@@ -77,7 +77,46 @@ func newTestDaemonInDir(t *testing.T, dir string) *Daemon {
 	prev := newSessionFn
 	newSessionFn = func(cols, rows int) apty.Session { return &fakeSession{} }
 	t.Cleanup(func() { newSessionFn = prev })
-	return New(config.Default())
+	d := New(config.Default())
+	registerClaudePlugin(t, d)
+	return d
+}
+
+// registerClaudePlugin loads a claude-code plugin into d's registry so
+// capability lookups answer as they do in production. New() builds an empty
+// registry — Start() is what loads plugins from disk — so without this a test
+// daemon reports every pane as non-Claude and the resume/occupancy paths are
+// silently skipped rather than exercised.
+//
+// Goes through LoadFromDir rather than poking the map so the TOML passes the
+// same validation the shipped plugin does (notably: sessions requires
+// prompts_cwd).
+func registerClaudePlugin(t *testing.T, d *Daemon) {
+	t.Helper()
+	dir := t.TempDir()
+	const toml = `
+[plugin]
+name = "claude-code"
+display_name = "Claude Code"
+category = "ai"
+schema_version = 1
+
+[command]
+cmd = "claude"
+prompts_cwd = true
+sessions = "claude"
+
+[persistence]
+strategy = "preassign_id"
+start_args = ["--session-id", "{session_id}"]
+resume_args = ["--continue"]
+`
+	if err := os.WriteFile(filepath.Join(dir, "claude-code.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatalf("write claude-code.toml: %v", err)
+	}
+	if err := d.registry.LoadFromDir(dir); err != nil {
+		t.Fatalf("load test plugins: %v", err)
+	}
 }
 
 func TestRespawnPanes_DefersNonActiveNonEager(t *testing.T) {

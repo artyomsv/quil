@@ -13,7 +13,7 @@ import (
 // one it had — the same reason the block around it does not guard on empty.
 func TestSyncPaneMeta_ClearsTheWorktreeName(t *testing.T) {
 	pane := &PaneModel{ID: "p1", GitWorktree: true, GitWorktreeName: "feat-x"}
-	syncPaneMeta(pane, &PaneInfo{ID: "p1"}, false, 0)
+	syncPaneMeta(pane, &PaneInfo{ID: "p1"}, false, 0, false)
 
 	if pane.GitWorktreeName != "" {
 		t.Errorf("GitWorktreeName = %q after an update with no git keys, want it cleared", pane.GitWorktreeName)
@@ -22,7 +22,7 @@ func TestSyncPaneMeta_ClearsTheWorktreeName(t *testing.T) {
 
 func TestSyncPaneMeta_CarriesTheWorktreeName(t *testing.T) {
 	pane := &PaneModel{ID: "p1"}
-	syncPaneMeta(pane, &PaneInfo{ID: "p1", GitWorktree: true, GitWorktreeName: "feat-x"}, false, 0)
+	syncPaneMeta(pane, &PaneInfo{ID: "p1", GitWorktree: true, GitWorktreeName: "feat-x"}, false, 0, false)
 
 	if pane.GitWorktreeName != "feat-x" {
 		t.Errorf("GitWorktreeName = %q, want \"feat-x\"", pane.GitWorktreeName)

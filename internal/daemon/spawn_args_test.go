@@ -202,7 +202,7 @@ func TestResolveSpawnArgs_Matrix(t *testing.T) {
 func TestResolveSpawnArgs_ClaudeResumePromotion(t *testing.T) {
 	claudePlugin := &plugin.PanePlugin{
 		Name:    "claude-code",
-		Command: plugin.CommandConfig{Cmd: "claude"},
+		Command: plugin.CommandConfig{Cmd: "claude", Sessions: "claude"},
 		Persistence: plugin.PersistenceConfig{
 			Strategy:   "preassign_id",
 			StartArgs:  []string{"--session-id", "{session_id}"},
@@ -230,8 +230,8 @@ func TestResolveSpawnArgs_ClaudeResumePromotion(t *testing.T) {
 					"transcript_path": transcript,
 				},
 			},
-			found:      true,
-			want:       []string{"--resume", sess},
+			found: true,
+			want:  []string{"--resume", sess},
 		},
 		{
 			// The behaviour this PR inverted: a session we cannot find is still
@@ -241,8 +241,8 @@ func TestResolveSpawnArgs_ClaudeResumePromotion(t *testing.T) {
 				CWD:         `E:\Projects\Stukans\Prototypes\calyx`,
 				PluginState: map[string]string{"session_id": sess},
 			},
-			found:      false,
-			want:       []string{"--resume", sess},
+			found: false,
+			want:  []string{"--resume", sess},
 		},
 		{
 			name: "InstanceArgs preserved alongside the resume",
@@ -254,8 +254,8 @@ func TestResolveSpawnArgs_ClaudeResumePromotion(t *testing.T) {
 					"transcript_path": transcript,
 				},
 			},
-			found:      true,
-			want:       []string{"--dangerously-skip-permissions", "--resume", sess},
+			found: true,
+			want:  []string{"--dangerously-skip-permissions", "--resume", sess},
 		},
 		{
 			name: "empty session_id — nothing recorded, configured fallback stands",
@@ -263,8 +263,8 @@ func TestResolveSpawnArgs_ClaudeResumePromotion(t *testing.T) {
 				CWD:         `E:\Projects\Stukans\Prototypes\calyx`,
 				PluginState: map[string]string{"session_id": ""},
 			},
-			found:      true,
-			want:       []string{"--continue"},
+			found: true,
+			want:  []string{"--continue"},
 		},
 	}
 
@@ -329,7 +329,7 @@ func TestResolveSpawnArgs_ClaudeResumePromotion_NotAppliedToOtherPlugins(t *test
 func TestResolveSpawnArgs_ClaudeHookSessionID(t *testing.T) {
 	claudePlugin := &plugin.PanePlugin{
 		Name:    "claude-code",
-		Command: plugin.CommandConfig{Cmd: "claude"},
+		Command: plugin.CommandConfig{Cmd: "claude", Sessions: "claude"},
 		Persistence: plugin.PersistenceConfig{
 			Strategy:   "preassign_id",
 			StartArgs:  []string{"--session-id", "{session_id}"},
@@ -424,7 +424,7 @@ func TestResolveSpawnArgs_ClaudeHookSessionID(t *testing.T) {
 // (a) emit --settings + QUIL_PANE_ID/QUIL_HOOK_MODE/QUIL_HOOK_HOME env when the
 // quild executable resolves, (b) silently skip both when the executable cannot
 // be resolved so the spawn proceeds like the pre-feature daemon, and (c) warn
-// (not error) when --settings is already in the user's args (Claude later-wins).
+// (not error) when --settings is already in the user's args (precedence unverified).
 func TestClaudeHookSpawnPrep(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -451,7 +451,7 @@ func TestClaudeHookSpawnPrep(t *testing.T) {
 			wantEnvVar: false,
 		},
 		{
-			name:       "user already passed --settings — still injects (later-wins warning logged)",
+			name:       "user already passed --settings — still injects (warning logged)",
 			exeErr:     nil,
 			userArgs:   []string{"--settings", `{"foo":"bar"}`, "--enable-auto-mode"},
 			paneID:     "pane-abc",
@@ -471,16 +471,29 @@ func TestClaudeHookSpawnPrep(t *testing.T) {
 				}
 				return "/opt/quil/quild", nil
 			}
-			prefix, env := claudeHookSpawnPrep("/tmp/quil", tt.paneID, "default", tt.userArgs)
+			// Writable: claudeHookSpawnPrep now writes the hook settings to a
+			// per-pane file under <quilDir>/sessions/.
+			quilDir := t.TempDir()
+			prefix, env := claudeHookSpawnPrep(quilDir, tt.paneID, "default", tt.userArgs)
 			if tt.wantPrefix {
 				if len(prefix) != 2 || prefix[0] != "--settings" {
 					t.Errorf("prefix = %v, want [--settings ...]", prefix)
 				}
-				if !strings.Contains(prefix[1], `"SessionStart"`) {
-					t.Errorf("prefix[1] missing SessionStart key: %s", prefix[1])
+				// The argument must be a bare PATH, not inline JSON — that is
+				// the whole point of the file indirection, since cmd.exe
+				// re-splits quotes when claude is reached through its .cmd shim.
+				if strings.ContainsAny(prefix[1], `"{}`) {
+					t.Errorf("prefix[1] = %q contains shell metacharacters; want a bare path", prefix[1])
 				}
-				if !strings.Contains(prefix[1], "claude-hook") {
-					t.Errorf("prefix[1] missing native claude-hook command: %s", prefix[1])
+				body, err := os.ReadFile(prefix[1])
+				if err != nil {
+					t.Fatalf("read settings file %s: %v", prefix[1], err)
+				}
+				if !strings.Contains(string(body), `"SessionStart"`) {
+					t.Errorf("settings file missing SessionStart key: %s", body)
+				}
+				if !strings.Contains(string(body), "claude-hook") {
+					t.Errorf("settings file missing native claude-hook command: %s", body)
 				}
 			} else if prefix != nil {
 				t.Errorf("prefix = %v, want nil", prefix)
@@ -502,8 +515,8 @@ func TestClaudeHookSpawnPrep(t *testing.T) {
 				if env[1] != "QUIL_HOOK_MODE=default" {
 					t.Errorf("env[1] = %q, want QUIL_HOOK_MODE=default", env[1])
 				}
-				if env[2] != "QUIL_HOOK_HOME=/tmp/quil" {
-					t.Errorf("env[2] = %q, want QUIL_HOOK_HOME=/tmp/quil", env[2])
+				if env[2] != "QUIL_HOOK_HOME="+quilDir {
+					t.Errorf("env[2] = %q, want QUIL_HOOK_HOME=%s", env[2], quilDir)
 				}
 			}
 		})
@@ -717,5 +730,28 @@ func TestOpencodeSpawnPrep(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A settings-write failure must degrade to spawning WITHOUT rotation tracking,
+// never to failing the spawn: this turned a pure function into an effectful one,
+// and a full or read-only disk must not stop a pane from opening.
+//
+// Reachable only because WriteSettingsFile rejects a quil dir holding a
+// character a shell would re-interpret — before that guard existed there was no
+// way to make the write fail without an unwritable filesystem.
+func TestClaudeHookSpawnPrep_WriteFailureDegradesInsteadOfFailing(t *testing.T) {
+	orig := claudeHookExeFn
+	claudeHookExeFn = func() (string, error) { return "/fake/quild", nil }
+	defer func() { claudeHookExeFn = orig }()
+
+	badDir := filepath.Join(t.TempDir(), "R&D")
+
+	prefix, env := claudeHookSpawnPrep(badDir, "pane-abc123", "default", nil)
+	if prefix != nil {
+		t.Errorf("prefix = %v, want nil so the spawn proceeds with no --settings", prefix)
+	}
+	if env != nil {
+		t.Errorf("env = %v, want nil", env)
 	}
 }

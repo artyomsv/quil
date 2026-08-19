@@ -2,8 +2,8 @@
 //
 // Quil tracks Claude session-id rotation (/clear, compaction, /resume) and
 // forwards Claude's lifecycle/notification hooks by registering a hook command
-// via --settings (inline JSON) when it spawns a claude-code pane. The hook
-// command invokes the quil daemon binary's `claude-hook` subcommand (see
+// via --settings (a per-pane settings file) when it spawns a claude-code pane.
+// The hook command invokes the quil daemon binary's `claude-hook` subcommand (see
 // runhook.go + cmd/quild), which reads the hook JSON on stdin and writes the
 // per-pane session id to $QUIL_HOME/sessions/<paneID>.id and/or appends a
 // hookevents JSONL line to $QUIL_HOME/events/<paneID>.jsonl.
@@ -118,7 +118,7 @@ type hookEntry struct {
 }
 
 // forwardedHookEvents lists the Claude Code hook events Quil registers in
-// the inline --settings JSON. The native claude-hook subcommand branches on
+// the --settings JSON. The native claude-hook subcommand branches on
 // hook_event_name from stdin so the same command handles every entry.
 //
 // SessionStart is the original — it writes the session id file used by the
@@ -172,8 +172,9 @@ var matchedHookEvents = []struct{ Name, Matcher string }{
 // in runhook.go.
 const promptToolMatcher = "AskUserQuestion|ExitPlanMode"
 
-// BuildSettingsJSON returns the inline JSON string Quil passes to
-// `claude --settings <json>`. Registers Quil's hook command under every
+// BuildSettingsJSON returns the settings JSON Quil writes for
+// `claude --settings <path>` (see WriteSettingsFile — the JSON reaches claude
+// as a file, never as an argv token). Registers Quil's hook command under every
 // entry in forwardedHookEvents — the native subcommand then branches on the
 // hook_event_name field of the stdin JSON.
 func BuildSettingsJSON(cmd string) (string, error) {
@@ -196,6 +197,79 @@ func BuildSettingsJSON(cmd string) (string, error) {
 		return "", fmt.Errorf("marshal claude settings: %w", err)
 	}
 	return string(b), nil
+}
+
+// settingsFile returns the absolute path of the per-pane hook-settings JSON
+// under <quilDir>/sessions/. Per-pane rather than shared so concurrent spawns
+// never race on one file.
+func settingsFile(quilDir, paneID string) string {
+	return filepath.Join(quilDir, "sessions", paneID+".settings.json")
+}
+
+// cmdMetaChars are the characters that would defeat the whole point of passing
+// a path instead of inline JSON.
+//
+// The premise of the file indirection is that a path carries nothing cmd.exe
+// re-interprets. That is very nearly true and not quite: Go quotes an argv
+// token only when it contains a space, a tab or a quote, so a path with none of
+// those but with a `&` in it — `C:\R&D\.quil\sessions\x.settings.json`, and R&D
+// is a real directory name — reaches cmd.exe unquoted and splits the command
+// line exactly as the inline JSON did.
+//
+// Of these, only & ^ % can occur in practice: " | < > are illegal in Windows
+// filenames.
+//
+// Checked on every platform, though the hazard is Windows-only: this runs
+// entirely daemon-side against the daemon's own QuilDir, so there is no
+// cross-machine disagreement to prevent — the honest reason is that a
+// GOOS-gated branch is dead code on the Linux container where the tests run,
+// and this repo has been bitten before by a rule no test could reach. The cost
+// is that a Unix daemon whose QUIL_HOME contains one of these loses hook
+// registration where Go's exec would never have consulted a shell.
+const cmdMetaChars = "&|^<>\"%"
+
+// pathIsArgvSafe reports whether p can be passed as a bare argv token without a
+// second parser re-interpreting part of it.
+func pathIsArgvSafe(p string) bool {
+	return !strings.ContainsAny(p, cmdMetaChars)
+}
+
+// WriteSettingsFile writes the hook-settings JSON for paneID and returns its
+// absolute path, for `claude --settings <path>`.
+//
+// A FILE rather than an inline JSON argument, because on Windows the claude
+// binary is an npm .cmd shim that cmd.exe re-parses: the quotes inside an
+// inline JSON are re-split at the wrong boundaries by a second parser with
+// different rules than the one the process spawner quoted for, so the hook
+// never registers and a JSON fragment is mistaken for a command name.
+//
+// Refuses when the resulting PATH would itself carry a character that second
+// parser re-interprets (see cmdMetaChars). The check is on the composed path
+// rather than on quilDir alone, because the path is what becomes the argv
+// token: validatePaneID rejects separators and control characters but not
+// `& ^ %`, so guarding only the directory would leave the actual escape
+// unguarded.
+//
+// Returns ("", nil) when there is nothing to write, letting the caller skip the
+// --settings argument entirely rather than passing an empty path.
+func WriteSettingsFile(quilDir, paneID, settingsJSON string) (string, error) {
+	if err := validatePaneID(paneID); err != nil {
+		return "", err
+	}
+	if settingsJSON == "" {
+		return "", nil
+	}
+	path := settingsFile(quilDir, paneID)
+	if !pathIsArgvSafe(path) {
+		return "", fmt.Errorf("claudehook: settings path %q contains a character (one of %s) a shell would re-interpret in the --settings argument", path, cmdMetaChars)
+	}
+	if err := os.MkdirAll(filepath.Join(quilDir, "sessions"), 0o700); err != nil {
+		return "", fmt.Errorf("claudehook: create sessions dir: %w", err)
+	}
+	if err := atomicWrite(path, []byte(settingsJSON), 0o600); err != nil {
+		return "", fmt.Errorf("claudehook: write hook settings: %w", err)
+	}
+	return path, nil
 }
 
 // sessionIDFile returns the absolute path to <paneID>.id.

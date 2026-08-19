@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -247,5 +248,142 @@ func TestReadPersistedSessionID_CapsLargeFile(t *testing.T) {
 	}
 	if len(got) > 256 {
 		t.Errorf("ReadPersistedSessionID returned %d bytes, expected <= 256", len(got))
+	}
+}
+
+// TestWriteSettingsFile pins the path shape and the round-trip. The path is
+// what reaches argv, so it is asserted exactly rather than by suffix.
+func TestWriteSettingsFile(t *testing.T) {
+	t.Parallel()
+	quilDir := t.TempDir()
+
+	path, err := WriteSettingsFile(quilDir, "pane-abc123", `{"hooks":{}}`)
+	if err != nil {
+		t.Fatalf("WriteSettingsFile: %v", err)
+	}
+	want := filepath.Join(quilDir, "sessions", "pane-abc123.settings.json")
+	if path != want {
+		t.Errorf("path = %q, want %q", path, want)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(body) != `{"hooks":{}}` {
+		t.Errorf("body = %q, want %q", body, `{"hooks":{}}`)
+	}
+}
+
+// TestWriteSettingsFile_EmptyJSONWritesNothing: an empty settings body means
+// there is nothing to register, so the caller must be able to skip the
+// --settings argument entirely rather than pass an empty path to claude.
+func TestWriteSettingsFile_EmptyJSONWritesNothing(t *testing.T) {
+	t.Parallel()
+	quilDir := t.TempDir()
+
+	path, err := WriteSettingsFile(quilDir, "pane-abc123", "")
+	if err != nil {
+		t.Fatalf("WriteSettingsFile: %v", err)
+	}
+	if path != "" {
+		t.Errorf(`path = %q, want "" so the caller can skip --settings`, path)
+	}
+	if _, err := os.Stat(filepath.Join(quilDir, "sessions")); !os.IsNotExist(err) {
+		t.Error("sessions dir created for an empty write")
+	}
+}
+
+// TestWriteSettingsFile_RejectsTraversalPaneID keeps the package invariant that
+// a pane id is a filename component, not a path.
+func TestWriteSettingsFile_RejectsTraversalPaneID(t *testing.T) {
+	t.Parallel()
+	quilDir := t.TempDir()
+
+	for _, bad := range []string{"", "../escape", `a\b`, "a/b", "pane\x00id"} {
+		if _, err := WriteSettingsFile(quilDir, bad, `{"hooks":{}}`); err == nil {
+			t.Errorf("paneID %q accepted, want rejected", bad)
+		}
+	}
+}
+
+// The file indirection exists so the --settings argument carries nothing a
+// second parser re-interprets. Go quotes an argv token only for space/tab/quote,
+// so a metacharacter in a space-free path reaches cmd.exe unquoted and splits
+// the command line exactly as the inline JSON used to.
+func TestWriteSettingsFile_RejectsShellMetacharsInQuilDir(t *testing.T) {
+	t.Parallel()
+
+	// Rooted at t.TempDir() rather than a literal absolute path: if the guard is
+	// ever removed — deliberately, while mutation-testing it — MkdirAll then
+	// creates these for real, and a literal path would land them in the package
+	// directory as untracked repo litter. Ask me how I know.
+	root := t.TempDir()
+	for _, name := range []string{"R&D", "a^b", "a%b", `q"x`, "a|b", "a<b", "a>b"} {
+		bad := filepath.Join(root, name)
+		if _, err := WriteSettingsFile(bad, "pane-abc123", `{"hooks":{}}`); err == nil {
+			t.Errorf("quilDir %q accepted, want rejected", bad)
+		}
+		// Refusing must also mean creating nothing — the guard runs before
+		// MkdirAll, and a future reordering that wrote first and checked after
+		// would leave directories behind on every refused spawn.
+		if _, err := os.Stat(bad); !os.IsNotExist(err) {
+			t.Errorf("quilDir %q was created despite being refused", bad)
+		}
+	}
+
+	// The paneID half: validatePaneID rejects separators and control chars but
+	// not these, so guarding only the directory would leave the composed path —
+	// the thing that actually becomes the argv token — unguarded.
+	if _, err := WriteSettingsFile(t.TempDir(), "pane-a&b", `{"hooks":{}}`); err == nil {
+		t.Error("paneID carrying a shell metacharacter accepted, want rejected")
+	}
+}
+
+// The common Windows path has a space, which Go quotes, so parentheses inside
+// it are inert. Rejecting them would break a default install.
+func TestWriteSettingsFile_AcceptsOrdinaryPaths(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if _, err := WriteSettingsFile(dir, "pane-abc123", `{"hooks":{}}`); err != nil {
+		t.Errorf("ordinary temp dir rejected: %v", err)
+	}
+	if !pathIsArgvSafe(`C:\Program Files (x86)\quil\.quil`) {
+		t.Error("a path with parens and a space must stay acceptable")
+	}
+}
+
+// The settings file is 0600 in a 0700 dir. That is the property that makes the
+// file indirection no worse than the argv it replaced — argv is world-readable
+// via /proc/<pid>/cmdline on Linux, so a widened mode here would be a real
+// downgrade rather than a cosmetic one. Nothing else pins it.
+//
+// Unix-only: Windows has no POSIX mode bits, and os.Stat there reports 0666/0444
+// from the read-only attribute, so the assertion would be meaningless where the
+// repo also runs its test binaries natively.
+func TestWriteSettingsFile_IsOwnerOnly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX mode bits are not meaningful on Windows")
+	}
+	t.Parallel()
+	quilDir := t.TempDir()
+
+	path, err := WriteSettingsFile(quilDir, "pane-abc123", `{"hooks":{}}`)
+	if err != nil {
+		t.Fatalf("WriteSettingsFile: %v", err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if got := fi.Mode().Perm(); got != 0o600 {
+		t.Errorf("settings file mode = %04o, want 0600", got)
+	}
+	di, err := os.Stat(filepath.Join(quilDir, "sessions"))
+	if err != nil {
+		t.Fatalf("stat sessions dir: %v", err)
+	}
+	if got := di.Mode().Perm(); got != 0o700 {
+		t.Errorf("sessions dir mode = %04o, want 0700", got)
 	}
 }

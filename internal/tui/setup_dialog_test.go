@@ -2669,3 +2669,35 @@ func TestEnterSetupOrSplit_ReEntry_ClearsThePriorPluginsWorktree(t *testing.T) {
 		t.Error("worktrees listing must be dropped on re-entry")
 	}
 }
+
+// The setup dialog keys the session picker off "does this plugin name a
+// sessions source at all", not off the literal "claude". registry.go already
+// validates the value against a closed set, so re-checking it here made three
+// render/layout functions independently maintained copies of one predicate --
+// and desyncing them puts the cursor on the wrong row, which is a runtime bug
+// rather than a compile error.
+func TestSetupFieldCount_CountsAnyNonEmptySessionsSource(t *testing.T) {
+	m := Model{}
+	p := &plugin.PanePlugin{}
+	p.Command.PromptsCWD = true
+	p.Command.Sessions = "future-store"
+
+	// cwd + worktree + session + continue
+	if got := m.setupFieldCount(p); got != 4 {
+		t.Fatalf("setupFieldCount = %d, want 4", got)
+	}
+}
+
+func TestSetupFieldKind_ReachesSessionRowForAnySource(t *testing.T) {
+	m := Model{}
+	p := &plugin.PanePlugin{}
+	p.Command.PromptsCWD = true
+	p.Command.Sessions = "future-store"
+
+	if kind, _ := m.setupFieldKind(p, 2); kind != "session" {
+		t.Errorf("field 2 = %q, want session", kind)
+	}
+	if kind, _ := m.setupFieldKind(p, 3); kind != "continue" {
+		t.Errorf("field 3 = %q, want continue", kind)
+	}
+}

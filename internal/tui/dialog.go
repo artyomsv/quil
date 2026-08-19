@@ -3367,7 +3367,7 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 	m.resetSessionSelection()
 
 	needsSetup := p != nil && (p.Command.PromptsCWD || len(p.Command.Toggles) > 0 ||
-		p.Command.Discover == "kube" || p.Command.Sessions == "claude")
+		p.Command.Discover == "kube" || p.Command.Sessions != "")
 	if !needsSetup {
 		return m.advanceFromPluginChoice()
 	}
@@ -3825,7 +3825,7 @@ func enforceToggleGroups(toggles []plugin.Toggle, states []bool, winner int) {
 
 // setupFieldCount returns the number of focusable fields in the setup dialog:
 // CWD (if PromptsCWD) + kube context (if discover="kube") + one per toggle +
-// worktree picker (if PromptsCWD) + session picker (if sessions="claude") + 1
+// worktree picker (if PromptsCWD) + session picker (if sessions is set) + 1
 // for the Continue button.
 func (m Model) setupFieldCount(p *plugin.PanePlugin) int {
 	n := len(p.Command.Toggles) + 1 // +1 for Continue
@@ -3838,7 +3838,7 @@ func (m Model) setupFieldCount(p *plugin.PanePlugin) int {
 	if p.Command.PromptsCWD {
 		n++ // the worktree field, scoped to the CWD above it
 	}
-	if p.Command.Sessions == "claude" {
+	if p.Command.Sessions != "" {
 		n++
 	}
 	return n
@@ -3878,7 +3878,7 @@ func (m Model) setupFieldKind(p *plugin.PanePlugin, cursor int) (kind string, to
 		}
 		i--
 	}
-	if p.Command.Sessions == "claude" {
+	if p.Command.Sessions != "" {
 		if i == 0 {
 			return "session", -1
 		}
@@ -5450,7 +5450,7 @@ func (m Model) renderCreatePaneSetupDialog() string {
 	// Last field before Continue: the picker expands into a tall scrolling list
 	// on focus, so it sits below the short fixed-height rows rather than pushing
 	// them up and down as it opens and closes.
-	if p.Command.Sessions == "claude" {
+	if p.Command.Sessions != "" {
 		b.WriteByte('\n')
 		b.WriteString(m.renderSetupSessionField(cursor == fieldIdx))
 		fieldIdx++

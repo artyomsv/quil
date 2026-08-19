@@ -250,3 +250,64 @@ func (ih *IdleHandler) Compile() error {
 func (ih *IdleHandler) Compiled() *regexp.Regexp {
 	return ih.compiled
 }
+
+// ClaudeSessionSource is the Command.Sessions value naming Claude Code's
+// transcript store. It implies the whole Claude protocol: the preassigned
+// session id, the SessionStart hook that tracks /clear, /resume and compaction
+// rotation, and transcripts under the Claude config dir.
+const ClaudeSessionSource = "claude"
+
+// ClaudeCodePluginName is the shipped Claude Code plugin. Recognised by name in
+// UsesClaudeSessions for backwards compatibility — see there for why.
+const ClaudeCodePluginName = "claude-code"
+
+// UsesClaudeSessions reports whether this plugin speaks Claude's hook and
+// resume protocol: the SessionStart hook that tracks /clear, /resume and
+// compaction, the preassigned session id, and session occupancy.
+//
+// Two ways to qualify, and the name half is NOT vestigial. `Command.Sessions`
+// is documented — in this file and in the shipped TOML, which says "Set to \"\"
+// to always start a fresh session" — as a *pane setup dialog* affordance:
+// whether to offer a resume pick-list. Deriving the protocol from it alone
+// would silently turn a documented UI preference into a kill switch for every
+// Claude hook, so a user who took that option, or who kept a plugin file from
+// before the field existed, would lose notifications, work state, input history
+// and per-pane --resume with nothing logged and nothing failing.
+//
+// So the shipped plugin qualifies by NAME, exactly as the six call sites this
+// replaced each did on their own, and any other plugin may opt in by declaring
+// the sessions source. The single benefit that survives from consolidating them
+// is the one that mattered: the rule lives in one place with its reasoning
+// attached, instead of six scattered comparisons where a missed one fails
+// silently.
+//
+// Nil-receiver safe: callers resolve through Registry.Get, which returns nil for
+// an unknown or failed-to-load plugin. False is the right answer there, because
+// a plugin that failed to load has already been degraded to a plain terminal at
+// the spawn site.
+func (p *PanePlugin) UsesClaudeSessions() bool {
+	if p == nil {
+		return false
+	}
+	return p.Name == ClaudeCodePluginName || p.Command.Sessions == ClaudeSessionSource
+}
+
+// RestoresOwnHistory reports whether this plugin's resume strategy hands the
+// respawned child a session id, so the child paints its own transcript back
+// instead of depending on Quil's ghost replay.
+//
+// The resume-strategy question, not a plugin-name list: these two strategies are
+// exactly the ones resolveSpawnArgs expands into `--resume <id>` /
+// `--session <id>`. `rerun` re-runs a command that starts from nothing and
+// `cwd_only` respawns a shell that will not reprint a word of its scrollback --
+// both of those still need the replay.
+func (p *PanePlugin) RestoresOwnHistory() bool {
+	if p == nil {
+		return false
+	}
+	switch p.Persistence.Strategy {
+	case "preassign_id", "session_scrape":
+		return true
+	}
+	return false
+}

@@ -2,8 +2,11 @@ package daemon
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/plugin"
 )
 
@@ -40,15 +43,15 @@ func (f *fakeSession) Start(cmd string, args ...string) error {
 	return nil
 }
 
-func (f *fakeSession) Read(buf []byte) (int, error)  { return 0, fmt.Errorf("not implemented") }
+func (f *fakeSession) Read(buf []byte) (int, error)   { return 0, fmt.Errorf("not implemented") }
 func (f *fakeSession) Write(data []byte) (int, error) { return 0, fmt.Errorf("not implemented") }
 func (f *fakeSession) Resize(rows, cols uint16) error {
 	f.resizes = append(f.resizes, [2]uint16{rows, cols})
 	return nil
 }
-func (f *fakeSession) Close() error                    { return nil }
-func (f *fakeSession) Pid() int                        { return 0 }
-func (f *fakeSession) WaitExit() int                   { return 0 }
+func (f *fakeSession) Close() error  { return nil }
+func (f *fakeSession) Pid() int      { return 0 }
+func (f *fakeSession) WaitExit() int { return 0 }
 
 func TestSpawnPane_SetsCWDBeforeStart(t *testing.T) {
 	d := &Daemon{
@@ -104,5 +107,59 @@ func TestSpawnPane_SetsCWDBeforeStart(t *testing.T) {
 					fake.cwdSetAt, fake.startedAt)
 			}
 		})
+	}
+}
+
+// loadRegistryWithOpencodeClaimingClaude builds an opencode plugin that ALSO
+// declares the claude sessions source. Legal TOML — registry.go validates the
+// value but never asserts that only one plugin may claim it — and it is the
+// exact shape that makes spawnPane's dispatch arms overlap.
+func loadRegistryWithOpencodeClaimingClaude(t *testing.T) *plugin.Registry {
+	t.Helper()
+	dir := t.TempDir()
+	toml := "[plugin]\n" +
+		"name = \"opencode\"\n" +
+		"display_name = \"OpenCode\"\n" +
+		"category = \"ai\"\n" +
+		"schema_version = 1\n" +
+		"[command]\n" +
+		"cmd = \"echo\"\n" +
+		"prompts_cwd = true\n" + // required alongside sessions
+		"sessions = \"claude\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "opencode.toml"), []byte(toml), 0o600); err != nil {
+		t.Fatalf("write plugin toml: %v", err)
+	}
+	reg := plugin.NewRegistry()
+	if err := reg.LoadFromDir(dir); err != nil {
+		t.Fatalf("LoadFromDir: %v", err)
+	}
+	return reg
+}
+
+// spawnPane's env/args dispatch used to be `switch pane.Type`, disjoint by
+// construction. It is now a switch over predicates, and any plugin file may
+// legally set sessions = "claude" — so an opencode plugin that does would take
+// the claude arm and be handed `--settings <path>`, a flag opencode does not
+// have, while skipping the session read it needs.
+//
+// opencode is therefore tested FIRST, and this pins that ordering: nothing else
+// in the suite runs an opencode-typed pane through the real dispatch.
+func TestSpawnPane_OpencodeArmWinsOverAClaimedClaudeSource(t *testing.T) {
+	d := &Daemon{
+		registry: loadRegistryWithOpencodeClaimingClaude(t),
+		session:  NewSessionManager(4096),
+		cfg:      config.Default(),
+	}
+	fake := &fakeSession{}
+	pane := &Pane{ID: "test-pane", Type: "opencode"}
+
+	if err := d.spawnPane(pane, fake, false); err != nil {
+		t.Fatalf("spawnPane: %v", err)
+	}
+
+	for _, a := range fake.startArgs {
+		if a == "--settings" {
+			t.Fatalf("opencode pane was handed claude's --settings; args=%v", fake.startArgs)
+		}
 	}
 }

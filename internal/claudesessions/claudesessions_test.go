@@ -673,3 +673,269 @@ func TestListDir_CancelledContext_DoesNotReportTruncation(t *testing.T) {
 			"completion, so the check is guarding only the capped title loop")
 	}
 }
+
+// CLAUDE_CONFIG_DIR is Claude Code's own relocation knob: setting it moves
+// everything Claude stores, projects/ included. Ignoring it made the session
+// picker list nothing for anyone who sets it — indistinguishable from having
+// no sessions at all.
+func TestConfigDir_PrefersEnv(t *testing.T) {
+	// t.TempDir() rather than a "/tmp/..." literal: filepath.Abs prepends a
+	// drive letter on Windows, and this repo runs its test binaries natively
+	// there as well as in Linux Docker.
+	want := t.TempDir()
+	t.Setenv(claudeConfigDirEnv, want)
+	if got := ConfigDir(); got != want {
+		t.Errorf("ConfigDir() = %q, want %q", got, want)
+	}
+}
+
+func TestConfigDir_FallsBackToHomeDotClaude(t *testing.T) {
+	t.Setenv(claudeConfigDirEnv, "")
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home directory in this environment")
+	}
+	if got, want := ConfigDir(), filepath.Join(home, ".claude"); got != want {
+		t.Errorf("ConfigDir() = %q, want %q", got, want)
+	}
+}
+
+func TestConfigDir_ExpandsTilde(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home directory in this environment")
+	}
+	t.Setenv(claudeConfigDirEnv, "~/scoped")
+	if got, want := ConfigDir(), filepath.Join(home, "scoped"); got != want {
+		t.Errorf("ConfigDir() = %q, want %q", got, want)
+	}
+}
+
+// ProjectDirIn takes the directory so a resolved value cannot be undercut by a
+// concurrent Setenv, and so tests need no environment at all.
+func TestProjectDirIn_DoesNotConsultEnv(t *testing.T) {
+	t.Setenv(claudeConfigDirEnv, filepath.Join(t.TempDir(), "should-not-be-read"))
+	got := ProjectDirIn("/explicit", "/work/repo")
+	want := filepath.Join("/explicit", "projects", EscapeCWD("/work/repo"))
+	if got != want {
+		t.Errorf("ProjectDirIn = %q, want %q", got, want)
+	}
+}
+
+func TestListIn_ReadsTheGivenConfigDir(t *testing.T) {
+	cfg := t.TempDir()
+	const cwd = "/work/repo"
+	dir := filepath.Join(cfg, "projects", EscapeCWD(cwd))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	line := `{"type":"user","promptSource":"typed","message":{"content":"hello there"}}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "11111111-2222-3333-4444-555555555555.jsonl"), []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sessions, _, err := ListIn(context.Background(), cfg, cwd)
+	if err != nil {
+		t.Fatalf("ListIn: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("len(sessions) = %d, want 1", len(sessions))
+	}
+	if sessions[0].Title != "hello there" {
+		t.Errorf("Title = %q, want %q", sessions[0].Title, "hello there")
+	}
+}
+
+// writeSchemaTranscript writes one transcript into a throwaway dir and returns
+// its path, for the schema-fallback tests below.
+func writeSchemaTranscript(t *testing.T, lines ...string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "11111111-2222-3333-4444-555555555555.jsonl")
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// The typed pass runs first and its result wins outright — the regression guard
+// for "the fallbacks are additive and change nothing for existing installs".
+func TestReadTitle_TypedPromptStillWins(t *testing.T) {
+	path := writeSchemaTranscript(t,
+		`{"type":"ai-title","aiTitle":"Generated Title","leafUuid":"u1","timestamp":"2026-07-01T10:00:30.000Z"}`,
+		`{"type":"user","promptSource":"typed","message":{"content":"the typed one"}}`,
+	)
+	if got := readTitle(path); got != "the typed one" {
+		t.Errorf("readTitle = %q, want the typed prompt to win", got)
+	}
+}
+
+func TestReadTitle_FallsBackToAiTitle(t *testing.T) {
+	path := writeSchemaTranscript(t,
+		`{"type":"ai-title","aiTitle":"Refactor the parser","leafUuid":"u1","timestamp":"2026-07-01T10:00:30.000Z"}`,
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"sure"}]}}`,
+	)
+	if got := readTitle(path); got != "Refactor the parser" {
+		t.Errorf("readTitle = %q, want the ai-title", got)
+	}
+}
+
+func TestReadTitle_FallsBackToStringContentUserEntry(t *testing.T) {
+	path := writeSchemaTranscript(t,
+		`{"type":"user","message":{"content":"no promptSource here"}}`,
+	)
+	if got := readTitle(path); got != "no promptSource here" {
+		t.Errorf("readTitle = %q, want the shape-detected prompt", got)
+	}
+}
+
+// Array content is a tool result, not a prompt — the shape is what separates
+// them when no schema marker is available.
+func TestReadTitle_ArrayContentUserEntryIsAToolResult(t *testing.T) {
+	path := writeSchemaTranscript(t,
+		`{"type":"user","message":{"content":[{"type":"tool_result","text":"exit 0"}]}}`,
+	)
+	if got := readTitle(path); got != "" {
+		t.Errorf("readTitle = %q, want empty — array content is a tool result", got)
+	}
+}
+
+func TestReadTitle_SidechainExcludedOnEveryPath(t *testing.T) {
+	path := writeSchemaTranscript(t,
+		`{"type":"user","isSidechain":true,"message":{"content":"subagent chatter"}}`,
+	)
+	if got := readTitle(path); got != "" {
+		t.Errorf("readTitle = %q, want empty — sidechain entries are not the user's conversation", got)
+	}
+}
+
+// The overbroad-fallback guard. This transcript is CURRENT schema — it records
+// promptSource — but has no "typed" entry. Without the promptSource-absent
+// condition the fallback would promote a compaction summary to the title.
+func TestReadTitle_CurrentSchemaNonTypedEntryIsNotPromoted(t *testing.T) {
+	path := writeSchemaTranscript(t,
+		`{"type":"user","promptSource":"compact","message":{"content":"This session is being continued from a previous conversation that ran out of context..."}}`,
+	)
+	if got := readTitle(path); got != "" {
+		t.Errorf("readTitle = %q, want empty — a non-typed current-schema entry is not a prompt", got)
+	}
+}
+
+func TestReadDetail_FallsBackToShapeWhenNoPromptSource(t *testing.T) {
+	path := writeSchemaTranscript(t,
+		`{"type":"user","timestamp":"2026-08-19T10:00:00Z","message":{"content":"first question"}}`,
+		`{"type":"user","message":{"content":[{"type":"tool_result","text":"exit 0"}]}}`,
+		`{"type":"user","message":{"content":"second question"}}`,
+	)
+	d, err := readDetail(context.Background(), path, "11111111-2222-3333-4444-555555555555")
+	if err != nil {
+		t.Fatalf("readDetail: %v", err)
+	}
+	if d.UserPrompts != 2 {
+		t.Errorf("UserPrompts = %d, want 2 (the tool result is not a prompt)", d.UserPrompts)
+	}
+	if d.FirstPrompt != "first question" {
+		t.Errorf("FirstPrompt = %q, want %q", d.FirstPrompt, "first question")
+	}
+	if d.LastPrompt != "second question" {
+		t.Errorf("LastPrompt = %q, want %q", d.LastPrompt, "second question")
+	}
+}
+
+// A transcript carrying BOTH shapes must be read exactly as before: only the
+// typed entry counts, or the fallback has changed behaviour for an existing
+// install.
+func TestReadDetail_TypedTranscriptDoesNotUseFallback(t *testing.T) {
+	path := writeSchemaTranscript(t,
+		`{"type":"user","promptSource":"typed","timestamp":"2026-08-19T10:00:00Z","message":{"content":"typed one"}}`,
+		`{"type":"user","message":{"content":"untyped noise"}}`,
+	)
+	d, err := readDetail(context.Background(), path, "11111111-2222-3333-4444-555555555555")
+	if err != nil {
+		t.Fatalf("readDetail: %v", err)
+	}
+	if d.UserPrompts != 1 {
+		t.Errorf("UserPrompts = %d, want 1 — the typed pass must win outright", d.UserPrompts)
+	}
+	if d.LastPrompt != "typed one" {
+		t.Errorf("LastPrompt = %q, want %q", d.LastPrompt, "typed one")
+	}
+}
+
+// The detail-side overbroad-fallback guard.
+func TestReadDetail_CurrentSchemaWithNoTypedEntriesStaysEmpty(t *testing.T) {
+	path := writeSchemaTranscript(t,
+		`{"type":"user","promptSource":"slash_command","timestamp":"2026-08-19T10:00:00Z","message":{"content":"/compact"}}`,
+		`{"type":"user","promptSource":"compact","message":{"content":"This session is being continued from a previous conversation..."}}`,
+	)
+	d, err := readDetail(context.Background(), path, "11111111-2222-3333-4444-555555555555")
+	if err != nil {
+		t.Fatalf("readDetail: %v", err)
+	}
+	if d.UserPrompts != 0 {
+		t.Errorf("UserPrompts = %d, want 0 — non-typed current-schema entries are not prompts", d.UserPrompts)
+	}
+	if d.FirstPrompt != "" || d.LastPrompt != "" {
+		t.Errorf("prompts = (%q, %q), want both empty", d.FirstPrompt, d.LastPrompt)
+	}
+	if d.Started.IsZero() {
+		t.Error("Started is zero — the timestamp scan is independent of prompt classification")
+	}
+}
+
+// Sidechain entries belong to subagents, so a subagent's ai-title is not this
+// session's title. The ai-title pass had no sidechain guard while the pass below
+// it did, which made the two asymmetric for no reason.
+func TestReadTitle_SidechainAiTitleIsNotPromoted(t *testing.T) {
+	path := writeSchemaTranscript(t,
+		`{"type":"ai-title","isSidechain":true,"aiTitle":"Subagent task","leafUuid":"u1"}`,
+	)
+	if got := readTitle(path); got != "" {
+		t.Errorf("readTitle = %q, want empty — a sidechain ai-title is a subagent's, not the session's", got)
+	}
+}
+
+// The ai-title pre-filter is a SUBSTRING match, so an entry merely containing
+// that text reaches the unmarshal. Only a real ai-title entry may title the row.
+func TestReadTitle_NonAiTitleEntryContainingTheMarkerIsIgnored(t *testing.T) {
+	path := writeSchemaTranscript(t,
+		`{"type":"assistant","aiTitle":"not mine","message":{"content":[{"type":"text","text":"mentions \"type\":\"ai-title\" in passing"}]}}`,
+	)
+	if got := readTitle(path); got != "" {
+		t.Errorf("readTitle = %q, want empty — only a real ai-title entry may title the session", got)
+	}
+}
+
+// A relative, non-tilde value is a third branch: neither the tilde expansion
+// nor the default fallback, but filepath.Abs. Every caller expects an absolute
+// path, so a relative one leaking through would resolve against whatever the
+// daemon's working directory happened to be.
+func TestConfigDir_AbsolutisesRelativeValue(t *testing.T) {
+	t.Setenv(claudeConfigDirEnv, "myconfig")
+	got := ConfigDir()
+	if !filepath.IsAbs(got) {
+		t.Errorf("ConfigDir() = %q, want an absolute path", got)
+	}
+	if filepath.Base(got) != "myconfig" {
+		t.Errorf("ConfigDir() = %q, want it to end in %q", got, "myconfig")
+	}
+}
+
+// json.Unmarshal accepts JSON null into a *string and reports success, so a
+// round-trip test for "is this a string" counted `"content": null` as a prompt.
+func TestReadDetail_NullContentIsNotAPrompt(t *testing.T) {
+	path := writeSchemaTranscript(t,
+		`{"type":"user","timestamp":"2026-08-19T10:00:00Z","message":{"content":null}}`,
+		`{"type":"user","message":{"content":"a real one"}}`,
+	)
+	d, err := readDetail(context.Background(), path, "11111111-2222-3333-4444-555555555555")
+	if err != nil {
+		t.Fatalf("readDetail: %v", err)
+	}
+	if d.UserPrompts != 1 {
+		t.Errorf("UserPrompts = %d, want 1 — null content is not a prompt", d.UserPrompts)
+	}
+	if d.FirstPrompt != "a real one" {
+		t.Errorf("FirstPrompt = %q, want %q", d.FirstPrompt, "a real one")
+	}
+}

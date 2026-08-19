@@ -1431,11 +1431,11 @@ func TestSyncPaneMeta_SetsWideCanvas(t *testing.T) {
 	// the caller) so every reconciliation path re-evaluates it — a plugin
 	// migration mid-session must be able to flip it in both directions.
 	pane := NewPaneModel("p", 1024)
-	syncPaneMeta(pane, &PaneInfo{Type: "claude-code"}, true, 0)
+	syncPaneMeta(pane, &PaneInfo{Type: "claude-code"}, true, 0, false)
 	if !pane.WideCanvas {
 		t.Error("syncPaneMeta must set WideCanvas from the passed flag (true)")
 	}
-	syncPaneMeta(pane, &PaneInfo{Type: "claude-code"}, false, 0)
+	syncPaneMeta(pane, &PaneInfo{Type: "claude-code"}, false, 0, false)
 	if pane.WideCanvas {
 		t.Error("syncPaneMeta must clear WideCanvas when the flag flips to false")
 	}
@@ -1450,14 +1450,14 @@ func TestSyncPaneMeta_MuteDoesNotDisturbWorking(t *testing.T) {
 	// the spinner would never reappear after unmuting a still-working pane.
 	pane := NewPaneModel("p1", 1024)
 	pane.working = true
-	syncPaneMeta(pane, &PaneInfo{Muted: true}, false, 0)
+	syncPaneMeta(pane, &PaneInfo{Muted: true}, false, 0, false)
 	if !pane.working {
 		t.Error("a mute metadata sync must not clear working")
 	}
 
 	pane2 := NewPaneModel("p2", 1024)
 	pane2.working = true
-	syncPaneMeta(pane2, &PaneInfo{Muted: false}, false, 0)
+	syncPaneMeta(pane2, &PaneInfo{Muted: false}, false, 0, false)
 	if !pane2.working {
 		t.Error("a non-mute metadata sync must not clear working")
 	}

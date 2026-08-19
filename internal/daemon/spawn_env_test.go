@@ -14,8 +14,11 @@ func TestClaudeHookSpawnPrep_PaneEnvUsesHookHome(t *testing.T) {
 	claudeHookExeFn = func() (string, error) { return "/fake/quild", nil }
 	defer func() { claudeHookExeFn = orig }()
 
-	_, env := claudeHookSpawnPrep("/data/quil", "pane-abc123", "default", nil)
-	assertHookHomeOnly(t, env, "/data/quil")
+	// quilDir must be writable: claudeHookSpawnPrep now writes the hook
+	// settings to a per-pane file under <quilDir>/sessions/.
+	quilDir := t.TempDir()
+	_, env := claudeHookSpawnPrep(quilDir, "pane-abc123", "default", nil)
+	assertHookHomeOnly(t, env, quilDir)
 }
 
 // TestOpencodeSpawnPrep_PaneEnvUsesHookHome mirrors the claude test for the

@@ -55,15 +55,20 @@ type PaneModel struct {
 	Type          string // plugin type ("terminal", "claude-code", etc.)
 	WideCanvas    bool   // [display] wide_canvas: VT/PTY stay window-sized; small rects render a wrapped preview
 	MinNativeCols int    // [display] min_native_cols: inner-width threshold for native (non-canvas) rendering; 0 = default 80
-	Name          string // user-given name (empty if not set)
-	CWD           string // current working directory from daemon
-	Muted         bool   // notification mute (daemon-authoritative; mirrored here for border rendering)
-	Eager         bool   // eager-restore flag (daemon-authoritative; mirrored for the tab marker)
-	vt            *vt.SafeEmulator
-	vtDrain       *vtDrain       // drain goroutine tracker for p.vt (see closeVT)
-	oscFilter     oscTitleFilter // strips OSC 0/1/2 before the emulator (see oscfilter.go)
-	Width         int
-	Height        int
+	// RestoresViaSession is the plugin capability resolved by Model (which owns
+	// the registry) and copied in by syncPaneMeta. PaneModel.View has no
+	// registry access, so it is resolved once per broadcast rather than looked
+	// up at render time.
+	RestoresViaSession bool
+	Name               string // user-given name (empty if not set)
+	CWD                string // current working directory from daemon
+	Muted              bool   // notification mute (daemon-authoritative; mirrored here for border rendering)
+	Eager              bool   // eager-restore flag (daemon-authoritative; mirrored for the tab marker)
+	vt                 *vt.SafeEmulator
+	vtDrain            *vtDrain       // drain goroutine tracker for p.vt (see closeVT)
+	oscFilter          oscTitleFilter // strips OSC 0/1/2 before the emulator (see oscfilter.go)
+	Width              int
+	Height             int
 	// NativeW is Width plus whatever the project sidebar reserved — the
 	// width this rect would have with the sidebar closed. It decides the
 	// pane's render mode and nothing else (paneVTSize), so toggling the
@@ -773,18 +778,16 @@ type restoreStep struct {
 	state stepState
 }
 
-// restoresViaSession reports whether a plugin restores its own history through a
-// session id (claude --resume / opencode --session) rather than a Quil ghost
-// buffer. For these tools the conversation comes back even though Quil saves no
-// ghost buffer (HistoryLines == 0).
-func restoresViaSession(paneType string) bool {
-	return paneType == "claude-code" || paneType == "opencode"
-}
-
 // resumeLabel is row 3 of the checklist: a human description of the resume
-// strategy for this pane type, with the tracked session-id prefix appended for
-// the agent plugins when known.
-func resumeLabel(paneType, sessionID string) string {
+// strategy for this pane type, with the tracked session-id prefix appended when
+// the plugin restores its own history through a session id.
+//
+// The switch is a copy table, not dispatch: "resuming claude" vs "reconnecting
+// ssh" is per-plugin phrasing, and no plugin field carries a verb phrase. The
+// capability question — does a session id mean anything for this pane — is the
+// restoresViaSession parameter, which Model resolves from the plugin's resume
+// strategy.
+func resumeLabel(paneType, sessionID string, restoresViaSession bool) string {
 	var base string
 	switch paneType {
 	case "claude-code":
@@ -800,8 +803,8 @@ func resumeLabel(paneType, sessionID string) string {
 	default:
 		base = "starting " + paneType
 	}
-	// Session id is only meaningful for agent plugins (claude-code, opencode).
-	if sessionID != "" && restoresViaSession(paneType) {
+	// Session id is only meaningful for plugins that resume through one.
+	if sessionID != "" && restoresViaSession {
 		id := sessionID
 		if r := []rune(sessionID); len(r) > 8 {
 			id = string(r[:8])
@@ -829,14 +832,14 @@ func (p *PaneModel) restoreSteps() []restoreStep {
 			text:  fmt.Sprintf("history restored (%d ln)", p.HistoryLines),
 			state: stepDone,
 		})
-	case restoresViaSession(p.Type) && p.SessionID != "":
+	case p.RestoresViaSession && p.SessionID != "":
 		steps = append(steps, restoreStep{text: "history via resume", state: stepDone})
 	default:
 		steps = append(steps, restoreStep{text: "no saved history", state: stepNone})
 	}
 
 	spawned := !p.Pending
-	resume := restoreStep{text: resumeLabel(p.Type, p.SessionID), state: stepActive}
+	resume := restoreStep{text: resumeLabel(p.Type, p.SessionID, p.RestoresViaSession), state: stepActive}
 	wait := restoreStep{text: "waiting for first output", state: stepPending}
 	if spawned {
 		resume.state = stepDone

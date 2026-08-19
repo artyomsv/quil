@@ -418,14 +418,19 @@ func (d *Daemon) refreshPluginStateFromHooks() {
 	for _, tab := range d.session.Tabs() {
 		for _, pane := range d.session.Panes(tab.ID) {
 			var hookID, transcript string
-			switch pane.Type {
-			case "claude-code":
-				if rec, err := readHookSessionFn(pane.ID); err == nil {
-					hookID, transcript = rec.ID, rec.TranscriptPath
-				}
-			case "opencode":
+			// opencode is tested FIRST. `switch pane.Type` was disjoint by
+			// construction; a switch over predicates is not, and any plugin
+			// file may legally set sessions = "claude" — including opencode's.
+			// Naming the narrower plugin first keeps the arms mutually
+			// exclusive for the shipped set however the TOML is edited.
+			switch {
+			case pane.Type == "opencode":
 				if id, err := readOpencodeSessionIDFn(pane.ID); err == nil {
 					hookID = id
+				}
+			case d.usesClaudeSessions(pane.Type):
+				if rec, err := readHookSessionFn(pane.ID); err == nil {
+					hookID, transcript = rec.ID, rec.TranscriptPath
 				}
 			default:
 				continue
@@ -1652,20 +1657,12 @@ func ghostScrollOut(rows int) []byte {
 // respawned child a session id, so the child paints its own transcript back
 // instead of depending on Quil's replay.
 //
-// This is the resume-strategy question, not a plugin-name list: the two
-// strategies below are exactly the ones resolveSpawnArgs expands into
-// `--resume <id>` / `--session <id>`. `rerun` re-runs a command that starts
-// from nothing, `cwd_only` respawns a shell that will not reprint a word of
-// its scrollback, and both of those need the replay.
+// Thin wrapper over the plugin method: the predicate now lives with the type it
+// describes, so the TUI's restore checklist asks the same question instead of
+// keeping its own hardcoded {claude-code, opencode} list. The daemon's call
+// sites read unchanged.
 func restoresOwnHistory(p *plugin.PanePlugin) bool {
-	if p == nil {
-		return false
-	}
-	switch p.Persistence.Strategy {
-	case "preassign_id", "session_scrape":
-		return true
-	}
-	return false
+	return p.RestoresOwnHistory()
 }
 
 func sendGhostChunked(conn *ipc.Conn, paneID string, data []byte, done <-chan struct{}) {
@@ -2245,7 +2242,7 @@ func (d *Daemon) cleanupPaneArtifacts(paneID string) {
 	if d.hookIngester != nil {
 		d.hookIngester.Cancel(paneID)
 	}
-	for _, name := range []string{paneID + ".id", paneID + ".transcript", "opencode-" + paneID + ".id"} {
+	for _, name := range []string{paneID + ".id", paneID + ".transcript", paneID + ".settings.json", "opencode-" + paneID + ".id"} {
 		p := filepath.Join(config.SessionsDir(), name)
 		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 			log.Printf("cleanup pane %s: remove session id %s: %v", paneID, name, err)
@@ -3346,23 +3343,36 @@ func opencodeSpawnPrep(quilDir, paneID, hookMode string) []string {
 // the running quild binary's native `claude-hook` subcommand. Returns nil
 // slices when the hook is unavailable (executable path unresolvable or settings
 // JSON build fails) so the spawn proceeds without the hook — matching the
-// pre-feature behaviour rather than failing the whole spawn. Logs a warning if
-// userArgs already contain --settings; Claude treats later wins, so our
-// prepend silently overrides the user's value.
+// pre-feature behaviour rather than failing the whole spawn.
+//
+// The settings go to a per-pane FILE passed as `--settings <path>`, never an
+// inline JSON string: on Windows the claude binary is an npm .cmd shim that
+// cmd.exe re-parses, and the quotes inside an inline JSON are re-split at the
+// wrong boundaries by that second parser. A path has no shell metacharacters.
+//
+// Logs a warning when userArgs already contain --settings. Which value wins is
+// UNVERIFIED — Quil prepends its own, so depending on Claude's precedence
+// either the user loses their settings or Quil loses rotation tracking. See §7
+// of docs/superpowers/specs/2026-08-19-claude-session-seam-design.md.
 func claudeHookSpawnPrep(quilDir, paneID, hookMode string, userArgs []string) (prefix, env []string) {
 	exePath, err := claudeHookExeFn()
 	if err != nil {
-		log.Printf("warning: pane %s: cannot resolve quild executable: %v — session-id rotation tracking disabled", paneID, err)
+		log.Printf("warning: pane %s: cannot resolve quild executable: %v — claude hooks disabled (notifications, work state, input history, session-id rotation)", paneID, err)
 		return nil, nil
 	}
 	js, err := claudehook.BuildSettingsJSON(claudehook.HookCommand(exePath))
 	if err != nil {
-		log.Printf("warning: pane %s: build claude settings JSON: %v — session-id rotation tracking disabled", paneID, err)
+		log.Printf("warning: pane %s: build claude settings JSON: %v — claude hooks disabled (notifications, work state, input history, session-id rotation)", paneID, err)
+		return nil, nil
+	}
+	settingsPath, err := claudehook.WriteSettingsFile(quilDir, paneID, js)
+	if err != nil {
+		log.Printf("warning: pane %s: write hook settings file: %v — claude hooks disabled (notifications, work state, input history, session-id rotation)", paneID, err)
 		return nil, nil
 	}
 	for _, a := range userArgs {
 		if a == "--settings" {
-			log.Printf("warning: pane %s: claude-code args already contain --settings; Quil's hook entry will override (later-wins)", paneID)
+			log.Printf("warning: pane %s: claude-code args already contain --settings; precedence with Quil's hook entry is unverified", paneID)
 			break
 		}
 	}
@@ -3374,11 +3384,21 @@ func claudeHookSpawnPrep(quilDir, paneID, hookMode string, userArgs []string) (p
 	// correct data dir; renamed from QUIL_HOME because children inherit the
 	// pane env and an inherited QUIL_HOME retargeted dev builds at production.
 	// Consumers fall back to QUIL_HOME for one release.
-	return []string{"--settings", js}, []string{
+	env = []string{
 		"QUIL_PANE_ID=" + paneID,
 		"QUIL_HOOK_MODE=" + mode,
 		"QUIL_HOOK_HOME=" + quilDir,
 	}
+	// WriteSettingsFile answers ("", nil) when there was nothing to write, and
+	// its contract is that the caller then SKIPS the flag rather than passing
+	// an empty one — `claude --settings ""` is not the same as no --settings.
+	// Unreachable today (BuildSettingsJSON never returns "" without an error),
+	// but the env vars are still wanted, so this returns them with no prefix
+	// rather than honouring the contract by dropping the hook entirely.
+	if settingsPath == "" {
+		return nil, env
+	}
+	return []string{"--settings", settingsPath}, env
 }
 
 // resumeTemplateFor returns the resume-arg template resolveSpawnArgs should
@@ -3386,7 +3406,7 @@ func claudeHookSpawnPrep(quilDir, paneID, hookMode string, userArgs []string) (p
 // promotion logic; default falls back to the plugin's configured ResumeArgs.
 func resumeTemplateFor(p *plugin.PanePlugin, pane *Pane, claim sessionClaimFn) []string {
 	switch {
-	case p.Name == "claude-code" && p.Persistence.Strategy == "preassign_id":
+	case p.UsesClaudeSessions() && p.Persistence.Strategy == "preassign_id":
 		return claudeResumeTemplate(p, pane, claim)
 	case p.Name == "opencode" && p.Persistence.Strategy == "session_scrape":
 		return opencodeResumeTemplate(p, pane)
@@ -3799,7 +3819,7 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 		// cannot resurface on a later restore either. Read off-lock: never hold
 		// PluginMu across a file read.
 		hookID := ""
-		if p.Name == "claude-code" {
+		if p.UsesClaudeSessions() {
 			if rec, err := readHookSessionFn(pane.ID); err == nil {
 				hookID = rec.ID
 			}
@@ -3836,8 +3856,10 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 		}
 	}
 
-	// Claude Code session-id rotation tracking: prepend --settings with an
-	// inline JSON that registers a SessionStart hook. The hook receives
+	// Claude Code session-id rotation tracking: prepend --settings with the
+	// path of a per-pane settings file that registers a SessionStart hook (a
+	// file rather than inline JSON so the argument survives the cmd.exe
+	// re-parse of claude's npm .cmd shim on Windows). The hook receives
 	// Claude's session_id and writes it to $QUIL_HOME/sessions/<paneID>.id,
 	// which the restore path consults in resumeTemplateFor. QUIL_PANE_ID in
 	// the PTY env lets the hook attribute the write to this specific pane.
@@ -3847,15 +3869,19 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	// under $QUIL_HOME/opencodehook/. OPENCODE_CONFIG_CONTENT merges with the
 	// user's own opencode config so their plugins/agents/modes still apply.
 	envVars := append([]string{}, p.Command.Env...)
-	switch p.Name {
-	case "claude-code":
+	// opencode first, for the reason refreshPluginStateFromHooks documents:
+	// these arms are no longer disjoint by construction, and prepending
+	// `--settings <path>` to opencode's argv would pass it a flag it does not
+	// have while skipping the session read it does need.
+	switch {
+	case p.Name == "opencode":
+		envVars = append(envVars, opencodeSpawnPrep(config.QuilDir(), pane.ID, d.cfg.Notification.Hooks.OpenCode)...)
+	case p.UsesClaudeSessions():
 		settingsArgs, hookEnv := claudeHookSpawnPrep(config.QuilDir(), pane.ID, d.cfg.Notification.Hooks.Claude, args)
 		if len(settingsArgs) > 0 {
 			args = append(settingsArgs, args...)
 		}
 		envVars = append(envVars, hookEnv...)
-	case "opencode":
-		envVars = append(envVars, opencodeSpawnPrep(config.QuilDir(), pane.ID, d.cfg.Notification.Hooks.OpenCode)...)
 	}
 
 	// Generic opt-in: any plugin whose hook producer records input history

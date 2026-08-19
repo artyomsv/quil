@@ -248,6 +248,20 @@ func TestNewModel_InstallsFrameCache(t *testing.T) {
 	}
 }
 
+// primeHiddenPane drives one chunk of output through a pane so its
+// once-per-pane transitions are spent.
+//
+// A fresh pane's FIRST live chunk sets liveOutputSeen and may settle a restore;
+// both legitimately force a rebuild, so measuring steady-state coalescing
+// without this measures the boot path instead and always sees a rebuild.
+func primeHiddenPane(t *testing.T, m Model, paneID string) Model {
+	t.Helper()
+	primed, _ := m.Update(PaneOutputMsg{PaneID: paneID, Data: []byte("prime\r\n")})
+	out := primed.(Model)
+	_ = out.View()
+	return out
+}
+
 // hiddenPaneID returns a pane on a tab other than the active one.
 func hiddenPaneID(t *testing.T, m *Model) string {
 	t.Helper()
@@ -338,5 +352,118 @@ func TestPaneIsVisible_InactiveTabOverlayIsNotVisible(t *testing.T) {
 
 	if m.paneIsVisible("overlay-hidden") {
 		t.Error("an overlay on an inactive tab is not rendered and must report hidden")
+	}
+}
+
+// Output from a pane on a tab the user is not looking at cannot change the
+// frame: View() renders only the active tab.
+func TestUpdate_HiddenPaneOutputServesCachedFrame(t *testing.T) {
+	m := coalesceModel(t)
+	// benchModel leaves perfStats nil — the recorders tolerate that, but reading
+	// the counter field directly does not. Install a real one.
+	m.perfStats = newEventLoopStats()
+
+	if m.View(); m.viewCache.builds == 0 {
+		t.Fatal("first View() must build a frame")
+	}
+
+	hiddenID := hiddenPaneID(t, &m)
+	m = primeHiddenPane(t, m, hiddenID)
+
+	builds := m.viewCache.builds
+	before := m.perfStats.viewHidden
+
+	updated, _ := m.Update(PaneOutputMsg{PaneID: hiddenID, Data: []byte("noise\r\n")})
+	after := updated.(Model)
+
+	if !after.skipRender {
+		t.Fatal("hidden-pane output must mark the message inert")
+	}
+	_ = after.View()
+	if after.viewCache.builds != builds {
+		t.Error("View rebuilt instead of reusing the cached frame; the optimisation did not happen")
+	}
+	if after.perfStats.viewHidden != before+1 {
+		t.Errorf("viewHidden = %d, want %d — the skip was not attributed to a hidden pane",
+			after.perfStats.viewHidden, before+1)
+	}
+}
+
+// The honesty check. A cached frame must equal what a forced rebuild produces.
+//
+// Compares against a REBUILD of the returned model — not against a frame taken
+// before the Update — because when the skip works those two are the same cached
+// struct and the assertion would be a tautology (round-1 code-quality/6).
+func TestUpdate_HiddenPaneCachedFrameMatchesForcedRebuild(t *testing.T) {
+	m := coalesceModel(t)
+	_ = m.View()
+
+	hiddenID := hiddenPaneID(t, &m)
+	m = primeHiddenPane(t, m, hiddenID)
+
+
+	updated, _ := m.Update(PaneOutputMsg{PaneID: hiddenID, Data: []byte("noise\r\n")})
+	after := updated.(Model)
+
+	delivered := after.View()
+
+	forced := after
+	forced.skipRender = false
+	honest := forced.View()
+
+	if delivered.Content != honest.Content {
+		t.Error("the delivered frame is STALE — an honest rebuild of the same model " +
+			"differs, so hidden-pane output moved the screen after all")
+	}
+	if delivered.MouseMode != honest.MouseMode {
+		t.Errorf("delivered MouseMode %v != honest %v — a cached frame carries the "+
+			"mouse mode, so a stale one leaves the terminal in the wrong reporting mode",
+			delivered.MouseMode, honest.MouseMode)
+	}
+}
+
+// Output from the pane the user IS looking at must always rebuild.
+func TestUpdate_VisiblePaneOutputAlwaysRebuilds(t *testing.T) {
+	m := coalesceModel(t)
+	_ = m.View()
+
+	visibleID := m.activeTabModel().Leaves()[0].ID
+	updated, _ := m.Update(PaneOutputMsg{PaneID: visibleID, Data: []byte("hello\r\n")})
+	if updated.(Model).skipRender {
+		t.Fatal("visible-pane output must never be coalesced")
+	}
+}
+
+// A CWD change forces a rebuild even off-screen. Not because anything outside
+// the pane draws a CWD today — nothing does — but because it fires at most a
+// handful of times per pane and is the obvious candidate for a future sidebar
+// column. Pinned so the conservatism stays deliberate rather than accidental.
+//
+// OSC 7 updates Pane.CWD synchronously inside AppendOutput via the VT callback,
+// so this drives the real path.
+func TestUpdate_HiddenPaneCWDChangeStillRebuilds(t *testing.T) {
+	m := coalesceModel(t)
+	_ = m.View()
+
+	hiddenID := hiddenPaneID(t, &m)
+	// Primed, or the first-live-output branch would force the rebuild and this
+	// test would pass without the CWD branch existing at all.
+	m = primeHiddenPane(t, m, hiddenID)
+
+	osc7 := []byte("\x1b]7;file://host/tmp/quil-cwd-probe\x07")
+	updated, _ := m.Update(PaneOutputMsg{PaneID: hiddenID, Data: osc7})
+	if updated.(Model).skipRender {
+		t.Fatal("a CWD change must force a rebuild even for an off-screen pane")
+	}
+}
+
+// An unknown pane id touches nothing, so it must not force a rebuild either.
+func TestUpdate_UnknownPaneOutputIsInert(t *testing.T) {
+	m := coalesceModel(t)
+	_ = m.View()
+
+	updated, _ := m.Update(PaneOutputMsg{PaneID: "no-such-pane", Data: []byte("x")})
+	if !updated.(Model).skipRender {
+		t.Error("output for a pane that does not exist changed nothing and must be inert")
 	}
 }

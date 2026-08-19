@@ -790,6 +790,12 @@ type Model struct {
 	// backwards would trade a performance win for stale pixels.
 	skipRender bool
 
+	// skipHidden narrows skipRender: set when this message was inert because it
+	// carried output from a pane the user cannot see. Read only by View, which
+	// is the sole place that knows a skip HAPPENED rather than was intended —
+	// Update can set skipRender and still be rebuilt if the cache is invalid.
+	skipHidden bool
+
 	// Plugin migration dialog state
 	migrationPlugins    []plugin.StalePlugin // stale plugins needing migration
 	migrationIdx        int                  // active plugin tab index
@@ -1066,6 +1072,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// only by branches audited as inert (see Model.skipRender). Resetting here
 	// means the flag describes THIS message and can never leak into the next.
 	m.skipRender = false
+	m.skipHidden = false
 	// Acknowledge the focused pane of the active tab before processing the
 	// message — focusing is the acknowledgement; see ackFocusedPane.
 	//
@@ -2000,7 +2007,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case PaneOutputMsg:
-		cmd := m.handlePaneOutput(msg)
+		cmd, changedView := m.handlePaneOutput(msg)
+		// Only the active tab is rendered, so output from any other pane leaves
+		// the frame identical. Folds in the prologue exactly as the four inert
+		// message types do — an unacked focus change or a pruned context menu
+		// is a real change this arm must not swallow.
+		m.skipRender = !changedView && !prologueChangedView
+		// Attributed in View, not here: this arm knows a skip was INTENDED,
+		// only View knows one happened.
+		m.skipHidden = m.skipRender
 		if cmd != nil {
 			return m, tea.Batch(cmd, m.listenForMessages())
 		}
@@ -4015,6 +4030,12 @@ func (m Model) View() tea.View {
 		// while reading like frames delivered, and a future measurement would
 		// compare it against pre-coalescing numbers that counted every frame.
 		m.perfStats.recordSkippedView()
+		if m.skipHidden {
+			// A strict subset of the above — see recordHiddenSkip. Counted here
+			// rather than in Update because this is the only place that knows
+			// the cache was actually served.
+			m.perfStats.recordHiddenSkip()
+		}
 		return m.viewCache.view
 	}
 	viewStart := time.Now()
@@ -4838,7 +4859,24 @@ func (m Model) handlePaneRenameKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
-func (m *Model) handlePaneOutput(msg PaneOutputMsg) tea.Cmd {
+// handlePaneOutput applies one chunk of PTY output to its pane and reports
+// whether anything the user can currently see changed.
+//
+// The bool exists because output is ~65% of this model's View rebuilds and most
+// of it belongs to panes on other tabs, which View() does not draw. Everything
+// this function does to a pane — rawBuf, the VT write, contentGen — feeds a
+// PaneModel whose View() is cached on renderKey() and which is not rendered at
+// all while off-screen.
+//
+// INVARIANT: a branch added here that can move the screen MUST set changedView.
+// Nothing else enforces it, and the failure mode is a stale frame rather than a
+// crash. Five sites set it today (both ghost transitions, the restore settle,
+// the first live frame, the CWD change) even though each renders only inside the
+// pane — plus the visibility base in each of the two branches. The five fire
+// once or twice per pane, so forcing a rebuild costs nothing, and they are
+// exactly what a future tab-bar or sidebar indicator would read. Each is pinned
+// by its own test; deleting any one flag fails exactly that test.
+func (m *Model) handlePaneOutput(msg PaneOutputMsg) (tea.Cmd, bool) {
 	// Overlay panes live outside the layout tree — check them first.
 	for _, tab := range m.allTabs() {
 		if tab.overlayPane != nil && tab.overlayPane.ID == msg.PaneID {
@@ -4859,11 +4897,17 @@ func (m *Model) handlePaneOutput(msg PaneOutputMsg) tea.Cmd {
 			// frames set up the terminal and clear the screen well before they
 			// paint, so the flag went down while the rectangle was still empty,
 			// which is the state the indicator exists to cover.
+			overlayChanged := m.paneIsVisible(msg.PaneID)
 			if (tab.overlayPane.preparing || tab.overlayPane.resuming) && tab.overlayPane.restoreSettled() {
 				tab.overlayPane.preparing = false
 				tab.overlayPane.resuming = false
+				// Same treatment as the layout branch's settle below, for the
+				// same reason: once per pane, and the state a future indicator
+				// would draw. Returning bare visibility here would leave the
+				// two branches inconsistent for no gain.
+				overlayChanged = true
 			}
-			return nil
+			return nil, overlayChanged
 		}
 	}
 	for _, tab := range m.allTabs() {
@@ -4871,6 +4915,9 @@ func (m *Model) handlePaneOutput(msg PaneOutputMsg) tea.Cmd {
 			continue
 		}
 		if leaf := tab.Root.FindLeaf(msg.PaneID); leaf != nil {
+			// Base: a pane the user is looking at always redraws. The branches
+			// below raise this for state that is cheap to be conservative about.
+			changedView := m.paneIsVisible(msg.PaneID)
 			oldCWD := leaf.Pane.CWD
 			// Reattach reset, applied on the daemon's FIRST replayed chunk rather
 			// than predicted before the attach. Only a replay can double a pane's
@@ -4885,6 +4932,12 @@ func (m *Model) handlePaneOutput(msg PaneOutputMsg) tea.Cmd {
 			if msg.Ghost && m.cfg.GhostBuffer.Dimmed {
 				if !leaf.Pane.ghost {
 					log.Printf("pane %s: ghost=true (received %d bytes)", msg.PaneID, len(msg.Data))
+					// The TRANSITION, not the assignment. `ghost` drives the
+					// pane's dim styling, so flipping it moves the screen —
+					// but the assignment below runs on every replayed chunk,
+					// and marking that would coalesce nothing at all. Same
+					// once-per-pane conservatism as the settle and CWD branches.
+					changedView = true
 				}
 				leaf.Pane.ghost = true
 			} else if !msg.Ghost {
@@ -4912,6 +4965,10 @@ func (m *Model) handlePaneOutput(msg PaneOutputMsg) tea.Cmd {
 				// child painting, which is what fixes the cursor.
 				if leaf.Pane.ghost {
 					log.Printf("pane %s: ghost->live transition, preserving VT (type=%q)", msg.PaneID, leaf.Pane.Type)
+					// Ghost->live drops the dim styling. Marked on the
+					// transition only, for the reason above: `ghost = false`
+					// below executes on every live chunk.
+					changedView = true
 				}
 				leaf.Pane.ghost = false
 			}
@@ -4927,11 +4984,17 @@ func (m *Model) handlePaneOutput(msg PaneOutputMsg) tea.Cmd {
 			if (leaf.Pane.resuming || leaf.Pane.preparing) && leaf.Pane.restoreSettled() {
 				leaf.Pane.resuming = false
 				leaf.Pane.preparing = false
+				// Renders only inside the pane today (see buildTopBorder), so
+				// this is conservatism rather than necessity: it fires once per
+				// pane and is what a tab-bar or sidebar pending indicator would
+				// read if one is ever added.
+				changedView = true
 			}
 
 			var cmds []tea.Cmd
 			if !msg.Ghost && !leaf.Pane.liveOutputSeen {
 				leaf.Pane.liveOutputSeen = true
+				changedView = true
 				// First live output: the child reflows right after the
 				// daemon's resize kick lands. Repaint quickly to clean
 				// boot-frame leftovers, and once more after the UI settles
@@ -4942,15 +5005,22 @@ func (m *Model) handlePaneOutput(msg PaneOutputMsg) tea.Cmd {
 				)
 			}
 			if leaf.Pane.CWD != oldCWD && leaf.Pane.CWD != "" {
+				// renderStatusBar draws a CWD outside the pane, but only for
+				// tab.ActivePaneModel() of the ACTIVE tab — which paneIsVisible
+				// already covers, so this flag is not what keeps that correct.
+				// Conservative for the same reason as the settle above: rare,
+				// cheap, and the obvious candidate for a future sidebar column.
+				changedView = true
 				cmds = append(cmds, m.updatePaneCWD(msg.PaneID, leaf.Pane.CWD))
 			}
 			if len(cmds) == 0 {
-				return nil
+				return nil, changedView
 			}
-			return tea.Batch(cmds...)
+			return tea.Batch(cmds...), changedView
 		}
 	}
-	return nil
+	// Unknown pane: nothing was touched, so nothing changed.
+	return nil, false
 }
 
 // applyWorkspaceState rebuilds the TUI state from one daemon's broadcast.

@@ -16,13 +16,13 @@ import (
 func TestHandlePaneOutput_FirstLiveOutput_SchedulesSettleRepaint(t *testing.T) {
 	m, _ := cursorTestModel("claude-code")
 
-	cmd := m.handlePaneOutput(PaneOutputMsg{PaneID: "p1", Data: []byte("hello")})
+	cmd, _ := m.handlePaneOutput(PaneOutputMsg{PaneID: "p1", Data: []byte("hello")})
 	if cmd == nil {
 		t.Fatal("first live output must schedule settle repaints")
 	}
 
 	// Subsequent output must NOT reschedule — one settle window per pane.
-	cmd = m.handlePaneOutput(PaneOutputMsg{PaneID: "p1", Data: []byte("more")})
+	cmd, _ = m.handlePaneOutput(PaneOutputMsg{PaneID: "p1", Data: []byte("more")})
 	if cmd != nil {
 		t.Error("second live output scheduled another settle repaint")
 	}
@@ -32,7 +32,7 @@ func TestHandlePaneOutput_GhostOutput_DoesNotScheduleRepaint(t *testing.T) {
 	m, _ := cursorTestModel("claude-code")
 	m.cfg.GhostBuffer.Dimmed = true
 
-	cmd := m.handlePaneOutput(PaneOutputMsg{PaneID: "p1", Data: []byte("replay"), Ghost: true})
+	cmd, _ := m.handlePaneOutput(PaneOutputMsg{PaneID: "p1", Data: []byte("replay"), Ghost: true})
 	if cmd != nil {
 		t.Error("ghost replay scheduled a settle repaint — only live output should")
 	}

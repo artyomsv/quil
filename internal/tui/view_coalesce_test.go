@@ -2,6 +2,7 @@ package tui
 
 import (
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -245,5 +246,363 @@ func TestNewModel_InstallsFrameCache(t *testing.T) {
 	m := NewModel(nil, config.Config{}, "test", nil, nil, nil)
 	if m.viewCache == nil {
 		t.Error("NewModel must install the frame cache, or coalescing is dead code in production")
+	}
+}
+
+// primePane drives one chunk of output through a pane so its
+// once-per-pane transitions are spent.
+//
+// A fresh pane's FIRST live chunk sets liveOutputSeen and may settle a restore;
+// both legitimately force a rebuild, so measuring steady-state coalescing
+// without this measures the boot path instead and always sees a rebuild.
+func primePane(t *testing.T, m Model, paneID string) Model {
+	t.Helper()
+	primed, _ := m.Update(PaneOutputMsg{PaneID: paneID, Data: []byte("prime\r\n")})
+	out := primed.(Model)
+	_ = out.View()
+	return out
+}
+
+// hiddenPaneID returns a pane on a tab other than the active one.
+func hiddenPaneID(t *testing.T, m *Model) string {
+	t.Helper()
+	active := m.activeTabModel()
+	for _, tab := range m.allTabs() {
+		if active != nil && tab.ID == active.ID {
+			continue
+		}
+		if tab.Root == nil {
+			continue
+		}
+		if leaves := tab.Leaves(); len(leaves) > 0 {
+			return leaves[0].ID
+		}
+	}
+	t.Fatal("fixture must have a second tab with at least one pane")
+	return ""
+}
+
+func TestPaneIsVisible_ActiveTabPanesVisibleOthersNot(t *testing.T) {
+	m := coalesceModel(t)
+
+	active := m.activeTabModel()
+	if active == nil || active.Root == nil {
+		t.Fatal("fixture must have an active tab with a layout tree")
+	}
+	visibleID := active.Leaves()[0].ID
+	if !m.paneIsVisible(visibleID) {
+		t.Errorf("pane %s is in the active tab but reported hidden", visibleID)
+	}
+
+	hiddenID := hiddenPaneID(t, &m)
+	if m.paneIsVisible(hiddenID) {
+		t.Errorf("pane %s is on an inactive tab but reported visible", hiddenID)
+	}
+}
+
+func TestPaneIsVisible_UnknownPaneIsNotVisible(t *testing.T) {
+	m := coalesceModel(t)
+	if m.paneIsVisible("pane-that-does-not-exist") {
+		t.Error("an unknown pane id must not report visible")
+	}
+}
+
+func TestPaneIsVisible_ActiveTabOverlayIsVisible(t *testing.T) {
+	m := coalesceModel(t)
+	active := m.activeTabModel()
+	if active == nil {
+		t.Fatal("fixture must have an active tab")
+	}
+
+	overlay := NewPaneModel("overlay-1", 4096)
+	active.overlayPane = overlay
+	// Every PaneModel owns a VT emulator with a parked drain goroutine and a
+	// scrollback allocation. Nilling the field reclaims neither.
+	t.Cleanup(func() {
+		active.overlayPane = nil
+		overlay.Dispose()
+	})
+
+	if !m.paneIsVisible("overlay-1") {
+		t.Error("the active tab's overlay pane is on screen and must report visible")
+	}
+}
+
+// An overlay belonging to a tab the user is NOT looking at is not on screen.
+func TestPaneIsVisible_InactiveTabOverlayIsNotVisible(t *testing.T) {
+	m := coalesceModel(t)
+	active := m.activeTabModel()
+
+	var other *TabModel
+	for _, tab := range m.allTabs() {
+		if active == nil || tab.ID != active.ID {
+			other = tab
+			break
+		}
+	}
+	if other == nil {
+		t.Fatal("fixture must have a second tab")
+	}
+
+	overlay := NewPaneModel("overlay-hidden", 4096)
+	other.overlayPane = overlay
+	t.Cleanup(func() {
+		other.overlayPane = nil
+		overlay.Dispose()
+	})
+
+	if m.paneIsVisible("overlay-hidden") {
+		t.Error("an overlay on an inactive tab is not rendered and must report hidden")
+	}
+}
+
+// Output from a pane on a tab the user is not looking at cannot change the
+// frame: View() renders only the active tab.
+func TestUpdate_HiddenPaneOutputServesCachedFrame(t *testing.T) {
+	m := coalesceModel(t)
+	// benchModel leaves perfStats nil — the recorders tolerate that, but reading
+	// the counter field directly does not. Install a real one.
+	m.perfStats = newEventLoopStats()
+
+	if m.View(); m.viewCache.builds == 0 {
+		t.Fatal("first View() must build a frame")
+	}
+
+	hiddenID := hiddenPaneID(t, &m)
+	m = primePane(t, m, hiddenID)
+
+	builds := m.viewCache.builds
+	before := m.perfStats.viewHidden
+
+	updated, _ := m.Update(PaneOutputMsg{PaneID: hiddenID, Data: []byte("noise\r\n")})
+	after := updated.(Model)
+
+	if !after.skipRender {
+		t.Fatal("hidden-pane output must mark the message inert")
+	}
+	_ = after.View()
+	if after.viewCache.builds != builds {
+		t.Error("View rebuilt instead of reusing the cached frame; the optimisation did not happen")
+	}
+	if after.perfStats.viewHidden != before+1 {
+		t.Errorf("viewHidden = %d, want %d — the skip was not attributed to a hidden pane",
+			after.perfStats.viewHidden, before+1)
+	}
+}
+
+// The honesty check. A cached frame must equal what a forced rebuild produces.
+//
+// Compares against a REBUILD of the returned model — not against a frame taken
+// before the Update — because when the skip works those two are the same cached
+// struct and the assertion would be a tautology (round-1 code-quality/6).
+func TestUpdate_HiddenPaneCachedFrameMatchesForcedRebuild(t *testing.T) {
+	m := coalesceModel(t)
+	_ = m.View()
+
+	hiddenID := hiddenPaneID(t, &m)
+	m = primePane(t, m, hiddenID)
+
+	updated, _ := m.Update(PaneOutputMsg{PaneID: hiddenID, Data: []byte("noise\r\n")})
+	after := updated.(Model)
+
+	delivered := after.View()
+
+	forced := after
+	forced.skipRender = false
+	honest := forced.View()
+
+	if delivered.Content != honest.Content {
+		t.Error("the delivered frame is STALE — an honest rebuild of the same model " +
+			"differs, so hidden-pane output moved the screen after all")
+	}
+	if delivered.MouseMode != honest.MouseMode {
+		t.Errorf("delivered MouseMode %v != honest %v — a cached frame carries the "+
+			"mouse mode, so a stale one leaves the terminal in the wrong reporting mode",
+			delivered.MouseMode, honest.MouseMode)
+	}
+}
+
+// Output from the pane the user IS looking at must always rebuild.
+//
+// PRIMED, and that is the whole point of this test rather than an incidental
+// detail. Without it the pane has never produced output, so the once-per-pane
+// liveOutputSeen branch sets changedView unconditionally and the assertion
+// passes on the boot path while never touching paneIsVisible at all. Round 2 of
+// review caught exactly that: setting the visibility base to false at BOTH call
+// sites — every visible pane coalesced away, a streaming pane frozen on screen —
+// left the entire package green.
+func TestUpdate_VisiblePaneOutputAlwaysRebuilds(t *testing.T) {
+	m := coalesceModel(t)
+	_ = m.View()
+
+	visibleID := m.activeTabModel().Leaves()[0].ID
+	m = primePane(t, m, visibleID)
+
+	updated, _ := m.Update(PaneOutputMsg{PaneID: visibleID, Data: []byte("hello\r\n")})
+	if updated.(Model).skipRender {
+		t.Fatal("visible-pane output must never be coalesced")
+	}
+}
+
+// The overlay half of the same gate. handlePaneOutput returns from its overlay
+// branch before ever reaching the layout tree, so the layout-branch tests say
+// nothing about it.
+func TestUpdate_ActiveTabOverlayOutputAlwaysRebuilds(t *testing.T) {
+	m := coalesceModel(t)
+	tab := m.activeTabModel()
+
+	overlay := NewPaneModel("overlay-live", 4096)
+	overlay.liveOutputSeen = true // spend the boot branch, as primePane does for a leaf
+	tab.overlayPane = overlay
+	tab.overlayVisible = true
+	t.Cleanup(func() {
+		tab.overlayPane = nil
+		tab.overlayVisible = false
+		overlay.Dispose()
+	})
+	_ = m.View()
+
+	updated, _ := m.Update(PaneOutputMsg{PaneID: "overlay-live", Data: []byte("lazygit\r\n")})
+	if updated.(Model).skipRender {
+		t.Fatal("output to the active tab's visible overlay must never be coalesced")
+	}
+}
+
+// The first-live-output branch, pinned. It is one of the five sites that set
+// changedView regardless of visibility, and the comments call that deliberate
+// conservatism — so it needs a test, or the next person removes it with a green
+// suite and nobody learns the difference between "dead" and "unpinned".
+func TestUpdate_HiddenPaneFirstLiveOutputStillRebuilds(t *testing.T) {
+	m := coalesceModel(t)
+	_ = m.View()
+
+	hiddenID := hiddenPaneID(t, &m)
+	// Deliberately NOT primed: the first live chunk is the branch under test.
+	updated, _ := m.Update(PaneOutputMsg{PaneID: hiddenID, Data: []byte("first\r\n")})
+	if updated.(Model).skipRender {
+		t.Fatal("a hidden pane's FIRST live output must rebuild — it is the branch " +
+			"that schedules the settle repaints")
+	}
+}
+
+// The restore-settle branch, pinned. Same reasoning as the first-output test.
+func TestUpdate_HiddenPaneRestoreSettleStillRebuilds(t *testing.T) {
+	m := coalesceModel(t)
+	_ = m.View()
+
+	hiddenID := hiddenPaneID(t, &m)
+	m = primePane(t, m, hiddenID)
+
+	// Park the pane in a restoring state that settles on the next chunk.
+	// resumeStart past restoreSafetyCap makes restoreSettled() true without the
+	// test having to wait out restoreMinDisplay.
+	var pane *PaneModel
+	for _, tab := range m.allTabs() {
+		if tab.Root == nil {
+			continue
+		}
+		if leaf := tab.Root.FindLeaf(hiddenID); leaf != nil {
+			pane = leaf.Pane
+			break
+		}
+	}
+	if pane == nil {
+		t.Fatal("could not resolve the hidden pane")
+	}
+	pane.resuming = true
+	pane.resumeStart = time.Now().Add(-2 * restoreSafetyCap)
+
+	updated, _ := m.Update(PaneOutputMsg{PaneID: hiddenID, Data: []byte("settled\r\n")})
+	if updated.(Model).skipRender {
+		t.Fatal("a restore settling must rebuild even for a hidden pane")
+	}
+	if pane.resuming {
+		t.Fatal("fixture wrong: the settle never fired, so the branch was not exercised")
+	}
+}
+
+// A CWD change forces a rebuild even off-screen. renderStatusBar DOES draw a
+// CWD outside the pane, but only for the active tab's active pane, which
+// paneIsVisible already covers — so this flag is conservatism rather than the
+// thing keeping the status bar correct. It fires at most a handful of times per
+// pane and is the obvious candidate for a future sidebar column. Pinned so the
+// conservatism stays deliberate rather than accidental.
+//
+// OSC 7 updates Pane.CWD synchronously inside AppendOutput via the VT callback,
+// so this drives the real path.
+func TestUpdate_HiddenPaneCWDChangeStillRebuilds(t *testing.T) {
+	m := coalesceModel(t)
+	_ = m.View()
+
+	hiddenID := hiddenPaneID(t, &m)
+	// Primed, or the first-live-output branch would force the rebuild and this
+	// test would pass without the CWD branch existing at all.
+	m = primePane(t, m, hiddenID)
+
+	osc7 := []byte("\x1b]7;file://host/tmp/quil-cwd-probe\x07")
+	updated, _ := m.Update(PaneOutputMsg{PaneID: hiddenID, Data: osc7})
+	if updated.(Model).skipRender {
+		t.Fatal("a CWD change must force a rebuild even for an off-screen pane")
+	}
+}
+
+// An unknown pane id touches nothing, so it must not force a rebuild either.
+func TestUpdate_UnknownPaneOutputIsInert(t *testing.T) {
+	m := coalesceModel(t)
+	_ = m.View()
+
+	updated, _ := m.Update(PaneOutputMsg{PaneID: "no-such-pane", Data: []byte("x")})
+	if !updated.(Model).skipRender {
+		t.Error("output for a pane that does not exist changed nothing and must be inert")
+	}
+}
+
+// The ghost->live transition, pinned. `ghost` drives the pane's dim styling, so
+// the flip moves the screen. Marked on the TRANSITION only — the assignment it
+// guards runs on every chunk, and marking that would coalesce nothing.
+func TestUpdate_HiddenPaneGhostToLiveTransitionRebuilds(t *testing.T) {
+	m := coalesceModel(t)
+	m.cfg.GhostBuffer.Dimmed = true
+	_ = m.View()
+
+	hiddenID := hiddenPaneID(t, &m)
+
+	// Spend liveOutputSeen FIRST. Without this the closing live chunk below is
+	// also the pane's first, so the test passes via that branch and says nothing
+	// about ghost — the same isolation failure that let the visibility base go
+	// untested through two rounds of review.
+	m = primePane(t, m, hiddenID)
+
+	// Replayed chunk: puts the pane into ghost state. This transition is itself
+	// a rebuild (dim styling appears), so assert it rather than just relying on
+	// it as setup.
+	ghosted, _ := m.Update(PaneOutputMsg{PaneID: hiddenID, Data: []byte("replay\r\n"), Ghost: true})
+	m = ghosted.(Model)
+	if m.skipRender {
+		t.Error("entering ghost state adds dim styling and must rebuild")
+	}
+	_ = m.View()
+
+	var pane *PaneModel
+	for _, tab := range m.allTabs() {
+		if tab.Root == nil {
+			continue
+		}
+		if leaf := tab.Root.FindLeaf(hiddenID); leaf != nil {
+			pane = leaf.Pane
+			break
+		}
+	}
+	if pane == nil || !pane.ghost {
+		t.Fatal("fixture wrong: the pane never entered ghost state, so the transition was not exercised")
+	}
+
+	// Now the first LIVE chunk: ghost->live, dim styling drops.
+	updated, _ := m.Update(PaneOutputMsg{PaneID: hiddenID, Data: []byte("live\r\n")})
+	if updated.(Model).skipRender {
+		t.Fatal("the ghost->live transition drops the pane's dim styling and must rebuild")
+	}
+	if pane.ghost {
+		t.Fatal("fixture wrong: the pane is still ghosted, so the transition never fired")
 	}
 }

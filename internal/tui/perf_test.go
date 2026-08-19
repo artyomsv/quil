@@ -270,3 +270,45 @@ func reflectSameMap(a, b map[string]*perfBucket) bool {
 	}
 	return false
 }
+
+// View's skip branch calls recordSkippedView for every cache-served frame and
+// recordHiddenSkip additionally for the subset attributable to a pane the user
+// cannot see. `skipped=` must therefore stay the TOTAL — if recordHiddenSkip
+// also bumped it, every hidden skip would be counted twice and the counter
+// would stop being comparable with logs written before hidden-pane coalescing
+// existed, which is the entire reason it is reported.
+func TestPerfStats_HiddenIsASubsetOfSkipped(t *testing.T) {
+	s := newEventLoopStats()
+
+	// Two plain inert skips.
+	s.recordSkippedView()
+	s.recordSkippedView()
+	// One hidden-pane skip: View makes BOTH calls, in this order.
+	s.recordSkippedView()
+	s.recordHiddenSkip()
+
+	if got := s.viewSkipped; got != 3 {
+		t.Fatalf("viewSkipped = %d, want 3 — recordHiddenSkip must NOT also bump it, "+
+			"View already called recordSkippedView for the same frame", got)
+	}
+	if got := s.viewHidden; got != 1 {
+		t.Fatalf("viewHidden = %d, want 1", got)
+	}
+}
+
+func TestPerfStats_FlushResetsHiddenCounter(t *testing.T) {
+	s := newEventLoopStats()
+	s.recordSkippedView()
+	s.recordHiddenSkip()
+	s.resetCounters()
+	if got := s.viewHidden; got != 0 {
+		t.Fatalf("viewHidden = %d after resetCounters, want 0 — the window counter leaked", got)
+	}
+}
+
+// The nil-receiver guard every sibling recorder carries. perfStats is a pointer
+// on Model and tests build Models directly.
+func TestPerfStats_RecordHiddenSkipToleratesNilReceiver(t *testing.T) {
+	var s *eventLoopStats
+	s.recordHiddenSkip() // must not panic
+}

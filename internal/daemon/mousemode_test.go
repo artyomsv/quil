@@ -15,7 +15,10 @@ func TestScanMouseModes(t *testing.T) {
 		{"colors only no change", mouseModeState{normal: true, sgr: true}, "\x1b[31mred\x1b[0m", mouseModeState{normal: true, sgr: true}, ""},
 		{"opencode startup burst separate", mouseModeState{},
 			"\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h",
-			mouseModeState{normal: true, button: true, any: true, sgr: true}, ""},
+			// altScreen comes along because opencode IS a full-screen app —
+			// this burst is a real capture, and it is exactly the population
+			// the replay override is about.
+			mouseModeState{normal: true, button: true, any: true, sgr: true, altScreen: true}, ""},
 		{"combined params", mouseModeState{}, "\x1b[?1000;1006h", mouseModeState{normal: true, sgr: true}, ""},
 		{"normal tracking only, no sgr", mouseModeState{}, "\x1b[?1000h", mouseModeState{normal: true}, ""},
 		{"x10 mode", mouseModeState{}, "\x1b[?9h", mouseModeState{x10: true}, ""},
@@ -27,7 +30,11 @@ func TestScanMouseModes(t *testing.T) {
 		{"cursor-hide does not trigger", mouseModeState{}, "\x1b[?25l", mouseModeState{}, ""},
 		{"bracketed-paste tracked", mouseModeState{}, "\x1b[?2004h", mouseModeState{bracketedPaste: true}, ""},
 		{"bracketed-paste reset", mouseModeState{bracketedPaste: true}, "\x1b[?2004l", mouseModeState{}, ""},
-		{"alt-screen does not trigger", mouseModeState{}, "\x1b[?1049h", mouseModeState{}, ""},
+		// Was "alt-screen does not trigger", from when 1049 was noise to this
+		// scanner. It is tracked now (issue #172) — but the property the case
+		// was written for still holds and is what it still asserts: a non-mouse
+		// mode moves no MOUSE field.
+		{"alt-screen sets only altScreen", mouseModeState{}, "\x1b[?1049h", mouseModeState{altScreen: true}, ""},
 		{"mouse set amid other output", mouseModeState{},
 			"text\x1b[?25l more\x1b[?1002h\x1b[?1006h done", mouseModeState{button: true, sgr: true}, ""},
 		{"incomplete sequence at end carried as tail", mouseModeState{}, "\x1b[?1000", mouseModeState{}, "\x1b[?1000"},
@@ -109,5 +116,58 @@ func TestScanMouseModes_SplitInsideCombinedRun(t *testing.T) {
 		if len(tail) != 0 {
 			t.Errorf("split at %d: leftover tail %q after complete sequence", at, tail)
 		}
+	}
+}
+
+// The alternate screen rides this scanner for the same reason bracketed paste
+// does: the daemon sees a pane's whole stream from spawn, and a client that
+// attaches later never sees the one-time enable. handleAttach needs the answer
+// to decide whether a ghost replay is history or garbage (issue #172).
+func TestScanMouseModes_TracksTheAlternateScreen(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"1049 enter", "\x1b[?1049h", true},
+		{"1049 leave", "\x1b[?1049l", false},
+		{"legacy 47 enter", "\x1b[?47h", true},
+		{"legacy 1047 enter", "\x1b[?1047h", true},
+		{"combined with mouse modes", "\x1b[?1049;1000;1006h", true},
+		{"unrelated mode does not set it", "\x1b[?25h", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, _ := scanMouseModes(mouseModeState{}, []byte(tt.in))
+			if got.altScreen != tt.want {
+				t.Errorf("altScreen = %v, want %v after %q", got.altScreen, tt.want, tt.in)
+			}
+		})
+	}
+}
+
+// Enter-then-leave in one chunk must end on the LAST state: a program that
+// redraws through an alt-screen round trip is on the main screen afterwards,
+// and its buffer replays fine.
+func TestScanMouseModes_AlternateScreenRoundTripEndsOff(t *testing.T) {
+	got, _ := scanMouseModes(mouseModeState{}, []byte("\x1b[?1049h...content...\x1b[?1049l"))
+	if got.altScreen {
+		t.Error("altScreen = true after an enter/leave round trip, want false")
+	}
+}
+
+// The carry path. A missed enable lets a corrupted replay through, which is the
+// exact failure this tracking exists to prevent — measured 2026-08-19: an
+// arbitrary cut of a fullscreen claude-code buffer paints torn escape sequences
+// as text (`[H`, `6;101m…`) because the stream carries only changed cells.
+func TestScanMouseModes_AlternateScreenSplitAcrossChunks(t *testing.T) {
+	m, tail := scanMouseModes(mouseModeState{}, []byte("noise\x1b[?10"))
+	if m.altScreen {
+		t.Fatal("altScreen set from an incomplete sequence")
+	}
+	joined := append(append([]byte{}, tail...), []byte("49h")...)
+	m, _ = scanMouseModes(m, joined)
+	if !m.altScreen {
+		t.Error("altScreen = false, want true — the split enable was lost")
 	}
 }

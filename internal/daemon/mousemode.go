@@ -31,6 +31,19 @@ type mouseModeState struct {
 	any            bool // ?1003 (any-event tracking)
 	sgr            bool // ?1006 (SGR extended encoding)
 	bracketedPaste bool // ?2004 (bracketed paste)
+	// altScreen is ?1049, and the older ?47 / ?1047 that mean the same thing to
+	// the grid. Not a mouse mode; it rides this scanner for the same reason
+	// bracketedPaste does — it needs the daemon-side lifetime described in the
+	// header comment, because a client attaching to an already-running pane
+	// never sees the one-time enable.
+	//
+	// handleAttach consumes it. A pane on the alternate screen has no
+	// replayable history, which is the condition ghost_buffer = false exists
+	// for. Measured 2026-08-19 (issue #172): claude-code's fullscreen renderer
+	// transmits only the cells that changed between frames, so any suffix of
+	// its stream is a few deltas against a blank screen — and an arbitrary cut
+	// paints torn escape sequences as literal text.
+	altScreen bool
 }
 
 // tracking reports whether any mouse-tracking mode is active — i.e. the child
@@ -105,6 +118,10 @@ func scanMouseModes(m mouseModeState, data []byte) (_ mouseModeState, tail []byt
 					m.sgr = set
 				case "2004":
 					m.bracketedPaste = set
+				case "47", "1047", "1049":
+					// All three switch the grid; 1049 is what every current
+					// program emits, the other two are the older forms.
+					m.altScreen = set
 				}
 			}
 		}

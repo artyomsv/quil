@@ -1,6 +1,7 @@
 package hookevents
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -375,5 +376,168 @@ func TestSpoolCleanup_RemovesParseErrCount(t *testing.T) {
 	s.mu.Unlock()
 	if ok {
 		t.Error("Cleanup left parseErrCounts entry — monotonic map growth")
+	}
+}
+
+// Tick used to open+fstat+close every spool file on every tick, including the
+// files with nothing new — which is nearly all of them, nearly all the time.
+// At 5 Hz across a large workspace that was the daemon's dominant syscall
+// source: measured 151 IO-other + 58 IO-read ops/sec with ~10 live spools.
+//
+// Serial, not parallel: stubs the openFile package var (same constraint the
+// removeFn tests carry).
+func TestSpool_Tick_DoesNotOpenFilesWithNothingNew(t *testing.T) {
+	dir := t.TempDir()
+	s := NewSpool(dir)
+	if err := s.Init(); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	path := filepath.Join(dir, "pane-1.jsonl")
+	writeSpoolLine(t, path, Payload{
+		V: SchemaVersion, PaneID: "pane-1", Source: SourceClaude,
+		HookEvent: "Stop", Title: "Reply ready", Severity: SeverityInfo, TsMs: 1, Seq: 1,
+	})
+
+	if got := len(s.Tick()); got != 1 {
+		t.Fatalf("first Tick returned %d payloads, want 1", got)
+	}
+
+	var opens int
+	restore := openFile
+	openFile = func(name string) (*os.File, error) {
+		opens++
+		return restore(name)
+	}
+	t.Cleanup(func() { openFile = restore })
+
+	if got := len(s.Tick()); got != 0 {
+		t.Fatalf("second Tick returned %d payloads, want 0", got)
+	}
+	if opens != 0 {
+		t.Errorf("second Tick opened %d files, want 0 — an idle spool must cost no file handle", opens)
+	}
+}
+
+// The size shortcut must not swallow real data.
+func TestSpool_Tick_StillReadsWhenTheFileGrew(t *testing.T) {
+	dir := t.TempDir()
+	s := NewSpool(dir)
+	if err := s.Init(); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	path := filepath.Join(dir, "pane-1.jsonl")
+	writeSpoolLine(t, path, Payload{
+		V: SchemaVersion, PaneID: "pane-1", Source: SourceClaude,
+		HookEvent: "Stop", Title: "one", Severity: SeverityInfo, TsMs: 1, Seq: 1,
+	})
+	if got := len(s.Tick()); got != 1 {
+		t.Fatalf("first Tick = %d, want 1", got)
+	}
+
+	writeSpoolLine(t, path, Payload{
+		V: SchemaVersion, PaneID: "pane-1", Source: SourceClaude,
+		HookEvent: "Stop", Title: "two", Severity: SeverityInfo, TsMs: 2, Seq: 2,
+	})
+	if got := len(s.Tick()); got != 1 {
+		t.Errorf("Tick after append = %d, want 1 — the size shortcut dropped a real line", got)
+	}
+}
+
+// A file the spool has never seen must always be read, however its size
+// compares to the zero-value offset an unseen paneID maps to.
+func TestSpool_Tick_ReadsAFileItHasNeverSeenBefore(t *testing.T) {
+	dir := t.TempDir()
+	s := NewSpool(dir)
+	if err := s.Init(); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	// Empty file: size 0, and offsets[paneID] is also 0 for an unseen pane. A
+	// naive `size == off` skip would drop it forever, including the moment it
+	// first gains content.
+	path := filepath.Join(dir, "pane-new.jsonl")
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	s.Tick()
+
+	writeSpoolLine(t, path, Payload{
+		V: SchemaVersion, PaneID: "pane-new", Source: SourceClaude,
+		HookEvent: "Stop", Title: "first", Severity: SeverityInfo, TsMs: 1, Seq: 1,
+	})
+	if got := len(s.Tick()); got != 1 {
+		t.Errorf("Tick = %d, want 1 — a previously-empty file must still be read once it grows", got)
+	}
+}
+
+// An empty spool file records no offset (readPaneFile's idle branch returns
+// before writing one), so it is permanently "unseen". Without a size-only skip
+// it would pay open+fstat+close on every tick for the life of the daemon —
+// which is the husk cost the Init unlink fix removed at startup, reappearing
+// for any pane whose spool exists but is still empty.
+func TestSpool_Tick_DoesNotOpenAnEmptyFileRepeatedly(t *testing.T) {
+	dir := t.TempDir()
+	s := NewSpool(dir)
+	if err := s.Init(); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	path := filepath.Join(dir, "pane-empty.jsonl")
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	s.Tick() // first sighting
+
+	var opens int
+	restore := openFile
+	openFile = func(name string) (*os.File, error) {
+		opens++
+		return restore(name)
+	}
+	t.Cleanup(func() { openFile = restore })
+
+	s.Tick()
+	s.Tick()
+	if opens != 0 {
+		t.Errorf("two idle Ticks opened an empty file %d times, want 0", opens)
+	}
+
+	// ...and it must still be read the moment it gains content.
+	openFile = restore
+	writeSpoolLine(t, path, Payload{
+		V: SchemaVersion, PaneID: "pane-empty", Source: SourceClaude,
+		HookEvent: "Stop", Title: "first", Severity: SeverityInfo, TsMs: 1, Seq: 1,
+	})
+	if got := len(s.Tick()); got != 1 {
+		t.Errorf("Tick after the empty file grew = %d, want 1", got)
+	}
+}
+
+// Rotation runs from readPaneFile's idle branch, so a file at the threshold
+// must never take the skip — it would be stranded to grow without bound.
+func TestSpool_Tick_StillRotatesAnIdleFileAtTheThreshold(t *testing.T) {
+	dir := t.TempDir()
+	s := NewSpool(dir)
+	if err := s.Init(); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	path := filepath.Join(dir, "pane-big.jsonl")
+	big := bytes.Repeat([]byte("\n"), rotationThreshold+1)
+	if err := os.WriteFile(path, big, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	s.Tick() // consumes; offset reaches size
+	s.Tick() // idle tick: must still reach the rotate path
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if info.Size() >= rotationThreshold {
+		t.Errorf("an idle file at the rotation threshold was skipped and never rotated (size=%d)", info.Size())
 	}
 }

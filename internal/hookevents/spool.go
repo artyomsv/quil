@@ -34,6 +34,13 @@ var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
 // run. See TestSpool_Init_TruncatesWhenRemoveFails.
 var removeFn = os.Remove
 
+// openFile is a seam so the idle-tick test can count how many spool files a
+// Tick actually opens.
+//
+// Same constraint as removeFn: any test that stubs this MUST NOT call
+// t.Parallel(). See TestSpool_Tick_DoesNotOpenFilesWithNothingNew.
+var openFile = os.Open
+
 // rotationThreshold is the per-pane spool size at which we truncate after a
 // fully-drained read. The watcher only ever advances; without rotation a
 // long-running pane's spool file grows linearly with hook-event count and
@@ -170,6 +177,40 @@ func (s *Spool) Tick() []Payload {
 			continue
 		}
 		paneID := strings.TrimSuffix(name, ".jsonl")
+
+		// Skip the open entirely when the file has not grown. ReadDir already
+		// carries the size on Windows (FindFirstFile fills it, so Info() costs
+		// no extra syscall); on Linux this trades open+fstat+close for one
+		// lstat. The idle case is the common one — at 5 Hz across a large
+		// workspace it was the daemon's dominant syscall source.
+		//
+		// Refused in three cases, each load-bearing:
+		//   - Info() errored: fall THROUGH to the full read. A failing stat must
+		//     not silently stop a pane's events draining.
+		//   - The pane has no recorded offset yet: a brand-new (or empty) file
+		//     has size 0 and maps to offset 0, so a bare size==off test would
+		//     skip it forever, including the moment it first gains content.
+		//   - The file is at or past rotationThreshold: rotation runs from
+		//     readPaneFile's idle branch, so skipping there strands the file to
+		//     grow without bound — the exact failure this shortcut is near.
+		if info, err := e.Info(); err == nil {
+			s.mu.Lock()
+			off := s.offsets[paneID]
+			s.mu.Unlock()
+			size := info.Size()
+			// The map's zero value carries this for a pane never seen before,
+			// so no separate "is it known" test is needed: an untracked file
+			// has off == 0, which matches only when it is also empty — and an
+			// empty file has nothing to read and nothing to rotate. The moment
+			// it gains a byte, size stops matching and the read below runs.
+			//
+			// External truncation (size < off) also falls through to the read,
+			// where readPaneFile restarts from zero.
+			if size == off && size < rotationThreshold {
+				continue
+			}
+		}
+
 		payloads := s.readPaneFile(paneID, filepath.Join(s.dir, name))
 		out = append(out, payloads...)
 	}
@@ -189,7 +230,7 @@ func (s *Spool) readPaneFile(paneID, path string) []Payload {
 	off := s.offsets[paneID]
 	s.mu.Unlock()
 
-	f, err := os.Open(path)
+	f, err := openFile(path)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			logger.Warn("hookevents: open spool %q: %v", path, err)

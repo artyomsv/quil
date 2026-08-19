@@ -36,6 +36,7 @@ A capability-by-capability tour of what Quil does. For configuration knobs, see 
   - [Notification center](#notification-center)
   - [Desktop notifications](#desktop-notifications)
   - [Memory reporting](#memory-reporting)
+  - [Process diagnostics (F1 → Processes)](#process-diagnostics-f1--processes)
   - [Leveled logger + log viewer](#leveled-logger--log-viewer)
 - [Pane notes](#pane-notes)
 - [Operations](#operations)
@@ -457,6 +458,16 @@ Clicking a toast can only move your cursor. The `quil://` handler validates a pa
 The status bar gains a `mem <n>` segment refreshed every 5 s by a daemon-side collector. Two MCP tools — `get_memory_report` (per-tab totals) and `get_pane_memory` (single-pane detail) — expose the layers for external agents.
 
 Cross-platform RSS: `/proc/<pid>/status` on Linux, `ps -o rss=` (batched) on Darwin, `GetProcessMemoryInfo` on Windows.
+
+**Scrollback depth scales to the workspace.** Every pane holds its own terminal emulator whether or not it is visible, so depth multiplies by pane count. With `[ui] scrollback_lines` unset, quil spends a workspace-wide budget instead of a fixed per-pane depth: ten panes or fewer are unchanged, larger workspaces get proportionally less, and a floor keeps every pane usable. A depth you set yourself always wins and is never adjusted; a depth chosen for you is written to the log. Editable at **F1 → Settings → Scrollback lines**, applied on next launch — the terminal emulator cannot release scrollback it has already retained, so depth is fixed when a pane is created.
+
+### Process diagnostics (F1 → Processes)
+
+Lists quil's own processes — the TUI, the daemon, and every `quil mcp` bridge — with each one's PID, age and binary path, so a stray child is visible without leaving the tool for a process explorer.
+
+Bridges whose parent process has gone are grouped first and can be stopped from the dialog. Nothing else can: a parentless process that is not quil's own is shown but never offered for termination. Killing routes through the standard confirm, and the target is re-checked against a fresh scan before the signal is sent, so an accepted confirm cannot act on a PID that has since been reused.
+
+Bridges are matched on their `mcp` subcommand rather than their filename, because an in-place upgrade renames the running binary aside — a live bridge can legitimately be executing `quil.exe.old.3`, which is exactly the case worth seeing.
 
 ### Leveled logger + log viewer
 

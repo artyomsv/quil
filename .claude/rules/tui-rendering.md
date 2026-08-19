@@ -120,3 +120,37 @@ Bubble Tea calls `model.View()` once per MESSAGE (`p.render(model)` after every 
 
 **Image paste proxy**: `clipboard.ReadImage()` reads `CF_DIBV5`/`CF_DIB` on Windows (Unix is a stub), `dib.go` parses the DIB into an `image.Image` (24bpp BI_RGB, 32bpp BI_RGB and BI_BITFIELDS, top-down + bottom-up, all-zero-alpha promotion). `pasteClipboard` falls through to image when text is empty: saves PNG to `config.PasteDir()` (`~/.quil/paste/quil-paste-<timestamp>.png`) and types the path into the PTY. Works around the upstream Claude Code Windows clipboard bug (anthropics/claude-code#32791). Paste keys: `Ctrl+V` (kb.Paste — eaten by Windows Terminal), `Ctrl+Alt+V` and `F8` are hardcoded aliases; `F8` is the recommended Windows trigger because it has no AltGr ambiguity
 
+
+### Frame assembly (`joinfast.go`)
+
+`View()` joins the tab bar, the pane area and the sidebar with
+`joinVerticalWidth` / `joinHorizontalWidth` rather than lipgloss's joins.
+Measured 2026-08-20 on a 41-tab / 200x50 frame with realistic pane content:
+`ansi.stringWidth` is **54.7%** of a frame whose pane caches are all warm, and
+97% of that arrives through lipgloss's own join internals — `getLines` 44.3%,
+`JoinVertical` 35.7%, `JoinHorizontal` 17.1%, and only **2.9%** through our own
+`lipgloss.Width` calls. Memoising those call sites was measured and **rejected**:
+it could reach ~1.6% of a frame.
+
+What the joins spend it on is the part worth knowing: every block View()
+assembles is ALREADY rectangular, because each comes from a lipgloss style with
+an explicit width (tab bar 1 line of 178, tab content 48 lines all 178, sidebar
+49 lines all 22). The joins walk ~50 lines of grapheme clusters per frame to
+discover they need to pad nothing.
+
+benchstat n=6, p=0.002: **-34% to -35%** on a real repaint, **-39% to -56%** with
+the pane caches warm, **-42.7% geomean**, and -31.8% bytes.
+
+**Both helpers verify their assumption and fall back to lipgloss**, so a future
+renderer emitting a ragged block gets correct output rather than a corrupted
+frame — slower, never wrong. `blockIsWidth` checks the FIRST and LAST line only,
+because an all-lines check costs exactly what the optimisation saves; the
+interior is covered by `TestFrameJoins_MatchLipglossOnRealFrames`, which runs
+real frames through both paths at three tab counts and three geometries.
+`TestFrameBlocks_AreRectangular` guards the premise: if the blocks stop being
+rectangular the fast path silently stops firing, and a perf regression that
+fails nothing is what this exists to prevent.
+
+**lipgloss remains the width AUTHORITY.** These helpers never compute a width by
+another route; they only skip measurement they can prove is unnecessary. If an
+equivalence test fails, DELETE the helper rather than adjusting the test.

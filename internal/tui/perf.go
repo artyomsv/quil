@@ -67,6 +67,13 @@ type eventLoopStats struct {
 	// meant before render coalescing existed.
 	viewSkipped int64
 
+	// viewHidden counts the subset of viewSkipped attributable to output from a
+	// pane that is not on screen. A SUBSET, not a sibling: View's skip branch
+	// calls recordSkippedView and then recordHiddenSkip for the same frame, so
+	// viewSkipped stays the total and remains comparable with logs written
+	// before hidden-pane coalescing existed.
+	viewHidden int64
+
 	// Non-key messages processed since the last KeyPressMsg — proxy for
 	// queue backlog. Large values while typing mean keystroke messages are
 	// queuing behind output messages.
@@ -172,6 +179,20 @@ func (s *eventLoopStats) recordSkippedView() {
 	s.viewSkipped++
 }
 
+// recordHiddenSkip attributes a cache-served frame to output from a pane the
+// user cannot see.
+//
+// Increments viewHidden ONLY. Its caller is View's skip branch, which has
+// already called recordSkippedView for the same frame — bumping viewSkipped
+// here too would double-count every hidden skip and corrupt the comparability
+// that is the whole reason skipped= is reported.
+func (s *eventLoopStats) recordHiddenSkip() {
+	if s == nil {
+		return
+	}
+	s.viewHidden++
+}
+
 // flush emits one aggregate summary line and resets all counters.
 // Caller must be on the Bubble Tea program goroutine.
 func (s *eventLoopStats) flush() {
@@ -186,9 +207,9 @@ func (s *eventLoopStats) flush() {
 		viewAvg = time.Duration(s.viewTotalNs / s.viewCount)
 	}
 
-	logger.Info("perf window=%s | view(n=%d skipped=%d avg=%s max=%s) | pane-out(bytes=%d max-vt=%s) | key-backlog-max=%d | %s",
+	logger.Info("perf window=%s | view(n=%d skipped=%d hidden=%d avg=%s max=%s) | pane-out(bytes=%d max-vt=%s) | key-backlog-max=%d | %s",
 		window.Round(time.Millisecond),
-		s.viewCount, s.viewSkipped, viewAvg, time.Duration(s.viewMaxNs),
+		s.viewCount, s.viewSkipped, s.viewHidden, viewAvg, time.Duration(s.viewMaxNs),
 		s.paneOutBytes, time.Duration(s.paneOutMaxNs),
 		s.maxSinceKey,
 		breakdown,
@@ -235,6 +256,7 @@ func (s *eventLoopStats) resetCounters() {
 	s.viewTotalNs = 0
 	s.viewMaxNs = 0
 	s.viewSkipped = 0
+	s.viewHidden = 0
 	s.maxSinceKey = 0
 	s.lastFlush = time.Now()
 }

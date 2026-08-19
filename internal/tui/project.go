@@ -235,6 +235,31 @@ func (m Model) activeTabModel() *TabModel {
 	return p.tabs[p.activeTab]
 }
 
+// paneIsVisible reports whether a pane's content occupies screen space right
+// now. View() draws m.activeTabModel() and nothing else, so output from any
+// other tab's pane cannot change the frame.
+//
+// Deliberately over-reports in four states that render LESS than this says:
+// focus mode (only the active pane draws), an open dialog, the notes editor,
+// and an overlay whose overlayVisible is false (tab.go:97). Each would let this
+// return true for something not currently on screen, costing one wasted
+// rebuild. The opposite error — reporting a visible pane hidden — delivers a
+// stale frame, which is a bug the user sees. That asymmetry is the whole reason
+// this errs toward true.
+func (m Model) paneIsVisible(paneID string) bool {
+	tab := m.activeTabModel()
+	if tab == nil {
+		return false
+	}
+	if tab.overlayPane != nil && tab.overlayPane.ID == paneID {
+		return true
+	}
+	if tab.Root == nil {
+		return false
+	}
+	return tab.Root.FindLeaf(paneID) != nil
+}
+
 // allTabs iterates EVERY project. Use it only where the operation genuinely
 // spans projects and carries no index — resolving an incoming pane event,
 // sweeping caches, the memory report. Everywhere else wants curTabs().

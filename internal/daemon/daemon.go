@@ -2150,7 +2150,7 @@ func (d *Daemon) cleanupPaneArtifacts(paneID string) {
 	if d.hookIngester != nil {
 		d.hookIngester.Cancel(paneID)
 	}
-	for _, name := range []string{paneID + ".id", paneID + ".transcript", "opencode-" + paneID + ".id"} {
+	for _, name := range []string{paneID + ".id", paneID + ".transcript", paneID + ".settings.json", "opencode-" + paneID + ".id"} {
 		p := filepath.Join(config.SessionsDir(), name)
 		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 			log.Printf("cleanup pane %s: remove session id %s: %v", paneID, name, err)
@@ -3242,9 +3242,17 @@ func opencodeSpawnPrep(quilDir, paneID, hookMode string) []string {
 // the running quild binary's native `claude-hook` subcommand. Returns nil
 // slices when the hook is unavailable (executable path unresolvable or settings
 // JSON build fails) so the spawn proceeds without the hook — matching the
-// pre-feature behaviour rather than failing the whole spawn. Logs a warning if
-// userArgs already contain --settings; Claude treats later wins, so our
-// prepend silently overrides the user's value.
+// pre-feature behaviour rather than failing the whole spawn.
+//
+// The settings go to a per-pane FILE passed as `--settings <path>`, never an
+// inline JSON string: on Windows the claude binary is an npm .cmd shim that
+// cmd.exe re-parses, and the quotes inside an inline JSON are re-split at the
+// wrong boundaries by that second parser. A path has no shell metacharacters.
+//
+// Logs a warning when userArgs already contain --settings. Which value wins is
+// UNVERIFIED — Quil prepends its own, so depending on Claude's precedence
+// either the user loses their settings or Quil loses rotation tracking. See §7
+// of docs/superpowers/specs/2026-08-19-claude-session-seam-design.md.
 func claudeHookSpawnPrep(quilDir, paneID, hookMode string, userArgs []string) (prefix, env []string) {
 	exePath, err := claudeHookExeFn()
 	if err != nil {
@@ -3256,9 +3264,14 @@ func claudeHookSpawnPrep(quilDir, paneID, hookMode string, userArgs []string) (p
 		log.Printf("warning: pane %s: build claude settings JSON: %v — session-id rotation tracking disabled", paneID, err)
 		return nil, nil
 	}
+	settingsPath, err := claudehook.WriteSettingsFile(quilDir, paneID, js)
+	if err != nil {
+		log.Printf("warning: pane %s: write hook settings file: %v — session-id rotation tracking disabled", paneID, err)
+		return nil, nil
+	}
 	for _, a := range userArgs {
 		if a == "--settings" {
-			log.Printf("warning: pane %s: claude-code args already contain --settings; Quil's hook entry will override (later-wins)", paneID)
+			log.Printf("warning: pane %s: claude-code args already contain --settings; precedence with Quil's hook entry is unverified", paneID)
 			break
 		}
 	}
@@ -3270,7 +3283,7 @@ func claudeHookSpawnPrep(quilDir, paneID, hookMode string, userArgs []string) (p
 	// correct data dir; renamed from QUIL_HOME because children inherit the
 	// pane env and an inherited QUIL_HOME retargeted dev builds at production.
 	// Consumers fall back to QUIL_HOME for one release.
-	return []string{"--settings", js}, []string{
+	return []string{"--settings", settingsPath}, []string{
 		"QUIL_PANE_ID=" + paneID,
 		"QUIL_HOOK_MODE=" + mode,
 		"QUIL_HOOK_HOME=" + quilDir,
@@ -3732,8 +3745,10 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 		}
 	}
 
-	// Claude Code session-id rotation tracking: prepend --settings with an
-	// inline JSON that registers a SessionStart hook. The hook receives
+	// Claude Code session-id rotation tracking: prepend --settings with the
+	// path of a per-pane settings file that registers a SessionStart hook (a
+	// file rather than inline JSON so the argument survives the cmd.exe
+	// re-parse of claude's npm .cmd shim on Windows). The hook receives
 	// Claude's session_id and writes it to $QUIL_HOME/sessions/<paneID>.id,
 	// which the restore path consults in resumeTemplateFor. QUIL_PANE_ID in
 	// the PTY env lets the hook attribute the write to this specific pane.

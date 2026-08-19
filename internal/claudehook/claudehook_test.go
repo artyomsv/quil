@@ -249,3 +249,58 @@ func TestReadPersistedSessionID_CapsLargeFile(t *testing.T) {
 		t.Errorf("ReadPersistedSessionID returned %d bytes, expected <= 256", len(got))
 	}
 }
+
+// TestWriteSettingsFile pins the path shape and the round-trip. The path is
+// what reaches argv, so it is asserted exactly rather than by suffix.
+func TestWriteSettingsFile(t *testing.T) {
+	t.Parallel()
+	quilDir := t.TempDir()
+
+	path, err := WriteSettingsFile(quilDir, "pane-abc123", `{"hooks":{}}`)
+	if err != nil {
+		t.Fatalf("WriteSettingsFile: %v", err)
+	}
+	want := filepath.Join(quilDir, "sessions", "pane-abc123.settings.json")
+	if path != want {
+		t.Errorf("path = %q, want %q", path, want)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(body) != `{"hooks":{}}` {
+		t.Errorf("body = %q, want %q", body, `{"hooks":{}}`)
+	}
+}
+
+// TestWriteSettingsFile_EmptyJSONWritesNothing: an empty settings body means
+// there is nothing to register, so the caller must be able to skip the
+// --settings argument entirely rather than pass an empty path to claude.
+func TestWriteSettingsFile_EmptyJSONWritesNothing(t *testing.T) {
+	t.Parallel()
+	quilDir := t.TempDir()
+
+	path, err := WriteSettingsFile(quilDir, "pane-abc123", "")
+	if err != nil {
+		t.Fatalf("WriteSettingsFile: %v", err)
+	}
+	if path != "" {
+		t.Errorf(`path = %q, want "" so the caller can skip --settings`, path)
+	}
+	if _, err := os.Stat(filepath.Join(quilDir, "sessions")); !os.IsNotExist(err) {
+		t.Error("sessions dir created for an empty write")
+	}
+}
+
+// TestWriteSettingsFile_RejectsTraversalPaneID keeps the package invariant that
+// a pane id is a filename component, not a path.
+func TestWriteSettingsFile_RejectsTraversalPaneID(t *testing.T) {
+	t.Parallel()
+	quilDir := t.TempDir()
+
+	for _, bad := range []string{"", "../escape", `a\b`, "a/b", "pane\x00id"} {
+		if _, err := WriteSettingsFile(quilDir, bad, `{"hooks":{}}`); err == nil {
+			t.Errorf("paneID %q accepted, want rejected", bad)
+		}
+	}
+}

@@ -2,7 +2,8 @@
 //
 // Quil tracks Claude session-id rotation (/clear, compaction, /resume) and
 // forwards Claude's lifecycle/notification hooks by registering a hook command
-// via --settings (inline JSON) when it spawns a claude-code pane. The hook
+// via --settings (a per-pane settings file) when it spawns a claude-code pane.
+// The hook
 // command invokes the quil daemon binary's `claude-hook` subcommand (see
 // runhook.go + cmd/quild), which reads the hook JSON on stdin and writes the
 // per-pane session id to $QUIL_HOME/sessions/<paneID>.id and/or appends a
@@ -172,8 +173,9 @@ var matchedHookEvents = []struct{ Name, Matcher string }{
 // in runhook.go.
 const promptToolMatcher = "AskUserQuestion|ExitPlanMode"
 
-// BuildSettingsJSON returns the inline JSON string Quil passes to
-// `claude --settings <json>`. Registers Quil's hook command under every
+// BuildSettingsJSON returns the settings JSON Quil writes for
+// `claude --settings <path>` (see WriteSettingsFile — the JSON reaches claude
+// as a file, never as an argv token). Registers Quil's hook command under every
 // entry in forwardedHookEvents — the native subcommand then branches on the
 // hook_event_name field of the stdin JSON.
 func BuildSettingsJSON(cmd string) (string, error) {
@@ -196,6 +198,43 @@ func BuildSettingsJSON(cmd string) (string, error) {
 		return "", fmt.Errorf("marshal claude settings: %w", err)
 	}
 	return string(b), nil
+}
+
+// settingsFile returns the absolute path of the per-pane hook-settings JSON
+// under <quilDir>/sessions/. Per-pane rather than shared so concurrent spawns
+// never race on one file.
+func settingsFile(quilDir, paneID string) string {
+	return filepath.Join(quilDir, "sessions", paneID+".settings.json")
+}
+
+// WriteSettingsFile writes the hook-settings JSON for paneID and returns its
+// absolute path, for `claude --settings <path>`.
+//
+// A FILE rather than an inline JSON argument, because on Windows the claude
+// binary is an npm .cmd shim that cmd.exe re-parses: the quotes inside an
+// inline JSON are re-split at the wrong boundaries by a second parser with
+// different rules than the one the process spawner quoted for, so the hook
+// never registers and a JSON fragment is mistaken for a command name. A path
+// has no shell metacharacters and survives every layer intact.
+//
+// Returns ("", nil) when there is nothing to write, letting the caller skip the
+// --settings argument entirely rather than passing an empty path.
+func WriteSettingsFile(quilDir, paneID, settingsJSON string) (string, error) {
+	if err := validatePaneID(paneID); err != nil {
+		return "", err
+	}
+	if settingsJSON == "" {
+		return "", nil
+	}
+	dir := filepath.Join(quilDir, "sessions")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("claudehook: create sessions dir: %w", err)
+	}
+	path := settingsFile(quilDir, paneID)
+	if err := atomicWrite(path, []byte(settingsJSON), 0o600); err != nil {
+		return "", fmt.Errorf("claudehook: write hook settings: %w", err)
+	}
+	return path, nil
 }
 
 // sessionIDFile returns the absolute path to <paneID>.id.

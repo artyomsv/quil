@@ -418,12 +418,12 @@ func (d *Daemon) refreshPluginStateFromHooks() {
 	for _, tab := range d.session.Tabs() {
 		for _, pane := range d.session.Panes(tab.ID) {
 			var hookID, transcript string
-			switch pane.Type {
-			case "claude-code":
+			switch {
+			case d.usesClaudeSessions(pane.Type):
 				if rec, err := readHookSessionFn(pane.ID); err == nil {
 					hookID, transcript = rec.ID, rec.TranscriptPath
 				}
-			case "opencode":
+			case pane.Type == "opencode":
 				if id, err := readOpencodeSessionIDFn(pane.ID); err == nil {
 					hookID = id
 				}
@@ -1557,20 +1557,12 @@ func ghostScrollOut(rows int) []byte {
 // respawned child a session id, so the child paints its own transcript back
 // instead of depending on Quil's replay.
 //
-// This is the resume-strategy question, not a plugin-name list: the two
-// strategies below are exactly the ones resolveSpawnArgs expands into
-// `--resume <id>` / `--session <id>`. `rerun` re-runs a command that starts
-// from nothing, `cwd_only` respawns a shell that will not reprint a word of
-// its scrollback, and both of those need the replay.
+// Thin wrapper over the plugin method: the predicate now lives with the type it
+// describes, so the TUI's restore checklist asks the same question instead of
+// keeping its own hardcoded {claude-code, opencode} list. The daemon's call
+// sites read unchanged.
 func restoresOwnHistory(p *plugin.PanePlugin) bool {
-	if p == nil {
-		return false
-	}
-	switch p.Persistence.Strategy {
-	case "preassign_id", "session_scrape":
-		return true
-	}
-	return false
+	return p.RestoresOwnHistory()
 }
 
 func sendGhostChunked(conn *ipc.Conn, paneID string, data []byte, done <-chan struct{}) {
@@ -3295,7 +3287,7 @@ func claudeHookSpawnPrep(quilDir, paneID, hookMode string, userArgs []string) (p
 // promotion logic; default falls back to the plugin's configured ResumeArgs.
 func resumeTemplateFor(p *plugin.PanePlugin, pane *Pane, claim sessionClaimFn) []string {
 	switch {
-	case p.Name == "claude-code" && p.Persistence.Strategy == "preassign_id":
+	case p.UsesClaudeSessions() && p.Persistence.Strategy == "preassign_id":
 		return claudeResumeTemplate(p, pane, claim)
 	case p.Name == "opencode" && p.Persistence.Strategy == "session_scrape":
 		return opencodeResumeTemplate(p, pane)
@@ -3708,7 +3700,7 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 		// cannot resurface on a later restore either. Read off-lock: never hold
 		// PluginMu across a file read.
 		hookID := ""
-		if p.Name == "claude-code" {
+		if p.UsesClaudeSessions() {
 			if rec, err := readHookSessionFn(pane.ID); err == nil {
 				hookID = rec.ID
 			}
@@ -3758,14 +3750,14 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	// under $QUIL_HOME/opencodehook/. OPENCODE_CONFIG_CONTENT merges with the
 	// user's own opencode config so their plugins/agents/modes still apply.
 	envVars := append([]string{}, p.Command.Env...)
-	switch p.Name {
-	case "claude-code":
+	switch {
+	case p.UsesClaudeSessions():
 		settingsArgs, hookEnv := claudeHookSpawnPrep(config.QuilDir(), pane.ID, d.cfg.Notification.Hooks.Claude, args)
 		if len(settingsArgs) > 0 {
 			args = append(settingsArgs, args...)
 		}
 		envVars = append(envVars, hookEnv...)
-	case "opencode":
+	case p.Name == "opencode":
 		envVars = append(envVars, opencodeSpawnPrep(config.QuilDir(), pane.ID, d.cfg.Notification.Hooks.OpenCode)...)
 	}
 

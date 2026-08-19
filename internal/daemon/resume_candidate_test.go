@@ -20,7 +20,7 @@ const (
 func resumeTestPlugin() *plugin.PanePlugin {
 	return &plugin.PanePlugin{
 		Name:    "claude-code",
-		Command: plugin.CommandConfig{Cmd: "claude"},
+		Command: plugin.CommandConfig{Cmd: "claude", Sessions: "claude"},
 		Persistence: plugin.PersistenceConfig{
 			Strategy:   "preassign_id",
 			StartArgs:  []string{"--session-id", "{session_id}"},

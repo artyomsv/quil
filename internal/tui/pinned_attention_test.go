@@ -358,11 +358,11 @@ func TestParseWorkspaceState_ReadsThePinWireKey(t *testing.T) {
 func TestSyncPaneMeta_AdoptsTheDaemonsPin(t *testing.T) {
 	t.Parallel()
 	pane := &PaneModel{ID: "p1"}
-	syncPaneMeta(pane, &PaneInfo{ID: "p1", PinnedAttention: true}, false, 0)
+	syncPaneMeta(pane, &PaneInfo{ID: "p1", PinnedAttention: true}, false, 0, false)
 	if !pane.pinnedAttention {
 		t.Fatal("a daemon-reported pin was not adopted")
 	}
-	syncPaneMeta(pane, &PaneInfo{ID: "p1", PinnedAttention: false}, false, 0)
+	syncPaneMeta(pane, &PaneInfo{ID: "p1", PinnedAttention: false}, false, 0, false)
 	if pane.pinnedAttention {
 		t.Error("a daemon-reported CLEAR was not adopted — the copy must be unconditional, " +
 			"or an unmark from another client can never reach this one")

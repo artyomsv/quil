@@ -2668,6 +2668,21 @@ func (m Model) pluginWideCanvas(paneType string) bool {
 	return false
 }
 
+// pluginRestoresViaSession reports whether panes of this type restore their own
+// history through a session id rather than a Quil ghost buffer. Mirrors
+// pluginWideCanvas: Model owns the registry, PaneModel does not.
+//
+// Shares one definition with the daemon's restoresOwnHistory, which asks the
+// resume STRATEGY. The TUI used to keep its own {claude-code, opencode} list —
+// wrong for a renamed plugin, and needing an edit for any new session-resuming
+// one.
+func (m Model) pluginRestoresViaSession(paneType string) bool {
+	if m.pluginRegistry == nil {
+		return false
+	}
+	return m.pluginRegistry.Get(paneType).RestoresOwnHistory()
+}
+
 // pluginMinNativeCols resolves the native-rendering column threshold for a
 // pane type via the plugin registry. Unknown types (registry miss, nil
 // registry in tests) return 0, which paneVTSize treats as the default (80).
@@ -5256,7 +5271,7 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 				if info, ok := paneMap[paneID]; ok {
 					if leaf := tab.Root.FindLeaf(paneID); leaf != nil {
 						wasPending := leaf.Pane.Pending
-						syncPaneMeta(leaf.Pane, info, m.pluginWideCanvas(info.Type), m.pluginMinNativeCols(info.Type))
+						syncPaneMeta(leaf.Pane, info, m.pluginWideCanvas(info.Type), m.pluginMinNativeCols(info.Type), m.pluginRestoresViaSession(info.Type))
 						// A deferred pane that just lazy-spawned (Pending→running,
 						// e.g. on tab switch): arm the restore indicator NOW so it
 						// covers the real boot, and enroll it for spinner ticks.
@@ -5314,7 +5329,7 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 				newPaneIDs = append(newPaneIDs, paneID)
 			}
 			if info != nil {
-				syncPaneMeta(pane, info, m.pluginWideCanvas(info.Type), m.pluginMinNativeCols(info.Type))
+				syncPaneMeta(pane, info, m.pluginWideCanvas(info.Type), m.pluginMinNativeCols(info.Type), m.pluginRestoresViaSession(info.Type))
 			}
 
 			// Try to fill a pending split placeholder first.
@@ -5445,7 +5460,7 @@ func (m *Model) restoreTabLayout(tab *TabModel, tabInfo TabInfo, paneMap map[str
 			pane.resumeStart = time.Now()
 		}
 		if info, ok := paneMap[paneID]; ok {
-			syncPaneMeta(pane, info, m.pluginWideCanvas(info.Type), m.pluginMinNativeCols(info.Type))
+			syncPaneMeta(pane, info, m.pluginWideCanvas(info.Type), m.pluginMinNativeCols(info.Type), m.pluginRestoresViaSession(info.Type))
 		}
 		paneModels[paneID] = pane
 	}
@@ -5559,7 +5574,7 @@ func (m *Model) reconcileOverlayPane(
 			}
 			newPaneIDs = append(newPaneIDs, overlayInfo.ID)
 		}
-		syncPaneMeta(pane, overlayInfo, m.pluginWideCanvas(overlayInfo.Type), m.pluginMinNativeCols(overlayInfo.Type))
+		syncPaneMeta(pane, overlayInfo, m.pluginWideCanvas(overlayInfo.Type), m.pluginMinNativeCols(overlayInfo.Type), m.pluginRestoresViaSession(overlayInfo.Type))
 		tab.overlayPane = pane
 		// Show the overlay immediately when this TUI's Alt+G triggered its
 		// creation (pendingOverlayShow entry). On plain reattach, default hidden.
@@ -5571,7 +5586,7 @@ func (m *Model) reconcileOverlayPane(
 		}
 	default:
 		// Same overlay pane — refresh metadata only.
-		syncPaneMeta(tab.overlayPane, overlayInfo, m.pluginWideCanvas(overlayInfo.Type), m.pluginMinNativeCols(overlayInfo.Type))
+		syncPaneMeta(tab.overlayPane, overlayInfo, m.pluginWideCanvas(overlayInfo.Type), m.pluginMinNativeCols(overlayInfo.Type), m.pluginRestoresViaSession(overlayInfo.Type))
 	}
 
 	return newPaneIDs, false, nil

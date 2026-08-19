@@ -202,7 +202,7 @@ func TestResolveSpawnArgs_Matrix(t *testing.T) {
 func TestResolveSpawnArgs_ClaudeResumePromotion(t *testing.T) {
 	claudePlugin := &plugin.PanePlugin{
 		Name:    "claude-code",
-		Command: plugin.CommandConfig{Cmd: "claude"},
+		Command: plugin.CommandConfig{Cmd: "claude", Sessions: "claude"},
 		Persistence: plugin.PersistenceConfig{
 			Strategy:   "preassign_id",
 			StartArgs:  []string{"--session-id", "{session_id}"},
@@ -230,8 +230,8 @@ func TestResolveSpawnArgs_ClaudeResumePromotion(t *testing.T) {
 					"transcript_path": transcript,
 				},
 			},
-			found:      true,
-			want:       []string{"--resume", sess},
+			found: true,
+			want:  []string{"--resume", sess},
 		},
 		{
 			// The behaviour this PR inverted: a session we cannot find is still
@@ -241,8 +241,8 @@ func TestResolveSpawnArgs_ClaudeResumePromotion(t *testing.T) {
 				CWD:         `E:\Projects\Stukans\Prototypes\calyx`,
 				PluginState: map[string]string{"session_id": sess},
 			},
-			found:      false,
-			want:       []string{"--resume", sess},
+			found: false,
+			want:  []string{"--resume", sess},
 		},
 		{
 			name: "InstanceArgs preserved alongside the resume",
@@ -254,8 +254,8 @@ func TestResolveSpawnArgs_ClaudeResumePromotion(t *testing.T) {
 					"transcript_path": transcript,
 				},
 			},
-			found:      true,
-			want:       []string{"--dangerously-skip-permissions", "--resume", sess},
+			found: true,
+			want:  []string{"--dangerously-skip-permissions", "--resume", sess},
 		},
 		{
 			name: "empty session_id — nothing recorded, configured fallback stands",
@@ -263,8 +263,8 @@ func TestResolveSpawnArgs_ClaudeResumePromotion(t *testing.T) {
 				CWD:         `E:\Projects\Stukans\Prototypes\calyx`,
 				PluginState: map[string]string{"session_id": ""},
 			},
-			found:      true,
-			want:       []string{"--continue"},
+			found: true,
+			want:  []string{"--continue"},
 		},
 	}
 
@@ -329,7 +329,7 @@ func TestResolveSpawnArgs_ClaudeResumePromotion_NotAppliedToOtherPlugins(t *test
 func TestResolveSpawnArgs_ClaudeHookSessionID(t *testing.T) {
 	claudePlugin := &plugin.PanePlugin{
 		Name:    "claude-code",
-		Command: plugin.CommandConfig{Cmd: "claude"},
+		Command: plugin.CommandConfig{Cmd: "claude", Sessions: "claude"},
 		Persistence: plugin.PersistenceConfig{
 			Strategy:   "preassign_id",
 			StartArgs:  []string{"--session-id", "{session_id}"},

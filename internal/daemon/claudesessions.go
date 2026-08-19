@@ -11,6 +11,21 @@ import (
 	"github.com/artyomsv/quil/internal/ipc"
 )
 
+// usesClaudeSessions reports whether panes of this plugin type speak the Claude
+// protocol. The call sites that hold only a pane TYPE, rather than an already
+// resolved plugin, route through here.
+//
+// A registry miss answers false. That is consistent rather than a new failure
+// mode: a plugin absent from the registry failed to load, and the spawn path
+// already degrades such a pane to a plain terminal — so the capability goes
+// false exactly when the pane is unusable anyway.
+func (d *Daemon) usesClaudeSessions(paneType string) bool {
+	if d.registry == nil {
+		return false
+	}
+	return d.registry.Get(paneType).UsesClaudeSessions()
+}
+
 // resumeSessionIDRe is the canonical UUID shape, which is what Claude actually
 // mints for a session id. The value arrives over IPC and becomes the operand of
 // `--resume` in the spawned process's argv, so it is validated rather than
@@ -458,7 +473,7 @@ func (d *Daemon) claudeSessionIDs(includePending bool) map[string]string {
 			running := hasPTY && pane.ExitCode == nil
 			pane.PluginMu.Unlock()
 
-			if typ != "claude-code" {
+			if !d.usesClaudeSessions(typ) {
 				continue
 			}
 			// No PTY at all = never spawned: either just created (its claim is

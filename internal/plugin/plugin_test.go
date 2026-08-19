@@ -967,3 +967,64 @@ func TestBuiltinPlugins_IncludesBothTerminals(t *testing.T) {
 		t.Errorf("builtinPlugins = %v, want both terminal and terminal-wide", names)
 	}
 }
+
+func TestUsesClaudeSessions(t *testing.T) {
+	tests := []struct {
+		name     string
+		sessions string
+		want     bool
+	}{
+		{"claude source", "claude", true},
+		{"no sessions", "", false},
+		{"other source", "future-store", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &PanePlugin{Command: CommandConfig{Sessions: tt.sessions}}
+			if got := p.UsesClaudeSessions(); got != tt.want {
+				t.Errorf("UsesClaudeSessions() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// Registry.Get returns nil for an unknown plugin and every caller routes
+// through it, so the nil case is reached in production, not just in tests.
+func TestUsesClaudeSessions_NilReceiverIsFalse(t *testing.T) {
+	var p *PanePlugin
+	if p.UsesClaudeSessions() {
+		t.Error("nil plugin reported as using claude sessions")
+	}
+}
+
+// The predicate is the resume STRATEGY, not a plugin-name list: session_scrape
+// covers opencode without naming it, and a future session-resuming plugin needs
+// no edit here.
+func TestRestoresOwnHistory(t *testing.T) {
+	tests := []struct {
+		strategy string
+		want     bool
+	}{
+		{"preassign_id", true},
+		{"session_scrape", true},
+		{"rerun", false},
+		{"cwd_only", false},
+		{"none", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.strategy, func(t *testing.T) {
+			p := &PanePlugin{Persistence: PersistenceConfig{Strategy: tt.strategy}}
+			if got := p.RestoresOwnHistory(); got != tt.want {
+				t.Errorf("RestoresOwnHistory() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRestoresOwnHistory_NilReceiverIsFalse(t *testing.T) {
+	var p *PanePlugin
+	if p.RestoresOwnHistory() {
+		t.Error("nil plugin reported as restoring own history")
+	}
+}

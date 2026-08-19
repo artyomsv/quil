@@ -537,7 +537,7 @@ func TestSpawnPane_RestartPrefersHookSessionOverStaleResumeTarget(t *testing.T) 
 func claudeResumePlugin() *plugin.PanePlugin {
 	return &plugin.PanePlugin{
 		Name:    "claude-code",
-		Command: plugin.CommandConfig{Cmd: "claude"},
+		Command: plugin.CommandConfig{Cmd: "claude", Sessions: "claude"},
 		Persistence: plugin.PersistenceConfig{
 			Strategy:   "preassign_id",
 			StartArgs:  []string{"--session-id", "{session_id}"},
@@ -977,5 +977,21 @@ func TestClaimResumeSession_AllowsSessionOfExitedPane(t *testing.T) {
 	newcomer := &Pane{ID: "pane-0000000b", Type: "claude-code"}
 	if _, _, ok := d.claimResumeSession(newcomer, []resumeCandidate{{id: sess}}); !ok {
 		t.Fatal("claim refused a session whose only holder has exited")
+	}
+}
+
+// usesClaudeSessions resolves a pane TYPE through the registry, so both the
+// nil-registry and the unknown-plugin paths are reachable in production: the
+// former during early startup, the latter whenever a plugin failed to load.
+// Both must answer false rather than panic.
+func TestUsesClaudeSessions_ResolvesThroughRegistry(t *testing.T) {
+	d := &Daemon{registry: plugin.NewRegistry()}
+	if d.usesClaudeSessions("claude-code") {
+		t.Error("unknown plugin reported as claude sessions")
+	}
+
+	noReg := &Daemon{}
+	if noReg.usesClaudeSessions("claude-code") {
+		t.Error("nil registry must answer false, not panic")
 	}
 }

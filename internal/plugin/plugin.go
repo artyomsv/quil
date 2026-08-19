@@ -250,3 +250,42 @@ func (ih *IdleHandler) Compile() error {
 func (ih *IdleHandler) Compiled() *regexp.Regexp {
 	return ih.compiled
 }
+
+// ClaudeSessionSource is the Command.Sessions value naming Claude Code's
+// transcript store. It implies the whole Claude protocol: the preassigned
+// session id, the SessionStart hook that tracks /clear, /resume and compaction
+// rotation, and transcripts under the Claude config dir.
+const ClaudeSessionSource = "claude"
+
+// UsesClaudeSessions reports whether this plugin's sessions are Claude Code
+// sessions. Every site that once compared Name against "claude-code" asks this
+// instead, so a renamed plugin -- or any future Claude-compatible tool -- works
+// without a code change.
+//
+// Nil-receiver safe: callers resolve through Registry.Get, which returns nil for
+// an unknown or failed-to-load plugin. False is the right answer there, because
+// a plugin that failed to load has already been degraded to a plain terminal at
+// the spawn site.
+func (p *PanePlugin) UsesClaudeSessions() bool {
+	return p != nil && p.Command.Sessions == ClaudeSessionSource
+}
+
+// RestoresOwnHistory reports whether this plugin's resume strategy hands the
+// respawned child a session id, so the child paints its own transcript back
+// instead of depending on Quil's ghost replay.
+//
+// The resume-strategy question, not a plugin-name list: these two strategies are
+// exactly the ones resolveSpawnArgs expands into `--resume <id>` /
+// `--session <id>`. `rerun` re-runs a command that starts from nothing and
+// `cwd_only` respawns a shell that will not reprint a word of its scrollback --
+// both of those still need the replay.
+func (p *PanePlugin) RestoresOwnHistory() bool {
+	if p == nil {
+		return false
+	}
+	switch p.Persistence.Strategy {
+	case "preassign_id", "session_scrape":
+		return true
+	}
+	return false
+}

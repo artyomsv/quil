@@ -52,7 +52,7 @@ func TestPaneView_SanitizesTheSpawnError(t *testing.T) {
 // guarded copy would keep showing the old one.
 func TestSyncPaneMeta_ClearsTheSpawnError(t *testing.T) {
 	pane := &PaneModel{ID: "p1", SpawnError: "worktree is gone: /wt/feat-x"}
-	syncPaneMeta(pane, &PaneInfo{ID: "p1"}, false, 0)
+	syncPaneMeta(pane, &PaneInfo{ID: "p1"}, false, 0, false)
 
 	if pane.SpawnError != "" {
 		t.Errorf("SpawnError = %q after a clean update, want it cleared", pane.SpawnError)
@@ -61,7 +61,7 @@ func TestSyncPaneMeta_ClearsTheSpawnError(t *testing.T) {
 
 func TestSyncPaneMeta_CarriesTheSpawnError(t *testing.T) {
 	pane := &PaneModel{ID: "p1"}
-	syncPaneMeta(pane, &PaneInfo{ID: "p1", SpawnError: "worktree is gone: /wt/feat-x"}, false, 0)
+	syncPaneMeta(pane, &PaneInfo{ID: "p1", SpawnError: "worktree is gone: /wt/feat-x"}, false, 0, false)
 
 	if pane.SpawnError != "worktree is gone: /wt/feat-x" {
 		t.Errorf("SpawnError = %q, want the daemon's message", pane.SpawnError)

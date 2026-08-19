@@ -99,11 +99,11 @@ func TestSyncPaneMeta_PropagatesPending(t *testing.T) {
 	p := NewPaneModel("p", testRingBufSize)
 	defer p.Dispose()
 	p.Pending = true
-	syncPaneMeta(p, &PaneInfo{ID: "p", Pending: false}, false, 0)
+	syncPaneMeta(p, &PaneInfo{ID: "p", Pending: false}, false, 0, false)
 	if p.Pending {
 		t.Error("syncPaneMeta should clear Pending when the daemon reports it spawned")
 	}
-	syncPaneMeta(p, &PaneInfo{ID: "p", Pending: true}, false, 0)
+	syncPaneMeta(p, &PaneInfo{ID: "p", Pending: true}, false, 0, false)
 	if !p.Pending {
 		t.Error("syncPaneMeta should set Pending when the daemon reports deferred")
 	}
@@ -111,7 +111,7 @@ func TestSyncPaneMeta_PropagatesPending(t *testing.T) {
 
 func TestRenderRestoreIndicator_Checklist(t *testing.T) {
 	t.Parallel()
-	p := &PaneModel{resuming: true, Type: "claude-code", SessionID: "8f2e1c00deadbeef", Pending: true}
+	p := &PaneModel{resuming: true, Type: "claude-code", SessionID: "8f2e1c00deadbeef", Pending: true, RestoresViaSession: true}
 	out := ansi.Strip(p.renderRestoreIndicator(48, 10))
 
 	for _, want := range []string{"session loaded", "history via resume", "resuming claude · 8f2e1c00", "waiting for first output"} {
@@ -290,7 +290,7 @@ func TestSyncPaneMeta_PropagatesSessionAndHistory(t *testing.T) {
 	t.Parallel()
 	p := NewPaneModel("p", testRingBufSize)
 	defer p.Dispose()
-	syncPaneMeta(p, &PaneInfo{ID: "p", Type: "claude-code", SessionID: "abc123", HistoryLines: 42}, false, 0)
+	syncPaneMeta(p, &PaneInfo{ID: "p", Type: "claude-code", SessionID: "abc123", HistoryLines: 42}, false, 0, false)
 	if p.SessionID != "abc123" {
 		t.Errorf("SessionID = %q, want abc123", p.SessionID)
 	}
@@ -303,19 +303,20 @@ func TestResumeLabel(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name, typ, sid, want string
+		restores             bool
 	}{
-		{"claude with id", "claude-code", "8f2e1c00deadbeef", "resuming claude · 8f2e1c00"},
-		{"claude no id", "claude-code", "", "resuming claude"},
-		{"opencode with id", "opencode", "abcdef0123", "resuming opencode · abcdef01"},
-		{"terminal", "terminal", "", "restarting shell"},
-		{"empty type", "", "", "restarting shell"},
-		{"ssh ignores id", "ssh", "ignored", "reconnecting ssh"},
-		{"stripe", "stripe", "", "restarting stripe"},
-		{"unknown", "weird", "", "starting weird"},
+		{"claude with id", "claude-code", "8f2e1c00deadbeef", "resuming claude · 8f2e1c00", true},
+		{"claude no id", "claude-code", "", "resuming claude", true},
+		{"opencode with id", "opencode", "abcdef0123", "resuming opencode · abcdef01", true},
+		{"terminal", "terminal", "", "restarting shell", false},
+		{"empty type", "", "", "restarting shell", false},
+		{"ssh ignores id", "ssh", "ignored", "reconnecting ssh", false},
+		{"stripe", "stripe", "", "restarting stripe", false},
+		{"unknown", "weird", "", "starting weird", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := resumeLabel(tc.typ, tc.sid); got != tc.want {
+			if got := resumeLabel(tc.typ, tc.sid, tc.restores); got != tc.want {
 				t.Errorf("resumeLabel(%q,%q) = %q, want %q", tc.typ, tc.sid, got, tc.want)
 			}
 		})
@@ -330,13 +331,13 @@ func TestRestoreSteps(t *testing.T) {
 		want []restoreStep
 	}{
 		{"claude deferred restores via resume",
-			&PaneModel{Type: "claude-code", SessionID: "8f2e1c00xx", HistoryLines: 0, Pending: true},
+			&PaneModel{Type: "claude-code", SessionID: "8f2e1c00xx", HistoryLines: 0, Pending: true, RestoresViaSession: true},
 			[]restoreStep{{"session loaded", stepDone}, {"history via resume", stepDone}, {"resuming claude · 8f2e1c00", stepActive}, {"waiting for first output", stepPending}}},
 		{"new claude pane has no session to resume",
-			&PaneModel{Type: "claude-code", SessionID: "", HistoryLines: 0, Pending: false},
+			&PaneModel{Type: "claude-code", SessionID: "", HistoryLines: 0, Pending: false, RestoresViaSession: true},
 			[]restoreStep{{"session loaded", stepDone}, {"no saved history", stepNone}, {"resuming claude", stepDone}, {"waiting for first output", stepActive}}},
 		{"opencode restores via resume",
-			&PaneModel{Type: "opencode", SessionID: "abcdef0123", HistoryLines: 0, Pending: false},
+			&PaneModel{Type: "opencode", SessionID: "abcdef0123", HistoryLines: 0, Pending: false, RestoresViaSession: true},
 			[]restoreStep{{"session loaded", stepDone}, {"history via resume", stepDone}, {"resuming opencode · abcdef01", stepDone}, {"waiting for first output", stepActive}}},
 		{"terminal spawned with history",
 			&PaneModel{Type: "terminal", HistoryLines: 412, Pending: false},
@@ -367,5 +368,50 @@ func TestRestoreSteps(t *testing.T) {
 				t.Errorf("want exactly one active row, got %d: %+v", active, steps)
 			}
 		})
+	}
+}
+
+// The restore checklist asks the resolved capability, not the pane's type name.
+// A renamed claude plugin used to fall off the hardcoded {claude-code,
+// opencode} list and silently lose both its resume row and its session-id
+// suffix.
+func TestRestoreSteps_UsesResolvedCapabilityNotPaneName(t *testing.T) {
+	t.Parallel()
+	p := &PaneModel{
+		Type:               "claude-code-custom",
+		SessionID:          "abcdef0123456789",
+		RestoresViaSession: true,
+	}
+	var joined string
+	for _, s := range p.restoreSteps() {
+		joined += s.text + "|"
+	}
+	if !strings.Contains(joined, "history via resume") {
+		t.Errorf("steps = %q, want a \"history via resume\" row", joined)
+	}
+	if !strings.Contains(joined, "abcdef01") {
+		t.Errorf("steps = %q, want the session-id prefix appended", joined)
+	}
+}
+
+// The inverse: a pane carrying a session id whose plugin does NOT resume
+// through one must show neither row. This is the case a blanket "true" in the
+// tests above would hide.
+func TestRestoreSteps_NoSessionRestoreWhenCapabilityFalse(t *testing.T) {
+	t.Parallel()
+	p := &PaneModel{
+		Type:               "terminal",
+		SessionID:          "abcdef0123456789",
+		RestoresViaSession: false,
+	}
+	var joined string
+	for _, s := range p.restoreSteps() {
+		joined += s.text + "|"
+	}
+	if strings.Contains(joined, "history via resume") {
+		t.Errorf("steps = %q, want no resume row for a non-session plugin", joined)
+	}
+	if strings.Contains(joined, "abcdef01") {
+		t.Errorf("steps = %q, want no session-id suffix for a non-session plugin", joined)
 	}
 }

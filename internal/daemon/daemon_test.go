@@ -225,6 +225,7 @@ func TestDaemon_RefreshPluginStateFromHooks(t *testing.T) {
 	saveHookStubs(t)
 
 	d := New(config.Default())
+	registerClaudePlugin(t, d)
 	tab := &Tab{ID: "tab-1", Name: "test", Panes: []string{"pane-claude", "pane-opencode", "pane-term", "pane-nilstate"}}
 	panes := []*Pane{
 		// Direct writes to PluginState without PluginMu are safe here:
@@ -552,6 +553,7 @@ func TestDaemon_RefreshPluginStateFromHooks_PersistsTranscriptPath(t *testing.T)
 
 	const path = "/home/u/.claude/projects/proj--claude-worktrees-faq/live-id.jsonl"
 	d := New(config.Default())
+	registerClaudePlugin(t, d)
 	tab := &Tab{ID: "tab-1", Name: "test", Panes: []string{"pane-claude"}}
 	panes := []*Pane{
 		{ID: "pane-claude", TabID: "tab-1", Type: "claude-code", PluginState: map[string]string{"session_id": "stale-id"}},
@@ -580,6 +582,7 @@ func TestDaemon_RefreshPluginStateFromHooks_DropsPathWithoutOne(t *testing.T) {
 	saveHookStubs(t)
 
 	d := New(config.Default())
+	registerClaudePlugin(t, d)
 	tab := &Tab{ID: "tab-1", Name: "test", Panes: []string{"pane-claude"}}
 	panes := []*Pane{
 		{ID: "pane-claude", TabID: "tab-1", Type: "claude-code", PluginState: map[string]string{

@@ -247,3 +247,96 @@ func TestNewModel_InstallsFrameCache(t *testing.T) {
 		t.Error("NewModel must install the frame cache, or coalescing is dead code in production")
 	}
 }
+
+// hiddenPaneID returns a pane on a tab other than the active one.
+func hiddenPaneID(t *testing.T, m *Model) string {
+	t.Helper()
+	active := m.activeTabModel()
+	for _, tab := range m.allTabs() {
+		if active != nil && tab.ID == active.ID {
+			continue
+		}
+		if tab.Root == nil {
+			continue
+		}
+		if leaves := tab.Leaves(); len(leaves) > 0 {
+			return leaves[0].ID
+		}
+	}
+	t.Fatal("fixture must have a second tab with at least one pane")
+	return ""
+}
+
+func TestPaneIsVisible_ActiveTabPanesVisibleOthersNot(t *testing.T) {
+	m := coalesceModel(t)
+
+	active := m.activeTabModel()
+	if active == nil || active.Root == nil {
+		t.Fatal("fixture must have an active tab with a layout tree")
+	}
+	visibleID := active.Leaves()[0].ID
+	if !m.paneIsVisible(visibleID) {
+		t.Errorf("pane %s is in the active tab but reported hidden", visibleID)
+	}
+
+	hiddenID := hiddenPaneID(t, &m)
+	if m.paneIsVisible(hiddenID) {
+		t.Errorf("pane %s is on an inactive tab but reported visible", hiddenID)
+	}
+}
+
+func TestPaneIsVisible_UnknownPaneIsNotVisible(t *testing.T) {
+	m := coalesceModel(t)
+	if m.paneIsVisible("pane-that-does-not-exist") {
+		t.Error("an unknown pane id must not report visible")
+	}
+}
+
+func TestPaneIsVisible_ActiveTabOverlayIsVisible(t *testing.T) {
+	m := coalesceModel(t)
+	active := m.activeTabModel()
+	if active == nil {
+		t.Fatal("fixture must have an active tab")
+	}
+
+	overlay := NewPaneModel("overlay-1", 4096)
+	active.overlayPane = overlay
+	// Every PaneModel owns a VT emulator with a parked drain goroutine and a
+	// scrollback allocation. Nilling the field reclaims neither.
+	t.Cleanup(func() {
+		active.overlayPane = nil
+		overlay.Dispose()
+	})
+
+	if !m.paneIsVisible("overlay-1") {
+		t.Error("the active tab's overlay pane is on screen and must report visible")
+	}
+}
+
+// An overlay belonging to a tab the user is NOT looking at is not on screen.
+func TestPaneIsVisible_InactiveTabOverlayIsNotVisible(t *testing.T) {
+	m := coalesceModel(t)
+	active := m.activeTabModel()
+
+	var other *TabModel
+	for _, tab := range m.allTabs() {
+		if active == nil || tab.ID != active.ID {
+			other = tab
+			break
+		}
+	}
+	if other == nil {
+		t.Fatal("fixture must have a second tab")
+	}
+
+	overlay := NewPaneModel("overlay-hidden", 4096)
+	other.overlayPane = overlay
+	t.Cleanup(func() {
+		other.overlayPane = nil
+		overlay.Dispose()
+	})
+
+	if m.paneIsVisible("overlay-hidden") {
+		t.Error("an overlay on an inactive tab is not rendered and must report hidden")
+	}
+}

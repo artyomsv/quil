@@ -38,9 +38,13 @@ func TestSpawnPane_ResetsTheRedrawCooldown(t *testing.T) {
 	}
 
 	pane.PluginMu.Lock()
-	stamp, seq := pane.lastRedrawAt, pane.redrawSeq
+	stamp, seq, gen := pane.lastRedrawAt, pane.redrawSeq, pane.ptyGen
 	pane.PluginMu.Unlock()
 
+	if gen == 0 {
+		t.Error("ptyGen did not advance on a fresh PTY — a kick armed for the previous " +
+			"child cannot tell it is now looking at a different one")
+	}
 	if !stamp.IsZero() {
 		t.Errorf("lastRedrawAt = %v after a fresh spawn, want the zero time — the new "+
 			"child has received no redraw key", stamp)
@@ -75,6 +79,10 @@ func TestSendRedrawKey_SecondKickInsideCooldownIsHeld(t *testing.T) {
 	if !waitForInput(t, pty, "\f") {
 		t.Fatalf("child received %q, want one form feed immediately", pty.got())
 	}
+	// Setup guard, not decoration: waitForInput has unbounded latency, so a
+	// stall here could push the sleep below past the cooldown and turn a lost
+	// race into a failure that reads like a throttle bug.
+	requireHeldKick(t, pane)
 	time.Sleep(150 * time.Millisecond) // still inside the cooldown
 	if got := pty.got(); got != "\f" {
 		t.Fatalf("child received %q inside the cooldown, want a single form feed", got)
@@ -144,6 +152,7 @@ func TestSendRedrawKey_HeldKickSkippedWhenThePaneExited(t *testing.T) {
 	if !waitForInput(t, pty, "\f") {
 		t.Fatalf("child received %q, want the leading kick before the pane exits", pty.got())
 	}
+	requireHeldKick(t, pane)
 	code := 0
 	pane.PluginMu.Lock()
 	pane.ExitCode = &code
@@ -198,6 +207,69 @@ func TestSendRedrawKey_HeldKickDroppedWhileTheEarlierOneIsStillQueued(t *testing
 	}
 }
 
+// requireHeldKick fails the test unless a kick is currently held. Every test
+// that establishes a condition AFTER waiting for the leading kick needs it:
+// waitForInput's latency is unbounded, so without this a scheduling stall makes
+// the assertion fail as though the throttle were broken, instead of saying that
+// the setup lost a race.
+func requireHeldKick(t *testing.T, pane *Pane) {
+	t.Helper()
+	pane.PluginMu.Lock()
+	armed := pane.redrawTimer != nil
+	pane.PluginMu.Unlock()
+	if !armed {
+		t.Fatal("setup: no kick was held — the cooldown elapsed before the test got here")
+	}
+}
+
+// The immediate path needs the same queued check as the held one, and this is
+// the case that proves it: once the cooldown has elapsed, a kick goes out
+// straight away, so a wedged child receives it directly behind the earlier one
+// that is still parked in its Write. Guarding only the deferred path leaves the
+// pair fully reachable — just three seconds later.
+func TestSendRedrawKey_ImmediateKickSkippedWhileTheEarlierOneIsStillQueued(t *testing.T) {
+	const cooldown = 300 * time.Millisecond
+	shortRedrawCooldown(t, cooldown)
+	d := daemonWithPlugin(t, "claude-code", "\f", false)
+	pty := newWedgedSession()
+	pane := &Pane{ID: "p1", Type: "claude-code", PTY: pty}
+	release := releaseWedgeOnce(pty)
+	t.Cleanup(pane.StopInput)
+	t.Cleanup(release)
+
+	d.sendRedrawKey(pane, "claude-code", "\f")
+	waitUntil(t, "the leading kick to reach the child's blocked Write",
+		func() bool { return pty.writeCount() == 1 })
+
+	// Past the cooldown, so this would take the IMMEDIATE branch if the queue
+	// were empty. It is not: the child has not read the first kick, so this one
+	// is armed instead of sent, and its timer fires a cooldown from here.
+	time.Sleep(400 * time.Millisecond)
+	d.sendRedrawKey(pane, "claude-code", "\f")
+	if got := pty.writeCount(); got != 1 {
+		t.Fatalf("child received %d kicks while wedged, want 1", got)
+	}
+
+	// The child starts reading with ~100 ms still to run on that timer. THIS is
+	// where the daemon's clock and the child's diverge: by our clock the first
+	// kick is 600 ms old, but the child has only just been handed it, so its
+	// two-second window opens now. Delivering when the timer fires would put
+	// the two kicks ~100 ms apart from the child's point of view.
+	time.Sleep(200 * time.Millisecond)
+	release()
+
+	time.Sleep(150 * time.Millisecond) // the armed timer has now fired
+	if got := pty.writeCount(); got != 1 {
+		t.Errorf("child received %d kicks, want 1 — the second landed inside the "+
+			"cooldown of the child actually READING the first, which is the window "+
+			"that decides /clear", got)
+	}
+
+	// And the repaint is not lost: it lands once the child's own window passes.
+	waitUntil(t, "the deferred kick to arrive after the child's own cooldown",
+		func() bool { return pty.writeCount() == 2 })
+}
+
 // releaseWedgeOnce unblocks a wedgedSession's Write/Close, idempotently — the
 // test both releases explicitly and registers the same call as cleanup, so an
 // early t.Fatalf cannot leave the writer goroutine parked.
@@ -235,7 +307,10 @@ func TestDeferredRedrawKey_SkippedAfterTeardown(t *testing.T) {
 		t.Fatal("setup: teardown must leave PTY and ExitCode untouched for this to mean anything")
 	}
 
-	d.deferredRedrawKey(pane, "claude-code", "\f", pty)
+	pane.PluginMu.Lock()
+	gen := pane.ptyGen // the generation the timer would have captured
+	pane.PluginMu.Unlock()
+	d.deferredRedrawKey(pane, "claude-code", "\f", gen)
 
 	time.Sleep(100 * time.Millisecond)
 	if got := pty.got(); got != "\f" {
@@ -311,8 +386,14 @@ func TestSendRedrawKey_HeldKickSkippedAfterAPTYSwap(t *testing.T) {
 	if !waitForInput(t, oldPTY, "\f") {
 		t.Fatalf("old child received %q, want the leading kick before the restart", oldPTY.got())
 	}
+	requireHeldKick(t, pane)
+
+	// Both fields, because spawnPane writes both: the generation is what the
+	// held kick compares, and a test that swapped only the pointer would keep
+	// passing if the staleness check were deleted.
 	pane.PluginMu.Lock()
 	pane.PTY = newPTY
+	pane.ptyGen++
 	pane.PluginMu.Unlock()
 
 	time.Sleep(400 * time.Millisecond)

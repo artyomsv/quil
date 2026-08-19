@@ -124,6 +124,13 @@ type Pane struct {
 	lastRedrawAt time.Time
 	redrawTimer  *time.Timer
 	redrawSeq    uint64
+	// ptyGen increments every time a new session is installed in PTY, so a held
+	// kick can tell "same child" from "restarted child" without comparing the
+	// interface value. apty.Session implementations are all pointers today, but
+	// nothing in the interface forbids a value receiver, and comparing a
+	// non-comparable dynamic type panics — on a time.AfterFunc goroutine, which
+	// takes the whole daemon with it. PluginMu-protected, like PTY itself.
+	ptyGen uint64
 	// inputEnqueued/inputWritten count items pushed onto and drained off the
 	// input queue. Atomic rather than PluginMu-protected: EnqueueInput sits on
 	// the keystroke path and takes no lock today, and the redraw throttle only
@@ -339,7 +346,7 @@ func (p *Pane) inputWriter() {
 // a counter that skipped them would stall forever and leave the redraw throttle
 // treating every later kick as still-queued.
 func (p *Pane) writeInput(data []byte) {
-	defer p.inputWritten.Add(1)
+	defer p.markInputWritten()
 
 	p.PluginMu.Lock()
 	pty := p.PTY
@@ -353,6 +360,28 @@ func (p *Pane) writeInput(data []byte) {
 	if _, err := pty.Write(data); err != nil {
 		logger.Debug("pane %s: input write: %v", p.ID, err)
 	}
+}
+
+// markInputWritten records that one queued item has left the queue, and — when
+// that item was the redraw kick — restarts the cooldown from THIS moment.
+//
+// That second half is what makes the cooldown mean anything. The enqueue stamp
+// only bounds how often the daemon hands a kick over; the window claude-code
+// measures starts when the byte actually reaches it, which is here. A kick that
+// sat in a wedged child's queue for a minute must not let a second one follow
+// microseconds behind it.
+//
+// The stamp only ever moves forward: a write completes after its own enqueue,
+// so replacing the enqueue time with the completion time lengthens the window
+// rather than shortening it.
+func (p *Pane) markInputWritten() {
+	n := p.inputWritten.Add(1)
+
+	p.PluginMu.Lock()
+	if p.redrawSeq != 0 && n == p.redrawSeq {
+		p.lastRedrawAt = time.Now()
+	}
+	p.PluginMu.Unlock()
 }
 
 // releasePanes tears down pane PTYs OFF the session lock, each on its own

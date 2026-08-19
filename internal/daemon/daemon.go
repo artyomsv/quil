@@ -3799,9 +3799,14 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	pane.appliedCols, pane.appliedRows = 0, 0
 	// And the redraw throttle, for the same reason: this child has received no
 	// redraw key, so the previous one's stamp would defer its first kick by up
-	// to a cooldown and leave a live pane looking blank meanwhile.
+	// to a cooldown and leave a live pane looking blank meanwhile. The /clear
+	// window belongs to the child PROCESS, so a new process starts a new one.
+	// ptyGen is what lets a kick armed for the previous child recognise that it
+	// is now looking at a different one; handleRestartPaneReq reinstalls
+	// through this same function, so this is the only site that needs it.
 	pane.lastRedrawAt = time.Time{}
 	pane.redrawSeq = 0
+	pane.ptyGen++
 	pane.PluginMu.Unlock()
 	go d.streamPTYOutput(pane.ID, ptySession)
 	return nil

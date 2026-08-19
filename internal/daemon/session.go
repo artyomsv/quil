@@ -107,6 +107,15 @@ type Pane struct {
 	// LastInputBlockedAt: cooldown for the input_blocked event emitted when
 	// the input queue overflows (child stopped reading stdin). Under PluginMu.
 	LastInputBlockedAt time.Time
+	// Redraw-key throttle, both under PluginMu. A plugin's redraw_key is
+	// INPUT, and a program may give a REPEATED press a second meaning:
+	// claude-code >= v2.1.126 runs /clear on two Ctrl+L within two seconds,
+	// and quil's attach kick and resize kick land ~5 ms apart on an ordinary
+	// reattach — which cleared the conversation in every AI pane at once
+	// (issue #169). sendRedrawKey keeps any two deliveries redrawKeyCooldown
+	// apart; redrawTimer is the one held kick waiting for the window to close.
+	lastRedrawAt time.Time
+	redrawTimer  *time.Timer
 	// Input pipeline: all PTY stdin writes go through a dedicated per-pane
 	// goroutine (inputWriter). A child that stops reading its stdin fills
 	// the kernel PTY buffer and makes Write block forever; on the IPC
@@ -255,7 +264,19 @@ func (p *Pane) EnqueueInput(data []byte) bool {
 
 // StopInput terminates the input writer. Idempotent; safe to call even if
 // the writer never started.
+//
+// It also drops a redraw kick held by sendRedrawKey. releasePanes is the single
+// teardown funnel and calls this before closing the PTY, so a pane being
+// destroyed cannot have a timer outlive it. deferredRedrawKey re-checks
+// liveness itself — this is the cheap half, not the correctness half.
 func (p *Pane) StopInput() {
+	p.PluginMu.Lock()
+	if p.redrawTimer != nil {
+		p.redrawTimer.Stop()
+		p.redrawTimer = nil
+	}
+	p.PluginMu.Unlock()
+
 	p.EnsureInputWriter()
 	p.inputStopOnce.Do(func() { close(p.inputDone) })
 }

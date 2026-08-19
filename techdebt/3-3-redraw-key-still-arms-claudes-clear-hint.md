@@ -7,6 +7,7 @@
 | Location | `internal/daemon/redraw.go`, `internal/plugin/defaults/claude-code.toml` |
 | Found during | Fixing issue #169 (claude-code panes clearing themselves) |
 | Date | 2026-08-19 |
+| Tracked as | https://github.com/artyomsv/quil/issues/171 |
 
 ## Issue
 

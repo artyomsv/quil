@@ -7,6 +7,7 @@
 | Location | `internal/plugin/defaults/claude-code.toml` (`ghost_buffer`), `internal/daemon/daemon.go` (`handleAttach`) |
 | Found during | Fixing issue #169 (claude-code panes clearing themselves) |
 | Date | 2026-08-19 |
+| Tracked as | https://github.com/artyomsv/quil/issues/172 |
 
 ## Issue
 

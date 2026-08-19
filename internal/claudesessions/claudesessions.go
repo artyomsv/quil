@@ -116,17 +116,58 @@ func EscapeCWD(cwd string) string {
 	return t[:maxLen] + "-" + strconv.FormatInt(abs, 36)
 }
 
-// ProjectDir returns the absolute directory Claude stores this CWD's session
-// transcripts in, or "" when the user's home directory cannot be resolved.
-func ProjectDir(cwd string) string {
-	if cwd == "" {
-		return ""
+// claudeConfigDirEnv is Claude Code's own override for its config directory.
+// Setting it relocates everything Claude stores, projects/ included — which is
+// how a user separates work from personal config, and how wrapper
+// distributions keep their sessions apart from upstream's.
+const claudeConfigDirEnv = "CLAUDE_CONFIG_DIR"
+
+// ConfigDir returns Claude Code's config directory: $CLAUDE_CONFIG_DIR when
+// set, else ~/.claude. Returns "" when neither can be resolved.
+//
+// A "~/"-prefixed or relative value is expanded here so every caller gets an
+// absolute path. Resolution belongs on whichever machine owns the disk — the
+// daemon — because the directory describes that machine's filesystem; a
+// client-supplied path would be the laptop's answer about the server's.
+func ConfigDir() string {
+	if v := strings.TrimSpace(os.Getenv(claudeConfigDirEnv)); v != "" {
+		if v == "~" || strings.HasPrefix(v, "~/") || strings.HasPrefix(v, `~\`) {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return ""
+			}
+			if v == "~" {
+				return home
+			}
+			return filepath.Join(home, v[2:])
+		}
+		if abs, err := filepath.Abs(v); err == nil {
+			return abs
+		}
+		return v
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".claude", "projects", EscapeCWD(cwd))
+	return filepath.Join(home, ".claude")
+}
+
+// ProjectDirIn maps a CWD to its transcript directory under an explicit config
+// dir. Takes the directory rather than reading the environment so a caller that
+// already resolved one is not at the mercy of a concurrent Setenv, and so tests
+// need no environment at all.
+func ProjectDirIn(configDir, cwd string) string {
+	if configDir == "" || cwd == "" {
+		return ""
+	}
+	return filepath.Join(configDir, "projects", EscapeCWD(cwd))
+}
+
+// ProjectDir returns the absolute directory Claude stores this CWD's session
+// transcripts in, or "" when the config directory cannot be resolved.
+func ProjectDir(cwd string) string {
+	return ProjectDirIn(ConfigDir(), cwd)
 }
 
 // TranscriptPath returns the absolute path of one session's transcript, or ""
@@ -152,7 +193,13 @@ func TranscriptPath(cwd, sessionID string) string {
 // dialog that must never be blocked by discovery, so surfacing cancellation as a
 // failure there would be a downgrade.
 func List(ctx context.Context, cwd string) (sessions []Session, truncated bool, err error) {
-	dir := ProjectDir(cwd)
+	return ListIn(ctx, ConfigDir(), cwd)
+}
+
+// ListIn is List against an explicit config directory. List resolves one from
+// the environment and delegates here.
+func ListIn(ctx context.Context, configDir, cwd string) (sessions []Session, truncated bool, err error) {
+	dir := ProjectDirIn(configDir, cwd)
 	if dir == "" || ctx.Err() != nil {
 		return nil, false, nil
 	}
@@ -251,8 +298,12 @@ type transcriptLine struct {
 	Type         string `json:"type"`
 	IsSidechain  bool   `json:"isSidechain"`
 	PromptSource string `json:"promptSource"`
-	Timestamp    string `json:"timestamp"`
-	Message      struct {
+	// AiTitle carries the session title on builds that emit a
+	// {"type":"ai-title"} entry. Absent on builds that do not; the title scan
+	// consults it only after the typed-prompt pass finds nothing.
+	AiTitle   string `json:"aiTitle"`
+	Timestamp string `json:"timestamp"`
+	Message   struct {
 		// Content is a string for a plain prompt and an array of content
 		// blocks when the prompt carries attachments — both shapes occur in
 		// the wild, so it is decoded in a second pass.
@@ -304,6 +355,12 @@ type Detail struct {
 // user has no way to distinguish from a right one. An empty panel is honest;
 // a truncated one is not.
 func ReadDetail(ctx context.Context, cwd, sessionID string) (Detail, error) {
+	return ReadDetailIn(ctx, ConfigDir(), cwd, sessionID)
+}
+
+// ReadDetailIn is ReadDetail against an explicit config directory. ReadDetail
+// resolves one from the environment and delegates here.
+func ReadDetailIn(ctx context.Context, configDir, cwd, sessionID string) (Detail, error) {
 	if err := ctx.Err(); err != nil {
 		return Detail{}, fmt.Errorf("read session detail: %w", err)
 	}
@@ -311,11 +368,11 @@ func ReadDetail(ctx context.Context, cwd, sessionID string) (Detail, error) {
 		sessionID == "." || sessionID == ".." || strings.ContainsRune(sessionID, filepath.Separator) {
 		return Detail{}, fmt.Errorf("invalid session id")
 	}
-	path := TranscriptPath(cwd, sessionID)
-	if path == "" {
+	dir := ProjectDirIn(configDir, cwd)
+	if dir == "" {
 		return Detail{}, fmt.Errorf("no transcript path for this session")
 	}
-	return readDetail(ctx, path, sessionID)
+	return readDetail(ctx, filepath.Join(dir, sessionID+".jsonl"), sessionID)
 }
 
 // readDetail is the filesystem half of ReadDetail, split out so tests can point
@@ -365,6 +422,50 @@ func readDetail(ctx context.Context, path, id string) (Detail, error) {
 		}
 		if readErr != nil {
 			break
+		}
+	}
+
+	// Fallback: a transcript from a build that does not record promptSource
+	// yields zero prompts above. Re-scan classifying by CONTENT SHAPE instead —
+	// string content is a prompt, array content is a tool result — and only for
+	// entries carrying no promptSource, so a current-schema transcript can
+	// never be reclassified here (see readTitle's fallback 2).
+	//
+	// A SECOND pass rather than one combined pass, deliberately: the loop above
+	// owes its speed to rejecting non-typed lines with a byte compare before
+	// any JSON parse, and parsing every "type":"user" line unconditionally
+	// would pay a full unmarshal per tool result on an 88 MB transcript for
+	// every existing user. This runs only when the fast path found nothing.
+	if d.UserPrompts == 0 {
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return d, nil // keep the timestamps the first pass gathered
+		}
+		r = bufio.NewReaderSize(f, 64<<10)
+		userMark := []byte(`"type":"user"`)
+		for lineNo := 0; ; lineNo++ {
+			if lineNo%4096 == 0 {
+				if err := ctx.Err(); err != nil {
+					return Detail{}, fmt.Errorf("rescan transcript %s at line %d: %w", id, lineNo, err)
+				}
+			}
+			line, readErr := r.ReadBytes('\n')
+			if len(line) > 0 && bytes.Contains(line, userMark) {
+				var tl transcriptLine
+				if json.Unmarshal(bytes.TrimSpace(line), &tl) == nil &&
+					tl.Type == "user" && !tl.IsSidechain && tl.PromptSource == "" &&
+					contentIsString(tl.Message.Content) {
+					d.UserPrompts++
+					if text := sanitizePrompt(contentText(tl.Message.Content, MaxPromptRunes)); text != "" {
+						if d.FirstPrompt == "" {
+							d.FirstPrompt = text
+						}
+						d.LastPrompt = text
+					}
+				}
+			}
+			if readErr != nil {
+				break
+			}
 		}
 	}
 	return d, nil
@@ -445,7 +546,64 @@ func readTitle(path string) string {
 			return text
 		}
 	}
+
+	// Fallback 1 — a {"type":"ai-title"} entry, emitted by builds that do not
+	// record promptSource. Reached only when the typed pass above found
+	// nothing, so an install whose transcripts carry both is unaffected.
+	for _, line := range lines {
+		if !bytes.Contains(line, []byte(`"type":"ai-title"`)) {
+			continue
+		}
+		var tl transcriptLine
+		if err := json.Unmarshal(bytes.TrimSpace(line), &tl); err != nil {
+			continue
+		}
+		if text := sanitizeTitle(tl.AiTitle); text != "" {
+			return text
+		}
+	}
+
+	// Fallback 2 — the first user entry whose content is a bare STRING, on a
+	// transcript that records no promptSource AT ALL.
+	//
+	// The PromptSource=="" condition is the correctness guard, not a nicety.
+	// Gating only on "the typed pass found nothing" would also fire for a
+	// CURRENT-schema transcript that happens to contain no typed prompt but
+	// does contain non-typed string-content user entries — slash-command
+	// expansions and compaction-continuation summaries, which are exactly what
+	// the promptSource=="typed" filter exists to exclude. Those would become
+	// titles, and a compaction summary makes a grotesque one. Keying on the
+	// field's ABSENCE confines this to schemas that never record it.
+	for _, line := range lines {
+		if !bytes.Contains(line, []byte(`"type":"user"`)) {
+			continue
+		}
+		var tl transcriptLine
+		if err := json.Unmarshal(bytes.TrimSpace(line), &tl); err != nil {
+			continue
+		}
+		if tl.Type != "user" || tl.IsSidechain || tl.PromptSource != "" ||
+			!contentIsString(tl.Message.Content) {
+			continue
+		}
+		if text := sanitizeTitle(contentText(tl.Message.Content, MaxTitleRunes)); text != "" {
+			return text
+		}
+	}
 	return ""
+}
+
+// contentIsString reports whether a message content field decoded as a plain
+// JSON string. It is the schema-free way to tell a typed prompt from a tool
+// result: Claude records both as type "user", but a tool result always carries
+// an ARRAY of content blocks while a typed prompt carries a bare string.
+// Consulted only on transcripts that do not record promptSource at all.
+func contentIsString(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var s string
+	return json.Unmarshal(raw, &s) == nil
 }
 
 // contentText flattens a message content field into plain text, accepting both

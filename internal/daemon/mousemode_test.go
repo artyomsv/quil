@@ -47,8 +47,14 @@ func TestScanMouseModes(t *testing.T) {
 		// carried, a run past the cap must be dropped. The first row is the
 		// regression guard for a cap set below the real maximum — at 24 the
 		// tail came back empty and the split enable was lost for good.
+		// Every tracked mode, alternate-screen aliases included — 42 bytes
+		// before the final byte, which is the figure maxModeSeqLen is derived
+		// from. Extended when 47/1047/1049 joined: a guard still using the old
+		// 29-byte run stops guarding the real maximum, which is the drift the
+		// constant's comment exists to prevent.
 		{"all-modes combined run carried", mouseModeState{},
-			"\x1b[?9;1000;1002;1003;1006;2004", mouseModeState{}, "\x1b[?9;1000;1002;1003;1006;2004"},
+			"\x1b[?9;1000;1002;1003;1006;2004;47;1047;1049", mouseModeState{},
+			"\x1b[?9;1000;1002;1003;1006;2004;47;1047;1049"},
 		{"overlong param run dropped, not carried", mouseModeState{},
 			"\x1b[?" + "1234567890123456789012345678901234567890123456789012345678901234567890",
 			mouseModeState{}, ""},
@@ -102,8 +108,11 @@ func TestScanMouseModes_SplitAcrossChunks(t *testing.T) {
 // than the one offset that happened to be tried.
 func TestScanMouseModes_SplitInsideCombinedRun(t *testing.T) {
 	t.Parallel()
-	const seq = "\x1b[?9;1000;1002;1003;1006;2004h"
-	want := mouseModeState{x10: true, normal: true, button: true, any: true, sgr: true, bracketedPaste: true}
+	const seq = "\x1b[?9;1000;1002;1003;1006;2004;47;1047;1049h"
+	want := mouseModeState{
+		x10: true, normal: true, button: true, any: true,
+		sgr: true, bracketedPaste: true, altScreen: true,
+	}
 	for at := 1; at < len(seq); at++ {
 		m, tail := scanMouseModes(mouseModeState{}, []byte(seq[:at]))
 		if m != (mouseModeState{}) {

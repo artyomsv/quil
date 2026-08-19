@@ -1451,7 +1451,19 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 			// Read inside this span, beside Type and GhostSnap: it is a fact
 			// about the process, not about the plugin, and the three have to
 			// describe the same instant.
-			if pane.MouseModes.altScreen {
+			//
+			// GATED ON A DECLARED redraw_key, which is not a detail — it is
+			// what makes this safe. Dropping the replay is only an improvement
+			// where something can then repaint the pane, and `redrawKick`'s
+			// fallback for a plugin with no key is a resize jiggle that a SHELL
+			// ignores. `terminal` and `ssh` are exactly that shape
+			// (ghost_buffer = true, no redraw_key), and `altScreen` is sticky:
+			// a program killed without emitting rmcup — SIGKILL, a segfault, a
+			// dropped ssh — leaves it true for the pane's whole life. Ungated,
+			// a user whose `vim` was killed would get a BLANK pane on every
+			// reattach forever, escapable only by restarting their shell. A
+			// torn replay beats that; a repaint beats both.
+			if p := d.registry.Get(typ); p != nil && p.Persistence.RedrawKey != "" && pane.MouseModes.altScreen {
 				ghostEnabled = false
 			}
 			// Take-and-clear the restore snapshot on this attach WHATEVER we

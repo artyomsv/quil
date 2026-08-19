@@ -39,8 +39,19 @@ func TestHandleAttach_SkipsReplayForAPaneOnTheAlternateScreen(t *testing.T) {
 		}
 		pane.PluginMu.Lock()
 		pane.Type = typ
-		pane.MouseModes.altScreen = alt
 		pane.PluginMu.Unlock()
+		if alt {
+			// Through the real scanner, not by setting the field: this is the
+			// producer→consumer seam, and a test that writes altScreen itself
+			// keeps passing if the two ever stop naming the same state.
+			d.flushPaneOutput(pane.ID, []byte("\x1b[?1049h"))
+			pane.PluginMu.Lock()
+			seen := pane.MouseModes.altScreen
+			pane.PluginMu.Unlock()
+			if !seen {
+				t.Fatalf("setup: the alt-screen enable did not reach %s's state", typ)
+			}
+		}
 		// OutputBuf, not GhostSnap: this is the reconnect path, where the child
 		// is alive and the replay is the only history there is. The ghostsnap
 		// path is already skipped for claude-code by restoresOwnHistory, so it
@@ -49,18 +60,29 @@ func TestHandleAttach_SkipsReplayForAPaneOnTheAlternateScreen(t *testing.T) {
 		return pane
 	}
 
+	fullscreen := mkPane("claude-code", true)
+	shell := mkPane("terminal", false)
+
 	// A pane carrying BOTH — a restore snapshot and an alt-screen child. Its
 	// snapshot must be consumed by this attach even though nothing is replayed:
 	// left behind, it would be replayed by a LATER attach once the child leaves
 	// the alternate screen, painting a previous daemon session's screen into a
-	// live pane. Reachable without claude-code at all: attach while `vim` is
-	// up, quit vim, attach again.
-	snapshotted := mkPane("terminal", true)
+	// live pane.
+	snapshotted := mkPane("claude-code", true)
 	snapshotted.PluginMu.Lock()
 	snapshotted.GhostSnap = bytes.Repeat([]byte{'s'}, 2048)
 	snapshotted.PluginMu.Unlock()
-	fullscreen := mkPane("claude-code", true)
-	shell := mkPane("terminal", false)
+
+	// A pane on the alternate screen whose plugin declares NO redraw_key. It
+	// must still get its replay: `redrawKick`'s fallback there is a resize
+	// jiggle, which a shell ignores, and altScreen is sticky — a `vim` killed
+	// without emitting rmcup would otherwise leave this pane blank on every
+	// reattach for the daemon's whole life. A torn replay beats a dead pane.
+	//
+	// Created LAST on purpose: panes replay in creation order, so waiting for
+	// THIS pane's bytes proves every earlier pane's frames have already
+	// arrived. A pane that receives nothing cannot serve as that barrier.
+	strandedShell := mkPane("terminal", true)
 
 	if err := d.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -87,11 +109,13 @@ func TestHandleAttach_SkipsReplayForAPaneOnTheAlternateScreen(t *testing.T) {
 		t.Fatalf("write attach: %v", err)
 	}
 
-	// Read until the shell's replay has fully arrived. The alt-screen pane's
-	// frames, if the daemon wrongly sent any, precede it in the same pane loop.
+	// Read until the LAST-created replaying pane has its bytes. Panes replay in
+	// creation order, so that is the barrier proving every earlier pane's
+	// frames have arrived — including the ones the daemon should have sent
+	// nothing for, whose absence is what the assertions below check.
 	ghost := map[string]int{}
 	_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
-	for ghost[shell.ID] < 4096 {
+	for ghost[strandedShell.ID] < 4096 {
 		msg, err := ipc.ReadMessage(conn)
 		if err != nil {
 			t.Fatalf("read after %v: %v", ghost, err)
@@ -113,9 +137,17 @@ func TestHandleAttach_SkipsReplayForAPaneOnTheAlternateScreen(t *testing.T) {
 			"deltas aimed at a screen the replay does not own, so it paints a torn "+
 			"frame that nothing then repairs", n)
 	}
-	if n := ghost[shell.ID]; n != 4096 {
-		t.Errorf("main-screen pane received %d ghost bytes, want 4096 — a shell "+
-			"reprints none of its scrollback, so this replay is its only history", n)
+	// >= rather than ==: the alt-screen panes' buffers also hold the enable
+	// sequence the scanner was driven with, so an exact count would be
+	// asserting about the test's own setup bytes.
+	if n := ghost[shell.ID]; n < 4096 {
+		t.Errorf("main-screen pane received %d ghost bytes, want at least 4096 — a "+
+			"shell reprints none of its scrollback, so this replay is its only history", n)
+	}
+	if n := ghost[strandedShell.ID]; n < 4096 {
+		t.Errorf("alt-screen pane with no redraw_key received %d ghost bytes, want its "+
+			"history — its plugin has no repair path, so skipping the replay leaves it "+
+			"blank on every reattach rather than merely torn", n)
 	}
 	if n := ghost[snapshotted.ID]; n != 0 {
 		t.Errorf("alt-screen pane with a restore snapshot received %d ghost bytes, want 0", n)

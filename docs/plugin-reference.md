@@ -254,8 +254,16 @@ resume_args = ["--resume", "{session_id}"]
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `strategy` | string | No | `""` (none) | Resume mechanism. See [Strategy Reference](#strategy-reference). |
-| `ghost_buffer` | bool | No | `true` | If `true`, PTY output is saved to disk and replayed on reconnect (shows previous terminal content with a dimmed "restored" label). Set to `false` for TUI apps that manage their own display — but measure first: "full-screen app" is not the test. A program that writes to the **main** screen and scrolls normally (so it is scrollable while attached) replays into coherent history, and `false` throws that history away on every reattach. `claude-code` ships `true` for exactly this reason. `false` is for programs that own the **alternate** screen. |
+| `ghost_buffer` | bool | No | `true` | If `true`, PTY output is saved to disk and replayed on reconnect (shows previous terminal content with a dimmed "restored" label). Set to `false` for TUI apps that manage their own display — but measure first: "full-screen app" is not the test. A program that writes to the **main** screen and scrolls normally (so it is scrollable while attached) replays into coherent history, and `false` throws that history away on every reattach. `claude-code` ships `true` for exactly this reason. `false` is for programs that own the **alternate** screen. This field is a **default, not a decision** — see below. |
 | `redraw_key` | string | No | `""` | Byte(s) written to the pane's stdin when a client attaches and the pane had **no** ghost replay to send. Only meaningful with `ghost_buffer = false`, which is what leaves a reconnecting client with a blank rectangle in front of a live process. See below before setting it. |
+
+#### `ghost_buffer` is a default, not a decision
+
+Quil watches each pane's output for the alternate-screen mode (`?1049`, and the older `?47` / `?1047`). A pane whose program is **currently on the alternate screen never receives a replay**, whatever this field says — it gets a `redraw_key` kick or a resize instead, exactly like an opted-out plugin.
+
+That override exists because the field describes a program, while the answer belongs to a *process at a moment in time*. Claude Code is the case that proved it: its classic renderer writes to the main screen and replays into coherent history, its fullscreen renderer draws on the alternate screen and transmits only the cells that changed between frames — and `/tui fullscreen` switches a running session in place. Measured against a real pane, replaying a wrapped buffer from the fullscreen renderer paints torn escape sequences as literal text with most rows blank.
+
+So set `ghost_buffer = true` when your program's stream replays into coherent history *while it is on the main screen*. The alt-screen case is handled for you, including a program that switches at runtime.
 
 #### `redraw_key` — when to set it, and when not to
 

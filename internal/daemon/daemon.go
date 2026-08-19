@@ -1431,6 +1431,29 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 			if p := d.registry.Get(typ); p != nil && !p.Persistence.GhostBuffer {
 				ghostEnabled = false
 			}
+			// A plugin's ghost_buffer is a DEFAULT; what the child is doing
+			// right now overrides it. A pane on the alternate screen has no
+			// replayable history — measured 2026-08-19 (issue #172), a
+			// fullscreen claude-code buffer cut at an arbitrary point paints
+			// torn escape sequences as literal text with most rows blank,
+			// because that renderer transmits only the cells that changed
+			// between frames. Its ghost_buffer = true was measured against the
+			// CLASSIC renderer, where the stream really is coherent history.
+			//
+			// Detection rather than configuration, because a user's own plugin
+			// TOML overrides the embedded default (so flipping the value
+			// reaches no existing install), the value stays right for the
+			// classic renderer, and `/tui fullscreen` can change the answer
+			// mid-session. The pane falls through to redrawKick below, exactly
+			// as an opted-out plugin does — which also repairs the frame,
+			// where a replay leaves it torn.
+			//
+			// Read inside this span, beside Type and GhostSnap: it is a fact
+			// about the process, not about the plugin, and the three have to
+			// describe the same instant.
+			if pane.MouseModes.altScreen {
+				ghostEnabled = false
+			}
 			var ghost []byte
 			source := "ghostsnap"
 			if ghostEnabled {

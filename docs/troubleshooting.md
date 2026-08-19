@@ -199,6 +199,38 @@ Quil tracks Claude session-id rotation via a `SessionStart` hook. If the hook di
 
 For OpenCode the equivalent files are under `~/.quil/opencodehook/` and `~/.quil/sessions/opencode-<pane-id>.id` — see [Features → OpenCode session-id tracking](features.md#opencode-session-id-tracking).
 
+## The session picker lists no sessions
+
+Symptoms: creating a `claude-code` pane, the **Session** field in the setup dialog shows no sessions to resume — even though you know that directory has Claude history.
+
+1. **`CLAUDE_CONFIG_DIR`.** Claude Code stores its transcripts under its config
+   directory, `~/.claude` by default. If you set `CLAUDE_CONFIG_DIR` to move that
+   directory, Quil reads the relocated path — but it reads the value **the daemon
+   was started with**, not the one in your current shell. Restart the daemon after
+   changing it:
+
+   ```bash
+   quil daemon restart
+   ```
+
+   Quil reads this on the daemon's machine, which matters under `--remote`: the
+   value that counts is the one set on the host running `quild`, not on your
+   laptop.
+
+2. **The directory is per working directory.** Claude keys transcripts off the
+   session's own working directory, so a session started elsewhere will not appear
+   for the folder you picked. Check what Claude recorded:
+
+   ```bash
+   ls "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/"
+   ```
+
+3. **Sessions listed but untitled.** A session showing as a bare UUID means Quil
+   read the transcript but found no prompt to title it with — harmless, and it
+   still resumes. Resuming does not depend on the picker: it uses the transcript
+   path Claude reports through the hook, so a pane resumes correctly even when the
+   picker cannot list it.
+
 ## No desktop notifications (Windows)
 
 Check in this order — the first item is the usual cause, because the config flag is already on by default and registration is the remaining gate.

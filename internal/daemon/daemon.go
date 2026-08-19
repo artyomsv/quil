@@ -1362,6 +1362,55 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	}
 }
 
+// setPaneType stores a pane's plugin type under PluginMu.
+//
+// CreatePane PUBLISHES the pane into sm.panes before returning, so every write
+// after that call lands on an object another connection's goroutine can already
+// be reading — workspaceStateFromSnapshot captures Type under this lock and says
+// so in its own comment. Two clients attaching at once is enough, because each
+// conn is dispatched on its own goroutine: one builds the default workspace
+// while the other builds the workspace state it is about to be sent.
+//
+// A function rather than the lock pair inlined at each call site, so the race
+// regression test can drive the SAME code production does. The first version of
+// that test hand-rolled the write, which meant it passed against the unguarded
+// production code it was written to pin — verified by checking daemon.go out at
+// the pre-fix commit and watching the suite stay green.
+//
+// Callers must NOT hold PluginMu: it is not reentrant, and doing so has
+// deadlocked the whole daemon before (see emitEvent/detectBellEvent in
+// .claude/rules/daemon-lifecycle.md). Safe to call while holding no lock, which
+// is what every call site does — CreatePane releases sm.mu before returning.
+func setPaneType(pane *Pane, typ string) {
+	pane.PluginMu.Lock()
+	defer pane.PluginMu.Unlock()
+	pane.Type = typ
+}
+
+// setPaneCWD stores a pane's working directory under PluginMu.
+//
+// Same contract as setPaneType, and `.claude/rules/daemon-lifecycle.md` states
+// it outright: "Pane.Type and Pane.CWD are also PluginMu-protected". Every
+// reader already honours that — workspaceStateFromSnapshot, buildPaneInfos and
+// buildPaneStatus each capture CWD under this lock and each say so — while
+// handleUpdatePane wrote it bare, which is the half that was missing.
+//
+// The window is wider than the Type race CI caught. That one needed two clients
+// attaching at the same instant; this one fires on every `cd` in every pane: the
+// TUI's OSC 7 handler sets the pane CWD, handlePaneOutput sends MsgUpdatePane,
+// and the write lands on a conn dispatch goroutine while the snapshot goroutine
+// reads it. A Go string is a two-word (pointer, length) value, so a torn read is
+// a mismatched pair — and that value is persisted to workspace.json, broadcast
+// to every client, and handed to os.Stat on the next restore.
+//
+// The UNC rejection stays at the CALL SITE: it validates the incoming payload,
+// which is a decision about what to store, not part of storing it.
+func setPaneCWD(pane *Pane, cwd string) {
+	pane.PluginMu.Lock()
+	defer pane.PluginMu.Unlock()
+	pane.CWD = cwd
+}
+
 func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 	var attach ipc.AttachPayload
 	if err := msg.DecodePayload(&attach); err != nil {
@@ -1397,14 +1446,7 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 		log.Print("attach: creating default workspace (no tabs)")
 		tab := d.session.CreateTab("Shell")
 		pane, _ := d.session.CreatePane(tab.ID, d.defaultCWD())
-		// PluginMu-protected: CreatePane PUBLISHES the pane into sm.panes before
-		// returning, so this writes an object another conn's goroutine can
-		// already be reading. workspaceStateFromSnapshot captures Type under
-		// this lock, and two clients attaching at once is enough — one builds
-		// the default workspace while the other builds workspace state.
-		pane.PluginMu.Lock()
-		pane.Type = "terminal"
-		pane.PluginMu.Unlock()
+		setPaneType(pane, "terminal")
 
 		ptySession := apty.NewWithSize(cols, rows)
 		if err := d.spawnPane(pane, ptySession, false); err != nil {
@@ -1790,11 +1832,7 @@ func (d *Daemon) recoverEmptyProject(projectID string) {
 		log.Printf("recover empty project %q: create pane: %v", projectID, err)
 		return
 	}
-	// PluginMu-protected for the same reason as the attach path: CreatePane has
-	// already published this pane, so a concurrent snapshot can read Type.
-	pane.PluginMu.Lock()
-	pane.Type = "terminal"
-	pane.PluginMu.Unlock()
+	setPaneType(pane, "terminal")
 	// Through newSessionFn rather than apty.NewWithSize directly: same 80×24
 	// default in production, and the seam is what lets a test assert the
 	// replacement shell's CWD without launching a child.
@@ -2252,11 +2290,7 @@ func (d *Daemon) ensureTabNotEmpty(tabID string) {
 		d.session.DestroyPane(op.ID)
 	}
 	if newPane, err := d.session.CreatePane(tabID, d.defaultCWD()); err == nil {
-		// PluginMu-protected: published by CreatePane, so a concurrent snapshot
-		// can read Type. Same shape as the attach and recover paths.
-		newPane.PluginMu.Lock()
-		newPane.Type = "terminal"
-		newPane.PluginMu.Unlock()
+		setPaneType(newPane, "terminal")
 		ptySession := apty.New()
 		if err := d.spawnPane(newPane, ptySession, false); err != nil {
 			log.Printf("failed to start replacement shell: %v", err)
@@ -2421,7 +2455,7 @@ func (d *Daemon) handleUpdatePane(conn *ipc.Conn, msg *ipc.Message) {
 		// prevents a UNC value from being persisted into workspace.json and later
 		// handed to os.Stat in spawnRestoredPane.
 		if !strings.HasPrefix(payload.CWD, `\\`) && !strings.HasPrefix(payload.CWD, `//`) {
-			pane.CWD = payload.CWD
+			setPaneCWD(pane, payload.CWD)
 		} else {
 			log.Printf("pane %s: rejected UNC CWD %q", pane.ID, payload.CWD)
 		}
@@ -4613,9 +4647,10 @@ func (d *Daemon) handleCreatePaneReq(conn *ipc.Conn, msg *ipc.Message) {
 	}
 	d.highlightPane(pane.ID)
 
-	// PluginMu-protected: CreatePane published this pane above, so a snapshot on
-	// another conn's goroutine can already read Type. Matches handleCreatePane's
-	// own guarded write of the same fields.
+	// Same hazard setPaneType documents, but three fields must land together —
+	// a snapshot between two critical sections would see the new Type with the
+	// previous instance, so this keeps its own combined block rather than
+	// calling the helper. Matches constructPaneAt, which guards the same trio.
 	pane.PluginMu.Lock()
 	pane.Type = req.Type
 	if pane.Type == "" {

@@ -4847,10 +4847,12 @@ func (m Model) handlePaneRenameKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 //
 // INVARIANT: a branch added here that can move the screen MUST set changedView.
 // Nothing else enforces it, and the failure mode is a stale frame rather than a
-// crash. Three branches set it today even though they render only inside the
-// pane (see the comments at each): they fire once or twice per pane, so forcing
-// a rebuild costs nothing, and they are exactly what a future tab-bar or
-// sidebar indicator would read.
+// crash. Five sites set it today (both ghost transitions, the restore settle,
+// the first live frame, the CWD change) even though each renders only inside the
+// pane — plus the visibility base in each of the two branches. The five fire
+// once or twice per pane, so forcing a rebuild costs nothing, and they are
+// exactly what a future tab-bar or sidebar indicator would read. Each is pinned
+// by its own test; deleting any one flag fails exactly that test.
 func (m *Model) handlePaneOutput(msg PaneOutputMsg) (tea.Cmd, bool) {
 	// Overlay panes live outside the layout tree — check them first.
 	for _, tab := range m.allTabs() {

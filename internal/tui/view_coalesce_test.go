@@ -468,7 +468,7 @@ func TestUpdate_ActiveTabOverlayOutputAlwaysRebuilds(t *testing.T) {
 	}
 }
 
-// The first-live-output branch, pinned. It is one of the three that set
+// The first-live-output branch, pinned. It is one of the five sites that set
 // changedView regardless of visibility, and the comments call that deliberate
 // conservatism — so it needs a test, or the next person removes it with a green
 // suite and nobody learns the difference between "dead" and "unpinned".
@@ -521,10 +521,12 @@ func TestUpdate_HiddenPaneRestoreSettleStillRebuilds(t *testing.T) {
 	}
 }
 
-// A CWD change forces a rebuild even off-screen. Not because anything outside
-// the pane draws a CWD today — nothing does — but because it fires at most a
-// handful of times per pane and is the obvious candidate for a future sidebar
-// column. Pinned so the conservatism stays deliberate rather than accidental.
+// A CWD change forces a rebuild even off-screen. renderStatusBar DOES draw a
+// CWD outside the pane, but only for the active tab's active pane, which
+// paneIsVisible already covers — so this flag is conservatism rather than the
+// thing keeping the status bar correct. It fires at most a handful of times per
+// pane and is the obvious candidate for a future sidebar column. Pinned so the
+// conservatism stays deliberate rather than accidental.
 //
 // OSC 7 updates Pane.CWD synchronously inside AppendOutput via the VT callback,
 // so this drives the real path.

@@ -2376,10 +2376,13 @@ func (d *Daemon) repaintAfterResize(pane *Pane, typ string) {
 	if p == nil || p.Persistence.RedrawKey == "" {
 		return
 	}
-	// EnqueueInput, never pane.PTY.Write: a child that has stopped reading
-	// stdin blocks the writer forever, and this runs on the resizing conn's
-	// dispatch goroutine.
-	pane.EnqueueInput([]byte(p.Persistence.RedrawKey))
+	// sendRedrawKey, never EnqueueInput directly: this key is input, and the
+	// program on the other side may read a REPEAT as something else entirely.
+	// This site and redrawKick fire ~5 ms apart on a restore-attach, which is
+	// what issue #169 was. It enqueues rather than calling pane.PTY.Write for
+	// the older reason: a child that has stopped reading stdin blocks the
+	// writer forever, and this runs on the resizing conn's dispatch goroutine.
+	d.sendRedrawKey(pane, typ, p.Persistence.RedrawKey)
 }
 
 // handleUpdatePane applies a PARTIAL pane update. conn identifies the client
@@ -2560,7 +2563,10 @@ func (d *Daemon) redrawKick(pane *Pane, typ string) {
 	if p := d.registry.Get(typ); p != nil && p.Persistence.RedrawKey != "" {
 		log.Printf("attach: redraw kick pane %s (type=%s, no ghost replay, %d bytes)",
 			pane.ID, typ, len(p.Persistence.RedrawKey))
-		pane.EnqueueInput([]byte(p.Persistence.RedrawKey))
+		// Throttled, because the resize that follows this attach kicks the same
+		// pane again milliseconds later and claude-code reads the pair as
+		// /clear (issue #169).
+		d.sendRedrawKey(pane, typ, p.Persistence.RedrawKey)
 		return
 	}
 
@@ -3791,6 +3797,16 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	// Fresh PTY: reset the same-size guard so its first resize_pane is
 	// always applied (see handleResizePane).
 	pane.appliedCols, pane.appliedRows = 0, 0
+	// And the redraw throttle, for the same reason: this child has received no
+	// redraw key, so the previous one's stamp would defer its first kick by up
+	// to a cooldown and leave a live pane looking blank meanwhile. The /clear
+	// window belongs to the child PROCESS, so a new process starts a new one.
+	// ptyGen is what lets a kick armed for the previous child recognise that it
+	// is now looking at a different one; handleRestartPaneReq reinstalls
+	// through this same function, so this is the only site that needs it.
+	pane.lastRedrawAt = time.Time{}
+	pane.redrawSeq = 0
+	pane.ptyGen++
 	pane.PluginMu.Unlock()
 	go d.streamPTYOutput(pane.ID, ptySession)
 	return nil

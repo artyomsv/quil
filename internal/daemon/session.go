@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/artyomsv/quil/internal/logger"
@@ -107,6 +108,40 @@ type Pane struct {
 	// LastInputBlockedAt: cooldown for the input_blocked event emitted when
 	// the input queue overflows (child stopped reading stdin). Under PluginMu.
 	LastInputBlockedAt time.Time
+	// Redraw-key throttle, both under PluginMu. A plugin's redraw_key is
+	// INPUT, and a program may give a REPEATED press a second meaning:
+	// claude-code >= v2.1.126 runs /clear on two Ctrl+L within two seconds,
+	// and quil's attach kick and resize kick land ~5 ms apart on an ordinary
+	// reattach — which cleared the conversation in every AI pane at once
+	// (issue #169). sendRedrawKey keeps any two deliveries redrawKeyCooldown
+	// apart; redrawTimer is the one held kick waiting for the window to close.
+	//
+	// redrawSeq is the input-queue position of the kick lastRedrawAt stamps.
+	// The cooldown has to be measured against what the CHILD has seen, not
+	// against what the daemon enqueued: a child that stops reading its stdin
+	// holds queued bytes for as long as it likes, so two kicks stamped three
+	// seconds apart can still arrive back to back once it resumes.
+	lastRedrawAt time.Time
+	redrawTimer  *time.Timer
+	redrawSeq    uint64
+	// ptyGen increments every time a new session is installed in PTY, so a held
+	// kick can tell "same child" from "restarted child" without comparing the
+	// interface value. apty.Session implementations are all pointers today, but
+	// nothing in the interface forbids a value receiver, and comparing a
+	// non-comparable dynamic type panics — on a time.AfterFunc goroutine, which
+	// takes the whole daemon with it. PluginMu-protected, like PTY itself.
+	ptyGen uint64
+	// inputEnqueued/inputWritten count items pushed onto and drained off the
+	// input queue. Atomic rather than PluginMu-protected: EnqueueInput sits on
+	// the keystroke path and takes no lock today, and the redraw throttle only
+	// ever compares the two. See enqueueInputSeq.
+	inputEnqueued atomic.Uint64
+	inputWritten  atomic.Uint64
+	// inputStopped records that StopInput has run, i.e. this pane is being torn
+	// down. PluginMu-protected. releasePanes neither nils PTY nor sets
+	// ExitCode, so without this flag a held redraw kick that fires during
+	// teardown reads the pane as perfectly healthy.
+	inputStopped bool
 	// Input pipeline: all PTY stdin writes go through a dedicated per-pane
 	// goroutine (inputWriter). A child that stops reading its stdin fills
 	// the kernel PTY buffer and makes Write block forever; on the IPC
@@ -244,18 +279,51 @@ func (p *Pane) EnsureInputWriter() {
 // Returns false when the queue is full — the child is not reading stdin
 // and the caller decides how to surface the drop.
 func (p *Pane) EnqueueInput(data []byte) bool {
+	_, ok := p.enqueueInputSeq(data)
+	return ok
+}
+
+// enqueueInputSeq is EnqueueInput plus the queue position of the accepted item.
+//
+// Only the redraw throttle needs the position, and it needs it for one reason:
+// it must know whether the PREVIOUS kick has left the queue before delivering
+// another, because the two-second window that matters belongs to the child.
+//
+// The counter is bumped after the push rather than reserved before it, so two
+// concurrent producers can hand each other's positions back. That can only make
+// a caller wait for FEWER writes than its own item needed, never more, and the
+// redraw path — the sole consumer — treats "not yet drained" as the cautious
+// answer, so the degradation is toward the pre-existing behaviour rather than
+// toward a stall.
+func (p *Pane) enqueueInputSeq(data []byte) (uint64, bool) {
 	p.EnsureInputWriter()
 	select {
 	case p.inputCh <- data:
-		return true
+		return p.inputEnqueued.Add(1), true
 	default:
-		return false
+		return 0, false
 	}
 }
 
 // StopInput terminates the input writer. Idempotent; safe to call even if
 // the writer never started.
+//
+// It also drops a redraw kick held by sendRedrawKey. releasePanes is the single
+// teardown funnel and calls this before closing the PTY, so a pane being
+// destroyed cannot have a timer outlive it. deferredRedrawKey re-checks
+// liveness itself — this is the cheap half, not the correctness half.
 func (p *Pane) StopInput() {
+	p.PluginMu.Lock()
+	if p.redrawTimer != nil {
+		p.redrawTimer.Stop()
+		p.redrawTimer = nil
+	}
+	// Stop() does not wait for a callback that has already fired and is parked
+	// on this lock, so the flag is what that callback reads to learn the pane
+	// is gone — releasePanes leaves PTY and ExitCode untouched.
+	p.inputStopped = true
+	p.PluginMu.Unlock()
+
 	p.EnsureInputWriter()
 	p.inputStopOnce.Do(func() { close(p.inputDone) })
 }
@@ -266,20 +334,54 @@ func (p *Pane) inputWriter() {
 		case <-p.inputDone:
 			return
 		case data := <-p.inputCh:
-			p.PluginMu.Lock()
-			pty := p.PTY
-			p.PluginMu.Unlock()
-			if pty == nil {
-				continue
-			}
-			// May block until the child reads or the PTY is closed — both
-			// are fine here, on the pane's own goroutine. A close while
-			// blocked errors the Write, and the next loop sees inputDone.
-			if _, err := pty.Write(data); err != nil {
-				logger.Debug("pane %s: input write: %v", p.ID, err)
-			}
+			p.writeInput(data)
 		}
 	}
+}
+
+// writeInput performs one queued write and then marks the item drained.
+//
+// inputWritten counts items that have LEFT the queue, whatever the outcome — a
+// nil PTY and a failed write both mean this item will never reach the child, so
+// a counter that skipped them would stall forever and leave the redraw throttle
+// treating every later kick as still-queued.
+func (p *Pane) writeInput(data []byte) {
+	defer p.markInputWritten()
+
+	p.PluginMu.Lock()
+	pty := p.PTY
+	p.PluginMu.Unlock()
+	if pty == nil {
+		return
+	}
+	// May block until the child reads or the PTY is closed — both are fine
+	// here, on the pane's own goroutine. A close while blocked errors the
+	// Write, and the next loop sees inputDone.
+	if _, err := pty.Write(data); err != nil {
+		logger.Debug("pane %s: input write: %v", p.ID, err)
+	}
+}
+
+// markInputWritten records that one queued item has left the queue, and — when
+// that item was the redraw kick — restarts the cooldown from THIS moment.
+//
+// That second half is what makes the cooldown mean anything. The enqueue stamp
+// only bounds how often the daemon hands a kick over; the window claude-code
+// measures starts when the byte actually reaches it, which is here. A kick that
+// sat in a wedged child's queue for a minute must not let a second one follow
+// microseconds behind it.
+//
+// The stamp only ever moves forward: a write completes after its own enqueue,
+// so replacing the enqueue time with the completion time lengthens the window
+// rather than shortening it.
+func (p *Pane) markInputWritten() {
+	n := p.inputWritten.Add(1)
+
+	p.PluginMu.Lock()
+	if p.redrawSeq != 0 && n == p.redrawSeq {
+		p.lastRedrawAt = time.Now()
+	}
+	p.PluginMu.Unlock()
 }
 
 // releasePanes tears down pane PTYs OFF the session lock, each on its own

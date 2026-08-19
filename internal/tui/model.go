@@ -4872,7 +4872,7 @@ func (m *Model) handlePaneOutput(msg PaneOutputMsg) (tea.Cmd, bool) {
 			// frames set up the terminal and clear the screen well before they
 			// paint, so the flag went down while the rectangle was still empty,
 			// which is the state the indicator exists to cover.
-			overlayChanged := m.paneIsVisible(msg.PaneID)
+			overlayChanged := false
 			if (tab.overlayPane.preparing || tab.overlayPane.resuming) && tab.overlayPane.restoreSettled() {
 				tab.overlayPane.preparing = false
 				tab.overlayPane.resuming = false
@@ -4970,9 +4970,11 @@ func (m *Model) handlePaneOutput(msg PaneOutputMsg) (tea.Cmd, bool) {
 				)
 			}
 			if leaf.Pane.CWD != oldCWD && leaf.Pane.CWD != "" {
-				// Drawn only in the pane's own top border today. Conservative
-				// for the same reason as the settle above: rare, cheap, and the
-				// obvious candidate for a future sidebar column.
+				// renderStatusBar draws a CWD outside the pane, but only for
+				// tab.ActivePaneModel() of the ACTIVE tab — which paneIsVisible
+				// already covers, so this flag is not what keeps that correct.
+				// Conservative for the same reason as the settle above: rare,
+				// cheap, and the obvious candidate for a future sidebar column.
 				changedView = true
 				cmds = append(cmds, m.updatePaneCWD(msg.PaneID, leaf.Pane.CWD))
 			}

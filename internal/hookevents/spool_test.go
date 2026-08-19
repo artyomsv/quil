@@ -541,3 +541,34 @@ func TestSpool_Tick_StillRotatesAnIdleFileAtTheThreshold(t *testing.T) {
 		t.Errorf("an idle file at the rotation threshold was skipped and never rotated (size=%d)", info.Size())
 	}
 }
+
+// The rotation boundary EXACTLY, not threshold+1.
+//
+// readPaneFile rotates on `size >= rotationThreshold`, so the skip must refuse
+// at `size == rotationThreshold` too. Seeding threshold+1 leaves the boundary
+// itself untested and lets `<` mutate to `<=` undetected — a file sitting at
+// exactly 16 MiB would then take the skip and never rotate until it grew one
+// more byte.
+func TestSpool_Tick_RotatesAFileAtExactlyTheThreshold(t *testing.T) {
+	dir := t.TempDir()
+	s := NewSpool(dir)
+	if err := s.Init(); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	path := filepath.Join(dir, "pane-exact.jsonl")
+	if err := os.WriteFile(path, bytes.Repeat([]byte("\n"), rotationThreshold), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	s.Tick() // consumes; offset reaches size == rotationThreshold
+	s.Tick() // idle tick: must NOT be skipped, must reach rotate
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if info.Size() >= rotationThreshold {
+		t.Errorf("a file at EXACTLY rotationThreshold was skipped and never rotated (size=%d)", info.Size())
+	}
+}

@@ -4872,7 +4872,7 @@ func (m *Model) handlePaneOutput(msg PaneOutputMsg) (tea.Cmd, bool) {
 			// frames set up the terminal and clear the screen well before they
 			// paint, so the flag went down while the rectangle was still empty,
 			// which is the state the indicator exists to cover.
-			overlayChanged := false
+			overlayChanged := m.paneIsVisible(msg.PaneID)
 			if (tab.overlayPane.preparing || tab.overlayPane.resuming) && tab.overlayPane.restoreSettled() {
 				tab.overlayPane.preparing = false
 				tab.overlayPane.resuming = false
@@ -4907,6 +4907,12 @@ func (m *Model) handlePaneOutput(msg PaneOutputMsg) (tea.Cmd, bool) {
 			if msg.Ghost && m.cfg.GhostBuffer.Dimmed {
 				if !leaf.Pane.ghost {
 					log.Printf("pane %s: ghost=true (received %d bytes)", msg.PaneID, len(msg.Data))
+					// The TRANSITION, not the assignment. `ghost` drives the
+					// pane's dim styling, so flipping it moves the screen —
+					// but the assignment below runs on every replayed chunk,
+					// and marking that would coalesce nothing at all. Same
+					// once-per-pane conservatism as the settle and CWD branches.
+					changedView = true
 				}
 				leaf.Pane.ghost = true
 			} else if !msg.Ghost {
@@ -4934,6 +4940,10 @@ func (m *Model) handlePaneOutput(msg PaneOutputMsg) (tea.Cmd, bool) {
 				// child painting, which is what fixes the cursor.
 				if leaf.Pane.ghost {
 					log.Printf("pane %s: ghost->live transition, preserving VT (type=%q)", msg.PaneID, leaf.Pane.Type)
+					// Ghost->live drops the dim styling. Marked on the
+					// transition only, for the reason above: `ghost = false`
+					// below executes on every live chunk.
+					changedView = true
 				}
 				leaf.Pane.ghost = false
 			}

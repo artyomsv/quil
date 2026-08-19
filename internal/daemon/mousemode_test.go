@@ -15,7 +15,10 @@ func TestScanMouseModes(t *testing.T) {
 		{"colors only no change", mouseModeState{normal: true, sgr: true}, "\x1b[31mred\x1b[0m", mouseModeState{normal: true, sgr: true}, ""},
 		{"opencode startup burst separate", mouseModeState{},
 			"\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h",
-			mouseModeState{normal: true, button: true, any: true, sgr: true}, ""},
+			// altScreen comes along because opencode IS a full-screen app —
+			// this burst is a real capture, and it is exactly the population
+			// the replay override is about.
+			mouseModeState{normal: true, button: true, any: true, sgr: true, altScreen: true}, ""},
 		{"combined params", mouseModeState{}, "\x1b[?1000;1006h", mouseModeState{normal: true, sgr: true}, ""},
 		{"normal tracking only, no sgr", mouseModeState{}, "\x1b[?1000h", mouseModeState{normal: true}, ""},
 		{"x10 mode", mouseModeState{}, "\x1b[?9h", mouseModeState{x10: true}, ""},
@@ -27,7 +30,11 @@ func TestScanMouseModes(t *testing.T) {
 		{"cursor-hide does not trigger", mouseModeState{}, "\x1b[?25l", mouseModeState{}, ""},
 		{"bracketed-paste tracked", mouseModeState{}, "\x1b[?2004h", mouseModeState{bracketedPaste: true}, ""},
 		{"bracketed-paste reset", mouseModeState{bracketedPaste: true}, "\x1b[?2004l", mouseModeState{}, ""},
-		{"alt-screen does not trigger", mouseModeState{}, "\x1b[?1049h", mouseModeState{}, ""},
+		// Was "alt-screen does not trigger", from when 1049 was noise to this
+		// scanner. It is tracked now (issue #172) — but the property the case
+		// was written for still holds and is what it still asserts: a non-mouse
+		// mode moves no MOUSE field.
+		{"alt-screen sets only altScreen", mouseModeState{}, "\x1b[?1049h", mouseModeState{altScreen: true}, ""},
 		{"mouse set amid other output", mouseModeState{},
 			"text\x1b[?25l more\x1b[?1002h\x1b[?1006h done", mouseModeState{button: true, sgr: true}, ""},
 		{"incomplete sequence at end carried as tail", mouseModeState{}, "\x1b[?1000", mouseModeState{}, "\x1b[?1000"},
@@ -40,8 +47,14 @@ func TestScanMouseModes(t *testing.T) {
 		// carried, a run past the cap must be dropped. The first row is the
 		// regression guard for a cap set below the real maximum — at 24 the
 		// tail came back empty and the split enable was lost for good.
+		// Every tracked mode, alternate-screen aliases included — 42 bytes
+		// before the final byte, which is the figure maxModeSeqLen is derived
+		// from. Extended when 47/1047/1049 joined: a guard still using the old
+		// 29-byte run stops guarding the real maximum, which is the drift the
+		// constant's comment exists to prevent.
 		{"all-modes combined run carried", mouseModeState{},
-			"\x1b[?9;1000;1002;1003;1006;2004", mouseModeState{}, "\x1b[?9;1000;1002;1003;1006;2004"},
+			"\x1b[?9;1000;1002;1003;1006;2004;47;1047;1049", mouseModeState{},
+			"\x1b[?9;1000;1002;1003;1006;2004;47;1047;1049"},
 		{"overlong param run dropped, not carried", mouseModeState{},
 			"\x1b[?" + "1234567890123456789012345678901234567890123456789012345678901234567890",
 			mouseModeState{}, ""},
@@ -95,8 +108,11 @@ func TestScanMouseModes_SplitAcrossChunks(t *testing.T) {
 // than the one offset that happened to be tried.
 func TestScanMouseModes_SplitInsideCombinedRun(t *testing.T) {
 	t.Parallel()
-	const seq = "\x1b[?9;1000;1002;1003;1006;2004h"
-	want := mouseModeState{x10: true, normal: true, button: true, any: true, sgr: true, bracketedPaste: true}
+	const seq = "\x1b[?9;1000;1002;1003;1006;2004;47;1047;1049h"
+	want := mouseModeState{
+		x10: true, normal: true, button: true, any: true,
+		sgr: true, bracketedPaste: true, altScreen: true,
+	}
 	for at := 1; at < len(seq); at++ {
 		m, tail := scanMouseModes(mouseModeState{}, []byte(seq[:at]))
 		if m != (mouseModeState{}) {
@@ -109,5 +125,119 @@ func TestScanMouseModes_SplitInsideCombinedRun(t *testing.T) {
 		if len(tail) != 0 {
 			t.Errorf("split at %d: leftover tail %q after complete sequence", at, tail)
 		}
+	}
+}
+
+// The alternate screen rides this scanner for the same reason bracketed paste
+// does: the daemon sees a pane's whole stream from spawn, and a client that
+// attaches later never sees the one-time enable. handleAttach needs the answer
+// to decide whether a ghost replay is history or garbage (issue #172).
+func TestScanMouseModes_TracksTheAlternateScreen(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"1049 enter", "\x1b[?1049h", true},
+		{"1049 leave", "\x1b[?1049l", false},
+		{"legacy 47 enter", "\x1b[?47h", true},
+		{"legacy 1047 enter", "\x1b[?1047h", true},
+		{"combined with mouse modes", "\x1b[?1049;1000;1006h", true},
+		{"unrelated mode does not set it", "\x1b[?25h", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, _ := scanMouseModes(mouseModeState{}, []byte(tt.in))
+			if got.altScreen != tt.want {
+				t.Errorf("altScreen = %v, want %v after %q", got.altScreen, tt.want, tt.in)
+			}
+		})
+	}
+}
+
+// Enter-then-leave in one chunk must end on the LAST state: a program that
+// redraws through an alt-screen round trip is on the main screen afterwards,
+// and its buffer replays fine.
+func TestScanMouseModes_AlternateScreenRoundTripEndsOff(t *testing.T) {
+	got, _ := scanMouseModes(mouseModeState{}, []byte("\x1b[?1049h...content...\x1b[?1049l"))
+	if got.altScreen {
+		t.Error("altScreen = true after an enter/leave round trip, want false")
+	}
+}
+
+// The carry path. A missed enable lets a corrupted replay through, which is the
+// exact failure this tracking exists to prevent — measured 2026-08-19: an
+// arbitrary cut of a fullscreen claude-code buffer paints torn escape sequences
+// as text (`[H`, `6;101m…`) because the stream carries only changed cells.
+func TestScanMouseModes_AlternateScreenSplitAcrossChunks(t *testing.T) {
+	m, tail := scanMouseModes(mouseModeState{}, []byte("noise\x1b[?10"))
+	if m.altScreen {
+		t.Fatal("altScreen set from an incomplete sequence")
+	}
+	joined := append(append([]byte{}, tail...), []byte("49h")...)
+	m, _ = scanMouseModes(m, joined)
+	if !m.altScreen {
+		t.Error("altScreen = false, want true — the split enable was lost")
+	}
+}
+
+// A parameter is a NUMBER to every terminal, not a string. xterm accumulates
+// digits, so these all reach the same mode there — and a daemon that matched on
+// the string form believed a pane was still on the main screen while it was
+// not, which is the belief handleAttach now acts on.
+func TestScanMouseModes_ParsesParametersNumerically(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want mouseModeState
+	}{
+		{"leading zeros on alt screen", "\x1b[?01049h", mouseModeState{altScreen: true}},
+		{"leading zeros on a mouse mode", "\x1b[?01000h", mouseModeState{normal: true}},
+		{"sub-parameters ignored", "\x1b[?1049:1h", mouseModeState{altScreen: true}},
+		{"sub-parameters in a combined run", "\x1b[?1000:2;1049h",
+			mouseModeState{normal: true, altScreen: true}},
+		{"empty parameter is not a mode", "\x1b[?;h", mouseModeState{}},
+		{"over-wide value is not a mode", "\x1b[?10490h", mouseModeState{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, _ := scanMouseModes(mouseModeState{}, []byte(tt.in))
+			if got != tt.want {
+				t.Errorf("scanMouseModes(%q) = %+v, want %+v", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// An ESC where a final byte should be CANCELS the sequence and starts the next
+// one — that is what every real parser does, so the terminal acts on the second
+// sequence. Stepping over that ESC made nine bytes of ordinary pane content
+// (an SSH banner, a git log message, tool output) enough to hide an enable from
+// the daemon while the terminal honoured it.
+func TestScanMouseModes_EscapeMidSequenceStartsTheNextOne(t *testing.T) {
+	got, _ := scanMouseModes(mouseModeState{}, []byte("\x1b[?9\x1b[?1049h"))
+	if !got.altScreen {
+		t.Errorf("altScreen = false after %q — the ESC that cancelled the first "+
+			"sequence was consumed, so the enable behind it was never seen", "\x1b[?9\x1b[?1049h")
+	}
+}
+
+// wireState is what the broadcast trigger compares. altScreen is not on the
+// wire, so toggling it must not look like a change worth a workspace broadcast
+// — and unlike the mouse modes, full-screen programs toggle it routinely.
+func TestMouseModeState_WireStateIgnoresTheAlternateScreen(t *testing.T) {
+	before := mouseModeState{normal: true, sgr: true}
+	after := before
+	after.altScreen = true
+
+	if before.wireState() != after.wireState() {
+		t.Error("entering the alternate screen changed wireState — that costs a " +
+			"broadcast for a field no client is told about")
+	}
+	// The control: something clients DO see must still register.
+	alsoTracking := after
+	alsoTracking.button = true
+	if after.wireState() == alsoTracking.wireState() {
+		t.Error("a mouse-mode change did not register in wireState")
 	}
 }

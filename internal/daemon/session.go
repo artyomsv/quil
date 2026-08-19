@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/artyomsv/quil/internal/logger"
@@ -114,8 +115,26 @@ type Pane struct {
 	// reattach — which cleared the conversation in every AI pane at once
 	// (issue #169). sendRedrawKey keeps any two deliveries redrawKeyCooldown
 	// apart; redrawTimer is the one held kick waiting for the window to close.
+	//
+	// redrawSeq is the input-queue position of the kick lastRedrawAt stamps.
+	// The cooldown has to be measured against what the CHILD has seen, not
+	// against what the daemon enqueued: a child that stops reading its stdin
+	// holds queued bytes for as long as it likes, so two kicks stamped three
+	// seconds apart can still arrive back to back once it resumes.
 	lastRedrawAt time.Time
 	redrawTimer  *time.Timer
+	redrawSeq    uint64
+	// inputEnqueued/inputWritten count items pushed onto and drained off the
+	// input queue. Atomic rather than PluginMu-protected: EnqueueInput sits on
+	// the keystroke path and takes no lock today, and the redraw throttle only
+	// ever compares the two. See enqueueInputSeq.
+	inputEnqueued atomic.Uint64
+	inputWritten  atomic.Uint64
+	// inputStopped records that StopInput has run, i.e. this pane is being torn
+	// down. PluginMu-protected. releasePanes neither nils PTY nor sets
+	// ExitCode, so without this flag a held redraw kick that fires during
+	// teardown reads the pane as perfectly healthy.
+	inputStopped bool
 	// Input pipeline: all PTY stdin writes go through a dedicated per-pane
 	// goroutine (inputWriter). A child that stops reading its stdin fills
 	// the kernel PTY buffer and makes Write block forever; on the IPC
@@ -253,12 +272,29 @@ func (p *Pane) EnsureInputWriter() {
 // Returns false when the queue is full — the child is not reading stdin
 // and the caller decides how to surface the drop.
 func (p *Pane) EnqueueInput(data []byte) bool {
+	_, ok := p.enqueueInputSeq(data)
+	return ok
+}
+
+// enqueueInputSeq is EnqueueInput plus the queue position of the accepted item.
+//
+// Only the redraw throttle needs the position, and it needs it for one reason:
+// it must know whether the PREVIOUS kick has left the queue before delivering
+// another, because the two-second window that matters belongs to the child.
+//
+// The counter is bumped after the push rather than reserved before it, so two
+// concurrent producers can hand each other's positions back. That can only make
+// a caller wait for FEWER writes than its own item needed, never more, and the
+// redraw path — the sole consumer — treats "not yet drained" as the cautious
+// answer, so the degradation is toward the pre-existing behaviour rather than
+// toward a stall.
+func (p *Pane) enqueueInputSeq(data []byte) (uint64, bool) {
 	p.EnsureInputWriter()
 	select {
 	case p.inputCh <- data:
-		return true
+		return p.inputEnqueued.Add(1), true
 	default:
-		return false
+		return 0, false
 	}
 }
 
@@ -275,6 +311,10 @@ func (p *Pane) StopInput() {
 		p.redrawTimer.Stop()
 		p.redrawTimer = nil
 	}
+	// Stop() does not wait for a callback that has already fired and is parked
+	// on this lock, so the flag is what that callback reads to learn the pane
+	// is gone — releasePanes leaves PTY and ExitCode untouched.
+	p.inputStopped = true
 	p.PluginMu.Unlock()
 
 	p.EnsureInputWriter()
@@ -287,19 +327,31 @@ func (p *Pane) inputWriter() {
 		case <-p.inputDone:
 			return
 		case data := <-p.inputCh:
-			p.PluginMu.Lock()
-			pty := p.PTY
-			p.PluginMu.Unlock()
-			if pty == nil {
-				continue
-			}
-			// May block until the child reads or the PTY is closed — both
-			// are fine here, on the pane's own goroutine. A close while
-			// blocked errors the Write, and the next loop sees inputDone.
-			if _, err := pty.Write(data); err != nil {
-				logger.Debug("pane %s: input write: %v", p.ID, err)
-			}
+			p.writeInput(data)
 		}
+	}
+}
+
+// writeInput performs one queued write and then marks the item drained.
+//
+// inputWritten counts items that have LEFT the queue, whatever the outcome — a
+// nil PTY and a failed write both mean this item will never reach the child, so
+// a counter that skipped them would stall forever and leave the redraw throttle
+// treating every later kick as still-queued.
+func (p *Pane) writeInput(data []byte) {
+	defer p.inputWritten.Add(1)
+
+	p.PluginMu.Lock()
+	pty := p.PTY
+	p.PluginMu.Unlock()
+	if pty == nil {
+		return
+	}
+	// May block until the child reads or the PTY is closed — both are fine
+	// here, on the pane's own goroutine. A close while blocked errors the
+	// Write, and the next loop sees inputDone.
+	if _, err := pty.Write(data); err != nil {
+		logger.Debug("pane %s: input write: %v", p.ID, err)
 	}
 }
 

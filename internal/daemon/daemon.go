@@ -3797,6 +3797,11 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	// Fresh PTY: reset the same-size guard so its first resize_pane is
 	// always applied (see handleResizePane).
 	pane.appliedCols, pane.appliedRows = 0, 0
+	// And the redraw throttle, for the same reason: this child has received no
+	// redraw key, so the previous one's stamp would defer its first kick by up
+	// to a cooldown and leave a live pane looking blank meanwhile.
+	pane.lastRedrawAt = time.Time{}
+	pane.redrawSeq = 0
 	pane.PluginMu.Unlock()
 	go d.streamPTYOutput(pane.ID, ptySession)
 	return nil

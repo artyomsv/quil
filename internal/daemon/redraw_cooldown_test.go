@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"sync"
 	"testing"
 	"time"
 )
@@ -15,6 +16,38 @@ func shortRedrawCooldown(t *testing.T, d time.Duration) {
 	prev := redrawKeyCooldown
 	redrawKeyCooldown = d
 	t.Cleanup(func() { redrawKeyCooldown = prev })
+}
+
+// A restart installs a fresh child that has received nothing, so it must not
+// inherit the previous child's stamp — otherwise its own first kick is held for
+// up to a cooldown and the restarted pane sits blank in front of a live
+// process. Driven through spawnPane rather than the field, because the reset
+// belongs in the same locked span that zeroes the applied-size guard for
+// exactly the same reason.
+func TestSpawnPane_ResetsTheRedrawCooldown(t *testing.T) {
+	d := newTestDaemon(t)
+	pane := &Pane{ID: "pane-0000000f", CWD: t.TempDir(), Type: "terminal"}
+
+	pane.PluginMu.Lock()
+	pane.lastRedrawAt = time.Now() // the previous child's kick
+	pane.redrawSeq = 7
+	pane.PluginMu.Unlock()
+
+	if err := d.spawnPane(pane, newRestoredPTY(paneSize(pane)), false); err != nil {
+		t.Fatalf("spawnPane: %v", err)
+	}
+
+	pane.PluginMu.Lock()
+	stamp, seq := pane.lastRedrawAt, pane.redrawSeq
+	pane.PluginMu.Unlock()
+
+	if !stamp.IsZero() {
+		t.Errorf("lastRedrawAt = %v after a fresh spawn, want the zero time — the new "+
+			"child has received no redraw key", stamp)
+	}
+	if seq != 0 {
+		t.Errorf("redrawSeq = %d after a fresh spawn, want 0", seq)
+	}
 }
 
 // The shipped value has to EXCEED the window claude-code reads as /clear.
@@ -119,6 +152,142 @@ func TestSendRedrawKey_HeldKickSkippedWhenThePaneExited(t *testing.T) {
 	time.Sleep(400 * time.Millisecond)
 	if got := pty.got(); got != "\f" {
 		t.Fatalf("child received %q, want only the leading kick — the process is gone", got)
+	}
+}
+
+// The cooldown is measured on the daemon's clock, but the window it exists to
+// respect belongs to the CHILD. A child that has stopped reading its stdin —
+// the wedge this daemon has hit in production — leaves the leading kick sitting
+// in the queue, so a held kick delivered three seconds later on our clock still
+// arrives back-to-back with it the moment the child resumes. That is the
+// original /clear chord, rebuilt by the fix meant to prevent it.
+//
+// The held kick is therefore DROPPED while the earlier one is undelivered. The
+// queued byte is itself the repaint, and it will be read at the child's current
+// geometry, so nothing is lost.
+func TestSendRedrawKey_HeldKickDroppedWhileTheEarlierOneIsStillQueued(t *testing.T) {
+	shortRedrawCooldown(t, 150*time.Millisecond)
+	d := daemonWithPlugin(t, "claude-code", "\f", false)
+	pty := newWedgedSession() // Write blocks like a child that stopped reading
+	pane := &Pane{ID: "p1", Type: "claude-code", PTY: pty}
+	release := releaseWedgeOnce(pty)
+	t.Cleanup(pane.StopInput)
+	t.Cleanup(release)
+
+	d.sendRedrawKey(pane, "claude-code", "\f") // leading: enters the PTY write and parks
+	d.sendRedrawKey(pane, "claude-code", "\f") // held behind the cooldown
+
+	// Guard: the leading kick must have REACHED the blocked Write, or this
+	// test would be asserting about an empty queue.
+	waitUntil(t, "the leading kick to reach the child's blocked Write",
+		func() bool { return pty.writeCount() == 1 })
+
+	time.Sleep(400 * time.Millisecond) // well past the cooldown
+
+	if got := pty.writeCount(); got != 1 {
+		t.Fatalf("child received %d kicks while the first was still unread, want 1 — "+
+			"two arriving together is what claude-code reads as /clear", got)
+	}
+
+	// And the drop is permanent rather than deferred: releasing the child must
+	// not produce a second byte out of nowhere.
+	release()
+	time.Sleep(200 * time.Millisecond)
+	if got := pty.writeCount(); got != 1 {
+		t.Errorf("child received %d kicks after the wedge cleared, want 1", got)
+	}
+}
+
+// releaseWedgeOnce unblocks a wedgedSession's Write/Close, idempotently — the
+// test both releases explicitly and registers the same call as cleanup, so an
+// early t.Fatalf cannot leave the writer goroutine parked.
+func releaseWedgeOnce(w *wedgedSession) func() {
+	var once sync.Once
+	return func() { once.Do(func() { close(w.release) }) }
+}
+
+// The teardown case the other checks cannot see: releasePanes calls StopInput
+// but leaves PTY and ExitCode untouched, so a held kick that fired and is
+// parked on PluginMu finds a pane that looks perfectly healthy.
+//
+// Called directly rather than through the timer, deliberately: the race is
+// between Timer.Stop and an already-running callback, which no test can
+// schedule reliably. This asserts the predicate that decides it.
+func TestDeferredRedrawKey_SkippedAfterTeardown(t *testing.T) {
+	shortRedrawCooldown(t, 150*time.Millisecond)
+	d := daemonWithPlugin(t, "claude-code", "\f", false)
+	pty := &recordingSession{}
+	pane := &Pane{ID: "p1", Type: "claude-code", PTY: pty}
+	t.Cleanup(pane.StopInput)
+
+	d.sendRedrawKey(pane, "claude-code", "\f")
+	if !waitForInput(t, pty, "\f") {
+		t.Fatalf("child received %q, want the leading kick", pty.got())
+	}
+
+	pane.StopInput() // what releasePanes does before closing the PTY
+
+	// The pane still looks alive by every other measure — that is the point.
+	pane.PluginMu.Lock()
+	alive := pane.PTY != nil && pane.ExitCode == nil
+	pane.PluginMu.Unlock()
+	if !alive {
+		t.Fatal("setup: teardown must leave PTY and ExitCode untouched for this to mean anything")
+	}
+
+	d.deferredRedrawKey(pane, "claude-code", "\f", pty)
+
+	time.Sleep(100 * time.Millisecond)
+	if got := pty.got(); got != "\f" {
+		t.Errorf("child received %q after teardown, want only the leading kick", got)
+	}
+}
+
+// StopInput is what releasePanes — the single pane-teardown funnel — calls
+// before closing the PTY, and it is the correctness half of the held kick's
+// lifetime: deferredRedrawKey's own staleness check cannot cover a destroy,
+// because releasePanes does not nil pane.PTY, so the captured session still
+// compares equal when the timer fires.
+//
+// The assertion is on the timer rather than only on the bytes, deliberately.
+// After StopInput the pane's writer goroutine has returned, so a kick that DID
+// fire would sit unread in the queue and write nothing — "nothing reached the
+// child" therefore holds whether or not the cancel exists, and a test resting
+// on it alone would survive deleting the code it is meant to protect.
+func TestStopInput_CancelsAHeldRedrawKick(t *testing.T) {
+	shortRedrawCooldown(t, 200*time.Millisecond)
+	d := daemonWithPlugin(t, "claude-code", "\f", false)
+	pty := &recordingSession{}
+	pane := &Pane{ID: "p1", Type: "claude-code", PTY: pty}
+	t.Cleanup(pane.StopInput)
+
+	d.sendRedrawKey(pane, "claude-code", "\f")
+	d.sendRedrawKey(pane, "claude-code", "\f") // held behind the cooldown
+	if !waitForInput(t, pty, "\f") {
+		t.Fatalf("child received %q, want the leading kick", pty.got())
+	}
+
+	// Guard: without an armed timer this test asserts nothing.
+	pane.PluginMu.Lock()
+	armed := pane.redrawTimer != nil
+	pane.PluginMu.Unlock()
+	if !armed {
+		t.Fatal("setup: no kick was held, so there is nothing for StopInput to cancel")
+	}
+
+	pane.StopInput()
+
+	pane.PluginMu.Lock()
+	pending := pane.redrawTimer
+	pane.PluginMu.Unlock()
+	if pending != nil {
+		t.Error("StopInput left a held kick armed — releasePanes calls it before " +
+			"closing the PTY, so the timer would outlive the pane it belongs to")
+	}
+
+	time.Sleep(400 * time.Millisecond) // past the cooldown the kick was waiting on
+	if got := pty.got(); got != "\f" {
+		t.Errorf("child received %q after teardown, want only the leading kick", got)
 	}
 }
 

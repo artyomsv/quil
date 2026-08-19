@@ -3,7 +3,7 @@
 | Field | Value |
 |-------|-------|
 | Criticality | Medium |
-| Complexity | Moderate |
+| Complexity | Medium |
 | Location | `internal/daemon/redraw.go`, `internal/plugin/defaults/claude-code.toml` |
 | Found during | Fixing issue #169 (claude-code panes clearing themselves) |
 | Date | 2026-08-19 |

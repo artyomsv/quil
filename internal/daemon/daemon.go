@@ -2376,10 +2376,13 @@ func (d *Daemon) repaintAfterResize(pane *Pane, typ string) {
 	if p == nil || p.Persistence.RedrawKey == "" {
 		return
 	}
-	// EnqueueInput, never pane.PTY.Write: a child that has stopped reading
-	// stdin blocks the writer forever, and this runs on the resizing conn's
-	// dispatch goroutine.
-	pane.EnqueueInput([]byte(p.Persistence.RedrawKey))
+	// sendRedrawKey, never EnqueueInput directly: this key is input, and the
+	// program on the other side may read a REPEAT as something else entirely.
+	// This site and redrawKick fire ~5 ms apart on a restore-attach, which is
+	// what issue #169 was. It enqueues rather than calling pane.PTY.Write for
+	// the older reason: a child that has stopped reading stdin blocks the
+	// writer forever, and this runs on the resizing conn's dispatch goroutine.
+	d.sendRedrawKey(pane, typ, p.Persistence.RedrawKey)
 }
 
 // handleUpdatePane applies a PARTIAL pane update. conn identifies the client
@@ -2560,7 +2563,10 @@ func (d *Daemon) redrawKick(pane *Pane, typ string) {
 	if p := d.registry.Get(typ); p != nil && p.Persistence.RedrawKey != "" {
 		log.Printf("attach: redraw kick pane %s (type=%s, no ghost replay, %d bytes)",
 			pane.ID, typ, len(p.Persistence.RedrawKey))
-		pane.EnqueueInput([]byte(p.Persistence.RedrawKey))
+		// Throttled, because the resize that follows this attach kicks the same
+		// pane again milliseconds later and claude-code reads the pair as
+		// /clear (issue #169).
+		d.sendRedrawKey(pane, typ, p.Persistence.RedrawKey)
 		return
 	}
 

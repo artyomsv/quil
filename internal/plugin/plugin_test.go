@@ -1028,3 +1028,38 @@ func TestRestoresOwnHistory_NilReceiverIsFalse(t *testing.T) {
 		t.Error("nil plugin reported as restoring own history")
 	}
 }
+
+// Command.Sessions is documented — here and in the shipped TOML ("Set to \"\"
+// to always start a fresh session") — as a pane-dialog affordance. Deriving the
+// hook/resume protocol from it alone turned that documented preference into a
+// silent kill switch for every Claude hook, so the shipped plugin qualifies by
+// name and cannot lose the protocol however its picker is configured.
+func TestUsesClaudeSessions_ShippedPluginSurvivesSessionsCleared(t *testing.T) {
+	p := &PanePlugin{Name: ClaudeCodePluginName, Command: CommandConfig{Sessions: ""}}
+	if !p.UsesClaudeSessions() {
+		t.Error("claude-code with the session picker turned off lost the Claude protocol")
+	}
+}
+
+// A plugin file predating the sessions field carries no value at all — the same
+// state as clearing it, reached by keeping an old file through the migration
+// dialog rather than by editing one.
+func TestUsesClaudeSessions_ShippedPluginWithNoSessionsField(t *testing.T) {
+	p := &PanePlugin{Name: ClaudeCodePluginName}
+	if !p.UsesClaudeSessions() {
+		t.Error("a pre-sessions claude-code plugin file lost the Claude protocol")
+	}
+}
+
+// The other half: a plugin that is not the shipped one opts in by declaring the
+// source, so a renamed or compatible plugin still works with no code change.
+func TestUsesClaudeSessions_OtherPluginOptsInBySessionsSource(t *testing.T) {
+	p := &PanePlugin{Name: "claude-code-custom", Command: CommandConfig{Sessions: ClaudeSessionSource}}
+	if !p.UsesClaudeSessions() {
+		t.Error("a renamed plugin declaring the claude sessions source was not recognised")
+	}
+	other := &PanePlugin{Name: "lazygit", Command: CommandConfig{Sessions: ""}}
+	if other.UsesClaudeSessions() {
+		t.Error("an unrelated plugin claimed the Claude protocol")
+	}
+}

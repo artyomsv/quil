@@ -313,10 +313,29 @@ func TestWriteSettingsFile_RejectsTraversalPaneID(t *testing.T) {
 func TestWriteSettingsFile_RejectsShellMetacharsInQuilDir(t *testing.T) {
 	t.Parallel()
 
-	for _, bad := range []string{`C:\R&D\.quil`, `/home/u/a^b/.quil`, `/home/u/a%b/.quil`} {
+	// Rooted at t.TempDir() rather than a literal absolute path: if the guard is
+	// ever removed — deliberately, while mutation-testing it — MkdirAll then
+	// creates these for real, and a literal path would land them in the package
+	// directory as untracked repo litter. Ask me how I know.
+	root := t.TempDir()
+	for _, name := range []string{"R&D", "a^b", "a%b", `q"x`, "a|b", "a<b", "a>b"} {
+		bad := filepath.Join(root, name)
 		if _, err := WriteSettingsFile(bad, "pane-abc123", `{"hooks":{}}`); err == nil {
 			t.Errorf("quilDir %q accepted, want rejected", bad)
 		}
+		// Refusing must also mean creating nothing — the guard runs before
+		// MkdirAll, and a future reordering that wrote first and checked after
+		// would leave directories behind on every refused spawn.
+		if _, err := os.Stat(bad); !os.IsNotExist(err) {
+			t.Errorf("quilDir %q was created despite being refused", bad)
+		}
+	}
+
+	// The paneID half: validatePaneID rejects separators and control chars but
+	// not these, so guarding only the directory would leave the composed path —
+	// the thing that actually becomes the argv token — unguarded.
+	if _, err := WriteSettingsFile(t.TempDir(), "pane-a&b", `{"hooks":{}}`); err == nil {
+		t.Error("paneID carrying a shell metacharacter accepted, want rejected")
 	}
 }
 

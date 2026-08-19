@@ -2676,6 +2676,14 @@ func (m Model) pluginWideCanvas(paneType string) bool {
 // resume STRATEGY. The TUI used to keep its own {claude-code, opencode} list —
 // wrong for a renamed plugin, and needing an edit for any new session-resuming
 // one.
+//
+// Remote-mode limitation, accepted: plugin definitions are client-local
+// (RD-035), so a plugin defined only on the remote host resolves to nil here
+// and the restore checklist reads "no saved history" for a pane that will in
+// fact resume. Cosmetic — this drives a checklist label and nothing else — and
+// pluginWideCanvas/pluginMinNativeCols carry the identical limitation. If this
+// capability ever gates something load-bearing it belongs on the wire in
+// PaneInfo instead.
 func (m Model) pluginRestoresViaSession(paneType string) bool {
 	if m.pluginRegistry == nil {
 		return false

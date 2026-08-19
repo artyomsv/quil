@@ -607,12 +607,12 @@ func readTitle(path string) string {
 // result: Claude records both as type "user", but a tool result always carries
 // an ARRAY of content blocks while a typed prompt carries a bare string.
 // Consulted only on transcripts that do not record promptSource at all.
+// Tests the raw token rather than round-tripping through json.Unmarshal, which
+// accepts JSON null into a string and reports success — so `"content": null`
+// counted as a prompt and inflated UserPrompts by one, with empty text.
 func contentIsString(raw json.RawMessage) bool {
-	if len(raw) == 0 {
-		return false
-	}
-	var s string
-	return json.Unmarshal(raw, &s) == nil
+	raw = bytes.TrimSpace(raw)
+	return len(raw) > 0 && raw[0] == '"'
 }
 
 // contentText flattens a message content field into plain text, accepting both

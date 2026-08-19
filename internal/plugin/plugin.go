@@ -257,17 +257,39 @@ func (ih *IdleHandler) Compiled() *regexp.Regexp {
 // rotation, and transcripts under the Claude config dir.
 const ClaudeSessionSource = "claude"
 
-// UsesClaudeSessions reports whether this plugin's sessions are Claude Code
-// sessions. Every site that once compared Name against "claude-code" asks this
-// instead, so a renamed plugin -- or any future Claude-compatible tool -- works
-// without a code change.
+// ClaudeCodePluginName is the shipped Claude Code plugin. Recognised by name in
+// UsesClaudeSessions for backwards compatibility — see there for why.
+const ClaudeCodePluginName = "claude-code"
+
+// UsesClaudeSessions reports whether this plugin speaks Claude's hook and
+// resume protocol: the SessionStart hook that tracks /clear, /resume and
+// compaction, the preassigned session id, and session occupancy.
+//
+// Two ways to qualify, and the name half is NOT vestigial. `Command.Sessions`
+// is documented — in this file and in the shipped TOML, which says "Set to \"\"
+// to always start a fresh session" — as a *pane setup dialog* affordance:
+// whether to offer a resume pick-list. Deriving the protocol from it alone
+// would silently turn a documented UI preference into a kill switch for every
+// Claude hook, so a user who took that option, or who kept a plugin file from
+// before the field existed, would lose notifications, work state, input history
+// and per-pane --resume with nothing logged and nothing failing.
+//
+// So the shipped plugin qualifies by NAME, exactly as the six call sites this
+// replaced each did on their own, and any other plugin may opt in by declaring
+// the sessions source. The single benefit that survives from consolidating them
+// is the one that mattered: the rule lives in one place with its reasoning
+// attached, instead of six scattered comparisons where a missed one fails
+// silently.
 //
 // Nil-receiver safe: callers resolve through Registry.Get, which returns nil for
 // an unknown or failed-to-load plugin. False is the right answer there, because
 // a plugin that failed to load has already been degraded to a plain terminal at
 // the spawn site.
 func (p *PanePlugin) UsesClaudeSessions() bool {
-	return p != nil && p.Command.Sessions == ClaudeSessionSource
+	if p == nil {
+		return false
+	}
+	return p.Name == ClaudeCodePluginName || p.Command.Sessions == ClaudeSessionSource
 }
 
 // RestoresOwnHistory reports whether this plugin's resume strategy hands the

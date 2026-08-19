@@ -418,14 +418,19 @@ func (d *Daemon) refreshPluginStateFromHooks() {
 	for _, tab := range d.session.Tabs() {
 		for _, pane := range d.session.Panes(tab.ID) {
 			var hookID, transcript string
+			// opencode is tested FIRST. `switch pane.Type` was disjoint by
+			// construction; a switch over predicates is not, and any plugin
+			// file may legally set sessions = "claude" — including opencode's.
+			// Naming the narrower plugin first keeps the arms mutually
+			// exclusive for the shipped set however the TOML is edited.
 			switch {
-			case d.usesClaudeSessions(pane.Type):
-				if rec, err := readHookSessionFn(pane.ID); err == nil {
-					hookID, transcript = rec.ID, rec.TranscriptPath
-				}
 			case pane.Type == "opencode":
 				if id, err := readOpencodeSessionIDFn(pane.ID); err == nil {
 					hookID = id
+				}
+			case d.usesClaudeSessions(pane.Type):
+				if rec, err := readHookSessionFn(pane.ID); err == nil {
+					hookID, transcript = rec.ID, rec.TranscriptPath
 				}
 			default:
 				continue
@@ -3248,17 +3253,17 @@ func opencodeSpawnPrep(quilDir, paneID, hookMode string) []string {
 func claudeHookSpawnPrep(quilDir, paneID, hookMode string, userArgs []string) (prefix, env []string) {
 	exePath, err := claudeHookExeFn()
 	if err != nil {
-		log.Printf("warning: pane %s: cannot resolve quild executable: %v — session-id rotation tracking disabled", paneID, err)
+		log.Printf("warning: pane %s: cannot resolve quild executable: %v — claude hooks disabled (notifications, work state, input history, session-id rotation)", paneID, err)
 		return nil, nil
 	}
 	js, err := claudehook.BuildSettingsJSON(claudehook.HookCommand(exePath))
 	if err != nil {
-		log.Printf("warning: pane %s: build claude settings JSON: %v — session-id rotation tracking disabled", paneID, err)
+		log.Printf("warning: pane %s: build claude settings JSON: %v — claude hooks disabled (notifications, work state, input history, session-id rotation)", paneID, err)
 		return nil, nil
 	}
 	settingsPath, err := claudehook.WriteSettingsFile(quilDir, paneID, js)
 	if err != nil {
-		log.Printf("warning: pane %s: write hook settings file: %v — session-id rotation tracking disabled", paneID, err)
+		log.Printf("warning: pane %s: write hook settings file: %v — claude hooks disabled (notifications, work state, input history, session-id rotation)", paneID, err)
 		return nil, nil
 	}
 	for _, a := range userArgs {
@@ -3275,11 +3280,21 @@ func claudeHookSpawnPrep(quilDir, paneID, hookMode string, userArgs []string) (p
 	// correct data dir; renamed from QUIL_HOME because children inherit the
 	// pane env and an inherited QUIL_HOME retargeted dev builds at production.
 	// Consumers fall back to QUIL_HOME for one release.
-	return []string{"--settings", settingsPath}, []string{
+	env = []string{
 		"QUIL_PANE_ID=" + paneID,
 		"QUIL_HOOK_MODE=" + mode,
 		"QUIL_HOOK_HOME=" + quilDir,
 	}
+	// WriteSettingsFile answers ("", nil) when there was nothing to write, and
+	// its contract is that the caller then SKIPS the flag rather than passing
+	// an empty one — `claude --settings ""` is not the same as no --settings.
+	// Unreachable today (BuildSettingsJSON never returns "" without an error),
+	// but the env vars are still wanted, so this returns them with no prefix
+	// rather than honouring the contract by dropping the hook entirely.
+	if settingsPath == "" {
+		return nil, env
+	}
+	return []string{"--settings", settingsPath}, env
 }
 
 // resumeTemplateFor returns the resume-arg template resolveSpawnArgs should
@@ -3750,15 +3765,19 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	// under $QUIL_HOME/opencodehook/. OPENCODE_CONFIG_CONTENT merges with the
 	// user's own opencode config so their plugins/agents/modes still apply.
 	envVars := append([]string{}, p.Command.Env...)
+	// opencode first, for the reason refreshPluginStateFromHooks documents:
+	// these arms are no longer disjoint by construction, and prepending
+	// `--settings <path>` to opencode's argv would pass it a flag it does not
+	// have while skipping the session read it does need.
 	switch {
+	case p.Name == "opencode":
+		envVars = append(envVars, opencodeSpawnPrep(config.QuilDir(), pane.ID, d.cfg.Notification.Hooks.OpenCode)...)
 	case p.UsesClaudeSessions():
 		settingsArgs, hookEnv := claudeHookSpawnPrep(config.QuilDir(), pane.ID, d.cfg.Notification.Hooks.Claude, args)
 		if len(settingsArgs) > 0 {
 			args = append(settingsArgs, args...)
 		}
 		envVars = append(envVars, hookEnv...)
-	case p.Name == "opencode":
-		envVars = append(envVars, opencodeSpawnPrep(config.QuilDir(), pane.ID, d.cfg.Notification.Hooks.OpenCode)...)
 	}
 
 	// Generic opt-in: any plugin whose hook producer records input history

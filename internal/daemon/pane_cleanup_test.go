@@ -108,8 +108,15 @@ func TestCleanupPaneArtifacts_RemovesAll(t *testing.T) {
 	if err := os.WriteFile(ocFile, []byte("oc"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	// The hook-settings file a claude-code spawn writes. Seeded here because
+	// the removal list is a slice of filename strings: a typo or a dropped
+	// entry leaves the file behind on every pane destroy with nothing failing.
+	setFile := filepath.Join(config.SessionsDir(), "pane-abc12345.settings.json")
+	if err := os.WriteFile(setFile, []byte(`{"hooks":{}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
 
 	d.cleanupPaneArtifacts("pane-abc12345")
 
-	assertGone(t, spoolFile, sessFile, ocFile)
+	assertGone(t, spoolFile, sessFile, ocFile, setFile)
 }

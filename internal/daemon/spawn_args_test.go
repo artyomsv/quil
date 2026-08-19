@@ -732,3 +732,26 @@ func TestOpencodeSpawnPrep(t *testing.T) {
 		})
 	}
 }
+
+// A settings-write failure must degrade to spawning WITHOUT rotation tracking,
+// never to failing the spawn: this turned a pure function into an effectful one,
+// and a full or read-only disk must not stop a pane from opening.
+//
+// Reachable only because WriteSettingsFile rejects a quil dir holding a
+// character a shell would re-interpret — before that guard existed there was no
+// way to make the write fail without an unwritable filesystem.
+func TestClaudeHookSpawnPrep_WriteFailureDegradesInsteadOfFailing(t *testing.T) {
+	orig := claudeHookExeFn
+	claudeHookExeFn = func() (string, error) { return "/fake/quild", nil }
+	defer func() { claudeHookExeFn = orig }()
+
+	badDir := filepath.Join(t.TempDir(), "R&D")
+
+	prefix, env := claudeHookSpawnPrep(badDir, "pane-abc123", "default", nil)
+	if prefix != nil {
+		t.Errorf("prefix = %v, want nil so the spawn proceeds with no --settings", prefix)
+	}
+	if env != nil {
+		t.Errorf("env = %v, want nil", env)
+	}
+}

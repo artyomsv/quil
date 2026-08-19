@@ -905,3 +905,37 @@ func TestReadTitle_NonAiTitleEntryContainingTheMarkerIsIgnored(t *testing.T) {
 		t.Errorf("readTitle = %q, want empty — only a real ai-title entry may title the session", got)
 	}
 }
+
+// A relative, non-tilde value is a third branch: neither the tilde expansion
+// nor the default fallback, but filepath.Abs. Every caller expects an absolute
+// path, so a relative one leaking through would resolve against whatever the
+// daemon's working directory happened to be.
+func TestConfigDir_AbsolutisesRelativeValue(t *testing.T) {
+	t.Setenv(claudeConfigDirEnv, "myconfig")
+	got := ConfigDir()
+	if !filepath.IsAbs(got) {
+		t.Errorf("ConfigDir() = %q, want an absolute path", got)
+	}
+	if filepath.Base(got) != "myconfig" {
+		t.Errorf("ConfigDir() = %q, want it to end in %q", got, "myconfig")
+	}
+}
+
+// json.Unmarshal accepts JSON null into a *string and reports success, so a
+// round-trip test for "is this a string" counted `"content": null` as a prompt.
+func TestReadDetail_NullContentIsNotAPrompt(t *testing.T) {
+	path := writeSchemaTranscript(t,
+		`{"type":"user","timestamp":"2026-08-19T10:00:00Z","message":{"content":null}}`,
+		`{"type":"user","message":{"content":"a real one"}}`,
+	)
+	d, err := readDetail(context.Background(), path, "11111111-2222-3333-4444-555555555555")
+	if err != nil {
+		t.Fatalf("readDetail: %v", err)
+	}
+	if d.UserPrompts != 1 {
+		t.Errorf("UserPrompts = %d, want 1 — null content is not a prompt", d.UserPrompts)
+	}
+	if d.FirstPrompt != "a real one" {
+		t.Errorf("FirstPrompt = %q, want %q", d.FirstPrompt, "a real one")
+	}
+}

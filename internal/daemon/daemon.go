@@ -1436,10 +1436,57 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 			if p := d.registry.Get(typ); p != nil && !p.Persistence.GhostBuffer {
 				ghostEnabled = false
 			}
+			// A plugin's ghost_buffer is a DEFAULT; what the child is doing
+			// right now overrides it. A pane on the alternate screen has no
+			// replayable history — measured 2026-08-19 (issue #172), a
+			// fullscreen claude-code buffer cut at an arbitrary point paints
+			// torn escape sequences as literal text with most rows blank,
+			// because that renderer transmits only the cells that changed
+			// between frames. Its ghost_buffer = true was measured against the
+			// CLASSIC renderer, where the stream really is coherent history.
+			//
+			// Detection rather than configuration, because a user's own plugin
+			// TOML overrides the embedded default (so flipping the value
+			// reaches no existing install), the value stays right for the
+			// classic renderer, and `/tui fullscreen` can change the answer
+			// mid-session. The pane falls through to redrawKick below, exactly
+			// as an opted-out plugin does — which also repairs the frame,
+			// where a replay leaves it torn.
+			//
+			// Read inside this span, beside Type and GhostSnap: it is a fact
+			// about the process, not about the plugin, and the three have to
+			// describe the same instant.
+			//
+			// GATED ON A DECLARED redraw_key, which is not a detail — it is
+			// what makes this safe. Dropping the replay is only an improvement
+			// where something can then repaint the pane, and `redrawKick`'s
+			// fallback for a plugin with no key is a resize jiggle that a SHELL
+			// ignores. `terminal` and `ssh` are exactly that shape
+			// (ghost_buffer = true, no redraw_key), and `altScreen` is sticky:
+			// a program killed without emitting rmcup — SIGKILL, a segfault, a
+			// dropped ssh — leaves it true for the pane's whole life. Ungated,
+			// a user whose `vim` was killed would get a BLANK pane on every
+			// reattach forever, escapable only by restarting their shell. A
+			// torn replay beats that; a repaint beats both.
+			if p := d.registry.Get(typ); p != nil && p.Persistence.RedrawKey != "" && pane.MouseModes.altScreen {
+				ghostEnabled = false
+			}
+			// Take-and-clear the restore snapshot on this attach WHATEVER we
+			// decide to do with it. It is a one-shot for the first attach after
+			// a restore, and leaving it behind for a pane that skipped its
+			// replay — an opted-out plugin, or one on the alternate screen —
+			// means a LATER attach can replay a previous daemon session's
+			// screen into a live pane long after the child moved on. Reachable
+			// without this: attach while `vim` is up, quit vim, attach again.
+			// It also stops the snapshot being retained in memory (it counts
+			// toward the pane's HeapBytes) for a pane that will never use it.
+			snap := pane.GhostSnap
+			pane.GhostSnap = nil
+
 			var ghost []byte
 			source := "ghostsnap"
 			if ghostEnabled {
-				ghost = pane.GhostSnap
+				ghost = snap
 				if ghost == nil {
 					ghost = pane.OutputBuf.Bytes() // reconnect — use full buffer
 					source = "outputbuf"
@@ -1462,7 +1509,6 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 					ghost = nil
 					source = "skipped-child-repaints"
 				}
-				pane.GhostSnap = nil // take-and-clear under the lock
 			}
 			// Captured in the same span as Type/GhostSnap: the redraw kick below
 			// needs a live PTY, and reading it separately would race a restart.
@@ -2373,10 +2419,13 @@ func (d *Daemon) repaintAfterResize(pane *Pane, typ string) {
 	if p == nil || p.Persistence.RedrawKey == "" {
 		return
 	}
-	// EnqueueInput, never pane.PTY.Write: a child that has stopped reading
-	// stdin blocks the writer forever, and this runs on the resizing conn's
-	// dispatch goroutine.
-	pane.EnqueueInput([]byte(p.Persistence.RedrawKey))
+	// sendRedrawKey, never EnqueueInput directly: this key is input, and the
+	// program on the other side may read a REPEAT as something else entirely.
+	// This site and redrawKick fire ~5 ms apart on a restore-attach, which is
+	// what issue #169 was. It enqueues rather than calling pane.PTY.Write for
+	// the older reason: a child that has stopped reading stdin blocks the
+	// writer forever, and this runs on the resizing conn's dispatch goroutine.
+	d.sendRedrawKey(pane, typ, p.Persistence.RedrawKey)
 }
 
 // handleUpdatePane applies a PARTIAL pane update. conn identifies the client
@@ -2557,7 +2606,10 @@ func (d *Daemon) redrawKick(pane *Pane, typ string) {
 	if p := d.registry.Get(typ); p != nil && p.Persistence.RedrawKey != "" {
 		log.Printf("attach: redraw kick pane %s (type=%s, no ghost replay, %d bytes)",
 			pane.ID, typ, len(p.Persistence.RedrawKey))
-		pane.EnqueueInput([]byte(p.Persistence.RedrawKey))
+		// Throttled, because the resize that follows this attach kicks the same
+		// pane again milliseconds later and claude-code reads the pair as
+		// /clear (issue #169).
+		d.sendRedrawKey(pane, typ, p.Persistence.RedrawKey)
 		return
 	}
 
@@ -2748,8 +2800,11 @@ func (d *Daemon) flushPaneOutput(paneID string, data []byte) {
 	// last-broadcast state (not the last-scanned state) means a change suppressed
 	// inside the cooldown window is re-evaluated on the next flush and still
 	// delivered once the window passes — normal apps never hit the window.
+	// wireState, not the whole struct: altScreen never reaches a client, so a
+	// pane entering or leaving the alternate screen must not cost a workspace
+	// broadcast. `less`, `vim` and `git log` do that routinely.
 	var doMouseBroadcast bool
-	if newModes != pane.mouseBroadcast && now.Sub(pane.lastMouseBroadcastAt) >= mouseModeBroadcastCooldown {
+	if newModes.wireState() != pane.mouseBroadcast.wireState() && now.Sub(pane.lastMouseBroadcastAt) >= mouseModeBroadcastCooldown {
 		pane.mouseBroadcast = newModes
 		pane.lastMouseBroadcastAt = now
 		doMouseBroadcast = true
@@ -3817,6 +3872,16 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	// Fresh PTY: reset the same-size guard so its first resize_pane is
 	// always applied (see handleResizePane).
 	pane.appliedCols, pane.appliedRows = 0, 0
+	// And the redraw throttle, for the same reason: this child has received no
+	// redraw key, so the previous one's stamp would defer its first kick by up
+	// to a cooldown and leave a live pane looking blank meanwhile. The /clear
+	// window belongs to the child PROCESS, so a new process starts a new one.
+	// ptyGen is what lets a kick armed for the previous child recognise that it
+	// is now looking at a different one; handleRestartPaneReq reinstalls
+	// through this same function, so this is the only site that needs it.
+	pane.lastRedrawAt = time.Time{}
+	pane.redrawSeq = 0
+	pane.ptyGen++
 	pane.PluginMu.Unlock()
 	go d.streamPTYOutput(pane.ID, ptySession)
 	return nil

@@ -11,6 +11,35 @@ version section here and deletes them.
 
 ## [Unreleased]
 
+## [1.62.3] - 2026-08-19
+
+### Fixed
+- **Reconnecting no longer paints a torn frame into a full-screen pane.** Quil
+  replays a pane's recent output when a client reconnects, which reproduces
+  history for a normal shell but not for a program drawing on the alternate
+  screen: those programs send only the parts of the screen that changed, so once
+  the saved buffer wraps there is no complete frame left in it to replay. Claude
+  Code's newer full-screen renderer is one of them, and it is the default for
+  recent installs — panes could come back showing fragments of escape sequences
+  as text, and stay that way until you typed something.
+
+  Quil now notices which panes are on the alternate screen and asks those
+  programs to repaint instead of replaying at them. A plugin's `ghost_buffer`
+  setting is still what decides for everything else.
+
+## [1.62.2] - 2026-08-19
+
+### Fixed
+- **A Claude Code pane no longer clears its own conversation.** Quil asks such a
+  pane to repaint by sending it `Ctrl+L`, and Claude Code v2.1.126+ runs
+  `/clear` when it receives two of those within two seconds. A daemon restart, a
+  client reattach, or two quick resizes delivered exactly that pair — wiping the
+  conversation in every AI pane at once, with nobody at the keyboard.
+
+  Quil now keeps any two deliveries of a plugin's `redraw_key` at least three
+  seconds apart, and coalesces the ones it holds back into a single later
+  repaint.
+
 ## [1.62.1] - 2026-08-18
 
 ### Added

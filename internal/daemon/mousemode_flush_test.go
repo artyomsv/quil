@@ -89,3 +89,44 @@ func TestFlushPaneOutput_PlainOutputDoesNotTrigger(t *testing.T) {
 		t.Error("MouseTracking = true after plain output, want false")
 	}
 }
+
+// The broadcast decision, driven through the real output path rather than the
+// helper it calls. altScreen is not on the wire, so a pane entering the
+// alternate screen must not spend a workspace broadcast — and full-screen
+// programs toggle it routinely, unlike the mouse modes it rides beside, which
+// flip once at startup and once at exit.
+//
+// lastMouseBroadcastAt is the observable: flushPaneOutput stamps it only when
+// it decides to broadcast.
+func TestFlushPaneOutput_AlternateScreenAloneDoesNotBroadcast(t *testing.T) {
+	d := newTestDaemon(t)
+	tab := d.session.CreateTab("t")
+	pane, err := d.session.CreatePane(tab.ID, "")
+	if err != nil {
+		t.Fatalf("CreatePane: %v", err)
+	}
+
+	d.flushPaneOutput(pane.ID, []byte("\x1b[?1049h"))
+
+	pane.PluginMu.Lock()
+	stamped, alt := pane.lastMouseBroadcastAt, pane.MouseModes.altScreen
+	pane.PluginMu.Unlock()
+
+	if !alt {
+		t.Fatal("setup: the alt-screen enable was not recorded, so this asserts nothing")
+	}
+	if !stamped.IsZero() {
+		t.Error("entering the alternate screen triggered a workspace broadcast; no " +
+			"client is told about that field")
+	}
+
+	// Control: something clients DO see must still broadcast.
+	d.flushPaneOutput(pane.ID, []byte("\x1b[?1000h"))
+
+	pane.PluginMu.Lock()
+	stamped = pane.lastMouseBroadcastAt
+	pane.PluginMu.Unlock()
+	if stamped.IsZero() {
+		t.Error("a mouse-tracking enable did not broadcast")
+	}
+}

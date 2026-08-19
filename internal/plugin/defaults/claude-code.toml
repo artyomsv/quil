@@ -86,6 +86,13 @@ ghost_buffer = true
 #
 # This is INPUT rather than a signal, which is why it is opt-in per plugin: a
 # program that reads its own stdin for data would receive this as data.
+#
+# The MEANING of the byte belongs to the program receiving it, and claude-code
+# changed it: since v2.1.126, two Ctrl+L within two seconds run /clear and start
+# a new conversation (fullscreen rendering, the default for newer installs). The
+# daemon therefore rate-limits this key per pane — see redrawKeyCooldown in
+# internal/daemon/redraw.go. Do not bypass that guard by writing a redraw key
+# straight to a pane; issue #169 is what it costs.
 redraw_key = "\f"
 # Pre-assign a UUID to the new session so Quil can identify the pane.
 start_args = ["--session-id", "{session_id}"]

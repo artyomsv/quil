@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -330,5 +331,40 @@ func TestWriteSettingsFile_AcceptsOrdinaryPaths(t *testing.T) {
 	}
 	if !pathIsArgvSafe(`C:\Program Files (x86)\quil\.quil`) {
 		t.Error("a path with parens and a space must stay acceptable")
+	}
+}
+
+// The settings file is 0600 in a 0700 dir. That is the property that makes the
+// file indirection no worse than the argv it replaced — argv is world-readable
+// via /proc/<pid>/cmdline on Linux, so a widened mode here would be a real
+// downgrade rather than a cosmetic one. Nothing else pins it.
+//
+// Unix-only: Windows has no POSIX mode bits, and os.Stat there reports 0666/0444
+// from the read-only attribute, so the assertion would be meaningless where the
+// repo also runs its test binaries natively.
+func TestWriteSettingsFile_IsOwnerOnly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX mode bits are not meaningful on Windows")
+	}
+	t.Parallel()
+	quilDir := t.TempDir()
+
+	path, err := WriteSettingsFile(quilDir, "pane-abc123", `{"hooks":{}}`)
+	if err != nil {
+		t.Fatalf("WriteSettingsFile: %v", err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if got := fi.Mode().Perm(); got != 0o600 {
+		t.Errorf("settings file mode = %04o, want 0600", got)
+	}
+	di, err := os.Stat(filepath.Join(quilDir, "sessions"))
+	if err != nil {
+		t.Fatalf("stat sessions dir: %v", err)
+	}
+	if got := di.Mode().Perm(); got != 0o700 {
+		t.Errorf("sessions dir mode = %04o, want 0700", got)
 	}
 }

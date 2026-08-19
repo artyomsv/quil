@@ -609,6 +609,8 @@ func (m Model) handleDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handleMigrationKey(msg)
 	case dialogMemory:
 		return m.handleMemoryDialogKey(msg)
+	case dialogProcesses:
+		return m.handleProcessesKey(msg)
 	case dialogGitRepoPick:
 		return m.handleGitRepoPickKey(msg)
 	case dialogCommandHistory:
@@ -689,22 +691,22 @@ func (m Model) handleCommandHistoryKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd)
 // About (root) menu; aboutStopDaemonIndex sits below it. Named constants
 // so handleAboutKey, lastAboutItem, and the confirm-dialog Esc handlers
 // cannot drift on the indices.
-const aboutUpdateIndex = 7
+const aboutUpdateIndex = 8
 
 // aboutWhatsNewIndex is the row index of "What's New" in the F1 → About (root)
 // menu. It sits directly below the dynamic update row because the two are the
 // same subject seen from either side of an upgrade.
-const aboutWhatsNewIndex = 8
+const aboutWhatsNewIndex = 9
 
 // aboutStopDaemonIndex is the row index of "Stop daemon" in the F1 → About
 // (root) menu. Stop daemon was promoted from the nested Settings list to the
 // root menu so it sits alongside Settings/Shortcuts/Plugins. Kept as a named
 // constant so handleAboutKey, lastAboutItem, and the confirm-dialog Esc
 // handler cannot drift on the index.
-const aboutStopDaemonIndex = 9
+const aboutStopDaemonIndex = 10
 
 func (m Model) handleAboutKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	const lastAboutItem = aboutStopDaemonIndex // 0:Settings 1:Shortcuts 2:Plugins 3:Memory 4:Client 5:Daemon 6:MCP 7:Update 8:What's New 9:Stop daemon
+	const lastAboutItem = aboutStopDaemonIndex // 0:Settings 1:Shortcuts 2:Plugins 3:Memory 4:Processes 5:Client 6:Daemon 7:MCP 8:Update 9:What's New 10:Stop daemon
 	switch msg.String() {
 	case "esc":
 		m.dialog = dialogNone
@@ -731,10 +733,13 @@ func (m Model) handleAboutKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m = m.openMemoryDialog()
 			return m, m.refreshMemory()
 		case 4:
-			return m.openLogViewer("Client log", filepath.Join(config.QuilDir(), "quil.log"))
+			m = m.openProcessesDialog()
+			return m, m.refreshProcesses()
 		case 5:
-			return m.openLogViewer("Daemon log", filepath.Join(config.QuilDir(), "quild.log"))
+			return m.openLogViewer("Client log", filepath.Join(config.QuilDir(), "quil.log"))
 		case 6:
+			return m.openLogViewer("Daemon log", filepath.Join(config.QuilDir(), "quild.log"))
+		case 7:
 			return m.openMCPLogsViewer()
 		case aboutUpdateIndex:
 			return m.handleUpdateAction()
@@ -1036,6 +1041,23 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// plugin's resume strategy (AI panes resume their session). Sent
 		// synchronously like MsgShutdown above; the listener logs the
 		// daemon's MsgRestartPaneResp.
+		// Kill an orphaned bridge. Requires explicit `y` like the other
+		// destructive confirms: Enter is the universal commit key, and this one
+		// terminates a process. killProcess re-validates against a fresh
+		// snapshot, so even an accepted confirm cannot kill a reused PID.
+		if kind == confirmKindKillProcess {
+			if msg.String() != "y" {
+				return m, nil
+			}
+			pid, convErr := strconv.Atoi(id)
+			m.dialog = dialogProcesses
+			m.dialogCursor = 0
+			if convErr != nil {
+				return m, m.refreshProcesses()
+			}
+			return m, m.killProcess(pid)
+		}
+
 		if kind == confirmKindRestartPane {
 			m.dialog = dialogNone
 			if m.client != nil {
@@ -1261,6 +1283,9 @@ func (m Model) renderDialog() string {
 	case dialogMemory:
 		width = 80
 		content = m.renderMemoryDialog()
+	case dialogProcesses:
+		width = processesWidth
+		content = m.renderProcessesDialog()
 	case dialogGitRepoPick:
 		width = gitRepoPickWidth
 		content = m.renderGitRepoPickDialog()
@@ -1320,6 +1345,7 @@ func (m Model) renderAboutDialog() string {
 		"Shortcuts",
 		"Plugins",
 		"Memory",
+		"Processes",
 		"View client log",
 		"View daemon log",
 		"View MCP logs",
@@ -5504,3 +5530,10 @@ func (m Model) renderCreatePaneSetupDialog() string {
 
 	return b.String()
 }
+
+// confirmKindKillProcess is the discriminator on confirmKind for the
+// F1 → Processes kill confirm. The PID rides in confirmID and the display name
+// in confirmName; killProcess re-validates against a fresh snapshot before
+// signalling, so an accepted confirm still cannot kill a PID that has since
+// been reused.
+const confirmKindKillProcess = "kill-process"

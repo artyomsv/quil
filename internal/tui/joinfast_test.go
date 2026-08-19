@@ -51,9 +51,9 @@ func TestJoinVerticalWidth_MatchesLipgloss(t *testing.T) {
 
 func TestJoinHorizontalWidth_MatchesLipgloss(t *testing.T) {
 	cases := []struct {
-		name                string
-		leftW, rightW       int
-		left, right         string
+		name          string
+		leftW, rightW int
+		left, right   string
 	}{
 		{"uniform same height", 3, 5, "abc\ndef", "12345\n67890"},
 		{"single line", 3, 5, "abc", "12345"},

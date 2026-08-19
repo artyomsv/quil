@@ -325,6 +325,7 @@ const (
 	dialogProjectRename // sidebar context menu: rename a project (Task 13)
 	dialogProjectPick   // Alt+P: fuzzy project picker (Task 14)
 	dialogWhatsNew      // post-upgrade highlights; also F1 → What's New
+	dialogProcesses     // F1 → Processes: quil's processes + orphaned bridges
 )
 
 // tuiClient is the subset of *ipc.Client the TUI uses on the Model. Defined
@@ -830,6 +831,10 @@ type Model struct {
 	// and the status-bar renderer checks flashUntil on every frame.
 	flashText  string
 	flashUntil time.Time
+
+	// processes backs the F1 → Processes dialog. Zero value = never scanned,
+	// which the renderer shows as "scanning…".
+	processes processesState
 
 	// updateInfos maps a destination to the newer release ITS daemon
 	// announced; drives the status-bar segment, the About row, and the
@@ -2020,6 +2025,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(cmd, m.listenForMessages())
 		}
 		return m, m.listenForMessages()
+
+	case processesScannedMsg:
+		m = m.applyProcessesScan(msg)
+		return m, nil
 
 	case paneSettleRepaintMsg:
 		return m, tea.ClearScreen

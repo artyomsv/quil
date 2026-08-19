@@ -48,6 +48,17 @@ func TestHandleAttach_SkipsReplayForAPaneOnTheAlternateScreen(t *testing.T) {
 		pane.OutputBuf.Write(bytes.Repeat([]byte{'g'}, 4096))
 		return pane
 	}
+
+	// A pane carrying BOTH — a restore snapshot and an alt-screen child. Its
+	// snapshot must be consumed by this attach even though nothing is replayed:
+	// left behind, it would be replayed by a LATER attach once the child leaves
+	// the alternate screen, painting a previous daemon session's screen into a
+	// live pane. Reachable without claude-code at all: attach while `vim` is
+	// up, quit vim, attach again.
+	snapshotted := mkPane("terminal", true)
+	snapshotted.PluginMu.Lock()
+	snapshotted.GhostSnap = bytes.Repeat([]byte{'s'}, 2048)
+	snapshotted.PluginMu.Unlock()
 	fullscreen := mkPane("claude-code", true)
 	shell := mkPane("terminal", false)
 
@@ -105,5 +116,17 @@ func TestHandleAttach_SkipsReplayForAPaneOnTheAlternateScreen(t *testing.T) {
 	if n := ghost[shell.ID]; n != 4096 {
 		t.Errorf("main-screen pane received %d ghost bytes, want 4096 — a shell "+
 			"reprints none of its scrollback, so this replay is its only history", n)
+	}
+	if n := ghost[snapshotted.ID]; n != 0 {
+		t.Errorf("alt-screen pane with a restore snapshot received %d ghost bytes, want 0", n)
+	}
+
+	snapshotted.PluginMu.Lock()
+	leftover := snapshotted.GhostSnap
+	snapshotted.PluginMu.Unlock()
+	if leftover != nil {
+		t.Errorf("GhostSnap survived an attach that skipped the replay (%d bytes); a "+
+			"later attach would paint a previous session's screen into this live pane",
+			len(leftover))
 	}
 }

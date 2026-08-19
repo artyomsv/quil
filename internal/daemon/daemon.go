@@ -1454,10 +1454,22 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 			if pane.MouseModes.altScreen {
 				ghostEnabled = false
 			}
+			// Take-and-clear the restore snapshot on this attach WHATEVER we
+			// decide to do with it. It is a one-shot for the first attach after
+			// a restore, and leaving it behind for a pane that skipped its
+			// replay — an opted-out plugin, or one on the alternate screen —
+			// means a LATER attach can replay a previous daemon session's
+			// screen into a live pane long after the child moved on. Reachable
+			// without this: attach while `vim` is up, quit vim, attach again.
+			// It also stops the snapshot being retained in memory (it counts
+			// toward the pane's HeapBytes) for a pane that will never use it.
+			snap := pane.GhostSnap
+			pane.GhostSnap = nil
+
 			var ghost []byte
 			source := "ghostsnap"
 			if ghostEnabled {
-				ghost = pane.GhostSnap
+				ghost = snap
 				if ghost == nil {
 					ghost = pane.OutputBuf.Bytes() // reconnect — use full buffer
 					source = "outputbuf"
@@ -1480,7 +1492,6 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 					ghost = nil
 					source = "skipped-child-repaints"
 				}
-				pane.GhostSnap = nil // take-and-clear under the lock
 			}
 			// Captured in the same span as Type/GhostSnap: the redraw kick below
 			// needs a live PTY, and reading it separately would race a restart.
@@ -2780,8 +2791,11 @@ func (d *Daemon) flushPaneOutput(paneID string, data []byte) {
 	// last-broadcast state (not the last-scanned state) means a change suppressed
 	// inside the cooldown window is re-evaluated on the next flush and still
 	// delivered once the window passes — normal apps never hit the window.
+	// wireState, not the whole struct: altScreen never reaches a client, so a
+	// pane entering or leaving the alternate screen must not cost a workspace
+	// broadcast. `less`, `vim` and `git log` do that routinely.
 	var doMouseBroadcast bool
-	if newModes != pane.mouseBroadcast && now.Sub(pane.lastMouseBroadcastAt) >= mouseModeBroadcastCooldown {
+	if newModes.wireState() != pane.mouseBroadcast.wireState() && now.Sub(pane.lastMouseBroadcastAt) >= mouseModeBroadcastCooldown {
 		pane.mouseBroadcast = newModes
 		pane.lastMouseBroadcastAt = now
 		doMouseBroadcast = true

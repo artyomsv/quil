@@ -46,6 +46,20 @@ type mouseModeState struct {
 	altScreen bool
 }
 
+// wireState is the part of this struct that clients are told about, which is
+// what the broadcast trigger has to compare.
+//
+// altScreen is deliberately excluded: buildWorkspaceState sends tracking, sgr
+// and bracketedPaste only, so a change to altScreen alone is invisible to every
+// client and a full workspace broadcast for it is pure cost. That matters more
+// than it looks — the mouse modes it rides beside flip once at startup and once
+// at exit, which is the premise the broadcast cooldown was written against,
+// while less, vim, man and git log toggle the alternate screen routinely.
+func (m mouseModeState) wireState() mouseModeState {
+	m.altScreen = false
+	return m
+}
+
 // tracking reports whether any mouse-tracking mode is active — i.e. the child
 // app wants to handle mouse events itself. SGR alone is not tracking.
 func (m mouseModeState) tracking() bool {
@@ -56,12 +70,13 @@ func (m mouseModeState) tracking() bool {
 // an unterminated sequence and how many bytes are carried into the next scan.
 // It must exceed the longest sequence we care about, or a split inside a long
 // one is silently dropped: every tracked mode combined is
-// `ESC [ ? 9;1000;1002;1003;1006;2004` = 29 bytes before the final byte, and a
-// real app may list untracked modes (1049, 25, 2026, …) in the same run. 64
-// leaves room for that while still bounding the carry — a longer digit/`;` run
-// is dropped rather than carried indefinitely. Do not shrink this below 29
-// without re-deriving it: the previous value of 24 sat under the all-modes
-// figure and lost exactly those splits.
+// `ESC [ ? 9;1000;1002;1003;1006;2004;47;1047;1049` = 42 bytes before the final
+// byte, and a real app may list untracked modes (25, 2026, …) in the same run.
+// 64 leaves room for that while still bounding the carry — a longer run is
+// dropped rather than carried indefinitely. Do not shrink this below 42
+// without re-deriving it: the original value of 24 sat under the then-current
+// figure of 29 and lost exactly those splits, and adding the alternate-screen
+// modes moved the figure again.
 const maxModeSeqLen = 64
 
 // scanMouseModes updates the per-mode state from a raw output chunk. It walks
@@ -92,10 +107,13 @@ func scanMouseModes(m mouseModeState, data []byte) (_ mouseModeState, tail []byt
 			i++
 			continue
 		}
-		// Parse the numeric/`;` parameter run up to the final byte.
+		// Parse the parameter run up to the final byte. `:` is accepted because
+		// a real emitter may attach sub-parameters (`?1049:1h`); they never
+		// change WHICH mode is meant, and stopping at the colon would drop the
+		// whole sequence while the terminal acted on it.
 		j := i + 3
 		paramStart := j
-		for j < len(data) && (data[j] == ';' || (data[j] >= '0' && data[j] <= '9')) {
+		for j < len(data) && (data[j] == ';' || data[j] == ':' || (data[j] >= '0' && data[j] <= '9')) {
 			j++
 		}
 		if j >= len(data) {
@@ -105,29 +123,73 @@ func scanMouseModes(m mouseModeState, data []byte) (_ mouseModeState, tail []byt
 		if final == 'h' || final == 'l' {
 			set := final == 'h'
 			for _, param := range bytes.Split(data[paramStart:j], []byte{';'}) {
-				switch string(param) {
-				case "9":
+				switch modeNumber(param) {
+				case 9:
 					m.x10 = set
-				case "1000":
+				case 1000:
 					m.normal = set
-				case "1002":
+				case 1002:
 					m.button = set
-				case "1003":
+				case 1003:
 					m.any = set
-				case "1006":
+				case 1006:
 					m.sgr = set
-				case "2004":
+				case 2004:
 					m.bracketedPaste = set
-				case "47", "1047", "1049":
+				case 47, 1047, 1049:
 					// All three switch the grid; 1049 is what every current
 					// program emits, the other two are the older forms.
 					m.altScreen = set
 				}
 			}
 		}
+		// A final byte that is itself an ESC starts the NEXT sequence, so it
+		// must be re-examined rather than stepped over: every real parser
+		// treats ESC mid-CSI as cancel-and-restart, so `CSI ? 9 ESC [ ? 1049 h`
+		// enters the alternate screen on the terminal. Skipping it here made
+		// nine bytes of pane content enough to hide an enable from the daemon.
+		if data[j] == 0x1b {
+			i = j
+			continue
+		}
 		i = j + 1
 	}
 	return m, tail
+}
+
+// modeNumber parses one parameter of a private-mode sequence into the mode it
+// names, or -1 when it names none.
+//
+// Numeric rather than a string compare, because a parameter is a NUMBER to
+// every terminal: xterm accumulates digits, so `?01049h` and `?1049h` are the
+// same mode to it, and a daemon matching on the string form would believe the
+// pane was still on the main screen while it was not. Sub-parameters are cut
+// first — `1049:1` is mode 1049 with a modifier nothing here cares about.
+//
+// Values wider than four digits return -1: no mode this scanner tracks is that
+// long, and refusing them keeps the accumulation bounded by construction.
+func modeNumber(param []byte) int {
+	if idx := bytes.IndexByte(param, ':'); idx >= 0 {
+		param = param[:idx]
+	}
+	if len(param) == 0 {
+		return -1
+	}
+	n := 0
+	digits := 0
+	for _, c := range param {
+		if c < '0' || c > '9' {
+			return -1
+		}
+		if n > 0 || c != '0' {
+			digits++ // leading zeros do not count toward the width
+		}
+		if digits > 4 {
+			return -1
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n
 }
 
 // incompleteModeSeq returns the trailing bytes of data that form an

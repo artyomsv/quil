@@ -171,3 +171,64 @@ func TestScanMouseModes_AlternateScreenSplitAcrossChunks(t *testing.T) {
 		t.Error("altScreen = false, want true — the split enable was lost")
 	}
 }
+
+// A parameter is a NUMBER to every terminal, not a string. xterm accumulates
+// digits, so these all reach the same mode there — and a daemon that matched on
+// the string form believed a pane was still on the main screen while it was
+// not, which is the belief handleAttach now acts on.
+func TestScanMouseModes_ParsesParametersNumerically(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want mouseModeState
+	}{
+		{"leading zeros on alt screen", "\x1b[?01049h", mouseModeState{altScreen: true}},
+		{"leading zeros on a mouse mode", "\x1b[?01000h", mouseModeState{normal: true}},
+		{"sub-parameters ignored", "\x1b[?1049:1h", mouseModeState{altScreen: true}},
+		{"sub-parameters in a combined run", "\x1b[?1000:2;1049h",
+			mouseModeState{normal: true, altScreen: true}},
+		{"empty parameter is not a mode", "\x1b[?;h", mouseModeState{}},
+		{"over-wide value is not a mode", "\x1b[?10490h", mouseModeState{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, _ := scanMouseModes(mouseModeState{}, []byte(tt.in))
+			if got != tt.want {
+				t.Errorf("scanMouseModes(%q) = %+v, want %+v", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// An ESC where a final byte should be CANCELS the sequence and starts the next
+// one — that is what every real parser does, so the terminal acts on the second
+// sequence. Stepping over that ESC made nine bytes of ordinary pane content
+// (an SSH banner, a git log message, tool output) enough to hide an enable from
+// the daemon while the terminal honoured it.
+func TestScanMouseModes_EscapeMidSequenceStartsTheNextOne(t *testing.T) {
+	got, _ := scanMouseModes(mouseModeState{}, []byte("\x1b[?9\x1b[?1049h"))
+	if !got.altScreen {
+		t.Errorf("altScreen = false after %q — the ESC that cancelled the first "+
+			"sequence was consumed, so the enable behind it was never seen", "\x1b[?9\x1b[?1049h")
+	}
+}
+
+// wireState is what the broadcast trigger compares. altScreen is not on the
+// wire, so toggling it must not look like a change worth a workspace broadcast
+// — and unlike the mouse modes, full-screen programs toggle it routinely.
+func TestMouseModeState_WireStateIgnoresTheAlternateScreen(t *testing.T) {
+	before := mouseModeState{normal: true, sgr: true}
+	after := before
+	after.altScreen = true
+
+	if before.wireState() != after.wireState() {
+		t.Error("entering the alternate screen changed wireState — that costs a " +
+			"broadcast for a field no client is told about")
+	}
+	// The control: something clients DO see must still register.
+	alsoTracking := after
+	alsoTracking.button = true
+	if after.wireState() == alsoTracking.wireState() {
+		t.Error("a mouse-mode change did not register in wireState")
+	}
+}

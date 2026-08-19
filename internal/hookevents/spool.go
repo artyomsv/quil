@@ -206,6 +206,17 @@ func (s *Spool) Tick() []Payload {
 			//
 			// External truncation (size < off) also falls through to the read,
 			// where readPaneFile restarts from zero.
+			//
+			// One caveat that bounds where this stays safe: on Windows the size
+			// comes from the directory entry, and NTFS updates that lazily while
+			// a file has an open write handle — so a producer mid-write can
+			// present a stale size and take the skip. Harmless for TODAY's
+			// producers, which are short-lived processes that append and close
+			// immediately (claudehook's RunHook), so the cost is at most one
+			// 200 ms tick of extra latency. A LONG-LIVED producer holding the
+			// spool handle open would be stranded until it closed. If one is
+			// ever added, this shortcut needs an age or generation check rather
+			// than size alone.
 			if size == off && size < rotationThreshold {
 				continue
 			}

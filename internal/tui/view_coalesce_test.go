@@ -401,7 +401,6 @@ func TestUpdate_HiddenPaneCachedFrameMatchesForcedRebuild(t *testing.T) {
 	hiddenID := hiddenPaneID(t, &m)
 	m = primeHiddenPane(t, m, hiddenID)
 
-
 	updated, _ := m.Update(PaneOutputMsg{PaneID: hiddenID, Data: []byte("noise\r\n")})
 	after := updated.(Model)
 

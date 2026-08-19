@@ -267,6 +267,8 @@ Setting `redraw_key` therefore means **"my program ignores `SIGWINCH` — send t
 
 **A key is input, not a signal.** It lands in the child's stdin, so only set it when you know both that the program treats the byte as "redraw" *and* that nothing else is reading its stdin as data. A pane that might be sitting in `cat > file` or at a password prompt must leave it unset — there, a stray `\f` is silent data corruption rather than a repaint.
 
+**Quil delivers this key to a given pane at most once every three seconds.** The meaning of a repeat belongs to the receiving program, and a program may give one a second meaning without telling anyone: Claude Code runs `/clear` when it receives two `Ctrl+L` within two seconds. Bursts — a resize storm, or an attach followed by its own first resize — are therefore coalesced into a single delivery, with one further delivery once the interval passes. Do not design a plugin around a redraw key that has to arrive rapidly; if your program needs that, it needs a different trigger.
+
 **Neither trigger is universal, and measurements are counter-intuitive in both directions.** On a real PTY:
 
 | Program | 1-column resize (`SIGWINCH`) | `Ctrl+L` (`\f`) |

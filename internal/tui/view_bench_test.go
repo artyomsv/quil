@@ -27,6 +27,17 @@ const benchPaneLine = "  bench-pane row of terminal text for the vt grid to lay 
 // tabs spread across projects, one pane each, every pane holding enough output
 // that the emulator has a populated grid.
 func benchModel(tabs, projects int) Model {
+	return benchModelContent(tabs, projects, []string{benchPaneLine})
+}
+
+// benchModelContent is benchModel with the pane filler chosen by the caller.
+//
+// Split out because the ASCII line above under-reports width measurement: every
+// rune is one cell, so lipgloss's fast path handles it and grapheme segmentation
+// never does real work. A benchmark used to decide whether to CACHE width
+// measurement has to run against content shaped like the real thing — see
+// realisticPaneLines.
+func benchModelContent(tabs, projects int, lines []string) Model {
 	ps := make([]*ProjectModel, projects)
 	for i := range ps {
 		ps[i] = &ProjectModel{ID: fmt.Sprintf("proj-%d", i), Name: fmt.Sprintf("project-%d", i)}
@@ -34,7 +45,7 @@ func benchModel(tabs, projects int) Model {
 	for i := 0; i < tabs; i++ {
 		pane := NewPaneModel(fmt.Sprintf("pane-%d", i), 64*1024)
 		for l := 0; l < 40; l++ {
-			pane.AppendOutput([]byte(benchPaneLine))
+			pane.AppendOutput([]byte(lines[l%len(lines)]))
 		}
 		tab := tabWith(pane)
 		tab.Name = fmt.Sprintf("tab-%d", i)

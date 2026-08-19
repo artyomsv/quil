@@ -4097,9 +4097,16 @@ func (m Model) View() tea.View {
 		// left edge rather than above the panes they name. The sidebar is a
 		// full-height left column beside the pair, which is what puts its
 		// PROJECTS heading on the same screen row as the tab names.
-		paneArea := lipgloss.JoinVertical(lipgloss.Left, m.renderTabBar(), tabContent)
+		// joinVerticalWidth / joinHorizontalWidth instead of lipgloss's joins:
+		// both blocks are already exactly this wide, and lipgloss re-measures
+		// every line of a full-screen string to discover it needs to pad
+		// nothing. Measured at 54.7% of a warm frame, 97% of it inside these
+		// joins. Both helpers verify the assumption and fall back to lipgloss
+		// when it does not hold, so a ragged block is slower rather than wrong.
+		paneArea := joinVerticalWidth(m.paneAreaWidth(), m.renderTabBar(), tabContent)
 		if projSidebarW > 0 {
-			paneArea = lipgloss.JoinHorizontal(lipgloss.Top, m.renderSidebar(m.sidebarContentHeight()), paneArea)
+			paneArea = joinHorizontalWidth(projSidebarW, m.paneAreaWidth(),
+				m.renderSidebar(m.sidebarContentHeight()), paneArea)
 		}
 		// Drag preview: a rule at the PENDING edge. The strip itself must not
 		// move mid-drag — see the sidebarDragging field comment — so the

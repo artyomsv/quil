@@ -5040,6 +5040,14 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]str
 		}
 	}
 
+	// Published BEFORE any pane is built. A restored workspace arrives as one
+	// full state, so this is the moment its true total is known — sizing panes
+	// as they are created instead would give the first pane the small-workspace
+	// depth and the last the large-workspace one, and no pane's depth can be
+	// revised afterwards (x/vt's SetScrollbackSize reslices rather than
+	// reallocating, so trimming a live pane frees nothing).
+	SetPaneCount(len(state.Panes))
+
 	paneMap := make(map[string]*PaneInfo)
 	for i := range state.Panes {
 		paneMap[state.Panes[i].ID] = &state.Panes[i]

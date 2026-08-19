@@ -136,29 +136,29 @@ func TestAdaptiveScrollbackLines_MeasuredWorkspaceLandsInBand(t *testing.T) {
 // built, so a count that oscillates would hand out inconsistent depths for no
 // benefit — a closing pane must not deepen the next pane's allocation.
 func TestSetPaneCount_OnlyRaises(t *testing.T) {
-	t.Cleanup(func() { knownPaneCount = 0 })
-	knownPaneCount = 0
+	t.Cleanup(func() { knownPaneCount.Store(0) })
+	knownPaneCount.Store(0)
 
 	SetPaneCount(41)
-	if knownPaneCount != 41 {
-		t.Fatalf("knownPaneCount = %d, want 41", knownPaneCount)
+	if knownPaneCount.Load() != 41 {
+		t.Fatalf("knownPaneCount = %d, want 41", knownPaneCount.Load())
 	}
 	SetPaneCount(3)
-	if knownPaneCount != 41 {
-		t.Errorf("knownPaneCount fell to %d — a closing pane must not deepen the next pane's allocation", knownPaneCount)
+	if knownPaneCount.Load() != 41 {
+		t.Errorf("knownPaneCount fell to %d — a closing pane must not deepen the next pane allocation", knownPaneCount.Load())
 	}
 	SetPaneCount(60)
-	if knownPaneCount != 60 {
-		t.Errorf("knownPaneCount = %d, want 60 — a growing workspace must still tighten the budget", knownPaneCount)
+	if knownPaneCount.Load() != 60 {
+		t.Errorf("knownPaneCount = %d, want 60 — a growing workspace must still tighten the budget", knownPaneCount.Load())
 	}
 }
 
 // scrollbackLines() is what newVTEmulator calls, so it must route through the
 // policy rather than returning the raw setting.
 func TestScrollbackLines_RoutesThroughTheAdaptivePolicy(t *testing.T) {
-	t.Cleanup(func() { explicitScrollback = 0; knownPaneCount = 0 })
+	t.Cleanup(func() { explicitScrollback.Store(0); knownPaneCount.Store(0) })
 
-	explicitScrollback, knownPaneCount = 0, 41
+	explicitScrollback.Store(0); knownPaneCount.Store(41)
 	adaptive := scrollbackLines()
 	if adaptive != adaptiveScrollbackLines(0, 41) {
 		t.Errorf("scrollbackLines() = %d, want the policy's %d", adaptive, adaptiveScrollbackLines(0, 41))
@@ -167,7 +167,7 @@ func TestScrollbackLines_RoutesThroughTheAdaptivePolicy(t *testing.T) {
 		t.Errorf("scrollbackLines() = %d at 41 panes — the adaptive path is not wired in", adaptive)
 	}
 
-	explicitScrollback = 4321
+	explicitScrollback.Store(4321)
 	if got := scrollbackLines(); got != 4321 {
 		t.Errorf("scrollbackLines() = %d with an explicit setting, want 4321", got)
 	}
@@ -178,8 +178,8 @@ func TestScrollbackLines_RoutesThroughTheAdaptivePolicy(t *testing.T) {
 // against a count of zero — which resolves to the full default and cannot be
 // revised once the emulator exists.
 func TestApplyWorkspaceState_PublishesPaneCountBeforeBuildingPanes(t *testing.T) {
-	t.Cleanup(func() { knownPaneCount = 0; explicitScrollback = 0 })
-	knownPaneCount, explicitScrollback = 0, 0
+	t.Cleanup(func() { knownPaneCount.Store(0); explicitScrollback.Store(0) })
+	knownPaneCount.Store(0); explicitScrollback.Store(0)
 
 	m := coalesceModel(t)
 	state := WorkspaceStateMsg{
@@ -193,8 +193,8 @@ func TestApplyWorkspaceState_PublishesPaneCountBeforeBuildingPanes(t *testing.T)
 
 	m.applyWorkspaceState(state, "")
 
-	if knownPaneCount < 41 {
-		t.Fatalf("knownPaneCount = %d after applying a 41-pane workspace, want >= 41", knownPaneCount)
+	if knownPaneCount.Load() < 41 {
+		t.Fatalf("knownPaneCount = %d after applying a 41-pane workspace, want >= 41", knownPaneCount.Load())
 	}
 	depth := scrollbackLines()
 	if depth >= defaultScrollbackLines {

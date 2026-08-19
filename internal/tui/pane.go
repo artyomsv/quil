@@ -421,13 +421,21 @@ const minAdaptiveScrollbackLines = 2000
 // constructed from a dozen call sites that have no config in hand. The
 // established precedent for this shape is version.SetUpdatesEnabled. Read
 // through scrollbackLines(), never directly.
-var explicitScrollback int
+//
+// ATOMIC, unlike that precedent, and the reason is worth stating: this pair is
+// written by applyWorkspaceState — PRODUCTION code on the Update goroutine —
+// while scrollbackLines() is read from NewPaneModel. Those are the same
+// goroutine in production, but a plain int makes every parallel test in the
+// package racy against any other that builds a pane, which the detector reports
+// as a failure of whichever pair it happens to catch. Same reasoning as
+// Daemon.clientCWD's atomic.Pointer.
+var explicitScrollback atomic.Int64
 
 // knownPaneCount is the workspace size the adaptive depth divides. Published by
 // applyWorkspaceState BEFORE it creates any pane, so a restored workspace sizes
 // every pane against its true total rather than against however many happened to
 // exist when each one was built.
-var knownPaneCount int
+var knownPaneCount atomic.Int64
 
 // logScrollbackChoiceOnce keeps the adaptive choice discoverable without making
 // it noisy: a depth chosen FOR the user rather than BY them should appear in the
@@ -484,7 +492,7 @@ func SetScrollbackLines(n int) {
 	if n < 0 {
 		n = 0
 	}
-	explicitScrollback = n
+	explicitScrollback.Store(int64(n))
 }
 
 // SetPaneCount publishes the workspace pane count for the adaptive depth.
@@ -492,16 +500,28 @@ func SetScrollbackLines(n int) {
 // Only ever RAISES. Depth cannot be reclaimed from panes already built, so a
 // count that oscillates would hand out inconsistent depths for no benefit — a
 // closing pane must not deepen the next pane's allocation.
+//
+// Compare-and-swap rather than a read-then-write, so the monotonic property
+// holds even though the field is atomic: two concurrent raises could otherwise
+// interleave and let the smaller win.
 func SetPaneCount(n int) {
-	if n > knownPaneCount {
-		knownPaneCount = n
+	v := int64(n)
+	for {
+		cur := knownPaneCount.Load()
+		if v <= cur {
+			return
+		}
+		if knownPaneCount.CompareAndSwap(cur, v) {
+			return
+		}
 	}
 }
 
 func scrollbackLines() int {
-	depth := adaptiveScrollbackLines(explicitScrollback, knownPaneCount)
-	if explicitScrollback == 0 && depth != defaultScrollbackLines {
-		panes := knownPaneCount
+	explicit := int(explicitScrollback.Load())
+	panes := int(knownPaneCount.Load())
+	depth := adaptiveScrollbackLines(explicit, panes)
+	if explicit == 0 && depth != defaultScrollbackLines {
 		logScrollbackChoiceOnce.Do(func() {
 			log.Printf("scrollback depth %d lines for %d panes (set ui.scrollback_lines to override)", depth, panes)
 		})

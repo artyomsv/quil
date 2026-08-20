@@ -1005,10 +1005,17 @@ func TestReadDetail_RecordingTranscriptWithNoTypedPromptIsNotRescanned(t *testin
 // entry a caller meant to put BEYOND the head lands inside it — the test still
 // passes, having stopped testing what it claims. Measuring cannot drift when
 // the filler text is edited.
+// padSlack is margin over the window, not a fudge factor. Measuring the filler
+// exactly guarantees only that the total EXCEEDS titleScanBytes — by as little
+// as one byte, depending on where the last line falls. The callers append their
+// own entry after this padding and need it comfortably clear, so the slack is
+// kept deliberately rather than trimmed to the minimum that satisfies the loop.
+const padSlack = 4096
+
 func padTranscript() []string {
 	filler := assistantMsg("filler line to push the tail past the scan window")
 	var out []string
-	for n := 0; n <= titleScanBytes; n += len(filler) + 1 { // +1 for the joining newline
+	for n := 0; n <= titleScanBytes+padSlack; n += len(filler) + 1 { // +1 for the joining newline
 		out = append(out, filler)
 	}
 	return out
@@ -1023,9 +1030,9 @@ func TestPadTranscript_ClearsTheHeadWindow(t *testing.T) {
 	for _, line := range padTranscript() {
 		n += len(line) + 1
 	}
-	if n <= titleScanBytes {
-		t.Fatalf("padding = %d bytes, want more than titleScanBytes (%d) — an entry placed after it would land INSIDE the head window",
-			n, titleScanBytes)
+	if n <= titleScanBytes+padSlack {
+		t.Fatalf("padding = %d bytes, want more than titleScanBytes+padSlack (%d) — an entry placed after it would be too close to the head window",
+			n, titleScanBytes+padSlack)
 	}
 }
 

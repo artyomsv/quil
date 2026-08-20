@@ -36,7 +36,7 @@ architectural bet.
 | Git worktree-per-session | ❌ | ✅ | ✅ (+ multi-repo) |
 | AI agents supported | **2** deep + tools | **~18** detected, 14 integrations | **~13** terminal, 7 ACP |
 | Scale | ~30–40k Go | ~170k Rust | ~292k Rust + large web app |
-| License / backing | MIT, product | Apache-2.0 (was AGPL-3.0 + commercial until 2026-07-22), solo + sponsors | MIT, Mozilla.ai community |
+| License / backing | Apache-2.0, product | Apache-2.0 (was AGPL-3.0 + commercial until 2026-07-22), solo + sponsors | MIT, Mozilla.ai community |
 
 **On herdr's licensing, because the reversal is the interesting part:** it
 shipped in March 2026 dual-licensed AGPL-3.0-or-later plus a commercial licence

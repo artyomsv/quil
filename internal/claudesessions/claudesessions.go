@@ -314,8 +314,17 @@ type transcriptLine struct {
 	// AiTitle carries the session title on builds that emit a
 	// {"type":"ai-title"} entry. Absent on builds that do not; the title scan
 	// consults it only after the typed-prompt pass finds nothing.
-	AiTitle   string `json:"aiTitle"`
-	Timestamp string `json:"timestamp"`
+	AiTitle string `json:"aiTitle"`
+	// IsMeta marks text claude injected into the user turn rather than text the
+	// user wrote — hook notices, local-command caveats, system reminders.
+	IsMeta bool `json:"isMeta"`
+	// ToolUseResult is present, at top level, on every entry that is a tool
+	// RESULT. Decoded as RawMessage and tested only for presence: the shape
+	// varies per tool and none of it is needed. It is what separates a tool
+	// result from a prompt, because content SHAPE does not — a tool result's
+	// content is a bare string far more often than not.
+	ToolUseResult json.RawMessage `json:"toolUseResult"`
+	Timestamp     string          `json:"timestamp"`
 	Message   struct {
 		// Content is a string for a plain prompt and an array of content
 		// blocks when the prompt carries attachments — both shapes occur in
@@ -439,10 +448,17 @@ func readDetail(ctx context.Context, path, id string) (Detail, error) {
 	}
 
 	// Fallback: a transcript from a build that does not record promptSource
-	// yields zero prompts above. Re-scan classifying by CONTENT SHAPE instead —
-	// string content is a prompt, array content is a tool result — and only for
-	// entries carrying no promptSource, so a current-schema transcript can
-	// never be reclassified here (see readTitle's fallback 2).
+	// yields zero prompts above. Re-scan classifying by what each entry IS.
+	//
+	// This comment used to say the promptSource=="" test meant "a current-schema
+	// transcript can never be reclassified here". It does not — that is a
+	// per-entry test, and plenty of entries on a current-schema transcript carry
+	// no promptSource. Array content is rejected because a tool result whose
+	// content is a block list is not a prompt, but that check is not enough
+	// either: a tool result's content is a bare STRING more often than not.
+	// isMachinery is what carries the classification (see readTitle's
+	// fallback 2), and it must run BEFORE the count below — the increment and
+	// the text are set together, so one rejection point covers both.
 	//
 	// A SECOND pass rather than one combined pass, deliberately: the loop above
 	// owes its speed to rejecting non-typed lines with a byte compare before
@@ -467,12 +483,17 @@ func readDetail(ctx context.Context, path, id string) (Detail, error) {
 				if json.Unmarshal(bytes.TrimSpace(line), &tl) == nil &&
 					tl.Type == "user" && !tl.IsSidechain && tl.PromptSource == "" &&
 					contentIsString(tl.Message.Content) {
-					d.UserPrompts++
-					if text := sanitizePrompt(contentText(tl.Message.Content, MaxPromptRunes)); text != "" {
-						if d.FirstPrompt == "" {
-							d.FirstPrompt = text
+					// NOT `continue`: this sits inside the read loop, above the
+					// readErr check that ends it, so skipping the rest of the
+					// iteration would skip the break too.
+					if raw := contentText(tl.Message.Content, MaxPromptRunes); !isMachinery(tl, raw) {
+						d.UserPrompts++
+						if text := sanitizePrompt(raw); text != "" {
+							if d.FirstPrompt == "" {
+								d.FirstPrompt = text
+							}
+							d.LastPrompt = text
 						}
-						d.LastPrompt = text
 					}
 				}
 			}
@@ -595,17 +616,21 @@ func readTitle(path string) string {
 		}
 	}
 
-	// Fallback 2 — the first user entry whose content is a bare STRING, on a
-	// transcript that records no promptSource AT ALL.
+	// Fallback 2 — the first user entry whose content is a bare STRING and is
+	// not claude's own text.
 	//
-	// The PromptSource=="" condition is the correctness guard, not a nicety.
-	// Gating only on "the typed pass found nothing" would also fire for a
-	// CURRENT-schema transcript that happens to contain no typed prompt but
-	// does contain non-typed string-content user entries — slash-command
-	// expansions and compaction-continuation summaries, which are exactly what
-	// the promptSource=="typed" filter exists to exclude. Those would become
-	// titles, and a compaction summary makes a grotesque one. Keying on the
-	// field's ABSENCE confines this to schemas that never record it.
+	// PromptSource=="" is necessary but nowhere near sufficient, and this
+	// comment used to claim it "confines this to schemas that never record"
+	// the field. It cannot: it is a PER-ENTRY test and says nothing about the
+	// transcript. A current-schema file is full of user entries carrying no
+	// promptSource — tool results, slash-command expansions, hook notices —
+	// and every one of them passed. Sessions were titled "a", "main-agent" and
+	// a directory path because of it.
+	//
+	// isMachinery is what establishes the content is a prompt. The
+	// promptSource test STAYS: it is what excludes the non-typed SOURCES
+	// (sdk, queued, compact) — real input, but not typed input, and widening
+	// that set is a separate decision.
 	for _, line := range lines {
 		if !bytes.Contains(line, []byte(`"type":"user"`)) {
 			continue
@@ -618,8 +643,12 @@ func readTitle(path string) string {
 			!contentIsString(tl.Message.Content) {
 			continue
 		}
-		if text := sanitizeTitle(contentText(tl.Message.Content, MaxTitleRunes)); text != "" {
-			return text
+		text := contentText(tl.Message.Content, MaxTitleRunes)
+		if isMachinery(tl, text) {
+			continue
+		}
+		if title := sanitizeTitle(text); title != "" {
+			return title
 		}
 	}
 	return ""
@@ -633,6 +662,56 @@ func readTitle(path string) string {
 // Tests the raw token rather than round-tripping through json.Unmarshal, which
 // accepts JSON null into a string and reports success — so `"content": null`
 // counted as a prompt and inflated UserPrompts by one, with empty text.
+// machineryTags are the wrappers claude puts around its own text in the user
+// turn. Derived from the transcripts on one developer's machine, counting only
+// entries whose message.content is a STRING — the only ones the shape-detecting
+// passes can reach.
+//
+// Six, not more: local-command-caveat and system-reminder are covered by isMeta
+// on every observed entry, and listing them here as well would hide which
+// mechanism is load-bearing. tool_use_error, persisted-output and
+// retrieval_status occur only inside ARRAY content, which contentIsString
+// rejects before this runs.
+var machineryTags = []string{
+	"task-notification",
+	"command-name",
+	"command-message",
+	"local-command-stdout",
+	"bash-stdout",
+	"bash-input",
+}
+
+// isMachinery reports whether a user entry is claude's own text rather than the
+// user's, and so must not become a title or count as a prompt.
+//
+// Three tests, in cost order. The first two are field reads on the already
+// decoded entry; only the third touches the content. All three run solely on
+// the shape-detecting fallback paths — an entry reaches them only after failing
+// the promptSource=="typed" test, so the fast path pays nothing.
+//
+// Each is independently load-bearing: a tool result carries no tag and no
+// isMeta; a hook notice carries isMeta and no tag; command markup carries a tag
+// and neither field.
+func isMachinery(tl transcriptLine, content string) bool {
+	if len(tl.ToolUseResult) > 0 {
+		return true
+	}
+	if tl.IsMeta {
+		return true
+	}
+	// Prefix, never substring: a prompt that MENTIONS <command-name> is prose.
+	// Both delimiters, because <command-name> closes immediately while
+	// <task-notification …> carries attributes. No TrimSpace — every observed
+	// machinery entry opens its tag at byte 0, and a whitespace-prefixed tag is
+	// therefore a miss, which yields the behaviour we have today.
+	for _, tag := range machineryTags {
+		if strings.HasPrefix(content, "<"+tag+">") || strings.HasPrefix(content, "<"+tag+" ") {
+			return true
+		}
+	}
+	return false
+}
+
 func contentIsString(raw json.RawMessage) bool {
 	raw = bytes.TrimSpace(raw)
 	return len(raw) > 0 && raw[0] == '"'

@@ -401,9 +401,31 @@ func TestReadTitle_PromptBeyondScanWindow_ReturnsEmpty(t *testing.T) {
 
 // toolResult builds the shape claude records for a tool result: type "user",
 // but with no promptSource, because the user did not type it.
+// toolResult builds the entry claude writes for a tool RESULT: type "user",
+// but carrying a top-level toolUseResult. The content is a bare STRING, which
+// is the common case and the reason content shape cannot classify these — the
+// sibling field is what identifies them.
 func toolResult(text string) string {
 	return fmt.Sprintf(
-		`{"type":"user","isSidechain":false,"message":{"role":"user","content":%q},"timestamp":"2026-07-01T10:05:00.000Z"}`,
+		`{"type":"user","isSidechain":false,"toolUseResult":{"stdout":"…"},"message":{"role":"user","content":%q},"timestamp":"2026-07-01T10:05:00.000Z"}`,
+		text)
+}
+
+// metaEntry builds a claude-injected meta entry: no tag, no toolUseResult, only
+// isMeta. Hook notices take this shape, so isMeta is the only marker that
+// identifies them.
+func metaEntry(text string) string {
+	return fmt.Sprintf(
+		`{"type":"user","isSidechain":false,"isMeta":true,"message":{"role":"user","content":%q},"timestamp":"2026-07-01T10:06:00.000Z"}`,
+		text)
+}
+
+// plainUserEntry is an old-schema user entry carrying no marker at all — no
+// promptSource, no isMeta, no toolUseResult. This is what a real prompt looks
+// like on a build that predates promptSource.
+func plainUserEntry(text string) string {
+	return fmt.Sprintf(
+		`{"type":"user","isSidechain":false,"message":{"role":"user","content":%q},"timestamp":"2026-07-01T10:07:00.000Z"}`,
 		text)
 }
 
@@ -797,6 +819,99 @@ func TestReadTitle_AiTitleFiresOnCurrentSchemaWithNoTypedPrompt(t *testing.T) {
 	)
 	if got := readTitle(path); got != "Refactor the parser" {
 		t.Errorf("readTitle = %q, want the ai-title — the pass must not be gated on promptSource being absent", got)
+	}
+}
+
+// --- machinery rejection ----------------------------------------------------
+//
+// The shape-detecting passes promote message CONTENT, so they must first
+// establish the content is a prompt. promptSource-absence cannot do that: it is
+// a per-entry test, and entries that are not prompts routinely carry no
+// promptSource. Three markers separate them, and each fixture below is
+// reachable only by the one it targets — a fixture carrying two markers would
+// stay green with either filter deleted.
+
+// The PRESERVATION test. It must keep passing through every filter added: an
+// old-schema transcript whose first string-content entry is ordinary prose is
+// the case the fallback exists to serve.
+func TestReadTitle_OldSchemaProsePromptIsPreserved(t *testing.T) {
+	path := writeSchemaTranscript(t,
+		plainUserEntry("Read docs/global-question-domain.md and summarise it"),
+	)
+	if got := readTitle(path); got != "Read docs/global-question-domain.md and summarise it" {
+		t.Errorf("readTitle = %q, want the real prompt", got)
+	}
+}
+
+func TestReadTitle_ToolResultIsNotATitle(t *testing.T) {
+	path := writeSchemaTranscript(t,
+		toolResult("total 9224 -rw-r--r-- 1 artjo"),
+		plainUserEntry("the real prompt"),
+	)
+	if got := readTitle(path); got != "the real prompt" {
+		t.Errorf("readTitle = %q, want the real prompt — a tool result is not a prompt", got)
+	}
+}
+
+func TestReadTitle_MetaEntryIsNotATitle(t *testing.T) {
+	path := writeSchemaTranscript(t,
+		metaEntry("A session-scoped Stop hook is now active"),
+		plainUserEntry("the real prompt"),
+	)
+	if got := readTitle(path); got != "the real prompt" {
+		t.Errorf("readTitle = %q, want the real prompt — isMeta marks claude's own text", got)
+	}
+}
+
+func TestReadTitle_CommandMarkupIsNotATitle(t *testing.T) {
+	path := writeSchemaTranscript(t,
+		plainUserEntry("<command-name>/goal</command-name> <command-message>goal</command-message>"),
+		plainUserEntry("the real prompt"),
+	)
+	if got := readTitle(path); got != "the real prompt" {
+		t.Errorf("readTitle = %q, want the real prompt — command markup is not a prompt", got)
+	}
+}
+
+// The denylist must reject CLAUDE's markup, not markup in general. A user who
+// pastes HTML has typed a prompt.
+func TestReadTitle_UserPastedMarkupIsATitle(t *testing.T) {
+	path := writeSchemaTranscript(t,
+		plainUserEntry("<html><body>why does this render wrong?</body></html>"),
+	)
+	if got := readTitle(path); got == "" {
+		t.Error("readTitle = empty, want the pasted markup — only claude's own tags are machinery")
+	}
+}
+
+func TestReadDetail_ToolResultIsNotAPrompt(t *testing.T) {
+	assertDetailIgnoresMachinery(t, toolResult("main-agent"))
+}
+
+func TestReadDetail_MetaEntryIsNotAPrompt(t *testing.T) {
+	assertDetailIgnoresMachinery(t, metaEntry("A session-scoped Stop hook is now active"))
+}
+
+func TestReadDetail_CommandMarkupIsNotAPrompt(t *testing.T) {
+	assertDetailIgnoresMachinery(t, plainUserEntry("<local-command-stdout>ok</local-command-stdout>"))
+}
+
+// assertDetailIgnoresMachinery pins BOTH halves of a rejection in readDetail's
+// shape-detecting pass. The count is incremented separately from the text, so a
+// text-only assertion can pass while UserPrompts is wrong — which is the
+// stronger failure this pass can produce.
+func assertDetailIgnoresMachinery(t *testing.T, machinery string) {
+	t.Helper()
+	path := writeSchemaTranscript(t, machinery, plainUserEntry("the real prompt"))
+	d, err := readDetail(context.Background(), path, "11111111-2222-3333-4444-555555555555")
+	if err != nil {
+		t.Fatalf("readDetail: %v", err)
+	}
+	if d.UserPrompts != 1 {
+		t.Errorf("UserPrompts = %d, want 1 — the machinery entry was counted", d.UserPrompts)
+	}
+	if d.FirstPrompt != "the real prompt" {
+		t.Errorf("FirstPrompt = %q, want %q", d.FirstPrompt, "the real prompt")
 	}
 }
 

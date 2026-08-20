@@ -900,6 +900,81 @@ func TestReadDetail_CommandMarkupIsNotAPrompt(t *testing.T) {
 // shape-detecting pass. The count is incremented separately from the text, so a
 // text-only assertion can pass while UserPrompts is wrong — which is the
 // stronger failure this pass can produce.
+// --- the schema gate on readDetail's second pass ----------------------------
+
+// A transcript that RECORDS promptSource but has no typed prompt must not be
+// rescanned: every entry the rescan could accept lacks the field, and on a
+// recording transcript that proves the entry is not a typed prompt.
+//
+// The two plain entries are load-bearing. They carry no toolUseResult, no
+// isMeta and no tag, so they survive every filter above — without them the
+// rescan would find nothing anyway and this would pass with the gate deleted.
+func TestReadDetail_RecordingTranscriptWithNoTypedPromptIsNotRescanned(t *testing.T) {
+	path := writeSchemaTranscript(t,
+		`{"type":"user","promptSource":"compact","message":{"content":"continued from a previous conversation"}}`,
+		plainUserEntry("something the rescan would otherwise count"),
+		plainUserEntry("and another"),
+	)
+	d, err := readDetail(context.Background(), path, "11111111-2222-3333-4444-555555555555")
+	if err != nil {
+		t.Fatalf("readDetail: %v", err)
+	}
+	if d.UserPrompts != 0 {
+		t.Errorf("UserPrompts = %d, want 0 — this transcript records promptSource, so an entry lacking it is not a typed prompt", d.UserPrompts)
+	}
+}
+
+// padTranscript returns filler lines totalling more than titleScanBytes, so a
+// caller can place an entry beyond the head window.
+func padTranscript() []string {
+	var out []string
+	for len(out)*96 < titleScanBytes+4096 {
+		out = append(out, assistantMsg("filler line to push the tail past the scan window"))
+	}
+	return out
+}
+
+// The gate's FALSE-NEGATIVE direction, and the only fixture that exercises it:
+// promptSource appears only past the 64 KiB head, so the gate answers false and
+// the rescan runs. The result must equal today's behaviour — that equivalence
+// is what makes a head sample an acceptable proxy for a whole-file question.
+func TestReadDetail_PromptSourceBeyondHeadStillRescans(t *testing.T) {
+	lines := append([]string{plainUserEntry("an old-schema prompt in the head")}, padTranscript()...)
+	lines = append(lines, `{"type":"user","promptSource":"compact","message":{"content":"a late current-schema entry"}}`)
+
+	path := writeSchemaTranscript(t, lines...)
+	d, err := readDetail(context.Background(), path, "11111111-2222-3333-4444-555555555555")
+	if err != nil {
+		t.Fatalf("readDetail: %v", err)
+	}
+	if d.UserPrompts != 1 || d.FirstPrompt != "an old-schema prompt in the head" {
+		t.Errorf("UserPrompts = %d, FirstPrompt = %q; want 1 and the head prompt — a field beyond the window must not gate the rescan off",
+			d.UserPrompts, d.FirstPrompt)
+	}
+}
+
+// A transcript that outlived a claude upgrade: old-schema head, typed prompt
+// only in the tail. This pins the head/whole-file split — readTitle sees only
+// the head and falls back, readDetail scans everything and finds the typed
+// prompt. It says NOTHING about the gate: with UserPrompts >= 1 the && ahead of
+// recordsPromptSource short-circuits and the gate is never consulted.
+func TestMixedSchemaTranscript_TitleFallsBackButDetailFindsTheTypedPrompt(t *testing.T) {
+	lines := append([]string{plainUserEntry("the old-schema head prompt")}, padTranscript()...)
+	lines = append(lines, typedPrompt("the typed prompt in the tail"))
+
+	path := writeSchemaTranscript(t, lines...)
+	if got := readTitle(path); got != "the old-schema head prompt" {
+		t.Errorf("readTitle = %q, want the head prompt — readTitle only ever reads the head", got)
+	}
+	d, err := readDetail(context.Background(), path, "11111111-2222-3333-4444-555555555555")
+	if err != nil {
+		t.Fatalf("readDetail: %v", err)
+	}
+	if d.UserPrompts != 1 || d.FirstPrompt != "the typed prompt in the tail" {
+		t.Errorf("UserPrompts = %d, FirstPrompt = %q; want 1 and the tail prompt", d.UserPrompts, d.FirstPrompt)
+	}
+}
+
 func assertDetailIgnoresMachinery(t *testing.T, machinery string) {
 	t.Helper()
 	path := writeSchemaTranscript(t, machinery, plainUserEntry("the real prompt"))

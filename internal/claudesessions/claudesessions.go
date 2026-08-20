@@ -465,7 +465,10 @@ func readDetail(ctx context.Context, path, id string) (Detail, error) {
 	// any JSON parse, and parsing every "type":"user" line unconditionally
 	// would pay a full unmarshal per tool result on an 88 MB transcript for
 	// every existing user. This runs only when the fast path found nothing.
-	if d.UserPrompts == 0 {
+	// Operand order is load-bearing. && short-circuits, so recordsPromptSource
+	// runs only on transcripts that already found no typed prompt — the rare
+	// path. Reversing it puts a seek and a 64 KiB read on EVERY detail read.
+	if d.UserPrompts == 0 && !recordsPromptSource(f) {
 		if _, err := f.Seek(0, io.SeekStart); err != nil {
 			return d, nil // keep the timestamps the first pass gathered
 		}
@@ -662,6 +665,42 @@ func readTitle(path string) string {
 // Tests the raw token rather than round-tripping through json.Unmarshal, which
 // accepts JSON null into a string and reports success — so `"content": null`
 // counted as a prompt and inflated UserPrompts by one, with empty text.
+// recordsPromptSource reports whether the transcript's head mentions
+// promptSource, i.e. whether the build that wrote it records the field.
+//
+// This is a CORRECTNESS gate that also saves work, not a pure optimisation. On
+// a transcript that records the field, an entry LACKING it is not a typed
+// prompt — whatever else it may be — so skipping the shape-detecting pass
+// cannot lose a prompt. It can only suppress entries that pass would
+// misclassify.
+//
+// The two error directions are NOT symmetric, which is what makes a head sample
+// acceptable for a whole-file question. A false positive is near impossible:
+// the head is the OLDEST part of the file, and a build that records the field
+// at session start does not stop mid-session. A false negative — the field
+// appearing only past the window, which happens on transcripts that outlived a
+// claude upgrade — costs one re-read that happens today anyway.
+//
+// The substring test is sound because of JSON escaping: a mention of
+// promptSource inside message content is stored as \"promptSource\", which
+// cannot match the quoted needle. Content can never fake the field.
+func recordsPromptSource(f *os.File) bool {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return false
+	}
+	head, err := io.ReadAll(io.LimitReader(f, titleScanBytes))
+	if err != nil {
+		return false
+	}
+	found := bytes.Contains(head, []byte(`"promptSource"`))
+	// Restore the offset for the caller. The pass seeks to 0 itself, so this is
+	// belt-and-braces; a failure here answers false and lets it run.
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return false
+	}
+	return found
+}
+
 // machineryTags are the wrappers claude puts around its own text in the user
 // turn. Derived from the transcripts on one developer's machine, counting only
 // entries whose message.content is a STRING — the only ones the shape-detecting

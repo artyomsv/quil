@@ -170,14 +170,33 @@ func ProjectDir(cwd string) string {
 	return ProjectDirIn(ConfigDir(), cwd)
 }
 
-// TranscriptPath returns the absolute path of one session's transcript, or ""
-// when the home directory is unavailable or either argument is empty.
-func TranscriptPath(cwd, sessionID string) string {
-	dir := ProjectDir(cwd)
+// TranscriptPathIn returns one session's transcript path under an explicit
+// config dir, or "" when the directory cannot be resolved or either remaining
+// argument is empty. It takes the directory for the same reason ProjectDirIn
+// does: a caller that already resolved one must not be at the mercy of a
+// concurrent Setenv, and tests need no environment at all.
+//
+// This is the ONLY place the session-id-to-filename join lives. ReadDetailIn
+// used to inline its own copy, which left the exported spelling below with no
+// production caller and its test certifying a join nothing ran.
+//
+// It does NOT validate sessionID, and deliberately so — it is a path
+// constructor, not a gate. filepath.Join CLEANS a traversal rather than
+// refusing it, so a caller building a path from untrusted input must reject
+// separators and ".." itself first. ReadDetailIn does exactly that before it
+// calls here; any new caller owes the same check.
+func TranscriptPathIn(configDir, cwd, sessionID string) string {
+	dir := ProjectDirIn(configDir, cwd)
 	if dir == "" || sessionID == "" {
 		return ""
 	}
 	return filepath.Join(dir, sessionID+".jsonl")
+}
+
+// TranscriptPath returns the absolute path of one session's transcript, or ""
+// when the home directory is unavailable or either argument is empty.
+func TranscriptPath(cwd, sessionID string) string {
+	return TranscriptPathIn(ConfigDir(), cwd, sessionID)
 }
 
 // List returns the sessions recorded for cwd, newest first, capped at
@@ -292,6 +311,31 @@ func listDir(ctx context.Context, dir string) (sessions []Session, truncated boo
 	return out, truncated, nil
 }
 
+// jsonPresent records only WHETHER a field appeared, never its value.
+//
+// json.RawMessage would answer the same question but keep a copy of the whole
+// blob: toolUseResult carries entire command outputs, and the rescan decodes
+// every tool-result line on a transcript that can reach tens of MB. Presence is
+// all isMachinery asks, so nothing is copied.
+//
+// The question is whether the KEY appeared, never what it held. encoding/json
+// calls this only for a key that is present, so any call means present —
+// including an explicit null, which says a tool returned nothing, not that this
+// entry is no longer a tool result.
+//
+// Measured: toolUseResult takes only object, string or array across 84,218
+// occurrences; null does not occur. So the strict reading costs nothing today
+// and stays conservative if it ever does — the permissive one would let tool
+// output reach the title passes with only isMeta and the tag denylist between
+// it and the screen, and untagged tool output is the case this whole change
+// exists to reject.
+type jsonPresent bool
+
+func (p *jsonPresent) UnmarshalJSON([]byte) error {
+	*p = true
+	return nil
+}
+
 // transcriptLine mirrors the subset of a transcript entry needed to recognize
 // a typed human prompt and pull its text. Extra fields are ignored.
 type transcriptLine struct {
@@ -301,9 +345,17 @@ type transcriptLine struct {
 	// AiTitle carries the session title on builds that emit a
 	// {"type":"ai-title"} entry. Absent on builds that do not; the title scan
 	// consults it only after the typed-prompt pass finds nothing.
-	AiTitle   string `json:"aiTitle"`
-	Timestamp string `json:"timestamp"`
-	Message   struct {
+	AiTitle string `json:"aiTitle"`
+	// IsMeta marks text claude injected into the user turn rather than text the
+	// user wrote — hook notices, local-command caveats, system reminders.
+	IsMeta bool `json:"isMeta"`
+	// ToolUseResult is present, at top level, on every entry that is a tool
+	// RESULT. It is what separates a tool result from a prompt, because content
+	// SHAPE does not — a tool result's content is a bare string far more often
+	// than not.
+	ToolUseResult jsonPresent `json:"toolUseResult"`
+	Timestamp     string      `json:"timestamp"`
+	Message       struct {
 		// Content is a string for a plain prompt and an array of content
 		// blocks when the prompt carries attachments — both shapes occur in
 		// the wild, so it is decoded in a second pass.
@@ -368,11 +420,11 @@ func ReadDetailIn(ctx context.Context, configDir, cwd, sessionID string) (Detail
 		sessionID == "." || sessionID == ".." || strings.ContainsRune(sessionID, filepath.Separator) {
 		return Detail{}, fmt.Errorf("invalid session id")
 	}
-	dir := ProjectDirIn(configDir, cwd)
-	if dir == "" {
+	path := TranscriptPathIn(configDir, cwd, sessionID)
+	if path == "" {
 		return Detail{}, fmt.Errorf("no transcript path for this session")
 	}
-	return readDetail(ctx, filepath.Join(dir, sessionID+".jsonl"), sessionID)
+	return readDetail(ctx, path, sessionID)
 }
 
 // readDetail is the filesystem half of ReadDetail, split out so tests can point
@@ -426,17 +478,27 @@ func readDetail(ctx context.Context, path, id string) (Detail, error) {
 	}
 
 	// Fallback: a transcript from a build that does not record promptSource
-	// yields zero prompts above. Re-scan classifying by CONTENT SHAPE instead —
-	// string content is a prompt, array content is a tool result — and only for
-	// entries carrying no promptSource, so a current-schema transcript can
-	// never be reclassified here (see readTitle's fallback 2).
+	// yields zero prompts above. Re-scan classifying by what each entry IS.
+	//
+	// This comment used to say the promptSource=="" test meant "a current-schema
+	// transcript can never be reclassified here". It does not — that is a
+	// per-entry test, and plenty of entries on a current-schema transcript carry
+	// no promptSource. Array content is rejected because a tool result whose
+	// content is a block list is not a prompt, but that check is not enough
+	// either: a tool result's content is a bare STRING more often than not.
+	// isMachinery is what carries the classification (see readTitle's
+	// fallback 2), and it must run BEFORE the count below — the increment and
+	// the text are set together, so one rejection point covers both.
 	//
 	// A SECOND pass rather than one combined pass, deliberately: the loop above
 	// owes its speed to rejecting non-typed lines with a byte compare before
 	// any JSON parse, and parsing every "type":"user" line unconditionally
 	// would pay a full unmarshal per tool result on an 88 MB transcript for
 	// every existing user. This runs only when the fast path found nothing.
-	if d.UserPrompts == 0 {
+	// Operand order is load-bearing. && short-circuits, so recordsPromptSource
+	// runs only on transcripts that already found no typed prompt — the rare
+	// path. Reversing it puts a seek and a 64 KiB read on EVERY detail read.
+	if d.UserPrompts == 0 && !recordsPromptSource(f) {
 		if _, err := f.Seek(0, io.SeekStart); err != nil {
 			return d, nil // keep the timestamps the first pass gathered
 		}
@@ -454,12 +516,17 @@ func readDetail(ctx context.Context, path, id string) (Detail, error) {
 				if json.Unmarshal(bytes.TrimSpace(line), &tl) == nil &&
 					tl.Type == "user" && !tl.IsSidechain && tl.PromptSource == "" &&
 					contentIsString(tl.Message.Content) {
-					d.UserPrompts++
-					if text := sanitizePrompt(contentText(tl.Message.Content, MaxPromptRunes)); text != "" {
-						if d.FirstPrompt == "" {
-							d.FirstPrompt = text
+					// NOT `continue`: this sits inside the read loop, above the
+					// readErr check that ends it, so skipping the rest of the
+					// iteration would skip the break too.
+					if raw := contentText(tl.Message.Content, MaxPromptRunes); !isMachinery(tl, raw) {
+						d.UserPrompts++
+						if text := sanitizePrompt(raw); text != "" {
+							if d.FirstPrompt == "" {
+								d.FirstPrompt = text
+							}
+							d.LastPrompt = text
 						}
-						d.LastPrompt = text
 					}
 				}
 			}
@@ -547,9 +614,19 @@ func readTitle(path string) string {
 		}
 	}
 
-	// Fallback 1 — a {"type":"ai-title"} entry, emitted by builds that do not
-	// record promptSource. Reached only when the typed pass above found
-	// nothing, so an install whose transcripts carry both is unaffected.
+	// Fallback 1 — a {"type":"ai-title"} entry. Reached only when the typed
+	// pass above found nothing.
+	//
+	// Deliberately NOT gated on the transcript's schema. Measured 2026-08-20:
+	// current Claude builds emit ai-title entries AND promptSource, so gating
+	// this on the field's absence would make the pass dead code. It fires for
+	// any transcript with no typed prompt, whatever its schema.
+	//
+	// A guard would buy nothing anyway, because of what this pass reads.
+	// aiTitle is a dedicated title field: the only values it can yield are a
+	// title or nothing. Measured: one distinct value per transcript, however
+	// many times the entry repeats. Contrast the passes that promote message
+	// CONTENT, which must first establish that the content is a prompt at all.
 	for _, line := range lines {
 		if !bytes.Contains(line, []byte(`"type":"ai-title"`)) {
 			continue
@@ -572,17 +649,21 @@ func readTitle(path string) string {
 		}
 	}
 
-	// Fallback 2 — the first user entry whose content is a bare STRING, on a
-	// transcript that records no promptSource AT ALL.
+	// Fallback 2 — the first user entry whose content is a bare STRING and is
+	// not claude's own text.
 	//
-	// The PromptSource=="" condition is the correctness guard, not a nicety.
-	// Gating only on "the typed pass found nothing" would also fire for a
-	// CURRENT-schema transcript that happens to contain no typed prompt but
-	// does contain non-typed string-content user entries — slash-command
-	// expansions and compaction-continuation summaries, which are exactly what
-	// the promptSource=="typed" filter exists to exclude. Those would become
-	// titles, and a compaction summary makes a grotesque one. Keying on the
-	// field's ABSENCE confines this to schemas that never record it.
+	// PromptSource=="" is necessary but nowhere near sufficient, and this
+	// comment used to claim it "confines this to schemas that never record"
+	// the field. It cannot: it is a PER-ENTRY test and says nothing about the
+	// transcript. A current-schema file is full of user entries carrying no
+	// promptSource — tool results, slash-command expansions, hook notices —
+	// and every one of them passed. Sessions were titled "a", "main-agent" and
+	// a directory path because of it.
+	//
+	// isMachinery is what establishes the content is a prompt. The
+	// promptSource test STAYS: it is what excludes the non-typed SOURCES
+	// (sdk, queued, compact) — real input, but not typed input, and widening
+	// that set is a separate decision.
 	for _, line := range lines {
 		if !bytes.Contains(line, []byte(`"type":"user"`)) {
 			continue
@@ -595,17 +676,123 @@ func readTitle(path string) string {
 			!contentIsString(tl.Message.Content) {
 			continue
 		}
-		if text := sanitizeTitle(contentText(tl.Message.Content, MaxTitleRunes)); text != "" {
-			return text
+		text := contentText(tl.Message.Content, MaxTitleRunes)
+		if isMachinery(tl, text) {
+			continue
+		}
+		if title := sanitizeTitle(text); title != "" {
+			return title
 		}
 	}
 	return ""
 }
 
+// recordsPromptSource reports whether the transcript's head mentions
+// promptSource, i.e. whether the build that wrote it records the field.
+//
+// This is a CORRECTNESS gate that also saves work, not a pure optimisation. On
+// a transcript that records the field, an entry LACKING it is not a typed
+// prompt — whatever else it may be — so skipping the shape-detecting pass
+// cannot lose a prompt. It can only suppress entries that pass would
+// misclassify.
+//
+// The two error directions are NOT symmetric, which is what makes a head sample
+// acceptable for a whole-file question. A false positive is near impossible:
+// the head is the OLDEST part of the file, and a build that records the field
+// at session start does not stop mid-session. A false negative — the field
+// appearing only past the window, which happens on transcripts that outlived a
+// claude upgrade — costs one re-read that happens today anyway.
+//
+// The needle includes the opening quote of the VALUE, and that is what bounds
+// the false-positive case. Message content cannot fake it at all — a mention of
+// promptSource inside a JSON string is stored escaped, as \"promptSource\". A
+// nested KEY is not escaped, so a tool result carrying its own promptSource
+// field could still match; requiring `:"` narrows that to a nested key whose
+// value is also a string. The residual cost is one blank detail panel on an
+// old-schema transcript that happens to contain such a key, which is why this
+// is a substring test and not a parse.
+//
+// That `:"` also makes the test sensitive to JSON spacing — a
+// `"promptSource": "typed"` with a space would miss it. That cannot cost a
+// prompt, and the reason is structural rather than a fact about Claude's
+// serializer: this needle is a strict prefix of typedMark, the mark the
+// whole-file pass above searches for. Any formatting that hides the field from
+// this gate hides it from that pass first, so the pass finds no typed prompt,
+// the gate answers false, and the rescan runs — which is the behaviour without
+// a gate at all. The gate can never be stricter than the path it guards.
+func recordsPromptSource(f *os.File) bool {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return false
+	}
+	head, err := io.ReadAll(io.LimitReader(f, titleScanBytes))
+	if err != nil {
+		return false
+	}
+	found := bytes.Contains(head, []byte(`"promptSource":"`))
+	// Restore the offset for the caller. Deliberately NOT checked: the answer is
+	// already computed, and letting a failed restore turn a true into a false
+	// would send the caller into the very pass this gate exists to skip. The
+	// pass re-seeks and handles its own failure anyway.
+	_, _ = f.Seek(0, io.SeekStart)
+	return found
+}
+
+// machineryTags are the wrappers claude puts around its own text in the user
+// turn. Derived from the transcripts on one developer's machine, counting only
+// entries whose message.content is a STRING — the only ones the shape-detecting
+// passes can reach.
+//
+// Six, not more: local-command-caveat and system-reminder are covered by isMeta
+// on every observed entry, and listing them here as well would hide which
+// mechanism is load-bearing. tool_use_error, persisted-output and
+// retrieval_status occur only inside ARRAY content, which contentIsString
+// rejects before this runs.
+var machineryTags = []string{
+	"task-notification",
+	"command-name",
+	"command-message",
+	"local-command-stdout",
+	"bash-stdout",
+	"bash-input",
+}
+
+// isMachinery reports whether a user entry is claude's own text rather than the
+// user's, and so must not become a title or count as a prompt.
+//
+// Three tests, in cost order. The first two are field reads on the already
+// decoded entry; only the third touches the content, which the caller passes in
+// because it already decoded it — that is the whole reason for the parameter,
+// not any difference between the two call sites' rune limits. All three run
+// solely on the shape-detecting fallback paths: an entry reaches them only
+// after failing the promptSource=="typed" test, so the fast path pays nothing.
+//
+// Each is independently load-bearing: a tool result carries no tag and no
+// isMeta; a hook notice carries isMeta and no tag; command markup carries a tag
+// and neither field.
+func isMachinery(tl transcriptLine, content string) bool {
+	if bool(tl.ToolUseResult) {
+		return true
+	}
+	if tl.IsMeta {
+		return true
+	}
+	// Prefix, never substring: a prompt that MENTIONS <command-name> is prose.
+	// Both delimiters, because <command-name> closes immediately while
+	// <task-notification …> carries attributes. No TrimSpace — every observed
+	// machinery entry opens its tag at byte 0, and a whitespace-prefixed tag is
+	// therefore a miss, which yields the behaviour we have today.
+	for _, tag := range machineryTags {
+		if strings.HasPrefix(content, "<"+tag+">") || strings.HasPrefix(content, "<"+tag+" ") {
+			return true
+		}
+	}
+	return false
+}
+
 // contentIsString reports whether a message content field decoded as a plain
-// JSON string. It is the schema-free way to tell a typed prompt from a tool
-// result: Claude records both as type "user", but a tool result always carries
-// an ARRAY of content blocks while a typed prompt carries a bare string.
+// JSON string. It tells a prompt from a tool result whose content is an ARRAY
+// of blocks — but NOT from one whose content is a bare string, which is the
+// common case; isMachinery's toolUseResult test is what covers those.
 // Consulted only on transcripts that do not record promptSource at all.
 // Tests the raw token rather than round-tripping through json.Unmarshal, which
 // accepts JSON null into a string and reports success — so `"content": null`

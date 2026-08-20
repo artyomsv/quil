@@ -399,11 +399,31 @@ func TestReadTitle_PromptBeyondScanWindow_ReturnsEmpty(t *testing.T) {
 
 // --- ReadDetail ------------------------------------------------------------
 
-// toolResult builds the shape claude records for a tool result: type "user",
-// but with no promptSource, because the user did not type it.
+// toolResult builds the entry claude writes for a tool RESULT: type "user",
+// but carrying a top-level toolUseResult. The content is a bare STRING, which
+// is the common case and the reason content shape cannot classify these — the
+// sibling field is what identifies them.
 func toolResult(text string) string {
 	return fmt.Sprintf(
-		`{"type":"user","isSidechain":false,"message":{"role":"user","content":%q},"timestamp":"2026-07-01T10:05:00.000Z"}`,
+		`{"type":"user","isSidechain":false,"toolUseResult":{"stdout":"…"},"message":{"role":"user","content":%q},"timestamp":"2026-07-01T10:05:00.000Z"}`,
+		text)
+}
+
+// metaEntry builds a claude-injected meta entry: no tag, no toolUseResult, only
+// isMeta. Hook notices take this shape, so isMeta is the only marker that
+// identifies them.
+func metaEntry(text string) string {
+	return fmt.Sprintf(
+		`{"type":"user","isSidechain":false,"isMeta":true,"message":{"role":"user","content":%q},"timestamp":"2026-07-01T10:06:00.000Z"}`,
+		text)
+}
+
+// plainUserEntry is an old-schema user entry carrying no marker at all — no
+// promptSource, no isMeta, no toolUseResult. This is what a real prompt looks
+// like on a build that predates promptSource.
+func plainUserEntry(text string) string {
+	return fmt.Sprintf(
+		`{"type":"user","isSidechain":false,"message":{"role":"user","content":%q},"timestamp":"2026-07-01T10:07:00.000Z"}`,
 		text)
 }
 
@@ -780,6 +800,305 @@ func TestReadTitle_FallsBackToAiTitle(t *testing.T) {
 	}
 }
 
+// The guard that must NOT be added. Reading the pass below this one, it is
+// natural to conclude the ai-title pass is missing a matching
+// promptSource-absent condition. It is not: measured 2026-08-20, current Claude
+// builds emit ai-title entries AND promptSource, so that guard would make the
+// pass dead code on every current transcript.
+//
+// This transcript is the case it would kill — records promptSource, carries an
+// ai-title, has no typed prompt. TestReadTitle_FallsBackToAiTitle above does
+// not cover it: that fixture has no promptSource at all, so the guard would
+// leave it green while breaking this.
+func TestReadTitle_AiTitleFiresOnCurrentSchemaWithNoTypedPrompt(t *testing.T) {
+	path := writeSchemaTranscript(t,
+		`{"type":"ai-title","aiTitle":"Refactor the parser","leafUuid":"u1"}`,
+		`{"type":"user","promptSource":"compact","message":{"content":"This session is being continued from a previous conversation..."}}`,
+	)
+	if got := readTitle(path); got != "Refactor the parser" {
+		t.Errorf("readTitle = %q, want the ai-title — the pass must not be gated on promptSource being absent", got)
+	}
+}
+
+// --- machinery rejection ----------------------------------------------------
+//
+// The shape-detecting passes promote message CONTENT, so they must first
+// establish the content is a prompt. promptSource-absence cannot do that: it is
+// a per-entry test, and entries that are not prompts routinely carry no
+// promptSource. Three markers separate them, and each fixture below is
+// reachable only by the one it targets — a fixture carrying two markers would
+// stay green with either filter deleted.
+
+// The PRESERVATION test. It must keep passing through every filter added: an
+// old-schema transcript whose first string-content entry is ordinary prose is
+// the case the fallback exists to serve.
+func TestReadTitle_OldSchemaProsePromptIsPreserved(t *testing.T) {
+	path := writeSchemaTranscript(t,
+		plainUserEntry("Read docs/global-question-domain.md and summarise it"),
+	)
+	if got := readTitle(path); got != "Read docs/global-question-domain.md and summarise it" {
+		t.Errorf("readTitle = %q, want the real prompt", got)
+	}
+}
+
+func TestReadTitle_ToolResultIsNotATitle(t *testing.T) {
+	path := writeSchemaTranscript(t,
+		toolResult("total 9224 -rw-r--r-- 1 artjo"),
+		plainUserEntry("the real prompt"),
+	)
+	if got := readTitle(path); got != "the real prompt" {
+		t.Errorf("readTitle = %q, want the real prompt — a tool result is not a prompt", got)
+	}
+}
+
+// A null toolUseResult is still a tool result: the KEY is what marks the record,
+// and a tool that returned nothing has not stopped being a tool. encoding/json
+// routes null to a custom unmarshaler rather than skipping it, so this pins
+// which answer jsonPresent gives — the permissive reading would let tool output
+// through filter 1 with only isMeta and the tag denylist left, and untagged tool
+// output is exactly what those two do not catch.
+func TestReadTitle_NullToolUseResultIsStillAToolResult(t *testing.T) {
+	path := writeSchemaTranscript(t,
+		`{"type":"user","isSidechain":false,"toolUseResult":null,"message":{"role":"user","content":"tool output, not a prompt"}}`,
+		plainUserEntry("the real prompt"),
+	)
+	if got := readTitle(path); got != "the real prompt" {
+		t.Errorf("readTitle = %q, want the real prompt — the key marks a tool result whatever it holds", got)
+	}
+}
+
+func TestReadTitle_MetaEntryIsNotATitle(t *testing.T) {
+	path := writeSchemaTranscript(t,
+		metaEntry("A session-scoped Stop hook is now active"),
+		plainUserEntry("the real prompt"),
+	)
+	if got := readTitle(path); got != "the real prompt" {
+		t.Errorf("readTitle = %q, want the real prompt — isMeta marks claude's own text", got)
+	}
+}
+
+func TestReadTitle_CommandMarkupIsNotATitle(t *testing.T) {
+	path := writeSchemaTranscript(t,
+		plainUserEntry("<command-name>/goal</command-name> <command-message>goal</command-message>"),
+		plainUserEntry("the real prompt"),
+	)
+	if got := readTitle(path); got != "the real prompt" {
+		t.Errorf("readTitle = %q, want the real prompt — command markup is not a prompt", got)
+	}
+}
+
+// The closing delimiter is what makes the denylist a TAG match rather than a
+// name-prefix match. Without it every tag also swallows every longer name that
+// starts with it — `bash` would eat `bash-input`, `command-name` would eat this.
+// Weakening the check to a bare HasPrefix passes every other test in this file.
+func TestReadTitle_TagPrefixWithoutDelimiterIsNotMachinery(t *testing.T) {
+	path := writeSchemaTranscript(t,
+		plainUserEntry("<command-nameless> is not one of claude's tags"),
+	)
+	const want = "<command-nameless> is not one of claude's tags"
+	if got := readTitle(path); got != want {
+		t.Errorf("readTitle = %q, want %q — only the exact tag plus a delimiter is machinery", got, want)
+	}
+}
+
+// isMachinery deliberately does NOT trim, and this pins that: every observed
+// machinery entry opens its tag at byte 0, so a leading space means the entry
+// is not the shape we are rejecting, and the result is what we do today.
+// Adding a TrimSpace passes every other test in this file, so without this the
+// documented behaviour is prose only.
+func TestReadTitle_WhitespacePrefixedTagIsNotMachinery(t *testing.T) {
+	path := writeSchemaTranscript(t,
+		plainUserEntry("   <command-name>/goal</command-name>"),
+	)
+	const want = "<command-name>/goal</command-name>"
+	if got := readTitle(path); got != want {
+		t.Errorf("readTitle = %q, want %q — the tag test is not trimmed, by design", got, want)
+	}
+}
+
+// The second delimiter, the one that admits attributes. task-notification is
+// the first tag in the denylist and the reason the branch exists — it is the
+// only observed form that carries them. Deleting that half of the check leaves
+// every other test green.
+func TestReadTitle_TagWithAttributesIsMachinery(t *testing.T) {
+	path := writeSchemaTranscript(t,
+		plainUserEntry(`<task-notification agent="impl-task7">done</task-notification>`),
+		plainUserEntry("the real prompt"),
+	)
+	if got := readTitle(path); got != "the real prompt" {
+		t.Errorf("readTitle = %q, want the real prompt — a tag with attributes is still machinery", got)
+	}
+}
+
+// The denylist must reject CLAUDE's markup, not markup in general. A user who
+// pastes HTML has typed a prompt.
+func TestReadTitle_UserPastedMarkupIsATitle(t *testing.T) {
+	path := writeSchemaTranscript(t,
+		plainUserEntry("<html><body>why does this render wrong?</body></html>"),
+	)
+	const want = "<html><body>why does this render wrong?</body></html>"
+	if got := readTitle(path); got != want {
+		t.Errorf("readTitle = %q, want %q — only claude's own tags are machinery", got, want)
+	}
+}
+
+func TestReadDetail_ToolResultIsNotAPrompt(t *testing.T) {
+	assertDetailIgnoresMachinery(t, toolResult("main-agent"))
+}
+
+func TestReadDetail_MetaEntryIsNotAPrompt(t *testing.T) {
+	assertDetailIgnoresMachinery(t, metaEntry("A session-scoped Stop hook is now active"))
+}
+
+func TestReadDetail_CommandMarkupIsNotAPrompt(t *testing.T) {
+	assertDetailIgnoresMachinery(t, plainUserEntry("<local-command-stdout>ok</local-command-stdout>"))
+}
+
+// --- the schema gate on readDetail's second pass ----------------------------
+
+// The needle is `"promptSource":"`, including the value's opening quote, and
+// this is what pins the narrowing. A nested KEY inside a tool result is not
+// JSON-escaped, so the wider `"promptSource"` needle matched it and gated the
+// rescan off on a transcript that records nothing of the sort — costing the
+// real prompt below. Reverting that one character sequence leaves every other
+// test in this package green.
+func TestReadDetail_NestedPromptSourceKeyDoesNotGateTheRescan(t *testing.T) {
+	path := writeSchemaTranscript(t,
+		`{"type":"user","isSidechain":false,"toolUseResult":{"promptSource":null},"message":{"role":"user","content":"tool output"}}`,
+		plainUserEntry("a real old-schema prompt"),
+	)
+	d, err := readDetail(context.Background(), path, "11111111-2222-3333-4444-555555555555")
+	if err != nil {
+		t.Fatalf("readDetail: %v", err)
+	}
+	if d.UserPrompts != 1 || d.FirstPrompt != "a real old-schema prompt" {
+		t.Errorf("UserPrompts = %d, FirstPrompt = %q; want 1 and the real prompt — a nested promptSource KEY is not a schema marker",
+			d.UserPrompts, d.FirstPrompt)
+	}
+}
+
+// A transcript that RECORDS promptSource but has no typed prompt must not be
+// rescanned: every entry the rescan could accept lacks the field, and on a
+// recording transcript that proves the entry is not a typed prompt.
+//
+// The two plain entries are load-bearing. They carry no toolUseResult, no
+// isMeta and no tag, so they survive every filter above — without them the
+// rescan would find nothing anyway and this would pass with the gate deleted.
+func TestReadDetail_RecordingTranscriptWithNoTypedPromptIsNotRescanned(t *testing.T) {
+	path := writeSchemaTranscript(t,
+		`{"type":"user","promptSource":"compact","message":{"content":"continued from a previous conversation"}}`,
+		plainUserEntry("something the rescan would otherwise count"),
+		plainUserEntry("and another"),
+	)
+	d, err := readDetail(context.Background(), path, "11111111-2222-3333-4444-555555555555")
+	if err != nil {
+		t.Fatalf("readDetail: %v", err)
+	}
+	if d.UserPrompts != 0 {
+		t.Errorf("UserPrompts = %d, want 0 — this transcript records promptSource, so an entry lacking it is not a typed prompt", d.UserPrompts)
+	}
+}
+
+// padTranscript returns filler lines totalling more than titleScanBytes, so a
+// caller can place an entry beyond the head window.
+//
+// Counts the filler's ACTUAL bytes rather than estimating them. An estimate
+// gets the safety direction wrong in a way that fails silently: guess too high
+// and the loop stops early, the padding falls short of the window, and the
+// entry a caller meant to put BEYOND the head lands inside it — the test still
+// passes, having stopped testing what it claims. Measuring cannot drift when
+// the filler text is edited.
+// padSlack is margin over the window, not a fudge factor. Measuring the filler
+// exactly guarantees only that the total EXCEEDS titleScanBytes — by as little
+// as one byte, depending on where the last line falls. The callers append their
+// own entry after this padding and need it comfortably clear, so the slack is
+// kept deliberately rather than trimmed to the minimum that satisfies the loop.
+const padSlack = 4096
+
+func padTranscript() []string {
+	filler := assistantMsg("filler line to push the tail past the scan window")
+	var out []string
+	for n := 0; n <= titleScanBytes+padSlack; n += len(filler) + 1 { // +1 for the joining newline
+		out = append(out, filler)
+	}
+	return out
+}
+
+// The two tests that place an entry "beyond the head" are only meaningful if
+// the padding really does clear titleScanBytes. Nothing else would notice if it
+// stopped — both tests would keep passing against an entry that had quietly
+// moved inside the window.
+func TestPadTranscript_ClearsTheHeadWindow(t *testing.T) {
+	n := 0
+	for _, line := range padTranscript() {
+		n += len(line) + 1
+	}
+	if n <= titleScanBytes+padSlack {
+		t.Fatalf("padding = %d bytes, want more than titleScanBytes+padSlack (%d) — an entry placed after it would be too close to the head window",
+			n, titleScanBytes+padSlack)
+	}
+}
+
+// The gate's FALSE-NEGATIVE direction, and the only fixture that exercises it:
+// promptSource appears only past the 64 KiB head, so the gate answers false and
+// the rescan runs. The result must equal today's behaviour — that equivalence
+// is what makes a head sample an acceptable proxy for a whole-file question.
+func TestReadDetail_PromptSourceBeyondHeadStillRescans(t *testing.T) {
+	lines := append([]string{plainUserEntry("an old-schema prompt in the head")}, padTranscript()...)
+	lines = append(lines, `{"type":"user","promptSource":"compact","message":{"content":"a late current-schema entry"}}`)
+
+	path := writeSchemaTranscript(t, lines...)
+	d, err := readDetail(context.Background(), path, "11111111-2222-3333-4444-555555555555")
+	if err != nil {
+		t.Fatalf("readDetail: %v", err)
+	}
+	if d.UserPrompts != 1 || d.FirstPrompt != "an old-schema prompt in the head" {
+		t.Errorf("UserPrompts = %d, FirstPrompt = %q; want 1 and the head prompt — a field beyond the window must not gate the rescan off",
+			d.UserPrompts, d.FirstPrompt)
+	}
+}
+
+// A transcript that outlived a claude upgrade: old-schema head, typed prompt
+// only in the tail. This pins the head/whole-file split — readTitle sees only
+// the head and falls back, readDetail scans everything and finds the typed
+// prompt. It says NOTHING about the gate: with UserPrompts >= 1 the && ahead of
+// recordsPromptSource short-circuits and the gate is never consulted.
+func TestMixedSchemaTranscript_TitleFallsBackButDetailFindsTheTypedPrompt(t *testing.T) {
+	lines := append([]string{plainUserEntry("the old-schema head prompt")}, padTranscript()...)
+	lines = append(lines, typedPrompt("the typed prompt in the tail"))
+
+	path := writeSchemaTranscript(t, lines...)
+	if got := readTitle(path); got != "the old-schema head prompt" {
+		t.Errorf("readTitle = %q, want the head prompt — readTitle only ever reads the head", got)
+	}
+	d, err := readDetail(context.Background(), path, "11111111-2222-3333-4444-555555555555")
+	if err != nil {
+		t.Fatalf("readDetail: %v", err)
+	}
+	if d.UserPrompts != 1 || d.FirstPrompt != "the typed prompt in the tail" {
+		t.Errorf("UserPrompts = %d, FirstPrompt = %q; want 1 and the tail prompt", d.UserPrompts, d.FirstPrompt)
+	}
+}
+
+// assertDetailIgnoresMachinery pins BOTH halves of a rejection in readDetail's
+// shape-detecting pass. The count is incremented separately from the text, so a
+// text-only assertion can pass while UserPrompts is wrong — which is the
+// stronger failure this pass can produce.
+func assertDetailIgnoresMachinery(t *testing.T, machinery string) {
+	t.Helper()
+	path := writeSchemaTranscript(t, machinery, plainUserEntry("the real prompt"))
+	d, err := readDetail(context.Background(), path, "11111111-2222-3333-4444-555555555555")
+	if err != nil {
+		t.Fatalf("readDetail: %v", err)
+	}
+	if d.UserPrompts != 1 {
+		t.Errorf("UserPrompts = %d, want 1 — the machinery entry was counted", d.UserPrompts)
+	}
+	if d.FirstPrompt != "the real prompt" {
+		t.Errorf("FirstPrompt = %q, want %q", d.FirstPrompt, "the real prompt")
+	}
+}
+
 func TestReadTitle_FallsBackToStringContentUserEntry(t *testing.T) {
 	path := writeSchemaTranscript(t,
 		`{"type":"user","message":{"content":"no promptSource here"}}`,
@@ -937,5 +1256,68 @@ func TestReadDetail_NullContentIsNotAPrompt(t *testing.T) {
 	}
 	if d.FirstPrompt != "a real one" {
 		t.Errorf("FirstPrompt = %q, want %q", d.FirstPrompt, "a real one")
+	}
+}
+
+func TestTranscriptPathIn_DoesNotConsultEnv(t *testing.T) {
+	t.Setenv(claudeConfigDirEnv, filepath.Join(t.TempDir(), "should-not-be-read"))
+	got := TranscriptPathIn("/explicit", "/work/repo", "abc-123")
+	want := filepath.Join("/explicit", "projects", EscapeCWD("/work/repo"), "abc-123.jsonl")
+	if got != want {
+		t.Errorf("TranscriptPathIn = %q, want %q", got, want)
+	}
+}
+
+func TestTranscriptPathIn_EmptyArgsReturnEmpty(t *testing.T) {
+	if got := TranscriptPathIn("/explicit", "/work/repo", ""); got != "" {
+		t.Errorf("empty session id = %q, want empty", got)
+	}
+	if got := TranscriptPathIn("/explicit", "", "abc-123"); got != "" {
+		t.Errorf("empty cwd = %q, want empty", got)
+	}
+}
+
+// TranscriptPath must DELEGATE rather than carry a second copy of the join —
+// two spellings of one path is how they drift.
+func TestTranscriptPath_AgreesWithTranscriptPathIn(t *testing.T) {
+	cfg := t.TempDir()
+	t.Setenv(claudeConfigDirEnv, cfg)
+	got := TranscriptPath("/work/repo", "abc-123")
+	want := TranscriptPathIn(cfg, "/work/repo", "abc-123")
+	if got == "" {
+		t.Fatal("TranscriptPath returned empty with the config dir set")
+	}
+	if got != want {
+		t.Errorf("TranscriptPath = %q, TranscriptPathIn = %q; the two must agree", got, want)
+	}
+}
+
+// The join ReadDetailIn uses must be the one under test, not a parallel copy:
+// point TranscriptPathIn at a real file and assert ReadDetailIn reads THAT one.
+// Before this, TestTranscriptPath_BuildsJSONLPath certified a join with no
+// production caller while the join actually used had no direct test.
+func TestReadDetailIn_ReadsPathFromTranscriptPathIn(t *testing.T) {
+	cfg := t.TempDir()
+	const cwd = "/work/repo"
+	const id = "11111111-2222-3333-4444-555555555555"
+
+	path := TranscriptPathIn(cfg, cwd, id)
+	if path == "" {
+		t.Fatal("TranscriptPathIn returned empty")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(typedPrompt("the only prompt")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	d, err := ReadDetailIn(context.Background(), cfg, cwd, id)
+	if err != nil {
+		t.Fatalf("ReadDetailIn: %v", err)
+	}
+	if d.FirstPrompt != "the only prompt" {
+		t.Errorf("FirstPrompt = %q, want %q — ReadDetailIn is not reading the path TranscriptPathIn builds",
+			d.FirstPrompt, "the only prompt")
 	}
 }

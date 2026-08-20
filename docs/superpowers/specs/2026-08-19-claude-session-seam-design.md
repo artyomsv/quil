@@ -24,6 +24,16 @@ Delivered as a single PR on `fix/claude-session-seam` — see "Delivery".
 > from a transcript anyone here has inspected. It is a *fallback reached only when
 > the current schema produced nothing*, so being wrong about it costs an untitled
 > session — the status quo — rather than a wrong title.
+>
+> **AMENDED 2026-08-20 — the caveat above is discharged, and the inference drawn
+> from it was wrong.** Real transcripts were measured. The shape is exactly as
+> transcribed, so §6's parser is correct. But "old schema" was never established:
+> current Claude builds emit `ai-title` entries *alongside* `promptSource`, so the
+> pass is not restricted to old transcripts and this PR's claim that an install
+> carrying both is unaffected is false. The fork's fixtures proved the field *can*
+> appear on an older build; they never showed it absent from newer ones, and it is
+> not. See `2026-08-20-claudesessions-fallback-gaps-design.md` §2, which corrects
+> the comment this note produced.
 
 Nothing here adds a plugin. The fork that prompted this work added a second
 Claude-family plugin (`tclaude`, Tencent's wrapper) and a 1,014-line parallel

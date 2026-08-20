@@ -851,16 +851,19 @@ func TestReadTitle_ToolResultIsNotATitle(t *testing.T) {
 	}
 }
 
-// An explicit null is ABSENT, not present. encoding/json hands null to a custom
-// unmarshaler rather than skipping it, so jsonPresent has to say so itself —
-// the same call contentIsString had to make for `"content": null`. Treating it
-// as present would discard a real prompt.
-func TestReadTitle_NullToolUseResultIsNotMachinery(t *testing.T) {
+// A null toolUseResult is still a tool result: the KEY is what marks the record,
+// and a tool that returned nothing has not stopped being a tool. encoding/json
+// routes null to a custom unmarshaler rather than skipping it, so this pins
+// which answer jsonPresent gives — the permissive reading would let tool output
+// through filter 1 with only isMeta and the tag denylist left, and untagged tool
+// output is exactly what those two do not catch.
+func TestReadTitle_NullToolUseResultIsStillAToolResult(t *testing.T) {
 	path := writeSchemaTranscript(t,
-		`{"type":"user","isSidechain":false,"toolUseResult":null,"message":{"role":"user","content":"a real prompt"}}`,
+		`{"type":"user","isSidechain":false,"toolUseResult":null,"message":{"role":"user","content":"tool output, not a prompt"}}`,
+		plainUserEntry("the real prompt"),
 	)
-	if got := readTitle(path); got != "a real prompt" {
-		t.Errorf("readTitle = %q, want the prompt — a null toolUseResult is absent, not present", got)
+	if got := readTitle(path); got != "the real prompt" {
+		t.Errorf("readTitle = %q, want the real prompt — the key marks a tool result whatever it holds", got)
 	}
 }
 

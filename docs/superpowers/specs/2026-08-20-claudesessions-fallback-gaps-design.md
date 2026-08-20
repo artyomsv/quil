@@ -486,13 +486,31 @@ rows and three more were unreachable (see *Evidence*).
 `transcriptLine` gains two fields:
 
 ```go
-	IsMeta        bool            `json:"isMeta"`
-	ToolUseResult json.RawMessage `json:"toolUseResult"`
+	IsMeta        bool        `json:"isMeta"`
+	ToolUseResult jsonPresent `json:"toolUseResult"`
 ```
 
-`ToolUseResult` is decoded as `json.RawMessage` and tested with `len(...) > 0` —
-a presence check, not a value check. Its shape varies by tool and none of it is
-needed. Both are top-level keys, siblings of `message`, not nested inside it.
+Both are top-level keys, siblings of `message`, not nested inside it.
+
+`ToolUseResult` answers **whether the key appeared**, never what it held — its
+shape varies by tool and none of it is needed. `jsonPresent` is a `bool` with an
+`UnmarshalJSON` that sets true unconditionally: `encoding/json` calls it only
+for a key that is present, so any call means present, and an absent key leaves
+the zero value untouched.
+
+**Not `json.RawMessage`**, which an earlier draft specified. It answers the same
+question but retains a copy of the whole blob, and the blob is entire command
+outputs — a copy per line on the rescan path, over a transcript that can reach
+tens of MB.
+
+**An explicit `null` counts as PRESENT.** `encoding/json` routes `null` to a
+custom unmarshaler rather than skipping it, so the type has to answer for
+itself, and the answer is that a tool returning nothing has not stopped being a
+tool. Measured: `toolUseResult` takes only object, string or array across 84,218
+occurrences — `null` does not occur, so the strict reading costs nothing today
+and stays conservative if it ever does. The permissive reading would let tool
+output reach the title passes with only `isMeta` and the tag denylist behind it,
+and untagged tool output is the case §4 exists to reject.
 
 ### The existing guards SURVIVE — the filters are additive
 

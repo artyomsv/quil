@@ -318,14 +318,21 @@ func listDir(ctx context.Context, dir string) (sessions []Session, truncated boo
 // every tool-result line on a transcript that can reach tens of MB. Presence is
 // all isMachinery asks, so nothing is copied.
 //
-// An explicit null counts as ABSENT. encoding/json hands null to a custom
-// unmarshaler rather than skipping it, and this package has already been bitten
-// once by treating null as a value — see contentIsString.
+// The question is whether the KEY appeared, never what it held. encoding/json
+// calls this only for a key that is present, so any call means present —
+// including an explicit null, which says a tool returned nothing, not that this
+// entry is no longer a tool result.
+//
+// Measured: toolUseResult takes only object, string or array across 84,218
+// occurrences; null does not occur. So the strict reading costs nothing today
+// and stays conservative if it ever does — the permissive one would let tool
+// output reach the title passes with only isMeta and the tag denylist between
+// it and the screen, and untagged tool output is the case this whole change
+// exists to reject.
 type jsonPresent bool
 
-func (p *jsonPresent) UnmarshalJSON(b []byte) error {
-	b = bytes.TrimSpace(b)
-	*p = jsonPresent(len(b) > 0 && !bytes.Equal(b, []byte("null")))
+func (p *jsonPresent) UnmarshalJSON([]byte) error {
+	*p = true
 	return nil
 }
 

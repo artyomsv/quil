@@ -892,8 +892,9 @@ func TestReadTitle_TagPrefixWithoutDelimiterIsNotMachinery(t *testing.T) {
 	path := writeSchemaTranscript(t,
 		plainUserEntry("<command-nameless> is not one of claude's tags"),
 	)
-	if got := readTitle(path); got == "" {
-		t.Error("readTitle = empty, want the entry — only the exact tag plus a delimiter is machinery")
+	const want = "<command-nameless> is not one of claude's tags"
+	if got := readTitle(path); got != want {
+		t.Errorf("readTitle = %q, want %q — only the exact tag plus a delimiter is machinery", got, want)
 	}
 }
 
@@ -906,8 +907,23 @@ func TestReadTitle_WhitespacePrefixedTagIsNotMachinery(t *testing.T) {
 	path := writeSchemaTranscript(t,
 		plainUserEntry("   <command-name>/goal</command-name>"),
 	)
-	if got := readTitle(path); got == "" {
-		t.Error("readTitle = empty, want the entry — the tag test is not trimmed, by design")
+	const want = "<command-name>/goal</command-name>"
+	if got := readTitle(path); got != want {
+		t.Errorf("readTitle = %q, want %q — the tag test is not trimmed, by design", got, want)
+	}
+}
+
+// The second delimiter, the one that admits attributes. task-notification is
+// the first tag in the denylist and the reason the branch exists — it is the
+// only observed form that carries them. Deleting that half of the check leaves
+// every other test green.
+func TestReadTitle_TagWithAttributesIsMachinery(t *testing.T) {
+	path := writeSchemaTranscript(t,
+		plainUserEntry(`<task-notification agent="impl-task7">done</task-notification>`),
+		plainUserEntry("the real prompt"),
+	)
+	if got := readTitle(path); got != "the real prompt" {
+		t.Errorf("readTitle = %q, want the real prompt — a tag with attributes is still machinery", got)
 	}
 }
 
@@ -917,8 +933,9 @@ func TestReadTitle_UserPastedMarkupIsATitle(t *testing.T) {
 	path := writeSchemaTranscript(t,
 		plainUserEntry("<html><body>why does this render wrong?</body></html>"),
 	)
-	if got := readTitle(path); got == "" {
-		t.Error("readTitle = empty, want the pasted markup — only claude's own tags are machinery")
+	const want = "<html><body>why does this render wrong?</body></html>"
+	if got := readTitle(path); got != want {
+		t.Errorf("readTitle = %q, want %q — only claude's own tags are machinery", got, want)
 	}
 }
 
@@ -934,11 +951,28 @@ func TestReadDetail_CommandMarkupIsNotAPrompt(t *testing.T) {
 	assertDetailIgnoresMachinery(t, plainUserEntry("<local-command-stdout>ok</local-command-stdout>"))
 }
 
-// assertDetailIgnoresMachinery pins BOTH halves of a rejection in readDetail's
-// shape-detecting pass. The count is incremented separately from the text, so a
-// text-only assertion can pass while UserPrompts is wrong — which is the
-// stronger failure this pass can produce.
 // --- the schema gate on readDetail's second pass ----------------------------
+
+// The needle is `"promptSource":"`, including the value's opening quote, and
+// this is what pins the narrowing. A nested KEY inside a tool result is not
+// JSON-escaped, so the wider `"promptSource"` needle matched it and gated the
+// rescan off on a transcript that records nothing of the sort — costing the
+// real prompt below. Reverting that one character sequence leaves every other
+// test in this package green.
+func TestReadDetail_NestedPromptSourceKeyDoesNotGateTheRescan(t *testing.T) {
+	path := writeSchemaTranscript(t,
+		`{"type":"user","isSidechain":false,"toolUseResult":{"promptSource":null},"message":{"role":"user","content":"tool output"}}`,
+		plainUserEntry("a real old-schema prompt"),
+	)
+	d, err := readDetail(context.Background(), path, "11111111-2222-3333-4444-555555555555")
+	if err != nil {
+		t.Fatalf("readDetail: %v", err)
+	}
+	if d.UserPrompts != 1 || d.FirstPrompt != "a real old-schema prompt" {
+		t.Errorf("UserPrompts = %d, FirstPrompt = %q; want 1 and the real prompt — a nested promptSource KEY is not a schema marker",
+			d.UserPrompts, d.FirstPrompt)
+	}
+}
 
 // A transcript that RECORDS promptSource but has no typed prompt must not be
 // rescanned: every entry the rescan could accept lacks the field, and on a
@@ -966,7 +1000,7 @@ func TestReadDetail_RecordingTranscriptWithNoTypedPromptIsNotRescanned(t *testin
 // caller can place an entry beyond the head window.
 func padTranscript() []string {
 	var out []string
-	for len(out)*96 < titleScanBytes+4096 {
+	for len(out)*180 < titleScanBytes+4096 {
 		out = append(out, assistantMsg("filler line to push the tail past the scan window"))
 	}
 	return out
@@ -1013,6 +1047,10 @@ func TestMixedSchemaTranscript_TitleFallsBackButDetailFindsTheTypedPrompt(t *tes
 	}
 }
 
+// assertDetailIgnoresMachinery pins BOTH halves of a rejection in readDetail's
+// shape-detecting pass. The count is incremented separately from the text, so a
+// text-only assertion can pass while UserPrompts is wrong — which is the
+// stronger failure this pass can produce.
 func assertDetailIgnoresMachinery(t *testing.T, machinery string) {
 	t.Helper()
 	path := writeSchemaTranscript(t, machinery, plainUserEntry("the real prompt"))

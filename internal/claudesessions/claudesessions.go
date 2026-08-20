@@ -713,11 +713,11 @@ func recordsPromptSource(f *os.File) bool {
 		return false
 	}
 	found := bytes.Contains(head, []byte(`"promptSource":"`))
-	// Restore the offset for the caller. The pass seeks to 0 itself, so this is
-	// belt-and-braces; a failure here answers false and lets it run.
-	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		return false
-	}
+	// Restore the offset for the caller. Deliberately NOT checked: the answer is
+	// already computed, and letting a failed restore turn a true into a false
+	// would send the caller into the very pass this gate exists to skip. The
+	// pass re-seeks and handles its own failure anyway.
+	_, _ = f.Seek(0, io.SeekStart)
 	return found
 }
 
@@ -744,9 +744,11 @@ var machineryTags = []string{
 // user's, and so must not become a title or count as a prompt.
 //
 // Three tests, in cost order. The first two are field reads on the already
-// decoded entry; only the third touches the content. All three run solely on
-// the shape-detecting fallback paths — an entry reaches them only after failing
-// the promptSource=="typed" test, so the fast path pays nothing.
+// decoded entry; only the third touches the content, which the caller passes in
+// because it already decoded it — that is the whole reason for the parameter,
+// not any difference between the two call sites' rune limits. All three run
+// solely on the shape-detecting fallback paths: an entry reaches them only
+// after failing the promptSource=="typed" test, so the fast path pays nothing.
 //
 // Each is independently load-bearing: a tool result carries no tag and no
 // isMeta; a hook notice carries isMeta and no tag; command markup carries a tag

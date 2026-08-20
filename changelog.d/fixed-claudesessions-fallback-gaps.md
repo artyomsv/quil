@@ -14,5 +14,5 @@ headline: Session titles no longer show tool output or slash commands
   shows the session id rather than inventing a label from whatever came first.
 
   The same entries were being counted as prompts in the detail panel, so its
-  prompt count and first/last prompt were wrong in the same sessions. Both now
-  agree with the title.
+  prompt count and first/last prompt were wrong in the same sessions. Those are
+  corrected by the same check.

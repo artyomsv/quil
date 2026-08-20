@@ -27,9 +27,17 @@ import (
 // of grapheme clusters per frame to discover they need to pad nothing.
 //
 // These helpers take the width the caller already knows and concatenate. They
-// are NOT a general lipgloss replacement: each verifies its assumption and falls
-// back to lipgloss the moment it does not hold, so a future renderer that emits
-// a ragged block gets correct output rather than a corrupted frame.
+// are NOT a general lipgloss replacement: each checks its assumption and falls
+// back to lipgloss when the check fails.
+//
+// The check is a SAMPLE, not a proof — see blockIsWidth. A block that is the
+// declared width on its first and last lines but ragged in the INTERIOR takes
+// the fast path and disagrees with lipgloss: vertically the short line goes
+// unpadded, horizontally the right column shifts left on that row. So the
+// guarantee is not "never wrong", it is "wrong only for a block nothing in the
+// frame produces" — and that premise is what
+// TestFrameBlocks_AreRectangularAcrossGeometries exists to defend. If a future
+// renderer emits a ragged interior, that test is what should fail.
 //
 // `lipgloss` remains the width AUTHORITY, per the project invariant — these
 // helpers never compute a width by another route. They only skip measurement
@@ -40,12 +48,19 @@ import (
 // Checks the FIRST and LAST line rather than all of them. That is the whole
 // point — an all-lines check costs exactly what the join costs — and it is
 // sound for the blocks this is used on, which are rectangular by construction:
-// a lipgloss style with .Width(n) pads every line it emits. The interior check
-// is the equivalence test (TestJoinVerticalWidth_MatchesLipgloss), which runs
-// real frames through both paths and compares.
+// a lipgloss style with .Width(n) pads every line it emits.
 //
-// A block that fails this returns false and the caller falls back to lipgloss,
-// so the failure mode is "slower", never "wrong".
+// The interior is covered by TestFrameJoins_MatchLipglossOnRealFrames, which
+// runs REAL frames through both paths at three tab counts and three geometries,
+// and by TestFrameBlocks_AreRectangular, which asserts the premise directly.
+// (TestJoinVerticalWidth_MatchesLipgloss covers the shapes, using synthetic
+// table cases rather than frames.)
+//
+// A block that fails this returns false and the caller falls back to lipgloss.
+// For a block that is UNIFORM, or ragged at either sampled line, the failure
+// mode is "slower". For one ragged only in its interior it is "wrong" — see the
+// package comment above, and TestBlockIsWidth_OnlyChecksFirstAndLastLine, which
+// asserts that divergence rather than describing it.
 func blockIsWidth(s string, w int) bool {
 	if s == "" {
 		return false

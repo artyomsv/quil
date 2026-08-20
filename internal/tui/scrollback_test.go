@@ -202,3 +202,45 @@ func TestApplyWorkspaceState_PublishesPaneCountBeforeBuildingPanes(t *testing.T)
 			"published before panes were built, so every pane got the full default", depth)
 	}
 }
+
+// A broadcast is ONE daemon's full state, so its pane count describes that host
+// alone. The scrollback budget is a property of this process, which holds every
+// host's panes at once — publishing a single host's count would hand each pane a
+// multiple of the depth the budget allows.
+//
+// Multi-daemon is shipped (M14), so this is a normal path, not an edge case.
+func TestSetDestPaneCount_SumsAcrossDestinations(t *testing.T) {
+	t.Cleanup(func() { knownPaneCount.Store(0); explicitScrollback.Store(0) })
+	knownPaneCount.Store(0)
+	explicitScrollback.Store(0)
+
+	m := &Model{}
+	m.setDestPaneCount("", 15)
+	m.setDestPaneCount("gpu01", 15)
+	m.setDestPaneCount("build02", 15)
+
+	if got := knownPaneCount.Load(); got != 45 {
+		t.Fatalf("knownPaneCount = %d across three 15-pane hosts, want 45 — a "+
+			"per-destination count gives every pane three times its share of the budget", got)
+	}
+	if got := scrollbackLines(); got != adaptiveScrollbackLines(0, 45) {
+		t.Errorf("scrollbackLines() = %d, want the depth for 45 panes (%d)",
+			got, adaptiveScrollbackLines(0, 45))
+	}
+}
+
+// A destination re-broadcasting must REPLACE its own contribution, not add to
+// it, or the total grows without bound on a workspace that never changed.
+func TestSetDestPaneCount_RebroadcastReplacesRatherThanAccumulates(t *testing.T) {
+	t.Cleanup(func() { knownPaneCount.Store(0); explicitScrollback.Store(0) })
+	knownPaneCount.Store(0)
+	explicitScrollback.Store(0)
+
+	m := &Model{}
+	for i := 0; i < 5; i++ {
+		m.setDestPaneCount("gpu01", 20)
+	}
+	if got := knownPaneCount.Load(); got != 20 {
+		t.Errorf("knownPaneCount = %d after five identical broadcasts from one host, want 20", got)
+	}
+}

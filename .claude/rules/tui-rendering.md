@@ -104,23 +104,6 @@ Bubble Tea calls `model.View()` once per MESSAGE (`p.render(model)` after every 
 
 `redraw` keybinding (default `alt+shift+l`) emits `tea.ClearScreen` + `tea.RequestWindowSize` — recovery hatch for accumulated cell-diff drift AND a missed `WindowSizeMsg` (conhost drops resize events on maximize/restore; ClearScreen alone would repaint the same stale-size frame). Listed in the F1 shortcuts dialog; exempt in notes mode via `notesKeyExempt`
 
-## Navigation and selection
-
-### Spatial pane navigation
-
-`internal/tui/tab.go` — `TabModel.NavigateDirection(dir Direction)` walks `CollectRects` (top-down geometry), filters by half-plane (`directionScore`), and picks the candidate with three tie-breakers: smallest gap, largest perpendicular overlap, smallest perpendicular center distance (tmux/vim parity). Default keys are `Alt+Left/Right/Up/Down` (`pane_left/right/up/down` in `[keybindings]`). Tab/Shift+Tab and `Alt+H/V` are deliberately NOT bound at the global level — they fall through to the PTY (shell completion, Claude Code mode toggle, claude-code's image paste). Splits live on `Alt+Shift+H/V`. Disabled in focus mode and on single-pane tabs (no-op). Vim users can rebind to `alt+h/l/k/j` in `config.toml`. Tests in `layout_test.go` cover all four directions, the no-overlap rejection branch, and the center-distance tie-breaker
-
-### Text selection
-
-`internal/tui/selection.go` — keyboard (Shift+Arrow, Ctrl+Shift+Arrow word jump, Ctrl+Alt+Shift+Arrow 3-word jump) and mouse (click+drag). Enter copies selection to clipboard via `internal/clipboard`. Shell cursor follows selection horizontally in real-time (same-line only; cross-line is visual-only to avoid triggering command history). Selection bounded by `lastContentLine()` — won't extend into empty terminal area
-
-### Clipboard
-
-`internal/clipboard/` — platform-native Read/Write. Windows: Win32 `GetClipboardData`/`SetClipboardData`. Unix: `pbpaste`/`pbcopy` (macOS), `xclip`/`xsel` (Linux). Paste (`Ctrl+V`) wraps content in bracketed paste sequences. Dialog paste sanitizes control characters.
-
-**Image paste proxy**: `clipboard.ReadImage()` reads `CF_DIBV5`/`CF_DIB` on Windows (Unix is a stub), `dib.go` parses the DIB into an `image.Image` (24bpp BI_RGB, 32bpp BI_RGB and BI_BITFIELDS, top-down + bottom-up, all-zero-alpha promotion). `pasteClipboard` falls through to image when text is empty: saves PNG to `config.PasteDir()` (`~/.quil/paste/quil-paste-<timestamp>.png`) and types the path into the PTY. Works around the upstream Claude Code Windows clipboard bug (anthropics/claude-code#32791). Paste keys: `Ctrl+V` (kb.Paste — eaten by Windows Terminal), `Ctrl+Alt+V` and `F8` are hardcoded aliases; `F8` is the recommended Windows trigger because it has no AltGr ambiguity
-
-
 ### Frame assembly (`joinfast.go`)
 
 `View()` joins the tab bar, the pane area and the sidebar with
@@ -141,16 +124,43 @@ discover they need to pad nothing.
 benchstat n=6, p=0.002: **-34% to -35%** on a real repaint, **-39% to -56%** with
 the pane caches warm, **-42.7% geomean**, and -31.8% bytes.
 
-**Both helpers verify their assumption and fall back to lipgloss**, so a future
-renderer emitting a ragged block gets correct output rather than a corrupted
-frame — slower, never wrong. `blockIsWidth` checks the FIRST and LAST line only,
-because an all-lines check costs exactly what the optimisation saves; the
-interior is covered by `TestFrameJoins_MatchLipglossOnRealFrames`, which runs
-real frames through both paths at three tab counts and three geometries.
-`TestFrameBlocks_AreRectangular` guards the premise: if the blocks stop being
-rectangular the fast path silently stops firing, and a perf regression that
-fails nothing is what this exists to prevent.
+**Both helpers check their assumption and fall back to lipgloss when the check
+fails — but the check is a SAMPLE, not a proof.** `blockIsWidth` measures the
+FIRST and LAST line only, because an all-lines check costs exactly what the
+optimisation saves. A block that is the declared width at both sampled lines but
+ragged in its INTERIOR takes the fast path and DISAGREES with lipgloss: the short
+line goes unpadded vertically, and horizontally the right column shifts left on
+that row. So the guarantee is not "never wrong" — it is "wrong only for a block
+nothing in the frame produces".
+
+That premise is the load-bearing part, and
+`TestFrameBlocks_AreRectangularAcrossGeometries` is what defends it, across the
+same three tab counts and three geometries the equivalence test uses. If a future
+renderer emits a ragged interior, THAT is the test that should fail.
+`TestBlockIsWidth_OnlyChecksFirstAndLastLine` asserts the divergence explicitly
+rather than describing it, and the equivalence tables include the shape that
+masks an inverted check (both blocks matching on one sampled line only) — without
+it, inverting either comparison survived the whole file while producing unpadded
+output.
 
 **lipgloss remains the width AUTHORITY.** These helpers never compute a width by
 another route; they only skip measurement they can prove is unnecessary. If an
 equivalence test fails, DELETE the helper rather than adjusting the test.
+
+## Navigation and selection
+
+### Spatial pane navigation
+
+`internal/tui/tab.go` — `TabModel.NavigateDirection(dir Direction)` walks `CollectRects` (top-down geometry), filters by half-plane (`directionScore`), and picks the candidate with three tie-breakers: smallest gap, largest perpendicular overlap, smallest perpendicular center distance (tmux/vim parity). Default keys are `Alt+Left/Right/Up/Down` (`pane_left/right/up/down` in `[keybindings]`). Tab/Shift+Tab and `Alt+H/V` are deliberately NOT bound at the global level — they fall through to the PTY (shell completion, Claude Code mode toggle, claude-code's image paste). Splits live on `Alt+Shift+H/V`. Disabled in focus mode and on single-pane tabs (no-op). Vim users can rebind to `alt+h/l/k/j` in `config.toml`. Tests in `layout_test.go` cover all four directions, the no-overlap rejection branch, and the center-distance tie-breaker
+
+### Text selection
+
+`internal/tui/selection.go` — keyboard (Shift+Arrow, Ctrl+Shift+Arrow word jump, Ctrl+Alt+Shift+Arrow 3-word jump) and mouse (click+drag). Enter copies selection to clipboard via `internal/clipboard`. Shell cursor follows selection horizontally in real-time (same-line only; cross-line is visual-only to avoid triggering command history). Selection bounded by `lastContentLine()` — won't extend into empty terminal area
+
+### Clipboard
+
+`internal/clipboard/` — platform-native Read/Write. Windows: Win32 `GetClipboardData`/`SetClipboardData`. Unix: `pbpaste`/`pbcopy` (macOS), `xclip`/`xsel` (Linux). Paste (`Ctrl+V`) wraps content in bracketed paste sequences. Dialog paste sanitizes control characters.
+
+**Image paste proxy**: `clipboard.ReadImage()` reads `CF_DIBV5`/`CF_DIB` on Windows (Unix is a stub), `dib.go` parses the DIB into an `image.Image` (24bpp BI_RGB, 32bpp BI_RGB and BI_BITFIELDS, top-down + bottom-up, all-zero-alpha promotion). `pasteClipboard` falls through to image when text is empty: saves PNG to `config.PasteDir()` (`~/.quil/paste/quil-paste-<timestamp>.png`) and types the path into the PTY. Works around the upstream Claude Code Windows clipboard bug (anthropics/claude-code#32791). Paste keys: `Ctrl+V` (kb.Paste — eaten by Windows Terminal), `Ctrl+Alt+V` and `F8` are hardcoded aliases; `F8` is the recommended Windows trigger because it has no AltGr ambiguity
+
+

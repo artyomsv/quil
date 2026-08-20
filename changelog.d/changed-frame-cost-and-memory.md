@@ -19,7 +19,3 @@ headline: Frames cost a third less and big workspaces use far less memory
 
 - **Scrollback depth is now editable in F1 → Settings** instead of only in
   `config.toml`. It applies on next launch, like every other Settings row.
-
-- **F1 → Processes lists quil's own processes**, separating out any MCP bridges
-  whose parent has gone. Those can be stopped from the dialog; anything that is not
-  quil's own is shown but never offered for termination.

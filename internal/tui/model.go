@@ -325,7 +325,6 @@ const (
 	dialogProjectRename // sidebar context menu: rename a project (Task 13)
 	dialogProjectPick   // Alt+P: fuzzy project picker (Task 14)
 	dialogWhatsNew      // post-upgrade highlights; also F1 → What's New
-	dialogProcesses     // F1 → Processes: quil's processes + orphaned bridges
 )
 
 // tuiClient is the subset of *ipc.Client the TUI uses on the Model. Defined
@@ -832,9 +831,10 @@ type Model struct {
 	flashText  string
 	flashUntil time.Time
 
-	// processes backs the F1 → Processes dialog. Zero value = never scanned,
-	// which the renderer shows as "scanning…".
-	processes processesState
+	// paneCountByDest is each destination's pane count from its last broadcast.
+	// Summed by setDestPaneCount into the workspace size the adaptive scrollback
+	// depth divides — a broadcast reports ONE host, this process holds all of them.
+	paneCountByDest map[string]int
 
 	// updateInfos maps a destination to the newer release ITS daemon
 	// announced; drives the status-bar segment, the About row, and the
@@ -2025,10 +2025,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(cmd, m.listenForMessages())
 		}
 		return m, m.listenForMessages()
-
-	case processesScannedMsg:
-		m = m.applyProcessesScan(msg)
-		return m, nil
 
 	case paneSettleRepaintMsg:
 		return m, tea.ClearScreen
@@ -5055,7 +5051,14 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]str
 	// depth and the last the large-workspace one, and no pane's depth can be
 	// revised afterwards (x/vt's SetScrollbackSize reslices rather than
 	// reallocating, so trimming a live pane frees nothing).
-	SetPaneCount(len(state.Panes))
+	//
+	// Summed ACROSS destinations, not taken from this broadcast alone. A
+	// broadcast is one daemon's full state, so `len(state.Panes)` is that host's
+	// pane count; the scrollback budget is a property of this CLIENT's process,
+	// which holds every host's panes at once. Three hosts at 15 panes each is 45
+	// emulators in one TUI, and publishing 15 would hand each pane three times
+	// the depth the budget allows.
+	m.setDestPaneCount(dest, len(state.Panes))
 
 	paneMap := make(map[string]*PaneInfo)
 	for i := range state.Panes {

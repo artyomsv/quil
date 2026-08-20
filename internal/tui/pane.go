@@ -1551,3 +1551,26 @@ func (p *PaneModel) insertCursor(content string) string {
 	lines[pos.Y] = b.String()
 	return strings.Join(lines, "\n")
 }
+
+// setDestPaneCount records one destination's pane count and publishes the SUM
+// across every destination as the workspace size the adaptive depth divides.
+//
+// A broadcast is one daemon's full state, so a client holding several hosts
+// receives several of them and each reports only its own panes. The scrollback
+// budget is a property of this PROCESS, which holds all of them at once, so the
+// sum is the only figure that means anything here — publishing a single host's
+// count would hand every pane a multiple of the depth the budget allows.
+//
+// Lives on Model rather than beside the package vars because it is per-client
+// state: two Models in one process would each have their own destinations.
+func (m *Model) setDestPaneCount(dest string, n int) {
+	if m.paneCountByDest == nil {
+		m.paneCountByDest = make(map[string]int, 2)
+	}
+	m.paneCountByDest[dest] = n
+	total := 0
+	for _, c := range m.paneCountByDest {
+		total += c
+	}
+	SetPaneCount(total)
+}

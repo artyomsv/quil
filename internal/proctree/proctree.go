@@ -66,6 +66,14 @@ func DefaultSources(rss func([]int) map[int]uint64) Sources {
 // The handle count is bounded by one workspace's descendants rather than by the
 // size of the machine.
 func (s *Sampler) Collect(now time.Time, rootPIDs []int, src Sources) (map[int]*Node, error) {
+	// Every hook is optional and nil-checked. Sources is an exported struct a
+	// caller fills in field by field, so a partially-filled one is a normal
+	// thing to hold — the kill path deliberately passes no CPU source, because
+	// it needs parent links and start times and nothing else, and on Darwin a
+	// CPU read is another `ps` fork paid for a number nobody reads.
+	if src.Table == nil {
+		return nil, ErrUnsupported
+	}
 	table, err := src.Table()
 	if err != nil {
 		return nil, err
@@ -87,7 +95,10 @@ func (s *Sampler) Collect(now time.Time, rootPIDs []int, src Sources) (map[int]*
 	if src.RSS != nil {
 		rss = src.RSS(pids)
 	}
-	cpu := s.Update(now, src.CPU(pids), starts)
+	var cpu map[int]float64
+	if src.CPU != nil {
+		cpu = s.Update(now, src.CPU(pids), starts)
+	}
 
 	Decorate(trees, rss, cpu)
 	return trees, nil

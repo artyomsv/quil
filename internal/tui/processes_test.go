@@ -18,6 +18,7 @@ func procReport() ipc.ResourceReportRespPayload {
 	start := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
 	return ipc.ResourceReportRespPayload{
 		SnapshotAt:   time.Now().UnixNano(),
+		WithTrees:    true,
 		TreesAt:      time.Now().UnixNano(),
 		Total:        5 << 30,
 		CPUSupported: true,
@@ -245,7 +246,10 @@ func TestProcTreesStale_OnlyPastTheThreshold(t *testing.T) {
 
 // The kill path, driven through Update rather than by calling the handler.
 //
-// This is the shape the removed version lacked entirely: its confirm branch was
+// Driven through handleDialogKey, the REAL dispatcher, not the handler it
+// routes to. The hop that matters is dialog.go's `case dialogProcesses` — delete
+// that line and a handler-level test stays green, which is exactly how the
+// removed version's confirm branch was
 // unreachable from the call site, so disabling it left the whole suite green.
 func TestKillProcess_ThroughUpdate(t *testing.T) {
 	m := procModel()
@@ -258,7 +262,7 @@ func TestKillProcess_ThroughUpdate(t *testing.T) {
 		}
 	}
 
-	updated, _ := m.handleProcessesDialogKey(tea.KeyPressMsg{Code: 'K', Text: "K"})
+	updated, _ := m.handleDialogKey(tea.KeyPressMsg{Code: 'K', Text: "K"})
 	m = updated.(Model)
 
 	if m.dialog != dialogConfirm || m.confirmKind != confirmKindKillProcess {
@@ -294,10 +298,10 @@ func TestKillConfirm_RequiresExplicitY(t *testing.T) {
 			m.proc.cursor = i
 		}
 	}
-	updated, _ := m.handleProcessesDialogKey(tea.KeyPressMsg{Code: 'K', Text: "K"})
+	updated, _ := m.handleDialogKey(tea.KeyPressMsg{Code: 'K', Text: "K"})
 	m = updated.(Model)
 
-	after, _ := m.handleConfirmKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	after, _ := m.handleDialogKey(tea.KeyPressMsg{Code: tea.KeyEnter})
 	got := after.(Model)
 	if got.dialog != dialogConfirm {
 		t.Errorf("Enter left the confirm (dialog=%v); only an explicit y may "+
@@ -315,10 +319,10 @@ func TestKillConfirm_EscReturnsToProcesses(t *testing.T) {
 			m.proc.cursor = i
 		}
 	}
-	updated, _ := m.handleProcessesDialogKey(tea.KeyPressMsg{Code: 'K', Text: "K"})
+	updated, _ := m.handleDialogKey(tea.KeyPressMsg{Code: 'K', Text: "K"})
 	m = updated.(Model)
 
-	after, _ := m.handleConfirmKey(tea.KeyPressMsg{Code: tea.KeyEscape})
+	after, _ := m.handleDialogKey(tea.KeyPressMsg{Code: tea.KeyEscape})
 	got := after.(Model)
 	if got.dialog != dialogProcesses {
 		t.Errorf("Esc from the kill confirm went to %v, want dialogProcesses", got.dialog)
@@ -334,7 +338,7 @@ func TestKillProcess_RefusesPaneOwnChild(t *testing.T) {
 			m.proc.cursor = i
 		}
 	}
-	updated, _ := m.handleProcessesDialogKey(tea.KeyPressMsg{Code: 'K', Text: "K"})
+	updated, _ := m.handleDialogKey(tea.KeyPressMsg{Code: 'K', Text: "K"})
 	m = updated.(Model)
 
 	if m.dialog == dialogConfirm {
@@ -351,7 +355,7 @@ func TestProcessesDialog_LowercaseKMovesCursorNotKills(t *testing.T) {
 	m := procModel()
 	m.proc.cursor = 5
 
-	updated, _ := m.handleProcessesDialogKey(tea.KeyPressMsg{Code: 'k', Text: "k"})
+	updated, _ := m.handleDialogKey(tea.KeyPressMsg{Code: 'k', Text: "k"})
 	got := updated.(Model)
 
 	if got.dialog == dialogConfirm {

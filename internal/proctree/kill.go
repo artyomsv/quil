@@ -83,7 +83,18 @@ func TermPass(target *Node, ops KillOps) TermResult {
 	if target == nil || ops.Term == nil {
 		return res
 	}
+
+	unverifiable := unverifiableSubtrees(target)
+
 	for _, n := range Flatten(target) {
+		if unverifiable[n.PID] {
+			// This process sits under a parent link nothing could confirm, so
+			// its membership in this pane's tree is unproven. Build keeps such
+			// a link because dropping it would hide a real child — but "show
+			// it" and "kill it" are different permissions.
+			res.Skipped++
+			continue
+		}
 		if err := ops.Term(n.PID, n.Start); err != nil {
 			// Either it already exited or its identity no longer matches.
 			// Both mean "do not chase this PID any further".
@@ -94,6 +105,41 @@ func TermPass(target *Node, ops KillOps) TermResult {
 		res.termed = append(res.termed, pendingKill{pid: n.PID, start: n.Start})
 	}
 	return res
+}
+
+// unverifiableSubtrees returns every PID whose ancestry inside this subtree
+// passes through a node with no known start time.
+//
+// Build deliberately KEEPS a parent link when either start time is unknown,
+// because refusing would hide a real child — and it justifies that by saying
+// the kill path refuses an unknown start separately. That is true of the
+// TARGET, which validateKillTarget checks, and it was NOT true of the target's
+// descendants: the sweep signals each node on its own start time, so a node X
+// with an unreadable start was skipped while X's children — which have perfectly
+// readable start times — were terminated, on the strength of a link to the pane
+// that nothing ever confirmed.
+//
+// Reachable on Windows, where a start time comes from a second OpenProcess pass
+// that can legitimately fail. On Linux and Darwin start times are effectively
+// always readable, which is why this is a narrow case rather than a common one.
+func unverifiableSubtrees(root *Node) map[int]bool {
+	out := map[int]bool{}
+	var walk func(n *Node, tainted bool)
+	walk = func(n *Node, tainted bool) {
+		if n == nil {
+			return
+		}
+		// The root itself is validated by the caller; taint starts below it.
+		if tainted {
+			out[n.PID] = true
+		}
+		childTainted := tainted || n.Start.IsZero()
+		for _, c := range n.Children {
+			walk(c, childTainted)
+		}
+	}
+	walk(root, false)
+	return out
 }
 
 // Escalate waits out the grace period and forcibly kills whatever is still the

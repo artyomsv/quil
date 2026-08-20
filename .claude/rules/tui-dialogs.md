@@ -177,3 +177,42 @@ dialog state only under `m.dialog == dialogProcesses` — the removed version
 wrote `dialogCursor` unguarded, so a late scan moved the About cursor. Rows are
 sized against `dialogInnerWidth`, not a literal: the removed version emitted
 89-cell rows into an 86-cell budget and every row wrapped.
+
+**The row list SCROLLS, and that is not optional.** `renderDialog` places the
+box with `lipgloss.Place`, which does not clip — this file documents that in
+several other places. A 33-tab workspace produces ~42 rows before anything is
+expanded, so an unwindowed list draws past the bottom of the terminal and the
+footer is simply gone, while the cursor still moves into rows nobody can see.
+`procWindow` is the same pure shape as `historyWindow` and is called by BOTH
+`syncProcScroll` and the renderer, because render must not depend on Update
+having run.
+
+**Every column is bounded in CELLS, and the assembled row is clamped again.**
+`padCell`/`padCellRight` exist because `fmt`'s `%-*s` pads to a RUNE count while
+`truncateToWidth` measures cells: 构建 is 2 runes and 4 cells, and
+`sanitizeRemoteText` preserves printable non-ASCII byte-identically, so a remote
+host's process names reach this path unchanged. The NUMERIC columns are bounded
+too — PID, CPU and RSS all come off the wire, and a PID of `math.MaxInt64` is 19
+characters into a 7-cell column. The final `truncateToWidth(line, inner)` in
+`procLine` is a guarantee independent of the column arithmetic, which cannot
+satisfy a narrow terminal on its own (`nameW` has a floor, so below ~48 cells
+the fixed columns already overflow).
+
+**`clampDepth` is a crash guard, not tidiness.** `ProcNode.Depth` is a plain int
+decoded off the socket and the indent is `strings.Repeat("  ", depth+2)`, which
+PANICS on a negative count — so a daemon answering `"depth": -3` kills the TUI
+the moment the user expands a pane. Verified empirically.
+
+**Nothing that blocks runs on the IPC dispatch goroutine.** `handleConn`
+processes one connection's messages sequentially, so a parked handler stops that
+client's keystrokes to every pane. Both the collector's first `collect()` and
+the whole kill path (enumerate → verify → sweep) run on worker goroutines,
+following `handleClaudeSessionsReq`'s precedent, each behind a single-flight.
+The graceful pass is NOT cheap on Darwin: verifying identity forks `ps` per
+process, so a subtree kill is one fork per node.
+
+**A treeless response must not replace a tree-bearing one.** The status bar and
+the dialog share `MsgResourceReportReq`, so a status-bar poll can be in flight
+when the dialog opens; the response echoes `WithTrees` so the client can tell
+them apart. Inferring it from a populated field instead would mistake an empty
+tree for a treeless answer.

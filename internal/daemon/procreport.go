@@ -1,10 +1,12 @@
 package daemon
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/logger"
@@ -81,11 +83,22 @@ func (c *procCollector) Renew() {
 	c.mu.Unlock()
 
 	if start {
-		// Collect once immediately so the first report is not empty; the CPU
-		// column still reads unknown until the second pass, which is what the
-		// dialog renders as an em dash.
-		c.collect()
-		go c.run()
+		// The first collect runs on the WORKER goroutine, not here.
+		//
+		// Renew is called from handleResourceReportReq, i.e. on the conn's
+		// dispatch goroutine, and handleConn processes one connection's
+		// messages sequentially — so a synchronous enumeration parks that
+		// client's keystrokes to every pane for as long as it takes. On Darwin
+		// that is a `ps` fork bounded only by psTimeout. collect()'s own doc
+		// says a hung ps costs a stale dialog rather than a wedged daemon;
+		// that was only true of the ticker path until this moved.
+		//
+		// The dialog already renders a loading state, so the first response
+		// simply carries no trees and the next tick fills them in.
+		go func() {
+			c.collect()
+			c.run()
+		}()
 	}
 }
 
@@ -290,6 +303,15 @@ func (d *Daemon) handleClientHello(conn *ipc.Conn, msg *ipc.Message) {
 		logger.Debug("client hello: incomplete (role=%q pid=%d)", p.Role, p.PID)
 		return
 	}
+	// Bound every string before RETAINING it. These are self-reported by any
+	// process that can open the socket and are held for the connection's whole
+	// lifetime, then copied into every tree-bearing response. Unbounded, one
+	// conn holding a multi-megabyte Role makes the response fail to marshal —
+	// which respondTo logs and drops, so the dialog sits on "Loading…" and the
+	// status-bar total freezes for EVERY client, not just the hostile one.
+	p.Role = truncateField(p.Role, maxHelloField)
+	p.Version = truncateField(p.Version, maxHelloField)
+	p.ExeName = truncateField(p.ExeName, maxHelloField)
 	d.hellos.put(conn, p)
 }
 
@@ -339,7 +361,8 @@ func (d *Daemon) handleResourceReportReq(conn *ipc.Conn, msg *ipc.Message) {
 	if req.WithTrees {
 		d.procReport.Renew()
 		resp.CPUSampled = d.procReport.Sampled()
-		resp.CPUSupported = true
+		resp.WithTrees = true
+		resp.CPUSupported = d.procReport.CPUSupported()
 
 		if ps := d.procReport.Latest(); ps != nil {
 			resp.TreesAt = ps.At.UnixNano()
@@ -400,6 +423,8 @@ const (
 	refuseUnknownTime = "cannot confirm this is still the same process"
 	refuseChanged     = "that PID now belongs to a different process"
 	refuseUnsupported = "stopping processes is not supported on this platform"
+	refuseEnumFailed  = "could not read the process list just now — try again"
+	refuseBusy        = "another stop is already in progress"
 )
 
 // handleKillProcessReq stops a pane descendant, after re-deriving the tree.
@@ -415,58 +440,86 @@ func (d *Daemon) handleKillProcessReq(conn *ipc.Conn, msg *ipc.Message) {
 		return
 	}
 
-	target, root, refused := d.resolveKillTarget(req)
-	if refused != "" {
+	// EVERYTHING below runs on a worker goroutine, following the precedent set
+	// by handleClaudeSessionsReq and the browse/discover handlers.
+	//
+	// None of it belongs on the dispatch goroutine. `handleConn` processes one
+	// connection's messages sequentially, so a parked handler stops that
+	// client's keystrokes to every pane — the 2026-06-11/12 wedge shape
+	// daemon-lifecycle.md exists to prevent. Three separate things here block:
+	// resolveKillTarget runs a full process enumeration; the graceful pass
+	// verifies each process's identity, which on Darwin is one `ps` fork PER
+	// NODE bounded only by psTimeout; and the escalation sleeps out the grace
+	// period. An earlier version of this comment claimed the graceful pass
+	// "completes in microseconds", which is true on Linux and Windows and
+	// flatly false on Darwin.
+	//
+	// A single-flight bounds the cost: a client looping this message would
+	// otherwise stack goroutines each running their own enumeration.
+	if !d.killRunning.CompareAndSwap(false, true) {
 		respondTo(conn, msg.ID, ipc.MsgKillProcessResp,
-			ipc.KillProcessRespPayload{Refused: refused})
+			ipc.KillProcessRespPayload{Refused: refuseBusy})
 		return
 	}
-	_ = root
-
-	ops := proctree.DefaultKillOps()
-
-	// The graceful pass is synchronous: it completes in microseconds and its
-	// result is what the client is told. The escalation waits out the grace
-	// period, so it runs on its own goroutine rather than parking this
-	// dispatch goroutine for three seconds — the class of blocking that
-	// daemon-lifecycle.md exists to prevent.
-	term := proctree.TermPass(target, ops)
 
 	go func() {
-		killed := proctree.Escalate(term, proctree.KillGrace, ops)
-		if killed > 0 {
-			logger.Info("kill: escalated %d process(es) under pane %s", killed, req.PaneID)
+		defer d.killRunning.Store(false)
+
+		target, refused := d.resolveKillTarget(req)
+		if refused != "" {
+			respondTo(conn, msg.ID, ipc.MsgKillProcessResp,
+				ipc.KillProcessRespPayload{Refused: refused})
+			return
 		}
+
+		ops := proctree.DefaultKillOps()
+		res := proctree.Sweep(target, proctree.KillGrace, ops)
+
+		logger.Info("kill: pane=%s pid=%d signalled=%d escalated=%d skipped=%d",
+			req.PaneID, req.PID, res.Signalled, res.Escalated, res.Skipped)
+
+		// Answered after the sweep completes, so Escalated carries a real
+		// number. It is a documented wire field, and reporting the graceful
+		// pass alone left it permanently zero.
+		respondTo(conn, msg.ID, ipc.MsgKillProcessResp, ipc.KillProcessRespPayload{
+			Signalled: res.Signalled,
+			Escalated: res.Escalated,
+		})
 	}()
-
-	logger.Info("kill: pane=%s pid=%d signalled=%d skipped=%d",
-		req.PaneID, req.PID, term.Signalled, term.Skipped)
-
-	respondTo(conn, msg.ID, ipc.MsgKillProcessResp, ipc.KillProcessRespPayload{
-		Signalled: term.Signalled,
-	})
 }
 
 // resolveKillTarget re-derives the pane's tree NOW and validates the request
 // against it, in order. Returns the node to kill, its pane root, and a refusal
 // reason when the kill must not proceed.
-func (d *Daemon) resolveKillTarget(req ipc.KillProcessReqPayload) (*proctree.Node, *proctree.Node, string) {
+func (d *Daemon) resolveKillTarget(req ipc.KillProcessReqPayload) (*proctree.Node, string) {
 	rootPID, ok := d.panePID(req.PaneID)
 	if !ok {
-		return nil, nil, refuseNoPane
+		return nil, refuseNoPane
 	}
 
+	// Structure only. The kill path needs parent links and start times; it has
+	// no use for memory or CPU, and on Darwin a CPU read is another `ps` fork
+	// paid for a number nobody reads.
+	src := proctree.DefaultSources(nil)
+	src.CPU = nil
+
 	sampler := proctree.NewSampler()
-	trees, err := sampler.Collect(time.Now(), []int{rootPID}, proctree.DefaultSources(nil))
+	trees, err := sampler.Collect(time.Now(), []int{rootPID}, src)
 	if err != nil {
-		return nil, nil, refuseUnsupported
+		// Distinguish "this platform cannot do it" from "the attempt failed".
+		// Reporting a Darwin `ps` timeout as "not supported on this platform"
+		// tells a user their platform lacks a feature they used a minute ago.
+		if errors.Is(err, proctree.ErrUnsupported) {
+			return nil, refuseUnsupported
+		}
+		logger.Debug("kill: enumeration failed for pane %s: %v", req.PaneID, err)
+		return nil, refuseEnumFailed
 	}
 	root := trees[rootPID]
 	if root == nil {
-		return nil, nil, refuseNoPane
+		return nil, refuseNoPane
 	}
-	target, refused := validateKillTarget(root, req)
-	return target, root, refused
+	return validateKillTarget(root, req)
 }
 
 // killStartTolerance is how far the daemon's freshly-read start time may differ
@@ -533,4 +586,36 @@ func daemonExeName() string {
 		return "quild"
 	}
 	return filepath.Base(exe)
+}
+
+// CPUSupported reports whether this platform has any CPU source at all.
+//
+// Derived from the platform reading rather than hardcoded true. On a platform
+// with no source, claiming support AND (via Sampled being false) footnoting
+// "CPU here is a kernel average" describes a measurement that does not exist.
+func (c *procCollector) CPUSupported() bool {
+	if c.src.CPU == nil {
+		return false
+	}
+	return c.src.CPU(nil).Supported
+}
+
+// maxHelloField bounds each self-reported identity string.
+//
+// A role is one of three words, a version is a semver, and an exe name is a
+// filename — 64 bytes is generous for all three, and none of them is a value
+// the user typed.
+const maxHelloField = 64
+
+// truncateField caps a string at n bytes on a rune boundary.
+func truncateField(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	// Back off to a rune boundary so the result stays valid UTF-8; a cut
+	// mid-sequence would reach the TUI as a replacement char at best.
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }

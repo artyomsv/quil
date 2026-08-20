@@ -167,10 +167,8 @@ func readCPU(pids []int) CPUReading {
 			total := filetimeDuration(kernel) + filetimeDuration(user)
 			out[pid] = total
 		}
-		if err := windows.CloseHandle(h); err != nil {
-			// Nothing useful to do; the next tick reopens regardless.
-			_ = err
-		}
+		// Nothing useful to do on failure; the next tick reopens regardless.
+		_ = windows.CloseHandle(h)
 	}
 	return CPUReading{Cumulative: out, Supported: true}
 }

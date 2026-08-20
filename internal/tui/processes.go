@@ -3,11 +3,14 @@ package tui
 import (
 	"fmt"
 	"log"
+	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/memreport"
@@ -39,6 +42,26 @@ const resourceTickInterval = 5 * time.Second
 // The dialog would sit showing stale numbers with no way back short of closing
 // it. Matches the 8 s the daemon-backed browse and discover dialogs use.
 const resourceRequestTimeout = 8 * time.Second
+
+// procMinRows and procChromeRows bound the scrolling row window.
+//
+// renderDialog places the box with lipgloss.Place, which does NOT clip — a box
+// taller than the terminal is drawn past the edge, and what falls off this
+// dialog is the footer telling the user which keys work. Without a window the
+// row count is unbounded: a workspace of 33 tabs produces ~42 rows before
+// anything is expanded, and one expanded pane running a build adds hundreds.
+// The cursor would then walk into rows that are never painted.
+//
+// procMinRows is 1 for the reason historyMinRows is: any floor above the height
+// actually available manufactures the overflow it looks like it prevents.
+const (
+	procMinRows = 1
+	// procChromeRows is every row the modal spends outside the list: border (2),
+	// Padding(1,2) top and bottom (2), the title, the blank row above the
+	// footer, the footer, the platform footnote, and one spare so the centered
+	// box never sits flush against the terminal edge.
+	procChromeRows = 9
+)
 
 // procStaleAfter is how old a tree snapshot may be before the dialog says so.
 //
@@ -77,6 +100,16 @@ type procRow struct {
 	depth   int
 	rss     uint64
 	cpu     float64
+	// version, uptime and exeName are the quil-section columns. Without them
+	// the section shows a role and a PID, which answers neither question it
+	// exists for — "is this binary current" and "how long has it been up".
+	version string
+	uptime  time.Duration
+	exeName string
+	// expandable and expanded drive the ▸/▾ indicator. Nothing else tells the
+	// user a row can be opened; the memory dialog this replaces had them.
+	expandable bool
+	expanded   bool
 	// killable marks a row the kill key may act on: strictly below a pane's
 	// own direct child.
 	killable bool
@@ -93,6 +126,9 @@ type processesState struct {
 	// 5 s poll does not collapse what the user just opened.
 	expandedTabs  map[string]bool
 	expandedPanes map[string]bool
+	// scroll is the index of the first rendered row. Without it the dialog
+	// draws every row and overflows the terminal on any real workspace.
+	scroll int
 	// inFlight and sentAt implement the single-flight and its timeout.
 	inFlight bool
 	sentAt   time.Time
@@ -178,6 +214,18 @@ func (m Model) applyResourceReport(resp ipc.ResourceReportRespPayload) Model {
 	m.lastResourceResp = &stored
 
 	if m.dialog == dialogProcesses {
+		// A TREELESS response must not replace a tree-bearing one, and must not
+		// clear the single-flight it does not answer.
+		//
+		// The status bar and the dialog share this message; a status-bar poll
+		// (WithTrees false) can still be in flight when the dialog opens. Its
+		// response carries no Quil section and no trees, so adopting it blanks
+		// the whole quil list and turns every CPU cell into an em dash for a
+		// round trip — a flicker locally, a visible wipe over ssh — while
+		// clearing inFlight for a request that was never the dialog's.
+		if !stored.WithTrees && m.proc.resp != nil {
+			return m
+		}
 		m.proc.resp = &stored
 		m.proc.loading = false
 		m.proc.inFlight = false
@@ -209,13 +257,16 @@ func (m Model) procRows() []procRow {
 	for _, q := range quil {
 		flag := ""
 		if q.Stale {
-			flag = "stale"
+			flag = "⚠ stale"
 		}
 		rows = append(rows, procRow{
-			kind:  procRowQuil,
-			label: q.Role,
-			pid:   q.PID,
-			flag:  flag,
+			kind:    procRowQuil,
+			label:   q.Role,
+			pid:     q.PID,
+			version: q.Version,
+			uptime:  time.Duration(q.UptimeMS) * time.Millisecond,
+			exeName: q.ExeName,
+			flag:    flag,
 		})
 	}
 	if resp.Unidentified > 0 {
@@ -266,11 +317,13 @@ func (m Model) procRows() []procRow {
 			name = tabID
 		}
 		rows = append(rows, procRow{
-			kind:  procRowTab,
-			tabID: tabID,
-			label: name,
-			rss:   tabTotals[tabID],
-			cpu:   proctree.UnknownCPU,
+			kind:       procRowTab,
+			tabID:      tabID,
+			label:      name,
+			rss:        tabTotals[tabID],
+			cpu:        proctree.UnknownCPU,
+			expandable: true,
+			expanded:   m.proc.expandedTabs[tabID],
 		})
 		if !m.proc.expandedTabs[tabID] {
 			continue
@@ -281,15 +334,21 @@ func (m Model) procRows() []procRow {
 			return panes[i].TotalBytes > panes[j].TotalBytes
 		})
 		for _, p := range panes {
+			expanded := m.proc.expandedPanes[p.PaneID]
 			rows = append(rows, procRow{
 				kind:   procRowPane,
 				tabID:  tabID,
 				paneID: p.PaneID,
 				label:  m.paneRowLabel(p.PaneID),
 				rss:    p.TotalBytes + m.tuiLocalMem(p.PaneID),
-				cpu:    procTreeCPU(p.Tree),
+				// Only walk the tree for a pane the user has opened. Summing a
+				// collapsed pane's whole subtree on every render makes the cost
+				// independent of what is actually on screen.
+				cpu:        paneRowCPU(p.Tree, expanded),
+				expandable: p.Tree != nil,
+				expanded:   expanded,
 			})
-			if !m.proc.expandedPanes[p.PaneID] || p.Tree == nil {
+			if !expanded || p.Tree == nil {
 				continue
 			}
 			rows = appendProcNodeRows(rows, p.Tree, p.PaneID, tabID)
@@ -328,7 +387,7 @@ func appendProcNodeRows(rows []procRow, n *ipc.ProcNode, paneID, tabID string) [
 		label:    n.Name,
 		pid:      n.PID,
 		startMS:  n.StartMS,
-		depth:    n.Depth,
+		depth:    clampDepth(n.Depth),
 		rss:      n.RSSBytes,
 		cpu:      n.CPUPct,
 		killable: killable,
@@ -338,6 +397,43 @@ func appendProcNodeRows(rows []procRow, n *ipc.ProcNode, paneID, tabID string) [
 		rows = appendProcNodeRows(rows, &n.Children[i], paneID, tabID)
 	}
 	return rows
+}
+
+// maxProcIndentDepth bounds how far a process row is indented.
+const maxProcIndentDepth = 12
+
+// clampDepth bounds a wire-supplied depth into a renderable range.
+//
+// This is not defensive tidiness. `Depth` is a plain int decoded straight off
+// the socket, and the indent is `strings.Repeat("  ", depth+2)` — which PANICS
+// on a negative count. A daemon answering with `"depth": -3` therefore kills the
+// TUI outright the moment the user expands a pane, which is the dialog's own
+// happy path; verified empirically. In remote mode that daemon is a machine the
+// user may not control. A large positive value is the other half: it allocates
+// a multi-megabyte indent string per row, per render.
+//
+// A legitimate daemon emits neither — proctree's walk starts at 1 and only
+// increments — which is exactly why nothing else catches it.
+func clampDepth(d int) int {
+	if d < 1 {
+		return 1
+	}
+	if d > maxProcIndentDepth {
+		return maxProcIndentDepth
+	}
+	return d
+}
+
+// paneRowCPU is procTreeCPU for an expanded pane, unknown for a collapsed one.
+//
+// A collapsed pane's rows are not on screen, so walking its whole subtree to
+// total a number nobody is looking at makes render cost scale with the
+// workspace rather than with the viewport.
+func paneRowCPU(tree *ipc.ProcNode, expanded bool) float64 {
+	if !expanded {
+		return proctree.UnknownCPU
+	}
+	return procTreeCPU(tree)
 }
 
 // procTreeCPU sums a tree's CPU, or reports unknown when nothing in it has an
@@ -394,6 +490,58 @@ func (m Model) paneRowLabel(paneID string) string {
 	return paneID
 }
 
+// procVisibleRows is how many rows fit under this terminal height.
+func (m Model) procVisibleRows() int {
+	if avail := m.height - procChromeRows; avail > procMinRows {
+		return avail
+	}
+	return procMinRows
+}
+
+// procWindow returns the half-open row range to render.
+//
+// Pure, and called by BOTH the cursor sync and the renderer, because render
+// must not depend on Update having run — a WindowSizeMsg can change the row
+// budget between them. Same shape and same reasoning as historyWindow.
+func procWindow(total, cursor, scroll, visible int) (start, end int) {
+	if total <= 0 || visible <= 0 {
+		return 0, 0
+	}
+	if visible > total {
+		visible = total
+	}
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor > total-1 {
+		cursor = total - 1
+	}
+	// Keep the cursor inside the window, then pull the window back inside the
+	// list. Order matters: a list that shrank under a refresh can leave a
+	// stored scroll past the last valid origin, which draws blank rows under
+	// the final row.
+	if cursor < scroll {
+		scroll = cursor
+	}
+	if cursor >= scroll+visible {
+		scroll = cursor - visible + 1
+	}
+	if scroll > total-visible {
+		scroll = total - visible
+	}
+	if scroll < 0 {
+		scroll = 0
+	}
+	return scroll, scroll + visible
+}
+
+// syncProcScroll re-derives the scroll origin after a cursor move.
+func (m Model) syncProcScroll(total int) Model {
+	start, _ := procWindow(total, m.proc.cursor, m.proc.scroll, m.procVisibleRows())
+	m.proc.scroll = start
+	return m
+}
+
 // procTreesStale reports whether the tree snapshot is old enough to say so.
 func (m Model) procTreesStale(now time.Time) bool {
 	if m.proc.resp == nil || m.proc.resp.TreesAt == 0 {
@@ -419,19 +567,49 @@ func (m Model) handleProcessesDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd
 		if m.proc.cursor > 0 {
 			m.proc.cursor--
 		}
-		return m, nil
+		return m.syncProcScroll(len(rows)), nil
 
 	case "down", "j":
 		if m.proc.cursor < len(rows)-1 {
 			m.proc.cursor++
 		}
-		return m, nil
+		return m.syncProcScroll(len(rows)), nil
+
+	case "pgup":
+		m.proc.cursor -= m.procVisibleRows()
+		if m.proc.cursor < 0 {
+			m.proc.cursor = 0
+		}
+		return m.syncProcScroll(len(rows)), nil
+
+	case "pgdown":
+		m.proc.cursor += m.procVisibleRows()
+		if m.proc.cursor > len(rows)-1 {
+			m.proc.cursor = len(rows) - 1
+		}
+		if m.proc.cursor < 0 {
+			m.proc.cursor = 0
+		}
+		return m.syncProcScroll(len(rows)), nil
+
+	case "home":
+		m.proc.cursor = 0
+		return m.syncProcScroll(len(rows)), nil
+
+	case "end":
+		m.proc.cursor = len(rows) - 1
+		if m.proc.cursor < 0 {
+			m.proc.cursor = 0
+		}
+		return m.syncProcScroll(len(rows)), nil
 
 	case "enter", "right", "l":
-		return m.toggleProcRow(rows, true), nil
+		m = m.toggleProcRow(rows, true)
+		return m.syncProcScroll(len(m.procRows())), nil
 
 	case "left", "h":
-		return m.toggleProcRow(rows, false), nil
+		m = m.toggleProcRow(rows, false)
+		return m.syncProcScroll(len(m.procRows())), nil
 
 	case "K":
 		// Uppercase K only. Lowercase k is the vim-style cursor-up binding
@@ -449,11 +627,31 @@ func (m Model) requestTreesNow() (tea.Model, tea.Cmd) {
 	return updated, cmd
 }
 
+// ensureExpandMaps makes the expand maps writable.
+//
+// Reading a nil map is fine; WRITING to one panics. The maps are created in
+// openProcessesDialog, but two paths reach dialogProcesses without passing
+// through it — the kill confirm's accept and cancel arms both return to the
+// dialog directly. Neither is reachable today without having opened the dialog
+// first, so this is not a live crash; it is a guarantee that does not depend on
+// that reachability argument staying true. The previous version of this feature
+// was full of correct-by-reachability claims, and they are what broke.
+func (m Model) ensureExpandMaps() Model {
+	if m.proc.expandedTabs == nil {
+		m.proc.expandedTabs = map[string]bool{}
+	}
+	if m.proc.expandedPanes == nil {
+		m.proc.expandedPanes = map[string]bool{}
+	}
+	return m
+}
+
 // toggleProcRow expands or collapses the row under the cursor.
 func (m Model) toggleProcRow(rows []procRow, expand bool) Model {
 	if m.proc.cursor < 0 || m.proc.cursor >= len(rows) {
 		return m
 	}
+	m = m.ensureExpandMaps()
 	row := rows[m.proc.cursor]
 	switch row.kind {
 	case procRowTab:
@@ -523,12 +721,22 @@ func (m Model) sendKillProcess() tea.Cmd {
 }
 
 // applyKillProcessResp surfaces the outcome as a line in the dialog.
+//
+// Guarded on the dialog being open for the same reason applyResourceReport is:
+// a response landing after Esc would otherwise set a notice that surfaces the
+// next time the dialog opens, describing something the user did earlier.
 func (m Model) applyKillProcessResp(resp ipc.KillProcessRespPayload) Model {
+	if m.dialog != dialogProcesses {
+		return m
+	}
 	if resp.Refused != "" {
 		m.proc.notice = resp.Refused
 		return m
 	}
-	m.proc.notice = fmt.Sprintf("signalled %d process(es)", resp.Signalled)
+	m.proc.notice = fmt.Sprintf("stopped %d process(es)", resp.Signalled)
+	if resp.Escalated > 0 {
+		m.proc.notice += fmt.Sprintf(" (%d forced)", resp.Escalated)
+	}
 	return m
 }
 
@@ -559,9 +767,20 @@ func (m Model) renderProcessesDialog() string {
 		b.WriteByte('\n')
 	}
 
-	for i, row := range m.procRows() {
-		b.WriteString(renderProcRow(row, i == m.proc.cursor, inner))
+	rows := m.procRows()
+	start, end := procWindow(len(rows), m.proc.cursor, m.proc.scroll, m.procVisibleRows())
+	for i := start; i < end; i++ {
+		b.WriteString(renderProcRow(rows[i], i == m.proc.cursor, inner))
 		b.WriteByte('\n')
+	}
+	// Say what is off-screen rather than letting the list end silently — a
+	// workspace with more panes than rows otherwise looks like it has fewer.
+	if hidden := len(rows) - end + start; hidden > 0 && end > start {
+		if above, below := start, len(rows)-end; above > 0 || below > 0 {
+			b.WriteString(dialogSubtle.Render(truncateToWidth(
+				fmt.Sprintf("  … %d above, %d below", above, below), inner)))
+			b.WriteByte('\n')
+		}
 	}
 
 	if m.proc.notice != "" {
@@ -602,19 +821,33 @@ func renderProcRow(row procRow, selected bool, inner int) string {
 	}
 
 	switch row.kind {
-	case procRowSectionQuil, procRowSectionWorkspace:
-		return dialogSubtle.Render(truncateToWidth(row.label, inner))
+	case procRowSectionQuil:
+		// Column headers, so the values below are not unlabelled numbers.
+		return dialogSubtle.Render(procQuilLine("QUIL", "VERSION", "UPTIME", "PID", "BINARY", inner))
+
+	case procRowSectionWorkspace:
+		return dialogSubtle.Render(procLine("WORKSPACE", "MEM", "CPU", 0, "", inner))
 
 	case procRowUnidentified:
 		return dialogSubtle.Render(truncateToWidth("    "+sanitizeRemoteText(row.label), inner))
 
 	case procRowQuil:
-		name := "    " + sanitizeRemoteText(row.label)
-		flag := row.flag
-		if flag == "stale" {
-			flag = "⚠ stale"
+		// Version, uptime and the binary name are the whole point of this
+		// section: a bridge still executing quil.exe.old.3 after an in-place
+		// upgrade renamed the binary aside is what it exists to surface, and a
+		// role plus a PID cannot show that.
+		role := "    " + sanitizeRemoteText(row.label)
+		if row.flag != "" {
+			role = "  " + row.flag + " " + sanitizeRemoteText(row.label)
 		}
-		return style.Render(procLine(name, "", "", row.pid, flag, inner))
+		return style.Render(procQuilLine(
+			role,
+			sanitizeRemoteText(row.version),
+			formatUptime(row.uptime),
+			strconv.Itoa(row.pid),
+			sanitizeRemoteText(row.exeName),
+			inner,
+		))
 	}
 
 	indent := ""
@@ -625,33 +858,138 @@ func renderProcRow(row procRow, selected bool, inner int) string {
 		indent = "    "
 	case procRowProc:
 		// depth 1 sits under the pane; each level below indents further.
-		indent = strings.Repeat("  ", row.depth+2)
+		indent = strings.Repeat("  ", clampDepth(row.depth)+2)
 	case procRowTotal, procRowTUILocal:
 		indent = "  "
 	}
 
-	name := indent + sanitizeRemoteText(row.label)
+	// The expand indicator. Nothing else tells the user a row can be opened.
+	marker := ""
+	if row.expandable {
+		if row.expanded {
+			marker = "▾ "
+		} else {
+			marker = "▸ "
+		}
+	} else if row.kind == procRowTab || row.kind == procRowPane {
+		marker = "  "
+	}
+
+	name := indent + marker + sanitizeRemoteText(row.label)
 	return style.Render(procLine(name, memreport.HumanBytes(row.rss), formatCPU(row.cpu), row.pid, row.flag, inner))
 }
 
+// formatUptime renders a duration compactly: 6d 03h, 2h 14m, 12m, 45s.
+func formatUptime(d time.Duration) string {
+	if d <= 0 {
+		return "—"
+	}
+	switch {
+	case d >= 24*time.Hour:
+		return fmt.Sprintf("%dd %02dh", int(d.Hours())/24, int(d.Hours())%24)
+	case d >= time.Hour:
+		return fmt.Sprintf("%dh %02dm", int(d.Hours()), int(d.Minutes())%60)
+	case d >= time.Minute:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	default:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+}
+
+// padCell pads or truncates s to exactly w CELLS.
+//
+// fmt's %-*s pads to a RUNE count, which is not the same thing and is wrong for
+// every value on this path. A pane named 构建 is 2 runes and 4 cells; truncating
+// it to a cell budget and then padding by runes overshoots, the row exceeds the
+// dialog's content width, and it soft-wraps — the exact 89-cells-into-86 defect
+// this dialog's predecessor was pulled for. sanitizeRemoteText deliberately
+// preserves printable non-ASCII byte-identically, so a remote host's process
+// names arrive here unchanged and this is not a rare path.
+//
+// Mirrors padOrTrunc in sidebar.go, which exists for the same reason.
+func padCell(s string, w int) string {
+	if w <= 0 {
+		return ""
+	}
+	s = truncateToWidth(s, w)
+	if pad := w - lipgloss.Width(s); pad > 0 {
+		s += strings.Repeat(" ", pad)
+	}
+	return s
+}
+
+// padCellRight is padCell, right-aligned.
+func padCellRight(s string, w int) string {
+	if w <= 0 {
+		return ""
+	}
+	s = truncateToWidth(s, w)
+	if pad := w - lipgloss.Width(s); pad > 0 {
+		s = strings.Repeat(" ", pad) + s
+	}
+	return s
+}
+
 // procLine lays out one row's columns to exactly inner cells.
+//
+// EVERY column goes through the cell-exact padders, numeric ones included. The
+// numbers come off the wire from a daemon that in remote mode is a machine the
+// user may not control: a PID of math.MaxInt64 is 19 characters into a 7-cell
+// column, and an absurd CPU float formats to hundreds. Bounding only the
+// strings would leave the row width dependent on values nobody validates.
 func procLine(name, mem, cpu string, pid int, flag string, inner int) string {
 	pidStr := ""
 	if pid > 0 {
-		pidStr = fmt.Sprintf("%d", pid)
+		pidStr = strconv.Itoa(pid)
 	}
 	nameW := inner - procColMem - procColCPU - procColPID - procColFlag
 	if nameW < 8 {
 		nameW = 8
 	}
-	return fmt.Sprintf("%-*s%*s%*s%*s  %-*s",
-		nameW, truncateToWidth(name, nameW),
-		procColMem, mem,
-		procColCPU, cpu,
-		procColPID, pidStr,
-		procColFlag-2, truncateToWidth(flag, procColFlag-2),
-	)
+	line := padCell(name, nameW) +
+		padCellRight(mem, procColMem) +
+		padCellRight(cpu, procColCPU) +
+		padCellRight(pidStr, procColPID) +
+		"  " + padCell(flag, procColFlag-2)
+
+	// The final, unconditional bound.
+	//
+	// The column arithmetic above cannot satisfy a narrow terminal on its own:
+	// nameW has a floor, so below ~48 cells the FIXED columns already exceed
+	// the budget and the row came out 47 cells wide whatever `inner` said.
+	// Clamping the assembled line is a guarantee that holds regardless of how
+	// the columns are later retuned — which matters, because every previous
+	// version of this row overflowed for a different reason each time.
+	return truncateToWidth(line, inner)
 }
+
+// quilNameCol is the role column's width in the quil section.
+//
+// Fixed and narrow because the roles are "tui", "daemon" and "bridge"; the
+// space that buys goes to the binary name, which has to fit
+// "quil.exe.old.3" — the whole reason the column exists.
+const quilNameCol = 22
+
+// procQuilLine lays out one quil-section row to exactly inner cells.
+func procQuilLine(role, version, uptime, pid, binary string, inner int) string {
+	binW := inner - quilNameCol - procColMem - procColCPU - procColPID - 2
+	if binW < 4 {
+		binW = 4
+	}
+	line := padCell(role, quilNameCol) +
+		padCellRight(version, procColMem) +
+		padCellRight(uptime, procColCPU) +
+		padCellRight(pid, procColPID) +
+		"  " + padCell(binary, binW)
+	return truncateToWidth(line, inner)
+}
+
+// cpuDisplayCeiling bounds what the CPU column will render.
+//
+// A machine cannot exceed 100% per core and no plausible box has 10,000 of
+// them, so anything above this is a wire value nobody should be formatting —
+// %.0f on 1e308 produces a 300-character column.
+const cpuDisplayCeiling = 1_000_000.0
 
 // formatCPU renders a percentage, or an em dash when there is no answer.
 //
@@ -660,8 +998,11 @@ func procLine(name, mem, cpu string, pid int, flag string, inner int) string {
 // CPU source, must not render as "0%" — that reads as idle, which is precisely
 // the wrong claim in a dialog for finding something that is spinning.
 func formatCPU(pct float64) string {
-	if pct < 0 {
+	if pct < 0 || math.IsNaN(pct) {
 		return "—"
+	}
+	if pct > cpuDisplayCeiling || math.IsInf(pct, 1) {
+		return "!"
 	}
 	return fmt.Sprintf("%.0f%%", pct)
 }

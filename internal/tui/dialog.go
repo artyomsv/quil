@@ -628,7 +628,7 @@ func (m Model) handleDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 // handleCommandHistoryKey processes a key press while the input-history modal
-// is open. Mirrors handleMemoryDialogKey's raw-string key idiom. Every cursor
+// is open. Mirrors handleProcessesDialogKey's raw-string key idiom. Every cursor
 // move ends in syncHistoryScroll: the list holds up to 200 entries against a
 // window of ~30 rows, so navigation that does not move the window can only walk
 // off-screen.
@@ -704,7 +704,7 @@ const aboutWhatsNewIndex = 8
 const aboutStopDaemonIndex = 9
 
 func (m Model) handleAboutKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	const lastAboutItem = aboutStopDaemonIndex // 0:Settings 1:Shortcuts 2:Plugins 3:Memory 4:Client 5:Daemon 6:MCP 7:Update 8:What's New 9:Stop daemon
+	const lastAboutItem = aboutStopDaemonIndex // 0:Settings 1:Shortcuts 2:Plugins 3:Processes 4:Client 5:Daemon 6:MCP 7:Update 8:What's New 9:Stop daemon
 	switch msg.String() {
 	case "esc":
 		m.dialog = dialogNone

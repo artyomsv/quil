@@ -27,11 +27,11 @@ const (
 	MsgUpdateLayout = "update_layout"
 
 	// Tab control (Client -> Daemon)
-	MsgCreateTab   = "create_tab"
-	MsgDestroyTab  = "destroy_tab"
-	MsgSwitchTab   = "switch_tab"
-	MsgUpdateTab   = "update_tab"
-	MsgReorderTab  = "reorder_tab"
+	MsgCreateTab  = "create_tab"
+	MsgDestroyTab = "destroy_tab"
+	MsgSwitchTab  = "switch_tab"
+	MsgUpdateTab  = "update_tab"
+	MsgReorderTab = "reorder_tab"
 
 	// Project lifecycle (mirrors the tab message set).
 	MsgCreateProject  = "create_project"
@@ -85,9 +85,9 @@ const (
 	MsgListTabsResp       = "list_tabs_resp"
 	MsgDestroyPaneReq     = "destroy_pane_req"
 	MsgDestroyPaneResp    = "destroy_pane_resp"
-	MsgSetActivePane      = "set_active_pane"  // broadcast to TUI
-	MsgCloseTUI           = "close_tui"        // broadcast to TUI
-	MsgHighlightPane      = "highlight_pane"   // broadcast to TUI (MCP interaction indicator)
+	MsgSetActivePane      = "set_active_pane" // broadcast to TUI
+	MsgCloseTUI           = "close_tui"       // broadcast to TUI
+	MsgHighlightPane      = "highlight_pane"  // broadcast to TUI (MCP interaction indicator)
 
 	// Notification center (M12)
 	MsgPaneEvent              = "pane_event"               // broadcast to TUI
@@ -833,6 +833,15 @@ type ResourceReportRespPayload struct {
 	// footnotes it, because a column that looks uniform while meaning
 	// different things per platform is a confidently wrong answer.
 	CPUSampled bool `json:"cpu_sampled,omitempty"`
+	// WithTrees echoes the request flag.
+	//
+	// The status bar and the dialog share this message, so a status-bar poll's
+	// response can arrive while the dialog is open. Without an explicit echo the
+	// client cannot tell a treeless answer from a tree-bearing one whose trees
+	// happen to be empty, and adopting the former blanks the dialog for a round
+	// trip. Echoed rather than inferred from a populated field for the same
+	// reason the browse dialogs echo their request key verbatim.
+	WithTrees bool `json:"with_trees,omitempty"`
 	// CPUSupported is false where the platform has no CPU source at all.
 	CPUSupported bool `json:"cpu_supported,omitempty"`
 }

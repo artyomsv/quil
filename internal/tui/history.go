@@ -45,7 +45,7 @@ const (
 )
 
 // historyState holds the live state of the input-history modal
-// (dialogCommandHistory). It mirrors memoryDialogState's role for the Memory
+// (dialogCommandHistory). It mirrors processesState's role for the Memory
 // dialog: a snapshot of the daemon's response plus the cursor and a loading
 // flag. supported is false when the active pane's plugin does not opt into
 // history capture (Command.RecordHistory == false) — the modal then renders a
@@ -61,9 +61,9 @@ type historyState struct {
 	// listenForMessages answers with a bare listenContinueMsg — leaves the modal
 	// showing "Loading…" forever with nothing to diagnose it by. Same failure
 	// mode paletteSearchTimeout and sessionScanTimeout exist for.
-	timedOut  bool
-	entries   []ipc.HistoryEntryMeta
-	cursor    int
+	timedOut bool
+	entries  []ipc.HistoryEntryMeta
+	cursor   int
 	// scroll is the index of the first entry drawn. The list holds up to
 	// panehistory.MaxEntries (200) rows against a window of ~30, so without it
 	// everything past the fold rendered off-screen with no way to reach it.
@@ -111,7 +111,7 @@ func (m Model) openHistoryDialog(paneID, paneType string, supported bool) Model 
 // requestHistory issues MsgPaneHistoryReq to the daemon as a fire-and-forget
 // send, paired with the timeout tick that bounds the wait. The corresponding
 // MsgPaneHistoryResp is dispatched by listenForMessages → historyListMsg →
-// Update. Mirrors refreshMemory.
+// Update. Mirrors refreshResources.
 func (m Model) requestHistory(paneID string) tea.Cmd {
 	send := func() tea.Msg {
 		if m.client == nil {
@@ -167,7 +167,7 @@ func (m Model) requestHistoryEntry(paneID string, tsMs int64) tea.Cmd {
 
 // applyHistoryList stores a fresh preview list and clamps the cursor. Stale
 // responses (a different pane than the one the modal is showing) are ignored —
-// the same guard pattern applyMemoryReport uses against the active dialog.
+// the same guard pattern applyResourceReport uses against the active dialog.
 func (m Model) applyHistoryList(resp ipc.PaneHistoryRespPayload) Model {
 	if resp.PaneID != m.history.paneID {
 		return m
@@ -287,7 +287,7 @@ func (m *Model) scrollHistoryList(button tea.MouseButton) {
 
 // renderCommandHistory produces the modal body string. The outer dialogBorder
 // wrapping + centering is applied by the common render dispatch (renderDialog),
-// exactly as for renderMemoryDialog. Exactly one row is drawn per entry — the
+// exactly as for renderProcessesDialog. Exactly one row is drawn per entry — the
 // daemon flattens each prompt to a single line (panehistory.PreviewLine) and
 // the row is truncated to the box, so the list stays scannable however long the
 // prompts were.

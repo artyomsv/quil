@@ -17,7 +17,9 @@ var errIdentityChanged = errors.New("proctree: process identity changed")
 
 // Darwin has no primitive that pins a process the way pidfd_open or a Windows
 // handle does. Verification and signalling are therefore separate steps, with a
-// residual window of microseconds between them.
+// residual window between them of TENS OF MILLISECONDS -- not microseconds, as
+// an earlier version of this comment claimed: identityMatches forks ps, so the
+// gap spans a whole process spawn rather than a few instructions.
 //
 // Documented rather than hidden: it is the one platform where the kill path's
 // identity guarantee is best-effort, and the sweep's own re-check before

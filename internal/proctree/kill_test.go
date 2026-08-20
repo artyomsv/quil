@@ -235,3 +235,50 @@ func TestSweep_SubtreeOnlyNotWholeTree(t *testing.T) {
 		t.Errorf("termed %v, want exactly 200 and 300", f.termed)
 	}
 }
+
+// A node whose own start time is unreadable has an unverifiable link to the
+// pane's tree. Build keeps the link (dropping it would hide a real child), but
+// the sweep must not treat "visible" as "killable" — and it must not treat the
+// node's CHILDREN as killable either, which is the half that was missing: they
+// have perfectly readable start times, so every per-node identity check passed
+// and they were terminated on the strength of an unconfirmed ancestry.
+func TestSweep_SkipsDescendantsOfAnUnverifiableNode(t *testing.T) {
+	table := []ProcessEntry{
+		p(100, 1, "zsh", 0),
+		p(200, 100, "node", 10),
+		// 300's start could not be read — the Windows second-pass failure.
+		{PID: 300, PPID: 200, Name: "unverifiable"},
+		// ...but ITS child is perfectly readable.
+		p(400, 300, "someone-elses-process", 30),
+	}
+	root := Build(table, []int{100})[100]
+	if Find(root, 400) == nil {
+		t.Fatal("fixture: 400 should be present in the tree")
+	}
+
+	f := &fakeProcs{live: map[int]time.Time{
+		100: at(0), 200: at(10), 400: at(30),
+	}}
+
+	Sweep(root, KillGrace, f.ops())
+
+	for _, pid := range f.termed {
+		if pid == 400 {
+			t.Error("terminated a process whose ancestry passes through a node " +
+				"with no confirmable identity; its membership in this pane's " +
+				"tree was never established")
+		}
+		if pid == 300 {
+			t.Error("terminated the unverifiable node itself")
+		}
+	}
+	// The verifiable part of the subtree is still killed.
+	got := map[int]bool{}
+	for _, pid := range f.termed {
+		got[pid] = true
+	}
+	if !got[100] || !got[200] {
+		t.Errorf("termed %v, want 100 and 200 — refusing an unverifiable branch "+
+			"must not abandon the rest of the sweep", f.termed)
+	}
+}

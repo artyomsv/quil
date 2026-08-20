@@ -68,6 +68,10 @@ type Daemon struct {
 	procReport *procCollector
 	// startedAt is when this daemon process began, for its own uptime row.
 	startedAt time.Time
+	// killRunning single-flights the kill handler's worker goroutine. A client
+	// looping the message would otherwise stack goroutines each running a full
+	// process enumeration.
+	killRunning atomic.Bool
 	// hellos records which conns identified themselves as quil processes.
 	hellos *helloRegistry
 	collectorWG sync.WaitGroup

@@ -70,7 +70,7 @@ export const homeFaq: FaqItem[] = [
   {
     question: "Is Quil free?",
     answer:
-      "Yes. Quil is open source under the MIT License. There's no hosted version, no paid tier, no telemetry. You self-host it on your own machine and it stores all state locally under ~/.quil/.",
+      "Yes. Quil is open source under the Apache License 2.0. There's no hosted version, no paid tier, no telemetry. You self-host it on your own machine and it stores all state locally under ~/.quil/.",
   },
   {
     question: "How do I install it?",

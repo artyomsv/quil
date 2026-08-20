@@ -2,7 +2,7 @@
 
 **The persistent workflow orchestrator for AI-native development.**
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.25-00ADD8.svg)](https://go.dev)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)](#install)
 [![MCP](https://img.shields.io/badge/MCP-18%20tools-orange.svg)](docs/mcp.md)
@@ -239,6 +239,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for branch / commit conventions and the d
 
 ## License
 
-[MIT](LICENSE) — Copyright (c) 2026 Artjoms Stukans
+[Apache License 2.0](LICENSE) — Copyright 2026 Artjoms Stukans
+
+"Quil" and the Quil mark are trademarks of Artjoms Stukans. The licence covers the
+code, not the name — see [TRADEMARK.md](TRADEMARK.md) if you are distributing a
+modified build.
 
 The Windows build bundles Microsoft's MIT-licensed [OpenConsole](https://github.com/microsoft/terminal) (`OpenConsole.exe` + `conpty.dll`) to host terminal panes correctly on Windows 10. See [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) for full third-party attribution.

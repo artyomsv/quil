@@ -104,6 +104,49 @@ Bubble Tea calls `model.View()` once per MESSAGE (`p.render(model)` after every 
 
 `redraw` keybinding (default `alt+shift+l`) emits `tea.ClearScreen` + `tea.RequestWindowSize` — recovery hatch for accumulated cell-diff drift AND a missed `WindowSizeMsg` (conhost drops resize events on maximize/restore; ClearScreen alone would repaint the same stale-size frame). Listed in the F1 shortcuts dialog; exempt in notes mode via `notesKeyExempt`
 
+### Frame assembly (`joinfast.go`)
+
+`View()` joins the tab bar, the pane area and the sidebar with
+`joinVerticalWidth` / `joinHorizontalWidth` rather than lipgloss's joins.
+Measured 2026-08-20 on a 41-tab / 200x50 frame with realistic pane content:
+`ansi.stringWidth` is **54.7%** of a frame whose pane caches are all warm, and
+97% of that arrives through lipgloss's own join internals — `getLines` 44.3%,
+`JoinVertical` 35.7%, `JoinHorizontal` 17.1%, and only **2.9%** through our own
+`lipgloss.Width` calls. Memoising those call sites was measured and **rejected**:
+it could reach ~1.6% of a frame.
+
+What the joins spend it on is the part worth knowing: every block View()
+assembles is ALREADY rectangular, because each comes from a lipgloss style with
+an explicit width (tab bar 1 line of 178, tab content 48 lines all 178, sidebar
+49 lines all 22). The joins walk ~50 lines of grapheme clusters per frame to
+discover they need to pad nothing.
+
+benchstat n=6, p=0.002: **-34% to -35%** on a real repaint, **-39% to -56%** with
+the pane caches warm, **-42.7% geomean**, and -31.8% bytes.
+
+**Both helpers check their assumption and fall back to lipgloss when the check
+fails — but the check is a SAMPLE, not a proof.** `blockIsWidth` measures the
+FIRST and LAST line only, because an all-lines check costs exactly what the
+optimisation saves. A block that is the declared width at both sampled lines but
+ragged in its INTERIOR takes the fast path and DISAGREES with lipgloss: the short
+line goes unpadded vertically, and horizontally the right column shifts left on
+that row. So the guarantee is not "never wrong" — it is "wrong only for a block
+nothing in the frame produces".
+
+That premise is the load-bearing part, and
+`TestFrameBlocks_AreRectangularAcrossGeometries` is what defends it, across the
+same three tab counts and three geometries the equivalence test uses. If a future
+renderer emits a ragged interior, THAT is the test that should fail.
+`TestBlockIsWidth_OnlyChecksFirstAndLastLine` asserts the divergence explicitly
+rather than describing it, and the equivalence tables include the shape that
+masks an inverted check (both blocks matching on one sampled line only) — without
+it, inverting either comparison survived the whole file while producing unpadded
+output.
+
+**lipgloss remains the width AUTHORITY.** These helpers never compute a width by
+another route; they only skip measurement they can prove is unnecessary. If an
+equivalence test fails, DELETE the helper rather than adjusting the test.
+
 ## Navigation and selection
 
 ### Spatial pane navigation
@@ -119,4 +162,5 @@ Bubble Tea calls `model.View()` once per MESSAGE (`p.render(model)` after every 
 `internal/clipboard/` — platform-native Read/Write. Windows: Win32 `GetClipboardData`/`SetClipboardData`. Unix: `pbpaste`/`pbcopy` (macOS), `xclip`/`xsel` (Linux). Paste (`Ctrl+V`) wraps content in bracketed paste sequences. Dialog paste sanitizes control characters.
 
 **Image paste proxy**: `clipboard.ReadImage()` reads `CF_DIBV5`/`CF_DIB` on Windows (Unix is a stub), `dib.go` parses the DIB into an `image.Image` (24bpp BI_RGB, 32bpp BI_RGB and BI_BITFIELDS, top-down + bottom-up, all-zero-alpha promotion). `pasteClipboard` falls through to image when text is empty: saves PNG to `config.PasteDir()` (`~/.quil/paste/quil-paste-<timestamp>.png`) and types the path into the PTY. Works around the upstream Claude Code Windows clipboard bug (anthropics/claude-code#32791). Paste keys: `Ctrl+V` (kb.Paste — eaten by Windows Terminal), `Ctrl+Alt+V` and `F8` are hardcoded aliases; `F8` is the recommended Windows trigger because it has no AltGr ambiguity
+
 

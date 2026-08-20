@@ -458,6 +458,8 @@ The status bar gains a `mem <n>` segment refreshed every 5 s by a daemon-side co
 
 Cross-platform RSS: `/proc/<pid>/status` on Linux, `ps -o rss=` (batched) on Darwin, `GetProcessMemoryInfo` on Windows.
 
+**Scrollback depth scales to the workspace.** Every pane holds its own terminal emulator whether or not it is visible, so depth multiplies by pane count. With `[ui] scrollback_lines` unset, quil spends a workspace-wide budget instead of a fixed per-pane depth: ten panes or fewer are unchanged, larger workspaces get proportionally less, and a floor keeps every pane usable. A depth you set yourself always wins and is never adjusted; a depth chosen for you is written to the log. Editable at **F1 → Settings → Scrollback lines**, applied on next launch — the terminal emulator cannot release scrollback it has already retained, so depth is fixed when a pane is created.
+
 ### Leveled logger + log viewer
 
 `internal/logger` wraps Go's stdlib `slog` and bridges all existing `log.Printf` call sites at info level. Set `[logging] level = "debug"` in `config.toml` to trace clipboard pipeline, per-key handlers, and image-paste decoding step-by-step.

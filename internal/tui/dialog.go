@@ -244,6 +244,34 @@ func settingsFields() []settingsField {
 			},
 		},
 		{
+			label: "Scrollback lines",
+			get:   func(m *Model) string { return strconv.Itoa(m.cfg.UI.ScrollbackLines) },
+			set: func(m *Model, v string) {
+				// Depth multiplies by pane count — every pane holds its own
+				// emulator whether or not it is visible — so this is the
+				// biggest single lever on client memory, and the one most
+				// worth reaching without editing config.toml.
+				//
+				// Rejects 0: the config layer reads it as "unset" and falls
+				// back to the adaptive default, so storing it would silently
+				// mean the opposite of what the user typed. Clamps the top end
+				// for the same reason SetScrollbackLines does — the setting
+				// whose purpose is reducing memory must not be able to exhaust
+				// it through a typo.
+				n, err := strconv.Atoi(v)
+				if err != nil || n <= 0 {
+					return
+				}
+				if n > maxScrollbackLines {
+					n = maxScrollbackLines
+				}
+				if m.cfg.UI.ScrollbackLines != n {
+					m.cfg.UI.ScrollbackLines = n
+					m.configChanged = true
+				}
+			},
+		},
+		{
 			label: "Mouse scroll lines",
 			get:   func(m *Model) string { return strconv.Itoa(m.cfg.UI.MouseScrollLines) },
 			set: func(m *Model, v string) {
@@ -1401,6 +1429,12 @@ func (m Model) renderSettingsDialog() string {
 
 	b.WriteByte('\n')
 	b.WriteString(dialogSubtle.Render("  Update check/auto-download apply on next daemon restart"))
+	b.WriteByte('\n')
+	// Not "applies to new panes": nothing re-applies the depth to the running
+	// process, and settingsFields' own doc states live re-application is
+	// deliberately not done here. Saying otherwise would describe behaviour the
+	// dialog does not have.
+	b.WriteString(dialogSubtle.Render("  Scrollback depth applies on next launch"))
 	b.WriteByte('\n')
 	hint := "↑↓ navigate  Enter edit  Esc back"
 	b.WriteString(dialogSubtle.Render(hint))

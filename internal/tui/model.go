@@ -831,6 +831,11 @@ type Model struct {
 	flashText  string
 	flashUntil time.Time
 
+	// paneCountByDest is each destination's pane count from its last broadcast.
+	// Summed by setDestPaneCount into the workspace size the adaptive scrollback
+	// depth divides — a broadcast reports ONE host, this process holds all of them.
+	paneCountByDest map[string]int
+
 	// updateInfos maps a destination to the newer release ITS daemon
 	// announced; drives the status-bar segment, the About row, and the
 	// startup notice. Keyed rather than a single field because a client can
@@ -4120,9 +4125,16 @@ func (m Model) View() tea.View {
 		// left edge rather than above the panes they name. The sidebar is a
 		// full-height left column beside the pair, which is what puts its
 		// PROJECTS heading on the same screen row as the tab names.
-		paneArea := lipgloss.JoinVertical(lipgloss.Left, m.renderTabBar(), tabContent)
+		// joinVerticalWidth / joinHorizontalWidth instead of lipgloss's joins:
+		// both blocks are already exactly this wide, and lipgloss re-measures
+		// every line of a full-screen string to discover it needs to pad
+		// nothing. Measured at 54.7% of a warm frame, 97% of it inside these
+		// joins. Both helpers verify the assumption and fall back to lipgloss
+		// when it does not hold, so a ragged block is slower rather than wrong.
+		paneArea := joinVerticalWidth(m.paneAreaWidth(), m.renderTabBar(), tabContent)
 		if projSidebarW > 0 {
-			paneArea = lipgloss.JoinHorizontal(lipgloss.Top, m.renderSidebar(m.sidebarContentHeight()), paneArea)
+			paneArea = joinHorizontalWidth(projSidebarW, m.paneAreaWidth(),
+				m.renderSidebar(m.sidebarContentHeight()), paneArea)
 		}
 		// Drag preview: a rule at the PENDING edge. The strip itself must not
 		// move mid-drag — see the sidebarDragging field comment — so the
@@ -5055,6 +5067,21 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]str
 			existingPanes[tab.overlayPane.ID] = tab.overlayPane
 		}
 	}
+
+	// Published BEFORE any pane is built. A restored workspace arrives as one
+	// full state, so this is the moment its true total is known — sizing panes
+	// as they are created instead would give the first pane the small-workspace
+	// depth and the last the large-workspace one, and no pane's depth can be
+	// revised afterwards (x/vt's SetScrollbackSize reslices rather than
+	// reallocating, so trimming a live pane frees nothing).
+	//
+	// Summed ACROSS destinations, not taken from this broadcast alone. A
+	// broadcast is one daemon's full state, so `len(state.Panes)` is that host's
+	// pane count; the scrollback budget is a property of this CLIENT's process,
+	// which holds every host's panes at once. Three hosts at 15 panes each is 45
+	// emulators in one TUI, and publishing 15 would hand each pane three times
+	// the depth the budget allows.
+	m.setDestPaneCount(dest, len(state.Panes))
 
 	paneMap := make(map[string]*PaneInfo)
 	for i := range state.Panes {

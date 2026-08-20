@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -400,39 +401,137 @@ const defaultScrollbackLines = 10000
 // far above any plausible use (100x the default) so it can only catch a typo.
 const maxScrollbackLines = 1000000
 
-// scrollbackDepth is process-wide because every pane wants the same answer and
-// panes are constructed from a dozen call sites that have no config in hand.
-// The established precedent for this shape in the codebase is
-// version.SetUpdatesEnabled/UpdatesEnabled. Read through scrollbackLines(),
-// never directly.
-var scrollbackDepth = defaultScrollbackLines
-
-// SetScrollbackLines sets the per-pane scrollback depth for panes created from
-// here on. Called once at startup from the loaded config.
+// targetTotalScrollbackLines is the workspace-wide line budget the adaptive
+// depth spends when ui.scrollback_lines is unset.
 //
-// Depth is per-pane and every pane holds its own emulator whether or not it is
-// visible, so this multiplies by pane count: 37 panes at the default measured
-// 1.13 GB resident in production. Both ends are clamped — <= 0 means unset
-// (TOML's zero) or nonsense, and anything past maxScrollbackLines is a typo the
-// user would otherwise discover as an OOM.
+// Calibrated from one production measurement: 41 panes at 10 000 lines
+// coincided with 847 MB resident, so roughly 2 KB per retained line. That
+// sample includes memory which is not scrollback, so it OVER-estimates the
+// per-line cost — the safe direction. Expressed in LINES, which is what this
+// code controls; a byte budget would be a guess wearing a unit.
+//
+// 100 000 puts a ten-pane workspace exactly at the historical default, which is
+// the property that matters: adaptation begins above ten panes, and nobody below
+// that sees any change at all.
+const targetTotalScrollbackLines = 100000
+
+// minAdaptiveScrollbackLines floors the adaptive depth. Bounding memory must not
+// make panes useless — a few hundred lines of history is not worth having. Only
+// the adaptive path is floored; an explicit setting may go lower, because asking
+// for it is a deliberate act.
+const minAdaptiveScrollbackLines = 2000
+
+// explicitScrollback is ui.scrollback_lines as configured; 0 means unset.
+// Process-wide because every pane wants the same answer and panes are
+// constructed from a dozen call sites that have no config in hand. The
+// established precedent for this shape is version.SetUpdatesEnabled. Read
+// through scrollbackLines(), never directly.
+//
+// ATOMIC, unlike that precedent, and the reason is worth stating: this pair is
+// written by applyWorkspaceState — PRODUCTION code on the Update goroutine —
+// while scrollbackLines() is read from NewPaneModel. Those are the same
+// goroutine in production, but a plain int makes every parallel test in the
+// package racy against any other that builds a pane, which the detector reports
+// as a failure of whichever pair it happens to catch. Same reasoning as
+// Daemon.clientCWD's atomic.Pointer.
+var explicitScrollback atomic.Int64
+
+// knownPaneCount is the workspace size the adaptive depth divides. Published by
+// applyWorkspaceState BEFORE it creates any pane, so a restored workspace sizes
+// every pane against its true total rather than against however many happened to
+// exist when each one was built.
+var knownPaneCount atomic.Int64
+
+// logScrollbackChoiceOnce keeps the adaptive choice discoverable without making
+// it noisy: a depth chosen FOR the user rather than BY them should appear in the
+// log, once.
+var logScrollbackChoiceOnce sync.Once
+
+// adaptiveScrollbackLines resolves the depth a pane is created with.
+//
+// explicit is ui.scrollback_lines (0 = unset). A set value WINS unconditionally
+// — pane count never overrides a depth the user asked for — and is clamped only
+// against maxScrollbackLines, the typo guard.
+//
+// Unset spends targetTotalScrollbackLines across the workspace, clamped to the
+// historical default at the top so small workspaces are untouched, and to
+// minAdaptiveScrollbackLines at the bottom.
+//
+// Depth is settable only at pane CREATION: x/vt's SetScrollbackSize reslices its
+// backing array rather than reallocating, so the dropped prefix stays reachable
+// and trimming a live pane frees nothing. That is why this is a creation-time
+// default rather than a background trim.
+//
+// Pure, so the policy is testable without a Model, a config file or a daemon.
+func adaptiveScrollbackLines(explicit, paneCount int) int {
+	if explicit > 0 {
+		if explicit > maxScrollbackLines {
+			return maxScrollbackLines
+		}
+		return explicit
+	}
+	if paneCount <= 0 {
+		return defaultScrollbackLines
+	}
+	depth := targetTotalScrollbackLines / paneCount
+	if depth > defaultScrollbackLines {
+		return defaultScrollbackLines
+	}
+	if depth < minAdaptiveScrollbackLines {
+		return minAdaptiveScrollbackLines
+	}
+	return depth
+}
+
+// SetScrollbackLines records ui.scrollback_lines. Called once at startup from
+// the loaded config.
+//
+// Stores the raw value rather than resolving it, because the resolution now
+// depends on pane count, which is not known until a workspace arrives.
 func SetScrollbackLines(n int) {
-	switch {
-	case n <= 0:
-		scrollbackDepth = defaultScrollbackLines
-	case n > maxScrollbackLines:
+	if n > maxScrollbackLines {
 		log.Printf("ui.scrollback_lines = %d exceeds the %d cap — clamping; depth is per pane and multiplies by pane count",
 			n, maxScrollbackLines)
-		scrollbackDepth = maxScrollbackLines
-	default:
-		scrollbackDepth = n
+		n = maxScrollbackLines
+	}
+	if n < 0 {
+		n = 0
+	}
+	explicitScrollback.Store(int64(n))
+}
+
+// SetPaneCount publishes the workspace pane count for the adaptive depth.
+//
+// Only ever RAISES. Depth cannot be reclaimed from panes already built, so a
+// count that oscillates would hand out inconsistent depths for no benefit — a
+// closing pane must not deepen the next pane's allocation.
+//
+// Compare-and-swap rather than a read-then-write, so the monotonic property
+// holds even though the field is atomic: two concurrent raises could otherwise
+// interleave and let the smaller win.
+func SetPaneCount(n int) {
+	v := int64(n)
+	for {
+		cur := knownPaneCount.Load()
+		if v <= cur {
+			return
+		}
+		if knownPaneCount.CompareAndSwap(cur, v) {
+			return
+		}
 	}
 }
 
 func scrollbackLines() int {
-	if scrollbackDepth <= 0 {
-		return defaultScrollbackLines
+	explicit := int(explicitScrollback.Load())
+	panes := int(knownPaneCount.Load())
+	depth := adaptiveScrollbackLines(explicit, panes)
+	if explicit == 0 && depth != defaultScrollbackLines {
+		logScrollbackChoiceOnce.Do(func() {
+			log.Printf("scrollback depth %d lines for %d panes (set ui.scrollback_lines to override)", depth, panes)
+		})
 	}
-	return scrollbackDepth
+	return depth
 }
 
 func NewPaneModel(id string, bufSize int) *PaneModel {
@@ -1454,4 +1553,27 @@ func (p *PaneModel) insertCursor(content string) string {
 
 	lines[pos.Y] = b.String()
 	return strings.Join(lines, "\n")
+}
+
+// setDestPaneCount records one destination's pane count and publishes the SUM
+// across every destination as the workspace size the adaptive depth divides.
+//
+// A broadcast is one daemon's full state, so a client holding several hosts
+// receives several of them and each reports only its own panes. The scrollback
+// budget is a property of this PROCESS, which holds all of them at once, so the
+// sum is the only figure that means anything here — publishing a single host's
+// count would hand every pane a multiple of the depth the budget allows.
+//
+// Lives on Model rather than beside the package vars because it is per-client
+// state: two Models in one process would each have their own destinations.
+func (m *Model) setDestPaneCount(dest string, n int) {
+	if m.paneCountByDest == nil {
+		m.paneCountByDest = make(map[string]int, 2)
+	}
+	m.paneCountByDest[dest] = n
+	total := 0
+	for _, c := range m.paneCountByDest {
+		total += c
+	}
+	SetPaneCount(total)
 }

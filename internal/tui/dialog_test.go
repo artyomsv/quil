@@ -25,6 +25,7 @@ func TestSettingsFields_LabelsAndInitialValues(t *testing.T) {
 		"Snapshot interval",
 		"Ghost dimmed",
 		"Ghost buffer lines",
+		"Scrollback lines",
 		"Mouse scroll lines",
 		"Page scroll lines",
 		"Sidebar width",
@@ -546,4 +547,56 @@ func (f *fakeSender) Send(m *ipc.Message) error {
 
 func (f *fakeSender) Receive() (*ipc.Message, error) {
 	return nil, nil
+}
+
+// Scrollback depth is the largest single lever on client memory for a big
+// workspace, and reaching it meant hand-editing config.toml.
+func TestSettingsFields_ScrollbackLinesRow(t *testing.T) {
+	var f *settingsField
+	fields := settingsFields()
+	for i := range fields {
+		if fields[i].label == "Scrollback lines" {
+			f = &fields[i]
+			break
+		}
+	}
+	if f == nil {
+		t.Fatal("Settings has no 'Scrollback lines' row")
+	}
+
+	m := &Model{}
+	m.cfg.UI.ScrollbackLines = 10000
+	if got := f.get(m); got != "10000" {
+		t.Errorf("get = %q, want \"10000\"", got)
+	}
+
+	f.set(m, "2000")
+	if m.cfg.UI.ScrollbackLines != 2000 {
+		t.Errorf("set(\"2000\") left ScrollbackLines = %d", m.cfg.UI.ScrollbackLines)
+	}
+	if !m.configChanged {
+		t.Error("set did not mark the config dirty, so the edit would never persist")
+	}
+
+	// Garbage must be rejected, not written.
+	m.configChanged = false
+	f.set(m, "not-a-number")
+	if m.cfg.UI.ScrollbackLines != 2000 {
+		t.Errorf("garbage input changed the value to %d", m.cfg.UI.ScrollbackLines)
+	}
+
+	// 0 is "unset" at the config layer — SetScrollbackLines reads it as "use the
+	// adaptive default". Storing it here would mean the opposite of what the
+	// user typed, so the row must refuse it.
+	f.set(m, "0")
+	if m.cfg.UI.ScrollbackLines == 0 {
+		t.Error("0 was accepted — the config layer reads it as unset, so the row must reject it")
+	}
+
+	// A value past the cap is a typo the config layer already clamps; the row
+	// must not be the place that lets it through unremarked.
+	f.set(m, "99999999")
+	if m.cfg.UI.ScrollbackLines > maxScrollbackLines {
+		t.Errorf("accepted %d, above the %d cap", m.cfg.UI.ScrollbackLines, maxScrollbackLines)
+	}
 }

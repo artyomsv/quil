@@ -269,14 +269,17 @@ type UIConfig struct {
 	// fight a narrower terminal on restore.
 	SidebarOpen  bool `toml:"sidebar_open"`
 	SidebarWidth int  `toml:"sidebar_width"`
-	// ScrollbackLines is the per-pane VT scrollback depth. 0 (unset) keeps the
-	// shipped default, so existing installs are unchanged.
+	// ScrollbackLines is the per-pane VT scrollback depth. 0 (unset) selects the
+	// ADAPTIVE default, which spends a workspace-wide line budget across the
+	// panes that exist: ten or fewer are unchanged at the historical depth, more
+	// get proportionally less, and a floor keeps every pane usable. A non-zero
+	// value here always wins and is never adapted.
 	//
 	// This multiplies by pane count — every pane holds its own emulator whether
 	// visible or not — so it is the knob for a workspace with dozens of panes on
-	// a memory-tight machine. Measured: 37 panes at the default 10 000 lines put
-	// the TUI at 1.13 GB resident. internal/tui.defaultScrollbackLines holds the
-	// default; config cannot import tui.
+	// a memory-tight machine. Measured: 37 panes at the old flat 10 000 lines put
+	// the TUI at 1.13 GB resident. internal/tui owns the policy
+	// (adaptiveScrollbackLines) and the constants; config cannot import tui.
 	ScrollbackLines int `toml:"scrollback_lines"`
 }
 

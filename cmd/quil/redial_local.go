@@ -83,6 +83,11 @@ func redialLocal() tui.RedialFunc {
 		}
 
 		failures.Store(0)
+		// Re-announce on every re-dial. The daemon keys identity on the CONN,
+		// so a reconnect after a daemon restart arrives as an anonymous client
+		// — and once past the age gate it would be counted as one that predates
+		// the feature, which is the opposite of true.
+		sendClientHello(client, helloRoleTUI)
 		return client, nil
 	}
 }

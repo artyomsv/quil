@@ -70,7 +70,7 @@ func TestView_InertMessagesReuseTheCachedFrame(t *testing.T) {
 		msg  tea.Msg
 	}{
 		{name: "sizePoll", msg: sizePollMsg{}},
-		{name: "memoryTick", msg: memoryTickMsg{}},
+		{name: "resourceTick", msg: resourceTickMsg{}},
 		{name: "listenContinue", msg: listenContinueMsg{}},
 		// The 1 s poll's echo: Bubble Tea re-reports a size that already
 		// matches. Update's own early return does nothing with it.

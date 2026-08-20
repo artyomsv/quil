@@ -12,6 +12,8 @@ paths:
   - "**/internal/tui/migration.go"
   - "**/internal/tui/viewer_mouse.go"
   - "**/internal/panehistory/**"
+  - "**/internal/tui/processes.go"
+  - "**/internal/proctree/**"
 ---
 
 # TUI Dialogs
@@ -22,7 +24,7 @@ Extracted verbatim from `.claude/CLAUDE.md`. Loaded only when the files above ar
 
 ### Dialog system
 
-`internal/tui/dialog.go` — modal dialogs with `dialogScreen` iota (`dialogAbout`, `dialogSettings`, `dialogShortcuts`, `dialogConfirm`, `dialogCreatePane`, `dialogCreatePaneSetup`, `dialogPluginError`, `dialogInstanceForm`, `dialogPlugins`, `dialogTOMLEditor`, `dialogLogViewer`, `dialogDisclaimer`, `dialogPluginMigration`, `dialogMemory`, `dialogGitRepoPick`, `dialogWhatsNew`). F1 opens About dialog with 10 items: Settings, Shortcuts, Plugins, Memory, View client log, View daemon log, View MCP logs, Update (`aboutUpdateIndex`, dynamic label), What's New (`aboutWhatsNewIndex`, opens the post-upgrade highlights for the newest release), Stop daemon (the last is a destructive action at `aboutStopDaemonIndex`, routed through the shutdown confirm). Ctrl+N opens typed pane creation dialog (category → plugin → instance → setup → split). `dialogCreatePaneSetup` (between plugin/instance and split) renders the directory browser + runtime toggle checkboxes for plugins that opt in via `prompts_cwd` / `[[command.toggles]]`. CWD browser pre-fills from `lastSelectedCWD` (remembers previous choice within the TUI session), then active pane OSC 7 CWD, then home dir; candidates are tried in order — stale directories are skipped and the memory is cleared.
+`internal/tui/dialog.go` — modal dialogs with `dialogScreen` iota (`dialogAbout`, `dialogSettings`, `dialogShortcuts`, `dialogConfirm`, `dialogCreatePane`, `dialogCreatePaneSetup`, `dialogPluginError`, `dialogInstanceForm`, `dialogPlugins`, `dialogTOMLEditor`, `dialogLogViewer`, `dialogDisclaimer`, `dialogPluginMigration`, `dialogProcesses`, `dialogGitRepoPick`, `dialogWhatsNew`). F1 opens About dialog with 10 items: Settings, Shortcuts, Plugins, Processes, View client log, View daemon log, View MCP logs, Update (`aboutUpdateIndex`, dynamic label), What's New (`aboutWhatsNewIndex`, opens the post-upgrade highlights for the newest release), Stop daemon (the last is a destructive action at `aboutStopDaemonIndex`, routed through the shutdown confirm). Ctrl+N opens typed pane creation dialog (category → plugin → instance → setup → split). `dialogCreatePaneSetup` (between plugin/instance and split) renders the directory browser + runtime toggle checkboxes for plugins that opt in via `prompts_cwd` / `[[command.toggles]]`. CWD browser pre-fills from `lastSelectedCWD` (remembers previous choice within the TUI session), then active pane OSC 7 CWD, then home dir; candidates are tried in order — stale directories are skipped and the memory is cleared.
 
 **The dialog serves TWO targets** (`Model.createPaneTarget`): `paneTargetSplit` (Ctrl+N, into the active tab) and `paneTargetNewTab` (Ctrl+T, as a new tab's first pane). Steps 0–2 plus the setup dialog are identical; only the LAST step differs, and `advanceFromPluginChoice` is the single place that decides — a split still asks H/V/Replace, a new tab has no pane to be relative to so those three rows cannot mean anything and it submits instead. It replaced FOUR scattered `createPaneStep = 3` assignments that all had to agree. `handleCreatePaneSplit` branches for the new-tab case AFTER its teardown block and BEFORE everything else: `m.dialogCursor` is read below it to pick the split direction and holds whatever the last list left there (the placement step never ran), the active-tab/active-pane requirements describe a pane to split FROM (skipping them is also what keeps Ctrl+T working in the pre-first-broadcast window, when there is no tab yet), and `pendingSplit`/`worktreeCreates`/`worktreeReplaced`/the give-up tick are all keyed by a tab id that does not exist until the daemon answers — nothing is detached and no leaf is reserved, so there is nothing to unwind and nothing to time out.
 
@@ -96,7 +98,7 @@ right-click on a pane (no selection active) or `quick_actions` (default `alt+a`;
 
 every Settings setter (snapshot interval, ghost dimmed, ghost buffer lines, mouse scroll lines, page scroll lines, log level, show disclaimer) flips `m.configChanged = true` so edits survive `cmd/quil/main.go`'s `if m.ConfigChanged()` check on TUI exit. Earlier versions only flagged the disclaimer field, silently dropping every other Settings edit. Log-level changes apply on the next launch (no live re-init); the file handle owned by `main.go` isn't re-plumbed into the Model.
 
-**Stop daemon** is NOT a Settings row — it lives on the F1 → About (root) menu as item index `aboutStopDaemonIndex` (9, last), alongside Settings/Shortcuts/Plugins/Memory/log viewers (handled in `handleAboutKey`). Selecting it transitions to `dialogConfirm` with `confirmKind = confirmKindShutdown`.
+**Stop daemon** is NOT a Settings row — it lives on the F1 → About (root) menu as item index `aboutStopDaemonIndex` (9, last), alongside Settings/Shortcuts/Plugins/Processes/log viewers (handled in `handleAboutKey`). Selecting it transitions to `dialogConfirm` with `confirmKind = confirmKindShutdown`.
 
 **`y` (not Enter) is required to accept** — Enter is the universal commit/toggle key, so reserving it from the shutdown confirm prevents finger-memory misclicks from killing the daemon and every pane child. The Enter/`y` handler sends `MsgShutdown` **synchronously** via `m.client.Send` (not via `tea.Batch` which gives no ordering guarantee and would race `main.go`'s `defer client.Close()`), then returns `tea.Quit`. Final snapshot is written in the daemon's stop defers and panes respawn on next launch. Esc on the shutdown confirm returns to the About menu with the cursor restored to `aboutStopDaemonIndex`. The TUI's Model.client field is the local `tuiClient` interface (Send + Receive) so tests can inject a `fakeSender` — `*ipc.Client` satisfies it implicitly
 
@@ -120,3 +122,58 @@ every Settings setter (snapshot interval, ghost dimmed, ghost buffer lines, mous
 
 `internal/tui/editor_selection.go` — `EditorSel`/`EditorPos` types (rune-based, independent from terminal `Selection`). Shift+Arrow char select, Ctrl+Shift+Arrow word jump, Ctrl+Alt+Shift+Arrow 3-word jump, Shift+Home/End line select, Ctrl+A select all. Enter copies selection, Ctrl+X cuts, Ctrl+V pastes (async via `editorPasteMsg`). Selection rendering via reverse video `\x1b[7m]`, cursor within selection uses `\x1b[7;4m]` (reverse+underline). Typing with selection replaces selected text
 
+
+## Processes dialog
+
+### F1 → Processes (replaces F1 → Memory)
+
+`internal/tui/processes.go` + `internal/proctree/` + `internal/daemon/procreport.go`.
+Row 3 of the About menu was RELABELLED, not added: the menu is index-addressed
+and `aboutUpdateIndex`/`aboutWhatsNewIndex`/`aboutStopDaemonIndex` are named
+constants below it, so inserting a row would have moved all three including the
+destructive shutdown-confirm routing.
+
+**Nothing here infers process identity.** The previous attempt (`ab3ac99`,
+removed from PR #177 before merge) scanned the CLIENT's process table and
+matched image paths: on Windows `Cmdline` came from
+`QueryFullProcessImageNameW` so the `mcp` token never matched, on Unix orphans
+reparent to PID 1 so the liveness check never fired, and `IsBridge` substring-
+matched `"quil"` against a whole path — which this repo's own directory
+satisfies. All of it was also the wrong MACHINE under `--remote`. The daemon
+spawned the PTY children, so it passes their PIDs to `proctree.Build` as roots;
+quil's own processes self-report over the socket (`MsgClientHello`). There is no
+classification left to be wrong.
+
+**Depth 1 is the pane's own child and is never killable** — that is
+restart-pane. `K` (uppercase; lowercase `k` is cursor-up, and binding a
+destructive action to a navigation key is how a user kills a process while
+scrolling) acts only on `Depth >= 2`, and the daemon re-derives the tree and
+re-checks before signalling anything. The client's request is a proposal.
+
+**`CPUPct` is negative for unknown, never 0**, all the way from `proctree` to
+`formatCPU`'s em dash. A first sample, a newly-appeared process, a recycled PID
+and an unsupported platform all mean "no answer"; `0%` reads as idle, which is
+the wrong claim in a dialog for finding something that spins. Darwin's figure is
+a kernel decaying average rather than a delta over our window
+(`CPUSampled=false`), and the dialog footnotes that — a column that looks
+uniform while meaning different things per platform is exactly the
+confidently-wrong answer this feature exists to remove.
+
+**`WithTrees` gates two things at once**: whether trees are on the wire, and
+whether the daemon's collector runs at all. The status bar polls the SAME
+message every 5 s for the life of the session and must never set it — trees for
+forty panes are tens of kilobytes per report, and that frame on the 64-slot
+must-deliver queue is the documented force-disconnect shape. The collector's
+gate is a decaying deadline these requests renew, NOT a close message: a client
+that crashes mid-dialog never sends one, and a renewed deadline cannot leak
+because every lost message stops it.
+
+**The single-flight MUST keep its timeout.** Collector renewals ride the same
+requests, so an unbounded suppression would freeze refresh and starve the gate
+together on one lost response.
+
+`applyResourceReport` updates the status-bar total unconditionally but touches
+dialog state only under `m.dialog == dialogProcesses` — the removed version
+wrote `dialogCursor` unguarded, so a late scan moved the About cursor. Rows are
+sized against `dialogInnerWidth`, not a literal: the removed version emitted
+89-cell rows into an 86-cell budget and every row wrapped.

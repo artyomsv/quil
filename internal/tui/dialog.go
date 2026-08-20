@@ -607,8 +607,8 @@ func (m Model) handleDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handleDisclaimerKey(msg)
 	case dialogPluginMigration:
 		return m.handleMigrationKey(msg)
-	case dialogMemory:
-		return m.handleMemoryDialogKey(msg)
+	case dialogProcesses:
+		return m.handleProcessesDialogKey(msg)
 	case dialogGitRepoPick:
 		return m.handleGitRepoPickKey(msg)
 	case dialogCommandHistory:
@@ -728,8 +728,8 @@ func (m Model) handleAboutKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.dialog = dialogPlugins
 			m.dialogCursor = 0
 		case 3:
-			m = m.openMemoryDialog()
-			return m, m.refreshMemory()
+			m = m.openProcessesDialog()
+			return m, m.refreshResources(true)
 		case 4:
 			return m.openLogViewer("Client log", filepath.Join(config.QuilDir(), "quil.log"))
 		case 5:
@@ -940,6 +940,14 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.dialogCursor = aboutStopDaemonIndex
 			return m, nil
 		}
+		if m.confirmKind == confirmKindKillProcess {
+			// Back to the process list, matching this kind's ACCEPT path. The
+			// removed version returned to dialogNone here while its accept
+			// path went elsewhere, so cancelling dumped the user out of the
+			// dialog they were working in.
+			m.dialog = dialogProcesses
+			return m, nil
+		}
 		if m.confirmKind == confirmKindApplyUpdate {
 			// Back to where the press came from — the About menu with the
 			// cursor on the update row when the user is still there, otherwise
@@ -980,6 +988,21 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// keystroke a user does not press accidentally.
 		if kind == confirmKindShutdown && msg.String() != "y" {
 			return m, nil
+		}
+
+		// Stopping a process requires explicit `y` for the same reason:
+		// Enter is the commit key everywhere else, and this dialog is reached
+		// from a list the user is scrolling. It kills a process tree on the
+		// daemon's machine, which is not something a reflex should do.
+		if kind == confirmKindKillProcess {
+			if msg.String() != "y" {
+				return m, nil
+			}
+			// Back to the list, not to nothing: the user is mid-diagnosis and
+			// the outcome renders as a line in that dialog. The removed
+			// version's Esc path disagreed with its own accept path here.
+			m.dialog = dialogProcesses
+			return m, m.sendKillProcess()
 		}
 
 		// Upgrade a host: the same push `quil remote setup` performs, run from
@@ -1258,9 +1281,9 @@ func (m Model) renderDialog() string {
 	case dialogDisclaimer:
 		width = disclaimerWidth
 		content = m.renderDisclaimerDialog()
-	case dialogMemory:
-		width = 80
-		content = m.renderMemoryDialog()
+	case dialogProcesses:
+		width = processesDialogWidth
+		content = m.renderProcessesDialog()
 	case dialogGitRepoPick:
 		width = gitRepoPickWidth
 		content = m.renderGitRepoPickDialog()
@@ -1319,7 +1342,7 @@ func (m Model) renderAboutDialog() string {
 		"Settings",
 		"Shortcuts",
 		"Plugins",
-		"Memory",
+		"Processes",
 		"View client log",
 		"View daemon log",
 		"View MCP logs",
@@ -1623,6 +1646,25 @@ func (m Model) renderConfirmDialog() string {
 		b.WriteString("  " + dialogSubtle.Render("The process is killed and respawned in place."))
 		b.WriteString("\n")
 		b.WriteString("  " + dialogSubtle.Render("AI panes resume their recorded session."))
+	case confirmKindKillProcess:
+		// The name comes from the daemon's process table, which under --remote
+		// is a machine the user may not control, so it is sanitized and bounded
+		// exactly like confirmKindApplyUpdate's and confirmKindDestroyProject's.
+		b.WriteString("  " + dialogNormal.Render(fmt.Sprintf("Stop %s (pid %d)?",
+			truncateToWidth(sanitizeRemoteText(m.confirmName), confirmDetailCap), m.killPID)))
+		b.WriteString("\n\n")
+		b.WriteString("  " + dialogSubtle.Render("This process and everything it started are stopped."))
+		b.WriteString("\n")
+		if killIsGraceful {
+			b.WriteString("  " + dialogSubtle.Render("They are asked to stop first, then forced after a moment."))
+		} else {
+			// Windows has no graceful tier for an arbitrary process, so the
+			// text must not promise one. Saying "asked to stop first" where
+			// TerminateProcess is the only option would be a straightforward
+			// lie about what the button does.
+			b.WriteString("  " + dialogSubtle.Render("On Windows they are terminated immediately, with no chance to save."))
+		}
+		footer = "y confirm    Esc cancel"
 	case confirmKindApplyUpdate:
 		// Sanitized and bounded like confirmKindDestroyProject's and
 		// confirmKindUpgradeDest's names: this one now comes from a stage
@@ -5504,3 +5546,13 @@ func (m Model) renderCreatePaneSetupDialog() string {
 
 	return b.String()
 }
+
+// confirmKindKillProcess is the discriminator on confirmKind for the
+// stop-process confirm opened from F1 -> Processes.
+//
+// Its own kind, with its own case in renderConfirmDialog below the other
+// arms, because the removed version of this feature had NO renderer case: it
+// fell through to `default:` and drew `Close kill-process "..."?` with a footer
+// promising Enter while the handler required `y`. A confirm whose text and
+// whose footer disagree with its own handler is worse than no confirm.
+const confirmKindKillProcess = "kill-process"

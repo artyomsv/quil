@@ -259,6 +259,7 @@ func refuseRemoteMCP() bool {
 func connectToDaemon(sockPath string, cfg config.Config) (*ipc.Client, error) {
 	client, err := ipc.NewClient(sockPath)
 	if err == nil {
+		sendClientHello(client, helloRoleBridge)
 		return client, nil
 	}
 
@@ -276,5 +277,6 @@ func connectToDaemon(sockPath string, cfg config.Config) (*ipc.Client, error) {
 	if client, err = ipc.NewClient(sockPath); err != nil {
 		return nil, fmt.Errorf("reconnect after auto-start: %w", err)
 	}
+	sendClientHello(client, helloRoleBridge)
 	return client, nil
 }

@@ -2,6 +2,8 @@
 
 > Deep comparison of Quil against the two closest direct competitors in the
 > "terminal multiplexer for AI coding agents" category, captured 2026-07-06.
+> Licence and repository-ownership rows re-verified 2026-08-20; everything else
+> still reflects the original capture.
 > Feeds the [competitive-gap section of the roadmap](roadmap.md#planned--competitive-gaps-herdr-aoe).
 
 The classic-multiplexer comparisons (tmux, zellij, WezTerm, screen) live on the
@@ -9,7 +11,7 @@ marketing site under `/vs/*`. This document covers the two products that share
 Quil's actual thesis — *persistent, agent-aware multiplexing* — and are therefore
 the more honest mirror of where Quil leads and where it trails.
 
-- **herdr** — <https://github.com/ogulcancelik/herdr> (Rust, AGPL-3.0 + commercial)
+- **herdr** — <https://github.com/herdrdev/herdr> (Rust, Apache-2.0)
 - **Agent of Empires (aoe)** — <https://github.com/agent-of-empires/agent-of-empires> (Rust + React, MIT, Mozilla.ai-backed)
 
 ---
@@ -34,7 +36,23 @@ architectural bet.
 | Git worktree-per-session | ❌ | ✅ | ✅ (+ multi-repo) |
 | AI agents supported | **2** deep + tools | **~18** detected, 14 integrations | **~13** terminal, 7 ACP |
 | Scale | ~30–40k Go | ~170k Rust | ~292k Rust + large web app |
-| License / backing | product | AGPL-3.0 + commercial, solo + sponsors | MIT, Mozilla.ai community |
+| License / backing | MIT, product | Apache-2.0 (was AGPL-3.0 + commercial until 2026-07-22), solo + sponsors | MIT, Mozilla.ai community |
+
+**On herdr's licensing, because the reversal is the interesting part:** it
+shipped in March 2026 dual-licensed AGPL-3.0-or-later plus a commercial licence
+sold by direct contact — the model that exists to stop a company using your work
+without contributing back. It ran that for four months and dropped it on
+2026-07-22 for plain Apache-2.0, with no commercial tier now offered anywhere
+public. The repo also moved from a personal account to the `herdrdev` org.
+
+What they kept is more telling than what they dropped. herdr has never had a CLA
+or DCO; instead `.github/APPROVED_CONTRIBUTORS` is a bot-enforced allowlist, and
+CONTRIBUTING states that unsolicited pull requests are closed automatically
+"regardless of their size, title, test results, or whether a human or an agent
+wrote the code." That allowlist predates the relicense by two months and is
+still in use after it. So the protection they actually wanted came from
+controlling who contributes, not from the licence — worth remembering before
+treating a copyleft-plus-commercial split as the answer to the same worry.
 
 **The blunt summary:** herdr is Quil's closest philosophical twin (own
 multiplexer, single binary, socket API, native-Windows ambition) but far ahead on

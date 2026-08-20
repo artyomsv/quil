@@ -179,6 +179,12 @@ func ProjectDir(cwd string) string {
 // This is the ONLY place the session-id-to-filename join lives. ReadDetailIn
 // used to inline its own copy, which left the exported spelling below with no
 // production caller and its test certifying a join nothing ran.
+//
+// It does NOT validate sessionID, and deliberately so — it is a path
+// constructor, not a gate. filepath.Join CLEANS a traversal rather than
+// refusing it, so a caller building a path from untrusted input must reject
+// separators and ".." itself first. ReadDetailIn does exactly that before it
+// calls here; any new caller owes the same check.
 func TranscriptPathIn(configDir, cwd, sessionID string) string {
 	dir := ProjectDirIn(configDir, cwd)
 	if dir == "" || sessionID == "" {
@@ -305,6 +311,24 @@ func listDir(ctx context.Context, dir string) (sessions []Session, truncated boo
 	return out, truncated, nil
 }
 
+// jsonPresent records only WHETHER a field appeared, never its value.
+//
+// json.RawMessage would answer the same question but keep a copy of the whole
+// blob: toolUseResult carries entire command outputs, and the rescan decodes
+// every tool-result line on a transcript that can reach tens of MB. Presence is
+// all isMachinery asks, so nothing is copied.
+//
+// An explicit null counts as ABSENT. encoding/json hands null to a custom
+// unmarshaler rather than skipping it, and this package has already been bitten
+// once by treating null as a value — see contentIsString.
+type jsonPresent bool
+
+func (p *jsonPresent) UnmarshalJSON(b []byte) error {
+	b = bytes.TrimSpace(b)
+	*p = jsonPresent(len(b) > 0 && !bytes.Equal(b, []byte("null")))
+	return nil
+}
+
 // transcriptLine mirrors the subset of a transcript entry needed to recognize
 // a typed human prompt and pull its text. Extra fields are ignored.
 type transcriptLine struct {
@@ -319,13 +343,12 @@ type transcriptLine struct {
 	// user wrote — hook notices, local-command caveats, system reminders.
 	IsMeta bool `json:"isMeta"`
 	// ToolUseResult is present, at top level, on every entry that is a tool
-	// RESULT. Decoded as RawMessage and tested only for presence: the shape
-	// varies per tool and none of it is needed. It is what separates a tool
-	// result from a prompt, because content SHAPE does not — a tool result's
-	// content is a bare string far more often than not.
-	ToolUseResult json.RawMessage `json:"toolUseResult"`
-	Timestamp     string          `json:"timestamp"`
-	Message   struct {
+	// RESULT. It is what separates a tool result from a prompt, because content
+	// SHAPE does not — a tool result's content is a bare string far more often
+	// than not.
+	ToolUseResult jsonPresent `json:"toolUseResult"`
+	Timestamp     string      `json:"timestamp"`
+	Message       struct {
 		// Content is a string for a plain prompt and an array of content
 		// blocks when the prompt carries attachments — both shapes occur in
 		// the wild, so it is decoded in a second pass.
@@ -657,14 +680,6 @@ func readTitle(path string) string {
 	return ""
 }
 
-// contentIsString reports whether a message content field decoded as a plain
-// JSON string. It is the schema-free way to tell a typed prompt from a tool
-// result: Claude records both as type "user", but a tool result always carries
-// an ARRAY of content blocks while a typed prompt carries a bare string.
-// Consulted only on transcripts that do not record promptSource at all.
-// Tests the raw token rather than round-tripping through json.Unmarshal, which
-// accepts JSON null into a string and reports success — so `"content": null`
-// counted as a prompt and inflated UserPrompts by one, with empty text.
 // recordsPromptSource reports whether the transcript's head mentions
 // promptSource, i.e. whether the build that wrote it records the field.
 //
@@ -681,9 +696,14 @@ func readTitle(path string) string {
 // appearing only past the window, which happens on transcripts that outlived a
 // claude upgrade — costs one re-read that happens today anyway.
 //
-// The substring test is sound because of JSON escaping: a mention of
-// promptSource inside message content is stored as \"promptSource\", which
-// cannot match the quoted needle. Content can never fake the field.
+// The needle includes the opening quote of the VALUE, and that is what bounds
+// the false-positive case. Message content cannot fake it at all — a mention of
+// promptSource inside a JSON string is stored escaped, as \"promptSource\". A
+// nested KEY is not escaped, so a tool result carrying its own promptSource
+// field could still match; requiring `:"` narrows that to a nested key whose
+// value is also a string. The residual cost is one blank detail panel on an
+// old-schema transcript that happens to contain such a key, which is why this
+// is a substring test and not a parse.
 func recordsPromptSource(f *os.File) bool {
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return false
@@ -692,7 +712,7 @@ func recordsPromptSource(f *os.File) bool {
 	if err != nil {
 		return false
 	}
-	found := bytes.Contains(head, []byte(`"promptSource"`))
+	found := bytes.Contains(head, []byte(`"promptSource":"`))
 	// Restore the offset for the caller. The pass seeks to 0 itself, so this is
 	// belt-and-braces; a failure here answers false and lets it run.
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
@@ -732,7 +752,7 @@ var machineryTags = []string{
 // isMeta; a hook notice carries isMeta and no tag; command markup carries a tag
 // and neither field.
 func isMachinery(tl transcriptLine, content string) bool {
-	if len(tl.ToolUseResult) > 0 {
+	if bool(tl.ToolUseResult) {
 		return true
 	}
 	if tl.IsMeta {
@@ -751,6 +771,14 @@ func isMachinery(tl transcriptLine, content string) bool {
 	return false
 }
 
+// contentIsString reports whether a message content field decoded as a plain
+// JSON string. It tells a prompt from a tool result whose content is an ARRAY
+// of blocks — but NOT from one whose content is a bare string, which is the
+// common case; isMachinery's toolUseResult test is what covers those.
+// Consulted only on transcripts that do not record promptSource at all.
+// Tests the raw token rather than round-tripping through json.Unmarshal, which
+// accepts JSON null into a string and reports success — so `"content": null`
+// counted as a prompt and inflated UserPrompts by one, with empty text.
 func contentIsString(raw json.RawMessage) bool {
 	raw = bytes.TrimSpace(raw)
 	return len(raw) > 0 && raw[0] == '"'

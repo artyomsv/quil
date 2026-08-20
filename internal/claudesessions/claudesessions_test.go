@@ -399,8 +399,6 @@ func TestReadTitle_PromptBeyondScanWindow_ReturnsEmpty(t *testing.T) {
 
 // --- ReadDetail ------------------------------------------------------------
 
-// toolResult builds the shape claude records for a tool result: type "user",
-// but with no promptSource, because the user did not type it.
 // toolResult builds the entry claude writes for a tool RESULT: type "user",
 // but carrying a top-level toolUseResult. The content is a bare STRING, which
 // is the common case and the reason content shape cannot classify these — the
@@ -850,6 +848,19 @@ func TestReadTitle_ToolResultIsNotATitle(t *testing.T) {
 	)
 	if got := readTitle(path); got != "the real prompt" {
 		t.Errorf("readTitle = %q, want the real prompt — a tool result is not a prompt", got)
+	}
+}
+
+// An explicit null is ABSENT, not present. encoding/json hands null to a custom
+// unmarshaler rather than skipping it, so jsonPresent has to say so itself —
+// the same call contentIsString had to make for `"content": null`. Treating it
+// as present would discard a real prompt.
+func TestReadTitle_NullToolUseResultIsNotMachinery(t *testing.T) {
+	path := writeSchemaTranscript(t,
+		`{"type":"user","isSidechain":false,"toolUseResult":null,"message":{"role":"user","content":"a real prompt"}}`,
+	)
+	if got := readTitle(path); got != "a real prompt" {
+		t.Errorf("readTitle = %q, want the prompt — a null toolUseResult is absent, not present", got)
 	}
 }
 

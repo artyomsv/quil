@@ -119,4 +119,4 @@ Install Quil (Linux/macOS):
 curl -sSfL https://raw.githubusercontent.com/artyomsv/quil/master/scripts/install.sh | sh
 ```
 
-*Quil is free and open source (MIT). [quil.cc](/) · [GitHub](https://github.com/artyomsv/quil)*
+*Quil is free and open source (Apache 2.0). [quil.cc](/) · [GitHub](https://github.com/artyomsv/quil)*

@@ -12,7 +12,7 @@ import { breadcrumbSchema } from "@/data/schemas";
 const seo = {
   title: "Legal notice",
   description:
-    "Quil is open-source software under the MIT License. No telemetry, no cookies, no tracking. What you run inside Quil is your responsibility and subject to the laws of your jurisdiction.",
+    "Quil is open-source software under the Apache License 2.0. No telemetry, no cookies, no tracking. What you run inside Quil is your responsibility and subject to the laws of your jurisdiction.",
   path: "/legal",
   ogImage: "/og/legal.png",
 };
@@ -29,7 +29,7 @@ const schemas = [
     <div class="container-ember stack">
       <div class="hero-ruler">
         <span>§ LEGAL</span>
-        <span style="margin-left:auto;">MIT Licensed · No telemetry · No cookies</span>
+        <span style="margin-left:auto;">Apache 2.0 · No telemetry · No cookies</span>
       </div>
       <span class="eyebrow">LEGAL NOTICE</span>
       <h1>Legal notice.</h1>
@@ -46,9 +46,19 @@ const schemas = [
         <h2>License</h2>
         <p>
           Quil is released under the
-          <a href={SITE.github + "/blob/master/LICENSE"} rel="noopener external">MIT License</a>.
+          <a href={SITE.github + "/blob/master/LICENSE"} rel="noopener external">Apache License 2.0</a>.
           You are free to use, modify, and redistribute the software for any purpose,
-          including commercial use, provided the copyright notice is preserved.
+          including commercial use, provided you retain the copyright, patent,
+          trademark and attribution notices, carry the
+          <a href={SITE.github + "/blob/master/NOTICE"} rel="noopener external">NOTICE</a>
+          file, and state which files you changed.
+        </p>
+        <p>
+          Releases published before August 2026 were licensed under the MIT
+          License and remain so. Some contributions are still licensed under MIT
+          pending relicensing consent from their authors; the
+          <a href={SITE.github + "/blob/master/LICENSE"} rel="noopener external">LICENSE</a>
+          file says which.
         </p>
 
         <h2>No warranty</h2>
@@ -89,6 +99,15 @@ const schemas = [
         </p>
 
         <h2>Trademarks</h2>
+        <p>
+          "Quil" and the Quil mark are trademarks of Artjoms Stukans. The
+          Apache License covers the code and not the name — section 6 says so
+          explicitly. Forks are welcome and should carry their own name;
+          describing your software as "based on Quil" or "compatible with Quil"
+          needs no permission at all. The full policy, including what is
+          pre-approved, is in
+          <a href={SITE.github + "/blob/master/TRADEMARK.md"} rel="noopener external">TRADEMARK.md</a>.
+        </p>
         <p>
           Claude Code is a trademark of Anthropic PBC. tmux, Zellij, WezTerm,
           GNU Screen, and other project names mentioned on this site are

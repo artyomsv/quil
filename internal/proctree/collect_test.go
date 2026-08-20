@@ -21,7 +21,7 @@ type fakeSources struct {
 func (f *fakeSources) sources(hasStarts bool) Sources {
 	return Sources{
 		Table: func() ([]ProcessEntry, error) { return append([]ProcessEntry(nil), f.table...), nil },
-		CPU:   func(pids []int) cpuReading { return cpuReading{Cumulative: map[int]time.Duration{}, Supported: true} },
+		CPU:   func(pids []int) CPUReading { return CPUReading{Cumulative: map[int]time.Duration{}, Supported: true} },
 		RSS:   func(pids []int) map[int]uint64 { return map[int]uint64{} },
 
 		HasStarts: hasStarts,
@@ -134,7 +134,7 @@ func TestCollect_TwoPassRejectsSpliceAfterEnrichment(t *testing.T) {
 func TestCollect_PropagatesTableError(t *testing.T) {
 	src := Sources{
 		Table: func() ([]ProcessEntry, error) { return nil, ErrUnsupported },
-		CPU:   func([]int) cpuReading { return cpuReading{} },
+		CPU:   func([]int) CPUReading { return CPUReading{} },
 	}
 	s := NewSampler()
 	if _, err := s.Collect(at(0), []int{100}, src); !errors.Is(err, ErrUnsupported) {
@@ -151,8 +151,8 @@ func TestCollect_DecoratesFromBatchReads(t *testing.T) {
 		Table:     func() ([]ProcessEntry, error) { return table, nil },
 		HasStarts: true,
 		RSS:       func([]int) map[int]uint64 { return map[int]uint64{200: 1 << 20} },
-		CPU: func([]int) cpuReading {
-			return cpuReading{Cumulative: map[int]time.Duration{200: time.Second}, Supported: true}
+		CPU: func([]int) CPUReading {
+			return CPUReading{Cumulative: map[int]time.Duration{200: time.Second}, Supported: true}
 		},
 	}
 
@@ -161,8 +161,8 @@ func TestCollect_DecoratesFromBatchReads(t *testing.T) {
 	if _, err := s.Collect(at(0), []int{100}, src); err != nil {
 		t.Fatalf("Collect: %v", err)
 	}
-	src.CPU = func([]int) cpuReading {
-		return cpuReading{Cumulative: map[int]time.Duration{200: 2 * time.Second}, Supported: true}
+	src.CPU = func([]int) CPUReading {
+		return CPUReading{Cumulative: map[int]time.Duration{200: 2 * time.Second}, Supported: true}
 	}
 	trees, err := s.Collect(at(5), []int{100}, src)
 	if err != nil {

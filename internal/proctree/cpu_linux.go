@@ -26,7 +26,7 @@ const cpuIsSampled = true
 // Only the PIDs asked for are read — one file open each — so the cost is bound
 // to a pane's descendants rather than to the size of the machine's process
 // table.
-func readCPU(pids []int) cpuReading {
+func readCPU(pids []int) CPUReading {
 	out := make(map[int]time.Duration, len(pids))
 	for _, pid := range pids {
 		raw, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
@@ -37,7 +37,7 @@ func readCPU(pids []int) cpuReading {
 			out[pid] = d
 		}
 	}
-	return cpuReading{Cumulative: out, Supported: true}
+	return CPUReading{Cumulative: out, Supported: true}
 }
 
 // parseCPUTicks sums utime and stime from one /proc/<pid>/stat.

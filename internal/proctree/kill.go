@@ -52,23 +52,38 @@ type SweepResult struct {
 // the mechanism that exists to prevent exactly that. It asks whether the
 // process WITH THAT START TIME is alive, which a recycled PID is not.
 func Sweep(target *Node, grace time.Duration, ops KillOps) SweepResult {
-	var res SweepResult
-	if target == nil {
+	term := TermPass(target, ops)
+	res := SweepResult{Signalled: term.Signalled, Skipped: term.Skipped}
+	res.Escalated = Escalate(term, grace, ops)
+	return res
+}
+
+// pendingKill is one process that was successfully signalled, remembered with
+// the start time it had at that moment.
+type pendingKill struct {
+	pid   int
+	start time.Time
+}
+
+// TermResult is what the graceful pass achieved, and the input to Escalate.
+type TermResult struct {
+	Signalled int
+	Skipped   int
+	termed    []pendingKill
+}
+
+// TermPass sends the graceful signal to a subtree and returns immediately.
+//
+// Split from the escalation so the daemon can answer the client with what
+// actually happened — it completes in microseconds — while the grace period and
+// the forced kill run on their own goroutine rather than parking an IPC
+// dispatch goroutine for three seconds.
+func TermPass(target *Node, ops KillOps) TermResult {
+	var res TermResult
+	if target == nil || ops.Term == nil {
 		return res
 	}
-
-	nodes := Flatten(target)
-
-	type pending struct {
-		pid   int
-		start time.Time
-	}
-	var termed []pending
-
-	for _, n := range nodes {
-		if ops.Term == nil {
-			break
-		}
+	for _, n := range Flatten(target) {
 		if err := ops.Term(n.PID, n.Start); err != nil {
 			// Either it already exited or its identity no longer matches.
 			// Both mean "do not chase this PID any further".
@@ -76,18 +91,27 @@ func Sweep(target *Node, grace time.Duration, ops KillOps) SweepResult {
 			continue
 		}
 		res.Signalled++
-		termed = append(termed, pending{pid: n.PID, start: n.Start})
+		res.termed = append(res.termed, pendingKill{pid: n.PID, start: n.Start})
 	}
+	return res
+}
 
-	if len(termed) == 0 {
-		return res
+// Escalate waits out the grace period and forcibly kills whatever is still the
+// same process. Returns how many were killed.
+//
+// Asks whether the process WITH THAT START TIME is alive, never whether the PID
+// is in use: a subtree member can exit during the grace period and have its PID
+// recycled, and killing on liveness alone would destroy an unrelated process
+// from inside the mechanism meant to prevent exactly that.
+func Escalate(r TermResult, grace time.Duration, ops KillOps) int {
+	if len(r.termed) == 0 {
+		return 0
 	}
-
 	if ops.Sleep != nil {
 		ops.Sleep(grace)
 	}
-
-	for _, p := range termed {
+	var killed int
+	for _, p := range r.termed {
 		if ops.Alive == nil || !ops.Alive(p.pid, p.start) {
 			continue
 		}
@@ -95,8 +119,8 @@ func Sweep(target *Node, grace time.Duration, ops KillOps) SweepResult {
 			continue
 		}
 		if err := ops.Kill(p.pid, p.start); err == nil {
-			res.Escalated++
+			killed++
 		}
 	}
-	return res
+	return killed
 }

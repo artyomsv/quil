@@ -148,7 +148,7 @@ func handleStart(h windows.Handle) (time.Time, bool) {
 }
 
 // readCPU returns cumulative kernel+user CPU time per PID.
-func readCPU(pids []int) cpuReading {
+func readCPU(pids []int) CPUReading {
 	out := make(map[int]time.Duration, len(pids))
 	for _, pid := range pids {
 		h, err := windows.OpenProcess(processQueryLimitedInfoAcc, false, uint32(pid))
@@ -172,7 +172,7 @@ func readCPU(pids []int) cpuReading {
 			_ = err
 		}
 	}
-	return cpuReading{Cumulative: out, Supported: true}
+	return CPUReading{Cumulative: out, Supported: true}
 }
 
 func filetimeDuration(ft windows.Filetime) time.Duration {

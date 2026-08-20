@@ -105,8 +105,39 @@ const (
 	MsgVersionResp = "version_resp" // daemon → client (VersionRespPayload)
 
 	// Memory reporting
+	//
+	// Retained permanently, not deprecated. Three consumers ride this pair —
+	// MCP's get_memory_report and get_pane_memory, plus `quil status` — and
+	// migrating an MCP tool's stable output shape for tidiness is not worth
+	// it. The resource pair below is a superset for the TUI's own use.
 	MsgMemoryReportReq  = "memory_report_req"
 	MsgMemoryReportResp = "memory_report_resp"
+
+	// Resource reporting — the process dialog and the status-bar total.
+	//
+	// Separate from the memory pair because it carries per-pane process TREES,
+	// which the status bar does not need and must not pay for. See
+	// ResourceReportReqPayload.WithTrees.
+	MsgResourceReportReq  = "resource_report_req"
+	MsgResourceReportResp = "resource_report_resp"
+
+	// ClientHello — a durable client stating its own identity.
+	//
+	// Fire and forget, no response. Sent only by clients that intend to be
+	// listed as running quil processes (the TUI and MCP bridges), never from
+	// ipc.NewClient itself: most dial sites are short-lived probes that dial,
+	// ask one thing and close, and registering those would populate the dialog
+	// with processes that no longer exist. Same distinction the daemon already
+	// draws between an ATTACHED client and a CONNECTED conn.
+	MsgClientHello = "client_hello"
+
+	// Process kill — the dialog asking the daemon to stop a pane descendant.
+	//
+	// The daemon owns this decision entirely: it re-enumerates, re-derives the
+	// pane's tree and re-checks the target before signalling anything. The
+	// request is a proposal, never an instruction.
+	MsgKillProcessReq  = "kill_process_req"
+	MsgKillProcessResp = "kill_process_resp"
 
 	// Pane input history
 	MsgPaneHistoryReq       = "pane_history_req"
@@ -715,6 +746,138 @@ type MemoryReportRespPayload struct {
 	// fresh — the two halves are captured close-in-time on the daemon side
 	// but are not guaranteed to be drawn from the exact same instant.
 	Tabs []TabInfo `json:"tabs,omitempty"`
+}
+
+// Resource reporting payloads
+
+// ResourceReportReqPayload asks for the workspace's resource state.
+type ResourceReportReqPayload struct {
+	// WithTrees asks for per-pane process trees as well as totals.
+	//
+	// This flag is what keeps the fat frame off the wire. The status bar polls
+	// this message every 5 s for the life of the session and needs only
+	// totals; trees for forty panes are tens of kilobytes per report, and
+	// sending them on that tick would put an oversized frame on the 64-slot
+	// must-deliver queue continuously. A client's own critical queue
+	// overflowing is a documented force-disconnect shape in this codebase.
+	//
+	// It also gates the daemon's process collector, which runs only while
+	// requests with this flag keep arriving.
+	WithTrees bool `json:"with_trees,omitempty"`
+}
+
+// ProcNode is the wire form of one process in a pane's tree.
+//
+// Carries an image name and never a command line: command lines are unbounded
+// and routinely contain secrets in argv, and in remote mode they come from a
+// machine the user may not control.
+type ProcNode struct {
+	PID      int        `json:"pid"`
+	Name     string     `json:"name"`
+	RSSBytes uint64     `json:"rss_bytes"`
+	CPUPct   float64    `json:"cpu_pct"` // negative means unknown
+	Depth    int        `json:"depth"`   // 1 = the pane's direct child
+	Children []ProcNode `json:"children,omitempty"`
+	// StartMS is the process start time in Unix milliseconds, echoed back on a
+	// kill request so the daemon can confirm the target is still the same
+	// process. Zero means the platform could not read it, which the daemon
+	// treats as grounds to refuse a kill.
+	StartMS int64 `json:"start_ms,omitempty"`
+}
+
+// PaneResourceInfo is one pane's resource state.
+type PaneResourceInfo struct {
+	PaneID      string `json:"pane_id"`
+	TabID       string `json:"tab_id"`
+	GoHeapBytes uint64 `json:"go_heap_bytes"`
+	PTYRSSBytes uint64 `json:"pty_rss_bytes"`
+	TotalBytes  uint64 `json:"total_bytes"`
+	// Tree is present only when WithTrees was set.
+	Tree *ProcNode `json:"tree,omitempty"`
+}
+
+// QuilProcInfo is one of quil's own processes, as it described itself.
+//
+// Every field here is SELF-REPORTED over the socket by the process it
+// describes. Nothing is inferred from the OS process table — that is what the
+// previous attempt at this feature did, and it was wrong on both platforms.
+type QuilProcInfo struct {
+	Role     string `json:"role"` // "tui" | "bridge" | "daemon"
+	PID      int    `json:"pid"`
+	Version  string `json:"version"`
+	ExeName  string `json:"exe_name"`
+	UptimeMS int64  `json:"uptime_ms"`
+	// Stale marks a process whose version differs from the daemon's.
+	Stale bool `json:"stale,omitempty"`
+}
+
+type ResourceReportRespPayload struct {
+	SnapshotAt int64              `json:"snapshot_at"` // Unix nanoseconds
+	Panes      []PaneResourceInfo `json:"panes"`
+	Total      uint64             `json:"total"`
+	Tabs       []TabInfo          `json:"tabs,omitempty"`
+	// Quil lists quil's own processes. Present only when WithTrees was set —
+	// the status bar has no use for it.
+	Quil []QuilProcInfo `json:"quil,omitempty"`
+	// Unidentified counts connections that never sent MsgClientHello AND have
+	// been open long enough that they cannot be a short-lived probe. At
+	// rollout these are bridges from a build predating the feature, which is
+	// precisely the population the stale marker exists to expose.
+	Unidentified int `json:"unidentified,omitempty"`
+	// TreesAt is when the process trees were collected, which can lag
+	// SnapshotAt: the collector is gated and its ticks can be skipped. The
+	// dialog surfaces staleness rather than presenting old numbers as current.
+	TreesAt int64 `json:"trees_at,omitempty"`
+	// CPUSampled is false where the platform reports a kernel-computed average
+	// instead of usage over our own sample window (Darwin). The dialog
+	// footnotes it, because a column that looks uniform while meaning
+	// different things per platform is a confidently wrong answer.
+	CPUSampled bool `json:"cpu_sampled,omitempty"`
+	// CPUSupported is false where the platform has no CPU source at all.
+	CPUSupported bool `json:"cpu_supported,omitempty"`
+}
+
+// ClientHelloPayload is a durable client's self-description.
+type ClientHelloPayload struct {
+	Role    string `json:"role"` // "tui" | "bridge"
+	PID     int    `json:"pid"`
+	Version string `json:"version"`
+	// ExeName is the basename of the running binary, so a bridge still
+	// executing quil.exe.old.3 after an in-place update swap is visible as
+	// such — an observed production state, not a hypothetical.
+	ExeName string `json:"exe_name"`
+	// UptimeMS is a DURATION, deliberately not a start timestamp. In remote
+	// mode the client and daemon are on different machines with unsynchronised
+	// clocks, and a daemon computing now-minus-start would report skewed and
+	// sometimes negative uptimes. It is also not redundant with the daemon's
+	// own connection age: a re-dial resets the connection but not the process,
+	// so after a daemon restart the conn is seconds old while a stale bridge
+	// has been alive for days.
+	UptimeMS int64 `json:"uptime_ms"`
+}
+
+// Process kill payloads
+
+// KillProcessReqPayload proposes killing one pane descendant.
+type KillProcessReqPayload struct {
+	// PaneID scopes the kill: the target must be a descendant of THIS pane's
+	// process, re-derived daemon-side rather than taken on trust.
+	PaneID string `json:"pane_id"`
+	PID    int    `json:"pid"`
+	// StartMS is the target's start time as the client saw it. The daemon
+	// requires a match before signalling; a PID recycled between the snapshot
+	// and the accepted confirm is a different process wearing the same number,
+	// and the start time is the only thing that distinguishes them.
+	StartMS int64 `json:"start_ms"`
+}
+
+type KillProcessRespPayload struct {
+	// Signalled and Escalated count what the sweep actually did.
+	Signalled int `json:"signalled"`
+	Escalated int `json:"escalated"`
+	// Refused carries the reason when nothing was killed. A refusal is a
+	// normal outcome here, not an error.
+	Refused string `json:"refused,omitempty"`
 }
 
 // Pane input history payloads

@@ -5,8 +5,8 @@ import (
 	"time"
 )
 
-func cumulative(m map[int]time.Duration) cpuReading {
-	return cpuReading{Cumulative: m, Supported: true}
+func cumulative(m map[int]time.Duration) CPUReading {
+	return CPUReading{Cumulative: m, Supported: true}
 }
 
 func TestSampler_FirstUpdateReportsNothing(t *testing.T) {
@@ -101,7 +101,7 @@ func TestSampler_NonPositiveElapsedReportsNothing(t *testing.T) {
 
 func TestSampler_UnsupportedPlatformReportsNothing(t *testing.T) {
 	s := NewSampler()
-	got := s.Update(at(0), cpuReading{Supported: false}, nil)
+	got := s.Update(at(0), CPUReading{Supported: false}, nil)
 
 	if len(got) != 0 {
 		t.Errorf("unsupported platform returned %v, want nothing", got)
@@ -112,7 +112,7 @@ func TestSampler_UnsupportedPlatformReportsNothing(t *testing.T) {
 // and the first update is immediately useful.
 func TestSampler_InstantReadingNeedsNoHistory(t *testing.T) {
 	s := NewSampler()
-	got := s.Update(at(0), cpuReading{Instant: map[int]float64{100: 37.5}, Supported: true}, nil)
+	got := s.Update(at(0), CPUReading{Instant: map[int]float64{100: 37.5}, Supported: true}, nil)
 
 	if pct, ok := got[100]; !ok || pct != 37.5 {
 		t.Errorf("instant reading = %v (present=%v), want 37.5", pct, ok)
@@ -121,7 +121,7 @@ func TestSampler_InstantReadingNeedsNoHistory(t *testing.T) {
 
 func TestSampler_InstantReadingDropsNegative(t *testing.T) {
 	s := NewSampler()
-	got := s.Update(at(0), cpuReading{Instant: map[int]float64{100: -1}, Supported: true}, nil)
+	got := s.Update(at(0), CPUReading{Instant: map[int]float64{100: -1}, Supported: true}, nil)
 
 	if _, ok := got[100]; ok {
 		t.Error("a negative instant reading was passed through; it means the " +

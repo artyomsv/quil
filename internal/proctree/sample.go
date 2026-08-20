@@ -2,7 +2,7 @@ package proctree
 
 import "time"
 
-// cpuReading is one platform's answer about CPU usage.
+// CPUReading is one platform's answer about CPU usage.
 //
 // The two shapes are not interchangeable, and the split is deliberate rather
 // than an abstraction leak. Windows and Linux expose CUMULATIVE CPU time, so a
@@ -14,7 +14,7 @@ import "time"
 // Collapsing them behind one "percent" would make the Darwin number look like
 // the other two while meaning something different. It is carried separately so
 // the dialog can say so.
-type cpuReading struct {
+type CPUReading struct {
 	// Cumulative is total CPU time consumed per PID, since process start.
 	Cumulative map[int]time.Duration
 	// Instant is a kernel-reported percentage per PID.
@@ -58,7 +58,7 @@ func NewSampler() *Sampler {
 // result, which Decorate leaves as UnknownCPU. That covers a first sample, a
 // process that appeared this tick, a recycled PID, a non-positive elapsed time
 // and a negative delta.
-func (s *Sampler) Update(now time.Time, r cpuReading, starts map[int]time.Time) map[int]float64 {
+func (s *Sampler) Update(now time.Time, r CPUReading, starts map[int]time.Time) map[int]float64 {
 	if !r.Supported {
 		s.prevAt = now
 		return nil

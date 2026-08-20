@@ -31,7 +31,7 @@ type Sources struct {
 	// Table enumerates the process table.
 	Table func() ([]ProcessEntry, error)
 	// CPU reads CPU usage for the given PIDs.
-	CPU func([]int) cpuReading
+	CPU func([]int) CPUReading
 	// RSS reads resident memory for the given PIDs.
 	RSS func([]int) map[int]uint64
 	// HasStarts is false on platforms whose Table cannot supply start times,

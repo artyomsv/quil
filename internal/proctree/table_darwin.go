@@ -72,9 +72,9 @@ func readTable() ([]ProcessEntry, error) {
 // trampolines rather than raw syscalls, so calling it means hand-written
 // assembly for a platform CI cannot run. The dialog footnotes the difference
 // instead of hiding it.
-func readCPU(pids []int) cpuReading {
+func readCPU(pids []int) CPUReading {
 	if len(pids) == 0 {
-		return cpuReading{Supported: true, Instant: map[int]float64{}}
+		return CPUReading{Supported: true, Instant: map[int]float64{}}
 	}
 	parts := make([]string, len(pids))
 	for i, p := range pids {
@@ -82,9 +82,9 @@ func readCPU(pids []int) cpuReading {
 	}
 	out, err := runPS("-o", "pid=,pcpu=", "-p", strings.Join(parts, ","))
 	if err != nil {
-		return cpuReading{Supported: false}
+		return CPUReading{Supported: false}
 	}
-	return cpuReading{Supported: true, Instant: parsePSPercent(out)}
+	return CPUReading{Supported: true, Instant: parsePSPercent(out)}
 }
 
 // cpuIsSampled reports whether this platform's CPU figure is a delta across our

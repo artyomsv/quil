@@ -12,6 +12,6 @@ const cpuIsSampled = false
 
 func readTable() ([]ProcessEntry, error) { return nil, ErrUnsupported }
 
-func readCPU(_ []int) cpuReading { return cpuReading{Supported: false} }
+func readCPU(_ []int) CPUReading { return CPUReading{Supported: false} }
 
 func enrichStarts(table []ProcessEntry, _ []int) []ProcessEntry { return table }

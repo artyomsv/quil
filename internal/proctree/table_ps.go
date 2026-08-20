@@ -70,6 +70,24 @@ func parsePSLine(line string) (ProcessEntry, bool) {
 	return ProcessEntry{PID: pid, PPID: ppid, Name: name, Start: start}, true
 }
 
+// parsePSStart parses `ps -o lstart= -p <pid>` output into a start time.
+//
+// Untagged like the rest of this file: it is the identity check the entire
+// Darwin kill path rests on, and behind a build tag it would never be compiled
+// by CI, let alone tested.
+func parsePSStart(out string) (time.Time, bool) {
+	fields := strings.Fields(out)
+	if len(fields) < psLStartFields {
+		return time.Time{}, false
+	}
+	t, err := time.ParseInLocation(psLStartLayout,
+		strings.Join(fields[:psLStartFields], " "), time.Local)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
+}
+
 // parsePSPercent parses `ps -o pid=,pcpu=` output into a percentage per PID.
 func parsePSPercent(out string) map[int]float64 {
 	res := map[int]float64{}

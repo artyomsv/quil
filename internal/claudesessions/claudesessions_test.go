@@ -780,6 +780,26 @@ func TestReadTitle_FallsBackToAiTitle(t *testing.T) {
 	}
 }
 
+// The guard that must NOT be added. Reading the pass below this one, it is
+// natural to conclude the ai-title pass is missing a matching
+// promptSource-absent condition. It is not: measured 2026-08-20, current Claude
+// builds emit ai-title entries AND promptSource, so that guard would make the
+// pass dead code on every current transcript.
+//
+// This transcript is the case it would kill — records promptSource, carries an
+// ai-title, has no typed prompt. TestReadTitle_FallsBackToAiTitle above does
+// not cover it: that fixture has no promptSource at all, so the guard would
+// leave it green while breaking this.
+func TestReadTitle_AiTitleFiresOnCurrentSchemaWithNoTypedPrompt(t *testing.T) {
+	path := writeSchemaTranscript(t,
+		`{"type":"ai-title","aiTitle":"Refactor the parser","leafUuid":"u1"}`,
+		`{"type":"user","promptSource":"compact","message":{"content":"This session is being continued from a previous conversation..."}}`,
+	)
+	if got := readTitle(path); got != "Refactor the parser" {
+		t.Errorf("readTitle = %q, want the ai-title — the pass must not be gated on promptSource being absent", got)
+	}
+}
+
 func TestReadTitle_FallsBackToStringContentUserEntry(t *testing.T) {
 	path := writeSchemaTranscript(t,
 		`{"type":"user","message":{"content":"no promptSource here"}}`,

@@ -560,9 +560,19 @@ func readTitle(path string) string {
 		}
 	}
 
-	// Fallback 1 — a {"type":"ai-title"} entry, emitted by builds that do not
-	// record promptSource. Reached only when the typed pass above found
-	// nothing, so an install whose transcripts carry both is unaffected.
+	// Fallback 1 — a {"type":"ai-title"} entry. Reached only when the typed
+	// pass above found nothing.
+	//
+	// Deliberately NOT gated on the transcript's schema. Measured 2026-08-20:
+	// current Claude builds emit ai-title entries AND promptSource, so gating
+	// this on the field's absence would make the pass dead code. It fires for
+	// any transcript with no typed prompt, whatever its schema.
+	//
+	// A guard would buy nothing anyway, because of what this pass reads.
+	// aiTitle is a dedicated title field: the only values it can yield are a
+	// title or nothing. Measured: one distinct value per transcript, however
+	// many times the entry repeats. Contrast the passes that promote message
+	// CONTENT, which must first establish that the content is a prompt at all.
 	for _, line := range lines {
 		if !bytes.Contains(line, []byte(`"type":"ai-title"`)) {
 			continue

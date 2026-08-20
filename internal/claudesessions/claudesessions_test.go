@@ -998,12 +998,35 @@ func TestReadDetail_RecordingTranscriptWithNoTypedPromptIsNotRescanned(t *testin
 
 // padTranscript returns filler lines totalling more than titleScanBytes, so a
 // caller can place an entry beyond the head window.
+//
+// Counts the filler's ACTUAL bytes rather than estimating them. An estimate
+// gets the safety direction wrong in a way that fails silently: guess too high
+// and the loop stops early, the padding falls short of the window, and the
+// entry a caller meant to put BEYOND the head lands inside it — the test still
+// passes, having stopped testing what it claims. Measuring cannot drift when
+// the filler text is edited.
 func padTranscript() []string {
+	filler := assistantMsg("filler line to push the tail past the scan window")
 	var out []string
-	for len(out)*180 < titleScanBytes+4096 {
-		out = append(out, assistantMsg("filler line to push the tail past the scan window"))
+	for n := 0; n <= titleScanBytes; n += len(filler) + 1 { // +1 for the joining newline
+		out = append(out, filler)
 	}
 	return out
+}
+
+// The two tests that place an entry "beyond the head" are only meaningful if
+// the padding really does clear titleScanBytes. Nothing else would notice if it
+// stopped — both tests would keep passing against an entry that had quietly
+// moved inside the window.
+func TestPadTranscript_ClearsTheHeadWindow(t *testing.T) {
+	n := 0
+	for _, line := range padTranscript() {
+		n += len(line) + 1
+	}
+	if n <= titleScanBytes {
+		t.Fatalf("padding = %d bytes, want more than titleScanBytes (%d) — an entry placed after it would land INSIDE the head window",
+			n, titleScanBytes)
+	}
 }
 
 // The gate's FALSE-NEGATIVE direction, and the only fixture that exercises it:

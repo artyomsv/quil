@@ -200,7 +200,7 @@ jobs:
             PAYLOAD=$(git diff --name-only "${LAST_TAG}..HEAD" \
               | grep -vE '^(site|docs|tools|techdebt|marketing|\.github|\.claude|changelog\.d)/' \
               | grep -vE '^[^/]+\.md$' \
-              | grep -vE '^(VERSION|LICENSE|Makefile|package-lock\.json|\.gitignore|\.gitattributes|\.editorconfig|\.dockerignore)$' \
+              | grep -vE '^(VERSION|LICENSE|MIT-LICENSE\.txt|NOTICE|Makefile|package-lock\.json|\.gitignore|\.gitattributes|\.editorconfig|\.dockerignore)$' \
               | grep -v '_test\.go$' || true)
             if [ -z "$PAYLOAD" ]; then
               echo "::notice::No changes reach the binary since ${LAST_TAG} (docs/site/workflow only) — skipping release"

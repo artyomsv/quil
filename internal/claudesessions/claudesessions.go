@@ -704,6 +704,15 @@ func readTitle(path string) string {
 // value is also a string. The residual cost is one blank detail panel on an
 // old-schema transcript that happens to contain such a key, which is why this
 // is a substring test and not a parse.
+//
+// That `:"` also makes the test sensitive to JSON spacing — a
+// `"promptSource": "typed"` with a space would miss it. That cannot cost a
+// prompt, and the reason is structural rather than a fact about Claude's
+// serializer: this needle is a strict prefix of typedMark, the mark the
+// whole-file pass above searches for. Any formatting that hides the field from
+// this gate hides it from that pass first, so the pass finds no typed prompt,
+// the gate answers false, and the rescan runs — which is the behaviour without
+// a gate at all. The gate can never be stricter than the path it guards.
 func recordsPromptSource(f *os.File) bool {
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return false

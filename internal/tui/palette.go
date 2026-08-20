@@ -68,7 +68,7 @@ const (
 	palActSettings
 	palActShortcuts
 	palActPlugins
-	palActMemory
+	palActProcesses
 	palActAbout
 	palActClientLog
 	palActDaemonLog
@@ -510,7 +510,7 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 		paletteCommand{action: palActSettings, enabled: true, label: "Settings", keywords: []string{"config", "preferences"}},
 		paletteCommand{action: palActShortcuts, enabled: true, label: "Keyboard shortcuts", keywords: []string{"keys", "bindings", "help"}},
 		paletteCommand{action: palActPlugins, enabled: true, label: "Plugins", keywords: []string{"plugin", "toml"}},
-		paletteCommand{action: palActMemory, enabled: true, label: "Memory report", keywords: []string{"memory", "mem", "ram"}},
+		paletteCommand{action: palActProcesses, enabled: true, label: "Processes", keywords: []string{"process", "processes", "memory", "mem", "ram", "cpu", "kill"}},
 		paletteCommand{action: palActAbout, enabled: true, label: "About", detail: "f1", keywords: []string{"about", "version"}},
 		paletteCommand{action: palActClientLog, enabled: true, label: "View client log", keywords: []string{"log", "client"}},
 		paletteCommand{action: palActDaemonLog, enabled: true, label: "View daemon log", keywords: []string{"log", "daemon"}},
@@ -1101,9 +1101,9 @@ func (m Model) executePaletteCommand(c paletteCommand) (tea.Model, tea.Cmd) {
 		m.dialog = dialogPlugins
 		m.dialogCursor = 0
 		return m, tea.ClearScreen
-	case palActMemory:
-		m = m.openMemoryDialog()
-		return m, m.refreshMemory()
+	case palActProcesses:
+		m = m.openProcessesDialog()
+		return m, m.refreshResources(true)
 	case palActAbout:
 		return m.openAboutDialog()
 	case palActClientLog:

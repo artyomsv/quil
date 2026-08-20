@@ -492,6 +492,12 @@ func launchTUI() {
 	}
 	defer client.Close()
 
+	// Identify this TUI to the daemon. After the version gate, so a client
+	// that is about to be turned away for a mismatch never registers as a
+	// running process — and once per launch, since the reconnect path sends
+	// its own on every re-dial.
+	sendClientHello(client, helloRoleTUI)
+
 	// Ensure default plugins exist and detect stale ones needing migration
 	stalePlugins, ensureErr := plugin.EnsureDefaultPlugins(config.PluginsDir())
 	if ensureErr != nil {

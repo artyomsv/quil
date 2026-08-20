@@ -21,3 +21,10 @@ type Snapshot struct {
 	Panes []PaneMem // sorted by Total desc
 	Total uint64    // sum of Panes[*].Total
 }
+
+// ProcRSSBatch reads resident set size for the given PIDs.
+//
+// Exported so internal/proctree can decorate process trees with the same
+// platform readers this package already maintains, rather than growing a second
+// set. The platform implementations stay unexported; this is the only seam.
+func ProcRSSBatch(pids []int) map[int]uint64 { return procRSSBatch(pids) }

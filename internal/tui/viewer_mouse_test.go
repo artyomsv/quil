@@ -51,7 +51,7 @@ func TestModalSwallowsMouse(t *testing.T) {
 		t.Parallel()
 		for _, d := range []dialogScreen{
 			dialogCommandHistory, dialogAbout, dialogSettings, dialogCreatePane,
-			dialogCommandPalette, dialogMemory, dialogConfirm,
+			dialogCommandPalette, dialogProcesses, dialogConfirm,
 		} {
 			m := Model{width: 100, height: 30, dialog: d}
 			if !m.modalSwallowsMouse() {

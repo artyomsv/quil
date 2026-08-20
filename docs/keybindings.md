@@ -26,7 +26,7 @@ The five keys you'll use most:
 | Key | Action |
 |---|---|
 | `Alt+Shift+P` | Command palette — fuzzy-find any action or jump to any pane/tab |
-| `F1` | About menu → Settings, Plugins, Memory, log viewers |
+| `F1` | About menu → Settings, Plugins, Processes, log viewers |
 | `Ctrl+N` | New typed pane (Claude Code, OpenCode, terminal, …) |
 | `Ctrl+T` | New tab — asks which pane it opens with (`Esc` for a plain terminal) |
 | `Ctrl+W` | Close active pane |

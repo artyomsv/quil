@@ -221,7 +221,7 @@ func TestPalette_DispatchOpensExpectedDialog(t *testing.T) {
 		{"shortcuts", palActShortcuts, dialogShortcuts, ""},
 		{"plugins", palActPlugins, dialogPlugins, ""},
 		{"about", palActAbout, dialogAbout, ""},
-		{"memory", palActMemory, dialogMemory, ""},
+		{"memory", palActProcesses, dialogProcesses, ""},
 		{"new pane", palActNewPane, dialogCreatePane, ""},
 		{"close pane", palActClosePane, dialogConfirm, "pane"},
 		{"close tab", palActCloseTab, dialogConfirm, "tab"},

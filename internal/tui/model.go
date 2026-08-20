@@ -316,7 +316,7 @@ const (
 	dialogLogViewer
 	dialogDisclaimer
 	dialogPluginMigration
-	dialogMemory
+	dialogProcesses
 	dialogGitRepoPick // Alt+G repo picker (Task 12 fills handler/render)
 	dialogCommandHistory
 	dialogUpdateNotice
@@ -804,9 +804,18 @@ type Model struct {
 	migrationRightFocus bool                 // true when right pane has keyboard focus
 	migrationError      string               // validation error message
 
-	// Memory dialog state
-	mem         memoryDialogState
-	lastMemResp *ipc.MemoryReportRespPayload
+	// Processes dialog state
+	//
+	// lastResourceResp feeds the status-bar total. Updated on every report
+	// whether or not the Processes dialog is open.
+	lastResourceResp *ipc.ResourceReportRespPayload
+	// proc is the Processes dialog's own state.
+	proc processesState
+	// killPID and killStartMS carry the confirm's target across the confirm
+	// dialog. The start time travels with it so the daemon can refuse a PID
+	// that has been recycled since the user was shown the row.
+	killPID     int
+	killStartMS int64
 
 	// Input-history modal state (dialogCommandHistory)
 	history historyState
@@ -1020,7 +1029,7 @@ func (m Model) Init() tea.Cmd {
 	log.Print("TUI Init — starting listener")
 	startUpdateWatchdog(defaultWatchdogConfig())
 	go m.inputForwarder()
-	return tea.Batch(m.listenForMessages(), memoryTickCmd(), sizePollTick())
+	return tea.Batch(m.listenForMessages(), resourceTickCmd(), sizePollTick())
 }
 
 // msgTypeName avoids per-Update reflection for the hot message types; the
@@ -1055,8 +1064,8 @@ func msgTypeName(msg tea.Msg) string {
 		return "tui.sidebarTickMsg"
 	case notesTickMsg:
 		return "tui.notesTickMsg"
-	case memoryTickMsg:
-		return "tui.memoryTickMsg"
+	case resourceTickMsg:
+		return "tui.resourceTickMsg"
 	case listenContinueMsg:
 		return "tui.listenContinueMsg"
 	case WorkspaceStateMsg:
@@ -2346,15 +2355,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.notesTickRunning = false
 		return m, nil
 
-	case memoryTickMsg:
-		// Inert: refreshMemory only builds a Cmd that sends an IPC request.
-		// The reply (memoryReportMsg) is what updates the status-bar total, and
-		// that branch renders.
+	case resourceTickMsg:
+		// Inert: refreshResources only builds a Cmd that sends an IPC request.
+		// The reply (resourceReportMsg) is what updates the status-bar total, and
+		// that branch renders. Dropping this line makes a 5 s timer repaint the
+		// whole frame forever, undoing part of the frame-rebuild work in #175.
 		m.skipRender = !prologueChangedView
-		return m, tea.Batch(m.refreshMemory(), memoryTickCmd())
 
-	case memoryReportMsg:
-		m = m.applyMemoryReport(msg.Resp)
+		// Trees are requested ONLY while the dialog is open. The flag is also
+		// what keeps the daemon's process collector alive, so asking for them
+		// on the status-bar poll would run a process enumeration for the life
+		// of the session with nobody looking at it — and put a far larger
+		// frame on the wire every 5 s.
+		if m.dialog == dialogProcesses {
+			updated, cmd := m.requestTrees(time.Now())
+			return updated, tea.Batch(cmd, resourceTickCmd())
+		}
+		return m, tea.Batch(m.refreshResources(false), resourceTickCmd())
+
+	case resourceReportMsg:
+		m = m.applyResourceReport(msg.Resp)
+		return m, m.listenForMessages()
+
+	case killProcessRespMsg:
+		m = m.applyKillProcessResp(msg.Resp)
 		return m, m.listenForMessages()
 
 	case paletteSearchDebounceMsg:
@@ -6292,8 +6316,8 @@ func (m Model) renderStatusBar() string {
 
 	// Right side: keybinding hints + version
 	right := "^T tab | ^N pane | ^W close | F1 help | ^Q quit | v" + m.version
-	if m.lastMemResp != nil {
-		total := m.lastMemResp.Total + m.tuiLocalMemTotal()
+	if m.lastResourceResp != nil {
+		total := m.lastResourceResp.Total + m.tuiLocalMemTotal()
 		right = "mem " + memreport.HumanBytes(total) + " | " + right
 	}
 	// Suppressed in remote mode: the announcement describes the REMOTE
@@ -6661,13 +6685,21 @@ func (m Model) listenForMessages() tea.Cmd {
 			log.Printf("ipc recv: pane_event %s %s %s", payload.Type, payload.PaneID, payload.Title)
 			return paneEventMsg(payload)
 
-		case ipc.MsgMemoryReportResp:
-			var payload ipc.MemoryReportRespPayload
+		case ipc.MsgResourceReportResp:
+			var payload ipc.ResourceReportRespPayload
 			if err := msg.DecodePayload(&payload); err != nil {
-				log.Printf("decode memory_report_resp: %v", err)
+				log.Printf("decode resource_report_resp: %v", err)
 				return listenContinueMsg{}
 			}
-			return memoryReportMsg{Resp: payload}
+			return resourceReportMsg{Resp: payload}
+
+		case ipc.MsgKillProcessResp:
+			var payload ipc.KillProcessRespPayload
+			if err := msg.DecodePayload(&payload); err != nil {
+				log.Printf("decode kill_process_resp: %v", err)
+				return listenContinueMsg{}
+			}
+			return killProcessRespMsg{Resp: payload}
 
 		case ipc.MsgPaneHistoryResp:
 			var payload ipc.PaneHistoryRespPayload

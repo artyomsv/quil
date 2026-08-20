@@ -35,7 +35,7 @@ A capability-by-capability tour of what Quil does. For configuration knobs, see 
 - [Observability](#observability)
   - [Notification center](#notification-center)
   - [Desktop notifications](#desktop-notifications)
-  - [Memory reporting](#memory-reporting)
+  - [Processes and memory](#processes-and-memory)
   - [Leveled logger + log viewer](#leveled-logger--log-viewer)
 - [Pane notes](#pane-notes)
 - [Operations](#operations)
@@ -446,17 +446,27 @@ Toggle it live at **F1 → Settings → Desktop notifications**, or via [`[notif
 
 Clicking a toast can only move your cursor. The `quil://` handler validates a pane id and forwards it to the running TUI over a per-PID named pipe — there is deliberately no path from a registered URI to spawning a pane, sending input, or running a command, since a registered scheme is invokable by any local process. Inline toast buttons ("Approve" / "Deny") are refused on that basis rather than merely deferred.
 
-### Memory reporting
+### Processes and memory
 
-`F1 → Memory` opens a collapsible tab / pane tree showing:
+`F1 → Processes` answers two questions on one screen: what is running under your panes and eating the machine, and which quil processes are alive right now.
 
-- Go-heap (output ring buffer + ghost snapshot + plugin state) per pane
-- PTY child resident memory (OS-reported; not comparable across platforms)
-- Notes-editor bytes per pane
+**Under each pane**, expand a tab and then a pane to see the actual OS process tree — the shell or agent quil started, and everything it went on to spawn — with memory and CPU per process. A build that will not stop, a language server that has doubled in size, an agent's child that outlived it: the thing you would otherwise open a process explorer for.
 
-The status bar gains a `mem <n>` segment refreshed every 5 s by a daemon-side collector. Two MCP tools — `get_memory_report` (per-tab totals) and `get_pane_memory` (single-pane detail) — expose the layers for external agents.
+Press `K` on any process **below** a pane's own shell to stop it, along with everything it started. The pane's own shell or agent is not offered here — that is `Restart pane` — and quil's own processes are never offered at all.
 
-Cross-platform RSS: `/proc/<pid>/status` on Linux, `ps -o rss=` (batched) on Darwin, `GetProcessMemoryInfo` on Windows.
+**Quil's own processes** are listed with their version, uptime and PID: the TUI, the daemon, and every MCP bridge. A bridge still running an older binary is flagged, which is how you catch one pinned to a version an in-place upgrade renamed aside.
+
+Also shown per pane: Go-heap (output ring buffer + ghost snapshot + plugin state), PTY child resident memory, and notes-editor bytes.
+
+The status bar keeps its `mem <n>` segment, refreshed every 5 s. Two MCP tools — `get_memory_report` (per-tab totals) and `get_pane_memory` (single-pane detail) — are unchanged.
+
+Everything about processes is read on the **daemon's** machine, which is the one running them — so this works unchanged when the daemon is remote.
+
+Cross-platform RSS: `/proc/<pid>/status` on Linux, `ps -o rss=` (batched) on Darwin, `GetProcessMemoryInfo` on Windows. Process enumeration: `/proc`, `ps`, and `CreateToolhelp32Snapshot` respectively.
+
+**CPU on macOS means something different**, and the dialog says so. Linux and Windows expose a cumulative CPU counter, so the percentage is usage measured across quil's own sample window. macOS has no equivalent reachable without CGo, so the figure there is the kernel's own decaying average. The numbers are not comparable between a Mac and a Linux host.
+
+Percentages are per-core: a process saturating two cores reads 200%, matching `top`. A process quil has not yet sampled twice shows `—` rather than `0%` — an unknown is not an idle.
 
 **Scrollback depth scales to the workspace.** Every pane holds its own terminal emulator whether or not it is visible, so depth multiplies by pane count. With `[ui] scrollback_lines` unset, quil spends a workspace-wide budget instead of a fixed per-pane depth: ten panes or fewer are unchanged, larger workspaces get proportionally less, and a floor keeps every pane usable. A depth you set yourself always wins and is never adjusted; a depth chosen for you is written to the log. Editable at **F1 → Settings → Scrollback lines**, applied on next launch — the terminal emulator cannot release scrollback it has already retained, so depth is fixed when a pane is created.
 

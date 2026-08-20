@@ -106,6 +106,10 @@ type Conn struct {
 	dropped   atomic.Uint64
 	// deadlineRefused gates reportDeadlineRefused to one line per conn.
 	deadlineRefused atomic.Bool
+	// openedAt is when this connection was accepted. Used to tell a durable
+	// client that never identified itself from a short-lived probe, which by
+	// design never identifies itself either.
+	openedAt time.Time
 	// noPaneOutput opts this conn out of the live MsgPaneOutput stream.
 	//
 	// Inverted so the ZERO VALUE means subscribed: a client that never says
@@ -141,6 +145,7 @@ func newConnWithWriteWindow(raw net.Conn, window time.Duration) *Conn {
 		outCh:       make(chan []byte, sendBufSize),
 		done:        make(chan struct{}),
 		writeWindow: window,
+		openedAt:    time.Now(),
 	}
 	go c.sendLoop()
 	return c
@@ -727,4 +732,28 @@ func (s *Server) removeConn(conn *Conn) {
 			return
 		}
 	}
+}
+
+// OpenedAt is when this connection was accepted.
+//
+// The daemon uses it to separate a durable client that never identified itself
+// — a bridge from a build predating MsgClientHello — from a short-lived probe,
+// which by design never identifies itself either. Without the distinction, a
+// report taken while `quil status` happens to be running would claim an
+// unidentified client that predates the feature, which is simply false.
+func (c *Conn) OpenedAt() time.Time { return c.openedAt }
+
+// ConnsSnapshot returns a copy of the currently-connected conns.
+//
+// A COPY, deliberately: s.conns is mutated by accept and removeConn under
+// s.mu, so handing the slice out would let a caller read it while it is being
+// reallocated. Callers iterate this to attribute connections to the clients
+// that identified themselves; a conn that disconnects immediately afterwards
+// simply drops out of the next call.
+func (s *Server) ConnsSnapshot() []*Conn {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*Conn, len(s.conns))
+	copy(out, s.conns)
+	return out
 }

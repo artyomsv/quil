@@ -63,6 +63,17 @@ type Daemon struct {
 	clientCWD atomic.Pointer[string]
 
 	memReport   *memreport.Collector
+	// procReport enumerates per-pane process trees, and runs ONLY while a
+	// client keeps asking for them. See procGateWindow.
+	procReport *procCollector
+	// startedAt is when this daemon process began, for its own uptime row.
+	startedAt time.Time
+	// killRunning single-flights the kill handler's worker goroutine. A client
+	// looping the message would otherwise stack goroutines each running a full
+	// process enumeration.
+	killRunning atomic.Bool
+	// hellos records which conns identified themselves as quil processes.
+	hellos *helloRegistry
 	collectorWG sync.WaitGroup
 
 	// snapGens records, per pane, the OutputBuf generation captured by the
@@ -237,6 +248,9 @@ func New(cfg config.Config) *Daemon {
 		snapGens:   make(map[string]uint64),
 	}
 	d.memReport = memreport.NewCollector(d.session, 5*time.Second)
+	d.procReport = newProcCollector(d.session, memreport.ProcRSSBatch)
+	d.hellos = newHelloRegistry()
+	d.startedAt = time.Now()
 	// Clamped like a pushed policy: config.toml is hand-edited, so it can carry
 	// exactly the values the IPC path is bounded against.
 	d.overlayPolicyState.set(clampOverlayPolicy(ipc.OverlayPolicyPayload{
@@ -541,6 +555,9 @@ func (d *Daemon) onClientDisconnect(conn *ipc.Conn) {
 	d.requestSnapshot()
 	d.events.RemoveWatchersByConn(conn)
 	d.forgetAttachedClient(conn)
+	// Drop this conn's identity with it: the process it described is gone,
+	// and a retained entry would be listed as running.
+	d.hellos.forget(conn)
 	if n := d.hideUnclaimedOverlays(time.Now()); n > 0 {
 		log.Printf("overlay: %d marked hidden (no client has them on screen)", n)
 	}
@@ -1345,6 +1362,19 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	// Memory reporting
 	case ipc.MsgMemoryReportReq:
 		d.handleMemoryReportReq(conn, msg)
+
+	// Resource reporting — the process dialog and the status-bar total.
+	case ipc.MsgResourceReportReq:
+		d.handleResourceReportReq(conn, msg)
+
+	// A durable client stating its own identity. No response.
+	case ipc.MsgClientHello:
+		d.handleClientHello(conn, msg)
+
+	// Stopping a pane descendant. The request is a proposal; every check
+	// runs daemon-side against a freshly enumerated process table.
+	case ipc.MsgKillProcessReq:
+		d.handleKillProcessReq(conn, msg)
 
 	// Auto-update
 	case ipc.MsgStageUpdateReq:
@@ -3939,6 +3969,14 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 // respondTo sends a response message to a specific connection with the same
 // request ID for correlation. Used by MCP request-response handlers.
 func respondTo(conn *ipc.Conn, requestID, msgType string, payload any) {
+	// A nil conn is a valid caller state, not a programming error: several
+	// handlers are driven by tests through handleMessage without a socket, and
+	// a broadcast-origin message carries no originating conn. Dereferencing it
+	// panics on the daemon's dispatch goroutine, which takes the whole daemon
+	// down rather than dropping one response.
+	if conn == nil {
+		return
+	}
 	resp, err := ipc.NewMessage(msgType, payload)
 	if err != nil {
 		log.Printf("respondTo: marshal %s: %v", msgType, err)

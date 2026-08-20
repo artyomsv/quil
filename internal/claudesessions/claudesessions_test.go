@@ -939,3 +939,66 @@ func TestReadDetail_NullContentIsNotAPrompt(t *testing.T) {
 		t.Errorf("FirstPrompt = %q, want %q", d.FirstPrompt, "a real one")
 	}
 }
+
+func TestTranscriptPathIn_DoesNotConsultEnv(t *testing.T) {
+	t.Setenv(claudeConfigDirEnv, filepath.Join(t.TempDir(), "should-not-be-read"))
+	got := TranscriptPathIn("/explicit", "/work/repo", "abc-123")
+	want := filepath.Join("/explicit", "projects", EscapeCWD("/work/repo"), "abc-123.jsonl")
+	if got != want {
+		t.Errorf("TranscriptPathIn = %q, want %q", got, want)
+	}
+}
+
+func TestTranscriptPathIn_EmptyArgsReturnEmpty(t *testing.T) {
+	if got := TranscriptPathIn("/explicit", "/work/repo", ""); got != "" {
+		t.Errorf("empty session id = %q, want empty", got)
+	}
+	if got := TranscriptPathIn("/explicit", "", "abc-123"); got != "" {
+		t.Errorf("empty cwd = %q, want empty", got)
+	}
+}
+
+// TranscriptPath must DELEGATE rather than carry a second copy of the join —
+// two spellings of one path is how they drift.
+func TestTranscriptPath_AgreesWithTranscriptPathIn(t *testing.T) {
+	cfg := t.TempDir()
+	t.Setenv(claudeConfigDirEnv, cfg)
+	got := TranscriptPath("/work/repo", "abc-123")
+	want := TranscriptPathIn(cfg, "/work/repo", "abc-123")
+	if got == "" {
+		t.Fatal("TranscriptPath returned empty with the config dir set")
+	}
+	if got != want {
+		t.Errorf("TranscriptPath = %q, TranscriptPathIn = %q; the two must agree", got, want)
+	}
+}
+
+// The join ReadDetailIn uses must be the one under test, not a parallel copy:
+// point TranscriptPathIn at a real file and assert ReadDetailIn reads THAT one.
+// Before this, TestTranscriptPath_BuildsJSONLPath certified a join with no
+// production caller while the join actually used had no direct test.
+func TestReadDetailIn_ReadsPathFromTranscriptPathIn(t *testing.T) {
+	cfg := t.TempDir()
+	const cwd = "/work/repo"
+	const id = "11111111-2222-3333-4444-555555555555"
+
+	path := TranscriptPathIn(cfg, cwd, id)
+	if path == "" {
+		t.Fatal("TranscriptPathIn returned empty")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(typedPrompt("the only prompt")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	d, err := ReadDetailIn(context.Background(), cfg, cwd, id)
+	if err != nil {
+		t.Fatalf("ReadDetailIn: %v", err)
+	}
+	if d.FirstPrompt != "the only prompt" {
+		t.Errorf("FirstPrompt = %q, want %q — ReadDetailIn is not reading the path TranscriptPathIn builds",
+			d.FirstPrompt, "the only prompt")
+	}
+}

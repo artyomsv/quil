@@ -170,14 +170,27 @@ func ProjectDir(cwd string) string {
 	return ProjectDirIn(ConfigDir(), cwd)
 }
 
-// TranscriptPath returns the absolute path of one session's transcript, or ""
-// when the home directory is unavailable or either argument is empty.
-func TranscriptPath(cwd, sessionID string) string {
-	dir := ProjectDir(cwd)
+// TranscriptPathIn returns one session's transcript path under an explicit
+// config dir, or "" when the directory cannot be resolved or either remaining
+// argument is empty. It takes the directory for the same reason ProjectDirIn
+// does: a caller that already resolved one must not be at the mercy of a
+// concurrent Setenv, and tests need no environment at all.
+//
+// This is the ONLY place the session-id-to-filename join lives. ReadDetailIn
+// used to inline its own copy, which left the exported spelling below with no
+// production caller and its test certifying a join nothing ran.
+func TranscriptPathIn(configDir, cwd, sessionID string) string {
+	dir := ProjectDirIn(configDir, cwd)
 	if dir == "" || sessionID == "" {
 		return ""
 	}
 	return filepath.Join(dir, sessionID+".jsonl")
+}
+
+// TranscriptPath returns the absolute path of one session's transcript, or ""
+// when the home directory is unavailable or either argument is empty.
+func TranscriptPath(cwd, sessionID string) string {
+	return TranscriptPathIn(ConfigDir(), cwd, sessionID)
 }
 
 // List returns the sessions recorded for cwd, newest first, capped at
@@ -368,11 +381,11 @@ func ReadDetailIn(ctx context.Context, configDir, cwd, sessionID string) (Detail
 		sessionID == "." || sessionID == ".." || strings.ContainsRune(sessionID, filepath.Separator) {
 		return Detail{}, fmt.Errorf("invalid session id")
 	}
-	dir := ProjectDirIn(configDir, cwd)
-	if dir == "" {
+	path := TranscriptPathIn(configDir, cwd, sessionID)
+	if path == "" {
 		return Detail{}, fmt.Errorf("no transcript path for this session")
 	}
-	return readDetail(ctx, filepath.Join(dir, sessionID+".jsonl"), sessionID)
+	return readDetail(ctx, path, sessionID)
 }
 
 // readDetail is the filesystem half of ReadDetail, split out so tests can point

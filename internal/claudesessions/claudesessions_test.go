@@ -884,6 +884,33 @@ func TestReadTitle_CommandMarkupIsNotATitle(t *testing.T) {
 	}
 }
 
+// The closing delimiter is what makes the denylist a TAG match rather than a
+// name-prefix match. Without it every tag also swallows every longer name that
+// starts with it — `bash` would eat `bash-input`, `command-name` would eat this.
+// Weakening the check to a bare HasPrefix passes every other test in this file.
+func TestReadTitle_TagPrefixWithoutDelimiterIsNotMachinery(t *testing.T) {
+	path := writeSchemaTranscript(t,
+		plainUserEntry("<command-nameless> is not one of claude's tags"),
+	)
+	if got := readTitle(path); got == "" {
+		t.Error("readTitle = empty, want the entry — only the exact tag plus a delimiter is machinery")
+	}
+}
+
+// isMachinery deliberately does NOT trim, and this pins that: every observed
+// machinery entry opens its tag at byte 0, so a leading space means the entry
+// is not the shape we are rejecting, and the result is what we do today.
+// Adding a TrimSpace passes every other test in this file, so without this the
+// documented behaviour is prose only.
+func TestReadTitle_WhitespacePrefixedTagIsNotMachinery(t *testing.T) {
+	path := writeSchemaTranscript(t,
+		plainUserEntry("   <command-name>/goal</command-name>"),
+	)
+	if got := readTitle(path); got == "" {
+		t.Error("readTitle = empty, want the entry — the tag test is not trimmed, by design")
+	}
+}
+
 // The denylist must reject CLAUDE's markup, not markup in general. A user who
 // pastes HTML has typed a prompt.
 func TestReadTitle_UserPastedMarkupIsATitle(t *testing.T) {

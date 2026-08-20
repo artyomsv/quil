@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -87,7 +88,43 @@ func identityMatches(pid int, start time.Time) bool {
 	return sameProcess(cur, start)
 }
 
-func aliveWithStart(pid int, start time.Time) bool { return identityMatches(pid, start) }
+// aliveWithStart reports whether the process with this PID AND this start time
+// is still running.
+//
+// A ZOMBIE is not running. /proc/<pid>/stat survives a process's death until
+// its parent reaps it, complete with the original start time, so an identity
+// check alone answers "alive" for something that has already exited — and a
+// subtree sweep creates exactly that state, because it kills parents and their
+// children together and a parent that exits first cannot reap anything. Left
+// unhandled, Escalate SIGKILLs corpses and reports them as forced, and a
+// long-lived zombie under a pane renders as a live process the dialog offers to
+// stop. Windows has the equivalent check via GetExitCodeProcess.
+func aliveWithStart(pid int, start time.Time) bool {
+	if !identityMatches(pid, start) {
+		return false
+	}
+	return !isZombie(pid)
+}
+
+// isZombie reports whether a process is in state Z.
+//
+// The state is the first field after comm's closing parenthesis, which is why
+// this parses from the LAST ')' like every other reader of this file: comm can
+// contain both spaces and parentheses.
+func isZombie(pid int) bool {
+	raw, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+	if err != nil {
+		// Gone entirely; the identity check above already answered that case.
+		return false
+	}
+	stat := string(raw)
+	end := strings.LastIndexByte(stat, ')')
+	if end < 0 || end+2 > len(stat) {
+		return false
+	}
+	fields := strings.Fields(stat[end+2:])
+	return len(fields) > 0 && fields[0] == "Z"
+}
 
 // processStart reads one process's start time from /proc.
 func processStart(pid int) (time.Time, bool) {

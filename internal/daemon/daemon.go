@@ -3969,6 +3969,14 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 // respondTo sends a response message to a specific connection with the same
 // request ID for correlation. Used by MCP request-response handlers.
 func respondTo(conn *ipc.Conn, requestID, msgType string, payload any) {
+	// A nil conn is a valid caller state, not a programming error: several
+	// handlers are driven by tests through handleMessage without a socket, and
+	// a broadcast-origin message carries no originating conn. Dereferencing it
+	// panics on the daemon's dispatch goroutine, which takes the whole daemon
+	// down rather than dropping one response.
+	if conn == nil {
+		return
+	}
 	resp, err := ipc.NewMessage(msgType, payload)
 	if err != nil {
 		log.Printf("respondTo: marshal %s: %v", msgType, err)

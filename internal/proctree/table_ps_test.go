@@ -164,3 +164,56 @@ func TestPSLStartLayout_RoundTrips(t *testing.T) {
 		t.Errorf("round trip = %v, want %v", got, want)
 	}
 }
+
+// parsePSStart is the whole Darwin kill path's identity check, and it has its
+// OWN field arithmetic: `ps -o lstart= -p <pid>` yields the five lstart fields
+// with nothing before them, where parsePSLine skips a pid and a ppid first.
+// Sharing the layout constant does not make the offsets shared, and mutating
+// this function to always fail left the package green.
+func TestParsePSStart(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		out  string
+		ok   bool
+	}{
+		{"plain", "Wed Aug 20 12:00:00 2026", true},
+		{"leading and trailing space", "   Wed Aug 20 12:00:00 2026\n", true},
+		{"single digit day", "Sun Aug  3 07:05:09 2026", true},
+		{"too few fields", "Wed Aug 20", false},
+		{"empty", "", false},
+		{"unparseable", "Xxx Yyy 99 99:99:99 abcd", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := parsePSStart(tc.out)
+			if ok != tc.ok {
+				t.Fatalf("ok = %v, want %v", ok, tc.ok)
+			}
+			if tc.ok && got.IsZero() {
+				t.Error("reported success with a zero time; every Darwin kill " +
+					"refuses an unknown start, so this would disable the platform")
+			}
+			if !tc.ok && !got.IsZero() {
+				t.Errorf("reported failure but returned %v", got)
+			}
+		})
+	}
+}
+
+// The two ps parsers must agree on the same instant, or a kill validated
+// against one and signalled against the other refuses every time.
+func TestParsePSStart_AgreesWithParsePSLine(t *testing.T) {
+	stamp := "Wed Aug 20 12:00:00 2026"
+
+	fromLine, ok := parsePSLine("  501     1 " + stamp + " zsh")
+	if !ok {
+		t.Fatal("parsePSLine refused a well-formed line")
+	}
+	fromStart, ok := parsePSStart(stamp)
+	if !ok {
+		t.Fatal("parsePSStart refused the same timestamp")
+	}
+	if !fromLine.Start.Equal(fromStart) {
+		t.Errorf("parsers disagree: line=%v start=%v — the kill path validates "+
+			"with one and verifies with the other", fromLine.Start, fromStart)
+	}
+}

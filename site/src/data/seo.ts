@@ -45,7 +45,7 @@ export const SITE = {
    *  (the next release will overwrite both via sed). */
   software: {
     version: "1.63.0",
-    license: "MIT",
+    license: "Apache-2.0",
     operatingSystem: "Linux, macOS, Windows",
     applicationCategory: "DeveloperApplication",
     runtime: "Cross-platform binary",

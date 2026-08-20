@@ -82,6 +82,27 @@ PRs get squash-merged to `master` for a clean history. GitHub uses the **PR titl
 >
 > One file per PR is what keeps parallel PRs from conflicting: entries used to go under a shared `## [Unreleased]` heading in `CHANGELOG.md`, so two open PRs edited the same anchor line and the second to merge always conflicted. **Do not edit `CHANGELOG.md` directly** — the release workflow owns it.
 
+## Licensing of contributions
+
+Quil is licensed under the [Apache License 2.0](LICENSE). By opening a pull
+request you agree that your contribution is licensed under the same terms —
+this is Apache-2.0 section 5, which applies by default to anything you
+deliberately submit for inclusion, unless you state otherwise in the PR.
+
+There is no CLA and no copyright assignment. You keep your copyright.
+
+Two consequences worth knowing, because they are easy to get wrong:
+
+- **Only contribute code you have the right to contribute.** Your own work, or
+  work under a licence compatible with Apache-2.0 — and if it is the latter,
+  say where it came from in the PR description so the attribution can be
+  carried into [`NOTICE`](NOTICE) and
+  [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md).
+- **The name is not covered by the licence.** Apache-2.0 grants rights over the
+  code and explicitly not over trade names or marks. If you are distributing a
+  modified build rather than contributing one, read [TRADEMARK.md](TRADEMARK.md)
+  — the short version is that forks are welcome and should carry their own name.
+
 ## Documentation maintenance
 
 When your change adds a new feature, configuration knob, or significant architectural decision:

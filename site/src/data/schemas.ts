@@ -93,7 +93,7 @@ export function softwareApplicationSchema(): Record<string, unknown> {
     softwareRequirements: "Linux kernel 4.x+, macOS 11+, or Windows 10+",
     memoryRequirements: "150 MB RSS typical",
     fileSize: "~40 MB",
-    license: "https://opensource.org/licenses/MIT",
+    license: "https://www.apache.org/licenses/LICENSE-2.0",
     releaseNotes: SITE.github + "/blob/master/CHANGELOG.md",
     downloadUrl: SITE.github + "/releases/latest",
     installUrl: SITE.url + "/install",

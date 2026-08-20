@@ -174,10 +174,16 @@ jobs:
           # changelog.d/ is denied for the same reason as docs/: a typo fix in
           # a pending fragment would otherwise read as payload and cut a
           # release whose five platform binaries are identical to the last tag.
+          #
+          # NOTICE and MIT-LICENSE.txt are listed here rather than caught by the
+          # `^[^/]+\.md$` filter above, which only covers root-level markdown —
+          # one has no extension and the other is .txt. TRADEMARK.md is NOT
+          # listed, because that filter already has it. All three ship in the
+          # release archives and none of them changes a binary.
           CODE=$(echo "$CHANGED" \
             | grep -vE '^(site|docs|tools|techdebt|marketing|\.github|\.claude|changelog\.d)/' \
             | grep -vE '^[^/]+\.md$' \
-            | grep -vE '^(VERSION|LICENSE|Makefile|package-lock\.json|\.gitignore|\.gitattributes|\.editorconfig|\.dockerignore)$' \
+            | grep -vE '^(VERSION|LICENSE|MIT-LICENSE\.txt|NOTICE|Makefile|package-lock\.json|\.gitignore|\.gitattributes|\.editorconfig|\.dockerignore)$' \
             | grep -v '_test\.go$' || true)
           if [ -z "$CODE" ]; then
             echo "::notice::No changes reach the binary — changelog fragment not required"

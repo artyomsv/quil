@@ -54,7 +54,12 @@ const maxBranchList = 2000
 // errors, or all three would render as "this repository has no branches", which
 // reads as "every name is free".
 func Branches(ctx context.Context, dir string) ([]string, bool, error) {
-	out, err := runGit(ctx, dir, "for-each-ref", "--format=%(refname:short)", "refs/heads")
+	// lstrip=2 rather than %(refname:short): "short" is git's shortest
+	// UNAMBIGUOUS form, so a repository holding a TAG of the same name gets
+	// `heads/foo` instead of `foo` — and branchTaken compares with ==, so the
+	// collision it exists to catch would be missed. lstrip=2 drops exactly
+	// `refs/heads/` and is deterministic whatever else the ref store holds.
+	out, err := runGit(ctx, dir, "for-each-ref", "--format=%(refname:lstrip=2)", "refs/heads")
 	if err != nil {
 		if errors.Is(err, exec.ErrNotFound) || ctx.Err() != nil {
 			return nil, false, err

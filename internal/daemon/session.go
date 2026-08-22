@@ -86,8 +86,23 @@ type Pane struct {
 	// is gone (replaced), on failure it is cleared alongside the SpawnError that
 	// explains it. PluginMu-protected.
 	PreparingWorktree string
-	Type              string            // Plugin name (default: "terminal")
-	PluginState       map[string]string // Scraped values (e.g., "session_id": "abc123")
+	// WorktreeInterrupted marks a placeholder that was PERSISTED mid-checkout.
+	//
+	// PreparingWorktree deliberately is not persisted — a restored pane would
+	// spin for an add nobody is running — but "runtime-only" and "the restored
+	// pane looks finished" are two different problems, and dropping the branch
+	// alone solved the first while leaving the second. handleCreateTab requests
+	// a snapshot immediately, so the placeholder is on disk for the WHOLE
+	// checkout as an ordinary terminal in the repository root: a daemon restart
+	// then lazy-spawns a live shell there, which is precisely the state this
+	// feature exists to remove, restored from disk.
+	//
+	// So the FACT is persisted without the branch, and spawnRestoredPane turns
+	// it into a refusal with the reason on screen. Cleared by spawnPane like
+	// SpawnError, so Alt+R gets the user an ordinary shell.
+	WorktreeInterrupted bool
+	Type                string            // Plugin name (default: "terminal")
+	PluginState         map[string]string // Scraped values (e.g., "session_id": "abc123")
 	// PluginMu protects every mutable field that can be read or written
 	// concurrently with the daemon's PTY-output goroutine: PluginState,
 	// GhostSnap, PTY (the pointer itself + Pid lookups), ExitCode, and

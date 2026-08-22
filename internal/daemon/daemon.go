@@ -825,6 +825,7 @@ func (d *Daemon) restoreWorkspace() error {
 				pinnedAttention, _ := paneData["pinned_attention"].(bool)
 				worktreeOwned, _ := paneData["worktree_owned"].(bool)
 				worktreePath, _ := paneData["worktree_path"].(string)
+				worktreeInterrupted, _ := paneData["worktree_interrupted"].(bool)
 
 				pane := &Pane{
 					ID:           paneID,
@@ -850,6 +851,11 @@ func (d *Daemon) restoreWorkspace() error {
 					// right default: a pane nobody recorded as owning a
 					// worktree keeps the ordinary CWD fallback.
 					WorktreeOwned: worktreeOwned,
+					// Absent on every snapshot written before the marker
+					// existed → false, so such a pane restores exactly as it
+					// did before: a shell in whatever CWD was recorded. The
+					// marker only ever ADDS a refusal.
+					WorktreeInterrupted: worktreeInterrupted,
 					// Absent on any snapshot written before the path was
 					// recorded → empty, and an owned pane with no path is never
 					// offered for close-time removal. That degradation is
@@ -1022,12 +1028,43 @@ func (d *Daemon) refuseMissingWorktree(pane *Pane) bool {
 	return true
 }
 
+// refuseInterruptedWorktree leaves a placeholder that was snapshotted
+// mid-checkout unspawned, with the reason on screen.
+//
+// The flag is NOT cleared here: a daemon that restarts twice before the user
+// acts must refuse both times, and the pane is re-persisted with it. spawnPane
+// clears it alongside SpawnError, so Alt+R is what converts the pane into an
+// ordinary shell — the same escape refuseMissingWorktree offers, and it names
+// no directory for the same reason: Quil recorded the branch, not a checkout
+// that exists.
+func (d *Daemon) refuseInterruptedWorktree(pane *Pane) bool {
+	pane.PluginMu.Lock()
+	interrupted := pane.WorktreeInterrupted
+	if interrupted {
+		pane.SpawnError = "worktree creation was interrupted — no worktree was made"
+	}
+	pane.PluginMu.Unlock()
+	if interrupted {
+		log.Printf("pane %s: worktree creation was interrupted, leaving the pane unspawned", pane.ID)
+	}
+	return interrupted
+}
+
 // spawnRestoredPane spawns a single restored pane, applying the saved-cwd
 // sanity check and the fallback-to-terminal recovery. Extracted from
 // respawnPanes so the lazy-spawn path (ensurePaneSpawned) reuses it verbatim.
 func (d *Daemon) spawnRestoredPane(pane *Pane) {
 	ptySession := newRestoredPTY(paneSize(pane))
 	if d.refuseMissingWorktree(pane) {
+		return
+	}
+	// A placeholder that was snapshotted mid-checkout. Refused for the same
+	// reason a missing worktree is: its recorded CWD is the REPOSITORY ROOT, so
+	// spawning would put a shell exactly where the worktree existed to keep it
+	// out of — and the pane would look finished. No add is running any more (the
+	// daemon that started it is gone), so there is nothing to wait for and the
+	// honest state is a stopped pane that says why.
+	if d.refuseInterruptedWorktree(pane) {
 		return
 	}
 	// !WorktreeOwned as well as the early return above, so the no-relocation
@@ -2336,9 +2373,28 @@ func (d *Daemon) replacePaneAt(payload ipc.CreatePanePayload, cwd, paneType stri
 	// the session maps).
 	d.applyResumeSessionID(newPane, payload.ResumeSessionID)
 
-	ptySession := apty.New()
+	// Through newSessionFn rather than apty.New(), for the reason constructPaneAt
+	// gives for the same swap: identical in production (the seam's zero pair IS
+	// apty.New()) and the smallest change that makes this function's FAILURE
+	// path drivable from a test — which is where the empty-tab bug lived, and
+	// which no test could reach while the PTY was constructed directly.
+	ptySession := newSessionFn(0, 0)
 	if err := d.spawnPane(newPane, ptySession, false); err != nil {
 		d.session.DestroyPane(newPane.ID)
+		// The tab can now be EMPTY, and for one caller it always is: the
+		// new-tab worktree flow replaces the tab's ONLY pane, so a spawn
+		// failure here left a tab with nothing in it — nothing to click,
+		// nothing to close — against handleCreateTab's own "the tab must never
+		// be pane-less" invariant. Reachable whenever the requested plugin's
+		// binary is missing. createFirstPaneWorktree cannot repair it either:
+		// it skips failPreparingPane precisely because the swap happened, so
+		// the user's only notice was a three-second flash over a blank tab.
+		//
+		// Recovered with a pane that has NO child and carries the reason,
+		// rather than by ensureTabNotEmpty's replacement shell: a shell would
+		// be a live child underneath renderSpawnError's block, which is the
+		// hazard the restart guard exists to prevent, one path over.
+		d.recoverEmptyTab(payload.TabID, fmt.Sprintf("pane could not start: %v", err))
 		d.broadcastState()
 		d.requestSnapshot()
 		// swapped=true: the old pane went with the swap above and is not coming
@@ -2449,6 +2505,38 @@ func (d *Daemon) handleDestroyPane(msg *ipc.Message) {
 // ensureTabNotEmpty destroys orphaned overlay panes and spawns a fresh
 // terminal pane when a tab has no normal panes left. Shared by the TUI
 // destroy path (handleDestroyPane) and the MCP path (handleDestroyPaneReq).
+// recoverEmptyTab gives a tab that just lost its last pane one that explains
+// itself: no child process, the reason on screen, Alt+R to get a shell.
+//
+// A no-op when the tab still holds a pane — an ordinary split-replace keeps its
+// siblings, so only the single-pane case pays for this — and when the tab is
+// gone entirely, which is a close racing the failure rather than something to
+// repair.
+//
+// Deliberately NOT ensureTabNotEmpty: that spawns a working shell in the
+// daemon's default directory, which is the right recovery when a pane the user
+// closed leaves a tab empty, and the wrong one here — the user asked for a
+// specific pane, it failed, and a shell that appears instead with no
+// explanation is the silent substitution this whole feature exists to remove.
+func (d *Daemon) recoverEmptyTab(tabID, reason string) {
+	if tabID == "" || d.session.Tab(tabID) == nil {
+		return
+	}
+	if len(d.session.Panes(tabID)) > 0 {
+		return
+	}
+	pane, err := d.session.CreatePane(tabID, d.defaultCWD())
+	if err != nil {
+		log.Printf("tab %s: could not recover an empty tab: %v", tabID, err)
+		return
+	}
+	pane.PluginMu.Lock()
+	pane.Type = "terminal"
+	pane.SpawnError = reason
+	pane.PluginMu.Unlock()
+	log.Printf("tab %s: recovered with an unspawned pane: %s", tabID, reason)
+}
+
 func (d *Daemon) ensureTabNotEmpty(tabID string) {
 	var overlays []*Pane
 	normal := 0
@@ -3248,6 +3336,13 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			if pane.WorktreePath != "" {
 				paneData["worktree_path"] = pane.WorktreePath
 			}
+			// PERSISTED, unlike the branch it stands for. A snapshot landing
+			// inside the checkout window would otherwise restore an ordinary
+			// terminal in the repository root — the bug this feature removes,
+			// brought back from disk. See Pane.WorktreeInterrupted.
+			if pane.PreparingWorktree != "" || pane.WorktreeInterrupted {
+				paneData["worktree_interrupted"] = true
+			}
 			// SpawnError is captured for the BROADCAST only — see
 			// includeOverlays below. It is never written to paneData.
 			spawnErr := pane.SpawnError
@@ -3936,6 +4031,10 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	// error stayed painted over it, and the user typing blind into a live
 	// shell they could not see.
 	pane.SpawnError = ""
+	// Cleared with it, and for the same reason: Alt+R is the escape the error
+	// screen advertises, and a flag left set would have the pane refuse again
+	// on the next lazy spawn — after the user had already retried it.
+	pane.WorktreeInterrupted = false
 	typ := pane.Type
 	pane.PluginMu.Unlock()
 

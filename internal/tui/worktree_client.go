@@ -109,7 +109,13 @@ func (s worktreeState) validateNewBranch(name string) string {
 		// git's own wording, so a user who then hits the daemon's error on a
 		// case-insensitive ref store reads the same sentence twice rather than
 		// two descriptions of one fact.
-		return "branch " + name + " already exists"
+		//
+		// Sanitized even though `name` is the user's OWN typing and ValidateBranch
+		// has already rejected C0/DEL: it does not reject C1 (U+009B is the CSI
+		// introducer oscfilter.go exists because of) or bidi overrides, and this
+		// is the one draw site of this value out of three that does not otherwise
+		// pass through sanitizeRemoteText — the inconsistency is what rots.
+		return "branch " + sanitizeRemoteText(name) + " already exists"
 	}
 	return ""
 }
@@ -289,10 +295,16 @@ func (m *Model) applyCreatePaneResp(p ipc.CreatePaneRespPayload, dest string) {
 		// guarantee that a duplicate, late or foreign answer is inert
 		// (TestCreatePaneResp_UnknownTabIsInert) — an MCP bridge's own worktree
 		// create would raise an error the user never caused.
-		if p.Error != "" && p.Worktree != nil && m.newTabWorktrees[p.Worktree.Branch] {
+		// Consumed on ANY answer, not only a failing one: the entry is this
+		// create's only bookkeeping, and deleting it solely on the error path
+		// left one behind for every SUCCESSFUL new-tab worktree create, keyed by
+		// branch name, for the life of the session.
+		if p.Worktree != nil && m.newTabWorktrees[p.Worktree.Branch] {
 			delete(m.newTabWorktrees, p.Worktree.Branch)
-			m.setFlash("worktree not created: " +
-				truncateCells(sanitizeRemoteText(p.Error), createErrFlashCap))
+			if p.Error != "" {
+				m.setFlash("worktree not created: " +
+					truncateCells(sanitizeRemoteText(p.Error), createErrFlashCap))
+			}
 		}
 		return // not ours, or already settled
 	}

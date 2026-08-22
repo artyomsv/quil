@@ -1064,12 +1064,21 @@ func (p *PaneModel) renderPreparingWorktree(innerW, innerH int) string {
 	// Bounded AND sanitized, two different jobs — see renderSpawnError. Elided
 	// in the MIDDLE because the informative half of a branch name is its tail.
 	branch := elideMiddle(sanitizeRemoteText(p.PreparingWorktree), innerW)
+	// ONE row unconditionally, like renderSpawnError — and for the reason its
+	// comment gives: lipgloss.Place pads but never CLIPS, so a block taller than
+	// innerH is returned whole and the pane body grows past its rect, shifting
+	// every sibling in the tab's JoinHorizontal. Measured before this gate: at
+	// Height 0-3 the budget is 3 lines and this rendered 4, while
+	// renderSpawnError rendered 3.
+	//
+	// The BRANCH is the row that survives after the first, never the
+	// reassurance line: it is the only part that says which checkout this is.
 	rows := []string{
 		restoreAccentStyle.Render(truncateToWidth(glyph+"  creating worktree", innerW)),
-		restoreDimStyle.Render(branch),
 	}
-	// Both extras cost a row each and are dropped rather than overflowing: the
-	// branch is what the user needs, the rest is reassurance.
+	if innerH >= 2 {
+		rows = append(rows, restoreDimStyle.Render(branch))
+	}
 	if innerH >= 4 {
 		rows = append(rows, "", restoreDimStyle.Render(
 			truncateToWidth("this can take a while on a large repository", innerW)))

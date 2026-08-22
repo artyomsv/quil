@@ -697,3 +697,33 @@ func TestBranches_RealGit_WorksFromASubdirectory(t *testing.T) {
 		t.Errorf("Branches() = %v from a subdirectory, want it to find the repository's branches", got)
 	}
 }
+
+// A TAG of the same name is what separates %(refname:short) from lstrip=2:
+// "short" is git's shortest UNAMBIGUOUS form, so with both refs/heads/dup and
+// refs/tags/dup present it answers `heads/dup` — which branchTaken's exact
+// comparison would never match against the `dup` a user types, silently missing
+// the collision the whole check exists to catch.
+func TestBranches_RealGit_UnaffectedByASameNamedTag(t *testing.T) {
+	repo := realGitRepo(t)
+	runGitIn(t, repo, "branch", "dup")
+	runGitIn(t, repo, "tag", "dup")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	got, _, err := Branches(ctx, repo)
+	if err != nil {
+		t.Fatalf("Branches: %v", err)
+	}
+	var found bool
+	for _, b := range got {
+		if b == "dup" {
+			found = true
+		}
+		if strings.Contains(b, "heads/") {
+			t.Errorf("Branches() returned %q — the refs/heads/ prefix leaked through", b)
+		}
+	}
+	if !found {
+		t.Errorf("Branches() = %v, want the plain branch name %q a user would type", got, "dup")
+	}
+}

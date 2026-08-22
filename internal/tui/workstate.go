@@ -802,6 +802,11 @@ func syncPaneMeta(pane *PaneModel, info *PaneInfo, wideCanvas bool, minNativeCol
 	// A pane whose worktree comes back must lose its complaint, and the daemon
 	// clears the field on every successful spawn.
 	pane.SpawnError = info.SpawnError
+	// Unconditional for the same reason and one more: this is what ENDS the
+	// wait. The pane that replaces a placeholder carries no branch, and on the
+	// failure path the daemon clears the field as it writes the SpawnError — a
+	// guarded copy would leave a finished checkout spinning forever.
+	pane.PreparingWorktree = info.PreparingWorktree
 	pane.GitBranch = info.GitBranch
 	pane.GitDetached = info.GitDetached
 	pane.GitWorktree = info.GitWorktree

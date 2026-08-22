@@ -1772,7 +1772,16 @@ func (d *Daemon) handleCreateTab(conn *ipc.Conn, msg *ipc.Message) {
 
 	// constructPaneAt, not createPaneAt: the tab and its pane are one change and
 	// must reach clients as ONE frame. See the note on that split.
-	pane, err := d.constructPaneAt(create, cwd, paneType)
+	//
+	// A WORKTREE request takes the placeholder path instead, and the difference
+	// is that it spawns NOTHING. See constructPreparingPane.
+	var pane *Pane
+	var err error
+	if spec.Worktree != nil {
+		pane, err = d.constructPreparingPane(tab.ID, cwd, paneType, spec.Worktree.Branch)
+	} else {
+		pane, err = d.constructPaneAt(create, cwd, paneType)
+	}
 	if err != nil {
 		log.Printf("new tab %s: %v", tab.ID, err)
 	}
@@ -1784,6 +1793,40 @@ func (d *Daemon) handleCreateTab(conn *ipc.Conn, msg *ipc.Message) {
 	if pane != nil && spec.Worktree != nil {
 		d.createFirstPaneWorktree(conn, msg.ID, tab.ID, pane.ID, *spec)
 	}
+}
+
+// constructPreparingPane builds a new tab's first pane as a VISIBLE PLACEHOLDER
+// for a worktree that is still being checked out: published into the tab like
+// any other pane, with no child process and the branch recorded on it.
+//
+// The tab cannot simply wait pane-less — createFirstPaneWorktree spells out why
+// (a blank active tab for the length of the checkout, persisted blank by any
+// snapshot inside the window, and nothing that recovers it). What it CAN do is
+// hold a pane that is honestly not ready, which is the half that was missing: the
+// placeholder used to be a real terminal in the repository root, and a live shell
+// is indistinguishable from a create that finished in the wrong tree. On a large
+// monorepo that is minutes of looking finished, and a failed add left the shell
+// standing with the reason only in quild.log.
+//
+// paneType comes from firstPaneType rather than a literal, so the placeholder and
+// the downgrade decision cannot drift apart. It matters beyond tidiness: this is
+// the type Alt+R would respawn on the error pane a failed add leaves, and the
+// requested type there would start an agent in the main checkout — the isolation
+// failure the whole path exists to prevent.
+func (d *Daemon) constructPreparingPane(tabID, cwd, paneType, branch string) (*Pane, error) {
+	pane, err := d.session.CreatePane(tabID, cwd)
+	if err != nil {
+		return nil, fmt.Errorf("create pane error: %w", err)
+	}
+	// Under PluginMu for the reason constructPaneAt states: CreatePane has
+	// already PUBLISHED the pane, so the snapshot and broadcast goroutines are
+	// legitimate concurrent readers of both fields.
+	pane.PluginMu.Lock()
+	pane.Type = paneType
+	pane.PreparingWorktree = branch
+	pane.PluginMu.Unlock()
+	log.Printf("pane created: %s (placeholder, tab=%s, awaiting worktree %s)", pane.ID, tabID, branch)
+	return pane, nil
 }
 
 // firstPaneType is the type a new tab's first pane OPENS as, which is not
@@ -1836,8 +1879,41 @@ func (d *Daemon) createFirstPaneWorktree(conn *ipc.Conn, reqID, tabID, placehold
 		Worktree:        spec.Worktree,
 	}
 	go func() {
-		respondTo(conn, reqID, ipc.MsgCreatePaneResp, d.worktreeAddAndCreate(p))
+		resp := d.worktreeAddAndCreate(p)
+		// A failure leaves the placeholder exactly where it is, so the reason
+		// goes ON it. The client's own notice is a three-second status-bar flash
+		// — the only one this path ever had, and easy to miss on a tab that has
+		// just opened — after which the user is left looking at a pane that
+		// cannot say why the agent they asked for never arrived.
+		//
+		// Swapped is the exception and cannot be inferred from Error: the swap
+		// precedes the new pane's PTY spawn, so a spawn failure reports an error
+		// with the placeholder already destroyed. Writing to it then would
+		// resurrect nothing and the id resolves to no pane anyway; the guard is
+		// what makes that explicit rather than accidental.
+		if resp.Error != "" && !resp.Swapped {
+			d.failPreparingPane(placeholderID, "worktree not created: "+resp.Error)
+		}
+		respondTo(conn, reqID, ipc.MsgCreatePaneResp, resp)
 	}()
+}
+
+// failPreparingPane turns a placeholder into the pane that explains itself.
+//
+// PreparingWorktree is cleared in the SAME step the error is written, or the
+// pane renders a spinner for a checkout that is over — the confidently-wrong
+// answer in the other direction. Both fields are broadcast-only, so this
+// requests no snapshot: there is nothing on disk for it to change.
+func (d *Daemon) failPreparingPane(paneID, reason string) {
+	pane := d.session.Pane(paneID)
+	if pane == nil {
+		return // the tab was closed while the checkout ran
+	}
+	pane.PluginMu.Lock()
+	pane.PreparingWorktree = ""
+	pane.SpawnError = reason
+	pane.PluginMu.Unlock()
+	d.broadcastState()
 }
 
 func (d *Daemon) handleDestroyTab(msg *ipc.Message) {
@@ -3143,6 +3219,9 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			// SpawnError is captured for the BROADCAST only — see
 			// includeOverlays below. It is never written to paneData.
 			spawnErr := pane.SpawnError
+			// Same: captured under the lock that protects it, written to
+			// paneData only on the broadcast side.
+			preparingWorktree := pane.PreparingWorktree
 			// Captured here rather than read below: this runs on the snapshot
 			// goroutine while handleResizePane writes them from a conn dispatch
 			// goroutine.
@@ -3190,6 +3269,16 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 				// nobody sees is the failure mode this replaces.
 				if spawnErr != "" {
 					paneData["spawn_error"] = spawnErr
+				}
+				// The branch a checkout is running for, runtime-only for the
+				// same reason and one more: a snapshot landing inside the
+				// checkout window would restore a pane waiting on an add no
+				// daemon is running, and nothing would ever settle it.
+				// Broadcast because without it the placeholder renders as an
+				// ordinary blank terminal — which is what it looked like for the
+				// whole of a monorepo-sized checkout.
+				if preparingWorktree != "" {
+					paneData["preparing_worktree"] = preparingWorktree
 				}
 				// Model/context usage of the last completed AI turn is
 				// runtime-only (broadcast, never persisted): a stale token

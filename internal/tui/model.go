@@ -130,10 +130,15 @@ type PaneInfo struct {
 	// when it means the second.
 	// SpawnError explains why a pane has no process — today, a worktree-owned
 	// pane whose directory is gone. Daemon-authoritative and runtime-only.
-	SpawnError  string
-	GitBranch   string
-	GitDetached bool
-	GitWorktree bool
+	SpawnError string
+	// PreparingWorktree names the branch a `git worktree add` is checking out
+	// for the pane that will replace this one. Daemon-authoritative and
+	// runtime-only, like SpawnError beside it — and mutually exclusive with it,
+	// since the daemon clears one as it writes the other.
+	PreparingWorktree string
+	GitBranch         string
+	GitDetached       bool
+	GitWorktree       bool
 	// GitWorktreeName names the linked worktree the pane's CWD is in. Derived
 	// daemon-side: path separators belong to the machine holding the disk, so
 	// a Windows daemon's path split by a Linux client's filepath.Base returns
@@ -2055,8 +2060,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		// Keep the indicator alive until the pane's first live output
-		// (min display met) or the safety cap — not a fixed 2s timer.
-		if (pane.resuming || pane.preparing) && !pane.restoreSettled() {
+		// (min display met) or the safety cap — not a fixed 2s timer. A pane
+		// waiting on a worktree checkout is exempt from both; see
+		// spinnerRunning.
+		if pane.spinnerRunning() {
 			pane.spinnerFrame = msg.frame
 			nextFrame := msg.frame + 1
 			paneID := msg.paneID
@@ -6999,6 +7006,9 @@ func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
 				}
 				if s, ok := pm["spawn_error"].(string); ok {
 					pi.SpawnError = s
+				}
+				if s, ok := pm["preparing_worktree"].(string); ok {
+					pi.PreparingWorktree = s
 				}
 				if b, ok := pm["git_branch"].(string); ok {
 					pi.GitBranch = b

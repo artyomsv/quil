@@ -18,7 +18,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/artyomsv/quil/internal/config"
-	"github.com/artyomsv/quil/internal/gitworktree"
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/keymap"
 	"github.com/artyomsv/quil/internal/logger"
@@ -4462,10 +4461,12 @@ func (m Model) handleSetupWorktreeKey(p *plugin.PanePlugin, key string) (tea.Mod
 
 // handleWorktreeNameKey edits the new branch's name.
 //
-// Validated on Enter with gitworktree.ValidateBranch — the same function the
-// daemon runs. The daemon is the authority (any IPC client can send anything),
-// but a round trip to learn about a typo is a bad dialog, and here the message
-// lands beside the field the user typed into.
+// Validated on Enter through worktreeState.validateNewBranch: the same
+// gitworktree.ValidateBranch the daemon runs, plus a test against the branches
+// the listing reported. The daemon is the authority (any IPC client can send
+// anything), but a round trip to learn about a typo is a bad dialog, and here
+// the message lands beside the field the user typed into — where a name git will
+// refuse costs a keystroke to correct rather than a create that produces no pane.
 //
 // Esc abandons the new-branch row entirely rather than merely closing the
 // input: a half-typed name left behind would be committed by the next Enter on
@@ -4478,8 +4479,8 @@ func (m Model) handleWorktreeNameKey(key string) (tea.Model, tea.Cmd) {
 		m.worktreeErr = ""
 		return m, nil
 	case "enter":
-		if err := gitworktree.ValidateBranch(m.worktreeNewBranch); err != nil {
-			m.worktreeErr = err.Error()
+		if msg := m.worktrees.validateNewBranch(m.worktreeNewBranch); msg != "" {
+			m.worktreeErr = msg
 			return m, nil
 		}
 		m.worktreeErr = ""
@@ -4531,8 +4532,8 @@ func (m Model) submitSetupDialog(p *plugin.PanePlugin) (tea.Model, tea.Cmd) {
 		// user can change the browsed directory afterwards, and this is the
 		// last point before the pane is created.
 		if m.worktreeNewBranch != "" {
-			if err := gitworktree.ValidateBranch(m.worktreeNewBranch); err != nil {
-				m.worktreeErr = err.Error()
+			if msg := m.worktrees.validateNewBranch(m.worktreeNewBranch); msg != "" {
+				m.worktreeErr = msg
 				return m, nil
 			}
 		}

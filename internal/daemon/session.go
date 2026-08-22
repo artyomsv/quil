@@ -69,9 +69,25 @@ type Pane struct {
 	// deliberately NOT persisted: a fresh daemon re-stats and re-derives it,
 	// while a stored one resurrects a complaint about a worktree the user has
 	// since restored. Cleared on every successful spawn. PluginMu-protected.
-	SpawnError  string
-	Type        string            // Plugin name (default: "terminal")
-	PluginState map[string]string // Scraped values (e.g., "session_id": "abc123")
+	SpawnError string
+	// PreparingWorktree names the branch a `git worktree add` is checking out
+	// for the pane that will REPLACE this one. Non-empty means this pane is a
+	// visible placeholder with no child process.
+	//
+	// It exists because the placeholder used to be a live shell in the
+	// repository root, and a live shell is indistinguishable from a create that
+	// finished and put the user in the wrong tree. On a large monorepo the
+	// checkout is minutes, so the tab looked done and wrong for all of it, and a
+	// failure left that shell in place with the reason nowhere but quild.log.
+	//
+	// Runtime-only and NOT persisted, like SpawnError beside it: a snapshot
+	// landing inside the checkout window would restore a pane waiting for an add
+	// no daemon is running. Cleared when the add settles — on success the pane
+	// is gone (replaced), on failure it is cleared alongside the SpawnError that
+	// explains it. PluginMu-protected.
+	PreparingWorktree string
+	Type              string            // Plugin name (default: "terminal")
+	PluginState       map[string]string // Scraped values (e.g., "session_id": "abc123")
 	// PluginMu protects every mutable field that can be read or written
 	// concurrently with the daemon's PTY-output goroutine: PluginState,
 	// GhostSnap, PTY (the pointer itself + Pid lookups), ExitCode, and

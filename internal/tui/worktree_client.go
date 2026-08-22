@@ -6,6 +6,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/artyomsv/quil/internal/gitworktree"
 	"github.com/artyomsv/quil/internal/ipc"
 )
 
@@ -45,7 +46,66 @@ type worktreeState struct {
 	root         string
 	worktreeRoot string
 	list         []ipc.WorktreeInfo
-	err          string
+	// branches is every LOCAL branch of the repository, short. It exists
+	// because list cannot answer "is this name taken": that one reports only
+	// branches with a checkout, and the ordinary collision is with a branch
+	// whose worktree was removed — invisible there, and the failure this was
+	// added for.
+	//
+	// branchesTruncated says the daemon clipped the list. It is deliberately NOT
+	// acted on: the check only ever refuses on a POSITIVE match, which stays a
+	// true positive however short the list is, and nothing here claims a name is
+	// available. Carried so a future affirmation ("✓ free") cannot be written
+	// against a list that is not evidence of absence.
+	branches          []string
+	branchesTruncated bool
+	err               string
+}
+
+// branchTaken reports whether the repository already has a branch by this name,
+// i.e. whether `git worktree add -b` will refuse it.
+//
+// EXACT comparison. A listing is git's spelling and the field is the user's;
+// folding case would refuse `Feat/X` on a repository holding `feat/x`, which git
+// accepts wherever its ref store is case-sensitive — and refusing a name the
+// user may legitimately create is the worse direction, because the message would
+// simply be wrong. On a case-insensitive ref store the collision falls through
+// to the daemon's own error, which the pane now shows.
+//
+// False for an empty list, which covers a directory that is not a repository, a
+// listing that has not answered yet, a branch listing that failed, and a daemon
+// too old to send one. Absence from a list nobody obtained is not evidence.
+func (s worktreeState) branchTaken(name string) bool {
+	for _, b := range s.branches {
+		if b == name {
+			return true
+		}
+	}
+	return false
+}
+
+// validateNewBranch returns the message to show beside the name field, or "" when
+// the name can be used.
+//
+// ONE function for BOTH validation sites — the name field's Enter and
+// submitSetupDialog — because they must agree. They are reached by different
+// routes (Tab is handled above the field dispatch, so tabbing away and pressing
+// Continue never runs the field's Enter), and a check present in one and not the
+// other is a name refused in the dialog and accepted by the button beside it.
+//
+// Syntax FIRST, so a malformed name is described as malformed rather than as
+// absent from the branch list.
+func (s worktreeState) validateNewBranch(name string) string {
+	if err := gitworktree.ValidateBranch(name); err != nil {
+		return err.Error()
+	}
+	if s.branchTaken(name) {
+		// git's own wording, so a user who then hits the daemon's error on a
+		// case-insensitive ref store reads the same sentence twice rather than
+		// two descriptions of one fact.
+		return "branch " + name + " already exists"
+	}
+	return ""
 }
 
 // requestWorktrees asks the daemon which worktrees the repository containing
@@ -90,6 +150,8 @@ func (m *Model) applyWorktreeList(msg worktreeListMsg) {
 	m.worktrees.root = msg.Resp.Root
 	m.worktrees.worktreeRoot = msg.Resp.WorktreeRoot
 	m.worktrees.list = msg.Resp.Worktrees
+	m.worktrees.branches = msg.Resp.Branches
+	m.worktrees.branchesTruncated = msg.Resp.BranchesTruncated
 	m.worktrees.err = msg.Resp.Error
 }
 

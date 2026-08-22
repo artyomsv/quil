@@ -3,6 +3,7 @@ package tui
 import (
 	"log"
 	"time"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -93,8 +94,13 @@ func (s worktreeState) branchTaken(name string) bool {
 // Continue never runs the field's Enter), and a check present in one and not the
 // other is a name refused in the dialog and accepted by the button beside it.
 //
-// Syntax FIRST, so a malformed name is described as malformed rather than as
-// absent from the branch list.
+// Syntax FIRST, and that ordering is a SECURITY property rather than only a
+// nicer message. ValidateBranch enforces maxBranchLen (255 bytes) and rejects
+// every rune below 0x20, so by the time the name is interpolated into the
+// message below it is bounded and control-free. Swapping the two statements
+// would put an arbitrary-length, escape-bearing string into a dialog row that
+// has no bound of its own — and lipgloss measures an escape as zero cells, so
+// the row's truncation would neither count nor cut it.
 func (s worktreeState) validateNewBranch(name string) string {
 	if err := gitworktree.ValidateBranch(name); err != nil {
 		return err.Error()
@@ -167,6 +173,42 @@ func (m *Model) applyWorktreeTimeout(msg worktreeTimeoutMsg) {
 	// A reason, not an empty list: "the scan never answered" and "this
 	// repository has one worktree" must not render identically.
 	m.worktrees.err = "worktree scan timed out"
+}
+
+// preparingBranchCap bounds the branch name a placeholder pane carries.
+//
+// Every other remote string in this package is sanitized and bounded at RENDER,
+// which is enough because it is rendered once per change. This one is not: the
+// spinner advances every 100 ms, spinnerFrame is part of paneRenderKey, so the
+// frame cache cannot absorb any of it — and renderPreparingWorktree does four
+// O(len) passes over the whole value per frame (sanitizeRemoteText, elideMiddle's
+// own width call, truncateCells', and lastCellsToWidth, which segments the
+// ENTIRE string into graphemes before walking back for the few cells it needs).
+// A frame may carry megabytes, so an unbounded value is hundreds of MB/s of
+// transient garbage on Bubble Tea's single Update goroutine, indefinitely, with
+// nothing that ends the condition.
+//
+// gitworktree.maxBranchLen is 255, so no honest value is affected — and the
+// daemon now refuses an over-long name before it can reach a broadcast at all.
+// This is the belt to that braces: it is the one place a future second render
+// path cannot forget, which is why the bound is at INGEST rather than at render.
+// Same shape as the project form's formMsgNameCap.
+const preparingBranchCap = 256
+
+// boundBranch clips a branch name from the wire to preparingBranchCap.
+//
+// Rune-safe: a branch name may carry non-ASCII, and lopping a byte off a
+// multi-byte rune leaves invalid UTF-8 for lipgloss to measure — the same reason
+// the name field's backspace decodes the last rune rather than dropping a byte.
+func boundBranch(s string) string {
+	if len(s) <= preparingBranchCap {
+		return s
+	}
+	b := []byte(s[:preparingBranchCap])
+	for len(b) > 0 && !utf8.Valid(b) {
+		b = b[:len(b)-1]
+	}
+	return string(b)
 }
 
 // createPaneTimeoutMsg fires when a worktree create has not answered. tabID

@@ -7008,7 +7008,7 @@ func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
 					pi.SpawnError = s
 				}
 				if s, ok := pm["preparing_worktree"].(string); ok {
-					pi.PreparingWorktree = s
+					pi.PreparingWorktree = boundBranch(s)
 				}
 				if b, ok := pm["git_branch"].(string); ok {
 					pi.GitBranch = b

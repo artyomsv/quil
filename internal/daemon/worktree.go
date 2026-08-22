@@ -123,7 +123,11 @@ func worktreeListResponse(req ipc.WorktreeListReqPayload, fallback string) ipc.W
 	// are an extra check whose absence degrades to the behaviour that shipped
 	// before it existed — git's own refusal at create time.
 	if branches, truncated, bErr := worktreeBranchesFn(ctx, dir); bErr != nil {
-		log.Printf("worktree list: branches for %s: %v", dir, bErr)
+		// %q, not %s: dir comes straight off the wire unvalidated and may carry
+		// ESC/CSI/OSC bytes and newlines, and quild.log is a plain file people
+		// read with cat and tail — which interpret them. Same hazard
+		// sanitizeRemoteText polices on the render side (CWE-117).
+		log.Printf("worktree list: branches for %q: %v", dir, bErr)
 	} else {
 		out.Branches = branches
 		out.BranchesTruncated = truncated

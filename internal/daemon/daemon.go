@@ -23,6 +23,7 @@ import (
 
 	"github.com/artyomsv/quil/internal/claudehook"
 	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/gitworktree"
 	"github.com/artyomsv/quil/internal/hookevents"
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/logger"
@@ -1747,6 +1748,37 @@ func (d *Daemon) handleCreateTab(conn *ipc.Conn, msg *ipc.Message) {
 	spec := payload.FirstPane
 	if spec == nil {
 		spec = &ipc.FirstPaneSpec{}
+	}
+	// Validated HERE, before the branch is stored on a pane and broadcast, and
+	// not only inside worktreeAddAndCreate — which runs on a worker goroutine
+	// this function launches LAST, so by the time it validates, an unvalidated
+	// name has already reached Pane.PreparingWorktree and gone out on a full
+	// workspace_state frame to every attached client.
+	//
+	// worktree_add.go states the invariant: "Validated BEFORE any repository
+	// write, so a bad name costs no git invocation, no permit and no slot — and
+	// never reaches argv." A placeholder is not a repository write, but it is a
+	// broadcast, and any IPC client can send create_tab (a pane's own child runs
+	// as the same user and the socket is right there — the reachability the
+	// DestroyPanePayload.RemoveWorktree design already accounts for).
+	//
+	// The check in worktreeAddAndCreate STAYS: handleCreatePane reaches it by
+	// another route. The two are a ladder, not a duplicate — the arrangement
+	// uniqueProjectName already uses.
+	if spec.Worktree != nil {
+		if err := gitworktree.ValidateBranch(spec.Worktree.Branch); err != nil {
+			// Reported to the requester exactly as the worktree path would have
+			// reported it, so the client's own error handling is unchanged, and
+			// the spec is dropped so the tab still opens with a usable pane
+			// rather than nothing.
+			log.Printf("new tab %s: worktree refused: %v", tab.ID, err)
+			respondTo(conn, msg.ID, ipc.MsgCreatePaneResp, ipc.CreatePaneRespPayload{
+				TabID:    tab.ID,
+				Error:    err.Error(),
+				Worktree: spec.Worktree,
+			})
+			spec.Worktree = nil
+		}
 	}
 	paneType := firstPaneType(*spec)
 	create := ipc.CreatePanePayload{TabID: tab.ID, Type: paneType}
@@ -4903,6 +4935,32 @@ func (d *Daemon) handleRestartPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 
 	pane := d.session.Pane(req.PaneID)
 	if pane == nil {
+		respondTo(conn, msg.ID, ipc.MsgRestartPaneResp, ipc.RestartPaneRespPayload{PaneID: req.PaneID})
+		return
+	}
+	// A placeholder waiting on a checkout is not a pane to restart, and the
+	// refusal has to be here rather than only in the TUI: the MCP restart_pane
+	// tool reaches this handler too, as does any other IPC client.
+	//
+	// Restarting one spawns a live shell INTO the same pane object while
+	// createFirstPaneWorktree's goroutine is still running against that id, and
+	// nothing here clears PreparingWorktree — so the shell renders hidden behind
+	// the "creating worktree" block, and whichever outcome lands next clobbers
+	// it: success destroys the pane in replacePaneAt, discarding the shell the
+	// user just started, and failure writes SpawnError over a pane that now
+	// holds a live PTY child nobody will ever close.
+	//
+	// Keyed on PreparingWorktree and never on SpawnError: the pane a FAILED add
+	// leaves behind must still restart, because Alt+R is exactly what its error
+	// screen offers.
+	pane.PluginMu.Lock()
+	preparing := pane.PreparingWorktree
+	pane.PluginMu.Unlock()
+	if preparing != "" {
+		log.Printf("restart pane %s: refused, still creating worktree %s", pane.ID, preparing)
+		// Success stays false — the pane is unchanged, and the "creating
+		// worktree" block it is already showing IS the answer to why nothing
+		// happened.
 		respondTo(conn, msg.ID, ipc.MsgRestartPaneResp, ipc.RestartPaneRespPayload{PaneID: req.PaneID})
 		return
 	}

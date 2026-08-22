@@ -612,3 +612,88 @@ func TestStatus_RealGit_CountsIgnoredFilesToo(t *testing.T) {
 		t.Errorf("Status = %d, want 2 (.env plus the collapsed build/ directory)", got)
 	}
 }
+
+// Branches is the one operation in this package that had no real-git test, and
+// it is the one the branch-collision check depends on being exactly right.
+//
+// A stub can agree with any format string; only real git can say whether
+// `--format=%(refname:short)` yields the spelling a user types. The slash case
+// is the load-bearing one — `feat/x` must come back as `feat/x`, not as a
+// worktree-style `feat-x` and not with a refs/heads/ prefix — because the value
+// is compared with == against the dialog's field.
+func TestBranches_RealGit_ListsShortLocalNames(t *testing.T) {
+	repo := realGitRepo(t)
+	runGitIn(t, repo, "branch", "feat/x")
+	runGitIn(t, repo, "branch", "fix/nationality-filter")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	got, truncated, err := Branches(ctx, repo)
+	if err != nil {
+		t.Fatalf("Branches: %v", err)
+	}
+	if truncated {
+		t.Error("truncated = true for a three-branch repository")
+	}
+	want := map[string]bool{"master": true, "feat/x": true, "fix/nationality-filter": true}
+	if len(got) != len(want) {
+		t.Fatalf("Branches() = %v, want exactly %v", got, want)
+	}
+	for _, b := range got {
+		if !want[b] {
+			t.Errorf("Branches() returned %q, which is not one of the branches created", b)
+		}
+	}
+}
+
+// A remote-tracking ref must NOT appear: `git worktree add -b` refuses a name
+// that exists as a LOCAL branch, and a remote ref of the same name is not a
+// collision — so including it would refuse a name the user may legitimately
+// create, which is the false-positive direction this check must never take.
+func TestBranches_RealGit_ExcludesRemoteTrackingRefs(t *testing.T) {
+	repo := realGitRepo(t)
+	// A remote-tracking ref with no local branch of that name. Written
+	// directly because a real fetch needs a real remote.
+	head := strings.TrimSpace(runGitIn(t, repo, "rev-parse", "HEAD"))
+	runGitIn(t, repo, "update-ref", "refs/remotes/origin/only-on-remote", head)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	got, _, err := Branches(ctx, repo)
+	if err != nil {
+		t.Fatalf("Branches: %v", err)
+	}
+	for _, b := range got {
+		if strings.Contains(b, "only-on-remote") {
+			t.Errorf("Branches() returned the remote-tracking ref %q — it would refuse a branch name git accepts", b)
+		}
+	}
+}
+
+// Run from a SUBDIRECTORY, which is where the setup dialog actually asks from:
+// the CWD browser starts at the active pane's directory, and `git worktree
+// list` succeeding there is the whole reason the field is offered.
+func TestBranches_RealGit_WorksFromASubdirectory(t *testing.T) {
+	repo := realGitRepo(t)
+	runGitIn(t, repo, "branch", "feat/x")
+	sub := filepath.Join(repo, "internal", "tui")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	got, _, err := Branches(ctx, sub)
+	if err != nil {
+		t.Fatalf("Branches: %v", err)
+	}
+	var found bool
+	for _, b := range got {
+		if b == "feat/x" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("Branches() = %v from a subdirectory, want it to find the repository's branches", got)
+	}
+}

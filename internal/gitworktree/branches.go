@@ -18,6 +18,15 @@ import (
 // that cannot see the whole list must not conclude a name is FREE — that is the
 // false-negative direction, where a branch git will refuse looks available — so
 // the flag is what lets it fall back to "no opinion" instead.
+//
+// It bounds the WIRE PAYLOAD and what this function retains and allocates. It
+// does NOT bound how much the daemon READS: runGit uses cmd.Output(), which
+// buffers the whole of stdout with no limit, so a repository with a very large
+// packed-refs is fully in memory before the scan below sees a byte. That is
+// shared with List and is tracked in
+// techdebt/3-2-gitworktree-rungit-reads-stdout-unbounded.md — fixing it inside
+// runGit needs its own thought about partial records, which is why it is not
+// smuggled in here.
 const maxBranchList = 2000
 
 // Branches reports the local branch names of the repository containing dir,
@@ -52,19 +61,44 @@ func Branches(ctx context.Context, dir string) ([]string, bool, error) {
 		}
 		return nil, false, nil
 	}
+	// Scanned line by line rather than via ReplaceAll + Split, and the reason is
+	// the rule ValidateBranch states a few files away: "Bounded BEFORE the split
+	// below ... splitting a megabyte string and then rejecting it for length
+	// would allocate exactly what the bound exists to avoid."
+	//
+	// The same applies here and the cap was on the wrong side of it: ReplaceAll
+	// copies the whole listing, Split adds a string header per line over that
+	// copy, and only then does maxBranchList get a say — so a repository with a
+	// very large packed-refs (a mirror clone, or one a pane's own child creates)
+	// cost roughly three times the listing in one burst, on a daemon that hosts
+	// every pane on the machine. Cutting as we go means the cap bounds the
+	// allocation it was written to bound.
+	//
+	// NOT fixed here, and deliberately named rather than left implicit: runGit
+	// uses cmd.Output(), which buffers the whole of stdout with no limit, so the
+	// listing is still fully READ before this loop sees it. That is shared with
+	// List (and Add/Remove/Status), and a truncated `worktree list --porcelain`
+	// would parse into a confidently wrong answer rather than an error — so a
+	// read limit belongs in a change scoped to that function, with its own
+	// thought about partial records, not smuggled in here.
 	var list []string
-	for _, line := range strings.Split(strings.ReplaceAll(out, "\r\n", "\n"), "\n") {
-		name := strings.TrimSpace(line)
-		// git appends a trailing newline, so the last field is always empty.
-		// An empty entry would match the branch field's own initial state and
-		// refuse it before a character has been typed.
-		if name == "" {
-			continue
+	rest := out
+	for rest != "" && len(list) < maxBranchList {
+		line, remainder, found := strings.Cut(rest, "\n")
+		if found {
+			rest = remainder
+		} else {
+			rest = ""
 		}
-		if len(list) == maxBranchList {
-			return list, true, nil
+		// TrimSpace also drops the CR of a CRLF listing, which is why there is
+		// no ReplaceAll pass. git appends a trailing newline, so the last field
+		// is always empty — and an empty entry would match the branch field's
+		// own initial state and refuse it before a character has been typed.
+		if name := strings.TrimSpace(line); name != "" {
+			list = append(list, name)
 		}
-		list = append(list, name)
 	}
-	return list, false, nil
+	// Truncated only if something was actually left unread. The loop can also
+	// exit on a listing that ends exactly at the cap, which is complete.
+	return list, strings.TrimSpace(rest) != "", nil
 }

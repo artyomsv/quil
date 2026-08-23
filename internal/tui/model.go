@@ -443,6 +443,7 @@ type Model struct {
 	confirmID          string                 // ID of pane/tab to delete
 	confirmName        string                 // display name for confirmation
 	confirmDetail      string                 // extra remote-sourced line (upgrade/apply-update confirm); sanitized+bounded at render
+	confirmOfflineKind OfflineKind            // which provisioning ask this is (upgrade vs first install); decides the confirm's body
 	pendingApplyVer    string                 // version to apply when the in-flight MsgStageUpdateReq answers; set only by a press meaning APPLY (see applyStageUpdateResp)
 	updateReqInFlight  bool                   // a MsgStageUpdateReq is unanswered; a second press must not queue a second one (see sendStageUpdateReq)
 	applyConfirmReturn dialogScreen           // where Esc on the apply confirm goes: About when the press came from there, else back to the panes
@@ -1405,7 +1406,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// sidebar offer the upgrade instead" described nothing: the sidebar
 			// had no such affordance, so a link that drifted out of version
 			// mid-session went quiet with no way to act on it in the tool.
-			m.enqueueUpgradePrompt(msg.dest, msg.err.Error())
+			m.enqueueUpgradePrompt(msg.dest, msg.err.Error(), offlineNeedsUpgrade)
 			m.promptNextUpgrade()
 			return m, nil
 		}

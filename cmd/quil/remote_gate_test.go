@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/tui"
@@ -93,5 +95,50 @@ func TestVerifyRemoteLinkGated_MatchingVersionPassesEitherWay(t *testing.T) {
 		if err := verifyRemoteLinkGated(client, time.Second, gate); err != nil {
 			t.Errorf("gate=%v: %v, want nil", gate, err)
 		}
+	}
+}
+
+// A daemon this client did not start controls the version string, and nothing
+// on the wire bounds it below ipc.maxFrameSize (10 MB). versionpkg.Parsed
+// truncates at the first "-", so "1.0.0-"+<megabytes> compares as an ordinary
+// 1.0.0 and the whole payload would flow into gateExtraVersion's error text,
+// then into OfflineState.Detail, and be re-measured on every rendered frame.
+func TestClampVersionString(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"a real version is untouched", "1.63.2", "1.63.2"},
+		{"a pre-release version is untouched", "1.63.2-rc1+build.7", "1.63.2-rc1+build.7"},
+		{"empty stays empty", "", ""},
+		{"exactly at the limit is untouched", strings.Repeat("a", maxVersionStringLen), strings.Repeat("a", maxVersionStringLen)},
+		{"one over is cut", strings.Repeat("a", maxVersionStringLen+1), strings.Repeat("a", maxVersionStringLen)},
+		{"a hostile payload is cut", "1.0.0-" + strings.Repeat("A", 9_000_000), "1.0.0-" + strings.Repeat("A", maxVersionStringLen-6)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := clampVersionString(tc.in); got != tc.want {
+				t.Errorf("clampVersionString(%d bytes) = %d bytes, want %d",
+					len(tc.in), len(got), len(tc.want))
+			}
+		})
+	}
+}
+
+// The cut must land on a rune boundary: sanitizeRemoteText downstream documents
+// valid UTF-8 as a PRECONDITION, and a severed multi-byte sequence decodes to
+// U+FFFD — a rune outside every range it strips, so it would pass through.
+func TestClampVersionString_CutsOnARuneBoundary(t *testing.T) {
+	// Multi-byte runes chosen so the byte limit falls mid-sequence.
+	got := clampVersionString(strings.Repeat("日", 40)) // 3 bytes each = 120
+	if !utf8.ValidString(got) {
+		t.Fatalf("clamped value is not valid UTF-8: %q", got)
+	}
+	if len(got) > maxVersionStringLen {
+		t.Errorf("clamped to %d bytes, over the %d-byte limit", len(got), maxVersionStringLen)
+	}
+	if len(got) < maxVersionStringLen-3 {
+		t.Errorf("clamped to %d bytes, wasting more than one rune of the %d-byte budget",
+			len(got), maxVersionStringLen)
 	}
 }

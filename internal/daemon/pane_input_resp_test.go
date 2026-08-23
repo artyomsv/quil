@@ -131,3 +131,66 @@ func TestHandlePaneInput_AnswersOnlyWhenTheRequestCarriesAnID(t *testing.T) {
 		return
 	}
 }
+
+// And the NEGATIVE half, which is what the test above is named for and did not
+// actually check: an ID-LESS pane_input must be answered with nothing at all.
+//
+// The guard is load-bearing rather than tidy. respondTo goes to critCh, the
+// MUST-DELIVER queue, whose overflow does not drop the frame — it force-closes
+// the client. The TUI sends one id-less pane_input per keystroke, so answering
+// them would put one critical frame per keystroke back at the TUI, and a paste
+// or a held key outruns sendLoop and disconnects it. That is the documented
+// 2026-08-09 shape.
+//
+// Ordered by a SECOND, id-bearing request of another type rather than by a
+// sleep: one conn's messages are dispatched sequentially, so the arrival of the
+// second answer proves the first was already handled and produced nothing.
+func TestHandlePaneInput_SendsNoAnswerWhenTheRequestHasNoID(t *testing.T) {
+	d, sock := overlayServerDaemonWithConfig(t, config.Default())
+	client := attachTestClient(t, sock)
+	defer client.Close()
+
+	tab := d.session.CreateTab("t")
+	pane, err := d.session.CreatePane(tab.ID, t.TempDir())
+	if err != nil {
+		t.Fatalf("CreatePane: %v", err)
+	}
+	pane.PluginMu.Lock()
+	pane.PreparingWorktree = "feat/x" // guarantees a refusal, so an answer WOULD be sent
+	pane.PluginMu.Unlock()
+
+	bare, err := ipc.NewMessage(ipc.MsgPaneInput, ipc.PaneInputPayload{PaneID: pane.ID, Data: []byte("x")})
+	if err != nil {
+		t.Fatalf("NewMessage: %v", err)
+	}
+	if err := client.Send(bare); err != nil { // no ID
+		t.Fatalf("send: %v", err)
+	}
+	marker, err := ipc.NewMessage(ipc.MsgPaneStatusReq, ipc.PaneStatusReqPayload{PaneID: pane.ID})
+	if err != nil {
+		t.Fatalf("NewMessage: %v", err)
+	}
+	marker.ID = "marker-1"
+	if err := client.Send(marker); err != nil {
+		t.Fatalf("send marker: %v", err)
+	}
+
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			t.Fatal("the marker response never arrived")
+		default:
+		}
+		resp, err := client.Receive()
+		if err != nil {
+			t.Fatalf("receive: %v", err)
+		}
+		if resp.Type == ipc.MsgPaneInputResp {
+			t.Fatal("an id-less pane_input was answered — one critical frame per keystroke would force-disconnect the TUI")
+		}
+		if resp.Type == ipc.MsgPaneStatusResp && resp.ID == "marker-1" {
+			return // the id-less input was dispatched before this and produced nothing
+		}
+	}
+}

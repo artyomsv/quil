@@ -2558,9 +2558,24 @@ func (d *Daemon) recoverEmptyTab(tabID, reason string) {
 	if tabID == "" || d.session.Tab(tabID) == nil {
 		return
 	}
-	if len(d.session.Panes(tabID)) > 0 {
-		return
+	// NORMAL panes only, the same split ensureTabNotEmpty makes twenty lines
+	// below and for the same reason. Counting everything let an open OVERLAY
+	// (lazygit / k9s / lazysql — the slot is per tab) satisfy this and skip the
+	// recovery, leaving the tab with zero normal panes and a muted overlay: the
+	// state `.claude/CLAUDE.md` names as one no create path repairs. Reachable
+	// by replacing a pane in a tab that has an overlay open, and silent, since
+	// Swapped skips failPreparingPane.
+	for _, p := range d.session.Panes(tabID) {
+		p.PluginMu.Lock()
+		isOverlay := p.Overlay
+		p.PluginMu.Unlock()
+		if !isOverlay {
+			return
+		}
 	}
+	// The overlay is left in place, UNLIKE ensureTabNotEmpty's orphan sweep:
+	// there the tab is losing its last pane for good, here it is getting a
+	// normal one back on the next line.
 	pane, err := d.session.CreatePane(tabID, d.defaultCWD())
 	if err != nil {
 		log.Printf("tab %s: could not recover an empty tab: %v", tabID, err)

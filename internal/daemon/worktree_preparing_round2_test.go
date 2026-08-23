@@ -244,3 +244,53 @@ func TestSpawnPane_ClearsAStaleWorktreeInterrupted(t *testing.T) {
 		t.Error("WorktreeInterrupted survived a successful spawn — the pane would refuse again on its next lazy spawn")
 	}
 }
+
+// An OVERLAY sibling must not make the recovery a no-op.
+//
+// recoverEmptyTab counted every pane, while ensureTabNotEmpty twenty lines below
+// deliberately splits overlays out and tests `normal > 0`. So a tab holding an
+// open overlay (lazygit / k9s / lazysql — the shared slot is per tab) plus the
+// pane being replaced was left with ZERO normal panes and a muted overlay, which
+// .claude/CLAUDE.md names as the state no create path repairs. The user's only
+// notice is the three-second flash, because Swapped skips failPreparingPane.
+func TestReplacePaneAt_SpawnFailureRecoversATabHoldingOnlyAnOverlay(t *testing.T) {
+	d := newTestDaemon(t)
+	tab := d.session.CreateTab("t")
+	overlay, err := d.session.CreatePane(tab.ID, t.TempDir())
+	if err != nil {
+		t.Fatalf("CreatePane: %v", err)
+	}
+	overlay.PluginMu.Lock()
+	overlay.Overlay = true
+	overlay.PluginMu.Unlock()
+	old, err := d.session.CreatePane(tab.ID, t.TempDir())
+	if err != nil {
+		t.Fatalf("CreatePane: %v", err)
+	}
+	stubFailingSpawn(t)
+
+	if _, _, err := d.replacePaneAt(ipc.CreatePanePayload{
+		TabID:         tab.ID,
+		ReplacePaneID: old.ID,
+	}, t.TempDir(), "terminal"); err == nil {
+		t.Fatal("the stubbed spawn did not fail")
+	}
+
+	var normal int
+	for _, p := range d.session.Panes(tab.ID) {
+		p.PluginMu.Lock()
+		isOverlay := p.Overlay
+		p.PluginMu.Unlock()
+		if !isOverlay {
+			normal++
+		}
+	}
+	if normal != 1 {
+		t.Errorf("tab has %d normal panes, want 1 — an overlay over nothing is the state no create path repairs", normal)
+	}
+	// The overlay itself is left alone: unlike ensureTabNotEmpty's case it is
+	// not orphaned, because the tab is getting a normal pane back.
+	if d.session.Pane(overlay.ID) == nil {
+		t.Error("the overlay was destroyed; recovery should leave it in place")
+	}
+}

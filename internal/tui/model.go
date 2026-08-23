@@ -613,6 +613,19 @@ type Model struct {
 	// projectFormInstalling holds the host a remote install is running for,
 	// so its result is matched the same way a dial's is.
 	projectFormInstalling string
+	// upgradingDests records hosts an in-tool upgrade is provisioning RIGHT NOW,
+	// so destInstalledMsg can be routed to the offer's completion path.
+	//
+	// Not projectFormInstalling: that field belongs to the New Project dialog
+	// and is the filter destInstalledMsg was written around. The upgrade confirm
+	// never set it, so its completion message matched nothing and was dropped —
+	// which meant a successful push STOPPED the remote daemon (runRemoteSetup
+	// does) and then nothing ever dialled the host again, so nothing ran the
+	// `quil --stdio` that would have started a new one. Observed on a real host:
+	// binaries updated, daemon shut down, panes gone, and the project stuck on
+	// "upgrading…" for an hour and a half.
+	upgradingDests map[string]bool
+
 	// installedDests records hosts this session has already provisioned, so a
 	// dial that still reports the binary missing afterwards reports instead of
 	// installing again.
@@ -2152,6 +2165,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(attach, browse)
 
 	case destInstalledMsg:
+		// The in-tool upgrade offer's own completion, checked FIRST because it
+		// has nothing to do with the New Project dialog whose field the filter
+		// below reads. Without this arm the message matched nothing and was
+		// discarded, and since runRemoteSetup stops the remote daemon as part
+		// of the push, "discarded" meant the host was left with no daemon and
+		// no dial to start one.
+		if m.upgradingDests[msg.dest] {
+			delete(m.upgradingDests, msg.dest)
+			return m.finishDestUpgrade(msg)
+		}
 		if msg.dest != m.projectFormInstalling {
 			return m, nil // the user moved on, same as a stale dial
 		}

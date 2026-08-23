@@ -1064,6 +1064,14 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.installedDests = map[string]bool{}
 			}
 			m.installedDests[id] = true
+			// Claim the completion BEFORE starting the install, or
+			// destInstalledMsg arrives matching nothing and is dropped — which
+			// leaves the host with its daemon stopped by the push and no dial
+			// to start a new one. See Model.upgradingDests.
+			if m.upgradingDests == nil {
+				m.upgradingDests = map[string]bool{}
+			}
+			m.upgradingDests[id] = true
 			if p := m.projectForDest(id); p != nil && p.Offline != nil {
 				p.Offline.Detail = "upgrading — the daemon on that host restarts…"
 			}

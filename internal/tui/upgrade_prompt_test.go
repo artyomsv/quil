@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -414,5 +415,107 @@ func TestUpgradePrompt_FirstInstallDoesNotThreatenPanes(t *testing.T) {
 	up := updated2.(Model).renderConfirmDialog()
 	if !strings.Contains(up, "Upgrade quil on") || !strings.Contains(up, "RESTARTS") {
 		t.Errorf("the upgrade confirm lost its own warning:\n%s", up)
+	}
+}
+
+// ACCEPTING THE OFFER HAS TO END SOMEWHERE. destInstalledMsg was filtered by
+// projectFormInstalling — the New Project dialog's field, which the upgrade
+// confirm never set — so the completion of an accepted upgrade matched nothing
+// and was dropped.
+//
+// That is not a cosmetic stall. runRemoteSetup STOPS the remote daemon as part
+// of the push, and the only thing that starts a new one is a dial, because a
+// dial is what runs `quil --stdio` over there. Dropping the completion left a
+// host with updated binaries, no daemon, dead panes, and a pane area still
+// reading "upgrading…". Observed on a real host for an hour and a half.
+func TestUpgradePrompt_AcceptedUpgradeReconnectsTheHost(t *testing.T) {
+	m, installed := upgradeModel(t)
+	m.SetRedialFunc("artyom@host", func(Client) (Client, error) { return nil, nil })
+	m.SeedOfflineDest("artyom@host", "artyom@host", OfflineNeedsUpgrade, mismatchDetail, nil)
+
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 44})
+	m = updated.(Model)
+	if m.dialog != dialogConfirm {
+		t.Fatalf("fixture raised no offer: %v", m.dialog)
+	}
+
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatal("accepting produced no command")
+	}
+	if !m.upgradingDests["artyom@host"] {
+		t.Fatal("accepting did not claim the completion — destInstalledMsg will match nothing")
+	}
+	runCmd(cmd)
+	if len(*installed) != 1 {
+		t.Fatalf("install ran for %v, want one host", *installed)
+	}
+
+	// The push finished. This is the message that used to be discarded.
+	updated, cmd = m.Update(destInstalledMsg{dest: "artyom@host"})
+	got := updated.(Model)
+
+	p := got.projectForDest("artyom@host")
+	if p == nil || p.Offline == nil {
+		t.Fatal("the host lost its offline row")
+	}
+	if !p.Offline.Kind.laddered() {
+		t.Errorf("kind = %v after a successful upgrade; a non-laddered kind means "+
+			"nothing ever dials the host, so nothing starts the daemon the push stopped", p.Offline.Kind)
+	}
+	if got.upgradingDests["artyom@host"] {
+		t.Error("the completion claim was not released")
+	}
+	if cmd == nil {
+		t.Fatal("a successful upgrade produced no reconnect command")
+	}
+	if _, ok := cmd().(offlineDestMsg); !ok {
+		t.Errorf("a successful upgrade did not wake the reconnect ladder; got %T", cmd())
+	}
+}
+
+// A failed push must say so and name the way out, not sit on "upgrading…".
+func TestUpgradePrompt_FailedUpgradeReportsInsteadOfHanging(t *testing.T) {
+	m, _ := upgradeModel(t)
+	m.SeedOfflineDest("artyom@host", "artyom@host", OfflineNeedsUpgrade, mismatchDetail, nil)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 44})
+	m = updated.(Model)
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
+	m = updated.(Model)
+	runCmd(cmd)
+
+	updated, _ = m.Update(destInstalledMsg{dest: "artyom@host", err: errors.New("scp: permission denied")})
+	got := updated.(Model)
+
+	p := got.projectForDest("artyom@host")
+	if p == nil || p.Offline == nil {
+		t.Fatal("the host lost its offline row")
+	}
+	if strings.Contains(p.Offline.Detail, "upgrading") {
+		t.Errorf("a failed upgrade still claims to be upgrading: %q", p.Offline.Detail)
+	}
+	if !strings.Contains(p.Offline.Detail, "quil remote setup") {
+		t.Errorf("a failed upgrade names no way out: %q", p.Offline.Detail)
+	}
+	if p.Offline.Kind.laddered() {
+		t.Error("a failed upgrade entered the reconnect ladder; the binary is still wrong")
+	}
+}
+
+// The New Project dialog's own install path must keep working — it is the one
+// destInstalledMsg was originally written for, and it shares the message.
+func TestUpgradePrompt_FormInstallPathStillHandled(t *testing.T) {
+	m, _ := upgradeModel(t)
+	m.projectFormInstalling = "artyom@new"
+	m.dialog = dialogProjectNew
+
+	updated, _ := m.Update(destInstalledMsg{dest: "artyom@new"})
+	got := updated.(Model)
+	if got.projectFormInstalling != "" {
+		t.Error("the form install path no longer clears its marker")
+	}
+	if got.projectFormDialing != "artyom@new" {
+		t.Errorf("the form install path no longer retries the dial: %q", got.projectFormDialing)
 	}
 }

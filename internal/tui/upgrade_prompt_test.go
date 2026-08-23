@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -415,4 +416,206 @@ func TestUpgradePrompt_FirstInstallDoesNotThreatenPanes(t *testing.T) {
 	if !strings.Contains(up, "Upgrade quil on") || !strings.Contains(up, "RESTARTS") {
 		t.Errorf("the upgrade confirm lost its own warning:\n%s", up)
 	}
+}
+
+// ACCEPTING THE OFFER HAS TO END SOMEWHERE. destInstalledMsg was filtered by
+// projectFormInstalling — the New Project dialog's field, which the upgrade
+// confirm never set — so the completion of an accepted upgrade matched nothing
+// and was dropped.
+//
+// That is not a cosmetic stall. runRemoteSetup STOPS the remote daemon as part
+// of the push, and the only thing that starts a new one is a dial, because a
+// dial is what runs `quil --stdio` over there. Dropping the completion left a
+// host with updated binaries, no daemon, dead panes, and a pane area still
+// reading "upgrading…". Observed on a real host for an hour and a half.
+func TestUpgradePrompt_AcceptedUpgradeReconnectsTheHost(t *testing.T) {
+	m, installed := upgradeModel(t)
+	m.SetRedialFunc("artyom@host", func(Client) (Client, error) { return nil, nil })
+	m.SeedOfflineDest("artyom@host", "artyom@host", OfflineNeedsUpgrade, mismatchDetail, nil)
+
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 44})
+	m = updated.(Model)
+	if m.dialog != dialogConfirm {
+		t.Fatalf("fixture raised no offer: %v", m.dialog)
+	}
+
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatal("accepting produced no command")
+	}
+	if !m.upgradingDests["artyom@host"] {
+		t.Fatal("accepting did not claim the completion — destInstalledMsg will match nothing")
+	}
+	runCmd(cmd)
+	if len(*installed) != 1 {
+		t.Fatalf("install ran for %v, want one host", *installed)
+	}
+
+	// The push finished. This is the message that used to be discarded.
+	updated, cmd = m.Update(destInstalledMsg{dest: "artyom@host"})
+	got := updated.(Model)
+
+	p := got.projectForDest("artyom@host")
+	if p == nil || p.Offline == nil {
+		t.Fatal("the host lost its offline row")
+	}
+	if !p.Offline.Kind.laddered() {
+		t.Errorf("kind = %v after a successful upgrade; a non-laddered kind means "+
+			"nothing ever dials the host, so nothing starts the daemon the push stopped", p.Offline.Kind)
+	}
+	if got.upgradingDests["artyom@host"] {
+		t.Error("the completion claim was not released")
+	}
+	if cmd == nil {
+		t.Fatal("a successful upgrade produced no reconnect command")
+	}
+	if _, ok := cmd().(offlineDestMsg); !ok {
+		t.Errorf("a successful upgrade did not wake the reconnect ladder; got %T", cmd())
+	}
+}
+
+// A failed push must say so and name the way out, not sit on "upgrading…".
+func TestUpgradePrompt_FailedUpgradeReportsInsteadOfHanging(t *testing.T) {
+	m, _ := upgradeModel(t)
+	m.SeedOfflineDest("artyom@host", "artyom@host", OfflineNeedsUpgrade, mismatchDetail, nil)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 44})
+	m = updated.(Model)
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
+	m = updated.(Model)
+	runCmd(cmd)
+
+	updated, _ = m.Update(destInstalledMsg{dest: "artyom@host", err: errors.New("scp: permission denied")})
+	got := updated.(Model)
+
+	p := got.projectForDest("artyom@host")
+	if p == nil || p.Offline == nil {
+		t.Fatal("the host lost its offline row")
+	}
+	if strings.Contains(p.Offline.Detail, "upgrading") {
+		t.Errorf("a failed upgrade still claims to be upgrading: %q", p.Offline.Detail)
+	}
+	if !strings.Contains(p.Offline.Detail, "quil remote setup") {
+		t.Errorf("a failed upgrade names no way out: %q", p.Offline.Detail)
+	}
+	if p.Offline.Kind.laddered() {
+		t.Error("a failed upgrade entered the reconnect ladder; the binary is still wrong")
+	}
+}
+
+// The New Project dialog's own install path must keep working — it is the one
+// destInstalledMsg was originally written for, and it shares the message.
+func TestUpgradePrompt_FormInstallPathStillHandled(t *testing.T) {
+	m, _ := upgradeModel(t)
+	m.projectFormInstalling = "artyom@new"
+	m.dialog = dialogProjectNew
+
+	updated, _ := m.Update(destInstalledMsg{dest: "artyom@new"})
+	got := updated.(Model)
+	if got.projectFormInstalling != "" {
+		t.Error("the form install path no longer clears its marker")
+	}
+	if got.projectFormDialing != "artyom@new" {
+		t.Errorf("the form install path no longer retries the dial: %q", got.projectFormDialing)
+	}
+}
+
+// IN-SESSION RECOVERY. needsInstall and needsUpgrade never enter the ladder —
+// correct, since retrying a missing binary or a version mismatch re-fails until
+// the far side changes — but that left NO way back inside a running client once
+// the far side did change. Relaunching was the only cure, which is a poor answer
+// from a tool whose whole point is that sessions survive.
+//
+// The concrete case that forced this: an accepted upgrade whose completion was
+// lost left the host with its daemon stopped by the push and nothing to dial it.
+func TestOfflineDest_RetryKeyRecoversAHostWithNoLadder(t *testing.T) {
+	for _, kind := range []OfflineKind{OfflineNeedsUpgrade, OfflineNeedsInstall} {
+		m, _ := upgradeModel(t)
+		m.SetRedialFunc("artyom@host", func(Client) (Client, error) { return nil, nil })
+		m.SeedOfflineDest("artyom@host", "artyom@host", kind, "stuck", nil)
+		// The offer is not what is under test here.
+		m.upgradeQueue = nil
+		m.installedDests = map[string]bool{"artyom@host": true}
+		// SeedOfflineDest APPENDS, so index 0 is still the fixture's own live
+		// project. The retry key is scoped to what the user is looking at, so
+		// the offline row has to be the active one for it to apply at all.
+		focusProject(t, &m, "artyom@host")
+
+		if m.linkOf("artyom@host").active {
+			t.Fatalf("kind=%v: fixture already has a ladder running", kind)
+		}
+
+		updated, cmd := m.Update(tea.KeyPressMsg{Code: 'r', Text: reconnectResumeKey})
+		got := updated.(Model)
+
+		p := got.projectForDest("artyom@host")
+		if p == nil || p.Offline == nil {
+			t.Fatalf("kind=%v: the host lost its offline row", kind)
+		}
+		if !p.Offline.Kind.laddered() {
+			t.Errorf("kind=%v: still %v after a retry — nothing will dial it", kind, p.Offline.Kind)
+		}
+		if !got.linkOf("artyom@host").active {
+			t.Errorf("kind=%v: no ladder started", kind)
+		}
+		if got.installedDests["artyom@host"] {
+			t.Errorf("kind=%v: the once-per-host guard survived an explicit retry, so a "+
+				"still-mismatched host could never be re-offered", kind)
+		}
+		if cmd == nil {
+			t.Errorf("kind=%v: retry produced no command", kind)
+		}
+	}
+}
+
+// The affordance has to be on screen, or it does not exist.
+func TestOfflineDest_PaneAreaAdvertisesTheRetryKey(t *testing.T) {
+	for _, kind := range []OfflineKind{OfflineNeedsUpgrade, OfflineNeedsInstall} {
+		m := Model{
+			width: 100, height: 30,
+			projects: []*ProjectModel{{
+				ID: "proj-1", Name: "api", Dest: "gpu01",
+				Offline: &OfflineState{Kind: kind, Detail: "stuck"},
+			}},
+			notifications: NewNotificationCenter(30, 50),
+		}
+		out := stripANSI(m.View().Content)
+		if !strings.Contains(out, "to try again") {
+			t.Errorf("kind=%v: the pane area offers no way back:\n%s", kind, out)
+		}
+	}
+}
+
+// A host with no dialer must not pretend to retry — beginReconnect would reach
+// redialCmd with a nil RedialFunc.
+func TestOfflineDest_RetryKeyIsARefusalWithNoDialer(t *testing.T) {
+	m, _ := upgradeModel(t)
+	m.SeedOfflineDest("artyom@host", "artyom@host", OfflineNeedsUpgrade, "stuck", nil)
+	m.upgradeQueue = nil
+	focusProject(t, &m, "artyom@host")
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: 'r', Text: reconnectResumeKey})
+	got := updated.(Model)
+	if got.linkOf("artyom@host").active {
+		t.Error("a destination with no dialer started a ladder anyway")
+	}
+	if p := got.projectForDest("artyom@host"); p != nil && p.Offline != nil && p.Offline.Kind.laddered() {
+		t.Error("a destination with no dialer was reclassified as laddered, so it now looks retryable and is not")
+	}
+}
+
+// focusProject makes the row for dest the ACTIVE project. SeedOfflineDest
+// appends, so a fixture that seeds one still has its own live project at index
+// 0 — and a key scoped to what the user is looking at would then be evaluated
+// against the wrong row (and, in these fixtures, forwarded to a pane whose
+// client is nil).
+func focusProject(t *testing.T, m *Model, dest string) {
+	t.Helper()
+	for i, p := range m.projects {
+		if p.Dest == dest {
+			m.activeProject = i
+			return
+		}
+	}
+	t.Fatalf("no project for dest %q in %d rows", dest, len(m.projects))
 }

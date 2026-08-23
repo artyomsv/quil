@@ -214,13 +214,14 @@ func TestEmptyTabArea_EmptyDetailAppendsNothing(t *testing.T) {
 		Offline: &OfflineState{Kind: offlineNeedsUpgrade},
 	}, 100, 30)
 
-	if got := strings.Count(without, "\n"); got != 3 {
-		t.Errorf("an empty detail produced %d newlines, want 3 (a 4-line block):\n%q", got, without)
+	// head, blank, two reason lines, blank, retry hint = 6 lines / 5 newlines.
+	if got := strings.Count(without, "\n"); got != 5 {
+		t.Errorf("an empty detail produced %d newlines, want 5 (a 6-line block):\n%q", got, without)
 	}
 	if strings.HasSuffix(without, "\n") {
 		t.Errorf("an empty detail left a trailing blank line: %q", without)
 	}
-	if strings.Count(withDetail, "\n") != 5 {
+	if strings.Count(withDetail, "\n") != 7 {
 		t.Errorf("a detail should add exactly two lines: %q", withDetail)
 	}
 }
@@ -233,11 +234,30 @@ func TestEmptyTabArea_ShortFrameDropsTheDetail(t *testing.T) {
 		Name: "api", Dest: "gpu01",
 		Offline: &OfflineState{Kind: offlineNeedsUpgrade, Detail: "gpu01 runs 1.0.0, this client runs 2.0.0"},
 	}
-	if got := strings.Count(Model{}.offlineTabAreaMsg(p, 100, 5), "\n"); got != 3 {
-		t.Errorf("a 5-row frame got %d newlines, want 3 — the detail must be dropped", got)
-	}
-	if got := strings.Count(Model{}.offlineTabAreaMsg(p, 100, 6), "\n"); got != 5 {
-		t.Errorf("a 6-row frame got %d newlines, want 5 — the detail fits", got)
+	// The optional tail goes on by priority while rows remain: the retry hint
+	// (the way OUT) before the detail (merely informative). The reason itself
+	// always survives, because PlaceVertical does not clip and an overflowing
+	// block pushes the status bar off screen.
+	for _, tc := range []struct {
+		h        int
+		newlines int
+		what     string
+	}{
+		{4, 3, "reason only — neither hint nor detail fits"},
+		{5, 3, "still no room for the hint's blank line plus the hint"},
+		{6, 5, "hint fits, detail does not"},
+		{7, 5, "still no room for the detail"},
+		{8, 7, "both fit"},
+		{30, 7, "everything fits"},
+	} {
+		if got := strings.Count(Model{}.offlineTabAreaMsg(p, 100, tc.h), "\n"); got != tc.newlines {
+			t.Errorf("h=%d got %d newlines, want %d (%s):\n%q",
+				tc.h, got, tc.newlines, tc.what, Model{}.offlineTabAreaMsg(p, 100, tc.h))
+		}
+		// Whatever was kept must fit the frame it was measured against.
+		if got := strings.Count(Model{}.offlineTabAreaMsg(p, 100, tc.h), "\n") + 1; got > tc.h {
+			t.Errorf("h=%d produced %d rows — PlaceVertical will not clip them", tc.h, got)
+		}
 	}
 }
 

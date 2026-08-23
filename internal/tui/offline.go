@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"log"
 	"strings"
 	"time"
 
@@ -148,6 +149,47 @@ func (m *Model) promptNextUpgrade() {
 	m.confirmName = next.dest
 	m.confirmDetail = next.detail
 	m.confirmOfflineKind = next.kind
+}
+
+// finishDestUpgrade closes out an upgrade the user accepted from the offer.
+//
+// Success does NOT mean "attached". runRemoteSetup pushes the archive and STOPS
+// the remote daemon; what starts a new one is the next dial, because that is
+// what runs `quil --stdio` over there. So the host is handed back to the
+// reconnect ladder rather than left to a bespoke re-dial: the ladder already
+// owns backoff (the daemon needs a moment to come up), the banner, the parked
+// state, and adoption on success. dialDest is deliberately not used — its
+// destDialedMsg is filtered by projectFormDialing, the New Project dialog's
+// field, which is the same shape of bug this function exists to fix.
+//
+// Reclassifying to offlineRetrying is what makes the ladder eligible:
+// offlineNeedsUpgrade is deliberately not laddered, since retrying a version
+// mismatch re-fails forever. Once the binary is replaced that reasoning no
+// longer applies, and the state has to move with it.
+func (m Model) finishDestUpgrade(msg destInstalledMsg) (tea.Model, tea.Cmd) {
+	p := m.projectForDest(msg.dest)
+	if p == nil || p.Offline == nil {
+		// Disconnected or already back while the push ran. Nothing to report
+		// against, and nothing to reconnect.
+		return m, nil
+	}
+	if msg.err != nil {
+		// installedDests stays armed: a push that failed once fails the same
+		// way on a retry it did not ask for, and this dialog opens by itself.
+		// The command is named instead, which is the affordance the pane area
+		// already carries for every other unrepairable offline state.
+		p.Offline.Detail = "upgrade failed — run: quil remote setup " + msg.dest
+		log.Printf("remote upgrade %s: %v", msg.dest, msg.err)
+		return m, nil
+	}
+	p.Offline.Kind = offlineRetrying
+	p.Offline.Detail = "upgraded — reconnecting…"
+	// The ladder refuses a destination it has already woken, and this one was
+	// woken at launch. Clearing the mark is what lets the post-upgrade dial
+	// happen at all.
+	delete(m.offlineWoken, msg.dest)
+	dest := msg.dest
+	return m, func() tea.Msg { return offlineDestMsg{dest: dest} }
 }
 
 // SeedOfflineDest installs (or replaces) the stand-in rows for one destination.

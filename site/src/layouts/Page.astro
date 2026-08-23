@@ -19,14 +19,18 @@ interface Props extends Page {
   schemas?: Record<string, unknown>[];
 }
 
-const { title, description, path, ogImage, keywords, schemas = [] } = Astro.props;
+// Everything except `schemas` is a BaseHead concern and is forwarded
+// verbatim. Spreading rather than re-listing each field means a new
+// optional on `Page` reaches <head> without a second edit here — the
+// class of bug where a page sets `ogType` and silently gets the default.
+const { schemas = [], ...page } = Astro.props;
 
 const sitewideSchemas = [organizationSchema(), websiteSchema(), ...schemas];
 ---
 <!doctype html>
 <html lang={SITE.htmlLang}>
   <head>
-    <BaseHead {title} {description} {path} {ogImage} {keywords} />
+    <BaseHead {...page} />
     <JsonLd data={sitewideSchemas} />
   </head>
   <body class="min-h-screen flex flex-col">

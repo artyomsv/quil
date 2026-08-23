@@ -1,6 +1,7 @@
 ---
 title: "How to Resume Your Claude Code Session After a Reboot — Automatically"
-description: "Reboot your machine and your Claude Code conversation is gone. Here's the manual fix with claude --resume, why it doesn't scale, and how to make it automatic."
+seoTitle: "Resume Claude Code Sessions After a Reboot, Automatically"
+description: "Claude Code forgets nothing — the process just dies. The claude --resume fix, why it breaks with multiple agents and projects, and how to make resume automatic."
 pubDate: 2026-06-14
 updatedDate: 2026-07-24
 ogImage: "https://cdn.stukans.com/quil/screenshots/pane-restoration-og.png"

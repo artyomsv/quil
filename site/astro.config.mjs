@@ -66,10 +66,16 @@ function gitLastMod(file) {
 }
 
 /**
- * Route → source file map. Astro's sitemap hook sees normalised URLs
- * without trailing slashes, which matches our trailingSlash: "never"
- * config. Every route we publish needs an entry here; a missing
- * entry falls back to the build time (harmless but less accurate).
+ * Route → source file map. The keys are SLASHLESS because that is the
+ * form Astro's sitemap hook normalises URLs to before calling
+ * `serialize` — it is NOT a statement about the site's config, which is
+ * `trailingSlash: "always"` (see below). This comment used to claim
+ * `trailingSlash: "never"`, which is the opposite of the truth and
+ * exactly the sort of stale note that gets trusted during a debugging
+ * session.
+ *
+ * Every route we publish needs an entry here; a missing entry falls
+ * back to the build time (harmless but less accurate).
  *
  * @type {Record<string, string>}
  */

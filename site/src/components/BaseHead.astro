@@ -15,20 +15,29 @@
 // Pages should import Page.astro which wraps this; they never touch
 // BaseHead directly.
 
-import { SITE, canonical, type Page } from "@/data/seo";
+import { SITE, canonical, absoluteURL, type Page } from "@/data/seo";
 
 type Props = Page;
-const { title, description, path, ogImage, keywords } = Astro.props;
+const {
+  title,
+  description,
+  path,
+  ogImage,
+  keywords,
+  seoTitle,
+  brandSuffix = true,
+  ogType = "website",
+} = Astro.props;
 
-const fullTitle = `${title} · ${SITE.name}`;
+// `seoTitle` overrides the editorial title for the SERP only; `brandSuffix`
+// is separate because the two decisions are independent — a post wants a
+// rewritten stem AND the suffix, a /vs page wants its own stem WITHOUT one.
+const titleStem = seoTitle ?? title;
+const fullTitle = brandSuffix ? `${titleStem} · ${SITE.name}` : titleStem;
 const canonicalURL = canonical(path);
-// ogImage may be a site-relative path ("/og/home.png") or an absolute
-// URL (a CDN-hosted card). Only prefix the origin for relative paths,
-// otherwise an absolute URL gets double-prefixed (https://quil.cchttps://…).
-const ogImageURL =
-  ogImage && /^https?:\/\//.test(ogImage)
-    ? ogImage
-    : SITE.url + (ogImage ?? SITE.defaultOgImage);
+// Relative-or-absolute handling lives in absoluteURL (see seo.ts) so the
+// JSON-LD path in the blog template resolves images the same way.
+const ogImageURL = absoluteURL(ogImage ?? SITE.defaultOgImage);
 ---
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -78,7 +87,7 @@ const ogImageURL =
 <link rel="canonical" href={canonicalURL} />
 
 <!-- Open Graph -->
-<meta property="og:type" content="website" />
+<meta property="og:type" content={ogType} />
 <meta property="og:site_name" content={SITE.name} />
 <meta property="og:title" content={fullTitle} />
 <meta property="og:description" content={description} />
@@ -103,8 +112,14 @@ const ogImageURL =
 <meta name="application-name" content="Quil" />
 <meta name="format-detection" content="telephone=no" />
 
-<!-- Sitemap discovery -->
+<!-- Sitemap + feed discovery -->
 <link rel="sitemap" href="/sitemap-index.xml" />
+<link
+  rel="alternate"
+  type="application/rss+xml"
+  title={`${SITE.name} — blog`}
+  href="/rss.xml"
+/>
 <meta name="robots" content="index, follow" />
 
 <!-- Generator tag (informational, not SEO-critical) -->

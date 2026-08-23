@@ -17,8 +17,20 @@ import { glob } from "astro/loaders";
 const blog = defineCollection({
   loader: glob({ pattern: "**/[^_]*.md", base: "./src/content/blog" }),
   schema: z.object({
-    /** Post title — also the <h1>, the <title> stem, and og:title. */
+    /** Post title — the <h1> and, unless `seoTitle` overrides it, the
+     *  <title> stem and og:title. */
     title: z.string(),
+    /**
+     * Optional <title> stem for search results, replacing `title`.
+     * The " · Quil" suffix is still appended, so budget ~53 characters.
+     *
+     * The <h1> deliberately keeps `title`. These serve different readers:
+     * the heading is read by someone already on the page, the <title> by
+     * someone choosing between ten blue links. Google truncates the
+     * latter near 60 characters — this post's editorial title ran to ~77
+     * and was cut mid-phrase in the SERP.
+     */
+    seoTitle: z.string().optional(),
     /** 120–160 char meta description, unique per post. */
     description: z.string(),
     /** Publish date (ISO, e.g. 2026-06-14). Drives sort order + schema. */

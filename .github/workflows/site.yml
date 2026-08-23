@@ -66,6 +66,18 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Full history: astro.config.mjs derives each page's sitemap
+          # <lastmod> from `git log -1 --format=%cI -- <file>`. The default
+          # depth-1 clone has exactly one commit, so that command returns
+          # the SAME date for every file — the deploy time — and every URL
+          # in the sitemap claims to have changed on every deploy.
+          #
+          # It fails silently and looks correct: the sitemap validates, the
+          # dates are real, and only comparing two of them reveals they are
+          # identical. Measured 2026-08-23: all 14 URLs carried
+          # lastmod 2026-08-23T13:32:28Z.
+          fetch-depth: 0
 
       - name: Set up Node
         uses: actions/setup-node@v4

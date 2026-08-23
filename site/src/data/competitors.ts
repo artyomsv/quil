@@ -191,6 +191,16 @@ export interface CompetitorInfo {
   matrix?: VsRow[];
   /** Optional override for the "where Quil takes over" headline. */
   quilHeadline?: string;
+  /**
+   * Optional <title> override, used verbatim (ComparePage suppresses the
+   * brand suffix, so "Quil vs tmux · Quil" can't happen).
+   *
+   * The default stem is "Quil vs <name>", which targets a phrase almost
+   * nobody types — the query with the demand is "<name> alternative".
+   * Set this where a competitor has a real alternative-seeking audience;
+   * leave it unset for herdr/aoe, whose names are searched directly.
+   */
+  seoTitle?: string;
   /** Per-page FAQ — 3-4 Q&A pairs. */
   faq: { question: string; answer: string }[];
 }
@@ -199,6 +209,7 @@ export const competitors: Record<CompetitorInfo["slug"], CompetitorInfo> = {
   tmux: {
     slug: "tmux",
     name: "tmux",
+    seoTitle: "Quil vs tmux — a tmux alternative that survives reboots",
     description:
       "The de-facto Unix terminal multiplexer. Server-side sessions, scriptable plugins, steep learning curve, shipped by default on most distros alongside screen.",
     positioning:
@@ -241,6 +252,7 @@ export const competitors: Record<CompetitorInfo["slug"], CompetitorInfo> = {
   zellij: {
     slug: "zellij",
     name: "Zellij",
+    seoTitle: "Quil vs Zellij — what a reboot does to each",
     description:
       "Modern Rust terminal multiplexer with a friendly UX, WASM plugins, and sane defaults. Released in 2021.",
     positioning:
@@ -273,6 +285,7 @@ export const competitors: Record<CompetitorInfo["slug"], CompetitorInfo> = {
   wezterm: {
     slug: "wezterm",
     name: "WezTerm",
+    seoTitle: "Quil vs WezTerm — what survives when the terminal closes",
     description:
       "A GPU-accelerated cross-platform terminal emulator with built-in multiplexer features, written in Rust, extensible via Lua. Released by Wez Furlong.",
     positioning:
@@ -305,6 +318,7 @@ export const competitors: Record<CompetitorInfo["slug"], CompetitorInfo> = {
   screen: {
     slug: "screen",
     name: "GNU Screen",
+    seoTitle: "Quil vs GNU Screen — persistence in 2026",
     description:
       "The original Unix terminal multiplexer, first released in 1987. Still shipped by default on most Unix distributions.",
     positioning:

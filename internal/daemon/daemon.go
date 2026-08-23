@@ -1802,12 +1802,24 @@ func (d *Daemon) handleCreateTab(conn *ipc.Conn, msg *ipc.Message) {
 	// The check in worktreeAddAndCreate STAYS: handleCreatePane reaches it by
 	// another route. The two are a ladder, not a duplicate — the arrangement
 	// uniqueProjectName already uses.
+	// BEFORE the validation below, and that order is the whole safety of this
+	// block. firstPaneType downgrades to a terminal only while Worktree is
+	// non-nil, so computing it AFTER a refusal dropped the spec hands back the
+	// REQUESTED type — and firstPanePayload then attaches InstanceArgs and
+	// ResumeSessionID, and the pane spawns in the repository ROOT. An agent
+	// running with its own arguments in the main checkout is exactly the
+	// isolation failure this path exists to prevent, reached by nothing more
+	// than a branch name git would refuse, and any IPC client can send
+	// create_tab. Pinned by TestHandleCreateTab_AnInvalidBranchStillLeavesAHarmlessPane.
+	paneType := firstPaneType(*spec)
 	if spec.Worktree != nil {
 		if err := gitworktree.ValidateBranch(spec.Worktree.Branch); err != nil {
 			// Reported to the requester exactly as the worktree path would have
 			// reported it, so the client's own error handling is unchanged, and
 			// the spec is dropped so the tab still opens with a usable pane
-			// rather than nothing.
+			// rather than nothing. The pane is the downgraded terminal the type
+			// above already settled on — harmless, and carrying none of the
+			// requested plugin's fields.
 			log.Printf("new tab %s: worktree refused: %v", tab.ID, err)
 			respondTo(conn, msg.ID, ipc.MsgCreatePaneResp, ipc.CreatePaneRespPayload{
 				TabID:    tab.ID,
@@ -1817,7 +1829,6 @@ func (d *Daemon) handleCreateTab(conn *ipc.Conn, msg *ipc.Message) {
 			spec.Worktree = nil
 		}
 	}
-	paneType := firstPaneType(*spec)
 	cwd := d.resolveRequestedCWD(spec.CWD, d.projectCWD(tab.ProjectID))
 
 	// The two construction paths are built SEPARATELY and share nothing but the
@@ -1999,6 +2010,13 @@ func (d *Daemon) failPreparingPane(paneID, reason string) {
 	pane.PluginMu.Lock()
 	pane.PreparingWorktree = ""
 	pane.SpawnError = reason
+	// The marker goes on for a FAILED add too, not only an interrupted one, and
+	// leaving it off was the same bug on the other branch. SpawnError is
+	// deliberately never persisted, so without this the next snapshot recorded
+	// the pane with no marker and no error, at its recorded CWD — the repository
+	// ROOT — and a daemon restart lazy-spawned a live shell there. "No worktree
+	// was made" is exactly as true after a refusal as after an interruption.
+	pane.WorktreeInterrupted = true
 	pane.PluginMu.Unlock()
 	d.broadcastState()
 }

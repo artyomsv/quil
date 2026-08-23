@@ -1199,6 +1199,35 @@ above the field dispatch, so tabbing away and pressing Continue never runs the
 field's Enter, and a check in one but not the other is a name the dialog refuses
 and the button beside it accepts.
 
+**A daemon RESTART inside the checkout window is its own problem, and dropping
+the branch from the snapshot solved only half of it.** `handleCreateTab` requests
+a snapshot immediately, so the placeholder is on disk for the WHOLE checkout — as
+an ordinary `terminal` whose CWD is the REPOSITORY ROOT. Keeping
+`PreparingWorktree` unpersisted is right (a restored pane would spin for an add
+nobody is running), but on its own it restored a live shell in the main checkout:
+the exact state this feature exists to remove, brought back from disk.
+
+`Pane.WorktreeInterrupted` is therefore PERSISTED — the FACT, without the branch —
+and `refuseInterruptedWorktree` (beside `refuseMissingWorktree`, in
+`spawnRestoredPane`) turns it into an unspawned pane with the reason on screen.
+The flag is deliberately NOT cleared when it fires: a daemon that restarts twice
+before the user acts must refuse both times, and the pane is re-persisted with
+it. `spawnPane` clears it alongside `SpawnError`, so `Alt+R` is what converts the
+pane into an ordinary shell. Absent on every older snapshot → false, so the
+marker only ever ADDS a refusal.
+
+**`recoverEmptyTab` covers the one shape where a replace can empty a tab.**
+`replacePaneAt` destroys its new pane when the spawn fails and reports
+`Swapped=true`; nothing on that path calls `ensureTabNotEmpty`, whose callers are
+the destroy and exit paths. For an ordinary split-replace that is harmless — the
+tab keeps its siblings — but the new-tab worktree flow replaces the tab's ONLY
+pane, so an empty tab was guaranteed whenever the requested plugin's binary was
+missing, and `createFirstPaneWorktree` cannot repair it because it skips
+`failPreparingPane` precisely when the swap happened. The recovery pane carries
+the reason and has NO child, deliberately: `ensureTabNotEmpty`'s replacement
+shell would be a live child underneath `renderSpawnError`'s block, which is the
+hazard the restart guard exists to prevent one path over.
+
 ## Removing worktrees on close (stage C)
 
 **`Pane.WorktreeOwned` is the ONLY gate, on BOTH sides of the socket, and it is

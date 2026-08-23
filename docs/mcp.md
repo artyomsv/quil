@@ -146,7 +146,7 @@ Start here. Other tools need pane IDs and tab IDs as inputs.
 
 | Tool | Input | Returns |
 |---|---|---|
-| `list_panes` | — | JSON array of all panes: `{id, type, name, cwd, tab_id, alive, pid}` |
+| `list_panes` | — | JSON array of all panes: `{id, type, name, cwd, tab_id, alive, pid, preparing_worktree}` |
 | `list_tabs` | — | JSON array of all tabs: `{id, name, pane_count, active}` |
 
 ### Reading pane output
@@ -157,14 +157,25 @@ Two ways to see what's in a pane — pick the right one for the kind of program 
 |---|---|---|---|
 | `read_pane_output` | `pane_id` (required), `last_lines` (default 50, max 1000) | ANSI-stripped scrollback text | Shell command output, build logs, test results — anything line-oriented |
 | `screenshot_pane` | `pane_id` (required), `width` (default 80), `height` (default 24) | VT-emulated screen text + cursor position | Interactive TUIs (vim, htop, Claude Code) — `read_pane_output` would show raw escape sequences |
-| `get_pane_status` | `pane_id` (required) | JSON: `{alive, exit_code, type, cwd, pid}` | Check if a process is still running, or what its exit code was |
+| `get_pane_status` | `pane_id` (required) | JSON: `{alive, exit_code, type, cwd, pid, preparing_worktree}` | Check if a process is still running, or what its exit code was |
+
+**`preparing_worktree`** is present when a pane is waiting for `git worktree add` to finish. Such a pane has **no process on purpose** — `alive` is false and `exit_code` is null, which otherwise looks exactly like a pane that crashed. It is a placeholder: the pane you asked for replaces it when the checkout completes, so there is nothing to restart and nothing to read. `restart_pane` refuses it.
 
 ### Interacting with panes
 
 | Tool | Input | Returns | Notes |
 |---|---|---|---|
-| `send_to_pane` | `pane_id` (required), `input` (text), `press_enter` (default true) | "Sent N bytes to <pane>" | Use for typing commands. Newline is appended by default so the command executes. **Wrap secrets in `<<REDACT>>...<</REDACT>>` markers** — see [Security](#security-redaction-model) |
-| `send_keys` | `pane_id` (required), `keys` (array of names or literal text, max 1000) | "Sent N keys to <pane>" | Use for navigating TUIs. Each entry is either a key name (see table below) or literal text. The bridge inserts 50 ms between escape sequences so a TUI app processes each key before the next arrives. |
+| `send_to_pane` | `pane_id` (required), `input` (text), `press_enter` (default true) | "Sent N bytes to <pane>", or an ERROR — see below | Use for typing commands. Newline is appended by default so the command executes. **Wrap secrets in `<<REDACT>>...<</REDACT>>` markers** — see [Security](#security-redaction-model) |
+| `send_keys` | `pane_id` (required), `keys` (array of names or literal text, max 1000) | "Sent N keys to <pane>", or an ERROR — see below | Use for navigating TUIs. Each entry is either a key name (see table below) or literal text. The bridge inserts 50 ms between escape sequences so a TUI app processes each key before the next arrives. |
+
+**Both tools now FAIL rather than reporting a send that went nowhere.** They wait for the daemon to confirm the bytes reached a pane's input queue, and return an error naming the reason when it could not:
+
+- `pane is still waiting for its worktree (<branch>) and has no process yet` — the target is a placeholder (see `preparing_worktree` above).
+- `pane has no process: <reason>` — its spawn failed; the pane shows the same reason and offers `Alt+R`.
+- `pane input queue is full — its child has stopped reading stdin` — the program is wedged and not reading input.
+- `no such pane` — the id is unknown.
+
+Previously these calls answered `"Sent N bytes"` regardless, so input aimed at a pane with no process disappeared silently and an agent waited for output from a command that never ran. Delivery means QUEUED for the pane's writer — that is as much as can be confirmed synchronously, because a child that has stopped reading its stdin must never be allowed to block the daemon.
 
 **Recognised key names** (case-insensitive):
 

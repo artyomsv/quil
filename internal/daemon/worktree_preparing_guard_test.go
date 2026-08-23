@@ -108,13 +108,26 @@ func TestHandleCreateTab_RefusesAnInvalidBranchBeforeBroadcastingIt(t *testing.T
 // A tab whose worktree was refused still gets a usable pane: the tab must never
 // be pane-less, and the requester learns why through the create_pane_resp the
 // worktree path would have sent.
-func TestHandleCreateTab_AnInvalidBranchStillLeavesAPane(t *testing.T) {
+//
+// And that pane is a PLAIN TERMINAL carrying NONE of the requested plugin's
+// fields. Dropping the spec to recover the tab must not promote the request:
+// firstPaneType only downgrades while Worktree is non-nil, so computing the type
+// after the drop hands back the REQUESTED type — and firstPanePayload then
+// attaches InstanceArgs and ResumeSessionID, and the pane spawns in the
+// repository ROOT. That is an agent running with its own arguments in the main
+// checkout, which is precisely the isolation failure the whole path exists to
+// prevent, reached by nothing more than a branch name git would refuse. Any IPC
+// client can send create_tab.
+func TestHandleCreateTab_AnInvalidBranchStillLeavesAHarmlessPane(t *testing.T) {
 	d := newTestDaemon(t)
 	msg, err := ipc.NewMessage(ipc.MsgCreateTab, ipc.CreateTabPayload{
 		Name: "t",
 		FirstPane: &ipc.FirstPaneSpec{
-			Type:     "terminal-wide",
-			Worktree: &ipc.WorktreeSpec{RepoRoot: t.TempDir(), Branch: "-flag-shaped"},
+			Type:            "terminal-wide",
+			InstanceName:    "inst",
+			InstanceArgs:    []string{"--dangerously-skip-permissions"},
+			ResumeSessionID: "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+			Worktree:        &ipc.WorktreeSpec{RepoRoot: t.TempDir(), Branch: "-flag-shaped"},
 		},
 	})
 	if err != nil {
@@ -122,7 +135,26 @@ func TestHandleCreateTab_AnInvalidBranchStillLeavesAPane(t *testing.T) {
 	}
 	d.handleCreateTab(nil, msg)
 
-	if n := len(d.session.Panes(d.session.ActiveTabID())); n != 1 {
-		t.Errorf("new tab has %d panes after a refused worktree, want exactly 1", n)
+	panes := d.session.Panes(d.session.ActiveTabID())
+	if len(panes) != 1 {
+		t.Fatalf("new tab has %d panes after a refused worktree, want exactly 1", len(panes))
+	}
+	pane := panes[0]
+	pane.PluginMu.Lock()
+	typ, args, name := pane.Type, pane.InstanceArgs, pane.InstanceName
+	resume := pane.PluginState["resume_session_id"]
+	pane.PluginMu.Unlock()
+
+	if typ != "terminal" {
+		t.Errorf("refused worktree spawned type %q in the repository root, want a plain terminal", typ)
+	}
+	if len(args) != 0 {
+		t.Errorf("refused worktree carried InstanceArgs %v — these replace the shell's own args", args)
+	}
+	if name != "" {
+		t.Errorf("refused worktree carried InstanceName %q", name)
+	}
+	if resume != "" {
+		t.Errorf("refused worktree carried resume_session_id %q", resume)
 	}
 }

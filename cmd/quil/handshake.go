@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/artyomsv/quil/internal/ipc"
 	versionpkg "github.com/artyomsv/quil/internal/version"
@@ -15,6 +17,30 @@ import (
 // Daemons from before the version-negotiation protocol silently ignore
 // the request; the timeout is the only way to notice.
 const handshakeTimeout = 2 * time.Second
+
+// maxVersionStringLen bounds a version string reported by a daemon this client
+// did not start. Generous next to any real one ("1.63.2", or "1.63.2-rc1" at
+// its longest) and small enough that carrying it costs nothing — the point is
+// only that SOME ceiling exists below the 10 MB IPC frame limit.
+const maxVersionStringLen = 64
+
+// clampVersionString truncates on a RUNE boundary, so a clamped value stays
+// valid UTF-8 and sanitizeRemoteText's precondition still holds downstream.
+// No ellipsis: the result is compared and interpolated as a version, not shown
+// as prose, and a "…" would only make a garbage value look deliberate.
+func clampVersionString(s string) string {
+	if len(s) <= maxVersionStringLen {
+		return s
+	}
+	var b strings.Builder
+	for _, r := range s {
+		if b.Len()+utf8.RuneLen(r) > maxVersionStringLen {
+			break
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
 
 // handshakeResult bundles the outcome of asking the daemon its version.
 type handshakeResult struct {
@@ -119,6 +145,15 @@ func versionHandshakeWithin(client *ipc.Client, timeout time.Duration) handshake
 			log.Printf("handshake: decode payload: %v", err)
 			return handshakeResult{DaemonUnknown: true}
 		}
+		// Clamped at the door, before anything reads it — the log line below
+		// included. Nothing else bounds this string: the daemon may be remote
+		// and the only ceiling on the wire is ipc.maxFrameSize (10 MB), while
+		// versionpkg.Parsed truncates at the first "-" or "+", so
+		// "1.0.0-"+<megabytes> compares as a perfectly ordinary 1.0.0 and the
+		// whole payload flows on into gateExtraVersion's error text, from there
+		// into OfflineState.Detail, and gets re-measured on every frame the
+		// offline pane area draws.
+		payload.Version = clampVersionString(payload.Version)
 
 		cmp, err := versionpkg.Compare(tuiVer, payload.Version)
 		if err != nil {

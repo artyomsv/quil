@@ -70,8 +70,16 @@ const confirmDetailCap = 60
 // already provisioned this session that STILL reports a mismatch did not
 // restart its daemon, and pushing the same archive again cannot change that —
 // the loop that guard exists to break is install, retry, same error, install.
-func (m *Model) enqueueUpgradePrompt(dest, detail string) {
-	if dest == "" || m.installDestFn == nil || m.installedDests[dest] {
+//
+// Whether a provisioner EXISTS is deliberately not asked here, and that is the
+// whole reason the launch path offered nothing for a year: cmd/quil/main.go
+// seeds the offline rows at :597 and wires installDestFn at :765, so every
+// launch-time ask was rejected before it was queued and the drain point found
+// an empty queue. Queueing is a record of what is wrong with a host — it does
+// not depend on what this Model can do about it yet. promptNextUpgrade asks
+// that question instead, by which time the wiring has run.
+func (m *Model) enqueueUpgradePrompt(dest, detail string, kind OfflineKind) {
+	if dest == "" || m.installedDests[dest] {
 		return
 	}
 	for _, q := range m.upgradeQueue {
@@ -79,29 +87,57 @@ func (m *Model) enqueueUpgradePrompt(dest, detail string) {
 			return
 		}
 	}
-	m.upgradeQueue = append(m.upgradeQueue, upgradePrompt{dest: dest, detail: detail})
+	m.upgradeQueue = append(m.upgradeQueue, upgradePrompt{dest: dest, detail: detail, kind: kind})
 }
 
-// upgradePrompt is one queued ask: which host, and the version pair to show.
-type upgradePrompt struct{ dest, detail string }
+// upgradePrompt is one queued ask: which host, why, and the version pair to show.
+//
+// kind rides along because the confirm's BODY is not the same sentence for both
+// of the two states that queue one. An upgrade stops a running daemon and takes
+// its panes with it; a first install has no daemon and no panes to lose, and
+// telling a user their panes will be killed on a host that has never run quil
+// is a reason to decline something that was free. installOffer already draws
+// that line for its own two messages.
+type upgradePrompt struct {
+	dest, detail string
+	kind         OfflineKind
+}
 
 // promptNextUpgrade opens the confirm for the next queued host, if the screen
 // is free to show it.
 //
-// Gated on dialogNone so it cannot displace the disclaimer or the plugin
-// migration at startup — both of which the user is already answering, and the
-// migration deliberately blocks until resolved. Every dialog dismissal calls
-// this again, so a deferred prompt arrives as soon as the screen is free
-// rather than being dropped.
+// Gated on dialogNone so it cannot displace the disclaimer, the what's-new
+// dialog or the plugin migration at startup — all of which the user is already
+// answering, and the migration deliberately blocks until resolved.
+// handleDialogKey calls this on every dialog's return to dialogNone, so a
+// deferred prompt arrives as soon as the screen is free rather than being
+// dropped. That sentence used to appear here while only ONE dismissal honoured
+// it; see the comment on handleDialogKey for what that cost.
+//
+// The no-provisioner check lives HERE rather than at enqueue time because this
+// is the moment the answer is final: a dialog whose only action cannot run is
+// worse than the parked row, but a Model that has not been wired YET is the
+// ordinary launch state, not a Model that never will be.
 func (m *Model) promptNextUpgrade() {
-	if m.dialog != dialogNone || len(m.upgradeQueue) == 0 {
+	if m.installDestFn == nil || m.dialog != dialogNone || len(m.upgradeQueue) == 0 {
 		return
 	}
 	next := m.upgradeQueue[0]
 	m.upgradeQueue = m.upgradeQueue[1:]
-	// The destination may have been disconnected, or provisioned through the
-	// New Project dialog, between queueing and now.
-	if m.installedDests[next.dest] || m.projectForDest(next.dest) == nil {
+	// The destination may have been disconnected, provisioned through the New
+	// Project dialog, or COME BACK, between queueing and now.
+	//
+	// That third one is not cosmetic. A host that reconnected has its
+	// Offline cleared by applyWorkspaceState while adoptDest never touches
+	// installedDests, so it still resolves to a live project and would be
+	// offered an upgrade it no longer needs — and accepting runs the same
+	// runRemoteSetup as the CLI, which STOPS that daemon and takes its panes
+	// down with it. The confirm's own body warns about exactly that cost; it
+	// must not be charged against a host that is working. The window was one
+	// WindowSizeMsg wide before the drain moved to every dialog dismissal,
+	// which is what made it worth closing rather than noting.
+	p := m.projectForDest(next.dest)
+	if m.installedDests[next.dest] || p == nil || p.Offline == nil {
 		m.promptNextUpgrade()
 		return
 	}
@@ -111,6 +147,7 @@ func (m *Model) promptNextUpgrade() {
 	m.confirmID = next.dest
 	m.confirmName = next.dest
 	m.confirmDetail = next.detail
+	m.confirmOfflineKind = next.kind
 }
 
 // SeedOfflineDest installs (or replaces) the stand-in rows for one destination.
@@ -142,7 +179,7 @@ func (m *Model) SeedOfflineDest(dest, label string, kind OfflineKind, detail str
 	// and because the disclaimer or the plugin migration may own the screen at
 	// that point. promptNextUpgrade drains it once the screen is free.
 	if kind == offlineNeedsInstall || kind == offlineNeedsUpgrade {
-		m.enqueueUpgradePrompt(dest, detail)
+		m.enqueueUpgradePrompt(dest, detail, kind)
 	}
 
 	rows := make([]*ProjectModel, 0, len(cached))

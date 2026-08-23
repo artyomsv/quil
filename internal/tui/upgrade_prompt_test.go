@@ -233,3 +233,186 @@ func TestUpgradePrompt_AlreadyInstalledHostIsNotOfferedAgain(t *testing.T) {
 		t.Error("a host provisioned this session was offered again — install, retry, same error, install")
 	}
 }
+
+// THE ORDER THAT SHIPS. cmd/quil/main.go seeds the offline rows (:597) and
+// wires the provisioner (:765) — 168 lines apart, seeding first — so at seed
+// time installDestFn is still nil. upgradeModel wires it FIRST, which is the
+// reverse, and that inversion is why every test above passed while the launch
+// path offered nothing: enqueueUpgradePrompt's nil-provisioner guard rejected
+// the ask before it was ever queued, and the drain point found an empty queue.
+//
+// The symptom reached a user as a sidebar row with a ⚡ and a pane area reading
+// "No tabs in cluster-management@… — Ctrl+T opens one", against a remote daemon
+// that was up the whole time with two tabs in it.
+func TestUpgradePrompt_SeedBeforeInstallFuncStillOffers(t *testing.T) {
+	m := *newSplitDragTestModel(t)
+	m.width, m.height = 120, 44
+	m.SeedOfflineDest("artyom@host", "artyom@host", OfflineNeedsUpgrade, mismatchDetail, nil)
+
+	var installed []string
+	m.SetInstallFunc(func(dest string) error {
+		installed = append(installed, dest)
+		return nil
+	})
+
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 44})
+	got := updated.(Model)
+	if got.dialog != dialogConfirm || got.confirmKind != confirmKindUpgradeDest {
+		t.Fatalf("a host seeded before the provisioner was wired raised no offer: "+
+			"dialog=%v kind=%q queue=%+v", got.dialog, got.confirmKind, got.upgradeQueue)
+	}
+	if got.confirmID != "artyom@host" {
+		t.Errorf("confirmID = %q, want the destination", got.confirmID)
+	}
+}
+
+// The guard that MOVED, pinned on the side the existing test cannot see.
+//
+// TestUpgradePrompt_NoInstallFuncRaisesNothing asserts only that no dialog
+// opens, which was true BEFORE this change for the opposite reason — the ask
+// was refused at the door and the queue was empty. Both readings satisfy it, so
+// on its own it cannot tell "held until a provisioner arrives" from "dropped".
+// That distinction is the entire fix: cmd/quil/main.go wires the provisioner
+// 168 lines after it seeds these rows.
+func TestUpgradePrompt_NoProvisionerHoldsTheAskRatherThanDroppingIt(t *testing.T) {
+	m := *newSplitDragTestModel(t)
+	m.width, m.height = 120, 44
+	m.SeedOfflineDest("artyom@host", "artyom@host", OfflineNeedsUpgrade, mismatchDetail, nil)
+
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 44})
+	got := updated.(Model)
+
+	if got.dialog == dialogConfirm {
+		t.Fatal("an upgrade was offered with no provisioner wired")
+	}
+	if len(got.upgradeQueue) != 1 {
+		t.Fatalf("the ask was dropped instead of held: %+v — a provisioner wired "+
+			"later would then have nothing to surface", got.upgradeQueue)
+	}
+
+	// And wiring one later surfaces it, without a second seed.
+	//
+	// The second size must DIFFER: an unchanged one is swallowed by the
+	// poll-echo guard well above the drain point, so re-sending 120x44 here
+	// asserts nothing about the queue and fails for a reason that has nothing
+	// to do with provisioners. Production never depends on this arm — main.go
+	// wires the provisioner before tea.NewProgram, so the first WindowSizeMsg
+	// already has one — but "held" is only meaningful if something can still
+	// collect it.
+	got.SetInstallFunc(func(string) error { return nil })
+	updated, _ = got.Update(tea.WindowSizeMsg{Width: 121, Height: 45})
+	if final := updated.(Model); final.dialog != dialogConfirm || final.confirmID != "artyom@host" {
+		t.Errorf("a held ask did not surface once a provisioner was wired: dialog=%v id=%q",
+			final.dialog, final.confirmID)
+	}
+}
+
+// THE FLAGSHIP PATH, and the one the first version of this fix still lost.
+//
+// promptNextUpgrade's doc promised "every dialog dismissal calls this again",
+// but only the upgrade confirm's own Esc did. handleWhatsNewKey and
+// handleDisclaimerKey return to dialogNone and drained nothing — so on the ONE
+// launch that matters, the queue filled and was never opened: a client
+// auto-update is exactly when gateExtraVersion refuses every configured host
+// AND when ResolveWhatsNew puts a dialog on screen. The first WindowSizeMsg
+// no-ops on `dialog != dialogNone`, the 1 s size poll is echo-guarded so no
+// second one arrives by itself, and dismissing what's-new dropped the ask on
+// the floor. Symptom: the ⚡ and no offer — what the PR exists to remove.
+func TestUpgradePrompt_SurvivesTheWhatsNewDialogAtLaunch(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		dialog  dialogScreen
+		dismiss tea.KeyPressMsg
+	}{
+		{"what's new", dialogWhatsNew, tea.KeyPressMsg{Code: tea.KeyEscape, Text: "esc"}},
+		{"disclaimer", dialogDisclaimer, tea.KeyPressMsg{Code: tea.KeyEnter, Text: "enter"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _ := upgradeModel(t)
+			m.dialog = tc.dialog
+			m.SeedOfflineDest("artyom@host", "artyom@host", OfflineNeedsUpgrade, mismatchDetail, nil)
+
+			updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 44})
+			held := updated.(Model)
+			if held.dialog != tc.dialog {
+				t.Fatalf("the offer displaced the startup dialog: %v", held.dialog)
+			}
+			if len(held.upgradeQueue) != 1 {
+				t.Fatalf("the ask was dropped before the dialog was even answered: %+v", held.upgradeQueue)
+			}
+
+			// Dismissing the startup dialog must surface it — with no resize,
+			// because none arrives on its own.
+			updated, _ = held.Update(tc.dismiss)
+			got := updated.(Model)
+			if got.dialog != dialogConfirm || got.confirmKind != confirmKindUpgradeDest {
+				t.Fatalf("dismissing %v dropped the queued offer: dialog=%v kind=%q queue=%+v",
+					tc.dialog, got.dialog, got.confirmKind, got.upgradeQueue)
+			}
+			if got.confirmID != "artyom@host" {
+				t.Errorf("confirmID = %q, want the destination", got.confirmID)
+			}
+		})
+	}
+}
+
+// A host that came BACK must not be offered an upgrade it no longer needs.
+//
+// applyWorkspaceState clears Offline on reconnect and adoptDest never touches
+// installedDests, so the queued ask still resolved to a live project. Accepting
+// it runs the same runRemoteSetup the CLI does, which STOPS that daemon — the
+// cost the confirm's own body warns about, charged against a host that works.
+func TestUpgradePrompt_HostThatCameBackIsNotOffered(t *testing.T) {
+	m, _ := upgradeModel(t)
+	m.SeedOfflineDest("artyom@host", "artyom@host", OfflineNeedsUpgrade, mismatchDetail, nil)
+	if len(m.upgradeQueue) != 1 {
+		t.Fatalf("fixture did not queue the ask: %+v", m.upgradeQueue)
+	}
+
+	// The host reconnects before the queue is drained.
+	for _, p := range m.projects {
+		if p.Dest == "artyom@host" {
+			p.Offline = nil
+		}
+	}
+
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 44})
+	if got := updated.(Model); got.dialog == dialogConfirm {
+		t.Errorf("a reconnected host was offered a daemon-restarting upgrade: %q", got.confirmID)
+	}
+}
+
+// needsInstall queues the same confirm as needsUpgrade, and the body was written
+// for the upgrade alone. A host that has never run quil has no daemon to restart
+// and no panes to lose; telling the user otherwise invents a cost and buys a
+// decline for something that was free.
+func TestUpgradePrompt_FirstInstallDoesNotThreatenPanes(t *testing.T) {
+	m, _ := upgradeModel(t)
+	m.SeedOfflineDest("artyom@fresh", "artyom@fresh", OfflineNeedsInstall, "quil: command not found", nil)
+
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 44})
+	got := updated.(Model)
+	if got.dialog != dialogConfirm {
+		t.Fatalf("a host with no quil raised no offer: %v", got.dialog)
+	}
+	out := got.renderConfirmDialog()
+
+	if !strings.Contains(out, "Install quil on") {
+		t.Errorf("a first install is titled as an upgrade:\n%s", out)
+	}
+	if strings.Contains(out, "RESTARTS") || strings.Contains(out, "is killed") {
+		t.Errorf("a host with no daemon was warned its panes would be killed:\n%s", out)
+	}
+	if !strings.Contains(out, "y install") {
+		t.Errorf("the footer still offers an upgrade:\n%s", out)
+	}
+
+	// The upgrade wording must survive for the kind it was written for.
+	m2, _ := upgradeModel(t)
+	m2.SeedOfflineDest("artyom@old", "artyom@old", OfflineNeedsUpgrade, mismatchDetail, nil)
+	updated2, _ := m2.Update(tea.WindowSizeMsg{Width: 120, Height: 44})
+	up := updated2.(Model).renderConfirmDialog()
+	if !strings.Contains(up, "Upgrade quil on") || !strings.Contains(up, "RESTARTS") {
+		t.Errorf("the upgrade confirm lost its own warning:\n%s", up)
+	}
+}

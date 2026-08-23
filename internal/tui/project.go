@@ -201,9 +201,108 @@ func (m Model) renderEmptyTabArea(w, h int) string {
 	}
 	msg := "Connecting to quild…"
 	if p := m.cur(); p != nil {
-		msg = "No tabs in " + sanitizeRemoteText(p.displayName()) + "\n\nCtrl+T opens one"
+		// Capped, not merely sanitized. lipgloss.Place does not CLIP: both
+		// PlaceHorizontal and PlaceVertical compute `gap := width - contentWidth`
+		// and `return str` unchanged when it is non-positive, so an over-wide
+		// line leaves this function whole and the sidebar's JoinHorizontal then
+		// emits rows wider than the terminal. A project NAME is not local text
+		// on this path — an offline row is seeded from the on-disk cache of what
+		// a remote daemon reported, which LoadRemoteProjects bounds to 4096
+		// BYTES and never to display CELLS.
+		msg = truncateToWidth("No tabs in "+sanitizeRemoteText(p.displayName()), offlineTextCap(w)) +
+			"\n\nCtrl+T opens one"
+		if p.Offline != nil {
+			msg = m.offlineTabAreaMsg(p, w, h)
+		}
 	}
 	return lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, dialogSubtle.Render(msg))
+}
+
+// offlineTabAreaMsg is what an OFFLINE project's pane area says instead.
+//
+// A third reason renderEmptyTabArea's own doc comment did not account for: the
+// project has no tabs HERE, but that is a statement about this client, not
+// about the host — a remote daemon refused over a version mismatch keeps every
+// tab it had. Rendering the live-project text there told a user their two tabs
+// were gone and invited a Ctrl+T that could not reach the daemon which would
+// have to mint the tab. The row's ⚡ was the only thing saying otherwise, and a
+// glyph is not an explanation.
+//
+// Detail is remote-influenced (ssh's stderr, or a version pair the far side
+// reported), so it is sanitized and capped here — the render, per the same rule
+// every other remote string in this package follows. firstErrLine runs BEFORE
+// the sanitize, reusing reconnect.go's idiom for the same class of text: ssh
+// writes multi-line stderr, and sanitizeRemoteText DROPS \n as a C0 control
+// with no separator, so the alternative is two sentences fused into one word.
+//
+// EVERY line is capped, this package's own prose included. lipgloss.Place pads
+// but never clips, so one over-wide line escapes the w×h box and shifts the
+// whole frame — and the fixed strings below are wider than the pane area of a
+// narrow terminal on their own, quite apart from anything a remote sent.
+//
+// h is taken because the block is 4 lines without a detail and 6 with one:
+// PlaceVertical has the same no-clip escape hatch as its horizontal sibling, so
+// on a short frame the detail is what gets dropped, not the status bar.
+// A METHOD, because the retrying arm cannot answer from the project alone: an
+// offline destination with no dialer is PARKED and no ladder is running, while
+// its Kind stays offlineRetrying. Saying "Reconnecting…" there is the same
+// confidently-wrong answer this function exists to remove — and it is the only
+// thing on screen, since renderReconnectBanner returns "" for a link that is
+// not active.
+func (m Model) offlineTabAreaMsg(p *ProjectModel, w, h int) string {
+	lines := []string{sanitizeRemoteText(p.displayName()), ""}
+	switch p.Offline.Kind {
+	case offlineNeedsUpgrade:
+		lines = append(lines, "That host runs a different version of Quil,", "so this client will not attach to it.")
+	case offlineNeedsInstall:
+		lines = append(lines, "Quil is not installed on that host.")
+	case offlineRetrying:
+		// Named explicitly rather than left to a default: laddered() one file
+		// over is safe as a default because it is a POSITIVE test, so a new
+		// kind falls out as "not laddered". This switch defaults to a CLAIM,
+		// which a kind nobody has written yet would inherit silently.
+		if m.linkOf(p.Dest).parked {
+			lines = append(lines, "Reconnecting stopped.", "Press "+reconnectResumeKey+" to try again.")
+		} else {
+			lines = append(lines, "Reconnecting…")
+		}
+	}
+	// The detail is dropped when the fixed line above already says it. The
+	// needs-install sentinel is literally "quil is not installed on that host",
+	// and cmd/quil seeds Detail from the dial error's own text, so rendering
+	// both prints one sentence twice — once capitalised, once behind a "dial
+	// <host>:" prefix. The sentinel is the single source; this is the seam that
+	// keeps the two from drifting apart.
+	detail := sanitizeRemoteText(firstErrLine(p.Offline.Detail))
+	if p.Offline.Kind == offlineNeedsInstall &&
+		strings.Contains(strings.ToLower(detail), strings.ToLower(ErrRemoteQuilMissing.Error())) {
+		detail = ""
+	}
+	if detail != "" && h >= len(lines)+2 {
+		lines = append(lines, "", detail)
+	}
+	for i, line := range lines {
+		lines[i] = truncateToWidth(line, offlineTextCap(w))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// offlineTextCap is the cell budget one line of the empty-tab area may occupy.
+//
+// The margin keeps the block off the frame edge. It is given up rather than
+// returning zero on a narrow frame: truncateToWidth answers "" for a
+// non-positive budget, so a blank pane area — saying nothing at all about a
+// host that cannot be reached — is what a hard margin would produce on the
+// terminal least able to spare the space.
+func offlineTextCap(w int) int {
+	const margin = 8
+	if c := w - margin; c > 0 {
+		return c
+	}
+	if w > 0 {
+		return w
+	}
+	return 0
 }
 
 // cur returns the active project, or nil when the Model has no projects yet.

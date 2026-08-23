@@ -578,7 +578,45 @@ func shortcutsList(m *Model) []shortcutRow {
 
 // --- Input handling ---
 
+// handleDialogKey routes a key to the open dialog's handler, then drains any
+// deferred upgrade offer once the screen comes free.
+//
+// The drain is HERE rather than in each handler because promptNextUpgrade's own
+// contract — "every dialog dismissal calls this again, so a deferred prompt
+// arrives as soon as the screen is free" — was true of exactly one dismissal:
+// the upgrade confirm's own Esc. handleDisclaimerKey, handleWhatsNewKey and the
+// migration handler all return to dialogNone and drained nothing.
+//
+// That gap swallowed the flagship case rather than an edge. A client
+// auto-update is precisely when gateExtraVersion refuses every configured host
+// (cmd/quil/main.go:589 says so in as many words) AND when ResolveWhatsNew
+// opens a dialog at startup — so the queue filled, the first WindowSizeMsg
+// no-oped on `dialog != dialogNone`, dismissing what's-new drained nothing, and
+// the 1 s size poll is echo-guarded so no later resize arrived on its own. The
+// user was left with the ⚡ and no offer: the exact symptom the offer exists to
+// remove.
+//
+// Gated on a dialog having been OPEN, so an ordinary keystroke with no dialog
+// on screen cannot raise one. A dismissal that opens another dialog (the
+// confirm's own Esc chaining to the next queued host) leaves dialog non-none
+// and is skipped here, so the offer is never raised twice for one key.
 func (m Model) handleDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	wasOpen := m.dialog != dialogNone
+	updated, cmd := m.dispatchDialogKey(msg)
+	if !wasOpen {
+		return updated, cmd
+	}
+	next, ok := updated.(Model)
+	if !ok || next.dialog != dialogNone {
+		return updated, cmd
+	}
+	next.promptNextUpgrade()
+	return next, cmd
+}
+
+// dispatchDialogKey is handleDialogKey's switch, split out so the drain above
+// wraps every arm without being repeated in any of them.
+func (m Model) dispatchDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch m.dialog {
 	case dialogAbout:
 		return m.handleAboutKey(msg)
@@ -1695,7 +1733,19 @@ func (m Model) renderConfirmDialog() string {
 		b.WriteString("\n\n")
 		b.WriteString("  " + dialogSubtle.Render("Every tab and pane in this project is destroyed too."))
 	case confirmKindUpgradeDest:
-		b.WriteString("  " + dialogNormal.Render(fmt.Sprintf("Upgrade quil on %s?", sanitizeRemoteText(m.confirmName))))
+		// Two states queue this confirm and they do not cost the same thing.
+		// SeedOfflineDest enqueues for needsInstall as well as needsUpgrade, and
+		// once the launch-path ask actually fired, a host that has never run
+		// quil started being told its panes would be killed — there are none,
+		// and no daemon to restart. That is a reason to decline something that
+		// was free. installOffer already splits these two sentences; this is the
+		// same split at the place the user is asked.
+		firstInstall := m.confirmOfflineKind == offlineNeedsInstall
+		title := "Upgrade quil on %s?"
+		if firstInstall {
+			title = "Install quil on %s?"
+		}
+		b.WriteString("  " + dialogNormal.Render(fmt.Sprintf(title, sanitizeRemoteText(m.confirmName))))
 		b.WriteString("\n\n")
 		// The version pair comes from the daemon's own handshake and is the
 		// answer to "why can I not reach it" — the reason the row parked. It is
@@ -1707,15 +1757,22 @@ func (m Model) renderConfirmDialog() string {
 		}
 		b.WriteString("  " + dialogSubtle.Render("Quil pushes this build over ssh."))
 		b.WriteString("\n")
-		// Named explicitly because an upgrade is not free the way a first
-		// install is: the push stops the remote daemon, so panes over there
-		// respawn and whatever was running in their shells is killed. The CLI
-		// says the same before asking; this is the same warning in the place
-		// the user is actually being asked.
-		b.WriteString("  " + dialogSubtle.Render("Its daemon RESTARTS: panes there respawn and"))
-		b.WriteString("\n")
-		b.WriteString("  " + dialogSubtle.Render("anything running in their shells is killed."))
-		footer = "y upgrade    Esc not now"
+		if firstInstall {
+			// Nothing is running over there yet, so there is nothing to warn
+			// about — saying otherwise invents a cost and buys a decline.
+			b.WriteString("  " + dialogSubtle.Render("Nothing is running there yet, so nothing is lost."))
+			footer = "y install    Esc not now"
+		} else {
+			// Named explicitly because an upgrade is not free the way a first
+			// install is: the push stops the remote daemon, so panes over there
+			// respawn and whatever was running in their shells is killed. The CLI
+			// says the same before asking; this is the same warning in the place
+			// the user is actually being asked.
+			b.WriteString("  " + dialogSubtle.Render("Its daemon RESTARTS: panes there respawn and"))
+			b.WriteString("\n")
+			b.WriteString("  " + dialogSubtle.Render("anything running in their shells is killed."))
+			footer = "y upgrade    Esc not now"
+		}
 	case confirmKindDisconnectHost:
 		b.WriteString("  " + dialogNormal.Render(fmt.Sprintf("Disconnect %q?", sanitizeRemoteText(m.confirmName))))
 		b.WriteString("\n\n")

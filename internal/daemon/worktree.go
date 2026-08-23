@@ -122,7 +122,8 @@ func worktreeListResponse(req ipc.WorktreeListReqPayload, fallback string) ipc.W
 	// worktree list is what the dialog needs to function, while the branch names
 	// are an extra check whose absence degrades to the behaviour that shipped
 	// before it existed — git's own refusal at create time.
-	if branches, truncated, bErr := worktreeBranchesFn(ctx, dir); bErr != nil {
+	branches, truncated, bErr := worktreeBranchesFn(ctx, dir)
+	if bErr != nil {
 		// %q, not %s: dir comes straight off the wire unvalidated and may carry
 		// ESC/CSI/OSC bytes and newlines, and quild.log is a plain file people
 		// read with cat and tail — which interpret them. Same hazard

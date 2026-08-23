@@ -46,8 +46,15 @@ const (
 	MsgLinkLost = "link_lost"
 
 	// I/O (bidirectional)
-	MsgPaneInput  = "pane_input"
-	MsgPaneOutput = "pane_output"
+	MsgPaneInput = "pane_input"
+	// MsgPaneInputResp answers a pane_input that carried an ID.
+	//
+	// ONLY id-bearing requests get one. The TUI sends pane_input for every
+	// keystroke and sets no ID, so it is unaffected — which matters, because a
+	// response per keystroke would be a frame per keystroke on that client's
+	// 64-slot must-deliver queue.
+	MsgPaneInputResp = "pane_input_resp"
+	MsgPaneOutput    = "pane_output"
 
 	// State sync (Daemon -> Client)
 	MsgWorkspaceState = "workspace_state"
@@ -337,6 +344,24 @@ type PaneInputPayload struct {
 	Data   []byte `json:"data"`
 }
 
+// PaneInputRespPayload says whether input actually reached a pane's process.
+//
+// It exists because "the daemon accepted the message" and "the child received
+// the bytes" are different facts, and the MCP send_to_pane tool was reporting
+// the first as the second: a pane with no PTY — a worktree placeholder, or one
+// whose spawn failed — dropped the input silently while the tool answered
+// "Sent N bytes".
+//
+// Delivered means the bytes are on the pane's input queue, which is as far as
+// any caller can be told synchronously: the per-pane writer goroutine owns the
+// PTY write, precisely so a child that has stopped reading its stdin cannot
+// block the dispatch goroutine. Queue overflow is reported as NOT delivered.
+type PaneInputRespPayload struct {
+	PaneID    string `json:"pane_id"`
+	Delivered bool   `json:"delivered"`
+	Error     string `json:"error,omitempty"`
+}
+
 type PaneOutputPayload struct {
 	PaneID string `json:"pane_id"`
 	Data   []byte `json:"data"`
@@ -529,6 +554,12 @@ type PaneInfo struct {
 	Running      bool   `json:"running"`
 	Pending      bool   `json:"pending,omitempty"`
 	InstanceName string `json:"instance_name,omitempty"`
+	// PreparingWorktree names the branch a `git worktree add` is checking out
+	// for the pane that will REPLACE this one. Non-empty means the pane has no
+	// process ON PURPOSE — and without it, "running: false, pending: false,
+	// exit_code: null" is indistinguishable from a pane whose process died, so
+	// an agent reads a placeholder as a corpse and calls restart_pane on it.
+	PreparingWorktree string `json:"preparing_worktree,omitempty"`
 }
 
 type ListPanesRespPayload struct {
@@ -558,6 +589,9 @@ type PaneStatusRespPayload struct {
 	Type     string `json:"type"`
 	CWD      string `json:"cwd"`
 	Name     string `json:"name"`
+	// PreparingWorktree: see PaneInfo. A pane waiting on a checkout is not a
+	// dead pane, and this is the only field that says so.
+	PreparingWorktree string `json:"preparing_worktree,omitempty"`
 }
 
 type CreatePaneReqPayload struct {

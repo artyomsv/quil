@@ -1204,7 +1204,7 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	case ipc.MsgUpdateLayout:
 		d.handleUpdateLayout(msg)
 	case ipc.MsgPaneInput:
-		d.handlePaneInput(msg)
+		d.handlePaneInput(conn, msg)
 	case ipc.MsgResizePane:
 		d.handleResizePane(msg)
 	case ipc.MsgReloadPlugins:
@@ -1818,38 +1818,23 @@ func (d *Daemon) handleCreateTab(conn *ipc.Conn, msg *ipc.Message) {
 		}
 	}
 	paneType := firstPaneType(*spec)
-	create := ipc.CreatePanePayload{TabID: tab.ID, Type: paneType}
-	// The plugin fields ride along ONLY when the pane really is the requested
-	// one. When firstPaneType downgraded it — a worktree placeholder, or a spec
-	// naming no type at all — they belong to a DIFFERENT program, and
-	// resolveSpawnArgs REPLACES a plugin's own args with InstanceArgs whenever
-	// the pane has any: the placeholder would be spawned as
-	// `<shell> --dangerously-skip-permissions`. shellinit.Configure masks that
-	// on bash/zsh/pwsh by overwriting args and returns nil for sh/dash/fish and
-	// anything unrecognised, where the shell dies on its first instruction —
-	// so the "a failed add leaves a harmless terminal" guarantee would hold
-	// only on some hosts. ResumeSessionID goes with them: it would write a
-	// resume claim onto a terminal, which a snapshot inside the checkout window
-	// persists and a failed add leaves forever. createFirstPaneWorktree carries
-	// the full set on its own payload, so nothing is lost.
-	if paneType == spec.Type {
-		create.InstanceName = spec.InstanceName
-		create.InstanceArgs = spec.InstanceArgs
-		create.ResumeSessionID = spec.ResumeSessionID
-	}
 	cwd := d.resolveRequestedCWD(spec.CWD, d.projectCWD(tab.ProjectID))
 
-	// constructPaneAt, not createPaneAt: the tab and its pane are one change and
-	// must reach clients as ONE frame. See the note on that split.
+	// The two construction paths are built SEPARATELY and share nothing but the
+	// type and the directory. `create` and its plugin-field block used to sit
+	// above the branch, unconditionally, while existing only for the ordinary
+	// arm — so a reader had to check that the worktree arm ignored them.
 	//
-	// A WORKTREE request takes the placeholder path instead, and the difference
-	// is that it spawns NOTHING. See constructPreparingPane.
+	// constructPaneAt, not createPaneAt: the tab and its pane are one change and
+	// must reach clients as ONE frame. See the note on that split. A WORKTREE
+	// request takes the placeholder path instead, and the difference is that it
+	// spawns NOTHING — see constructPreparingPane.
 	var pane *Pane
 	var err error
 	if spec.Worktree != nil {
-		pane, err = d.constructPreparingPane(tab.ID, cwd, paneType, spec.Worktree.Branch)
+		pane, err = d.constructPreparingPane(tab.ID, cwd, paneType, *spec)
 	} else {
-		pane, err = d.constructPaneAt(create, cwd, paneType)
+		pane, err = d.constructPaneAt(d.firstPanePayload(tab.ID, paneType, *spec), cwd, paneType)
 	}
 	if err != nil {
 		log.Printf("new tab %s: %v", tab.ID, err)
@@ -1862,6 +1847,32 @@ func (d *Daemon) handleCreateTab(conn *ipc.Conn, msg *ipc.Message) {
 	if pane != nil && spec.Worktree != nil {
 		d.createFirstPaneWorktree(conn, msg.ID, tab.ID, pane.ID, *spec)
 	}
+}
+
+// firstPanePayload builds the create payload for a new tab's ordinary first
+// pane.
+//
+// The plugin fields ride along ONLY when the pane really is the requested
+// one. When firstPaneType downgraded it — a worktree placeholder, or a spec
+// naming no type at all — they belong to a DIFFERENT program, and
+// resolveSpawnArgs REPLACES a plugin's own args with InstanceArgs whenever
+// the pane has any: the placeholder would be spawned as
+// `<shell> --dangerously-skip-permissions`. shellinit.Configure masks that
+// on bash/zsh/pwsh by overwriting args and returns nil for sh/dash/fish and
+// anything unrecognised, where the shell dies on its first instruction —
+// so the "a failed add leaves a harmless terminal" guarantee would hold
+// only on some hosts. ResumeSessionID goes with them: it would write a
+// resume claim onto a terminal, which a snapshot inside the checkout window
+// persists and a failed add leaves forever. createFirstPaneWorktree carries
+// the full set on its own payload, so nothing is lost.
+func (d *Daemon) firstPanePayload(tabID, paneType string, spec ipc.FirstPaneSpec) ipc.CreatePanePayload {
+	create := ipc.CreatePanePayload{TabID: tabID, Type: paneType}
+	if paneType == spec.Type {
+		create.InstanceName = spec.InstanceName
+		create.InstanceArgs = spec.InstanceArgs
+		create.ResumeSessionID = spec.ResumeSessionID
+	}
+	return create
 }
 
 // constructPreparingPane builds a new tab's first pane as a VISIBLE PLACEHOLDER
@@ -1882,11 +1893,18 @@ func (d *Daemon) handleCreateTab(conn *ipc.Conn, msg *ipc.Message) {
 // the type Alt+R would respawn on the error pane a failed add leaves, and the
 // requested type there would start an agent in the main checkout — the isolation
 // failure the whole path exists to prevent.
-func (d *Daemon) constructPreparingPane(tabID, cwd, paneType, branch string) (*Pane, error) {
+// The branch comes from the SPEC rather than as a fourth string parameter: four
+// adjacent same-typed positionals is a signature where swapping cwd and paneType
+// compiles silently, and the spec is what the call site already holds.
+func (d *Daemon) constructPreparingPane(tabID, cwd, paneType string, spec ipc.FirstPaneSpec) (*Pane, error) {
+	if spec.Worktree == nil {
+		return nil, fmt.Errorf("create pane error: no worktree spec")
+	}
 	pane, err := d.session.CreatePane(tabID, cwd)
 	if err != nil {
 		return nil, fmt.Errorf("create pane error: %w", err)
 	}
+	branch := spec.Worktree.Branch
 	// Under PluginMu for the reason constructPaneAt states: CreatePane has
 	// already PUBLISHED the pane, so the snapshot and broadcast goroutines are
 	// legitimate concurrent readers of both fields.
@@ -2567,21 +2585,57 @@ func (d *Daemon) ensureTabNotEmpty(tabID string) {
 	}
 }
 
-func (d *Daemon) handlePaneInput(msg *ipc.Message) {
+func (d *Daemon) handlePaneInput(conn *ipc.Conn, msg *ipc.Message) {
 	var payload ipc.PaneInputPayload
 	if err := msg.DecodePayload(&payload); err != nil {
 		return
 	}
+	out := d.paneInputOutcome(payload)
+	// ONLY an id-bearing request is answered. The TUI sets no ID and sends one
+	// of these per keystroke, so it is untouched — a response per keystroke
+	// would be a frame per keystroke on that client's 64-slot must-deliver
+	// queue, which is the documented force-disconnect shape.
+	if msg.ID != "" {
+		respondTo(conn, msg.ID, ipc.MsgPaneInputResp, out)
+	}
+}
 
+// paneInputOutcome delivers the input and says what happened to it.
+//
+// Split out because the answer is the whole point: "the daemon accepted the
+// message" and "the child received the bytes" are different facts, and the MCP
+// send_to_pane tool was reporting the first as the second — a pane with no PTY
+// (a worktree placeholder, or one whose spawn failed) dropped the input in
+// silence while the tool answered "Sent N bytes".
+//
+// Every refusal names a REASON rather than a bare false, because the reasons are
+// not interchangeable: a placeholder is waiting on a checkout and will be
+// replaced, a spawn failure wants Alt+R, and a full queue means the child has
+// stopped reading its stdin.
+func (d *Daemon) paneInputOutcome(payload ipc.PaneInputPayload) ipc.PaneInputRespPayload {
+	refuse := func(format string, args ...any) ipc.PaneInputRespPayload {
+		return ipc.PaneInputRespPayload{PaneID: payload.PaneID, Error: fmt.Sprintf(format, args...)}
+	}
 	pane := d.session.Pane(payload.PaneID)
 	if pane == nil {
-		return
+		return refuse("no such pane")
 	}
 	// A deferred pane (MCP send_to_pane / send_keys targeting a not-yet-spawned
 	// restored pane) must be booted before its PTY can accept input.
 	d.ensurePaneSpawned(pane)
-	if pane.PTY == nil {
-		return
+	pane.PluginMu.Lock()
+	pty := pane.PTY
+	preparing, spawnErr := pane.PreparingWorktree, pane.SpawnError
+	pane.PluginMu.Unlock()
+	if pty == nil {
+		switch {
+		case preparing != "":
+			return refuse("pane is still waiting for its worktree (%s) and has no process yet", preparing)
+		case spawnErr != "":
+			return refuse("pane has no process: %s", spawnErr)
+		default:
+			return refuse("pane has no process")
+		}
 	}
 	// Never write the PTY here: a child that stopped reading stdin makes
 	// Write block forever, and this runs on the conn's dispatch goroutine —
@@ -2589,7 +2643,12 @@ func (d *Daemon) handlePaneInput(msg *ipc.Message) {
 	// EnqueueInput hands the data to the pane's own writer goroutine.
 	if !pane.EnqueueInput(payload.Data) {
 		d.notifyInputBlocked(pane)
+		return refuse("pane input queue is full — its child has stopped reading stdin")
 	}
+	// Delivered means QUEUED, which is as far as any caller can be told
+	// synchronously — the writer goroutine owns the PTY write precisely so a
+	// wedged child cannot block this goroutine.
+	return ipc.PaneInputRespPayload{PaneID: payload.PaneID, Delivered: true}
 }
 
 // notifyInputBlocked surfaces a full input queue — the pane's child has
@@ -4824,6 +4883,7 @@ func (d *Daemon) buildPaneInfos() []ipc.PaneInfo {
 			typ := pane.Type
 			cwd := pane.CWD
 			running := pane.PTY != nil && pane.ExitCode == nil
+			preparing := pane.PreparingWorktree
 			pane.PluginMu.Unlock()
 			if typ == "" {
 				typ = "terminal"
@@ -4841,6 +4901,9 @@ func (d *Daemon) buildPaneInfos() []ipc.PaneInfo {
 				Running:      running,
 				Pending:      pending,
 				InstanceName: pane.InstanceName,
+				// Why this pane has no process. Without it an agent reads a
+				// placeholder as a crashed pane.
+				PreparingWorktree: preparing,
 			})
 		}
 	}
@@ -4912,6 +4975,7 @@ func (d *Daemon) buildPaneStatus(pane *Pane) ipc.PaneStatusRespPayload {
 	cwd := pane.CWD
 	exitCode := pane.ExitCode
 	running := pane.PTY != nil && exitCode == nil
+	preparing := pane.PreparingWorktree
 	pane.PluginMu.Unlock()
 	if typ == "" {
 		typ = "terminal"
@@ -4921,13 +4985,14 @@ func (d *Daemon) buildPaneStatus(pane *Pane) ipc.PaneStatusRespPayload {
 	pane.spawnMu.Unlock()
 
 	return ipc.PaneStatusRespPayload{
-		PaneID:   pane.ID,
-		Running:  running,
-		Pending:  pending,
-		ExitCode: exitCode,
-		Type:     typ,
-		CWD:      cwd,
-		Name:     pane.Name,
+		PaneID:            pane.ID,
+		Running:           running,
+		Pending:           pending,
+		ExitCode:          exitCode,
+		Type:              typ,
+		CWD:               cwd,
+		Name:              pane.Name,
+		PreparingWorktree: preparing,
 	}
 }
 

@@ -91,3 +91,67 @@ func TestUpdate_SpinnerTickStopsWhenTheCheckoutSettles(t *testing.T) {
 		t.Error("the tick chain re-armed for a pane that is preparing nothing")
 	}
 }
+
+// A tick that lands while the pane's leaf is DETACHED must not kill the chain.
+//
+// spinnerTargetPane resolved only through tab.Root.FindLeaf / overlayPane, so a
+// worktree REPLACE — which holds its detached pane in worktreeReplaced for the
+// length of a checkout, exactly when ticks are flying — made the arm return
+// nil. That ended the chain WITHOUT clearing spinnerTickRunning, and the
+// re-enrol guard is `if pane.spinnerTickRunning { continue }`, so when the pane
+// came back its spinner was frozen for good with no live chain behind it.
+func TestUpdate_SpinnerTickSurvivesADetachedLeaf(t *testing.T) {
+	m := newSplitDragTestModel(t)
+	tab := m.activeTabModel()
+	pane := tab.Leaves()[0]
+	pane.resuming = true
+	pane.spinnerTickRunning = true
+	pane.resumeStart = time.Now()
+
+	// Detach it the way a worktree replace does: out of the tree, held for the
+	// length of the add so a failure can put it back.
+	leaf := tab.Root.FindLeaf(pane.ID)
+	if leaf == nil {
+		t.Fatal("fixture pane is not a leaf")
+	}
+	leaf.Pane = nil
+	tab.invalidateLeaves()
+	if m.worktreeReplaced == nil {
+		m.worktreeReplaced = map[string]*PaneModel{}
+	}
+	m.worktreeReplaced[tab.ID] = pane
+
+	_, cmd := m.Update(spinnerTickMsg{paneID: pane.ID, frame: 2})
+	if cmd == nil {
+		t.Error("the tick chain died on a detached leaf — the pane's spinner freezes for good once it is re-attached")
+	}
+	if !pane.spinnerTickRunning {
+		t.Error("spinnerTickRunning was cleared while a chain is still live — a re-enrol would stack a second chain")
+	}
+}
+
+// An output frame must NOT take the indicator down while a checkout is in
+// flight. Unreachable today — a placeholder has no child, so nothing can deliver
+// output to it, and the restart guard is what keeps it childless — but the two
+// output call sites used to hand-roll this predicate and knew nothing about a
+// worktree, so the correctness rested on a guard in another file.
+func TestRestoreSettles_RefusesWhileAWorktreeIsBeingCreated(t *testing.T) {
+	p := NewPaneModel("p1", 1024)
+	p.preparing = true
+	p.resumeStart = time.Now().Add(-2 * restoreSafetyCap) // settled by every other measure
+	p.PreparingWorktree = "feat/x"
+
+	if p.restoreSettles() {
+		t.Error("an output frame would clear the indicator while the checkout is still running")
+	}
+}
+
+func TestRestoreSettles_AllowsAnOrdinaryPaneToSettle(t *testing.T) {
+	p := NewPaneModel("p1", 1024)
+	p.preparing = true
+	p.resumeStart = time.Now().Add(-2 * restoreSafetyCap)
+
+	if !p.restoreSettles() {
+		t.Error("an ordinary restored pane never settles — its indicator would never come down")
+	}
+}

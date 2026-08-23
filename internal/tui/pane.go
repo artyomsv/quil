@@ -877,6 +877,27 @@ func (p *PaneModel) spinnerRunning() bool {
 	return (p.resuming || p.preparing) && !p.restoreSettled()
 }
 
+// restoreSettles reports whether an arriving output frame should take the
+// restore indicator down, and is the ONE predicate both output call sites use.
+//
+// It exists because those two sites hand-rolled
+// `(resuming || preparing) && restoreSettled()` and therefore knew nothing about
+// a worktree checkout. Harmless as things stand — a placeholder has no child, so
+// no output frame can reach them, and the restart guard is what keeps it that
+// way — but "correct because another guard makes it unreachable" is exactly the
+// coupling that breaks quietly when one of the two moves. Refusing here makes it
+// structural instead.
+//
+// Pinned by a direct test rather than through the call sites, deliberately: a
+// call-site test for this state would be vacuous, since nothing can deliver
+// output to a pane that has no process.
+func (p *PaneModel) restoreSettles() bool {
+	if p.PreparingWorktree != "" {
+		return false
+	}
+	return (p.resuming || p.preparing) && p.restoreSettled()
+}
+
 // restoreContext builds the dim second line: "<type> · <name-or-cwd-basename>".
 // Falls back to just the type when neither a name nor a CWD is known.
 func (p *PaneModel) restoreContext() string {

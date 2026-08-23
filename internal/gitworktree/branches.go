@@ -19,14 +19,11 @@ import (
 // false-negative direction, where a branch git will refuse looks available — so
 // the flag is what lets it fall back to "no opinion" instead.
 //
-// It bounds the WIRE PAYLOAD and what this function retains and allocates. It
-// does NOT bound how much the daemon READS: runGit uses cmd.Output(), which
-// buffers the whole of stdout with no limit, so a repository with a very large
-// packed-refs is fully in memory before the scan below sees a byte. That is
-// shared with List and is tracked in
-// techdebt/3-2-gitworktree-rungit-reads-stdout-unbounded.md — fixing it inside
-// runGit needs its own thought about partial records, which is why it is not
-// smuggled in here.
+// It bounds ENTRIES; maxGitOutput bounds the BYTES runGit will buffer, so the
+// two together mean neither the wire payload nor the daemon's memory scales with
+// the repository. This one fires first for any plausible listing (2000 names is
+// well under 1 MiB), which is why truncation here is nearly always the entry cap
+// rather than the byte cap.
 const maxBranchList = 2000
 
 // Branches reports the local branch names of the repository containing dir,
@@ -60,7 +57,14 @@ func Branches(ctx context.Context, dir string) ([]string, bool, error) {
 	// collision it exists to catch would be missed. lstrip=2 drops exactly
 	// `refs/heads/` and is deterministic whatever else the ref store holds.
 	out, err := runGit(ctx, dir, "for-each-ref", "--format=%(refname:lstrip=2)", "refs/heads")
-	if err != nil {
+	// A truncated read is NOT an error here, unlike in List and Status. This
+	// output is one independent name per line, so losing the tail yields a
+	// SHORTER list rather than a wrong one — and "shorter" is precisely what
+	// this function's second return value already means, and what branchTaken
+	// already treats as "no opinion". Refusing would throw away a usable answer
+	// over the same fact the flag exists to carry.
+	truncatedRead := errors.Is(err, ErrOutputTruncated)
+	if err != nil && !truncatedRead {
 		if errors.Is(err, exec.ErrNotFound) || ctx.Err() != nil {
 			return nil, false, err
 		}
@@ -79,13 +83,9 @@ func Branches(ctx context.Context, dir string) ([]string, bool, error) {
 	// every pane on the machine. Cutting as we go means the cap bounds the
 	// allocation it was written to bound.
 	//
-	// NOT fixed here, and deliberately named rather than left implicit: runGit
-	// uses cmd.Output(), which buffers the whole of stdout with no limit, so the
-	// listing is still fully READ before this loop sees it. That is shared with
-	// List (and Add/Remove/Status), and a truncated `worktree list --porcelain`
-	// would parse into a confidently wrong answer rather than an error — so a
-	// read limit belongs in a change scoped to that function, with its own
-	// thought about partial records, not smuggled in here.
+	// The READ is bounded too, by runGit's own maxGitOutput — so a repository
+	// with a very large packed-refs never reaches this loop as one enormous
+	// string in the first place.
 	var list []string
 	rest := out
 	for rest != "" && len(list) < maxBranchList {
@@ -103,7 +103,12 @@ func Branches(ctx context.Context, dir string) ([]string, bool, error) {
 			list = append(list, name)
 		}
 	}
-	// Truncated only if something was actually left unread. The loop can also
-	// exit on a listing that ends exactly at the cap, which is complete.
-	return list, strings.TrimSpace(rest) != "", nil
+	// Truncated if the ENTRY cap stopped the scan (something is left in rest) or
+	// if the BYTE cap stopped the read upstream. Either way the caller holds an
+	// incomplete list and must not read absence as availability.
+	//
+	// The loop can also exit on a listing that ends exactly at the entry cap,
+	// which is complete — hence the test on what is left rather than on the
+	// count.
+	return list, truncatedRead || strings.TrimSpace(rest) != "", nil
 }

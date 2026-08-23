@@ -3188,6 +3188,23 @@ func (m *Model) spinnerTargetPane(id string) *PaneModel {
 			return leaf.Pane
 		}
 	}
+	// A pane a worktree REPLACE detached is live on both sides and deliberately
+	// absent from the tree for the length of the checkout — which is exactly
+	// when ticks are flying. Resolving only through the tree returned nil for
+	// it, which ended the chain WITHOUT clearing spinnerTickRunning (there is no
+	// pane in hand to clear it on), and the re-enrol guard is
+	// `if pane.spinnerTickRunning { continue }` — so the pane came back with a
+	// frozen spinner and no live chain, permanently.
+	//
+	// Searching here rather than clearing the flag at the call site is the
+	// stronger fix: the chain keeps running, so the spinner is already correct
+	// the moment the pane is re-attached, and nil goes back to meaning what it
+	// says — this pane is gone for good.
+	for _, held := range m.worktreeReplaced {
+		if held != nil && held.ID == id {
+			return held
+		}
+	}
 	return nil
 }
 
@@ -4941,7 +4958,7 @@ func (m *Model) handlePaneOutput(msg PaneOutputMsg) (tea.Cmd, bool) {
 			// paint, so the flag went down while the rectangle was still empty,
 			// which is the state the indicator exists to cover.
 			overlayChanged := m.paneIsVisible(msg.PaneID)
-			if (tab.overlayPane.preparing || tab.overlayPane.resuming) && tab.overlayPane.restoreSettled() {
+			if tab.overlayPane.restoreSettles() {
 				tab.overlayPane.preparing = false
 				tab.overlayPane.resuming = false
 				// Same treatment as the layout branch's settle below, for the
@@ -5024,7 +5041,7 @@ func (m *Model) handlePaneOutput(msg PaneOutputMsg) (tea.Cmd, bool) {
 			// frame). A boot frame that only clears the screen leaves it blank
 			// and keeps the indicator up; the frame that paints real content
 			// clears it. Mirrors restoreSettled() used by the spinner tick.
-			if (leaf.Pane.resuming || leaf.Pane.preparing) && leaf.Pane.restoreSettled() {
+			if leaf.Pane.restoreSettles() {
 				leaf.Pane.resuming = false
 				leaf.Pane.preparing = false
 				// Renders only inside the pane today (see buildTopBorder), so

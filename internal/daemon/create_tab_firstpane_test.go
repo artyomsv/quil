@@ -74,10 +74,15 @@ func paneType(p *Pane) string {
 // is still running, and the package-level newSessionFn it is about to read is
 // restored by this test's own cleanup — a race that lands on whichever test
 // runs next. Every wait in this file settles on THIS rather than on presence.
+// PreparingWorktree joins the set for the same reason the other two are in it:
+// a worktree placeholder spawns nothing at all, so it is DONE the moment that
+// field is written — which constructPreparingPane does last, after the publish.
+// Without it every wait in this file hangs on a pane that is never going to grow
+// a PTY.
 func paneSpawned(p *Pane) bool {
 	p.PluginMu.Lock()
 	defer p.PluginMu.Unlock()
-	return p.PTY != nil || p.SpawnError != ""
+	return p.PTY != nil || p.SpawnError != "" || p.PreparingWorktree != ""
 }
 
 // settled waits until the daemon has finished everything the test asked for:

@@ -61,23 +61,100 @@ type Worktree struct {
 // Stderr is discarded for List, whose every failure means the same thing.
 // Add needs the opposite and captures it; see there.
 var runGit = func(ctx context.Context, dir string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := exec.CommandContext(ctx, gitBinary, args...)
 	cmd.Dir = dir
 	hideWindow(cmd)
 	cmd.WaitDelay = gitWaitDelay
-	out, err := cmd.Output()
+	// cmd.Output() would buffer the WHOLE of stdout with no cap. Only stderr is
+	// bounded there (Go caps it through a prefixSuffixSaver), which is why the
+	// asymmetry was easy to miss: `git for-each-ref refs/heads` and `git
+	// worktree list` both scale with the repository, and a mirror clone with a
+	// very large packed-refs is a few hundred MB allocated in one burst — inside
+	// a daemon that hosts every pane on the machine and runs for weeks.
+	stdout := &boundedBuffer{max: maxGitOutput}
+	stderr := &boundedBuffer{max: maxGitStderr}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	err := cmd.Run()
+	out := stdout.String()
 	if err != nil {
 		// git writes the actionable part of a worktree failure to stderr —
 		// "already exists", "already used by worktree", "invalid reference".
 		// The caller shows it to the user, so unlike gitinfo this cannot
-		// discard it. ExitError carries it; every other error is the exec
-		// itself failing and speaks for itself.
-		if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
-			return string(out), fmt.Errorf("%w: %s", err, strings.TrimSpace(string(ee.Stderr)))
+		// discard it. Read from our own buffer now that Stderr is set: an
+		// ExitError only carries stderr when the exec package captured it
+		// itself, which it no longer does.
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return out, fmt.Errorf("%w: %s", err, msg)
 		}
+		return out, err
 	}
-	return string(out), err
+	// Reported AFTER a successful exit, and as an error rather than a flag,
+	// because "what git said" and "what we kept" have diverged and only the
+	// caller knows whether that is survivable. Branches folds it back into its
+	// own truncation flag; List and Status refuse.
+	if stdout.truncated {
+		return out, fmt.Errorf("%w: git wrote more than %d bytes", ErrOutputTruncated, maxGitOutput)
+	}
+	return out, nil
 }
+
+// gitBinary is the executable runGit invokes. A package var ONLY so the bounded
+// read can be exercised against a real child process that emits more than the
+// cap — every other test drives the runGit seam itself and never reaches here.
+var gitBinary = "git"
+
+// ErrOutputTruncated reports that git produced more than maxGitOutput and the
+// tail was discarded.
+//
+// It is deliberately an ERROR rather than a second return value: every caller
+// then has to decide, and they decide differently. A record format cut
+// mid-record (List) parses into a confidently wrong answer; a line-per-item
+// listing (Branches) is merely shorter, which its caller already handles; and a
+// COUNT (Status) silently undercounts, and its zero is the one answer that
+// invites a force-delete.
+var ErrOutputTruncated = errors.New("git output truncated")
+
+// maxGitOutput bounds what runGit retains from one invocation.
+//
+// Generous against every honest caller: 2000 branch names at the 255-byte
+// maximum is ~512 KB, and Branches' own maxBranchList stops it long before this
+// does. It exists for the pathological repository, not for the ordinary one.
+const maxGitOutput = 1 << 20 // 1 MiB
+
+// maxGitStderr matches what cmd.Output() used to give us for free, so error text
+// is bounded exactly as it was before stdout took its own buffer.
+const maxGitStderr = 32 << 10 // 32 KiB
+
+// boundedBuffer keeps the first max bytes written to it and records that more
+// arrived.
+//
+// Write always reports len(p) consumed. Returning short would make os/exec's
+// copier stop with io.ErrShortWrite and surface as a spurious command failure;
+// the goal is to stop RETAINING, not to stop the child. The excess is read and
+// dropped, so memory is bounded while git still gets to finish and exit
+// normally — and the context deadline remains the bound on time.
+type boundedBuffer struct {
+	buf       []byte
+	max       int
+	truncated bool
+}
+
+func (b *boundedBuffer) Write(p []byte) (int, error) {
+	if room := b.max - len(b.buf); room > 0 {
+		if len(p) > room {
+			b.buf = append(b.buf, p[:room]...)
+			b.truncated = true
+		} else {
+			b.buf = append(b.buf, p...)
+		}
+	} else if len(p) > 0 {
+		b.truncated = true
+	}
+	return len(p), nil
+}
+
+func (b *boundedBuffer) String() string { return string(b.buf) }
 
 // gitWaitDelay caps how long a killed git may hold its output pipe open.
 const gitWaitDelay = 2 * time.Second
@@ -101,7 +178,13 @@ const gitWaitDelay = 2 * time.Second
 func List(ctx context.Context, dir string) ([]Worktree, error) {
 	out, err := runGit(ctx, dir, "worktree", "list", "--porcelain")
 	if err != nil {
-		if errors.Is(err, exec.ErrNotFound) || ctx.Err() != nil {
+		// A TRUNCATED listing is returned as an error, never folded into the
+		// not-a-repository answer. This is a RECORD format: a listing cut
+		// mid-record loses a `branch` line and parsePorcelain reports that
+		// worktree as detached, or invents a phantom entry from a partial
+		// `worktree ` line. Both are confidently wrong rather than absent, and
+		// the caller renders them as fact.
+		if errors.Is(err, exec.ErrNotFound) || errors.Is(err, ErrOutputTruncated) || ctx.Err() != nil {
 			return nil, err
 		}
 		return nil, nil
@@ -384,6 +467,11 @@ func RemoveWorktree(ctx context.Context, repo, path string) error {
 // It is affordable here because it runs ONCE, when the user opens a confirm
 // dialog, against one worktree.
 func Status(ctx context.Context, path string) (int, error) {
+	// A truncated read arrives as an error here and is NOT special-cased into a
+	// count, deliberately: this function returns a NUMBER, so truncation
+	// undercounts — and 0 is the single answer that invites the force-delete.
+	// "Could not check" and "clean" are rendered apart precisely so a count
+	// nobody fully obtained never masquerades as one.
 	out, err := runGit(ctx, path, "--no-optional-locks", "status", "--porcelain", "--ignored")
 	if err != nil {
 		return 0, fmt.Errorf("git status %s: %w", path, err)

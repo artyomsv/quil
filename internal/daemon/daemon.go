@@ -23,6 +23,7 @@ import (
 
 	"github.com/artyomsv/quil/internal/claudehook"
 	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/gitworktree"
 	"github.com/artyomsv/quil/internal/hookevents"
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/logger"
@@ -824,6 +825,7 @@ func (d *Daemon) restoreWorkspace() error {
 				pinnedAttention, _ := paneData["pinned_attention"].(bool)
 				worktreeOwned, _ := paneData["worktree_owned"].(bool)
 				worktreePath, _ := paneData["worktree_path"].(string)
+				worktreeInterrupted, _ := paneData["worktree_interrupted"].(bool)
 
 				pane := &Pane{
 					ID:           paneID,
@@ -849,6 +851,11 @@ func (d *Daemon) restoreWorkspace() error {
 					// right default: a pane nobody recorded as owning a
 					// worktree keeps the ordinary CWD fallback.
 					WorktreeOwned: worktreeOwned,
+					// Absent on every snapshot written before the marker
+					// existed → false, so such a pane restores exactly as it
+					// did before: a shell in whatever CWD was recorded. The
+					// marker only ever ADDS a refusal.
+					WorktreeInterrupted: worktreeInterrupted,
 					// Absent on any snapshot written before the path was
 					// recorded → empty, and an owned pane with no path is never
 					// offered for close-time removal. That degradation is
@@ -1021,12 +1028,43 @@ func (d *Daemon) refuseMissingWorktree(pane *Pane) bool {
 	return true
 }
 
+// refuseInterruptedWorktree leaves a placeholder that was snapshotted
+// mid-checkout unspawned, with the reason on screen.
+//
+// The flag is NOT cleared here: a daemon that restarts twice before the user
+// acts must refuse both times, and the pane is re-persisted with it. spawnPane
+// clears it alongside SpawnError, so Alt+R is what converts the pane into an
+// ordinary shell — the same escape refuseMissingWorktree offers, and it names
+// no directory for the same reason: Quil recorded the branch, not a checkout
+// that exists.
+func (d *Daemon) refuseInterruptedWorktree(pane *Pane) bool {
+	pane.PluginMu.Lock()
+	interrupted := pane.WorktreeInterrupted
+	if interrupted {
+		pane.SpawnError = "worktree creation was interrupted — no worktree was made"
+	}
+	pane.PluginMu.Unlock()
+	if interrupted {
+		log.Printf("pane %s: worktree creation was interrupted, leaving the pane unspawned", pane.ID)
+	}
+	return interrupted
+}
+
 // spawnRestoredPane spawns a single restored pane, applying the saved-cwd
 // sanity check and the fallback-to-terminal recovery. Extracted from
 // respawnPanes so the lazy-spawn path (ensurePaneSpawned) reuses it verbatim.
 func (d *Daemon) spawnRestoredPane(pane *Pane) {
 	ptySession := newRestoredPTY(paneSize(pane))
 	if d.refuseMissingWorktree(pane) {
+		return
+	}
+	// A placeholder that was snapshotted mid-checkout. Refused for the same
+	// reason a missing worktree is: its recorded CWD is the REPOSITORY ROOT, so
+	// spawning would put a shell exactly where the worktree existed to keep it
+	// out of — and the pane would look finished. No add is running any more (the
+	// daemon that started it is gone), so there is nothing to wait for and the
+	// honest state is a stopped pane that says why.
+	if d.refuseInterruptedWorktree(pane) {
 		return
 	}
 	// !WorktreeOwned as well as the early return above, so the no-relocation
@@ -1166,7 +1204,7 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	case ipc.MsgUpdateLayout:
 		d.handleUpdateLayout(msg)
 	case ipc.MsgPaneInput:
-		d.handlePaneInput(msg)
+		d.handlePaneInput(conn, msg)
 	case ipc.MsgResizePane:
 		d.handleResizePane(msg)
 	case ipc.MsgReloadPlugins:
@@ -1748,31 +1786,67 @@ func (d *Daemon) handleCreateTab(conn *ipc.Conn, msg *ipc.Message) {
 	if spec == nil {
 		spec = &ipc.FirstPaneSpec{}
 	}
+	// Validated HERE, before the branch is stored on a pane and broadcast, and
+	// not only inside worktreeAddAndCreate — which runs on a worker goroutine
+	// this function launches LAST, so by the time it validates, an unvalidated
+	// name has already reached Pane.PreparingWorktree and gone out on a full
+	// workspace_state frame to every attached client.
+	//
+	// worktree_add.go states the invariant: "Validated BEFORE any repository
+	// write, so a bad name costs no git invocation, no permit and no slot — and
+	// never reaches argv." A placeholder is not a repository write, but it is a
+	// broadcast, and any IPC client can send create_tab (a pane's own child runs
+	// as the same user and the socket is right there — the reachability the
+	// DestroyPanePayload.RemoveWorktree design already accounts for).
+	//
+	// The check in worktreeAddAndCreate STAYS: handleCreatePane reaches it by
+	// another route. The two are a ladder, not a duplicate — the arrangement
+	// uniqueProjectName already uses.
+	// BEFORE the validation below, and that order is the whole safety of this
+	// block. firstPaneType downgrades to a terminal only while Worktree is
+	// non-nil, so computing it AFTER a refusal dropped the spec hands back the
+	// REQUESTED type — and firstPanePayload then attaches InstanceArgs and
+	// ResumeSessionID, and the pane spawns in the repository ROOT. An agent
+	// running with its own arguments in the main checkout is exactly the
+	// isolation failure this path exists to prevent, reached by nothing more
+	// than a branch name git would refuse, and any IPC client can send
+	// create_tab. Pinned by TestHandleCreateTab_AnInvalidBranchStillLeavesAHarmlessPane.
 	paneType := firstPaneType(*spec)
-	create := ipc.CreatePanePayload{TabID: tab.ID, Type: paneType}
-	// The plugin fields ride along ONLY when the pane really is the requested
-	// one. When firstPaneType downgraded it — a worktree placeholder, or a spec
-	// naming no type at all — they belong to a DIFFERENT program, and
-	// resolveSpawnArgs REPLACES a plugin's own args with InstanceArgs whenever
-	// the pane has any: the placeholder would be spawned as
-	// `<shell> --dangerously-skip-permissions`. shellinit.Configure masks that
-	// on bash/zsh/pwsh by overwriting args and returns nil for sh/dash/fish and
-	// anything unrecognised, where the shell dies on its first instruction —
-	// so the "a failed add leaves a harmless terminal" guarantee would hold
-	// only on some hosts. ResumeSessionID goes with them: it would write a
-	// resume claim onto a terminal, which a snapshot inside the checkout window
-	// persists and a failed add leaves forever. createFirstPaneWorktree carries
-	// the full set on its own payload, so nothing is lost.
-	if paneType == spec.Type {
-		create.InstanceName = spec.InstanceName
-		create.InstanceArgs = spec.InstanceArgs
-		create.ResumeSessionID = spec.ResumeSessionID
+	if spec.Worktree != nil {
+		if err := gitworktree.ValidateBranch(spec.Worktree.Branch); err != nil {
+			// Reported to the requester exactly as the worktree path would have
+			// reported it, so the client's own error handling is unchanged, and
+			// the spec is dropped so the tab still opens with a usable pane
+			// rather than nothing. The pane is the downgraded terminal the type
+			// above already settled on — harmless, and carrying none of the
+			// requested plugin's fields.
+			log.Printf("new tab %s: worktree refused: %v", tab.ID, err)
+			respondTo(conn, msg.ID, ipc.MsgCreatePaneResp, ipc.CreatePaneRespPayload{
+				TabID:    tab.ID,
+				Error:    err.Error(),
+				Worktree: spec.Worktree,
+			})
+			spec.Worktree = nil
+		}
 	}
 	cwd := d.resolveRequestedCWD(spec.CWD, d.projectCWD(tab.ProjectID))
 
+	// The two construction paths are built SEPARATELY and share nothing but the
+	// type and the directory. `create` and its plugin-field block used to sit
+	// above the branch, unconditionally, while existing only for the ordinary
+	// arm — so a reader had to check that the worktree arm ignored them.
+	//
 	// constructPaneAt, not createPaneAt: the tab and its pane are one change and
-	// must reach clients as ONE frame. See the note on that split.
-	pane, err := d.constructPaneAt(create, cwd, paneType)
+	// must reach clients as ONE frame. See the note on that split. A WORKTREE
+	// request takes the placeholder path instead, and the difference is that it
+	// spawns NOTHING — see constructPreparingPane.
+	var pane *Pane
+	var err error
+	if spec.Worktree != nil {
+		pane, err = d.constructPreparingPane(tab.ID, cwd, paneType, *spec)
+	} else {
+		pane, err = d.constructPaneAt(d.firstPanePayload(tab.ID, paneType, *spec), cwd, paneType)
+	}
 	if err != nil {
 		log.Printf("new tab %s: %v", tab.ID, err)
 	}
@@ -1784,6 +1858,73 @@ func (d *Daemon) handleCreateTab(conn *ipc.Conn, msg *ipc.Message) {
 	if pane != nil && spec.Worktree != nil {
 		d.createFirstPaneWorktree(conn, msg.ID, tab.ID, pane.ID, *spec)
 	}
+}
+
+// firstPanePayload builds the create payload for a new tab's ordinary first
+// pane.
+//
+// The plugin fields ride along ONLY when the pane really is the requested
+// one. When firstPaneType downgraded it — a worktree placeholder, or a spec
+// naming no type at all — they belong to a DIFFERENT program, and
+// resolveSpawnArgs REPLACES a plugin's own args with InstanceArgs whenever
+// the pane has any: the placeholder would be spawned as
+// `<shell> --dangerously-skip-permissions`. shellinit.Configure masks that
+// on bash/zsh/pwsh by overwriting args and returns nil for sh/dash/fish and
+// anything unrecognised, where the shell dies on its first instruction —
+// so the "a failed add leaves a harmless terminal" guarantee would hold
+// only on some hosts. ResumeSessionID goes with them: it would write a
+// resume claim onto a terminal, which a snapshot inside the checkout window
+// persists and a failed add leaves forever. createFirstPaneWorktree carries
+// the full set on its own payload, so nothing is lost.
+func (d *Daemon) firstPanePayload(tabID, paneType string, spec ipc.FirstPaneSpec) ipc.CreatePanePayload {
+	create := ipc.CreatePanePayload{TabID: tabID, Type: paneType}
+	if paneType == spec.Type {
+		create.InstanceName = spec.InstanceName
+		create.InstanceArgs = spec.InstanceArgs
+		create.ResumeSessionID = spec.ResumeSessionID
+	}
+	return create
+}
+
+// constructPreparingPane builds a new tab's first pane as a VISIBLE PLACEHOLDER
+// for a worktree that is still being checked out: published into the tab like
+// any other pane, with no child process and the branch recorded on it.
+//
+// The tab cannot simply wait pane-less — createFirstPaneWorktree spells out why
+// (a blank active tab for the length of the checkout, persisted blank by any
+// snapshot inside the window, and nothing that recovers it). What it CAN do is
+// hold a pane that is honestly not ready, which is the half that was missing: the
+// placeholder used to be a real terminal in the repository root, and a live shell
+// is indistinguishable from a create that finished in the wrong tree. On a large
+// monorepo that is minutes of looking finished, and a failed add left the shell
+// standing with the reason only in quild.log.
+//
+// paneType comes from firstPaneType rather than a literal, so the placeholder and
+// the downgrade decision cannot drift apart. It matters beyond tidiness: this is
+// the type Alt+R would respawn on the error pane a failed add leaves, and the
+// requested type there would start an agent in the main checkout — the isolation
+// failure the whole path exists to prevent.
+// The branch comes from the SPEC rather than as a fourth string parameter: four
+// adjacent same-typed positionals is a signature where swapping cwd and paneType
+// compiles silently, and the spec is what the call site already holds.
+func (d *Daemon) constructPreparingPane(tabID, cwd, paneType string, spec ipc.FirstPaneSpec) (*Pane, error) {
+	if spec.Worktree == nil {
+		return nil, fmt.Errorf("create pane error: no worktree spec")
+	}
+	pane, err := d.session.CreatePane(tabID, cwd)
+	if err != nil {
+		return nil, fmt.Errorf("create pane error: %w", err)
+	}
+	branch := spec.Worktree.Branch
+	// Under PluginMu for the reason constructPaneAt states: CreatePane has
+	// already PUBLISHED the pane, so the snapshot and broadcast goroutines are
+	// legitimate concurrent readers of both fields.
+	pane.PluginMu.Lock()
+	pane.Type = paneType
+	pane.PreparingWorktree = branch
+	pane.PluginMu.Unlock()
+	log.Printf("pane created: %s (placeholder, tab=%s, awaiting worktree %s)", pane.ID, tabID, branch)
+	return pane, nil
 }
 
 // firstPaneType is the type a new tab's first pane OPENS as, which is not
@@ -1836,8 +1977,48 @@ func (d *Daemon) createFirstPaneWorktree(conn *ipc.Conn, reqID, tabID, placehold
 		Worktree:        spec.Worktree,
 	}
 	go func() {
-		respondTo(conn, reqID, ipc.MsgCreatePaneResp, d.worktreeAddAndCreate(p))
+		resp := d.worktreeAddAndCreate(p)
+		// A failure leaves the placeholder exactly where it is, so the reason
+		// goes ON it. The client's own notice is a three-second status-bar flash
+		// — the only one this path ever had, and easy to miss on a tab that has
+		// just opened — after which the user is left looking at a pane that
+		// cannot say why the agent they asked for never arrived.
+		//
+		// Swapped is the exception and cannot be inferred from Error: the swap
+		// precedes the new pane's PTY spawn, so a spawn failure reports an error
+		// with the placeholder already destroyed. Writing to it then would
+		// resurrect nothing and the id resolves to no pane anyway; the guard is
+		// what makes that explicit rather than accidental.
+		if resp.Error != "" && !resp.Swapped {
+			d.failPreparingPane(placeholderID, "worktree not created: "+resp.Error)
+		}
+		respondTo(conn, reqID, ipc.MsgCreatePaneResp, resp)
 	}()
+}
+
+// failPreparingPane turns a placeholder into the pane that explains itself.
+//
+// PreparingWorktree is cleared in the SAME step the error is written, or the
+// pane renders a spinner for a checkout that is over — the confidently-wrong
+// answer in the other direction. Both fields are broadcast-only, so this
+// requests no snapshot: there is nothing on disk for it to change.
+func (d *Daemon) failPreparingPane(paneID, reason string) {
+	pane := d.session.Pane(paneID)
+	if pane == nil {
+		return // the tab was closed while the checkout ran
+	}
+	pane.PluginMu.Lock()
+	pane.PreparingWorktree = ""
+	pane.SpawnError = reason
+	// The marker goes on for a FAILED add too, not only an interrupted one, and
+	// leaving it off was the same bug on the other branch. SpawnError is
+	// deliberately never persisted, so without this the next snapshot recorded
+	// the pane with no marker and no error, at its recorded CWD — the repository
+	// ROOT — and a daemon restart lazy-spawned a live shell there. "No worktree
+	// was made" is exactly as true after a refusal as after an interruption.
+	pane.WorktreeInterrupted = true
+	pane.PluginMu.Unlock()
+	d.broadcastState()
 }
 
 func (d *Daemon) handleDestroyTab(msg *ipc.Message) {
@@ -2228,9 +2409,28 @@ func (d *Daemon) replacePaneAt(payload ipc.CreatePanePayload, cwd, paneType stri
 	// the session maps).
 	d.applyResumeSessionID(newPane, payload.ResumeSessionID)
 
-	ptySession := apty.New()
+	// Through newSessionFn rather than apty.New(), for the reason constructPaneAt
+	// gives for the same swap: identical in production (the seam's zero pair IS
+	// apty.New()) and the smallest change that makes this function's FAILURE
+	// path drivable from a test — which is where the empty-tab bug lived, and
+	// which no test could reach while the PTY was constructed directly.
+	ptySession := newSessionFn(0, 0)
 	if err := d.spawnPane(newPane, ptySession, false); err != nil {
 		d.session.DestroyPane(newPane.ID)
+		// The tab can now be EMPTY, and for one caller it always is: the
+		// new-tab worktree flow replaces the tab's ONLY pane, so a spawn
+		// failure here left a tab with nothing in it — nothing to click,
+		// nothing to close — against handleCreateTab's own "the tab must never
+		// be pane-less" invariant. Reachable whenever the requested plugin's
+		// binary is missing. createFirstPaneWorktree cannot repair it either:
+		// it skips failPreparingPane precisely because the swap happened, so
+		// the user's only notice was a three-second flash over a blank tab.
+		//
+		// Recovered with a pane that has NO child and carries the reason,
+		// rather than by ensureTabNotEmpty's replacement shell: a shell would
+		// be a live child underneath renderSpawnError's block, which is the
+		// hazard the restart guard exists to prevent, one path over.
+		d.recoverEmptyTab(payload.TabID, fmt.Sprintf("pane could not start: %v", err))
 		d.broadcastState()
 		d.requestSnapshot()
 		// swapped=true: the old pane went with the swap above and is not coming
@@ -2341,6 +2541,53 @@ func (d *Daemon) handleDestroyPane(msg *ipc.Message) {
 // ensureTabNotEmpty destroys orphaned overlay panes and spawns a fresh
 // terminal pane when a tab has no normal panes left. Shared by the TUI
 // destroy path (handleDestroyPane) and the MCP path (handleDestroyPaneReq).
+// recoverEmptyTab gives a tab that just lost its last pane one that explains
+// itself: no child process, the reason on screen, Alt+R to get a shell.
+//
+// A no-op when the tab still holds a pane — an ordinary split-replace keeps its
+// siblings, so only the single-pane case pays for this — and when the tab is
+// gone entirely, which is a close racing the failure rather than something to
+// repair.
+//
+// Deliberately NOT ensureTabNotEmpty: that spawns a working shell in the
+// daemon's default directory, which is the right recovery when a pane the user
+// closed leaves a tab empty, and the wrong one here — the user asked for a
+// specific pane, it failed, and a shell that appears instead with no
+// explanation is the silent substitution this whole feature exists to remove.
+func (d *Daemon) recoverEmptyTab(tabID, reason string) {
+	if tabID == "" || d.session.Tab(tabID) == nil {
+		return
+	}
+	// NORMAL panes only, the same split ensureTabNotEmpty makes twenty lines
+	// below and for the same reason. Counting everything let an open OVERLAY
+	// (lazygit / k9s / lazysql — the slot is per tab) satisfy this and skip the
+	// recovery, leaving the tab with zero normal panes and a muted overlay: the
+	// state `.claude/CLAUDE.md` names as one no create path repairs. Reachable
+	// by replacing a pane in a tab that has an overlay open, and silent, since
+	// Swapped skips failPreparingPane.
+	for _, p := range d.session.Panes(tabID) {
+		p.PluginMu.Lock()
+		isOverlay := p.Overlay
+		p.PluginMu.Unlock()
+		if !isOverlay {
+			return
+		}
+	}
+	// The overlay is left in place, UNLIKE ensureTabNotEmpty's orphan sweep:
+	// there the tab is losing its last pane for good, here it is getting a
+	// normal one back on the next line.
+	pane, err := d.session.CreatePane(tabID, d.defaultCWD())
+	if err != nil {
+		log.Printf("tab %s: could not recover an empty tab: %v", tabID, err)
+		return
+	}
+	pane.PluginMu.Lock()
+	pane.Type = "terminal"
+	pane.SpawnError = reason
+	pane.PluginMu.Unlock()
+	log.Printf("tab %s: recovered with an unspawned pane: %s", tabID, reason)
+}
+
 func (d *Daemon) ensureTabNotEmpty(tabID string) {
 	var overlays []*Pane
 	normal := 0
@@ -2371,21 +2618,57 @@ func (d *Daemon) ensureTabNotEmpty(tabID string) {
 	}
 }
 
-func (d *Daemon) handlePaneInput(msg *ipc.Message) {
+func (d *Daemon) handlePaneInput(conn *ipc.Conn, msg *ipc.Message) {
 	var payload ipc.PaneInputPayload
 	if err := msg.DecodePayload(&payload); err != nil {
 		return
 	}
+	out := d.paneInputOutcome(payload)
+	// ONLY an id-bearing request is answered. The TUI sets no ID and sends one
+	// of these per keystroke, so it is untouched — a response per keystroke
+	// would be a frame per keystroke on that client's 64-slot must-deliver
+	// queue, which is the documented force-disconnect shape.
+	if msg.ID != "" {
+		respondTo(conn, msg.ID, ipc.MsgPaneInputResp, out)
+	}
+}
 
+// paneInputOutcome delivers the input and says what happened to it.
+//
+// Split out because the answer is the whole point: "the daemon accepted the
+// message" and "the child received the bytes" are different facts, and the MCP
+// send_to_pane tool was reporting the first as the second — a pane with no PTY
+// (a worktree placeholder, or one whose spawn failed) dropped the input in
+// silence while the tool answered "Sent N bytes".
+//
+// Every refusal names a REASON rather than a bare false, because the reasons are
+// not interchangeable: a placeholder is waiting on a checkout and will be
+// replaced, a spawn failure wants Alt+R, and a full queue means the child has
+// stopped reading its stdin.
+func (d *Daemon) paneInputOutcome(payload ipc.PaneInputPayload) ipc.PaneInputRespPayload {
+	refuse := func(format string, args ...any) ipc.PaneInputRespPayload {
+		return ipc.PaneInputRespPayload{PaneID: payload.PaneID, Error: fmt.Sprintf(format, args...)}
+	}
 	pane := d.session.Pane(payload.PaneID)
 	if pane == nil {
-		return
+		return refuse("no such pane")
 	}
 	// A deferred pane (MCP send_to_pane / send_keys targeting a not-yet-spawned
 	// restored pane) must be booted before its PTY can accept input.
 	d.ensurePaneSpawned(pane)
-	if pane.PTY == nil {
-		return
+	pane.PluginMu.Lock()
+	pty := pane.PTY
+	preparing, spawnErr := pane.PreparingWorktree, pane.SpawnError
+	pane.PluginMu.Unlock()
+	if pty == nil {
+		switch {
+		case preparing != "":
+			return refuse("pane is still waiting for its worktree (%s) and has no process yet", preparing)
+		case spawnErr != "":
+			return refuse("pane has no process: %s", spawnErr)
+		default:
+			return refuse("pane has no process")
+		}
 	}
 	// Never write the PTY here: a child that stopped reading stdin makes
 	// Write block forever, and this runs on the conn's dispatch goroutine —
@@ -2393,7 +2676,12 @@ func (d *Daemon) handlePaneInput(msg *ipc.Message) {
 	// EnqueueInput hands the data to the pane's own writer goroutine.
 	if !pane.EnqueueInput(payload.Data) {
 		d.notifyInputBlocked(pane)
+		return refuse("pane input queue is full — its child has stopped reading stdin")
 	}
+	// Delivered means QUEUED, which is as far as any caller can be told
+	// synchronously — the writer goroutine owns the PTY write precisely so a
+	// wedged child cannot block this goroutine.
+	return ipc.PaneInputRespPayload{PaneID: payload.PaneID, Delivered: true}
 }
 
 // notifyInputBlocked surfaces a full input queue — the pane's child has
@@ -3140,9 +3428,19 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			if pane.WorktreePath != "" {
 				paneData["worktree_path"] = pane.WorktreePath
 			}
+			// PERSISTED, unlike the branch it stands for. A snapshot landing
+			// inside the checkout window would otherwise restore an ordinary
+			// terminal in the repository root — the bug this feature removes,
+			// brought back from disk. See Pane.WorktreeInterrupted.
+			if pane.PreparingWorktree != "" || pane.WorktreeInterrupted {
+				paneData["worktree_interrupted"] = true
+			}
 			// SpawnError is captured for the BROADCAST only — see
 			// includeOverlays below. It is never written to paneData.
 			spawnErr := pane.SpawnError
+			// Same: captured under the lock that protects it, written to
+			// paneData only on the broadcast side.
+			preparingWorktree := pane.PreparingWorktree
 			// Captured here rather than read below: this runs on the snapshot
 			// goroutine while handleResizePane writes them from a conn dispatch
 			// goroutine.
@@ -3190,6 +3488,16 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 				// nobody sees is the failure mode this replaces.
 				if spawnErr != "" {
 					paneData["spawn_error"] = spawnErr
+				}
+				// The branch a checkout is running for, runtime-only for the
+				// same reason and one more: a snapshot landing inside the
+				// checkout window would restore a pane waiting on an add no
+				// daemon is running, and nothing would ever settle it.
+				// Broadcast because without it the placeholder renders as an
+				// ordinary blank terminal — which is what it looked like for the
+				// whole of a monorepo-sized checkout.
+				if preparingWorktree != "" {
+					paneData["preparing_worktree"] = preparingWorktree
 				}
 				// Model/context usage of the last completed AI turn is
 				// runtime-only (broadcast, never persisted): a stale token
@@ -3815,6 +4123,10 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	// error stayed painted over it, and the user typing blind into a live
 	// shell they could not see.
 	pane.SpawnError = ""
+	// Cleared with it, and for the same reason: Alt+R is the escape the error
+	// screen advertises, and a flag left set would have the pane refuse again
+	// on the next lazy spawn — after the user had already retried it.
+	pane.WorktreeInterrupted = false
 	typ := pane.Type
 	pane.PluginMu.Unlock()
 
@@ -4604,6 +4916,7 @@ func (d *Daemon) buildPaneInfos() []ipc.PaneInfo {
 			typ := pane.Type
 			cwd := pane.CWD
 			running := pane.PTY != nil && pane.ExitCode == nil
+			preparing := pane.PreparingWorktree
 			pane.PluginMu.Unlock()
 			if typ == "" {
 				typ = "terminal"
@@ -4621,6 +4934,9 @@ func (d *Daemon) buildPaneInfos() []ipc.PaneInfo {
 				Running:      running,
 				Pending:      pending,
 				InstanceName: pane.InstanceName,
+				// Why this pane has no process. Without it an agent reads a
+				// placeholder as a crashed pane.
+				PreparingWorktree: preparing,
 			})
 		}
 	}
@@ -4692,6 +5008,7 @@ func (d *Daemon) buildPaneStatus(pane *Pane) ipc.PaneStatusRespPayload {
 	cwd := pane.CWD
 	exitCode := pane.ExitCode
 	running := pane.PTY != nil && exitCode == nil
+	preparing := pane.PreparingWorktree
 	pane.PluginMu.Unlock()
 	if typ == "" {
 		typ = "terminal"
@@ -4701,13 +5018,14 @@ func (d *Daemon) buildPaneStatus(pane *Pane) ipc.PaneStatusRespPayload {
 	pane.spawnMu.Unlock()
 
 	return ipc.PaneStatusRespPayload{
-		PaneID:   pane.ID,
-		Running:  running,
-		Pending:  pending,
-		ExitCode: exitCode,
-		Type:     typ,
-		CWD:      cwd,
-		Name:     pane.Name,
+		PaneID:            pane.ID,
+		Running:           running,
+		Pending:           pending,
+		ExitCode:          exitCode,
+		Type:              typ,
+		CWD:               cwd,
+		Name:              pane.Name,
+		PreparingWorktree: preparing,
 	}
 }
 
@@ -4814,6 +5132,32 @@ func (d *Daemon) handleRestartPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 
 	pane := d.session.Pane(req.PaneID)
 	if pane == nil {
+		respondTo(conn, msg.ID, ipc.MsgRestartPaneResp, ipc.RestartPaneRespPayload{PaneID: req.PaneID})
+		return
+	}
+	// A placeholder waiting on a checkout is not a pane to restart, and the
+	// refusal has to be here rather than only in the TUI: the MCP restart_pane
+	// tool reaches this handler too, as does any other IPC client.
+	//
+	// Restarting one spawns a live shell INTO the same pane object while
+	// createFirstPaneWorktree's goroutine is still running against that id, and
+	// nothing here clears PreparingWorktree — so the shell renders hidden behind
+	// the "creating worktree" block, and whichever outcome lands next clobbers
+	// it: success destroys the pane in replacePaneAt, discarding the shell the
+	// user just started, and failure writes SpawnError over a pane that now
+	// holds a live PTY child nobody will ever close.
+	//
+	// Keyed on PreparingWorktree and never on SpawnError: the pane a FAILED add
+	// leaves behind must still restart, because Alt+R is exactly what its error
+	// screen offers.
+	pane.PluginMu.Lock()
+	preparing := pane.PreparingWorktree
+	pane.PluginMu.Unlock()
+	if preparing != "" {
+		log.Printf("restart pane %s: refused, still creating worktree %s", pane.ID, preparing)
+		// Success stays false — the pane is unchanged, and the "creating
+		// worktree" block it is already showing IS the answer to why nothing
+		// happened.
 		respondTo(conn, msg.ID, ipc.MsgRestartPaneResp, ipc.RestartPaneRespPayload{PaneID: req.PaneID})
 		return
 	}

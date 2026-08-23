@@ -19,6 +19,10 @@ var worktreeListTimeout = 10 * time.Second
 // git binary. Same pattern as gitProbeFn/gitDirsFn in gitcache.go.
 var worktreeListFn = gitworktree.List
 
+// worktreeBranchesFn is the same seam for the branch listing that rides along
+// with it.
+var worktreeBranchesFn = gitworktree.Branches
+
 // handleWorktreeListReq answers "which worktrees does this repository have".
 //
 // Worker goroutine + single-flight, matching handleGitReposReq. Its OWN slot
@@ -83,10 +87,21 @@ func worktreeListResponse(req ipc.WorktreeListReqPayload, fallback string) ipc.W
 		out.Error = "too many filesystem calls in flight"
 		return out
 	}
+	// ONE deadline and ONE permit for BOTH git invocations, the arrangement
+	// dirsExistResponse and worktreeStatusResponse already use. Giving the
+	// branch listing its own budget would double the worst case a hung mount can
+	// hold the single-flight slot for, and the shared deadline is
+	// self-propagating in the right direction: a listing that spent the whole
+	// budget leaves the branch listing to fail immediately, which degrades to
+	// "no opinion about branch names" rather than to a second stall.
+	//
+	// Released by defer rather than inline: what follows the git calls is pure
+	// slice building, and two exit paths that each had to remember both calls is
+	// how a permit leaks.
+	defer releaseBlockingFSCall()
 	ctx, cancel := context.WithTimeout(context.Background(), worktreeListTimeout)
+	defer cancel()
 	list, err := worktreeListFn(ctx, dir)
-	cancel()
-	releaseBlockingFSCall()
 
 	if err != nil {
 		out.Error = err.Error()
@@ -95,7 +110,28 @@ func worktreeListResponse(req ipc.WorktreeListReqPayload, fallback string) ipc.W
 	if len(list) == 0 {
 		// Not a repository. A real answer, deliberately not an Error — the two
 		// produce different UI and only one may say "there is no repository".
+		//
+		// Returning here is also what keeps the branch listing off the browser's
+		// hot path: the setup dialog asks about every directory the user walks
+		// through and most are not repositories, so a second subprocess for each
+		// would be a per-keystroke cost for an answer that is always empty.
 		return out
+	}
+
+	// AFTER the repository test, and its failure is deliberately not fatal: the
+	// worktree list is what the dialog needs to function, while the branch names
+	// are an extra check whose absence degrades to the behaviour that shipped
+	// before it existed — git's own refusal at create time.
+	branches, truncated, bErr := worktreeBranchesFn(ctx, dir)
+	if bErr != nil {
+		// %q, not %s: dir comes straight off the wire unvalidated and may carry
+		// ESC/CSI/OSC bytes and newlines, and quild.log is a plain file people
+		// read with cat and tail — which interpret them. Same hazard
+		// sanitizeRemoteText polices on the render side (CWE-117).
+		log.Printf("worktree list: branches for %q: %v", dir, bErr)
+	} else {
+		out.Branches = branches
+		out.BranchesTruncated = truncated
 	}
 
 	out.Repo = true

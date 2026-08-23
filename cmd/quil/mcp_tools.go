@@ -117,20 +117,47 @@ func registerSendToPaneTool(s *mcp.Server, bridge *mcpBridge, mcpLog *mcpLogger)
 			detail += fmt.Sprintf(" [%d redacted]", redactCount)
 		}
 		mcpLog.Log(input.PaneID, "send_to_pane", detail)
-		msg, err := ipc.NewMessage(ipc.MsgPaneInput, ipc.PaneInputPayload{
-			PaneID: input.PaneID,
-			Data:   []byte(data),
-		})
-		if err != nil {
+		// A REQUEST, not a fire-and-forget send: the daemon drops input aimed at
+		// a pane with no process (a worktree placeholder, or one whose spawn
+		// failed) and this tool used to answer "Sent N bytes" anyway — an agent
+		// then waits forever for output from a command that was never run.
+		if err := sendPaneInput(bridge, input.PaneID, []byte(data)); err != nil {
 			return nil, nil, fmt.Errorf("send_to_pane: %w", err)
-		}
-		if err := bridge.sendRaw(msg); err != nil {
-			return nil, nil, fmt.Errorf("send_to_pane send: %w", err)
 		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("Sent %d bytes to %s", len(data), input.PaneID)}},
 		}, nil, nil
 	})
+}
+
+// sendPaneInput delivers bytes to a pane and FAILS when the daemon could not
+// hand them to a process.
+//
+// The daemon drops input aimed at a pane with no PTY — a worktree placeholder,
+// or a pane whose spawn failed — and both MCP input tools used to report success
+// regardless, because the send was fire-and-forget. An agent then waits for
+// output from a command that was never run, which is indistinguishable from a
+// slow command and resolves only by timing out.
+//
+// One round trip per call is affordable here and nowhere else: these are agent
+// tools issuing a handful of sends, not the TUI's per-keystroke path, which
+// deliberately still sets no request ID and still gets no answer.
+func sendPaneInput(bridge *mcpBridge, paneID string, data []byte) error {
+	resp, err := bridge.request(ipc.MsgPaneInput, ipc.PaneInputPayload{PaneID: paneID, Data: data})
+	if err != nil {
+		return err
+	}
+	var payload ipc.PaneInputRespPayload
+	if err := resp.DecodePayload(&payload); err != nil {
+		return fmt.Errorf("decode pane_input_resp: %w", err)
+	}
+	if !payload.Delivered {
+		if payload.Error != "" {
+			return fmt.Errorf("%s: %s", paneID, payload.Error)
+		}
+		return fmt.Errorf("%s: input was not delivered", paneID)
+	}
+	return nil
 }
 
 func registerGetPaneStatusTool(s *mcp.Server, bridge *mcpBridge, mcpLog *mcpLogger) {
@@ -215,15 +242,9 @@ func registerSendKeysTool(s *mcp.Server, bridge *mcpBridge, mcpLog *mcpLogger) {
 			if textBuf.Len() == 0 {
 				return nil
 			}
-			msg, err := ipc.NewMessage(ipc.MsgPaneInput, ipc.PaneInputPayload{
-				PaneID: input.PaneID,
-				Data:   []byte(textBuf.String()),
-			})
-			if err != nil {
-				return err
-			}
+			data := textBuf.String()
 			textBuf.Reset()
-			return bridge.sendRaw(msg)
+			return sendPaneInput(bridge, input.PaneID, []byte(data))
 		}
 
 		for _, key := range input.Keys {
@@ -232,15 +253,12 @@ func registerSendKeysTool(s *mcp.Server, bridge *mcpBridge, mcpLog *mcpLogger) {
 				if err := sendBuf(); err != nil {
 					return nil, nil, fmt.Errorf("send_keys: %w", err)
 				}
-				msg, err := ipc.NewMessage(ipc.MsgPaneInput, ipc.PaneInputPayload{
-					PaneID: input.PaneID,
-					Data:   []byte(seq),
-				})
-				if err != nil {
+				// Confirmed like the text above it: a key sequence dropped into
+				// a pane with no process is the same silent failure, and this
+				// tool is the one used to drive interactive menus, where a
+				// dropped keypress reads as the menu ignoring you.
+				if err := sendPaneInput(bridge, input.PaneID, []byte(seq)); err != nil {
 					return nil, nil, fmt.Errorf("send_keys: %w", err)
-				}
-				if err := bridge.sendRaw(msg); err != nil {
-					return nil, nil, fmt.Errorf("send_keys send: %w", err)
 				}
 				time.Sleep(50 * time.Millisecond)
 			} else {

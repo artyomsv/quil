@@ -1100,6 +1100,134 @@ tree — silently making every placeholder assertion vacuous. Match `Left == nil
 uses.
 
 
+## The NEW-TAB worktree placeholder (pane-level, not LayoutNode-level)
+
+Everything above describes the SPLIT path's placeholder: a `LayoutNode` with
+`Pane == nil`, labelled from `phType` / `TabModel.CreatingBranch`, filled by
+`fill`. A new TAB created on a new branch (Ctrl+T → worktree) uses a **different
+mechanism**, and conflating the two is the mistake to avoid — a new tab has no
+existing pane to split from and no client-side placeholder at all, because the
+tab id does not exist until the daemon mints it.
+
+There the placeholder is a REAL PANE. `handleCreateTab` calls
+`constructPreparingPane` (`daemon.go`) instead of `constructPaneAt`: it publishes
+a pane into the tab and **spawns nothing**, recording the branch on
+`Pane.PreparingWorktree`.
+
+**It used to spawn a live `terminal`, and that was the bug.** A shell in the
+repository root is indistinguishable from a create that FINISHED and put the user
+in the wrong tree — for the whole of a checkout, which is minutes on a large
+monorepo — and a failed add left that shell standing with the reason nowhere but
+`quild.log`, behind a three-second status-bar flash. The tab still cannot be
+pane-less (`createFirstPaneWorktree` documents why: blank active tab, persisted
+blank by any snapshot in the window, nothing recovers it), so the answer is a pane
+that is honestly not ready rather than no pane.
+
+**`Pane.PreparingWorktree` is runtime-only and broadcast-only**, exactly like
+`SpawnError` beside it: a snapshot landing inside the checkout window would
+otherwise restore a pane waiting on an add no daemon is running, and nothing would
+ever settle it. The two fields are MUTUALLY EXCLUSIVE by construction —
+`failPreparingPane` clears the branch in the same `PluginMu` span it writes the
+error — and `syncPaneMeta` copies both UNCONDITIONALLY, because an absent key is
+what ends the wait.
+
+**The branch is validated in `handleCreateTab`, before the placeholder exists.**
+`worktreeAddAndCreate` validates too, but it runs on a worker goroutine launched
+LAST — so validating only there let an unvalidated name reach `PreparingWorktree`
+and go out on a full `workspace_state` frame to every attached client first. Any
+IPC client can send `create_tab`. The two checks are a ladder, not a duplicate
+(the `uniqueProjectName` arrangement); a refused spec drops to a plain terminal
+and answers the requester with the error the worktree path would have sent.
+
+**`handleRestartPaneReq` REFUSES a pane whose `PreparingWorktree` is set**, and the
+refusal is daemon-side because the MCP `restart_pane` tool reaches it too.
+Restarting a placeholder spawns a shell into the same pane object while the
+checkout goroutine still holds that id: the shell renders hidden behind the
+preparing block, and whichever outcome lands next clobbers it — success destroys
+the pane in `replacePaneAt`, failure writes `SpawnError` over a pane now holding a
+live PTY child nobody closes. Keyed on `PreparingWorktree` and never on
+`SpawnError`: the pane a FAILED add leaves must still restart, since `Alt+R` is
+what its error screen offers (it respawns as the DOWNGRADED `terminal`, never the
+requested agent type — `firstPaneType`'s reason applies to the retry too).
+
+**`PaneModel.spinnerRunning()` exempts this state from `restoreSettled`.** Those
+caps bound a pane BOOT — `restoreMinDisplay` up to `restoreSafetyCap`, seconds —
+while a checkout runs for minutes and the daemon allows two, plus a FRESH
+`worktreeAddTimeout` for the cleanup an abandonment runs. A frozen glyph in front
+of live work is worse than none. It also cannot gate on `screenBlank()` as the
+restore indicator does: there is no child to paint over it, so blank is permanent
+rather than a window that closes.
+
+**`preparingBranchCap` (`worktree_client.go`) bounds the branch at INGEST**, which
+is the one place in this feature where render-time bounding is not enough. The
+spinner advances every 100 ms and `spinnerFrame` is in `paneRenderKey`, so the
+frame cache absorbs none of it, and `renderPreparingWorktree` makes four `O(len)`
+passes per frame — one of which segments the whole string into graphemes. A frame
+may carry megabytes. Same shape as the project form's `formMsgNameCap`, and the
+reason it sits at ingest rather than at render is that a future second render path
+cannot forget it there.
+
+**The branch listing that feeds the dialog's refusal rides the EXISTING worktree
+listing** (`WorktreeListRespPayload.Branches` / `BranchesTruncated`,
+`gitworktree.Branches`) rather than a seventh request-response pair. It shares one
+deadline and one blocking-FS permit with the listing it rides on, and is skipped
+entirely outside a repository — the setup browser asks about every directory the
+user walks through and most are not repositories, so a second subprocess each
+would be a per-keystroke cost for an answer that is always empty. A failure is
+non-fatal: the worktree list is what the dialog needs to function, and losing the
+branches degrades to git's own refusal at create time.
+
+**`refs/heads` ONLY.** A remote-tracking ref of the same name is not a collision,
+so including `refs/remotes` would refuse names `git worktree add -b` accepts —
+the false-positive direction, which blocks legitimate work with a message that is
+simply wrong. **Absence is never evidence**: `branchTaken` refuses only on a
+POSITIVE match, which stays a true positive however short the list is, so a
+truncated or failed listing means "no opinion", never "available". That is why
+`BranchesTruncated` is carried and deliberately NOT acted on — it exists so a
+future affirmative ("✓ free") cannot be written against a list that is not
+evidence of absence. The comparison is EXACT: folding case would refuse `Feat/X`
+on a repository holding `feat/x`, which git accepts wherever its ref store is
+case-sensitive.
+
+**`worktreeState.validateNewBranch` runs syntax FIRST, and that is a security
+property.** `ValidateBranch` bounds the name at 255 bytes and rejects every rune
+below 0x20, so the interpolation below it is bounded and control-free; swapping
+the two would put an arbitrary-length escape-bearing string into a dialog row with
+no bound of its own. One function for BOTH call sites (the name field's Enter and
+`submitSetupDialog`) because they are reached by different routes — Tab is handled
+above the field dispatch, so tabbing away and pressing Continue never runs the
+field's Enter, and a check in one but not the other is a name the dialog refuses
+and the button beside it accepts.
+
+**A daemon RESTART inside the checkout window is its own problem, and dropping
+the branch from the snapshot solved only half of it.** `handleCreateTab` requests
+a snapshot immediately, so the placeholder is on disk for the WHOLE checkout — as
+an ordinary `terminal` whose CWD is the REPOSITORY ROOT. Keeping
+`PreparingWorktree` unpersisted is right (a restored pane would spin for an add
+nobody is running), but on its own it restored a live shell in the main checkout:
+the exact state this feature exists to remove, brought back from disk.
+
+`Pane.WorktreeInterrupted` is therefore PERSISTED — the FACT, without the branch —
+and `refuseInterruptedWorktree` (beside `refuseMissingWorktree`, in
+`spawnRestoredPane`) turns it into an unspawned pane with the reason on screen.
+The flag is deliberately NOT cleared when it fires: a daemon that restarts twice
+before the user acts must refuse both times, and the pane is re-persisted with
+it. `spawnPane` clears it alongside `SpawnError`, so `Alt+R` is what converts the
+pane into an ordinary shell. Absent on every older snapshot → false, so the
+marker only ever ADDS a refusal.
+
+**`recoverEmptyTab` covers the one shape where a replace can empty a tab.**
+`replacePaneAt` destroys its new pane when the spawn fails and reports
+`Swapped=true`; nothing on that path calls `ensureTabNotEmpty`, whose callers are
+the destroy and exit paths. For an ordinary split-replace that is harmless — the
+tab keeps its siblings — but the new-tab worktree flow replaces the tab's ONLY
+pane, so an empty tab was guaranteed whenever the requested plugin's binary was
+missing, and `createFirstPaneWorktree` cannot repair it because it skips
+`failPreparingPane` precisely when the swap happened. The recovery pane carries
+the reason and has NO child, deliberately: `ensureTabNotEmpty`'s replacement
+shell would be a live child underneath `renderSpawnError`'s block, which is the
+hazard the restart guard exists to prevent one path over.
+
 ## Removing worktrees on close (stage C)
 
 **`Pane.WorktreeOwned` is the ONLY gate, on BOTH sides of the socket, and it is

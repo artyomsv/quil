@@ -130,10 +130,15 @@ type PaneInfo struct {
 	// when it means the second.
 	// SpawnError explains why a pane has no process — today, a worktree-owned
 	// pane whose directory is gone. Daemon-authoritative and runtime-only.
-	SpawnError  string
-	GitBranch   string
-	GitDetached bool
-	GitWorktree bool
+	SpawnError string
+	// PreparingWorktree names the branch a `git worktree add` is checking out
+	// for the pane that will replace this one. Daemon-authoritative and
+	// runtime-only, like SpawnError beside it — and mutually exclusive with it,
+	// since the daemon clears one as it writes the other.
+	PreparingWorktree string
+	GitBranch         string
+	GitDetached       bool
+	GitWorktree       bool
 	// GitWorktreeName names the linked worktree the pane's CWD is in. Derived
 	// daemon-side: path separators belong to the machine holding the disk, so
 	// a Windows daemon's path split by a Linux client's filepath.Base returns
@@ -2055,8 +2060,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		// Keep the indicator alive until the pane's first live output
-		// (min display met) or the safety cap — not a fixed 2s timer.
-		if (pane.resuming || pane.preparing) && !pane.restoreSettled() {
+		// (min display met) or the safety cap — not a fixed 2s timer. A pane
+		// waiting on a worktree checkout is exempt from both; see
+		// spinnerRunning.
+		if pane.spinnerRunning() {
 			pane.spinnerFrame = msg.frame
 			nextFrame := msg.frame + 1
 			paneID := msg.paneID
@@ -3179,6 +3186,23 @@ func (m *Model) spinnerTargetPane(id string) *PaneModel {
 		}
 		if leaf := tab.Root.FindLeaf(id); leaf != nil {
 			return leaf.Pane
+		}
+	}
+	// A pane a worktree REPLACE detached is live on both sides and deliberately
+	// absent from the tree for the length of the checkout — which is exactly
+	// when ticks are flying. Resolving only through the tree returned nil for
+	// it, which ended the chain WITHOUT clearing spinnerTickRunning (there is no
+	// pane in hand to clear it on), and the re-enrol guard is
+	// `if pane.spinnerTickRunning { continue }` — so the pane came back with a
+	// frozen spinner and no live chain, permanently.
+	//
+	// Searching here rather than clearing the flag at the call site is the
+	// stronger fix: the chain keeps running, so the spinner is already correct
+	// the moment the pane is re-attached, and nil goes back to meaning what it
+	// says — this pane is gone for good.
+	for _, held := range m.worktreeReplaced {
+		if held != nil && held.ID == id {
+			return held
 		}
 	}
 	return nil
@@ -4934,7 +4958,7 @@ func (m *Model) handlePaneOutput(msg PaneOutputMsg) (tea.Cmd, bool) {
 			// paint, so the flag went down while the rectangle was still empty,
 			// which is the state the indicator exists to cover.
 			overlayChanged := m.paneIsVisible(msg.PaneID)
-			if (tab.overlayPane.preparing || tab.overlayPane.resuming) && tab.overlayPane.restoreSettled() {
+			if tab.overlayPane.restoreSettles() {
 				tab.overlayPane.preparing = false
 				tab.overlayPane.resuming = false
 				// Same treatment as the layout branch's settle below, for the
@@ -5017,7 +5041,7 @@ func (m *Model) handlePaneOutput(msg PaneOutputMsg) (tea.Cmd, bool) {
 			// frame). A boot frame that only clears the screen leaves it blank
 			// and keeps the indicator up; the frame that paints real content
 			// clears it. Mirrors restoreSettled() used by the spinner tick.
-			if (leaf.Pane.resuming || leaf.Pane.preparing) && leaf.Pane.restoreSettled() {
+			if leaf.Pane.restoreSettles() {
 				leaf.Pane.resuming = false
 				leaf.Pane.preparing = false
 				// Renders only inside the pane today (see buildTopBorder), so
@@ -6999,6 +7023,9 @@ func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
 				}
 				if s, ok := pm["spawn_error"].(string); ok {
 					pi.SpawnError = s
+				}
+				if s, ok := pm["preparing_worktree"].(string); ok {
+					pi.PreparingWorktree = boundBranch(s)
 				}
 				if b, ok := pm["git_branch"].(string); ok {
 					pi.GitBranch = b

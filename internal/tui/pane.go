@@ -92,11 +92,17 @@ type PaneModel struct {
 	// values actually observed rather than current ones.
 	// SpawnError explains why this pane has no process; empty when it has one.
 	// Rendered in the pane's own rectangle in place of VT content.
-	SpawnError      string
-	GitBranch       string
-	GitDetached     bool
-	GitWorktree     bool
-	GitWorktreeName string
+	SpawnError string
+	// PreparingWorktree names the branch a `git worktree add` is checking out
+	// for the pane that will REPLACE this one. Daemon-authoritative, and while
+	// it is set this pane has no process at all — it is a placeholder standing
+	// in a new tab so the tab is never pane-less, which is why it must not look
+	// like an ordinary blank terminal.
+	PreparingWorktree string
+	GitBranch         string
+	GitDetached       bool
+	GitWorktree       bool
+	GitWorktreeName   string
 	// WorktreeOwned is daemon-authoritative: this pane's worktree was created
 	// by Quil, so the close dialog may offer to delete it. WorktreePath is the
 	// directory that was created — the close dialog prices THAT, never CWD,
@@ -215,6 +221,7 @@ type paneRenderKey struct {
 	active, cursorVisible          bool
 	ghost, resuming, preparing     bool
 	pending                        bool
+	preparingWorktree, spawnError  string
 	mcpHighlight, muted, focusMode bool
 	splitDragHighlight             bool
 	ctxTargetHighlight             bool
@@ -234,16 +241,21 @@ type paneRenderKey struct {
 // renderKey computes the current fingerprint of every View() input.
 func (p *PaneModel) renderKey() paneRenderKey {
 	k := paneRenderKey{
-		contentGen:         p.contentGen,
-		width:              p.Width,
-		height:             p.Height,
-		scrollBack:         p.scrollBack,
-		active:             p.Active,
-		cursorVisible:      p.cursorVisible,
-		ghost:              p.ghost,
-		resuming:           p.resuming,
-		preparing:          p.preparing,
-		pending:            p.Pending,
+		contentGen:    p.contentGen,
+		width:         p.Width,
+		height:        p.Height,
+		scrollBack:    p.scrollBack,
+		active:        p.Active,
+		cursorVisible: p.cursorVisible,
+		ghost:         p.ghost,
+		resuming:      p.resuming,
+		preparing:     p.preparing,
+		pending:       p.Pending,
+		// Both are drawn by View and both now change on a LIVE pane: a failed
+		// worktree create writes SpawnError onto a pane that has already
+		// rendered, and Alt+R clears it with no output to bump contentGen.
+		preparingWorktree:  p.PreparingWorktree,
+		spawnError:         p.SpawnError,
 		mcpHighlight:       p.mcpHighlight,
 		splitDragHighlight: p.splitDragHighlight,
 		ctxTargetHighlight: p.ctxTargetHighlight,
@@ -846,6 +858,46 @@ func (p *PaneModel) showRestoreIndicator() bool {
 	return (p.resuming || p.preparing || p.Pending) && p.scrollBack == 0 && p.screenBlank()
 }
 
+// spinnerRunning reports whether the per-pane spinner chain should tick again.
+//
+// A worktree checkout is checked FIRST and is deliberately exempt from
+// restoreSettled: that function bounds a pane BOOT — restoreMinDisplay up to
+// restoreSafetyCap, seconds — while `git worktree add` against a large monorepo
+// runs for minutes and the daemon allows it two. A frozen glyph in front of work
+// that is still happening is exactly the "is this stuck?" question the indicator
+// exists to answer, and it is worse than no glyph at all.
+//
+// It also cannot use screenBlank() as the other indicator does: a placeholder has
+// no child, so nothing will ever paint over it. The daemon clearing the branch is
+// the only thing that ends this wait.
+func (p *PaneModel) spinnerRunning() bool {
+	if p.PreparingWorktree != "" {
+		return true
+	}
+	return (p.resuming || p.preparing) && !p.restoreSettled()
+}
+
+// restoreSettles reports whether an arriving output frame should take the
+// restore indicator down, and is the ONE predicate both output call sites use.
+//
+// It exists because those two sites hand-rolled
+// `(resuming || preparing) && restoreSettled()` and therefore knew nothing about
+// a worktree checkout. Harmless as things stand — a placeholder has no child, so
+// no output frame can reach them, and the restart guard is what keeps it that
+// way — but "correct because another guard makes it unreachable" is exactly the
+// coupling that breaks quietly when one of the two moves. Refusing here makes it
+// structural instead.
+//
+// Pinned by a direct test rather than through the call sites, deliberately: a
+// call-site test for this state would be vacuous, since nothing can deliver
+// output to a pane that has no process.
+func (p *PaneModel) restoreSettles() bool {
+	if p.PreparingWorktree != "" {
+		return false
+	}
+	return (p.resuming || p.preparing) && p.restoreSettled()
+}
+
 // restoreContext builds the dim second line: "<type> · <name-or-cwd-basename>".
 // Falls back to just the type when neither a name nor a CWD is known.
 func (p *PaneModel) restoreContext() string {
@@ -1016,6 +1068,46 @@ func (p *PaneModel) renderSpawnError(innerW, innerH int) string {
 		lipgloss.JoinVertical(lipgloss.Center, rows...))
 }
 
+// renderPreparingWorktree fills the pane with the branch its worktree is being
+// checked out for.
+//
+// It borrows renderSpawnError's shape rather than the restore checklist's,
+// because there is exactly one thing happening and no steps to tick off — and
+// the checklist's vocabulary ("session loaded", "waiting for first output")
+// describes a pane that is booting, which this one is not: it has no process and
+// is not going to get one. The pane that arrives will be a different pane.
+//
+// The duration note is not padding. A `git worktree add` against a large
+// monorepo runs for minutes, and "is this thing stuck" is the question the whole
+// indicator exists to answer.
+func (p *PaneModel) renderPreparingWorktree(innerW, innerH int) string {
+	glyph := spinnerFrames[p.spinnerFrame%len(spinnerFrames)]
+	// Bounded AND sanitized, two different jobs — see renderSpawnError. Elided
+	// in the MIDDLE because the informative half of a branch name is its tail.
+	branch := elideMiddle(sanitizeRemoteText(p.PreparingWorktree), innerW)
+	// ONE row unconditionally, like renderSpawnError — and for the reason its
+	// comment gives: lipgloss.Place pads but never CLIPS, so a block taller than
+	// innerH is returned whole and the pane body grows past its rect, shifting
+	// every sibling in the tab's JoinHorizontal. Measured before this gate: at
+	// Height 0-3 the budget is 3 lines and this rendered 4, while
+	// renderSpawnError rendered 3.
+	//
+	// The BRANCH is the row that survives after the first, never the
+	// reassurance line: it is the only part that says which checkout this is.
+	rows := []string{
+		restoreAccentStyle.Render(truncateToWidth(glyph+"  creating worktree", innerW)),
+	}
+	if innerH >= 2 {
+		rows = append(rows, restoreDimStyle.Render(branch))
+	}
+	if innerH >= 4 {
+		rows = append(rows, "", restoreDimStyle.Render(
+			truncateToWidth("this can take a while on a large repository", innerW)))
+	}
+	return lipgloss.Place(innerW, innerH, lipgloss.Center, lipgloss.Center,
+		lipgloss.JoinVertical(lipgloss.Center, rows...))
+}
+
 // renderRestoreIndicatorCompact is the small single-line indicator used when the
 // pane is too small for the full checklist.
 func (p *PaneModel) renderRestoreIndicatorCompact(innerW, innerH int) string {
@@ -1060,7 +1152,10 @@ func (p *PaneModel) View() string {
 	if p.Active {
 		borderColor = lipgloss.Color("57")
 	}
-	if p.ghost || p.resuming || p.preparing {
+	// A pane waiting on a worktree joins the set: it is the same "not ready
+	// yet" state, and the muted border is half of what stops it reading as an
+	// ordinary pane.
+	if p.ghost || p.resuming || p.preparing || p.PreparingWorktree != "" {
 		borderColor = lipgloss.Color("95") // muted purple — distinct but not jarring
 	}
 	if p.splitDragHighlight {
@@ -1085,6 +1180,15 @@ func (p *PaneModel) View() string {
 	content := p.renderContent(p.activeSel)
 	if p.showRestoreIndicator() {
 		content = p.renderRestoreIndicator(innerW, innerH)
+	}
+	// Before the spawn-error check and after the restore one, which is the
+	// order of certainty: this pane has no VT content to show and never will,
+	// but a failure that has already landed outranks a wait that is over.
+	// Ungated on screenBlank(), unlike the restore indicator — there is no
+	// child to paint anything, so "blank" is the permanent state rather than a
+	// window that closes.
+	if p.PreparingWorktree != "" {
+		content = p.renderPreparingWorktree(innerW, innerH)
 	}
 	// A pane with no process says WHY, in its own rectangle. Checked after the
 	// restore indicator and last, because it is a terminal state: the pane is
@@ -1121,7 +1225,11 @@ func (p *PaneModel) View() string {
 			rightLabel = "[muted] " + rightLabel
 		}
 	}
-	topLine := buildTopBorder(p.Width, p.CWD, rightLabel, borderColor, p.ghost, p.resuming, p.preparing, p.focusMode, p.spinnerFrame, p.working, p.workFrame)
+	// The worktree wait reuses the `preparing` label slot rather than adding a
+	// third: "preparing..." is what it is, and the branch is already in the
+	// pane body, where there is room to elide it honestly.
+	topLine := buildTopBorder(p.Width, p.CWD, rightLabel, borderColor, p.ghost, p.resuming,
+		p.preparing || p.PreparingWorktree != "", p.focusMode, p.spinnerFrame, p.working, p.workFrame)
 
 	out := topLine + "\n" + body
 	p.cachedKey, p.cachedView, p.hasCache = key, out, true

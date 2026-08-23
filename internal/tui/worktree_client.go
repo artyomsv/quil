@@ -3,9 +3,11 @@ package tui
 import (
 	"log"
 	"time"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/artyomsv/quil/internal/gitworktree"
 	"github.com/artyomsv/quil/internal/ipc"
 )
 
@@ -45,7 +47,77 @@ type worktreeState struct {
 	root         string
 	worktreeRoot string
 	list         []ipc.WorktreeInfo
-	err          string
+	// branches is every LOCAL branch of the repository, short. It exists
+	// because list cannot answer "is this name taken": that one reports only
+	// branches with a checkout, and the ordinary collision is with a branch
+	// whose worktree was removed — invisible there, and the failure this was
+	// added for.
+	//
+	// branchesTruncated says the daemon clipped the list. It is deliberately NOT
+	// acted on: the check only ever refuses on a POSITIVE match, which stays a
+	// true positive however short the list is, and nothing here claims a name is
+	// available. Carried so a future affirmation ("✓ free") cannot be written
+	// against a list that is not evidence of absence.
+	branches          []string
+	branchesTruncated bool
+	err               string
+}
+
+// branchTaken reports whether the repository already has a branch by this name,
+// i.e. whether `git worktree add -b` will refuse it.
+//
+// EXACT comparison. A listing is git's spelling and the field is the user's;
+// folding case would refuse `Feat/X` on a repository holding `feat/x`, which git
+// accepts wherever its ref store is case-sensitive — and refusing a name the
+// user may legitimately create is the worse direction, because the message would
+// simply be wrong. On a case-insensitive ref store the collision falls through
+// to the daemon's own error, which the pane now shows.
+//
+// False for an empty list, which covers a directory that is not a repository, a
+// listing that has not answered yet, a branch listing that failed, and a daemon
+// too old to send one. Absence from a list nobody obtained is not evidence.
+func (s worktreeState) branchTaken(name string) bool {
+	for _, b := range s.branches {
+		if b == name {
+			return true
+		}
+	}
+	return false
+}
+
+// validateNewBranch returns the message to show beside the name field, or "" when
+// the name can be used.
+//
+// ONE function for BOTH validation sites — the name field's Enter and
+// submitSetupDialog — because they must agree. They are reached by different
+// routes (Tab is handled above the field dispatch, so tabbing away and pressing
+// Continue never runs the field's Enter), and a check present in one and not the
+// other is a name refused in the dialog and accepted by the button beside it.
+//
+// Syntax FIRST, and that ordering is a SECURITY property rather than only a
+// nicer message. ValidateBranch enforces maxBranchLen (255 bytes) and rejects
+// every rune below 0x20, so by the time the name is interpolated into the
+// message below it is bounded and control-free. Swapping the two statements
+// would put an arbitrary-length, escape-bearing string into a dialog row that
+// has no bound of its own — and lipgloss measures an escape as zero cells, so
+// the row's truncation would neither count nor cut it.
+func (s worktreeState) validateNewBranch(name string) string {
+	if err := gitworktree.ValidateBranch(name); err != nil {
+		return err.Error()
+	}
+	if s.branchTaken(name) {
+		// git's own wording, so a user who then hits the daemon's error on a
+		// case-insensitive ref store reads the same sentence twice rather than
+		// two descriptions of one fact.
+		//
+		// Sanitized even though `name` is the user's OWN typing and ValidateBranch
+		// has already rejected C0/DEL: it does not reject C1 (U+009B is the CSI
+		// introducer oscfilter.go exists because of) or bidi overrides, and this
+		// is the one draw site of this value out of three that does not otherwise
+		// pass through sanitizeRemoteText — the inconsistency is what rots.
+		return "branch " + sanitizeRemoteText(name) + " already exists"
+	}
+	return ""
 }
 
 // requestWorktrees asks the daemon which worktrees the repository containing
@@ -90,6 +162,8 @@ func (m *Model) applyWorktreeList(msg worktreeListMsg) {
 	m.worktrees.root = msg.Resp.Root
 	m.worktrees.worktreeRoot = msg.Resp.WorktreeRoot
 	m.worktrees.list = msg.Resp.Worktrees
+	m.worktrees.branches = msg.Resp.Branches
+	m.worktrees.branchesTruncated = msg.Resp.BranchesTruncated
 	m.worktrees.err = msg.Resp.Error
 }
 
@@ -105,6 +179,42 @@ func (m *Model) applyWorktreeTimeout(msg worktreeTimeoutMsg) {
 	// A reason, not an empty list: "the scan never answered" and "this
 	// repository has one worktree" must not render identically.
 	m.worktrees.err = "worktree scan timed out"
+}
+
+// preparingBranchCap bounds the branch name a placeholder pane carries.
+//
+// Every other remote string in this package is sanitized and bounded at RENDER,
+// which is enough because it is rendered once per change. This one is not: the
+// spinner advances every 100 ms, spinnerFrame is part of paneRenderKey, so the
+// frame cache cannot absorb any of it — and renderPreparingWorktree does four
+// O(len) passes over the whole value per frame (sanitizeRemoteText, elideMiddle's
+// own width call, truncateCells', and lastCellsToWidth, which segments the
+// ENTIRE string into graphemes before walking back for the few cells it needs).
+// A frame may carry megabytes, so an unbounded value is hundreds of MB/s of
+// transient garbage on Bubble Tea's single Update goroutine, indefinitely, with
+// nothing that ends the condition.
+//
+// gitworktree.maxBranchLen is 255, so no honest value is affected — and the
+// daemon now refuses an over-long name before it can reach a broadcast at all.
+// This is the belt to that braces: it is the one place a future second render
+// path cannot forget, which is why the bound is at INGEST rather than at render.
+// Same shape as the project form's formMsgNameCap.
+const preparingBranchCap = 256
+
+// boundBranch clips a branch name from the wire to preparingBranchCap.
+//
+// Rune-safe: a branch name may carry non-ASCII, and lopping a byte off a
+// multi-byte rune leaves invalid UTF-8 for lipgloss to measure — the same reason
+// the name field's backspace decodes the last rune rather than dropping a byte.
+func boundBranch(s string) string {
+	if len(s) <= preparingBranchCap {
+		return s
+	}
+	b := []byte(s[:preparingBranchCap])
+	for len(b) > 0 && !utf8.Valid(b) {
+		b = b[:len(b)-1]
+	}
+	return string(b)
 }
 
 // createPaneTimeoutMsg fires when a worktree create has not answered. tabID
@@ -185,10 +295,16 @@ func (m *Model) applyCreatePaneResp(p ipc.CreatePaneRespPayload, dest string) {
 		// guarantee that a duplicate, late or foreign answer is inert
 		// (TestCreatePaneResp_UnknownTabIsInert) — an MCP bridge's own worktree
 		// create would raise an error the user never caused.
-		if p.Error != "" && p.Worktree != nil && m.newTabWorktrees[p.Worktree.Branch] {
+		// Consumed on ANY answer, not only a failing one: the entry is this
+		// create's only bookkeeping, and deleting it solely on the error path
+		// left one behind for every SUCCESSFUL new-tab worktree create, keyed by
+		// branch name, for the life of the session.
+		if p.Worktree != nil && m.newTabWorktrees[p.Worktree.Branch] {
 			delete(m.newTabWorktrees, p.Worktree.Branch)
-			m.setFlash("worktree not created: " +
-				truncateCells(sanitizeRemoteText(p.Error), createErrFlashCap))
+			if p.Error != "" {
+				m.setFlash("worktree not created: " +
+					truncateCells(sanitizeRemoteText(p.Error), createErrFlashCap))
+			}
 		}
 		return // not ours, or already settled
 	}

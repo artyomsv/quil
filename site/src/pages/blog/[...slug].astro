@@ -11,7 +11,7 @@
 import { getCollection, render } from "astro:content";
 import Page from "@/layouts/Page.astro";
 import Faq from "@/components/Faq.astro";
-import { SITE, canonical } from "@/data/seo";
+import { SITE, canonical, absoluteURL } from "@/data/seo";
 import { breadcrumbSchema, faqSchema } from "@/data/schemas";
 
 export async function getStaticPaths() {
@@ -48,7 +48,7 @@ const blogPosting = {
   url: canonical(path),
   inLanguage: SITE.htmlLang,
   keywords: post.data.keywords,
-  ...(post.data.ogImage ? { image: SITE.url + post.data.ogImage } : {}),
+  ...(post.data.ogImage ? { image: absoluteURL(post.data.ogImage) } : {}),
 };
 
 const schemas = [
@@ -58,7 +58,7 @@ const schemas = [
   ...(post.data.faq.length > 0 ? [faqSchema(post.data.faq)] : []),
   breadcrumbSchema([
     { name: "Home", path: "/" },
-    { name: "Blog", path: "/blog" },
+    { name: "Blog", path: "/blog/" },
     { name: post.data.title, path },
   ]),
 ];
@@ -73,6 +73,8 @@ const displayDate = post.data.pubDate.toLocaleDateString("en-US", {
 ---
 <Page
   title={post.data.title}
+  seoTitle={post.data.seoTitle}
+  ogType="article"
   description={post.data.description}
   path={path}
   ogImage={post.data.ogImage}

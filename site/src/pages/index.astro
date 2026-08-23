@@ -23,6 +23,13 @@ import { homeFaq } from "@/data/faq";
 
 const seo = {
   title: "Reboot-proof terminal multiplexer for AI development",
+  // Brand-first, and the suffix suppressed because the stem already
+  // opens with it. "quil" is a contested SERP — Rigetti's quantum
+  // language, the Clojure library, Quill.org — so a searcher who does
+  // mean this Quil has to recognise it in the first word or they scan
+  // past. The old form buried the name at character 52.
+  seoTitle: "Quil — the reboot-proof terminal multiplexer for AI coding agents",
+  brandSuffix: false,
   description:
     "Quil is a reboot-proof terminal multiplexer for AI-native developers. Typed panes, auto-resuming Claude Code sessions, remote attach over SSH, and an MCP server. One static binary per platform.",
   path: "/",
@@ -73,7 +80,7 @@ const topFeatures = [
     number: "◇ 05",
     title: "Panes on another machine",
     tag: "← REMOTE · BETA",
-    body: `<span class="mono" style="color:var(--flame);">quil --remote gpu01</span> puts the daemon on the server and the TUI on your laptop. No port is opened — it is <span class="mono">ssh -T</span> and one channel. Close the lid and the panes keep working; reopen and an amber bar reconnects on its own. Every directory picker reads the <b>server's</b> disk, not yours. <a href="/features#remote-daemon-ssh" style="color:var(--flame); white-space:nowrap;">How remote attach works →</a>`,
+    body: `<span class="mono" style="color:var(--flame);">quil --remote gpu01</span> puts the daemon on the server and the TUI on your laptop. No port is opened — it is <span class="mono">ssh -T</span> and one channel. Close the lid and the panes keep working; reopen and an amber bar reconnects on its own. Every directory picker reads the <b>server's</b> disk, not yours. <a href="/features/#remote-daemon-ssh" style="color:var(--flame); white-space:nowrap;">How remote attach works →</a>`,
   },
   {
     number: "◇ 06",
@@ -148,7 +155,7 @@ const revTimestamp = new Date().toISOString().slice(0, 10).replace(/-/g, "");
           </p>
 
           <div class="hero-actions">
-            <a href="/install" class="btn btn-primary"><span>▸ install in 30 seconds</span></a>
+            <a href="/install/" class="btn btn-primary"><span>▸ install in 30 seconds</span></a>
             <a href="#demo" class="btn btn-outline">try the demo</a>
             <a href={SITE.github} class="btn btn-ghost" rel="noopener external">★ star on github</a>
           </div>
@@ -242,7 +249,7 @@ const revTimestamp = new Date().toISOString().slice(0, 10).replace(/-/g, "");
       </div>
 
       <div style="margin-top:28px;">
-        <a href="/features" class="btn btn-outline">see every capability →</a>
+        <a href="/features/" class="btn btn-outline">see every capability →</a>
       </div>
     </div>
   </section>
@@ -339,8 +346,8 @@ const revTimestamp = new Date().toISOString().slice(0, 10).replace(/-/g, "");
             <div class="section-tag"><span class="dot"></span>THE DIRECT RIVALS</div>
             <p style="margin-top:12px; color:var(--ink-2); font-size:14px; line-height:1.6; max-width:52ch;">
               Building the same thing for agents? So are
-              <a href="/vs/herdr" style="color:var(--flame);">herdr</a> and
-              <a href="/vs/aoe" style="color:var(--flame);">Agent of Empires</a>.
+              <a href="/vs/herdr/" style="color:var(--flame);">herdr</a> and
+              <a href="/vs/aoe/" style="color:var(--flame);">Agent of Empires</a>.
               They ship broader agent support and a web dashboard; Quil answers
               with native Windows, an MCP server, and pane notes. See the honest
               side-by-side — gaps included.
@@ -374,7 +381,7 @@ const revTimestamp = new Date().toISOString().slice(0, 10).replace(/-/g, "");
 
         <div class="compare-tiles">
           {compareTiles.map((tile) => (
-            <a href={`/vs/${tile.slug}`} class="compare-tile">
+            <a href={`/vs/${tile.slug}/`} class="compare-tile">
               <span class="vs">vs ·</span>
               <span class="name">{tile.label}</span>
               <span style="font-size:12px; color:var(--ink-3); line-height:1.5;">{tile.blurb}</span>
@@ -445,7 +452,7 @@ const revTimestamp = new Date().toISOString().slice(0, 10).replace(/-/g, "");
         </div>
 
         <div class="actions">
-          <a href="/install" class="btn btn-primary">▸ install quil</a>
+          <a href="/install/" class="btn btn-primary">▸ install quil</a>
           <a href={SITE.github} class="btn btn-outline" rel="noopener external">★ star on github</a>
         </div>
       </div>

@@ -13,26 +13,35 @@
  */
 import { SITE } from "@/data/seo";
 
+// Every internal href carries its trailing slash — see
+// scripts/check-trailing-slash.mjs for why a slashless one is a bug and
+// not a cosmetic difference.
 const navLinks = [
-  { href: "/features", label: "features" },
-  { href: "/plugins",  label: "plugins"  },
-  { href: "/install",  label: "install"  },
-  { href: "/docs",     label: "docs"     },
-  { href: "/blog",     label: "blog"     },
+  { href: "/features/", label: "features" },
+  { href: "/plugins/",  label: "plugins"  },
+  { href: "/install/",  label: "install"  },
+  { href: "/docs/",     label: "docs"     },
+  { href: "/blog/",     label: "blog"     },
 ];
 
 const compareLinks = [
-  { href: "/vs/tmux",    label: "vs tmux"       },
-  { href: "/vs/zellij",  label: "vs Zellij"     },
-  { href: "/vs/wezterm", label: "vs WezTerm"    },
-  { href: "/vs/screen",  label: "vs GNU Screen" },
+  { href: "/vs/tmux/",    label: "vs tmux"       },
+  { href: "/vs/zellij/",  label: "vs Zellij"     },
+  { href: "/vs/wezterm/", label: "vs WezTerm"    },
+  { href: "/vs/screen/",  label: "vs GNU Screen" },
 ];
 
-const currentPath = Astro.url.pathname.replace(/\/$/, "") || "/";
+// Both sides are compared slash-stripped. The hrefs above are canonical
+// (trailing slash) while `pathname` may arrive either way depending on
+// how the page was reached, so normalising only one side makes every
+// nav item compare unequal and quietly drops the active state sitewide.
+const strip = (p: string) => p.replace(/\/+$/, "") || "/";
+const currentPath = strip(Astro.url.pathname);
 
 function isActive(href: string): boolean {
-  if (href === "/") return currentPath === "/";
-  return currentPath === href || currentPath.startsWith(href + "/");
+  const target = strip(href);
+  if (target === "/") return currentPath === "/";
+  return currentPath === target || currentPath.startsWith(target + "/");
 }
 
 const compareOpen = compareLinks.some((link) => isActive(link.href));

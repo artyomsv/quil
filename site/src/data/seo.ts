@@ -56,7 +56,13 @@ export const SITE = {
 } as const;
 
 export interface Page {
-  /** Required: page title without the brand suffix (BaseHead adds " · Quil"). */
+  /** Required: page title without the brand suffix (BaseHead adds " · Quil").
+   *  This is the EDITORIAL title — it is what the page calls itself, and on
+   *  a blog post it is also the <h1>. When the SERP wants different words
+   *  from the ones on the page, override the <title> with `seoTitle` rather
+   *  than bending this one; the visible heading and the search result are
+   *  allowed to differ, and pretending otherwise is how headings end up
+   *  written for a crawler instead of a reader. */
   title: string;
   /** Required: 120-160 char meta description, unique per page. */
   description: string;
@@ -66,6 +72,31 @@ export interface Page {
   ogImage?: string;
   /** Optional: keywords array — not used by Google but useful for Bing / Yandex. */
   keywords?: string[];
+  /**
+   * Optional: replaces `title` as the <title> / og:title stem. The brand
+   * suffix is still appended unless `brandSuffix` is false.
+   *
+   * Exists because Google truncates a <title> around 60 characters and
+   * the flagship post's editorial title ran to ~77 with the suffix — the
+   * result was a search listing that stopped mid-phrase.
+   */
+  seoTitle?: string;
+  /**
+   * Optional: append " · Quil" to the title. Default true.
+   *
+   * Set false where the brand already appears in the stem. "Quil vs tmux
+   * · Quil" says the name twice and spends ~7 of the ~60 usable
+   * characters doing it.
+   */
+  brandSuffix?: boolean;
+  /**
+   * Optional: og:type. Default "website".
+   *
+   * A blog post is "article" — the difference is what a share card and a
+   * crawler each expect to find, and "website" on a post suppresses the
+   * article-level fields entirely.
+   */
+  ogType?: "website" | "article";
 }
 
 /**
@@ -80,6 +111,28 @@ export interface Page {
  *
  * The home URL keeps its single trailing slash ("/").
  */
+/**
+ * Resolve an asset reference to an absolute URL.
+ *
+ * An `ogImage` is either site-relative ("/og/home.png") or already
+ * absolute (a CDN-hosted card on cdn.stukans.com). Prefixing the origin
+ * unconditionally turns the second kind into
+ * `https://quil.cchttps://cdn.stukans.com/…` — a string that is not a
+ * URL and that no consumer reports as an error; it simply renders no
+ * image.
+ *
+ * This lives here, next to `canonical`, because the guard previously
+ * existed ONLY inside BaseHead. The blog template built its
+ * BlogPosting `image` with a bare `SITE.url + …` twenty lines away in
+ * another file and inherited nothing — so the page carrying 64% of the
+ * site's impressions shipped the malformed form in its JSON-LD while
+ * its OG tags were correct. Two call sites, one rule: the rule has to
+ * be somewhere both can reach it.
+ */
+export function absoluteURL(ref: string): string {
+  return /^https?:\/\//.test(ref) ? ref : SITE.url + ref;
+}
+
 export function canonical(path: string): string {
   if (path === "/") return SITE.url + "/";
   const withLeadingSlash = path.startsWith("/") ? path : "/" + path;

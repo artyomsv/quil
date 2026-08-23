@@ -33,8 +33,12 @@ const article = /^[aeiou]/i.test(info.name) ? "an" : "a";
 
 const seo = {
   title: `Quil vs ${info.name}`,
+  // The default stem already contains the brand, so the suffix would say
+  // it twice and spend ~7 of the ~60 usable characters doing it.
+  seoTitle: info.seoTitle,
+  brandSuffix: false,
   description: `Looking for ${article} ${info.name} alternative? Quil is a reboot-proof terminal multiplexer with AI session resume, typed panes, and an MCP server — see how it compares to ${info.name}.`,
-  path: `/vs/${slug}`,
+  path: `/vs/${slug}/`,
   ogImage: `/og/vs-${slug}.png`,
   keywords: [
     `quil vs ${slug}`,
@@ -48,8 +52,8 @@ const seo = {
 const schemas = [
   breadcrumbSchema([
     { name: "Quil",   path: "/" },
-    { name: "Compare", path: `/vs/${slug}` },
-    { name: info.name, path: `/vs/${slug}` },
+    { name: "Compare", path: `/vs/${slug}/` },
+    { name: info.name, path: `/vs/${slug}/` },
   ]),
   faqSchema(info.faq),
 ];
@@ -190,7 +194,7 @@ function cellGlyph(support: Support): CellGlyph {
       <h2 class="h2" style="margin-top:10px; font-size:28px;">Other comparisons.</h2>
       <div class="compare-tiles" style="margin-top:24px; grid-template-columns: repeat(3, 1fr);">
         {otherCompetitors.map((other) => (
-          <a href={`/vs/${other}`} class="compare-tile">
+          <a href={`/vs/${other}/`} class="compare-tile">
             <span class="vs">vs ·</span>
             <span class="name">{competitors[other].name}</span>
             <span class="arrow">→ compare</span>
@@ -209,8 +213,8 @@ function cellGlyph(support: Support): CellGlyph {
         </h2>
         <p>Quil installs side-by-side with {info.name}. Nothing to uninstall first.</p>
         <div class="actions">
-          <a href="/install" class="btn btn-primary">▸ install quil</a>
-          <a href="/features" class="btn btn-outline">every capability →</a>
+          <a href="/install/" class="btn btn-primary">▸ install quil</a>
+          <a href="/features/" class="btn btn-outline">every capability →</a>
         </div>
       </div>
     </div>

@@ -251,9 +251,19 @@ func (m Model) renderEmptyTabArea(w, h int) string {
 // not active.
 func (m Model) offlineTabAreaMsg(p *ProjectModel, w, h int) string {
 	lines := []string{sanitizeRemoteText(p.displayName()), ""}
+	// Everything appended after the reason is OPTIONAL and goes on in priority
+	// order while the frame still has rows for it: the way out first, the
+	// diagnostic second. PlaceVertical has the same no-clip escape hatch as its
+	// horizontal sibling, so a block taller than h pushes the status bar off
+	// rather than being trimmed — the reason has to be the part that always
+	// survives, and the hint has to outrank the detail because one is actionable
+	// and the other is only informative.
+	fits := func(n int) bool { return h >= len(lines)+n }
 	switch p.Offline.Kind {
 	case offlineNeedsUpgrade:
-		lines = append(lines, "That host runs a different version of Quil,", "so this client will not attach to it.")
+		lines = append(lines,
+			"That host runs a different version of Quil,",
+			"so this client will not attach to it.")
 	case offlineNeedsInstall:
 		lines = append(lines, "Quil is not installed on that host.")
 	case offlineRetrying:
@@ -273,12 +283,19 @@ func (m Model) offlineTabAreaMsg(p *ProjectModel, w, h int) string {
 	// both prints one sentence twice — once capitalised, once behind a "dial
 	// <host>:" prefix. The sentinel is the single source; this is the seam that
 	// keeps the two from drifting apart.
+	// The two kinds that never enter the ladder have no other way back, so the
+	// key that starts one is the only actionable thing on this screen.
+	if p.Offline.Kind == offlineNeedsUpgrade || p.Offline.Kind == offlineNeedsInstall {
+		if fits(2) {
+			lines = append(lines, "", "Press "+reconnectResumeKey+" to try again.")
+		}
+	}
 	detail := sanitizeRemoteText(firstErrLine(p.Offline.Detail))
 	if p.Offline.Kind == offlineNeedsInstall &&
 		strings.Contains(strings.ToLower(detail), strings.ToLower(ErrRemoteQuilMissing.Error())) {
 		detail = ""
 	}
-	if detail != "" && h >= len(lines)+2 {
+	if detail != "" && fits(2) {
 		lines = append(lines, "", detail)
 	}
 	for i, line := range lines {

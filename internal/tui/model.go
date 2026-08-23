@@ -1168,6 +1168,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.resumeReconnect()
 		}
 	}
+	// The same key for a destination with NO ladder running. The arm above
+	// covers a ladder that parked itself; this covers the states that never
+	// started one — needsInstall, needsUpgrade, and a host whose accepted
+	// upgrade left it with a stopped daemon and nothing to dial it. Without
+	// this the only way out of any of them is relaunching the client, which is
+	// a poor answer for a tool whose whole point is that sessions survive.
+	if p := m.cur(); p != nil && p.Offline != nil && p.Dest != "" && !m.linkOf(p.Dest).active {
+		if key, ok := msg.(tea.KeyPressMsg); ok && kbMatches(key.String(), reconnectResumeKey) {
+			return m.retryOfflineDest(p.Dest)
+		}
+	}
 	// A dead link drops input rather than queueing it. Placed ahead of the type
 	// switch so input decisions are made in one place instead of in a branch
 	// nobody updated.

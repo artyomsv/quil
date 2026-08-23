@@ -13,3 +13,10 @@ headline: Accepting a remote upgrade now reconnects the host
 
 - **A push that fails says so.** It reported nothing at all before, for the same reason;
   the project now names the command that finishes the job by hand.
+
+- **Any offline host can be retried from inside the client — press `r`.** A host waiting
+  on an install or an upgrade never enters the reconnect ladder, deliberately: retrying a
+  missing binary or a version mismatch just re-fails until the far side changes. But
+  nothing noticed when the far side *did* change, so the only cure was relaunching. The
+  pane area now offers the key, and pressing it dials the host, starts its daemon, and
+  brings the panes back.

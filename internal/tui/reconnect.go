@@ -482,6 +482,42 @@ func (m Model) resumeReconnect() (tea.Model, tea.Cmd) {
 	return m.scheduleRedial(dest)
 }
 
+// retryOfflineDest is the way back for a destination no ladder is running for.
+//
+// The three offline kinds split into "waiting" and "acting", and only the
+// waiting one retries itself. needsInstall and needsUpgrade are deliberately
+// excluded from the ladder — retrying a missing binary or a version mismatch
+// re-fails until someone changes the far side — which is correct right up to
+// the moment the far side DOES change, and then there is nothing to notice it.
+// A host whose upgrade was accepted but whose completion never arrived sits in
+// exactly that hole: its daemon was stopped by the push, and the only thing
+// that starts a new one is a dial nothing was going to make.
+//
+// Manual on purpose, and cheap because it is: the user pressing a key IS the
+// new information the ladder cannot derive. That is also why the once-per-host
+// install guard is cleared here — it exists to break an automatic
+// install/retry/same-error loop, and an explicit keypress is not that loop. If
+// the far side really is still mismatched, the redial arm reclassifies and
+// re-offers the upgrade, which is the honest outcome rather than a silent
+// no-op.
+func (m Model) retryOfflineDest(dest string) (tea.Model, tea.Cmd) {
+	if dest == "" || !m.canReconnect(dest) {
+		return m, nil
+	}
+	p := m.projectForDest(dest)
+	if p == nil || p.Offline == nil {
+		return m, nil
+	}
+	log.Printf("remote: user retry for offline destination %s (kind=%v)", m.linkHost(dest), p.Offline.Kind)
+	p.Offline.Kind = offlineRetrying
+	p.Offline.Detail = "retrying…"
+	delete(m.offlineWoken, dest)
+	delete(m.installedDests, dest)
+	ls := m.linkFor(dest)
+	ls.parked, ls.attempt, ls.lastErr = false, 0, nil
+	return m.beginReconnect(dest, errors.New("retry requested"))
+}
+
 // isFreezeEscape reports whether a key should end a frozen session.
 func isFreezeEscape(key string, configuredQuit []string) bool {
 	for _, q := range configuredQuit {

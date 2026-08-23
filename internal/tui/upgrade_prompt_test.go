@@ -519,3 +519,103 @@ func TestUpgradePrompt_FormInstallPathStillHandled(t *testing.T) {
 		t.Errorf("the form install path no longer retries the dial: %q", got.projectFormDialing)
 	}
 }
+
+// IN-SESSION RECOVERY. needsInstall and needsUpgrade never enter the ladder —
+// correct, since retrying a missing binary or a version mismatch re-fails until
+// the far side changes — but that left NO way back inside a running client once
+// the far side did change. Relaunching was the only cure, which is a poor answer
+// from a tool whose whole point is that sessions survive.
+//
+// The concrete case that forced this: an accepted upgrade whose completion was
+// lost left the host with its daemon stopped by the push and nothing to dial it.
+func TestOfflineDest_RetryKeyRecoversAHostWithNoLadder(t *testing.T) {
+	for _, kind := range []OfflineKind{OfflineNeedsUpgrade, OfflineNeedsInstall} {
+		m, _ := upgradeModel(t)
+		m.SetRedialFunc("artyom@host", func(Client) (Client, error) { return nil, nil })
+		m.SeedOfflineDest("artyom@host", "artyom@host", kind, "stuck", nil)
+		// The offer is not what is under test here.
+		m.upgradeQueue = nil
+		m.installedDests = map[string]bool{"artyom@host": true}
+		// SeedOfflineDest APPENDS, so index 0 is still the fixture's own live
+		// project. The retry key is scoped to what the user is looking at, so
+		// the offline row has to be the active one for it to apply at all.
+		focusProject(t, &m, "artyom@host")
+
+		if m.linkOf("artyom@host").active {
+			t.Fatalf("kind=%v: fixture already has a ladder running", kind)
+		}
+
+		updated, cmd := m.Update(tea.KeyPressMsg{Code: 'r', Text: reconnectResumeKey})
+		got := updated.(Model)
+
+		p := got.projectForDest("artyom@host")
+		if p == nil || p.Offline == nil {
+			t.Fatalf("kind=%v: the host lost its offline row", kind)
+		}
+		if !p.Offline.Kind.laddered() {
+			t.Errorf("kind=%v: still %v after a retry — nothing will dial it", kind, p.Offline.Kind)
+		}
+		if !got.linkOf("artyom@host").active {
+			t.Errorf("kind=%v: no ladder started", kind)
+		}
+		if got.installedDests["artyom@host"] {
+			t.Errorf("kind=%v: the once-per-host guard survived an explicit retry, so a "+
+				"still-mismatched host could never be re-offered", kind)
+		}
+		if cmd == nil {
+			t.Errorf("kind=%v: retry produced no command", kind)
+		}
+	}
+}
+
+// The affordance has to be on screen, or it does not exist.
+func TestOfflineDest_PaneAreaAdvertisesTheRetryKey(t *testing.T) {
+	for _, kind := range []OfflineKind{OfflineNeedsUpgrade, OfflineNeedsInstall} {
+		m := Model{
+			width: 100, height: 30,
+			projects: []*ProjectModel{{
+				ID: "proj-1", Name: "api", Dest: "gpu01",
+				Offline: &OfflineState{Kind: kind, Detail: "stuck"},
+			}},
+			notifications: NewNotificationCenter(30, 50),
+		}
+		out := stripANSI(m.View().Content)
+		if !strings.Contains(out, "to try again") {
+			t.Errorf("kind=%v: the pane area offers no way back:\n%s", kind, out)
+		}
+	}
+}
+
+// A host with no dialer must not pretend to retry — beginReconnect would reach
+// redialCmd with a nil RedialFunc.
+func TestOfflineDest_RetryKeyIsARefusalWithNoDialer(t *testing.T) {
+	m, _ := upgradeModel(t)
+	m.SeedOfflineDest("artyom@host", "artyom@host", OfflineNeedsUpgrade, "stuck", nil)
+	m.upgradeQueue = nil
+	focusProject(t, &m, "artyom@host")
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: 'r', Text: reconnectResumeKey})
+	got := updated.(Model)
+	if got.linkOf("artyom@host").active {
+		t.Error("a destination with no dialer started a ladder anyway")
+	}
+	if p := got.projectForDest("artyom@host"); p != nil && p.Offline != nil && p.Offline.Kind.laddered() {
+		t.Error("a destination with no dialer was reclassified as laddered, so it now looks retryable and is not")
+	}
+}
+
+// focusProject makes the row for dest the ACTIVE project. SeedOfflineDest
+// appends, so a fixture that seeds one still has its own live project at index
+// 0 — and a key scoped to what the user is looking at would then be evaluated
+// against the wrong row (and, in these fixtures, forwarded to a pane whose
+// client is nil).
+func focusProject(t *testing.T, m *Model, dest string) {
+	t.Helper()
+	for i, p := range m.projects {
+		if p.Dest == dest {
+			m.activeProject = i
+			return
+		}
+	}
+	t.Fatalf("no project for dest %q in %d rows", dest, len(m.projects))
+}

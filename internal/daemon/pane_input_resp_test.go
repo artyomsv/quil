@@ -86,7 +86,14 @@ func TestHandlePaneInput_AnswersOnlyWhenTheRequestCarriesAnID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreatePane: %v", err)
 	}
+	// Under PluginMu: this daemon has a LIVE IPC server, so its snapshot and
+	// broadcast goroutines are already reading this field. The other tests in
+	// this file write it bare because their daemon has no server and therefore
+	// no concurrent reader — a distinction the race detector makes and a local
+	// `dev.sh test` does not.
+	pane.PluginMu.Lock()
 	pane.PreparingWorktree = "feat/x"
+	pane.PluginMu.Unlock()
 
 	msg, err := ipc.NewMessage(ipc.MsgPaneInput, ipc.PaneInputPayload{PaneID: pane.ID, Data: []byte("x")})
 	if err != nil {

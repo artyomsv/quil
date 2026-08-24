@@ -100,18 +100,6 @@ export interface Page {
 }
 
 /**
- * Build the canonical URL for a page.
- *
- * Always emits a trailing slash on non-root paths so the canonical
- * URL matches GitHub Pages' directory-style serving. Without this,
- * the canonical link tag would point at `/install` but GH Pages
- * serves the page at `/install/` (301-redirecting the slashless
- * form), which Google Search Console flags as a sitemap redirect
- * chain and refuses to read.
- *
- * The home URL keeps its single trailing slash ("/").
- */
-/**
  * Resolve an asset reference to an absolute URL.
  *
  * An `ogImage` is either site-relative ("/og/home.png") or already
@@ -133,6 +121,18 @@ export function absoluteURL(ref: string): string {
   return /^https?:\/\//.test(ref) ? ref : SITE.url + ref;
 }
 
+/**
+ * Build the canonical URL for a page.
+ *
+ * Always emits a trailing slash on non-root paths so the canonical
+ * URL matches GitHub Pages' directory-style serving. Without this,
+ * the canonical link tag would point at `/install` but GH Pages
+ * serves the page at `/install/` (301-redirecting the slashless
+ * form), which Google Search Console flags as a sitemap redirect
+ * chain and refuses to read.
+ *
+ * The home URL keeps its single trailing slash ("/").
+ */
 export function canonical(path: string): string {
   if (path === "/") return SITE.url + "/";
   const withLeadingSlash = path.startsWith("/") ? path : "/" + path;

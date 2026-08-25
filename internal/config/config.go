@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -281,6 +282,48 @@ type UIConfig struct {
 	// the TUI at 1.13 GB resident. internal/tui owns the policy
 	// (adaptiveScrollbackLines) and the constants; config cannot import tui.
 	ScrollbackLines int `toml:"scrollback_lines"`
+	// UnfocusedDim fades the whole frame toward the terminal background while
+	// the terminal window does not have OS focus, so typing into a window that
+	// only looks focused is visibly wrong before the first keystroke lands.
+	// 0 disables it; see UnfocusedDimAmount for the accepted range.
+	//
+	// It needs no "enabled" companion because 0 already says that, and it needs
+	// no terminal-capability key because the mechanism is self-gating: the dim
+	// only ever applies after a DEC 1004 blur, which a terminal without focus
+	// reporting never sends.
+	UnfocusedDim float64 `toml:"unfocused_dim"`
+}
+
+// DefaultUnfocusedDim is the share of the way toward the terminal background
+// an unfocused frame travels. Chosen to read as unmistakably muted at a glance
+// while leaving a parked agent's output legible — the point is to notice the
+// window is not focused, not to stop being able to read it.
+const DefaultUnfocusedDim = 0.6
+
+// MaxUnfocusedDim is short of 1.0 deliberately: a full blend renders the frame
+// as an empty rectangle, which is indistinguishable from a crashed TUI.
+const MaxUnfocusedDim = 0.9
+
+// UnfocusedDimAmount clamps UnfocusedDim into the usable range. A negative
+// value (which would brighten toward the foreground) and anything past
+// MaxUnfocusedDim both read as "off by one keystroke" typos rather than
+// intent, so they are clamped rather than honoured or rejected.
+//
+// NaN is named explicitly because it defeats an ordinary clamp: TOML accepts
+// the literal `nan`, and NaN compares false against BOTH bounds, so it would
+// fall through the default arm and reach the blend, where uint8(NaN) is
+// undefined. The frame happens to survive that today only because the caller
+// also gates on `amount > 0` — but a value this function exists to make safe
+// must not depend on a downstream check a refactor could drop.
+func (u UIConfig) UnfocusedDimAmount() float64 {
+	switch {
+	case math.IsNaN(u.UnfocusedDim), u.UnfocusedDim <= 0:
+		return 0
+	case u.UnfocusedDim > MaxUnfocusedDim:
+		return MaxUnfocusedDim
+	default:
+		return u.UnfocusedDim
+	}
 }
 
 type KeybindingsConfig struct {
@@ -424,6 +467,7 @@ func Default() Config {
 			ShowDisclaimer:     true,
 			SidebarOpen:        false, // closed by default — existing installs keep their pane geometry unchanged
 			SidebarWidth:       22,    // internal/tui.defaultSidebarWidth — config can't import tui, kept in sync by TestUIDefault_SidebarWidthMatchesTUIDefault
+			UnfocusedDim:       DefaultUnfocusedDim,
 		},
 		MCP: MCPConfig{
 			HighlightDuration: "10s",

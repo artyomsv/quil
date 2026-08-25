@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image/color"
 	"log"
 	"math"
 	"math/rand"
@@ -679,6 +680,20 @@ type Model struct {
 	// ever appear" has no distinguishable cause.
 	focusEverReported bool
 
+	// termFg/termBg are the terminal's own default colors, as reported by
+	// OSC 10 / OSC 11 (tea.ForegroundColorMsg / BackgroundColorMsg). Nil until
+	// the terminal answers, and nil forever on one that does not.
+	//
+	// They exist for the unfocused dim, which blends every color toward the
+	// background: getting that target from the terminal is what makes the pass
+	// fade INTO the surrounding window rather than toward an assumed black.
+	// The fallbacks (dimFallbackFg/Bg) assume a dark theme, which is safe
+	// precisely because the dim is gated on a DEC 1004 blur — a terminal
+	// modern enough to report focus reports its colors too, so the fallback
+	// covers a corner rather than the common case.
+	termFg color.Color
+	termBg color.Color
+
 	// notifier raises desktop toasts. Nil on every platform but Windows, and
 	// nil on Windows until the user has run `quil notify setup` — so every
 	// call site is a single nil check rather than a platform branch.
@@ -1048,7 +1063,14 @@ func (m Model) Init() tea.Cmd {
 	log.Print("TUI Init — starting listener")
 	startUpdateWatchdog(defaultWatchdogConfig())
 	go m.inputForwarder()
-	return tea.Batch(m.listenForMessages(), resourceTickCmd(), sizePollTick())
+	// The two color requests are OSC 10/11 queries whose answers feed the
+	// unfocused dim's blend target. A terminal that ignores them simply never
+	// replies — there is no timeout to run and nothing to retry, because the
+	// fallback palette is already in place.
+	return tea.Batch(
+		m.listenForMessages(), resourceTickCmd(), sizePollTick(),
+		tea.RequestForegroundColor, tea.RequestBackgroundColor,
+	)
 }
 
 // msgTypeName avoids per-Update reflection for the hot message types; the
@@ -1210,6 +1232,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// focus — see the focusEverReported field comment.
 		m.termFocused = true
 		m.focusEverReported = true
+		return m, nil
+
+	case tea.ForegroundColorMsg:
+		m.termFg = msg.Color
+		return m, nil
+
+	case tea.BackgroundColorMsg:
+		m.termBg = msg.Color
 		return m, nil
 
 	case tea.BlurMsg:
@@ -4246,6 +4276,19 @@ func (m Model) View() tea.View {
 	// read as an outage of the ones that are.
 	if m.linkOf(m.activeDest()).active {
 		content = overlayAt(content, m.renderReconnectBanner(m.width), 0, 0, m.width)
+	}
+
+	// Unfocused dim: the last thing done to the frame, and deliberately so.
+	// Everything above has already been composed into `content` — chrome,
+	// panes, overlays, banners — so one pass fades all of it, and being
+	// downstream of every render cache means a focus change needs no
+	// invalidation anywhere. Gated on termFocused alone: that starts true and
+	// only a DEC 1004 blur clears it, so a terminal without focus reporting
+	// never dims rather than dimming forever.
+	if !m.termFocused {
+		if amount := m.cfg.UI.UnfocusedDimAmount(); amount > 0 {
+			content = dimFrame(content, m.dimInputs(amount))
+		}
 	}
 
 	v := tea.NewView(content)

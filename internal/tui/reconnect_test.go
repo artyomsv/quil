@@ -1297,6 +1297,23 @@ func TestReconnect_KeepsPinnedAttention(t *testing.T) {
 	}
 }
 
+// The deletion mark survives a reattach for the same reason the pin does, and
+// it survives by OMISSION — resetWorkStateForReattach never names the field, so
+// nothing but this test stops a future edit to that pane loop from clearing it.
+// The function's docstring claims the mark is preserved; this is what makes the
+// claim true rather than merely currently-accurate.
+func TestReconnect_KeepsMarkedForDeletion(t *testing.T) {
+	m := newReconnectTestModel(t, 1)
+	p := m.curTabs()[0].Leaves()[0]
+	p.markedForDeletion = true
+
+	m.resetWorkStateForReattach(testDest)
+
+	if !p.markedForDeletion {
+		t.Error("the user's deletion mark was cleared by a reconnect")
+	}
+}
+
 // workTickRunning must NOT be cleared here. The spinner loop is self-stopping:
 // the in-flight tick observes !anyPaneWorking() and clears the flag itself.
 // Clearing it while that tick is still scheduled lets the next hook event start

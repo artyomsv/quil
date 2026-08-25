@@ -26,6 +26,7 @@ const (
 	ctxActMute
 	ctxActAttention
 	ctxActClearAttention
+	ctxActMarkDeletion
 	ctxActRestart
 	ctxActClose
 	// Project-row actions (Task 13) — only ever set on a menu opened via
@@ -117,6 +118,10 @@ func (m *Model) buildCtxMenuItems(pane *PaneModel) []ctxMenuItem {
 	if pane.pinnedAttention {
 		attnLabel = "Unmark attention"
 	}
+	delLabel := "Mark for deletion"
+	if pane.markedForDeletion {
+		delLabel = "Unmark for deletion"
+	}
 	// "Clear attention" is the inverse of the whole state block, not the
 	// inverse of the pin above it: it drops the BLOCKED mark, which is the one
 	// the user cannot otherwise get rid of. Three of the four marks it clears
@@ -160,6 +165,14 @@ func (m *Model) buildCtxMenuItems(pane *PaneModel) []ctxMenuItem {
 		{ctxActHunk, "Open hunk", hunkOK, true},
 		{ctxActRename, "Rename pane", true, false},
 		{ctxActMute, muteLabel, true, false},
+		// Before the attention pair rather than after it, and NOT beside
+		// Close pane… below the separator. Two reasons. The pin and Clear
+		// attention are one vocabulary and have to stay adjacent — the group
+		// separator sits on Clear attention precisely to close that block.
+		// And this row deletes nothing: it records a decision about a pane
+		// that stays alive, so putting it under a separator that means
+		// "destructive from here down" would misdescribe it.
+		{ctxActMarkDeletion, delLabel, true, false},
 		{ctxActAttention, attnLabel, true, false},
 		{ctxActClearAttention, "Clear attention", clearable, true},
 		{ctxActRestart, "Restart pane…", true, false},
@@ -625,6 +638,20 @@ func (m Model) executeCtxMenuItem(item ctxMenuItem) (tea.Model, tea.Cmd) {
 			// itself. The mute toggle has taken this route since it was
 			// written; this is the same shape.
 			return m, m.sendPinnedAttention(paneID, !pane.pinnedAttention)
+		}
+		return m, nil
+	case ctxActMarkDeletion:
+		if pane, _, _ := m.findPaneAndTab(paneID); pane != nil {
+			// Sent, not written — the same rule ctxActAttention follows and
+			// for the same reason: the mark is daemon-owned, syncPaneMeta
+			// copies it back on every broadcast, and a local flip would be
+			// reverted by the next workspace_state and visibly undo itself.
+			//
+			// The daemon also clears the attention pin as a side effect of
+			// setting this, which is a second reason the answer has to come
+			// from there: this client cannot know the pin is gone until the
+			// broadcast says so.
+			return m, m.sendMarkedForDeletion(paneID, !pane.markedForDeletion)
 		}
 		return m, nil
 	case ctxActClearAttention:

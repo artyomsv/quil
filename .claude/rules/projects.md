@@ -655,6 +655,55 @@ differ by, and an SGR attribute costs no cells where padding would desync
 blocked outranks pinned for the colour, so on a tab that is both, the glyph is
 the only channel left to say the pin is there.
 
+**The deletion mark is the pin's twin, and everything above applies to it
+unchanged.** `Pane.MarkedForDeletion` is daemon-owned, rides the same
+`MsgUpdatePane` `*bool`, persists through the same non-overlay block, and
+`syncPaneMeta` copies it unconditionally — so `sendMarkedForDeletion` sends and
+writes nothing locally, for the reason Mark attention does. It says the OPPOSITE
+thing: not "come back to this" but "I am finished here, it is safe to close",
+set on a pane deliberately kept alive while a deployment or a server it was
+spawned for finishes. Nothing but the user can know that, which is why no hook
+edge sets or clears it and why losing it at restart would be losing the whole
+feature. The hostile-daemon paragraph above covers it identically — display-only
+blast radius, same accepted trade.
+
+**The pair is MUTUALLY EXCLUSIVE and `handleUpdatePane` is where that lives.**
+Two opposite claims about one pane cannot both be true, so SETTING either clears
+the other. Enforcing it daemon-side rather than in the TUI is what makes it one
+answer for a second attached client and for the snapshot on disk; a client-side
+clear is one client's opinion, and the other client keeps the stale mark until
+something else happens to overwrite it. **CLEARING one deliberately does NOT
+touch the other**, and the asymmetry is the point: an unmark is not a claim about
+the opposite mark, and since the pair can never both be set, a clear that also
+cleared its opposite could only ever destroy state the user set — it could never
+repair an invalid combination. A payload carrying both as true is not something
+any client sends; deletion is applied second and wins, so the outcome is
+deterministic rather than merely unlikely. `Clear attention` is scoped to the
+attention vocabulary and does not reach the deletion mark, which has its own
+Unmark row.
+
+**`counts().marked` is a second axis beside `counts().pinned`, on the same
+terms**, and `paneRow` reserves BOTH suffix widths before the label floor
+applies. The suffix matters more here than for the pin: the marked pane is
+usually the one still `working`, so the live state claims the row's glyph for
+exactly as long as the reason to keep the pane alive lasts, and a mark that hid
+for that window would be invisible whenever it mattered. `projectRow`'s segment
+slice is sized 7 for the pair — one pane can hold only one of them, but a
+PROJECT holding one pinned pane and one marked pane is ordinary.
+
+**Red 160, and the tab bar gets the glyph with NO colour — the one place the
+twin diverges.** 160 has to miss three neighbours rather than the pin's one: 214
+is the blocked ▲, 208 the offline host, 203 the parked link. All three mean
+"wrong or waiting"; this one means the opposite, so it takes the darkest red
+left, reading as terminal rather than alarming. `tabStyle` gains no branch at
+all, unlike `pinnedTabStyle`. Tab colour ranks by urgency — blocked > pinned >
+unseen — and a pane already destined for deletion is the least urgent thing in
+the workspace, so a colour would put it in competition with three states that
+want the user to act. `tabLabel` adds `⌫` the way it adds `eagerTabMarker`, a
+fact rather than a demand. `TestTabStyle_DeletionMarkDoesNotRecolourTheTab`
+exists because a deliberate ABSENCE is otherwise invisible to review, and the
+obvious "finish the symmetry" edit would silently undo it.
+
 **`linkGlyphStyles` is a swept MAP rather than a switch**, because
 `linkGlyphStyle`'s fallback has to be some style and every candidate lies about
 a state it was not written for. A third link state added to `linkGlyph` without

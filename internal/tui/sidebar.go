@@ -60,10 +60,11 @@ func (p *ProjectModel) displayName() string {
 
 // paneStateCounts is what one project's panes add up to, for its summary row.
 //
-// A struct rather than four returns: the first three are one ORDERED
-// classification and `pinned` is a second, independent axis, so a bare
-// (working, blocked, done, pinned) tuple invites a caller to read them as four
-// of a kind. It also keeps projectRow's parameter list from growing to eight.
+// A struct rather than five returns: the first three are one ORDERED
+// classification while `pinned` and `marked` are two further independent axes,
+// so a bare (working, blocked, done, pinned, marked) tuple invites a caller to
+// read them as five of a kind. It also keeps projectRow's parameter list from
+// growing to nine.
 type paneStateCounts struct {
 	working int
 	blocked int
@@ -71,6 +72,11 @@ type paneStateCounts struct {
 	// pinned counts panes the USER marked by hand. Independent of the three
 	// above, deliberately — see counts().
 	pinned int
+	// marked counts panes the user marked for deletion. Independent of the
+	// three states for the same reason as `pinned`, and mutually exclusive
+	// with it on the daemon — so the two badges never both count the same
+	// pane, but they are tallied separately because they say opposite things.
+	marked int
 }
 
 // counts aggregates the pane states a project row summarises. `done` counts
@@ -114,6 +120,9 @@ func (p *ProjectModel) counts() paneStateCounts {
 			}
 			if pane.pinnedAttention {
 				c.pinned++
+			}
+			if pane.markedForDeletion {
+				c.marked++
 			}
 		}
 	}
@@ -755,6 +764,18 @@ const (
 	glyphDone    = "✓" // finished while you were away
 	glyphIdle    = "○" // nothing happening
 	glyphPinned  = "◆" // attention pinned by hand — never auto-cleared
+	// glyphDeletion is the user's "done with this pane, safe to close" mark.
+	// U+232B ERASE TO THE LEFT: one rune, one cell, Emoji=No, and it belongs to
+	// no other state in this vocabulary. Deliberately not ✗ or × — this is not
+	// a failure, and every other member of this set describes what the pane IS
+	// rather than what went wrong with it.
+	//
+	// Worth knowing rather than a problem: ⌫ is also the Backspace KEY symbol,
+	// and Alt+Backspace is a bound pane action (pane-history back). It collides
+	// with no other STATE glyph, which is what this block is a vocabulary for,
+	// but if the keybinding docs ever grow a glyph column the two conventions
+	// will meet.
+	glyphDeletion = "⌫" // marked for deletion by hand — never auto-cleared
 	// glyphMore marks rows the PANES window is hiding above or below itself.
 	// U+22EF is already what paneRow uses for the subagent count, so it is
 	// proven against the rule this block states. Deliberately NOT ▲/▼: ▲ is
@@ -829,10 +850,16 @@ var (
 	// be offline AND holding a blocked agent at the same time, and one colour
 	// for both makes "this host is gone" and "an agent wants you" the same
 	// signal.
-	sidebarOfflineStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("208"))
-	sidebarWorkingStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
-	sidebarUnseenStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("28"))
-	sidebarPinnedStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("141"))
+	sidebarOfflineStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("208"))
+	sidebarWorkingStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
+	sidebarUnseenStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("28"))
+	sidebarPinnedStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("141"))
+	// 160, and it has to avoid three neighbours rather than one: 214 is the
+	// blocked ▲, 208 the offline host, 203 the parked link. All three say
+	// "something is wrong or waiting"; this one says the opposite — the pane is
+	// finished with — so it takes the darkest red left, which reads as a
+	// terminal state rather than an alarm.
+	sidebarDeletionStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("160"))
 	sidebarGitStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 	sidebarGitStaleStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Italic(true)
 	// Link health, paired to its glyphs by linkGlyphStyles — see there for why
@@ -1094,7 +1121,7 @@ func sidebarTabHeading(name string, idx int, active bool, color string, w int) s
 
 // projectRow renders one project's summary line: an active-project marker,
 // its (already sanitized, dest-qualified) name, and a trailing badge of the
-// four pane counts plus link health. name is expected pre-sanitized —
+// five pane counts plus link health. name is expected pre-sanitized —
 // every call site in renderSidebar routes the raw daemon-sourced value
 // through sanitizeRemoteText before reaching here.
 //
@@ -1132,7 +1159,10 @@ func projectRow(name string, c paneStateCounts, workFrame int, link string, acti
 	// copying it into a fifth to prepend the head is some 8 KB of churn per
 	// project per frame, on a strip repainted on every message including the
 	// work-spinner tick (workSpinnerInterval).
-	segs := make([]styledSegment, 1, 6)
+	// 7, not 6: head + three states + both user marks + link. The two marks
+	// cannot both be set on one PANE, but this counts across a whole project,
+	// where one pane pinned and another marked is ordinary.
+	segs := make([]styledSegment, 1, 7)
 	// Badge order is urgency order, and it is the same glyph vocabulary the
 	// pane rows use so the summary reads as a roll-up rather than a second
 	// notation: needs you, still running, finished while you were away.
@@ -1165,11 +1195,18 @@ func projectRow(name string, c paneStateCounts, workFrame int, link string, acti
 	// The pin comes AFTER the three automatic states and before the link,
 	// which is not urgency order and is not meant to be: those three rank
 	// against each other because they describe what the agents are doing, and
-	// this one is the user's own mark. Putting it last of the four keeps their
+	// this one is the user's own mark. Putting it after the three keeps their
 	// ranking readable as a sequence, and it is also the one the user already
 	// knows about — it is here to be found again, not to be noticed first.
 	if c.pinned > 0 {
 		segs = append(segs, styledSegment{fmt.Sprintf(" %s%d", glyphPinned, c.pinned), sidebarPinnedStyle})
+	}
+	// Last of the user's own marks, and last of the badges before the link:
+	// this is the one thing on the row that asks for nothing. It is here so a
+	// project accumulating disposable panes says so from the outside — which is
+	// where forgotten panes actually pile up, in the project you are not in.
+	if c.marked > 0 {
+		segs = append(segs, styledSegment{fmt.Sprintf(" %s%d", glyphDeletion, c.marked), sidebarDeletionStyle})
 	}
 	if link != "" {
 		segs = append(segs, styledSegment{" " + link, linkGlyphStyle(link)})
@@ -1253,6 +1290,12 @@ func paneRow(pane *PaneModel, focused bool, w int) string {
 		}
 	case pane.pinnedAttention:
 		glyph, style = glyphPinned, sidebarPinnedStyle
+	case pane.markedForDeletion:
+		// Above unseen, below the live states. A finished turn the user has not
+		// looked at is usually the very thing they were waiting for before
+		// deciding the pane was disposable, so showing ✓ over the mark would
+		// hide the decision behind its own cause.
+		glyph, style = glyphDeletion, sidebarDeletionStyle
 	case pane.unseen:
 		glyph, style = glyphDone, sidebarUnseenStyle
 	default:
@@ -1275,6 +1318,23 @@ func paneRow(pane *PaneModel, focused bool, w int) string {
 	if pane.pinnedAttention && glyph != glyphPinned {
 		pinSuffix = " " + glyphPinned
 	}
+	// The deletion mark gets the same treatment, and it needs it more than the
+	// pin does: the pane it lands on is typically one the user left running on
+	// purpose, so `working` outranks it for as long as the reason to keep the
+	// pane alive lasts. A mark that hid for exactly that window would be
+	// invisible whenever it mattered.
+	//
+	// Its width is reserved alongside the pin's below, and the arithmetic
+	// covers BOTH being present even though the daemon keeps them exclusive on
+	// one pane. Not because a torn pair can arrive — it cannot, since both
+	// daemon write paths enforce the exclusion and one PluginMu span publishes
+	// both fields — but because the reservation is what makes each suffix
+	// independent of the other. Sizing it for one would couple them, so the
+	// next mark added here would silently take its width out of the label.
+	delSuffix := ""
+	if pane.markedForDeletion && glyph != glyphDeletion {
+		delSuffix = " " + glyphDeletion
+	}
 
 	label := pane.Name
 	if label == "" {
@@ -1287,7 +1347,7 @@ func paneRow(pane *PaneModel, focused bool, w int) string {
 		marker = "▸ "
 	}
 	prefix := marker + glyph + " "
-	avail := w - lipgloss.Width(prefix) - lipgloss.Width(pinSuffix)
+	avail := w - lipgloss.Width(prefix) - lipgloss.Width(pinSuffix) - lipgloss.Width(delSuffix)
 	if avail < 1 {
 		avail = 1
 	}
@@ -1324,6 +1384,7 @@ func paneRow(pane *PaneModel, focused bool, w int) string {
 	return renderStyledSegments([]styledSegment{
 		{prefix + label + suffix, style},
 		{pinSuffix, sidebarPinnedStyle},
+		{delSuffix, sidebarDeletionStyle},
 	}, w)
 }
 

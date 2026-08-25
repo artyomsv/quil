@@ -1174,9 +1174,16 @@ var newSessionFn = func(cols, rows int) apty.Session {
 }
 
 func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
-	// Log all IPC messages except high-frequency ones (input, resize, layout)
+	// Log all IPC messages except high-frequency ones (input, resize, layout,
+	// client stat).
+	//
+	// MsgClientStat is on this list for the same reason as the others and it is
+	// not optional: EVERY durable client pushes one every statPushInterval for
+	// its whole life, so an ordinary session with a TUI and ~30 bridges emits
+	// several lines a second forever. Logging it would churn quild.log through
+	// its rotation and bury the lifecycle lines this log exists for.
 	switch msg.Type {
-	case ipc.MsgPaneInput, ipc.MsgResizePane, ipc.MsgUpdateLayout:
+	case ipc.MsgPaneInput, ipc.MsgResizePane, ipc.MsgUpdateLayout, ipc.MsgClientStat:
 		// skip logging — too noisy
 	default:
 		log.Printf("ipc recv: %s", msg.Type)
@@ -1408,6 +1415,11 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	// A durable client stating its own identity. No response.
 	case ipc.MsgClientHello:
 		d.handleClientHello(conn, msg)
+
+	// A durable client reporting its own cpu and rss. No response, same as
+	// the hello: nothing the client does depends on the answer.
+	case ipc.MsgClientStat:
+		d.handleClientStat(conn, msg)
 
 	// Stopping a pane descendant. The request is a proposal; every check
 	// runs daemon-side against a freshly enumerated process table.

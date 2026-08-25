@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/artyomsv/quil/internal/memreport"
+	"github.com/artyomsv/quil/internal/proctree"
 )
 
 // processStart is when this process began, for the uptime it reports.
@@ -57,6 +59,61 @@ func sendClientHello(client *ipc.Client, role string) {
 		return
 	}
 	_ = client.Send(msg)
+
+	// Identity is sent once; cpu and rss have to keep arriving. Started HERE
+	// rather than at the four call sites for the reason the hello itself is
+	// funnelled through this helper: a new durable dial that forgets it would
+	// not fail loudly, it would just show an em dash forever in a diagnostic
+	// dialog nobody opens until something is already wrong.
+	startClientStatReports(client)
+}
+
+// statPushInterval matches the daemon's proc-collector tick, so a client's
+// report and the daemon's own enumeration describe roughly the same window.
+const statPushInterval = 5 * time.Second
+
+// startClientStatReports pushes this process's own cpu and rss on a tick.
+//
+// Best effort, like the hello: an older daemon drops the unknown message type,
+// and a send failure ends the loop rather than retrying. That exit is the
+// reconnect story — a redial calls sendClientHello again and starts a fresh
+// loop, while this one's next Send fails on the dead conn and returns. Retrying
+// here instead would leave one goroutine per reconnect pushing at a socket
+// nobody reads.
+//
+// The first tick always reports an unknown CPU: a rate needs two readings. RSS
+// is valid immediately, so a fresh process shows its memory and an em dash for
+// cpu until the tick after.
+func startClientStatReports(client *ipc.Client) {
+	if client == nil {
+		return
+	}
+	go func() {
+		sampler := proctree.NewSelfSampler()
+		t := time.NewTicker(statPushInterval)
+		defer t.Stop()
+
+		for range t.C {
+			// Unknown unless proven otherwise. Zero would render as "0%" and
+			// claim this process is idle.
+			p := ipc.ClientStatPayload{CPUPct: proctree.UnknownCPU}
+			if pct, ok := sampler.Percent(time.Now()); ok {
+				p.CPUPct = pct
+			}
+			self := os.Getpid()
+			if m := memreport.ProcRSSBatch([]int{self}); m != nil {
+				p.RSSBytes = m[self]
+			}
+
+			msg, err := ipc.NewMessage(ipc.MsgClientStat, p)
+			if err != nil {
+				continue
+			}
+			if err := client.Send(msg); err != nil {
+				return
+			}
+		}
+	}()
 }
 
 // currentExeName is the basename of the running binary.

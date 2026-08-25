@@ -106,6 +106,10 @@ type procRow struct {
 	version string
 	uptime  time.Duration
 	exeName string
+	// statAge is how long ago this process last reported its own cpu and rss.
+	// Zero means it has never reported — which is NOT "reported just now", so
+	// freshness is decided by the cpu/rss values, never by this alone.
+	statAge time.Duration
 	// expandable and expanded drive the ▸/▾ indicator. Nothing else tells the
 	// user a row can be opened; the memory dialog this replaces had them.
 	expandable bool
@@ -266,6 +270,9 @@ func (m Model) procRows() []procRow {
 			version: q.Version,
 			uptime:  time.Duration(q.UptimeMS) * time.Millisecond,
 			exeName: q.ExeName,
+			cpu:     q.CPUPct,
+			rss:     q.RSSBytes,
+			statAge: time.Duration(q.StatAgeMS) * time.Millisecond,
 			flag:    flag,
 		})
 	}
@@ -823,7 +830,8 @@ func renderProcRow(row procRow, selected bool, inner int) string {
 	switch row.kind {
 	case procRowSectionQuil:
 		// Column headers, so the values below are not unlabelled numbers.
-		return dialogSubtle.Render(procQuilLine("QUIL", "VERSION", "UPTIME", "PID", "BINARY", inner))
+		return dialogSubtle.Render(procQuilLine(
+			"QUIL", "MEM", "CPU", "VERSION", "UPTIME", "PID", "BINARY", inner))
 
 	case procRowSectionWorkspace:
 		return dialogSubtle.Render(procLine("WORKSPACE", "MEM", "CPU", 0, "", inner))
@@ -842,6 +850,8 @@ func renderProcRow(row procRow, selected bool, inner int) string {
 		}
 		return style.Render(procQuilLine(
 			role,
+			formatQuilMem(row.rss, row.statAge),
+			formatQuilCPU(row.cpu, row.statAge),
 			sanitizeRemoteText(row.version),
 			formatUptime(row.uptime),
 			strconv.Itoa(row.pid),
@@ -970,13 +980,65 @@ func procLine(name, mem, cpu string, pid int, flag string, inner int) string {
 // "quil.exe.old.3" — the whole reason the column exists.
 const quilNameCol = 22
 
+// procStatStaleAfter is how old a self-reported stat may be before the dialog
+// stops showing it.
+//
+// Clients push on statPushInterval (5 s), so two missed pushes plus slack. The
+// case this exists for is a WEDGED process: it keeps its connection open, so
+// nothing else about the row changes, and its last reading would otherwise sit
+// on screen looking current for as long as the dialog stayed open — which is
+// exactly the process someone opened this dialog to investigate.
+const procStatStaleAfter = 12 * time.Second
+
+// statIsStale reports whether a reading is too old to show.
+//
+// A zero age means NEVER REPORTED, not "reported this instant" — that row's
+// values are already the unknown markers, so it is deliberately not treated as
+// stale here and the value formatters handle it.
+func statIsStale(age time.Duration) bool {
+	return age > procStatStaleAfter
+}
+
+// formatQuilCPU renders a self-reported percentage, or an em dash.
+func formatQuilCPU(pct float64, age time.Duration) string {
+	if statIsStale(age) {
+		return "—"
+	}
+	return formatCPU(pct)
+}
+
+// formatQuilMem renders a self-reported RSS, or an em dash.
+//
+// Zero is the unknown marker rather than a measurement: a live process cannot
+// occupy zero bytes, so rendering "0 B" would state something no reading ever
+// said. Same reasoning as formatCPU's em dash, one field over.
+func formatQuilMem(rss uint64, age time.Duration) string {
+	if rss == 0 || statIsStale(age) {
+		return "—"
+	}
+	return memreport.HumanBytes(rss)
+}
+
 // procQuilLine lays out one quil-section row to exactly inner cells.
-func procQuilLine(role, version, uptime, pid, binary string, inner int) string {
-	binW := inner - quilNameCol - procColMem - procColCPU - procColPID - 2
+//
+// Seven columns now. MEM and CPU sit immediately after the role because they
+// are what the section exists to answer since quil's own processes started
+// reporting themselves; version, uptime and the binary name follow, and BINARY
+// keeps the flexible width because "quil.exe.old.3" is the string that has to
+// survive truncation.
+//
+// These do NOT line up with the workspace section's MEM/CPU columns, and cannot:
+// that section's name column is flexible where this one's role column is fixed,
+// so the two only coincide at one specific terminal width. Each section carries
+// its own header row for that reason.
+func procQuilLine(role, mem, cpu, version, uptime, pid, binary string, inner int) string {
+	binW := inner - quilNameCol - procColMem - procColCPU - procColMem - procColCPU - procColPID - 2
 	if binW < 4 {
 		binW = 4
 	}
 	line := padCell(role, quilNameCol) +
+		padCellRight(mem, procColMem) +
+		padCellRight(cpu, procColCPU) +
 		padCellRight(version, procColMem) +
 		padCellRight(uptime, procColCPU) +
 		padCellRight(pid, procColPID) +

@@ -138,6 +138,21 @@ const (
 	// draws between an ATTACHED client and a CONNECTED conn.
 	MsgClientHello = "client_hello"
 
+	// MsgClientStat is a durable client reporting its OWN cpu and rss, pushed
+	// on a tick rather than sent once like the hello.
+	//
+	// It is a push, not a request-response, for the same reason the hello is
+	// fire-and-forget: the daemon must never block a report on a client that
+	// has stopped reading, and the client whose numbers matter most is
+	// precisely the one that might be wedged. A missed push ages out and
+	// renders as unknown, which is the honest answer.
+	//
+	// Self-reported rather than read from the OS process table, matching
+	// MsgClientHello — the daemon cannot see a remote client's process at all,
+	// and inferring quil's own processes from the local table is the mistake
+	// the previous version of this section made.
+	MsgClientStat = "client_stat"
+
 	// Process kill — the dialog asking the daemon to stop a pane descendant.
 	//
 	// The daemon owns this decision entirely: it re-enumerates, re-derives the
@@ -843,6 +858,20 @@ type QuilProcInfo struct {
 	UptimeMS int64  `json:"uptime_ms"`
 	// Stale marks a process whose version differs from the daemon's.
 	Stale bool `json:"stale,omitempty"`
+
+	// CPUPct and RSSBytes are the last values this process reported about
+	// itself via MsgClientStat. CPUPct is negative when unknown, which is what
+	// a process that has not reported yet gets — NOT zero, which renders as
+	// "0%" and claims the process is idle.
+	CPUPct   float64 `json:"cpu_pct"`
+	RSSBytes uint64  `json:"rss_bytes,omitempty"`
+	// StatAgeMS is how long ago that report ARRIVED, on the daemon's clock.
+	// Zero means nothing was ever reported, which the dialog renders the same
+	// as unknown but which is a distinct state from a report that went stale.
+	//
+	// Measured daemon-side rather than carried by the client for the reason
+	// UptimeMS is a duration: in remote mode the two clocks are unrelated.
+	StatAgeMS int64 `json:"stat_age_ms,omitempty"`
 }
 
 type ResourceReportRespPayload struct {
@@ -897,6 +926,21 @@ type ClientHelloPayload struct {
 	// so after a daemon restart the conn is seconds old while a stale bridge
 	// has been alive for days.
 	UptimeMS int64 `json:"uptime_ms"`
+}
+
+// ClientStatPayload is a durable client's periodic report about ITSELF.
+//
+// Both fields carry an explicit unknown, because "could not measure" and
+// "measured zero" are different claims and only one of them is safe to render
+// as a number. A client on a platform with no cumulative CPU counter sends a
+// negative CPUPct forever, and the dialog shows an em dash forever.
+type ClientStatPayload struct {
+	// CPUPct is percent of ONE core since this client's previous report.
+	// Negative means unknown — the same convention ProcNode.CPUPct uses.
+	CPUPct float64 `json:"cpu_pct"`
+	// RSSBytes is the process's resident set size. Zero means unknown; a live
+	// process cannot genuinely occupy zero bytes, so the ambiguity is free.
+	RSSBytes uint64 `json:"rss_bytes"`
 }
 
 // Process kill payloads

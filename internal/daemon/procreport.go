@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -48,21 +49,47 @@ type procCollector struct {
 	lister memreport.PaneLister
 	now    func() time.Time
 
+	// rss is kept as well as being folded into src, because the daemon's own
+	// row needs one PID's RSS without going through a tree enumeration.
+	rss func([]int) map[int]uint64
+
 	mu       sync.Mutex
 	sampler  *proctree.Sampler
 	src      proctree.Sources
 	last     *procSnapshot
 	deadline time.Time
 	running  bool
+
+	// The daemon's own cpu and rss. Unlike every client row, these are not
+	// self-REPORTED over a socket — the daemon is the process doing the
+	// reporting, so it reads itself directly on the same tick that enumerates
+	// the panes.
+	selfCPU *proctree.SelfSampler
+	selfPct float64
+	selfRSS uint64
 }
 
 func newProcCollector(lister memreport.PaneLister, rss func([]int) map[int]uint64) *procCollector {
 	return &procCollector{
 		lister:  lister,
 		now:     time.Now,
+		rss:     rss,
 		sampler: proctree.NewSampler(),
 		src:     proctree.DefaultSources(rss),
+		selfCPU: proctree.NewSelfSampler(),
+		// Unknown until the second tick — a rate needs two readings, and 0.0
+		// would render as "0%".
+		selfPct: proctree.UnknownCPU,
 	}
+}
+
+// SelfStat returns the daemon's own last measurement of itself.
+//
+// A negative percentage means unknown, matching the wire convention.
+func (c *procCollector) SelfStat() (float64, uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.selfPct, c.selfRSS
 }
 
 // Sampled reports whether this platform's CPU figure is a delta over our own
@@ -123,6 +150,11 @@ func (c *procCollector) expired() bool {
 	// interval nobody measured.
 	c.sampler = proctree.NewSampler()
 	c.last = nil
+	// Same reasoning for the daemon's own figure: a delta spanning a gap of
+	// unknown length is not a rate for any window anyone observed.
+	c.selfCPU = proctree.NewSelfSampler()
+	c.selfPct = proctree.UnknownCPU
+	c.selfRSS = 0
 	return true
 }
 
@@ -159,10 +191,28 @@ func (c *procCollector) collect() {
 	}
 
 	c.mu.Lock()
-	sampler, src := c.sampler, c.src
+	sampler, src, selfCPU := c.sampler, c.src, c.selfCPU
 	c.mu.Unlock()
 
 	now := c.now()
+
+	// The daemon's own reading, taken on this tick. Outside the lock like every
+	// other syscall in this function — Percent reads the platform CPU counter
+	// and rss forks or opens a handle depending on the platform.
+	selfPct, ok := selfCPU.Percent(now)
+	if !ok {
+		selfPct = proctree.UnknownCPU
+	}
+	var selfRSS uint64
+	if c.rss != nil {
+		self := os.Getpid()
+		if m := c.rss([]int{self}); m != nil {
+			selfRSS = m[self]
+		}
+	}
+	c.mu.Lock()
+	c.selfPct, c.selfRSS = selfPct, selfRSS
+	c.mu.Unlock()
 	trees, err := sampler.Collect(now, roots, src)
 	if err != nil {
 		logger.Debug("proctree: enumeration failed: %v", err)
@@ -185,6 +235,13 @@ func (c *procCollector) collect() {
 type helloRecord struct {
 	payload  ipc.ClientHelloPayload
 	received time.Time
+
+	// stat is the most recent MsgClientStat from this connection, and statAt is
+	// when it ARRIVED on the daemon's clock. A zero statAt means this process
+	// has never reported — distinct from a report that has gone stale, and the
+	// reason describe cannot simply age a zero value.
+	stat   ipc.ClientStatPayload
+	statAt time.Time
 }
 
 // helloRegistry tracks which connections have identified themselves.
@@ -220,6 +277,27 @@ func (r *helloRegistry) put(conn *ipc.Conn, p ipc.ClientHelloPayload) {
 	r.mu.Lock()
 	r.byConn[conn] = helloRecord{payload: p, received: r.nowFunc()}
 	r.mu.Unlock()
+}
+
+// putStat records a client's latest self-measurement.
+//
+// A stat for a connection that never said hello is DROPPED, not stored. Rows
+// are built from hellos, so an orphan stat could only become a row with cpu and
+// rss but no role, pid or version — and every short-lived probe connection
+// (`quil status`, the version gate, daemonctl) is such a connection by design.
+func (r *helloRegistry) putStat(conn *ipc.Conn, p ipc.ClientStatPayload) {
+	if conn == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rec, ok := r.byConn[conn]
+	if !ok {
+		return
+	}
+	rec.stat = p
+	rec.statAt = r.nowFunc()
+	r.byConn[conn] = rec
 }
 
 func (r *helloRegistry) forget(conn *ipc.Conn) {
@@ -259,11 +337,26 @@ func (r *helloRegistry) describe(conns []*ipc.Conn, daemonVersion string, now ti
 			}
 			continue
 		}
+		// A process that has never reported is UNKNOWN, not idle. The zero
+		// value for CPUPct is 0.0, which renders as "0%" — so the unknown
+		// marker has to be written explicitly here rather than left to Go.
+		cpu := proctree.UnknownCPU
+		var rss uint64
+		var statAgeMS int64
+		if !rec.statAt.IsZero() {
+			cpu = rec.stat.CPUPct
+			rss = rec.stat.RSSBytes
+			statAgeMS = now.Sub(rec.statAt).Milliseconds()
+		}
+
 		out = append(out, ipc.QuilProcInfo{
-			Role:    rec.payload.Role,
-			PID:     rec.payload.PID,
-			Version: rec.payload.Version,
-			ExeName: rec.payload.ExeName,
+			Role:      rec.payload.Role,
+			PID:       rec.payload.PID,
+			Version:   rec.payload.Version,
+			ExeName:   rec.payload.ExeName,
+			CPUPct:    cpu,
+			RSSBytes:  rss,
+			StatAgeMS: statAgeMS,
 			// Uptime is extrapolated from the DURATION the client reported at
 			// hello, plus the time since. Deriving it from a client-supplied
 			// timestamp would be wrong by the clock skew between two machines
@@ -379,12 +472,23 @@ func (d *Daemon) handleResourceReportReq(conn *ipc.Conn, msg *ipc.Message) {
 				d.server.ConnsSnapshot(), version.Current(), now)
 		}
 		// The daemon's own row is not a hello — it reads itself directly.
+		//
+		// CPUPct must be written explicitly even when unknown: the zero value
+		// is 0.0, which renders as "0%" and claims the daemon is idle. StatAge
+		// stays 0 because there is no arrival to age — this reading is taken in
+		// this process, so "how long ago did it get here" has no meaning.
+		selfPct, selfRSS := proctree.UnknownCPU, uint64(0)
+		if d.procReport != nil {
+			selfPct, selfRSS = d.procReport.SelfStat()
+		}
 		resp.Quil = append(resp.Quil, ipc.QuilProcInfo{
 			Role:     "daemon",
 			PID:      os.Getpid(),
 			Version:  version.Current(),
 			ExeName:  daemonExeName(),
 			UptimeMS: now.Sub(d.startedAt).Milliseconds(),
+			CPUPct:   selfPct,
+			RSSBytes: selfRSS,
 		})
 	}
 
@@ -618,4 +722,37 @@ func truncateField(s string, n int) string {
 		n--
 	}
 	return s[:n]
+}
+
+// sanitizeClientStat makes a self-reported stat safe to RETAIN and re-encode.
+//
+// The one real hazard is a non-finite float. encoding/json refuses to marshal
+// NaN and ±Inf, and this value is copied into every tree-bearing response — so
+// a single client reporting one would make the whole response fail to marshal
+// for EVERY client, leaving the dialog on "Loading…" and freezing the
+// status-bar total. That is the same denial handleClientHello truncates its
+// strings to prevent, reached through a number instead.
+//
+// A non-finite value becomes UnknownCPU rather than being clamped: there is no
+// honest percentage to recover from it, and the em dash already means exactly
+// "no answer". RSS is left alone — every uint64 encodes.
+func sanitizeClientStat(p ipc.ClientStatPayload) ipc.ClientStatPayload {
+	if math.IsNaN(p.CPUPct) || math.IsInf(p.CPUPct, 0) {
+		p.CPUPct = proctree.UnknownCPU
+	}
+	return p
+}
+
+// handleClientStat records a durable client's report about itself.
+//
+// Fire and forget, exactly like handleClientHello: there is no response,
+// because nothing the client does depends on the answer. A stat from a
+// connection that never identified itself is dropped by putStat.
+func (d *Daemon) handleClientStat(conn *ipc.Conn, msg *ipc.Message) {
+	var p ipc.ClientStatPayload
+	if err := msg.DecodePayload(&p); err != nil {
+		logger.Debug("client stat: bad payload: %v", err)
+		return
+	}
+	d.hellos.putStat(conn, sanitizeClientStat(p))
 }

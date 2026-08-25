@@ -1153,11 +1153,18 @@ func (p *PaneModel) View() string {
 		borderColor = lipgloss.Color("141")
 	}
 	if p.markedForDeletion {
-		// Red 160, matching sidebarDeletionStyle. Mutually exclusive with the
-		// pin on the daemon, so the two cannot genuinely collide — placed after
-		// it anyway so a client rendering mid-broadcast, with both flags briefly
-		// set, shows the mark the user just chose rather than the one they
-		// replaced.
+		// Red 160, matching sidebarDeletionStyle. Ordered AFTER the pin so that
+		// if a pane ever carries both, every surface resolves it the same way
+		// the daemon does — deletion wins.
+		//
+		// A torn pair cannot arrive over the wire: the daemon reads both fields
+		// inside one PluginMu span and syncPaneMeta copies both from one
+		// PaneInfo, so there is no mid-broadcast window to catch. Both write
+		// paths that CAN set them (handleUpdatePane and restore) now enforce the
+		// exclusion, which is what makes both-set unreachable rather than merely
+		// unlikely. This ordering is the belt to that pair of braces: it costs
+		// one line and means a pane wearing both is merely wrong rather than
+		// wrong in a different way on each surface.
 		borderColor = lipgloss.Color("160")
 	}
 	if p.Active {

@@ -104,20 +104,28 @@ var remoteTextSamples = []string{
 func TestSidebarRows_MeasureExactlyTheirWidth(t *testing.T) {
 	t.Parallel()
 	widths := []int{4, 8, 12, defaultSidebarWidth, 40}
-	// Four axes now: the pin is a badge segment of its own, and it is the one
-	// that stacks ON TOP of the others rather than competing with them (a
-	// pinned pane is usually also working or blocked), so the all-four case is
-	// the widest badge the row can be asked to fit and is not reachable by
-	// varying the first three.
+	// FIVE axes now: the pin and the deletion mark are badge segments of their
+	// own, and both stack ON TOP of the other three rather than competing with
+	// them (a marked or pinned pane is usually also working or blocked), so the
+	// all-five case is the widest badge the row can be asked to fit and is not
+	// reachable by varying the first three.
+	//
+	// The two hand-set marks are mutually exclusive on one PANE but not on one
+	// PROJECT — this row counts across every pane in a project, so one pinned
+	// and one marked is ordinary, and it is what sizes projectRow's segment
+	// slice at 7.
 	counts := []paneStateCounts{
 		{},
 		{working: 1},
 		{blocked: 1},
 		{done: 1},
 		{pinned: 1},
+		{marked: 1},
+		{pinned: 1, marked: 1},
 		{working: 1, blocked: 2, done: 3},
 		{working: 1, blocked: 2, done: 3, pinned: 4},
-		{working: 12, blocked: 345, done: 6, pinned: 7890},
+		{working: 1, blocked: 2, done: 3, pinned: 4, marked: 5},
+		{working: 12, blocked: 345, done: 6, pinned: 7890, marked: 123},
 	}
 
 	for _, w := range widths {
@@ -165,12 +173,52 @@ func TestPaneRow_MeasuresExactlyItsWidth(t *testing.T) {
 				// budget BEFORE the label floor applies — so the pin
 				// participates in the label/suffix arithmetic instead of being
 				// appended to the end of a string that is then cut.
-				for _, state := range []string{"blocked", "working", "unseen", "idle", "pinned", "pinned+blocked", "pinned+working", "pinned+unseen"} {
+				// The "marked+X" cases exist for the same reason the "pinned+X"
+				// ones do, and the "pinned+marked+X" pair for one more: it is
+				// the only shape where BOTH suffix widths come out of the same
+				// budget, so it is where the two reservations can compete. The
+				// daemon keeps the pair off a single pane, but paneRow
+				// deliberately does not depend on that, and this is what holds
+				// the independence honest.
+				for _, state := range []string{
+					"blocked", "working", "unseen", "idle",
+					"pinned", "pinned+blocked", "pinned+working", "pinned+unseen",
+					"marked", "marked+blocked", "marked+working", "marked+unseen",
+					"pinned+marked", "pinned+marked+blocked", "pinned+marked+working",
+				} {
 					pane := &PaneModel{Name: label, ID: "pane-b16e3850"}
 					switch state {
 					case "pinned+unseen":
 						pane.pinnedAttention = true
 						pane.unseen = true
+					case "marked":
+						pane.markedForDeletion = true
+					case "marked+unseen":
+						pane.markedForDeletion = true
+						pane.unseen = true
+					case "marked+blocked":
+						pane.markedForDeletion = true
+						pane.blockedSince = time.Now()
+						pane.blockedReason = reason
+					case "marked+working":
+						pane.markedForDeletion = true
+						pane.working = true
+						pane.workFrame = 7
+						pane.subagents = map[string]int{"impl": 3}
+					case "pinned+marked":
+						pane.pinnedAttention = true
+						pane.markedForDeletion = true
+					case "pinned+marked+blocked":
+						pane.pinnedAttention = true
+						pane.markedForDeletion = true
+						pane.blockedSince = time.Now()
+						pane.blockedReason = reason
+					case "pinned+marked+working":
+						pane.pinnedAttention = true
+						pane.markedForDeletion = true
+						pane.working = true
+						pane.workFrame = 7
+						pane.subagents = map[string]int{"impl": 3}
 					case "blocked":
 						pane.blockedSince = time.Now()
 						pane.blockedReason = reason

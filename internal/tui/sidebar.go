@@ -60,10 +60,11 @@ func (p *ProjectModel) displayName() string {
 
 // paneStateCounts is what one project's panes add up to, for its summary row.
 //
-// A struct rather than four returns: the first three are one ORDERED
-// classification and `pinned` is a second, independent axis, so a bare
-// (working, blocked, done, pinned) tuple invites a caller to read them as four
-// of a kind. It also keeps projectRow's parameter list from growing to eight.
+// A struct rather than five returns: the first three are one ORDERED
+// classification while `pinned` and `marked` are two further independent axes,
+// so a bare (working, blocked, done, pinned, marked) tuple invites a caller to
+// read them as five of a kind. It also keeps projectRow's parameter list from
+// growing to nine.
 type paneStateCounts struct {
 	working int
 	blocked int
@@ -768,6 +769,12 @@ const (
 	// no other state in this vocabulary. Deliberately not ✗ or × — this is not
 	// a failure, and every other member of this set describes what the pane IS
 	// rather than what went wrong with it.
+	//
+	// Worth knowing rather than a problem: ⌫ is also the Backspace KEY symbol,
+	// and Alt+Backspace is a bound pane action (pane-history back). It collides
+	// with no other STATE glyph, which is what this block is a vocabulary for,
+	// but if the keybinding docs ever grow a glyph column the two conventions
+	// will meet.
 	glyphDeletion = "⌫" // marked for deletion by hand — never auto-cleared
 	// glyphMore marks rows the PANES window is hiding above or below itself.
 	// U+22EF is already what paneRow uses for the subagent count, so it is
@@ -1114,7 +1121,7 @@ func sidebarTabHeading(name string, idx int, active bool, color string, w int) s
 
 // projectRow renders one project's summary line: an active-project marker,
 // its (already sanitized, dest-qualified) name, and a trailing badge of the
-// four pane counts plus link health. name is expected pre-sanitized —
+// five pane counts plus link health. name is expected pre-sanitized —
 // every call site in renderSidebar routes the raw daemon-sourced value
 // through sanitizeRemoteText before reaching here.
 //
@@ -1188,7 +1195,7 @@ func projectRow(name string, c paneStateCounts, workFrame int, link string, acti
 	// The pin comes AFTER the three automatic states and before the link,
 	// which is not urgency order and is not meant to be: those three rank
 	// against each other because they describe what the agents are doing, and
-	// this one is the user's own mark. Putting it last of the four keeps their
+	// this one is the user's own mark. Putting it after the three keeps their
 	// ranking readable as a sequence, and it is also the one the user already
 	// knows about — it is here to be found again, not to be noticed first.
 	if c.pinned > 0 {
@@ -1317,10 +1324,13 @@ func paneRow(pane *PaneModel, focused bool, w int) string {
 	// pane alive lasts. A mark that hid for exactly that window would be
 	// invisible whenever it mattered.
 	//
-	// Its width is reserved alongside the pin's below. The two are mutually
-	// exclusive on the daemon, so in practice at most one is ever non-empty —
-	// the arithmetic covers both anyway rather than depending on that
-	// invariant holding in a client that is mid-broadcast.
+	// Its width is reserved alongside the pin's below, and the arithmetic
+	// covers BOTH being present even though the daemon keeps them exclusive on
+	// one pane. Not because a torn pair can arrive — it cannot, since both
+	// daemon write paths enforce the exclusion and one PluginMu span publishes
+	// both fields — but because the reservation is what makes each suffix
+	// independent of the other. Sizing it for one would couple them, so the
+	// next mark added here would silently take its width out of the label.
 	delSuffix := ""
 	if pane.markedForDeletion && glyph != glyphDeletion {
 		delSuffix = " " + glyphDeletion

@@ -385,18 +385,24 @@ func TestSendMarkedForDeletion_DegenerateInputs(t *testing.T) {
 	}
 }
 
-// TestPaneRow_BothMarksSetStillMeasuresExactly is the client-side half of the
-// invalid pair. The daemon keeps the two marks exclusive, so this state reaches
-// a client only mid-broadcast — and paneRow's own comment says the arithmetic
-// covers both "rather than depending on that invariant holding". Nothing pinned
-// that, and the sidebar is where a width error is expensive: renderSidebar's
-// closing .Width(w) WRAPS an over-wide row onto a second painted line, which
-// shifts every row below it while sidebarRowAt still maps screen row y to
-// rows[y] — the user clicks one project and selects another.
+// TestPaneRow_BothMarksSurviveTogether pins that the two suffix width
+// reservations are INDEPENDENT — neither mark may be the one dropped to fit the
+// other.
 //
-// A live state is set so BOTH suffixes are present at once, which is the widest
-// the row can get and the only case where the two reservations compete.
-func TestPaneRow_BothMarksSetStillMeasuresExactly(t *testing.T) {
+// Read the assertions in the right order, because the obvious one is the weak
+// one. The width check CANNOT fail for a missing reservation:
+// renderStyledSegments truncates each segment against the remaining budget and
+// pads the rest, so the row measures exactly w for any input at all. It is here
+// as a cheap guard on truncateCells and the cluster-boundary precondition, and
+// that is all it is. The GLYPH-PRESENCE checks are what actually guard
+// paneRow's subtraction — verified by mutation: dropping delSuffix from `avail`
+// fails this test on the dropped mark, never on the width.
+//
+// The blocked arm is the one with teeth. Under that same mutation the working
+// arm PASSES, because only a long blocked reason puts enough pressure on the
+// budget to push the ⌫ out of it. Do not delete it as redundant with the
+// cheaper one above it.
+func TestPaneRow_BothMarksSurviveTogether(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
 		name  string
@@ -465,5 +471,65 @@ func TestPaneView_DeletionMarkOutranksThePinOnTheBorder(t *testing.T) {
 	if both.View() != deletionOnly.View() {
 		t.Error("a pane carrying both marks does not render as the deletion mark — the border " +
 			"must show the mark that was set last, and setting deletion is what clears the pin")
+	}
+}
+
+// TestTabMarkedForDeletion_ExcludesTheFocusedPane pins a branch every other
+// test in this file deliberately avoids: they set ActivePane to something else
+// so the tab reports its mark, which means the exclusion itself was never
+// exercised.
+//
+// The rule is the pin's: a mark is an explicit note to self, so the ACTIVE tab
+// reports it too — except when the marked pane is the one in focus, because the
+// tab bar answers "which tab should I go to" and the tab you are on is not an
+// answer. The pane's own border is already saying it there.
+func TestTabMarkedForDeletion_ExcludesTheFocusedPane(t *testing.T) {
+	t.Parallel()
+	build := func(activePane string) Model {
+		pane := newTestPane("pane-1")
+		pane.markedForDeletion = true
+		m := Model{}
+		m.setTabs([]*TabModel{{ID: "tab-1", Name: "build", Root: &LayoutNode{Pane: pane}, ActivePane: activePane}})
+		return m
+	}
+	if !build("other").tabMarkedForDeletion(0) {
+		t.Error("a marked pane that is NOT focused must mark its tab")
+	}
+	if build("pane-1").tabMarkedForDeletion(0) {
+		t.Error("the focused pane of the active tab must not mark its own tab — " +
+			"the tab bar points at tabs to go to, and you are already here")
+	}
+}
+
+// TestCtxMenu_ClearAttentionLeavesTheDeletionMark pins the scope of that row.
+// "Clear attention" drops the three attention marks and deliberately stops
+// there: the deletion mark is a different vocabulary with its own Unmark row,
+// and the two can never be set at once anyway.
+//
+// The companion assertion is that the row is DISABLED on a pane whose only mark
+// is the deletion one — the row exists to answer "is this pane still flagged"
+// as much as to clear it, so enabling it for a mark it will not touch would
+// make it a control that visibly does nothing.
+func TestCtxMenu_ClearAttentionLeavesTheDeletionMark(t *testing.T) {
+	t.Parallel()
+	m := newSplitDragTestModel(t)
+	pane := m.curTabs()[0].Root.Left.Pane
+	pane.markedForDeletion = true
+
+	for _, it := range m.buildCtxMenuItems(pane) {
+		if it.id == ctxActClearAttention && it.enabled {
+			t.Error("Clear attention is enabled on a pane whose only mark is the deletion one, " +
+				"which it does not clear — the row would do nothing")
+		}
+	}
+
+	updated, _ := m.Update(tea.MouseClickMsg{X: 20, Y: 10, Button: tea.MouseRight})
+	got := updated.(Model)
+	updated, _ = got.executeCtxMenuItem(ctxMenuItem{id: ctxActClearAttention, label: "Clear attention", enabled: true})
+	got = updated.(Model)
+
+	if !got.curTabs()[0].Root.Left.Pane.markedForDeletion {
+		t.Error("Clear attention cleared the deletion mark — it is scoped to the attention " +
+			"vocabulary, and the mark has its own Unmark row")
 	}
 }

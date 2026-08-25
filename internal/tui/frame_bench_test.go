@@ -117,3 +117,32 @@ func BenchmarkFrame_ChromeOnly(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkFrame_UnfocusedDim measures what the unfocused dim adds to a frame.
+//
+// It is deliberately a WARM-pane measurement: the dim runs on the composed
+// string, so its cost tracks frame SIZE, not how much of the frame was
+// re-rendered — the pane caches it sits downstream of change nothing about what
+// it has to walk.
+//
+// The number matters less than it looks. This pass only ever runs while the
+// terminal is unfocused, which is precisely when nobody is typing into it and
+// no keystroke is waiting on a frame. It is measured anyway because "only when
+// unfocused" is an argument about the common case, and a pathological cost here
+// would still show up as a laggy window under the mouse.
+func BenchmarkFrame_UnfocusedDim(b *testing.B) {
+	for _, tabs := range frameBenchTabCounts {
+		b.Run(fmt.Sprintf("tabs=%d", tabs), func(b *testing.B) {
+			m := benchModelContent(tabs, 3, realisticPaneLines)
+			m.viewCache = &viewCacheBox{}
+			m.cfg.UI.UnfocusedDim = 0.45
+			m.termFocused = false
+			_ = m.View() // prime every pane cache
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_ = m.View()
+			}
+		})
+	}
+}

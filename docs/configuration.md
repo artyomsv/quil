@@ -54,6 +54,7 @@ scrollback_lines = 0            # per-pane scrollback depth; 0 = adaptive to pan
 show_disclaimer = true          # beta disclaimer on startup
 sidebar_open = false            # project sidebar starts collapsed
 sidebar_width = 22              # project sidebar width — reserves layout width; NOT [notification]'s
+unfocused_dim = 0.45            # fade the frame while the window is unfocused; 0 = off
 
 [mcp]
 highlight_duration = "10s"      # border flash duration when AI touches a pane
@@ -163,6 +164,8 @@ The "ghost buffer" is the rendered preview Quil shows immediately on reconnect, 
 | `show_disclaimer` | bool | `true` | Display the beta disclaimer on startup. The `Don't show again` button flips this to `false`. |
 | `sidebar_open` | bool | `false` | Whether the **project** sidebar starts expanded. Closed by default so existing installs keep their pane geometry unchanged. `Alt+Shift+S` flips it, and the setting persists. |
 | `sidebar_width` | int | `22` | Width of the **project** sidebar. Unlike the notification sidebar this reserves real layout width — panes are narrower by exactly this many columns while it is open, and toggling it resizes every pane's PTY. Clamped against the terminal width, so an oversized value cannot push the pane area off screen. Editable without touching this file: **F1 → Settings → Sidebar width** (the one Settings row that applies immediately rather than on next launch), or **drag the sidebar's right edge** with the mouse. Both persist here. A drag will not take the strip below 12 columns — collapsing it entirely is what `Alt+Shift+S` is for, and a strip dragged to nothing would leave no edge to grab it back by. |
+
+| `unfocused_dim` | float | `0.45` | How far the whole frame fades toward the terminal background while the terminal **window** does not have focus — panes, tab bar, sidebar, borders and status bar alike. It exists so that typing into a window that only *looks* focused is visible before the first keystroke lands. `0` disables it; values above `0.9` are clamped, because a full blend renders an empty rectangle that is indistinguishable from a crashed TUI, and a negative value (which would blend the wrong way) is treated as `0`. Only the colours change — the text, the layout and every cell width are identical, so nothing shifts when focus comes and goes. Quil asks your terminal for its real default foreground and background (OSC 10/11) and fades toward those, so the result follows your theme rather than assuming black. A terminal that does not implement focus reporting (DEC 1004) never dims at all, since it never reports losing focus. |
 
 > **Two different `sidebar_width` keys.** This one (`[ui]`, default `22`) is the
 > project sidebar on the **left**, which reserves layout width. The one in

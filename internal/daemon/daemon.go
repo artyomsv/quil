@@ -824,6 +824,19 @@ func (d *Daemon) restoreWorkspace() error {
 				eager, _ := paneData["eager"].(bool)
 				pinnedAttention, _ := paneData["pinned_attention"].(bool)
 				markedForDeletion, _ := paneData["marked_for_deletion"].(bool)
+				// The two marks are mutually exclusive, and handleUpdatePane is
+				// not the only way a pane acquires them — a file can carry any
+				// pair of booleans. Applying the handler's tie-break here too
+				// makes the invariant structural rather than a property of the
+				// one code path that happens to enforce it, so a snapshot
+				// written by an older build, edited by hand, or produced by some
+				// later write path cannot restore a pane wearing both. Left
+				// unresolved the state renders INCONSISTENTLY — paneRow gives
+				// the pin the glyph and the mark the suffix while the border
+				// gives its colour to the mark — and nothing self-heals it.
+				if markedForDeletion {
+					pinnedAttention = false
+				}
 				worktreeOwned, _ := paneData["worktree_owned"].(bool)
 				worktreePath, _ := paneData["worktree_path"].(string)
 				worktreeInterrupted, _ := paneData["worktree_interrupted"].(bool)
@@ -2860,20 +2873,34 @@ func (d *Daemon) handleUpdatePane(conn *ipc.Conn, msg *ipc.Message) {
 	if payload.PinnedAttention != nil {
 		pane.PluginMu.Lock()
 		pane.PinnedAttention = *payload.PinnedAttention
+		cleared := false
 		if *payload.PinnedAttention {
+			cleared = pane.MarkedForDeletion
 			pane.MarkedForDeletion = false
 		}
 		pane.PluginMu.Unlock()
 		log.Printf("pane %s: pinned_attention=%v", pane.ID, *payload.PinnedAttention)
+		// The implicit clear is logged too. The daemon is the single authority
+		// on these marks, so a user reporting "my ⌫ vanished" otherwise leaves
+		// no trace to follow — the set is recorded and the thing it displaced
+		// is not.
+		if cleared {
+			log.Printf("pane %s: marked_for_deletion cleared by the attention pin", pane.ID)
+		}
 	}
 	if payload.MarkedForDeletion != nil {
 		pane.PluginMu.Lock()
 		pane.MarkedForDeletion = *payload.MarkedForDeletion
+		cleared := false
 		if *payload.MarkedForDeletion {
+			cleared = pane.PinnedAttention
 			pane.PinnedAttention = false
 		}
 		pane.PluginMu.Unlock()
 		log.Printf("pane %s: marked_for_deletion=%v", pane.ID, *payload.MarkedForDeletion)
+		if cleared {
+			log.Printf("pane %s: pinned_attention cleared by the deletion mark", pane.ID)
+		}
 	}
 	if payload.OverlayVisible != nil {
 		d.applyOverlayVisibility(conn, pane, *payload.OverlayVisible)

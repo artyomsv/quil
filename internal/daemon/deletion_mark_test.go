@@ -325,3 +325,52 @@ func TestUpdatePane_BothMarksTrueInOnePayloadIsDeterministic(t *testing.T) {
 			"documents that it is applied second and wins", got.PinnedAttention, got.MarkedForDeletion)
 	}
 }
+
+// TestRestore_BothMarksInASnapshotCannotSurvive makes the exclusion STRUCTURAL
+// rather than by-convention.
+//
+// handleUpdatePane is the only place the invariant was enforced, so it held for
+// every message a client can send and for nothing else. A snapshot carrying
+// both — hand-edited, written by an older build, or produced by any future
+// write path that sets the fields directly as this test does — restored an
+// impossible pane that nothing self-heals, and the client renders that state
+// INCONSISTENTLY: paneRow gives the pin the glyph and the mark the suffix,
+// while the pane border gives its colour to the mark. Two surfaces disagreeing
+// about one pane is the exact confusion the mutual exclusion exists to remove.
+//
+// Restore applies the same tie-break the handler documents, so "deletion wins"
+// is one rule with two enforcement points rather than two rules.
+func TestRestore_BothMarksInASnapshotCannotSurvive(t *testing.T) {
+	dir := t.TempDir()
+	d := newTestDaemonInDir(t, dir)
+	tab := d.session.CreateTab("t")
+	pane, err := d.session.CreatePane(tab.ID, t.TempDir())
+	if err != nil {
+		t.Fatalf("CreatePane: %v", err)
+	}
+	// Set directly, bypassing handleUpdatePane — that is the whole point: this
+	// is the state no message can produce but a file can.
+	pane.PinnedAttention = true
+	pane.MarkedForDeletion = true
+	d.snapshot()
+
+	d2 := newTestDaemonInDir(t, dir)
+	if err := d2.restoreWorkspace(); err != nil {
+		t.Fatalf("restoreWorkspace: %v", err)
+	}
+
+	got := d2.session.Pane(pane.ID)
+	if got == nil {
+		t.Fatal("pane did not survive restore")
+	}
+	if got.PinnedAttention && got.MarkedForDeletion {
+		t.Fatal("a snapshot carrying both marks restored a pane wearing both — " +
+			"the pair is mutually exclusive and no surface can render that coherently")
+	}
+	if !got.MarkedForDeletion {
+		t.Errorf("restore resolved the invalid pair the other way (pinned=%v, marked=%v) — "+
+			"it must match the handler's documented tie-break, or the same file restores "+
+			"differently depending on which code path last touched it",
+			got.PinnedAttention, got.MarkedForDeletion)
+	}
+}

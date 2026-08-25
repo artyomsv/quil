@@ -9,6 +9,7 @@ import (
 
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/daemon"
+	"github.com/artyomsv/quil/internal/debugserver"
 	"github.com/artyomsv/quil/internal/logger"
 	apty "github.com/artyomsv/quil/internal/pty"
 	versionpkg "github.com/artyomsv/quil/internal/version"
@@ -96,6 +97,24 @@ func main() {
 	closer := initLogging(logLevel, cfg.Logging.MaxSizeMB, cfg.Logging.MaxFiles)
 	if closer != nil {
 		defer closer.Close()
+	}
+
+	// Optional pprof listener. Off unless QUIL_PPROF is set, loopback-only when
+	// it is — see internal/debugserver.
+	//
+	// The daemon needs its own port, distinct from the TUI's: both processes
+	// read the same inherited variable, and whichever binds second gets
+	// "address already in use". That failure is logged and non-fatal by design
+	// — a profiling port is never worth refusing to start a daemon over.
+	if dbg, err := debugserver.StartFromEnv(os.Getenv(debugserver.EnvVar)); err != nil {
+		log.Printf("pprof: %v", err)
+	} else if dbg != nil {
+		log.Printf("pprof listening on http://%s/debug/pprof/", dbg.Addr())
+		defer func() {
+			if err := dbg.Close(); err != nil {
+				log.Printf("pprof: close: %v", err)
+			}
+		}()
 	}
 
 	// Extract the bundled ConPTY host (Windows only; no-op elsewhere) so panes

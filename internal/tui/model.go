@@ -3549,8 +3549,9 @@ func (m Model) pinnableDest() string {
 // handleNewTab opens the create-pane dialog to choose the new tab's first pane.
 //
 // Ctrl+T used to send create_tab immediately, which always produced a shell.
-// The daemon still does exactly that for a create carrying no spec, so the
-// escape path and every other client keep the old behaviour.
+// The daemon still does exactly that for a create carrying no spec, so every
+// other client keeps the old behaviour. No client path sends one any more: the
+// escape that used to is now a plain cancel.
 //
 // The reachability refusal moved here from the keypress: the send is what
 // Router.Send drops silently, and letting the user fill in a directory, a
@@ -3568,16 +3569,11 @@ func (m Model) handleNewTab() (tea.Model, tea.Cmd) {
 	return m.openCreatePaneDialogFor(paneTargetNewTab)
 }
 
-// createTerminalTab sends the bare create_tab every producer sent before the
-// first-pane spec existed: no FirstPane, so the daemon spawns its terminal.
-//
-// This is the Esc fallback, and it is why cancelling the picker still leaves a
-// usable tab rather than nothing at all.
-func (m Model) createTerminalTab() tea.Cmd {
-	return m.sendCreateTab(nil)
-}
-
 // sendCreateTab is the ONE create_tab producer.
+//
+// A nil spec is still the wire's meaning of "the daemon picks", which every
+// non-interactive producer relies on; the TUI simply has no path that sends one
+// any more, now that cancelling the picker cancels the create outright.
 //
 // A KNOWN destination is aimed with sendForDestStrict rather than the unstamped
 // m.client.Send the old createTab used: that send was safe only because the

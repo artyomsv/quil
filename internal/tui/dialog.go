@@ -2082,15 +2082,21 @@ func (m Model) handleCreatePaneKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.dialogCursor = 0
 			return m, nil
 		}
+		// Cancelling the picker cancels the create, for a new tab exactly as for
+		// a split. This branch used to send a bare create_tab so that Ctrl+T Esc
+		// stayed the two-keystroke path to the shell tab the key produced before
+		// the picker existed — but that made Esc the one key in the whole dialog
+		// system that could not back out of what it opened, and a user who
+		// changed their mind had no way to say so. The step-0 footer below
+		// renders "Esc cancel" and always has, so this is the handler being
+		// taught to keep a promise the screen was already making.
+		//
+		// The old shortcut survives as Ctrl+T Enter Enter — Terminal is the
+		// first category in plugin.CategoryOrder — and that promise is pinned
+		// by TestNewTab_EnterEnterCreatesAPlainTerminalTab, because the category
+		// holds two plugins and the plain one wins on a display-name prefix.
 		m.dialog = dialogNone
 		m.createPaneStep = 0
-		if m.createPaneTarget == paneTargetNewTab {
-			// Cancelling the PICKER is not cancelling the tab: Ctrl+T Esc stays
-			// the two-keystroke path to the shell tab this key produced before
-			// the picker existed. The bare create carries no spec, so the daemon
-			// takes exactly the path every other producer takes.
-			return m, m.createTerminalTab()
-		}
 		return m, nil
 
 	case "up", "k":

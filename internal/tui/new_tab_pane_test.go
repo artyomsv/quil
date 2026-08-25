@@ -77,6 +77,24 @@ func pressEscape(t *testing.T, m Model) Model {
 	return out.(Model)
 }
 
+// pressEnterTwice walks the picker the way a user does — category, then plugin
+// — and returns the submit's command. Both presses go through the real key
+// handler rather than assigning selectedPlugin directly, so the cursor
+// defaults, the category order and the step-1 dispatch are all exercised: this
+// IS the Ctrl+T Enter Enter shortcut the docs promise, not a re-description of
+// it. m is updated in place so the caller sees the closed dialog.
+func pressEnterTwice(t *testing.T, m *Model) tea.Cmd {
+	t.Helper()
+	out, cmd := m.handleCreatePaneKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd != nil {
+		t.Fatalf("the category step submitted; want it to advance to the plugin list")
+	}
+	next := out.(Model)
+	out, cmd = next.handleCreatePaneKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	*m = out.(Model)
+	return cmd
+}
+
 func TestNewTab_OpensTheCreatePaneDialogInsteadOfCreatingATab(t *testing.T) {
 	m := newTabModel(t)
 	f := m.client.(*fakeSender)
@@ -95,10 +113,13 @@ func TestNewTab_OpensTheCreatePaneDialogInsteadOfCreatingATab(t *testing.T) {
 	}
 }
 
-// Esc on the FIRST step closes the dialog and falls back to a terminal tab, so
-// Ctrl+T Esc stays the two-keystroke path to the old behavior. The tab is never
-// left un-created and never left empty.
-func TestNewTab_EscapeAtTheFirstStepCreatesATerminalTab(t *testing.T) {
+// Esc on the FIRST step CANCELS. It used to fall back to a bare terminal tab,
+// on the reasoning that Ctrl+T Esc should stay the two-keystroke path to the
+// pre-picker behavior — but a user who opens the picker and changes their mind
+// has no other way out, so the one key that means "cancel" in every other
+// dialog was the one key that could not cancel this one. The old shortcut is
+// now Ctrl+T Enter Enter: Terminal is the first category (plugin.CategoryOrder).
+func TestNewTab_EscapeAtTheFirstStepCreatesNothing(t *testing.T) {
 	m := newTabModel(t)
 	f := m.client.(*fakeSender)
 	out, _ := m.handleNewTab()
@@ -108,9 +129,39 @@ func TestNewTab_EscapeAtTheFirstStepCreatesATerminalTab(t *testing.T) {
 	if got.dialog != dialogNone {
 		t.Errorf("dialog = %v, want it closed", got.dialog)
 	}
+	if len(f.sent) != 0 {
+		t.Errorf("cancelling the picker sent %v, want nothing at all", sentMsgTypes(f))
+	}
+}
+
+// Ctrl+T Enter Enter is what replaced the old Ctrl+T Esc shell tab, and five
+// documents now promise it: the comment on the Esc branch, the scoped rules
+// file, the changelog fragment, docs/features.md and both Ctrl+T rows in
+// docs/keybindings.md. Nothing pinned it, and the promise is one rename away
+// from being false — the terminal CATEGORY holds two plugins (`terminal` and
+// `terminal-wide`), sorted by display name, and "Terminal" wins only by being
+// a prefix of "Terminal (keeps content on squeeze)". Give the wide variant a
+// name that sorts earlier, or drop in a user TOML with category = "terminal",
+// and the shortcut silently opens the wrong shell while the docs still say it
+// opens a plain one.
+func TestNewTab_EnterEnterCreatesAPlainTerminalTab(t *testing.T) {
+	m := newTabModel(t)
+	f := m.client.(*fakeSender)
+	out, _ := m.handleNewTab()
+	opened := out.(Model)
+
+	cmd := pressEnterTwice(t, &opened)
+	runCmd(cmd)
+
+	if opened.dialog != dialogNone {
+		t.Errorf("dialog = %v, want the two presses to have submitted", opened.dialog)
+	}
 	p := decodeCreateTab(t, f)
-	if p.FirstPane != nil {
-		t.Errorf("escape sent a first-pane spec %+v, want the bare terminal default", p.FirstPane)
+	if p.FirstPane == nil {
+		t.Fatal("the create carried no first-pane spec")
+	}
+	if p.FirstPane.Type != "terminal" {
+		t.Errorf("type = %q, want the plain terminal — the shortcut the docs promise", p.FirstPane.Type)
 	}
 }
 
@@ -421,7 +472,11 @@ func TestNewTab_BeforeTheFirstBroadcastReachesTheSoleDaemon(t *testing.T) {
 		t.Fatalf("dialog = %v, want the picker to open in the startup window", opened.dialog)
 	}
 
-	_, cmd := opened.handleCreatePaneKey(tea.KeyPressMsg{Code: tea.KeyEscape})
+	// The SUBMIT is what sends. Escape used to be the cheap way to reach the
+	// wire from here, and re-pointing this at the real path is not cosmetic:
+	// an Esc that no longer sends would leave this test asserting about a key
+	// that does nothing, and the pinned destination would go uncovered.
+	cmd := pressEnterTwice(t, &opened)
 	runCmd(cmd)
 
 	remote.mu.Lock()
@@ -455,7 +510,7 @@ func TestNewTab_OnlyOfflineProjectsStillReachesTheLocalDaemon(t *testing.T) {
 		t.Fatalf("dialog = %v, want the picker (the carve-out must not refuse here)", opened.dialog)
 	}
 
-	_, cmd := opened.handleCreatePaneKey(tea.KeyPressMsg{Code: tea.KeyEscape})
+	cmd := pressEnterTwice(t, &opened)
 	runCmd(cmd)
 
 	local.mu.Lock()

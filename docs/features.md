@@ -127,8 +127,8 @@ step, so a new tab can start in a chosen directory, on a chosen kube context, or
 resuming a Claude session. If the plugin offers worktrees, a new tab can open
 straight onto a fresh branch.
 
-`Esc` on the first screen closes the picker and gives you a plain terminal tab,
-so `Ctrl+T` `Esc` is the two-keystroke path to the old behaviour.
+`Esc` on the first screen cancels: no tab is created. Terminal is the first
+category, so `Ctrl+T` `Enter` `Enter` is the quick path to a plain shell tab.
 
 The tab and its pane are created together, so a tab never flickers through a
 shell you did not ask for. The one exception is a new branch: the tab opens with

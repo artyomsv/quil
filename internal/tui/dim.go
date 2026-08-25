@@ -30,9 +30,12 @@ var (
 	dimFallbackBg = color.RGBA{R: 0x00, G: 0x00, B: 0x00, A: 0xff}
 )
 
-// dimPalette builds the blend inputs for this frame, preferring what the
+// maxDimCacheEntries caps dimFrame's per-frame memo. See the cache comment.
+const maxDimCacheEntries = 512
+
+// dimInputs builds the blend inputs for this frame, preferring what the
 // terminal reported about itself over the assumed defaults.
-func (m Model) dimPalette(amount float64) dimPalette {
+func (m Model) dimInputs(amount float64) dimPalette {
 	p := dimPalette{fg: dimFallbackFg, bg: dimFallbackBg, amount: amount}
 	if m.termFg != nil {
 		p.fg = m.termFg
@@ -78,7 +81,8 @@ func sgrSetFg(c color.RGBA) string {
 }
 
 // sgrColorParams renders the truecolor parameter run for c — "38;2;R;G;B" for
-// a foreground (lead 38), "48;2;R;G;B" for a background (lead 48).
+// a foreground (lead 38), "48;2;R;G;B" for a background (lead 48), and
+// "58;2;R;G;B" for an underline color (lead 58).
 func sgrColorParams(lead int, c color.RGBA) string {
 	var b []byte
 	b = strconv.AppendInt(b, int64(lead), 10)
@@ -129,6 +133,13 @@ func dimFrame(content string, p dimPalette) string {
 	// number to trust here — the wall-clock figures at 41 tabs are noisy enough
 	// on a shared runner to overlap between runs. The split/parse/join per
 	// occurrence was the bulk of the cost, and most occurrences are duplicates.
+	// The cap bounds the LOSS, not the win. Hit rate is set by the content: a
+	// pane painting every cell a distinct truecolor (a gradient, a rendered
+	// image) yields one distinct key per cell — tens of thousands on a large
+	// terminal, every one of them garbage the moment the frame ends. Past the
+	// cap the rewrite is still computed, just not remembered, which is exactly
+	// the behaviour before the cache existed. Anything with a real hit rate
+	// saturates far below this.
 	cache := make(map[string]sgrRewrite, 32)
 
 	var state byte
@@ -145,7 +156,9 @@ func dimFrame(content string, p dimPalette) string {
 			r, hit := cache[params]
 			if !hit {
 				r.out, r.setsDefaultFg, r.setsExplicitFg = dimSGRParams(params, p)
-				cache[params] = r
+				if len(cache) < maxDimCacheEntries {
+					cache[params] = r
+				}
 			}
 			b.WriteString("\x1b[")
 			b.WriteString(r.out)
@@ -178,6 +191,18 @@ func dimFrame(content string, p dimPalette) string {
 // A CSI carrying a private prefix (`<=>?`) is deliberately NOT treated as SGR
 // even when it ends in 'm' — those are private-mode sequences with unrelated
 // grammar, and rewriting their parameters would corrupt them.
+//
+// The byte-range check is what makes dimSGRParams' verbatim copies safe to
+// emit, and it is deliberately a CHECK rather than an assumption. A CSI body
+// returned by ansi.DecodeSequence is drawn only from 0x20-0x3F — parameter
+// digits, ':', ';' and intermediates — so a field copied through untouched
+// cannot carry an ESC, a second final byte, or a string terminator, and the
+// rewriter therefore cannot emit a sequence that was not in its input. That
+// property belongs to the parser, not to this file. If a future version
+// returned the raw span of a malformed CSI instead, the verbatim copy would
+// become an injection primitive and nothing here would notice. Checking costs
+// one pass over a short string and turns that into a sequence that merely goes
+// undimmed. Pinned by TestSGRParams_RefusesABodyOutsideTheParameterByteRange.
 func sgrParams(seq string) (string, bool) {
 	var body string
 	switch {
@@ -194,6 +219,11 @@ func sgrParams(seq string) (string, bool) {
 	body = body[:len(body)-1]
 	if body != "" && body[0] >= 0x3c && body[0] <= 0x3f {
 		return "", false
+	}
+	for i := 0; i < len(body); i++ {
+		if body[i] < 0x20 || body[i] > 0x3f {
+			return "", false
+		}
 	}
 	return body, true
 }
@@ -222,9 +252,11 @@ func dimSGRParams(params string, p dimPalette) (out string, setsDefaultFg, setsE
 	rewritten := make([]string, 0, len(fields))
 
 	for i := 0; i < len(fields); i++ {
-		v, err := strconv.Atoi(fields[i])
-		if fields[i] == "" {
-			v, err = 0, nil // an omitted parameter defaults to 0
+		// An omitted parameter defaults to 0, and checking that first spares
+		// every empty field a guaranteed-failing Atoi.
+		v, err := 0, error(nil)
+		if fields[i] != "" {
+			v, err = strconv.Atoi(fields[i])
 		}
 		if err != nil { // colon sub-parameters, or junk — leave it as it came
 			rewritten = append(rewritten, fields[i])
@@ -257,10 +289,29 @@ func dimSGRParams(params string, p dimPalette) (out string, setsDefaultFg, setsE
 			rewritten = append(rewritten, dimBasic(48, v-40, p))
 		case v >= 100 && v <= 107:
 			rewritten = append(rewritten, dimBasic(48, v-100+8, p))
-		case v == 38 || v == 48:
+		case v == 38 || v == 48 || v == 58:
+			// 38, 48 and 58 are the COMPLETE set of codes that consume
+			// following parameters, and consuming them is not optional. A code
+			// left out here does not merely go undimmed: its sub-parameters
+			// fall back into this loop and are read as top-level SGR values,
+			// so "58;2;0;255;0" becomes faint + reset + reset and the reset
+			// clobbers whatever foreground was in effect. Where the index
+			// instead lands in 30-37/40-47/90-97/100-107 the failure inverts:
+			// the run sets an explicit foreground, the stand-in is suppressed,
+			// and the text after it stays at FULL brightness. 58 was missing.
+			// It reaches quil from any undercurl-capable client — Neovim and
+			// helix LSP diagnostics, delta, anything kitty-underline aware.
 			consumed, text, ok := dimExtended(v, fields[i:], p)
-			if !ok { // malformed run — copy the remainder verbatim
+			if !ok {
+				// Malformed run — copy the remainder verbatim. A 38 still
+				// counts as an explicit foreground, for the same reason the
+				// colon form does: it may well have set one, and naming the
+				// dimmed default over the top would be corruption where
+				// leaving it undimmed is only a miss.
 				rewritten = append(rewritten, fields[i:]...)
+				if v == 38 {
+					setsExplicitFg, setsDefaultFg = true, false
+				}
 				return strings.Join(rewritten, ";"), setsDefaultFg, setsExplicitFg
 			}
 			rewritten = append(rewritten, text)
@@ -280,7 +331,7 @@ func dimBasic(lead, idx int, p dimPalette) string {
 	return sgrColorParams(lead, dimColor(ansi.BasicColor(idx), p.bg, p.amount))
 }
 
-// dimExtended blends a 38/48 extended-color run — "5;n" (256-palette) or
+// dimExtended blends a 38/48/58 extended-color run — "5;n" (256-palette) or
 // "2;r;g;b" (truecolor) — returning how many fields it consumed.
 func dimExtended(lead int, fields []string, p dimPalette) (consumed int, out string, ok bool) {
 	if len(fields) < 2 {

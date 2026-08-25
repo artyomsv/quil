@@ -80,7 +80,11 @@ the `charmbracelet/x/vt` emulator ends an OSC string at byte `0x9C` (the C1 Stri
 
 ### Pane cursor model
 
-terminal/ssh panes get a software reverse-video overlay (`insertCursor`, gated by `isTerminalPane` in `internal/tui/pane.go`); every other plugin pane (claude-code, opencode, …) gets the REAL hardware cursor via Bubble Tea v2 `tea.View.Cursor`, positioned by `Model.paneHardwareCursor()` (model.go) at the active pane's VT cursor + pane rect offset (+1 for the border; rects collected with oy=1 below the tab bar; focus mode uses the full tab area). Returns nil (hardware cursor hidden) during dialogs/rename/selection/scrollback/notes-editor-focus or when the app sent DECTCEM hide. The old `\x1b[?25l` append in View() is gone — a nil `View.Cursor` is what hides the cursor now. Cell-loop renderers (`styledCellLine`, `styledCellLineWithSelection`, `insertCursor`) skip `Width==0` wide-char continuation cells — emitting a space there drifted scrollback/selection rendering +1 column per emoji/CJK glyph (`pane_widechar_test.go` guards this)
+EVERY pane type gets a software reverse-video caret, drawn into the frame by `renderContent`/`insertCursor` (`internal/tui/pane.go`) when the pane is active and the app has not sent DECTCEM hide. `tea.View.Cursor` stays nil and the hardware cursor is never shown.
+
+**The hardware cursor was tried and REVERTED, and this section used to document the version that lost.** `paneHardwareCursor()` and the `isTerminalPane` split it was gated on no longer exist — positioning the real cursor through `tea.View.Cursor` every frame desynced Bubble Tea's diff writer on Windows, and the first character typed on a fresh input line landed one cell off ("Test" → "T est"). The rationale lives at the bottom of `View()` in `model.go`. Anything that reintroduces per-frame cursor positioning inherits that bug.
+
+Cell-loop renderers (`styledCellLine`, `styledCellLineWithSelection`, `insertCursor`) skip `Width==0` wide-char continuation cells — emitting a space there drifted scrollback/selection rendering +1 column per emoji/CJK glyph (`pane_widechar_test.go` guards this)
 
 ### Render coalescing
 
@@ -99,6 +103,70 @@ Bubble Tea calls `model.View()` once per MESSAGE (`p.render(model)` after every 
 **The perf line's counters nest.** `skipped=` is every cache-served frame; `hidden=` is the subset attributable to off-screen output. `View`'s skip branch calls `recordSkippedView` then `recordHiddenSkip` (which bumps `viewHidden` ALONE) — attribution lives in `View` because `Update` only knows a skip was intended, and double-counting would break comparability with logs written before this existed.
 
 **Honesty tests compare against a FORCED REBUILD of the model `Update` returned**, never against the frame from before the message: when the skip works those two are the same cached struct and the assertion is a tautology. That tautology is exactly how the ctxmenu case escaped the first audit. Tests in `view_coalesce_test.go`; a fresh pane must be PRIMED with one output chunk first, or the once-per-pane `liveOutputSeen` transition makes every case rebuild and the test proves nothing.
+
+### Unfocused dim (`dim.go`)
+
+`View()` runs the composed frame through `dimFrame` as its LAST step, immediately
+before `tea.NewView(content)`, whenever `m.termFocused` is false and
+`[ui] unfocused_dim` is above 0. Every colour blends toward the terminal's own
+background — reported by OSC 10/11 into `Model.termFg`/`termBg`, with a dark-theme
+fallback.
+
+**Why the composed frame and not the cells.** Chrome and pane content are already
+flattened into one string at that point, so a single SGR rewrite dims both — the
+~93 package-level `lipgloss.Color(...)` style vars need no palette indirection.
+More importantly it sits **downstream of every render cache**: `viewCache` and the
+per-pane render caches keep storing UNDIMMED content, and the pass rewrites
+whatever they hand over. A cell-level design would have to invalidate every pane's
+cache on each focus transition.
+
+**The coalescing interaction is what makes that safe, and it is by omission.**
+`tea.BlurMsg`, `tea.FocusMsg`, `tea.ForegroundColorMsg` and `tea.BackgroundColorMsg`
+never set `skipRender`, so they fall through to the fail-safe default and the frame
+rebuilds. Marking any of them inert — the obvious "this message changes no state"
+optimisation — serves the cached frame at the wrong brightness, which is the same
+class of bug as the ctxmenu case above and just as invisible in a test that
+compares a cached frame against itself.
+
+**INVARIANT: the pass may change colours and nothing else.** `renderTabBar`
+measures `style.Render(name)` to hit-test clicks, and `paneHardwareCursor` positions
+the real cursor by cell coordinates, so a rewrite that altered any line's rendered
+width would desync both from what is drawn. Only SGR *parameters* are rewritten,
+which preserves width by construction;
+`TestDimFrame_PreservesRenderedWidthOfEveryLine` is what keeps it true.
+
+**38, 48 and 58 are the complete set of parameter-consuming SGR codes**, and
+`dimSGRParams` must consume all three. A code left unconsumed does not merely go
+undimmed — its sub-parameters fall back into the top-level loop and are read as
+SGR codes, so `58;2;0;255;0` became faint + reset + reset and the reset clobbered
+the active foreground. Where the stray index instead lands in 30-37/40-47/90-97/
+100-107 the failure INVERTS — the run sets an explicit foreground, the stand-in is
+suppressed, and following text stays at full brightness — so a regression row must
+pick an index that collides (`58;5;31`); `58;5;9` passes while the bug is present.
+Shipped broken and caught in review. Producers are undercurl-capable clients —
+Neovim and helix LSP diagnostics, `delta` — not every colour-using tool. Anything
+unparseable is copied verbatim AND counted as an explicit foreground, so a miss
+stays a miss rather than becoming corruption.
+
+**The no-injection property is a checked invariant, not an assumption.** `sgrParams`
+refuses any CSI body carrying a byte outside 0x20-0x3F. `ansi.DecodeSequence` cannot
+currently return one, which is precisely why the check is there: without it, a future
+parser that returned the raw span of a malformed CSI would silently turn
+`dimSGRParams`' verbatim field copies into an injection primitive, and no test in the
+package would notice. A refused sequence goes undimmed.
+
+**Palette colours are resolved against the xterm defaults, and there is no fix
+available.** `dimBasic`/`dimExtended` map indices through `ansi.BasicColor`/
+`IndexedColor`, so a retheming terminal's `\x1b[31m` blends from `#800000` rather than
+from what the user actually sees, and blur shifts hue slightly instead of only fading.
+OSC 10/11 covers the default fg/bg; there is no palette-query Cmd in bubbletea v2, so
+honouring the real 16/256 entries needs hand-rolled OSC 4. Documented in
+`docs/configuration.md` as a known limitation rather than left looking accidental.
+
+Rewrites are memoised per parameter run for the frame — a pane paints most cells in
+the same few colours, worth ~860 allocations on a 41-tab frame. `BenchmarkFrame_UnfocusedDim`
+measures it against the `WarmPane` baseline; compare allocation counts, not ns/op,
+which is too noisy at 41 tabs to read.
 
 ### Force redraw
 

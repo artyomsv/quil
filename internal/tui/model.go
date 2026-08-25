@@ -4291,7 +4291,7 @@ func (m Model) View() tea.View {
 	// never dims rather than dimming forever.
 	if !m.termFocused {
 		if amount := m.cfg.UI.UnfocusedDimAmount(); amount > 0 {
-			content = dimFrame(content, m.dimPalette(amount))
+			content = dimFrame(content, m.dimInputs(amount))
 		}
 	}
 

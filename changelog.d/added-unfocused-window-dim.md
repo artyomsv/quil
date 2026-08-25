@@ -11,7 +11,7 @@ headline: Quil dims itself when the window loses focus
   Quil asks the terminal for its real default foreground and background (OSC 10/11)
   and fades toward those, so the effect matches your theme rather than assuming a
   black background. Tune it with `unfocused_dim` under `[ui]` in `config.toml` —
-  `0.45` by default, `0` to switch it off entirely.
+  `0.6` by default, `0` to switch it off entirely.
 
   Terminals that do not implement focus reporting (DEC 1004) never dim, since they
   never report losing focus in the first place.

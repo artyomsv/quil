@@ -3,6 +3,8 @@ package tui
 import (
 	"fmt"
 	"testing"
+
+	"github.com/artyomsv/quil/internal/config"
 )
 
 // Frame-cost attribution.
@@ -135,7 +137,7 @@ func BenchmarkFrame_UnfocusedDim(b *testing.B) {
 		b.Run(fmt.Sprintf("tabs=%d", tabs), func(b *testing.B) {
 			m := benchModelContent(tabs, 3, realisticPaneLines)
 			m.viewCache = &viewCacheBox{}
-			m.cfg.UI.UnfocusedDim = 0.45
+			m.cfg.UI.UnfocusedDim = config.DefaultUnfocusedDim
 			m.termFocused = false
 			_ = m.View() // prime every pane cache
 			b.ReportAllocs()

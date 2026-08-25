@@ -298,7 +298,7 @@ type UIConfig struct {
 // an unfocused frame travels. Chosen to read as unmistakably muted at a glance
 // while leaving a parked agent's output legible — the point is to notice the
 // window is not focused, not to stop being able to read it.
-const DefaultUnfocusedDim = 0.45
+const DefaultUnfocusedDim = 0.6
 
 // MaxUnfocusedDim is short of 1.0 deliberately: a full blend renders the frame
 // as an empty rectangle, which is indistinguishable from a crashed TUI.

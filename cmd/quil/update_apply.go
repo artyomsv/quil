@@ -74,7 +74,7 @@ func maybeApplyStagedUpdate(preConfirmed bool) bool {
 			versionpkg.Current())
 		return false
 	}
-	swapErr := swapBinaries(exe, dir)
+	swapErr := swapBinaries(exe, dir, man)
 	release()
 	if swapErr != nil {
 		fmt.Fprintf(os.Stderr, "update to v%s failed: %v — continuing on v%s\n",
@@ -117,20 +117,22 @@ func promptApplyUpdate(ver string) bool {
 // exactly once in maybeApplyStagedUpdate — see the comment there). If the
 // second swap fails, the first is rolled back so the pair never splits
 // versions.
-func swapBinaries(exe, stagedDir string) error {
+func swapBinaries(exe, stagedDir string, man *update.Manifest) error {
 	quildTarget := findDaemonBinaryForUpgrade()
 	if !filepath.IsAbs(quildTarget) {
 		return fmt.Errorf("cannot locate installed quild (got %q)", quildTarget)
 	}
-	return swapPair(exe, quildTarget, stagedDir, runtime.GOOS)
+	return swapPair(exe, quildTarget, stagedDir, man, runtime.GOOS)
 }
 
-// swapPair swaps both binaries as a unit: if the second swap fails, the
-// first is rolled back so quil/quild never split versions. Pure function
+// swapPair swaps both REQUIRED binaries as a unit: if the second swap fails,
+// the first is rolled back so quil/quild never split versions. Pure function
 // of its arguments (target resolution via os.Executable /
 // findDaemonBinaryForUpgrade lives in swapBinaries) so the rollback path
 // is directly testable against temp-dir targets.
-func swapPair(quilTarget, quildTarget, stagedDir, goos string) error {
+//
+// The optional tier follows, outside the unit — see installOptional.
+func swapPair(quilTarget, quildTarget, stagedDir string, man *update.Manifest, goos string) error {
 	names := update.BinaryNames(goos)
 	quilName, quildName := names[0], names[1]
 
@@ -151,7 +153,138 @@ func swapPair(quilTarget, quildTarget, stagedDir, goos string) error {
 		}
 		return err
 	}
+
+	// The pair is committed from here, and the optional tier must not be able
+	// to un-commit it. A helper that cannot be written — pinned by a click
+	// handler still running, denied by antivirus, out of disk — costs a console
+	// flash on the next toast click; rolling the pair back over it would cost
+	// the update itself, and the user would be told it failed when the only
+	// thing that failed was a convenience. Reported, never returned.
+	if err := installOptional(quilTarget, stagedDir, man, goos); err != nil {
+		log.Printf("update: optional binary not installed: %v — "+
+			"toast clicks use the console fallback until the next update", err)
+	}
 	return nil
+}
+
+// statTarget is a seam, for the reason remote-dialogs.md gives for
+// listFilesystemRoots being one: the branch it feeds turns on WHICH error a
+// stat returns, and the non-ErrNotExist arm cannot be reached from a portable
+// fixture — no temp directory makes os.Stat fail with a denied ACL or a handle
+// an antivirus scanner is holding, and a directory in the target's place makes
+// it SUCCEED, so the obvious fixture exercises neither arm. Without the seam
+// the distinction is a statically dead assertion that would keep passing with
+// the errors.Is reverted to a bare err != nil.
+var statTarget = os.Stat
+
+// installOptional installs the staged optional binaries beside the quil
+// executable.
+//
+// Beside quil.exe *specifically*: notify.ActivateHelperName is resolved against
+// filepath.Dir of the binary being registered, so anywhere else is nowhere.
+//
+// ADMISSION IS BY MANIFEST DECLARATION, NEVER BY PRESENCE ON DISK. VerifyStaged
+// hashes every file the manifest DECLARES and enforces coverage only for the
+// names its caller passes as required — which is `BinaryNames`, never the
+// optional tier — and it does not enumerate the staged directory at all. So
+// "sitting in the staged dir" and "verified" are different sets, and a file in
+// the first but not the second has been hashed by nobody. Gating on os.Stat of
+// the staged path would install exactly that file.
+//
+// THIS IS CORRUPTION RESISTANCE AND CONSISTENCY, NOT A SECURITY BOUNDARY, and
+// the distinction is worth stating precisely because the comment that stood here
+// before got it wrong in the other direction. Anyone who can write into
+// $QUIL_HOME/update/staged/ can also write $QUIL_HOME/plugins/*.toml, whose
+// CommandConfig.Path is "full path to binary (overrides PATH lookup)" and which
+// the daemon loads at startup (daemon.go:301) — arbitrary execution on the next
+// pane spawn, with no update, no version compare and no toast click. The gate
+// below therefore grants an attacker nothing they did not already have; what it
+// buys is that a helper truncated by a failed download, a crash mid-write or a
+// bad disk is refused the way the pair already is, instead of being installed
+// unchecked and then registered as the quil:// handler. It also keeps the
+// invariant true for whatever the optional tier holds NEXT — a binary outside
+// QUIL_HOME's blast radius would make this load-bearing, and the rule should
+// already be in place by then rather than needing to be noticed.
+//
+// Gating on declared-ness rather than adding the helper to VerifyStaged's
+// `required` list is what preserves the optional semantics: a pre-helper archive
+// declares nothing and is skipped, identically to today, where making it
+// required would fail the coverage check and discard the whole stage.
+func installOptional(quilTarget, stagedDir string, man *update.Manifest, goos string) error {
+	if man == nil {
+		// No manifest is no verification. FindStaged never yields one this way,
+		// but the fallback must be "install nothing" rather than "trust the
+		// directory" — that is the same choice for the same reason as above.
+		return nil
+	}
+	var errs []error
+	dir := filepath.Dir(quilTarget)
+	for _, name := range update.OptionalBinaryNames(goos) {
+		if _, declared := man.Files[name]; !declared {
+			// Either a pre-helper archive, or a file someone else put there.
+			// Both are handled by doing nothing, and deliberately without an
+			// error: the first is the ordinary case the optional tier exists
+			// for, and the second must not be able to fail an update whose
+			// required pair verified cleanly.
+			continue
+		}
+		staged := filepath.Join(stagedDir, name)
+		if _, err := os.Stat(staged); err != nil {
+			// Declared but absent. VerifyStaged already opens every declared
+			// file, so reaching this means it vanished between the gate and
+			// here — nothing to install, and nothing worth failing over.
+			continue
+		}
+		target := filepath.Join(dir, name)
+		// errors.Is(fs.ErrNotExist), never a bare err != nil — applyInProgress
+		// in this same file draws the distinction for the same reason, and it
+		// is load-bearing rather than pedantic here. A stat failing for any
+		// OTHER reason (a denied ACL, a wedged network path, a handle an
+		// antivirus scanner is holding) says nothing about whether the target
+		// is present, and guessing "absent" selects copyFile — the one branch
+		// that CANNOT work against a Windows helper some process still runs as
+		// its image, which is precisely the state a stat is most likely to
+		// fail in. Ambiguity therefore falls through to swapOne, whose
+		// rename-aside handles a present target and fails cleanly on an
+		// absent one, so the safe guess is the one that degrades to an error
+		// rather than to a corrupt install.
+		if _, err := statTarget(target); errors.Is(err, fs.ErrNotExist) {
+			// Nothing to displace. This is the ordinary case for an install
+			// that has only ever been upgraded, which is how the helper came
+			// to be missing in the first place.
+			if cpErr := copyFile(staged, target); cpErr != nil {
+				// Remove the partial file. copyFile opens O_CREATE|O_TRUNC
+				// BEFORE io.Copy, so a failure mid-transfer (disk full, an AV
+				// denial) leaves a SHORT — usually zero-byte — executable
+				// behind, and this branch has no backup to rename back the way
+				// swapOne does.
+				//
+				// Leaving it is worse than never having tried, which is what
+				// makes this a correctness fix rather than tidiness. The stated
+				// cost of a failed helper install is one console flash, because
+				// `notify setup` falls back to `quil.exe activate` when it finds
+				// no helper — but activatecmd.go admits any non-directory, so a
+				// zero-byte file is accepted as the real thing and registered as
+				// the quil:// handler. Every later toast click then fails inside
+				// CreateProcess with no UI at all: a DEAD handler instead of a
+				// working fallback, in precisely the failure this path exists to
+				// survive.
+				if rmErr := os.Remove(target); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
+					cpErr = fmt.Errorf("%w (and removing the partial file failed: %v)", cpErr, rmErr)
+				}
+				errs = append(errs, fmt.Errorf("install %s: %w", target, cpErr))
+			}
+			continue
+		}
+		// A REPLACEMENT goes through swapOne rather than a bare copy: NT
+		// refuses to overwrite an executable while a process still runs it as
+		// its image, and a toast clicked a second ago is exactly that. The
+		// rename-aside sidesteps it; cleanupAppliedUpdate sweeps the backup.
+		if _, err := swapOne(target, staged); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 const (
@@ -445,12 +578,36 @@ func cleanupAppliedUpdate() {
 		return
 	}
 	removeBackups(exe)
+	sweepOptionalBackups(exe, runtime.GOOS)
 	// Only sweep the daemon's backups when it sits next to us.
 	// findDaemonBinaryForUpgrade falls through to a PATH lookup, and deleting
 	// "<path>.old[.N]" in a directory this install does not own is not ours to
 	// do — the more so now that the sweep covers the numbered slots too.
 	if quild := findDaemonBinaryForUpgrade(); filepath.IsAbs(quild) && sameDir(quild, exe) {
 		removeBackups(quild)
+	}
+}
+
+// sweepOptionalBackups removes the backups installOptional leaves beside exe.
+//
+// The optional tier produces them: a REPLACEMENT helper goes through swapOne,
+// which renames the old one aside, and nothing else in the cleanup path would
+// ever clear it. Unconditional, unlike the daemon sweep beside it — the helper
+// is installed at filepath.Dir(quilTarget) by construction, so unlike
+// findDaemonBinaryForUpgrade's PATH fallback there is no foreign directory this
+// could reach into.
+//
+// Split out of cleanupAppliedUpdate purely so it can be tested: that function
+// takes no arguments and reads config.UpdateDir() and os.Executable() itself,
+// so a sweep left inline could only ever be verified by reading it. goos is a
+// parameter for the reason the rest of this file takes one — the optional tier
+// is EMPTY on the platform CI runs, so a hardcoded runtime.GOOS would make
+// every assertion about this vacuously true on Linux and the test would keep
+// passing with the body deleted.
+func sweepOptionalBackups(exe, goos string) {
+	dir := filepath.Dir(exe)
+	for _, name := range update.OptionalBinaryNames(goos) {
+		removeBackups(filepath.Join(dir, name))
 	}
 }
 

@@ -43,3 +43,73 @@ TUI side, `Model.pendingApplyVer` is the INTENT of the press: set only by the st
 
 Both the row and its action REFUSE when the active project's daemon is remote (`remoteModeFor(activeDest())`): the announcement and the stage describe that host's disk while the apply swaps THIS machine's binaries, the same wrong-machine argument `maybeShowUpdateNotice` already made for the startup notice. It matters more now that a success continues into the confirm, which would otherwise name a version this machine never staged. The status-bar segment is gated the same way (`RemoteMode()` alone misses a MIXED session, where the TUI is local but the project on screen is not — it rendered "↑ vX ready" for a release staged on the far host beside an About row correctly saying updates are local)
 
+
+### The archive has two binary tiers, and only one of them is required
+
+`BinaryNames(goos)` is the REQUIRED set — `extractBinaries` demands every name back and the stage fails
+without them. `OptionalBinaryNames(goos)` is extracted when the archive carries it and skipped without
+complaint when it does not; today that is `quil-activate.exe` on Windows and nothing anywhere else.
+
+**The helper cannot simply join `BinaryNames`, and the reason is the archives that already exist.** It
+entered the release zip with the toast feature (#154) and not the updater, so every release before that
+lacks it — folding it into the required set makes all of them unstageable, which turns a downgrade away
+from a broken version into a dead end. Optionality here is a statement about release history, not about
+how much the file matters. It matters a lot: it is the windowless binary `quil notify setup` registers
+as the `quil://` handler, and without it setup silently falls back to `quil.exe activate`, a CONSOLE
+binary whose window takes the foreground on every toast click and then vanishes. That fallback routes
+correctly, so the failure is invisible — the click works, it just looks wrong, which is why nobody
+reported it for eleven days.
+
+**`extractBinaries`' completeness check is per-NAME, never a count.** `files` now also holds whatever
+optional entries the archive happened to carry, so `len(files) != len(names)` would pass an archive
+holding the helper and no `quild` — the split-pair case the count existed to catch in the first place.
+
+**Verification needs no tier of its own, but ADMISSION does.** `VerifyStaged` checks manifest COVERAGE
+against the names the caller passes as required, then hashes every entry the manifest DECLARES — so an
+extracted helper is covered by the same tamper gate as the pair, and an absent one declares nothing.
+`maybeApplyStagedUpdate` therefore still passes `BinaryNames(runtime.GOOS)` and must not be "fixed" to
+pass the optional names too: that would make a pre-helper release fail the coverage check and be
+discarded on sight.
+
+**What that leaves is an asymmetry that is easy to miss: `VerifyStaged` never enumerates the staged
+directory.** It walks the manifest, so "present on disk" and "verified" are different sets, and a file in
+the first but not the second has been hashed by nobody. `installOptional` therefore admits by
+DECLARATION — `if _, declared := man.Files[name]; !declared { continue }` — and the manifest is threaded
+down through `swapBinaries` and `swapPair` for no other reason. A nil manifest installs nothing, for the
+same reason.
+
+**That gate is corruption resistance and consistency, NOT a security boundary — say so when you touch
+it.** The comment that originally stood on `installOptional` claimed a file in the staged dir was
+verified (false), and the comment that replaced it claimed the gap was exploitable (also false, in the
+other direction). Both were written confidently. The fact that settles it: anyone who can write into
+`$QUIL_HOME/update/staged/` can equally write `$QUIL_HOME/plugins/*.toml`, whose `CommandConfig.Path` is
+"full path to binary (overrides PATH lookup)" and which the daemon loads at startup (`daemon.go:301`) —
+arbitrary execution on the next pane spawn, no update or toast click involved. So the whole of
+`QUIL_HOME` is one trust domain and the gate crosses no boundary inside it. What it actually buys is
+that a helper truncated by a failed download or a bad disk is refused the way the pair already is, and
+that the invariant still holds if the optional tier ever carries something OUTSIDE that blast radius —
+an installer, a service binary — where it would become load-bearing.
+
+**A failed FIRST install removes its partial file.** `copyFile` opens `O_CREATE|O_TRUNC` before
+`io.Copy` and this branch has no backup to rename back the way `swapOne` does, so a failure mid-transfer
+strands a usually-zero-byte executable — and `activatecmd.go` admits any non-directory, so `notify
+setup` registers that empty file and every later click dies inside `CreateProcess` with no UI. That is a
+DEAD handler where the whole point of tolerating the failure was to fall back to the WORKING
+`quil.exe activate`, so leaving the partial behind is worse than never having attempted the install.
+
+**`installOptional` runs AFTER `swapPair`'s atomic unit and can never fail it.** The pair swap is the
+update; the helper is a convenience worth one console flash. A helper that cannot be written — pinned by
+a click handler still running, denied by antivirus, out of disk — is logged and swallowed, because
+rolling the pair back over it would report a failed update when the only thing that failed was the
+convenience, and the version gate would then find a matched OLD pair with no explanation. This is the
+one place in the apply path where an error is deliberately not propagated.
+
+**A REPLACEMENT helper goes through `swapOne`, not `copyFile`.** NT refuses to overwrite an executable
+while any process still runs it as its image, and a toast clicked a second ago is exactly that — the
+same constraint `freeBackupPath` exists for. A FIRST install has nothing to displace and uses `copyFile`
+directly, since `swapOne`'s opening `os.Rename(target, backup)` fails on a target that does not exist —
+and that is the ordinary case, because an install which has only ever been upgraded is precisely how the
+helper came to be missing. `cleanupAppliedUpdate` sweeps the helper's backups unconditionally rather
+than behind the `sameDir` guard the daemon sweep uses: the helper is installed beside `exe` by
+construction (`filepath.Dir(quilTarget)`, which is where `notify.ActivateHelperName` is resolved), so
+there is no foreign directory to guard against.

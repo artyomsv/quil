@@ -28,13 +28,40 @@ const maxArchiveSize = 200 << 20
 // manifestName is the atomic "staging complete" marker inside a staged dir.
 const manifestName = "manifest.json"
 
-// BinaryNames returns the executable names inside the release archive for
-// a platform.
+// BinaryNames returns the REQUIRED executable names inside the release archive
+// for a platform. An archive missing any of them is not a usable release.
 func BinaryNames(goos string) []string {
 	if goos == "windows" {
 		return []string{"quil.exe", "quild.exe"}
 	}
 	return []string{"quil", "quild"}
+}
+
+// OptionalBinaryNames returns executables extracted when the archive carries
+// them and skipped without complaint when it does not.
+//
+// quil-activate.exe is the windowless handler a desktop-toast click runs. It
+// joined the release archive with the toast feature and NOT this updater, so
+// every in-place `quil update` since installed the pair and dropped the helper
+// — an install that has only ever upgraded therefore has no helper at all, and
+// `quil notify setup` registers `quil.exe activate` instead: a console binary,
+// whose window takes the foreground on every click and then vanishes. Silent,
+// because the fallback routes correctly; it only looks wrong.
+//
+// It cannot simply join BinaryNames. That set is what extractBinaries REQUIRES,
+// and every release published before the helper existed would stop staging —
+// turning a downgrade away from a broken version into a dead end. Optionality
+// is about the archives that already exist, not about how much the file
+// matters.
+//
+// Verification does not need a tier of its own: VerifyStaged hashes every file
+// the manifest DECLARES, so an extracted helper is covered by the same
+// tamper gate as the pair, and an absent one declares nothing.
+func OptionalBinaryNames(goos string) []string {
+	if goos == "windows" {
+		return []string{"quil-activate.exe"}
+	}
+	return nil
 }
 
 // Manifest records a completed staging: which files landed and their
@@ -222,12 +249,14 @@ func matchBinary(names []string, entryName string) string {
 	return ""
 }
 
-// extractBinaries pulls only the quil/quild executables out of the archive
-// into dir, ignoring archive paths entirely (base-name match only — immune
-// to zip-slip by construction). Returns base name → sha256 of extracted
-// bytes.
+// extractBinaries pulls only quil's own executables out of the archive into
+// dir, ignoring archive paths entirely (base-name match only — immune to
+// zip-slip by construction). Returns base name → sha256 of extracted bytes.
+//
+// Both tiers are extracted; only the REQUIRED tier is demanded back.
 func extractBinaries(archivePath, dir, goos string) (map[string]string, error) {
 	names := BinaryNames(goos)
+	wanted := append(append([]string{}, names...), OptionalBinaryNames(goos)...)
 	files := make(map[string]string)
 
 	writeOne := func(base string, r io.Reader) error {
@@ -254,7 +283,7 @@ func extractBinaries(archivePath, dir, goos string) (map[string]string, error) {
 		}
 		defer zr.Close()
 		for _, f := range zr.File {
-			name := matchBinary(names, f.Name)
+			name := matchBinary(wanted, f.Name)
 			if name == "" {
 				continue
 			}
@@ -288,7 +317,7 @@ func extractBinaries(archivePath, dir, goos string) (map[string]string, error) {
 			if err != nil {
 				return nil, err
 			}
-			name := matchBinary(names, hdr.Name)
+			name := matchBinary(wanted, hdr.Name)
 			if hdr.Typeflag != tar.TypeReg || name == "" {
 				continue
 			}
@@ -298,8 +327,14 @@ func extractBinaries(archivePath, dir, goos string) (map[string]string, error) {
 		}
 	}
 
-	if len(files) != len(names) {
-		return nil, fmt.Errorf("archive missing binaries: extracted %d of %d", len(files), len(names))
+	// Named rather than counted. files now also holds whatever OPTIONAL entries
+	// the archive happened to carry, so a length compare would pass an archive
+	// with the helper and no quild — the split-pair case the count was there to
+	// catch in the first place.
+	for _, name := range names {
+		if _, ok := files[name]; !ok {
+			return nil, fmt.Errorf("archive missing required binary %s", name)
+		}
 	}
 	return files, nil
 }

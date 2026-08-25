@@ -44,7 +44,7 @@ export const SITE = {
    *  bump step — manual edits are normally unnecessary but harmless
    *  (the next release will overwrite both via sed). */
   software: {
-    version: "1.64.1",
+    version: "1.65.0",
     license: "Apache-2.0",
     operatingSystem: "Linux, macOS, Windows",
     applicationCategory: "DeveloperApplication",

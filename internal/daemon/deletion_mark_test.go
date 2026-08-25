@@ -284,3 +284,44 @@ func TestWorkspaceState_MarkedForDeletionFlip_NoRace(t *testing.T) {
 	}
 	<-done
 }
+
+// TestUpdatePane_BothMarksTrueInOnePayloadIsDeterministic pins the tie-break.
+//
+// No client sends this: the context menu toggles one mark at a time. It is
+// pinned anyway because the handler's own comment PROMISES an outcome ("deletion
+// is applied second and therefore wins"), and a promise about an input nobody
+// currently sends is exactly the kind that rots — reordering the two blocks
+// would silently invert it, and every other test in this file would stay green.
+//
+// What matters is less WHICH mark wins than that exactly one does: the pair is
+// mutually exclusive, so a payload that left both set would persist an invalid
+// state to disk and hand every client a pane wearing two contradictory marks.
+func TestUpdatePane_BothMarksTrueInOnePayloadIsDeterministic(t *testing.T) {
+	d := New(config.Default())
+	tab := &Tab{ID: "tab-1", Name: "test", Panes: []string{"pane-1"}}
+	d.session.RestoreTab(tab, []*Pane{{ID: "pane-1", TabID: "tab-1", Type: "terminal"}})
+
+	yes := true
+	msg, err := ipc.NewMessage(ipc.MsgUpdatePane, ipc.UpdatePanePayload{
+		PaneID:            "pane-1",
+		PinnedAttention:   &yes,
+		MarkedForDeletion: &yes,
+	})
+	if err != nil {
+		t.Fatalf("NewMessage: %v", err)
+	}
+	d.handleUpdatePane(nil, msg)
+
+	got := d.session.Pane("pane-1")
+	if got == nil {
+		t.Fatal("pane vanished")
+	}
+	if got.PinnedAttention && got.MarkedForDeletion {
+		t.Fatal("both marks are set — the pair is mutually exclusive, and this state " +
+			"would be persisted to disk and broadcast to every client")
+	}
+	if !got.MarkedForDeletion {
+		t.Errorf("deletion did not win the tie-break (pinned=%v, marked=%v) — the handler "+
+			"documents that it is applied second and wins", got.PinnedAttention, got.MarkedForDeletion)
+	}
+}

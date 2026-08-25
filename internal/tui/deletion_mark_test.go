@@ -384,3 +384,86 @@ func TestSendMarkedForDeletion_DegenerateInputs(t *testing.T) {
 		t.Errorf("sent %d messages, want 1 — the send is attempted even when it will fail", len(fake.sent))
 	}
 }
+
+// TestPaneRow_BothMarksSetStillMeasuresExactly is the client-side half of the
+// invalid pair. The daemon keeps the two marks exclusive, so this state reaches
+// a client only mid-broadcast — and paneRow's own comment says the arithmetic
+// covers both "rather than depending on that invariant holding". Nothing pinned
+// that, and the sidebar is where a width error is expensive: renderSidebar's
+// closing .Width(w) WRAPS an over-wide row onto a second painted line, which
+// shifts every row below it while sidebarRowAt still maps screen row y to
+// rows[y] — the user clicks one project and selects another.
+//
+// A live state is set so BOTH suffixes are present at once, which is the widest
+// the row can get and the only case where the two reservations compete.
+func TestPaneRow_BothMarksSetStillMeasuresExactly(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name  string
+		setup func(p *PaneModel)
+	}{
+		{"blocked with a long reason", func(p *PaneModel) {
+			p.blockedSince = time.Now()
+			p.blockedReason = "AskUserQuestion"
+		}},
+		{"working", func(p *PaneModel) { p.working = true }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pane := &PaneModel{ID: "pane-b16e3850", Name: "agent"}
+			pane.pinnedAttention = true
+			pane.markedForDeletion = true
+			tt.setup(pane)
+
+			row := paneRow(pane, false, defaultSidebarWidth)
+			if n := lipgloss.Width(row); n != defaultSidebarWidth {
+				t.Errorf("row measures %d cells, want exactly %d — an over-wide row wraps and "+
+					"desyncs every sidebar click below it", n, defaultSidebarWidth)
+			}
+			// Both marks survive: each is width-reserved independently, so
+			// neither may be the one that gets dropped to fit the other.
+			if !strings.Contains(row, glyphPinned) {
+				t.Errorf("paneRow = %q dropped the pin when both marks were set", row)
+			}
+			if !strings.Contains(row, glyphDeletion) {
+				t.Errorf("paneRow = %q dropped the deletion mark when both marks were set", row)
+			}
+		})
+	}
+}
+
+// TestPaneView_DeletionMarkOutranksThePinOnTheBorder pins the ordering the
+// border comment states. The border can hold one colour, so with both flags set
+// (only reachable mid-broadcast) it must show the mark the user chose MOST
+// RECENTLY — and since setting the deletion mark is what clears the pin on the
+// daemon, deletion is by construction the newer of the two.
+//
+// Asserted by comparing renders rather than by matching an SGR literal: the
+// question is "which branch won", and the deletion-only pane is the exact answer
+// that branch should produce.
+func TestPaneView_DeletionMarkOutranksThePinOnTheBorder(t *testing.T) {
+	t.Parallel()
+	deletionOnly := NewPaneModel("pane-border-cmp", 1024)
+	defer deletionOnly.Dispose()
+	deletionOnly.Width, deletionOnly.Height = 40, 12
+	deletionOnly.markedForDeletion = true
+
+	both := NewPaneModel("pane-border-cmp", 1024)
+	defer both.Dispose()
+	both.Width, both.Height = 40, 12
+	both.markedForDeletion = true
+	both.pinnedAttention = true
+
+	pinOnly := NewPaneModel("pane-border-cmp", 1024)
+	defer pinOnly.Dispose()
+	pinOnly.Width, pinOnly.Height = 40, 12
+	pinOnly.pinnedAttention = true
+
+	if pinOnly.View() == deletionOnly.View() {
+		t.Fatal("a pinned pane and a marked pane render identically — this test cannot discriminate")
+	}
+	if both.View() != deletionOnly.View() {
+		t.Error("a pane carrying both marks does not render as the deletion mark — the border " +
+			"must show the mark that was set last, and setting deletion is what clears the pin")
+	}
+}

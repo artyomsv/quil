@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -307,9 +308,16 @@ const MaxUnfocusedDim = 0.9
 // value (which would brighten toward the foreground) and anything past
 // MaxUnfocusedDim both read as "off by one keystroke" typos rather than
 // intent, so they are clamped rather than honoured or rejected.
+//
+// NaN is named explicitly because it defeats an ordinary clamp: TOML accepts
+// the literal `nan`, and NaN compares false against BOTH bounds, so it would
+// fall through the default arm and reach the blend, where uint8(NaN) is
+// undefined. The frame happens to survive that today only because the caller
+// also gates on `amount > 0` — but a value this function exists to make safe
+// must not depend on a downstream check a refactor could drop.
 func (u UIConfig) UnfocusedDimAmount() float64 {
 	switch {
-	case u.UnfocusedDim <= 0:
+	case math.IsNaN(u.UnfocusedDim), u.UnfocusedDim <= 0:
 		return 0
 	case u.UnfocusedDim > MaxUnfocusedDim:
 		return MaxUnfocusedDim

@@ -291,16 +291,33 @@ func dimSGRParams(params string, p dimPalette) (out string, setsDefaultFg, setsE
 			rewritten = append(rewritten, dimBasic(48, v-100+8, p))
 		case v == 38 || v == 48 || v == 58:
 			// 38, 48 and 58 are the COMPLETE set of codes that consume
-			// following parameters, and consuming them is not optional. A code
-			// left out here does not merely go undimmed: its sub-parameters
-			// fall back into this loop and are read as top-level SGR values,
+			// following parameters, and consuming them is not optional.
+			//
+			// Complete over the EMITTERS, which is a stronger claim than
+			// complete over the SGR standard and is the one that holds here:
+			// pane bytes never reach this function. They die in the vt
+			// emulator, and the frame's SGR is REGENERATED from uv.Style — so
+			// the reachable alphabet is whatever x/ansi's style builder can
+			// write, and that has exactly three multi-parameter emitters
+			// (foregroundColorString, backgroundColorString,
+			// underlineColorString). An SGR code the emulator does not
+			// recognise is dropped rather than stored, so a child cannot
+			// smuggle a fourth. The closure reopens only if x/ansi gains one,
+			// or if raw pane bytes ever bypass the cell model.
+			//
+			// A code left out here does not merely go undimmed: its
+			// sub-parameters fall back into this loop and are read as
+			// top-level SGR values,
 			// so "58;2;0;255;0" becomes faint + reset + reset and the reset
 			// clobbers whatever foreground was in effect. Where the index
 			// instead lands in 30-37/40-47/90-97/100-107 the failure inverts:
 			// the run sets an explicit foreground, the stand-in is suppressed,
 			// and the text after it stays at FULL brightness. 58 was missing.
-			// It reaches quil from any undercurl-capable client — Neovim and
-			// helix LSP diagnostics, delta, anything kitty-underline aware.
+			// It reaches quil from Neovim and helix LSP diagnostics, and from
+			// anything else that sets a colored or curly underline. NOT from
+			// every colorful tool — `rg --color` and bat emit 38/48 only, and
+			// a reader who checks those first would wrongly conclude this case
+			// is theoretical.
 			consumed, text, ok := dimExtended(v, fields[i:], p)
 			if !ok {
 				// Malformed run — copy the remainder verbatim. A 38 still

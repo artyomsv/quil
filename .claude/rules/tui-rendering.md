@@ -129,11 +129,18 @@ class of bug as the ctxmenu case above and just as invisible in a test that
 compares a cached frame against itself.
 
 **INVARIANT: the pass may change colours and nothing else.** `renderTabBar`
-measures `style.Render(name)` to hit-test clicks, and `paneHardwareCursor` positions
-the real cursor by cell coordinates, so a rewrite that altered any line's rendered
-width would desync both from what is drawn. Only SGR *parameters* are rewritten,
-which preserves width by construction;
+measures `style.Render(name)` to hit-test clicks, and the cell-loop renderers
+(`styledCellLine`, `insertCursor`) rebuild a row column by column, so a rewrite that
+altered any line's rendered width would desync both from what is drawn. Only SGR
+*parameters* are rewritten, which preserves width by construction;
 `TestDimFrame_PreservesRenderedWidthOfEveryLine` is what keeps it true.
+
+The software caret comes out right for a reason worth recording, since it looks like
+it should not: `insertCursor` emits `\x1b[0m\x1b[7m` + glyph + `\x1b[27m`. The `0m`
+re-arms `fgIsDefault`/`named`, so the stand-in lands between the `7m` and the glyph
+and the caret block fades with everything else, and the `27m` leaves the stand-in in
+effect for the cells after it — which is correct, because those cells were
+default-foreground in the undimmed rendering too.
 
 **38, 48 and 58 are the complete set of parameter-consuming SGR codes**, and
 `dimSGRParams` must consume all three. A code left unconsumed does not merely go
@@ -143,8 +150,10 @@ the active foreground. Where the stray index instead lands in 30-37/40-47/90-97/
 100-107 the failure INVERTS — the run sets an explicit foreground, the stand-in is
 suppressed, and following text stays at full brightness — so a regression row must
 pick an index that collides (`58;5;31`); `58;5;9` passes while the bug is present.
-Shipped broken and caught in review. Producers are undercurl-capable clients —
-Neovim and helix LSP diagnostics, `delta` — not every colour-using tool. Anything
+Shipped broken and caught in review. Producers are Neovim and helix LSP diagnostics
+and anything else setting a coloured underline — NOT every colour-using tool, since
+`rg --color` and bat emit 38/48 only and checking those first reads as a false alarm.
+Anything
 unparseable is copied verbatim AND counted as an explicit foreground, so a miss
 stays a miss rather than becoming corruption.
 

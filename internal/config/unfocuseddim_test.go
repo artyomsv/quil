@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func TestUnfocusedDimAmount_ClampsOutOfRangeValues(t *testing.T) {
 	tests := []struct {
@@ -14,6 +17,17 @@ func TestUnfocusedDimAmount_ClampsOutOfRangeValues(t *testing.T) {
 		{"the maximum passes through", MaxUnfocusedDim, MaxUnfocusedDim},
 		{"a full blend is clamped short of invisible", 1.0, MaxUnfocusedDim},
 		{"a percentage-shaped typo is clamped, not honoured", 45, MaxUnfocusedDim},
+		{
+			// TOML accepts the literal `nan`, and NaN fails BOTH comparisons in
+			// an ordinary clamp — so it would pass straight through and reach
+			// the blend, where uint8(NaN) is undefined. The frame currently
+			// survives that only because the caller happens to gate on
+			// `amount > 0`, which NaN also fails. Relying on a downstream guard
+			// for a value this one is supposed to have made safe is the kind of
+			// accident that a later refactor of the caller silently removes.
+			"a NaN is off rather than passed through", math.NaN(), 0,
+		},
+		{"an infinity is clamped like any oversized value", math.Inf(1), MaxUnfocusedDim},
 	}
 
 	for _, tt := range tests {

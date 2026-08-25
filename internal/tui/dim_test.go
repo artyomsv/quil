@@ -133,8 +133,9 @@ func TestDimFrame_RewritingRules(t *testing.T) {
 			// grammar as 38 and 48. Leaving it unconsumed re-reads its
 			// sub-parameters as top-level codes — the 2 becomes faint, the
 			// zeroes become resets, and the reset clobbers the foreground that
-			// is still in effect. Emitted by undercurl-capable clients:
-			// Neovim and helix LSP diagnostics, delta.
+			// is still in effect. Emitted by Neovim and helix LSP diagnostics,
+			// and anything else setting a colored underline — not by every
+			// colorful tool (`rg --color` and bat emit 38/48 only).
 			name: "underline color is consumed and leaves the foreground alone",
 			in:   "\x1b[38;2;255;0;0m\x1b[58;2;0;255;0mtext",
 			want: "\x1b[38;2;128;0;0m\x1b[58;2;0;128;0mtext\x1b[0m",

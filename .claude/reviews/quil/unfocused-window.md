@@ -20,3 +20,11 @@ Rounds completed: 1
 ## Dismissed (acknowledged, will not fix; agents may escalate with explicit justification)
 - [code-quality/LOW] b.Grow(len+len/8) preallocation constant is a guess and a text-heavy frame can exceed it — it is a hint to the allocator, not a bound; being wrong costs one growth, and there is no better estimate available before the walk (round 1)
 - [security/advisory] consume extended runs via ansi.ReadStyleColor so the rewriter's grammar cannot drift from the emitter's — structurally nicer than the enumerated 38/48/58 fix, but security assessed the enumerated fix plus a regression test as proportionate and the drift risk requires x/ansi adding a fourth multi-parameter emitter (round 1)
+- [code-quality, round 1 re-review] the round-1 rules edit ITSELF cited paneHardwareCursor as live, 47 lines after correcting the section that says it does not exist; width invariant now hangs on renderTabBar + the cell-loop renderers — round 1
+- [code-quality, verified by running rg --color] SGR 58 producer list narrowed to what was actually confirmed; rg and bat named as NON-producers so a future reader checking them does not read the case as a false alarm — round 1
+- [security] NaN in unfocused_dim defeated the clamp (fails both comparisons) and survived to the blend; UnfocusedDimAmount now names NaN explicitly rather than relying on View's amount > 0 — round 1
+- [security] recorded WHY 38/48/58 is complete: the frame's SGR is regenerated from uv.Style, so the alphabet is what x/ansi's builder emits (exactly three multi-parameter emitters), not what the SGR standard defines — round 1
+
+## Dismissed, added on re-review
+- [code-quality/lowest] a malformed 48/58 followed by a VALID 38 in the same CSI run copies the remainder verbatim without marking the foreground explicit, so the stand-in can overwrite that 38 — unreachable from ultraviolet's emitter, which only writes well-formed runs; hardening means scanning the copied remainder for a 38, which the reviewer and I agree costs more than the case is worth (round 1)
+- [security/theoretical] the T.416 six-parameter form "38;2;<colorspace>;r;g;b" would desync dimExtended (consumes 5) from a terminal consuming 6 — unreachable, since quil's own emitter only ever writes the five-parameter form and the frame is regenerated rather than passed through (round 1)

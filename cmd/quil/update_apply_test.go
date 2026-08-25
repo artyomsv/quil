@@ -355,7 +355,7 @@ func TestSwapBinaries_SecondSwapFails_RollsBackFirst(t *testing.T) {
 	// second swap to fail and the pair-rollback branch to run.
 	os.WriteFile(filepath.Join(stagedDir, "quil.exe"), []byte("new-quil"), 0755)
 
-	if err := swapPair(quilTarget, quildTarget, stagedDir, "windows"); err == nil {
+	if err := swapPair(quilTarget, quildTarget, stagedDir, manifestDeclaring("quil.exe", "quild.exe"), "windows"); err == nil {
 		t.Fatal("swapPair with missing staged quild = nil error, want error")
 	}
 
@@ -389,7 +389,7 @@ func TestSwapPair_PinnedQuilBackup_SecondSwapFails_RollsBackFromFallback(t *test
 	pinBackup(t, quilTarget)
 	os.WriteFile(filepath.Join(stagedDir, "quil.exe"), []byte("new-quil"), 0755)
 
-	if err := swapPair(quilTarget, quildTarget, stagedDir, "windows"); err == nil {
+	if err := swapPair(quilTarget, quildTarget, stagedDir, manifestDeclaring("quil.exe", "quild.exe"), "windows"); err == nil {
 		t.Fatal("swapPair with missing staged quild = nil error, want error")
 	}
 

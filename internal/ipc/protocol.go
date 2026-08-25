@@ -515,6 +515,13 @@ type UpdatePanePayload struct {
 	// make "unmark attention" indistinguishable from "rename this pane" and
 	// every OSC 7 CWD update would silently clear the mark.
 	PinnedAttention *bool `json:"pinned_attention,omitempty"`
+	// MarkedForDeletion is a pointer for the same reason as PinnedAttention,
+	// and the tri-state is load-bearing twice over here. Unmarking is the
+	// off-state the user asks for explicitly, so a plain bool could not express
+	// it; and the panes this mark lands on are the ones still emitting OSC 7
+	// CWD updates from a background job, so a plain bool would clear the mark
+	// on the next `cd` the shell reports.
+	MarkedForDeletion *bool `json:"marked_for_deletion,omitempty"`
 	// OverlayVisible reports whether the TUI is currently SHOWING this overlay
 	// pane. Pointer for the same tri-state reason as Muted: this is a partial
 	// update handler, so a plain bool would report every rename and every OSC 7

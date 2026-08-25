@@ -110,10 +110,14 @@ type PaneInfo struct {
 	// like Muted, so it survives a TUI restart and reads the same on every
 	// client attached to that daemon.
 	PinnedAttention bool
-	Overlay         bool
-	Pending         bool // deferred restore — not yet lazy-spawned
-	SessionID       string
-	HistoryLines    int
+	// MarkedForDeletion is the user's "done with this pane" mark, daemon-owned
+	// for the same reasons as PinnedAttention and mutually exclusive with it
+	// (the daemon enforces that, so both fields here are simply reported).
+	MarkedForDeletion bool
+	Overlay           bool
+	Pending           bool // deferred restore — not yet lazy-spawned
+	SessionID         string
+	HistoryLines      int
 	// MouseTracking/MouseSGR are daemon-authoritative (scanned from the PTY
 	// stream): the child app has enabled mouse tracking, so wheel events
 	// should be forwarded to it. Mirrored onto PaneModel for the wheel handler.
@@ -5992,6 +5996,16 @@ func (m Model) tabLabel(idx int) string {
 	if m.tabPinnedAttention(idx) {
 		name = glyphPinned + name
 	}
+	// Glyph only, with no tabStyle branch to match — the deliberate omission
+	// TestTabStyle_DeletionMarkDoesNotRecolourTheTab exists to protect. The
+	// colour ranks by urgency (blocked > pinned > unseen), and a pane the user
+	// has already decided to throw away is the least urgent thing in the
+	// workspace; giving it a colour would put it in competition with three
+	// states that all want the user to act. Same treatment as eagerTabMarker,
+	// which is also a fact about a pane rather than a demand.
+	if m.tabMarkedForDeletion(idx) {
+		name = glyphDeletion + name
+	}
 	if m.tabHasWorkingPane(idx) {
 		name = workingGlyph(m.workSpinnerFrame) + " " + name
 	}
@@ -7067,6 +7081,9 @@ func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
 				}
 				if pinned, ok := pm["pinned_attention"].(bool); ok {
 					pi.PinnedAttention = pinned
+				}
+				if marked, ok := pm["marked_for_deletion"].(bool); ok {
+					pi.MarkedForDeletion = marked
 				}
 				if overlay, ok := pm["overlay"].(bool); ok {
 					pi.Overlay = overlay
@@ -8175,6 +8192,38 @@ func (m Model) toggleActivePaneMute() tea.Cmd {
 // that silently did not take is invisible until the user goes looking for it
 // next week. There is no dialog to surface it in from a context menu, so the
 // failure is named in the log rather than swallowed as success.
+// sendMarkedForDeletion is sendPinnedAttention for the deletion mark, and it
+// is a separate function rather than a shared one taking a field selector for
+// the reason the daemon keeps the two flags apart: they are opposite claims,
+// and a single helper would invite a call site to pass the wrong one.
+//
+// Everything sendPinnedAttention's comment says applies unchanged: the
+// destination is resolved HERE on the Update goroutine, and the send is STRICT
+// because a mark that silently did not take is invisible until the user goes
+// looking for it — which for this mark is by definition later, on a pane they
+// have stopped watching.
+func (m Model) sendMarkedForDeletion(paneID string, marked bool) tea.Cmd {
+	if paneID == "" {
+		return nil
+	}
+	dest := m.destOfPane(paneID)
+	return func() tea.Msg {
+		msg, err := ipc.NewMessage(ipc.MsgUpdatePane, ipc.UpdatePanePayload{
+			PaneID:            paneID,
+			MarkedForDeletion: &marked,
+		})
+		if err != nil {
+			log.Printf("sendMarkedForDeletion build msg: %v", err)
+			return nil
+		}
+		if err := m.sendForDestStrict(dest, msg); err != nil {
+			log.Printf("sendMarkedForDeletion: marked=%v for pane %s did not reach dest %q: %v",
+				marked, paneID, dest, err)
+		}
+		return nil
+	}
+}
+
 func (m Model) sendPinnedAttention(paneID string, pinned bool) tea.Cmd {
 	if paneID == "" {
 		return nil

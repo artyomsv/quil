@@ -128,6 +128,7 @@ type PaneModel struct {
 	subagents          map[string]int // agent_type → outstanding count (SubagentStart/Stop, burst-aware); a stop only cancels a start it can name
 	subagentsOverflow  bool           // a start was refused by maxTrackedSubagents, so an untracked agent may still be live; sticky until a terminal edge
 	unseen             bool           // work finished while this pane was not focused (a park no longer sets this — see workPark); cleared on focus
+	markedForDeletion  bool           // context-menu "Mark for deletion" — red border + ⌫ saying the pane is finished with and safe to close; cleared only by Unmark, or by the daemon when the attention pin replaces it. DAEMON-owned (Pane.MarkedForDeletion) on the same terms as pinnedAttention: syncPaneMeta is the sole writer here, and every set goes out as MsgUpdatePane
 	pinnedAttention    bool           // context-menu "Mark attention" pin — purple border + ◆ that SURVIVES focus; cleared only by Unmark/Clear attention. DAEMON-owned (Pane.PinnedAttention), so it survives restart and reads the same on every client: syncPaneMeta is the sole writer here, and every set goes out as MsgUpdatePane
 	workFrame          int            // shared spinner frame index, mirrored here for top-border render
 	blockedSince       time.Time      // set when the agent parks waiting on the user — workPark always, workNotify unless the producer marked the event as Claude's idle nudge AND the turn is already over; zero when not blocked. Cleared on workStart/workAbort/workStop/workStopFinal (a completed turn is by definition not blocked) — focus does NOT clear it (see ackFocusedPane); paneRow suppresses the glyph for the focused pane instead
@@ -228,6 +229,7 @@ type paneRenderKey struct {
 	working                        bool
 	unseen                         bool
 	pinnedAttention                bool
+	markedForDeletion              bool
 	liveOutputSeen                 bool
 	spinnerFrame, workFrame        int
 	name, cwd                      string
@@ -264,6 +266,7 @@ func (p *PaneModel) renderKey() paneRenderKey {
 		working:            p.working,
 		unseen:             p.unseen,
 		pinnedAttention:    p.pinnedAttention,
+		markedForDeletion:  p.markedForDeletion,
 		liveOutputSeen:     p.liveOutputSeen,
 		spinnerFrame:       p.spinnerFrame,
 		workFrame:          p.workFrame,
@@ -1148,6 +1151,14 @@ func (p *PaneModel) View() string {
 		// Second, so a pane that is both shows the pin: unseen clears on focus
 		// by itself, the pin does not.
 		borderColor = lipgloss.Color("141")
+	}
+	if p.markedForDeletion {
+		// Red 160, matching sidebarDeletionStyle. Mutually exclusive with the
+		// pin on the daemon, so the two cannot genuinely collide — placed after
+		// it anyway so a client rendering mid-broadcast, with both flags briefly
+		// set, shows the mark the user just chose rather than the one they
+		// replaced.
+		borderColor = lipgloss.Color("160")
 	}
 	if p.Active {
 		borderColor = lipgloss.Color("57")

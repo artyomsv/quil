@@ -823,6 +823,7 @@ func (d *Daemon) restoreWorkspace() error {
 				muted, _ := paneData["muted"].(bool)
 				eager, _ := paneData["eager"].(bool)
 				pinnedAttention, _ := paneData["pinned_attention"].(bool)
+				markedForDeletion, _ := paneData["marked_for_deletion"].(bool)
 				worktreeOwned, _ := paneData["worktree_owned"].(bool)
 				worktreePath, _ := paneData["worktree_path"].(string)
 				worktreeInterrupted, _ := paneData["worktree_interrupted"].(bool)
@@ -847,6 +848,11 @@ func (d *Daemon) restoreWorkspace() error {
 					// the mark is deliberately un-clearable by anything but the
 					// user.
 					PinnedAttention: pinnedAttention,
+					// Absent on pre-mark snapshots → false, and false is the
+					// only safe default in this direction too: inventing a
+					// deletion mark would invite the user to close a pane that
+					// is still doing work.
+					MarkedForDeletion: markedForDeletion,
 					// Absent on pre-worktree snapshots → false, which is the
 					// right default: a pane nobody recorded as owning a
 					// worktree keeps the ordinary CWD fallback.
@@ -2836,11 +2842,38 @@ func (d *Daemon) handleUpdatePane(conn *ipc.Conn, msg *ipc.Message) {
 		pane.PluginMu.Unlock()
 		log.Printf("pane %s: eager=%v", pane.ID, *payload.Eager)
 	}
+	// The two marks are opposite claims about the same pane — "come back to
+	// this" and "nothing left here" — so SETTING either clears the other.
+	// Enforced here rather than in the TUI because this is the only place that
+	// is one answer for every attached client and for the snapshot on disk; a
+	// client-side clear leaves a second TUI, and the next restore, holding the
+	// mark the user just replaced.
+	//
+	// CLEARING one deliberately does NOT touch the other. Unmarking is not a
+	// claim about the opposite mark, and since the pair can never both be set,
+	// a clear that also cleared its opposite could only ever destroy state the
+	// user set — never repair an invalid combination.
+	//
+	// A payload carrying both as true is not something any client sends; the
+	// order below makes it deterministic anyway, with deletion applied second
+	// and therefore winning.
 	if payload.PinnedAttention != nil {
 		pane.PluginMu.Lock()
 		pane.PinnedAttention = *payload.PinnedAttention
+		if *payload.PinnedAttention {
+			pane.MarkedForDeletion = false
+		}
 		pane.PluginMu.Unlock()
 		log.Printf("pane %s: pinned_attention=%v", pane.ID, *payload.PinnedAttention)
+	}
+	if payload.MarkedForDeletion != nil {
+		pane.PluginMu.Lock()
+		pane.MarkedForDeletion = *payload.MarkedForDeletion
+		if *payload.MarkedForDeletion {
+			pane.PinnedAttention = false
+		}
+		pane.PluginMu.Unlock()
+		log.Printf("pane %s: marked_for_deletion=%v", pane.ID, *payload.MarkedForDeletion)
 	}
 	if payload.OverlayVisible != nil {
 		d.applyOverlayVisibility(conn, pane, *payload.OverlayVisible)
@@ -2869,7 +2902,8 @@ func updateTouchesBroadcastState(p ipc.UpdatePanePayload) bool {
 		p.CWD != "" ||
 		p.Muted != nil ||
 		p.Eager != nil ||
-		p.PinnedAttention != nil
+		p.PinnedAttention != nil ||
+		p.MarkedForDeletion != nil
 }
 
 func (d *Daemon) handleReloadPlugins() {
@@ -3415,6 +3449,14 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			// and the broadcast — the same arrangement muted has.
 			if pane.PinnedAttention {
 				paneData["pinned_attention"] = true
+			}
+			// PERSISTED for the same reason, and the case for it is stronger:
+			// the mark is set precisely so the user can walk away from a pane
+			// with a job still running and decide about it later, and "later"
+			// routinely spans a restart. A mark lost there sends them back to
+			// reading the scrollback, which is what the mark replaces.
+			if pane.MarkedForDeletion {
+				paneData["marked_for_deletion"] = true
 			}
 			// PERSISTED, unlike SpawnError beside it: this is how restore tells
 			// a missing worktree from a stale browsed directory, and without it

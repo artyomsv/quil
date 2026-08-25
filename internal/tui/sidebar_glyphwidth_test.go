@@ -36,10 +36,11 @@ func TestSidebarGlyphs_OneCellAndNotEmojiCapable(t *testing.T) {
 		0x1F534: "U+1F534 RED CIRCLE",
 	}
 	glyphs := map[string]string{
-		"glyphBlocked": glyphBlocked,
-		"glyphDone":    glyphDone,
-		"glyphIdle":    glyphIdle,
-		"glyphPinned":  glyphPinned,
+		"glyphBlocked":  glyphBlocked,
+		"glyphDone":     glyphDone,
+		"glyphIdle":     glyphIdle,
+		"glyphPinned":   glyphPinned,
+		"glyphDeletion": glyphDeletion,
 		// Not a state glyph, but it sits in the same const block and is
 		// budgeted the same way: the scroll markers pad to an exact column
 		// count around it, and paneRow already spends it on the subagent

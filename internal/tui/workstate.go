@@ -718,6 +718,28 @@ func (m Model) tabPinnedAttention(idx int) bool {
 	return false
 }
 
+// tabMarkedForDeletion reports whether the tab at idx contains a pane the user
+// marked for deletion. Same active-tab rule as tabPinnedAttention, and for the
+// same reason: the mark is an explicit note to self rather than a seen/unseen
+// state, so the ACTIVE tab reports it too — except when the marked pane is the
+// one in focus, where the pane's own border already says so.
+func (m Model) tabMarkedForDeletion(idx int) bool {
+	tabs := m.curTabs()
+	if idx < 0 || idx >= len(tabs) || tabs[idx].Root == nil {
+		return false
+	}
+	for _, p := range tabs[idx].Leaves() {
+		if p == nil || !p.markedForDeletion {
+			continue
+		}
+		if idx == m.activeTabIdx() && p.ID == tabs[idx].ActivePane {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
 // tabBlocked reports whether the tab at idx holds a pane parked on the user.
 // Unlike tabUnseen the ACTIVE tab also reports true: a permission prompt is
 // not a seen/unseen state, it is an outstanding question, and the tab bar is
@@ -780,6 +802,11 @@ func syncPaneMeta(pane *PaneModel, info *PaneInfo, wideCanvas bool, minNativeCol
 	// broadcast — and broadcasts are frequent (the git ticker alone fires every
 	// 5 s), so the mark would appear to set and then undo itself.
 	pane.pinnedAttention = info.PinnedAttention
+	// Unconditional for the same reason, plus one specific to this mark: the
+	// daemon CLEARS it by itself when the attention pin replaces it, so a
+	// guarded copy would leave the client showing both marks on a pane the
+	// daemon says has one.
+	pane.markedForDeletion = info.MarkedForDeletion
 	pane.Pending = info.Pending
 	pane.SessionID = info.SessionID
 	pane.HistoryLines = info.HistoryLines

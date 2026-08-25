@@ -205,6 +205,22 @@ type Pane struct {
 	// OUTLIVE the TUI process and be the same answer for every client attached
 	// to this daemon, which is exactly what Muted needed and got.
 	PinnedAttention bool
+	// MarkedForDeletion is the user's "I am done with this pane, it is safe to
+	// close" mark, set from the context menu's Mark for deletion and cleared
+	// only by Unmark. Persisted in the workspace snapshot and read under
+	// PluginMu, exactly like PinnedAttention.
+	//
+	// It is the OPPOSITE claim to PinnedAttention — "nothing left here" against
+	// "come back to this" — so handleUpdatePane keeps the two mutually
+	// exclusive. Enforcing that on this side rather than in the TUI is what
+	// makes it one answer for every attached client and for the snapshot,
+	// instead of one client's opinion.
+	//
+	// The pane it marks is typically still RUNNING something (a deployment the
+	// user is waiting out), which is why the mark cannot be inferred from any
+	// state the daemon can observe: the distinction it records is "I no longer
+	// need to read this", and only the user knows that.
+	MarkedForDeletion bool
 	// Overlay marks an ephemeral TUI overlay pane (lazygit toggle view).
 	// Guarded by PluginMu like Muted (set in handleCreatePane after the
 	// pane is already published to the session maps; concurrent snapshots

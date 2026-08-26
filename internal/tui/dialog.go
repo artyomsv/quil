@@ -344,6 +344,55 @@ func settingsFields() []settingsField {
 			relayout: true,
 		},
 		{
+			// Reports STATE, not the flag — the rule the Desktop
+			// notifications row states. `unfocused_dim = 0` was the only way
+			// to switch the dim off before the flag existed, so "flag on,
+			// level 0" is a real config on disk, and rendering it as "on"
+			// would claim the frame dims when nothing does.
+			//
+			// Applies LIVE, like Sidebar width and Desktop notifications
+			// rather than like the rest of this table: View() calls
+			// UnfocusedDimAmount on every frame, so the next repaint after an
+			// unfocused window regains and loses focus already honours it.
+			// The doc comment above about next-launch is about the rows whose
+			// value is read once at startup.
+			//
+			// No relayout: only colours move. dimFrame rewrites SGR
+			// parameters and nothing else, so every cell width is identical
+			// by construction and there is no geometry to recompute.
+			label: "Unfocused dim",
+			get: func(m *Model) string {
+				if m.cfg.UI.UnfocusedDimAmount() > 0 {
+					return "on"
+				}
+				return "off"
+			},
+			set:    func(m *Model, _ string) { m.toggleUnfocusedDim() },
+			isBool: true,
+		},
+		{
+			// Shows UnfocusedDimLevel — the clamped level, ignoring the
+			// switch — so the row keeps displaying what the user will turn
+			// back ON to while the row above reads "off". Showing the raw
+			// config field instead would print a hand-edited 1.5 that the
+			// renderer clamps to 0.9.
+			label: "Unfocused dim level",
+			get:   func(m *Model) string { return formatDimLevel(m.cfg.UI.UnfocusedDimLevel()) },
+			set: func(m *Model, v string) {
+				// Refused rather than clamped, and 0 refused rather than
+				// treated as off: see parseDimLevel. Editing the level
+				// deliberately does NOT switch the dim on — the two rows own
+				// different keys, and a level edit that flipped the switch
+				// would make the toggle impossible to keep off.
+				n, ok := parseDimLevel(v)
+				if !ok || n == m.cfg.UI.UnfocusedDim {
+					return
+				}
+				m.cfg.UI.UnfocusedDim = n
+				m.configChanged = true
+			},
+		},
+		{
 			// Overlay retention (idle timeout + live cap) is pushed to the
 			// daemon LIVE via overlayPolicyCmd — see handleSettingsKey and
 			// attachAllDests — unlike the rest of this table, which the

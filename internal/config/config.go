@@ -282,15 +282,32 @@ type UIConfig struct {
 	// the TUI at 1.13 GB resident. internal/tui owns the policy
 	// (adaptiveScrollbackLines) and the constants; config cannot import tui.
 	ScrollbackLines int `toml:"scrollback_lines"`
-	// UnfocusedDim fades the whole frame toward the terminal background while
-	// the terminal window does not have OS focus, so typing into a window that
-	// only looks focused is visibly wrong before the first keystroke lands.
-	// 0 disables it; see UnfocusedDimAmount for the accepted range.
+	// UnfocusedDimEnabled is the dim's off switch, kept SEPARATE from the level
+	// below rather than folded into it as `0 = off`. That was the original
+	// shape, and it cost the user their setting: with one key, switching the
+	// dim off has to write 0 over the level, so switching it back on can only
+	// restore the DEFAULT — a customised 0.35 is destroyed by an off/on round
+	// trip through the Settings dialog or the command palette. With two keys
+	// the level is preserved across the switch, which is the whole point of
+	// exposing an off switch in the UI at all.
 	//
-	// It needs no "enabled" companion because 0 already says that, and it needs
-	// no terminal-capability key because the mechanism is self-gating: the dim
-	// only ever applies after a DEC 1004 blur, which a terminal without focus
-	// reporting never sends.
+	// Absent from a config.toml written before this key existed, so it MUST
+	// default to true: Load starts from Default() and lets the decoder
+	// overwrite only the keys the file names, which is what stops the upgrade
+	// from silently switching the dim off for every install that has ever
+	// saved a config. A legacy `unfocused_dim = 0` still reads as off, through
+	// the level arm of UnfocusedDimAmount. Pinned by
+	// TestLoad_AbsentEnabledKeyKeepsTheDimOn and
+	// TestLoad_LegacyZeroStillDisablesTheDim.
+	UnfocusedDimEnabled bool `toml:"unfocused_dim_enabled"`
+	// UnfocusedDim is how far the frame fades toward the terminal background
+	// while the terminal window does not have OS focus, so typing into a window
+	// that only looks focused is visibly wrong before the first keystroke
+	// lands. See UnfocusedDimLevel for the accepted range.
+	//
+	// It needs no terminal-capability key because the mechanism is
+	// self-gating: the dim only ever applies after a DEC 1004 blur, which a
+	// terminal without focus reporting never sends.
 	UnfocusedDim float64 `toml:"unfocused_dim"`
 }
 
@@ -304,10 +321,10 @@ const DefaultUnfocusedDim = 0.6
 // as an empty rectangle, which is indistinguishable from a crashed TUI.
 const MaxUnfocusedDim = 0.9
 
-// UnfocusedDimAmount clamps UnfocusedDim into the usable range. A negative
-// value (which would brighten toward the foreground) and anything past
-// MaxUnfocusedDim both read as "off by one keystroke" typos rather than
-// intent, so they are clamped rather than honoured or rejected.
+// UnfocusedDimLevel clamps UnfocusedDim into the usable range, IGNORING the
+// on/off switch. A negative value (which would brighten toward the foreground)
+// and anything past MaxUnfocusedDim both read as "off by one keystroke" typos
+// rather than intent, so they are clamped rather than honoured or rejected.
 //
 // NaN is named explicitly because it defeats an ordinary clamp: TOML accepts
 // the literal `nan`, and NaN compares false against BOTH bounds, so it would
@@ -315,7 +332,14 @@ const MaxUnfocusedDim = 0.9
 // undefined. The frame happens to survive that today only because the caller
 // also gates on `amount > 0` — but a value this function exists to make safe
 // must not depend on a downstream check a refactor could drop.
-func (u UIConfig) UnfocusedDimAmount() float64 {
+//
+// Ignoring the switch is what the Settings dialog and the command palette need:
+// both show the level the dim WOULD use while reporting it as off, and the
+// dialog's own rule is that it never displays a number the renderer would not
+// use. Consulting the switch here would make a switched-off dim report a level
+// of 0 and destroy the setting on the next edit. Use UnfocusedDimAmount to
+// decide whether to blend at all.
+func (u UIConfig) UnfocusedDimLevel() float64 {
 	switch {
 	case math.IsNaN(u.UnfocusedDim), u.UnfocusedDim <= 0:
 		return 0
@@ -324,6 +348,17 @@ func (u UIConfig) UnfocusedDimAmount() float64 {
 	default:
 		return u.UnfocusedDim
 	}
+}
+
+// UnfocusedDimAmount is what the renderer blends with: the clamped level, or 0
+// when the dim is switched off. Zero means "do not dim", however it arose —
+// the switch being off, a legacy `unfocused_dim = 0`, or a value the clamp
+// rejected — so callers need only the one `> 0` test they already make.
+func (u UIConfig) UnfocusedDimAmount() float64 {
+	if !u.UnfocusedDimEnabled {
+		return 0
+	}
+	return u.UnfocusedDimLevel()
 }
 
 type KeybindingsConfig struct {
@@ -459,15 +494,16 @@ func Default() Config {
 			RedactSecrets: true,
 		},
 		UI: UIConfig{
-			TabDock:            "top",
-			Theme:              "default",
-			MouseScrollLines:   3,
-			PageScrollLines:    0,  // 0 = half-page (dynamic) — used by terminal pane scrollback
-			LogViewerPageLines: 40, // Alt+Up / Alt+Down jump in F1 → log viewer
-			ShowDisclaimer:     true,
-			SidebarOpen:        false, // closed by default — existing installs keep their pane geometry unchanged
-			SidebarWidth:       22,    // internal/tui.defaultSidebarWidth — config can't import tui, kept in sync by TestUIDefault_SidebarWidthMatchesTUIDefault
-			UnfocusedDim:       DefaultUnfocusedDim,
+			TabDock:             "top",
+			Theme:               "default",
+			MouseScrollLines:    3,
+			PageScrollLines:     0,  // 0 = half-page (dynamic) — used by terminal pane scrollback
+			LogViewerPageLines:  40, // Alt+Up / Alt+Down jump in F1 → log viewer
+			ShowDisclaimer:      true,
+			SidebarOpen:         false, // closed by default — existing installs keep their pane geometry unchanged
+			SidebarWidth:        22,    // internal/tui.defaultSidebarWidth — config can't import tui, kept in sync by TestUIDefault_SidebarWidthMatchesTUIDefault
+			UnfocusedDimEnabled: true,  // absent from every pre-existing config.toml; see the field comment
+			UnfocusedDim:        DefaultUnfocusedDim,
 		},
 		MCP: MCPConfig{
 			HighlightDuration: "10s",

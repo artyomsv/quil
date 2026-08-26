@@ -108,9 +108,53 @@ Bubble Tea calls `model.View()` once per MESSAGE (`p.render(model)` after every 
 
 `View()` runs the composed frame through `dimFrame` as its LAST step, immediately
 before `tea.NewView(content)`, whenever `m.termFocused` is false and
-`[ui] unfocused_dim` is above 0. Every colour blends toward the terminal's own
-background — reported by OSC 10/11 into `Model.termFg`/`termBg`, with a dark-theme
+`UIConfig.UnfocusedDimAmount()` is above 0. Every colour blends toward the terminal's
+own background — reported by OSC 10/11 into `Model.termFg`/`termBg`, with a dark-theme
 fallback.
+
+**The config is TWO keys, and the split is not cosmetic.** `unfocused_dim_enabled`
+(default true) is the off switch; `unfocused_dim` is the level. Folding "off" into
+`0` — the original shape — means switching off has to WRITE 0 over the level, so
+switching back on can only restore the default and a customised 0.35 does not
+survive an off/on round trip. That is unnoticeable while the only way to change
+either is to hand-edit `config.toml`, and unacceptable once a Settings row and a
+palette command make the round trip one keystroke each. `UnfocusedDimLevel()` is the
+clamped level IGNORING the switch (what the dialog and palette DISPLAY, so a
+switched-off dim still shows what it will return to); `UnfocusedDimAmount()` is
+`Level` gated on the switch (what the renderer blends with). Nothing but `Level`
+may be shown to the user, and nothing but `Amount` may reach the blend.
+
+**`unfocused_dim_enabled` MUST default true**, because it is absent from every
+`config.toml` written before it existed and `Save` writes the whole struct. `Load`
+starts from `Default()` and lets the decoder overwrite only the keys the file names,
+which is the only reason the upgrade does not silently switch the dim off for every
+install that has ever saved a config. A legacy `unfocused_dim = 0` still reads as off
+through `Level`. Both pinned in `internal/config/unfocuseddim_test.go`.
+
+**Both front doors act on the effective STATE, never on the flag.** `flag on, level 0`
+is a real config on disk, so `toggleUnfocusedDim` (shared by the Settings row and
+`palActDimToggle` — one implementation, because "switching on must also supply a
+level" is a rule two copies drift apart on) tests `Amount() > 0` and, when switching
+on, writes `DefaultUnfocusedDim` if the level is unusable. A naive `Enabled =
+!Enabled` passes six of the eight toggle cases and is wrong exclusively for configs
+that already exist. The Settings row's `get` reports `on`/`off` from `Amount()` for
+the same reason the Desktop-notifications row reports registration state.
+
+**The palette's level presets switch the dim ON as well as setting it**
+(`setUnfocusedDimLevel`); the Settings level row deliberately does NOT. In the
+palette a preset is the user's whole expressed intent and storing a level that never
+renders is a command with no observable effect; in the dialog the toggle sits
+directly above and owns the switch, so a level edit that flipped it would make the
+dim impossible to keep off. `palActDimLevel` resolves its `arg` against
+`dimLevelPresets` rather than parsing it — same rule as `palActSwitchProject`
+resolving an ID. The "current" marker is gated on the dim actually being on, not on
+the level matching, and is plain text rather than a glyph because that column
+otherwise holds keybindings and is measured for width.
+
+Neither row sets `relayout`: `dimFrame` rewrites SGR parameters only, so every cell
+width is identical by construction and there is no geometry to recompute. Both apply
+LIVE (next repaint) because `View()` reads the config every frame — the
+`settingsFields` doc comment's "next launch" covers the rows read once at startup.
 
 **Why the composed frame and not the cells.** Chrome and pane content are already
 flattened into one string at that point, so a single SGR rewrite dims both — the

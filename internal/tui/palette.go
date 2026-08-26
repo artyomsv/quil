@@ -74,17 +74,22 @@ const (
 	palActDaemonLog
 	palActMCPLog
 	palActRedraw
+	// Appearance. palActDimLevel carries the level as its arg, formatted the
+	// same way the Settings row displays it, so the row that is current can be
+	// identified by string compare without re-deriving it from a float.
+	palActDimToggle
+	palActDimLevel // arg = the level, e.g. "0.60"
 	// Projects. palActSwitchProject carries a project ID rather than an index
 	// for the reason toggleLastProject documents: an index resolved later can
 	// name a different project, or a destroyed one resolves to 0 and switches
 	// somewhere the user never asked for.
 	palActSwitchProject // arg = projectID
 	palActNewProject
-	palActRenameProject   // arg = projectID
-	palActRemoveProject   // arg = projectID (destroy if local, disconnect if remote)
-	palActProjectSidebar  // toggle the reserved column
-	palActAttentionQueue  // jump to the agent blocked longest
-	palActPrevProject     // bounce to the previous project
+	palActRenameProject  // arg = projectID
+	palActRemoveProject  // arg = projectID (destroy if local, disconnect if remote)
+	palActProjectSidebar // toggle the reserved column
+	palActAttentionQueue // jump to the agent blocked longest
+	palActPrevProject    // bounce to the previous project
 )
 
 // paletteCommand is one row of the palette. Disabled rows render greyed and are
@@ -517,6 +522,43 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 		paletteCommand{action: palActMCPLog, enabled: true, label: "View MCP logs", keywords: []string{"log", "mcp"}},
 		paletteCommand{action: palActRedraw, enabled: true, label: "Force redraw", detail: m.keymap.Display("app.redraw"), keywords: []string{"redraw", "repaint", "refresh"}},
 	)
+
+	// --- Appearance --------------------------------------------------------
+	//
+	// The dim is the one visual setting worth reaching without opening a
+	// dialog: it is the setting a user reconsiders precisely when they are
+	// looking at a dimmed window, and F1 → Settings is four keystrokes and a
+	// scroll away from it.
+	header("Appearance")
+	dimming := m.cfg.UI.UnfocusedDimAmount() > 0
+	cmds = append(cmds, paletteCommand{
+		action:   palActDimToggle,
+		enabled:  true,
+		label:    dimToggleLabel(dimming),
+		keywords: []string{"dim", "unfocused", "focus", "fade", "brightness", "appearance"},
+	})
+	for _, p := range dimLevelPresets {
+		// "current" rather than a glyph: this column otherwise holds
+		// keybindings, and a marker that is plain text cannot disagree with
+		// the width the row is measured at.
+		//
+		// Gated on `dimming`, not on the level alone — while the dim is
+		// switched off no preset is in effect, whatever the stored level
+		// happens to equal, and marking one would report a state that is not
+		// rendering.
+		detail := ""
+		if dimming && m.cfg.UI.UnfocusedDimLevel() == p.level {
+			detail = "current"
+		}
+		cmds = append(cmds, paletteCommand{
+			action:   palActDimLevel,
+			arg:      formatDimLevel(p.level),
+			enabled:  true,
+			label:    fmt.Sprintf("Dim level: %s (%s)", p.name, formatDimLevel(p.level)),
+			detail:   detail,
+			keywords: []string{"dim", "unfocused", "level", "fade", "brightness", "appearance"},
+		})
+	}
 
 	return cmds
 }
@@ -1114,6 +1156,29 @@ func (m Model) executePaletteCommand(c paletteCommand) (tea.Model, tea.Cmd) {
 		return m.openMCPLogsViewer()
 	case palActRedraw:
 		return m.forceRedraw()
+
+	// --- Appearance --------------------------------------------------------
+	case palActDimToggle:
+		// Shares toggleUnfocusedDim with the Settings row rather than
+		// re-deriving the flip here: "switching on must also supply a level"
+		// is the kind of rule two copies drift apart on, and the drift is
+		// invisible until someone opens the other front door.
+		m.toggleUnfocusedDim()
+		return m, nil
+	case palActDimLevel:
+		// Resolved against the preset table rather than by parsing the arg, so
+		// only a level this build actually offers can be stored — the same
+		// reason palActSwitchProject resolves an ID instead of trusting an
+		// index. No frame command is needed: View reads the config on every
+		// render, and the dim only paints while the window is unfocused, which
+		// it is not at the moment the user presses Enter in the palette.
+		for _, p := range dimLevelPresets {
+			if formatDimLevel(p.level) == c.arg {
+				m.setUnfocusedDimLevel(p.level)
+				break
+			}
+		}
+		return m, nil
 	}
 	return m, nil
 }

@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/x/ansi"
+
+	"github.com/artyomsv/quil/internal/config"
 )
 
 // dimPalette holds the blend inputs for one dimmed frame.
@@ -380,4 +382,117 @@ func dimExtended(lead int, fields []string, p dimPalette) (consumed int, out str
 		return 5, sgrColorParams(lead, dimColor(c, p.bg, p.amount)), true
 	}
 	return 0, "", false
+}
+
+// --- Dim controls (F1 → Settings, command palette) -------------------------
+
+// formatDimLevel renders a dim level for display. It formats
+// UnfocusedDimLevel, never the raw config field, so the number shown is the
+// one the renderer would blend with — a hand-edited 1.5 in config.toml reads
+// as 0.90 here, per the rule the Sidebar width setter states.
+//
+// Two decimals because that is the resolution the level is worth setting at:
+// MaxUnfocusedDim is 0.9, and a third digit changes nothing a human can see
+// against a blended background.
+func formatDimLevel(level float64) string {
+	return strconv.FormatFloat(level, 'f', 2, 64)
+}
+
+// parseDimLevel accepts a typed dim level, reporting ok only for a value the
+// renderer would honour verbatim.
+//
+// REFUSED rather than clamped, for the reason the Sidebar width setter gives:
+// a stored value the renderer would not use must never be displayed back. 0
+// and negatives are refused specifically because the toggle row owns "off" —
+// accepting 0 here would leave the two Settings rows disagreeing about the
+// same state, with the toggle reading "off" over a level the user believes
+// they set.
+//
+// NaN is named rather than left to the comparisons: it fails BOTH bounds, so
+// an ordinary range check passes it straight through. It is reachable from
+// this row because the editor accepts any single characters the user types,
+// and ParseFloat reads "NaN" happily.
+func parseDimLevel(s string) (float64, bool) {
+	n, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	if err != nil || math.IsNaN(n) || n <= 0 || n > config.MaxUnfocusedDim {
+		return 0, false
+	}
+	return n, true
+}
+
+// toggleUnfocusedDim flips the dim between off and on, acting on the STATE the
+// user can see rather than on the enabled flag alone.
+//
+// The distinction is load-bearing for a legacy `unfocused_dim = 0` install:
+// the flag defaults true there while nothing dims, so a flag-flipping toggle
+// would move an already-"off" row to a differently-off state and read as a
+// dead control. Switching on therefore also supplies a level when none is
+// usable — an on switch over a zero level is a toggle that never dims.
+//
+// Switching off leaves the level alone. That is the entire reason the switch
+// is a separate config key; see UIConfig.UnfocusedDimEnabled.
+func (m *Model) toggleUnfocusedDim() {
+	if m.cfg.UI.UnfocusedDimAmount() > 0 {
+		m.cfg.UI.UnfocusedDimEnabled = false
+		m.configChanged = true
+		return
+	}
+	m.cfg.UI.UnfocusedDimEnabled = true
+	if m.cfg.UI.UnfocusedDimLevel() <= 0 {
+		m.cfg.UI.UnfocusedDim = config.DefaultUnfocusedDim
+	}
+	m.configChanged = true
+}
+
+// dimLevelPreset is one palette-offered dim level.
+type dimLevelPreset struct {
+	name  string
+	level float64
+}
+
+// dimLevelPresets are the levels the command palette offers. Three, not a
+// continuum: the palette is a list of commands with no value-input mode, and
+// the F1 → Settings level row is where an arbitrary level is typed.
+//
+// The set must include DefaultUnfocusedDim, or a user who moved off the
+// default from the palette cannot get back to it from the palette — pinned by
+// TestDimLevelPresets_AreWithinTheSettableRange, which also holds every preset
+// to what the Settings row would accept, so the two front doors cannot
+// disagree about which levels are legal.
+//
+// The top preset stops short of MaxUnfocusedDim: the clamp exists because a
+// full blend is indistinguishable from a crashed TUI, and an offered preset
+// should sit inside the usable range rather than on its boundary.
+var dimLevelPresets = []dimLevelPreset{
+	{name: "subtle", level: 0.30},
+	{name: "normal", level: config.DefaultUnfocusedDim},
+	{name: "strong", level: 0.85},
+}
+
+// dimToggleLabel names what Enter will DO, not what the state is — the rule
+// sidebarToggleLabel states, and for the same reason: a row labelled with the
+// current state leaves the user working out which direction Enter moves it.
+//
+// Derived from the effective state, so a legacy `unfocused_dim = 0` (flag on,
+// nothing dimming) offers to turn the dim ON, matching what toggleUnfocusedDim
+// will actually do.
+func dimToggleLabel(dimming bool) string {
+	if dimming {
+		return "Turn unfocused dim off"
+	}
+	return "Turn unfocused dim on"
+}
+
+// setUnfocusedDimLevel applies a palette preset.
+//
+// It switches the dim ON as well as storing the level, deliberately: picking
+// "strong" while the dim is off would otherwise store a number that never
+// renders, and a command whose only effect is invisible is indistinguishable
+// from one that failed. The Settings level row does NOT do this — there the
+// toggle sits directly above and owns the switch, so a level edit that flipped
+// it would make the dim impossible to keep off.
+func (m *Model) setUnfocusedDimLevel(level float64) {
+	m.cfg.UI.UnfocusedDimEnabled = true
+	m.cfg.UI.UnfocusedDim = level
+	m.configChanged = true
 }

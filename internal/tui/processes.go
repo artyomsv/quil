@@ -74,9 +74,33 @@ const procStaleAfter = 30 * time.Second
 // procRowKind distinguishes the row types in the flattened view.
 type procRowKind int
 
+// procStaleFlag marks a quil process running a binary that differs from the
+// daemon's.
+//
+// U+25B3 WHITE UP-POINTING TRIANGLE, and the choice is constrained rather than
+// aesthetic. This string is rendered inside a FIXED-WIDTH column, so it is bound
+// by the rule sidebar.go states for its own glyph vocabulary: the codepoint must
+// have NO emoji presentation available. An emoji-capable one is subject to font
+// fallback — the terminal picks a colour emoji face, draws it about two cells
+// and advances one, overpainting whatever follows; where it advances two
+// instead, the row is painted one cell wider than every width helper here
+// believes and the columns after it drift.
+//
+// This column originally used U+26A0 WARNING SIGN, which is the exact glyph
+// sidebar.go names as "the single emoji-capable glyph in this set, and the only
+// one that misbehaved" — observed here as the space between the marker and the
+// word disappearing. Forcing text presentation with U+FE0E is not the fix
+// either; that was tried and rejected there, because it depends on the terminal
+// honouring a variation selector.
+//
+// Deliberately the OUTLINE triangle: the filled U+25B2 is the sidebar's
+// "blocked, needs you" glyph, and a stale binary is not that.
+const procStaleFlag = "△ stale"
+
 const (
 	procRowSectionQuil procRowKind = iota
 	procRowQuil
+	procRowQuilTotal
 	procRowUnidentified
 	procRowSectionWorkspace
 	procRowTotal
@@ -278,7 +302,7 @@ func (m Model) procRows() []procRow {
 	for _, q := range quil {
 		flag := ""
 		if q.Stale {
-			flag = "⚠ stale"
+			flag = procStaleFlag
 		}
 		rows = append(rows, procRow{
 			kind:    procRowQuil,
@@ -293,6 +317,34 @@ func (m Model) procRows() []procRow {
 			flag:    flag,
 		})
 	}
+	// Quil's own total, so "what is quil itself costing me" — the question this
+	// section exists to answer — does not require adding a TUI, a daemon and
+	// thirty bridges by hand. It is also what keeps the WORKSPACE total below
+	// unambiguous: that one covers panes, and with both sections showing
+	// numbers a reader needs to see the two sums side by side to believe it.
+	//
+	// Rendered only when something reported. A section of em dashes totalling to
+	// an em dash is noise.
+	var quilAgg cpuAggregate
+	var quilRSS uint64
+	for _, q := range quil {
+		if statIsStale(time.Duration(q.StatAgeMS) * time.Millisecond) {
+			quilAgg.add(proctree.UnknownCPU)
+			continue
+		}
+		quilAgg.add(q.CPUPct)
+		quilRSS += q.RSSBytes
+	}
+	if quilAgg.known > 0 {
+		rows = append(rows, procRow{
+			kind:       procRowQuilTotal,
+			label:      "Total",
+			rss:        quilRSS,
+			cpu:        quilAgg.pct(),
+			cpuPartial: quilAgg.partial(),
+		})
+	}
+
 	if resp.Unidentified > 0 {
 		rows = append(rows, procRow{
 			kind: procRowUnidentified,
@@ -323,8 +375,12 @@ func (m Model) procRows() []procRow {
 	// Appended after the loop above, because the grand total is what that loop
 	// produces. It still renders directly under the section header.
 	rows = append(rows, procRow{
-		kind:       procRowTotal,
-		label:      "Total",
+		kind: procRowTotal,
+		// Names what it covers. Quil's own processes are totalled in the QUIL
+		// section above and are deliberately NOT in this figure, so a bare
+		// "Total" sitting under a second section of numbers reads as the whole
+		// dialog's total when it is the panes' alone.
+		label:      "All panes",
 		rss:        resp.Total + m.tuiLocalMemTotal(),
 		cpu:        allCPU.pct(),
 		cpuPartial: allCPU.partial(),
@@ -893,6 +949,18 @@ func renderProcRow(row procRow, selected bool, inner int) string {
 
 	case procRowUnidentified:
 		return dialogSubtle.Render(truncateToWidth("    "+sanitizeRemoteText(row.label), inner))
+
+	case procRowQuilTotal:
+		// Laid out on the quil grid so its MEM and CPU land under the columns
+		// they total, with the trailing columns left empty — a version or a PID
+		// for a sum would be meaningless.
+		return style.Render(procQuilLine(
+			"  "+row.label,
+			formatQuilMem(row.rss, 0),
+			formatCPUAggregate(row.cpu, row.cpuPartial),
+			"", "", "", "",
+			inner,
+		))
 
 	case procRowQuil:
 		// Version, uptime and the binary name are the whole point of this

@@ -268,6 +268,28 @@ dialog is open. Doing the walk when the 5 s response arrives (`computePaneCPU` �
 is also why a COLLAPSED pane can now show its subtotal; `paneRowCPU` and
 `procTreeCPU` were deleted as dead once the totals were precomputed.
 
+**The QUIL section carries its own total, and the workspace one is labelled
+`All panes`.** Quil's own processes are what this section exists to account for,
+so "what is quil costing me" must not require adding a TUI, a daemon and thirty
+bridges by hand — and the two sums have to be visibly separate, because the
+workspace figure covers panes and deliberately excludes quil's own processes. A
+bare `Total` under a second section of numbers reads as the dialog's total. The
+quil total is suppressed entirely when nothing reported: a column of em dashes
+summing to an em dash is noise.
+
+**The stale marker is `△` (U+25B3), and the codepoint is constrained rather
+than aesthetic.** It renders inside a FIXED-WIDTH column, so it is bound by the
+rule `sidebar.go` states for its own glyph vocabulary: no emoji presentation
+available. This column shipped with `⚠` (U+26A0) — the exact glyph that file
+names as "the single emoji-capable glyph in this set, and the only one that
+misbehaved" — and it reproduced there too: the terminal font-falls-back to a
+colour emoji face, draws about two cells and advances one, so the space between
+the marker and the word vanished. `U+FE0E` is not the fix (tried and rejected in
+`sidebar.go`, since it depends on the terminal honouring a variation selector).
+The OUTLINE triangle specifically: the filled `▲` is the sidebar's "blocked,
+needs you" glyph, and a stale binary is not that.
+`TestProcStaleFlag_UsesNoEmojiCapableCodepoint` pins it.
+
 **A partial sum renders `~7%`, not `7%`** (`cpuAggregate`,
 `formatCPUAggregate`). Summing only the known values while some children are
 unsampled produces a real number that is nonetheless an understatement, and the

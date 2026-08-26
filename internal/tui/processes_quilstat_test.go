@@ -181,9 +181,119 @@ func TestQuilRow_BinaryColumnSurvivesAnEightyColumnTerminal(t *testing.T) {
 // role collide. Measured in CELLS, because the marker is non-ASCII.
 func TestQuilNameCol_HoldsTheWidestRoleLine(t *testing.T) {
 	// The shape renderProcRow builds for a stale process.
-	widest := "  ⚠ stale " + "daemon"
+	widest := "  " + procStaleFlag + " daemon"
 	if w := lipgloss.Width(widest); w > quilNameCol {
 		t.Errorf("widest role line %q is %d cells, exceeding quilNameCol=%d",
 			widest, w, quilNameCol)
+	}
+}
+
+// The stale marker sits in a FIXED-WIDTH column, so it must be a codepoint with
+// no emoji presentation available.
+//
+// sidebar.go states this as a hard requirement, from a bug already paid for
+// once: an emoji-CAPABLE codepoint is subject to font fallback, so the terminal
+// picks a colour emoji face, draws it about two cells and advances one — it
+// overpaints what follows, or (where it advances two) the row is painted one
+// cell wider than every width helper believes. U+26A0 WARNING SIGN is the
+// documented offender and was what this column originally used.
+func TestProcStaleFlag_UsesNoEmojiCapableCodepoint(t *testing.T) {
+	// The emoji-capable glyphs this codebase has been bitten by. U+FE0E/U+FE0F
+	// are the variation selectors that were tried and rejected as a fix.
+	for _, bad := range []rune{'⚠', '⚡', '︎', '️'} {
+		if strings.ContainsRune(procStaleFlag, bad) {
+			t.Errorf("procStaleFlag %q contains U+%04X, which is emoji-capable "+
+				"and overpaints the column — see the glyph rule in sidebar.go",
+				procStaleFlag, bad)
+		}
+	}
+}
+
+// Quil's own processes are the thing this section exists to account for, and
+// reading "how much is quil costing me" should not require adding a TUI, a
+// daemon and thirty bridges by hand — especially since the WORKSPACE total
+// deliberately does NOT include them.
+func TestProcRows_QuilSectionCarriesItsOwnTotal(t *testing.T) {
+	m := Model{lastWidth: 200}
+	m = m.openProcessesDialog()
+	m = m.applyResourceReport(ipc.ResourceReportRespPayload{
+		WithTrees: true,
+		Quil: []ipc.QuilProcInfo{
+			{Role: "tui", PID: 1, CPUPct: 11.5, RSSBytes: 700, StatAgeMS: 100},
+			{Role: "daemon", PID: 2, CPUPct: 1.0, RSSBytes: 65, StatAgeMS: 100},
+			{Role: "bridge", PID: 3, CPUPct: 0.5, RSSBytes: 17, StatAgeMS: 100},
+		},
+	})
+
+	var total *procRow
+	for i, r := range m.procRows() {
+		if r.kind == procRowQuilTotal {
+			total = &m.procRows()[i]
+			break
+		}
+	}
+	if total == nil {
+		t.Fatal("no total row in the QUIL section")
+	}
+	if total.rss != 782 {
+		t.Errorf("quil total rss = %d, want 782", total.rss)
+	}
+	if total.cpu < 12.99 || total.cpu > 13.01 {
+		t.Errorf("quil total cpu = %v, want 13", total.cpu)
+	}
+	if total.cpuPartial {
+		t.Error("every process reported, so the total must not be marked partial")
+	}
+}
+
+// A stale bridge running a binary that predates MsgClientStat reports nothing,
+// so the total covering it is an understatement and has to say so — the same
+// rule the workspace aggregates follow.
+func TestProcRows_QuilTotalMarksAnUnreportedProcess(t *testing.T) {
+	m := Model{lastWidth: 200}
+	m = m.openProcessesDialog()
+	m = m.applyResourceReport(ipc.ResourceReportRespPayload{
+		WithTrees: true,
+		Quil: []ipc.QuilProcInfo{
+			{Role: "tui", PID: 1, CPUPct: 11.5, RSSBytes: 700, StatAgeMS: 100},
+			// An older binary: it never pushes a stat, so the daemon reports it
+			// as unknown rather than zero.
+			{Role: "bridge", PID: 2, CPUPct: proctree.UnknownCPU, RSSBytes: 0},
+		},
+	})
+
+	var total *procRow
+	for i, r := range m.procRows() {
+		if r.kind == procRowQuilTotal {
+			total = &m.procRows()[i]
+			break
+		}
+	}
+	if total == nil {
+		t.Fatal("no total row in the QUIL section")
+	}
+	if !total.cpuPartial {
+		t.Error("a total covering an unreported process is an understatement " +
+			"and must be marked partial")
+	}
+	line := renderProcRow(*total, false, 120)
+	if !strings.Contains(line, "~") {
+		t.Errorf("partial quil total rendered without its marker: %q", line)
+	}
+}
+
+// The workspace total covers panes, not quil's own processes. With both
+// sections now showing numbers, a bare "Total" invites the reader to think it
+// is the whole dialog's total.
+func TestProcRows_WorkspaceTotalSaysWhatItCovers(t *testing.T) {
+	rows := twoTabModel(t).procRows()
+
+	r, ok := rowOfKind(rows, procRowTotal, "")
+	if !ok {
+		t.Fatal("no workspace total row")
+	}
+	if r.label == "Total" {
+		t.Error("workspace total is still labelled a bare \"Total\"; with the " +
+			"QUIL section carrying its own numbers that reads as the dialog's total")
 	}
 }

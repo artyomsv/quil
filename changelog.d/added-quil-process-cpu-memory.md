@@ -13,7 +13,14 @@ headline: The process dialog now shows quil's own CPU and memory
   already reports its version, which is also the only thing that works when the
   daemon is on another machine.
 
+  The section totals itself, so "what is quil costing me" does not mean adding
+  a TUI, a daemon and thirty bridges by hand. The workspace total below it is
+  now labelled `All panes`, because it covers the panes and deliberately does
+  not include quil's own processes — with both sections showing numbers, a bare
+  `Total` read as the whole dialog's.
+
   A process that has not reported yet, one whose platform has no per-process CPU
   counter, and one that has stopped reporting all render as `—`. None of them
   render as `0%`, which would read as idle — the wrong claim in a dialog you
-  opened to find something that is spinning.
+  opened to find something that is spinning. A total covering any of them is
+  shown as `~4%`: real, but an understatement.

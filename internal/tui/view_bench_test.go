@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+
+	"github.com/artyomsv/quil/internal/config"
 )
 
 // Benchmarks for the View() hot path.
@@ -53,6 +55,12 @@ func benchModelContent(tabs, projects int, lines []string) Model {
 		p.tabs = append(p.tabs, tab)
 	}
 	return Model{
+		// config.Default(), not the zero Config: a Model literal answers "off"
+		// to every config-GATED renderer feature, silently, and a benchmark
+		// asserts nothing so nothing catches it. BenchmarkFrame_UnfocusedDim
+		// measured an undimmed frame for exactly that reason once
+		// UnfocusedDimEnabled was added beside the level it did set.
+		cfg:           config.Default(),
 		projects:      ps,
 		activeProject: 0,
 		sidebarOpen:   true,

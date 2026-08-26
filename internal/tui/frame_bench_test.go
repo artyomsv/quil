@@ -137,8 +137,22 @@ func BenchmarkFrame_UnfocusedDim(b *testing.B) {
 		b.Run(fmt.Sprintf("tabs=%d", tabs), func(b *testing.B) {
 			m := benchModelContent(tabs, 3, realisticPaneLines)
 			m.viewCache = &viewCacheBox{}
+			// Both keys, explicitly: this benchmark states its own
+			// precondition rather than inheriting it, so it stays honest if
+			// the shipped defaults change.
+			m.cfg.UI.UnfocusedDimEnabled = true
 			m.cfg.UI.UnfocusedDim = config.DefaultUnfocusedDim
 			m.termFocused = false
+			// A benchmark asserts nothing, which is why this one quietly
+			// measured an UNDIMMED frame the moment an `enabled` key was added
+			// beside the level it set — the gate at model.go's View() is
+			// `UnfocusedDimAmount() > 0`, and a Model literal's zero Config
+			// answers 0. Nothing failed; the dim simply read as free. Checking
+			// the gate here is what turns the next such regression from
+			// silence into a message.
+			if got := m.cfg.UI.UnfocusedDimAmount(); got <= 0 {
+				b.Fatalf("UnfocusedDimAmount() = %v — this benchmark would measure an undimmed frame", got)
+			}
 			_ = m.View() // prime every pane cache
 			b.ReportAllocs()
 			b.ResetTimer()

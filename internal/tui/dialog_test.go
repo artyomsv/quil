@@ -29,6 +29,8 @@ func TestSettingsFields_LabelsAndInitialValues(t *testing.T) {
 		"Mouse scroll lines",
 		"Page scroll lines",
 		"Sidebar width",
+		"Unfocused dim",
+		"Unfocused dim level",
 		"Overlay idle timeout (min)",
 		"Desktop notifications",
 		"Max live overlays",

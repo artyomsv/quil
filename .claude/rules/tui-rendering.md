@@ -2,6 +2,7 @@
 description: Pane rendering, tab bar, mouse handling, selection, scrollback, and the keybinding action registry. Load when touching pane/tab rendering, mouse routing, the selection layer, or internal/keymap.
 paths:
   - "**/internal/tui/pane*.go"
+  - "**/internal/tui/dim*.go"
   - "**/internal/tui/tab.go"
   - "**/internal/tui/layout.go"
   - "**/internal/tui/model.go"
@@ -108,9 +109,81 @@ Bubble Tea calls `model.View()` once per MESSAGE (`p.render(model)` after every 
 
 `View()` runs the composed frame through `dimFrame` as its LAST step, immediately
 before `tea.NewView(content)`, whenever `m.termFocused` is false and
-`[ui] unfocused_dim` is above 0. Every colour blends toward the terminal's own
-background — reported by OSC 10/11 into `Model.termFg`/`termBg`, with a dark-theme
+`UIConfig.UnfocusedDimAmount()` is above 0. Every colour blends toward the terminal's
+own background — reported by OSC 10/11 into `Model.termFg`/`termBg`, with a dark-theme
 fallback.
+
+**The config is TWO keys, and the split is not cosmetic.** `unfocused_dim_enabled`
+(default true) is the off switch; `unfocused_dim` is the level. Folding "off" into
+`0` — the original shape — means switching off has to WRITE 0 over the level, so
+switching back on can only restore the default and a customised 0.35 does not
+survive an off/on round trip. That is unnoticeable while the only way to change
+either is to hand-edit `config.toml`, and unacceptable once a Settings row and a
+palette command make the round trip one keystroke each. `UnfocusedDimLevel()` is the
+clamped level IGNORING the switch (what the dialog and palette DISPLAY, so a
+switched-off dim still shows what it will return to); `UnfocusedDimAmount()` is
+`Level` gated on the switch (what the renderer blends with). Nothing but `Level`
+may be shown to the user, and nothing but `Amount` may reach the blend.
+
+**`unfocused_dim_enabled` MUST default true**, because it is absent from every
+`config.toml` written before it existed and `Save` writes the whole struct. `Load`
+starts from `Default()` and lets the decoder overwrite only the keys the file names,
+which is the only reason the upgrade does not silently switch the dim off for every
+install that has ever saved a config. A legacy `unfocused_dim = 0` still reads as off
+through `Level`. Both pinned in `internal/config/unfocuseddim_test.go`.
+
+**Both front doors act on the effective STATE, never on the flag.** `flag on, level 0`
+is a real config on disk, so `toggleUnfocusedDim` (shared by the Settings row and
+`palActDimToggle` — one implementation, because "switching on must also supply a
+level" is a rule two copies drift apart on) tests `Amount() > 0` and, when switching
+on, writes `DefaultUnfocusedDim` if the level is unusable. A naive `Enabled =
+!Enabled` passes six of the eight toggle cases and is wrong exclusively for configs
+that already exist. The Settings row's `get` reports `on`/`off` from `Amount()` for
+the same reason the Desktop-notifications row reports registration state.
+
+**The palette's level presets switch the dim ON as well as setting it**
+(`setUnfocusedDimLevel`); the Settings level row deliberately does NOT. In the
+palette a preset is the user's whole expressed intent and storing a level that never
+renders is a command with no observable effect; in the dialog the toggle sits
+directly above and owns the switch, so a level edit that flipped it would make the
+dim impossible to keep off. `palActDimLevel` resolves its `arg` against
+`dimLevelPresets` rather than parsing it — same rule as `palActSwitchProject`
+resolving an ID. The "current" marker is gated on the dim actually being on, not on
+the level matching, and is plain text rather than a glyph because that column
+otherwise holds keybindings and is measured for width.
+
+Neither row sets `relayout`: `dimFrame` rewrites SGR parameters only, so every cell
+width is identical by construction and there is no geometry to recompute. Both apply
+LIVE (next repaint) because `View()` reads the config every frame — the
+`settingsFields` doc comment's "next launch" covers the rows read once at startup.
+
+**The settable domain is bounded BELOW by the display resolution, not by
+visibility.** `minDimLevel` = 10^-`dimLevelDecimals`, and `parseDimLevel` refuses
+anything under it. Any level below 0.005 renders as `"0.00"` while the toggle row
+still reads `on` — the amount is genuinely non-zero, so the state-based `get` cannot
+catch it — and the row could never commit what it displayed, since typing back
+`"0.00"` parses to 0 and is refused. It is reachable by TYPING, not just by
+hand-editing config.toml: `ParseFloat` takes `"0.001"` and `"5e-324"`. Tying the
+floor to the format's precision makes the accepted domain exactly the set of values
+the row can display and the user can type back.
+
+**The level row's unchanged-check compares FORMATTED values.** `get` renders the
+clamped, rounded level while the stored field may hold neither, and
+`handleSettingsKey` pre-fills the editor from `get` — so with a hand-edited
+`unfocused_dim = 1.5` the row shows `0.90` and a RAW compare made Enter-Enter store
+0.9 and set `configChanged`. `config.Save` writes the whole file, so merely
+inspecting the row rewrote `config.toml` and any comments in it. Every other row in
+that table is immune because its get/set round-trip is exact (`Itoa`, string); this
+is the only one where it is not.
+
+**`benchModelContent` builds its `Model` with `config.Default()`, and that is
+load-bearing.** A `Model` literal's zero `Config` answers "off" to every
+config-GATED renderer feature, silently — adding `UnfocusedDimEnabled` beside the
+level `BenchmarkFrame_UnfocusedDim` already set made that benchmark measure an
+UNDIMMED frame. Benchmarks assert nothing, so nothing failed; the dim simply read as
+free. That benchmark now checks `UnfocusedDimAmount() > 0` and `b.Fatal`s, which is
+what turns the next such regression from silence into a message. Expect the dim to
+cost ~+93 allocs on a 41-tab frame; a delta near zero means the gate is off again.
 
 **Why the composed frame and not the cells.** Chrome and pane content are already
 flattened into one string at that point, so a single SGR rewrite dims both — the

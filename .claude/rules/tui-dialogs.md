@@ -216,3 +216,86 @@ the dialog share `MsgResourceReportReq`, so a status-bar poll can be in flight
 when the dialog opens; the response echoes `WithTrees` so the client can tell
 them apart. Inferring it from a populated field instead would mistake an empty
 tree for a treeless answer.
+
+**quil's own processes report their OWN cpu and rss** (`MsgClientStat`,
+`ClientStatPayload`, `QuilProcInfo.CPUPct/RSSBytes/StatAgeMS`). The QUIL section
+carried no resource columns at all, so the dialog could show a pane's `claude`
+burning CPU while saying nothing about the TUI that was burning more than any of
+them — measured on one workspace: TUI 703 MB / 11.5% of a core against the
+daemon's 65 MB / 1.0%. This is the same self-report rule the hello already
+follows, for the same two reasons: the daemon cannot see a remote client's
+process table at all, and a process measuring ITSELF needs none of `Sampler`'s
+PID-reuse machinery, since it cannot be recycled while doing the measuring
+(`proctree.SelfSampler`). The push is started inside `sendClientHello` rather
+than at its four call sites, so a new durable dial cannot acquire a
+reports-identity-but-never-stats bug.
+
+**`MsgClientStat` is in `handleMessage`'s high-frequency log skip list, and that
+is not optional.** Every durable client pushes one every `statPushInterval` for
+its whole life, so a TUI plus ~30 bridges emits several lines a second forever —
+enough to churn `quild.log` through its rotation and bury the lifecycle lines it
+exists for. It is also the FIRST float any process can hand the daemon and have
+retained, which is why `sanitizeClientStat` converts a non-finite reading to
+unknown at the handler: `encoding/json` refuses NaN and ±Inf, and the value is
+copied into every tree-bearing response, so a retained one would fail that
+response for EVERY client and park the dialog on "Loading…" — the same denial
+`handleClientHello` truncates its strings to prevent, reached through a number.
+**The guard is belt-and-braces, not the only line of defence, and the comment
+must not claim otherwise**: JSON has no literal for NaN or infinity, so
+`json.Unmarshal` already rejects them and `handleClientStat` drops the message
+before the guard runs. It is the CODEC that makes the hazard unreachable, so the
+guard is what survives a future codec that does not.
+
+**The stat push uses `SendDroppable`, never `Send`, and that is a correctness
+requirement rather than a preference.** `ipc.Client.Send` is not a plain enqueue
+— when the must-deliver queue stays full past `clientSendTimeout` it CLOSES the
+connection. The TUI survives that (it redials, and the close feeds the redial
+ladder), but the MCP bridge dials once in `connectToDaemon` and has no redial
+anywhere, so a background push that closed its conn would fail every later tool
+call for the life of that process, silently and between calls — a diagnostic
+row's message taking down the link it rode in on. `SendDroppable` routes to the
+droppable queue, which drops one frame and returns nil, while still reporting
+`ErrSendOverflow` for a conn that is genuinely gone — so the loop can still tell
+"lost one" from "stop pushing". A dropped stat ages out and renders unknown,
+which this feature already treats as the honest answer.
+
+**Aggregates are computed ONCE per response, in `applyResourceReport`, never in
+`procRows`.** The tab and Total rows used to hardcode `UnknownCPU` because
+walking every pane's subtree on render makes cost scale with the workspace
+rather than the viewport — `procRows` re-runs on every keystroke while the
+dialog is open. Doing the walk when the 5 s response arrives (`computePaneCPU` →
+`processesState.paneCPU`) removes the objection without removing the number, and
+is also why a COLLAPSED pane can now show its subtotal; `paneRowCPU` and
+`procTreeCPU` were deleted as dead once the totals were precomputed.
+
+**The QUIL section carries its own total, and the workspace one is labelled
+`All panes`.** Quil's own processes are what this section exists to account for,
+so "what is quil costing me" must not require adding a TUI, a daemon and thirty
+bridges by hand — and the two sums have to be visibly separate, because the
+workspace figure covers panes and deliberately excludes quil's own processes. A
+bare `Total` under a second section of numbers reads as the dialog's total. The
+quil total is suppressed entirely when nothing reported: a column of em dashes
+summing to an em dash is noise.
+
+**The stale marker is `△` (U+25B3), and the codepoint is constrained rather
+than aesthetic.** It renders inside a FIXED-WIDTH column, so it is bound by the
+rule `sidebar.go` states for its own glyph vocabulary: no emoji presentation
+available. This column shipped with `⚠` (U+26A0) — the exact glyph that file
+names as "the single emoji-capable glyph in this set, and the only one that
+misbehaved" — and it reproduced there too: the terminal font-falls-back to a
+colour emoji face, draws about two cells and advances one, so the space between
+the marker and the word vanished. `U+FE0E` is not the fix (tried and rejected in
+`sidebar.go`, since it depends on the terminal honouring a variation selector).
+The OUTLINE triangle specifically: the filled `▲` is the sidebar's "blocked,
+needs you" glyph, and a stale binary is not that.
+`TestProcStaleFlag_UsesNoEmojiCapableCodepoint` pins it.
+
+**A partial sum renders `~7%`, not `7%`** (`cpuAggregate`,
+`formatCPUAggregate`). Summing only the known values while some children are
+unsampled produces a real number that is nonetheless an understatement, and the
+two facts have to reach the screen together — a bare figure repeats, one level
+up, exactly the overclaim `formatCPU`'s em dash exists to prevent. An entirely
+unsampled set stays unknown rather than partial: there is no number to qualify,
+so the marker never appears beside an em dash. Same rule one field over:
+`formatQuilMem` treats a zero RSS as unknown, because a live process cannot
+occupy zero bytes.

@@ -16,6 +16,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/artyomsv/quil/internal/changelog"
 	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/debugserver"
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/logger"
 	"github.com/artyomsv/quil/internal/notify"
@@ -365,6 +366,30 @@ func launchTUI() {
 			logSink = logWriter
 			defer logWriter.Close()
 		}
+	}
+
+	// Optional pprof listener. Off unless QUIL_PPROF is set, and loopback-only
+	// when it is — see internal/debugserver for why that is enforced rather
+	// than documented.
+	//
+	// Deliberately AFTER the subcommand dispatch above, so `quil mcp` never
+	// reaches it: the daemon passes its environment to PTY children, so a
+	// QUIL_PPROF exported for this TUI is inherited by every pane and by the
+	// bridge each AI pane spawns. Thirty bridges racing for one port would
+	// leave twenty-nine bind failures in the log and tell us nothing — the
+	// bridges are idle, and the TUI is the process worth profiling.
+	//
+	// Reported through log, not stdout: this runs before Bubble Tea takes the
+	// screen, and a stray Println corrupts the first frame.
+	if dbg, err := debugserver.StartFromEnv(os.Getenv(debugserver.EnvVar)); err != nil {
+		log.Printf("pprof: %v", err)
+	} else if dbg != nil {
+		log.Printf("pprof listening on http://%s/debug/pprof/", dbg.Addr())
+		defer func() {
+			if err := dbg.Close(); err != nil {
+				log.Printf("pprof: close: %v", err)
+			}
+		}()
 	}
 
 	// Panic recovery — write to log before crashing

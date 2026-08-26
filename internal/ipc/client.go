@@ -93,6 +93,19 @@ func (c *Client) Send(msg *Message) error {
 	return err
 }
 
+// SendDroppable queues a frame that may be dropped instead of closing the link.
+//
+// Send closes the connection when the must-deliver queue stays full past
+// clientSendTimeout. That is right for anything whose loss would desynchronise
+// the session, and wrong for periodic telemetry — see Conn.SendDroppable. The
+// MCP bridge is why this exists rather than being a style preference: it dials
+// once and never redials, so a background push that closed its conn would kill
+// every later tool call for the life of the process, silently and between
+// calls.
+func (c *Client) SendDroppable(msg *Message) error {
+	return c.conn.SendDroppable(msg)
+}
+
 func (c *Client) Receive() (*Message, error) {
 	return c.conn.Receive()
 }

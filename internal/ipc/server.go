@@ -172,6 +172,30 @@ func (c *Conn) Send(msg *Message) error {
 	return c.sendFrame(frame)
 }
 
+// SendDroppable queues a frame that may be DROPPED rather than close the conn.
+//
+// The counterpart to Send for periodic telemetry, where losing one frame is
+// cheaper than losing the connection. Send routes through the must-deliver
+// queue whose full-buffer policy is "this peer is wedged, close it" — correct
+// for state and responses, wrong for a heartbeat: a client pushing its own cpu
+// and rss every few seconds would take its own link down over a message whose
+// only consumer is a diagnostic row, and the daemon already renders a missing
+// report as unknown, which is the honest answer.
+//
+// Still reports ErrSendOverflow for a conn that is already closed or
+// overflowed, so a caller looping on this can tell "dropped one" (nil) from
+// "the link is gone" (error) and stop.
+func (c *Conn) SendDroppable(msg *Message) error {
+	if c.closed.Load() || c.overflow.Load() {
+		return ErrSendOverflow
+	}
+	frame, err := EncodeFrame(msg)
+	if err != nil {
+		return err
+	}
+	return c.enqueue(frame, true)
+}
+
 // sendFrame queues a must-deliver frame. Retained for Send and the existing
 // tests that exercise the critical-overflow → close path. It is a thin wrapper
 // over enqueue with droppable=false.

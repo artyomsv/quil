@@ -54,3 +54,6 @@ Thumbs.db
 
 # Benchmark result files (./scripts/dev.sh bench)
 /bench/
+
+# Fetched pprof profiles (scripts/pprof.sh)
+/.pprof/

@@ -376,18 +376,22 @@ func TestApplyKillProcessResp_ShowsRefusalReason(t *testing.T) {
 	}
 }
 
-func TestProcTreeCPU_UnknownWhenNothingSampled(t *testing.T) {
+func TestAggregateTree_UnknownWhenNothingSampled(t *testing.T) {
 	tree := &ipc.ProcNode{
 		PID: 1, CPUPct: proctree.UnknownCPU,
 		Children: []ipc.ProcNode{{PID: 2, CPUPct: proctree.UnknownCPU}},
 	}
-	if got := procTreeCPU(tree); got != proctree.UnknownCPU {
-		t.Errorf("procTreeCPU = %v, want unknown — a pane whose processes have "+
+	agg := aggregateTree(tree)
+	if got := agg.pct(); got != proctree.UnknownCPU {
+		t.Errorf("aggregate pct = %v, want unknown — a pane whose processes have "+
 			"not been sampled twice must not read as idle", got)
+	}
+	if agg.partial() {
+		t.Error("an entirely unsampled set reported partial; there is no number to qualify")
 	}
 }
 
-func TestProcTreeCPU_SumsKnownValues(t *testing.T) {
+func TestAggregateTree_SumsKnownValues(t *testing.T) {
 	tree := &ipc.ProcNode{
 		PID: 1, CPUPct: 2,
 		Children: []ipc.ProcNode{
@@ -395,7 +399,12 @@ func TestProcTreeCPU_SumsKnownValues(t *testing.T) {
 			{PID: 3, CPUPct: proctree.UnknownCPU},
 		},
 	}
-	if got := procTreeCPU(tree); got != 38 {
-		t.Errorf("procTreeCPU = %v, want 38 (unknown children contribute nothing)", got)
+	agg := aggregateTree(tree)
+	if got := agg.pct(); got != 38 {
+		t.Errorf("aggregate pct = %v, want 38 (unknown children contribute nothing)", got)
+	}
+	if !agg.partial() {
+		t.Error("a sum with an unsampled child is an understatement and must be " +
+			"marked partial, or it claims a completeness it does not have")
 	}
 }

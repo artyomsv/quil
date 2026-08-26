@@ -334,6 +334,57 @@ Takes effect on the next launch.
 
 Debug builds attach to the production `~/.quil/` daemon and emit verbose logging. Don't use them as your daily driver — they're noisy.
 
+## Profile a running quil or quild
+
+When quil itself is slow or holding more memory than you expect, `QUIL_PPROF`
+turns on Go's pprof profiler for one process. Nothing listens unless the
+variable is set — no port, no goroutine, no cost.
+
+```bash
+QUIL_PPROF=6060 quil          # the TUI
+QUIL_PPROF=6061 quild         # the daemon needs its OWN port
+```
+
+Start `quild` **before** the TUI when profiling both. The TUI auto-starts the
+daemon and passes its environment down, so a daemon inherited from
+`QUIL_PPROF=6060 quil` tries the same port and logs `address already in use`.
+That is harmless — profiling never stops a daemon starting — but you get no
+daemon profile.
+
+Then fetch one:
+
+```bash
+./scripts/pprof.sh 6060 heap          # what is holding memory
+./scripts/pprof.sh 6060 profile 30    # what is burning CPU, sampled for 30s
+./scripts/pprof.sh 6060 goroutine     # goroutines, and anything leaking them
+```
+
+`scripts/pprof.sh` saves the profile under `.pprof/` and renders the top
+entries. `scripts/pprof-view.sh <profile> <view>` re-examines a saved one
+(`top`, `tree`, `traces`, `list <regex>`, `peek <regex>`) without re-sampling —
+worth using, because a CPU profile costs 30 seconds and perturbs the process you
+are measuring. Both run `go tool pprof` inside Docker, so no local Go toolchain
+is needed, but Docker must be running.
+
+The port is checked against the log line the process writes at startup
+(`pprof listening on http://127.0.0.1:6060/debug/pprof/`) — grep `quil.log` or
+`quild.log` for `pprof` if you lose track of it.
+
+**Loopback only, enforced rather than documented.** A bare port becomes
+`127.0.0.1:<port>`; an explicit non-loopback address is refused with an error
+instead of being bound, and hostnames are never resolved.
+
+**Not authenticated.** Loopback is a machine boundary, not a user boundary: while
+the port is open, any account on that machine can read the profiles. That is
+weaker than every other quil interface — the IPC socket is mode `0600` — and no
+equivalent restriction exists for a loopback TCP socket. Profiles do not contain
+terminal buffer contents (Go's heap profile records allocation call stacks and
+sizes, not memory), but `/debug/pprof/cmdline` exposes the full command line,
+which for `quil --remote` includes the destination host, and
+`/debug/pprof/goroutine?debug=2` exposes stack traces with absolute source
+paths. Set `QUIL_PPROF` for the length of an investigation on a machine you
+share, not permanently in a shell profile.
+
 ## Quil hangs, or tabs don't reopen after a restart
 
 Symptoms: the TUI freezes (no pane output, keys ignored), or after quitting and relaunching, `quil` connects but shows an empty workspace with no tabs.

@@ -633,6 +633,14 @@ func redialRemote(cfgOf func() *config.Config, dest string) tui.RedialFunc {
 			// the loop keeps retrying.
 			return nil, markPermanentLinkFailure(cause, link)
 		}
+		// Re-announce, exactly as redialLocal does. The daemon keys identity on
+		// the CONN, so a reconnected TUI arrives anonymous: it drops out of the
+		// process dialog's QUIL section, is counted past the age gate as a
+		// client predating the feature, and — since the stat push rides the
+		// same helper — never reports its cpu or rss again for the rest of the
+		// session. Remote is the case the self-reporting design exists for,
+		// because the daemon cannot see this machine's process table at all.
+		sendClientHello(client, helloRoleTUI)
 		return client, nil
 	}
 }

@@ -70,46 +70,79 @@ func sendClientHello(client *ipc.Client, role string) {
 
 // statPushInterval matches the daemon's proc-collector tick, so a client's
 // report and the daemon's own enumeration describe roughly the same window.
-const statPushInterval = 5 * time.Second
+//
+// A var rather than a const so tests can drive the loop without spending five
+// seconds per tick — the same reason clientSendTimeout is one.
+var statPushInterval = 5 * time.Second
+
+// statSender is the narrow slice of *ipc.Client this file needs.
+//
+// Declared at the consumer, and deliberately exposing only the DROPPABLE send:
+// a stat must never be able to reach the must-deliver path, and a one-method
+// interface makes that structural rather than a rule someone has to remember.
+type statSender interface {
+	SendDroppable(*ipc.Message) error
+}
+
+// sampleSelfStat reads this process's own cpu and rss.
+//
+// Unknown unless proven otherwise: zero CPU renders as "0%" and claims the
+// process is idle, which is the wrong claim in a dialog opened to find
+// something that spins.
+func sampleSelfStat(sampler *proctree.SelfSampler, now time.Time) ipc.ClientStatPayload {
+	p := ipc.ClientStatPayload{CPUPct: proctree.UnknownCPU}
+	if pct, ok := sampler.Percent(now); ok {
+		p.CPUPct = pct
+	}
+	self := os.Getpid()
+	if m := memreport.ProcRSSBatch([]int{self}); m != nil {
+		p.RSSBytes = m[self]
+	}
+	return p
+}
 
 // startClientStatReports pushes this process's own cpu and rss on a tick.
 //
 // Best effort, like the hello: an older daemon drops the unknown message type,
-// and a send failure ends the loop rather than retrying. That exit is the
-// reconnect story — a redial calls sendClientHello again and starts a fresh
-// loop, while this one's next Send fails on the dead conn and returns. Retrying
-// here instead would leave one goroutine per reconnect pushing at a socket
-// nobody reads.
+// and a send failure ends the loop rather than retrying.
 //
-// The first tick always reports an unknown CPU: a rate needs two readings. RSS
-// is valid immediately, so a fresh process shows its memory and an em dash for
-// cpu until the tick after.
-func startClientStatReports(client *ipc.Client) {
+// The send is DROPPABLE, and that is load-bearing rather than tidy. Client.Send
+// closes the connection when the must-deliver queue stays full past
+// clientSendTimeout — survivable for the TUI, which redials, but the MCP bridge
+// dials once in connectToDaemon and never redials, so a background push on that
+// path would close the bridge's conn and fail every later tool call for the
+// life of the process, with nothing in flight to surface the error. A dropped
+// stat costs an em dash for one tick instead.
+//
+// The error exit is still the reconnect story: SendDroppable reports
+// ErrSendOverflow for a conn that is genuinely closed (as opposed to merely
+// full), and a redial calls sendClientHello again and starts a fresh loop.
+// Retrying here would leave one goroutine per reconnect pushing at a dead
+// socket.
+//
+// One loop per CLIENT, not per process: every caller is handed a freshly
+// dialled client, so calling this twice on the same one would double the push
+// rate with nothing to notice it.
+func startClientStatReports(client statSender) {
 	if client == nil {
 		return
 	}
 	go func() {
 		sampler := proctree.NewSelfSampler()
+		// Primed here so the FIRST tick carries a real percentage. A rate needs
+		// two readings, and without this the reading at +5 s is the sampler's
+		// first, leaving cpu unknown until +10 s.
+		sampler.Percent(time.Now())
+
 		t := time.NewTicker(statPushInterval)
 		defer t.Stop()
 
 		for range t.C {
-			// Unknown unless proven otherwise. Zero would render as "0%" and
-			// claim this process is idle.
-			p := ipc.ClientStatPayload{CPUPct: proctree.UnknownCPU}
-			if pct, ok := sampler.Percent(time.Now()); ok {
-				p.CPUPct = pct
-			}
-			self := os.Getpid()
-			if m := memreport.ProcRSSBatch([]int{self}); m != nil {
-				p.RSSBytes = m[self]
-			}
-
-			msg, err := ipc.NewMessage(ipc.MsgClientStat, p)
+			msg, err := ipc.NewMessage(ipc.MsgClientStat, sampleSelfStat(sampler, time.Now()))
 			if err != nil {
 				continue
 			}
-			if err := client.Send(msg); err != nil {
+			if err := client.SendDroppable(msg); err != nil {
 				return
 			}
 		}

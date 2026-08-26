@@ -726,12 +726,17 @@ func truncateField(s string, n int) string {
 
 // sanitizeClientStat makes a self-reported stat safe to RETAIN and re-encode.
 //
-// The one real hazard is a non-finite float. encoding/json refuses to marshal
-// NaN and ±Inf, and this value is copied into every tree-bearing response — so
-// a single client reporting one would make the whole response fail to marshal
-// for EVERY client, leaving the dialog on "Loading…" and freezing the
-// status-bar total. That is the same denial handleClientHello truncates its
+// The hazard it guards is a non-finite float: this value is copied into every
+// tree-bearing response, and encoding/json refuses to marshal NaN or ±Inf, so
+// retaining one would fail the whole response for EVERY client and leave the
+// dialog on "Loading…" — the same denial handleClientHello truncates its
 // strings to prevent, reached through a number instead.
+//
+// Note that today's decoder already closes that door: JSON has no literal for
+// NaN or infinity, so json.Unmarshal rejects them and handleClientStat drops
+// the message before this is reached. This is kept as belt-and-braces rather
+// than as the only line of defence — it costs two comparisons, and it is the
+// codec, not the field, that makes the hazard unreachable.
 //
 // A non-finite value becomes UnknownCPU rather than being clamped: there is no
 // honest percentage to recover from it, and the em dash already means exactly

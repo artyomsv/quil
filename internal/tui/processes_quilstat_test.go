@@ -144,3 +144,46 @@ func TestRenderProcRow_QuilRowFitsNarrowBudgets(t *testing.T) {
 		}
 	}
 }
+
+// Fitting the budget is not enough: the binary column has to survive it.
+//
+// "quil.exe.old.3" is the string this whole section exists to surface — a
+// bridge still executing a binary an in-place update renamed aside. Adding the
+// MEM and CPU columns is exactly the kind of change that squeezes it out, and
+// the overflow test above cannot see that happen because a truncated row is
+// still a correctly-sized row.
+func TestQuilRow_BinaryColumnSurvivesAnEightyColumnTerminal(t *testing.T) {
+	const renamed = "quil.exe.old.3"
+
+	// An 80-column terminal: the dialog clamps to 78, leaving 72 inner cells.
+	for _, inner := range []int{72, dialogInnerWidth(200, processesDialogWidth)} {
+		line := renderProcRow(procRow{
+			kind:    procRowQuil,
+			label:   "bridge",
+			pid:     56356,
+			version: "1.63.4",
+			uptime:  45 * time.Hour,
+			exeName: renamed,
+			cpu:     11.5,
+			rss:     703 << 20,
+			statAge: time.Second,
+		}, false, inner)
+
+		if !strings.Contains(line, renamed) {
+			t.Errorf("inner=%d truncated the binary name: %q\n"+
+				"a renamed binary is the one thing this section must always show",
+				inner, line)
+		}
+	}
+}
+
+// The role column has to hold its own widest line, or the stale marker and the
+// role collide. Measured in CELLS, because the marker is non-ASCII.
+func TestQuilNameCol_HoldsTheWidestRoleLine(t *testing.T) {
+	// The shape renderProcRow builds for a stale process.
+	widest := "  ⚠ stale " + "daemon"
+	if w := lipgloss.Width(widest); w > quilNameCol {
+		t.Errorf("widest role line %q is %d cells, exceeding quilNameCol=%d",
+			widest, w, quilNameCol)
+	}
+}

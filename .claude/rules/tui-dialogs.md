@@ -235,11 +235,29 @@ is not optional.** Every durable client pushes one every `statPushInterval` for
 its whole life, so a TUI plus ~30 bridges emits several lines a second forever —
 enough to churn `quild.log` through its rotation and bury the lifecycle lines it
 exists for. It is also the FIRST float any process can hand the daemon and have
-retained: `encoding/json` refuses NaN and ±Inf, and the value is copied into
-every tree-bearing response, so `sanitizeClientStat` converts a non-finite
-reading to unknown at the handler. One bad client would otherwise park the
-dialog on "Loading…" for every client — the same denial `handleClientHello`
-truncates its strings to prevent, reached through a number.
+retained, which is why `sanitizeClientStat` converts a non-finite reading to
+unknown at the handler: `encoding/json` refuses NaN and ±Inf, and the value is
+copied into every tree-bearing response, so a retained one would fail that
+response for EVERY client and park the dialog on "Loading…" — the same denial
+`handleClientHello` truncates its strings to prevent, reached through a number.
+**The guard is belt-and-braces, not the only line of defence, and the comment
+must not claim otherwise**: JSON has no literal for NaN or infinity, so
+`json.Unmarshal` already rejects them and `handleClientStat` drops the message
+before the guard runs. It is the CODEC that makes the hazard unreachable, so the
+guard is what survives a future codec that does not.
+
+**The stat push uses `SendDroppable`, never `Send`, and that is a correctness
+requirement rather than a preference.** `ipc.Client.Send` is not a plain enqueue
+— when the must-deliver queue stays full past `clientSendTimeout` it CLOSES the
+connection. The TUI survives that (it redials, and the close feeds the redial
+ladder), but the MCP bridge dials once in `connectToDaemon` and has no redial
+anywhere, so a background push that closed its conn would fail every later tool
+call for the life of that process, silently and between calls — a diagnostic
+row's message taking down the link it rode in on. `SendDroppable` routes to the
+droppable queue, which drops one frame and returns nil, while still reporting
+`ErrSendOverflow` for a conn that is genuinely gone — so the loop can still tell
+"lost one" from "stop pushing". A dropped stat ages out and renders unknown,
+which this feature already treats as the honest answer.
 
 **Aggregates are computed ONCE per response, in `applyResourceReport`, never in
 `procRows`.** The tab and Total rows used to hardcode `UnknownCPU` because

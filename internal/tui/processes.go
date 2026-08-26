@@ -1029,12 +1029,41 @@ func procLine(name, mem, cpu string, pid int, flag string, inner int) string {
 	return truncateToWidth(line, inner)
 }
 
-// quilNameCol is the role column's width in the quil section.
+// Quil-section column widths.
 //
-// Fixed and narrow because the roles are "tui", "daemon" and "bridge"; the
-// space that buys goes to the binary name, which has to fit
-// "quil.exe.old.3" — the whole reason the column exists.
-const quilNameCol = 22
+// quilNameCol is the role column. Fixed and narrow because the roles are "tui",
+// "daemon" and "bridge"; the widest line it must hold is the indent plus a
+// stale marker plus the longest role ("  ⚠ stale daemon"), and the space that
+// buys goes to the binary name.
+//
+// quilMemCol and quilCPUCol are DELIBERATELY narrower than the workspace
+// section's procColMem/procColCPU. Adding two columns to this row cut the
+// binary column from 37 cells to 19 at the dialog's own width, and from 23 to 5
+// on an 80-column terminal — where "quil.exe.old.3" stopped fitting entirely.
+// That string is the whole reason the section exists (a bridge still executing
+// a binary an in-place update renamed aside), so the space comes out of the
+// columns that do not need it: a memory figure is at most "703.2 MB" and a
+// percentage at most "~100%".
+//
+// quilVersionCol/quilUptimeCol are aliases rather than reuses of the workspace
+// constants, so a reader can see which column each width belongs to.
+// The version and uptime columns are sized to their real contents rather than
+// inherited from the workspace section: a version is "1.63.4" and an uptime is
+// "1d 21h" or "45m", so the cells the workspace layout gives them were slack
+// that the binary column needed.
+const (
+	quilNameCol    = 18
+	quilMemCol     = 9
+	quilCPUCol     = 6
+	quilVersionCol = 8
+	quilUptimeCol  = 7
+)
+
+// quilFixedCols is every fixed cell in a quil row, including the two-space gap
+// before the binary name. Named so the width test and procQuilLine cannot drift
+// apart.
+const quilFixedCols = quilNameCol + quilMemCol + quilCPUCol +
+	quilVersionCol + quilUptimeCol + procColPID + 2
 
 // procStatStaleAfter is how old a self-reported stat may be before the dialog
 // stops showing it.
@@ -1088,15 +1117,15 @@ func formatQuilMem(rss uint64, age time.Duration) string {
 // so the two only coincide at one specific terminal width. Each section carries
 // its own header row for that reason.
 func procQuilLine(role, mem, cpu, version, uptime, pid, binary string, inner int) string {
-	binW := inner - quilNameCol - procColMem - procColCPU - procColMem - procColCPU - procColPID - 2
+	binW := inner - quilFixedCols
 	if binW < 4 {
 		binW = 4
 	}
 	line := padCell(role, quilNameCol) +
-		padCellRight(mem, procColMem) +
-		padCellRight(cpu, procColCPU) +
-		padCellRight(version, procColMem) +
-		padCellRight(uptime, procColCPU) +
+		padCellRight(mem, quilMemCol) +
+		padCellRight(cpu, quilCPUCol) +
+		padCellRight(version, quilVersionCol) +
+		padCellRight(uptime, quilUptimeCol) +
 		padCellRight(pid, procColPID) +
 		"  " + padCell(binary, binW)
 	return truncateToWidth(line, inner)
@@ -1138,7 +1167,10 @@ func formatCPU(pct float64) string {
 // to qualify — so the marker never appears next to an em dash.
 func formatCPUAggregate(pct float64, partial bool) string {
 	s := formatCPU(pct)
-	if !partial || pct < 0 {
+	// The marker qualifies a NUMBER. Where formatCPU returned a symbol instead
+	// — an em dash for unknown, "!" for a value past the display ceiling —
+	// there is nothing to qualify, and "~!" would mean nothing at all.
+	if !partial || pct < 0 || pct > cpuDisplayCeiling {
 		return s
 	}
 	return "~" + s

@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -134,6 +135,99 @@ func TestDaemon_ClientStatRoundTrip(t *testing.T) {
 	if mine.StatAgeMS > 10_000 {
 		t.Errorf("StatAgeMS = %d, implausibly large for a stat sent moments ago",
 			mine.StatAgeMS)
+	}
+}
+
+// The daemon's own row is assembled differently from every client row: it is
+// not a hello, so it never touches the registry, and handleResourceReportReq
+// appends it from procReport.SelfStat() directly. That assembly step is the one
+// place in "quil reports itself" that no unit test reaches — mutating the
+// SelfStat() call away leaves the whole package green.
+func TestDaemon_OwnRowCarriesItsSelfMeasurement(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	tmp := t.TempDir()
+	t.Setenv("QUIL_HOME", tmp)
+
+	cfg := config.Default()
+	d := daemon.New(cfg)
+	if err := d.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { d.Stop() })
+
+	sockPath := filepath.Join(tmp, "quild.sock")
+	var conn net.Conn
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		c, err := net.Dial("unix", sockPath)
+		if err == nil {
+			conn = c
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if conn == nil {
+		t.Fatalf("socket %s never became connectable", sockPath)
+	}
+	defer conn.Close()
+
+	reqPayload, _ := json.Marshal(ipc.ResourceReportReqPayload{WithTrees: true})
+
+	// The FIRST tree request starts the collector, whose first pass has nothing
+	// to delta against — so the daemon's own CPU is legitimately unknown until a
+	// later pass. RSS needs no baseline and must be present immediately, so that
+	// is what this asserts on; asserting a percentage would be a timing race
+	// against procTickInterval.
+	var own *ipc.QuilProcInfo
+	for attempt := 0; attempt < 3 && own == nil; attempt++ {
+		id := "own" + strconv.Itoa(attempt)
+		if err := ipc.WriteMessage(conn, &ipc.Message{
+			Type: ipc.MsgResourceReportReq, ID: id, Payload: reqPayload,
+		}); err != nil {
+			t.Fatalf("write req: %v", err)
+		}
+
+		_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		var out ipc.ResourceReportRespPayload
+		for {
+			m, err := ipc.ReadMessage(conn)
+			if err != nil {
+				t.Fatalf("read: %v", err)
+			}
+			if m.ID != id {
+				continue
+			}
+			if err := json.Unmarshal(m.Payload, &out); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			break
+		}
+		for i := range out.Quil {
+			if out.Quil[i].Role == "daemon" {
+				row := out.Quil[i]
+				if row.RSSBytes > 0 {
+					own = &row
+				}
+				break
+			}
+		}
+		if own == nil {
+			time.Sleep(300 * time.Millisecond)
+		}
+	}
+
+	if own == nil {
+		t.Fatal("the daemon's own row never carried an RSS reading — " +
+			"handleResourceReportReq is not consulting procReport.SelfStat()")
+	}
+	if own.PID != os.Getpid() {
+		t.Errorf("daemon row PID = %d, want this process %d", own.PID, os.Getpid())
+	}
+	if own.CPUPct == 0 {
+		t.Error("daemon row CPUPct is exactly 0 — the unknown marker is negative, " +
+			"and a literal zero renders as \"0%\" claiming the daemon is idle")
 	}
 }
 

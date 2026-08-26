@@ -33,6 +33,41 @@ func waitSendLoopCount(want int, timeout time.Duration) int {
 	}
 }
 
+// waitSendLoopQuiescent polls until the live count stops moving, and returns it.
+//
+// The baseline below is a DIFFERENCE, so it is only meaningful if nothing else
+// is in flight when it is taken. An earlier test's conn can still be unwinding
+// when this one starts — Close is asynchronous on several paths — and a
+// baseline captured mid-unwind is unreachable by construction: the departing
+// goroutine (-1) cancels the one this test starts (+1), the count never reaches
+// baseline+1, and the assertion burns its whole timeout before failing with a
+// count that looks impossible.
+//
+// Observed in CI as "sendLoop did not start: count=2, want 3" on a commit whose
+// diff added no goroutines, and not reproducible locally at -count=10 under
+// -race, which is the signature of a slower runner giving the previous
+// goroutine longer to unwind. Waiting for quiescence rather than sampling once
+// removes the assumption instead of widening a timeout around it.
+func waitSendLoopQuiescent(timeout time.Duration) int {
+	const stableSamples = 3
+	deadline := time.Now().Add(timeout)
+	last, stable := -1, 0
+	for {
+		got := sendLoopCount()
+		if got == last {
+			if stable++; stable >= stableSamples {
+				return got
+			}
+		} else {
+			last, stable = got, 1
+		}
+		if time.Now().After(deadline) {
+			return got
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 // TestSendLoop_ExitsOnWriteError verifies that when the underlying socket
 // Write fails (peer disconnected mid-send, kernel detected RST, etc.),
 // sendLoop terminates cleanly without leaking the goroutine. The CR finding
@@ -48,7 +83,7 @@ func waitSendLoopCount(want int, timeout time.Duration) int {
 // the count is stable here, and the poll-until-deadline makes the check
 // timing-independent.
 func TestSendLoop_ExitsOnWriteError(t *testing.T) {
-	baseline := sendLoopCount()
+	baseline := waitSendLoopQuiescent(5 * time.Second)
 
 	local, remote := net.Pipe()
 	c := newConn(local)

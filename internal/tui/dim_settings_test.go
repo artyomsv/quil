@@ -222,6 +222,13 @@ func TestSettingsKey_UnfocusedDimLevelRefusesUnusableValues(t *testing.T) {
 		{"empty", ""},
 		{"NaN survives an ordinary clamp, so it is refused by name", "NaN"},
 		{"an infinity", "Inf"},
+		// Below minDimLevel. These are the values that pass every ordinary
+		// range check and then render as "0.00" — the row would display a
+		// level it could never commit again, while the toggle above it still
+		// read "on". Reachable by typing, since ParseFloat takes them.
+		{"a level the row could not display", "0.001"},
+		{"just under the display resolution", "0.004"},
+		{"a subnormal", "5e-324"},
 	}
 
 	for _, tt := range tests {
@@ -269,20 +276,90 @@ func TestSettingsKey_UnfocusedDimLevelAcceptsUsableValues(t *testing.T) {
 	}
 }
 
-// TestSettingsKey_UnfocusedDimLevelEditsWhileSwitchedOff pins that setting a
-// level does NOT secretly switch the dim on. The level row and the toggle row
-// own different keys; a level edit that flipped the switch would make the
-// toggle impossible to keep off.
-func TestSettingsKey_UnfocusedDimLevelEditsWhileSwitchedOff(t *testing.T) {
+// TestSettingsKey_UnfocusedDimLevelNeverWritesTheFlag pins that setting a
+// level does NOT write the switch. The level row and the toggle row own
+// different keys; a level edit that flipped the flag would make the toggle
+// impossible to keep off.
+//
+// The legacy case is the one worth stating: there the flag is ALREADY on and
+// only the level said "off", so a level edit moves the effective STATE from
+// off to on without the row having touched the flag at all. That is the
+// intended reading of "set a level" — the assertion is about the key, not
+// about the state.
+func TestSettingsKey_UnfocusedDimLevelNeverWritesTheFlag(t *testing.T) {
 	t.Parallel()
-	cfg := config.Default()
-	cfg.UI.UnfocusedDimEnabled = false
-	got := commitSettingsEdit(t, Model{cfg: cfg}, "Unfocused dim level", "0.4")
-
-	if got.cfg.UI.UnfocusedDimEnabled {
-		t.Error("editing the level switched the dim on — the toggle owns that")
+	tests := []struct {
+		name        string
+		enabled     bool
+		level       float64
+		wantEnabled bool
+		wantDimming bool
+	}{
+		{"switched off stays switched off", false, config.DefaultUnfocusedDim, false, false},
+		{"a legacy zero level keeps its already-on flag and starts dimming", true, 0, true, true},
 	}
-	if got.cfg.UI.UnfocusedDim != 0.4 {
-		t.Errorf("UnfocusedDim = %v, want the typed 0.4", got.cfg.UI.UnfocusedDim)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := config.Default()
+			cfg.UI.UnfocusedDimEnabled = tt.enabled
+			cfg.UI.UnfocusedDim = tt.level
+			got := commitSettingsEdit(t, Model{cfg: cfg}, "Unfocused dim level", "0.4")
+
+			if got.cfg.UI.UnfocusedDimEnabled != tt.wantEnabled {
+				t.Errorf("UnfocusedDimEnabled = %v, want %v — the level row must not write the flag",
+					got.cfg.UI.UnfocusedDimEnabled, tt.wantEnabled)
+			}
+			if got.cfg.UI.UnfocusedDim != 0.4 {
+				t.Errorf("UnfocusedDim = %v, want the typed 0.4", got.cfg.UI.UnfocusedDim)
+			}
+			if dimming := got.cfg.UI.UnfocusedDimAmount() > 0; dimming != tt.wantDimming {
+				t.Errorf("dimming = %v, want %v", dimming, tt.wantDimming)
+			}
+		})
+	}
+}
+
+// TestSettingsKey_UnfocusedDimLevelAcceptingWhatItShowsWritesNothing is the
+// no-op guard, and it compares FORMATTED values for a reason the raw compare
+// could not satisfy: `get` renders the CLAMPED, rounded level while the stored
+// field may hold neither.
+//
+// Opening the row pre-fills the editor from `get`, so Enter-Enter — inspecting
+// the row and accepting exactly what it already displayed — must change
+// nothing and must not flag the config dirty. config.Save writes the whole
+// file, so a spurious dirty flag rewrites config.toml (and any comments in it)
+// for a user who only looked.
+func TestSettingsKey_UnfocusedDimLevelAcceptingWhatItShowsWritesNothing(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		level float64
+	}{
+		{"the shipped default", config.DefaultUnfocusedDim},
+		{"an exactly-representable custom level", 0.35},
+		// Stored raw values that `get` does not render back verbatim. A raw
+		// compare writes on both of these.
+		{"a hand-edited level past the clamp", 1.5},
+		{"a hand-edited level finer than the display resolution", 0.355},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := config.Default()
+			cfg.UI.UnfocusedDim = tt.level
+			m := Model{cfg: cfg}
+
+			shown := settingsFields()[settingsIdx(t, "Unfocused dim level")].get(&m)
+			got := commitSettingsEdit(t, m, "Unfocused dim level", shown)
+
+			if got.cfg.UI.UnfocusedDim != tt.level {
+				t.Errorf("UnfocusedDim = %v after accepting the displayed %q, want the untouched %v",
+					got.cfg.UI.UnfocusedDim, shown, tt.level)
+			}
+			if got.configChanged {
+				t.Errorf("configChanged set by accepting the displayed %q — looking at the row would rewrite config.toml", shown)
+			}
+		})
 	}
 }

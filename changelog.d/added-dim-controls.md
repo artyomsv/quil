@@ -6,7 +6,7 @@ headline: Turn the unfocused dim on or off without editing a file
   relaunch. There are two new front doors, and both take effect on the next repaint:
 
   - **`F1` → Settings** gained two rows. **Unfocused dim** switches the effect on and
-    off, and **Unfocused dim level** takes a number between `0` and `0.9` — higher
+    off, and **Unfocused dim level** takes a number from `0.01` to `0.9` — higher
     fades further toward your terminal's background.
   - **The command palette** (`Alt+Shift+P`, search for "dim") offers the same switch
     plus three ready-made levels: subtle (`0.30`), normal (`0.60`) and strong

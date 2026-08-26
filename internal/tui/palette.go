@@ -285,8 +285,9 @@ func formatPaneNav(tabIdx, paneIdx int, p *PaneModel, project string) string {
 // buildPaletteCommands assembles the full command registry, rebuilt on every
 // open so dynamic entries (tabs/panes) and per-active-pane gates/labels are
 // current. Entries are grouped under dim section headers (Go to pane / Tabs /
-// Pane / System), in that order — navigation first (jumping to a pane/tab is the
-// most common reason to open the palette), then pane actions, then system.
+// Projects / Pane / System / Appearance), in that order — navigation first
+// (jumping to a pane/tab is the most common reason to open the palette), then
+// pane actions, then system, then the display settings reached least often.
 // Headers are shown only while browsing (empty query) and skipped by the cursor.
 func (m *Model) buildPaletteCommands() []paletteCommand {
 	home, _ := os.UserHomeDir()
@@ -546,9 +547,18 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 		// switched off no preset is in effect, whatever the stored level
 		// happens to equal, and marking one would report a state that is not
 		// rendering.
-		detail := ""
-		if dimming && m.cfg.UI.UnfocusedDimLevel() == p.level {
-			detail = "current"
+		//
+		// While it is off the same column says what Enter will ALSO do. A
+		// preset switches the dim on (see setUnfocusedDimLevel), and without
+		// this the rows are indistinguishable from ones that would store a
+		// level and leave the frame undimmed. The two never collide: no
+		// preset is current while the dim is off.
+		detail := dimPresetTurnsOnDetail
+		if dimming {
+			detail = ""
+			if m.cfg.UI.UnfocusedDimLevel() == p.level {
+				detail = dimPresetCurrentDetail
+			}
 		}
 		cmds = append(cmds, paletteCommand{
 			action:   palActDimLevel,

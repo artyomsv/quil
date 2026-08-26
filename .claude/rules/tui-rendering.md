@@ -2,6 +2,7 @@
 description: Pane rendering, tab bar, mouse handling, selection, scrollback, and the keybinding action registry. Load when touching pane/tab rendering, mouse routing, the selection layer, or internal/keymap.
 paths:
   - "**/internal/tui/pane*.go"
+  - "**/internal/tui/dim*.go"
   - "**/internal/tui/tab.go"
   - "**/internal/tui/layout.go"
   - "**/internal/tui/model.go"
@@ -155,6 +156,34 @@ Neither row sets `relayout`: `dimFrame` rewrites SGR parameters only, so every c
 width is identical by construction and there is no geometry to recompute. Both apply
 LIVE (next repaint) because `View()` reads the config every frame — the
 `settingsFields` doc comment's "next launch" covers the rows read once at startup.
+
+**The settable domain is bounded BELOW by the display resolution, not by
+visibility.** `minDimLevel` = 10^-`dimLevelDecimals`, and `parseDimLevel` refuses
+anything under it. Any level below 0.005 renders as `"0.00"` while the toggle row
+still reads `on` — the amount is genuinely non-zero, so the state-based `get` cannot
+catch it — and the row could never commit what it displayed, since typing back
+`"0.00"` parses to 0 and is refused. It is reachable by TYPING, not just by
+hand-editing config.toml: `ParseFloat` takes `"0.001"` and `"5e-324"`. Tying the
+floor to the format's precision makes the accepted domain exactly the set of values
+the row can display and the user can type back.
+
+**The level row's unchanged-check compares FORMATTED values.** `get` renders the
+clamped, rounded level while the stored field may hold neither, and
+`handleSettingsKey` pre-fills the editor from `get` — so with a hand-edited
+`unfocused_dim = 1.5` the row shows `0.90` and a RAW compare made Enter-Enter store
+0.9 and set `configChanged`. `config.Save` writes the whole file, so merely
+inspecting the row rewrote `config.toml` and any comments in it. Every other row in
+that table is immune because its get/set round-trip is exact (`Itoa`, string); this
+is the only one where it is not.
+
+**`benchModelContent` builds its `Model` with `config.Default()`, and that is
+load-bearing.** A `Model` literal's zero `Config` answers "off" to every
+config-GATED renderer feature, silently — adding `UnfocusedDimEnabled` beside the
+level `BenchmarkFrame_UnfocusedDim` already set made that benchmark measure an
+UNDIMMED frame. Benchmarks assert nothing, so nothing failed; the dim simply read as
+free. That benchmark now checks `UnfocusedDimAmount() > 0` and `b.Fatal`s, which is
+what turns the next such regression from silence into a message. Expect the dim to
+cost ~+93 allocs on a 41-tab frame; a delta near zero means the gate is off again.
 
 **Why the composed frame and not the cells.** Chrome and pane content are already
 flattened into one string at that point, so a single SGR rewrite dims both — the

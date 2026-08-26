@@ -379,13 +379,30 @@ func settingsFields() []settingsField {
 			label: "Unfocused dim level",
 			get:   func(m *Model) string { return formatDimLevel(m.cfg.UI.UnfocusedDimLevel()) },
 			set: func(m *Model, v string) {
-				// Refused rather than clamped, and 0 refused rather than
-				// treated as off: see parseDimLevel. Editing the level
-				// deliberately does NOT switch the dim on — the two rows own
+				// Refused rather than clamped, and a level below minDimLevel
+				// refused rather than treated as off: see parseDimLevel.
+				//
+				// Editing the level never touches the FLAG — the two rows own
 				// different keys, and a level edit that flipped the switch
-				// would make the toggle impossible to keep off.
+				// would make the toggle impossible to keep off. It can still
+				// move the effective STATE: over a legacy `unfocused_dim = 0`
+				// the flag is already on, so setting a usable level makes the
+				// row above read "on". That is the intended reading of "set a
+				// level" and not a second switch.
+				//
+				// The unchanged-check compares FORMATTED values, not raw
+				// ones. `get` renders the CLAMPED, rounded level while the
+				// stored field may hold neither: with a hand-edited
+				// `unfocused_dim = 1.5` the row displays "0.90", and a raw
+				// compare made Enter-Enter — inspecting the row and accepting
+				// what it already showed — store 0.9 and flag the config
+				// dirty. config.Save writes the whole file, so merely looking
+				// at this row rewrote config.toml and any comments in it.
+				// Every other row in this table is immune because its get/set
+				// round-trip is exact; this is the only one where they are
+				// not.
 				n, ok := parseDimLevel(v)
-				if !ok || n == m.cfg.UI.UnfocusedDim {
+				if !ok || formatDimLevel(n) == formatDimLevel(m.cfg.UI.UnfocusedDimLevel()) {
 					return
 				}
 				m.cfg.UI.UnfocusedDim = n

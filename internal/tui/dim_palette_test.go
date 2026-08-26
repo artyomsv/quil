@@ -115,9 +115,12 @@ func TestPalette_DimLevelMarksTheCurrentPreset(t *testing.T) {
 	m.cfg.UI.UnfocusedDimEnabled = true
 	m.cfg.UI.UnfocusedDim = dimLevelPresets[1].level
 
+	// Matched against the marker constant, not against "non-empty": the same
+	// column also carries the turns-dim-on hint, so a non-empty test would
+	// count that as "current" and pass while the row said something else.
 	marked := 0
 	for _, c := range paletteRows(m, palActDimLevel) {
-		if c.detail == "" {
+		if c.detail != dimPresetCurrentDetail {
 			continue
 		}
 		marked++
@@ -133,17 +136,22 @@ func TestPalette_DimLevelMarksTheCurrentPreset(t *testing.T) {
 	// is stored.
 	m.cfg.UI.UnfocusedDim = 0.37
 	for _, c := range paletteRows(m, palActDimLevel) {
-		if c.detail != "" {
+		if c.detail == dimPresetCurrentDetail {
 			t.Errorf("row %q marked current while the level is a custom 0.37", c.arg)
 		}
 	}
 
-	// Switched off, no preset is in effect however the level reads.
+	// Switched off, no preset is in effect however the level reads — and the
+	// column says what Enter will also do instead.
 	m.cfg.UI.UnfocusedDim = dimLevelPresets[1].level
 	m.cfg.UI.UnfocusedDimEnabled = false
 	for _, c := range paletteRows(m, palActDimLevel) {
-		if c.detail != "" {
+		if c.detail == dimPresetCurrentDetail {
 			t.Errorf("row %q marked current while the dim is switched off", c.arg)
+		}
+		if c.detail != dimPresetTurnsOnDetail {
+			t.Errorf("row %q detail = %q while the dim is off, want %q — nothing would tell the user Enter also switches it on",
+				c.arg, c.detail, dimPresetTurnsOnDetail)
 		}
 	}
 }
@@ -244,22 +252,32 @@ func TestDimLevelPresets_AreWithinTheSettableRange(t *testing.T) {
 	// accept. A preset outside parseDimLevel's range would be settable from
 	// the palette and refused in the dialog, which is the two front doors
 	// disagreeing about what is legal.
-	seen := map[float64]bool{}
+	seen := map[string]bool{}
 	for _, p := range dimLevelPresets {
-		if _, ok := parseDimLevel(formatDimLevel(p.level)); !ok {
-			t.Errorf("preset %s (%v) is not a value the Settings row would accept", p.name, p.level)
+		// IDENTITY, not merely ok. buildPaletteCommands marks the current
+		// preset by exact float equality against this literal, while dispatch
+		// matches the FORMATTED arg — so a preset that does not survive
+		// format/parse unchanged (0.125 renders "0.12") silently loses its
+		// marker the first time the level is re-accepted through Settings.
+		if got, ok := parseDimLevel(formatDimLevel(p.level)); !ok || got != p.level {
+			t.Errorf("preset %s (%v) does not survive format/parse: got %v ok=%v", p.name, p.level, got, ok)
 		}
-		if p.level > config.MaxUnfocusedDim || p.level <= 0 {
-			t.Errorf("preset %s = %v, outside (0, %v]", p.name, p.level, config.MaxUnfocusedDim)
+		if p.level > config.MaxUnfocusedDim || p.level < minDimLevel {
+			t.Errorf("preset %s = %v, outside [%v, %v]", p.name, p.level, minDimLevel, config.MaxUnfocusedDim)
 		}
-		if seen[p.level] {
-			t.Errorf("preset %s duplicates level %v", p.name, p.level)
+		// Keyed on the FORMATTED value: dispatch resolves a row by string
+		// compare, so two presets that merely render alike leave the second
+		// one permanently undispatchable — its Enter falls through to a
+		// silent no-op.
+		if key := formatDimLevel(p.level); seen[key] {
+			t.Errorf("preset %s renders as %q, which another preset already uses", p.name, key)
+		} else {
+			seen[key] = true
 		}
-		seen[p.level] = true
 	}
 	// The shipped default must be reachable without typing a number, or a
 	// user who moved off it from the palette cannot get back from the palette.
-	if !seen[config.DefaultUnfocusedDim] {
+	if !seen[formatDimLevel(config.DefaultUnfocusedDim)] {
 		t.Errorf("no preset offers the default level %v", config.DefaultUnfocusedDim)
 	}
 }

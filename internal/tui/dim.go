@@ -395,8 +395,29 @@ func dimExtended(lead int, fields []string, p dimPalette) (consumed int, out str
 // MaxUnfocusedDim is 0.9, and a third digit changes nothing a human can see
 // against a blended background.
 func formatDimLevel(level float64) string {
-	return strconv.FormatFloat(level, 'f', 2, 64)
+	return strconv.FormatFloat(level, 'f', dimLevelDecimals, 64)
 }
+
+// dimLevelDecimals is the display resolution of a dim level, and — through
+// minDimLevel — the resolution of the whole settable domain.
+const dimLevelDecimals = 2
+
+// minDimLevel is the smallest level parseDimLevel accepts. It is not a
+// judgement about what is VISIBLE; it is the smallest value formatDimLevel can
+// render distinctly, which makes the accepted domain exactly the set of values
+// the Settings row can display and the user can type back.
+//
+// Without it the two Settings rows contradict each other. Any level below
+// 0.005 renders as "0.00" while the toggle row above still reads "on" (the
+// amount is genuinely non-zero, so the state-based `get` cannot catch it) and
+// the frame does not visibly dim — the exact lie that row's own comment says
+// it exists to prevent. It is also reachable from the dialog rather than only
+// by hand-editing config.toml, since ParseFloat accepts "0.001" and "5e-324"
+// happily, and the row could then never commit the value it was displaying:
+// typing back the "0.00" it shows parses to 0 and is refused.
+//
+// Tied to dimLevelDecimals so the two cannot drift.
+var minDimLevel = math.Pow(10, -dimLevelDecimals)
 
 // parseDimLevel accepts a typed dim level, reporting ok only for a value the
 // renderer would honour verbatim.
@@ -412,9 +433,14 @@ func formatDimLevel(level float64) string {
 // an ordinary range check passes it straight through. It is reachable from
 // this row because the editor accepts any single characters the user types,
 // and ParseFloat reads "NaN" happily.
+//
+// The floor is minDimLevel, not 0 — see there for why a level the row cannot
+// display is worse than one it refuses. It subsumes the `<= 0` case (and
+// -Inf), but a value below the floor is a different mistake from a negative
+// one, so both bounds are still named.
 func parseDimLevel(s string) (float64, bool) {
 	n, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
-	if err != nil || math.IsNaN(n) || n <= 0 || n > config.MaxUnfocusedDim {
+	if err != nil || math.IsNaN(n) || n <= 0 || n < minDimLevel || n > config.MaxUnfocusedDim {
 		return 0, false
 	}
 	return n, true
@@ -449,6 +475,15 @@ type dimLevelPreset struct {
 	name  string
 	level float64
 }
+
+// The two things a preset row's detail column can say. Named constants because
+// the renderer writes them and the tests match on them — a literal in both
+// places makes a typo look like a state bug. Plain text rather than a glyph:
+// that column otherwise holds keybindings and is measured for width.
+const (
+	dimPresetCurrentDetail = "current"
+	dimPresetTurnsOnDetail = "turns dim on"
+)
 
 // dimLevelPresets are the levels the command palette offers. Three, not a
 // continuum: the palette is a list of commands with no value-input mode, and
@@ -485,12 +520,14 @@ func dimToggleLabel(dimming bool) string {
 
 // setUnfocusedDimLevel applies a palette preset.
 //
-// It switches the dim ON as well as storing the level, deliberately: picking
-// "strong" while the dim is off would otherwise store a number that never
+// It writes the FLAG as well as the level, deliberately: picking "strong"
+// while the dim is switched off would otherwise store a number that never
 // renders, and a command whose only effect is invisible is indistinguishable
-// from one that failed. The Settings level row does NOT do this — there the
-// toggle sits directly above and owns the switch, so a level edit that flipped
-// it would make the dim impossible to keep off.
+// from one that failed. The Settings level row does NOT write the flag —
+// there the toggle sits directly above and owns it, so a level edit that
+// flipped it would make the dim impossible to keep off. (Both can still move
+// the effective STATE over a legacy `unfocused_dim = 0`, where the flag is
+// already on and only the level was saying "off".)
 func (m *Model) setUnfocusedDimLevel(level float64) {
 	m.cfg.UI.UnfocusedDimEnabled = true
 	m.cfg.UI.UnfocusedDim = level

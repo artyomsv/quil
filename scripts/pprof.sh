@@ -49,6 +49,18 @@ case "$PROFILE" in
     ;;
 esac
 
+# Validated before it reaches $(( )) below. Bash arithmetic expansion evaluates
+# command substitution inside array subscripts, so an unchecked value makes
+# `pprof.sh 6060 profile 'a[$(...)]'` execute it. Today the caller is the person
+# running the script, but that stops being true the moment this is wrapped by a
+# make target or a CI job keyed on anything external.
+case "$SECONDS_ARG" in
+  ''|*[!0-9]*)
+    echo "seconds must be a whole number of seconds, got '$SECONDS_ARG'" >&2
+    exit 2
+    ;;
+esac
+
 URL="http://127.0.0.1:${PORT}/debug/pprof/${PROFILE}"
 if [ "$PROFILE" = "profile" ]; then
   URL="${URL}?seconds=${SECONDS_ARG}"

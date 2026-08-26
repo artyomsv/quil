@@ -3,6 +3,8 @@ package debugserver
 import (
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -43,11 +45,11 @@ func TestAddr_BarePortBindsLoopback(t *testing.T) {
 // to the network, and ":6060" is the form that does it by accident.
 func TestAddr_RejectsNonLoopbackHost(t *testing.T) {
 	for _, v := range []string{
-		":6060",             // empty host = all interfaces
-		"0.0.0.0:6060",      // explicit all interfaces
-		"192.168.6.12:6060", // a real LAN address
-		"[::]:6060",         // all interfaces, v6
-		"example.com:6060",  // a name we refuse to resolve
+		":6060",            // empty host = all interfaces
+		"0.0.0.0:6060",     // explicit all interfaces
+		"203.0.113.1:6060", // a routable address (RFC 5737 documentation range)
+		"[::]:6060",        // all interfaces, v6
+		"example.com:6060", // a name we refuse to resolve
 	} {
 		if _, ok, err := Addr(v); err == nil {
 			t.Errorf("Addr(%q) error = nil (ok=%v), want a refusal — this binds a "+
@@ -66,6 +68,21 @@ func TestAddr_AcceptsExplicitLoopback(t *testing.T) {
 		if _, ok, err := Addr(v); err != nil || !ok {
 			t.Errorf("Addr(%q) = ok %v, err %v; want ok with no error", v, ok, err)
 		}
+	}
+}
+
+// "localhost" is the one accepted host that is a NAME, and handing a name to
+// net.Listen would let the resolver pick the bind address — the exact thing
+// this package refuses to do for every other hostname. Rewriting it here makes
+// the "never resolved" guarantee structural rather than conventional.
+func TestAddr_RewritesLocalhostToALiteral(t *testing.T) {
+	addr, ok, err := Addr("localhost:6060")
+	if err != nil || !ok {
+		t.Fatalf("Addr(\"localhost:6060\") = ok %v, err %v; want ok", ok, err)
+	}
+	if addr != "127.0.0.1:6060" {
+		t.Errorf("Addr = %q, want %q — a name reaching net.Listen lets the "+
+			"resolver choose the bind address", addr, "127.0.0.1:6060")
 	}
 }
 
@@ -183,6 +200,41 @@ func TestServer_AddrReportsBoundPort(t *testing.T) {
 	}
 	if !strings.HasPrefix(s.Addr(), "127.0.0.1:") {
 		t.Errorf("Addr() = %q, want a loopback address", s.Addr())
+	}
+}
+
+// net/http/pprof applies no ceiling to ?seconds= and its own deadline helper is
+// inert while WriteTimeout is zero, which it deliberately is here. Unclamped,
+// one local request could pin the CPU profiler indefinitely — and because
+// runtime/pprof refuses a second concurrent profile, that denies the operator
+// the profiling this package exists to provide.
+func TestClampSeconds_BoundsAnOverlongWindow(t *testing.T) {
+	var got string
+	h := clampSeconds(func(_ http.ResponseWriter, r *http.Request) {
+		got = r.FormValue("seconds")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/debug/pprof/profile?seconds=100000000", nil)
+	h(httptest.NewRecorder(), req)
+
+	if got != strconv.Itoa(maxProfileSeconds) {
+		t.Errorf("seconds = %q, want %d", got, maxProfileSeconds)
+	}
+}
+
+func TestClampSeconds_LeavesAcceptableValuesAlone(t *testing.T) {
+	for _, raw := range []string{"30", "1", "300", "", "abc", "-5", "0"} {
+		var got string
+		h := clampSeconds(func(_ http.ResponseWriter, r *http.Request) {
+			got = r.FormValue("seconds")
+		})
+		req := httptest.NewRequest(http.MethodGet, "/debug/pprof/profile?seconds="+raw, nil)
+		h(httptest.NewRecorder(), req)
+
+		if got != raw {
+			t.Errorf("seconds=%q was rewritten to %q; only an over-long window "+
+				"should change (pprof handles its own default for the rest)", raw, got)
+		}
 	}
 }
 

@@ -7,12 +7,29 @@
 // process. That decision is what every guard in this file exists to pay for:
 //
 //   - Nothing listens unless QUIL_PPROF is set. No goroutine, no port, no cost.
-//   - The address is refused unless it is LITERALLY loopback. A hostname is not
-//     resolved, because a name that resolves to a LAN address today can resolve
-//     somewhere else tomorrow, and the failure mode is a heap dump — which
-//     carries live buffer contents — served to the network.
+//   - The address is refused unless it is LITERALLY loopback, and "localhost"
+//     is rewritten to 127.0.0.1 before it reaches net.Listen so the resolver
+//     never chooses the bind address. A hostname is not resolved, because a
+//     name that resolves to a LAN address today can resolve somewhere else
+//     tomorrow.
 //   - The handlers are registered on a PRIVATE mux, so they are reachable only
 //     through this listener.
+//   - seconds= is clamped, so one request cannot pin the profiler indefinitely.
+//
+// What a profile actually exposes, since the guards are only worth what the
+// threat model is: Go's heap profile is a SAMPLED ALLOCATION profile — call
+// stacks and byte counts, not memory contents — so it does not carry terminal
+// buffer contents, and net/http/pprof exposes no endpoint that dumps heap
+// memory. What does leak is narrower and real: /debug/pprof/cmdline is the full
+// argv, which for `quil --remote` names the destination host, and
+// /debug/pprof/goroutine?debug=2 is every goroutine's stack with pointer words
+// and absolute source paths.
+//
+// The listener is UNAUTHENTICATED, and loopback is a machine boundary rather
+// than a user boundary — quil's IPC socket is chmod 0600, and there is no
+// equivalent for a loopback TCP socket on either platform. So while the port is
+// open, any local account can read the above. That is the reason to set
+// QUIL_PPROF for an investigation rather than leaving it in a shell profile.
 //
 // The private mux does not make http.DefaultServeMux pristine: importing
 // net/http/pprof runs its init, which registers the same handlers there, and
@@ -34,12 +51,6 @@ import (
 
 // EnvVar names the environment variable that enables profiling.
 const EnvVar = "QUIL_PPROF"
-
-// shutdownGrace bounds how long Close waits for in-flight requests. A CPU
-// profile runs for its full ?seconds= window, so this is deliberately short:
-// quil is exiting, and a half-written profile is a better outcome than a
-// process that will not quit.
-const shutdownGrace = 100 * time.Millisecond
 
 // Addr resolves a QUIL_PPROF value into a listen address.
 //
@@ -74,9 +85,19 @@ func Addr(v string) (string, bool, error) {
 	}
 	if !isLoopbackHost(host) {
 		return "", false, fmt.Errorf(
-			"%s=%q would bind %q, which is not loopback; profiles expose heap and "+
+			"%s=%q would bind %q, which is not loopback; profiles expose argv and "+
 				"goroutine state, so only 127.0.0.1, ::1 or localhost are accepted",
 			EnvVar, v, host)
+	}
+	// Resolve "localhost" HERE rather than letting net.Listen do it. It is the
+	// one accepted host that is a name, and passing a name to net.Listen hands
+	// the bind-address choice to the resolver — which is exactly what this
+	// package's refusal to resolve hostnames exists to prevent. A container
+	// image with no localhost entry in /etc/hosts and a search domain in
+	// resolv.conf is enough for that lookup to leave the machine. Rewriting it
+	// makes the invariant structural instead of documented.
+	if host == "localhost" {
+		host = "127.0.0.1"
 	}
 	return net.JoinHostPort(host, port), true, nil
 }
@@ -98,12 +119,53 @@ func isLoopbackHost(host string) bool {
 func checkPort(p string) error {
 	n, err := strconv.Atoi(p)
 	if err != nil {
-		return fmt.Errorf("%s port %q is not a number", EnvVar, p)
+		// Names the convention as well as the failure: a colon-less value is
+		// read as a bare port, so QUIL_PPROF=127.0.0.1 lands here complaining
+		// about a "port" the user thinks they supplied as a host.
+		return fmt.Errorf("%s port %q is not a number "+
+			"(a value with no colon is treated as a port; use host:port)", EnvVar, p)
 	}
 	if n < 0 || n > 65535 {
 		return fmt.Errorf("%s port %d is out of range 0-65535", EnvVar, n)
 	}
 	return nil
+}
+
+// maxProfileSeconds bounds the ?seconds= window on the two sampling endpoints.
+//
+// net/http/pprof applies NO ceiling of its own: it parses seconds, and calls
+// configureWriteDeadline, which is a no-op unless Server.WriteTimeout is set —
+// and WriteTimeout is deliberately zero here. So without this clamp any local
+// process could ask for a profile lasting years. That is worse than a slow
+// request: runtime/pprof refuses a SECOND concurrent CPU profile, so one held
+// request denies the operator the profiling this package exists to provide,
+// while the profiler's own overhead runs on the process being investigated.
+//
+// Five minutes is far beyond the documented workflow (30 s) and far short of
+// indefinite.
+const maxProfileSeconds = 300
+
+// clampSeconds bounds ?seconds= before delegating to a pprof handler.
+//
+// Rewrites the value rather than rejecting the request, so an over-long ask
+// still returns a usable profile instead of an error the caller has to
+// interpret. An absent, malformed or non-positive value is left alone for
+// pprof's own default (30 s) to handle.
+func clampSeconds(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if raw := r.FormValue("seconds"); raw != "" {
+			if sec, err := strconv.ParseInt(raw, 10, 64); err == nil && sec > maxProfileSeconds {
+				q := r.URL.Query()
+				q.Set("seconds", strconv.Itoa(maxProfileSeconds))
+				r.URL.RawQuery = q.Encode()
+				// FormValue cached the parsed form on the first call above, so
+				// the rewritten URL alone would not be seen. Clearing it forces
+				// a re-parse from the updated RawQuery.
+				r.Form = nil
+			}
+		}
+		next(w, r)
+	}
 }
 
 // Server is a running pprof listener.
@@ -152,15 +214,27 @@ func Start(addr string) (*Server, error) {
 	// entries because they are not runtime/pprof profile names.
 	mux.HandleFunc("/debug/pprof/", pprof.Index)
 	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
-	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/profile", clampSeconds(pprof.Profile))
 	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
-	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	mux.HandleFunc("/debug/pprof/trace", clampSeconds(pprof.Trace))
 
 	s := &Server{
 		ln: ln,
-		// No timeouts: a CPU profile is a long-lived request by design, and a
-		// ReadTimeout here would cut off exactly the profile worth taking.
-		srv: &http.Server{Handler: mux},
+		srv: &http.Server{
+			Handler: mux,
+			// WriteTimeout stays ZERO deliberately: a CPU profile is a
+			// long-lived response by design and any write deadline would cut
+			// off exactly the profile worth taking. maxProfileSeconds is what
+			// bounds that duration instead.
+			//
+			// The other three are set, because none of them limits how long a
+			// RESPONSE may take. Without them a local peer can hold connections
+			// open indefinitely, each pinning a goroutine, on a listener with
+			// no authentication in front of it.
+			ReadHeaderTimeout: 10 * time.Second,
+			IdleTimeout:       60 * time.Second,
+			MaxHeaderBytes:    1 << 16,
+		},
 	}
 	// Serve always returns a non-nil error, and the only one reachable here is
 	// the ErrServerClosed that Close causes deliberately. There is no caller to
@@ -187,16 +261,17 @@ func (s *Server) Close() error {
 	}
 	var err error
 	s.once.Do(func() {
-		// Close runs off-goroutine under a deadline because it waits on active
-		// connections, and a CPU profile holds one open for its whole window.
-		// A profile in flight must not be able to hold up quil's exit.
-		done := make(chan error, 1)
-		go func() { done <- s.srv.Close() }()
-		select {
-		case err = <-done:
-		case <-time.After(shutdownGrace):
-			err = fmt.Errorf("pprof listener did not close within %s", shutdownGrace)
-		}
+		// Close, never Shutdown. http.Server.Close does NOT wait for in-flight
+		// handlers — it closes the listener and every connection immediately,
+		// which cancels request contexts and unblocks the sleep inside a
+		// running CPU profile. That is what makes it safe to call on quil's
+		// exit path with no deadline around it.
+		//
+		// Shutdown is the one that waits, and switching to it for "graceful"
+		// behaviour would block exit for the remainder of any profile window —
+		// up to maxProfileSeconds. A truncated profile is the right trade when
+		// the process is going away.
+		err = s.srv.Close()
 	})
 	return err
 }

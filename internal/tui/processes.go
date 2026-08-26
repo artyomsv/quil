@@ -100,6 +100,10 @@ type procRow struct {
 	depth   int
 	rss     uint64
 	cpu     float64
+	// cpuPartial marks an AGGREGATE summed over a set where at least one
+	// process had no answer. The sum is then an understatement, and rendering
+	// it bare would claim a completeness it does not have.
+	cpuPartial bool
 	// version, uptime and exeName are the quil-section columns. Without them
 	// the section shows a role and a PID, which answers neither question it
 	// exists for — "is this binary current" and "how long has it been up".
@@ -133,6 +137,16 @@ type processesState struct {
 	// scroll is the index of the first rendered row. Without it the dialog
 	// draws every row and overflows the terminal on any real workspace.
 	scroll int
+	// paneCPU is each pane's whole-subtree CPU, computed ONCE when a report
+	// arrives rather than on every render.
+	//
+	// That timing is the entire design. The rows this feeds are re-derived on
+	// every keystroke while the dialog is open, so walking every pane's process
+	// tree there would make render cost scale with the workspace instead of the
+	// viewport — which is why the tab and total rows previously reported
+	// unknown rather than a sum. Doing the walk once per 5 s response removes
+	// the objection without removing the number.
+	paneCPU map[string]cpuAggregate
 	// inFlight and sentAt implement the single-flight and its timeout.
 	inFlight bool
 	sentAt   time.Time
@@ -233,6 +247,9 @@ func (m Model) applyResourceReport(resp ipc.ResourceReportRespPayload) Model {
 		m.proc.resp = &stored
 		m.proc.loading = false
 		m.proc.inFlight = false
+		// Walk the process trees HERE, once per response, rather than in
+		// procRows — which runs on every render.
+		m.proc.paneCPU = computePaneCPU(stored.Panes)
 		rows := m.procRows()
 		if m.proc.cursor >= len(rows) {
 			m.proc.cursor = len(rows) - 1
@@ -286,19 +303,32 @@ func (m Model) procRows() []procRow {
 
 	// --- the workspace ---
 	rows = append(rows, procRow{kind: procRowSectionWorkspace, label: "WORKSPACE"})
-	rows = append(rows, procRow{
-		kind:  procRowTotal,
-		label: "Total",
-		rss:   resp.Total + m.tuiLocalMemTotal(),
-		cpu:   proctree.UnknownCPU,
-	})
 
 	byTab := map[string][]ipc.PaneResourceInfo{}
 	tabTotals := map[string]uint64{}
+	tabCPU := map[string]cpuAggregate{}
+	var allCPU cpuAggregate
 	for _, p := range resp.Panes {
 		byTab[p.TabID] = append(byTab[p.TabID], p)
 		tabTotals[p.TabID] += p.TotalBytes
+		// Reading precomputed per-pane totals, so this loop is O(panes) — the
+		// tree walk already happened in applyResourceReport.
+		agg := m.proc.paneCPU[p.PaneID]
+		merged := tabCPU[p.TabID]
+		merged.merge(agg)
+		tabCPU[p.TabID] = merged
+		allCPU.merge(agg)
 	}
+
+	// Appended after the loop above, because the grand total is what that loop
+	// produces. It still renders directly under the section header.
+	rows = append(rows, procRow{
+		kind:       procRowTotal,
+		label:      "Total",
+		rss:        resp.Total + m.tuiLocalMemTotal(),
+		cpu:        allCPU.pct(),
+		cpuPartial: allCPU.partial(),
+	})
 
 	order, names := m.tabOrderAndNames()
 	seen := map[string]bool{}
@@ -328,7 +358,8 @@ func (m Model) procRows() []procRow {
 			tabID:      tabID,
 			label:      name,
 			rss:        tabTotals[tabID],
-			cpu:        proctree.UnknownCPU,
+			cpu:        tabCPU[tabID].pct(),
+			cpuPartial: tabCPU[tabID].partial(),
 			expandable: true,
 			expanded:   m.proc.expandedTabs[tabID],
 		})
@@ -348,10 +379,12 @@ func (m Model) procRows() []procRow {
 				paneID: p.PaneID,
 				label:  m.paneRowLabel(p.PaneID),
 				rss:    p.TotalBytes + m.tuiLocalMem(p.PaneID),
-				// Only walk the tree for a pane the user has opened. Summing a
-				// collapsed pane's whole subtree on every render makes the cost
-				// independent of what is actually on screen.
-				cpu:        paneRowCPU(p.Tree, expanded),
+				// Read, not walked. The subtree total was computed when the
+				// response arrived, so a collapsed pane can show its subtotal
+				// without making render cost scale with the workspace — the
+				// constraint that previously forced this to report unknown.
+				cpu:        m.proc.paneCPU[p.PaneID].pct(),
+				cpuPartial: m.proc.paneCPU[p.PaneID].partial(),
 				expandable: p.Tree != nil,
 				expanded:   expanded,
 			})
@@ -431,47 +464,69 @@ func clampDepth(d int) int {
 	return d
 }
 
-// paneRowCPU is procTreeCPU for an expanded pane, unknown for a collapsed one.
+// cpuAggregate is a CPU sum plus whether anything in it went unanswered.
 //
-// A collapsed pane's rows are not on screen, so walking its whole subtree to
-// total a number nobody is looking at makes render cost scale with the
-// workspace rather than with the viewport.
-func paneRowCPU(tree *ipc.ProcNode, expanded bool) float64 {
-	if !expanded {
-		return proctree.UnknownCPU
-	}
-	return procTreeCPU(tree)
+// The two fields are not redundant: `known == 0` means there is no number at
+// all, while `unknown > 0` alongside a positive sum means the number is real
+// but an understatement. Those render differently and mean different things.
+type cpuAggregate struct {
+	sum     float64
+	known   int
+	unknown int
 }
 
-// procTreeCPU sums a tree's CPU, or reports unknown when nothing in it has an
-// answer.
-//
-// Summing only the KNOWN values and reporting unknown when there are none keeps
-// the distinction the whole CPU model rests on: a pane whose processes have not
-// been sampled twice yet reads as unknown, not as idle.
-func procTreeCPU(n *ipc.ProcNode) float64 {
-	if n == nil {
+// add folds one process's reading in.
+func (a *cpuAggregate) add(pct float64) {
+	if pct >= 0 {
+		a.sum += pct
+		a.known++
+		return
+	}
+	a.unknown++
+}
+
+// merge folds another aggregate in, for building a tab total from its panes.
+func (a *cpuAggregate) merge(b cpuAggregate) {
+	a.sum += b.sum
+	a.known += b.known
+	a.unknown += b.unknown
+}
+
+// pct returns the sum, or UnknownCPU when nothing in the set had an answer.
+func (a cpuAggregate) pct() float64 {
+	if a.known == 0 {
 		return proctree.UnknownCPU
 	}
-	total, any := 0.0, false
+	return a.sum
+}
+
+// partial reports whether the sum understates the set it covers.
+func (a cpuAggregate) partial() bool { return a.known > 0 && a.unknown > 0 }
+
+// aggregateTree totals one pane's whole process subtree.
+func aggregateTree(n *ipc.ProcNode) cpuAggregate {
+	var a cpuAggregate
 	var walk func(*ipc.ProcNode)
 	walk = func(x *ipc.ProcNode) {
 		if x == nil {
 			return
 		}
-		if x.CPUPct >= 0 {
-			total += x.CPUPct
-			any = true
-		}
+		a.add(x.CPUPct)
 		for i := range x.Children {
 			walk(&x.Children[i])
 		}
 	}
 	walk(n)
-	if !any {
-		return proctree.UnknownCPU
+	return a
+}
+
+// computePaneCPU totals every pane's tree once, for the row builder to read.
+func computePaneCPU(panes []ipc.PaneResourceInfo) map[string]cpuAggregate {
+	out := make(map[string]cpuAggregate, len(panes))
+	for _, p := range panes {
+		out[p.PaneID] = aggregateTree(p.Tree)
 	}
-	return total
+	return out
 }
 
 // procRoleRank orders the quil section: TUI, daemon, then bridges.
@@ -886,7 +941,8 @@ func renderProcRow(row procRow, selected bool, inner int) string {
 	}
 
 	name := indent + marker + sanitizeRemoteText(row.label)
-	return style.Render(procLine(name, memreport.HumanBytes(row.rss), formatCPU(row.cpu), row.pid, row.flag, inner))
+	return style.Render(procLine(name, memreport.HumanBytes(row.rss),
+		formatCPUAggregate(row.cpu, row.cpuPartial), row.pid, row.flag, inner))
 }
 
 // formatUptime renders a duration compactly: 6d 03h, 2h 14m, 12m, 45s.
@@ -1067,6 +1123,25 @@ func formatCPU(pct float64) string {
 		return "!"
 	}
 	return fmt.Sprintf("%.0f%%", pct)
+}
+
+// formatCPUAggregate renders a percentage, marking an incomplete sum.
+//
+// The tilde is the aggregate counterpart of the em dash. A tab total summed
+// over five processes where two have not been sampled twice yet is a REAL
+// number that is nonetheless an understatement, and the two facts have to reach
+// the screen together: "7%" claims the tab uses 7%, "~7%" claims it uses at
+// least that. Rendering the first would repeat, one level up, exactly the
+// overclaim that formatCPU's em dash exists to prevent.
+//
+// An entirely unsampled set is unknown rather than partial — there is no number
+// to qualify — so the marker never appears next to an em dash.
+func formatCPUAggregate(pct float64, partial bool) string {
+	s := formatCPU(pct)
+	if !partial || pct < 0 {
+		return s
+	}
+	return "~" + s
 }
 
 // --- helpers carried over from the memory dialog this replaces ---

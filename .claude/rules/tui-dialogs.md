@@ -216,3 +216,46 @@ the dialog share `MsgResourceReportReq`, so a status-bar poll can be in flight
 when the dialog opens; the response echoes `WithTrees` so the client can tell
 them apart. Inferring it from a populated field instead would mistake an empty
 tree for a treeless answer.
+
+**quil's own processes report their OWN cpu and rss** (`MsgClientStat`,
+`ClientStatPayload`, `QuilProcInfo.CPUPct/RSSBytes/StatAgeMS`). The QUIL section
+carried no resource columns at all, so the dialog could show a pane's `claude`
+burning CPU while saying nothing about the TUI that was burning more than any of
+them — measured on one workspace: TUI 703 MB / 11.5% of a core against the
+daemon's 65 MB / 1.0%. This is the same self-report rule the hello already
+follows, for the same two reasons: the daemon cannot see a remote client's
+process table at all, and a process measuring ITSELF needs none of `Sampler`'s
+PID-reuse machinery, since it cannot be recycled while doing the measuring
+(`proctree.SelfSampler`). The push is started inside `sendClientHello` rather
+than at its four call sites, so a new durable dial cannot acquire a
+reports-identity-but-never-stats bug.
+
+**`MsgClientStat` is in `handleMessage`'s high-frequency log skip list, and that
+is not optional.** Every durable client pushes one every `statPushInterval` for
+its whole life, so a TUI plus ~30 bridges emits several lines a second forever —
+enough to churn `quild.log` through its rotation and bury the lifecycle lines it
+exists for. It is also the FIRST float any process can hand the daemon and have
+retained: `encoding/json` refuses NaN and ±Inf, and the value is copied into
+every tree-bearing response, so `sanitizeClientStat` converts a non-finite
+reading to unknown at the handler. One bad client would otherwise park the
+dialog on "Loading…" for every client — the same denial `handleClientHello`
+truncates its strings to prevent, reached through a number.
+
+**Aggregates are computed ONCE per response, in `applyResourceReport`, never in
+`procRows`.** The tab and Total rows used to hardcode `UnknownCPU` because
+walking every pane's subtree on render makes cost scale with the workspace
+rather than the viewport — `procRows` re-runs on every keystroke while the
+dialog is open. Doing the walk when the 5 s response arrives (`computePaneCPU` →
+`processesState.paneCPU`) removes the objection without removing the number, and
+is also why a COLLAPSED pane can now show its subtotal; `paneRowCPU` and
+`procTreeCPU` were deleted as dead once the totals were precomputed.
+
+**A partial sum renders `~7%`, not `7%`** (`cpuAggregate`,
+`formatCPUAggregate`). Summing only the known values while some children are
+unsampled produces a real number that is nonetheless an understatement, and the
+two facts have to reach the screen together — a bare figure repeats, one level
+up, exactly the overclaim `formatCPU`'s em dash exists to prevent. An entirely
+unsampled set stays unknown rather than partial: there is no number to qualify,
+so the marker never appears beside an em dash. Same rule one field over:
+`formatQuilMem` treats a zero RSS as unknown, because a live process cannot
+occupy zero bytes.

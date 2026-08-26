@@ -11,6 +11,104 @@ version section here and deletes them.
 
 ## [Unreleased]
 
+## [1.66.0] - 2026-08-26
+
+### Added
+- **The unfocused-window dim is now switchable and tunable from inside Quil.** Until
+  now the only way to change it was to hand-edit `unfocused_dim` in `config.toml` and
+  relaunch. There are two new front doors, and both take effect on the next repaint:
+
+  - **`F1` → Settings** gained two rows. **Unfocused dim** switches the effect on and
+    off, and **Unfocused dim level** takes a number from `0.01` to `0.9` — higher
+    fades further toward your terminal's background.
+  - **The command palette** (`Alt+Shift+P`, search for "dim") offers the same switch
+    plus three ready-made levels: subtle (`0.30`), normal (`0.60`) and strong
+    (`0.85`). The level currently in effect is marked.
+
+  Switching the dim off **keeps** your level, so turning it back on returns you to the
+  setting you chose rather than the default.
+
+- **New `[ui]` key: `unfocused_dim_enabled`** (default `true`), the off switch that
+  sits beside the existing `unfocused_dim` level. Existing configurations need no
+  changes — a config file written before this key existed keeps dimming exactly as it
+  did, and one that switched the dim off with `unfocused_dim = 0` stays off.
+- **Both binaries can serve Go pprof profiles on demand.** Set `QUIL_PPROF` to a
+  port before launching, and that process exposes CPU, heap, goroutine and
+  allocation profiles for as long as it runs:
+
+  ```
+  QUIL_PPROF=6060 quil          # the TUI
+  QUIL_PPROF=6061 quild         # the daemon needs its own port
+  ```
+
+  Start `quild` first if you want both — the TUI auto-starts the daemon and
+  passes its environment down, so a daemon that inherits the TUI's port just
+  logs `address already in use`.
+
+  Nothing listens when the variable is unset — no port, no goroutine, no cost.
+  When it is set, the listener binds loopback only and refuses to start on any
+  other address: a bare port number becomes `127.0.0.1:<port>`, and an explicit
+  non-loopback host is rejected with an error rather than bound.
+
+  It is **not authenticated**, and loopback is a machine boundary rather than a
+  user boundary — while the port is open, any account on that machine can read
+  the profiles. Profiles do not contain terminal buffer contents, but the
+  command line (which for `quil --remote` names the destination host) and full
+  goroutine stacks are among them. Set it for an investigation rather than
+  leaving it in a shell profile.
+
+  `scripts/pprof.sh <port> [profile] [seconds]` fetches one and renders it, and
+  `scripts/pprof-view.sh` re-examines a saved profile without re-sampling.
+  `docs/troubleshooting.md` has the full walkthrough.
+- **The process dialog reports quil's own processes, not just the panes'.** The
+  `QUIL` section listed a role, version, uptime, PID and binary for the TUI, the
+  daemon and every MCP bridge — but no resource columns at all. It could show you
+  a pane's `claude` burning CPU while saying nothing about the TUI that was
+  burning more than any of them.
+
+  Each quil process now measures itself and reports it, so the section carries
+  `MEM` and `CPU` alongside the existing columns. Nothing is inferred from the OS
+  process table: a process describes itself over the socket the same way it
+  already reports its version, which is also the only thing that works when the
+  daemon is on another machine.
+
+  The section totals itself, so "what is quil costing me" does not mean adding
+  a TUI, a daemon and thirty bridges by hand. The workspace total below it is
+  now labelled `All panes`, because it covers the panes and deliberately does
+  not include quil's own processes — with both sections showing numbers, a bare
+  `Total` read as the whole dialog's.
+
+  A process that has not reported yet, one whose platform has no per-process CPU
+  counter, and one that has stopped reporting all render as `—`. None of them
+  render as `0%`, which would read as idle — the wrong claim in a dialog you
+  opened to find something that is spinning. A total covering any of them is
+  shown as `~4%`: real, but an understatement.
+- **The workspace section totals CPU instead of showing an em dash.** `Total`
+  and every tab row hardcoded "unknown", and a pane reported nothing while it
+  was collapsed — so on a freshly opened dialog, which starts with everything
+  collapsed, the `CPU` column was empty in every row that had one.
+
+  The per-pane subtree totals are now computed once when each report arrives
+  rather than on every render, which is what previously made summing them too
+  expensive to do at all. A collapsed pane shows its subtotal for the same
+  reason.
+
+  A sum taken over processes that have not all been sampled yet renders as
+  `~7%`. The number is real but an understatement, and a bare `7%` would claim
+  a completeness it does not have.
+
+### Fixed
+- **The process dialog's stale marker renders correctly again.** A quil process
+  running a binary that differs from the daemon's is flagged in the `QUIL`
+  section, and that flag used `⚠` — a codepoint terminals are free to render
+  with a colour emoji face, drawing it about two cells wide while advancing
+  only one. The result overpainted the space after it, so the row read
+  `⚠stale bridge`, and in some terminals every column after it drifted.
+
+  It now uses an outline triangle, which has no emoji presentation to fall back
+  to. The same rule already governs the sidebar's status glyphs, for the same
+  reason.
+
 ## [1.65.0] - 2026-08-25
 
 ### Added

@@ -27,6 +27,18 @@ type SelfSampler struct {
 	prev     time.Duration
 	prevAt   time.Time
 	havePrev bool
+
+	// unsupported latches a platform that has no cumulative counter at all, so
+	// the read is attempted once instead of forever.
+	//
+	// This is a real cost, not hygiene: on Darwin readCPU FORKS ps, and that
+	// platform reports only an instantaneous kernel figure, so every tick paid
+	// a fork to produce an answer it could never use. With a TUI and ~30 MCP
+	// bridges each sampling itself every few seconds, that was several ps
+	// spawns per second, permanently, on a machine where the dialog may never
+	// be opened. A platform cannot grow a CPU counter while the process runs,
+	// so one attempt settles it for the life of the process.
+	unsupported bool
 }
 
 // NewSelfSampler returns a sampler reading this process's own CPU counter.
@@ -42,16 +54,28 @@ func NewSelfSampler() *SelfSampler {
 // ok=false covers: the first call, a platform with no cumulative counter, a
 // failed read, a non-positive elapsed time, and a counter that went backwards.
 // A nil sampler, or one built as a struct literal without a reader, answers
-// unknown rather than panicking. Owners are constructed both ways (the proc
-// collector's tests build it as a literal), and this runs on a tick inside the
-// daemon — a diagnostic that can crash the process it diagnoses is worse than
-// no diagnostic. Same convention as procTreeCPU(nil).
+// unknown rather than panicking.
+//
+// Not defensive padding: this runs on a tick inside the daemon, and a
+// diagnostic that can crash the process it diagnoses is worse than no
+// diagnostic. Every owner in the tree goes through NewSelfSampler today, so the
+// guard should never fire — which is exactly why it must not be the thing
+// keeping a future owner alive. If it ever does fire, the symptom is a
+// permanent em dash, and that is the honest rendering of "this was never
+// measured".
 func (s *SelfSampler) Percent(now time.Time) (float64, bool) {
-	if s == nil || s.read == nil {
+	if s == nil || s.read == nil || s.unsupported {
 		return 0, false
 	}
 	total, ok := s.read()
 	if !ok {
+		// The FIRST failure decides whether this platform has a counter at all.
+		// A later failure is a transient read error — a file that vanished, a
+		// handle that could not be opened — and must not disable sampling for
+		// the life of the process, so only the first one latches.
+		if !s.havePrev && s.prevAt.IsZero() {
+			s.unsupported = true
+		}
 		// Drop the baseline. Keeping it would make the NEXT tick delta across
 		// both windows, and a two-window delta over a one-window elapsed
 		// renders as a spike the process never had.

@@ -229,12 +229,15 @@ func (f fakePaneLister) PaneSources() []memreport.PaneSource { return f.sources 
 // gateCollector builds a collector whose clock the test drives, with the
 // background loop never started — the goroutine is not what is under test here,
 // the deadline arithmetic is.
+// gateCollector builds a collector through the production constructor, so the
+// fields it seeds (the self-sampler, the unknown-CPU starting value) are the
+// ones under test. A struct literal here left selfCPU nil, which made the
+// nil-receiver guard in SelfSampler.Percent load-bearing for a state no
+// production path produces — a test shaping the code rather than checking it.
 func gateCollector(now *time.Time) *procCollector {
-	return &procCollector{
-		lister:  fakePaneLister{},
-		now:     func() time.Time { return *now },
-		sampler: proctree.NewSampler(),
-	}
+	c := newProcCollector(fakePaneLister{}, func([]int) map[int]uint64 { return nil })
+	c.now = func() time.Time { return *now }
+	return c
 }
 
 func TestProcCollector_GateHoldsWhileRenewed(t *testing.T) {

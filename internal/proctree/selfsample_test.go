@@ -113,6 +113,54 @@ func TestSelfSampler_RecoversAfterAFailedRead(t *testing.T) {
 	}
 }
 
+// On a platform with no cumulative counter the read must be attempted ONCE, not
+// forever. Darwin's readCPU forks ps and can never return a cumulative value, so
+// an unlatched sampler paid a fork per tick per process to produce an answer it
+// could never use — several ps spawns a second across a TUI and ~30 bridges.
+func TestSelfSampler_UnsupportedPlatformIsProbedOnlyOnce(t *testing.T) {
+	calls := 0
+	s := &SelfSampler{read: func() (time.Duration, bool) {
+		calls++
+		return 0, false
+	}}
+
+	for i := 0; i < 5; i++ {
+		if _, ok := s.Percent(time.Unix(int64(100+i), 0)); ok {
+			t.Fatalf("tick %d reported ok on a platform with no counter", i)
+		}
+	}
+	if calls != 1 {
+		t.Errorf("read called %d times, want 1 — the platform answer cannot "+
+			"change at runtime, so probing it every tick is pure cost", calls)
+	}
+}
+
+// The latch must fire only on the FIRST read. A failure after a success is a
+// transient error — a file that vanished, a handle that would not open — and
+// must not disable sampling for the life of the process.
+func TestSelfSampler_TransientFailureDoesNotLatchUnsupported(t *testing.T) {
+	calls := 0
+	s := &SelfSampler{read: func() (time.Duration, bool) {
+		calls++
+		switch calls {
+		case 2:
+			return 0, false // one bad read, after a good one
+		default:
+			return time.Duration(calls) * time.Second, true
+		}
+	}}
+
+	s.Percent(time.Unix(100, 0)) // baseline, succeeds
+	s.Percent(time.Unix(101, 0)) // transient failure
+	if s.unsupported {
+		t.Fatal("a failure following a successful read latched unsupported")
+	}
+	s.Percent(time.Unix(102, 0)) // re-baseline
+	if _, ok := s.Percent(time.Unix(103, 0)); !ok {
+		t.Error("sampling did not resume after a transient read failure")
+	}
+}
+
 // A zero-valued or struct-literal-constructed owner leaves this nil, and the
 // collector calls Percent on every tick. Unknown is the answer that matches the
 // rest of this package (procTreeCPU(nil) does the same); a panic in a

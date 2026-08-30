@@ -90,8 +90,18 @@ const topFeatures = [
   },
 ];
 
+// Cells are "yes" | "no" | "partial", the same three states /vs/ pages use.
+// `.cmp-table .partial` already exists in ember.css, so a partial styles
+// itself — this table used to render every non-"yes" as ✕, which is what
+// let the home page keep saying Zellij has no reboot story after the
+// comparison data stopped saying it.
 const compareRows = [
-  { feature: "Host reboot survival",     values: ["yes", "no",  "no",  "no" ] },
+  // Zellij is a genuine partial: session serialization is on by default and
+  // restores the layout, tabs and directories. It does not restore running
+  // processes, and it has no notion of an AI session. The footnote under the
+  // table carries that distinction — a bare ~ with no explanation is the
+  // other way to be wrong here.
+  { feature: "Host reboot survival",     values: ["yes", "no",  "partial", "no" ] },
   { feature: "AI session resume",        values: ["yes", "no",  "no",  "no" ] },
   // Not "does it have a sidebar" — the claim is that the multiplexer knows an
   // agent is mid-turn vs waiting on a permission prompt vs done. That needs a
@@ -114,7 +124,7 @@ const compareTiles = [
   { slug: "herdr",   label: "herdr",             blurb: "The closest rival: a Rust agent multiplexer. Broader agent support; no native Windows, no MCP." },
   { slug: "aoe",     label: "Agent of Empires",  blurb: "A tmux-based agent manager with a web dashboard. Richer remote; WSL2-only, no MCP." },
   { slug: "tmux",    label: "tmux",       blurb: "The 2007 standard. Still the answer if you just need tabs on a remote host." },
-  { slug: "zellij",  label: "Zellij",     blurb: "The modern Rust option. Friendly UX, WASM plugins, no reboot story." },
+  { slug: "zellij",  label: "Zellij",     blurb: "The modern Rust option. Friendly UX, WASM plugins. A reboot returns the layout, not the work." },
   { slug: "wezterm", label: "WezTerm",    blurb: "A terminal emulator with multiplexer bolted on. Use both — they complement." },
   { slug: "screen",  label: "GNU Screen", blurb: "1987. Still on every Unix host. Not a dev-experience tool anymore." },
 ];
@@ -335,11 +345,12 @@ const revTimestamp = new Date().toISOString().slice(0, 10).replace(/-/g, "");
             Different <span class="flame-text">category.</span>
           </h2>
           <p style="margin-top:20px; color:var(--ink-2); font-size:16px; line-height:1.65; max-width:52ch;">
-            tmux and Zellij survive network disconnects but not host
-            reboots. WezTerm is a terminal emulator that happens to
-            multiplex. Screen is 38 years old. Quil is a workflow
-            orchestrator that treats your terminal as the source of
-            truth.
+            tmux survives a network disconnect but not a host reboot.
+            Zellij rebuilds the layout after one and waits for you to
+            re-run each command. WezTerm is a terminal emulator that
+            happens to multiplex. Screen is 38 years old. Quil is a
+            workflow orchestrator that treats your terminal as the
+            source of truth.
           </p>
 
           <div style="margin-top:24px; padding:16px 18px; border:1px solid var(--line-2); background:var(--bg-2);">
@@ -370,13 +381,22 @@ const revTimestamp = new Date().toISOString().slice(0, 10).replace(/-/g, "");
                   <td class="feat">{row.feature}</td>
                   {row.values.map((val) => (
                     <td class="val">
-                      <b class={val === "yes" ? "yes" : "no"}>{val === "yes" ? "✓" : "✕"}</b>
+                      <b class={val}>
+                        {val === "yes" ? "✓" : val === "partial" ? "~" : "✕"}
+                      </b>
                     </td>
                   ))}
                 </tr>
               ))}
             </tbody>
           </table>
+
+          <p style="margin-top:14px; font-size:12px; color:var(--ink-4); font-style:italic; max-width:64ch;">
+            ~ Zellij serializes a session by default, so a reboot returns the
+            layout, the tabs and the directories, each command waiting behind a
+            "Press ENTER to run" prompt. What it does not return is the running
+            work. <a href="/vs/zellij/" style="color:var(--flame);">vs Zellij →</a>
+          </p>
         </div>
 
         <div class="compare-tiles">

@@ -93,7 +93,7 @@ Legend: ✅ full · 🟡 partial/different · ❌ absent
 | Snapshot restore after server restart | ✅ | ✅ | ✅ (ghost buffers) |
 | Survives full host reboot | ✅ | ✅ (tmux) | ✅ |
 | Named sessions (separate server namespaces) | ✅ | 🟡 (profiles) | ❌ |
-| Remote attach over SSH (thin client) | ✅ | 🟡 (SSH+web) | ❌ |
+| Remote attach over SSH (thin client) | ✅ | 🟡 (SSH+web) | ✅ (v1.44; several hosts at once since v1.47) |
 | Clipboard-image bridged into remote session | ✅ | ✅ (web) | ❌ |
 | Live server handoff (upgrade without killing panes) | ✅ | 🟡 (detached workers) | ❌ |
 | Web dashboard (browser terminal) | ❌ | ✅ (PWA) | ❌ |
@@ -110,9 +110,9 @@ Legend: ✅ full · 🟡 partial/different · ❌ absent
 | Runtime-updatable detection manifests | ✅ (remote fetch) | ❌ | ❌ |
 | Detection debugger (`agent explain`) | ✅ | ❌ | ❌ |
 | Model/context-token status display | 🟡 | ✅ | ✅ |
-| AI agents with detection | ~18 | ~13 | **2** |
+| AI agents with detection | 20+ | ~13 | **2** |
 | One-command agent integration installer | ✅ | ✅ | ❌ |
-| Native agent session restore | ✅ (14 agents) | ✅ (Claude+) | ✅ (claude, opencode) |
+| Native agent session restore | ✅ (most of its integrations) | ✅ (Claude+) | ✅ (claude, opencode) |
 | Session fork | ❌ | ✅ | ❌ |
 | Session import from disk | ❌ | ✅ (Claude) | ❌ |
 
@@ -183,13 +183,13 @@ current to-do list.
 | # | Feature | Source | Why it matters | Effort | Impact | Maps to |
 |---|---|---|---|:---:|:---:|---|
 | 1 | Screen-content agent state detection (no hooks) | herdr, aoe | Blocked/working/done inferred from terminal output for *any* agent, zero hooks. Quil only pattern-matches idle. | M | ★★★ | process-health |
-| 2 | Broad agent support + detection registry | herdr, aoe | They detect ~13–18 agents (Codex, Gemini, Cursor, Copilot, Droid, Devin…); Quil ships 2. Starkest gap. | M | ★★★ | community-plugins |
+| 2 | Broad agent support + detection registry | herdr, aoe | They detect 13–20+ agents (Codex, Gemini, Cursor, Copilot, Droid, Devin…); Quil ships 2. Starkest gap, and the one still widening — herdr's list grows most releases. | M | ★★★ | community-plugins |
 | 3 | ~~Git worktree-per-session~~ **SHIPPED** | herdr, aoe | Auto branch + worktree on session create, cleanup on delete. The #1 adoption driver for these tools. A tab can open onto a new worktree (placeholder pane + spinner while `git worktree add` runs), and closing it offers to remove the worktree, naming what it holds. | M | ★★★ | workspace-files |
 | 4 | Built-in diff viewer (review + edit + commit) | aoe | Review agent changes without leaving the TUI. Table stakes for "review what the agent did". | M | ★★★ | new |
 | 5 | Executable/scriptable plugins (actions, event hooks, link handlers) | herdr, aoe | Any-language plugins that run logic, not just declare pane types. Unlocks a real ecosystem. | M | ★★★ | community-plugins, cross-pane-events |
 | 6 | Plugin marketplace (GitHub-topic index) | herdr, aoe | Discover + `install owner/repo`. Already partially planned. | M | ★★ | community-plugins |
 | 7 | General shell CLI to script the multiplexer | herdr, aoe | `quil pane split`, `quil tab create` from any script. MCP serves AI; humans/scripts have nothing. | M | ★★ | new |
-| 8 | ~~Remote SSH thin-client attach (`--remote`)~~ **SHIPPED (v1.44)** | herdr | Local client of a remote server; bridges local clipboard image paste into remote agents. Quil went further than the gap asked: since v1.47 one client holds the local daemon and any number of remote ones at once. | M | ★★ | session-sharing |
+| 8 | ~~Remote SSH thin-client attach (`--remote`)~~ **SHIPPED (v1.44)** | herdr | Local client of a remote server. Since v1.47 one client holds the local daemon and any number of remote ones at once, which is more than the gap asked for. The clipboard-image half of this gap did **not** ship: the paste proxy writes the PNG to the client's own disk and types that path into the PTY, so in remote mode it names a file the server cannot read. | M | ★★ | session-sharing |
 | 9 | Web dashboard (browser terminal) | aoe | Real terminal + diffs in the browser, installable PWA. The largest surface Quil is missing. | L | ★★★ | new |
 | 10 | Remote phone access (tunnel + QR/passphrase + push) | aoe | Check on agents from a phone via Tailscale/Cloudflare with two-factor pairing. | L | ★★ | session-sharing |
 | 11 | Container sandboxing (Docker/Podman) + shared auth volumes | aoe | Isolate agents in containers; authenticate in-container without re-login. | L | ★★ | new |
@@ -237,16 +237,20 @@ Closing the most impactful gaps, roughly in ROI order:
    agents is the starkest deficit; both rivals detect many out of the box. A
    screen-content detector (like herdr's TOML manifests) would let Quil claim
    broad agent awareness without per-agent hooks.
-2. **Worktree-per-session + a diff viewer** (#3, #4) — the single most-cited
-   reason people adopt these tools ("parallel agents on branches, then review the
-   diff"). Quil has the git-discovery primitives already; the automation and
-   review layers are missing.
+2. **A diff viewer** (#4) — the other half of the most-cited reason people adopt
+   these tools ("parallel agents on branches, then review the diff"). The
+   worktree half of that pair (#3) has since shipped, which makes the review
+   layer the one that is now conspicuously missing: Quil can put an agent on its
+   own branch and can no longer show you what it did there.
 3. **A shell-scriptable CLI** (#7) — Quil's MCP is great for AI but leaves
    human/script orchestration unserved; a thin CLI over the existing daemon IPC is
    low effort.
-4. **Sound + OS notifications** (#14, #15) — small effort, immediately felt.
-5. **Web/remote access & sandboxing** (#9, #10, #11) — the largest builds; likely
+4. **Sound, and desktop notifications beyond Windows** (#14, #15) — small effort,
+   immediately felt. Windows toasts shipped; macOS and Linux did not, and neither
+   did sound on any platform.
+5. **Web/mobile access & sandboxing** (#9, #10, #11) — the largest builds; likely
    a deliberate "not now" given Quil's TUI/Windows-native focus, but this is where
-   aoe is pulling away for the mobile/remote crowd.
+   aoe is pulling away for the mobile crowd. Terminal-side remote attach (#8) is
+   no longer part of this cluster — it shipped in v1.44.
 </content>
 </invoke>

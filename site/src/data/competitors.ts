@@ -33,7 +33,7 @@ export const competitorMatrix: CompareRow[] = [
     zellij: "partial",
     wezterm: "no",
     screen: "no",
-    note: "Quil's defining capability. Zellij is the one honest partial: session serialization is on by default, so after a reboot it brings back the layout, the tabs and the working directories, and offers each pane's command behind a `Press ENTER to run` prompt. What it does not bring back is the work — no running processes, no scrollback unless you turned that on, and no idea an AI session ever existed. tmux, WezTerm and Screen lose the session outright; tmux-resurrect gets tmux to roughly where Zellij already is.",
+    note: "Quil's defining capability. Zellij is the one honest partial: session serialization is on by default, so after a reboot it brings back the layout, the tabs and the working directories, and offers each pane's command behind a “Press ENTER to run” prompt. What it does not bring back is the work — no running processes, no scrollback unless you turned that on, and no idea an AI session ever existed. tmux, WezTerm and Screen lose the session outright; tmux-resurrect gets tmux to roughly where Zellij already is.",
   },
   {
     feature: "AI session auto-resume (Claude Code, OpenCode)",
@@ -244,7 +244,7 @@ export const competitors: Record<CompetitorInfo["slug"], CompetitorInfo> = {
       {
         question: "What is the best tmux alternative that survives a reboot?",
         answer:
-          "tmux, WezTerm and GNU Screen lose the session when the host reboots — their persistence only lasts while the server process is alive. Zellij is the exception, and a partial one: it serializes the session by default, so a reboot returns the layout, the tabs and the directories, with each command waiting behind a `Press ENTER to run` prompt. Nothing is still running, and an AI session comes back as a command line to re-type. Quil was built for that second half: its daemon snapshots the whole workspace to disk continuously, so after a reboot you type one command and the layout, working directories, scrollback, and AI sessions come back in under 30 seconds.",
+          "tmux, WezTerm and GNU Screen lose the session when the host reboots — their persistence only lasts while the server process is alive. Zellij is the exception, and a partial one: it serializes the session by default, so a reboot returns the layout, the tabs and the directories, with each command waiting behind a “Press ENTER to run” prompt. Nothing is still running, and an AI session comes back as a command line to re-type. Quil was built for that second half: its daemon snapshots the whole workspace to disk continuously, so after a reboot you type one command and the layout, working directories, scrollback, and AI sessions come back in under 30 seconds.",
       },
     ],
   },
@@ -260,7 +260,7 @@ export const competitors: Record<CompetitorInfo["slug"], CompetitorInfo> = {
     keyStrength:
       "Modern UX, clean WASM plugin model, excellent defaults, discoverable status bar. Zellij users rarely need to read a manual.",
     keyGap:
-      "Zellij serializes a session to its cache folder by default, so a reboot gives you the shape back — tabs, panes, directories, and each pane's command waiting behind a `Press ENTER to run` prompt. It does not give you the work back: nothing is still running, scrollback is off unless you enabled it, and an AI session is just a command line to re-type. Quil restores the running workspace, and resumes the Claude Code or OpenCode conversation with its current session id.",
+      "Zellij serializes a session to its cache folder by default, so a reboot gives you the shape back — tabs, panes, directories, and each pane's command waiting behind a “Press ENTER to run” prompt. It does not give you the work back: nothing is still running, scrollback is off unless you enabled it, and an AI session is just a command line to re-type. Quil restores the running workspace, and resumes the Claude Code or OpenCode conversation with its current session id.",
     migrationNote:
       "Zellij users will feel at home in Quil — both tools use Alt-based keys and avoid prefix chords by default. The main adjustment is Quil's typed panes (Terminal / AI / SSH / etc.), which Zellij doesn't have.",
     faq: [
@@ -383,7 +383,7 @@ export const competitors: Record<CompetitorInfo["slug"], CompetitorInfo> = {
       { feature: "Screen-content agent detection (no hooks)", quil: "partial", them: "yes", note: "Quil pattern-matches idle only; herdr ships updatable detection manifests for every agent it lists." },
       { feature: "Breadth of agents detected", quil: "partial", them: "yes", note: "Quil: 2 deep (Claude Code, OpenCode) + tools. herdr: 20+." },
       { feature: "One-command agent integration installer", quil: "no", them: "yes" },
-      { feature: "Git worktree-per-session", quil: "yes", them: "yes", note: "Quil opens a tab straight onto a new worktree — the pane is a placeholder with a spinner while `git worktree add` runs, so a slow monorepo checkout can never be mistaken for an agent started in the wrong tree — and closing that tab or pane offers to remove the worktree, naming what it holds and refusing to call a dirty one clean." },
+      { feature: "Git worktree-per-session", quil: "yes", them: "yes", note: "Quil opens a tab straight onto a new worktree — the pane is a placeholder with a spinner while git worktree add runs, so a slow monorepo checkout can never be mistaken for an agent started in the wrong tree — and closing that tab or pane offers to remove the worktree, naming what it holds and refusing to call a dirty one clean." },
       { feature: "Executable plugins (actions / event hooks / link handlers)", quil: "partial", them: "yes", note: "Quil plugins are declarative TOML pane types; herdr runs any-language plugins." },
       { feature: "Plugin marketplace", quil: "no", them: "yes" },
       { feature: "General CLI to script the multiplexer", quil: "no", them: "yes", note: "Quil scripts via MCP (for AI); herdr adds a shell CLI for humans." },
@@ -437,7 +437,7 @@ export const competitors: Record<CompetitorInfo["slug"], CompetitorInfo> = {
       { feature: "Web dashboard (browser terminal + diffs, PWA)", quil: "no", them: "yes" },
       { feature: "Remote phone access (tunnel + QR/passphrase + Web Push)", quil: "no", them: "yes" },
       { feature: "ACP structured view (plan / tool / approve cards)", quil: "no", them: "yes" },
-      { feature: "Git worktree-per-session", quil: "yes", them: "yes", note: "Was a genuine gap until recently. A Quil tab can now open straight onto a new worktree, showing a placeholder pane with a spinner while `git worktree add` runs so a slow checkout is never mistaken for an agent started in the main tree, and closing the tab or pane offers to remove the worktree — naming what it holds, and refusing to call a dirty one clean." },
+      { feature: "Git worktree-per-session", quil: "yes", them: "yes", note: "Was a genuine gap until recently. A Quil tab can now open straight onto a new worktree, showing a placeholder pane with a spinner while git worktree add runs so a slow checkout is never mistaken for an agent started in the main tree, and closing the tab or pane offers to remove the worktree — naming what it holds, and refusing to call a dirty one clean." },
       { feature: "Multi-repo workspaces", quil: "yes", them: "yes", note: "Was a genuine gap until v1.47. Quil projects each own a root directory and their own tabs, so several repositories sit side by side in one window — and a project can belong to a different machine, which AoE's workspaces do not span." },
       { feature: "Built-in diff viewer (review + edit)", quil: "no", them: "yes" },
       { feature: "Container sandboxing (Docker/Podman/Apple)", quil: "no", them: "yes" },

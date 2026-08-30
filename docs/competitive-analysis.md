@@ -33,8 +33,8 @@ architectural bet.
 | Web/browser UI | ❌ TUI only | ❌ (responsive TUI) | ✅ **React PWA dashboard** |
 | Container sandbox | ❌ | ❌ | ✅ Docker/Podman/Apple |
 | Remote phone access | ❌ | via SSH TUI | ✅ Tunnel + PWA + Web Push |
-| Git worktree-per-session | ❌ | ✅ | ✅ (+ multi-repo) |
-| AI agents supported | **2** deep + tools | **~18** detected, 14 integrations | **~13** terminal, 7 ACP |
+| Git worktree-per-session | ✅ | ✅ | ✅ (+ multi-repo) |
+| AI agents supported | **2** deep + tools | **20+** detected, native integrations for most | **~13** terminal, 7 ACP |
 | Scale | ~30–40k Go | ~170k Rust | ~292k Rust + large web app |
 | License / backing | Apache-2.0, product | Apache-2.0 (was AGPL-3.0 + commercial until 2026-07-22), solo + sponsors | MIT, Mozilla.ai community |
 
@@ -120,8 +120,8 @@ Legend: ✅ full · 🟡 partial/different · ❌ absent
 
 | Feature | herdr | aoe | Quil |
 |---|:---:|:---:|:---:|
-| Worktree-per-session (auto branch + worktree) | ✅ | ✅ | ❌ |
-| Multi-repo workspace (one session, N repos) | ❌ | ✅ | ❌ |
+| Worktree-per-session (auto branch + worktree) | ✅ | ✅ | ✅ (tab opens onto a new worktree; close offers removal) |
+| Multi-repo workspace (one session, N repos) | ❌ | ✅ | ✅ (projects, v1.47 — and they may span hosts) |
 | Built-in diff viewer (review + edit) | ❌ | ✅ | ❌ |
 | Inline diff comments → prompt to agent | ❌ | ✅ | ❌ |
 | Lazygit / git-tool integration | 🟡 (plugin) | ✅ (tool sessions) | ✅ (Alt+G overlay) |
@@ -154,7 +154,7 @@ Legend: ✅ full · 🟡 partial/different · ❌ absent
 |---|:---:|:---:|:---:|
 | Themes (multiple, light/dark auto) | ✅ (18) | ✅ (8) | 🟡 minimal |
 | Sound notifications | ✅ | ✅ | ❌ |
-| OS/terminal desktop notifications | ✅ | ✅ (push) | ❌ (in-TUI sidebar) |
+| OS/terminal desktop notifications | ✅ | ✅ (push) | 🟡 Windows toasts + click-to-route; no macOS/Linux |
 | In-TUI notification center | 🟡 | ✅ | ✅ |
 | Repo config + lifecycle hooks | 🟡 | ✅ | ❌ |
 | Profiles (per-project workspaces) | 🟡 | ✅ | ❌ |
@@ -174,23 +174,29 @@ The most interesting capabilities Quil lacks or only partially supports, ranked
 by a blend of strategic impact and how differentiating they are. Effort is a rough
 T-shirt size. "Maps to" links a gap to an existing roadmap item it extends.
 
+The ranking is kept as it was first written — re-scoring it every release would
+destroy the record of what looked most urgent at the time, which is the only
+reason a list like this is worth keeping. Rows that have since shipped are struck
+through and marked instead, so the table stays readable as history *and* as a
+current to-do list.
+
 | # | Feature | Source | Why it matters | Effort | Impact | Maps to |
 |---|---|---|---|:---:|:---:|---|
 | 1 | Screen-content agent state detection (no hooks) | herdr, aoe | Blocked/working/done inferred from terminal output for *any* agent, zero hooks. Quil only pattern-matches idle. | M | ★★★ | process-health |
 | 2 | Broad agent support + detection registry | herdr, aoe | They detect ~13–18 agents (Codex, Gemini, Cursor, Copilot, Droid, Devin…); Quil ships 2. Starkest gap. | M | ★★★ | community-plugins |
-| 3 | Git worktree-per-session | herdr, aoe | Auto branch + worktree on session create, cleanup on delete. The #1 adoption driver for these tools. | M | ★★★ | workspace-files |
+| 3 | ~~Git worktree-per-session~~ **SHIPPED** | herdr, aoe | Auto branch + worktree on session create, cleanup on delete. The #1 adoption driver for these tools. A tab can open onto a new worktree (placeholder pane + spinner while `git worktree add` runs), and closing it offers to remove the worktree, naming what it holds. | M | ★★★ | workspace-files |
 | 4 | Built-in diff viewer (review + edit + commit) | aoe | Review agent changes without leaving the TUI. Table stakes for "review what the agent did". | M | ★★★ | new |
 | 5 | Executable/scriptable plugins (actions, event hooks, link handlers) | herdr, aoe | Any-language plugins that run logic, not just declare pane types. Unlocks a real ecosystem. | M | ★★★ | community-plugins, cross-pane-events |
 | 6 | Plugin marketplace (GitHub-topic index) | herdr, aoe | Discover + `install owner/repo`. Already partially planned. | M | ★★ | community-plugins |
 | 7 | General shell CLI to script the multiplexer | herdr, aoe | `quil pane split`, `quil tab create` from any script. MCP serves AI; humans/scripts have nothing. | M | ★★ | new |
-| 8 | Remote SSH thin-client attach (`--remote`) | herdr | Local client of a remote server; bridges local clipboard image paste into remote agents. | M | ★★ | session-sharing |
+| 8 | ~~Remote SSH thin-client attach (`--remote`)~~ **SHIPPED (v1.44)** | herdr | Local client of a remote server; bridges local clipboard image paste into remote agents. Quil went further than the gap asked: since v1.47 one client holds the local daemon and any number of remote ones at once. | M | ★★ | session-sharing |
 | 9 | Web dashboard (browser terminal) | aoe | Real terminal + diffs in the browser, installable PWA. The largest surface Quil is missing. | L | ★★★ | new |
 | 10 | Remote phone access (tunnel + QR/passphrase + push) | aoe | Check on agents from a phone via Tailscale/Cloudflare with two-factor pairing. | L | ★★ | session-sharing |
 | 11 | Container sandboxing (Docker/Podman) + shared auth volumes | aoe | Isolate agents in containers; authenticate in-container without re-login. | L | ★★ | new |
-| 12 | Multi-repo workspaces | aoe | One session/branch spanning several repos. | M | ★★ | workspace-files |
+| 12 | ~~Multi-repo workspaces~~ **SHIPPED (v1.47)** | aoe | One session/branch spanning several repos. Quil's projects each own a root directory and their own tabs — and a project can belong to a different machine, which aoe's workspaces do not span. | M | ★★ | workspace-files |
 | 13 | Inline diff comments → prompt to agent | aoe | Annotate a diff; comments assemble into one prompt back to the agent. Tight review loop. | M | ★★ | (extends #4) |
 | 14 | Sound notifications | herdr, aoe | Audible cue when an agent needs you. Cheap, immediately felt. | S | ★★ | notification-center |
-| 15 | OS/desktop notifications (beyond in-TUI sidebar) | herdr, aoe | OSC/`notify-send`/`terminal-notifier` so alerts leave the TUI (works over SSH). | S | ★★ | notification-center |
+| 15 | ~~OS/desktop notifications (beyond in-TUI sidebar)~~ **PARTLY SHIPPED** | herdr, aoe | OSC/`notify-send`/`terminal-notifier` so alerts leave the TUI (works over SSH). Windows toasts land, and a click routes to the pane that raised it. macOS and Linux are still open — no transport there carries a click back to a pane. | S | ★★ | notification-center |
 | 16 | One-command agent integration installer | herdr, aoe | `quil integration install <agent>` writes the agent's hooks for you. | M | ★★ | (extends #1/#2) |
 | 17 | Themes + light/dark auto-switch | herdr, aoe | 8–18 presets, follows host OSC 10/11. Quil's theming is minimal. | S–M | ★★ | new |
 | 18 | Session fork | aoe | Branch a conversation into a new independent session, parent untouched. | M | ★★ | new |

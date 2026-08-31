@@ -15,7 +15,7 @@ export const homeFaq: FaqItem[] = [
   {
     question: "How is Quil different from tmux or Zellij?",
     answer:
-      "tmux and Zellij are terminal multiplexers — they survive network disconnects but not full host reboots. Quil survives reboots. It also understands pane types (a Claude Code pane resumes differently than an SSH pane), ships an MCP server for AI agents, and tracks per-pane notes alongside your work. For a deeper comparison, see /vs/tmux or /vs/zellij.",
+      "tmux and Zellij are terminal multiplexers — they survive network disconnects, but not a host reboot with your work still running. tmux loses the session outright; Zellij rebuilds the layout from its cache and waits for you to press ENTER on each command again. Quil brings the running workspace back. It also understands pane types (a Claude Code pane resumes differently than an SSH pane), ships an MCP server for AI agents, and tracks per-pane notes alongside your work. For a deeper comparison, see /vs/tmux or /vs/zellij.",
   },
   {
     question: "Can I use Quil on a remote server over SSH?",

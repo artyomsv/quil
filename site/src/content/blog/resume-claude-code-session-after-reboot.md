@@ -38,7 +38,7 @@ Claude Code keeps each conversation as a session on your local machine. The tran
 When you reboot:
 
 - Every terminal process dies, including `claude`.
-- Your terminal multiplexer (if you use one) dies too — `tmux` and `zellij` survive a disconnected SSH session, but **not** a full host reboot.
+- Your terminal multiplexer (if you use one) dies too. `tmux` survives a disconnected SSH session but **not** a reboot. `zellij` does better — it rebuilds the layout from its cache — but it gives you back the *shape* of the workspace, not the running work, and it has no idea a `claude` session was ever in that pane.
 - The transcript file survives on disk, but nothing reattaches to it automatically. You're staring at a clean shell.
 
 So the *data* is still there. The problem is reconnecting to it.

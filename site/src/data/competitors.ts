@@ -30,10 +30,10 @@ export const competitorMatrix: CompareRow[] = [
     feature: "Survives a full host reboot",
     quil: "yes",
     tmux: "no",
-    zellij: "no",
+    zellij: "partial",
     wezterm: "no",
     screen: "no",
-    note: "Quil's defining capability. Everyone else loses the session on reboot.",
+    note: "Quil's defining capability. Zellij is the one honest partial: session serialization is on by default, so after a reboot it brings back the layout, the tabs and the working directories, and offers each pane's command behind a “Press ENTER to run” prompt. What it does not bring back is the work — no running processes, no scrollback unless you turned that on, and no idea an AI session ever existed. tmux, WezTerm and Screen lose the session outright; tmux-resurrect gets tmux to roughly where Zellij already is.",
   },
   {
     feature: "AI session auto-resume (Claude Code, OpenCode)",
@@ -244,7 +244,7 @@ export const competitors: Record<CompetitorInfo["slug"], CompetitorInfo> = {
       {
         question: "What is the best tmux alternative that survives a reboot?",
         answer:
-          "tmux, Zellij, WezTerm and GNU Screen all lose their sessions when the host reboots — their persistence only lasts while the server process is alive. Quil was built specifically for this gap: its daemon snapshots the whole workspace to disk continuously, so after a reboot you type one command and the layout, working directories, scrollback, and AI sessions come back in under 30 seconds.",
+          "tmux, WezTerm and GNU Screen lose the session when the host reboots — their persistence only lasts while the server process is alive. Zellij is the exception, and a partial one: it serializes the session by default, so a reboot returns the layout, the tabs and the directories, with each command waiting behind a “Press ENTER to run” prompt. Nothing is still running, and an AI session comes back as a command line to re-type. Quil was built for that second half: its daemon snapshots the whole workspace to disk continuously, so after a reboot you type one command and the layout, working directories, scrollback, and AI sessions come back in under 30 seconds.",
       },
     ],
   },
@@ -256,11 +256,11 @@ export const competitors: Record<CompetitorInfo["slug"], CompetitorInfo> = {
     description:
       "Modern Rust terminal multiplexer with a friendly UX, WASM plugins, and sane defaults. Released in 2021.",
     positioning:
-      "Zellij is the closest competitor on UX — both tools prioritise gentle defaults and a modern feel. Where they diverge: Zellij is a multiplexer first, Quil is a workflow orchestrator first. Quil's typed panes, AI session resume, and reboot persistence address a problem Zellij considers out of scope.",
+      "Zellij is the closest competitor on UX — both tools prioritise gentle defaults and a modern feel. Where they diverge: Zellij is a multiplexer first, Quil is a workflow orchestrator first. Zellij is also the only classic multiplexer that gives you anything back after a reboot, so the honest question is not whether a session returns but what returns with it — Zellij rebuilds the layout and waits for you to re-run each command, while Quil restores the running workspace and the AI conversation attached to it.",
     keyStrength:
       "Modern UX, clean WASM plugin model, excellent defaults, discoverable status bar. Zellij users rarely need to read a manual.",
     keyGap:
-      "No concept of reboot-proof workflows or AI session continuity. Zellij sessions are runtime-only; a host reboot is final.",
+      "Zellij serializes a session to its cache folder by default, so a reboot gives you the shape back — tabs, panes, directories, and each pane's command waiting behind a “Press ENTER to run” prompt. It does not give you the work back: nothing is still running, scrollback is off unless you enabled it, and an AI session is just a command line to re-type. Quil restores the running workspace, and resumes the Claude Code or OpenCode conversation with its current session id.",
     migrationNote:
       "Zellij users will feel at home in Quil — both tools use Alt-based keys and avoid prefix chords by default. The main adjustment is Quil's typed panes (Terminal / AI / SSH / etc.), which Zellij doesn't have.",
     faq: [
@@ -362,36 +362,36 @@ export const competitors: Record<CompetitorInfo["slug"], CompetitorInfo> = {
     slug: "herdr",
     name: "herdr",
     description:
-      "A Rust terminal multiplexer purpose-built for AI coding agents — 'tmux, rebuilt for agents.' Single binary, its own PTY and VT engine, a socket API agents can drive, and a language-agnostic plugin system. Quil's closest philosophical twin.",
+      "A Rust terminal multiplexer purpose-built for AI coding agents — 'the runtime your coding agents live on.' Single binary, its own PTY and VT engine, a socket API agents can drive, and a language-agnostic plugin system. Quil's closest philosophical twin.",
     positioning:
-      "herdr and Quil made almost the same bet: build your own multiplexer, keep it a single lightweight binary, and make it agent-aware. herdr is further ahead on agent breadth (it detects ~18 agents and ships 14 integrations) and scriptable plugins; Quil is further ahead on native Windows and on speaking MCP, the protocol AI assistants already understand. The honest read: herdr is the stronger Unix-first agent fleet manager today, Quil is the stronger Windows-native, MCP-native one.",
+      "herdr and Quil made almost the same bet: build your own multiplexer, keep it a single lightweight binary, and make it agent-aware. herdr is further ahead on agent breadth (20+ agents detected, with native integrations for most of them) and on scriptable plugins; Quil is further ahead on native Windows and on speaking MCP, the protocol AI assistants already understand. The honest read: herdr is the stronger Unix-first agent fleet manager today, Quil is the stronger Windows-native, MCP-native one.",
     keyStrength:
-      "Agent breadth and extensibility. Detects ~18 agents with screen-content heuristics, installs native integrations with one command, exposes a full socket API + CLI that agents and scripts can drive, and runs language-agnostic plugins with actions, event hooks, and a GitHub-topic marketplace.",
+      "Agent breadth and extensibility. Detects 20+ agents with screen-content heuristics, installs native integrations with one command, exposes a full socket API + CLI that agents and scripts can drive, and runs language-agnostic plugins with actions, event hooks, and a marketplace.",
     keyGap:
-      "Native Windows is still beta, there is no MCP server (agents drive it through a bespoke socket API + an installed skill instead of a protocol assistants already speak), and it has no pane-notes editor or per-pane memory reporting.",
+      "Native Windows is still beta, there is no MCP server — herdr's own pitch is that agents talk to each other through it without one, so they drive it through a bespoke socket API and an installed skill instead of a protocol assistants already speak — and it has no pane-notes editor or per-pane memory reporting.",
     migrationNote:
       "herdr uses a tmux-style prefix (Ctrl+B) where Quil uses direct Alt-based keys. Both keep agents alive on detach and restore AI sessions. If you're on Windows without WSL, Quil is the smoother path; if you drive many different agents from Unix and want to script the multiplexer from a shell, herdr is very strong.",
     quilHeadline: "Native Windows. MCP-native. Notes + memory built in.",
     matrix: [
       { feature: "Own multiplexer + PTY (not a tmux wrapper)", quil: "yes", them: "yes" },
       { feature: "Survives a full host reboot", quil: "yes", them: "yes" },
-      { feature: "AI session auto-resume", quil: "yes", them: "yes", note: "herdr restores native sessions for ~14 agents; Quil for Claude Code + OpenCode." },
+      { feature: "AI session auto-resume", quil: "yes", them: "yes", note: "herdr restores native sessions for most of the agents it integrates with; Quil for Claude Code + OpenCode." },
       { feature: "Native Windows (no WSL)", quil: "yes", them: "partial", note: "herdr's native Windows support is a ConPTY beta; Quil ships bundled ConPTY/OpenConsole and a Windows clipboard image-paste proxy." },
       { feature: "MCP server for AI agents", quil: "yes", them: "no", note: "herdr exposes a bespoke socket API + an installed agent skill instead of the MCP protocol." },
       { feature: "Pane notes editor", quil: "yes", them: "no" },
       { feature: "Per-pane memory reporting", quil: "yes", them: "no" },
-      { feature: "Screen-content agent detection (no hooks)", quil: "partial", them: "yes", note: "Quil pattern-matches idle only; herdr ships updatable detection manifests for ~18 agents." },
-      { feature: "Breadth of agents detected", quil: "partial", them: "yes", note: "Quil: 2 deep + tools. herdr: ~18." },
+      { feature: "Screen-content agent detection (no hooks)", quil: "partial", them: "yes", note: "Quil pattern-matches idle only; herdr ships updatable detection manifests for every agent it lists." },
+      { feature: "Breadth of agents detected", quil: "partial", them: "yes", note: "Quil: 2 deep (Claude Code, OpenCode) + tools. herdr: 20+." },
       { feature: "One-command agent integration installer", quil: "no", them: "yes" },
-      { feature: "Git worktree-per-session", quil: "no", them: "yes" },
+      { feature: "Git worktree-per-session", quil: "yes", them: "yes", note: "Quil opens a tab straight onto a new worktree — the pane is a placeholder with a spinner while git worktree add runs, so a slow monorepo checkout can never be mistaken for an agent started in the wrong tree — and closing that tab or pane offers to remove the worktree, naming what it holds and refusing to call a dirty one clean." },
       { feature: "Executable plugins (actions / event hooks / link handlers)", quil: "partial", them: "yes", note: "Quil plugins are declarative TOML pane types; herdr runs any-language plugins." },
       { feature: "Plugin marketplace", quil: "no", them: "yes" },
       { feature: "General CLI to script the multiplexer", quil: "no", them: "yes", note: "Quil scripts via MCP (for AI); herdr adds a shell CLI for humans." },
       { feature: "Remote SSH thin-client attach", quil: "yes", them: "yes", note: "`quil --remote <host>` since v1.44; opens no port, reconnects on its own after a dropped link, and installs itself on a bare server." },
       { feature: "Several hosts in one window at once", quil: "yes", them: "no", note: "Since v1.47 a Quil client holds the local daemon and any number of remote ones together, each project tagged with the machine that owns it and each host with its own reconnect state. herdr's remote attach drives one server per client." },
       { feature: "Named sessions / live server handoff", quil: "no", them: "yes" },
-      { feature: "Sound + desktop notifications", quil: "partial", them: "yes", note: "Quil has an in-TUI notification center but no sound or OS notifications." },
-      { feature: "Themes with light/dark auto-switch", quil: "partial", them: "yes" },
+      { feature: "Sound + desktop notifications", quil: "partial", them: "yes", note: "Quil raises real Windows toasts when an agent parks on a prompt or finishes a turn, and clicking one routes you to the pane that sent it. Still missing: sound, and macOS/Linux — herdr does all three, and can hand the notification to the outer terminal as well as the OS." },
+      { feature: "Themes with light/dark auto-switch", quil: "partial", them: "yes", note: "Quil ships no theme presets — it asks the terminal for its real foreground and background (OSC 10/11) and renders against those, so it follows your terminal instead of theming itself. herdr carries named themes and switches between a light and a dark one when the terminal reports the change." },
     ],
     faq: [
       {
@@ -437,14 +437,14 @@ export const competitors: Record<CompetitorInfo["slug"], CompetitorInfo> = {
       { feature: "Web dashboard (browser terminal + diffs, PWA)", quil: "no", them: "yes" },
       { feature: "Remote phone access (tunnel + QR/passphrase + Web Push)", quil: "no", them: "yes" },
       { feature: "ACP structured view (plan / tool / approve cards)", quil: "no", them: "yes" },
-      { feature: "Git worktree-per-session", quil: "no", them: "yes" },
+      { feature: "Git worktree-per-session", quil: "yes", them: "yes", note: "Was a genuine gap until recently. A Quil tab can now open straight onto a new worktree, showing a placeholder pane with a spinner while git worktree add runs so a slow checkout is never mistaken for an agent started in the main tree, and closing the tab or pane offers to remove the worktree — naming what it holds, and refusing to call a dirty one clean." },
       { feature: "Multi-repo workspaces", quil: "yes", them: "yes", note: "Was a genuine gap until v1.47. Quil projects each own a root directory and their own tabs, so several repositories sit side by side in one window — and a project can belong to a different machine, which AoE's workspaces do not span." },
       { feature: "Built-in diff viewer (review + edit)", quil: "no", them: "yes" },
       { feature: "Container sandboxing (Docker/Podman/Apple)", quil: "no", them: "yes" },
       { feature: "Screen-content agent detection (no hooks)", quil: "partial", them: "yes" },
       { feature: "Breadth of agents supported", quil: "partial", them: "yes", note: "Quil: 2 deep + tools. AoE: ~13 terminal + 7 ACP." },
       { feature: "Session fork / import from disk", quil: "no", them: "yes" },
-      { feature: "Sound + push notifications", quil: "partial", them: "yes", note: "Quil has an in-TUI notification center but no sound or push." },
+      { feature: "Sound + push notifications", quil: "partial", them: "yes", note: "Quil raises real Windows toasts when an agent parks on a prompt or finishes a turn, and clicking one routes you to the pane that sent it. Still missing: sound, macOS/Linux, and anything that reaches a phone — AoE's Web Push does, which is the point of its browser surface." },
       { feature: "Session lifecycle mgmt (auto-stop idle, groups, archive)", quil: "no", them: "yes" },
     ],
     faq: [
@@ -471,3 +471,36 @@ export const competitors: Record<CompetitorInfo["slug"], CompetitorInfo> = {
     ],
   },
 };
+
+/**
+ * Display order for the compare navigation. The header dropdown and the
+ * footer column both render from this, so adding a /vs/ page is one edit
+ * and it appears in both — the header used to carry its own hardcoded
+ * copy, which is how herdr and Agent of Empires came to be missing from
+ * the dropdown for months while the footer listed all six.
+ *
+ * Typed as a Record over the slug union rather than a plain array on
+ * purpose: a competitor added to `competitors` without a rank here is a
+ * build error, not a page that quietly never appears in the nav. That is
+ * the exact failure this export exists to end, so it must not be
+ * reintroducible by omission.
+ */
+const compareNavOrder: Record<CompetitorInfo["slug"], number> = {
+  herdr: 1,
+  aoe: 2,
+  tmux: 3,
+  zellij: 4,
+  wezterm: 5,
+  screen: 6,
+};
+
+/** Ordered `{ href, label }` pairs for every /vs/ page. Hrefs carry the
+ *  trailing slash — see scripts/check-trailing-slash.mjs for why. */
+export const compareNav: { href: string; label: string }[] = (
+  Object.keys(competitors) as CompetitorInfo["slug"][]
+)
+  .sort((a, b) => compareNavOrder[a] - compareNavOrder[b])
+  .map((slug) => ({
+    href: `/vs/${slug}/`,
+    label: `vs ${competitors[slug].name}`,
+  }));

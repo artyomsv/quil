@@ -12,6 +12,7 @@
  * that utility overrides aren't needed).
  */
 import { SITE } from "@/data/seo";
+import { compareNav } from "@/data/competitors";
 
 // Every internal href carries its trailing slash — see
 // scripts/check-trailing-slash.mjs for why a slashless one is a bug and
@@ -24,12 +25,11 @@ const navLinks = [
   { href: "/blog/",     label: "blog"     },
 ];
 
-const compareLinks = [
-  { href: "/vs/tmux/",    label: "vs tmux"       },
-  { href: "/vs/zellij/",  label: "vs Zellij"     },
-  { href: "/vs/wezterm/", label: "vs WezTerm"    },
-  { href: "/vs/screen/",  label: "vs GNU Screen" },
-];
+// Derived from src/data/competitors.ts, never hand-listed here. This used
+// to be a literal array and it fell four pages behind the data file —
+// herdr and Agent of Empires shipped with /vs/ pages, a footer link, and
+// a "see also" tile, but no entry in the one menu most visitors use.
+const compareLinks = compareNav;
 
 // Both sides are compared slash-stripped. The hrefs above are canonical
 // (trailing slash) while `pathname` may arrive either way depending on

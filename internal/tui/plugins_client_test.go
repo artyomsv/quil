@@ -20,17 +20,24 @@ func pluginClientModel(t *testing.T) *Model {
 	}
 }
 
-// DetectAvailability first, or this test cannot fail: a fresh registry has
-// terminal.Available == false, so the FALLBACK answers false too and gutting
-// applyPluginList to a no-op still passes. Detecting makes local truth `true`,
-// which is the only way the assertion can distinguish "filed the server's
-// false" from "never filed anything".
+// The marker must read AVAILABLE locally, or the fallback returns the same
+// answer the assertion is looking for and no implementation can be
+// distinguished from any other. "terminal" satisfies that with no detection
+// pass at all — builtinTerminal() carries `Available: true` as a struct literal
+// — and DetectAvailability is called anyway so the precondition is stated here
+// rather than inherited from a literal in another package. Gutting
+// applyPluginList to a no-op fails this test.
 func TestApplyPluginList_FilesTheServersAnswer(t *testing.T) {
 	m := pluginClientModel(t)
 	m.pluginRegistry.DetectAvailability()
+	if !m.pluginAvailableFor("gpu01", "terminal") {
+		t.Fatal("precondition: the marker must read available before the answer is filed, or this test cannot fail")
+	}
+
 	m.applyPluginList("gpu01", ipc.PluginListRespPayload{
 		Plugins: []ipc.PluginInfo{{Name: "terminal", Available: false}},
 	})
+
 	if m.pluginAvailableFor("gpu01", "terminal") {
 		t.Error("Available = true, want false — the server's answer was ignored")
 	}
@@ -145,12 +152,23 @@ func TestPluginAvailableFor_AbsentFromAnAnswerIsUnavailableOnThatHostOnly(t *tes
 // remote whose reply is still in flight and one whose daemon is too old to have
 // the RPC: a wrong offer fails loudly at spawn, a wrong grey-out hides a
 // working tool silently.
+//
+// BOTH answers are asserted, and one alone would be worthless. Every marker in
+// a fresh registry reads available (builtinTerminal's `Available: true` literal,
+// copied by terminal-wide), so an "available" assertion on its own cannot tell
+// "read the registry" from "return true" — the shape that made four tests in
+// this package unfalsifiable at once. Seeding the second marker false is what
+// makes the pair pin the fallback to the registry VALUE rather than a constant.
 func TestPluginAvailableFor_UnansweredDestinationKeepsLocalDetection(t *testing.T) {
 	m := pluginClientModel(t)
 	m.pluginRegistry.DetectAvailability()
+	m.pluginRegistry.Get("terminal-wide").Available = false
 
 	if !m.pluginAvailableFor("never-answered", "terminal") {
-		t.Error("Available = false for a host that has not answered; local detection should stand in")
+		t.Error("terminal reads unavailable at an unanswered host; local detection should stand in")
+	}
+	if m.pluginAvailableFor("never-answered", "terminal-wide") {
+		t.Error("terminal-wide reads available at an unanswered host — the fallback is answering a constant, not the registry")
 	}
 }
 
@@ -343,5 +361,89 @@ func TestReloadPluginsThenAskCmd_SendsReloadBeforeAskFromOneCommand(t *testing.T
 	}
 	if fake.sent[1].Type != ipc.MsgPluginListReq {
 		t.Errorf("sent[1].Type = %q, want %q", fake.sent[1].Type, ipc.MsgPluginListReq)
+	}
+}
+
+// --- which machine each gate asks -------------------------------------------
+
+// The overlay gates ask the TAB's daemon, not the active project's, and nothing
+// pinned that until this test.
+//
+// resolveOverlay is reachable from applyGitRepos with a tab resolved by ID,
+// which can belong to a BACKGROUND project — the case overlay.go's comment
+// calls out as the reason it takes tab.Dest. Every pre-existing gate test seeds
+// availability in the registry alone, so it answers identically whichever
+// destination is asked and all of them survive retargeting the argument.
+//
+// Here the two answers DISAGREE: lazygit is installed on this machine (the
+// registry, which is also what the active dest "" falls back to) and absent on
+// the tab's host. Asking the wrong one opens the picker on a doomed pane.
+func TestResolveOverlay_AsksTheTabsDaemonNotTheActiveOne(t *testing.T) {
+	repo := gitRepoDir(t)
+	m, fake, tab := overlayTestModel(t, repo)
+	tab.Dest = "gpu01" // a background project's host; the active project is local
+	m.applyPluginList("gpu01", ipc.PluginListRespPayload{
+		Plugins: []ipc.PluginInfo{{Name: "lazygit", Available: false}},
+	})
+	if !m.pluginAvailableFor("", overlayPluginLazygit) {
+		t.Fatal("precondition: lazygit must read available locally, or both dests answer alike")
+	}
+
+	runCmd(toggleWithDiscovery(m, tab, repo))
+
+	if m.flashText == "" {
+		t.Error("no refusal — the gate asked the active dest, where lazygit IS installed, instead of the tab's host")
+	}
+	if len(fake.sent) != 0 {
+		t.Errorf("sent %d messages — a pane was created for a host that cannot run it", len(fake.sent))
+	}
+}
+
+// createOverlay's defence-in-depth check owes the same answer as the gate above
+// it. handleGitRepoPickKey calls it directly, so a divergence here is reachable
+// by picking a repo from the picker rather than by the toggle.
+func TestCreateOverlay_DefenceInDepthAsksTheTabsDaemon(t *testing.T) {
+	repo := gitRepoDir(t)
+	m, fake, tab := overlayTestModel(t, repo)
+	tab.Dest = "gpu01"
+	m.applyPluginList("gpu01", ipc.PluginListRespPayload{
+		Plugins: []ipc.PluginInfo{{Name: "lazygit", Available: false}},
+	})
+
+	runCmd(m.createOverlay(tab, repo, overlayPluginLazygit))
+
+	if m.flashText == "" {
+		t.Error("no refusal — createOverlay asked the active dest instead of the tab's host")
+	}
+	if len(fake.sent) != 0 {
+		t.Errorf("sent %d messages — the overlay was created on a host that cannot run it", len(fake.sent))
+	}
+}
+
+// The palette and context menu gate on the ACTIVE project's daemon, which is
+// the tab their actions reach. Pinned for the same reason: every other test of
+// these two rows seeds the registry, so they cannot tell which dest was asked.
+func TestPaletteAndCtxMenu_GateOnTheActiveDaemonsAnswer(t *testing.T) {
+	repo := gitRepoDir(t)
+	m, _, tab := overlayTestModel(t, repo)
+	tab.Dest = "gpu01"
+	m.cur().Dest = "gpu01" // this project, and its tab, live on gpu01
+	m.applyPluginList("gpu01", ipc.PluginListRespPayload{
+		Plugins: []ipc.PluginInfo{{Name: "lazygit", Available: false}},
+	})
+	if !m.pluginAvailableFor("", overlayPluginLazygit) {
+		t.Fatal("precondition: lazygit must read available locally, or both dests answer alike")
+	}
+
+	for _, cmd := range m.buildPaletteCommands() {
+		if cmd.action == palActLazygit && cmd.enabled {
+			t.Error("palette offers lazygit — it asked the local registry, not the active host")
+		}
+	}
+	pane := tab.ActivePaneModel()
+	for _, item := range m.buildCtxMenuItems(pane) {
+		if item.id == ctxActLazygit && item.enabled {
+			t.Error("context menu offers lazygit — it asked the local registry, not the active host")
+		}
 	}
 }

@@ -453,6 +453,7 @@ func TestHandlePluginsKey_ReloadButton_KeepsRemoteAnswerAndReDetectsLocally(t *t
 		dialog:         dialogPlugins,
 	}
 	m.asRemote("gpu01")
+	seedUnavailable(t, m.pluginRegistry, "terminal-wide")
 	// gpu01 reports terminal-wide missing. The local machine's own PATH would
 	// report it available (every DetectAvailability call elsewhere in this
 	// suite detects /bin/sh in the sandbox).
@@ -474,16 +475,42 @@ func TestHandlePluginsKey_ReloadButton_KeepsRemoteAnswerAndReDetectsLocally(t *t
 	}
 }
 
+// seedUnavailable forces one plugin's runtime flag false before a handler runs.
+//
+// Without it a test of DetectAvailability cannot fail, and four of them could
+// not. builtinTerminal() carries `Available: true` as a STRUCT LITERAL
+// (internal/plugin/builtin.go) and builtinTerminalWide() copies it, so a bare
+// plugin.NewRegistry() already reports both markers available with no detection
+// pass at all — the assertion "it is available afterwards" then holds whether or
+// not the handler detected anything, and deleting all three DetectAvailability
+// calls in this package left the whole suite green.
+//
+// The pre-#198 tests got this for free from reg.SetAvailability({x: false}).
+// Deleting that setter removed the seeding step with it, because its replacement
+// writes to Model.destAvail — which none of these handlers touch.
+func seedUnavailable(t *testing.T, reg *plugin.Registry, name string) {
+	t.Helper()
+	p := reg.Get(name)
+	if p == nil {
+		t.Fatalf("marker plugin %q missing from the registry", name)
+	}
+	if !p.Available {
+		t.Fatalf("marker plugin %q is already unavailable; it cannot show that detection ran", name)
+	}
+	p.Available = false
+}
+
 // The local-only counterpart: pressing Reload Plugins must re-detect, or a tool
 // installed since launch would never clear its grey-out.
 func TestHandlePluginsKey_ReloadButton_LocalModeReDetects(t *testing.T) {
 	t.Setenv("QUIL_HOME", t.TempDir())
 	m := Model{
 		client:         &fakeSender{},
-		pluginRegistry: plugin.NewRegistry(), // nothing detected yet: every flag false
+		pluginRegistry: plugin.NewRegistry(),
 		dialog:         dialogPlugins,
 	}
 	// No asRemote — local mode.
+	seedUnavailable(t, m.pluginRegistry, "terminal-wide")
 	m.dialogCursor = len(m.sortedPlugins())
 
 	out, _ := m.handlePluginsKey(tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -517,6 +544,9 @@ func TestHandleTOMLEditorKey_Saved_KeepsRemoteAnswerAndReDetectsLocally(t *testi
 		tomlEditor:     NewTextEditor(content, fp, 80, 24),
 	}
 	m.asRemote("gpu01")
+	// Seeded false so the local half can fail; DetectAvailability restores it
+	// unconditionally for "terminal", which is what the assertion detects.
+	seedUnavailable(t, m.pluginRegistry, "terminal")
 	// gpu01 says "terminal" is unavailable there — unrealistic in practice (the
 	// Go built-in always is) but deterministic and PATH-independent, which is
 	// what this test needs from its marker.

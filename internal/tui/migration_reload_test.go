@@ -102,6 +102,10 @@ func TestSaveMigrationAndAdvance_KeepsRemoteAnswerAndReDetectsLocally(t *testing
 	// prune-on-reload exempts only "terminal" (registry.go), so a real reload
 	// deletes "terminal-wide" outright. Same hazard documented at
 	// dialog_test.go's sibling test.
+	//
+	// Seeded false so the local half can fail — see seedUnavailable for why a
+	// fresh registry already reports this marker available.
+	seedUnavailable(t, m.pluginRegistry, "terminal")
 	m.applyPluginList("gpu01", ipc.PluginListRespPayload{
 		Plugins: []ipc.PluginInfo{{Name: "terminal", Available: false}},
 	})

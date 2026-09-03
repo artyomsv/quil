@@ -3159,6 +3159,17 @@ func (m Model) renderPluginsDialog() string {
 	allPlugins := m.sortedPlugins()
 	// Hoisted: the destination is the same for every row, and renderCreatePaneDialog
 	// resolves its own the same way.
+	//
+	// The ACTIVE dest, deliberately, and it is the one call site where the
+	// choice is not obvious. This dialog lists and edits the CLIENT's own
+	// plugin definitions (RD-035 — the editor reads and writes
+	// config.PluginsDir() here, never the daemon's), so in remote mode the row
+	// pairs a local definition with a remote host's availability. That is the
+	// answer the marker should give: it says "can I run this in the project I
+	// am looking at", which is the same question Ctrl+N answers two dialogs
+	// away, and disagreeing with Ctrl+N is what would actually confuse anyone.
+	// It also preserves the pre-split behaviour exactly — SetAvailability had
+	// already overwritten the registry with the remote's answer by this point.
 	availDest := m.activeDest()
 
 	// Plugin list (selectable — Enter opens editor)

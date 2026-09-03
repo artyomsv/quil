@@ -62,7 +62,7 @@ func TestSaveMigrationAndAdvance_ReloadsDaemon(t *testing.T) {
 // daemon's availability answer by the time this runs. Calling
 // DetectAvailability() unconditionally here discarded that answer with a
 // detection pass over the wrong machine.
-func TestSaveMigrationAndAdvance_RemoteModeKeepsAdoptedAvailability(t *testing.T) {
+func TestSaveMigrationAndAdvance_KeepsRemoteAnswerAndReDetectsLocally(t *testing.T) {
 	t.Setenv("QUIL_HOME", t.TempDir())
 
 	dir := t.TempDir()
@@ -85,20 +85,10 @@ func TestSaveMigrationAndAdvance_RemoteModeKeepsAdoptedAvailability(t *testing.T
 		t.Fatalf("write plugin toml: %v", err)
 	}
 
-	reg := plugin.NewRegistry()
-	// Simulate an availability answer already adopted from the daemon over
-	// IPC before this dialog resolved.
-	//
-	// The marker is "terminal", NOT "terminal-wide": LoadFromDir's
-	// prune-on-reload exempts only "terminal" (registry.go), so a real reload
-	// deletes "terminal-wide" outright and Get() would return nil here. Same
-	// hazard documented at dialog_test.go's sibling test.
-	reg.SetAvailability(map[string]bool{"terminal": false})
-
 	fake := &fakeSender{}
 	m := Model{
 		client:         fake,
-		pluginRegistry: reg,
+		pluginRegistry: plugin.NewRegistry(),
 		migrationIdx:   0,
 		migrationPlugins: []plugin.StalePlugin{{
 			Name:        "claude-code",
@@ -108,16 +98,30 @@ func TestSaveMigrationAndAdvance_RemoteModeKeepsAdoptedAvailability(t *testing.T
 		migrationLeft: NewTextEditor(content, fp, 80, 24),
 	}
 	m.asRemote("gpu01")
+	// The marker is "terminal", NOT "terminal-wide": LoadFromDir's
+	// prune-on-reload exempts only "terminal" (registry.go), so a real reload
+	// deletes "terminal-wide" outright. Same hazard documented at
+	// dialog_test.go's sibling test.
+	//
+	// Seeded false so the local half can fail — see seedUnavailable for why a
+	// fresh registry already reports this marker available.
+	seedUnavailable(t, m.pluginRegistry, "terminal")
+	m.applyPluginList("gpu01", ipc.PluginListRespPayload{
+		Plugins: []ipc.PluginInfo{{Name: "terminal", Available: false}},
+	})
 
 	out, cmd := m.saveMigrationAndAdvance()
 	got := out.(Model)
-	if got.pluginRegistry.Get("terminal").Available {
-		t.Error("Available = true — a local DetectAvailability pass ran in remote mode and clobbered the daemon's answer")
+	if got.pluginAvailableFor("gpu01", "terminal") {
+		t.Error(`"gpu01" reads available — a local detection pass ran over the daemon's answer`)
+	}
+	if !got.pluginAvailableFor("", "terminal") {
+		t.Error("local reads unavailable — the migration reloaded the registry and nothing re-detected")
 	}
 
-	// Skipping local detection is only half the contract. LoadFromDir replaces
-	// every TOML-backed plugin and Available is runtime-only, so the flags are
-	// all false now; without a re-ask, remote mode greys out every plugin for
+	// Re-detecting locally is only half the contract. The reload changed a
+	// plugin DEFINITION, and the remote daemon is still holding whatever it
+	// last reported about the old one; without a re-ask that stays stale for
 	// the rest of the session.
 	runCmd(cmd)
 	var asked bool

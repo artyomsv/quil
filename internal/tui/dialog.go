@@ -2078,6 +2078,10 @@ func (m *Model) createPaneCategories() []struct {
 	// vanishing from the list.
 	byCategory := m.pluginRegistry.ByCategory()
 	order := plugin.CategoryOrder()
+	// Availability is resolved for the machine the pane is going to, not for
+	// whichever daemon answered last. See createPaneDialogDest.
+	dest := m.createPaneDialogDest()
+	avail := func(p *plugin.PanePlugin) bool { return m.pluginAvailableFor(dest, p.Name) }
 
 	var result []struct {
 		key     string
@@ -2091,7 +2095,7 @@ func (m *Model) createPaneCategories() []struct {
 		}
 		// Available plugins first, then alphabetical — keeps the actionable
 		// entries on top and greyed (not-installed) ones below.
-		sortPluginsAvailableFirst(plugins)
+		sortPluginsAvailableFirst(plugins, avail)
 		result = append(result, struct {
 			key     string
 			label   string
@@ -2109,7 +2113,7 @@ func (m *Model) createPaneCategories() []struct {
 			}
 		}
 		if !found {
-			sortPluginsAvailableFirst(plugins)
+			sortPluginsAvailableFirst(plugins, avail)
 			result = append(result, struct {
 				key     string
 				label   string
@@ -2122,10 +2126,15 @@ func (m *Model) createPaneCategories() []struct {
 
 // sortPluginsAvailableFirst orders available plugins ahead of unavailable
 // ones, alphabetical by display name within each group.
-func sortPluginsAvailableFirst(plugins []*plugin.PanePlugin) {
+//
+// Availability arrives as a function rather than being read off p.Available:
+// the field describes the LOCAL machine, and this list is being built for
+// whichever daemon the dialog is creating a pane on.
+func sortPluginsAvailableFirst(plugins []*plugin.PanePlugin, avail func(*plugin.PanePlugin) bool) {
 	sort.SliceStable(plugins, func(i, j int) bool {
-		if plugins[i].Available != plugins[j].Available {
-			return plugins[i].Available // available (true) sorts before unavailable
+		ai, aj := avail(plugins[i]), avail(plugins[j])
+		if ai != aj {
+			return ai // available (true) sorts before unavailable
 		}
 		return plugins[i].DisplayName < plugins[j].DisplayName
 	})
@@ -2246,9 +2255,10 @@ func (m Model) handleCreatePaneSelect() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		// Unavailable plugins are greyed and not selectable — the binary isn't
-		// installed, so there's nothing to spawn. The inline footer hint
-		// (rendered while the cursor is on it) tells the user where to get it.
-		if !plugins[m.dialogCursor].Available {
+		// installed on the machine this pane is going to, so there's nothing to
+		// spawn. The inline footer hint (rendered while the cursor is on it)
+		// tells the user where to get it.
+		if !m.pluginAvailableFor(m.createPaneDialogDest(), plugins[m.dialogCursor].Name) {
 			return m, nil
 		}
 		m.selectedPlugin = plugins[m.dialogCursor].Name
@@ -2315,15 +2325,20 @@ func (m Model) handleCreatePaneSelect() (tea.Model, tea.Cmd) {
 	return m.handleCreatePaneSplit()
 }
 
-// recentCWDsDest is the destination a committed directory is filed under.
+// createPaneDialogDest is the machine the create-pane dialog is working
+// against: the one whose disk it browsed, whose plugins it offers, and where
+// the pane is about to be spawned.
 //
-// createPaneDest when the dialog pinned one, because that is the machine whose
-// disk was browsed and the machine the pane is going to. It is deliberately NOT
-// used when empty: "" there means one of the startup windows (see
-// pinnableDest), where the router picks the destination and the client cannot
-// know which — filing under "" would put the entry in the unscoped list, which
-// is the LOCAL daemon's, and that is the same guess Router.Send makes.
-func (m Model) recentCWDsDest() string {
+// createPaneDest when the dialog pinned one. It is deliberately NOT used when
+// empty: "" there means one of the startup windows (see pinnableDest), where
+// the router picks the destination and the client cannot know which — falling
+// back to the active dest is the same guess Router.Send makes.
+//
+// Two callers, and the answer has to be the same for both. A committed
+// directory is filed under it (filing under "" would put the entry in the
+// unscoped list, which is the LOCAL daemon's), and plugin availability is
+// resolved against it (see pluginAvailableFor).
+func (m Model) createPaneDialogDest() string {
 	if m.createPaneDest != "" {
 		return m.createPaneDest
 	}
@@ -2422,7 +2437,7 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 		// differ exactly when createPaneDest exists to matter — the active
 		// project moved while the dialog was open — and the pane itself goes to
 		// createPaneDest, so the recent list has to follow it.
-		if err := SaveRecentCWDs(config.RecentCWDsPath(m.recentCWDsDest()), m.recentCWDs); err != nil {
+		if err := SaveRecentCWDs(config.RecentCWDsPath(m.createPaneDialogDest()), m.recentCWDs); err != nil {
 			log.Printf("create pane: save recent cwds: %v", err)
 		}
 	}
@@ -2758,11 +2773,12 @@ func (m Model) renderCreatePaneDialog() string {
 			b.WriteString("\n\n")
 
 			cursorOnUnavailable := false
+			availDest := m.createPaneDialogDest()
 			for i, p := range cat.plugins {
 				cursor := "  "
 				selected := i == m.dialogCursor
 				var line string
-				if !p.Available {
+				if !m.pluginAvailableFor(availDest, p.Name) {
 					// Greyed, not selectable — show why and where to get it.
 					if selected {
 						cursor = "> "
@@ -3108,17 +3124,16 @@ func (m Model) handlePluginsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if err := m.pluginRegistry.LoadFromDir(config.PluginsDir()); err != nil {
 			log.Printf("reload plugins: %v", err)
 		}
-		// Local detection only in local mode — in remote mode this would
-		// discard whatever availability answer the daemon already supplied
-		// with a detection pass over the wrong machine. reloadPluginsThenAskCmd
-		// below re-asks the daemon instead, once its own reload has finished.
-		//
-		// remoteModeFor(activeDest()), not RemoteMode(): the daemon this
-		// dialog reloads is the ACTIVE one, and this is the daemon-scoped
-		// counterpart to the same guard elsewhere.
-		if !m.remoteModeFor(m.activeDest()) {
-			m.pluginRegistry.DetectAvailability()
-		}
+		// UNCONDITIONAL, and it has to be. LoadFromDir above replaces every
+		// TOML-backed plugin with a freshly parsed one and Available is a
+		// runtime-only field, so without this pass the registry reads false for
+		// everything. It used to be skipped in remote mode, because the
+		// registry was also where the daemon's answer was stored and a local
+		// detection pass would clobber it — that is no longer true: remote
+		// answers live in Model.destAvail, keyed by the daemon that gave them,
+		// and the registry describes this machine alone. Skipping it now would
+		// grey out every plugin in the LOCAL project instead.
+		m.pluginRegistry.DetectAvailability()
 		m.dialog = dialogNone
 		return m, reloadPluginsThenAskCmd(m.client)
 	}
@@ -3142,6 +3157,30 @@ func (m Model) renderPluginsDialog() string {
 	b.WriteString("\n\n")
 
 	allPlugins := m.sortedPlugins()
+	// Hoisted: the destination is the same for every row, and renderCreatePaneDialog
+	// resolves its own the same way.
+	//
+	// The ACTIVE dest, deliberately, and it is the one call site where the
+	// choice is not obvious. This dialog lists and edits the CLIENT's own
+	// plugin definitions (RD-035 — the editor reads and writes
+	// config.PluginsDir() here, never the daemon's), so in remote mode the row
+	// pairs a local definition with a remote host's availability. That is the
+	// answer the marker should give: it says "can I run this in the project I
+	// am looking at", which is the same question Ctrl+N answers two dialogs
+	// away. Marking this list against "" instead would have the two dialogs
+	// disagree about the same tool on the same screen, and a user reading [ok]
+	// here and "(not installed)" there has no way to tell which one is lying.
+	//
+	// That is the whole argument. "It preserves the pre-split behaviour" is NOT
+	// a second one and was wrong when this comment first claimed it:
+	// SetAvailability overwrote the registry globally, so there was no
+	// per-destination behaviour to preserve — only one answer that happened to
+	// coincide with this one.
+	//
+	// Pinned by TestRenderPluginsDialog_MarksAgainstTheActiveDaemon, because a
+	// decision recorded only in a comment is one refactor away from flipping
+	// with every test still green.
+	availDest := m.activeDest()
 
 	// Plugin list (selectable — Enter opens editor)
 	for i, p := range allPlugins {
@@ -3153,7 +3192,7 @@ func (m Model) renderPluginsDialog() string {
 		}
 
 		avail := dialogSubtle.Render("[x]")
-		if p.Available {
+		if m.pluginAvailableFor(availDest, p.Name) {
 			avail = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Render("[ok]")
 		}
 
@@ -3201,11 +3240,9 @@ func (m Model) handleTOMLEditorKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if err := m.pluginRegistry.LoadFromDir(config.PluginsDir()); err != nil {
 			log.Printf("reload plugins: %v", err)
 		}
-		// Local detection only in local mode — see the identical guard on the
-		// Plugins dialog's Reload/Restore buttons above.
-		if !m.remoteModeFor(m.activeDest()) {
-			m.pluginRegistry.DetectAvailability()
-		}
+		// Unconditional — see the identical call on the Plugins dialog's
+		// Reload/Restore buttons above for why the remote-mode guard went.
+		m.pluginRegistry.DetectAvailability()
 		m.tomlEditor = nil
 		m.dialog = dialogPlugins
 		m.dialogCursor = 0

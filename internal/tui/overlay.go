@@ -132,8 +132,9 @@ func (m *Model) resolveOverlay(tab *TabModel, candidates []string, pluginName st
 
 	// Step 5: availability gate — must come before the picker so a missing
 	// binary never opens the picker dialog (Enter would spawn a doomed pane).
-	p := m.pluginRegistry.Get(pluginName)
-	if p == nil || !p.Available {
+	// Asked of the TAB's daemon, which is where the overlay pane is created
+	// (createOverlay's tabDest) and is reachable from a background project.
+	if !m.pluginAvailableFor(tab.Dest, pluginName) {
 		m.setFlash(pluginName + " not installed")
 		return m.flashCmd()
 	}
@@ -382,8 +383,8 @@ func overlayInstanceArgs(pluginName, repo string) []string {
 // calls createOverlay directly, so we re-check here to cover any future caller.
 func (m *Model) createOverlay(tab *TabModel, repo, pluginName string) tea.Cmd {
 	// Defense-in-depth: re-check availability so any direct caller is safe.
-	p := m.pluginRegistry.Get(pluginName)
-	if p == nil || !p.Available {
+	// The tab's daemon, for the same reason tabDest below is.
+	if !m.pluginAvailableFor(tab.Dest, pluginName) {
 		m.setFlash(pluginName + " not installed")
 		return m.flashCmd()
 	}

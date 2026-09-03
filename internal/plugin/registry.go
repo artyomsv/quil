@@ -93,18 +93,12 @@ func (r *Registry) ByCategory() map[string][]*PanePlugin {
 	return cats
 }
 
-// AvailableByCategory returns only available plugins grouped by category.
-func (r *Registry) AvailableByCategory() map[string][]*PanePlugin {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	cats := make(map[string][]*PanePlugin)
-	for _, p := range r.plugins {
-		if p.Available {
-			cats[p.Category] = append(cats[p.Category], p)
-		}
-	}
-	return cats
-}
+// There is deliberately no AvailableByCategory beside ByCategory. One existed,
+// filtering on p.Available, and it had lost its last caller — leaving a
+// ready-made way to build a plugin list that silently answers for the LOCAL
+// machine, which is the trap SetAvailability's removal below is about. A caller
+// that wants only the runnable plugins must filter through the accessor that
+// names a destination (Model.pluginAvailableFor in the client), not here.
 
 // CategoryOrder returns the display order for categories.
 func CategoryOrder() []struct{ Key, Label string } {
@@ -244,20 +238,16 @@ func (r *Registry) DetectAvailability() {
 	}
 }
 
-// SetAvailability replaces locally-detected availability with an authoritative
-// answer from elsewhere — in practice the daemon, which may be on another host.
+// A Registry's Available flags describe the machine the process is running on
+// and no other. There is deliberately no setter that overwrites them with an
+// answer from elsewhere: one existed (SetAvailability, for adopting a remote
+// daemon's list) and it was the whole of the 2026-09-03 bug — the client keeps
+// ONE registry for every destination, so a remote host with no `claude`
+// installed greyed out Claude Code in the local project too, permanently,
+// because DetectAvailability only ever sets availability TRUE.
 //
-// A plugin absent from avail becomes unavailable rather than keeping its local
-// value: if the answering side has no definition for it, spawning that type
-// there falls back to "terminal", so the pane would open as a shell wearing the
-// wrong name. Greying it is the honest answer.
-func (r *Registry) SetAvailability(avail map[string]bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for name, p := range r.plugins {
-		p.Available = avail[name]
-	}
-}
+// Another daemon's answer belongs beside the destination that gave it; in the
+// client that is Model.destAvail, read through Model.pluginAvailableFor.
 
 // searchBinary finds a binary when exec.LookPath fails. The motivating case
 // is Windows: when Quil is launched from Explorer (rather than a Terminal

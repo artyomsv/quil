@@ -435,72 +435,101 @@ func TestHandleConfirmKey_CancelPane(t *testing.T) {
 	}
 }
 
-// TestHandlePluginsKey_ReloadButton_RemoteModeKeepsAdoptedAvailability pins
-// the fix for a bug where pressing Reload Plugins / Restore Missing Defaults
-// called DetectAvailability() unconditionally, discarding whatever
-// availability answer the daemon had already supplied over IPC and replacing
-// it with a detection pass over the WRONG machine. Repro was: F1 → Plugins →
-// press either button, while attached to a remote daemon.
-func TestHandlePluginsKey_ReloadButton_RemoteModeKeepsAdoptedAvailability(t *testing.T) {
+// Pressing Reload Plugins / Restore Missing Defaults must leave BOTH answers
+// intact: what the remote daemon reported about itself, and what this machine
+// detects about itself. Repro is F1 → Plugins → press either button.
+//
+// Both halves have been shipped broken, in opposite directions. First
+// DetectAvailability ran unconditionally into the one shared registry and
+// overwrote the daemon's answer with a pass over the WRONG machine; the guard
+// added for that then meant a remote session never re-detected, so once the
+// answer moved out of the registry the same button greyed out every LOCAL
+// plugin instead — LoadFromDir replaces each one and Available is runtime-only.
+func TestHandlePluginsKey_ReloadButton_KeepsRemoteAnswerAndReDetectsLocally(t *testing.T) {
 	t.Setenv("QUIL_HOME", t.TempDir())
-	reg := plugin.NewRegistry()
-	// Simulate an availability answer already adopted from the daemon: the
-	// server says terminal-wide is unavailable, even though the local
-	// machine's own PATH would report it available (every DetectAvailability
-	// call elsewhere in this suite detects /bin/sh in the sandbox).
-	reg.SetAvailability(map[string]bool{"terminal-wide": false})
-
 	m := Model{
 		client:         &fakeSender{},
-		pluginRegistry: reg,
+		pluginRegistry: plugin.NewRegistry(),
 		dialog:         dialogPlugins,
 	}
 	m.asRemote("gpu01")
+	seedUnavailable(t, m.pluginRegistry, "terminal-wide")
+	// gpu01 reports terminal-wide missing. The local machine's own PATH would
+	// report it available (every DetectAvailability call elsewhere in this
+	// suite detects /bin/sh in the sandbox).
+	m.applyPluginList("gpu01", ipc.PluginListRespPayload{
+		Plugins: []ipc.PluginInfo{{Name: "terminal-wide", Available: false}},
+	})
 	m.dialogCursor = len(m.sortedPlugins()) // "Reload Plugins" button (btnIdx 0)
 
 	out, cmd := m.handlePluginsKey(tea.KeyPressMsg{Code: tea.KeyEnter})
 	got := out.(Model)
-	if got.pluginRegistry.Get("terminal-wide").Available {
-		t.Error("Available = true — a local DetectAvailability pass ran in remote mode and clobbered the daemon's answer")
+	if got.pluginAvailableFor("gpu01", "terminal-wide") {
+		t.Error(`"gpu01" reads available — a local detection pass clobbered the daemon's answer`)
+	}
+	if !got.pluginAvailableFor("", "terminal-wide") {
+		t.Error("local reads unavailable — the reload replaced every plugin and nothing re-detected")
 	}
 	if cmd == nil {
 		t.Fatal("no command returned — the daemon must be reloaded and re-asked")
 	}
 }
 
-// The local-mode counterpart: pressing Reload Plugins locally must still
-// re-detect, or a tool installed since launch would never clear its grey-out.
+// seedUnavailable forces one plugin's runtime flag false before a handler runs.
+//
+// Without it a test of DetectAvailability cannot fail, and four of them could
+// not. builtinTerminal() carries `Available: true` as a STRUCT LITERAL
+// (internal/plugin/builtin.go) and builtinTerminalWide() copies it, so a bare
+// plugin.NewRegistry() already reports both markers available with no detection
+// pass at all — the assertion "it is available afterwards" then holds whether or
+// not the handler detected anything, and deleting all three DetectAvailability
+// calls in this package left the whole suite green.
+//
+// The pre-#198 tests got this for free from reg.SetAvailability({x: false}).
+// Deleting that setter removed the seeding step with it, because its replacement
+// writes to Model.destAvail — which none of these handlers touch.
+func seedUnavailable(t *testing.T, reg *plugin.Registry, name string) {
+	t.Helper()
+	p := reg.Get(name)
+	if p == nil {
+		t.Fatalf("marker plugin %q missing from the registry", name)
+	}
+	if !p.Available {
+		t.Fatalf("marker plugin %q is already unavailable; it cannot show that detection ran", name)
+	}
+	p.Available = false
+}
+
+// The local-only counterpart: pressing Reload Plugins must re-detect, or a tool
+// installed since launch would never clear its grey-out.
 func TestHandlePluginsKey_ReloadButton_LocalModeReDetects(t *testing.T) {
 	t.Setenv("QUIL_HOME", t.TempDir())
-	reg := plugin.NewRegistry()
-	reg.SetAvailability(map[string]bool{"terminal-wide": false}) // stale/wrong
 	m := Model{
 		client:         &fakeSender{},
-		pluginRegistry: reg,
+		pluginRegistry: plugin.NewRegistry(),
 		dialog:         dialogPlugins,
 	}
-	// No SetRemoteDest — local mode.
+	// No asRemote — local mode.
+	seedUnavailable(t, m.pluginRegistry, "terminal-wide")
 	m.dialogCursor = len(m.sortedPlugins())
 
 	out, _ := m.handlePluginsKey(tea.KeyPressMsg{Code: tea.KeyEnter})
 	got := out.(Model)
-	if !got.pluginRegistry.Get("terminal-wide").Available {
+	if !got.pluginAvailableFor("", "terminal-wide") {
 		t.Error("Available = false — local mode should re-detect after reload, not keep a stale value")
 	}
 }
 
-// TestHandleTOMLEditorKey_Saved_RemoteModeKeepsAdoptedAvailability is the
-// same regression for the second site: saving a plugin's TOML in the F1 →
+// The same contract for the second site: saving a plugin's TOML in the F1 →
 // Plugins editor.
 //
 // Marker plugin is "terminal", not "terminal-wide": this test's save target
 // lives inside config.PluginsDir(), so LoadFromDir's reload-scan prunes any
 // OTHER registry entry with no backing TOML file in that directory —
 // "terminal-wide" among them (LoadFromDir exempts only "terminal" from
-// pruning). "terminal"'s pointer and Available field are therefore the only
-// ones guaranteed to survive the reload untouched except via
-// DetectAvailability, which is exactly the mechanism under test.
-func TestHandleTOMLEditorKey_Saved_RemoteModeKeepsAdoptedAvailability(t *testing.T) {
+// pruning). "terminal" is therefore the only entry guaranteed to survive the
+// reload and reach DetectAvailability, which is the mechanism under test.
+func TestHandleTOMLEditorKey_Saved_KeepsRemoteAnswerAndReDetectsLocally(t *testing.T) {
 	t.Setenv("QUIL_HOME", t.TempDir())
 	if err := os.MkdirAll(config.PluginsDir(), 0o700); err != nil {
 		t.Fatal(err)
@@ -508,25 +537,30 @@ func TestHandleTOMLEditorKey_Saved_RemoteModeKeepsAdoptedAvailability(t *testing
 	fp := filepath.Join(config.PluginsDir(), "widget.toml")
 	content := "[plugin]\nname = \"widget\"\n[command]\ncmd = \"widget\"\n"
 
-	reg := plugin.NewRegistry()
-	// Simulate an availability answer already adopted from the daemon: the
-	// server says "terminal" is unavailable (unrealistic in practice — the
-	// built-in is always available — but deterministic and PATH-independent,
-	// which is what this test needs from its marker).
-	reg.SetAvailability(map[string]bool{"terminal": false})
-
 	m := Model{
 		client:         &fakeSender{},
-		pluginRegistry: reg,
+		pluginRegistry: plugin.NewRegistry(),
 		dialog:         dialogTOMLEditor,
 		tomlEditor:     NewTextEditor(content, fp, 80, 24),
 	}
 	m.asRemote("gpu01")
+	// Seeded false so the local half can fail; DetectAvailability restores it
+	// unconditionally for "terminal", which is what the assertion detects.
+	seedUnavailable(t, m.pluginRegistry, "terminal")
+	// gpu01 says "terminal" is unavailable there — unrealistic in practice (the
+	// Go built-in always is) but deterministic and PATH-independent, which is
+	// what this test needs from its marker.
+	m.applyPluginList("gpu01", ipc.PluginListRespPayload{
+		Plugins: []ipc.PluginInfo{{Name: "terminal", Available: false}},
+	})
 
 	out, cmd := m.handleTOMLEditorKey(tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
 	got := out.(Model)
-	if got.pluginRegistry.Get("terminal").Available {
-		t.Error("Available = true — saving the TOML editor ran local detection in remote mode and clobbered the daemon's answer")
+	if got.pluginAvailableFor("gpu01", "terminal") {
+		t.Error(`"gpu01" reads available — saving the editor ran a local detection pass over the daemon's answer`)
+	}
+	if !got.pluginAvailableFor("", "terminal") {
+		t.Error("local reads unavailable — the save reloaded the registry and nothing re-detected")
 	}
 	if cmd == nil {
 		t.Fatal("no command returned — the daemon must be reloaded and re-asked")

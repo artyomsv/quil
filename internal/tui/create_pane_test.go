@@ -3,8 +3,10 @@ package tui
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/plugin"
 )
 
@@ -78,6 +80,72 @@ func TestHandleCreatePaneSelect_UnavailablePluginBlocked(t *testing.T) {
 	}
 	if got.createPaneStep != 1 {
 		t.Errorf("createPaneStep = %d, want 1 (stayed on plugin list)", got.createPaneStep)
+	}
+}
+
+// toolsIdxIn locates the "tools" category in a built dialog list.
+func toolsIdxIn(t *testing.T, m *Model) int {
+	t.Helper()
+	for i, c := range m.createPaneCategories() {
+		if c.key == "tools" {
+			return i
+		}
+	}
+	t.Fatal("tools category missing")
+	return -1
+}
+
+// The screen the 2026-09-03 bug appeared on. The create-pane dialog pins its
+// destination at open (createPaneDest), so it must gate on THAT machine's
+// availability — with one shared registry a remote host that lacked the tool
+// blocked Enter on a plugin installed right here.
+func TestHandleCreatePaneSelect_RemoteAnswerDoesNotBlockALocalPlugin(t *testing.T) {
+	m := &Model{pluginRegistry: toolsRegistry(t)} // lazygit available locally
+	m.applyPluginList("pi-hole", ipc.PluginListRespPayload{
+		Plugins: []ipc.PluginInfo{
+			{Name: "lazygit", Available: false},
+			{Name: "k9s", Available: false},
+		},
+	})
+
+	m.createPaneStep = 1
+	m.selectedCategory = toolsIdxIn(t, m)
+	m.dialogCursor = 0 // lazygit — installed on THIS machine
+
+	out, _ := m.handleCreatePaneSelect()
+	got := out.(Model)
+	if got.selectedPlugin != "lazygit" {
+		t.Errorf("selectedPlugin = %q, want \"lazygit\" — a remote host's answer blocked a locally installed tool",
+			got.selectedPlugin)
+	}
+}
+
+// The same answer, rendered. "(not installed)" is the exact string the user
+// read on a machine where the tool was installed.
+func TestRenderCreatePaneDialog_RemoteAnswerDoesNotGreyALocalPlugin(t *testing.T) {
+	m := &Model{pluginRegistry: toolsRegistry(t), width: 100, height: 40}
+	m.applyPluginList("pi-hole", ipc.PluginListRespPayload{
+		Plugins: []ipc.PluginInfo{
+			{Name: "lazygit", Available: false},
+			{Name: "k9s", Available: false},
+		},
+	})
+
+	m.createPaneStep = 1
+	m.selectedCategory = toolsIdxIn(t, m)
+
+	out := m.renderCreatePaneDialog()
+	lazygitRow := ""
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "Lazygit") {
+			lazygitRow = line
+		}
+	}
+	if lazygitRow == "" {
+		t.Fatalf("no Lazygit row in the dialog:\n%s", out)
+	}
+	if strings.Contains(lazygitRow, "not installed") {
+		t.Errorf("Lazygit row reads %q — a remote host's answer greyed out a locally installed tool", lazygitRow)
 	}
 }
 

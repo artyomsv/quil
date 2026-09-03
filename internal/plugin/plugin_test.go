@@ -29,26 +29,6 @@ func TestRegistryTerminalAlwaysAvailable(t *testing.T) {
 	}
 }
 
-func TestSetAvailability_OverridesLocalDetection(t *testing.T) {
-	r := NewRegistry()
-	r.DetectAvailability()
-	r.SetAvailability(map[string]bool{"terminal": false})
-	if r.Get("terminal").Available {
-		t.Error("Available = true, want false — the server's answer did not override local detection")
-	}
-}
-
-// A plugin the server does not define cannot spawn there: the daemon falls back
-// to "terminal", so the pane would open as a shell wearing the wrong name.
-func TestSetAvailability_PluginAbsentFromTheAnswerIsUnavailable(t *testing.T) {
-	r := NewRegistry()
-	r.DetectAvailability()
-	r.SetAvailability(map[string]bool{"something-else": true})
-	if r.Get("terminal").Available {
-		t.Error("Available = true for a plugin absent from the server's answer, want false")
-	}
-}
-
 func TestRegistryByCategory(t *testing.T) {
 	r := NewRegistry()
 	cats := r.ByCategory()

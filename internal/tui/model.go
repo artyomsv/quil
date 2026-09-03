@@ -465,10 +465,23 @@ type Model struct {
 	upgradeQueue          []upgradePrompt  // hosts waiting to be ASKED about provisioning; see enqueueUpgradePrompt
 	devMode               bool             // true when QUIL_HOME is set
 	pluginRegistry        *plugin.Registry // plugin registry (shared with daemon)
-	lastWidth             int              // last known window width (for persistence)
-	lastHeight            int              // last known window height (for persistence)
-	createPaneStep        int              // 0=category, 1=plugin, 2=instance form, 3=split direction
-	createPaneTarget      paneTarget       // where the pane goes: into this tab (Ctrl+N) or a new one (Ctrl+T)
+	// destAvail records what each REMOTE daemon said about its OWN registry,
+	// keyed by destination. Absent means "nobody else has answered for this
+	// machine", which is the local registry's own detection — see
+	// pluginAvailableFor.
+	//
+	// The registry itself therefore describes exactly ONE machine, the one
+	// running this client, and no answer from anywhere else may write into it.
+	// It used to be the single store for every destination: a remote daemon's
+	// answer overwrote it wholesale, so adding a remote host with no `claude`
+	// installed greyed out Claude Code in the LOCAL project's Ctrl+N while
+	// claude ran fine on the laptop (2026-09-03). Nothing repaired it either,
+	// because DetectAvailability only ever sets availability TRUE.
+	destAvail        map[string]map[string]bool
+	lastWidth        int        // last known window width (for persistence)
+	lastHeight       int        // last known window height (for persistence)
+	createPaneStep   int        // 0=category, 1=plugin, 2=instance form, 3=split direction
+	createPaneTarget paneTarget // where the pane goes: into this tab (Ctrl+N) or a new one (Ctrl+T)
 	// createPaneDest pins the destination the dialog was OPENED against.
 	//
 	// Resolving it at submit instead would read whichever project is active by
@@ -2558,7 +2571,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case pluginListMsg:
 		// MUST re-arm the listen loop, like every other IPC response branch.
-		cmd := m.applyPluginList(msg.Resp)
+		cmd := m.applyPluginList(msg.Dest, msg.Resp)
 		return m, tea.Batch(cmd, m.listenForMessages())
 
 	case browseDirMsg:
@@ -6906,7 +6919,11 @@ func (m Model) listenForMessages() tea.Cmd {
 				log.Printf("decode plugin_list_resp: %v", err)
 				return listenContinueMsg{}
 			}
-			return pluginListMsg{Resp: payload}
+			// Stamped with the answering daemon: availability is per
+			// machine, and an unstamped answer files under "" — the local
+			// daemon — which is the wrong-machine bug this RPC exists to
+			// remove, wearing a different hat.
+			return pluginListMsg{Resp: payload, Dest: msg.Origin}
 
 		case ipc.MsgBrowseDirResp:
 			var payload ipc.BrowseDirRespPayload

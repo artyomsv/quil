@@ -8,13 +8,21 @@ import (
 	"github.com/artyomsv/quil/internal/ipc"
 )
 
-// pluginListMsg carries one plugin-availability response.
+// pluginListMsg carries one plugin-availability response and the daemon that
+// sent it.
+//
+// Dest is ipc.Message.Origin, which the router stamps on receive; "" is the
+// local daemon, as everywhere else in this client. It is what keeps two hosts'
+// answers apart — without it the last reply to arrive spoke for every machine.
 //
 // No generation field, deliberately, and this is the one RPC in the phase where
-// that is right rather than forgotten: every response describes the same daemon
-// and the apply is idempotent, so a late answer says exactly what a fresh one
-// would.
-type pluginListMsg struct{ Resp ipc.PluginListRespPayload }
+// that is right rather than forgotten: responses are now keyed by the daemon
+// that sent them and the apply is idempotent, so a late answer says exactly
+// what a fresh one from that same host would.
+type pluginListMsg struct {
+	Resp ipc.PluginListRespPayload
+	Dest string
+}
 
 // requestPluginList asks the daemon which plugins its own registry can run.
 //
@@ -62,12 +70,21 @@ func (m *Model) requestPluginListFor(dest string) tea.Cmd {
 	}
 }
 
-// applyPluginList adopts the daemon's availability answer.
+// applyPluginList files ONE daemon's availability answer under ITS OWN
+// destination.
+//
+// Filed rather than adopted, and that distinction is the whole fix. The answer
+// describes the machine that sent it and nothing else; writing it into the
+// shared registry made the last host to reply speak for every host, so a remote
+// with no `claude` greyed out Claude Code in the local project too. `dest` is
+// the answering daemon (ipc.Message.Origin, stamped by the router on receive),
+// with "" meaning the local one exactly as it does everywhere else in this
+// client.
 //
 // An EMPTY answer is refused: it is not a statement that nothing is installed,
-// it is a daemon that told us nothing. Adopting it would grey out every plugin
-// at once — the silent failure this change exists to remove.
-func (m *Model) applyPluginList(resp ipc.PluginListRespPayload) tea.Cmd {
+// it is a daemon that told us nothing. Filing it would grey out every plugin on
+// that host at once — the silent failure this RPC exists to remove.
+func (m *Model) applyPluginList(dest string, resp ipc.PluginListRespPayload) tea.Cmd {
 	if len(resp.Plugins) == 0 || m.pluginRegistry == nil {
 		return nil
 	}
@@ -75,8 +92,39 @@ func (m *Model) applyPluginList(resp ipc.PluginListRespPayload) tea.Cmd {
 	for _, p := range resp.Plugins {
 		avail[p.Name] = p.Available
 	}
-	m.pluginRegistry.SetAvailability(avail)
+	if m.destAvail == nil {
+		m.destAvail = make(map[string]map[string]bool, 1)
+	}
+	m.destAvail[dest] = avail
 	return nil
+}
+
+// pluginAvailableFor reports whether the plugin named `name` can actually be
+// run by the daemon at `dest`. Every .Available consumer in the client goes
+// through it, because "is this installed" has no answer that is not about a
+// particular machine.
+//
+// A destination that has answered is authoritative for itself — including a
+// plugin ABSENT from its answer, which reads false: the daemon has no
+// definition for it, so spawning that type there falls back to "terminal" and
+// the pane opens as a shell wearing the wrong name. Greying it is the honest
+// answer.
+//
+// A destination that has NOT answered falls back to the local registry's own
+// detection. That is the right default in both directions: "" is the local
+// daemon and the registry already describes that machine, while a remote whose
+// answer is still in flight (or whose daemon is too old to have the RPC) keeps
+// the pre-RD-023 behaviour of offering what this machine has — a wrong offer
+// fails loudly at spawn, a wrong grey-out hides a working tool silently.
+func (m Model) pluginAvailableFor(dest, name string) bool {
+	if m.pluginRegistry == nil {
+		return false
+	}
+	if avail, ok := m.destAvail[dest]; ok {
+		return avail[name]
+	}
+	p := m.pluginRegistry.Get(name)
+	return p != nil && p.Available
 }
 
 // reloadPluginsThenAskCmd sends MsgReloadPlugins and MsgPluginListReq from a

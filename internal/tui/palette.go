@@ -313,14 +313,12 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 		}
 	}
 	// Each overlay tool is gated on its OWN binary: they share a tab's overlay
-	// slot, not an installation.
+	// slot, not an installation. Asked of the active project's daemon, which is
+	// the one handleToggleOverlay would create the overlay on.
 	if m.pluginRegistry != nil {
-		if pl := m.pluginRegistry.Get(overlayPluginLazygit); pl != nil {
-			lazygitOK = pl.Available
-		}
-		if pl := m.pluginRegistry.Get(overlayPluginHunk); pl != nil {
-			hunkOK = pl.Available
-		}
+		dest := m.activeDest()
+		lazygitOK = m.pluginAvailableFor(dest, overlayPluginLazygit)
+		hunkOK = m.pluginAvailableFor(dest, overlayPluginHunk)
 	}
 
 	// --- Go to pane: navigation leads — jumping to a pane is the most common

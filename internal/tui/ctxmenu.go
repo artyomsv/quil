@@ -102,13 +102,11 @@ func (m *Model) buildCtxMenuItems(pane *PaneModel) []ctxMenuItem {
 			historyOK = p.Command.RecordHistory
 		}
 		// Each overlay tool is gated on its OWN binary: they share a slot, not
-		// an installation.
-		if p := m.pluginRegistry.Get(overlayPluginLazygit); p != nil {
-			lazygitOK = p.Available
-		}
-		if p := m.pluginRegistry.Get(overlayPluginHunk); p != nil {
-			hunkOK = p.Available
-		}
+		// an installation. Asked of the active project's daemon, which is the
+		// one handleToggleOverlay would create the overlay on.
+		dest := m.activeDest()
+		lazygitOK = m.pluginAvailableFor(dest, overlayPluginLazygit)
+		hunkOK = m.pluginAvailableFor(dest, overlayPluginHunk)
 	}
 	muteLabel := "Mute notifications"
 	if pane.Muted {

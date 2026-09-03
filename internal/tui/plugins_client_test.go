@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"io"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -21,10 +22,10 @@ func pluginClientModel(t *testing.T) *Model {
 
 func TestApplyPluginList_AdoptsTheServersAnswer(t *testing.T) {
 	m := pluginClientModel(t)
-	m.applyPluginList(ipc.PluginListRespPayload{
+	m.applyPluginList("gpu01", ipc.PluginListRespPayload{
 		Plugins: []ipc.PluginInfo{{Name: "terminal", Available: false}},
 	})
-	if m.pluginRegistry.Get("terminal").Available {
+	if m.pluginAvailableFor("gpu01", "terminal") {
 		t.Error("Available = true, want false — the server's answer was ignored")
 	}
 }
@@ -36,10 +37,159 @@ func TestApplyPluginList_AdoptsTheServersAnswer(t *testing.T) {
 func TestApplyPluginList_EmptyAnswerKeepsLocalDetection(t *testing.T) {
 	m := pluginClientModel(t)
 	m.pluginRegistry.DetectAvailability()
-	m.applyPluginList(ipc.PluginListRespPayload{})
-	if !m.pluginRegistry.Get("terminal").Available {
+	m.applyPluginList("gpu01", ipc.PluginListRespPayload{})
+	if !m.pluginAvailableFor("gpu01", "terminal") {
 		t.Error("Available = false — an empty answer overwrote local detection")
 	}
+}
+
+// --- availability is per destination ----------------------------------------
+
+// A daemon's answer describes ITS OWN machine, and the client used to keep one
+// shared registry for every destination — so the LAST answer to arrive spoke
+// for all of them.
+//
+// Shipped repro (2026-09-03): adding a remote host with no `claude` installed
+// made the LOCAL project's Ctrl+N offer "Claude Code (not installed)" while
+// claude ran perfectly on the laptop, and nothing ever put it back —
+// DetectAvailability only ever sets availability TRUE.
+//
+// "terminal" is the fixture because DetectAvailability marks it available
+// unconditionally, so no binary on the test runner takes part in the answer.
+func TestApplyPluginList_RemoteAnswerDoesNotDescribeTheLocalMachine(t *testing.T) {
+	m := pluginClientModel(t)
+	m.pluginRegistry.DetectAvailability()
+
+	m.applyPluginList("pi-hole", ipc.PluginListRespPayload{
+		Plugins: []ipc.PluginInfo{{Name: "terminal", Available: false}},
+	})
+
+	if !m.pluginAvailableFor("", "terminal") {
+		t.Error("local availability = false — a remote daemon's answer overwrote the local machine's own detection")
+	}
+	if m.pluginAvailableFor("pi-hole", "terminal") {
+		t.Error("remote availability = true — the answering daemon's own answer was dropped")
+	}
+}
+
+// Two remotes must not overwrite each other either. With one shared answer the
+// winner was whichever host replied last, which is a race between two hosts
+// that have nothing to do with one another.
+func TestApplyPluginList_EachRemoteKeepsItsOwnAnswer(t *testing.T) {
+	m := pluginClientModel(t)
+
+	m.applyPluginList("has-it", ipc.PluginListRespPayload{
+		Plugins: []ipc.PluginInfo{{Name: "terminal", Available: true}},
+	})
+	m.applyPluginList("lacks-it", ipc.PluginListRespPayload{
+		Plugins: []ipc.PluginInfo{{Name: "terminal", Available: false}},
+	})
+
+	if !m.pluginAvailableFor("has-it", "terminal") {
+		t.Error(`"has-it" reads unavailable — the second host's answer overwrote the first`)
+	}
+	if m.pluginAvailableFor("lacks-it", "terminal") {
+		t.Error(`"lacks-it" reads available`)
+	}
+}
+
+// A plugin the answering daemon does not define cannot spawn there: that
+// daemon falls back to "terminal", so the pane would open as a shell wearing
+// the wrong name. Absent must read unavailable FOR THAT HOST — and must not
+// bleed into any other, which is why the local answer is asserted alongside it.
+func TestPluginAvailableFor_AbsentFromAnAnswerIsUnavailableOnThatHostOnly(t *testing.T) {
+	m := pluginClientModel(t)
+	m.pluginRegistry.DetectAvailability()
+
+	m.applyPluginList("gpu01", ipc.PluginListRespPayload{
+		Plugins: []ipc.PluginInfo{{Name: "something-else", Available: true}},
+	})
+
+	if m.pluginAvailableFor("gpu01", "terminal") {
+		t.Error(`"gpu01" reads available for a plugin absent from its own answer`)
+	}
+	if !m.pluginAvailableFor("", "terminal") {
+		t.Error("local reads unavailable — another host's answer decided it")
+	}
+}
+
+// A destination nobody has answered for keeps local detection. That covers a
+// remote whose reply is still in flight and one whose daemon is too old to have
+// the RPC: a wrong offer fails loudly at spawn, a wrong grey-out hides a
+// working tool silently.
+func TestPluginAvailableFor_UnansweredDestinationKeepsLocalDetection(t *testing.T) {
+	m := pluginClientModel(t)
+	m.pluginRegistry.DetectAvailability()
+
+	if !m.pluginAvailableFor("never-answered", "terminal") {
+		t.Error("Available = false for a host that has not answered; local detection should stand in")
+	}
+}
+
+// Driven through Update rather than by calling applyPluginList directly: the
+// destination has to survive the message as well as the function, and a
+// decision function that is correct in isolation says nothing about the call
+// site that feeds it.
+func TestUpdate_PluginListIsFiledUnderTheDaemonThatAnswered(t *testing.T) {
+	m := pluginClientModel(t)
+	m.pluginRegistry.DetectAvailability()
+
+	out, _ := m.Update(pluginListMsg{
+		Dest: "pi-hole",
+		Resp: ipc.PluginListRespPayload{
+			Plugins: []ipc.PluginInfo{{Name: "terminal", Available: false}},
+		},
+	})
+	got := out.(Model)
+
+	if !got.pluginAvailableFor("", "terminal") {
+		t.Error("local availability = false after a remote answer reached Update")
+	}
+	if got.pluginAvailableFor("pi-hole", "terminal") {
+		t.Error("remote availability = true — Update dropped the answering destination")
+	}
+}
+
+// The listen loop is where a response learns which daemon sent it: the router
+// stamps ipc.Message.Origin on receive. Losing it here files every remote
+// answer under "" — the local daemon — which is the original bug wearing a
+// different hat, and no test above would notice.
+func TestListenForMessages_PluginListCarriesItsOrigin(t *testing.T) {
+	resp, err := ipc.NewMessage(ipc.MsgPluginListResp, ipc.PluginListRespPayload{
+		Plugins: []ipc.PluginInfo{{Name: "terminal", Available: false}},
+	})
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	resp.Origin = "pi-hole" // what Router.pump stamps on receive
+
+	m := Model{client: &oneShotClient{msg: resp}, pluginRegistry: plugin.NewRegistry()}
+	m.asRemote("pi-hole")
+
+	msg := m.listenForMessages()()
+	got, ok := msg.(pluginListMsg)
+	if !ok {
+		t.Fatalf("msg is %T, want pluginListMsg", msg)
+	}
+	if got.Dest != "pi-hole" {
+		t.Errorf("Dest = %q, want %q — the answering daemon was not carried through", got.Dest, "pi-hole")
+	}
+}
+
+// oneShotClient answers once, then reports EOF.
+type oneShotClient struct {
+	msg  *ipc.Message
+	done bool
+}
+
+func (c *oneShotClient) Send(*ipc.Message) error { return nil }
+
+func (c *oneShotClient) Receive() (*ipc.Message, error) {
+	if c.done {
+		return nil, io.EOF
+	}
+	c.done = true
+	return c.msg, nil
 }
 
 // Local mode must not adopt the daemon's answer: it detects at start and runs
@@ -72,7 +222,7 @@ func TestRequestPluginList_RemoteModeAsks(t *testing.T) {
 // wired one up, or in a test harness that never sets it.
 func TestApplyPluginList_NilRegistryDoesNotPanic(t *testing.T) {
 	m := &Model{client: &fakeSender{}} // pluginRegistry left nil
-	cmd := m.applyPluginList(ipc.PluginListRespPayload{
+	cmd := m.applyPluginList("gpu01", ipc.PluginListRespPayload{
 		Plugins: []ipc.PluginInfo{{Name: "terminal", Available: true}},
 	})
 	if cmd != nil {

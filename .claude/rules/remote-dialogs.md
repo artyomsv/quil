@@ -6,6 +6,7 @@ paths:
   - "**/internal/daemon/plugins.go"
   - "**/internal/tui/browse_client.go"
   - "**/internal/tui/discover_client.go"
+  - "**/internal/tui/plugins_client.go"
   - "**/internal/tui/remotetext.go"
 ---
 

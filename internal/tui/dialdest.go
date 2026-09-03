@@ -263,6 +263,15 @@ func (m *Model) disconnectDest(dest string) {
 	// with a list belonging to the host the user just told this client to forget.
 	delete(m.offlineWoken, dest)
 	delete(m.cachedRemote, dest)
+	// The plugin-availability answer this host gave. Unlike the five above, a
+	// leftover entry here is WRONG rather than unreachable: pluginAvailableFor
+	// is read for a non-active dest (the overlay gates take tab.Dest, the
+	// create-pane dialog takes the dest it pinned at open), and a present
+	// bucket is authoritative. So re-adding a host that has since gained a tool
+	// greys it out until the fresh answer lands — turning the fallback this
+	// feature deliberately chose (offer, and fail loudly at spawn) back into
+	// the silent grey-out it exists to remove.
+	delete(m.destAvail, dest)
 	// The on-disk half of cachedRemote. "Forget this host" should leave nothing
 	// behind — a stale cache file would outlive the in-memory map and reappear
 	// as offline rows naming this host the next time it is added back. Best

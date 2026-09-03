@@ -20,13 +20,41 @@ func pluginClientModel(t *testing.T) *Model {
 	}
 }
 
-func TestApplyPluginList_AdoptsTheServersAnswer(t *testing.T) {
+// DetectAvailability first, or this test cannot fail: a fresh registry has
+// terminal.Available == false, so the FALLBACK answers false too and gutting
+// applyPluginList to a no-op still passes. Detecting makes local truth `true`,
+// which is the only way the assertion can distinguish "filed the server's
+// false" from "never filed anything".
+func TestApplyPluginList_FilesTheServersAnswer(t *testing.T) {
 	m := pluginClientModel(t)
+	m.pluginRegistry.DetectAvailability()
 	m.applyPluginList("gpu01", ipc.PluginListRespPayload{
 		Plugins: []ipc.PluginInfo{{Name: "terminal", Available: false}},
 	})
 	if m.pluginAvailableFor("gpu01", "terminal") {
 		t.Error("Available = true, want false — the server's answer was ignored")
+	}
+}
+
+// The LOCAL daemon's answer is refused. reloadPluginsThenAskCmd asks
+// unconditionally, so this arrives on a path the startup migration dialog
+// reaches without the user opening anything — and filing it would make the
+// daemon (detects once at start, then runs for weeks) authoritative over this
+// client's own detection about the very same machine, silently undoing the
+// DetectAvailability pass the reload had just run.
+func TestApplyPluginList_LocalAnswerIsRefused(t *testing.T) {
+	m := pluginClientModel(t)
+	m.pluginRegistry.DetectAvailability() // local truth: terminal is available
+
+	m.applyPluginList("", ipc.PluginListRespPayload{
+		Plugins: []ipc.PluginInfo{{Name: "terminal", Available: false}},
+	})
+
+	if !m.pluginAvailableFor("", "terminal") {
+		t.Error("local availability = false — the local daemon's answer was filed and shadowed local detection")
+	}
+	if _, filed := m.destAvail[""]; filed {
+		t.Error(`destAvail[""] exists — the local daemon must never get a bucket at all`)
 	}
 }
 
@@ -123,6 +151,30 @@ func TestPluginAvailableFor_UnansweredDestinationKeepsLocalDetection(t *testing.
 
 	if !m.pluginAvailableFor("never-answered", "terminal") {
 		t.Error("Available = false for a host that has not answered; local detection should stand in")
+	}
+}
+
+// Forgetting a host forgets what it said. disconnectDest deletes every other
+// per-destination table and says so; this one is the first whose leftover entry
+// is WRONG rather than merely unreachable, because pluginAvailableFor is read
+// for a non-active dest and a present bucket wins over local detection. So a
+// host re-added after gaining a tool would grey it out until a fresh answer
+// landed — the silent failure this whole change removes.
+func TestDisconnectDest_DropsThatHostsPluginAnswer(t *testing.T) {
+	m := pluginClientModel(t)
+	m.pluginRegistry.DetectAvailability() // local truth: terminal is available
+	m.client = NewRouter(map[string]Client{"gpu01": newFakeConn()})
+	m.applyPluginList("gpu01", ipc.PluginListRespPayload{
+		Plugins: []ipc.PluginInfo{{Name: "terminal", Available: false}},
+	})
+	if m.pluginAvailableFor("gpu01", "terminal") {
+		t.Fatal("setup failed: gpu01's answer was never filed")
+	}
+
+	m.disconnectDest("gpu01")
+
+	if !m.pluginAvailableFor("gpu01", "terminal") {
+		t.Error("gpu01 still reads unavailable after being forgotten — its stale answer outlived the disconnect")
 	}
 }
 

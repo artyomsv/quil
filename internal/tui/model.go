@@ -466,9 +466,11 @@ type Model struct {
 	devMode               bool             // true when QUIL_HOME is set
 	pluginRegistry        *plugin.Registry // plugin registry (shared with daemon)
 	// destAvail records what each REMOTE daemon said about its OWN registry,
-	// keyed by destination. Absent means "nobody else has answered for this
-	// machine", which is the local registry's own detection — see
-	// pluginAvailableFor.
+	// keyed by destination. Absent means "that machine has not answered for
+	// itself" and falls back to the local registry's own detection — see
+	// pluginAvailableFor. The LOCAL daemon never has an entry at all:
+	// applyPluginList refuses a "" answer, because this client re-detects far
+	// more often than the daemon does about that same machine.
 	//
 	// The registry itself therefore describes exactly ONE machine, the one
 	// running this client, and no answer from anywhere else may write into it.
@@ -477,6 +479,12 @@ type Model struct {
 	// installed greyed out Claude Code in the LOCAL project's Ctrl+N while
 	// claude ran fine on the laptop (2026-09-03). Nothing repaired it either,
 	// because DetectAvailability only ever sets availability TRUE.
+	//
+	// Written and read on the one Bubble Tea goroutine (Update and View). Every
+	// Model copy shares the same map header, so a tea.Cmd closure calling
+	// pluginAvailableFor would read it from another goroutine — no caller does,
+	// and none should start: resolve the answer in Update and capture the bool.
+	// disconnectDest drops a destination's entry with the rest of its tables.
 	destAvail        map[string]map[string]bool
 	lastWidth        int        // last known window width (for persistence)
 	lastHeight       int        // last known window height (for persistence)

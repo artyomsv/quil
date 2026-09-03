@@ -93,18 +93,12 @@ func (r *Registry) ByCategory() map[string][]*PanePlugin {
 	return cats
 }
 
-// AvailableByCategory returns only available plugins grouped by category.
-func (r *Registry) AvailableByCategory() map[string][]*PanePlugin {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	cats := make(map[string][]*PanePlugin)
-	for _, p := range r.plugins {
-		if p.Available {
-			cats[p.Category] = append(cats[p.Category], p)
-		}
-	}
-	return cats
-}
+// There is deliberately no AvailableByCategory beside ByCategory. One existed,
+// filtering on p.Available, and it had lost its last caller — leaving a
+// ready-made way to build a plugin list that silently answers for the LOCAL
+// machine, which is the trap SetAvailability's removal below is about. A caller
+// that wants only the runnable plugins must filter through the accessor that
+// names a destination (Model.pluginAvailableFor in the client), not here.
 
 // CategoryOrder returns the display order for categories.
 func CategoryOrder() []struct{ Key, Label string } {

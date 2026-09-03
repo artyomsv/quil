@@ -3157,6 +3157,9 @@ func (m Model) renderPluginsDialog() string {
 	b.WriteString("\n\n")
 
 	allPlugins := m.sortedPlugins()
+	// Hoisted: the destination is the same for every row, and renderCreatePaneDialog
+	// resolves its own the same way.
+	availDest := m.activeDest()
 
 	// Plugin list (selectable — Enter opens editor)
 	for i, p := range allPlugins {
@@ -3168,7 +3171,7 @@ func (m Model) renderPluginsDialog() string {
 		}
 
 		avail := dialogSubtle.Render("[x]")
-		if m.pluginAvailableFor(m.activeDest(), p.Name) {
+		if m.pluginAvailableFor(availDest, p.Name) {
 			avail = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Render("[ok]")
 		}
 

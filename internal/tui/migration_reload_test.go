@@ -62,7 +62,7 @@ func TestSaveMigrationAndAdvance_ReloadsDaemon(t *testing.T) {
 // daemon's availability answer by the time this runs. Calling
 // DetectAvailability() unconditionally here discarded that answer with a
 // detection pass over the wrong machine.
-func TestSaveMigrationAndAdvance_RemoteModeKeepsAdoptedAvailability(t *testing.T) {
+func TestSaveMigrationAndAdvance_KeepsRemoteAnswerAndReDetectsLocally(t *testing.T) {
 	t.Setenv("QUIL_HOME", t.TempDir())
 
 	dir := t.TempDir()

@@ -84,8 +84,20 @@ func (m *Model) requestPluginListFor(dest string) tea.Cmd {
 // An EMPTY answer is refused: it is not a statement that nothing is installed,
 // it is a daemon that told us nothing. Filing it would grey out every plugin on
 // that host at once — the silent failure this RPC exists to remove.
+//
+// A LOCAL answer is refused too, and that guard lives HERE rather than at the
+// asker. requestPluginListFor already declines to ask locally, but
+// reloadPluginsThenAskCmd asks unconditionally — so a local answer really does
+// arrive, on a path the startup migration dialog reaches without the user
+// opening anything. Filing it would make the local daemon authoritative for the
+// local project: this client re-detects at every launch and at all three reload
+// sites, while the daemon detects once at start and then runs for weeks with a
+// PATH frozen at spawn. It would also silently undo the DetectAvailability pass
+// those reload sites had just run, milliseconds earlier, about the very same
+// machine. Refusing at the file keeps the rule true for any future caller
+// instead of for one of two.
 func (m *Model) applyPluginList(dest string, resp ipc.PluginListRespPayload) tea.Cmd {
-	if len(resp.Plugins) == 0 || m.pluginRegistry == nil {
+	if len(resp.Plugins) == 0 || !m.remoteModeFor(dest) {
 		return nil
 	}
 	avail := make(map[string]bool, len(resp.Plugins))
@@ -111,17 +123,21 @@ func (m *Model) applyPluginList(dest string, resp ipc.PluginListRespPayload) tea
 // answer.
 //
 // A destination that has NOT answered falls back to the local registry's own
-// detection. That is the right default in both directions: "" is the local
-// daemon and the registry already describes that machine, while a remote whose
-// answer is still in flight (or whose daemon is too old to have the RPC) keeps
-// the pre-RD-023 behaviour of offering what this machine has — a wrong offer
-// fails loudly at spawn, a wrong grey-out hides a working tool silently.
-func (m Model) pluginAvailableFor(dest, name string) bool {
-	if m.pluginRegistry == nil {
-		return false
-	}
+// detection. That covers the local daemon (which never files an answer at all,
+// see applyPluginList) and a remote whose answer is still in flight or whose
+// daemon is too old to have the RPC — there it keeps the pre-RD-023 behaviour of
+// offering what this machine has, because a wrong offer fails loudly at spawn
+// while a wrong grey-out hides a working tool silently.
+//
+// Pointer receiver: Model is large and this runs twice per comparison inside
+// sortPluginsAvailableFirst's comparator and once per row in two render loops,
+// so a value receiver copies the whole struct on a hot path for nothing.
+func (m *Model) pluginAvailableFor(dest, name string) bool {
 	if avail, ok := m.destAvail[dest]; ok {
 		return avail[name]
+	}
+	if m.pluginRegistry == nil {
+		return false
 	}
 	p := m.pluginRegistry.Get(name)
 	return p != nil && p.Available

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"io"
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -445,5 +446,47 @@ func TestPaletteAndCtxMenu_GateOnTheActiveDaemonsAnswer(t *testing.T) {
 		if item.id == ctxActLazygit && item.enabled {
 			t.Error("context menu offers lazygit — it asked the local registry, not the active host")
 		}
+	}
+}
+
+// The F1 -> Plugins list marks each row against the ACTIVE project's daemon,
+// and that is a deliberate decision rather than an accident of which dest was
+// nearest.
+//
+// The rows themselves are the CLIENT's own plugin definitions (RD-035 — that
+// editor reads and writes config.PluginsDir() here, never the daemon's), so in
+// remote mode this pairs a local definition with a remote host's availability.
+// The alternative, marking against "", would have this dialog and Ctrl+N
+// disagree about the same tool on the same screen.
+//
+// It is pinned because it was the LAST pluginAvailableFor call site whose
+// destination no test could distinguish: retargeting it alone left the whole
+// suite green, so the decision lived only in a comment and a refactor could
+// have flipped it silently.
+func TestRenderPluginsDialog_MarksAgainstTheActiveDaemon(t *testing.T) {
+	repo := gitRepoDir(t)
+	m, _, tab := overlayTestModel(t, repo)
+	tab.Dest = "gpu01"
+	m.cur().Dest = "gpu01"
+	m.dialog = dialogPlugins
+	m.width, m.height = 100, 40
+	m.applyPluginList("gpu01", ipc.PluginListRespPayload{
+		Plugins: []ipc.PluginInfo{{Name: "lazygit", Available: false}},
+	})
+	if !m.pluginAvailableFor("", overlayPluginLazygit) {
+		t.Fatal("precondition: lazygit must read available locally, or both dests answer alike")
+	}
+
+	row := ""
+	for _, line := range strings.Split(stripANSI(m.renderPluginsDialog()), "\n") {
+		if strings.Contains(line, "lazygit") {
+			row = line
+		}
+	}
+	if row == "" {
+		t.Fatalf("no lazygit row in the Plugins dialog:\n%s", stripANSI(m.renderPluginsDialog()))
+	}
+	if !strings.Contains(row, "[x]") {
+		t.Errorf("lazygit row is %q, want the unavailable marker — the list marked against the local registry instead of the active host", row)
 	}
 }

@@ -3167,9 +3167,19 @@ func (m Model) renderPluginsDialog() string {
 	// pairs a local definition with a remote host's availability. That is the
 	// answer the marker should give: it says "can I run this in the project I
 	// am looking at", which is the same question Ctrl+N answers two dialogs
-	// away, and disagreeing with Ctrl+N is what would actually confuse anyone.
-	// It also preserves the pre-split behaviour exactly — SetAvailability had
-	// already overwritten the registry with the remote's answer by this point.
+	// away. Marking this list against "" instead would have the two dialogs
+	// disagree about the same tool on the same screen, and a user reading [ok]
+	// here and "(not installed)" there has no way to tell which one is lying.
+	//
+	// That is the whole argument. "It preserves the pre-split behaviour" is NOT
+	// a second one and was wrong when this comment first claimed it:
+	// SetAvailability overwrote the registry globally, so there was no
+	// per-destination behaviour to preserve — only one answer that happened to
+	// coincide with this one.
+	//
+	// Pinned by TestRenderPluginsDialog_MarksAgainstTheActiveDaemon, because a
+	// decision recorded only in a comment is one refactor away from flipping
+	// with every test still green.
 	availDest := m.activeDest()
 
 	// Plugin list (selectable — Enter opens editor)

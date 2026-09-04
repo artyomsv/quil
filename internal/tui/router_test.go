@@ -363,6 +363,34 @@ func TestRouterRemovedPumpPublishesNothing(t *testing.T) {
 		}
 	})
 
+	// The publication boundary itself: a pump that has ALREADY received a
+	// message and is parked on a full inbox must exit when removed, not
+	// publish once a slot frees. Deterministic because the inbox is filled
+	// from the test side first, so the pump can only be waiting in its
+	// select when Remove closes stop — and only the select's stop case lets
+	// it leave. Drop that case and this test sees the message come out.
+	t.Run("blocked publish", func(t *testing.T) {
+		gpu := newFakeConn()
+		r := NewRouter(map[string]Client{"gpu01": gpu})
+		filler, _ := ipc.NewMessage(ipc.MsgWorkspaceState, nil)
+		for i := 0; i < cap(r.in); i++ {
+			r.in <- filler
+		}
+		out, _ := ipc.NewMessage(ipc.MsgPaneOutput, nil)
+		gpu.recv <- out
+		time.Sleep(50 * time.Millisecond) // the pump has `out` in hand and is parked on r.in
+		r.Remove("gpu01")
+		for i := 0; i < cap(r.in); i++ {
+			<-r.in
+		}
+		time.Sleep(50 * time.Millisecond)
+		select {
+		case leaked := <-r.in:
+			t.Fatalf("removed pump published %s once its inbox drained — the select's stop case is what lets a parked pump exit", leaked.Type)
+		default:
+		}
+	})
+
 	t.Run("failure", func(t *testing.T) {
 		gpu := newFakeConn()
 		r := NewRouter(map[string]Client{"gpu01": gpu})

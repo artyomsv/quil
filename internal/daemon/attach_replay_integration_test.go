@@ -270,3 +270,109 @@ func TestHandleAttach_SkipsGhostReplayWhenTheChildRepaints(t *testing.T) {
 			"reprints none of its scrollback, so this replay is the only history", n)
 	}
 }
+
+// TestHandleAttach_ReplaysTheChildsOwnStreamAfterARestore: the skip above is
+// for the PREVIOUS session's bytes, which the respawned child repaints itself.
+// Once that child has written, OutputBuf holds ITS stream (flushPaneOutput
+// hands the buffer over on the first byte), and replaying that reproduces the
+// screen the child already has — the same bytes a reattach replays. Sending
+// nothing and relying on the redraw kick instead left the pane BLACK whenever
+// the child sat on a screen that ignores Ctrl+L: claude's first-run setup,
+// its login prompt, a startup error (2026-09-04, the proctoring pane sat on
+// the theme picker behind an empty rectangle for two hours).
+//
+// Three panes in one attach so a fix cannot pass by replaying everything:
+// a self-restoring child that has painted (replay ITS bytes, none of the old
+// ones), one that has not (still nothing — the old bytes would double the
+// conversation), and a shell as the barrier and control.
+func TestHandleAttach_ReplaysTheChildsOwnStreamAfterARestore(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("QUIL_HOME", tmp)
+
+	d := New(config.Default())
+	tab := d.session.CreateTab("Shell")
+
+	// restored leaves a pane exactly as restoreWorkspace does: the previous
+	// session's bytes seeded into OutputBuf, the snapshot copy in GhostSnap.
+	old := bytes.Repeat([]byte{'g'}, 4096)
+	restored := func(typ string) *Pane {
+		t.Helper()
+		pane, err := d.session.CreatePane(tab.ID, "/tmp")
+		if err != nil {
+			t.Fatalf("CreatePane: %v", err)
+		}
+		pane.PluginMu.Lock()
+		pane.Type = typ
+		pane.OutputBuf.Write(old)
+		pane.ghostSeeded = true
+		pane.GhostSnap = append([]byte(nil), old...)
+		pane.PluginMu.Unlock()
+		return pane
+	}
+
+	painted := restored("claude-code")
+	// The respawned child wrote — through the real handover seam, not by
+	// poking the buffer, so the test fails if the handover ever stops
+	// resetting it.
+	own := bytes.Repeat([]byte{'c'}, 2048)
+	d.flushPaneOutput(painted.ID, own)
+
+	waiting := restored("claude-code")
+	shell := restored("terminal") // last: the barrier, and the control
+
+	if err := d.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer d.Stop()
+
+	if p := d.registry.Get("claude-code"); p == nil || !restoresOwnHistory(p) {
+		t.Fatal("setup: claude-code must resolve to a session-resuming strategy")
+	}
+
+	conn := dialDaemon(t, filepath.Join(tmp, "quild.sock"))
+	defer conn.Close()
+
+	attach, err := ipc.NewMessage(ipc.MsgAttach, ipc.AttachPayload{Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("NewMessage attach: %v", err)
+	}
+	if err := ipc.WriteMessage(conn, attach); err != nil {
+		t.Fatalf("write attach: %v", err)
+	}
+
+	// Panes replay in creation order; the shell's last byte proves every
+	// earlier pane's frames — or their absence — are already here.
+	got := map[string][]byte{}
+	_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
+	for len(got[shell.ID]) < 4096 {
+		msg, err := ipc.ReadMessage(conn)
+		if err != nil {
+			t.Fatalf("read after %d/%d/%d bytes: %v", len(got[painted.ID]), len(got[waiting.ID]), len(got[shell.ID]), err)
+		}
+		if msg.Type != ipc.MsgPaneOutput {
+			continue
+		}
+		var p ipc.PaneOutputPayload
+		if err := msg.DecodePayload(&p); err != nil {
+			t.Fatalf("decode pane output: %v", err)
+		}
+		if p.Ghost {
+			got[p.PaneID] = append(got[p.PaneID], p.Data...)
+		}
+	}
+
+	if !bytes.Equal(got[painted.ID], own) {
+		t.Errorf("painted claude-code pane received %d ghost bytes (%d of the old session's), want exactly its child's %d — "+
+			"the screen it drew is the only thing that shows what it is waiting for",
+			len(got[painted.ID]), bytes.Count(got[painted.ID], []byte{'g'}), len(own))
+	}
+	if n := len(got[waiting.ID]); n != 0 {
+		t.Errorf("waiting claude-code pane received %d ghost bytes; its child has not painted, "+
+			"so the only bytes on hand are the previous session's, which it will repaint itself", n)
+	}
+	// Prefix, not equality: the shell's replay is followed by a scroll-out
+	// frame, and whether the read loop stops before it depends on chunking.
+	if !bytes.HasPrefix(got[shell.ID], old) {
+		t.Errorf("terminal pane received %d ghost bytes, want its 4096 restored bytes first", len(got[shell.ID]))
+	}
+}

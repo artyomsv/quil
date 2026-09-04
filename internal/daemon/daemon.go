@@ -1675,11 +1675,9 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 					// child's cut stream is torn, and there the kick remains
 					// the better of the two. No scroll-out either — that is for
 					// a DIFFERENT session's screen, and this is the child's own.
-					if !pane.ghostSeeded {
-						if own := pane.OutputBuf.Bytes(); len(own) > 0 {
-							ghost = own
-							source = "child-stream"
-						}
+					if !pane.ghostSeeded && pane.OutputBuf.Len() > 0 {
+						ghost = pane.OutputBuf.Bytes()
+						source = "child-stream"
 					}
 				}
 			}
@@ -3263,13 +3261,21 @@ func (d *Daemon) flushPaneOutput(paneID string, data []byte) {
 		// replay on reconnect; from here it is this child's stream, which is
 		// what makes a reconnect replay reproduce the child's screen exactly
 		// instead of laying it over a different session's.
+		//
+		// The reset happens INSIDE the PluginMu span, with the flag flip:
+		// handleAttach decides "replay the child's own stream" on !ghostSeeded
+		// while holding PluginMu, so a window where the flag is already false
+		// and the buffer still holds the previous session's bytes would have
+		// it replay THOSE, with no scroll-out — the corrupted join of
+		// 2026-08-03. Reset is an index write under the ring's own mutex, not
+		// I/O, and PluginMu → ringbuf.mu is the order handleAttach's Bytes()
+		// already takes.
 		pane.PluginMu.Lock()
-		seeded := pane.ghostSeeded
-		pane.ghostSeeded = false
-		pane.PluginMu.Unlock()
-		if seeded {
+		if pane.ghostSeeded {
 			pane.OutputBuf.Reset()
+			pane.ghostSeeded = false
 		}
+		pane.PluginMu.Unlock()
 		pane.OutputBuf.Write(data)
 	}
 
@@ -3977,36 +3983,40 @@ func claudeResumeTemplate(p *plugin.PanePlugin, pane *Pane, claim sessionClaimFn
 }
 
 // locatedOwnSession names the session a restarting pane must --resume: its
-// first candidate (hook record, then workspace state — the same order the
-// restore path trusts) whose transcript is on disk and that no OTHER pane
-// holds. The claim records the choice on the pane exactly as restore does, so
-// session_id and transcript_path stay a coherent pair.
+// most authoritative candidate (the hook record, else workspace state — the
+// order claudeResumeCandidates fixes), provided THAT candidate's transcript is
+// on disk and no other pane holds it. rec is the hook record spawnPane already
+// read, so both decisions see one snapshot of it. The claim records the
+// choice on the pane exactly as restore does, so session_id and
+// transcript_path stay a coherent pair.
+//
+// Only the top candidate is considered, never the first located one further
+// down the list: ranking a located low-authority id above an unlocated
+// high-authority one is the silent swap claudeResumeTemplate's comment rules
+// out, and here it has a concrete shape — after /clear the hook names the new
+// session, whose transcript does not exist until the first exchange, while
+// workspace state still names the cleared one, whose transcript does.
+// Promoting the latter reopens the conversation the user just cleared.
 //
 // Stricter than claudeResumeTemplate on purpose: that path resumes an
 // UNLOCATED id too, because failing to find a transcript is not proof it is
 // gone. Here the alternative is not --continue but --session-id with the same
 // id, which is correct for a session that was never persisted and fatal for
-// one that was — so only positive evidence promotes. Reports false when
-// nothing is located, and the fresh-start args stand.
-func (d *Daemon) locatedOwnSession(pane *Pane) (string, bool) {
-	cands, _ := claudeResumeCandidates(pane)
-	located := make([]resumeCandidate, 0, len(cands))
-	for _, c := range cands {
-		if c.state == candidateLocated {
-			located = append(located, c)
-		}
-	}
-	if len(located) == 0 {
+// one that was — so only positive evidence promotes. Reports false otherwise,
+// and the fresh-start args stand.
+func (d *Daemon) locatedOwnSession(pane *Pane, rec claudehook.SessionRecord, recErr error) (string, bool) {
+	cands, _ := claudeResumeCandidatesFrom(pane, rec, recErr)
+	if len(cands) == 0 || cands[0].state != candidateLocated {
 		return "", false
 	}
-	chosen, holder, ok := d.claimResumeSession(pane, located)
+	chosen, holder, ok := d.claimResumeSession(pane, cands[:1])
 	if !ok {
 		// Falling through to --session-id will have claude refuse it, which is
 		// the truthful outcome: the conversation is open in another pane.
-		log.Printf("restart pane %s: not resuming %q — held by pane %s", pane.ID, located[0].id, holder)
+		log.Printf("spawn pane %s: not resuming %q — held by pane %s", pane.ID, cands[0].id, holder)
 		return "", false
 	}
-	log.Printf("restart pane %s: resuming its own session %q (source=%s)", pane.ID, chosen.id, chosen.source)
+	log.Printf("spawn pane %s: resuming its own session %q (source=%s)", pane.ID, chosen.id, chosen.source)
 	return chosen.id, true
 }
 
@@ -4051,6 +4061,14 @@ func freshClaudeSession(p *plugin.PanePlugin, pane *Pane, why string) []string {
 // wedges this package documents at length.
 func claudeResumeCandidates(pane *Pane) (cands []resumeCandidate, sawRecorded bool) {
 	rec, err := readHookSessionFn(pane.ID)
+	return claudeResumeCandidatesFrom(pane, rec, err)
+}
+
+// claudeResumeCandidatesFrom is claudeResumeCandidates for a caller that has
+// already read the hook record (spawnPane reads it for the stale-pick
+// retirement) and must not read the file a second time — a rotation landing
+// between two reads would have the two decisions describe different sessions.
+func claudeResumeCandidatesFrom(pane *Pane, rec claudehook.SessionRecord, err error) (cands []resumeCandidate, sawRecorded bool) {
 	if err != nil {
 		// A missing file is the ordinary case (no hook has fired yet). Anything
 		// else means the authoritative source was silently discarded on the one
@@ -4339,22 +4357,51 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 		// the new id), a restart has to reattach to THAT conversation, not the
 		// one chosen days ago. The stale pick is retired at the same time so it
 		// cannot resurface on a later restore either. Read off-lock: never hold
-		// PluginMu across a file read.
-		hookID := ""
+		// PluginMu across a file read. The record is read ONCE and threaded
+		// into locatedOwnSession below, so the two decisions cannot disagree
+		// about a rotation that lands between two reads.
+		var (
+			rec    claudehook.SessionRecord
+			recErr error
+		)
+		hookID, hookPath := "", ""
 		if p.UsesClaudeSessions() {
-			if rec, err := readHookSessionFn(pane.ID); err == nil {
-				hookID = rec.ID
+			rec, recErr = readHookSessionFn(pane.ID)
+			// Shape-checked before it can reach argv: this is the one input on
+			// the branch that no other guard has seen.
+			if recErr == nil && resumeSessionIDRe.MatchString(rec.ID) {
+				hookID, hookPath = rec.ID, rec.TranscriptPath
 			}
 		}
 		pane.PluginMu.Lock()
 		if pane.PluginState == nil {
 			pane.PluginState = make(map[string]string)
 		}
+		// hadSession tells a RESTART (the pane already ran, so it has an id)
+		// from a CREATE (no id yet); both reach this branch. A hook record
+		// under a brand-new pane's id can only be a leftover from a destroyed
+		// pane that drew the same id — nothing deletes those files — so every
+		// use of the record below is gated on it.
+		hadSession := pane.PluginState["session_id"] != ""
 		resumeID = pane.PluginState["resume_session_id"]
 		if resumeID != "" && hookID != "" && hookID != resumeID {
 			delete(pane.PluginState, "resume_session_id")
-			pane.PluginState["session_id"] = hookID
 			resumeID = ""
+		}
+		// The hook is the only source that tracks /clear, /resume and
+		// compaction, and PluginState["session_id"] is refreshed from it only
+		// at shutdown — so on a restart it can still name the session the user
+		// cleared minutes ago. Adopt the hook's id and path as ONE pair (a path
+		// left behind would vouch for a transcript nobody checked), which is
+		// what makes the transcript check below answer about the LIVE session
+		// rather than a superseded one.
+		if hadSession && hookID != "" && pane.PluginState["session_id"] != hookID {
+			pane.PluginState["session_id"] = hookID
+			if hookPath != "" {
+				pane.PluginState["transcript_path"] = hookPath
+			} else {
+				delete(pane.PluginState, "transcript_path")
+			}
 		}
 		if pane.PluginState["session_id"] == "" {
 			if resumeID != "" {
@@ -4374,9 +4421,10 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 		// 2026-09-04). Only a LOCATED transcript promotes: an id claude never
 		// persisted (a restart on the trust screen) is exactly what
 		// --session-id accepts, and --resume on it fails the other way round.
-		// A user-chosen resume target (the picker) already takes precedence.
-		if resumeID == "" && p.UsesClaudeSessions() {
-			if id, ok := d.locatedOwnSession(pane); ok {
+		// A user-chosen resume target (the picker) already takes precedence,
+		// and a pane being created has nothing of its own to resume.
+		if resumeID == "" && hadSession && p.UsesClaudeSessions() {
+			if id, ok := d.locatedOwnSession(pane, rec, recErr); ok {
 				resumeID = id
 			}
 		}

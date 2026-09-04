@@ -370,7 +370,9 @@ func TestHandleAttach_ReplaysTheChildsOwnStreamAfterARestore(t *testing.T) {
 		t.Errorf("waiting claude-code pane received %d ghost bytes; its child has not painted, "+
 			"so the only bytes on hand are the previous session's, which it will repaint itself", n)
 	}
-	if n := len(got[shell.ID]); n != 4096 {
-		t.Errorf("terminal pane received %d ghost bytes, want 4096", n)
+	// Prefix, not equality: the shell's replay is followed by a scroll-out
+	// frame, and whether the read loop stops before it depends on chunking.
+	if !bytes.HasPrefix(got[shell.ID], old) {
+		t.Errorf("terminal pane received %d ghost bytes, want its 4096 restored bytes first", len(got[shell.ID]))
 	}
 }

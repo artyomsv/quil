@@ -280,7 +280,12 @@ func (m *Model) raiseDeferredToasts() {
 				switch {
 				case cfg.Blocked && !pane.blockedSince.IsZero():
 					m.emitToast(pane, proj, toastBlocked)
-				case cfg.Done && pane.unseen:
+				// A mark seeded from the daemon's copy at attach is excluded:
+				// the process that derived it already toasted, and this sweep
+				// runs on the first message of every TUI start, when every
+				// remembered green tab would otherwise toast again. A mark
+				// this process set itself still does.
+				case cfg.Done && pane.unseen && !pane.unseenFromSeed:
 					m.emitToast(pane, proj, toastDone)
 				}
 			}

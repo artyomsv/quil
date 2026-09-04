@@ -1,7 +1,6 @@
 package hookevents
 
 import (
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -38,17 +37,44 @@ const EventStorm = "internal.event_storm"
 // (PaneID, Title) aggregation (×N badge). Coalescer collapses bursts of
 // the SAME hook_event; queue aggregation collapses bursts where multiple
 // hook_event types happen to map to the same human title.
+//
+// Emission is in ARRIVAL order across keys, and that is a correctness
+// property rather than a nicety. The consumer (internal/tui/workstate.go)
+// replays these as state transitions, so a stop edge delivered before the
+// start edge it belongs to leaves a pane lit until session end. The spool
+// watcher submits every line of one 200 ms tick back to back, and the first
+// version armed one time.AfterFunc per key and let each fire on its own: both
+// timers expired in the same pass, Go ran the most recently created goroutine
+// first, and the SECOND submission was emitted first — 300 of 300 runs on
+// Windows, 299 of 300 on Linux. Keys therefore queue in first-arrival order
+// and a timer only ever releases the queue's PREFIX (see flush). The one emit
+// outside that order is the rate limiter's storm diagnostic, which
+// allowAndRecord emits inline: it is never coalesced, carries no work-state
+// edge, and is deliberately not queued behind the events it is warning about.
 type Ingester struct {
 	emit func(Payload)
 
 	// now is overridable for tests so we don't depend on wall-clock time
-	// for rate-limiter / coalesce window assertions. Defaults to time.Now.
+	// for rate-limiter window assertions. Defaults to time.Now. The
+	// coalescer deliberately does NOT read it: a key's own timer firing is
+	// the proof its window closed, so a frozen test clock cannot strand the
+	// queue.
 	now func() time.Time
 
 	mu      sync.Mutex
 	closed  bool                     // FlushAll set; future Submits no-op
 	rates   map[string]*paneRate     // paneID → sliding window
 	pending map[string]*pendingEvent // coalesceKey(paneID, hookEvent, agentType) → buffered coalesce
+	// order holds the pending keys in first-arrival order. It is the emit
+	// order: flush releases a prefix of it and nothing else, so a later key
+	// whose timer happened to run first waits for the earlier one.
+	order []string
+
+	// emitMu serialises whole batches. Two timers can each collect a batch
+	// (the second finds only what the first left), and without this the
+	// second batch could start emitting while the first is mid-way through
+	// its own — reordering across batches what the queue ordered within them.
+	emitMu sync.Mutex
 }
 
 const (
@@ -94,10 +120,15 @@ type paneRate struct {
 }
 
 type pendingEvent struct {
-	payload     Payload
-	burstCount  int
-	scheduledAt time.Time
-	timer       *time.Timer
+	payload    Payload
+	burstCount int
+	timer      *time.Timer
+	// due is set by this key's own timer. Timers are armed in arrival order,
+	// so their callbacks MARK in arrival order too — but the goroutines that
+	// run them are not scheduled in that order, which is the whole bug. The
+	// flag turns "my timer fired" into state the prefix walk can read
+	// regardless of which goroutine got there first.
+	due bool
 }
 
 // NewIngester returns an Ingester whose Submit forwards through the rate
@@ -136,7 +167,7 @@ func (i *Ingester) Submit(p Payload) {
 	if !i.allowAndRecord(p, now) {
 		return
 	}
-	i.coalesce(p, now)
+	i.coalesce(p)
 }
 
 // Cancel discards any coalescer state for a pane being destroyed. Stops the
@@ -150,20 +181,41 @@ func (i *Ingester) Submit(p Payload) {
 // effectively impossible).
 //
 // Safe to call for a paneID that has no pending events; idempotent.
+//
+// Removing the head of the queue can uncover a key that is ALREADY due: its
+// own timer ran while the head was still open, the prefix walk stopped at the
+// head, and that timer will not run again. drainDue is driven by nothing but
+// timers, so Cancel schedules one itself — otherwise the uncovered event sits
+// until some unrelated pane's timer happens to fire, which on a quiet daemon
+// is shutdown. Scheduled rather than called inline so every emit still
+// originates on a timer goroutine, never on the IPC dispatch goroutine that
+// destroyed the pane.
 func (i *Ingester) Cancel(paneID string) {
 	prefix := paneID + "\x00"
 	i.mu.Lock()
-	defer i.mu.Unlock()
-	for k, p := range i.pending {
+	kept := i.order[:0]
+	for _, k := range i.order {
 		if !strings.HasPrefix(k, prefix) {
+			kept = append(kept, k)
 			continue
 		}
-		if p.timer != nil {
+		if p := i.pending[k]; p != nil && p.timer != nil {
 			p.timer.Stop()
 		}
 		delete(i.pending, k)
 	}
+	i.order = kept
 	delete(i.rates, paneID)
+	uncovered := false
+	if len(kept) > 0 {
+		if head := i.pending[kept[0]]; head != nil && head.due {
+			uncovered = true
+		}
+	}
+	i.mu.Unlock()
+	if uncovered {
+		time.AfterFunc(0, i.drainDue)
+	}
 }
 
 // allowAndRecord returns true if the payload is within budget. If it
@@ -242,10 +294,12 @@ func stormPayload(paneID, source string, now time.Time) Payload {
 }
 
 // coalesce buffers a payload under its (paneID, hook_event, agent_type) key.
-// The first event in a new window arms the timer; subsequent events in the
-// window replace the buffered payload and bump the burst counter. When the
+// The first event in a new window arms the timer and takes the next slot in
+// the arrival queue; subsequent events in the window replace the buffered
+// payload and bump the burst counter without moving the slot. When the
 // timer fires we emit the LAST buffered payload (so the freshest state wins)
-// with the burst count attached so consumers can render ×N.
+// with the burst count attached so consumers can render ×N — in the slot the
+// FIRST arrival opened, because that is where the event happened.
 //
 // agent_type joins the key because coalescing is LAST-WINS and the TUI's work
 // ledger matches a SubagentStop to the SubagentStart naming the same agent
@@ -256,10 +310,20 @@ func stormPayload(paneID, source string, now time.Time) Payload {
 // event keys exactly as before — and a burst of the SAME agent still
 // collapses to one emit with the burst count, which is the behaviour the
 // count exists for.
-func (i *Ingester) coalesce(p Payload, now time.Time) {
+func (i *Ingester) coalesce(p Payload) {
 	key := coalesceKey(p.PaneID, p.HookEvent, p.Data["agent_type"])
 
 	i.mu.Lock()
+	if i.closed {
+		// Submit's own check ran before it dropped the lock, and FlushAll
+		// can complete in between: it sets closed and drains, and a coalesce
+		// landing after that would repopulate pending and arm a timer that
+		// fires into a pipeline the daemon has already torn down. FlushAll
+		// sets closed under this same lock, so a submit either lands before
+		// its drain and is emitted by it, or is dropped here.
+		i.mu.Unlock()
+		return
+	}
 	pending, exists := i.pending[key]
 	if exists {
 		// Replace payload with the newer one, bump count, leave timer alone.
@@ -269,14 +333,14 @@ func (i *Ingester) coalesce(p Payload, now time.Time) {
 		return
 	}
 	pending = &pendingEvent{
-		payload:     p,
-		burstCount:  1,
-		scheduledAt: now,
+		payload:    p,
+		burstCount: 1,
 	}
 	pending.timer = time.AfterFunc(coalesceDelay, func() {
 		i.flush(key)
 	})
 	i.pending[key] = pending
+	i.order = append(i.order, key)
 	i.mu.Unlock()
 }
 
@@ -306,18 +370,62 @@ func coalesceKey(paneID, hookEvent, agentType string) string {
 // the mapping reversible — and therefore collision-free.
 var keyFieldEscaper = strings.NewReplacer(`\`, `\\`, "\x00", `\0`)
 
-// flush emits the buffered payload for key and removes the pending entry.
-// Called from the AfterFunc timer goroutine.
+// flush marks key's window closed and emits every due entry at the FRONT of
+// the arrival queue, in order. Called from the AfterFunc timer goroutine.
+//
+// Only a prefix is released, never the key alone: if this key's timer ran
+// before an earlier key's (the scheduler makes no promise about timer
+// goroutines), the earlier key is not yet due and the walk stops there — this
+// key then goes out when THAT timer runs, behind it. Timers are armed in
+// arrival order, so every key ahead of a due one is either due already or
+// about to be, and the queue never stalls.
 func (i *Ingester) flush(key string) {
 	i.mu.Lock()
-	pending, ok := i.pending[key]
-	if !ok {
-		i.mu.Unlock()
-		return
+	if pending, ok := i.pending[key]; ok {
+		pending.due = true
 	}
-	delete(i.pending, key)
+	i.mu.Unlock()
+	i.drainDue()
+}
+
+// drainDue emits the due prefix of the arrival queue. The batch is collected
+// under mu and emitted under emitMu, so a second timer arriving mid-batch
+// collects only what this one left and then waits its turn to emit it.
+func (i *Ingester) drainDue() {
+	i.emitMu.Lock()
+	defer i.emitMu.Unlock()
+
+	i.mu.Lock()
+	var batch []*pendingEvent
+	released := 0
+	for _, k := range i.order {
+		pending, ok := i.pending[k]
+		if !ok {
+			// Defensive only: every removal from pending also removes the
+			// key from order under mu (Cancel filters it, FlushAll nils it,
+			// this loop re-slices it), so a queued key with no entry is a
+			// state the code prevents. Skipping it beats stalling the queue
+			// on it if that ever stops being true.
+			released++
+			continue
+		}
+		if !pending.due {
+			break
+		}
+		delete(i.pending, k)
+		batch = append(batch, pending)
+		released++
+	}
+	i.order = i.order[released:]
 	i.mu.Unlock()
 
+	for _, pending := range batch {
+		i.emit(finalizePayload(pending))
+	}
+}
+
+// finalizePayload attaches the burst count to a drained entry's payload.
+func finalizePayload(pending *pendingEvent) Payload {
 	payload := pending.payload
 	if pending.burstCount > 1 {
 		if payload.Data == nil {
@@ -325,7 +433,7 @@ func (i *Ingester) flush(key string) {
 		}
 		payload.Data["coalesced"] = formatUint(uint64(pending.burstCount))
 	}
-	i.emit(payload)
+	return payload
 }
 
 // formatUint is a tiny strconv.FormatUint shim — kept inline so we don't
@@ -346,9 +454,9 @@ func formatUint(v uint64) string {
 }
 
 // FlushAll is a test helper / shutdown helper that drains the coalescer's
-// pending buffers immediately, emitting whatever is currently queued. The
-// hookEventsWatcher goroutine calls it during shutdown so in-flight bursts
-// surface before the IPC server tears down.
+// pending buffers immediately, emitting whatever is currently queued in
+// arrival order. The hookEventsWatcher goroutine calls it during shutdown so
+// in-flight bursts surface before the IPC server tears down.
 //
 // FlushAll also marks the Ingester closed so any concurrent or
 // late-arriving Submit becomes a no-op — without this, a Submit racing
@@ -356,23 +464,30 @@ func formatUint(v uint64) string {
 // ms later when the daemon's emit pipeline has already torn down.
 //
 // Every pending timer is Stop()ped before drain so the AfterFunc
-// goroutines do not fire a second redundant flush; the explicit flush
-// loop covers what the timers would have delivered.
+// goroutines do not fire a second redundant flush; the explicit drain
+// covers what the timers would have delivered.
 func (i *Ingester) FlushAll() {
+	i.emitMu.Lock()
+	defer i.emitMu.Unlock()
+
 	i.mu.Lock()
 	i.closed = true
-	keys := make([]string, 0, len(i.pending))
-	for k, p := range i.pending {
-		if p.timer != nil {
-			p.timer.Stop()
+	var batch []*pendingEvent
+	for _, k := range i.order {
+		pending, ok := i.pending[k]
+		if !ok {
+			continue
 		}
-		keys = append(keys, k)
+		if pending.timer != nil {
+			pending.timer.Stop()
+		}
+		delete(i.pending, k)
+		batch = append(batch, pending)
 	}
-	// Sort so the emit order is deterministic for tests.
-	sort.Strings(keys)
+	i.order = nil
 	i.mu.Unlock()
 
-	for _, k := range keys {
-		i.flush(k)
+	for _, pending := range batch {
+		i.emit(finalizePayload(pending))
 	}
 }

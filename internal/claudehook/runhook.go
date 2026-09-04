@@ -41,7 +41,12 @@ type claudeStdin struct {
 	Message        string `json:"message"`
 	ToolName       string `json:"tool_name"`
 	Reason         string `json:"reason"`
-	AgentType      string `json:"agent_type"`
+	// Error is StopFailure's explanation (e.g. "model_not_found"). It is NOT
+	// `reason` — that field exists on PreCompact only. Observed live on Claude
+	// Code 2.1.260; reading `reason` here shipped every "Turn failed" card
+	// with an empty explanation.
+	Error     string `json:"error"`
+	AgentType string `json:"agent_type"`
 	// AgentID is present only when the hook fires INSIDE a subagent, which
 	// makes its absence the test for "this came from the main agent".
 	// agent_type cannot serve: a session started with --agent carries one on
@@ -161,16 +166,7 @@ func dispatchHookEvent(env HookEnv, in claudeStdin, nowMs int64) error {
 			truncate("Resumed after "+in.ToolName, hookevents.MaxTitleBytes), hookevents.SeverityInfo,
 			map[string]string{"tool": truncate(in.ToolName, hookevents.MaxDataValueBytes)})
 	case "StopFailure":
-		// The turn ending Claude reports instead of Stop when the API call
-		// fails. Carries the reason where Stop carries model usage: there is no
-		// completed assistant turn to read usage from, and the reason is what
-		// separates a network blip from a pane worth restarting.
-		title := "Turn failed"
-		if in.Reason != "" {
-			title = truncate("Turn failed: "+in.Reason, hookevents.MaxTitleBytes)
-		}
-		return spoolEvent(env, nowMs, "StopFailure", in.SessionID, title, hookevents.SeverityWarning,
-			map[string]string{"reason": truncate(in.Reason, hookevents.MaxDataValueBytes)})
+		return stopFailureEvent(env, in, nowMs)
 	case "PreToolUse":
 		// Work-spinner START edge for a turn no user prompt began. See the
 		// PreToolUse case in hookevents.ClassifyWorkEvent for the trace.
@@ -259,6 +255,50 @@ func dispatchHookEvent(env HookEnv, in claudeStdin, nowMs int64) error {
 		hookLog(env.QuilDir, env.PaneID, "unhandled hook_event: "+in.HookEventName)
 		return nil
 	}
+}
+
+// stopFailureEvent spools the turn ending Claude reports instead of Stop when
+// the API call fails. It carries the error where Stop carries model usage:
+// there is no completed assistant turn to read usage from, and the error is
+// what separates a network blip from a pane worth restarting.
+//
+// It fires INSIDE subagents too, and there it is the only ending the agent
+// gets: a subagent whose turn dies emits StopFailure carrying its agent_id +
+// agent_type and never a SubagentStop (verified on Claude Code 2.1.260 by
+// forcing a subagent onto a model that does not exist). Spooled as a bare
+// "Turn failed", the TUI read it as the MAIN turn ending and kept the dead
+// agent in its ledger for good — two production panes held a lit spinner for
+// two days after the usage limit killed their QA agents. So a subagent's
+// failure is spooled under the agent's name, which is the ledger key the
+// consumer drains.
+//
+// agent_id is the discriminator, exactly as in the PreToolUse gate: a session
+// started with --agent carries agent_type on every event, main turn included,
+// while agent_id is present only inside a subagent.
+func stopFailureEvent(env HookEnv, in claudeStdin, nowMs int64) error {
+	data := map[string]string{"error": truncate(in.Error, hookevents.MaxDataValueBytes)}
+	if in.AgentID == "" {
+		title := "Turn failed"
+		if in.Error != "" {
+			title = truncate("Turn failed: "+in.Error, hookevents.MaxTitleBytes)
+		}
+		return spoolEvent(env, nowMs, "StopFailure", in.SessionID, title, hookevents.SeverityWarning, data)
+	}
+	if in.AgentType == "" {
+		// A subagent's death that names no agent can drain nothing and must
+		// not end the main turn either. Every observed subagent event carries
+		// both fields; this is the same refusal the unnamed SubagentStop gets.
+		hookLog(env.QuilDir, env.PaneID, "StopFailure from a subagent without agent_type dropped")
+		return nil
+	}
+	agent := truncate(in.AgentType, hookevents.MaxDataValueBytes)
+	data["agent_type"] = agent
+	title := agent + " failed"
+	if in.Error != "" {
+		title = agent + " failed: " + in.Error
+	}
+	return spoolEvent(env, nowMs, "StopFailure", in.SessionID,
+		truncate(title, hookevents.MaxTitleBytes), hookevents.SeverityWarning, data)
 }
 
 // transcriptRetryDelays paces the re-reads in modelUsageData. Claude appends

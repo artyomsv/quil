@@ -651,11 +651,16 @@ func TestRunHook_PreToolUse_FirstEventOnAPaneIsNeverThrottled(t *testing.T) {
 // TestRunHook_StopFailure_SpoolsATurnEndingEdge covers the turn ending that
 // Claude reports instead of Stop when the API call fails. Unspooled, the TUI
 // never learned the turn was over.
+//
+// The payload field is `error` (observed live on Claude Code 2.1.260:
+// `"error":"model_not_found"`, beside `last_assistant_message`). There is no
+// `reason` field on this event — reading one is why every production
+// "Turn failed" card shipped with an empty explanation.
 func TestRunHook_StopFailure_SpoolsATurnEndingEdge(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	env := HookEnv{PaneID: "pane-sf", QuilDir: dir, Mode: "default"}
-	stdin := `{"hook_event_name":"StopFailure","session_id":"11111111-2222-3333-4444-555555555555","reason":"API Error: 500"}`
+	stdin := `{"hook_event_name":"StopFailure","session_id":"11111111-2222-3333-4444-555555555555","error":"API Error: 500"}`
 
 	if err := RunHook(strings.NewReader(stdin), env, 1700000000000); err != nil {
 		t.Fatalf("RunHook: %v", err)
@@ -667,22 +672,121 @@ func TestRunHook_StopFailure_SpoolsATurnEndingEdge(t *testing.T) {
 	if got[0].HookEvent != "StopFailure" {
 		t.Errorf("hook_event = %q, want StopFailure", got[0].HookEvent)
 	}
-	// The reason is what makes the card actionable — a bare "turn failed"
+	// The error is what makes the card actionable — a bare "turn failed"
 	// leaves the user to guess between a network blip and a wedged pane.
 	if !strings.Contains(got[0].Title, "API Error: 500") {
-		t.Errorf("title = %q, want it to carry the reason", got[0].Title)
+		t.Errorf("title = %q, want it to carry the error", got[0].Title)
+	}
+	if got[0].Data["error"] != "API Error: 500" {
+		t.Errorf("data[error] = %q, want the error text", got[0].Data["error"])
 	}
 	if got[0].Severity != hookevents.SeverityWarning {
 		t.Errorf("severity = %q, want warning", got[0].Severity)
 	}
+	// The MAIN turn's failure names no agent, so the consumer reads it as the
+	// turn ending and leaves the subagent ledger alone.
+	if _, named := got[0].Data["agent_type"]; named {
+		t.Errorf("a main-turn StopFailure must not carry agent_type; data = %v", got[0].Data)
+	}
 }
 
-// TestRunHook_StopFailure_WithoutAReasonStillEndsTheTurn covers the fallback
-// title. The reason is Claude's to supply and an empty one must not produce a
+// TestRunHook_StopFailure_FromASubagentNamesTheAgent covers the OTHER thing
+// StopFailure means. A subagent whose turn dies fires StopFailure inside the
+// subagent — carrying agent_id and agent_type — and NEVER a SubagentStop.
+// Verified on Claude Code 2.1.260 by forcing a subagent onto a model that does
+// not exist: SubagentStart, then StopFailure with the same agent_id/agent_type
+// and error=model_not_found, then nothing for that agent.
+//
+// Spooled without the agent's name, the TUI read it as the MAIN turn ending
+// and kept the agent in its ledger forever: two production panes sat with a
+// lit spinner for two days after the usage limit killed their QA agents at
+// 11:16 on 2026-09-02 (one SubagentStart each with no stop). The name is what
+// lets the consumer drain that agent instead.
+func TestRunHook_StopFailure_FromASubagentNamesTheAgent(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	env := HookEnv{PaneID: "pane-sfa", QuilDir: dir, Mode: "default"}
+	stdin := `{"hook_event_name":"StopFailure","session_id":"11111111-2222-3333-4444-555555555555","agent_id":"a9caa208283d35f4b","agent_type":"qa-t0","error":"usage_limit"}`
+
+	if err := RunHook(strings.NewReader(stdin), env, 1700000000000); err != nil {
+		t.Fatalf("RunHook: %v", err)
+	}
+	got := readSpool(t, dir, "pane-sfa")
+	if len(got) != 1 {
+		t.Fatalf("spool lines = %d, want 1", len(got))
+	}
+	if got[0].HookEvent != "StopFailure" {
+		t.Errorf("hook_event = %q, want StopFailure", got[0].HookEvent)
+	}
+	if got[0].Data["agent_type"] != "qa-t0" {
+		t.Errorf("data[agent_type] = %q, want qa-t0 (the ledger key the consumer drains)", got[0].Data["agent_type"])
+	}
+	if got[0].Data["error"] != "usage_limit" {
+		t.Errorf("data[error] = %q, want usage_limit", got[0].Data["error"])
+	}
+	// The card should say WHICH agent died, the way "qa-t0 done" says which
+	// one finished — "Turn failed" would read as the pane's own turn.
+	if !strings.HasPrefix(got[0].Title, "qa-t0 failed") {
+		t.Errorf("title = %q, want it to start with %q", got[0].Title, "qa-t0 failed")
+	}
+	if !strings.Contains(got[0].Title, "usage_limit") {
+		t.Errorf("title = %q, want it to carry the error", got[0].Title)
+	}
+}
+
+// TestRunHook_StopFailure_AgentTypeWithoutAgentIDIsTheMainTurn keeps agent_id
+// as the discriminator, exactly as the PreToolUse gate does: a session started
+// with --agent carries agent_type on EVERY event, main-agent events included,
+// while agent_id is documented as present only inside a subagent. Naming the
+// agent here would have the consumer look for a ledger entry that was never
+// opened and skip ending the turn.
+func TestRunHook_StopFailure_AgentTypeWithoutAgentIDIsTheMainTurn(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	env := HookEnv{PaneID: "pane-sfm", QuilDir: dir, Mode: "default"}
+	stdin := `{"hook_event_name":"StopFailure","session_id":"11111111-2222-3333-4444-555555555555","agent_type":"security-reviewer","error":"rate_limit"}`
+
+	if err := RunHook(strings.NewReader(stdin), env, 1700000000000); err != nil {
+		t.Fatalf("RunHook: %v", err)
+	}
+	got := readSpool(t, dir, "pane-sfm")
+	if len(got) != 1 {
+		t.Fatalf("spool lines = %d, want 1", len(got))
+	}
+	if _, named := got[0].Data["agent_type"]; named {
+		t.Errorf("agent_type without agent_id is the main turn; data = %v", got[0].Data)
+	}
+	if !strings.HasPrefix(got[0].Title, "Turn failed") {
+		t.Errorf("title = %q, want the main-turn title", got[0].Title)
+	}
+}
+
+// TestRunHook_StopFailure_FromASubagentWithoutAgentTypeIsDropped: a subagent
+// failure that names no agent can drain nothing, and spooled bare it would end
+// the MAIN turn — the wrong-off direction, on a turn that may still be running.
+// Same refusal the unnamed SubagentStop gets. Never observed (every subagent
+// event carries both fields); pinned so a producer change fails loudly here
+// rather than silently in the ledger.
+func TestRunHook_StopFailure_FromASubagentWithoutAgentTypeIsDropped(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	env := HookEnv{PaneID: "pane-sfu", QuilDir: dir, Mode: "default"}
+	stdin := `{"hook_event_name":"StopFailure","session_id":"11111111-2222-3333-4444-555555555555","agent_id":"a9caa208283d35f4b","error":"usage_limit"}`
+
+	if err := RunHook(strings.NewReader(stdin), env, 1700000000000); err != nil {
+		t.Fatalf("RunHook: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "events", "pane-sfu.jsonl")); !os.IsNotExist(err) {
+		t.Fatalf("spool must not exist for a nameless subagent failure; stat err = %v", err)
+	}
+}
+
+// TestRunHook_StopFailure_WithoutAnErrorStillEndsTheTurn covers the fallback
+// title. The error is Claude's to supply and an empty one must not produce a
 // card titled "Turn failed: " — nor, worse, tempt a future edit into dropping
-// the event when it carries no reason, since the turn ending is the part the
-// spinner depends on and the reason is only the explanation.
-func TestRunHook_StopFailure_WithoutAReasonStillEndsTheTurn(t *testing.T) {
+// the event when it carries no error, since the turn ending is the part the
+// spinner depends on and the error is only the explanation.
+func TestRunHook_StopFailure_WithoutAnErrorStillEndsTheTurn(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	env := HookEnv{PaneID: "pane-sfe", QuilDir: dir, Mode: "default"}

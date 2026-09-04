@@ -82,6 +82,14 @@ func workStateOnlyEvent(eventType string) bool {
 // a second way to clear the same fields.
 const userInterruptEvent = "internal.user_interrupt"
 
+// subagentFailureEvent is the ONE stop-kind event that can also be a
+// subagent's ending. Claude fires StopFailure inside a subagent whose turn
+// dies and never a SubagentStop for it; the producer names the agent in
+// data["agent_type"] for exactly that case, and applyWorkTransition drains the
+// ledger instead of ending the main turn. Every other WorkEventStop type is
+// the main turn's own, whatever its data carries.
+const subagentFailureEvent = "hook.claude.StopFailure"
+
 // interruptWorkingPane ends the main turn of the pane the user just interrupted.
 //
 // ESC is the ONLY turn ending Claude reports nothing for. Verified by driving a
@@ -376,42 +384,35 @@ func (m *Model) applyWorkTransition(paneID, eventType string, data map[string]st
 		}
 		pane.subagents[agentType] += coalescedCount(data)
 	case workSubagentStop:
-		agentType := data["agent_type"]
-		outstanding, live := pane.subagents[agentType]
-		if !live {
-			// The stop names no agent this pane has running, so there is
-			// nothing for it to cancel. Two ways to get here, both real:
+		pane.drainSubagent(data["agent_type"], coalescedCount(data))
+	case workStop, workStopFinal:
+		if eventType == subagentFailureEvent && data["agent_type"] != "" {
+			// A SUBAGENT's failure, not the main turn's. StopFailure fires
+			// inside subagents too, and there it is the only ending the agent
+			// ever gets: a subagent whose turn dies emits StopFailure carrying
+			// its agent_type and never a SubagentStop (verified on Claude Code
+			// 2.1.260 by forcing a subagent onto a model that does not exist).
+			// The producer names the agent for exactly this branch; the main
+			// turn's own failure carries no name.
 			//
-			//   - Claude Code emits ONE unpaired SubagentStop carrying an
-			//     EMPTY agent_type at the end of every main turn (measured
-			//     1:1 against Stop on every AI pane; a SubagentStart with an
-			//     empty agent_type never occurs). It is the root turn's own
-			//     completion — its start edge is UserPromptSubmit, not a
-			//     SubagentStart — so it can never have a partner here.
-			//   - A replay truncated by ring eviction, or a lost start.
+			// Read as a main-turn stop, it cleared turnActive on a turn that
+			// may still be running (wrong-off, heals on the next heartbeat)
+			// and left the dead agent in the ledger with nothing left to
+			// drain it — wrong-on, and permanent: two production panes held a
+			// lit spinner for two days after the usage limit killed their QA
+			// agents at 11:16 on 2026-09-02, one SubagentStart each with no
+			// stop. So this is the stop that SubagentStop would have been.
 			//
-			// Ignoring it is what makes the ledger self-correcting. A bare
-			// counter cannot: stops are fungible there, so the phantom is
-			// spent on whichever background agent happens to be outstanding
-			// and the spinner goes dark while that agent is still working
-			// (2026-08-02: a 27-minute agent ran with no indicator). The
-			// old zero-guard could not catch it either — it only fires when
-			// the count is already zero, which is precisely when no agent is
-			// at risk.
-			//
-			// break, not return: the derivation below is the single point
-			// that owns `working`, and leaving the function around it would
-			// make that property depend on this branch never mattering.
-			// Recomputing an unchanged state is free and fires no edge.
+			// Gated on the event TYPE, not on the kind: workStop also covers
+			// hook.claude.Stop, the two opencode stops and the synthetic
+			// interrupt, none of which is ever a subagent's ending. No producer
+			// puts agent_type on those today, but a --agent session carries
+			// the field on every event, so a kind-based gate would turn every
+			// main-turn Stop into a no-op the day one of them grew it.
+			// break, not return: the derivation below still owns `working`.
+			pane.drainSubagent(data["agent_type"], coalescedCount(data))
 			break
 		}
-		outstanding -= coalescedCount(data)
-		if outstanding <= 0 {
-			delete(pane.subagents, agentType)
-		} else {
-			pane.subagents[agentType] = outstanding
-		}
-	case workStop, workStopFinal:
 		pane.turnActive = false
 		// A completed turn is by definition not blocked — clears on a PLAIN
 		// workStop too, not just workStopFinal. Approving a permission
@@ -535,6 +536,9 @@ func (m *Model) applyWorkTransition(paneID, eventType string, data map[string]st
 		// ackFocusedPane the moment the user comes back.
 		if !m.userIsWatching(paneID) {
 			pane.unseen = true
+			// A completion THIS process saw: a fresh event the on-blur sweep
+			// may toast for, unlike a mark seeded from the daemon's copy.
+			pane.unseenFromSeed = false
 		}
 	}
 
@@ -544,6 +548,86 @@ func (m *Model) applyWorkTransition(paneID, eventType string, data map[string]st
 	// choke point (the user typing an answer clears blockedSince without any
 	// hook firing at all), so it is a sweep in Update instead.
 	m.raiseAttentionToast(pane, proj, wasBlocked, wasUnseen)
+
+	// The daemon's copy of the mark follows every CHANGE — set on the falling
+	// edge above, cleared on a human start — and only a change: the replay at
+	// attach runs this function once per replayed edge, and a report per edge
+	// rather than per transition would be a message storm for nothing.
+	if pane.unseen != wasUnseen {
+		m.reportUnseen(paneID, pane.unseen)
+	}
+}
+
+// reportUnseen tells the pane's daemon the client's current unseen mark, so
+// the mark outlives this process. The daemon persists it and hands it back in
+// the workspace state, where syncPaneMeta seeds a pane it has not seen before;
+// nothing else reads the copy, so the report is fire-and-forget.
+//
+// Sent synchronously on the Update goroutine, never as a tea.Cmd: a set and the
+// clear that follows it can be milliseconds apart (a completion, then the ack
+// on the next message), and Bubble Tea runs Cmds on their own goroutines with
+// no ordering between them — a clear overtaken by its set would persist a mark
+// the user already dismissed. The loose sendForPane is deliberate: with the
+// link parked the report is dropped and only logged, and finishReconnect
+// restates every seeded mark once the link is back — nothing else would, since
+// a replay re-derives the VALUE and a value that is already right reports
+// nothing.
+func (m *Model) reportUnseen(paneID string, unseen bool) {
+	// The nil client is the ~46 Models tests build directly, and the window
+	// before a connection exists; sendForPane dereferences it unconditionally.
+	if paneID == "" || m.client == nil {
+		return
+	}
+	msg, err := ipc.NewMessage(ipc.MsgUpdatePane, ipc.UpdatePanePayload{
+		PaneID: paneID,
+		Unseen: &unseen,
+	})
+	if err != nil {
+		log.Printf("report unseen for pane %s: encode: %v", paneID, err)
+		return
+	}
+	if err := m.sendForPane(paneID, msg); err != nil {
+		log.Printf("report unseen for pane %s: send: %v", paneID, err)
+	}
+}
+
+// drainSubagent cancels n outstanding instances of the named agent, deleting
+// the key once it reaches zero so the map self-corrects instead of
+// accumulating. Shared by SubagentStop and by a subagent's StopFailure, which
+// is the stop a failed agent sends instead.
+//
+// A stop naming no LIVE agent is ignored. Two ways to get here, both real:
+//
+//   - Claude Code emits ONE unpaired SubagentStop carrying an EMPTY
+//     agent_type at the end of every main turn (measured 1:1 against Stop on
+//     every AI pane; a SubagentStart with an empty agent_type never occurs).
+//     It is the root turn's own completion — its start edge is
+//     UserPromptSubmit, not a SubagentStart — so it can never have a partner.
+//   - A replay truncated by ring eviction, or a lost start.
+//
+// Ignoring it is what makes the ledger self-correcting. A bare counter
+// cannot: stops are fungible there, so the phantom is spent on whichever
+// background agent happens to be outstanding and the spinner goes dark while
+// that agent is still working (2026-08-02: a 27-minute agent ran with no
+// indicator). The old zero-guard could not catch it either — it only fires
+// when the count is already zero, which is precisely when no agent is at
+// risk.
+//
+// Callers `break` rather than `return` around this, because the derivation
+// in applyWorkTransition is the single point that owns `working`, and leaving
+// the function around it would make that property depend on this branch never
+// mattering. Recomputing an unchanged state is free and fires no edge.
+func (p *PaneModel) drainSubagent(agentType string, n int) {
+	outstanding, live := p.subagents[agentType]
+	if !live {
+		return
+	}
+	outstanding -= n
+	if outstanding <= 0 {
+		delete(p.subagents, agentType)
+	} else {
+		p.subagents[agentType] = outstanding
+	}
 }
 
 // coalescedCount extracts the ingester's burst count from an event's Data
@@ -614,6 +698,14 @@ func (m *Model) ackFocusedPane() bool {
 			// mutation lets the skip sites defer to it; see Model.skipRender.
 			changed := p.unseen
 			p.unseen = false
+			if changed {
+				// Looking IS the acknowledgement, and the daemon's copy must
+				// hear it, or the next TUI start seeds the mark straight back
+				// onto the pane the user was sitting in. Reported only on the
+				// transition: this runs on every message, and a report per
+				// message would be a stream of identical clears.
+				m.reportUnseen(p.ID, false)
+			}
 			return changed
 		}
 	}
@@ -807,6 +899,25 @@ func syncPaneMeta(pane *PaneModel, info *PaneInfo, wideCanvas bool, minNativeCol
 	// guarded copy would leave the client showing both marks on a pane the
 	// daemon says has one.
 	pane.markedForDeletion = info.MarkedForDeletion
+	// The unseen mark is the OPPOSITE arrangement, deliberately: copied ONCE,
+	// when this client first sees the pane, and never again. The daemon's
+	// value is a copy of what THIS client reported (reportUnseen), kept only
+	// so the mark survives a TUI restart — the seed is that restart. After it
+	// the live value here is the truth: the client clears it the moment the
+	// user focuses the pane and sets it on completions it derives itself, and
+	// an unconditional copy would revert both on the next broadcast, which the
+	// git ticker alone delivers every 5 s. The attach replay that follows the
+	// seed refines it the same way it always did.
+	if !pane.unseenSeeded {
+		pane.unseen = info.Unseen
+		// Remembered as a seed so raiseDeferredToasts leaves it alone: that
+		// sweep is state-based, and before the copy existed a restart cleared
+		// every mark, so nothing toasted at start. The previous process
+		// already toasted for this completion; toasting it again on every
+		// restart (auto-update restarts the TUI routinely) is noise.
+		pane.unseenFromSeed = info.Unseen
+		pane.unseenSeeded = true
+	}
 	pane.Pending = info.Pending
 	pane.SessionID = info.SessionID
 	pane.HistoryLines = info.HistoryLines

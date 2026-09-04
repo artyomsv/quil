@@ -221,6 +221,16 @@ type Pane struct {
 	// state the daemon can observe: the distinction it records is "I no longer
 	// need to read this", and only the user knows that.
 	MarkedForDeletion bool
+	// Unseen is the TUI's own "work finished while you were not looking" mark
+	// — the green tab — kept here so it outlives the TUI process. Unlike the
+	// two marks above the daemon does not decide it: only the client knows
+	// what the user was looking at when a turn ended, so the client derives
+	// the mark and reports every set and clear through MsgUpdatePane. The
+	// daemon persists it in the snapshot and hands it back in the workspace
+	// state, where a client seeds a pane it sees for the first time and then
+	// trusts its own live value. It used to live only in TUI memory, so every
+	// TUI restart dropped every green tab. Read under PluginMu.
+	Unseen bool
 	// Overlay marks an ephemeral TUI overlay pane (lazygit toggle view).
 	// Guarded by PluginMu like Muted (set in handleCreatePane after the
 	// pane is already published to the session maps; concurrent snapshots

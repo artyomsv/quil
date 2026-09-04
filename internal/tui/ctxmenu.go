@@ -668,6 +668,12 @@ func (m Model) executeCtxMenuItem(item ctxMenuItem) (tea.Model, tea.Cmd) {
 			pane.blockedSince = time.Time{}
 			pane.blockedReason = ""
 			pane.unseen = false
+			// The daemon keeps a copy of the unseen mark so it survives a TUI
+			// restart, so the clear is reported as well as applied — else the
+			// next start seeds the green back. Unconditional for the same
+			// reason the pin send below is: a user-initiated action buys a
+			// guarantee that does not depend on what has arrived yet.
+			m.reportUnseen(paneID, false)
 			// The pin is the exception: it lives on the daemon, so it is SENT
 			// and not written here — the same route ctxActAttention takes, for
 			// the same reason. Two things were wrong with doing both.

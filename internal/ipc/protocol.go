@@ -537,6 +537,13 @@ type UpdatePanePayload struct {
 	// CWD updates from a background job, so a plain bool would clear the mark
 	// on the next `cd` the shell reports.
 	MarkedForDeletion *bool `json:"marked_for_deletion,omitempty"`
+	// Unseen is the TUI's "work finished while you were not looking" mark,
+	// reported here so it outlives the TUI process. The TUI derives it (only
+	// the client knows what the user was looking at) and reports every set
+	// and clear; the daemon keeps a copy for the snapshot and hands it back on
+	// attach. Pointer for the same tri-state reason as the others: the clear
+	// is the direction that has to be expressible, and the handler is partial.
+	Unseen *bool `json:"unseen,omitempty"`
 	// OverlayVisible reports whether the TUI is currently SHOWING this overlay
 	// pane. Pointer for the same tri-state reason as Muted: this is a partial
 	// update handler, so a plain bool would report every rename and every OSC 7

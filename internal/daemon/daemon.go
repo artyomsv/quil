@@ -1660,6 +1660,27 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 					// is unchanged.
 					ghost = nil
 					source = "skipped-child-repaints"
+					// What is skipped is the PREVIOUS session's bytes. Once the
+					// respawned child has written, flushPaneOutput has handed
+					// OutputBuf over to it (ghostSeeded cleared), so the buffer
+					// is the child's own stream — the same bytes a reattach
+					// replays, reproducing the screen the child already has.
+					// Sending nothing here and leaning on the redraw kick left
+					// the pane BLACK whenever that screen ignores Ctrl+L:
+					// claude's first-run setup, its login prompt, a startup
+					// error (2026-09-04 — a pane sat on the theme picker behind
+					// an empty rectangle, and nothing on screen said why).
+					//
+					// The alt-screen override above still applies: a fullscreen
+					// child's cut stream is torn, and there the kick remains
+					// the better of the two. No scroll-out either — that is for
+					// a DIFFERENT session's screen, and this is the child's own.
+					if !pane.ghostSeeded {
+						if own := pane.OutputBuf.Bytes(); len(own) > 0 {
+							ghost = own
+							source = "child-stream"
+						}
+					}
 				}
 			}
 			// Captured in the same span as Type/GhostSnap: the redraw kick below
@@ -3955,6 +3976,40 @@ func claudeResumeTemplate(p *plugin.PanePlugin, pane *Pane, claim sessionClaimFn
 	return []string{"--resume", "{session_id}"}
 }
 
+// locatedOwnSession names the session a restarting pane must --resume: its
+// first candidate (hook record, then workspace state — the same order the
+// restore path trusts) whose transcript is on disk and that no OTHER pane
+// holds. The claim records the choice on the pane exactly as restore does, so
+// session_id and transcript_path stay a coherent pair.
+//
+// Stricter than claudeResumeTemplate on purpose: that path resumes an
+// UNLOCATED id too, because failing to find a transcript is not proof it is
+// gone. Here the alternative is not --continue but --session-id with the same
+// id, which is correct for a session that was never persisted and fatal for
+// one that was — so only positive evidence promotes. Reports false when
+// nothing is located, and the fresh-start args stand.
+func (d *Daemon) locatedOwnSession(pane *Pane) (string, bool) {
+	cands, _ := claudeResumeCandidates(pane)
+	located := make([]resumeCandidate, 0, len(cands))
+	for _, c := range cands {
+		if c.state == candidateLocated {
+			located = append(located, c)
+		}
+	}
+	if len(located) == 0 {
+		return "", false
+	}
+	chosen, holder, ok := d.claimResumeSession(pane, located)
+	if !ok {
+		// Falling through to --session-id will have claude refuse it, which is
+		// the truthful outcome: the conversation is open in another pane.
+		log.Printf("restart pane %s: not resuming %q — held by pane %s", pane.ID, located[0].id, holder)
+		return "", false
+	}
+	log.Printf("restart pane %s: resuming its own session %q (source=%s)", pane.ID, chosen.id, chosen.source)
+	return chosen.id, true
+}
+
 // freshClaudeSession gives the pane a brand-new session identity and returns the
 // plugin's fresh-start args.
 //
@@ -4309,6 +4364,22 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 			}
 		}
 		pane.PluginMu.Unlock()
+
+		// A restart of a pane whose session already has a transcript must
+		// --resume it. Alt+R lands here with the pane's own id in PluginState,
+		// and the fresh-start args hand that id to --session-id — which claude
+		// refuses once <id>.jsonl exists ("Session ID … is already in use",
+		// exit 129), so every restart of a pane that had exchanged a message
+		// died on the error screen (production log: 2026-08-11, -19, -28,
+		// 2026-09-04). Only a LOCATED transcript promotes: an id claude never
+		// persisted (a restart on the trust screen) is exactly what
+		// --session-id accepts, and --resume on it fails the other way round.
+		// A user-chosen resume target (the picker) already takes precedence.
+		if resumeID == "" && p.UsesClaudeSessions() {
+			if id, ok := d.locatedOwnSession(pane); ok {
+				resumeID = id
+			}
+		}
 	}
 
 	args := resolveSpawnArgs(p, pane, restoring, resumeID, d.claimResumeSession)

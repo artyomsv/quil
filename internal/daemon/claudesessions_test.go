@@ -526,6 +526,87 @@ func TestSpawnPane_RestartPrefersHookSessionOverStaleResumeTarget(t *testing.T) 
 	}
 }
 
+// TestSpawnPane_RestartResumesASessionThatHasATranscript: Alt+R spawns with
+// restoring=false, which hands the pane's own id to --session-id. Claude
+// refuses that once <id>.jsonl exists ("Session ID … is already in use", exit
+// 129), so a restart of any pane that has ever exchanged a message died on the
+// error screen. A located transcript means the restart must --resume it.
+func TestSpawnPane_RestartResumesASessionThatHasATranscript(t *testing.T) {
+	id := "d7c6d6be-17d0-448e-9ca9-43c1a1259a68"
+	d := newTestDaemon(t)
+	withClaudePlugin(t, d)
+	stubResumeSeams(t, claudehook.SessionRecord{ID: id, TranscriptPath: transcriptFor(id)}, probeOnly(transcriptFor(id)))
+
+	pane := &Pane{
+		ID:          "pane-0000000b",
+		Type:        "claude-code",
+		PluginState: map[string]string{"session_id": id},
+	}
+	fs := &fakeSession{}
+	if err := d.spawnPane(pane, fs, false); err != nil {
+		t.Fatalf("spawnPane: %v", err)
+	}
+
+	if !argsHavePair(fs.startArgs, "--resume", id) {
+		t.Errorf("start args = %q, want --resume %s", fs.startArgs, id)
+	}
+	if argsHaveFlag(fs.startArgs, "--session-id") {
+		t.Errorf("start args = %q, want no --session-id: claude refuses an id that already has a transcript", fs.startArgs)
+	}
+	if got := pane.PluginState["session_id"]; got != id {
+		t.Errorf("session_id = %q, want the resumed %q", got, id)
+	}
+}
+
+// TestSpawnPane_RestartWithoutATranscriptKeepsItsPreassignedID pins the
+// boundary: a pane restarted before claude ever persisted its session (closed
+// on the trust or model screen) has nothing to resume, and --session-id with
+// an unused id is exactly what claude accepts. Promoting THAT to --resume
+// would fail with "No conversation found".
+func TestSpawnPane_RestartWithoutATranscriptKeepsItsPreassignedID(t *testing.T) {
+	id := "2db05609-f1d5-4576-b5b2-ff114519726b"
+	d := newTestDaemon(t)
+	withClaudePlugin(t, d)
+	stubResumeSeams(t, claudehook.SessionRecord{ID: id, TranscriptPath: transcriptFor(id)}, probeNothing)
+
+	pane := &Pane{
+		ID:          "pane-0000000c",
+		Type:        "claude-code",
+		PluginState: map[string]string{"session_id": id},
+	}
+	fs := &fakeSession{}
+	if err := d.spawnPane(pane, fs, false); err != nil {
+		t.Fatalf("spawnPane: %v", err)
+	}
+
+	if !argsHavePair(fs.startArgs, "--session-id", id) {
+		t.Errorf("start args = %q, want --session-id %s", fs.startArgs, id)
+	}
+	if argsHaveFlag(fs.startArgs, "--resume") {
+		t.Errorf("start args = %q, want no --resume for a session with no transcript", fs.startArgs)
+	}
+}
+
+// argsHavePair reports whether flag is immediately followed by value in args.
+func argsHavePair(args []string, flag, value string) bool {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == flag && args[i+1] == value {
+			return true
+		}
+	}
+	return false
+}
+
+// argsHaveFlag reports whether flag appears anywhere in args.
+func argsHaveFlag(args []string, flag string) bool {
+	for _, a := range args {
+		if a == flag {
+			return true
+		}
+	}
+	return false
+}
+
 // NOTE: handleCreatePane and handleReplacePane both call applyResumeSessionID,
 // but neither is covered end to end here — both construct their PTY through
 // apty.New() rather than the newSessionFn seam, so driving them would spawn a

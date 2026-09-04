@@ -31,15 +31,63 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
-// HookCommand returns the command codex runs for each registered event. The
-// exe path is double-quoted because codex runs hook commands through a shell
-// (%COMSPEC% /C on Windows, $SHELL -lc elsewhere), and the daemon's own binary
-// may live under "Program Files". exePath is OS-controlled, never user input.
-func HookCommand(exePath string) string {
-	return fmt.Sprintf(`"%s" codex-hook`, exePath)
+// HookCommand returns the command codex runs for each registered event, plus a
+// non-empty note when the only form available is one the installed codex may
+// not be able to run (the daemon logs it). exePath is OS-controlled, never
+// user input.
+//
+// Codex runs hook commands through a shell — `$SHELL -lc` on Unix, where a
+// double-quoted path is the ordinary spelling and spaces are fine, and
+// `%COMSPEC% /C` on Windows, where it is NOT: codex 0.146.0 passes the line as
+// an ordinary argv token, so Rust escapes every `"` as `\"` before cmd.exe
+// sees it, and cmd.exe then looks for a program literally named
+// `\"E:\...\quild.exe\"` and exits 1. Measured 2026-09-04: with the quoted
+// path no hook ever wrote anything ("Stop hook (failed) — hook exited with
+// code 1" in the transcript); the same path unquoted recorded the session.
+// Newer codex wraps the line in its own quotes instead (raw_arg), where the
+// quoted form works — but the unquoted one works on both, so that is what
+// Windows gets. A path with a space cannot go unquoted, so it is replaced by
+// its 8.3 short name; only when that is unavailable does the quoted form go
+// out, with the note.
+func HookCommand(exePath string) (cmd, note string) {
+	return hookCommandFor(runtime.GOOS, exePath, shortPathName)
+}
+
+// hookCommandFor is HookCommand with the platform and the short-path lookup
+// injected, so the Windows branch is testable on the Linux CI image.
+func hookCommandFor(goos, exePath string, shortPath func(string) (string, error)) (cmd, note string) {
+	if goos != "windows" {
+		return fmt.Sprintf(`"%s" codex-hook`, exePath), ""
+	}
+	if cmdSafeUnquoted(exePath) {
+		return exePath + " codex-hook", ""
+	}
+	if short, err := shortPath(exePath); err == nil && cmdSafeUnquoted(short) {
+		return short + " codex-hook", ""
+	}
+	return fmt.Sprintf(`"%s" codex-hook`, exePath),
+		"the quild path needs quoting and has no short (8.3) name; codex 0.146 cannot run a quoted hook command (it escapes the quotes before cmd.exe sees them) — newer codex can"
+}
+
+// cmdMetaChars are the characters an UNQUOTED cmd.exe token cannot carry
+// without changing meaning; a path holding one has to be quoted.
+const cmdMetaChars = "&|^<>\"%()"
+
+// cmdSafeUnquoted reports whether p can stand as a bare cmd.exe token.
+func cmdSafeUnquoted(p string) bool {
+	if p == "" || strings.ContainsAny(p, cmdMetaChars) {
+		return false
+	}
+	for _, r := range p {
+		if r == ' ' || r == '\t' || r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 // hookEvent is one registered codex hook event: the event name codex expects

@@ -3789,7 +3789,11 @@ func codexSpawnPrep(quilDir, paneID, hookMode, resolvedCmd string) (prefix, env 
 		log.Printf("warning: pane %s: cannot resolve quild executable: %v — codex hooks disabled (notifications, work state, input history, session resume)", paneID, err)
 		return nil, nil
 	}
-	prefix, err = codexhook.ConfigOverrideArgs(codexhook.HookCommand(exePath), runtime.GOOS)
+	hookCmd, note := codexhook.HookCommand(exePath)
+	if note != "" {
+		log.Printf("warning: pane %s: codex hook command may not run on this codex version: %s", paneID, note)
+	}
+	prefix, err = codexhook.ConfigOverrideArgs(hookCmd, runtime.GOOS)
 	if err != nil {
 		log.Printf("warning: pane %s: build codex hook override: %v — codex hooks disabled", paneID, err)
 		return nil, nil

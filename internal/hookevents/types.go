@@ -1,9 +1,9 @@
 // Package hookevents defines the wire format and ingest pipeline for
-// notifications sourced from Claude Code and OpenCode hooks.
+// notifications sourced from Claude Code, OpenCode and Codex hooks.
 //
 // Wire path (v1):
 //
-//   hook fires (claude .sh / opencode .js)
+//   hook fires (quild claude-hook / codex-hook, opencode .js)
 //       │
 //       ├─ writes one JSONL line to $QUIL_HOME/events/<paneID>.jsonl  (primary)
 //       │  ─ append-only, single-write per line (atomic under PIPE_BUF)
@@ -45,10 +45,13 @@ const (
 
 // Source values for Payload.Source. Hooks stamp their own source so the
 // daemon can disambiguate when a single pane runs both (e.g. an opencode
-// pane that internally invokes claude).
+// pane that internally invokes claude). Codex reuses Claude's event NAMES
+// (its hook system is Claude-compatible), so the source is the only thing
+// that separates the two producers on the wire.
 const (
 	SourceClaude   = "claude"
 	SourceOpenCode = "opencode"
+	SourceCodex    = "codex"
 )
 
 // Hook-side wire-size caps. The hook is responsible for truncating before
@@ -100,8 +103,9 @@ type Payload struct {
 	// PaneID is the Quil pane id (passed to the hook via QUIL_PANE_ID env).
 	PaneID string `json:"pane_id"`
 
-	// Source identifies which tool emitted the event: SourceClaude or
-	// SourceOpenCode. Determines which set of HookEvent values are valid.
+	// Source identifies which tool emitted the event: SourceClaude,
+	// SourceOpenCode or SourceCodex. Determines which set of HookEvent values
+	// are valid.
 	Source string `json:"src"`
 
 	// HookEvent is the raw event name from the upstream tool (e.g. claude's
@@ -159,7 +163,7 @@ func (p Payload) Validate() error {
 		return ErrUnknownSeverity
 	}
 	switch p.Source {
-	case SourceClaude, SourceOpenCode:
+	case SourceClaude, SourceOpenCode, SourceCodex:
 	default:
 		return ErrUnknownSource
 	}

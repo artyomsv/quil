@@ -50,6 +50,12 @@ func main() {
 		runClaudeHook()
 		return
 	}
+	// Same contract for the Codex hook (see internal/codexhook): codex
+	// registers this command through a `-c hooks=…` override per pane.
+	if len(os.Args) > 1 && os.Args[1] == "codex-hook" {
+		runCodexHook()
+		return
+	}
 
 	// Build-time dev mode: auto-set QUIL_HOME before everything except the
 	// claude-hook fast path above (which must honor the spawning daemon's dir).

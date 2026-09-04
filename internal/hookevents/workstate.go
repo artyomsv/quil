@@ -101,7 +101,7 @@ const (
 // which a client learns the pane is working.
 func IsWorkStateOnly(eventType string) bool {
 	switch eventType {
-	case "hook.claude.PostToolUse", "hook.claude.PreToolUse":
+	case "hook.claude.PostToolUse", "hook.claude.PreToolUse", "hook.codex.PreToolUse":
 		return true
 	}
 	return false
@@ -124,13 +124,18 @@ func IsWorkStateOnly(eventType string) bool {
 // asks "did a human cause this". Collapsing them would re-introduce the bug for
 // the answered-prompt case, where clearing the mark is exactly right.
 func IsWorkHeartbeat(eventType string) bool {
-	return eventType == "hook.claude.PreToolUse"
+	return eventType == "hook.claude.PreToolUse" || eventType == "hook.codex.PreToolUse"
 }
 
 // ClassifyWorkEvent maps a composed PaneEvent Type to a work-state transition.
+//
+// Codex emits Claude's event NAMES (its hook system is Claude-compatible; see
+// internal/codexhook), so each hook.codex.* case sits beside its Claude twin.
+// The events codex never emits — Notification, StopFailure, the Task pair —
+// simply have no codex arm.
 func ClassifyWorkEvent(eventType string) WorkEventKind {
 	switch eventType {
-	case "hook.claude.UserPromptSubmit", "hook.opencode.chat.message":
+	case "hook.claude.UserPromptSubmit", "hook.opencode.chat.message", "hook.codex.UserPromptSubmit":
 		return WorkEventStart
 	// Resume edge: the user answered an interactive-prompt tool (AskUserQuestion
 	// / ExitPlanMode) and the agent is working again. The hook registers
@@ -151,9 +156,9 @@ func ClassifyWorkEvent(eventType string) WorkEventKind {
 	// (claudehook.spoolIsFresh), so the ledger sees a heartbeat rather than a
 	// per-tool-call stream. Dropping one is free — it is a level, not an edge:
 	// any later tool call in the same turn re-arms the identical state.
-	case "hook.claude.PreToolUse":
+	case "hook.claude.PreToolUse", "hook.codex.PreToolUse":
 		return WorkEventStart
-	case "hook.claude.Stop",
+	case "hook.claude.Stop", "hook.codex.Stop",
 		"hook.opencode.session.idle", "hook.opencode.session.error":
 		return WorkEventStop
 	// A turn killed by an API error ends with StopFailure and NEVER a Stop, so
@@ -173,15 +178,15 @@ func ClassifyWorkEvent(eventType string) WorkEventKind {
 	// exit): no subagent of it can still be running, so the TUI also drops
 	// any outstanding-subagent count instead of letting a lost SubagentStop
 	// wedge the spinner forever.
-	case "hook.claude.SessionEnd":
+	case "hook.claude.SessionEnd", "hook.codex.SessionEnd":
 		return WorkEventStopFinal
 	// Background subagents outlive the main turn's Stop (Claude Code runs
 	// them detached by default), so they carry their own start/stop edges.
 	// TaskCreated/TaskCompleted stay unmapped on purpose: the task list is
 	// bookkeeping, not an execution signal.
-	case "hook.claude.SubagentStart":
+	case "hook.claude.SubagentStart", "hook.codex.SubagentStart":
 		return WorkEventSubagentStart
-	case "hook.claude.SubagentStop":
+	case "hook.claude.SubagentStop", "hook.codex.SubagentStop":
 		return WorkEventSubagentStop
 	// Park-for-input edges: the agent is blocked waiting on the user (permission
 	// prompt, option select, idle-input nudge). internal/tui/workstate.go's
@@ -204,7 +209,7 @@ func ClassifyWorkEvent(eventType string) WorkEventKind {
 	// sidebar can tell "blocked on you" apart from "turn finished" — a
 	// genuine park no longer sets unseen; tabBlocked + blockedTabStyle carry
 	// it to the tab bar instead.
-	case "hook.claude.PermissionRequest", "hook.opencode.permission.ask":
+	case "hook.claude.PermissionRequest", "hook.opencode.permission.ask", "hook.codex.PermissionRequest":
 		return WorkEventPark
 	case "hook.claude.Notification":
 		return WorkEventNotify

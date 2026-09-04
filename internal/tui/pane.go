@@ -950,6 +950,8 @@ func resumeLabel(paneType, sessionID string, restoresViaSession bool) string {
 		base = "resuming claude"
 	case "opencode":
 		base = "resuming opencode"
+	case "codex":
+		base = "resuming codex"
 	case "ssh":
 		base = "reconnecting ssh"
 	case "stripe":

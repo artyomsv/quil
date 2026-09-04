@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/artyomsv/quil/internal/claudehook"
+	"github.com/artyomsv/quil/internal/codexhook"
 	"github.com/artyomsv/quil/internal/plugin"
 )
 
@@ -753,5 +754,94 @@ func TestClaudeHookSpawnPrep_WriteFailureDegradesInsteadOfFailing(t *testing.T) 
 	}
 	if env != nil {
 		t.Errorf("env = %v, want nil", env)
+	}
+}
+
+// TestResolveSpawnArgs_CodexResume covers the codex restore branch of
+// resumeTemplateFor: a recorded id becomes `resume <id>`, anything else
+// starts FRESH — the plugin ships resume_args = [] because `resume --last`
+// is codex's most-recent-session lookup, the same sibling trap as
+// `claude --continue`.
+func TestResolveSpawnArgs_CodexResume(t *testing.T) {
+	codexPlugin := &plugin.PanePlugin{
+		Name:    plugin.CodexPluginName,
+		Command: plugin.CommandConfig{Cmd: "codex"},
+		Persistence: plugin.PersistenceConfig{
+			Strategy:   "session_scrape",
+			ResumeArgs: nil,
+		},
+	}
+	const sid = "01a05db1-9f44-73b2-b426-8aad5f5232f4"
+
+	tests := []struct {
+		name string
+		pane *Pane
+		rec  codexhook.SessionRecord
+		err  error
+		want []string
+	}{
+		{"recorded id — resume by id", &Pane{ID: "pane-abc"}, codexhook.SessionRecord{ID: sid}, nil, []string{"resume", sid}},
+		{"recorded id keeps runtime toggles", &Pane{ID: "pane-abc", InstanceArgs: []string{"--search"}}, codexhook.SessionRecord{ID: sid}, nil, []string{"--search", "resume", sid}},
+		{"no record — fresh start", &Pane{ID: "pane-abc"}, codexhook.SessionRecord{}, os.ErrNotExist, nil},
+		{"empty id — fresh start", &Pane{ID: "pane-abc"}, codexhook.SessionRecord{}, nil, nil},
+		{"flag-shaped id — fresh start", &Pane{ID: "pane-abc"}, codexhook.SessionRecord{ID: "--last"}, nil, nil},
+		{"non-uuid id — fresh start", &Pane{ID: "pane-abc"}, codexhook.SessionRecord{ID: "ses_abc"}, nil, nil},
+	}
+
+	// Subtests mutate readCodexSessionFn — not parallel-safe.
+	orig := readCodexSessionFn
+	t.Cleanup(func() { readCodexSessionFn = orig })
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			readCodexSessionFn = func(paneID string) (codexhook.SessionRecord, error) {
+				if paneID != tt.pane.ID {
+					t.Errorf("read paneID = %q, want %q", paneID, tt.pane.ID)
+				}
+				return tt.rec, tt.err
+			}
+			got := resolveSpawnArgs(codexPlugin, tt.pane, true, "", claimAny)
+			if len(got) == 0 && len(tt.want) == 0 {
+				return
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("resolveSpawnArgs:\n  got:  %v\n  want: %v", got, tt.want)
+			}
+			if tt.want != nil {
+				tt.pane.PluginMu.Lock()
+				sidState := tt.pane.PluginState["session_id"]
+				tt.pane.PluginMu.Unlock()
+				if sidState != tt.rec.ID {
+					t.Errorf("PluginState[session_id] = %q, want %q", sidState, tt.rec.ID)
+				}
+			}
+		})
+	}
+}
+
+// TestResumeTemplateFor_CodexArmWinsOverClaudeCapability: a codex pane must
+// never take the claude arm even if its TOML is edited to say
+// sessions = "claude" — that arm would prepend --settings and read the wrong
+// record file.
+func TestResumeTemplateFor_CodexArmWinsOverClaudeCapability(t *testing.T) {
+	orig := readCodexSessionFn
+	t.Cleanup(func() { readCodexSessionFn = orig })
+	readCodexSessionFn = func(string) (codexhook.SessionRecord, error) {
+		return codexhook.SessionRecord{ID: "01a05db1-9f44-73b2-b426-8aad5f5232f4", TranscriptPath: "/r/x.jsonl"}, nil
+	}
+	p := &plugin.PanePlugin{
+		Name:        plugin.CodexPluginName,
+		Command:     plugin.CommandConfig{Cmd: "codex", Sessions: plugin.ClaudeSessionSource},
+		Persistence: plugin.PersistenceConfig{Strategy: "session_scrape"},
+	}
+	pane := &Pane{ID: "pane-abc"}
+	got := resumeTemplateFor(p, pane, claimAny)
+	if !reflect.DeepEqual(got, []string{"resume", "{session_id}"}) {
+		t.Errorf("template = %v", got)
+	}
+	pane.PluginMu.Lock()
+	defer pane.PluginMu.Unlock()
+	if pane.PluginState["transcript_path"] != "/r/x.jsonl" {
+		t.Errorf("transcript_path not recorded with the id: %v", pane.PluginState)
 	}
 }

@@ -31,6 +31,17 @@ func TestClassifyWorkEvent(t *testing.T) {
 		{"hook.opencode.permission.ask", WorkEventPark},
 		{"hook.claude.SubagentStart", WorkEventSubagentStart},
 		{"hook.claude.SubagentStop", WorkEventSubagentStop},
+		// Codex reuses Claude's event names; the mapping is the same minus
+		// the events codex does not emit (Notification, StopFailure).
+		{"hook.codex.UserPromptSubmit", WorkEventStart},
+		{"hook.codex.PreToolUse", WorkEventStart},
+		{"hook.codex.Stop", WorkEventStop},
+		{"hook.codex.SessionEnd", WorkEventStopFinal},
+		{"hook.codex.PermissionRequest", WorkEventPark},
+		{"hook.codex.SubagentStart", WorkEventSubagentStart},
+		{"hook.codex.SubagentStop", WorkEventSubagentStop},
+		{"hook.codex.PreCompact", WorkEventNone},
+		{"hook.codex.PostCompact", WorkEventNone},
 		{"process_exit", WorkEventAbort},
 		// Synthesised by the TUI from an ESC keypress: the one turn ending
 		// upstream emits no event for at all.
@@ -79,5 +90,21 @@ func TestParkEventsAreDistinctFromStop(t *testing.T) {
 	// and tui.applyWorkTransition parks everything else.
 	if got := ClassifyWorkEvent("hook.claude.Notification"); got != WorkEventNotify {
 		t.Errorf("Notification must classify as WorkEventNotify, got %v", got)
+	}
+}
+
+// TestCodexPreToolUse_IsWorkStateOnlyHeartbeat: the codex heartbeat must be
+// kept off the sidebar and out of the daemon queue exactly like Claude's, and
+// must not clear the unseen mark.
+func TestCodexPreToolUse_IsWorkStateOnlyHeartbeat(t *testing.T) {
+	t.Parallel()
+	if !IsWorkStateOnly("hook.codex.PreToolUse") {
+		t.Error("hook.codex.PreToolUse must be work-state-only")
+	}
+	if !IsWorkHeartbeat("hook.codex.PreToolUse") {
+		t.Error("hook.codex.PreToolUse must be a heartbeat")
+	}
+	if IsWorkStateOnly("hook.codex.Stop") || IsWorkHeartbeat("hook.codex.UserPromptSubmit") {
+		t.Error("only the heartbeat is work-state-only")
 	}
 }

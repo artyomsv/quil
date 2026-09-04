@@ -73,3 +73,14 @@ func TestPayload_Validate_EmptySeverityAllowed(t *testing.T) {
 		t.Errorf("empty severity should be allowed; got %v", err)
 	}
 }
+
+// TestPayload_Validate_AcceptsCodex: codex is the third producer; a payload
+// stamped with it must pass the daemon's ingest gate or every codex event is
+// dropped at the spool.
+func TestPayload_Validate_AcceptsCodex(t *testing.T) {
+	t.Parallel()
+	p := Payload{V: SchemaVersion, PaneID: "pane-abc", Source: SourceCodex, HookEvent: "Stop", Title: "Reply ready"}
+	if err := p.Validate(); err != nil {
+		t.Errorf("codex payload should validate; got %v", err)
+	}
+}

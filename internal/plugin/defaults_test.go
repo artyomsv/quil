@@ -287,3 +287,66 @@ func TestDefaultHunk_ResolvesRepoFromTheWorkingDirectory(t *testing.T) {
 		t.Errorf("Discover = %q, want git", p.Command.Discover)
 	}
 }
+
+// TestEnsureDefaultPlugins_CodexShape pins the shipped codex plugin: the
+// session_scrape strategy opts it into the restore branch's resume expansion,
+// the EMPTY resume_args is what makes "no recorded session" a fresh start
+// rather than codex's most-recent lookup, and record_history is what turns
+// the hook's UserPromptSubmit into Alt+Shift+I history.
+func TestEnsureDefaultPlugins_CodexShape(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := EnsureDefaultPlugins(dir); err != nil {
+		t.Fatalf("EnsureDefaultPlugins: %v", err)
+	}
+	p, err := loadPluginTOML(filepath.Join(dir, "codex.toml"))
+	if err != nil {
+		t.Fatalf("load codex.toml: %v", err)
+	}
+	if p.Name != CodexPluginName || p.Command.Cmd != "codex" || p.Category != "ai" {
+		t.Errorf("name/cmd/category = %q/%q/%q", p.Name, p.Command.Cmd, p.Category)
+	}
+	if !p.Command.PromptsCWD || !p.Command.RecordHistory || p.Command.Sessions != "" {
+		t.Errorf("PromptsCWD=%v RecordHistory=%v Sessions=%q", p.Command.PromptsCWD, p.Command.RecordHistory, p.Command.Sessions)
+	}
+	if p.Persistence.Strategy != "session_scrape" {
+		t.Errorf("strategy = %q, want session_scrape", p.Persistence.Strategy)
+	}
+	if len(p.Persistence.ResumeArgs) != 0 {
+		t.Errorf("resume_args = %v, want empty (a pane with no recorded session starts fresh)", p.Persistence.ResumeArgs)
+	}
+	for _, a := range p.Command.Args {
+		if a == "--last" {
+			t.Error("codex.toml must never pass --last")
+		}
+	}
+	if p.Persistence.GhostBuffer {
+		t.Error("codex runs on the alternate screen; ghost replay must be off")
+	}
+	if !p.Display.WideCanvas {
+		t.Error("codex is an AI transcript pane; wide_canvas must be on")
+	}
+	groups := map[string]int{}
+	var search bool
+	for _, tg := range p.Command.Toggles {
+		if tg.Group != "" {
+			groups[tg.Group]++
+		}
+		for _, a := range tg.ArgsWhenOn {
+			if a == "--search" {
+				search = true
+			}
+			if a == "--last" || a == "--dangerously-bypass-hook-trust" {
+				t.Errorf("toggle %q carries forbidden arg %q", tg.Name, a)
+			}
+		}
+		if tg.Default {
+			t.Errorf("toggle %q must default off", tg.Name)
+		}
+	}
+	if groups["permission_mode"] != 2 {
+		t.Errorf("want 2 toggles in the permission_mode group, got %d", groups["permission_mode"])
+	}
+	if !search {
+		t.Error("want a --search toggle")
+	}
+}

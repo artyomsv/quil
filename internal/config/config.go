@@ -219,6 +219,7 @@ type UpdateConfig struct {
 type HookNotificationsConfig struct {
 	Claude   string `toml:"claude"`
 	OpenCode string `toml:"opencode"`
+	Codex    string `toml:"codex"`
 }
 
 type MCPConfig struct {
@@ -520,6 +521,7 @@ func Default() Config {
 			Hooks: HookNotificationsConfig{
 				Claude:   "default",
 				OpenCode: "default",
+				Codex:    "default",
 			},
 		},
 		Overlay: OverlayConfig{

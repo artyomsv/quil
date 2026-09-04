@@ -441,3 +441,25 @@ func TestDesktopConfig_RoundTrips(t *testing.T) {
 		t.Errorf("round trip = %+v, want %+v", out.Notification.Desktop, in.Notification.Desktop)
 	}
 }
+
+// TestLoad_HooksCodexKnob: the third hook source has its own tier, defaulted
+// like the other two and overridable from config.toml.
+func TestLoad_HooksCodexKnob(t *testing.T) {
+	if got := config.Default().Notification.Hooks.Codex; got != "default" {
+		t.Errorf("default codex hooks tier = %q, want \"default\"", got)
+	}
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte("[notification.hooks]\ncodex = \"off\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Notification.Hooks.Codex != "off" {
+		t.Errorf("loaded codex tier = %q, want off", loaded.Notification.Hooks.Codex)
+	}
+	if loaded.Notification.Hooks.Claude != "default" {
+		t.Errorf("claude tier must keep its default beside a codex override, got %q", loaded.Notification.Hooks.Claude)
+	}
+}

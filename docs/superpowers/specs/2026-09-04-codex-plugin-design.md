@@ -77,10 +77,12 @@ put codex-only differences (rollout usage, no prompt-tool gate, a different reco
 inside it, and the repo already accepts parallel producers (`opencodehook`).
 
 - `codexhook.go`
-  - `HookCommand(exePath) (cmd, note string)` → `"<quild>" codex-hook` on Unix; on Windows
-    the UNQUOTED `<quild> codex-hook` (8.3 short name when the path has a space), because
-    codex 0.146.0 escapes quotes as `\"` before cmd.exe sees them and the quoted form exits
-    1 — measured after the first runtime check, see `.claude/rules/hooks-and-sessions.md`.
+  - `HookCommand() string` → `& $env:QUIL_HOOK_EXE codex-hook` on Windows (codex runs hooks
+    through PowerShell there), `"$QUIL_HOOK_EXE" codex-hook` elsewhere; `HookExeEnv(exePath)`
+    puts the bare quild path in the pane env. The path is kept OUT of the command because a
+    quoted path is a PowerShell parse error and a bare one breaks on spaces — measured after
+    the first runtime check and re-measured with a directory containing a space; see
+    `.claude/rules/hooks-and-sessions.md`.
   - `BuildConfigOverride(cmd string, goos string) (string, error)` → the TOML value for
     `-c hooks=…`: one matcher-less group per registered event plus `state` with one
     `trusted_hash` per event. Golden-tested against the probe-verified hash. The hash is

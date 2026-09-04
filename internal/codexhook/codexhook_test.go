@@ -1,7 +1,6 @@
 package codexhook
 
 import (
-	"errors"
 	"strings"
 	"testing"
 )
@@ -12,54 +11,57 @@ import (
 const probeCommand = "echo hooked > hookfired.txt"
 const probeHash = "sha256:5be9d5089b64165ae3661e509b80789b0e314361111505f1b2c86a5490dbb86e"
 
-// TestHookCommand_QuotingPerPlatform pins the one shape codex 0.146.0 can run
-// on Windows — an UNQUOTED path — beside the ordinary quoted form for the
-// Unix shells. Measured 2026-09-04: codex escapes the quotes as \" before
-// cmd.exe sees them, so the quoted form exits 1 with nothing written, while
-// the same path unquoted recorded the session.
-func TestHookCommand_QuotingPerPlatform(t *testing.T) {
+// TestHookCommand_NamesTheExeEnvVar pins the shape that survives codex's argv
+// handling AND the shell codex runs hooks in: the command carries NO path and
+// NO quote, only the environment variable the shell resolves. Measured
+// 2026-09-04 with codex 0.146.0 on Windows (PowerShell): a quoted path is a
+// parse error (exit 1, nothing written), a bare path breaks on a space, and
+// `%VAR%` is never expanded; `& $env:QUIL_HOOK_EXE codex-hook` recorded the
+// session from a directory WITH a space under both PowerShell 5.1 and pwsh.
+func TestHookCommand_NamesTheExeEnvVar(t *testing.T) {
 	t.Parallel()
-	noShort := func(p string) (string, error) { return p, nil }
-	shortOK := func(p string) (string, error) { return `C:\PROGRA~1\quil\quild.exe`, nil }
-	shortFails := func(p string) (string, error) { return "", errors.New("8.3 names disabled") }
+	if got := hookCommandFor("windows"); got != `& $env:QUIL_HOOK_EXE codex-hook` {
+		t.Errorf("windows command = %q", got)
+	}
+	for _, goos := range []string{"linux", "darwin"} {
+		if got := hookCommandFor(goos); got != `"$QUIL_HOOK_EXE" codex-hook` {
+			t.Errorf("%s command = %q", goos, got)
+		}
+	}
+	if strings.ContainsRune(hookCommandFor("windows"), '"') {
+		t.Error("the Windows command must carry no quote: PowerShell reads a quoted path as an expression")
+	}
+	if got := HookCommand(); !strings.HasSuffix(got, " codex-hook") || !strings.Contains(got, HookExeEnvVar) {
+		t.Errorf("HookCommand = %q", got)
+	}
+}
 
+// TestHookExeEnv pins how the path travels: bare, on every platform — the
+// shell side takes the variable's contents as one token.
+func TestHookExeEnv(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
-		name     string
-		goos     string
-		exe      string
-		short    func(string) (string, error)
-		wantCmd  string
-		wantNote bool
+		name, exe, want string
+		wantErr         bool
 	}{
-		{"linux quotes", "linux", "/usr/local/bin/quild", noShort, `"/usr/local/bin/quild" codex-hook`, false},
-		{"darwin quotes even with a space", "darwin", "/Applications/Quil Tools/quild", noShort, `"/Applications/Quil Tools/quild" codex-hook`, false},
-		{"windows bare path goes unquoted", "windows", `E:\Projects\quil\quild.exe`, noShort, `E:\Projects\quil\quild.exe codex-hook`, false},
-		{"windows space uses the short name", "windows", `C:\Program Files\quil\quild.exe`, shortOK, `C:\PROGRA~1\quil\quild.exe codex-hook`, false},
-		{"windows space without a short name falls back to quotes with a note", "windows", `C:\Program Files\quil\quild.exe`, shortFails, `"C:\Program Files\quil\quild.exe" codex-hook`, true},
-		{"windows metacharacter falls back to quotes with a note", "windows", `C:\R&D\quild.exe`, noShort, `"C:\R&D\quild.exe" codex-hook`, true},
-		// cmd.exe also splits a bare token at ; , and = — a path holding one
-		// would go out unquoted and every hook would fail with no log line.
-		{"windows delimiter takes the short name", "windows", `C:\a;b\quild.exe`, shortOK, `C:\PROGRA~1\quil\quild.exe codex-hook`, false},
-		{"windows equals sign without a short name falls back with a note", "windows", `C:\k=v\quild.exe`, shortFails, `"C:\k=v\quild.exe" codex-hook`, true},
-		{"unix path with a dollar is reported", "linux", "/opt/$HOME/quild", noShort, `"/opt/$HOME/quild" codex-hook`, true},
+		{"windows path with a space", `C:\Program Files\quil\quild.exe`, `QUIL_HOOK_EXE=C:\Program Files\quil\quild.exe`, false},
+		{"windows path with metacharacters", `C:\R&D\a;b\quild.exe`, `QUIL_HOOK_EXE=C:\R&D\a;b\quild.exe`, false},
+		{"unix path with a space and a dollar", "/opt/quil tools/$x/quild", "QUIL_HOOK_EXE=/opt/quil tools/$x/quild", false},
+		{"empty path refused", "", "", true},
+		{"newline refused", "/opt/q\nuild", "", true},
+		{"NUL refused", "C:\\q\x00uild.exe", "", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			cmd, note := hookCommandFor(tt.goos, tt.exe, tt.short)
-			if cmd != tt.wantCmd {
-				t.Errorf("cmd = %q, want %q", cmd, tt.wantCmd)
+			got, err := HookExeEnv(tt.exe)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
 			}
-			if (note != "") != tt.wantNote {
-				t.Errorf("note = %q, wantNote %v", note, tt.wantNote)
+			if got != tt.want {
+				t.Errorf("env = %q, want %q", got, tt.want)
 			}
 		})
-	}
-	// The production wrapper must route through the same function with the
-	// real platform, never a hardcoded quoted form.
-	cmd, _ := HookCommand("/opt/quild")
-	if !strings.HasSuffix(cmd, " codex-hook") || !strings.Contains(cmd, "/opt/quild") {
-		t.Errorf("HookCommand = %q", cmd)
 	}
 }
 
@@ -160,25 +162,32 @@ func TestBuildConfigOverride_ExplicitShortTimeouts(t *testing.T) {
 
 func TestBuildConfigOverride_QuotesBackslashesAndQuotes(t *testing.T) {
 	t.Parallel()
-	cmd, _ := hookCommandFor("windows", `C:\quil\quild.exe`, func(p string) (string, error) { return p, nil })
-	v, err := BuildConfigOverride(cmd, "windows")
+	v, err := BuildConfigOverride(hookCommandFor("windows"), "windows")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(v, `command="C:\\quil\\quild.exe codex-hook"`) {
-		t.Errorf("command not TOML-quoted: %s", v)
+	if !strings.Contains(v, `command="& $env:QUIL_HOOK_EXE codex-hook"`) {
+		t.Errorf("windows command not carried verbatim: %s", v)
 	}
 	if !strings.Contains(v, `"C:\\<session-flags>\\config.toml:stop:0:0"`) {
 		t.Errorf("key not TOML-quoted: %s", v)
 	}
-	// A quoted Unix form still round-trips through TOML escaping.
-	unix, _ := hookCommandFor("linux", "/opt/q/quild", nil)
-	v, err = BuildConfigOverride(unix, "linux")
+	// The Unix form's own double quotes round-trip through TOML escaping.
+	v, err = BuildConfigOverride(hookCommandFor("linux"), "linux")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(v, `command="\"/opt/q/quild\" codex-hook"`) {
+	if !strings.Contains(v, `command="\"$QUIL_HOOK_EXE\" codex-hook"`) {
 		t.Errorf("unix command not TOML-quoted: %s", v)
+	}
+	// A backslash in a command still escapes (the probe command has none;
+	// this guards tomlQuote's use on the command position).
+	v, err = BuildConfigOverride(`C:\x\y.exe codex-hook`, "windows")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(v, `command="C:\\x\\y.exe codex-hook"`) {
+		t.Errorf("backslashes not TOML-escaped: %s", v)
 	}
 }
 

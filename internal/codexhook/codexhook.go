@@ -13,9 +13,11 @@
 // codex-cli 0.146.0 on 2026-09-04: with the hash the hook fires, without it
 // codex silently skips it, and nothing under ~/.codex is read or written.
 //
-// The hook command is `quild codex-hook` (runhook.go), which reads the hook
-// JSON on stdin and writes $QUIL_HOME/sessions/codex-<paneID>.id or appends a
-// hookevents JSONL line to $QUIL_HOME/events/<paneID>.jsonl.
+// The hook command is `quild codex-hook` (runhook.go) — spelled through the
+// QUIL_HOOK_EXE environment variable rather than as a path, see HookCommand —
+// which reads the hook JSON on stdin and writes $QUIL_HOME/sessions/codex-
+// <paneID>.id or appends a hookevents JSONL line to $QUIL_HOME/events/
+// <paneID>.jsonl.
 //
 // This is a sibling of internal/claudehook that deliberately shares no code
 // with it: that path is incident-hardened, and codex's differences (the
@@ -35,69 +37,59 @@ import (
 	"strings"
 )
 
-// HookCommand returns the command codex runs for each registered event, plus a
-// non-empty note when the only form available is one the installed codex may
-// not be able to run (the daemon logs it). exePath is OS-controlled, never
-// user input.
+// HookExeEnvVar is the pane-environment variable that carries the quild
+// binary's path to the hook command. The daemon sets it at spawn (HookExeEnv)
+// and the command codex runs names it instead of the path (HookCommand).
+const HookExeEnvVar = "QUIL_HOOK_EXE"
+
+// HookCommand returns the command codex runs for each registered event. It
+// names the quild binary INDIRECTLY, through HookExeEnvVar, and that is the
+// whole design.
 //
-// Codex runs hook commands through a shell — `$SHELL -lc` on Unix, where a
-// double-quoted path is the ordinary spelling and spaces are fine, and
-// `%COMSPEC% /C` on Windows, where it is NOT: codex 0.146.0 passes the line as
-// an ordinary argv token, so Rust escapes every `"` as `\"` before cmd.exe
-// sees it, and cmd.exe then looks for a program literally named
-// `\"E:\...\quild.exe\"` and exits 1. Measured 2026-09-04: with the quoted
-// path no hook ever wrote anything ("Stop hook (failed) — hook exited with
-// code 1" in the transcript); the same path unquoted recorded the session.
-// Newer codex wraps the line in its own quotes instead (raw_arg), where the
-// quoted form works — but the unquoted one works on both, so that is what
-// Windows gets. A path with a space cannot go unquoted, so it is replaced by
-// its 8.3 short name; only when that is unavailable does the quoted form go
-// out, with the note.
-func HookCommand(exePath string) (cmd, note string) {
-	return hookCommandFor(runtime.GOOS, exePath, shortPathName)
+// Codex runs hook commands through the user's shell — `$SHELL -lc` on Unix
+// and PowerShell (`powershell -NoProfile -Command <line>`, pwsh when present)
+// on Windows. A path spelled into the command therefore has to satisfy
+// PowerShell's grammar, and the obvious spellings do not: `"C:\...\quild.exe"
+// codex-hook` is a string EXPRESSION followed by a stray token (a parse error,
+// exit 1 — measured 2026-09-04 with codex 0.146.0: no hook wrote anything and
+// the transcript said "Stop hook (failed) — hook exited with code 1"), a bare
+// path works only while it has no space and no character PowerShell reads as
+// an operator, and `%VAR%` is never expanded there at all. The call operator
+// on an environment variable, `& $env:QUIL_HOOK_EXE codex-hook`, carries no
+// quote and no path in the command string, so it survives codex's argv
+// escaping unchanged, and PowerShell invokes whatever the variable holds —
+// verified with quild running from a directory with a space under both
+// Windows PowerShell 5.1 and pwsh 7. On Unix `"$QUIL_HOOK_EXE"` is expanded
+// inside double quotes, so a path holding a space, `$`, a backtick or a quote
+// is delivered verbatim.
+//
+// A constant command also makes the trust identity constant: the hash codex
+// checks no longer changes with the install directory or across upgrades.
+func HookCommand() string {
+	return hookCommandFor(runtime.GOOS)
 }
 
-// hookCommandFor is HookCommand with the platform and the short-path lookup
-// injected, so the Windows branch is testable on the Linux CI image.
-func hookCommandFor(goos, exePath string, shortPath func(string) (string, error)) (cmd, note string) {
-	if goos != "windows" {
-		cmd = fmt.Sprintf(`"%s" codex-hook`, exePath)
-		// The shell expands $ and ` and reads " and \ inside double quotes;
-		// a quild path carrying one would leave the quotes. OS-controlled and
-		// effectively never true, but the Windows branch reports its
-		// unrepresentable case, so this one does too.
-		if strings.ContainsAny(exePath, "\"\\$`\n") {
-			return cmd, "the quild path contains a character the shell interprets inside double quotes (one of \" \\ $ `)"
-		}
-		return cmd, ""
+// hookCommandFor is HookCommand with the platform injected, so both spellings
+// are testable on the Linux CI image.
+func hookCommandFor(goos string) string {
+	if goos == "windows" {
+		return "& $env:" + HookExeEnvVar + " codex-hook"
 	}
-	if cmdSafeUnquoted(exePath) {
-		return exePath + " codex-hook", ""
-	}
-	if short, err := shortPath(exePath); err == nil && cmdSafeUnquoted(short) {
-		return short + " codex-hook", ""
-	}
-	return fmt.Sprintf(`"%s" codex-hook`, exePath),
-		"the quild path needs quoting and has no short (8.3) name; codex 0.146 cannot run a quoted hook command (it escapes the quotes before cmd.exe sees them) — newer codex can"
+	return `"$` + HookExeEnvVar + `" codex-hook`
 }
 
-// cmdMetaChars are the characters an UNQUOTED cmd.exe token cannot carry
-// without changing meaning — the operators, plus the three token delimiters
-// (; , =) cmd.exe splits an argument at. A path holding one has to be quoted,
-// or go through its 8.3 name, which admits none of them.
-const cmdMetaChars = "&|^<>\"%();,="
-
-// cmdSafeUnquoted reports whether p can stand as a bare cmd.exe token.
-func cmdSafeUnquoted(p string) bool {
-	if p == "" || strings.ContainsAny(p, cmdMetaChars) {
-		return false
+// HookExeEnv returns the KEY=VALUE pane-environment entry that resolves
+// HookCommand to exePath (the daemon's own binary, OS-controlled). The value
+// is the bare path on every platform: PowerShell's call operator and the
+// Unix double quotes each take the variable's contents as ONE token.
+func HookExeEnv(exePath string) (string, error) {
+	if exePath == "" {
+		return "", errors.New("codexhook: empty quild path")
 	}
-	for _, r := range p {
-		if r == ' ' || r == '\t' || r < 0x20 || r == 0x7f {
-			return false
-		}
+	if strings.ContainsAny(exePath, "\x00\r\n") {
+		return "", errors.New("codexhook: quild path contains a control character")
 	}
-	return true
+	return HookExeEnvVar + "=" + exePath, nil
 }
 
 // hookEvent is one registered codex hook event: the event name codex expects
@@ -270,8 +262,9 @@ func ConfigOverrideArgs(cmd, goos string) ([]string, error) {
 
 // IsShim reports whether the resolved codex command is a cmd.exe batch shim —
 // what an npm install puts on PATH on Windows. cmd.exe re-parses the command
-// line with its own quoting rules, and the override value carries quotes, so
-// an inline `-c` through a shim is the same bug class as the inline Claude
+// line with its own quoting rules, and the override value carries quotes (the
+// TOML strings, even though the hook command itself no longer does), so an
+// inline `-c` through a shim is the same bug class as the inline Claude
 // `--settings` JSON was. There is no file form to fall back to here, so the
 // caller skips the hook and logs.
 func IsShim(resolvedCmd string) bool {

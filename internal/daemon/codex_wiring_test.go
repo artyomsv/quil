@@ -72,7 +72,7 @@ func TestSpawnPane_CodexArmInjectsHookOverride(t *testing.T) {
 		t.Errorf("override does not register the codex-hook command with trust: %s", fake.startArgs[1])
 	}
 
-	var paneID, hookHome, mode, history bool
+	var paneID, hookHome, mode, history, exe bool
 	for _, kv := range fake.env {
 		switch {
 		case kv == "QUIL_PANE_ID=pane-c0dec0de":
@@ -83,12 +83,14 @@ func TestSpawnPane_CodexArmInjectsHookOverride(t *testing.T) {
 			mode = true
 		case kv == "QUIL_RECORD_HISTORY=1":
 			history = true
+		case strings.HasPrefix(kv, "QUIL_HOOK_EXE=") && strings.Contains(kv, "/opt/quil/quild"):
+			exe = true
 		case strings.HasPrefix(kv, "QUIL_HOME="):
 			t.Errorf("pane env carries %s — children inherit it and a dev build would retarget at production", kv)
 		}
 	}
-	if !paneID || !hookHome || !mode || !history {
-		t.Errorf("pane env missing hook context: pane=%v home=%v mode=%v history=%v (env=%q)", paneID, hookHome, mode, history, fake.env)
+	if !paneID || !hookHome || !mode || !history || !exe {
+		t.Errorf("pane env missing hook context: pane=%v home=%v mode=%v history=%v exe=%v (env=%q)", paneID, hookHome, mode, history, exe, fake.env)
 	}
 }
 

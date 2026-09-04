@@ -3791,11 +3791,15 @@ func codexSpawnPrep(quilDir, paneID, hookMode, resolvedCmd string) (prefix, env 
 		log.Printf("warning: pane %s: cannot resolve quild executable: %v — codex hooks disabled (notifications, work state, input history, session resume)", paneID, err)
 		return nil, nil
 	}
-	hookCmd, note := codexhook.HookCommand(exePath)
-	if note != "" {
-		log.Printf("warning: pane %s: codex hook command may not run on this codex version: %s", paneID, note)
+	// The hook command names QUIL_HOOK_EXE rather than the path, so the path
+	// travels in the pane env (see codexhook.HookCommand for why a path in the
+	// command cannot be spelled safely for every codex version on Windows).
+	exeEnv, err := codexhook.HookExeEnv(exePath)
+	if err != nil {
+		log.Printf("warning: pane %s: %v — codex hooks disabled", paneID, err)
+		return nil, nil
 	}
-	prefix, err = codexhook.ConfigOverrideArgs(hookCmd, runtime.GOOS)
+	prefix, err = codexhook.ConfigOverrideArgs(codexhook.HookCommand(), runtime.GOOS)
 	if err != nil {
 		log.Printf("warning: pane %s: build codex hook override: %v — codex hooks disabled", paneID, err)
 		return nil, nil
@@ -3811,6 +3815,7 @@ func codexSpawnPrep(quilDir, paneID, hookMode, resolvedCmd string) (prefix, env 
 		"QUIL_PANE_ID=" + paneID,
 		"QUIL_HOOK_MODE=" + mode,
 		"QUIL_HOOK_HOME=" + quilDir,
+		exeEnv,
 	}
 	return prefix, env
 }

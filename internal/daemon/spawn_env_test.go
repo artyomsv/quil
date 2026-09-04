@@ -67,12 +67,25 @@ func TestCodexSpawnPrep_PaneEnvUsesHookHome(t *testing.T) {
 	if !strings.Contains(prefix[1], `codex-hook`) || !strings.Contains(prefix[1], "trusted_hash=") {
 		t.Errorf("prefix must register the codex-hook command with trust: %s", prefix[1])
 	}
+	var exe bool
 	for _, kv := range env {
 		switch {
 		case kv == "QUIL_PANE_ID=pane-cx123", kv == "QUIL_HOOK_MODE=default", strings.HasPrefix(kv, "QUIL_HOOK_HOME="):
+		case strings.HasPrefix(kv, "QUIL_HOOK_EXE="):
+			// The command names the variable; the value is what resolves it.
+			if !strings.Contains(kv, "/fake/quild") {
+				t.Errorf("QUIL_HOOK_EXE does not carry the quild path: %q", kv)
+			}
+			exe = true
 		default:
 			t.Errorf("unexpected env entry %q", kv)
 		}
+	}
+	if !exe {
+		t.Errorf("pane env missing QUIL_HOOK_EXE; env = %q", env)
+	}
+	if strings.Contains(prefix[1], "/fake/quild") {
+		t.Errorf("the override must name the variable, never the path: %s", prefix[1])
 	}
 }
 

@@ -84,6 +84,20 @@ Two rules the overlay retention work had to learn, both instances of the
   overlay timestamp is on the wire or in the snapshot
   (`includeOverlays=false`), so the frame carried zero changed state — on a
   path that now fires on every tab switch.
+- **Do not broadcast a change nobody will read.** An unseen-only
+  `MsgUpdatePane` (the TUI reporting its green "finished while you were away"
+  mark, see `hooks-and-sessions.md`) skips the broadcast and keeps only the
+  debounced snapshot request: the client that sent it owns the live value and
+  seeds from the daemon's copy exactly once, at attach — and it sends one of
+  these per completion, dozens in a burst while the attach replay re-derives
+  marks across a large workspace. `updateTouchesBroadcastState` omits `Unseen`
+  on purpose; the field is on the wire and on disk, just not worth a frame. The
+  two quiet fields share ONE exit in `handleUpdatePane`, gated on a quiet field
+  being PRESENT and the predicate false — so a payload carrying both cannot slip
+  past either half, and a new field nobody has listed still broadcasts. An OLDER
+  daemon has no such exit and broadcasts a full frame per report; unreachable
+  from a release TUI (the version gate demands an exact match per destination),
+  reachable only when a non-release TUI skips the gate.
 
 The overlay-specific side of this (per-client visibility claims, the LRU cap,
 the policy clamp) lives in `plugins.md`, which is scoped to

@@ -114,10 +114,15 @@ type PaneInfo struct {
 	// for the same reasons as PinnedAttention and mutually exclusive with it
 	// (the daemon enforces that, so both fields here are simply reported).
 	MarkedForDeletion bool
-	Overlay           bool
-	Pending           bool // deferred restore — not yet lazy-spawned
-	SessionID         string
-	HistoryLines      int
+	// Unseen is the daemon's copy of this client's own "work finished while
+	// you were not looking" mark. It seeds a pane the client sees for the
+	// first time (a TUI restart) and is otherwise ignored: the client owns the
+	// live value, and reports every change back so the copy stays current.
+	Unseen       bool
+	Overlay      bool
+	Pending      bool // deferred restore — not yet lazy-spawned
+	SessionID    string
+	HistoryLines int
 	// MouseTracking/MouseSGR are daemon-authoritative (scanned from the PTY
 	// stream): the child app has enabled mouse tracking, so wheel events
 	// should be forwarded to it. Mirrored onto PaneModel for the wheel handler.
@@ -7109,6 +7114,9 @@ func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
 				}
 				if marked, ok := pm["marked_for_deletion"].(bool); ok {
 					pi.MarkedForDeletion = marked
+				}
+				if unseen, ok := pm["unseen"].(bool); ok {
+					pi.Unseen = unseen
 				}
 				if overlay, ok := pm["overlay"].(bool); ok {
 					pi.Overlay = overlay

@@ -1013,6 +1013,21 @@ func (m Model) finishReconnect(dest string, c Client) (tea.Model, tea.Cmd) {
 	// daemon is about to replay.
 	m.armReattachReset(dest)
 	m.resetWorkStateForReattach(dest)
+	// Restate every seeded unseen mark for this daemon. Reports made while the
+	// link was down were dropped (Router.Send answers nil for a dest it has no
+	// conn for, a dead conn errors), and a daemon that restarted restored a
+	// snapshot up to one debounce older than the last report — and nothing
+	// re-derives a REPORT: the replay re-derives the local value, which reports
+	// only on change, so a value that is already right sends nothing and the
+	// daemon's stale copy would come back green on the next TUI start. The live
+	// value is the truth by design, so saying it again cannot be wrong; the
+	// cost is one small frame per pane on a fresh conn with an empty queue.
+	// Sent through m.client, which the branches above have already swapped.
+	m.eachClientPane(dest, func(p *PaneModel) {
+		if p.unseenSeeded {
+			m.reportUnseen(p.ID, p.unseen)
+		}
+	})
 
 	if isRouter {
 		return m, m.attachToDest(dest)

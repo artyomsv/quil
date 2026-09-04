@@ -837,6 +837,7 @@ func (d *Daemon) restoreWorkspace() error {
 				if markedForDeletion {
 					pinnedAttention = false
 				}
+				unseen, _ := paneData["unseen"].(bool)
 				worktreeOwned, _ := paneData["worktree_owned"].(bool)
 				worktreePath, _ := paneData["worktree_path"].(string)
 				worktreeInterrupted, _ := paneData["worktree_interrupted"].(bool)
@@ -866,6 +867,9 @@ func (d *Daemon) restoreWorkspace() error {
 					// deletion mark would invite the user to close a pane that
 					// is still doing work.
 					MarkedForDeletion: markedForDeletion,
+					// Absent on pre-mark snapshots → false: a pane nobody
+					// recorded a completion for has nothing to look at.
+					Unseen: unseen,
 					// Absent on pre-worktree snapshots → false, which is the
 					// right default: a pane nobody recorded as owning a
 					// worktree keeps the ordinary CWD fallback.
@@ -2914,19 +2918,45 @@ func (d *Daemon) handleUpdatePane(conn *ipc.Conn, msg *ipc.Message) {
 			log.Printf("pane %s: pinned_attention cleared by the deletion mark", pane.ID)
 		}
 	}
+	if payload.Unseen != nil {
+		// The client's own mark, kept here only so it outlives the client.
+		// No log line: unlike the two marks above this one flips on every
+		// completion the TUI derives, and at attach the TUI re-derives marks
+		// from the replayed event history — a line per report would churn
+		// quild.log for no diagnostic gain.
+		pane.PluginMu.Lock()
+		pane.Unseen = *payload.Unseen
+		pane.PluginMu.Unlock()
+	}
 	if payload.OverlayVisible != nil {
 		d.applyOverlayVisibility(conn, pane, *payload.OverlayVisible)
-		if !updateTouchesBroadcastState(payload) {
-			// Nothing a client can observe changed: neither OverlayHiddenAt nor
-			// OverlayShownAt is on the wire or on disk (the snapshot passes
-			// includeOverlays=false). Broadcasting the complete workspace state
-			// here is a must-deliver frame carrying zero changed state, and this
-			// branch fires on every tab switch and once per overlay-bearing tab
-			// on every attach round — landing exactly when the 64-slot critical
-			// queue is most loaded. The snapshot request is skipped for the same
-			// reason: it would schedule a write of data the snapshot excludes.
-			return
+	}
+	// Two fields are QUIET: applied above, never broadcast. Folded into one
+	// exit so a payload carrying both cannot slip past either half.
+	//
+	//   - OverlayVisible: nothing a client can observe changed — neither
+	//     OverlayHiddenAt nor OverlayShownAt is on the wire or on disk (the
+	//     snapshot passes includeOverlays=false). Broadcasting the complete
+	//     workspace state is a must-deliver frame carrying zero changed state,
+	//     and this fires on every tab switch and once per overlay-bearing tab
+	//     on every attach round — landing exactly when the 64-slot critical
+	//     queue is most loaded. No snapshot either: it would schedule a write
+	//     of data the snapshot excludes.
+	//   - Unseen: PERSISTED but not broadcast. The TUI owns the live value and
+	//     seeds from this copy only when it first sees a pane, so it needs no
+	//     echo — and it reports one per completion, dozens in a burst at attach
+	//     while the event replay re-derives marks across a large workspace. The
+	//     snapshot request is debounced, and the snapshot is the whole point.
+	//
+	// Gated on the quiet fields being PRESENT rather than on the predicate
+	// alone, so a new payload field nobody has listed still broadcasts — the
+	// safe direction updateTouchesBroadcastState promises.
+	quiet := payload.OverlayVisible != nil || payload.Unseen != nil
+	if quiet && !updateTouchesBroadcastState(payload) {
+		if payload.Unseen != nil {
+			d.requestSnapshot()
 		}
+		return
 	}
 	d.broadcastState()
 	d.requestSnapshot()
@@ -2936,6 +2966,11 @@ func (d *Daemon) handleUpdatePane(conn *ipc.Conn, msg *ipc.Message) {
 // field a client or the disk snapshot can see. Enumerated rather than inferred
 // from "OverlayVisible is the only non-nil field", so a new field added to
 // UpdatePanePayload without a line here keeps broadcasting — the safe direction.
+//
+// Unseen is deliberately NOT listed: it is on the wire and in the snapshot, but
+// a client seeds it once and otherwise trusts its own value, so broadcasting it
+// would cost a full state frame per completion for nothing. See the unseen-only
+// branch in handleUpdatePane.
 func updateTouchesBroadcastState(p ipc.UpdatePanePayload) bool {
 	return p.Name != "" ||
 		p.CWD != "" ||
@@ -3496,6 +3531,15 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			// reading the scrollback, which is what the mark replaces.
 			if pane.MarkedForDeletion {
 				paneData["marked_for_deletion"] = true
+			}
+			// PERSISTED so the green "finished while you were away" tab
+			// survives a TUI restart, which is when the user most needs it:
+			// they left the pane running, came back, and want to know what
+			// finished. The client derives the mark and reports it; this copy
+			// only has to outlive the client. Same one-line-serves-both
+			// arrangement as the pin.
+			if pane.Unseen {
+				paneData["unseen"] = true
 			}
 			// PERSISTED, unlike SpawnError beside it: this is how restore tells
 			// a missing worktree from a stale browsed directory, and without it

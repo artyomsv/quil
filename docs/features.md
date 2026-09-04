@@ -9,6 +9,7 @@ A capability-by-capability tour of what Quil does. For configuration knobs, see 
   - [Lazy restore](#lazy-restore)
   - [Claude Code session-id rotation](#claude-code-session-id-rotation)
   - [OpenCode session-id tracking](#opencode-session-id-tracking)
+  - [Codex session-id tracking](#codex-session-id-tracking)
   - [AI session resume](#ai-session-resume)
 - [Layout & navigation](#layout--navigation)
   - [tmux-style pane splits](#tmux-style-pane-splits)
@@ -70,9 +71,13 @@ Mark a pane as **eager** with `Alt+Shift+E` (config key `toggle_eager`) to force
 
 OpenCode (opencode.ai) mints a new session id on `/new`, fork, or compaction. Quil registers a small JS plugin via `OPENCODE_CONFIG_CONTENT='{"plugin":["<abs path>"]}'` at every spawn and passes `QUIL_PANE_ID` + `QUIL_HOME` in the PTY env. The plugin — embedded in the binary, written to `$QUIL_HOME/opencodehook/` — hooks opencode's `session.created` / `session.updated` / `session.idle` / `session.compacted` / `session.deleted` events and atomically writes `$QUIL_HOME/sessions/opencode-<paneID>.id`. Quil never writes into `~/.config/opencode/` — `OPENCODE_CONFIG_CONTENT` merges with the user's existing config so their plugins, agents, and modes remain active.
 
+### Codex session-id tracking
+
+Codex (OpenAI's coding agent CLI) mints a new session id on `/new` and reports it through its Claude-compatible `SessionStart` hook. Quil registers `quild codex-hook` per pane with a `-c hooks=…` override that also carries the hook's trust hash — codex runs only trusted hooks, and the hash is computed by Quil, so nothing under `~/.codex` is read or written and no trust prompt appears. The record lands at `$QUIL_HOME/sessions/codex-<paneID>.id`; on restart Quil runs `codex resume <id>`. A pane with no recorded session starts fresh — `resume --last` (codex's most-recent-session lookup) is never used, because on restore it finds the sibling pane that respawned a second earlier. The same hook drives the notification sidebar, the work indicator, the model/context status segment and input history for Codex panes.
+
 ### AI session resume
 
-Each AI pane gets a UUID at creation time. On restart Quil runs `claude --resume <session-id>` (or `opencode --session <id>`) automatically. Works for any AI tool that exposes a session id — Claude Code (production), OpenCode (beta), more to come. Tools without a session id can fall back to regex-scraping the last visible state or replaying a stored command.
+Each AI pane gets a UUID at creation time. On restart Quil runs `claude --resume <session-id>` (or `opencode --session <id>`, or `codex resume <id>`) automatically. Works for any AI tool that exposes a session id — Claude Code (production), OpenCode (beta), Codex, more to come. Tools without a session id can fall back to regex-scraping the last visible state or replaying a stored command.
 
 ### Wide canvas (no-resize AI panes)
 
@@ -232,7 +237,7 @@ AI panes produce a lot of output, and the prompt you actually typed scrolls far 
 - **`Enter`** opens the selected prompt's full text in a read-only viewer, **`Esc`** back to the list, **`Esc`** again back to the pane. The viewer **soft-wraps** (a pasted paragraph or stack trace is one very long logical line — without wrapping, most of it would be unreachable) and opens at the top. Drag to select, right-click or `Enter` to copy, `Ctrl+A` to select all, mouse wheel to scroll.
 - History **persists across daemon restarts** at `~/.quil/history/<pane-id>.jsonl` (one JSON line per prompt, capped at 64 KiB per entry and ring-trimmed to the last 200), and is deleted when the pane is destroyed.
 
-Capture is **opt-in per pane type**. A plugin enables it with `record_history = true` under `[command]` (see [Plugin reference](plugin-reference.md)); the built-in **Claude Code** plugin sets it. The source of truth is the agent's own `UserPromptSubmit` hook — not keystroke scraping — so multiline prompts, pastes, and edits are captured exactly as submitted. Pane types without the opt-in (terminal, lazygit, k9s, lazysql, …) show "No input history for this pane type." OpenCode support is planned.
+Capture is **opt-in per pane type**. A plugin enables it with `record_history = true` under `[command]` (see [Plugin reference](plugin-reference.md)); the built-in **Claude Code** and **Codex** plugins set it. The source of truth is the agent's own `UserPromptSubmit` hook — not keystroke scraping — so multiline prompts, pastes, and edits are captured exactly as submitted. Pane types without the opt-in (terminal, lazygit, k9s, lazysql, …) show "No input history for this pane type." OpenCode support is planned.
 
 Turns the harness submits on your behalf are filtered out on write, on read, and on compaction — background-task notifications (`<task-notification>`) and subagent reports (`<agent-message>`) are things the agent said to itself, not prompts you typed. A prompt that merely *mentions* one of those tags is kept: a turn is only dropped when it both starts and ends with those markers and holds nothing else.
 
@@ -251,6 +256,7 @@ Panes aren't just shells. Press `Ctrl+N` to create a typed pane from 5 built-in 
 | **Terminal** | Built-in shell | Restore working directory |
 | **Claude Code** | AI Assistant | UUID-based session resume + `SessionStart` hook for rotations |
 | **OpenCode** *(beta)* | AI Assistant | JS plugin records `session.*` events; restore via `--session <id>` |
+| **Codex** | AI Assistant | Claude-compatible hooks registered through a trusted `-c hooks=…` override; restore via `resume <id>` |
 | **SSH** *(POC)* | Remote | Re-run same command |
 | **Stripe** *(POC)* | Tools | Re-run same command |
 
@@ -399,20 +405,20 @@ A non-modal sidebar (drawn as an overlay on the right edge — panes keep their 
 - Bell characters (30 s cooldown to avoid storming)
 - Smart-idle pattern matches (per-plugin `[[idle_handlers]]` regex)
 - **"Pane not accepting input"** — the pane's process stopped reading its stdin (e.g. an AI tool wedged after a context compaction), so the daemon drops the keystrokes instead of letting one stuck pane freeze the app. Recover with `Alt+R` (restart the pane in place — AI sessions resume)
-- **Hook-driven events from Claude Code and OpenCode** — structured events forwarded directly from the AI tool (permission requests, "reply ready", session errors, file edits, etc.) instead of guessed from the PTY byte stream. See `[notification.hooks]` in [configuration.md](configuration.md#notificationhooks) for the tier knob.
+- **Hook-driven events from Claude Code, OpenCode and Codex** — structured events forwarded directly from the AI tool (permission requests, "reply ready", session errors, file edits, etc.) instead of guessed from the PTY byte stream. See `[notification.hooks]` in [configuration.md](configuration.md#notificationhooks) for the tier knob.
 
 Hook-driven events flow:
 
 ```
-hook fires (claude .sh / opencode .js)
+hook fires (quild claude-hook / codex-hook, opencode .js)
   → writes one JSONL line to ~/.quil/events/<paneID>.jsonl
   → daemon polls every 200 ms (rate-limited to 100/2s per pane, coalesced 50 ms per event-type)
   → translated to PaneEvent and routed through the same broadcast pipeline
 ```
 
-Tier values (per source — Claude and OpenCode are configured independently):
+Tier values (per source — Claude, OpenCode and Codex are configured independently):
 
-- `default` (the v1 set): Claude `SessionEnd`, `UserPromptSubmit`, `Notification`, `PermissionRequest`, `Stop`, `StopFailure`, `PreCompact`/`PostCompact`, `SubagentStart/Stop`, `TaskCreated/Completed`, plus a throttled `PreToolUse` heartbeat (see below); OpenCode `permission.ask`, `experimental.session.compacting`, plus filtered bus events (`session.idle/error/compacted`, `session.status` retry-only, `file.edited` batched 1 s).
+- `default` (the v1 set): Claude `SessionEnd`, `UserPromptSubmit`, `Notification`, `PermissionRequest`, `Stop`, `StopFailure`, `PreCompact`/`PostCompact`, `SubagentStart/Stop`, `TaskCreated/Completed`, plus a throttled `PreToolUse` heartbeat (see below); OpenCode `permission.ask`, `experimental.session.compacting`, plus filtered bus events (`session.idle/error/compacted`, `session.status` retry-only, `file.edited` batched 1 s); Codex `SessionEnd`, `UserPromptSubmit`, `PermissionRequest`, `Stop`, `PreCompact`/`PostCompact`, `SubagentStart/Stop`, plus the same throttled `PreToolUse` heartbeat.
 - `verbose` (currently identical to `default` — placeholder for future tier-2 events such as the full per-tool-call `PreToolUse`/`PostToolUse` stream).
 
 The `default` tier's `PreToolUse` registration is **not** the per-tool-call stream `verbose` is reserved for. It is the work-indicator's only evidence that a turn is running when no user prompt started it — an agent resuming after a teammate reports back — so it must fire for every tool, but it is throttled to at most one spooled event per pane per 15 seconds of silence and never becomes a notification card. `verbose` remains the switch for seeing every tool call.

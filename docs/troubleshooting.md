@@ -171,7 +171,7 @@ Symptoms: a restored pane border stays dimmed with a `restored` label and no fre
 
 The pane's underlying process died before producing live output. Check `~/.quil/quild.log` for spawn errors near the pane id. Common causes:
 
-- The plugin binary (`claude`, `opencode`, `ssh`, …) isn't on `PATH`
+- The plugin binary (`claude`, `opencode`, `codex`, `ssh`, …) isn't on `PATH`
 - The CWD no longer exists (e.g., you deleted the project directory)
 - The plugin's resume args reference a stale id (e.g., `--session <gone>`)
 
@@ -198,6 +198,8 @@ Quil tracks Claude session-id rotation via a `SessionStart` hook. If the hook di
 3. **`QUIL_HOME` characters.** The hook installer rejects shell-unsafe characters in `$QUIL_HOME`. If you set `QUIL_HOME=/path/with"quote/` the daemon refuses to install the hook (see warning in daemon log).
 
 For OpenCode the equivalent files are under `~/.quil/opencodehook/` and `~/.quil/sessions/opencode-<pane-id>.id` — see [Features → OpenCode session-id tracking](features.md#opencode-session-id-tracking).
+
+For Codex they are `~/.quil/codexhook/hook.log` and `~/.quil/sessions/codex-<pane-id>.id`. If a Codex pane shows codex's own "hooks need review" prompt at startup, the trust hash Quil computed no longer matches what your codex version expects — check `~/.quil/quild.log` for the spawn line and file an issue with your `codex --version`. If codex is the npm `.cmd` shim on Windows, Quil logs a warning and spawns without hooks (the inline override cannot survive cmd.exe's re-parse); install the native binary or set `path` in `codex.toml`.
 
 ## The session picker lists no sessions
 
@@ -306,6 +308,7 @@ Dev builds register separately (`quil-dev://`, `Quil (dev).lnk`), so `quil-dev.e
 | `~/.quil/mcp-logs/<pane-id>.log` | Per-pane MCP interaction log (tool name, timestamp, sanitized detail) |
 | `~/.quil/claudehook/hook.log` | Errors from the Claude Code SessionStart hook |
 | `~/.quil/opencodehook/hook.log` | Errors / breadcrumbs from the OpenCode JS plugin |
+| `~/.quil/codexhook/hook.log` | Errors / breadcrumbs from the Codex hook subcommand |
 | `~/.quil/quild.stderr.log` | Daemon panics and SIGQUIT goroutine dumps (anything the Go runtime writes to stderr) |
 | `~/.quil/notify-activate.log` | One line per desktop-toast click: which pane it routed to and whether the window could be raised. Written by the short-lived process Windows spawns for the click, which has no other way to report — truncated at 64 KiB |
 

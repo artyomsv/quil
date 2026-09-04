@@ -38,7 +38,7 @@ Don't memorize the [full keymap](keybindings.md) yet. Five keys handle 90% of da
 | Key | What it does |
 |---|---|
 | `F1` | About menu → Settings, Plugins, log viewers, Memory |
-| `Ctrl+N` | New typed pane (Claude Code, OpenCode, terminal, …) |
+| `Ctrl+N` | New typed pane (Claude Code, OpenCode, Codex, terminal, …) |
 | `Ctrl+T` | New tab |
 | `Ctrl+W` | Close active pane |
 | `Ctrl+Q` | Quit (workspace persists — re-launch picks up where you left off) |
@@ -50,7 +50,7 @@ You can navigate panes with `Alt+Arrow` (spatial — left/right/up/down focus th
 Press `Ctrl+N`. The plugin picker opens with categories:
 
 - **Terminal** — system shell
-- **AI Assistant** — Claude Code, OpenCode (beta)
+- **AI Assistant** — Claude Code, OpenCode (beta), Codex
 - **Remote** — SSH (POC)
 - **Tools** — Stripe (POC)
 

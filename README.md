@@ -70,7 +70,7 @@ Five keys to remember:
 | Key | Action |
 |---|---|
 | `F1` | Menu — Settings, Plugins, Memory, log viewers |
-| `Ctrl+N` | New typed pane (Claude Code, OpenCode, shell, …) |
+| `Ctrl+N` | New typed pane (Claude Code, OpenCode, Codex, shell, …) |
 | `Ctrl+T` | New tab |
 | `Ctrl+W` | Close active pane |
 | `Ctrl+Q` | Quit (workspace persists) |
@@ -204,6 +204,7 @@ Typed panes ship for the tools developers run all day. Each opens from `Ctrl+N`;
 | **Terminal** | Your system shell (bash/zsh/PowerShell/fish) with live working-directory tracking. |
 | **Claude Code** | AI coding session that resumes the exact conversation by session id across reboots. |
 | **OpenCode** | AI coding session ([opencode](https://opencode.ai)) with the same per-pane session resume. |
+| **Codex** | AI coding session ([codex](https://github.com/openai/codex)) with per-pane session resume and hook-driven notifications, work state and input history. |
 | **lazygit** | Git TUI ([lazygit](https://github.com/jesseduffield/lazygit)) for the repo near the pane — also a per-tab `Alt+G` overlay. |
 | **hunk** | Review-first diff viewer ([hunk](https://github.com/modem-dev/hunk)) for reading what an agent just wrote — also a per-tab `Alt+D` overlay, sharing lazygit's slot. |
 | **k9s** | Kubernetes cluster TUI ([k9s](https://github.com/derailed/k9s)) with a context picker sourced from your kubeconfig. |

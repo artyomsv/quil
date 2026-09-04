@@ -67,6 +67,7 @@ max_events = 200                # ring-buffer cap (per daemon, both sidebar and 
 [notification.hooks]
 claude = "default"              # "default" | "verbose" | "off"
 opencode = "default"            # same
+codex = "default"               # same
 
 [notification.desktop]
 enabled = true                  # OS toasts; Windows only, needs `quil notify setup`
@@ -189,12 +190,13 @@ The "ghost buffer" is the rendered preview Quil shows immediately on reconnect, 
 
 ### `[notification.hooks]`
 
-Hook-driven notifications surface structured events from Claude Code and OpenCode (permission asks, retries, "reply ready", file edits, …) instead of guessing from the PTY byte stream. The daemon writes the resolved tier to the hook script's environment via `QUIL_HOOK_MODE` at pane spawn so the script can branch on it.
+Hook-driven notifications surface structured events from Claude Code, OpenCode and Codex (permission asks, retries, "reply ready", file edits, …) instead of guessing from the PTY byte stream. The daemon writes the resolved tier to the hook script's environment via `QUIL_HOOK_MODE` at pane spawn so the script can branch on it.
 
 | Key | Type | Default | What it does |
 |---|---|---|---|
 | `claude` | string | `"default"` | Tier for Claude Code panes. `"default"` forwards SessionEnd, UserPromptSubmit, Notification, PermissionRequest, Stop, StopFailure, PreCompact, PostCompact, SubagentStart/Stop, TaskCreated/TaskCompleted, plus a throttled PreToolUse heartbeat — at most one event per pane per 15 s of silence, used only to keep the work indicator honest on turns no user prompt began, and never shown as a card. `"verbose"` is reserved for the full per-tool-call PreToolUse/PostToolUse stream (one card per tool call — useful for debugging, noisy in normal use). `"off"` disables hook event forwarding entirely; Quil falls back to the legacy PTY-byte idle heuristic. |
 | `opencode` | string | `"default"` | Tier for OpenCode panes. `"default"` forwards session.idle/error/compacted, session.status retry only, file.edited batched 1 s, permission.ask, experimental.session.compacting. `"verbose"` adds tool.execute.before/after. `"off"` disables hook event forwarding. |
+| `codex` | string | `"default"` | Tier for Codex panes. `"default"` forwards SessionEnd, UserPromptSubmit, PermissionRequest, Stop, PreCompact/PostCompact, SubagentStart/Stop and the same throttled PreToolUse heartbeat Claude has. `"verbose"` is currently identical to `"default"`. `"off"` disables hook event forwarding; session-id tracking stays on so restore still works. |
 
 The hook events flow through a JSONL spool (`~/.quil/events/<paneID>.jsonl`) that the daemon polls every 200 ms. Truncated on daemon start (no replay of stale events); deleted on pane destroy.
 

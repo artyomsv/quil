@@ -22,6 +22,7 @@ import (
 	"regexp"
 
 	"github.com/artyomsv/quil/internal/claudehook"
+	"github.com/artyomsv/quil/internal/codexhook"
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/gitworktree"
 	"github.com/artyomsv/quil/internal/hookevents"
@@ -442,6 +443,11 @@ func (d *Daemon) refreshPluginStateFromHooks() {
 			case pane.Type == "opencode":
 				if id, err := readOpencodeSessionIDFn(pane.ID); err == nil {
 					hookID = id
+				}
+			case pane.Type == plugin.CodexPluginName:
+				// Codex records id + rollout path as one unit, like Claude.
+				if rec, err := readCodexSessionFn(pane.ID); err == nil {
+					hookID, transcript = rec.ID, rec.TranscriptPath
 				}
 			case d.usesClaudeSessions(pane.Type):
 				if rec, err := readHookSessionFn(pane.ID); err == nil {
@@ -2526,7 +2532,7 @@ func (d *Daemon) cleanupPaneArtifacts(paneID string) {
 	if d.hookIngester != nil {
 		d.hookIngester.Cancel(paneID)
 	}
-	for _, name := range []string{paneID + ".id", paneID + ".transcript", paneID + ".settings.json", "opencode-" + paneID + ".id"} {
+	for _, name := range []string{paneID + ".id", paneID + ".transcript", paneID + ".settings.json", "opencode-" + paneID + ".id", "codex-" + paneID + ".id"} {
 		p := filepath.Join(config.SessionsDir(), name)
 		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 			log.Printf("cleanup pane %s: remove session id %s: %v", paneID, name, err)
@@ -3767,11 +3773,13 @@ var readHookSessionFn = func(paneID string) (claudehook.SessionRecord, error) {
 	return claudehook.ReadPersistedSession(config.QuilDir(), paneID)
 }
 
-// claudeHookExeFn resolves the path to the running quild binary, which the
-// claude hook command invokes via its `claude-hook` subcommand. Defaults to
-// os.Executable; tests override it to simulate the unresolvable-executable
-// branch without depending on the test binary's real path.
-var claudeHookExeFn = os.Executable
+// quildExeFn resolves the path to the running quild binary, which the claude
+// and codex hook commands invoke via their `claude-hook` / `codex-hook`
+// subcommands. Defaults to os.Executable; tests override it to simulate the
+// unresolvable-executable branch without depending on the test binary's real
+// path. Named for the binary rather than for either plugin, because a stub
+// installed "for the claude tests" gates the codex hook just the same.
+var quildExeFn = os.Executable
 
 // readOpencodeSessionIDFn mirrors readHookSessionIDFn for the opencode pane
 // type. Tests override it so the spawn-args matrix never touches the real
@@ -3779,6 +3787,64 @@ var claudeHookExeFn = os.Executable
 var readOpencodeSessionIDFn = func(paneID string) (string, error) {
 	id, _, err := opencodehook.ReadPersistedSessionID(config.QuilDir(), paneID)
 	return id, err
+}
+
+// readCodexSessionFn mirrors readOpencodeSessionIDFn for the codex pane type.
+// Tests override it so the spawn-args matrix never touches $QUIL_HOME/sessions/.
+var readCodexSessionFn = func(paneID string) (codexhook.SessionRecord, error) {
+	return codexhook.ReadPersistedSession(config.QuilDir(), paneID)
+}
+
+// codexSpawnPrep returns the argv prefix and env vars to add to a fresh codex
+// spawn so the hook registers. The prefix is ONE `-c hooks=…` override that
+// carries every event registration and the trust hash codex requires for
+// each (see internal/codexhook) — codex has no `--settings <file>`, and the
+// session-flags layer is the only one Quil can write without touching
+// ~/.codex. Returns nil slices when the hook is unavailable so the spawn
+// proceeds without it, matching the claude path.
+//
+// resolvedCmd is the codex binary the pane will run. A `.cmd`/`.bat` shim (an
+// npm install on Windows) re-parses the command line through cmd.exe with
+// different quoting rules, and the override value carries quotes — the same
+// bug class the inline Claude --settings JSON hit, with no file form to fall
+// back to. So a shim disables the hook rather than risk a split argument.
+func codexSpawnPrep(quilDir, paneID, hookMode, resolvedCmd string) (prefix, env []string) {
+	if codexhook.IsShim(resolvedCmd) {
+		log.Printf("warning: pane %s: codex resolves to a cmd.exe shim (%s); the inline hook override cannot survive its re-parse — codex hooks disabled (notifications, work state, input history, session resume). Install the native codex binary or set [command] path in codex.toml", paneID, resolvedCmd)
+		return nil, nil
+	}
+	exePath, err := quildExeFn()
+	if err != nil {
+		log.Printf("warning: pane %s: cannot resolve quild executable: %v — codex hooks disabled (notifications, work state, input history, session resume)", paneID, err)
+		return nil, nil
+	}
+	// The hook command names QUIL_HOOK_EXE rather than the path, so the path
+	// travels in the pane env (see codexhook.HookCommand for why a path in the
+	// command cannot be spelled safely for every codex version on Windows).
+	exeEnv, err := codexhook.HookExeEnv(exePath)
+	if err != nil {
+		log.Printf("warning: pane %s: %v — codex hooks disabled", paneID, err)
+		return nil, nil
+	}
+	prefix, err = codexhook.ConfigOverrideArgs(codexhook.HookCommand(), runtime.GOOS)
+	if err != nil {
+		log.Printf("warning: pane %s: build codex hook override: %v — codex hooks disabled", paneID, err)
+		return nil, nil
+	}
+	mode := hookMode
+	if mode == "" {
+		mode = "default"
+	}
+	// QUIL_HOOK_HOME rather than QUIL_HOME, for the reason claudeHookSpawnPrep
+	// documents: children inherit the pane env, and an inherited QUIL_HOME
+	// retargeted dev builds at production.
+	env = []string{
+		"QUIL_PANE_ID=" + paneID,
+		"QUIL_HOOK_MODE=" + mode,
+		"QUIL_HOOK_HOME=" + quilDir,
+		exeEnv,
+	}
+	return prefix, env
 }
 
 // opencodeHookScriptStatFn mirrors claudeHookScriptStatFn for the opencode
@@ -3845,7 +3911,7 @@ func opencodeSpawnPrep(quilDir, paneID, hookMode string) []string {
 // either the user loses their settings or Quil loses rotation tracking. See §7
 // of docs/superpowers/specs/2026-08-19-claude-session-seam-design.md.
 func claudeHookSpawnPrep(quilDir, paneID, hookMode string, userArgs []string) (prefix, env []string) {
-	exePath, err := claudeHookExeFn()
+	exePath, err := quildExeFn()
 	if err != nil {
 		log.Printf("warning: pane %s: cannot resolve quild executable: %v — claude hooks disabled (notifications, work state, input history, session-id rotation)", paneID, err)
 		return nil, nil
@@ -3896,6 +3962,16 @@ func claudeHookSpawnPrep(quilDir, paneID, hookMode string, userArgs []string) (p
 // promotion logic; default falls back to the plugin's configured ResumeArgs.
 func resumeTemplateFor(p *plugin.PanePlugin, pane *Pane, claim sessionClaimFn) []string {
 	switch {
+	// Codex first, and on the NAME ALONE: the claude arm below is
+	// capability-based, and a codex TOML may legally set sessions = "claude".
+	// Gating this arm on the strategy too would let a TOML that also says
+	// strategy = "preassign_id" fall through to the claude arm, which emits
+	// `--resume <uuid>` — a flag codex does not have — or mints a fresh uuid
+	// over the real codex session. codexResumeTemplate already falls back to
+	// the plugin's own ResumeArgs when nothing was recorded, so it is sane on
+	// every strategy.
+	case p.Name == plugin.CodexPluginName:
+		return codexResumeTemplate(p, pane)
 	case p.UsesClaudeSessions() && p.Persistence.Strategy == "preassign_id":
 		return claudeResumeTemplate(p, pane, claim)
 	case p.Name == "opencode" && p.Persistence.Strategy == "session_scrape":
@@ -4188,6 +4264,39 @@ func opencodeResumeTemplate(p *plugin.PanePlugin, pane *Pane) []string {
 	return []string{"--session", "{session_id}"}
 }
 
+// codexResumeTemplate decides how a restored codex pane respawns: the hook's
+// recorded id becomes `resume <id>`; anything else falls back to the plugin's
+// ResumeArgs, which the shipped TOML leaves empty so the pane starts FRESH.
+// `resume --last` is never emitted — it is codex's most-recent-session-in-CWD
+// lookup, and on restore that is the sibling that respawned a second earlier,
+// the same trap `claude --continue` is.
+//
+// The id is shape-checked (canonical UUID) before it becomes argv, and logged
+// by length only: the value comes from a file a pane's own child wrote. The id
+// and the rollout path are stored as one unit, as the claude path does.
+func codexResumeTemplate(p *plugin.PanePlugin, pane *Pane) []string {
+	rec, err := readCodexSessionFn(pane.ID)
+	if err != nil || rec.ID == "" {
+		return p.Persistence.ResumeArgs
+	}
+	if !codexhook.IsValidSessionID(rec.ID) {
+		log.Printf("warning: pane %s: recorded codex session id failed shape validation (len=%d); starting fresh", pane.ID, len(rec.ID))
+		return p.Persistence.ResumeArgs
+	}
+	pane.PluginMu.Lock()
+	if pane.PluginState == nil {
+		pane.PluginState = make(map[string]string)
+	}
+	pane.PluginState["session_id"] = rec.ID
+	if rec.TranscriptPath != "" {
+		pane.PluginState["transcript_path"] = rec.TranscriptPath
+	} else {
+		delete(pane.PluginState, "transcript_path")
+	}
+	pane.PluginMu.Unlock()
+	return []string{"resume", "{session_id}"}
+}
+
 // templateHasPlaceholder reports whether any entry contains a `{key}` token
 // that ExpandResumeArgs would need to substitute. Used by resolveSpawnArgs
 // to decide whether a static template can pass through without PluginState
@@ -4462,6 +4571,22 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	switch {
 	case p.Name == "opencode":
 		envVars = append(envVars, opencodeSpawnPrep(config.QuilDir(), pane.ID, d.cfg.Notification.Hooks.OpenCode)...)
+	case p.Name == plugin.CodexPluginName:
+		// Codex rides a `-c hooks=…` override carrying its own trust hashes
+		// (see internal/codexhook). The hook needs the RESOLVED binary to
+		// refuse a cmd.exe shim; the LookPath below runs after this switch,
+		// so resolve here as well.
+		resolvedCmd := cmd
+		if r, err := exec.LookPath(cmd); err == nil {
+			resolvedCmd = r
+		}
+		prefix, hookEnv := codexSpawnPrep(config.QuilDir(), pane.ID, d.cfg.Notification.Hooks.Codex, resolvedCmd)
+		if len(prefix) > 0 {
+			// `-c` is global, so it precedes both a fresh start and the
+			// `resume <id>` subcommand the restore branch appends.
+			args = append(prefix, args...)
+		}
+		envVars = append(envVars, hookEnv...)
 	case p.UsesClaudeSessions():
 		settingsArgs, hookEnv := claudeHookSpawnPrep(config.QuilDir(), pane.ID, d.cfg.Notification.Hooks.Claude, args)
 		if len(settingsArgs) > 0 {
@@ -4688,6 +4813,8 @@ func (d *Daemon) emitHookEvent(p hookevents.Payload) {
 			mode = d.cfg.Notification.Hooks.Claude
 		case hookevents.SourceOpenCode:
 			mode = d.cfg.Notification.Hooks.OpenCode
+		case hookevents.SourceCodex:
+			mode = d.cfg.Notification.Hooks.Codex
 		}
 		if mode == "off" {
 			return

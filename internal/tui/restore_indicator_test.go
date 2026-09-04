@@ -308,6 +308,7 @@ func TestResumeLabel(t *testing.T) {
 		{"claude with id", "claude-code", "8f2e1c00deadbeef", "resuming claude · 8f2e1c00", true},
 		{"claude no id", "claude-code", "", "resuming claude", true},
 		{"opencode with id", "opencode", "abcdef0123", "resuming opencode · abcdef01", true},
+		{"codex with id", "codex", "01a05db1-9f44-73b2-b426-8aad5f5232f4", "resuming codex · 01a05db1", true},
 		{"terminal", "terminal", "", "restarting shell", false},
 		{"empty type", "", "", "restarting shell", false},
 		{"ssh ignores id", "ssh", "ignored", "reconnecting ssh", false},

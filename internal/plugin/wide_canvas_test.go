@@ -60,7 +60,7 @@ cmd = "true"
 }
 
 func TestDefaultPlugins_AgentPluginsShipWideCanvas(t *testing.T) {
-	for _, name := range []string{"claude-code", "opencode"} {
+	for _, name := range []string{"claude-code", "opencode", "codex"} {
 		data, err := defaultPlugins.ReadFile("defaults/" + name + ".toml")
 		if err != nil {
 			t.Fatalf("read embedded default %s: %v", name, err)

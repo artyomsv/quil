@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/artyomsv/quil/internal/claudehook"
+	"github.com/artyomsv/quil/internal/codexhook"
 	"github.com/artyomsv/quil/internal/config"
 )
 
@@ -208,9 +209,11 @@ func saveHookStubs(t *testing.T) {
 	t.Helper()
 	origClaudeHook := readHookSessionFn
 	origOpencodeHook := readOpencodeSessionIDFn
+	origCodexHook := readCodexSessionFn
 	t.Cleanup(func() {
 		readHookSessionFn = origClaudeHook
 		readOpencodeSessionIDFn = origOpencodeHook
+		readCodexSessionFn = origCodexHook
 	})
 }
 
@@ -226,7 +229,7 @@ func TestDaemon_RefreshPluginStateFromHooks(t *testing.T) {
 
 	d := New(config.Default())
 	registerClaudePlugin(t, d)
-	tab := &Tab{ID: "tab-1", Name: "test", Panes: []string{"pane-claude", "pane-opencode", "pane-term", "pane-nilstate"}}
+	tab := &Tab{ID: "tab-1", Name: "test", Panes: []string{"pane-claude", "pane-opencode", "pane-term", "pane-nilstate", "pane-codex"}}
 	panes := []*Pane{
 		// Direct writes to PluginState without PluginMu are safe here:
 		// the panes have not been published to any goroutine until
@@ -237,6 +240,8 @@ func TestDaemon_RefreshPluginStateFromHooks(t *testing.T) {
 		// nil PluginState exercises the lazy allocation branch in
 		// refreshPluginStateFromHooks.
 		{ID: "pane-nilstate", TabID: "tab-1", Type: "claude-code", PluginState: nil},
+		// The third producer: id and rollout path are copied as one unit.
+		{ID: "pane-codex", TabID: "tab-1", Type: "codex", PluginState: map[string]string{"session_id": "stale-codex"}},
 	}
 	d.session.RestoreTab(tab, panes)
 
@@ -255,8 +260,21 @@ func TestDaemon_RefreshPluginStateFromHooks(t *testing.T) {
 		}
 		return "", nil
 	}
+	readCodexSessionFn = func(paneID string) (codexhook.SessionRecord, error) {
+		if paneID == "pane-codex" {
+			return codexhook.SessionRecord{ID: "live-codex-id", TranscriptPath: "/r/rollout-live-codex-id.jsonl"}, nil
+		}
+		return codexhook.SessionRecord{}, nil
+	}
 
 	d.refreshPluginStateFromHooks()
+
+	if got := panes[4].PluginState["session_id"]; got != "live-codex-id" {
+		t.Errorf("codex pane session_id = %q, want %q", got, "live-codex-id")
+	}
+	if got := panes[4].PluginState["transcript_path"]; got != "/r/rollout-live-codex-id.jsonl" {
+		t.Errorf("codex pane transcript_path = %q, want the recorded rollout path", got)
+	}
 
 	if got := panes[0].PluginState["session_id"]; got != "live-claude-id" {
 		t.Errorf("claude pane session_id = %q, want %q (hook id should have overwritten the stale preassigned id)", got, "live-claude-id")

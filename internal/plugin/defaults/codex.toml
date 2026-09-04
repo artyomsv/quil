@@ -1,0 +1,87 @@
+# Codex — OpenAI's coding agent CLI (github.com/openai/codex)
+# Edit this file to customize the plugin. Delete it to restore defaults.
+#
+# Diagnostic logging: the hook Quil registers per pane (a `-c hooks=…`
+# override carrying its own trust hash — nothing under ~/.codex is touched)
+# appends breadcrumbs to $QUIL_HOME/codexhook/hook.log. Safe to delete.
+
+[plugin]
+name = "codex"
+display_name = "Codex"
+category = "ai"
+description = "OpenAI Codex coding agent"
+homepage = "https://github.com/openai/codex"
+schema_version = 1
+
+[command]
+cmd = "codex"
+# path = "/path/to/codex"  # uncomment to override PATH lookup
+detect = "codex --version"
+prompts_cwd = true  # ask which folder to open codex in (project trust + AGENTS.md live there)
+record_history = true  # capture submitted prompts to <quilDir>/history/<paneID>.jsonl (hook producer)
+
+# Runtime toggles — rendered in the pane setup dialog.
+#
+# The two below share group = "permission_mode" and are mutually exclusive
+# (radio buttons). Both default off, which leaves codex's own interactive
+# approvals in place.
+[[command.toggles]]
+name = "bypass_approvals_and_sandbox"
+label = "Bypass approvals and sandbox (dangerous)"
+args_when_on = ["--dangerously-bypass-approvals-and-sandbox"]
+default = false
+group = "permission_mode"
+
+[[command.toggles]]
+name = "auto_workspace_write"
+label = "Auto: workspace-write sandbox, never ask"
+args_when_on = ["-a", "never", "-s", "workspace-write"]
+default = false
+group = "permission_mode"
+
+# Independent of the permission mode.
+[[command.toggles]]
+name = "search"
+label = "Web search"
+args_when_on = ["--search"]
+default = false
+
+[persistence]
+# The daemon promotes the restore args to ["resume", "<session_id>"] when the
+# hook recorded a session id for this pane (see codexResumeTemplate in
+# internal/daemon/daemon.go). resume_args is deliberately EMPTY: a pane with no
+# recorded session starts fresh. `resume --last` is codex's most-recent-session
+# lookup, and on restore that finds the sibling pane that respawned a second
+# earlier — the same trap `claude --continue` is.
+strategy = "session_scrape"
+resume_args = []
+# Codex runs on the alternate screen by default, so a byte replay would paint
+# garbage; `resume <id>` repaints the conversation itself.
+ghost_buffer = false
+
+[[error_handlers]]
+pattern = '(?i)not logged in|run .*codex login|please log ?in'
+title = "Codex Not Logged In"
+message = "Run 'codex login' to sign in."
+action = "dialog"
+
+# Idle handlers — checked when pane goes idle (last 5 lines analyzed)
+[[idle_handlers]]
+pattern = '(?i)waiting for (confirmation|input|approval|permission)'
+title = "Needs your approval"
+severity = "warning"
+
+[[idle_handlers]]
+pattern = '(?i)(plan|question|choose|select|pick)'
+title = "Waiting for your choice"
+severity = "warning"
+
+[[idle_handlers]]
+pattern = '❯|> $'
+title = "Waiting for input"
+severity = "info"
+
+[display]
+# Window-sized canvas: the PTY never resizes with the pane rect; small
+# panes show a soft-wrapped preview. Zoom (Ctrl+E) shows the native render.
+wide_canvas = true

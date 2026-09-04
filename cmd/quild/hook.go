@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/artyomsv/quil/internal/claudehook"
+	"github.com/artyomsv/quil/internal/codexhook"
 	"github.com/artyomsv/quil/internal/config"
 )
 
@@ -25,6 +26,21 @@ func runClaudeHook() {
 		QuilDir: hookHomeDir(),
 		Mode:    os.Getenv("QUIL_HOOK_MODE"),
 
+		RecordHistory: os.Getenv("QUIL_RECORD_HISTORY") == "1",
+	}, time.Now().UnixMilli())
+}
+
+// runCodexHook handles the `quild codex-hook` subcommand: one Codex hook
+// invocation (JSON on stdin) → the session record or a spool line under
+// $QUIL_HOOK_HOME. Same fast-path contract as runClaudeHook: no daemon, no
+// logger, no config from disk, always exit 0 so codex is never blocked. Codex
+// hands its own process environment to hook commands, so the QUIL_* vars the
+// daemon set on the pane arrive exactly as they do for Claude.
+func runCodexHook() {
+	_ = codexhook.RunHook(os.Stdin, codexhook.HookEnv{
+		PaneID:        os.Getenv("QUIL_PANE_ID"),
+		QuilDir:       hookHomeDir(),
+		Mode:          os.Getenv("QUIL_HOOK_MODE"),
 		RecordHistory: os.Getenv("QUIL_RECORD_HISTORY") == "1",
 	}, time.Now().UnixMilli())
 }

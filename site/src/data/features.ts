@@ -80,7 +80,7 @@ export const features: Feature[] = [
     category: "ai",
     detail: [
       "Each AI pane gets a UUID at creation time. On restart Quil runs `claude --resume <session-id>` automatically.",
-      "Works for any AI tool that exposes a session ID — Claude Code (production) and OpenCode (beta) today, more to come.",
+      "Works for any AI tool that exposes a session ID — Claude Code (production), OpenCode (beta) and Codex today, more to come.",
       "For tools without a session ID, plugins can fall back to regex scraping the last state or replaying a command.",
     ],
   },
@@ -138,7 +138,7 @@ export const features: Feature[] = [
       "A spinner shows which AI panes are mid-turn; when one finishes or waits for your input, it stays marked green until you actually look at it.",
     category: "ai",
     detail: [
-      "Work state is derived entirely from the agent's own hook events (Claude Code hooks, OpenCode plugin bus) — no output polling, no heuristics.",
+      "Work state is derived entirely from the agent's own hook events (Claude Code hooks, OpenCode plugin bus, Codex hooks) — no output polling, no heuristics.",
       "While an agent works, a spinner animates on the pane border and its tab label.",
       "When a turn completes — or the agent parks on a permission prompt or a question — the pane border turns green and the tab label of a background tab turns green with it.",
       "No timer: the green mark persists until you focus that exact pane (click it, Alt+Arrow onto it, or switch to its tab). With several agent panes split in one tab, the border pinpoints which one needs you.",
@@ -155,7 +155,7 @@ export const features: Feature[] = [
     category: "ai",
     detail: [
       "AI panes show the model id and context-window token count from the last completed turn, e.g. `opus-4.8 · 612k ctx`.",
-      "Deliberately tokens, not a percentage: neither Claude Code nor OpenCode records the window size in its data, and a Claude session may be running at 200k or at 1M — a percentage would be a guess presented as a fact.",
+      "Deliberately tokens, not a percentage: Claude Code and OpenCode record no window size in their data, and a Claude session may be running at 200k or at 1M — a percentage would be a guess presented as a fact. Codex panes show the same segment for consistency.",
       "Right after a compaction the pane reads `· compacting` until the next turn reports the reduced size. The transcript doesn't contain the new count yet at that moment, so showing the old one would be worse than showing nothing.",
       "Rides the same hook-event stream as the work indicators — no polling, no extra IPC, and it keeps working while the pane is muted.",
     ],
@@ -173,7 +173,7 @@ export const features: Feature[] = [
       "Alt+Shift+I opens a per-pane list of your past prompts as 3-line previews, newest first; Enter opens the full text in a read-only viewer you can scroll and copy from.",
       "Captured from the agent's own UserPromptSubmit hook, not keystroke scraping — multiline prompts, pastes, and edits are recorded exactly as submitted.",
       "Persists across daemon restarts at ~/.quil/history/<pane>.jsonl (64 KiB per entry, ring-trimmed to the last 200) and is removed when the pane is destroyed.",
-      "Opt-in per pane type via `[command] record_history = true` (enabled for Claude Code); other pane types show an empty state. OpenCode support is planned.",
+      "Opt-in per pane type via `[command] record_history = true` (enabled for Claude Code and Codex); other pane types show an empty state. OpenCode support is planned.",
     ],
   },
 
@@ -205,7 +205,7 @@ export const features: Feature[] = [
       "Terminals are not all the same. Quil understands pane types and gives each one context-aware behaviour — including a per-spawn setup dialog with directory browser and runtime checkboxes.",
     category: "interaction",
     detail: [
-      "Nine built-in pane types: Terminal, Terminal (keeps content on squeeze), Claude Code, OpenCode (beta), SSH, Stripe, lazygit, k9s, lazysql.",
+      "Ten built-in pane types: Terminal, Terminal (keeps content on squeeze), Claude Code, OpenCode (beta), Codex, SSH, Stripe, lazygit, k9s, lazysql.",
       "Each type has its own resume strategy, error handler, and status line.",
       "Pane setup dialog (opt-in via plugin TOML): a directory browser pre-filled with the active pane's CWD plus one checkbox per declared `[[command.toggles]]` entry. claude-code uses both — picks up the project's `.claude/` context automatically and offers a `Dangerously skip permissions` toggle for unattended runs.",
       "The directory step remembers where you've been: the last five folders you actually opened a pane in are offered as a one-keystroke quick pick (deleted ones filtered out), and for git-aware pane types the repositories discovered near the active pane take priority. Browse… always drops to the full picker.",
@@ -224,7 +224,7 @@ export const features: Feature[] = [
     detail: [
       "Binary split tree, each split with its own direction and ratio.",
       "Click any pane to focus it; the scroll wheel traverses terminal history.",
-      "Over a pane running something that handles its own mouse input — claude-code, opencode, vim, htop, lazygit — the wheel scrolls that program's viewport instead. Those apps run on the alternate screen and never fill Quil's scrollback, so the wheel is forwarded to them as the mouse sequence they expect. The daemon is what detects this, so it stays correct even when you reattach to a session that was already running.",
+      "Over a pane running something that handles its own mouse input — claude-code, opencode, codex, vim, htop, lazygit — the wheel scrolls that program's viewport instead. Those apps run on the alternate screen and never fill Quil's scrollback, so the wheel is forwarded to them as the mouse sequence they expect. The daemon is what detects this, so it stays correct even when you reattach to a session that was already running.",
       "Click the scrollbar to jump the thumb; click-and-drag scrolls continuously. The hit zone is three cells wide so off-by-one clicks register as scroll instead of text selection.",
       "Spatial pane navigation: Alt+Left/Right/Up/Down focuses the closest neighbour in that direction. Three tie-breakers (gap, perpendicular overlap, perpendicular center distance) match tmux/vim/iTerm muscle memory.",
       "Drag any tab in the tab bar to reorder it — intermediate tabs slide one slot at a time. A click without motion still switches tabs. The active tab is prefixed with `* ` so it's visible at a glance even when colored.",

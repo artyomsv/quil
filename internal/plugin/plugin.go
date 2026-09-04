@@ -261,6 +261,13 @@ const ClaudeSessionSource = "claude"
 // UsesClaudeSessions for backwards compatibility — see there for why.
 const ClaudeCodePluginName = "claude-code"
 
+// CodexPluginName is the shipped Codex CLI plugin. Recognised by NAME at the
+// spawn, restore and shutdown-refresh sites, the way opencode is: codex speaks
+// Claude's hook JSON but not Claude's argv (`resume <id>`, no preassigned id),
+// so it must never fall into the UsesClaudeSessions arm — which is also why
+// those sites test the codex name BEFORE that capability.
+const CodexPluginName = "codex"
+
 // UsesClaudeSessions reports whether this plugin speaks Claude's hook and
 // resume protocol: the SessionStart hook that tracks /clear, /resume and
 // compaction, the preassigned session id, and session occupancy.

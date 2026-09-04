@@ -185,7 +185,7 @@ Previously these calls answered `"Sent N bytes"` regardless, so input aimed at a
 
 | Tool | Input | Returns | Notes |
 |---|---|---|---|
-| `create_pane` | `tab_id` (optional, default = active), `cwd` (optional), `type` (default `terminal`; also `claude-code`, `opencode`, `ssh`, `stripe`) | JSON: `{pane_id, tab_id}` | Spawns a new pane in the given tab. |
+| `create_pane` | `tab_id` (optional, default = active), `cwd` (optional), `type` (default `terminal`; also `claude-code`, `opencode`, `codex`, `ssh`, `stripe`) | JSON: `{pane_id, tab_id}` | Spawns a new pane in the given tab. |
 | `restart_pane` | `pane_id` (required) | JSON: `{success, message}` | Kills + respawns with the same plugin, CWD, and instance config. Useful for stuck or crashed panes. AI clients should confirm with the user before calling. |
 | `destroy_pane` | `pane_id` (required) | "Destroyed pane <id>" or "Failed to destroy" | If it was the last pane in a tab, a replacement terminal pane is auto-created. AI clients should confirm before calling. |
 

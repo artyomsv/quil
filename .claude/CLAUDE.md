@@ -35,7 +35,7 @@ Client-daemon model:
 - `internal/tui/` — Bubble Tea model, tabs, panes, layout tree, styles, text selection, notification sidebar
 
 Deep package notes — `internal/transport/`, `internal/pty/`, `internal/ipc/`, `internal/claudehook/`,
-`internal/claudesessions/`, `internal/opencodehook/`, `internal/hookevents/` — live in the scoped
+`internal/claudesessions/`, `internal/opencodehook/`, `internal/codexhook/`, `internal/hookevents/` — live in the scoped
 rules under `.claude/rules/` (table below). They load automatically when you open a file in those
 packages, so they cost nothing on unrelated work.
 
@@ -133,7 +133,7 @@ package-specific moved to `.claude/rules/*.md`, each gated by a `paths:` glob so
 | `tui-dialogs.md` | `tui/dialog*.go`, `palette*.go`, `sessions.go`, `history.go`, `ctxmenu.go`, `editor*.go`, `notes.go`, `internal/panehistory/` | dialog system, command palette, context menu, resume picker, input history, editors/notes |
 | `tui-rendering.md` | `tui/pane*.go`, `tab.go`, `layout.go`, `model.go`, `compose.go`, `selection.go`, `keymatch.go`, `keyspecs.go`, `oscfilter.go`, `internal/keymap/`, `internal/clipboard/` | tab bar, mouse routing, split-border drag, wheel forwarding, OSC filtering, cursor model, selection, action registry + dispatch tiers |
 | `daemon-lifecycle.md` | `internal/daemon/`, `internal/ipc/`, `internal/persist/`, `internal/ringbuf/`, `cmd/quild/` | IPC queues, startup guards, readiness wait, restart/shutdown, restore, snapshots, ghost buffers, logging |
-| `hooks-and-sessions.md` | `internal/claudehook/`, `opencodehook/`, `hookevents/`, `claudesessions/`, `tui/workstate.go`, `modelinfo.go` | hook producers, session-id rotation, hook-events pipeline, work-in-progress indicators |
+| `hooks-and-sessions.md` | `internal/claudehook/`, `opencodehook/`, `codexhook/`, `hookevents/`, `claudesessions/`, `tui/workstate.go`, `modelinfo.go` | hook producers, session-id rotation, hook-events pipeline, work-in-progress indicators |
 | `windows-pty.md` | `internal/pty/`, any `*_windows.go`, `tui/consolefix*.go` | ConPTY + bundled OpenConsole, console-mode restore, window geometry, spawn-size healing |
 | `plugins.md` | `internal/plugin/`, `gitdiscover/`, `kubediscover/`, `defaults/*.toml`, `tui/instances.go`, `overlay.go` | plugin schema + registry, instances, `discover`/`sessions` opt-ins, the shared overlay slot, lazygit/hunk/k9s/lazysql |
 | `auto-update.md` | `internal/update/`, `cmd/quil/update_apply.go`, `daemon/update.go`, `tui/update.go` | update check, staging, rename-aside swap + rollback |

@@ -15,7 +15,7 @@ import { plugins, samplePluginToml, pluginAuthoringRef } from "@/data/plugins";
 const seo = {
   title: "Plugins — typed panes with context-aware behaviour",
   description:
-    "Quil ships five built-in pane types: Terminal, Claude Code, OpenCode (beta), SSH, and Stripe CLI. Each has its own spawn command, resume strategy, error handler, and status line. Write your own in a single TOML file.",
+    "Quil ships six built-in pane types: Terminal, Claude Code, OpenCode (beta), Codex, SSH, and Stripe CLI. Each has its own spawn command, resume strategy, error handler, and status line. Write your own in a single TOML file.",
   path: "/plugins",
   ogImage: "/og/plugins.png",
   keywords: [
@@ -36,7 +36,7 @@ const schemas = [
   itemListSchema({
     name: "Quil built-in plugins",
     description:
-      "Five built-in typed pane types — Terminal, Claude Code, OpenCode (beta), SSH, and Stripe CLI — plus an authoring guide for writing your own in TOML.",
+      "Six built-in typed pane types — Terminal, Claude Code, OpenCode (beta), Codex, SSH, and Stripe CLI — plus an authoring guide for writing your own in TOML.",
     url: SITE.url + "/plugins",
     items: plugins.map((p) => ({
       name: p.name,

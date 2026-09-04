@@ -61,7 +61,15 @@ func HookCommand(exePath string) (cmd, note string) {
 // injected, so the Windows branch is testable on the Linux CI image.
 func hookCommandFor(goos, exePath string, shortPath func(string) (string, error)) (cmd, note string) {
 	if goos != "windows" {
-		return fmt.Sprintf(`"%s" codex-hook`, exePath), ""
+		cmd = fmt.Sprintf(`"%s" codex-hook`, exePath)
+		// The shell expands $ and ` and reads " and \ inside double quotes;
+		// a quild path carrying one would leave the quotes. OS-controlled and
+		// effectively never true, but the Windows branch reports its
+		// unrepresentable case, so this one does too.
+		if strings.ContainsAny(exePath, "\"\\$`\n") {
+			return cmd, "the quild path contains a character the shell interprets inside double quotes (one of \" \\ $ `)"
+		}
+		return cmd, ""
 	}
 	if cmdSafeUnquoted(exePath) {
 		return exePath + " codex-hook", ""
@@ -74,8 +82,10 @@ func hookCommandFor(goos, exePath string, shortPath func(string) (string, error)
 }
 
 // cmdMetaChars are the characters an UNQUOTED cmd.exe token cannot carry
-// without changing meaning; a path holding one has to be quoted.
-const cmdMetaChars = "&|^<>\"%()"
+// without changing meaning — the operators, plus the three token delimiters
+// (; , =) cmd.exe splits an argument at. A path holding one has to be quoted,
+// or go through its 8.3 name, which admits none of them.
+const cmdMetaChars = "&|^<>\"%();,="
 
 // cmdSafeUnquoted reports whether p can stand as a bare cmd.exe token.
 func cmdSafeUnquoted(p string) bool {
@@ -94,16 +104,29 @@ func cmdSafeUnquoted(p string) bool {
 // in the config, the snake_case label codex uses in trust keys and hash
 // identities, and the timeout written into the override.
 //
-// The timeout is EXPLICIT for every event so the trust hash depends on a value
-// this package chose rather than on codex's per-event default (600 s for most
-// events, 1 s for SessionEnd, which is capped at 3 s). A wrong guess would not
-// fail loudly: the hook would be reported Untrusted and codex's startup review
-// would prompt in every pane.
+// The timeout is EXPLICIT for every event, for two reasons. The trust hash
+// covers it, so writing it pins the hash to a value this package chose rather
+// than to codex's per-event default (600 s for most events, 1 s for
+// SessionEnd, capped at 3 s) — a wrong guess would not fail loudly, it would
+// have codex's startup review prompting in every pane. And the handlers are
+// SYNCHRONOUS, so the timeout is how long a wedged hook process ($QUIL_HOME
+// on a stalled mount, the binary mid-upgrade) can hold codex's turn:
+// PreToolUse runs once per tool call, and codex's own 600 s would stall the
+// agent for ten minutes each. The hook's worst legitimate cost is the Stop
+// handler's ~350 ms of rollout re-reads plus a 256 KB tail read, so
+// hookTimeoutSec leaves it more than 25× headroom.
 type hookEvent struct {
 	name    string
 	key     string
 	timeout int
 }
+
+// hookTimeoutSec bounds every handler except SessionEnd, which codex caps at
+// sessionEndTimeoutSec.
+const (
+	hookTimeoutSec       = 15
+	sessionEndTimeoutSec = 3
+)
 
 // registeredEvents lists what Quil registers. Not PostToolUse: codex has no
 // AskUserQuestion / ExitPlanMode, and an answered permission prompt is cleared
@@ -114,16 +137,16 @@ type hookEvent struct {
 // on codex's side and could deliver a Stop before its own UserPromptSubmit,
 // which the TUI would replay as a stop edge for a turn it never saw start.
 var registeredEvents = []hookEvent{
-	{name: "SessionStart", key: "session_start", timeout: 600},
-	{name: "SessionEnd", key: "session_end", timeout: 3},
-	{name: "UserPromptSubmit", key: "user_prompt_submit", timeout: 600},
-	{name: "PermissionRequest", key: "permission_request", timeout: 600},
-	{name: "PreToolUse", key: "pre_tool_use", timeout: 600},
-	{name: "Stop", key: "stop", timeout: 600},
-	{name: "SubagentStart", key: "subagent_start", timeout: 600},
-	{name: "SubagentStop", key: "subagent_stop", timeout: 600},
-	{name: "PreCompact", key: "pre_compact", timeout: 600},
-	{name: "PostCompact", key: "post_compact", timeout: 600},
+	{name: "SessionStart", key: "session_start", timeout: hookTimeoutSec},
+	{name: "SessionEnd", key: "session_end", timeout: sessionEndTimeoutSec},
+	{name: "UserPromptSubmit", key: "user_prompt_submit", timeout: hookTimeoutSec},
+	{name: "PermissionRequest", key: "permission_request", timeout: hookTimeoutSec},
+	{name: "PreToolUse", key: "pre_tool_use", timeout: hookTimeoutSec},
+	{name: "Stop", key: "stop", timeout: hookTimeoutSec},
+	{name: "SubagentStart", key: "subagent_start", timeout: hookTimeoutSec},
+	{name: "SubagentStop", key: "subagent_stop", timeout: hookTimeoutSec},
+	{name: "PreCompact", key: "pre_compact", timeout: hookTimeoutSec},
+	{name: "PostCompact", key: "post_compact", timeout: hookTimeoutSec},
 }
 
 // sessionFlagsPath is the synthetic source path codex assigns to the

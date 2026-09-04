@@ -303,7 +303,57 @@ func TestTruncate(t *testing.T) {
 	if got := truncate("héllo wörld", 8); got != "héll…" {
 		t.Errorf("truncate = %q", got)
 	}
+	if got := truncate("abcdef", 2); got != "" {
+		t.Errorf("a cap below the ellipsis must yield nothing, got %q", got)
+	}
 	if got := truncate("short", 60); got != "short" {
 		t.Errorf("truncate = %q", got)
+	}
+}
+
+// TestModelUsageData_RetriesUntilTheRolloutLine: codex appends the final
+// token_count line around the moment the Stop hook fires, so a first read
+// that finds nothing is not the answer. Not parallel: it scripts the two
+// package-var seams every other Stop test reads.
+func TestModelUsageData_RetriesUntilTheRolloutLine(t *testing.T) {
+	origDelays, origRead := rolloutRetryDelays, readRolloutUsageFn
+	t.Cleanup(func() { rolloutRetryDelays, readRolloutUsageFn = origDelays, origRead })
+	rolloutRetryDelays = []time.Duration{0, 0, 0}
+
+	calls := 0
+	readRolloutUsageFn = func(string) (int64, bool) {
+		calls++
+		if calls < 3 {
+			return 0, false
+		}
+		return 14072, true
+	}
+	env := HookEnv{PaneID: "pane-abc", QuilDir: t.TempDir()}
+	got := modelUsageData(env, "gpt-5", "/r/rollout.jsonl")
+	if calls != 3 || got == nil || got["context_tokens"] != "14072" || got["model"] != "gpt-5" {
+		t.Fatalf("calls=%d data=%v", calls, got)
+	}
+
+	calls = 0
+	readRolloutUsageFn = func(string) (int64, bool) { calls++; return 0, false }
+	if got := modelUsageData(env, "gpt-5", "/r/rollout.jsonl"); got != nil || calls != 3 {
+		t.Fatalf("exhausted retries must yield nil after every attempt: calls=%d data=%v", calls, got)
+	}
+}
+
+func TestHookLog_StripsControlCharacters(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	hookLog(dir, "pane-abc", "unhandled hook_event: Evil\nforged pane=other line\x1b[31m")
+	b, err := os.ReadFile(filepath.Join(dir, "codexhook", "hook.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("a control character forged a line: %q", string(b))
+	}
+	if strings.Contains(lines[0], "\x1b") {
+		t.Errorf("escape survived: %q", lines[0])
 	}
 }

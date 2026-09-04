@@ -157,8 +157,13 @@ func dispatchHookEvent(env HookEnv, in codexStdin, nowMs int64) error {
 }
 
 // rolloutRetryDelays paces the re-reads in modelUsageData: codex appends the
-// final token_count line around the moment Stop hooks fire.
-var rolloutRetryDelays = []time.Duration{0, 100 * time.Millisecond, 250 * time.Millisecond}
+// final token_count line around the moment Stop hooks fire. readRolloutUsageFn
+// is the seam the retry test drives; both are package vars so a test can
+// shrink the waits and script the attempts.
+var (
+	rolloutRetryDelays = []time.Duration{0, 100 * time.Millisecond, 250 * time.Millisecond}
+	readRolloutUsageFn = readRolloutUsage
+)
 
 // modelUsageData returns the model + context-token Data keys for a Stop, or
 // nil when either half is unavailable — the daemon sets the status segment
@@ -174,7 +179,7 @@ func modelUsageData(env HookEnv, model, transcriptPath string) map[string]string
 	)
 	for _, delay := range rolloutRetryDelays {
 		time.Sleep(delay)
-		if tokens, ok = readRolloutUsage(transcriptPath); ok {
+		if tokens, ok = readRolloutUsageFn(transcriptPath); ok {
 			break
 		}
 	}
@@ -252,16 +257,17 @@ func spoolEvent(env HookEnv, nowMs int64, hookEvent, sessionID, title, sev strin
 }
 
 // truncate cuts s on a rune boundary so the result (with a trailing "…") stays
-// within maxBytes and is valid UTF-8.
+// within maxBytes and is valid UTF-8. A cap too small to hold the ellipsis
+// yields "" rather than a result over the cap.
 func truncate(s string, maxBytes int) string {
 	if len(s) <= maxBytes {
 		return s
 	}
 	const ellipsis = "…" // 3 bytes UTF-8
-	budget := maxBytes - len(ellipsis)
-	if budget < 0 {
-		budget = 0
+	if maxBytes < len(ellipsis) {
+		return ""
 	}
+	budget := maxBytes - len(ellipsis)
 	cut := 0
 	for i := range s { // i is the byte index of each rune start
 		if i > budget {

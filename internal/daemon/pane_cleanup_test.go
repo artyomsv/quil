@@ -108,6 +108,13 @@ func TestCleanupPaneArtifacts_RemovesAll(t *testing.T) {
 	if err := os.WriteFile(ocFile, []byte("oc"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	// The codex record. Seeded for the same reason as the settings file
+	// below: the removal list is hand-maintained, and the third producer's
+	// entry was the one missing on the first review of this feature.
+	cxFile := filepath.Join(config.SessionsDir(), "codex-pane-abc12345.id")
+	if err := os.WriteFile(cxFile, []byte("01a05db1-9f44-73b2-b426-8aad5f5232f4\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	// The hook-settings file a claude-code spawn writes. Seeded here because
 	// the removal list is a slice of filename strings: a typo or a dropped
 	// entry leaves the file behind on every pane destroy with nothing failing.
@@ -118,5 +125,5 @@ func TestCleanupPaneArtifacts_RemovesAll(t *testing.T) {
 
 	d.cleanupPaneArtifacts("pane-abc12345")
 
-	assertGone(t, spoolFile, sessFile, ocFile, setFile)
+	assertGone(t, spoolFile, sessFile, ocFile, cxFile, setFile)
 }

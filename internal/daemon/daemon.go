@@ -2513,7 +2513,7 @@ func (d *Daemon) cleanupPaneArtifacts(paneID string) {
 	if d.hookIngester != nil {
 		d.hookIngester.Cancel(paneID)
 	}
-	for _, name := range []string{paneID + ".id", paneID + ".transcript", paneID + ".settings.json", "opencode-" + paneID + ".id"} {
+	for _, name := range []string{paneID + ".id", paneID + ".transcript", paneID + ".settings.json", "opencode-" + paneID + ".id", "codex-" + paneID + ".id"} {
 		p := filepath.Join(config.SessionsDir(), name)
 		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 			log.Printf("cleanup pane %s: remove session id %s: %v", paneID, name, err)
@@ -3746,11 +3746,13 @@ var readHookSessionFn = func(paneID string) (claudehook.SessionRecord, error) {
 	return claudehook.ReadPersistedSession(config.QuilDir(), paneID)
 }
 
-// claudeHookExeFn resolves the path to the running quild binary, which the
-// claude hook command invokes via its `claude-hook` subcommand. Defaults to
-// os.Executable; tests override it to simulate the unresolvable-executable
-// branch without depending on the test binary's real path.
-var claudeHookExeFn = os.Executable
+// quildExeFn resolves the path to the running quild binary, which the claude
+// and codex hook commands invoke via their `claude-hook` / `codex-hook`
+// subcommands. Defaults to os.Executable; tests override it to simulate the
+// unresolvable-executable branch without depending on the test binary's real
+// path. Named for the binary rather than for either plugin, because a stub
+// installed "for the claude tests" gates the codex hook just the same.
+var quildExeFn = os.Executable
 
 // readOpencodeSessionIDFn mirrors readHookSessionIDFn for the opencode pane
 // type. Tests override it so the spawn-args matrix never touches the real
@@ -3784,7 +3786,7 @@ func codexSpawnPrep(quilDir, paneID, hookMode, resolvedCmd string) (prefix, env 
 		log.Printf("warning: pane %s: codex resolves to a cmd.exe shim (%s); the inline hook override cannot survive its re-parse — codex hooks disabled (notifications, work state, input history, session resume). Install the native codex binary or set [command] path in codex.toml", paneID, resolvedCmd)
 		return nil, nil
 	}
-	exePath, err := claudeHookExeFn()
+	exePath, err := quildExeFn()
 	if err != nil {
 		log.Printf("warning: pane %s: cannot resolve quild executable: %v — codex hooks disabled (notifications, work state, input history, session resume)", paneID, err)
 		return nil, nil
@@ -3877,7 +3879,7 @@ func opencodeSpawnPrep(quilDir, paneID, hookMode string) []string {
 // either the user loses their settings or Quil loses rotation tracking. See §7
 // of docs/superpowers/specs/2026-08-19-claude-session-seam-design.md.
 func claudeHookSpawnPrep(quilDir, paneID, hookMode string, userArgs []string) (prefix, env []string) {
-	exePath, err := claudeHookExeFn()
+	exePath, err := quildExeFn()
 	if err != nil {
 		log.Printf("warning: pane %s: cannot resolve quild executable: %v — claude hooks disabled (notifications, work state, input history, session-id rotation)", paneID, err)
 		return nil, nil
@@ -3928,10 +3930,15 @@ func claudeHookSpawnPrep(quilDir, paneID, hookMode string, userArgs []string) (p
 // promotion logic; default falls back to the plugin's configured ResumeArgs.
 func resumeTemplateFor(p *plugin.PanePlugin, pane *Pane, claim sessionClaimFn) []string {
 	switch {
-	// Codex first: the claude arm below is capability-based, and a codex
-	// TOML may legally set sessions = "claude" — the name keeps the arms
-	// mutually exclusive, as refreshPluginStateFromHooks documents.
-	case p.Name == plugin.CodexPluginName && p.Persistence.Strategy == "session_scrape":
+	// Codex first, and on the NAME ALONE: the claude arm below is
+	// capability-based, and a codex TOML may legally set sessions = "claude".
+	// Gating this arm on the strategy too would let a TOML that also says
+	// strategy = "preassign_id" fall through to the claude arm, which emits
+	// `--resume <uuid>` — a flag codex does not have — or mints a fresh uuid
+	// over the real codex session. codexResumeTemplate already falls back to
+	// the plugin's own ResumeArgs when nothing was recorded, so it is sane on
+	// every strategy.
+	case p.Name == plugin.CodexPluginName:
 		return codexResumeTemplate(p, pane)
 	case p.UsesClaudeSessions() && p.Persistence.Strategy == "preassign_id":
 		return claudeResumeTemplate(p, pane, claim)

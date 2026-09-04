@@ -82,6 +82,23 @@ export const plugins: PluginEntry[] = [
     ],
   },
   {
+    slug: "codex",
+    name: "Codex",
+    kind: "built-in",
+    description:
+      "An AI session pane that runs [Codex](https://github.com/openai/codex), OpenAI's coding agent CLI, with the same hook-driven capabilities as Claude Code: notifications, the work-in-progress indicator, subagent tracking, the model and context-token status segment, input history, and per-pane session resume. Codex only runs hooks it trusts; Quil registers its hook per pane with a `-c hooks=…` override that carries the trust hash codex expects, so nothing under `~/.codex` is touched and no trust prompt appears.",
+    spawnExample:
+      '# codex.toml — relevant fields\n[plugin]\nname = "codex"\nschema_version = 1\n\n[command]\ncmd = "codex"\nprompts_cwd = true\nrecord_history = true\n\n[[command.toggles]]\nname = "bypass_approvals_and_sandbox"\nlabel = "Bypass approvals and sandbox (dangerous)"\nargs_when_on = ["--dangerously-bypass-approvals-and-sandbox"]\ngroup = "permission_mode"\n\n[[command.toggles]]\nname = "auto_workspace_write"\nlabel = "Auto: workspace-write sandbox, never ask"\nargs_when_on = ["-a", "never", "-s", "workspace-write"]\ngroup = "permission_mode"\n\n[[command.toggles]]\nname = "search"\nlabel = "Web search"\nargs_when_on = ["--search"]\n\n[persistence]\nstrategy = "session_scrape"\nresume_args = []',
+    features: [
+      "Setup dialog (Ctrl+N → AI → Codex) browses the filesystem from the active pane's working directory; two mutually exclusive approval-mode toggles plus an independent web-search toggle.",
+      "Codex's Claude-compatible hooks (SessionStart, UserPromptSubmit, PermissionRequest, Stop, SubagentStart/Stop, compaction, a throttled PreToolUse heartbeat) feed the notification sidebar, the spinner and green/amber tab marks, and the `<model> · <n>k ctx` status segment — with **zero writes** into `~/.codex`.",
+      "On daemon restart the pane respawns with `codex resume <id>` so each pane reattaches to its own conversation, including a rotation from `/new` during the previous run.",
+      "A pane with no recorded session starts fresh — never `resume --last`, codex's most-recent-session lookup, which on restore finds the sibling pane that respawned a second earlier.",
+      "`Alt+Shift+I` browses the prompts submitted in the pane, captured from the `UserPromptSubmit` hook rather than keystrokes.",
+      "Requires the native codex binary on Windows: an npm `.cmd` shim re-parses the hook override, so Quil logs a warning there and spawns codex without hooks.",
+    ],
+  },
+  {
     slug: "ssh",
     name: "SSH",
     kind: "built-in",

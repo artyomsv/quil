@@ -191,7 +191,7 @@ func registerCreatePaneTool(s *mcp.Server, bridge *mcpBridge, mcpLog *mcpLogger)
 	type Input struct {
 		TabID string `json:"tab_id,omitempty" jsonschema:"tab to create pane in (default: active tab)"`
 		CWD   string `json:"cwd,omitempty" jsonschema:"working directory for the new pane"`
-		Type  string `json:"type,omitempty" jsonschema:"plugin type: terminal (default), claude-code, ssh, stripe"`
+		Type  string `json:"type,omitempty" jsonschema:"plugin type: terminal (default), claude-code, opencode, codex, ssh, stripe"`
 	}
 
 	mcp.AddTool(s, &mcp.Tool{

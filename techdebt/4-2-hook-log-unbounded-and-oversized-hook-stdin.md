@@ -4,7 +4,7 @@
 |-------|-------|
 | Criticality | Low |
 | Complexity | Small |
-| Location | `internal/claudehook/runhook.go` (`hookLog`, `maxStdinBytes`, `RunHook`) |
+| Location | `internal/claudehook/runhook.go` (`hookLog`, `maxStdinBytes`, `RunHook`); reproduced verbatim in `internal/codexhook/` (`session.go` `hookLog`, `runhook.go` `maxStdinBytes`/`RunHook`) on 2026-09-04, with the same match-all `PreToolUse` registration that makes both reachable |
 | Found during | Security review of PR #162 (work-indicator start edges) |
 | Date | 2026-08-15 |
 

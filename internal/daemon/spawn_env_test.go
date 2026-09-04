@@ -11,9 +11,9 @@ import (
 // inherited QUIL_HOME silently retargets quil dev builds at production
 // (techdebt/daemon/1-3). The hook subcommand reads QUIL_HOOK_HOME.
 func TestClaudeHookSpawnPrep_PaneEnvUsesHookHome(t *testing.T) {
-	orig := claudeHookExeFn
-	claudeHookExeFn = func() (string, error) { return "/fake/quild", nil }
-	defer func() { claudeHookExeFn = orig }()
+	orig := quildExeFn
+	quildExeFn = func() (string, error) { return "/fake/quild", nil }
+	defer func() { quildExeFn = orig }()
 
 	// quilDir must be writable: claudeHookSpawnPrep now writes the hook
 	// settings to a per-pane file under <quilDir>/sessions/.
@@ -55,9 +55,9 @@ func assertHookHomeOnly(t *testing.T, env []string, dir string) {
 // prefix must be the single `-c hooks=…` override that registers the
 // codex-hook command together with its trust hashes.
 func TestCodexSpawnPrep_PaneEnvUsesHookHome(t *testing.T) {
-	orig := claudeHookExeFn
-	claudeHookExeFn = func() (string, error) { return "/fake/quild", nil }
-	defer func() { claudeHookExeFn = orig }()
+	orig := quildExeFn
+	quildExeFn = func() (string, error) { return "/fake/quild", nil }
+	defer func() { quildExeFn = orig }()
 
 	prefix, env := codexSpawnPrep("/data/quil", "pane-cx123", "default", "/usr/local/bin/codex")
 	assertHookHomeOnly(t, env, "/data/quil")
@@ -80,9 +80,9 @@ func TestCodexSpawnPrep_PaneEnvUsesHookHome(t *testing.T) {
 // shim that re-parses the quotes in the override; the spawn must then proceed
 // WITHOUT the hook rather than with a mangled argument.
 func TestCodexSpawnPrep_ShimDisablesHooks(t *testing.T) {
-	orig := claudeHookExeFn
-	claudeHookExeFn = func() (string, error) { return "/fake/quild", nil }
-	defer func() { claudeHookExeFn = orig }()
+	orig := quildExeFn
+	quildExeFn = func() (string, error) { return "/fake/quild", nil }
+	defer func() { quildExeFn = orig }()
 
 	prefix, env := codexSpawnPrep("/data/quil", "pane-cx123", "default", `C:\Users\x\AppData\Roaming\npm\codex.cmd`)
 	if prefix != nil || env != nil {
@@ -91,9 +91,9 @@ func TestCodexSpawnPrep_ShimDisablesHooks(t *testing.T) {
 }
 
 func TestCodexSpawnPrep_UnresolvableExeDisablesHooks(t *testing.T) {
-	orig := claudeHookExeFn
-	claudeHookExeFn = func() (string, error) { return "", errors.New("no exe") }
-	defer func() { claudeHookExeFn = orig }()
+	orig := quildExeFn
+	quildExeFn = func() (string, error) { return "", errors.New("no exe") }
+	defer func() { quildExeFn = orig }()
 
 	prefix, env := codexSpawnPrep("/data/quil", "pane-cx123", "default", "/usr/local/bin/codex")
 	if prefix != nil || env != nil {

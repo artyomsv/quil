@@ -46,13 +46,19 @@ func readRolloutUsage(path string) (contextTokens int64, ok bool) {
 	if !filepath.IsAbs(path) || !strings.HasSuffix(path, ".jsonl") {
 		return 0, false
 	}
+	// Refuse anything but a regular file BEFORE opening it: a FIFO at the
+	// named path would park the Stop hook on Open until codex's timeout, and
+	// Lstat sees a symlink where Stat would follow it.
+	if li, err := os.Lstat(path); err != nil || !li.Mode().IsRegular() {
+		return 0, false
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return 0, false
 	}
 	defer f.Close()
 	st, err := f.Stat()
-	if err != nil || st.IsDir() {
+	if err != nil || !st.Mode().IsRegular() {
 		return 0, false
 	}
 	offset := st.Size() - rolloutTailBytes

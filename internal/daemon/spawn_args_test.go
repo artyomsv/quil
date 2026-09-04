@@ -461,12 +461,12 @@ func TestClaudeHookSpawnPrep(t *testing.T) {
 		},
 	}
 
-	origExe := claudeHookExeFn
-	t.Cleanup(func() { claudeHookExeFn = origExe })
+	origExe := quildExeFn
+	t.Cleanup(func() { quildExeFn = origExe })
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			claudeHookExeFn = func() (string, error) {
+			quildExeFn = func() (string, error) {
 				if tt.exeErr != nil {
 					return "", tt.exeErr
 				}
@@ -742,9 +742,9 @@ func TestOpencodeSpawnPrep(t *testing.T) {
 // character a shell would re-interpret — before that guard existed there was no
 // way to make the write fail without an unwritable filesystem.
 func TestClaudeHookSpawnPrep_WriteFailureDegradesInsteadOfFailing(t *testing.T) {
-	orig := claudeHookExeFn
-	claudeHookExeFn = func() (string, error) { return "/fake/quild", nil }
-	defer func() { claudeHookExeFn = orig }()
+	orig := quildExeFn
+	quildExeFn = func() (string, error) { return "/fake/quild", nil }
+	defer func() { quildExeFn = orig }()
 
 	badDir := filepath.Join(t.TempDir(), "R&D")
 
@@ -801,47 +801,89 @@ func TestResolveSpawnArgs_CodexResume(t *testing.T) {
 				return tt.rec, tt.err
 			}
 			got := resolveSpawnArgs(codexPlugin, tt.pane, true, "", claimAny)
-			if len(got) == 0 && len(tt.want) == 0 {
-				return
-			}
-			if !reflect.DeepEqual(got, tt.want) {
+			if !(len(got) == 0 && len(tt.want) == 0) && !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("resolveSpawnArgs:\n  got:  %v\n  want: %v", got, tt.want)
 			}
+			tt.pane.PluginMu.Lock()
+			sidState, has := tt.pane.PluginState["session_id"]
+			tt.pane.PluginMu.Unlock()
 			if tt.want != nil {
-				tt.pane.PluginMu.Lock()
-				sidState := tt.pane.PluginState["session_id"]
-				tt.pane.PluginMu.Unlock()
 				if sidState != tt.rec.ID {
 					t.Errorf("PluginState[session_id] = %q, want %q", sidState, tt.rec.ID)
 				}
+				return
+			}
+			// A rejected or missing record must leave NO id behind: a later
+			// restart reads PluginState, and a flag-shaped value parked there
+			// would reach `codex resume` on that path instead of this one.
+			if has {
+				t.Errorf("fresh start must not record a session id, got %q", sidState)
 			}
 		})
 	}
 }
 
+// TestResolveSpawnArgs_CodexResume_ClearsStaleTranscriptPath: the id and the
+// rollout path are stored as one unit, so a record that carries no path must
+// DELETE the previous session's rather than leave it vouching for a file the
+// new id was never in.
+func TestResolveSpawnArgs_CodexResume_ClearsStaleTranscriptPath(t *testing.T) {
+	orig := readCodexSessionFn
+	t.Cleanup(func() { readCodexSessionFn = orig })
+	const sid = "01a05db1-9f44-73b2-b426-8aad5f5232f4"
+	readCodexSessionFn = func(string) (codexhook.SessionRecord, error) {
+		return codexhook.SessionRecord{ID: sid}, nil
+	}
+	p := &plugin.PanePlugin{
+		Name:        plugin.CodexPluginName,
+		Command:     plugin.CommandConfig{Cmd: "codex"},
+		Persistence: plugin.PersistenceConfig{Strategy: "session_scrape"},
+	}
+	pane := &Pane{ID: "pane-abc", PluginState: map[string]string{
+		"session_id":      "01a05db2-6843-7612-8ea6-a7eca009f8b5",
+		"transcript_path": "/old/rollout.jsonl",
+	}}
+	got := resolveSpawnArgs(p, pane, true, "", claimAny)
+	if !reflect.DeepEqual(got, []string{"resume", sid}) {
+		t.Fatalf("args = %v", got)
+	}
+	pane.PluginMu.Lock()
+	defer pane.PluginMu.Unlock()
+	if _, stale := pane.PluginState["transcript_path"]; stale {
+		t.Errorf("stale transcript_path survived a record without one: %v", pane.PluginState)
+	}
+}
+
 // TestResumeTemplateFor_CodexArmWinsOverClaudeCapability: a codex pane must
 // never take the claude arm even if its TOML is edited to say
-// sessions = "claude" — that arm would prepend --settings and read the wrong
-// record file.
+// sessions = "claude" AND strategy = "preassign_id" — the shape that
+// satisfies the claude arm's every condition. That arm would emit
+// `--resume <uuid>`, a flag codex does not have, so the pane would die on
+// restore with a usage error. The first version of this test left the
+// strategy at session_scrape and passed against a gate that let this through.
 func TestResumeTemplateFor_CodexArmWinsOverClaudeCapability(t *testing.T) {
 	orig := readCodexSessionFn
 	t.Cleanup(func() { readCodexSessionFn = orig })
 	readCodexSessionFn = func(string) (codexhook.SessionRecord, error) {
 		return codexhook.SessionRecord{ID: "01a05db1-9f44-73b2-b426-8aad5f5232f4", TranscriptPath: "/r/x.jsonl"}, nil
 	}
-	p := &plugin.PanePlugin{
-		Name:        plugin.CodexPluginName,
-		Command:     plugin.CommandConfig{Cmd: "codex", Sessions: plugin.ClaudeSessionSource},
-		Persistence: plugin.PersistenceConfig{Strategy: "session_scrape"},
-	}
-	pane := &Pane{ID: "pane-abc"}
-	got := resumeTemplateFor(p, pane, claimAny)
-	if !reflect.DeepEqual(got, []string{"resume", "{session_id}"}) {
-		t.Errorf("template = %v", got)
-	}
-	pane.PluginMu.Lock()
-	defer pane.PluginMu.Unlock()
-	if pane.PluginState["transcript_path"] != "/r/x.jsonl" {
-		t.Errorf("transcript_path not recorded with the id: %v", pane.PluginState)
+	for _, strategy := range []string{"session_scrape", "preassign_id"} {
+		t.Run(strategy, func(t *testing.T) {
+			p := &plugin.PanePlugin{
+				Name:        plugin.CodexPluginName,
+				Command:     plugin.CommandConfig{Cmd: "codex", Sessions: plugin.ClaudeSessionSource},
+				Persistence: plugin.PersistenceConfig{Strategy: strategy},
+			}
+			pane := &Pane{ID: "pane-abc"}
+			got := resumeTemplateFor(p, pane, claimAny)
+			if !reflect.DeepEqual(got, []string{"resume", "{session_id}"}) {
+				t.Errorf("template = %v", got)
+			}
+			pane.PluginMu.Lock()
+			defer pane.PluginMu.Unlock()
+			if pane.PluginState["transcript_path"] != "/r/x.jsonl" {
+				t.Errorf("transcript_path not recorded with the id: %v", pane.PluginState)
+			}
+		})
 	}
 }

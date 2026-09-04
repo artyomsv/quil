@@ -22,11 +22,8 @@ func TestSessionRecord_RoundTrip(t *testing.T) {
 	if rec.ID != "01a05db1-9f44-73b2-b426-8aad5f5232f4" {
 		t.Errorf("ID = %q", rec.ID)
 	}
-	if !filepath.IsAbs(rec.TranscriptPath) && runtime.GOOS == "windows" {
-		t.Errorf("TranscriptPath lost its drive: %q", rec.TranscriptPath)
-	}
-	if want := "rollout-2026-09-01T17-58-36-01a05db1-9f44-73b2-b426-8aad5f5232f4.jsonl"; !hasSuffix(rec.TranscriptPath, want) {
-		t.Errorf("TranscriptPath = %q, want suffix %q", rec.TranscriptPath, want)
+	if want := `C:\Users\x\.codex\sessions\2026\09\01\rollout-2026-09-01T17-58-36-01a05db1-9f44-73b2-b426-8aad5f5232f4.jsonl`; rec.TranscriptPath != want {
+		t.Errorf("TranscriptPath = %q, want %q (recorded verbatim)", rec.TranscriptPath, want)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "sessions", "codex-pane-abc.id")); err != nil {
 		t.Errorf("record must live at sessions/codex-<paneID>.id: %v", err)
@@ -35,10 +32,6 @@ func TestSessionRecord_RoundTrip(t *testing.T) {
 	if err != nil || id != rec.ID {
 		t.Errorf("ReadPersistedSessionID = %q, %v", id, err)
 	}
-}
-
-func hasSuffix(s, suffix string) bool {
-	return len(s) >= len(suffix) && s[len(s)-len(suffix):] == suffix
 }
 
 func TestSessionRecord_MissingIsNotExist(t *testing.T) {

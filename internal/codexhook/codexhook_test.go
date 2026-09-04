@@ -37,6 +37,11 @@ func TestHookCommand_QuotingPerPlatform(t *testing.T) {
 		{"windows space uses the short name", "windows", `C:\Program Files\quil\quild.exe`, shortOK, `C:\PROGRA~1\quil\quild.exe codex-hook`, false},
 		{"windows space without a short name falls back to quotes with a note", "windows", `C:\Program Files\quil\quild.exe`, shortFails, `"C:\Program Files\quil\quild.exe" codex-hook`, true},
 		{"windows metacharacter falls back to quotes with a note", "windows", `C:\R&D\quild.exe`, noShort, `"C:\R&D\quild.exe" codex-hook`, true},
+		// cmd.exe also splits a bare token at ; , and = — a path holding one
+		// would go out unquoted and every hook would fail with no log line.
+		{"windows delimiter takes the short name", "windows", `C:\a;b\quild.exe`, shortOK, `C:\PROGRA~1\quil\quild.exe codex-hook`, false},
+		{"windows equals sign without a short name falls back with a note", "windows", `C:\k=v\quild.exe`, shortFails, `"C:\k=v\quild.exe" codex-hook`, true},
+		{"unix path with a dollar is reported", "linux", "/opt/$HOME/quild", noShort, `"/opt/$HOME/quild" codex-hook`, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -119,14 +124,19 @@ func TestBuildConfigOverride_RegistersEveryEventWithTrust(t *testing.T) {
 			t.Errorf("override missing trust for %s: want %s in %s", ev.name, want, v)
 		}
 	}
-	if !strings.Contains(v, tomlQuote(hookKey("windows", "session_start"))+"={trusted_hash="+tomlQuote(probeHash)+"}") {
-		t.Errorf("SessionStart trust does not carry the probe hash: %s", v)
+	// The probe itself is pinned by TestTrustHash_MatchesProbe at the probe's
+	// own timeout; the override's hashes cover the SHORT timeouts it writes,
+	// so the two must differ — a state entry equal to the probe hash would
+	// mean the timeout is not part of the identity, and it is.
+	if strings.Contains(v, probeHash) {
+		t.Errorf("override carries the 600 s probe hash, so its timeout is not in the identity: %s", v)
 	}
 }
 
-// SessionEnd is the one event codex caps at 3 s; the override says so
-// explicitly so the hash never depends on codex's default for that event.
-func TestBuildConfigOverride_SessionEndTimeout(t *testing.T) {
+// Every handler is synchronous, so its timeout is how long a wedged hook can
+// hold codex's turn; the override writes a short one explicitly (never
+// codex's 600 s default) and SessionEnd stays at the 3 s codex caps it to.
+func TestBuildConfigOverride_ExplicitShortTimeouts(t *testing.T) {
 	t.Parallel()
 	v, err := BuildConfigOverride(probeCommand, "linux")
 	if err != nil {
@@ -135,8 +145,16 @@ func TestBuildConfigOverride_SessionEndTimeout(t *testing.T) {
 	if !strings.Contains(v, `SessionEnd=[{hooks=[{type="command",command="echo hooked > hookfired.txt",timeout=3}]}]`) {
 		t.Errorf("SessionEnd must carry timeout=3: %s", v)
 	}
-	if !strings.Contains(v, `Stop=[{hooks=[{type="command",command="echo hooked > hookfired.txt",timeout=600}]}]`) {
-		t.Errorf("Stop must carry timeout=600: %s", v)
+	if !strings.Contains(v, `Stop=[{hooks=[{type="command",command="echo hooked > hookfired.txt",timeout=15}]}]`) {
+		t.Errorf("Stop must carry timeout=15: %s", v)
+	}
+	if strings.Contains(v, "timeout=600") {
+		t.Errorf("no handler may inherit codex's 600 s default: %s", v)
+	}
+	for _, ev := range registeredEvents {
+		if ev.timeout > 30 || ev.timeout < 1 {
+			t.Errorf("%s timeout %d is outside the bound a wedged synchronous hook may hold a turn", ev.name, ev.timeout)
+		}
 	}
 }
 

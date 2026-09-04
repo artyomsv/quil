@@ -195,6 +195,10 @@ func atomicWrite(path string, data []byte, perm os.FileMode) error {
 
 // hookLog appends a best-effort breadcrumb to $QuilDir/codexhook/hook.log.
 // Never returns an error — a failure to log must not surface to codex.
+//
+// The message may carry codex-supplied strings (an event name, a rollout
+// path), so control characters are dropped: a newline in either would forge a
+// second breadcrumb line, and the F1 log viewer renders without a VT emulator.
 func hookLog(quilDir, paneID, msg string) {
 	logDir := filepath.Join(quilDir, "codexhook")
 	if err := os.MkdirAll(logDir, 0o700); err != nil {
@@ -205,5 +209,19 @@ func hookLog(quilDir, paneID, msg string) {
 		return
 	}
 	defer f.Close()
-	fmt.Fprintf(f, "%s pane=%s %s\n", time.Now().UTC().Format("2006-01-02T15:04:05Z"), paneID, msg)
+	fmt.Fprintf(f, "%s pane=%s %s\n", time.Now().UTC().Format("2006-01-02T15:04:05Z"), paneID, stripControl(msg))
+}
+
+// stripControl removes C0 controls and DEL from s; tab becomes a space so the
+// line keeps its shape.
+func stripControl(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r == '\t':
+			return ' '
+		case r < 0x20 || r == 0x7f:
+			return -1
+		}
+		return r
+	}, s)
 }

@@ -343,11 +343,16 @@ func TestRouterRemovedPumpPublishesNothing(t *testing.T) {
 	t.Run("message", func(t *testing.T) {
 		gpu := newFakeConn()
 		r := NewRouter(map[string]Client{"gpu01": gpu})
-		// Queue the message BEFORE the removal so the pump is guaranteed to
-		// have something to publish once it wakes.
+		// Remove FIRST, then deliver. The pump is already parked in Receive,
+		// and r.in is buffered, so a message queued before the removal races
+		// it: whichever of "pump publishes" and "Remove closes stop" runs
+		// first decides the outcome, and on a loaded -race runner the pump won
+		// often enough to fail CI (2026-09-04). Delivering after the removal
+		// is the property this test is about — a removed pump must publish
+		// nothing that arrives once it is stopped — and it is deterministic.
+		r.Remove("gpu01")
 		out, _ := ipc.NewMessage(ipc.MsgWorkspaceState, nil)
 		gpu.recv <- out
-		r.Remove("gpu01")
 		close(gpu.recv)
 
 		time.Sleep(50 * time.Millisecond)

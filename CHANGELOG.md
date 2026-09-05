@@ -11,6 +11,34 @@ version section here and deletes them.
 
 ## [Unreleased]
 
+## [1.68.0] - 2026-09-05
+
+### Added
+- **Dragging a tab no longer jumps around.** A tab now moves only once the pointer
+  passes the middle of the tab it is over. Before, a narrow tab dragged over a wide
+  one swapped back and forth on every mouse move, and a wide tab dragged over narrow
+  ones flew across several slots at once.
+- **Tabs move from the keyboard.** `Alt+Shift+PgUp` / `Alt+Shift+PgDn` slide the
+  active tab one slot left or right (`tab.move_left` / `tab.move_right`, also in the
+  command palette and F1 → Shortcuts).
+- **The project sidebar reorders too.** Drag a tab name up or down the PANES list to
+  reorder tabs, and drag a project row to reorder projects — the same midpoint rule,
+  measured in rows. Clicking a tab name in the sidebar now switches to that tab.
+  `Alt+Shift+Up` / `Alt+Shift+Down` move the active project (`project.move_up` /
+  `project.move_down`). Each daemon saves the order of its own projects; when several
+  hosts are connected, how their rows interleave is kept for the running session only.
+
+### Fixed
+- **The Shortcuts list shows which row you are on.** `↑`/`↓` moved an invisible
+  cursor, so the only sign a key had done anything was the whole list sliding once
+  the cursor reached the edge of the window. The row under the cursor is now marked
+  `>` and drawn bright, like every other list in Quil.
+- **F1 → Shortcuts, F1 → Processes and F1 → What's New no longer open over the
+  leftovers of the menu they came from.** All three are drawn in a wider box than the
+  About menu, and none asked for a repaint — so the old menu's border was left
+  standing inside the new box until something else forced a full redraw, such as
+  clicking away and back. Leaving Shortcuts with `Esc` repaints for the same reason.
+
 ## [1.67.0] - 2026-09-04
 
 ### Added

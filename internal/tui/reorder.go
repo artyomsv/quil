@@ -47,23 +47,26 @@ func dragSlot(from, target, pos, start, size int) int {
 }
 
 // tabSpan is one visible tab's extent in the tab bar, in BAR-LOCAL columns
-// (screen column minus projectSidebarWidth()).
+// (screen column minus projectSidebarWidth()), plus the styled text painted
+// there.
 type tabSpan struct {
 	index int // into curTabs()
 	start int
 	width int
+	text  string
 }
 
-// tabSpans lays the visible tabs out exactly as renderTabBar paints them:
-// same labels, same styles, same overflow rule around the active tab, same
-// one-column separators. It is the single geometry hitTestTab and the reorder
-// drag both read, so a click and a drag can never disagree about which tab is
-// under a column.
+// tabSpans lays the visible tabs out: same labels, same styles, same overflow
+// rule around the active tab, same one-column separators. It is the SINGLE
+// geometry the painter (renderTabBar), the click (hitTestTab) and the reorder
+// drag all read, so none of the three can disagree about which tab occupies
+// which column.
 //
-// The width/overflow logic is duplicated from renderTabBar rather than shared
-// because that function needs the rendered TEXT and this one only the widths —
-// but the two must move together, which TestTabSpansAgreeWithHitTestTab and
-// the tab-bar click tests pin.
+// Carrying the rendered text costs nothing: the width has to come from
+// lipgloss.Width(style.Render(label)) either way, so the string already exists
+// and was previously thrown away. Keeping it is what let renderTabBar stop
+// owning a second copy of this arithmetic — the copy that made
+// TestTabSpansAgreeWithHitTestTab necessary in the first place.
 func (m Model) tabSpans() []tabSpan {
 	barW := m.paneAreaWidth()
 	tabs := m.curTabs()
@@ -71,10 +74,12 @@ func (m Model) tabSpans() []tabSpan {
 		return nil
 	}
 
+	texts := make([]string, len(tabs))
 	widths := make([]int, len(tabs))
 	totalW := 0
 	for i := range tabs {
-		widths[i] = lipgloss.Width(m.tabStyle(i).Render(m.tabLabel(i)))
+		texts[i] = m.tabStyle(i).Render(m.tabLabel(i))
+		widths[i] = lipgloss.Width(texts[i])
 		totalW += widths[i]
 		if i > 0 {
 			totalW++
@@ -127,7 +132,7 @@ func (m Model) tabSpans() []tabSpan {
 		if cursor > 0 {
 			cursor++ // space separator
 		}
-		spans = append(spans, tabSpan{index: i, start: cursor, width: widths[i]})
+		spans = append(spans, tabSpan{index: i, start: cursor, width: widths[i], text: texts[i]})
 		cursor += widths[i]
 	}
 	return spans
@@ -173,10 +178,14 @@ func (m *Model) moveProject(from, to int) bool {
 	if from == to || from < 0 || to < 0 || from >= n || to >= n {
 		return false
 	}
-	activeID := ""
-	if p := m.cur(); p != nil {
-		activeID = p.ID
-	}
+	// The active project is re-found by POINTER, not by ID. A project ID is
+	// "proj-" plus the first 8 hex digits of a UUID (daemon/project.go),
+	// minted independently by every daemon — so two daemons in one sidebar can
+	// hand out the same one, and indexOfProject returns the FIRST match. That
+	// would move focus, and every action that follows it, to the other
+	// daemon's project. This slide only permutes the existing slice, so the
+	// pointer is guaranteed to still be in it.
+	active := m.cur()
 	p := m.projects[from]
 	if from < to {
 		copy(m.projects[from:to], m.projects[from+1:to+1])
@@ -184,8 +193,13 @@ func (m *Model) moveProject(from, to int) bool {
 		copy(m.projects[to+1:from+1], m.projects[to:from])
 	}
 	m.projects[to] = p
-	if activeID != "" {
-		m.activeProject = indexOfProject(m.projects, activeID)
+	if active != nil {
+		for i, q := range m.projects {
+			if q == active {
+				m.activeProject = i
+				break
+			}
+		}
 	}
 	return true
 }
@@ -203,14 +217,27 @@ func (m Model) sendReorderProject(p *ProjectModel) tea.Cmd {
 	if !m.projectActionable(p) {
 		return nil
 	}
-	idx := 0
+	idx, found := 0, false
 	for _, q := range m.projects {
 		if q == p {
+			found = true
 			break
 		}
 		if q.Dest == p.Dest {
 			idx++
 		}
+	}
+	// A miss is refused rather than sent. Falling off the end leaves idx at
+	// "one past that daemon's last project" — a perfectly legal ordinal the
+	// daemon would clamp and act on, so a lookup failure would silently move a
+	// project to the end instead of doing nothing.
+	//
+	// Pointer identity rather than ID, for the reason moveProject documents:
+	// project IDs are only 8 hex digits and are minted per daemon, so an ID
+	// compare could match a DIFFERENT daemon's project and break the count
+	// early — the same class of bug, one level down.
+	if !found {
+		return nil
 	}
 	id, dest := p.ID, p.Dest
 	return func() tea.Msg {
@@ -240,11 +267,33 @@ func (m *Model) moveActiveProject(delta int) tea.Cmd {
 	return m.sendReorderProject(p)
 }
 
-// sidebarProjectRowSpan is the screen-row extent of project idx's rows in the
-// sidebar: one row for a local project, two for a remote one (name + host).
-// Read from the same rows the hit test uses, so the drag and the click agree.
-func (m *Model) sidebarProjectRowSpan(idx int) (start, size int) {
-	rows := m.sidebarVisibleRows(m.projectSidebarWidth(), m.sidebarContentHeight())
+// sidebarDragRows resolves the pointer to a sidebar row AND hands back the row
+// slice it came from, so one motion event builds the sidebar exactly ONCE.
+//
+// The build is not cheap: it renders every project row, tab heading, pane row
+// and git row through lipgloss. A real workspace reaches ~70 of them. The first
+// version called sidebarRowAt (which builds) and then a span helper (which
+// built again), so every motion event paid for two full builds on the Update
+// goroutine that also forwards keystrokes — for as long as the button is held.
+//
+// The guards mirror sidebarRowAt's exactly, so the drag and a click resolve the
+// same coordinate to the same row.
+func (m *Model) sidebarDragRows(x, y int) ([]sidebarRow, sidebarRow, bool) {
+	w := m.projectSidebarWidth()
+	if w <= 0 || x < 0 || x >= w || y < 0 || y >= m.height-1 {
+		return nil, sidebarRow{}, false
+	}
+	rows := m.sidebarVisibleRows(w, m.sidebarContentHeight())
+	if y >= len(rows) {
+		return nil, sidebarRow{}, false
+	}
+	return rows, rows[y], true
+}
+
+// projectRowSpanIn is the screen-row extent of project idx's rows: one row for
+// a local project, two for a remote one (name + host). Pure over an
+// already-built slice — see sidebarDragRows for why that matters.
+func projectRowSpanIn(rows []sidebarRow, idx int) (start, size int) {
 	start, end := -1, -1
 	for y, row := range rows {
 		if row.kind != sidebarRowProject || row.index != idx {
@@ -267,7 +316,7 @@ func (m *Model) sidebarProjectRowSpan(idx int) (start, size int) {
 // that wanders and resumes when it comes back. Returns the IPC cmd for a move,
 // or nil when nothing moved.
 func (m *Model) trackProjectDrag(x, y int) tea.Cmd {
-	row, ok := m.sidebarRowAt(x, y)
+	rows, row, ok := m.sidebarDragRows(x, y)
 	if !ok || row.kind != sidebarRowProject {
 		return nil
 	}
@@ -275,7 +324,7 @@ func (m *Model) trackProjectDrag(x, y int) tea.Cmd {
 	if from < 0 || from >= len(m.projects) {
 		return nil
 	}
-	start, size := m.sidebarProjectRowSpan(row.index)
+	start, size := projectRowSpanIn(rows, row.index)
 	if size == 0 {
 		return nil
 	}
@@ -291,12 +340,12 @@ func (m *Model) trackProjectDrag(x, y int) tea.Cmd {
 	return m.sendReorderProject(p)
 }
 
-// sidebarTabGroupSpan is the screen-row extent of tab idx's group in the
-// sidebar — heading, pane rows and git rows (every row marked inTab). Measured
-// on the VISIBLE rows, so a group partly scrolled off screen is as tall as the
-// part the user can see, which is the part the pointer can be over.
-func (m *Model) sidebarTabGroupSpan(idx int) (start, size int) {
-	rows := m.sidebarVisibleRows(m.projectSidebarWidth(), m.sidebarContentHeight())
+// tabGroupSpanIn is the screen-row extent of tab idx's group — heading, pane
+// rows and git rows (every row marked inTab). Measured on the VISIBLE rows, so
+// a group partly scrolled off screen is as tall as the part the user can see,
+// which is the part the pointer can be over. Pure over an already-built slice,
+// like projectRowSpanIn.
+func tabGroupSpanIn(rows []sidebarRow, idx int) (start, size int) {
 	start, end := -1, -1
 	for y, row := range rows {
 		if !row.inTab || row.tabIdx != idx {
@@ -319,7 +368,7 @@ func (m *Model) sidebarTabGroupSpan(idx int) (start, size int) {
 // alone. The move itself is moveTab plus the same reorder_tab the tab bar
 // sends, so the daemon sees one kind of reorder however it was made.
 func (m *Model) trackSidebarTabDrag(x, y int) tea.Cmd {
-	row, ok := m.sidebarRowAt(x, y)
+	rows, row, ok := m.sidebarDragRows(x, y)
 	if !ok || !row.inTab {
 		return nil
 	}
@@ -328,7 +377,7 @@ func (m *Model) trackSidebarTabDrag(x, y int) tea.Cmd {
 	if from < 0 || from >= len(tabs) {
 		return nil
 	}
-	start, size := m.sidebarTabGroupSpan(row.tabIdx)
+	start, size := tabGroupSpanIn(rows, row.tabIdx)
 	if size == 0 {
 		return nil
 	}

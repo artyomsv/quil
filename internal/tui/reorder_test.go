@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -97,10 +98,65 @@ func reorderTabMessages(sent []*ipc.Message) []ipc.ReorderTabPayload {
 	return out
 }
 
+// TestTabSpansMatchThePaintedBarWhenTheBarOverflows is the test that can
+// actually fail.
+//
+// Its sibling below compares hitTestTab with tabSpans, and hitTestTab now
+// DELEGATES to tabSpanAt — so that one compares tabSpans with itself and is
+// tautological. It is kept only as a cheap guard on the delegation surviving.
+// This one compares tabSpans against the PAINTED row, which is the claim that
+// matters, and it does it in the OVERFLOW branch: the fit-everything branch is
+// a straight walk, while the overflow branch decides which tabs get painted at
+// all, and that is where a divergence would hide.
+func TestTabSpansMatchThePaintedBarWhenTheBarOverflows(t *testing.T) {
+	t.Parallel()
+	m := newModelForTest([]string{"Aaaaaaaaaa", "Bbbbbbbbbb", "Cccccccccc", "Dddddddddd", "Eeeeeeeeee"}, 2)
+	// 60 columns, NOT 40. At 40 the reserve leaves room for the active tab
+	// alone, so exactly one span is painted, every separator is skipped and the
+	// cursor arithmetic this test exists to check is never executed — verified
+	// by mutation: desyncing the separator from renderTabBar's join survived a
+	// 40-column fixture and fails a 60-column one. 60 paints three of five.
+	m.width, m.height = 60, 40
+
+	spans := m.tabSpans()
+	if len(spans) == len(m.curTabs()) {
+		t.Fatal("fixture does not overflow — this test cannot discriminate, " +
+			"widen the tabs or narrow the terminal")
+	}
+	if len(spans) < 2 {
+		t.Fatalf("fixture paints %d tab(s); at least 2 are needed or the "+
+			"separator arithmetic is never exercised", len(spans))
+	}
+
+	row0 := stripANSI(m.renderTabBar())
+	for _, s := range spans {
+		want := fmt.Sprintf("%d:%s", s.index+1, m.curTabs()[s.index].Name)
+		got := strings.Index(row0, want)
+		if got < 0 {
+			t.Errorf("tab %d is in tabSpans but not painted in the bar: %q", s.index, row0)
+			continue
+		}
+		if got < s.start || got >= s.start+s.width {
+			t.Errorf("tab %d is painted at column %d but tabSpans puts it at [%d,%d)",
+				s.index, got, s.start, s.start+s.width)
+		}
+	}
+
+	// The overflow indicator has to agree with the same set, or the bar tells
+	// the user a different number of tabs is hidden than actually is.
+	if hidden := len(m.curTabs()) - len(spans); !strings.Contains(row0, fmt.Sprintf("«%d more»", hidden)) {
+		t.Errorf("bar does not report %d hidden tabs: %q", hidden, row0)
+	}
+}
+
 // TestTabSpansAgreeWithHitTestTab: hitTestTab is the mouse's authority on which
 // tab is under a column and tabSpans is what the drag reads its geometry from.
 // Every column of every span must hit-test to that span's tab, and the
 // separator columns between spans to none.
+//
+// NOTE: hitTestTab delegates to tabSpanAt, so this is a guard on the delegation
+// and not an independent check of the geometry. The test above is the one that
+// can catch a real divergence.
 func TestTabSpansAgreeWithHitTestTab(t *testing.T) {
 	t.Parallel()
 	m := newModelForTest([]string{"A", "Bb", "Ccccccccccc", "D"}, 2)
@@ -375,6 +431,45 @@ func TestProjectMoveTellsEachDaemonItsOwnIndex(t *testing.T) {
 	}
 }
 
+// A project that is not in m.projects has no rank among its daemon's
+// siblings, and the counting loop would fall off the end leaving an index one
+// past that daemon's last project — a legal ordinal the daemon clamps and acts
+// on, so a lookup failure would silently move a project to the end.
+//
+// Called DIRECTLY, unlike the drag and keyboard tests, and deliberately: both
+// real call sites read p out of m.projects immediately beforehand, so the miss
+// is unreachable through Update. That makes this a guard on the guard — the
+// alternative is an untested branch that can be deleted with the suite green,
+// which is how it was found.
+func TestSendReorderProjectRefusesAProjectNotInTheList(t *testing.T) {
+	t.Parallel()
+	fake := newFakeConn()
+	m := newModelForTest([]string{"T"}, 0)
+	m.client = fake
+	m.projects = []*ProjectModel{{ID: "pa", Name: "A"}, {ID: "pb", Name: "B"}}
+
+	stray := &ProjectModel{ID: "pc", Name: "C"}
+	if cmd := m.sendReorderProject(stray); cmd != nil {
+		cmd()
+		t.Fatal("sendReorderProject returned a command for a project absent from m.projects; " +
+			"the index would be one past the daemon's last project")
+	}
+	if msgs := reorderProjectMessages(t, fake.sent); len(msgs) != 0 {
+		t.Fatalf("a stray project produced %d reorder_project message(s): %+v", len(msgs), msgs)
+	}
+
+	// Control: the same call for a project that IS in the list must still send,
+	// or this test would pass against a function that refuses everything.
+	if cmd := m.sendReorderProject(m.projects[1]); cmd == nil {
+		t.Fatal("sendReorderProject refused a project that is in the list")
+	} else {
+		cmd()
+	}
+	if msgs := reorderProjectMessages(t, fake.sent); len(msgs) != 1 || msgs[0].ProjectID != "pb" {
+		t.Fatalf("control send = %+v, want one message for pb", msgs)
+	}
+}
+
 // Dragging a project row in the sidebar follows the same midpoint rule as the
 // tab bar, measured in rows. A remote project is two rows tall (name + host),
 // so its lower row is the NEAR half when dragging upward over it.
@@ -440,6 +535,102 @@ func TestSidebarProjectDragReordersPastTheMidpoint(t *testing.T) {
 	got = updated.(Model)
 	if got.projectDragging {
 		t.Fatal("release must end the project drag")
+	}
+}
+
+// A drag whose pointer wanders off the project rows must leave the order alone
+// and stay armed. Without the row-kind guard, a pane row's `index` is a pane
+// ordinal and a chrome row's is the zero value — both would be read as a
+// project index and reorder something the pointer is nowhere near.
+func TestSidebarProjectDragIgnoresNonProjectRowsAndColumnsOutsideTheStrip(t *testing.T) {
+	fake := newFakeConn()
+	m := newSplitDragTestModel(t)
+	m.client = fake
+	m.sidebarOpen = true
+	m.sidebarWidth = 22
+	m.projects[0].ID, m.projects[0].Name = "pa", "alpha"
+	m.projects = append(m.projects,
+		&ProjectModel{ID: "pb", Name: "beta"},
+		&ProjectModel{ID: "pc", Name: "gamma"},
+	)
+	// Rows: 0 PROJECTS, 1 alpha, 2 beta, 3 gamma, 4 blank, 5 PANES, 6 tab, 7+ panes.
+
+	updated, _ := m.Update(tea.MouseClickMsg{X: 3, Y: 3, Button: tea.MouseLeft})
+	got := updated.(Model)
+	if !got.projectDragging || got.projectDragIdx != 2 {
+		t.Fatalf("drag = (%v, %d) after pressing gamma, want (true, 2)", got.projectDragging, got.projectDragIdx)
+	}
+
+	for _, tc := range []struct {
+		name string
+		x, y int
+	}{
+		{"PROJECTS heading", 3, 0},
+		{"blank separator", 3, 4},
+		{"PANES heading", 3, 5},
+		{"a pane row", 3, 7},
+		{"a column outside the strip", m.sidebarWidth + 4, 2},
+		{"a negative column", -1, 2},
+		{"the status bar row", 3, m.height - 1},
+	} {
+		updated, cmd := got.Update(tea.MouseMotionMsg{X: tc.x, Y: tc.y, Button: tea.MouseLeft})
+		next := updated.(Model)
+		if names := projectNames(next); names != "alpha,beta,gamma" {
+			t.Errorf("%s (%d,%d) reordered to %s, want unchanged", tc.name, tc.x, tc.y, names)
+		}
+		if cmd != nil {
+			t.Errorf("%s (%d,%d) sent traffic without a move", tc.name, tc.x, tc.y)
+		}
+		if !next.projectDragging {
+			t.Errorf("%s (%d,%d) cancelled the drag; it must stay armed so the "+
+				"pointer can wander and come back", tc.name, tc.x, tc.y)
+		}
+		got = next
+	}
+	if msgs := reorderProjectMessages(t, fake.sent); len(msgs) != 0 {
+		t.Fatalf("non-actionable rows produced %d reorder_project message(s): %+v", len(msgs), msgs)
+	}
+}
+
+// An offline project's destination has no connection and a synthetic one's ID
+// exists only in this client, so Router.Send would DROP either and log it as
+// delivered. The reorder still happens locally — the sidebar is the user's own
+// view — but nothing may go on the wire.
+func TestProjectMoveDoesNotReportAnOfflineOrSyntheticProject(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		project *ProjectModel
+	}{
+		{"offline", &ProjectModel{ID: "pb", Name: "B", Dest: "gpu01", Offline: &OfflineState{}}},
+		{"synthetic", &ProjectModel{ID: interimProjectID, Name: "B"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fake := newFakeConn()
+			m := newModelForTest([]string{"T"}, 0)
+			m.client = fake
+			m.notifications = NewNotificationCenter(30, 200)
+			m.width, m.height = 100, 40
+			m.projects = []*ProjectModel{{ID: "pa", Name: "A"}, tc.project}
+			m.activeProject = 1
+
+			updated, cmd := m.handleKey(tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModAlt | tea.ModShift})
+			got := updated.(Model)
+			if names := projectNames(got); names != "B,A" {
+				t.Fatalf("order = %s, want B,A — the local move must still happen", names)
+			}
+			if got.activeProject != 0 {
+				t.Fatalf("activeProject = %d, want 0 (it follows the moved project)", got.activeProject)
+			}
+			if cmd != nil {
+				cmd()
+			}
+			if msgs := reorderProjectMessages(t, fake.sent); len(msgs) != 0 {
+				t.Fatalf("a %s project produced %d reorder_project message(s): %+v",
+					tc.name, len(msgs), msgs)
+			}
+		})
 	}
 }
 
@@ -542,5 +733,74 @@ func TestSidebarTabDragReordersPastTheMidpoint(t *testing.T) {
 	got = updated.(Model)
 	if got.sidebarTabDragging {
 		t.Fatal("release must end the sidebar tab drag")
+	}
+}
+
+// The blank separator between tab groups belongs to no tab. Its zero-value
+// tabIdx is 0, so a drag that reads it without checking inTab computes a slot
+// against TAB 0's extent — which is invisible while the dragged tab IS tab 0,
+// because dragSlot then returns `from` for an unrelated reason. This drags the
+// THIRD tab, where the guard is the only thing that can stop the move.
+func TestSidebarTabDragIgnoresTheBlankRowBetweenGroups(t *testing.T) {
+	fake := newFakeConn()
+	m, _ := twoTabSidebarModel(t)
+	m.client = fake
+	v := NewTabModel("tab-v", "V")
+	v.Root = NewLeaf(NewPaneModel("p4", 1024))
+	v.ActivePane = "p4"
+	m.appendTab(v)
+	// Rows: 0 PROJECTS 1 project 2 blank 3 PANES
+	//       4 T 5 p1 6 p2   7 blank   8 U 9 p3   10 blank   11 V 12 p4
+	updated, _ := m.Update(tea.MouseClickMsg{X: 3, Y: 11, Button: tea.MouseLeft})
+	got := updated.(Model)
+	if got.sidebarTabDragIdx != 2 {
+		t.Fatalf("drag index = %d after pressing V's heading, want 2", got.sidebarTabDragIdx)
+	}
+
+	// Row 7 is the blank between T's group and U's group. It carries tabIdx 0.
+	// Tab 0 spans rows 4-6, and row 7 is past its end — so an unguarded read
+	// computes "past tab 0's midpoint" and slides V to index 0.
+	updated, cmd := got.Update(tea.MouseMotionMsg{X: 3, Y: 7, Button: tea.MouseLeft})
+	got = updated.(Model)
+	if names := strings.Join(tabNames(t, got), ","); names != "T,U,V" {
+		t.Fatalf("a blank separator row reordered the tabs to %s, want T,U,V", names)
+	}
+	if cmd != nil {
+		t.Fatal("a blank separator row must send nothing")
+	}
+	if !got.sidebarTabDragging {
+		t.Fatal("a blank row must not cancel the drag")
+	}
+	if msgs := reorderTabMessages(fake.sent); len(msgs) != 0 {
+		t.Fatalf("blank row produced %d reorder_tab message(s): %+v", len(msgs), msgs)
+	}
+}
+
+// A git row is part of its tab's group but carries no kind, so only `inTab`
+// ties it to its tab. Dropping that flag would shorten the measured group by a
+// row and move the midpoint — so the drag would fire a row early or late.
+func TestSidebarTabGroupSpanIncludesTheGitRow(t *testing.T) {
+	m, _ := twoTabSidebarModel(t)
+	// A branch is what makes gitRow render at all.
+	m.curTabs()[0].Leaves()[0].GitBranch = "master"
+
+	rows := m.sidebarVisibleRows(m.projectSidebarWidth(), m.sidebarContentHeight())
+	var gitRows int
+	for _, r := range rows {
+		if r.kind == "" && r.inTab && strings.Contains(stripANSI(r.text), "master") {
+			gitRows++
+		}
+	}
+	if gitRows != 1 {
+		t.Fatalf("fixture rendered %d git rows, want exactly 1 — the test cannot "+
+			"discriminate without one", gitRows)
+	}
+
+	start, size := tabGroupSpanIn(rows, 0)
+	// Heading + 2 pane rows + 1 git row.
+	if size != 4 {
+		t.Errorf("tab 0's group spans %d rows from %d, want 4 (heading, two panes, one git row) "+
+			"— a git row missing its inTab flag shortens the group and moves the drag midpoint",
+			size, start)
 	}
 }

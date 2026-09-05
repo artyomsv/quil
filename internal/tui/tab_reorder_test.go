@@ -128,4 +128,13 @@ func TestModel_ClearDragState(t *testing.T) {
 	if m.sidebarTabDragging {
 		t.Error("sidebarTabDragging = true, want false")
 	}
+	// The INDICES too, not just the flags. clearDragState zeroes both, and the
+	// tui-rendering rule says this test guards that — but asserting only the
+	// booleans let the index resets be deleted with the suite still green.
+	if m.projectDragIdx != 0 {
+		t.Errorf("projectDragIdx = %d, want 0", m.projectDragIdx)
+	}
+	if m.sidebarTabDragIdx != 0 {
+		t.Errorf("sidebarTabDragIdx = %d, want 0", m.sidebarTabDragIdx)
+	}
 }

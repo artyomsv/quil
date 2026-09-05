@@ -1858,6 +1858,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// MIDDLE (dragSlot) — moving on first contact is what made the
 			// drag flip-flop and overshoot, see dragSlot for the mechanics.
 			x := msg.X - m.projectSidebarWidth()
+			if x < 0 {
+				// Stated rather than implied. No span starts before 0, so
+				// tabSpanAt would miss anyway — but hitTestTab guards this
+				// explicitly and an invariant that holds by accident in one of
+				// two readers of the same geometry is one edit from not holding.
+				return m, nil
+			}
 			if span, ok := m.tabSpanAt(x); ok && m.tabDragFromIdx < len(m.curTabs()) {
 				from := m.tabDragFromIdx
 				if to := dragSlot(from, span.index, x, span.start, span.width); to != from {
@@ -6006,6 +6013,11 @@ func (m *Model) switchTabBy(delta int) tea.Cmd {
 func (m Model) openShortcutsDialog() (tea.Model, tea.Cmd) {
 	m.dialog = dialogShortcuts
 	m.dialogCursor = 0
+	// Reset on the way IN as well as on the way out. Esc zeroes these, but Esc
+	// is not the only way the dialog closes, and any other exit left a stale
+	// cursor and scroll for the next open. Latent while nothing drew the
+	// cursor; visible the moment the row is marked.
+	m.shortcutsCursor, m.shortcutsScroll = 0, 0
 	return m, tea.ClearScreen
 }
 
@@ -6070,7 +6082,18 @@ func (m Model) tabLabel(idx int) string {
 	if m.renaming && idx == m.activeTabIdx() {
 		return "* " + m.renameInput + "▎"
 	}
-	name := fmt.Sprintf("%d:%s", idx+1, m.curTabs()[idx].Name)
+	// Sanitized HERE, not at either call site. The name reaches us in a
+	// workspace_state broadcast, so under --remote it is authored by a machine
+	// the user may not control: control characters have zero WIDTH but are not
+	// zero-length, so fitTabBar's ansi.Truncate carries them through the cut and
+	// into the terminal. The sidebar has always cleaned the same string
+	// (sidebar.go, sidebarTabHeading); the bar did not.
+	//
+	// tabLabel is the one place both the painter and the click/drag geometry
+	// read (renderTabBar and tabSpans both call it), so cleaning it here keeps
+	// the measured width and the painted width identical. Cleaning it in only
+	// one of them would land a click on the wrong tab.
+	name := fmt.Sprintf("%d:%s", idx+1, sanitizeRemoteText(m.curTabs()[idx].Name))
 	if m.tabHasEagerPane(idx) {
 		name = eagerTabMarker + name
 	}
@@ -6194,99 +6217,29 @@ func fitTabBar(bar string, barW int) string {
 // pane COLUMN (above tabContent, right of the project sidebar), so its first
 // painted cell is screen column projectSidebarWidth() and it has exactly the
 // panes' width to spend. Sizing it to m.width instead made the bar overhang
-// the sidebar by that many columns. hitTestTab mirrors this budget — which
-// tabs overflow depends on it, so the two must read the same width.
+// the sidebar by that many columns.
+//
+// The layout itself — labels, styles, the overflow rule, the separators — lives
+// in tabSpans (reorder.go), which hitTestTab and the reorder drag also read.
+// This function only joins what that returns, so the painted bar and the click
+// map cannot drift: there is nothing left here to drift FROM.
 func (m Model) renderTabBar() string {
 	barW := m.paneAreaWidth()
-	tabs := m.curTabs()
-	if len(tabs) == 0 {
+	spans := m.tabSpans()
+	if len(spans) == 0 {
 		return lipgloss.NewStyle().Width(barW).Render("")
 	}
 
-	type renderedTab struct {
-		text  string
-		width int
-	}
-
-	// Pre-render all tabs
-	all := make([]renderedTab, len(tabs))
-	for i := range tabs {
-		name := m.tabLabel(i)
-		style := m.tabStyle(i)
-		rendered := style.Render(name)
-		all[i] = renderedTab{text: rendered, width: lipgloss.Width(rendered)}
-	}
-
-	// Try to fit all tabs
-	totalW := 0
-	for i, rt := range all {
-		totalW += rt.width
-		if i > 0 {
-			totalW++ // space separator
-		}
-	}
-
-	if totalW <= barW {
-		// Everything fits
-		tabs := make([]string, len(all))
-		for i, rt := range all {
-			tabs[i] = rt.text
-		}
-		bar := strings.Join(tabs, " ")
-		return lipgloss.NewStyle().Width(barW).Render(fitTabBar(bar, barW))
-	}
-
-	// Overflow: include active tab, expand outward, show indicator for hidden
-	included := make([]bool, len(tabs))
-	activeIdx := m.activeTabIdx()
-	included[activeIdx] = true
-	usedW := all[activeIdx].width
-
-	// Reserve space for overflow indicator (e.g. " «3 more»")
-	indicatorReserve := 12
-
-	// Expand left, then right from active tab
-	left := activeIdx - 1
-	right := activeIdx + 1
-	for left >= 0 || right < len(tabs) {
-		if left >= 0 {
-			need := all[left].width + 1 // +1 for separator
-			if usedW+need+indicatorReserve <= barW {
-				included[left] = true
-				usedW += need
-				left--
-			} else {
-				left = -1 // stop expanding left
-			}
-		}
-		if right < len(tabs) {
-			need := all[right].width + 1
-			if usedW+need+indicatorReserve <= barW {
-				included[right] = true
-				usedW += need
-				right++
-			} else {
-				right = len(tabs) // stop expanding right
-			}
-		}
-	}
-
-	// Build the bar with overflow indicators
-	hidden := 0
-	for _, inc := range included {
-		if !inc {
-			hidden++
-		}
-	}
-
-	var parts []string
-	for i, rt := range all {
-		if included[i] {
-			parts = append(parts, rt.text)
-		}
+	parts := make([]string, len(spans))
+	for i, s := range spans {
+		parts[i] = s.text
 	}
 	bar := strings.Join(parts, " ")
-	if hidden > 0 {
+
+	// A tab tabSpans left out is a tab that did not fit. Counting the
+	// difference rather than re-deriving the overflow set keeps the indicator
+	// honest by construction.
+	if hidden := len(m.curTabs()) - len(spans); hidden > 0 {
 		indicator := fmt.Sprintf(" «%d more»", hidden)
 		bar += lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Render(indicator)
 	}

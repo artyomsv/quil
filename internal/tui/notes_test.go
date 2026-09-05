@@ -760,6 +760,12 @@ func TestModel_NotesKeyExempt_AllowsGlobalShortcuts(t *testing.T) {
 		"f1", "ctrl+n",
 		"alt+1", "alt+2", "alt+3", "alt+4", "alt+5",
 		"alt+6", "alt+7", "alt+8", "alt+9",
+		// The four reorder actions. They move a tab's or a project's SLOT and
+		// never the notes binding, so they are as harmless mid-edit as
+		// cycle-tab-color — but they must still reach handleKey rather than
+		// being typed into the editor as text. These have no [keybindings]
+		// field, so they are listed by chord like the alt+digit set above.
+		"alt+shift+pgup", "alt+shift+pgdown", "alt+shift+up", "alt+shift+down",
 	)
 	for _, key := range exempt {
 		if !m.notesKeyExempt(key) {

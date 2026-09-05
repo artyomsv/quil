@@ -355,6 +355,21 @@ func (sm *SessionManager) ReorderProject(id string, newIndex int) bool {
 	if _, ok := sm.projects[id]; !ok {
 		return false
 	}
+	// Read BEFORE the removal: the return value has to mean "the order
+	// changed", not "the id exists". ReorderTab has always meant that (its
+	// slideString returns false for a no-op) and handleReorderProject's guard
+	// is written against that contract — without this it only ever caught an
+	// unknown id, and a reorder that moved nothing still cost a full
+	// workspace_state broadcast on every client's must-deliver queue.
+	//
+	// That is an ordinary drag, not an abusive client: the sidebar interleaves
+	// several daemons' projects, so dragging a local project past a REMOTE row
+	// changes the sidebar without changing this daemon's rank, and the client
+	// sends on every sidebar change.
+	//
+	// before is -1 for a project in the map but absent from the order, so that
+	// repair path still reports a change and is not silently swallowed.
+	before := indexOfString(sm.projectOrder, id)
 	order := removeString(sm.projectOrder, id)
 	if newIndex < 0 {
 		newIndex = 0
@@ -364,7 +379,7 @@ func (sm *SessionManager) ReorderProject(id string, newIndex int) bool {
 	}
 	rest := append([]string{id}, order[newIndex:]...)
 	sm.projectOrder = append(order[:newIndex:newIndex], rest...)
-	return true
+	return indexOfString(sm.projectOrder, id) != before
 }
 
 // Projects returns COPIES. Returning live pointers would let a caller holding

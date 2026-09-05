@@ -827,15 +827,23 @@ func (m Model) handleAboutKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case 1:
 			m.dialog = dialogShortcuts
 			m.dialogCursor = 0
+			// Same reset as openShortcutsDialog: the list is reference
+			// material, so it opens at the top however it was reached.
+			m.shortcutsCursor, m.shortcutsScroll = 0, 0
 			// ClearScreen because the BOX CHANGES SIZE here: About is
 			// dialogWidth (60), Shortcuts is shortcutsDialogWidth (100), and
 			// both are centred — so the old border sits inside the new one and
 			// the new one's own edges land on cells the diff considers
 			// unchanged. Bubble Tea v2's cell diff leaves that debris standing
 			// until something forces a full frame (a focus change did it, in
-			// the report). The palette's palActShortcuts row and the
-			// system.shortcuts key already clear for exactly this reason; this
-			// path was the one that did not.
+			// the report).
+			//
+			// The RULE, not this one instance: an About row whose sub-dialog is
+			// drawn at a width other than dialogWidth must clear. That is
+			// Shortcuts (100), Processes (92) and What's New (whatsNewWidth).
+			// Settings and Plugins render at dialogWidth and need nothing. The
+			// palette's palActShortcuts row and the system.shortcuts key
+			// already cleared; the three About rows did not.
 			return m, tea.ClearScreen
 		case 2:
 			m.dialog = dialogPlugins
@@ -863,7 +871,12 @@ func (m Model) handleAboutKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			if w, ok := latestWindow(); ok {
 				m.openWhatsNew(w, dialogAbout)
 			}
-			return m, nil
+			// Same width-change repaint as the Shortcuts and Processes rows:
+			// whatsNewWidth is up to whatsNewMaxWidth against About's
+			// dialogWidth. The EXIT path already cleared (whatsnew.go), so the
+			// debris only ever showed on the way in — which is exactly why it
+			// went unnoticed.
+			return m, tea.ClearScreen
 		case aboutStopDaemonIndex:
 			// Stop daemon: route to the shutdown confirm. Enter here only
 			// opens the confirm; the confirm itself requires `y` to fire
@@ -1713,7 +1726,12 @@ func (m Model) renderShortcutsDialog() string {
 		// row's and overflow the width budget the truncations below spend.
 		lead := indent
 		if start+i == m.shortcutsCursor {
-			lead = truncateToWidth("> ", shortcutsRowIndent)
+			// padOrTrunc, not truncateToWidth: that helper cuts but never PADS,
+			// so it holds the key column in line only because "> " happens to
+			// be exactly shortcutsRowIndent cells wide today. Raise the
+			// constant and the cursor row's key column would shift left — the
+			// precise misalignment this comment claims to prevent.
+			lead = padOrTrunc("> ", shortcutsRowIndent)
 		}
 		// A conflict row is one sentence, not a key/label pair — it takes the
 		// whole inner width, marker included, and is red because it reports

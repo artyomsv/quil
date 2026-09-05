@@ -653,7 +653,7 @@ func (m *Model) sidebarRowAt(x, y int) (sidebarRow, bool) {
 }
 
 // sidebarHit maps a screen coordinate to the sidebar row under it, as a
-// kind ("project" / "pane") and that kind's index. Returns ("", -1) for any
+// kind ("project" / "tab" / "pane") and that kind's index. Returns ("", -1) for any
 // x at or beyond the reserved width — the panes begin exactly there — and
 // for inert chrome rows inside the strip.
 func (m *Model) sidebarHit(x, y int) (kind string, index int) {

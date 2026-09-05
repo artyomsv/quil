@@ -133,7 +133,7 @@ On daemon start, `restoreWorkspace()` loads `~/.quil/workspace.json`, reconstruc
 
 ### Snapshot triggers
 
-centralized event queue via `snapshotCh` channel — `requestSnapshot()` sends non-blocking request, `Wait()` loop debounces with 500ms `time.AfterFunc`. Triggers: create/destroy tab/pane, switch tab, update layout, update pane, client disconnect. Periodic timer (30s) as safety net. Final flush on daemon stop
+centralized event queue via `snapshotCh` channel — `requestSnapshot()` sends non-blocking request, `Wait()` loop debounces with 500ms `time.AfterFunc`. Triggers: create/destroy tab/pane, switch tab, update layout, update pane, reorder tab, reorder project, client disconnect. Both reorder handlers first ask whether the order actually CHANGED (`ReorderTab` via `slideString`, `ReorderProject` by comparing the id's index before and after) and return without broadcasting or snapshotting when it did not — a no-op reorder is an ordinary drag, since the sidebar interleaves several daemons' projects and dragging a local one past a remote row changes the sidebar without changing this daemon's rank. Periodic timer (30s) as safety net. Final flush on daemon stop
 
 ### Ghost buffer dimming
 

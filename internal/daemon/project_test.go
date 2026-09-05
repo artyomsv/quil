@@ -687,3 +687,74 @@ func TestReorderProjectRequestsASnapshot(t *testing.T) {
 		t.Fatalf("snapshot requests pending after reorder_project = %d, want 1", len(d.snapshotCh))
 	}
 }
+
+// TestReorderProjectReportsWhetherTheOrderChanged: ReorderProject returned true
+// whenever the id existed, so handleReorderProject's guard only ever caught an
+// unknown id and a reorder that moved nothing still cost a full workspace_state
+// broadcast on every client's 64-slot must-deliver queue.
+//
+// That is reachable in ordinary use, not just from a hostile client: the sidebar
+// interleaves several daemons' projects, so dragging a local project past a
+// REMOTE row changes the sidebar without changing this daemon's rank, and the
+// client sends on every sidebar change. ReorderTab has always reported honestly
+// (slideString returns false for a no-op); this is the contract handleReorder-
+// Project's own comment claims to share.
+func TestReorderProjectReportsWhetherTheOrderChanged(t *testing.T) {
+	t.Run("no-op returns false", func(t *testing.T) {
+		sm := NewSessionManager(1024)
+		a := sm.CreateProject("A", "/tmp/a")
+		sm.CreateProject("B", "/tmp/b")
+		sm.CreateProject("C", "/tmp/c")
+		if sm.ReorderProject(a.ID, 0) {
+			t.Error("ReorderProject = true for a project already at index 0")
+		}
+		// Clamped out-of-range that resolves to where it already is.
+		c := sm.Projects()[2]
+		if sm.ReorderProject(c.ID, 99) {
+			t.Error("ReorderProject = true for the last project asked to move past the end")
+		}
+	})
+
+	t.Run("a real move still returns true", func(t *testing.T) {
+		sm := NewSessionManager(1024)
+		a := sm.CreateProject("A", "/tmp/a")
+		sm.CreateProject("B", "/tmp/b")
+		if !sm.ReorderProject(a.ID, 1) {
+			t.Fatal("ReorderProject = false for a move that changes the order")
+		}
+		if got := sm.Projects()[1].Name; got != "A" {
+			t.Fatalf("order after the move = %s at index 1, want A", got)
+		}
+	})
+
+	t.Run("a no-op reaching the handler neither broadcasts nor snapshots", func(t *testing.T) {
+		d := newTestDaemon(t)
+		a := d.session.CreateProject("A", t.TempDir())
+		d.session.CreateProject("B", t.TempDir())
+		for len(d.snapshotCh) > 0 {
+			<-d.snapshotCh
+		}
+		msg, _ := ipc.NewMessage(ipc.MsgReorderProject, ipc.ReorderProjectPayload{
+			ProjectID: a.ID, NewIndex: 0,
+		})
+		d.handleMessage(nil, msg)
+		if len(d.snapshotCh) != 0 {
+			t.Fatalf("a no-op reorder requested %d snapshot(s), want 0", len(d.snapshotCh))
+		}
+	})
+
+	t.Run("an unknown id neither broadcasts nor snapshots", func(t *testing.T) {
+		d := newTestDaemon(t)
+		d.session.CreateProject("A", t.TempDir())
+		for len(d.snapshotCh) > 0 {
+			<-d.snapshotCh
+		}
+		msg, _ := ipc.NewMessage(ipc.MsgReorderProject, ipc.ReorderProjectPayload{
+			ProjectID: "proj-does-not-exist", NewIndex: 0,
+		})
+		d.handleMessage(nil, msg)
+		if len(d.snapshotCh) != 0 {
+			t.Fatalf("a reorder naming an unknown project requested %d snapshot(s), want 0", len(d.snapshotCh))
+		}
+	})
+}

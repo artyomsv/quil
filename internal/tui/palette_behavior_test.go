@@ -303,14 +303,31 @@ func TestPalette_ReorderActionsMoveTabAndProject(t *testing.T) {
 	first := m.projects[0].Name
 	m.projects = append(m.projects, &ProjectModel{ID: "pb", Name: "beta"})
 
-	want := map[string]bool{"Move tab left": false, "Move tab right": false, "Move project up": false, "Move project down": false}
+	// The rows exist AND they grey out at the ends of their list. The fixture
+	// sits on tab 0 of 2 and project 0 of 2, so exactly one of each pair is
+	// disabled — an enabled-gate that was hardcoded true would show a "Move
+	// tab left" the user can press on the leftmost tab, which does nothing.
+	wantEnabled := map[string]bool{
+		"Move tab left":     false,
+		"Move tab right":    true,
+		"Move project up":   false,
+		"Move project down": true,
+	}
+	seen := map[string]bool{}
 	for _, c := range m.buildPaletteCommands() {
-		if _, ok := want[c.label]; ok {
-			want[c.label] = true
+		want, tracked := wantEnabled[c.label]
+		if !tracked {
+			continue
+		}
+		seen[c.label] = true
+		if c.enabled != want {
+			t.Errorf("palette row %q enabled = %v, want %v (active tab %d of %d, active project %d of %d)",
+				c.label, c.enabled, want, m.activeTabIdx(), len(m.curTabs()),
+				m.activeProject, len(m.projects))
 		}
 	}
-	for label, seen := range want {
-		if !seen {
+	for label := range wantEnabled {
+		if !seen[label] {
 			t.Errorf("palette has no %q row", label)
 		}
 	}

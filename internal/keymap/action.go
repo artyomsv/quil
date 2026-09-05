@@ -52,6 +52,12 @@ var registry = []Action{
 	{ID: "project.prev", Label: "Previous project", Group: "Projects", Tier: TierEarly, Order: 1500, Default: "alt+shift+left"},
 	{ID: "project.toggle", Label: "Bounce to the previous project", Group: "Projects", Tier: TierEarly, Order: 1600, Default: "alt+o"},
 	{ID: "project.attention_queue", Label: "Jump to the agent blocked longest", Group: "Projects", Tier: TierEarly, Order: 1700, Default: "alt+shift+a"},
+	// Up/Down because the sidebar lists projects vertically; the same Alt+Shift
+	// layer as project.next/prev (Left/Right) so the four arrows read as one
+	// family: plain moves you, with the cursor keys' other axis it moves the
+	// project. Early tier with the rest of the project keys.
+	{ID: "project.move_up", Label: "Move project up", Group: "Projects", Tier: TierEarly, Order: 1800, Default: "alt+shift+up"},
+	{ID: "project.move_down", Label: "Move project down", Group: "Projects", Tier: TierEarly, Order: 1900, Default: "alt+shift+down"},
 
 	// --- Late tier: handleKey's second switch, after tryPluginRawKey ---
 	{ID: "app.quit", Label: "Quit", Group: "System", Tier: TierLate, Order: 2000, Default: "ctrl+q"},
@@ -95,6 +101,12 @@ var registry = []Action{
 	// serve a preset they have not selected.
 	{ID: "tab.next", Label: "Next tab", Group: "Tabs", Tier: TierLate, Order: 4400, Default: ""},
 	{ID: "tab.prev", Label: "Previous tab", Group: "Tabs", Tier: TierLate, Order: 4500, Default: ""},
+	// Bound, unlike tab.next/prev: reordering from the keyboard was asked for,
+	// and PgUp/PgDn with a modifier is what browsers use to move a tab. Alt+Shift
+	// rather than Ctrl+Shift because Windows Terminal owns Ctrl+Shift+PgUp/PgDn
+	// for its own scrollback and never delivers them.
+	{ID: "tab.move_left", Label: "Move tab left", Group: "Tabs", Tier: TierLate, Order: 4520, Default: "alt+shift+pgup"},
+	{ID: "tab.move_right", Label: "Move tab right", Group: "Tabs", Tier: TierLate, Order: 4540, Default: "alt+shift+pgdown"},
 	{ID: "tab.switch_1", Label: "Switch to tab 1", Group: "Tabs", Tier: TierLate, Order: 4600, Default: "alt+1"},
 	{ID: "tab.switch_2", Label: "Switch to tab 2", Group: "Tabs", Tier: TierLate, Order: 4700, Default: "alt+2"},
 	{ID: "tab.switch_3", Label: "Switch to tab 3", Group: "Tabs", Tier: TierLate, Order: 4800, Default: "alt+3"},

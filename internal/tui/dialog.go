@@ -827,12 +827,27 @@ func (m Model) handleAboutKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case 1:
 			m.dialog = dialogShortcuts
 			m.dialogCursor = 0
+			// ClearScreen because the BOX CHANGES SIZE here: About is
+			// dialogWidth (60), Shortcuts is shortcutsDialogWidth (100), and
+			// both are centred — so the old border sits inside the new one and
+			// the new one's own edges land on cells the diff considers
+			// unchanged. Bubble Tea v2's cell diff leaves that debris standing
+			// until something forces a full frame (a focus change did it, in
+			// the report). The palette's palActShortcuts row and the
+			// system.shortcuts key already clear for exactly this reason; this
+			// path was the one that did not.
+			return m, tea.ClearScreen
 		case 2:
 			m.dialog = dialogPlugins
 			m.dialogCursor = 0
 		case 3:
 			m = m.openProcessesDialog()
-			return m, m.refreshResources(true)
+			// Batched with the refresh for the same reason the Shortcuts row
+			// above clears: the box goes from dialogWidth (60) to
+			// processesDialogWidth (92), and the cells the About border stood
+			// on are inside the new box while the new box's own edges are on
+			// cells the diff never revisits.
+			return m, tea.Batch(tea.ClearScreen, m.refreshResources(true))
 		case 4:
 			return m.openLogViewer("Client log", filepath.Join(config.QuilDir(), "quil.log"))
 		case 5:
@@ -973,6 +988,10 @@ func (m Model) handleShortcutsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// Reset so re-opening starts at the top rather than wherever the last
 		// visit left off — the list is reference material, not a work queue.
 		m.shortcutsCursor, m.shortcutsScroll = 0, 0
+		// The same size change as the way in, in reverse: the 100-column box
+		// is replaced by the 60-column one, and the wide box's border columns
+		// are outside the narrow one entirely, so nothing repaints them.
+		return m, tea.ClearScreen
 	case "up", "k", "ctrl+p":
 		if m.shortcutsCursor > 0 {
 			m.shortcutsCursor--
@@ -1681,12 +1700,26 @@ func (m Model) renderShortcutsDialog() string {
 	desc := m.shortcutsDescWidth()
 	full := m.shortcutsFullRowWidth()
 	indent := strings.Repeat(" ", shortcutsRowIndent)
-	for _, s := range list[start:end] {
+	for i, s := range list[start:end] {
+		// The cursor row is marked "> ", the way the About menu, the palette
+		// and every other list in Quil mark theirs. Without it the arrow keys
+		// had no visible effect at all until the cursor reached the window's
+		// edge and the whole list slid by one — which reads as a scroll with no
+		// selection rather than as a cursor.
+		//
+		// The marker REPLACES the indent rather than being prepended to it: the
+		// indent is the row's whole left margin, and adding two more cells
+		// would push the cursor row's key column out of line with every other
+		// row's and overflow the width budget the truncations below spend.
+		lead := indent
+		if start+i == m.shortcutsCursor {
+			lead = truncateToWidth("> ", shortcutsRowIndent)
+		}
 		// A conflict row is one sentence, not a key/label pair — it takes the
 		// whole inner width, marker included, and is red because it reports
 		// something the user has to go and fix.
 		if s.full {
-			b.WriteString(indent)
+			b.WriteString(lead)
 			b.WriteString(dialogErrorStyle.Render(truncateToWidth(s.key+" "+s.desc, full)))
 			b.WriteByte('\n')
 			continue
@@ -1705,10 +1738,18 @@ func (m Model) renderShortcutsDialog() string {
 		// dialog is built on. (Escapes are handled at the parser — see
 		// keymap.ParseChord — because truncateToWidth is ANSI-aware and would
 		// carry one through intact.)
+		// The cursor row's description is bright rather than reverse-video: a
+		// full-width highlight on a 100-column box is a bar across the screen,
+		// and the marker already says which row it is. Same pairing the About
+		// menu uses (marker + dialogSelected).
+		valStyle := dialogValStyle
+		if start+i == m.shortcutsCursor {
+			valStyle = dialogSelected
+		}
 		b.WriteString(fmt.Sprintf("%s%s%s\n",
-			indent,
+			lead,
 			dialogKeyStyle.Render(truncateToWidth(s.key, dialogKeyColWidth)),
-			dialogValStyle.Render(truncateToWidth(s.desc, desc))))
+			valStyle.Render(truncateToWidth(s.desc, desc))))
 	}
 
 	b.WriteByte('\n')

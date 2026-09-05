@@ -88,13 +88,17 @@ func TestModel_MoveTab(t *testing.T) {
 func TestModel_ClearDragState(t *testing.T) {
 	t.Parallel()
 	m := Model{
-		tabDragFromIdx:   5,
-		scrollDragPaneID: "pane-x",
-		scrollDragRect:   PaneRect{OX: 1, OY: 2, W: 3, H: 4},
-		mouseDown:        true,
-		notesMouseDown:   true,
-		splitDragNode:    &LayoutNode{},
-		splitDragRect:    BorderHit{OX: 1, OY: 2, W: 3, H: 4},
+		tabDragFromIdx:     5,
+		scrollDragPaneID:   "pane-x",
+		scrollDragRect:     PaneRect{OX: 1, OY: 2, W: 3, H: 4},
+		mouseDown:          true,
+		notesMouseDown:     true,
+		splitDragNode:      &LayoutNode{},
+		splitDragRect:      BorderHit{OX: 1, OY: 2, W: 3, H: 4},
+		projectDragging:    true,
+		projectDragIdx:     2,
+		sidebarTabDragging: true,
+		sidebarTabDragIdx:  3,
 	}
 	m.clearDragState()
 	if m.tabDragFromIdx != -1 {
@@ -117,5 +121,11 @@ func TestModel_ClearDragState(t *testing.T) {
 	}
 	if m.splitDragRect != (BorderHit{}) {
 		t.Errorf("splitDragRect = %+v, want zero value", m.splitDragRect)
+	}
+	if m.projectDragging {
+		t.Error("projectDragging = true, want false")
+	}
+	if m.sidebarTabDragging {
+		t.Error("sidebarTabDragging = true, want false")
 	}
 }

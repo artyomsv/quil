@@ -17,8 +17,12 @@ func conflictRow(t *testing.T, m Model) string {
 	t.Helper()
 	var found []string
 	for _, line := range strings.Split(stripANSI(m.renderShortcutsDialog()), "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), "!") {
-			found = append(found, strings.TrimSpace(line))
+		// The cursor marker is stripped along with the indent: conflicts sort
+		// first, so the top conflict IS the cursor row when the dialog opens,
+		// and this helper is about the message, not about the marker.
+		row := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), ">"))
+		if strings.HasPrefix(row, "!") {
+			found = append(found, row)
 		}
 	}
 	if len(found) != 1 {

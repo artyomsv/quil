@@ -1373,8 +1373,14 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 			log.Printf("reorder project: malformed payload: %v", err)
 			return
 		}
-		d.session.ReorderProject(p.ProjectID, p.NewIndex)
+		if !d.session.ReorderProject(p.ProjectID, p.NewIndex) {
+			return
+		}
 		d.broadcastState()
+		// Same contract as handleReorderTab: without the snapshot the new
+		// order lived only until the next unrelated snapshot happened to run,
+		// and a daemon restart before that undid the drag.
+		d.requestSnapshot()
 
 	// MCP request-response
 	case ipc.MsgListPanesReq:

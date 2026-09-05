@@ -4,8 +4,8 @@ import "testing"
 
 func TestActions_RegistryIntegrity(t *testing.T) {
 	acts := Actions()
-	if len(acts) != 54 {
-		t.Fatalf("registry has %d actions, want 54 (42 config-backed + 12 promoted from the reserved-key switch)", len(acts))
+	if len(acts) != 58 {
+		t.Fatalf("registry has %d actions, want 58 (42 config-backed + 12 promoted from the reserved-key switch + 4 reorder)", len(acts))
 	}
 	seen := make(map[ActionID]bool, len(acts))
 	orders := make(map[int]ActionID, len(acts))
@@ -50,9 +50,10 @@ func TestActions_TierSplitMatchesLegacySwitches(t *testing.T) {
 		"project.destroy": true, "project.picker": true,
 		"project.next": true, "project.prev": true,
 		"project.toggle": true, "project.attention_queue": true,
+		"project.move_up": true, "project.move_down": true,
 	}
-	if len(early) != 18 {
-		t.Fatalf("expected-early table has %d entries, want 18", len(early))
+	if len(early) != 20 {
+		t.Fatalf("expected-early table has %d entries, want 20", len(early))
 	}
 	for _, a := range Actions() {
 		want := TierLate
@@ -92,5 +93,34 @@ func TestLookup(t *testing.T) {
 	}
 	if _, ok := Lookup("nope.nope"); ok {
 		t.Error("Lookup(nope.nope) found something")
+	}
+}
+
+// The four reorder actions ship BOUND, unlike tab.next/tab.prev: the user asked
+// for keyboard reordering, and every chord here was free. Projects are a
+// vertical list, so they move with Up/Down; tabs are a horizontal strip, and
+// PgUp/PgDn is the browser convention for moving one. Alt+Shift keeps them on
+// the same layer as the other project keys and off anything an AI tool binds.
+func TestReorderActionsShipBound(t *testing.T) {
+	want := []struct {
+		id    ActionID
+		def   string
+		tier  Tier
+		group string
+	}{
+		{"tab.move_left", "alt+shift+pgup", TierLate, "Tabs"},
+		{"tab.move_right", "alt+shift+pgdown", TierLate, "Tabs"},
+		{"project.move_up", "alt+shift+up", TierEarly, "Projects"},
+		{"project.move_down", "alt+shift+down", TierEarly, "Projects"},
+	}
+	for _, w := range want {
+		a, ok := Lookup(w.id)
+		if !ok {
+			t.Errorf("action %q is not registered", w.id)
+			continue
+		}
+		if a.Default != w.def || a.Tier != w.tier || a.Group != w.group || a.Hidden {
+			t.Errorf("action %q = %+v, want Default %q, Tier %v, Group %q, visible", w.id, a, w.def, w.tier, w.group)
+		}
 	}
 }

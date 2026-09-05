@@ -666,3 +666,24 @@ func TestReorderProjectMovesTheProjectAndKeepsTheRest(t *testing.T) {
 		eq(t, names(d.session), "B", "A")
 	})
 }
+
+// TestReorderProjectRequestsASnapshot: the handler broadcast the new order but
+// never asked for a snapshot, so a reorder survived only until the daemon
+// restarted — unless some unrelated change happened to snapshot first. Its tab
+// twin (handleReorderTab) requests one; this pins the project handler to the
+// same contract.
+func TestReorderProjectRequestsASnapshot(t *testing.T) {
+	d := newTestDaemon(t)
+	d.session.CreateProject("A", t.TempDir())
+	b := d.session.CreateProject("B", t.TempDir())
+	for len(d.snapshotCh) > 0 {
+		<-d.snapshotCh
+	}
+	msg, _ := ipc.NewMessage(ipc.MsgReorderProject, ipc.ReorderProjectPayload{
+		ProjectID: b.ID, NewIndex: 0,
+	})
+	d.handleMessage(nil, msg)
+	if len(d.snapshotCh) != 1 {
+		t.Fatalf("snapshot requests pending after reorder_project = %d, want 1", len(d.snapshotCh))
+	}
+}

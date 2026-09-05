@@ -803,6 +803,15 @@ type Model struct {
 	// the next workspace_state broadcast is a no-op.
 	tabDragFromIdx int
 
+	// Sidebar reorder drags: a project row or a tab heading pressed in the
+	// project sidebar (reorder.go). A bool beside the index rather than
+	// tabDragFromIdx's -1 sentinel, so a Model built directly by a test — the
+	// zero value — reads as "no drag" without a constructor having to seed it.
+	projectDragging    bool
+	projectDragIdx     int
+	sidebarTabDragging bool
+	sidebarTabDragIdx  int
+
 	// Split-border drag-resize. splitDragNode is non-nil while a border
 	// drag is in progress; splitDragRect captures the owning node's region
 	// at click time so mid-drag layout changes can't drift the ratio math.
@@ -1632,6 +1641,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch msg.Button {
 			case tea.MouseLeft:
 				if kind, idx := m.sidebarHit(msg.X, msg.Y); kind != "" {
+					// A press on a project row also arms a reorder drag; the
+					// motion handler moves the row once the pointer crosses a
+					// neighbour's midpoint (trackProjectDrag). Armed BEFORE the
+					// activate call, whose value receiver carries the flag on.
+					switch kind {
+					case sidebarRowProject:
+						m.projectDragging = true
+						m.projectDragIdx = idx
+					case sidebarRowTab:
+						m.sidebarTabDragging = true
+						m.sidebarTabDragIdx = idx
+					}
 					return m.activateSidebarRow(kind, idx)
 				}
 			case tea.MouseRight:
@@ -1833,15 +1854,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// keeps the drag alive so the user can return to the tab bar
 		// without releasing.
 		if m.tabDragFromIdx >= 0 && msg.Y == 0 {
-			target := m.hitTestTab(msg.X)
-			if target >= 0 && target != m.tabDragFromIdx && m.tabDragFromIdx < len(m.curTabs()) {
-				tabID := m.curTabs()[m.tabDragFromIdx].ID
-				if m.moveTab(m.tabDragFromIdx, target) {
-					m.tabDragFromIdx = target
-					return m, m.sendReorderTab(tabID, target)
+			// The move waits for the pointer to cross the hovered tab's
+			// MIDDLE (dragSlot) — moving on first contact is what made the
+			// drag flip-flop and overshoot, see dragSlot for the mechanics.
+			x := msg.X - m.projectSidebarWidth()
+			if span, ok := m.tabSpanAt(x); ok && m.tabDragFromIdx < len(m.curTabs()) {
+				from := m.tabDragFromIdx
+				if to := dragSlot(from, span.index, x, span.start, span.width); to != from {
+					tabID := m.curTabs()[from].ID
+					if m.moveTab(from, to) {
+						m.tabDragFromIdx = to
+						return m, m.sendReorderTab(tabID, to)
+					}
 				}
 			}
 			return m, nil
+		}
+		if m.projectDragging {
+			// Sequenced: trackProjectDrag mutates m through a pointer receiver.
+			cmd := m.trackProjectDrag(msg.X, msg.Y)
+			return m, cmd
+		}
+		if m.sidebarTabDragging {
+			cmd := m.trackSidebarTabDrag(msg.X, msg.Y)
+			return m, cmd
 		}
 		if m.scrollDragPaneID != "" {
 			if pane := m.activePaneByID(m.scrollDragPaneID); pane != nil {
@@ -1910,7 +1946,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// A tab drag or scrollbar drag terminates here with no further
 		// processing — they don't share the click-vs-drag pane-focus
 		// fall-through path below.
-		if m.tabDragFromIdx >= 0 || m.scrollDragPaneID != "" {
+		if m.tabDragFromIdx >= 0 || m.scrollDragPaneID != "" || m.projectDragging || m.sidebarTabDragging {
 			m.clearDragState()
 			return m, nil
 		}
@@ -3036,6 +3072,10 @@ func (m *Model) clearDragState() {
 		m.setSplitDragHighlight(&m.splitDragRect, false)
 	}
 	m.tabDragFromIdx = -1
+	m.projectDragging = false
+	m.projectDragIdx = 0
+	m.sidebarTabDragging = false
+	m.sidebarTabDragIdx = 0
 	m.scrollDragPaneID = ""
 	m.scrollDragRect = PaneRect{}
 	m.mouseDown = false
@@ -4099,6 +4139,10 @@ func (m Model) notesKeyExempt(key string) bool {
 		"tab.switch_1", "tab.switch_2", "tab.switch_3", "tab.switch_4", "tab.switch_5",
 		"tab.switch_6", "tab.switch_7", "tab.switch_8", "tab.switch_9",
 		"tab.next", "tab.prev", "system.shortcuts",
+		// Reordering moves the bound tab's SLOT, not the binding: the editor
+		// stays on the same pane, so both are as harmless here as
+		// tab.cycle_color. Project moves likewise change list order only.
+		"tab.move_left", "tab.move_right", "project.move_up", "project.move_down",
 	} {
 		if m.isAction(key, id) {
 			return true
@@ -4621,6 +4665,16 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// mutates m through a pointer receiver via switchProject.
 		cmd := m.cycleProject(delta)
 		return m, cmd
+	case "project.move_up", "project.move_down":
+		// The resolved action is the direction, as for project.next/prev
+		// above. Silent at the ends of the list, like the tab moves: the
+		// list itself shows there is nowhere further to go.
+		delta := 1
+		if earlyID == "project.move_up" {
+			delta = -1
+		}
+		cmd := m.moveActiveProject(delta)
+		return m, cmd
 	case "project.toggle":
 		// No bounce target flashes rather than doing nothing, for the same
 		// reason the AttentionQueue empty case below does. This is the
@@ -4858,6 +4912,14 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case "tab.prev":
 		cmd := m.switchTabBy(-1)
+		return m, cmd
+
+	case "tab.move_left":
+		cmd := m.moveActiveTab(-1)
+		return m, cmd
+
+	case "tab.move_right":
+		cmd := m.moveActiveTab(1)
 		return m, cmd
 
 	case "tab.switch_1", "tab.switch_2", "tab.switch_3", "tab.switch_4", "tab.switch_5",
@@ -6233,7 +6295,8 @@ func (m Model) renderTabBar() string {
 }
 
 // hitTestTab returns the tab index at screen X coordinate, or -1 if none.
-// Mirrors renderTabBar() width/overflow logic exactly.
+// Reads tabSpans (reorder.go), which mirrors renderTabBar()'s width/overflow
+// logic exactly and is the same geometry the reorder drag uses.
 //
 // x arrives SCREEN-absolute, and the bar's first cell is screen column
 // projectSidebarWidth() (View() joins it into the pane column, right of the
@@ -6243,91 +6306,13 @@ func (m Model) renderTabBar() string {
 // before Update ever reaches the tab-bar branch, and answering with a tab
 // would make a click on the PROJECTS heading switch tabs.
 func (m *Model) hitTestTab(x int) int {
-	barW := m.paneAreaWidth()
 	x -= m.projectSidebarWidth()
 	if x < 0 {
 		return -1
 	}
-	tabs := m.curTabs()
-	if len(tabs) == 0 {
-		return -1
+	if s, ok := m.tabSpanAt(x); ok {
+		return s.index
 	}
-
-	type renderedTab struct {
-		width int
-		index int
-	}
-
-	// Pre-render tab widths using the same styling as renderTabBar.
-	all := make([]renderedTab, len(tabs))
-	for i := range tabs {
-		name := m.tabLabel(i)
-		style := m.tabStyle(i)
-		rendered := style.Render(name)
-		all[i] = renderedTab{width: lipgloss.Width(rendered), index: i}
-	}
-
-	// Determine which tabs are visible (same overflow logic).
-	totalW := 0
-	for i, rt := range all {
-		totalW += rt.width
-		if i > 0 {
-			totalW++
-		}
-	}
-
-	included := make([]bool, len(tabs))
-	if totalW <= barW {
-		for i := range included {
-			included[i] = true
-		}
-	} else {
-		activeIdx := m.activeTabIdx()
-		included[activeIdx] = true
-		usedW := all[activeIdx].width
-		indicatorReserve := 12
-
-		left := activeIdx - 1
-		right := activeIdx + 1
-		for left >= 0 || right < len(tabs) {
-			if left >= 0 {
-				need := all[left].width + 1
-				if usedW+need+indicatorReserve <= barW {
-					included[left] = true
-					usedW += need
-					left--
-				} else {
-					left = -1
-				}
-			}
-			if right < len(tabs) {
-				need := all[right].width + 1
-				if usedW+need+indicatorReserve <= barW {
-					included[right] = true
-					usedW += need
-					right++
-				} else {
-					right = len(tabs)
-				}
-			}
-		}
-	}
-
-	// Walk visible tabs and match X coordinate.
-	cursor := 0
-	for i, rt := range all {
-		if !included[i] {
-			continue
-		}
-		if cursor > 0 {
-			cursor++ // space separator
-		}
-		if x >= cursor && x < cursor+rt.width {
-			return i
-		}
-		cursor += rt.width
-	}
-
 	return -1
 }
 

@@ -64,6 +64,8 @@ const (
 	palActCloseTab
 	palActRenameTab
 	palActCycleTabColor
+	palActMoveTabLeft
+	palActMoveTabRight
 	palActNewPane
 	palActSettings
 	palActShortcuts
@@ -90,6 +92,8 @@ const (
 	palActProjectSidebar // toggle the reserved column
 	palActAttentionQueue // jump to the agent blocked longest
 	palActPrevProject    // bounce to the previous project
+	palActMoveProjectUp
+	palActMoveProjectDown
 )
 
 // paletteCommand is one row of the palette. Disabled rows render greyed and are
@@ -404,6 +408,10 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 		paletteCommand{action: palActCloseTab, enabled: true, label: "Close tab…", detail: m.keymap.Display("tab.close"), keywords: []string{"tab", "close"}},
 		paletteCommand{action: palActRenameTab, enabled: true, label: "Rename tab", detail: m.keymap.Display("tab.rename"), keywords: []string{"tab", "rename"}},
 		paletteCommand{action: palActCycleTabColor, enabled: true, label: "Cycle tab color", detail: m.keymap.Display("tab.cycle_color"), keywords: []string{"tab", "color"}},
+		// Greyed at the strip's ends rather than hidden, so the rows stay
+		// where the eye expects them and the disabled state says why.
+		paletteCommand{action: palActMoveTabLeft, enabled: m.activeTabIdx() > 0, label: "Move tab left", detail: m.keymap.Display("tab.move_left"), keywords: []string{"tab", "move", "reorder", "left"}},
+		paletteCommand{action: palActMoveTabRight, enabled: m.activeTabIdx() < len(m.curTabs())-1, label: "Move tab right", detail: m.keymap.Display("tab.move_right"), keywords: []string{"tab", "move", "reorder", "right"}},
 	)
 
 	// --- Projects ----------------------------------------------------------
@@ -478,6 +486,20 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 			label:    "Go to the agent waiting longest",
 			detail:   m.keymap.Display("project.attention_queue"),
 			keywords: []string{"attention", "blocked", "waiting", "permission", "agent", "project"},
+		},
+		paletteCommand{
+			action:   palActMoveProjectUp,
+			enabled:  m.activeProject > 0,
+			label:    "Move project up",
+			detail:   m.keymap.Display("project.move_up"),
+			keywords: []string{"project", "move", "reorder", "up"},
+		},
+		paletteCommand{
+			action:   palActMoveProjectDown,
+			enabled:  m.activeProject < len(m.projects)-1,
+			label:    "Move project down",
+			detail:   m.keymap.Display("project.move_down"),
+			keywords: []string{"project", "move", "reorder", "down"},
 		},
 		paletteCommand{
 			action: palActProjectSidebar,
@@ -1133,6 +1155,21 @@ func (m Model) executePaletteCommand(c paletteCommand) (tea.Model, tea.Cmd) {
 		return m.beginTabRename()
 	case palActCycleTabColor:
 		return m, m.cycleTabColor()
+	// Sequenced, not inlined: the move helpers mutate m through a pointer
+	// receiver, and Go does not order a plain operand against a call in the
+	// same return statement.
+	case palActMoveTabLeft:
+		cmd := m.moveActiveTab(-1)
+		return m, cmd
+	case palActMoveTabRight:
+		cmd := m.moveActiveTab(1)
+		return m, cmd
+	case palActMoveProjectUp:
+		cmd := m.moveActiveProject(-1)
+		return m, cmd
+	case palActMoveProjectDown:
+		cmd := m.moveActiveProject(1)
+		return m, cmd
 
 	// --- Create ------------------------------------------------------------
 	case palActNewPane:

@@ -48,8 +48,10 @@ the pane it opens with starts in that project's root directory.
 | `Alt+Shift+Right` | Next project (wraps) |
 | `Alt+Shift+Left` | Previous project (wraps) |
 | `Alt+Shift+A` | Attention queue — jump to the oldest pane waiting on you, across every project |
+| `Alt+Shift+Up` / `Alt+Shift+Down` | Move the active project one slot up / down in the sidebar |
 | `Alt+Shift+S` | Collapse / expand the project sidebar |
-| Mouse click a sidebar row | Switch to that project, or raise that pane |
+| Mouse click a sidebar row | Switch to that project, switch to that tab, or raise that pane |
+| Mouse drag a project row | Reorder — the row moves once the pointer passes the middle of its neighbour (a remote project is two rows tall). Each daemon remembers the order of its own projects; when several hosts are connected, how their rows interleave is kept only for the running session |
 | Click + drag the sidebar's right edge | Resize the sidebar (12-column minimum; a rule previews the new edge, panes resize on release, width persists to `[ui] sidebar_width`) |
 
 The sidebar is the reserved left column listing projects and the active
@@ -91,8 +93,10 @@ actions, command palette).
 | `F2` | Rename active tab |
 | `Alt+C` | Cycle tab colour (8 colours) |
 | `Alt+1` … `Alt+9` | Switch directly to tab 1–9 |
+| `Alt+Shift+PgUp` / `Alt+Shift+PgDn` | Move the active tab one slot left / right |
 | Mouse click on tab | Switch to that tab |
-| Mouse drag a tab | Reorder — intermediate tabs slide one slot at a time, dragged tab follows the cursor |
+| Mouse drag a tab | Reorder — the tab moves once the pointer passes the middle of a neighbour, so a narrow tab dragged over a wide one never flips back and forth; intermediate tabs slide one slot at a time |
+| Mouse click / drag a tab name in the project sidebar | Switch to that tab / reorder it — drag the name up or down past the middle of another tab's group of rows |
 
 The active tab is prefixed with `* ` in the tab bar so it's visible even when [tab colors](configuration.md#keybindings) override the bold weight.
 

@@ -21,6 +21,10 @@ var promotedActions = map[keymap.ActionID]bool{
 	"tab.switch_1": true, "tab.switch_2": true, "tab.switch_3": true,
 	"tab.switch_4": true, "tab.switch_5": true, "tab.switch_6": true,
 	"tab.switch_7": true, "tab.switch_8": true, "tab.switch_9": true,
+	// The reorder actions arrived after bindings.toml replaced the table, so
+	// they never had a field there either.
+	"tab.move_left": true, "tab.move_right": true,
+	"project.move_up": true, "project.move_down": true,
 }
 
 func TestKeySpecsFromConfig_MapsEveryConfigBackedAction(t *testing.T) {

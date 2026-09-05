@@ -226,6 +226,9 @@ func linkGlyphStyle(glyph string) lipgloss.Style {
 const (
 	sidebarRowProject = "project"
 	sidebarRowPane    = "pane"
+	// sidebarRowTab is a tab heading in the PANES section. A click switches to
+	// the tab; a drag reorders it (reorder.go). index is the tab's ordinal.
+	sidebarRowTab = "tab"
 )
 
 // sidebarRow is one rendered row of the project sidebar: the painted text
@@ -237,9 +240,13 @@ const (
 type sidebarRow struct {
 	text   string
 	kind   string
-	index  int    // project index (kind project) or pane ordinal (kind pane)
-	tabIdx int    // pane rows only: index into curTabs()
+	index  int    // project index (kind project), tab index (kind tab) or pane ordinal (kind pane)
+	tabIdx int    // rows inside a tab group (inTab): index into curTabs()
 	paneID string // pane rows only
+	// inTab marks every row of a tab's group — heading, pane rows, git rows —
+	// so a tab drag can measure the group's height and tell which tab the
+	// pointer is over from ANY of its rows, not just the heading.
+	inTab bool
 }
 
 // sidebarRows builds the sidebar's rows in paint order at width w: every
@@ -303,7 +310,13 @@ func (m *Model) sidebarRows(w int) ([]sidebarRow, int) {
 		if ti > 0 {
 			rows = append(rows, sidebarRow{})
 		}
-		rows = append(rows, sidebarRow{text: sidebarTabHeading(sanitizeRemoteText(tab.Name), ti, onTab, tab.Color, w)})
+		rows = append(rows, sidebarRow{
+			text:   sidebarTabHeading(sanitizeRemoteText(tab.Name), ti, onTab, tab.Color, w),
+			kind:   sidebarRowTab,
+			index:  ti,
+			tabIdx: ti,
+			inTab:  true,
+		})
 		for _, pane := range tab.Leaves() {
 			rows = append(rows, sidebarRow{
 				text:   paneRow(pane, onTab && pane.ID == tab.ActivePane, w),
@@ -311,15 +324,17 @@ func (m *Model) sidebarRows(w int) ([]sidebarRow, int) {
 				index:  ordinal,
 				tabIdx: ti,
 				paneID: pane.ID,
+				inTab:  true,
 			})
 			ordinal++
 			// Git state gets its own row rather than more suffix: at the
 			// default 22 columns a branch name and a pane name cannot share
-			// one. Non-interactive, like a tab heading — giving it the pane's
-			// ordinal would put two rows on one index and desync every hit
-			// test from the attention queue's numbering.
+			// one. Non-interactive (no kind) — giving it the pane's ordinal
+			// would put two rows on one index and desync every hit test from
+			// the attention queue's numbering. It is still part of the tab's
+			// group for a tab drag, hence inTab.
 			if git := gitRow(pane, w); git != "" {
-				rows = append(rows, sidebarRow{text: git})
+				rows = append(rows, sidebarRow{text: git, tabIdx: ti, inTab: true})
 			}
 		}
 	}
@@ -638,7 +653,7 @@ func (m *Model) sidebarRowAt(x, y int) (sidebarRow, bool) {
 }
 
 // sidebarHit maps a screen coordinate to the sidebar row under it, as a
-// kind ("project" / "pane") and that kind's index. Returns ("", -1) for any
+// kind ("project" / "tab" / "pane") and that kind's index. Returns ("", -1) for any
 // x at or beyond the reserved width — the panes begin exactly there — and
 // for inert chrome rows inside the strip.
 func (m *Model) sidebarHit(x, y int) (kind string, index int) {

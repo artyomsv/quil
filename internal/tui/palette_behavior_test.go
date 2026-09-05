@@ -291,6 +291,68 @@ func mustExec(t *testing.T, m *Model, a paletteAction) Model {
 	return updated.(Model)
 }
 
+// The four reorder actions are palette rows like every other keybinding and
+// dispatch into the same handlers the keys use — no second implementation.
+func TestPalette_ReorderActionsMoveTabAndProject(t *testing.T) {
+	t.Parallel()
+	m := newSplitDragTestModel(t)
+	m.client = newFakeConn()
+	u := NewTabModel("tab-u", "U")
+	u.Root = NewLeaf(NewPaneModel("p3", 1024))
+	m.appendTab(u)
+	first := m.projects[0].Name
+	m.projects = append(m.projects, &ProjectModel{ID: "pb", Name: "beta"})
+
+	// The rows exist AND they grey out at the ends of their list. The fixture
+	// sits on tab 0 of 2 and project 0 of 2, so exactly one of each pair is
+	// disabled — an enabled-gate that was hardcoded true would show a "Move
+	// tab left" the user can press on the leftmost tab, which does nothing.
+	wantEnabled := map[string]bool{
+		"Move tab left":     false,
+		"Move tab right":    true,
+		"Move project up":   false,
+		"Move project down": true,
+	}
+	seen := map[string]bool{}
+	for _, c := range m.buildPaletteCommands() {
+		want, tracked := wantEnabled[c.label]
+		if !tracked {
+			continue
+		}
+		seen[c.label] = true
+		if c.enabled != want {
+			t.Errorf("palette row %q enabled = %v, want %v (active tab %d of %d, active project %d of %d)",
+				c.label, c.enabled, want, m.activeTabIdx(), len(m.curTabs()),
+				m.activeProject, len(m.projects))
+		}
+	}
+	for label := range wantEnabled {
+		if !seen[label] {
+			t.Errorf("palette has no %q row", label)
+		}
+	}
+
+	m.dialog = dialogCommandPalette
+	got := mustExec(t, m, palActMoveTabRight)
+	if names := tabNames(t, got); names[0] != "U" || names[1] != "T" {
+		t.Fatalf("tabs after Move tab right = %v, want [U T]", names)
+	}
+	got = mustExec(t, &got, palActMoveTabLeft)
+	if names := tabNames(t, got); names[0] != "T" || names[1] != "U" {
+		t.Fatalf("tabs after Move tab left = %v, want [T U]", names)
+	}
+	got = mustExec(t, &got, palActMoveProjectDown)
+	if got.projects[0].Name != "beta" || got.projects[1].Name != first || got.activeProject != 1 {
+		t.Fatalf("projects after Move project down = %s,%s (active %d), want beta,%s (active 1)",
+			got.projects[0].Name, got.projects[1].Name, got.activeProject, first)
+	}
+	got = mustExec(t, &got, palActMoveProjectUp)
+	if got.projects[0].Name != first || got.activeProject != 0 {
+		t.Fatalf("projects after Move project up = %s,%s (active %d), want %s,beta (active 0)",
+			got.projects[0].Name, got.projects[1].Name, got.activeProject, first)
+	}
+}
+
 // TestPalette_GoToPaneCrossTab verifies the load-bearing focus ordering when the
 // target pane is on a DIFFERENT tab — the single-tab fixture cannot exercise it.
 func TestPalette_GoToPaneCrossTab(t *testing.T) {

@@ -140,6 +140,11 @@ func (m Model) activateSidebarRow(kind string, index int) (tea.Model, tea.Cmd) {
 		// plain operand against a call in the same return statement.
 		cmd := m.switchProject(index)
 		return m, cmd
+	case sidebarRowTab:
+		// Same path as a tab-bar click: switchTab tells the daemon and tears
+		// down notes mode on the outgoing tab.
+		cmd := m.switchTab(index)
+		return m, cmd
 	case sidebarRowPane:
 		// The row carries its tab, which sidebarHit's (kind, index) pair
 		// cannot: re-resolve it from the same rows the click was tested

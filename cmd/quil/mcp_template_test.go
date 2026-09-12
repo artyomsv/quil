@@ -12,8 +12,8 @@ import (
 
 func TestCreateFromTemplate_ProjectHost_ForwardsRequestAndRemembersIDs(t *testing.T) {
 	t.Setenv("QUIL_HOME", t.TempDir())
-	local := newFakeIPCDaemon(t, "pane-local")
-	remote := newFakeIPCDaemon(t, "pane-remote")
+	local := newFakeIPCDaemonVersion(t, "pane-local", "1.73.0")
+	remote := newFakeIPCDaemonVersion(t, "pane-remote", "1.73.0")
 	session, router := toolHarness(t, local, remote)
 	router.remember("gpu", "project-remote")
 	want := ipc.CreateFromTemplateReqPayload{Template: "pair", Task: "task text", CWD: "/chosen path", Branch: "feat/new", ProjectID: "project-remote"}

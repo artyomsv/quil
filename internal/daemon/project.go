@@ -138,12 +138,6 @@ func (sm *SessionManager) DestroyProject(id string) []*Pane {
 			}
 		}
 		delete(sm.tabs, tabID)
-		for flowID, f := range sm.flows {
-			if f.TabID == tabID {
-				delete(sm.flows, flowID)
-				delete(sm.flowPreparing, flowID)
-			}
-		}
 		sm.tabOrder = removeString(sm.tabOrder, tabID)
 	}
 

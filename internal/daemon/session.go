@@ -9,10 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/artyomsv/quil/internal/config"
-	"github.com/artyomsv/quil/internal/flow"
 	"github.com/artyomsv/quil/internal/hookevents"
-	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/logger"
 	memreport "github.com/artyomsv/quil/internal/memreport"
 	apty "github.com/artyomsv/quil/internal/pty"
@@ -32,8 +29,6 @@ type Tab struct {
 }
 
 type Pane struct {
-	// FlowRole opts this pane into per-spawn Quil MCP registration. Under PluginMu.
-	FlowRole     string
 	QuilMCP      bool // Opts into ordinary Quil MCP at spawn. Under PluginMu.
 	ID           string
 	TabID        string
@@ -370,16 +365,12 @@ type Pane struct {
 }
 
 type SessionManager struct {
-	flows           map[string]*flow.Flow // guarded by mu, like tabs
-	flowPreparing   map[string]map[flow.Role]ipc.CreatePanePayload
-	flowConfig      config.Flows
-	flowConfigError string
-	tabs            map[string]*Tab
-	tabOrder        []string
-	panes           map[string]*Pane
-	activeTab       string
-	bufSize         int // ring buffer capacity per pane (bytes)
-	mu              sync.RWMutex
+	tabs      map[string]*Tab
+	tabOrder  []string
+	panes     map[string]*Pane
+	activeTab string
+	bufSize   int // ring buffer capacity per pane (bytes)
+	mu        sync.RWMutex
 
 	// projects/projectOrder/activeProject: see project.go. Guarded by mu,
 	// same as tabs/tabOrder/activeTab above.
@@ -655,12 +646,6 @@ func (sm *SessionManager) DestroyTab(tabID string) error {
 	}
 
 	delete(sm.tabs, tabID)
-	for id, f := range sm.flows {
-		if f.TabID == tabID {
-			delete(sm.flows, id)
-			delete(sm.flowPreparing, id)
-		}
-	}
 	for i, id := range sm.tabOrder {
 		if id == tabID {
 			sm.tabOrder = append(sm.tabOrder[:i], sm.tabOrder[i+1:]...)
@@ -937,21 +922,10 @@ func (sm *SessionManager) RestoreProjects(projects []*Project, activeProject str
 // to Projects()/ActiveProject() — a nested RLock on this goroutine could
 // deadlock behind a writer parked between the two acquisitions (the
 // oscillation hazard noted at daemon.go's snapshot()).
-func (sm *SessionManager) SnapshotState() (activeTab string, tabs []*Tab, panesByTab map[string][]*Pane, projects []Project, activeProject string) {
-	activeTab, tabs, panesByTab, projects, activeProject, _ = sm.snapshotStateWithFlows()
-	return
-}
 
-func (sm *SessionManager) snapshotStateWithFlows() (activeTab string, tabs []*Tab, panesByTab map[string][]*Pane, projects []Project, activeProject string, flows []flow.Flow) {
+func (sm *SessionManager) SnapshotState() (activeTab string, tabs []*Tab, panesByTab map[string][]*Pane, projects []Project, activeProject string) {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
-	flows = make([]flow.Flow, 0, len(sm.flows))
-	for _, f := range sm.flows {
-		if sm.tabs[f.TabID] != nil {
-			flows = append(flows, f.Clone())
-		}
-	}
-
 	activeTab = sm.activeTab
 	tabs = make([]*Tab, 0, len(sm.tabOrder))
 	panesByTab = make(map[string][]*Pane)

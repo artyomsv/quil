@@ -139,7 +139,7 @@ func TestWorkspaceState_BroadcastsPreparingWorktree(t *testing.T) {
 	pane.PreparingWorktree = "feat/x"
 
 	state := d.workspaceStateFromSnapshot(tab.ID, []*Tab{tab},
-		map[string][]*Pane{tab.ID: {pane}}, nil, "", true, nil)
+		map[string][]*Pane{tab.ID: {pane}}, nil, "", true)
 	panes, _ := state["panes"].([]map[string]any)
 	for _, p := range panes {
 		if p["id"] != pane.ID {

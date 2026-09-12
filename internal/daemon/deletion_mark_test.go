@@ -234,7 +234,7 @@ func TestSnapshot_MarkedForDeletionUsesTheWireKey(t *testing.T) {
 	// wire, which is why it is written outside that block.
 	for _, includeOverlays := range []bool{false, true} {
 		activeTab, tabs, panesByTab, projects, activeProject := d.session.SnapshotState()
-		state := d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab, projects, activeProject, includeOverlays, nil)
+		state := d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab, projects, activeProject, includeOverlays)
 		panes, ok := state["panes"].([]map[string]any)
 		if !ok {
 			t.Fatalf("includeOverlays=%v: panes is %T, want []map[string]any", includeOverlays, state["panes"])
@@ -280,7 +280,7 @@ func TestWorkspaceState_MarkedForDeletionFlip_NoRace(t *testing.T) {
 	}()
 
 	for i := 0; i < iters; i++ {
-		_ = d.workspaceStateFromSnapshot(tab.ID, tabs, panesByTab, nil, "", true, nil)
+		_ = d.workspaceStateFromSnapshot(tab.ID, tabs, panesByTab, nil, "", true)
 	}
 	<-done
 }

@@ -1,10 +1,7 @@
 package tui
 
-import "github.com/artyomsv/quil/internal/flow"
-
 // TabModel represents a single tab containing a tree of panes.
 type TabModel struct {
-	Flow *flow.Flow
 	ID   string
 	Name string
 	// Dest is the destination the tab's project arrived on — client-side

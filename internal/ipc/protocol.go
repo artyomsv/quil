@@ -305,7 +305,6 @@ type AttachPayload struct {
 
 type CreatePanePayload struct {
 	QuilMCP       bool     `json:"quil_mcp,omitempty"`
-	FlowRole      string   `json:"flow_role,omitempty"`
 	TabID         string   `json:"tab_id"`
 	CWD           string   `json:"cwd"`
 	Type          string   `json:"type,omitempty"`

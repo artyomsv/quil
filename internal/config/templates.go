@@ -25,6 +25,9 @@ import (
 //go:embed templates.toml
 var defaultTemplates string
 
+// DefaultTemplatesText supplies the editable starting file, comments included.
+func DefaultTemplatesText() string { return defaultTemplates }
+
 // Layout keywords. Empty means LayoutRows, which is what an untemplated tab
 // has always done.
 const (
@@ -36,6 +39,9 @@ const (
 )
 
 var templateLayouts = []string{LayoutRows, LayoutColumns, LayoutMainLeft, LayoutMainTop, LayoutGrid}
+
+var templateModelShape = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,79}$`)
+var templatePlaceholder = regexp.MustCompile(`\{\{[^{}]+\}\}`)
 
 // templateName bounds a template name to what a palette row and a TOML key can
 // both carry without quoting.
@@ -207,7 +213,7 @@ func (p TemplatePane) validate() error {
 	if UnsafeTemplateText(p.Type) || UnsafeTemplateText(p.Name) || UnsafeTemplateText(p.Prompt) || UnsafeTemplateText(p.CWD) {
 		return fmt.Errorf("contains terminal control characters")
 	}
-	if p.Model != "" && !flowModelShape.MatchString(p.Model) {
+	if p.Model != "" && !templateModelShape.MatchString(p.Model) {
 		return fmt.Errorf("model %q is not a valid model id", p.Model)
 	}
 	for _, name := range p.Toggles {
@@ -244,9 +250,6 @@ func safeRelativePath(p string) error {
 // and the C1 CSI introducer in both spellings, and CR, which would submit a
 // prompt early and leave the rest as loose keystrokes. Newlines and tabs are
 // text and are kept.
-//
-// Duplicated from flow.UnsafePromptText on purpose for one phase: that package
-// is removed with the flow feature, and this one must not depend on it.
 func UnsafeTemplateText(s string) bool {
 	return strings.ContainsAny(s, "\x1b\u009b\r") || strings.Contains(s, string([]byte{0x9b}))
 }
@@ -259,6 +262,20 @@ func WriteTemplates(t Templates) error {
 	if err := toml.NewEncoder(&b).Encode(t); err != nil {
 		return err
 	}
+	return WriteTemplatesSource(b.String())
+}
+
+// WriteTemplatesSource validates the complete file before an atomic write,
+// preserving comments and prompt formatting from the TOML editor.
+func WriteTemplatesSource(source string) error {
+	source = strings.ReplaceAll(source, "\r\n", "\n")
+	var templates Templates
+	if err := toml.Unmarshal([]byte(source), &templates); err != nil {
+		return fmt.Errorf("parse templates: %w", err)
+	}
+	if err := templates.Validate(); err != nil {
+		return err
+	}
 	path := TemplatesPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
@@ -268,7 +285,7 @@ func WriteTemplates(t Templates) error {
 		return err
 	}
 	defer os.Remove(tmp.Name())
-	if _, err = tmp.Write(b.Bytes()); err != nil {
+	if _, err = tmp.WriteString(source); err != nil {
 		tmp.Close()
 		return err
 	}
@@ -300,7 +317,7 @@ func UnknownTemplatePlaceholders(prompt string) []string {
 		known[key] = true
 	}
 	var out []string
-	for _, key := range flowPlaceholder.FindAllString(prompt, -1) {
+	for _, key := range templatePlaceholder.FindAllString(prompt, -1) {
 		if !known[key] {
 			out = append(out, key)
 		}

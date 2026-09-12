@@ -90,7 +90,7 @@ func (d *Daemon) validateTemplateCreation(req ipc.CreateFromTemplateReqPayload) 
 		if p.Category == "ai" && permissionMode && !selected {
 			return nil, fmt.Errorf("template %q pane %d: %s requires a permission_mode toggle", tpl.Name, i+1, pane.Type)
 		}
-		if pane.QuilMCP && !flowMCPSupported(pane.Type) {
+		if pane.QuilMCP && !mcpSupported(pane.Type) {
 			return nil, fmt.Errorf("template %q pane %d: plugin %q has no per-spawn Quil MCP support", tpl.Name, i+1, pane.Type)
 		}
 		// Match resolveSpawnArgs' base-argument behavior, then freeze the model
@@ -99,7 +99,7 @@ func (d *Daemon) validateTemplateCreation(req ipc.CreateFromTemplateReqPayload) 
 			args = append([]string(nil), p.Command.Args...)
 		}
 		if p.Category == "ai" {
-			args = flowModelArgs(pane.Type, pane.Model, args)
+			args = mcpModelArgs(pane.Type, pane.Model, args)
 		}
 		dir := cwd
 		if i == 0 && req.Branch != "" {

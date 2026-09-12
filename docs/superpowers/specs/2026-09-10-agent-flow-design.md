@@ -1,3 +1,5 @@
+SUPERSEDED by [Workspace templates](2026-09-12-workspace-templates-design.md); retained as historical design only.
+
 # Agent Flow — design
 
 Date: 2026-09-10

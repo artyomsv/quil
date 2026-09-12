@@ -38,7 +38,7 @@ Two facts from that run shaped the shipped template, not the mechanism:
 
 `$QUIL_HOME/templates.toml`. Embedded default, `LoadTemplates`,
 `WriteTemplates` (atomic temp-file + rename), daemon reload on save, F1 editor
-— all exactly as `flows.toml` does today, and mostly the same code.
+— all exactly as `flows.toml` did, and mostly the same code.
 
 ```toml
 [[templates]]
@@ -97,7 +97,7 @@ plugin must exist and be available; toggle names must resolve, with no two from
 one mutual-exclusion group; an AI pane whose plugin exposes a `permission_mode`
 group must select one, or it stops on a prompt nobody answers; the model must
 match the existing charset; `prompt`, `name` and `cwd` reject terminal controls
-through `flow.UnsafePromptText`; at most one pane may set `main`; `quil_mcp`
+through `config.UnsafeTemplateText`; at most one pane may set `main`; `quil_mcp`
 requires a plugin the spawn adapters support. A template that fails validation
 is refused at save and named at load.
 
@@ -219,15 +219,15 @@ in `internal/tui`. It is table-testable without a `Model`.
 | Removed | Why |
 |---|---|
 | `internal/flow/` — the whole package | No stages, no transitions, no rounds |
-| `report_step`: tool, IPC pair, version-gate bump, `--toolset flow` bridge mode | Nothing reports to a daemon loop; `quil_mcp` registers the ordinary server |
+| `report_step`: tool, IPC pair, version-gate bump, the `--toolset flow` bridge mode | Nothing reports to a daemon loop; `quil_mcp` registers the ordinary server |
 | The flow registry, dispatch, pause/resume, `flowOnTaskEnd`, `task.flowStep` | No daemon-side loop |
 | `flow_paused` / `flow_ready` events and their toasts | A prompt notifies the user itself |
 | Palette **New flow** / **Resume flow** / **Cancel flow**; the stage and round sidebar label | Replaced by **New from template**; a tab closes the ordinary way |
 | Flow persistence in the workspace snapshot | A created tab keeps no template state |
 | `flows.toml`, its config type and its F1 page | Replaced by `templates.toml` |
-| `Pane.FlowRole` | Replaced by `Pane.QuilMCP bool` |
+| the persisted pane role marker | Replaced by `Pane.QuilMCP bool` |
 
-`mcpDaemonMinVersion` returns to its released value and `reportStepMinVersion`
+`mcpDaemonMinVersion` returns to its released value and `retired reporting version floor`
 goes with `report_step`.
 
 ## 7. What is kept

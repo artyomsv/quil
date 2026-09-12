@@ -43,7 +43,7 @@ func broadcastTabIDs(t *testing.T, sm *SessionManager, projectID string) []strin
 	t.Helper()
 	d := New(config.Default())
 	activeTab, tabs, panesByTab, projects, activeProject := sm.SnapshotState()
-	state := d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab, projects, activeProject, false, nil)
+	state := d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab, projects, activeProject, false)
 	list, ok := state["projects"].([]any)
 	if !ok {
 		t.Fatalf("projects = %T, want []any", state["projects"])

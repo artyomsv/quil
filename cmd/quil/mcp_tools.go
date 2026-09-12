@@ -17,15 +17,6 @@ import (
 const hostDoc = "daemon host from list_hosts (empty = the host the id was discovered on, else local)"
 
 func registerMCPTools(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogger) {
-	registerMCPToolset(s, r, mcpLog, false)
-}
-
-func registerMCPToolset(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogger, flowOnly bool) {
-	if flowOnly {
-		registerReportStepTool(s, r)
-		registerFlowGetTaskTool(s, r)
-		return
-	}
 	// Phase A (M10 core)
 	registerListPanesTool(s, r, mcpLog)
 	registerReadPaneOutputTool(s, r, mcpLog)

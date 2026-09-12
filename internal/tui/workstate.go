@@ -534,9 +534,7 @@ func (m *Model) applyWorkTransition(paneID, eventType string, data map[string]st
 		// excludes the active tab and the active pane border outranks the green
 		// one, so the mark is invisible until it matters and is cleared by
 		// ackFocusedPane the moment the user comes back.
-		// Flow outcomes own completion marks. An internal Stop must not seed
-		// a mark that the later on-blur sweep could turn into a second toast.
-		if !m.userIsWatching(paneID) && m.paneFlow(paneID) == nil {
+		if !m.userIsWatching(paneID) {
 			pane.unseen = true
 			// A completion THIS process saw: a fresh event the on-blur sweep
 			// may toast for, unlike a mark seeded from the daemon's copy.

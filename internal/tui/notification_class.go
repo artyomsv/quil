@@ -52,8 +52,6 @@ var hookEventGroups = map[string]string{
 
 // plainEventGroups maps a non-hook event type, matched whole.
 var plainEventGroups = map[string]string{
-	"flow_paused":            groupAgentBlocked,
-	"flow_ready":             groupAgentTurn,
 	"bell":                   groupAgentBlocked,
 	"process_exit":           groupProcess,
 	"pane_destroyed":         groupPane,

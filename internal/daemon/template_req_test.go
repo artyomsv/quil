@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/gitworktree"
 	"github.com/artyomsv/quil/internal/ipc"
 	apty "github.com/artyomsv/quil/internal/pty"
 )
@@ -90,7 +91,7 @@ func saveTestTemplate(t *testing.T, tpl config.Template) {
 
 func TestTemplateIPC_Pair_CreatesNamedPanesInOneFrame(t *testing.T) {
 	t.Setenv("QUIL_HOME", t.TempDir())
-	d, c := flowTestDaemon(t)
+	d, c := templateTestDaemon(t)
 	keep := d.session.CreateTab("keep focus")
 	frames := observeTemplateFrames(t)
 	dir := t.TempDir()
@@ -137,7 +138,7 @@ func TestTemplateIPC_Pair_CreatesNamedPanesInOneFrame(t *testing.T) {
 
 func TestTemplateIPC_ArgumentsAndMetadata_SurviveTemplateEditAndRestore(t *testing.T) {
 	t.Setenv("QUIL_HOME", t.TempDir())
-	d, c := flowTestDaemon(t)
+	d, c := templateTestDaemon(t)
 	tpl, _ := config.DefaultTemplates().ByName("pair")
 	tpl.Panes[0].Model = "claude-test"
 	tpl.Panes[1].Model = "codex-test"
@@ -161,8 +162,8 @@ func TestTemplateIPC_ArgumentsAndMetadata_SurviveTemplateEditAndRestore(t *testi
 			t.Fatalf("pane %d: %v muted=%v mcp=%v", i, args, muted, mcp)
 		}
 	}
-	active, tabs, panes, projects, project, flows := d.session.snapshotStateWithFlows()
-	data, err := json.Marshal(d.workspaceStateFromSnapshot(active, tabs, panes, projects, project, false, flows))
+	active, tabs, panes, projects, project := d.session.SnapshotState()
+	data, err := json.Marshal(d.workspaceStateFromSnapshot(active, tabs, panes, projects, project, false))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +240,7 @@ func (s *templatePromptSession) recorded() []templatePromptWrite {
 
 func TestTemplateIPC_Prompts_QueueInOrderAfterAllPanesExist(t *testing.T) {
 	t.Setenv("QUIL_HOME", t.TempDir())
-	d, c := flowTestDaemon(t)
+	d, c := templateTestDaemon(t)
 	tpl := config.Template{Name: "prompts", Panes: []config.TemplatePane{
 		{Type: "terminal", Name: "first", Prompt: "FIRST {{task}}\n{{panes}}"},
 		{Type: "terminal", Name: "second", Prompt: "SECOND {{dir}} {{branch}}\n{{panes}}"},
@@ -287,7 +288,7 @@ func TestTemplateIPC_InvalidRequest_CreatesNothing(t *testing.T) {
 	for _, tc := range []string{"unknown_template", "unknown_plugin", "unavailable_plugin", "unknown_toggle", "conflicting_toggles", "missing_permission", "missing_directory", "file_directory", "pane_directory", "first_pane_directory", "branch_later_pane_directory", "symlink_escape", "unsupported_mcp", "bad_branch", "bad_project", "unsafe_task"} {
 		t.Run(tc, func(t *testing.T) {
 			t.Setenv("QUIL_HOME", t.TempDir())
-			d, c := flowTestDaemon(t)
+			d, c := templateTestDaemon(t)
 			tpl, _ := config.DefaultTemplates().ByName("pair")
 			req := ipc.CreateFromTemplateReqPayload{Template: "pair", CWD: t.TempDir()}
 			want := ""
@@ -367,7 +368,7 @@ func TestTemplateIPC_InvalidRequest_CreatesNothing(t *testing.T) {
 
 func TestTemplateIPC_Worktree_PublishesPreparingSwapAndCompleteFrames(t *testing.T) {
 	t.Setenv("QUIL_HOME", t.TempDir())
-	d, c := flowTestDaemon(t)
+	d, c := templateTestDaemon(t)
 	tpl, _ := config.DefaultTemplates().ByName("pair")
 	// Main is first, so its placeholder ID must be replaced by the real ID.
 	saveTestTemplate(t, tpl)
@@ -426,7 +427,7 @@ func TestTemplateIPC_FirstWorktreeSubdir_ValidatesNewCheckout(t *testing.T) {
 	for _, tc := range []string{"nested", "checkout_only", "empty", "missing", "escape", "inside_symlink"} {
 		t.Run(tc, func(t *testing.T) {
 			t.Setenv("QUIL_HOME", t.TempDir())
-			d, c := flowTestDaemon(t)
+			d, c := templateTestDaemon(t)
 			source, outside := t.TempDir(), t.TempDir()
 			if tc != "checkout_only" {
 				if err := os.Mkdir(filepath.Join(source, "nested"), 0700); err != nil {
@@ -562,32 +563,48 @@ func TestTemplateIPC_FirstWorktreeSubdir_ValidatesNewCheckout(t *testing.T) {
 	}
 }
 
-func TestSpawnPane_QuilMCP_UsesOrdinaryToolsetUnlessFlowRoleWins(t *testing.T) {
+func TestSpawnPane_QuilMCP_UsesOrdinaryToolsOnlyWhenEnabled(t *testing.T) {
 	t.Setenv("QUIL_HOME", t.TempDir())
 	d := newTestDaemon(t)
 	registerShippedPlugins(t, d)
-	stubFlowCodexProbe(t)
-	old := flowMCPExeFn
-	flowMCPExeFn = func() (string, error) { return "/test/quil", nil }
-	t.Cleanup(func() { flowMCPExeFn = old })
+	stubMCPCodexProbe(t)
+	old := mcpExeFn
+	mcpExeFn = func() (string, error) { return "/test/quil", nil }
+	t.Cleanup(func() { mcpExeFn = old })
 	for _, agent := range []string{"claude-code", "codex", "opencode"} {
 		d.registry.Get(agent).Available = true
-		for _, tc := range []struct {
-			mcp  bool
-			role string
-		}{{false, ""}, {true, ""}, {false, "analyst"}, {true, "analyst"}} {
+		for _, enabled := range []bool{false, true} {
 			fake := &fakeSession{}
-			p := &Pane{ID: "pane-a1b2c3d4", Type: agent, CWD: t.TempDir(), QuilMCP: tc.mcp, FlowRole: tc.role}
+			p := &Pane{ID: "pane-a1b2c3d4", Type: agent, CWD: t.TempDir(), QuilMCP: enabled}
 			if err := d.spawnPane(p, fake, false); err != nil {
 				t.Fatal(err)
 			}
 			all := strings.Join(append(append([]string(nil), fake.startArgs...), fake.env...), " ")
-			if strings.Contains(all, "/test/quil") != (tc.mcp || tc.role != "") || strings.Contains(all, "--toolset") != (tc.role != "") {
-				t.Fatalf("agent=%s mcp=%v role=%s args=%s", agent, tc.mcp, tc.role, all)
+			if strings.Contains(all, "/test/quil") != enabled || strings.Contains(all, "--toolset") {
+				t.Fatalf("agent=%s mcp=%v args=%s", agent, enabled, all)
 			}
-			if tc.mcp && tc.role == "" && !strings.Contains(all, `"mcp"`) {
+			if enabled && !strings.Contains(all, `"mcp"`) {
 				t.Fatalf("missing ordinary mcp argv: %s", all)
 			}
 		}
 	}
+}
+
+func templateTestDaemon(t *testing.T) (*Daemon, *ipc.Client) {
+	t.Helper()
+	stubMCPCodexProbe(t)
+	d, c := mcpTestDaemon(t)
+	for _, name := range []string{"claude-code", "codex", "opencode"} {
+		d.registry.Get(name).Available = true
+	}
+	prevExe, prevList := mcpExeFn, worktreeListFn
+	mcpExeFn = func() (string, error) { return "/test/quil", nil }
+	root := t.TempDir()
+	worktreeListFn = func(context.Context, string) ([]gitworktree.Worktree, error) {
+		return []gitworktree.Worktree{{Path: root}}, nil
+	}
+	t.Cleanup(func() { mcpExeFn, worktreeListFn = prevExe, prevList })
+	stubAdd(t, func(_ context.Context, _, path, _ string) error { return os.MkdirAll(path, 0700) })
+	shortenIdleSettle(t, 25*time.Millisecond)
+	return d, c
 }

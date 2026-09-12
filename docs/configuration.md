@@ -512,12 +512,17 @@ shared_claude_config = false
 default_image = ""
 ```
 
-## Flow configuration (`flows.toml`)
+## Workspace templates (`templates.toml`)
 
-`$QUIL_HOME/flows.toml` holds the built-in agent flow's roles, named plugin
-toggles, an optional `model` per role (passed to the agent's `--model` / `-m`
-flag; empty keeps the agent's default), prompts, `max_review_rounds` (default
-3), and `step_timeout_minutes` (default 0, unlimited). A missing file uses
-embedded defaults. F1 → Settings → Flows saves atomically on the selected daemon and
-reloads it. See [Agent flows](agent-flows.md#configuration) for the complete
-configuration and prompt protocol.
+`$QUIL_HOME/templates.toml` holds named tab templates with one to eight ordered
+panes, a layout keyword, and optional prompts. Pane fields cover plugin type,
+name, model, named toggles, relative directory, prompt, mute, main anchor and
+Quil MCP registration. Missing files use embedded defaults; invalid files
+produce a named error rather than silently falling back.
+
+F1 → Settings → Templates opens the local file in the TOML editor. Ctrl+S
+validates the entire file, preserves comments and prompt formatting, writes
+atomically and requests a local daemon reload. Templates are also re-read on
+every creation. Existing panes retain their frozen arguments and saved layouts.
+Remote daemons use their own templates file. See
+[Workspace templates](workspace-templates.md) for the complete format and examples.

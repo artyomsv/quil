@@ -172,9 +172,8 @@ func (b *mcpBridge) requestWithTimeout(msgType string, payload any, timeout time
 func runMCP() {
 	// MCP uses stdout for JSON-RPC — redirect logs to stderr early
 	log.SetOutput(os.Stderr)
-	flowOnly, err := parseMCPToolset(os.Args[2:])
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+	if len(os.Args) > 2 {
+		fmt.Fprintln(os.Stderr, "usage: quil mcp")
 		exitFn(1)
 		return
 	}
@@ -218,38 +217,22 @@ func runMCP() {
 	// Remote hosts ride the same [[destinations]] the TUI attaches to, dialled
 	// in the background so the local daemon is served at once.
 	router := newMCPRouter(bridge, cfg, dialMCPHost)
-	if !flowOnly {
-		router.connectAll()
-	}
-	instructions := mcpInstructions
-	if flowOnly {
-		instructions = "Report your assigned flow step with report_step before ending your turn. Use get_task only for your own step."
-	}
+	router.connectAll()
 
 	server := mcp.NewServer(
 		&mcp.Implementation{Name: "quil", Version: version},
 		&mcp.ServerOptions{
-			Instructions: instructions,
+			Instructions: mcpInstructions,
 		},
 	)
 
 	mcpLog := newMCPLogger(cfg.MCP)
-	registerMCPToolset(server, router, mcpLog, flowOnly)
+	registerMCPTools(server, router, mcpLog)
 
 	if err := server.Run(ctx, &mcp.StdioTransport{}); err != nil {
 		fmt.Fprintf(os.Stderr, "mcp server: %v\n", err)
 		os.Exit(1)
 	}
-}
-
-func parseMCPToolset(args []string) (bool, error) {
-	if len(args) == 0 {
-		return false, nil
-	}
-	if len(args) == 2 && args[0] == "--toolset" && args[1] == "flow" {
-		return true, nil
-	}
-	return false, fmt.Errorf("usage: quil mcp [--toolset flow]")
 }
 
 // mcpInstructions is the server-level guidance every MCP client shows its

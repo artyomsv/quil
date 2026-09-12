@@ -311,7 +311,7 @@ func (m *Model) sidebarRows(w int) ([]sidebarRow, int) {
 			rows = append(rows, sidebarRow{})
 		}
 		rows = append(rows, sidebarRow{
-			text:   sidebarTabHeading(flowTabLabel(tab), ti, onTab, tab.Color, w),
+			text:   sidebarTabHeading(sanitizeRemoteText(tab.Name), ti, onTab, tab.Color, w),
 			kind:   sidebarRowTab,
 			index:  ti,
 			tabIdx: ti,

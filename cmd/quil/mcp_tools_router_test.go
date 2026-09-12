@@ -52,17 +52,6 @@ func newFakeIPCDaemonVersion(t *testing.T, paneID, version string) *fakeIPCDaemo
 			var req ipc.DelegateTaskReqPayload
 			_ = m.DecodePayload(&req)
 			resp, _ = ipc.NewMessage(ipc.MsgDelegateTaskResp, ipc.DelegateTaskRespPayload{Task: ipc.TaskInfo{ID: "task-1", ToPane: req.ToPane, FromPane: req.FromPane, State: "sent"}})
-		case ipc.MsgReportStepReq:
-			var req ipc.ReportStepReqPayload
-			_ = m.DecodePayload(&req)
-			payload := ipc.ReportStepRespPayload{TaskID: "task-1"}
-			if req.PaneID != f.paneID {
-				payload.Error = "no step is waiting on this pane"
-			}
-			if req.TaskID != "" && req.TaskID != "task-1" {
-				payload.Error = "pane is not this task's target"
-			}
-			resp, _ = ipc.NewMessage(ipc.MsgReportStepResp, payload)
 		case ipc.MsgListProjectsReq:
 			resp, _ = ipc.NewMessage(ipc.MsgListProjectsResp, ipc.ListProjectsRespPayload{Projects: []ipc.ProjectInfo{{ID: "proj-" + f.paneID, Name: f.paneID}}})
 		case ipc.MsgCreateFromTemplateReq:
@@ -123,11 +112,8 @@ func (f *fakeIPCDaemon) delegate() *ipc.DelegateTaskReqPayload {
 
 // toolHarness registers every tool on a server backed by a router over one
 // local fake daemon and one remote fake daemon, and returns a client session.
-func toolHarness(t *testing.T, local, remote *fakeIPCDaemon) (*mcp.ClientSession, *mcpRouter) {
-	return toolsetHarness(t, local, remote, false)
-}
 
-func toolsetHarness(t *testing.T, local, remote *fakeIPCDaemon, flowOnly bool) (*mcp.ClientSession, *mcpRouter) {
+func toolHarness(t *testing.T, local, remote *fakeIPCDaemon) (*mcp.ClientSession, *mcpRouter) {
 	t.Helper()
 	cfg := config.Default()
 	dial := func(cfg config.Config, d config.Destination) (*ipc.Client, error) { return ipc.NewClient(remote.sock) }
@@ -141,7 +127,7 @@ func toolsetHarness(t *testing.T, local, remote *fakeIPCDaemon, flowOnly bool) (
 		}
 	}
 	server := mcp.NewServer(&mcp.Implementation{Name: "quil-test", Version: "0"}, nil)
-	registerMCPToolset(server, r, &mcpLogger{dir: t.TempDir()}, flowOnly)
+	registerMCPTools(server, r, &mcpLogger{dir: t.TempDir()})
 	ct, st := mcp.NewInMemoryTransports()
 	if _, err := server.Connect(context.Background(), st, nil); err != nil {
 		t.Fatalf("server connect: %v", err)
@@ -308,7 +294,7 @@ func TestCreatePaneSchema_ExposesDialogOptions(t *testing.T) {
 	}
 	for _, want := range []string{"create_pane", "create_tab", "create_from_template", "list_projects", "create_project", "update_project", "destroy_project",
 		"switch_project", "rename_tab", "destroy_tab", "rename_pane", "list_plugins", "list_sessions", "list_hosts",
-		"delegate_task", "get_task", "wait_task", "list_tasks", "report_step"} {
+		"delegate_task", "get_task", "wait_task", "list_tasks"} {
 		if byName[want] == nil {
 			t.Errorf("tool %s not registered", want)
 		}
@@ -319,7 +305,7 @@ func TestCreatePaneSchema_ExposesDialogOptions(t *testing.T) {
 			t.Errorf("create_pane schema lacks %s:\n%s", prop, schema)
 		}
 	}
-	if len(tools.Tools) != 36 {
-		t.Errorf("tool count = %d, want 36 (update docs/mcp.md and CLAUDE.md if this changed on purpose)", len(tools.Tools))
+	if len(tools.Tools) != 35 {
+		t.Errorf("tool count = %d, want 35 (update docs/mcp.md and CLAUDE.md if this changed on purpose)", len(tools.Tools))
 	}
 }

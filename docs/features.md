@@ -794,9 +794,11 @@ list you pick a working directory from. The real name is always what gets opened
 
 Linux, macOS, and Windows from day one. PTY management via `creack/pty` (Unix) and ConPTY (Windows). IPC over Unix domain sockets or Named Pipes. All persistence paths use atomic temp+rename so a crash during snapshot leaves the previous state on disk.
 
-## Agent flows
+## Workspace templates
 
-The command palette's **New flow** creates an analyst/developer/reviewer worktree
-for one epic and one PR. Quil owns the handoffs and pauses for user help instead
-of automatically retrying. See [Agent flows](agent-flows.md) for stages, recovery,
-and the F1 settings editor.
+The command palette's **New from template** creates a tab of named panes with
+frozen model/toggle arguments, optional starting prompts and one of five layouts.
+Use the chosen directory directly or request a new branch/worktree. The shipped
+agent-team, pair and review templates are editable through F1 → Settings →
+Templates in the TOML editor. MCP exposes the same creation through
+`create_from_template`. See [Workspace templates](workspace-templates.md).

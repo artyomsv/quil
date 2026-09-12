@@ -256,7 +256,7 @@ Define your own pane types in TOML — see the [plugin reference](docs/plugin-re
 | **Keybindings** | [keybindings.md](docs/keybindings.md) |
 | **tmux comparison** | [tmux-comparison.md](docs/tmux-comparison.md) |
 | **Configuration** | [configuration.md](docs/configuration.md) |
-| **Agent flows** | [agent-flows.md](docs/agent-flows.md) |
+| **Workspace templates** | [workspace-templates.md](docs/workspace-templates.md) |
 | **MCP (AI integration)** | [mcp.md](docs/mcp.md) |
 | **Custom plugins** | [plugin-reference.md](docs/plugin-reference.md) |
 | **Sandbox panes (Docker)** | [sandbox-panes.md](docs/sandbox-panes.md) |

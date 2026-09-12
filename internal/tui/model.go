@@ -25,7 +25,6 @@ import (
 	"github.com/artyomsv/quil/internal/claudesessions"
 	"github.com/artyomsv/quil/internal/clipboard"
 	"github.com/artyomsv/quil/internal/config"
-	"github.com/artyomsv/quil/internal/flow"
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/keymap"
 	"github.com/artyomsv/quil/internal/kubediscover"
@@ -53,7 +52,6 @@ type PaneOutputMsg struct {
 }
 
 type WorkspaceStateMsg struct {
-	Flows     []flow.Flow
 	ActiveTab string
 	Tabs      []TabInfo
 	Panes     []PaneInfo
@@ -346,9 +344,7 @@ const (
 	dialogProjectPick    // Alt+P: fuzzy project picker (Task 14)
 	dialogWhatsNew       // post-upgrade highlights; also F1 → What's New
 	dialogNotifySettings // F1 → Settings → Notifications: toasts + sidebar event groups
-	dialogNewFlow
 	dialogNewTemplate
-	dialogFlowSettings
 )
 
 // tuiClient is the subset of *ipc.Client the TUI uses on the Model. Defined
@@ -370,7 +366,6 @@ type tuiClient interface {
 type Client = tuiClient
 
 type Model struct {
-	flowUI     flowDialogState
 	templateUI templateDialogState
 	// projects owns every tab. There is no flat tab list: activeProject
 	// selects the project, and that project's own activeTab selects the tab
@@ -725,6 +720,7 @@ type Model struct {
 	projectPick projectPickState
 
 	tomlEditor       *TextEditor // active TOML editor (nil when not editing)
+	templateEditor   bool        // return this TOML editor to Settings on close
 	selection        *Selection  // active text selection (nil when none)
 	mouseDown        bool        // true while left mouse button is held
 	mouseStartX      int         // screen X of mouse press
@@ -2165,13 +2161,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			text := strings.ReplaceAll(msg.Content, "\r", "")
 			m.notesEditor.HandlePaste(text)
 			return m, nil
-		} else if m.flowPaste(msg.Content) {
-			// Same isolation rule as the palette below, and the flow dialog had
-			// neither half of it: with New flow open a bracketed paste reached
-			// sendClipboardToPane, so the clipboard was typed into whatever
-			// pane sat behind the dialog — a live shell would run a pasted line
-			// ending in a newline.
-			return m, nil
 		} else if m.dialog == dialogCommandPalette {
 			// Fold pasted text into the fuzzy query, keeping only printable runes
 			// (same guard as typed input — drops newlines, tabs, control bytes).
@@ -2219,12 +2208,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.templatePaste(string(msg)) {
 			return m, nil
 		}
-		// Routed by FOCUS, not by "an editor exists": a New flow dialog always
-		// holds a feature editor, so an unconditional editor branch put a paste
-		// meant for the branch or repository row into the feature text instead.
-		if m.flowPaste(string(msg)) {
-			return m, nil
-		} else if m.dialog == dialogPluginMigration && m.migrationLeft != nil && !m.migrationRightFocus {
+		if m.dialog == dialogPluginMigration && m.migrationLeft != nil && !m.migrationRightFocus {
 			text := strings.ReplaceAll(string(msg), "\r", "")
 			m.migrationLeft.InsertMultiLine(text)
 			m.migrationLeft.Dirty = true
@@ -2238,9 +2222,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case flowReplyMsg:
-		cmd := m.applyFlowReply(msg)
-		return m, tea.Batch(cmd, m.listenForMessages())
 	case templateReplyMsg:
 		cmd := m.applyTemplateReply(msg)
 		return m, tea.Batch(cmd, m.listenForMessages())
@@ -2248,12 +2229,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.templateUI.pending && m.templateUI.requestID == string(msg) {
 			m.templateUI.pending = false
 			m.templateUI.err = "Template request timed out; check the destination daemon."
-		}
-		return m, nil
-	case flowRequestTimeoutMsg:
-		if m.flowUI.pending && m.flowUI.requestID == string(msg) {
-			m.flowUI.pending = false
-			m.flowUI.err = "Flow request timed out; check the destination daemon."
 		}
 		return m, nil
 	case PaneOutputMsg:
@@ -2447,7 +2422,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// runs, then either delete or demote them to logger.Debug.
 		log.Printf("WorkspaceState: %d tabs, %d panes", len(msg.Tabs), len(msg.Panes))
 		newPaneIDs, overlayResizeCmds := m.applyWorkspaceState(msg, msg.Dest)
-		flowFocusCmd := m.adoptFlowState(msg)
 		templateFocusCmd := m.focusNewTemplateTab()
 		log.Printf("apply: returned, %d new panes", len(newPaneIDs))
 		// An open project picker holds a filtered snapshot taken when it opened.
@@ -2467,7 +2441,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Both diffs run here, on the Update goroutine, because they read
 		// m.projects, which applyWorkspaceState has just rebuilt.
 		cmds := []tea.Cmd{
-			flowFocusCmd,
 			templateFocusCmd,
 			m.listenForMessages(),
 			m.sendDiffedResizes(m.diffResizes(msg)),
@@ -2580,7 +2553,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Update working state + unseen marks from the same hook stream.
 		m.applyWorkTransition(msg.PaneID, msg.Type, msg.Data)
-		m.flowAttention(msg)
 		if m.anyPaneWorking() && !m.workTickRunning {
 			m.workTickRunning = true
 			cmds = append(cmds, m.workSpinnerTick())
@@ -5698,7 +5670,6 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]str
 // Returns the project's tabs, the pane IDs it created (the caller arms a
 // spinner per ID) and the overlay resize commands the caller must batch.
 func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingTabs map[string]*TabModel, existingPanes map[string]*PaneModel, paneMap map[string]*PaneInfo, dest string) ([]*TabModel, []string, []tea.Cmd) {
-	flowRoleOf := flowPaneRoles(state)
 	var newPaneIDs []string
 	var overlayResizeCmds []tea.Cmd
 
@@ -5725,14 +5696,14 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 		tab, exists := existingTabs[tabInfo.ID]
 		if exists && tab.templateLayoutPending && len(tabInfo.Layout) > 0 {
 			// Another client may have already saved the completed tree.
-			tab = m.restoreTabLayout(tab, tabInfo, paneMap, existingPanes, flowRoleOf)
+			tab = m.restoreTabLayout(tab, tabInfo, paneMap, existingPanes)
 		}
 		if !exists {
 			tab = NewTabModel(tabInfo.ID, tabInfo.Name)
 
 			// New tab that doesn't exist locally — try to restore layout from daemon.
 			if len(tabInfo.Layout) > 0 {
-				tab = m.restoreTabLayout(tab, tabInfo, paneMap, existingPanes, flowRoleOf)
+				tab = m.restoreTabLayout(tab, tabInfo, paneMap, existingPanes)
 				tab.Dest = dest
 				// All non-overlay panes in a restored tab are new.
 				for _, pid := range tabInfo.Panes {
@@ -5916,7 +5887,7 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 				tab.Root = NewLeaf(pane)
 				tab.invalidateLeaves()
 			} else {
-				splitForNewPane(tab, leaves, pane, flowRoleOf[pane.ID])
+				splitForNewPane(tab, leaves, pane)
 			}
 		}
 
@@ -5968,7 +5939,7 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 }
 
 // restoreTabLayout rebuilds a tab's layout tree from serialized daemon state.
-func (m *Model) restoreTabLayout(tab *TabModel, tabInfo TabInfo, paneMap map[string]*PaneInfo, existingPanes map[string]*PaneModel, flowRoleOf map[string]flow.Role) *TabModel {
+func (m *Model) restoreTabLayout(tab *TabModel, tabInfo TabInfo, paneMap map[string]*PaneInfo, existingPanes map[string]*PaneModel) *TabModel {
 	tab.templateLayoutApplied, tab.templateLayoutPending = true, false
 	log.Printf("restoreLayout: tab %s %q with %d panes", tab.ID, tabInfo.Name, len(tabInfo.Panes))
 	tab.Name = tabInfo.Name
@@ -6023,7 +5994,7 @@ func (m *Model) restoreTabLayout(tab *TabModel, tabInfo TabInfo, paneMap map[str
 			tab.Root = NewLeaf(pane)
 			tab.invalidateLeaves()
 		} else {
-			splitForNewPane(tab, tab.Leaves(), pane, flowRoleOf[pane.ID])
+			splitForNewPane(tab, tab.Leaves(), pane)
 		}
 	}
 
@@ -6923,8 +6894,6 @@ func (m Model) listenForMessages() tea.Cmd {
 		switch msg.Type {
 		case ipc.MsgCreateFromTemplateResp:
 			return templateReplyMsg{msg}
-		case ipc.MsgStartFlowResp, ipc.MsgResumeFlowResp, ipc.MsgFlowConfigResp, ipc.MsgSaveFlowConfigResp, ipc.MsgPluginCatalogResp:
-			return flowReplyMsg{msg}
 		case ipc.MsgLinkLost:
 			// Synthesised by the Router when one of its connections died — it
 			// never reaches a socket. Receive itself cannot report that error,
@@ -7174,9 +7143,6 @@ func (m Model) listenForMessages() tea.Cmd {
 
 func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
 	state := WorkspaceStateMsg{}
-	if data, err := json.Marshal(raw["flows"]); err == nil {
-		_ = json.Unmarshal(data, &state.Flows)
-	}
 	if at, ok := raw["active_tab"].(string); ok {
 		state.ActiveTab = at
 	}

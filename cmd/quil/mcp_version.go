@@ -23,7 +23,7 @@ import (
 //
 // Newer tools use their own floor; do not raise the floor of existing tools.
 const mcpDaemonMinVersion = "1.72.0"
-const reportStepMinVersion = "1.73.0"
+const createFromTemplateMinVersion = "1.73.0"
 
 // daemonVersionProbeTimeout bounds remote version probes. A pre-versioning
 // daemon drops the request silently. Local startup uses handshakeTimeout;

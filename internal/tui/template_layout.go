@@ -1,5 +1,13 @@
 package tui
 
+// splitForNewPane preserves ordinary tab insertion. Template tabs replace
+// this temporary tree with their initial layout once the completed frame arrives.
+func splitForNewPane(tab *TabModel, leaves []*PaneModel, pane *PaneModel) {
+	tab.Root.SplitLeaf(leaves[0].ID, SplitVertical)
+	tab.Root.FillPlaceholder(pane)
+	tab.invalidateLeaves()
+}
+
 // templateLayout builds only the initial tree. Pane order is preserved within
 // each region; main selects an anchor without changing creation/prompt order.
 func templateLayout(keyword string, panes []*PaneModel, main int) *LayoutNode {

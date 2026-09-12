@@ -65,7 +65,7 @@ session occupancy come from the daemon that will perform the action.
 | `restart_pane` | Restart the child with the pane's configuration and dimensions |
 | `destroy_pane` | Remove a pane, preserving the last-pane replacement behavior |
 
-### Projects and tabs (8)
+### Projects and tabs (9)
 
 Projects let an orchestrator group related workers and keep their working
 directories explicit. Creating a tab does not take the user's focus.
@@ -76,12 +76,13 @@ directories explicit. Creating a tab does not take the user's focus.
 | `update_project` | Rename a project or change its root |
 | `switch_project` | Show the project's last active tab |
 | `destroy_project` | Remove the project and its tabs and panes |
+| `create_from_template` | Create ordered panes and starting prompts from a workspace template (daemon 1.73.0+) |
 | `create_tab` | Create a tab with a configurable first pane |
 | `rename_tab` | Label a tab |
 | `switch_tab` | Show a tab |
 | `destroy_tab` | Remove a tab, retaining a shell tab when its project becomes empty |
 
-### Task delegation and flow reporting (5)
+### Task delegation (4)
 
 | Tool | Purpose |
 |------|---------|
@@ -89,17 +90,12 @@ directories explicit. Creating a tab does not take the user's focus.
 | `get_task` | Read one task's status |
 | `wait_task` | Wait for completion or a bounded timeout |
 | `list_tasks` | List the daemon's retained tasks |
-| `report_step` | Report a structured result for the caller's current flow step |
 
 An AI task finishes when the target's hook-derived work state settles idle,
 including subagent activity; a raw Stop event alone is insufficient. A terminal
 task finishes on shell command completion. Notify-back waits until the requester
 can receive input and is limited to panes on the same daemon. Tasks are bounded
 and runtime-only. See [task delegation](../mcp.md#delegating-work-to-another-pane).
-
-Flow steps require a structured report as well as settled idle. Role panes use
-a restricted bridge with `report_step` and caller-local `get_task`; see
-[agent flows](../agent-flows.md) for configuration and the adapter limits.
 
 ### TUI cooperation (2)
 

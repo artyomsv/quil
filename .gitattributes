@@ -46,3 +46,8 @@ internal/changelog/highlights.txt text eol=lf
 
 # Embedded multiline flow prompts reject CR terminal controls at startup.
 internal/config/flows.toml text eol=lf
+
+# internal/config/templates.toml is go:embed'ed and its prompts are validated
+# against terminal control characters, CR included. A CRLF checkout therefore
+# makes DefaultTemplates panic at daemon start, and CI never sees it.
+internal/config/templates.toml text eol=lf

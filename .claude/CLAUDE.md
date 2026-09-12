@@ -110,7 +110,7 @@ Architecture: thin bridge between MCP JSON-RPC (stdio) and daemon IPC (socket). 
 
 MCP SDK: `github.com/modelcontextprotocol/go-sdk` (official SDK, v1.4+). Typed tool handlers with struct-based input schemas.
 
-35 MCP tools: `list_panes` (marks the caller's own pane `self`, reports `agent_state`), `read_pane_output` (ANSI-stripped), `send_to_pane` (`paste` for multi-line), `get_pane_status`, `create_pane` (the dialog's options: `name`, `toggles` by NAME, `resume_session_id`, `worktree_branch`, `sandbox_image`/`sandbox_auth`), `send_keys` (named key sequences), `restart_pane`, `screenshot_pane` (VT-emulated text screenshot), `switch_tab`, `list_tabs`, `destroy_pane`, `set_active_pane` (TUI cooperation), `close_tui` (TUI cooperation), `get_notifications` (non-blocking; carries `data.excerpt` with the triggering lines), `watch_notifications` (blocking, replaces polling; optional `since_timestamp` closes the race-on-registration window), `dismiss_notifications` (ack handled events from the agent side), `get_memory_report` (per-tab totals + Go-heap + PTY RSS), `get_pane_memory` (single pane detail); projects and tabs: `list_projects`, `create_project`, `update_project`, `switch_project`, `destroy_project`, `create_tab` (any first pane, in a named project, no focus steal), `rename_tab`, `destroy_tab`, `rename_pane`; discovery: `list_plugins` (toggle names, `sandbox_available`), `list_sessions`, `list_hosts`; tasking: `delegate_task`, `get_task`, `wait_task`, `list_tasks`, `report_step`.
+36 MCP tools: `list_panes` (marks the caller's own pane `self`, reports `agent_state`), `read_pane_output` (ANSI-stripped), `send_to_pane` (`paste` for multi-line), `get_pane_status`, `create_pane` (the dialog's options: `name`, `toggles` by NAME, `resume_session_id`, `worktree_branch`, `sandbox_image`/`sandbox_auth`), `send_keys` (named key sequences), `restart_pane`, `screenshot_pane` (VT-emulated text screenshot), `switch_tab`, `list_tabs`, `destroy_pane`, `set_active_pane` (TUI cooperation), `close_tui` (TUI cooperation), `get_notifications` (non-blocking; carries `data.excerpt` with the triggering lines), `watch_notifications` (blocking, replaces polling; optional `since_timestamp` closes the race-on-registration window), `dismiss_notifications` (ack handled events from the agent side), `get_memory_report` (per-tab totals + Go-heap + PTY RSS), `get_pane_memory` (single pane detail); projects and tabs: `list_projects`, `create_project`, `update_project`, `switch_project`, `destroy_project`, `create_tab` (any first pane, in a named project, no focus steal), `create_from_template` (ordered panes, frozen args and prompts from templates.toml), `rename_tab`, `destroy_tab`, `rename_pane`; discovery: `list_plugins` (toggle names, `sandbox_available`), `list_sessions`, `list_hosts`; tasking: `delegate_task`, `get_task`, `wait_task`, `list_tasks`, `report_step`.
 
 IPC request-response: `Message.ID` field (omitempty, backward compatible) correlates requests with responses. Daemon responds to the requesting connection when `ID` is set, broadcasts when empty. **The six project mutations, `update_tab`, `destroy_tab` and `update_pane` answer an `OpRespPayload` ONLY when the request carries an ID** (`answerOp`, `internal/daemon/project_req.go`) — the TUI sets none and keeps getting nothing; answering its id-less sends would put a critical frame per keystroke-class message on its 64-slot queue, the 2026-08-09 disconnect shape.
 
@@ -244,7 +244,7 @@ Project docs are now organized as a navigable tree under `docs/` (with the index
 - `docs/keybindings.md` — Full keymap + customization syntax
 - `docs/configuration.md` — `~/.quil/config.toml` reference
 - `docs/agent-flows.md` — Agent roles, structured handoffs, pause/resume, settings, and validation limits
-- `docs/mcp.md` — User-facing MCP guide (client wiring, all 35 tools, redaction model)
+- `docs/mcp.md` — User-facing MCP guide (client wiring, all 36 tools, redaction model)
 - `docs/plugin-reference.md` — TOML plugin schema (every field, every strategy, examples)
 - `docs/troubleshooting.md` — Daemon won't start, MCP not detected, log file locations, reset
 - `docs/sandbox-panes.md` — Docker sandbox panes: building the image, signing in, what the sandbox does and does not bound
@@ -276,7 +276,7 @@ Cached reference repos:
 | M6 | Done | Pane focus — Ctrl+E full-screen active pane |
 | M7 | Done | Pane notes — Alt+E editor bound per pane, three save safety nets |
 | M8 | Done | Bubble Tea v2 + Lipgloss v2 migration |
-| M10 | Done | MCP server — `quil mcp`, 35 tools; projects, hosts and task delegation added September 2026; request-response IPC via `Message.ID` |
+| M10 | Done | MCP server — `quil mcp`, 36 tools; projects, hosts and task delegation added September 2026; request-response IPC via `Message.ID` |
 | M11 | Done | Command palette — Alt+Shift+P, fuzzy find, unified content search |
 | M12 | Done | Notification center — daemon event queue, per-pane mute, sidebar, 3 MCP tools |
 | M13 | Done | Memory reporting — 5s collector, per-pane Go-heap + PTY RSS, dialog + 2 MCP tools |

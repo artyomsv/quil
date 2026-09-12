@@ -86,7 +86,7 @@ layout = "main-left"
 | `name` | pane name; empty means the plugin's own |
 | `model` | optional model id, appended as the agent's own flag (`--model`, or `-m` for codex). Ignored for a non-AI plugin |
 | `toggles` | plugin toggle NAMES, resolved by `resolveToggles` |
-| `cwd` | optional, relative to the chosen directory; must stay inside it |
+| `cwd` | optional, relative to the chosen directory; must stay inside it. With a branch it also applies to the FIRST pane, through `WorktreeSpec.Subdir` — see below |
 | `prompt` | optional starting prompt, typed after every pane exists |
 | `muted` | sets the existing per-pane mute, so this pane's turns raise no notification |
 | `main` | marks the layout anchor for `main-left` / `main-top`; defaults to the first pane |
@@ -139,10 +139,41 @@ Order of work daemon-side, all validated before anything is created:
 2. Create the tab. Name it after the task, or the template when there is none.
 3. When a branch was asked for: the existing preparing-placeholder path, then
    the worktree add, then the panes. Otherwise the panes directly.
-4. Create every pane in listed order with `constructPaneAt`, so the tab and its
-   panes reach clients in ONE broadcast frame.
+4. Create every pane in listed order with `constructPaneAt`, which does not
+   publish, so N panes never cost N frames.
 5. Render the prompts — now that every pane exists, so `{{panes}}` is complete
    — and deliver each with `deliverPrompt`, in listed order.
+
+**Broadcast budget.** The rule being honoured is "no frame PER PANE", not "one
+frame ever" — the 64-slot overflow this guards against came from per-pane and
+per-keystroke frames at 33 tabs, not from a constant handful. So:
+
+- **no branch: exactly one frame**, after every pane exists;
+- **with a branch: three**, and no more. One preparing frame (the tab and its
+  placeholder, so the spinner is visible while git runs), one from the existing
+  `worktreeAddAndCreate` → `replacePaneAt` swap, which publishes on its own,
+  and one final frame after the remaining panes are constructed.
+
+Do not suppress the preparing frame to save one: it is the only thing on screen
+for as long as a monorepo checkout takes.
+
+**The response answers immediately**, like `create_tab` does today: the tab id,
+the pane ids that exist at that moment, and the branch when one is preparing.
+On the branch path the remaining pane ids reach clients in the broadcast, not
+in the response.
+
+**A per-pane `cwd` survives the worktree path.** `createPaneInWorktree` assigns
+the worktree root to the pane's CWD unconditionally, which would silently drop
+the `cwd` of the FIRST pane — and only the first, since the rest are built with
+`constructPaneAt` after the checkout exists and join their own. Refusing the
+combination would leave an arbitrary rule rather than a clean limitation, so
+`ipc.WorktreeSpec` gains `Subdir string` instead: empty keeps today's behaviour
+exactly, and a value is joined onto the root. The join is re-validated
+daemon-side even though `config.Validate` already refused an escaping relative
+path, because this is a different machine's filesystem and a symlink inside the
+checkout can escape after the join. A missing or escaping subdirectory refuses
+and leaves no pane; it never falls back to the root, because a pane in the
+wrong directory is the failure this feature exists to remove.
 
 Listed order is the user's control over who is briefed first. The shipped
 agent-team template puts the orchestrator last so its teammates are already
@@ -159,11 +190,18 @@ reach a pane that already exists.
 ## 5. Layout
 
 The daemon does not build layout trees; it stores `Tab.Layout` opaquely and the
-TUI owns the tree. So `CreateTabPayload` gains `TemplateLayout string`, stored
-on the tab, and the TUI builds the tree the first time it sees a tab carrying
-that keyword with no layout yet, then reports it back with the existing
-`MsgUpdateLayout`. After that the tab is an ordinary tab and the keyword is
-spent.
+TUI owns the tree. So the tab gains TWO persisted, broadcast fields, both set
+at creation:
+
+- `TemplateLayout string` — the keyword.
+- `TemplateMain string` — the PANE ID of the layout anchor, not an index.
+  An index would couple the layout to creation order, and order is what decides
+  who is prompted first; the shipped `agent-team` marks its third pane as main
+  precisely so the two can differ.
+
+The TUI builds the tree the first time it sees a tab carrying a keyword with no
+layout yet, then reports it back with the existing `MsgUpdateLayout`. After
+that the tab is an ordinary tab and both fields are spent.
 
 | Keyword | Shape |
 |---|---|
@@ -196,8 +234,12 @@ goes with `report_step`.
 
 - **The per-spawn MCP adapters** for Claude Code, Codex and OpenCode, including
   `--strict-mcp-config`, the Codex inherited-server probe and whole-table
-  override, and the documented OpenCode limit. Now gated on `Pane.QuilMCP` and
-  registering the ordinary toolset.
+  override, and the documented OpenCode limit. They gain a `toolset` parameter
+  rather than having their arguments rewritten: the flow path keeps passing
+  `flow` until phase 4 deletes it, and a `Pane.QuilMCP` pane passes the empty
+  string for the ordinary tool set. A pane carrying both fields — which the
+  template path never creates — takes the restricted flow one, because the
+  narrower grant is the safe way to resolve a state that should not exist.
 - **The directory picker**, with git discovery pinned to the dialog's
   destination, and the typed-path fixes from the review of PR #214
   (focus-routed paste, `msg.Text` for characters).

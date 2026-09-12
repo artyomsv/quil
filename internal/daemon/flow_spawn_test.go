@@ -18,7 +18,7 @@ func TestFlowMCPSpawn_PreservesHooksAndQuotesPaths(t *testing.T) {
 	flowMCPExeFn = func() (string, error) { return `C:\Program Files\Quil\quil-dev.exe`, nil }
 	t.Cleanup(func() { flowMCPExeFn = old })
 	for _, agent := range []string{"claude-code", "codex", "opencode"} {
-		args, env, err := flowMCPSpawn(agent, []string{"existing"}, []string{`OPENCODE_CONFIG_CONTENT={"plugin":["hook.js"],"mcp":{"other":{"type":"remote","url":"https://example.com/mcp"}}}`, "KEEP=yes"}, nil)
+		args, env, err := flowMCPSpawn(agent, []string{"existing"}, []string{`OPENCODE_CONFIG_CONTENT={"plugin":["hook.js"],"mcp":{"other":{"type":"remote","url":"https://example.com/mcp"}}}`, "KEEP=yes"}, nil, "flow")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -100,7 +100,7 @@ func TestFlowCodexMCPConfig_DisablesInheritedServersWithoutMergingBridge(t *test
 			EnvVars []string `toml:"env_vars"`
 		} `toml:"mcp_servers"`
 	}
-	overrides, err := flowCodexMCPConfig(exe, servers)
+	overrides, err := flowCodexMCPConfig(exe, servers, "flow")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +118,7 @@ func TestFlowCodexMCPConfig_DisablesInheritedServersWithoutMergingBridge(t *test
 		t.Fatal(cfg)
 	}
 	for _, name := range []string{"with.dot", `with"quote`, ""} {
-		if _, err := flowCodexMCPConfig(exe, []string{name}); err == nil {
+		if _, err := flowCodexMCPConfig(exe, []string{name}, "flow"); err == nil {
 			t.Fatal("unaddressable server accepted", name)
 		}
 	}
@@ -168,7 +168,7 @@ func TestFlowCodexProbe_InstalledCLI(t *testing.T) {
 	old := flowMCPExeFn
 	flowMCPExeFn = func() (string, error) { return "fixture-quil", nil }
 	t.Cleanup(func() { flowMCPExeFn = old })
-	args, _, err := flowMCPSpawn("codex", original, nil, servers)
+	args, _, err := flowMCPSpawn("codex", original, nil, servers, "flow")
 	if err != nil {
 		t.Fatal(err)
 	}

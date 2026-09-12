@@ -65,6 +65,22 @@ func newFakeIPCDaemonVersion(t *testing.T, paneID, version string) *fakeIPCDaemo
 			resp, _ = ipc.NewMessage(ipc.MsgReportStepResp, payload)
 		case ipc.MsgListProjectsReq:
 			resp, _ = ipc.NewMessage(ipc.MsgListProjectsResp, ipc.ListProjectsRespPayload{Projects: []ipc.ProjectInfo{{ID: "proj-" + f.paneID, Name: f.paneID}}})
+		case ipc.MsgCreateFromTemplateReq:
+			var req ipc.CreateFromTemplateReqPayload
+			if err := m.DecodePayload(&req); err != nil {
+				t.Error(err)
+				return
+			}
+			payload := ipc.CreateFromTemplateRespPayload{TabID: "tab-" + f.paneID, PaneIDs: []string{f.paneID}, PreparingWorktree: req.Branch}
+			if req.Template == "unknown" {
+				payload = ipc.CreateFromTemplateRespPayload{Error: "unknown template"}
+			}
+			var err error
+			resp, err = ipc.NewMessage(ipc.MsgCreateFromTemplateResp, payload)
+			if err != nil {
+				t.Error(err)
+				return
+			}
 		default:
 			return
 		}
@@ -290,7 +306,7 @@ func TestCreatePaneSchema_ExposesDialogOptions(t *testing.T) {
 	for _, tl := range tools.Tools {
 		byName[tl.Name] = tl
 	}
-	for _, want := range []string{"create_pane", "create_tab", "list_projects", "create_project", "update_project", "destroy_project",
+	for _, want := range []string{"create_pane", "create_tab", "create_from_template", "list_projects", "create_project", "update_project", "destroy_project",
 		"switch_project", "rename_tab", "destroy_tab", "rename_pane", "list_plugins", "list_sessions", "list_hosts",
 		"delegate_task", "get_task", "wait_task", "list_tasks", "report_step"} {
 		if byName[want] == nil {
@@ -303,7 +319,7 @@ func TestCreatePaneSchema_ExposesDialogOptions(t *testing.T) {
 			t.Errorf("create_pane schema lacks %s:\n%s", prop, schema)
 		}
 	}
-	if len(tools.Tools) != 35 {
-		t.Errorf("tool count = %d, want 35 (update docs/mcp.md and CLAUDE.md if this changed on purpose)", len(tools.Tools))
+	if len(tools.Tools) != 36 {
+		t.Errorf("tool count = %d, want 36 (update docs/mcp.md and CLAUDE.md if this changed on purpose)", len(tools.Tools))
 	}
 }

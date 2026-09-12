@@ -14,7 +14,7 @@ The result: your AI can **see what's in your build pane and react**, instead of 
   - [VS Code (GitHub Copilot Chat)](#vs-code-github-copilot-chat)
   - [Any MCP-capable client](#any-mcp-capable-client)
 - [Verify the connection](#verify-the-connection)
-- [The 35 tools](#the-35-tools)
+- [The 36 tools](#the-36-tools)
   - [Discovery](#discovery)
   - [Reading pane output](#reading-pane-output)
   - [Interacting with panes](#interacting-with-panes)
@@ -71,7 +71,7 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) o
 }
 ```
 
-Restart Claude Desktop. The 🔌 icon in the input bar should show Quil with 35 tools.
+Restart Claude Desktop. The 🔌 icon in the input bar should show Quil with 36 tools.
 
 ### Claude Code (CLI)
 
@@ -140,7 +140,7 @@ In your AI client, ask:
 
 The AI should call `list_panes` and return a JSON array with each pane's `id`, `type`, `tab_id`, `cwd`, etc. If you see "no Quil panes" or an error, check [Troubleshooting](#troubleshooting).
 
-## The 35 tools
+## The 36 tools
 
 Tools are grouped below by purpose. Every tool returns a `text` content block; many return JSON-formatted payloads.
 
@@ -229,6 +229,7 @@ A project groups tabs and owns a root directory (new tabs open there). Every tab
 | `switch_project` | `project_id` | `{ok}` | Brings the project's last active tab into view in the TUI. |
 | `destroy_project` | `project_id` | `{ok}` | Destroys every tab and pane under it. **Confirm with the user first.** |
 | `create_tab` | `name`, `project_id` (default: active project), `first_pane` (any `create_pane` option), `host` | `{tab_id, pane_id, preparing_worktree?, error?, host}` | Does NOT steal the TUI's focus — an orchestrator opening tabs for workers must not yank the user around; call `switch_tab` when you want it. With `worktree_branch` the returned `pane_id` is a placeholder (no process, `preparing_worktree` set); the `worktree_ready` event names the pane that replaces it. The first pane is validated BEFORE the tab is made, so a refusal (unknown plugin, clashing toggles, unresolvable worktree root) is an ERROR with no tab and no pane. |
+| `create_from_template` | `template`, `task`, `cwd`, `branch`, `project_id` (default: active project), `host` | `{tab_id, pane_ids, preparing_worktree?, error?, host}` | Creates the template's panes in listed order with frozen toggle/model arguments and optional starting prompts. Refuses unknown templates, invalid pane settings, and unusable directories before creating anything. Does not switch focus. A branch request returns a visible placeholder immediately; use `list_panes` for the completed tab's pane IDs. |
 | `rename_tab` | `tab_id`, `name` | `{ok}` | |
 | `destroy_tab` | `tab_id` | `{ok}` | Every pane in it. If it was the project's last tab a shell tab is auto-created. **Confirm first.** |
 

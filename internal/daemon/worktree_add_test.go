@@ -37,6 +37,35 @@ func worktreeCreate(tabID, repo, branch string) ipc.CreatePanePayload {
 	}
 }
 
+func TestWorktreeAdd_ClassifiesWrappedSubdirError(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	d := newTestDaemon(t)
+	tab := d.session.CreateTab("t")
+	req := worktreeCreate(tab.ID, t.TempDir(), "feat/subdir")
+	req.Worktree.Subdir = "missing"
+	checkout := gitworktree.DerivePath(req.Worktree.RepoRoot, req.Worktree.Branch)
+	if err := os.MkdirAll(checkout, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	// Exercise the real producer and require its contextual wrapper, so a
+	// bare assertion at the worker boundary cannot accidentally pass again.
+	_, swapped, err := d.createPaneInWorktree(req, checkout)
+	var subdirErr *worktreeSubdirError
+	if swapped || !errors.As(errors.Unwrap(err), &subdirErr) {
+		t.Fatalf("want wrapped subdirectory error before swap, got swapped=%v err=%v", swapped, err)
+	}
+	stubAdd(t, func(context.Context, string, string, string) error { return nil })
+	removes := stubRemove(t, nil)
+	resp := d.worktreeAddAndCreate(req)
+	if !resp.InvalidSubdir || resp.Swapped || resp.PaneID != "" || !strings.Contains(resp.Error, "missing") {
+		t.Fatalf("wrapped subdirectory error was not classified: %+v", resp)
+	}
+	if len(d.session.AllPanes()) != 0 || len(*removes) != 1 || (*removes)[0][1] != checkout {
+		t.Fatalf("refused creation did not clean up checkout: panes=%d removes=%v", len(d.session.AllPanes()), *removes)
+	}
+}
+
 // The whole point of the feature: an add that fails must produce NO pane and
 // must never relocate to the repository root. A pane on master that the user
 // believes is isolated is the confidently-wrong answer this design exists to

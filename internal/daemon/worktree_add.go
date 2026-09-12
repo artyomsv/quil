@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -206,6 +207,8 @@ func (d *Daemon) worktreeAddAndCreate(p ipc.CreatePanePayload) ipc.CreatePaneRes
 		// pane the daemon no longer has back into its layout.
 		resp := abandon("%v", err)
 		resp.Swapped = swapped
+		var subdirErr *worktreeSubdirError
+		resp.InvalidSubdir = errors.As(err, &subdirErr)
 		return resp
 	}
 	// The one success return. A checkout can take minutes on a monorepo, which
@@ -215,7 +218,11 @@ func (d *Daemon) worktreeAddAndCreate(p ipc.CreatePanePayload) ipc.CreatePaneRes
 	return ipc.CreatePaneRespPayload{PaneID: pane.ID, TabID: p.TabID, Worktree: spec, Swapped: swapped}
 }
 
-// createPaneInWorktree builds the pane with the worktree as its CWD.
+// Keep subdirectory validation failures distinct from git or process failures:
+// only the former invalidate a template's provisional tab after checkout.
+type worktreeSubdirError struct{ error }
+
+// createPaneInWorktree builds the pane in the worktree or its requested Subdir.
 //
 // It deliberately does NOT reuse handleCreatePane's cwd sanity block. That
 // block substitutes d.defaultCWD() whenever the stat fails — a sound
@@ -233,10 +240,24 @@ func (d *Daemon) worktreeAddAndCreate(p ipc.CreatePanePayload) ipc.CreatePaneRes
 // be inferred from the error.
 func (d *Daemon) createPaneInWorktree(p ipc.CreatePanePayload, path string) (*Pane, bool, error) {
 	var swapped bool
-	if info, err := os.Stat(path); err != nil || !info.IsDir() {
-		return nil, swapped, fmt.Errorf("worktree %s is not there after creating it: %v", path, err)
+	cwd, worktreeRoot := path, path
+	if p.Worktree != nil && p.Worktree.Subdir != "" {
+		worktreeRoot = probeSpawnDirWithin(path, spawnDirProbeTimeout, true)
+		if worktreeRoot == "" {
+			return nil, false, &worktreeSubdirError{fmt.Errorf("worktree %q cannot be resolved for subdirectory %q", path, p.Worktree.Subdir)}
+		}
+		var err error
+		cwd, err = templatePaneDirectory(worktreeRoot, p.Worktree.Subdir)
+		if err != nil {
+			return nil, false, fmt.Errorf("worktree subdirectory %q: %w", p.Worktree.Subdir, &worktreeSubdirError{err})
+		}
+	} else {
+		// Preserve the empty-Subdir path for all existing callers.
+		if info, err := os.Stat(path); err != nil || !info.IsDir() {
+			return nil, swapped, fmt.Errorf("worktree %s is not there after creating it: %v", path, err)
+		}
 	}
-	p.CWD = path
+	p.CWD = cwd
 	paneType := p.Type
 	if paneType == "" {
 		paneType = "terminal"
@@ -248,9 +269,9 @@ func (d *Daemon) createPaneInWorktree(p ipc.CreatePanePayload, path string) (*Pa
 	var pane *Pane
 	var err error
 	if p.ReplacePaneID != "" {
-		pane, swapped, err = d.replacePaneAt(p, path, paneType)
+		pane, swapped, err = d.replacePaneAt(p, cwd, paneType)
 	} else {
-		pane, err = d.createPaneAt(p, path, paneType)
+		pane, err = d.createPaneAt(p, cwd, paneType)
 	}
 	if err != nil {
 		if pane != nil {
@@ -263,13 +284,18 @@ func (d *Daemon) createPaneInWorktree(p ipc.CreatePanePayload, path string) (*Pa
 	// reading it.
 	pane.PluginMu.Lock()
 	pane.WorktreeOwned = true
-	// The one place the created directory can be captured, and it is taken from
-	// the pane's OWN CWD rather than the payload's: the spawn resolves the path
+	// Without a Subdir, capture the checkout from the pane's OWN CWD rather
+	// than the payload's: the spawn resolves the path
 	// (EvalSymlinks canonicalises /var → /private/var on macOS), so the pane's
 	// value is the one every later comparison sees. It is correct only at this
 	// instant — the shell will move it with the first `cd` — which is exactly
 	// why it is copied somewhere that does not move. See Pane.WorktreePath.
 	pane.WorktreePath = pane.CWD
+	if p.Worktree != nil && p.Worktree.Subdir != "" {
+		// Ownership always names the checkout, never the pane's subdirectory.
+		// Later template panes and close-time removal both use this root.
+		pane.WorktreePath = worktreeRoot
+	}
 	pane.PluginMu.Unlock()
 	return pane, swapped, nil
 }

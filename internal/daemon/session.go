@@ -21,17 +21,20 @@ import (
 )
 
 type Tab struct {
-	ID        string
-	Name      string
-	Color     string
-	Panes     []string        // Pane IDs in order
-	Layout    json.RawMessage // Opaque layout tree from TUI
-	ProjectID string          // Project this tab belongs to (see project.go)
+	TemplateLayout string // Initial layout keyword; the TUI builds the tree.
+	TemplateMain   string // Initial layout anchor pane ID. Protected by sm.mu.
+	ID             string
+	Name           string
+	Color          string
+	Panes          []string        // Pane IDs in order
+	Layout         json.RawMessage // Opaque layout tree from TUI
+	ProjectID      string          // Project this tab belongs to (see project.go)
 }
 
 type Pane struct {
 	// FlowRole opts this pane into per-spawn Quil MCP registration. Under PluginMu.
 	FlowRole     string
+	QuilMCP      bool // Opts into ordinary Quil MCP at spawn. Under PluginMu.
 	ID           string
 	TabID        string
 	CWD          string

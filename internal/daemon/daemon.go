@@ -832,6 +832,8 @@ func (d *Daemon) restoreWorkspace() error {
 		// closes the tab. migrateToDefaultProject above guarantees every tab
 		// map carries "project_id" by the time this loop runs.
 		tab.ProjectID, _ = tabMap["project_id"].(string)
+		tab.TemplateLayout, _ = tabMap["template_layout"].(string)
+		tab.TemplateMain, _ = tabMap["template_main"].(string)
 
 		// Restore layout
 		if layoutRaw, ok := tabMap["layout"]; ok {
@@ -928,6 +930,7 @@ func (d *Daemon) restoreWorkspace() error {
 				unseen, _ := paneData["unseen"].(bool)
 				worktreeOwned, _ := paneData["worktree_owned"].(bool)
 				flowRole, _ := paneData["flow_role"].(string)
+				quilMCP, _ := paneData["quil_mcp"].(bool)
 				worktreePath, _ := paneData["worktree_path"].(string)
 				worktreeInterrupted, _ := paneData["worktree_interrupted"].(bool)
 				sandboxImage, _ := paneData["sandbox_image"].(string)
@@ -980,6 +983,7 @@ func (d *Daemon) restoreWorkspace() error {
 					// worktree keeps the ordinary CWD fallback.
 					WorktreeOwned: worktreeOwned,
 					FlowRole:      flowRole,
+					QuilMCP:       quilMCP,
 					// Absent on every snapshot written before the marker
 					// existed → false, so such a pane restores exactly as it
 					// did before: a shell in whatever CWD was recorded. The
@@ -1541,6 +1545,8 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		d.handleCreateProjectReq(conn, msg)
 	case ipc.MsgCreateTabReq:
 		d.handleCreateTabReq(conn, msg)
+	case ipc.MsgCreateFromTemplateReq:
+		d.handleCreateFromTemplateReq(conn, msg)
 	case ipc.MsgPluginCatalogReq:
 		d.handlePluginCatalogReq(conn, msg)
 	case ipc.MsgStartFlowReq:
@@ -2632,6 +2638,7 @@ func (d *Daemon) constructPaneAt(payload ipc.CreatePanePayload, cwd, paneType st
 	pane.InstanceName = payload.InstanceName
 	pane.InstanceArgs = payload.InstanceArgs
 	pane.FlowRole = payload.FlowRole
+	pane.QuilMCP = payload.QuilMCP
 	pane.PluginMu.Unlock()
 	// The sandbox spec joins the fields above, and its absence here was the
 	// whole feature failing open: spawnPane gates the container branch on
@@ -2713,6 +2720,7 @@ func (d *Daemon) replacePaneAt(payload ipc.CreatePanePayload, cwd, paneType stri
 	newPane.InstanceName = payload.InstanceName
 	newPane.InstanceArgs = payload.InstanceArgs
 	newPane.FlowRole = payload.FlowRole
+	newPane.QuilMCP = payload.QuilMCP
 	// Before the swap, deliberately. This pane is not published yet, so a
 	// refusal costs nothing — whereas past ReplacePane the OLD pane is gone
 	// whatever else fails, and refusing there would leave the tab short a
@@ -4076,6 +4084,12 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 		if len(tab.Layout) > 0 {
 			tabData["layout"] = tab.Layout
 		}
+		if tab.TemplateLayout != "" {
+			tabData["template_layout"] = tab.TemplateLayout
+		}
+		if tab.TemplateMain != "" {
+			tabData["template_main"] = tab.TemplateMain
+		}
 		tabList = append(tabList, tabData)
 
 		for _, pane := range panesByTab[tab.ID] {
@@ -4154,6 +4168,9 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			}
 			if pane.FlowRole != "" {
 				paneData["flow_role"] = pane.FlowRole
+			}
+			if pane.QuilMCP {
+				paneData["quil_mcp"] = true
 			}
 			// Persisted for the same reason, and it is the half that says WHICH
 			// directory. Without it a restored pane can only name its CWD, which
@@ -5060,6 +5077,7 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	pane.WorktreeInterrupted = false
 	typ := pane.Type
 	flowRole := pane.FlowRole
+	quilMCP := pane.QuilMCP
 	sandboxImage := pane.SandboxImage
 	pane.PluginMu.Unlock()
 
@@ -5075,6 +5093,9 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	p := d.registry.Get(typ)
 	if flowRole != "" && (sandboxed || p == nil || p.Category != "ai" || !p.Available || !flowMCPSupported(typ)) {
 		return fmt.Errorf("flow agent %q is unavailable or does not support per-spawn MCP", typ)
+	}
+	if quilMCP && (sandboxed || p == nil || !p.Available || !flowMCPSupported(typ)) {
+		return fmt.Errorf("plugin %q is unavailable or does not support per-spawn Quil MCP", typ)
 	}
 	if p == nil {
 		p = d.registry.Get("terminal") // fallback
@@ -5283,23 +5304,27 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 		envVars = append(envVars, hookEnv...)
 	}
 
-	if flowRole != "" {
+	if flowRole != "" || quilMCP {
 		var err error
 		var codexServers []string
-		// The model is read at spawn, not frozen at flow start, so a role's
-		// model edited in F1 applies on the pane's next restart. An unloadable
-		// config keeps the agent's default rather than refusing the pane: the
-		// flow itself already refused to START on that config.
-		//
-		// The configured AGENT must match this pane's own type before its
-		// model is applied. A role's agent can be changed after its panes
-		// exist, and those panes keep their original Type — so keying on the
-		// role name alone handed a live claude pane `--model gpt-5-codex` the
-		// moment the analyst role was switched to codex, and every restart of
-		// that pane then failed on a model its agent has never heard of.
-		if cfg, cfgErr := d.flowsConfig(); cfgErr == nil {
-			if role := cfg.Roles[flow.Role(flowRole)]; role.Agent == typ {
-				args = flowModelArgs(typ, role.Model, args)
+		toolset := ""
+		if flowRole != "" {
+			toolset = "flow" // A flow role takes precedence over the ordinary toolset.
+			// The model is read at spawn, not frozen at flow start, so a role's
+			// model edited in F1 applies on the pane's next restart. An unloadable
+			// config keeps the agent's default rather than refusing the pane: the
+			// flow itself already refused to START on that config.
+			//
+			// The configured AGENT must match this pane's own type before its
+			// model is applied. A role's agent can be changed after its panes
+			// exist, and those panes keep their original Type — so keying on the
+			// role name alone handed a live claude pane `--model gpt-5-codex` the
+			// moment the analyst role was switched to codex, and every restart of
+			// that pane then failed on a model its agent has never heard of.
+			if cfg, cfgErr := d.flowsConfig(); cfgErr == nil {
+				if role := cfg.Roles[flow.Role(flowRole)]; role.Agent == typ {
+					args = flowModelArgs(typ, role.Model, args)
+				}
 			}
 		}
 		if typ == "codex" {
@@ -5308,7 +5333,7 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 				return err
 			}
 		}
-		args, envVars, err = flowMCPSpawn(typ, args, envVars, codexServers)
+		args, envVars, err = flowMCPSpawn(typ, args, envVars, codexServers, toolset)
 		if err != nil {
 			return err
 		}

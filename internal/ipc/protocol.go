@@ -304,6 +304,7 @@ type AttachPayload struct {
 }
 
 type CreatePanePayload struct {
+	QuilMCP       bool     `json:"quil_mcp,omitempty"`
 	FlowRole      string   `json:"flow_role,omitempty"`
 	TabID         string   `json:"tab_id"`
 	CWD           string   `json:"cwd"`
@@ -399,6 +400,9 @@ type SandboxSpec struct {
 // Create-time only — an instruction, not stored pane state; what persists is
 // the resulting CWD, plus a flag saying the pane owns a worktree.
 type WorktreeSpec struct {
+	// Subdir is the pane's relative working directory within the new checkout.
+	// Empty keeps the worktree-root spawn used by existing callers.
+	Subdir string `json:"subdir,omitempty"`
 	// RepoRoot is the repository the worktree branches from, as the DAEMON's
 	// filesystem spells it. The client sends back the directory the daemon's
 	// own browse answered with, so no path built on the client is involved.
@@ -772,8 +776,11 @@ type CreatePaneReqPayload struct {
 }
 
 type CreatePaneRespPayload struct {
-	PaneID string `json:"pane_id"`
-	TabID  string `json:"tab_id"`
+	// InvalidSubdir is worker-local failure classification, never sent over IPC.
+	// Template creation uses it to discard its provisional tab after checkout.
+	InvalidSubdir bool   `json:"-"`
+	PaneID        string `json:"pane_id"`
+	TabID         string `json:"tab_id"`
 	// Error explains a create that produced NO pane. Only a create carrying a
 	// WorktreeSpec can fail this way — an ordinary create is synchronous and
 	// its result arrives in the next workspace broadcast, as it always has.

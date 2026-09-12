@@ -50,6 +50,7 @@ const (
 	repoScanOverlay  repoScanPurpose = iota // Alt+G — resolveLazygitOverlay
 	repoScanPickList                        // setup dialog's git pick list
 	repoScanFlow                            // New flow dialog's repository row
+	repoScanTemplate                        // New from template dialog's directory row
 )
 
 // repoScanState tracks an in-flight git-discovery request.
@@ -162,7 +163,7 @@ func (m *Model) applyGitRepos(resp ipc.GitReposRespPayload, gen string) tea.Cmd 
 		if purpose == repoScanPickList {
 			return m.applyGitReposPickListError()
 		}
-		if purpose == repoScanFlow {
+		if purpose == repoScanFlow || purpose == repoScanTemplate {
 			// The row still holds the project root; a failed offer is not an
 			// error the user has to act on.
 			return nil
@@ -176,6 +177,12 @@ func (m *Model) applyGitRepos(resp ipc.GitReposRespPayload, gen string) tea.Cmd 
 	}
 	if purpose == repoScanFlow {
 		return m.applyGitReposFlow(resp.Repos)
+	}
+	if purpose == repoScanTemplate {
+		if m.dialog == dialogNewTemplate {
+			m.templateUI.repos = resp.Repos
+		}
+		return nil
 	}
 
 	// Resolved again rather than captured: the request is asynchronous and the

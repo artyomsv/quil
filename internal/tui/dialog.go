@@ -723,6 +723,8 @@ func (m Model) dispatchDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handleNotifySettingsKey(msg)
 	case dialogNewFlow, dialogFlowSettings:
 		return m.handleFlowDialogKey(msg)
+	case dialogNewTemplate:
+		return m.handleTemplateDialogKey(msg)
 	case dialogShortcuts:
 		return m.handleShortcutsKey(msg)
 	case dialogConfirm:
@@ -1451,6 +1453,8 @@ func (m Model) renderDialog() string {
 		content = m.renderNotifySettingsDialog()
 	case dialogNewFlow, dialogFlowSettings:
 		content = m.renderFlowDialog()
+	case dialogNewTemplate:
+		content = m.renderTemplateDialog()
 	case dialogShortcuts:
 		content = m.renderShortcutsDialog()
 	case dialogConfirm:

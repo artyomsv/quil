@@ -96,6 +96,7 @@ const (
 	palActMoveProjectUp
 	palActMoveProjectDown
 	palActNewFlow
+	palActNewTemplate
 	palActResumeFlow
 	palActCancelFlow
 )
@@ -403,6 +404,7 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 	}
 	cmds = append(cmds,
 		paletteCommand{action: palActNewFlow, enabled: newTabEnabled, label: "New flow", keywords: []string{"flow", "agents", "feature"}},
+		paletteCommand{action: palActNewTemplate, enabled: newTabEnabled, label: "New from template", keywords: []string{"template", "workspace", "agents"}},
 		paletteCommand{action: palActResumeFlow, enabled: m.activeFlow() != nil && m.activeFlow().Paused, label: "Resume flow", keywords: []string{"flow", "resume"}},
 		paletteCommand{action: palActCancelFlow, enabled: m.activeFlow() != nil, label: "Cancel flow…", keywords: []string{"flow", "cancel"}},
 		paletteCommand{
@@ -1075,6 +1077,8 @@ func (m Model) executePaletteCommand(c paletteCommand) (tea.Model, tea.Cmd) {
 	switch c.action {
 	case palActNewFlow:
 		return m.openNewFlow()
+	case palActNewTemplate:
+		return m.openNewTemplate()
 	case palActResumeFlow:
 		if f := m.activeFlow(); f != nil && f.Paused {
 			m.flowUI.dest = m.activeDest()

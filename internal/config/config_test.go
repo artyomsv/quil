@@ -84,6 +84,9 @@ func TestLoad_WarmShellPoolSize(t *testing.T) {
 		{"absent key", "[daemon]\nauto_start = false\n", 1},
 		{"explicit override", "[daemon]\nwarm_shell_pool_size = 3\n", 3},
 		{"zero disables pooling", "[daemon]\nwarm_shell_pool_size = 0\n", 0},
+		// Load preserves TOML values; the daemon constructor applies the bounds.
+		{"negative disables pooling", "[daemon]\nwarm_shell_pool_size = -1\n", -1},
+		{"oversized is bounded by pool", "[daemon]\nwarm_shell_pool_size = 1000\n", 1000},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

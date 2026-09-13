@@ -12,8 +12,19 @@ import (
 	"sync"
 	"time"
 
+	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/plugin"
 	apty "github.com/artyomsv/quil/internal/pty"
+	"github.com/artyomsv/quil/internal/shellinit"
 )
+
+const maxWarmShellPoolSize = 8
+
+// Copied at construction; seam-swapping tests set these before starting workers.
+var warmShellFillTimeout = 15 * time.Second
+var warmShellRetryDelay = time.Second
+
+var warmPowerShellQuotes = strings.NewReplacer("'", "''", "\u2018", "\u2018\u2018", "\u2019", "\u2019\u2019", "\u201a", "\u201a\u201a", "\u201b", "\u201b\u201b")
 
 type warmPoolShellConfig struct {
 	Cmd  string
@@ -22,7 +33,7 @@ type warmPoolShellConfig struct {
 }
 
 // warmShellPool uses one immutable shell configuration. Reloading the terminal
-// plugin does not update it: the old shell remains in use until daemon restart.
+// plugin does not update it: a changed shell bypasses pooling until daemon restart.
 // Parked shells have no reader after their first prompt; unsolicited idle output
 // can therefore fill their PTY buffer. Claim failure falls back to a fresh spawn.
 type warmShellPool struct {
@@ -35,14 +46,34 @@ type warmShellPool struct {
 	once         sync.Once
 	powershell   bool
 	claimTimeout time.Duration // set before claims; tests may shorten the bound
+	fillTimeout  time.Duration
+	retryDelay   time.Duration
+	stopTimeout  time.Duration
+	cleanup      sync.WaitGroup
 	mu           sync.Mutex
 	filling      *warmPoolSession
 }
 
+// newShellPoolFor runs after Start has loaded user plugin overrides.
+func newShellPoolFor(cfg config.Config, registry *plugin.Registry) *warmShellPool {
+	if shellCfg := shellinit.Configure(registry.Get("terminal").Command.Cmd, config.QuilDir()); shellCfg != nil {
+		return newWarmShellPool(warmPoolShellConfig{Cmd: shellCfg.Cmd, Args: shellCfg.Args, Env: shellCfg.Env}, cfg.Daemon.WarmShellPoolSize)
+	}
+	return newWarmShellPool(warmPoolShellConfig{}, 0)
+}
+
+func (p *warmShellPool) servesShell(cmd string) bool {
+	return p == nil || p.size <= 0 || p.cfg.Cmd == cmd
+}
+
 func newWarmShellPool(cfg warmPoolShellConfig, size int) *warmShellPool {
-	p := &warmShellPool{claimTimeout: 500 * time.Millisecond}
+	p := &warmShellPool{claimTimeout: 500 * time.Millisecond, fillTimeout: warmShellFillTimeout, retryDelay: warmShellRetryDelay, stopTimeout: time.Second}
 	if size <= 0 {
 		return p
+	}
+	if size > maxWarmShellPoolSize {
+		log.Printf("warm shell pool: size %d exceeds ceiling; using %d", size, maxWarmShellPoolSize)
+		size = maxWarmShellPoolSize
 	}
 	// Decide quoting once, from the command that will actually be started.
 	name := strings.TrimSuffix(strings.ToLower(filepath.Base(strings.ReplaceAll(cfg.Cmd, "\\", "/"))), ".exe")
@@ -76,6 +107,7 @@ func (p *warmShellPool) fill() {
 		}
 		// A vacant slot includes its in-flight spawn, so size bounds all idle
 		// shells, not just the sessions already parked in ready.
+		delay := p.retryDelay
 		for {
 			select {
 			case <-p.stop:
@@ -86,6 +118,7 @@ func (p *warmShellPool) fill() {
 			s.SetEnv(p.cfg.Env)
 			s.SetCWD(os.TempDir())
 			err := s.Start(p.cfg.Cmd, p.cfg.Args...)
+			var readerDone <-chan struct{}
 			if err == nil {
 				// Publish only after Start: Close must not race the platform
 				// session's initialization of its PTY handles.
@@ -93,13 +126,15 @@ func (p *warmShellPool) fill() {
 				select {
 				case <-p.stop:
 					p.mu.Unlock()
-					s.Close()
+					p.retire(s, nil)
 					return
 				default:
 					p.filling = s
 				}
 				p.mu.Unlock()
-				_, err = readWarmPrompt(s, "")
+				_, readerDone, err = p.awaitOperation(p.fillTimeout, func() ([]byte, error) {
+					return readWarmPrompt(s, "")
+				})
 				p.mu.Lock()
 				p.filling = nil
 				p.mu.Unlock()
@@ -107,26 +142,45 @@ func (p *warmShellPool) fill() {
 			if err == nil {
 				select {
 				case <-p.stop:
-					s.Close()
+					p.retire(s, readerDone)
 					return
 				case p.ready <- s:
 				}
 				break
 			}
-			s.Close()
+			retired := p.retire(s, readerDone)
+			select {
+			case <-p.stop:
+				return // shutdown's own Close must not produce a failure log
+			default:
+			}
 			log.Printf("warm shell pool: prepare shell: %v", err)
-			timer := time.NewTimer(time.Second)
+			timer := time.NewTimer(delay)
+			delay = nextWarmRetryDelay(delay)
 			select {
 			case <-p.stop:
 				timer.Stop()
 				return
 			case <-timer.C:
 			}
+			// Do not accumulate failed children if their platform cleanup wedges.
+			select {
+			case <-p.stop:
+				return
+			case <-retired:
+			}
 		}
 	}
 }
 
-func (p *warmShellPool) TryClaim(cwd string) (apty.Session, bool) {
+func nextWarmRetryDelay(delay time.Duration) time.Duration {
+	if delay >= 15*time.Second {
+		return 30 * time.Second
+	}
+	return delay * 2
+}
+
+func (p *warmShellPool) TryClaim(cwd string, cols, rows int) (apty.Session, bool) {
 	// nil is a valid receiver: New() leaves d.shellPool nil until Start()
 	// builds the real one from the fully-loaded registry (see daemon.go), and
 	// tests that construct a Daemon via New() alone never call Start() at
@@ -147,7 +201,7 @@ func (p *warmShellPool) TryClaim(cwd string) (apty.Session, bool) {
 	select {
 	case <-p.stop:
 		p.mu.Unlock()
-		s.Close()
+		s.Close() // pool sessions close asynchronously; Stop owns the admitted work
 		return nil, false
 	default:
 		p.wg.Add(1)
@@ -157,48 +211,87 @@ func (p *warmShellPool) TryClaim(cwd string) (apty.Session, bool) {
 	// Control characters are keystrokes to an interactive shell even inside
 	// quotes (in particular CR/LF would submit an incomplete command).
 	if cwd == "" || strings.IndexFunc(cwd, func(r rune) bool { return r < 32 || r == 127 }) >= 0 {
-		s.Close()
+		p.retire(s, nil)
 		return nil, false
 	}
 	command := "cd '" + strings.ReplaceAll(cwd, "'", "'\\''") + "'\r"
 	if p.powershell {
-		command = "Set-Location -LiteralPath '" + strings.ReplaceAll(cwd, "'", "''") + "'\r"
+		command = "Set-Location -LiteralPath '" + warmPowerShellQuotes.Replace(cwd) + "'\r"
 	}
-	var suffix []byte
-	var err error
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		var n int
-		n, err = s.Write([]byte(command))
+	suffix, done, err := p.awaitOperation(p.claimTimeout, func() ([]byte, error) {
+		// Resize before the echoed command and prompt. Unknown/degenerate
+		// dimensions keep the neutral fill geometry, as on the cold path.
+		if cols > 0 && rows > 0 && !degenerateSize(cols, rows) {
+			if err := s.Resize(uint16(rows), uint16(cols)); err != nil {
+				return nil, err
+			}
+		}
+		n, err := s.Write([]byte(command))
 		if err == nil && n != len(command) {
 			err = io.ErrShortWrite
 		}
-		if err == nil {
-			suffix, err = readWarmPrompt(s, cwd)
+		if err != nil {
+			return nil, err
 		}
+		return readWarmPrompt(s, cwd)
+	})
+	if err == nil {
+		select {
+		case <-p.stop:
+		default:
+			// Replay OSC 7 as well as its suffix so the new owner learns CWD.
+			return &warmPoolSession{Session: s, pending: suffix}, true
+		}
+	}
+	// Neither Close, WaitExit nor a stuck syscall may hold spawnMu. This
+	// operation owns only the discarded session, never a pane's replacement.
+	p.retire(s, done)
+	return nil, false
+}
+
+// awaitOperation bounds Read/Write/Resize without assuming Close unblocks them
+// immediately. Its buffered result belongs solely to this operation.
+func (p *warmShellPool) awaitOperation(timeout time.Duration, fn func() ([]byte, error)) ([]byte, <-chan struct{}, error) {
+	type result struct {
+		data []byte
+		err  error
+	}
+	results := make(chan result, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		data, err := fn()
+		results <- result{data, err}
 	}()
-	timer := time.NewTimer(p.claimTimeout)
+	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
-	case <-done:
-		if err == nil {
-			select {
-			case <-p.stop:
-			default:
-				// The confirmation reader has returned. Keep bytes after OSC 7:
-				// one Read may contain both its terminator and the visible prompt.
-				return &warmPoolSession{Session: s, pending: suffix}, true
-			}
-		}
+	case r := <-results:
+		<-done // successful handoff must have exactly one reader
+		return r.data, done, r.err
 	case <-timer.C:
+		return nil, done, fmt.Errorf("warm shell: prompt confirmation timed out")
 	case <-p.stop:
+		return nil, done, fmt.Errorf("warm shell: pool stopped")
 	}
-	// No failed claim is ever exposed to a pane. Close releases its blocked
-	// Read/Write; join before returning so it cannot outlive the test seam.
-	s.Close()
-	<-done
-	return nil, false
+}
+
+// retire is called only by admitted workers, or by Stop after they have joined.
+func (p *warmShellPool) retire(s apty.Session, operationDone <-chan struct{}) <-chan struct{} {
+	done := make(chan struct{})
+	p.cleanup.Add(1)
+	go func() {
+		defer p.cleanup.Done()
+		defer close(done)
+		s.Close()
+		if wrapped, ok := s.(*warmPoolSession); ok {
+			<-wrapped.closed
+		}
+		if operationDone != nil {
+			<-operationDone
+		}
+	}()
+	return done
 }
 
 func (p *warmShellPool) Stop() {
@@ -215,9 +308,25 @@ func (p *warmShellPool) Stop() {
 			s.Close() // wake a fill reader still waiting for the initial prompt
 		}
 		p.drain()
-		p.wg.Wait()
-		// A ready send can win its select concurrently with stop closing.
-		p.drain()
+		done := make(chan struct{})
+		go func() {
+			p.wg.Wait()
+			// A ready send can win its select concurrently with stop closing.
+			p.drain()
+			p.cleanup.Wait()
+			close(done)
+		}()
+		timeout := p.stopTimeout
+		if timeout <= 0 {
+			timeout = time.Second
+		}
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		select {
+		case <-done:
+		case <-timer.C:
+			// Windows WaitExit can wait forever; pane teardown must still run.
+		}
 	})
 }
 
@@ -225,7 +334,7 @@ func (p *warmShellPool) drain() {
 	for {
 		select {
 		case s := <-p.ready:
-			s.Close()
+			p.retire(s, nil)
 		default:
 			return
 		}
@@ -236,9 +345,9 @@ func (p *warmShellPool) drain() {
 // changes safe to clean up more than once. Read still has exactly one owner.
 type warmPoolSession struct {
 	apty.Session
-	pending  []byte
-	once     sync.Once
-	closeErr error
+	pending []byte
+	once    sync.Once
+	closed  chan struct{}
 }
 
 func (s *warmPoolSession) Read(buf []byte) (int, error) {
@@ -252,12 +361,20 @@ func (s *warmPoolSession) Read(buf []byte) (int, error) {
 
 func (s *warmPoolSession) Close() error {
 	s.once.Do(func() {
-		s.closeErr = s.Session.Close()
-		// Unclaimed sessions never reach streamPTYOutput's exit watcher.
-		// WaitExit also releases the Windows process handle after exit.
-		s.Session.WaitExit()
+		s.closed = make(chan struct{})
+		go func() {
+			defer close(s.closed)
+			s.Session.Close()
+			// Unclaimed sessions have no streamPTYOutput exit watcher. A
+			// nested handoff wrapper must also join the original async reap.
+			if wrapped, ok := s.Session.(*warmPoolSession); ok {
+				<-wrapped.closed
+			} else {
+				s.Session.WaitExit()
+			}
+		}()
 	})
-	return s.closeErr
+	return nil // cleanup is asynchronous, like releasePanes
 }
 
 // readWarmPrompt scans OSCs using the same Index/IndexAny idiom as
@@ -300,6 +417,7 @@ func readWarmPrompt(s apty.Session, cwd string) ([]byte, error) {
 				terminator = 2
 			}
 			payload := string(rest[:end])
+			sequence := data[:2+end+terminator]
 			data = rest[end+terminator:]
 			if payload == "133;A" {
 				if cwd == "" {
@@ -310,7 +428,8 @@ func readWarmPrompt(s apty.Session, cwd string) ([]byte, error) {
 				if !warmCWDMatches(strings.TrimPrefix(payload, "7;"), cwd) {
 					return nil, fmt.Errorf("warm shell: directory confirmation mismatch")
 				}
-				return append([]byte(nil), data...), nil
+				replay := append([]byte(nil), sequence...)
+				return append(replay, data...), nil
 			}
 		}
 	}

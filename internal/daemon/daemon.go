@@ -347,11 +347,7 @@ func (d *Daemon) Start() error {
 	}
 	d.registry.DetectAvailability()
 
-	if shellCfg := shellinit.Configure(d.registry.Get("terminal").Command.Cmd, config.QuilDir()); shellCfg != nil {
-		d.shellPool = newWarmShellPool(warmPoolShellConfig{Cmd: shellCfg.Cmd, Args: shellCfg.Args, Env: shellCfg.Env}, d.cfg.Daemon.WarmShellPoolSize)
-	} else {
-		d.shellPool = newWarmShellPool(warmPoolShellConfig{}, 0) // shell has no integration script; pooling is meaningless
-	}
+	d.shellPool = newShellPoolFor(d.cfg, d.registry)
 
 	// Restore workspace from disk if available
 	if err := d.restoreWorkspace(); err != nil {
@@ -5166,12 +5162,15 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 
 	// Claim only fresh terminal panes with shell integration, never restored
 	// or sandboxed panes. Other plugin names remain on the normal spawn path.
-	eligible := !restoring && typ == "terminal" && !sandboxed && p.Command.ShellIntegration
+	pane.PluginMu.Lock()
+	cwd, cols, rows := pane.CWD, pane.Cols, pane.Rows
+	hasInstanceArgs := len(pane.InstanceArgs) != 0
+	pane.PluginMu.Unlock()
+	// Plugin-specific environment, history and arguments require the cold setup.
+	eligible := !restoring && typ == "terminal" && !sandboxed && p.Command.ShellIntegration &&
+		d.shellPool.servesShell(p.Command.Cmd) && len(p.Command.Env) == 0 && !p.Command.RecordHistory && !hasInstanceArgs
 	if eligible {
-		pane.PluginMu.Lock()
-		cwd := pane.CWD
-		pane.PluginMu.Unlock()
-		if claimed, ok := d.shellPool.TryClaim(cwd); ok {
+		if claimed, ok := d.shellPool.TryClaim(cwd, cols, rows); ok {
 			ptySession = claimed
 			log.Printf("spawn: pane %s claimed a warm shell, cwd=%s", pane.ID, cwd)
 		} else {

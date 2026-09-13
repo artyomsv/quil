@@ -146,7 +146,7 @@ sidebar_toggle = "alt+shift+s"  # collapse/expand the PROJECT sidebar (not the n
 |---|---|---|---|
 | `snapshot_interval` | duration | `"30s"` | Periodic safety-net write of `workspace.json` + ghost buffers. Event-driven snapshots (pane create/destroy, etc.) still fire 500 ms after the trigger. |
 | `auto_start` | bool | `true` | The TUI auto-starts `quild --background` when it can't find an existing daemon. Set `false` if you manage `quild` yourself (systemd, launchd, etc.) — the TUI will error instead of auto-spawning. |
-| `warm_shell_pool_size` | int | `1` | Number of pre-spawned shells kept in a pool for faster Ctrl+N; `0` disables pooling. |
+| `warm_shell_pool_size` | int | `1` | Number of pre-spawned shells kept in a pool for faster Ctrl+N; capped at `8`, and `0` or negative values disable pooling. |
 
 ## `[ghost_buffer]`
 

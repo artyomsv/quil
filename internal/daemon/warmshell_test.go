@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -35,6 +36,10 @@ type scriptedWarmSession struct {
 	overlap     atomic.Bool
 	closeCalls  atomic.Int64
 	waitCalls   atomic.Int64
+	resizeErr   error
+	lastSize    atomic.Uint64
+	sizeAtWrite atomic.Uint64
+	resizeCalls atomic.Int64
 }
 
 func newScriptedWarmSession() *scriptedWarmSession {
@@ -75,6 +80,7 @@ func (s *scriptedWarmSession) Read(buf []byte) (int, error) {
 }
 
 func (s *scriptedWarmSession) Write(data []byte) (int, error) {
+	s.sizeAtWrite.Store(s.lastSize.Load())
 	s.writes <- string(data)
 	if s.blockWrite {
 		<-s.closed
@@ -90,6 +96,12 @@ func (s *scriptedWarmSession) Write(data []byte) (int, error) {
 		s.chunks <- append([]byte(nil), s.response...)
 	}
 	return len(data), nil
+}
+
+func (s *scriptedWarmSession) Resize(rows, cols uint16) error {
+	s.resizeCalls.Add(1)
+	s.lastSize.Store(uint64(rows)<<16 | uint64(cols))
+	return s.resizeErr
 }
 
 func (s *scriptedWarmSession) Close() error {
@@ -178,37 +190,48 @@ func TestWarmShellPool_FillWaitsForPrompt(t *testing.T) {
 }
 
 func TestWarmShellPool_TryClaim(t *testing.T) {
-	for _, cmd := range []string{"bash", "zsh", "pwsh.exe", "powershell.exe"} {
-		t.Run(cmd, func(t *testing.T) {
-			cwd := filepath.Join(t.TempDir(), "O'Brien #100%25 ?")
+	tests := []struct {
+		cmd  string
+		cwd  string
+		want string
+	}{
+		{"bash", "/target/O'Brien #100%25 ?", "cd '/target/O'\\''Brien #100%25 ?'\r"},
+		{"zsh", "/target/O'Brien #100%25 ?", "cd '/target/O'\\''Brien #100%25 ?'\r"},
+		{"pwsh.exe", "/target/O'Brien #100%25 ?", "Set-Location -LiteralPath '/target/O''Brien #100%25 ?'\r"},
+		{"powershell.exe", "/target/O'Brien #100%25 ?", "Set-Location -LiteralPath '/target/O''Brien #100%25 ?'\r"},
+		{"pwsh.exe", "/target/'‘’;Write-Output PWN;‚‛", "Set-Location -LiteralPath '/target/''‘‘’’;Write-Output PWN;‚‚‛‛'\r"},
+		{"powershell.exe", "/target/'‘’;Write-Output PWN;‚‛", "Set-Location -LiteralPath '/target/''‘‘’’;Write-Output PWN;‚‚‛‛'\r"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.cmd+tt.cwd, func(t *testing.T) {
+			cwd := tt.cwd
 			s := newScriptedWarmSession()
 			// An early zsh chpwd OSC 7 is not the confirmation. The prompt
 			// tail is in the SAME Read as the matching OSC 7, and must survive.
 			s.response = []byte("echoed cd\r\n" + warmOSC7(t.TempDir()) + "\x1b]133;A\x07" + warmOSC7(cwd) + "fresh prompt> ")
 			s.chunks <- []byte("\x1b]133;A\x07old prompt")
 			var created atomic.Int64
-			p := warmTestPool(t, warmPoolShellConfig{Cmd: cmd}, 1, func() apty.Session {
+			p := warmTestPool(t, warmPoolShellConfig{Cmd: tt.cmd}, 1, func() apty.Session {
 				if created.Add(1) == 1 {
 					return s
 				}
 				return newScriptedWarmSession()
 			})
 			warmReady(t, p, 1)
-			claimed, ok := p.TryClaim(cwd)
+			claimed, ok := p.TryClaim(cwd, 120, 40)
 			if !ok || claimed == nil {
 				t.Fatal("matching directory was not claimed")
 			}
 			t.Cleanup(func() { claimed.Close() })
-			want := "cd '" + strings.ReplaceAll(cwd, "'", "'\\''") + "'\r"
-			if cmd == "pwsh.exe" || cmd == "powershell.exe" {
-				want = "Set-Location -LiteralPath '" + strings.ReplaceAll(cwd, "'", "''") + "'\r"
+			if got := <-s.writes; got != tt.want || strings.Contains(got, "\n") {
+				t.Fatalf("Write = %q, want %q", got, tt.want)
 			}
-			if got := <-s.writes; got != want || strings.Contains(got, "\n") {
-				t.Fatalf("Write = %q, want %q", got, want)
+			if s.sizeAtWrite.Load() != 40<<16|120 {
+				t.Fatal("claim did not resize to 120x40 before writing cd")
 			}
-			buf := make([]byte, 128)
+			buf := make([]byte, 4096)
 			n, err := claimed.Read(buf)
-			if err != nil || string(buf[:n]) != "fresh prompt> " {
+			if err != nil || string(buf[:n]) != warmOSC7(cwd)+"fresh prompt> " {
 				t.Fatalf("handoff output = %q, %v", buf[:n], err)
 			}
 			if s.overlap.Load() || s.readers.Load() != 0 {
@@ -223,11 +246,14 @@ func TestWarmShellPool_TryClaim(t *testing.T) {
 }
 
 func TestWarmShellPool_TryClaimFailure(t *testing.T) {
-	for _, scenario := range []string{"mismatch", "timeout", "read error", "write error", "short write", "blocked write", "control character"} {
+	for _, scenario := range []string{"mismatch", "timeout", "read error", "write error", "short write", "blocked write", "resize error", "control character", ""} {
 		t.Run(scenario, func(t *testing.T) {
 			s := newScriptedWarmSession()
 			cwd := t.TempDir()
 			switch scenario {
+			case "":
+				cwd = ""
+				s.response = []byte("\x1b]133;A\x07" + warmOSC7(t.TempDir()))
 			case "mismatch":
 				s.response = []byte("\x1b]133;A\x07" + warmOSC7(t.TempDir()))
 			case "write error":
@@ -236,42 +262,50 @@ func TestWarmShellPool_TryClaimFailure(t *testing.T) {
 				s.shortWrite = true
 			case "blocked write":
 				s.blockWrite = true
+			case "resize error":
+				s.resizeErr = io.ErrClosedPipe
 			case "control character":
 				cwd += "\rwhoami"
 			}
 			// Manually park a session to isolate claims from refill behavior.
-			p := &warmShellPool{ready: make(chan apty.Session, 1), vacant: make(chan struct{}, 1), stop: make(chan struct{}), claimTimeout: 20 * time.Millisecond}
-			p.ready <- s
-			t.Cleanup(func() { s.Close() })
+			p := &warmShellPool{size: 1, ready: make(chan apty.Session, 1), vacant: make(chan struct{}, 1), stop: make(chan struct{}), claimTimeout: 20 * time.Millisecond}
+			p.ready <- &warmPoolSession{Session: s}
+			t.Cleanup(p.Stop)
 			if scenario == "read error" {
 				s.chunks <- nil
 			}
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
-				if claimed, ok := p.TryClaim(cwd); ok || claimed != nil {
+				if claimed, ok := p.TryClaim(cwd, 120, 40); ok || claimed != nil {
 					t.Error("failed confirmation handed off a shell")
 				}
 			}()
 			warmWait(t, "failed claim", done)
+			p.Stop() // join asynchronous cleanup before inspecting its observations
 			if s.closeCalls.Load() != 1 || s.readers.Load() != 0 {
 				t.Fatalf("failed claim: closes=%d readers=%d", s.closeCalls.Load(), s.readers.Load())
 			}
-			if scenario == "control character" && len(s.writes) != 0 {
-				t.Fatal("control character written to interactive shell")
+			if (scenario == "control character" || scenario == "" || scenario == "resize error") && len(s.writes) != 0 {
+				t.Fatal("invalid claim wrote to interactive shell")
 			}
 		})
 	}
 }
 
 func TestWarmShellPool_EmptyAndDisabled(t *testing.T) {
+	var absent *warmShellPool
+	if s, ok := absent.TryClaim("/tmp", 80, 24); ok || s != nil {
+		t.Fatal("nil pool claimed a shell")
+	}
+	absent.Stop()
 	for _, size := range []int{0, -1} {
 		var calls atomic.Int64
 		p := warmTestPool(t, warmPoolShellConfig{Cmd: "bash"}, size, func() apty.Session {
 			calls.Add(1)
 			return newScriptedWarmSession()
 		})
-		if s, ok := p.TryClaim("/tmp"); ok || s != nil {
+		if s, ok := p.TryClaim("/tmp", 80, 24); ok || s != nil {
 			t.Fatal("disabled pool claimed a shell")
 		}
 		p.Stop()
@@ -285,7 +319,7 @@ func TestWarmShellPool_EmptyAndDisabled(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		if s, ok := p.TryClaim("/tmp"); ok || s != nil {
+		if s, ok := p.TryClaim("/tmp", 80, 24); ok || s != nil {
 			t.Error("empty pool claimed a shell")
 		}
 	}()
@@ -381,7 +415,7 @@ func TestWarmShellPool_RefillsAfterClaim(t *testing.T) {
 		return s
 	})
 	warmReady(t, p, 1)
-	claimed, ok := p.TryClaim(cwd)
+	claimed, ok := p.TryClaim(cwd, 120, 40)
 	if !ok {
 		t.Fatal("initial shell was not claimed")
 	}
@@ -404,7 +438,7 @@ func TestWarmShellPool_StopCancelsAndJoinsClaim(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		if claimed, ok := p.TryClaim("/target"); ok || claimed != nil {
+		if claimed, ok := p.TryClaim("/target", 80, 24); ok || claimed != nil {
 			t.Error("claim succeeded during shutdown")
 		}
 	}()
@@ -427,7 +461,7 @@ func TestWarmShellPool_ConfirmationAcrossChunks(t *testing.T) {
 		s.chunks <- []byte(stream[split:] + "prompt")
 		s.chunks <- nil // malformed parsing must fail rather than hang this test
 		suffix, err := readWarmPrompt(s, cwd)
-		if err != nil || string(suffix) != "prompt" {
+		if err != nil || string(suffix) != warmOSC7(cwd)+"prompt" {
 			t.Fatalf("split %d: suffix=%q err=%v", split, suffix, err)
 		}
 	}
@@ -447,6 +481,16 @@ func TestWarmShellPool_ConfirmationRequiresPromptThenValidOSC7(t *testing.T) {
 		if _, err := readWarmPrompt(s, cwd); err == nil {
 			t.Errorf("invalid confirmation accepted: %q", data)
 		}
+	}
+}
+
+func TestWarmCWDMatches_Case(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		if !warmCWDMatches("file://host/c:/Users/Example/PROJECT", `C:\users\example\project`) {
+			t.Fatal("Windows CWD comparison must ignore drive and path case")
+		}
+	} else if warmCWDMatches("file://host/target/PROJECT", "/target/project") {
+		t.Fatal("Unix CWD comparison must preserve case")
 	}
 }
 

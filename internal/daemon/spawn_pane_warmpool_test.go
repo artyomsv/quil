@@ -44,7 +44,7 @@ func TestSpawnPane_ClaimsWarmShellWithoutStartingAnotherProcess(t *testing.T) {
 		t.Fatal("New constructed the pool before user plugin overrides are loaded")
 	}
 	d.registry.Get("terminal").Command.Cmd = "bash"
-	pane := &Pane{ID: "warm-hit", Type: "terminal", CWD: t.TempDir()}
+	pane := &Pane{ID: "warm-hit", Type: "terminal", CWD: t.TempDir(), Cols: 137, Rows: 43}
 	s, parked := warmSpawnPool(t, d, pane.CWD)
 	cold := &fakeSession{}
 	if err := d.spawnPane(pane, cold, false); err != nil {
@@ -75,6 +75,9 @@ func TestSpawnPane_ClaimsWarmShellWithoutStartingAnotherProcess(t *testing.T) {
 	if len(s.writes) != 1 {
 		t.Fatal("pool shell was not relocated through the claim handshake")
 	}
+	if s.sizeAtWrite.Load() != 43<<16|137 {
+		t.Fatal("spawnPane discarded the pane's initial size on a warm claim")
+	}
 }
 
 func TestSpawnPane_WarmPoolBypasses(t *testing.T) {
@@ -83,21 +86,37 @@ func TestSpawnPane_WarmPoolBypasses(t *testing.T) {
 		typ         string
 		restoring   bool
 		integration bool
+		custom      string
 	}{
-		{"restore", "terminal", true, true},
-		{"different shell plugin", "terminal-wide", false, true},
-		{"AI plugin", "claude-code", false, true},
-		{"integration disabled", "terminal", false, false},
-		{"unknown plugin fallback", "unknown-plugin", false, true},
+		{"restore", "terminal", true, true, ""},
+		{"different shell plugin", "terminal-wide", false, true, ""},
+		{"AI plugin", "claude-code", false, true, ""},
+		{"integration disabled", "terminal", false, false, ""},
+		{"unknown plugin fallback", "unknown-plugin", false, true, ""},
+		{"reloaded shell", "terminal", false, true, "shell"},
+		{"plugin environment", "terminal", false, true, "env"},
+		{"plugin history", "terminal", false, true, "history"},
+		{"instance arguments", "terminal", false, true, "args"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("QUIL_HOME", t.TempDir())
 			d := New(config.Default())
 			registerClaudePlugin(t, d)
+			d.registry.Get("terminal").Command.Cmd = "bash"
 			d.registry.Get("terminal").Command.ShellIntegration = tt.integration
 			pane := &Pane{ID: "warm-bypass", Type: tt.typ, CWD: t.TempDir()}
 			s, parked := warmSpawnPool(t, d, pane.CWD)
+			switch tt.custom {
+			case "shell":
+				d.registry.Get("terminal").Command.Cmd = "zsh"
+			case "env":
+				d.registry.Get("terminal").Command.Env = []string{"WARM_TEST=custom"}
+			case "history":
+				d.registry.Get("terminal").Command.RecordHistory = true
+			case "args":
+				pane.InstanceArgs = []string{"--login"}
+			}
 			cold := &fakeSession{}
 			if err := d.spawnPane(pane, cold, tt.restoring); err != nil {
 				t.Fatalf("spawnPane: %v", err)
@@ -134,6 +153,7 @@ func TestSpawnPane_SandboxBypassesWarmPool(t *testing.T) {
 		t.Run(typ, func(t *testing.T) {
 			d, pane, _ := sandboxCallsiteFixture(t)
 			d.registry = plugin.NewRegistry()
+			d.registry.Get("terminal").Command.Cmd = "bash"
 			pane.Type = typ
 			if typ != "terminal" {
 				pane.SandboxImage = "" // prefix alone must also exclude pooling

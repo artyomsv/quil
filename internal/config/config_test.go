@@ -67,6 +67,41 @@ tab_dock = "bottom"
 	}
 }
 
+func TestDefault_WarmShellPoolSize(t *testing.T) {
+	cfg := config.Default()
+	if cfg.Daemon.WarmShellPoolSize != 1 {
+		t.Errorf("WarmShellPoolSize = %d, want 1", cfg.Daemon.WarmShellPoolSize)
+	}
+}
+
+func TestLoad_WarmShellPoolSize(t *testing.T) {
+	tests := []struct {
+		name string
+		toml string
+		want int
+	}{
+		{"absent section", "[ui]\ntheme = \"dark\"\n", 1},
+		{"absent key", "[daemon]\nauto_start = false\n", 1},
+		{"explicit override", "[daemon]\nwarm_shell_pool_size = 3\n", 3},
+		{"zero disables pooling", "[daemon]\nwarm_shell_pool_size = 0\n", 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(path, []byte(tt.toml), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := config.Load(path)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.Daemon.WarmShellPoolSize != tt.want {
+				t.Errorf("WarmShellPoolSize = %d, want %d", cfg.Daemon.WarmShellPoolSize, tt.want)
+			}
+		})
+	}
+}
+
 func TestQuilDir(t *testing.T) {
 	dir := config.QuilDir()
 	if dir == "" {

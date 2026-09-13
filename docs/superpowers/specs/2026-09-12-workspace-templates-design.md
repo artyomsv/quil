@@ -169,9 +169,9 @@ the `cwd` of the FIRST pane — and only the first, since the rest are built wit
 combination would leave an arbitrary rule rather than a clean limitation, so
 `ipc.WorktreeSpec` gains `Subdir string` instead: empty keeps today's behaviour
 exactly, and a value is joined onto the root. The join is re-validated
-daemon-side even though `config.Validate` already refused an escaping relative
-path, because this is a different machine's filesystem and a symlink inside the
-checkout can escape after the join. A missing or escaping subdirectory refuses
+daemon-side even though `config.Templates.Validate` already refused an
+escaping relative path, because this is a different machine's filesystem and a
+symlink inside the checkout can escape after the join. A missing or escaping subdirectory refuses
 and leaves no pane; it never falls back to the root, because a pane in the
 wrong directory is the failure this feature exists to remove.
 
@@ -225,10 +225,13 @@ in `internal/tui`. It is table-testable without a `Model`.
 | Palette **New flow** / **Resume flow** / **Cancel flow**; the stage and round sidebar label | Replaced by **New from template**; a tab closes the ordinary way |
 | Flow persistence in the workspace snapshot | A created tab keeps no template state |
 | `flows.toml`, its config type and its F1 page | Replaced by `templates.toml` |
-| the persisted pane role marker | Replaced by `Pane.QuilMCP bool` |
+| `Pane.FlowRole` | Replaced by `Pane.QuilMCP bool` |
 
-`mcpDaemonMinVersion` returns to its released value and `retired reporting version floor`
-goes with `report_step`.
+`reportStepMinVersion` is removed with `report_step`. The shared
+`mcpDaemonMinVersion` stays at 1.72.0 so already-released tools remain available
+against that daemon version. Template creation uses its own
+`createFromTemplateMinVersion` floor of 1.73.0 because its request type is new
+in this release.
 
 ## 7. What is kept
 

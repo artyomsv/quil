@@ -835,7 +835,7 @@ func TestResolveSpawnArgs_FreshResume(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := resolveSpawnArgs(p, tt.pane, false, tt.resumeID, claimAny)
+			got := resolveSpawnArgs(p, tt.pane, false, false, tt.resumeID, claimAny)
 			if strings.Join(got, " ") != strings.Join(tt.want, " ") {
 				t.Errorf("resolveSpawnArgs:\n  got:  %v\n  want: %v", got, tt.want)
 			}

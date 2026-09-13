@@ -77,6 +77,64 @@ type reconnectState struct {
 	// reconnectResumeKey restarts the loop once the operator has fixed the
 	// cause. Never set for a failure the classifier did not recognise.
 	parked bool
+	// downAt is when this destination's CURRENT outage began. It bounds the
+	// input freeze (see freezesInput) and is deliberately separate from
+	// lastUpAt, which handleLinkLost clears on every drop.
+	//
+	// Zero means "no outage recorded" — the offline stand-ins, which set
+	// parked or active directly without going through handleLinkLost.
+	downAt time.Time
+}
+
+// reconnectFreezeWindow is how long the input freeze lasts after a link drops.
+//
+// The freeze exists so a keystroke typed at a link that is about to heal does
+// not read as accepted. That reasoning has a shelf life: it describes a blip,
+// and it stops describing anything once the host has been unreachable for the
+// better part of a minute. Past that the ladder is no longer "about to
+// succeed", it is waiting for a machine somebody has to switch back on.
+//
+// Unbounded, the freeze is a TRAP, and the 2026-09-10 incident is what it costs:
+// a remote host was powered off at 23:26, ssh answered "Connection timed out",
+// which ClassifyLinkFailure correctly calls TRANSIENT — so the ladder never
+// parked, `active` stayed true for 7.5 hours, and every key except quit was
+// swallowed while the user sat on that host's project. The only way out was
+// Ctrl+Q and a full restart, which is how the session's 56 tabs came to be
+// reattached at once.
+//
+// Releasing the freeze cannot resurrect the hazard it was added for, because
+// nothing queues input across an outage: Router.Send drops a frame for a
+// destination it has no live conn for, and a dead conn's Send fails at once
+// (ipc.ErrConnClosed). A key pressed here goes nowhere and is gone — it cannot
+// arrive late at a prompt that moved on. What the user gets back is the rest of
+// the client: the project switcher, the sidebar, every tab on every OTHER
+// daemon. The banner stays up for as long as the ladder climbs, so the state is
+// still visible; it is just no longer modal.
+//
+// Budgeted against the reboot case the backoff itself is tuned for — a host
+// that is coming back does so well inside this — and above reconnectMaxDelay,
+// so a link that heals on a late attempt was still frozen while it healed.
+const reconnectFreezeWindow = 45 * time.Second
+
+// freezesInput reports whether this destination's state should swallow input.
+//
+// Three states are distinguished, and only the first one freezes:
+//
+//   - climbing, recently — a drop that still looks like a blip. Freeze.
+//   - climbing, for a long time — the host is gone rather than blipping. The
+//     ladder keeps running; the UI is handed back. See reconnectFreezeWindow.
+//   - parked — nothing is retrying at all, so there is no imminent success for
+//     a keystroke to be confused about. Freezing here left the user modal on a
+//     banner whose only affordance was the resume key, which is checked ahead
+//     of the freeze precisely because it had to be.
+func (ls reconnectState) freezesInput() bool {
+	if !ls.active || ls.parked {
+		return false
+	}
+	if ls.downAt.IsZero() {
+		return true
+	}
+	return time.Since(ls.downAt) < reconnectFreezeWindow
 }
 
 // reconnectFlapWindow is how long a restored link must survive before the next
@@ -383,9 +441,12 @@ func (m Model) canReconnect(dest string) bool {
 // and rode straight through the freeze until it was named. Anything added later
 // that can reach a PTY belongs in this function.
 //
-// Ctrl+Q is the single exception. It is the only way out of a host that never
-// comes back, and by definition the reconnect loop cannot end the session
-// itself — it retries forever.
+// Ctrl+Q is the single exception WHILE the freeze is on, and the freeze is
+// bounded so that it does not have to be the only one for long: freezesInput
+// releases every message type once the outage passes reconnectFreezeWindow, or
+// the moment the ladder parks. Before that bound existed, Ctrl+Q was the only
+// key a user could press for as long as a powered-off host stayed powered off —
+// forever, since a reconnect loop cannot end the session itself.
 //
 // Scoped to the ACTIVE destination, which is the whole point of a per-daemon
 // link table: input goes to the pane the user is typing into, so only that
@@ -404,18 +465,21 @@ func (m Model) freezeInput(msg tea.Msg) (tea.Cmd, bool) {
 	// is the right default here: a pane that vanished mid-read has nowhere to
 	// deliver to, and sendClipboardToPaneID drops it on arrival anyway.
 	if p, ok := msg.(clipboardPastedMsg); ok {
-		return nil, m.linkOf(m.destOfPane(p.paneID)).active
+		return nil, m.linkOf(m.destOfPane(p.paneID)).freezesInput()
 	}
 	// An OFFLINE project is a client-side stand-in: it has no tabs and no panes,
 	// so no keystroke here can reach a PTY, and freezing would trap the user on
 	// a row whose whole purpose is to be navigated away from — the ladder holds
-	// `active` for as long as it climbs, and the switch-away key is frozen with
-	// everything else. A destination that dropped MID-session has Offline == nil
-	// and keeps the freeze, which is what it is for.
+	// `active` for as long as it climbs, and the switch-away key would be frozen
+	// with everything else. A destination that dropped MID-session has
+	// Offline == nil and keeps the freeze, which is what it is for — but only
+	// for reconnectFreezeWindow. This branch stays because it is unconditional
+	// where that bound is temporal: a stand-in row must be navigable from the
+	// FIRST second, not the forty-sixth.
 	if p := m.cur(); p != nil && p.Offline != nil {
 		return nil, false
 	}
-	if !m.linkOf(m.activeDest()).active {
+	if !m.linkOf(m.activeDest()).freezesInput() {
 		return nil, false
 	}
 	switch msg := msg.(type) {
@@ -886,7 +950,7 @@ func (m *Model) handleLinkLost(dest string, err error) {
 	// destination's connection, and a drop does not make the timers armed for the
 	// PREVIOUS one current again — resetting it here would let a redial result
 	// still in flight from before the outage be accepted as this outage's.
-	*ls = reconnectState{gen: ls.gen, active: true, lastErr: err, attempt: carried}
+	*ls = reconnectState{gen: ls.gen, active: true, lastErr: err, attempt: carried, downAt: time.Now()}
 
 	// The transient UI below belongs to the project on screen, so it is torn down
 	// only when the daemon that dropped is the one the user is looking at. A

@@ -183,7 +183,7 @@ func TestResolveSpawnArgs_Matrix(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := resolveSpawnArgs(tt.plugin, tt.pane, tt.restoring, "", claimAny)
+			got := resolveSpawnArgs(tt.plugin, tt.pane, tt.restoring, false, "", claimAny)
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("resolveSpawnArgs:\n  got:  %v\n  want: %v", got, tt.want)
 			}
@@ -278,7 +278,7 @@ func TestResolveSpawnArgs_ClaudeResumePromotion(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			transcriptExistsFn = func(p string) (bool, bool) { return tt.found && p == transcript, true }
-			got := resolveSpawnArgs(claudePlugin, tt.pane, true, "", claimAny)
+			got := resolveSpawnArgs(claudePlugin, tt.pane, true, false, "", claimAny)
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("resolveSpawnArgs:\n  got:  %v\n  want: %v", got, tt.want)
 			}
@@ -310,7 +310,7 @@ func TestResolveSpawnArgs_ClaudeResumePromotion_NotAppliedToOtherPlugins(t *test
 		CWD:         `E:\anywhere`,
 		PluginState: map[string]string{"session_id": "xyz"},
 	}
-	got := resolveSpawnArgs(p, pane, true, "", claimAny)
+	got := resolveSpawnArgs(p, pane, true, false, "", claimAny)
 	want := []string{"--resume", "xyz"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("resolveSpawnArgs:\n  got:  %v\n  want: %v", got, want)
@@ -413,7 +413,7 @@ func TestResolveSpawnArgs_ClaudeHookSessionID(t *testing.T) {
 				}
 				return false, true
 			}
-			got := resolveSpawnArgs(claudePlugin, tt.pane, true, "", claimAny)
+			got := resolveSpawnArgs(claudePlugin, tt.pane, true, false, "", claimAny)
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("resolveSpawnArgs:\n  got:  %v\n  want: %v", got, tt.want)
 			}
@@ -535,7 +535,7 @@ func TestResolveSpawnArgs_DoesNotMutatePluginArgs(t *testing.T) {
 		},
 		Persistence: plugin.PersistenceConfig{Strategy: "cwd_only"},
 	}
-	got := resolveSpawnArgs(p, &Pane{}, false, "", claimAny)
+	got := resolveSpawnArgs(p, &Pane{}, false, false, "", claimAny)
 	got[0] = "MUTATED"
 	if p.Command.Args[0] != "-l" {
 		t.Errorf("plugin.Command.Args was mutated: got %q, want %q", p.Command.Args[0], "-l")
@@ -620,7 +620,7 @@ func TestResolveSpawnArgs_OpencodeResume(t *testing.T) {
 				}
 				return tt.hookID, tt.hookErr
 			}
-			got := resolveSpawnArgs(opencodePlugin, tt.pane, true, "", claimAny)
+			got := resolveSpawnArgs(opencodePlugin, tt.pane, true, false, "", claimAny)
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("resolveSpawnArgs:\n  got:  %v\n  want: %v", got, tt.want)
 			}
@@ -800,7 +800,7 @@ func TestResolveSpawnArgs_CodexResume(t *testing.T) {
 				}
 				return tt.rec, tt.err
 			}
-			got := resolveSpawnArgs(codexPlugin, tt.pane, true, "", claimAny)
+			got := resolveSpawnArgs(codexPlugin, tt.pane, true, false, "", claimAny)
 			if !(len(got) == 0 && len(tt.want) == 0) && !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("resolveSpawnArgs:\n  got:  %v\n  want: %v", got, tt.want)
 			}
@@ -843,7 +843,7 @@ func TestResolveSpawnArgs_CodexResume_ClearsStaleTranscriptPath(t *testing.T) {
 		"session_id":      "01a05db2-6843-7612-8ea6-a7eca009f8b5",
 		"transcript_path": "/old/rollout.jsonl",
 	}}
-	got := resolveSpawnArgs(p, pane, true, "", claimAny)
+	got := resolveSpawnArgs(p, pane, true, false, "", claimAny)
 	if !reflect.DeepEqual(got, []string{"resume", sid}) {
 		t.Fatalf("args = %v", got)
 	}

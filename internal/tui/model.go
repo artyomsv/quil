@@ -7582,6 +7582,31 @@ func (m Model) enqueueInput(paneID string, data []byte) {
 		return
 	}
 	dest := m.destOfPane(paneID)
+	// PTY-bound bytes for a destination that is DOWN are dropped here rather
+	// than queued, and this is the only place that can do it.
+	//
+	// freezeInput is bounded now (reconnectFreezeWindow), which is right for
+	// keys the CLIENT consumes — navigation, the sidebar, the project switcher —
+	// and wrong for bytes headed at a PTY. The queue is why: enqueueInput hands
+	// the entry to inputForwarder, which resolves the CONNECTION later, and
+	// Router.Send looks up r.conns[dest] at SEND time. So an entry still in the
+	// channel when finishReconnect swaps the conn in is delivered to the
+	// REPLACEMENT — bytes typed at a host that was offline landing in the live
+	// agent session that came back, which is the precise hazard the freeze was
+	// built to prevent and the one case releasing the freeze reopened.
+	//
+	// Gated on `active` rather than on freezesInput: a parked link is down too,
+	// and past the freeze window the ladder is still climbing. Dropping is
+	// consistent with what already happens further down — Router.Send discards a
+	// frame for a dest it has no conn for — it just happens before the bytes can
+	// outlive the outage.
+	//
+	// Navigation is unaffected: it never reaches this function. Everything here
+	// is bytes for a child process, by construction — the four producers are
+	// keystroke forwarding, wheel notches and the two paste paths.
+	if m.linkOf(dest).active {
+		return
+	}
 	if m.inputCh == nil {
 		m.sendPaneInput(dest, paneID, data)
 		return

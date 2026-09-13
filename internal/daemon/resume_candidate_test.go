@@ -341,7 +341,7 @@ func TestResolveSpawnArgs_ClaimedSession_SpawnsFreshWithTogglesIntact(t *testing
 		InstanceArgs: []string{"--dangerously-skip-permissions"},
 		PluginState:  map[string]string{"session_id": uuidA},
 	}
-	got := resolveSpawnArgs(resumeTestPlugin(), pane, true, "", claimRefusing("pane-99999999"))
+	got := resolveSpawnArgs(resumeTestPlugin(), pane, true, false, "", claimRefusing("pane-99999999"))
 
 	for _, banned := range []string{"--resume", "--continue"} {
 		for _, a := range got {

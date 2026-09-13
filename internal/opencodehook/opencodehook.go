@@ -227,3 +227,30 @@ func ReadPersistedSessionID(quilDir, paneID string) (id string, modTime time.Tim
 	}
 	return strings.TrimSpace(string(buf)), info.ModTime(), nil
 }
+
+// RemovePersistedSession deletes the record for a pane id, so no later read can
+// return it. A missing file is success — the caller wants the record GONE, and
+// "was never there" satisfies that.
+//
+// Mirrors codexhook.RemovePersistedSession, and exists for the same single
+// caller: the daemon retiring a record under a pane that is starting FRESH.
+// Pane ids are 32 bits and nothing else deletes these files, so a newly minted
+// id can land on a destroyed pane's leftover — and once the new pane has run
+// once, that record is indistinguishable from its own. Removing it at the fresh
+// spawn makes the invariant true rather than merely unlikely.
+//
+// Safe by the same uniqueness that creates the hazard: ids are unique among
+// LIVE panes, so a record under a pane that has never run can only belong to
+// one that no longer exists.
+func RemovePersistedSession(quilDir, paneID string) error {
+	if quilDir == "" {
+		return errors.New("opencodehook: empty quilDir")
+	}
+	if err := validatePaneID(paneID); err != nil {
+		return err
+	}
+	if err := os.Remove(sessionIDFile(quilDir, paneID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}

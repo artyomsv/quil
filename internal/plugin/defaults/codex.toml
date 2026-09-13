@@ -55,8 +55,25 @@ default = false
 # earlier — the same trap `claude --continue` is.
 strategy = "session_scrape"
 resume_args = []
-# Codex runs on the alternate screen by default, so a byte replay would paint
-# garbage; `resume <id>` repaints the conversation itself.
+# No byte replay on attach. The reason is NOT the alternate screen, whatever an
+# earlier version of this comment said — measured on a real PTY (336 KB of codex
+# 0.154.0 output across startup, a resize jiggle, Ctrl+L and a large resize):
+# codex emits `ESC[?1049h` ZERO times. It draws inline on the MAIN screen.
+#
+# What it does emit is one `ESC[2J` at startup and never again, then a diffed
+# frame every ~75 ms built from relative moves and erase-in-place (`ESC[nC`,
+# `ESC[nX`) — roughly 7.5 KB/s even while idle. A diffed frame is meaningless
+# against a grid it did not draw, so the thing that makes a reattached pane
+# correct is the resize jiggle in redrawKick: codex answers SIGWINCH with
+# `ESC[H` and a FULL frame. Replaying the captured stream through the TUI's own
+# emulator produces a screen identical to the jiggle's, cell for cell, so the
+# kick is doing the work and the replay would only duplicate it.
+#
+# Do not "fix" this to true on the theory that the pane goes blank on reattach;
+# it does not. Re-measure before changing it: spawn the agent under a PTY, let
+# it start, count bytes over a fixed window with NO trigger first — codex never
+# goes quiet, so a settle-until-silent loop hangs and every later number is
+# meaningless without that control — then jiggle and count again.
 ghost_buffer = false
 
 [[error_handlers]]

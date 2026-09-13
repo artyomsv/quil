@@ -11,6 +11,49 @@ version section here and deletes them.
 
 ## [Unreleased]
 
+## [1.73.0] - 2026-09-13
+
+### Added
+- **New terminal panes can skip full shell startup.** The daemon now keeps a
+  small pool of pre-spawned, shell-integration-armed shells; `Ctrl+N`/`Ctrl+T`
+  claims one instead of spawning fresh when a match is ready, silently moving
+  it to the pane's working directory before handoff.
+
+  Configurable via `warm_shell_pool_size` in `config.toml` (default `1`, `0`
+  disables pooling). Falls back to the existing spawn path with no added
+  latency whenever the pool is empty, disabled, or doesn't apply — sandboxed
+  panes, non-terminal panes (`claude-code`, `codex`, etc.), and workspace
+  restore always use the normal path.
+
+## [1.72.3] - 2026-09-11
+
+### Fixed
+- **Restarting a Codex or opencode pane no longer throws the conversation away.**
+  `Alt+R` — and the MCP `restart_pane` tool — respawned the agent with no resume
+  argument, so it came back as a brand-new session with the live one abandoned and
+  no way to reach it again. Claude Code panes already reattached correctly; the
+  restart path simply never asked for the other agents' recorded session, even
+  though the daemon had it on disk the whole time.
+
+  A restart now rejoins the session the pane's own hook recorded, and keeps the
+  toggles the pane was created with. A pane with nothing recorded still starts
+  clean rather than guessing at the most recent session in the folder, which on a
+  multi-pane workspace would pick up a sibling pane's conversation.
+- **A remote host that goes away no longer locks up your keyboard.** While a link is
+  reconnecting, Quil drops input so a keystroke cannot arrive late in an agent
+  session that has moved on. That is right for a blip and wrong for a machine
+  somebody switched off: `ssh` reports a powered-off host as a connection timeout,
+  which is a *transient* failure, so the retry loop climbed forever and every key
+  except quit was swallowed for as long as it climbed — with the dead host's project
+  on screen, even the key that switches to another project.
+
+  The freeze is now bounded. After 45 seconds of an outage — or the moment the retry
+  loop parks itself on a failure that cannot heal, such as a rejected key — the
+  client hands the keyboard back. The banner stays up and the retry loop keeps
+  running, so a host that comes back still reattaches on its own; it just stops
+  being modal. Nothing is queued across an outage, so a key pressed at an
+  unreachable daemon still goes nowhere rather than arriving late.
+
 ## [1.72.2] - 2026-09-10
 
 ### Fixed

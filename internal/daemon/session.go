@@ -224,6 +224,22 @@ type Pane struct {
 	// non-comparable dynamic type panics — on a time.AfterFunc goroutine, which
 	// takes the whole daemon with it. PluginMu-protected, like PTY itself.
 	ptyGen uint64
+	// freshID records that this pane's ID was MINTED in this process rather
+	// than read back from a snapshot. Runtime-only and deliberately never
+	// persisted: restoring it would make every pane look fresh forever, which
+	// is the exact inversion of what it is for.
+	//
+	// It answers "can a hook record under this id belong to somebody else?".
+	// Only a newly minted id can collide with a destroyed pane's leftover; an
+	// id that came off disk names the pane that wrote the record. ptyGen alone
+	// cannot answer it — a RESTORED pane whose lazy spawn was refused (a
+	// missing worktree) has ptyGen 0 with a record that is entirely its own,
+	// and treating that as fresh deletes the conversation it was holding.
+	//
+	// Set by the two id-minting constructors (CreatePane, NewPane); the restore
+	// path builds its Pane literal directly and correctly leaves it false.
+	// PluginMu-protected, like ptyGen.
+	freshID bool
 	// inputEnqueued/inputWritten count items pushed onto and drained off the
 	// input queue. Atomic rather than PluginMu-protected: EnqueueInput sits on
 	// the keystroke path and takes no lock today, and the redraw throttle only
@@ -684,6 +700,9 @@ func (sm *SessionManager) CreatePane(tabID string, cwd string) (*Pane, error) {
 		TabID:     tabID,
 		CWD:       cwd,
 		OutputBuf: ringbuf.NewRingBuffer(sm.bufSize),
+		// This id has just been invented, so any hook record already filed
+		// under it belongs to a pane that no longer exists. See Pane.freshID.
+		freshID: true,
 	}
 
 	sm.panes[id] = pane
@@ -699,6 +718,8 @@ func (sm *SessionManager) NewPane(cwd string) *Pane {
 		ID:        id,
 		CWD:       cwd,
 		OutputBuf: ringbuf.NewRingBuffer(sm.bufSize),
+		// Same as CreatePane: a minted id owns no history. See Pane.freshID.
+		freshID: true,
 	}
 }
 

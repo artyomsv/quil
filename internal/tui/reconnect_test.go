@@ -2003,21 +2003,41 @@ func TestReconnect_ResumeKeyRestartsAParkedLoop(t *testing.T) {
 	}
 }
 
-// TestReconnect_OrdinaryKeysStayFrozenWhileParked guards the freeze. Only the
-// resume key and the quit escape may act.
-func TestReconnect_OrdinaryKeysStayFrozenWhileParked(t *testing.T) {
+// TestReconnect_OrdinaryKeysDoNotResumeAParkedLoop keeps the half of the old
+// guard that is about the LADDER, and drops the half that was about the
+// keyboard.
+//
+// This test used to assert that a parked link swallows every key but resume and
+// quit ("guards the freeze. Only the resume key and the quit escape may act").
+// That is the same trap reconnectFreezeWindow exists to remove, in its other
+// shape: parked means the ladder has STOPPED, so there is no imminent reconnect
+// for a keystroke to be confused about — the freeze's entire justification is a
+// key arriving late at a session that moved on, and nothing is going to arrive.
+// What it bought instead was a modal client reached by a wrong IdentityFile:
+// with several daemons, one host's bad key froze the tabs of every OTHER host
+// too, because the freeze is scoped to the ACTIVE destination and the key that
+// changes which destination is active was frozen along with the rest.
+//
+// The ladder half still matters and is what is asserted now: an ordinary key
+// must not be mistaken for the resume key, or a parked loop would restart on
+// any keypress and re-authenticate against a key sshd has already refused —
+// which is what the rate decay above exists to avoid.
+func TestReconnect_OrdinaryKeysDoNotResumeAParkedLoop(t *testing.T) {
 	m := newReconnectTestModel(t, 1)
+	// A client is now required where it was not before: the key is no longer
+	// swallowed, so it reaches the pane-input path and that path sends. The
+	// fake is the point — the send goes nowhere, which is exactly what a
+	// keystroke aimed at an unreachable daemon should do.
+	m.client = newFakeConn()
+	m.initKeymap()
 	m.linkFor(testDest).active = true
 	m.linkFor(testDest).parked = true
 
-	updated, cmd := m.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	updated, _ := m.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
 	got := updated.(Model)
 
 	if !got.linkOf(testDest).parked {
 		t.Error("an ordinary key must not resume a parked loop")
-	}
-	if cmd != nil {
-		t.Error("an ordinary key must produce no command while frozen")
 	}
 }
 

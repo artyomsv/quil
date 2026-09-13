@@ -54,6 +54,7 @@ Quil exposes **35 MCP tools**: agents can manage [projects and tabs](mcp.md#proj
   - [What's New after an upgrade](#whats-new-after-an-upgrade)
   - [Remote daemon over SSH](#remote-daemon-over-ssh)
   - [Cross-platform](#cross-platform)
+- [Workspace templates](#workspace-templates)
 
 ---
 
@@ -796,9 +797,45 @@ Linux, macOS, and Windows from day one. PTY management via `creack/pty` (Unix) a
 
 ## Workspace templates
 
-The command palette's **New from template** creates a tab of named panes with
-frozen model/toggle arguments, optional starting prompts and one of five layouts.
-Use the chosen directory directly or request a new branch/worktree. The shipped
-agent-team, pair and review templates are editable through F1 → Settings →
-Templates in the TOML editor. MCP exposes the same creation through
-`create_from_template`. See [Workspace templates](workspace-templates.md).
+A template describes one tab: its panes, their layout, and an optional starting
+prompt for each. Quil recreates that setup on demand and then gets out of the
+way — nothing survives creation, and nothing supervises what the panes go on to
+do. The tab that results is an ordinary tab.
+
+The command palette's **New from template** has four rows: the template, an
+optional free-text task, a directory, and an optional new branch. The directory
+row is the same daemon-side browser the Ctrl+N pane dialog uses — Up/Down moves,
+Enter descends, Left goes up, Ctrl+V jumps to a pasted path — so the directory
+is chosen by navigating rather than typed. Creating is refused while a listing
+is still loading, so the tab cannot land somewhere other than what is on screen.
+Ctrl+S creates from any row; Enter creates from every row except the task editor
+(where it adds a line) and the browser (where it descends).
+
+Each pane may name a `model`, plugin `toggles` by name, a subdirectory, a mute,
+and a `prompt`. Model and toggle arguments are **frozen into the pane at
+creation**, so editing the file later cannot change what an existing pane
+restarts with. Prompts substitute `{{task}}`, `{{dir}}`, `{{branch}}` and
+`{{panes}}` in a single pass — placeholder-like text inside your own task stays
+literal. `{{panes}}` lists every pane in the tab with its name, id and type,
+which is what lets one pane's prompt drive the others without you pasting ids.
+
+Five layouts: `rows`, `columns`, `main-left`, `main-top`, `grid`. The pane
+marked `main` is the anchor for the two main-\* shapes, chosen independently of
+list order — so a pane that should be briefed last can still hold the large
+region. Panes are created and prompted in listed order, after every pane exists.
+
+Naming a branch opens the tab in a fresh git worktree instead: a placeholder
+pane spins while git runs, then the real panes replace it.
+
+Three templates ship — **agent-team**, **pair** and **review** — and
+`templates.toml` is editable at F1 → Settings → Templates in the TOML editor.
+A save validates the whole document before replacing it atomically; an invalid
+file keeps the editor open with the reason and leaves the previous file intact.
+Comments and prompt formatting survive a round trip.
+
+MCP exposes the same creation through `create_from_template`. Two limits are
+worth knowing before writing a team prompt: a Codex pane's output cannot be read
+back as its answer (scrollback and screen capture are both spinner animation, so
+ask for a file), and the per-pane MCP server is a guard rail rather than a
+security boundary against an agent that has a shell. See
+[Workspace templates](workspace-templates.md).

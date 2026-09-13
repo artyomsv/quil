@@ -39,6 +39,9 @@ Type `quil` after a reboot — every tab, pane, working directory, layout split,
 | **Every project in one sidebar** | **…including ones on other machines** |
 | <img src="https://cdn.stukans.com/quil/screenshots/projects_1_main-800.webp" alt="Quil sidebar listing a dozen projects with per-pane agent state and git branch under the active one" width="420"> | <img src="https://cdn.stukans.com/quil/screenshots/projects_2_with_remote-800.webp" alt="A remote project in the sidebar labelled with its ssh host, its terminal, lazygit and Claude Code panes all running on that machine" width="420"> |
 | Projects group tabs and roll up their agents — `▲` needs you, `⠹` working (spinning), `✓` finished while you were elsewhere. Per-pane git branch underneath. | A remote host is a sibling row with its host under the name. Its panes run over there; the sidebar reports them exactly like local ones. |
+| **A whole tab of agents, from one entry** | **…and the templates are yours to write** |
+| <img src="https://cdn.stukans.com/quil/screenshots/templates-3-800.webp" alt="A tab created from the agent-team template: orchestrator anchored on the left, muted analyst and developer panes stacked on the right" width="420"> | <img src="https://cdn.stukans.com/quil/screenshots/templates-settings-2-800.webp" alt="templates.toml open in Quil's TOML editor showing the agent-team template and its analyst pane prompt" width="420"> |
+| **New from template** builds the panes, names them, lays them out and types each one's opening prompt. | `templates.toml` is an ordinary file. Panes, models, toggles, layout and prompts — edit it in Quil and save. |
 
 ## Install
 
@@ -207,6 +210,45 @@ scripts/sandbox-image.sh --with codex,opencode # add the other agents
 Prerequisites, both Claude sign-in flows, the image recipe line by line, and the
 limits that are *not* bounded (egress, branch pointers, submodules):
 [docs/sandbox-panes.md](docs/sandbox-panes.md).
+
+## Set the whole tab up at once
+
+Some work needs four panes, not one — an agent that plans, an agent that writes
+code, a lazygit, a shell. Building that by hand every time is the boring part,
+and the opening prompt for each pane is the part you retype.
+
+A **template** describes one tab: its panes, their layout, and an optional
+starting prompt for each. Open the command palette, choose **New from
+template**, pick a directory, and Quil builds it.
+
+```toml
+[[templates]]
+name = "pair"
+description = "Claude and Codex side by side"
+layout = "columns"
+
+  [[templates.panes]]
+  type = "claude-code"
+  name = "claude"
+
+  [[templates.panes]]
+  type = "codex"
+  name = "codex"
+```
+
+A pane may set a `model`, plugin `toggles` by name, a subdirectory, a mute, and
+a `prompt`. Prompts take `{{task}}` (the text you typed), `{{dir}}`,
+`{{branch}}` and `{{panes}}` — the last one lists every pane in the tab with
+its id, so a prompt can tell one agent how to reach the others without you
+copying ids by hand. Add a branch name and the tab opens in a fresh git
+worktree.
+
+Three templates ship: **agent-team**, **pair** and **review**. Edit them, or add
+your own, at **F1 → Settings → Templates**. An invalid file is refused with the
+reason and your previous one is left alone.
+
+Every field, every layout, and the limits worth knowing before writing a team
+prompt: [docs/workspace-templates.md](docs/workspace-templates.md).
 
 ## Let your AI assistant drive Quil
 

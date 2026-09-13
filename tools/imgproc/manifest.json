@@ -29,6 +29,9 @@
     { "src": "projects_1_main.png",            "type": "content", "profiles": ["full", "hero", "card"] },
     { "src": "projects_2_with_remote.png",     "type": "content", "profiles": ["full", "hero", "card"] },
     { "src": "projects_3_add_remote_1.png",    "type": "dialog",  "profiles": ["hero", "card"] },
-    { "src": "projects_4_add_remote_2.png",    "type": "dialog",  "profiles": ["hero", "card"] }
+    { "src": "projects_4_add_remote_2.png",    "type": "dialog",  "profiles": ["hero", "card"] },
+    { "src": "templates-3.png",                "type": "content", "profiles": ["full", "hero", "card"] },
+    { "src": "templates-settings-1.png",       "type": "dialog",  "profiles": ["hero", "card"] },
+    { "src": "templates-settings-2.png",       "type": "content", "profiles": ["hero", "card"] }
   ]
 }

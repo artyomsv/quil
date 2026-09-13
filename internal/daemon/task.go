@@ -45,7 +45,30 @@ const (
 	// submits it. Claude Code and codex both accept a paste and then a
 	// separate CR; sending the CR inside the same write has the newline land
 	// in the input buffer as text on some versions.
-	pasteSettle = 100 * time.Millisecond
+	//
+	// CODEX is what makes this number large. Under ConPTY it does not receive
+	// the bracketed-paste markers as a paste EVENT — it sees a fast run of
+	// characters — so it falls back to its paste-burst heuristic
+	// (codex-rs/tui/src/bottom_pane/paste_burst.rs, read at v0.154.0):
+	// PASTE_ENTER_SUPPRESS_WINDOW is 120 ms and is REFRESHED on every
+	// buffered character, so it ends 120 ms after the last one codex
+	// processed, and PASTE_BURST_ACTIVE_IDLE_TIMEOUT is 60 ms on Windows
+	// before the buffer reaches the composer at all. An Enter inside that
+	// window is appended to the prompt as a newline AND extends the window by
+	// another 120 ms, so it is swallowed in silence: the prompt sits in the
+	// composer looking delivered and nothing ever runs. At 100 ms that was
+	// the common case — measured 2026-09-13, a delegated task to a codex pane
+	// never started, while the same delivery to a claude pane in the same tab
+	// started in 0.6 s. Only a real bracketed-paste event clears the window
+	// early (clear_after_explicit_paste), which is exactly what does not
+	// happen here.
+	//
+	// 400 ms is 60 + 120 with margin for the lag between our write and codex
+	// reading it. It is a CEILING on the gap, not a floor: the CR is timed
+	// from the enqueue, and both halves cross the same ordered per-pane
+	// writer, so a child that is slow to drain its stdin narrows the gap it
+	// actually sees. Claude Code accepts any gap, so one value serves both.
+	pasteSettle = 400 * time.Millisecond
 )
 
 type task struct {

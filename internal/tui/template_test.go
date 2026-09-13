@@ -17,6 +17,29 @@ func templateUpdate(t *testing.T, m Model, msg tea.Msg) Model {
 	return next.(Model)
 }
 
+// templateBrowseReply answers whatever browse request the dialog has in
+// flight. Routed through Update rather than applyBrowseDir directly, because
+// the defect this dialog shipped with was a key that produced no request at
+// all — a direct call would assert the listing machinery while bypassing the
+// wiring under test.
+func templateBrowseReply(t *testing.T, m Model, resolved string, dirs ...string) Model {
+	t.Helper()
+	if !m.browse.pending {
+		t.Fatal("no browse request in flight")
+	}
+	entries := make([]ipc.BrowseEntry, 0, len(dirs))
+	for _, d := range dirs {
+		entries = append(entries, ipc.BrowseEntry{Name: d, IsDir: true})
+	}
+	return templateUpdate(t, m, browseDirMsg{
+		Gen: m.browse.gen,
+		Resp: ipc.BrowseDirRespPayload{
+			Path: m.browse.path, Child: m.browse.child,
+			Resolved: resolved, Parent: "/", Entries: entries,
+		},
+	})
+}
+
 func newTemplateDialog(t *testing.T) Model {
 	t.Helper()
 	t.Setenv("QUIL_HOME", t.TempDir())
@@ -39,50 +62,61 @@ func newTemplateDialog(t *testing.T) Model {
 		t.Fatal("template palette command missing")
 	}
 	m = templateUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
-	if m.dialog != dialogNewTemplate || m.templateUI.row != 0 {
+	if m.dialog != dialogNewTemplate || m.templateUI.row != templateRowTemplate {
 		t.Fatal("dialog did not open on template row")
 	}
-	return m
+	return templateBrowseReply(t, m, "/project root", "Program Files", "src")
 }
 
-func TestTemplateDialog_FourRows_SubmitsAllValuesWithTypedSpaces(t *testing.T) {
+func TestTemplateDialog_FourRows_EnterCreatesWithBrowsedDirectory(t *testing.T) {
 	for _, branch := range []string{"", "feat/example"} {
 		t.Run("branch="+branch, func(t *testing.T) {
 			m := newTemplateDialog(t)
-			if m.templateUI.cwd != "/project root" {
-				t.Fatal("did not start at project root")
+			if m.cwdBrowseDir != "/project root" {
+				t.Fatalf("browser did not open at the project root: %q", m.cwdBrowseDir)
 			}
 			m = templateUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyRight})
 			if m.templateUI.templates[m.templateUI.selected].Name != "two" || !strings.Contains(m.renderTemplateDialog(), "Second description") {
 				t.Fatal("template did not cycle")
 			}
+
 			m = templateUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyTab})
 			for _, r := range "A useful task" {
 				m = templateUpdate(t, m, tea.KeyPressMsg{Code: r, Text: string(r)})
 			}
+			// Enter is a newline in the task editor and must NOT create.
 			m = templateUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+			if m.templateUI.pending {
+				t.Fatal("Enter in the task editor created the tab")
+			}
 			m = templateUpdate(t, m, editorPasteMsg("Second line"))
+
 			m = templateUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyTab})
-			m = templateUpdate(t, m, gitReposMsg{Gen: m.repoScan.gen, Resp: ipc.GitReposRespPayload{CWD: m.repoScan.cwd, Repos: []string{"/discovered/one", "/discovered/two"}}})
-			m = templateUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyRight})
-			if m.templateUI.cwd != "/discovered/one" {
-				t.Fatal("discovery did not populate directory picker")
+			if m.templateUI.row != templateRowDirectory {
+				t.Fatal("directory is not third")
 			}
-			m = templateUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyLeft})
-			if m.templateUI.cwd != "/discovered/two" {
-				t.Fatal("reverse directory cycling failed")
+			// ".." is row 0; the first real folder is row 1.
+			m = templateUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
+			m = templateUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+			if m.templateUI.pending {
+				t.Fatal("Enter on the directory row created instead of descending")
 			}
-			m.templateUI.cwd = ""
-			const path = "C:/Program Files/project"
-			for _, r := range path {
-				m = templateUpdate(t, m, tea.KeyPressMsg{Code: r, Text: string(r)})
+			if m.browse.child != "Program Files" {
+				t.Fatalf("descend asked for the wrong child: %q", m.browse.child)
 			}
+			m = templateBrowseReply(t, m, "/project root/Program Files")
+			if m.cwdBrowseDir != "/project root/Program Files" {
+				t.Fatalf("descend did not land: %q", m.cwdBrowseDir)
+			}
+
 			m = templateUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyTab})
-			if m.templateUI.row != 3 {
+			if m.templateUI.row != templateRowBranch {
 				t.Fatal("branch is not fourth")
 			}
 			m = templateUpdate(t, m, tea.PasteMsg{Content: branch})
-			m = templateUpdate(t, m, tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
+
+			// Enter creates from every row but the task editor.
+			m = templateUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 			sent := m.client.(*fakeConn).lastSent()
 			if sent == nil || sent.Type != ipc.MsgCreateFromTemplateReq {
 				t.Fatal("wrong request", sent)
@@ -91,7 +125,8 @@ func TestTemplateDialog_FourRows_SubmitsAllValuesWithTypedSpaces(t *testing.T) {
 			if err := sent.DecodePayload(&req); err != nil {
 				t.Fatal(err)
 			}
-			if req.Template != "two" || req.Task != "A useful task\nSecond line" || req.CWD != path || req.Branch != branch || req.ProjectID != "proj-local" {
+			if req.Template != "two" || req.Task != "A useful task\nSecond line" ||
+				req.CWD != "/project root/Program Files" || req.Branch != branch || req.ProjectID != "proj-local" {
 				t.Fatalf("payload: %+v", req)
 			}
 			if !m.templateUI.pending {
@@ -101,15 +136,38 @@ func TestTemplateDialog_FourRows_SubmitsAllValuesWithTypedSpaces(t *testing.T) {
 	}
 }
 
+// The browser is the commit point for the directory, so a create issued while
+// its round trip is still in flight would use the daemon's default rather than
+// the directory on screen.
+func TestTemplateDialog_SubmitDuringBrowse_WaitsInsteadOfCommittingDefault(t *testing.T) {
+	m := newTemplateDialog(t)
+	m = templateUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyTab})
+	m = templateUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyTab})
+	m = templateUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
+	m = templateUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // descend; now in flight
+	before := m.client.(*fakeConn).sentCount()
+	m = templateUpdate(t, m, tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
+	if m.templateUI.pending || m.client.(*fakeConn).sentCount() != before {
+		t.Fatal("created while the directory was still being read")
+	}
+	if !strings.Contains(m.renderTemplateDialog(), "Reading the directory") {
+		t.Fatal("the wait is not explained")
+	}
+	m = templateBrowseReply(t, m, "/project root/Program Files")
+	m = templateUpdate(t, m, tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
+	if !m.templateUI.pending {
+		t.Fatal("create still blocked after the listing landed")
+	}
+}
+
 func TestTemplateDialog_PasteOnEveryRow_OnlyFocusedFieldChangesAndPaneReceivesNothing(t *testing.T) {
-	for row := 0; row < 4; row++ {
+	for row := 0; row < templateRowCount; row++ {
 		for _, transport := range []string{"terminal", "editor", "pending-clipboard"} {
 			t.Run(fmt.Sprintf("row%d/%s", row, transport), func(t *testing.T) {
 				m := newTemplateDialog(t)
 				for i := 0; i < row; i++ {
 					m = templateUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyTab})
 				}
-				m.templateUI.cwd = ""
 				const text = "paste with spaces\nnext"
 				var paste tea.Msg = tea.PasteMsg{Content: text}
 				if transport == "editor" {
@@ -119,18 +177,21 @@ func TestTemplateDialog_PasteOnEveryRow_OnlyFocusedFieldChangesAndPaneReceivesNo
 					paste = clipboardPastedMsg{paneID: "pane-1", text: text}
 				}
 				m = templateUpdate(t, m, paste)
-				wantTask, wantDir, wantBranch := "", "", ""
+				wantTask, wantBranch := "", ""
 				switch row {
-				case 1:
+				case templateRowTask:
 					wantTask = text
-				case 2:
-					wantDir = sanitizeDialogInput(text)
-				case 3:
+				case templateRowBranch:
 					wantBranch = sanitizeDialogInput(text)
 				}
 				f := m.templateUI
-				if f.selected != 0 || f.editor.Content() != wantTask || f.cwd != wantDir || f.branch != wantBranch {
-					t.Fatalf("paste reached wrong field: task=%q dir=%q branch=%q", f.editor.Content(), f.cwd, f.branch)
+				if f.selected != 0 || f.editor.Content() != wantTask || f.branch != wantBranch {
+					t.Fatalf("paste reached wrong field: task=%q branch=%q", f.editor.Content(), f.branch)
+				}
+				// The directory row is a browser: a paste is a path to navigate
+				// to, never text appended to the committed directory.
+				if m.cwdBrowseDir != "/project root" {
+					t.Fatalf("paste edited the browsed directory: %q", m.cwdBrowseDir)
 				}
 				conn := m.client.(*fakeConn)
 				conn.mu.Lock()
@@ -145,7 +206,7 @@ func TestTemplateDialog_PasteOnEveryRow_OnlyFocusedFieldChangesAndPaneReceivesNo
 	}
 }
 
-func TestTemplateDialog_RemoteDiscoveryAndSubmit_StayOnPinnedDestination(t *testing.T) {
+func TestTemplateDialog_RemoteBrowseAndSubmit_StayOnPinnedDestination(t *testing.T) {
 	t.Setenv("QUIL_HOME", t.TempDir())
 	local, remote := newFakeConn(), newFakeConn()
 	router := NewRouter(map[string]Client{"": local, "gpu01": remote})
@@ -162,12 +223,27 @@ func TestTemplateDialog_RemoteDiscoveryAndSubmit_StayOnPinnedDestination(t *test
 	m.activeProject = 0
 	runCmd(cmd)
 	if local.sentCount() != 0 {
-		t.Fatal("remote scan leaked locally")
+		t.Fatal("remote browse leaked locally")
 	}
 	sent := remote.lastSent()
-	if sent == nil || sent.Type != ipc.MsgGitReposReq || sent.Origin != "gpu01" {
-		t.Fatal("scan not stamped", sent)
+	if sent == nil || sent.Type != ipc.MsgBrowseDirReq || sent.Origin != "gpu01" {
+		t.Fatal("browse not stamped", sent)
 	}
+	m = templateBrowseReply(t, m, "/remote root", "service")
+
+	// Navigating after the active project moved must still ask the pinned host.
+	m = templateUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyTab})
+	m = templateUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyTab})
+	_, nav := m.handleTemplateDialogKey(tea.KeyPressMsg{Code: tea.KeyDown})
+	runCmd(nav)
+	m2, nav := m.handleTemplateDialogKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = m2.(Model)
+	runCmd(nav)
+	if local.sentCount() != 0 || remote.lastSent().Type != ipc.MsgBrowseDirReq {
+		t.Fatal("navigation changed hosts")
+	}
+	m = templateBrowseReply(t, m, "/remote root/service")
+
 	m = templateUpdate(t, m, tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
 	if local.sentCount() != 0 || remote.lastSent().Type != ipc.MsgCreateFromTemplateReq {
 		t.Fatal("submission changed hosts")
@@ -176,7 +252,7 @@ func TestTemplateDialog_RemoteDiscoveryAndSubmit_StayOnPinnedDestination(t *test
 	if err := remote.lastSent().DecodePayload(&req); err != nil {
 		t.Fatal(err)
 	}
-	if req.ProjectID != "proj-remote" || req.CWD != "/remote root" {
+	if req.ProjectID != "proj-remote" || req.CWD != "/remote root/service" {
 		t.Fatal(req)
 	}
 }

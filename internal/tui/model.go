@@ -2349,7 +2349,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.setFormOK("connected to " + sanitizeRemoteText(msg.dest))
 		m.projectFormDest = msg.dest
 		m.projectFormCursor = projectRowRootDir
-		m.resetProjectBrowseState()
+		m.resetDirBrowseState()
 		// Sequenced, not batched with the browse: adoptDest writes the attach
 		// ledger onto this Model, and the browse must be requested against the
 		// destination it just installed.

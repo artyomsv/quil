@@ -8,10 +8,10 @@ Open the command palette and choose **New from template**. The dialog has four r
 
 1. **Template** — use Left/Right to choose a template and see its description.
 2. **Task** — optional multiline text to include in prompts.
-3. **Directory** — starts at the active project's root. Type any path, including spaces, or use Left/Right to choose a repository discovered by that project's daemon.
+3. **Directory** — a directory browser, the same one the Ctrl+N pane dialog uses. It opens at the active project's root. Up/Down move, Enter descends, Left or Backspace goes up, and Ctrl+V pastes a path to jump to. On Windows, going up from a drive shows the drive list. The directory it is showing is the one the tab is created in.
 4. **New branch** — leave empty to work in the chosen directory, or enter a branch name to create a worktree.
 
-Tab/Shift+Tab move between rows; Ctrl+S creates the tab; Escape cancels. Pasted text belongs to the focused field; the template selector consumes paste without sending it to a pane. Discovery and creation stay on the host and project selected when the dialog opened. A successful request focuses the returned tab in the requesting client only.
+Tab/Shift+Tab move between rows. Ctrl+S creates the tab from any row, and Enter creates it from every row except **Task**, where Enter adds a line, and **Directory**, where Enter descends into the highlighted folder. Escape cancels. Creating is refused for as long as a directory listing is still loading, so the tab cannot be created against a directory other than the one on screen. Pasted text belongs to the focused field; the template selector and the directory browser consume paste without sending it to a pane. Browsing and creation stay on the host and project selected when the dialog opened. A successful request focuses the returned tab in the requesting client only.
 
 A branch request first shows a preparing pane while the checkout runs. The final layout is built after all panes exist and the main pane is known. The layout then behaves like an ordinary tab: resize its borders as needed, and the saved tree survives later template edits.
 

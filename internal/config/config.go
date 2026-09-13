@@ -349,8 +349,9 @@ type MCPConfig struct {
 }
 
 type DaemonConfig struct {
-	SnapshotInterval string `toml:"snapshot_interval"`
-	AutoStart        bool   `toml:"auto_start"`
+	SnapshotInterval  string `toml:"snapshot_interval"`
+	AutoStart         bool   `toml:"auto_start"`
+	WarmShellPoolSize int    `toml:"warm_shell_pool_size"` // 0 disables pooling.
 }
 
 type GhostBufferConfig struct {
@@ -594,8 +595,9 @@ type KeybindingsConfig struct {
 func Default() Config {
 	return Config{
 		Daemon: DaemonConfig{
-			SnapshotInterval: "30s",
-			AutoStart:        true,
+			SnapshotInterval:  "30s",
+			AutoStart:         true,
+			WarmShellPoolSize: 1,
 		},
 		GhostBuffer: GhostBufferConfig{
 			MaxLines: 500,

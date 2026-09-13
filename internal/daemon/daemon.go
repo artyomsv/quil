@@ -52,6 +52,7 @@ type Daemon struct {
 	server       *ipc.Server
 	session      *SessionManager
 	registry     *plugin.Registry
+	shellPool    *warmShellPool // nil until Start() builds it from the fully-loaded registry.
 	shutdown     chan struct{}
 	shutdownOnce sync.Once
 	stopOnce     sync.Once
@@ -346,6 +347,8 @@ func (d *Daemon) Start() error {
 	}
 	d.registry.DetectAvailability()
 
+	d.shellPool = newShellPoolFor(d.cfg, d.registry)
+
 	// Restore workspace from disk if available
 	if err := d.restoreWorkspace(); err != nil {
 		log.Printf("warning: failed to restore workspace: %v", err)
@@ -571,6 +574,7 @@ func (d *Daemon) Stop() {
 			}
 			d.killSandboxContainers(ids)
 		}
+		d.shellPool.Stop()
 		for _, tab := range d.session.Tabs() {
 			for _, pane := range d.session.Panes(tab.ID) {
 				if pane.PTY != nil {
@@ -5156,311 +5160,331 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 		p = d.registry.Get("terminal") // fallback
 	}
 
-	cmd := p.Command.Cmd
+	// Claim only fresh terminal panes with shell integration, never restored
+	// or sandboxed panes. Other plugin names remain on the normal spawn path.
+	pane.PluginMu.Lock()
+	cwd, cols, rows := pane.CWD, pane.Cols, pane.Rows
+	hasInstanceArgs := len(pane.InstanceArgs) != 0
+	pane.PluginMu.Unlock()
+	// Plugin-specific environment, history and arguments require the cold setup.
+	eligible := !restoring && typ == "terminal" && !sandboxed && p.Command.ShellIntegration &&
+		d.shellPool.servesShell(p.Command.Cmd) && len(p.Command.Env) == 0 && !p.Command.RecordHistory && !hasInstanceArgs
+	if eligible {
+		if claimed, ok := d.shellPool.TryClaim(cwd, cols, rows); ok {
+			ptySession = claimed
+			log.Printf("spawn: pane %s claimed a warm shell, cwd=%s", pane.ID, cwd)
+		} else {
+			eligible = false
+		}
+	}
 
-	// Generate a session UUID for fresh preassign_id panes before computing
-	// args, since resolveSpawnArgs expects PluginState["session_id"] to be
-	// populated for the {session_id} expansion.
-	//
-	// A pane created with a resume target adopts THAT id instead of minting a
-	// new one: the session it is about to join is its real session, so every
-	// downstream consumer (refreshPluginStateFromHooks, the model/context
-	// status segment, the restore probe) sees a coherent id from the first
-	// instant rather than a UUID that never existed.
-	//
-	// resumeID is also captured here, under the same lock, and handed to
-	// resolveSpawnArgs — see the note on that function for why it must not
-	// read PluginState itself.
-	var resumeID string
-	if !restoring && p.Persistence.Strategy == "preassign_id" {
-		// This branch is not only pane creation: handleRestartPaneReq (Alt+R)
-		// also calls spawnPane with restoring=false. So a creation-time resume
-		// pick must not be replayed blindly here — if the pane has since
-		// recorded its own session (a /clear rotates it, and the hook writes
-		// the new id), a restart has to reattach to THAT conversation, not the
-		// one chosen days ago. The stale pick is retired at the same time so it
-		// cannot resurface on a later restore either. Read off-lock: never hold
-		// PluginMu across a file read. The record is read ONCE and threaded
-		// into locatedOwnSession below, so the two decisions cannot disagree
-		// about a rotation that lands between two reads.
-		var (
-			rec    claudehook.SessionRecord
-			recErr error
-		)
-		hookID, hookPath := "", ""
-		if p.UsesClaudeSessions() {
-			rec, recErr = readHookSessionFn(pane.ID)
-			// Shape-checked before it can reach argv: this is the one input on
-			// the branch that no other guard has seen.
-			if recErr == nil && resumeSessionIDRe.MatchString(rec.ID) {
-				hookID, hookPath = rec.ID, rec.TranscriptPath
+	if !eligible {
+		cmd := p.Command.Cmd
+
+		// Generate a session UUID for fresh preassign_id panes before computing
+		// args, since resolveSpawnArgs expects PluginState["session_id"] to be
+		// populated for the {session_id} expansion.
+		//
+		// A pane created with a resume target adopts THAT id instead of minting a
+		// new one: the session it is about to join is its real session, so every
+		// downstream consumer (refreshPluginStateFromHooks, the model/context
+		// status segment, the restore probe) sees a coherent id from the first
+		// instant rather than a UUID that never existed.
+		//
+		// resumeID is also captured here, under the same lock, and handed to
+		// resolveSpawnArgs — see the note on that function for why it must not
+		// read PluginState itself.
+		var resumeID string
+		if !restoring && p.Persistence.Strategy == "preassign_id" {
+			// This branch is not only pane creation: handleRestartPaneReq (Alt+R)
+			// also calls spawnPane with restoring=false. So a creation-time resume
+			// pick must not be replayed blindly here — if the pane has since
+			// recorded its own session (a /clear rotates it, and the hook writes
+			// the new id), a restart has to reattach to THAT conversation, not the
+			// one chosen days ago. The stale pick is retired at the same time so it
+			// cannot resurface on a later restore either. Read off-lock: never hold
+			// PluginMu across a file read. The record is read ONCE and threaded
+			// into locatedOwnSession below, so the two decisions cannot disagree
+			// about a rotation that lands between two reads.
+			var (
+				rec    claudehook.SessionRecord
+				recErr error
+			)
+			hookID, hookPath := "", ""
+			if p.UsesClaudeSessions() {
+				rec, recErr = readHookSessionFn(pane.ID)
+				// Shape-checked before it can reach argv: this is the one input on
+				// the branch that no other guard has seen.
+				if recErr == nil && resumeSessionIDRe.MatchString(rec.ID) {
+					hookID, hookPath = rec.ID, rec.TranscriptPath
+				}
+			}
+			pane.PluginMu.Lock()
+			if pane.PluginState == nil {
+				pane.PluginState = make(map[string]string)
+			}
+			// hadSession tells a RESTART (the pane already ran, so it has an id)
+			// from a CREATE (no id yet); both reach this branch. A hook record
+			// under a brand-new pane's id can only be a leftover from a destroyed
+			// pane that drew the same id — nothing deletes those files — so every
+			// use of the record below is gated on it.
+			hadSession := pane.PluginState["session_id"] != ""
+			resumeID = pane.PluginState["resume_session_id"]
+			if resumeID != "" && hookID != "" && hookID != resumeID {
+				delete(pane.PluginState, "resume_session_id")
+				resumeID = ""
+			}
+			// The hook is the only source that tracks /clear, /resume and
+			// compaction, and PluginState["session_id"] is refreshed from it only
+			// at shutdown — so on a restart it can still name the session the user
+			// cleared minutes ago. Adopt the hook's id and path as ONE pair (a path
+			// left behind would vouch for a transcript nobody checked), which is
+			// what makes the transcript check below answer about the LIVE session
+			// rather than a superseded one.
+			if hadSession && hookID != "" && pane.PluginState["session_id"] != hookID {
+				pane.PluginState["session_id"] = hookID
+				if hookPath != "" {
+					pane.PluginState["transcript_path"] = hookPath
+				} else {
+					delete(pane.PluginState, "transcript_path")
+				}
+			}
+			if pane.PluginState["session_id"] == "" {
+				if resumeID != "" {
+					pane.PluginState["session_id"] = resumeID
+				} else {
+					pane.PluginState["session_id"] = uuid.New().String()
+				}
+			}
+			pane.PluginMu.Unlock()
+
+			// A restart of a pane whose session already has a transcript must
+			// --resume it. Alt+R lands here with the pane's own id in PluginState,
+			// and the fresh-start args hand that id to --session-id — which claude
+			// refuses once <id>.jsonl exists ("Session ID … is already in use",
+			// exit 129), so every restart of a pane that had exchanged a message
+			// died on the error screen (production log: 2026-08-11, -19, -28,
+			// 2026-09-04). Only a LOCATED transcript promotes: an id claude never
+			// persisted (a restart on the trust screen) is exactly what
+			// --session-id accepts, and --resume on it fails the other way round.
+			// A user-chosen resume target (the picker) already takes precedence,
+			// and a pane being created has nothing of its own to resume.
+			if resumeID == "" && hadSession && p.UsesClaudeSessions() {
+				if id, ok := d.locatedOwnSession(pane, rec, recErr); ok {
+					resumeID = id
+				}
 			}
 		}
+
+		// ownsRecord answers the only question the session_scrape paths care about:
+		// can a hook record under this pane's id have been written by anything but
+		// this pane? Read under PluginMu for the same reason resumeID is — every
+		// other access to the pane's spawn state is lock-guarded, and both fields
+		// have concurrent writers.
+		//
+		// TWO signals, because neither is sufficient alone:
+		//
+		//   - ptyGen > 0: a child of THIS pane object has already run, so it wrote
+		//     whatever is under the id. Incremented below, after the args are built,
+		//     so the value here describes previous spawns only.
+		//   - !freshID: the id came off a snapshot rather than being minted here, so
+		//     the record was written by this same pane in an earlier daemon.
+		//
+		// ptyGen alone was wrong, and the failure is data loss rather than a missed
+		// resume: a RESTORED pane whose lazy spawn was refused (`spawnRestoredPane`
+		// returns early on a missing worktree, and `ensurePaneSpawned` clears
+		// Pending anyway) sits at ptyGen 0 holding a record that is entirely its
+		// own. Alt+R once the directory is back then arrives with restoring=false
+		// and ptyGen 0 — so the retire below would DELETE the conversation the pane
+		// was still carrying, and the resume would be skipped on top of it.
+		pane.PluginMu.Lock()
+		ownsRecord := pane.ptyGen > 0 || !pane.freshID
+		pane.PluginMu.Unlock()
+
+		// A session_scrape pane that owns NOTHING retires any record left under its
+		// id before its child can write one, which is what turns ownsRecord from a
+		// claim about order into one about ownership.
+		//
+		// Without it the gate is merely narrow: a fresh spawn correctly ignores a
+		// leftover record, but it also increments ptyGen — so if that child dies
+		// before its SessionStart hook fires (a crash, a missing binary, a login
+		// prompt the user closes), the NEXT restart would see ptyGen > 0 and read a
+		// record the pane never wrote. Retiring it here removes the file that path
+		// depends on, and the restore path benefits identically: a snapshot restored
+		// under a recycled id can no longer find a stranger's session either.
+		//
+		// Never on a RESTORE, a RESTART, or a restored pane retrying its first
+		// spawn — all three reach a pane whose record is its own, and deleting there
+		// would throw away the conversation this whole branch exists to keep.
+		//
+		// Best-effort: a record that cannot be removed is logged and the spawn
+		// proceeds. Refusing to start a pane because a stale file is read-only would
+		// trade a narrow wrong-session risk for a certain no-pane-at-all.
+		if !restoring && !ownsRecord && p.Persistence.Strategy == "session_scrape" {
+			if err := retireSessionRecord(p, pane.ID); err != nil {
+				log.Printf("warning: pane %s: could not retire a stale %s session record: %v", pane.ID, p.Name, err)
+			}
+		}
+
+		args := resolveSpawnArgs(p, pane, restoring, ownsRecord, resumeID, d.claimResumeSession)
+
+		// Shell integration (only for terminal-type panes)
+		if p.Command.ShellIntegration {
+			shellCfg := shellinit.Configure(cmd, config.QuilDir())
+			if shellCfg != nil {
+				ptySession.SetEnv(shellCfg.Env)
+				cmd = shellCfg.Cmd
+				args = shellCfg.Args
+			}
+		}
+
+		// Claude Code session-id rotation tracking: prepend --settings with the
+		// path of a per-pane settings file that registers a SessionStart hook (a
+		// file rather than inline JSON so the argument survives the cmd.exe
+		// re-parse of claude's npm .cmd shim on Windows). The hook receives
+		// Claude's session_id and writes it to $QUIL_HOME/sessions/<paneID>.id,
+		// which the restore path consults in resumeTemplateFor. QUIL_PANE_ID in
+		// the PTY env lets the hook attribute the write to this specific pane.
+		//
+		// OpenCode session-id rotation tracking uses the same pattern but routes
+		// through OPENCODE_CONFIG_CONTENT (inline JSON) referencing a JS plugin
+		// under $QUIL_HOME/opencodehook/. OPENCODE_CONFIG_CONTENT merges with the
+		// user's own opencode config so their plugins/agents/modes still apply.
+		// The sandbox mapping is resolved HERE, before the hook switch, because
+		// every hook prep below bakes a path into a file or an argument that only
+		// the CONTAINER will read. Wrapping afterwards would leave a host path
+		// inside the settings JSON claude loads from inside the container.
+		//
+		// A failure is a refusal, never a host spawn. That is the whole contract
+		// of the feature: a pane the user asked to isolate must not quietly run
+		// unisolated because Docker Desktop was not started.
+		var sbox *sandbox.Mapping
+		if sandboxed {
+			if ok, why := d.sandboxAvailable(context.Background()); !ok {
+				return fmt.Errorf("sandbox unavailable: %s", why)
+			}
+			// Sign in FOR the user rather than letting the pane fall through to a
+			// per-container sign-in they have to repeat for every pane. Returns
+			// true when it took ownership: this pane now has no child and a
+			// goroutine will spawn it once the browser flow finishes. Nil, not an
+			// error — a pane waiting on something is not a pane that failed, and
+			// the worktree placeholder is the same shape.
+			// `p`, not just the pane: the sign-in runs `claude setup-token` and
+			// opens a browser, which is meaningless for codex or opencode — their
+			// credentials are their own. Without this a codex pane with no Claude
+			// token launched a Claude sign-in.
+			if d.beginSandboxSignIn(pane, p) {
+				return nil
+			}
+			m, err := d.prepareSandbox(context.Background(), pane, p.Name, sandboxImage)
+			if err != nil {
+				return err
+			}
+			sbox = &m
+		}
+
+		envVars := append([]string{}, p.Command.Env...)
+		// opencode first, for the reason refreshPluginStateFromHooks documents:
+		// these arms are no longer disjoint by construction, and prepending
+		// `--settings <path>` to opencode's argv would pass it a flag it does not
+		// have while skipping the session read it does need.
+		//
+		// A sandbox pane routes every one of these through the container's own
+		// paths and OS instead of the host's: hp names the pane's tree as the
+		// container sees it, and hookGOOS is what the child runs, not what the
+		// daemon runs.
+		hp := hostHookPaths(config.QuilDir())
+		hookGOOS := runtime.GOOS
+		if sbox != nil {
+			hp = containerHookPaths(*sbox)
+			hookGOOS = "linux"
+		}
+		switch {
+		case p.Name == "opencode":
+			envVars = append(envVars, opencodeSpawnPrep(hp, pane.ID, d.cfg.Notification.Hooks.OpenCode)...)
+		case p.Name == plugin.CodexPluginName:
+			// Codex rides a `-c hooks=…` override carrying its own trust hashes
+			// (see internal/codexhook). The hook needs the RESOLVED binary to
+			// refuse a cmd.exe shim; the LookPath below runs after this switch,
+			// so resolve here as well.
+			//
+			// A sandbox pane resolves nothing on the host: the codex binary is
+			// inside the container, and a host lookup would either fail or hand
+			// the shim check a path from the wrong machine.
+			resolvedCmd := cmd
+			if sbox == nil {
+				if r, err := exec.LookPath(cmd); err == nil {
+					resolvedCmd = r
+				}
+			}
+			prefix, hookEnv := codexSpawnPrep(hp, pane.ID, d.cfg.Notification.Hooks.Codex, resolvedCmd, hookGOOS)
+			if len(prefix) > 0 {
+				// `-c` is global, so it precedes both a fresh start and the
+				// `resume <id>` subcommand the restore branch appends.
+				args = append(prefix, args...)
+			}
+			envVars = append(envVars, hookEnv...)
+		case p.UsesClaudeSessions():
+			settingsArgs, hookEnv := claudeHookSpawnPrep(hp, pane.ID, d.cfg.Notification.Hooks.Claude, args)
+			if len(settingsArgs) > 0 {
+				args = append(settingsArgs, args...)
+			}
+			envVars = append(envVars, hookEnv...)
+		}
+
+		// Generic opt-in: any plugin whose hook producer records input history
+		// gets the gate env. The hook subprocess reads QUIL_RECORD_HISTORY and
+		// appends submitted prompts to the per-pane history store.
+		if p.Command.RecordHistory {
+			envVars = append(envVars, "QUIL_RECORD_HISTORY=1")
+		}
+
+		if len(envVars) > 0 {
+			ptySession.SetEnv(envVars)
+		}
+
+		// Initialize plugin state map
 		pane.PluginMu.Lock()
 		if pane.PluginState == nil {
 			pane.PluginState = make(map[string]string)
 		}
-		// hadSession tells a RESTART (the pane already ran, so it has an id)
-		// from a CREATE (no id yet); both reach this branch. A hook record
-		// under a brand-new pane's id can only be a leftover from a destroyed
-		// pane that drew the same id — nothing deletes those files — so every
-		// use of the record below is gated on it.
-		hadSession := pane.PluginState["session_id"] != ""
-		resumeID = pane.PluginState["resume_session_id"]
-		if resumeID != "" && hookID != "" && hookID != resumeID {
-			delete(pane.PluginState, "resume_session_id")
-			resumeID = ""
-		}
-		// The hook is the only source that tracks /clear, /resume and
-		// compaction, and PluginState["session_id"] is refreshed from it only
-		// at shutdown — so on a restart it can still name the session the user
-		// cleared minutes ago. Adopt the hook's id and path as ONE pair (a path
-		// left behind would vouch for a transcript nobody checked), which is
-		// what makes the transcript check below answer about the LIVE session
-		// rather than a superseded one.
-		if hadSession && hookID != "" && pane.PluginState["session_id"] != hookID {
-			pane.PluginState["session_id"] = hookID
-			if hookPath != "" {
-				pane.PluginState["transcript_path"] = hookPath
-			} else {
-				delete(pane.PluginState, "transcript_path")
-			}
-		}
-		if pane.PluginState["session_id"] == "" {
-			if resumeID != "" {
-				pane.PluginState["session_id"] = resumeID
-			} else {
-				pane.PluginState["session_id"] = uuid.New().String()
-			}
-		}
 		pane.PluginMu.Unlock()
 
-		// A restart of a pane whose session already has a transcript must
-		// --resume it. Alt+R lands here with the pane's own id in PluginState,
-		// and the fresh-start args hand that id to --session-id — which claude
-		// refuses once <id>.jsonl exists ("Session ID … is already in use",
-		// exit 129), so every restart of a pane that had exchanged a message
-		// died on the error screen (production log: 2026-08-11, -19, -28,
-		// 2026-09-04). Only a LOCATED transcript promotes: an id claude never
-		// persisted (a restart on the trust screen) is exactly what
-		// --session-id accepts, and --resume on it fails the other way round.
-		// A user-chosen resume target (the picker) already takes precedence,
-		// and a pane being created has nothing of its own to resume.
-		if resumeID == "" && hadSession && p.UsesClaudeSessions() {
-			if id, ok := d.locatedOwnSession(pane, rec, recErr); ok {
-				resumeID = id
+		// Resolve command to absolute path so CWD doesn't interfere with lookup.
+		//
+		// Skipped for a sandbox pane: the agent binary lives INSIDE the
+		// container, so a host lookup either fails or — worse — resolves a
+		// same-named binary on the host and puts that path in the container's
+		// argv, where it does not exist.
+		if sbox == nil {
+			if resolved, err := exec.LookPath(cmd); err == nil {
+				cmd = resolved
 			}
+		} else {
+			cmd, args = d.wrapInContainer(*sbox, pane, p, sandboxImage, cmd, args, envVars)
+			// The container carries the pane's environment through `docker run
+			// -e`, so the PTY child — the docker CLI itself — must not also
+			// inherit it. The one exception is the OAuth token, which travels by
+			// NAME so docker forwards the value from its own environment; that
+			// is why it is set here and never in argv.
+			// Gated on the plugin as well as the mode, and it must match
+			// sandboxIdentity's own gate exactly: that one decides whether argv
+			// carries `-e CLAUDE_CODE_OAUTH_TOKEN`, this one whether the docker
+			// CLI has a value under that name to forward. A codex or opencode
+			// container has no use for either.
+			authMode := config.SandboxAuthBrowser
+			if plugin.UsesClaudeAuthName(p.Name) {
+				authMode = d.paneAuthMode(pane)
+			}
+			envVars = dockerCLIEnv(authMode)
+			ptySession.SetEnv(envVars)
 		}
-	}
 
-	// ownsRecord answers the only question the session_scrape paths care about:
-	// can a hook record under this pane's id have been written by anything but
-	// this pane? Read under PluginMu for the same reason resumeID is — every
-	// other access to the pane's spawn state is lock-guarded, and both fields
-	// have concurrent writers.
-	//
-	// TWO signals, because neither is sufficient alone:
-	//
-	//   - ptyGen > 0: a child of THIS pane object has already run, so it wrote
-	//     whatever is under the id. Incremented below, after the args are built,
-	//     so the value here describes previous spawns only.
-	//   - !freshID: the id came off a snapshot rather than being minted here, so
-	//     the record was written by this same pane in an earlier daemon.
-	//
-	// ptyGen alone was wrong, and the failure is data loss rather than a missed
-	// resume: a RESTORED pane whose lazy spawn was refused (`spawnRestoredPane`
-	// returns early on a missing worktree, and `ensurePaneSpawned` clears
-	// Pending anyway) sits at ptyGen 0 holding a record that is entirely its
-	// own. Alt+R once the directory is back then arrives with restoring=false
-	// and ptyGen 0 — so the retire below would DELETE the conversation the pane
-	// was still carrying, and the resume would be skipped on top of it.
-	pane.PluginMu.Lock()
-	ownsRecord := pane.ptyGen > 0 || !pane.freshID
-	pane.PluginMu.Unlock()
-
-	// A session_scrape pane that owns NOTHING retires any record left under its
-	// id before its child can write one, which is what turns ownsRecord from a
-	// claim about order into one about ownership.
-	//
-	// Without it the gate is merely narrow: a fresh spawn correctly ignores a
-	// leftover record, but it also increments ptyGen — so if that child dies
-	// before its SessionStart hook fires (a crash, a missing binary, a login
-	// prompt the user closes), the NEXT restart would see ptyGen > 0 and read a
-	// record the pane never wrote. Retiring it here removes the file that path
-	// depends on, and the restore path benefits identically: a snapshot restored
-	// under a recycled id can no longer find a stranger's session either.
-	//
-	// Never on a RESTORE, a RESTART, or a restored pane retrying its first
-	// spawn — all three reach a pane whose record is its own, and deleting there
-	// would throw away the conversation this whole branch exists to keep.
-	//
-	// Best-effort: a record that cannot be removed is logged and the spawn
-	// proceeds. Refusing to start a pane because a stale file is read-only would
-	// trade a narrow wrong-session risk for a certain no-pane-at-all.
-	if !restoring && !ownsRecord && p.Persistence.Strategy == "session_scrape" {
-		if err := retireSessionRecord(p, pane.ID); err != nil {
-			log.Printf("warning: pane %s: could not retire a stale %s session record: %v", pane.ID, p.Name, err)
-		}
-	}
-
-	args := resolveSpawnArgs(p, pane, restoring, ownsRecord, resumeID, d.claimResumeSession)
-
-	// Shell integration (only for terminal-type panes)
-	if p.Command.ShellIntegration {
-		shellCfg := shellinit.Configure(cmd, config.QuilDir())
-		if shellCfg != nil {
-			ptySession.SetEnv(shellCfg.Env)
-			cmd = shellCfg.Cmd
-			args = shellCfg.Args
-		}
-	}
-
-	// Claude Code session-id rotation tracking: prepend --settings with the
-	// path of a per-pane settings file that registers a SessionStart hook (a
-	// file rather than inline JSON so the argument survives the cmd.exe
-	// re-parse of claude's npm .cmd shim on Windows). The hook receives
-	// Claude's session_id and writes it to $QUIL_HOME/sessions/<paneID>.id,
-	// which the restore path consults in resumeTemplateFor. QUIL_PANE_ID in
-	// the PTY env lets the hook attribute the write to this specific pane.
-	//
-	// OpenCode session-id rotation tracking uses the same pattern but routes
-	// through OPENCODE_CONFIG_CONTENT (inline JSON) referencing a JS plugin
-	// under $QUIL_HOME/opencodehook/. OPENCODE_CONFIG_CONTENT merges with the
-	// user's own opencode config so their plugins/agents/modes still apply.
-	// The sandbox mapping is resolved HERE, before the hook switch, because
-	// every hook prep below bakes a path into a file or an argument that only
-	// the CONTAINER will read. Wrapping afterwards would leave a host path
-	// inside the settings JSON claude loads from inside the container.
-	//
-	// A failure is a refusal, never a host spawn. That is the whole contract
-	// of the feature: a pane the user asked to isolate must not quietly run
-	// unisolated because Docker Desktop was not started.
-	var sbox *sandbox.Mapping
-	if sandboxed {
-		if ok, why := d.sandboxAvailable(context.Background()); !ok {
-			return fmt.Errorf("sandbox unavailable: %s", why)
-		}
-		// Sign in FOR the user rather than letting the pane fall through to a
-		// per-container sign-in they have to repeat for every pane. Returns
-		// true when it took ownership: this pane now has no child and a
-		// goroutine will spawn it once the browser flow finishes. Nil, not an
-		// error — a pane waiting on something is not a pane that failed, and
-		// the worktree placeholder is the same shape.
-		// `p`, not just the pane: the sign-in runs `claude setup-token` and
-		// opens a browser, which is meaningless for codex or opencode — their
-		// credentials are their own. Without this a codex pane with no Claude
-		// token launched a Claude sign-in.
-		if d.beginSandboxSignIn(pane, p) {
-			return nil
-		}
-		m, err := d.prepareSandbox(context.Background(), pane, p.Name, sandboxImage)
-		if err != nil {
+		ptySession.SetCWD(pane.CWD)
+		log.Printf("spawn: pane %s cmd=%s args=%v cwd=%s restoring=%v", pane.ID, cmd, args, pane.CWD, restoring)
+		if err := ptySession.Start(cmd, args...); err != nil {
 			return err
 		}
-		sbox = &m
-	}
-
-	envVars := append([]string{}, p.Command.Env...)
-	// opencode first, for the reason refreshPluginStateFromHooks documents:
-	// these arms are no longer disjoint by construction, and prepending
-	// `--settings <path>` to opencode's argv would pass it a flag it does not
-	// have while skipping the session read it does need.
-	//
-	// A sandbox pane routes every one of these through the container's own
-	// paths and OS instead of the host's: hp names the pane's tree as the
-	// container sees it, and hookGOOS is what the child runs, not what the
-	// daemon runs.
-	hp := hostHookPaths(config.QuilDir())
-	hookGOOS := runtime.GOOS
-	if sbox != nil {
-		hp = containerHookPaths(*sbox)
-		hookGOOS = "linux"
-	}
-	switch {
-	case p.Name == "opencode":
-		envVars = append(envVars, opencodeSpawnPrep(hp, pane.ID, d.cfg.Notification.Hooks.OpenCode)...)
-	case p.Name == plugin.CodexPluginName:
-		// Codex rides a `-c hooks=…` override carrying its own trust hashes
-		// (see internal/codexhook). The hook needs the RESOLVED binary to
-		// refuse a cmd.exe shim; the LookPath below runs after this switch,
-		// so resolve here as well.
-		//
-		// A sandbox pane resolves nothing on the host: the codex binary is
-		// inside the container, and a host lookup would either fail or hand
-		// the shim check a path from the wrong machine.
-		resolvedCmd := cmd
-		if sbox == nil {
-			if r, err := exec.LookPath(cmd); err == nil {
-				resolvedCmd = r
-			}
-		}
-		prefix, hookEnv := codexSpawnPrep(hp, pane.ID, d.cfg.Notification.Hooks.Codex, resolvedCmd, hookGOOS)
-		if len(prefix) > 0 {
-			// `-c` is global, so it precedes both a fresh start and the
-			// `resume <id>` subcommand the restore branch appends.
-			args = append(prefix, args...)
-		}
-		envVars = append(envVars, hookEnv...)
-	case p.UsesClaudeSessions():
-		settingsArgs, hookEnv := claudeHookSpawnPrep(hp, pane.ID, d.cfg.Notification.Hooks.Claude, args)
-		if len(settingsArgs) > 0 {
-			args = append(settingsArgs, args...)
-		}
-		envVars = append(envVars, hookEnv...)
-	}
-
-	// Generic opt-in: any plugin whose hook producer records input history
-	// gets the gate env. The hook subprocess reads QUIL_RECORD_HISTORY and
-	// appends submitted prompts to the per-pane history store.
-	if p.Command.RecordHistory {
-		envVars = append(envVars, "QUIL_RECORD_HISTORY=1")
-	}
-
-	if len(envVars) > 0 {
-		ptySession.SetEnv(envVars)
-	}
-
-	// Initialize plugin state map
-	pane.PluginMu.Lock()
-	if pane.PluginState == nil {
-		pane.PluginState = make(map[string]string)
-	}
-	pane.PluginMu.Unlock()
-
-	// Resolve command to absolute path so CWD doesn't interfere with lookup.
-	//
-	// Skipped for a sandbox pane: the agent binary lives INSIDE the
-	// container, so a host lookup either fails or — worse — resolves a
-	// same-named binary on the host and puts that path in the container's
-	// argv, where it does not exist.
-	if sbox == nil {
-		if resolved, err := exec.LookPath(cmd); err == nil {
-			cmd = resolved
-		}
-	} else {
-		cmd, args = d.wrapInContainer(*sbox, pane, p, sandboxImage, cmd, args, envVars)
-		// The container carries the pane's environment through `docker run
-		// -e`, so the PTY child — the docker CLI itself — must not also
-		// inherit it. The one exception is the OAuth token, which travels by
-		// NAME so docker forwards the value from its own environment; that
-		// is why it is set here and never in argv.
-		// Gated on the plugin as well as the mode, and it must match
-		// sandboxIdentity's own gate exactly: that one decides whether argv
-		// carries `-e CLAUDE_CODE_OAUTH_TOKEN`, this one whether the docker
-		// CLI has a value under that name to forward. A codex or opencode
-		// container has no use for either.
-		authMode := config.SandboxAuthBrowser
-		if plugin.UsesClaudeAuthName(p.Name) {
-			authMode = d.paneAuthMode(pane)
-		}
-		envVars = dockerCLIEnv(authMode)
-		ptySession.SetEnv(envVars)
-	}
-
-	ptySession.SetCWD(pane.CWD)
-	log.Printf("spawn: pane %s cmd=%s args=%v cwd=%s restoring=%v", pane.ID, cmd, args, pane.CWD, restoring)
-	if err := ptySession.Start(cmd, args...); err != nil {
-		return err
 	}
 	// PluginMu protects pane.PTY (per the Pane struct doc): the memReport
 	// collector reads it on a 5s timer goroutine. PluginMu is free here (taken

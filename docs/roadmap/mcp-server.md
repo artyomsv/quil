@@ -76,7 +76,7 @@ directories explicit. Creating a tab does not take the user's focus.
 | `update_project` | Rename a project or change its root |
 | `switch_project` | Show the project's last active tab |
 | `destroy_project` | Remove the project and its tabs and panes |
-| `create_from_template` | Create ordered panes and starting prompts from a workspace template (daemon 1.73.0+) |
+| `create_from_template` | Create ordered panes and starting prompts from a workspace template (daemon 1.74.0+) |
 | `create_tab` | Create a tab with a configurable first pane |
 | `rename_tab` | Label a tab |
 | `switch_tab` | Show a tab |

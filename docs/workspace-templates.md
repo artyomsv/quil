@@ -81,7 +81,7 @@ Substitution is a single pass, so placeholder-like text inside the task remains 
 
 ## MCP
 
-`create_from_template` accepts `template` (required), `task`, `cwd`, `branch`, `project_id`, and the normal optional `host` selector. It returns `tab_id` and the pane IDs that currently exist. Branch creation returns `preparing_worktree` and a placeholder ID immediately; later workspace state contains the completed panes. The MCP call does not switch TUI focus. The destination daemon must be version **1.73.0 or newer**; older released project/tab/task tools retain their 1.72.0 floor. See the [MCP guide](mcp.md).
+`create_from_template` accepts `template` (required), `task`, `cwd`, `branch`, `project_id`, and the normal optional `host` selector. It returns `tab_id` and the pane IDs that currently exist. Branch creation returns `preparing_worktree` and a placeholder ID immediately; later workspace state contains the completed panes. The MCP call does not switch TUI focus. The destination daemon must be version **1.74.0 or newer**; older released project/tab/task tools retain their 1.72.0 floor. See the [MCP guide](mcp.md).
 
 Unknown templates, invalid settings and unusable directories are refused. Validation of a first-pane subdirectory after checkout can fail asynchronously: the new checkout and provisional tab are removed, and a named error event is emitted. A failed process or prompt delivery is reported on its pane; it never silently launches at a fallback directory.
 

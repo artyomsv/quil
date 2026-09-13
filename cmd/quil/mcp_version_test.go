@@ -20,7 +20,7 @@ func TestRequireDaemon_RefusesOnlyAnOlderRelease(t *testing.T) {
 		{"1.71.0", true},   // the release measured against: drops the new types
 		{"1.71.9", true},   //
 		{"1.72.0", false},  // existing project/tab/task floor
-		{"1.73.0", false},  // newer release with template creation
+		{"1.74.0", false},  // newer release with template creation
 		{"1.80.3", false},  // newer
 		{"garbage", false}, // unparseable is unknown
 	}
@@ -44,7 +44,7 @@ func TestCreateFromTemplate_OldDaemon_RefusesWithoutDisablingReleasedTools(t *te
 	session, _ := toolHarness(t, local, remote)
 	for _, host := range []string{"", "gpu"} {
 		_, err := callTool(t, session, "create_from_template", map[string]any{"host": host, "template": "pair"})
-		if err == nil || !strings.Contains(err.Error(), "1.73.0") || !strings.Contains(err.Error(), "1.72.0") {
+		if err == nil || !strings.Contains(err.Error(), "1.74.0") || !strings.Contains(err.Error(), "1.72.0") {
 			t.Fatalf("host %q: expected named version refusal, got %v", host, err)
 		}
 		if _, err := callTool(t, session, "list_projects", map[string]any{"host": host}); err != nil {
@@ -58,7 +58,7 @@ func TestCreateFromTemplate_OldDaemon_RefusesWithoutDisablingReleasedTools(t *te
 
 func TestCreateFromTemplate_CurrentDaemon_AllowsRequest(t *testing.T) {
 	t.Setenv("QUIL_HOME", t.TempDir())
-	local := newFakeIPCDaemonVersion(t, "pane-local", "1.73.0")
+	local := newFakeIPCDaemonVersion(t, "pane-local", "1.74.0")
 	session, _ := toolHarness(t, local, nil)
 	if _, err := callTool(t, session, "create_from_template", map[string]any{"template": "pair"}); err != nil {
 		t.Fatal(err)

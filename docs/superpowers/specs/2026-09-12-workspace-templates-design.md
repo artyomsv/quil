@@ -230,7 +230,7 @@ in `internal/tui`. It is table-testable without a `Model`.
 `reportStepMinVersion` is removed with `report_step`. The shared
 `mcpDaemonMinVersion` stays at 1.72.0 so already-released tools remain available
 against that daemon version. Template creation uses its own
-`createFromTemplateMinVersion` floor of 1.73.0 because its request type is new
+`createFromTemplateMinVersion` floor of 1.74.0 because its request type is new
 in this release.
 
 ## 7. What is kept

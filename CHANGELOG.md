@@ -11,6 +11,18 @@ version section here and deletes them.
 
 ## [Unreleased]
 
+## [1.74.0] - 2026-09-14
+
+### Added
+- Choose **New from template** in the command palette to create ordered panes with frozen model/toggle arguments, starting prompts, and rows, columns, main-left, main-top or grid layouts. An optional branch creates a worktree; the layout waits for its completed panes.
+- The directory row is the same daemon-side browser the Ctrl+N pane dialog uses, so a directory is chosen by navigating rather than typed. Enter creates the tab from any row but the task editor and the browser.
+- Edit `templates.toml` through F1 → Settings → Templates in the TOML editor. Invalid files stay open with a named error; valid saves preserve comments and formatting and replace the file atomically. Three templates ship: agent-team, pair and review.
+- Agents can use `create_from_template` through Quil MCP. It requires daemon 1.74.0 while existing project/tab/task tools remain available against 1.72.0. Template panes can opt into the ordinary Quil server without changing global agent settings.
+
+### Fixed
+- A prompt sent to a codex pane through `delegate_task`, `send_to_pane` with `paste`, or a workspace template's starting prompt could arrive complete and never run: codex ignores an Enter that lands within 120 ms of a pasted burst and folds it into the prompt as a newline, and Quil was sending it after 100 ms. The pane showed the prompt and sat idle with nothing reporting a failure. The gap is now 400 ms on both delivery paths.
+- New panes ignore unusable 1×1 sibling dimensions and use the attached terminal size or the 80×24 fallback. Valid one-column and one-row split panes still provide their dimensions.
+
 ## [1.73.0] - 2026-09-13
 
 ### Added

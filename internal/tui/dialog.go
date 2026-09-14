@@ -207,7 +207,8 @@ type settingsField struct {
 	// value. get supplies the right-hand hint; set is never called. A flag
 	// for the same reason relayout is one — the row that needs the behaviour
 	// declares it, so renaming a label cannot silently break it.
-	submenu bool
+	submenu          bool
+	templateSettings bool
 }
 
 // settingsFields returns the editable Settings rows. Every setter that
@@ -513,6 +514,7 @@ func settingsFields() []settingsField {
 			},
 			isBool: true,
 		},
+		{label: "Templates", get: func(m *Model) string { return "…" }, set: func(m *Model, _ string) {}, templateSettings: true},
 	}
 }
 
@@ -719,6 +721,8 @@ func (m Model) dispatchDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handleSettingsKey(msg)
 	case dialogNotifySettings:
 		return m.handleNotifySettingsKey(msg)
+	case dialogNewTemplate:
+		return m.handleTemplateDialogKey(msg)
 	case dialogShortcuts:
 		return m.handleShortcutsKey(msg)
 	case dialogConfirm:
@@ -1013,6 +1017,8 @@ func (m Model) handleSettingsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "enter", " ":
 		f := fields[m.dialogCursor]
 		switch {
+		case f.templateSettings:
+			return m.openTemplateSettings()
 		case f.submenu:
 			m.dialog = dialogNotifySettings
 			m.dialogCursor = firstNotifyRow(notifySettingsRows())
@@ -1443,6 +1449,8 @@ func (m Model) renderDialog() string {
 		content = m.renderSettingsDialog()
 	case dialogNotifySettings:
 		content = m.renderNotifySettingsDialog()
+	case dialogNewTemplate:
+		content = m.renderTemplateDialog()
 	case dialogShortcuts:
 		content = m.renderShortcutsDialog()
 	case dialogConfirm:
@@ -1619,7 +1627,9 @@ func (m Model) renderSettingsDialog() string {
 	b.WriteString("\n\n")
 
 	fields := settingsFields()
-	for i, f := range fields {
+	start, end := historyWindow(len(fields), m.dialogCursor, 0, max(1, m.height-13))
+	for i := start; i < end; i++ {
+		f := fields[i]
 		cursor := "  "
 		labelStyle := dialogLabelStyle
 		if i == m.dialogCursor {
@@ -3226,6 +3236,7 @@ func (m Model) handlePluginsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 			viewW := 70
 			m.tomlEditor = NewTextEditor(string(data), filePath, viewW, viewH)
+			m.templateEditor = false
 			m.dialog = dialogTOMLEditor
 			return m, nil
 		}
@@ -3348,6 +3359,29 @@ func (m Model) handleTOMLEditorKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 
 	saved, closed, cmd := m.tomlEditor.HandleKey(msg.String())
+	if m.templateEditor {
+		if saved {
+			reload, err := ipc.NewMessage(ipc.MsgReloadPlugins, nil)
+			if err == nil {
+				if m.client == nil {
+					err = fmt.Errorf("daemon is not connected")
+				} else {
+					// The edited file is local, even when a remote project is
+					// selected. Never send its reload to another host.
+					err = m.sendForDestStrict("", reload)
+				}
+			}
+			if err != nil {
+				m.tomlEditor.SaveErr = "Saved; reload failed: " + err.Error()
+				return m, cmd
+			}
+		}
+		if saved || closed {
+			m.tomlEditor, m.templateEditor = nil, false
+			m.dialog, m.dialogCursor = dialogSettings, 0
+		}
+		return m, cmd
+	}
 
 	if saved {
 		// Reload plugins after save, re-enable mouse
@@ -3763,7 +3797,7 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 			// be any candidates isn't known until the answer lands, so the
 			// recent-locations/browser fallback that used to run right below
 			// this branch now runs in applyGitReposPickList instead.
-			browseCmd = m.requestGitRepos(base, "", repoScanPickList, "")
+			browseCmd = m.requestGitRepos(m.createPaneDialogDest(), base, "", repoScanPickList, "")
 		} else {
 			browseCmd = m.fallbackToRecentOrBrowser()
 		}

@@ -94,6 +94,7 @@ const (
 	palActPrevProject    // bounce to the previous project
 	palActMoveProjectUp
 	palActMoveProjectDown
+	palActNewTemplate
 )
 
 // paletteCommand is one row of the palette. Disabled rows render greyed and are
@@ -398,6 +399,7 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 		newTabEnabled = m.projectActionable(p) || m.onlyOfflineProjects()
 	}
 	cmds = append(cmds,
+		paletteCommand{action: palActNewTemplate, enabled: newTabEnabled, label: "New from template", keywords: []string{"template", "workspace", "agents"}},
 		paletteCommand{
 			action:   palActNewTab,
 			enabled:  newTabEnabled,
@@ -1066,6 +1068,8 @@ func (m Model) executePaletteCommand(c paletteCommand) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	switch c.action {
+	case palActNewTemplate:
+		return m.openNewTemplate()
 	// --- Navigation --------------------------------------------------------
 	case palActGoToPane:
 		return m.goToPane(c.arg)

@@ -74,6 +74,19 @@ func TestDelegateTask_PastesPromptThenEnter(t *testing.T) {
 	}
 }
 
+func TestDeliverPrompt_EmbeddedTerminator_CannotEscapePaste(t *testing.T) {
+	d := newTestDaemon(t)
+	p, session := agentPane(t, d, "worker")
+	if !d.deliverPrompt(p, "prefix\x1b[201~\rsuffix\u009b201~tail", true) {
+		t.Fatal("delivery refused")
+	}
+	want := "\x1b[200~prefix\rsuffixtail\x1b[201~"
+	waitWrites(t, session, want)
+	if got := session.joined(); strings.Count(got, "\x1b[201~") != 1 || strings.Contains(got, "\u009b201~") {
+		t.Fatalf("paste escape survived: %q", got)
+	}
+}
+
 func TestDelegateTask_RefusesWhatPaneInputRefuses(t *testing.T) {
 	d := newTestDaemon(t)
 	tab := d.session.CreateTab("t")
@@ -559,5 +572,24 @@ func TestTaskRequests_RoundTrip(t *testing.T) {
 		ipc.GetTaskReqPayload{TaskID: "task-nope"}))
 	if missing.Error == "" {
 		t.Fatal("unknown task answered without an error")
+	}
+}
+
+// codexEnterSuppressWindow is codex's own PASTE_ENTER_SUPPRESS_WINDOW
+// (codex-rs/tui/src/bottom_pane/paste_burst.rs) plus its Windows burst flush
+// (PASTE_BURST_ACTIVE_IDLE_TIMEOUT). An Enter delivered inside that window is
+// appended to the prompt as a newline instead of submitting it, and extends
+// the window again — so the prompt sits in the composer and nothing runs.
+const codexEnterSuppressWindow = 180 * time.Millisecond
+
+// This guards a NUMBER rather than a behaviour on purpose: the failure it
+// prevents is invisible from inside the daemon. The daemon queues the paste
+// and the CR, both succeed, the task is recorded as sent, and the target
+// simply never starts. Nothing in this process can observe that, so the only
+// place the constraint can be written down is here, against the window it
+// has to clear.
+func TestPasteSettle_ClearsCodexEnterSuppressWindow(t *testing.T) {
+	if pasteSettle <= codexEnterSuppressWindow {
+		t.Fatalf("pasteSettle is %v; codex swallows an Enter delivered within %v of the paste", pasteSettle, codexEnterSuppressWindow)
 	}
 }

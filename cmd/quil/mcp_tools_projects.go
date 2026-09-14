@@ -18,6 +18,7 @@ func registerProjectTools(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogger) {
 	registerDestroyProjectTool(s, r, mcpLog)
 	registerSwitchProjectTool(s, r, mcpLog)
 	registerCreateTabTool(s, r, mcpLog)
+	registerCreateFromTemplateTool(s, r, mcpLog)
 	registerRenameTabTool(s, r, mcpLog)
 	registerDestroyTabTool(s, r, mcpLog)
 	registerRenamePaneTool(s, r, mcpLog)
@@ -273,6 +274,51 @@ func registerCreateTabTool(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogger) {
 		mcpLog.Log(payload.PaneID, "create_tab", fmt.Sprintf("tab=%s project=%s", payload.TabID, input.ProjectID))
 		return jsonResult(struct {
 			ipc.CreateTabRespPayload
+			Host string `json:"host,omitempty"`
+		}{payload, host}), nil, nil
+	})
+}
+
+func registerCreateFromTemplateTool(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogger) {
+	type Input struct {
+		Template  string `json:"template" jsonschema:"name in templates.toml, such as pair, agent-team, or review"`
+		Task      string `json:"task,omitempty" jsonschema:"optional task text for the tab name and starting prompts"`
+		CWD       string `json:"cwd,omitempty" jsonschema:"existing working directory on the daemon; default is the project's root; unusable paths are refused"`
+		Branch    string `json:"branch,omitempty" jsonschema:"optional new branch to create in a linked worktree"`
+		ProjectID string `json:"project_id,omitempty" jsonschema:"project to file the tab under; defaults to the active project"`
+		Host      string `json:"host,omitempty" jsonschema:"daemon host from list_hosts; default is the project id's host, otherwise local"`
+	}
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "create_from_template",
+		Description: "Create a tab from a named workspace template, with its ordered panes, frozen arguments and starting prompts. " +
+			"Returns tab_id and pane_ids without switching focus. With branch, returns immediately with a preparing_worktree " +
+			"placeholder; the completed pane IDs arrive in workspace state (use list_panes). Invalid requests create nothing.",
+	}, func(_ context.Context, _ *mcp.CallToolRequest, input Input) (*mcp.CallToolResult, any, error) {
+		bridge, host, err := r.bridgeFor(input.Host, input.ProjectID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("create_from_template: %w", err)
+		}
+		if err := bridge.requireRequest("create_from_template", ipc.MsgCreateFromTemplateReq, createFromTemplateMinVersion); err != nil {
+			return nil, nil, err
+		}
+		resp, err := bridge.request(ipc.MsgCreateFromTemplateReq, ipc.CreateFromTemplateReqPayload{
+			Template: input.Template, Task: input.Task, CWD: input.CWD, Branch: input.Branch, ProjectID: input.ProjectID,
+		})
+		if err != nil {
+			return nil, nil, fmt.Errorf("create_from_template: %w", err)
+		}
+		var payload ipc.CreateFromTemplateRespPayload
+		if err := resp.DecodePayload(&payload); err != nil {
+			return nil, nil, fmt.Errorf("create_from_template decode: %w", err)
+		}
+		if payload.TabID == "" {
+			return nil, nil, fmt.Errorf("create_from_template: %s", payload.Error)
+		}
+		r.remember(host, payload.TabID)
+		r.remember(host, payload.PaneIDs...)
+		mcpLog.Log("", "create_from_template", fmt.Sprintf("tab=%s template=%s project=%s", payload.TabID, input.Template, input.ProjectID))
+		return jsonResult(struct {
+			ipc.CreateFromTemplateRespPayload
 			Host string `json:"host,omitempty"`
 		}{payload, host}), nil, nil
 	})

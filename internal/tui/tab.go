@@ -7,12 +7,16 @@ type TabModel struct {
 	// Dest is the destination the tab's project arrived on — client-side
 	// only, empty for the local daemon. Carried on the tab so a pane event
 	// can be routed without walking back up to the project.
-	Dest       string
-	Color      string
-	Root       *LayoutNode // binary split tree (nil = empty tab)
-	ActivePane string      // pane ID of the active pane
-	Width      int
-	Height     int
+	Dest  string
+	Color string
+	Root  *LayoutNode // binary split tree (nil = empty tab)
+	// Temporary trees render preparation but must not be saved. Once a real
+	// layout is built or restored, the template's initial-layout hint is spent.
+	templateLayoutPending bool
+	templateLayoutApplied bool
+	ActivePane            string // pane ID of the active pane
+	Width                 int
+	Height                int
 	// CanvasW/CanvasH: full tab-area dimensions for wide-canvas panes
 	// (set via SetCanvas before Resize; independent of notes squeeze).
 	CanvasW int

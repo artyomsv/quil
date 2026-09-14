@@ -38,6 +38,7 @@ func TestSettingsFields_LabelsAndInitialValues(t *testing.T) {
 		"Show disclaimer",
 		"Update check",
 		"Update auto-download",
+		"Templates",
 	}
 	if len(fields) != len(wantLabels) {
 		t.Fatalf("settingsFields len = %d, want %d", len(fields), len(wantLabels))

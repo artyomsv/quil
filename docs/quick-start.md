@@ -102,7 +102,7 @@ Restart the client. Then ask the AI:
 
 You should see a JSON array of every pane with its id, type, tab, and CWD. If you don't, see [MCP → Troubleshooting](mcp.md#troubleshooting).
 
-The full [MCP guide](mcp.md) covers all 34 tools, wiring for Claude Code / Cursor / VS Code, the redaction model for secrets, and example prompts.
+The full [MCP guide](mcp.md) covers all 35 tools, wiring for Claude Code / Cursor / VS Code, the redaction model for secrets, and example prompts.
 
 ## Where to go next
 

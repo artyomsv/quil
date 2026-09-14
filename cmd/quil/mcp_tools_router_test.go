@@ -23,10 +23,25 @@ type fakeIPCDaemon struct {
 	// version is what the fake reports to the bridge's probe. Empty means
 	// "do not answer", the pre-versioning daemon shape.
 	version string
+	// requests is what the fake advertises as handled (VersionRespPayload
+	// .Requests). Nil is the daemon that predates the field, where the
+	// version floor still decides.
+	requests []string
 }
 
 func newFakeIPCDaemon(t *testing.T, paneID string) *fakeIPCDaemon {
 	return newFakeIPCDaemonVersion(t, paneID, mcpDaemonMinVersion)
+}
+
+// newFakeIPCDaemonRequests is newFakeIPCDaemonVersion for a daemon new enough
+// to advertise which gated request types it handles.
+func newFakeIPCDaemonRequests(t *testing.T, paneID, version string, requests ...string) *fakeIPCDaemon {
+	t.Helper()
+	f := newFakeIPCDaemonVersion(t, paneID, version)
+	f.mu.Lock()
+	f.requests = requests
+	f.mu.Unlock()
+	return f
 }
 
 func newFakeIPCDaemonVersion(t *testing.T, paneID, version string) *fakeIPCDaemon {
@@ -43,7 +58,7 @@ func newFakeIPCDaemonVersion(t *testing.T, paneID, version string) *fakeIPCDaemo
 			if f.version == "" {
 				return
 			}
-			resp, _ = ipc.NewMessage(ipc.MsgVersionResp, ipc.VersionRespPayload{Version: f.version})
+			resp, _ = ipc.NewMessage(ipc.MsgVersionResp, ipc.VersionRespPayload{Version: f.version, Requests: f.requests})
 		case ipc.MsgListPanesReq:
 			resp, _ = ipc.NewMessage(ipc.MsgListPanesResp, ipc.ListPanesRespPayload{Panes: []ipc.PaneInfo{{ID: f.paneID, TabID: "tab-" + f.paneID, AgentState: "idle"}}})
 		case ipc.MsgPaneInput:
@@ -54,6 +69,22 @@ func newFakeIPCDaemonVersion(t *testing.T, paneID, version string) *fakeIPCDaemo
 			resp, _ = ipc.NewMessage(ipc.MsgDelegateTaskResp, ipc.DelegateTaskRespPayload{Task: ipc.TaskInfo{ID: "task-1", ToPane: req.ToPane, FromPane: req.FromPane, State: "sent"}})
 		case ipc.MsgListProjectsReq:
 			resp, _ = ipc.NewMessage(ipc.MsgListProjectsResp, ipc.ListProjectsRespPayload{Projects: []ipc.ProjectInfo{{ID: "proj-" + f.paneID, Name: f.paneID}}})
+		case ipc.MsgCreateFromTemplateReq:
+			var req ipc.CreateFromTemplateReqPayload
+			if err := m.DecodePayload(&req); err != nil {
+				t.Error(err)
+				return
+			}
+			payload := ipc.CreateFromTemplateRespPayload{TabID: "tab-" + f.paneID, PaneIDs: []string{f.paneID}, PreparingWorktree: req.Branch}
+			if req.Template == "unknown" {
+				payload = ipc.CreateFromTemplateRespPayload{Error: "unknown template"}
+			}
+			var err error
+			resp, err = ipc.NewMessage(ipc.MsgCreateFromTemplateResp, payload)
+			if err != nil {
+				t.Error(err)
+				return
+			}
 		default:
 			return
 		}
@@ -96,6 +127,7 @@ func (f *fakeIPCDaemon) delegate() *ipc.DelegateTaskReqPayload {
 
 // toolHarness registers every tool on a server backed by a router over one
 // local fake daemon and one remote fake daemon, and returns a client session.
+
 func toolHarness(t *testing.T, local, remote *fakeIPCDaemon) (*mcp.ClientSession, *mcpRouter) {
 	t.Helper()
 	cfg := config.Default()
@@ -275,7 +307,7 @@ func TestCreatePaneSchema_ExposesDialogOptions(t *testing.T) {
 	for _, tl := range tools.Tools {
 		byName[tl.Name] = tl
 	}
-	for _, want := range []string{"create_pane", "create_tab", "list_projects", "create_project", "update_project", "destroy_project",
+	for _, want := range []string{"create_pane", "create_tab", "create_from_template", "list_projects", "create_project", "update_project", "destroy_project",
 		"switch_project", "rename_tab", "destroy_tab", "rename_pane", "list_plugins", "list_sessions", "list_hosts",
 		"delegate_task", "get_task", "wait_task", "list_tasks"} {
 		if byName[want] == nil {
@@ -288,7 +320,7 @@ func TestCreatePaneSchema_ExposesDialogOptions(t *testing.T) {
 			t.Errorf("create_pane schema lacks %s:\n%s", prop, schema)
 		}
 	}
-	if len(tools.Tools) != 34 {
-		t.Errorf("tool count = %d, want 34 (update docs/mcp.md and CLAUDE.md if this changed on purpose)", len(tools.Tools))
+	if len(tools.Tools) != 35 {
+		t.Errorf("tool count = %d, want 35 (update docs/mcp.md and CLAUDE.md if this changed on purpose)", len(tools.Tools))
 	}
 }

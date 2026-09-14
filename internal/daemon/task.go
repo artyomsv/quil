@@ -45,7 +45,30 @@ const (
 	// submits it. Claude Code and codex both accept a paste and then a
 	// separate CR; sending the CR inside the same write has the newline land
 	// in the input buffer as text on some versions.
-	pasteSettle = 100 * time.Millisecond
+	//
+	// CODEX is what makes this number large. Under ConPTY it does not receive
+	// the bracketed-paste markers as a paste EVENT — it sees a fast run of
+	// characters — so it falls back to its paste-burst heuristic
+	// (codex-rs/tui/src/bottom_pane/paste_burst.rs, read at v0.154.0):
+	// PASTE_ENTER_SUPPRESS_WINDOW is 120 ms and is REFRESHED on every
+	// buffered character, so it ends 120 ms after the last one codex
+	// processed, and PASTE_BURST_ACTIVE_IDLE_TIMEOUT is 60 ms on Windows
+	// before the buffer reaches the composer at all. An Enter inside that
+	// window is appended to the prompt as a newline AND extends the window by
+	// another 120 ms, so it is swallowed in silence: the prompt sits in the
+	// composer looking delivered and nothing ever runs. At 100 ms that was
+	// the common case — measured 2026-09-13, a delegated task to a codex pane
+	// never started, while the same delivery to a claude pane in the same tab
+	// started in 0.6 s. Only a real bracketed-paste event clears the window
+	// early (clear_after_explicit_paste), which is exactly what does not
+	// happen here.
+	//
+	// 400 ms is 60 + 120 with margin for the lag between our write and codex
+	// reading it. It is a CEILING on the gap, not a floor: the CR is timed
+	// from the enqueue, and both halves cross the same ordered per-pane
+	// writer, so a child that is slow to drain its stdin narrows the gap it
+	// actually sees. Claude Code accepts any gap, so one value serves both.
+	pasteSettle = 400 * time.Millisecond
 )
 
 type task struct {
@@ -252,6 +275,8 @@ func (d *Daemon) deliverPrompt(pane *Pane, text string, agent bool) bool {
 	if !agent {
 		return pane.EnqueueInput([]byte(text + "\r"))
 	}
+	// No embedded paste delimiter may turn subsequent text into keystrokes.
+	text = strings.NewReplacer("\x1b[201~", "", "\u009b201~", "", string([]byte{0x9b})+"201~", "").Replace(text)
 	if !pane.EnqueueInput([]byte("\x1b[200~" + text + "\x1b[201~")) {
 		return false
 	}
@@ -283,8 +308,9 @@ func (d *Daemon) delegateTask(req ipc.DelegateTaskReqPayload) ipc.DelegateTaskRe
 	toName := pane.Name
 	pane.PluginMu.Unlock()
 
+	id := "task-" + uuid.New().String()[:8]
 	t := &task{
-		id:       "task-" + uuid.New().String()[:8],
+		id:       id,
 		from:     req.FromPane,
 		to:       req.ToPane,
 		toName:   toName,
@@ -393,7 +419,10 @@ func (d *Daemon) failTasksForPane(paneID, reason string) {
 
 // finishTask moves t to a terminal state exactly once: captures the target's
 // last output, queues task_done, wakes waiters and starts the notify-back.
+
 func (d *Daemon) finishTask(t *task, st taskState, errText string) {
+	// Resolve before the registry lock; never reacquire sm.mu under workMu.
+	target := d.session.Pane(t.to)
 	reg := d.tasksRegistry()
 	reg.mu.Lock()
 	if t.state.terminal() {
@@ -406,7 +435,7 @@ func (d *Daemon) finishTask(t *task, st taskState, errText string) {
 	if t.timer != nil {
 		t.timer.Stop()
 	}
-	if target := d.session.Pane(t.to); target != nil {
+	if target != nil {
 		t.result = paneOutputExcerpt(target, taskResultLines)
 	}
 	close(t.done)
@@ -414,7 +443,7 @@ func (d *Daemon) finishTask(t *task, st taskState, errText string) {
 	reg.mu.Unlock()
 
 	log.Printf("task %s: %s (%s → %s)", t.id, st, t.from, t.to)
-	target := d.session.Pane(t.to)
+	target = d.session.Pane(t.to)
 	ev := PaneEvent{
 		ID:        uuid.New().String(),
 		PaneID:    t.to,

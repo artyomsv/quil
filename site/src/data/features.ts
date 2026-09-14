@@ -102,6 +102,24 @@ export const features: Feature[] = [
     ],
   },
   {
+    slug: "workspace-templates",
+    image: "https://cdn.stukans.com/quil/screenshots/templates-3-800.webp",
+    icon: "layers",
+    title: "Build the whole tab from a template",
+    blurb:
+      "Some work needs four panes, not one. A template describes the panes, the layout and each one's opening prompt — pick it from the palette and Quil builds the tab.",
+    category: "ai",
+    detail: [
+      "A template is one tab: 1 to 8 panes of any plugin type, a layout (rows, columns, main-left, main-top, grid) and an optional starting prompt for each. Choose 'New from template' in the command palette, pick a directory, and it is built.",
+      "Each pane can set a model, plugin toggles by name, a subdirectory, a mute, and a prompt. Model and toggle arguments are frozen into the pane at creation, so editing the file later cannot change what an existing pane restarts with.",
+      "Prompts substitute {{task}} (the text you typed), {{dir}}, {{branch}} and {{panes}} — the last lists every pane in the tab with its id and type, which is what lets one pane's prompt drive the others without pasting ids by hand. Substitution is a single pass, so placeholder-like text inside your own task stays literal.",
+      "The directory row is the same daemon-side browser the pane setup dialog uses, so it lists the right machine when the daemon is remote. Naming a branch opens the tab in a fresh git worktree instead, with a placeholder pane spinning while git runs.",
+      "Three templates ship — agent-team, pair and review — and templates.toml is yours to edit at F1 → Settings → Templates. A save validates the whole document before replacing it atomically; an invalid file keeps the editor open with the reason and leaves the previous file intact.",
+      "Quil sets the workspace up and then gets out of the way: it does not supervise the panes, interpret their answers, or hold any state about the template afterwards. The tab that results is an ordinary tab.",
+      "Agents can create one too, via the create_from_template MCP tool. A template pane can opt into Quil's own MCP server without changing your global agent config — a guard rail for which tools it reaches for, not a security boundary against an agent that has a shell.",
+    ],
+  },
+  {
     slug: "mcp-server",
     image: "https://cdn.stukans.com/quil/screenshots/claude-code-quil-mcp-800.webp",
     icon: "zap",
@@ -110,7 +128,7 @@ export const features: Feature[] = [
       "Run `quil mcp` and an AI agent can manage projects across remote hosts, create AI panes, and delegate work between them.",
     category: "ai",
     detail: [
-      "34 tools exposed over the Model Context Protocol (Anthropic's open standard for AI tool use).",
+      "35 tools exposed over the Model Context Protocol (Anthropic's open standard for AI tool use).",
       "Create tabs and AI panes with named toggles, session resume, worktree and sandbox options; manage projects across configured remote hosts.",
       "Delegate tasks between panes, track completion, and notify the requester when it is ready. Read output, send keys, inspect screens, watch events, and query memory use.",
       "Lets any MCP-capable client (Claude Desktop, Claude Code, Cursor) reach directly into your running Quil session.",

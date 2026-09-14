@@ -142,3 +142,19 @@ func TestSendPaneInput_SendsAnIDBearingRequestWithTheData(t *testing.T) {
 		t.Fatal("the daemon never received a pane_input")
 	}
 }
+
+// codexEnterSuppressWindow is codex's own PASTE_ENTER_SUPPRESS_WINDOW
+// (codex-rs/tui/src/bottom_pane/paste_burst.rs) plus its Windows burst flush
+// (PASTE_BURST_ACTIVE_IDLE_TIMEOUT). An Enter delivered inside that window is
+// folded into the prompt as a newline rather than submitting it, so the pane
+// shows the prompt and nothing ever runs.
+const codexEnterSuppressWindow = 180 * time.Millisecond
+
+// The daemon's pasteSettle carries the same guard. Both are pinned because
+// neither side can observe the failure: the bytes are delivered, the tool
+// answers "Pasted N bytes", and the target simply never starts.
+func TestPasteEnterDelay_ClearsCodexEnterSuppressWindow(t *testing.T) {
+	if pasteEnterDelay <= codexEnterSuppressWindow {
+		t.Fatalf("pasteEnterDelay is %v; codex swallows an Enter delivered within %v of the paste", pasteEnterDelay, codexEnterSuppressWindow)
+	}
+}

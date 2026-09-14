@@ -94,20 +94,31 @@ type repoScanState struct {
 // is local, and a path exercised only by remote sessions is one that rots.
 // plugin names the overlay tool that asked; it is meaningful for
 // repoScanOverlay only and ignored for the pick list.
-func (m *Model) requestGitRepos(cwd, tabID string, purpose repoScanPurpose, plugin string) tea.Cmd {
+func (m *Model) requestGitRepos(dest, cwd, tabID string, purpose repoScanPurpose, plugin string) tea.Cmd {
 	gen := m.nextReqGen()
 	m.repoScan = repoScanState{cwd: cwd, tabID: tabID, purpose: purpose, plugin: plugin, gen: gen}
+	msg, err := ipc.NewMessage(ipc.MsgGitReposReq, ipc.GitReposReqPayload{CWD: cwd})
+	if err != nil {
+		log.Printf("git discovery: encode: %v", err)
+		return nil
+	}
+	// The daemon's respondTo echoes ID back on the response verbatim
+	// (same mechanism MCP request-response correlation uses) — this is
+	// what lets applyGitRepos tell two requests for the same cwd apart.
+	msg.ID = gen
+	// Stamped HERE, on the Update goroutine, rather than left for the router to
+	// resolve when the send goroutine finally runs. Router.Send routes an
+	// UNSTAMPED message to whichever destination is active AT SEND TIME, so a
+	// dialog opened for one host whose scan ran after the active project
+	// changed asked the wrong daemon about a path that exists only on the
+	// first — and the answer, keyed only on (cwd, gen), was then accepted as
+	// the original host's own. A stamped message reaches that destination or is
+	// dropped with a log; it can never reach a different one. An unreachable
+	// destination keeps the existing recovery: nothing is sent and the caller's
+	// own timeout path reports it, per purpose.
+	stampDest(msg, dest)
 	return tea.Batch(
 		func() tea.Msg {
-			msg, err := ipc.NewMessage(ipc.MsgGitReposReq, ipc.GitReposReqPayload{CWD: cwd})
-			if err != nil {
-				log.Printf("git discovery: encode: %v", err)
-				return nil
-			}
-			// The daemon's respondTo echoes ID back on the response verbatim
-			// (same mechanism MCP request-response correlation uses) — this is
-			// what lets applyGitRepos tell two requests for the same cwd apart.
-			msg.ID = gen
 			m.client.Send(msg)
 			return nil
 		},
@@ -157,7 +168,6 @@ func (m *Model) applyGitRepos(resp ipc.GitReposRespPayload, gen string) tea.Cmd 
 	if purpose == repoScanPickList {
 		return m.applyGitReposPickList(resp.Repos)
 	}
-
 	// Resolved again rather than captured: the request is asynchronous and the
 	// user may have switched tabs while it was in flight. Acting on the tab that
 	// asked keeps the overlay with its own pane; if that tab is gone, so is the

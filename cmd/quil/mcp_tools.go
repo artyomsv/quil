@@ -217,8 +217,15 @@ func registerSendToPaneTool(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogger) {
 }
 
 // pasteEnterDelay is the pause between a bracketed paste and the Enter that
-// submits it. The daemon's delegate_task uses the same gap.
-const pasteEnterDelay = 100 * time.Millisecond
+// submits it. The daemon's delegate_task uses the same gap, and the reasoning
+// for the size of it lives on that constant (`pasteSettle`,
+// internal/daemon/task.go): codex suppresses an Enter arriving within 120 ms
+// of the last character of a paste burst, swallowing it into the prompt as a
+// newline, so the pane looks loaded and never starts. Reproduced on this path
+// too — a 2.5 KB `send_to_pane paste=true` to a codex pane sat unsubmitted
+// (2026-09-13). The two are kept equal deliberately: an agent that finds
+// delegate_task reliable and send_to_pane not would have no way to tell why.
+const pasteEnterDelay = 400 * time.Millisecond
 
 // sendPaneInput delivers bytes to a pane and FAILS when the daemon could not
 // hand them to a process.

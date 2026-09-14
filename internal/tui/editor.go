@@ -41,7 +41,10 @@ type TextEditor struct {
 	FilePath   string
 	Dirty      bool
 	SaveErr    string
-	Sel        *EditorSel // active selection (nil = none)
+	// SaveContent is an optional domain validator/writer. Plugin editors keep
+	// the existing contained-path save; template editors validate the full file.
+	SaveContent func(string) error
+	Sel         *EditorSel // active selection (nil = none)
 	// Highlight selects the syntax highlighter. Defaults to HighlightTOML.
 	Highlight HighlightMode
 	// ReadOnly disables every key path that would mutate the document
@@ -753,6 +756,13 @@ func (e *TextEditor) Content() string {
 // Save validates TOML syntax and writes to disk atomically.
 func (e *TextEditor) Save() error {
 	content := e.Content()
+	if e.SaveContent != nil {
+		if err := e.SaveContent(content); err != nil {
+			return err
+		}
+		e.Dirty = false
+		return nil
+	}
 
 	var test map[string]any
 	if err := toml.Unmarshal([]byte(content), &test); err != nil {

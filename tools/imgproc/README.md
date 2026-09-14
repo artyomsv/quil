@@ -96,6 +96,9 @@ let Cloudflare hold it.
 | README "See it" row 6 | `projects_1_main-800.webp`, `projects_2_with_remote-800.webp` | sidebar + a remote project |
 | README "Run the work somewhere else" | `projects_3_add_remote_1-800.webp`, `projects_4_add_remote_2-800.webp` | the two-step connect flow |
 | /features cards | `projects_1_main-800.webp` (projects), `projects_2_with_remote-800.webp` (multi-daemon) | per-feature |
+| README "See it" row 7 | `templates-3-800.webp`, `templates-settings-2-800.webp` | a tab built from the agent-team template + `templates.toml` in the editor |
+| /features card | `templates-3-800.webp` (workspace-templates) | per-feature |
+| Unplaced | `templates-settings-1-*` (the Templates row on the F1 settings page) | captured with the pair above; kept for a docs walkthrough |
 
 Reference webp with a png fallback where you want belt-and-suspenders:
 

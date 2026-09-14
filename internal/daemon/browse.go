@@ -343,6 +343,12 @@ func statExistsWithinBudget(path string) (exists, answered bool) {
 // the link and so parks exactly as the stat does, and a budget covering only
 // the stat moves the wedge one syscall later rather than removing it.
 func resolveSpawnDirWithin(path string, d time.Duration) string {
+	return probeSpawnDirWithin(path, d, false)
+}
+
+// Containment checks require successful symlink resolution. Ordinary spawn
+// callers retain their historical best-effort fallback through the wrapper.
+func probeSpawnDirWithin(path string, d time.Duration, requireResolved bool) string {
 	if path == "" || d <= 0 || !claimBlockingFSCall() {
 		return ""
 	}
@@ -354,10 +360,14 @@ func resolveSpawnDirWithin(path string, d time.Duration) string {
 			ch <- ""
 			return
 		}
-		// A path that stats as a directory but will not resolve is still
-		// usable as a spawn CWD; the resolution is a nicety, not a gate.
+		// Ordinary callers can use a directory even if resolution fails.
+		// Containment checks opt out: they must know where a symlink leads.
 		if resolved, err := filepath.EvalSymlinks(path); err == nil {
 			ch <- resolved
+			return
+		}
+		if requireResolved {
+			ch <- ""
 			return
 		}
 		ch <- path

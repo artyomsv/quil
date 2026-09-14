@@ -30,7 +30,7 @@ export const homeFaq: FaqItem[] = [
   {
     question: "Which AI tools does Quil support today?",
     answer:
-      "Claude Code has first-class support via the built-in Claude Code pane type, with auto-resume on daemon restart, a setup dialog that pre-fills the active pane's working directory (so the project's `.claude/` context is preserved), and a one-click `Dangerously skip permissions` toggle for unattended runs. Quil also runs an MCP server (`quil mcp`) that exposes 34 tools so any MCP-capable client can read pane output, send keystrokes, snapshot a workspace, query per-pane memory usage, create tabs and AI panes with the dialog's options, manage projects across remote hosts, and delegate work between AI panes. Any other AI tool can be wrapped in a custom TOML plugin that defines its spawn command, resume strategy, and error patterns.",
+      "Claude Code has first-class support via the built-in Claude Code pane type, with auto-resume on daemon restart, a setup dialog that pre-fills the active pane's working directory (so the project's `.claude/` context is preserved), and a one-click `Dangerously skip permissions` toggle for unattended runs. Quil also runs an MCP server (`quil mcp`) that exposes 35 tools so any MCP-capable client can read pane output, send keystrokes, snapshot a workspace, query per-pane memory usage, create tabs and AI panes with the dialog's options, manage projects across remote hosts, and delegate work between AI panes. Any other AI tool can be wrapped in a custom TOML plugin that defines its spawn command, resume strategy, and error patterns.",
   },
   {
     question: "Can I paste a screenshot into Claude Code on Windows?",

@@ -550,7 +550,7 @@ func (m Model) openNewProjectDialog() (tea.Model, tea.Cmd) {
 	// existing one. Same seeding beginProjectRename does, for the same reason.
 	m.projectFormRemote = m.projectFormDest != ""
 	m.projectFormUser, m.projectFormHost = splitSSHDest(m.projectFormDest)
-	m.resetProjectBrowseState()
+	m.resetDirBrowseState()
 	return m, m.requestBrowseDirForDest(m.projectFormDest, "", "", "")
 }
 
@@ -574,7 +574,7 @@ func (m Model) beginProjectRename(id string) (tea.Model, tea.Cmd) {
 	// described it.
 	m.projectFormMerge = nil
 	m.projectFormDest = p.Dest
-	m.resetProjectBrowseState()
+	m.resetDirBrowseState()
 	// Seed the root-dir field with the project's OWN value, so a submit before
 	// the browse answers sends what the project already has instead of nothing.
 	//
@@ -589,8 +589,8 @@ func (m Model) beginProjectRename(id string) (tea.Model, tea.Cmd) {
 	return m, m.requestBrowseDirForDest(m.projectFormDest, p.RootDir, "", "")
 }
 
-// resetProjectBrowseState clears the root-dir browser SYNCHRONOUSLY, before
-// the (async) browse request is even sent — mirrors enterSetupOrSplit's
+// resetDirBrowseState clears the shared directory browser SYNCHRONOUSLY,
+// before the (async) browse request is even sent — mirrors enterSetupOrSplit's
 // reset for exactly the same reason. requestBrowseDirForDest's send is a
 // real IPC round trip (an SSH-hop TCP handshake plus auth on the first
 // request to a remote daemon), and submitProjectForm reads m.cwdBrowseDir as
@@ -600,7 +600,11 @@ func (m Model) beginProjectRename(id string) (tea.Model, tea.Cmd) {
 // pane-setup dialog's last browsed CWD. The daemon's UpdateProject has no
 // unchanged-value guard, so a rename that only touched the name would
 // silently overwrite RootDir with that stale value.
-func (m *Model) resetProjectBrowseState() {
+//
+// Named for the browser rather than for this dialog because the template
+// dialog's directory row reuses the same listing state and needs exactly the
+// same guarantee (submitTemplateDialog also commits m.cwdBrowseDir).
+func (m *Model) resetDirBrowseState() {
 	m.cwdBrowseDir = ""
 	m.cwdBrowseEntries = nil
 	m.cwdBrowseCursor = 0
@@ -802,7 +806,7 @@ func (m Model) handleProjectRemoteKey(key string) (tea.Model, tea.Cmd) {
 			m.projectFormUser = ""
 			m.projectFormDialing = ""
 			m.projectFormDest = ""
-			m.resetProjectBrowseState()
+			m.resetDirBrowseState()
 			return m, m.requestBrowseDirForDest("", "", "", "")
 		}
 		// Turning Remote ON blanks the listing and requests NOTHING. The
@@ -812,7 +816,7 @@ func (m Model) handleProjectRemoteKey(key string) (tea.Model, tea.Cmd) {
 		// connected, and saying so is more honest than showing the wrong
 		// filesystem. destDialedMsg repopulates it against the real host.
 		m.projectFormDest = ""
-		m.resetProjectBrowseState()
+		m.resetDirBrowseState()
 		m.projectFormCursor = 2 // the User row, which is where the flow goes next
 		return m, nil
 	}
@@ -852,7 +856,7 @@ func (m Model) connectProjectHost() (tea.Model, tea.Cmd) {
 	if dest == "" || m.destConnected(dest) {
 		m.projectFormDest = dest
 		m.projectFormCursor = projectRowRootDir
-		m.resetProjectBrowseState()
+		m.resetDirBrowseState()
 		// Re-browse against the newly chosen machine: the entries on screen
 		// describe whichever daemon was asked last, and a path picked from one
 		// host's filesystem is meaningless on another.
@@ -998,7 +1002,7 @@ func (m Model) handleProjectRootDirKey(key string) (tea.Model, tea.Cmd) {
 // capture.
 //
 // Blocked while m.browse.pending: the root-dir round trip may still be in
-// flight (resetProjectBrowseState's zeroing happens synchronously, the
+// flight (resetDirBrowseState's zeroing happens synchronously, the
 // daemon's answer does not), and submitting mid-flight would commit
 // whatever cwdBrowseDir currently holds — "" fresh after a reset — as the
 // root dir. For New that is merely a premature default; for Rename it would
@@ -1018,7 +1022,7 @@ func (m Model) submitProjectForm() (tea.Model, tea.Cmd) {
 	//
 	// No wait on the browse. The hazard it guarded — submitting a root dir left
 	// over from a DIFFERENT dialog session — is gone at the source:
-	// resetProjectBrowseState clears the scratch value when either dialog
+	// resetDirBrowseState clears the scratch value when either dialog
 	// opens, and beginProjectRename then seeds the field with the project's
 	// OWN root. So whatever cwdBrowseDir holds here is always one of three
 	// safe things: this project's existing value, a directory the user picked

@@ -38,7 +38,7 @@ architectural bet.
 | VT emulation | `charmbracelet/x/vt` | Vendored libghostty-vt (Ghostty engine) | `vt100` crate over `tmux pipe-pane` |
 | Client/server | daemon + TUI client | server + thin client(s) | tmux + TUI + optional HTTP daemon |
 | **Windows** | ✅ **Native** (bundled ConPTY/OpenConsole) | ✅ Native, **GA** (ConPTY) as of 2026-09-10 — no terminal attach, no live handoff, no clipboard image bridge | ❌ **WSL2 only** |
-| Agent-drives-it API | **MCP server** (34 tools, native protocol) | Socket API + full CLI + agent skill | HTTP REST API (130 routes) + CLI |
+| Agent-drives-it API | **MCP server** (35 tools, native protocol) | Socket API + full CLI + agent skill | HTTP REST API (130 routes) + CLI |
 | Web/browser UI | ❌ TUI only | ❌ (responsive TUI) | ✅ **React PWA dashboard** |
 | Container sandbox | ✅ **Docker** (per-pane, user-supplied image) | ❌ | ✅ Docker/Podman/Apple |
 | Remote phone access | ❌ | via SSH TUI | ✅ Tunnel + PWA + Web Push |
@@ -157,7 +157,7 @@ Legend: ✅ full · 🟡 partial/different · ❌ absent · ❓ not re-verified
 | Executable plugins (any language) | ✅ | ✅ (design) | ❌ |
 | Plugin actions / event hooks / link handlers | ✅ | ✅ | ❌ |
 | Plugin marketplace (GitHub topic index) | ✅ | ✅ (featured + hash) | ❌ |
-| Agent-drives-multiplexer API | ✅ socket+CLI | ✅ HTTP+CLI | ✅ **MCP (34 tools)** |
+| Agent-drives-multiplexer API | ✅ socket+CLI | ✅ HTTP+CLI | ✅ **MCP (35 tools)** |
 | Subscribable event stream (`events.subscribe`) | ✅ (workspace/tab/pane/layout/worktree lifecycle) | 🟡 | 🟡 (`watch_notifications` + task completion only) |
 | Wait on *semantic* agent state (`--until done/blocked`) | ✅ | 🟡 | ✅ (`wait_task`, daemon-side ledger) |
 | Portable layout export / declarative apply | ✅ (`layout.*`) | ❌ | ❌ (layout persists, but is not exportable) |
@@ -343,7 +343,7 @@ jobs, and Quil is not an emulator.
   executable cannot be replaced in place). It is a shared limitation of the
   category, not a wedge, and it was written into the site copy once during the
   2026-09-10 pass before being caught.
-- **First-class MCP server.** Quil exposes 34 MCP tools that Claude Desktop /
+- **First-class MCP server.** Quil exposes 35 MCP tools that Claude Desktop /
   Cursor / VS Code consume *natively*, including projects, remote hosts and
   pane-to-pane task delegation. The competitors built bespoke socket/HTTP
   APIs that need an "agent skill" to teach. For the *AI-agent-as-operator* use

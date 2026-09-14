@@ -18,15 +18,18 @@ import (
 )
 
 type Tab struct {
-	ID        string
-	Name      string
-	Color     string
-	Panes     []string        // Pane IDs in order
-	Layout    json.RawMessage // Opaque layout tree from TUI
-	ProjectID string          // Project this tab belongs to (see project.go)
+	TemplateLayout string // Initial layout keyword; the TUI builds the tree.
+	TemplateMain   string // Initial layout anchor pane ID. Protected by sm.mu.
+	ID             string
+	Name           string
+	Color          string
+	Panes          []string        // Pane IDs in order
+	Layout         json.RawMessage // Opaque layout tree from TUI
+	ProjectID      string          // Project this tab belongs to (see project.go)
 }
 
 type Pane struct {
+	QuilMCP      bool // Opts into ordinary Quil MCP at spawn. Under PluginMu.
 	ID           string
 	TabID        string
 	CWD          string
@@ -940,10 +943,10 @@ func (sm *SessionManager) RestoreProjects(projects []*Project, activeProject str
 // to Projects()/ActiveProject() — a nested RLock on this goroutine could
 // deadlock behind a writer parked between the two acquisitions (the
 // oscillation hazard noted at daemon.go's snapshot()).
+
 func (sm *SessionManager) SnapshotState() (activeTab string, tabs []*Tab, panesByTab map[string][]*Pane, projects []Project, activeProject string) {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
-
 	activeTab = sm.activeTab
 	tabs = make([]*Tab, 0, len(sm.tabOrder))
 	panesByTab = make(map[string][]*Pane)

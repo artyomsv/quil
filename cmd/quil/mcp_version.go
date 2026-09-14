@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"slices"
 	"time"
 
 	"github.com/artyomsv/quil/internal/ipc"
@@ -21,9 +22,9 @@ import (
 // rather than as "this host has not been upgraded". Measured 2026-09-10
 // against a remote still on 1.71.0.
 //
-// Bump when a later release adds request types that a still-older daemon
-// would drop the same way.
+// Newer tools use their own floor; do not raise the floor of existing tools.
 const mcpDaemonMinVersion = "1.72.0"
+const createFromTemplateMinVersion = "1.74.0"
 
 // daemonVersionProbeTimeout bounds remote version probes. A pre-versioning
 // daemon drops the request silently. Local startup uses handshakeTimeout;
@@ -31,26 +32,27 @@ const mcpDaemonMinVersion = "1.72.0"
 var daemonVersionProbeTimeout = remoteHandshakeTimeout
 
 // probeDaemonVersion asks a freshly dialled client which version its daemon
-// runs. It must run BEFORE the bridge's readLoop owns the connection, because
-// it reads the reply itself. Empty on any failure — "unknown" — and an
-// unknown version is never a reason to refuse anything (see requireDaemon).
+// runs and which gated request types it handles. It must run BEFORE the
+// bridge's readLoop owns the connection, because it reads the reply itself.
+// Both empty on any failure — "unknown" — and an unknown daemon is never a
+// reason to refuse anything (see requireDaemon).
 //
 // This is deliberately not versionHandshakeWithin: that one is the TUI's
 // GATE and skips itself entirely for a non-release client, while a dev bridge
-// still needs the number to say "that host is older than the tools you are
+// still needs the answer to say "that host is older than the tools you are
 // calling" instead of timing out.
-func probeDaemonVersion(client *ipc.Client, timeout time.Duration) string {
+func probeDaemonVersion(client *ipc.Client, timeout time.Duration) (string, []string) {
 	reqID := fmt.Sprintf("mcpv-%d", time.Now().UnixNano())
 	req, err := ipc.NewMessage(ipc.MsgVersionReq, struct{}{})
 	if err != nil {
-		return ""
+		return "", nil
 	}
 	req.ID = reqID
 	if err := client.Send(req); err != nil {
-		return ""
+		return "", nil
 	}
 	if err := client.SetReadDeadline(time.Now().Add(timeout)); err != nil {
-		return ""
+		return "", nil
 	}
 	defer client.SetReadDeadline(time.Time{})
 	for {
@@ -60,18 +62,30 @@ func probeDaemonVersion(client *ipc.Client, timeout time.Duration) string {
 			if !(errors.As(err, &netErr) && netErr.Timeout()) {
 				log.Printf("mcp: version probe: %v", err)
 			}
-			return ""
+			return "", nil
 		}
 		if msg.Type != ipc.MsgVersionResp || msg.ID != reqID {
 			continue
 		}
 		var payload ipc.VersionRespPayload
 		if err := msg.DecodePayload(&payload); err != nil {
-			return ""
+			return "", nil
 		}
-		return truncateVersion(payload.Version)
+		// Bounded like the version string: both come off the wire from a
+		// host the user may not control, and both are rendered in errors.
+		reqs := payload.Requests
+		if len(reqs) > maxGatedRequests {
+			reqs = reqs[:maxGatedRequests]
+		}
+		for i, r := range reqs {
+			reqs[i] = truncateVersion(r)
+		}
+		return truncateVersion(payload.Version), reqs
 	}
 }
+
+// maxGatedRequests bounds a list that arrives from another machine.
+const maxGatedRequests = 64
 
 // truncateVersion bounds a string that came off the wire from a daemon the
 // user may not control; it is rendered in list_hosts and in error text.
@@ -86,20 +100,55 @@ func truncateVersion(v string) string {
 // requireDaemon reports whether the daemon behind b is new enough for a tool
 // that sends one of the request types listed on mcpDaemonMinVersion.
 //
-// Unknown and unparseable versions PASS: a dev daemon reports "dev", a
+// Unknown and unparseable versions PASS: an unstamped build reports "dev", a
 // pre-versioning daemon reports nothing, and refusing either would take a
 // developer's own daemon away from them. Only a RELEASE number older than the
 // floor is refused, and the error says what to run — the remedy is the same
 // one `quil remote setup` performs.
 func (b *mcpBridge) requireDaemon(tool string) error {
+	return b.requireDaemonAtLeast(tool, mcpDaemonMinVersion)
+}
+
+// requireRequest gates a tool on whether the daemon SAYS it handles the
+// request type, falling back to the version floor when it does not say.
+//
+// A version number cannot answer this for a build made from a branch.
+// scripts/dev.sh stamps `-X main.version=$(cat VERSION)` into all six
+// binaries — dev and debug included — so a client and daemon built here both
+// report the tree's VERSION while the floor names the release that has not
+// happened yet. Comparing numbers there refuses the daemon the client was
+// built beside, and the tool is unusable in exactly the builds used to test
+// it. Comparing them the other way — treating an equal number as proof of a
+// shared build — is no better: quil-debug.exe attaches to the PRODUCTION
+// daemon by design, so a released daemon wearing the same number would be
+// sent a request it drops in silence, which is the timeout the floor exists
+// to replace.
+//
+// So the daemon is asked instead. An EMPTY list means "cannot say" — every
+// daemon built before the field existed — and the version floor still
+// decides there, unchanged. A NON-EMPTY list that omits the type is a
+// daemon that answered and does not have it, which is a refusal however new
+// its version reads.
+func (b *mcpBridge) requireRequest(tool, reqType, min string) error {
+	if len(b.daemonRequests) > 0 {
+		if slices.Contains(b.daemonRequests, reqType) {
+			return nil
+		}
+		return fmt.Errorf("%s is not available on that daemon (it runs %s and does not handle %s) — upgrade it (quil remote setup <host> pushes this client's build)",
+			tool, b.daemonVersion, reqType)
+	}
+	return b.requireDaemonAtLeast(tool, min)
+}
+
+func (b *mcpBridge) requireDaemonAtLeast(tool, min string) error {
 	v := b.daemonVersion
 	if v == "" {
 		return nil
 	}
-	cmp, err := versionpkg.Compare(v, mcpDaemonMinVersion)
+	cmp, err := versionpkg.Compare(v, min)
 	if err != nil || cmp >= 0 {
 		return nil
 	}
 	return fmt.Errorf("%s needs quil %s or newer on the daemon, and this one runs %s — upgrade it (quil remote setup <host> pushes this client's build)",
-		tool, mcpDaemonMinVersion, v)
+		tool, min, v)
 }

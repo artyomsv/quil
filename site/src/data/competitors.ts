@@ -493,7 +493,7 @@ export const competitors: Record<CompetitorInfo["slug"], CompetitorInfo> = {
       {
         question: "How do agents control each tool?",
         answer:
-          "herdr exposes a Unix-socket API plus a CLI, and ships an installable 'skill' so an agent learns to call it. Quil exposes 34 tools for panes, projects, remote hosts and task delegation over the Model Context Protocol, which Claude Desktop, Cursor, and VS Code speak natively with no glue.",
+          "herdr exposes a Unix-socket API plus a CLI, and ships an installable 'skill' so an agent learns to call it. Quil exposes 35 tools for panes, projects, remote hosts and task delegation over the Model Context Protocol, which Claude Desktop, Cursor, and VS Code speak natively with no glue.",
       },
     ],
   },

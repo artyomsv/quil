@@ -17,7 +17,7 @@ make this harder: the relevant project may be on another machine.
 
 ## Implemented solution
 
-`quil mcp` exposes 34 Model Context Protocol tools over stdio. An MCP-capable
+`quil mcp` exposes 35 Model Context Protocol tools over stdio. An MCP-capable
 client can discover the workspace, create tabs and AI panes using the same
 validated options as the TUI, manage projects across configured remote hosts,
 and delegate work between panes with completion tracking and notify-back.
@@ -25,7 +25,7 @@ and delegate work between panes with completion tracking and notify-back.
 This PRD records the capability and its constraints. The [MCP guide](../mcp.md)
 is the reference for client configuration, input schemas, responses and examples.
 
-## Tools by purpose (34 total)
+## Tools by purpose (35 total)
 
 ### Discovery (6)
 
@@ -65,7 +65,7 @@ session occupancy come from the daemon that will perform the action.
 | `restart_pane` | Restart the child with the pane's configuration and dimensions |
 | `destroy_pane` | Remove a pane, preserving the last-pane replacement behavior |
 
-### Projects and tabs (8)
+### Projects and tabs (9)
 
 Projects let an orchestrator group related workers and keep their working
 directories explicit. Creating a tab does not take the user's focus.
@@ -76,6 +76,7 @@ directories explicit. Creating a tab does not take the user's focus.
 | `update_project` | Rename a project or change its root |
 | `switch_project` | Show the project's last active tab |
 | `destroy_project` | Remove the project and its tabs and panes |
+| `create_from_template` | Create ordered panes and starting prompts from a workspace template (daemon 1.74.0+) |
 | `create_tab` | Create a tab with a configurable first pane |
 | `rename_tab` | Label a tab |
 | `switch_tab` | Show a tab |
@@ -152,7 +153,7 @@ old terminal state and discard late output from the replaced process.
 
 ## Acceptance
 
-- MCP clients can connect through stdio and discover all 34 registered tools.
+- MCP clients can connect through stdio and discover all 35 registered tools.
 - Agents can manage projects, tabs and panes on local and configured remote daemons.
 - Unscoped discovery recovers hosts after the retry backoff without a named call.
 - Pane creation honors TUI-equivalent options and reports validation or spawn errors.

@@ -21,7 +21,9 @@ func (d *Daemon) newPaneSession(pane *Pane) apty.Session {
 		sibling.PluginMu.Lock()
 		c, r, overlay := sibling.Cols, sibling.Rows, sibling.Overlay
 		sibling.PluginMu.Unlock()
-		if c > 0 && r > 0 && !overlay {
+		// Apply the same guard to sibling dimensions as to the attached client.
+		// A stored 1x1 size must not override a usable fallback.
+		if c > 0 && r > 0 && !degenerateSize(c, r) && !overlay {
 			cols, rows = c, r
 			break
 		}

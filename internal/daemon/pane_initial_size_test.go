@@ -11,27 +11,32 @@ func TestMCPCreatePane_StartsAtKnownSize(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
 		attach        terminalSize
-		sibling       bool
+		sibling       terminalSize
 		want, wantTab terminalSize
 	}{
-		{"no client", terminalSize{}, false, terminalSize{80, 24}, terminalSize{80, 24}},
-		{"attached client", terminalSize{178, 58}, false, terminalSize{178, 58}, terminalSize{178, 58}},
-		{"degenerate attach", terminalSize{1, 1}, false, terminalSize{80, 24}, terminalSize{80, 24}},
-		{"narrow attach", terminalSize{1, 58}, false, terminalSize{1, 58}, terminalSize{1, 58}},
-		{"short attach", terminalSize{178, 1}, false, terminalSize{178, 1}, terminalSize{178, 1}},
-		{"sibling wins", terminalSize{178, 58}, true, terminalSize{176, 54}, terminalSize{178, 58}},
-		{"sibling wins over degenerate attach", terminalSize{1, 1}, true, terminalSize{176, 54}, terminalSize{80, 24}},
+		{"no client", terminalSize{}, terminalSize{}, terminalSize{80, 24}, terminalSize{80, 24}},
+		{"attached client", terminalSize{178, 58}, terminalSize{}, terminalSize{178, 58}, terminalSize{178, 58}},
+		{"degenerate attach", terminalSize{1, 1}, terminalSize{}, terminalSize{80, 24}, terminalSize{80, 24}},
+		{"narrow attach", terminalSize{1, 58}, terminalSize{}, terminalSize{1, 58}, terminalSize{1, 58}},
+		{"short attach", terminalSize{178, 1}, terminalSize{}, terminalSize{178, 1}, terminalSize{178, 1}},
+		{"sibling wins", terminalSize{178, 58}, terminalSize{176, 54}, terminalSize{176, 54}, terminalSize{178, 58}},
+		{"sibling wins over degenerate attach", terminalSize{1, 1}, terminalSize{176, 54}, terminalSize{176, 54}, terminalSize{80, 24}},
+		{"degenerate sibling uses attach", terminalSize{178, 58}, terminalSize{1, 1}, terminalSize{178, 58}, terminalSize{178, 58}},
+		{"degenerate sibling without client uses default", terminalSize{}, terminalSize{1, 1}, terminalSize{80, 24}, terminalSize{80, 24}},
+		{"degenerate sibling and attach use default", terminalSize{1, 1}, terminalSize{1, 1}, terminalSize{80, 24}, terminalSize{80, 24}},
+		{"narrow sibling wins", terminalSize{178, 58}, terminalSize{1, 54}, terminalSize{1, 54}, terminalSize{178, 58}},
+		{"short sibling wins", terminalSize{178, 58}, terminalSize{176, 1}, terminalSize{176, 1}, terminalSize{178, 58}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d, client := mcpTestDaemon(t)
 			tab := d.session.CreateTab("hidden")
-			if tc.sibling {
+			if tc.sibling != (terminalSize{}) {
 				p, err := d.session.CreatePane(tab.ID, t.TempDir())
 				if err != nil {
 					t.Fatal(err)
 				}
 				p.PluginMu.Lock()
-				p.Cols, p.Rows = 176, 54
+				p.Cols, p.Rows = tc.sibling.cols, tc.sibling.rows
 				p.PluginMu.Unlock()
 			}
 			if tc.attach != (terminalSize{}) {

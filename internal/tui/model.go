@@ -93,10 +93,12 @@ type TabInfo struct {
 	// what a rebuild iterates; this is the tab's own answer to the same
 	// question, used to reject a stale TabIDs entry that would otherwise build
 	// one TabModel into two projects at once.
-	ProjectID string
-	Color     string
-	Panes     []string
-	Layout    json.RawMessage
+	ProjectID      string
+	Color          string
+	Panes          []string
+	Layout         json.RawMessage
+	TemplateLayout string
+	TemplateMain   string
 }
 
 type PaneInfo struct {
@@ -342,6 +344,7 @@ const (
 	dialogProjectPick    // Alt+P: fuzzy project picker (Task 14)
 	dialogWhatsNew       // post-upgrade highlights; also F1 → What's New
 	dialogNotifySettings // F1 → Settings → Notifications: toasts + sidebar event groups
+	dialogNewTemplate
 )
 
 // tuiClient is the subset of *ipc.Client the TUI uses on the Model. Defined
@@ -363,6 +366,7 @@ type tuiClient interface {
 type Client = tuiClient
 
 type Model struct {
+	templateUI templateDialogState
 	// projects owns every tab. There is no flat tab list: activeProject
 	// selects the project, and that project's own activeTab selects the tab
 	// within it, so switching projects restores the tab each was left on.
@@ -716,6 +720,7 @@ type Model struct {
 	projectPick projectPickState
 
 	tomlEditor       *TextEditor // active TOML editor (nil when not editing)
+	templateEditor   bool        // return this TOML editor to Settings on close
 	selection        *Selection  // active text selection (nil when none)
 	mouseDown        bool        // true while left mouse button is held
 	mouseStartX      int         // screen X of mouse press
@@ -2132,6 +2137,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.PasteMsg:
+		if m.templatePaste(msg.Content) {
+			m.cancelSequence()
+			return m, nil
+		}
 		// Paste bypasses handleKey and lands in the PTY, so an armed prefix
 		// would read the next keystroke as a sequence step.
 		m.cancelSequence()
@@ -2177,6 +2186,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case clipboardPastedMsg:
+		if m.templatePaste(msg.text) {
+			return m, nil
+		}
 		// The clipboard read happened on a tea.Cmd goroutine; the ENQUEUE
 		// happens here, on the Update goroutine, so paste joins the ordered
 		// input queue at a defined point relative to the keys around it, and
@@ -2193,6 +2205,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case editorPasteMsg:
+		if m.templatePaste(string(msg)) {
+			return m, nil
+		}
 		if m.dialog == dialogPluginMigration && m.migrationLeft != nil && !m.migrationRightFocus {
 			text := strings.ReplaceAll(string(msg), "\r", "")
 			m.migrationLeft.InsertMultiLine(text)
@@ -2207,6 +2222,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case templateReplyMsg:
+		cmd := m.applyTemplateReply(msg)
+		return m, tea.Batch(cmd, m.listenForMessages())
+	case templateRequestTimeoutMsg:
+		if m.templateUI.pending && m.templateUI.requestID == string(msg) {
+			m.templateUI.pending = false
+			m.templateUI.err = "Template request timed out; check the destination daemon."
+		}
+		return m, nil
 	case PaneOutputMsg:
 		cmd, changedView := m.handlePaneOutput(msg)
 		// Only the active tab is rendered, so output from any other pane leaves
@@ -2325,7 +2349,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.setFormOK("connected to " + sanitizeRemoteText(msg.dest))
 		m.projectFormDest = msg.dest
 		m.projectFormCursor = projectRowRootDir
-		m.resetProjectBrowseState()
+		m.resetDirBrowseState()
 		// Sequenced, not batched with the browse: adoptDest writes the attach
 		// ledger onto this Model, and the browse must be requested against the
 		// destination it just installed.
@@ -2398,6 +2422,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// runs, then either delete or demote them to logger.Debug.
 		log.Printf("WorkspaceState: %d tabs, %d panes", len(msg.Tabs), len(msg.Panes))
 		newPaneIDs, overlayResizeCmds := m.applyWorkspaceState(msg, msg.Dest)
+		templateFocusCmd := m.focusNewTemplateTab()
 		log.Printf("apply: returned, %d new panes", len(newPaneIDs))
 		// An open project picker holds a filtered snapshot taken when it opened.
 		// A project created or destroyed by another client — or a host
@@ -2416,6 +2441,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Both diffs run here, on the Update goroutine, because they read
 		// m.projects, which applyWorkspaceState has just rebuilt.
 		cmds := []tea.Cmd{
+			templateFocusCmd,
 			m.listenForMessages(),
 			m.sendDiffedResizes(m.diffResizes(msg)),
 			m.sendDiffedLayouts(m.diffLayouts(msg)),
@@ -5668,6 +5694,10 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 		}
 		// Reuse existing tab if possible (preserves layout tree).
 		tab, exists := existingTabs[tabInfo.ID]
+		if exists && tab.templateLayoutPending && len(tabInfo.Layout) > 0 {
+			// Another client may have already saved the completed tree.
+			tab = m.restoreTabLayout(tab, tabInfo, paneMap, existingPanes)
+		}
 		if !exists {
 			tab = NewTabModel(tabInfo.ID, tabInfo.Name)
 
@@ -5696,6 +5726,10 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 		tab.Dest = dest
 		tab.Name = tabInfo.Name
 		tab.Color = tabInfo.Color
+		if len(tabInfo.Layout) > 0 {
+			tab.templateLayoutApplied = true
+		}
+		tab.templateLayoutPending = !tab.templateLayoutApplied && len(tabInfo.Layout) == 0 && tabInfo.TemplateLayout != ""
 
 		// Build the set of panes the daemon says belong to this tab.
 		// Overlay panes are excluded: they live outside the layout tree and
@@ -5853,12 +5887,11 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 				tab.Root = NewLeaf(pane)
 				tab.invalidateLeaves()
 			} else {
-				// Split the root vertically (stacked) to accommodate the new pane.
-				tab.Root.SplitLeaf(leaves[0].ID, SplitVertical)
-				tab.Root.FillPlaceholder(pane)
-				tab.invalidateLeaves()
+				splitForNewPane(tab, leaves, pane)
 			}
 		}
+
+		applyTemplateLayout(tab, tabInfo, paneMap)
 
 		// Clean up any unfilled placeholders (e.g., rapid double-splits).
 		//
@@ -5907,6 +5940,7 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 
 // restoreTabLayout rebuilds a tab's layout tree from serialized daemon state.
 func (m *Model) restoreTabLayout(tab *TabModel, tabInfo TabInfo, paneMap map[string]*PaneInfo, existingPanes map[string]*PaneModel) *TabModel {
+	tab.templateLayoutApplied, tab.templateLayoutPending = true, false
 	log.Printf("restoreLayout: tab %s %q with %d panes", tab.ID, tabInfo.Name, len(tabInfo.Panes))
 	tab.Name = tabInfo.Name
 	tab.Color = tabInfo.Color
@@ -5958,11 +5992,10 @@ func (m *Model) restoreTabLayout(tab *TabModel, tabInfo TabInfo, paneMap map[str
 		pane := paneModels[paneID]
 		if tab.Root == nil {
 			tab.Root = NewLeaf(pane)
+			tab.invalidateLeaves()
 		} else {
-			tab.Root.SplitLeaf(tab.Leaves()[0].ID, SplitVertical)
-			tab.Root.FillPlaceholder(pane)
+			splitForNewPane(tab, tab.Leaves(), pane)
 		}
-		tab.invalidateLeaves()
 	}
 
 	m.finalizeTabPanes(tab)
@@ -6859,6 +6892,8 @@ func (m Model) listenForMessages() tea.Cmd {
 		}
 
 		switch msg.Type {
+		case ipc.MsgCreateFromTemplateResp:
+			return templateReplyMsg{msg}
 		case ipc.MsgLinkLost:
 			// Synthesised by the Router when one of its connections died — it
 			// never reaches a socket. Receive itself cannot report that error,
@@ -7172,6 +7207,8 @@ func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
 		for _, t := range tabs {
 			if tm, ok := t.(map[string]any); ok {
 				ti := TabInfo{}
+				ti.TemplateLayout, _ = tm["template_layout"].(string)
+				ti.TemplateMain, _ = tm["template_main"].(string)
 				if id, ok := tm["id"].(string); ok {
 					ti.ID = id
 				}
@@ -8553,7 +8590,7 @@ func (m *Model) diffLayouts(state WorkspaceStateMsg) []layoutSend {
 			continue
 		}
 		for _, tab := range proj.tabs {
-			if tab.Root == nil || layoutAgrees(stored[tab.ID], tab.Root) {
+			if tab.templateLayoutPending || tab.Root == nil || layoutAgrees(stored[tab.ID], tab.Root) {
 				continue
 			}
 			data, err := MarshalLayout(tab.Root)
@@ -8690,7 +8727,7 @@ func (m Model) sendAllLayouts() tea.Cmd {
 	return func() tea.Msg {
 		for _, proj := range m.projects {
 			for _, tab := range proj.tabs {
-				if tab.Root == nil {
+				if tab.templateLayoutPending || tab.Root == nil {
 					continue
 				}
 				data, err := MarshalLayout(tab.Root)

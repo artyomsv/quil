@@ -834,6 +834,8 @@ func (d *Daemon) restoreWorkspace() error {
 		// closes the tab. migrateToDefaultProject above guarantees every tab
 		// map carries "project_id" by the time this loop runs.
 		tab.ProjectID, _ = tabMap["project_id"].(string)
+		tab.TemplateLayout, _ = tabMap["template_layout"].(string)
+		tab.TemplateMain, _ = tabMap["template_main"].(string)
 
 		// Restore layout
 		if layoutRaw, ok := tabMap["layout"]; ok {
@@ -929,6 +931,7 @@ func (d *Daemon) restoreWorkspace() error {
 				}
 				unseen, _ := paneData["unseen"].(bool)
 				worktreeOwned, _ := paneData["worktree_owned"].(bool)
+				quilMCP, _ := paneData["quil_mcp"].(bool)
 				worktreePath, _ := paneData["worktree_path"].(string)
 				worktreeInterrupted, _ := paneData["worktree_interrupted"].(bool)
 				sandboxImage, _ := paneData["sandbox_image"].(string)
@@ -980,6 +983,7 @@ func (d *Daemon) restoreWorkspace() error {
 					// right default: a pane nobody recorded as owning a
 					// worktree keeps the ordinary CWD fallback.
 					WorktreeOwned: worktreeOwned,
+					QuilMCP:       quilMCP,
 					// Absent on every snapshot written before the marker
 					// existed → false, so such a pane restores exactly as it
 					// did before: a shell in whatever CWD was recorded. The
@@ -1540,6 +1544,8 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		d.handleCreateProjectReq(conn, msg)
 	case ipc.MsgCreateTabReq:
 		d.handleCreateTabReq(conn, msg)
+	case ipc.MsgCreateFromTemplateReq:
+		d.handleCreateFromTemplateReq(conn, msg)
 	case ipc.MsgPluginCatalogReq:
 		d.handlePluginCatalogReq(conn, msg)
 	case ipc.MsgDelegateTaskReq:
@@ -1647,6 +1653,9 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	case ipc.MsgVersionReq:
 		respondTo(conn, msg.ID, ipc.MsgVersionResp, ipc.VersionRespPayload{
 			Version: version.Current(),
+			// What this daemon can actually be SENT, which the version string
+			// cannot say for a build made from a branch — see the field.
+			Requests: ipc.GatedRequests,
 		})
 	}
 }
@@ -2622,6 +2631,7 @@ func (d *Daemon) constructPaneAt(payload ipc.CreatePanePayload, cwd, paneType st
 	pane.Type = paneType
 	pane.InstanceName = payload.InstanceName
 	pane.InstanceArgs = payload.InstanceArgs
+	pane.QuilMCP = payload.QuilMCP
 	pane.PluginMu.Unlock()
 	// The sandbox spec joins the fields above, and its absence here was the
 	// whole feature failing open: spawnPane gates the container branch on
@@ -2702,6 +2712,7 @@ func (d *Daemon) replacePaneAt(payload ipc.CreatePanePayload, cwd, paneType stri
 	newPane.Type = paneType
 	newPane.InstanceName = payload.InstanceName
 	newPane.InstanceArgs = payload.InstanceArgs
+	newPane.QuilMCP = payload.QuilMCP
 	// Before the swap, deliberately. This pane is not published yet, so a
 	// refusal costs nothing — whereas past ReplacePane the OLD pane is gone
 	// whatever else fails, and refusing there would leave the tab short a
@@ -4058,6 +4069,12 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 		if len(tab.Layout) > 0 {
 			tabData["layout"] = tab.Layout
 		}
+		if tab.TemplateLayout != "" {
+			tabData["template_layout"] = tab.TemplateLayout
+		}
+		if tab.TemplateMain != "" {
+			tabData["template_main"] = tab.TemplateMain
+		}
 		tabList = append(tabList, tabData)
 
 		for _, pane := range panesByTab[tab.ID] {
@@ -4133,6 +4150,9 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			// the snapshot carries only CWD, which cannot distinguish them.
 			if pane.WorktreeOwned {
 				paneData["worktree_owned"] = true
+			}
+			if pane.QuilMCP {
+				paneData["quil_mcp"] = true
 			}
 			// Persisted for the same reason, and it is the half that says WHICH
 			// directory. Without it a restored pane can only name its CWD, which
@@ -5143,6 +5163,7 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	// on the next lazy spawn — after the user had already retried it.
 	pane.WorktreeInterrupted = false
 	typ := pane.Type
+	quilMCP := pane.QuilMCP
 	sandboxImage := pane.SandboxImage
 	pane.PluginMu.Unlock()
 
@@ -5156,6 +5177,9 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	sandboxed = sandboxed || sandboxImage != ""
 
 	p := d.registry.Get(typ)
+	if quilMCP && (sandboxed || p == nil || !p.Available || !mcpSupported(typ)) {
+		return fmt.Errorf("plugin %q is unavailable or does not support per-spawn Quil MCP", typ)
+	}
 	if p == nil {
 		p = d.registry.Get("terminal") // fallback
 	}
@@ -5430,6 +5454,21 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 				args = append(settingsArgs, args...)
 			}
 			envVars = append(envVars, hookEnv...)
+		}
+
+		if quilMCP {
+			var err error
+			var codexServers []string
+			if typ == "codex" {
+				codexServers, err = mcpCodexServersFn(cmd, pane.CWD, args, envVars)
+				if err != nil {
+					return err
+				}
+			}
+			args, envVars, err = mcpSpawn(typ, args, envVars, codexServers)
+			if err != nil {
+				return err
+			}
 		}
 
 		// Generic opt-in: any plugin whose hook producer records input history

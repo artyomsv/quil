@@ -304,6 +304,7 @@ type AttachPayload struct {
 }
 
 type CreatePanePayload struct {
+	QuilMCP       bool     `json:"quil_mcp,omitempty"`
 	TabID         string   `json:"tab_id"`
 	CWD           string   `json:"cwd"`
 	Type          string   `json:"type,omitempty"`
@@ -398,6 +399,9 @@ type SandboxSpec struct {
 // Create-time only — an instruction, not stored pane state; what persists is
 // the resulting CWD, plus a flag saying the pane owns a worktree.
 type WorktreeSpec struct {
+	// Subdir is the pane's relative working directory within the new checkout.
+	// Empty keeps the worktree-root spawn used by existing callers.
+	Subdir string `json:"subdir,omitempty"`
 	// RepoRoot is the repository the worktree branches from, as the DAEMON's
 	// filesystem spells it. The client sends back the directory the daemon's
 	// own browse answered with, so no path built on the client is involved.
@@ -771,8 +775,11 @@ type CreatePaneReqPayload struct {
 }
 
 type CreatePaneRespPayload struct {
-	PaneID string `json:"pane_id"`
-	TabID  string `json:"tab_id"`
+	// InvalidSubdir is worker-local failure classification, never sent over IPC.
+	// Template creation uses it to discard its provisional tab after checkout.
+	InvalidSubdir bool   `json:"-"`
+	PaneID        string `json:"pane_id"`
+	TabID         string `json:"tab_id"`
 	// Error explains a create that produced NO pane. Only a create carrying a
 	// WorktreeSpec can fail this way — an ordinary create is synchronous and
 	// its result arrives in the next workspace broadcast, as it always has.
@@ -1081,7 +1088,30 @@ type WatchNotificationsRespPayload struct {
 // has no payload — the request is just "what version are you running?".
 type VersionRespPayload struct {
 	Version string `json:"version"`
+	// Requests names the gated request types this daemon actually handles.
+	//
+	// It exists because a VERSION NUMBER cannot tell a feature-branch build
+	// from the release that wears the same number: scripts/dev.sh stamps the
+	// tree's VERSION into every binary, so a client built beside a daemon
+	// that has a new request type and a released daemon that does not can
+	// report the identical string. A floor compared against that string is
+	// therefore either too strict (it refuses the daemon the client was built
+	// beside, making the feature unusable in the builds used to test it) or
+	// too loose (it accepts a released daemon that drops the request in
+	// silence). This answers the question the floor was approximating.
+	//
+	// ABSENT from every daemon built before this field existed, which is the
+	// discriminator: an empty list means "cannot say", and the caller falls
+	// back to the version floor. Only the gated types are listed — this is
+	// not a catalogue of everything the daemon handles, and nothing should
+	// read it as one.
+	Requests []string `json:"requests,omitempty"`
 }
+
+// GatedRequests are the request types a daemon advertises in
+// VersionRespPayload.Requests. Add a type here when it is new enough that an
+// older daemon would drop it silently.
+var GatedRequests = []string{MsgCreateFromTemplateReq}
 
 // Memory reporting payloads
 

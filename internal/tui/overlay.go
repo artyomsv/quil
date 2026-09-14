@@ -93,7 +93,7 @@ func (m *Model) handleToggleOverlay(pluginName string) tea.Cmd {
 	// machine that actually holds it — and nothing in that message hinted the
 	// wrong disk had been consulted. The rest of the state machine resumes in
 	// applyGitRepos when the answer lands.
-	return m.requestGitRepos(cwd, tab.ID, repoScanOverlay, pluginName)
+	return m.requestGitRepos(tab.Dest, cwd, tab.ID, repoScanOverlay, pluginName)
 }
 
 // resolveOverlay runs steps 3-7 of the overlay state machine against an

@@ -1653,6 +1653,9 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	case ipc.MsgVersionReq:
 		respondTo(conn, msg.ID, ipc.MsgVersionResp, ipc.VersionRespPayload{
 			Version: version.Current(),
+			// What this daemon can actually be SENT, which the version string
+			// cannot say for a build made from a branch — see the field.
+			Requests: ipc.GatedRequests,
 		})
 	}
 }

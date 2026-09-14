@@ -1088,7 +1088,30 @@ type WatchNotificationsRespPayload struct {
 // has no payload — the request is just "what version are you running?".
 type VersionRespPayload struct {
 	Version string `json:"version"`
+	// Requests names the gated request types this daemon actually handles.
+	//
+	// It exists because a VERSION NUMBER cannot tell a feature-branch build
+	// from the release that wears the same number: scripts/dev.sh stamps the
+	// tree's VERSION into every binary, so a client built beside a daemon
+	// that has a new request type and a released daemon that does not can
+	// report the identical string. A floor compared against that string is
+	// therefore either too strict (it refuses the daemon the client was built
+	// beside, making the feature unusable in the builds used to test it) or
+	// too loose (it accepts a released daemon that drops the request in
+	// silence). This answers the question the floor was approximating.
+	//
+	// ABSENT from every daemon built before this field existed, which is the
+	// discriminator: an empty list means "cannot say", and the caller falls
+	// back to the version floor. Only the gated types are listed — this is
+	// not a catalogue of everything the daemon handles, and nothing should
+	// read it as one.
+	Requests []string `json:"requests,omitempty"`
 }
+
+// GatedRequests are the request types a daemon advertises in
+// VersionRespPayload.Requests. Add a type here when it is new enough that an
+// older daemon would drop it silently.
+var GatedRequests = []string{MsgCreateFromTemplateReq}
 
 // Memory reporting payloads
 

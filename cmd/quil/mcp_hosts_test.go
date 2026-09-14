@@ -44,7 +44,7 @@ func bridgeTo(t *testing.T, sock string) *mcpBridge {
 	b := newMCPBridge(client)
 	// As runMCP does: the probe reads its own reply, so it runs before the
 	// read loop owns the connection.
-	b.daemonVersion = probeDaemonVersion(client, daemonVersionProbeTimeout)
+	b.daemonVersion, b.daemonRequests = probeDaemonVersion(client, daemonVersionProbeTimeout)
 	go b.readLoop(context.Background())
 	return b
 }

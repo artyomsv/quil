@@ -75,8 +75,12 @@ func TestProbeDaemonVersion_ReadsTheAnswerOrGivesUp(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.Close()
-	if got := probeDaemonVersion(client, time.Second); got != "1.75.0" {
+	got, reqs := probeDaemonVersion(client, time.Second)
+	if got != "1.75.0" {
 		t.Fatalf("probe = %q, want 1.75.0", got)
+	}
+	if len(reqs) != 0 {
+		t.Fatalf("a daemon that advertises nothing must report no requests, got %v", reqs)
 	}
 	silent := newFakeIPCDaemonVersion(t, "pane-b", "")
 	client2, err := ipc.NewClient(silent.sock)
@@ -85,8 +89,8 @@ func TestProbeDaemonVersion_ReadsTheAnswerOrGivesUp(t *testing.T) {
 	}
 	defer client2.Close()
 	start := time.Now()
-	if got := probeDaemonVersion(client2, 150*time.Millisecond); got != "" {
-		t.Fatalf("probe of a silent daemon = %q, want empty", got)
+	if got, reqs := probeDaemonVersion(client2, 150*time.Millisecond); got != "" || reqs != nil {
+		t.Fatalf("probe of a silent daemon = %q/%v, want empty", got, reqs)
 	}
 	if time.Since(start) > 2*time.Second {
 		t.Fatal("probe did not give up at its timeout")
@@ -206,53 +210,43 @@ func TestToolHarness_ProbesTheLocalVersionOnce(t *testing.T) {
 	}
 }
 
-// stubClientVersion swaps this build's own reported version for the duration
-// of a test. Package-level var, so every test using it MUST stay sequential —
-// the same rule stubStopSpawn documents in version_gate_test.go.
-func stubClientVersion(t *testing.T, v string) {
-	t.Helper()
-	prev := version
-	version = v
-	t.Cleanup(func() { version = prev })
-}
-
 // scripts/dev.sh stamps `-X main.version=$(cat VERSION)` into all six
-// binaries, so a locally built client and daemon BOTH report the tree's
-// VERSION — which is below a floor naming a version not yet released. Refusing
-// there makes the tool unusable in exactly the builds used to test it, which
-// is how the floor shipped the first time.
+// binaries, so a client and daemon built from this branch BOTH report the
+// tree's VERSION — below a floor that names the release which has not
+// happened yet. Comparing numbers refuses the daemon the client was built
+// beside, and the tool is unusable in exactly the builds used to test it.
 //
-// Driven through the tool rather than through requireDaemon, because the
-// defect was reachable only at the call site: requireDaemon's own table test
-// passed throughout.
-func TestCreateFromTemplate_ClientsOwnBuild_IsNotRefusedByAnUnreleasedFloor(t *testing.T) {
+// The daemon says what it handles, so that is what decides.
+func TestCreateFromTemplate_DaemonAdvertisingTheRequest_IsAllowedBelowTheFloor(t *testing.T) {
 	t.Setenv("QUIL_HOME", t.TempDir())
-	stubClientVersion(t, "1.73.0") // the tree's VERSION while 1.74.0 is unreleased
-
-	local := newFakeIPCDaemonVersion(t, "pane-local", "1.73.0")
+	local := newFakeIPCDaemonRequests(t, "pane-local", "1.73.0", ipc.MsgCreateFromTemplateReq)
 	session, _ := toolHarness(t, local, nil)
 	if _, err := callTool(t, session, "create_from_template", map[string]any{"template": "pair"}); err != nil {
-		t.Fatalf("client refused a daemon from its own build: %v", err)
+		t.Fatalf("daemon advertising the request was refused on its number: %v", err)
 	}
 	if local.sawNo(ipc.MsgCreateFromTemplateReq) {
 		t.Fatal("allowed request was not sent")
 	}
 }
 
-// The escape above is EQUALITY, not "anything goes once the client is old".
-// A daemon that is genuinely older than this client must still be refused,
-// or an unupgraded remote host goes back to reading as a ten-second timeout.
-func TestCreateFromTemplate_OlderThanTheClientItself_IsStillRefused(t *testing.T) {
+// The other direction, and the reason this is not a version-equality escape:
+// a daemon that ANSWERED and did not list the type is refused however new its
+// number reads. quil-debug.exe attaches to the production daemon by design, so
+// a released build wearing the same number as this branch is reachable — and
+// must still get the named refusal rather than a silent drop and a timeout.
+func TestCreateFromTemplate_DaemonWithoutTheRequest_IsRefusedHoweverNewItReads(t *testing.T) {
 	t.Setenv("QUIL_HOME", t.TempDir())
-	stubClientVersion(t, "1.73.0")
-
-	local := newFakeIPCDaemonVersion(t, "pane-local", "1.72.0")
+	local := newFakeIPCDaemonRequests(t, "pane-local", "9.9.9", ipc.MsgCreateTabReq)
 	session, _ := toolHarness(t, local, nil)
 	_, err := callTool(t, session, "create_from_template", map[string]any{"template": "pair"})
-	if err == nil || !strings.Contains(err.Error(), "1.72.0") {
-		t.Fatalf("expected a named refusal for an older daemon, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), ipc.MsgCreateFromTemplateReq) {
+		t.Fatalf("expected a refusal naming the request type, got %v", err)
 	}
 	if !local.sawNo(ipc.MsgCreateFromTemplateReq) {
 		t.Fatal("refused request reached the daemon")
+	}
+	// The released tools must stay usable on that same daemon.
+	if _, err := callTool(t, session, "list_projects", map[string]any{}); err != nil {
+		t.Fatalf("released list_projects refused: %v", err)
 	}
 }

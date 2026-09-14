@@ -36,6 +36,10 @@ type mcpBridge struct {
 	// not answer. Read by requireDaemon so a tool aimed at a daemon too old
 	// to know its request type is refused at once instead of timing out.
 	daemonVersion string
+	// daemonRequests is what the daemon SAYS it can be sent (GatedRequests).
+	// Empty when it did not answer, or when it predates the field — see
+	// requireRequest, which falls back to the version floor there.
+	daemonRequests []string
 }
 
 func newMCPBridge(client *ipc.Client) *mcpBridge {
@@ -50,7 +54,7 @@ func newMCPBridge(client *ipc.Client) *mcpBridge {
 // ignores the probe, and waiting the remote budget would delay MCP startup.
 func newLocalMCPBridge(client *ipc.Client) *mcpBridge {
 	bridge := newMCPBridge(client)
-	bridge.daemonVersion = probeDaemonVersion(client, handshakeTimeout)
+	bridge.daemonVersion, bridge.daemonRequests = probeDaemonVersion(client, handshakeTimeout)
 	return bridge
 }
 

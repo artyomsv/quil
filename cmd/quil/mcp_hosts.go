@@ -230,7 +230,7 @@ func (r *mcpRouter) dialOutcome(h *hostConn) error {
 // while nothing else reads the connection.
 func startHostBridge(client *ipc.Client, label string) (*mcpBridge, context.CancelFunc) {
 	bridge := newMCPBridge(client)
-	bridge.daemonVersion = probeDaemonVersion(client, daemonVersionProbeTimeout)
+	bridge.daemonVersion, bridge.daemonRequests = probeDaemonVersion(client, daemonVersionProbeTimeout)
 	if err := bridge.declinePaneOutput(); err != nil {
 		log.Printf("mcp: host %s: decline pane output: %v", label, err)
 	}

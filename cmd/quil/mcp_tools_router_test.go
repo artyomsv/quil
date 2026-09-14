@@ -23,10 +23,25 @@ type fakeIPCDaemon struct {
 	// version is what the fake reports to the bridge's probe. Empty means
 	// "do not answer", the pre-versioning daemon shape.
 	version string
+	// requests is what the fake advertises as handled (VersionRespPayload
+	// .Requests). Nil is the daemon that predates the field, where the
+	// version floor still decides.
+	requests []string
 }
 
 func newFakeIPCDaemon(t *testing.T, paneID string) *fakeIPCDaemon {
 	return newFakeIPCDaemonVersion(t, paneID, mcpDaemonMinVersion)
+}
+
+// newFakeIPCDaemonRequests is newFakeIPCDaemonVersion for a daemon new enough
+// to advertise which gated request types it handles.
+func newFakeIPCDaemonRequests(t *testing.T, paneID, version string, requests ...string) *fakeIPCDaemon {
+	t.Helper()
+	f := newFakeIPCDaemonVersion(t, paneID, version)
+	f.mu.Lock()
+	f.requests = requests
+	f.mu.Unlock()
+	return f
 }
 
 func newFakeIPCDaemonVersion(t *testing.T, paneID, version string) *fakeIPCDaemon {
@@ -43,7 +58,7 @@ func newFakeIPCDaemonVersion(t *testing.T, paneID, version string) *fakeIPCDaemo
 			if f.version == "" {
 				return
 			}
-			resp, _ = ipc.NewMessage(ipc.MsgVersionResp, ipc.VersionRespPayload{Version: f.version})
+			resp, _ = ipc.NewMessage(ipc.MsgVersionResp, ipc.VersionRespPayload{Version: f.version, Requests: f.requests})
 		case ipc.MsgListPanesReq:
 			resp, _ = ipc.NewMessage(ipc.MsgListPanesResp, ipc.ListPanesRespPayload{Panes: []ipc.PaneInfo{{ID: f.paneID, TabID: "tab-" + f.paneID, AgentState: "idle"}}})
 		case ipc.MsgPaneInput:

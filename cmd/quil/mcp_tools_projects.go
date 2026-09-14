@@ -298,7 +298,7 @@ func registerCreateFromTemplateTool(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogg
 		if err != nil {
 			return nil, nil, fmt.Errorf("create_from_template: %w", err)
 		}
-		if err := bridge.requireDaemonAtLeast("create_from_template", createFromTemplateMinVersion); err != nil {
+		if err := bridge.requireRequest("create_from_template", ipc.MsgCreateFromTemplateReq, createFromTemplateMinVersion); err != nil {
 			return nil, nil, err
 		}
 		resp, err := bridge.request(ipc.MsgCreateFromTemplateReq, ipc.CreateFromTemplateReqPayload{

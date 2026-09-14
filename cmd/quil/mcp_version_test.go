@@ -205,3 +205,54 @@ func TestToolHarness_ProbesTheLocalVersionOnce(t *testing.T) {
 		t.Fatalf("local daemonVersion = %q", r.local.daemonVersion)
 	}
 }
+
+// stubClientVersion swaps this build's own reported version for the duration
+// of a test. Package-level var, so every test using it MUST stay sequential —
+// the same rule stubStopSpawn documents in version_gate_test.go.
+func stubClientVersion(t *testing.T, v string) {
+	t.Helper()
+	prev := version
+	version = v
+	t.Cleanup(func() { version = prev })
+}
+
+// scripts/dev.sh stamps `-X main.version=$(cat VERSION)` into all six
+// binaries, so a locally built client and daemon BOTH report the tree's
+// VERSION — which is below a floor naming a version not yet released. Refusing
+// there makes the tool unusable in exactly the builds used to test it, which
+// is how the floor shipped the first time.
+//
+// Driven through the tool rather than through requireDaemon, because the
+// defect was reachable only at the call site: requireDaemon's own table test
+// passed throughout.
+func TestCreateFromTemplate_ClientsOwnBuild_IsNotRefusedByAnUnreleasedFloor(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	stubClientVersion(t, "1.73.0") // the tree's VERSION while 1.74.0 is unreleased
+
+	local := newFakeIPCDaemonVersion(t, "pane-local", "1.73.0")
+	session, _ := toolHarness(t, local, nil)
+	if _, err := callTool(t, session, "create_from_template", map[string]any{"template": "pair"}); err != nil {
+		t.Fatalf("client refused a daemon from its own build: %v", err)
+	}
+	if local.sawNo(ipc.MsgCreateFromTemplateReq) {
+		t.Fatal("allowed request was not sent")
+	}
+}
+
+// The escape above is EQUALITY, not "anything goes once the client is old".
+// A daemon that is genuinely older than this client must still be refused,
+// or an unupgraded remote host goes back to reading as a ten-second timeout.
+func TestCreateFromTemplate_OlderThanTheClientItself_IsStillRefused(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	stubClientVersion(t, "1.73.0")
+
+	local := newFakeIPCDaemonVersion(t, "pane-local", "1.72.0")
+	session, _ := toolHarness(t, local, nil)
+	_, err := callTool(t, session, "create_from_template", map[string]any{"template": "pair"})
+	if err == nil || !strings.Contains(err.Error(), "1.72.0") {
+		t.Fatalf("expected a named refusal for an older daemon, got %v", err)
+	}
+	if !local.sawNo(ipc.MsgCreateFromTemplateReq) {
+		t.Fatal("refused request reached the daemon")
+	}
+}

@@ -86,11 +86,14 @@ func truncateVersion(v string) string {
 // requireDaemon reports whether the daemon behind b is new enough for a tool
 // that sends one of the request types listed on mcpDaemonMinVersion.
 //
-// Unknown and unparseable versions PASS: a dev daemon reports "dev", a
+// Unknown and unparseable versions PASS: an unstamped build reports "dev", a
 // pre-versioning daemon reports nothing, and refusing either would take a
 // developer's own daemon away from them. Only a RELEASE number older than the
 // floor is refused, and the error says what to run — the remedy is the same
 // one `quil remote setup` performs.
+//
+// A daemon reporting exactly THIS CLIENT'S OWN version also passes; see
+// requireDaemonAtLeast.
 func (b *mcpBridge) requireDaemon(tool string) error {
 	return b.requireDaemonAtLeast(tool, mcpDaemonMinVersion)
 }
@@ -98,6 +101,27 @@ func (b *mcpBridge) requireDaemon(tool string) error {
 func (b *mcpBridge) requireDaemonAtLeast(tool, min string) error {
 	v := b.daemonVersion
 	if v == "" {
+		return nil
+	}
+	// A daemon reporting exactly this client's own version IS this client's
+	// own build, so their wire types agree by construction and no floor can
+	// say anything useful about the pair.
+	//
+	// Without this, a floor naming an UNRELEASED version makes its tool
+	// unusable in every build produced from the branch that adds it.
+	// scripts/dev.sh stamps `-X main.version=$(cat VERSION)` into all six
+	// binaries — dev and debug included — so a locally built pair both report
+	// the tree's VERSION, 1.73.0 while 1.74.0 is still unreleased, and the
+	// client refuses its own daemon. The comment above this function used to
+	// claim a dev daemon reports "dev"; it does not, and believing that is
+	// what shipped the refusal.
+	//
+	// The narrow cost: quil-debug.exe deliberately attaches to the PRODUCTION
+	// daemon, so a debug build made here against a released daemon wearing the
+	// same number now passes this gate and pays a request timeout instead of a
+	// named refusal. That is the pre-floor behaviour, for one variant, during
+	// development only.
+	if v == version {
 		return nil
 	}
 	cmp, err := versionpkg.Compare(v, min)

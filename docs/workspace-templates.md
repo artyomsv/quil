@@ -85,6 +85,8 @@ Substitution is a single pass, so placeholder-like text inside the task remains 
 
 Unknown templates, invalid settings and unusable directories are refused. Validation of a first-pane subdirectory after checkout can fail asynchronously: the new checkout and provisional tab are removed, and a named error event is emitted. A failed process or prompt delivery is reported on its pane; it never silently launches at a fallback directory.
 
+If a later pane cannot be created — its subdirectory exists in the source directory but not in the new checkout, which is the one case the up-front validation cannot reach — the panes that did come up are kept and the failed one is left visible with its error, but **no starting prompt is delivered to any pane**. `{{panes}}` is built from the panes that exist, so briefing here would hand the survivors a roster shorter than the template they came from, and a pane told to drive the others would start doing so without learning that one is missing. The error is returned to the caller and the create dialog stays open on it.
+
 ## Shipped templates and limits
 
 - **agent-team** — analyst (Claude Code), developer (Codex), and an orchestrator (Claude Code) created last and marked main, using main-left. The orchestrator gets Quil MCP and the pane roster; teammates are muted. Its prompts assign git and user communication to the orchestrator and ask workers for file reports.

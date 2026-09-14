@@ -608,3 +608,81 @@ func templateTestDaemon(t *testing.T) (*Daemon, *ipc.Client) {
 	shortenIdleSettle(t, 25*time.Millisecond)
 	return d, c
 }
+
+// A later pane whose directory exists in the SOURCE but not in the new
+// checkout passes validation and fails at construction — the one failure the
+// up-front validation cannot reach, because the checkout does not exist yet.
+//
+// The panes that came up are kept, but nobody is briefed. {{panes}} is built
+// from the panes that EXIST, so delivering here hands the survivors a roster
+// shorter than the template they were created from: agent-team's orchestrator
+// would start delegating without ever learning a requested teammate is
+// missing.
+func TestTemplateIPC_LaterPaneFailsInCheckout_KeepsPanesAndBriefsNobody(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	d, c := templateTestDaemon(t)
+	source := t.TempDir()
+	if err := os.Mkdir(filepath.Join(source, "nested"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	saveTestTemplate(t, config.Template{Name: "team", Panes: []config.TemplatePane{
+		{Type: "terminal", Name: "first", Prompt: "LEAD {{panes}}"},
+		{Type: "terminal", Name: "worker", CWD: "nested", Prompt: "WORKER"},
+	}})
+
+	prev := newSessionFn
+	var sessions []*templatePromptSession
+	newSessionFn = func(_, _ int) apty.Session {
+		s := &templatePromptSession{liveFakeSession: liveFakeSession{done: make(chan struct{})}, d: d, index: len(sessions)}
+		sessions = append(sessions, s)
+		return s
+	}
+	t.Cleanup(func() {
+		newSessionFn = prev
+		for _, s := range sessions {
+			s.Close()
+		}
+	})
+
+	created := make(chan string, 1)
+	stubAdd(t, func(_ context.Context, _, path, _ string) error {
+		// Deliberately WITHOUT "nested": the source has it, the checkout does
+		// not, and only the checkout is what the pane would open in.
+		err := os.MkdirAll(path, 0700)
+		created <- path
+		return err
+	})
+
+	resp := templateRequest(t, c, ipc.CreateFromTemplateReqPayload{Template: "team", CWD: source, Branch: "feat/subdir-later"})
+	if resp.Error != "" || resp.PreparingWorktree != "feat/subdir-later" {
+		t.Fatalf("preparing response: %+v", resp)
+	}
+	select {
+	case <-created:
+	case <-time.After(3 * time.Second):
+		t.Fatal("checkout did not run")
+	}
+
+	waitUntil(t, "both panes constructed", func() bool { return len(d.session.AllPanes()) == 2 })
+	var failed int
+	for _, p := range d.session.AllPanes() {
+		p.PluginMu.Lock()
+		spawnErr := p.SpawnError
+		p.PluginMu.Unlock()
+		if spawnErr != "" {
+			failed++
+		}
+	}
+	if failed != 1 {
+		t.Fatalf("panes carrying a spawn error = %d, want 1 — the failure must stay visible", failed)
+	}
+
+	// Give delivery every chance to happen before concluding it did not: the
+	// prompts are queued right after the frame this test already waited for.
+	time.Sleep(300 * time.Millisecond)
+	for i, s := range sessions {
+		if got := s.recorded(); len(got) != 0 {
+			t.Fatalf("pane %d was briefed on an incomplete team: %+v", i, got)
+		}
+	}
+}

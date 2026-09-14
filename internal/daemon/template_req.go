@@ -340,6 +340,22 @@ func (d *Daemon) completeTemplateCreation(plan *templateCreation, tabID string, 
 	// the preparing and swap frames, regardless of the number of panes.
 	d.broadcastState()
 	d.requestSnapshot()
+	// A starting prompt is a statement about the tab that was ASKED for, so
+	// none is delivered once a pane is missing or dead. agent-team is the
+	// shape that makes this concrete: {{panes}} is built from the panes that
+	// EXIST, so a failed developer leaves the orchestrator briefed with a
+	// two-line roster where three were requested — and it starts delegating
+	// without ever learning that a teammate it was told to use is not there.
+	//
+	// The panes that did come up are kept rather than rolled back. A visible
+	// SpawnError beside working panes is more useful than destroying a
+	// checkout that took minutes, and the failure is not silent: the pane
+	// carries it, resp.Error carries it to the caller, and the create dialog
+	// keeps itself open on it. What is removed is only the briefing of a team
+	// that is not the one the template describes.
+	if resp.Error != "" {
+		return resp
+	}
 	d.deliverTemplatePrompts(plan, panes, root)
 	return resp
 }

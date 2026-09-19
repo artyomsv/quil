@@ -207,8 +207,16 @@ nothing to install, and `~/.quil/claudehook/` is **not** created at daemon start
    grep "spawn: pane" ~/.quil/quild.log
    ```
    A registered pane shows `--settings /…/.quil/sessions/<pane-id>.settings.json` in its
-   args — that flag is the positive confirmation. A registration that was refused logs
-   `claude hooks disabled` with the reason instead.
+   args, and the daemon logs `claude hooks registered` naming the same file. A pane that
+   shows `cmd=/bin/zsh args=[]` (or your own shell) is a **terminal** pane — Quil registers
+   no hook for it, even if you later type `claude` into it yourself.
+
+   Two other outcomes are logged instead of `claude hooks registered`:
+
+   | Log line | Meaning |
+   |---|---|
+   | `claude hooks disabled` | Registration was refused — the reason is on the same line |
+   | `… already carry their own --settings` | Your plugin args pass a `--settings` of their own. Which file Claude honours is unverified, so the hook may not be active. Remove yours. |
 
 3. **Check the hook's own breadcrumbs:**
    ```bash

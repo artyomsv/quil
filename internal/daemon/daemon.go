@@ -108,10 +108,20 @@ type Daemon struct {
 	// one sandboxed agent out of every other pane's data.
 	spoolFwd *spoolForwarder
 
-	// lastSnapshotDone is the UnixNano of the last completed snapshot().
-	// The snapshot loop is the daemon's liveness canary — it acquires the
-	// same locks (sm.mu, per-pane PluginMu) every wedge so far has parked
-	// on. snapshotWatchdog dumps all goroutine stacks when this goes stale.
+	// lastSnapshotDone is the last completed snapshot(), as a MONOTONIC
+	// duration since d.startedAt, biased by +1 so that 0 keeps meaning "no
+	// snapshot yet". The snapshot loop is the daemon's liveness canary — it
+	// acquires the same locks (sm.mu, per-pane PluginMu) every wedge so far
+	// has parked on. snapshotWatchdog dumps all goroutine stacks when this
+	// goes stale.
+	//
+	// It is NOT a wall-clock instant, deliberately. A wall-clock delta counts
+	// time the machine spent asleep, during which no ticker fires and no
+	// snapshot can complete — so a laptop closed for 10 minutes was
+	// indistinguishable from a daemon wedged for 10 minutes, and the watchdog
+	// dumped every goroutine in the process to the log on the strength of it
+	// (#221, macOS). Go's monotonic clock stops across suspend on darwin and
+	// windows, which is exactly the reading this wants.
 	lastSnapshotDone atomic.Int64
 
 	// updateMu guards updateInfo, the currently-announced newer release
@@ -390,7 +400,7 @@ func (d *Daemon) Start() error {
 	go d.hookEventsWatcher()
 	go d.gitWatcher()
 	// Arm the liveness canary only once a first snapshot is plausible.
-	d.lastSnapshotDone.Store(time.Now().UnixNano())
+	d.markSnapshotDone()
 	go d.snapshotWatchdog()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -725,7 +735,31 @@ func (d *Daemon) snapshot() {
 
 	log.Printf("snapshot: %d tabs, %d panes, %d buffers (%d bytes), took %v",
 		len(tabs), len(activePaneIDs), len(buffers), totalBytes, time.Since(start).Round(time.Millisecond))
-	d.lastSnapshotDone.Store(time.Now().UnixNano())
+	d.markSnapshotDone()
+}
+
+// markSnapshotDone records "a snapshot completed now" for snapshotWatchdog,
+// on the monotonic clock. The +1 bias reserves 0 for "never" — the zero value
+// of the atomic — which the watchdog tests for before it measures anything.
+func (d *Daemon) markSnapshotDone() {
+	d.lastSnapshotDone.Store(int64(time.Since(d.startedAt)) + 1)
+}
+
+// snapshotStale reports how long it has been since the last completed
+// snapshot, and whether the canary is armed at all. ok is false before the
+// first markSnapshotDone, when there is nothing to be late for.
+//
+// Split out of snapshotWatchdog so the arithmetic is reachable from a test
+// without a running ticker: the defect being guarded against is a wall-clock
+// subtraction, which no amount of test-side waiting can expose.
+func (d *Daemon) snapshotStale() (time.Duration, bool) {
+	last := d.lastSnapshotDone.Load()
+	if last == 0 {
+		return 0, false
+	}
+	// Both terms are monotonic durations since d.startedAt, so their
+	// difference excludes any time the machine spent suspended.
+	return time.Since(d.startedAt) - time.Duration(last-1), true
 }
 
 // snapshotWatchdog turns a wedged daemon into a diagnosable incident. The
@@ -734,6 +768,10 @@ func (d *Daemon) snapshot() {
 // stallAfter, dump every goroutine stack to the log (throttled) so the
 // blocking site is identifiable post-mortem instead of being lost in a
 // silent freeze (incidents 2026-06-11/12: zero log evidence of the holder).
+//
+// Staleness is measured on the MONOTONIC clock (see lastSnapshotDone): a
+// suspended machine is not a wedged daemon, and reporting one as the other
+// costs a megabyte of goroutine dump and a false bug report (#221).
 func (d *Daemon) snapshotWatchdog() {
 	const (
 		checkEvery = 30 * time.Second
@@ -748,11 +786,10 @@ func (d *Daemon) snapshotWatchdog() {
 		case <-d.shutdown:
 			return
 		case <-ticker.C:
-			last := d.lastSnapshotDone.Load()
-			if last == 0 {
+			stale, armed := d.snapshotStale()
+			if !armed {
 				continue
 			}
-			stale := time.Since(time.Unix(0, last))
 			if stale < stallAfter || time.Since(lastDump) < dumpEvery {
 				continue
 			}
@@ -4571,9 +4608,10 @@ func claudeHookSpawnPrep(hp hookPaths, paneID, hookMode string, userArgs []strin
 	// a sandbox pane those differ: claude loads it from inside the container,
 	// where the host path does not exist.
 	settingsPath = hp.ref(settingsPath)
+	contested := false
 	for _, a := range userArgs {
 		if a == "--settings" {
-			log.Printf("warning: pane %s: claude-code args already contain --settings; precedence with Quil's hook entry is unverified", paneID)
+			contested = true
 			break
 		}
 	}
@@ -4598,6 +4636,24 @@ func claudeHookSpawnPrep(hp hookPaths, paneID, hookMode string, userArgs []strin
 	// rather than honouring the contract by dropping the hook entirely.
 	if settingsPath == "" {
 		return nil, env
+	}
+	// An OUTCOME is logged either way, not only on failure. The three refusals
+	// above each log "claude hooks disabled"; a registration that worked logged
+	// nothing, so `grep -i hook quild.log` read identically whether the hook was
+	// live or had never been registered at all — which is how #221 spent a day
+	// on a directory that was never the problem.
+	//
+	// "registered" is claimed only when nothing contests it. Quil prepends its
+	// own --settings, so when the plugin's args already carry one, which file
+	// claude honours is UNVERIFIED (see the doc comment): the hook may never
+	// become active. Claiming registration there would reintroduce exactly the
+	// ambiguity this line exists to remove — a positive confirmation for a hook
+	// that is not running. So that case reports what is actually established,
+	// which is that the settings file was written and the flag was passed.
+	if contested {
+		log.Printf("warning: pane %s: claude hook settings written to %s (mode=%s), but claude-code args already carry their own --settings; which one claude honours is unverified, so the hook may not be active", paneID, settingsPath, mode)
+	} else {
+		log.Printf("pane %s: claude hooks registered (settings=%s, mode=%s)", paneID, settingsPath, mode)
 	}
 	return []string{"--settings", settingsPath}, env
 }

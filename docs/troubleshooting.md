@@ -206,9 +206,9 @@ nothing to install, and `~/.quil/claudehook/` is **not** created at daemon start
    ```bash
    grep "spawn: pane" ~/.quil/quild.log
    ```
-   A registered pane shows `--settings /…/.quil/sessions/<pane-id>.settings.json` in its args.
-   A successful registration also logs `claude hooks registered`; a failed one logs
-   `claude hooks disabled` with the reason.
+   A registered pane shows `--settings /…/.quil/sessions/<pane-id>.settings.json` in its
+   args — that flag is the positive confirmation. A registration that was refused logs
+   `claude hooks disabled` with the reason instead.
 
 3. **Check the hook's own breadcrumbs:**
    ```bash

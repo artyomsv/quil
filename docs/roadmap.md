@@ -187,10 +187,14 @@ Before this, daemon kept resuming the preassigned jsonl after a restart, silentl
 Quil registers a `SessionStart` hook at every spawn (never modifies `~/.claude/settings.json`) and passes `QUIL_PANE_ID=<paneID>` in the PTY env. The hook is the `quild claude-hook` subcommand (the embedded sh/ps1 scripts it replaced are described in [ADR-23](architecture.md)): the daemon writes `$QUIL_HOME/sessions/<paneID>.settings.json` naming that command and passes `claude --settings <that file>`. The subcommand reads Claude's stdin JSON, extracts `session_id`, and atomically writes `$QUIL_HOME/sessions/<paneID>.id`. On daemon restore, `resumeTemplateFor` consults this file and prefers the hook-recorded id over the original preassigned id.
 
 Hardening:
-- **`ValidateQuilDir`** rejects shell-unsafe paths before hook install
+- **`pathIsArgvSafe`** rejects a settings path holding a character a shell would
+  re-interpret in the `--settings` argument, before the file is written
 - **`ReadPersistedSessionID`** rejects pane ids containing path separators and caps reads at 256 bytes
 - **The hook validates** the extracted id against a uuid regex before persisting; failures land in `$QUIL_HOME/claudehook/hook.log` (created lazily on first write)
-- **Missing-script detection** at spawn time (`claudeHookSpawnPrep`) — falls back to pre-feature behaviour rather than registering a dead hook
+- **Registration failure is not fatal** at spawn time (`claudeHookSpawnPrep`) — if the
+  quild executable cannot be resolved, the settings JSON cannot be built, or the settings
+  file cannot be written, the pane spawns with pre-feature behaviour rather than a dead
+  hook, and the reason is logged
 
 ### Notes Soft-Wrap
 > Long prose in the pane-notes editor wraps onto the next visual row instead of being hard-truncated.

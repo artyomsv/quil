@@ -184,12 +184,12 @@ Watchdog: `internal/tui/watchdog.go` ticks every 2 s and, if a Bubble Tea Update
 
 Before this, daemon kept resuming the preassigned jsonl after a restart, silently restoring pre-rotation conversation and discarding the user's post-rotation work.
 
-Quil registers a `SessionStart` hook via `claude --settings '<inline JSON>'` at every spawn (never modifies `~/.claude/settings.json`) and passes `QUIL_PANE_ID=<paneID>` in the PTY env. The hook script — embedded in `internal/claudehook/scripts/` (sh + ps1), written to `$QUIL_HOME/claudehook/` atomically on daemon start — reads Claude's stdin JSON, extracts `session_id`, and atomically writes `$QUIL_HOME/sessions/<paneID>.id`. On daemon restore, `resumeTemplateFor` consults this file and prefers the hook-recorded id over the original preassigned id.
+Quil registers a `SessionStart` hook at every spawn (never modifies `~/.claude/settings.json`) and passes `QUIL_PANE_ID=<paneID>` in the PTY env. The hook is the `quild claude-hook` subcommand (the embedded sh/ps1 scripts it replaced are described in [ADR-23](architecture.md)): the daemon writes `$QUIL_HOME/sessions/<paneID>.settings.json` naming that command and passes `claude --settings <that file>`. The subcommand reads Claude's stdin JSON, extracts `session_id`, and atomically writes `$QUIL_HOME/sessions/<paneID>.id`. On daemon restore, `resumeTemplateFor` consults this file and prefers the hook-recorded id over the original preassigned id.
 
 Hardening:
 - **`ValidateQuilDir`** rejects shell-unsafe paths before hook install
 - **`ReadPersistedSessionID`** rejects pane ids containing path separators and caps reads at 256 bytes
-- **Scripts validate** the extracted id against a uuid regex before persisting; failures land in `$QUIL_HOME/claudehook/hook.log`
+- **The hook validates** the extracted id against a uuid regex before persisting; failures land in `$QUIL_HOME/claudehook/hook.log` (created lazily on first write)
 - **Missing-script detection** at spawn time (`claudeHookSpawnPrep`) — falls back to pre-feature behaviour rather than registering a dead hook
 
 ### Notes Soft-Wrap

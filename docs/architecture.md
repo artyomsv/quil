@@ -1033,7 +1033,7 @@ not a field-by-field rebind.
 │   └── <version>/                 # conpty.dll + OpenConsole.exe, extracted from the embed
 ├── mcp-logs/                      # Per-pane MCP interaction logs (M10)
 │   └── pane-XXXXXXXX.log
-├── claudehook/                    # Embedded SessionStart hook scripts (ADR-23)
+├── claudehook/                    # hook.log only, written lazily (ADR-23; the scripts it names are gone)
 │   ├── quil-session-hook.sh       # Unix
 │   ├── quil-session-hook.ps1      # Windows
 │   └── hook.log                   # Hook validation failure log

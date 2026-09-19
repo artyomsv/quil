@@ -182,21 +182,48 @@ Close the pane (`Ctrl+W`) and create a fresh one (`Ctrl+N`).
 
 Symptoms: on restart, `claude` starts a new conversation instead of resuming the old one.
 
-Quil tracks Claude session-id rotation via a `SessionStart` hook. If the hook didn't run:
+Quil tracks Claude session-id rotation via a `SessionStart` hook. The hook is the
+`quild claude-hook` subcommand — **not** a script file. Quil registers it by writing a
+per-pane settings file at every spawn and passing `claude --settings <that file>`. There is
+nothing to install, and `~/.quil/claudehook/` is **not** created at daemon start.
 
-1. **Check the hook script exists:**
+1. **Check the hook is registered:**
    ```bash
-   ls -la ~/.quil/claudehook/
+   ls -la ~/.quil/sessions/
    ```
-   Should contain `quil-session-hook.sh` and `quil-session-hook.ps1`. If missing, restart the daemon — it re-installs on every start.
+   A Claude Code pane gets `<pane-id>.settings.json` at every spawn. If it is missing, the
+   daemon never spawned a `claude-code` pane for that id — the pane is most likely a plain
+   terminal pane in which `claude` was started by hand. Quil only registers the hook for
+   `claude-code` typed panes (Ctrl+N → Claude Code) and for plugins with
+   `sessions = "claude"`.
 
-2. **Check the recorded session id:**
+2. **Check the hook actually fired:**
    ```bash
    cat ~/.quil/sessions/<pane-id>.id
    ```
-   Empty or missing means the hook never fired. Look at `~/.quil/claudehook/hook.log` for errors.
+   Missing while `<pane-id>.settings.json` exists means Claude never ran the hook command.
+   Confirm the spawn line carried the flag:
+   ```bash
+   grep "spawn: pane" ~/.quil/quild.log
+   ```
+   A registered pane shows `--settings /…/.quil/sessions/<pane-id>.settings.json` in its args.
+   A successful registration also logs `claude hooks registered`; a failed one logs
+   `claude hooks disabled` with the reason.
 
-3. **`QUIL_HOME` characters.** The hook installer rejects shell-unsafe characters in `$QUIL_HOME`. If you set `QUIL_HOME=/path/with"quote/` the daemon refuses to install the hook (see warning in daemon log).
+3. **Check the hook's own breadcrumbs:**
+   ```bash
+   cat ~/.quil/claudehook/hook.log
+   ```
+   This file — and the `claudehook/` directory itself — is created lazily, the first time the
+   hook has something to report. **On a healthy install it may never exist.** Its absence is
+   not a fault.
+
+4. **`QUIL_HOME` characters.** The settings-file writer rejects shell-unsafe characters in
+   `$QUIL_HOME`. If you set `QUIL_HOME=/path/with"quote/` the daemon spawns without the hook
+   (see the `claude hooks disabled` warning in the daemon log).
+
+> Passing your own `--settings` in the plugin's args conflicts with Quil's. The daemon logs a
+> warning when it sees one; which value wins is unverified.
 
 For OpenCode the equivalent files are under `~/.quil/opencodehook/` and `~/.quil/sessions/opencode-<pane-id>.id` — see [Features → OpenCode session-id tracking](features.md#opencode-session-id-tracking).
 
@@ -343,7 +370,7 @@ opening a dialog — often clears it.
 | `~/.quil/quil.log` | TUI client log (input handling, dialog state, IPC send/receive) |
 | `~/.quil/quild.log` | Daemon log (pane lifecycle, IPC dispatch, snapshot timings, spawn commands) |
 | `~/.quil/mcp-logs/<pane-id>.log` | Per-pane MCP interaction log (tool name, timestamp, sanitized detail) |
-| `~/.quil/claudehook/hook.log` | Errors from the Claude Code SessionStart hook |
+| `~/.quil/claudehook/hook.log` | Errors and breadcrumbs from the Claude Code hook. Created lazily on first write — absent on a healthy install |
 | `~/.quil/opencodehook/hook.log` | Errors / breadcrumbs from the OpenCode JS plugin |
 | `~/.quil/codexhook/hook.log` | Errors / breadcrumbs from the Codex hook subcommand |
 | `~/.quil/quild.stderr.log` | Daemon panics and SIGQUIT goroutine dumps (anything the Go runtime writes to stderr) |

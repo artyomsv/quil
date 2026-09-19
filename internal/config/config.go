@@ -953,13 +953,6 @@ func NotesDir() string {
 	return filepath.Join(QuilDir(), "notes")
 }
 
-// ClaudeHookDir returns the directory where Quil writes the Claude Code
-// SessionStart hook scripts it passes via --settings. Lives under Quil's
-// own home so we never touch the user's ~/.claude/ config.
-func ClaudeHookDir() string {
-	return filepath.Join(QuilDir(), "claudehook")
-}
-
 // EventsDir returns the directory where Claude / opencode hooks append
 // per-pane JSONL event spool files (<paneID>.jsonl). The daemon's
 // hookEventsWatcher polls these files on a 200 ms ticker, parses new

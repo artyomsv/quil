@@ -76,7 +76,7 @@ Mark a pane as **eager** with `Alt+Shift+E` (config key `toggle_eager`) to force
 
 ### Claude Code session-id rotation
 
-`/clear`, `/resume`, and conversation compaction all rotate Claude Code's session id to a new jsonl file. Quil registers a `SessionStart` hook via `claude --settings '<inline JSON>'` at every spawn (it never modifies `~/.claude/settings.json`) and passes `QUIL_PANE_ID=<paneID>` in the PTY env. The hook script — embedded in the binary, written to `$QUIL_HOME/claudehook/`, reused across spawns — atomically writes the live session id to `$QUIL_HOME/sessions/<paneID>.id` on every rotation. On daemon restart, the resume strategy prefers the hook-recorded id over the original preassigned id.
+`/clear`, `/resume`, and conversation compaction all rotate Claude Code's session id to a new jsonl file. Quil registers a `SessionStart` hook at every spawn (it never modifies `~/.claude/settings.json`) and passes `QUIL_PANE_ID=<paneID>` in the PTY env. The hook is the `quild claude-hook` subcommand, not a script: the daemon writes a per-pane settings file `$QUIL_HOME/sessions/<paneID>.settings.json` naming `"<quild>" claude-hook`, and passes `claude --settings <that file>`. The subcommand atomically writes the live session id to `$QUIL_HOME/sessions/<paneID>.id` on every rotation. `$QUIL_HOME/claudehook/` holds only `hook.log`, created lazily on first write. On daemon restart, the resume strategy prefers the hook-recorded id over the original preassigned id.
 
 ### OpenCode session-id tracking
 

@@ -1033,10 +1033,10 @@ not a field-by-field rebind.
 │   └── <version>/                 # conpty.dll + OpenConsole.exe, extracted from the embed
 ├── mcp-logs/                      # Per-pane MCP interaction logs (M10)
 │   └── pane-XXXXXXXX.log
-├── claudehook/                    # Embedded SessionStart hook scripts (ADR-23)
-│   ├── quil-session-hook.sh       # Unix
-│   ├── quil-session-hook.ps1      # Windows
-│   └── hook.log                   # Hook validation failure log
+├── claudehook/                    # ADR-23. Created lazily on first hook.log write;
+│   └── hook.log                   # absent on a healthy install. The sh/ps1 scripts
+│                                  # this once held were replaced in v1.18.0 by the
+│                                  # `quild claude-hook` subcommand — see the ADR
 ├── opencodehook/                  # Embedded OpenCode JS plugin
 │   └── *.js
 ├── codexhook/                     # Codex hook log

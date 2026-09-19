@@ -4608,9 +4608,10 @@ func claudeHookSpawnPrep(hp hookPaths, paneID, hookMode string, userArgs []strin
 	// a sandbox pane those differ: claude loads it from inside the container,
 	// where the host path does not exist.
 	settingsPath = hp.ref(settingsPath)
+	contested := false
 	for _, a := range userArgs {
 		if a == "--settings" {
-			log.Printf("warning: pane %s: claude-code args already contain --settings; precedence with Quil's hook entry is unverified", paneID)
+			contested = true
 			break
 		}
 	}
@@ -4636,13 +4637,24 @@ func claudeHookSpawnPrep(hp hookPaths, paneID, hookMode string, userArgs []strin
 	if settingsPath == "" {
 		return nil, env
 	}
-	// Logged on SUCCESS, not only on failure. The three refusals above each
-	// log "claude hooks disabled"; a registration that worked logged nothing,
-	// so `grep -i hook quild.log` read identically whether the hook was live
-	// or had never been registered at all — which is how #221 spent a day on
-	// a directory that was never the problem. This line is the positive
-	// evidence a troubleshooting run needs.
-	log.Printf("pane %s: claude hooks registered (settings=%s, mode=%s)", paneID, settingsPath, mode)
+	// An OUTCOME is logged either way, not only on failure. The three refusals
+	// above each log "claude hooks disabled"; a registration that worked logged
+	// nothing, so `grep -i hook quild.log` read identically whether the hook was
+	// live or had never been registered at all — which is how #221 spent a day
+	// on a directory that was never the problem.
+	//
+	// "registered" is claimed only when nothing contests it. Quil prepends its
+	// own --settings, so when the plugin's args already carry one, which file
+	// claude honours is UNVERIFIED (see the doc comment): the hook may never
+	// become active. Claiming registration there would reintroduce exactly the
+	// ambiguity this line exists to remove — a positive confirmation for a hook
+	// that is not running. So that case reports what is actually established,
+	// which is that the settings file was written and the flag was passed.
+	if contested {
+		log.Printf("warning: pane %s: claude hook settings written to %s (mode=%s), but claude-code args already carry their own --settings; which one claude honours is unverified, so the hook may not be active", paneID, settingsPath, mode)
+	} else {
+		log.Printf("pane %s: claude hooks registered (settings=%s, mode=%s)", paneID, settingsPath, mode)
+	}
 	return []string{"--settings", settingsPath}, env
 }
 

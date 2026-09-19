@@ -5410,7 +5410,7 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 
 		// Shell integration (only for terminal-type panes)
 		if p.Command.ShellIntegration {
-			shellCfg := shellinit.Configure(cmd, config.QuilDir())
+			shellCfg := shellinit.Configure(cmd, config.QuilDir(), nil, "")
 			if shellCfg != nil {
 				ptySession.SetEnv(shellCfg.Env)
 				cmd = shellCfg.Cmd

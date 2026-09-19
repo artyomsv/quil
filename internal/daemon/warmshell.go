@@ -56,7 +56,7 @@ type warmShellPool struct {
 
 // newShellPoolFor runs after Start has loaded user plugin overrides.
 func newShellPoolFor(cfg config.Config, registry *plugin.Registry) *warmShellPool {
-	if shellCfg := shellinit.Configure(registry.Get("terminal").Command.Cmd, config.QuilDir()); shellCfg != nil {
+	if shellCfg := shellinit.Configure(registry.Get("terminal").Command.Cmd, config.QuilDir(), nil, ""); shellCfg != nil {
 		return newWarmShellPool(warmPoolShellConfig{Cmd: shellCfg.Cmd, Args: shellCfg.Args, Env: shellCfg.Env}, cfg.Daemon.WarmShellPoolSize)
 	}
 	return newWarmShellPool(warmPoolShellConfig{}, 0)

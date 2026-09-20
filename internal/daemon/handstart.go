@@ -88,6 +88,15 @@ const (
 type handStartDecision struct {
 	Class  handStartClass
 	Reason string
+	// Sessionful says the launch WOULD have opened a conversation, even when
+	// it is not being converted. Adoption and the untracked card are gated on
+	// it: `claude doctor` opens no session, and adopting on its behalf would
+	// mark the pane as holding a conversation that belongs to something else
+	// entirely — one that a transcript written seconds earlier in the same
+	// directory would supply. `claude attach <id>` is worse: it is refused
+	// BECAUSE the session belongs to another agent, so adopting it would
+	// record exactly the id the refusal was about.
+	Sessionful bool
 }
 
 // decodeHandStartField reverses the shell's percent-encoding of the three
@@ -249,11 +258,53 @@ var handStartNoConvert = map[string]map[string]bool{
 	"claude": setOf("attach"),
 }
 
-// handStartSessionFlags are the flags that name a session to resume. More than
-// one of them is contradictory and is refused rather than resolved.
-var handStartSessionFlags = map[string]bool{
-	"--resume": true, "-r": true, "--session-id": true,
-	"--continue": true, "-c": true, "--session": true,
+// flagName reduces `--flag=value` to `--flag`.
+//
+// Every guard here compares whole tokens, and GNU-style `=` is an ordinary way
+// to spell the same flag. Without this, `claude --resume=A` slipped past the
+// session-flag check and resolveSpawnArgs appended its own `--session-id` on
+// top — the exact two-session argv claude refuses, reached by a second
+// spelling of the flag that was already fixed.
+func flagName(a string) string {
+	if !strings.HasPrefix(a, "-") {
+		return a
+	}
+	name, _, _ := strings.Cut(a, "=")
+	return name
+}
+
+// handStartSessionFlags are the flags that name a session to resume, PER
+// AGENT. More than one from the same agent is contradictory and is refused
+// rather than resolved.
+//
+// Per agent because `-c` collides: it is claude's --continue and codex's
+// CONFIG OVERRIDE. Treating every `-c` as a session selector made
+// `codex -c model=gpt-5` look like a resume, which skipped the recorded
+// `resume <id>` on restart and started a new conversation — and on restore
+// stripSessionArgs removed the `-c` while leaving `model=gpt-5` behind as a
+// stray positional.
+var handStartSessionFlags = map[string]map[string]bool{
+	"claude":   setOf("--resume", "-r", "--session-id", "--continue", "-c"),
+	"codex":    setOf("resume"),
+	"opencode": setOf("--session", "--continue", "-c"),
+}
+
+// sessionFlagsFor answers the selectors for an agent, or the union when the
+// agent is unknown — a caller that cannot name the agent (the restore path
+// works from InstanceArgs alone) must not under-detect and append a second
+// selector. Over-detecting there only means leaving the user's own argument in
+// place, which is the safer direction.
+func sessionFlagsFor(agent string) map[string]bool {
+	if f, ok := handStartSessionFlags[agent]; ok {
+		return f
+	}
+	all := map[string]bool{}
+	for _, f := range handStartSessionFlags {
+		for k := range f {
+			all[k] = true
+		}
+	}
+	return all
 }
 
 // classifyHandStart decides what to do about an authenticated marker.
@@ -264,10 +315,10 @@ var handStartSessionFlags = map[string]bool{
 // denylist rather than an allowlist.
 func classifyHandStart(p *plugin.PanePlugin, m handStartMarker, daemonEnv func(string) (string, bool)) handStartDecision {
 	if p == nil {
-		return handStartDecision{handStartRun, "no plugin for that command"}
+		return handStartDecision{handStartRun, "no plugin for that command", false}
 	}
 	if m.Oversize {
-		return handStartDecision{handStartRun, "the command line was too long to classify"}
+		return handStartDecision{handStartRun, "the command line was too long to classify", false}
 	}
 
 	// A name set in the shell AND in the daemon's environment is assumed equal
@@ -280,36 +331,38 @@ func classifyHandStart(p *plugin.PanePlugin, m handStartMarker, daemonEnv func(s
 			continue
 		}
 		if _, ok := daemonEnv(name); !ok {
-			return handStartDecision{handStartRun, "this shell sets " + name + ", which the daemon does not have"}
+			return handStartDecision{handStartRun, "this shell sets " + name + ", which the daemon does not have", true}
 		}
 	}
 
 	base := handStartBase(m.Name)
 	deny := handStartNonSession[base]
 	noConvert := handStartNoConvert[base]
+	sessionFlags := sessionFlagsFor(base)
 	seen := 0
 	for i, a := range m.Args {
+		name := flagName(a)
 		switch {
-		case a == "--settings":
+		case name == "--settings":
 			// claudeHookSpawnPrep itself says what happens when the plugin's
 			// args already carry one: which file claude honours is unverified,
 			// so the hook may not be active. Converting would print a card
 			// saying hooks are on, which could be false.
-			return handStartDecision{handStartRun, "a typed --settings would contend with Quil's hook settings"}
-		case handStartSessionFlags[a]:
+			return handStartDecision{handStartRun, "a typed --settings would contend with Quil's hook settings", true}
+		case sessionFlags[name]:
 			seen++
 			if seen > 1 {
-				return handStartDecision{handStartRun, "more than one session flag was given"}
+				return handStartDecision{handStartRun, "more than one session flag was given", false}
 			}
 		case i == 0 && !strings.HasPrefix(a, "-") && deny[a]:
-			return handStartDecision{handStartRun, a + " is not an interactive session"}
+			return handStartDecision{handStartRun, a + " is not an interactive session", false}
 		case i == 0 && !strings.HasPrefix(a, "-") && noConvert[a]:
-			return handStartDecision{handStartRun, a + " joins a session another agent already owns"}
+			return handStartDecision{handStartRun, a + " joins a session another agent already owns", false}
 		case !handStartArgShapeOK(a):
-			return handStartDecision{handStartRun, "an argument could not be validated"}
+			return handStartDecision{handStartRun, "an argument could not be validated", false}
 		}
 	}
-	return handStartDecision{handStartConvert, ""}
+	return handStartDecision{handStartConvert, "", true}
 }
 
 // handStartArgShapeOK refuses an argument that could not have been typed at an
@@ -472,7 +525,25 @@ func (d *Daemon) convertAtLaunch(pane *Pane, target *plugin.PanePlugin, m handSt
 	pane.handStart.token = ""
 	pane.PluginMu.Unlock()
 
-	log.Printf("pane %s: converting %s to %s (args=%v, cwd=%s)", pane.ID, prevType, target.Name, m.Args, cwd)
+	// COUNT, never the values. A hand-typed agent command routinely carries a
+	// prompt, and a prompt routinely carries whatever the user is working on —
+	// quild.log is retained on disk, rotated, and readable from F1. The env
+	// rule is already names-not-values; argv must hold the same line.
+	log.Printf("pane %s: converting %s to %s (%d args, cwd=%s)", pane.ID, prevType, target.Name, len(m.Args), cwd)
+
+	// The argv the user typed becomes a PERSISTED property of this pane: it is
+	// written to workspace.json and re-applied on every restart and every
+	// Alt+R. A one-off `--dangerously-skip-permissions` would otherwise become
+	// a permanent, invisible setting — the create dialog's toggles are at
+	// least re-chosen each time. The card is the only place it is ever shown,
+	// so it names them.
+	if len(m.Args) > 0 {
+		d.emitHandStartCard(pane, "agent_converted", "info",
+			"Opened as a "+target.Name+" pane",
+			"Quil reopened this pane as "+target.Name+" with the arguments you typed: "+
+				strings.Join(shapedArgsForCard(m.Args), " ")+
+				". They are kept for this pane and reapplied when it restarts.")
+	}
 
 	if !d.restartPaneInPlace(pane) {
 		// The pane is left as the agent type with its SpawnError showing, which
@@ -493,11 +564,18 @@ func (d *Daemon) convertAtLaunch(pane *Pane, target *plugin.PanePlugin, m handSt
 // spawning the agent there would silently start it in the wrong project. The
 // shell's value is validated the same way any client-supplied path is.
 func (d *Daemon) resolveHandStartCWD(pane *Pane, m handStartMarker) string {
-	if m.CWD != "" {
-		if resolved, err := filepath.EvalSymlinks(m.CWD); err == nil {
-			if st, err := os.Stat(resolved); err == nil && st.IsDir() {
-				return resolved
-			}
+	// Through the daemon's own permit-limited, deadline-bounded probe, NOT a
+	// bare EvalSymlinks+Stat. This runs on the pane's PTY output goroutine, and
+	// that goroutine parking in an uninterruptible syscall on a dead NFS or SMB
+	// mount is the wedge class this daemon has scars from: the pane stops
+	// draining, the child fills the PTY buffer, and input freezes.
+	//
+	// Absolute only. EvalSymlinks on a relative path answers a relative path,
+	// so a marker naming "." would have spawned the agent relative to the
+	// DAEMON's directory.
+	if filepath.IsAbs(m.CWD) {
+		if dir := resolveSpawnDirWithin(m.CWD, spawnDirProbeTimeout); dir != "" {
+			return dir
 		}
 	}
 	pane.PluginMu.Lock()
@@ -514,7 +592,7 @@ func (d *Daemon) resolveHandStartCWD(pane *Pane, m handStartMarker) string {
 //
 // Runs on the output goroutine for this pane, and conversion runs synchronously
 // from here — see convertAtLaunch for why that ordering is load-bearing.
-func (d *Daemon) detectHandStart(pane *Pane, paneID string, data []byte) {
+func (d *Daemon) detectHandStart(pane *Pane, paneID string, data []byte, arrival time.Time) {
 	pane.PluginMu.Lock()
 	bound := pane.handStart.token
 	prev := pane.handStartTail
@@ -533,8 +611,20 @@ func (d *Daemon) detectHandStart(pane *Pane, paneID string, data []byte) {
 		return
 	}
 
-	arrival := time.Now()
 	for _, payload := range payloads {
+		// Re-read per marker. Read once outside the loop, a converted pane
+		// stayed "armed" for the rest of the chunk against a stale local copy,
+		// so sixty markers in one 2ms coalesced chunk drove sixty pane
+		// restarts — each a PTY teardown, a fork/exec under the daemon-wide
+		// spawn lock, and a session-record deletion. The file's own contract
+		// says exactly one outcome per marker; this is what makes that true
+		// within a chunk as well as across them.
+		pane.PluginMu.Lock()
+		bound = pane.handStart.token
+		pane.PluginMu.Unlock()
+		if bound == "" {
+			break
+		}
 		m, ok := parseHandStart(payload)
 		if !ok {
 			logger.Debug("pane %s: unparseable hand-start marker (%d bytes)", paneID, len(payload))
@@ -556,7 +646,9 @@ func (d *Daemon) detectHandStart(pane *Pane, paneID string, data []byte) {
 		if !m.fresh(time.Now(), arrival) {
 			// The shell has already given up and run the binary. Answering now
 			// would put eight characters into a live agent's composer.
-			log.Printf("pane %s: hand-start marker for %q arrived too late to answer", paneID, m.Name)
+			if d.handStartLogAllowed(pane) {
+				log.Printf("pane %s: hand-start marker for %q arrived too late to answer", paneID, truncateName(m.Name))
+			}
 			continue
 		}
 		d.answerHandStart(pane, paneID, m)
@@ -572,7 +664,7 @@ func (d *Daemon) answerHandStart(pane *Pane, paneID string, m handStartMarker) {
 	if policy != config.HandStartedConvert {
 		// adopt and notify both run the binary as typed; they differ only in
 		// what happens afterwards, which is Part C's business, not this one's.
-		decision = handStartDecision{handStartRun, "hand_started = " + policy}
+		decision = handStartDecision{handStartRun, "hand_started = " + policy, decision.Sessionful}
 	}
 
 	if decision.Class == handStartConvert {
@@ -588,11 +680,18 @@ func (d *Daemon) answerHandStart(pane *Pane, paneID string, m handStartMarker) {
 
 	d.replyHandStart(pane, handStartReplyRun)
 	if decision.Reason != "" {
-		log.Printf("pane %s: running %s as typed — %s", paneID, m.Name, decision.Reason)
+		// The name is truncated and the line is rate-limited: both are reached
+		// at will by anything holding the token (send a stale timestamp, or an
+		// env name the daemon lacks), and the payload cap allows a ~2KB name.
+		// Unbounded, that rotates the daemon's diagnostic history away.
+		if d.handStartLogAllowed(pane) {
+			log.Printf("pane %s: running %s as typed — %s", paneID, truncateName(m.Name), decision.Reason)
+		}
 	}
-	if target == nil || policy == config.HandStartedOff {
-		// "off" means say nothing, and a command that is not one of Quil's
-		// agents is not this feature's business.
+	if target == nil || policy == config.HandStartedOff || !decision.Sessionful {
+		// "off" means say nothing; a command that is not one of Quil's agents
+		// is not this feature's business; and a launch that opens no session
+		// has nothing to adopt and nothing to report as untracked.
 		return
 	}
 
@@ -607,7 +706,7 @@ func (d *Daemon) answerHandStart(pane *Pane, paneID string, m handStartMarker) {
 	}
 	d.emitHandStartCard(pane, "agent_untracked", "info",
 		"Session not tracked",
-		untrackedMessage(m.Name, decision.Reason))
+		untrackedMessage(target.Name, decision.Reason))
 }
 
 // untrackedMessage says what happened and what to do, in that order. A card
@@ -621,15 +720,34 @@ func untrackedMessage(name, reason string) string {
 	return msg + " Ctrl+N opens a pane of that type with full tracking."
 }
 
-// replyHandStart writes the eight-byte answer to the pane's child, answering
-// whether it was accepted for delivery.
+// replyHandStart writes the eight-byte answer to the shell that is waiting for
+// it, answering whether the bytes reached a PTY.
 //
-// Through EnqueueInput, the ordered per-pane writer every keystroke uses: a
-// direct PTY write from this goroutine would block forever against a child that
-// has stopped reading stdin, which is the wedge shape this daemon already has
-// scars from.
+// Written DIRECTLY to the PTY captured here, not through EnqueueInput. The
+// queue is asynchronous and its writer resolves pane.PTY when it drains, so a
+// conversion — which replaces that PTY microseconds later — could have the
+// reply land in the newly started agent's composer, or be dropped against a nil
+// pointer, while the shell waits out its full second and runs the agent anyway.
+// The pane would then restart AND run the binary.
+//
+// A direct write is safe HERE and is not safe in general: the wedge this
+// daemon has scars from is a child that stopped reading stdin, filling the
+// kernel buffer and blocking the writer forever. That cannot apply to these
+// eight bytes — the shell is parked in a `read` on its tty, which is the
+// opposite of a child ignoring stdin, and eight bytes fit in any PTY buffer
+// that is not already full. The deadline the shell holds bounds the rest.
 func (d *Daemon) replyHandStart(pane *Pane, reply string) bool {
-	return pane.EnqueueInput([]byte(reply))
+	pane.PluginMu.Lock()
+	pty := pane.PTY
+	pane.PluginMu.Unlock()
+	if pty == nil {
+		return false
+	}
+	if _, err := pty.Write([]byte(reply)); err != nil {
+		logger.Debug("pane %s: hand-start reply: %v", pane.ID, err)
+		return false
+	}
+	return true
 }
 
 // logHandStartMismatch reports an authenticated-looking marker whose token is
@@ -649,5 +767,45 @@ func (d *Daemon) logHandStartMismatch(pane *Pane, paneID, name, bound string) {
 	// Neither token is printed. The bound one is a live credential for this
 	// pane, and the marker's is whatever the writer chose.
 	log.Printf("pane %s: hand-start marker for %q carried a token this pane does not hold (armed=%v) — ignoring",
-		paneID, name, bound != "")
+		paneID, truncateName(name), bound != "")
+}
+
+// truncateName bounds a marker-supplied name before it reaches a log line or a
+// card. The payload cap allows ~2KB here and the value is attacker-chosen.
+func truncateName(s string) string {
+	const max = 32
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "…"
+}
+
+// handStartLogAllowed rate-limits the marker-driven log lines to one per pane
+// per cooldown, sharing the clock with the mismatch report.
+func (d *Daemon) handStartLogAllowed(pane *Pane) bool {
+	const cooldown = time.Minute
+	now := time.Now()
+	pane.PluginMu.Lock()
+	defer pane.PluginMu.Unlock()
+	if now.Sub(pane.handStartLoggedAt) < cooldown {
+		return false
+	}
+	pane.handStartLoggedAt = now
+	return true
+}
+
+// shapedArgsForCard bounds what a marker can put on a notification card.
+// Truncated per argument and capped in count: the values are attacker-chosen
+// within the payload cap, and the card is rendered to every attached client.
+func shapedArgsForCard(args []string) []string {
+	const maxArgs = 12
+	out := make([]string, 0, len(args))
+	for i, a := range args {
+		if i == maxArgs {
+			out = append(out, "…")
+			break
+		}
+		out = append(out, truncateName(a))
+	}
+	return out
 }

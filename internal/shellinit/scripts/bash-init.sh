@@ -35,8 +35,19 @@ __quil_preexec() {
     printf '\e]133;B\e\\'
 }
 
+# Set while the tty is in -echo for an interception, cleared by whoever
+# restores it. A prompt drawn with this still set means the read was
+# interrupted, and the prompt hook is the one place a restore survives
+# `read -N` unwinding.
+__quil_stty_pending=
+__quil_restore_stty() {
+    [ -n "$__quil_stty_pending" ] || return 0
+    stty "$__quil_stty_pending" < /dev/tty 2>/dev/null
+    __quil_stty_pending=
+}
+
 if [[ "${PROMPT_COMMAND}" != *"__quil_osc7"* ]]; then
-    PROMPT_COMMAND="__quil_precmd;__quil_osc7${PROMPT_COMMAND:+;$PROMPT_COMMAND};__quil_arm"
+    PROMPT_COMMAND="__quil_restore_stty;__quil_precmd;__quil_osc7${PROMPT_COMMAND:+;$PROMPT_COMMAND};__quil_arm"
 fi
 trap '__quil_preexec' DEBUG
 
@@ -110,7 +121,28 @@ __quil_intercept() {
     # would paint the answer on screen.
     local __qstty
     __qstty=$(stty -g < /dev/tty 2>/dev/null)
-    [ -n "$__qstty" ] && stty -echo < /dev/tty 2>/dev/null
+    # Restored by a RETURN trap, not by a statement after the read. The read
+    # below blocks for up to a second, and Ctrl-C during it aborts the function
+    # — a plain restore never runs, and the user is left typing blind into a
+    # terminal with echo off. The trap is set INSIDE the function so it is
+    # local to this call.
+    # Restored from the PROMPT HOOK, not from a trap.
+    #
+    # Two measured reasons, both against a real pty. A bash RETURN trap does
+    # not run when SIGINT unwinds a function. And an INT trap that restores is
+    # then UNDONE: `read -N` puts the tty in non-canonical mode and, as it
+    # unwinds, restores the termios it captured on ENTRY — which already had
+    # ECHO off, because stty -echo ran before the read. The trap fires first,
+    # the read's restore lands second, and the terminal is left -echo.
+    #
+    # The prompt hook runs after the read has fully unwound, which is the only
+    # point at which a restore sticks. Echo left off is invisible at the prompt
+    # because readline echoes there itself; the user discovers it at the next
+    # program that reads stdin, and then types blind until `stty sane`.
+    if [ -n "$__qstty" ]; then
+        __quil_stty_pending=$__qstty
+        stty -echo < /dev/tty 2>/dev/null
+    fi
 
     printf '\e]7770;%s\e\\' "$__qpay" > /dev/tty
 
@@ -119,8 +151,7 @@ __quil_intercept() {
     # fixed-length read has neither failure.
     local __qreply=
     read -r -N 8 -t 1 __qreply < /dev/tty
-
-    [ -n "$__qstty" ] && stty "$__qstty" < /dev/tty 2>/dev/null
+    __quil_restore_stty
 
     if [ "$__qreply" = "quil:cnv" ]; then
         return 0

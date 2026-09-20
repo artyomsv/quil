@@ -63,11 +63,11 @@ var plainEventGroups = map[string]string{
 	"input_blocked":          groupSystem,
 	// Hand-started agents. System rather than process: these report what Quil
 	// did about a launch, not what a program did.
-	"agent_adopted":   groupSystem,
-	"agent_untracked": groupSystem,
-	"worktree_ready":         groupSystem,
-	"command_complete":       groupCommands,
-	"output_idle":            groupIdle,
+	"agent_adopted":    groupSystem,
+	"agent_untracked":  groupSystem,
+	"worktree_ready":   groupSystem,
+	"command_complete": groupCommands,
+	"output_idle":      groupIdle,
 }
 
 // eventGroup classifies one PaneEvent Type.

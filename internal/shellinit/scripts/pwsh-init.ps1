@@ -101,7 +101,7 @@ if ($env:QUIL_INTERCEPT -and $env:QUIL_INTERCEPT_TOKEN) {
     }
 
     foreach ($__qn in ($env:QUIL_INTERCEPT -split ',')) {
-        if ($__qn -notmatch '^[A-Za-z0-9._-]+$') { continue }
+        if ($__qn -notmatch '\A[A-Za-z0-9._-]+\z') { continue }
         # A user's own function of that name exists to set environment, and
         # must keep winning over Quil's.
         if (Get-Command $__qn -CommandType Function -ErrorAction SilentlyContinue) { continue }

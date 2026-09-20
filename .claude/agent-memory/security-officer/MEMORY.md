@@ -5,3 +5,4 @@
 - [project_uintptrescapes_com_helper.md](project_uintptrescapes_com_helper.md) — a hand-rolled COM vtable call helper needs //go:uintptrescapes; x/sys's own Call has it, yours does not
 - [log injection escaped by slog](project_log_injection_escaped_by_slog.md) — `%s` of an attacker string is NOT injectable (slog TextHandler quotes the whole msg); flag length-bounds + rate-limits instead, and the initLogging-returns-nil raw-stderr path
 - [per-dest table cleanup](project_per_dest_table_cleanup.md) — a new dest-keyed map on tui.Model must be deleted in disconnectDest (dialdest.go); Origin is router-stamped so bucket choice needs no re-review
+- [hand-start OSC 7770 taint](project_handstart_osc7770_taint.md) — marker argv is pane-controlled, persisted and UI-invisible; the token rides the env to every shell descendant; zsh `read -t -k` is no deadline

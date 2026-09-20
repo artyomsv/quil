@@ -39,14 +39,23 @@ type Pane struct {
 	// shell's token and the old one stops matching.
 	handStart handStartState
 
-	// Adopted marks a terminal pane whose hand-started claude session Quil is
-	// tracking without having spawned it. The pane will resume that
-	// conversation after a restart; it gets none of the hook events a properly
-	// spawned pane gets, and the UI says so rather than implying parity.
+	// Adopted marks a terminal pane whose hand-started claude session Quil has
+	// recorded without having spawned it.
+	//
+	// Recording is all it is. The pane stays a terminal, and a terminal's
+	// persistence strategy is cwd_only, so a restart spawns a shell and never
+	// consults the id — the card says exactly that, because an earlier version
+	// promised a resume this cannot deliver, which is the #221 failure with a
+	// reassuring label on it. The hook events a properly spawned pane gets are
+	// not available here at any price.
 	Adopted bool
 
 	// handStartMismatchAt rate-limits the "wrong token" report to once an hour.
 	handStartMismatchAt time.Time
+
+	// handStartLoggedAt rate-limits the marker-driven refusal lines. Anything
+	// holding the token reaches them at will.
+	handStartLoggedAt time.Time
 
 	// handStartTail retains an unterminated marker across output chunks, the
 	// way modeScanTail does for mouse modes. Bounded; see keepHandStartTail.

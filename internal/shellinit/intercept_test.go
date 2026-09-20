@@ -111,14 +111,23 @@ func TestScripts_InterceptGuards(t *testing.T) {
 	}{
 		{"scripts/bash-init.sh", []string{
 			`QUIL_INTERCEPT_TOKEN`,
-			`BASH_VERSINFO[0]`,   // read -N needs bash >= 4.1; macOS ships 3.2
-			`-t 0 && -t 1`,       // a captured stdout must not receive the marker
-			`BASH_SUBSHELL > 0`,  // `claude &` would take SIGTTIN on the read
-			`-p|--print`,         // not a session; never round-tripped
-			`declare -F`,         // a user's own wrapper keeps winning
-			`read -r -N 8 -t 1`,  // fixed length: no terminator to get wrong
+			`BASH_VERSINFO[0]`,  // read -N needs bash >= 4.1; macOS ships 3.2
+			`-t 0 && -t 1`,      // a captured stdout must not receive the marker
+			`BASH_SUBSHELL > 0`, // `claude &` would take SIGTTIN on the read
+			`-p|--print`,        // not a session; never round-tripped
+			`declare -F`,        // a user's own wrapper keeps winning
+			`read -r -N 8 -t 1`, // fixed length: no terminator to get wrong
 			`> /dev/tty`,
 			`stty -echo`,
+		}},
+		{"scripts/pwsh-init.ps1", []string{
+			`QUIL_INTERCEPT_TOKEN`,
+			`IsInputRedirected`,      // a captured stream must not receive the marker
+			`-p', '--print`,          // not a session; never round-tripped
+			`-CommandType Function`,  // a user's own wrapper keeps winning
+			`Select-Object -First 1`, // Get-Command returns an ARRAY when .cmd and .exe both exist
+			`$Pipe | & $bin`,         // pipeline input must survive the interception
+			`KeyAvailable`,           // fixed-length read, polled against a deadline
 		}},
 		{"scripts/zsh-init.sh", []string{
 			`QUIL_INTERCEPT_TOKEN`,
@@ -126,7 +135,12 @@ func TestScripts_InterceptGuards(t *testing.T) {
 			`ZSH_SUBSHELL > 0`,
 			`-p|--print`,
 			`${+functions[$__qn]}`,
-			`read -t 1 -k 8`,
+			// ONE byte per read, NOT -k 8. zsh's -t is an input-availability
+			// test, not a read deadline: with -k 8 the first byte satisfies -t
+			// and the read then blocks with no bound for the other seven.
+			// Measured at 4s+ against a single byte, with echo already off.
+			`read -t 1 -k 1`,
+			`TRAPINT`,
 			`> /dev/tty`,
 			`stty -echo`,
 		}},

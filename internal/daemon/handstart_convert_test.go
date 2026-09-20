@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/artyomsv/quil/internal/config"
 )
@@ -12,16 +13,16 @@ import (
 // The reply alone proves nothing: a shell told to step aside for a pane that
 // then spawns a shell again is the worst outcome of the whole feature.
 func TestConvertAtLaunch_RetypesThePaneAndKeepsTheArguments(t *testing.T) {
-	d, pane := handStartFixture(t, "")
+	d, pane, rec := handStartFixture(t, "")
 	pane.handStart.token = "TOK"
 	cwd := t.TempDir()
 	pane.CWD = cwd
 
 	d.detectHandStart(pane, pane.ID, []byte(handStartOSC+
 		"cmd;TOK;claude;"+cwd+";;;--resume,5799ac23-d81a-462f-b176-515f9be6d07c,--enable-auto-mode"+
-		"\x1b\\"))
+		"\x1b\\"), time.Now())
 
-	if got := pane.drainInput(); got != handStartReplyConvert {
+	if got := rec.drain(); got != handStartReplyConvert {
 		t.Fatalf("reply = %q, want %q", got, handStartReplyConvert)
 	}
 	if pane.Type != "claude-code" {
@@ -51,11 +52,11 @@ func TestConvertAtLaunch_RetypesThePaneAndKeepsTheArguments(t *testing.T) {
 // InstanceArgs REPLACE them, so an empty non-nil slice would silently strip a
 // user's configured --model.
 func TestConvertAtLaunch_BareLaunchKeepsThePluginArgs(t *testing.T) {
-	d, pane := handStartFixture(t, "")
+	d, pane, _ := handStartFixture(t, "")
 	pane.handStart.token = "TOK"
 	pane.InstanceArgs = []string{"left", "over"}
 
-	d.detectHandStart(pane, pane.ID, []byte(handStartOSC+"cmd;TOK;claude;;;;"+"\x1b\\"))
+	d.detectHandStart(pane, pane.ID, []byte(handStartOSC+"cmd;TOK;claude;;;;"+"\x1b\\"), time.Now())
 
 	if pane.InstanceArgs != nil {
 		t.Fatalf("InstanceArgs = %v, want nil so the plugin's own args apply", pane.InstanceArgs)
@@ -66,12 +67,12 @@ func TestConvertAtLaunch_BareLaunchKeepsThePluginArgs(t *testing.T) {
 // the TUI's OSC 7 handler, so a pane driven with no client attached carries a
 // stale value and the agent would start in the wrong project.
 func TestConvertAtLaunch_PrefersTheShellsWorkingDirectory(t *testing.T) {
-	d, pane := handStartFixture(t, "")
+	d, pane, _ := handStartFixture(t, "")
 	pane.handStart.token = "TOK"
 	pane.CWD = t.TempDir() // stale
 	live := t.TempDir()
 
-	d.detectHandStart(pane, pane.ID, []byte(handStartOSC+"cmd;TOK;claude;"+live+";;;"+"\x1b\\"))
+	d.detectHandStart(pane, pane.ID, []byte(handStartOSC+"cmd;TOK;claude;"+live+";;;"+"\x1b\\"), time.Now())
 
 	want, err := filepath.EvalSymlinks(live)
 	if err != nil {
@@ -85,12 +86,12 @@ func TestConvertAtLaunch_PrefersTheShellsWorkingDirectory(t *testing.T) {
 // A directory that no longer exists must not become the spawn CWD — the shell's
 // value is validated exactly as any client-supplied path is.
 func TestConvertAtLaunch_RejectsAnUnusableWorkingDirectory(t *testing.T) {
-	d, pane := handStartFixture(t, "")
+	d, pane, _ := handStartFixture(t, "")
 	pane.handStart.token = "TOK"
 	keep := t.TempDir()
 	pane.CWD = keep
 
-	d.detectHandStart(pane, pane.ID, []byte(handStartOSC+"cmd;TOK;claude;/no/such/dir;;;"+"\x1b\\"))
+	d.detectHandStart(pane, pane.ID, []byte(handStartOSC+"cmd;TOK;claude;/no/such/dir;;;"+"\x1b\\"), time.Now())
 
 	if pane.CWD != keep {
 		t.Fatalf("CWD = %q, want the pane's own %q", pane.CWD, keep)
@@ -101,7 +102,7 @@ func TestConvertAtLaunch_RejectsAnUnusableWorkingDirectory(t *testing.T) {
 // record. Without retiring, a stale record from a destroyed pane whose id was
 // recycled would be resumed on top of the id the user actually typed.
 func TestConvertAtLaunch_RetiresStaleSessionRecords(t *testing.T) {
-	d, pane := handStartFixture(t, "")
+	d, pane, _ := handStartFixture(t, "")
 	pane.handStart.token = "TOK"
 
 	dir := config.SessionsDir()
@@ -115,7 +116,7 @@ func TestConvertAtLaunch_RetiresStaleSessionRecords(t *testing.T) {
 		}
 	}
 
-	d.detectHandStart(pane, pane.ID, []byte(handStartOSC+"cmd;TOK;claude;;;;"+"\x1b\\"))
+	d.detectHandStart(pane, pane.ID, []byte(handStartOSC+"cmd;TOK;claude;;;;"+"\x1b\\"), time.Now())
 
 	for _, name := range stale {
 		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {

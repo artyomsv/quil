@@ -5,6 +5,7 @@ paths:
   - "**/internal/ipc/**"
   - "**/internal/persist/**"
   - "**/internal/ringbuf/**"
+  - "**/internal/shellinit/**"
   - "**/cmd/quild/**"
 ---
 
@@ -199,3 +200,8 @@ daemon logs IPC dispatch (excluding high-frequency input/resize/layout), client 
 
 **Log rotation**: `quild.log`/`quil.log` rotate via `internal/logger/rotate.go` (`RotatingWriter`). Config knobs: `[logging] max_size_mb` (default 5) / `max_files` (default 10). When the active file would exceed `max_size_mb`, it is renamed to a timestamped archive (`stem-YYYYMMDD-HHMMSS.log`); the newest `max_files` archives are kept (pruned by modification time). On a failed rename (Windows file-lock), writing continues to the original path and rotation is suppressed until another `max_size_mb` bytes accumulate (back-off prevents a per-write hot-loop)
 
+
+
+## Hand-started agents (#221)
+
+Hand-started agents (#221): a terminal pane's shell SHADOWS `claude`/`codex`/`opencode` with a function (`internal/shellinit/scripts/*`, armed only when the daemon supplies both `QUIL_INTERCEPT` and `QUIL_INTERCEPT_TOKEN`). It emits `OSC 7770` carrying the exact argv, `$PWD` and the NAMES of agent env vars, then reads EXACTLY 8 bytes with a 1 s deadline — no terminator, because LF is not Enter under ConPTY and a late terminated reply would submit itself as a prompt. Fields are percent-encoded (`%`, `;`, `,`): `$PWD` sits between fixed fields and a directory holding a `;` would shift every field after it. The token is per SHELL, not per pane — the warm pool's env is captured pane-less at daemon start, so a pane-keyed value cannot exist there; `spawnPane` binds whatever the claimed shell carries and the daemon resolves the pane from the PTY the marker arrived on. A token is only ever COMPARED. Daemon side is `internal/daemon/handstart*.go`; `detectHandStart` runs BEFORE `detectOSC133Exit` and conversion runs SYNCHRONOUSLY on the output goroutine, so the shell's post-return `133;D` lands on a superseded generation. Conversion retires the pane's session records and sets a one-shot `disownRecords`: `ownsRecord` means "a child of this pane wrote the record under its id", and a converting pane raised `ptyGen` by running a SHELL, which wrote nothing. **Quil never attaches to a running agent** — `--settings` is argv, read once; adoption only WRITES DOWN a session id read off disk. Fish is uncovered (`shellinit.Configure` returns nil for it)

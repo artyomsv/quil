@@ -76,14 +76,33 @@ __quil_intercept() {
 
     local __qstty
     __qstty=$(stty -g < /dev/tty 2>/dev/null)
-    [ -n "$__qstty" ] && stty -echo < /dev/tty 2>/dev/null
 
-    printf '\e]7770;%s\e\\' "$__qpay" > /dev/tty
-
-    local __qreply=
-    read -t 1 -k 8 __qreply < /dev/tty
-
-    [ -n "$__qstty" ] && stty "$__qstty" < /dev/tty 2>/dev/null
+    # always-block, not a statement after the read: the read blocks for up to a
+    # second and Ctrl-C during it would otherwise skip the restore and leave the
+    # user typing blind with echo off.
+    local __qreply= __qc
+    {
+        # An INT trap as well as the always-block: `always` does not run when
+        # SIGINT unwinds the function, and Ctrl-C during the launch window is
+        # an ordinary thing to do. Echo left off is invisible at the prompt —
+        # readline echoes there itself — and the user only discovers it at the
+        # next program that reads stdin, then types blind until `stty sane`.
+        TRAPINT() { [ -n "$__qstty" ] && stty "$__qstty" < /dev/tty 2>/dev/null; return $(( 128 + $1 )) }
+        [ -n "$__qstty" ] && stty -echo < /dev/tty 2>/dev/null
+        printf '\e]7770;%s\e\\' "$__qpay" > /dev/tty
+        # ONE BYTE AT A TIME. zsh's -t is an input-AVAILABILITY test, not a read
+        # deadline: with `-k 8`, one byte arriving satisfies -t and the read
+        # then blocks with no deadline for the other seven. Measured at 4s+
+        # against a single byte. A daemon that answers nothing — which it does
+        # deliberately past its own cutoff — would leave the pane dead with
+        # echo off. Per byte, -t is a real bound on each wait.
+        while [ ${#__qreply} -lt 8 ]; do
+            read -t 1 -k 1 __qc < /dev/tty || break
+            __qreply="$__qreply$__qc"
+        done
+    } always {
+        [ -n "$__qstty" ] && stty "$__qstty" < /dev/tty 2>/dev/null
+    }
 
     if [ "$__qreply" = "quil:cnv" ]; then
         return 0

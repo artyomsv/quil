@@ -3904,6 +3904,7 @@ func (d *Daemon) flushPaneOutputGeneration(paneID string, data []byte, generatio
 
 	// Update idle tracking + mouse-mode state (guarded by PluginMu).
 	now := time.Now()
+	flushedAt := now
 	pane.LastOutputAt = now
 	pane.IdleNotified = false
 	scanData := data
@@ -3943,7 +3944,12 @@ func (d *Daemon) flushPaneOutputGeneration(paneID string, data []byte, generatio
 	// Before the OSC 133 detector: a conversion restarts the pane, and the
 	// shell's own prompt hooks emit a D for the command it never ran. Running
 	// the conversion first means that D lands on a superseded generation.
-	d.detectHandStart(pane, paneID, data)
+	// The arrival stamp is taken at the top of this flush, where the bytes
+	// actually arrived. Taken inside detectHandStart it measured only that
+	// function's own parse work — microseconds — so the fallback freshness
+	// bound for a shell that cannot supply a timestamp was inert, and a marker
+	// delayed in the queue or the coalescer was still answered.
+	d.detectHandStart(pane, paneID, data, flushedAt)
 	d.detectOSC133Exit(pane, paneID, data)
 	d.applyPluginHandlers(pane, paneID, data)
 
@@ -5134,7 +5140,14 @@ func resolveSpawnArgs(p *plugin.PanePlugin, pane *Pane, restoring, ownsRecord bo
 	// Derived from the args rather than flagged on the pane, so it holds for
 	// every route that can carry typed arguments — a template, an MCP
 	// create_pane, a restart of any of them — not only for conversion.
-	typedSession := instanceArgsNameSession(pane.InstanceArgs)
+	// Keyed by the BINARY the plugin runs, not by the plugin's name. The flag
+	// map is keyed on what the user types — "claude" — while p.Name is
+	// "claude-code", so passing the plugin name silently missed the map and
+	// fell back to the union of every agent's flags. Harmless today, because
+	// the union only over-detects, but it meant the per-agent split this map
+	// exists for was not actually reached from here.
+	agent := handStartBase(p.Command.Cmd)
+	typedSession := instanceArgsNameSession(agent, pane.InstanceArgs)
 
 	if !restoring && p.Persistence.Strategy == "preassign_id" {
 		if resumeID != "" {
@@ -5224,7 +5237,7 @@ func resolveSpawnArgs(p *plugin.PanePlugin, pane *Pane, restoring, ownsRecord bo
 			// survive, which is the whole point of appending here rather than
 			// replacing the argument list outright.
 			if typedSession {
-				args = stripSessionArgs(args)
+				args = stripSessionArgs(agent, args)
 			}
 			args = appendResumeTemplate(args, resumeTemplateFor(p, pane, claim), pane)
 		case "rerun":
@@ -5489,9 +5502,20 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 			// pane: the marker would be authentic, but conversion means
 			// restarting the pane with a plugin the container was not built
 			// for. It is refused structurally here rather than checked later.
+			// Restored panes are armed too. A restore spawns a BRAND NEW
+			// shell with a fresh environment, so there is nothing about it
+			// that cannot carry a token — and excluding it meant that after
+			// any daemon restart every existing terminal pane was silently
+			// dead to the feature until the user happened to press Alt+R on
+			// it. For a workspace of twenty restored terminals, the feature
+			// simply did not exist.
+			//
+			// Sandbox panes stay excluded, and that one IS structural:
+			// conversion restarts the pane with a plugin the container was
+			// never built for.
 			var intercept []string
 			tok := ""
-			if !sandboxed && !restoring && d.cfg.Agents.HandStartedPolicy() != config.HandStartedOff {
+			if !sandboxed && d.cfg.Agents.HandStartedPolicy() != config.HandStartedOff {
 				if intercept = handStartNames(d.registry.All()); len(intercept) > 0 {
 					tok = newInterceptToken()
 				}
@@ -5501,10 +5525,18 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 				ptySession.SetEnv(shellCfg.Env)
 				cmd = shellCfg.Cmd
 				args = shellCfg.Args
-				pane.PluginMu.Lock()
-				pane.handStart.token = tok
-				pane.PluginMu.Unlock()
 			}
+			// Written unconditionally, so a spawn either arms or DISARMS. Set
+			// only inside the branch above, a pane whose shell yields no
+			// config — fish, sh — kept whatever token an earlier spawn left
+			// behind, and the detector went on scanning every chunk against a
+			// dead shell's credential.
+			pane.PluginMu.Lock()
+			if shellCfg == nil {
+				tok = ""
+			}
+			pane.handStart.token = tok
+			pane.PluginMu.Unlock()
 		}
 
 		// Claude Code session-id rotation tracking: prepend --settings with the
@@ -6570,6 +6602,9 @@ func (d *Daemon) restartPaneInPlace(pane *Pane) bool {
 	// broadcast bookkeeping too so the fresh (empty) state is delivered promptly.
 	pane.MouseModes = mouseModeState{}
 	pane.modeScanTail = nil
+	// Same class as modeScanTail: a partial marker from the dead child must
+	// not be prepended to the replacement's first chunk.
+	pane.handStartTail = nil
 	pane.mouseBroadcast = mouseModeState{}
 	pane.lastMouseBroadcastAt = time.Time{}
 	// Clear model/context usage: the respawned child starts a fresh (or
@@ -6605,7 +6640,7 @@ func (d *Daemon) restartPaneInPlace(pane *Pane) bool {
 	} else {
 		ptySession := newSessionFn(cols, rows)
 		if err := d.spawnPane(pane, ptySession, false); err != nil {
-			log.Printf("handleRestartPaneReq: spawn: %v", err)
+			log.Printf("restartPaneInPlace: spawn pane %s: %v", pane.ID, err)
 			success = false
 		}
 	}
@@ -7131,13 +7166,18 @@ func (d *Daemon) handlePaneHistoryEntryReq(conn *ipc.Conn, msg *ipc.Message) {
 // A bare value is not enough — `--resume` takes an id as a separate word, and
 // codex spells it as a positional subcommand — so the check is on the flag
 // names plus codex's verb in first position.
-func instanceArgsNameSession(args []string) bool {
+func instanceArgsNameSession(agent string, args []string) bool {
+	flags := sessionFlagsFor(agent)
 	for i, a := range args {
-		if handStartSessionFlags[a] {
-			return true
+		// codex spells it as a positional subcommand, never later in the line.
+		if a == "resume" {
+			if i == 0 {
+				return true
+			}
+			continue
 		}
-		// codex: `resume <id>` / `resume --last`, only as the subcommand.
-		if i == 0 && a == "resume" {
+		// `--resume=<id>` is the same flag as `--resume <id>`.
+		if flags[flagName(a)] {
 			return true
 		}
 	}
@@ -7156,21 +7196,29 @@ func sessionFlagTakesValue(flag string) bool {
 }
 
 // stripSessionArgs removes a session selector and its id, leaving every other
-// argument in place.
+// argument in place. Selectors are resolved PER AGENT: `-c` is claude's
+// --continue and codex's config override, and stripping the latter would
+// discard the flag while leaving its value as a stray positional.
 //
 // A value is consumed only when it does not itself look like a flag, so a
 // malformed `--resume --chrome` loses the dangling --resume and keeps the
 // toggle rather than swallowing it.
-func stripSessionArgs(args []string) []string {
+func stripSessionArgs(agent string, args []string) []string {
+	flags := sessionFlagsFor(agent)
 	out := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		takesValue := false
 		switch {
-		case handStartSessionFlags[a]:
-			takesValue = sessionFlagTakesValue(a)
-		case i == 0 && a == "resume": // codex spells it as a subcommand
+		case a == "resume" && i == 0: // codex spells it as a subcommand
 			takesValue = true
+		case a == "resume":
+			out = append(out, a)
+			continue
+		case flags[flagName(a)]:
+			// `--resume=<id>` carries its value in the same token, so there is
+			// no following word to consume.
+			takesValue = a == flagName(a) && sessionFlagTakesValue(a)
 		default:
 			out = append(out, a)
 			continue

@@ -66,13 +66,13 @@ func TestAdoptClaudeSession_RecordsTheSessionWithoutRetypingThePane(t *testing.T
 	}
 	t.Cleanup(func() { listSessionsFn = prevList })
 
-	d, pane := handStartFixture(t, config.HandStartedAdopt)
+	d, pane, rec := handStartFixture(t, config.HandStartedAdopt)
 	pane.handStart.token = "TOK"
 	pane.CWD = t.TempDir()
 
-	d.detectHandStart(pane, pane.ID, []byte(handStartOSC+"cmd;TOK;claude;"+pane.CWD+";;;"+"\x1b\\"))
+	d.detectHandStart(pane, pane.ID, []byte(handStartOSC+"cmd;TOK;claude;"+pane.CWD+";;;"+"\x1b\\"), time.Now())
 
-	if got := pane.drainInput(); got != handStartReplyRun {
+	if got := rec.drain(); got != handStartReplyRun {
 		t.Fatalf("reply = %q, want %q — adopt must let the command run as typed", got, handStartReplyRun)
 	}
 	waitFor(t, func() bool {
@@ -156,7 +156,9 @@ func TestUntrackedMessage_NamesTheRemedy(t *testing.T) {
 	}
 }
 
-func contains(s, sub string) bool { return len(sub) == 0 || (len(s) >= len(sub) && indexOf(s, sub) >= 0) }
+func contains(s, sub string) bool {
+	return len(sub) == 0 || (len(s) >= len(sub) && indexOf(s, sub) >= 0)
+}
 
 func indexOf(s, sub string) int {
 	for i := 0; i+len(sub) <= len(s); i++ {

@@ -32,10 +32,18 @@ const (
 	handStartScanTimeout = 2 * time.Second
 )
 
-// handStartAdoptDelayVar is how long to wait before looking. claude writes its
-// transcript once the session is under way, not at exec, so scanning
+// handStartAdoptDelayVar is how long to wait before the FIRST look. claude
+// writes its transcript once the session is under way, not at exec, so scanning
 // immediately finds nothing. A var so a test need not sleep for it.
 var handStartAdoptDelayVar = 3 * time.Second
+
+// handStartAdoptSchedule is the wait before each attempt. Backing off rather
+// than polling: the thing being waited for is a person composing a first
+// message, and the cost of looking is a directory walk.
+func handStartAdoptSchedule() []time.Duration {
+	d := handStartAdoptDelayVar
+	return []time.Duration{d, 2 * d, 4 * d, 8 * d}
+}
 
 // listSessionsFn is the seam tests replace instead of writing transcript trees.
 var listSessionsFn = func(ctx context.Context, cwd string) ([]claudesessions.Session, error) {
@@ -65,27 +73,52 @@ func (d *Daemon) adoptClaudeSession(pane *Pane, target *plugin.PanePlugin, m han
 	// Off the output goroutine: this sleeps and then walks a directory, and
 	// that goroutine is on the path of every byte the pane produces.
 	go func() {
-		time.Sleep(handStartAdoptDelayVar)
-		ctx, cancel := context.WithTimeout(context.Background(), handStartScanTimeout)
-		defer cancel()
-		sessions, err := listSessionsFn(ctx, cwd)
-		if err != nil {
-			logger.Debug("pane %s: adopt scan: %v", pane.ID, err)
-			return
+		// Claude writes its transcript once the session is under way, not at
+		// exec, and "under way" is the user's typing speed. A single look after
+		// three seconds missed every launch where the first message took
+		// longer to compose — and missed it SILENTLY, leaving the pane neither
+		// tracked nor told.
+		var id string
+		var ok bool
+		for _, wait := range handStartAdoptSchedule() {
+			select {
+			case <-d.shutdown:
+				return
+			case <-time.After(wait):
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), handStartScanTimeout)
+			sessions, err := listSessionsFn(ctx, cwd)
+			cancel()
+			if err != nil {
+				logger.Debug("pane %s: adopt scan: %v", pane.ID, err)
+				continue
+			}
+			if id, ok = newestSessionSince(sessions, started.Add(-handStartAdoptWindow)); ok {
+				break
+			}
 		}
-		id, ok := newestSessionSince(sessions, started.Add(-handStartAdoptWindow))
 		if !ok {
-			logger.Debug("pane %s: no transcript appeared in %s to adopt", pane.ID, cwd)
+			log.Printf("pane %s: no claude transcript appeared in %s — session not recorded", pane.ID, cwd)
+			d.emitHandStartCard(pane, "agent_untracked", "info",
+				"Session not tracked",
+				untrackedMessage("claude", "no transcript appeared to identify the session"))
 			return
 		}
 		if !d.claimAdoptedSession(pane, id) {
 			return
 		}
 		log.Printf("pane %s: adopted hand-started claude session %s", pane.ID, id)
+		// The card says what adoption ACTUALLY buys, which is less than the
+		// first version claimed. The pane stays a terminal, and a terminal's
+		// persistence strategy is cwd_only — restore spawns a shell and never
+		// consults the recorded id. Promising a resume it cannot deliver is
+		// worse than promising nothing: it is the #221 failure with a
+		// reassuring label on it.
 		d.emitHandStartCard(pane, "agent_adopted", "info",
-			"Tracking this session",
-			"This pane will resume this conversation after a restart. Work-in-progress "+
-				"indicators and notifications need a Claude Code pane.")
+			"Session recorded, not tracked",
+			"Quil noted which session this is, but a terminal pane cannot resume "+
+				"it after a restart, and work indicators and notifications need "+
+				"the hooks only a Claude Code pane gets. Ctrl+N opens one.")
 		d.broadcastState()
 		d.requestSnapshot()
 	}()
@@ -99,6 +132,14 @@ func (d *Daemon) adoptClaudeSession(pane *Pane, target *plugin.PanePlugin, m han
 // adopting the wrong session is not, because the next restart would then resume
 // someone else's work into this pane.
 func (d *Daemon) claimAdoptedSession(pane *Pane, id string) bool {
+	// The test and the write are ONE step, under the same daemon-wide lock the
+	// create path uses (applyResumeSessionID). Two same-directory adoption
+	// goroutines scan the same project tree and would otherwise both find the
+	// session free — neither has written yet, so neither is visible to the
+	// other — and both would record it.
+	d.resumeClaimMu.Lock()
+	defer d.resumeClaimMu.Unlock()
+
 	if holder := d.paneHoldingSession(id, pane.ID); holder != "" {
 		log.Printf("pane %s: not adopting %s — pane %s already holds it", pane.ID, id, holder)
 		return false
@@ -192,8 +233,20 @@ func (d *Daemon) returnToShellOnCleanExit(pane *Pane, code int) bool {
 		pane.ConvertedFromTerminal = ""
 		pane.InstanceArgs = nil
 		pane.Adopted = false
+		// The conversation is OVER — the user typed /exit. Leaving its id
+		// behind made the next bare `claude` in this pane look like a pane
+		// that already has a session, and the preassign path reopened the
+		// conversation the user had just closed.
+		delete(pane.PluginState, "session_id")
+		delete(pane.PluginState, "resume_session_id")
+		delete(pane.PluginState, "transcript_path")
 	}
 	pane.PluginMu.Unlock()
+	if prev != "" {
+		// The records are the other half of that state and outlive the pane
+		// object; a stale one is read back by the next spawn's ownsRecord.
+		retirePaneSessionRecords(pane.ID)
+	}
 	if prev == "" {
 		return false
 	}

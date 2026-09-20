@@ -711,6 +711,12 @@ type PaneInfo struct {
 	BlockedReason string `json:"blocked_reason,omitempty"`
 	// LastIdleAt is when the pane last fell idle, Unix ms; 0 if never.
 	LastIdleAt int64 `json:"last_idle_at,omitempty"`
+	// Adopted marks a terminal pane running a hand-started Claude session that
+	// Quil is tracking without having spawned it. Such a pane resumes its
+	// conversation after a restart but produces no hook events, so AgentState
+	// stays empty for it — an agent choosing a pane to delegate to must not
+	// read that emptiness as "idle and ready".
+	Adopted bool `json:"adopted,omitempty"`
 }
 
 type ListPanesRespPayload struct {

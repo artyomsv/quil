@@ -950,6 +950,8 @@ func (d *Daemon) restoreWorkspace() error {
 					cols, rows = 0, 0
 				}
 				muted, _ := paneData["muted"].(bool)
+				convertedFrom, _ := paneData["converted_from"].(string)
+				adopted, _ := paneData["adopted"].(bool)
 				eager, _ := paneData["eager"].(bool)
 				pinnedAttention, _ := paneData["pinned_attention"].(bool)
 				markedForDeletion, _ := paneData["marked_for_deletion"].(bool)
@@ -995,6 +997,10 @@ func (d *Daemon) restoreWorkspace() error {
 					OutputBuf:    ringbuf.NewRingBuffer(d.session.bufSize),
 					Muted:        muted,
 					Eager:        eager,
+
+					ConvertedFromTerminal: convertedFrom,
+					Adopted:               adopted,
+
 					SandboxImage: sandboxImage,
 					// Absent on a pre-choice snapshot → empty, which follows
 					// [sandbox] auth. That is the same behaviour those panes
@@ -4170,6 +4176,19 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			if pane.Eager {
 				paneData["eager"] = true
 			}
+			// PERSISTED because the loop it serves spans restarts: a user whose
+			// habit is shell -> agent -> /exit -> shell would otherwise find
+			// every cycle after a daemon restart ending on a dead agent pane.
+			if pane.ConvertedFromTerminal != "" {
+				paneData["converted_from"] = pane.ConvertedFromTerminal
+			}
+			// PERSISTED so the restore resumes the conversation the user
+			// started by hand. Without it the session id in plugin_state is
+			// indistinguishable from one Quil itself preassigned, and the
+			// UI would claim tracking that a restart silently dropped.
+			if pane.Adopted {
+				paneData["adopted"] = true
+			}
 			// PERSISTED for the reason the field exists: the mark is the user's
 			// own, nothing re-derives it, and a hook edge that would set it
 			// again is never coming. Written here rather than in the
@@ -6306,6 +6325,7 @@ func (d *Daemon) buildPaneInfos() []ipc.PaneInfo {
 			cwd := pane.CWD
 			running := pane.PTY != nil && pane.ExitCode == nil
 			preparing := pane.PreparingWorktree
+			adopted := pane.Adopted
 			pane.PluginMu.Unlock()
 			if typ == "" {
 				typ = "terminal"
@@ -6331,6 +6351,7 @@ func (d *Daemon) buildPaneInfos() []ipc.PaneInfo {
 				AgentState:        state,
 				BlockedReason:     reason,
 				LastIdleAt:        lastIdle,
+				Adopted:           adopted,
 			})
 		}
 	}

@@ -528,3 +528,27 @@ atomically and requests a local daemon reload. Templates are also re-read on
 every creation. Existing panes retain their frozen arguments and saved layouts.
 Remote daemons use their own templates file. See
 [Workspace templates](workspace-templates.md) for the complete format and examples.
+
+## `[agents]`
+
+What Quil does when an agent it can spawn — `claude`, `codex`, `opencode` — is
+started by hand from a terminal pane's shell.
+
+```toml
+[agents]
+hand_started = "convert"
+```
+
+| Value | Behaviour |
+|---|---|
+| `convert` *(default)* | Open the pane as that agent instead, with your arguments |
+| `adopt` | Run it as typed; track the Claude session so the pane resumes it after a restart |
+| `notify` | Run it as typed; say that the session is untracked |
+| `off` | Run it as typed, say nothing, and arm nothing in the shell |
+
+An unrecognised value is treated as `convert` rather than refused — this is a
+hand-edited file, and a typo in it must not stop the daemon starting.
+
+`command claude` bypasses the interception for one invocation, whatever the
+setting. See [Features → Hand-started agents](features.md#hand-started-agents)
+for the cases that are never intercepted, including fish.

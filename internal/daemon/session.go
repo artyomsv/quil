@@ -45,6 +45,9 @@ type Pane struct {
 	// spawned pane gets, and the UI says so rather than implying parity.
 	Adopted bool
 
+	// handStartMismatchAt rate-limits the "wrong token" report to once an hour.
+	handStartMismatchAt time.Time
+
 	// handStartTail retains an unterminated marker across output chunks, the
 	// way modeScanTail does for mouse modes. Bounded; see keepHandStartTail.
 	handStartTail []byte

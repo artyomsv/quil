@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/logger"
 	"github.com/artyomsv/quil/internal/plugin"
 )
 
@@ -503,13 +504,20 @@ func (d *Daemon) detectHandStart(pane *Pane, paneID string, data []byte) {
 	for _, payload := range payloads {
 		m, ok := parseHandStart(payload)
 		if !ok {
+			logger.Debug("pane %s: unparseable hand-start marker (%d bytes)", paneID, len(payload))
 			continue
 		}
+		logger.Debug("pane %s: hand-start marker name=%q args=%d cwd=%q", paneID, m.Name, len(m.Args), m.CWD)
 		if !m.tokenMatches(bound) {
 			// Output from somewhere else — an ssh remote printing into the
 			// pane, a pasted log — cannot trigger a conversion, because it
-			// never had this shell's token. Not logged per occurrence: a
-			// hostile or noisy source would own the log file.
+			// never had this shell's token.
+			//
+			// Rate-limited rather than silent: a hostile or noisy source would
+			// own the log file, but a mismatch that is never reported is
+			// indistinguishable from no marker at all, and that blind spot
+			// cost a live debugging session.
+			d.logHandStartMismatch(pane, paneID, m.Name, bound)
 			continue
 		}
 		if !m.fresh(time.Now(), arrival) {
@@ -589,4 +597,24 @@ func untrackedMessage(name, reason string) string {
 // scars from.
 func (d *Daemon) replyHandStart(pane *Pane, reply string) bool {
 	return pane.EnqueueInput([]byte(reply))
+}
+
+// logHandStartMismatch reports an authenticated-looking marker whose token is
+// not this pane's, at most once an hour per pane.
+func (d *Daemon) logHandStartMismatch(pane *Pane, paneID, name, bound string) {
+	const cooldown = time.Hour
+	now := time.Now()
+	pane.PluginMu.Lock()
+	report := now.Sub(pane.handStartMismatchAt) >= cooldown
+	if report {
+		pane.handStartMismatchAt = now
+	}
+	pane.PluginMu.Unlock()
+	if !report {
+		return
+	}
+	// Neither token is printed. The bound one is a live credential for this
+	// pane, and the marker's is whatever the writer chose.
+	log.Printf("pane %s: hand-start marker for %q carried a token this pane does not hold (armed=%v) — ignoring",
+		paneID, name, bound != "")
 }

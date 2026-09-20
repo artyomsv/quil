@@ -261,7 +261,16 @@ func (p *warmShellPool) TryClaim(cwd string, cols, rows int) (apty.Session, bool
 		case <-p.stop:
 		default:
 			// Replay OSC 7 as well as its suffix so the new owner learns CWD.
-			return &warmPoolSession{Session: s, pending: suffix}, true
+			//
+			// The claimed session is re-wrapped, so the token minted in fill
+			// must be carried across by hand — it lives on the INNER value and
+			// a zero field here reads as "cold spawn". spawnPane would then
+			// bind "" to the pane, and detectHandStart returns on an empty
+			// token before it parses anything: the shell emits an authentic
+			// marker, waits its second, and runs the agent as typed. Same
+			// shape as the Intercept field dropped from the pool's config
+			// copy, and silent for the same reason.
+			return &warmPoolSession{Session: s, pending: suffix, tok: interceptTokenOf(s)}, true
 		}
 	}
 	// Neither Close, WaitExit nor a stuck syscall may hold spawnMu. This

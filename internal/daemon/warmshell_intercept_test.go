@@ -2,8 +2,10 @@ package daemon
 
 import (
 	"strings"
+	"sync/atomic"
 	"testing"
 
+	apty "github.com/artyomsv/quil/internal/pty"
 	"github.com/artyomsv/quil/internal/shellinit"
 )
 
@@ -69,5 +71,50 @@ func TestWarmPool_ArmedShellEnvironmentCarriesBothHalves(t *testing.T) {
 		if !strings.Contains(env, want) {
 			t.Errorf("a warm shell would start without %s (env=%q)", want, env)
 		}
+	}
+}
+
+// TryClaim re-wraps the parked session, and the token minted in fill lives on
+// the value being wrapped — so it has to be carried across by hand. It was not.
+// Every link in the chain above was correct: the pool held the names, the shell
+// started armed, the function shadowed the binary, and the marker was authentic.
+// spawnPane then bound "" to the pane, detectHandStart returned on the empty
+// token before parsing anything, and the shell — hearing no reply — ran the
+// agent as typed. A silent, whole-feature failure with no log line anywhere.
+func TestWarmShellPool_ClaimCarriesTheInterceptToken(t *testing.T) {
+	cwd := t.TempDir()
+	s := newScriptedWarmSession()
+	s.response = []byte("echoed cd\r\n\x1b]133;A\x07" + warmOSC7(cwd) + "prompt> ")
+	s.chunks <- []byte("\x1b]133;A\x07old prompt")
+	var created atomic.Int64
+	p := warmTestPool(t, warmPoolShellConfig{
+		Cmd:       "/bin/zsh",
+		Intercept: []string{"claude"},
+	}, 1, func() apty.Session {
+		if created.Add(1) == 1 {
+			return s
+		}
+		return newScriptedWarmSession()
+	})
+	warmReady(t, p, 1)
+
+	claimed, ok := p.TryClaim(cwd, 120, 40)
+	if !ok || claimed == nil {
+		t.Fatal("warm shell was not claimed")
+	}
+	t.Cleanup(func() { claimed.Close() })
+
+	var want string
+	for _, kv := range s.env {
+		if v, found := strings.CutPrefix(kv, "QUIL_INTERCEPT_TOKEN="); found {
+			want = v
+		}
+	}
+	if want == "" {
+		t.Fatal("the warm shell was started without a token; nothing to carry")
+	}
+	if got := interceptTokenOf(claimed); got != want {
+		t.Fatalf("claimed token = %q, want %q — spawnPane binds this to the pane, "+
+			"and an empty one makes every authentic marker from this shell unreadable", got, want)
 	}
 }

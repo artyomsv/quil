@@ -5122,9 +5122,25 @@ func resolveSpawnArgs(p *plugin.PanePlugin, pane *Pane, restoring, ownsRecord bo
 	// The branch runs after the InstanceArgs override above, so runtime toggles
 	// (--dangerously-skip-permissions, --enable-auto-mode, --chrome) still
 	// compose with the resume exactly as they do with a fresh session.
+	// The same contradiction reached from the other side: the pane's OWN args
+	// already name a session. A hand-started `claude --resume <id>` converts
+	// into InstanceArgs carrying that flag, and appending the plugin's
+	// `--session-id {session_id}` on top produced an argv naming two different
+	// sessions — which claude refuses outright:
+	//
+	//   Error: --session-id can only be used with --continue or --resume if
+	//   --fork-session is also specified.
+	//
+	// Derived from the args rather than flagged on the pane, so it holds for
+	// every route that can carry typed arguments — a template, an MCP
+	// create_pane, a restart of any of them — not only for conversion.
+	typedSession := instanceArgsNameSession(pane.InstanceArgs)
+
 	if !restoring && p.Persistence.Strategy == "preassign_id" {
 		if resumeID != "" {
 			args = append(args, "--resume", resumeID)
+		} else if typedSession {
+			// Nothing to append: the user said which session this is.
 		} else if len(p.Persistence.StartArgs) > 0 {
 			startArgs := plugin.ExpandResumeArgs(p.Persistence.StartArgs, pane.PluginState)
 			if startArgs != nil {
@@ -5186,7 +5202,7 @@ func resolveSpawnArgs(p *plugin.PanePlugin, pane *Pane, restoring, ownsRecord bo
 	// session expands to the plugin's own ResumeArgs, which codex.toml
 	// deliberately leaves empty, so it starts fresh rather than guessing with
 	// `resume --last`.
-	if !restoring && ownsRecord && p.Persistence.Strategy == "session_scrape" {
+	if !restoring && ownsRecord && !typedSession && p.Persistence.Strategy == "session_scrape" {
 		args = appendResumeTemplate(args, resumeTemplateFor(p, pane, claim), pane)
 	}
 
@@ -5197,6 +5213,19 @@ func resolveSpawnArgs(p *plugin.PanePlugin, pane *Pane, restoring, ownsRecord bo
 	if restoring {
 		switch p.Persistence.Strategy {
 		case "preassign_id", "session_scrape":
+			// A session the user TYPED is a starting point, not a standing
+			// instruction. By restore time the hook has recorded where that
+			// conversation actually went — /clear, /resume and compaction all
+			// rotate the id — so the recorded one is authoritative and the
+			// typed one is stale. Appending both is also simply invalid.
+			//
+			// Only the session flag is removed; toggles the user typed beside
+			// it (--chrome, --dangerously-skip-permissions) are theirs and
+			// survive, which is the whole point of appending here rather than
+			// replacing the argument list outright.
+			if typedSession {
+				args = stripSessionArgs(args)
+			}
 			args = appendResumeTemplate(args, resumeTemplateFor(p, pane, claim), pane)
 		case "rerun":
 			// args already set from InstanceArgs above
@@ -7090,4 +7119,65 @@ func (d *Daemon) handlePaneHistoryEntryReq(conn *ipc.Conn, msg *ipc.Message) {
 		}
 	}
 	respondTo(conn, msg.ID, ipc.MsgPaneHistoryEntryResp, resp)
+}
+
+// instanceArgsNameSession reports whether a pane's own arguments already say
+// which session it is joining.
+//
+// When they do, the plugin's persistence arguments must not be appended: every
+// agent here treats "mint this id" and "attach to that id" as contradictory,
+// and passing both is not a valid invocation of any of them.
+//
+// A bare value is not enough — `--resume` takes an id as a separate word, and
+// codex spells it as a positional subcommand — so the check is on the flag
+// names plus codex's verb in first position.
+func instanceArgsNameSession(args []string) bool {
+	for i, a := range args {
+		if handStartSessionFlags[a] {
+			return true
+		}
+		// codex: `resume <id>` / `resume --last`, only as the subcommand.
+		if i == 0 && a == "resume" {
+			return true
+		}
+	}
+	return false
+}
+
+// sessionFlagTakesValue reports whether a session flag is followed by an id.
+// --continue and -c name no session; the rest do.
+func sessionFlagTakesValue(flag string) bool {
+	switch flag {
+	case "--continue", "-c":
+		return false
+	default:
+		return true
+	}
+}
+
+// stripSessionArgs removes a session selector and its id, leaving every other
+// argument in place.
+//
+// A value is consumed only when it does not itself look like a flag, so a
+// malformed `--resume --chrome` loses the dangling --resume and keeps the
+// toggle rather than swallowing it.
+func stripSessionArgs(args []string) []string {
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		takesValue := false
+		switch {
+		case handStartSessionFlags[a]:
+			takesValue = sessionFlagTakesValue(a)
+		case i == 0 && a == "resume": // codex spells it as a subcommand
+			takesValue = true
+		default:
+			out = append(out, a)
+			continue
+		}
+		if takesValue && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+			i++
+		}
+	}
+	return out
 }

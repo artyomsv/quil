@@ -204,20 +204,49 @@ func (m handStartMarker) tokenMatches(bound string) bool {
 // binary then runs with the user's argv under hooks, which is harmless. The
 // only misclassification possible is a new NON-interactive subcommand, which
 // would run inside a pane of that agent's type and exit.
+//
+// Taken from each agent's own `--help` output rather than guessed, and PER
+// AGENT with no shared list. A word that is a subcommand for one tool is an
+// ordinary prompt for another: `help` is a real codex subcommand, while
+// `claude help` and `claude version` are neither — claude 2.1.x lists 22
+// commands and neither word is among them, so both open a session and answer
+// the word as the prompt it is. Measured, not inferred; an earlier revision of
+// this list asserted that `claude help` printed usage, and it does not.
 var handStartNonSession = map[string]map[string]bool{
-	"claude": {
-		"mcp": true, "setup-token": true, "doctor": true, "update": true,
-		"install": true, "config": true, "auth": true, "login": true,
-		"logout": true, "plugin": true, "plugins": true, "agents": true,
-		"migrate-installer": true,
-	},
-	"codex": {
-		"login": true, "logout": true, "exec": true, "apply": true,
-		"mcp": true, "completion": true, "debug": true,
-	},
-	"opencode": {
-		"auth": true, "run": true, "serve": true, "upgrade": true,
-	},
+	// claude-cli 2.1.x
+	"claude": setOf("agents", "auth", "auto-mode", "config", "doctor",
+		"gateway", "import", "install", "kill", "logs", "mcp", "migrate-installer",
+		"plugin", "plugins", "project", "respawn", "rm", "setup-token", "stop",
+		"ultrareview", "update", "upgrade"),
+	// codex-cli 0.155.x. `resume` is absent deliberately: it IS a session.
+	"codex": setOf("agents", "app", "app-server", "apply", "completion", "debug",
+		"doctor", "exec", "help", "login", "logout", "mcp", "plugin",
+		"remote-control", "review", "sandbox", "update"),
+	// opencode. `attach` and `pr` are absent: both end in an interactive TUI.
+	"opencode": setOf("acp", "agent", "auth", "completion", "debug", "export",
+		"github", "import", "mcp", "models", "providers", "run", "serve", "stats",
+		"uninstall", "upgrade", "web"),
+}
+
+func setOf(words ...string) map[string]bool {
+	m := make(map[string]bool, len(words))
+	for _, w := range words {
+		m[w] = true
+	}
+	return m
+}
+
+// handStartNoConvert are interactive launches that must still run as typed.
+//
+// They are NOT "not a session" — saying so on the card would be a lie the user
+// can check. `claude attach <id>` opens a background session in this terminal,
+// which is as interactive as anything here; it is refused because the session
+// it joins is one claude already owns elsewhere, so a respawn under Quil's own
+// --settings would be a second client of a conversation the background agent
+// is still driving. opencode's `attach` and `pr` end in a TUI and convert
+// normally, which is why this is claude-only.
+var handStartNoConvert = map[string]map[string]bool{
+	"claude": setOf("attach"),
 }
 
 // handStartSessionFlags are the flags that name a session to resume. More than
@@ -255,7 +284,9 @@ func classifyHandStart(p *plugin.PanePlugin, m handStartMarker, daemonEnv func(s
 		}
 	}
 
-	deny := handStartNonSession[handStartBase(m.Name)]
+	base := handStartBase(m.Name)
+	deny := handStartNonSession[base]
+	noConvert := handStartNoConvert[base]
 	seen := 0
 	for i, a := range m.Args {
 		switch {
@@ -272,6 +303,8 @@ func classifyHandStart(p *plugin.PanePlugin, m handStartMarker, daemonEnv func(s
 			}
 		case i == 0 && !strings.HasPrefix(a, "-") && deny[a]:
 			return handStartDecision{handStartRun, a + " is not an interactive session"}
+		case i == 0 && !strings.HasPrefix(a, "-") && noConvert[a]:
+			return handStartDecision{handStartRun, a + " joins a session another agent already owns"}
 		case !handStartArgShapeOK(a):
 			return handStartDecision{handStartRun, "an argument could not be validated"}
 		}

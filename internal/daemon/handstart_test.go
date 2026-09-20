@@ -264,6 +264,31 @@ func TestClassifyHandStart(t *testing.T) {
 
 		{"an env name the daemon lacks", handStartMarker{Name: "claude", EnvNames: []string{"CLAUDE_CONFIG_DIR"}}, noEnv, handStartRun},
 		{"an env name the daemon also has", handStartMarker{Name: "claude", EnvNames: []string{"CLAUDE_CONFIG_DIR"}}, hasEnv("CLAUDE_CONFIG_DIR"), handStartConvert},
+
+		// The subcommand lists are PER AGENT because the same word means
+		// different things to different tools. Measured against the installed
+		// CLIs, not inferred from their shape.
+		//
+		// claude 2.1.x lists 22 commands and neither "help" nor "version" is
+		// among them: both open a session and answer the word as the prompt it
+		// is. An earlier revision put them in a shared list and refused two
+		// perfectly ordinary launches.
+		{"claude help is a prompt, not a subcommand", handStartMarker{Name: "claude", Args: []string{"help"}}, noEnv, handStartConvert},
+		{"claude version is a prompt too", handStartMarker{Name: "claude", Args: []string{"version"}}, noEnv, handStartConvert},
+		{"opencode version is a prompt", handStartMarker{Name: "opencode", Args: []string{"version"}}, noEnv, handStartConvert},
+		// codex, by contrast, really does have one.
+		{"codex help is a real subcommand", handStartMarker{Name: "codex", Args: []string{"help"}}, noEnv, handStartRun},
+
+		// Interactive, but refused for a different reason — see the card text
+		// assertion below.
+		{"claude attach joins someone else's session", handStartMarker{Name: "claude", Args: []string{"attach", "abc"}}, noEnv, handStartRun},
+		// opencode's attach ends in a TUI of its own and converts.
+		{"opencode attach converts", handStartMarker{Name: "opencode", Args: []string{"attach"}}, noEnv, handStartConvert},
+
+		// Newer non-session verbs, from the same help output.
+		{"claude respawn", handStartMarker{Name: "claude", Args: []string{"respawn"}}, noEnv, handStartRun},
+		{"claude ultrareview", handStartMarker{Name: "claude", Args: []string{"ultrareview"}}, noEnv, handStartRun},
+		{"codex resume is a session", handStartMarker{Name: "codex", Args: []string{"resume", "abc"}}, noEnv, handStartConvert},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -293,6 +318,41 @@ func TestHandStartReplies_AreEightBytes(t *testing.T) {
 	for _, r := range []string{handStartReplyRun, handStartReplyConvert} {
 		if len(r) != 8 {
 			t.Errorf("reply %q is %d bytes, want 8", r, len(r))
+		}
+	}
+}
+
+// A refusal the user can check must not say something false. `claude attach`
+// IS interactive — its own help says it opens a background session in this
+// terminal — so calling it "not an interactive session" would be a lie on a
+// card, and the reason is the part of a refusal the user acts on.
+func TestClassifyHandStart_AttachIsRefusedHonestly(t *testing.T) {
+	got := classifyHandStart(&plugin.PanePlugin{Name: "claude-code"},
+		handStartMarker{Name: "claude", Args: []string{"attach", "abc"}}, noEnv)
+
+	if got.Class != handStartRun {
+		t.Fatalf("class = %v, want run", got.Class)
+	}
+	if strings.Contains(got.Reason, "not an interactive session") {
+		t.Fatalf("reason claims attach is not interactive, which its own help "+
+			"contradicts: %q", got.Reason)
+	}
+	if !strings.Contains(got.Reason, "already owns") {
+		t.Fatalf("reason does not say why it is refused: %q", got.Reason)
+	}
+}
+
+// The lists must stay per-agent. A shared list is what put `help` and
+// `version` in front of claude, where neither is a subcommand.
+func TestHandStartNonSession_IsPerAgent(t *testing.T) {
+	if !handStartNonSession["codex"]["help"] {
+		t.Error("codex lost its real help subcommand")
+	}
+	for _, agent := range []string{"claude", "opencode"} {
+		for _, word := range []string{"help", "version"} {
+			if handStartNonSession[agent][word] {
+				t.Errorf("%s denies %q, which that CLI treats as a prompt", agent, word)
+			}
 		}
 	}
 }

@@ -39,6 +39,20 @@ type Pane struct {
 	// shell's token and the old one stops matching.
 	handStart handStartState
 
+	// handStartTail retains an unterminated marker across output chunks, the
+	// way modeScanTail does for mouse modes. Bounded; see keepHandStartTail.
+	handStartTail []byte
+
+	// ConvertedFromTerminal names the pane type this pane held before a
+	// hand-started agent converted it, or "" if it was never converted.
+	//
+	// Persisted, because the loop it exists for spans restarts: a user whose
+	// habit is shell -> claude -> /exit -> shell would otherwise end every
+	// cycle looking at a dead agent pane and reaching for Ctrl+N. A clean exit
+	// puts the shell back; a crash does not, because a pane that died deserves
+	// to show that it did.
+	ConvertedFromTerminal string
+
 	QuilMCP      bool // Opts into ordinary Quil MCP at spawn. Under PluginMu.
 	ID           string
 	TabID        string

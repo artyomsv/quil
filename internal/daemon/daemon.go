@@ -2841,7 +2841,7 @@ func (d *Daemon) cleanupPaneArtifacts(paneID string) {
 	if d.hookIngester != nil {
 		d.hookIngester.Cancel(paneID)
 	}
-	for _, name := range []string{paneID + ".id", paneID + ".transcript", paneID + ".settings.json", "opencode-" + paneID + ".id", "codex-" + paneID + ".id"} {
+	for _, name := range paneSessionRecordNames(paneID) {
 		p := filepath.Join(config.SessionsDir(), name)
 		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 			log.Printf("cleanup pane %s: remove session id %s: %v", paneID, name, err)
@@ -3925,6 +3925,10 @@ func (d *Daemon) flushPaneOutputGeneration(paneID string, data []byte, generatio
 	}
 
 	d.detectBellEvent(pane, paneID, data)
+	// Before the OSC 133 detector: a conversion restarts the pane, and the
+	// shell's own prompt hooks emit a D for the command it never ran. Running
+	// the conversion first means that D lands on a superseded generation.
+	d.detectHandStart(pane, paneID, data)
 	d.detectOSC133Exit(pane, paneID, data)
 	d.applyPluginHandlers(pane, paneID, data)
 
@@ -5384,6 +5388,15 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 		// was still carrying, and the resume would be skipped on top of it.
 		pane.PluginMu.Lock()
 		ownsRecord := pane.ptyGen > 0 || !pane.freshID
+		// A converting pane raised ptyGen by running a SHELL, which wrote no
+		// session record — so ownsRecord's premise ("a child of this pane wrote
+		// what is under its id") is false for exactly one spawn. Consume the
+		// one-shot rather than clearing ptyGen, which is the output-generation
+		// stamp and means something else entirely.
+		if pane.handStart.disownRecords {
+			pane.handStart.disownRecords = false
+			ownsRecord = false
+		}
 		pane.PluginMu.Unlock()
 
 		// A session_scrape pane that owns NOTHING retires any record left under its
@@ -6433,45 +6446,20 @@ func (d *Daemon) handlePaneStatusReq(conn *ipc.Conn, msg *ipc.Message) {
 	respondTo(conn, msg.ID, ipc.MsgPaneStatusResp, d.buildPaneStatus(pane))
 }
 
-func (d *Daemon) handleRestartPaneReq(conn *ipc.Conn, msg *ipc.Message) {
-	var req ipc.RestartPaneReqPayload
-	if err := msg.DecodePayload(&req); err != nil {
-		log.Printf("handleRestartPaneReq: decode: %v", err)
-		respondTo(conn, msg.ID, ipc.MsgRestartPaneResp, ipc.RestartPaneRespPayload{})
-		return
-	}
-
-	pane := d.session.Pane(req.PaneID)
-	if pane == nil {
-		respondTo(conn, msg.ID, ipc.MsgRestartPaneResp, ipc.RestartPaneRespPayload{PaneID: req.PaneID})
-		return
-	}
-	// A placeholder waiting on a checkout is not a pane to restart, and the
-	// refusal has to be here rather than only in the TUI: the MCP restart_pane
-	// tool reaches this handler too, as does any other IPC client.
-	//
-	// Restarting one spawns a live shell INTO the same pane object while
-	// createFirstPaneWorktree's goroutine is still running against that id, and
-	// nothing here clears PreparingWorktree — so the shell renders hidden behind
-	// the "creating worktree" block, and whichever outcome lands next clobbers
-	// it: success destroys the pane in replacePaneAt, discarding the shell the
-	// user just started, and failure writes SpawnError over a pane that now
-	// holds a live PTY child nobody will ever close.
-	//
-	// Keyed on PreparingWorktree and never on SpawnError: the pane a FAILED add
-	// leaves behind must still restart, because Alt+R is exactly what its error
-	// screen offers.
-	pane.PluginMu.Lock()
-	preparing := pane.PreparingWorktree
-	pane.PluginMu.Unlock()
-	if preparing != "" {
-		log.Printf("restart pane %s: refused, still creating worktree %s", pane.ID, preparing)
-		// Success stays false — the pane is unchanged, and the "creating
-		// worktree" block it is already showing IS the answer to why nothing
-		// happened.
-		respondTo(conn, msg.ID, ipc.MsgRestartPaneResp, ipc.RestartPaneRespPayload{PaneID: req.PaneID})
-		return
-	}
+// restartPaneInPlace tears down a pane's child and spawns a replacement into
+// the SAME pane — same id, same layout leaf, same object — answering whether
+// the spawn succeeded.
+//
+// Factored out of handleRestartPaneReq so hand-started conversion can reuse it.
+// Restart is the right primitive there and ReplacePaneID is not: replace mints
+// a NEW pane id and needs the client to patch its layout leaf, while conversion
+// must keep the pane the user is looking at. spawnPane re-reads pane.Type under
+// PluginMu, so a pane re-typed just before this call spawns as the new plugin —
+// which is the whole of what "convert" does.
+//
+// The caller owns everything around it: the refusals that decide whether a
+// restart is allowed at all, any notification, the broadcast and the snapshot.
+func (d *Daemon) restartPaneInPlace(pane *Pane) bool {
 	// Clear any deferred state first so the restart below operates on a normal
 	// live pane (Pending=false) rather than racing the lazy-spawn guard.
 	d.ensurePaneSpawned(pane)
@@ -6562,6 +6550,50 @@ func (d *Daemon) handleRestartPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 			success = false
 		}
 	}
+
+	return success
+}
+
+func (d *Daemon) handleRestartPaneReq(conn *ipc.Conn, msg *ipc.Message) {
+	var req ipc.RestartPaneReqPayload
+	if err := msg.DecodePayload(&req); err != nil {
+		log.Printf("handleRestartPaneReq: decode: %v", err)
+		respondTo(conn, msg.ID, ipc.MsgRestartPaneResp, ipc.RestartPaneRespPayload{})
+		return
+	}
+
+	pane := d.session.Pane(req.PaneID)
+	if pane == nil {
+		respondTo(conn, msg.ID, ipc.MsgRestartPaneResp, ipc.RestartPaneRespPayload{PaneID: req.PaneID})
+		return
+	}
+	// A placeholder waiting on a checkout is not a pane to restart, and the
+	// refusal has to be here rather than only in the TUI: the MCP restart_pane
+	// tool reaches this handler too, as does any other IPC client.
+	//
+	// Restarting one spawns a live shell INTO the same pane object while
+	// createFirstPaneWorktree's goroutine is still running against that id, and
+	// nothing here clears PreparingWorktree — so the shell renders hidden behind
+	// the "creating worktree" block, and whichever outcome lands next clobbers
+	// it: success destroys the pane in replacePaneAt, discarding the shell the
+	// user just started, and failure writes SpawnError over a pane that now
+	// holds a live PTY child nobody will ever close.
+	//
+	// Keyed on PreparingWorktree and never on SpawnError: the pane a FAILED add
+	// leaves behind must still restart, because Alt+R is exactly what its error
+	// screen offers.
+	pane.PluginMu.Lock()
+	preparing := pane.PreparingWorktree
+	pane.PluginMu.Unlock()
+	if preparing != "" {
+		log.Printf("restart pane %s: refused, still creating worktree %s", pane.ID, preparing)
+		// Success stays false — the pane is unchanged, and the "creating
+		// worktree" block it is already showing IS the answer to why nothing
+		// happened.
+		respondTo(conn, msg.ID, ipc.MsgRestartPaneResp, ipc.RestartPaneRespPayload{PaneID: req.PaneID})
+		return
+	}
+	success := d.restartPaneInPlace(pane)
 
 	// AFTER the outcome is known, and only on success.
 	//

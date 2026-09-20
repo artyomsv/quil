@@ -3,11 +3,15 @@ package daemon
 import (
 	"bytes"
 	"crypto/subtle"
+	"errors"
+	"log"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/plugin"
 )
 
@@ -354,4 +358,206 @@ func keepHandStartTail(buf []byte) []byte {
 		return nil
 	}
 	return append([]byte(nil), buf...)
+}
+
+// retirePaneSessionRecords deletes the agent session records filed under a
+// pane's id, so the next spawn cannot resume a conversation that belongs to a
+// pane that no longer exists.
+//
+// Conversion needs this because ownsRecord means "a child of THIS pane already
+// ran, so it wrote whatever record sits under its id" — and a converting pane
+// has ptyGen > 0 because its SHELL ran, which wrote nothing. Without retiring,
+// a stale `codex-<id>.id` left by a destroyed pane whose id was recycled would
+// be appended to the user's own `resume <id>`, producing argv naming two
+// different sessions; and a stale claude `<id>.id` would REPLACE the id the
+// user typed, resuming a conversation they did not ask for.
+//
+// Shares its file list with cleanupPaneArtifacts by construction: a record kind
+// added there and missed here would be exactly the stale file this prevents.
+func retirePaneSessionRecords(paneID string) {
+	for _, name := range paneSessionRecordNames(paneID) {
+		p := filepath.Join(config.SessionsDir(), name)
+		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+			log.Printf("pane %s: retire stale session record %s: %v", paneID, name, err)
+		}
+	}
+}
+
+// paneSessionRecordNames is every per-pane session file the hook producers
+// write. One list, two callers.
+func paneSessionRecordNames(paneID string) []string {
+	return []string{
+		paneID + ".id",
+		paneID + ".transcript",
+		paneID + ".settings.json",
+		"opencode-" + paneID + ".id",
+		"codex-" + paneID + ".id",
+	}
+}
+
+// convertAtLaunch reopens a terminal pane as the agent the user just typed.
+//
+// It runs SYNCHRONOUSLY on the output goroutine that read the marker, and that
+// is load-bearing. The shell returns 0 the moment it sees the reply, and its
+// prompt hooks immediately write OSC 133;D, 133;A and OSC 7 into the OLD PTY.
+// Restarting here means those bytes arrive against a superseded generation and
+// are dropped by the existing check; deferring the restart to another goroutine
+// would let that D reach detectOSC133Exit and report a command completion for a
+// command that never ran.
+//
+// The caller has already answered the shell. Nothing here writes to the pane.
+func (d *Daemon) convertAtLaunch(pane *Pane, target *plugin.PanePlugin, m handStartMarker) bool {
+	cwd := d.resolveHandStartCWD(pane, m)
+
+	// A converting pane's own records were written by nothing — its shell wrote
+	// no session — so any file under its id is stale by definition.
+	retirePaneSessionRecords(pane.ID)
+
+	pane.PluginMu.Lock()
+	prevType := pane.Type
+	pane.Type = target.Name
+	pane.CWD = cwd
+	// The user's argv REPLACES the plugin's own args, exactly as the create
+	// dialog's toggles do — resolveSpawnArgs has always replaced rather than
+	// merged, so this is the dialog's behaviour and not a new rule. With no
+	// typed arguments the plugin's own args apply, which is what a bare
+	// `claude` should mean.
+	if len(m.Args) > 0 {
+		pane.InstanceArgs = append([]string(nil), m.Args...)
+	} else {
+		pane.InstanceArgs = nil
+	}
+	// One shot: make the next spawn treat this pane as owning no record, since
+	// the ptyGen that would otherwise say it does was raised by the shell.
+	pane.handStart.disownRecords = true
+	// The pane converted FROM a terminal, so a clean exit of the agent can put
+	// the shell back rather than leaving a dead agent pane behind.
+	pane.ConvertedFromTerminal = prevType
+	// Disarm: the converted pane runs the agent directly, not a shell, so no
+	// further marker can legitimately come from it.
+	pane.handStart.token = ""
+	pane.PluginMu.Unlock()
+
+	log.Printf("pane %s: converting %s to %s (args=%v, cwd=%s)", pane.ID, prevType, target.Name, m.Args, cwd)
+
+	if !d.restartPaneInPlace(pane) {
+		// The pane is left as the agent type with its SpawnError showing, which
+		// is the same state a failed Ctrl+N reaches and the same thing Alt+R
+		// retries. Reverting to a terminal here would hide why it failed.
+		log.Printf("pane %s: conversion spawn failed", pane.ID)
+		return false
+	}
+	d.broadcastState()
+	d.requestSnapshot()
+	return true
+}
+
+// resolveHandStartCWD prefers the shell's own $PWD over the pane's recorded one.
+//
+// Pane.CWD is written by the TUI's OSC 7 handler, so a pane driven with no
+// client attached — or one between attaches — carries a stale value, and
+// spawning the agent there would silently start it in the wrong project. The
+// shell's value is validated the same way any client-supplied path is.
+func (d *Daemon) resolveHandStartCWD(pane *Pane, m handStartMarker) string {
+	if m.CWD != "" {
+		if resolved, err := filepath.EvalSymlinks(m.CWD); err == nil {
+			if st, err := os.Stat(resolved); err == nil && st.IsDir() {
+				return resolved
+			}
+		}
+	}
+	pane.PluginMu.Lock()
+	defer pane.PluginMu.Unlock()
+	return pane.CWD
+}
+
+// detectHandStart answers any authenticated marker in a chunk of PTY output.
+//
+// Every authenticated, fresh marker ends in EXACTLY ONE of: a "run" reply, a
+// conversion, or silence because the pane is gone. Two answers would type eight
+// stray bytes into whatever is running; none would cost the user a second of
+// dead air. A test pins that discipline.
+//
+// Runs on the output goroutine for this pane, and conversion runs synchronously
+// from here — see convertAtLaunch for why that ordering is load-bearing.
+func (d *Daemon) detectHandStart(pane *Pane, paneID string, data []byte) {
+	pane.PluginMu.Lock()
+	bound := pane.handStart.token
+	prev := pane.handStartTail
+	pane.PluginMu.Unlock()
+	// The introducer cannot appear without the feature having armed this pane,
+	// so the common case costs one Index over the chunk and nothing else.
+	if bound == "" && len(prev) == 0 {
+		return
+	}
+
+	payloads, tail := scanHandStart(prev, data)
+	pane.PluginMu.Lock()
+	pane.handStartTail = tail
+	pane.PluginMu.Unlock()
+	if len(payloads) == 0 {
+		return
+	}
+
+	arrival := time.Now()
+	for _, payload := range payloads {
+		m, ok := parseHandStart(payload)
+		if !ok {
+			continue
+		}
+		if !m.tokenMatches(bound) {
+			// Output from somewhere else — an ssh remote printing into the
+			// pane, a pasted log — cannot trigger a conversion, because it
+			// never had this shell's token. Not logged per occurrence: a
+			// hostile or noisy source would own the log file.
+			continue
+		}
+		if !m.fresh(time.Now(), arrival) {
+			// The shell has already given up and run the binary. Answering now
+			// would put eight characters into a live agent's composer.
+			log.Printf("pane %s: hand-start marker for %q arrived too late to answer", paneID, m.Name)
+			continue
+		}
+		d.answerHandStart(pane, paneID, m)
+	}
+}
+
+// answerHandStart resolves one authenticated marker to its single outcome.
+func (d *Daemon) answerHandStart(pane *Pane, paneID string, m handStartMarker) {
+	policy := d.cfg.Agents.HandStartedPolicy()
+	target := handStartTargets(d.registry.All())[handStartBase(m.Name)]
+
+	decision := classifyHandStart(target, m, daemonHasEnv)
+	if policy != config.HandStartedConvert {
+		// adopt and notify both run the binary as typed; they differ only in
+		// what happens afterwards, which is Part C's business, not this one's.
+		decision = handStartDecision{handStartRun, "hand_started = " + policy}
+	}
+
+	if decision.Class == handStartConvert {
+		// Tell the shell to step aside FIRST. It is waiting with a deadline,
+		// and the spawn below can take longer than that deadline — a reply sent
+		// after the restart would arrive at the agent, not the shell.
+		if !d.replyHandStart(pane, handStartReplyConvert) {
+			return
+		}
+		d.convertAtLaunch(pane, target, m)
+		return
+	}
+
+	d.replyHandStart(pane, handStartReplyRun)
+	if decision.Reason != "" {
+		log.Printf("pane %s: running %s as typed — %s", paneID, m.Name, decision.Reason)
+	}
+}
+
+// replyHandStart writes the eight-byte answer to the pane's child, answering
+// whether it was accepted for delivery.
+//
+// Through EnqueueInput, the ordered per-pane writer every keystroke uses: a
+// direct PTY write from this goroutine would block forever against a child that
+// has stopped reading stdin, which is the wedge shape this daemon already has
+// scars from.
+func (d *Daemon) replyHandStart(pane *Pane, reply string) bool {
+	return pane.EnqueueInput([]byte(reply))
 }

@@ -339,6 +339,18 @@ func classifyHandStart(p *plugin.PanePlugin, m handStartMarker, daemonEnv func(s
 	deny := handStartNonSession[base]
 	noConvert := handStartNoConvert[base]
 	sessionFlags := sessionFlagsFor(base)
+	// The subcommand is the first POSITIONAL, which is not always argv[0]:
+	// `claude --verbose attach <id>` is a valid invocation and walked straight
+	// past an index-zero check into conversion — respawning Quil's own claude
+	// as a second client of a conversation a background agent owns, which is
+	// the exact thing the attach refusal exists to prevent.
+	//
+	// Only the FIRST positional, never a scan of the whole line: an unquoted
+	// prompt would otherwise collide with these words, and a quoted one is a
+	// single token so it cannot. A flag's VALUE can land here (`--model opus`
+	// reads "opus" as the subcommand), which is harmless — an unknown word is
+	// classed as a session, and that is the direction that keeps working.
+	sub := subcommandIndex(m.Args, sessionFlags)
 	seen := 0
 	for i, a := range m.Args {
 		name := flagName(a)
@@ -354,9 +366,9 @@ func classifyHandStart(p *plugin.PanePlugin, m handStartMarker, daemonEnv func(s
 			if seen > 1 {
 				return handStartDecision{handStartRun, "more than one session flag was given", false}
 			}
-		case i == 0 && !strings.HasPrefix(a, "-") && deny[a]:
+		case i == sub && deny[a]:
 			return handStartDecision{handStartRun, a + " is not an interactive session", false}
-		case i == 0 && !strings.HasPrefix(a, "-") && noConvert[a]:
+		case i == sub && noConvert[a]:
 			return handStartDecision{handStartRun, a + " joins a session another agent already owns", false}
 		case !handStartArgShapeOK(a):
 			return handStartDecision{handStartRun, "an argument could not be validated", false}
@@ -808,4 +820,36 @@ func shapedArgsForCard(args []string) []string {
 		out = append(out, truncateName(a))
 	}
 	return out
+}
+
+// firstPositional answers the index of the first argument that is not a flag,
+// or -1 when every argument is one. Flags are recognised by a leading "-",
+// which is all any of these agents uses.
+func firstPositional(args []string) int {
+	for i, a := range args {
+		if !strings.HasPrefix(a, "-") {
+			return i
+		}
+	}
+	return -1
+}
+
+// subcommandIndex answers where the subcommand is, or -1 when there is none.
+//
+// It is the first positional — not argv[0], because a global option can come
+// first — EXCEPT that a session selector rules one out entirely. `--continue`
+// takes no value, so `claude --continue mcp` has "mcp" in first-positional
+// position while plainly being a prompt for a conversation being resumed. No
+// agent here takes a subcommand and a session selector together, so the
+// selector is the signal that everything after it is prompt.
+func subcommandIndex(args []string, sessionFlags map[string]bool) int {
+	for i, a := range args {
+		if !strings.HasPrefix(a, "-") {
+			return i
+		}
+		if sessionFlags[flagName(a)] {
+			return -1
+		}
+	}
+	return -1
 }

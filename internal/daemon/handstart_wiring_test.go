@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"context"
+	"github.com/artyomsv/quil/internal/claudesessions"
 	"log"
 	"strings"
 	"testing"
@@ -275,5 +277,90 @@ func TestDetectHandStart_DisarmStopsLaterMarkersInTheSameChunk(t *testing.T) {
 
 	if got := rec.drain(); got != handStartReplyConvert {
 		t.Fatalf("answered %q, want exactly one %q", got, handStartReplyConvert)
+	}
+}
+
+// The subcommand is the first POSITIONAL, not argv[0]. A global option before
+// it — `claude --verbose attach <id>` is a valid invocation — walked past an
+// index-zero check into conversion, respawning Quil's own claude as a second
+// client of a conversation a background agent owns.
+func TestClassifyHandStart_SubcommandAfterGlobalOptions(t *testing.T) {
+	p := &plugin.PanePlugin{Name: "claude-code"}
+	cases := []struct {
+		name string
+		args []string
+		want handStartClass
+	}{
+		{"attach at the front", []string{"attach", "abc"}, handStartRun},
+		{"attach behind a global option", []string{"--verbose", "attach", "abc"}, handStartRun},
+		{"doctor behind two", []string{"--verbose", "--debug", "doctor"}, handStartRun},
+		// A quoted prompt is ONE token, so it cannot collide with these words.
+		{"a prompt that mentions attach", []string{"attach the logs please"}, handStartConvert},
+		// Flags only: nothing positional to classify.
+		{"flags only", []string{"--chrome", "--dangerously-skip-permissions"}, handStartConvert},
+		// A flag's value landing in first-positional position is harmless: an
+		// unknown word is a session, which is the direction that keeps working.
+		{"a flag value is not a subcommand", []string{"--model", "opus"}, handStartConvert},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifyHandStart(p, handStartMarker{Name: "claude", Args: tc.args}, noEnv); got.Class != tc.want {
+				t.Fatalf("class = %v (%q), want %v", got.Class, got.Reason, tc.want)
+			}
+		})
+	}
+}
+
+func TestSubcommandIndex(t *testing.T) {
+	flags := sessionFlagsFor("claude")
+	cases := []struct {
+		args []string
+		want int
+	}{
+		{nil, -1},
+		{[]string{"attach"}, 0},
+		{[]string{"--verbose", "attach"}, 1},
+		{[]string{"--a", "--b", "x"}, 2},
+		{[]string{"--only", "--flags"}, -1},
+		// A session selector rules out a subcommand: what follows is prompt.
+		{[]string{"--continue", "mcp"}, -1},
+		{[]string{"--resume", "abc", "doctor"}, -1},
+	}
+	for _, tc := range cases {
+		if got := subcommandIndex(tc.args, flags); got != tc.want {
+			t.Errorf("subcommandIndex(%v) = %d, want %d", tc.args, got, tc.want)
+		}
+	}
+}
+
+// The retries outlive the process they are waiting for. Bound to the PTY run
+// the marker came from, so a session that appears in the same directory after
+// the intercepted process is gone is not claimed — it belongs to whatever
+// started it, and adopting it would deny it to that pane.
+func TestAdoptClaudeSession_AbandonsWhenTheRunIsGone(t *testing.T) {
+	prev := listSessionsFn
+	listSessionsFn = func(context.Context, string) ([]claudesessions.Session, error) {
+		return []claudesessions.Session{{ID: "SOMEONE-ELSES", Modified: time.Now()}}, nil
+	}
+	t.Cleanup(func() { listSessionsFn = prev })
+	handStartAdoptDelayForTest(t, time.Millisecond)
+
+	d, pane, _ := handStartFixture(t, config.HandStartedAdopt)
+	pane.CWD = t.TempDir()
+	pane.ptyGen = 7
+
+	d.adoptClaudeSession(pane, d.registry.Get("claude-code"), handStartMarker{Name: "claude", CWD: pane.CWD})
+
+	// The run ends before the first scan lands.
+	pane.PluginMu.Lock()
+	pane.ptyGen = 8
+	pane.PluginMu.Unlock()
+
+	time.Sleep(200 * time.Millisecond)
+	pane.PluginMu.Lock()
+	got := pane.PluginState["session_id"]
+	pane.PluginMu.Unlock()
+	if got != "" {
+		t.Fatalf("adopted %q after its run had ended", got)
 	}
 }

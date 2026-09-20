@@ -69,6 +69,14 @@ func (d *Daemon) adoptClaudeSession(pane *Pane, target *plugin.PanePlugin, m han
 		return
 	}
 	started := time.Now()
+	// The retries outlive the thing they are waiting for. Bind to the PTY run
+	// this marker came from: if the intercepted process exits, or the pane is
+	// restarted, a later scan would otherwise claim whatever session appeared
+	// next in that directory — another terminal's conversation, adopted onto
+	// this pane, and denied to the pane that actually owns it.
+	pane.PluginMu.Lock()
+	gen := pane.ptyGen
+	pane.PluginMu.Unlock()
 
 	// Off the output goroutine: this sleeps and then walks a directory, and
 	// that goroutine is on the path of every byte the pane produces.
@@ -85,6 +93,13 @@ func (d *Daemon) adoptClaudeSession(pane *Pane, target *plugin.PanePlugin, m han
 			case <-d.shutdown:
 				return
 			case <-time.After(wait):
+			}
+			pane.PluginMu.Lock()
+			live := pane.ptyGen == gen && pane.PTY != nil
+			pane.PluginMu.Unlock()
+			if !live {
+				logger.Debug("pane %s: abandoning adoption, the run it was for is gone", pane.ID)
+				return
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), handStartScanTimeout)
 			sessions, err := listSessionsFn(ctx, cwd)

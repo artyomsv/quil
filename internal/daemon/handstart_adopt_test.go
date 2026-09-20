@@ -75,11 +75,13 @@ func TestAdoptClaudeSession_RecordsTheSessionWithoutRetypingThePane(t *testing.T
 	if got := rec.drain(); got != handStartReplyRun {
 		t.Fatalf("reply = %q, want %q — adopt must let the command run as typed", got, handStartReplyRun)
 	}
-	waitFor(t, func() bool {
+	if !waitUntilTrue(t, func() bool {
 		pane.PluginMu.Lock()
 		defer pane.PluginMu.Unlock()
 		return pane.PluginState["session_id"] == "ADOPTED"
-	}, "the session was never adopted")
+	}, 3*time.Second) {
+		t.Fatal("the session was never adopted")
+	}
 
 	if pane.Type != "terminal" {
 		t.Errorf("pane type = %q, want terminal — adoption does not re-type a pane", pane.Type)
@@ -177,18 +179,6 @@ func handStartAdoptDelayForTest(t *testing.T, d time.Duration) time.Duration {
 	handStartAdoptDelayVar = d
 	t.Cleanup(func() { handStartAdoptDelayVar = prev })
 	return prev
-}
-
-func waitFor(t *testing.T, cond func() bool, msg string) {
-	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatal(msg)
 }
 
 // mustPane creates a pane of the given type in a tab, failing the test if the

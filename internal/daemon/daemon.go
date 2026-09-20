@@ -3795,6 +3795,15 @@ func (d *Daemon) onPaneExitGeneration(pane *Pane, code int, generation uint64) {
 	pane.PluginMu.Unlock()
 	log.Printf("pane %s: process exited with code %d", pane.ID, code)
 
+	// A pane that was converted from a terminal goes back to being one when its
+	// agent exits normally, so the shell -> agent -> /exit -> shell loop does
+	// not end every cycle on a dead pane. It takes the exit card with it: the
+	// pane is already back at a prompt, and "Process exited (code 0)" on a live
+	// shell reads as a fault.
+	if d.returnToShellOnCleanExit(pane, code) {
+		return
+	}
+
 	severity := "info"
 	title := "Process exited (code 0)"
 	if code != 0 {

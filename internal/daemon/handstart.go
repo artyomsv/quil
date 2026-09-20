@@ -549,6 +549,35 @@ func (d *Daemon) answerHandStart(pane *Pane, paneID string, m handStartMarker) {
 	if decision.Reason != "" {
 		log.Printf("pane %s: running %s as typed — %s", paneID, m.Name, decision.Reason)
 	}
+	if target == nil || policy == config.HandStartedOff {
+		// "off" means say nothing, and a command that is not one of Quil's
+		// agents is not this feature's business.
+		return
+	}
+
+	// The agent is running as typed. What Quil can still do depends on the
+	// policy and on whether the agent keeps a session store a third party can
+	// read — which, for now, only claude does.
+	if policy == config.HandStartedAdopt || policy == config.HandStartedConvert {
+		if target.UsesClaudeSessions() {
+			d.adoptClaudeSession(pane, target, m)
+			return
+		}
+	}
+	d.emitHandStartCard(pane, "agent_untracked", "info",
+		"Session not tracked",
+		untrackedMessage(m.Name, decision.Reason))
+}
+
+// untrackedMessage says what happened and what to do, in that order. A card
+// that only says something is wrong is the state #221 was already in.
+func untrackedMessage(name, reason string) string {
+	msg := name + " is running, but Quil is not tracking its session, so it will " +
+		"not resume after a restart."
+	if reason != "" {
+		msg += " Reason: " + reason + "."
+	}
+	return msg + " Ctrl+N opens a pane of that type with full tracking."
 }
 
 // replyHandStart writes the eight-byte answer to the pane's child, answering

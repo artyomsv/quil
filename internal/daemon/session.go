@@ -39,6 +39,12 @@ type Pane struct {
 	// shell's token and the old one stops matching.
 	handStart handStartState
 
+	// Adopted marks a terminal pane whose hand-started claude session Quil is
+	// tracking without having spawned it. The pane will resume that
+	// conversation after a restart; it gets none of the hook events a properly
+	// spawned pane gets, and the UI says so rather than implying parity.
+	Adopted bool
+
 	// handStartTail retains an unterminated marker across output chunks, the
 	// way modeScanTail does for mouse modes. Bounded; see keepHandStartTail.
 	handStartTail []byte

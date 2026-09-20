@@ -110,7 +110,20 @@ func TestDelegateTask_RefusesWhatPaneInputRefuses(t *testing.T) {
 
 func TestDelegateTask_CompletesOnSettledIdleNotRawStop(t *testing.T) {
 	d := newTestDaemon(t)
-	shortenIdleSettle(t, 30*time.Millisecond)
+	// The settle window has to satisfy two assertions pulling in opposite
+	// directions: the sleep below must OUTLAST it (to prove a live subagent
+	// holds the task open past the window), while the check immediately after
+	// SubagentStop must run INSIDE it (to prove the raw falling edge does not
+	// end the task on its own).
+	//
+	// At 30ms with an 80ms sleep the second one was a race: any scheduling
+	// delay over 30ms and the task had already settled done, failing with
+	// "task ended on the raw falling edge" — which is the opposite of what
+	// happened. Reproduced roughly 1 run in 3 on master under package load.
+	// The gap is now 200ms against a 400ms sleep, which no scheduler delay
+	// that leaves the rest of the suite passing can close.
+	const settle = 200 * time.Millisecond
+	shortenIdleSettle(t, settle)
 	target, _ := agentPane(t, d, "worker")
 	reg := d.tasksRegistry()
 
@@ -123,7 +136,7 @@ func TestDelegateTask_CompletesOnSettledIdleNotRawStop(t *testing.T) {
 	}
 	d.emitEvent(hookEvent(target, "hook.claude.SubagentStart", map[string]string{"agent_type": "qa"}))
 	d.emitEvent(hookEvent(target, "hook.claude.Stop", nil))
-	time.Sleep(80 * time.Millisecond)
+	time.Sleep(2 * settle)
 	if st := reg.info(task).State; st != "working" {
 		t.Fatalf("Stop with a live subagent ended the task: %s", st)
 	}
@@ -138,7 +151,11 @@ func TestDelegateTask_CompletesOnSettledIdleNotRawStop(t *testing.T) {
 	if info.EndedAt == 0 || info.StartedAt == 0 {
 		t.Fatalf("timestamps missing: %+v", info)
 	}
-	if !hasEventType(d, target.ID, "task_done") {
+	// Waited for, not sampled. The card is queued as a CONSEQUENCE of the
+	// state flip, on the other side of it — so a test that polls until the
+	// state reads "done" and then samples the queue is racing the publish it
+	// is trying to observe.
+	if !waitUntilTrue(t, func() bool { return hasEventType(d, target.ID, "task_done") }, 2*time.Second) {
 		t.Fatal("task_done never queued")
 	}
 	select {

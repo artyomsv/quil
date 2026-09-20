@@ -96,7 +96,15 @@ func newWarmShellPool(cfg warmPoolShellConfig, size int) *warmShellPool {
 	default:
 		return p // these are the only shells with the required Quil prompt hooks
 	}
-	p.cfg = warmPoolShellConfig{Cmd: cfg.Cmd, Args: append([]string(nil), cfg.Args...), Env: append([]string(nil), cfg.Env...)}
+	// Copied field by field so the pool owns its slices. EVERY field must be
+	// named here: one left out is silently dropped, which is how Intercept was
+	// lost — the pool started, the shells started, and nothing was armed.
+	p.cfg = warmPoolShellConfig{
+		Cmd:       cfg.Cmd,
+		Args:      append([]string(nil), cfg.Args...),
+		Env:       append([]string(nil), cfg.Env...),
+		Intercept: append([]string(nil), cfg.Intercept...),
+	}
 	p.size = size
 	p.ready = make(chan apty.Session, size)
 	p.vacant = make(chan struct{}, size)

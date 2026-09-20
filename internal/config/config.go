@@ -28,6 +28,7 @@ type Config struct {
 	Update       UpdateConfig       `toml:"update"`
 	Remote       RemoteConfig       `toml:"remote"`
 	Sandbox      SandboxConfig      `toml:"sandbox"`
+	Agents       AgentsConfig       `toml:"agents"`
 	// Destinations are the ADDITIONAL daemons this client attaches to beside
 	// the local one, each contributing its projects to the same sidebar. A
 	// slice rather than a map because order is meaningful — it is the order the
@@ -603,6 +604,9 @@ func Default() Config {
 			MaxLines: 500,
 			Dimmed:   true,
 		},
+		Agents: AgentsConfig{
+			HandStarted: HandStartedConvert,
+		},
 		Logging: LoggingConfig{
 			Level:     "info",
 			MaxSizeMB: 5,
@@ -1010,4 +1014,40 @@ func UpdateNotifiedPath() string {
 // the what's-new for a version that was never installed.
 func LastRunPath() string {
 	return filepath.Join(UpdateDir(), "lastrun.json")
+}
+
+// Hand-started agent policy. What Quil does when an agent binary Quil knows how
+// to spawn is started by hand from a terminal pane's shell.
+const (
+	// HandStartedConvert opens the pane as the matching AI pane instead,
+	// carrying the arguments the user typed. The default: the user asked for
+	// that agent, and a pane that tracks its session is what they meant.
+	HandStartedConvert = "convert"
+	// HandStartedAdopt runs the binary as typed and records the session so the
+	// pane resumes it after a restart. No process is touched.
+	HandStartedAdopt = "adopt"
+	// HandStartedNotify runs it as typed and says the session is untracked.
+	HandStartedNotify = "notify"
+	// HandStartedOff runs it as typed and says nothing. Nothing is armed in the
+	// shell either, so there is no marker and no per-invocation pause.
+	HandStartedOff = "off"
+)
+
+// AgentsConfig governs agents started outside a typed pane.
+type AgentsConfig struct {
+	// HandStarted is one of the four constants above. An unrecognised value is
+	// treated as the default rather than refused: this is a hand-edited file,
+	// and a typo here must not stop the daemon starting.
+	HandStarted string `toml:"hand_started"`
+}
+
+// HandStartedPolicy normalises the configured value, answering the default for
+// anything unrecognised or unset.
+func (a AgentsConfig) HandStartedPolicy() string {
+	switch a.HandStarted {
+	case HandStartedAdopt, HandStartedNotify, HandStartedOff:
+		return a.HandStarted
+	default:
+		return HandStartedConvert
+	}
 }

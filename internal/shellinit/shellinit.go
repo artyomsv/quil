@@ -69,7 +69,7 @@ func Configure(shell, quilDir string, intercept []string, token string) *ShellCo
 		return &ShellConfig{
 			Cmd:  shell,
 			Args: []string{"--rcfile", filepath.Join(base, "bash-init.sh")},
-			Env:  interceptEnv(intercept, token),
+			Env:  InterceptEnv(intercept, token),
 		}
 
 	case "zsh":
@@ -80,14 +80,14 @@ func Configure(shell, quilDir string, intercept []string, token string) *ShellCo
 			Env: append([]string{
 				"QUIL_ORIG_ZDOTDIR=" + origZdotdir,
 				"ZDOTDIR=" + zshDir,
-			}, interceptEnv(intercept, token)...),
+			}, InterceptEnv(intercept, token)...),
 		}
 
 	case "pwsh", "powershell":
 		return &ShellConfig{
 			Cmd:  shell,
 			Args: []string{"-NoProfile", "-NoLogo", "-NoExit", "-File", filepath.Join(base, "pwsh-init.ps1")},
-			Env:  interceptEnv(intercept, token),
+			Env:  InterceptEnv(intercept, token),
 		}
 
 	default:
@@ -95,7 +95,7 @@ func Configure(shell, quilDir string, intercept []string, token string) *ShellCo
 	}
 }
 
-// interceptEnv is the pair the init scripts gate on. It answers nil unless both
+// InterceptEnv is the pair the init scripts gate on. It answers nil unless both
 // halves are present: a name list with no token would arm functions whose
 // marker the daemon must reject, which is a shell that pauses for a second
 // before every agent launch and converts nothing.
@@ -103,7 +103,7 @@ func Configure(shell, quilDir string, intercept []string, token string) *ShellCo
 // A name carrying a comma would split into two bogus names, and one carrying a
 // character outside the scripts' own validation would be skipped there anyway;
 // both are dropped here so the two ends cannot disagree about the list.
-func interceptEnv(intercept []string, token string) []string {
+func InterceptEnv(intercept []string, token string) []string {
 	if token == "" || len(intercept) == 0 {
 		return nil
 	}

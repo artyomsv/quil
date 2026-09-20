@@ -5252,6 +5252,11 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	if eligible {
 		if claimed, ok := d.shellPool.TryClaim(cwd, cols, rows); ok {
 			ptySession = claimed
+			// The claimed shell already carries its own token in its
+			// environment; bind it so a marker from that shell matches.
+			pane.PluginMu.Lock()
+			pane.handStart.token = interceptTokenOf(claimed)
+			pane.PluginMu.Unlock()
 			log.Printf("spawn: pane %s claimed a warm shell, cwd=%s", pane.ID, cwd)
 		} else {
 			eligible = false
@@ -5410,11 +5415,25 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 
 		// Shell integration (only for terminal-type panes)
 		if p.Command.ShellIntegration {
-			shellCfg := shellinit.Configure(cmd, config.QuilDir(), nil, "")
+			// A cold spawn mints its own token. Arming is refused for a sandbox
+			// pane: the marker would be authentic, but conversion means
+			// restarting the pane with a plugin the container was not built
+			// for. It is refused structurally here rather than checked later.
+			var intercept []string
+			tok := ""
+			if !sandboxed && !restoring && d.cfg.Agents.HandStartedPolicy() != config.HandStartedOff {
+				if intercept = handStartNames(d.registry.All()); len(intercept) > 0 {
+					tok = newInterceptToken()
+				}
+			}
+			shellCfg := shellinit.Configure(cmd, config.QuilDir(), intercept, tok)
 			if shellCfg != nil {
 				ptySession.SetEnv(shellCfg.Env)
 				cmd = shellCfg.Cmd
 				args = shellCfg.Args
+				pane.PluginMu.Lock()
+				pane.handStart.token = tok
+				pane.PluginMu.Unlock()
 			}
 		}
 

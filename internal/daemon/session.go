@@ -29,6 +29,16 @@ type Tab struct {
 }
 
 type Pane struct {
+	// handStart carries the per-shell interception token this pane's child was
+	// started with, and nothing else: the daemon resolves the pane from the PTY
+	// a marker arrives on, so the token is only ever COMPARED, never looked up
+	// by. Empty means this pane converts nothing — a cold spawn, a restore, a
+	// sandbox pane, or a shell started before the feature existed.
+	//
+	// Written under PluginMu at every spawn, so a restart re-arms with the new
+	// shell's token and the old one stops matching.
+	handStart handStartState
+
 	QuilMCP      bool // Opts into ordinary Quil MCP at spawn. Under PluginMu.
 	ID           string
 	TabID        string

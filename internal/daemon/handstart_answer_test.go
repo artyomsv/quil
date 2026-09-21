@@ -185,15 +185,23 @@ type replyRecorder struct {
 	alive   chan struct{}
 }
 
-// WaitExit blocks. fakeSession's returns 0 at once, which makes the spawned
-// "agent" look like one that exited cleanly — and a converted pane that exits
-// cleanly is correctly returned to its shell, so the conversion undid itself
-// before any assertion could see it. Blocking here keeps the pane in the state
-// under test; the revert itself is covered through the real exit path in
-// handstart_wiring_test.go.
+// WaitExit blocks, then reports a KILLED exit.
+//
+// Blocking, because fakeSession's returns 0 at once: that makes the spawned
+// "agent" look like one that exited cleanly, and a converted pane that exits
+// cleanly is correctly returned to its shell — so the conversion undid itself
+// before any assertion could see it. The revert is covered through the real
+// exit path in handstart_wiring_test.go instead.
+//
+// Killed rather than 0, because the unblock happens in t.Cleanup, i.e. AFTER
+// the test body. A zero exit there runs returnToShellOnCleanExit, which
+// restarts the pane, which calls newSessionFn — a package-level seam that by
+// then belongs to whichever test runs next. A test that swaps it to capture
+// spawn dimensions then reads values this pane wrote. Cross-test state escaping
+// through a fixture's teardown, and invisible in any single test.
 func (r *replyRecorder) WaitExit() int {
 	<-r.alive
-	return 0
+	return 130
 }
 
 func (r *replyRecorder) Write(data []byte) (int, error) {

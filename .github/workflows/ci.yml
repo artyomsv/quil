@@ -49,7 +49,35 @@ jobs:
       # (the project's go-testing rule requires CI to run with -race). -timeout
       # makes a deadlocked test fail fast WITH a full goroutine dump naming the
       # culprit, instead of hanging until the job timeout.
-      - run: go test -race -timeout 300s ./...
+      # Failures are echoed into the job SUMMARY, not left only in the log.
+      # Reading a job log needs admin rights on the repository, so on a red run
+      # a contributor — or anyone reviewing the PR — is told that "test" failed
+      # and nothing else. The summary is part of the check itself and readable
+      # by anyone who can see the PR, which is where the names of the failing
+      # tests belong.
+      #
+      # pipefail so the step still fails on a test failure: tee's exit status
+      # would otherwise mask go test's.
+      - name: Run go test -race -timeout 300s ./...
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -race -timeout 300s ./... 2>&1 | tee /tmp/test.log || {
+            {
+              echo "### Failing tests"
+              echo
+              echo '```'
+              grep -E "^(--- FAIL|    --- FAIL|FAIL|panic:|WARNING: DATA RACE)" /tmp/test.log | head -60
+              echo '```'
+              echo
+              echo "### Assertion messages"
+              echo
+              echo '```'
+              grep -E "^\s+[a-z_]+\.go:[0-9]+:" /tmp/test.log | head -40
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          }
       # The build tag keeps these out of the run above — and out of compilation
       # entirely, so without this step they are not even type-checked. They cover
       # what unit tests structurally cannot: that a handler is wired into the

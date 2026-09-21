@@ -10,6 +10,7 @@ import (
 
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/plugin"
+	apty "github.com/artyomsv/quil/internal/pty"
 )
 
 // The whole chain, through the real spawn: a pane spawned by spawnPane must end
@@ -34,6 +35,22 @@ func TestSpawnPane_BindsTheTokenTheShellWasStartedWith(t *testing.T) {
 	pane := mustPane(t, d, tab.ID)
 	pane.Type = "terminal"
 	pane.CWD = t.TempDir()
+
+	// The conversion at the end of this test respawns the pane through
+	// newSessionFn, which newTestDaemon points at a bare fakeSession — and
+	// fakeSession.WaitExit returns 0 AT ONCE. A converted pane whose agent
+	// exits cleanly is correctly returned to its shell, so the conversion
+	// undid itself before the assertion below could read it: the pane was
+	// back to "terminal", the feature working exactly as designed.
+	//
+	// replyRecorder already carries the fix for the shell half of this and
+	// says so in its own doc comment; the agent half was left on the default.
+	// It is a coin flip between the assertion and the exit goroutine, not a
+	// rare interleaving — it reproduced on the first of 30 local -race runs
+	// and turned CI red on a commit that touched no Go code at all.
+	prevNew := newSessionFn
+	newSessionFn = func(cols, rows int) apty.Session { return newReplyRecorder(t) }
+	t.Cleanup(func() { newSessionFn = prevNew })
 
 	sess := newReplyRecorder(t)
 	if err := d.spawnPane(pane, sess, false); err != nil {

@@ -11,6 +11,51 @@ version section here and deletes them.
 
 ## [Unreleased]
 
+## [1.75.0] - 2026-09-21
+
+### Added
+- **Starting `claude`, `codex` or `opencode` in a terminal pane now opens the
+  pane as that agent, with the arguments you typed.** Before, a hand-started
+  agent got no hook and no session tracking, so it came back as a fresh
+  conversation after every restart and Quil never said so — the gap reported in
+  #221, where four conversations were lost across a reboot and the logs looked
+  identical to a healthy install.
+
+  Nothing is killed to do it. Quil's shell integration shadows the binary with a
+  function, so the daemon learns the command line before the binary starts and
+  reopens the pane rather than interrupting it. The converted pane gets
+  everything a `Ctrl+N` pane gets: hooks, session-id tracking through `/clear`
+  and compaction, work indicators, notifications and resume. When the agent
+  exits cleanly the pane goes back to being a terminal.
+
+  It covers an interactive bash 4.1+, zsh or PowerShell prompt. Everywhere else
+  the command runs exactly as typed, unchanged: fish, the macOS system bash,
+  your own `claude` wrapper, `command claude`, pipelines, background jobs,
+  non-session subcommands, and a launch carrying agent environment the daemon
+  does not have. Where Quil declines to convert a Claude launch it still records
+  the session, so the pane resumes that conversation after a restart.
+
+  Set `[agents] hand_started` to `adopt`, `notify` or `off` to change or disable
+  it; `command claude` bypasses it for one invocation.
+
+### Changed
+- **Sandbox Claude panes now default to the in-container browser sign-in** (`[sandbox] auth = "browser"`) instead of the forwarded token. The token flow saves a `CLAUDE_CODE_OAUTH_TOKEN` to your OS user environment, and every process started afterwards inherits it — including the daemon, and so every *ordinary* Claude pane it spawns. Picking it once for one sandbox pane therefore moved every Claude pane on the machine onto "Claude API": a smaller `/model` list with no Fable, no Remote Control, no claude.ai connectors, and usage off the subscription you are paying for. Only the exact string `auth = "token"` selects it now; an unset, misspelled or wrong-case value resolves to the browser flow, which stores nothing outside the pane. The create dialog's **Sign in** row leads with Browser and its Token option now names the machine-wide cost. An existing pane moving from token to browser is repaired on the way: a pane prepared for a forwarded token carries a Quil-written config marking its first-run screens answered, and the sign-in is one of those screens — so Quil removes just that answer and leaves the theme, trust answers and history alone, instead of opening the pane on a prompt it cannot authenticate. If you already have the variable set, delete `CLAUDE_CODE_OAUTH_TOKEN` from your user environment and restart the daemon to go back to your subscription.
+
+### Internal
+- **`./scripts/dev.sh build` now targets the host platform instead of always
+  cross-compiling for Windows.** On macOS and Linux it writes `quil`, `quild`,
+  `quil-dev`, `quild-dev`, `quil-debug` and `quild-debug` for that machine, and
+  skips the Windows-only prologue — the ConPTY fetch, the `go-winres` icon
+  resources and `quil-activate.exe`, all of which are behind `//go:build
+  windows` and unusable in the resulting binaries. Before this, a non-Windows
+  checkout ended up with seven executables that could not run on the machine
+  that had just built them, and the unsigned `quil-activate.exe` among them was
+  reliably quarantined by endpoint security. Set `QUIL_BUILD_GOOS=windows`
+  (optionally with `QUIL_BUILD_GOARCH`) to get the old behaviour from any host;
+  `cross` is unchanged and still emits every platform. `clean` is now driven off
+  the same binary list as `build`, so it removes the suffix-less names too — it
+  never did before.
+
 ## [1.74.1] - 2026-09-19
 
 ### Fixed

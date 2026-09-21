@@ -49,33 +49,25 @@ jobs:
       # (the project's go-testing rule requires CI to run with -race). -timeout
       # makes a deadlocked test fail fast WITH a full goroutine dump naming the
       # culprit, instead of hanging until the job timeout.
-      # Failures are echoed into the job SUMMARY, not left only in the log.
-      # Reading a job log needs admin rights on the repository, so on a red run
-      # a contributor — or anyone reviewing the PR — is told that "test" failed
-      # and nothing else. The summary is part of the check itself and readable
-      # by anyone who can see the PR, which is where the names of the failing
-      # tests belong.
+      # Failures are echoed as ANNOTATIONS, not left only in the log.
+      # Reading a workflow job log needs admin rights on the repository, so on a
+      # red run a contributor — or anyone reviewing the PR — is told that "test"
+      # failed and nothing else. Annotations are part of the check itself and
+      # readable by anyone who can see the pull request, which is where the
+      # names of the failing tests belong. GITHUB_STEP_SUMMARY is not an
+      # alternative here: it renders on the run page but is absent from the
+      # check-run API, so it is unreadable to exactly the people this is for.
       #
       # pipefail so the step still fails on a test failure: tee's exit status
-      # would otherwise mask go test's.
+      # would otherwise mask go test's, turning a red check green.
       - name: Run go test -race -timeout 300s ./...
         shell: bash
         run: |
           set -o pipefail
           go test -race -timeout 300s ./... 2>&1 | tee /tmp/test.log || {
-            {
-              echo "### Failing tests"
-              echo
-              echo '```'
-              grep -E "^(--- FAIL|    --- FAIL|FAIL|panic:|WARNING: DATA RACE)" /tmp/test.log | head -60
-              echo '```'
-              echo
-              echo "### Assertion messages"
-              echo
-              echo '```'
-              grep -E "^\s+[a-z_]+\.go:[0-9]+:" /tmp/test.log | head -40
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
+            grep -E "^(--- FAIL|    --- FAIL|panic:|WARNING: DATA RACE)|^\s+[a-z_]+\.go:[0-9]+:" /tmp/test.log \
+              | head -30 \
+              | while IFS= read -r line; do echo "::error::${line}"; done
             exit 1
           }
       # The build tag keeps these out of the run above — and out of compilation

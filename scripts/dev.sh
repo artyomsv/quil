@@ -5,6 +5,51 @@ set -euo pipefail
 
 GO_IMAGE="golang:1.25-alpine"
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd -W 2>/dev/null || pwd)"
+
+# TARGET_GOOS / TARGET_GOARCH are the HOST platform by default, not Windows.
+#
+# `build` used to hardcode GOOS=windows for all seven binaries. That is correct
+# on the machine this project is developed on and wrong on every other one: a
+# macOS or Linux checkout ended up with seven executables that cannot run on the
+# machine that just built them, so `build` could never be followed by running
+# the thing it built.
+#
+# It also tripped endpoint security. An unsigned PE written into a home
+# directory by a Docker helper process is precisely the shape a static-AI
+# scanner flags, and quil-activate.exe — 2 MB, windowsgui-linked, no console —
+# is the most suspicious-looking of the set. A binary the host cannot execute
+# has no upside to weigh against that.
+#
+# Overridable, so a Windows build is one variable away from any host:
+#   QUIL_BUILD_GOOS=windows ./scripts/dev.sh build
+# `cross` is unchanged and still emits every platform including Windows — that
+# is what it is for.
+host_goos() {
+  case "$(uname -s)" in
+    Darwin)                          echo darwin  ;;
+    Linux)                           echo linux   ;;
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) echo windows ;;
+    # Unknown kernels get linux rather than an error: the container this runs in
+    # is Linux, so it is the one target guaranteed to compile.
+    *)                               echo linux   ;;
+  esac
+}
+
+host_goarch() {
+  case "$(uname -m)" in
+    arm64|aarch64) echo arm64 ;;
+    x86_64|amd64)  echo amd64 ;;
+    *)             echo amd64 ;;
+  esac
+}
+
+TARGET_GOOS="${QUIL_BUILD_GOOS:-$(host_goos)}"
+TARGET_GOARCH="${QUIL_BUILD_GOARCH:-$(host_goarch)}"
+
+# EXE is the filename suffix, and only that. .gitignore already lists both
+# spellings of all six names, and findDaemonBinary appends .exe itself on
+# Windows, so -X main.daemonBinary= stays suffix-less on every target.
+if [ "$TARGET_GOOS" = "windows" ]; then EXE=".exe"; else EXE=""; fi
 # quil-gomod persists downloaded modules; quil-gocache persists COMPILED
 # packages. The build cache is the load-bearing one: without it every
 # `docker run --rm` starts with an empty /root/.cache/go-build and recompiles
@@ -42,7 +87,16 @@ pkg_target() {
 
 # BUILT_BINARIES are every file `build` writes and `clean` removes, in this
 # project directory. Production installs live elsewhere and are never touched.
-BUILT_BINARIES="quil-dev.exe quild-dev.exe quil-debug.exe quild-debug.exe quil.exe quild.exe quil-activate.exe quil quild"
+#
+# BOTH spellings are listed, not just this host's. A checkout built for Windows
+# last week and for darwin today holds both sets, and the probe below skips
+# names that do not exist — so the union costs nothing and catches a holder of
+# the other set, which a host-scoped list would walk straight past. The
+# suffix-less dev and debug names were missing here entirely, which is why a
+# darwin quil-dev survived every `clean` ever run.
+BUILT_BINARIES="quil quild quil-dev quild-dev quil-debug quild-debug"
+BUILT_BINARIES="$BUILT_BINARIES quil.exe quild.exe quil-dev.exe quild-dev.exe"
+BUILT_BINARIES="$BUILT_BINARIES quil-debug.exe quild-debug.exe quil-activate.exe"
 
 # refuse_if_binaries_held stops a build that would silently half-finish.
 #
@@ -89,7 +143,7 @@ refuse_if_binaries_held() {
 
   Close any Quil started from this directory. If a dev daemon is running:
 
-    QUIL_HOME="$PROJECT_DIR/.quil" "$PROJECT_DIR/quil-dev.exe" daemon stop
+    QUIL_HOME="$PROJECT_DIR/.quil" "$PROJECT_DIR/quil-dev$EXE" daemon stop
 
   Only files in $PROJECT_DIR were checked.
   A production install elsewhere is untouched.
@@ -105,23 +159,43 @@ case "${1:-help}" in
     # problem costs a second rather than a full build.
     sh "$PROJECT_DIR/scripts/check-claude-md-size.sh"
     refuse_if_binaries_held
+    echo "building for $TARGET_GOOS/$TARGET_GOARCH (override: QUIL_BUILD_GOOS / QUIL_BUILD_GOARCH)" >&2
+
+    # WIN_PREP is the Windows-only prologue, and every piece of it is gated
+    # behind //go:build windows in the tree:
+    #   - fetch-conpty.sh downloads the OpenConsole pair that
+    #     internal/pty/winconpty/embed_windows.go go:embeds;
+    #   - go-winres writes the rsrc_windows_*.syso the linker picks up only
+    #     when GOOS=windows.
+    # A darwin or linux build can neither use nor link either one, and each
+    # costs a network fetch, so the whole block is skipped rather than made
+    # harmless. It ends in `&&` so it chains, and is empty on every other
+    # target. VER is computed BEFORE it, because go-winres stamps it.
+    WIN_PREP=""
+    ACTIVATE_STEP=""
+    if [ "$TARGET_GOOS" = "windows" ]; then
+      WIN_PREP="apk add --no-cache curl unzip >/dev/null 2>&1 && sh scripts/fetch-conpty.sh && go install github.com/tc-hib/go-winres@v0.3.3 && go-winres make --in winres/winres.json --out cmd/quil/rsrc --product-version \$VER --file-version \$VER && go-winres make --in winres/winres.json --out cmd/quild/rsrc --product-version \$VER --file-version \$VER &&"
+      # quil-activate is a Windows URI handler. Its non-Windows file is a stub
+      # that prints an error and exits 1 — building it elsewhere produces a
+      # 2 MB executable whose only behaviour is to refuse.
+      ACTIVATE_STEP="&& go build -ldflags \"\$F -H windowsgui\" -o quil-activate.exe ./cmd/quil-activate"
+    fi
+
+    # GOOS/GOARCH are exported once rather than prefixed onto each build: seven
+    # copies of the same pair is seven chances for one to drift.
     $DOCKER_RUN sh -c "\
-      apk add --no-cache curl unzip >/dev/null 2>&1 && \
-      sh scripts/fetch-conpty.sh && \
-      go install github.com/tc-hib/go-winres@v0.3.3 && \
+      export GOOS=$TARGET_GOOS GOARCH=$TARGET_GOARCH && \
       VER=\$(cat VERSION) && \
-      go-winres make --in winres/winres.json --out cmd/quil/rsrc --product-version \$VER --file-version \$VER && \
-      go-winres make --in winres/winres.json --out cmd/quild/rsrc --product-version \$VER --file-version \$VER && \
+      $WIN_PREP \
       F=\"-s -w -X main.version=\$VER\" && \
       F_DEV=\"\$F -X main.buildDevMode=true -X main.buildLogLevel=debug -X main.daemonBinary=quild-dev -X main.buildUpdatesOff=true\" && \
       F_DBG=\"\$F -X main.buildLogLevel=debug -X main.daemonBinary=quild-debug -X main.buildUpdatesOff=true\" && \
-      GOOS=windows GOARCH=amd64 go build -ldflags \"\$F_DEV\" -o quil-dev.exe    ./cmd/quil  && \
-      GOOS=windows GOARCH=amd64 go build -ldflags \"\$F_DEV\" -o quild-dev.exe   ./cmd/quild && \
-      GOOS=windows GOARCH=amd64 go build -ldflags \"\$F_DBG\" -o quil-debug.exe  ./cmd/quil  && \
-      GOOS=windows GOARCH=amd64 go build -ldflags \"\$F_DBG\" -o quild-debug.exe ./cmd/quild && \
-      GOOS=windows GOARCH=amd64 go build -ldflags \"\$F\"     -o quil.exe        ./cmd/quil  && \
-      GOOS=windows GOARCH=amd64 go build -ldflags \"\$F\"     -o quild.exe       ./cmd/quild && \
-      GOOS=windows GOARCH=amd64 go build -ldflags \"\$F -H windowsgui\" -o quil-activate.exe ./cmd/quil-activate"
+      go build -ldflags \"\$F_DEV\" -o quil-dev$EXE    ./cmd/quil  && \
+      go build -ldflags \"\$F_DEV\" -o quild-dev$EXE   ./cmd/quild && \
+      go build -ldflags \"\$F_DBG\" -o quil-debug$EXE  ./cmd/quil  && \
+      go build -ldflags \"\$F_DBG\" -o quild-debug$EXE ./cmd/quild && \
+      go build -ldflags \"\$F\"     -o quil$EXE        ./cmd/quil  && \
+      go build -ldflags \"\$F\"     -o quild$EXE       ./cmd/quild $ACTIVATE_STEP"
     ;;
 
   test)
@@ -238,11 +312,10 @@ case "${1:-help}" in
     # Same reason as build: rm cannot remove a held executable, and `set -e`
     # would abort the cleanup partway through.
     refuse_if_binaries_held
-    rm -f "$PROJECT_DIR/quil" "$PROJECT_DIR/quild" \
-          "$PROJECT_DIR/quil.exe" "$PROJECT_DIR/quild.exe" \
-          "$PROJECT_DIR/quil-dev.exe" "$PROJECT_DIR/quild-dev.exe" \
-          "$PROJECT_DIR/quil-debug.exe" "$PROJECT_DIR/quild-debug.exe" \
-          "$PROJECT_DIR/quil-activate.exe"
+    # Driven off BUILT_BINARIES so the two lists cannot drift. The hand-written
+    # list this replaces named only the .exe spellings plus bare quil/quild, so
+    # a native quil-dev built on macOS was never removed by `clean` at all.
+    for name in $BUILT_BINARIES; do rm -f "$PROJECT_DIR/$name"; done
     rm -f "$PROJECT_DIR"/cmd/quil/rsrc*.syso "$PROJECT_DIR"/cmd/quild/rsrc*.syso
     rm -rf "$PROJECT_DIR/dist/"
     ;;
@@ -256,7 +329,9 @@ case "${1:-help}" in
     echo "Usage: ./dev.sh <command>"
     echo ""
     echo "Commands:"
-    echo "  build          Build all variants: prod, dev, debug (6 binaries) + quil-activate.exe"
+    echo "  build          Build prod, dev and debug for THIS host ($TARGET_GOOS/$TARGET_GOARCH)"
+    echo "                 Windows also gets quil-activate.exe. Override the target with"
+    echo "                 QUIL_BUILD_GOOS=windows QUIL_BUILD_GOARCH=amd64 ./scripts/dev.sh build"
     echo "  test [pkg]     Run tests (all, or just ./<pkg>/...)"
     echo "  test-race [pkg]  Run tests with race detector"
     echo "  bench [label] [pkg]  Run benchmarks -> bench/<label>.txt (default pkg: internal/ipc)"

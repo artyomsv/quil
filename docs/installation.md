@@ -69,13 +69,20 @@ You need this if you're hacking on Quil or want a build with debug instrumentati
 `scripts/dev.sh` (or `dev.ps1` on Windows) is a Docker wrapper around the Go toolchain — no local install needed:
 
 ```bash
-./scripts/dev.sh build        # Build all 6 binaries (prod + dev + debug pairs)
+./scripts/dev.sh build        # Build 6 binaries for THIS host (prod + dev + debug pairs)
 ./scripts/dev.sh test         # Run the full test suite
 ./scripts/dev.sh test-race    # Tests with race detector (CGo handled automatically)
 ./scripts/dev.sh vet          # go vet
 ./scripts/dev.sh cross        # Cross-compile to all 5 platforms (Linux/macOS amd64+arm64, Windows amd64)
 ./scripts/dev.sh image        # Build the scratch-based Docker image
 ./scripts/dev.sh clean        # Remove built binaries
+```
+
+`build` compiles for the machine you run it on. Building for Windows from macOS or
+Linux is an explicit opt-in, and adds the seventh binary, `quil-activate.exe`:
+
+```bash
+QUIL_BUILD_GOOS=windows QUIL_BUILD_GOARCH=amd64 ./scripts/dev.sh build
 ```
 
 The Go module cache is persisted in a Docker volume (`quil-gomod`) for fast repeated builds.

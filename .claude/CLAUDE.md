@@ -47,7 +47,7 @@ packages, so they cost nothing on unrelated work.
 Go and make are NOT installed locally. Use `scripts/dev.sh` (Docker-based):
 
 ```bash
-./scripts/dev.sh build          # Build all variants: prod, dev, debug (6 binaries) + quil-activate.exe
+./scripts/dev.sh build          # Build prod, dev, debug pairs FOR THIS HOST (+ quil-activate.exe on Windows)
 ./scripts/dev.sh test           # Run tests
 ./scripts/dev.sh test-race      # Tests with race detector (CGo — handled automatically)
 ./scripts/dev.sh vet            # Lint
@@ -66,7 +66,23 @@ There is deliberately no override flag, for the same reason `refuse_if_binaries_
 
 ### Build Variants
 
-`build` produces three matched pairs via compile-time ldflags:
+**`build` targets the HOST platform, not Windows.** `TARGET_GOOS`/`TARGET_GOARCH` come
+from `uname` and are overridable with `QUIL_BUILD_GOOS`/`QUIL_BUILD_GOARCH`
+(`QUIL_BUILD_GOOS=windows ./scripts/dev.sh build` restores the old behaviour from any
+host). On a non-Windows target the entire Windows prologue is SKIPPED, not merely
+unused: `fetch-conpty.sh`, both `go-winres` invocations and `quil-activate.exe` are each
+gated behind `//go:build windows` in the tree, so their output cannot be linked into a
+darwin or linux binary, and each costs a network fetch. The names lose the `.exe` —
+`.gitignore` already lists both spellings of all six, and `findDaemonBinary` appends
+`.exe` itself on Windows, so `-X main.daemonBinary=` stays suffix-less on every target.
+It hardcoded `GOOS=windows` until September 2026, which left every macOS and Linux
+checkout holding seven executables that could not run on the machine that built them —
+and the unsigned, console-less `quil-activate.exe` among them is the exact shape a
+static-AI endpoint scanner quarantines. `cross` is deliberately unchanged: emitting
+every platform is what it is for. `clean` now iterates `BUILT_BINARIES` rather than a
+hand-written list, which is why a native `quil-dev` used to survive it.
+
+`build` produces three matched pairs via compile-time ldflags (`.exe` on Windows only):
 
 | Variant | TUI | Daemon | Behavior |
 |---------|-----|--------|----------|

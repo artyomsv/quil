@@ -78,6 +78,18 @@ func (d *Daemon) adoptClaudeSession(pane *Pane, target *plugin.PanePlugin, m han
 	gen := pane.ptyGen
 	pane.PluginMu.Unlock()
 
+	// Both seams are READ ONCE, here, rather than inside the goroutine.
+	//
+	// They are package-level test seams, and this goroutine outlives the call
+	// by design — up to the whole backoff. A test that swaps one and restores
+	// it in t.Cleanup would then be writing it while a goroutine from an
+	// earlier test is still reading, which is a data race that the race
+	// detector is entitled to fail on and which no amount of local passing
+	// disproves. Capturing them also makes the retry loop use one scan
+	// function throughout rather than whichever is installed at each wake.
+	scan := listSessionsFn
+	schedule := handStartAdoptSchedule()
+
 	// Off the output goroutine: this sleeps and then walks a directory, and
 	// that goroutine is on the path of every byte the pane produces.
 	go func() {
@@ -88,7 +100,7 @@ func (d *Daemon) adoptClaudeSession(pane *Pane, target *plugin.PanePlugin, m han
 		// tracked nor told.
 		var id string
 		var ok bool
-		for _, wait := range handStartAdoptSchedule() {
+		for _, wait := range schedule {
 			select {
 			case <-d.shutdown:
 				return
@@ -102,7 +114,7 @@ func (d *Daemon) adoptClaudeSession(pane *Pane, target *plugin.PanePlugin, m han
 				return
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), handStartScanTimeout)
-			sessions, err := listSessionsFn(ctx, cwd)
+			sessions, err := scan(ctx, cwd)
 			cancel()
 			if err != nil {
 				logger.Debug("pane %s: adopt scan: %v", pane.ID, err)

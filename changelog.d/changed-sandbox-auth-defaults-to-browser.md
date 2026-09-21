@@ -1,0 +1,5 @@
+---
+headline: Sandbox panes sign in with your subscription by default
+---
+
+- **Sandbox Claude panes now default to the in-container browser sign-in** (`[sandbox] auth = "browser"`) instead of the forwarded token. The token flow saves a `CLAUDE_CODE_OAUTH_TOKEN` to your OS user environment, and every process started afterwards inherits it — including the daemon, and so every *ordinary* Claude pane it spawns. Picking it once for one sandbox pane therefore moved every Claude pane on the machine onto "Claude API": a smaller `/model` list with no Fable, no Remote Control, no claude.ai connectors, and usage off the subscription you are paying for. Only the exact string `auth = "token"` selects it now; an unset, misspelled or wrong-case value resolves to the browser flow, which stores nothing outside the pane. The create dialog's **Sign in** row leads with Browser and its Token option now names the machine-wide cost. If you already have the variable set, delete `CLAUDE_CODE_OAUTH_TOKEN` from your user environment and restart the daemon to go back to your subscription.

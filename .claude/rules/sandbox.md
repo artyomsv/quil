@@ -226,22 +226,46 @@ Sandbox panes have **no network egress restriction**. `RunArgs` passes no
 dev container cannot work here (it needs `NET_ADMIN`). The mount set is the
 boundary this feature enforces; egress is not, and the docs say so.
 
-## The token flow is the DEFAULT, and `""` means it
+## The BROWSER flow is the default, and only `"token"` selects the other one
 
-The design chose `claude setup-token` as the main path and the in-container
-browser sign-in as the fallback. The code shipped the reverse, because
-`SandboxConfig` is absent from `config.Default()` — so `Auth` was the zero
-value `""`, and `""` meant browser. Every pane asked the user to sign in again
-with nothing on screen connecting that prompt to the token they had set up.
+**The token flow is not contained by the pane, and that is why it cannot be the
+default.** `claude setup-token` mints a credential that `internal/userenv`
+saves to the user's persistent environment — Quil deliberately keeps no copy of
+its own — and Windows builds every new process's environment from its parent's,
+so the daemon and therefore every ORDINARY Claude pane it spawns inherits it.
+Claude Code prefers that token over an interactive login. Measured 2026-09-21:
+a user who had opened one sandbox pane found every pane, sandbox or not,
+authenticating as "Claude API" with a smaller `/model` list, and their usage off
+the subscription they were paying for. Nothing on screen connected the two, and
+the diagnosis took a registry write-time comparison against two daemons' start
+times. A default that can move someone's billing is wrong whatever the sign-in
+cost of the alternative.
 
 **Read `Auth` only through `SandboxConfig.ResolveAuth`.** `""` resolves to the
-TOKEN flow, and that is the migration rather than a nicety: `Load` starts from
+BROWSER flow, and that is the migration rather than a nicety: `Load` starts from
 `Default()` and lets the decoder overwrite only the keys a file NAMES, and
 every `config.toml` on disk names `auth = ""` — so changing `Default()` alone
 reaches no existing install (the property `unfocused_dim_enabled` documents).
 Making the zero value mean the intended default is the only change that reaches
-everyone, and it costs nothing: before `"browser"` existed there was no way to
-ASK for the fallback, so no `""` on disk can be a deliberate choice of it.
+everyone.
+
+**The resolver is asymmetric on purpose**: only the exact string `"token"`
+selects the token flow. `""`, a typo, the wrong case and stray whitespace all
+resolve to browser, which stores nothing and therefore cannot move anyone's
+usage anywhere. `TestResolveAuth_OnlyAnExplicitChoiceSelectsTheToken` pins that
+as a property rather than as a list of literals, because the defect class here
+is a default drifting, not a spelling.
+
+It meant browser once before, was changed to token because `""` was then
+indistinguishable from "unset" (nothing could ASK for the fallback, so every
+pane re-prompted with nothing explaining why), and is browser again for the
+reason above. That earlier argument no longer holds: `"browser"` is a value a
+config can name.
+
+**A test about token behaviour must NAME the mode** — `tokenFlowConfig()` in
+`internal/daemon/sandbox_signin_test.go`. Nine tests there described "the
+default" while their names claimed to describe the token flow, and all nine
+went red on this change rather than one.
 
 `sandboxIdentity` and `dockerCLIEnv` must agree, and both now take the RESOLVED
 mode. They used to compare against the literal `"token"` separately, so a
@@ -500,6 +524,13 @@ Per-pane because the trade is per-pane and both halves are measured: a token
 pane needs no sign-in but authenticates as "Claude API" (no Fable, no Remote
 Control), while a browser pane signs in inside its own container and gets the
 full subscription. Neither is right for every pane.
+
+**The token half of that trade is NOT per-pane, though, and the row says so.**
+One pane picking it persists a credential every later process inherits, so the
+choice is per-pane in what it costs this container and machine-wide in what it
+costs every other Claude — which is why `browser` leads `sandboxAuthChoices`
+and why the token option's detail line names the reach rather than only the
+lost features.
 
 **Everything that decides how a container authenticates goes through
 `paneAuthMode`** — `needsSandboxSignIn`, `sandboxTokenAvailable` and

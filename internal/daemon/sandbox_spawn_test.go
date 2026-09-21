@@ -179,14 +179,19 @@ func TestDockerCLIEnv_OnlyCarriesTheTokenUnderTokenAuth(t *testing.T) {
 		t.Errorf("the browser fallback passed env to the docker CLI: %v", env)
 	}
 
-	// Both spellings of the token flow, including the empty one every
-	// existing config.toml carries.
-	for _, auth := range []string{"", "token"} {
-		mode, _ := config.SandboxConfig{Auth: auth}.ResolveAuth()
-		env := dockerCLIEnv(mode)
-		if len(env) != 1 || !strings.HasPrefix(env[0], oauthTokenEnv+"=") {
-			t.Errorf("auth=%q env = %v, want the token variable", auth, env)
-		}
+	// Only the named token flow forwards it. The empty value every existing
+	// config.toml carries now means the browser flow, so it is covered by the
+	// row above rather than here — a credential the user did not ask for must
+	// not reach a container.
+	mode, _ := config.SandboxConfig{Auth: "token"}.ResolveAuth()
+	env := dockerCLIEnv(mode)
+	if len(env) != 1 || !strings.HasPrefix(env[0], oauthTokenEnv+"=") {
+		t.Errorf("auth=\"token\" env = %v, want the token variable", env)
+	}
+
+	unset, _ := config.SandboxConfig{}.ResolveAuth()
+	if env := dockerCLIEnv(unset); len(env) != 0 {
+		t.Errorf("an unset auth passed env to the docker CLI: %v", env)
 	}
 }
 
@@ -209,8 +214,8 @@ func TestSandboxAuth_IdentityAndCLIEnvAgree(t *testing.T) {
 		auth        string
 		wantForward bool
 	}{
-		{"", true},      // every config already on disk
-		{"token", true}, // explicit
+		{"", false},     // every config already on disk — now the browser flow
+		{"token", true}, // explicit, the only value that forwards
 		{"browser", false},
 		{"typo", false}, // unrecognised falls back
 	} {

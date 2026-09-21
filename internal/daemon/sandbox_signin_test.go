@@ -14,9 +14,20 @@ import (
 	"github.com/artyomsv/quil/internal/sandbox"
 )
 
-// Opening a sandbox pane with no token must trigger the sign-in, or the pane
-// falls through to a per-container login the user has to repeat for every pane
-// — the state this whole flow exists to remove.
+// tokenFlowConfig is config.Default() with the token flow NAMED.
+//
+// The shipped default is the browser flow, deliberately — the token flow saves
+// a credential into the user's environment that every later process inherits,
+// so it is reachable only by asking for it (see config.ResolveAuth). A test
+// about token behaviour therefore has to say so. Leaving it implicit is what
+// let nine tests here describe "the default" while their names claimed to
+// describe the token mode.
+func tokenFlowConfig() config.Config {
+	c := config.Default()
+	c.Sandbox.Auth = string(config.SandboxAuthToken)
+	return c
+}
+
 func TestNeedsSandboxSignIn(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -24,9 +35,14 @@ func TestNeedsSandboxSignIn(t *testing.T) {
 		token string
 		want  bool
 	}{
-		{"token flow, no token", "", "", true},
 		{"token flow explicit, no token", "token", "", true},
-		{"token flow, token present", "", "sk-ant-x", false},
+		{"token flow explicit, token present", "token", "sk-ant-x", false},
+		// The default is the per-pane sign-in, so an untouched config must
+		// never drive `claude setup-token` on the user's behalf — that writes
+		// a credential into their environment which every later process
+		// inherits, including the ones running ORDINARY panes.
+		{"unset follows the browser default", "", "", false},
+		{"unset with a token present still does not", "", "sk-ant-x", false},
 		// The user chose the per-pane sign-in. Hijacking that with a browser
 		// window would override an explicit decision.
 		{"browser chosen, no token", "browser", "", false},
@@ -93,7 +109,7 @@ func TestSpawnPane_SandboxWithNoTokenStartsTheSignIn(t *testing.T) {
 	withClaudePlugin(t, d)
 	pane.Type = "claude-code"
 	t.Setenv(oauthTokenEnv, "")
-	d.cfg = config.Default() // token flow by default
+	d.cfg = tokenFlowConfig()
 	// Stubbed like every sibling in this file: without it adoptPersistedToken
 	// reads the DEVELOPER's own HKCU token on Windows, concludes no sign-in is
 	// needed, and this test fails deterministically — invisible on Linux CI,
@@ -170,7 +186,7 @@ func TestNeedsSandboxSignIn_AdoptsTheSavedToken(t *testing.T) {
 	userenvGet = func(string) (string, error) { return "sk-ant-saved-earlier", nil }
 	t.Cleanup(func() { userenvGet = prevGet })
 
-	d := &Daemon{cfg: config.Default()}
+	d := &Daemon{cfg: tokenFlowConfig()}
 	if d.needsSandboxSignIn(nil) {
 		t.Error("a second sign-in was started while a saved token was available — " +
 			"the new token supersedes the one running panes are using")
@@ -189,7 +205,7 @@ func TestNeedsSandboxSignIn_NoSavedTokenStillSignsIn(t *testing.T) {
 	userenvGet = func(string) (string, error) { return "", nil }
 	t.Cleanup(func() { userenvGet = prevGet })
 
-	d := &Daemon{cfg: config.Default()}
+	d := &Daemon{cfg: tokenFlowConfig()}
 	if !d.needsSandboxSignIn(nil) {
 		t.Error("no sign-in was started with no token anywhere")
 	}
@@ -210,7 +226,8 @@ func TestPaneAuthMode_ThePaneChoiceBeatsTheConfig(t *testing.T) {
 		{"pane picks browser against a token config", "token", "browser", config.SandboxAuthBrowser},
 		{"pane picks token against a browser config", "browser", "token", config.SandboxAuthToken},
 		{"untouched pane follows the config", "browser", "", config.SandboxAuthBrowser},
-		{"untouched pane follows the default", "", "", config.SandboxAuthToken},
+		{"untouched pane follows the config, token", "token", "", config.SandboxAuthToken},
+		{"untouched pane and untouched config get the browser default", "", "", config.SandboxAuthBrowser},
 		// A snapshot from a future version must not pin a pane to a mode this
 		// build cannot honour.
 		{"unknown stored value falls back to the config", "browser", "future-mode", config.SandboxAuthBrowser},
@@ -231,7 +248,7 @@ func TestPaneAuthMode_ThePaneChoiceBeatsTheConfig(t *testing.T) {
 // was chosen to avoid.
 func TestNeedsSandboxSignIn_ABrowserPaneNeverUsesTheHostToken(t *testing.T) {
 	t.Setenv(oauthTokenEnv, "")
-	d := &Daemon{cfg: config.Default()} // token flow configured
+	d := &Daemon{cfg: tokenFlowConfig()} // the host token IS available here
 	pane := &Pane{ID: "p1", SandboxAuth: "browser"}
 
 	if d.needsSandboxSignIn(pane) {
@@ -337,7 +354,7 @@ func TestBeginSandboxSignIn_StillFiresForClaudeCode(t *testing.T) {
 	}
 	t.Cleanup(func() { captureTokenFn = prevCap })
 
-	d := &Daemon{cfg: config.Default(), session: NewSessionManager(1024), events: newEventQueue(50)}
+	d := &Daemon{cfg: tokenFlowConfig(), session: NewSessionManager(1024), events: newEventQueue(50)}
 	// Registered BEFORE the call, so it runs AFTER the cleanups above are
 	// queued and therefore BEFORE them (t.Cleanup is LIFO). The sign-in runs
 	// on its own goroutine and reads captureTokenFn there, so returning
@@ -356,7 +373,7 @@ func TestBeginSandboxSignIn_StillFiresForClaudeCode(t *testing.T) {
 // it shows.
 func TestSandboxTokenAvailable_OnlyForClaudeCode(t *testing.T) {
 	t.Setenv(oauthTokenEnv, "sk-ant-present")
-	d := &Daemon{cfg: config.Default()}
+	d := &Daemon{cfg: tokenFlowConfig()}
 	pane := &Pane{ID: "p1"}
 
 	if !d.sandboxTokenAvailable(pane, "claude-code") {

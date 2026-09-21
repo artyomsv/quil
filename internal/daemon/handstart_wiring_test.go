@@ -86,8 +86,15 @@ func TestSpawnPane_BindsTheTokenTheShellWasStartedWith(t *testing.T) {
 		t.Fatalf("answered %q, want %q — the chain is broken somewhere between "+
 			"the spawn and the detector", got, handStartReplyConvert)
 	}
-	if pane.Type != "claude-code" {
-		t.Fatalf("pane type = %q, want claude-code", pane.Type)
+	// Under PluginMu, like the token read above: Pane.Type is written there by
+	// every path that owns it, and this bare read is what the race detector
+	// reported alongside the failure above. Keeping the lock means the next
+	// change to the fixture cannot quietly reintroduce the report.
+	pane.PluginMu.Lock()
+	gotType := pane.Type
+	pane.PluginMu.Unlock()
+	if gotType != "claude-code" {
+		t.Fatalf("pane type = %q, want claude-code", gotType)
 	}
 }
 

@@ -60,14 +60,29 @@ jobs:
       #
       # pipefail so the step still fails on a test failure: tee's exit status
       # would otherwise mask go test's, turning a red check green.
+      #
+      # The pattern must cover a BUILD failure as well as a test failure, and
+      # those look nothing alike. A compiler error is `internal/x/y.go:12:3: …`
+      # at column zero with slashes in it; the first pattern here only matched
+      # an INDENTED bare filename, so a package that did not compile produced a
+      # red check with no annotation at all — exactly the case where the log is
+      # least guessable. `\.go:[0-9]+:` unanchored covers both, and the trailing
+      # colon is what keeps goroutine-dump frames (`panic.go:770 +0x132`) out.
+      #
+      # ::error:: is a workflow COMMAND, not text: an unescaped `%` or CR in the
+      # message is parsed rather than shown, so `%0A` inside a failure string
+      # would split the annotation. Escape `%` first, then CR — PTY-shaped test
+      # output is CRLF, so the CR is routine here, not hypothetical.
       - name: Run go test -race -timeout 300s ./...
         shell: bash
         run: |
           set -o pipefail
           go test -race -timeout 300s ./... 2>&1 | tee /tmp/test.log || {
-            grep -E "^(--- FAIL|    --- FAIL|panic:|WARNING: DATA RACE)|^\s+[a-z_]+\.go:[0-9]+:" /tmp/test.log \
+            grep -E "^(--- FAIL|    --- FAIL|panic:|WARNING: DATA RACE|# |FAIL.*\[build failed\])|\.go:[0-9]+:" /tmp/test.log \
               | head -30 \
-              | while IFS= read -r line; do echo "::error::${line}"; done
+              | while IFS= read -r line; do
+                  printf '::error::%s\n' "$(printf '%s' "$line" | sed -e 's/%/%25/g' -e 's/\r/%0D/g')"
+                done
             exit 1
           }
       # The build tag keeps these out of the run above — and out of compilation

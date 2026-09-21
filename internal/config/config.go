@@ -28,6 +28,7 @@ type Config struct {
 	Update       UpdateConfig       `toml:"update"`
 	Remote       RemoteConfig       `toml:"remote"`
 	Sandbox      SandboxConfig      `toml:"sandbox"`
+	Agents       AgentsConfig       `toml:"agents"`
 	// Destinations are the ADDITIONAL daemons this client attaches to beside
 	// the local one, each contributing its projects to the same sidebar. A
 	// slice rather than a map because order is meaningful — it is the order the
@@ -45,23 +46,33 @@ type SandboxConfig struct {
 	// through ResolveAuth, never directly — "" is both "unset" and the
 	// migration path for every config written before "browser" existed.
 	//
-	// "" or "token" (default) — the daemon forwards CLAUDE_CODE_OAUTH_TOKEN
-	// from its OWN environment, by name, so the value never enters argv or
-	// any log. Run `claude setup-token` once and export the result where the
-	// daemon runs. With no credential file to share, a per-pane config
-	// directory costs nothing. It gives up Remote Control and claude.ai
-	// connectors for that pane.
+	// "" or "browser" (default) — the user signs in inside the container,
+	// once per pane, into that pane's own config directory. Anthropic
+	// documents the paste-the-code path for a callback that cannot reach a
+	// container. The pane gets the user's full subscription.
 	//
-	// "browser" — the FALLBACK: the user signs in inside the container, once
-	// per pane, into that pane's own config directory. Anthropic documents
-	// the paste-the-code path for a callback that cannot reach a container.
+	// "token" — the daemon forwards CLAUDE_CODE_OAUTH_TOKEN from its OWN
+	// environment, by name, so the value never enters argv or any log. A pane
+	// with no token signs in for the user by running `claude setup-token`.
+	// Faster to set up, but see below before choosing it.
 	//
-	// The token flow is the default because it is the one the design chose,
-	// and shipping the reverse was a real defect rather than a preference:
-	// "" is the zero value, so a config that never mentioned auth silently
-	// selected the fallback and every pane asked the user to sign in again,
-	// with nothing on screen explaining why the token they had set up was
-	// being ignored.
+	// THE TOKEN FLOW IS NOT CONTAINED BY THE PANE, which is why it is not the
+	// default. `claude setup-token` mints a credential the daemon saves to the
+	// user's persistent environment (HKCU\Environment on Windows), because Quil
+	// deliberately keeps no copy of its own. Every process started afterwards
+	// inherits it — including the daemon, and so every ORDINARY Claude pane it
+	// spawns. Claude Code prefers that token over an interactive login, so a
+	// subscriber who ticked the sandbox box once found every pane, sandbox or
+	// not, authenticating as "Claude API" with a smaller /model list, and their
+	// usage moved off the subscription they were paying for. A default that can
+	// do that is wrong whatever the sign-in cost of the alternative — so the
+	// token flow is now reachable only by naming it.
+	//
+	// It briefly meant browser once before, for an unrelated reason, and moved
+	// to token because "" was then indistinguishable from "unset": nothing
+	// could ASK for the fallback, so every pane re-prompted with nothing
+	// explaining why. That no longer holds — "browser" is a value a config can
+	// name — so the fallback being the zero value costs nothing irreversible.
 	//
 	// Quil never reads, copies, stores or refreshes a credential in either
 	// mode. Copying ~/.claude/.credentials.json is deliberately NOT
@@ -76,7 +87,9 @@ type SandboxConfig struct {
 	// servers), every transcript and the prompt history, so any sandbox pane
 	// can then plant a hook or an MCP server that every OTHER sandbox pane's
 	// claude executes inside its own container. Off by default for that
-	// reason; `auth = "token"` avoids the trade entirely.
+	// reason. It is the alternative to `auth = "token"` for signing in once
+	// instead of once per pane, and the trade to weigh against it: one shared
+	// trust domain here, or a credential every later Claude inherits there.
 	SharedClaudeConfig bool `toml:"shared_claude_config"`
 
 	// DefaultImage pre-fills the setup dialog's image field.
@@ -104,24 +117,29 @@ const (
 // ResolveAuth maps the configured Auth string onto the mode to act on, and
 // reports back any value it did not recognise so the caller can say so.
 //
-// "" resolves to the TOKEN flow, and that is the whole migration: Load starts
+// "" resolves to the BROWSER flow, and that is the whole migration: Load starts
 // from Default() and lets the decoder overwrite only the keys a file names, so
 // every config.toml already on disk names `auth = ""` explicitly. Changing
 // Default() alone would therefore reach no existing install — the same
 // property unfocused_dim_enabled documents. Making the zero value mean the
-// intended default is the only change that reaches everyone, and it costs
-// nothing: before "browser" existed there was no way to ASK for the fallback,
-// so no "" on disk can be a deliberate choice of it.
+// intended default is the only change that reaches everyone.
 //
-// An unrecognised value resolves to the fallback rather than refusing: it is a
-// typo in a sign-in preference, not an isolation property, and the browser
-// path is always safe — it uses no credential at all. The caller logs it.
+// Only the exact string "token" selects the token flow, and the asymmetry is
+// deliberate: that mode persists a credential into the user's environment where
+// every later process inherits it (see Auth above), so it must be something a
+// user NAMED, never something they landed on. Everything else — "", a typo,
+// wrong case, stray whitespace — resolves to browser, which uses no stored
+// credential at all and therefore cannot move anyone's usage anywhere.
+//
+// An unrecognised value is reported rather than refused: it is a typo in a
+// sign-in preference, not an isolation property, and it now fails toward the
+// safe mode. The caller logs it.
 func (c SandboxConfig) ResolveAuth() (mode SandboxAuthMode, unrecognised string) {
 	switch c.Auth {
-	case "", string(SandboxAuthToken):
-		return SandboxAuthToken, ""
-	case string(SandboxAuthBrowser):
+	case "", string(SandboxAuthBrowser):
 		return SandboxAuthBrowser, ""
+	case string(SandboxAuthToken):
+		return SandboxAuthToken, ""
 	default:
 		return SandboxAuthBrowser, c.Auth
 	}
@@ -603,6 +621,9 @@ func Default() Config {
 			MaxLines: 500,
 			Dimmed:   true,
 		},
+		Agents: AgentsConfig{
+			HandStarted: HandStartedConvert,
+		},
 		Logging: LoggingConfig{
 			Level:     "info",
 			MaxSizeMB: 5,
@@ -1010,4 +1031,40 @@ func UpdateNotifiedPath() string {
 // the what's-new for a version that was never installed.
 func LastRunPath() string {
 	return filepath.Join(UpdateDir(), "lastrun.json")
+}
+
+// Hand-started agent policy. What Quil does when an agent binary Quil knows how
+// to spawn is started by hand from a terminal pane's shell.
+const (
+	// HandStartedConvert opens the pane as the matching AI pane instead,
+	// carrying the arguments the user typed. The default: the user asked for
+	// that agent, and a pane that tracks its session is what they meant.
+	HandStartedConvert = "convert"
+	// HandStartedAdopt runs the binary as typed and records the session so the
+	// pane resumes it after a restart. No process is touched.
+	HandStartedAdopt = "adopt"
+	// HandStartedNotify runs it as typed and says the session is untracked.
+	HandStartedNotify = "notify"
+	// HandStartedOff runs it as typed and says nothing. Nothing is armed in the
+	// shell either, so there is no marker and no per-invocation pause.
+	HandStartedOff = "off"
+)
+
+// AgentsConfig governs agents started outside a typed pane.
+type AgentsConfig struct {
+	// HandStarted is one of the four constants above. An unrecognised value is
+	// treated as the default rather than refused: this is a hand-edited file,
+	// and a typo here must not stop the daemon starting.
+	HandStarted string `toml:"hand_started"`
+}
+
+// HandStartedPolicy normalises the configured value, answering the default for
+// anything unrecognised or unset.
+func (a AgentsConfig) HandStartedPolicy() string {
+	switch a.HandStarted {
+	case HandStartedAdopt, HandStartedNotify, HandStartedOff:
+		return a.HandStarted
+	default:
+		return HandStartedConvert
+	}
 }

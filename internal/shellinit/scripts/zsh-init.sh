@@ -33,3 +33,92 @@ __quil_preexec() { __quil_ran=1; printf '\e]133;B\e\\'; }
 (( ${precmd_functions[(Ie)__quil_precmd]:-0} )) || precmd_functions=(__quil_precmd $precmd_functions)
 (( ${precmd_functions[(Ie)__quil_osc7]:-0} )) || precmd_functions+=(__quil_osc7)
 (( ${preexec_functions[(Ie)__quil_preexec]:-0} )) || preexec_functions+=(__quil_preexec)
+
+# Hand-started agent interception (issue #221). See bash-init.sh for the
+# reasoning; zsh differs only in the read flag, the subshell variable and the
+# function-exists test. zsh needs no version gate — `read -k` is native.
+if [ -n "${QUIL_INTERCEPT}" ] && [ -n "${QUIL_INTERCEPT_TOKEN}" ]; then
+
+__quil_esc() {
+    local s=${1//\%/%25}
+    s=${s//;/%3B}
+    s=${s//,/%2C}
+    printf '%s' "$s"
+}
+
+__quil_intercept() {
+    local __qn=$1; shift
+
+    [[ -t 0 && -t 1 ]] || { command "$__qn" "$@"; return; }
+    (( ZSH_SUBSHELL > 0 )) && { command "$__qn" "$@"; return; }
+    case "$1" in
+        -p|--print|-v|--version|-h|--help) command "$__qn" "$@"; return ;;
+    esac
+
+    local __qa= __qfirst=1 __qx
+    for __qx in "$@"; do
+        if (( __qfirst )); then __qa=$(__quil_esc "$__qx"); __qfirst=0
+        else __qa="$__qa,$(__quil_esc "$__qx")"; fi
+    done
+
+    local __qe= __qv
+    for __qv in ${(k)parameters[(I)CLAUDE_*|ANTHROPIC_*|CODEX_*|OPENAI_*|OPENCODE_*]}; do
+        __qe="${__qe:+$__qe,}$__qv"
+    done
+
+    local __qts=
+    zmodload -F zsh/datetime +p:EPOCHREALTIME 2>/dev/null && __qts=$EPOCHREALTIME
+
+    local __qpay="cmd;${QUIL_INTERCEPT_TOKEN};${__qn};$(__quil_esc "$PWD");${__qts};${__qe};${__qa}"
+    if (( ${#__qpay} > 2048 )); then
+        __qpay="cmd;${QUIL_INTERCEPT_TOKEN};${__qn};;;;!"
+    fi
+
+    local __qstty
+    __qstty=$(stty -g < /dev/tty 2>/dev/null)
+
+    # always-block, not a statement after the read: the read blocks for up to a
+    # second and Ctrl-C during it would otherwise skip the restore and leave the
+    # user typing blind with echo off.
+    local __qreply= __qc
+    {
+        # An INT trap as well as the always-block: `always` does not run when
+        # SIGINT unwinds the function, and Ctrl-C during the launch window is
+        # an ordinary thing to do. Echo left off is invisible at the prompt —
+        # readline echoes there itself — and the user only discovers it at the
+        # next program that reads stdin, then types blind until `stty sane`.
+        TRAPINT() { [ -n "$__qstty" ] && stty "$__qstty" < /dev/tty 2>/dev/null; return $(( 128 + $1 )) }
+        [ -n "$__qstty" ] && stty -echo < /dev/tty 2>/dev/null
+        printf '\e]7770;%s\e\\' "$__qpay" > /dev/tty
+        # ONE BYTE AT A TIME. zsh's -t is an input-AVAILABILITY test, not a read
+        # deadline: with `-k 8`, one byte arriving satisfies -t and the read
+        # then blocks with no deadline for the other seven. Measured at 4s+
+        # against a single byte. A daemon that answers nothing — which it does
+        # deliberately past its own cutoff — would leave the pane dead with
+        # echo off. Per byte, -t is a real bound on each wait.
+        while [ ${#__qreply} -lt 8 ]; do
+            read -t 1 -k 1 __qc < /dev/tty || break
+            __qreply="$__qreply$__qc"
+        done
+    } always {
+        [ -n "$__qstty" ] && stty "$__qstty" < /dev/tty 2>/dev/null
+    }
+
+    if [ "$__qreply" = "quil:cnv" ]; then
+        return 0
+    fi
+    command "$__qn" "$@"
+}
+
+__quil_arm_intercept() {
+    local __qn
+    for __qn in ${(s:,:)QUIL_INTERCEPT}; do
+        [[ "$__qn" =~ ^[A-Za-z0-9._-]+$ ]] || continue
+        (( ${+functions[$__qn]} )) && continue
+        eval "${__qn}() { __quil_intercept ${__qn} \"\$@\"; }"
+    done
+}
+__quil_arm_intercept
+unfunction __quil_arm_intercept
+
+fi

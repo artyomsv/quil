@@ -488,15 +488,24 @@ Controls AI panes that run inside a Docker container. Full guide:
 
 ```toml
 [sandbox]
-# "" or "token" (default) — forward CLAUDE_CODE_OAUTH_TOKEN from the daemon's
-#                own environment. A pane with no token signs in for you: it runs
+# "" or "browser" (default) — sign in inside the container, once per pane. The
+#                pane gets your full subscription and nothing is written outside
+#                it.
+# "token"      — forward CLAUDE_CODE_OAUTH_TOKEN from the daemon's own
+#                environment. A pane with no token signs in for you: it runs
 #                `claude setup-token`, saves the result to your user environment
-#                and starts the container. Costs the pane Remote Control and
-#                claude.ai connectors, and Fable is absent from /model, because
-#                the credential authenticates as "Claude API" rather than as
-#                your subscription.
-# "browser"    — sign in inside the container instead, once per pane. Slower to
-#                set up, but the pane gets the full subscription.
+#                and starts the container. No per-pane sign-in, but read the
+#                warning below first.
+#
+# WARNING — "token" reaches further than the pane. The credential is saved to
+# your OS user environment (HKCU\Environment on Windows), because Quil keeps no
+# copy of its own. Every process started afterwards inherits it, including the
+# daemon and so every ORDINARY Claude pane it spawns. Claude Code prefers that
+# token over an interactive login, so a subscriber who picks "token" once will
+# see every pane — sandbox or not — authenticate as "Claude API" with a smaller
+# /model list (no Fable), no Remote Control and no claude.ai connectors. To undo
+# it, delete CLAUDE_CODE_OAUTH_TOKEN from your user environment and restart the
+# daemon.
 #
 # Each pane can override this in the create dialog; this is only the default.
 # Quil never reads, copies, stores or refreshes a Claude credential in either
@@ -528,3 +537,27 @@ atomically and requests a local daemon reload. Templates are also re-read on
 every creation. Existing panes retain their frozen arguments and saved layouts.
 Remote daemons use their own templates file. See
 [Workspace templates](workspace-templates.md) for the complete format and examples.
+
+## `[agents]`
+
+What Quil does when an agent it can spawn — `claude`, `codex`, `opencode` — is
+started by hand from a terminal pane's shell.
+
+```toml
+[agents]
+hand_started = "convert"
+```
+
+| Value | Behaviour |
+|---|---|
+| `convert` *(default)* | Open the pane as that agent instead, with your arguments |
+| `adopt` | Run it as typed; track the Claude session so the pane resumes it after a restart |
+| `notify` | Run it as typed; say that the session is untracked |
+| `off` | Run it as typed, say nothing, and arm nothing in the shell |
+
+An unrecognised value is treated as `convert` rather than refused — this is a
+hand-edited file, and a typo in it must not stop the daemon starting.
+
+`command claude` bypasses the interception for one invocation, whatever the
+setting. See [Features → Hand-started agents](features.md#hand-started-agents)
+for the cases that are never intercepted, including fish.

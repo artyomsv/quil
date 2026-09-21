@@ -35,6 +35,16 @@ import (
 // `/theme` changes it and the answer persists in the pane's own config.
 const claudeSeedTheme = "dark"
 
+// claudeConfigName and claudeOnboardingKey are named because TWO files now
+// depend on them meaning the same thing: this one writes the answer, and
+// sandbox_authstamp.go removes it when the pane stops receiving the credential
+// that answer assumed. A drift between the two is a repair that silently
+// repairs nothing.
+const (
+	claudeConfigName    = ".claude.json"
+	claudeOnboardingKey = "hasCompletedOnboarding"
+)
+
 // seedClaudeConfig writes a first-run config for a sandbox pane, unless one is
 // already there.
 //
@@ -54,7 +64,7 @@ func seedClaudeConfig(m sandbox.Mapping, authed bool) error {
 	if !authed {
 		return nil
 	}
-	path := filepath.Join(m.HostClaudeConfig(), ".claude.json")
+	path := filepath.Join(m.HostClaudeConfig(), claudeConfigName)
 	if _, err := os.Stat(path); err == nil {
 		return nil
 	} else if !os.IsNotExist(err) {
@@ -72,7 +82,7 @@ func seedClaudeConfig(m sandbox.Mapping, authed bool) error {
 		"bypassPermissionsModeAccepted": true,
 	}
 	seed := map[string]any{
-		"hasCompletedOnboarding":        true,
+		claudeOnboardingKey:             true,
 		"theme":                         claudeSeedTheme,
 		"bypassPermissionsModeAccepted": true,
 		"projects":                      map[string]any{m.ContainerCWD(): project},

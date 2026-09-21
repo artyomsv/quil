@@ -590,16 +590,20 @@ func TestEffectiveSandboxAuth_FollowsTheConfigUntilPicked(t *testing.T) {
 func TestHandleSandboxAuthFieldKey(t *testing.T) {
 	t.Parallel()
 	var m Model
-	m.cfg = config.Default() // token by default
+	m.cfg = config.Default() // browser by default
 
+	if got := m.effectiveSandboxAuth(); got != "browser" {
+		t.Fatalf("the untouched row shows %q, want the browser default — a row that "+
+			"opens on the token would offer it to someone who never asked", got)
+	}
 	if !m.handleSandboxAuthFieldKey(tea.KeyPressMsg{Code: tea.KeyRight}) {
 		t.Fatal("right was not consumed")
 	}
-	if m.effectiveSandboxAuth() != "browser" {
-		t.Errorf("right gave %q, want browser", m.effectiveSandboxAuth())
+	if m.effectiveSandboxAuth() != "token" {
+		t.Errorf("right gave %q, want token", m.effectiveSandboxAuth())
 	}
 	m.handleSandboxAuthFieldKey(tea.KeyPressMsg{Code: ' ', Text: " "})
-	if m.effectiveSandboxAuth() != "token" {
+	if m.effectiveSandboxAuth() != "browser" {
 		t.Errorf("space did not cycle back, got %q", m.effectiveSandboxAuth())
 	}
 

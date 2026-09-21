@@ -202,7 +202,7 @@ func TestPrepareSandbox_SeedsTheClaudeConfig(t *testing.T) {
 	d, pane, _ := sandboxCallsiteFixture(t)
 	// The seed is gated on the container actually receiving a credential:
 	// without one, hiding onboarding would hide the sign-in inside it.
-	d.cfg = config.Default()
+	d.cfg = tokenFlowConfig()
 	t.Setenv(oauthTokenEnv, "sk-ant-test-token")
 
 	m, err := d.prepareSandbox(context.Background(), pane, "claude-code", "img:1")

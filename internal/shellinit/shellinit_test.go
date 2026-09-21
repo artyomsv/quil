@@ -45,7 +45,7 @@ func TestEnsureInitDirIdempotent(t *testing.T) {
 
 func TestConfigureBash(t *testing.T) {
 	dir := t.TempDir()
-	cfg := Configure("/usr/bin/bash", dir)
+	cfg := Configure("/usr/bin/bash", dir, nil, "")
 	if cfg == nil {
 		t.Fatal("expected config for bash, got nil")
 	}
@@ -66,7 +66,7 @@ func TestConfigureBash(t *testing.T) {
 
 func TestConfigureZsh(t *testing.T) {
 	dir := t.TempDir()
-	cfg := Configure("/bin/zsh", dir)
+	cfg := Configure("/bin/zsh", dir, nil, "")
 	if cfg == nil {
 		t.Fatal("expected config for zsh, got nil")
 	}
@@ -101,7 +101,7 @@ func TestConfigureZsh(t *testing.T) {
 
 func TestConfigurePwsh(t *testing.T) {
 	for _, shell := range []string{"pwsh", "pwsh.exe", "powershell", "powershell.exe"} {
-		cfg := Configure(shell, t.TempDir())
+		cfg := Configure(shell, t.TempDir(), nil, "")
 		if cfg == nil {
 			t.Errorf("expected config for %s, got nil", shell)
 			continue
@@ -117,7 +117,7 @@ func TestConfigurePwsh(t *testing.T) {
 }
 
 func TestConfigureFish(t *testing.T) {
-	cfg := Configure("/usr/bin/fish", t.TempDir())
+	cfg := Configure("/usr/bin/fish", t.TempDir(), nil, "")
 	if cfg != nil {
 		t.Errorf("expected nil for fish, got %+v", cfg)
 	}
@@ -125,7 +125,7 @@ func TestConfigureFish(t *testing.T) {
 
 func TestConfigureUnknown(t *testing.T) {
 	for _, shell := range []string{"/bin/sh", "cmd.exe", "/usr/bin/unknown"} {
-		cfg := Configure(shell, t.TempDir())
+		cfg := Configure(shell, t.TempDir(), nil, "")
 		if cfg != nil {
 			t.Errorf("expected nil for %s, got %+v", shell, cfg)
 		}

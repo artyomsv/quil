@@ -219,9 +219,15 @@ func (m Model) renderSetupSandboxUnavailable() string {
 // sandboxAuthChoices are the modes the row offers, in display order. "" is not
 // among them: an untouched row follows the configured default, and picking is
 // what makes a pane carry its own answer.
+// Browser leads because it is the configured default and the only one of the
+// two that changes nothing outside the pane. Token's detail names the reach
+// rather than only the loss: the sign-in it skips saves a credential into the
+// user's environment, which every process started afterwards inherits — so the
+// cost lands on ORDINARY panes as well as this one, and the row is the last
+// place to say so before it does.
 var sandboxAuthChoices = []struct{ mode, label, detail string }{
-	{"token", "Token", "no sign-in · no Fable, no Remote Control"},
 	{"browser", "Browser", "sign in in the container · full subscription"},
+	{"token", "Token", "no sign-in · saves a token every later Claude uses"},
 }
 
 // showSandboxAuthField reports whether the setup dialog offers the sign-in row.

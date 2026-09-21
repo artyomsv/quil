@@ -35,7 +35,142 @@ __quil_preexec() {
     printf '\e]133;B\e\\'
 }
 
+# Set while the tty is in -echo for an interception, cleared by whoever
+# restores it. A prompt drawn with this still set means the read was
+# interrupted, and the prompt hook is the one place a restore survives
+# `read -N` unwinding.
+__quil_stty_pending=
+__quil_restore_stty() {
+    [ -n "$__quil_stty_pending" ] || return 0
+    stty "$__quil_stty_pending" < /dev/tty 2>/dev/null
+    __quil_stty_pending=
+}
+
 if [[ "${PROMPT_COMMAND}" != *"__quil_osc7"* ]]; then
-    PROMPT_COMMAND="__quil_precmd;__quil_osc7${PROMPT_COMMAND:+;$PROMPT_COMMAND};__quil_arm"
+    PROMPT_COMMAND="__quil_restore_stty;__quil_precmd;__quil_osc7${PROMPT_COMMAND:+;$PROMPT_COMMAND};__quil_arm"
 fi
 trap '__quil_preexec' DEBUG
+
+# Hand-started agent interception (issue #221).
+#
+# QUIL_INTERCEPT is a comma-separated list of agent binaries the daemon knows
+# how to spawn as a typed pane. For each, define a function that shadows the
+# PATH lookup, so the daemon learns the argv BEFORE the binary execs and can
+# open the pane as that agent instead. Quil's rc is sourced after the user's,
+# which is what makes this definition win.
+#
+# read -N arrived in bash 4.1. On an older bash nothing is defined at all and
+# the agent runs exactly as typed — the pre-feature behaviour, not a degraded
+# one. macOS ships bash 3.2, so this is the common case there.
+if [ -n "${QUIL_INTERCEPT}" ] && [ -n "${QUIL_INTERCEPT_TOKEN}" ] &&
+   { [ "${BASH_VERSINFO[0]}" -gt 4 ] ||
+     { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -ge 1 ]; }; }; then
+
+# Percent-encode the three characters the marker's own grammar uses, so a
+# directory or argument containing one cannot shift the daemon's field split.
+# `;` separates fields and `,` separates argv elements; `%` must go first or
+# the encoding is ambiguous. Pure parameter expansion — no fork.
+__quil_esc() {
+    local s=${1//\%/%25}
+    s=${s//;/%3B}
+    s=${s//,/%2C}
+    printf '%s' "$s"
+}
+
+__quil_intercept() {
+    local __qn=$1; shift
+
+    # Both streams must be terminals. `$(claude -p …)` has a tty stdin and a
+    # captured stdout: a marker written there would land in the captured
+    # string and the daemon would never see it.
+    [[ -t 0 && -t 1 ]] || { command "$__qn" "$@"; return; }
+
+    # `claude &`, `( claude )` and `$(claude)` all raise BASH_SUBSHELL. A read
+    # from the tty in a background job takes SIGTTIN and stops it.
+    (( BASH_SUBSHELL > 0 )) && { command "$__qn" "$@"; return; }
+
+    # Not sessions. Short-circuited here rather than round-tripped for a
+    # "run" the daemon would always give.
+    case "$1" in
+        -p|--print|-v|--version|-h|--help) command "$__qn" "$@"; return ;;
+    esac
+
+    local __qa= __qfirst=1 __qx
+    for __qx in "$@"; do
+        if (( __qfirst )); then __qa=$(__quil_esc "$__qx"); __qfirst=0
+        else __qa="$__qa,$(__quil_esc "$__qx")"; fi
+    done
+
+    # NAMES only, never values: the marker is echoed into the pane's output and
+    # persisted in its ghost buffer. The daemon compares the names against its
+    # own environment and declines to convert when one is missing.
+    local __qe= __qv
+    for __qv in ${!CLAUDE_@} ${!ANTHROPIC_@} ${!CODEX_@} ${!OPENAI_@} ${!OPENCODE_@}; do
+        __qe="${__qe:+$__qe,}$__qv"
+    done
+
+    local __qpay="cmd;${QUIL_INTERCEPT_TOKEN};${__qn};$(__quil_esc "$PWD");${EPOCHREALTIME:-};${__qe};${__qa}"
+    # Over the cap the daemon cannot classify, so say so rather than truncate
+    # into a different command than the user typed.
+    if (( ${#__qpay} > 2048 )); then
+        __qpay="cmd;${QUIL_INTERCEPT_TOKEN};${__qn};;;;!"
+    fi
+
+    # Echo off BEFORE the marker, not before the read: the line discipline
+    # applies echo when bytes ARRIVE, and stty is a fork+exec, so a fast reply
+    # would paint the answer on screen.
+    local __qstty
+    __qstty=$(stty -g < /dev/tty 2>/dev/null)
+    # Restored by a RETURN trap, not by a statement after the read. The read
+    # below blocks for up to a second, and Ctrl-C during it aborts the function
+    # — a plain restore never runs, and the user is left typing blind into a
+    # terminal with echo off. The trap is set INSIDE the function so it is
+    # local to this call.
+    # Restored from the PROMPT HOOK, not from a trap.
+    #
+    # Two measured reasons, both against a real pty. A bash RETURN trap does
+    # not run when SIGINT unwinds a function. And an INT trap that restores is
+    # then UNDONE: `read -N` puts the tty in non-canonical mode and, as it
+    # unwinds, restores the termios it captured on ENTRY — which already had
+    # ECHO off, because stty -echo ran before the read. The trap fires first,
+    # the read's restore lands second, and the terminal is left -echo.
+    #
+    # The prompt hook runs after the read has fully unwound, which is the only
+    # point at which a restore sticks. Echo left off is invisible at the prompt
+    # because readline echoes there itself; the user discovers it at the next
+    # program that reads stdin, and then types blind until `stty sane`.
+    if [ -n "$__qstty" ]; then
+        __quil_stty_pending=$__qstty
+        stty -echo < /dev/tty 2>/dev/null
+    fi
+
+    printf '\e]7770;%s\e\\' "$__qpay" > /dev/tty
+
+    # Exactly 8 bytes, no terminator. LF is not Enter under ConPTY and a
+    # terminated reply arriving late would submit itself as a prompt; a
+    # fixed-length read has neither failure.
+    local __qreply=
+    read -r -N 8 -t 1 __qreply < /dev/tty
+    __quil_restore_stty
+
+    if [ "$__qreply" = "quil:cnv" ]; then
+        return 0
+    fi
+    command "$__qn" "$@"
+}
+
+__quil_arm_intercept() {
+    local IFS=,
+    local __qn
+    for __qn in $QUIL_INTERCEPT; do
+        # A name Quil did not vet must never reach eval.
+        [[ "$__qn" =~ ^[A-Za-z0-9._-]+$ ]] || continue
+        # A user's own wrapper exists to set environment. It keeps winning.
+        declare -F "$__qn" > /dev/null 2>&1 && continue
+        eval "${__qn}() { __quil_intercept ${__qn} \"\$@\"; }"
+    done
+}
+__quil_arm_intercept
+unset -f __quil_arm_intercept
+
+fi

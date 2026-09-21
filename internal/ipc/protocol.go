@@ -711,6 +711,16 @@ type PaneInfo struct {
 	BlockedReason string `json:"blocked_reason,omitempty"`
 	// LastIdleAt is when the pane last fell idle, Unix ms; 0 if never.
 	LastIdleAt int64 `json:"last_idle_at,omitempty"`
+	// Adopted marks a terminal pane in which a Claude session was started by
+	// hand and whose id Quil has recorded. Such a pane produces no hook events,
+	// so AgentState stays empty for it, and a terminal pane cannot resume the
+	// session either — its persistence strategy is cwd_only.
+	//
+	// NOTHING READS THIS YET. It is carried so that a client choosing a pane to
+	// delegate to can eventually tell "a shell" from "a shell with an agent
+	// running inside it", which AgentState alone cannot express. list_panes
+	// does not surface it and neither does the sidebar.
+	Adopted bool `json:"adopted,omitempty"`
 }
 
 type ListPanesRespPayload struct {

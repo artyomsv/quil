@@ -35,7 +35,7 @@ daemon reported.
 4. Turn on **Run in a Docker container**.
 5. Type the image name, or leave the pre-filled one from
    `[sandbox] default_image`.
-6. **Claude Code only:** pick **Sign in** — `Token` or `Browser`. See
+6. **Claude Code only:** pick **Sign in** — `Browser` (default) or `Token`. See
    [Signing in](#signing-in).
 7. Press **Continue**.
 
@@ -46,7 +46,7 @@ new one.
 
 | Plugin | Sandbox | Sign-in inside the container |
 |---|---|---|
-| **Claude Code** | Yes | Token forwarded, or browser once per pane — you choose per pane |
+| **Claude Code** | Yes | Browser once per pane (default), or a forwarded token — you choose per pane |
 | **Codex** | Yes | None. Quil copies your host `~/.codex/auth.json` into the pane |
 | **OpenCode** | Yes | Once per container, in the container |
 | Terminal, lazygit, k9s, … | No | The row is not offered — these are not AI panes |
@@ -219,25 +219,63 @@ config:
 
 ```toml
 [sandbox]
-auth = "token"    # or "browser"
+auth = "browser"    # or "token"
 ```
 
-`auth` accepts `"token"`, `"browser"`, and — for every config written before
-`"browser"` existed — the empty string, which means `"token"`. Anything else is
-treated as `"browser"` and reported in `quild.log`. The dialog row overrides it
-for that pane only.
+`auth` accepts `"browser"`, `"token"`, and the empty string, which means
+`"browser"`. Anything else — a typo, the wrong case — also resolves to
+`"browser"` and is reported in `quild.log`. Only the exact string `"token"`
+selects the token flow, because that is the one that writes a credential
+outside the pane. The dialog row overrides the config for that pane only.
 
-| | **Token** (default) | **Browser** |
+| | **Browser** (default) | **Token** |
 |---|---|---|
-| Set-up cost | Once per machine, automatic | Once per pane |
-| What runs | `claude setup-token`, driven by Quil | `claude`'s own sign-in, inside the container |
-| Authenticates as | "Claude API" | Your subscription |
-| Fable in `/model` | **No** | Yes |
-| Remote Control, claude.ai connectors | **No** | Yes |
+| Set-up cost | Once per pane | Once per machine, automatic |
+| What runs | `claude`'s own sign-in, inside the container | `claude setup-token`, driven by Quil |
+| Authenticates as | Your subscription | "Claude API" |
+| Fable in `/model` | Yes | **No** |
+| Remote Control, claude.ai connectors | Yes | **No** |
+| Affects non-sandbox panes | No | **Yes — see the warning below** |
 
-#### Token — the default
+> ### The token flow is not contained by the pane
+>
+> `claude setup-token` mints a credential, and Quil saves it to your **OS user
+> environment** — it keeps no copy of its own, by design. Every process started
+> after that inherits it, including the daemon, and therefore **every ordinary
+> Claude pane the daemon spawns**. Claude Code prefers that token over an
+> interactive login.
+>
+> So picking **Token** once, for one sandbox pane, moves *every* Claude pane on
+> the machine onto "Claude API": a smaller `/model` list with no Fable, no
+> Remote Control, no claude.ai connectors — and usage that no longer runs on the
+> subscription you are paying for. Nothing on screen connects the two.
+>
+> That is why **Browser is the default** and why only the exact string `"token"`
+> selects the other one. To undo it: delete `CLAUDE_CODE_OAUTH_TOKEN` from your
+> user environment and restart the daemon.
 
-**You do not have to do anything.** Open a sandbox pane and, if no token is
+**Moving an existing pane from Token to Browser is handled for you.** A pane
+prepared for a forwarded token carries a Quil-written config saying its
+first-run screens are answered — and the sign-in is one of those screens. When
+the pane stops receiving a token, Quil removes just that answer so the sign-in
+comes back. Your theme, trust answers and history are untouched. If a pane ever
+does open on a prompt it cannot authenticate, `/login` inside the pane fixes it.
+
+#### Browser — the default
+
+Run `claude` in the pane and follow the prompt. If the browser callback cannot
+reach the container, copy the code shown in the browser and paste it at the
+`Paste code here if prompted` prompt.
+
+Each pane has its own config directory, so this is **once per pane** — unless
+you set `shared_claude_config`, below.
+
+#### Token — no per-pane sign-in
+
+Pick **Token** on the Sign in row, or set `auth = "token"`, when the per-pane
+sign-in is the bigger cost and the warning above is acceptable.
+
+Open a sandbox pane and, if no token is
 found, the pane signs itself in: it runs Anthropic's own `claude setup-token`
 under a pseudo-terminal, opens your browser, and the pane shows
 
@@ -262,7 +300,7 @@ quil sandbox status    # where you stand
 ```
 
 ```
-auth mode : token   (default)
+auth mode : browser (default)
 token in this process : yes
 token persisted       : yes
 ```
@@ -287,19 +325,16 @@ its own environment, so the token never appears in a command line or in
 > That is why Quil runs it under a pseudo-terminal and mirrors it to your
 > terminal, so the browser step stays visible and interactive.
 
-#### Browser — the full subscription
-
-Pick **Browser** on the Sign in row when the pane needs Fable, Remote Control,
-or claude.ai connectors. Run `claude` in the pane and follow the prompt. If the
-browser callback cannot reach the container, copy the code shown in the browser
-and paste it at the `Paste code here if prompted` prompt.
-
-Each pane has its own config directory, so this is **once per pane**.
+#### Signing in once instead of once per pane
 
 `shared_claude_config = true` gives every sandbox pane one config directory, so
-you sign in once. It also merges them into **one trust domain**: any sandbox
-pane can then write a hook or an MCP server that every other sandbox pane's
-claude runs. Off by default. `auth = "token"` avoids the trade entirely.
+the browser sign-in happens **once ever** rather than per pane, and every pane
+still gets the full subscription. It also merges them into **one trust domain**:
+any sandbox pane can then write a hook or an MCP server that every other sandbox
+pane's claude runs. Off by default.
+
+That is the trade to weigh against `auth = "token"` — one shared trust domain,
+or a credential every Claude on the machine picks up.
 
 #### What Quil never does
 

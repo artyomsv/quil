@@ -21,7 +21,7 @@ func warmSpawnPool(t *testing.T, d *Daemon, cwd string) (*scriptedWarmSession, a
 	s := newScriptedWarmSession()
 	s.chunks <- []byte("\x1b]133;A\x07")
 	s.response = []byte("\x1b]133;A\x07" + warmOSC7(cwd))
-	cfg := shellinit.Configure("bash", config.QuilDir())
+	cfg := shellinit.Configure("bash", config.QuilDir(), nil, "")
 	var calls atomic.Int64
 	d.shellPool = warmTestPool(t, warmPoolShellConfig{Cmd: cfg.Cmd, Args: cfg.Args, Env: cfg.Env}, 1, func() apty.Session {
 		if calls.Add(1) == 1 {

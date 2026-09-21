@@ -78,6 +78,44 @@ Mark a pane as **eager** with `Alt+Shift+E` (config key `toggle_eager`) to force
 
 `/clear`, `/resume`, and conversation compaction all rotate Claude Code's session id to a new jsonl file. Quil registers a `SessionStart` hook at every spawn (it never modifies `~/.claude/settings.json`) and passes `QUIL_PANE_ID=<paneID>` in the PTY env. The hook is the `quild claude-hook` subcommand, not a script: the daemon writes a per-pane settings file `$QUIL_HOME/sessions/<paneID>.settings.json` naming `"<quild>" claude-hook`, and passes `claude --settings <that file>`. The subcommand atomically writes the live session id to `$QUIL_HOME/sessions/<paneID>.id` on every rotation. `$QUIL_HOME/claudehook/` holds only `hook.log`, created lazily on first write. On daemon restart, the resume strategy prefers the hook-recorded id over the original preassigned id.
 
+### Hand-started agents
+
+Start `claude`, `codex` or `opencode` from a terminal pane's shell and Quil
+opens the pane as that agent instead, carrying the arguments you typed. The
+pane then gets everything a pane created with Ctrl+N gets: hook registration,
+session-id tracking through `/clear` and compaction, work-in-progress
+indicators, notifications, input history, and resume after a restart.
+
+Nothing is killed to do this. Quil's shell integration defines a function that
+shadows the binary, so the daemon learns the command line *before* the binary
+starts; the pane is reopened rather than interrupted. When the agent exits
+cleanly the pane goes back to being a terminal.
+
+It works at an interactive **bash (4.1+), zsh or PowerShell** prompt. The
+command runs exactly as typed — unchanged from before the feature existed — in
+every other case:
+
+| Case | Why |
+|---|---|
+| **fish** | Quil injects no init script for fish, so nothing is armed at all. Fish emits OSC 7 by itself; that is the whole of its integration. |
+| **bash 3.2** (the macOS system bash) | `read -N` arrived in 4.1 |
+| You already define your own `claude` function | Such wrappers exist to set environment a respawn would drop, so yours wins |
+| `command claude`, `env claude`, an absolute path, `npx`, `sudo`, `xargs`, a Makefile, a script | The function is bypassed. `command claude` is the deliberate one-off override |
+| `claude &`, `$(claude …)`, `( claude )` | A background job reading the tty would stop on SIGTTIN |
+| `claude -p`, `--version`, `--help`, `mcp`, `setup-token`, `codex exec`, `opencode serve` | Not an interactive session |
+| A typed `--settings` | It would contend with Quil's own hook settings |
+| An agent variable (`CLAUDE_*`, `ANTHROPIC_*`, `CODEX_*`, `OPENAI_*`, `OPENCODE_*`) set in the shell but not in the daemon | The respawn would behave differently — `CLAUDE_CONFIG_DIR` naming another session store is the case that matters |
+
+When conversion is declined for a **Claude** launch, Quil still records which
+session the running agent is in, so the pane resumes that conversation after a
+restart. It does not attach to the process, and it never can: hooks are
+registered at launch, so a running agent produces no work-state or notification
+events. Codex and opencode keep no session store a third party can read, so for
+those Quil reports the situation and does nothing else.
+
+Configure with `[agents] hand_started` — see
+[Configuration](configuration.md).
+
 ### OpenCode session-id tracking
 
 OpenCode (opencode.ai) mints a new session id on `/new`, fork, or compaction. Quil registers a small JS plugin via `OPENCODE_CONFIG_CONTENT='{"plugin":["<abs path>"]}'` at every spawn and passes `QUIL_PANE_ID` + `QUIL_HOME` in the PTY env. The plugin — embedded in the binary, written to `$QUIL_HOME/opencodehook/` — hooks opencode's `session.created` / `session.updated` / `session.idle` / `session.compacted` / `session.deleted` events and atomically writes `$QUIL_HOME/sessions/opencode-<paneID>.id`. Quil never writes into `~/.config/opencode/` — `OPENCODE_CONFIG_CONTENT` merges with the user's existing config so their plugins, agents, and modes remain active.

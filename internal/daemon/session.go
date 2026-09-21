@@ -29,6 +29,48 @@ type Tab struct {
 }
 
 type Pane struct {
+	// handStart carries the per-shell interception token this pane's child was
+	// started with, and nothing else: the daemon resolves the pane from the PTY
+	// a marker arrives on, so the token is only ever COMPARED, never looked up
+	// by. Empty means this pane converts nothing — a cold spawn, a restore, a
+	// sandbox pane, or a shell started before the feature existed.
+	//
+	// Written under PluginMu at every spawn, so a restart re-arms with the new
+	// shell's token and the old one stops matching.
+	handStart handStartState
+
+	// Adopted marks a terminal pane whose hand-started claude session Quil has
+	// recorded without having spawned it.
+	//
+	// Recording is all it is. The pane stays a terminal, and a terminal's
+	// persistence strategy is cwd_only, so a restart spawns a shell and never
+	// consults the id — the card says exactly that, because an earlier version
+	// promised a resume this cannot deliver, which is the #221 failure with a
+	// reassuring label on it. The hook events a properly spawned pane gets are
+	// not available here at any price.
+	Adopted bool
+
+	// handStartMismatchAt rate-limits the "wrong token" report to once an hour.
+	handStartMismatchAt time.Time
+
+	// handStartLoggedAt rate-limits the marker-driven refusal lines. Anything
+	// holding the token reaches them at will.
+	handStartLoggedAt time.Time
+
+	// handStartTail retains an unterminated marker across output chunks, the
+	// way modeScanTail does for mouse modes. Bounded; see keepHandStartTail.
+	handStartTail []byte
+
+	// ConvertedFromTerminal names the pane type this pane held before a
+	// hand-started agent converted it, or "" if it was never converted.
+	//
+	// Persisted, because the loop it exists for spans restarts: a user whose
+	// habit is shell -> claude -> /exit -> shell would otherwise end every
+	// cycle looking at a dead agent pane and reaching for Ctrl+N. A clean exit
+	// puts the shell back; a crash does not, because a pane that died deserves
+	// to show that it did.
+	ConvertedFromTerminal string
+
 	QuilMCP      bool // Opts into ordinary Quil MCP at spawn. Under PluginMu.
 	ID           string
 	TabID        string

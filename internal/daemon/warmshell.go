@@ -30,6 +30,10 @@ type warmPoolShellConfig struct {
 	Cmd  string
 	Args []string
 	Env  []string
+	// Intercept names the agent binaries a claimed shell should shadow. It is
+	// held here rather than baked into Env because the other half of the pair,
+	// the token, is minted per shell in fill.
+	Intercept []string
 }
 
 // warmShellPool uses one immutable shell configuration. Reloading the terminal
@@ -56,8 +60,16 @@ type warmShellPool struct {
 
 // newShellPoolFor runs after Start has loaded user plugin overrides.
 func newShellPoolFor(cfg config.Config, registry *plugin.Registry) *warmShellPool {
-	if shellCfg := shellinit.Configure(registry.Get("terminal").Command.Cmd, config.QuilDir()); shellCfg != nil {
-		return newWarmShellPool(warmPoolShellConfig{Cmd: shellCfg.Cmd, Args: shellCfg.Args, Env: shellCfg.Env}, cfg.Daemon.WarmShellPoolSize)
+	if shellCfg := shellinit.Configure(registry.Get("terminal").Command.Cmd, config.QuilDir(), nil, ""); shellCfg != nil {
+		// The names are constant for the daemon's lifetime; the token is not,
+		// so Configure is asked for neither and fill supplies both.
+		var intercept []string
+		if cfg.Agents.HandStartedPolicy() != config.HandStartedOff {
+			intercept = handStartNames(registry.All())
+		}
+		return newWarmShellPool(warmPoolShellConfig{
+			Cmd: shellCfg.Cmd, Args: shellCfg.Args, Env: shellCfg.Env, Intercept: intercept,
+		}, cfg.Daemon.WarmShellPoolSize)
 	}
 	return newWarmShellPool(warmPoolShellConfig{}, 0)
 }
@@ -84,7 +96,15 @@ func newWarmShellPool(cfg warmPoolShellConfig, size int) *warmShellPool {
 	default:
 		return p // these are the only shells with the required Quil prompt hooks
 	}
-	p.cfg = warmPoolShellConfig{Cmd: cfg.Cmd, Args: append([]string(nil), cfg.Args...), Env: append([]string(nil), cfg.Env...)}
+	// Copied field by field so the pool owns its slices. EVERY field must be
+	// named here: one left out is silently dropped, which is how Intercept was
+	// lost — the pool started, the shells started, and nothing was armed.
+	p.cfg = warmPoolShellConfig{
+		Cmd:       cfg.Cmd,
+		Args:      append([]string(nil), cfg.Args...),
+		Env:       append([]string(nil), cfg.Env...),
+		Intercept: append([]string(nil), cfg.Intercept...),
+	}
 	p.size = size
 	p.ready = make(chan apty.Session, size)
 	p.vacant = make(chan struct{}, size)
@@ -114,8 +134,9 @@ func (p *warmShellPool) fill() {
 				return
 			default:
 			}
-			s := &warmPoolSession{Session: newSessionFn(80, 24)}
-			s.SetEnv(p.cfg.Env)
+			s := &warmPoolSession{Session: newSessionFn(80, 24), tok: newInterceptToken()}
+			s.SetEnv(append(append([]string(nil), p.cfg.Env...),
+				shellinit.InterceptEnv(p.cfg.Intercept, s.tok)...))
 			s.SetCWD(os.TempDir())
 			err := s.Start(p.cfg.Cmd, p.cfg.Args...)
 			var readerDone <-chan struct{}
@@ -240,7 +261,16 @@ func (p *warmShellPool) TryClaim(cwd string, cols, rows int) (apty.Session, bool
 		case <-p.stop:
 		default:
 			// Replay OSC 7 as well as its suffix so the new owner learns CWD.
-			return &warmPoolSession{Session: s, pending: suffix}, true
+			//
+			// The claimed session is re-wrapped, so the token minted in fill
+			// must be carried across by hand — it lives on the INNER value and
+			// a zero field here reads as "cold spawn". spawnPane would then
+			// bind "" to the pane, and detectHandStart returns on an empty
+			// token before it parses anything: the shell emits an authentic
+			// marker, waits its second, and runs the agent as typed. Same
+			// shape as the Intercept field dropped from the pool's config
+			// copy, and silent for the same reason.
+			return &warmPoolSession{Session: s, pending: suffix, tok: interceptTokenOf(s)}, true
 		}
 	}
 	// Neither Close, WaitExit nor a stuck syscall may hold spawnMu. This
@@ -348,6 +378,34 @@ type warmPoolSession struct {
 	pending []byte
 	once    sync.Once
 	closed  chan struct{}
+	// tok authenticates this shell's OSC 7770 markers. It is minted per SHELL,
+	// not per pane: the pool's environment is captured once, pane-less, long
+	// before any pane exists, so a pane-keyed token cannot be written here.
+	// spawnPane binds whatever token the claimed shell carries to the pane it
+	// becomes, and the daemon resolves the pane from the PTY a marker arrives
+	// on — a token is never a lookup key.
+	tok string
+}
+
+// interceptToken answers the token a claimed warm shell was started with, so
+// spawnPane can bind it to the pane. TryClaim's signature is unchanged and
+// returns apty.Session; this is the seam for recovering the per-shell value
+// from it.
+func (s *warmPoolSession) interceptToken() string {
+	if s == nil {
+		return ""
+	}
+	return s.tok
+}
+
+// interceptTokenOf recovers the token from a claimed session, answering "" for
+// a cold spawn or a test double. A pane with no token never converts, which is
+// the pre-feature behaviour.
+func interceptTokenOf(s apty.Session) string {
+	if b, ok := s.(interface{ interceptToken() string }); ok {
+		return b.interceptToken()
+	}
+	return ""
 }
 
 func (s *warmPoolSession) Read(buf []byte) (int, error) {

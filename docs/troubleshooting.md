@@ -208,8 +208,14 @@ nothing to install, and `~/.quil/claudehook/` is **not** created at daemon start
    ```
    A registered pane shows `--settings /…/.quil/sessions/<pane-id>.settings.json` in its
    args, and the daemon logs `claude hooks registered` naming the same file. A pane that
-   shows `cmd=/bin/zsh args=[]` (or your own shell) is a **terminal** pane — Quil registers
-   no hook for it, even if you later type `claude` into it yourself.
+   shows `cmd=/bin/zsh args=[]` (or your own shell) is a **terminal** pane.
+
+   Typing `claude` into a terminal pane normally converts it into a Claude Code pane
+   (see [Features → Hand-started agents](features.md#hand-started-agents)). If that did
+   not happen, the daemon log says why: look for `running claude as typed —` with the
+   reason, or `converting terminal to claude-code`. The common causes are **fish**
+   (uncovered entirely), the macOS system **bash 3.2**, your own `claude` shell
+   function, and `[agents] hand_started` set to something other than `convert`.
 
    Two other outcomes are logged instead of `claude hooks registered`:
 

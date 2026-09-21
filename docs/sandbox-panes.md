@@ -254,6 +254,13 @@ outside the pane. The dialog row overrides the config for that pane only.
 > selects the other one. To undo it: delete `CLAUDE_CODE_OAUTH_TOKEN` from your
 > user environment and restart the daemon.
 
+**Moving an existing pane from Token to Browser is handled for you.** A pane
+prepared for a forwarded token carries a Quil-written config saying its
+first-run screens are answered — and the sign-in is one of those screens. When
+the pane stops receiving a token, Quil removes just that answer so the sign-in
+comes back. Your theme, trust answers and history are untouched. If a pane ever
+does open on a prompt it cannot authenticate, `/login` inside the pane fixes it.
+
 #### Browser — the default
 
 Run `claude` in the pane and follow the prompt. If the browser callback cannot

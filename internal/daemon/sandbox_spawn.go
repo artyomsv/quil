@@ -196,6 +196,18 @@ func (d *Daemon) prepareSandbox(ctx context.Context, pane *Pane, pluginName, ima
 		return sandbox.Mapping{}, fmt.Errorf("sandbox: %w", err)
 	}
 
+	// BEFORE the seed, and the order is load-bearing: the seed never
+	// overwrites, so a stale answer it would decline to touch has to be
+	// repaired first. Claude-only, through the same predicate that gates every
+	// other auth decision — a codex or opencode directory holds no Claude
+	// onboarding answer and must not be stamped with a Claude sign-in mode.
+	// See sandbox_authstamp.go.
+	if plugin.UsesClaudeAuthName(pluginName) {
+		if err := reconcileClaudeAuthMode(m, d.paneAuthMode(pane)); err != nil {
+			return sandbox.Mapping{}, fmt.Errorf("sandbox: %w", err)
+		}
+	}
+
 	// So the pane opens on a working prompt instead of four first-run screens.
 	// Gated on the container actually GETTING a credential: the same seed on
 	// an unauthenticated pane hides the sign-in that lives inside onboarding.

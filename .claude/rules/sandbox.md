@@ -267,6 +267,44 @@ config can name.
 default" while their names claimed to describe the token flow, and all nine
 went red on this change rather than one.
 
+## Changing the mode under a directory has to REPAIR it
+
+`sandbox_authstamp.go`. The two modes leave INCOMPATIBLE state behind:
+`seedClaudeConfig` writes `hasCompletedOnboarding` so a token pane skips four
+first-run screens, and **the sign-in is one of the screens that answer skips**.
+Move the same directory to the browser flow and the token is gone while the
+answer stays — a prompt with no credential and no way to log in. Flipping the
+default did that to every existing pane at once, which is how it was found.
+
+`prepareSandbox` therefore calls `reconcileClaudeAuthMode` **before**
+`seedClaudeConfig`, and the order is load-bearing: the seed never overwrites,
+so a stale answer it would decline to touch has to be repaired first.
+
+- The stamp (`.quil-auth`) lives **beside the config**, not on the `Pane` —
+  under `shared_claude_config` one directory serves every sandbox pane, so a
+  per-pane record says nothing about the file being repaired.
+- **Only token → browser repairs.** The other direction gains a credential, so
+  the answer on disk is still right and a repeated sign-in buys nothing.
+- **No stamp + an existing config = token era.** That inference is why the
+  stamp alone is not enough: panes created before it existed have no record and
+  are exactly the ones the default change stranded. It is imprecise in one
+  direction — an explicit pre-stamp `auth = "browser"` user who signed in is
+  asked once more — and that is the better failure, because an extra sign-in
+  explains itself while the state it replaces does not.
+- Only `hasCompletedOnboarding` is deleted. The file also holds the theme,
+  per-project trust answers and history, and under `shared_claude_config` it
+  holds them for every pane. A config that does not decode is left ALONE.
+- Nothing here fails a spawn. The repair restores a sign-in screen; refusing to
+  open the pane would be worse than the screen it is restoring.
+- Reads go through `os.Root`, like every daemon-side read under a pane's tree.
+
+Gated on `plugin.UsesClaudeAuthName` with the rest of the auth decisions — a
+codex directory holds no Claude onboarding answer and must not be stamped with
+a Claude sign-in mode. Pinned at the CALL SITE by
+`TestPrepareSandbox_ReopensOnboardingWhenTheModeDropsTheToken` and its two
+mirrors; verified by mutation, since the unit tests stay green against a
+`prepareSandbox` that never calls any of it.
+
 `sandboxIdentity` and `dockerCLIEnv` must agree, and both now take the RESOLVED
 mode. They used to compare against the literal `"token"` separately, so a
 change to the accepted spellings had to land in both or docker is handed a

@@ -51,8 +51,17 @@ func (s *Selection) ColRange(absLine, width int) (startCol, endCol int) {
 	return 0, width - 1
 }
 
-// extractText extracts the selected text from a pane.
+// extractText extracts the selected text from an ordinary pane.
 func extractText(pane *PaneModel, sel *Selection) string {
+	return copyText(pane, sel, false)
+}
+
+// copyText extracts the selected text from a pane. agentReply says the pane
+// is an AI agent's transcript, whose opening "• " / "● " is a reply marker
+// that the rest of the reply is indented under (see dedent). The glyph alone
+// cannot say that — "• parent" / "  • child" is an ordinary nested list
+// anywhere else — so only the caller, which knows the pane's plugin, can.
+func copyText(pane *PaneModel, sel *Selection, agentReply bool) string {
 	if sel == nil || pane == nil {
 		return ""
 	}
@@ -112,7 +121,7 @@ func extractText(pane *PaneModel, sel *Selection) string {
 			}
 		}
 	}
-	return dedent(result.String(), start.Col)
+	return dedent(result.String(), start.Col, agentReply)
 }
 
 // dedent removes the leading spaces every non-blank line shares. Claude Code
@@ -125,15 +134,16 @@ func extractText(pane *PaneModel, sel *Selection) string {
 // way to select it) otherwise reads as indent 0 and cancels the dedent for
 // every line after it.
 //
-// A FIRST line opening with an agent's reply marker ("• ", "● ", "⏺ ")
-// counts at the column its TEXT starts, because that is where the rest of
-// the reply is indented to: Codex opens a reply with "• " and indents the
-// rest of it by two, so measuring the marker at 0 kept every later paragraph
-// indented. Markdown list markers ("- ", "1. ") do NOT count, and neither
-// does a reply marker further down: there the indent under a marker is the
-// nesting of a list ("- parent" / "  - child"), which must survive the copy.
-// The marker itself is never removed.
-func dedent(s string, firstCol int) string {
+// In an agent pane (agentReply), a FIRST line opening with a reply marker
+// ("• ", "● ", "⏺ ") counts at the column its TEXT starts, because that is
+// where the rest of the reply is indented to: Codex opens a reply with "• "
+// and indents the rest of it by two, so measuring the marker at 0 kept every
+// later paragraph indented. Nowhere else does a marker count — not a markdown
+// one ("- ", "1. "), not a reply glyph further down, and not any glyph outside
+// an agent pane: there the indent under a marker is the nesting of a list
+// ("- parent" / "  - child", "• parent" / "  • child"), which must survive
+// the copy. The marker itself is never removed.
+func dedent(s string, firstCol int, agentReply bool) string {
 	lines := strings.Split(s, "\n")
 	lead := func(l string) int { return len(l) - len(strings.TrimLeft(l, " ")) }
 	common := -1
@@ -143,7 +153,10 @@ func dedent(s string, firstCol int) string {
 		}
 		n := lead(l)
 		if i == 0 {
-			n += firstCol + replyMarkerWidth(l[lead(l):])
+			n += firstCol
+			if agentReply {
+				n += replyMarkerWidth(l[lead(l):])
+			}
 		}
 		if common < 0 || n < common {
 			common = n

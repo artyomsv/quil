@@ -1,11 +1,15 @@
 package tui
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/artyomsv/quil/internal/plugin"
 )
 
 // textPane builds a pane of the given width with feed written through the
@@ -159,6 +163,7 @@ func TestExtractText_DedentWhenDragStartsPastTheMargin(t *testing.T) {
 		name     string
 		feed     string
 		startCol int
+		agent    bool // pane runs an AI agent (copyText's agentReply)
 		want     string
 	}{
 		{
@@ -177,10 +182,19 @@ func TestExtractText_DedentWhenDragStartsPastTheMargin(t *testing.T) {
 		},
 		{
 			// Codex: a reply opens with "• " and indents the rest by two.
-			name:     "hanging marker counts at its text",
+			name:     "agent reply marker counts at its text",
 			feed:     "• one\r\n\r\n  two\r\n  - three",
+			agent:    true,
 			startCol: 0,
 			want:     "• one\n\ntwo\n- three",
+		},
+		{
+			// The same glyph in an ordinary pane is a list bullet, and the
+			// indent under it is nesting (review finding on #227).
+			name:     "unicode bullet list keeps its nesting",
+			feed:     "• parent\r\n  • child",
+			startCol: 0,
+			want:     "• parent\n  • child",
 		},
 		{
 			// A markdown list marker is not a margin: the child's indent is
@@ -203,7 +217,7 @@ func TestExtractText_DedentWhenDragStartsPastTheMargin(t *testing.T) {
 			pane := textPane(t, 20, 6, tt.feed)
 			sel := selectLines(pane, 0, lastContentLine(pane)-pane.vt.ScrollbackLen())
 			sel.Anchor.Col = tt.startCol
-			if got := extractText(pane, sel); got != tt.want {
+			if got := copyText(pane, sel, tt.agent); got != tt.want {
 				t.Errorf("extractText = %q, want %q", got, tt.want)
 			}
 		})
@@ -545,6 +559,77 @@ func TestExtractText_HardBreaksAreNotAppWraps(t *testing.T) {
 			last := lastContentLine(pane) - pane.vt.ScrollbackLen()
 			if got := extractText(pane, selectLines(pane, 0, last)); got != tt.want {
 				t.Errorf("extractText = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// paneIsAgent is what turns the reply-marker rule on, so it is decided by the
+// plugin's category — the rule the daemon uses for "is this an AI pane" —
+// and never by the glyph.
+func TestPaneIsAgent_FollowsPluginCategory(t *testing.T) {
+	dir := t.TempDir()
+	for name, category := range map[string]string{"agent": "ai", "tool": "tools"} {
+		toml := "[plugin]\nname = \"" + name + "\"\ncategory = \"" + category + "\"\n\n[command]\ncmd = \"" + name + "\"\n"
+		if err := os.WriteFile(filepath.Join(dir, name+".toml"), []byte(toml), 0o644); err != nil {
+			t.Fatalf("write toml: %v", err)
+		}
+	}
+	reg := plugin.NewRegistry()
+	if err := reg.LoadFromDir(dir); err != nil {
+		t.Fatalf("LoadFromDir: %v", err)
+	}
+	m := Model{pluginRegistry: reg}
+	for paneType, want := range map[string]bool{"agent": true, "tool": false, "terminal": false, "unknown": false} {
+		if got := m.paneIsAgent(&PaneModel{Type: paneType}); got != want {
+			t.Errorf("paneIsAgent(%q) = %v, want %v", paneType, got, want)
+		}
+	}
+	if (Model{}).paneIsAgent(&PaneModel{Type: "agent"}) {
+		t.Error("paneIsAgent with no registry = true, want false")
+	}
+}
+
+// The copy paths hand copyText the pane's agent-ness. Driven through a real
+// right-click so deleting that argument at the call site fails here, not
+// only in a unit test of copyText.
+func TestUpdate_RightClickCopy_ReplyMarkerOnlyInAgentPanes(t *testing.T) {
+	dir := t.TempDir()
+	toml := "[plugin]\nname = \"agent\"\ncategory = \"ai\"\n\n[command]\ncmd = \"agent\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "agent.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatalf("write toml: %v", err)
+	}
+	reg := plugin.NewRegistry()
+	if err := reg.LoadFromDir(dir); err != nil {
+		t.Fatalf("LoadFromDir: %v", err)
+	}
+
+	var copied string
+	prev := clipboardWriteText
+	clipboardWriteText = func(s string) error { copied = s; return nil }
+	t.Cleanup(func() { clipboardWriteText = prev })
+
+	for paneType, want := range map[string]string{
+		"agent":    "• one\n\ntwo",   // reply margin removed
+		"terminal": "• one\n\n  two", // a bullet list: nesting kept
+	} {
+		t.Run(paneType, func(t *testing.T) {
+			copied = ""
+			m := pasteTestModel(&fakeSender{})
+			m.pluginRegistry = reg
+			pane := m.curTabs()[0].ActivePaneModel()
+			pane.Type = paneType
+			pane.AppendOutput([]byte("• one\r\n\r\n  two"))
+			m.selection = selectLines(pane, 0, 2)
+
+			x, y := paneCellScreen(m, 1, 0)
+			_, cmd := m.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseRight})
+			if cmd == nil {
+				t.Fatal("right-click with a selection returned no copy command")
+			}
+			cmd()
+			if copied != want {
+				t.Errorf("copied %q, want %q", copied, want)
 			}
 		})
 	}

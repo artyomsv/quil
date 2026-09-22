@@ -1796,11 +1796,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				tab := m.activeTabModel()
 				if tab != nil {
 					if pane := tab.ActivePaneModel(); pane != nil {
-						text := extractText(pane, m.selection)
+						text := copyText(pane, m.selection, m.paneIsAgent(pane))
 						m.selection = nil
 						if text != "" {
 							return m, func() tea.Msg {
-								if err := clipboard.Write(text); err != nil {
+								if err := clipboardWriteText(text); err != nil {
 									log.Printf("pane clipboard write: %v", err)
 								}
 								return nil
@@ -3061,6 +3061,19 @@ func (m Model) pluginRestoresViaSession(paneType string) bool {
 		return false
 	}
 	return m.pluginRegistry.Get(paneType).RestoresOwnHistory()
+}
+
+// paneIsAgent reports whether pane runs an AI agent (a plugin in the "ai"
+// category), whose transcript copy treats an opening "• " as a reply marker
+// rather than a list bullet (copyText). Same remote-mode limitation as
+// pluginRestoresViaSession: an unknown type answers false, which only means
+// the reply margin is kept in the copy.
+func (m Model) paneIsAgent(pane *PaneModel) bool {
+	if m.pluginRegistry == nil || pane == nil {
+		return false
+	}
+	p := m.pluginRegistry.Get(pane.Type)
+	return p != nil && p.Category == "ai"
 }
 
 // pluginMinNativeCols resolves the native-rendering column threshold for a
@@ -4922,11 +4935,11 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		tab := m.activeTabModel()
 		if tab != nil {
 			if pane := tab.ActivePaneModel(); pane != nil {
-				text := extractText(pane, m.selection)
+				text := copyText(pane, m.selection, m.paneIsAgent(pane))
 				m.selection = nil
 				if text != "" {
 					return m, func() tea.Msg {
-						if err := clipboard.Write(text); err != nil {
+						if err := clipboardWriteText(text); err != nil {
 							log.Printf("pane clipboard write: %v", err)
 						}
 						return nil
@@ -7762,6 +7775,9 @@ func (m Model) StopInputForwarder() {
 var (
 	clipboardReadText  = clipboard.Read
 	clipboardReadImage = clipboard.ReadImage
+	// clipboardWriteText is the pane-copy writer, indirected for the same
+	// reason: a test can then read what a copy PRODUCED through Update.
+	clipboardWriteText = clipboard.Write
 )
 
 func (m Model) pasteClipboard() tea.Cmd {

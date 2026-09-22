@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630" role="img" aria-label="Quil — MIT licensed. No telemetry.">
-  <title>Quil — MIT licensed. No telemetry.</title>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630" role="img" aria-label="Quil — Apache-2.0 licensed. No telemetry.">
+  <title>Quil — Apache-2.0 licensed. No telemetry.</title>
 
   <defs>
     <linearGradient id="bg" x1="0%" y1="0%" x2="0%" y2="100%">
@@ -101,23 +101,23 @@
   <text
     x="90" y="370"
     font-family="'JetBrains Mono', 'SF Mono', ui-monospace, monospace"
-    font-size="92"
+    font-size="84"
     font-weight="700"
     letter-spacing="-3"
     fill="url(#ogTitle)"
-  >MIT licensed.</text>
+  >Apache-2.0 licensed.</text>
 
   <text
-    x="90" y="467"
+    x="90" y="458"
     font-family="'JetBrains Mono', 'SF Mono', ui-monospace, monospace"
-    font-size="92"
+    font-size="84"
     font-weight="700"
     letter-spacing="-3"
     fill="url(#ogTitle)"
   >No telemetry.</text>
 
   <text
-    x="90" y="527"
+    x="90" y="518"
     font-family="'Inter', 'SF Pro Display', system-ui, sans-serif"
     font-size="28"
     font-weight="500"
@@ -127,7 +127,7 @@
 
   <g font-family="'JetBrains Mono', ui-monospace, monospace" font-size="22" fill="#B37A48">
     <text x="90" y="575">quil.cc/legal</text>
-    <text x="1110" y="575" text-anchor="end">v1.0.0  ·  MIT  ·  Linux · macOS · Windows</text>
+    <text x="1110" y="575" text-anchor="end">v1.0.0  ·  Apache-2.0  ·  Linux · macOS · Windows</text>
   </g>
 
   <rect x="0" y="620" width="1200" height="3" fill="url(#ogStroke)" opacity="0.75"/>

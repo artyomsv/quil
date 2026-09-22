@@ -18,6 +18,12 @@ work under the MIT License and who have not granted explicit permission to
 relicense remain licensed under the MIT License, the text of which is
 reproduced in MIT-LICENSE.txt.
 
+One contribution is in that position: the changes made by pull request #116
+(commit aaa2c55, "fix(tui): re-wrap terminal pastes in bracketed paste
+markers"), Portions Copyright 2026 Ope Oladipo (@oooseun). Consent was
+requested in issue #180 on 2026-08-20 and has not been given, so those changes
+remain under the MIT License.
+
 No rights beyond those granted by the applicable original license are conveyed
 for such contributions.
 

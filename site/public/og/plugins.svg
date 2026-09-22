@@ -127,7 +127,7 @@
 
   <g font-family="'JetBrains Mono', ui-monospace, monospace" font-size="22" fill="#B37A48">
     <text x="90" y="575">quil.cc/plugins</text>
-    <text x="1110" y="575" text-anchor="end">v1.0.0  ·  MIT  ·  Linux · macOS · Windows</text>
+    <text x="1110" y="575" text-anchor="end">v1.0.0  ·  Apache-2.0  ·  Linux · macOS · Windows</text>
   </g>
 
   <rect x="0" y="620" width="1200" height="3" fill="url(#ogStroke)" opacity="0.75"/>

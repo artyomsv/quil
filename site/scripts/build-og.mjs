@@ -96,9 +96,9 @@ const pages = [
     slug: "legal",
     path: "/legal",
     kicker: "LEGAL",
-    headline: "MIT licensed.",
+    headline: "Apache-2.0 licensed.",
     headline2: "No telemetry.",
-    headlineSize: 92,
+    headlineSize: 84,
     subline: "Quil stores all state locally under ~/.quil/.",
   },
   {

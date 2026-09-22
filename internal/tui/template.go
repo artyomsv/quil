@@ -98,7 +98,7 @@ func (m Model) templateTextTarget() string {
 func (m *Model) templateInsertText(text string) {
 	switch m.templateTextTarget() {
 	case "task":
-		m.templateUI.editor.InsertMultiLine(strings.ReplaceAll(text, "\r", ""))
+		m.templateUI.editor.InsertMultiLine(text)
 		m.templateUI.editor.Dirty = true
 		m.templateUI.editor.ensureCursorVisible()
 	case "branch":

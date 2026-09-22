@@ -279,6 +279,29 @@ func (e *TextEditor) HandleKey(key string) (saved, closed bool, cmd tea.Cmd) {
 			e.Dirty = true
 		}
 
+	case "ctrl+u", "ctrl+k":
+		// Readline's kill-to-start / kill-to-end. Ctrl+U at the end of a
+		// line clears it, which is the gesture people reach for first;
+		// Ctrl+Y (delete the whole line) was the only way before, and it
+		// removes the line itself rather than emptying it.
+		if e.ReadOnly {
+			return false, false, nil
+		}
+		e.Sel = nil
+		runes := []rune(e.Lines[e.CursorRow])
+		col := min(e.CursorCol, len(runes))
+		if key == "ctrl+u" {
+			if col > 0 {
+				e.Lines[e.CursorRow] = string(runes[col:])
+				e.CursorCol = 0
+				e.Dirty = true
+			}
+		} else if col < len(runes) {
+			e.Lines[e.CursorRow] = string(runes[:col])
+			e.Dirty = true
+		}
+		e.ensureCursorVisible()
+
 	// 4. Movement keys — clear selection
 	case "up":
 		e.Sel = nil
@@ -566,7 +589,12 @@ func (e *TextEditor) InsertMultiLine(text string) {
 	}
 	e.clearSel()
 
-	text = strings.ReplaceAll(text, "\r", "")
+	// A bare CR is a line break, not noise: Windows Terminal delivers a
+	// bracketed paste with every newline as "\r", and deleting CRs joined a
+	// multi-line paste into ONE line (Ctrl+U at its end then emptied all of
+	// it). CRLF first, so it becomes one break rather than two.
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
 	parts := strings.Split(text, "\n")
 
 	if len(parts) == 1 {

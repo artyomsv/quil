@@ -237,6 +237,59 @@ func (n *NotesEditor) ExtendSelection(row, col int) {
 	n.editor.extendSelectionAt(row, col)
 }
 
+// SelectWordAt selects the word containing (row, col), for double-click.
+// Reports false, changing nothing, when that position is not on a word.
+func (n *NotesEditor) SelectWordAt(row, col int) bool {
+	if n == nil || n.editor == nil {
+		return false
+	}
+	row, col = n.editor.clampPos(row, col)
+	if row >= len(n.editor.Lines) {
+		return false
+	}
+	runes := []rune(n.editor.Lines[row])
+	if col >= len(runes) || !isSelectWordRune(runes[col]) {
+		return false
+	}
+	start, end := col, col+1 // end is exclusive, as EditorSel expects
+	for start > 0 && isSelectWordRune(runes[start-1]) {
+		start--
+	}
+	for end < len(runes) && isSelectWordRune(runes[end]) {
+		end++
+	}
+	for end-1 > col && strings.ContainsRune(".,:!?", runes[end-1]) {
+		end--
+	}
+	n.editor.beginSelectionAt(row, start)
+	n.editor.extendSelectionAt(row, end)
+	return true
+}
+
+// SelectSentenceAt selects the sentence containing (row, col) within its
+// line, for triple-click. Reports false, changing nothing, on a blank line.
+func (n *NotesEditor) SelectSentenceAt(row, col int) bool {
+	if n == nil || n.editor == nil {
+		return false
+	}
+	row, col = n.editor.clampPos(row, col)
+	if row >= len(n.editor.Lines) {
+		return false
+	}
+	runes := []rune(n.editor.Lines[row])
+	units := make([]string, len(runes))
+	for i, r := range runes {
+		units[i] = string(r)
+	}
+	start, end, ok := sentenceBounds(units, col)
+	if !ok {
+		return false
+	}
+	n.editor.beginSelectionAt(row, start)
+	n.editor.extendSelectionAt(row, end)
+	return true
+}
+
 // MaybeAutoSave saves when the debounce window has elapsed since the last edit.
 // No-op if the editor is clean or the user is still actively editing.
 func (n *NotesEditor) MaybeAutoSave() {

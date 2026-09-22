@@ -165,6 +165,10 @@ intercepts (`Alt+G`, `Alt+M`, `Alt+N`, `Alt+E`, …); rebind `pane.quick_actions
 | `Ctrl+S` | Save notes immediately (in addition to 30 s autosave) |
 | `Tab` / `Shift+Tab` | Cycle keyboard focus between editor and bound pane |
 | `Esc` | Clear selection (first press) / exit notes mode (second press) |
+| `Ctrl+U` | Delete from the cursor to the start of the line (at the line end: clear the line) |
+| `Ctrl+K` | Delete from the cursor to the end of the line |
+| `Ctrl+Y` | Delete the whole line |
+| Double-click / triple-click | Select the word / the sentence |
 
 ## Notification sidebar
 
@@ -203,6 +207,8 @@ If the clipboard has no text but contains an image, Quil decodes the DIB, saves 
 | `Ctrl+A` (in editors) | Select all |
 | `Enter` | Copy selection to clipboard |
 | Mouse click + drag | Visual selection (terminals + editors) |
+| Double-click | Select the word (paths and URLs stay whole) |
+| Triple-click | Select the sentence, across wrapped rows |
 | Click + drag a split border | Resize the adjacent panes (10×4 minimum; PTY resize applied on release) |
 
 ## Scrolling

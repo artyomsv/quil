@@ -725,6 +725,10 @@ type Model struct {
 	mouseDown        bool        // true while left mouse button is held
 	mouseStartX      int         // screen X of mouse press
 	mouseStartY      int         // screen Y of mouse press
+	lastClickAt      time.Time   // previous left press, for double-click detection
+	clickCount       int         // presses in the current same-cell run; 0 = none
+	lastClickX       int         // screen X of that press
+	lastClickY       int         // screen Y of that press
 	configChanged    bool        // true when config needs saving on exit
 	disclaimerTipIdx int         // random tip index for disclaimer dialog
 
@@ -1833,8 +1837,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Notes editor click takes priority — the document anchor
 				// is resolved once at click time so motion events can't
 				// drift it if ScrollTop changes mid-drag.
+				clicks := m.registerClick(msg.X, msg.Y)
 				if row, col, ok := m.notesEditorPosAt(msg.X, msg.Y); ok {
 					m.clearDragState()
+					if (clicks == 2 && m.notesEditor.SelectWordAt(row, col)) ||
+						(clicks == 3 && m.notesEditor.SelectSentenceAt(row, col)) {
+						m.selection = nil
+						m.notesPaneFocused = false
+						return m, nil
+					}
 					m.notesMouseDown = true
 					m.mouseStartX = msg.X
 					m.mouseStartY = msg.Y
@@ -1883,6 +1894,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.selection = nil
 				if m.notesMode && m.notesEditor != nil {
 					m.notesPaneFocused = true
+				}
+				// Double-click selects the word under the pointer, triple-click
+				// the sentence. The drag is disarmed so the release keeps the
+				// selection instead of treating the press as a focus click.
+				if (clicks == 2 && m.selectWordAt(msg.X, msg.Y)) ||
+					(clicks == 3 && m.selectSentenceAt(msg.X, msg.Y)) {
+					m.mouseDown = false
 				}
 			}
 		}
@@ -2145,20 +2163,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// would read the next keystroke as a sequence step.
 		m.cancelSequence()
 		if m.dialog == dialogPluginMigration && m.migrationLeft != nil && !m.migrationRightFocus {
-			text := strings.ReplaceAll(msg.Content, "\r", "")
+			text := msg.Content // InsertMultiLine turns CR line breaks into newlines
 			m.migrationLeft.InsertMultiLine(text)
 			m.migrationLeft.Dirty = true
 			return m, nil
 		} else if m.dialog == dialogTOMLEditor && m.tomlEditor != nil {
-			text := strings.ReplaceAll(msg.Content, "\r", "")
+			text := msg.Content // InsertMultiLine turns CR line breaks into newlines
 			m.tomlEditor.InsertMultiLine(text)
 			m.tomlEditor.Dirty = true
 			return m, nil
 		} else if m.dialog != dialogNone && m.dialogEdit {
 			m.dialogInput += sanitizeDialogInput(msg.Content)
 			return m, nil
-		} else if m.notesMode && m.notesEditor != nil {
-			text := strings.ReplaceAll(msg.Content, "\r", "")
+		} else if m.notesMode && m.notesEditor != nil && !m.notesPaneFocused {
+			// Only while the EDITOR has focus. With the bound pane focused the
+			// paste falls through to it, like every keystroke does — the
+			// terminal's own Ctrl+V arrives here, not through handleKey, so
+			// this is the one paste path the notes focus split never reached.
+			text := msg.Content // InsertMultiLine turns CR line breaks into newlines
 			m.notesEditor.HandlePaste(text)
 			return m, nil
 		} else if m.dialog == dialogCommandPalette {
@@ -2209,15 +2231,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.dialog == dialogPluginMigration && m.migrationLeft != nil && !m.migrationRightFocus {
-			text := strings.ReplaceAll(string(msg), "\r", "")
+			text := string(msg) // InsertMultiLine turns CR line breaks into newlines
 			m.migrationLeft.InsertMultiLine(text)
 			m.migrationLeft.Dirty = true
 		} else if m.dialog == dialogTOMLEditor && m.tomlEditor != nil {
-			text := strings.ReplaceAll(string(msg), "\r", "")
+			text := string(msg) // InsertMultiLine turns CR line breaks into newlines
 			m.tomlEditor.InsertMultiLine(text)
 			m.tomlEditor.Dirty = true
 		} else if m.notesMode && m.notesEditor != nil {
-			text := strings.ReplaceAll(string(msg), "\r", "")
+			text := string(msg) // InsertMultiLine turns CR line breaks into newlines
 			m.notesEditor.HandlePaste(text)
 		}
 		return m, nil
@@ -7856,6 +7878,91 @@ func (m Model) pasteToDialog() tea.Cmd {
 		}
 		return dialogPasteMsg(text)
 	}
+}
+
+// doubleClickWindow is the longest gap between two presses on the same cell
+// that still counts as a double-click (the Windows default).
+const doubleClickWindow = 500 * time.Millisecond
+
+// clickNow is the clock double-click detection reads; a package var so tests
+// can pin it.
+var clickNow = time.Now
+
+// registerClick records a left press and returns its place in a run of
+// presses on the same cell, each within doubleClickWindow of the last:
+// 1 single, 2 double (word), 3 triple (sentence). A triple ends the run, so a
+// fourth press starts over rather than reading as another triple.
+func (m *Model) registerClick(x, y int) int {
+	now := clickNow()
+	chained := m.clickCount > 0 && x == m.lastClickX && y == m.lastClickY &&
+		now.Sub(m.lastClickAt) <= doubleClickWindow
+	if chained {
+		m.clickCount++
+	} else {
+		m.clickCount = 1
+	}
+	m.lastClickAt, m.lastClickX, m.lastClickY = now, x, y
+	count := m.clickCount
+	if count >= 3 {
+		m.clickCount = 0
+	}
+	return count
+}
+
+// selectWordAt selects the word under the screen cell (x, y) in the pane
+// beneath it. Reports false, leaving no selection, when the cell is not on a
+// word.
+func (m *Model) selectWordAt(x, y int) bool {
+	sel, pane := m.selectionCellAt(x, y)
+	if sel == nil {
+		return false
+	}
+	start, end, ok := wordBoundsAt(pane, sel.Anchor.Line, sel.Anchor.Col)
+	if !ok {
+		m.selection = nil
+		return false
+	}
+	sel.Anchor.Col, sel.Cursor.Col = start, end
+	return true
+}
+
+// selectSentenceAt selects the sentence under the screen cell (x, y),
+// following it across wrapped rows. Reports false, leaving no selection,
+// when the cell is on a blank row.
+func (m *Model) selectSentenceAt(x, y int) bool {
+	sel, pane := m.selectionCellAt(x, y)
+	if sel == nil {
+		return false
+	}
+	from, to, ok := sentenceAt(pane, sel.Anchor)
+	if !ok {
+		m.selection = nil
+		return false
+	}
+	sel.Anchor, sel.Cursor = from, to
+	return true
+}
+
+// selectionCellAt sets m.selection to the single cell under (x, y) and
+// returns it with its pane, or (nil, nil) when (x, y) is on no pane. A
+// zero-length drag from (x, y) to itself resolves the cell through the same
+// mapping a drag uses — focus, notes and preview layouts included.
+func (m *Model) selectionCellAt(x, y int) (*Selection, *PaneModel) {
+	tab := m.activeTabModel()
+	if tab == nil || tab.Root == nil {
+		return nil, nil
+	}
+	m.mouseStartX, m.mouseStartY = x, y
+	m.updateMouseSelection(tab, x, y, m.height-chromeHeight)
+	if m.selection == nil {
+		return nil, nil
+	}
+	pane := m.activePaneByID(m.selection.PaneID)
+	if pane == nil {
+		m.selection = nil
+		return nil, nil
+	}
+	return m.selection, pane
 }
 
 func (m *Model) updateMouseSelection(tab *TabModel, curX, curY, tabH int) {

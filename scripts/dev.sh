@@ -174,7 +174,10 @@ case "${1:-help}" in
     WIN_PREP=""
     ACTIVATE_STEP=""
     if [ "$TARGET_GOOS" = "windows" ]; then
-      WIN_PREP="apk add --no-cache curl unzip >/dev/null 2>&1 && sh scripts/fetch-conpty.sh && go install github.com/tc-hib/go-winres@v0.3.3 && go-winres make --in winres/winres.json --out cmd/quil/rsrc --product-version \$VER --file-version \$VER && go-winres make --in winres/winres.json --out cmd/quild/rsrc --product-version \$VER --file-version \$VER &&"
+      # go-winres runs INSIDE the container, so it is installed for the
+      # container's platform: under the exported GOOS=windows, `go install`
+      # cross-compiles it into /go/bin/windows_amd64/, off PATH.
+      WIN_PREP="apk add --no-cache curl unzip >/dev/null 2>&1 && sh scripts/fetch-conpty.sh && GOOS= GOARCH= go install github.com/tc-hib/go-winres@v0.3.3 && go-winres make --in winres/winres.json --out cmd/quil/rsrc --product-version \$VER --file-version \$VER && go-winres make --in winres/winres.json --out cmd/quild/rsrc --product-version \$VER --file-version \$VER &&"
       # quil-activate is a Windows URI handler. Its non-Windows file is a stub
       # that prints an error and exits 1 — building it elsewhere produces a
       # 2 MB executable whose only behaviour is to refuse.

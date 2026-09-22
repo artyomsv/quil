@@ -125,11 +125,14 @@ func extractText(pane *PaneModel, sel *Selection) string {
 // way to select it) otherwise reads as indent 0 and cancels the dedent for
 // every line after it.
 //
-// A line opening with a list or message marker ("• ", "- ", "1. ") counts at
-// the column its TEXT starts, because that is where its hanging continuation
-// lines are indented to: Codex opens a reply with "• " and indents the rest
-// of it by two, so measuring the marker at 0 kept every later paragraph
-// indented. The marker itself is never removed.
+// A FIRST line opening with an agent's reply marker ("• ", "● ", "⏺ ")
+// counts at the column its TEXT starts, because that is where the rest of
+// the reply is indented to: Codex opens a reply with "• " and indents the
+// rest of it by two, so measuring the marker at 0 kept every later paragraph
+// indented. Markdown list markers ("- ", "1. ") do NOT count, and neither
+// does a reply marker further down: there the indent under a marker is the
+// nesting of a list ("- parent" / "  - child"), which must survive the copy.
+// The marker itself is never removed.
 func dedent(s string, firstCol int) string {
 	lines := strings.Split(s, "\n")
 	lead := func(l string) int { return len(l) - len(strings.TrimLeft(l, " ")) }
@@ -138,9 +141,9 @@ func dedent(s string, firstCol int) string {
 		if strings.TrimSpace(l) == "" {
 			continue
 		}
-		n := lead(l) + markerWidth(l[lead(l):])
+		n := lead(l)
 		if i == 0 {
-			n += firstCol
+			n += firstCol + replyMarkerWidth(l[lead(l):])
 		}
 		if common < 0 || n < common {
 			common = n
@@ -160,14 +163,35 @@ func dedent(s string, firstCol int) string {
 	return strings.Join(lines, "\n")
 }
 
-// markerWidth returns the columns a leading list/message marker and the
-// space after it occupy in text, or 0 when text does not open with one.
-func markerWidth(text string) int {
+// replyMarkerWidth returns the columns an agent's reply marker and the space
+// after it occupy at the start of text, or 0 when text does not open with one.
+func replyMarkerWidth(text string) int {
 	word, rest, ok := strings.Cut(text, " ")
-	if !ok || rest == "" || !isListMarker(word) {
+	if !ok || rest == "" || !isReplyMarker(word) {
 		return 0
 	}
-	return utf8.RuneCountInString(word) + 1 // markers are single-width runes
+	return utf8.RuneCountInString(word) + 1 // the markers are single-width runes
+}
+
+// isReplyMarker reports whether word is the bullet an AI agent opens a reply
+// with (Codex "•", Claude Code "●"/"⏺") — as opposed to a markdown list item.
+func isReplyMarker(word string) bool {
+	switch word {
+	case "•", "●", "⏺":
+		return true
+	}
+	return false
+}
+
+// hangIndent returns the column the text of absLine starts at: its leading
+// blanks plus, when it opens with a list or reply marker, that marker and its
+// space. It is the indent a wrapped continuation of the row carries.
+func hangIndent(pane *PaneModel, absLine int) int {
+	n := leadingBlanks(pane, absLine)
+	if word, cols := firstWord(pane, absLine); isListMarker(word) {
+		n += cols + 1
+	}
+	return n
 }
 
 // Kinds of boundary between two adjacent rows of a selection.
@@ -189,25 +213,34 @@ const wordWrapSlack = 4
 // left — which is exactly the test a word-wrapping app applied when it broke
 // the line there. Everything else, including a following blank row or list
 // item, is a real line break.
+//
+// An app wrap must also look like one: the next row is indented exactly to
+// where this row's text starts (hangIndent) — a paragraph's continuation
+// lines up under it, code does not — and a short row must be at least half
+// full. Without those two guards "if ok:" followed by an indented long
+// identifier was joined into one line, since the length test alone is
+// satisfied by any long first word.
 func lineBreakKind(pane *PaneModel, absLine int) int {
 	w := pane.vt.Width()
 	contentEnd := lineContentEnd(pane, absLine)
 	if contentEnd < 0 {
 		return breakHard
 	}
+	nextLead := leadingBlanks(pane, absLine+1)
+	continues := nextLead == hangIndent(pane, absLine)
 	if contentEnd >= w-1 {
-		// A full row followed by an INDENTED one is an app that wraps right
-		// up to the edge (Codex) and indents its continuation, not the
-		// terminal splitting a word — the terminal's continuation starts at
-		// column 0. One leading space is kept as content: that is the
-		// terminal wrapping exactly at a space.
-		if leadingBlanks(pane, absLine+1) >= 2 {
+		// A full row followed by an INDENTED continuation is an app that
+		// wraps right up to the edge (Codex), not the terminal splitting a
+		// word — the terminal's continuation starts at column 0. One leading
+		// space is kept as content: that is the terminal wrapping exactly at
+		// a space.
+		if nextLead >= 2 && continues {
 			return breakWordWrap
 		}
 		return breakCharWrap
 	}
 	word, wordCols := firstWord(pane, absLine+1)
-	if word == "" || isListMarker(word) {
+	if word == "" || isListMarker(word) || !continues || 2*(contentEnd+1) < w {
 		return breakHard
 	}
 	free := w - 1 - contentEnd // columns left after the last character

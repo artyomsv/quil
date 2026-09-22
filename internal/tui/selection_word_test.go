@@ -178,9 +178,17 @@ func TestExtractText_DedentWhenDragStartsPastTheMargin(t *testing.T) {
 		{
 			// Codex: a reply opens with "• " and indents the rest by two.
 			name:     "hanging marker counts at its text",
-			feed:     "• one\r\n\r\n  two\r\n- three",
+			feed:     "• one\r\n\r\n  two\r\n  - three",
 			startCol: 0,
 			want:     "• one\n\ntwo\n- three",
+		},
+		{
+			// A markdown list marker is not a margin: the child's indent is
+			// its nesting and must survive the copy (review finding on #227).
+			name:     "nested list keeps its indent",
+			feed:     "- parent\r\n  - child",
+			startCol: 0,
+			want:     "- parent\n  - child",
 		},
 		{
 			// Unindented output: a mid-line start removes nothing.
@@ -492,6 +500,51 @@ func TestUpdate_NotesPaste_KeepsLineBreaks(t *testing.T) {
 			m = next.(Model)
 			if got := m.notesEditor.Content(); got != tt.want {
 				t.Errorf("content = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// Real line breaks in ordinary shell output must survive the word-wrap
+// heuristic, however long the next line's first word is (review finding on
+// #227).
+func TestExtractText_HardBreaksAreNotAppWraps(t *testing.T) {
+	tests := []struct {
+		name string
+		feed string
+		want string
+	}{
+		{
+			name: "short code row before an indented long identifier",
+			feed: "if ok:\r\n    very_long_function_name_that_fits()",
+			want: "if ok:\n    very_long_function_name_that_fits()",
+		},
+		{
+			// Half full and the next word would not fit, but the next row
+			// is indented differently: code, not a paragraph continuation.
+			name: "indent change is not a continuation",
+			feed: "for item in collection_of_things:\r\n    another_long_identifier_name",
+			want: "for item in collection_of_things:\n    another_long_identifier_name",
+		},
+		{
+			// Same indent, but a 2-column row is no wrapped paragraph.
+			name: "short row at the same indent",
+			feed: "ok\r\nvery_long_identifier_name_that_is_long",
+			want: "ok\nvery_long_identifier_name_that_is_long",
+		},
+		{
+			// Same layout with the continuation lined up is still joined.
+			name: "lined-up continuation still joins",
+			feed: "  the quick brown fox jumps over the\r\n  extraordinarily lazy dog",
+			want: "the quick brown fox jumps over the extraordinarily lazy dog",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pane := textPane(t, 40, 5, tt.feed)
+			last := lastContentLine(pane) - pane.vt.ScrollbackLen()
+			if got := extractText(pane, selectLines(pane, 0, last)); got != tt.want {
+				t.Errorf("extractText = %q, want %q", got, tt.want)
 			}
 		})
 	}

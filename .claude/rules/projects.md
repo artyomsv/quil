@@ -299,6 +299,22 @@ snapshot shape, where a tab's own `ProjectID` names no project the daemon
 holds) falls back to the workspace-wide emptiness test, which is a no-op
 whenever anything else in the workspace still holds a tab.
 
+**`handleMoveTab` spawns THREE tabs, not one, because a project's own
+`ActiveTab` and the daemon's single GLOBAL active tab (`ActiveTabID`) are
+different things.** Several clients can each be looking at a different
+project, so a second client switching the daemon globally elsewhere does not
+change what a FIRST client, still viewing the source project, is looking at.
+After a lazy restore only `ActiveTabID()`'s panes are running — spawning just
+that one misses the source's own successor whenever the source is not the
+globally active project, leaving that first client on a restore indicator
+with no PTY until it happens to switch tabs again. The handler therefore
+spawns the source's new `ActiveTab` (`ProjectActiveTab(from)`, read AFTER
+`recoverEmptyProject`, since that call can be what set it — the successor, or
+the recovery Shell tab), the moved tab itself (now the target's `ActiveTab`),
+and `ActiveTabID()` for the ordinary single-client case. `ensureTabSpawned` is
+idempotent, so the three calls — often naming the same tab — cost nothing
+extra.
+
 **Same-daemon only, by construction** — `MoveTabPayload` carries a bare
 `project_id`, meaningful only to the daemon that owns the map it indexes.
 There is no destination field to get wrong.

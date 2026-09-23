@@ -2565,15 +2565,28 @@ func (d *Daemon) handleMoveTab(conn *ipc.Conn, msg *ipc.Message) {
 	// Moving the source project's LAST tab out leaves it exactly as empty as
 	// DestroyTab leaves one, and owes the same replacement Shell tab.
 	d.recoverEmptyProject(from)
-	// Unconditional, and it has to be: the moved tab is not the only one that
-	// can become the global active tab here. MoveTab promotes the SOURCE's
-	// successor to sm.activeTab when the moved tab was the global active one
-	// and is leaving the active project (mirrors DestroyTab) — and after a
-	// lazy restore that successor's own panes can still be Pending, same as
-	// the MsgSwitchProject arm above. ensureTabSpawned is idempotent
+	// Each project keeps its OWN ActiveTab, and that is independent of the
+	// daemon's single GLOBAL active project/tab (sm.activeProject/activeTab):
+	// several clients can each be looking at a different project, so a
+	// second client can have switched the daemon globally to some OTHER
+	// project while a first client — still viewing the source — is the one
+	// that just moved a tab out of it. Spawning only ActiveTabID() then
+	// misses the source's own successor whenever the source is not the
+	// globally active project, leaving that client on a restore indicator
+	// with no PTY behind it until it switches tabs again.
+	//
+	// Spawn every per-project selection this move touched: the source's new
+	// ActiveTab (the successor, or recoverEmptyProject's Shell tab — read
+	// AFTER that call, since it can be what set it), the moved tab itself
+	// (now the target's ActiveTab), and the global active tab for the
+	// ordinary single-client case. ensureTabSpawned is idempotent
 	// (ensurePaneSpawned returns early once a PTY exists or Pending is
-	// false), so spawning whichever tab actually ended up active costs
-	// nothing on the ordinary "moved tab into the active project" path.
+	// false), so calling it three times over — often on the very same tab —
+	// costs nothing.
+	if srcActive, ok := d.session.ProjectActiveTab(from); ok && srcActive != "" {
+		d.ensureTabSpawned(srcActive)
+	}
+	d.ensureTabSpawned(p.TabID)
 	d.ensureTabSpawned(d.session.ActiveTabID())
 	d.broadcastState()
 	d.requestSnapshot()

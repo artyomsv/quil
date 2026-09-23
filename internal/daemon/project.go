@@ -510,6 +510,22 @@ func (sm *SessionManager) ActiveProject() string {
 	return sm.activeProject
 }
 
+// ProjectActiveTab reads one project's own remembered ActiveTab under the
+// session lock. It exists because a project's ActiveTab and the daemon's
+// GLOBAL active tab (ActiveTabID) are different things: several clients can
+// each be looking at a different project, so "spawn whatever is globally
+// active" misses a project's own selection whenever that project is not the
+// one currently globally active. Reports false for an unknown project.
+func (sm *SessionManager) ProjectActiveTab(projectID string) (string, bool) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	p, ok := sm.projects[projectID]
+	if !ok {
+		return "", false
+	}
+	return p.ActiveTab, true
+}
+
 func (sm *SessionManager) CreateTabInProject(projectID, name string) *Tab {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()

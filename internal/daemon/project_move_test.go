@@ -393,3 +393,67 @@ func TestHandleMoveTab_SpawnsTheSourceSuccessorWhenTheActiveTabMovesOut(t *testi
 			"user lands on a restore indicator with no process behind it")
 	}
 }
+
+// TestHandleMoveTab_SpawnsTheSourceSuccessorForAnotherClientsProject covers
+// the case the test above cannot reach: the daemon's GLOBAL active
+// project/tab (sm.activeProject/activeTab) is a single value, but several
+// clients can each be looking at a DIFFERENT project. Client A is viewing
+// the SOURCE project (S active, T Pending); client B has separately switched
+// the daemon globally to the DESTINATION project. When A moves S to the
+// destination, the source's successor (T) is promoted to the source's own
+// ActiveTab — but the daemon's global active tab was never S to begin with,
+// so the old `ensureTabSpawned(ActiveTabID())`-only fix left T Pending
+// forever: client A's own tab list shows a restore indicator with no PTY
+// until it happens to switch tabs again.
+func TestHandleMoveTab_SpawnsTheSourceSuccessorForAnotherClientsProject(t *testing.T) {
+	d := newTestDaemon(t)
+	src := d.session.CreateProject("alpha", t.TempDir())
+	dst := d.session.CreateProject("beta", t.TempDir())
+
+	s := d.session.CreateTabInProject(src.ID, "S") // src's ActiveTab by default
+	tTab := d.session.CreateTabInProject(src.ID, "T")
+	dstTab := d.session.CreateTabInProject(dst.ID, "D0")
+
+	tPane, err := d.session.CreatePane(tTab.ID, t.TempDir())
+	if err != nil {
+		t.Fatalf("create T's pane: %v", err)
+	}
+	// The shape a lazy restore leaves behind: everything outside the GLOBAL
+	// active tab is deferred — and T is not it, dst's own tab is.
+	tPane.Type = "terminal"
+	tPane.Pending = true
+
+	// Client B's action: switch the daemon GLOBALLY to the destination
+	// project, which has nothing to do with client A's own source-project
+	// view.
+	d.session.SwitchProject(dst.ID)
+	if got := d.session.ActiveTabID(); got != dstTab.ID {
+		t.Fatalf("setup invariant broken: ActiveTabID() = %q, want dst's own tab %q", got, dstTab.ID)
+	}
+	if srcActive, ok := d.session.ProjectActiveTab(src.ID); !ok || srcActive != s.ID {
+		t.Fatalf("setup invariant broken: src.ActiveTab = %q, want %q", srcActive, s.ID)
+	}
+	if tPane.PTY != nil {
+		t.Fatal("setup invariant broken: T's pane must still be Pending")
+	}
+
+	// Client A's action: move S (its own project's active tab) to dst, which
+	// happens to be the daemon's globally active project right now.
+	msg, err := ipc.NewMessage(ipc.MsgMoveTab, ipc.MoveTabPayload{
+		TabID:     s.ID,
+		ProjectID: dst.ID,
+	})
+	if err != nil {
+		t.Fatalf("NewMessage: %v", err)
+	}
+	d.handleMessage(nil, msg)
+
+	if srcActive, ok := d.session.ProjectActiveTab(src.ID); !ok || srcActive != tTab.ID {
+		t.Fatalf("src.ActiveTab after the move = %q, want the promoted successor %q", srcActive, tTab.ID)
+	}
+	if tPane.PTY == nil || tPane.Pending {
+		t.Error("moving S out of a project that was never the GLOBAL active one left T " +
+			"unspawned — client A's own project view shows a restore indicator with no " +
+			"process behind it")
+	}
+}

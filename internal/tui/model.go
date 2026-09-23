@@ -849,6 +849,19 @@ type Model struct {
 	// the next workspace_state broadcast is a no-op.
 	tabDragFromIdx int
 
+	// Manual tab-bar scroll (reorder.go: tabBarLayout, scrollTabBar).
+	// tabScrollAnchor == "" means auto mode: the window is centered on the
+	// active tab, same as before this existed. A non-empty anchor is in
+	// effect ONLY while it equals the active tab's ID — any tab switch
+	// (keyboard, project switch, create/destroy, MCP) therefore falls back
+	// to auto mode with no reset call needed at those sites, because the
+	// active tab's ID no longer matches what the wheel last set.
+	// tabScrollFirst is the first visible tab's index while in manual mode;
+	// tabBarLayout re-clamps it against the CURRENT tab count on every read,
+	// so a stale value from before a tab closed never paints past the end.
+	tabScrollFirst  int
+	tabScrollAnchor string
+
 	// Sidebar reorder drags: a project row or a tab heading pressed in the
 	// project sidebar (reorder.go). A bool beside the index rather than
 	// tabDragFromIdx's -1 sentinel, so a Model built directly by a test — the
@@ -1831,7 +1844,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.clearDragState()
 				if idx := m.hitTestTab(msg.X); idx >= 0 {
 					m.tabDragFromIdx = idx
-					return m, m.switchTab(idx)
+					// Checked BEFORE switchTab moves the active tab: manual
+					// mode is a statement about the tab being LEFT, and
+					// switchTab itself never touches the anchor (that is
+					// what lets an ordinary switch fall back to auto). A
+					// click while scrolled re-arms the anchor on the tab
+					// being ENTERED so the bar keeps showing this window
+					// instead of re-centering on the click.
+					wasManual := m.tabBarManualMode()
+					cmd := m.switchTab(idx)
+					if wasManual {
+						if tabs := m.curTabs(); idx >= 0 && idx < len(tabs) {
+							m.tabScrollAnchor = tabs[idx].ID
+						}
+					}
+					return m, cmd
 				}
 			} else if msg.Y < m.height-1 {
 				// Notes editor click takes priority — the document anchor
@@ -2102,6 +2129,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.scrollSidebar(true)
 			case tea.MouseWheelDown:
 				m.scrollSidebar(false)
+			}
+			return m, nil
+		}
+		// Wheel over the tab bar scrolls the strip instead of switching tabs
+		// or reaching a pane beneath it. Y==0 is the bar's own row (row 0 of
+		// the pane column, same test hitTestTab's click branch uses); the
+		// four buttons are matched explicitly, as every other wheel consumer
+		// in this package does, for the same reason the sidebar branch above
+		// states it — collapsing to `== MouseWheelUp` reads a trackpad's
+		// Left/Right notch as "not up" and falls through to the pane.
+		if msg.Y == 0 && msg.X >= m.projectSidebarWidth() {
+			switch msg.Button {
+			case tea.MouseWheelUp, tea.MouseWheelLeft:
+				m.scrollTabBar(-1)
+			case tea.MouseWheelDown, tea.MouseWheelRight:
+				m.scrollTabBar(1)
 			}
 			return m, nil
 		}
@@ -6428,32 +6471,41 @@ func fitTabBar(bar string, barW int) string {
 // panes' width to spend. Sizing it to m.width instead made the bar overhang
 // the sidebar by that many columns.
 //
-// The layout itself — labels, styles, the overflow rule, the separators — lives
-// in tabSpans (reorder.go), which hitTestTab and the reorder drag also read.
-// This function only joins what that returns, so the painted bar and the click
-// map cannot drift: there is nothing left here to drift FROM.
+// The layout itself — labels, styles, the overflow rule, the separators, the
+// manual scroll window — lives in tabBarLayout (reorder.go), which hitTestTab
+// and the reorder drag also read via tabSpans. This function reads
+// tabBarLayout directly (not the tabSpans wrapper) because it is the one
+// caller that also needs the hidden-left/hidden-right counts, and reading
+// them off the SAME call it joins is what keeps the markers honest by
+// construction — a tab tabBarLayout left out is a tab that did not fit, on
+// whichever side it fell off.
 func (m Model) renderTabBar() string {
 	barW := m.paneAreaWidth()
-	spans := m.tabSpans()
+	spans, hiddenLeft, hiddenRight := m.tabBarLayout()
 	if len(spans) == 0 {
 		return lipgloss.NewStyle().Width(barW).Render("")
 	}
+	indicatorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
 
-	parts := make([]string, len(spans))
+	var bar strings.Builder
+	// The left marker is painted FIRST and occupies the columns before the
+	// first tab — tabBarLayout already reserved its width in span.start, so
+	// painting anything else here first would desync the painted column from
+	// the geometry hitTestTab and the drag read.
+	if hiddenLeft > 0 {
+		bar.WriteString(indicatorStyle.Render(fmt.Sprintf("«%d ", hiddenLeft)))
+	}
 	for i, s := range spans {
-		parts[i] = s.text
+		if i > 0 {
+			bar.WriteString(" ")
+		}
+		bar.WriteString(s.text)
 	}
-	bar := strings.Join(parts, " ")
-
-	// A tab tabSpans left out is a tab that did not fit. Counting the
-	// difference rather than re-deriving the overflow set keeps the indicator
-	// honest by construction.
-	if hidden := len(m.curTabs()) - len(spans); hidden > 0 {
-		indicator := fmt.Sprintf(" «%d more»", hidden)
-		bar += lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Render(indicator)
+	if hiddenRight > 0 {
+		bar.WriteString(indicatorStyle.Render(fmt.Sprintf(" %d»", hiddenRight)))
 	}
 
-	return lipgloss.NewStyle().Width(barW).Render(fitTabBar(bar, barW))
+	return lipgloss.NewStyle().Width(barW).Render(fitTabBar(bar.String(), barW))
 }
 
 // hitTestTab returns the tab index at screen X coordinate, or -1 if none.

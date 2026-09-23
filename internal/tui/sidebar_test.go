@@ -547,7 +547,7 @@ func TestTabBarFitsThePaneColumnWhenTabsOverflow(t *testing.T) {
 	}
 	// Control: the fixture must actually overflow the pane column, or the
 	// budget under test is never consulted.
-	if !strings.Contains(stripANSI(bar), "more»") {
+	if !strings.Contains(stripANSI(bar), "»") {
 		t.Fatalf("fixture does not overflow paneAreaWidth=%d — this test cannot fail: %q",
 			m.paneAreaWidth(), stripANSI(bar))
 	}

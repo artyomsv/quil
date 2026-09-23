@@ -118,7 +118,7 @@ func TestTabSpansMatchThePaintedBarWhenTheBarOverflows(t *testing.T) {
 	// 40-column fixture and fails a 60-column one. 60 paints three of five.
 	m.width, m.height = 60, 40
 
-	spans := m.tabSpans()
+	spans, hiddenLeft, hiddenRight := m.tabBarLayout()
 	if len(spans) == len(m.curTabs()) {
 		t.Fatal("fixture does not overflow — this test cannot discriminate, " +
 			"widen the tabs or narrow the terminal")
@@ -142,10 +142,21 @@ func TestTabSpansMatchThePaintedBarWhenTheBarOverflows(t *testing.T) {
 		}
 	}
 
-	// The overflow indicator has to agree with the same set, or the bar tells
-	// the user a different number of tabs is hidden than actually is.
-	if hidden := len(m.curTabs()) - len(spans); !strings.Contains(row0, fmt.Sprintf("«%d more»", hidden)) {
-		t.Errorf("bar does not report %d hidden tabs: %q", hidden, row0)
+	// The overflow markers have to agree with the same set on EACH side, or
+	// the bar tells the user a different number of tabs is hidden than
+	// actually is (or on the wrong side of the visible window).
+	if hiddenLeft > 0 && !strings.Contains(row0, fmt.Sprintf("«%d ", hiddenLeft)) {
+		t.Errorf("bar does not report %d tabs hidden on the left: %q", hiddenLeft, row0)
+	}
+	if hiddenRight > 0 && !strings.Contains(row0, fmt.Sprintf(" %d»", hiddenRight)) {
+		t.Errorf("bar does not report %d tabs hidden on the right: %q", hiddenRight, row0)
+	}
+	// Control: the fixture must hide tabs on BOTH sides, or this test cannot
+	// discriminate the two markers from a single-sided one.
+	if hiddenLeft == 0 || hiddenRight == 0 {
+		t.Fatalf("fixture hides tabs on only one side (hiddenLeft=%d hiddenRight=%d) — "+
+			"widen the tabs or change the active index so both markers are exercised",
+			hiddenLeft, hiddenRight)
 	}
 }
 

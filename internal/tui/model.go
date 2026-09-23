@@ -1218,7 +1218,31 @@ func msgTypeName(msg tea.Msg) string {
 	}
 }
 
-func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
+	// Permanently invalidate a stale manual tab-bar scroll anchor once its
+	// tab is no longer the active one. tabBarManualMode's compare already
+	// makes a MISMATCHED anchor inert for the current frame, but never
+	// CLEARS it — so switching away and back to that same tab by any means
+	// OTHER than a click (switchTabBy, a project switch and back, an MCP
+	// jump, tab create/destroy reassigning the active tab) makes the
+	// compare true again and resurrects a stale scroll window, sometimes
+	// hiding the very tab that just became active.
+	//
+	// A single choke point on the NAMED RETURN, via defer, is deliberately
+	// chosen over a reset sprinkled into every switch path: Update has
+	// dozens of return statements and no other point they all pass
+	// through, and a sprinkled reset is one a future switch path forgets.
+	// The click-while-scrolled path (this function's MouseClickMsg branch)
+	// re-arms the anchor to the newly active tab BEFORE returning, so by
+	// the time this runs the anchor already matches and survives
+	// unchanged; wheel-scroll (scrollTabBar) sets the anchor to the
+	// CURRENT, unchanged active tab for the same reason.
+	defer func() {
+		if mm, ok := retModel.(Model); ok {
+			mm.normalizeTabScrollAnchor()
+			retModel = mm
+		}
+	}()
 	start := time.Now()
 	markUpdateStart(start)
 	defer func() {

@@ -672,3 +672,111 @@ func TestTabRenameWhileScrolled_ReturnsToAutoMode(t *testing.T) {
 		t.Fatal("active tab is not visible after starting a rename in auto mode")
 	}
 }
+
+// Switching away from a scrolled tab and back to it must NOT resurrect the
+// stale scroll window. tabBarManualMode's compare only makes a mismatched
+// anchor INERT while some other tab is active; coming back to the ORIGINAL
+// tab by any non-click means (here, two ordinary Alt+N switches) makes the
+// compare true again unless something actually CLEARS the anchor in
+// between — which is exactly what Model.Update's defer
+// (normalizeTabScrollAnchor) does. Driven through Update, not by calling
+// switchTab directly, because that defer is the fix under test.
+func TestSwitchAwayAndBack_ReturnsToAutoMode(t *testing.T) {
+	t.Parallel()
+	m := newTabBarScrollModel(eightOverflowingTabNames(), 0)
+	m.client = newFakeConn()
+	wantOverflow(t, m)
+
+	scrolled := wheelAtTabBar(t, m, tea.MouseWheelDown)
+	if !scrolled.tabBarManualMode() {
+		t.Fatal("fixture precondition: expected manual mode after scrolling")
+	}
+	hiddenAfterScroll := true
+	for _, s := range scrolled.tabSpans() {
+		if s.index == 0 {
+			hiddenAfterScroll = false
+			break
+		}
+	}
+	if !hiddenAfterScroll {
+		t.Fatal("fixture precondition: tab 0 must be scrolled out of view")
+	}
+
+	// Away: Alt+2 switches to tab index 1 (tab.switch_2).
+	updated, _ := scrolled.Update(tea.KeyPressMsg{Code: '2', Mod: tea.ModAlt})
+	away := updated.(Model)
+	if away.activeTabIdx() != 1 {
+		t.Fatalf("fixture precondition: Alt+2 switched to tab %d, want 1", away.activeTabIdx())
+	}
+
+	// Back: Alt+1 switches back to tab 0 — the ORIGINAL tab, the one the
+	// stale anchor still names.
+	updated, _ = away.Update(tea.KeyPressMsg{Code: '1', Mod: tea.ModAlt})
+	back := updated.(Model)
+	if back.activeTabIdx() != 0 {
+		t.Fatalf("Alt+1 switched to tab %d, want 0", back.activeTabIdx())
+	}
+	if back.tabBarManualMode() {
+		t.Fatal("manual mode reactivated on returning to the originally-scrolled tab")
+	}
+	visible := false
+	for _, s := range back.tabSpans() {
+		if s.index == 0 {
+			visible = true
+			break
+		}
+	}
+	if !visible {
+		t.Fatal("active tab 0 is not visible after switching away and back — the stale scroll window was resurrected")
+	}
+}
+
+// Same class of bug, one level up: switching PROJECT away and back must also
+// return the bar to auto mode. A project switch changes activeTabIdx()'s
+// meaning without ever touching tabScrollAnchor, so the away leg alone
+// (moving to a project whose active tab has a different ID) is what the
+// normalize defer clears against; the anchor is already gone by the time the
+// user comes back.
+func TestSwitchProjectAwayAndBack_ReturnsToAutoMode(t *testing.T) {
+	t.Parallel()
+	m := newTabBarScrollModel(eightOverflowingTabNames(), 0)
+	m.client = newFakeConn()
+	m.projects = append(m.projects, &ProjectModel{
+		ID: "proj-b", Name: "B",
+		tabs: []*TabModel{NewTabModel("only", "Only")},
+	})
+	wantOverflow(t, m)
+
+	scrolled := wheelAtTabBar(t, m, tea.MouseWheelDown)
+	if !scrolled.tabBarManualMode() {
+		t.Fatal("fixture precondition: expected manual mode after scrolling")
+	}
+
+	// Away: Alt+Shift+Right (project.next) switches to project B.
+	updated, _ := scrolled.Update(tea.KeyPressMsg{Mod: tea.ModAlt | tea.ModShift, Code: tea.KeyRight})
+	away := updated.(Model)
+	if away.activeProject != 1 {
+		t.Fatalf("fixture precondition: project.next moved to project %d, want 1", away.activeProject)
+	}
+
+	// Back: Alt+Shift+Left (project.prev) returns to project A — the one
+	// the stale anchor still names.
+	updated, _ = away.Update(tea.KeyPressMsg{Mod: tea.ModAlt | tea.ModShift, Code: tea.KeyLeft})
+	back := updated.(Model)
+	if back.activeProject != 0 {
+		t.Fatalf("project.prev moved to project %d, want 0", back.activeProject)
+	}
+	if back.tabBarManualMode() {
+		t.Fatal("manual mode reactivated on returning to the originally-scrolled project")
+	}
+	visible := false
+	for _, s := range back.tabSpans() {
+		if s.index == back.activeTabIdx() {
+			visible = true
+			break
+		}
+	}
+	if !visible {
+		t.Fatal("active tab is not visible after switching project away and back")
+	}
+}

@@ -154,6 +154,31 @@ func (m Model) tabBarManualMode() bool {
 	return tabs[activeIdx].ID == m.tabScrollAnchor
 }
 
+// normalizeTabScrollAnchor clears a manual scroll anchor that no longer
+// names the active tab, called once per message from a defer on
+// Model.Update's named return (model.go) — see that comment for why a
+// single choke point beats a reset in every switch path.
+//
+// Without this, tabBarManualMode's compare is the ONLY thing that reacts to
+// an active-tab change, and it merely goes inert for as long as some OTHER
+// tab is active — the anchor itself is left standing, ready to match again
+// the moment the user comes back to the original tab by any means. This is
+// what makes it a PERMANENT invalidation rather than a temporary one:
+// tabBarManualMode would otherwise report manual mode is back in effect on
+// a plain switchTabBy(1) followed by switchTabBy(-1), painting a scroll
+// window computed for a click that never happened and, in the reported
+// case, hiding the tab that just became active again.
+func (m *Model) normalizeTabScrollAnchor() {
+	if m.tabScrollAnchor == "" {
+		return
+	}
+	tabs := m.curTabs()
+	activeIdx := m.activeTabIdx()
+	if activeIdx < 0 || activeIdx >= len(tabs) || tabs[activeIdx].ID != m.tabScrollAnchor {
+		m.tabScrollAnchor = ""
+	}
+}
+
 // tabBarLayout is the layout engine tabSpans wraps: same labels, same styles,
 // same one-column separators as before, plus the manual scroll offset
 // (scrollTabBar) and the two-sided overflow markers. It is the SINGLE

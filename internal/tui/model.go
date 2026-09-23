@@ -2179,14 +2179,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						// they are swallowed here — not forwarded, and not
 						// scrolled locally either, since this pane's
 						// scrollback is never populated on the alt screen.
-						up, ok := true, false
+						var up bool
 						switch msg.Button {
 						case tea.MouseWheelUp:
-							up, ok = true, true
+							up = true
 						case tea.MouseWheelDown:
-							up, ok = false, true
-						}
-						if !ok {
+							up = false
+						default:
 							return m, nil
 						}
 						relX := msg.X - rect.OX - 1

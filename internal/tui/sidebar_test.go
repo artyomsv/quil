@@ -2197,37 +2197,49 @@ func TestSidebarWheel_HorizontalDoesNotMoveTheBody(t *testing.T) {
 	}
 }
 
-// TestSidebarWheel_HorizontalIsStillSwallowed is the other half of the same
-// branch: refusing to scroll must not let the event fall THROUGH to the pane
-// area, because the pane under the cursor is the sidebar, not a pane. A tracking
-// app would otherwise receive a wheel escape for a notch aimed at the strip.
+// TestSidebarWheel_HorizontalIsStillSwallowed pins the sidebar's OWN handling
+// of a horizontal notch aimed at the strip: it must move NEITHER the PANES
+// scroll offset NOR reach the pane beneath. The original bug collapsed
+// msg.Button to `== tea.MouseWheelUp` as a bool, so a horizontal notch read as
+// "not up" and scrolled the sidebar body DOWN.
 //
-// The control fires a VERTICAL button at a PANE coordinate — it can no longer
-// reuse the horizontal button under test, because the pane-forwarding branch
-// itself now swallows MouseWheelLeft/Right too (it used to misforward them as
-// wheel-down). The control still proves this fixture's tracking pane forwards
-// wheel events at all, so the swallow assertion below is not vacuous.
+// The control fires MouseWheelDown at the same coordinate first and asserts
+// it DOES move sidebarScroll: without it, an assertion that a horizontal
+// notch leaves sidebarScroll unchanged would also pass for a sidebar with
+// nothing to scroll into, proving nothing.
+//
+// Checking IPC sends alone would no longer discriminate the sidebar's own
+// swallow from the pane-forwarding branch's: that branch now swallows
+// horizontal notches too (defense in depth, from the same fix), so a
+// horizontal notch that "escaped" the sidebar's own early return would still
+// send nothing once it reached the pane. Pinning sidebarScroll is what keeps
+// this test specific to the sidebar branch rather than to that one.
 func TestSidebarWheel_HorizontalIsStillSwallowed(t *testing.T) {
 	t.Parallel()
 	fake := newFakeConn()
-	m := newSplitDragTestModel(t)
+	m := newTestModelManyPanes(t, 3, 8)
 	m.client = fake
-	m.sidebarOpen = true
-	m.sidebarWidth = 22
-	m.curTabs()[0].ActivePaneModel().daemonMouseTracking = true
+	m.width, m.height = 100, 13
 
-	updated, _ := m.Update(tea.MouseWheelMsg{X: 40, Y: 10, Button: tea.MouseWheelUp})
+	// Control: a vertical notch at the sidebar coordinate does move the
+	// PANES scroll offset.
+	updated, _ := m.Update(tea.MouseWheelMsg{X: 5, Y: 5, Button: tea.MouseWheelDown})
 	got := updated.(Model)
-	if fake.sentCount() == 0 {
-		t.Fatal("control: a wheel over the PANE must forward to a tracking app — " +
+	if got.sidebarScroll == 0 {
+		t.Fatal("control: MouseWheelDown over the sidebar must move sidebarScroll — " +
 			"without it the swallow assertion below is vacuous")
 	}
-	sentBefore := fake.sentCount()
+	before := got.sidebarScroll
 
-	updated, _ = got.Update(tea.MouseWheelMsg{X: 5, Y: 5, Button: tea.MouseWheelLeft})
-	if after := fake.sentCount(); after != sentBefore {
-		t.Errorf("horizontal wheel over the strip forwarded %d message(s) to the pane beneath",
-			after-sentBefore)
+	for _, btn := range []tea.MouseButton{tea.MouseWheelLeft, tea.MouseWheelRight} {
+		updated, _ = got.Update(tea.MouseWheelMsg{X: 5, Y: 5, Button: btn})
+		got = updated.(Model)
+		if got.sidebarScroll != before {
+			t.Errorf("%v over the strip: sidebarScroll %d -> %d, want unchanged", btn, before, got.sidebarScroll)
+		}
+	}
+	if n := fake.sentCount(); n != 0 {
+		t.Errorf("horizontal wheel over the strip sent %d IPC message(s), want 0", n)
 	}
 }
 

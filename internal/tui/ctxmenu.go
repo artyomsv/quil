@@ -43,7 +43,10 @@ const (
 	// ctxActSetTabColor is one row of that re-populated list; the chosen
 	// colour rides on ctxMenuItem.color, never decoded from the label.
 	ctxActSetTabColor
-	// ctxActMoveTab is added in Task 4.
+	// ctxActMoveTab opens the project picker in MOVE mode (openMoveTabPicker)
+	// for the target tab. buildTabCtxMenuItems hides the row entirely when
+	// moveTabCandidates has nothing to offer, rather than greying it.
+	ctxActMoveTab
 )
 
 // ctxMenuItem is one row of the menu. Disabled rows render greyed, are
@@ -493,16 +496,45 @@ func (m *Model) openProjectCtxMenu(p *ProjectModel, anchorX, anchorY int) {
 	m.ctxMenu = s
 }
 
-// buildTabCtxMenuItems is the tab bar / sidebar tab-heading's menu: Rename
-// and Set color. Compact layout (spaced=false), like the project menu — two
-// rows have no group boundary to space out. Task 4 adds "Move to project…"
-// here, which is why the receiver is a pointer despite this task needing no
-// Model state: a move needs the project list to offer.
+// buildTabCtxMenuItems is the tab bar / sidebar tab-heading's menu: Rename,
+// Set color, and — as the LAST row, only when moveTabCandidates has
+// something to offer — Move to project…. Compact layout (spaced=false):
+// none of the rows have a natural group boundary to space out. The row is
+// HIDDEN rather than greyed when there is nowhere to move the tab to (a
+// single-project workspace, or every other project on the tab's own Dest
+// offline or synthetic).
 func (m *Model) buildTabCtxMenuItems(tab *TabModel) []ctxMenuItem {
-	return []ctxMenuItem{
+	items := []ctxMenuItem{
 		{id: ctxActRenameTab, label: "Rename tab", enabled: true},
 		{id: ctxActTabColorList, label: "Set color…", enabled: true},
 	}
+	if len(m.moveTabCandidates(tab.ID)) > 0 {
+		items = append(items, ctxMenuItem{id: ctxActMoveTab, label: "Move to project…", enabled: true})
+	}
+	return items
+}
+
+// moveTabCandidates lists the projects a tab may move to: same Dest as the
+// tab's own project (a project ID is only meaningful to the daemon that
+// minted it), not the tab's own project, and projectActionable (no synthetic
+// placeholder, no offline stand-in — Router.Send would drop the message).
+// Empty when the tab's own project is unknown or itself not actionable.
+// Order = m.projects order.
+func (m *Model) moveTabCandidates(tabID string) []*ProjectModel {
+	owner := m.projectOf(tabID)
+	if !m.projectActionable(owner) {
+		return nil
+	}
+	var out []*ProjectModel
+	for _, p := range m.projects {
+		if p == owner {
+			continue
+		}
+		if p.Dest == owner.Dest && m.projectActionable(p) {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // buildTabColorItems returns one row per tabColors entry, in palette order,
@@ -652,6 +684,12 @@ func (m Model) executeTabCtxMenuItem(tabID string, item ctxMenuItem) (tea.Model,
 		tab.Color = item.color
 		m.closeCtxMenu()
 		return m, m.updateTab(tab.ID, tab.Name, item.color)
+	case ctxActMoveTab:
+		// The proj == m.cur() refusal above already ran; openMoveTabPicker
+		// needs only the tab id, resolved fresh at Enter time by the picker
+		// itself rather than a pointer closed over here.
+		m.closeCtxMenu()
+		return m.openMoveTabPicker(tabID)
 	}
 	return m, nil
 }

@@ -312,6 +312,47 @@ precedent `ReorderTab` sets for a drag that changed nothing: an action the
 user can trigger accidentally (dragging a tab back onto its own project row)
 must not cost every attached client a full `workspace_state` frame.
 
+### The project picker's move mode
+
+**Move to project…** (the tab context menu's last row, `tui-dialogs.md`'s Tab
+context menu section) reuses the fuzzy project picker (Alt+P) rather than a
+sibling dialog — a `moveTabID` field on `projectPickState` puts it in MOVE
+mode instead of duplicating the query editing, cursor, fuzzy ranking,
+sanitized rendering and broadcast refresh a second dialog would need.
+
+**The scope lives INSIDE `filterProjects`, via `projectPickBase`, and it has
+to.** `projectPickBase` returns `m.moveTabCandidates(moveTabID)` in move mode
+and `m.projects` otherwise; `filterProjects` fuzzy-ranks whichever one it gets.
+The reason it cannot live only at open time is the broadcast refresh
+(`model.go`, the `WorkspaceStateMsg` case): every workspace_state re-calls
+`filterProjects(m.projectPick.query)` while the picker is open, so a scope
+applied once at open would be widened back to every project by the very next
+git-ticker broadcast, five seconds later.
+
+**Candidates are same-Dest + `projectActionable`** (`moveTabCandidates`, beside
+`buildTabCtxMenuItems` in `ctxmenu.go`): a project ID means nothing off the
+daemon that minted it, so cross-Dest candidates make no sense, and an offline
+or synthetic project would have `Router.Send` silently drop the move. The row
+itself is HIDDEN, not greyed, when the candidate list is empty — a
+single-project workspace has nowhere to offer.
+
+**Enter sends via `sendForDestStrict` and flashes on failure**, exactly like
+`sendCreateTab`: `Router.Send` drops a message for a dest it has no conn for
+and returns nil, so a user-confirmed move needs the strict form to be able to
+say it failed. `moveTabFailedMsg` is the send-result twin of
+`createTabFailedMsg` — not an IPC response, so its `Update` arm must not
+re-arm `listenForMessages`.
+
+**No optimistic move.** The picker does not touch `m.projects` itself; sending
+`MsgMoveTab` and waiting for the broadcast is one round trip, and a client-side
+guess would have to separately reproduce the daemon's successor choice and
+`recoverEmptyProject`. The reconciliation needs no code of its own for this
+feature: `applyWorkspaceState`'s existing `existingTabs` index is keyed by ID
+across EVERY project (see "Moving one tab between projects" above), so the
+moved `*TabModel` is reused in its new project with its layout tree, VT
+emulator and scrollback intact, and `resolveActiveProjectIndex` is what keeps
+the user's own project selection from moving just because a tab did.
+
 **A daemon too old to understand `merge_projects` cannot receive one**, which is
 why no capability probe was needed (contrast `destSupportsProjects`).
 `gateExtraVersion` REFUSES the connection on any version difference, and the

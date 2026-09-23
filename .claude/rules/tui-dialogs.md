@@ -68,7 +68,7 @@ right-click on a pane (no selection active) or `quick_actions` (default `alt+a`;
 
 ### Tab context menu
 
-`ctxMenuState` carries a THIRD target discriminator, `tabID`, beside `paneID` and `projectID` — the same struct, the same render/hit-test machinery, keyed by whichever of the three is set (never more than one). Two entry points: right-click a tab in the tab bar (`hitTestTab` at `msg.Y == 0`, checked before `paneRectAt` and after the two selection-copy branches — a selection still wins) and right-click a tab heading in the sidebar's PANES section (`sidebarRowTab`, `sidebarHit`). Both call `openTabCtxMenu` without focusing or switching: unlike the pane row's right-click, none of the tab menu's two items resolve through the active tab, so there is nothing to satisfy up front.
+`ctxMenuState` carries a THIRD target discriminator, `tabID`, beside `paneID` and `projectID` — the same struct, the same render/hit-test machinery, keyed by whichever of the three is set (never more than one). Two entry points: right-click a tab in the tab bar (`hitTestTab` at `msg.Y == 0`, checked before `paneRectAt` and after the two selection-copy branches — a selection still wins) and right-click a tab heading in the sidebar's PANES section (`sidebarRowTab`, `sidebarHit`). Both call `openTabCtxMenu` without focusing or switching: unlike the pane row's right-click, none of the tab menu's items resolve through the active tab, so there is nothing to satisfy up front.
 
 **Right-click never switches tabs; Rename does.** The menu opens on whichever tab the cursor landed on, active or not, and the active tab is unchanged until an item is actually chosen. `executeTabCtxMenuItem`'s `ctxActRenameTab` branch calls `switchTab` first (only when the target isn't already active — a pointer receiver, sequenced on its own statement, never mixed into the return expression) and then `beginTabRename`, so Rename edits the tab you clicked rather than seeding the currently-active one.
 
@@ -79,6 +79,17 @@ right-click on a pane (no selection active) or `quick_actions` (default `alt+a`;
 **The prologue needs its own arm, for the reason the project menu already has one.** A tab menu's `paneID` is empty, so testing `findPaneAndTab(m.ctxMenu.paneID)` alone would close it on the very next message — any spinner tick, PTY chunk or resize. The tab arm checks `m.projectOf(tabID) == nil` instead, sitting between the project arm and the pane else-arm; there are now three kinds, each checked against its own target.
 
 **`openTabCtxMenu` refuses to open — without mutating anything — while notes mode, an inline rename, a pane rename, or a dialog owns input**, the same gate `openCtxMenu`'s pane menu path assumes at its entry points. Notes mode and an inline rename would be stranded behind a menu they cannot see; Rename switching tabs out from under the notes editor would leave it bound to a pane that just left the screen (`switchProject`'s own notes comment covers the same hazard). The usual narrow-terminal bail applies too: `openTabCtxMenu` and `openTabColorList` both return without mutating state when even the compact box cannot fit inside the content area, rather than leave an invisible menu that still owns every keystroke.
+
+**Move to project… is the LAST row, and only when there is somewhere to move
+to.** `buildTabCtxMenuItems` appends it only when `moveTabCandidates(tab.ID)`
+is non-empty — same-Dest, `projectActionable` projects other than the tab's
+own — and the row is HIDDEN rather than greyed on a single-project workspace,
+matching the empty-candidates shape the rest of this menu does not otherwise
+need. Choosing it (`ctxActMoveTab`) closes the menu and opens the fuzzy
+project picker (Alt+P) in MOVE mode (`openMoveTabPicker`) rather than a
+sibling dialog — see `projects.md`'s "The project picker's move mode" for the
+picker half, including why the scope has to live inside `filterProjects`
+rather than being fixed at open time.
 
 ## Claude resume picker
 

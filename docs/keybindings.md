@@ -126,7 +126,7 @@ Right-clicking a **pane row in the project sidebar** opens the same menu. It foc
 
 ### Mouse: tab context menu
 
-Right-click a tab — in the tab bar, or its heading in the project sidebar's PANES section — to open Rename tab / Set color…. A text selection still copies instead. Unlike a left-click, right-click does **not** switch to the tab; choosing Rename does. Set color… re-populates the same menu with one row per color, each painted in its own color and the current one marked `✓`; choosing a color applies it immediately. `↑`/`↓` (or `k`/`j`) navigate, `Enter` or a left-click executes the highlighted item, `Esc` closes the whole menu — there's no "back" from the color list.
+Right-click a tab — in the tab bar, or its heading in the project sidebar's PANES section — to open Rename tab / Set color… / Move to project…. A text selection still copies instead. Unlike a left-click, right-click does **not** switch to the tab; choosing Rename does. Set color… re-populates the same menu with one row per color, each painted in its own color and the current one marked `✓`; choosing a color applies it immediately. Move to project… opens a picker of the OTHER projects on the same machine (it lists only other projects on the same machine — none, and the row is hidden instead); pick one and the tab moves there, panes and all, still running, in whatever directory each pane was already in. You stay in the project you were in — the picker never switches you to where the tab went. `↑`/`↓` (or `k`/`j`) navigate, `Enter` or a left-click executes the highlighted item, `Esc` closes the whole menu — there's no "back" from the color list.
 
 ## Pane navigation
 

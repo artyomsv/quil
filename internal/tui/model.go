@@ -2601,6 +2601,14 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		// A project created or destroyed by another client — or a host
 		// disconnected — would otherwise be invisible to it until it closed,
 		// which is exactly when the user is choosing from that list.
+		//
+		// A move-mode picker closes outright when its OWN tab has vanished —
+		// destroyed elsewhere while the picker sat open — since there is then
+		// nothing left to move. Checked before the refilter, and refiltering
+		// only runs while the dialog is still open.
+		if m.projectPick.moveTabID != "" && m.projectOf(m.projectPick.moveTabID) == nil {
+			m.closeProjectPicker()
+		}
 		if m.dialog == dialogProjectPick {
 			m.projectPick.filtered = m.filterProjects(m.projectPick.query)
 			m.clampProjectPickCursor()
@@ -2856,6 +2864,12 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		// dropped this silently and returned nil, which is why the send is
 		// strict: a tab the user asked for and did not get has to say so.
 		m.setFlash("cannot reach " + hostLabel(msg.dest) + " — new tab not created")
+		return m, m.flashCmd()
+
+	case moveTabFailedMsg:
+		// Same shape as createTabFailedMsg: a send result, not an IPC response,
+		// so no re-arm.
+		m.setFlash("cannot reach " + hostLabel(msg.dest) + " — tab not moved")
 		return m, m.flashCmd()
 
 	case worktreeTimeoutMsg:
@@ -7624,6 +7638,35 @@ func (m Model) updateTab(tabID, name, color string) tea.Cmd {
 			ClearColor: color == "",
 		})
 		m.sendForDest(dest, msg)
+		return nil
+	}
+}
+
+// moveTabFailedMsg reports a move_tab that never reached its daemon. The send
+// happens off the Update goroutine, so the flash cannot be set there — same
+// shape as createTabFailedMsg.
+type moveTabFailedMsg struct{ dest string }
+
+// sendMoveTab fires a MsgMoveTab IPC for the project picker's move mode. The
+// destination is resolved HERE, on the Update goroutine, from the tab's
+// OWNING project — never inside the returned closure, which runs later and
+// must not race a workspace reconciliation.
+//
+// Strict, like sendCreateTab: Router.Send drops a message for a dest it has
+// no conn for and returns nil, which would report a move that never happened
+// as having succeeded — a user-confirmed action has to be able to say it
+// failed.
+func (m Model) sendMoveTab(tabID, projectID string) tea.Cmd {
+	dest := m.destOfTab(tabID)
+	return func() tea.Msg {
+		msg, err := ipc.NewMessage(ipc.MsgMoveTab, ipc.MoveTabPayload{TabID: tabID, ProjectID: projectID})
+		if err != nil {
+			log.Printf("move tab: build message: %v", err)
+			return nil
+		}
+		if err := m.sendForDestStrict(dest, msg); err != nil {
+			return moveTabFailedMsg{dest: dest}
+		}
 		return nil
 	}
 }

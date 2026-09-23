@@ -1237,9 +1237,17 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 	// the time this runs the anchor already matches and survives
 	// unchanged; wheel-scroll (scrollTabBar) sets the anchor to the
 	// CURRENT, unchanged active tab for the same reason.
+	//
+	// This defer runs on EVERY message Update ever sees — PTY output
+	// included, the hottest path in the program — so the type assertion is
+	// conditioned on normalizeTabScrollAnchor's own report of whether it
+	// changed anything, and `retModel = mm` (a copy of the whole ~230-field
+	// Model back into the interface, plus a heap allocation) executes only
+	// on that rarer branch. The common case — the anchor already empty, or
+	// already naming the still-active tab — costs one string compare and
+	// nothing else.
 	defer func() {
-		if mm, ok := retModel.(Model); ok {
-			mm.normalizeTabScrollAnchor()
+		if mm, ok := retModel.(Model); ok && mm.normalizeTabScrollAnchor() {
 			retModel = mm
 		}
 	}()

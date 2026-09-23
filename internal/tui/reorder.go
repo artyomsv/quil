@@ -168,15 +168,23 @@ func (m Model) tabBarManualMode() bool {
 // a plain switchTabBy(1) followed by switchTabBy(-1), painting a scroll
 // window computed for a click that never happened and, in the reported
 // case, hiding the tab that just became active again.
-func (m *Model) normalizeTabScrollAnchor() {
+//
+// Reports whether it actually cleared anything, so Update's defer — which
+// runs on EVERY message, PTY output included — can skip re-boxing the
+// ~230-field Model into the tea.Model interface (a copy plus a heap alloc)
+// on the overwhelming majority of calls where the anchor was already empty
+// or already correct.
+func (m *Model) normalizeTabScrollAnchor() bool {
 	if m.tabScrollAnchor == "" {
-		return
+		return false
 	}
 	tabs := m.curTabs()
 	activeIdx := m.activeTabIdx()
 	if activeIdx < 0 || activeIdx >= len(tabs) || tabs[activeIdx].ID != m.tabScrollAnchor {
 		m.tabScrollAnchor = ""
+		return true
 	}
+	return false
 }
 
 // tabBarLayout is the layout engine tabSpans wraps: same labels, same styles,

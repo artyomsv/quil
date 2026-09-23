@@ -888,6 +888,37 @@ func (sm *SessionManager) ActiveTabID() string {
 	return sm.activeTab
 }
 
+// UpdateTab applies a rename and/or colour change under sm.mu. Returns false
+// when the tab does not exist. Semantics are EXACTLY the former
+// handleUpdateTab's:
+//
+//	name != ""                  → Name = name
+//	color != ""                 → Color = color
+//	else clearColor || name=="" → Color = ""   (explicit clear, or the legacy
+//	                                            "only an empty color sent" heuristic)
+//
+// Mutating through sm.mu (rather than the live *Tab handleUpdateTab used to
+// write through unlocked) is the fix: SnapshotState copies *tab under
+// sm.mu.RLock, so an unlocked write here is a data race against every
+// snapshot and broadcast in flight.
+func (sm *SessionManager) UpdateTab(tabID, name, color string, clearColor bool) bool {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	tab, ok := sm.tabs[tabID]
+	if !ok {
+		return false
+	}
+	if name != "" {
+		tab.Name = name
+	}
+	if color != "" {
+		tab.Color = color
+	} else if clearColor || name == "" {
+		tab.Color = ""
+	}
+	return true
+}
+
 func (sm *SessionManager) SwitchTab(tabID string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()

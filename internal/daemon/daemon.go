@@ -2505,22 +2505,12 @@ func (d *Daemon) handleUpdateTab(msg *ipc.Message) {
 		return
 	}
 
-	tab := d.session.Tab(payload.TabID)
-	if tab == nil {
+	if !d.session.UpdateTab(payload.TabID, payload.Name, payload.Color, payload.ClearColor) {
 		return
-	}
-	if payload.Name != "" {
-		tab.Name = payload.Name
-	}
-	if payload.Color != "" {
-		tab.Color = payload.Color
-	} else if payload.ClearColor || payload.Name == "" {
-		// Explicit clear (color cycle wrapped past the last color), or the
-		// legacy heuristic: only the color field sent, as empty → clear.
-		tab.Color = ""
 	}
 
 	d.broadcastState()
+	d.requestSnapshot()
 }
 
 func (d *Daemon) handleReorderTab(msg *ipc.Message) {

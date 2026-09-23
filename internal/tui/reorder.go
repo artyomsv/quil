@@ -58,12 +58,36 @@ type tabSpan struct {
 	text  string
 }
 
+// leftTabMarker is the exact text painted before the first visible tab when
+// hidden tabs remain to its left — never the WORST-CASE width tabBarWidths
+// returns for fit decisions. A POSITION (span.start, the cursor tabBarLayout
+// advances by, what renderTabBar paints) must use the REAL count: the worst
+// case (N = n-1) is only ever a valid upper bound for deciding whether tabs
+// FIT, and using it for a position paints every tab one or more cells left
+// of where its span says it starts whenever the real count has fewer digits
+// than n-1 — e.g. 11-100 tabs with 1-9 actually hidden on the left, where
+// the reserve is sized for a 2-digit count ("«99 ") but "«3 " is only 3
+// cells.
+func leftTabMarker(hidden int) string {
+	return fmt.Sprintf("«%d ", hidden)
+}
+
+// rightTabMarker mirrors leftTabMarker for the trailing indicator. It has no
+// position to get wrong today — it is painted after every span, never
+// before one — but shares the real-count rule leftTabMarker states, since
+// nothing here should have two ways to spell the same marker.
+func rightTabMarker(hidden int) string {
+	return fmt.Sprintf(" %d»", hidden)
+}
+
 // tabBarWidths renders every tab label once and returns its styled text and
 // width, the bar's own budget, and both overflow markers' WORST-CASE widths
-// (N = n-1, the most tabs either marker can ever report). tabBarLayout and
-// scrollTabBar both need these numbers before they can decide anything else,
-// and computing them once here is what keeps there being only one place that
-// renders a tab label for layout purposes.
+// (N = n-1, the most tabs either marker can ever report) — used ONLY for
+// space-budget decisions (maxFirstIndex, the reserve either layout branch
+// walks against), never for a position. tabBarLayout and scrollTabBar both
+// need these numbers before they can decide anything else, and computing
+// them once here is what keeps there being only one place that renders a
+// tab label for layout purposes.
 func (m Model) tabBarWidths() (texts []string, widths []int, barW, leftMarkerW, rightMarkerW int) {
 	tabs := m.curTabs()
 	barW = m.paneAreaWidth()
@@ -240,8 +264,12 @@ func (m Model) tabBarLayout() (spans []tabSpan, hiddenLeft, hiddenRight int) {
 				// The left marker occupies columns before the first visible
 				// tab — span.start must include its width or the painted
 				// column (renderTabBar paints the marker first) disagrees
-				// with the geometry hitTestTab and the drag read.
-				cursor += leftMarkerW
+				// with the geometry hitTestTab and the drag read. The REAL
+				// count (firstIdx tabs are hidden, contiguously, from 0) —
+				// never leftMarkerW, which is sized for the WORST case
+				// (n-1) and is too wide whenever the real count has fewer
+				// digits, shifting every painted tab left of its span.
+				cursor += lipgloss.Width(leftTabMarker(firstIdx))
 			}
 		} else {
 			cursor++ // space separator
@@ -266,6 +294,59 @@ func (m Model) tabBarLayout() (spans []tabSpan, hiddenLeft, hiddenRight int) {
 func (m Model) tabSpans() []tabSpan {
 	spans, _, _ := m.tabBarLayout()
 	return spans
+}
+
+// tabBarContains reports whether tab index idx is currently painted in the
+// tab bar.
+func (m Model) tabBarContains(idx int) bool {
+	for _, s := range m.tabSpans() {
+		if s.index == idx {
+			return true
+		}
+	}
+	return false
+}
+
+// ensureTabVisibleInScrollWindow nudges the manual scroll window forward
+// until idx is actually painted — called after a click re-arms the anchor
+// on the tab just entered (model.go). The active tab's "* " prefix grows
+// its label by two cells the instant it becomes active, so clicking the
+// RIGHTMOST visible tab while scrolled can grow it right off the end of the
+// bar: the same window that fit it a moment ago, before the click, is now
+// one that doesn't.
+//
+// Raising tabScrollFirst one tab at a time (rather than jumping straight to
+// idx) trims only as much of the currently-visible window as the growth
+// actually needs, keeping any other still-visible tabs on screen. maxFirst
+// is recomputed HERE, after the caller's switchTab already moved the active
+// tab — using the width idx now has, not the one it had before the click —
+// which is what guarantees the loop terminates successfully: by
+// construction, tabBarLayout's manual branch always shows the ENTIRE tail
+// from maxFirst to the last tab (that is maxFirst's defining property), and
+// idx is always somewhere in that tail once first reaches it.
+//
+// If idx still doesn't fit even there — an over-wide active label with no
+// window that could show it at all — the anchor is cleared instead of
+// leaving the just-clicked tab invisible: auto mode always keeps the
+// active tab on screen (by including it unconditionally), which is a
+// stronger guarantee than any scroll position manual mode can offer here.
+func (m *Model) ensureTabVisibleInScrollWindow(idx int) {
+	if m.tabBarContains(idx) {
+		return
+	}
+	tabs := m.curTabs()
+	if len(tabs) == 0 {
+		return
+	}
+	_, widths, barW, leftMarkerW, _ := m.tabBarWidths()
+	maxFirst := maxFirstIndex(widths, barW, leftMarkerW)
+	for m.tabScrollFirst < maxFirst {
+		m.tabScrollFirst++
+		if m.tabBarContains(idx) {
+			return
+		}
+	}
+	m.tabScrollAnchor = ""
 }
 
 // scrollTabBar moves the tab bar's manual scroll window by delta tabs

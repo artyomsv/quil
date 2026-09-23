@@ -1856,6 +1856,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if wasManual {
 						if tabs := m.curTabs(); idx >= 0 && idx < len(tabs) {
 							m.tabScrollAnchor = tabs[idx].ID
+							// The click's own tab just grew by the active
+							// "* " prefix (two cells) — re-check it is
+							// still painted in the window we just kept,
+							// nudging forward (or falling back to auto
+							// mode) if the growth pushed it off the end.
+							m.ensureTabVisibleInScrollWindow(idx)
 						}
 					}
 					return m, cmd
@@ -3843,6 +3849,12 @@ func (m Model) beginTabRename() (tea.Model, tea.Cmd) {
 	if tab := m.activeTabModel(); tab != nil {
 		m.renaming = true
 		m.renameInput = tab.Name
+		// Force auto mode: renaming a tab scrolled out of view would type
+		// into a label nobody can see. tabBarManualMode() already returns
+		// false once the anchor is cleared, so this is the same "no reset
+		// hook needed" mechanism a tab switch uses — just invoked directly,
+		// since a rename does not otherwise change the active tab.
+		m.tabScrollAnchor = ""
 	}
 	return m, nil
 }
@@ -6520,7 +6532,7 @@ func (m Model) renderTabBar() string {
 	// painting anything else here first would desync the painted column from
 	// the geometry hitTestTab and the drag read.
 	if hiddenLeft > 0 {
-		bar.WriteString(indicatorStyle.Render(fmt.Sprintf("«%d ", hiddenLeft)))
+		bar.WriteString(indicatorStyle.Render(leftTabMarker(hiddenLeft)))
 	}
 	for i, s := range spans {
 		if i > 0 {
@@ -6529,7 +6541,7 @@ func (m Model) renderTabBar() string {
 		bar.WriteString(s.text)
 	}
 	if hiddenRight > 0 {
-		bar.WriteString(indicatorStyle.Render(fmt.Sprintf(" %d»", hiddenRight)))
+		bar.WriteString(indicatorStyle.Render(rightTabMarker(hiddenRight)))
 	}
 
 	return lipgloss.NewStyle().Width(barW).Render(fitTabBar(bar.String(), barW))

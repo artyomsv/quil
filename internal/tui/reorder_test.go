@@ -6,9 +6,25 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/artyomsv/quil/internal/ipc"
 )
+
+// cellIndexOf returns the CELL column of substr's first occurrence in row
+// (already ANSI-stripped), or -1 if absent. strings.Index returns a BYTE
+// offset, and a multi-byte rune before the match — the two-byte «/» marker
+// glyphs, or a wide tab label — makes the byte offset diverge from the cell
+// column a span.start is measured in. ansi.StringWidth converts the
+// byte-offset PREFIX to its actual cell width (and tolerates any ANSI
+// escapes still in the row, though these tests strip them first).
+func cellIndexOf(row, substr string) int {
+	i := strings.Index(row, substr)
+	if i < 0 {
+		return -1
+	}
+	return ansi.StringWidth(row[:i])
+}
 
 // dragSlot is the one rule every reorder drag in the TUI shares — tab bar
 // (columns) and sidebar (rows) alike. These cases pin the hysteresis it exists
@@ -130,15 +146,19 @@ func TestTabSpansMatchThePaintedBarWhenTheBarOverflows(t *testing.T) {
 
 	row0 := stripANSI(m.renderTabBar())
 	for _, s := range spans {
-		want := fmt.Sprintf("%d:%s", s.index+1, m.curTabs()[s.index].Name)
-		got := strings.Index(row0, want)
+		// The span's OWN text (s.text), not a hand-built "N:name" guess: it
+		// already carries the style's padding, so its painted column is
+		// s.start with no separate accounting for the pad cell that guess
+		// would have missed.
+		want := stripANSI(s.text)
+		got := cellIndexOf(row0, want)
 		if got < 0 {
 			t.Errorf("tab %d is in tabSpans but not painted in the bar: %q", s.index, row0)
 			continue
 		}
-		if got < s.start || got >= s.start+s.width {
-			t.Errorf("tab %d is painted at column %d but tabSpans puts it at [%d,%d)",
-				s.index, got, s.start, s.start+s.width)
+		if got != s.start {
+			t.Errorf("tab %d is painted at cell column %d but tabSpans puts it at %d",
+				s.index, got, s.start)
 		}
 	}
 
@@ -157,6 +177,53 @@ func TestTabSpansMatchThePaintedBarWhenTheBarOverflows(t *testing.T) {
 		t.Fatalf("fixture hides tabs on only one side (hiddenLeft=%d hiddenRight=%d) — "+
 			"widen the tabs or change the active index so both markers are exercised",
 			hiddenLeft, hiddenRight)
+	}
+}
+
+// TestTabSpansMatchThePaintedBar_WorstCaseLeftMarkerWidthNeverShiftsPositions
+// pins a regression found by review: span.start used to reserve the left
+// marker's WORST-CASE width (sized for n-1, e.g. "«11 " at 4 cells) even
+// when the REAL hidden count needs fewer digits (e.g. "«3 " at 3 cells) —
+// painting every visible tab one cell left of where its span said it
+// started. The worst case only ever differs from the real one when n-1 and
+// the actual hidden count have a different number of digits, which needs at
+// least 11 tabs (n-1 >= 10, two digits) with 1-9 actually hidden on the left
+// (one digit) — a case the 5-tab sibling test above cannot reach.
+func TestTabSpansMatchThePaintedBar_WorstCaseLeftMarkerWidthNeverShiftsPositions(t *testing.T) {
+	t.Parallel()
+	names := make([]string, 12)
+	for i := range names {
+		names[i] = strings.Repeat(string(rune('A'+i)), 10)
+	}
+	// Active tab near the right end: auto mode expands mostly leftward,
+	// hiding a single-digit count of tabs on the left while n-1 (11) is
+	// two digits.
+	m := newModelForTest(names, 9)
+	m.width, m.height = 60, 40
+
+	spans, hiddenLeft, _ := m.tabBarLayout()
+	if hiddenLeft == 0 || hiddenLeft > 9 {
+		t.Fatalf("fixture precondition: hiddenLeft=%d, want 1-9 (single digit, the case "+
+			"whose worst-case reserve — sized for n-1=%d, two digits — differs from it)",
+			hiddenLeft, len(m.curTabs())-1)
+	}
+	if len(spans) < 2 {
+		t.Fatalf("fixture paints %d tab(s); at least 2 are needed", len(spans))
+	}
+
+	row0 := stripANSI(m.renderTabBar())
+	for _, s := range spans {
+		want := stripANSI(s.text)
+		got := cellIndexOf(row0, want)
+		if got < 0 {
+			t.Errorf("tab %d is in tabSpans but not painted in the bar: %q", s.index, row0)
+			continue
+		}
+		if got != s.start {
+			t.Errorf("tab %d is painted at cell column %d but tabSpans puts it at %d — "+
+				"the left marker's real width must match what span.start reserved",
+				s.index, got, s.start)
+		}
 	}
 }
 

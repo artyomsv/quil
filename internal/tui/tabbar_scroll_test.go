@@ -368,15 +368,15 @@ func TestTabSpansMatchThePaintedBar_WithLeftMarkerVisible(t *testing.T) {
 	spans := cur.tabSpans()
 	row := stripANSI(cur.renderTabBar())
 	for _, s := range spans {
-		want := fmt.Sprintf("%d:%s", s.index+1, cur.curTabs()[s.index].Name)
-		got := strings.Index(row, want)
+		want := stripANSI(s.text)
+		got := cellIndexOf(row, want)
 		if got < 0 {
 			t.Errorf("tab %d is in tabSpans but not painted in the bar: %q", s.index, row)
 			continue
 		}
-		if got < s.start || got >= s.start+s.width {
-			t.Errorf("tab %d is painted at column %d but tabSpans puts it at [%d,%d)",
-				s.index, got, s.start, s.start+s.width)
+		if got != s.start {
+			t.Errorf("tab %d is painted at cell column %d but tabSpans puts it at %d",
+				s.index, got, s.start)
 		}
 	}
 }
@@ -420,6 +420,60 @@ func TestClickWhileScrolled_KeepsTheScrollWindow(t *testing.T) {
 	if got.tabSpans()[0].index != beforeFirst {
 		t.Fatalf("first visible tab jumped from %d to %d on click — the scroll window must not move",
 			beforeFirst, got.tabSpans()[0].index)
+	}
+}
+
+// Clicking the RIGHTMOST visible tab while scrolled must not hide it. The
+// active tab's "* " prefix costs two extra cells the instant it becomes
+// active, so a click on a tab sitting right at the end of the window can
+// grow it straight off the bar — the same window that painted it a moment
+// ago, before the click. Geometry found by exhaustive search over (tab
+// count, name length, bar width, active index): 5 one-character-named tabs,
+// barW=15, scrolled so tabs D and E (indices 3, 4) are the only two visible
+// — clicking E leaves less than 2 cells of spare budget once it grows.
+func TestClickRightmostVisibleTabWhileScrolled_StaysVisible(t *testing.T) {
+	t.Parallel()
+	fake := newFakeConn()
+	m := newModelForTest([]string{"A", "B", "C", "D", "E"}, 0)
+	m.client = fake
+	m.notifications = NewNotificationCenter(30, 200)
+	m.width, m.height = 15, 40
+
+	m.tabScrollFirst = 3
+	m.tabScrollAnchor = m.curTabs()[0].ID
+	if !m.tabBarManualMode() {
+		t.Fatal("fixture precondition: expected manual mode")
+	}
+	spansBefore := m.tabSpans()
+	if len(spansBefore) == 0 {
+		t.Fatal("fixture precondition: nothing visible")
+	}
+	target := spansBefore[len(spansBefore)-1]
+	if target.index != 4 {
+		t.Fatalf("fixture precondition: rightmost visible tab = %d, want 4 (E) — "+
+			"this fixture no longer reproduces the geometry the search found", target.index)
+	}
+
+	x := m.projectSidebarWidth() + target.start
+	updated, cmd := m.Update(tea.MouseClickMsg{X: x, Y: 0, Button: tea.MouseLeft})
+	got := updated.(Model)
+	if cmd != nil {
+		cmd()
+	}
+
+	if got.activeTabIdx() != target.index {
+		t.Fatalf("active tab = %d after clicking tab %d, want %d", got.activeTabIdx(), target.index, target.index)
+	}
+	visible := false
+	for _, s := range got.tabSpans() {
+		if s.index == target.index {
+			visible = true
+			break
+		}
+	}
+	if !visible {
+		t.Fatalf("clicked tab %d is not visible after the click — its own active-marker "+
+			"growth pushed it off the bar", target.index)
 	}
 }
 
@@ -583,5 +637,38 @@ func TestWheelAtRow0InsideProjectSidebar_NotTreatedAsTabBar(t *testing.T) {
 	if got.tabScrollFirst != 0 || got.tabScrollAnchor != "" {
 		t.Fatalf("wheel inside the project sidebar touched tab-bar scroll state: first=%d anchor=%q",
 			got.tabScrollFirst, got.tabScrollAnchor)
+	}
+}
+
+// Starting an inline tab rename (F2, default binding for tab.rename) while
+// scrolled must return the bar to auto mode: renaming a tab that is
+// scrolled out of view would type into a label nobody can see.
+func TestTabRenameWhileScrolled_ReturnsToAutoMode(t *testing.T) {
+	t.Parallel()
+	m := newTabBarScrollModel(eightOverflowingTabNames(), 0)
+	wantOverflow(t, m)
+
+	scrolled := wheelAtTabBar(t, m, tea.MouseWheelDown)
+	if !scrolled.tabBarManualMode() {
+		t.Fatal("fixture precondition: expected manual mode after scrolling")
+	}
+
+	updated, _ := scrolled.handleKey(tea.KeyPressMsg{Code: tea.KeyF2})
+	got := updated.(Model)
+	if !got.renaming {
+		t.Fatal("F2 did not enter tab-rename mode")
+	}
+	if got.tabBarManualMode() {
+		t.Fatal("manual mode still in effect after starting a tab rename — the active tab may be scrolled out of view")
+	}
+	visible := false
+	for _, s := range got.tabSpans() {
+		if s.index == got.activeTabIdx() {
+			visible = true
+			break
+		}
+	}
+	if !visible {
+		t.Fatal("active tab is not visible after starting a rename in auto mode")
 	}
 }

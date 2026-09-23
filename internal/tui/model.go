@@ -317,6 +317,31 @@ var tabColors = []string{
 	"208", // orange
 }
 
+// tabColorLabel names a tabColors entry for the tab context menu's colour
+// list. Every tabColors value MUST have a name here — pinned by
+// TestTabColorLabel_CoversThePalette — or a colour row silently renders "".
+func tabColorLabel(c string) string {
+	switch c {
+	case "":
+		return "Default"
+	case "1":
+		return "Red"
+	case "2":
+		return "Green"
+	case "3":
+		return "Yellow"
+	case "4":
+		return "Blue"
+	case "5":
+		return "Magenta"
+	case "6":
+		return "Cyan"
+	case "208":
+		return "Orange"
+	}
+	return ""
+}
+
 type dialogScreen int
 
 const (
@@ -1292,19 +1317,24 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 	// destroy, MsgDestroyProject from another client) closes itself. Single
 	// choke point — no need to audit every pruning path.
 	//
-	// The two menu kinds are checked against their OWN target: a project menu
-	// has no paneID at all, so testing whether paneID resolves closed it on
-	// the very next message — any spinner tick, PTY chunk or resize — which is
-	// what the user saw as "the project menu flashes and vanishes". projectID
-	// and paneID are mutually exclusive discriminators (see ctxMenuState), so
-	// the else arm is exactly the original pane case. Both lookups are
-	// nil-safe.
+	// The three menu kinds are checked against their OWN target: a project or
+	// tab menu has no paneID at all, so testing whether paneID resolves closed
+	// it on the very next message — any spinner tick, PTY chunk or resize —
+	// which is what the user saw as "the project menu flashes and vanishes".
+	// paneID, projectID and tabID are mutually exclusive discriminators (see
+	// ctxMenuState), so the final else arm is exactly the original pane case.
+	// All three lookups are nil-safe.
 	// Folded into prologueChangedView: View both DRAWS this menu and derives
 	// v.MouseMode from it, so closing it here moves the screen — on a message
 	// that may otherwise be inert.
 	if m.ctxMenu.open() {
 		if projectID := m.ctxMenu.projectID; projectID != "" {
 			if m.projectByID(projectID) == nil {
+				m.closeCtxMenu()
+				prologueChangedView = true
+			}
+		} else if tabID := m.ctxMenu.tabID; tabID != "" {
+			if m.projectOf(tabID) == nil {
 				m.closeCtxMenu()
 				prologueChangedView = true
 			}
@@ -1772,6 +1802,16 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 					if idx >= 0 && idx < len(m.projects) {
 						m.openProjectCtxMenu(m.projects[idx], msg.X, msg.Y)
 					}
+				case sidebarRowTab:
+					// Opens the tab menu without focusing or switching — unlike
+					// the pane row below, OPENING needs no active-tab contract
+					// satisfied first. Rename is the one item that switches to
+					// the target tab before acting (executeTabCtxMenuItem), so
+					// it can edit the tab the menu opened for rather than
+					// whichever one happened to be active.
+					if tabs := m.curTabs(); idx >= 0 && idx < len(tabs) {
+						m.openTabCtxMenu(tabs[idx], msg.X, msg.Y)
+					}
 				case sidebarRowPane:
 					// Right-click FOCUSES the pane first, exactly like
 					// left-click (activateSidebarRow → focusSidebarPane) —
@@ -1858,10 +1898,22 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 				return m, nil
 			}
 			// No selection anywhere: open the pane context menu for the
-			// pane under the cursor. Suppressed while a modal dialog,
-			// rename edit, or notes mode owns input (the lazygit overlay
-			// and sidebar swallows already returned above).
+			// pane under the cursor, or the tab menu for the tab bar.
+			// Suppressed while a modal dialog, rename edit, or notes mode
+			// owns input (the lazygit overlay and sidebar swallows already
+			// returned above).
 			if m.dialog == dialogNone && !m.notesMode && !m.renaming && !m.renamingPane {
+				if msg.Y == 0 {
+					// The sidebar's own columns at row 0 are already
+					// swallowed above; hitTestTab answers -1 for the scroll
+					// markers and empty bar space, so nothing opens there.
+					if idx := m.hitTestTab(msg.X); idx >= 0 {
+						if tabs := m.curTabs(); idx < len(tabs) {
+							m.openTabCtxMenu(tabs[idx], msg.X, msg.Y)
+						}
+					}
+					return m, nil // row 0 is never a pane
+				}
 				if rect := m.paneRectAt(msg.X, msg.Y); rect != nil && rect.Pane != nil {
 					m.openCtxMenu(rect.Pane, msg.X, msg.Y)
 				}
@@ -2551,6 +2603,26 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		// A project created or destroyed by another client — or a host
 		// disconnected — would otherwise be invisible to it until it closed,
 		// which is exactly when the user is choosing from that list.
+		//
+		// A move-mode picker closes outright when its OWN tab has vanished —
+		// destroyed elsewhere while the picker sat open — since there is then
+		// nothing left to move. Checked before the refilter, and refiltering
+		// only runs while the dialog is still open.
+		//
+		// Gated on m.dialog == dialogProjectPick, not moveTabID alone:
+		// moveTabID is cleared only by closeProjectPicker, so a dialog that
+		// REPLACED the open picker without going through it (PluginErrorMsg,
+		// say) leaves it stale — and an ungated close here would dismiss that
+		// OTHER dialog the next time a broadcast landed, mistaking it for the
+		// picker.
+		var pickerVanishCmd tea.Cmd
+		if m.dialog == dialogProjectPick && m.projectPick.moveTabID != "" && m.projectOf(m.projectPick.moveTabID) == nil {
+			m.closeProjectPicker()
+			// Every other picker-close path (Enter, Esc) returns tea.ClearScreen;
+			// this one must too, or the picker's stale border survives on screen
+			// until something else forces a full redraw.
+			pickerVanishCmd = tea.ClearScreen
+		}
 		if m.dialog == dialogProjectPick {
 			m.projectPick.filtered = m.filterProjects(m.projectPick.query)
 			m.clampProjectPickCursor()
@@ -2565,6 +2637,7 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		// m.projects, which applyWorkspaceState has just rebuilt.
 		cmds := []tea.Cmd{
 			templateFocusCmd,
+			pickerVanishCmd,
 			m.listenForMessages(),
 			m.sendDiffedResizes(m.diffResizes(msg)),
 			m.sendDiffedLayouts(m.diffLayouts(msg)),
@@ -2806,6 +2879,12 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		// dropped this silently and returned nil, which is why the send is
 		// strict: a tab the user asked for and did not get has to say so.
 		m.setFlash("cannot reach " + hostLabel(msg.dest) + " — new tab not created")
+		return m, m.flashCmd()
+
+	case moveTabFailedMsg:
+		// Same shape as createTabFailedMsg: a send result, not an IPC response,
+		// so no re-arm.
+		m.setFlash("cannot reach " + hostLabel(msg.dest) + " — tab not moved")
 		return m, m.flashCmd()
 
 	case worktreeTimeoutMsg:
@@ -7574,6 +7653,35 @@ func (m Model) updateTab(tabID, name, color string) tea.Cmd {
 			ClearColor: color == "",
 		})
 		m.sendForDest(dest, msg)
+		return nil
+	}
+}
+
+// moveTabFailedMsg reports a move_tab that never reached its daemon. The send
+// happens off the Update goroutine, so the flash cannot be set there — same
+// shape as createTabFailedMsg.
+type moveTabFailedMsg struct{ dest string }
+
+// sendMoveTab fires a MsgMoveTab IPC for the project picker's move mode. The
+// destination is resolved HERE, on the Update goroutine, from the tab's
+// OWNING project — never inside the returned closure, which runs later and
+// must not race a workspace reconciliation.
+//
+// Strict, like sendCreateTab: Router.Send drops a message for a dest it has
+// no conn for and returns nil, which would report a move that never happened
+// as having succeeded — a user-confirmed action has to be able to say it
+// failed.
+func (m Model) sendMoveTab(tabID, projectID string) tea.Cmd {
+	dest := m.destOfTab(tabID)
+	return func() tea.Msg {
+		msg, err := ipc.NewMessage(ipc.MsgMoveTab, ipc.MoveTabPayload{TabID: tabID, ProjectID: projectID})
+		if err != nil {
+			log.Printf("move tab: build message: %v", err)
+			return nil
+		}
+		if err := m.sendForDestStrict(dest, msg); err != nil {
+			return moveTabFailedMsg{dest: dest}
+		}
 		return nil
 	}
 }

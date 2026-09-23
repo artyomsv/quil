@@ -196,7 +196,7 @@ checkout.
 
 ### Mouse & keyboard
 
-Full mouse support — click tabs to switch, click panes to focus, scroll wheel for terminal history. Drag panes to select text. Drag a tab (in the tab bar or by its name in the project sidebar) or a project row to reorder it; the item moves once the pointer passes the middle of its neighbour, so the drag never flips back and forth. `Alt+Shift+PgUp`/`PgDn` and `Alt+Shift+Up`/`Down` do the same from the keyboard for tabs and projects. All keybindings are configurable via `config.toml`.
+Full mouse support — click tabs to switch, click panes to focus, scroll wheel for terminal history. Drag panes to select text. Drag a tab (in the tab bar or by its name in the project sidebar) or a project row to reorder it; the item moves once the pointer passes the middle of its neighbour, so the drag never flips back and forth. `Alt+Shift+PgUp`/`PgDn` and `Alt+Shift+Up`/`Down` do the same from the keyboard for tabs and projects. Right-click a tab (in the bar or the sidebar) for a context menu to rename it, pick its color, or move it to another project on the same machine — see [Mouse: tab context menu](keybindings.md#mouse-tab-context-menu). All keybindings are configurable via `config.toml`.
 
 When there are more tabs than fit, the mouse wheel over the tab bar scrolls the strip left/right instead of switching tabs or reaching the pane beneath it; markers (`«N` / `N»`) show how many tabs are hidden on each side. Clicking a tab keeps the current scroll position; switching some other way (keyboard, the palette, an MCP tool) snaps the bar back to centering on whichever tab is now active.
 
@@ -615,7 +615,7 @@ A worktree named after its branch — `feat-x` for `feat/x`, the usual conventio
 | `Alt+Shift+A` | Jump to the oldest pane waiting on you, across every project |
 | `Alt+Shift+X` | Remove the active project (destroy locally, disconnect a remote host) |
 
-Right-click a project row for Rename, and either Destroy (local) or Disconnect host (remote). Right-click a **pane** row for the same menu you get on the pane itself (see [Mouse: pane context menu](keybindings.md#mouse-pane-context-menu)) — note that this focuses the pane first, switching tabs if it lives on another one, so the menu's actions all land on the pane you clicked.
+Right-click a project row for Rename, and either Destroy (local) or Disconnect host (remote). Right-click a **pane** row for the same menu you get on the pane itself (see [Mouse: pane context menu](keybindings.md#mouse-pane-context-menu)) — note that this focuses the pane first, switching tabs if it lives on another one, so the menu's actions all land on the pane you clicked. Right-click a **tab** heading for the tab menu (see [Mouse: tab context menu](keybindings.md#mouse-tab-context-menu)) — this one does not focus or switch first, since none of its actions need the active tab.
 
 ### Projects on another machine
 

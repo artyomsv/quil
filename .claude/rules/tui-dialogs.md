@@ -64,6 +64,34 @@ right-click on a pane (no selection active) or `quick_actions` (default `alt+a`;
 
 **A menu row REFUSES when its target is no longer in the ACTIVE tab.** Eight of the ten items dispatch through `activeTabModel().ActivePaneModel()` (shared with the keybinding and palette paths), which is why every entry point focuses the pane before opening the menu — but that establishes the property at OPEN time and says nothing about EXECUTE time: MCP `set_active_pane` (`setActivePaneMsg` → `jumpToPane`) moves the active project AND tab, and the vanished-target guard at the top of `Update` closes only a menu whose target is GONE, not one whose active tab moved — so Rename seeded the on-screen pane's name, Mute toggled it, and Restart/Close armed a confirm for it. Keyboard and mouse cannot reach that state; MCP is the one producer that can. `executeCtxMenuItem` therefore tests `proj != m.cur() || tabIdx != m.activeTabIdx()` BEFORE the `ActivePane`/`Active` sync, so a refused execute leaves nothing half-applied on a background tab, and it refuses ALL ten rows — including the two attention items that resolve `paneID` directly and could still have acted correctly, because "two of ten rows work after the tab moved" is a rule nobody can hold and the remedy is a second right-click. A future entry point that opens this menu on a pane outside the active tab without focusing it first will find every row inert: focus first, rather than widening the guard.
 
+## Tab context menu
+
+### Tab context menu
+
+`ctxMenuState` carries a THIRD target discriminator, `tabID`, beside `paneID` and `projectID` — the same struct, the same render/hit-test machinery, keyed by whichever of the three is set (never more than one). Two entry points: right-click a tab in the tab bar (`hitTestTab` at `msg.Y == 0`, checked before `paneRectAt` and after the two selection-copy branches — a selection still wins) and right-click a tab heading in the sidebar's PANES section (`sidebarRowTab`, `sidebarHit`). Both call `openTabCtxMenu` without focusing or switching: unlike the pane row's right-click, OPENING needs no active-tab contract satisfied up front. Rename is the one item that still touches the active tab, and only at EXECUTE time — see "Right-click never switches tabs; Rename does" below.
+
+**Right-click never switches tabs; Rename does.** The menu opens on whichever tab the cursor landed on, active or not, and the active tab is unchanged until an item is actually chosen. `executeTabCtxMenuItem`'s `ctxActRenameTab` branch calls `switchTab` first (only when the target isn't already active — a pointer receiver, sequenced on its own statement, never mixed into the return expression) and then `beginTabRename`, so Rename edits the tab you clicked rather than seeding the currently-active one.
+
+**The colour list re-populates the same menu in place.** `ctxActTabColorList` calls `openTabColorList`, which replaces `items` with `buildTabColorItems(tab.Color)` — one row per `tabColors` entry, painted in that colour (`renderCtxMenu`: an enabled, non-cursor row with `item.color != ""` renders in that foreground instead of `ctxMenuItemStyle`; the cursor row's reverse video shows it as a background instead), the current colour marked with a leading `✓ ` (a `"  "` two-cell blank on every other row, so `innerWidth` — measured on the label before styling — stays honest). Esc closes the whole menu; there is no "back" item. Choosing a colour (`ctxActSetTabColor`) is the same optimistic-local-write-plus-send shape `cycleTabColor` already uses: `tab.Color = item.color` locally, then `updateTab(tab.ID, tab.Name, item.color)`, which sets `ClearColor` when the colour is empty — exactly what choosing Default needs.
+
+**The uniform refusal is the same one the pane menu makes.** `executeTabCtxMenuItem` tests `proj := m.projectOf(tabID); proj == nil || proj != m.cur()` before anything else: every entry point shows only the active project's tabs, and MCP `switch_project` is the one producer that can move the active project underneath an open menu with no keyboard or mouse event involved. The tab's index is resolved with an explicit loop over `proj.tabs`, never `indexOfTab`, which answers 0 on a miss — indistinguishable from "the first tab", the one target a refusal must never silently redirect to.
+
+**The prologue needs its own arm, for the reason the project menu already has one.** A tab menu's `paneID` is empty, so testing `findPaneAndTab(m.ctxMenu.paneID)` alone would close it on the very next message — any spinner tick, PTY chunk or resize. The tab arm checks `m.projectOf(tabID) == nil` instead, sitting between the project arm and the pane else-arm; there are now three kinds, each checked against its own target.
+
+**`openTabCtxMenu` refuses to open — without mutating anything — while notes mode, an inline rename, a pane rename, or a dialog owns input**, the same gate `openCtxMenu`'s pane menu path assumes at its entry points. Notes mode and an inline rename would be stranded behind a menu they cannot see; Rename switching tabs out from under the notes editor would leave it bound to a pane that just left the screen (`switchProject`'s own notes comment covers the same hazard). The usual narrow-terminal bail applies too: `openTabCtxMenu` and `openTabColorList` both return without mutating state when even the compact box cannot fit inside the content area, rather than leave an invisible menu that still owns every keystroke.
+
+**Move to project… is the LAST row, shown only when there is somewhere to
+move to.** `buildTabCtxMenuItems` appends it only when
+`moveTabCandidates(tab.ID)` is non-empty — same-Dest, `projectActionable`
+projects other than the tab's own. It is HIDDEN, not greyed, on a
+single-project workspace: Rename and Set color… always have something to do,
+so this is the only row that can run out of candidates, and hiding is the
+right answer for a row nobody can ever act on. Choosing it (`ctxActMoveTab`)
+closes the menu and opens the fuzzy project picker (Alt+P) in MOVE mode
+(`openMoveTabPicker`) rather than a sibling dialog — see `projects.md`'s "The
+project picker's move mode" for the picker half, including why the scope has
+to live inside `filterProjects` rather than being fixed at open time.
+
 ## Claude resume picker
 
 ### Claude resume picker (setup dialog "Session" field)

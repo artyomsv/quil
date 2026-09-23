@@ -1403,6 +1403,8 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		answerOp(conn, msg, ipc.MsgTabOpResp, id, known, opErrUnless(known, "no such tab"))
 	case ipc.MsgReorderTab:
 		d.handleReorderTab(msg)
+	case ipc.MsgMoveTab:
+		d.handleMoveTab(conn, msg)
 	case ipc.MsgCreatePane:
 		d.handleCreatePane(conn, msg)
 	case ipc.MsgDestroyPane:
@@ -2337,11 +2339,11 @@ func (d *Daemon) handleDestroyTab(msg *ipc.Message) {
 	log.Printf("tab destroy: %s", payload.TabID)
 	// The owning project has to be read BEFORE the destroy: DestroyTab
 	// de-registers the tab from it, so afterwards there is nothing left to
-	// ask which project just lost a tab.
-	projectID := ""
-	if tab := d.session.Tab(payload.TabID); tab != nil {
-		projectID = tab.ProjectID
-	}
+	// ask which project just lost a tab. TabProjectID, not Tab(id).ProjectID:
+	// the latter reads the field off the LIVE *Tab pointer with no lock,
+	// racing MoveTab/MergeProjects writing it under sm.mu on another conn's
+	// dispatch goroutine.
+	projectID, _ := d.session.TabProjectID(payload.TabID)
 	// Capture the pane list before DestroyTab removes them from the session
 	// maps, so we can clean up their artifacts after the tab is gone.
 	panes := d.session.Panes(payload.TabID)
@@ -2505,22 +2507,12 @@ func (d *Daemon) handleUpdateTab(msg *ipc.Message) {
 		return
 	}
 
-	tab := d.session.Tab(payload.TabID)
-	if tab == nil {
+	if !d.session.UpdateTab(payload.TabID, payload.Name, payload.Color, payload.ClearColor) {
 		return
-	}
-	if payload.Name != "" {
-		tab.Name = payload.Name
-	}
-	if payload.Color != "" {
-		tab.Color = payload.Color
-	} else if payload.ClearColor || payload.Name == "" {
-		// Explicit clear (color cycle wrapped past the last color), or the
-		// legacy heuristic: only the color field sent, as empty → clear.
-		tab.Color = ""
 	}
 
 	d.broadcastState()
+	d.requestSnapshot()
 }
 
 func (d *Daemon) handleReorderTab(msg *ipc.Message) {
@@ -2536,6 +2528,69 @@ func (d *Daemon) handleReorderTab(msg *ipc.Message) {
 	}
 	d.broadcastState()
 	d.requestSnapshot()
+}
+
+// handleMoveTab reassigns a tab to another project. Unlike handleReorderTab
+// and handleUpdateTab, it answers the requester ITSELF rather than through
+// the dispatch arm's tabIDKnown+answerOp pattern: a move has more than one
+// failure shape (unknown tab, unknown project) and its own no-op, none of
+// which "no such tab" alone can distinguish. The TUI sends no ID and gets
+// nothing back either way, exactly as every other answerOp call; this is
+// included so a future MCP tool needs no daemon change.
+func (d *Daemon) handleMoveTab(conn *ipc.Conn, msg *ipc.Message) {
+	var p ipc.MoveTabPayload
+	if err := msg.DecodePayload(&p); err != nil {
+		log.Printf("move tab: malformed payload: %v", err)
+		answerOp(conn, msg, ipc.MsgTabOpResp, "", false, "malformed payload")
+		return
+	}
+
+	from, res := d.session.MoveTab(p.TabID, p.ProjectID)
+	switch res {
+	case moveTabUnknownTab:
+		log.Printf("move tab %s: no such tab", p.TabID)
+		answerOp(conn, msg, ipc.MsgTabOpResp, p.TabID, false, "no such tab")
+		return
+	case moveTabUnknownProject:
+		log.Printf("move tab %s to %s: no such project", p.TabID, p.ProjectID)
+		answerOp(conn, msg, ipc.MsgTabOpResp, p.TabID, false, "no such project")
+		return
+	case moveTabNoop:
+		// Already in that project. No broadcast, no snapshot — the same
+		// precedent ReorderTab sets for a drag that changed nothing.
+		answerOp(conn, msg, ipc.MsgTabOpResp, p.TabID, true, "")
+		return
+	}
+
+	// Moving the source project's LAST tab out leaves it exactly as empty as
+	// DestroyTab leaves one, and owes the same replacement Shell tab.
+	d.recoverEmptyProject(from)
+	// Each project keeps its OWN ActiveTab, and that is independent of the
+	// daemon's single GLOBAL active project/tab (sm.activeProject/activeTab):
+	// several clients can each be looking at a different project, so a
+	// second client can have switched the daemon globally to some OTHER
+	// project while a first client — still viewing the source — is the one
+	// that just moved a tab out of it. Spawning only ActiveTabID() then
+	// misses the source's own successor whenever the source is not the
+	// globally active project, leaving that client on a restore indicator
+	// with no PTY behind it until it switches tabs again.
+	//
+	// Spawn every per-project selection this move touched: the source's new
+	// ActiveTab (the successor, or recoverEmptyProject's Shell tab — read
+	// AFTER that call, since it can be what set it), the moved tab itself
+	// (now the target's ActiveTab), and the global active tab for the
+	// ordinary single-client case. ensureTabSpawned is idempotent
+	// (ensurePaneSpawned returns early once a PTY exists or Pending is
+	// false), so calling it three times over — often on the very same tab —
+	// costs nothing.
+	if srcActive, ok := d.session.ProjectActiveTab(from); ok && srcActive != "" {
+		d.ensureTabSpawned(srcActive)
+	}
+	d.ensureTabSpawned(p.TabID)
+	d.ensureTabSpawned(d.session.ActiveTabID())
+	d.broadcastState()
+	d.requestSnapshot()
+	answerOp(conn, msg, ipc.MsgTabOpResp, p.TabID, true, "")
 }
 
 func (d *Daemon) handleCreatePane(conn *ipc.Conn, msg *ipc.Message) {
@@ -6493,10 +6548,9 @@ func (d *Daemon) buildPaneStatus(pane *Pane) ipc.PaneStatusRespPayload {
 	pending := pane.Pending
 	pane.spawnMu.Unlock()
 	state, reason, lastIdle := paneWorkState(pane)
-	projectID := ""
-	if tab := d.session.Tab(pane.TabID); tab != nil {
-		projectID = tab.ProjectID
-	}
+	// TabProjectID, not Tab(id).ProjectID: see handleDestroyTab's comment —
+	// the latter reads the field unlocked off the live *Tab pointer.
+	projectID, _ := d.session.TabProjectID(pane.TabID)
 
 	return ipc.PaneStatusRespPayload{
 		PaneID:            pane.ID,

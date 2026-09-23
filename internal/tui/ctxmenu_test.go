@@ -9,9 +9,9 @@ import (
 
 func testItems() []ctxMenuItem {
 	return []ctxMenuItem{
-		{ctxActHistory, "Input history", false, false},
-		{ctxActFocus, "Focus mode", true, true}, // group boundary below this row
-		{ctxActClose, "Close pane…", true, false},
+		{id: ctxActHistory, label: "Input history", enabled: false},
+		{id: ctxActFocus, label: "Focus mode", enabled: true, gapAfter: true}, // group boundary below this row
+		{id: ctxActClose, label: "Close pane…", enabled: true},
 	}
 }
 
@@ -113,7 +113,7 @@ func TestNextEnabled_SkipsDisabledAndWraps(t *testing.T) {
 	if got := nextEnabled(items, 1, -1); got != 2 {
 		t.Errorf("up from 1 wraps past disabled 0 to 2, got %d", got)
 	}
-	none := []ctxMenuItem{{ctxActFocus, "x", false, false}}
+	none := []ctxMenuItem{{id: ctxActFocus, label: "x", enabled: false}}
 	if got := firstEnabled(none); got != -1 {
 		t.Errorf("all disabled: firstEnabled = %d, want -1", got)
 	}

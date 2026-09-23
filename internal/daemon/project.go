@@ -309,6 +309,110 @@ func (sm *SessionManager) MergeProjects(into string, absorb []string, name strin
 	return true
 }
 
+// moveTabResult reports what MoveTab did, so the handler can tell an ordinary
+// no-op (already there — nothing to broadcast) from the two ways a move can
+// fail to apply at all.
+type moveTabResult int
+
+const (
+	moveTabMoved moveTabResult = iota
+	moveTabNoop
+	moveTabUnknownTab
+	moveTabUnknownProject
+)
+
+// MoveTab reassigns tabID from whatever project holds it to projectID, on
+// THIS daemon only — a project ID is only meaningful to the daemon that
+// minted it, so there is no cross-daemon shape to support.
+//
+// It returns the SOURCE project id (may be "" for a tab whose project the
+// daemon does not know, the pre-project-migration shape) so the caller can
+// run recoverEmptyProject on it: moving a project's last tab out leaves it
+// exactly as empty as DestroyTab leaves one, and owes the same replacement
+// Shell tab.
+//
+// Panes, layout and CWDs are untouched — Pane.TabID does not change, so a tab
+// that moves between projects keeps working in the directory it already had.
+// A NEW TAB opened in the target afterwards picks up its root (projectCWD);
+// a pane SPLIT into the moved tab does not — handleCreatePane's ordinary path
+// falls back to defaultCWD, same as a split into any other tab.
+func (sm *SessionManager) MoveTab(tabID, projectID string) (from string, res moveTabResult) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	tab, ok := sm.tabs[tabID]
+	if !ok {
+		return "", moveTabUnknownTab
+	}
+	dst, ok := sm.projects[projectID]
+	if !ok {
+		return "", moveTabUnknownProject
+	}
+	if tab.ProjectID == projectID {
+		return "", moveTabNoop
+	}
+
+	from = tab.ProjectID
+	successor := ""
+	if src, ok := sm.projects[from]; ok {
+		// The successor is picked exactly as DestroyTab picks one: the
+		// neighbour that slides into the moved tab's slot, never a
+		// workspace-wide answer that could name a different project's tab.
+		idx := indexOfString(src.TabIDs, tabID)
+		src.TabIDs = removeString(src.TabIDs, tabID)
+		if len(src.TabIDs) > 0 {
+			if idx < 0 || idx >= len(src.TabIDs) {
+				idx = len(src.TabIDs) - 1
+			}
+			successor = src.TabIDs[idx]
+		}
+		if src.ActiveTab == tabID {
+			src.ActiveTab = successor
+		}
+	}
+
+	// BOTH sides of the link. The client skips a tab whose own ProjectID
+	// disagrees with the list naming it (rebuildTabs), so updating one side
+	// alone makes the tab vanish from the sidebar while still existing here.
+	tab.ProjectID = projectID
+	if indexOfString(dst.TabIDs, tabID) < 0 {
+		dst.TabIDs = append(dst.TabIDs, tabID)
+	}
+	// Keeps the global order consistent with the project-relative one, the
+	// same invariant ReorderTab and MergeProjects maintain through this
+	// helper.
+	sm.tabOrder = reanchorTab(sm.tabOrder, dst.TabIDs, tabID)
+	dst.ActiveTab = tabID
+
+	if sm.activeTab == tabID && sm.activeProject != projectID {
+		// The moved tab was the global active one and is leaving the active
+		// project. A non-empty successor keeps the invariant that
+		// sm.activeTab belongs to the active project's TabIDs; an empty one
+		// is left for recoverEmptyProject/SwitchTab to repair, exactly as
+		// DestroyTab leaves it.
+		//
+		// An unknown source (from == "", or a from whose record is gone) also
+		// leaves successor == "" here, so sm.activeTab keeps naming tabID —
+		// now filed under a DIFFERENT project than sm.activeProject. That is
+		// not a new invariant break: sm.activeProject != projectID together
+		// with an unresolvable source already meant sm.activeTab did not
+		// belong to sm.activeProject's own TabIDs before this call ran.
+		// recoverEmptyProject's workspace-wide fallback and the caller's
+		// unconditional ensureTabSpawned(ActiveTabID()) are what carry the
+		// daemon through it either way.
+		if successor != "" {
+			sm.activeTab = successor
+		}
+	} else if sm.activeProject == projectID {
+		// The tab moved INTO the active project — it is now the obvious
+		// thing to be looking at, and it is what dst.ActiveTab was just set
+		// to above.
+		sm.activeTab = tabID
+	}
+
+	return from, moveTabMoved
+}
+
 // SwitchProject makes id the active project and moves the global active tab
 // onto that project's OWN remembered tab. It returns that tab's ID (empty for
 // a project with no tabs) and whether the project existed.
@@ -404,6 +508,22 @@ func (sm *SessionManager) ActiveProject() string {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 	return sm.activeProject
+}
+
+// ProjectActiveTab reads one project's own remembered ActiveTab under the
+// session lock. It exists because a project's ActiveTab and the daemon's
+// GLOBAL active tab (ActiveTabID) are different things: several clients can
+// each be looking at a different project, so "spawn whatever is globally
+// active" misses a project's own selection whenever that project is not the
+// one currently globally active. Reports false for an unknown project.
+func (sm *SessionManager) ProjectActiveTab(projectID string) (string, bool) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	p, ok := sm.projects[projectID]
+	if !ok {
+		return "", false
+	}
+	return p.ActiveTab, true
 }
 
 func (sm *SessionManager) CreateTabInProject(projectID, name string) *Tab {

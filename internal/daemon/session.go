@@ -842,6 +842,23 @@ func (sm *SessionManager) Tab(id string) *Tab {
 	return sm.tabs[id]
 }
 
+// TabProjectID reads a tab's owning project under the session lock. It
+// exists because Tab(id) hands back the LIVE *Tab pointer, and MoveTab and
+// MergeProjects both write tab.ProjectID under sm.mu.Lock() from a
+// different goroutine — so `d.session.Tab(id).ProjectID` after the call
+// returns is an unsynchronized read racing those writers, exactly the shape
+// SnapshotState's own doc comment calls out for reading Panes/Layout off a
+// live *Tab. Reports false for an unknown tab, same as Tab(id) == nil.
+func (sm *SessionManager) TabProjectID(id string) (string, bool) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	tab, ok := sm.tabs[id]
+	if !ok {
+		return "", false
+	}
+	return tab.ProjectID, true
+}
+
 func (sm *SessionManager) Panes(tabID string) []*Pane {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
@@ -886,6 +903,37 @@ func (sm *SessionManager) ActiveTabID() string {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 	return sm.activeTab
+}
+
+// UpdateTab applies a rename and/or colour change under sm.mu. Returns false
+// when the tab does not exist. Semantics are EXACTLY the former
+// handleUpdateTab's:
+//
+//	name != ""                  → Name = name
+//	color != ""                 → Color = color
+//	else clearColor || name=="" → Color = ""   (explicit clear, or the legacy
+//	                                            "only an empty color sent" heuristic)
+//
+// Mutating through sm.mu (rather than the live *Tab handleUpdateTab used to
+// write through unlocked) is the fix: SnapshotState copies *tab under
+// sm.mu.RLock, so an unlocked write here is a data race against every
+// snapshot and broadcast in flight.
+func (sm *SessionManager) UpdateTab(tabID, name, color string, clearColor bool) bool {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	tab, ok := sm.tabs[tabID]
+	if !ok {
+		return false
+	}
+	if name != "" {
+		tab.Name = name
+	}
+	if color != "" {
+		tab.Color = color
+	} else if clearColor || name == "" {
+		tab.Color = ""
+	}
+	return true
 }
 
 func (sm *SessionManager) SwitchTab(tabID string) {

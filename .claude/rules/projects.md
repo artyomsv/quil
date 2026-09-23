@@ -268,6 +268,118 @@ that is what the strays are called — and disambiguating first hands back
 same reason `sendMergeProjects` does NOT reuse `sendUpdateProject`'s duplicate
 guard: every project it would find on that host is one the message absorbs.
 
+### Moving one tab between projects (`MsgMoveTab`)
+
+`SessionManager.MoveTab` reassigns ONE tab from whatever project holds it to
+another, on THIS daemon only — a project ID means nothing off the daemon that
+minted it, so there is no cross-daemon shape to support and, for the same
+reason `merge_projects` needs none, no capability probe either: an older
+daemon simply drops the unknown message type.
+
+**Both sides of the link are written, through the same `reanchorTab` helper
+`MergeProjects` and `ReorderTab` already use.** The client rebuilds a project
+from its `TabIDs` but skips any tab whose own `ProjectID` disagrees with the
+list naming it (`rebuildTabs`) — updating one side and not the other makes the
+tab vanish from the sidebar while the daemon still holds it. `reanchorTab`
+keeps the workspace-wide `tabOrder` consistent with the project-relative
+order without moving any OTHER project's tab: the moved tab lands right after
+the target project's previous last tab, wherever that sits in the global list.
+
+**The source's successor is chosen exactly as `DestroyTab` chooses one** — the
+neighbour that slides into the moved tab's slot, read from the project's OWN
+`TabIDs`, never a workspace-wide answer that could name a different project's
+tab. The target's `ActiveTab` becomes the moved tab unconditionally: it is the
+one thing the user just asked to look at.
+
+**`recoverEmptyProject` runs on the SOURCE**, exactly as it does after
+`DestroyTab` — moving a project's last tab out leaves it precisely as empty,
+and it is owed the same replacement Shell tab, promoted to the active tab when
+the source is the daemon's active project. An unknown source (the pre-projects
+snapshot shape, where a tab's own `ProjectID` names no project the daemon
+holds) falls back to the workspace-wide emptiness test, which is a no-op
+whenever anything else in the workspace still holds a tab.
+
+**`handleMoveTab` spawns THREE tabs, not one, because a project's own
+`ActiveTab` and the daemon's single GLOBAL active tab (`ActiveTabID`) are
+different things.** Several clients can each be looking at a different
+project, so a second client switching the daemon globally elsewhere does not
+change what a FIRST client, still viewing the source project, is looking at.
+After a lazy restore only `ActiveTabID()`'s panes are running — spawning just
+that one misses the source's own successor whenever the source is not the
+globally active project, leaving that first client on a restore indicator
+with no PTY until it happens to switch tabs again. The handler therefore
+spawns the source's new `ActiveTab` (`ProjectActiveTab(from)`, read AFTER
+`recoverEmptyProject`, since that call can be what set it — the successor, or
+the recovery Shell tab), the moved tab itself (now the target's `ActiveTab`),
+and `ActiveTabID()` for the ordinary single-client case. `ensureTabSpawned` is
+idempotent, so the three calls — often naming the same tab — cost nothing
+extra.
+
+**Same-daemon only, by construction** — `MoveTabPayload` carries a bare
+`project_id`, meaningful only to the daemon that owns the map it indexes.
+There is no destination field to get wrong.
+
+**Panes keep their CWD.** `Pane.TabID` never changes — a tab that moves
+between projects keeps working wherever it already was. A NEW TAB opened in
+the target afterwards (or the Shell tab `recoverEmptyProject` gives the
+source) opens at the target's root (`projectCWD`, `daemon.go:2124`/`:2428`).
+A pane SPLIT into the moved tab does not: `handleCreatePane`'s ordinary path
+resolves against `d.defaultCWD()` (`daemon.go:2608`), same as a split into any
+other tab — `projectCWD` is a NEW-TAB concept, not a per-tab one.
+
+**The target's `ActiveTab` becomes the moved tab, and that reaches every
+attached client.** A second client currently looking at the target project is
+therefore moved onto the newly-arrived tab by the very next broadcast — the
+same way `SwitchTab`/`SwitchProject` already move every attached client's view
+of `ActiveTab`, and accepted for the same reason: `ActiveTab` is one value per
+project, shared by construction, not a per-client cursor.
+
+**A same-project move is a no-op and broadcasts nothing** — the same
+precedent `ReorderTab` sets for a drag that changed nothing: an action the
+user can trigger accidentally (dragging a tab back onto its own project row)
+must not cost every attached client a full `workspace_state` frame.
+
+### The project picker's move mode
+
+**Move to project…** (the tab context menu's last row, `tui-dialogs.md`'s Tab
+context menu section) reuses the fuzzy project picker (Alt+P) rather than a
+sibling dialog — a `moveTabID` field on `projectPickState` puts it in MOVE
+mode instead of duplicating the query editing, cursor, fuzzy ranking,
+sanitized rendering and broadcast refresh a second dialog would need.
+
+**The scope lives INSIDE `filterProjects`, via `projectPickBase`, and it has
+to.** `projectPickBase` returns `m.moveTabCandidates(moveTabID)` in move mode
+and `m.projects` otherwise; `filterProjects` fuzzy-ranks whichever one it gets.
+The reason it cannot live only at open time is the broadcast refresh
+(`model.go`, the `WorkspaceStateMsg` case): every workspace_state re-calls
+`filterProjects(m.projectPick.query)` while the picker is open, so a scope
+applied once at open would be widened back to every project by the very next
+git-ticker broadcast, five seconds later.
+
+**Candidates are same-Dest + `projectActionable`** (`moveTabCandidates`, beside
+`buildTabCtxMenuItems` in `ctxmenu.go`): a project ID means nothing off the
+daemon that minted it, so cross-Dest candidates make no sense, and an offline
+or synthetic project would have `Router.Send` silently drop the move. The row
+itself is HIDDEN, not greyed, when the candidate list is empty — a
+single-project workspace has nowhere to offer.
+
+**Enter sends via `sendForDestStrict` and flashes on failure**, exactly like
+`sendCreateTab`: `Router.Send` drops a message for a dest it has no conn for
+and returns nil, so a user-confirmed move needs the strict form to be able to
+say it failed. `moveTabFailedMsg` is the send-result twin of
+`createTabFailedMsg` — not an IPC response, so its `Update` arm must not
+re-arm `listenForMessages`.
+
+**No optimistic move.** The picker does not touch `m.projects` itself; sending
+`MsgMoveTab` and waiting for the broadcast is one round trip, and a client-side
+guess would have to separately reproduce the daemon's successor choice and
+`recoverEmptyProject`. The reconciliation needs no code of its own for this
+feature: `applyWorkspaceState`'s existing `existingTabs` index is keyed by ID
+across EVERY project (see "Moving one tab between projects" above), so the
+moved `*TabModel` is reused in its new project with its layout tree, VT
+emulator and scrollback intact, and `resolveActiveProjectIndex` is what keeps
+the user's own project selection from moving just because a tab did.
+
 **A daemon too old to understand `merge_projects` cannot receive one**, which is
 why no capability probe was needed (contrast `destSupportsProjects`).
 `gateExtraVersion` REFUSES the connection on any version difference, and the
@@ -497,6 +609,11 @@ hit test written as an independent second copy drifts the moment a row is
 inserted, and the symptom (clicking one project, getting its neighbour) looks
 nothing like a rendering change. Four fixtures pin it; they shift whenever a
 row is added, which is the expected cost.
+
+Right-clicking a `sidebarRowTab` heading opens the tab context menu
+(`tui-dialogs.md`'s Tab context menu section) for that tab and does NOT switch
+to it — the same "target without acting" shape the project row's right-click
+already has, and unlike a left-click on the same row, which does switch.
 
 Layout decisions that were each a bug first: the project NAME alone on its row
 with a remote's host on a second one (`name@dest` at 22 columns leaves nothing

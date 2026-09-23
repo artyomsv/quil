@@ -19,6 +19,24 @@ type projectPickState struct {
 	query    string
 	cursor   int
 	filtered []*ProjectModel
+	// moveTabID != "" puts the picker in MOVE mode: the list is scoped to
+	// moveTabCandidates(moveTabID) (via projectPickBase) and Enter sends
+	// MsgMoveTab instead of switching project — see handleProjectPickKey.
+	// openProjectPicker's fresh zero value leaves it off.
+	moveTabID string
+}
+
+// projectPickBase returns the picker's base list BEFORE fuzzy filtering:
+// every project in switch mode, or the move-mode scope in move mode. This is
+// where the move-mode scope has to live, rather than only at open time —
+// model.go's broadcast refresh calls filterProjects again on every
+// workspace_state while the picker is open, and a scope applied only at open
+// would let the first broadcast widen the list back to every project.
+func (m *Model) projectPickBase() []*ProjectModel {
+	if m.projectPick.moveTabID != "" {
+		return m.moveTabCandidates(m.projectPick.moveTabID)
+	}
+	return m.projects
 }
 
 // filterProjects ranks projects with fuzzyScore — the same matcher the command
@@ -26,20 +44,21 @@ type projectPickState struct {
 // two that drift apart. Matches against displayName() (Name, or Name@Dest for
 // a remote project) so a query narrows on either half.
 func (m *Model) filterProjects(query string) []*ProjectModel {
+	base := m.projectPickBase()
 	if query == "" {
-		// A COPY, not m.projects itself. The picker holds this slice across
-		// Update calls while a workspace broadcast can rebuild m.projects
-		// underneath it; aliasing makes "what is on screen" and "what exists"
-		// the same variable in one case and different in every other, which is
-		// the harder bug to reason about of the two.
-		return append([]*ProjectModel(nil), m.projects...)
+		// A COPY, not the base slice itself. The picker holds this slice
+		// across Update calls while a workspace broadcast can rebuild
+		// m.projects underneath it; aliasing makes "what is on screen" and
+		// "what exists" the same variable in one case and different in every
+		// other, which is the harder bug to reason about of the two.
+		return append([]*ProjectModel(nil), base...)
 	}
 	type scored struct {
 		p     *ProjectModel
 		score int
 	}
 	var hits []scored
-	for _, p := range m.projects {
+	for _, p := range base {
 		if score, ok := fuzzyScore(query, p.displayName()); ok {
 			hits = append(hits, scored{p, score})
 		}
@@ -100,6 +119,24 @@ func (m Model) openProjectPicker() (tea.Model, tea.Cmd) {
 	return m, tea.ClearScreen
 }
 
+// openMoveTabPicker opens the SAME picker in MOVE mode for tabID: the list is
+// scoped to moveTabCandidates(tabID) via projectPickBase, and Enter sends
+// MsgMoveTab instead of switching project (handleProjectPickKey). A sibling
+// dialog was considered and rejected — see the plan's "Alternatives
+// considered" note — because the query editing, fuzzy ranking, sanitized
+// rendering and broadcast refresh are all identical to the switch picker.
+//
+// The tab context menu's own refusal (proj == m.cur()) already ran before
+// this is reached, and buildTabCtxMenuItems already hid the menu row that
+// leads here when moveTabCandidates is empty — but this function does not
+// re-check either, matching openProjectPicker's own lack of preconditions.
+func (m Model) openMoveTabPicker(tabID string) (tea.Model, tea.Cmd) {
+	m.projectPick = projectPickState{moveTabID: tabID}
+	m.projectPick.filtered = m.filterProjects("")
+	m.dialog = dialogProjectPick
+	return m, tea.ClearScreen
+}
+
 // closeProjectPicker closes the picker and clears its state. m.dialog is the
 // open/closed authority.
 func (m *Model) closeProjectPicker() {
@@ -134,6 +171,27 @@ func (m Model) handleProjectPickKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if target == nil {
 			m.closeProjectPicker()
 			return m, tea.ClearScreen
+		}
+		// Move mode: never switchProject — the user stays in the project they
+		// were in. Re-check the target is still in scope rather than trusting
+		// the snapshot filterProjects took when the picker opened (or last
+		// refreshed): the target may have gone offline or been destroyed
+		// between then and this Enter.
+		if tabID := m.projectPick.moveTabID; tabID != "" {
+			inScope := false
+			for _, cand := range m.moveTabCandidates(tabID) {
+				if cand.ID == target.ID {
+					inScope = true
+					break
+				}
+			}
+			if !inScope {
+				m.closeProjectPicker()
+				return m, tea.ClearScreen
+			}
+			cmd := m.sendMoveTab(tabID, target.ID)
+			m.closeProjectPicker()
+			return m, tea.Batch(tea.ClearScreen, cmd)
 		}
 		idx := indexOfProject(m.projects, target.ID)
 		// Sequenced, not `return m, tea.Batch(tea.ClearScreen, m.switchProject(idx))`:
@@ -196,10 +254,21 @@ func (m *Model) clampProjectPickCursor() {
 }
 
 // renderProjectPickDialog returns the picker box CONTENT (renderDialog wraps
-// it in dialogBorder and centers it, at the default dialogWidth).
+// it in dialogBorder and centers it, at the default dialogWidth). Move mode
+// adds a title row naming the tab being moved and swaps the empty-list
+// message and the hint row for their move-mode wording.
 func (m Model) renderProjectPickDialog() string {
 	inner := dialogInnerWidth(m.width, projectPickWidth)
 	var b strings.Builder
+
+	moveMode := m.projectPick.moveTabID != ""
+	if moveMode {
+		// sanitizeRemoteText: the tab's Name can come from a remote daemon,
+		// same trust boundary as every project name drawn below.
+		name := sanitizeRemoteText(tabNameFor(m.tabByID(m.projectPick.moveTabID)))
+		b.WriteString(dialogTitle.Render(truncateToWidth(`Move "`+name+`" to:`, inner)))
+		b.WriteByte('\n')
+	}
 
 	// Query row: "> " (2 cells) + query + caret (1 cell), tail-truncated like
 	// the command palette's so the caret stays visible on a narrow terminal.
@@ -213,7 +282,11 @@ func (m Model) renderProjectPickDialog() string {
 	b.WriteByte('\n')
 
 	if len(m.projectPick.filtered) == 0 {
-		b.WriteString(dialogSubtle.Render(truncateToWidth("No matching projects", inner)))
+		empty := "No matching projects"
+		if moveMode && m.projectPick.query == "" {
+			empty = "No other project on this host"
+		}
+		b.WriteString(dialogSubtle.Render(truncateToWidth(empty, inner)))
 		b.WriteByte('\n')
 	}
 	for i, p := range m.projectPick.filtered {
@@ -230,7 +303,22 @@ func (m Model) renderProjectPickDialog() string {
 		b.WriteByte('\n')
 	}
 
+	hint := "↑↓ nav · Enter switch · Esc close"
+	if moveMode {
+		hint = "↑↓ nav · Enter move · Esc cancel"
+	}
 	b.WriteByte('\n')
-	b.WriteString(dialogSubtle.Render(truncateToWidth("↑↓ nav · Enter switch · Esc close", inner)))
+	b.WriteString(dialogSubtle.Render(truncateToWidth(hint, inner)))
 	return b.String()
+}
+
+// tabNameFor returns tab.Name, or "" for a nil tab — the tab named by
+// moveTabID can vanish (destroyed elsewhere) between open and render; the
+// broadcast-refresh close in model.go handles the common case, but render
+// must not assume it already ran.
+func tabNameFor(tab *TabModel) string {
+	if tab == nil {
+		return ""
+	}
+	return tab.Name
 }

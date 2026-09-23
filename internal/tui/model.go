@@ -2606,8 +2606,20 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		// destroyed elsewhere while the picker sat open — since there is then
 		// nothing left to move. Checked before the refilter, and refiltering
 		// only runs while the dialog is still open.
-		if m.projectPick.moveTabID != "" && m.projectOf(m.projectPick.moveTabID) == nil {
+		//
+		// Gated on m.dialog == dialogProjectPick, not moveTabID alone:
+		// moveTabID is cleared only by closeProjectPicker, so a dialog that
+		// REPLACED the open picker without going through it (PluginErrorMsg,
+		// say) leaves it stale — and an ungated close here would dismiss that
+		// OTHER dialog the next time a broadcast landed, mistaking it for the
+		// picker.
+		var pickerVanishCmd tea.Cmd
+		if m.dialog == dialogProjectPick && m.projectPick.moveTabID != "" && m.projectOf(m.projectPick.moveTabID) == nil {
 			m.closeProjectPicker()
+			// Every other picker-close path (Enter, Esc) returns tea.ClearScreen;
+			// this one must too, or the picker's stale border survives on screen
+			// until something else forces a full redraw.
+			pickerVanishCmd = tea.ClearScreen
 		}
 		if m.dialog == dialogProjectPick {
 			m.projectPick.filtered = m.filterProjects(m.projectPick.query)
@@ -2623,6 +2635,7 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		// m.projects, which applyWorkspaceState has just rebuilt.
 		cmds := []tea.Cmd{
 			templateFocusCmd,
+			pickerVanishCmd,
 			m.listenForMessages(),
 			m.sendDiffedResizes(m.diffResizes(msg)),
 			m.sendDiffedLayouts(m.diffLayouts(msg)),

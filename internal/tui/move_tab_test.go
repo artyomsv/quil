@@ -76,11 +76,38 @@ func moveTabItemIndex(t *testing.T, items []ctxMenuItem) int {
 	t.Helper()
 	for i, it := range items {
 		if it.id == ctxActMoveTab {
+			// buildTabCtxMenuItems appends it LAST, after Rename/Set color —
+			// pinned here since every caller of this helper depends on it.
+			if i != len(items)-1 {
+				t.Fatalf("Move to project… is at index %d of %d, want the LAST row", i, len(items))
+			}
 			return i
 		}
 	}
 	t.Fatal("Move to project… item not found in the tab menu")
 	return -1
+}
+
+// flattenCmd recursively executes cmd and, for a tea.BatchMsg, every command
+// inside it — mirroring runCmd's traversal but COLLECTING every resulting
+// message instead of discarding them, so a test can look for one buried
+// inside a batch (e.g. tea.ClearScreen alongside m.listenForMessages()).
+func flattenCmd(cmd tea.Cmd) []tea.Msg {
+	if cmd == nil {
+		return nil
+	}
+	msg := cmd()
+	if msg == nil {
+		return nil
+	}
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		var out []tea.Msg
+		for _, c := range batch {
+			out = append(out, flattenCmd(c)...)
+		}
+		return out
+	}
+	return []tea.Msg{msg}
 }
 
 // openMoveTabPickerViaMenu drives the path a real user takes: right-click the
@@ -143,6 +170,9 @@ func TestTabCtxMenu_MoveItemHiddenWithoutCandidates(t *testing.T) {
 	x := tabBarX(t, m, 0, 0)
 	updated, _ := m.Update(tea.MouseClickMsg{X: x, Y: 0, Button: tea.MouseRight})
 	got := updated.(Model)
+	if !got.ctxMenu.open() {
+		t.Fatal("setup: tab menu did not open — the loop below would vacuously see no items at all")
+	}
 
 	for _, it := range got.ctxMenu.items {
 		if it.id == ctxActMoveTab {
@@ -275,12 +305,18 @@ func TestMoveTabPicker_BroadcastRefreshKeepsTheScope(t *testing.T) {
 func TestMoveTabPicker_ClosesWhenTheTabVanishes(t *testing.T) {
 	t.Parallel()
 	m := newMoveTabTestModel(t)
-	m.client = newFakeConn()
+	fake := newFakeConn()
+	// Closed up front so the batch's own m.listenForMessages() sub-cmd
+	// returns immediately (io.EOF → linkLostMsg) instead of blocking on
+	// Receive() forever when flattenCmd executes it below — same technique
+	// tinyterm_test.go uses for the same reason.
+	close(fake.recv)
+	m.client = fake
 	got, _ := openMoveTabPickerViaMenu(t, m, 0)
 
 	// The tab the picker is about is destroyed elsewhere: source's TabIDs no
 	// longer lists it, and no other project claims it either.
-	updated, _ := got.Update(WorkspaceStateMsg{
+	updated, cmd := got.Update(WorkspaceStateMsg{
 		Dest: "",
 		Projects: []ProjectInfo{
 			{ID: "proj-source", Name: "source", TabIDs: []string{"tab-src-2"}, ActiveTab: "tab-src-2"},
@@ -301,6 +337,66 @@ func TestMoveTabPicker_ClosesWhenTheTabVanishes(t *testing.T) {
 	if next.projectPick.moveTabID != "" {
 		t.Errorf("projectPick = %+v, want the zero value after close", next.projectPick)
 	}
+
+	// Every other picker-close path (Enter, Esc) returns tea.ClearScreen; this
+	// one must too, or the picker's stale border survives on screen until
+	// something else forces a full redraw.
+	haveClear := false
+	for _, msg := range flattenCmd(cmd) {
+		if msg == tea.ClearScreen() {
+			haveClear = true
+		}
+	}
+	if !haveClear {
+		t.Error("the vanish-close did not return tea.ClearScreen")
+	}
+}
+
+// TestMoveTabPicker_VanishCloseDoesNotDismissAReplacingDialog pins the guard
+// on m.dialog == dialogProjectPick: moveTabID is cleared only by
+// closeProjectPicker, so a dialog that REPLACES the open picker without going
+// through it (PluginErrorMsg sets m.dialog directly and never touches
+// m.projectPick) leaves moveTabID stale. An ungated vanish-close would then
+// dismiss that OTHER dialog on the next broadcast, mistaking it for the
+// picker it no longer is.
+func TestMoveTabPicker_VanishCloseDoesNotDismissAReplacingDialog(t *testing.T) {
+	t.Parallel()
+	m := newMoveTabTestModel(t)
+	fake := newFakeConn()
+	close(fake.recv) // see TestMoveTabPicker_ClosesWhenTheTabVanishes
+	m.client = fake
+	got, _ := openMoveTabPickerViaMenu(t, m, 0)
+
+	updated, _ := got.Update(PluginErrorMsg{Title: "boom", Message: "it broke"})
+	next := updated.(Model)
+	if next.dialog != dialogPluginError {
+		t.Fatalf("setup: PluginErrorMsg did not open the plugin-error dialog: dialog=%v", next.dialog)
+	}
+	if next.projectPick.moveTabID == "" {
+		t.Fatal("setup: PluginErrorMsg must not clear the stale moveTabID — that IS the hazard under test")
+	}
+
+	// A broadcast now reports the picker's tab gone — the vanish-close's own
+	// trigger — while a DIFFERENT dialog is on screen.
+	updated, _ = next.Update(WorkspaceStateMsg{
+		Dest: "",
+		Projects: []ProjectInfo{
+			{ID: "proj-source", Name: "source", TabIDs: []string{"tab-src-2"}, ActiveTab: "tab-src-2"},
+			{ID: "proj-b", Name: "beta", TabIDs: []string{"tab-b-1"}, ActiveTab: "tab-b-1"},
+			{ID: "proj-c", Name: "gamma", TabIDs: []string{"tab-c-1"}, ActiveTab: "tab-c-1"},
+		},
+		Tabs: []TabInfo{
+			{ID: "tab-src-2", Name: "Build", ProjectID: "proj-source"},
+			{ID: "tab-b-1", Name: "Shell", ProjectID: "proj-b"},
+			{ID: "tab-c-1", Name: "Shell", ProjectID: "proj-c"},
+		},
+	})
+	final := updated.(Model)
+
+	if final.dialog != dialogPluginError {
+		t.Errorf("dialog = %v, want dialogPluginError — the vanish-close must not dismiss a "+
+			"dialog that replaced the picker", final.dialog)
+	}
 }
 
 func TestMoveTabPicker_EnterOnTargetThatWentOfflineSendsNothing(t *testing.T) {
@@ -319,8 +415,13 @@ func TestMoveTabPicker_EnterOnTargetThatWentOfflineSendsNothing(t *testing.T) {
 	// broadcast.
 	got.projectByID("proj-b").Offline = &OfflineState{}
 
-	updated, _ := got.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	updated, cmd := got.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	next := updated.(Model)
+	// The re-check's whole effect is which Cmd the Enter branch RETURNS — the
+	// in-scope path batches sendMoveTab into it, the refused path returns bare
+	// tea.ClearScreen — so the send (and the bug this test exists to catch)
+	// only happens once this runs.
+	runCmd(cmd)
 
 	if next.dialog != dialogNone {
 		t.Errorf("dialog = %v, want dialogNone", next.dialog)
@@ -339,8 +440,9 @@ func TestMoveTabPicker_EscSendsNothing(t *testing.T) {
 	m.client = fake
 	got, _ := openMoveTabPickerViaMenu(t, m, 0)
 
-	updated, _ := got.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	updated, cmd := got.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	next := updated.(Model)
+	runCmd(cmd)
 
 	if next.dialog != dialogNone {
 		t.Errorf("dialog = %v, want dialogNone", next.dialog)
@@ -361,14 +463,16 @@ func TestProjectPicker_AltPAfterMoveModeIsPlainSwitch(t *testing.T) {
 	m.client = fake
 	got, _ := openMoveTabPickerViaMenu(t, m, 0)
 
-	updated, _ := got.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	updated, cmd := got.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	next := updated.(Model)
+	runCmd(cmd)
 	if next.dialog != dialogNone {
 		t.Fatal("setup: Esc did not close the move-mode picker")
 	}
 
-	updated, _ = next.Update(tea.KeyPressMsg{Mod: tea.ModAlt, Code: 'p'})
+	updated, cmd = next.Update(tea.KeyPressMsg{Mod: tea.ModAlt, Code: 'p'})
 	next = updated.(Model)
+	runCmd(cmd)
 	if next.dialog != dialogProjectPick || next.projectPick.moveTabID != "" {
 		t.Fatalf("Alt+P did not open a plain (non-move) picker: dialog=%v moveTabID=%q",
 			next.dialog, next.projectPick.moveTabID)
@@ -378,14 +482,19 @@ func TestProjectPicker_AltPAfterMoveModeIsPlainSwitch(t *testing.T) {
 			len(next.projectPick.filtered), len(next.projects))
 	}
 
-	updated, _ = next.Update(tea.KeyPressMsg{Text: "beta"})
+	updated, cmd = next.Update(tea.KeyPressMsg{Text: "beta"})
 	next = updated.(Model)
+	runCmd(cmd)
 	if len(next.projectPick.filtered) != 1 || next.projectPick.filtered[0].ID != "proj-b" {
 		t.Fatalf("filtered = %v, want [proj-b]", next.projectPick.filtered)
 	}
 
-	updated, _ = next.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	updated, cmd = next.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	next = updated.(Model)
+	// This is the assertion that matters for "no MsgMoveTab": the move-mode
+	// send only happens inside the closure sendMoveTab returns, so without
+	// running the Cmd a stale moveTabID surviving Esc would pass silently.
+	runCmd(cmd)
 
 	if next.dialog != dialogNone {
 		t.Errorf("dialog = %v, want dialogNone after Enter", next.dialog)

@@ -80,16 +80,17 @@ right-click on a pane (no selection active) or `quick_actions` (default `alt+a`;
 
 **`openTabCtxMenu` refuses to open — without mutating anything — while notes mode, an inline rename, a pane rename, or a dialog owns input**, the same gate `openCtxMenu`'s pane menu path assumes at its entry points. Notes mode and an inline rename would be stranded behind a menu they cannot see; Rename switching tabs out from under the notes editor would leave it bound to a pane that just left the screen (`switchProject`'s own notes comment covers the same hazard). The usual narrow-terminal bail applies too: `openTabCtxMenu` and `openTabColorList` both return without mutating state when even the compact box cannot fit inside the content area, rather than leave an invisible menu that still owns every keystroke.
 
-**Move to project… is the LAST row, and only when there is somewhere to move
-to.** `buildTabCtxMenuItems` appends it only when `moveTabCandidates(tab.ID)`
-is non-empty — same-Dest, `projectActionable` projects other than the tab's
-own — and the row is HIDDEN rather than greyed on a single-project workspace,
-matching the empty-candidates shape the rest of this menu does not otherwise
-need. Choosing it (`ctxActMoveTab`) closes the menu and opens the fuzzy
-project picker (Alt+P) in MOVE mode (`openMoveTabPicker`) rather than a
-sibling dialog — see `projects.md`'s "The project picker's move mode" for the
-picker half, including why the scope has to live inside `filterProjects`
-rather than being fixed at open time.
+**Move to project… is the LAST row, shown only when there is somewhere to
+move to.** `buildTabCtxMenuItems` appends it only when
+`moveTabCandidates(tab.ID)` is non-empty — same-Dest, `projectActionable`
+projects other than the tab's own. It is HIDDEN, not greyed, on a
+single-project workspace: Rename and Set color… always have something to do,
+so this is the only row that can run out of candidates, and hiding is the
+right answer for a row nobody can ever act on. Choosing it (`ctxActMoveTab`)
+closes the menu and opens the fuzzy project picker (Alt+P) in MOVE mode
+(`openMoveTabPicker`) rather than a sibling dialog — see `projects.md`'s "The
+project picker's move mode" for the picker half, including why the scope has
+to live inside `filterProjects` rather than being fixed at open time.
 
 ## Claude resume picker
 

@@ -3059,8 +3059,13 @@ func (d *Daemon) recoverEmptyTab(tabID, reason string) {
 // Overlay and PreparingWorktree are set before or at publication and only ever
 // cleared later, so a stale "no" can only refuse a move that would have been
 // fine a moment later. A worktree add that BEGINS between the check and the
-// move is caught by worktreeAddAndCreate's own post-add re-check, which
-// abandons cleanly when the replace target is no longer in its tab.
+// move is caught daemon-side only on the SOURCE side, and only for a REPLACE:
+// worktreeAddAndCreate's post-add re-check abandons cleanly when the replace
+// target is no longer in its tab. A plain worktree add into the move's TARGET
+// tab that begins after the check is not caught here and cannot be — the
+// requesting client arms its placeholder before the daemon add even starts.
+// The client-side guard covers it: the TUI never fills a worktree placeholder
+// with a moved pane.
 //
 // None of the refusals broadcasts or snapshots: nothing changed.
 func (d *Daemon) handleMovePane(conn *ipc.Conn, msg *ipc.Message) {
@@ -3176,8 +3181,10 @@ func (d *Daemon) tabPreparingWorktree(tabID string) bool {
 // CLOSE and wrong after a MOVE. The user took the pane somewhere; a fresh shell
 // appearing in its place is a pane they never asked for. Overlays left in the
 // tab are cleaned up (cleanupPaneArtifacts) exactly as ensureTabNotEmpty
-// cleans its orphans, then go down with the tab (DestroyTab releases PTYs off
-// the lock). Returns whether the tab was destroyed. A no-op for an unknown tab.
+// cleans its orphans, then go down with the tab (DestroyTabIfPanes releases
+// PTYs off the lock). The destroy is conditional on the pane list read here, so
+// a pane that arrives in between keeps the tab alive. Returns whether the tab
+// was destroyed. A no-op for an unknown tab.
 func (d *Daemon) dissolveEmptyTab(tabID string) bool {
 	if tabID == "" || d.session.Tab(tabID) == nil {
 		return false
@@ -3192,8 +3199,23 @@ func (d *Daemon) dissolveEmptyTab(tabID string) bool {
 		}
 		overlays = append(overlays, p.ID)
 	}
-	if err := d.session.DestroyTab(tabID); err != nil {
+	return d.dissolveTabHolding(tabID, overlays)
+}
+
+// dissolveTabHolding is dissolveEmptyTab's second half: it destroys tabID
+// only if its live panes are still exactly overlays, the list the first half
+// read. The two halves are two lock holds, and a pane another client moved or
+// created into this tab in between must survive — its request was answered
+// OK, and nobody asked for a destroy. The tab then simply is not empty any
+// more. Split out so a test can land a pane between the two.
+func (d *Daemon) dissolveTabHolding(tabID string, overlays []string) bool {
+	destroyed, err := d.session.DestroyTabIfPanes(tabID, overlays)
+	if err != nil {
 		log.Printf("move pane: dissolve tab %s: %v", tabID, err)
+		return false
+	}
+	if !destroyed {
+		log.Printf("move pane: tab %s gained a pane before it could dissolve; kept", tabID)
 		return false
 	}
 	log.Printf("tab dissolved: %s (its last pane moved away)", tabID)

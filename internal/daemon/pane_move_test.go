@@ -316,6 +316,85 @@ func TestHandleMovePane_KeptSourceTabIsNotRefilled(t *testing.T) {
 	}
 }
 
+// dissolveEmptyTab reads the pane list and destroys in two lock holds. A pane
+// another client moves or creates into the tab in between must survive: the
+// destroy is conditional on the list read. Mutation guard: a plain
+// DestroyTab in dissolveTabHolding (or in DestroyTabIfPanes) kills the
+// arrival and fails both subtests.
+func TestDissolveEmptyTab_KeepsAPaneThatArrivedAfterTheRead(t *testing.T) {
+	arrive := map[string]func(t *testing.T, d *Daemon, tab, other *Tab) *Pane{
+		"moved in": func(t *testing.T, d *Daemon, tab, other *Tab) *Pane {
+			p := moveTestPane(t, d, other.ID)
+			if _, res := d.session.MovePane(p.ID, tab.ID); res != movePaneMoved {
+				t.Fatalf("setup: MovePane res = %v", res)
+			}
+			return p
+		},
+		"created": func(t *testing.T, d *Daemon, tab, _ *Tab) *Pane {
+			return moveTestPane(t, d, tab.ID)
+		},
+	}
+	for name, land := range arrive {
+		t.Run(name, func(t *testing.T) {
+			d := overlayTestDaemon(t, config.Default())
+			proj := d.session.CreateProject("alpha", t.TempDir())
+			emptied := d.session.CreateTabInProject(proj.ID, "emptied")
+			other := d.session.CreateTabInProject(proj.ID, "other")
+			moveTestPane(t, d, other.ID) // keeps other alive
+
+			// The first half's read: the emptied tab holds nothing.
+			var read []string
+			for _, p := range d.session.Panes(emptied.ID) {
+				read = append(read, p.ID)
+			}
+			arrived := land(t, d, emptied, other)
+
+			if d.dissolveTabHolding(emptied.ID, read) {
+				t.Error("the tab was dissolved although a pane arrived after the read")
+			}
+			if d.session.Tab(emptied.ID) == nil {
+				t.Fatal("the tab is gone")
+			}
+			if d.session.Pane(arrived.ID) == nil {
+				t.Error("the pane that arrived was destroyed with the tab")
+			}
+		})
+	}
+}
+
+func TestDestroyTabIfPanes(t *testing.T) {
+	t.Run("same set in another order destroys", func(t *testing.T) {
+		sm, a, _, a1, a2, a3, _ := movePaneFixture(t)
+		ok, err := sm.DestroyTabIfPanes(a, []string{a3, a1, a2})
+		if err != nil || !ok {
+			t.Fatalf("ok, err = %v, %v; want true, nil", ok, err)
+		}
+		if sm.tabs[a] != nil || sm.panes[a1] != nil {
+			t.Error("the tab or its panes survived a matching destroy")
+		}
+	})
+	t.Run("a pane that arrived keeps everything", func(t *testing.T) {
+		sm, a, _, a1, a2, a3, b1 := movePaneFixture(t)
+		want := []string{a1, a2, a3}
+		sm.MovePane(b1, a)
+		before := snapshotAll(sm)
+
+		ok, err := sm.DestroyTabIfPanes(a, want)
+		if err != nil || ok {
+			t.Fatalf("ok, err = %v, %v; want false, nil", ok, err)
+		}
+		if after := snapshotAll(sm); !reflect.DeepEqual(before, after) {
+			t.Error("state changed on a declined destroy")
+		}
+	})
+	t.Run("unknown tab", func(t *testing.T) {
+		sm, _, _, _, _, _, _ := movePaneFixture(t)
+		if ok, err := sm.DestroyTabIfPanes("tab-gone", nil); ok || err == nil {
+			t.Errorf("ok, err = %v, %v; want false and an error", ok, err)
+		}
+	})
+}
+
 // assertHandlerRefused drives a move the handler must refuse and checks that
 // nothing moved and nothing was scheduled.
 func assertHandlerRefused(t *testing.T, d *Daemon, paneID, tabID string) {

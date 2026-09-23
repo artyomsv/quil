@@ -672,12 +672,78 @@ func (sm *SessionManager) createTabLocked(projectID, name string) *Tab {
 
 func (sm *SessionManager) DestroyTab(tabID string) error {
 	sm.mu.Lock()
-
 	tab, ok := sm.tabs[tabID]
 	if !ok {
 		sm.mu.Unlock()
 		return fmt.Errorf("tab not found: %s", tabID)
 	}
+	orphans := sm.destroyTabLocked(tab)
+	sm.mu.Unlock()
+	releasePanes(orphans)
+	return nil
+}
+
+// DestroyTabIfPanes destroys tabID only while its live panes are still exactly
+// the ids in want — the same SET, compared order-insensitively (a reorder
+// alone cannot make a tab worth keeping). It reports whether the tab
+// was destroyed; a mismatch destroys nothing and is not an error.
+//
+// It exists for dissolveEmptyTab, which decides from a pane list read in an
+// earlier lock hold. Between that read and a plain DestroyTab, another
+// client's MovePane or CreatePane can land a pane in the tab — a move that was
+// answered OK, or a create whose spawn is still to come — and DestroyTab would
+// detach it and kill its process with nobody having asked to destroy anything.
+// Checking under the same sm.mu hold as the destroy closes that window. Takes
+// no PluginMu under sm.mu; PTYs are released off the lock, as DestroyTab does.
+func (sm *SessionManager) DestroyTabIfPanes(tabID string, want []string) (bool, error) {
+	sm.mu.Lock()
+	tab, ok := sm.tabs[tabID]
+	if !ok {
+		sm.mu.Unlock()
+		return false, fmt.Errorf("tab not found: %s", tabID)
+	}
+	// LIVE panes, the same filter Panes(tabID) applies to the list the caller
+	// captured — a dangling id from a corrupt snapshot must not make the tab
+	// impossible to dissolve.
+	live := make([]string, 0, len(tab.Panes))
+	for _, id := range tab.Panes {
+		if _, ok := sm.panes[id]; ok {
+			live = append(live, id)
+		}
+	}
+	if !sameStringSet(live, want) {
+		sm.mu.Unlock()
+		return false, nil
+	}
+	orphans := sm.destroyTabLocked(tab)
+	sm.mu.Unlock()
+	releasePanes(orphans)
+	return true, nil
+}
+
+// sameStringSet reports whether a and b hold the same multiset of strings.
+func sameStringSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	count := make(map[string]int, len(a))
+	for _, s := range a {
+		count[s]++
+	}
+	for _, s := range b {
+		if count[s] == 0 {
+			return false
+		}
+		count[s]--
+	}
+	return true
+}
+
+// destroyTabLocked removes tab and its panes from the session and returns the
+// detached panes for the caller to releasePanes AFTER unlocking. Caller holds
+// sm.mu (write).
+func (sm *SessionManager) destroyTabLocked(tab *Tab) []*Pane {
+	tabID := tab.ID
 
 	// Detach panes under the lock; close their PTYs after releasing it
 	// (releasePanes) — Close can block on reaping a wedged child.
@@ -737,9 +803,7 @@ func (sm *SessionManager) DestroyTab(tabID string) error {
 			sm.activeTab = sm.tabOrder[0]
 		}
 	}
-	sm.mu.Unlock()
-	releasePanes(orphans)
-	return nil
+	return orphans
 }
 
 func (sm *SessionManager) CreatePane(tabID string, cwd string) (*Pane, error) {

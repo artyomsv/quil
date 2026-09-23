@@ -215,10 +215,25 @@ same-tab move is a no-op: no broadcast, no snapshot.
   that tree from `Tab.Panes`, so a pane leaving or joining first changes it.
 
 These checks are TOCTOU and that is accepted: `Overlay`/`PreparingWorktree`
-are set before or at publication and only ever cleared, and a worktree add
-that BEGINS between the check and the move is caught by
-`worktreeAddAndCreate`'s existing post-add re-check ("the pane to replace moved
-to another tab"), which abandons and removes the checkout.
+are set before or at publication and only ever cleared. A worktree add that
+BEGINS between the check and the move is caught daemon-side only for a
+REPLACE whose target just left: `worktreeAddAndCreate`'s post-add re-check
+("the pane to replace moved to another tab") abandons and removes the
+checkout. **The target side has a gap the daemon cannot close**: a plain
+worktree add into the move's TARGET tab that starts after the check is not
+caught, because the requesting client's placeholder exists before the daemon
+add starts. The client-side guard covers it — the TUI never fills a worktree
+placeholder with a moved pane.
+
+**The dissolve is conditional** (`SessionManager.DestroyTabIfPanes`):
+`dissolveEmptyTab` reads the pane list in one lock hold and destroys in
+another, and a plain `DestroyTab` there would kill a pane another client moved
+or created into the tab in between — a move answered OK, detached with its
+process killed and its artifacts never cleaned, or a create whose `spawnPane`
+then installs a PTY into a detached pane. It destroys only while the tab's
+LIVE panes are the same SET (order-insensitive) as the list read, under the
+same `sm.mu` hold as the destroy, taking no `PluginMu` there; on a mismatch it
+destroys nothing and `recoverEmptyProject` does not run.
 
 **`SetTabLayout`** replaces `handleUpdateLayout`'s unlocked write through the
 live `*Tab`, which raced `SnapshotState`'s copy (the `handleUpdateTab` shape

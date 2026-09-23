@@ -6,7 +6,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
 )
 
@@ -22,8 +21,7 @@ import (
 //
 // Run under ./scripts/dev.sh test-race internal/daemon.
 func TestMovePane_DoesNotRacePaneSources(t *testing.T) {
-	t.Setenv("QUIL_HOME", t.TempDir())
-	d := New(config.Default())
+	d := newTestDaemon(t) // fake PTYs: nothing here may spawn a real child
 	proj := d.session.CreateProject("alpha", "/a")
 	a := d.session.CreateTabInProject(proj.ID, "A")
 	b := d.session.CreateTabInProject(proj.ID, "B")
@@ -80,8 +78,7 @@ func TestMovePane_DoesNotRacePaneSources(t *testing.T) {
 //
 // Run under ./scripts/dev.sh test-race internal/daemon.
 func TestUpdateLayout_DoesNotRaceSnapshotState(t *testing.T) {
-	t.Setenv("QUIL_HOME", t.TempDir())
-	d := New(config.Default())
+	d := newTestDaemon(t) // fake PTYs: nothing here may spawn a real child
 	tab := d.session.CreateTab("layout")
 
 	const rounds = 500

@@ -6441,11 +6441,13 @@ func (m Model) tabStyle(idx int) lipgloss.Style {
 // the unshifted layout, and the status bar is pushed off the bottom. Every
 // click in the UI lands one row out.
 //
-// The overflow path can produce it: the active tab is included
-// unconditionally, before any budget check, so a single label wider than the
-// whole bar survives. That was reachable when the bar spanned m.width and is
-// projectSidebarWidth() columns more reachable now that it spends
-// paneAreaWidth() — a tab named after a long branch or directory reaches it.
+// The overflow path can produce it: tabBarLayout (reorder.go) always includes
+// ONE tab unconditionally, before any budget check — the active tab in auto
+// mode, or the first visible tab (tabScrollFirst, clamped) in manual mode —
+// so a single label wider than the whole bar survives either way. That was
+// reachable when the bar spanned m.width and is projectSidebarWidth() columns
+// more reachable now that it spends paneAreaWidth() — a tab named after a
+// long branch or directory reaches it.
 //
 // ansi.Truncate measures CELLS and drops a straddling wide glyph whole rather
 // than emitting half of one; the reset closes any SGR the cut left open, so
@@ -6454,8 +6456,13 @@ func (m Model) tabStyle(idx int) lipgloss.Style {
 //
 // hitTestTab needs no mirror of this: truncation only ever removes the TAIL,
 // and the loop that fills the bar admits a second tab only while the running
-// total stays inside barW — so an over-wide active tab is alone on the bar and
-// still owns every column the hit test can be asked about.
+// total stays inside barW — so an over-wide unconditional tab still owns
+// every column the hit test can be asked about, in EITHER mode. Manual mode
+// adds one wrinkle rather than an exception: when tabScrollFirst > 0 the left
+// marker precedes that tab and owns its own few columns first (tabBarLayout
+// reserves its width in span.start), so hitTestTab still answers -1 there —
+// truncation can only ever shorten the over-wide tab's OWN tail, never the
+// marker in front of it.
 func fitTabBar(bar string, barW int) string {
 	if barW <= 0 || lipgloss.Width(bar) <= barW {
 		return bar

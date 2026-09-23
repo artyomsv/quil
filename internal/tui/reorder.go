@@ -314,7 +314,25 @@ func (m *Model) scrollTabBar(delta int) {
 		}
 	}
 
-	m.tabScrollFirst = clampInt(start+delta, 0, maxFirst)
+	next := clampInt(start+delta, 0, maxFirst)
+	// A notch must never move the window opposite to the direction it was
+	// turned. Auto mode's window is a conservative APPROXIMATION — it always
+	// reserves space for BOTH markers while expanding outward, even on the
+	// side that turns out not to need one (an active tab near the end
+	// expands only inward, but still pays the far side's marker on every
+	// step) — so its start can land PAST maxFirst, the exact "smallest index
+	// whose tail already fits with only a left marker" bound manual mode
+	// clamps to. From such a position, clamping start+1 back down to
+	// maxFirst on a wheel-DOWN notch would move the visible window LEFT, the
+	// opposite of what the user just turned the wheel. Refusing the move
+	// entirely (rather than clamping it) leaves the bar exactly where it
+	// was — indistinguishable from "nothing left to do here", which is what
+	// it is.
+	if (delta > 0 && next < start) || (delta < 0 && next > start) {
+		return
+	}
+
+	m.tabScrollFirst = next
 	if activeIdx >= 0 && activeIdx < n {
 		m.tabScrollAnchor = tabs[activeIdx].ID
 	}

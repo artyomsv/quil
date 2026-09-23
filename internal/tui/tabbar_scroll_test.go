@@ -11,21 +11,54 @@ import (
 )
 
 // newTabBarScrollModel builds a model the same way newModelForTest does, but
-// gives every tab a real PaneModel — the "no pane scrolled" claim in these
-// tests needs a real scroll offset to observe, not a nil ActivePaneModel that
-// could never move. Sized at 60x40 with no project sidebar, which the fixture
-// below (8 ten-character tab names) reliably overflows.
+// gives every tab a real PaneModel with real SCROLLBACK — the "no pane
+// scrolled" claim in these tests needs a pane whose scroll offset could
+// actually move to be worth anything. A pane with no history has
+// maxScroll()==0 (pane.go), so ScrollUp clamps right back to 0 and
+// ScrollDown floors at 0 regardless of whether the wheel reached it — a
+// leaked event would be silently indistinguishable from a correctly-swallowed
+// one. Feeding each pane enough lines to overflow its 24-row VT gives
+// ScrollUp real room to move, which is what makes wantScrollableHistory (and
+// every "the wheel must not reach the pane" assertion below) a real check
+// rather than a vacuous one. Sized at 60x40 with no project sidebar, which
+// the fixture below (8 ten-character tab names) reliably overflows.
 func newTabBarScrollModel(names []string, activeIdx int) Model {
 	m := newModelForTest(names, activeIdx)
+	var scrollback strings.Builder
+	for line := 0; line < 80; line++ {
+		fmt.Fprintf(&scrollback, "line %d\r\n", line)
+	}
 	for i, tab := range m.curTabs() {
-		pane := NewPaneModel(fmt.Sprintf("pane-%d", i), 256)
+		pane := NewPaneModel(fmt.Sprintf("pane-%d", i), 4096)
 		pane.Active = true
+		pane.AppendOutput([]byte(scrollback.String()))
 		tab.Root = NewLeaf(pane)
 		tab.ActivePane = pane.ID
 	}
 	m.notifications = NewNotificationCenter(30, 200)
 	m.width, m.height = 60, 40
 	return m
+}
+
+// wantScrollableHistory fails the test unless the active pane actually has
+// scrollback to move through. Without this control, a pane's scrollBack
+// starting at (and clamping back to) 0 on both ends makes a wheel event that
+// LEAKS through to PaneModel.ScrollUp/ScrollDown indistinguishable from one
+// that correctly never reached the pane at all.
+func wantScrollableHistory(t *testing.T, m Model) {
+	t.Helper()
+	tab := m.activeTabModel()
+	if tab == nil {
+		t.Fatal("no active tab")
+	}
+	pane := tab.ActivePaneModel()
+	if pane == nil {
+		t.Fatal("no active pane")
+	}
+	if pane.maxScroll() <= 0 {
+		t.Fatal("fixture pane has no scrollback — a wheel event leaking through to it " +
+			"would be invisible; feed it more output")
+	}
 }
 
 // eightOverflowingTabNames is wide enough, at 60 columns, that only a few of
@@ -77,11 +110,11 @@ func TestWheelDownOverTabBar_ScrollsWithoutSwitchingOrPaneScroll(t *testing.T) {
 	t.Parallel()
 	m := newTabBarScrollModel(eightOverflowingTabNames(), 0)
 	wantOverflow(t, m)
+	wantScrollableHistory(t, m)
 
 	beforeSpans := m.tabSpans()
 	beforeFirst := beforeSpans[0].index
 	beforeActiveID := m.curTabs()[m.activeTabIdx()].ID
-	beforeScroll := activePaneScrollBack(t, m)
 
 	got := wheelAtTabBar(t, m, tea.MouseWheelDown)
 
@@ -97,9 +130,16 @@ func TestWheelDownOverTabBar_ScrollsWithoutSwitchingOrPaneScroll(t *testing.T) {
 		t.Fatalf("active tab changed from %q to %q — the wheel must never switch tabs",
 			beforeActiveID, got.curTabs()[got.activeTabIdx()].ID)
 	}
-	if got := activePaneScrollBack(t, got); got != beforeScroll {
-		t.Fatalf("active pane scrollBack = %d, want unchanged %d — the wheel must not reach the pane",
-			got, beforeScroll)
+
+	// The wheel must never reach the pane. Wheel-UP is the discriminating
+	// probe: scrollBack starts at 0, and ScrollDown floors there too (so a
+	// down-notch leak would be invisible), but ScrollUp on a pane with real
+	// history (wantScrollableHistory) would move scrollBack off 0 the moment
+	// the event reached PaneModel.ScrollUp.
+	upped := wheelAtTabBar(t, got, tea.MouseWheelUp)
+	if s := activePaneScrollBack(t, upped); s != 0 {
+		t.Fatalf("active pane scrollBack = %d after wheel-up over the tab bar, want 0 — "+
+			"the wheel must not reach the pane", s)
 	}
 }
 
@@ -127,6 +167,56 @@ func TestWheelLeftRightOverTabBar_MatchUpDown(t *testing.T) {
 	if up.tabScrollFirst != left.tabScrollFirst {
 		t.Fatalf("wheel-left first=%d, want the same as wheel-up first=%d",
 			left.tabScrollFirst, up.tabScrollFirst)
+	}
+}
+
+// A regression fixture found by exhaustive search over (tab count, name
+// length, bar width, active index): n=4 one-character tab names, barW=22,
+// active tab 3 (the LAST tab). Auto mode's expansion there is left-only —
+// there is nothing to the right of the last tab — but it still reserves
+// space for a right marker it will never need on every step of that
+// expansion, the same conservative approximation auto mode has always used
+// (see tabBarLayout). That makes its window start (tab 2) land PAST
+// maxFirst (1, computed with only the left marker reserved, since the tail
+// is already fully shown). A wheel-DOWN notch that just clamps the result —
+// clamp(2+1, 0, 1) = 1 — moves the visible window LEFT, backward from the
+// direction the wheel was actually turned.
+func TestWheelDown_NeverMovesTheWindowOppositeToItsDirection(t *testing.T) {
+	t.Parallel()
+	m := newTabBarScrollModel([]string{"A", "B", "C", "D"}, 3)
+	m.width = 22
+	wantOverflow(t, m)
+
+	before := m.tabSpans()
+	if len(before) == 0 {
+		t.Fatal("fixture precondition: nothing visible")
+	}
+	beforeFirst := before[0].index
+	_, widths, barW, leftMarkerW, _ := m.tabBarWidths()
+	maxFirst := maxFirstIndex(widths, barW, leftMarkerW)
+	if beforeFirst <= maxFirst {
+		t.Fatalf("fixture precondition: auto-mode first=%d must EXCEED maxFirst=%d, "+
+			"or this fixture no longer reproduces the mismatch a plain clamp gets wrong",
+			beforeFirst, maxFirst)
+	}
+
+	got := wheelAtTabBar(t, m, tea.MouseWheelDown)
+	after := got.tabSpans()
+	if len(after) == 0 {
+		t.Fatal("no tabs visible after wheel-down")
+	}
+	if after[0].index < beforeFirst {
+		t.Fatalf("first visible tab moved from %d to %d on a wheel-DOWN notch — "+
+			"the window must never move opposite to the direction it was turned",
+			beforeFirst, after[0].index)
+	}
+	// The refusal must be a genuine no-op: no state change, still auto mode.
+	if got.tabScrollFirst != 0 || got.tabScrollAnchor != "" {
+		t.Fatalf("a refused notch still wrote scroll state: first=%d anchor=%q",
+			got.tabScrollFirst, got.tabScrollAnchor)
+	}
+	if got.tabBarManualMode() {
+		t.Fatal("a refused notch entered manual mode instead of leaving auto mode untouched")
 	}
 }
 
@@ -401,21 +491,36 @@ func TestScrollFirstPastMaxFirstAfterTabsClose_ClampsAndRecovers(t *testing.T) {
 	}
 	_, widths, barW, leftMarkerW, _ = cur.tabBarWidths()
 	newMaxFirst := maxFirstIndex(widths, barW, leftMarkerW)
-	if newMaxFirst >= oldMaxFirst {
-		t.Fatalf("fixture precondition: newMaxFirst=%d must be less than oldMaxFirst=%d "+
-			"or the stale tabScrollFirst is never actually out of range", newMaxFirst, oldMaxFirst)
+	// The fixture must overshoot by at least 2, or a broken implementation
+	// that clamps only the RESULT (clamp(oldMaxFirst+delta, 0, newMaxFirst))
+	// instead of the START produces the same value as the correct one and
+	// the exact-value assertion below cannot tell them apart: with
+	// oldMaxFirst=newMaxFirst+1, clamp(oldMaxFirst-1, 0, newMaxFirst) is
+	// already newMaxFirst-1, same as clamping the start first.
+	if newMaxFirst > oldMaxFirst-2 {
+		t.Fatalf("fixture precondition: newMaxFirst=%d must be at most oldMaxFirst-2=%d "+
+			"or a missing pre-clamp cannot be distinguished from a correct one", newMaxFirst, oldMaxFirst-2)
 	}
 	if spans[0].index > newMaxFirst {
 		t.Fatalf("first visible tab = %d after closing tabs, want clamped to <= %d", spans[0].index, newMaxFirst)
 	}
 
-	// The next notch must move from the CLAMPED position, not the stale one:
-	// wheel-up should move to newMaxFirst-1 (or stay at 0), never underflow
-	// or jump from the old, now out-of-range, value.
+	// The next notch must move from the CLAMPED position, not the stale one.
+	// Asserting only membership in [0,newMaxFirst] cannot catch a missing
+	// pre-clamp: clamping just the result — clamp(oldMaxFirst-1, 0,
+	// newMaxFirst) — also lands in that range (at newMaxFirst itself, per the
+	// precondition above), so the exact expected value is asserted instead:
+	// newMaxFirst-1, which only clamping the START to newMaxFirst BEFORE
+	// applying the notch can produce.
 	next := wheelAtTabBar(t, cur, tea.MouseWheelUp)
-	if next.tabScrollFirst < 0 || next.tabScrollFirst > newMaxFirst {
-		t.Fatalf("tabScrollFirst = %d after a notch past a closed-tab clamp, want within [0,%d]",
-			next.tabScrollFirst, newMaxFirst)
+	want := newMaxFirst - 1
+	if want < 0 {
+		want = 0
+	}
+	if next.tabScrollFirst != want {
+		t.Fatalf("tabScrollFirst = %d after a notch past a closed-tab clamp, want exactly %d "+
+			"(newMaxFirst-1, reached only by clamping the stale start BEFORE the notch)",
+			next.tabScrollFirst, want)
 	}
 }
 
@@ -427,16 +532,25 @@ func TestWheelOverTabBar_AllTabsFit_NoOp(t *testing.T) {
 	if len(m.tabSpans()) != len(m.curTabs()) {
 		t.Fatal("fixture overflows — this test needs every tab to fit")
 	}
-	beforeScroll := activePaneScrollBack(t, m)
+	wantScrollableHistory(t, m)
 
-	got := wheelAtTabBar(t, m, tea.MouseWheelDown)
-
-	if got.tabScrollFirst != 0 || got.tabScrollAnchor != "" {
-		t.Fatalf("wheel over a fully-fitting bar changed state: first=%d anchor=%q",
-			got.tabScrollFirst, got.tabScrollAnchor)
+	for _, btn := range []tea.MouseButton{tea.MouseWheelDown, tea.MouseWheelUp} {
+		got := wheelAtTabBar(t, m, btn)
+		if got.tabScrollFirst != 0 || got.tabScrollAnchor != "" {
+			t.Fatalf("wheel(%v) over a fully-fitting bar changed state: first=%d anchor=%q",
+				btn, got.tabScrollFirst, got.tabScrollAnchor)
+		}
 	}
-	if s := activePaneScrollBack(t, got); s != beforeScroll {
-		t.Fatalf("active pane scrollBack = %d, want unchanged %d", s, beforeScroll)
+
+	// Wheel-UP is the discriminating probe for "never reaches the pane":
+	// scrollBack starts at 0, and ScrollDown floors there too (so a
+	// down-notch leak is invisible), but ScrollUp on a pane with real
+	// history (wantScrollableHistory) would move scrollBack off 0 the moment
+	// the event reached PaneModel.ScrollUp.
+	upped := wheelAtTabBar(t, m, tea.MouseWheelUp)
+	if s := activePaneScrollBack(t, upped); s != 0 {
+		t.Fatalf("active pane scrollBack = %d after wheel-up over a fully-fitting bar, want 0 — "+
+			"the wheel must not reach the pane", s)
 	}
 }
 

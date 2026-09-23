@@ -317,6 +317,31 @@ var tabColors = []string{
 	"208", // orange
 }
 
+// tabColorLabel names a tabColors entry for the tab context menu's colour
+// list. Every tabColors value MUST have a name here — pinned by
+// TestTabColorLabel_CoversThePalette — or a colour row silently renders "".
+func tabColorLabel(c string) string {
+	switch c {
+	case "":
+		return "Default"
+	case "1":
+		return "Red"
+	case "2":
+		return "Green"
+	case "3":
+		return "Yellow"
+	case "4":
+		return "Blue"
+	case "5":
+		return "Magenta"
+	case "6":
+		return "Cyan"
+	case "208":
+		return "Orange"
+	}
+	return ""
+}
+
 type dialogScreen int
 
 const (
@@ -1292,19 +1317,24 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 	// destroy, MsgDestroyProject from another client) closes itself. Single
 	// choke point — no need to audit every pruning path.
 	//
-	// The two menu kinds are checked against their OWN target: a project menu
-	// has no paneID at all, so testing whether paneID resolves closed it on
-	// the very next message — any spinner tick, PTY chunk or resize — which is
-	// what the user saw as "the project menu flashes and vanishes". projectID
-	// and paneID are mutually exclusive discriminators (see ctxMenuState), so
-	// the else arm is exactly the original pane case. Both lookups are
-	// nil-safe.
+	// The three menu kinds are checked against their OWN target: a project or
+	// tab menu has no paneID at all, so testing whether paneID resolves closed
+	// it on the very next message — any spinner tick, PTY chunk or resize —
+	// which is what the user saw as "the project menu flashes and vanishes".
+	// paneID, projectID and tabID are mutually exclusive discriminators (see
+	// ctxMenuState), so the final else arm is exactly the original pane case.
+	// All three lookups are nil-safe.
 	// Folded into prologueChangedView: View both DRAWS this menu and derives
 	// v.MouseMode from it, so closing it here moves the screen — on a message
 	// that may otherwise be inert.
 	if m.ctxMenu.open() {
 		if projectID := m.ctxMenu.projectID; projectID != "" {
 			if m.projectByID(projectID) == nil {
+				m.closeCtxMenu()
+				prologueChangedView = true
+			}
+		} else if tabID := m.ctxMenu.tabID; tabID != "" {
+			if m.projectOf(tabID) == nil {
 				m.closeCtxMenu()
 				prologueChangedView = true
 			}
@@ -1772,6 +1802,14 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 					if idx >= 0 && idx < len(m.projects) {
 						m.openProjectCtxMenu(m.projects[idx], msg.X, msg.Y)
 					}
+				case sidebarRowTab:
+					// Opens the tab menu without focusing or switching — unlike
+					// the pane row below, none of the tab menu's items resolve
+					// through the active tab, so there is no shared contract to
+					// satisfy first.
+					if tabs := m.curTabs(); idx >= 0 && idx < len(tabs) {
+						m.openTabCtxMenu(tabs[idx], msg.X, msg.Y)
+					}
 				case sidebarRowPane:
 					// Right-click FOCUSES the pane first, exactly like
 					// left-click (activateSidebarRow → focusSidebarPane) —
@@ -1858,10 +1896,22 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 				return m, nil
 			}
 			// No selection anywhere: open the pane context menu for the
-			// pane under the cursor. Suppressed while a modal dialog,
-			// rename edit, or notes mode owns input (the lazygit overlay
-			// and sidebar swallows already returned above).
+			// pane under the cursor, or the tab menu for the tab bar.
+			// Suppressed while a modal dialog, rename edit, or notes mode
+			// owns input (the lazygit overlay and sidebar swallows already
+			// returned above).
 			if m.dialog == dialogNone && !m.notesMode && !m.renaming && !m.renamingPane {
+				if msg.Y == 0 {
+					// The sidebar's own columns at row 0 are already
+					// swallowed above; hitTestTab answers -1 for the scroll
+					// markers and empty bar space, so nothing opens there.
+					if idx := m.hitTestTab(msg.X); idx >= 0 {
+						if tabs := m.curTabs(); idx < len(tabs) {
+							m.openTabCtxMenu(tabs[idx], msg.X, msg.Y)
+						}
+					}
+					return m, nil // row 0 is never a pane
+				}
 				if rect := m.paneRectAt(msg.X, msg.Y); rect != nil && rect.Pane != nil {
 					m.openCtxMenu(rect.Pane, msg.X, msg.Y)
 				}

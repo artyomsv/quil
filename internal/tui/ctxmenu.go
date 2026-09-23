@@ -34,6 +34,16 @@ const (
 	ctxActRenameProject
 	ctxActDestroyProject
 	ctxActDisconnectHost
+	// Tab-row actions (Task 3) — only ever set on a menu opened via
+	// openTabCtxMenu, never mixed into the pane or project rows above.
+	ctxActRenameTab
+	// ctxActTabColorList re-populates the OPEN menu in place with one row per
+	// tabColors entry (buildTabColorItems) — it is not itself a colour choice.
+	ctxActTabColorList
+	// ctxActSetTabColor is one row of that re-populated list; the chosen
+	// colour rides on ctxMenuItem.color, never decoded from the label.
+	ctxActSetTabColor
+	// ctxActMoveTab is added in Task 4.
 )
 
 // ctxMenuItem is one row of the menu. Disabled rows render greyed, are
@@ -45,23 +55,29 @@ type ctxMenuItem struct {
 	label    string
 	enabled  bool
 	gapAfter bool
+	// color is set only on ctxActSetTabColor rows: one of the tabColors
+	// values ("" = default). renderCtxMenu paints an enabled, non-cursor row
+	// with it set in that colour instead of ctxMenuItemStyle.
+	color string
 }
 
 // ctxMenuState is the live state of the pane context menu — a compositor
 // overlay (overlayAt), NOT a dialogScreen: dialogs are modal and centered,
 // this popup is positional and dismiss-on-outside-click. Zero value = closed.
 //
-// projectID (Task 13) is the sidebar's project-row menu sharing this same
-// state/render/hit-test machinery: paneID and projectID are mutually
-// exclusive target discriminators, never both set. A second dedicated struct
-// was considered and rejected — none of the geometry/render/hit-test helpers
+// projectID (Task 13) and tabID (Task 3) are the sidebar's project-row menu
+// and the tab menu sharing this same state/render/hit-test machinery: paneID,
+// projectID and tabID are THREE mutually exclusive target discriminators,
+// never more than one set. A second (or third) dedicated struct was
+// considered and rejected — none of the geometry/render/hit-test helpers
 // below (innerWidth, boxSize, ctxMenuPos, ctxMenuHitRow, renderCtxMenu,
-// nextEnabled…) touch paneID at all, so duplicating them for two rows would
-// only buy an unused field.
+// nextEnabled…) touch any of the three ID fields at all, so duplicating them
+// for each target kind would only buy unused fields.
 type ctxMenuState struct {
-	paneID    string // target pane; "" when the target is a project (or closed)
-	projectID string // target project; "" when the target is a pane (or closed)
-	title     string // pane/project display name shown as the header row
+	paneID    string // target pane; "" when the target is a project, a tab, or closed
+	projectID string // target project; "" when the target is a pane, a tab, or closed
+	tabID     string // target tab; "" when the target is a pane, a project, or closed
+	title     string // pane/project/tab display name shown as the header row
 	x, y      int    // clamped top-left of the rendered box (screen coords)
 	cursor    int    // index into items; always on an enabled item (or -1)
 	// spaced honors the items' gapAfter group separators (a blank row
@@ -73,7 +89,7 @@ type ctxMenuState struct {
 	items  []ctxMenuItem
 }
 
-func (s ctxMenuState) open() bool { return s.paneID != "" || s.projectID != "" }
+func (s ctxMenuState) open() bool { return s.paneID != "" || s.projectID != "" || s.tabID != "" }
 
 // ctxMenuTitleCap bounds how far the header (pane display name — often a
 // CWD) may widen the box beyond the widest item label. Longer titles are
@@ -156,13 +172,13 @@ func (m *Model) buildCtxMenuItems(pane *PaneModel) []ctxMenuItem {
 	}
 	// Group boundaries (gapAfter): view actions | pane settings | destructive.
 	return []ctxMenuItem{
-		{ctxActHistory, "Input history", historyOK, false},
-		{ctxActFocus, focusLabel, true, false},
-		{ctxActNotes, "Open notes", true, false},
-		{ctxActLazygit, "Open lazygit", lazygitOK, false},
-		{ctxActHunk, "Open hunk", hunkOK, true},
-		{ctxActRename, "Rename pane", true, false},
-		{ctxActMute, muteLabel, true, false},
+		{id: ctxActHistory, label: "Input history", enabled: historyOK},
+		{id: ctxActFocus, label: focusLabel, enabled: true},
+		{id: ctxActNotes, label: "Open notes", enabled: true},
+		{id: ctxActLazygit, label: "Open lazygit", enabled: lazygitOK},
+		{id: ctxActHunk, label: "Open hunk", enabled: hunkOK, gapAfter: true},
+		{id: ctxActRename, label: "Rename pane", enabled: true},
+		{id: ctxActMute, label: muteLabel, enabled: true},
 		// Before the attention pair rather than after it, and NOT beside
 		// Close pane… below the separator. Two reasons. The pin and Clear
 		// attention are one vocabulary and have to stay adjacent — the group
@@ -170,11 +186,11 @@ func (m *Model) buildCtxMenuItems(pane *PaneModel) []ctxMenuItem {
 		// And this row deletes nothing: it records a decision about a pane
 		// that stays alive, so putting it under a separator that means
 		// "destructive from here down" would misdescribe it.
-		{ctxActMarkDeletion, delLabel, true, false},
-		{ctxActAttention, attnLabel, true, false},
-		{ctxActClearAttention, "Clear attention", clearable, true},
-		{ctxActRestart, "Restart pane…", true, false},
-		{ctxActClose, "Close pane…", true, false},
+		{id: ctxActMarkDeletion, label: delLabel, enabled: true},
+		{id: ctxActAttention, label: attnLabel, enabled: true},
+		{id: ctxActClearAttention, label: "Clear attention", enabled: clearable, gapAfter: true},
+		{id: ctxActRestart, label: "Restart pane…", enabled: true},
+		{id: ctxActClose, label: "Close pane…", enabled: true},
 	}
 }
 
@@ -361,7 +377,11 @@ func renderCtxMenu(s ctxMenuState) string {
 		case !it.enabled:
 			rows = append(rows, ctxMenuDisabledStyle.Render(label))
 		case i == s.cursor:
+			// Reverse video shows the colour as a background even on a
+			// ctxActSetTabColor row — the cursor style always wins here.
 			rows = append(rows, ctxMenuCursorStyle.Render(label))
+		case it.color != "":
+			rows = append(rows, lipgloss.NewStyle().Foreground(lipgloss.Color(it.color)).Render(label))
 		default:
 			rows = append(rows, ctxMenuItemStyle.Render(label))
 		}
@@ -430,7 +450,7 @@ func buildProjectCtxMenuItems(remote, unreachable bool) []ctxMenuItem {
 	// work there: it is client-side entirely, and detaching the machine is
 	// what a user reaching for "remove this" actually wants when the daemon
 	// cannot hold a project in the first place (or cannot be reached at all).
-	items := []ctxMenuItem{{ctxActRenameProject, "Rename project", !unreachable, false}}
+	items := []ctxMenuItem{{id: ctxActRenameProject, label: "Rename project", enabled: !unreachable}}
 	// ONE removal action, chosen by what the project is.
 	//
 	// Offering both on a remote read as two ways to do the same thing, and the
@@ -440,9 +460,9 @@ func buildProjectCtxMenuItems(remote, unreachable bool) []ctxMenuItem {
 	// Disconnect is what "get this machine out of my sidebar" actually means,
 	// and it leaves everything on the far side running.
 	if remote {
-		items = append(items, ctxMenuItem{ctxActDisconnectHost, "Disconnect host…", true, false})
+		items = append(items, ctxMenuItem{id: ctxActDisconnectHost, label: "Disconnect host…", enabled: true})
 	} else {
-		items = append(items, ctxMenuItem{ctxActDestroyProject, "Destroy project…", !unreachable, false})
+		items = append(items, ctxMenuItem{id: ctxActDestroyProject, label: "Destroy project…", enabled: !unreachable})
 	}
 	return items
 }
@@ -471,6 +491,169 @@ func (m *Model) openProjectCtxMenu(p *ProjectModel, anchorX, anchorY int) {
 	m.selection = nil
 	s.x, s.y = ctxMenuPos(anchorX, anchorY, w, h, m.width, m.height)
 	m.ctxMenu = s
+}
+
+// buildTabCtxMenuItems is the tab bar / sidebar tab-heading's menu: Rename
+// and Set color. Compact layout (spaced=false), like the project menu — two
+// rows have no group boundary to space out. Task 4 adds "Move to project…"
+// here, which is why the receiver is a pointer despite this task needing no
+// Model state: a move needs the project list to offer.
+func (m *Model) buildTabCtxMenuItems(tab *TabModel) []ctxMenuItem {
+	return []ctxMenuItem{
+		{id: ctxActRenameTab, label: "Rename tab", enabled: true},
+		{id: ctxActTabColorList, label: "Set color…", enabled: true},
+	}
+}
+
+// buildTabColorItems returns one row per tabColors entry, in palette order,
+// for the menu ctxActTabColorList re-populates. The marker is exactly two
+// cells on every row ("✓ " for the current colour, "  " otherwise) so
+// ctxMenuState.innerWidth — measured from the label BEFORE styling — stays
+// honest across every row.
+func buildTabColorItems(current string) []ctxMenuItem {
+	items := make([]ctxMenuItem, 0, len(tabColors))
+	for _, c := range tabColors {
+		marker := "  "
+		if c == current {
+			marker = "✓ "
+		}
+		items = append(items, ctxMenuItem{
+			id:      ctxActSetTabColor,
+			label:   marker + tabColorLabel(c),
+			enabled: true,
+			color:   c,
+		})
+	}
+	return items
+}
+
+// openTabCtxMenu opens (or re-targets) the tab bar / sidebar's tab-heading
+// menu, mirroring openProjectCtxMenu but keyed by tabID — see
+// ctxMenuState's doc comment for why the three target kinds share one type.
+// Never switches tabs, unlike a left-click on the same row: right-click only
+// targets a tab, it does not act on it.
+//
+// Refuses to open (without mutating anything) while another modal surface
+// owns input. Notes mode and an inline rename would be stranded behind a
+// menu they cannot see; a dialog is already modal. Rename would otherwise
+// switch tabs out from under the notes editor and strand it bound to a pane
+// that just left the screen — see switchProject's own notes comment for why
+// that matters.
+func (m *Model) openTabCtxMenu(tab *TabModel, anchorX, anchorY int) {
+	if m.notesMode || m.renaming || m.renamingPane || m.dialog != dialogNone {
+		return
+	}
+	s := ctxMenuState{
+		tabID:  tab.ID,
+		title:  tab.Name,
+		spaced: false,
+		cursor: -1,
+		items:  m.buildTabCtxMenuItems(tab),
+	}
+	s.cursor = firstEnabled(s.items)
+	w, h := s.boxSize()
+	if w > m.width || h > m.height-2 {
+		return
+	}
+	m.closeCtxMenu()
+	m.clearDragState()
+	m.selection = nil
+	s.x, s.y = ctxMenuPos(anchorX, anchorY, w, h, m.width, m.height)
+	m.ctxMenu = s
+}
+
+// openTabColorList re-populates the OPEN tab menu in place with the colour
+// list: same tabID and title, items replaced, cursor on the tab's current
+// colour. Esc closes the whole menu from here — there is no "back" item.
+//
+// Re-derives the top-left from the box's own current position rather than a
+// fresh anchor, so it stays put unless the taller box no longer fits —
+// ctxMenuPos always adds one cell to its anchor, so subtracting one first is
+// what makes re-deriving idempotent. Closes the menu instead of opening it
+// when even the re-clamped box cannot fit, matching openTabCtxMenu's own
+// bail (never leave an invisible menu still owning input).
+func (m *Model) openTabColorList(tab *TabModel) {
+	items := buildTabColorItems(tab.Color)
+	cursor := 0
+	for i, it := range items {
+		if it.color == tab.Color {
+			cursor = i
+			break
+		}
+	}
+	s := m.ctxMenu
+	s.items = items
+	s.spaced = false
+	s.cursor = cursor
+	w, h := s.boxSize()
+	if w > m.width || h > m.height-2 {
+		m.closeCtxMenu()
+		return
+	}
+	s.x, s.y = ctxMenuPos(m.ctxMenu.x-1, m.ctxMenu.y-1, w, h, m.width, m.height)
+	m.ctxMenu = s
+}
+
+// executeTabCtxMenuItem dispatches one tab-menu row. The uniform refusal
+// below (proj != m.cur()) mirrors executeCtxMenuItem's pane branch: every
+// entry point shows only the active project's tabs, and MCP switch_project
+// is the one producer that can move the active project underneath an open
+// menu.
+func (m Model) executeTabCtxMenuItem(tabID string, item ctxMenuItem) (tea.Model, tea.Cmd) {
+	proj := m.projectOf(tabID)
+	if proj == nil || proj != m.cur() {
+		m.closeCtxMenu()
+		return m, nil
+	}
+	// Resolved with an explicit loop, never indexOfTab, which answers 0 on a
+	// miss — indistinguishable from "the first tab", the one target this
+	// menu must never silently redirect to.
+	idx := -1
+	for i, t := range proj.tabs {
+		if t.ID == tabID {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		m.closeCtxMenu()
+		return m, nil
+	}
+	if !item.enabled {
+		m.closeCtxMenu()
+		return m, nil
+	}
+	tab := proj.tabs[idx]
+	switch item.id {
+	case ctxActRenameTab:
+		m.closeCtxMenu()
+		// switchTab has a pointer receiver: sequenced on its own statement so
+		// it is never mixed into the return expression, where Go gives no
+		// ordering guarantee against the other operand.
+		var cmd tea.Cmd
+		if idx != m.activeTabIdx() {
+			cmd = m.switchTab(idx)
+		}
+		// Comma-ok, not a bare assertion: beginTabRename is typed tea.Model,
+		// the signature that invites returning something else, and a failed
+		// assertion here would panic inside the Update loop.
+		next, _ := m.beginTabRename()
+		if nm, ok := next.(Model); ok {
+			m = nm
+		}
+		return m, cmd
+	case ctxActTabColorList:
+		m.openTabColorList(tab)
+		return m, nil
+	case ctxActSetTabColor:
+		// Optimistic local write, same as cycleTabColor: the daemon is the
+		// authority and syncs it back on the next broadcast, but not writing
+		// it here would show the old colour until then.
+		tab.Color = item.color
+		m.closeCtxMenu()
+		return m, m.updateTab(tab.ID, tab.Name, item.color)
+	}
+	return m, nil
 }
 
 // closeCtxMenu closes the menu and clears the target-pane highlight. Safe to
@@ -556,6 +739,13 @@ func (m Model) executeCtxMenuItem(item ctxMenuItem) (tea.Model, tea.Cmd) {
 			return m, m.confirmDisconnectHost(projectID)
 		}
 		return m, nil
+	}
+
+	// Tab row (Task 3): same early branch-out as the project row above, for
+	// the same reason — executeTabCtxMenuItem owns its own refusal and
+	// dispatch, and the pane-focus bookkeeping below assumes a pane target.
+	if tabID := m.ctxMenu.tabID; tabID != "" {
+		return m.executeTabCtxMenuItem(tabID, item)
 	}
 
 	paneID := m.ctxMenu.paneID

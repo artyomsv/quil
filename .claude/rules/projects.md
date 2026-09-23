@@ -542,6 +542,11 @@ inserted, and the symptom (clicking one project, getting its neighbour) looks
 nothing like a rendering change. Four fixtures pin it; they shift whenever a
 row is added, which is the expected cost.
 
+Right-clicking a `sidebarRowTab` heading opens the tab context menu
+(`tui-dialogs.md`'s Tab context menu section) for that tab and does NOT switch
+to it — the same "target without acting" shape the project row's right-click
+already has, and unlike a left-click on the same row, which does switch.
+
 Layout decisions that were each a bug first: the project NAME alone on its row
 with a remote's host on a second one (`name@dest` at 22 columns leaves nothing
 of either half, and the badges truncate away first); a blank row between TAB

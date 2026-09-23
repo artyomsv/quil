@@ -124,6 +124,10 @@ Right-click on a pane — with a text selection active, it copies the selection 
 
 Right-clicking a **pane row in the project sidebar** opens the same menu. It focuses that pane first — switching tabs if the pane lives on another one, exactly as a left-click on the row does — so every action in the menu applies to the pane you clicked.
 
+### Mouse: tab context menu
+
+Right-click a tab — in the tab bar, or its heading in the project sidebar's PANES section — to open Rename tab / Set color…. A text selection still copies instead. Unlike a left-click, right-click does **not** switch to the tab; choosing Rename does. Set color… re-populates the same menu with one row per color, each painted in its own color and the current one marked `✓`; choosing a color applies it immediately. `↑`/`↓` (or `k`/`j`) navigate, `Enter` or a left-click executes the highlighted item, `Esc` closes the whole menu — there's no "back" from the color list.
+
 ## Pane navigation
 
 | Key | Action |

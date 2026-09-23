@@ -228,7 +228,7 @@ func (d *Daemon) emitHandStartCard(pane *Pane, kind, severity, title, message st
 	d.emitEvent(PaneEvent{
 		ID:        uuid.New().String(),
 		PaneID:    pane.ID,
-		TabID:     pane.TabID,
+		TabID:     pane.CurrentTabID(),
 		PaneName:  pane.Name,
 		Type:      kind,
 		Title:     title,

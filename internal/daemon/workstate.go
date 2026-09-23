@@ -102,7 +102,7 @@ func (d *Daemon) settleIdle(paneID string) {
 	d.emitEvent(withExcerpt(PaneEvent{
 		ID:        uuid.New().String(),
 		PaneID:    pane.ID,
-		TabID:     pane.TabID,
+		TabID:     pane.CurrentTabID(),
 		PaneName:  name,
 		Type:      "agent_idle",
 		Title:     "Turn finished",

@@ -387,7 +387,7 @@ func (d *Daemon) deliverTemplatePrompts(plan *templateCreation, panes []*Pane, r
 		// queued, as with delegate_task; children consume their queues separately.
 		if !live || !d.deliverPrompt(pane, prompt, plan.agents[i]) {
 			log.Printf("template %s pane %s (%s): starting prompt could not be queued", plan.tpl.Name, name, pane.ID)
-			d.emitEvent(PaneEvent{PaneID: pane.ID, TabID: pane.TabID, PaneName: name,
+			d.emitEvent(PaneEvent{PaneID: pane.ID, TabID: pane.CurrentTabID(), PaneName: name,
 				Type: "template_prompt_failed", Title: "Starting prompt was not delivered", Severity: "error",
 				Message: "Template " + plan.tpl.Name + ": no process or input queue full"})
 		}

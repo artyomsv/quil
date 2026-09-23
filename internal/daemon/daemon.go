@@ -215,6 +215,11 @@ type Daemon struct {
 	// most one blocking-FS permit held for worktreeAddTimeout.
 	worktreeAdding atomic.Bool
 
+	// worktreeAddTab names the tab the single in-flight worktree add targets, or
+	// nil. worktreeAdding (above) makes it single-valued. Set right after
+	// beginWorktreeAdd succeeds, cleared in the same defer that ends it.
+	worktreeAddTab atomic.Pointer[string]
+
 	// sandboxCap caches the answer to "can this machine run a container".
 	//
 	// Not an atomic.Bool single-flight like the dialog RPCs above, because
@@ -1413,6 +1418,8 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		id, known := paneIDKnown(d, msg)
 		d.handleUpdatePane(conn, msg)
 		answerOp(conn, msg, ipc.MsgPaneOpResp, id, known, opErrUnless(known, "no such pane"))
+	case ipc.MsgMovePane:
+		d.handleMovePane(conn, msg)
 	case ipc.MsgUpdateLayout:
 		d.handleUpdateLayout(msg)
 	case ipc.MsgPaneInput:
@@ -2931,7 +2938,7 @@ func (d *Daemon) handleDestroyPane(msg *ipc.Message) {
 	var tabID string
 	var worktrees []string
 	if pane := d.session.Pane(payload.PaneID); pane != nil {
-		tabID = pane.TabID
+		tabID = pane.CurrentTabID()
 		// Captured here for the reason the tab id is: DestroyPane removes the
 		// pane from the session maps, and its CWD is the only record of which
 		// worktree it owned.
@@ -3041,6 +3048,161 @@ func (d *Daemon) recoverEmptyTab(tabID, reason string) {
 	pane.SpawnError = reason
 	pane.PluginMu.Unlock()
 	log.Printf("tab %s: recovered with an unspawned pane: %s", tabID, reason)
+}
+
+// handleMovePane moves one pane into another tab on this daemon. It answers
+// the requester itself (MsgPaneOpResp via answerOp, only when the request
+// carries an ID), for the reason handleMoveTab does: a move has several
+// failure shapes and its own no-op.
+//
+// The pre-checks run outside sm.mu and are TOCTOU, which is acceptable.
+// Overlay and PreparingWorktree are set before or at publication and only ever
+// cleared later, so a stale "no" can only refuse a move that would have been
+// fine a moment later. A worktree add that BEGINS between the check and the
+// move is caught by worktreeAddAndCreate's own post-add re-check, which
+// abandons cleanly when the replace target is no longer in its tab.
+//
+// None of the refusals broadcasts or snapshots: nothing changed.
+func (d *Daemon) handleMovePane(conn *ipc.Conn, msg *ipc.Message) {
+	var p ipc.MovePanePayload
+	if err := msg.DecodePayload(&p); err != nil {
+		log.Printf("move pane: malformed payload: %v", err)
+		answerOp(conn, msg, ipc.MsgPaneOpResp, "", false, "malformed payload")
+		return
+	}
+	refuse := func(reason string) {
+		log.Printf("move pane %s to %s: %s", p.PaneID, p.TabID, reason)
+		answerOp(conn, msg, ipc.MsgPaneOpResp, p.PaneID, false, reason)
+	}
+
+	pane := d.session.Pane(p.PaneID)
+	if pane == nil {
+		refuse("no such pane")
+		return
+	}
+	pane.PluginMu.Lock()
+	isOverlay := pane.Overlay
+	preparing := pane.PreparingWorktree != ""
+	pane.PluginMu.Unlock()
+	if isOverlay {
+		// An overlay belongs to its tab's per-tab slot (lazygit / k9s /
+		// lazysql); in another tab it would be a second overlay nobody's slot
+		// accounts for.
+		refuse("an overlay pane cannot move")
+		return
+	}
+	if preparing {
+		// The checkout goroutine still holds this pane's id and will REPLACE it
+		// in whatever tab it is in when the add settles.
+		refuse("the pane's worktree is still being prepared")
+		return
+	}
+	// A worktree add in flight on either side: the requester holds a placeholder
+	// in its tab, which a pane arriving there would fill, and the pane leaving
+	// may be the one the add is about to replace.
+	if d.worktreeAddingIn(pane.CurrentTabID()) || d.worktreeAddingIn(p.TabID) || d.tabPreparingWorktree(p.TabID) {
+		refuse("a worktree is being created in that tab")
+		return
+	}
+
+	from, res := d.session.MovePane(p.PaneID, p.TabID)
+	switch res {
+	case movePaneUnknownPane:
+		refuse("no such pane")
+		return
+	case movePaneUnknownTab:
+		refuse("no such tab")
+		return
+	case movePaneTemplatePending:
+		refuse("that tab is still being laid out")
+		return
+	case movePaneNoop:
+		// Already there. No broadcast, no snapshot — the ReorderTab/MoveTab
+		// precedent for a request that changed nothing.
+		answerOp(conn, msg, ipc.MsgPaneOpResp, p.PaneID, true, "")
+		return
+	}
+	log.Printf("pane move: %s (tab=%s -> %s)", p.PaneID, from, p.TabID)
+
+	// Read BEFORE dissolving: DestroyTab de-registers the tab from its
+	// project, after which nothing can say which project just lost it.
+	srcProject, _ := d.session.TabProjectID(from)
+	destroyed := d.dissolveEmptyTab(from)
+	if destroyed {
+		// The source may have been its project's only tab — the same emptiness
+		// DestroyTab leaves, owed the same replacement Shell tab.
+		d.recoverEmptyProject(srcProject)
+	}
+
+	// Spawn every selection this move touched; ensureTabSpawned is idempotent
+	// (see handleMoveTab). A lazily restored, Pending pane moved into a tab
+	// someone is looking at must not sit on the restore indicator.
+	if dstProj, ok := d.session.TabProjectID(p.TabID); ok {
+		if act, _ := d.session.ProjectActiveTab(dstProj); act == p.TabID {
+			d.ensureTabSpawned(p.TabID)
+		}
+	}
+	if destroyed {
+		if a, ok := d.session.ProjectActiveTab(srcProject); ok && a != "" {
+			d.ensureTabSpawned(a)
+		}
+	}
+	d.ensureTabSpawned(d.session.ActiveTabID())
+
+	d.broadcastState()
+	d.requestSnapshot()
+	answerOp(conn, msg, ipc.MsgPaneOpResp, p.PaneID, true, "")
+}
+
+// tabPreparingWorktree reports whether any pane of tabID is the new-tab
+// worktree placeholder (PreparingWorktree set). Its add has already claimed
+// the tab: the requested pane replaces the placeholder when the checkout
+// settles.
+func (d *Daemon) tabPreparingWorktree(tabID string) bool {
+	for _, p := range d.session.Panes(tabID) {
+		p.PluginMu.Lock()
+		preparing := p.PreparingWorktree != ""
+		p.PluginMu.Unlock()
+		if preparing {
+			return true
+		}
+	}
+	return false
+}
+
+// dissolveEmptyTab destroys tabID when it holds no NORMAL pane, which is the
+// state a move of its last pane leaves behind. It is deliberately NOT
+// ensureTabNotEmpty: that refills the tab with a shell, which is right after a
+// CLOSE and wrong after a MOVE. The user took the pane somewhere; a fresh shell
+// appearing in its place is a pane they never asked for. Overlays left in the
+// tab are cleaned up (cleanupPaneArtifacts) exactly as ensureTabNotEmpty
+// cleans its orphans, then go down with the tab (DestroyTab releases PTYs off
+// the lock). Returns whether the tab was destroyed. A no-op for an unknown tab.
+func (d *Daemon) dissolveEmptyTab(tabID string) bool {
+	if tabID == "" || d.session.Tab(tabID) == nil {
+		return false
+	}
+	var overlays []string
+	for _, p := range d.session.Panes(tabID) {
+		p.PluginMu.Lock()
+		isOverlay := p.Overlay
+		p.PluginMu.Unlock()
+		if !isOverlay {
+			return false
+		}
+		overlays = append(overlays, p.ID)
+	}
+	if err := d.session.DestroyTab(tabID); err != nil {
+		log.Printf("move pane: dissolve tab %s: %v", tabID, err)
+		return false
+	}
+	log.Printf("tab dissolved: %s (its last pane moved away)", tabID)
+	// After the destroy, as handleDestroyTab orders it.
+	for _, id := range overlays {
+		log.Printf("pane destroy: orphaned overlay %s (tab=%s)", id, tabID)
+		d.cleanupPaneArtifacts(id)
+	}
+	return true
 }
 
 func (d *Daemon) ensureTabNotEmpty(tabID string) {
@@ -3178,7 +3340,7 @@ func (d *Daemon) notifyInputBlocked(pane *Pane) {
 	d.emitEvent(PaneEvent{
 		ID:        uuid.New().String(),
 		PaneID:    pane.ID,
-		TabID:     pane.TabID,
+		TabID:     pane.CurrentTabID(),
 		PaneName:  pane.Name,
 		Type:      "input_blocked",
 		Title:     "Pane not accepting input",
@@ -3218,7 +3380,7 @@ func (d *Daemon) notifyMCPControl(pane *Pane, title string) {
 		pane.LastMCPEventAt = make(map[string]time.Time, 2)
 	}
 	pane.LastMCPEventAt[title] = time.Now()
-	tabID, name := pane.TabID, pane.Name
+	tabID, name := pane.CurrentTabID(), pane.Name
 	pane.PluginMu.Unlock()
 
 	// Logged as well as carded, for the reason notifyInputBlocked logs: the
@@ -3252,7 +3414,7 @@ func (d *Daemon) notifyPaneMark(pane *Pane, eventType, title string) {
 		return
 	}
 	pane.PluginMu.Lock()
-	tabID, name := pane.TabID, pane.Name
+	tabID, name := pane.CurrentTabID(), pane.Name
 	pane.PluginMu.Unlock()
 
 	d.emitEvent(PaneEvent{
@@ -3285,7 +3447,7 @@ func (d *Daemon) notifyPaneDestroyed(pane *Pane, by string) {
 	}
 	pane.PluginMu.Lock()
 	isOverlay := pane.Overlay
-	tabID, name := pane.TabID, pane.Name
+	tabID, name := pane.CurrentTabID(), pane.Name
 	pane.PluginMu.Unlock()
 	if isOverlay {
 		return
@@ -3319,7 +3481,7 @@ func (d *Daemon) notifyWorktreeReady(pane *Pane, branch string) {
 		return
 	}
 	pane.PluginMu.Lock()
-	tabID, name := pane.TabID, pane.Name
+	tabID, name := pane.CurrentTabID(), pane.Name
 	pane.PluginMu.Unlock()
 
 	d.emitEvent(PaneEvent{
@@ -3670,11 +3832,11 @@ func (d *Daemon) handleUpdateLayout(msg *ipc.Message) {
 		return
 	}
 
-	tab := d.session.Tab(payload.TabID)
-	if tab == nil {
+	// Under sm.mu: SnapshotState copies Layout under the same lock, and
+	// MovePane reads it there for its template check.
+	if !d.session.SetTabLayout(payload.TabID, payload.Layout) {
 		return
 	}
-	tab.Layout = payload.Layout
 	// No broadcastState() — avoids feedback loop.
 	// Snapshot ensures layout is persisted to disk.
 	d.requestSnapshot()
@@ -3874,7 +4036,7 @@ func (d *Daemon) onPaneExitGeneration(pane *Pane, code int, generation uint64) {
 	d.emitEvent(withExcerpt(PaneEvent{
 		ID:        uuid.New().String(),
 		PaneID:    pane.ID,
-		TabID:     pane.TabID,
+		TabID:     pane.CurrentTabID(),
 		PaneName:  pane.Name,
 		Type:      "process_exit",
 		Title:     title,
@@ -3887,7 +4049,7 @@ func (d *Daemon) onPaneExitGeneration(pane *Pane, code int, generation uint64) {
 	// reconciliation clears the slot and the next Alt+G creates fresh.
 	// Normal panes survive as exited husks (existing behavior unchanged).
 	if isOverlay {
-		tabID := pane.TabID
+		tabID := pane.CurrentTabID()
 		if err := d.session.DestroyPane(pane.ID); err != nil {
 			// A retention eviction destroys the pane and the child exits
 			// afterwards, so "not found" here means the pane was already
@@ -4041,7 +4203,7 @@ func (d *Daemon) detectBellEvent(pane *Pane, paneID string, data []byte) {
 		return
 	}
 	pane.LastBellEventAt = time.Now()
-	tabID := pane.TabID
+	tabID := pane.CurrentTabID()
 	name := pane.Name
 	pane.PluginMu.Unlock()
 	d.emitEvent(withExcerpt(PaneEvent{
@@ -4073,7 +4235,7 @@ func (d *Daemon) detectOSC133Exit(pane *Pane, paneID string, data []byte) {
 		title = fmt.Sprintf("Command failed (code %d)", code)
 	}
 	d.emitEvent(withExcerpt(PaneEvent{
-		ID: uuid.New().String(), PaneID: paneID, TabID: pane.TabID,
+		ID: uuid.New().String(), PaneID: paneID, TabID: pane.CurrentTabID(),
 		PaneName: pane.Name, Type: "command_complete",
 		Title: title, Severity: severity, Timestamp: time.Now(),
 		Data: map[string]string{"exit_code": strconv.Itoa(code)},
@@ -4200,9 +4362,13 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			if !includeOverlays && overlayIDs[pane.ID] {
 				continue
 			}
+			// tab_id is the tab that LISTS this pane in this snapshot, never
+			// pane.TabID read afterwards: a MovePane between SnapshotState and
+			// here would make the two disagree within one frame, and the TUI's
+			// applyTemplateLayout bails on exactly that mismatch.
 			paneData := map[string]any{
 				"id":     pane.ID,
-				"tab_id": pane.TabID,
+				"tab_id": tab.ID,
 			}
 			if pane.Name != "" {
 				paneData["name"] = pane.Name
@@ -6041,7 +6207,7 @@ func (d *Daemon) emitHookEvent(p hookevents.Payload) {
 	d.emitEvent(PaneEvent{
 		ID:        uuid.New().String(),
 		PaneID:    p.PaneID,
-		TabID:     pane.TabID,
+		TabID:     pane.CurrentTabID(),
 		PaneName:  pane.Name,
 		Type:      eventType,
 		Title:     p.Title,
@@ -6129,7 +6295,7 @@ func (d *Daemon) checkIdlePanes() {
 			d.emitEvent(withExcerpt(PaneEvent{
 				ID:        uuid.New().String(),
 				PaneID:    pane.ID,
-				TabID:     pane.TabID,
+				TabID:     pane.CurrentTabID(),
 				PaneName:  pane.Name,
 				Type:      "output_idle",
 				Title:     title,
@@ -6550,7 +6716,7 @@ func (d *Daemon) buildPaneStatus(pane *Pane) ipc.PaneStatusRespPayload {
 	state, reason, lastIdle := paneWorkState(pane)
 	// TabProjectID, not Tab(id).ProjectID: see handleDestroyTab's comment —
 	// the latter reads the field unlocked off the live *Tab pointer.
-	projectID, _ := d.session.TabProjectID(pane.TabID)
+	projectID, _ := d.session.TabProjectID(pane.CurrentTabID())
 
 	return ipc.PaneStatusRespPayload{
 		PaneID:            pane.ID,
@@ -6930,7 +7096,7 @@ func (d *Daemon) handleDestroyPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 	// persisted session-id files before the pane disappears.
 	d.cleanupPaneArtifacts(req.PaneID)
 
-	tabID := pane.TabID
+	tabID := pane.CurrentTabID()
 	if err := d.session.DestroyPane(req.PaneID); err != nil {
 		log.Printf("handleDestroyPaneReq: %v", err)
 		respondTo(conn, msg.ID, ipc.MsgDestroyPaneResp, ipc.DestroyPaneRespPayload{})
@@ -6975,7 +7141,7 @@ func (d *Daemon) handleSetActivePane(conn *ipc.Conn, msg *ipc.Message) {
 	d.ensurePaneSpawned(pane)
 
 	// Switch to the pane's tab
-	d.session.SwitchTab(pane.TabID)
+	d.session.SwitchTab(pane.CurrentTabID())
 
 	// Broadcast to TUI clients so they can set focus
 	broadcast, _ := ipc.NewMessage(ipc.MsgSetActivePane, ipc.SetActivePanePayload{

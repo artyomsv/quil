@@ -57,6 +57,12 @@ func (d *Daemon) beginWorktreeAdd() bool {
 
 func (d *Daemon) endWorktreeAdd() { d.worktreeAdding.Store(false) }
 
+// worktreeAddingIn reports whether the in-flight worktree add targets tabID.
+func (d *Daemon) worktreeAddingIn(tabID string) bool {
+	t := d.worktreeAddTab.Load()
+	return t != nil && *t == tabID
+}
+
 // worktreeAddAndCreate creates a linked worktree and spawns the pane inside
 // it. Runs on a WORKER goroutine: handleCreatePane runs on the requesting
 // connection's dispatch goroutine, where a checkout would block every message
@@ -126,7 +132,7 @@ func (d *Daemon) worktreeAddAndCreate(p ipc.CreatePanePayload) ipc.CreatePaneRes
 		if target == nil {
 			return fail("no such pane to replace")
 		}
-		if target.TabID != p.TabID {
+		if target.CurrentTabID() != p.TabID {
 			return fail("the pane to replace is not in that tab")
 		}
 	}
@@ -134,7 +140,13 @@ func (d *Daemon) worktreeAddAndCreate(p ipc.CreatePanePayload) ipc.CreatePaneRes
 	if !d.beginWorktreeAdd() {
 		return fail("another worktree is being created — try again in a moment")
 	}
-	defer d.endWorktreeAdd()
+	// Recorded so handleMovePane can refuse a pane moving into or out of this
+	// tab for the length of the checkout: a pane arriving would be swallowed by
+	// the requesting client's placeholder, and one leaving may be the replace
+	// target (the post-add re-check below is the backstop for that side).
+	tab := p.TabID
+	d.worktreeAddTab.Store(&tab)
+	defer func() { d.worktreeAddTab.Store(nil); d.endWorktreeAdd() }()
 
 	if !claimBlockingFSCall() {
 		return fail("the daemon is busy with filesystem work — try again in a moment")
@@ -193,7 +205,7 @@ func (d *Daemon) worktreeAddAndCreate(p ipc.CreatePanePayload) ipc.CreatePaneRes
 		if target == nil {
 			return abandon("the pane to replace was closed while the worktree was being created")
 		}
-		if target.TabID != p.TabID {
+		if target.CurrentTabID() != p.TabID {
 			return abandon("the pane to replace moved to another tab while the worktree was being created")
 		}
 	}

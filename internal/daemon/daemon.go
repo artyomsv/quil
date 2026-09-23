@@ -1403,6 +1403,8 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		answerOp(conn, msg, ipc.MsgTabOpResp, id, known, opErrUnless(known, "no such tab"))
 	case ipc.MsgReorderTab:
 		d.handleReorderTab(msg)
+	case ipc.MsgMoveTab:
+		d.handleMoveTab(conn, msg)
 	case ipc.MsgCreatePane:
 		d.handleCreatePane(conn, msg)
 	case ipc.MsgDestroyPane:
@@ -2526,6 +2528,52 @@ func (d *Daemon) handleReorderTab(msg *ipc.Message) {
 	}
 	d.broadcastState()
 	d.requestSnapshot()
+}
+
+// handleMoveTab reassigns a tab to another project. Unlike handleReorderTab
+// and handleUpdateTab, it answers the requester ITSELF rather than through
+// the dispatch arm's tabIDKnown+answerOp pattern: a move has more than one
+// failure shape (unknown tab, unknown project) and its own no-op, none of
+// which "no such tab" alone can distinguish. The TUI sends no ID and gets
+// nothing back either way, exactly as every other answerOp call; this is
+// included so a future MCP tool needs no daemon change.
+func (d *Daemon) handleMoveTab(conn *ipc.Conn, msg *ipc.Message) {
+	var p ipc.MoveTabPayload
+	if err := msg.DecodePayload(&p); err != nil {
+		log.Printf("move tab: malformed payload: %v", err)
+		answerOp(conn, msg, ipc.MsgTabOpResp, "", false, "malformed payload")
+		return
+	}
+
+	from, res := d.session.MoveTab(p.TabID, p.ProjectID)
+	switch res {
+	case moveTabUnknownTab:
+		log.Printf("move tab %s: no such tab", p.TabID)
+		answerOp(conn, msg, ipc.MsgTabOpResp, p.TabID, false, "no such tab")
+		return
+	case moveTabUnknownProject:
+		log.Printf("move tab %s to %s: no such project", p.TabID, p.ProjectID)
+		answerOp(conn, msg, ipc.MsgTabOpResp, p.TabID, false, "no such project")
+		return
+	case moveTabNoop:
+		// Already in that project. No broadcast, no snapshot — the same
+		// precedent ReorderTab sets for a drag that changed nothing.
+		answerOp(conn, msg, ipc.MsgTabOpResp, p.TabID, true, "")
+		return
+	}
+
+	// Moving the source project's LAST tab out leaves it exactly as empty as
+	// DestroyTab leaves one, and owes the same replacement Shell tab.
+	d.recoverEmptyProject(from)
+	// After a lazy restore, a background tab's panes are Pending. Moving the
+	// GLOBAL active tab into a new project does not change which tab is
+	// active, but it can be the first time anything asks for its panes.
+	if d.session.ActiveTabID() == p.TabID {
+		d.ensureTabSpawned(p.TabID)
+	}
+	d.broadcastState()
+	d.requestSnapshot()
+	answerOp(conn, msg, ipc.MsgTabOpResp, p.TabID, true, "")
 }
 
 func (d *Daemon) handleCreatePane(conn *ipc.Conn, msg *ipc.Message) {

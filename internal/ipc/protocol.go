@@ -32,6 +32,7 @@ const (
 	MsgSwitchTab  = "switch_tab"
 	MsgUpdateTab  = "update_tab"
 	MsgReorderTab = "reorder_tab"
+	MsgMoveTab    = "move_tab"
 
 	// Project lifecycle (mirrors the tab message set).
 	MsgCreateProject  = "create_project"
@@ -567,6 +568,15 @@ type UpdateTabPayload struct {
 type ReorderTabPayload struct {
 	TabID    string `json:"tab_id"`
 	NewIndex int    `json:"new_index"`
+}
+
+// MoveTabPayload reassigns an existing tab to another project ON THE SAME
+// DAEMON (a project ID is only meaningful to the daemon that minted it). The
+// tab is appended at the END of the target project's tab order and becomes
+// that project's remembered ActiveTab. Panes, layout and CWDs are untouched.
+type MoveTabPayload struct {
+	TabID     string `json:"tab_id"`
+	ProjectID string `json:"project_id"`
 }
 
 type CreateProjectPayload struct {

@@ -268,6 +268,50 @@ that is what the strays are called — and disambiguating first hands back
 same reason `sendMergeProjects` does NOT reuse `sendUpdateProject`'s duplicate
 guard: every project it would find on that host is one the message absorbs.
 
+### Moving one tab between projects (`MsgMoveTab`)
+
+`SessionManager.MoveTab` reassigns ONE tab from whatever project holds it to
+another, on THIS daemon only — a project ID means nothing off the daemon that
+minted it, so there is no cross-daemon shape to support and, for the same
+reason `merge_projects` needs none, no capability probe either: an older
+daemon simply drops the unknown message type.
+
+**Both sides of the link are written, through the same `reanchorTab` helper
+`MergeProjects` and `ReorderTab` already use.** The client rebuilds a project
+from its `TabIDs` but skips any tab whose own `ProjectID` disagrees with the
+list naming it (`rebuildTabs`) — updating one side and not the other makes the
+tab vanish from the sidebar while the daemon still holds it. `reanchorTab`
+keeps the workspace-wide `tabOrder` consistent with the project-relative
+order without moving any OTHER project's tab: the moved tab lands right after
+the target project's previous last tab, wherever that sits in the global list.
+
+**The source's successor is chosen exactly as `DestroyTab` chooses one** — the
+neighbour that slides into the moved tab's slot, read from the project's OWN
+`TabIDs`, never a workspace-wide answer that could name a different project's
+tab. The target's `ActiveTab` becomes the moved tab unconditionally: it is the
+one thing the user just asked to look at.
+
+**`recoverEmptyProject` runs on the SOURCE**, exactly as it does after
+`DestroyTab` — moving a project's last tab out leaves it precisely as empty,
+and it is owed the same replacement Shell tab, promoted to the active tab when
+the source is the daemon's active project. An unknown source (the pre-projects
+snapshot shape, where a tab's own `ProjectID` names no project the daemon
+holds) falls back to the workspace-wide emptiness test, which is a no-op
+whenever anything else in the workspace still holds a tab.
+
+**Same-daemon only, by construction** — `MoveTabPayload` carries a bare
+`project_id`, meaningful only to the daemon that owns the map it indexes.
+There is no destination field to get wrong.
+
+**Panes keep their CWD.** `Pane.TabID` never changes, and only a pane created
+AFTER the move picks up the target project's root (`projectCWD`) — a tab that
+moves between projects keeps working wherever it already was.
+
+**A same-project move is a no-op and broadcasts nothing** — the same
+precedent `ReorderTab` sets for a drag that changed nothing: an action the
+user can trigger accidentally (dragging a tab back onto its own project row)
+must not cost every attached client a full `workspace_state` frame.
+
 **A daemon too old to understand `merge_projects` cannot receive one**, which is
 why no capability probe was needed (contrast `destSupportsProjects`).
 `gateExtraVersion` REFUSES the connection on any version difference, and the

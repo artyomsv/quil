@@ -2565,12 +2565,16 @@ func (d *Daemon) handleMoveTab(conn *ipc.Conn, msg *ipc.Message) {
 	// Moving the source project's LAST tab out leaves it exactly as empty as
 	// DestroyTab leaves one, and owes the same replacement Shell tab.
 	d.recoverEmptyProject(from)
-	// After a lazy restore, a background tab's panes are Pending. Moving the
-	// GLOBAL active tab into a new project does not change which tab is
-	// active, but it can be the first time anything asks for its panes.
-	if d.session.ActiveTabID() == p.TabID {
-		d.ensureTabSpawned(p.TabID)
-	}
+	// Unconditional, and it has to be: the moved tab is not the only one that
+	// can become the global active tab here. MoveTab promotes the SOURCE's
+	// successor to sm.activeTab when the moved tab was the global active one
+	// and is leaving the active project (mirrors DestroyTab) — and after a
+	// lazy restore that successor's own panes can still be Pending, same as
+	// the MsgSwitchProject arm above. ensureTabSpawned is idempotent
+	// (ensurePaneSpawned returns early once a PTY exists or Pending is
+	// false), so spawning whichever tab actually ended up active costs
+	// nothing on the ordinary "moved tab into the active project" path.
+	d.ensureTabSpawned(d.session.ActiveTabID())
 	d.broadcastState()
 	d.requestSnapshot()
 	answerOp(conn, msg, ipc.MsgTabOpResp, p.TabID, true, "")

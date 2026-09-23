@@ -389,6 +389,16 @@ func (sm *SessionManager) MoveTab(tabID, projectID string) (from string, res mov
 		// sm.activeTab belongs to the active project's TabIDs; an empty one
 		// is left for recoverEmptyProject/SwitchTab to repair, exactly as
 		// DestroyTab leaves it.
+		//
+		// An unknown source (from == "", or a from whose record is gone) also
+		// leaves successor == "" here, so sm.activeTab keeps naming tabID —
+		// now filed under a DIFFERENT project than sm.activeProject. That is
+		// not a new invariant break: sm.activeProject != projectID together
+		// with an unresolvable source already meant sm.activeTab did not
+		// belong to sm.activeProject's own TabIDs before this call ran.
+		// recoverEmptyProject's workspace-wide fallback and the caller's
+		// unconditional ensureTabSpawned(ActiveTabID()) are what carry the
+		// daemon through it either way.
 		if successor != "" {
 			sm.activeTab = successor
 		}

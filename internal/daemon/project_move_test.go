@@ -3,6 +3,7 @@ package daemon
 import (
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
@@ -245,8 +246,15 @@ func projectByID(d *Daemon, id string) (Project, bool) {
 
 // --- Handler tests -----------------------------------------------------
 
+// Drives the move over a REAL conn and counts actual workspace_state frames,
+// rather than trusting the name — a plain d.handleMessage(nil, msg) call
+// proves nothing about how many times broadcastState() itself fires, since
+// d.server is nil in that shape and broadcastState is a no-op. The N
+// back-to-back full workspace_state frames onto a 64-slot must-deliver queue
+// is the documented 2026-08-09 force-disconnect shape (daemon-lifecycle.md),
+// which is exactly what a move that broadcast per side-effect would risk.
 func TestHandleMoveTab_BroadcastsOnceAndSchedulesSnapshot(t *testing.T) {
-	d := overlayTestDaemon(t, config.Default())
+	d, sock := overlayServerDaemonWithConfig(t, config.Default())
 	src := d.session.CreateProject("alpha", "/work/alpha")
 	dst := d.session.CreateProject("beta", "/work/beta")
 	// A second tab in src so the move does not also trigger the empty-project
@@ -254,11 +262,25 @@ func TestHandleMoveTab_BroadcastsOnceAndSchedulesSnapshot(t *testing.T) {
 	d.session.CreateTabInProject(src.ID, "other")
 	tab := d.session.CreateTabInProject(src.ID, "moving")
 
+	client := attachTestClient(t, sock)
+	defer client.Close()
+	frames := countWorkspaceFrames(client)
+	waitUntil(t, "the attach broadcast to land", func() bool { return frames.Count() > 0 })
+	frames.Reset()
+
 	msg, err := ipc.NewMessage(ipc.MsgMoveTab, ipc.MoveTabPayload{TabID: tab.ID, ProjectID: dst.ID})
 	if err != nil {
 		t.Fatalf("NewMessage: %v", err)
 	}
-	d.handleMessage(nil, msg)
+	if err := client.Send(msg); err != nil {
+		t.Fatalf("send move_tab: %v", err)
+	}
+
+	waitUntil(t, "the move to broadcast", func() bool { return frames.Count() > 0 })
+	time.Sleep(100 * time.Millisecond) // let a stray second frame land, if one would
+	if n := frames.Count(); n != 1 {
+		t.Errorf("move broadcast %d workspace_state frames, want exactly 1", n)
+	}
 
 	if len(d.snapshotCh) != 1 {
 		t.Errorf("snapshotCh len = %d, want 1 — the move must schedule a snapshot "+
@@ -313,5 +335,61 @@ func TestHandleMoveTab_EmptiedSourceGetsAShellTab(t *testing.T) {
 	}
 	if indexOfString(dstAfter.TabIDs, tab.ID) < 0 {
 		t.Errorf("dst.TabIDs %v does not list the moved tab %s", dstAfter.TabIDs, tab.ID)
+	}
+}
+
+// TestHandleMoveTab_SpawnsTheSourceSuccessorWhenTheActiveTabMovesOut mirrors
+// TestHandleSwitchProjectSpawnsTheIncomingProjectsTab for the move-tab path.
+//
+// After a lazy restore, only sm.activeTab's panes are running and everything
+// else is Pending. Moving the GLOBAL active tab out of its own project
+// promotes the source's successor to sm.activeTab (SessionManager.MoveTab,
+// mirroring DestroyTab) — and until handleMoveTab called ensureTabSpawned on
+// whatever tab ended up active (rather than only on the moved tab), that
+// promoted successor's panes stayed Pending forever: a restore indicator with
+// no process behind it, the same failure the MsgSwitchProject arm exists to
+// prevent.
+func TestHandleMoveTab_SpawnsTheSourceSuccessorWhenTheActiveTabMovesOut(t *testing.T) {
+	d := newTestDaemon(t)
+	src := d.session.CreateProject("alpha", t.TempDir())
+	dst := d.session.CreateProject("beta", t.TempDir())
+
+	successorTab := d.session.CreateTabInProject(src.ID, "stays")
+	movingTab := d.session.CreateTabInProject(src.ID, "moving")
+
+	successorPane, err := d.session.CreatePane(successorTab.ID, t.TempDir())
+	if err != nil {
+		t.Fatalf("create successor pane: %v", err)
+	}
+	// The shape a lazy restore leaves behind: everything outside the active
+	// tab is deferred.
+	successorPane.Type = "terminal"
+	successorPane.Pending = true
+
+	d.session.SwitchProject(src.ID)
+	d.session.SwitchTab(movingTab.ID)
+	if got := d.session.ActiveTabID(); got != movingTab.ID {
+		t.Fatalf("setup invariant broken: ActiveTabID() = %q, want the moving tab", got)
+	}
+	if successorPane.PTY != nil {
+		t.Fatal("setup invariant broken: the successor's pane must still be Pending")
+	}
+
+	msg, err := ipc.NewMessage(ipc.MsgMoveTab, ipc.MoveTabPayload{
+		TabID:     movingTab.ID,
+		ProjectID: dst.ID,
+	})
+	if err != nil {
+		t.Fatalf("NewMessage: %v", err)
+	}
+	d.handleMessage(nil, msg)
+
+	if got := d.session.ActiveTabID(); got != successorTab.ID {
+		t.Fatalf("ActiveTabID() = %q after the move, want the promoted successor %q",
+			got, successorTab.ID)
+	}
+	if successorPane.PTY == nil || successorPane.Pending {
+		t.Error("moving the active tab out left its promoted successor unspawned — the " +
+			"user lands on a restore indicator with no process behind it")
 	}
 }

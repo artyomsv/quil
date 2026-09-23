@@ -24,8 +24,11 @@ func TestMoveTab_SurvivesTheWireAndARestart(t *testing.T) {
 	src := d.session.CreateProject("alpha", "/home/a/alpha")
 	dst := d.session.CreateProject("beta", "/home/a/beta")
 	// A second tab in src so the move is an ordinary reassignment rather than
-	// also exercising the empty-project recovery path.
-	d.session.CreateTabInProject(src.ID, "staying")
+	// also exercising the empty-project recovery path. It becomes src's
+	// ActiveTab by construction (CreateTabInProject only sets ActiveTab when
+	// it was empty), which is what makes the post-restore assertion below
+	// mean something: src.ActiveTab must survive the round trip UNCHANGED.
+	staying := d.session.CreateTabInProject(src.ID, "staying")
 	tab := d.session.CreateTabInProject(src.ID, "moving")
 
 	// The exact payload the client sends.
@@ -72,6 +75,12 @@ func TestMoveTab_SurvivesTheWireAndARestart(t *testing.T) {
 	}
 	if freshDst.ActiveTab != tab.ID {
 		t.Errorf("restored dst.ActiveTab = %q, want the moved tab %q", freshDst.ActiveTab, tab.ID)
+	}
+	// Both ActiveTabs, not just the destination's: src.ActiveTab was never the
+	// moved tab, so it must survive the round trip unchanged rather than being
+	// blanked or dragged along with the tab that left.
+	if freshSrc.ActiveTab != staying.ID {
+		t.Errorf("restored src.ActiveTab = %q, want the untouched %q", freshSrc.ActiveTab, staying.ID)
 	}
 
 	restoredTab := fresh.session.Tab(tab.ID)

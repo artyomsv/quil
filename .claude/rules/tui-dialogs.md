@@ -64,6 +64,18 @@ right-click on a pane (no selection active) or `quick_actions` (default `alt+a`;
 
 **A menu row REFUSES when its target is no longer in the ACTIVE tab.** Eight of the ten items dispatch through `activeTabModel().ActivePaneModel()` (shared with the keybinding and palette paths), which is why every entry point focuses the pane before opening the menu — but that establishes the property at OPEN time and says nothing about EXECUTE time: MCP `set_active_pane` (`setActivePaneMsg` → `jumpToPane`) moves the active project AND tab, and the vanished-target guard at the top of `Update` closes only a menu whose target is GONE, not one whose active tab moved — so Rename seeded the on-screen pane's name, Mute toggled it, and Restart/Close armed a confirm for it. Keyboard and mouse cannot reach that state; MCP is the one producer that can. `executeCtxMenuItem` therefore tests `proj != m.cur() || tabIdx != m.activeTabIdx()` BEFORE the `ActivePane`/`Active` sync, so a refused execute leaves nothing half-applied on a background tab, and it refuses ALL ten rows — including the two attention items that resolve `paneID` directly and could still have acted correctly, because "two of ten rows work after the tab moved" is a rule nobody can hold and the remedy is a second right-click. A future entry point that opens this menu on a pane outside the active tab without focusing it first will find every row inert: focus first, rather than widening the guard.
 
+**Move to tab… sits directly after Rename pane, in the pane-settings group,
+and is GREYED rather than hidden.** `buildCtxMenuItems` sets its `enabled` from
+`len(movePaneCandidates(pane.ID)) > 0` — the pane menu's own convention (four
+other rows already grey out this way, unlike the tab menu's Move to
+project…, which hides): every row here answers a question about the SAME
+pane, so hiding one would shift the rows around it depending on state, which
+none of the other nine do. It stays above the destructive separator with the
+rest of its group, because moving deletes nothing, and there is deliberately
+no replace variant — a move has nothing to replace. Choosing it
+(`ctxActMovePane`) closes the menu and opens the tab picker (`openMovePanePicker`,
+`tabpicker.go`) — see "Tab picker (move pane)" below.
+
 ## Tab context menu
 
 ### Tab context menu
@@ -91,6 +103,73 @@ closes the menu and opens the fuzzy project picker (Alt+P) in MOVE mode
 (`openMoveTabPicker`) rather than a sibling dialog — see `projects.md`'s "The
 project picker's move mode" for the picker half, including why the scope has
 to live inside `filterProjects` rather than being fixed at open time.
+
+## Tab picker (move pane)
+
+### Tab picker (move pane)
+
+The pane context menu's **Move to tab…** row opens a SIBLING of the fuzzy
+project picker (`internal/tui/tabpicker.go`), not a mode of it. The project
+picker's move mode (`projects.md`'s "The project picker's move mode") reuses
+that dialog because moving a TAB is still choosing a PROJECT — the row type is
+unchanged. Moving a PANE is choosing a TAB, across every project on the host,
+which is a different row type, a different scope function, and a different
+close condition, so a third `*ProjectModel`-typed mode was rejected in favor of
+a second small dialog that shares everything actually shareable: `fuzzyScore`,
+`dialogInnerWidth`, `lastCellsToWidth`/`truncateToWidth`, `sanitizeRemoteText`,
+and the `dialog*` styles.
+
+**The scope lives in `filterTabPick`, via `movePaneCandidates`, and it has
+to.** Exactly like the project picker's move mode, `model.go`'s broadcast
+refresh recomputes `m.tabPick.filtered` from `filterTabPick` on every
+`workspace_state` while the picker is open — a scope captured only at OPEN
+time would be widened back to every reachable tab by the next broadcast (the
+git ticker alone delivers one every 5 s). `movePaneCandidates` (`ctxmenu.go`,
+beside `moveTabCandidates`) is the pure helper both the menu row's `enabled`
+gate and the picker's scope call: same-Dest, `projectActionable` projects,
+excluding the pane's own tab and any tab `tabInFlight` — a worktree create or
+replace targeting it, a template layout not yet applied, or a leaf still
+carrying `PreparingWorktree` (the new-tab worktree placeholder). The pane
+itself must not be preparing and its own tab must not be in flight either, or
+there is nowhere for it to safely leave from.
+
+**The rows are IDs, never pointers.** `tabPickRow{tabID, label}` — a broadcast
+can rebuild every tab under an open picker, and a `*TabModel` captured before
+that rebuild can point at a discarded tree. `label` is the RAW `"project /
+tab"` string and is sanitized only at render, the render-only rule every other
+daemon-sourced string in this package follows.
+
+**It closes when the PANE leaves its SOURCE tab, not when a named tab
+vanishes.** `tabPickState.srcTabID` is captured at open; `tabPickSourceIntact`
+re-resolves the pane via `findPaneAndTab` and compares its current tab against
+that snapshot. This is a stricter and different condition than the project
+picker's move-mode vanish-close (which asks only whether the TAB it names
+still exists) — a pane can leave its tab by MOVING, not just by the tab being
+destroyed, and either way the picker is now offering to move a pane out of a
+tab it is no longer in. Gated on `m.dialog == dialogTabPick`, for the same
+reason the project picker's own gate is: a dialog that REPLACED this one
+without going through `closeTabPicker` (a `PluginErrorMsg`, say) must not be
+dismissed by a broadcast mistaking it for the picker it no longer is.
+
+**Enter re-checks BOTH the source and the target before sending, and sends
+nothing on either failure.** The source check is `tabPickSourceIntact`, shared
+with the broadcast refresh's vanish-close. The target check re-derives
+`movePaneCandidates(paneID)` rather than trusting the filtered snapshot the
+cursor is pointing at — a target can go ineligible between open and Enter (a
+worktree create started there, it went offline) with no broadcast required for
+THIS client to know, since `movePaneCandidates` reads this client's own
+in-flight maps. Either failure closes the picker and sends nothing; never
+switches tabs or projects, and never mutates the layout tree — the daemon's
+`move_pane` broadcast is what places the pane (see `tui-rendering.md`'s "Panes
+moved between tabs").
+
+**`sendMovePane` follows `sendMoveTab`'s exact shape**: the destination is
+resolved on the Update goroutine via `destOfPane`, never inside the returned
+closure, and the send is `sendForDestStrict` — `Router.Send` silently drops a
+message for a dest with no connection, which would report a move that never
+happened as having succeeded for a user-confirmed action. `movePaneFailedMsg`
+is the send-result twin of `moveTabFailedMsg`: a send result, not an IPC
+response, so its `Update` arm must not re-arm `listenForMessages`.
 
 ## Claude resume picker
 

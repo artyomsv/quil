@@ -47,6 +47,11 @@ const (
 	// for the target tab. buildTabCtxMenuItems hides the row entirely when
 	// moveTabCandidates has nothing to offer, rather than greying it.
 	ctxActMoveTab
+	// ctxActMovePane opens the tab picker (openMovePanePicker) for the target
+	// pane. Unlike ctxActMoveTab, buildCtxMenuItems GREYS this row rather
+	// than hiding it — the pane menu's own convention, since it sits in the
+	// pane-settings group among the other gated rows (history, lazygit, hunk).
+	ctxActMovePane
 )
 
 // ctxMenuItem is one row of the menu. Disabled rows render greyed, are
@@ -181,6 +186,10 @@ func (m *Model) buildCtxMenuItems(pane *PaneModel) []ctxMenuItem {
 		{id: ctxActLazygit, label: "Open lazygit", enabled: lazygitOK},
 		{id: ctxActHunk, label: "Open hunk", enabled: hunkOK, gapAfter: true},
 		{id: ctxActRename, label: "Rename pane", enabled: true},
+		// Moving deletes nothing, so it stays above the destructive separator
+		// with the rest of the pane-settings group — and there is
+		// deliberately no replace variant, unlike a worktree create.
+		{id: ctxActMovePane, label: "Move to tab…", enabled: len(m.movePaneCandidates(pane.ID)) > 0},
 		{id: ctxActMute, label: muteLabel, enabled: true},
 		// Before the attention pair rather than after it, and NOT beside
 		// Close pane… below the separator. Two reasons. The pin and Clear
@@ -537,6 +546,85 @@ func (m *Model) moveTabCandidates(tabID string) []*ProjectModel {
 	return out
 }
 
+// tabInFlight reports whether tab has something in progress that a moved
+// pane could be swallowed by or that could itself be disrupted by a move
+// arriving mid-operation: a worktree create or replace, a template layout not
+// yet applied, or a leaf still waiting on its own worktree checkout (the
+// new-tab worktree placeholder, Pane.PreparingWorktree). A nil tab counts as
+// in flight — there is nothing to move into or out of.
+func (m *Model) tabInFlight(tab *TabModel) bool {
+	if tab == nil {
+		return true
+	}
+	if m.worktreeCreates[tab.ID] != "" {
+		return true
+	}
+	if m.worktreeReplaced[tab.ID] != nil {
+		return true
+	}
+	if tab.templateLayoutPending {
+		return true
+	}
+	for _, p := range tab.Leaves() {
+		if p.PreparingWorktree != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// movePaneCandidates lists the tabs paneID may move to, or nil when the pane
+// cannot move at all.
+//
+// The pane must be in an actionable project (projectActionable), must not be
+// a preparing placeholder itself (PreparingWorktree), and its own tab must
+// not be in flight (tabInFlight) — a pane cannot leave a tab whose worktree
+// checkout, replace, or template layout is still resolving.
+//
+// Candidates are every tab of every actionable project on the SAME Dest as
+// the pane's own project, except the pane's own tab and any tab that is
+// itself in flight (tabInFlight, which also excludes a tab holding a
+// PreparingWorktree leaf — the new-tab worktree placeholder).
+//
+// Order: the pane's own project's tabs first, in tab order, then the other
+// projects in m.projects (sidebar) order.
+func (m *Model) movePaneCandidates(paneID string) []*TabModel {
+	pane, proj, tabIdx := m.findPaneAndTab(paneID)
+	if pane == nil || proj == nil || tabIdx < 0 || tabIdx >= len(proj.tabs) {
+		return nil
+	}
+	if pane.PreparingWorktree != "" {
+		return nil
+	}
+	if !m.projectActionable(proj) {
+		return nil
+	}
+	srcTab := proj.tabs[tabIdx]
+	if m.tabInFlight(srcTab) {
+		return nil
+	}
+
+	var out []*TabModel
+	for _, t := range proj.tabs {
+		if t == srcTab || m.tabInFlight(t) {
+			continue
+		}
+		out = append(out, t)
+	}
+	for _, p := range m.projects {
+		if p == proj || p.Dest != proj.Dest || !m.projectActionable(p) {
+			continue
+		}
+		for _, t := range p.tabs {
+			if m.tabInFlight(t) {
+				continue
+			}
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
 // buildTabColorItems returns one row per tabColors entry, in palette order,
 // for the menu ctxActTabColorList re-populates. The marker is exactly two
 // cells on every row ("✓ " for the current colour, "  " otherwise) so
@@ -853,6 +941,12 @@ func (m Model) executeCtxMenuItem(item ctxMenuItem) (tea.Model, tea.Cmd) {
 		return m, m.handleToggleHunk()
 	case ctxActRename:
 		return m.beginPaneRename()
+	case ctxActMovePane:
+		// The uniform active-tab refusal and the focus sync above it have
+		// already run; openMovePanePicker needs only the pane id, resolved
+		// fresh at Enter time by the picker itself rather than a pointer
+		// closed over here.
+		return m.openMovePanePicker(paneID)
 	case ctxActMute:
 		return m, m.toggleActivePaneMute()
 	case ctxActAttention:

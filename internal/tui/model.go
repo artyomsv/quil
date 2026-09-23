@@ -370,6 +370,7 @@ const (
 	dialogWhatsNew       // post-upgrade highlights; also F1 → What's New
 	dialogNotifySettings // F1 → Settings → Notifications: toasts + sidebar event groups
 	dialogNewTemplate
+	dialogTabPick // pane context menu's "Move to tab…" picker — see tabpicker.go
 )
 
 // tuiClient is the subset of *ipc.Client the TUI uses on the Model. Defined
@@ -743,6 +744,12 @@ type Model struct {
 	// list, and cursor — same shape as paletteState (zero value = empty,
 	// m.dialog is the sole open/closed authority). See projectpicker.go.
 	projectPick projectPickState
+
+	// tabPick is the pane context menu's "Move to tab…" picker state — a
+	// sibling of projectPick rather than a mode of it (see tabpicker.go's doc
+	// comment for why). Same zero-value/m.dialog contract: m.dialog ==
+	// dialogTabPick is the sole open/closed authority.
+	tabPick tabPickState
 
 	tomlEditor       *TextEditor // active TOML editor (nil when not editing)
 	templateEditor   bool        // return this TOML editor to Settings on close
@@ -2627,6 +2634,20 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 			m.projectPick.filtered = m.filterProjects(m.projectPick.query)
 			m.clampProjectPickCursor()
 		}
+		// The "Move to tab…" picker's own vanish-close: the pane being moved
+		// left its source tab (moved elsewhere, or destroyed) while the
+		// picker sat open. Gated on m.dialog == dialogTabPick for the same
+		// reason as the project picker's guard above — never dismiss a
+		// dialog that replaced this one.
+		if m.dialog == dialogTabPick {
+			if !m.tabPickSourceIntact() {
+				m.closeTabPicker()
+				pickerVanishCmd = tea.ClearScreen
+			} else {
+				m.tabPick.filtered = m.filterTabPick(m.tabPick.query)
+				m.clampTabPickCursor()
+			}
+		}
 		m.resizeTabs()
 		log.Printf("apply: resizeTabs done")
 		// Diffed, not swept. A broadcast that agrees with what we already hold
@@ -2885,6 +2906,12 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		// Same shape as createTabFailedMsg: a send result, not an IPC response,
 		// so no re-arm.
 		m.setFlash("cannot reach " + hostLabel(msg.dest) + " — tab not moved")
+		return m, m.flashCmd()
+
+	case movePaneFailedMsg:
+		// Same shape as moveTabFailedMsg: a send result, not an IPC response,
+		// so no re-arm.
+		m.setFlash("cannot reach " + hostLabel(msg.dest) + " — pane not moved")
 		return m, m.flashCmd()
 
 	case worktreeTimeoutMsg:
@@ -7756,6 +7783,34 @@ func (m Model) sendMoveTab(tabID, projectID string) tea.Cmd {
 		}
 		if err := m.sendForDestStrict(dest, msg); err != nil {
 			return moveTabFailedMsg{dest: dest}
+		}
+		return nil
+	}
+}
+
+// movePaneFailedMsg reports a move_pane that never reached its daemon. The
+// send happens off the Update goroutine, so the flash cannot be set there —
+// same shape as moveTabFailedMsg.
+type movePaneFailedMsg struct{ dest string }
+
+// sendMovePane fires a MsgMovePane IPC for the pane context menu's "Move to
+// tab…" picker. The destination is resolved HERE, on the Update goroutine,
+// via destOfPane — never inside the returned closure, which runs later and
+// must not race a workspace reconciliation.
+//
+// Strict, like sendMoveTab: Router.Send drops a message for a dest it has no
+// conn for and returns nil, which would report a move that never happened as
+// having succeeded — a user-confirmed action has to be able to say it failed.
+func (m Model) sendMovePane(paneID, tabID string) tea.Cmd {
+	dest := m.destOfPane(paneID)
+	return func() tea.Msg {
+		msg, err := ipc.NewMessage(ipc.MsgMovePane, ipc.MovePanePayload{PaneID: paneID, TabID: tabID})
+		if err != nil {
+			log.Printf("move pane: build message: %v", err)
+			return nil
+		}
+		if err := m.sendForDestStrict(dest, msg); err != nil {
+			return movePaneFailedMsg{dest: dest}
 		}
 		return nil
 	}

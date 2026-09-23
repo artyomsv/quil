@@ -124,6 +124,8 @@ Right-click on a pane — with a text selection active, it copies the selection 
 
 Right-clicking a **pane row in the project sidebar** opens the same menu. It focuses that pane first — switching tabs if the pane lives on another one, exactly as a left-click on the row does — so every action in the menu applies to the pane you clicked.
 
+*Move to tab…* lists every other tab on the same machine as "project / tab". The pane moves with its process and history, the largest pane in the target is split side by side (top and bottom only when it is too narrow), and you stay where you are. A tab left with no panes is closed.
+
 ### Mouse: tab context menu
 
 Right-click a tab — in the tab bar, or its heading in the project sidebar's PANES section — to open Rename tab / Set color… / Move to project…. A text selection still copies instead. Unlike a left-click, right-click does **not** switch to the tab; choosing Rename does. Set color… re-populates the same menu with one row per color, each painted in its own color and the current one marked `✓`; choosing a color applies it immediately. Move to project… opens a picker listing the other projects on the same machine; pick one and the tab moves there, panes and all, still running, in whatever directory each pane was already in — you stay in the project you were in. The item is hidden when no other project on the same machine exists. `↑`/`↓` (or `k`/`j`) navigate, `Enter` or a left-click executes the highlighted item, `Esc` closes the whole menu — there's no "back" from the color list.

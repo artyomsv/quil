@@ -11,6 +11,22 @@ import (
 // as the project picker (projectPickWidth), which this is modelled on.
 const tabPickWidth = 60
 
+const (
+	// tabPickMinRows is the floor on the candidate-list window: one row,
+	// never zero — same reasoning as historyMinRows (history.go). renderDialog's
+	// lipgloss.Place does not clip, so any floor above what is actually
+	// available manufactures the overflow it looks like it prevents; with a
+	// floor of 1 the box only overruns a terminal too short for the chrome
+	// alone, where no list height would have helped either.
+	tabPickMinRows = 1
+	// tabPickChromeRows is every row this dialog spends outside the
+	// candidate list: the rounded border (2), dialogBorder's Padding(1,2) top
+	// and bottom (2), the title, the query row, the blank row after the
+	// query, the blank row before the hint, the hint, and one spare so the
+	// centered box never sits flush against the terminal edge — 10 total.
+	tabPickChromeRows = 10
+)
+
 // tabPickState holds the "Move to tab…" picker's query buffer, result list,
 // and cursor. m.dialog == dialogTabPick is the sole open/closed authority,
 // the same contract projectPickState uses — no `open` field, and
@@ -33,6 +49,10 @@ type tabPickState struct {
 	query    string
 	cursor   int
 	filtered []tabPickRow
+	// scroll is the list window's origin — see tabPickVisibleRows/
+	// syncTabPickScroll. Zero value (top of list) is correct for a freshly
+	// opened picker.
+	scroll int
 }
 
 // tabPickRow carries IDs, never pointers: a workspace broadcast rebuilds tabs
@@ -142,12 +162,64 @@ func (m *Model) clampTabPickCursor() {
 	}
 }
 
+// tabPickCursorTabID returns the tabID the cursor currently points at, or ""
+// when the list is empty or the cursor is out of range.
+func (m *Model) tabPickCursorTabID() string {
+	if m.tabPick.cursor < 0 || m.tabPick.cursor >= len(m.tabPick.filtered) {
+		return ""
+	}
+	return m.tabPick.filtered[m.tabPick.cursor].tabID
+}
+
+// restoreTabPickCursor points the cursor back at wantTabID in the CURRENT
+// filtered list, or falls back to clampTabPickCursor when that row is no
+// longer present. Used by the broadcast refresh: refiltering after a change
+// elsewhere in the workspace must not silently move the user's selection onto
+// a DIFFERENT tab merely because some other row (often one ABOVE it) came or
+// went — an index-only clamp is exactly that bug, since the cursor stays in
+// range but now names whatever row slid into its old slot.
+func (m *Model) restoreTabPickCursor(wantTabID string) {
+	if wantTabID != "" {
+		for i, row := range m.tabPick.filtered {
+			if row.tabID == wantTabID {
+				m.tabPick.cursor = i
+				return
+			}
+		}
+	}
+	m.clampTabPickCursor()
+}
+
+// tabPickVisibleRows is how many candidate rows fit in the list for the
+// current terminal height — same shape as historyVisibleRows: the list is the
+// only element that can give, so it absorbs a short terminal rather than
+// pushing the hint off-screen.
+func (m Model) tabPickVisibleRows() int {
+	if avail := m.height - tabPickChromeRows; avail > tabPickMinRows {
+		return avail
+	}
+	return tabPickMinRows
+}
+
+// syncTabPickScroll stores the window origin historyWindow would pick for the
+// current cursor and list — mirrors syncHistoryScroll. Called after every
+// cursor move and whenever the filtered list is replaced, since the render
+// path re-derives from this stored value rather than recomputing from
+// scratch (matching historyWindow's own contract: it self-corrects even if
+// this was never called, but calling it keeps the window from jumping only
+// on the FIRST render after a resize).
+func (m *Model) syncTabPickScroll() {
+	m.tabPick.scroll, _ = historyWindow(
+		len(m.tabPick.filtered), m.tabPick.cursor, m.tabPick.scroll, m.tabPickVisibleRows())
+}
+
 // afterTabPickQueryChange refilters the tab list and clamps the cursor back
 // onto it. Single choke point for every path that mutates m.tabPick.query
 // (typed text, backspace, space) — mirrors afterProjectPickQueryChange.
 func (m Model) afterTabPickQueryChange() (tea.Model, tea.Cmd) {
 	m.tabPick.filtered = m.filterTabPick(m.tabPick.query)
 	m.clampTabPickCursor()
+	m.syncTabPickScroll()
 	return m, nil
 }
 
@@ -169,9 +241,11 @@ func (m Model) handleTabPickKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// this dialog promises, since either can have changed while it sat
 		// open: the pane may have moved or been destroyed elsewhere
 		// (tabPickSourceIntact), and the chosen target may have gone
-		// ineligible — another client started a worktree create there, or it
-		// went offline (re-derive movePaneCandidates rather than trust the
-		// filtered snapshot).
+		// ineligible — its host went offline, or the tab itself was destroyed
+		// (re-derive movePaneCandidates rather than trust the filtered
+		// snapshot). worktreeCreates/worktreeReplaced are THIS client's own
+		// in-flight state, not a daemon broadcast, so the realistic trigger
+		// here is one of those two, not another client's worktree add.
 		paneID := m.tabPick.paneID
 		tabID := m.tabPick.filtered[c].tabID
 		if !m.tabPickSourceIntact() {
@@ -200,11 +274,13 @@ func (m Model) handleTabPickKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.tabPick.cursor > 0 {
 			m.tabPick.cursor--
 		}
+		m.syncTabPickScroll()
 		return m, nil
 	case key == "down" || key == "ctrl+n":
 		if m.tabPick.cursor < len(m.tabPick.filtered)-1 {
 			m.tabPick.cursor++
 		}
+		m.syncTabPickScroll()
 		return m, nil
 	case key == "backspace":
 		if q := []rune(m.tabPick.query); len(q) > 0 {
@@ -270,7 +346,15 @@ func (m Model) renderTabPickDialog() string {
 		b.WriteString(dialogSubtle.Render(truncateToWidth(empty, inner)))
 		b.WriteByte('\n')
 	}
-	for i, row := range m.tabPick.filtered {
+	// Windowed, not the whole list: renderDialog's lipgloss.Place does not
+	// clip, so an unwindowed list taller than the terminal pushes the cursor
+	// row and the hint below it off-screen (the processes/history dialogs
+	// document the same hazard). historyWindow re-derives the origin from the
+	// cursor rather than trusting m.tabPick.scroll, so render is correct even
+	// if a WindowSizeMsg changed the row budget since the last Update.
+	start, end := historyWindow(len(m.tabPick.filtered), m.tabPick.cursor, m.tabPick.scroll, m.tabPickVisibleRows())
+	for i := start; i < end; i++ {
+		row := m.tabPick.filtered[i]
 		name := truncateToWidth(sanitizeRemoteText(row.label), inner-2)
 		if i == m.tabPick.cursor {
 			b.WriteString(dialogSelected.Render("> " + name))

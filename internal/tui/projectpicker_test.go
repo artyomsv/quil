@@ -22,6 +22,33 @@ func TestProjectPickerFiltersFuzzily(t *testing.T) {
 	}
 }
 
+// TestUpdate_PasteMsg_ProjectPickerFoldsIntoQueryInsteadOfPane guards an
+// input-isolation break: tea.PasteMsg had no branch for dialogProjectPick, so
+// a paste while the picker was open fell through to sendClipboardToPane —
+// typed into the pane hidden behind the dialog, and a trailing CR/newline
+// could run it. Mirrors the command palette's own paste branch
+// (afterPaletteQueryChange), which the picker's Enter/typed-text paths
+// already reuse the shape of (afterProjectPickQueryChange).
+func TestUpdate_PasteMsg_ProjectPickerFoldsIntoQueryInsteadOfPane(t *testing.T) {
+	fake := &fakeSender{}
+	m := pasteTestModel(fake)
+	m.dialog = dialogProjectPick
+	m.projectPick = projectPickState{filtered: []*ProjectModel{{ID: "proj-a", Name: "quil"}}}
+
+	updated, cmd := m.Update(tea.PasteMsg{Content: "hello\r"})
+	if cmd != nil {
+		runCmd(cmd)
+	}
+	got := updated.(Model)
+
+	if len(fake.sent) != 0 {
+		t.Fatalf("paste while the project picker is open sent %d IPC message(s) to the hidden pane, want 0", len(fake.sent))
+	}
+	if !strings.Contains(got.projectPick.query, "hello") {
+		t.Errorf("projectPick.query = %q, want it to contain the pasted text", got.projectPick.query)
+	}
+}
+
 func TestLastProjectToggleReturnsAndBounces(t *testing.T) {
 	m := Model{
 		client:        newFakeConn(),

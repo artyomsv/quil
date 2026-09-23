@@ -2352,6 +2352,17 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 			// (a trailing newline could even execute it).
 			m.palette.query += sanitizePaletteQuery(msg.Content)
 			return m.afterPaletteQueryChange()
+		} else if m.dialog == dialogProjectPick {
+			// Same isolation break as the palette above, and the same fix: fold
+			// into the fuzzy query rather than falling through to
+			// sendClipboardToPane, which would type it into the hidden pane
+			// behind the picker (a trailing newline could run it).
+			m.projectPick.query += sanitizePaletteQuery(msg.Content)
+			return m.afterProjectPickQueryChange()
+		} else if m.dialog == dialogTabPick {
+			// Same isolation break, same fix, for the "Move to tab…" picker.
+			m.tabPick.query += sanitizePaletteQuery(msg.Content)
+			return m.afterTabPickQueryChange()
 		} else {
 			// Empty bracketed-paste content means the terminal (e.g. Windows
 			// Terminal on Ctrl+V) fired a paste for a clipboard that holds an
@@ -2644,8 +2655,14 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 				m.closeTabPicker()
 				pickerVanishCmd = tea.ClearScreen
 			} else {
+				// Capture the selected row's tabID BEFORE refiltering: an
+				// index-only clamp would silently move the cursor onto
+				// whichever row slides into its old slot when a row above it
+				// disappears, rather than keeping the user's actual selection.
+				wantTabID := m.tabPickCursorTabID()
 				m.tabPick.filtered = m.filterTabPick(m.tabPick.query)
-				m.clampTabPickCursor()
+				m.restoreTabPickCursor(wantTabID)
+				m.syncTabPickScroll()
 			}
 		}
 		m.resizeTabs()
@@ -6198,7 +6215,17 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 				// the historical top|bottom split of the first leaf.
 				splitForNewPane(tab, leaves, pane)
 			}
-			if migrated {
+			// Adopt, EXCEPT when tab is THIS client's own active tab right now.
+			// Every attached client reconciles the same broadcast, so without
+			// this a client sitting in the TARGET tab — typing into some
+			// unrelated pane there — would have adoptMovedPane steal both
+			// ActivePane and focus mode out from under it, and its next
+			// keystrokes would land on the pane that just arrived rather than
+			// the one it was looking at. The MOVER never has the target active
+			// (Enter never switches tabs — see tabpicker.go), so this only
+			// ever skips for a bystander, and finalizeTabPanes still repairs
+			// ActivePane/Active if it names a pane that no longer exists.
+			if migrated && tab != m.activeTabModel() {
 				adoptMovedPane(tab, pane)
 			}
 		}

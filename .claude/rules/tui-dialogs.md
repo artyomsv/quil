@@ -66,15 +66,17 @@ right-click on a pane (no selection active) or `quick_actions` (default `alt+a`;
 
 **Move to tab… sits directly after Rename pane, in the pane-settings group,
 and is GREYED rather than hidden.** `buildCtxMenuItems` sets its `enabled` from
-`len(movePaneCandidates(pane.ID)) > 0` — the pane menu's own convention (four
-other rows already grey out this way, unlike the tab menu's Move to
-project…, which hides): every row here answers a question about the SAME
-pane, so hiding one would shift the rows around it depending on state, which
-none of the other nine do. It stays above the destructive separator with the
-rest of its group, because moving deletes nothing, and there is deliberately
-no replace variant — a move has nothing to replace. Choosing it
-(`ctxActMovePane`) closes the menu and opens the tab picker (`openMovePanePicker`,
-`tabpicker.go`) — see "Tab picker (move pane)" below.
+`len(movePaneCandidates(pane.ID)) > 0` — the pane menu's own convention: four
+other rows already grey out this way (Input history, Open lazygit, Open hunk,
+Clear attention), unlike the tab menu's Move to project…, which hides.
+Hiding this one instead would make it the only row, among the other twelve,
+whose PRESENCE on screen depends on pane state rather than its `enabled` flag
+alone — every one of the twelve stays put and only its label or gate changes.
+It stays above the destructive separator with the rest of its group, because
+moving deletes nothing, and there is deliberately no replace variant — a move
+has nothing to replace. Choosing it (`ctxActMovePane`) closes the menu and
+opens the tab picker (`openMovePanePicker`, `tabpicker.go`) — see "Tab picker
+(move pane)" below.
 
 ## Tab context menu
 
@@ -155,10 +157,15 @@ dismissed by a broadcast mistaking it for the picker it no longer is.
 nothing on either failure.** The source check is `tabPickSourceIntact`, shared
 with the broadcast refresh's vanish-close. The target check re-derives
 `movePaneCandidates(paneID)` rather than trusting the filtered snapshot the
-cursor is pointing at — a target can go ineligible between open and Enter (a
-worktree create started there, it went offline) with no broadcast required for
-THIS client to know, since `movePaneCandidates` reads this client's own
-in-flight maps. Either failure closes the picker and sends nothing; never
+cursor is pointing at — a target can go ineligible between open and Enter
+with no broadcast required for THIS client to know, since `worktreeCreates`/
+`worktreeReplaced` are THIS client's own in-flight state, armed by its own
+dialog interactions elsewhere, not something a broadcast populates. The
+realistic trigger is therefore this client starting its OWN worktree create or
+replace in the target tab meanwhile, its host going offline, or the target tab
+itself being destroyed — not another client's worktree add, which reaches this
+check only indirectly, via the `PreparingWorktree` leaf a broadcast DOES carry.
+Either failure closes the picker and sends nothing; never
 switches tabs or projects, and never mutates the layout tree — the daemon's
 `move_pane` broadcast is what places the pane (see `tui-rendering.md`'s "Panes
 moved between tabs").

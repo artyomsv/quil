@@ -181,6 +181,40 @@ func TestMovedPane_BecomesTargetActivePane(t *testing.T) {
 	}
 }
 
+// TestMovedPane_BystanderViewingTargetKeepsItsOwnActivePane covers a review
+// finding: adoptMovedPane used to steal focus from a SECOND client already
+// looking at the target tab. Unlike every other move test in this file, which
+// follows the mover and stays on the SOURCE, this Model's active tab IS the
+// target — mid-keystroke in a pane the move does not touch — and the arriving
+// pane must not disturb it.
+func TestMovedPane_BystanderViewingTargetKeepsItsOwnActivePane(t *testing.T) {
+	t.Parallel()
+	m := newMovePaneModel(t, 120, 40)
+	m = mpApply(t, m, mpState("tab-tgt",
+		mpTab{"tab-src", []string{"p1", "p2"}}, mpTab{"tab-tgt", []string{"p3", "p4"}}))
+	tgt := mpTabOf(t, &m, "tab-tgt")
+	tgt.ActivePane = "p3"
+	mpPane(t, tgt, "p3").Active = true
+	tgt.ToggleFocus()
+	if !tgt.FocusMode() {
+		t.Fatal("setup: the bystander's target tab did not enter focus mode")
+	}
+
+	m = mpApply(t, m, mpState("tab-tgt",
+		mpTab{"tab-src", []string{"p1"}}, mpTab{"tab-tgt", []string{"p3", "p4", "p2"}}))
+
+	tgt = mpTabOf(t, &m, "tab-tgt")
+	if tgt.ActivePane != "p3" {
+		t.Errorf("ActivePane = %q, want unchanged p3 — the bystander was typing there", tgt.ActivePane)
+	}
+	if !mpPane(t, tgt, "p3").Active {
+		t.Error("p3 lost its Active flag")
+	}
+	if !tgt.FocusMode() {
+		t.Error("focus mode was exited — adoptMovedPane must not run for a bystander viewing the target")
+	}
+}
+
 func TestMovedPane_SourceDropsLeafAndPromotesSibling(t *testing.T) {
 	t.Parallel()
 	m := newMovePaneModel(t, 120, 40)

@@ -214,8 +214,19 @@ same-tab move is a no-op: no broadcast, no snapshot.
   and no `Layout`, checked inside `MovePane` under `sm.mu`) — the client builds
   that tree from `Tab.Panes`, so a pane leaving or joining first changes it.
 
-These checks are TOCTOU and that is accepted: `Overlay`/`PreparingWorktree`
-are set before or at publication and only ever cleared. A worktree add that
+These checks are TOCTOU and that is accepted, and only ever cleared afterwards
+— but neither `Overlay` nor `PreparingWorktree` is set BEFORE publication, as
+an earlier version of this note claimed. `CreatePane` publishes the pane into
+the session maps first; only afterwards do `constructPaneAt` and
+`constructPreparingPane` take `PluginMu` and set `pane.Overlay = true` /
+`pane.PreparingWorktree = branch` respectively (`daemon.go`). So there is a
+real window, on the CREATING goroutine, where the pane is published with
+neither flag set yet. It is harmless because nothing outside that one call can
+reach the pane's id during the window: it is not on any wire yet (no
+broadcast, no `create_pane_resp`), and no other IPC connection's dispatch
+goroutine has any way to learn it, so no concurrent `MovePane` can name it. The
+window closes before this pane's own create response — the only place the id
+first leaves the daemon — is sent. A worktree add that
 BEGINS between the check and the move is caught daemon-side only for a
 REPLACE whose target just left: `worktreeAddAndCreate`'s post-add re-check
 ("the pane to replace moved to another tab") abandons and removes the

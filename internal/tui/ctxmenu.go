@@ -49,8 +49,9 @@ const (
 	ctxActMoveTab
 	// ctxActMovePane opens the tab picker (openMovePanePicker) for the target
 	// pane. Unlike ctxActMoveTab, buildCtxMenuItems GREYS this row rather
-	// than hiding it — the pane menu's own convention, since it sits in the
-	// pane-settings group among the other gated rows (history, lazygit, hunk).
+	// than hiding it — the pane menu's own convention already used by other
+	// gated rows (history, lazygit and hunk in the view-actions group; Clear
+	// attention in the pane-settings group beside this one).
 	ctxActMovePane
 )
 

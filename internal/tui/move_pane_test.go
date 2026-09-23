@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -544,6 +545,36 @@ func TestTabPicker_EscSendsNothing(t *testing.T) {
 	}
 }
 
+// TestUpdate_PasteMsg_TabPickerFoldsIntoQueryInsteadOfPane guards the same
+// input-isolation break TestUpdate_PasteMsg_ProjectPickerFoldsIntoQueryInsteadOfPane
+// (projectpicker_test.go) does, for the tab picker: tea.PasteMsg had no
+// branch for dialogTabPick either, so a paste while it was open fell through
+// to sendClipboardToPane — typed into the pane hidden behind the dialog, with
+// a trailing CR able to run it.
+func TestUpdate_PasteMsg_TabPickerFoldsIntoQueryInsteadOfPane(t *testing.T) {
+	fake := &fakeSender{}
+	m := pasteTestModel(fake)
+	m.dialog = dialogTabPick
+	m.tabPick = tabPickState{
+		paneID:   "p1",
+		srcTabID: "t1",
+		filtered: []tabPickRow{{tabID: "t2", label: "proj / other"}},
+	}
+
+	updated, cmd := m.Update(tea.PasteMsg{Content: "hello\r"})
+	if cmd != nil {
+		runCmd(cmd)
+	}
+	got := updated.(Model)
+
+	if len(fake.sent) != 0 {
+		t.Fatalf("paste while the tab picker is open sent %d IPC message(s) to the hidden pane, want 0", len(fake.sent))
+	}
+	if !strings.Contains(got.tabPick.query, "hello") {
+		t.Errorf("tabPick.query = %q, want it to contain the pasted text", got.tabPick.query)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Send failure
 // ---------------------------------------------------------------------------
@@ -688,5 +719,134 @@ func TestMovePane_MenuToBroadcastEndToEnd(t *testing.T) {
 		t.Errorf("active tab = %v, want tab-src-1", activeTab)
 	} else if activeTab.ActivePane != "p1" {
 		t.Errorf("T1 ActivePane = %q, want p1", activeTab.ActivePane)
+	}
+}
+
+// TestTabPicker_BroadcastRefreshPreservesCursorSelection covers a review
+// finding: refiltering after a broadcast clamped the cursor by INDEX alone,
+// so removing a candidate ABOVE the selection silently moved the cursor onto
+// whichever row slid into its old slot instead of keeping the user's actual
+// selection.
+func TestTabPicker_BroadcastRefreshPreservesCursorSelection(t *testing.T) {
+	t.Parallel()
+	p2 := NewPaneModel("p2", 1024)
+	srcTab := NewTabModel("tab-src", "Shell")
+	srcTab.Root = NewLeaf(p2)
+	source := &ProjectModel{ID: "proj-source", Name: "source", tabs: []*TabModel{srcTab}}
+	t1 := NewTabModel("tab-1", "Alpha")
+	t2 := NewTabModel("tab-2", "Beta")
+	t3 := NewTabModel("tab-3", "Gamma")
+	projA := &ProjectModel{ID: "proj-a", Name: "a", tabs: []*TabModel{t1}}
+	projB := &ProjectModel{ID: "proj-b", Name: "b", tabs: []*TabModel{t2}}
+	projC := &ProjectModel{ID: "proj-c", Name: "c", tabs: []*TabModel{t3}}
+
+	m := &Model{width: 100, height: 40, projects: []*ProjectModel{source, projA, projB, projC}, activeProject: 0}
+	updated, _ := m.openMovePanePicker("p2")
+	got := updated.(Model)
+	if len(got.tabPick.filtered) != 3 {
+		t.Fatalf("setup: filtered = %v, want 3 candidates", got.tabPick.filtered)
+	}
+
+	// Cursor onto tab-2 (index 1, the MIDDLE candidate) — load-bearing choice:
+	// an index-only clamp is a no-op whenever the cursor's OLD index is still
+	// in range, which is exactly what happens here once a row above it is
+	// removed (index 1 stays "in range" of the surviving 2-row list, it just
+	// silently names a DIFFERENT tab). Putting the cursor on the last row
+	// instead would make a plain clamp-to-new-max coincidentally agree with
+	// the fix, since the last row survives either way.
+	updated, _ = got.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	got = updated.(Model)
+	if row := got.tabPick.filtered[got.tabPick.cursor]; row.tabID != "tab-2" {
+		t.Fatalf("setup: cursor row = %+v, want tab-2", row)
+	}
+
+	// Broadcast removes proj-a (and tab-1) — the row ABOVE the selection.
+	// Everything below it shifts up one slot: index 1 now names tab-3, not
+	// tab-2, so a bare "is the index still in range" clamp says nothing
+	// changed while the selection has silently moved.
+	updated, _ = got.Update(WorkspaceStateMsg{
+		Dest: "",
+		Projects: []ProjectInfo{
+			{ID: "proj-source", Name: "source", TabIDs: []string{"tab-src"}, ActiveTab: "tab-src"},
+			{ID: "proj-b", Name: "b", TabIDs: []string{"tab-2"}, ActiveTab: "tab-2"},
+			{ID: "proj-c", Name: "c", TabIDs: []string{"tab-3"}, ActiveTab: "tab-3"},
+		},
+		Tabs: []TabInfo{
+			{ID: "tab-src", Name: "Shell", ProjectID: "proj-source", Panes: []string{"p2"}},
+			{ID: "tab-2", Name: "Beta", ProjectID: "proj-b"},
+			{ID: "tab-3", Name: "Gamma", ProjectID: "proj-c"},
+		},
+		Panes: []PaneInfo{
+			{ID: "p2", TabID: "tab-src", Type: "terminal"},
+		},
+	})
+	next := updated.(Model)
+
+	if next.dialog != dialogTabPick {
+		t.Fatalf("dialog = %v, want dialogTabPick", next.dialog)
+	}
+	if len(next.tabPick.filtered) != 2 {
+		t.Fatalf("filtered = %v, want 2 candidates after proj-a's removal", next.tabPick.filtered)
+	}
+	if row := next.tabPick.filtered[next.tabPick.cursor]; row.tabID != "tab-2" {
+		t.Errorf("cursor row = %+v, want it to still name tab-2 — the user's selection, not whichever "+
+			"row slid into its old index", row)
+	}
+}
+
+// TestRenderTabPickDialog_ScrollsWithManyCandidates guards a review finding:
+// the picker used to render every candidate unwindowed, so on a workspace with
+// dozens of tabs the list ran taller than the terminal and renderDialog's
+// lipgloss.Place (which does not clip) pushed the cursor row and the hint
+// below it off-screen. 40 candidates against a 24-row terminal reproduces it.
+func TestRenderTabPickDialog_ScrollsWithManyCandidates(t *testing.T) {
+	t.Parallel()
+	p1 := NewPaneModel("p1", 1024)
+	srcTab := NewTabModel("tab-src", "Shell")
+	srcTab.Root = NewLeaf(p1)
+	projects := []*ProjectModel{{ID: "proj-source", Name: "source", tabs: []*TabModel{srcTab}}}
+	for i := 0; i < 40; i++ {
+		id := fmt.Sprintf("proj-%02d", i)
+		tab := NewTabModel(fmt.Sprintf("tab-%02d", i), "Shell")
+		projects = append(projects, &ProjectModel{ID: id, Name: id, tabs: []*TabModel{tab}})
+	}
+
+	m := &Model{width: 100, height: 24, projects: projects, activeProject: 0}
+	updated, _ := m.openMovePanePicker("p1")
+	got := updated.(Model)
+	if len(got.tabPick.filtered) != 40 {
+		t.Fatalf("setup: filtered = %d candidates, want 40", len(got.tabPick.filtered))
+	}
+
+	out := got.renderTabPickDialog()
+	lines := strings.Split(out, "\n")
+	// renderDialog wraps this content in dialogBorder: a 2-row rounded border
+	// plus Padding(1,2)'s top/bottom row each — 4 rows of chrome around
+	// whatever this function returns, so the CONTENT must fit in height-4 for
+	// the whole box to fit the terminal.
+	if maxLines := got.height - 4; len(lines) > maxLines {
+		t.Fatalf("rendered %d content lines, want at most %d to fit height=%d:\n%s",
+			len(lines), maxLines, got.height, stripANSI(out))
+	}
+
+	// Move the cursor down to the LAST candidate and confirm it is still
+	// rendered — the window must follow the cursor, not just shrink to fit.
+	for i := 0; i < len(got.tabPick.filtered)-1; i++ {
+		updated, _ = got.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+		got = updated.(Model)
+	}
+	if got.tabPick.cursor != 39 {
+		t.Fatalf("setup: cursor = %d, want 39 (the last candidate)", got.tabPick.cursor)
+	}
+	out = got.renderTabPickDialog()
+	lines = strings.Split(out, "\n")
+	if len(lines) > got.height-4 {
+		t.Fatalf("rendered %d content lines after scrolling to the last row, want at most %d",
+			len(lines), got.height-4)
+	}
+	stripped := stripANSI(out)
+	lastLabel := got.tabPick.filtered[39].label
+	if !strings.Contains(stripped, "> "+lastLabel) {
+		t.Errorf("cursor row for the last candidate (%q) not found in rendered output:\n%s", lastLabel, stripped)
 	}
 }

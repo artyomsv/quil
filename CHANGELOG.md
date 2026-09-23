@@ -11,6 +11,20 @@ version section here and deletes them.
 
 ## [Unreleased]
 
+## [1.77.0] - 2026-09-23
+
+### Added
+- **Move a tab to another project.** Right-click a tab and choose *Move to
+  project…* to send it, with its panes still running, to another project on the
+  same machine. You stay in the project you were in.
+- **Tabs have a context menu.** Right-click a tab in the tab bar, or its heading in
+  the sidebar, to rename it or pick its colour from a list that shows each colour.
+
+### Fixed
+- **Renaming or recolouring a tab is saved immediately.** It used to wait for the
+  30-second periodic snapshot, so a daemon stopped inside that window came back
+  with the old name and colour.
+
 ## [1.76.0] - 2026-09-23
 
 ### Added

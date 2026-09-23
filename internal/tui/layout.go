@@ -114,6 +114,42 @@ func (n *LayoutNode) PaneIDs() map[string]bool {
 	return ids
 }
 
+// largestLeaf returns the leaf holding the largest pane by FRACTION of the
+// tab's area: the product of the split ratios along its path (Ratio for a
+// Left child, 1-Ratio for a Right one). Placeholder leaves (Pane == nil) are
+// skipped. A tie goes to the FIRST leaf in tree order: only a strictly larger
+// fraction replaces the current best. nil when the tree holds no pane.
+//
+// Fraction, not cells, on purpose: cell areas are a function of THIS client's
+// terminal, so two clients with different window sizes could rank two leaves
+// differently. Integer truncation also breaks ties arbitrarily (a 101-wide
+// 50/50 split is 50|51 cells). The fraction is a property of the tree alone,
+// so every client holding the same tree picks the same leaf.
+func (n *LayoutNode) largestLeaf() *LayoutNode {
+	var best *LayoutNode
+	var bestFrac float64
+	var walk func(node *LayoutNode, frac float64)
+	walk = func(node *LayoutNode, frac float64) {
+		if node == nil {
+			return
+		}
+		if node.IsLeaf() {
+			if best == nil || frac > bestFrac {
+				best, bestFrac = node, frac
+			}
+			return
+		}
+		if node.Left == nil && node.Right == nil {
+			// Placeholder: no pane to rank.
+			return
+		}
+		walk(node.Left, frac*node.Ratio)
+		walk(node.Right, frac*(1-node.Ratio))
+	}
+	walk(n, 1.0)
+	return best
+}
+
 // findParent returns the parent of the node containing paneID, and whether
 // the target is the left child (true) or right child (false).
 // Returns nil if paneID is at the root or not found.
@@ -517,6 +553,32 @@ func (n *LayoutNode) minHeight() int {
 		return n.Left.minHeight() + n.Right.minHeight()
 	}
 	return max(n.Left.minHeight(), n.Right.minHeight())
+}
+
+// arrivalSplitDir chooses how to split a leaf of w×h cells for an arriving
+// pane. It prefers SplitHorizontal (left|right). It falls back to
+// SplitVertical (top|bottom) only when a left|right split would leave either
+// half narrower than minPaneW AND a top|bottom split keeps both halves at
+// least minPaneH. If neither fits, it keeps the preference. Unknown geometry
+// (w <= 0 || h <= 0: no WindowSizeMsg yet) also keeps the preference.
+// Halves are computed exactly as CollectRects does: left = int(w*0.5),
+// right = w-left.
+func arrivalSplitDir(w, h int) SplitDir {
+	if w <= 0 || h <= 0 {
+		return SplitHorizontal
+	}
+	left := int(float64(w) * 0.5)
+	right := w - left
+	narrow := left < minPaneW || right < minPaneW
+	if !narrow {
+		return SplitHorizontal
+	}
+	top := int(float64(h) * 0.5)
+	bottom := h - top
+	if top >= minPaneH && bottom >= minPaneH {
+		return SplitVertical
+	}
+	return SplitHorizontal
 }
 
 // FindPaneRectAt returns the pane and its screen rectangle at coordinates (x, y).

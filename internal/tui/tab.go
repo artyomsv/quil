@@ -446,6 +446,45 @@ func (t *TabModel) SplitAtPane(paneID string, dir SplitDir) *LayoutNode {
 	return ph
 }
 
+// placeArrivingPane splits the largest leaf of t's tree and installs pane in
+// the RIGHT (left|right) or BOTTOM (top|bottom) half, Ratio 0.5. w, h are the
+// tab's canonical geometry (the caller passes paneAreaWidth() and
+// height-chromeHeight, NOT the notes-squeezed width). It locates the chosen
+// leaf's cell rect with CollectRects(0, 0, w, h, …) and feeds that rect to
+// arrivalSplitDir. It installs the pane through SplitAtPane + the node's
+// fill(), which retires phType (see fill's comment), then calls
+// invalidateLeaves. It returns false and leaves the tree untouched when the
+// tree is nil or holds no pane leaf. The caller guarantees pane is not
+// already in the tree.
+func (t *TabModel) placeArrivingPane(pane *PaneModel, w, h int) bool {
+	if t.Root == nil {
+		return false
+	}
+	leaf := t.Root.largestLeaf()
+	if leaf == nil {
+		return false
+	}
+
+	var rects []PaneRect
+	t.Root.CollectRects(0, 0, w, h, &rects)
+	var rectW, rectH int
+	for _, r := range rects {
+		if r.Pane.ID == leaf.Pane.ID {
+			rectW, rectH = r.W, r.H
+			break
+		}
+	}
+
+	dir := arrivalSplitDir(rectW, rectH)
+	ph := t.SplitAtPane(leaf.Pane.ID, dir)
+	if ph == nil {
+		return false
+	}
+	ph.fill(pane)
+	t.invalidateLeaves()
+	return true
+}
+
 // RemovePane removes the pane with the given ID, promoting its sibling.
 // If the removed pane was active, focus moves to the first leaf.
 func (t *TabModel) RemovePane(paneID string) {

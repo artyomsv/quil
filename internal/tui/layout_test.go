@@ -941,3 +941,137 @@ func TestLayoutNode_CollectBorders_PlaceholderSkipped(t *testing.T) {
 		t.Error("the emitted border must belong to the root split")
 	}
 }
+
+func TestLargestLeaf_NilTree(t *testing.T) {
+	var root *LayoutNode
+	if got := root.largestLeaf(); got != nil {
+		t.Fatalf("largestLeaf(nil) = %v, want nil", got)
+	}
+}
+
+func TestLargestLeaf_SingleLeaf(t *testing.T) {
+	root := NewLeaf(newTestPane("a"))
+	got := root.largestLeaf()
+	if got == nil || got.Pane.ID != "a" {
+		t.Fatalf("largestLeaf = %v, want leaf 'a'", got)
+	}
+}
+
+func TestLargestLeaf_OnlyPlaceholders(t *testing.T) {
+	root := &LayoutNode{Split: SplitHorizontal, Ratio: 0.5,
+		Left:  &LayoutNode{Ratio: 0.5}, // placeholder
+		Right: &LayoutNode{Ratio: 0.5}, // placeholder
+	}
+	if got := root.largestLeaf(); got != nil {
+		t.Fatalf("largestLeaf = %v, want nil (no pane leaves)", got)
+	}
+}
+
+// TestLargestLeaf_PicksLargestByArea: `A | (B / C)` at 0.5 gives A (0.5
+// fraction) over B and C (0.25 each).
+func TestLargestLeaf_PicksLargestByArea(t *testing.T) {
+	root := &LayoutNode{Split: SplitHorizontal, Ratio: 0.5,
+		Left: NewLeaf(newTestPane("a")),
+		Right: &LayoutNode{Split: SplitVertical, Ratio: 0.5,
+			Left:  NewLeaf(newTestPane("b")),
+			Right: NewLeaf(newTestPane("c")),
+		},
+	}
+	got := root.largestLeaf()
+	if got == nil || got.Pane.ID != "a" {
+		t.Fatalf("largestLeaf = %v, want leaf 'a'", got)
+	}
+}
+
+// TestLargestLeaf_HonoursRatio: `A | B` at Ratio 0.3 gives B (0.7 fraction).
+func TestLargestLeaf_HonoursRatio(t *testing.T) {
+	root := &LayoutNode{Split: SplitHorizontal, Ratio: 0.3,
+		Left:  NewLeaf(newTestPane("a")),
+		Right: NewLeaf(newTestPane("b")),
+	}
+	got := root.largestLeaf()
+	if got == nil || got.Pane.ID != "b" {
+		t.Fatalf("largestLeaf = %v, want leaf 'b'", got)
+	}
+}
+
+// TestLargestLeaf_TieGoesToFirstInTreeOrder: a 2x2 grid of equal quarters
+// (all Ratio 0.5, so every leaf's fraction is exactly 0.25) gives the first
+// leaf in tree order.
+//
+// Mutation guard: `>` -> `>=` in largestLeaf's replace condition must fail
+// this. At an exact tie frac == bestFrac, so `>` keeps the first leaf while
+// `>=` keeps overwriting best all the way to the last leaf.
+func TestLargestLeaf_TieGoesToFirstInTreeOrder(t *testing.T) {
+	root := &LayoutNode{Split: SplitHorizontal, Ratio: 0.5,
+		Left: &LayoutNode{Split: SplitVertical, Ratio: 0.5,
+			Left:  NewLeaf(newTestPane("a")),
+			Right: NewLeaf(newTestPane("b")),
+		},
+		Right: &LayoutNode{Split: SplitVertical, Ratio: 0.5,
+			Left:  NewLeaf(newTestPane("c")),
+			Right: NewLeaf(newTestPane("d")),
+		},
+	}
+	got := root.largestLeaf()
+	if got == nil || got.Pane.ID != "a" {
+		t.Fatalf("largestLeaf = %v, want leaf 'a' (first in tree order)", got)
+	}
+}
+
+// TestLargestLeaf_UsesFractionNotCells: `A | B` at 0.5 ties by fraction, so
+// placeArrivingPane must split A (the first leaf) even though a 101-wide
+// tab gives A 50 cells and B 51 — cell-based ranking would pick B.
+//
+// Mutation guard: ranking by CollectRects area instead of the tree fraction
+// must fail this.
+func TestLargestLeaf_UsesFractionNotCells(t *testing.T) {
+	tab := NewTabModel("t1", "Test")
+	tab.Root = &LayoutNode{Split: SplitHorizontal, Ratio: 0.5,
+		Left:  NewLeaf(newTestPane("a")),
+		Right: NewLeaf(newTestPane("b")),
+	}
+
+	if ok := tab.placeArrivingPane(newTestPane("new"), 101, 40); !ok {
+		t.Fatal("placeArrivingPane returned false")
+	}
+	// B must be untouched: fraction ranking (0.5 == 0.5, tie to first) must
+	// win over cell ranking (51 cells for B > 50 cells for A).
+	if tab.Root.Right == nil || !tab.Root.Right.IsLeaf() || tab.Root.Right.Pane.ID != "b" {
+		t.Fatalf("leaf 'b' should be untouched, got %+v", tab.Root.Right)
+	}
+	// A must have been split for the arriving pane.
+	aNode := tab.Root.Left
+	if aNode == nil || aNode.IsLeaf() {
+		t.Fatalf("leaf 'a' should have been split, got %+v", aNode)
+	}
+	if aNode.Left == nil || aNode.Left.Pane == nil || aNode.Left.Pane.ID != "a" {
+		t.Fatalf("a's first child should still hold pane 'a', got %+v", aNode.Left)
+	}
+	if aNode.Right == nil || aNode.Right.Pane == nil || aNode.Right.Pane.ID != "new" {
+		t.Fatalf("a's other child should hold the arriving pane, got %+v", aNode.Right)
+	}
+}
+
+func TestArrivalSplitDir(t *testing.T) {
+	tests := []struct {
+		name string
+		w, h int
+		want SplitDir
+	}{
+		{"wide enough for H", 100, 40, SplitHorizontal},
+		{"exact H boundary 10|10", 20, 40, SplitHorizontal},
+		{"below H boundary, V fits", 19, 40, SplitVertical},
+		{"neither fits, keeps preference", 19, 7, SplitHorizontal},
+		{"exact V boundary 4|4", 19, 8, SplitVertical},
+		{"unknown geometry zero", 0, 0, SplitHorizontal},
+		{"unknown geometry negative", -5, 10, SplitHorizontal},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := arrivalSplitDir(tt.w, tt.h); got != tt.want {
+				t.Errorf("arrivalSplitDir(%d, %d) = %v, want %v", tt.w, tt.h, got, tt.want)
+			}
+		})
+	}
+}

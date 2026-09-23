@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -185,4 +186,120 @@ func TestTabModel_OverlayVisible_ResizeSizesOverlay(t *testing.T) {
 	if normal.Width == 0 {
 		t.Error("layout pane must still be resized while overlay is visible")
 	}
+}
+
+func TestPlaceArrivingPane_SingleLeafGoesLeftRight(t *testing.T) {
+	tab := NewTabModel("t1", "Test")
+	tab.Root = NewLeaf(newTestPane("old"))
+
+	ok := tab.placeArrivingPane(newTestPane("new"), 100, 40)
+	if !ok {
+		t.Fatal("placeArrivingPane returned false")
+	}
+	if tab.Root.Split != SplitHorizontal {
+		t.Fatalf("root split: got %v, want SplitHorizontal", tab.Root.Split)
+	}
+	if tab.Root.Ratio != 0.5 {
+		t.Fatalf("root ratio: got %v, want 0.5", tab.Root.Ratio)
+	}
+	if tab.Root.Left == nil || tab.Root.Left.Pane == nil || tab.Root.Left.Pane.ID != "old" {
+		t.Fatalf("left child: want the old pane, got %+v", tab.Root.Left)
+	}
+	if tab.Root.Right == nil || tab.Root.Right.Pane == nil || tab.Root.Right.Pane.ID != "new" {
+		t.Fatalf("right child: want the new pane, got %+v", tab.Root.Right)
+	}
+	if leaves := tab.Leaves(); len(leaves) != 2 {
+		t.Fatalf("Leaves() = %d, want 2 (cache must be invalidated)", len(leaves))
+	}
+}
+
+// TestPlaceArrivingPane_NarrowLeafGoesTopBottom: `A | B` in a 30-wide tab
+// makes A 15 cells wide (7|8 when split again), narrower than minPaneW, so
+// the arriving pane goes top/bottom under A instead: A becomes `A / new`.
+func TestPlaceArrivingPane_NarrowLeafGoesTopBottom(t *testing.T) {
+	tab := NewTabModel("t1", "Test")
+	tab.Root = &LayoutNode{Split: SplitHorizontal, Ratio: 0.5,
+		Left:  NewLeaf(newTestPane("a")),
+		Right: NewLeaf(newTestPane("b")),
+	}
+
+	ok := tab.placeArrivingPane(newTestPane("new"), 30, 40)
+	if !ok {
+		t.Fatal("placeArrivingPane returned false")
+	}
+
+	aNode := tab.Root.Left
+	if aNode == nil || aNode.IsLeaf() {
+		t.Fatalf("leaf 'a' should have been split, got %+v", aNode)
+	}
+	if aNode.Split != SplitVertical {
+		t.Fatalf("a's split: got %v, want SplitVertical", aNode.Split)
+	}
+	if aNode.Left == nil || aNode.Left.Pane == nil || aNode.Left.Pane.ID != "a" {
+		t.Fatalf("a's top child: want pane 'a', got %+v", aNode.Left)
+	}
+	if aNode.Right == nil || aNode.Right.Pane == nil || aNode.Right.Pane.ID != "new" {
+		t.Fatalf("a's bottom child: want the new pane, got %+v", aNode.Right)
+	}
+	if tab.Root.Right == nil || tab.Root.Right.Pane == nil || tab.Root.Right.Pane.ID != "b" {
+		t.Fatalf("leaf 'b' should be untouched, got %+v", tab.Root.Right)
+	}
+}
+
+// buildThreeLeafTestTree returns a fresh 3-leaf tree (a | (b / c)) each call,
+// for building two independent-but-structurally-identical trees.
+func buildThreeLeafTestTree() *LayoutNode {
+	return &LayoutNode{Split: SplitHorizontal, Ratio: 0.5,
+		Left: NewLeaf(newTestPane("a")),
+		Right: &LayoutNode{Split: SplitVertical, Ratio: 0.5,
+			Left:  NewLeaf(newTestPane("b")),
+			Right: NewLeaf(newTestPane("c")),
+		},
+	}
+}
+
+// TestPlaceArrivingPane_DeterministicForIdenticalTrees is the multi-client
+// guarantee in miniature: two clients holding independently-built but
+// structurally identical trees, given the same geometry, must place the
+// arriving pane in the same spot.
+func TestPlaceArrivingPane_DeterministicForIdenticalTrees(t *testing.T) {
+	tabA := NewTabModel("t1", "Test")
+	tabA.Root = buildThreeLeafTestTree()
+	tabB := NewTabModel("t2", "Test")
+	tabB.Root = buildThreeLeafTestTree()
+
+	okA := tabA.placeArrivingPane(newTestPane("new"), 101, 41)
+	okB := tabB.placeArrivingPane(newTestPane("new"), 101, 41)
+	if !okA || !okB {
+		t.Fatalf("placeArrivingPane: okA=%v okB=%v, want true/true", okA, okB)
+	}
+
+	if !reflect.DeepEqual(SerializeLayout(tabA.Root), SerializeLayout(tabB.Root)) {
+		t.Fatalf("layouts diverged:\n a=%+v\n b=%+v", SerializeLayout(tabA.Root), SerializeLayout(tabB.Root))
+	}
+}
+
+func TestPlaceArrivingPane_NoPaneLeafLeavesTreeUntouched(t *testing.T) {
+	t.Run("nil tree", func(t *testing.T) {
+		tab := NewTabModel("t1", "Test")
+		if ok := tab.placeArrivingPane(newTestPane("new"), 100, 40); ok {
+			t.Fatal("placeArrivingPane returned true for a nil tree")
+		}
+		if tab.Root != nil {
+			t.Fatalf("tree should stay nil, got %+v", tab.Root)
+		}
+	})
+
+	t.Run("only placeholders", func(t *testing.T) {
+		tab := NewTabModel("t1", "Test")
+		placeholder := &LayoutNode{Ratio: 0.7}
+		tab.Root = placeholder
+
+		if ok := tab.placeArrivingPane(newTestPane("new"), 100, 40); ok {
+			t.Fatal("placeArrivingPane returned true for a tree with no pane leaf")
+		}
+		if tab.Root != placeholder || tab.Root.Ratio != 0.7 || tab.Root.Left != nil || tab.Root.Right != nil || tab.Root.Pane != nil {
+			t.Fatalf("tree must be untouched, got %+v", tab.Root)
+		}
+	})
 }

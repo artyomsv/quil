@@ -2339,11 +2339,11 @@ func (d *Daemon) handleDestroyTab(msg *ipc.Message) {
 	log.Printf("tab destroy: %s", payload.TabID)
 	// The owning project has to be read BEFORE the destroy: DestroyTab
 	// de-registers the tab from it, so afterwards there is nothing left to
-	// ask which project just lost a tab.
-	projectID := ""
-	if tab := d.session.Tab(payload.TabID); tab != nil {
-		projectID = tab.ProjectID
-	}
+	// ask which project just lost a tab. TabProjectID, not Tab(id).ProjectID:
+	// the latter reads the field off the LIVE *Tab pointer with no lock,
+	// racing MoveTab/MergeProjects writing it under sm.mu on another conn's
+	// dispatch goroutine.
+	projectID, _ := d.session.TabProjectID(payload.TabID)
 	// Capture the pane list before DestroyTab removes them from the session
 	// maps, so we can clean up their artifacts after the tab is gone.
 	panes := d.session.Panes(payload.TabID)
@@ -6535,10 +6535,9 @@ func (d *Daemon) buildPaneStatus(pane *Pane) ipc.PaneStatusRespPayload {
 	pending := pane.Pending
 	pane.spawnMu.Unlock()
 	state, reason, lastIdle := paneWorkState(pane)
-	projectID := ""
-	if tab := d.session.Tab(pane.TabID); tab != nil {
-		projectID = tab.ProjectID
-	}
+	// TabProjectID, not Tab(id).ProjectID: see handleDestroyTab's comment —
+	// the latter reads the field unlocked off the live *Tab pointer.
+	projectID, _ := d.session.TabProjectID(pane.TabID)
 
 	return ipc.PaneStatusRespPayload{
 		PaneID:            pane.ID,

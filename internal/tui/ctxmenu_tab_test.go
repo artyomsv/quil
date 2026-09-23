@@ -497,6 +497,29 @@ func TestTabCtxMenu_NotOpenedInNotesMode(t *testing.T) {
 	}
 }
 
+// TestTabCtxMenu_SidebarRightClickNotOpenedInNotesMode pins the same refusal
+// as the test above, but through the SIDEBAR entry point rather than the tab
+// bar — and the two are not redundant. The tab-bar right-click has its OWN
+// call-site gate before it ever calls openTabCtxMenu (`m.dialog == dialogNone
+// && !m.notesMode && !m.renaming && !m.renamingPane`, model.go's mouse-right
+// branch), so that path would still refuse even without openTabCtxMenu's own
+// check. The sidebar's `projectSidebarSwallowsMouse` branch has no such
+// call-site gate: its `sidebarRowTab` case dispatches straight into
+// openTabCtxMenu, so THIS test is the only thing in the suite that would
+// notice if openTabCtxMenu's own refusal (notes mode / an inline rename / a
+// pane rename / an open dialog) were ever removed.
+func TestTabCtxMenu_SidebarRightClickNotOpenedInNotesMode(t *testing.T) {
+	t.Parallel()
+	m := newTestModelWithSidebar(t)
+	m.notesMode = true
+	x, y := sidebarTabRowCoords(t, &m, 1)
+	updated, _ := m.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseRight})
+	got := updated.(Model)
+	if got.ctxMenu.open() {
+		t.Error("the sidebar tab menu must not open while notes mode owns input")
+	}
+}
+
 func TestTabCtxMenu_NarrowTerminalGuard(t *testing.T) {
 	t.Parallel()
 	m := newTabCtxMenuTestModel(t)

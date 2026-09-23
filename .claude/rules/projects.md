@@ -303,9 +303,20 @@ whenever anything else in the workspace still holds a tab.
 `project_id`, meaningful only to the daemon that owns the map it indexes.
 There is no destination field to get wrong.
 
-**Panes keep their CWD.** `Pane.TabID` never changes, and only a pane created
-AFTER the move picks up the target project's root (`projectCWD`) — a tab that
-moves between projects keeps working wherever it already was.
+**Panes keep their CWD.** `Pane.TabID` never changes — a tab that moves
+between projects keeps working wherever it already was. A NEW TAB opened in
+the target afterwards (or the Shell tab `recoverEmptyProject` gives the
+source) opens at the target's root (`projectCWD`, `daemon.go:2124`/`:2428`).
+A pane SPLIT into the moved tab does not: `handleCreatePane`'s ordinary path
+resolves against `d.defaultCWD()` (`daemon.go:2608`), same as a split into any
+other tab — `projectCWD` is a NEW-TAB concept, not a per-tab one.
+
+**The target's `ActiveTab` becomes the moved tab, and that reaches every
+attached client.** A second client currently looking at the target project is
+therefore moved onto the newly-arrived tab by the very next broadcast — the
+same way `SwitchTab`/`SwitchProject` already move every attached client's view
+of `ActiveTab`, and accepted for the same reason: `ActiveTab` is one value per
+project, shared by construction, not a per-client cursor.
 
 **A same-project move is a no-op and broadcasts nothing** — the same
 precedent `ReorderTab` sets for a drag that changed nothing: an action the

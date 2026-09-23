@@ -331,10 +331,11 @@ const (
 // exactly as empty as DestroyTab leaves one, and owes the same replacement
 // Shell tab.
 //
-// Panes, layout and CWDs are untouched — Pane.TabID does not change, and only
-// a NEW pane created after the move picks up the target project's root
-// (projectCWD). A tab that moves between projects keeps working in the
-// directory it already had.
+// Panes, layout and CWDs are untouched — Pane.TabID does not change, so a tab
+// that moves between projects keeps working in the directory it already had.
+// A NEW TAB opened in the target afterwards picks up its root (projectCWD);
+// a pane SPLIT into the moved tab does not — handleCreatePane's ordinary path
+// falls back to defaultCWD, same as a split into any other tab.
 func (sm *SessionManager) MoveTab(tabID, projectID string) (from string, res moveTabResult) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()

@@ -842,6 +842,23 @@ func (sm *SessionManager) Tab(id string) *Tab {
 	return sm.tabs[id]
 }
 
+// TabProjectID reads a tab's owning project under the session lock. It
+// exists because Tab(id) hands back the LIVE *Tab pointer, and MoveTab and
+// MergeProjects both write tab.ProjectID under sm.mu.Lock() from a
+// different goroutine — so `d.session.Tab(id).ProjectID` after the call
+// returns is an unsynchronized read racing those writers, exactly the shape
+// SnapshotState's own doc comment calls out for reading Panes/Layout off a
+// live *Tab. Reports false for an unknown tab, same as Tab(id) == nil.
+func (sm *SessionManager) TabProjectID(id string) (string, bool) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	tab, ok := sm.tabs[id]
+	if !ok {
+		return "", false
+	}
+	return tab.ProjectID, true
+}
+
 func (sm *SessionManager) Panes(tabID string) []*Pane {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()

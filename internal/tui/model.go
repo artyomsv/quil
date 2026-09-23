@@ -1804,9 +1804,11 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 					}
 				case sidebarRowTab:
 					// Opens the tab menu without focusing or switching — unlike
-					// the pane row below, none of the tab menu's items resolve
-					// through the active tab, so there is no shared contract to
-					// satisfy first.
+					// the pane row below, OPENING needs no active-tab contract
+					// satisfied first. Rename is the one item that switches to
+					// the target tab before acting (executeTabCtxMenuItem), so
+					// it can edit the tab the menu opened for rather than
+					// whichever one happened to be active.
 					if tabs := m.curTabs(); idx >= 0 && idx < len(tabs) {
 						m.openTabCtxMenu(tabs[idx], msg.X, msg.Y)
 					}

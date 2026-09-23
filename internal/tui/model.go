@@ -2168,9 +2168,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// Either way this pane's local scrollback is never populated
 					// (alt-screen), so swallow the event rather than scrolling it.
 					if rect := m.activePaneRect(); rect != nil {
+						// The two vertical buttons are matched explicitly, as
+						// every other wheel consumer in this package does:
+						// tea.MouseWheelMsg also carries MouseWheelLeft/Right
+						// (a trackpad or shift-scroll emits them), and
+						// collapsing the button to `== MouseWheelUp` read
+						// both of those as "not up" and forwarded them to
+						// the app as wheel DOWN. There is no horizontal
+						// mouse-wheel escape sequence to forward instead, so
+						// they are swallowed here — not forwarded, and not
+						// scrolled locally either, since this pane's
+						// scrollback is never populated on the alt screen.
+						up, ok := true, false
+						switch msg.Button {
+						case tea.MouseWheelUp:
+							up, ok = true, true
+						case tea.MouseWheelDown:
+							up, ok = false, true
+						}
+						if !ok {
+							return m, nil
+						}
 						relX := msg.X - rect.OX - 1
 						relY := msg.Y - rect.OY - 1
-						if seq := pane.wheelForwardSeq(msg.Button == tea.MouseWheelUp, relX, relY); seq != nil {
+						if seq := pane.wheelForwardSeq(up, relX, relY); seq != nil {
 							logger.Debug("wheel: forward pane=%s type=%s btn=%v rel=(%d,%d) seq=%q (local n=%v b=%v a=%v sgr=%v daemonTrack=%v)",
 								pane.ID, pane.Type, msg.Button, relX, relY, string(seq),
 								pane.mouseNormal, pane.mouseButton, pane.mouseAny, pane.mouseSGR, pane.daemonMouseTracking)

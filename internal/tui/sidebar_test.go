@@ -2202,9 +2202,11 @@ func TestSidebarWheel_HorizontalDoesNotMoveTheBody(t *testing.T) {
 // area, because the pane under the cursor is the sidebar, not a pane. A tracking
 // app would otherwise receive a wheel escape for a notch aimed at the strip.
 //
-// The control fires the same button at a PANE coordinate — only the coordinate
-// differs between the two halves, so the assertion is about the swallow rather
-// than about horizontal buttons being inert everywhere.
+// The control fires a VERTICAL button at a PANE coordinate — it can no longer
+// reuse the horizontal button under test, because the pane-forwarding branch
+// itself now swallows MouseWheelLeft/Right too (it used to misforward them as
+// wheel-down). The control still proves this fixture's tracking pane forwards
+// wheel events at all, so the swallow assertion below is not vacuous.
 func TestSidebarWheel_HorizontalIsStillSwallowed(t *testing.T) {
 	t.Parallel()
 	fake := newFakeConn()
@@ -2214,7 +2216,7 @@ func TestSidebarWheel_HorizontalIsStillSwallowed(t *testing.T) {
 	m.sidebarWidth = 22
 	m.curTabs()[0].ActivePaneModel().daemonMouseTracking = true
 
-	updated, _ := m.Update(tea.MouseWheelMsg{X: 40, Y: 10, Button: tea.MouseWheelLeft})
+	updated, _ := m.Update(tea.MouseWheelMsg{X: 40, Y: 10, Button: tea.MouseWheelUp})
 	got := updated.(Model)
 	if fake.sentCount() == 0 {
 		t.Fatal("control: a wheel over the PANE must forward to a tracking app — " +

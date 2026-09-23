@@ -217,6 +217,7 @@ If the clipboard has no text but contains an image, Quil decodes the DIB, saves 
 |---|---|
 | `Alt+PgUp` / `Alt+PgDown` | Scroll the pane scrollback by `[ui] page_scroll_lines` (0 = half-page) |
 | Mouse wheel | Scroll by `[ui] mouse_scroll_lines` (default 3) |
+| Mouse wheel over the tab bar | Scroll the tab strip instead of the pane, without switching tabs, when tabs overflow |
 | Click on scrollbar | Jump the scrollbar thumb to that Y position (rightmost content column of the pane) |
 | Click + drag on scrollbar | Continuous scroll — drag follows cursor Y, even off-pane |
 | `Alt+Up` / `Alt+Down` *(in log viewer)* | Jump cursor by `[ui] log_viewer_page_lines` (default 40) |

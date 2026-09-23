@@ -147,3 +147,41 @@ func TestUpdate_MouseWheel_ForwardsViaDaemonFlagOnReattach(t *testing.T) {
 		t.Errorf("forwarded data = %q, want SGR wheel-down (button 65)", data)
 	}
 }
+
+// TestUpdate_MouseWheel_HorizontalSwallowedForMouseTrackingPane is the
+// regression guard for treating MouseWheelLeft/Right as "not up" and
+// forwarding them as wheel DOWN: a trackpad or shift-scroll notch aimed at a
+// mouse-tracking pane must reach neither the PTY nor Quil's own scrollback.
+func TestUpdate_MouseWheel_HorizontalSwallowedForMouseTrackingPane(t *testing.T) {
+	cfg := config.Default()
+	pane := NewPaneModel("oc3", 1024)
+	pane.Active = true
+	pane.Type = "opencode"
+	tab := NewTabModel("t1", "Test")
+	tab.Root = NewLeaf(pane)
+	tab.ActivePane = "oc3"
+	fake := &fakeSender{}
+	m := Model{
+		cfg:           cfg,
+		client:        fake,
+		projects:      oneProject(tab),
+		width:         80,
+		height:        24,
+		notifications: NewNotificationCenter(cfg.Notification.SidebarWidth, cfg.Notification.MaxEvents),
+		mcpHighlights: make(map[string]bool),
+	}
+	m.resizeTabs()
+
+	pane.AppendOutput([]byte("\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h"))
+	if !pane.MouseTracking() {
+		t.Fatalf("MouseTracking() = false after opencode mouse-enable; flags x10=%v normal=%v button=%v any=%v sgr=%v",
+			pane.mouseX10, pane.mouseNormal, pane.mouseButton, pane.mouseAny, pane.mouseSGR)
+	}
+
+	for _, btn := range []tea.MouseButton{tea.MouseWheelLeft, tea.MouseWheelRight} {
+		_, _ = m.Update(tea.MouseWheelMsg{Button: btn, X: 10, Y: 5})
+		if len(fake.sent) != 0 {
+			t.Fatalf("button=%v: %d IPC send(s), want 0 (horizontal wheel must be swallowed, not forwarded as up/down)", btn, len(fake.sent))
+		}
+	}
+}

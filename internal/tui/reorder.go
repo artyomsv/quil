@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"fmt"
+
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
@@ -56,86 +58,398 @@ type tabSpan struct {
 	text  string
 }
 
-// tabSpans lays the visible tabs out: same labels, same styles, same overflow
-// rule around the active tab, same one-column separators. It is the SINGLE
-// geometry the painter (renderTabBar), the click (hitTestTab) and the reorder
-// drag all read, so none of the three can disagree about which tab occupies
-// which column.
-//
-// Carrying the rendered text costs nothing: the width has to come from
-// lipgloss.Width(style.Render(label)) either way, so the string already exists
-// and was previously thrown away. Keeping it is what let renderTabBar stop
-// owning a second copy of this arithmetic — the copy that made
-// TestTabSpansAgreeWithHitTestTab necessary in the first place.
-func (m Model) tabSpans() []tabSpan {
-	barW := m.paneAreaWidth()
-	tabs := m.curTabs()
-	if len(tabs) == 0 {
-		return nil
-	}
+// leftTabMarker is the exact text painted before the first visible tab when
+// hidden tabs remain to its left — never the WORST-CASE width tabBarWidths
+// returns for fit decisions. A POSITION (span.start, the cursor tabBarLayout
+// advances by, what renderTabBar paints) must use the REAL count: the worst
+// case (N = n-1) is only ever a valid upper bound for deciding whether tabs
+// FIT, and using it for a position paints every tab one or more cells left
+// of where its span says it starts whenever the real count has fewer digits
+// than n-1 — e.g. 11-100 tabs with 1-9 actually hidden on the left, where
+// the reserve is sized for a 2-digit count ("«99 ") but "«3 " is only 3
+// cells.
+func leftTabMarker(hidden int) string {
+	return fmt.Sprintf("«%d ", hidden)
+}
 
-	texts := make([]string, len(tabs))
-	widths := make([]int, len(tabs))
-	totalW := 0
+// rightTabMarker mirrors leftTabMarker for the trailing indicator. It has no
+// position to get wrong today — it is painted after every span, never
+// before one — but shares the real-count rule leftTabMarker states, since
+// nothing here should have two ways to spell the same marker.
+func rightTabMarker(hidden int) string {
+	return fmt.Sprintf(" %d»", hidden)
+}
+
+// tabBarWidths renders every tab label once and returns its styled text and
+// width, the bar's own budget, and both overflow markers' WORST-CASE widths
+// (N = n-1, the most tabs either marker can ever report) — used ONLY for
+// space-budget decisions (maxFirstIndex, the reserve either layout branch
+// walks against), never for a position. tabBarLayout and scrollTabBar both
+// need these numbers before they can decide anything else, and computing
+// them once here is what keeps there being only one place that renders a
+// tab label for layout purposes.
+func (m Model) tabBarWidths() (texts []string, widths []int, barW, leftMarkerW, rightMarkerW int) {
+	tabs := m.curTabs()
+	barW = m.paneAreaWidth()
+	n := len(tabs)
+	if n == 0 {
+		return nil, nil, barW, 0, 0
+	}
+	texts = make([]string, n)
+	widths = make([]int, n)
 	for i := range tabs {
 		texts[i] = m.tabStyle(i).Render(m.tabLabel(i))
 		widths[i] = lipgloss.Width(texts[i])
-		totalW += widths[i]
+	}
+	leftMarkerW = lipgloss.Width(fmt.Sprintf("«%d ", n-1))
+	rightMarkerW = lipgloss.Width(fmt.Sprintf(" %d»", n-1))
+	return texts, widths, barW, leftMarkerW, rightMarkerW
+}
+
+// maxFirstIndex is the smallest first-visible-tab index f such that tabs
+// f..n-1 — with their one-column separators, plus the left marker's width
+// once f > 0 — fit in barW. Scrolling any further right than this hides more
+// tabs on the left while showing an already-complete tail, so both manual
+// mode's clamp and scrollTabBar's own re-clamp read it from here: one
+// implementation, not two.
+//
+// Computed as a suffix-sum table scanned forward for the first fit, rather
+// than an incremental break from the top: the left marker's width is added
+// only once f reaches 0, so the total is not strictly monotonic across that
+// one step and a break-on-first-failure loop can stop one index early.
+func maxFirstIndex(widths []int, barW, leftMarkerW int) int {
+	n := len(widths)
+	if n == 0 {
+		return 0
+	}
+	suffix := make([]int, n)
+	suffix[n-1] = widths[n-1]
+	for f := n - 2; f >= 0; f-- {
+		suffix[f] = suffix[f+1] + widths[f] + 1
+	}
+	for f := 0; f < n; f++ {
+		total := suffix[f]
+		if f > 0 {
+			total += leftMarkerW
+		}
+		if total <= barW {
+			return f
+		}
+	}
+	return n - 1
+}
+
+// tabBarManualMode reports whether the tab bar is currently showing a
+// user-set scroll window rather than auto-centering: the anchor is non-empty
+// AND names the CURRENT active tab. tabBarLayout, scrollTabBar and the
+// tab-bar click handler (model.go) all read this same check, so "a tab
+// switch returns the bar to auto mode" is one comparison rather than three
+// copies of it that could drift.
+func (m Model) tabBarManualMode() bool {
+	tabs := m.curTabs()
+	activeIdx := m.activeTabIdx()
+	if m.tabScrollAnchor == "" || activeIdx < 0 || activeIdx >= len(tabs) {
+		return false
+	}
+	return tabs[activeIdx].ID == m.tabScrollAnchor
+}
+
+// normalizeTabScrollAnchor clears a manual scroll anchor that no longer
+// names the active tab, called once per message from a defer on
+// Model.Update's named return (model.go) — see that comment for why a
+// single choke point beats a reset in every switch path.
+//
+// Without this, tabBarManualMode's compare is the ONLY thing that reacts to
+// an active-tab change, and it merely goes inert for as long as some OTHER
+// tab is active — the anchor itself is left standing, ready to match again
+// the moment the user comes back to the original tab by any means. This is
+// what makes it a PERMANENT invalidation rather than a temporary one:
+// tabBarManualMode would otherwise report manual mode is back in effect on
+// a plain switchTabBy(1) followed by switchTabBy(-1), painting a scroll
+// window computed for a click that never happened and, in the reported
+// case, hiding the tab that just became active again.
+//
+// Reports whether it actually cleared anything, so Update's defer — which
+// runs on EVERY message, PTY output included — can skip re-boxing the
+// ~230-field Model into the tea.Model interface (a copy plus a heap alloc)
+// on the overwhelming majority of calls where the anchor was already empty
+// or already correct.
+func (m *Model) normalizeTabScrollAnchor() bool {
+	if m.tabScrollAnchor == "" {
+		return false
+	}
+	tabs := m.curTabs()
+	activeIdx := m.activeTabIdx()
+	if activeIdx < 0 || activeIdx >= len(tabs) || tabs[activeIdx].ID != m.tabScrollAnchor {
+		m.tabScrollAnchor = ""
+		return true
+	}
+	return false
+}
+
+// tabBarLayout is the layout engine tabSpans wraps: same labels, same styles,
+// same one-column separators as before, plus the manual scroll offset
+// (scrollTabBar) and the two-sided overflow markers. It is the SINGLE
+// geometry the painter (renderTabBar), the click (hitTestTab) and the reorder
+// drag all read via tabSpans, so none of the three can disagree about which
+// tab occupies which column — and renderTabBar reads hiddenLeft/hiddenRight
+// off this SAME call, so the markers can never report a different set than
+// the one actually painted.
+//
+// Carrying the rendered text costs nothing: the width has to come from
+// lipgloss.Width(style.Render(label)) either way, so the string already
+// exists and was previously thrown away.
+//
+// Manual mode is in effect only while tabScrollAnchor names the CURRENT
+// active tab — any tab switch changes the active tab without touching the
+// anchor, so the compare alone returns the bar to auto mode. That is also why
+// this method needs no separate reset hook on every switch path.
+func (m Model) tabBarLayout() (spans []tabSpan, hiddenLeft, hiddenRight int) {
+	tabs := m.curTabs()
+	n := len(tabs)
+	if n == 0 {
+		return nil, 0, 0
+	}
+	texts, widths, barW, leftMarkerW, rightMarkerW := m.tabBarWidths()
+
+	totalW := 0
+	for i, w := range widths {
+		totalW += w
 		if i > 0 {
 			totalW++
 		}
 	}
 
-	included := make([]bool, len(tabs))
+	included := make([]bool, n)
 	if totalW <= barW {
 		for i := range included {
 			included[i] = true
 		}
 	} else {
 		activeIdx := m.activeTabIdx()
-		included[activeIdx] = true
-		usedW := widths[activeIdx]
-		indicatorReserve := 12
+		manual := m.tabBarManualMode()
 
-		left := activeIdx - 1
-		right := activeIdx + 1
-		for left >= 0 || right < len(tabs) {
-			if left >= 0 {
-				need := widths[left] + 1
-				if usedW+need+indicatorReserve <= barW {
-					included[left] = true
-					usedW += need
-					left--
-				} else {
-					left = -1
-				}
+		if manual {
+			maxFirst := maxFirstIndex(widths, barW, leftMarkerW)
+			first := clampInt(m.tabScrollFirst, 0, maxFirst)
+			included[first] = true
+			usedW := widths[first]
+			if first > 0 {
+				usedW += leftMarkerW
 			}
-			if right < len(tabs) {
-				need := widths[right] + 1
-				if usedW+need+indicatorReserve <= barW {
-					included[right] = true
-					usedW += need
-					right++
-				} else {
-					right = len(tabs)
+			for i := first + 1; i < n; i++ {
+				need := widths[i] + 1 // separator
+				reserve := 0
+				if i < n-1 {
+					reserve = rightMarkerW
+				}
+				if usedW+need+reserve > barW {
+					break
+				}
+				included[i] = true
+				usedW += need
+			}
+		} else {
+			// Auto mode, unchanged from before this existed: expand around
+			// the active tab alternately left/right. Only the reserve
+			// changes — both markers' worst case now, not a fixed guess.
+			included[activeIdx] = true
+			usedW := widths[activeIdx]
+			indicatorReserve := leftMarkerW + rightMarkerW
+
+			left := activeIdx - 1
+			right := activeIdx + 1
+			for left >= 0 || right < n {
+				if left >= 0 {
+					need := widths[left] + 1
+					if usedW+need+indicatorReserve <= barW {
+						included[left] = true
+						usedW += need
+						left--
+					} else {
+						left = -1
+					}
+				}
+				if right < n {
+					need := widths[right] + 1
+					if usedW+need+indicatorReserve <= barW {
+						included[right] = true
+						usedW += need
+						right++
+					} else {
+						right = n
+					}
 				}
 			}
 		}
 	}
 
-	spans := make([]tabSpan, 0, len(tabs))
+	spans = make([]tabSpan, 0, n)
 	cursor := 0
+	firstIdx, lastIdx := -1, -1
 	for i := range tabs {
 		if !included[i] {
 			continue
 		}
-		if cursor > 0 {
+		if firstIdx < 0 {
+			firstIdx = i
+			if firstIdx > 0 {
+				// The left marker occupies columns before the first visible
+				// tab — span.start must include its width or the painted
+				// column (renderTabBar paints the marker first) disagrees
+				// with the geometry hitTestTab and the drag read. The REAL
+				// count (firstIdx tabs are hidden, contiguously, from 0) —
+				// never leftMarkerW, which is sized for the WORST case
+				// (n-1) and is too wide whenever the real count has fewer
+				// digits, shifting every painted tab left of its span.
+				cursor += lipgloss.Width(leftTabMarker(firstIdx))
+			}
+		} else {
 			cursor++ // space separator
 		}
 		spans = append(spans, tabSpan{index: i, start: cursor, width: widths[i], text: texts[i]})
 		cursor += widths[i]
+		lastIdx = i
 	}
+	if firstIdx > 0 {
+		hiddenLeft = firstIdx
+	}
+	if lastIdx >= 0 && lastIdx < n-1 {
+		hiddenRight = n - 1 - lastIdx
+	}
+	return spans, hiddenLeft, hiddenRight
+}
+
+// tabSpans is a thin wrapper over tabBarLayout for the callers that only need
+// the geometry — hitTestTab, tabSpanAt, the reorder drag. renderTabBar is the
+// one caller that also needs the hidden-tab counts, and it calls tabBarLayout
+// directly so its markers read off the exact spans it paints.
+func (m Model) tabSpans() []tabSpan {
+	spans, _, _ := m.tabBarLayout()
 	return spans
+}
+
+// tabBarContains reports whether tab index idx is currently painted in the
+// tab bar.
+func (m Model) tabBarContains(idx int) bool {
+	for _, s := range m.tabSpans() {
+		if s.index == idx {
+			return true
+		}
+	}
+	return false
+}
+
+// ensureTabVisibleInScrollWindow nudges the manual scroll window forward
+// until idx is actually painted — called after a click re-arms the anchor
+// on the tab just entered (model.go). The active tab's "* " prefix grows
+// its label by two cells the instant it becomes active, so clicking the
+// RIGHTMOST visible tab while scrolled can grow it right off the end of the
+// bar: the same window that fit it a moment ago, before the click, is now
+// one that doesn't.
+//
+// Raising tabScrollFirst one tab at a time (rather than jumping straight to
+// idx) trims only as much of the currently-visible window as the growth
+// actually needs, keeping any other still-visible tabs on screen. maxFirst
+// is recomputed HERE, after the caller's switchTab already moved the active
+// tab — using the width idx now has, not the one it had before the click —
+// which is what guarantees the loop terminates successfully: by
+// construction, tabBarLayout's manual branch always shows the ENTIRE tail
+// from maxFirst to the last tab (that is maxFirst's defining property), and
+// idx is always somewhere in that tail once first reaches it.
+//
+// If idx still doesn't fit even there — an over-wide active label with no
+// window that could show it at all — the anchor is cleared instead of
+// leaving the just-clicked tab invisible: auto mode always keeps the
+// active tab on screen (by including it unconditionally), which is a
+// stronger guarantee than any scroll position manual mode can offer here.
+func (m *Model) ensureTabVisibleInScrollWindow(idx int) {
+	if m.tabBarContains(idx) {
+		return
+	}
+	tabs := m.curTabs()
+	if len(tabs) == 0 {
+		return
+	}
+	_, widths, barW, leftMarkerW, _ := m.tabBarWidths()
+	maxFirst := maxFirstIndex(widths, barW, leftMarkerW)
+	for m.tabScrollFirst < maxFirst {
+		m.tabScrollFirst++
+		if m.tabBarContains(idx) {
+			return
+		}
+	}
+	m.tabScrollAnchor = ""
+}
+
+// scrollTabBar moves the tab bar's manual scroll window by delta tabs
+// (negative = toward tab 0), from the wheel handler in Update. It is a no-op
+// — but still swallows the event, per the call site — when there are no tabs
+// or every tab already fits.
+//
+// The starting point is the CURRENT first-visible index, from manual mode's
+// own stored value when manual mode is already in effect, or from auto
+// mode's computed window otherwise — so the first notch over an
+// auto-centered bar scrolls from where the user is actually looking, not
+// from tab 0. Re-clamping the stored value against maxFirst BEFORE adding
+// the notch (rather than clamping only the result) is what keeps a wheel
+// notch after a tab closes or the terminal resizes moving from the clamped
+// position instead of a stale one that could be arbitrarily far past it.
+func (m *Model) scrollTabBar(delta int) {
+	tabs := m.curTabs()
+	n := len(tabs)
+	if n == 0 {
+		return
+	}
+	_, widths, barW, leftMarkerW, _ := m.tabBarWidths()
+
+	totalW := 0
+	for i, w := range widths {
+		totalW += w
+		if i > 0 {
+			totalW++
+		}
+	}
+	if totalW <= barW {
+		return
+	}
+
+	maxFirst := maxFirstIndex(widths, barW, leftMarkerW)
+	activeIdx := m.activeTabIdx()
+	manual := m.tabBarManualMode()
+
+	var start int
+	if manual {
+		start = clampInt(m.tabScrollFirst, 0, maxFirst)
+	} else {
+		spans := m.tabSpans()
+		if len(spans) > 0 {
+			start = spans[0].index
+		}
+	}
+
+	next := clampInt(start+delta, 0, maxFirst)
+	// A notch must never move the window opposite to the direction it was
+	// turned. Auto mode's window is a conservative APPROXIMATION — it always
+	// reserves space for BOTH markers while expanding outward, even on the
+	// side that turns out not to need one (an active tab near the end
+	// expands only inward, but still pays the far side's marker on every
+	// step) — so its start can land PAST maxFirst, the exact "smallest index
+	// whose tail already fits with only a left marker" bound manual mode
+	// clamps to. From such a position, clamping start+1 back down to
+	// maxFirst on a wheel-DOWN notch would move the visible window LEFT, the
+	// opposite of what the user just turned the wheel. Refusing the move
+	// entirely (rather than clamping it) leaves the bar exactly where it
+	// was — indistinguishable from "nothing left to do here", which is what
+	// it is.
+	if (delta > 0 && next < start) || (delta < 0 && next > start) {
+		return
+	}
+
+	m.tabScrollFirst = next
+	if activeIdx >= 0 && activeIdx < n {
+		m.tabScrollAnchor = tabs[activeIdx].ID
+	}
 }
 
 // tabSpanAt returns the visible tab under bar-local column x, if any.

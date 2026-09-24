@@ -114,40 +114,44 @@ func (n *LayoutNode) PaneIDs() map[string]bool {
 	return ids
 }
 
-// largestLeaf returns the leaf holding the largest pane by FRACTION of the
-// tab's area: the product of the split ratios along its path (Ratio for a
-// Left child, 1-Ratio for a Right one). Placeholder leaves (Pane == nil) are
-// skipped. A tie goes to the FIRST leaf in tree order: only a strictly larger
-// fraction replaces the current best. nil when the tree holds no pane.
+// spiralLeaf returns the leaf an arriving pane spirals into: the LAST leaf
+// holding a pane in tree order (Leaves() order), together with the split of
+// its parent node. hasParent is false when that leaf is the root. Placeholder
+// leaves (Pane == nil) are skipped, so a slot reserved for another create is
+// never chosen. nil when the tree holds no pane.
 //
-// Fraction, not cells, on purpose: cell areas are a function of THIS client's
-// terminal, so two clients with different window sizes could rank two leaves
-// differently. Integer truncation also breaks ties arbitrarily (a 101-wide
-// 50/50 split is 50|51 cells). The fraction is a property of the tree alone,
-// so every client holding the same tree picks the same leaf.
-func (n *LayoutNode) largestLeaf() *LayoutNode {
-	var best *LayoutNode
-	var bestFrac float64
-	var walk func(node *LayoutNode, frac float64)
-	walk = func(node *LayoutNode, frac float64) {
+// The last leaf, split against its parent's direction, is what makes
+// successive arrivals spiral ("dwindle") into the bottom-right corner instead
+// of lining up as ever-thinner columns: A → A|new, A|B → A|(B/new),
+// A|(B/C) → A|(B/(C|new)). It is a property of the tree alone, so every
+// client holding the same tree picks the same leaf and direction.
+func (n *LayoutNode) spiralLeaf() (leaf *LayoutNode, parentSplit SplitDir, hasParent bool) {
+	var walk func(node, parent *LayoutNode)
+	walk = func(node, parent *LayoutNode) {
 		if node == nil {
 			return
 		}
 		if node.IsLeaf() {
-			if best == nil || frac > bestFrac {
-				best, bestFrac = node, frac
+			leaf, hasParent = node, parent != nil
+			if parent != nil {
+				parentSplit = parent.Split
 			}
 			return
 		}
-		if node.Left == nil && node.Right == nil {
-			// Placeholder: no pane to rank.
-			return
-		}
-		walk(node.Left, frac*node.Ratio)
-		walk(node.Right, frac*(1-node.Ratio))
+		walk(node.Left, node)
+		walk(node.Right, node)
 	}
-	walk(n, 1.0)
-	return best
+	walk(n, nil)
+	return leaf, parentSplit, hasParent
+}
+
+// spiralSplitDir is the preferred direction for splitting the spiral leaf:
+// the opposite of its parent's split, and left|right for a root leaf.
+func spiralSplitDir(parentSplit SplitDir, hasParent bool) SplitDir {
+	if hasParent && parentSplit == SplitHorizontal {
+		return SplitVertical
+	}
+	return SplitHorizontal
 }
 
 // findParent returns the parent of the node containing paneID, and whether
@@ -556,29 +560,28 @@ func (n *LayoutNode) minHeight() int {
 }
 
 // arrivalSplitDir chooses how to split a leaf of w×h cells for an arriving
-// pane. It prefers SplitHorizontal (left|right). It falls back to
-// SplitVertical (top|bottom) only when a left|right split would leave either
-// half narrower than minPaneW AND a top|bottom split keeps both halves at
-// least minPaneH. If neither fits, it keeps the preference. Unknown geometry
-// (w <= 0 || h <= 0: no WindowSizeMsg yet) also keeps the preference.
-// Halves are computed exactly as CollectRects does: left = int(w*0.5),
-// right = w-left.
-func arrivalSplitDir(w, h int) SplitDir {
+// pane, preferring pref. It switches to the other direction only when pref
+// would leave either half under the minimum (minPaneW across a left|right
+// split, minPaneH across a top|bottom one) AND the other direction keeps both
+// halves at it. If neither fits, it keeps pref. Unknown geometry (w <= 0 ||
+// h <= 0: no WindowSizeMsg yet) also keeps pref. Halves are computed exactly
+// as CollectRects does: first = int(n*0.5), second = n-first.
+func arrivalSplitDir(pref SplitDir, w, h int) SplitDir {
 	if w <= 0 || h <= 0 {
-		return SplitHorizontal
+		return pref
 	}
-	left := int(float64(w) * 0.5)
-	right := w - left
-	narrow := left < minPaneW || right < minPaneW
-	if !narrow {
-		return SplitHorizontal
+	halvesFit := func(n, least int) bool {
+		first := int(float64(n) * 0.5)
+		return first >= least && n-first >= least
 	}
-	top := int(float64(h) * 0.5)
-	bottom := h - top
-	if top >= minPaneH && bottom >= minPaneH {
+	fitsH, fitsV := halvesFit(w, minPaneW), halvesFit(h, minPaneH)
+	switch {
+	case pref == SplitHorizontal && !fitsH && fitsV:
 		return SplitVertical
+	case pref == SplitVertical && !fitsV && fitsH:
+		return SplitHorizontal
 	}
-	return SplitHorizontal
+	return pref
 }
 
 // FindPaneRectAt returns the pane and its screen rectangle at coordinates (x, y).

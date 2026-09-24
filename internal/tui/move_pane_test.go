@@ -703,8 +703,9 @@ func TestMovePane_MenuToBroadcastEndToEnd(t *testing.T) {
 	if tgtTab.Root == nil || tgtTab.Root.IsLeaf() {
 		t.Fatalf("target root = %+v, want a split", tgtTab.Root)
 	}
-	if tgtTab.Root.Right == nil || !tgtTab.Root.Right.IsLeaf() || tgtTab.Root.Right.Pane.ID != "p2" {
-		t.Errorf("target Right = %+v, want leaf p2", tgtTab.Root.Right)
+	// Spiral rule on a single-pane target: its root leaf splits left|right.
+	if got, want := layoutString(SerializeLayout(tgtTab.Root)), "(p4|p2)"; got != want {
+		t.Errorf("target tree = %s, want %s", got, want)
 	}
 	if tgtTab.ActivePane != "p2" {
 		t.Errorf("target ActivePane = %q, want p2", tgtTab.ActivePane)

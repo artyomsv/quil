@@ -115,24 +115,67 @@ func TestMovedPane_KeepsItsPaneModel(t *testing.T) {
 	}
 }
 
-func TestMovedPane_SplitsTargetsLargestPaneLeftRight(t *testing.T) {
+// withLayout stores tree as tabID's layout in st, so a tab this client sees
+// for the first time is restored with that exact shape (restoreTabLayout)
+// rather than built by the layout-less top|bottom fallback.
+func withLayout(t *testing.T, st WorkspaceStateMsg, tabID string, tree *LayoutNode) WorkspaceStateMsg {
+	t.Helper()
+	data, err := MarshalLayout(tree)
+	if err != nil {
+		t.Fatalf("MarshalLayout: %v", err)
+	}
+	st.Tabs = append([]TabInfo(nil), st.Tabs...)
+	for i := range st.Tabs {
+		if st.Tabs[i].ID == tabID {
+			st.Tabs[i].Layout = data
+		}
+	}
+	return st
+}
+
+// mpTreeOf renders a tab's tree as `a|(b/c)` (layoutString, tab_test.go).
+func mpTreeOf(t *testing.T, m *Model, tabID string) string {
+	t.Helper()
+	return layoutString(SerializeLayout(mpTabOf(t, m, tabID).Root))
+}
+
+func TestMovedPane_SingleTargetPaneSplitsLeftRight(t *testing.T) {
 	t.Parallel()
 	m := newMovePaneModel(t, 120, 40)
 	m = mpApply(t, m, mpState("tab-src", mpBefore...))
 	m = mpApply(t, m, mpState("tab-src", mpAfter...))
 
-	root := mpTabOf(t, &m, "tab-tgt").Root
-	if root == nil || root.IsLeaf() {
-		t.Fatalf("target root = %+v, want a split", root)
+	if got, want := mpTreeOf(t, &m, "tab-tgt"), "(p3|p2)"; got != want {
+		t.Errorf("target tree = %s, want %s", got, want)
 	}
-	if root.Split != SplitHorizontal {
-		t.Errorf("target split = %v, want SplitHorizontal (left|right)", root.Split)
+}
+
+// The user's scenario: moving a pane into a tab that already holds p3|p4 used
+// to make three columns. It spirals instead — the LAST pane (p4) splits
+// against its parent's direction — and a second move spirals one level
+// further.
+func TestMovedPane_SpiralsIntoTheTargetsLastPane(t *testing.T) {
+	t.Parallel()
+	pair := &LayoutNode{Split: SplitHorizontal, Ratio: 0.5,
+		Left: NewLeaf(newTestPane("p3")), Right: NewLeaf(newTestPane("p4"))}
+
+	m := newMovePaneModel(t, 120, 40)
+	m = mpApply(t, m, withLayout(t, mpState("tab-src",
+		mpTab{"tab-src", []string{"p1", "p2", "pX"}}, mpTab{"tab-tgt", []string{"p3", "p4"}}), "tab-tgt", pair))
+	if got := mpTreeOf(t, &m, "tab-tgt"); got != "(p3|p4)" {
+		t.Fatalf("setup: target tree = %s, want (p3|p4)", got)
 	}
-	if root.Left == nil || !root.Left.IsLeaf() || root.Left.Pane.ID != "p3" {
-		t.Errorf("target Left = %+v, want leaf p3", root.Left)
+
+	m = mpApply(t, m, withLayout(t, mpState("tab-src",
+		mpTab{"tab-src", []string{"p1", "pX"}}, mpTab{"tab-tgt", []string{"p3", "p4", "p2"}}), "tab-tgt", pair))
+	if got, want := mpTreeOf(t, &m, "tab-tgt"), "(p3|(p4/p2))"; got != want {
+		t.Fatalf("after the first move: target tree = %s, want %s", got, want)
 	}
-	if root.Right == nil || !root.Right.IsLeaf() || root.Right.Pane.ID != "p2" {
-		t.Errorf("target Right = %+v, want leaf p2", root.Right)
+
+	m = mpApply(t, m, withLayout(t, mpState("tab-src",
+		mpTab{"tab-src", []string{"p1"}}, mpTab{"tab-tgt", []string{"p3", "p4", "p2", "pX"}}), "tab-tgt", pair))
+	if got, want := mpTreeOf(t, &m, "tab-tgt"), "(p3|(p4/(p2|pX)))"; got != want {
+		t.Errorf("after the second move: target tree = %s, want %s", got, want)
 	}
 }
 
@@ -464,13 +507,11 @@ func TestMovedPane_NeverFillsAWorktreePlaceholder(t *testing.T) {
 	if m.worktreeCreates["tab-tgt"] != "feat-x" {
 		t.Errorf("worktreeCreates = %q, want feat-x — the create lost its bookkeeping", m.worktreeCreates["tab-tgt"])
 	}
-	// Placed by the largest-leaf rule: p3 was the only pane, so p2 splits it
-	// left|right and the reservation keeps its own half.
-	left := tgt.Root.Left
-	if left == nil || left.Split != SplitHorizontal ||
-		left.Left == nil || !left.Left.IsLeaf() || left.Left.Pane.ID != "p3" ||
-		left.Right == nil || !left.Right.IsLeaf() || left.Right.Pane.ID != "p2" {
-		t.Errorf("target Left = %+v, want p3|p2 beside the reservation", left)
+	// Placed by the spiral rule, which skips the reservation: p3 is the last
+	// PANE leaf, its parent splits left|right, so p2 goes under it and the
+	// reservation keeps its own half.
+	if got, want := mpTreeOf(t, &m, "tab-tgt"), "((p3/p2)|·)"; got != want {
+		t.Errorf("target tree = %s, want %s", got, want)
 	}
 	if tgt.Root.Right != ph {
 		t.Error("the reservation moved out of its own half")
@@ -554,11 +595,16 @@ func TestMovedPane_KeepsASinglePaneWorktreeReplaceReservation(t *testing.T) {
 	}
 }
 
-func TestMovedPane_FillsAnOrdinaryPendingSplit(t *testing.T) {
+// The two-client split race: this client split the target (an ordinary
+// Alt+Shift+V, reservation armed) and, before its own pane arrives, another
+// client's move lands there. The moved pane must not take the reservation —
+// it would steal the tab's ActivePane and leave this client's pane with no
+// leaf — and the reservation must survive the placeholder prune of that same
+// broadcast so its own pane can still fill it.
+func TestMovedPane_NeverFillsAnOrdinaryPendingSplit(t *testing.T) {
 	t.Parallel()
 	m := newMovePaneModel(t, 120, 40)
 	m = mpApply(t, m, mpState("tab-tgt", mpWtBefore...))
-	// An ordinary Alt+Shift+V split whose own pane has not arrived yet.
 	_ = m.splitPane(SplitVertical)
 	ph := m.pendingSplit["tab-tgt"]
 	if ph == nil {
@@ -568,17 +614,37 @@ func TestMovedPane_FillsAnOrdinaryPendingSplit(t *testing.T) {
 	m = mpApply(t, m, mpState("tab-tgt", mpWtAfter...))
 
 	tgt := mpTabOf(t, &m, "tab-tgt")
-	if ph.Pane == nil || ph.Pane.ID != "p2" {
-		t.Errorf("the ordinary placeholder holds %v, want the moved pane p2 (today's behaviour)", ph.Pane)
+	if ph.Pane != nil {
+		t.Fatalf("the moved pane took this client's reservation (it holds %s)", ph.Pane.ID)
+	}
+	if !treeHoldsNode(tgt.Root, ph) || m.pendingSplit["tab-tgt"] != ph {
+		t.Fatal("the reservation was pruned or forgotten — this client's own pane would land nowhere")
+	}
+	// Spiral, skipping the reservation: p3 is the last pane leaf and its
+	// parent splits top|bottom, so p2 goes beside it.
+	if got, want := mpTreeOf(t, &m, "tab-tgt"), "((p3|p2)/·)"; got != want {
+		t.Errorf("target tree = %s, want %s", got, want)
+	}
+	if tgt.ActivePane != "p3" {
+		t.Errorf("target ActivePane = %q, want p3 — this client is in the target, the move must not steal it", tgt.ActivePane)
+	}
+
+	// This client's own pane arrives on the next broadcast.
+	m = mpApply(t, m, mpState("tab-tgt",
+		mpTab{"tab-src", []string{"p1"}}, mpTab{"tab-tgt", []string{"p3", "p2", "p-own"}}))
+
+	tgt = mpTabOf(t, &m, "tab-tgt")
+	if ph.Pane == nil || ph.Pane.ID != "p-own" || !treeHoldsNode(tgt.Root, ph) {
+		t.Fatalf("this client's own pane did not land in its reservation (it holds %v)", ph.Pane)
 	}
 	if _, armed := m.pendingSplit["tab-tgt"]; armed {
-		t.Error("pendingSplit still armed after a pane filled it")
+		t.Error("pendingSplit still armed after its pane landed")
 	}
-	if tgt.Root.Split != SplitVertical {
-		t.Errorf("target split = %v, want the placeholder's own SplitVertical", tgt.Root.Split)
+	if got, want := mpTreeOf(t, &m, "tab-tgt"), "((p3|p2)/p-own)"; got != want {
+		t.Errorf("target tree = %s, want %s", got, want)
 	}
-	if tgt.ActivePane != "p2" {
-		t.Errorf("target ActivePane = %q, want p2", tgt.ActivePane)
+	if tgt.ActivePane != "p-own" {
+		t.Errorf("target ActivePane = %q, want p-own", tgt.ActivePane)
 	}
 }
 

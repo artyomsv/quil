@@ -6047,6 +6047,10 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 		if tab.Root != nil {
 			treePaneIDs = tab.Root.PaneIDs()
 		}
+		// Set when a moved pane arrived while this client held a reservation
+		// in this tab; the placeholder prune below then spares it for this
+		// pass (see there).
+		sparedReservation := false
 		for _, paneID := range tabInfo.Panes {
 			// Overlay panes are reconciled separately — never insert into the tree.
 			if isOverlayPane(paneMap, paneID) {
@@ -6130,15 +6134,20 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 
 			// Try to fill a pending split placeholder first.
 			//
-			// Never with a MIGRATED pane while a worktree create holds the
-			// placeholder: filling it would retire worktreeCreates and dispose
-			// worktreeReplaced, and the pane the create is actually for would
-			// then arrive with no leaf to land in. The daemon cannot refuse a
-			// move into that tab — this client reserved the leaf before its
-			// create_pane even reached it — so this guard is the only
-			// protection. An ordinary pending split lives for microseconds and
-			// is still filled, as it always was.
-			if m.pendingSplit != nil && !(migrated && m.worktreeCreates[tab.ID] != "") {
+			// Never with a MIGRATED pane. The placeholder is reserved for the
+			// pane THIS client asked for — a split, a replace, a worktree
+			// create — and a moved pane filling it would steal the tab's
+			// ActivePane and leave the requested pane, which still arrives
+			// later, with no leaf to land in; for a worktree create it would
+			// also retire worktreeCreates and dispose worktreeReplaced. The
+			// daemon cannot refuse a move into that tab — this client reserved
+			// the leaf before its create_pane even reached it — so this guard
+			// is the only protection. The moved pane is placed by the spiral
+			// rule below, which skips placeholder leaves.
+			if migrated && m.pendingSplit[tab.ID] != nil {
+				sparedReservation = true
+			}
+			if m.pendingSplit != nil && !migrated {
 				if placeholder, ok := m.pendingSplit[tab.ID]; ok {
 					placeholder.fill(pane)
 					tab.invalidateLeaves()
@@ -6169,9 +6178,6 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 					}
 					// Focus the new pane (it replaced the previously active one)
 					tab.ActivePane = pane.ID
-					if migrated {
-						adoptMovedPane(tab, pane)
-					}
 					continue
 				}
 			}
@@ -6180,15 +6186,16 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 			if tab.Root == nil {
 				tab.Root = NewLeaf(pane)
 				tab.invalidateLeaves()
-			} else if leaves := tab.Leaves(); len(leaves) == 0 && migrated && m.worktreeCreates[tab.ID] != "" {
-				// The bare root placeholder IS a worktree REPLACE's reserved
-				// leaf (a replace on a single-pane tab). Overwriting the root,
-				// as the arm below does, would detach it while pendingSplit
-				// still points at it, stranding the pane the create is for —
-				// the same leak the fill guard above prevents. Keep it and
-				// place the moved pane beside it.
+			} else if leaves := tab.Leaves(); len(leaves) == 0 && migrated && m.pendingSplit[tab.ID] == tab.Root {
+				// The bare root placeholder IS this client's reserved leaf (a
+				// replace on a single-pane tab). Overwriting the root, as the
+				// arm below does, would detach it while pendingSplit still
+				// points at it, stranding the pane the replace is for — the
+				// same leak the fill guard above prevents. Keep it and place
+				// the moved pane beside it, as the spiral rule places a pane
+				// beside a root leaf.
 				tab.Root = &LayoutNode{
-					Split: arrivalSplitDir(m.paneAreaWidth(), m.height-chromeHeight),
+					Split: arrivalSplitDir(SplitHorizontal, m.paneAreaWidth(), m.height-chromeHeight),
 					Ratio: 0.5,
 					Left:  tab.Root,
 					Right: NewLeaf(pane),
@@ -6208,7 +6215,7 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 				tab.Root = NewLeaf(pane)
 				tab.invalidateLeaves()
 			} else if !migrated || !tab.placeArrivingPane(pane, m.paneAreaWidth(), m.height-chromeHeight) {
-				// A moved pane goes beside the tab's largest pane (see
+				// A moved pane spirals into the tab's last pane (see
 				// placeArrivingPane); it cannot fail here, since this arm has
 				// a pane leaf. Every other arrival — an MCP create, another
 				// client's split, a layout-less tab on first attach — keeps
@@ -6250,8 +6257,14 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 		// Pushed from the SAME read that decides the exemption, so the
 		// placeholder and the message standing in it can never disagree about
 		// whether a create is in flight.
+		//
+		// Also spared for ONE pass when a moved pane arrived while an ordinary
+		// reservation was still open: the fill guard kept the moved pane out
+		// of it, and pruning it now would strand the requested pane the same
+		// way. That pane normally rides the very next broadcast; if it never
+		// comes, the next pass prunes as it always did.
 		tab.CreatingBranch = m.worktreeCreates[tab.ID]
-		if tab.Root != nil && tab.CreatingBranch == "" {
+		if tab.Root != nil && tab.CreatingBranch == "" && !sparedReservation {
 			tab.Root.PrunePlaceholders()
 			tab.invalidateLeaves()
 		}

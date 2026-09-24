@@ -213,37 +213,107 @@ func TestPlaceArrivingPane_SingleLeafGoesLeftRight(t *testing.T) {
 	}
 }
 
-// TestPlaceArrivingPane_NarrowLeafGoesTopBottom: `A | B` in a 30-wide tab
-// makes A 15 cells wide (7|8 when split again), narrower than minPaneW, so
-// the arriving pane goes top/bottom under A instead: A becomes `A / new`.
-func TestPlaceArrivingPane_NarrowLeafGoesTopBottom(t *testing.T) {
+// sLeaf and sSplit build an expected SerializedNode tree, Ratio 0.5.
+func sLeaf(id string) *SerializedNode { return &SerializedNode{PaneID: id} }
+
+func sSplit(dir SplitDir, left, right *SerializedNode) *SerializedNode {
+	return &SerializedNode{Split: &dir, Ratio: 0.5, Left: left, Right: right}
+}
+
+// TestPlaceArrivingPane_Spirals: the arriving pane splits the LAST pane leaf
+// against its parent's direction, so successive arrivals spiral into the
+// bottom-right corner instead of forming thin columns — and the min-size
+// fallback flips the direction only when the other one fits.
+func TestPlaceArrivingPane_Spirals(t *testing.T) {
+	a, b, c := func() *LayoutNode { return NewLeaf(newTestPane("a")) },
+		func() *LayoutNode { return NewLeaf(newTestPane("b")) },
+		func() *LayoutNode { return NewLeaf(newTestPane("c")) }
+	split := func(dir SplitDir, l, r *LayoutNode) *LayoutNode {
+		return &LayoutNode{Split: dir, Ratio: 0.5, Left: l, Right: r}
+	}
+	H, V := SplitHorizontal, SplitVertical
+
+	tests := []struct {
+		name string
+		root *LayoutNode
+		w, h int
+		want *SerializedNode
+	}{
+		{"A → A|new", a(), 100, 40,
+			sSplit(H, sLeaf("a"), sLeaf("new"))},
+		{"A|B → A|(B/new)", split(H, a(), b()), 100, 40,
+			sSplit(H, sLeaf("a"), sSplit(V, sLeaf("b"), sLeaf("new")))},
+		{"A|(B/C) → A|(B/(C|new))", split(H, a(), split(V, b(), c())), 100, 40,
+			sSplit(H, sLeaf("a"), sSplit(V, sLeaf("b"), sSplit(H, sLeaf("c"), sLeaf("new"))))},
+		{"(A/B) → (A/(B|new))", split(V, a(), b()), 100, 40,
+			sSplit(V, sLeaf("a"), sSplit(H, sLeaf("b"), sLeaf("new")))},
+		// B is 50x7: top|bottom would give 3|4 rows, left|right fits.
+		{"preferred V too short → H", split(H, a(), b()), 100, 7,
+			sSplit(H, sLeaf("a"), sSplit(H, sLeaf("b"), sLeaf("new")))},
+		// A is 18 wide: left|right would give 9|9, top|bottom fits.
+		{"preferred H too narrow → V", a(), 18, 40,
+			sSplit(V, sLeaf("a"), sLeaf("new"))},
+		// B is 15x6: 7|8 columns and 3|3 rows — neither fits, keep V.
+		{"neither fits → preferred", split(H, a(), b()), 30, 6,
+			sSplit(H, sLeaf("a"), sSplit(V, sLeaf("b"), sLeaf("new")))},
+		{"unknown geometry → preferred", split(H, a(), b()), 0, 0,
+			sSplit(H, sLeaf("a"), sSplit(V, sLeaf("b"), sLeaf("new")))},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tab := NewTabModel("t1", "Test")
+			tab.Root = tt.root
+			if ok := tab.placeArrivingPane(newTestPane("new"), tt.w, tt.h); !ok {
+				t.Fatal("placeArrivingPane returned false")
+			}
+			if got := SerializeLayout(tab.Root); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("tree = %s, want %s", layoutString(got), layoutString(tt.want))
+			}
+		})
+	}
+}
+
+// TestPlaceArrivingPane_SkipsATrailingPlaceholder: the last leaf is a slot
+// reserved for another create, so the last PANE leaf is split and the
+// reservation is left exactly where it was.
+func TestPlaceArrivingPane_SkipsATrailingPlaceholder(t *testing.T) {
+	ph := &LayoutNode{Ratio: 0.5}
 	tab := NewTabModel("t1", "Test")
 	tab.Root = &LayoutNode{Split: SplitHorizontal, Ratio: 0.5,
-		Left:  NewLeaf(newTestPane("a")),
-		Right: NewLeaf(newTestPane("b")),
+		Left: NewLeaf(newTestPane("a")),
+		Right: &LayoutNode{Split: SplitVertical, Ratio: 0.5,
+			Left: NewLeaf(newTestPane("b")), Right: ph},
 	}
 
-	ok := tab.placeArrivingPane(newTestPane("new"), 30, 40)
-	if !ok {
+	if ok := tab.placeArrivingPane(newTestPane("new"), 100, 40); !ok {
 		t.Fatal("placeArrivingPane returned false")
 	}
+	right := tab.Root.Right
+	if right.Right != ph || ph.Pane != nil {
+		t.Fatal("the reservation was moved or filled")
+	}
+	bNode := right.Left
+	if bNode.Split != SplitHorizontal || bNode.Left.Pane.ID != "b" || bNode.Right.Pane.ID != "new" {
+		t.Errorf("b's slot = %s, want b|new (opposite of its top|bottom parent)", layoutString(SerializeLayout(bNode)))
+	}
+}
 
-	aNode := tab.Root.Left
-	if aNode == nil || aNode.IsLeaf() {
-		t.Fatalf("leaf 'a' should have been split, got %+v", aNode)
+// layoutString renders a SerializedNode tree as `a|(b/c)` for failure output.
+func layoutString(n *SerializedNode) string {
+	switch {
+	case n == nil, n.Split != nil && n.Left == nil && n.Right == nil:
+		return "·" // a placeholder serializes as a childless split
+	case n.Split == nil:
+		if n.PaneID == "" {
+			return "·"
+		}
+		return n.PaneID
 	}
-	if aNode.Split != SplitVertical {
-		t.Fatalf("a's split: got %v, want SplitVertical", aNode.Split)
+	sep := "|"
+	if *n.Split == SplitVertical {
+		sep = "/"
 	}
-	if aNode.Left == nil || aNode.Left.Pane == nil || aNode.Left.Pane.ID != "a" {
-		t.Fatalf("a's top child: want pane 'a', got %+v", aNode.Left)
-	}
-	if aNode.Right == nil || aNode.Right.Pane == nil || aNode.Right.Pane.ID != "new" {
-		t.Fatalf("a's bottom child: want the new pane, got %+v", aNode.Right)
-	}
-	if tab.Root.Right == nil || tab.Root.Right.Pane == nil || tab.Root.Right.Pane.ID != "b" {
-		t.Fatalf("leaf 'b' should be untouched, got %+v", tab.Root.Right)
-	}
+	return "(" + layoutString(n.Left) + sep + layoutString(n.Right) + ")"
 }
 
 // buildThreeLeafTestTree returns a fresh 3-leaf tree (a | (b / c)) each call,

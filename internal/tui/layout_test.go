@@ -942,135 +942,112 @@ func TestLayoutNode_CollectBorders_PlaceholderSkipped(t *testing.T) {
 	}
 }
 
-func TestLargestLeaf_NilTree(t *testing.T) {
+func TestSpiralLeaf_NilTree(t *testing.T) {
 	var root *LayoutNode
-	if got := root.largestLeaf(); got != nil {
-		t.Fatalf("largestLeaf(nil) = %v, want nil", got)
+	if leaf, _, _ := root.spiralLeaf(); leaf != nil {
+		t.Fatalf("spiralLeaf(nil) = %v, want nil", leaf)
 	}
 }
 
-func TestLargestLeaf_SingleLeaf(t *testing.T) {
-	root := NewLeaf(newTestPane("a"))
-	got := root.largestLeaf()
-	if got == nil || got.Pane.ID != "a" {
-		t.Fatalf("largestLeaf = %v, want leaf 'a'", got)
-	}
-}
-
-func TestLargestLeaf_OnlyPlaceholders(t *testing.T) {
+func TestSpiralLeaf_OnlyPlaceholders(t *testing.T) {
 	root := &LayoutNode{Split: SplitHorizontal, Ratio: 0.5,
 		Left:  &LayoutNode{Ratio: 0.5}, // placeholder
 		Right: &LayoutNode{Ratio: 0.5}, // placeholder
 	}
-	if got := root.largestLeaf(); got != nil {
-		t.Fatalf("largestLeaf = %v, want nil (no pane leaves)", got)
+	if leaf, _, _ := root.spiralLeaf(); leaf != nil {
+		t.Fatalf("spiralLeaf = %v, want nil (no pane leaves)", leaf)
 	}
 }
 
-// TestLargestLeaf_PicksLargestByArea: `A | (B / C)` at 0.5 gives A (0.5
-// fraction) over B and C (0.25 each).
-func TestLargestLeaf_PicksLargestByArea(t *testing.T) {
-	root := &LayoutNode{Split: SplitHorizontal, Ratio: 0.5,
-		Left: NewLeaf(newTestPane("a")),
-		Right: &LayoutNode{Split: SplitVertical, Ratio: 0.5,
-			Left:  NewLeaf(newTestPane("b")),
-			Right: NewLeaf(newTestPane("c")),
-		},
+// TestSpiralLeaf_PicksLastPaneLeaf: the target is the LAST pane leaf in tree
+// order, reported with its parent's split. Choosing the first leaf instead,
+// or reporting the wrong parent, fails a row.
+func TestSpiralLeaf_PicksLastPaneLeaf(t *testing.T) {
+	tests := []struct {
+		name       string
+		root       *LayoutNode
+		want       string
+		wantSplit  SplitDir
+		wantParent bool
+	}{
+		{"root leaf", NewLeaf(newTestPane("a")), "a", SplitHorizontal, false},
+		{"a|b", &LayoutNode{Split: SplitHorizontal, Ratio: 0.5,
+			Left: NewLeaf(newTestPane("a")), Right: NewLeaf(newTestPane("b"))},
+			"b", SplitHorizontal, true},
+		{"a|(b/c)", &LayoutNode{Split: SplitHorizontal, Ratio: 0.5,
+			Left: NewLeaf(newTestPane("a")),
+			Right: &LayoutNode{Split: SplitVertical, Ratio: 0.5,
+				Left: NewLeaf(newTestPane("b")), Right: NewLeaf(newTestPane("c"))}},
+			"c", SplitVertical, true},
+		// The last leaf is a reserved slot: the last PANE leaf is used.
+		{"a|(b/placeholder)", &LayoutNode{Split: SplitHorizontal, Ratio: 0.5,
+			Left: NewLeaf(newTestPane("a")),
+			Right: &LayoutNode{Split: SplitVertical, Ratio: 0.5,
+				Left: NewLeaf(newTestPane("b")), Right: &LayoutNode{Ratio: 0.5}}},
+			"b", SplitVertical, true},
+		{"(a/b)|placeholder", &LayoutNode{Split: SplitHorizontal, Ratio: 0.5,
+			Left: &LayoutNode{Split: SplitVertical, Ratio: 0.5,
+				Left: NewLeaf(newTestPane("a")), Right: NewLeaf(newTestPane("b"))},
+			Right: &LayoutNode{Ratio: 0.5}},
+			"b", SplitVertical, true},
 	}
-	got := root.largestLeaf()
-	if got == nil || got.Pane.ID != "a" {
-		t.Fatalf("largestLeaf = %v, want leaf 'a'", got)
-	}
-}
-
-// TestLargestLeaf_HonoursRatio: `A | B` at Ratio 0.3 gives B (0.7 fraction).
-func TestLargestLeaf_HonoursRatio(t *testing.T) {
-	root := &LayoutNode{Split: SplitHorizontal, Ratio: 0.3,
-		Left:  NewLeaf(newTestPane("a")),
-		Right: NewLeaf(newTestPane("b")),
-	}
-	got := root.largestLeaf()
-	if got == nil || got.Pane.ID != "b" {
-		t.Fatalf("largestLeaf = %v, want leaf 'b'", got)
-	}
-}
-
-// TestLargestLeaf_TieGoesToFirstInTreeOrder: a 2x2 grid of equal quarters
-// (all Ratio 0.5, so every leaf's fraction is exactly 0.25) gives the first
-// leaf in tree order.
-//
-// Mutation guard: `>` -> `>=` in largestLeaf's replace condition must fail
-// this. At an exact tie frac == bestFrac, so `>` keeps the first leaf while
-// `>=` keeps overwriting best all the way to the last leaf.
-func TestLargestLeaf_TieGoesToFirstInTreeOrder(t *testing.T) {
-	root := &LayoutNode{Split: SplitHorizontal, Ratio: 0.5,
-		Left: &LayoutNode{Split: SplitVertical, Ratio: 0.5,
-			Left:  NewLeaf(newTestPane("a")),
-			Right: NewLeaf(newTestPane("b")),
-		},
-		Right: &LayoutNode{Split: SplitVertical, Ratio: 0.5,
-			Left:  NewLeaf(newTestPane("c")),
-			Right: NewLeaf(newTestPane("d")),
-		},
-	}
-	got := root.largestLeaf()
-	if got == nil || got.Pane.ID != "a" {
-		t.Fatalf("largestLeaf = %v, want leaf 'a' (first in tree order)", got)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			leaf, split, hasParent := tt.root.spiralLeaf()
+			if leaf == nil || leaf.Pane.ID != tt.want {
+				t.Fatalf("spiralLeaf = %v, want leaf %q", leaf, tt.want)
+			}
+			if hasParent != tt.wantParent || (hasParent && split != tt.wantSplit) {
+				t.Errorf("parent = (%v, %v), want (%v, %v)", split, hasParent, tt.wantSplit, tt.wantParent)
+			}
+		})
 	}
 }
 
-// TestLargestLeaf_UsesFractionNotCells: `A | B` at 0.5 ties by fraction, so
-// placeArrivingPane must split A (the first leaf) even though a 101-wide
-// tab gives A 50 cells and B 51 — cell-based ranking would pick B.
-//
-// Mutation guard: ranking by CollectRects area instead of the tree fraction
-// must fail this.
-func TestLargestLeaf_UsesFractionNotCells(t *testing.T) {
-	tab := NewTabModel("t1", "Test")
-	tab.Root = &LayoutNode{Split: SplitHorizontal, Ratio: 0.5,
-		Left:  NewLeaf(newTestPane("a")),
-		Right: NewLeaf(newTestPane("b")),
+func TestSpiralSplitDir_OppositeOfParent(t *testing.T) {
+	tests := []struct {
+		name      string
+		parent    SplitDir
+		hasParent bool
+		want      SplitDir
+	}{
+		{"root leaf", SplitVertical, false, SplitHorizontal},
+		{"parent left|right", SplitHorizontal, true, SplitVertical},
+		{"parent top|bottom", SplitVertical, true, SplitHorizontal},
 	}
-
-	if ok := tab.placeArrivingPane(newTestPane("new"), 101, 40); !ok {
-		t.Fatal("placeArrivingPane returned false")
-	}
-	// B must be untouched: fraction ranking (0.5 == 0.5, tie to first) must
-	// win over cell ranking (51 cells for B > 50 cells for A).
-	if tab.Root.Right == nil || !tab.Root.Right.IsLeaf() || tab.Root.Right.Pane.ID != "b" {
-		t.Fatalf("leaf 'b' should be untouched, got %+v", tab.Root.Right)
-	}
-	// A must have been split for the arriving pane.
-	aNode := tab.Root.Left
-	if aNode == nil || aNode.IsLeaf() {
-		t.Fatalf("leaf 'a' should have been split, got %+v", aNode)
-	}
-	if aNode.Left == nil || aNode.Left.Pane == nil || aNode.Left.Pane.ID != "a" {
-		t.Fatalf("a's first child should still hold pane 'a', got %+v", aNode.Left)
-	}
-	if aNode.Right == nil || aNode.Right.Pane == nil || aNode.Right.Pane.ID != "new" {
-		t.Fatalf("a's other child should hold the arriving pane, got %+v", aNode.Right)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := spiralSplitDir(tt.parent, tt.hasParent); got != tt.want {
+				t.Errorf("spiralSplitDir(%v, %v) = %v, want %v", tt.parent, tt.hasParent, got, tt.want)
+			}
+		})
 	}
 }
 
 func TestArrivalSplitDir(t *testing.T) {
 	tests := []struct {
 		name string
+		pref SplitDir
 		w, h int
 		want SplitDir
 	}{
-		{"wide enough for H", 100, 40, SplitHorizontal},
-		{"exact H boundary 10|10", 20, 40, SplitHorizontal},
-		{"below H boundary, V fits", 19, 40, SplitVertical},
-		{"neither fits, keeps preference", 19, 7, SplitHorizontal},
-		{"exact V boundary 4|4", 19, 8, SplitVertical},
-		{"unknown geometry zero", 0, 0, SplitHorizontal},
-		{"unknown geometry negative", -5, 10, SplitHorizontal},
+		{"H fits", SplitHorizontal, 100, 40, SplitHorizontal},
+		{"H exact boundary 10|10", SplitHorizontal, 20, 40, SplitHorizontal},
+		{"H too narrow, V fits", SplitHorizontal, 19, 40, SplitVertical},
+		{"H too narrow, V exact boundary 4|4", SplitHorizontal, 19, 8, SplitVertical},
+		{"H: neither fits, keeps H", SplitHorizontal, 19, 7, SplitHorizontal},
+		{"V fits", SplitVertical, 100, 40, SplitVertical},
+		{"V exact boundary 4|4", SplitVertical, 100, 8, SplitVertical},
+		{"V too short, H fits", SplitVertical, 100, 7, SplitHorizontal},
+		{"V: neither fits, keeps V", SplitVertical, 19, 7, SplitVertical},
+		{"unknown geometry keeps H", SplitHorizontal, 0, 0, SplitHorizontal},
+		{"unknown geometry keeps V", SplitVertical, -5, 10, SplitVertical},
+		{"unknown height keeps V", SplitVertical, 100, 0, SplitVertical},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := arrivalSplitDir(tt.w, tt.h); got != tt.want {
-				t.Errorf("arrivalSplitDir(%d, %d) = %v, want %v", tt.w, tt.h, got, tt.want)
+			if got := arrivalSplitDir(tt.pref, tt.w, tt.h); got != tt.want {
+				t.Errorf("arrivalSplitDir(%v, %d, %d) = %v, want %v", tt.pref, tt.w, tt.h, got, tt.want)
 			}
 		})
 	}

@@ -124,7 +124,7 @@ Right-click on a pane — with a text selection active, it copies the selection 
 
 Right-clicking a **pane row in the project sidebar** opens the same menu. It focuses that pane first — switching tabs if the pane lives on another one, exactly as a left-click on the row does — so every action in the menu applies to the pane you clicked.
 
-*Move to tab…* lists every other tab on the same machine as "project / tab". The pane moves with its process and history, the largest pane in the target is split side by side (top and bottom only when it is too narrow), and you stay where you are. A tab left with no panes is closed.
+*Move to tab…* lists every other tab on the same machine as "project / tab". The pane moves with its process and history, the last pane in the target is split, alternating direction (a lone pane side by side, the right-hand pane of a pair top and bottom, and so on), so panes spiral in instead of forming thin columns — the other direction is used only when the preferred one would be too small — and you stay where you are. A tab left with no panes is closed.
 
 ### Mouse: tab context menu
 

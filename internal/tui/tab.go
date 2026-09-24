@@ -446,21 +446,23 @@ func (t *TabModel) SplitAtPane(paneID string, dir SplitDir) *LayoutNode {
 	return ph
 }
 
-// placeArrivingPane splits the largest leaf of t's tree and installs pane in
-// the RIGHT (left|right) or BOTTOM (top|bottom) half, Ratio 0.5. w, h are the
-// tab's canonical geometry (the caller passes paneAreaWidth() and
+// placeArrivingPane spirals pane into t's tree: it splits the LAST pane leaf
+// (spiralLeaf) against its parent's direction (spiralSplitDir) and installs
+// pane in the RIGHT (left|right) or BOTTOM (top|bottom) half, Ratio 0.5. w, h
+// are the tab's canonical geometry (the caller passes paneAreaWidth() and
 // height-chromeHeight, NOT the notes-squeezed width). It locates the chosen
 // leaf's cell rect with CollectRects(0, 0, w, h, …) and feeds that rect to
-// arrivalSplitDir. It installs the pane through SplitAtPane + the node's
-// fill(), which retires phType (see fill's comment), then calls
-// invalidateLeaves. It returns false and leaves the tree untouched when the
-// tree is nil or holds no pane leaf. The caller guarantees pane is not
-// already in the tree.
+// arrivalSplitDir, which may flip the direction when the preferred one would
+// leave a half under the minimum pane size. It installs the pane through
+// SplitAtPane + the node's fill(), which retires phType (see fill's comment),
+// then calls invalidateLeaves. It returns false and leaves the tree untouched
+// when the tree is nil or holds no pane leaf. The caller guarantees pane is
+// not already in the tree.
 func (t *TabModel) placeArrivingPane(pane *PaneModel, w, h int) bool {
 	if t.Root == nil {
 		return false
 	}
-	leaf := t.Root.largestLeaf()
+	leaf, parentSplit, hasParent := t.Root.spiralLeaf()
 	if leaf == nil {
 		return false
 	}
@@ -475,7 +477,7 @@ func (t *TabModel) placeArrivingPane(pane *PaneModel, w, h int) bool {
 		}
 	}
 
-	dir := arrivalSplitDir(rectW, rectH)
+	dir := arrivalSplitDir(spiralSplitDir(parentSplit, hasParent), rectW, rectH)
 	ph := t.SplitAtPane(leaf.Pane.ID, dir)
 	if ph == nil {
 		return false

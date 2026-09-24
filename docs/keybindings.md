@@ -48,10 +48,15 @@ the pane it opens with starts in that project's root directory.
 | `Alt+Shift+Right` | Next project (wraps) |
 | `Alt+Shift+Left` | Previous project (wraps) |
 | `Alt+Shift+A` | Attention queue — jump to the oldest pane waiting on you, across every project |
-| `Alt+Shift+Up` / `Alt+Shift+Down` | Move the active project one slot up / down in the sidebar |
+| `Alt+Shift+Up` / `Alt+Shift+Down` | Move the active project one slot up / down in the sidebar, within its own section (the ungrouped projects, or its group) — never into or out of a group |
 | `Alt+Shift+S` | Collapse / expand the project sidebar |
 | Mouse click a sidebar row | Switch to that project, switch to that tab, or raise that pane |
 | Mouse drag a project row | Reorder — the row moves once the pointer passes the middle of its neighbour (a remote project is two rows tall). Each daemon remembers the order of its own projects; when several hosts are connected, how their rows interleave is kept only for the running session |
+| Mouse drop a project on a group header / on the PROJECTS heading | Put it in that group / take it out of its group (dropping it on an ungrouped project does the same) |
+| Mouse click / drag a group header | Collapse or expand the group / reorder the groups |
+| Right-click a project row → Move to group… | Pick a group, **New group…** (type the name in the status bar, `Enter` creates, `Esc` cancels) or **No group** |
+| Right-click a group header | Rename group, Collapse / Expand, Move up, Move down, Delete group — deleting only ungroups its projects |
+| *(unbound)* | `project.group_toggle` — collapse or expand the active project's group; `project.groups_collapse_all` — collapse every group, or expand them all when all are collapsed. Bind them in `bindings.toml` |
 | Click + drag the sidebar's right edge | Resize the sidebar (12-column minimum; a rule previews the new edge, panes resize on release, width persists to `[ui] sidebar_width`) |
 
 The sidebar is the reserved left column listing projects and the active
@@ -73,6 +78,13 @@ A project row can also carry a link marker, which is about the **connection**
 rather than the agents: `⟳` while that daemon is reconnecting, `⚡` when its
 reconnect is parked and it will not retry until you resume it (`r`). Only a
 remote project can show either.
+
+Projects can be put into named **groups**. Ungrouped projects stay at the top;
+each group follows as a header — `▾ name (N)` expanded, `▸ name (N)`
+collapsed — carrying the summed badges of its projects, with its projects
+indented beneath it. A collapsed group is one row, plus the project you are in
+if it belongs to that group. Groups are kept on this machine, so one group can
+mix local and remote projects.
 
 Unlike the notification sidebar (`Alt+N`), which draws *over* the pane area,
 this one reserves real layout width — so toggling it resizes every pane's PTY.

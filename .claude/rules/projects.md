@@ -14,6 +14,7 @@ paths:
   - "**/internal/tui/project.go"
   - "**/internal/tui/projectdialog.go"
   - "**/internal/tui/projectpicker.go"
+  - "**/internal/tui/projectgroups*.go"
   - "**/internal/tui/sidebar.go"
   - "**/internal/tui/router.go"
   - "**/internal/tui/dialdest.go"
@@ -919,6 +920,26 @@ Adding to the stale value there clamps straight back to the same visible
 maximum for as many notches as it is stale by: not row drift, but a wheel that
 does nothing while the strip already shows the bound it is being pushed
 against.
+
+## Project groups (`projectgroups*.go`)
+
+Groups are a CLIENT-side view over `m.projects`: `projectgroups.go` is the pure model (`projectGroups` → `projectGroup{Name, Collapsed, Members}` → `groupMember{Dest, ID}`), its operations and load/save; `projectgroups_model.go` the Model side (save, toggle, prune, `projectSections`); `projectgroups_input.go` the drags, menus, name editor and keys. Nothing is sent to a daemon, which is what lets one group mix hosts.
+
+**The key is `(Dest, ID)`, never the ID alone** — the reason `moveProject` compares pointers: two daemons mint project IDs independently and can hand out the same one. The project context menu therefore carries `ctxMenuState.projectDest` beside `projectID`, and every membership read goes through `groupOf`/`memberIndex` with both halves. Rename/Destroy/Disconnect still resolve by ID (`projectByID`, first match) — unchanged, and a known limit for twins.
+
+**One section definition.** `projectSections` splits `m.projects` into the ungrouped section and one per group, each in `m.projects` order; the rows (`sidebarRows`), the within-section drag, the move keys (`sectionOf`) and the palette's grey-at-the-ends all read it. Rows: the ungrouped projects, then per group a `sidebarRowGroup` header (`▾`/`▸ name (N)` plus the members' summed `paneStateCounts` through the shared `appendBadgeSegments`, the link glyph when any member host is parked or retrying) and its members indented by `indentSidebarRow` — which renders the row at `w-2` and prefixes, and drops the indent at `w <= 2` rather than emit a row wider than the strip (the row-drift bug: `.Width(w)` wraps). The header cuts the NAME with `…` and keeps the badge. A collapsed group still shows the ACTIVE project's row, so the pinned PROJECTS head's height depends on which project is active; `sidebarVisibleRows` needed no change because it measures the head from `panesStart`. Pinned by `TestSidebarGroups_PaintAndHitTestAgreeOnHeaderAndIndentedRows`, `…EveryRowIsExactlyTheStripWidth`, `…CollapsedActiveRowIsPartOfThePinnedHead`.
+
+**Drags.** A header press arms `groupDragging`/`groupDragIdx`; motion reorders groups live (`dragSlot` over the hovered group's whole block, `groupBlockSpanIn`) and sets `groupDragMoved`; the release TOGGLES only when nothing moved — toggling on the press would collapse every group the user starts to drag. A project drag reorders live only inside its own section, by section positions; membership changes on RELEASE (`finishProjectDrag`): on a header → `assign`, on the PROJECTS heading (`sidebarRow.ungroupDrop`, kind still `""`) or an ungrouped project row → `unassign`. The heading is a target because with every project grouped there is no ungrouped row left.
+
+**A reorder is reported only when the daemon rank changed.** `moveProjectWithinSection` compares `projectDaemonRank` before and after `moveProject` and sends `MsgReorderProject` only on a change: in a mixed group (or the ungrouped list) a local project dragged past a remote one changes the sidebar and not the local daemon's order, and a reorder for an unchanged index is a broadcast on every client's must-deliver queue for nothing. It lands the project directly after (moving down) or before (moving up) the section member it passed, whatever other sections' projects lie between. `project.move_up/down` go through it too and never cross a section boundary.
+
+**Persistence.** `project-groups.json` (`config.ProjectGroupsPath()`), loaded in `cmd/quil/main.go` (`LoadProjectGroups` → `SetProjectGroups`, a pure setter — the `SetRecentCWDs` rule). Every change calls `saveGroupsCmd`, which CLONES the groups on the Update goroutine and bumps `groupsSeq`; `groupsWriter` serialises the writes and drops a snapshot older than one already written, because Bubble Tea runs Cmds concurrently with no ordering and two saves would also share one `.tmp`. Load reads at most 256 KiB + 1 byte; an over-cap, unreadable or unparseable file is renamed to `.bak` — not merely ignored, since the next save would overwrite it — and a symlink is refused and left alone. A failed save logs and flashes `Could not save project groups`; the in-memory state stays. Several TUIs on one machine: last write wins, the other sees it on its next start.
+
+**Pruning only from evidence.** `pruneProjectGroupsFor` runs in the `WorkspaceStateMsg` arm — reached only past `destConnected`, i.e. for a connected daemon whose state arrived — and drops members of THAT dest missing from `broadcastProjects(state)`. An offline, parked or disconnected host is never pruned (its rows are seeded stand-ins, not the daemon's answer), and a broadcast naming zero projects prunes nothing: a project-capable daemon always has one. A disconnected host's members stay in the file and return with the host. `TestProjectGroups_BroadcastPrunesOnlyItsOwnDestination`.
+
+**Names and the editor.** Unique ignoring case, trimmed, 1-32 runes (`normalizeGroupName`; the editor stops accepting input at 32). The editor is `Model.groupEdit` — a sibling of the pane-rename status-bar editor, NOT a reuse of `renamingPane` (whose Enter sends `MsgUpdatePane`) — captured in `handleKey` right after `renamingPane`, typed through `msg.Text` + `isPrintableText`, and it STAYS OPEN on `Group name cannot be empty` / `A group with that name already exists`. Names pass `sanitizeRemoteText` at render only: the header, the menu labels (built per open, the raw name riding `ctxMenuItem.groupName`), the status bar.
+
+**Menus and keys.** The project menu's *Move to group…* (`ctxActGroupList`) re-populates in place, like Set color…: the groups (`✓` on the current), *New group…*, *No group* (`✓` when ungrouped). The header menu is the fourth `ctxMenuState` discriminator (`groupName`), closed by the Update prologue when `indexOf` misses: Rename group / Collapse-Expand / Move up / Move down / Delete group — delete ungroups the members and closes nothing. `project.group_toggle` (the active project's group; an ungrouped one is a no-op) and `project.groups_collapse_all` (collapse all, or expand all when all are collapsed) ship unbound, `TierLate`. Tests: `projectgroups_test.go`, `projectgroups_sidebar_test.go`, `projectgroups_input_test.go`.
 
 ## Git subsystem (`gitinfo` + `gitcache.go`)
 

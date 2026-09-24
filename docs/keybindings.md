@@ -94,6 +94,8 @@ actions, command palette).
 | `Alt+C` | Cycle tab colour (8 colours) |
 | `Alt+1` … `Alt+9` | Switch directly to tab 1–9 |
 | `Alt+Shift+PgUp` / `Alt+Shift+PgDn` | Move the active tab one slot left / right |
+| *(unbound)* | `tab.layout_even` / `tab.layout_columns` / `tab.layout_rows` / `tab.layout_grid` / `tab.layout_main` / `tab.layout_spiral` — arrange the active tab (the same six as the tab menu's *Layout…*). Bind them in `bindings.toml` |
+| `Alt` + drag a pane | Put it beside another pane, swap it with one, or move it to another tab — see [Mouse: pane drag](#mouse-pane-drag) |
 | Mouse click on tab | Switch to that tab |
 | Mouse drag a tab | Reorder — the tab moves once the pointer passes the middle of a neighbour, so a narrow tab dragged over a wide one never flips back and forth; intermediate tabs slide one slot at a time |
 | Mouse click / drag a tab name in the project sidebar | Switch to that tab / reorder it — drag the name up or down past the middle of another tab's group of rows |
@@ -128,7 +130,17 @@ Right-clicking a **pane row in the project sidebar** opens the same menu. It foc
 
 ### Mouse: tab context menu
 
-Right-click a tab — in the tab bar, or its heading in the project sidebar's PANES section — to open Rename tab / Set color… / Move to project…. A text selection still copies instead. Unlike a left-click, right-click does **not** switch to the tab; choosing Rename does. Set color… re-populates the same menu with one row per color, each painted in its own color and the current one marked `✓`; choosing a color applies it immediately. Move to project… opens a picker listing the other projects on the same machine; pick one and the tab moves there, panes and all, still running, in whatever directory each pane was already in — you stay in the project you were in. The item is hidden when no other project on the same machine exists. `↑`/`↓` (or `k`/`j`) navigate, `Enter` or a left-click executes the highlighted item, `Esc` closes the whole menu — there's no "back" from the color list.
+Right-click a tab — in the tab bar, or its heading in the project sidebar's PANES section — to open Rename tab / Set color… / Layout… / Move to project…. A text selection still copies instead. Unlike a left-click, right-click does **not** switch to the tab; choosing Rename does. Set color… re-populates the same menu with one row per color, each painted in its own color and the current one marked `✓`; choosing a color applies it immediately. Layout… re-populates the menu with Even out (keep the shape, give every pane the same area), Columns, Rows, Grid, Main + stack (the tab's active pane on the left, the rest stacked on the right) and Spiral; the choice applies to the tab you right-clicked, without switching to it, and every pane keeps running. It is greyed when the tab has one pane or is busy (a worktree checkout, a template, or a pane you are creating there), and a layout that would make a pane too small is refused with "Not enough room for that layout". Move to project… opens a picker listing the other projects on the same machine; pick one and the tab moves there, panes and all, still running, in whatever directory each pane was already in — you stay in the project you were in. The item is hidden when no other project on the same machine exists. `↑`/`↓` (or `k`/`j`) navigate, `Enter` or a left-click executes the highlighted item, `Esc` closes the whole menu — there's no "back" from the color list.
+
+### Mouse: pane drag
+
+Hold `Alt`, press the left button anywhere inside a pane (its border included) and drag. While you drag, an outline shows where the pane will go:
+
+- **On the edge of another pane** — the outer quarter on any side — the pane is placed on that side of it, taking half of its space.
+- **On the middle of another pane** — the two panes swap places.
+- **On a tab in the tab bar** — the tab is highlighted, and dropping moves the pane there, exactly like *Move to tab…*.
+
+`Esc` cancels, and so does releasing on the pane itself, on its own tab, or anywhere else. Nothing restarts: the pane keeps its process and history. An `Alt`+press never starts a text selection or a border resize, and the drag is not available in the notes editor.
 
 ## Pane navigation
 

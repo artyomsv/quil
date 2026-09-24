@@ -19,6 +19,7 @@ Quil exposes **35 MCP tools**: agents can manage [projects and tabs](mcp.md#proj
   - [Spatial pane navigation](#spatial-pane-navigation)
   - [Live CWD tracking](#live-cwd-tracking)
   - [Pane focus mode](#pane-focus-mode)
+  - [Rearranging a tab's panes](#rearranging-a-tabs-panes)
   - [Tab customization](#tab-customization)
   - [New tab, with the pane you actually want](#new-tab-with-the-pane-you-actually-want)
 - [Input & clipboard](#input--clipboard)
@@ -162,6 +163,20 @@ The CWD also feeds the new-pane setup dialog (pre-filled from the active pane's 
 
 `Ctrl+E` toggles the active pane full-screen. The layout tree stays intact; other panes keep running but aren't rendered. `* FOCUS *` in the pane top border, `[focus]` in the status bar. Pane navigation is disabled in focus mode. Splitting / closing exit focus automatically.
 
+### Rearranging a tab's panes
+
+Panes moved in from other tabs can leave a tab lopsided. Right-click the tab (in the tab bar or the sidebar) and choose **Layout…**:
+
+| Row | Result |
+|---|---|
+| Even out | Keeps the arrangement, gives every pane the same area |
+| Columns / Rows | All panes side by side / stacked, equal sizes |
+| Grid | Rows of equal panes, as square as possible (5 panes → 3 + 2) |
+| Main + stack | The tab's active pane on the left at half the width, the rest stacked on the right |
+| Spiral | Each pane splits the last one, alternating direction, all equal |
+
+The same six are in the command palette (acting on the active tab) and can be bound to keys as `tab.layout_even`, `tab.layout_columns`, `tab.layout_rows`, `tab.layout_grid`, `tab.layout_main` and `tab.layout_spiral` in `bindings.toml` — they ship unbound. Hold `Alt` and drag a pane onto another to place it on the side you drop it on, onto the middle to swap the two, or onto a tab to move it there. Nothing restarts. A layout that would make a pane smaller than 10×4 cells is refused, and the new layout is saved at once. Other Quil windows attached to the same daemon keep their own arrangement of that tab until they reattach.
+
 ### Tab customization
 
 | Action | Binding |
@@ -196,7 +211,7 @@ checkout.
 
 ### Mouse & keyboard
 
-Full mouse support — click tabs to switch, click panes to focus, scroll wheel for terminal history. Drag panes to select text. Drag a tab (in the tab bar or by its name in the project sidebar) or a project row to reorder it; the item moves once the pointer passes the middle of its neighbour, so the drag never flips back and forth. `Alt+Shift+PgUp`/`PgDn` and `Alt+Shift+Up`/`Down` do the same from the keyboard for tabs and projects. Right-click a tab (in the bar or the sidebar) for a context menu to rename it, pick its color, or move it to another project on the same machine — see [Mouse: tab context menu](keybindings.md#mouse-tab-context-menu). All keybindings are configurable via `config.toml`.
+Full mouse support — click tabs to switch, click panes to focus, scroll wheel for terminal history. Drag panes to select text. Drag a tab (in the tab bar or by its name in the project sidebar) or a project row to reorder it; the item moves once the pointer passes the middle of its neighbour, so the drag never flips back and forth. `Alt+Shift+PgUp`/`PgDn` and `Alt+Shift+Up`/`Down` do the same from the keyboard for tabs and projects. Right-click a tab (in the bar or the sidebar) for a context menu to rename it, pick its color, tidy its layout, or move it to another project on the same machine — see [Mouse: tab context menu](keybindings.md#mouse-tab-context-menu). Hold `Alt` and drag a pane to move it beside another pane, swap the two, or drop it on a tab — see [Rearranging a tab's panes](#rearranging-a-tabs-panes). All keybindings are configurable via `config.toml`.
 
 When there are more tabs than fit, the mouse wheel over the tab bar scrolls the strip left/right instead of switching tabs or reaching the pane beneath it; markers (`«N` / `N»`) show how many tabs are hidden on each side. Clicking a tab keeps the current scroll position; switching some other way (keyboard, the palette, an MCP tool) snaps the bar back to centering on whichever tab is now active.
 

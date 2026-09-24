@@ -7,25 +7,17 @@ https://github.com/artyomsv/quil
 Licensed under the Apache License, Version 2.0 (the "License"). You may obtain
 a copy in the LICENSE file, or at http://www.apache.org/licenses/LICENSE-2.0
 
---- Licensing transition -------------------------------------------------------
+--- Licensing history ----------------------------------------------------------
 
-Quil is transitioning from the MIT License to the Apache License, Version 2.0.
-All new contributions are licensed under Apache-2.0.
+Quil moved from the MIT License to the Apache License, Version 2.0, in August
+2026. All contributions are licensed under Apache-2.0.
 
-Contributions for which relicensing consent has been obtained are licensed
-under Apache-2.0. Contributions made by authors who originally licensed their
-work under the MIT License and who have not granted explicit permission to
-relicense remain licensed under the MIT License, the text of which is
-reproduced in MIT-LICENSE.txt.
-
-One contribution is in that position: the changes made by pull request #116
-(commit aaa2c55, "fix(tui): re-wrap terminal pastes in bracketed paste
-markers"), Portions Copyright 2026 Ope Oladipo (@oooseun). Consent was
-requested in issue #180 on 2026-08-20 and has not been given, so those changes
-remain under the MIT License.
-
-No rights beyond those granted by the applicable original license are conveyed
-for such contributions.
+Every author who contributed under the MIT License has granted permission to
+relicense. The changes made by pull request #116 (commit aaa2c55, "fix(tui):
+re-wrap terminal pastes in bracketed paste markers"), Portions Copyright 2026
+Ope Oladipo (@oooseun), were relicensed to Apache-2.0 with the author's consent
+given in issue #180 on 2026-09-23:
+https://github.com/artyomsv/quil/issues/180#issuecomment-5791630891
 
 Releases published before August 2026 remain under the MIT License they
 shipped with.
@@ -34,8 +26,8 @@ This statement lives here rather than in LICENSE deliberately. LICENSE is kept
 byte-identical to the canonical Apache-2.0 text, because GitHub's licence
 detector matches the whole file and any preamble drops it below the confidence
 threshold, reporting the project as "Other". NOTICE is also the file Apache-2.0
-section 4(d) requires derivatives to carry, so the caveat travels further here
-than it would there.
+section 4(d) requires derivatives to carry, so the statement travels further
+here than it would there.
 
 --- Third-party ----------------------------------------------------------------
 

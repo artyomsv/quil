@@ -16,7 +16,7 @@ hand no longer satisfies it — and `CHANGELOG.md` is written by
 
 The gate fires when the diff still has files after a **denylist**:
 `^(site|docs|tools|techdebt|marketing|\.github|\.claude|changelog\.d)/`, root
-`*.md`, `VERSION|LICENSE|MIT-LICENSE.txt|NOTICE|Makefile|package-lock.json|
+`*.md`, `VERSION|LICENSE|NOTICE|Makefile|package-lock.json|
 .gitignore|.gitattributes|.editorconfig|.dockerignore`, and `_test.go$`. So a
 test-only PR is exempt. `release.yml` uses the SAME denylist on purpose — a
 divergence is what turned master red in #130.

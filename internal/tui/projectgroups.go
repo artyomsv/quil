@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 )
 
@@ -291,13 +292,42 @@ func readProjectGroupsFile(path string) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(f, projectGroupsFileCap+1))
 }
 
-// quarantineProjectGroups moves a file that cannot be used to <path>.bak, so
-// the next save cannot silently overwrite the only copy of the user's groups.
+// quarantineBakSlots caps the numbered backup slots (<path>.bak,
+// <path>.bak.1 .. <path>.bak.9) tried before falling back to a timestamped
+// name. A groups file is quarantined at most a handful of times between a
+// user noticing and fixing the cause; ten slots is far more than that.
+const quarantineBakSlots = 10
+
+// pathTaken reports whether something already exists at p — a real file, a
+// symlink, anything Lstat can see. Used to find a quarantine name that will
+// not silently destroy whatever is already there.
+func pathTaken(p string) bool {
+	_, err := os.Lstat(p)
+	return err == nil
+}
+
+// quarantineProjectGroups moves a file that cannot be used aside, so the next
+// save cannot silently overwrite it. It never overwrites an EARLIER
+// quarantine either: os.Rename replaces its destination on both Windows and
+// Unix, so a second bad file renamed straight onto "<path>.bak" would
+// silently destroy the first one's backup — the loss the spec says load must
+// never cause. It tries "<path>.bak", then "<path>.bak.1" up to
+// "<path>.bak.<quarantineBakSlots-1>", using the first name nothing already
+// occupies. If every numbered slot is taken, it falls back to a
+// nanosecond-timestamped name rather than pick one of them to overwrite —
+// for one quarantine call that name cannot already exist.
 func quarantineProjectGroups(path string, cause error) error {
-	if err := os.Rename(path, path+".bak"); err != nil {
+	dest := path + ".bak"
+	for i := 1; pathTaken(dest) && i < quarantineBakSlots; i++ {
+		dest = fmt.Sprintf("%s.bak.%d", path, i)
+	}
+	if pathTaken(dest) {
+		dest = fmt.Sprintf("%s.bak.%d", path, time.Now().UnixNano())
+	}
+	if err := os.Rename(path, dest); err != nil {
 		return fmt.Errorf("%w; moving it aside also failed: %v", cause, err)
 	}
-	return fmt.Errorf("%w; moved to %s", cause, filepath.Base(path)+".bak")
+	return fmt.Errorf("%w; moved to %s", cause, filepath.Base(dest))
 }
 
 // loadProjectGroups reads the groups file. A missing file is the first launch

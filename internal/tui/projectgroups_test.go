@@ -275,6 +275,29 @@ func TestProjectGroups_CorruptFileIsMovedToBakAndStartsEmpty(t *testing.T) {
 	}
 }
 
+func TestProjectGroups_QuarantineNeverOverwritesAnEarlierBackup(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	path := config.ProjectGroupsPath()
+	oldBak := `{"version":1,"groups":[{"name":"OldBackup"}]}`
+	if err := os.WriteFile(path+".bak", []byte(oldBak), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	corrupt := `{"groups": [`
+	if err := os.WriteFile(path, []byte(corrupt), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadProjectGroups(path); err == nil {
+		t.Fatal("a corrupt file loaded without an error to log")
+	}
+	if data, err := os.ReadFile(path + ".bak"); err != nil || string(data) != oldBak {
+		t.Fatalf(".bak = %q (err %v), want the untouched earlier backup %q", data, err, oldBak)
+	}
+	if data, err := os.ReadFile(path + ".bak.1"); err != nil || string(data) != corrupt {
+		t.Fatalf(".bak.1 = %q (err %v), want the corrupt bytes %q — a second quarantine "+
+			"must never destroy the first backup", data, err, corrupt)
+	}
+}
+
 func TestProjectGroups_OversizedFileIsRefusedAndMovedToBak(t *testing.T) {
 	t.Setenv("QUIL_HOME", t.TempDir())
 	path := config.ProjectGroupsPath()

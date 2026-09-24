@@ -1417,6 +1417,13 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 	// a different daemon than the one on screen. A gate in two places is a gate
 	// in neither.
 	if cmd, frozen := m.freezeInput(msg); frozen {
+		// A frozen buttonless move is dropped like any input, so it is inert —
+		// and all-motion reporting (on while the sidebar is painted) delivers
+		// one per pointer move, which would otherwise rebuild the frame each
+		// time for as long as the link is down.
+		if mm, ok := msg.(tea.MouseMotionMsg); ok && mm.Button == tea.MouseNone {
+			m.skipRender = !prologueChangedView
+		}
 		return m, cmd
 	}
 	switch msg := msg.(type) {
@@ -4774,6 +4781,16 @@ type viewCacheBox struct {
 	// comparing rendered content proves a skip was HONEST, this proves the skip
 	// actually happened.
 	builds int
+	// The last sidebar hover resolution (sidebarHoverAt): row hoverY resolved
+	// to hoverKey while the frame counter read hoverBuilds. The rows change
+	// only through a state change, and a state change rebuilds the frame, so
+	// an unchanged counter means the same row slice — the guarantee the skip
+	// itself rests on. hoverResolves counts the slow path, for the tests.
+	hoverValid    bool
+	hoverY        int
+	hoverBuilds   int
+	hoverKey      sidebarHoverKey
+	hoverResolves int
 }
 
 func (m Model) View() tea.View {

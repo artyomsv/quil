@@ -77,7 +77,29 @@ type sidebarHoverKey struct {
 // sidebarRowAt — the row slice the paint uses — so the highlighted row is the
 // one the pointer is on. Anything but a project row (either of a remote's two)
 // or a group header, including every cell outside the strip, is no hover.
+//
+// Building the rows styles every one of them, and buttonless motion arrives
+// per pointer move, so a move along the same row reuses the last answer while
+// no frame has been rebuilt since (viewCacheBox.hoverBuilds). Without a view
+// cache every move resolves.
 func (m *Model) sidebarHoverAt(x, y int) sidebarHoverKey {
+	if w := m.projectSidebarWidth(); w <= 0 || x < 0 || x >= w || y < 0 || y >= m.height-1 {
+		return sidebarHoverKey{}
+	}
+	c := m.viewCache
+	if c != nil && c.valid && c.hoverValid && c.hoverY == y && c.hoverBuilds == c.builds {
+		return c.hoverKey
+	}
+	key := m.resolveSidebarHover(x, y)
+	if c != nil {
+		c.hoverValid, c.hoverY, c.hoverBuilds, c.hoverKey = true, y, c.builds, key
+		c.hoverResolves++
+	}
+	return key
+}
+
+// resolveSidebarHover is sidebarHoverAt's slow path: the row slice itself.
+func (m *Model) resolveSidebarHover(x, y int) sidebarHoverKey {
 	row, ok := m.sidebarRowAt(x, y)
 	if !ok {
 		return sidebarHoverKey{}

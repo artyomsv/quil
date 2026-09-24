@@ -372,3 +372,113 @@ func TestSidebarGroups_EveryHighlightedRowIsExactlyTheStripWidth(t *testing.T) {
 		}
 	}
 }
+
+// grpHoverFrame is one Bubble Tea step for a buttonless move: Update, then
+// View — the order the program runs them in, which is what the hover cache's
+// frame counter relies on.
+func grpHoverFrame(m Model, x, y int) Model {
+	next, _ := grpHover(m, x, y)
+	next.View()
+	return next
+}
+
+// A move along the same row reuses the last resolved key instead of restyling
+// every sidebar row, until a frame is rebuilt — and after a rebuild that moved
+// the rows, the same y resolves to the row that is there now.
+func TestSidebarHover_SameRowReusesTheResolvedKeyUntilAFrameRebuild(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	m, _ := newGroupsSidebarModel(t)
+	m.viewCache = &viewCacheBox{}
+	got := *m
+	got.View()
+	c := got.viewCache
+
+	got = grpHoverFrame(got, 3, 3) // R1: a new key, so the frame rebuilds
+	if n := c.hoverResolves; n != 1 {
+		t.Fatalf("first move resolved %d times, want 1", n)
+	}
+	got = grpHoverFrame(got, 9, 3) // the frame was rebuilt since: resolves again
+	resolves := c.hoverResolves
+	for _, x := range []int{12, 4, 20} {
+		got = grpHoverFrame(got, x, 3)
+	}
+	if c.hoverResolves != resolves {
+		t.Fatalf("moves along row 3 with no rebuild resolved %d more times, want 0", c.hoverResolves-resolves)
+	}
+	if want := (sidebarHoverKey{dest: "gpu01", projectID: "r1"}); got.sidebarHover != want {
+		t.Fatalf("sidebarHover = %+v, want %+v", got.sidebarHover, want)
+	}
+
+	// Collapsing G-A moves the rows: row 3 becomes G-B's header. A state
+	// change rebuilds the frame, which drops the cached answer.
+	got.groups.setCollapsed(0, true)
+	got.skipRender = false
+	got.View()
+	rows, _ := got.sidebarRows(22)
+	if r := rows[3]; r.kind != sidebarRowGroup || r.index != 1 {
+		t.Fatalf("setup: row 3 = %+v, want G-B's header after collapsing G-A", r)
+	}
+	got = grpHoverFrame(got, 3, 3)
+	if want := (sidebarHoverKey{group: "G-B"}); got.sidebarHover != want {
+		t.Fatalf("after the rebuild sidebarHover = %+v, want %+v — a stale cached key", got.sidebarHover, want)
+	}
+}
+
+// While the link is down every input is dropped, and all-motion reporting
+// still delivers a buttonless move per pointer move: each is inert and must
+// serve the cached frame rather than rebuild it.
+func TestReconnect_FrozenButtonlessMotionServesTheCachedFrame(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	m, _ := newGroupsSidebarModel(t)
+	m.viewCache = &viewCacheBox{}
+	m.links = oneLink(reconnectState{active: true, attempt: 3})
+	m.asRemote(testDest)
+	if _, frozen := m.freezeInput(tea.MouseMotionMsg{}); !frozen {
+		t.Fatal("setup: input is not frozen")
+	}
+	m.View()
+	for _, p := range [][2]int{{3, 1}, {3, 5}, {50, 10}} {
+		builds := m.viewCache.builds
+		next, _ := grpHover(*m, p[0], p[1])
+		delivered := next.View()
+		forced := next
+		forced.skipRender = false
+		if honest := forced.View(); delivered.Content != honest.Content || delivered.MouseMode != honest.MouseMode {
+			t.Errorf("(%d,%d): the delivered frame is STALE against an honest rebuild", p[0], p[1])
+		}
+		if next.viewCache.builds != builds+1 { // +1: the forced rebuild only
+			t.Errorf("(%d,%d): a frozen buttonless move rebuilt the frame", p[0], p[1])
+		}
+		if next.sidebarHover != (sidebarHoverKey{}) {
+			t.Errorf("(%d,%d): a frozen move set the hover", p[0], p[1])
+		}
+	}
+}
+
+// The name row is budgeted on its plain parts, so on any box width it fits
+// the inner width and keeps its caret — a cut through the styled row could
+// split an SGR sequence and drop the caret.
+func TestGroupNameDialog_NameRowFitsEveryWidth(t *testing.T) {
+	m, _ := newGroupsSidebarModel(t)
+	got := grpOpenNewGroup(t, *m, 1)
+	got = grpType(got, strings.Repeat("构", maxGroupNameRunes))
+	for w := 3; w <= 60; w++ {
+		got.width = w
+		inner := dialogInnerWidth(w, groupNameDialogWidth)
+		for _, line := range strings.Split(got.renderGroupNameDialog(), "\n") {
+			if lw := lipgloss.Width(line); lw > inner {
+				t.Fatalf("w=%d: line %q is %d cells, over the inner %d", w, stripANSI(line), lw, inner)
+			}
+			// Every CSI the line carries must be a whole SGR: digits and ';'
+			// up to its 'm'.
+			for _, part := range strings.Split(line, "\x1b[")[1:] {
+				if i := strings.IndexByte(part, 'm'); i < 0 || strings.Trim(part[:i], "0123456789;") != "" {
+					t.Fatalf("w=%d: a cut SGR sequence in %q", w, line)
+				}
+			}
+		}
+		if !strings.Contains(stripANSI(got.renderGroupNameDialog()), "▎") {
+			t.Fatalf("w=%d: the name row lost its caret", w)
+		}
+	}
+}

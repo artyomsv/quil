@@ -407,9 +407,16 @@ func (m Model) renderGroupNameDialog() string {
 	var b strings.Builder
 	b.WriteString(dialogTitle.Render(truncateToWidth(title, inner)))
 	b.WriteString("\n\n")
-	const label = "Name: "
-	name := lastCellsToWidth(sanitizeRemoteText(m.groupEdit.input), inner-lipgloss.Width(label)-1)
-	b.WriteString(truncateToWidth(dialogNormal.Render(label)+dialogEditStyle.Render(name+"▎"), inner))
+	// Budgeted on the PLAIN parts before styling — a cut through styled text
+	// can split an SGR sequence. The label goes first on a box too narrow for
+	// it; the caret always fits (inner is at least 1).
+	label := "Name: "
+	nameW := inner - lipgloss.Width(label) - 1
+	if nameW < 0 {
+		label, nameW = "", inner-1
+	}
+	name := lastCellsToWidth(sanitizeRemoteText(m.groupEdit.input), nameW)
+	b.WriteString(dialogNormal.Render(label) + dialogEditStyle.Render(name+"▎"))
 	b.WriteString("\n\n")
 	if msg := m.groupNameRefusal(); msg != "" {
 		b.WriteString(dialogErrorStyle.Render(truncateToWidth("✗ "+msg, inner)))

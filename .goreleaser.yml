@@ -96,11 +96,9 @@ archives:
     allow_different_binary_count: true
     name_template: "quil_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     # Explicit, because the defaults are wrong in both directions. The default
-    # globs are LICENSE*, README* and CHANGELOG*, which MISS `NOTICE` and
-    # `MIT-LICENSE.txt` — and Apache-2.0 makes both an obligation rather than a
-    # courtesy: §4(a) says recipients get the licence, §4(d) says they get the
-    # NOTICE, and LICENSE itself points at MIT-LICENSE.txt, so shipping one
-    # without the other puts a dangling reference in a legal document.
+    # globs are LICENSE*, README* and CHANGELOG*, which MISS `NOTICE` — and
+    # Apache-2.0 makes shipping it an obligation rather than a courtesy: §4(a)
+    # says recipients get the licence, §4(d) says they get the NOTICE.
     #
     # THIRD_PARTY_LICENSES.md carries Microsoft's MIT notice for the OpenConsole
     # binaries that internal/pty/winconpty embeds into the Windows build. MIT
@@ -112,7 +110,6 @@ archives:
     # earlier. Listing files explicitly drops it.
     files:
       - LICENSE
-      - MIT-LICENSE.txt
       - NOTICE
       - TRADEMARK.md
       - THIRD_PARTY_LICENSES.md

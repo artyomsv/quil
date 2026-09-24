@@ -1,0 +1,1 @@
+- **All of quil is now under Apache-2.0.** The author of #116 granted relicensing permission in #180, so no contribution stays under MIT. `NOTICE` records the consent, and release archives no longer carry `MIT-LICENSE.txt`.

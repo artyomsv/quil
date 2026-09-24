@@ -54,7 +54,7 @@ the pane it opens with starts in that project's root directory.
 | Mouse drag a project row | Reorder — the row moves once the pointer passes the middle of its neighbour (a remote project is two rows tall). Each daemon remembers the order of its own projects; when several hosts are connected, how their rows interleave is kept only for the running session |
 | Mouse drop a project on a group header / on the PROJECTS heading | Put it in that group / take it out of its group (dropping it on an ungrouped project does the same) |
 | Mouse click / drag a group header | Collapse or expand the group / reorder the groups |
-| Right-click a project row → Move to group… | Pick a group, **New group…** (type the name in the status bar, `Enter` creates, `Esc` cancels) or **No group** |
+| Right-click a project row → Move to group… | Pick a group, **New group…** (a centred dialog asks for the name, `Enter` creates, `Esc` cancels) or **No group** |
 | Right-click a group header | Rename group, Collapse / Expand, Move up, Move down, Delete group — deleting only ungroups its projects |
 | *(unbound)* | `project.group_toggle` — collapse or expand the active project's group; `project.groups_collapse_all` — collapse every group, or expand them all when all are collapsed. Bind them in `bindings.toml` |
 | Click + drag the sidebar's right edge | Resize the sidebar (12-column minimum; a rule previews the new edge, panes resize on release, width persists to `[ui] sidebar_width`) |

@@ -1022,3 +1022,115 @@ func TestRenderCtxMenu_OverWideLabelIsCutNotPanicking(t *testing.T) {
 		}
 	}
 }
+
+// grpIdentityModel: local projects ids (names upper-cased), all ungrouped,
+// and one empty group G, with the sidebar open. Its client records sends.
+func grpIdentityModel(t *testing.T, ids ...string) (Model, *fakeConn) {
+	t.Helper()
+	fake := newFakeConn()
+	m := Model{
+		cfg:            config.Default(),
+		notifications:  NewNotificationCenter(30, 50),
+		mcpHighlights:  make(map[string]bool),
+		tabDragFromIdx: -1,
+		sized:          true,
+		width:          100,
+		height:         40,
+		client:         fake,
+		sidebarOpen:    true,
+		sidebarWidth:   22,
+	}
+	for _, id := range ids {
+		m.projects = append(m.projects, &ProjectModel{ID: id, Name: strings.ToUpper(id)})
+	}
+	m.groups = grpFromNames("G")
+	return m, fake
+}
+
+// grpBroadcastProjects delivers the local daemon's project list through Update.
+func grpBroadcastProjects(t *testing.T, m Model, active string, ids ...string) Model {
+	t.Helper()
+	infos := make([]ProjectInfo, len(ids))
+	for i, id := range ids {
+		infos[i] = ProjectInfo{ID: id, Name: strings.ToUpper(id)}
+	}
+	updated, _ := m.Update(WorkspaceStateMsg{Projects: infos, ActiveProject: active})
+	got := updated.(Model)
+	if ps := grpProjectIDs(got); ps != strings.Join(ids, ",") {
+		t.Fatalf("setup: projects after the broadcast = %s, want %s", ps, strings.Join(ids, ","))
+	}
+	return got
+}
+
+// A broadcast that removes an EARLIER project mid-drag shifts every index
+// after it. The drag names its project by (Dest, ID), so the release still
+// regroups the project that was pressed — the pressed index would now name
+// its successor, which is what a review reproduced (G ended up holding C).
+func TestProjectDrag_BroadcastRemovingAnEarlierProjectKeepsTheDraggedOne(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	m, _ := grpIdentityModel(t, "a", "b", "c")
+	// Rows: 0 PROJECTS, 1 A, 2 B, 3 C, 4 ▾ G (0).
+	got, _ := grpPress(m, 2, tea.MouseLeft) // B
+	got, _ = grpMotion(got, 4)              // over G: the drop target
+	if got.projectDrop.group != "G" {
+		t.Fatalf("setup: projectDrop = %+v, want G", got.projectDrop)
+	}
+	got = grpBroadcastProjects(t, got, "b", "b", "c") // another client removed A
+	// Rows now: 0 PROJECTS, 1 B, 2 C, 3 ▾ G (0).
+	if y := grpProjectRowY(t, got, "b"); !strings.Contains(stripANSI(grpRowText(got, y)), "B") ||
+		cellBackgrounds(grpRowText(got, y))[0] != dragBGSpec {
+		t.Errorf("the blue drag row is not B's after the rebuild: %q", stripANSI(grpRowText(got, y)))
+	}
+	got, _ = grpRelease(got, 3)
+	if members := grpMembers(got.groups, 0); members != "/b" {
+		t.Fatalf("G holds %q after the release, want /b — the drag regrouped the project at its stale index", members)
+	}
+}
+
+// A broadcast that removes the DRAGGED project ends the drag: the release
+// regroups nothing, reorders nothing and saves nothing.
+func TestProjectDrag_BroadcastRemovingTheDraggedProjectCancelsIt(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	m, fake := grpIdentityModel(t, "a", "b", "c")
+	got, _ := grpPress(m, 2, tea.MouseLeft) // B
+	got, _ = grpMotion(got, 4)              // over G
+	got = grpBroadcastProjects(t, got, "a", "a", "c")
+	seq, sent := got.groupsSeq, len(fake.sent)
+	// Rows now: 0 PROJECTS, 1 A, 2 C, 3 ▾ G (0). Move over C's row (a reorder
+	// row for a live drag), then release on G's header.
+	got, _ = grpMotion(got, 2)
+	got, _ = grpRelease(got, 3)
+	if members := grpMembers(got.groups, 0); members != "" {
+		t.Fatalf("G holds %q after the dragged project vanished, want nothing", members)
+	}
+	if got.groupsSeq != seq {
+		t.Errorf("groupsSeq %d → %d: a vanished drag saved", seq, got.groupsSeq)
+	}
+	for _, msg := range fake.sent[sent:] {
+		if msg.Type == ipc.MsgReorderProject {
+			t.Fatal("a vanished drag sent a reorder")
+		}
+	}
+	if ps := grpProjectIDs(got); ps != "a,c" {
+		t.Errorf("projects = %s, want a,c untouched", ps)
+	}
+	if got.projectDragging || got.projectDragKey != (groupMember{}) {
+		t.Error("the drag is still armed")
+	}
+}
+
+// The within-section reorder follows the dragged project too: after an
+// earlier project is removed, crossing a neighbour moves the dragged project,
+// not whichever one now sits at its old index.
+func TestProjectDrag_ReorderAfterABroadcastMovesTheDraggedProject(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	m, _ := grpIdentityModel(t, "a", "b", "c", "d")
+	// Rows: 0 PROJECTS, 1 A, 2 B, 3 C, 4 D, 5 ▾ G (0).
+	got, _ := grpPress(m, 3, tea.MouseLeft) // C
+	got = grpBroadcastProjects(t, got, "c", "b", "c", "d")
+	// Rows now: 0 PROJECTS, 1 B, 2 C, 3 D. Up over B: C moves above it.
+	got, _ = grpMotion(got, 1)
+	if ps := grpProjectIDs(got); ps != "c,b,d" {
+		t.Fatalf("order = %s after dragging C over B, want c,b,d", ps)
+	}
+}

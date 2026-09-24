@@ -64,9 +64,12 @@ func (m *Model) trackGroupDrag(x, y int) {
 // press switched the active project and may have shifted every row below a
 // collapsed group, so its release y no longer names the row it was on.
 func (m *Model) finishProjectDrag(x, y int) tea.Cmd {
-	idx, moved := m.projectDragIdx, m.projectDragMoved
+	// The index is re-resolved from the drag's identity: a broadcast during the
+	// drag may have removed an earlier project, and the pressed index would then
+	// name its successor. A project that is gone changes nothing.
+	idx, moved := m.projectDragIndex(), m.projectDragMoved
 	m.clearDragState()
-	if !moved || idx < 0 || idx >= len(m.projects) {
+	if !moved || idx < 0 {
 		return nil
 	}
 	p := m.projects[idx]

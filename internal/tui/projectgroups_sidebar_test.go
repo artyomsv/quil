@@ -425,8 +425,8 @@ func TestSidebarGroups_CollapsedActiveRowIsPartOfThePinnedHead(t *testing.T) {
 		t.Errorf("row 7 = %q, want the indented active row", got)
 	}
 	got, _ := grpPress(*m, 7, tea.MouseLeft)
-	if !got.projectDragging || got.projectDragIdx != 3 {
-		t.Fatalf("a press on the collapsed group's active row armed (%v, %d), want (true, 3)", got.projectDragging, got.projectDragIdx)
+	if !got.projectDragging || got.projectDragIndex() != 3 {
+		t.Fatalf("a press on the collapsed group's active row armed (%v, %d), want (true, 3)", got.projectDragging, got.projectDragIndex())
 	}
 	got, _ = grpRelease(got, 7)
 

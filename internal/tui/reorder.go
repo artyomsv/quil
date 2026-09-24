@@ -711,15 +711,22 @@ func projectRowSpanIn(rows []sidebarRow, idx int) (start, size int) {
 // a group is a drop, decided on release (finishProjectDrag). Returns the IPC
 // cmd when the daemon rank changed, else nil.
 func (m *Model) trackProjectDrag(x, y int) tea.Cmd {
+	// Re-resolved from the drag's identity, never trusted from the press: a
+	// broadcast since then may have rebuilt m.projects. A project that is gone
+	// ends the drag — there is nothing left to move or regroup.
+	from := m.projectDragIndex()
+	if from < 0 {
+		m.clearDragState()
+		return nil
+	}
 	rows, row, ok := m.sidebarDragRows(x, y)
 	// Where a release here would land, from the rule finishProjectDrag applies
 	// — resolved before any reorder below, from the rows this event built.
-	m.projectDrop = m.projectDropFor(m.projectDragIdx, row, ok)
+	m.projectDrop = m.projectDropFor(from, row, ok)
 	if !ok || row.kind != sidebarRowProject {
 		return nil
 	}
-	from := m.projectDragIdx
-	if from < 0 || from >= len(m.projects) || row.index < 0 || row.index >= len(m.projects) {
+	if row.index < 0 || row.index >= len(m.projects) {
 		return nil
 	}
 	section := m.sectionOf(from)
@@ -736,12 +743,25 @@ func (m *Model) trackProjectDrag(x, y int) tea.Cmd {
 	if toPos == fromPos {
 		return nil
 	}
-	p := m.projects[from]
-	cmd, moved := m.moveProjectWithinSection(p, toPos)
-	if moved {
-		m.projectDragIdx = indexOfProjectPtr(m.projects, p)
-	}
+	// moveProjectWithinSection keys on the pointer, which the identity just
+	// resolved; the drag itself needs no update, since its key did not move.
+	cmd, _ := m.moveProjectWithinSection(m.projects[from], toPos)
 	return cmd
+}
+
+// projectDragIndex is the dragged project's CURRENT index in m.projects,
+// resolved from projectDragKey, or -1 when no drag is armed or the project no
+// longer exists. Every reader of the drag goes through it.
+func (m *Model) projectDragIndex() int {
+	if !m.projectDragging || m.projectDragKey.ID == "" {
+		return -1
+	}
+	for i, p := range m.projects {
+		if p.Dest == m.projectDragKey.Dest && p.ID == m.projectDragKey.ID {
+			return i
+		}
+	}
+	return -1
 }
 
 // tabGroupSpanIn is the screen-row extent of tab idx's group — heading, pane

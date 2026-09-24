@@ -224,10 +224,11 @@ func (m *Model) dragActive() bool {
 }
 
 // projectRowHighlight is project i's highlight. A drag that has left its press
-// row paints the dragged project: it follows projectDragIdx as the project
-// reorders, and clearDragState ends it. The hover shows only with no drag.
+// row paints the dragged project, found by its identity (projectDragIndex) so
+// it follows the project through a reorder or a rebuild; clearDragState ends
+// it. The hover shows only with no drag.
 func (m *Model) projectRowHighlight(i int) rowHighlight {
-	if m.projectDragging && m.projectDragMoved && m.projectDragIdx == i {
+	if m.projectDragMoved && m.projectDragIndex() == i {
 		return rowHighlightDrag
 	}
 	p := m.projects[i]

@@ -594,8 +594,8 @@ func TestSidebarProjectDragReordersPastTheMidpoint(t *testing.T) {
 	if got.activeProject != 2 {
 		t.Fatalf("activeProject = %d after pressing gamma, want 2", got.activeProject)
 	}
-	if !got.projectDragging || got.projectDragIdx != 2 {
-		t.Fatalf("drag = (%v, %d) after pressing a project row, want (true, 2)", got.projectDragging, got.projectDragIdx)
+	if !got.projectDragging || got.projectDragIndex() != 2 {
+		t.Fatalf("drag = (%v, %d) after pressing a project row, want (true, 2)", got.projectDragging, got.projectDragIndex())
 	}
 
 	updated, cmd := got.Update(tea.MouseMotionMsg{X: 3, Y: 3, Button: tea.MouseLeft})
@@ -612,8 +612,8 @@ func TestSidebarProjectDragReordersPastTheMidpoint(t *testing.T) {
 	if names := projectNames(got); names != "alpha,gamma,beta" {
 		t.Fatalf("order after crossing beta's midpoint = %s, want alpha,gamma,beta", names)
 	}
-	if got.activeProject != 1 || got.projectDragIdx != 1 {
-		t.Fatalf("active / drag index = %d / %d after the move, want 1 / 1", got.activeProject, got.projectDragIdx)
+	if got.activeProject != 1 || got.projectDragIndex() != 1 {
+		t.Fatalf("active / drag index = %d / %d after the move, want 1 / 1", got.activeProject, got.projectDragIndex())
 	}
 	// gamma passed only gpu01's project: it is still the local daemon's
 	// second, so there is nothing to tell it.
@@ -675,8 +675,8 @@ func TestSidebarProjectDragIgnoresNonProjectRowsAndColumnsOutsideTheStrip(t *tes
 
 	updated, _ := m.Update(tea.MouseClickMsg{X: 3, Y: 3, Button: tea.MouseLeft})
 	got := updated.(Model)
-	if !got.projectDragging || got.projectDragIdx != 2 {
-		t.Fatalf("drag = (%v, %d) after pressing gamma, want (true, 2)", got.projectDragging, got.projectDragIdx)
+	if !got.projectDragging || got.projectDragIndex() != 2 {
+		t.Fatalf("drag = (%v, %d) after pressing gamma, want (true, 2)", got.projectDragging, got.projectDragIndex())
 	}
 
 	for _, tc := range []struct {

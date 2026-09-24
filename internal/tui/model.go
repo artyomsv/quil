@@ -900,8 +900,12 @@ type Model struct {
 	// project sidebar (reorder.go). A bool beside the index rather than
 	// tabDragFromIdx's -1 sentinel, so a Model built directly by a test — the
 	// zero value — reads as "no drag" without a constructor having to seed it.
-	projectDragging   bool
-	projectDragIdx    int
+	projectDragging bool
+	// projectDragKey is the dragged project's (Dest, ID), NOT an index: a
+	// broadcast can rebuild m.projects mid-drag, and an index then names a
+	// neighbour — the release regrouped and saved the wrong project.
+	// projectDragIndex re-resolves it at every use.
+	projectDragKey    groupMember
 	projectDragMoved  bool // the pointer left the press row: only a MOVED drag regroups (finishProjectDrag)
 	projectDragPressY int  // the press row; motion on it (sideways jitter) is not a drag
 	// projectDrop is where the moved project drag would land if released now,
@@ -1844,9 +1848,11 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 					// activate call, whose value receiver carries the flag on.
 					switch kind {
 					case sidebarRowProject:
-						m.projectDragging = true
-						m.projectDragIdx = idx
-						m.projectDragPressY = msg.Y
+						if idx >= 0 && idx < len(m.projects) {
+							m.projectDragging = true
+							m.projectDragKey = groupMember{Dest: m.projects[idx].Dest, ID: m.projects[idx].ID}
+							m.projectDragPressY = msg.Y
+						}
 					case sidebarRowTab:
 						m.sidebarTabDragging = true
 						m.sidebarTabDragIdx = idx
@@ -3638,7 +3644,7 @@ func (m *Model) clearDragState() {
 	}
 	m.tabDragFromIdx = -1
 	m.projectDragging = false
-	m.projectDragIdx = 0
+	m.projectDragKey = groupMember{}
 	m.projectDragMoved = false
 	m.projectDragPressY = 0
 	m.projectDrop = projectDrop{}

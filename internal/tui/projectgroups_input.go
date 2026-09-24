@@ -70,17 +70,15 @@ func (m *Model) finishProjectDrag(x, y int) tea.Cmd {
 		return nil
 	}
 	p := m.projects[idx]
+	// The same rule the drop-target highlight was painted from, applied to the
+	// release row — so the green row is exactly what the release does.
 	_, row, ok := m.sidebarDragRows(x, y)
-	if !ok {
-		return nil
-	}
-	cur := m.groups.groupOf(p.Dest, p.ID)
-	switch {
-	case row.kind == sidebarRowGroup:
-		if !m.groups.assign(row.index, p.Dest, p.ID) {
+	switch d := m.projectDropFor(idx, row, ok); {
+	case d.group != "":
+		if !m.groups.assign(m.groups.indexOf(d.group), p.Dest, p.ID) {
 			return nil
 		}
-	case cur >= 0 && (row.ungroupDrop || (row.kind == sidebarRowProject && !row.inGroup)):
+	case d.ungroup:
 		m.groups.unassign(p.Dest, p.ID)
 	default:
 		return nil

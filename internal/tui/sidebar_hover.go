@@ -16,14 +16,23 @@ const (
 	rowHighlightNone rowHighlight = iota
 	rowHighlightHover
 	rowHighlightDrag
+	// rowHighlightDrop marks where a moved project drag would land on release:
+	// a group header, or the PROJECTS heading for "no group".
+	rowHighlightDrop
 )
 
-// Both backgrounds are light, so the row's plain text turns dark on them
+// glyphDropTarget prefixes the drop-target row's label. U+2192 is one cell
+// and has no emoji presentation (the sidebar glyph rule —
+// TestSidebarGlyphs_OneCellAndNotEmojiCapable).
+const glyphDropTarget = "→"
+
+// Every background is light, so the row's plain text turns dark on them
 // (sidebarHighlightFG) — readable on a dark terminal and a light one alike.
 // The badge glyphs keep their own colours on top.
 var (
 	sidebarHoverBG     = lipgloss.Color("252")
 	sidebarDragBG      = lipgloss.Color("153")
+	sidebarDropBG      = lipgloss.Color("151")
 	sidebarHighlightFG = lipgloss.Color("235")
 )
 
@@ -33,6 +42,8 @@ func (h rowHighlight) background() color.Color {
 		return sidebarHoverBG
 	case rowHighlightDrag:
 		return sidebarDragBG
+	case rowHighlightDrop:
+		return sidebarDropBG
 	}
 	return nil
 }
@@ -128,15 +139,64 @@ func (m *Model) setSidebarHover(k sidebarHoverKey) bool {
 	return true
 }
 
+// projectDrop names where a project drag would land: a group by NAME, or
+// ungroup ("no group"). The zero value is "nowhere".
+type projectDrop struct {
+	group   string
+	ungroup bool
+}
+
+// projectDropFor is THE drop rule, for project idx released on row (ok false:
+// no sidebar row there). finishProjectDrag applies it and trackProjectDrag
+// paints it, so the highlight can never promise a drop the release will not
+// make, nor the release make one nobody was shown. A group header other than
+// the project's own group joins that group; the PROJECTS heading or an
+// ungrouped project row takes a GROUPED project out; everything else — its own
+// section, its own header, the panes, empty space — is nowhere.
+func (m *Model) projectDropFor(idx int, row sidebarRow, ok bool) projectDrop {
+	if !ok || idx < 0 || idx >= len(m.projects) {
+		return projectDrop{}
+	}
+	p := m.projects[idx]
+	cur := m.groups.groupOf(p.Dest, p.ID)
+	switch {
+	case row.kind == sidebarRowGroup:
+		if row.index >= 0 && row.index < len(m.groups.Groups) && row.index != cur {
+			return projectDrop{group: m.groups.Groups[row.index].Name}
+		}
+	case cur >= 0 && (row.ungroupDrop || (row.kind == sidebarRowProject && !row.inGroup)):
+		return projectDrop{ungroup: true}
+	}
+	return projectDrop{}
+}
+
+// activeProjectDrop is the drop target to paint: only for a project drag that
+// has left its press row, which is also the only drag a release acts on.
+func (m *Model) activeProjectDrop() projectDrop {
+	if m.projectDragging && m.projectDragMoved {
+		return m.projectDrop
+	}
+	return projectDrop{}
+}
+
+// dragActive reports any armed drag or selection. The hover is frozen during
+// one (only held-button motion arrives), so it is not painted either: the
+// colours then say where things are going, not where the pointer began.
+func (m *Model) dragActive() bool {
+	return m.projectDragging || m.groupDragging || m.sidebarTabDragging || m.sidebarDragging ||
+		m.tabDragFromIdx >= 0 || m.splitDragNode != nil || m.paneDrag.active() ||
+		m.scrollDragPaneID != "" || m.mouseDown || m.notesMouseDown
+}
+
 // projectRowHighlight is project i's highlight. A drag that has left its press
-// row wins over the hover: the dragged row is the one being acted on, and it
-// follows projectDragIdx as the project reorders. clearDragState ends it.
+// row paints the dragged project: it follows projectDragIdx as the project
+// reorders, and clearDragState ends it. The hover shows only with no drag.
 func (m *Model) projectRowHighlight(i int) rowHighlight {
 	if m.projectDragging && m.projectDragMoved && m.projectDragIdx == i {
 		return rowHighlightDrag
 	}
 	p := m.projects[i]
-	if h := m.sidebarHover; h.group == "" && h.projectID != "" && h.projectID == p.ID && h.dest == p.Dest {
+	if h := m.sidebarHover; !m.dragActive() && h.group == "" && h.projectID != "" && h.projectID == p.ID && h.dest == p.Dest {
 		return rowHighlightHover
 	}
 	return rowHighlightNone
@@ -144,13 +204,27 @@ func (m *Model) projectRowHighlight(i int) rowHighlight {
 
 // groupRowHighlight is group g's HEADER highlight — never its members'. The
 // drag colour needs a header drag that has moved the group (groupDragMoved),
-// so a click on the header never flashes it.
+// so a click on the header never flashes it; the drop colour marks the group
+// a moved project drag would join.
 func (m *Model) groupRowHighlight(g int) rowHighlight {
 	if m.groupDragging && m.groupDragMoved && m.groupDragIdx == g {
 		return rowHighlightDrag
 	}
-	if h := m.sidebarHover.group; h != "" && h == m.groups.Groups[g].Name {
+	name := m.groups.Groups[g].Name
+	if d := m.activeProjectDrop(); d.group != "" && d.group == name {
+		return rowHighlightDrop
+	}
+	if h := m.sidebarHover.group; !m.dragActive() && h != "" && h == name {
 		return rowHighlightHover
+	}
+	return rowHighlightNone
+}
+
+// projectsHeadingHighlight is the PROJECTS heading's: the drop colour while a
+// moved project drag would leave its group there.
+func (m *Model) projectsHeadingHighlight() rowHighlight {
+	if m.activeProjectDrop().ungroup {
+		return rowHighlightDrop
 	}
 	return rowHighlightNone
 }

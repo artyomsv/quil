@@ -900,10 +900,14 @@ type Model struct {
 	// project sidebar (reorder.go). A bool beside the index rather than
 	// tabDragFromIdx's -1 sentinel, so a Model built directly by a test — the
 	// zero value — reads as "no drag" without a constructor having to seed it.
-	projectDragging    bool
-	projectDragIdx     int
-	projectDragMoved   bool // the pointer left the press row: only a MOVED drag regroups (finishProjectDrag)
-	projectDragPressY  int  // the press row; motion on it (sideways jitter) is not a drag
+	projectDragging   bool
+	projectDragIdx    int
+	projectDragMoved  bool // the pointer left the press row: only a MOVED drag regroups (finishProjectDrag)
+	projectDragPressY int  // the press row; motion on it (sideways jitter) is not a drag
+	// projectDrop is where the moved project drag would land if released now,
+	// painted light green (projectDropFor, sidebar_hover.go). A KEY — a group
+	// name or "no group" — never an index; clearDragState resets it.
+	projectDrop        projectDrop
 	sidebarTabDragging bool
 	sidebarTabDragIdx  int
 
@@ -3637,6 +3641,7 @@ func (m *Model) clearDragState() {
 	m.projectDragIdx = 0
 	m.projectDragMoved = false
 	m.projectDragPressY = 0
+	m.projectDrop = projectDrop{}
 	m.sidebarTabDragging = false
 	m.sidebarTabDragIdx = 0
 	m.groupDragging = false

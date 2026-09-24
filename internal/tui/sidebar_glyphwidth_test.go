@@ -50,6 +50,9 @@ func TestSidebarGlyphs_OneCellAndNotEmojiCapable(t *testing.T) {
 		// budgeted as one cell each, exactly like the state glyphs.
 		"glyphGroupOpen":   glyphGroupOpen,
 		"glyphGroupClosed": glyphGroupClosed,
+		// The drop-target arrow leads a header or the PROJECTS heading and is
+		// budgeted as one cell.
+		"glyphDropTarget": glyphDropTarget,
 	}
 	// The WORKING state animates (workingGlyph), so it is a SET of glyphs where
 	// the others are one — and the row arithmetic budgets whichever frame is

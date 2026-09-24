@@ -712,6 +712,9 @@ func projectRowSpanIn(rows []sidebarRow, idx int) (start, size int) {
 // cmd when the daemon rank changed, else nil.
 func (m *Model) trackProjectDrag(x, y int) tea.Cmd {
 	rows, row, ok := m.sidebarDragRows(x, y)
+	// Where a release here would land, from the rule finishProjectDrag applies
+	// — resolved before any reorder below, from the rows this event built.
+	m.projectDrop = m.projectDropFor(m.projectDragIdx, row, ok)
 	if !ok || row.kind != sidebarRowProject {
 		return nil
 	}

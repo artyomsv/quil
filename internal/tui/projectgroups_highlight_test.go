@@ -482,3 +482,159 @@ func TestGroupNameDialog_NameRowFitsEveryWidth(t *testing.T) {
 		}
 	}
 }
+
+// dropBGSpec is the drop-target background as an SGR colour spec.
+const dropBGSpec = "5;151"
+
+// grpNoDropAnywhere fails when any sidebar row carries the drop colour.
+func grpNoDropAnywhere(t *testing.T, m Model, when string) {
+	t.Helper()
+	rows, _ := m.sidebarRows(22)
+	for y, r := range rows {
+		for _, bg := range cellBackgrounds(r.text) {
+			if bg == dropBGSpec {
+				t.Fatalf("%s: row %d carries the drop colour: %q", when, y, stripANSI(r.text))
+			}
+		}
+		if strings.Contains(stripANSI(r.text), glyphDropTarget) {
+			t.Fatalf("%s: row %d carries the drop arrow: %q", when, y, stripANSI(r.text))
+		}
+	}
+}
+
+// Rows (newGroupsSidebarModel): 0 PROJECTS, 1 L1, 2 ▾ G-A, 3 R1, 4 R1's host,
+// 5 L2, 6 ▸ G-B. L2 is in G-A.
+func TestProjectDrop_AnotherGroupsHeaderIsTheTargetAndTheReleaseJoinsIt(t *testing.T) {
+	m, _ := newGroupsSidebarModel(t)
+	got, _ := grpPress(*m, 5, tea.MouseLeft) // L2
+	got, _ = grpMotion(got, 6)               // G-B's header
+	if want := (projectDrop{group: "G-B"}); got.projectDrop != want {
+		t.Fatalf("projectDrop = %+v, want %+v", got.projectDrop, want)
+	}
+	head := grpRowText(got, 6)
+	assertRowBG(t, "G-B's header", head, dropBGSpec)
+	if plain := stripANSI(head); !strings.HasPrefix(plain, glyphDropTarget+" ▸ G-B") {
+		t.Errorf("the target header reads %q, want it to start with %q", plain, glyphDropTarget+" ▸ G-B")
+	}
+	assertRowBG(t, "the dragged L2", grpRowText(got, grpProjectRowY(t, got, "l2")), dragBGSpec)
+	for _, y := range []int{0, 1, 2, 3, 4} {
+		for _, bg := range cellBackgrounds(grpRowText(got, y)) {
+			if bg == dropBGSpec {
+				t.Fatalf("row %d carries the drop colour too", y)
+			}
+		}
+	}
+	seq := got.groupsSeq
+	got, _ = grpRelease(got, 6)
+	if got.groupsSeq != seq+1 {
+		t.Fatalf("groupsSeq = %d after the release, want %d — the join must be saved", got.groupsSeq, seq+1)
+	}
+	if g := got.groups.groupOf("", "l2"); g != 1 {
+		t.Fatalf("L2 is in group %d after the release on the green header, want 1 (G-B)", g)
+	}
+	grpNoDropAnywhere(t, got, "after the release")
+}
+
+// Nowhere to land: the project's own group header, and — for an UNGROUPED
+// project — the PROJECTS heading. Neither is highlighted, and releasing there
+// changes nothing.
+func TestProjectDrop_OwnGroupOrAlreadyUngroupedIsNoTarget(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		press, over   int
+		id            string
+		wantGroupOfID int
+	}{
+		{"grouped L2 over its own header", 5, 2, "l2", 0},
+		{"ungrouped L1 over the PROJECTS heading", 1, 0, "l1", -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _ := newGroupsSidebarModel(t)
+			got, _ := grpPress(*m, tc.press, tea.MouseLeft)
+			got, _ = grpMotion(got, tc.over)
+			if !got.projectDragMoved {
+				t.Fatal("setup: the drag did not move")
+			}
+			if got.projectDrop != (projectDrop{}) {
+				t.Fatalf("projectDrop = %+v, want none", got.projectDrop)
+			}
+			grpNoDropAnywhere(t, got, "mid-drag")
+			seq := got.groupsSeq
+			got, _ = grpRelease(got, tc.over)
+			if g := got.groups.groupOf("", tc.id); g != tc.wantGroupOfID || got.groupsSeq != seq {
+				t.Fatalf("after the release %s is in group %d (seq %d→%d), want %d and nothing saved", tc.id, g, seq, got.groupsSeq, tc.wantGroupOfID)
+			}
+		})
+	}
+}
+
+// A GROUPED project over the PROJECTS heading, or over an ungrouped project
+// row, would leave its group: the heading is the target, and the release there
+// ungroups it.
+func TestProjectDrop_ProjectsHeadingIsTheTargetForLeavingAGroup(t *testing.T) {
+	for _, over := range []int{0, 1} { // the heading, then ungrouped L1's row
+		m, _ := newGroupsSidebarModel(t)
+		got, _ := grpPress(*m, 5, tea.MouseLeft) // L2, in G-A
+		got, _ = grpMotion(got, over)
+		if !got.projectDrop.ungroup {
+			t.Fatalf("over row %d: projectDrop = %+v, want ungroup", over, got.projectDrop)
+		}
+		heading := grpRowText(got, 0)
+		assertRowBG(t, "the PROJECTS heading", heading, dropBGSpec)
+		if plain := stripANSI(heading); !strings.HasPrefix(plain, glyphDropTarget+" PROJECTS") {
+			t.Errorf("the heading reads %q, want %q first", plain, glyphDropTarget+" PROJECTS")
+		}
+		if n := lipgloss.Width(heading); n != 22 {
+			t.Errorf("the green heading is %d cells, want 22", n)
+		}
+		got, _ = grpRelease(got, over)
+		if g := got.groups.groupOf("", "l2"); g != -1 {
+			t.Fatalf("over row %d: L2 is still in group %d after the release", over, g)
+		}
+		grpNoDropAnywhere(t, got, "after the release")
+	}
+}
+
+// Leaving a target clears it, and a release where nothing is highlighted
+// changes nothing.
+func TestProjectDrop_ReleaseElsewhereChangesNothing(t *testing.T) {
+	m, _ := newGroupsSidebarModel(t)
+	got, _ := grpPress(*m, 5, tea.MouseLeft)
+	got, _ = grpMotion(got, 6)
+	if got.projectDrop.group != "G-B" {
+		t.Fatalf("setup: projectDrop = %+v", got.projectDrop)
+	}
+	got, _ = grpAt(got, tea.MouseMotionMsg{X: 50, Y: 10, Button: tea.MouseLeft}) // a pane
+	if got.projectDrop != (projectDrop{}) {
+		t.Fatalf("over a pane projectDrop = %+v, want none", got.projectDrop)
+	}
+	grpNoDropAnywhere(t, got, "over a pane")
+	seq := got.groupsSeq
+	got, _ = grpAt(got, tea.MouseReleaseMsg{X: 50, Y: 10, Button: tea.MouseLeft})
+	if g := got.groups.groupOf("", "l2"); g != 0 || got.groupsSeq != seq {
+		t.Fatalf("a release over a pane moved L2 to group %d (seq %d→%d)", g, seq, got.groupsSeq)
+	}
+	grpNoDropAnywhere(t, got, "after the release")
+}
+
+// While any drag is active the hover grey is not painted — the colours then
+// say where things are going.
+func TestProjectDrop_HoverIsSuppressedDuringADrag(t *testing.T) {
+	m, _ := newGroupsSidebarModel(t)
+	got, _ := grpHover(*m, 3, 2) // hover G-A's header
+	got, _ = grpPress(got, 5, tea.MouseLeft)
+	got, _ = grpMotion(got, 6)
+	assertRowNoBG(t, "the hovered G-A header during a drag", grpRowText(got, 2))
+}
+
+// Drop-target rows are exactly the strip width at every width.
+func TestProjectDrop_TargetRowsAreExactlyTheStripWidth(t *testing.T) {
+	for _, w := range []int{1, 2, 3, 4, 5, 8, 12, 22, 40} {
+		if n := lipgloss.Width(groupHeaderRow("构建构建构建构建", 3, true, paneStateCounts{blocked: 1, working: 2}, 0, glyphLinkRetry, w, rowHighlightDrop)); n != w {
+			t.Errorf("w=%d: drop header is %d cells", w, n)
+		}
+		if n := lipgloss.Width(sidebarHeadingHL("PROJECTS", w, rowHighlightDrop)); n != w {
+			t.Errorf("w=%d: drop heading is %d cells", w, n)
+		}
+	}
+}

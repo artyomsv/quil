@@ -295,7 +295,7 @@ type sidebarRow struct {
 func (m *Model) sidebarRows(w int) ([]sidebarRow, int) {
 	// The heading doubles as the "ungrouped" drop target: with every project
 	// in a group there is no ungrouped row left to drop a project on.
-	rows := []sidebarRow{{text: sidebarHeading("PROJECTS", w), ungroupDrop: true}}
+	rows := []sidebarRow{{text: sidebarHeadingHL("PROJECTS", w, m.projectsHeadingHighlight()), ungroupDrop: true}}
 	ungrouped, byGroup := m.projectSections()
 	for _, i := range ungrouped {
 		rows = m.appendProjectRows(rows, i, w, -1)
@@ -458,6 +458,11 @@ func groupHeaderRow(name string, members int, collapsed bool, c paneStateCounts,
 	marker := glyphGroupOpen + " "
 	if collapsed {
 		marker = glyphGroupClosed + " "
+	}
+	if hl == rowHighlightDrop {
+		// The drop target says so in text as well as colour; the name gives
+		// way for the two cells, like it does for the badge.
+		marker = glyphDropTarget + " " + marker
 	}
 	count := fmt.Sprintf(" (%d)", members)
 	segs := appendBadgeSegments(make([]styledSegment, 1, 7), c, workFrame, link)
@@ -1260,6 +1265,19 @@ func gitRow(pane *PaneModel, w int) string {
 
 func sidebarHeading(title string, w int) string {
 	return sidebarHeadingStyle.Render(truncateCells(title, w))
+}
+
+// sidebarHeadingHL is sidebarHeading with a row highlight. Highlighted, the
+// heading is padded to exactly w so the colour fills the row, and as a drop
+// target it carries glyphDropTarget first — the cut takes the title's tail.
+func sidebarHeadingHL(title string, w int, hl rowHighlight) string {
+	if hl == rowHighlightNone {
+		return sidebarHeading(title, w)
+	}
+	if hl == rowHighlightDrop {
+		title = glyphDropTarget + " " + title
+	}
+	return hl.onBackground(hl.text(sidebarHeadingStyle)).Render(padOrTrunc(title, w))
 }
 
 // sidebarTabHeading renders one tab's name above its panes. The active tab

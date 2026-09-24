@@ -1102,7 +1102,7 @@ func TestProjectBadgeCountsFinishedPanes(t *testing.T) {
 	// to carry a COUNT per state, and pinning the codepoints here would make a
 	// deliberate glyph change (see TestSidebarGlyphs_OneCellAndNotEmojiCapable
 	// for why one was needed) look like a counting regression.
-	row := projectRow("alpha", c, 0, "", false, 30, nil)
+	row := projectRow("alpha", c, 0, "", false, 30, nil, rowHighlightNone)
 	for _, want := range []string{glyphBlocked + "1", workingGlyph(0) + "1", glyphDone + "1"} {
 		if !strings.Contains(row, want) {
 			t.Errorf("project row %q is missing the %s badge", row, want)
@@ -1154,7 +1154,7 @@ func TestProjectCounts_PinnedIsIndependentOfTheStateRanking(t *testing.T) {
 // mark", which is the whole job of a mark that never auto-clears.
 func TestProjectRow_ShowsThePinnedCount(t *testing.T) {
 	t.Parallel()
-	row := projectRow("alpha", paneStateCounts{pinned: 2}, 0, "", false, 30, nil)
+	row := projectRow("alpha", paneStateCounts{pinned: 2}, 0, "", false, 30, nil, rowHighlightNone)
 	if want := glyphPinned + "2"; !strings.Contains(row, want) {
 		t.Errorf("project row %q is missing the %s badge", row, want)
 	}
@@ -1163,7 +1163,7 @@ func TestProjectRow_ShowsThePinnedCount(t *testing.T) {
 	}
 	// Absent when there is nothing to report — the badge is a list of what is
 	// true, not a fixed set of columns with zeroes in them.
-	if plain := projectRow("alpha", paneStateCounts{}, 0, "", false, 30, nil); strings.Contains(plain, glyphPinned) {
+	if plain := projectRow("alpha", paneStateCounts{}, 0, "", false, 30, nil, rowHighlightNone); strings.Contains(plain, glyphPinned) {
 		t.Errorf("project row %q shows a pin badge with no pinned panes", plain)
 	}
 }
@@ -1412,7 +1412,7 @@ func TestProjectRow_BadgesCarryTheirStateColour(t *testing.T) {
 	// badge that inherits it is exactly the bug — being the active project does
 	// not change what its panes are doing.
 	for _, active := range []bool{false, true} {
-		row := projectRow("alpha", paneStateCounts{working: 2, blocked: 1, done: 3}, 4 /*workFrame*/, "", active, 30, nil)
+		row := projectRow("alpha", paneStateCounts{working: 2, blocked: 1, done: 3}, 4 /*workFrame*/, "", active, 30, nil, rowHighlightNone)
 		for _, tt := range tests {
 			want := styleSGR(t, tt.style) + " " + tt.badge
 			if !strings.Contains(row, want) {
@@ -1448,7 +1448,7 @@ func TestProjectRow_LinkGlyphCarriesItsOwnColour(t *testing.T) {
 		{glyphLinkParked, sidebarLinkParkedStyle},
 		{glyphLinkRetry, sidebarLinkRetryStyle},
 	} {
-		row := projectRow("alpha", paneStateCounts{}, 0, tt.glyph, false, 30, nil)
+		row := projectRow("alpha", paneStateCounts{}, 0, tt.glyph, false, 30, nil, rowHighlightNone)
 		want := styleSGR(t, tt.style) + " " + tt.glyph
 		if !strings.Contains(row, want) {
 			t.Errorf("projectRow(link=%q) = %q, want the glyph painted with its own style (%q)",
@@ -1475,7 +1475,7 @@ func TestProjectRow_NameKeepsTheRowStyle(t *testing.T) {
 		{"inactive", sidebarProjectStyle, false},
 		{"active", sidebarActiveStyle, true},
 	} {
-		row := projectRow("alpha", paneStateCounts{working: 1, blocked: 1, done: 1}, 0, glyphLinkParked, tt.activ, 30, nil)
+		row := projectRow("alpha", paneStateCounts{working: 1, blocked: 1, done: 1}, 0, glyphLinkParked, tt.activ, 30, nil, rowHighlightNone)
 		if want := styleSGR(t, tt.style); !strings.Contains(row, want) {
 			t.Errorf("%s: projectRow = %q, want the name painted with the row style (%q)",
 				tt.name, row, want)

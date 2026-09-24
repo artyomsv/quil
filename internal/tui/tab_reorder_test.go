@@ -96,9 +96,14 @@ func TestModel_ClearDragState(t *testing.T) {
 		splitDragNode:      &LayoutNode{},
 		splitDragRect:      BorderHit{OX: 1, OY: 2, W: 3, H: 4},
 		projectDragging:    true,
-		projectDragIdx:     2,
+		projectDragKey:     groupMember{Dest: "gpu01", ID: "proj-x"},
+		projectDragMoved:   true,
+		projectDragPressY:  7,
 		sidebarTabDragging: true,
 		sidebarTabDragIdx:  3,
+		groupDragging:      true,
+		groupDragIdx:       4,
+		groupDragMoved:     true,
 		paneDrag:           paneDragState{srcPaneID: "p1", srcTabID: "t1", targetPaneID: "p2", zone: zoneLeft, overTabID: "t2"},
 	}
 	m.clearDragState()
@@ -126,17 +131,26 @@ func TestModel_ClearDragState(t *testing.T) {
 	if m.projectDragging {
 		t.Error("projectDragging = true, want false")
 	}
+	if m.projectDragMoved {
+		t.Error("projectDragMoved = true, want false")
+	}
+	if m.projectDragPressY != 0 {
+		t.Errorf("projectDragPressY = %d, want 0", m.projectDragPressY)
+	}
 	if m.sidebarTabDragging {
 		t.Error("sidebarTabDragging = true, want false")
 	}
 	// The INDICES too, not just the flags. clearDragState zeroes both, and the
 	// tui-rendering rule says this test guards that — but asserting only the
 	// booleans let the index resets be deleted with the suite still green.
-	if m.projectDragIdx != 0 {
-		t.Errorf("projectDragIdx = %d, want 0", m.projectDragIdx)
+	if m.projectDragKey != (groupMember{}) {
+		t.Errorf("projectDragKey = %+v, want zero", m.projectDragKey)
 	}
 	if m.sidebarTabDragIdx != 0 {
 		t.Errorf("sidebarTabDragIdx = %d, want 0", m.sidebarTabDragIdx)
+	}
+	if m.groupDragging || m.groupDragIdx != 0 || m.groupDragMoved {
+		t.Errorf("group drag = (%v, %d, %v), want all zero", m.groupDragging, m.groupDragIdx, m.groupDragMoved)
 	}
 	if m.paneDrag != (paneDragState{}) {
 		t.Errorf("paneDrag = %+v, want zero value", m.paneDrag)

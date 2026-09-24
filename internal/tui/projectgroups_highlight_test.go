@@ -1,0 +1,641 @@
+package tui
+
+import (
+	"fmt"
+	"strings"
+	"testing"
+
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+)
+
+// The two highlight backgrounds as SGR colour specs (the part after "48;").
+const (
+	hoverBGSpec = "5;252"
+	dragBGSpec  = "5;153"
+)
+
+// cellBackgrounds returns, for every printed rune of s, the background SGR
+// spec in force when it was printed ("" = none). The whole-width assertions
+// read it: a highlight that stopped short — an unstyled indent or pad — shows
+// up as a "" cell.
+func cellBackgrounds(s string) []string {
+	var out []string
+	bg := ""
+	for i := 0; i < len(s); {
+		if s[i] == 0x1b && i+1 < len(s) && s[i+1] == '[' {
+			end := strings.IndexByte(s[i:], 'm')
+			if end < 0 {
+				break
+			}
+			params := strings.Split(s[i+2:i+end], ";")
+			for j := 0; j < len(params); j++ {
+				switch params[j] {
+				case "", "0", "49":
+					bg = ""
+				case "38", "48", "58":
+					n := 2 // 5;N
+					if j+1 < len(params) && params[j+1] == "2" {
+						n = 4 // 2;R;G;B
+					}
+					if params[j] == "48" && j+n < len(params) {
+						bg = strings.Join(params[j+1:j+1+n], ";")
+					}
+					j += n
+				}
+			}
+			i += end + 1
+			continue
+		}
+		r := []rune(s[i:])[0]
+		out = append(out, bg)
+		i += len(string(r))
+	}
+	return out
+}
+
+// assertRowBG fails unless every cell of text is painted on bg — the WHOLE
+// width, indent and padding included.
+func assertRowBG(t *testing.T, what, text, bg string) {
+	t.Helper()
+	cells := cellBackgrounds(text)
+	if len(cells) == 0 {
+		t.Fatalf("%s: empty row", what)
+	}
+	for i, got := range cells {
+		if got != bg {
+			t.Fatalf("%s: cell %d background %q, want %q across the whole row: %q", what, i, got, bg, text)
+		}
+	}
+}
+
+// assertRowNoBG fails when any cell of text carries a background.
+func assertRowNoBG(t *testing.T, what, text string) {
+	t.Helper()
+	for i, got := range cellBackgrounds(text) {
+		if got != "" {
+			t.Fatalf("%s: cell %d carries background %q, want none: %q", what, i, got, text)
+		}
+	}
+}
+
+// grpHover sends BUTTONLESS motion — what all-motion reporting delivers while
+// the pointer merely moves.
+func grpHover(m Model, x, y int) (Model, tea.Cmd) {
+	updated, cmd := m.Update(tea.MouseMotionMsg{X: x, Y: y})
+	return updated.(Model), cmd
+}
+
+// grpRowText is the painted text of sidebar row y at the fixture's width.
+func grpRowText(m Model, y int) string {
+	rows, _ := m.sidebarRows(22)
+	return rows[y].text
+}
+
+// Rows (newGroupsSidebarModel): 0 PROJECTS, 1 L1, 2 ▾ G-A, 3 R1, 4 R1's host,
+// 5 L2, 6 ▸ G-B.
+func TestSidebarHover_ProjectRowIsPaintedLightGrey(t *testing.T) {
+	m, _ := newGroupsSidebarModel(t)
+	got, _ := grpHover(*m, 3, 1)
+	if want := (sidebarHoverKey{projectID: "l1"}); got.sidebarHover != want {
+		t.Fatalf("sidebarHover = %+v, want %+v", got.sidebarHover, want)
+	}
+	assertRowBG(t, "L1's row", grpRowText(got, 1), hoverBGSpec)
+	for _, y := range []int{0, 2, 3, 4, 5, 6} {
+		assertRowNoBG(t, fmt.Sprintf("row %d", y), grpRowText(got, y))
+	}
+	// The plain text turns dark on the grey; the name is still there.
+	if !strings.Contains(stripANSI(grpRowText(got, 1)), "L1") {
+		t.Errorf("the hovered row lost its name: %q", stripANSI(grpRowText(got, 1)))
+	}
+}
+
+// A remote project is two rows, and either one hovers the whole project.
+func TestSidebarHover_RemoteHostRowHighlightsBothRows(t *testing.T) {
+	m, _ := newGroupsSidebarModel(t)
+	got, _ := grpHover(*m, 3, 4) // R1's host row
+	if want := (sidebarHoverKey{dest: "gpu01", projectID: "r1"}); got.sidebarHover != want {
+		t.Fatalf("sidebarHover = %+v, want %+v", got.sidebarHover, want)
+	}
+	assertRowBG(t, "R1's name row", grpRowText(got, 3), hoverBGSpec)
+	assertRowBG(t, "R1's host row", grpRowText(got, 4), hoverBGSpec)
+	assertRowNoBG(t, "G-A's header", grpRowText(got, 2))
+}
+
+func TestSidebarHover_GroupHeaderIsHighlightedAlone(t *testing.T) {
+	m, _ := newGroupsSidebarModel(t)
+	got, _ := grpHover(*m, 3, 2) // ▾ G-A
+	if want := (sidebarHoverKey{group: "G-A"}); got.sidebarHover != want {
+		t.Fatalf("sidebarHover = %+v, want %+v", got.sidebarHover, want)
+	}
+	assertRowBG(t, "G-A's header", grpRowText(got, 2), hoverBGSpec)
+	for _, y := range []int{3, 4, 5} {
+		assertRowNoBG(t, fmt.Sprintf("member row %d", y), grpRowText(got, y))
+	}
+}
+
+// Motion anywhere off a hoverable row clears the hover: a pane, the tab bar,
+// the status bar, both headings and the blank row between the sections.
+func TestSidebarHover_MotionOffTheProjectRowsClearsIt(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		x, y int
+	}{
+		{"a pane", 50, 10},
+		{"the tab bar", 50, 0},
+		{"the status bar", 3, 39},
+		{"the PROJECTS heading", 3, 0},
+		{"the blank row before PANES", 3, 7},
+		{"the PANES heading", 3, 8},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _ := newGroupsSidebarModel(t)
+			got, _ := grpHover(*m, 3, 1)
+			if got.sidebarHover == (sidebarHoverKey{}) {
+				t.Fatal("setup: no hover")
+			}
+			got, _ = grpHover(got, tc.x, tc.y)
+			if got.sidebarHover != (sidebarHoverKey{}) {
+				t.Fatalf("sidebarHover = %+v after motion over %s, want none", got.sidebarHover, tc.name)
+			}
+			assertRowNoBG(t, "L1's row", grpRowText(got, 1))
+		})
+	}
+}
+
+// All-motion reporting delivers every pointer move over the whole terminal. A
+// move that keeps the same row hovered changes nothing, so it serves the
+// cached frame — checked against a FORCED rebuild of the returned model (see
+// view_coalesce_test.go for why never against the previous frame). A move to
+// another row rebuilds.
+func TestSidebarHover_UnchangedHoverServesTheCachedFrame(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	m, _ := newGroupsSidebarModel(t)
+	m.viewCache = &viewCacheBox{}
+	got, _ := grpHover(*m, 3, 1)
+	got.View()
+	for _, tc := range []struct {
+		name  string
+		x, y  int
+		skips bool
+	}{
+		{"same cell", 3, 1, true},
+		{"same row, another column", 9, 1, true},
+		{"another row", 3, 5, false},
+		{"same row again", 4, 5, true},
+		{"over a pane: hover cleared", 50, 10, false},
+		{"another pane cell: still none", 60, 20, true},
+	} {
+		builds := got.viewCache.builds
+		next, _ := grpHover(got, tc.x, tc.y)
+		delivered := next.View()
+		skipped := next.viewCache.builds == builds
+		forced := next
+		forced.skipRender = false
+		honest := forced.View()
+		if delivered.Content != honest.Content {
+			t.Errorf("%s: the delivered frame is STALE against an honest rebuild", tc.name)
+		}
+		if delivered.MouseMode != honest.MouseMode {
+			t.Errorf("%s: delivered MouseMode %v != honest %v", tc.name, delivered.MouseMode, honest.MouseMode)
+		}
+		if skipped != tc.skips {
+			t.Errorf("%s: skipped = %v, want %v", tc.name, skipped, tc.skips)
+		}
+		got = next
+	}
+}
+
+// Buttonless motion never starts or advances a drag or a selection — not
+// even a drag whose release was lost outside the window.
+func TestSidebarHover_ButtonlessMotionNeverDrags(t *testing.T) {
+	m, _ := newGroupsSidebarModel(t)
+	got := *m
+	tabDrag := got.tabDragFromIdx
+	// Sidebar rows, the sidebar edge, the split border, a pane, the tab bar.
+	for _, p := range [][2]int{{3, 1}, {3, 2}, {3, 5}, {21, 10}, {49, 10}, {30, 10}, {50, 0}, {60, 20}} {
+		got, _ = grpHover(got, p[0], p[1])
+	}
+	if got.projectDragging || got.groupDragging || got.sidebarTabDragging || got.sidebarDragging ||
+		got.tabDragFromIdx != tabDrag || got.splitDragNode != nil || got.mouseDown || got.selection != nil ||
+		got.paneDrag.active() || got.scrollDragPaneID != "" {
+		t.Fatal("buttonless motion armed a drag or a selection")
+	}
+	// A project press whose release never arrived: the pointer moves on with
+	// no button held, and the project must not follow it.
+	got, _ = grpPress(got, 5, tea.MouseLeft) // L2
+	order := grpProjectIDs(got)
+	got, _ = grpHover(got, 3, 3)
+	got, _ = grpHover(got, 3, 1)
+	if got.projectDragMoved || grpProjectIDs(got) != order {
+		t.Fatalf("buttonless motion advanced an armed drag: moved %v, order %s (was %s)", got.projectDragMoved, grpProjectIDs(got), order)
+	}
+}
+
+// grpProjectIDs joins m.projects' IDs in order.
+func grpProjectIDs(m Model) string {
+	ids := make([]string, len(m.projects))
+	for i, p := range m.projects {
+		ids[i] = p.ID
+	}
+	return strings.Join(ids, ",")
+}
+
+// Hover needs buttonless motion, which only all-motion reporting delivers — so
+// it is on whenever the project sidebar is painted, and off (cell motion) when
+// neither the sidebar nor a context menu is.
+func TestView_MouseModeFollowsTheProjectSidebar(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	m, _ := newGroupsSidebarModel(t)
+	if v := m.View(); v.MouseMode != tea.MouseModeAllMotion {
+		t.Errorf("sidebar visible: MouseMode %v, want all-motion", v.MouseMode)
+	}
+	m.sidebarOpen = false
+	if v := m.View(); v.MouseMode != tea.MouseModeCellMotion {
+		t.Errorf("sidebar hidden, no menu: MouseMode %v, want cell-motion", v.MouseMode)
+	}
+	m.sidebarOpen = true
+	got := grpOpenNewGroup(t, *m, 1)
+	if v := got.View(); v.MouseMode != tea.MouseModeCellMotion {
+		t.Errorf("a dialog is up (no sidebar painted): MouseMode %v, want cell-motion", v.MouseMode)
+	}
+}
+
+// grpProjectRowY is the first row of project id in the painted slice.
+func grpProjectRowY(t *testing.T, m Model, id string) int {
+	t.Helper()
+	rows, _ := m.sidebarRows(22)
+	for y, r := range rows {
+		if r.kind == sidebarRowProject && m.projects[r.index].ID == id {
+			return y
+		}
+	}
+	t.Fatalf("no row for project %s", id)
+	return -1
+}
+
+// A project drag that has left its press row paints the dragged project light
+// blue, following it as it reorders; the release clears it.
+func TestSidebarDragHighlight_ProjectRowIsLightBlueUntilRelease(t *testing.T) {
+	m, _ := newGroupsSidebarModel(t)
+	got, _ := grpPress(*m, 5, tea.MouseLeft) // L2, below R1 in G-A
+	assertRowNoBG(t, "L2 pressed, not yet moved", grpRowText(got, 5))
+	got, _ = grpMotion(got, 3) // R1's name row: L2 moves above R1
+	if !got.projectDragMoved {
+		t.Fatal("setup: the drag did not move")
+	}
+	y := grpProjectRowY(t, got, "l2")
+	if y != 3 {
+		t.Fatalf("setup: L2 is at row %d, want 3 after passing R1", y)
+	}
+	assertRowBG(t, "the dragged L2", grpRowText(got, y), dragBGSpec)
+	for _, other := range []int{1, 2, 4, 5, 6} {
+		assertRowNoBG(t, fmt.Sprintf("row %d", other), grpRowText(got, other))
+	}
+	got, _ = grpRelease(got, 3)
+	for y := 1; y <= 6; y++ {
+		assertRowNoBG(t, fmt.Sprintf("row %d after release", y), grpRowText(got, y))
+	}
+}
+
+// A header drag paints the HEADER light blue — not its members — and the
+// release clears it.
+func TestSidebarDragHighlight_GroupHeaderOnlyUntilRelease(t *testing.T) {
+	m, _ := newGroupsSidebarModel(t)
+	m.groups.Groups[1].Collapsed = false // G-B shows L3, so "not its members" is checked
+	// Rows: 0 PROJECTS, 1 L1, 2 ▾ G-A, 3 R1, 4 host, 5 L2, 6 ▾ G-B, 7 L3.
+	got, _ := grpPress(*m, 6, tea.MouseLeft)
+	assertRowNoBG(t, "G-B pressed, not yet moved", grpRowText(got, 6))
+	got, _ = grpMotion(got, 2) // over G-A's header: G-B moves first
+	if names := grpNames(got.groups); names != "G-B,G-A" || !got.groupDragMoved {
+		t.Fatalf("setup: order %s moved %v, want G-B,G-A / true", names, got.groupDragMoved)
+	}
+	// Rows now: 0 PROJECTS, 1 L1, 2 ▾ G-B, 3 L3, 4 ▾ G-A, 5 R1, 6 host, 7 L2.
+	assertRowBG(t, "G-B's header", grpRowText(got, 2), dragBGSpec)
+	for _, y := range []int{1, 3, 4, 5, 6, 7} {
+		assertRowNoBG(t, fmt.Sprintf("row %d", y), grpRowText(got, y))
+	}
+	got, _ = grpRelease(got, 2)
+	assertRowNoBG(t, "G-B's header after release", grpRowText(got, 2))
+}
+
+// Drag wins over hover on the same row.
+func TestSidebarDragHighlight_BeatsHover(t *testing.T) {
+	m, _ := newGroupsSidebarModel(t)
+	got, _ := grpHover(*m, 3, 5) // hover L2
+	got, _ = grpPress(got, 5, tea.MouseLeft)
+	got, _ = grpMotion(got, 3)
+	if want := (sidebarHoverKey{projectID: "l2"}); got.sidebarHover != want {
+		t.Fatalf("setup: sidebarHover = %+v, want %+v (a held-button motion moves no hover)", got.sidebarHover, want)
+	}
+	assertRowBG(t, "the dragged, hovered L2", grpRowText(got, grpProjectRowY(t, got, "l2")), dragBGSpec)
+}
+
+// Every highlighted row — hovered or dragged, project, host or header, indented
+// or not — keeps exactly the strip width: .Width(w) would wrap a wider one and
+// shift every row below the hit test.
+func TestSidebarGroups_EveryHighlightedRowIsExactlyTheStripWidth(t *testing.T) {
+	m, _ := newGroupsSidebarModel(t)
+	m.groups.Groups[0].Name = "构建构建构建构建构建构建构建构建"
+	m.projects[1].Name = "远程机器的名字很长很长"
+	m.projects[0].Name = "本地机器的名字很长很长"
+	for _, w := range []int{1, 2, 3, 4, 5, 8, 12, 22, 40} {
+		for _, hl := range []rowHighlight{rowHighlightHover, rowHighlightDrag} {
+			for i := range m.projects {
+				c := m.projects[i].counts()
+				if n := lipgloss.Width(projectRow(m.projects[i].Name, c, 0, glyphLinkParked, i == 0, w, nil, hl)); n != w {
+					t.Errorf("w=%d hl=%d project %d row is %d cells", w, hl, i, n)
+				}
+			}
+			if n := lipgloss.Width(projectDestRow("user@a-very-long-host-name", w, hl)); n != w {
+				t.Errorf("w=%d hl=%d host row is %d cells", w, hl, n)
+			}
+			if n := lipgloss.Width(groupHeaderRow(m.groups.Groups[0].Name, 2, false, paneStateCounts{blocked: 1, working: 2}, 0, glyphLinkRetry, w, hl)); n != w {
+				t.Errorf("w=%d hl=%d header row is %d cells", w, hl, n)
+			}
+		}
+	}
+	// Through the Model: every hover target at the strip's own widths, the
+	// indented member rows included.
+	for _, w := range []int{5, 12, 22} {
+		m.sidebarWidth = w
+		for _, key := range []sidebarHoverKey{{projectID: "l1"}, {dest: "gpu01", projectID: "r1"}, {group: m.groups.Groups[0].Name}} {
+			m.sidebarHover = key
+			rows, _ := m.sidebarRows(w)
+			for y, r := range rows {
+				if r.kind != sidebarRowProject && r.kind != sidebarRowGroup {
+					continue
+				}
+				if got := lipgloss.Width(r.text); got != w {
+					t.Errorf("w=%d hover %+v row %d is %d cells, want %d", w, key, y, got, w)
+				}
+			}
+		}
+	}
+}
+
+// grpHoverFrame is one Bubble Tea step for a buttonless move: Update, then
+// View — the order the program runs them in, which is what the hover cache's
+// frame counter relies on.
+func grpHoverFrame(m Model, x, y int) Model {
+	next, _ := grpHover(m, x, y)
+	next.View()
+	return next
+}
+
+// A move along the same row reuses the last resolved key instead of restyling
+// every sidebar row, until a frame is rebuilt — and after a rebuild that moved
+// the rows, the same y resolves to the row that is there now.
+func TestSidebarHover_SameRowReusesTheResolvedKeyUntilAFrameRebuild(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	m, _ := newGroupsSidebarModel(t)
+	m.viewCache = &viewCacheBox{}
+	got := *m
+	got.View()
+	c := got.viewCache
+
+	got = grpHoverFrame(got, 3, 3) // R1: a new key, so the frame rebuilds
+	if n := c.hoverResolves; n != 1 {
+		t.Fatalf("first move resolved %d times, want 1", n)
+	}
+	got = grpHoverFrame(got, 9, 3) // the frame was rebuilt since: resolves again
+	resolves := c.hoverResolves
+	for _, x := range []int{12, 4, 20} {
+		got = grpHoverFrame(got, x, 3)
+	}
+	if c.hoverResolves != resolves {
+		t.Fatalf("moves along row 3 with no rebuild resolved %d more times, want 0", c.hoverResolves-resolves)
+	}
+	if want := (sidebarHoverKey{dest: "gpu01", projectID: "r1"}); got.sidebarHover != want {
+		t.Fatalf("sidebarHover = %+v, want %+v", got.sidebarHover, want)
+	}
+
+	// Collapsing G-A moves the rows: row 3 becomes G-B's header. A state
+	// change rebuilds the frame, which drops the cached answer.
+	got.groups.setCollapsed(0, true)
+	got.skipRender = false
+	got.View()
+	rows, _ := got.sidebarRows(22)
+	if r := rows[3]; r.kind != sidebarRowGroup || r.index != 1 {
+		t.Fatalf("setup: row 3 = %+v, want G-B's header after collapsing G-A", r)
+	}
+	got = grpHoverFrame(got, 3, 3)
+	if want := (sidebarHoverKey{group: "G-B"}); got.sidebarHover != want {
+		t.Fatalf("after the rebuild sidebarHover = %+v, want %+v — a stale cached key", got.sidebarHover, want)
+	}
+}
+
+// While the link is down every input is dropped, and all-motion reporting
+// still delivers a buttonless move per pointer move: each is inert and must
+// serve the cached frame rather than rebuild it.
+func TestReconnect_FrozenButtonlessMotionServesTheCachedFrame(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	m, _ := newGroupsSidebarModel(t)
+	m.viewCache = &viewCacheBox{}
+	m.links = oneLink(reconnectState{active: true, attempt: 3})
+	m.asRemote(testDest)
+	if _, frozen := m.freezeInput(tea.MouseMotionMsg{}); !frozen {
+		t.Fatal("setup: input is not frozen")
+	}
+	m.View()
+	for _, p := range [][2]int{{3, 1}, {3, 5}, {50, 10}} {
+		builds := m.viewCache.builds
+		next, _ := grpHover(*m, p[0], p[1])
+		delivered := next.View()
+		forced := next
+		forced.skipRender = false
+		if honest := forced.View(); delivered.Content != honest.Content || delivered.MouseMode != honest.MouseMode {
+			t.Errorf("(%d,%d): the delivered frame is STALE against an honest rebuild", p[0], p[1])
+		}
+		if next.viewCache.builds != builds+1 { // +1: the forced rebuild only
+			t.Errorf("(%d,%d): a frozen buttonless move rebuilt the frame", p[0], p[1])
+		}
+		if next.sidebarHover != (sidebarHoverKey{}) {
+			t.Errorf("(%d,%d): a frozen move set the hover", p[0], p[1])
+		}
+	}
+}
+
+// The name row is budgeted on its plain parts, so on any box width it fits
+// the inner width and keeps its caret — a cut through the styled row could
+// split an SGR sequence and drop the caret.
+func TestGroupNameDialog_NameRowFitsEveryWidth(t *testing.T) {
+	m, _ := newGroupsSidebarModel(t)
+	got := grpOpenNewGroup(t, *m, 1)
+	got = grpType(got, strings.Repeat("构", maxGroupNameRunes))
+	for w := 3; w <= 60; w++ {
+		got.width = w
+		inner := dialogInnerWidth(w, groupNameDialogWidth)
+		for _, line := range strings.Split(got.renderGroupNameDialog(), "\n") {
+			if lw := lipgloss.Width(line); lw > inner {
+				t.Fatalf("w=%d: line %q is %d cells, over the inner %d", w, stripANSI(line), lw, inner)
+			}
+			// Every CSI the line carries must be a whole SGR: digits and ';'
+			// up to its 'm'.
+			for _, part := range strings.Split(line, "\x1b[")[1:] {
+				if i := strings.IndexByte(part, 'm'); i < 0 || strings.Trim(part[:i], "0123456789;") != "" {
+					t.Fatalf("w=%d: a cut SGR sequence in %q", w, line)
+				}
+			}
+		}
+		if !strings.Contains(stripANSI(got.renderGroupNameDialog()), "▎") {
+			t.Fatalf("w=%d: the name row lost its caret", w)
+		}
+	}
+}
+
+// dropBGSpec is the drop-target background as an SGR colour spec.
+const dropBGSpec = "5;151"
+
+// grpNoDropAnywhere fails when any sidebar row carries the drop colour.
+func grpNoDropAnywhere(t *testing.T, m Model, when string) {
+	t.Helper()
+	rows, _ := m.sidebarRows(22)
+	for y, r := range rows {
+		for _, bg := range cellBackgrounds(r.text) {
+			if bg == dropBGSpec {
+				t.Fatalf("%s: row %d carries the drop colour: %q", when, y, stripANSI(r.text))
+			}
+		}
+		if strings.Contains(stripANSI(r.text), glyphDropTarget) {
+			t.Fatalf("%s: row %d carries the drop arrow: %q", when, y, stripANSI(r.text))
+		}
+	}
+}
+
+// Rows (newGroupsSidebarModel): 0 PROJECTS, 1 L1, 2 ▾ G-A, 3 R1, 4 R1's host,
+// 5 L2, 6 ▸ G-B. L2 is in G-A.
+func TestProjectDrop_AnotherGroupsHeaderIsTheTargetAndTheReleaseJoinsIt(t *testing.T) {
+	m, _ := newGroupsSidebarModel(t)
+	got, _ := grpPress(*m, 5, tea.MouseLeft) // L2
+	got, _ = grpMotion(got, 6)               // G-B's header
+	if want := (projectDrop{group: "G-B"}); got.projectDrop != want {
+		t.Fatalf("projectDrop = %+v, want %+v", got.projectDrop, want)
+	}
+	head := grpRowText(got, 6)
+	assertRowBG(t, "G-B's header", head, dropBGSpec)
+	if plain := stripANSI(head); !strings.HasPrefix(plain, glyphDropTarget+" ▸ G-B") {
+		t.Errorf("the target header reads %q, want it to start with %q", plain, glyphDropTarget+" ▸ G-B")
+	}
+	assertRowBG(t, "the dragged L2", grpRowText(got, grpProjectRowY(t, got, "l2")), dragBGSpec)
+	for _, y := range []int{0, 1, 2, 3, 4} {
+		for _, bg := range cellBackgrounds(grpRowText(got, y)) {
+			if bg == dropBGSpec {
+				t.Fatalf("row %d carries the drop colour too", y)
+			}
+		}
+	}
+	seq := got.groupsSeq
+	got, _ = grpRelease(got, 6)
+	if got.groupsSeq != seq+1 {
+		t.Fatalf("groupsSeq = %d after the release, want %d — the join must be saved", got.groupsSeq, seq+1)
+	}
+	if g := got.groups.groupOf("", "l2"); g != 1 {
+		t.Fatalf("L2 is in group %d after the release on the green header, want 1 (G-B)", g)
+	}
+	grpNoDropAnywhere(t, got, "after the release")
+}
+
+// Nowhere to land: the project's own group header, and — for an UNGROUPED
+// project — the PROJECTS heading. Neither is highlighted, and releasing there
+// changes nothing.
+func TestProjectDrop_OwnGroupOrAlreadyUngroupedIsNoTarget(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		press, over   int
+		id            string
+		wantGroupOfID int
+	}{
+		{"grouped L2 over its own header", 5, 2, "l2", 0},
+		{"ungrouped L1 over the PROJECTS heading", 1, 0, "l1", -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _ := newGroupsSidebarModel(t)
+			got, _ := grpPress(*m, tc.press, tea.MouseLeft)
+			got, _ = grpMotion(got, tc.over)
+			if !got.projectDragMoved {
+				t.Fatal("setup: the drag did not move")
+			}
+			if got.projectDrop != (projectDrop{}) {
+				t.Fatalf("projectDrop = %+v, want none", got.projectDrop)
+			}
+			grpNoDropAnywhere(t, got, "mid-drag")
+			seq := got.groupsSeq
+			got, _ = grpRelease(got, tc.over)
+			if g := got.groups.groupOf("", tc.id); g != tc.wantGroupOfID || got.groupsSeq != seq {
+				t.Fatalf("after the release %s is in group %d (seq %d→%d), want %d and nothing saved", tc.id, g, seq, got.groupsSeq, tc.wantGroupOfID)
+			}
+		})
+	}
+}
+
+// A GROUPED project over the PROJECTS heading, or over an ungrouped project
+// row, would leave its group: the heading is the target, and the release there
+// ungroups it.
+func TestProjectDrop_ProjectsHeadingIsTheTargetForLeavingAGroup(t *testing.T) {
+	for _, over := range []int{0, 1} { // the heading, then ungrouped L1's row
+		m, _ := newGroupsSidebarModel(t)
+		got, _ := grpPress(*m, 5, tea.MouseLeft) // L2, in G-A
+		got, _ = grpMotion(got, over)
+		if !got.projectDrop.ungroup {
+			t.Fatalf("over row %d: projectDrop = %+v, want ungroup", over, got.projectDrop)
+		}
+		heading := grpRowText(got, 0)
+		assertRowBG(t, "the PROJECTS heading", heading, dropBGSpec)
+		if plain := stripANSI(heading); !strings.HasPrefix(plain, glyphDropTarget+" PROJECTS") {
+			t.Errorf("the heading reads %q, want %q first", plain, glyphDropTarget+" PROJECTS")
+		}
+		if n := lipgloss.Width(heading); n != 22 {
+			t.Errorf("the green heading is %d cells, want 22", n)
+		}
+		got, _ = grpRelease(got, over)
+		if g := got.groups.groupOf("", "l2"); g != -1 {
+			t.Fatalf("over row %d: L2 is still in group %d after the release", over, g)
+		}
+		grpNoDropAnywhere(t, got, "after the release")
+	}
+}
+
+// Leaving a target clears it, and a release where nothing is highlighted
+// changes nothing.
+func TestProjectDrop_ReleaseElsewhereChangesNothing(t *testing.T) {
+	m, _ := newGroupsSidebarModel(t)
+	got, _ := grpPress(*m, 5, tea.MouseLeft)
+	got, _ = grpMotion(got, 6)
+	if got.projectDrop.group != "G-B" {
+		t.Fatalf("setup: projectDrop = %+v", got.projectDrop)
+	}
+	got, _ = grpAt(got, tea.MouseMotionMsg{X: 50, Y: 10, Button: tea.MouseLeft}) // a pane
+	if got.projectDrop != (projectDrop{}) {
+		t.Fatalf("over a pane projectDrop = %+v, want none", got.projectDrop)
+	}
+	grpNoDropAnywhere(t, got, "over a pane")
+	seq := got.groupsSeq
+	got, _ = grpAt(got, tea.MouseReleaseMsg{X: 50, Y: 10, Button: tea.MouseLeft})
+	if g := got.groups.groupOf("", "l2"); g != 0 || got.groupsSeq != seq {
+		t.Fatalf("a release over a pane moved L2 to group %d (seq %d→%d)", g, seq, got.groupsSeq)
+	}
+	grpNoDropAnywhere(t, got, "after the release")
+}
+
+// While any drag is active the hover grey is not painted — the colours then
+// say where things are going.
+func TestProjectDrop_HoverIsSuppressedDuringADrag(t *testing.T) {
+	m, _ := newGroupsSidebarModel(t)
+	got, _ := grpHover(*m, 3, 2) // hover G-A's header
+	got, _ = grpPress(got, 5, tea.MouseLeft)
+	got, _ = grpMotion(got, 6)
+	assertRowNoBG(t, "the hovered G-A header during a drag", grpRowText(got, 2))
+}
+
+// Drop-target rows are exactly the strip width at every width.
+func TestProjectDrop_TargetRowsAreExactlyTheStripWidth(t *testing.T) {
+	for _, w := range []int{1, 2, 3, 4, 5, 8, 12, 22, 40} {
+		if n := lipgloss.Width(groupHeaderRow("构建构建构建构建", 3, true, paneStateCounts{blocked: 1, working: 2}, 0, glyphLinkRetry, w, rowHighlightDrop)); n != w {
+			t.Errorf("w=%d: drop header is %d cells", w, n)
+		}
+		if n := lipgloss.Width(sidebarHeadingHL("PROJECTS", w, rowHighlightDrop)); n != w {
+			t.Errorf("w=%d: drop heading is %d cells", w, n)
+		}
+	}
+}

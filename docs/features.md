@@ -46,6 +46,7 @@ Quil exposes **35 MCP tools**: agents can manage [projects and tabs](mcp.md#proj
   - [Processes and memory](#processes-and-memory)
   - [Leveled logger + log viewer](#leveled-logger--log-viewer)
 - [Projects](#projects)
+  - [Project groups](#project-groups)
   - [Projects on another machine](#projects-on-another-machine)
 - [Pane notes](#pane-notes)
 - [Operations](#operations)
@@ -632,7 +633,20 @@ A worktree named after its branch — `feat-x` for `feat/x`, the usual conventio
 | `Alt+Shift+A` | Jump to the oldest pane waiting on you, across every project |
 | `Alt+Shift+X` | Remove the active project (destroy locally, disconnect a remote host) |
 
-Right-click a project row for Rename, and either Destroy (local) or Disconnect host (remote). Right-click a **pane** row for the same menu you get on the pane itself (see [Mouse: pane context menu](keybindings.md#mouse-pane-context-menu)) — note that this focuses the pane first, switching tabs if it lives on another one, so the menu's actions all land on the pane you clicked. Right-click a **tab** heading for the tab menu (see [Mouse: tab context menu](keybindings.md#mouse-tab-context-menu)) — this one does not focus or switch first, since none of its actions need the active tab.
+Right-click a project row for Rename, Move to group… (see [Project groups](#project-groups)), and either Destroy (local) or Disconnect host (remote). Right-click a **pane** row for the same menu you get on the pane itself (see [Mouse: pane context menu](keybindings.md#mouse-pane-context-menu)) — note that this focuses the pane first, switching tabs if it lives on another one, so the menu's actions all land on the pane you clicked. Right-click a **tab** heading for the tab menu (see [Mouse: tab context menu](keybindings.md#mouse-tab-context-menu)) — this one does not focus or switch first, since none of its actions need the active tab.
+
+### Project groups
+
+With many projects — especially remote ones, which take two rows each — the sidebar's project list crowds out the PANES section below it. Put projects into named groups and collapse the ones you are not using:
+
+- **Right-click a project → Move to group…** lists your groups (the current one marked `✓`), **New group…** — a small dialog asks for the name, `Enter` to create, `Esc` to cancel — and **No group**. A group can mix local and remote projects.
+- **Click a group header** to collapse or expand it. A collapsed group is one row, `▸ name (N)`, carrying the summed badges of its projects — `▲`, the working spinner, `✓`, `◆`, `⌫`, and the link marker when one of its hosts is parked or retrying its connection. If the project you are in belongs to a collapsed group, its row still shows under the header.
+- **Drag a header** to reorder the groups. **Drag a project onto a header** to put it in that group, or onto the **PROJECTS** heading (or an ungrouped project) to take it out. Dragging a project up or down inside its group, or inside the ungrouped list, reorders it as before; `Alt+Shift+Up`/`Down` do the same and never move a project into or out of a group.
+- The project row or group header under the mouse pointer is shaded light grey, and the project or header you are dragging light blue. In the PANES section, pointing at a tab shades its whole block, and the pane under the pointer a little darker. While you drag a project, the place it would land if you let go — another group's header, or the **PROJECTS** heading for "no group" — turns light green with a `→`.
+- **Right-click a header** for Rename group (the same name dialog), Collapse / Expand, Move up / down and Delete group. Deleting a group only ungroups its projects — nothing is closed.
+- Two keymap actions ship unbound: `project.group_toggle` (the active project's group) and `project.groups_collapse_all` (collapse every group, or expand them all when all are collapsed). Bind them in `bindings.toml`.
+
+Group names are unique (ignoring case) and at most 32 characters. Groups live on this machine, in `project-groups.json` beside `config.toml`, and survive a restart; a project whose host is offline stays in its group, and one its daemon reports as gone leaves it. Two Quil windows on one machine share the file: the last change wins, and the other window picks it up on its next start. The project picker, `Alt+Shift+←/→` and `Alt+Shift+A` still reach every project, including those in collapsed groups.
 
 ### Projects on another machine
 

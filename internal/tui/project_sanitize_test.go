@@ -52,6 +52,20 @@ func TestRemoteProjectNameIsNeutralisedOnEveryRenderPath(t *testing.T) {
 		assertNeutralised(t, "the sidebar", strings.Join(rowTexts(rows), "\n"))
 	})
 
+	t.Run("group header", func(t *testing.T) {
+		m := &Model{
+			width: 100, height: 30, sidebarOpen: true, sidebarWidth: 22,
+			projects: []*ProjectModel{{ID: "proj-1", Name: "safe"}},
+			groups:   projectGroups{Groups: []projectGroup{{Name: hostileName, Members: []groupMember{{ID: "proj-1"}}}}},
+		}
+		rows, _ := m.sidebarRows(22)
+		assertNeutralised(t, "a group header", strings.Join(rowTexts(rows), "\n"))
+	})
+	t.Run("move-to-group list", func(t *testing.T) {
+		s := ctxMenuState{projectID: "proj-1", title: "p", items: buildProjectGroupItems([]projectGroup{{Name: hostileName}}, -1)}
+		assertNeutralised(t, "the Move to group list", renderCtxMenu(s))
+	})
+
 	t.Run("right-click menu", func(t *testing.T) {
 		m := &Model{width: 100, height: 30}
 		p := &ProjectModel{ID: "proj-1", Name: hostileName, Dest: "gpu01"}

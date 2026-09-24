@@ -28,6 +28,8 @@ var promotedActions = map[keymap.ActionID]bool{
 	// The tab-layout actions likewise never had a [keybindings] field.
 	"tab.layout_even": true, "tab.layout_columns": true, "tab.layout_rows": true,
 	"tab.layout_grid": true, "tab.layout_main": true, "tab.layout_spiral": true,
+	// The project-group actions arrived after bindings.toml too.
+	"project.group_toggle": true, "project.groups_collapse_all": true,
 }
 
 func TestKeySpecsFromConfig_MapsEveryConfigBackedAction(t *testing.T) {

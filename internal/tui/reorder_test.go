@@ -467,7 +467,9 @@ func TestProjectMoveKeysSlideTheActiveProject(t *testing.T) {
 
 // The sidebar interleaves projects from several daemons, but each daemon only
 // knows its own. The index the daemon is told is the project's position among
-// THAT daemon's projects, and the message is stamped for that daemon.
+// THAT daemon's projects, the message is stamped for that daemon — and a move
+// that leaves that position unchanged (past another daemon's projects only)
+// tells it nothing, since its order did not change.
 func TestProjectMoveTellsEachDaemonItsOwnIndex(t *testing.T) {
 	t.Parallel()
 	fake := newFakeConn()
@@ -478,34 +480,57 @@ func TestProjectMoveTellsEachDaemonItsOwnIndex(t *testing.T) {
 	m.projects = []*ProjectModel{
 		{ID: "l1", Name: "L1"},
 		{ID: "r1", Name: "R1", Dest: "gpu01"},
+		{ID: "r2", Name: "R2", Dest: "gpu01"},
 		{ID: "l2", Name: "L2"},
 	}
-	m.activeProject = 2
 	up := tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModAlt | tea.ModShift}
 
+	// R2 above R1: gpu01's second project becomes its first.
+	m.activeProject = 2
 	updated, cmd := m.handleKey(up)
 	got := updated.(Model)
-	if names := projectNames(got); names != "L1,L2,R1" {
-		t.Fatalf("order = %s, want L1,L2,R1", names)
+	if names := projectNames(got); names != "L1,R2,R1,L2" {
+		t.Fatalf("order = %s, want L1,R2,R1,L2", names)
+	}
+	if cmd == nil {
+		t.Fatal("R2 changed its place among gpu01's projects; the daemon must be told")
 	}
 	cmd()
 	msgs := reorderProjectMessages(t, fake.sent)
-	if len(msgs) != 1 || msgs[0].ProjectID != "l2" || msgs[0].NewIndex != 1 || msgs[0].dest != "" {
-		t.Fatalf("messages = %+v, want l2 to index 1 (second LOCAL project) on the local daemon", msgs)
+	if len(msgs) != 1 || msgs[0].ProjectID != "r2" || msgs[0].NewIndex != 0 || msgs[0].dest != "gpu01" {
+		t.Fatalf("messages = %+v, want r2 to index 0 on gpu01", msgs)
 	}
 
-	// Now move the remote project above L2: it is the only project on gpu01,
-	// so its index there is 0 whatever the sidebar shows.
-	got.activeProject = 2
+	// L2 up twice: past R1, then past R2 — both gpu01's. L2 is still the
+	// local daemon's second project, so nothing is sent.
+	got.activeProject = 3
+	for _, want := range []string{"L1,R2,L2,R1", "L1,L2,R2,R1"} {
+		updated, cmd = got.handleKey(up)
+		got = updated.(Model)
+		if names := projectNames(got); names != want {
+			t.Fatalf("order = %s, want %s", names, want)
+		}
+		if cmd != nil {
+			cmd()
+		}
+	}
+	if msgs := reorderProjectMessages(t, fake.sent); len(msgs) != 1 {
+		t.Fatalf("messages = %+v, want still one — a move past another daemon's projects tells neither", msgs)
+	}
+
+	// Past L1: now L2 IS the local daemon's first project.
 	updated, cmd = got.handleKey(up)
 	got = updated.(Model)
-	if names := projectNames(got); names != "L1,R1,L2" {
-		t.Fatalf("order = %s, want L1,R1,L2", names)
+	if names := projectNames(got); names != "L2,L1,R2,R1" {
+		t.Fatalf("order = %s, want L2,L1,R2,R1", names)
+	}
+	if cmd == nil {
+		t.Fatal("L2 changed its place among the local daemon's projects; the daemon must be told")
 	}
 	cmd()
 	msgs = reorderProjectMessages(t, fake.sent)
-	if len(msgs) != 2 || msgs[1].ProjectID != "r1" || msgs[1].NewIndex != 0 || msgs[1].dest != "gpu01" {
-		t.Fatalf("messages = %+v, want a second one moving r1 to index 0 on gpu01", msgs)
+	if len(msgs) != 2 || msgs[1].ProjectID != "l2" || msgs[1].NewIndex != 0 || msgs[1].dest != "" {
+		t.Fatalf("messages = %+v, want a second moving l2 to index 0 on the local daemon", msgs)
 	}
 }
 
@@ -569,8 +594,8 @@ func TestSidebarProjectDragReordersPastTheMidpoint(t *testing.T) {
 	if got.activeProject != 2 {
 		t.Fatalf("activeProject = %d after pressing gamma, want 2", got.activeProject)
 	}
-	if !got.projectDragging || got.projectDragIdx != 2 {
-		t.Fatalf("drag = (%v, %d) after pressing a project row, want (true, 2)", got.projectDragging, got.projectDragIdx)
+	if !got.projectDragging || got.projectDragIndex() != 2 {
+		t.Fatalf("drag = (%v, %d) after pressing a project row, want (true, 2)", got.projectDragging, got.projectDragIndex())
 	}
 
 	updated, cmd := got.Update(tea.MouseMotionMsg{X: 3, Y: 3, Button: tea.MouseLeft})
@@ -587,16 +612,16 @@ func TestSidebarProjectDragReordersPastTheMidpoint(t *testing.T) {
 	if names := projectNames(got); names != "alpha,gamma,beta" {
 		t.Fatalf("order after crossing beta's midpoint = %s, want alpha,gamma,beta", names)
 	}
-	if got.activeProject != 1 || got.projectDragIdx != 1 {
-		t.Fatalf("active / drag index = %d / %d after the move, want 1 / 1", got.activeProject, got.projectDragIdx)
+	if got.activeProject != 1 || got.projectDragIndex() != 1 {
+		t.Fatalf("active / drag index = %d / %d after the move, want 1 / 1", got.activeProject, got.projectDragIndex())
 	}
-	if cmd == nil {
-		t.Fatal("a move must tell the daemon")
+	// gamma passed only gpu01's project: it is still the local daemon's
+	// second, so there is nothing to tell it.
+	if cmd != nil {
+		cmd()
 	}
-	cmd()
-	msgs := reorderProjectMessages(t, fake.sent)
-	if len(msgs) != 1 || msgs[0].ProjectID != "pc" || msgs[0].NewIndex != 1 || msgs[0].dest != "" {
-		t.Fatalf("messages = %+v, want pc to index 1 on the local daemon", msgs)
+	if msgs := reorderProjectMessages(t, fake.sent); len(msgs) != 0 {
+		t.Fatalf("messages = %+v, want none — gamma's local rank did not change", msgs)
 	}
 
 	// Stationary pointer, now over the dragged row itself: nothing moves.
@@ -609,7 +634,22 @@ func TestSidebarProjectDragReordersPastTheMidpoint(t *testing.T) {
 		t.Fatal("a stationary pointer must send nothing")
 	}
 
-	updated, _ = got.Update(tea.MouseReleaseMsg{X: 3, Y: 2, Button: tea.MouseLeft})
+	// Past alpha: now gamma IS the local daemon's first project.
+	updated, cmd = got.Update(tea.MouseMotionMsg{X: 3, Y: 1, Button: tea.MouseLeft})
+	got = updated.(Model)
+	if names := projectNames(got); names != "gamma,alpha,beta" {
+		t.Fatalf("order after crossing alpha = %s, want gamma,alpha,beta", names)
+	}
+	if cmd == nil {
+		t.Fatal("gamma changed its place among the local daemon's projects; the daemon must be told")
+	}
+	cmd()
+	msgs := reorderProjectMessages(t, fake.sent)
+	if len(msgs) != 1 || msgs[0].ProjectID != "pc" || msgs[0].NewIndex != 0 || msgs[0].dest != "" {
+		t.Fatalf("messages = %+v, want pc to index 0 on the local daemon", msgs)
+	}
+
+	updated, _ = got.Update(tea.MouseReleaseMsg{X: 3, Y: 1, Button: tea.MouseLeft})
 	got = updated.(Model)
 	if got.projectDragging {
 		t.Fatal("release must end the project drag")
@@ -635,8 +675,8 @@ func TestSidebarProjectDragIgnoresNonProjectRowsAndColumnsOutsideTheStrip(t *tes
 
 	updated, _ := m.Update(tea.MouseClickMsg{X: 3, Y: 3, Button: tea.MouseLeft})
 	got := updated.(Model)
-	if !got.projectDragging || got.projectDragIdx != 2 {
-		t.Fatalf("drag = (%v, %d) after pressing gamma, want (true, 2)", got.projectDragging, got.projectDragIdx)
+	if !got.projectDragging || got.projectDragIndex() != 2 {
+		t.Fatalf("drag = (%v, %d) after pressing gamma, want (true, 2)", got.projectDragging, got.projectDragIndex())
 	}
 
 	for _, tc := range []struct {

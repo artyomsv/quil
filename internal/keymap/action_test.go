@@ -4,8 +4,8 @@ import "testing"
 
 func TestActions_RegistryIntegrity(t *testing.T) {
 	acts := Actions()
-	if len(acts) != 64 {
-		t.Fatalf("registry has %d actions, want 64 (42 config-backed + 12 promoted from the reserved-key switch + 4 reorder + 6 tab layout)", len(acts))
+	if len(acts) != 66 {
+		t.Fatalf("registry has %d actions, want 66 (42 config-backed + 12 promoted from the reserved-key switch + 4 reorder + 6 tab layout + 2 project groups)", len(acts))
 	}
 	seen := make(map[ActionID]bool, len(acts))
 	orders := make(map[int]ActionID, len(acts))
@@ -104,6 +104,25 @@ func TestLayoutActionsShipUnbound(t *testing.T) {
 		}
 		if a.Tier != TierLate || a.Group != "Tabs" {
 			t.Errorf("action %q = tier %v group %q, want TierLate / Tabs", id, a.Tier, a.Group)
+		}
+	}
+}
+
+// The two project-group actions ship UNBOUND, like the layout actions: a
+// header click and the header's menu already reach both, and a default chord
+// would claim a key from every existing user.
+func TestProjectGroupActionsShipUnbound(t *testing.T) {
+	for _, id := range []ActionID{"project.group_toggle", "project.groups_collapse_all"} {
+		a, ok := Lookup(id)
+		if !ok {
+			t.Errorf("action %q is not registered", id)
+			continue
+		}
+		if a.Default != "" {
+			t.Errorf("action %q ships bound to %q, want unbound", id, a.Default)
+		}
+		if a.Tier != TierLate || a.Group != "Projects" {
+			t.Errorf("action %q = tier %v group %q, want TierLate / Projects", id, a.Tier, a.Group)
 		}
 	}
 }

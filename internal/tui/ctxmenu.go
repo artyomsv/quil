@@ -59,6 +59,20 @@ const (
 	// ctxActTabLayout is one row of that list; the arrangement rides on
 	// ctxMenuItem.layout, never decoded from the label.
 	ctxActTabLayout
+	// Project-group rows. ctxActGroupList re-populates the PROJECT menu in
+	// place (the Set color… mechanism) with one ctxActSetGroup row per group,
+	// then ctxActNewGroup and ctxActUngroup; the chosen group rides on
+	// ctxMenuItem.groupName, never decoded from the label.
+	ctxActGroupList
+	ctxActSetGroup
+	ctxActNewGroup
+	ctxActUngroup
+	// Group-header rows — only ever on a menu opened via openGroupCtxMenu.
+	ctxActRenameGroup
+	ctxActToggleGroup
+	ctxActGroupUp
+	ctxActGroupDown
+	ctxActDeleteGroup
 )
 
 // ctxMenuItem is one row of the menu. Disabled rows render greyed, are
@@ -76,27 +90,34 @@ type ctxMenuItem struct {
 	color string
 	// layout is set only on ctxActTabLayout rows: the arrangement the row applies.
 	layout layoutKind
+	// groupName is set only on ctxActSetGroup rows: the group (raw, unsanitized
+	// name) the row moves the project into.
+	groupName string
 }
 
 // ctxMenuState is the live state of the pane context menu — a compositor
 // overlay (overlayAt), NOT a dialogScreen: dialogs are modal and centered,
 // this popup is positional and dismiss-on-outside-click. Zero value = closed.
 //
-// projectID (Task 13) and tabID (Task 3) are the sidebar's project-row menu
-// and the tab menu sharing this same state/render/hit-test machinery: paneID,
-// projectID and tabID are THREE mutually exclusive target discriminators,
-// never more than one set. A second (or third) dedicated struct was
-// considered and rejected — none of the geometry/render/hit-test helpers
-// below (innerWidth, boxSize, ctxMenuPos, ctxMenuHitRow, renderCtxMenu,
-// nextEnabled…) touch any of the three ID fields at all, so duplicating them
-// for each target kind would only buy unused fields.
+// projectID (Task 13), tabID (Task 3) and groupName (project groups) are the
+// sidebar's project-row menu, the tab menu and the group-header menu sharing
+// this same state/render/hit-test machinery: paneID, projectID, tabID and
+// groupName are FOUR mutually exclusive target discriminators, never more
+// than one set. A dedicated struct per kind was considered and rejected — none
+// of the geometry/render/hit-test helpers below (innerWidth, boxSize,
+// ctxMenuPos, ctxMenuHitRow, renderCtxMenu, nextEnabled…) touch any of the ID
+// fields at all, so duplicating them would only buy unused fields.
 type ctxMenuState struct {
-	paneID    string // target pane; "" when the target is a project, a tab, or closed
-	projectID string // target project; "" when the target is a pane, a tab, or closed
-	tabID     string // target tab; "" when the target is a pane, a project, or closed
-	title     string // pane/project/tab display name shown as the header row
-	x, y      int    // clamped top-left of the rendered box (screen coords)
-	cursor    int    // index into items; always on an enabled item (or -1)
+	paneID    string // target pane; "" when the target is a project, a tab, a group, or closed
+	projectID string // target project; "" when the target is a pane, a tab, a group, or closed
+	// projectDest is the target project's Dest — the second half of its group
+	// key. Project IDs are minted per daemon and can collide across daemons.
+	projectDest string
+	tabID       string // target tab; "" when the target is a pane, a project, a group, or closed
+	groupName   string // target group; "" when the target is a pane, a project, a tab, or closed
+	title       string // pane/project/tab display name shown as the header row
+	x, y        int    // clamped top-left of the rendered box (screen coords)
+	cursor      int    // index into items; always on an enabled item (or -1)
 	// spaced honors the items' gapAfter group separators (a blank row
 	// between action groups — near-misses at group edges land on an inert
 	// spacer, and the destructive group stays visually isolated).
@@ -106,7 +127,9 @@ type ctxMenuState struct {
 	items  []ctxMenuItem
 }
 
-func (s ctxMenuState) open() bool { return s.paneID != "" || s.projectID != "" || s.tabID != "" }
+func (s ctxMenuState) open() bool {
+	return s.paneID != "" || s.projectID != "" || s.tabID != "" || s.groupName != ""
+}
 
 // ctxMenuTitleCap bounds how far the header (pane display name — often a
 // CWD) may widen the box beyond the widest item label. Longer titles are
@@ -393,7 +416,15 @@ func renderCtxMenu(s ctxMenuState) string {
 		if s.spaced && i > 0 && s.items[i-1].gapAfter {
 			rows = append(rows, blank)
 		}
-		label := " " + it.label + strings.Repeat(" ", innerW-lipgloss.Width(it.label)-2) + " "
+		// innerWidth caps the box at ctxMenuTitleCap, so a label can be wider
+		// than the box — a dynamic one (a group name) always could. Cut it like
+		// the title: an uncut one makes the pad count negative and Repeat
+		// panics, taking the whole TUI down on a render.
+		text := it.label
+		if lipgloss.Width(text) > innerW-2 {
+			text = ansi.Truncate(text, innerW-3, "…")
+		}
+		label := " " + text + strings.Repeat(" ", innerW-lipgloss.Width(text)-2) + " "
 		switch {
 		case !it.enabled:
 			rows = append(rows, ctxMenuDisabledStyle.Render(label))
@@ -471,7 +502,12 @@ func buildProjectCtxMenuItems(remote, unreachable bool) []ctxMenuItem {
 	// work there: it is client-side entirely, and detaching the machine is
 	// what a user reaching for "remove this" actually wants when the daemon
 	// cannot hold a project in the first place (or cannot be reached at all).
-	items := []ctxMenuItem{{id: ctxActRenameProject, label: "Rename project", enabled: !unreachable}}
+	items := []ctxMenuItem{
+		{id: ctxActRenameProject, label: "Rename project", enabled: !unreachable},
+		// Client-side only, so — like Disconnect — it works on every row the
+		// sidebar can show, offline and synthetic included.
+		{id: ctxActGroupList, label: "Move to group…", enabled: true},
+	}
 	// ONE removal action, chosen by what the project is.
 	//
 	// Offering both on a remote read as two ways to do the same thing, and the
@@ -495,12 +531,19 @@ func buildProjectCtxMenuItems(remote, unreachable bool) []ctxMenuItem {
 // pane border, which has no project analogue (the active-project marker in
 // the sidebar already shows which row is selected).
 func (m *Model) openProjectCtxMenu(p *ProjectModel, anchorX, anchorY int) {
+	// Not over a dialog. modalSwallowsMouse already keeps every click from
+	// here, so this is the second line — kept because over the group-name
+	// dialog a menu's New group… would replace the name being typed.
+	if m.dialog != dialogNone {
+		return
+	}
 	s := ctxMenuState{
-		projectID: p.ID,
-		title:     p.Name,
-		spaced:    false,
-		cursor:    -1,
-		items:     buildProjectCtxMenuItems(p.Dest != "", !m.projectActionable(p)),
+		projectID:   p.ID,
+		projectDest: p.Dest,
+		title:       p.Name,
+		spaced:      false,
+		cursor:      -1,
+		items:       buildProjectCtxMenuItems(p.Dest != "", !m.projectActionable(p)),
 	}
 	s.cursor = firstEnabled(s.items)
 	w, h := s.boxSize()
@@ -907,6 +950,13 @@ func (m Model) executeCtxMenuItem(item ctxMenuItem) (tea.Model, tea.Cmd) {
 	// ActivePane sync). Both project actions keep the destructive one behind
 	// the shared confirm dialog, same as ctxActClose/ctxActRestart.
 	if projectID := m.ctxMenu.projectID; projectID != "" {
+		dest := m.ctxMenu.projectDest
+		// Move to group… re-populates the menu in place, so it is the one row
+		// that runs BEFORE the close below.
+		if item.enabled && item.id == ctxActGroupList {
+			cmd := m.openProjectGroupList()
+			return m, cmd
+		}
 		m.closeCtxMenu()
 		if !item.enabled {
 			return m, nil
@@ -918,8 +968,22 @@ func (m Model) executeCtxMenuItem(item ctxMenuItem) (tea.Model, tea.Cmd) {
 			return m, m.confirmDestroyProject(projectID)
 		case ctxActDisconnectHost:
 			return m, m.confirmDisconnectHost(projectID)
+		case ctxActSetGroup:
+			cmd := m.moveProjectToGroup(dest, projectID, item.groupName)
+			return m, cmd
+		case ctxActUngroup:
+			cmd := m.ungroupProject(dest, projectID)
+			return m, cmd
+		case ctxActNewGroup:
+			m.beginGroupEdit(groupEditState{mode: groupEditNew, dest: dest, projectID: projectID})
+			return m, nil
 		}
 		return m, nil
+	}
+
+	// Group header: its own dispatcher, like the tab row below.
+	if name := m.ctxMenu.groupName; name != "" {
+		return m.executeGroupCtxMenuItem(name, item)
 	}
 
 	// Tab row (Task 3): same early branch-out as the project row above, for

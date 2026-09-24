@@ -186,7 +186,7 @@ package-specific moved to `.claude/rules/*.md`, each gated by a `paths:` glob so
 | `plugins.md` | `internal/plugin/`, `gitdiscover/`, `kubediscover/`, `defaults/*.toml`, `tui/instances.go`, `overlay.go` | plugin schema + registry, instances, `discover`/`sessions` opt-ins, the shared overlay slot, lazygit/hunk/k9s/lazysql |
 | `sandbox.md` | `internal/sandbox/`, `daemon/sandbox*.go`, `tui/sandbox*.go` | docker sandbox panes — the mount set as a security boundary, the per-pane object store and its ordered teardown, refusals that never soften |
 | `auto-update.md` | `internal/update/`, `cmd/quil/update_apply.go`, `daemon/update.go`, `tui/update.go` | update check, staging, rename-aside swap + rollback |
-| `projects.md` | `daemon/project.go`, `daemon/gitcache.go`, `daemon/worktree*.go`, `internal/gitinfo/`, `internal/gitworktree/`, `tui/project*.go`, `tui/worktree_*.go`, `sidebar.go`, `router.go`, `dialdest.go`, `attention.go` | projects above tabs, multi-daemon routing, runtime connect/disconnect, the project form, sidebar layout, git subsystem, worktree creation + close-time removal |
+| `projects.md` | `daemon/project.go`, `daemon/gitcache.go`, `daemon/worktree*.go`, `internal/gitinfo/`, `internal/gitworktree/`, `tui/project*.go`, `tui/worktree_*.go`, `sidebar.go`, `router.go`, `dialdest.go`, `attention.go` | projects above tabs, multi-daemon routing, runtime connect/disconnect, the project form, sidebar layout, project groups, git subsystem, worktree creation + close-time removal |
 | `dev-environment.md` | *(always on)* | production-isolation rule — never touch the running production daemon |
 
 **Adding to this file?** Ask: *does this apply when I open a file in a different package?*

@@ -370,7 +370,8 @@ const (
 	dialogWhatsNew       // post-upgrade highlights; also F1 → What's New
 	dialogNotifySettings // F1 → Settings → Notifications: toasts + sidebar event groups
 	dialogNewTemplate
-	dialogTabPick // pane context menu's "Move to tab…" picker — see tabpicker.go
+	dialogTabPick   // pane context menu's "Move to tab…" picker — see tabpicker.go
+	dialogGroupName // New group… / Rename group name editor — see projectgroups_input.go
 )
 
 // tuiClient is the subset of *ipc.Client the TUI uses on the Model. Defined
@@ -469,6 +470,7 @@ type Model struct {
 	renameInput        string
 	renamingPane       bool
 	paneRenameInput    string
+	groupEdit          groupEditState // the dialogGroupName editor's data (projectgroups_input.go)
 	pendingWidth       int
 	pendingHeight      int
 	resizeSeq          int
@@ -898,10 +900,38 @@ type Model struct {
 	// project sidebar (reorder.go). A bool beside the index rather than
 	// tabDragFromIdx's -1 sentinel, so a Model built directly by a test — the
 	// zero value — reads as "no drag" without a constructor having to seed it.
-	projectDragging    bool
-	projectDragIdx     int
+	projectDragging bool
+	// projectDragKey is the dragged project's (Dest, ID), NOT an index: a
+	// broadcast can rebuild m.projects mid-drag, and an index then names a
+	// neighbour — the release regrouped and saved the wrong project.
+	// projectDragIndex re-resolves it at every use.
+	projectDragKey    groupMember
+	projectDragMoved  bool // the pointer left the press row: only a MOVED drag regroups (finishProjectDrag)
+	projectDragPressY int  // the press row; motion on it (sideways jitter) is not a drag
+	// projectDrop is where the moved project drag would land if released now,
+	// painted light green (projectDropFor, sidebar_hover.go). A KEY — a group
+	// name or "no group" — never an index; clearDragState resets it.
+	projectDrop        projectDrop
 	sidebarTabDragging bool
 	sidebarTabDragIdx  int
+
+	// Project groups (projectgroups*.go) — the sidebar's client-side grouping
+	// of projects. groupsPath "" means persistence is off, which is every Model
+	// a test builds directly; groupsWriter serialises the saves a tea.Cmd runs,
+	// in groupsSeq order.
+	groups       projectGroups
+	groupsPath   string
+	groupsWriter *groupsWriter
+	groupsSeq    uint64
+	// A press on a group header. The release TOGGLES the group only when
+	// groupDragMoved is still false; a drag reorders the groups instead.
+	groupDragging  bool
+	groupDragIdx   int
+	groupDragMoved bool
+	// sidebarHover names the PROJECTS row under a buttonless pointer, painted
+	// light grey (sidebar_hover.go). A KEY, not a row index: a broadcast can
+	// rebuild the rows under a pointer that has not moved.
+	sidebarHover sidebarHoverKey
 
 	// Split-border drag-resize. splitDragNode is non-nil while a border
 	// drag is in progress; splitDragRect captures the owning node's region
@@ -1349,6 +1379,13 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 				m.closeCtxMenu()
 				prologueChangedView = true
 			}
+		} else if name := m.ctxMenu.groupName; name != "" {
+			// A group menu has no paneID either; it closes when its group is
+			// gone — deleted or renamed away by another path.
+			if m.groups.indexOf(name) < 0 {
+				m.closeCtxMenu()
+				prologueChangedView = true
+			}
 		} else if pane, _, _ := m.findPaneAndTab(m.ctxMenu.paneID); pane == nil {
 			m.closeCtxMenu()
 			prologueChangedView = true
@@ -1388,6 +1425,13 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 	// a different daemon than the one on screen. A gate in two places is a gate
 	// in neither.
 	if cmd, frozen := m.freezeInput(msg); frozen {
+		// A frozen buttonless move is dropped like any input, so it is inert —
+		// and all-motion reporting (on while the sidebar is painted) delivers
+		// one per pointer move, which would otherwise rebuild the frame each
+		// time for as long as the link is down.
+		if mm, ok := msg.(tea.MouseMotionMsg); ok && mm.Button == tea.MouseNone {
+			m.skipRender = !prologueChangedView
+		}
 		return m, cmd
 	}
 	switch msg := msg.(type) {
@@ -1804,11 +1848,18 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 					// activate call, whose value receiver carries the flag on.
 					switch kind {
 					case sidebarRowProject:
-						m.projectDragging = true
-						m.projectDragIdx = idx
+						if idx >= 0 && idx < len(m.projects) {
+							m.projectDragging = true
+							m.projectDragKey = groupMember{Dest: m.projects[idx].Dest, ID: m.projects[idx].ID}
+							m.projectDragPressY = msg.Y
+						}
 					case sidebarRowTab:
 						m.sidebarTabDragging = true
 						m.sidebarTabDragIdx = idx
+					case sidebarRowGroup:
+						m.groupDragging = true
+						m.groupDragIdx = idx
+						m.groupDragMoved = false
 					}
 					return m.activateSidebarRow(kind, idx)
 				}
@@ -1832,6 +1883,9 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 					if tabs := m.curTabs(); idx >= 0 && idx < len(tabs) {
 						m.openTabCtxMenu(tabs[idx], msg.X, msg.Y)
 					}
+				case sidebarRowGroup:
+					// The header menu: rename, collapse/expand, move, delete.
+					m.openGroupCtxMenu(idx, msg.X, msg.Y)
 				case sidebarRowPane:
 					// Right-click FOCUSES the pane first, exactly like
 					// left-click (activateSidebarRow → focusSidebarPane) —
@@ -2063,8 +2117,12 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		if m.modalSwallowsMouse() {
 			return m, nil
 		}
-		// Overlay visible: swallow all motion (keyboard-only v1).
+		// Overlay visible: swallow all motion (keyboard-only v1). The sidebar
+		// takes no click meanwhile, so it shows no hover either.
 		if tab := m.activeTabModel(); tab != nil && tab.overlayVisible {
+			if msg.Button == tea.MouseNone && !m.setSidebarHover(sidebarHoverKey{}) {
+				m.skipRender = !prologueChangedView
+			}
 			return m, nil
 		}
 		// Context menu open: hover moves the cursor; everything else is
@@ -2072,6 +2130,19 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		if m.ctxMenu.open() {
 			if row, inside := ctxMenuHitRow(m.ctxMenu, msg.X, msg.Y); inside && row >= 0 && m.ctxMenu.items[row].enabled {
 				m.ctxMenu.cursor = row
+			}
+			return m, nil
+		}
+		// Buttonless motion only ever moves the sidebar hover. All-motion
+		// reporting is on whenever the sidebar is (View), so this fires on every
+		// pointer move over the whole terminal — and a drag is always driven
+		// with the button held, so nothing below may see it: a release lost
+		// outside the window would otherwise leave a drag following a pointer
+		// nobody is pressing. An unchanged hover is inert and serves the cached
+		// frame, or every move would rebuild it.
+		if msg.Button == tea.MouseNone {
+			if !m.setSidebarHover(m.sidebarHoverAt(msg.X, msg.Y)) {
+				m.skipRender = !prologueChangedView
 			}
 			return m, nil
 		}
@@ -2107,7 +2178,19 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 			}
 			return m, nil
 		}
+		if m.groupDragging {
+			m.trackGroupDrag(msg.X, msg.Y)
+			return m, nil
+		}
 		if m.projectDragging {
+			// A drag starts only once the pointer leaves the press ROW.
+			// Sideways jitter on it is still a click — and the press already
+			// switched projects, which can shift every row below a collapsed
+			// group, so this y may now name a different row than was pressed.
+			if !m.projectDragMoved && msg.Y == m.projectDragPressY {
+				return m, nil
+			}
+			m.projectDragMoved = true
 			// Sequenced: trackProjectDrag mutates m through a pointer receiver.
 			cmd := m.trackProjectDrag(msg.X, msg.Y)
 			return m, cmd
@@ -2185,10 +2268,20 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		if m.sidebarDragging {
 			return m, m.finishSidebarDrag()
 		}
+		// A group-header press ends here: a click toggles, a drag saves.
+		if m.groupDragging {
+			cmd := m.finishGroupDrag(msg.X, msg.Y)
+			return m, cmd
+		}
+		// A project drag's release decides group membership (finishProjectDrag).
+		if m.projectDragging {
+			cmd := m.finishProjectDrag(msg.X, msg.Y)
+			return m, cmd
+		}
 		// A tab drag or scrollbar drag terminates here with no further
 		// processing — they don't share the click-vs-drag pane-focus
 		// fall-through path below.
-		if m.tabDragFromIdx >= 0 || m.scrollDragPaneID != "" || m.projectDragging || m.sidebarTabDragging {
+		if m.tabDragFromIdx >= 0 || m.scrollDragPaneID != "" || m.sidebarTabDragging {
 			m.clearDragState()
 			return m, nil
 		}
@@ -2357,7 +2450,14 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		// Paste bypasses handleKey and lands in the PTY, so an armed prefix
 		// would read the next keystroke as a sequence step.
 		m.cancelSequence()
-		if m.dialog == dialogPluginMigration && m.migrationLeft != nil && !m.migrationRightFocus {
+		if m.dialog == dialogGroupName {
+			// The group-name dialog owns input like the palette does: without
+			// this branch the paste would fall through to sendClipboardToPane
+			// and be typed into the pane behind it (a trailing CR could run it).
+			m.groupEdit.appendPaste(msg.Content)
+			m.clearGroupNameRefusal()
+			return m, nil
+		} else if m.dialog == dialogPluginMigration && m.migrationLeft != nil && !m.migrationRightFocus {
 			text := msg.Content // InsertMultiLine turns CR line breaks into newlines
 			m.migrationLeft.InsertMultiLine(text)
 			m.migrationLeft.Dirty = true
@@ -2476,6 +2576,11 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 
 	case paneSettleRepaintMsg:
 		return m, tea.ClearScreen
+
+	case projectGroupsSaveFailedMsg:
+		// A local save result, not an IPC response: no listenForMessages here.
+		m.setFlash(groupSaveFailedFlash)
+		return m, m.flashCmd()
 
 	case flashExpireMsg:
 		// Clear flash only if it hasn't been refreshed by a newer setFlash call.
@@ -2650,6 +2755,9 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		// runs, then either delete or demote them to logger.Debug.
 		log.Printf("WorkspaceState: %d tabs, %d panes", len(msg.Tabs), len(msg.Panes))
 		newPaneIDs, overlayResizeCmds := m.applyWorkspaceState(msg, msg.Dest)
+		// After the merge, and only here: this arm is reached only for a
+		// connected destination whose state arrived (the gate above).
+		groupsCmd := m.pruneProjectGroupsFor(msg)
 		templateFocusCmd := m.focusNewTemplateTab()
 		log.Printf("apply: returned, %d new panes", len(newPaneIDs))
 		// An open project picker holds a filtered snapshot taken when it opened.
@@ -2714,6 +2822,7 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 			m.listenForMessages(),
 			m.sendDiffedResizes(m.diffResizes(msg)),
 			m.sendDiffedLayouts(m.diffLayouts(msg)),
+			groupsCmd,
 		}
 		// Resize overlay PTYs that just became visible on initial creation.
 		// resizeAllPanes only walks tab.Leaves() (the layout tree), so overlay
@@ -3535,9 +3644,15 @@ func (m *Model) clearDragState() {
 	}
 	m.tabDragFromIdx = -1
 	m.projectDragging = false
-	m.projectDragIdx = 0
+	m.projectDragKey = groupMember{}
+	m.projectDragMoved = false
+	m.projectDragPressY = 0
+	m.projectDrop = projectDrop{}
 	m.sidebarTabDragging = false
 	m.sidebarTabDragIdx = 0
+	m.groupDragging = false
+	m.groupDragIdx = 0
+	m.groupDragMoved = false
 	m.scrollDragPaneID = ""
 	m.scrollDragRect = PaneRect{}
 	m.mouseDown = false
@@ -4677,6 +4792,16 @@ type viewCacheBox struct {
 	// comparing rendered content proves a skip was HONEST, this proves the skip
 	// actually happened.
 	builds int
+	// The last sidebar hover resolution (sidebarHoverAt): row hoverY resolved
+	// to hoverKey while the frame counter read hoverBuilds. The rows change
+	// only through a state change, and a state change rebuilds the frame, so
+	// an unchanged counter means the same row slice — the guarantee the skip
+	// itself rests on. hoverResolves counts the slow path, for the tests.
+	hoverValid    bool
+	hoverY        int
+	hoverBuilds   int
+	hoverKey      sidebarHoverKey
+	hoverResolves int
 }
 
 func (m Model) View() tea.View {
@@ -4845,12 +4970,14 @@ func (m Model) View() tea.View {
 	// terminal ignores the sequence and simply never reports.
 	v.ReportFocus = true
 	v.MouseMode = tea.MouseModeCellMotion
-	if m.ctxMenu.open() {
+	if m.ctxMenu.open() || (m.dialog == dialogNone && m.projectSidebarWidth() > 0) {
 		// Cell-motion only reports motion while a button is held, so the
-		// context menu's hover highlight would be dead under it. All-motion
-		// is scoped to exactly the frames where the menu is open — the
-		// flood of buttonless motion events ends the moment it closes (the
-		// menu's Update routing swallows them meanwhile).
+		// context menu's hover highlight and the project sidebar's would be
+		// dead under it. All-motion is scoped to the frames that paint one of
+		// the two — a dialog draws no sidebar — and the flood of buttonless
+		// motion it brings is routed to the hover alone, which serves the
+		// cached frame while the hovered row is unchanged (Update's
+		// MouseMotionMsg arm).
 		v.MouseMode = tea.MouseModeAllMotion
 	}
 	// v.Cursor stays nil — the hardware cursor is never shown. Every pane
@@ -5405,6 +5532,14 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// ok is always true: the case labels admit only ids in layoutPresets.
 		kind, _ := layoutKindFor(lateID)
 		cmd := m.arrangeTab(m.activeTabModel(), kind)
+		return m, cmd
+
+	case "project.group_toggle":
+		cmd := m.toggleActiveProjectGroup()
+		return m, cmd
+
+	case "project.groups_collapse_all":
+		cmd := m.toggleAllGroups()
 		return m, cmd
 
 	case "tab.switch_1", "tab.switch_2", "tab.switch_3", "tab.switch_4", "tab.switch_5",
@@ -7046,7 +7181,13 @@ func (m Model) renderStatusBar() string {
 	// Fit within width: left takes priority
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right) - 2 // 2 for padding
 	if gap < 2 {
-		// Not enough room for hints
+		// Not enough room for hints. The left is CUT to the bar as well:
+		// .Width WRAPS an over-wide line, and a status bar two rows tall
+		// pushes the frame one row past the terminal. (No width yet — a
+		// Model before its first WindowSizeMsg — keeps the old behaviour.)
+		if m.width > 2 {
+			left = truncateToWidth(left, m.width-2)
+		}
 		return statusBarStyle.Width(m.width).Render(left)
 	}
 

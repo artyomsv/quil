@@ -636,6 +636,15 @@ func launchTUI() {
 	if remoteDest != "" {
 		model.SetRecentCWDs(tui.LoadRecentCWDs(config.RecentCWDsPath(remoteDest)))
 	}
+	// Project groups: the sidebar's client-side grouping, loaded here for the
+	// reason SetRecentCWDs is — NewModel must not read the disk. A bad file was
+	// moved aside by the load; the state beside the error is still usable.
+	groupsPath := config.ProjectGroupsPath()
+	groupsState, groupsErr := tui.LoadProjectGroups(groupsPath)
+	if groupsErr != nil {
+		log.Printf("project groups: %v; starting with none", groupsErr)
+	}
+	model.SetProjectGroups(groupsState, groupsPath)
 
 	// Keybindings. Migrate the legacy [keybindings] table on first launch, then
 	// resolve the layers. Loaded here rather than inside NewModel for the same

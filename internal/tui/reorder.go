@@ -566,19 +566,98 @@ func (m Model) sendReorderProject(p *ProjectModel) tea.Cmd {
 	}
 }
 
-// moveActiveProject slides the active project by delta slots (negative = up)
-// and reports the move. A no-op at either end, with no traffic.
+// moveActiveProject slides the active project by delta slots WITHIN ITS
+// SECTION — the ungrouped projects, or its group — and reports the move when
+// its daemon rank changed. It never moves a project into or out of a group:
+// at either end of its section it is a no-op with no traffic.
 func (m *Model) moveActiveProject(delta int) tea.Cmd {
 	from := m.activeProject
-	to := from + delta
-	if from < 0 || from >= len(m.projects) || to < 0 || to >= len(m.projects) {
+	if from < 0 || from >= len(m.projects) {
 		return nil
 	}
-	p := m.projects[from]
-	if !m.moveProject(from, to) {
-		return nil
+	pos := sectionPos(m.sectionOf(from), from)
+	cmd, _ := m.moveProjectWithinSection(m.projects[from], pos+delta)
+	return cmd
+}
+
+// projectDaemonRank is p's position among its OWN daemon's projects in
+// m.projects — the index MsgReorderProject carries. found is false for a
+// pointer not in the list. Pointer identity, for the reason moveProject gives.
+func (m *Model) projectDaemonRank(p *ProjectModel) (int, bool) {
+	idx := 0
+	for _, q := range m.projects {
+		if q == p {
+			return idx, true
+		}
+		if q.Dest == p.Dest {
+			idx++
+		}
 	}
-	return m.sendReorderProject(p)
+	return 0, false
+}
+
+// indexOfProjectPtr is p's index in projects by POINTER, or -1.
+func indexOfProjectPtr(projects []*ProjectModel, p *ProjectModel) int {
+	for i, q := range projects {
+		if q == p {
+			return i
+		}
+	}
+	return -1
+}
+
+// sectionOf is the m.projects indices of the section holding project i, in
+// order: its group's members, or the ungrouped projects. i must be valid.
+func (m *Model) sectionOf(i int) []int {
+	ungrouped, byGroup := m.projectSections()
+	p := m.projects[i]
+	if g := m.groups.groupOf(p.Dest, p.ID); g >= 0 {
+		return byGroup[g]
+	}
+	return ungrouped
+}
+
+// sectionPos is i's position in section, or -1.
+func sectionPos(section []int, i int) int {
+	for pos, j := range section {
+		if j == i {
+			return pos
+		}
+	}
+	return -1
+}
+
+// moveProjectWithinSection slides p to position toPos of its own section. The
+// slide goes through moveProject onto the m.projects index of the section
+// member at toPos, which lands p directly after that member when moving down
+// and directly before it when moving up — so the section's visible order is
+// exactly one slot changed, whatever other sections' projects lie between.
+//
+// The daemon is told ONLY when p's rank among its own daemon's projects
+// changed. A section can interleave daemons (a group may mix hosts), and a
+// move past another daemon's projects changes the sidebar but not this
+// daemon's order; a reorder_project for an unchanged index is a broadcast on
+// every client's must-deliver queue for nothing.
+//
+// Returns the send (nil when there is nothing to tell) and whether the order
+// moved.
+func (m *Model) moveProjectWithinSection(p *ProjectModel, toPos int) (tea.Cmd, bool) {
+	from := indexOfProjectPtr(m.projects, p)
+	if from < 0 {
+		return nil, false
+	}
+	section := m.sectionOf(from)
+	if toPos < 0 || toPos >= len(section) {
+		return nil, false
+	}
+	before, _ := m.projectDaemonRank(p)
+	if !m.moveProject(from, section[toPos]) {
+		return nil, false
+	}
+	if after, _ := m.projectDaemonRank(p); after == before {
+		return nil, true
+	}
+	return m.sendReorderProject(p), true
 }
 
 // sidebarDragRows resolves the pointer to a sidebar row AND hands back the row
@@ -625,33 +704,64 @@ func projectRowSpanIn(rows []sidebarRow, idx int) (start, size int) {
 }
 
 // trackProjectDrag advances an armed project drag to the pointer at (x, y).
-// Rows that are not a project row — the heading, the PANES section, a column
-// outside the strip — leave the order alone, so the drag survives a pointer
-// that wanders and resumes when it comes back. Returns the IPC cmd for a move,
-// or nil when nothing moved.
+// Only a project row of the dragged project's OWN section reorders it, by the
+// midpoint rule over section positions; a row of another section, a header,
+// the headings, the PANES section or a column outside the strip leave the
+// order alone, so the drag survives a wandering pointer. Moving INTO or OUT OF
+// a group is a drop, decided on release (finishProjectDrag). Returns the IPC
+// cmd when the daemon rank changed, else nil.
 func (m *Model) trackProjectDrag(x, y int) tea.Cmd {
+	// Re-resolved from the drag's identity, never trusted from the press: a
+	// broadcast since then may have rebuilt m.projects. A project that is gone
+	// ends the drag — there is nothing left to move or regroup.
+	from := m.projectDragIndex()
+	if from < 0 {
+		m.clearDragState()
+		return nil
+	}
 	rows, row, ok := m.sidebarDragRows(x, y)
+	// Where a release here would land, from the rule finishProjectDrag applies
+	// — resolved before any reorder below, from the rows this event built.
+	m.projectDrop = m.projectDropFor(from, row, ok)
 	if !ok || row.kind != sidebarRowProject {
 		return nil
 	}
-	from := m.projectDragIdx
-	if from < 0 || from >= len(m.projects) {
+	if row.index < 0 || row.index >= len(m.projects) {
+		return nil
+	}
+	section := m.sectionOf(from)
+	fromPos, targetPos := sectionPos(section, from), sectionPos(section, row.index)
+	if fromPos < 0 || targetPos < 0 {
+		// A row of ANOTHER section: hovering it moves nothing.
 		return nil
 	}
 	start, size := projectRowSpanIn(rows, row.index)
 	if size == 0 {
 		return nil
 	}
-	to := dragSlot(from, row.index, y, start, size)
-	if to == from {
+	toPos := dragSlot(fromPos, targetPos, y, start, size)
+	if toPos == fromPos {
 		return nil
 	}
-	p := m.projects[from]
-	if !m.moveProject(from, to) {
-		return nil
+	// moveProjectWithinSection keys on the pointer, which the identity just
+	// resolved; the drag itself needs no update, since its key did not move.
+	cmd, _ := m.moveProjectWithinSection(m.projects[from], toPos)
+	return cmd
+}
+
+// projectDragIndex is the dragged project's CURRENT index in m.projects,
+// resolved from projectDragKey, or -1 when no drag is armed or the project no
+// longer exists. Every reader of the drag goes through it.
+func (m *Model) projectDragIndex() int {
+	if !m.projectDragging || m.projectDragKey.ID == "" {
+		return -1
 	}
-	m.projectDragIdx = to
-	return m.sendReorderProject(p)
+	for i, p := range m.projects {
+		if p.Dest == m.projectDragKey.Dest && p.ID == m.projectDragKey.ID {
+			return i
+		}
+	}
+	return -1
 }
 
 // tabGroupSpanIn is the screen-row extent of tab idx's group — heading, pane

@@ -71,9 +71,15 @@ type Pane struct {
 	// to show that it did.
 	ConvertedFromTerminal string
 
-	QuilMCP      bool // Opts into ordinary Quil MCP at spawn. Under PluginMu.
-	ID           string
-	TabID        string
+	QuilMCP bool // Opts into ordinary Quil MCP at spawn. Under PluginMu.
+	ID      string
+	TabID   string
+	// tabIDMu guards TabID after publication. TabID is written ONLY by
+	// SessionManager.MovePane, holding sm.mu (write) AND tabIDMu. Readers holding
+	// sm.mu read TabID directly; every other reader calls CurrentTabID. It is a
+	// LEAF lock, never held while acquiring another, so it nests safely inside
+	// PluginMu sections and needs no lock-order audit.
+	tabIDMu      sync.Mutex
 	CWD          string
 	Name         string // User-set name (empty = use CWD)
 	PTY          apty.Session
@@ -207,8 +213,8 @@ type Pane struct {
 	// handleAttach (a different conn), the PTY output goroutine's resizeKick,
 	// and snapshot() all read them. They were previously described here as
 	// "immutable once set" and written just outside this lock, which made all
-	// three readers data races. Only genuinely immutable post-creation fields
-	// (ID, TabID, OutputBuf pointer) are read without it.
+	// three readers data races. ID and the OutputBuf pointer are immutable;
+	// TabID has its own leaf lock (tabIDMu).
 	PluginMu     sync.Mutex
 	InstanceName string    // Which instance config was used
 	InstanceArgs []string  // Args used to start (for rerun strategy)
@@ -482,6 +488,15 @@ func (p *Pane) enqueueInputSeq(data []byte) (uint64, bool) {
 	}
 }
 
+// CurrentTabID reads TabID under its leaf lock. Every reader that does not hold
+// sm.mu uses this: MovePane rewrites the field on another conn's dispatch
+// goroutine while PTY-output, hook, memreport and broadcast goroutines read it.
+func (p *Pane) CurrentTabID() string {
+	p.tabIDMu.Lock()
+	defer p.tabIDMu.Unlock()
+	return p.TabID
+}
+
 // StopInput terminates the input writer. Idempotent; safe to call even if
 // the writer never started.
 //
@@ -657,12 +672,78 @@ func (sm *SessionManager) createTabLocked(projectID, name string) *Tab {
 
 func (sm *SessionManager) DestroyTab(tabID string) error {
 	sm.mu.Lock()
-
 	tab, ok := sm.tabs[tabID]
 	if !ok {
 		sm.mu.Unlock()
 		return fmt.Errorf("tab not found: %s", tabID)
 	}
+	orphans := sm.destroyTabLocked(tab)
+	sm.mu.Unlock()
+	releasePanes(orphans)
+	return nil
+}
+
+// DestroyTabIfPanes destroys tabID only while its live panes are still exactly
+// the ids in want — the same SET, compared order-insensitively (a reorder
+// alone cannot make a tab worth keeping). It reports whether the tab
+// was destroyed; a mismatch destroys nothing and is not an error.
+//
+// It exists for dissolveEmptyTab, which decides from a pane list read in an
+// earlier lock hold. Between that read and a plain DestroyTab, another
+// client's MovePane or CreatePane can land a pane in the tab — a move that was
+// answered OK, or a create whose spawn is still to come — and DestroyTab would
+// detach it and kill its process with nobody having asked to destroy anything.
+// Checking under the same sm.mu hold as the destroy closes that window. Takes
+// no PluginMu under sm.mu; PTYs are released off the lock, as DestroyTab does.
+func (sm *SessionManager) DestroyTabIfPanes(tabID string, want []string) (bool, error) {
+	sm.mu.Lock()
+	tab, ok := sm.tabs[tabID]
+	if !ok {
+		sm.mu.Unlock()
+		return false, fmt.Errorf("tab not found: %s", tabID)
+	}
+	// LIVE panes, the same filter Panes(tabID) applies to the list the caller
+	// captured — a dangling id from a corrupt snapshot must not make the tab
+	// impossible to dissolve.
+	live := make([]string, 0, len(tab.Panes))
+	for _, id := range tab.Panes {
+		if _, ok := sm.panes[id]; ok {
+			live = append(live, id)
+		}
+	}
+	if !sameStringSet(live, want) {
+		sm.mu.Unlock()
+		return false, nil
+	}
+	orphans := sm.destroyTabLocked(tab)
+	sm.mu.Unlock()
+	releasePanes(orphans)
+	return true, nil
+}
+
+// sameStringSet reports whether a and b hold the same multiset of strings.
+func sameStringSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	count := make(map[string]int, len(a))
+	for _, s := range a {
+		count[s]++
+	}
+	for _, s := range b {
+		if count[s] == 0 {
+			return false
+		}
+		count[s]--
+	}
+	return true
+}
+
+// destroyTabLocked removes tab and its panes from the session and returns the
+// detached panes for the caller to releasePanes AFTER unlocking. Caller holds
+// sm.mu (write).
+func (sm *SessionManager) destroyTabLocked(tab *Tab) []*Pane {
+	tabID := tab.ID
 
 	// Detach panes under the lock; close their PTYs after releasing it
 	// (releasePanes) — Close can block on reaping a wedged child.
@@ -722,9 +803,7 @@ func (sm *SessionManager) DestroyTab(tabID string) error {
 			sm.activeTab = sm.tabOrder[0]
 		}
 	}
-	sm.mu.Unlock()
-	releasePanes(orphans)
-	return nil
+	return orphans
 }
 
 func (sm *SessionManager) CreatePane(tabID string, cwd string) (*Pane, error) {
@@ -823,6 +902,74 @@ func (sm *SessionManager) DestroyPane(paneID string) error {
 	sm.mu.Unlock()
 	releasePanes([]*Pane{pane})
 	return nil
+}
+
+// movePaneResult reports what MovePane did, so the handler can tell an
+// ordinary no-op (already there) from the ways a move can fail to apply.
+type movePaneResult int
+
+const (
+	movePaneMoved movePaneResult = iota
+	movePaneNoop                 // already in that tab
+	movePaneUnknownPane
+	movePaneUnknownTab
+	movePaneTemplatePending // source or target is a template tab not yet laid out
+)
+
+// MovePane moves paneID to the END of tabID's pane list, on THIS daemon only.
+// It returns the SOURCE tab id so the caller can dissolve it if the move
+// emptied it.
+//
+// BOTH sides of the link are written, as MoveTab writes both sides of a
+// tab's: the source's Panes loses the id, the target's gains it, and
+// Pane.TabID follows — under tabIDMu as well as sm.mu, because every reader
+// outside this lock reads it through CurrentTabID. The pane itself (process,
+// output buffer, CWD, session ids, worktree, sandbox) is untouched, and so is
+// everything else: projects, the active tab and project, tabOrder, both
+// Layouts and both TemplateMains. The daemon has no active-pane state, and the
+// layout is the clients' to re-send.
+//
+// A template tab that no client has laid out yet is refused on either side:
+// the client builds its tree from Tab.Panes (applyTemplateLayout), so a pane
+// leaving or joining one before that happens changes the tree the template
+// builds.
+//
+// An unknown source tab (a corrupt snapshot) changes only the target side.
+// Nothing here closes a PTY, so it runs entirely under sm.mu.
+func (sm *SessionManager) MovePane(paneID, tabID string) (from string, res movePaneResult) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	pane, ok := sm.panes[paneID]
+	if !ok {
+		return "", movePaneUnknownPane
+	}
+	dst, ok := sm.tabs[tabID]
+	if !ok {
+		return "", movePaneUnknownTab
+	}
+	if pane.TabID == tabID {
+		return "", movePaneNoop
+	}
+
+	from = pane.TabID
+	src := sm.tabs[from]
+	if (src != nil && src.TemplateLayout != "" && len(src.Layout) == 0) ||
+		(dst.TemplateLayout != "" && len(dst.Layout) == 0) {
+		return "", movePaneTemplatePending
+	}
+
+	if src != nil {
+		// Order-preserving, and a copy rather than an in-place shift.
+		src.Panes = removeString(src.Panes, paneID)
+	}
+	if indexOfString(dst.Panes, paneID) < 0 {
+		dst.Panes = append(dst.Panes, paneID)
+	}
+	pane.tabIDMu.Lock()
+	pane.TabID = tabID
+	pane.tabIDMu.Unlock()
+	return from, movePaneMoved
 }
 
 func (sm *SessionManager) Tabs() []*Tab {
@@ -933,6 +1080,21 @@ func (sm *SessionManager) UpdateTab(tabID, name, color string, clearColor bool) 
 	} else if clearColor || name == "" {
 		tab.Color = ""
 	}
+	return true
+}
+
+// SetTabLayout replaces a tab's opaque layout under sm.mu. False for an
+// unknown tab. handleUpdateLayout used to write tab.Layout through the live
+// pointer with no lock, racing SnapshotState's copy — the handleUpdateTab
+// shape #229 fixed.
+func (sm *SessionManager) SetTabLayout(tabID string, layout json.RawMessage) bool {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	tab, ok := sm.tabs[tabID]
+	if !ok {
+		return false
+	}
+	tab.Layout = layout
 	return true
 }
 
@@ -1095,14 +1257,15 @@ func (sm *SessionManager) SnapshotState() (activeTab string, tabs []*Tab, panesB
 type paneSourceAdapter struct{ p *Pane }
 
 // Snapshot fills a PaneSourceSnapshot under a single PluginMu acquisition
-// so the GoHeap / PID / Alive trio is layer-consistent. ID, TabID, and the
-// OutputBuf pointer are immutable after pane creation, so they are read
-// outside the lock. OutputBuf.Len() is safe outside PluginMu because the
-// ringbuf has its own internal mutex protecting its length.
+// so the GoHeap / PID / Alive trio is layer-consistent. ID and the OutputBuf
+// pointer are immutable after pane creation, so they are read outside the
+// lock; TabID has its own leaf lock (tabIDMu), since MovePane rewrites it.
+// OutputBuf.Len() is safe outside PluginMu because the ringbuf has its own
+// internal mutex protecting its length.
 func (a paneSourceAdapter) Snapshot() memreport.PaneSourceSnapshot {
 	s := memreport.PaneSourceSnapshot{
 		PaneID: a.p.ID,
-		TabID:  a.p.TabID,
+		TabID:  a.p.CurrentTabID(),
 	}
 	if a.p.OutputBuf != nil {
 		s.HeapBytes += uint64(a.p.OutputBuf.Len())

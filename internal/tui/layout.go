@@ -114,6 +114,46 @@ func (n *LayoutNode) PaneIDs() map[string]bool {
 	return ids
 }
 
+// spiralLeaf returns the leaf an arriving pane spirals into: the LAST leaf
+// holding a pane in tree order (Leaves() order), together with the split of
+// its parent node. hasParent is false when that leaf is the root. Placeholder
+// leaves (Pane == nil) are skipped, so a slot reserved for another create is
+// never chosen. nil when the tree holds no pane.
+//
+// The last leaf, split against its parent's direction, is what makes
+// successive arrivals spiral ("dwindle") into the bottom-right corner instead
+// of lining up as ever-thinner columns: A → A|new, A|B → A|(B/new),
+// A|(B/C) → A|(B/(C|new)). It is a property of the tree alone, so every
+// client holding the same tree picks the same leaf and direction.
+func (n *LayoutNode) spiralLeaf() (leaf *LayoutNode, parentSplit SplitDir, hasParent bool) {
+	var walk func(node, parent *LayoutNode)
+	walk = func(node, parent *LayoutNode) {
+		if node == nil {
+			return
+		}
+		if node.IsLeaf() {
+			leaf, hasParent = node, parent != nil
+			if parent != nil {
+				parentSplit = parent.Split
+			}
+			return
+		}
+		walk(node.Left, node)
+		walk(node.Right, node)
+	}
+	walk(n, nil)
+	return leaf, parentSplit, hasParent
+}
+
+// spiralSplitDir is the preferred direction for splitting the spiral leaf:
+// the opposite of its parent's split, and left|right for a root leaf.
+func spiralSplitDir(parentSplit SplitDir, hasParent bool) SplitDir {
+	if hasParent && parentSplit == SplitHorizontal {
+		return SplitVertical
+	}
+	return SplitHorizontal
+}
+
 // findParent returns the parent of the node containing paneID, and whether
 // the target is the left child (true) or right child (false).
 // Returns nil if paneID is at the root or not found.
@@ -517,6 +557,31 @@ func (n *LayoutNode) minHeight() int {
 		return n.Left.minHeight() + n.Right.minHeight()
 	}
 	return max(n.Left.minHeight(), n.Right.minHeight())
+}
+
+// arrivalSplitDir chooses how to split a leaf of w×h cells for an arriving
+// pane, preferring pref. It switches to the other direction only when pref
+// would leave either half under the minimum (minPaneW across a left|right
+// split, minPaneH across a top|bottom one) AND the other direction keeps both
+// halves at it. If neither fits, it keeps pref. Unknown geometry (w <= 0 ||
+// h <= 0: no WindowSizeMsg yet) also keeps pref. Halves are computed exactly
+// as CollectRects does: first = int(n*0.5), second = n-first.
+func arrivalSplitDir(pref SplitDir, w, h int) SplitDir {
+	if w <= 0 || h <= 0 {
+		return pref
+	}
+	halvesFit := func(n, least int) bool {
+		first := int(float64(n) * 0.5)
+		return first >= least && n-first >= least
+	}
+	fitsH, fitsV := halvesFit(w, minPaneW), halvesFit(h, minPaneH)
+	switch {
+	case pref == SplitHorizontal && !fitsH && fitsV:
+		return SplitVertical
+	case pref == SplitVertical && !fitsV && fitsH:
+		return SplitHorizontal
+	}
+	return pref
 }
 
 // FindPaneRectAt returns the pane and its screen rectangle at coordinates (x, y).

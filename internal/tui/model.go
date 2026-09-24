@@ -370,6 +370,7 @@ const (
 	dialogWhatsNew       // post-upgrade highlights; also F1 → What's New
 	dialogNotifySettings // F1 → Settings → Notifications: toasts + sidebar event groups
 	dialogNewTemplate
+	dialogTabPick // pane context menu's "Move to tab…" picker — see tabpicker.go
 )
 
 // tuiClient is the subset of *ipc.Client the TUI uses on the Model. Defined
@@ -744,6 +745,12 @@ type Model struct {
 	// m.dialog is the sole open/closed authority). See projectpicker.go.
 	projectPick projectPickState
 
+	// tabPick is the pane context menu's "Move to tab…" picker state — a
+	// sibling of projectPick rather than a mode of it (see tabpicker.go's doc
+	// comment for why). Same zero-value/m.dialog contract: m.dialog ==
+	// dialogTabPick is the sole open/closed authority.
+	tabPick tabPickState
+
 	tomlEditor       *TextEditor // active TOML editor (nil when not editing)
 	templateEditor   bool        // return this TOML editor to Settings on close
 	selection        *Selection  // active text selection (nil when none)
@@ -903,6 +910,10 @@ type Model struct {
 	// (finishSplitDrag) — mid-drag only the local tree and VT change.
 	splitDragNode *LayoutNode
 	splitDragRect BorderHit
+
+	// paneDrag is an Alt+drag of a whole pane (panedrag.go). Zero value = no
+	// drag. Rides clearDragState like every other drag.
+	paneDrag paneDragState
 
 	// Project-sidebar edge drag. sidebarDragging is set while a drag is in
 	// flight; sidebarDragW is the PENDING width, painted as a preview rule and
@@ -1690,6 +1701,15 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		return m.handleKey(msg)
 
 	case tea.MouseClickMsg:
+		// Per-press trace for modified clicks — the mouse twin of handleKey's
+		// modified-key trace. [logging] level = "debug" (the dev build's
+		// default) shows exactly which modifiers the terminal delivered, which
+		// is how the pane drag's chord was verified in Windows Terminal.
+		if msg.Mod != 0 {
+			logger.Debug("mouse click: button=%v x=%d y=%d alt=%t ctrl=%t shift=%t",
+				msg.Button, msg.X, msg.Y, msg.Mod.Contains(tea.ModAlt),
+				msg.Mod.Contains(tea.ModCtrl), msg.Mod.Contains(tea.ModShift))
+		}
 		// A click can change the active pane, so a sequence completed after one
 		// would target a different pane than the one the prefix was pressed in.
 		m.cancelSequence()
@@ -1951,6 +1971,19 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 					return m, cmd
 				}
 			} else if msg.Y < m.height-1 {
+				// The pane-drag chord (panedrag.go) arms a drag of the pane
+				// under the press, AHEAD of the notes editor, split border,
+				// scrollbar and selection arms — so it never starts any of
+				// them, and a press that cannot arm is swallowed rather than
+				// falling through to one (a busy tab also flashes why). Not in
+				// notes mode: the editor owns the layout there, and the click
+				// behaves as before.
+				if paneDragModifier(msg.Mod) && !m.notesMode {
+					m.clearDragState()
+					m.selection = nil
+					cmd := m.beginPaneDrag(msg.X, msg.Y)
+					return m, cmd
+				}
 				// Notes editor click takes priority — the document anchor
 				// is resolved once at click time so motion events can't
 				// drift it if ScrollTop changes mid-drag.
@@ -2046,6 +2079,10 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		// invariant). Off-Y=0 motion during a tab drag pauses reorder but
 		// keeps the drag alive so the user can return to the tab bar
 		// without releasing.
+		if m.paneDrag.active() {
+			m.trackPaneDrag(msg.X, msg.Y)
+			return m, nil
+		}
 		if m.tabDragFromIdx >= 0 && msg.Y == 0 {
 			// The move waits for the pointer to cross the hovered tab's
 			// MIDDLE (dragSlot) — moving on first contact is what made the
@@ -2131,6 +2168,11 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		}
 		if m.ctxMenu.open() {
 			return m, nil // no drags can be live while the menu is open
+		}
+		// A pane drag commits (or cancels) on release — finishPaneDrag.
+		if m.paneDrag.active() {
+			cmd := m.finishPaneDrag(msg.X, msg.Y)
+			return m, cmd
 		}
 		// A split-border drag commits on release: one PTY resize per pane
 		// plus the persisted layout ratio (finishSplitDrag), highlight off.
@@ -2345,6 +2387,17 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 			// (a trailing newline could even execute it).
 			m.palette.query += sanitizePaletteQuery(msg.Content)
 			return m.afterPaletteQueryChange()
+		} else if m.dialog == dialogProjectPick {
+			// Same isolation break as the palette above, and the same fix: fold
+			// into the fuzzy query rather than falling through to
+			// sendClipboardToPane, which would type it into the hidden pane
+			// behind the picker (a trailing newline could run it).
+			m.projectPick.query += sanitizePaletteQuery(msg.Content)
+			return m.afterProjectPickQueryChange()
+		} else if m.dialog == dialogTabPick {
+			// Same isolation break, same fix, for the "Move to tab…" picker.
+			m.tabPick.query += sanitizePaletteQuery(msg.Content)
+			return m.afterTabPickQueryChange()
 		} else {
 			// Empty bracketed-paste content means the terminal (e.g. Windows
 			// Terminal on Ctrl+V) fired a paste for a clipboard that holds an
@@ -2627,6 +2680,26 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 			m.projectPick.filtered = m.filterProjects(m.projectPick.query)
 			m.clampProjectPickCursor()
 		}
+		// The "Move to tab…" picker's own vanish-close: the pane being moved
+		// left its source tab (moved elsewhere, or destroyed) while the
+		// picker sat open. Gated on m.dialog == dialogTabPick for the same
+		// reason as the project picker's guard above — never dismiss a
+		// dialog that replaced this one.
+		if m.dialog == dialogTabPick {
+			if !m.tabPickSourceIntact() {
+				m.closeTabPicker()
+				pickerVanishCmd = tea.ClearScreen
+			} else {
+				// Capture the selected row's tabID BEFORE refiltering: an
+				// index-only clamp would silently move the cursor onto
+				// whichever row slides into its old slot when a row above it
+				// disappears, rather than keeping the user's actual selection.
+				wantTabID := m.tabPickCursorTabID()
+				m.tabPick.filtered = m.filterTabPick(m.tabPick.query)
+				m.restoreTabPickCursor(wantTabID)
+				m.syncTabPickScroll()
+			}
+		}
 		m.resizeTabs()
 		log.Printf("apply: resizeTabs done")
 		// Diffed, not swept. A broadcast that agrees with what we already hold
@@ -2885,6 +2958,12 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		// Same shape as createTabFailedMsg: a send result, not an IPC response,
 		// so no re-arm.
 		m.setFlash("cannot reach " + hostLabel(msg.dest) + " — tab not moved")
+		return m, m.flashCmd()
+
+	case movePaneFailedMsg:
+		// Same shape as moveTabFailedMsg: a send result, not an IPC response,
+		// so no re-arm.
+		m.setFlash("cannot reach " + hostLabel(msg.dest) + " — pane not moved")
 		return m, m.flashCmd()
 
 	case worktreeTimeoutMsg:
@@ -3468,6 +3547,7 @@ func (m *Model) clearDragState() {
 	m.splitDragRect = BorderHit{}
 	m.sidebarDragging = false
 	m.sidebarDragW = 0
+	m.paneDrag = paneDragState{}
 }
 
 // beginSidebarDrag arms an edge drag, seeding the pending width from the
@@ -4716,6 +4796,9 @@ func (m Model) View() tea.View {
 			rows := strings.Count(paneArea, "\n") + 1
 			paneArea = overlayAt(paneArea, sidebarDragRuleBlock(rows), m.sidebarDragW-1, 0, m.width)
 		}
+		// Pane drag preview — composited like the sidebar rule above, on
+		// paneArea, whose first line is screen row 0.
+		paneArea = m.paneDragOverlay(paneArea)
 		if m.ctxMenu.open() {
 			// ctxMenu coords are screen rows and paneArea's first line IS
 			// screen row 0 (the tab bar), so no shift.
@@ -4820,6 +4903,12 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// through inside the handler (never swallow quit).
 	if m.ctxMenu.open() {
 		return m.handleCtxMenuKey(key)
+	}
+
+	// Esc abandons an armed pane drag. Consumed: it is the drag's cancel key.
+	if m.paneDrag.active() && key == "esc" {
+		m.clearDragState()
+		return m, nil
 	}
 
 	// Notes mode: while active, keyboard input is split between the bound
@@ -5309,6 +5398,13 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case "tab.move_right":
 		cmd := m.moveActiveTab(1)
+		return m, cmd
+
+	case "tab.layout_even", "tab.layout_columns", "tab.layout_rows",
+		"tab.layout_grid", "tab.layout_main", "tab.layout_spiral":
+		// ok is always true: the case labels admit only ids in layoutPresets.
+		kind, _ := layoutKindFor(lateID)
+		cmd := m.arrangeTab(m.activeTabModel(), kind)
 		return m, cmd
 
 	case "tab.switch_1", "tab.switch_2", "tab.switch_3", "tab.switch_4", "tab.switch_5",
@@ -5842,10 +5938,19 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]str
 
 	log.Printf("apply: active project = %d, active tab = %d", m.activeProject, m.activeTabIdx())
 
-	// Reconcile notes mode after daemon state sync:
+	// Reconcile notes mode after daemon state sync. The invariant is "the
+	// bound pane is in the ACTIVE tab" — switchTab and switchProject both keep
+	// it by exiting notes first — and a broadcast can break it:
 	//   (a) If the bound pane no longer exists in any tab, tear down
 	//       notes mode — the notes file is orphaned and the editor would
 	//       otherwise keep writing to a dead pane ID.
+	//   (a2) If the bound pane lives in a tab that is not the active one —
+	//       it moved to another tab, or this client's active tab moved
+	//       under the editor (MCP switch_tab) — tear down too. Re-syncing
+	//       (b) there would force a BACKGROUND tab's ActivePane while the
+	//       editor sat beside the active tab's pane, writing another pane's
+	//       notes. The WorkspaceStateMsg arm runs resizeTabs after this, so
+	//       no resize command is needed, as for (a).
 	//   (b) If the bound pane still exists but the containing tab's
 	//       ActivePane is now something else (e.g., a split created a new
 	//       pane and the daemon promoted it), force ActivePane back to the
@@ -5865,6 +5970,9 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]str
 		}
 		if boundTab == nil {
 			log.Printf("notes: bound pane %s pruned — exiting notes mode", bound)
+			m.exitNotesModeInPlace()
+		} else if boundTab != m.activeTabModel() {
+			log.Printf("notes: bound pane %s left the active tab — exiting notes mode", bound)
 			m.exitNotesModeInPlace()
 		} else if boundTab.ActivePane != bound {
 			log.Printf("notes: bound pane %s is no longer active (active=%s) — re-syncing", bound, boundTab.ActivePane)
@@ -5967,6 +6075,15 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 		if tab.Root != nil {
 			for id := range tab.Root.PaneIDs() {
 				if !daemonPaneSet[id] {
+					// A pane gone from THIS tab but still in the broadcast
+					// MOVED to another tab. RemovePane hands ActivePane to
+					// leaves[0] and leaves focus mode on, so a focused pane
+					// moving out would leave the tab full-screening a pane
+					// nobody chose. A DESTROYED pane is absent from paneMap
+					// and keeps today's behaviour.
+					if _, live := paneMap[id]; live && tab.FocusMode() && tab.ActivePane == id {
+						tab.ExitFocus()
+					}
 					tab.RemovePane(id)
 				}
 			}
@@ -5982,6 +6099,10 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 		if tab.Root != nil {
 			treePaneIDs = tab.Root.PaneIDs()
 		}
+		// Set when a moved pane arrived while this client held a reservation
+		// in this tab; the placeholder prune below then spares it for this
+		// pass (see there).
+		sparedReservation := false
 		for _, paneID := range tabInfo.Panes {
 			// Overlay panes are reconciled separately — never insert into the tree.
 			if isOverlayPane(paneMap, paneID) {
@@ -6027,7 +6148,16 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 			}
 
 			// New pane — reuse model if it existed elsewhere, otherwise create.
+			//
+			// migrated: a hit here can only be a pane that sits in ANOTHER
+			// tab's tree, i.e. one the daemon moved into this tab. A pane
+			// already in THIS tree took the treePaneIDs branch above, overlay
+			// panes never reach this loop, and the worktree-held pane was
+			// skipped just before. Every client of this daemon holds every tab
+			// of it, so every client sees the same reuse and places the pane
+			// the same way.
 			pane, ok := existingPanes[paneID]
+			migrated := ok
 			info := paneMap[paneID]
 			if !ok {
 				pane = NewPaneModel(paneID, m.replayBufSize())
@@ -6055,7 +6185,21 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 			}
 
 			// Try to fill a pending split placeholder first.
-			if m.pendingSplit != nil {
+			//
+			// Never with a MIGRATED pane. The placeholder is reserved for the
+			// pane THIS client asked for — a split, a replace, a worktree
+			// create — and a moved pane filling it would steal the tab's
+			// ActivePane and leave the requested pane, which still arrives
+			// later, with no leaf to land in; for a worktree create it would
+			// also retire worktreeCreates and dispose worktreeReplaced. The
+			// daemon cannot refuse a move into that tab — this client reserved
+			// the leaf before its create_pane even reached it — so this guard
+			// is the only protection. The moved pane is placed by the spiral
+			// rule below, which skips placeholder leaves.
+			if migrated && m.pendingSplit[tab.ID] != nil {
+				sparedReservation = true
+			}
+			if m.pendingSplit != nil && !migrated {
 				if placeholder, ok := m.pendingSplit[tab.ID]; ok {
 					placeholder.fill(pane)
 					tab.invalidateLeaves()
@@ -6094,7 +6238,22 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 			if tab.Root == nil {
 				tab.Root = NewLeaf(pane)
 				tab.invalidateLeaves()
-			} else if leaves := tab.Leaves(); len(leaves) == 0 {
+			} else if leaves := tab.Leaves(); len(leaves) == 0 && migrated && m.pendingSplit[tab.ID] == tab.Root {
+				// The bare root placeholder IS this client's reserved leaf (a
+				// replace on a single-pane tab). Overwriting the root, as the
+				// arm below does, would detach it while pendingSplit still
+				// points at it, stranding the pane the replace is for — the
+				// same leak the fill guard above prevents. Keep it and place
+				// the moved pane beside it, as the spiral rule places a pane
+				// beside a root leaf.
+				tab.Root = &LayoutNode{
+					Split: arrivalSplitDir(SplitHorizontal, m.paneAreaWidth(), m.height-chromeHeight),
+					Ratio: 0.5,
+					Left:  tab.Root,
+					Right: NewLeaf(pane),
+				}
+				tab.invalidateLeaves()
+			} else if len(leaves) == 0 {
 				// The root is a bare placeholder, which PrunePlaceholders
 				// cannot repair — it only inspects a split node's CHILDREN, so
 				// a placeholder that IS the root is invisible to it. A replace
@@ -6107,8 +6266,26 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 				// it. Skipping the held pane above removes that mask.
 				tab.Root = NewLeaf(pane)
 				tab.invalidateLeaves()
-			} else {
+			} else if !migrated || !tab.placeArrivingPane(pane, m.paneAreaWidth(), m.height-chromeHeight) {
+				// A moved pane spirals into the tab's last pane (see
+				// placeArrivingPane); it cannot fail here, since this arm has
+				// a pane leaf. Every other arrival — an MCP create, another
+				// client's split, a layout-less tab on first attach — keeps
+				// the historical top|bottom split of the first leaf.
 				splitForNewPane(tab, leaves, pane)
+			}
+			// Adopt, EXCEPT when tab is THIS client's own active tab right now.
+			// Every attached client reconciles the same broadcast, so without
+			// this a client sitting in the TARGET tab — typing into some
+			// unrelated pane there — would have adoptMovedPane steal both
+			// ActivePane and focus mode out from under it, and its next
+			// keystrokes would land on the pane that just arrived rather than
+			// the one it was looking at. The MOVER never has the target active
+			// (Enter never switches tabs — see tabpicker.go), so this only
+			// ever skips for a bystander, and finalizeTabPanes still repairs
+			// ActivePane/Active if it names a pane that no longer exists.
+			if migrated && tab != m.activeTabModel() {
+				adoptMovedPane(tab, pane)
 			}
 		}
 
@@ -6132,8 +6309,14 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 		// Pushed from the SAME read that decides the exemption, so the
 		// placeholder and the message standing in it can never disagree about
 		// whether a create is in flight.
+		//
+		// Also spared for ONE pass when a moved pane arrived while an ordinary
+		// reservation was still open: the fill guard kept the moved pane out
+		// of it, and pruning it now would strand the requested pane the same
+		// way. That pane normally rides the very next broadcast; if it never
+		// comes, the next pass prunes as it always did.
 		tab.CreatingBranch = m.worktreeCreates[tab.ID]
-		if tab.Root != nil && tab.CreatingBranch == "" {
+		if tab.Root != nil && tab.CreatingBranch == "" && !sparedReservation {
 			tab.Root.PrunePlaceholders()
 			tab.invalidateLeaves()
 		}
@@ -6311,6 +6494,17 @@ func (m *Model) reconcileOverlayPane(
 	}
 
 	return newPaneIDs, false, nil
+}
+
+// adoptMovedPane makes a pane that just moved into tab the tab's active pane,
+// and leaves focus mode so the new split is what the tab shows instead of a
+// different full-screen pane. finalizeTabPanes then sets the Active flags.
+func adoptMovedPane(tab *TabModel, pane *PaneModel) {
+	if tab.FocusMode() {
+		tab.ExitFocus()
+	}
+	tab.ActivePane = pane.ID
+	log.Printf("apply: pane %s moved in from another tab", pane.ID)
 }
 
 // finalizeTabPanes ensures the active pane is valid and focus flags are set.
@@ -7681,6 +7875,34 @@ func (m Model) sendMoveTab(tabID, projectID string) tea.Cmd {
 		}
 		if err := m.sendForDestStrict(dest, msg); err != nil {
 			return moveTabFailedMsg{dest: dest}
+		}
+		return nil
+	}
+}
+
+// movePaneFailedMsg reports a move_pane that never reached its daemon. The
+// send happens off the Update goroutine, so the flash cannot be set there —
+// same shape as moveTabFailedMsg.
+type movePaneFailedMsg struct{ dest string }
+
+// sendMovePane fires a MsgMovePane IPC for the pane context menu's "Move to
+// tab…" picker. The destination is resolved HERE, on the Update goroutine,
+// via destOfPane — never inside the returned closure, which runs later and
+// must not race a workspace reconciliation.
+//
+// Strict, like sendMoveTab: Router.Send drops a message for a dest it has no
+// conn for and returns nil, which would report a move that never happened as
+// having succeeded — a user-confirmed action has to be able to say it failed.
+func (m Model) sendMovePane(paneID, tabID string) tea.Cmd {
+	dest := m.destOfPane(paneID)
+	return func() tea.Msg {
+		msg, err := ipc.NewMessage(ipc.MsgMovePane, ipc.MovePanePayload{PaneID: paneID, TabID: tabID})
+		if err != nil {
+			log.Printf("move pane: build message: %v", err)
+			return nil
+		}
+		if err := m.sendForDestStrict(dest, msg); err != nil {
+			return movePaneFailedMsg{dest: dest}
 		}
 		return nil
 	}

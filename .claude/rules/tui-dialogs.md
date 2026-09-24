@@ -52,7 +52,7 @@ Extracted verbatim from `.claude/CLAUDE.md`. Loaded only when the files above ar
 
 ### Command palette (M11)
 
-`command_palette` (default `alt+shift+p` ONLY — `ctrl+shift+p` is intercepted by many terminals' own palette (Windows Terminal, VS Code) before Quil sees it, so it is opt-in) opens a modal, centered, keyboard-first fuzzy-find launcher (`internal/tui/palette.go`) — a `dialogScreen` (`dialogCommandPalette`), NOT a compositor overlay like the context menu (it needs no mouse anchoring and inherits input routing + `lipgloss.Place` centering from the dialog system). State is `Model.palette paletteState` (query/cursor/commands/filtered; zero value = empty, `m.dialog` is the sole open/closed authority — no `open` bool, mirrors `ctxMenu`). `buildPaletteCommands` rebuilds the registry on every open, GROUPED under dim section headers (`paletteCommand.header`) in fixed order, NAVIGATION FIRST — **Go to pane** (one row per pane across all tabs, labelled `<tab>.<pane> · <type>[· name]` + short CWD detail so same-name/same-dir panes are distinct), **Tabs** (switch-to first, then new/close/rename/cycle-color, then move-left/move-right), **Pane** (actions on the active pane), **Projects** (new/rename/remove, previous, attention queue, then move-up/move-down, then the sidebar toggle), **System** (settings/plugins/memory/about/logs/redraw). The four reorder rows are GREYED at the ends of their list rather than hidden — the row stays where the eye expects it and the disabled state says why, the same choice Ctrl+N makes for an unavailable plugin. Per-active-pane gates (`Input history` needs `record_history`, `Open lazygit` needs the binary) and toggle labels (mute/eager) reflect current state. Fuzzy match is a hand-rolled greedy subsequence scorer (`fuzzyScore`/`commandScore`) — case-insensitive, rewards consecutive runs + start/separator boundaries. `filterPalette` has TWO modes: empty query = browse (all rows incl. headers, registry order); non-empty = search (headers dropped, matches stable-sorted by score). `paletteCommand.selectable()` (= `!header && enabled`) gates cursor movement (`firstSelectable`/`nextSelectable` skip headers + disabled rows, no wrap) and Enter. `executePaletteCommand` is a THIRD dispatcher (alongside the key switch and context menu) that routes each `paletteAction` into the SAME existing handler methods — pane-scoped actions act on the active pane; `palActGoToPane`/`palActSwitchTab` change the active tab/pane (go-to clears the old tab's active-pane `.Active` flag BEFORE `switchTab` moves `m.activeTab` — load-bearing ordering). Reuses four handlers extracted from `handleKey` for this: `openCloseTabConfirm`/`beginTabRename`/`openCreatePaneDialog`/`forceRedraw`. Input: `msg.Text` typing gated by `isPrintableText` (drops control chars incl. tab); paste (`tea.PasteMsg`) folded into the query via `sanitizePaletteQuery` (dedicated `dialogCommandPalette` branch — else it would leak into the hidden pane's PTY); `ctrl+p`/`ctrl+n` alias up/down. No-op in notes mode (explicit `openCommandPalette` guard — `notesKeyExempt` governs only the editor-focused path). `renderCommandPalette` returns box CONTENT (renderDialog sets `width = paletteWidth`, clamps to `m.width-2`); `paletteInnerWidth` is `boxW-6` (2 border + 4 padding — lipgloss draws the border INSIDE `.Width`, so a full-width row of `boxW-4` soft-wraps its right-aligned shortcut onto the next line), and rows/headers/hints all clamp via cell-aware `truncateToWidth`/`lastCellsToWidth` so wide-glyph names and long queries never wrap the border.
+`command_palette` (default `alt+shift+p` ONLY — `ctrl+shift+p` is intercepted by many terminals' own palette (Windows Terminal, VS Code) before Quil sees it, so it is opt-in) opens a modal, centered, keyboard-first fuzzy-find launcher (`internal/tui/palette.go`) — a `dialogScreen` (`dialogCommandPalette`), NOT a compositor overlay like the context menu (it needs no mouse anchoring and inherits input routing + `lipgloss.Place` centering from the dialog system). State is `Model.palette paletteState` (query/cursor/commands/filtered; zero value = empty, `m.dialog` is the sole open/closed authority — no `open` bool, mirrors `ctxMenu`). `buildPaletteCommands` rebuilds the registry on every open, GROUPED under dim section headers (`paletteCommand.header`) in fixed order, NAVIGATION FIRST — **Go to pane** (one row per pane across all tabs, labelled `<tab>.<pane> · <type>[· name]` + short CWD detail so same-name/same-dir panes are distinct), **Tabs** (switch-to first, then new/close/rename/cycle-color, then move-left/move-right, then the six `Layout:` rows acting on the active tab — `palActTabLayout`, arg = the action id resolved through `layoutKindFor`, greyed together when `tabArrangeable` fails), **Pane** (actions on the active pane), **Projects** (new/rename/remove, previous, attention queue, then move-up/move-down, then the sidebar toggle), **System** (settings/plugins/memory/about/logs/redraw). The four reorder rows are GREYED at the ends of their list rather than hidden — the row stays where the eye expects it and the disabled state says why, the same choice Ctrl+N makes for an unavailable plugin. Per-active-pane gates (`Input history` needs `record_history`, `Open lazygit` needs the binary) and toggle labels (mute/eager) reflect current state. Fuzzy match is a hand-rolled greedy subsequence scorer (`fuzzyScore`/`commandScore`) — case-insensitive, rewards consecutive runs + start/separator boundaries. `filterPalette` has TWO modes: empty query = browse (all rows incl. headers, registry order); non-empty = search (headers dropped, matches stable-sorted by score). `paletteCommand.selectable()` (= `!header && enabled`) gates cursor movement (`firstSelectable`/`nextSelectable` skip headers + disabled rows, no wrap) and Enter. `executePaletteCommand` is a THIRD dispatcher (alongside the key switch and context menu) that routes each `paletteAction` into the SAME existing handler methods — pane-scoped actions act on the active pane; `palActGoToPane`/`palActSwitchTab` change the active tab/pane (go-to clears the old tab's active-pane `.Active` flag BEFORE `switchTab` moves `m.activeTab` — load-bearing ordering). Reuses four handlers extracted from `handleKey` for this: `openCloseTabConfirm`/`beginTabRename`/`openCreatePaneDialog`/`forceRedraw`. Input: `msg.Text` typing gated by `isPrintableText` (drops control chars incl. tab); paste (`tea.PasteMsg`) folded into the query via `sanitizePaletteQuery` (dedicated `dialogCommandPalette` branch — else it would leak into the hidden pane's PTY); `ctrl+p`/`ctrl+n` alias up/down. No-op in notes mode (explicit `openCommandPalette` guard — `notesKeyExempt` governs only the editor-focused path). `renderCommandPalette` returns box CONTENT (renderDialog sets `width = paletteWidth`, clamps to `m.width-2`); `paletteInnerWidth` is `boxW-6` (2 border + 4 padding — lipgloss draws the border INSIDE `.Width`, so a full-width row of `boxW-4` soft-wraps its right-aligned shortcut onto the next line), and rows/headers/hints all clamp via cell-aware `truncateToWidth`/`lastCellsToWidth` so wide-glyph names and long queries never wrap the border.
 
 **Content search is UNIFIED into the palette** — there is NO `/` prefix or separate mode. Whenever the query is non-empty, `afterPaletteQueryChange` refilters the commands AND fires a debounced content search over every pane's buffered scrollback (all tabs, incl. background + muted), via IPC pair `MsgPaneSearchReq`/`MsgPaneSearchResp`. Daemon side (`internal/daemon/search.go`): `scanPaneMatches` counts per-line matches + captures the last (most-recent) match as a preview excerpt; `Daemon.searchPanes` scans all panes' loaded `OutputBuf`, never spawns a dormant pane; `paneSearchResponse` (the testable split of `handlePaneSearchReq`) MUST echo `req.Query` VERBATIM — the query is untrimmed and daemon-side normalization would make a whitespace-bearing query look permanently stale. TUI side (`internal/tui/palette_search.go`): 150ms debounce (`paletteSearchDebounce`) coalesces keystrokes; `applyPaneSearch` drops stale responses by comparing the daemon's echoed query to the current `m.palette.query`, and stores each hit AS a `palActGoToPane` `paletteCommand` (label via `paneNavLabel`/`formatPaneNav`, `N×`[` capped`] detail from the PER-HIT `PaneSearchHit.Truncated`, `excerpt` for the preview line). `paletteDisplay()` (palette.go) assembles the ONE list the cursor walks: filtered commands, then — for a non-empty query — a dim `Found in panes` header + the hit rows (or a single dim status row: `Searching…` / `Search timed out — is the daemon running?` / `No matches in any pane`; the payload-level `Truncated` renders as a trailing "some panes hit the cap" note). Because hits are `palActGoToPane` rows, cursor nav (`nextSelectable`/`clampPaletteCursor`), Enter dispatch (`executePaletteCommand` → shared `goToPane`), and row rendering (`renderPaletteLine` + the `excerpt` second line) all reuse the command machinery — no separate content view. `paletteSearchTimeout` (3 s `tea.Tick`, a LOCAL timer that must never re-arm `listenForMessages`; both it and the debounce compare on `m.palette.query`) turns a never-answered request — wedged daemon, or a new TUI against a daemon whose `handleMessage` has no case for `pane_search_req` and silently drops it — into the diagnosable timed-out row instead of an endless `Searching…`. Deferred to Phase 2: per-plugin/instance quick-create, `:` command mode, MRU ordering.
 
@@ -63,6 +63,20 @@ Extracted verbatim from `.claude/CLAUDE.md`. Loaded only when the files above ar
 right-click on a pane (no selection active) or `quick_actions` (default `alt+a`; the M1 `ctrl+a` placeholder was rebound — ctrl+a is readline home) opens a per-pane action popup (`internal/tui/ctxmenu.go`) — a compositor overlay via `overlayAt` (compose.go), NOT a dialogScreen. Targets the pane under the cursor (blue `ctxTargetHighlight` border), dispatches into the existing keybinding handler methods (extracted: `openClosePaneConfirm`/`openRestartPaneConfirm`/`beginPaneRename`/`toggleFocusForActiveTab`/`openHistoryForActivePane`), disabled rows greyed (history without `record_history`, lazygit without binary). "Mark attention" SENDS `MsgUpdatePane{PinnedAttention}` — the pin is daemon-owned and persisted (see `projects.md`), so the row must not write `PaneModel.pinnedAttention` itself: `syncPaneMeta` overwrites it on every broadcast, and a local flip would be reverted within 5 s by the git ticker alone. It survives focus (`ackFocusedPane` never clears it; `tabPinnedAttention` colors the tab label, including the active tab) and renders PURPLE 141 — deliberately not `unseen`'s green, which it used to share, because only `unseen` clears itself when you look at the pane. **`ackFocusedPane` clears `unseen` and nothing else**: `blockedSince`/`blockedReason` also survive focus (it runs on every message, including the 100 ms spinner tick, so clearing there destroyed the mark before it could be seen — see `hooks-and-sessions.md`), and `paneRow` suppresses the blocked glyph for the focused pane instead. That is what keeps **"Clear attention"** the only non-agent route to a clear, and therefore the only way to dismiss a stuck `▲` on a pane you are not going to focus; it drops all FOUR marks together, because clearing one leaves the row looking half-worked. Three of them are client-owned and cleared in place; the pin is sent, UNCONDITIONALLY and never gated on the local value — that value reports only what the last broadcast said, so a Mark followed by a Clear before the round trip returned would send nothing and then let the Mark's own broadcast restore the ◆ after the user cleared it. Menu state is `Model.ctxMenu` (zero value = closed), vanished-target close guarded at the top of `Update`, closed on window resize. Right-click with a selection still copies (split-by-selection). Layout: title row = target pane's `paneDisplayName` (width capped by `ctxMenuTitleCap`, truncated at render) + blank separator + items with a blank row at group boundaries only (`ctxMenuItem.gapAfter`: view actions | pane settings | destructive; `ctxMenuState.spaced` auto-falls back to compact when the box exceeds the content height — geometry lives in the `gapsBefore`/`itemContentRow`/`itemAtContentRow` trio). The focus row's label is stateful (Enter/Exit focus mode). Hover-to-highlight works because `View()` switches `v.MouseMode` to `tea.MouseModeAllMotion` while the menu is open (cell-motion never delivers buttonless hover) and back to cell-motion on close.
 
 **A menu row REFUSES when its target is no longer in the ACTIVE tab.** Eight of the ten items dispatch through `activeTabModel().ActivePaneModel()` (shared with the keybinding and palette paths), which is why every entry point focuses the pane before opening the menu — but that establishes the property at OPEN time and says nothing about EXECUTE time: MCP `set_active_pane` (`setActivePaneMsg` → `jumpToPane`) moves the active project AND tab, and the vanished-target guard at the top of `Update` closes only a menu whose target is GONE, not one whose active tab moved — so Rename seeded the on-screen pane's name, Mute toggled it, and Restart/Close armed a confirm for it. Keyboard and mouse cannot reach that state; MCP is the one producer that can. `executeCtxMenuItem` therefore tests `proj != m.cur() || tabIdx != m.activeTabIdx()` BEFORE the `ActivePane`/`Active` sync, so a refused execute leaves nothing half-applied on a background tab, and it refuses ALL ten rows — including the two attention items that resolve `paneID` directly and could still have acted correctly, because "two of ten rows work after the tab moved" is a rule nobody can hold and the remedy is a second right-click. A future entry point that opens this menu on a pane outside the active tab without focusing it first will find every row inert: focus first, rather than widening the guard.
+
+**Move to tab… sits directly after Rename pane, in the pane-settings group,
+and is GREYED rather than hidden.** `buildCtxMenuItems` sets its `enabled` from
+`len(movePaneCandidates(pane.ID)) > 0` — the pane menu's own convention: four
+other rows already grey out this way (Input history, Open lazygit, Open hunk,
+Clear attention), unlike the tab menu's Move to project…, which hides.
+Hiding this one instead would make it the only row, among the other twelve,
+whose PRESENCE on screen depends on pane state rather than its `enabled` flag
+alone — every one of the twelve stays put and only its label or gate changes.
+It stays above the destructive separator with the rest of its group, because
+moving deletes nothing, and there is deliberately no replace variant — a move
+has nothing to replace. Choosing it (`ctxActMovePane`) closes the menu and
+opens the tab picker (`openMovePanePicker`, `tabpicker.go`) — see "Tab picker
+(move pane)" below.
 
 ## Tab context menu
 
@@ -91,6 +105,80 @@ closes the menu and opens the fuzzy project picker (Alt+P) in MOVE mode
 (`openMoveTabPicker`) rather than a sibling dialog — see `projects.md`'s "The
 project picker's move mode" for the picker half, including why the scope has
 to live inside `filterProjects` rather than being fixed at open time.
+
+**Layout… re-populates the menu in place, like Set color….** `buildTabCtxMenuItems` puts it after Set color… and before Move to project… (which stays LAST), GREYED — never hidden — when `tabArrangeable` fails (fewer than two panes, or `tabLayoutBusy`: a worktree create/replace, a template not laid out, a `PreparingWorktree` leaf, or this client's own `pendingSplit`). `ctxActTabLayoutList` calls `openTabLayoutList`, which swaps in one `ctxActTabLayout` row per `layoutPresets` entry (the arrangement rides on `ctxMenuItem.layout`) and CLOSES the menu when the six-row box cannot fit — at `minTermHeight` the four-row tab menu fits and the list does not. Choosing a row calls `arrangeTab` on THAT tab without switching to it; `applyTabArrangement` re-checks everything, so a tab that turned busy while the list was open is refused with a flash rather than trusted from the open-time grey. `layoutPresets` (`arrange_apply.go`) is the single table the menu, the palette rows and the `tab.layout_*` late-tier arm all read.
+
+## Tab picker (move pane)
+
+### Tab picker (move pane)
+
+The pane context menu's **Move to tab…** row opens a SIBLING of the fuzzy
+project picker (`internal/tui/tabpicker.go`), not a mode of it. The project
+picker's move mode (`projects.md`'s "The project picker's move mode") reuses
+that dialog because moving a TAB is still choosing a PROJECT — the row type is
+unchanged. Moving a PANE is choosing a TAB, across every project on the host,
+which is a different row type, a different scope function, and a different
+close condition, so a third `*ProjectModel`-typed mode was rejected in favor of
+a second small dialog that shares everything actually shareable: `fuzzyScore`,
+`dialogInnerWidth`, `lastCellsToWidth`/`truncateToWidth`, `sanitizeRemoteText`,
+and the `dialog*` styles.
+
+**The scope lives in `filterTabPick`, via `movePaneCandidates`, and it has
+to.** Exactly like the project picker's move mode, `model.go`'s broadcast
+refresh recomputes `m.tabPick.filtered` from `filterTabPick` on every
+`workspace_state` while the picker is open — a scope captured only at OPEN
+time would be widened back to every reachable tab by the next broadcast (the
+git ticker alone delivers one every 5 s). `movePaneCandidates` (`ctxmenu.go`,
+beside `moveTabCandidates`) is the pure helper both the menu row's `enabled`
+gate and the picker's scope call: same-Dest, `projectActionable` projects,
+excluding the pane's own tab and any tab `tabInFlight` — a worktree create or
+replace targeting it, a template layout not yet applied, or a leaf still
+carrying `PreparingWorktree` (the new-tab worktree placeholder). The pane
+itself must not be preparing and its own tab must not be in flight either, or
+there is nowhere for it to safely leave from.
+
+**The rows are IDs, never pointers.** `tabPickRow{tabID, label}` — a broadcast
+can rebuild every tab under an open picker, and a `*TabModel` captured before
+that rebuild can point at a discarded tree. `label` is the RAW `"project /
+tab"` string and is sanitized only at render, the render-only rule every other
+daemon-sourced string in this package follows.
+
+**It closes when the PANE leaves its SOURCE tab, not when a named tab
+vanishes.** `tabPickState.srcTabID` is captured at open; `tabPickSourceIntact`
+re-resolves the pane via `findPaneAndTab` and compares its current tab against
+that snapshot. This is a stricter and different condition than the project
+picker's move-mode vanish-close (which asks only whether the TAB it names
+still exists) — a pane can leave its tab by MOVING, not just by the tab being
+destroyed, and either way the picker is now offering to move a pane out of a
+tab it is no longer in. Gated on `m.dialog == dialogTabPick`, for the same
+reason the project picker's own gate is: a dialog that REPLACED this one
+without going through `closeTabPicker` (a `PluginErrorMsg`, say) must not be
+dismissed by a broadcast mistaking it for the picker it no longer is.
+
+**Enter re-checks BOTH the source and the target before sending, and sends
+nothing on either failure.** The source check is `tabPickSourceIntact`, shared
+with the broadcast refresh's vanish-close. The target check re-derives
+`movePaneCandidates(paneID)` rather than trusting the filtered snapshot the
+cursor is pointing at — a target can go ineligible between open and Enter
+with no broadcast required for THIS client to know, since `worktreeCreates`/
+`worktreeReplaced` are THIS client's own in-flight state, armed by its own
+dialog interactions elsewhere, not something a broadcast populates. The
+realistic trigger is therefore this client starting its OWN worktree create or
+replace in the target tab meanwhile, its host going offline, or the target tab
+itself being destroyed — not another client's worktree add, which reaches this
+check only indirectly, via the `PreparingWorktree` leaf a broadcast DOES carry.
+Either failure closes the picker and sends nothing; never
+switches tabs or projects, and never mutates the layout tree — the daemon's
+`move_pane` broadcast is what places the pane (see `tui-rendering.md`'s "Panes
+moved between tabs").
+
+**`sendMovePane` follows `sendMoveTab`'s exact shape**: the destination is
+resolved on the Update goroutine via `destOfPane`, never inside the returned
+closure, and the send is `sendForDestStrict` — `Router.Send` silently drops a
+message for a dest with no connection, which would report a move that never
+happened as having succeeded for a user-confirmed action. `movePaneFailedMsg`
+is the send-result twin of `moveTabFailedMsg`: a send result, not an IPC
+response, so its `Update` arm must not re-arm `listenForMessages`.
 
 ## Claude resume picker
 

@@ -13,6 +13,7 @@ import (
 	"github.com/rivo/uniseg"
 
 	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/keymap"
 )
 
 const paletteVisibleLines = 12 // rendered lines shown before the list scrolls (a hit row is 2 lines)
@@ -95,6 +96,7 @@ const (
 	palActMoveProjectUp
 	palActMoveProjectDown
 	palActNewTemplate
+	palActTabLayout // arg = the keymap action id, e.g. "tab.layout_grid"
 )
 
 // paletteCommand is one row of the palette. Disabled rows render greyed and are
@@ -415,6 +417,19 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 		paletteCommand{action: palActMoveTabLeft, enabled: m.activeTabIdx() > 0, label: "Move tab left", detail: m.keymap.Display("tab.move_left"), keywords: []string{"tab", "move", "reorder", "left"}},
 		paletteCommand{action: palActMoveTabRight, enabled: m.activeTabIdx() < len(m.curTabs())-1, label: "Move tab right", detail: m.keymap.Display("tab.move_right"), keywords: []string{"tab", "move", "reorder", "right"}},
 	)
+	// The six arrangements, acting on the ACTIVE tab. Greyed together, since
+	// the gate (two panes, not busy) is the tab's rather than any one row's.
+	arrangeable := m.tabArrangeable(m.activeTabModel())
+	for _, p := range layoutPresets {
+		cmds = append(cmds, paletteCommand{
+			action:   palActTabLayout,
+			arg:      string(p.action),
+			enabled:  arrangeable,
+			label:    "Layout: " + p.label,
+			detail:   m.keymap.Display(p.action),
+			keywords: []string{"tab", "layout", "arrange", "tidy"},
+		})
+	}
 
 	// --- Projects ----------------------------------------------------------
 	//
@@ -1167,6 +1182,16 @@ func (m Model) executePaletteCommand(c paletteCommand) (tea.Model, tea.Cmd) {
 		return m, cmd
 	case palActMoveTabRight:
 		cmd := m.moveActiveTab(1)
+		return m, cmd
+	case palActTabLayout:
+		// Resolved against the preset table rather than trusted as a kind —
+		// the palActDimLevel precedent: only an arrangement this build offers
+		// can run.
+		kind, ok := layoutKindFor(keymap.ActionID(c.arg))
+		if !ok {
+			return m, nil
+		}
+		cmd := m.arrangeTab(m.activeTabModel(), kind)
 		return m, cmd
 	case palActMoveProjectUp:
 		cmd := m.moveActiveProject(-1)

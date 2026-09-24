@@ -19,6 +19,7 @@ Quil exposes **35 MCP tools**: agents can manage [projects and tabs](mcp.md#proj
   - [Spatial pane navigation](#spatial-pane-navigation)
   - [Live CWD tracking](#live-cwd-tracking)
   - [Pane focus mode](#pane-focus-mode)
+  - [Rearranging a tab's panes](#rearranging-a-tabs-panes)
   - [Tab customization](#tab-customization)
   - [New tab, with the pane you actually want](#new-tab-with-the-pane-you-actually-want)
 - [Input & clipboard](#input--clipboard)
@@ -162,6 +163,20 @@ The CWD also feeds the new-pane setup dialog (pre-filled from the active pane's 
 
 `Ctrl+E` toggles the active pane full-screen. The layout tree stays intact; other panes keep running but aren't rendered. `* FOCUS *` in the pane top border, `[focus]` in the status bar. Pane navigation is disabled in focus mode. Splitting / closing exit focus automatically.
 
+### Rearranging a tab's panes
+
+Panes moved in from other tabs can leave a tab lopsided. Right-click the tab (in the tab bar or the sidebar) and choose **Layout…**:
+
+| Row | Result |
+|---|---|
+| Even out | Keeps the arrangement, gives every pane the same area |
+| Columns / Rows | All panes side by side / stacked, equal sizes |
+| Grid | Rows of equal panes, as square as possible (5 panes → 3 + 2) |
+| Main + stack | The tab's active pane on the left at half the width, the rest stacked on the right |
+| Spiral | Each pane splits the last one, alternating direction, all equal |
+
+The same six are in the command palette (acting on the active tab) and can be bound to keys as `tab.layout_even`, `tab.layout_columns`, `tab.layout_rows`, `tab.layout_grid`, `tab.layout_main` and `tab.layout_spiral` in `bindings.toml` — they ship unbound. Hold `Alt` and drag a pane onto another to place it on the side you drop it on, onto the middle to swap the two, or onto a tab to move it there. Nothing restarts. A layout that would make a pane smaller than 10×4 cells is refused, and the new layout is saved at once. Another Quil window attached to the same daemon keeps its own arrangement of that tab, and may overwrite the saved layout with it; whichever window sent its layout last is the one a restart brings back.
+
 ### Tab customization
 
 | Action | Binding |
@@ -196,7 +211,7 @@ checkout.
 
 ### Mouse & keyboard
 
-Full mouse support — click tabs to switch, click panes to focus, scroll wheel for terminal history. Drag panes to select text. Drag a tab (in the tab bar or by its name in the project sidebar) or a project row to reorder it; the item moves once the pointer passes the middle of its neighbour, so the drag never flips back and forth. `Alt+Shift+PgUp`/`PgDn` and `Alt+Shift+Up`/`Down` do the same from the keyboard for tabs and projects. Right-click a tab (in the bar or the sidebar) for a context menu to rename it, pick its color, or move it to another project on the same machine — see [Mouse: tab context menu](keybindings.md#mouse-tab-context-menu). All keybindings are configurable via `config.toml`.
+Full mouse support — click tabs to switch, click panes to focus, scroll wheel for terminal history. Drag panes to select text. Drag a tab (in the tab bar or by its name in the project sidebar) or a project row to reorder it; the item moves once the pointer passes the middle of its neighbour, so the drag never flips back and forth. `Alt+Shift+PgUp`/`PgDn` and `Alt+Shift+Up`/`Down` do the same from the keyboard for tabs and projects. Right-click a tab (in the bar or the sidebar) for a context menu to rename it, pick its color, tidy its layout, or move it to another project on the same machine — see [Mouse: tab context menu](keybindings.md#mouse-tab-context-menu). Hold `Alt` and drag a pane to move it beside another pane, swap the two, or drop it on a tab — see [Rearranging a tab's panes](#rearranging-a-tabs-panes). All keybindings are configurable via `config.toml`.
 
 When there are more tabs than fit, the mouse wheel over the tab bar scrolls the strip left/right instead of switching tabs or reaching the pane beneath it; markers (`«N` / `N»`) show how many tabs are hidden on each side. Clicking a tab keeps the current scroll position; switching some other way (keyboard, the palette, an MCP tool) snaps the bar back to centering on whichever tab is now active.
 
@@ -223,9 +238,11 @@ The default is `Alt+Shift+P` because `Ctrl+Shift+P` (the VS Code key) is interce
 
 ### Pane context menu
 
-Right-click a pane (with no text selection active — a selection still copies, unchanged) or press `Alt+A` (`quick_actions`, active pane) to open a popup with 12 actions: Input history, Enter/Exit focus mode, Open notes, Open lazygit, Open hunk, Rename pane, Mute/Unmute notifications, Mark/Unmark for deletion, Mark/Unmark attention, Clear attention, Restart pane… (confirm), Close pane… (confirm). The menu shows the target pane's name as a header, and the target pane gets a blue highlight border while the menu is open. Hovering the mouse highlights the row under the cursor; `↑`/`↓`/`k`/`j` also navigate (disabled rows are skipped), `Enter` or a click executes, `Esc` or a click outside closes, and right-clicking another pane re-targets the menu. Action groups (view actions / pane settings / destructive) are separated by a blank line, keeping Restart/Close visually isolated (the menu falls back to a compact layout on short terminals).
+Right-click a pane (with no text selection active — a selection still copies, unchanged) or press `Alt+A` (`quick_actions`, active pane) to open a popup with 13 actions: Input history, Enter/Exit focus mode, Open notes, Open lazygit, Open hunk, Rename pane, Move to tab…, Mute/Unmute notifications, Mark/Unmark for deletion, Mark/Unmark attention, Clear attention, Restart pane… (confirm), Close pane… (confirm). The menu shows the target pane's name as a header, and the target pane gets a blue highlight border while the menu is open. Hovering the mouse highlights the row under the cursor; `↑`/`↓`/`k`/`j` also navigate (disabled rows are skipped), `Enter` or a click executes, `Esc` or a click outside closes, and right-clicking another pane re-targets the menu. Action groups (view actions / pane settings / destructive) are separated by a blank line, keeping Restart/Close visually isolated (the menu falls back to a compact layout on short terminals).
 
-Four rows grey out when unavailable: **Input history** unless the pane's plugin sets `record_history` (Claude Code), **Open lazygit** and **Open hunk** when their binaries aren't installed (each gated on its own), and **Clear attention** when the pane carries no mark to clear.
+**Move to tab…** sends the pane, still running, to any other tab on the same machine — its process, output history and CWD are untouched. It lists every other tab as "project / tab" in a small picker; picking one moves the pane there and splits the last pane in that tab to make room, alternating direction — a lone pane is split side by side, the right-hand one of a side-by-side pair top and bottom, and so on — so moved panes spiral in instead of forming thin columns. You stay on the tab you were on, and a tab left with no panes by the move is closed. The row is greyed rather than hidden when there is nowhere to move to (a single-tab workspace, or the pane or its tab mid worktree checkout).
+
+Five rows grey out when unavailable: **Input history** unless the pane's plugin sets `record_history` (Claude Code), **Open lazygit** and **Open hunk** when their binaries aren't installed (each gated on its own), **Move to tab…** when there is nowhere to move the pane to, and **Clear attention** when the pane carries no mark to clear.
 
 **Mark attention** pins a purple `◆` on the pane — deliberately not the green of the automatic "work finished, unseen" mark, because only one of the two clears itself. The pin survives focusing the pane and goes away only via **Unmark attention** or **Clear attention**.
 

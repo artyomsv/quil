@@ -461,7 +461,7 @@ func (d *Daemon) finishTask(t *task, st taskState, errText string) {
 		ev.Severity = "warning"
 	}
 	if target != nil {
-		ev.TabID = target.TabID
+		ev.TabID = target.CurrentTabID()
 		ev.PaneName = info.ToPaneName
 	}
 	d.emitEvent(ev)

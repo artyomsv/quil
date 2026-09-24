@@ -25,6 +25,7 @@ const (
 	MsgResizePane   = "resize_pane"
 	MsgUpdatePane   = "update_pane"
 	MsgUpdateLayout = "update_layout"
+	MsgMovePane     = "move_pane"
 
 	// Tab control (Client -> Daemon)
 	MsgCreateTab  = "create_tab"
@@ -577,6 +578,17 @@ type ReorderTabPayload struct {
 type MoveTabPayload struct {
 	TabID     string `json:"tab_id"`
 	ProjectID string `json:"project_id"`
+}
+
+// MovePanePayload moves an existing pane into another tab ON THE SAME DAEMON
+// (tab and pane IDs are only meaningful to the daemon that minted them). The
+// pane is appended to the END of the target's pane list. Its process, output
+// buffer, CWD, session ids, worktree and sandbox are untouched. The daemon
+// stores no layout for it: every client places it (see internal/tui
+// placeArrivingPane) and re-sends both trees.
+type MovePanePayload struct {
+	PaneID string `json:"pane_id"`
+	TabID  string `json:"tab_id"`
 }
 
 type CreateProjectPayload struct {

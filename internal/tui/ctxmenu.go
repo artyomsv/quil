@@ -47,6 +47,18 @@ const (
 	// for the target tab. buildTabCtxMenuItems hides the row entirely when
 	// moveTabCandidates has nothing to offer, rather than greying it.
 	ctxActMoveTab
+	// ctxActMovePane opens the tab picker (openMovePanePicker) for the target
+	// pane. Unlike ctxActMoveTab, buildCtxMenuItems GREYS this row rather
+	// than hiding it — the pane menu's own convention already used by other
+	// gated rows (history, lazygit and hunk in the view-actions group; Clear
+	// attention in the pane-settings group beside this one).
+	ctxActMovePane
+	// ctxActTabLayoutList re-populates the OPEN tab menu in place with one row
+	// per layoutPresets entry (buildTabLayoutItems) — the Set color… mechanism.
+	ctxActTabLayoutList
+	// ctxActTabLayout is one row of that list; the arrangement rides on
+	// ctxMenuItem.layout, never decoded from the label.
+	ctxActTabLayout
 )
 
 // ctxMenuItem is one row of the menu. Disabled rows render greyed, are
@@ -62,6 +74,8 @@ type ctxMenuItem struct {
 	// values ("" = default). renderCtxMenu paints an enabled, non-cursor row
 	// with it set in that colour instead of ctxMenuItemStyle.
 	color string
+	// layout is set only on ctxActTabLayout rows: the arrangement the row applies.
+	layout layoutKind
 }
 
 // ctxMenuState is the live state of the pane context menu — a compositor
@@ -181,6 +195,10 @@ func (m *Model) buildCtxMenuItems(pane *PaneModel) []ctxMenuItem {
 		{id: ctxActLazygit, label: "Open lazygit", enabled: lazygitOK},
 		{id: ctxActHunk, label: "Open hunk", enabled: hunkOK, gapAfter: true},
 		{id: ctxActRename, label: "Rename pane", enabled: true},
+		// Moving deletes nothing, so it stays above the destructive separator
+		// with the rest of the pane-settings group — and there is
+		// deliberately no replace variant, unlike a worktree create.
+		{id: ctxActMovePane, label: "Move to tab…", enabled: len(m.movePaneCandidates(pane.ID)) > 0},
 		{id: ctxActMute, label: muteLabel, enabled: true},
 		// Before the attention pair rather than after it, and NOT beside
 		// Close pane… below the separator. Two reasons. The pin and Clear
@@ -497,16 +515,20 @@ func (m *Model) openProjectCtxMenu(p *ProjectModel, anchorX, anchorY int) {
 }
 
 // buildTabCtxMenuItems is the tab bar / sidebar tab-heading's menu: Rename,
-// Set color, and — as the LAST row, only when moveTabCandidates has
-// something to offer — Move to project…. Compact layout (spaced=false):
-// none of the rows have a natural group boundary to space out. The row is
-// HIDDEN rather than greyed when there is nowhere to move the tab to (a
+// Set color…, Layout…, and — as the LAST row, only when moveTabCandidates has
+// something to offer — Move to project…. Compact layout (spaced=false): none
+// of the rows have a natural group boundary to space out. Move to project…
+// is HIDDEN rather than greyed when there is nowhere to move the tab to (a
 // single-project workspace, or every other project on the tab's own Dest
-// offline or synthetic).
+// offline or synthetic). Layout… is GREYED instead: it has a reason to be
+// unavailable (one pane, or a tab busy with a create, a template, a worktree
+// checkout or this client's own split) that the grey states, and its
+// presence must not depend on the tab's state.
 func (m *Model) buildTabCtxMenuItems(tab *TabModel) []ctxMenuItem {
 	items := []ctxMenuItem{
 		{id: ctxActRenameTab, label: "Rename tab", enabled: true},
 		{id: ctxActTabColorList, label: "Set color…", enabled: true},
+		{id: ctxActTabLayoutList, label: "Layout…", enabled: m.tabArrangeable(tab)},
 	}
 	if len(m.moveTabCandidates(tab.ID)) > 0 {
 		items = append(items, ctxMenuItem{id: ctxActMoveTab, label: "Move to project…", enabled: true})
@@ -532,6 +554,85 @@ func (m *Model) moveTabCandidates(tabID string) []*ProjectModel {
 		}
 		if p.Dest == owner.Dest && m.projectActionable(p) {
 			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// tabInFlight reports whether tab has something in progress that a moved
+// pane could be swallowed by or that could itself be disrupted by a move
+// arriving mid-operation: a worktree create or replace, a template layout not
+// yet applied, or a leaf still waiting on its own worktree checkout (the
+// new-tab worktree placeholder, Pane.PreparingWorktree). A nil tab counts as
+// in flight — there is nothing to move into or out of.
+func (m *Model) tabInFlight(tab *TabModel) bool {
+	if tab == nil {
+		return true
+	}
+	if m.worktreeCreates[tab.ID] != "" {
+		return true
+	}
+	if m.worktreeReplaced[tab.ID] != nil {
+		return true
+	}
+	if tab.templateLayoutPending {
+		return true
+	}
+	for _, p := range tab.Leaves() {
+		if p.PreparingWorktree != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// movePaneCandidates lists the tabs paneID may move to, or nil when the pane
+// cannot move at all.
+//
+// The pane must be in an actionable project (projectActionable), must not be
+// a preparing placeholder itself (PreparingWorktree), and its own tab must
+// not be in flight (tabInFlight) — a pane cannot leave a tab whose worktree
+// checkout, replace, or template layout is still resolving.
+//
+// Candidates are every tab of every actionable project on the SAME Dest as
+// the pane's own project, except the pane's own tab and any tab that is
+// itself in flight (tabInFlight, which also excludes a tab holding a
+// PreparingWorktree leaf — the new-tab worktree placeholder).
+//
+// Order: the pane's own project's tabs first, in tab order, then the other
+// projects in m.projects (sidebar) order.
+func (m *Model) movePaneCandidates(paneID string) []*TabModel {
+	pane, proj, tabIdx := m.findPaneAndTab(paneID)
+	if pane == nil || proj == nil || tabIdx < 0 || tabIdx >= len(proj.tabs) {
+		return nil
+	}
+	if pane.PreparingWorktree != "" {
+		return nil
+	}
+	if !m.projectActionable(proj) {
+		return nil
+	}
+	srcTab := proj.tabs[tabIdx]
+	if m.tabInFlight(srcTab) {
+		return nil
+	}
+
+	var out []*TabModel
+	for _, t := range proj.tabs {
+		if t == srcTab || m.tabInFlight(t) {
+			continue
+		}
+		out = append(out, t)
+	}
+	for _, p := range m.projects {
+		if p == proj || p.Dest != proj.Dest || !m.projectActionable(p) {
+			continue
+		}
+		for _, t := range p.tabs {
+			if m.tabInFlight(t) {
+				continue
+			}
+			out = append(out, t)
 		}
 	}
 	return out
@@ -626,6 +727,39 @@ func (m *Model) openTabColorList(tab *TabModel) {
 	m.ctxMenu = s
 }
 
+// buildTabLayoutItems returns one row per layoutPresets entry, in table order,
+// all enabled or all greyed: the gate belongs to the tab, not to a row.
+func buildTabLayoutItems(enabled bool) []ctxMenuItem {
+	items := make([]ctxMenuItem, 0, len(layoutPresets))
+	for _, p := range layoutPresets {
+		items = append(items, ctxMenuItem{id: ctxActTabLayout, label: p.label, enabled: enabled, layout: p.kind})
+	}
+	return items
+}
+
+// openTabLayoutList re-populates the OPEN tab menu in place with the layout
+// list, exactly as openTabColorList does with the colours: same tabID and
+// title, items replaced, Esc closes the whole menu (no "back" row), the box
+// re-derived from its own position, and the menu CLOSED when even the
+// re-clamped box cannot fit rather than left invisible and owning input.
+//
+// The rows are gated here too, but the gate that matters runs at execute
+// time: applyTabArrangement re-checks the tab, so one that turned busy while
+// the list was open is refused with a flash.
+func (m *Model) openTabLayoutList(tab *TabModel) {
+	s := m.ctxMenu
+	s.items = buildTabLayoutItems(m.tabArrangeable(tab))
+	s.spaced = false
+	s.cursor = firstEnabled(s.items)
+	w, h := s.boxSize()
+	if w > m.width || h > m.height-2 {
+		m.closeCtxMenu()
+		return
+	}
+	s.x, s.y = ctxMenuPos(m.ctxMenu.x-1, m.ctxMenu.y-1, w, h, m.width, m.height)
+	m.ctxMenu = s
+}
+
 // executeTabCtxMenuItem dispatches one tab-menu row. The uniform refusal
 // below (proj != m.cur()) mirrors executeCtxMenuItem's pane branch: every
 // entry point shows only the active project's tabs, and MCP switch_project
@@ -684,6 +818,15 @@ func (m Model) executeTabCtxMenuItem(tabID string, item ctxMenuItem) (tea.Model,
 		tab.Color = item.color
 		m.closeCtxMenu()
 		return m, m.updateTab(tab.ID, tab.Name, item.color)
+	case ctxActTabLayoutList:
+		m.openTabLayoutList(tab)
+		return m, nil
+	case ctxActTabLayout:
+		// Acts on THIS tab, active or not — no switchTab, unlike Rename. The
+		// apply step owns every refusal.
+		m.closeCtxMenu()
+		cmd := m.arrangeTab(tab, item.layout)
+		return m, cmd
 	case ctxActMoveTab:
 		// The proj == m.cur() refusal above already ran; openMoveTabPicker
 		// needs only the tab id, resolved fresh at Enter time by the picker
@@ -853,6 +996,12 @@ func (m Model) executeCtxMenuItem(item ctxMenuItem) (tea.Model, tea.Cmd) {
 		return m, m.handleToggleHunk()
 	case ctxActRename:
 		return m.beginPaneRename()
+	case ctxActMovePane:
+		// The uniform active-tab refusal and the focus sync above it have
+		// already run; openMovePanePicker needs only the pane id, resolved
+		// fresh at Enter time by the picker itself rather than a pointer
+		// closed over here.
+		return m.openMovePanePicker(paneID)
 	case ctxActMute:
 		return m, m.toggleActivePaneMute()
 	case ctxActAttention:

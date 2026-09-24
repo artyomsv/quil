@@ -941,3 +941,114 @@ func TestLayoutNode_CollectBorders_PlaceholderSkipped(t *testing.T) {
 		t.Error("the emitted border must belong to the root split")
 	}
 }
+
+func TestSpiralLeaf_NilTree(t *testing.T) {
+	var root *LayoutNode
+	if leaf, _, _ := root.spiralLeaf(); leaf != nil {
+		t.Fatalf("spiralLeaf(nil) = %v, want nil", leaf)
+	}
+}
+
+func TestSpiralLeaf_OnlyPlaceholders(t *testing.T) {
+	root := &LayoutNode{Split: SplitHorizontal, Ratio: 0.5,
+		Left:  &LayoutNode{Ratio: 0.5}, // placeholder
+		Right: &LayoutNode{Ratio: 0.5}, // placeholder
+	}
+	if leaf, _, _ := root.spiralLeaf(); leaf != nil {
+		t.Fatalf("spiralLeaf = %v, want nil (no pane leaves)", leaf)
+	}
+}
+
+// TestSpiralLeaf_PicksLastPaneLeaf: the target is the LAST pane leaf in tree
+// order, reported with its parent's split. Choosing the first leaf instead,
+// or reporting the wrong parent, fails a row.
+func TestSpiralLeaf_PicksLastPaneLeaf(t *testing.T) {
+	tests := []struct {
+		name       string
+		root       *LayoutNode
+		want       string
+		wantSplit  SplitDir
+		wantParent bool
+	}{
+		{"root leaf", NewLeaf(newTestPane("a")), "a", SplitHorizontal, false},
+		{"a|b", &LayoutNode{Split: SplitHorizontal, Ratio: 0.5,
+			Left: NewLeaf(newTestPane("a")), Right: NewLeaf(newTestPane("b"))},
+			"b", SplitHorizontal, true},
+		{"a|(b/c)", &LayoutNode{Split: SplitHorizontal, Ratio: 0.5,
+			Left: NewLeaf(newTestPane("a")),
+			Right: &LayoutNode{Split: SplitVertical, Ratio: 0.5,
+				Left: NewLeaf(newTestPane("b")), Right: NewLeaf(newTestPane("c"))}},
+			"c", SplitVertical, true},
+		// The last leaf is a reserved slot: the last PANE leaf is used.
+		{"a|(b/placeholder)", &LayoutNode{Split: SplitHorizontal, Ratio: 0.5,
+			Left: NewLeaf(newTestPane("a")),
+			Right: &LayoutNode{Split: SplitVertical, Ratio: 0.5,
+				Left: NewLeaf(newTestPane("b")), Right: &LayoutNode{Ratio: 0.5}}},
+			"b", SplitVertical, true},
+		{"(a/b)|placeholder", &LayoutNode{Split: SplitHorizontal, Ratio: 0.5,
+			Left: &LayoutNode{Split: SplitVertical, Ratio: 0.5,
+				Left: NewLeaf(newTestPane("a")), Right: NewLeaf(newTestPane("b"))},
+			Right: &LayoutNode{Ratio: 0.5}},
+			"b", SplitVertical, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			leaf, split, hasParent := tt.root.spiralLeaf()
+			if leaf == nil || leaf.Pane.ID != tt.want {
+				t.Fatalf("spiralLeaf = %v, want leaf %q", leaf, tt.want)
+			}
+			if hasParent != tt.wantParent || (hasParent && split != tt.wantSplit) {
+				t.Errorf("parent = (%v, %v), want (%v, %v)", split, hasParent, tt.wantSplit, tt.wantParent)
+			}
+		})
+	}
+}
+
+func TestSpiralSplitDir_OppositeOfParent(t *testing.T) {
+	tests := []struct {
+		name      string
+		parent    SplitDir
+		hasParent bool
+		want      SplitDir
+	}{
+		{"root leaf", SplitVertical, false, SplitHorizontal},
+		{"parent left|right", SplitHorizontal, true, SplitVertical},
+		{"parent top|bottom", SplitVertical, true, SplitHorizontal},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := spiralSplitDir(tt.parent, tt.hasParent); got != tt.want {
+				t.Errorf("spiralSplitDir(%v, %v) = %v, want %v", tt.parent, tt.hasParent, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestArrivalSplitDir(t *testing.T) {
+	tests := []struct {
+		name string
+		pref SplitDir
+		w, h int
+		want SplitDir
+	}{
+		{"H fits", SplitHorizontal, 100, 40, SplitHorizontal},
+		{"H exact boundary 10|10", SplitHorizontal, 20, 40, SplitHorizontal},
+		{"H too narrow, V fits", SplitHorizontal, 19, 40, SplitVertical},
+		{"H too narrow, V exact boundary 4|4", SplitHorizontal, 19, 8, SplitVertical},
+		{"H: neither fits, keeps H", SplitHorizontal, 19, 7, SplitHorizontal},
+		{"V fits", SplitVertical, 100, 40, SplitVertical},
+		{"V exact boundary 4|4", SplitVertical, 100, 8, SplitVertical},
+		{"V too short, H fits", SplitVertical, 100, 7, SplitHorizontal},
+		{"V: neither fits, keeps V", SplitVertical, 19, 7, SplitVertical},
+		{"unknown geometry keeps H", SplitHorizontal, 0, 0, SplitHorizontal},
+		{"unknown geometry keeps V", SplitVertical, -5, 10, SplitVertical},
+		{"unknown height keeps V", SplitVertical, 100, 0, SplitVertical},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := arrivalSplitDir(tt.pref, tt.w, tt.h); got != tt.want {
+				t.Errorf("arrivalSplitDir(%v, %d, %d) = %v, want %v", tt.pref, tt.w, tt.h, got, tt.want)
+			}
+		})
+	}
+}

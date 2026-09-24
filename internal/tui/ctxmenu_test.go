@@ -127,12 +127,33 @@ func TestBuildCtxMenuItems_LabelsAndGates(t *testing.T) {
 	pane.pinnedAttention = true
 
 	items := m.buildCtxMenuItems(pane)
-	if len(items) != 12 {
-		t.Fatalf("item count = %d, want 12", len(items))
+	if len(items) != 13 {
+		t.Fatalf("item count = %d, want 13", len(items))
 	}
 	byID := map[ctxMenuAction]ctxMenuItem{}
 	for _, it := range items {
 		byID[it.id] = it
+	}
+	// Move to tab… sits directly after Rename pane, in the pane-settings
+	// group, and is GREYED (not hidden) when there is nowhere to move the
+	// pane to — the test fixture is a single-tab workspace.
+	renameIdx, moveIdx := -1, -1
+	for i, it := range items {
+		switch it.id {
+		case ctxActRename:
+			renameIdx = i
+		case ctxActMovePane:
+			moveIdx = i
+		}
+	}
+	if moveIdx != renameIdx+1 {
+		t.Fatalf("Move to tab… is at index %d, want directly after Rename pane (%d)", moveIdx, renameIdx)
+	}
+	if byID[ctxActMovePane].label != "Move to tab…" {
+		t.Errorf("move-to-tab label = %q, want %q", byID[ctxActMovePane].label, "Move to tab…")
+	}
+	if byID[ctxActMovePane].enabled {
+		t.Error("Move to tab… must be disabled with no other tab to move to")
 	}
 	if byID[ctxActMute].label != "Unmute notifications" {
 		t.Errorf("mute label = %q", byID[ctxActMute].label)

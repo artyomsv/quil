@@ -14,7 +14,7 @@ func (d *Daemon) newPaneSession(pane *Pane) apty.Session {
 	if size := d.clientSize.Load(); size != nil && !degenerateSize(size.cols, size.rows) {
 		cols, rows = size.cols, size.rows
 	}
-	for _, sibling := range d.session.Panes(pane.TabID) {
+	for _, sibling := range d.session.Panes(pane.CurrentTabID()) {
 		if sibling.ID == pane.ID {
 			continue
 		}

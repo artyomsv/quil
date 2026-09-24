@@ -6,7 +6,7 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
-// rowHighlight is a whole-row background on a PROJECTS row: light grey under
+// rowHighlight is a whole-row background on a sidebar row: light grey under
 // the pointer, light blue while the row is being dragged. The zero value
 // paints nothing, and every renderer takes it as a parameter rather than
 // reading the Model, so paint and hit test keep sharing one row slice.
@@ -19,6 +19,9 @@ const (
 	// rowHighlightDrop marks where a moved project drag would land on release:
 	// a group header, or the PROJECTS heading for "no group".
 	rowHighlightDrop
+	// rowHighlightPaneHover is the hovered PANE (and its git row), a shade
+	// darker than the rowHighlightHover its tab's block is painted with.
+	rowHighlightPaneHover
 )
 
 // glyphDropTarget prefixes the drop-target row's label. U+2192 is one cell
@@ -33,6 +36,7 @@ var (
 	sidebarHoverBG     = lipgloss.Color("252")
 	sidebarDragBG      = lipgloss.Color("153")
 	sidebarDropBG      = lipgloss.Color("151")
+	sidebarPaneHoverBG = lipgloss.Color("249")
 	sidebarHighlightFG = lipgloss.Color("235")
 )
 
@@ -40,6 +44,8 @@ func (h rowHighlight) background() color.Color {
 	switch h {
 	case rowHighlightHover:
 		return sidebarHoverBG
+	case rowHighlightPaneHover:
+		return sidebarPaneHoverBG
 	case rowHighlightDrag:
 		return sidebarDragBG
 	case rowHighlightDrop:
@@ -65,6 +71,16 @@ func (h rowHighlight) text(s lipgloss.Style) lipgloss.Style {
 	return s.Foreground(sidebarHighlightFG)
 }
 
+// line is the style for a row drawn in ONE style (a heading, a host or git
+// row): its text darkened on the highlight's background. Unhighlighted it is
+// s itself.
+func (h rowHighlight) line(s lipgloss.Style) lipgloss.Style {
+	if h == rowHighlightNone {
+		return s
+	}
+	return h.onBackground(h.text(s))
+}
+
 // fill paints unstyled cells — an indent, a pad — on the highlight's
 // background. Unhighlighted they stay the bare string they always were.
 func (h rowHighlight) fill(s string) string {
@@ -74,20 +90,25 @@ func (h rowHighlight) fill(s string) string {
 	return lipgloss.NewStyle().Background(h.background()).Render(s)
 }
 
-// sidebarHoverKey names the hovered PROJECTS row: a project by (dest, id) —
-// the key groups use, since two daemons can mint one id — or a group header by
-// name. Stable across a broadcast that rebuilds the rows; the zero value is
-// "nothing hovered".
+// sidebarHoverKey names the hovered sidebar row by IDs, never an index: a
+// project by (dest, projectID) — the key groups use, since two daemons can
+// mint one id — a group header by name, a PANES tab block by (dest, tabID),
+// and a pane in it by (dest, tabID, paneID). Stable across a broadcast that
+// rebuilds the rows; the zero value is "nothing hovered".
 type sidebarHoverKey struct {
 	group     string
 	dest      string
 	projectID string
+	tabID     string
+	paneID    string
 }
 
 // sidebarHoverAt resolves the hover key under a screen cell through
-// sidebarRowAt — the row slice the paint uses — so the highlighted row is the
-// one the pointer is on. Anything but a project row (either of a remote's two)
-// or a group header, including every cell outside the strip, is no hover.
+// sidebarRowAt — the row slice the paint uses, PANES scroll window included —
+// so the highlighted row is the one the pointer is on. A project row (either
+// of a remote's two), a group header, a tab heading, a pane row or a pane's
+// git row hovers; anything else, every cell outside the strip included, is
+// no hover.
 //
 // Building the rows styles every one of them, and buttonless motion arrives
 // per pointer move, so a move along the same row reuses the last answer while
@@ -126,7 +147,21 @@ func (m *Model) resolveSidebarHover(x, y int) sidebarHoverKey {
 			return sidebarHoverKey{group: m.groups.Groups[row.index].Name}
 		}
 	}
-	return sidebarHoverKey{}
+	// The PANES rows: every row of a tab's block names that tab (inTab), and a
+	// pane row — or the git row under it — its pane too. The blank row between
+	// blocks is in neither.
+	tabs, p := m.curTabs(), m.cur()
+	if !row.inTab || p == nil || row.tabIdx < 0 || row.tabIdx >= len(tabs) {
+		return sidebarHoverKey{}
+	}
+	key := sidebarHoverKey{dest: p.Dest, tabID: tabs[row.tabIdx].ID}
+	switch {
+	case row.kind == sidebarRowPane:
+		key.paneID = row.paneID
+	case row.gitOf != "":
+		key.paneID = row.gitOf
+	}
+	return key
 }
 
 // setSidebarHover stores k and reports whether it changed — an unchanged
@@ -218,6 +253,30 @@ func (m *Model) groupRowHighlight(g int) rowHighlight {
 		return rowHighlightHover
 	}
 	return rowHighlightNone
+}
+
+// tabRowHighlight is the highlight of tab's whole PANES block: the hover grey
+// while the pointer is on any row of it, matched by (dest, tabID) — tab ids
+// are per daemon. Never during a drag.
+func (m *Model) tabRowHighlight(tab *TabModel) rowHighlight {
+	h := m.sidebarHover
+	if h.tabID == "" || h.tabID != tab.ID || m.dragActive() {
+		return rowHighlightNone
+	}
+	if p := m.cur(); p == nil || p.Dest != h.dest {
+		return rowHighlightNone
+	}
+	return rowHighlightHover
+}
+
+// paneRowHighlight is a pane row's (and its git row's): the darker grey for
+// the hovered pane, else its tab block's tabHL. The pane id is compared only
+// inside a block already matched on (dest, tabID).
+func (m *Model) paneRowHighlight(pane *PaneModel, tabHL rowHighlight) rowHighlight {
+	if tabHL == rowHighlightHover && m.sidebarHover.paneID != "" && m.sidebarHover.paneID == pane.ID {
+		return rowHighlightPaneHover
+	}
+	return tabHL
 }
 
 // projectsHeadingHighlight is the PROJECTS heading's: the drop colour while a

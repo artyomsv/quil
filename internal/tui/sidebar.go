@@ -266,6 +266,10 @@ type sidebarRow struct {
 	index  int    // project index (kind project), tab index (kind tab) or pane ordinal (kind pane)
 	tabIdx int    // rows inside a tab group (inTab): index into curTabs()
 	paneID string // pane rows only
+	// gitOf is the pane a GIT row describes. Not paneID: every reader of that
+	// treats a row carrying one as the pane's own row; this is read only by
+	// the hover, which shades a pane's git row with it.
+	gitOf string
 	// inTab marks every row of a tab's group — heading, pane rows, git rows —
 	// so a tab drag can measure the group's height and tell which tab the
 	// pointer is over from ANY of its rows, not just the heading.
@@ -345,16 +349,21 @@ func (m *Model) sidebarRows(w int) ([]sidebarRow, int) {
 		if ti > 0 {
 			rows = append(rows, sidebarRow{})
 		}
+		// The hovered tab's block — heading, pane rows, git rows, but not the
+		// blank row between blocks, which belongs to neither — is shaded, and
+		// the hovered pane (with its git row) a shade darker on top.
+		tabHL := m.tabRowHighlight(tab)
 		rows = append(rows, sidebarRow{
-			text:   sidebarTabHeading(sanitizeRemoteText(tab.Name), ti, onTab, tab.Color, w),
+			text:   sidebarTabHeadingHL(sanitizeRemoteText(tab.Name), ti, onTab, tab.Color, w, tabHL),
 			kind:   sidebarRowTab,
 			index:  ti,
 			tabIdx: ti,
 			inTab:  true,
 		})
 		for _, pane := range tab.Leaves() {
+			paneHL := m.paneRowHighlight(pane, tabHL)
 			rows = append(rows, sidebarRow{
-				text:   paneRow(pane, onTab && pane.ID == tab.ActivePane, w),
+				text:   paneRowHL(pane, onTab && pane.ID == tab.ActivePane, w, paneHL),
 				kind:   sidebarRowPane,
 				index:  ordinal,
 				tabIdx: ti,
@@ -368,8 +377,8 @@ func (m *Model) sidebarRows(w int) ([]sidebarRow, int) {
 			// would put two rows on one index and desync every hit test from
 			// the attention queue's numbering. It is still part of the tab's
 			// group for a tab drag, hence inTab.
-			if git := gitRow(pane, w); git != "" {
-				rows = append(rows, sidebarRow{text: git, tabIdx: ti, inTab: true})
+			if git := gitRowHL(pane, w, paneHL); git != "" {
+				rows = append(rows, sidebarRow{text: git, tabIdx: ti, inTab: true, gitOf: pane.ID})
 			}
 		}
 	}
@@ -1159,11 +1168,7 @@ func projectDestRow(dest string, w int, hl rowHighlight) string {
 	if avail < 1 {
 		avail = 1
 	}
-	style := sidebarGitStyle
-	if hl != rowHighlightNone {
-		style = hl.onBackground(hl.text(style))
-	}
-	return style.Render(padOrTrunc(prefix+elideMiddle(dest, avail), w))
+	return hl.line(sidebarGitStyle).Render(padOrTrunc(prefix+elideMiddle(dest, avail), w))
 }
 
 // minGitBranchCells is the floor a branch name keeps on its row, for the same
@@ -1206,6 +1211,12 @@ func worktreeNameIsRedundant(name, branch string) bool {
 }
 
 func gitRow(pane *PaneModel, w int) string {
+	return gitRowHL(pane, w, rowHighlightNone)
+}
+
+// gitRowHL is gitRow with a row highlight: one style for the whole line, so
+// the highlight is that style, text darkened, on hl's background.
+func gitRowHL(pane *PaneModel, w int, hl rowHighlight) string {
 	name := pane.GitBranch
 	if name == "" && pane.GitDetached {
 		name = "detached"
@@ -1260,7 +1271,7 @@ func gitRow(pane *PaneModel, w int) string {
 	if pane.GitStale {
 		style = sidebarGitStaleStyle
 	}
-	return style.Render(padOrTrunc(prefix+name+suffix, w))
+	return hl.line(style).Render(padOrTrunc(prefix+name+suffix, w))
 }
 
 func sidebarHeading(title string, w int) string {
@@ -1277,7 +1288,7 @@ func sidebarHeadingHL(title string, w int, hl rowHighlight) string {
 	if hl == rowHighlightDrop {
 		title = glyphDropTarget + " " + title
 	}
-	return hl.onBackground(hl.text(sidebarHeadingStyle)).Render(padOrTrunc(title, w))
+	return hl.line(sidebarHeadingStyle).Render(padOrTrunc(title, w))
 }
 
 // sidebarTabHeading renders one tab's name above its panes. The active tab
@@ -1303,6 +1314,13 @@ func sidebarHeadingHL(title string, w int, hl rowHighlight) string {
 // width where nothing else fits either), and the name — the one part a user can
 // re-read from the tab bar — gives way first.
 func sidebarTabHeading(name string, idx int, active bool, color string, w int) string {
+	return sidebarTabHeadingHL(name, idx, active, color, w, rowHighlightNone)
+}
+
+// sidebarTabHeadingHL is sidebarTabHeading with a row highlight: the one
+// style, text darkened, on hl's background — so a hovered heading trades the
+// tab's own colour for readability on the grey.
+func sidebarTabHeadingHL(name string, idx int, active bool, color string, w int, hl rowHighlight) string {
 	marker := "  "
 	style := sidebarTabNameStyle
 	if color != "" {
@@ -1322,7 +1340,7 @@ func sidebarTabHeading(name string, idx int, active bool, color string, w int) s
 	// exactly w cells, and a heading that stopped short left the closing
 	// .Width(w) to pad it — one more thing that pass has to get right on a row
 	// whose arithmetic already has to be exact.
-	return style.Render(padOrTrunc(marker+ordinal+elideMiddle(name, avail), w))
+	return hl.line(style).Render(padOrTrunc(marker+ordinal+elideMiddle(name, avail), w))
 }
 
 // projectRow renders one project's summary line: an active-project marker,
@@ -1479,6 +1497,14 @@ func appendBadgeSegments(segs []styledSegment, c paneStateCounts, workFrame int,
 // UNFOCUSED pane is blocked-visible always: that is the signal the whole
 // feature exists for.
 func paneRow(pane *PaneModel, focused bool, w int) string {
+	return paneRowHL(pane, focused, w, rowHighlightNone)
+}
+
+// paneRowHL is paneRow with a row highlight. Highlighted, the state glyph
+// becomes its own segment so it keeps the state's colour while the marker and
+// label go dark on the grey — unhighlighted they share one segment, one SGR
+// pair per row.
+func paneRowHL(pane *PaneModel, focused bool, w int, hl rowHighlight) string {
 	var glyph string
 	var style lipgloss.Style
 	var suffix string
@@ -1597,6 +1623,17 @@ func paneRow(pane *PaneModel, focused bool, w int) string {
 	// either way. So the independently-measured sum stays exact even though a
 	// preceding Prepend character (UAX #29 GB9b) would technically pull the
 	// space into its cluster.
+	if hl != rowHighlightNone {
+		// Split at the glyph: the marker ends in a space and the rest begins
+		// with one, so every segment still starts on a cluster boundary.
+		return renderStyledSegmentsHL([]styledSegment{
+			{marker, hl.text(style)},
+			{glyph, style},
+			{" " + label + suffix, hl.text(style)},
+			{pinSuffix, sidebarPinnedStyle},
+			{delSuffix, sidebarDeletionStyle},
+		}, w, hl)
+	}
 	return renderStyledSegments([]styledSegment{
 		{prefix + label + suffix, style},
 		{pinSuffix, sidebarPinnedStyle},

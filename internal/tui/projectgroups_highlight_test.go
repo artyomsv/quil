@@ -134,8 +134,8 @@ func TestSidebarHover_GroupHeaderIsHighlightedAlone(t *testing.T) {
 	}
 }
 
-// Motion anywhere off the PROJECTS rows clears the hover: a pane, the tab bar,
-// the status bar, the heading and the PANES section.
+// Motion anywhere off a hoverable row clears the hover: a pane, the tab bar,
+// the status bar, both headings and the blank row between the sections.
 func TestSidebarHover_MotionOffTheProjectRowsClearsIt(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -145,7 +145,8 @@ func TestSidebarHover_MotionOffTheProjectRowsClearsIt(t *testing.T) {
 		{"the tab bar", 50, 0},
 		{"the status bar", 3, 39},
 		{"the PROJECTS heading", 3, 0},
-		{"a pane row in the sidebar", 3, 11},
+		{"the blank row before PANES", 3, 7},
+		{"the PANES heading", 3, 8},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m, _ := newGroupsSidebarModel(t)

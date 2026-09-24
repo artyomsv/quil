@@ -512,6 +512,19 @@ func TestProjectGroups_BroadcastPrunesOnlyItsOwnDestination(t *testing.T) {
 			t.Errorf("groupsSeq moved without a change")
 		}
 	})
+	t.Run("a tabs-only broadcast from a daemon without projects prunes nothing", func(t *testing.T) {
+		// broadcastProjects synthesises a made-up interim project for this
+		// shape; pruning against that would drop every real local member.
+		m := grpBroadcastModel(t)
+		updated, _ := m.Update(WorkspaceStateMsg{Tabs: []TabInfo{{ID: "t1", Name: "Shell"}}, ActiveTab: "t1"})
+		got := updated.(Model)
+		if members := grpMembers(got.groups, 0); members != "/l1,/l-gone,gpu01/r1" {
+			t.Fatalf("members = %s, want all three", members)
+		}
+		if got.groupsSeq != m.groupsSeq {
+			t.Errorf("groupsSeq = %d, want %d — nothing was pruned", got.groupsSeq, m.groupsSeq)
+		}
+	})
 	t.Run("a broadcast from a disconnected destination is ignored", func(t *testing.T) {
 		m := grpBroadcastModel(t)
 		updated, _ := m.Update(WorkspaceStateMsg{Dest: "gpu01", Projects: []ProjectInfo{{ID: "other", Name: "x"}}})

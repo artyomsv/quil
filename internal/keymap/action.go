@@ -131,6 +131,12 @@ var registry = []Action{
 	{ID: "tab.layout_grid", Label: "Arrange the active tab as a grid", Group: "Tabs", Tier: TierLate, Order: 5900, Default: ""},
 	{ID: "tab.layout_main", Label: "Arrange the active tab as main + stack", Group: "Tabs", Tier: TierLate, Order: 6000, Default: ""},
 	{ID: "tab.layout_spiral", Label: "Arrange the active tab as a spiral", Group: "Tabs", Tier: TierLate, Order: 6100, Default: ""},
+	// Project groups (the sidebar's client-side grouping). Unbound, like the
+	// layout actions: a header click and the header's menu already reach
+	// both. Late tier with them — an unbound action's tier only matters once
+	// a user binds it, and TierLate keeps the legacy early-tier table intact.
+	{ID: "project.group_toggle", Label: "Collapse or expand the active project's group", Group: "Projects", Tier: TierLate, Order: 6200, Default: ""},
+	{ID: "project.groups_collapse_all", Label: "Collapse every project group (expand all when all are collapsed)", Group: "Projects", Tier: TierLate, Order: 6300, Default: ""},
 }
 
 // Actions returns every registered action. The slice is a copy.

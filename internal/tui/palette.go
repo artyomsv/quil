@@ -468,6 +468,13 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 	if active != nil {
 		removeArg = active.ID
 	}
+	// The move rows grey at the ends of the active project's SECTION — its
+	// group, or the ungrouped list — because that is as far as they move it.
+	secPos, secLen := -1, 0
+	if i := m.activeProject; i >= 0 && i < len(m.projects) {
+		sec := m.sectionOf(i)
+		secPos, secLen = sectionPos(sec, i), len(sec)
+	}
 	cmds = append(cmds,
 		paletteCommand{action: palActNewProject, enabled: true, label: "New project", detail: m.keymap.Display("project.new"), keywords: []string{"project", "create", "add", "workspace"}},
 		paletteCommand{
@@ -506,14 +513,14 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 		},
 		paletteCommand{
 			action:   palActMoveProjectUp,
-			enabled:  m.activeProject > 0,
+			enabled:  secPos > 0,
 			label:    "Move project up",
 			detail:   m.keymap.Display("project.move_up"),
 			keywords: []string{"project", "move", "reorder", "up"},
 		},
 		paletteCommand{
 			action:   palActMoveProjectDown,
-			enabled:  m.activeProject < len(m.projects)-1,
+			enabled:  secPos >= 0 && secPos < secLen-1,
 			label:    "Move project down",
 			detail:   m.keymap.Display("project.move_down"),
 			keywords: []string{"project", "move", "reorder", "down"},

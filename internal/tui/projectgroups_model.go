@@ -75,15 +75,21 @@ func (m *Model) toggleGroup(g int) tea.Cmd {
 	return m.saveGroupsCmd()
 }
 
-// finishGroupDrag ends a press on a group header. A press that never moved the
-// group is a CLICK and toggles it; a drag already reordered the groups on
-// motion and only has to save. Toggling on the press instead would collapse
-// every group the user starts to drag.
-func (m *Model) finishGroupDrag() tea.Cmd {
+// finishGroupDrag ends a press on a group header at the release point (x, y).
+// A drag already reordered the groups on motion and only has to save. A press
+// that never moved the group is a CLICK only when it is released on that SAME
+// header: pressed, dragged off (into the panes, onto a row that reorders
+// nothing) and released elsewhere is neither a click nor a reorder, and
+// changes nothing. Toggling on the press instead would collapse every group
+// the user starts to drag.
+func (m *Model) finishGroupDrag(x, y int) tea.Cmd {
 	g, moved := m.groupDragIdx, m.groupDragMoved
 	m.clearDragState()
 	if moved {
 		return m.saveGroupsCmd()
+	}
+	if _, row, ok := m.sidebarDragRows(x, y); !ok || row.kind != sidebarRowGroup || row.index != g {
+		return nil
 	}
 	return m.toggleGroup(g)
 }
@@ -98,11 +104,17 @@ func (m *Model) finishGroupDrag() tea.Cmd {
 // always holds at least one (it bootstraps a Default), so an empty list says
 // nothing trustworthy about membership — and acting on it would empty the
 // user's groups for that host in one message.
+//
+// It reads the DAEMON's own list, state.Projects, never broadcastProjects:
+// for a daemon that does not speak projects that one synthesises a made-up
+// interim project, and pruning against it would drop every real member of
+// that destination. Such a broadcast names zero real projects, so it is the
+// empty case above.
 func (m *Model) pruneProjectGroupsFor(state WorkspaceStateMsg) tea.Cmd {
 	if len(m.groups.Groups) == 0 {
 		return nil
 	}
-	infos := broadcastProjects(state, state.Dest)
+	infos := state.Projects
 	if len(infos) == 0 {
 		return nil
 	}

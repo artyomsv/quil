@@ -469,6 +469,7 @@ type Model struct {
 	renameInput        string
 	renamingPane       bool
 	paneRenameInput    string
+	groupEdit          groupEditState // status-bar group-name editor (projectgroups_input.go)
 	pendingWidth       int
 	pendingHeight      int
 	resizeSeq          int
@@ -1363,6 +1364,13 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 				m.closeCtxMenu()
 				prologueChangedView = true
 			}
+		} else if name := m.ctxMenu.groupName; name != "" {
+			// A group menu has no paneID either; it closes when its group is
+			// gone — deleted or renamed away by another path.
+			if m.groups.indexOf(name) < 0 {
+				m.closeCtxMenu()
+				prologueChangedView = true
+			}
 		} else if pane, _, _ := m.findPaneAndTab(m.ctxMenu.paneID); pane == nil {
 			m.closeCtxMenu()
 			prologueChangedView = true
@@ -1850,6 +1858,9 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 					if tabs := m.curTabs(); idx >= 0 && idx < len(tabs) {
 						m.openTabCtxMenu(tabs[idx], msg.X, msg.Y)
 					}
+				case sidebarRowGroup:
+					// The header menu: rename, collapse/expand, move, delete.
+					m.openGroupCtxMenu(idx, msg.X, msg.Y)
 				case sidebarRowPane:
 					// Right-click FOCUSES the pane first, exactly like
 					// left-click (activateSidebarRow → focusSidebarPane) —
@@ -1940,7 +1951,7 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 			// Suppressed while a modal dialog, rename edit, or notes mode
 			// owns input (the lazygit overlay and sidebar swallows already
 			// returned above).
-			if m.dialog == dialogNone && !m.notesMode && !m.renaming && !m.renamingPane {
+			if m.dialog == dialogNone && !m.notesMode && !m.renaming && !m.renamingPane && !m.groupEdit.active() {
 				if msg.Y == 0 {
 					// The sidebar's own columns at row 0 are already
 					// swallowed above; hitTestTab answers -1 for the scroll
@@ -2125,6 +2136,10 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 			}
 			return m, nil
 		}
+		if m.groupDragging {
+			m.trackGroupDrag(msg.X, msg.Y)
+			return m, nil
+		}
 		if m.projectDragging {
 			// Sequenced: trackProjectDrag mutates m through a pointer receiver.
 			cmd := m.trackProjectDrag(msg.X, msg.Y)
@@ -2205,13 +2220,18 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		}
 		// A group-header press ends here: a click toggles, a drag saves.
 		if m.groupDragging {
-			cmd := m.finishGroupDrag()
+			cmd := m.finishGroupDrag(msg.X, msg.Y)
+			return m, cmd
+		}
+		// A project drag's release decides group membership (finishProjectDrag).
+		if m.projectDragging {
+			cmd := m.finishProjectDrag(msg.X, msg.Y)
 			return m, cmd
 		}
 		// A tab drag or scrollbar drag terminates here with no further
 		// processing — they don't share the click-vs-drag pane-focus
 		// fall-through path below.
-		if m.tabDragFromIdx >= 0 || m.scrollDragPaneID != "" || m.projectDragging || m.sidebarTabDragging {
+		if m.tabDragFromIdx >= 0 || m.scrollDragPaneID != "" || m.sidebarTabDragging {
 			m.clearDragState()
 			return m, nil
 		}
@@ -4933,6 +4953,9 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.renamingPane {
 		return m.handlePaneRenameKey(msg)
 	}
+	if m.groupEdit.active() {
+		return m.handleGroupEditKey(msg)
+	}
 
 	// Context menu open: it captures navigation until closed. Quit passes
 	// through inside the handler (never swallow quit).
@@ -5440,6 +5463,14 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// ok is always true: the case labels admit only ids in layoutPresets.
 		kind, _ := layoutKindFor(lateID)
 		cmd := m.arrangeTab(m.activeTabModel(), kind)
+		return m, cmd
+
+	case "project.group_toggle":
+		cmd := m.toggleActiveProjectGroup()
+		return m, cmd
+
+	case "project.groups_collapse_all":
+		cmd := m.toggleAllGroups()
 		return m, cmd
 
 	case "tab.switch_1", "tab.switch_2", "tab.switch_3", "tab.switch_4", "tab.switch_5",
@@ -6975,6 +7006,12 @@ func (m Model) renderStatusBar() string {
 	left := "quil"
 	if m.renamingPane {
 		left = "Rename pane: " + m.paneRenameInput + "▎"
+	} else if m.groupEdit.active() {
+		label := "New group: "
+		if m.groupEdit.mode == groupEditRename {
+			label = "Rename group: "
+		}
+		left = label + sanitizeRemoteText(m.groupEdit.input) + "▎"
 	} else if tab := m.activeTabModel(); tab != nil {
 		paneCount := 0
 		if tab.Root != nil {

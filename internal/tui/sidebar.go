@@ -274,7 +274,8 @@ type sidebarRow struct {
 	// host rows); group is that group's index into m.groups.Groups (-1 on an
 	// ungrouped project row). A group drag measures a block from these, and a
 	// project drop reads the section a row belongs to — the role inTab/tabIdx
-	// play for tabs.
+	// play for tabs. Read group ONLY behind inGroup: the headings, the blank
+	// row and every PANES row leave it at 0, which is group 0's own index.
 	inGroup bool
 	group   int
 	// ungroupDrop is set on the PROJECTS heading only: a grouped project

@@ -129,6 +129,16 @@ func (p *ProjectModel) counts() paneStateCounts {
 	return c
 }
 
+// add sums o into c — a group header rolls its members' counts up the way a
+// project row rolls up its panes'.
+func (c *paneStateCounts) add(o paneStateCounts) {
+	c.working += o.working
+	c.blocked += o.blocked
+	c.done += o.done
+	c.pinned += o.pinned
+	c.marked += o.marked
+}
+
 // The link-health glyphs, deliberately kept OUT of the state-glyph const block
 // below rather than added to it.
 //
@@ -229,6 +239,19 @@ const (
 	// sidebarRowTab is a tab heading in the PANES section. A click switches to
 	// the tab; a drag reorders it (reorder.go). index is the tab's ordinal.
 	sidebarRowTab = "tab"
+	// sidebarRowGroup is a project-group header in the PROJECTS section. A
+	// click toggles it; a drag reorders the groups. index is the group's
+	// position in m.groups.Groups.
+	sidebarRowGroup = "group"
+)
+
+// The group-header markers and the member indent. ▸ is also the
+// active-project marker; a collapsed header and the active row share it
+// because the spec gives both that glyph, and the indent tells them apart.
+const (
+	glyphGroupOpen   = "▾" // U+25BE — an expanded group
+	glyphGroupClosed = "▸" // U+25B8 — a collapsed group
+	groupIndent      = "  "
 )
 
 // sidebarRow is one rendered row of the project sidebar: the painted text
@@ -247,40 +270,51 @@ type sidebarRow struct {
 	// so a tab drag can measure the group's height and tell which tab the
 	// pointer is over from ANY of its rows, not just the heading.
 	inTab bool
+	// inGroup marks a group header and every row of its members (project and
+	// host rows); group is that group's index into m.groups.Groups (-1 on an
+	// ungrouped project row). A group drag measures a block from these, and a
+	// project drop reads the section a row belongs to — the role inTab/tabIdx
+	// play for tabs.
+	inGroup bool
+	group   int
+	// ungroupDrop is set on the PROJECTS heading only: a grouped project
+	// dropped there leaves its group. Its kind stays "", so every other reader
+	// still treats the heading as chrome.
+	ungroupDrop bool
 }
 
-// sidebarRows builds the sidebar's rows in paint order at width w: every
-// project with its aggregate working/blocked counts and link health (active
-// project marked), then the active project's tabs and panes with per-pane
-// agent-state glyphs.
+// sidebarRows builds the sidebar's rows in paint order at width w: the
+// ungrouped projects, then each project group — its header and its members,
+// indented, or only the active member when the group is collapsed — each
+// project with its aggregate counts and link health (active project marked),
+// then the active project's tabs and panes with per-pane agent-state glyphs.
 //
 // The second return value is the index of the first row after the PANES
 // heading — where the pinned block ends and the scrollable body begins.
 func (m *Model) sidebarRows(w int) ([]sidebarRow, int) {
-	rows := []sidebarRow{{text: sidebarHeading("PROJECTS", w)}}
-	for i, p := range m.projects {
-		// The NAME alone on the first row. displayName's "name@dest" was
-		// written for the picker, where a dialog is wide enough for it; at the
-		// sidebar's 22 columns "Default@build@gpu01" leaves nothing of
-		// either half, and the badges that say whether the project needs you
-		// are what gets truncated away first.
+	// The heading doubles as the "ungrouped" drop target: with every project
+	// in a group there is no ungrouped row left to drop a project on.
+	rows := []sidebarRow{{text: sidebarHeading("PROJECTS", w), ungroupDrop: true}}
+	ungrouped, byGroup := m.projectSections()
+	for _, i := range ungrouped {
+		rows = m.appendProjectRows(rows, i, w, -1)
+	}
+	for g := range m.groups.Groups {
+		grp := &m.groups.Groups[g]
 		rows = append(rows, sidebarRow{
-			text: projectRow(sanitizeRemoteText(p.Name), p.counts(), m.workSpinnerFrame,
-				m.linkGlyph(p.Dest, p.Offline), i == m.activeProject, w, p.Offline),
-			kind:  sidebarRowProject,
-			index: i,
+			text:    m.groupHeaderText(grp, byGroup[g], w),
+			kind:    sidebarRowGroup,
+			index:   g,
+			inGroup: true,
+			group:   g,
 		})
-		// The host gets its own row, and only a remote project has one — a
-		// local project spending a line to say "this machine" would halve how
-		// many projects fit for no information. Same kind and index, so a
-		// click on either row selects the same project rather than falling
-		// through to the pane underneath.
-		if p.Dest != "" {
-			rows = append(rows, sidebarRow{
-				text:  projectDestRow(sanitizeRemoteText(p.Dest), w),
-				kind:  sidebarRowProject,
-				index: i,
-			})
+		for _, i := range byGroup[g] {
+			// A collapsed group keeps ONE member visible: the active project,
+			// so "where am I" never hides behind a header.
+			if grp.Collapsed && i != m.activeProject {
+				continue
+			}
+			rows = m.appendProjectRows(rows, i, w, g)
 		}
 	}
 
@@ -339,6 +373,118 @@ func (m *Model) sidebarRows(w int) ([]sidebarRow, int) {
 		}
 	}
 	return rows, panesStart
+}
+
+// appendProjectRows appends project i's rows: the NAME alone on the first
+// row, and a remote project's host on a second one. With g >= 0 both are
+// indented under group g's header and marked inGroup.
+//
+// The name is alone on its row because displayName's "name@dest" was written
+// for the picker, where a dialog is wide enough for it; at the sidebar's 22
+// columns "Default@build@gpu01" leaves nothing of either half, and the badges
+// that say whether the project needs you are what gets truncated away first.
+// Only a remote project has a host row — a local project spending a line to
+// say "this machine" would halve how many projects fit. Same kind and index on
+// both rows, so a click on either selects the same project.
+func (m *Model) appendProjectRows(rows []sidebarRow, i, w, g int) []sidebarRow {
+	p := m.projects[i]
+	indent := g >= 0
+	rows = append(rows, sidebarRow{
+		text: indentSidebarRow(indent, w, func(w int) string {
+			return projectRow(sanitizeRemoteText(p.Name), p.counts(), m.workSpinnerFrame,
+				m.linkGlyph(p.Dest, p.Offline), i == m.activeProject, w, p.Offline)
+		}),
+		kind:    sidebarRowProject,
+		index:   i,
+		inGroup: indent,
+		group:   g,
+	})
+	if p.Dest != "" {
+		rows = append(rows, sidebarRow{
+			text: indentSidebarRow(indent, w, func(w int) string {
+				return projectDestRow(sanitizeRemoteText(p.Dest), w)
+			}),
+			kind:    sidebarRowProject,
+			index:   i,
+			inGroup: indent,
+			group:   g,
+		})
+	}
+	return rows
+}
+
+// indentSidebarRow builds a row at w-len(groupIndent) and prefixes the indent,
+// so an indented row is still exactly w cells. At w <= len(groupIndent) the
+// indent is dropped instead: the prefix alone would fill the strip, and
+// renderSidebar's closing .Width(w) WRAPS an over-wide row — shifting every
+// row below while sidebarRowAt still maps screen row y to rows[y].
+func indentSidebarRow(indent bool, w int, build func(w int) string) string {
+	if !indent || w <= len(groupIndent) {
+		return build(w)
+	}
+	return groupIndent + build(w-len(groupIndent))
+}
+
+// groupHeaderText is a group's header row: the members' pane counts summed,
+// and the link glyph when any member's host is parked (⚡ wins) or retrying.
+func (m *Model) groupHeaderText(grp *projectGroup, members []int, w int) string {
+	var c paneStateCounts
+	link := ""
+	for _, i := range members {
+		p := m.projects[i]
+		c.add(p.counts())
+		switch m.linkGlyph(p.Dest, p.Offline) {
+		case glyphLinkParked:
+			link = glyphLinkParked
+		case glyphLinkRetry:
+			if link == "" {
+				link = glyphLinkRetry
+			}
+		}
+	}
+	return groupHeaderRow(sanitizeRemoteText(grp.Name), len(members), grp.Collapsed, c, m.workSpinnerFrame, link, w)
+}
+
+// groupHeaderRow renders "▾ name (N)" (▸ when collapsed) with the roll-up
+// badge flush right, exactly w cells. The badge is budgeted first and the NAME
+// gives way, cut with "…" — the same priority projectRow gives its name. name
+// is expected pre-sanitized.
+func groupHeaderRow(name string, members int, collapsed bool, c paneStateCounts, workFrame int, link string, w int) string {
+	marker := glyphGroupOpen + " "
+	if collapsed {
+		marker = glyphGroupClosed + " "
+	}
+	count := fmt.Sprintf(" (%d)", members)
+	segs := appendBadgeSegments(make([]styledSegment, 1, 7), c, workFrame, link)
+	badgeW := 0
+	for i := 1; i < len(segs); i++ {
+		badgeW += lipgloss.Width(segs[i].text)
+	}
+	avail := w - lipgloss.Width(marker) - lipgloss.Width(count) - badgeW
+	if avail < 1 {
+		avail = 1
+	}
+	head := marker + elideEnd(name, avail) + count
+	if gap := w - lipgloss.Width(head) - badgeW; gap > 0 {
+		head += strings.Repeat(" ", gap)
+	}
+	segs[0] = styledSegment{head, sidebarGroupStyle}
+	return renderStyledSegments(segs, w)
+}
+
+// elideEnd cuts s to at most w cells, spending the last cell on "…" when a cut
+// happens. Cluster-safe and lipgloss-measured through truncateCells.
+func elideEnd(s string, w int) string {
+	if w <= 0 {
+		return ""
+	}
+	if lipgloss.Width(s) <= w {
+		return s
+	}
+	if w == 1 {
+		return truncateCells(s, 1)
+	}
+	return truncateCells(s, w-1) + "…"
 }
 
 // renderSidebar renders the project sidebar. height is the number of screen
@@ -860,6 +1006,9 @@ var (
 	sidebarTabNameStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("255"))
 	sidebarActiveStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230"))
 	sidebarProjectStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
+	// A group header is bold near-white: it is a heading over project rows, so
+	// it must not read as one of them (250) nor as the active project (230).
+	sidebarGroupStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("252"))
 	sidebarBlockedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 	// 208, not the 214 sidebarBlockedStyle spends on the ▲ badge: a project can
 	// be offline AND holding a blocked agent at the same time, and one colour
@@ -1178,6 +1327,38 @@ func projectRow(name string, c paneStateCounts, workFrame int, link string, acti
 	// cannot both be set on one PANE, but this counts across a whole project,
 	// where one pane pinned and another marked is ordinary.
 	segs := make([]styledSegment, 1, 7)
+	segs = appendBadgeSegments(segs, c, workFrame, link)
+	badgeW := 0
+	for i := 1; i < len(segs); i++ {
+		badgeW += lipgloss.Width(segs[i].text)
+	}
+
+	avail := w - lipgloss.Width(marker) - badgeW
+	if avail < 1 {
+		avail = 1
+	}
+	name = truncateCells(name, avail)
+
+	// The gap belongs to the HEAD segment, so the badge stays flush right rather
+	// than sitting behind unstyled cells. renderStyledSegments' own trailing pad
+	// is then reached only when the LAST segment gives up a cell it could not
+	// use — a wide glyph straddling the boundary, as in
+	// projectRow("a", paneStateCounts{}, glyphLinkParked, false, 5), where " ⚡"
+	// cuts to " " and leaves one cell to backfill.
+	head := marker + name
+	if gap := w - lipgloss.Width(head) - badgeW; gap > 0 {
+		head += strings.Repeat(" ", gap)
+	}
+	segs[0] = styledSegment{head, style}
+	return renderStyledSegments(segs, w)
+}
+
+// appendBadgeSegments appends the roll-up badge — ▲ blocked, the working
+// spinner, ✓ done, ◆ pinned, ⌫ marked, then the link glyph — in the pane rows'
+// own colours. Shared by projectRow and groupHeaderRow so a group's roll-up and
+// a project's are one notation. Every segment begins with a SPACE, which is
+// what satisfies renderStyledSegments' cluster-boundary precondition.
+func appendBadgeSegments(segs []styledSegment, c paneStateCounts, workFrame int, link string) []styledSegment {
 	// Badge order is urgency order, and it is the same glyph vocabulary the
 	// pane rows use so the summary reads as a roll-up rather than a second
 	// notation: needs you, still running, finished while you were away.
@@ -1226,29 +1407,7 @@ func projectRow(name string, c paneStateCounts, workFrame int, link string, acti
 	if link != "" {
 		segs = append(segs, styledSegment{" " + link, linkGlyphStyle(link)})
 	}
-	badgeW := 0
-	for i := 1; i < len(segs); i++ {
-		badgeW += lipgloss.Width(segs[i].text)
-	}
-
-	avail := w - lipgloss.Width(marker) - badgeW
-	if avail < 1 {
-		avail = 1
-	}
-	name = truncateCells(name, avail)
-
-	// The gap belongs to the HEAD segment, so the badge stays flush right rather
-	// than sitting behind unstyled cells. renderStyledSegments' own trailing pad
-	// is then reached only when the LAST segment gives up a cell it could not
-	// use — a wide glyph straddling the boundary, as in
-	// projectRow("a", paneStateCounts{}, glyphLinkParked, false, 5), where " ⚡"
-	// cuts to " " and leaves one cell to backfill.
-	head := marker + name
-	if gap := w - lipgloss.Width(head) - badgeW; gap > 0 {
-		head += strings.Repeat(" ", gap)
-	}
-	segs[0] = styledSegment{head, style}
-	return renderStyledSegments(segs, w)
+	return segs
 }
 
 // paneRow renders one pane's agent state: a spinning braille frame for working

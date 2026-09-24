@@ -46,6 +46,10 @@ func TestSidebarGlyphs_OneCellAndNotEmojiCapable(t *testing.T) {
 		// count around it, and paneRow already spends it on the subagent
 		// count, so a font drawing it wide would overpaint there too.
 		"glyphMore": glyphMore,
+		// The group-header markers sit at the start of a header row and are
+		// budgeted as one cell each, exactly like the state glyphs.
+		"glyphGroupOpen":   glyphGroupOpen,
+		"glyphGroupClosed": glyphGroupClosed,
 	}
 	// The WORKING state animates (workingGlyph), so it is a SET of glyphs where
 	// the others are one — and the row arithmetic budgets whichever frame is

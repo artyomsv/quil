@@ -903,6 +903,20 @@ type Model struct {
 	sidebarTabDragging bool
 	sidebarTabDragIdx  int
 
+	// Project groups (projectgroups*.go) — the sidebar's client-side grouping
+	// of projects. groupsPath "" means persistence is off, which is every Model
+	// a test builds directly; groupsWriter serialises the saves a tea.Cmd runs,
+	// in groupsSeq order.
+	groups       projectGroups
+	groupsPath   string
+	groupsWriter *groupsWriter
+	groupsSeq    uint64
+	// A press on a group header. The release TOGGLES the group only when
+	// groupDragMoved is still false; a drag reorders the groups instead.
+	groupDragging  bool
+	groupDragIdx   int
+	groupDragMoved bool
+
 	// Split-border drag-resize. splitDragNode is non-nil while a border
 	// drag is in progress; splitDragRect captures the owning node's region
 	// at click time so mid-drag layout changes can't drift the ratio math.
@@ -1809,6 +1823,10 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 					case sidebarRowTab:
 						m.sidebarTabDragging = true
 						m.sidebarTabDragIdx = idx
+					case sidebarRowGroup:
+						m.groupDragging = true
+						m.groupDragIdx = idx
+						m.groupDragMoved = false
 					}
 					return m.activateSidebarRow(kind, idx)
 				}
@@ -2185,6 +2203,11 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		if m.sidebarDragging {
 			return m, m.finishSidebarDrag()
 		}
+		// A group-header press ends here: a click toggles, a drag saves.
+		if m.groupDragging {
+			cmd := m.finishGroupDrag()
+			return m, cmd
+		}
 		// A tab drag or scrollbar drag terminates here with no further
 		// processing — they don't share the click-vs-drag pane-focus
 		// fall-through path below.
@@ -2477,6 +2500,11 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 	case paneSettleRepaintMsg:
 		return m, tea.ClearScreen
 
+	case projectGroupsSaveFailedMsg:
+		// A local save result, not an IPC response: no listenForMessages here.
+		m.setFlash(groupSaveFailedFlash)
+		return m, m.flashCmd()
+
 	case flashExpireMsg:
 		// Clear flash only if it hasn't been refreshed by a newer setFlash call.
 		if !time.Now().Before(m.flashUntil) {
@@ -2650,6 +2678,9 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		// runs, then either delete or demote them to logger.Debug.
 		log.Printf("WorkspaceState: %d tabs, %d panes", len(msg.Tabs), len(msg.Panes))
 		newPaneIDs, overlayResizeCmds := m.applyWorkspaceState(msg, msg.Dest)
+		// After the merge, and only here: this arm is reached only for a
+		// connected destination whose state arrived (the gate above).
+		groupsCmd := m.pruneProjectGroupsFor(msg)
 		templateFocusCmd := m.focusNewTemplateTab()
 		log.Printf("apply: returned, %d new panes", len(newPaneIDs))
 		// An open project picker holds a filtered snapshot taken when it opened.
@@ -2714,6 +2745,7 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 			m.listenForMessages(),
 			m.sendDiffedResizes(m.diffResizes(msg)),
 			m.sendDiffedLayouts(m.diffLayouts(msg)),
+			groupsCmd,
 		}
 		// Resize overlay PTYs that just became visible on initial creation.
 		// resizeAllPanes only walks tab.Leaves() (the layout tree), so overlay
@@ -3538,6 +3570,9 @@ func (m *Model) clearDragState() {
 	m.projectDragIdx = 0
 	m.sidebarTabDragging = false
 	m.sidebarTabDragIdx = 0
+	m.groupDragging = false
+	m.groupDragIdx = 0
+	m.groupDragMoved = false
 	m.scrollDragPaneID = ""
 	m.scrollDragRect = PaneRect{}
 	m.mouseDown = false

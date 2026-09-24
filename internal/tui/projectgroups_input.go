@@ -56,11 +56,14 @@ func (m *Model) trackGroupDrag(x, y int) {
 // finishProjectDrag ends a project drag. The reorder already happened on
 // motion; the RELEASE decides membership: on a group header the project joins
 // that group, and a grouped project released on the PROJECTS heading or on an
-// ungrouped project's row leaves its group. Anything else changes nothing.
+// ungrouped project's row leaves its group. Anything else changes nothing —
+// including a CLICK: a press that never moved decides nothing, because the
+// press switched the active project and may have shifted every row below a
+// collapsed group, so its release y no longer names the row it was on.
 func (m *Model) finishProjectDrag(x, y int) tea.Cmd {
-	idx := m.projectDragIdx
+	idx, moved := m.projectDragIdx, m.projectDragMoved
 	m.clearDragState()
-	if idx < 0 || idx >= len(m.projects) {
+	if !moved || idx < 0 || idx >= len(m.projects) {
 		return nil
 	}
 	p := m.projects[idx]
@@ -253,6 +256,21 @@ type groupEditState struct {
 }
 
 func (s groupEditState) active() bool { return s.mode != groupEditNone }
+
+// appendPaste folds pasted text into the editor: printable runes only (a
+// paste's line breaks and control bytes are dropped, as in the palette), cut
+// at maxGroupNameRunes rather than refused whole like an over-long key.
+func (s *groupEditState) appendPaste(text string) {
+	room := maxGroupNameRunes - utf8.RuneCountInString(s.input)
+	if room <= 0 {
+		return
+	}
+	add := []rune(sanitizePaletteQuery(text))
+	if len(add) > room {
+		add = add[:room]
+	}
+	s.input += string(add)
+}
 
 // beginGroupEdit opens the editor. The menu that led here is closed and no
 // drag survives it.

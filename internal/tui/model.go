@@ -901,6 +901,7 @@ type Model struct {
 	// zero value — reads as "no drag" without a constructor having to seed it.
 	projectDragging    bool
 	projectDragIdx     int
+	projectDragMoved   bool // a motion arrived: only a MOVED drag regroups (finishProjectDrag)
 	sidebarTabDragging bool
 	sidebarTabDragIdx  int
 
@@ -2141,6 +2142,7 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 			return m, nil
 		}
 		if m.projectDragging {
+			m.projectDragMoved = true
 			// Sequenced: trackProjectDrag mutates m through a pointer receiver.
 			cmd := m.trackProjectDrag(msg.X, msg.Y)
 			return m, cmd
@@ -2400,7 +2402,14 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		// Paste bypasses handleKey and lands in the PTY, so an armed prefix
 		// would read the next keystroke as a sequence step.
 		m.cancelSequence()
-		if m.dialog == dialogPluginMigration && m.migrationLeft != nil && !m.migrationRightFocus {
+		if m.groupEdit.active() {
+			// The status-bar group-name editor owns input like the palette
+			// does: without this branch the paste would fall through to
+			// sendClipboardToPane and be typed into the pane behind it (a
+			// trailing newline could run it).
+			m.groupEdit.appendPaste(msg.Content)
+			return m, nil
+		} else if m.dialog == dialogPluginMigration && m.migrationLeft != nil && !m.migrationRightFocus {
 			text := msg.Content // InsertMultiLine turns CR line breaks into newlines
 			m.migrationLeft.InsertMultiLine(text)
 			m.migrationLeft.Dirty = true
@@ -3588,6 +3597,7 @@ func (m *Model) clearDragState() {
 	m.tabDragFromIdx = -1
 	m.projectDragging = false
 	m.projectDragIdx = 0
+	m.projectDragMoved = false
 	m.sidebarTabDragging = false
 	m.sidebarTabDragIdx = 0
 	m.groupDragging = false

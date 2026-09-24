@@ -209,9 +209,61 @@ func TestSidebarGroups_ProjectDroppedOnAHeaderJoinsThatGroup(t *testing.T) {
 	// Dropped on its OWN group's header: nothing changes, nothing is saved.
 	seq = got.groupsSeq
 	got, _ = grpPress(got, 6, tea.MouseLeft) // L1's row under G-B
+	got, _ = grpMotion(got, 5)               // a real drag: a click decides nothing
 	got, _ = grpRelease(got, 5)              // G-B's header
 	if got.groupsSeq != seq || got.groups.groupOf("", "l1") != 1 {
 		t.Fatalf("a drop on its own header changed state (seq %d→%d, group %d)", seq, got.groupsSeq, got.groups.groupOf("", "l1"))
+	}
+}
+
+// A plain CLICK never changes membership. The press switches the active
+// project, and the collapsed G1 above was showing the OLD active project, so
+// its row (two for a remote one) vanishes and every row below moves up — the
+// release y then names G3's header, although the pointer never moved.
+func TestSidebarGroups_ClickWithoutMotionNeverRegroups(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		dest   string // P0's host
+		pressY int    // P2's row before the press
+	}{
+		// Rows: 0 PROJECTS, 1 ▸ G1, 2 P0, 3 ▾ G2, 4 P1, 5 P2, 6 ▾ G3, 7 P3.
+		{"a local active member", "", 5},
+		// Rows: 0 PROJECTS, 1 ▸ G1, 2 P0, 3 P0's host, 4 ▾ G2, 5 P1, 6 P2, 7 ▾ G3, 8 P3.
+		{"a remote active member", "gpu01", 6},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newSplitDragTestModel(t)
+			m.client = newFakeConn()
+			m.sidebarOpen = true
+			m.sidebarWidth = 22
+			m.projects[0].ID, m.projects[0].Name, m.projects[0].Dest = "p0", "P0", tc.dest
+			m.projects = append(m.projects,
+				&ProjectModel{ID: "p1", Name: "P1"},
+				&ProjectModel{ID: "p2", Name: "P2"},
+				&ProjectModel{ID: "p3", Name: "P3"},
+			)
+			m.groups = projectGroups{Groups: []projectGroup{
+				{Name: "G1", Collapsed: true, Members: []groupMember{{Dest: tc.dest, ID: "p0"}}},
+				{Name: "G2", Members: []groupMember{{ID: "p1"}, {ID: "p2"}}},
+				{Name: "G3", Members: []groupMember{{ID: "p3"}}},
+			}}
+			got, _ := grpPress(*m, tc.pressY, tea.MouseLeft) // P2
+			if got.activeProject != 2 {
+				t.Fatalf("setup: the press activated project %d, want 2", got.activeProject)
+			}
+			// Not vacuous: after the press the release row IS G3's header.
+			rows, _ := got.sidebarRows(22)
+			if r := rows[5]; r.kind != sidebarRowGroup || r.index != 2 {
+				t.Fatalf("setup: row 5 after the press = %+v, want G3's header", r)
+			}
+			got, _ = grpRelease(got, 5)
+			if g := got.groups.groupOf("", "p2"); g != 1 {
+				t.Fatalf("P2 is in group %d after a motionless click, want 1 (G2)", g)
+			}
+			if got.groupsSeq != 0 {
+				t.Errorf("groupsSeq = %d, want 0 — a click saves nothing", got.groupsSeq)
+			}
+		})
 	}
 }
 
@@ -227,6 +279,7 @@ func TestSidebarGroups_GroupedProjectDroppedInTheUngroupedSectionLeavesItsGroup(
 			m, fake := newGroupsSidebarModel(t)
 			got, _ := grpPress(*m, 5, tea.MouseLeft) // L2, in G-A (now active)
 			seq := got.groupsSeq
+			got, _ = grpMotion(got, tc.y) // a real drag: a click decides nothing
 			got, _ = grpRelease(got, tc.y)
 			if g := got.groups.groupOf("", "l2"); g != -1 {
 				t.Fatalf("L2 is still in group %d", g)
@@ -681,5 +734,72 @@ func TestGroupKeys_ToggleTheActiveGroupAndCollapseAll(t *testing.T) {
 	got = updated.(Model)
 	if !got.groups.Groups[0].Collapsed || !got.groups.Groups[1].Collapsed {
 		t.Fatal("collapse-all must collapse every group")
+	}
+}
+
+// A paste while the group-name editor is open goes into the editor — printable
+// runes only, cut at the cap — and never to the pane behind it, where the
+// trailing CR would run it.
+func TestGroupEdit_PasteGoesToTheEditorNeverToAPane(t *testing.T) {
+	m, fake := newGroupsSidebarModel(t)
+	got := grpOpenGroupList(t, *m, 1)
+	got, _ = grpChoose(t, got, grpMenuRow(t, got.ctxMenu, ctxActNewGroup, ""))
+	if !got.groupEdit.active() {
+		t.Fatal("setup: the name editor is not open")
+	}
+	updated, cmd := got.Update(tea.PasteMsg{Content: "x\r"})
+	got = updated.(Model)
+	runCmd(cmd)
+	if got.groupEdit.input != "x" {
+		t.Errorf("editor input = %q, want x", got.groupEdit.input)
+	}
+	for _, msg := range fake.sent {
+		if msg.Type == ipc.MsgPaneInput {
+			t.Fatal("a paste into the group editor was sent to a pane")
+		}
+	}
+	updated, _ = got.Update(tea.PasteMsg{Content: strings.Repeat("é", 40)})
+	got = updated.(Model)
+	if n := len([]rune(got.groupEdit.input)); n != maxGroupNameRunes {
+		t.Errorf("input holds %d runes after an over-long paste, want %d", n, maxGroupNameRunes)
+	}
+}
+
+// The project menu does not open over the group-name editor: its New group…
+// row would start a second edit that replaces the one being typed.
+func TestProjectCtxMenu_RefusedWhileTheGroupEditorIsOpen(t *testing.T) {
+	m, _ := newGroupsSidebarModel(t)
+	got := grpOpenGroupList(t, *m, 1)
+	got, _ = grpChoose(t, got, grpMenuRow(t, got.ctxMenu, ctxActNewGroup, ""))
+	got = grpType(got, "ab")
+	got, _ = grpPress(got, 5, tea.MouseRight) // L2's row
+	if got.ctxMenu.open() {
+		t.Fatalf("a project menu opened over the group editor (rows %q)", grpLabels(got.ctxMenu))
+	}
+	if !got.groupEdit.active() || got.groupEdit.input != "ab" {
+		t.Fatalf("editor = %+v, want still open holding ab", got.groupEdit)
+	}
+}
+
+// renderCtxMenu caps the box at ctxMenuTitleCap, so a label can be wider than
+// the box. It is cut, never allowed to make the pad count negative — which
+// panicked the TUI — and every row keeps the box's width.
+func TestRenderCtxMenu_OverWideLabelIsCutNotPanicking(t *testing.T) {
+	t.Parallel()
+	for _, label := range []string{strings.Repeat("W", 40), strings.Repeat("构", 40)} {
+		s := ctxMenuState{projectID: "p", title: "t", cursor: 0, items: []ctxMenuItem{
+			{id: ctxActRenameProject, label: label, enabled: true},
+			{id: ctxActDestroyProject, label: label, enabled: true},
+		}}
+		w, _ := s.boxSize()
+		out := renderCtxMenu(s)
+		for i, line := range strings.Split(out, "\n") {
+			if got := lipgloss.Width(line); got != w {
+				t.Errorf("line %d is %d cells, want the box's %d", i, got, w)
+			}
+		}
+		if !strings.Contains(stripANSI(out), "…") {
+			t.Error("the over-wide label was not cut with an ellipsis")
+		}
 	}
 }

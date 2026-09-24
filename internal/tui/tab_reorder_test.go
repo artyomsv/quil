@@ -97,6 +97,7 @@ func TestModel_ClearDragState(t *testing.T) {
 		splitDragRect:      BorderHit{OX: 1, OY: 2, W: 3, H: 4},
 		projectDragging:    true,
 		projectDragIdx:     2,
+		projectDragMoved:   true,
 		sidebarTabDragging: true,
 		sidebarTabDragIdx:  3,
 		groupDragging:      true,
@@ -128,6 +129,9 @@ func TestModel_ClearDragState(t *testing.T) {
 	}
 	if m.projectDragging {
 		t.Error("projectDragging = true, want false")
+	}
+	if m.projectDragMoved {
+		t.Error("projectDragMoved = true, want false")
 	}
 	if m.sidebarTabDragging {
 		t.Error("sidebarTabDragging = true, want false")

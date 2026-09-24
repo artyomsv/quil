@@ -416,7 +416,15 @@ func renderCtxMenu(s ctxMenuState) string {
 		if s.spaced && i > 0 && s.items[i-1].gapAfter {
 			rows = append(rows, blank)
 		}
-		label := " " + it.label + strings.Repeat(" ", innerW-lipgloss.Width(it.label)-2) + " "
+		// innerWidth caps the box at ctxMenuTitleCap, so a label can be wider
+		// than the box — a dynamic one (a group name) always could. Cut it like
+		// the title: an uncut one makes the pad count negative and Repeat
+		// panics, taking the whole TUI down on a render.
+		text := it.label
+		if lipgloss.Width(text) > innerW-2 {
+			text = ansi.Truncate(text, innerW-3, "…")
+		}
+		label := " " + text + strings.Repeat(" ", innerW-lipgloss.Width(text)-2) + " "
 		switch {
 		case !it.enabled:
 			rows = append(rows, ctxMenuDisabledStyle.Render(label))
@@ -523,6 +531,11 @@ func buildProjectCtxMenuItems(remote, unreachable bool) []ctxMenuItem {
 // pane border, which has no project analogue (the active-project marker in
 // the sidebar already shows which row is selected).
 func (m *Model) openProjectCtxMenu(p *ProjectModel, anchorX, anchorY int) {
+	// The group-name editor owns every key; a menu opened over it could start
+	// a second edit (New group…) that silently replaces the one being typed.
+	if m.groupEdit.active() {
+		return
+	}
 	s := ctxMenuState{
 		projectID:   p.ID,
 		projectDest: p.Dest,

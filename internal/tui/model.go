@@ -5355,6 +5355,12 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		cmd := m.moveActiveTab(1)
 		return m, cmd
 
+	case "tab.layout_even", "tab.layout_columns", "tab.layout_rows",
+		"tab.layout_grid", "tab.layout_main", "tab.layout_spiral":
+		kind, _ := layoutKindFor(lateID)
+		cmd := m.arrangeTab(m.activeTabModel(), kind)
+		return m, cmd
+
 	case "tab.switch_1", "tab.switch_2", "tab.switch_3", "tab.switch_4", "tab.switch_5",
 		"tab.switch_6", "tab.switch_7", "tab.switch_8", "tab.switch_9":
 		// The ID's last rune is the 1-based tab number; switchTab is 0-based.

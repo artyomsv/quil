@@ -25,6 +25,9 @@ var promotedActions = map[keymap.ActionID]bool{
 	// they never had a field there either.
 	"tab.move_left": true, "tab.move_right": true,
 	"project.move_up": true, "project.move_down": true,
+	// The tab-layout actions likewise never had a [keybindings] field.
+	"tab.layout_even": true, "tab.layout_columns": true, "tab.layout_rows": true,
+	"tab.layout_grid": true, "tab.layout_main": true, "tab.layout_spiral": true,
 }
 
 func TestKeySpecsFromConfig_MapsEveryConfigBackedAction(t *testing.T) {

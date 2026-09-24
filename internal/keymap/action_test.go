@@ -4,8 +4,8 @@ import "testing"
 
 func TestActions_RegistryIntegrity(t *testing.T) {
 	acts := Actions()
-	if len(acts) != 58 {
-		t.Fatalf("registry has %d actions, want 58 (42 config-backed + 12 promoted from the reserved-key switch + 4 reorder)", len(acts))
+	if len(acts) != 64 {
+		t.Fatalf("registry has %d actions, want 64 (42 config-backed + 12 promoted from the reserved-key switch + 4 reorder + 6 tab layout)", len(acts))
 	}
 	seen := make(map[ActionID]bool, len(acts))
 	orders := make(map[int]ActionID, len(acts))
@@ -83,6 +83,28 @@ func TestActionsByGroup_IsDeterministic(t *testing.T) {
 	}
 	if total != len(Actions()) {
 		t.Errorf("grouping covers %d actions, want %d", total, len(Actions()))
+	}
+}
+
+// The six tab-layout actions ship UNBOUND, like tab.next: the tab menu and the
+// palette already reach them, and a default chord would claim a key from every
+// existing user.
+func TestLayoutActionsShipUnbound(t *testing.T) {
+	for _, id := range []ActionID{
+		"tab.layout_even", "tab.layout_columns", "tab.layout_rows",
+		"tab.layout_grid", "tab.layout_main", "tab.layout_spiral",
+	} {
+		a, ok := Lookup(id)
+		if !ok {
+			t.Errorf("action %q is not registered", id)
+			continue
+		}
+		if a.Default != "" {
+			t.Errorf("action %q ships bound to %q, want unbound", id, a.Default)
+		}
+		if a.Tier != TierLate || a.Group != "Tabs" {
+			t.Errorf("action %q = tier %v group %q, want TierLate / Tabs", id, a.Tier, a.Group)
+		}
 	}
 }
 

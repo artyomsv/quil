@@ -119,6 +119,18 @@ var registry = []Action{
 	// Reachable today only through F1 -> About. Ships unbound for the same
 	// reason as tab.next: the tmux preset is what wants a key for it.
 	{ID: "system.shortcuts", Label: "Show keyboard shortcuts", Group: "System", Tier: TierLate, Order: 5500, Default: ""},
+
+	// Tab layout arrangement — the same six the tab menu's Layout… list and the
+	// palette's Tabs group offer, acting on the ACTIVE tab. Shipped UNBOUND for
+	// tab.next's reason: a default chord would claim a key from every existing
+	// user for something the menu already reaches. Late tier with the other
+	// tab actions.
+	{ID: "tab.layout_even", Label: "Even out the active tab's panes", Group: "Tabs", Tier: TierLate, Order: 5600, Default: ""},
+	{ID: "tab.layout_columns", Label: "Arrange the active tab as columns", Group: "Tabs", Tier: TierLate, Order: 5700, Default: ""},
+	{ID: "tab.layout_rows", Label: "Arrange the active tab as rows", Group: "Tabs", Tier: TierLate, Order: 5800, Default: ""},
+	{ID: "tab.layout_grid", Label: "Arrange the active tab as a grid", Group: "Tabs", Tier: TierLate, Order: 5900, Default: ""},
+	{ID: "tab.layout_main", Label: "Arrange the active tab as main + stack", Group: "Tabs", Tier: TierLate, Order: 6000, Default: ""},
+	{ID: "tab.layout_spiral", Label: "Arrange the active tab as a spiral", Group: "Tabs", Tier: TierLate, Order: 6100, Default: ""},
 }
 
 // Actions returns every registered action. The slice is a copy.

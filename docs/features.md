@@ -175,7 +175,7 @@ Panes moved in from other tabs can leave a tab lopsided. Right-click the tab (in
 | Main + stack | The tab's active pane on the left at half the width, the rest stacked on the right |
 | Spiral | Each pane splits the last one, alternating direction, all equal |
 
-The same six are in the command palette (acting on the active tab) and can be bound to keys as `tab.layout_even`, `tab.layout_columns`, `tab.layout_rows`, `tab.layout_grid`, `tab.layout_main` and `tab.layout_spiral` in `bindings.toml` — they ship unbound. Hold `Alt` and drag a pane onto another to place it on the side you drop it on, onto the middle to swap the two, or onto a tab to move it there. Nothing restarts. A layout that would make a pane smaller than 10×4 cells is refused, and the new layout is saved at once. Other Quil windows attached to the same daemon keep their own arrangement of that tab until they reattach.
+The same six are in the command palette (acting on the active tab) and can be bound to keys as `tab.layout_even`, `tab.layout_columns`, `tab.layout_rows`, `tab.layout_grid`, `tab.layout_main` and `tab.layout_spiral` in `bindings.toml` — they ship unbound. Hold `Alt` and drag a pane onto another to place it on the side you drop it on, onto the middle to swap the two, or onto a tab to move it there. Nothing restarts. A layout that would make a pane smaller than 10×4 cells is refused, and the new layout is saved at once. Another Quil window attached to the same daemon keeps its own arrangement of that tab, and may overwrite the saved layout with it; whichever window sent its layout last is the one a restart brings back.
 
 ### Tab customization
 

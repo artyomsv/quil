@@ -142,6 +142,8 @@ Hold `Alt`, press the left button anywhere inside a pane (its border included) a
 
 `Esc` cancels, and so does releasing on the pane itself, on its own tab, or anywhere else. Nothing restarts: the pane keeps its process and history. An `Alt`+press never starts a text selection or a border resize, and the drag is not available in the notes editor.
 
+The `Alt`+drag was verified in Windows Terminal. Some terminals keep `Alt`/`Option`+drag for their own selection (on macOS the terminal may need its "Option sends Meta" or mouse-reporting setting); if the drag does not start in yours, the tab's *Layout…* menu still works.
+
 ## Pane navigation
 
 | Key | Action |

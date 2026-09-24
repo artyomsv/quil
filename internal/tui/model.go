@@ -1974,14 +1974,15 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 				// The pane-drag chord (panedrag.go) arms a drag of the pane
 				// under the press, AHEAD of the notes editor, split border,
 				// scrollbar and selection arms — so it never starts any of
-				// them, and a press that cannot arm (busy tab) is swallowed
-				// rather than falling through to one. Not in notes mode: the
-				// editor owns the layout there, and the click behaves as before.
+				// them, and a press that cannot arm is swallowed rather than
+				// falling through to one (a busy tab also flashes why). Not in
+				// notes mode: the editor owns the layout there, and the click
+				// behaves as before.
 				if paneDragModifier(msg.Mod) && !m.notesMode {
 					m.clearDragState()
 					m.selection = nil
-					m.beginPaneDrag(msg.X, msg.Y)
-					return m, nil
+					cmd := m.beginPaneDrag(msg.X, msg.Y)
+					return m, cmd
 				}
 				// Notes editor click takes priority — the document anchor
 				// is resolved once at click time so motion events can't
@@ -5401,6 +5402,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case "tab.layout_even", "tab.layout_columns", "tab.layout_rows",
 		"tab.layout_grid", "tab.layout_main", "tab.layout_spiral":
+		// ok is always true: the case labels admit only ids in layoutPresets.
 		kind, _ := layoutKindFor(lateID)
 		cmd := m.arrangeTab(m.activeTabModel(), kind)
 		return m, cmd

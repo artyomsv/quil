@@ -383,6 +383,25 @@ func TestPaneDrag_NotArmedInNotesModeOrOnABusyTab(t *testing.T) {
 	}
 }
 
+func TestPaneDrag_AltPressOnABusyTabFlashes(t *testing.T) {
+	t.Parallel()
+	m := newPaneDragTestModel(t)
+	tab := mpTabOf(t, &m, "tab-a")
+	m.pendingSplit = map[string]*LayoutNode{"tab-a": tab.SplitAtPane("p3", SplitVertical)}
+	updated, cmd := m.Update(tea.MouseClickMsg{X: 20, Y: 10, Button: tea.MouseLeft, Mod: pdMod})
+	m = updated.(Model)
+	if m.paneDrag.active() {
+		t.Error("a pane drag armed on a busy tab")
+	}
+	if m.flashText != tabBusyFlash {
+		t.Errorf("flashText = %q, want %q", m.flashText, tabBusyFlash)
+	}
+	// cmd is the flash's 3 s expiry tick: asserted present, never run.
+	if cmd == nil {
+		t.Error("the busy refusal returned no flash expiry command")
+	}
+}
+
 // Review Focus 5.
 func TestPaneDrag_SourceMovedAwayByABroadcastCancels(t *testing.T) {
 	t.Setenv("QUIL_HOME", t.TempDir())

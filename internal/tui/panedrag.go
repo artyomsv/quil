@@ -109,18 +109,24 @@ func overlayOutline(base string, r PaneRect, totalW int) string {
 }
 
 // beginPaneDrag arms a drag of the pane under (x, y) in the active tab. The
-// caller has cleared every other drag. A busy tab arms nothing: its tree is
-// about to change under the drag.
-func (m *Model) beginPaneDrag(x, y int) {
+// caller has cleared every other drag. A busy tab arms nothing, since its
+// tree is about to change under the drag, and flashes tabBusyFlash like the
+// menu, palette and key paths do.
+func (m *Model) beginPaneDrag(x, y int) tea.Cmd {
 	tab := m.activeTabModel()
-	if tab == nil || tab.Root == nil || m.tabLayoutBusy(tab) {
-		return
+	if tab == nil || tab.Root == nil {
+		return nil
+	}
+	if m.tabLayoutBusy(tab) {
+		m.setFlash(tabBusyFlash)
+		return m.flashCmd()
 	}
 	r := m.paneRectAt(x, y)
 	if r == nil || r.Pane == nil {
-		return
+		return nil
 	}
 	m.paneDrag = paneDragState{srcPaneID: r.Pane.ID, srcTabID: tab.ID}
+	return nil
 }
 
 // paneDragIntact reports whether the armed drag still describes the screen:

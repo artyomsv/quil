@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -216,20 +217,24 @@ func TestSidebarGroups_ProjectDroppedOnAHeaderJoinsThatGroup(t *testing.T) {
 	}
 }
 
-// A plain CLICK never changes membership. The press switches the active
-// project, and the collapsed G1 above was showing the OLD active project, so
-// its row (two for a remote one) vanishes and every row below moves up — the
-// release y then names G3's header, although the pointer never moved.
+// A plain CLICK never changes membership — nor does a click whose pointer
+// jitters sideways on the press row. The press switches the active project,
+// and the collapsed G1 above was showing the OLD active project, so its row
+// (two for a remote one) vanishes and every row below moves up: the press row
+// y=5 now names G3's header, although the pointer never left it.
 func TestSidebarGroups_ClickWithoutMotionNeverRegroups(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		dest   string // P0's host
-		pressY int    // P2's row before the press
+		name    string
+		dest    string // P0's host
+		pressed int    // the project on row 5 before the press
+		jitter  bool   // a motion one cell sideways on the press row
 	}{
 		// Rows: 0 PROJECTS, 1 ▸ G1, 2 P0, 3 ▾ G2, 4 P1, 5 P2, 6 ▾ G3, 7 P3.
-		{"a local active member", "", 5},
+		{"a local active member", "", 2, false},
+		{"a local active member, sideways jitter", "", 2, true},
 		// Rows: 0 PROJECTS, 1 ▸ G1, 2 P0, 3 P0's host, 4 ▾ G2, 5 P1, 6 P2, 7 ▾ G3, 8 P3.
-		{"a remote active member", "gpu01", 6},
+		{"a remote active member", "gpu01", 1, false},
+		{"a remote active member, sideways jitter", "gpu01", 1, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := newSplitDragTestModel(t)
@@ -247,18 +252,22 @@ func TestSidebarGroups_ClickWithoutMotionNeverRegroups(t *testing.T) {
 				{Name: "G2", Members: []groupMember{{ID: "p1"}, {ID: "p2"}}},
 				{Name: "G3", Members: []groupMember{{ID: "p3"}}},
 			}}
-			got, _ := grpPress(*m, tc.pressY, tea.MouseLeft) // P2
-			if got.activeProject != 2 {
-				t.Fatalf("setup: the press activated project %d, want 2", got.activeProject)
+			got, _ := grpPress(*m, 5, tea.MouseLeft)
+			if got.activeProject != tc.pressed {
+				t.Fatalf("setup: the press activated project %d, want %d", got.activeProject, tc.pressed)
 			}
-			// Not vacuous: after the press the release row IS G3's header.
+			// Not vacuous: after the press the press row IS G3's header.
 			rows, _ := got.sidebarRows(22)
 			if r := rows[5]; r.kind != sidebarRowGroup || r.index != 2 {
 				t.Fatalf("setup: row 5 after the press = %+v, want G3's header", r)
 			}
+			if tc.jitter {
+				got, _ = grpAt(got, tea.MouseMotionMsg{X: 4, Y: 5, Button: tea.MouseLeft})
+			}
 			got, _ = grpRelease(got, 5)
-			if g := got.groups.groupOf("", "p2"); g != 1 {
-				t.Fatalf("P2 is in group %d after a motionless click, want 1 (G2)", g)
+			id := got.projects[tc.pressed].ID
+			if g := got.groups.groupOf("", id); g != 1 {
+				t.Fatalf("%s is in group %d after a click, want 1 (G2)", id, g)
 			}
 			if got.groupsSeq != 0 {
 				t.Errorf("groupsSeq = %d, want 0 — a click saves nothing", got.groupsSeq)
@@ -778,6 +787,115 @@ func TestProjectCtxMenu_RefusedWhileTheGroupEditorIsOpen(t *testing.T) {
 	}
 	if !got.groupEdit.active() || got.groupEdit.input != "ab" {
 		t.Fatalf("editor = %+v, want still open holding ab", got.groupEdit)
+	}
+}
+
+// A refused name flashes where the user is looking. At an ordinary width the
+// status bar's right side does not fit beside the editor and is dropped whole
+// — the flash lived there, so Enter looked like it did nothing. The flash now
+// follows the caret, and the bar stays ONE line of at most the width even for
+// a 32-wide-rune name, whose editor text gives way to keep the flash.
+func TestGroupEdit_RefusalFlashIsVisibleOnTheStatusBar(t *testing.T) {
+	for _, tc := range []struct {
+		name, typed, existing, flash string
+	}{
+		{"empty name", "", "", groupNameEmptyFlash},
+		{"taken wide name", strings.Repeat("构", maxGroupNameRunes), strings.Repeat("构", maxGroupNameRunes), groupNameTakenFlash},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _ := newGroupsSidebarModel(t)
+			// A real version string: with it the flash-bearing right side
+			// no longer fits beside the editor at 100 columns, as in use.
+			m.version = "1.78.0"
+			if tc.existing != "" {
+				m.groups.Groups[1].Name = tc.existing
+			}
+			got := grpOpenGroupList(t, *m, 1)
+			got, _ = grpChoose(t, got, grpMenuRow(t, got.ctxMenu, ctxActNewGroup, ""))
+			got = grpType(got, tc.typed)
+			got, _ = grpKey(got, tea.KeyEnter) // the flash tick: not run
+			if got.width != 100 || got.flashText != tc.flash {
+				t.Fatalf("setup: width %d flash %q, want 100 / %q", got.width, got.flashText, tc.flash)
+			}
+			bar := got.renderStatusBar()
+			if strings.Contains(bar, "\n") {
+				t.Fatalf("the status bar wrapped onto %d lines: %q", strings.Count(bar, "\n")+1, stripANSI(bar))
+			}
+			if w := lipgloss.Width(bar); w > 100 {
+				t.Errorf("the status bar is %d cells, over the 100-cell width", w)
+			}
+			if plain := stripANSI(bar); !strings.Contains(plain, tc.flash) {
+				t.Errorf("status bar %q does not show the flash %q", plain, tc.flash)
+			}
+		})
+	}
+}
+
+// A 32-wide-rune name in the editor is 76 cells of status bar on its own; on
+// a narrow terminal it is cut, never wrapped — .Width wraps an over-wide line
+// and a two-row status bar pushes the frame one row past the terminal.
+func TestGroupEdit_LongNameNeverWrapsTheStatusBar(t *testing.T) {
+	m, _ := newGroupsSidebarModel(t)
+	got := grpOpenGroupList(t, *m, 1)
+	got, _ = grpChoose(t, got, grpMenuRow(t, got.ctxMenu, ctxActNewGroup, ""))
+	got = grpType(got, strings.Repeat("构", maxGroupNameRunes))
+	got.width = 60
+	bar := got.renderStatusBar()
+	if strings.Contains(bar, "\n") {
+		t.Fatalf("the status bar wrapped: %q", stripANSI(bar))
+	}
+	if w := lipgloss.Width(bar); w != 60 {
+		t.Errorf("the status bar is %d cells, want 60", w)
+	}
+}
+
+// Move to group… lists one row per group, so enough groups overflow the
+// terminal. The list cannot open then, and says so rather than closing the
+// menu silently.
+func TestProjectCtxMenu_TooManyGroupsToListFlashes(t *testing.T) {
+	m, _ := newGroupsSidebarModel(t)
+	for i := 0; i < 20; i++ {
+		if _, err := m.groups.addGroup(fmt.Sprintf("extra-%02d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m.height = 24
+	got, _ := grpPress(*m, 1, tea.MouseRight) // L1
+	if got.ctxMenu.projectID == "" {
+		t.Fatal("setup: no project menu")
+	}
+	got, _ = grpChoose(t, got, grpMenuRow(t, got.ctxMenu, ctxActGroupList, "")) // the flash tick: not run
+	if got.ctxMenu.open() {
+		t.Fatalf("a %d-group list opened on a 24-row terminal", len(got.groups.Groups))
+	}
+	if got.flashText != groupListTooTallFlash {
+		t.Fatalf("flash = %q, want %q", got.flashText, groupListTooTallFlash)
+	}
+}
+
+// Right-clicking a PANE row in the sidebar opens no pane menu over the
+// group-name editor, like the project and tab menus — and focuses nothing.
+func TestSidebarPaneMenu_RefusedWhileTheGroupEditorIsOpen(t *testing.T) {
+	m, _ := newGroupsSidebarModel(t)
+	rows, _ := m.sidebarRows(22)
+	if r := rows[11]; r.kind != sidebarRowPane || r.paneID != "p2" {
+		t.Fatalf("setup: row 11 = %+v, want pane p2's row", r)
+	}
+	if tab := m.activeTabModel(); tab == nil || tab.ActivePane == "p2" {
+		t.Fatal("setup: p2 must not start focused, or the focus check below is vacuous")
+	}
+	got := grpOpenGroupList(t, *m, 1)
+	got, _ = grpChoose(t, got, grpMenuRow(t, got.ctxMenu, ctxActNewGroup, ""))
+	got = grpType(got, "ab")
+	got, _ = grpPress(got, 11, tea.MouseRight)
+	if got.ctxMenu.open() {
+		t.Fatalf("a pane menu opened over the group editor (rows %q)", grpLabels(got.ctxMenu))
+	}
+	if !got.groupEdit.active() || got.groupEdit.input != "ab" {
+		t.Fatalf("editor = %+v, want still open holding ab", got.groupEdit)
+	}
+	if tab := got.activeTabModel(); tab == nil || tab.ActivePane == "p2" {
+		t.Error("the refused right-click still focused the pane")
 	}
 }
 

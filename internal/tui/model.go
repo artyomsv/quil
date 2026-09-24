@@ -901,7 +901,8 @@ type Model struct {
 	// zero value — reads as "no drag" without a constructor having to seed it.
 	projectDragging    bool
 	projectDragIdx     int
-	projectDragMoved   bool // a motion arrived: only a MOVED drag regroups (finishProjectDrag)
+	projectDragMoved   bool // the pointer left the press row: only a MOVED drag regroups (finishProjectDrag)
+	projectDragPressY  int  // the press row; motion on it (sideways jitter) is not a drag
 	sidebarTabDragging bool
 	sidebarTabDragIdx  int
 
@@ -1829,6 +1830,7 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 					case sidebarRowProject:
 						m.projectDragging = true
 						m.projectDragIdx = idx
+						m.projectDragPressY = msg.Y
 					case sidebarRowTab:
 						m.sidebarTabDragging = true
 						m.sidebarTabDragIdx = idx
@@ -1863,6 +1865,12 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 					// The header menu: rename, collapse/expand, move, delete.
 					m.openGroupCtxMenu(idx, msg.X, msg.Y)
 				case sidebarRowPane:
+					// Not over the group-name editor, like the project and tab
+					// menus: it owns every key, and the pane menu would sit
+					// behind it unreachable. Nothing is focused either.
+					if m.groupEdit.active() {
+						break
+					}
 					// Right-click FOCUSES the pane first, exactly like
 					// left-click (activateSidebarRow → focusSidebarPane) —
 					// reversing an earlier "does not move focus" decision.
@@ -2142,6 +2150,13 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 			return m, nil
 		}
 		if m.projectDragging {
+			// A drag starts only once the pointer leaves the press ROW.
+			// Sideways jitter on it is still a click — and the press already
+			// switched projects, which can shift every row below a collapsed
+			// group, so this y may now name a different row than was pressed.
+			if !m.projectDragMoved && msg.Y == m.projectDragPressY {
+				return m, nil
+			}
 			m.projectDragMoved = true
 			// Sequenced: trackProjectDrag mutates m through a pointer receiver.
 			cmd := m.trackProjectDrag(msg.X, msg.Y)
@@ -3598,6 +3613,7 @@ func (m *Model) clearDragState() {
 	m.projectDragging = false
 	m.projectDragIdx = 0
 	m.projectDragMoved = false
+	m.projectDragPressY = 0
 	m.sidebarTabDragging = false
 	m.sidebarTabDragIdx = 0
 	m.groupDragging = false
@@ -7014,6 +7030,8 @@ func (m Model) renderTOMLEditorFullScreen() string {
 func (m Model) renderStatusBar() string {
 	// Left side: pane info
 	left := "quil"
+	flashActive := m.flashText != "" && time.Now().Before(m.flashUntil)
+	flashOnLeft := false
 	if m.renamingPane {
 		left = "Rename pane: " + m.paneRenameInput + "▎"
 	} else if m.groupEdit.active() {
@@ -7022,6 +7040,19 @@ func (m Model) renderStatusBar() string {
 			label = "Rename group: "
 		}
 		left = label + sanitizeRemoteText(m.groupEdit.input) + "▎"
+		// The editor's refusals flash HERE, right after the caret. The right
+		// side is dropped whenever it does not fit beside the left, and with
+		// the editor there it rarely does — a refusal the user cannot see
+		// reads as Enter doing nothing. The editor text gives way (its tail,
+		// with the caret, is kept) so the flash always fits.
+		if flashActive {
+			suffix := "  " + m.flashText
+			if budget := m.width - 2 - lipgloss.Width(suffix); m.width > 2 && lipgloss.Width(left) > budget {
+				left = "…" + lastCellsToWidth(left, budget-1)
+			}
+			left += suffix
+			flashOnLeft = true
+		}
 	} else if tab := m.activeTabModel(); tab != nil {
 		paneCount := 0
 		if tab.Root != nil {
@@ -7121,14 +7152,20 @@ func (m Model) renderStatusBar() string {
 	if count := m.notifications.Count(); count > 0 && !m.notifications.visible {
 		right = fmt.Sprintf("[%d events] ", count) + right
 	}
-	if m.flashText != "" && time.Now().Before(m.flashUntil) {
+	if flashActive && !flashOnLeft {
 		right = m.flashText + " | " + right
 	}
 
 	// Fit within width: left takes priority
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right) - 2 // 2 for padding
 	if gap < 2 {
-		// Not enough room for hints
+		// Not enough room for hints. The left is CUT to the bar as well:
+		// .Width WRAPS an over-wide line, and a status bar two rows tall
+		// pushes the frame one row past the terminal. (No width yet — a
+		// Model before its first WindowSizeMsg — keeps the old behaviour.)
+		if m.width > 2 {
+			left = truncateToWidth(left, m.width-2)
+		}
 		return statusBarStyle.Width(m.width).Render(left)
 	}
 

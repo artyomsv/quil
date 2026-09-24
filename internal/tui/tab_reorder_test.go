@@ -98,6 +98,7 @@ func TestModel_ClearDragState(t *testing.T) {
 		projectDragging:    true,
 		projectDragIdx:     2,
 		projectDragMoved:   true,
+		projectDragPressY:  7,
 		sidebarTabDragging: true,
 		sidebarTabDragIdx:  3,
 		groupDragging:      true,
@@ -132,6 +133,9 @@ func TestModel_ClearDragState(t *testing.T) {
 	}
 	if m.projectDragMoved {
 		t.Error("projectDragMoved = true, want false")
+	}
+	if m.projectDragPressY != 0 {
+		t.Errorf("projectDragPressY = %d, want 0", m.projectDragPressY)
 	}
 	if m.sidebarTabDragging {
 		t.Error("sidebarTabDragging = true, want false")

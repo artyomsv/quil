@@ -119,7 +119,13 @@ func buildProjectGroupItems(groups []projectGroup, current int) []ctxMenuItem {
 // items replaced, cursor on the current choice, Esc closes the whole menu, the
 // box re-derived from its own position, and the menu CLOSED when even the
 // re-clamped box cannot fit. Membership is read by (projectDest, projectID).
-func (m *Model) openProjectGroupList() {
+//
+// Unlike the colour list, this one GROWS with the user's data: one row per
+// group, so ~18 groups overflow a 24-row terminal. Closing silently there
+// reads as a menu row that does nothing, so the close flashes why. (The box is
+// at most ctxMenuTitleCap+4 wide, so above minTermWidth it is the HEIGHT that
+// fails.) Returns the flash tick, or nil.
+func (m *Model) openProjectGroupList() tea.Cmd {
 	cur := m.groups.groupOf(m.ctxMenu.projectDest, m.ctxMenu.projectID)
 	s := m.ctxMenu
 	s.items = buildProjectGroupItems(m.groups.Groups, cur)
@@ -131,10 +137,12 @@ func (m *Model) openProjectGroupList() {
 	w, h := s.boxSize()
 	if w > m.width || h > m.height-2 {
 		m.closeCtxMenu()
-		return
+		m.setFlash(groupListTooTallFlash)
+		return m.flashCmd()
 	}
 	s.x, s.y = ctxMenuPos(m.ctxMenu.x-1, m.ctxMenu.y-1, w, h, m.width, m.height)
 	m.ctxMenu = s
+	return nil
 }
 
 // moveProjectToGroup puts (dest, id) in the group named name, resolved NOW —

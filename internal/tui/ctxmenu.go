@@ -953,8 +953,8 @@ func (m Model) executeCtxMenuItem(item ctxMenuItem) (tea.Model, tea.Cmd) {
 		// Move to group… re-populates the menu in place, so it is the one row
 		// that runs BEFORE the close below.
 		if item.enabled && item.id == ctxActGroupList {
-			m.openProjectGroupList()
-			return m, nil
+			cmd := m.openProjectGroupList()
+			return m, cmd
 		}
 		m.closeCtxMenu()
 		if !item.enabled {

@@ -35,6 +35,9 @@ const (
 	groupNameTakenFlash  = "A group with that name already exists"
 	groupNameEmptyFlash  = "Group name cannot be empty"
 	groupSaveFailedFlash = "Could not save project groups"
+	// groupListTooTallFlash: Move to group… lists one row per group, and a
+	// list taller than the terminal cannot open.
+	groupListTooTallFlash = "Too many groups to list here"
 )
 
 var (
@@ -361,7 +364,14 @@ func loadProjectGroups(path string) (projectGroups, error) {
 	return sanitizeLoadedGroups(projectGroups{Groups: file.Groups}), nil
 }
 
-// saveProjectGroups writes g atomically: .tmp, then rename over the real file.
+// saveProjectGroups writes g atomically: a UNIQUE temp file beside the real
+// one, then rename over it. The temp name must be unique, not path+".tmp":
+// groupsWriter serialises saves inside ONE TUI only, and two TUIs on one
+// machine prune on the same broadcast — sharing a fixed .tmp, one truncates
+// and rewrites it under the other, a longer write followed by a shorter one
+// leaves mixed JSON, and that gets renamed into place for the next start to
+// quarantine. The persist/notes.go shape: CreateTemp, write, chmod, close,
+// rename, and the temp removed on every failure.
 func saveProjectGroups(path string, g projectGroups) error {
 	groups := g.Groups
 	if groups == nil {
@@ -374,19 +384,38 @@ func saveProjectGroups(path string, g projectGroups) error {
 	if len(data) > projectGroupsFileCap {
 		return fmt.Errorf("project groups encode to %d bytes, over the %d-byte cap", len(data), projectGroupsFileCap)
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return fmt.Errorf("create %s: %w", filepath.Dir(path), err)
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("create %s: %w", dir, err)
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return fmt.Errorf("write %s: %w", tmp, err)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp.*")
+	if err != nil {
+		return fmt.Errorf("create temp for %s: %w", path, err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		// Best effort: the rename error is the one worth reporting, and a
-		// leftover .tmp is overwritten by the next save anyway.
-		_ = os.Remove(tmp)
+	tmpPath := tmp.Name()
+	committed := false
+	defer func() {
+		if !committed {
+			// Best effort: the error being returned is the one worth
+			// reporting, and a uniquely named leftover would never be reused.
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write %s: %w", tmpPath, err)
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("chmod %s: %w", tmpPath, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close %s: %w", tmpPath, err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("replace %s: %w", path, err)
 	}
+	committed = true
 	return nil
 }
 

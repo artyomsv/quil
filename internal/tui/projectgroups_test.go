@@ -2,10 +2,12 @@ package tui
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"unicode/utf8"
 
@@ -234,8 +236,8 @@ func TestProjectGroups_SaveLoadRoundTrip(t *testing.T) {
 	if err := saveProjectGroups(path, want); err != nil {
 		t.Fatalf("save: %v", err)
 	}
-	if _, err := os.Stat(path + ".tmp"); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("the .tmp file was left behind (stat err = %v)", err)
+	if left := grpTempFiles(t, path); len(left) != 0 {
+		t.Errorf("temp files left behind: %v", left)
 	}
 	got, err := loadProjectGroups(path)
 	if err != nil {
@@ -243,6 +245,77 @@ func TestProjectGroups_SaveLoadRoundTrip(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("round trip = %+v, want %+v", got, want)
+	}
+}
+
+// grpTempFiles lists the save temp files beside path — the fixed ".tmp" name
+// included, so a regression to it is seen too.
+func grpTempFiles(t *testing.T, path string) []string {
+	t.Helper()
+	matches, err := filepath.Glob(path + ".tmp*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return matches
+}
+
+// Two TUIs on one machine save the same file — and after a broadcast prune,
+// at the same moment. groupsWriter orders saves inside ONE process only, so
+// the temp file must be unique per save: a shared fixed ".tmp" is truncated
+// and rewritten under the other writer, a longer write then a shorter one
+// leaves mixed JSON, and the rename installs it for the next start to
+// quarantine. Every save must succeed and the file must always parse.
+func TestSaveProjectGroups_ConcurrentSavesNeverCorruptTheFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "project-groups.json")
+	long := projectGroups{}
+	for i := 0; i < 40; i++ {
+		long.Groups = append(long.Groups, projectGroup{Name: fmt.Sprintf("group-%02d-%s", i, strings.Repeat("x", 20))})
+	}
+	short := grpFromNames("s")
+	var wg sync.WaitGroup
+	errs := make(chan error, 400)
+	for _, snap := range []projectGroups{long, short} {
+		wg.Add(1)
+		go func(g projectGroups) {
+			defer wg.Done()
+			for i := 0; i < 200; i++ {
+				if err := saveProjectGroups(path, g); err != nil {
+					errs <- err
+					return
+				}
+			}
+		}(snap)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("a concurrent save failed: %v", err)
+	}
+	got, err := loadProjectGroups(path)
+	if err != nil {
+		t.Fatalf("the file does not parse after concurrent saves: %v", err)
+	}
+	if !reflect.DeepEqual(got, long) && !reflect.DeepEqual(got, short) {
+		t.Fatalf("the file holds %s, neither snapshot", grpNames(got))
+	}
+	if left := grpTempFiles(t, path); len(left) != 0 {
+		t.Errorf("temp files left behind: %v", left)
+	}
+}
+
+// A save that fails at the rename leaves no temp file behind: the name is
+// unique per save, so nothing would ever reuse or overwrite a leftover.
+func TestSaveProjectGroups_FailedRenameRemovesItsTempFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "project-groups.json")
+	// A non-empty DIRECTORY where the file should be: the rename fails.
+	if err := os.MkdirAll(filepath.Join(path, "occupied"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveProjectGroups(path, grpFromNames("a")); err == nil {
+		t.Fatal("a save over a directory succeeded")
+	}
+	if left := grpTempFiles(t, path); len(left) != 0 {
+		t.Errorf("a failed save left temp files behind: %v", left)
 	}
 }
 

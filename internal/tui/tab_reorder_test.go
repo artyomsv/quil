@@ -99,6 +99,7 @@ func TestModel_ClearDragState(t *testing.T) {
 		projectDragIdx:     2,
 		sidebarTabDragging: true,
 		sidebarTabDragIdx:  3,
+		paneDrag:           paneDragState{srcPaneID: "p1", srcTabID: "t1", targetPaneID: "p2", zone: zoneLeft, overTabID: "t2"},
 	}
 	m.clearDragState()
 	if m.tabDragFromIdx != -1 {
@@ -136,5 +137,8 @@ func TestModel_ClearDragState(t *testing.T) {
 	}
 	if m.sidebarTabDragIdx != 0 {
 		t.Errorf("sidebarTabDragIdx = %d, want 0", m.sidebarTabDragIdx)
+	}
+	if m.paneDrag != (paneDragState{}) {
+		t.Errorf("paneDrag = %+v, want zero value", m.paneDrag)
 	}
 }

@@ -911,6 +911,10 @@ type Model struct {
 	splitDragNode *LayoutNode
 	splitDragRect BorderHit
 
+	// paneDrag is an Alt+drag of a whole pane (panedrag.go). Zero value = no
+	// drag. Rides clearDragState like every other drag.
+	paneDrag paneDragState
+
 	// Project-sidebar edge drag. sidebarDragging is set while a drag is in
 	// flight; sidebarDragW is the PENDING width, painted as a preview rule and
 	// committed to sidebarWidth only on release.
@@ -1697,6 +1701,15 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		return m.handleKey(msg)
 
 	case tea.MouseClickMsg:
+		// Per-press trace for modified clicks — the mouse twin of handleKey's
+		// modified-key trace. [logging] level = "debug" (the dev build's
+		// default) shows exactly which modifiers the terminal delivered, which
+		// is how the pane drag's chord was verified in Windows Terminal.
+		if msg.Mod != 0 {
+			logger.Debug("mouse click: button=%v x=%d y=%d alt=%t ctrl=%t shift=%t",
+				msg.Button, msg.X, msg.Y, msg.Mod.Contains(tea.ModAlt),
+				msg.Mod.Contains(tea.ModCtrl), msg.Mod.Contains(tea.ModShift))
+		}
 		// A click can change the active pane, so a sequence completed after one
 		// would target a different pane than the one the prefix was pressed in.
 		m.cancelSequence()
@@ -1958,6 +1971,18 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 					return m, cmd
 				}
 			} else if msg.Y < m.height-1 {
+				// The pane-drag chord (panedrag.go) arms a drag of the pane
+				// under the press, AHEAD of the notes editor, split border,
+				// scrollbar and selection arms — so it never starts any of
+				// them, and a press that cannot arm (busy tab) is swallowed
+				// rather than falling through to one. Not in notes mode: the
+				// editor owns the layout there, and the click behaves as before.
+				if paneDragModifier(msg.Mod) && !m.notesMode {
+					m.clearDragState()
+					m.selection = nil
+					m.beginPaneDrag(msg.X, msg.Y)
+					return m, nil
+				}
 				// Notes editor click takes priority — the document anchor
 				// is resolved once at click time so motion events can't
 				// drift it if ScrollTop changes mid-drag.
@@ -2053,6 +2078,10 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		// invariant). Off-Y=0 motion during a tab drag pauses reorder but
 		// keeps the drag alive so the user can return to the tab bar
 		// without releasing.
+		if m.paneDrag.active() {
+			m.trackPaneDrag(msg.X, msg.Y)
+			return m, nil
+		}
 		if m.tabDragFromIdx >= 0 && msg.Y == 0 {
 			// The move waits for the pointer to cross the hovered tab's
 			// MIDDLE (dragSlot) — moving on first contact is what made the
@@ -2138,6 +2167,11 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		}
 		if m.ctxMenu.open() {
 			return m, nil // no drags can be live while the menu is open
+		}
+		// A pane drag commits (or cancels) on release — finishPaneDrag.
+		if m.paneDrag.active() {
+			cmd := m.finishPaneDrag(msg.X, msg.Y)
+			return m, cmd
 		}
 		// A split-border drag commits on release: one PTY resize per pane
 		// plus the persisted layout ratio (finishSplitDrag), highlight off.
@@ -3512,6 +3546,7 @@ func (m *Model) clearDragState() {
 	m.splitDragRect = BorderHit{}
 	m.sidebarDragging = false
 	m.sidebarDragW = 0
+	m.paneDrag = paneDragState{}
 }
 
 // beginSidebarDrag arms an edge drag, seeding the pending width from the
@@ -4760,6 +4795,9 @@ func (m Model) View() tea.View {
 			rows := strings.Count(paneArea, "\n") + 1
 			paneArea = overlayAt(paneArea, sidebarDragRuleBlock(rows), m.sidebarDragW-1, 0, m.width)
 		}
+		// Pane drag preview — composited like the sidebar rule above, on
+		// paneArea, whose first line is screen row 0.
+		paneArea = m.paneDragOverlay(paneArea)
 		if m.ctxMenu.open() {
 			// ctxMenu coords are screen rows and paneArea's first line IS
 			// screen row 0 (the tab bar), so no shift.
@@ -4864,6 +4902,12 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// through inside the handler (never swallow quit).
 	if m.ctxMenu.open() {
 		return m.handleCtxMenuKey(key)
+	}
+
+	// Esc abandons an armed pane drag. Consumed: it is the drag's cancel key.
+	if m.paneDrag.active() && key == "esc" {
+		m.clearDragState()
+		return m, nil
 	}
 
 	// Notes mode: while active, keyboard input is split between the bound

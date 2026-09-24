@@ -119,6 +119,14 @@ func TestQuilDir_EnvOverride(t *testing.T) {
 	}
 }
 
+func TestProjectGroupsPath_IsInQuilDir(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("QUIL_HOME", dir)
+	if got, want := config.ProjectGroupsPath(), filepath.Join(dir, "project-groups.json"); got != want {
+		t.Errorf("ProjectGroupsPath() = %q, want %q", got, want)
+	}
+}
+
 func TestShowDisclaimerDefault(t *testing.T) {
 	cfg := config.Default()
 	if !cfg.UI.ShowDisclaimer {

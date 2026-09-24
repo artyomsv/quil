@@ -902,6 +902,13 @@ func InstancesPath() string {
 	return filepath.Join(QuilDir(), "instances.json")
 }
 
+// ProjectGroupsPath is the TUI-owned file holding the sidebar's project groups.
+// Client-side only — no daemon reads it — so one group can mix projects from
+// several hosts. Several TUIs on one machine share it; the last write wins.
+func ProjectGroupsPath() string {
+	return filepath.Join(QuilDir(), "project-groups.json")
+}
+
 // RecentCWDsPath returns the file storing the last-used working directories
 // offered as a quick pick in the pane setup dialog. TUI-owned, single writer.
 //

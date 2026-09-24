@@ -209,7 +209,9 @@ func TestSidebarDrag_ThroughUpdate(t *testing.T) {
 		t.Fatal("a press on the sidebar's last column did not arm the drag — the swallow branch took it")
 	}
 
-	updated, _ = got.Update(tea.MouseMotionMsg{X: 40, Y: 10})
+	// The button is held, as a terminal reports a drag: buttonless motion only
+	// ever moves the sidebar hover.
+	updated, _ = got.Update(tea.MouseMotionMsg{X: 40, Y: 10, Button: tea.MouseLeft})
 	got = updated.(Model)
 	if got.sidebarWidth != 22 {
 		t.Errorf("m.sidebarWidth = %d mid-drag, want it pinned at 22", got.sidebarWidth)

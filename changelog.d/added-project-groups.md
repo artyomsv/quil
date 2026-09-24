@@ -7,7 +7,8 @@ headline: Group projects in the sidebar and collapse them
   shows its projects' badges (and the project you are in); drag headers to
   reorder the groups, and drag a project onto a header, or back onto the
   PROJECTS heading, to move it in or out. Right-click a header to rename,
-  reorder or delete the group — deleting only ungroups its projects. Groups
+  reorder or delete the group — deleting only ungroups its projects. The row
+  under the pointer is shaded, and the one being dragged stands out. Groups
   are saved on this machine and survive a restart. Two unbound keymap actions,
   `project.group_toggle` and `project.groups_collapse_all`, can be bound in
   `bindings.toml`.

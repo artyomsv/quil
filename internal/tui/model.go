@@ -370,7 +370,8 @@ const (
 	dialogWhatsNew       // post-upgrade highlights; also F1 → What's New
 	dialogNotifySettings // F1 → Settings → Notifications: toasts + sidebar event groups
 	dialogNewTemplate
-	dialogTabPick // pane context menu's "Move to tab…" picker — see tabpicker.go
+	dialogTabPick   // pane context menu's "Move to tab…" picker — see tabpicker.go
+	dialogGroupName // New group… / Rename group name editor — see projectgroups_input.go
 )
 
 // tuiClient is the subset of *ipc.Client the TUI uses on the Model. Defined
@@ -469,7 +470,7 @@ type Model struct {
 	renameInput        string
 	renamingPane       bool
 	paneRenameInput    string
-	groupEdit          groupEditState // status-bar group-name editor (projectgroups_input.go)
+	groupEdit          groupEditState // the dialogGroupName editor's data (projectgroups_input.go)
 	pendingWidth       int
 	pendingHeight      int
 	resizeSeq          int
@@ -919,6 +920,10 @@ type Model struct {
 	groupDragging  bool
 	groupDragIdx   int
 	groupDragMoved bool
+	// sidebarHover names the PROJECTS row under a buttonless pointer, painted
+	// light grey (sidebar_hover.go). A KEY, not a row index: a broadcast can
+	// rebuild the rows under a pointer that has not moved.
+	sidebarHover sidebarHoverKey
 
 	// Split-border drag-resize. splitDragNode is non-nil while a border
 	// drag is in progress; splitDragRect captures the owning node's region
@@ -1865,12 +1870,6 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 					// The header menu: rename, collapse/expand, move, delete.
 					m.openGroupCtxMenu(idx, msg.X, msg.Y)
 				case sidebarRowPane:
-					// Not over the group-name editor, like the project and tab
-					// menus: it owns every key, and the pane menu would sit
-					// behind it unreachable. Nothing is focused either.
-					if m.groupEdit.active() {
-						break
-					}
 					// Right-click FOCUSES the pane first, exactly like
 					// left-click (activateSidebarRow → focusSidebarPane) —
 					// reversing an earlier "does not move focus" decision.
@@ -1960,7 +1959,7 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 			// Suppressed while a modal dialog, rename edit, or notes mode
 			// owns input (the lazygit overlay and sidebar swallows already
 			// returned above).
-			if m.dialog == dialogNone && !m.notesMode && !m.renaming && !m.renamingPane && !m.groupEdit.active() {
+			if m.dialog == dialogNone && !m.notesMode && !m.renaming && !m.renamingPane {
 				if msg.Y == 0 {
 					// The sidebar's own columns at row 0 are already
 					// swallowed above; hitTestTab answers -1 for the scroll
@@ -2101,8 +2100,12 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		if m.modalSwallowsMouse() {
 			return m, nil
 		}
-		// Overlay visible: swallow all motion (keyboard-only v1).
+		// Overlay visible: swallow all motion (keyboard-only v1). The sidebar
+		// takes no click meanwhile, so it shows no hover either.
 		if tab := m.activeTabModel(); tab != nil && tab.overlayVisible {
+			if msg.Button == tea.MouseNone && !m.setSidebarHover(sidebarHoverKey{}) {
+				m.skipRender = !prologueChangedView
+			}
 			return m, nil
 		}
 		// Context menu open: hover moves the cursor; everything else is
@@ -2110,6 +2113,19 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		if m.ctxMenu.open() {
 			if row, inside := ctxMenuHitRow(m.ctxMenu, msg.X, msg.Y); inside && row >= 0 && m.ctxMenu.items[row].enabled {
 				m.ctxMenu.cursor = row
+			}
+			return m, nil
+		}
+		// Buttonless motion only ever moves the sidebar hover. All-motion
+		// reporting is on whenever the sidebar is (View), so this fires on every
+		// pointer move over the whole terminal — and a drag is always driven
+		// with the button held, so nothing below may see it: a release lost
+		// outside the window would otherwise leave a drag following a pointer
+		// nobody is pressing. An unchanged hover is inert and serves the cached
+		// frame, or every move would rebuild it.
+		if msg.Button == tea.MouseNone {
+			if !m.setSidebarHover(m.sidebarHoverAt(msg.X, msg.Y)) {
+				m.skipRender = !prologueChangedView
 			}
 			return m, nil
 		}
@@ -2417,12 +2433,12 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		// Paste bypasses handleKey and lands in the PTY, so an armed prefix
 		// would read the next keystroke as a sequence step.
 		m.cancelSequence()
-		if m.groupEdit.active() {
-			// The status-bar group-name editor owns input like the palette
-			// does: without this branch the paste would fall through to
-			// sendClipboardToPane and be typed into the pane behind it (a
-			// trailing newline could run it).
+		if m.dialog == dialogGroupName {
+			// The group-name dialog owns input like the palette does: without
+			// this branch the paste would fall through to sendClipboardToPane
+			// and be typed into the pane behind it (a trailing CR could run it).
 			m.groupEdit.appendPaste(msg.Content)
+			m.clearGroupNameRefusal()
 			return m, nil
 		} else if m.dialog == dialogPluginMigration && m.migrationLeft != nil && !m.migrationRightFocus {
 			text := msg.Content // InsertMultiLine turns CR line breaks into newlines
@@ -4926,12 +4942,14 @@ func (m Model) View() tea.View {
 	// terminal ignores the sequence and simply never reports.
 	v.ReportFocus = true
 	v.MouseMode = tea.MouseModeCellMotion
-	if m.ctxMenu.open() {
+	if m.ctxMenu.open() || (m.dialog == dialogNone && m.projectSidebarWidth() > 0) {
 		// Cell-motion only reports motion while a button is held, so the
-		// context menu's hover highlight would be dead under it. All-motion
-		// is scoped to exactly the frames where the menu is open — the
-		// flood of buttonless motion events ends the moment it closes (the
-		// menu's Update routing swallows them meanwhile).
+		// context menu's hover highlight and the project sidebar's would be
+		// dead under it. All-motion is scoped to the frames that paint one of
+		// the two — a dialog draws no sidebar — and the flood of buttonless
+		// motion it brings is routed to the hover alone, which serves the
+		// cached frame while the hovered row is unchanged (Update's
+		// MouseMotionMsg arm).
 		v.MouseMode = tea.MouseModeAllMotion
 	}
 	// v.Cursor stays nil — the hardware cursor is never shown. Every pane
@@ -4978,9 +4996,6 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.renamingPane {
 		return m.handlePaneRenameKey(msg)
-	}
-	if m.groupEdit.active() {
-		return m.handleGroupEditKey(msg)
 	}
 
 	// Context menu open: it captures navigation until closed. Quit passes
@@ -7030,29 +7045,8 @@ func (m Model) renderTOMLEditorFullScreen() string {
 func (m Model) renderStatusBar() string {
 	// Left side: pane info
 	left := "quil"
-	flashActive := m.flashText != "" && time.Now().Before(m.flashUntil)
-	flashOnLeft := false
 	if m.renamingPane {
 		left = "Rename pane: " + m.paneRenameInput + "▎"
-	} else if m.groupEdit.active() {
-		label := "New group: "
-		if m.groupEdit.mode == groupEditRename {
-			label = "Rename group: "
-		}
-		left = label + sanitizeRemoteText(m.groupEdit.input) + "▎"
-		// The editor's refusals flash HERE, right after the caret. The right
-		// side is dropped whenever it does not fit beside the left, and with
-		// the editor there it rarely does — a refusal the user cannot see
-		// reads as Enter doing nothing. The editor text gives way (its tail,
-		// with the caret, is kept) so the flash always fits.
-		if flashActive {
-			suffix := "  " + m.flashText
-			if budget := m.width - 2 - lipgloss.Width(suffix); m.width > 2 && lipgloss.Width(left) > budget {
-				left = "…" + lastCellsToWidth(left, budget-1)
-			}
-			left += suffix
-			flashOnLeft = true
-		}
 	} else if tab := m.activeTabModel(); tab != nil {
 		paneCount := 0
 		if tab.Root != nil {
@@ -7152,7 +7146,7 @@ func (m Model) renderStatusBar() string {
 	if count := m.notifications.Count(); count > 0 && !m.notifications.visible {
 		right = fmt.Sprintf("[%d events] ", count) + right
 	}
-	if flashActive && !flashOnLeft {
+	if m.flashText != "" && time.Now().Before(m.flashUntil) {
 		right = m.flashText + " | " + right
 	}
 

@@ -531,9 +531,10 @@ func buildProjectCtxMenuItems(remote, unreachable bool) []ctxMenuItem {
 // pane border, which has no project analogue (the active-project marker in
 // the sidebar already shows which row is selected).
 func (m *Model) openProjectCtxMenu(p *ProjectModel, anchorX, anchorY int) {
-	// The group-name editor owns every key; a menu opened over it could start
-	// a second edit (New group…) that silently replaces the one being typed.
-	if m.groupEdit.active() {
+	// Not over a dialog. modalSwallowsMouse already keeps every click from
+	// here, so this is the second line — kept because over the group-name
+	// dialog a menu's New group… would replace the name being typed.
+	if m.dialog != dialogNone {
 		return
 	}
 	s := ctxMenuState{
@@ -715,7 +716,7 @@ func buildTabColorItems(current string) []ctxMenuItem {
 // that just left the screen — see switchProject's own notes comment for why
 // that matters.
 func (m *Model) openTabCtxMenu(tab *TabModel, anchorX, anchorY int) {
-	if m.notesMode || m.renaming || m.renamingPane || m.groupEdit.active() || m.dialog != dialogNone {
+	if m.notesMode || m.renaming || m.renamingPane || m.dialog != dialogNone {
 		return
 	}
 	s := ctxMenuState{

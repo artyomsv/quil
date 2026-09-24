@@ -639,10 +639,11 @@ Right-click a project row for Rename, Move to group… (see [Project groups](#pr
 
 With many projects — especially remote ones, which take two rows each — the sidebar's project list crowds out the PANES section below it. Put projects into named groups and collapse the ones you are not using:
 
-- **Right-click a project → Move to group…** lists your groups (the current one marked `✓`), **New group…** — type the name in the status bar, `Enter` to create, `Esc` to cancel — and **No group**. A group can mix local and remote projects.
+- **Right-click a project → Move to group…** lists your groups (the current one marked `✓`), **New group…** — a small dialog asks for the name, `Enter` to create, `Esc` to cancel — and **No group**. A group can mix local and remote projects.
 - **Click a group header** to collapse or expand it. A collapsed group is one row, `▸ name (N)`, carrying the summed badges of its projects — `▲`, the working spinner, `✓`, `◆`, `⌫`, and the link marker when one of its hosts is parked or retrying its connection. If the project you are in belongs to a collapsed group, its row still shows under the header.
 - **Drag a header** to reorder the groups. **Drag a project onto a header** to put it in that group, or onto the **PROJECTS** heading (or an ungrouped project) to take it out. Dragging a project up or down inside its group, or inside the ungrouped list, reorders it as before; `Alt+Shift+Up`/`Down` do the same and never move a project into or out of a group.
-- **Right-click a header** for Rename group, Collapse / Expand, Move up / down and Delete group. Deleting a group only ungroups its projects — nothing is closed.
+- The project row or group header under the mouse pointer is shaded light grey, and the project or header you are dragging light blue.
+- **Right-click a header** for Rename group (the same name dialog), Collapse / Expand, Move up / down and Delete group. Deleting a group only ungroups its projects — nothing is closed.
 - Two keymap actions ship unbound: `project.group_toggle` (the active project's group) and `project.groups_collapse_all` (collapse every group, or expand them all when all are collapsed). Bind them in `bindings.toml`.
 
 Group names are unique (ignoring case) and at most 32 characters. Groups live on this machine, in `project-groups.json` beside `config.toml`, and survive a restart; a project whose host is offline stays in its group, and one its daemon reports as gone leaves it. Two Quil windows on one machine share the file: the last change wins, and the other window picks it up on its next start. The project picker, `Alt+Shift+←/→` and `Alt+Shift+A` still reach every project, including those in collapsed groups.

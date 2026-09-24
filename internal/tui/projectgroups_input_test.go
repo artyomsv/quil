@@ -521,22 +521,97 @@ func TestProjectCtxMenu_NoGroupTakesAProjectOutOfItsGroup(t *testing.T) {
 	}
 }
 
-func TestProjectCtxMenu_NewGroupNamesAGroupAndPutsTheProjectInIt(t *testing.T) {
+// grpOpenNewGroup right-clicks the project row at y and chooses Move to group…
+// → New group…, which must open the group-name dialog.
+func grpOpenNewGroup(t *testing.T, m Model, y int) Model {
+	t.Helper()
+	got := grpOpenGroupList(t, m, y)
+	got, _ = grpChoose(t, got, grpMenuRow(t, got.ctxMenu, ctxActNewGroup, ""))
+	if got.ctxMenu.open() || got.dialog != dialogGroupName || got.groupEdit.mode != groupEditNew {
+		t.Fatalf("New group… did not open the name dialog (menu open %v, dialog %d, mode %d)",
+			got.ctxMenu.open(), got.dialog, got.groupEdit.mode)
+	}
+	return got
+}
+
+// grpDialogBox finds the one bordered box in a rendered frame and returns its
+// rows (ANSI stripped) with the box's left column and width. It fails when a
+// row between the corners does not carry BOTH side borders at the corners'
+// columns. A WRAPPED line keeps its borders — lipgloss wraps inside the box —
+// so wrapping shows as extra rows, which callers count (grpDialogRows).
+func grpDialogBox(t *testing.T, frame string) (rows []string, left, width int) {
+	t.Helper()
+	lines := strings.Split(stripANSI(frame), "\n")
+	top, bottom := -1, -1
+	for i, l := range lines {
+		if top < 0 && strings.Contains(l, "╭") {
+			top = i
+		}
+		if strings.Contains(l, "╰") {
+			bottom = i
+		}
+	}
+	if top < 0 || bottom <= top {
+		t.Fatalf("no dialog box in the frame:\n%s", strings.Join(lines, "\n"))
+	}
+	cellOf := func(l string, i int) int {
+		if i < 0 {
+			return -1
+		}
+		return lipgloss.Width(l[:i])
+	}
+	left = cellOf(lines[top], strings.Index(lines[top], "╭"))
+	width = cellOf(lines[top], strings.Index(lines[top], "╮")) - left + 1
+	for i := top; i <= bottom; i++ {
+		l := lines[i]
+		first, last := "│", "│"
+		if i == top {
+			first, last = "╭", "╮"
+		} else if i == bottom {
+			first, last = "╰", "╯"
+		}
+		if cellOf(l, strings.Index(l, first)) != left || cellOf(l, strings.LastIndex(l, last)) != left+width-1 {
+			t.Fatalf("box row %d is not a whole row of the box %d..%d: %q", i-top, left, left+width-1, l)
+		}
+		rows = append(rows, l)
+	}
+	return rows, left, width
+}
+
+// grpBoxRowWith returns the box row containing s, failing when none does.
+func grpBoxRowWith(t *testing.T, rows []string, s string) string {
+	t.Helper()
+	for _, r := range rows {
+		if strings.Contains(r, s) {
+			return r
+		}
+	}
+	t.Fatalf("no box row contains %q:\n%s", s, strings.Join(rows, "\n"))
+	return ""
+}
+
+// New group… opens a CENTRED dialog — the status-bar editor it replaced was
+// easy enough to miss that the menu row read as doing nothing.
+func TestGroupNameDialog_NewGroupNamesAGroupAndPutsTheProjectInIt(t *testing.T) {
 	t.Setenv("QUIL_HOME", t.TempDir())
 	m, _ := newGroupsSidebarModel(t)
 	m.SetProjectGroups(ProjectGroupsState{groups: m.groups}, config.ProjectGroupsPath())
-	got := grpOpenGroupList(t, *m, 1) // L1, ungrouped
-	got, _ = grpChoose(t, got, grpMenuRow(t, got.ctxMenu, ctxActNewGroup, ""))
-	if got.ctxMenu.open() || got.groupEdit.mode != groupEditNew {
-		t.Fatalf("New group… did not open the name editor (menu open %v, mode %d)", got.ctxMenu.open(), got.groupEdit.mode)
-	}
+	got := grpOpenNewGroup(t, *m, 1) // L1, ungrouped
 	got = grpType(got, "ops")
-	if bar := got.renderStatusBar(); !strings.Contains(bar, "New group: ops▎") {
-		t.Errorf("status bar %q does not show the editor", stripANSI(bar))
+	frame := got.View().Content
+	rows, left, width := grpDialogBox(t, frame)
+	grpBoxRowWith(t, rows, "New group")
+	grpBoxRowWith(t, rows, "Name: ops▎")
+	grpBoxRowWith(t, rows, "Enter save · Esc cancel")
+	if right := got.width - left - width; left-right > 1 || right-left > 1 {
+		t.Errorf("box spans columns %d..%d of %d — not centred", left, left+width-1, got.width)
+	}
+	if strings.Contains(stripANSI(frame), "New group: ") {
+		t.Error("the status-bar editor is still drawn")
 	}
 	got, cmd := grpKey(got, tea.KeyEnter)
-	if got.groupEdit.active() {
-		t.Fatal("Enter on a valid name must close the editor")
+	if got.dialog != dialogNone {
+		t.Fatal("Enter on a valid name must close the dialog")
 	}
 	if names := grpNames(got.groups); names != "G-A,G-B,ops" {
 		t.Fatalf("groups = %s, want the new group last", names)
@@ -551,19 +626,22 @@ func TestProjectCtxMenu_NewGroupNamesAGroupAndPutsTheProjectInIt(t *testing.T) {
 	}
 }
 
-func TestGroupEdit_RefusesEmptyAndDuplicateNamesAndStaysOpen(t *testing.T) {
+func TestGroupNameDialog_RefusesEmptyAndDuplicateNamesAndStaysOpen(t *testing.T) {
 	m, _ := newGroupsSidebarModel(t)
-	got := grpOpenGroupList(t, *m, 1)
-	got, _ = grpChoose(t, got, grpMenuRow(t, got.ctxMenu, ctxActNewGroup, ""))
+	got := grpOpenNewGroup(t, *m, 1)
 	// Enter on nothing. The returned cmd is the 3 s flash tick: not run.
 	got, _ = grpKey(got, tea.KeyEnter)
-	if got.flashText != groupNameEmptyFlash || !got.groupEdit.active() {
-		t.Fatalf("empty name: flash %q, editor open %v — want %q and still open", got.flashText, got.groupEdit.active(), groupNameEmptyFlash)
+	if got.groupNameRefusal() != groupNameEmptyFlash || got.dialog != dialogGroupName {
+		t.Fatalf("empty name: refusal %q, dialog %d — want %q and still open", got.groupNameRefusal(), got.dialog, groupNameEmptyFlash)
 	}
 	got = grpType(got, "g-a")
+	if got.groupNameRefusal() != "" {
+		t.Error("typing must clear the refusal it no longer describes")
+	}
 	got, _ = grpKey(got, tea.KeyEnter)
-	if got.flashText != groupNameTakenFlash || !got.groupEdit.active() || got.groupEdit.input != "g-a" {
-		t.Fatalf("duplicate: flash %q, open %v, input %q — want %q, open, input kept", got.flashText, got.groupEdit.active(), got.groupEdit.input, groupNameTakenFlash)
+	if got.groupNameRefusal() != groupNameTakenFlash || got.dialog != dialogGroupName || got.groupEdit.input != "g-a" {
+		t.Fatalf("duplicate: refusal %q, dialog %d, input %q — want %q, open, input kept",
+			got.groupNameRefusal(), got.dialog, got.groupEdit.input, groupNameTakenFlash)
 	}
 	if names := grpNames(got.groups); names != "G-A,G-B" {
 		t.Fatalf("a refused name created a group: %s", names)
@@ -573,15 +651,14 @@ func TestGroupEdit_RefusesEmptyAndDuplicateNamesAndStaysOpen(t *testing.T) {
 		t.Fatalf("input after backspace = %q, want g-", got.groupEdit.input)
 	}
 	got, _ = grpKey(got, tea.KeyEscape)
-	if got.groupEdit.active() || grpNames(got.groups) != "G-A,G-B" || got.groups.groupOf("", "l1") != -1 {
-		t.Fatal("Esc must abandon the edit and create nothing")
+	if got.dialog != dialogNone || grpNames(got.groups) != "G-A,G-B" || got.groups.groupOf("", "l1") != -1 {
+		t.Fatal("Esc must close the dialog and create nothing")
 	}
 }
 
-func TestGroupEdit_InputStopsAt32Runes(t *testing.T) {
+func TestGroupNameDialog_InputStopsAt32Runes(t *testing.T) {
 	m, _ := newGroupsSidebarModel(t)
-	got := grpOpenGroupList(t, *m, 1)
-	got, _ = grpChoose(t, got, grpMenuRow(t, got.ctxMenu, ctxActNewGroup, ""))
+	got := grpOpenNewGroup(t, *m, 1)
 	got = grpType(got, strings.Repeat("é", 40))
 	if n := len([]rune(got.groupEdit.input)); n != maxGroupNameRunes {
 		t.Fatalf("input holds %d runes, want %d", n, maxGroupNameRunes)
@@ -689,9 +766,12 @@ func TestGroupCtxMenu_Actions(t *testing.T) {
 	t.Run("rename", func(t *testing.T) {
 		got, _ := open(t, 2)
 		got, _ = grpChoose(t, got, grpMenuRow(t, got.ctxMenu, ctxActRenameGroup, ""))
-		if got.groupEdit.mode != groupEditRename || got.groupEdit.input != "G-A" {
-			t.Fatalf("editor = %+v, want rename seeded with G-A", got.groupEdit)
+		if got.dialog != dialogGroupName || got.groupEdit.mode != groupEditRename || got.groupEdit.input != "G-A" {
+			t.Fatalf("dialog %d, editor = %+v, want the name dialog seeded with G-A", got.dialog, got.groupEdit)
 		}
+		rows, _, _ := grpDialogBox(t, got.renderDialog())
+		grpBoxRowWith(t, rows, "Rename group")
+		grpBoxRowWith(t, rows, "Name: G-A▎")
 		for range 3 {
 			got, _ = grpKey(got, tea.KeyBackspace)
 		}
@@ -746,56 +826,79 @@ func TestGroupKeys_ToggleTheActiveGroupAndCollapseAll(t *testing.T) {
 	}
 }
 
-// A paste while the group-name editor is open goes into the editor — printable
+// A paste while the group-name dialog is open goes into the name — printable
 // runes only, cut at the cap — and never to the pane behind it, where the
 // trailing CR would run it.
-func TestGroupEdit_PasteGoesToTheEditorNeverToAPane(t *testing.T) {
+func TestGroupNameDialog_PasteGoesToTheNameNeverToAPane(t *testing.T) {
 	m, fake := newGroupsSidebarModel(t)
-	got := grpOpenGroupList(t, *m, 1)
-	got, _ = grpChoose(t, got, grpMenuRow(t, got.ctxMenu, ctxActNewGroup, ""))
-	if !got.groupEdit.active() {
-		t.Fatal("setup: the name editor is not open")
-	}
+	got := grpOpenNewGroup(t, *m, 1)
 	updated, cmd := got.Update(tea.PasteMsg{Content: "x\r"})
 	got = updated.(Model)
 	runCmd(cmd)
-	if got.groupEdit.input != "x" {
-		t.Errorf("editor input = %q, want x", got.groupEdit.input)
+	if got.groupEdit.input != "x" || got.dialog != dialogGroupName {
+		t.Errorf("name = %q, dialog %d — want x, still open", got.groupEdit.input, got.dialog)
 	}
 	for _, msg := range fake.sent {
 		if msg.Type == ipc.MsgPaneInput {
-			t.Fatal("a paste into the group editor was sent to a pane")
+			t.Fatal("a paste into the group-name dialog was sent to a pane")
 		}
 	}
-	updated, _ = got.Update(tea.PasteMsg{Content: strings.Repeat("é", 40)})
+	updated, cmd = got.Update(tea.PasteMsg{Content: strings.Repeat("é", 40)})
 	got = updated.(Model)
+	runCmd(cmd)
 	if n := len([]rune(got.groupEdit.input)); n != maxGroupNameRunes {
 		t.Errorf("input holds %d runes after an over-long paste, want %d", n, maxGroupNameRunes)
 	}
-}
-
-// The project menu does not open over the group-name editor: its New group…
-// row would start a second edit that replaces the one being typed.
-func TestProjectCtxMenu_RefusedWhileTheGroupEditorIsOpen(t *testing.T) {
-	m, _ := newGroupsSidebarModel(t)
-	got := grpOpenGroupList(t, *m, 1)
-	got, _ = grpChoose(t, got, grpMenuRow(t, got.ctxMenu, ctxActNewGroup, ""))
-	got = grpType(got, "ab")
-	got, _ = grpPress(got, 5, tea.MouseRight) // L2's row
-	if got.ctxMenu.open() {
-		t.Fatalf("a project menu opened over the group editor (rows %q)", grpLabels(got.ctxMenu))
-	}
-	if !got.groupEdit.active() || got.groupEdit.input != "ab" {
-		t.Fatalf("editor = %+v, want still open holding ab", got.groupEdit)
+	for _, msg := range fake.sent {
+		if msg.Type == ipc.MsgPaneInput {
+			t.Fatal("an over-long paste into the group-name dialog was sent to a pane")
+		}
 	}
 }
 
-// A refused name flashes where the user is looking. At an ordinary width the
-// status bar's right side does not fit beside the editor and is dropped whole
-// — the flash lived there, so Enter looked like it did nothing. The flash now
-// follows the caret, and the bar stays ONE line of at most the width even for
-// a 32-wide-rune name, whose editor text gives way to keep the flash.
-func TestGroupEdit_RefusalFlashIsVisibleOnTheStatusBar(t *testing.T) {
+// Clicks are swallowed while the dialog is open (modalSwallowsMouse): a
+// right-click opens no project, group or pane menu — a project menu's New
+// group… would replace the name being typed — and a left-click switches no
+// project.
+func TestGroupNameDialog_SwallowsClicks(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		y      int
+		button tea.MouseButton
+	}{
+		{"right-click a project row", 5, tea.MouseRight},
+		{"right-click a group header", 2, tea.MouseRight},
+		{"left-click a project row", 5, tea.MouseLeft},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _ := newGroupsSidebarModel(t)
+			got := grpOpenNewGroup(t, *m, 1)
+			got = grpType(got, "ab")
+			active := got.activeProject
+			got, _ = grpPress(got, tc.y, tc.button)
+			got, _ = grpRelease(got, tc.y)
+			if got.ctxMenu.open() {
+				t.Fatalf("a menu opened over the group-name dialog (rows %q)", grpLabels(got.ctxMenu))
+			}
+			if got.dialog != dialogGroupName || got.groupEdit.input != "ab" {
+				t.Fatalf("dialog %d holding %q, want still open holding ab", got.dialog, got.groupEdit.input)
+			}
+			if got.activeProject != active || got.projectDragging || got.groupDragging {
+				t.Error("a click behind the dialog acted on the sidebar")
+			}
+		})
+	}
+}
+
+// grpDialogRows is the dialog box's height: two borders, two padding rows, and
+// title, blank, name, blank, error, blank, hint. The error row is there even
+// empty, so a refusal never moves the box — and any wrapped line adds a row.
+const grpDialogRows = 11
+
+// A refused name is shown INSIDE the dialog box. The status-bar editor this
+// replaced flashed where the bar's right side was dropped whole at ordinary
+// widths, so Enter looked like it did nothing.
+func TestGroupNameDialog_RefusalIsShownInsideTheBox(t *testing.T) {
 	for _, tc := range []struct {
 		name, typed, existing, flash string
 	}{
@@ -804,48 +907,47 @@ func TestGroupEdit_RefusalFlashIsVisibleOnTheStatusBar(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m, _ := newGroupsSidebarModel(t)
-			// A real version string: with it the flash-bearing right side
-			// no longer fits beside the editor at 100 columns, as in use.
-			m.version = "1.78.0"
 			if tc.existing != "" {
 				m.groups.Groups[1].Name = tc.existing
 			}
-			got := grpOpenGroupList(t, *m, 1)
-			got, _ = grpChoose(t, got, grpMenuRow(t, got.ctxMenu, ctxActNewGroup, ""))
+			got := grpOpenNewGroup(t, *m, 1)
 			got = grpType(got, tc.typed)
+			rows, _, _ := grpDialogBox(t, got.renderDialog())
+			for _, r := range rows {
+				if strings.Contains(r, "✗") {
+					t.Fatalf("an error row before any refusal: %q", r)
+				}
+			}
 			got, _ = grpKey(got, tea.KeyEnter) // the flash tick: not run
-			if got.width != 100 || got.flashText != tc.flash {
-				t.Fatalf("setup: width %d flash %q, want 100 / %q", got.width, got.flashText, tc.flash)
+			if got.width != 100 || got.dialog != dialogGroupName {
+				t.Fatalf("setup: width %d dialog %d, want 100 and the dialog still open", got.width, got.dialog)
 			}
-			bar := got.renderStatusBar()
-			if strings.Contains(bar, "\n") {
-				t.Fatalf("the status bar wrapped onto %d lines: %q", strings.Count(bar, "\n")+1, stripANSI(bar))
+			rows, _, _ = grpDialogBox(t, got.renderDialog())
+			if len(rows) != grpDialogRows {
+				t.Fatalf("the box is %d rows, want %d — a line wrapped:\n%s", len(rows), grpDialogRows, strings.Join(rows, "\n"))
 			}
-			if w := lipgloss.Width(bar); w > 100 {
-				t.Errorf("the status bar is %d cells, over the 100-cell width", w)
-			}
-			if plain := stripANSI(bar); !strings.Contains(plain, tc.flash) {
-				t.Errorf("status bar %q does not show the flash %q", plain, tc.flash)
-			}
+			grpBoxRowWith(t, rows, "✗ "+tc.flash)
+			grpBoxRowWith(t, rows, "▎")
 		})
 	}
 }
 
-// A 32-wide-rune name in the editor is 76 cells of status bar on its own; on
-// a narrow terminal it is cut, never wrapped — .Width wraps an over-wide line
-// and a two-row status bar pushes the frame one row past the terminal.
-func TestGroupEdit_LongNameNeverWrapsTheStatusBar(t *testing.T) {
-	m, _ := newGroupsSidebarModel(t)
-	got := grpOpenGroupList(t, *m, 1)
-	got, _ = grpChoose(t, got, grpMenuRow(t, got.ctxMenu, ctxActNewGroup, ""))
-	got = grpType(got, strings.Repeat("构", maxGroupNameRunes))
-	got.width = 60
-	bar := got.renderStatusBar()
-	if strings.Contains(bar, "\n") {
-		t.Fatalf("the status bar wrapped: %q", stripANSI(bar))
-	}
-	if w := lipgloss.Width(bar); w != 60 {
-		t.Errorf("the status bar is %d cells, want 60", w)
+// A 32-wide-rune name is 64 cells, wider than the box: it keeps its tail and
+// caret and never wraps, down to the narrowest terminal.
+func TestGroupNameDialog_LongNameNeverWrapsTheBox(t *testing.T) {
+	for _, w := range []int{100, 60, minTermWidth} {
+		m, _ := newGroupsSidebarModel(t)
+		got := grpOpenNewGroup(t, *m, 1)
+		got = grpType(got, strings.Repeat("构", maxGroupNameRunes-1)+"尾")
+		got.width = w
+		rows, _, width := grpDialogBox(t, got.renderDialog())
+		if len(rows) != grpDialogRows {
+			t.Fatalf("w=%d: the box is %d rows, want %d — a line wrapped:\n%s", w, len(rows), grpDialogRows, strings.Join(rows, "\n"))
+		}
+		if width > w {
+			t.Errorf("w=%d: the box is %d cells wide", w, width)
+		}
+		grpBoxRowWith(t, rows, "尾▎")
 	}
 }
 
@@ -874,8 +976,8 @@ func TestProjectCtxMenu_TooManyGroupsToListFlashes(t *testing.T) {
 }
 
 // Right-clicking a PANE row in the sidebar opens no pane menu over the
-// group-name editor, like the project and tab menus — and focuses nothing.
-func TestSidebarPaneMenu_RefusedWhileTheGroupEditorIsOpen(t *testing.T) {
+// group-name dialog — and focuses nothing.
+func TestSidebarPaneMenu_SwallowedWhileTheGroupNameDialogIsOpen(t *testing.T) {
 	m, _ := newGroupsSidebarModel(t)
 	rows, _ := m.sidebarRows(22)
 	if r := rows[11]; r.kind != sidebarRowPane || r.paneID != "p2" {
@@ -884,15 +986,14 @@ func TestSidebarPaneMenu_RefusedWhileTheGroupEditorIsOpen(t *testing.T) {
 	if tab := m.activeTabModel(); tab == nil || tab.ActivePane == "p2" {
 		t.Fatal("setup: p2 must not start focused, or the focus check below is vacuous")
 	}
-	got := grpOpenGroupList(t, *m, 1)
-	got, _ = grpChoose(t, got, grpMenuRow(t, got.ctxMenu, ctxActNewGroup, ""))
+	got := grpOpenNewGroup(t, *m, 1)
 	got = grpType(got, "ab")
 	got, _ = grpPress(got, 11, tea.MouseRight)
 	if got.ctxMenu.open() {
-		t.Fatalf("a pane menu opened over the group editor (rows %q)", grpLabels(got.ctxMenu))
+		t.Fatalf("a pane menu opened over the group-name dialog (rows %q)", grpLabels(got.ctxMenu))
 	}
-	if !got.groupEdit.active() || got.groupEdit.input != "ab" {
-		t.Fatalf("editor = %+v, want still open holding ab", got.groupEdit)
+	if got.dialog != dialogGroupName || got.groupEdit.input != "ab" {
+		t.Fatalf("dialog %d holding %q, want still open holding ab", got.dialog, got.groupEdit.input)
 	}
 	if tab := got.activeTabModel(); tab == nil || tab.ActivePane == "p2" {
 		t.Error("the refused right-click still focused the pane")

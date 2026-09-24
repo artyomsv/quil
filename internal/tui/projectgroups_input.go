@@ -2,9 +2,12 @@ package tui
 
 import (
 	"errors"
+	"strings"
+	"time"
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 // groupBlockSpanIn is the screen-row extent of group g's block — its header
@@ -185,7 +188,7 @@ func buildGroupCtxMenuItems(g, n int, collapsed bool) []ctxMenuItem {
 // surface owns input, and when even the box cannot fit.
 func (m *Model) openGroupCtxMenu(g, anchorX, anchorY int) {
 	if g < 0 || g >= len(m.groups.Groups) ||
-		m.notesMode || m.renaming || m.renamingPane || m.groupEdit.active() || m.dialog != dialogNone {
+		m.notesMode || m.renaming || m.renamingPane || m.dialog != dialogNone {
 		return
 	}
 	grp := m.groups.Groups[g]
@@ -252,9 +255,11 @@ const (
 	groupEditRename
 )
 
-// groupEditState is the status-bar group-name editor — a sibling of the pane
-// rename editor (same place, same ▎ caret), with its own state because that one
-// is bound to the active pane and its Enter sends MsgUpdatePane.
+// groupEditState backs the group-name dialog (dialogGroupName), used for both
+// New group… and Rename group. m.dialog is the open/closed authority; this is
+// only its data. It was a status-bar editor first, bottom left beside the pane
+// rename one — easy enough to miss that New group… read as doing nothing, while
+// it silently held every key and refused every right-click.
 type groupEditState struct {
 	mode      groupEditMode
 	input     string
@@ -262,8 +267,6 @@ type groupEditState struct {
 	dest      string // new: the project to put in the new group
 	projectID string // new: "" creates the group empty
 }
-
-func (s groupEditState) active() bool { return s.mode != groupEditNone }
 
 // appendPaste folds pasted text into the editor: printable runes only (a
 // paste's line breaks and control bytes are dropped, as in the palette), cut
@@ -280,39 +283,53 @@ func (s *groupEditState) appendPaste(text string) {
 	s.input += string(add)
 }
 
-// beginGroupEdit opens the editor. The menu that led here is closed and no
-// drag survives it.
+// beginGroupEdit opens the group-name dialog. The menu that led here is closed
+// and no drag survives it; a refusal left over from an earlier open is not
+// shown in this one.
 func (m *Model) beginGroupEdit(s groupEditState) {
 	m.closeCtxMenu()
 	m.clearDragState()
+	m.clearGroupNameRefusal()
 	m.groupEdit = s
+	m.dialog = dialogGroupName
 }
 
-// handleGroupEditKey captures every key while the editor is open, like the
-// pane rename editor. Text comes from msg.Text through isPrintableText, so a
-// name can be non-ASCII; input stops at maxGroupNameRunes.
+// closeGroupNameDialog closes the dialog and forgets its data and refusal.
+func (m *Model) closeGroupNameDialog() {
+	m.dialog = dialogNone
+	m.groupEdit = groupEditState{}
+	m.clearGroupNameRefusal()
+}
+
+// handleGroupEditKey is the dialog's key handler (dispatchDialogKey). Text
+// comes from msg.Text through isPrintableText, so a name can be non-ASCII;
+// input stops at maxGroupNameRunes. An edit clears a shown refusal, which
+// described the text before it.
 func (m Model) handleGroupEditKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "escape":
-		m.groupEdit = groupEditState{}
+		m.closeGroupNameDialog()
 		return m, nil
 	case "enter":
 		return m.commitGroupEdit()
 	case "backspace":
 		if r := []rune(m.groupEdit.input); len(r) > 0 {
 			m.groupEdit.input = string(r[:len(r)-1])
+			m.clearGroupNameRefusal()
 		}
 		return m, nil
 	}
 	if msg.Text != "" && isPrintableText(msg.Text) &&
 		utf8.RuneCountInString(m.groupEdit.input)+utf8.RuneCountInString(msg.Text) <= maxGroupNameRunes {
 		m.groupEdit.input += msg.Text
+		m.clearGroupNameRefusal()
 	}
 	return m, nil
 }
 
-// commitGroupEdit applies the editor. A refused name flashes and leaves the
-// editor OPEN with the text kept, so the user fixes it rather than retyping.
+// commitGroupEdit applies the dialog. A refused name flashes — shown INSIDE the
+// box, see groupNameRefusal — and leaves the dialog OPEN with the text kept, so
+// the user fixes it rather than retyping.
 func (m Model) commitGroupEdit() (tea.Model, tea.Cmd) {
 	e := m.groupEdit
 	changed := false
@@ -338,7 +355,7 @@ func (m Model) commitGroupEdit() (tea.Model, tea.Cmd) {
 		m.setFlash(groupNameFlash(err))
 		return m, m.flashCmd()
 	}
-	m.groupEdit = groupEditState{}
+	m.closeGroupNameDialog()
 	if !changed {
 		return m, nil
 	}
@@ -352,6 +369,54 @@ func groupNameFlash(err error) string {
 		return groupNameTakenFlash
 	}
 	return groupNameEmptyFlash
+}
+
+// groupNameRefusal is the refusal the dialog shows: the flash commitGroupEdit
+// set, while it lasts. View draws only the dialog while one is open, so the
+// status bar that carries every other flash is not on screen.
+func (m Model) groupNameRefusal() string {
+	if (m.flashText == groupNameEmptyFlash || m.flashText == groupNameTakenFlash) &&
+		time.Now().Before(m.flashUntil) {
+		return m.flashText
+	}
+	return ""
+}
+
+// clearGroupNameRefusal drops a group-name refusal flash, and nothing else.
+func (m *Model) clearGroupNameRefusal() {
+	if m.flashText == groupNameEmptyFlash || m.flashText == groupNameTakenFlash {
+		m.flashText = ""
+	}
+}
+
+// groupNameDialogWidth fits "✗ A group with that name already exists" on
+// one line; renderDialog clamps it to a narrow terminal.
+const groupNameDialogWidth = 48
+
+// renderGroupNameDialog is the dialog's box content. Every line is cut to the
+// inner width: lipgloss wraps an over-wide one, and a 32-rune name can be 64
+// cells. The name keeps its TAIL, caret included, and passes sanitizeRemoteText
+// at render only — a rename is seeded from project-groups.json. The error row
+// is always there, blank without a refusal, so a refusal does not move the box.
+func (m Model) renderGroupNameDialog() string {
+	inner := dialogInnerWidth(m.width, groupNameDialogWidth)
+	title := "New group"
+	if m.groupEdit.mode == groupEditRename {
+		title = "Rename group"
+	}
+	var b strings.Builder
+	b.WriteString(dialogTitle.Render(truncateToWidth(title, inner)))
+	b.WriteString("\n\n")
+	const label = "Name: "
+	name := lastCellsToWidth(sanitizeRemoteText(m.groupEdit.input), inner-lipgloss.Width(label)-1)
+	b.WriteString(truncateToWidth(dialogNormal.Render(label)+dialogEditStyle.Render(name+"▎"), inner))
+	b.WriteString("\n\n")
+	if msg := m.groupNameRefusal(); msg != "" {
+		b.WriteString(dialogErrorStyle.Render(truncateToWidth("✗ "+msg, inner)))
+	}
+	b.WriteString("\n\n")
+	b.WriteString(dialogSubtle.Render(truncateToWidth("Enter save · Esc cancel", inner)))
+	return b.String()
 }
 
 // toggleActiveProjectGroup (project.group_toggle) collapses or expands the

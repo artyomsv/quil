@@ -303,7 +303,7 @@ func (m *Model) sidebarRows(w int) ([]sidebarRow, int) {
 	for g := range m.groups.Groups {
 		grp := &m.groups.Groups[g]
 		rows = append(rows, sidebarRow{
-			text:    m.groupHeaderText(grp, byGroup[g], w),
+			text:    m.groupHeaderText(grp, byGroup[g], w, m.groupRowHighlight(g)),
 			kind:    sidebarRowGroup,
 			index:   g,
 			inGroup: true,
@@ -386,14 +386,16 @@ func (m *Model) sidebarRows(w int) ([]sidebarRow, int) {
 // that say whether the project needs you are what gets truncated away first.
 // Only a remote project has a host row — a local project spending a line to
 // say "this machine" would halve how many projects fit. Same kind and index on
-// both rows, so a click on either selects the same project.
+// both rows, so a click on either selects the same project — and one
+// highlight on both, so a hovered or dragged remote project lights as one.
 func (m *Model) appendProjectRows(rows []sidebarRow, i, w, g int) []sidebarRow {
 	p := m.projects[i]
 	indent := g >= 0
+	hl := m.projectRowHighlight(i)
 	rows = append(rows, sidebarRow{
-		text: indentSidebarRow(indent, w, func(w int) string {
+		text: indentSidebarRow(indent, w, hl, func(w int) string {
 			return projectRow(sanitizeRemoteText(p.Name), p.counts(), m.workSpinnerFrame,
-				m.linkGlyph(p.Dest, p.Offline), i == m.activeProject, w, p.Offline)
+				m.linkGlyph(p.Dest, p.Offline), i == m.activeProject, w, p.Offline, hl)
 		}),
 		kind:    sidebarRowProject,
 		index:   i,
@@ -402,8 +404,8 @@ func (m *Model) appendProjectRows(rows []sidebarRow, i, w, g int) []sidebarRow {
 	})
 	if p.Dest != "" {
 		rows = append(rows, sidebarRow{
-			text: indentSidebarRow(indent, w, func(w int) string {
-				return projectDestRow(sanitizeRemoteText(p.Dest), w)
+			text: indentSidebarRow(indent, w, hl, func(w int) string {
+				return projectDestRow(sanitizeRemoteText(p.Dest), w, hl)
 			}),
 			kind:    sidebarRowProject,
 			index:   i,
@@ -418,17 +420,19 @@ func (m *Model) appendProjectRows(rows []sidebarRow, i, w, g int) []sidebarRow {
 // so an indented row is still exactly w cells. At w <= len(groupIndent) the
 // indent is dropped instead: the prefix alone would fill the strip, and
 // renderSidebar's closing .Width(w) WRAPS an over-wide row — shifting every
-// row below while sidebarRowAt still maps screen row y to rows[y].
-func indentSidebarRow(indent bool, w int, build func(w int) string) string {
+// row below while sidebarRowAt still maps screen row y to rows[y]. A
+// highlighted row's indent takes the highlight's background, so the colour
+// fills the whole width.
+func indentSidebarRow(indent bool, w int, hl rowHighlight, build func(w int) string) string {
 	if !indent || w <= len(groupIndent) {
 		return build(w)
 	}
-	return groupIndent + build(w-len(groupIndent))
+	return hl.fill(groupIndent) + build(w-len(groupIndent))
 }
 
 // groupHeaderText is a group's header row: the members' pane counts summed,
 // and the link glyph when any member's host is parked (⚡ wins) or retrying.
-func (m *Model) groupHeaderText(grp *projectGroup, members []int, w int) string {
+func (m *Model) groupHeaderText(grp *projectGroup, members []int, w int, hl rowHighlight) string {
 	var c paneStateCounts
 	link := ""
 	for _, i := range members {
@@ -443,14 +447,14 @@ func (m *Model) groupHeaderText(grp *projectGroup, members []int, w int) string 
 			}
 		}
 	}
-	return groupHeaderRow(sanitizeRemoteText(grp.Name), len(members), grp.Collapsed, c, m.workSpinnerFrame, link, w)
+	return groupHeaderRow(sanitizeRemoteText(grp.Name), len(members), grp.Collapsed, c, m.workSpinnerFrame, link, w, hl)
 }
 
 // groupHeaderRow renders "▾ name (N)" (▸ when collapsed) with the roll-up
 // badge flush right, exactly w cells. The badge is budgeted first and the NAME
 // gives way, cut with "…" — the same priority projectRow gives its name. name
 // is expected pre-sanitized.
-func groupHeaderRow(name string, members int, collapsed bool, c paneStateCounts, workFrame int, link string, w int) string {
+func groupHeaderRow(name string, members int, collapsed bool, c paneStateCounts, workFrame int, link string, w int, hl rowHighlight) string {
 	marker := glyphGroupOpen + " "
 	if collapsed {
 		marker = glyphGroupClosed + " "
@@ -469,8 +473,8 @@ func groupHeaderRow(name string, members int, collapsed bool, c paneStateCounts,
 	if gap := w - lipgloss.Width(head) - badgeW; gap > 0 {
 		head += strings.Repeat(" ", gap)
 	}
-	segs[0] = styledSegment{head, sidebarGroupStyle}
-	return renderStyledSegments(segs, w)
+	segs[0] = styledSegment{head, hl.text(sidebarGroupStyle)}
+	return renderStyledSegmentsHL(segs, w, hl)
 }
 
 // elideEnd cuts s to at most w cells, spending the last cell on "…" when a cut
@@ -1085,6 +1089,15 @@ type styledSegment struct {
 // badge segments each begin with a space, and its head ends wherever
 // truncateCells cut, which is a cluster boundary by definition.
 func renderStyledSegments(segs []styledSegment, w int) string {
+	return renderStyledSegmentsHL(segs, w, rowHighlightNone)
+}
+
+// renderStyledSegmentsHL is renderStyledSegments with a row highlight: every
+// segment AND the trailing pad take hl's background, so the colour fills the
+// whole row, while each segment keeps its own foreground — a caller wanting
+// the plain text dark on it passes that segment's style through hl.text.
+// rowHighlightNone renders exactly as renderStyledSegments always has.
+func renderStyledSegmentsHL(segs []styledSegment, w int, hl rowHighlight) string {
 	var b strings.Builder
 	used := 0
 	for i := range segs {
@@ -1108,18 +1121,23 @@ func renderStyledSegments(segs []styledSegment, w int) string {
 			break
 		}
 		used += lipgloss.Width(t)
-		b.WriteString(s.style.Render(t))
+		if hl == rowHighlightNone {
+			b.WriteString(s.style.Render(t))
+		} else {
+			b.WriteString(hl.onBackground(s.style).Render(t))
+		}
 	}
 	// The same backstop padOrTrunc gives every other row: renderSidebar's
 	// closing .Width(w) WRAPS a short line's neighbour rather than padding
 	// predictably, and a row that stopped short would leave that pass work to do
 	// on a strip whose y->row mapping depends on it having none.
 	//
-	// These cells are the one part of the row emitted OUTSIDE any Render, which
-	// is invisible for the foreground-only styles this file uses and would show
-	// as an unpainted gap the day a sidebar style grows a background.
+	// Unhighlighted, these cells are the one part of the row emitted OUTSIDE
+	// any Render — invisible for foreground-only styles. A highlight paints a
+	// background, so there they go through hl.fill, or the colour would stop
+	// short of the strip's edge.
 	if pad := w - used; pad > 0 {
-		b.WriteString(strings.Repeat(" ", pad))
+		b.WriteString(hl.fill(strings.Repeat(" ", pad)))
 	}
 	return b.String()
 }
@@ -1128,14 +1146,19 @@ func renderStyledSegments(segs []styledSegment, w int) string {
 // dimmed so the column still reads as a list of projects rather than eight
 // entries, and elided in the middle for the same reason a branch is: an ssh
 // destination is user@host, and cutting either end alone leaves a column where
-// every row looks the same.
-func projectDestRow(dest string, w int) string {
+// every row looks the same. One style for the whole line, so a highlight is
+// that style on hl's background, padding included.
+func projectDestRow(dest string, w int, hl rowHighlight) string {
 	const prefix = "   @"
 	avail := w - len(prefix)
 	if avail < 1 {
 		avail = 1
 	}
-	return sidebarGitStyle.Render(padOrTrunc(prefix+elideMiddle(dest, avail), w))
+	style := sidebarGitStyle
+	if hl != rowHighlightNone {
+		style = hl.onBackground(hl.text(style))
+	}
+	return style.Render(padOrTrunc(prefix+elideMiddle(dest, avail), w))
 }
 
 // minGitBranchCells is the floor a branch name keeps on its row, for the same
@@ -1306,7 +1329,7 @@ func sidebarTabHeading(name string, idx int, active bool, color string, w int) s
 // The active project keeps sidebarActiveStyle even when offline: "where am I"
 // outranks "what is wrong with it", and the link glyph beside the name says
 // the rest.
-func projectRow(name string, c paneStateCounts, workFrame int, link string, active bool, w int, offline *OfflineState) string {
+func projectRow(name string, c paneStateCounts, workFrame int, link string, active bool, w int, offline *OfflineState, hl rowHighlight) string {
 	marker := "  "
 	if active {
 		marker = "▸ "
@@ -1350,8 +1373,8 @@ func projectRow(name string, c paneStateCounts, workFrame int, link string, acti
 	if gap := w - lipgloss.Width(head) - badgeW; gap > 0 {
 		head += strings.Repeat(" ", gap)
 	}
-	segs[0] = styledSegment{head, style}
-	return renderStyledSegments(segs, w)
+	segs[0] = styledSegment{head, hl.text(style)}
+	return renderStyledSegmentsHL(segs, w, hl)
 }
 
 // appendBadgeSegments appends the roll-up badge — ▲ blocked, the working

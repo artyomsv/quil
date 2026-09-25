@@ -111,6 +111,8 @@ actions, command palette).
 | Mouse click on tab | Switch to that tab |
 | Mouse drag a tab | Reorder — the tab moves once the pointer passes the middle of a neighbour, so a narrow tab dragged over a wide one never flips back and forth; intermediate tabs slide one slot at a time |
 | Mouse click / drag a tab name in the project sidebar | Switch to that tab / reorder it — drag the name up or down past the middle of another tab's group of rows |
+| Right-click a tab (tab bar or sidebar) | Rename tab, Set color…, Layout…, Move to project… — see [Mouse: tab context menu](#mouse-tab-context-menu) |
+| Mouse wheel over the tab bar | Scroll the tab strip when tabs overflow, without switching tabs; `«N` / `N»` count the tabs hidden on each side |
 
 The active tab is prefixed with `* ` in the tab bar so it's visible even when [tab colors](configuration.md#keybindings) override the bold weight.
 
@@ -131,6 +133,7 @@ The active tab is prefixed with `* ` in the tab bar so it's visible even when [t
 | `Alt+Shift+L` | Force a full screen redraw — clears rendering artifacts (scrambled/misplaced characters) without restarting. Mnemonic: `Ctrl+L` redraws a shell. |
 | `Alt+Shift+I` | Open the active pane's input history — one row per prompt you submitted, newest first. `↑/↓` navigate, `PgUp/PgDn/Home/End` jump, `Enter` opens the full text in a soft-wrapped read-only viewer (drag or `Ctrl+A` to select, right-click or `Enter` to copy), `Esc` closes. Only AI panes whose plugin sets `record_history` (Claude Code) capture history; other pane types show an empty state. |
 | `Alt+A` | Open the pane context menu for the active pane (`quick_actions`). Same menu as right-click — see [Mouse: pane context menu](#mouse-pane-context-menu) below. |
+| Right-click a pane → Move to tab… | Send the pane, still running, to another tab on the same machine |
 
 ### Mouse: pane context menu
 

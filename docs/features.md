@@ -188,6 +188,9 @@ The same six are in the command palette (acting on the active tab) and can be bo
 | Close tab | `Alt+W` |
 | Cycle tab color | `Alt+C` (8 colours) |
 | Switch to tab N | `Alt+1` .. `Alt+9` |
+| Rename, pick a colour, tidy the layout, move to another project | Right-click the tab — see [Mouse: tab context menu](keybindings.md#mouse-tab-context-menu) |
+
+A rename or colour change is saved at once, so a daemon stopped straight after it comes back with the new name.
 
 ### New tab, with the pane you actually want
 
@@ -212,7 +215,7 @@ checkout.
 
 ### Mouse & keyboard
 
-Full mouse support — click tabs to switch, click panes to focus, scroll wheel for terminal history. Drag panes to select text. Drag a tab (in the tab bar or by its name in the project sidebar) or a project row to reorder it; the item moves once the pointer passes the middle of its neighbour, so the drag never flips back and forth. `Alt+Shift+PgUp`/`PgDn` and `Alt+Shift+Up`/`Down` do the same from the keyboard for tabs and projects. Right-click a tab (in the bar or the sidebar) for a context menu to rename it, pick its color, tidy its layout, or move it to another project on the same machine — see [Mouse: tab context menu](keybindings.md#mouse-tab-context-menu). Hold `Alt` and drag a pane to move it beside another pane, swap the two, or drop it on a tab — see [Rearranging a tab's panes](#rearranging-a-tabs-panes). All keybindings are configurable via `config.toml`.
+Full mouse support — click tabs to switch, click panes to focus, scroll wheel for terminal history (over vim, lazygit, Claude Code or another app that takes the mouse, the wheel scrolls the app instead, and a sideways wheel or trackpad swipe does nothing). Drag panes to select text. Drag a tab (in the tab bar or by its name in the project sidebar) or a project row to reorder it; the item moves once the pointer passes the middle of its neighbour, so the drag never flips back and forth. `Alt+Shift+PgUp`/`PgDn` and `Alt+Shift+Up`/`Down` do the same from the keyboard for tabs and projects. Right-click a tab (in the bar or the sidebar) for a context menu to rename it, pick its color, tidy its layout, or move it to another project on the same machine — see [Mouse: tab context menu](keybindings.md#mouse-tab-context-menu). Hold `Alt` and drag a pane to move it beside another pane, swap the two, or drop it on a tab — see [Rearranging a tab's panes](#rearranging-a-tabs-panes). All keybindings are configurable in `bindings.toml`.
 
 When there are more tabs than fit, the mouse wheel over the tab bar scrolls the strip left/right instead of switching tabs or reaching the pane beneath it; markers (`«N` / `N»`) show how many tabs are hidden on each side. Clicking a tab keeps the current scroll position; switching some other way (keyboard, the palette, an MCP tool) snaps the bar back to centering on whichever tab is now active.
 

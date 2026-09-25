@@ -247,6 +247,32 @@ func TestFollower_RenderTooTallShowsBottomRowsWithMarker(t *testing.T) {
 	assertExactBox(t, p, view)
 }
 
+// Both cuts at once: both corners carry the marker, the labels between them
+// are untouched, and the border keeps the pane's exact width.
+func TestFollower_RenderTooWideAndTallShowsBothMarkers(t *testing.T) {
+	var innerW, innerH int
+	m, _ := followerFixture(t, "other", []string{"pane-1"}, func(_ string, w, h int) (int, int) {
+		innerW, innerH = w, h
+		return w + 30, h + 10
+	}, nil)
+	rows := numberedRows(innerH + 10)
+	m = feedOutput(t, m, "pane-1", rows+strings.Repeat("a", innerW)+"BBBB")
+	p := paneByID(t, m, "pane-1")
+	view := p.View()
+	lines := strings.Split(view, "\n")
+	top := []rune(stripANSI(lines[0]))
+	if top[0] != '…' || top[len(top)-1] != '…' {
+		t.Errorf("top border %q: want … at BOTH ends for a width and a height cut", string(top))
+	}
+	if strings.Count(string(top), "…") != 2 {
+		t.Errorf("top border %q: want exactly the two corner markers", string(top))
+	}
+	if got := stripANSI(lines[innerH]); strings.Contains(got, "B") {
+		t.Errorf("last visible row %q: want the right columns cut", got)
+	}
+	assertExactBox(t, p, view)
+}
+
 func TestFollower_RenderSmallerIsPadded(t *testing.T) {
 	m, _ := followerFixture(t, "other", []string{"pane-1"}, fixedSize(20, 5), nil)
 	m = feedOutput(t, m, "pane-1", numberedRows(5))

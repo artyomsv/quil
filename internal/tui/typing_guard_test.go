@@ -535,7 +535,7 @@ func TestTypingGuard_CreateTabTokenSpentOnAnExistingTab(t *testing.T) {
 	m, _ := typingGuardModel(t, t0, "t1", "t2")
 	proj := m.cur()
 	key := requestedTabKey("", proj.ID)
-	m.recordRequestedTab("", proj.ID, pendingTabCreateToken)
+	m.recordRequestedTab("", proj.ID, pendingTabCreateToken, "")
 
 	updated, _ := m.Update(typingGuardBroadcast("t2", "t1", "t2"))
 	got := updated.(Model)
@@ -557,7 +557,7 @@ func TestTypingGuard_CreateTabTokenMatchesTheNewTab(t *testing.T) {
 	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	m, _ := typingGuardModel(t, t0, "t1")
 	proj := m.cur()
-	m.recordRequestedTab("", proj.ID, pendingTabCreateToken)
+	m.recordRequestedTab("", proj.ID, pendingTabCreateToken, "")
 
 	// A brand new tab (never seen before) becomes active — this client's own
 	// create_tab landing.
@@ -566,6 +566,125 @@ func TestTypingGuard_CreateTabTokenMatchesTheNewTab(t *testing.T) {
 
 	if got.guardPaneID != "" {
 		t.Errorf("guardPaneID = %q, want empty — a genuinely new tab must be recognised as the pending create's own landing", got.guardPaneID)
+	}
+}
+
+// TestTypingGuard_CreateTabTokenSurvivesANoOpBroadcast pins review round 2's
+// new Important finding: applyTabMoveGuard now runs on EVERY broadcast for
+// the active project (fix round 1's Important 1), including ordinary ones
+// that change nothing — the git ticker, an OSC 7 CWD update, another
+// client's unrelated action. Before this fix, the pending-create branch
+// deleted its token unconditionally and only THEN checked existedBefore, so
+// a no-op broadcast (existedBefore trivially true — it's the tab we were
+// already on) spent it — and the create's own tab, landing moments later,
+// read as a stranger's remote switch: a false flash and 250 ms of redirected
+// typing right after Ctrl+T.
+func TestTypingGuard_CreateTabTokenSurvivesANoOpBroadcast(t *testing.T) {
+	t.Parallel()
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	m, _ := typingGuardModel(t, t0, "t1")
+	proj := m.cur()
+	m.recordRequestedTab("", proj.ID, pendingTabCreateToken, "")
+
+	// An ordinary broadcast, same active tab, lands before the create's own.
+	updated, _ := m.Update(typingGuardBroadcast("t1", "t1"))
+	got := updated.(Model)
+	if got.guardPaneID != "" {
+		t.Fatalf("guardPaneID = %q after a no-op broadcast, want empty", got.guardPaneID)
+	}
+	key := requestedTabKey("", proj.ID)
+	if _, ok := got.requestedTab[key]; !ok {
+		t.Fatal("pendingTabCreateToken was spent by a broadcast that changed nothing")
+	}
+
+	// The create's own tab lands next — the token must still be there to
+	// recognise it.
+	updated, _ = got.Update(typingGuardBroadcast("t2", "t1", "t2"))
+	got2 := updated.(Model)
+	if got2.guardPaneID != "" {
+		t.Errorf("guardPaneID = %q, want empty — the surviving token must still recognise its own create's landing", got2.guardPaneID)
+	}
+}
+
+// TestTypingGuard_StaleFromTabBroadcastIsRejectedWhilePending pins review
+// round 2's pre-existing issue: a broadcast already in flight when switchTab
+// runs still names the tab this client just left. Adopting it — as the
+// pre-fix code did, since it had no way to tell "the daemon really switched
+// back" from "this is leftover from before my own switch" — visibly jumped
+// the tab back to the old one for the width of one round trip before the
+// requester's own echo corrected it, and armed a false guard/flash on top.
+func TestTypingGuard_StaleFromTabBroadcastIsRejectedWhilePending(t *testing.T) {
+	t.Parallel()
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	m, _ := typingGuardModel(t, t0, "t1", "t2")
+
+	updated, _ := m.Update(altKey('2')) // requests t2, leaving t1
+	got := updated.(Model)
+	if got.activeTabModel().ID != "t2" {
+		t.Fatalf("setup: active tab = %q, want t2", got.activeTabModel().ID)
+	}
+
+	// A broadcast already in flight before the switch still names t1 — the
+	// PRE-switch state, not a real switch back. Well within the stale bound.
+	got.now = func() time.Time { return t0.Add(500 * time.Millisecond) }
+	updated, _ = got.Update(typingGuardBroadcast("t1", "t1", "t2"))
+	got2 := updated.(Model)
+
+	if got2.activeTabModel().ID != "t2" {
+		t.Errorf("active tab = %q after the stale t1 broadcast, want t2 (unchanged)", got2.activeTabModel().ID)
+	}
+	if got2.guardPaneID != "" {
+		t.Errorf("guardPaneID = %q, want empty — a stale echo of the pre-switch state must not arm the guard", got2.guardPaneID)
+	}
+	if got2.flashText != "" {
+		t.Errorf("flashText = %q, want empty — no false flash for a stale broadcast", got2.flashText)
+	}
+
+	// The real confirmation lands next and must still be recognised — the
+	// stale broadcast above must not have consumed the token.
+	updated, _ = got2.Update(typingGuardBroadcast("t2", "t1", "t2"))
+	got3 := updated.(Model)
+	if got3.activeTabModel().ID != "t2" {
+		t.Fatalf("active tab = %q after the echo, want t2", got3.activeTabModel().ID)
+	}
+	if got3.guardPaneID != "" {
+		t.Errorf("guardPaneID = %q after the echo, want empty", got3.guardPaneID)
+	}
+
+	// NOW a genuine remote switch to t1 (the token is spent, so nothing can
+	// mistake this for another stale echo) must be honoured and guarded.
+	updated, _ = got3.Update(typingGuardBroadcast("t1", "t1", "t2"))
+	got4 := updated.(Model)
+	if got4.activeTabModel().ID != "t1" {
+		t.Fatalf("active tab = %q after the genuine remote switch, want t1", got4.activeTabModel().ID)
+	}
+	if got4.guardPaneID != "p2" {
+		t.Errorf("guardPaneID = %q, want p2 (this client's own tab when the remote switch arrived)", got4.guardPaneID)
+	}
+}
+
+// TestTypingGuard_StaleFromTabBroadcastIsAdoptedPastTheBound is the other
+// side of requestedSwitchStaleWindow: once it elapses, the local switch is
+// assumed lost (never reached the daemon, or was overtaken), and a broadcast
+// naming the tab this client asked to leave is adopted normally — guard
+// included — rather than held forever.
+func TestTypingGuard_StaleFromTabBroadcastIsAdoptedPastTheBound(t *testing.T) {
+	t.Parallel()
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	m, _ := typingGuardModel(t, t0, "t1", "t2")
+
+	updated, _ := m.Update(altKey('2')) // requests t2, leaving t1
+	got := updated.(Model)
+
+	got.now = func() time.Time { return t0.Add(3 * time.Second) } // past requestedSwitchStaleWindow
+	updated, _ = got.Update(typingGuardBroadcast("t1", "t1", "t2"))
+	got2 := updated.(Model)
+
+	if got2.activeTabModel().ID != "t1" {
+		t.Errorf("active tab = %q, want t1 — past the bound the broadcast must be adopted, not held", got2.activeTabModel().ID)
+	}
+	if got2.guardPaneID != "p2" {
+		t.Errorf("guardPaneID = %q, want p2", got2.guardPaneID)
 	}
 }
 
@@ -584,7 +703,7 @@ func TestArmReattachReset_ClearsTypingGuardStateForThatDest(t *testing.T) {
 	if got.guardPaneID != "p1" {
 		t.Fatalf("setup: guardPaneID = %q, want p1", got.guardPaneID)
 	}
-	got.recordRequestedTab("", "some-other-project", "some-tab")
+	got.recordRequestedTab("", "some-other-project", "some-tab", "")
 
 	got.armReattachReset("")
 

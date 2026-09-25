@@ -527,14 +527,16 @@ type Model struct {
 	// client count (bridges excluded) — what renderStatusBar's role marker
 	// and D9's "most recent input" default both key off of at the TUI layer.
 	clientCount map[string]int
-	// requestedTab records, per (dest, project) key (requestedTabKey), the tab
-	// id THIS client last asked for via switchTab/switchTabBy or sendCreateTab.
-	// applyWorkspaceState consults it to tell this client's own switch landing
-	// apart from a change some OTHER client made (typing guard, spec §8.1):
-	// a broadcast whose adopted ActiveTab equals the recorded value is this
-	// client's own request landing (the entry is cleared); anything else is
-	// remote and arms remoteSwitchAt/guardPaneID/remoteFocusUnacked below.
-	requestedTab map[string]string
+	// requestedTab records, per (dest, project) key (requestedTabKey), THIS
+	// client's own in-flight switchTab/switchTabBy/sendCreateTab request.
+	// applyTabMoveGuard consults it to tell this client's own switch landing
+	// apart from a change some OTHER client made (typing guard, spec §8.1): a
+	// broadcast whose adopted ActiveTab equals pendingSwitch.target is this
+	// client's own request landing (the entry is cleared); one naming
+	// pendingSwitch.from within the stale window is a network-ordering
+	// leftover from before the request and is rejected outright; anything
+	// else is remote and arms remoteSwitchAt/guardPaneID/remoteFocusUnacked.
+	requestedTab map[string]pendingSwitch
 	// remoteSwitchAt is m.clock() at the last REMOTE active-tab change this
 	// client observed for its active project — the typing guard's window
 	// (remoteSwitchGuardWindow) is measured from here.
@@ -1274,7 +1276,7 @@ func NewModel(client Client, cfg config.Config, version string, registry *plugin
 		inputCh:          make(chan paneInput, inputForwardBuffer),
 		inputDone:        make(chan struct{}),
 		inputIdle:        make(chan struct{}),
-		requestedTab:     make(map[string]string),
+		requestedTab:     make(map[string]pendingSwitch),
 		now:              time.Now,
 	}
 	// Startup dialog priority: migration > what's-new > update-notice >
@@ -4478,7 +4480,7 @@ func (m Model) sendCreateTab(spec *ipc.FirstPaneSpec) tea.Cmd {
 	// since it always looks up (dest, THAT dest's own active project). Better
 	// to record nothing than to record a key that can only ever be wrong.
 	if proj := m.cur(); proj != nil && proj.Dest == dest && m.requestedTab != nil {
-		m.requestedTab[requestedTabKey(dest, proj.ID)] = pendingTabCreateToken
+		m.requestedTab[requestedTabKey(dest, proj.ID)] = pendingSwitch{target: pendingTabCreateToken, at: m.clock()}
 	}
 	return func() tea.Msg {
 		msg, err := ipc.NewMessage(ipc.MsgCreateTab, ipc.CreateTabPayload{
@@ -6120,52 +6122,81 @@ func tabInputPaneID(tab *TabModel) string {
 	return tab.ActivePane
 }
 
-// applyTabMoveGuard decides whether an active-tab change applyWorkspaceState
-// just observed for the ACTIVE project is this client's own request landing
-// or one another attached client made, and arms the typing guard for the
-// latter (spec §8.1). Returns the flash-expiry cmd when it arms, nil
-// otherwise — the caller must batch it, or the flash never clears itself.
+// applyTabMoveGuard decides, for the ACTIVE project, what active tab this
+// broadcast should actually settle on — the daemon's own report, this
+// client's pending request held in place instead (a stale echo), or the
+// daemon's report adopted with the typing guard armed (spec §8.1) — and
+// returns that tab id alongside the flash-expiry cmd when the guard armed
+// (nil otherwise; the caller must batch a non-nil one, or the flash never
+// clears itself).
 //
 // Called UNCONDITIONALLY for the active project on every broadcast, not only
 // when the tab actually moved: a token must be retired on an ORDINARY echo
-// too (fromTab == targetTab already, because switchTab updates the client's
-// own index synchronously before any broadcast can land) — leaving a matched
-// token in place would let it silently satisfy some LATER, unrelated
-// broadcast that happens to name the same tab id.
+// too (fromTab.ID == newActiveTab already, because switchTab updates the
+// client's own index synchronously before any broadcast can land) — leaving
+// a matched token in place would let it silently satisfy some LATER,
+// unrelated broadcast that happens to name the same tab id. The SAME reason
+// is why the create-token case below must not spend itself on a broadcast
+// that changes nothing (review round 2): applyTabMoveGuard now runs on every
+// broadcast including the ordinary ones a pending create sits through (the
+// git ticker, an OSC 7 CWD update, another client's unrelated action) before
+// its own tab ever lands.
 //
 // "Not requested" is decided with the requestedTab TOKEN, never with a time
 // window: a local switch followed quickly by an unrelated remote one must
 // still be guarded, which a window alone cannot tell apart from the local
-// switch's own delayed echo.
+// switch's own delayed echo. The one exception is pendingSwitch.from within
+// requestedSwitchStaleWindow (review round 2's pre-existing issue): a
+// broadcast already in flight when switchTab ran still names the tab this
+// client just left, and adopting it would jump the tab visibly back for the
+// width of one round trip before the requester's own echo corrects it — so
+// that report is rejected outright rather than merely un-guarded.
 //
 // existedBefore reports whether newActiveTab was already one of this
 // client's tabs (any project) before this broadcast — the create-token's
 // only use for it, since a create_tab request has no id to compare by
 // equality ahead of time (the daemon mints one).
-func (m *Model) applyTabMoveGuard(dest, projectID, newActiveTab string, fromTab, targetTab *TabModel, tabs []*TabModel, existedBefore bool) tea.Cmd {
+func (m *Model) applyTabMoveGuard(dest, projectID, newActiveTab string, fromTab *TabModel, tabs []*TabModel, existedBefore bool) (string, tea.Cmd) {
 	key := requestedTabKey(dest, projectID)
 	if req, ok := m.requestedTab[key]; ok {
 		switch {
-		case req == pendingTabCreateToken:
-			// One-shot: spent against the very next active-tab change either
-			// way, so a leftover token can never outlive the create it was
-			// minted for and silently swallow some LATER remote switch.
+		case req.target == pendingTabCreateToken:
+			if fromTab != nil && fromTab.ID == newActiveTab {
+				// Nothing has changed yet: an ordinary broadcast landed
+				// before the pending create's own tab. Keep waiting — the
+				// token must not be spent on a broadcast that names the
+				// tab we were ALREADY on.
+				return newActiveTab, nil
+			}
+			// One-shot from here: spent against this active-tab change
+			// either way, so a leftover token can never outlive the create
+			// it was minted for and silently swallow some LATER remote
+			// switch.
 			delete(m.requestedTab, key)
 			if !existedBefore {
-				return nil // the create's own tab landing
+				return newActiveTab, nil // the create's own tab landing
 			}
 			// Not the create landing — an unrelated change beat it there.
 			// Fall through to the ordinary remote-switch handling below.
-		case req == newActiveTab:
+		case req.target == newActiveTab:
 			// An exact match is this client's own switchTab landing, echo or
 			// not — see the function comment for why this compare must run
 			// unconditionally rather than only inside a "moved" branch.
 			delete(m.requestedTab, key)
-			return nil
+			return newActiveTab, nil
+		case req.from != "" && req.from == newActiveTab && m.clock().Sub(req.at) < requestedSwitchStaleWindow:
+			// This broadcast reports the tab we just switched AWAY FROM —
+			// network-ordering leftover from before the request, not a
+			// switch back to it (a genuine one arrives, if it happens at
+			// all, only after this client's own confirmation, by which
+			// point the token above is gone and this case cannot match).
+			// Reject it outright: hold the tab at what we asked for, keep
+			// the token, arm no guard.
+			return req.target, nil
 		}
 	}
-	if fromTab == nil || fromTab == targetTab {
-		return nil // nothing moved, or this project's very first broadcast
+	if fromTab == nil || fromTab.ID == newActiveTab {
+		return newActiveTab, nil // nothing moved, or this project's very first broadcast
 	}
 	// A vanished source tab (this client's own Ctrl+W, Move to project, or a
 	// dissolve/recovery that moved its last pane out) is not "switched away
@@ -6173,13 +6204,13 @@ func (m *Model) applyTabMoveGuard(dest, projectID, newActiveTab string, fromTab,
 	// the tab away from under itself. Only arm when fromTab is still part of
 	// the broadcast's tab list for this project.
 	if !tabsContainID(tabs, fromTab.ID) {
-		return nil
+		return newActiveTab, nil
 	}
 	m.remoteSwitchAt = m.clock()
 	m.guardPaneID = tabInputPaneID(fromTab)
 	m.remoteFocusUnacked = true
 	m.setFlash("Tab switched by another client")
-	return m.flashCmd()
+	return newActiveTab, m.flashCmd()
 }
 
 // applyWorkspaceState rebuilds the TUI state from one daemon's broadcast.
@@ -6322,21 +6353,28 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]str
 		proj.Offline = nil
 		tabs, projPaneIDs, projResizeCmds := m.rebuildTabs(info, state, existingTabs, existingPanes, paneMap, dest)
 		proj.tabs = tabs
-		proj.activeTab = indexOfTab(proj.tabs, info.ActiveTab)
-		targetTab := tabAt(proj.tabs, proj.activeTab)
 		// Typing guard (spec §8.1), scoped to the ACTIVE project only: a
 		// background project's active tab moving under it is not something
-		// anyone is typing into right now. Called even when fromTab == targetTab
-		// (an ordinary echo) — see applyTabMoveGuard's own comment for why the
-		// requestedTab token must be retired on that path too, not only inside
-		// the "moved" branch below. ok (the project already existed) is what
+		// anyone is typing into right now. Called even when nothing moved (an
+		// ordinary echo, or an unrelated broadcast while a request is pending)
+		// — see applyTabMoveGuard's own comment for why the requestedTab token
+		// must be retired (or deliberately KEPT) on those paths too, not only
+		// inside a "moved" branch. ok (the project already existed) is what
 		// makes the token lookup meaningful; a brand new project has none.
+		// effectiveActiveTab may differ from info.ActiveTab: a rejected stale
+		// broadcast (pendingSwitch.from) holds the tab at this client's own
+		// pending request instead of adopting the daemon's report.
+		effectiveActiveTab := info.ActiveTab
 		if info.ID == activeID && ok {
 			_, existedBefore := existingTabs[info.ActiveTab]
-			if cmd := m.applyTabMoveGuard(dest, info.ID, info.ActiveTab, fromTab, targetTab, proj.tabs, existedBefore); cmd != nil {
+			var cmd tea.Cmd
+			effectiveActiveTab, cmd = m.applyTabMoveGuard(dest, info.ID, info.ActiveTab, fromTab, proj.tabs, existedBefore)
+			if cmd != nil {
 				overlayResizeCmds = append(overlayResizeCmds, cmd)
 			}
 		}
+		proj.activeTab = indexOfTab(proj.tabs, effectiveActiveTab)
+		targetTab := tabAt(proj.tabs, proj.activeTab)
 		if fromTab != targetTab {
 			tabMoves = append(tabMoves, activeTabMove{from: fromTab, target: targetTab})
 		}
@@ -7251,9 +7289,16 @@ func (m *Model) switchTab(idx int) tea.Cmd {
 	// Typing guard (spec §8.1): this client asked for tabID, so the broadcast
 	// that lands it must not be mistaken for another client's switch. Recorded
 	// against the CURRENT project — target and its project share one Dest, so
-	// this is the same key applyWorkspaceState looks up.
+	// this is the same key applyWorkspaceState looks up. fromID lets a
+	// broadcast still describing the PRE-switch state (in flight when this
+	// ran) be recognised as stale rather than adopted as a switch back — see
+	// requestedSwitchStaleWindow.
 	if proj := m.cur(); proj != nil {
-		m.recordRequestedTab(dest, proj.ID, tabID)
+		fromID := ""
+		if from != nil {
+			fromID = from.ID
+		}
+		m.recordRequestedTab(dest, proj.ID, tabID, fromID)
 	}
 	cmds := []tea.Cmd{func() tea.Msg {
 		msg, _ := ipc.NewMessage(ipc.MsgSwitchTab, ipc.SwitchTabPayload{
@@ -7280,7 +7325,19 @@ func (m *Model) switchTab(idx int) tea.Cmd {
 // before it, not the pane the switch made active.
 const remoteSwitchGuardWindow = 250 * time.Millisecond
 
-// pendingTabCreateToken marks requestedTab[key] while this client's own
+// requestedSwitchStaleWindow bounds how long a broadcast naming the tab a
+// pending LOCAL switch moved AWAY FROM (pendingSwitch.from) is rejected as a
+// stale echo of the pre-switch state, rather than adopted as a genuine switch
+// back to it. review round 2: a broadcast already in flight when switchTab
+// runs still names the OLD active tab; without this bound, that broadcast is
+// indistinguishable from another client genuinely switching back, and the
+// tab visibly jumped to the old one for the width of one round trip before
+// the requester's own echo corrected it. Past the bound the local switch is
+// assumed lost (never reached the daemon, or was overtaken) and a broadcast
+// naming `from` is adopted normally, guard included.
+const requestedSwitchStaleWindow = 2 * time.Second
+
+// pendingTabCreateToken marks pendingSwitch.target while this client's own
 // create_tab is in flight for that project. Unlike switchTab, sendCreateTab
 // has no id to record ahead of time — the daemon mints the new tab's id — so
 // there is nothing to compare the eventual broadcast's ActiveTab against by
@@ -7288,6 +7345,23 @@ const remoteSwitchGuardWindow = 250 * time.Millisecond
 // never carry a NUL byte), and applyTabMoveGuard treats it as a match for
 // whatever tab the daemon makes active next.
 const pendingTabCreateToken = "\x00pending-create"
+
+// pendingSwitch is requestedTab's value — see that field's comment for the
+// decisions it drives.
+type pendingSwitch struct {
+	// target is the tab id this client asked for (switchTab), or
+	// pendingTabCreateToken when the daemon has not minted one yet
+	// (sendCreateTab).
+	target string
+	// from is the tab this project was showing right before the request —
+	// "" for a create, which never moves this client's own active tab ahead
+	// of the daemon's answer, so there is no "pre-request state" a broadcast
+	// could stale-echo. See requestedSwitchStaleWindow.
+	from string
+	// at is m.clock() when the request was recorded — requestedSwitchStaleWindow
+	// is measured from here.
+	at time.Time
+}
 
 // requestedTabKey identifies one project on one destination for
 // Model.requestedTab. Dest alone is not unique (each daemon mints its own
@@ -7298,15 +7372,17 @@ func requestedTabKey(dest, projectID string) string {
 	return dest + "\x00" + projectID
 }
 
-// recordRequestedTab notes that THIS client is the one asking for tabID to
-// become the active tab of (dest, projectID). Called by switchTab/
-// switchTabBy with the tab they are switching TO, and by sendCreateTab with
-// pendingTabCreateToken. See requestedTab's field comment.
-func (m *Model) recordRequestedTab(dest, projectID, tabID string) {
+// recordRequestedTab notes that THIS client is the one asking for target to
+// become the active tab of (dest, projectID), moving there FROM the tab this
+// project was showing before (from — "" when not applicable, e.g. a create).
+// Called by switchTab/switchTabBy with the tab they are switching TO and the
+// tab they are leaving, and by sendCreateTab with pendingTabCreateToken and
+// no from. See requestedTab's field comment.
+func (m *Model) recordRequestedTab(dest, projectID, target, from string) {
 	if m.requestedTab == nil {
-		m.requestedTab = make(map[string]string)
+		m.requestedTab = make(map[string]pendingSwitch)
 	}
-	m.requestedTab[requestedTabKey(dest, projectID)] = tabID
+	m.requestedTab[requestedTabKey(dest, projectID)] = pendingSwitch{target: target, from: from, at: m.clock()}
 }
 
 // clock returns the typing guard's current time: m.now when the Model has

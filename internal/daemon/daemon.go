@@ -275,6 +275,17 @@ type Daemon struct {
 	// be called while it is held, and nothing broadcasts while it is held.
 	clients clientRegistry
 
+	// broadcastMu guards the single in-flight timer requestBroadcast arms
+	// (broadcast_coalesce.go), coalescing a burst of accepted layout writes
+	// into one broadcastState() call. broadcastAfterFn is the same seam
+	// shape as clientRegistry's afterFn — real time.AfterFunc from New(), a
+	// fake that fires by hand in tests — kept as its own field rather than
+	// reused because the two timers are armed and stopped independently
+	// (Stop() calls both stopBroadcastCoalescer() and clients.stopTimer()).
+	broadcastMu        sync.Mutex
+	broadcastTimerStop func() bool
+	broadcastAfterFn   func(time.Duration, func()) (stop func() bool)
+
 	// holds keeps each attaching conn's live pane output while its replay is
 	// sent, keyed by conn (outputhold.go). holdMu is a leaf guarding it;
 	// holdGate orders a flush's hold append and broadcast against a conn's
@@ -331,6 +342,7 @@ func New(cfg config.Config) *Daemon {
 	d.clients.afterFn = realAfterFunc
 	d.clients.grace = cfg.Daemon.MasterGrace()
 	d.clients.onChange = d.broadcastState
+	d.broadcastAfterFn = realAfterFunc
 	d.startedAt = time.Now()
 	// Clamped like a pushed policy: config.toml is hand-edited, so it can carry
 	// exactly the values the IPC path is bounded against.
@@ -595,6 +607,7 @@ func (d *Daemon) Stop() {
 		}
 		// No client can attach any more, so nothing can re-arm it.
 		d.clients.stopTimer()
+		d.stopBroadcastCoalescer()
 		d.collectorWG.Wait()
 		// Pull the latest hook-recorded session ids into PluginState so
 		// the final snapshot survives even if the hook files are lost.
@@ -894,6 +907,16 @@ func (d *Daemon) restoreWorkspace() error {
 			layoutBytes, err := json.Marshal(layoutRaw)
 			if err == nil {
 				tab.Layout = json.RawMessage(layoutBytes)
+			}
+		}
+
+		// Restore layout revision. Absent means 0 — a workspace.json written
+		// before layout revisioning existed, or a tab that never had a
+		// layout write. JSON numbers decode to float64 through this
+		// map[string]any, never a uint64 directly.
+		if revRaw, ok := tabMap["layout_rev"]; ok {
+			if rev, ok := revRaw.(float64); ok && rev >= 0 {
+				tab.LayoutRev = uint64(rev)
 			}
 		}
 
@@ -4014,12 +4037,18 @@ func (d *Daemon) handleUpdateLayout(msg *ipc.Message) {
 
 	// Under sm.mu: SnapshotState copies Layout under the same lock, and
 	// MovePane reads it there for its template check.
-	if !d.session.SetTabLayout(payload.TabID, payload.Layout) {
+	if !d.session.SetTabLayout(payload.TabID, payload.Layout, payload.BaseRev) {
+		logger.Debug("update_layout: refused tab=%s (unknown tab or stale base_rev)", payload.TabID)
 		return
 	}
-	// No broadcastState() — avoids feedback loop.
-	// Snapshot ensures layout is persisted to disk.
+	// Every client now sends an update only after ITS OWN change and adopts
+	// a broadcast whose layout_rev is newer than what it holds (spec §7.1),
+	// so echoing this accepted write back to the sender cannot make it send
+	// again — the feedback loop this comment used to warn about is
+	// structurally impossible now, not merely avoided by omission.
+	// requestBroadcast coalesces a burst of these (see broadcast_coalesce.go).
 	d.requestSnapshot()
+	d.requestBroadcast()
 }
 
 // resizeKick re-applies a pane's last known size to its PTY, with a
@@ -4546,6 +4575,11 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			"color":      tab.Color,
 			"panes":      paneIDs,
 			"project_id": tab.ProjectID,
+			// Unconditional, unlike "layout" below: every client compares
+			// this against its own copy on every broadcast to decide whether
+			// to adopt (spec §7.1), including a tab whose layout has never
+			// been written, so it must be on the wire even at its zero value.
+			"layout_rev": tab.LayoutRev,
 		}
 		if len(tab.Layout) > 0 {
 			tabData["layout"] = tab.Layout

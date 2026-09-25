@@ -25,7 +25,16 @@ type Tab struct {
 	Color          string
 	Panes          []string        // Pane IDs in order
 	Layout         json.RawMessage // Opaque layout tree from TUI
-	ProjectID      string          // Project this tab belongs to (see project.go)
+	// LayoutRev is bumped on every accepted SetTabLayout. It is the
+	// compare-and-store base a client sends back on its NEXT write
+	// (UpdateLayoutPayload.BaseRev) and the value every client compares its
+	// own copy against on a broadcast, to tell an update it should adopt from
+	// one it should ignore (spec §7.1). Zero both for a tab that has never
+	// had a layout written and for one restored from a workspace.json
+	// written before this field existed — the two are indistinguishable and
+	// that is fine, since both start the CAS from the same place.
+	LayoutRev uint64
+	ProjectID string // Project this tab belongs to (see project.go)
 }
 
 type Pane struct {
@@ -1090,18 +1099,27 @@ func (sm *SessionManager) UpdateTab(tabID, name, color string, clearColor bool) 
 	return true
 }
 
-// SetTabLayout replaces a tab's opaque layout under sm.mu. False for an
-// unknown tab. handleUpdateLayout used to write tab.Layout through the live
-// pointer with no lock, racing SnapshotState's copy — the handleUpdateTab
-// shape #229 fixed.
-func (sm *SessionManager) SetTabLayout(tabID string, layout json.RawMessage) bool {
+// SetTabLayout replaces a tab's opaque layout under sm.mu, gated by a
+// compare-and-store on baseRev: nil accepts unconditionally (an older client,
+// or one that has not adopted revisions yet), a value equal to the tab's
+// current LayoutRev accepts, and anything else is refused with NO write at
+// all — not to Layout, not to LayoutRev. False also for an unknown tab. An
+// accepted write bumps LayoutRev, which is the new base the caller's NEXT
+// update carries. handleUpdateLayout used to write tab.Layout through the
+// live pointer with no lock, racing SnapshotState's copy — the
+// handleUpdateTab shape #229 fixed.
+func (sm *SessionManager) SetTabLayout(tabID string, layout json.RawMessage, baseRev *uint64) bool {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	tab, ok := sm.tabs[tabID]
 	if !ok {
 		return false
 	}
+	if baseRev != nil && *baseRev != tab.LayoutRev {
+		return false
+	}
 	tab.Layout = layout
+	tab.LayoutRev++
 	return true
 }
 

@@ -923,6 +923,9 @@ func (m *Model) armReattachReset(dest string) {
 		p.reattachReset = true
 		// The daemon may have restarted too, resetting its PTY run counter.
 		p.outputGeneration = 0
+		// And its per-pane size counter: a restarted daemon numbers sizes from
+		// 1 again, and a kept number would refuse every one of them as stale.
+		p.daemonSizeSeq = 0
 		// Forget that this pane has been sized. The suppression in diffResizes
 		// describes a daemon-side guard (appliedCols/appliedRows) that a PTY
 		// reinstall zeroes, so carrying it across an outage would withhold the

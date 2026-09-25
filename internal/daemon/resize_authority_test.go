@@ -415,6 +415,73 @@ func TestPaneSizes_FailedResizeSendsPreviousSize(t *testing.T) {
 	if c, r := appliedSize(pane); c != 120 || r != 40 {
 		t.Errorf("applied = %dx%d after a failed resize, want 120x40 unchanged", c, r)
 	}
+	// The rollback is a newer announcement than the size it undoes.
+	e1, e2 := paneSizesOf(t, first[len(first)-1]), paneSizesOf(t, second[len(second)-1])
+	if e2[0].SizeSeq <= e1[0].SizeSeq {
+		t.Errorf("rollback size_seq %d, want above the failed announcement's %d", e2[0].SizeSeq, e1[0].SizeSeq)
+	}
+}
+
+// broadcastSizeSeq reads pane id's size_seq out of a broadcast state map; 0
+// when absent. No t here: it also runs inside a PTY hook, off the test
+// goroutine, where t.Fatal is not allowed.
+func broadcastSizeSeq(state map[string]any, id string) uint64 {
+	panes, _ := state["panes"].([]map[string]any)
+	for _, p := range panes {
+		if p["id"] == id {
+			n, _ := p["size_seq"].(uint64)
+			return n
+		}
+	}
+	return 0
+}
+
+// Each announcement is numbered before the pane_sizes frame leaves, and the
+// frame carries the number. A broadcast built INSIDE the batch window — after
+// the frame, before Cols/Rows are recorded — still reports the old size, so it
+// must carry an OLDER number than the frame, or a follower would adopt the old
+// size over the new one with no PTY redraw to pair it. Once recorded, the
+// broadcast carries the frame's own number.
+func TestPaneSizes_FrameCarriesSizeSeqAndMidBatchBroadcastIsOlder(t *testing.T) {
+	d, sock, tabID := resizeAuthorityDaemon(t)
+	a, b := attachAB(t, d, sock)
+	readUntil(t, b, "B's attach state", isType(ipc.MsgWorkspaceState))
+
+	panes, probes := addProbePanes(t, d, tabID, "terminal", 1)
+	pane := panes[0]
+	var midSeq, midBroadcast uint64
+	var midCols int
+	probes[0].mu.Lock()
+	probes[0].onResize = func() {
+		pane.PluginMu.Lock()
+		midSeq, midCols = pane.sizeSeq, pane.Cols
+		pane.PluginMu.Unlock()
+		midBroadcast = broadcastSizeSeq(d.buildWorkspaceState(), pane.ID)
+	}
+	probes[0].mu.Unlock()
+
+	sendClientMsg(t, a, ipc.MsgResizePane, ipc.ResizePanePayload{PaneID: pane.ID, Cols: 150, Rows: 40})
+	got := readUntil(t, b, "the size frame", isType(ipc.MsgPaneSizes))
+	e := paneSizesOf(t, got[len(got)-1])
+	if len(e) != 1 || e[0].SizeSeq == 0 {
+		t.Fatalf("pane_sizes = %+v, want one numbered entry", e)
+	}
+	waitUntil(t, "the resize applied", func() bool {
+		c, r := appliedSize(pane)
+		return c == 150 && r == 40
+	})
+	if midSeq != e[0].SizeSeq {
+		t.Errorf("sizeSeq during the PTY resize = %d, want the frame's %d: the number must be taken before the frame leaves", midSeq, e[0].SizeSeq)
+	}
+	if midCols == 150 {
+		t.Fatal("setup: Cols was already recorded inside Resize, so no window was probed")
+	}
+	if midBroadcast >= e[0].SizeSeq {
+		t.Errorf("a broadcast built mid-batch carries size_seq %d with the OLD size; want below the frame's %d", midBroadcast, e[0].SizeSeq)
+	}
+	if after := broadcastSizeSeq(d.buildWorkspaceState(), pane.ID); after != e[0].SizeSeq {
+		t.Errorf("broadcast after the resize carries size_seq %d, want the frame's %d", after, e[0].SizeSeq)
+	}
 }
 
 // The broadcast carries who the master is and how many clients are attached;

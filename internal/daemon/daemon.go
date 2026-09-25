@@ -3731,14 +3731,22 @@ func (d *Daemon) applyResizes(conn *ipc.Conn, items []ipc.ResizePanePayload) {
 	if len(work) == 0 {
 		return
 	}
+	// Each pane's announcement is numbered BEFORE the frame leaves, so the
+	// frame carries it and the Cols/Rows recorded after the resize can be
+	// stamped with the same number (see Pane.sizeSeq).
 	sizes := make([]ipc.ResizePanePayload, len(work))
+	seqs := make([]uint64, len(work))
 	for i, w := range work {
-		sizes[i] = ipc.ResizePanePayload{PaneID: w.pane.ID, Cols: w.cols, Rows: w.rows}
+		w.pane.PluginMu.Lock()
+		w.pane.sizeSeq++
+		seqs[i] = w.pane.sizeSeq
+		w.pane.PluginMu.Unlock()
+		sizes[i] = ipc.ResizePanePayload{PaneID: w.pane.ID, Cols: w.cols, Rows: w.rows, SizeSeq: seqs[i]}
 	}
 	d.sendPaneSizes(conn, sizes)
 
 	var failed []ipc.ResizePanePayload
-	for _, w := range work {
+	for i, w := range work {
 		if err := w.pty.Resize(w.rows, w.cols); err != nil {
 			// Record nothing on failure: a transient Resize error must not make
 			// the guard believe this size was applied, or the TUI's next
@@ -3749,8 +3757,15 @@ func (d *Daemon) applyResizes(conn *ipc.Conn, items []ipc.ResizePanePayload) {
 			// The followers were already told the new size, and the child is
 			// still at the old one: tell them the old one again. A pane that
 			// never had a size applied has nothing to go back to.
+			// The rollback is a newer announcement than the one it undoes,
+			// so it takes a new number; Cols/Rows and colsSeq are left
+			// alone, so a broadcast still carrying them is older than both.
 			if w.prevC > 0 && w.prevR > 0 {
-				failed = append(failed, ipc.ResizePanePayload{PaneID: w.pane.ID, Cols: uint16(w.prevC), Rows: uint16(w.prevR)})
+				w.pane.PluginMu.Lock()
+				w.pane.sizeSeq++
+				seq := w.pane.sizeSeq
+				w.pane.PluginMu.Unlock()
+				failed = append(failed, ipc.ResizePanePayload{PaneID: w.pane.ID, Cols: uint16(w.prevC), Rows: uint16(w.prevR), SizeSeq: seq})
 			}
 			continue
 		}
@@ -3762,6 +3777,13 @@ func (d *Daemon) applyResizes(conn *ipc.Conn, items []ipc.ResizePanePayload) {
 		w.pane.PluginMu.Lock()
 		w.pane.appliedCols, w.pane.appliedRows = int(w.cols), int(w.rows)
 		w.pane.Cols, w.pane.Rows = int(w.cols), int(w.rows)
+		// Never backwards. Should another batch's newer announcement already
+		// be recorded, this resize still ran LAST, so Cols/Rows above are the
+		// PTY's real size — and keeping the newer number is what lets a
+		// broadcast carry that truth past the newer, now-wrong frame.
+		if seqs[i] > w.pane.colsSeq {
+			w.pane.colsSeq = seqs[i]
+		}
 		w.pane.PluginMu.Unlock()
 
 		d.repaintAfterResize(w.pane, w.typ)
@@ -4761,7 +4783,15 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			// goroutine while handleResizePane writes them from a conn dispatch
 			// goroutine.
 			snapCols, snapRows := pane.Cols, pane.Rows
+			// In the same span as Cols/Rows: the number must describe exactly
+			// the size read beside it (see Pane.sizeSeq).
+			snapSizeSeq := pane.colsSeq
 			pane.PluginMu.Unlock()
+			// Broadcast-only, runtime: the counter restarts with the daemon,
+			// so a persisted one would mean nothing.
+			if includeOverlays && snapSizeSeq > 0 {
+				paneData["size_seq"] = snapSizeSeq
+			}
 			// Pending (deferred, not yet lazy-spawned) is spawnMu-guarded —
 			// read it the same way list_panes does. The TUI uses it to show the
 			// restore indicator on deferred panes and to re-arm the indicator

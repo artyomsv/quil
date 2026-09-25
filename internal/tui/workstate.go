@@ -928,10 +928,13 @@ func syncPaneMeta(pane *PaneModel, info *PaneInfo, wideCanvas bool, minNativeCol
 	pane.daemonMouseTracking = info.MouseTracking
 	pane.daemonMouseSGR = info.MouseSGR
 	pane.daemonBracketedPaste = info.BracketedPaste
-	// Unconditional, like the rest: the last size the daemon ACCEPTED is the
-	// size a follower's VT takes, and 0x0 (never sized) must fall back.
+	// The last size the daemon ACCEPTED is the size a follower's VT takes, and
+	// 0x0 (never sized) must fall back. NOT unconditional like the rest: a
+	// broadcast built while a resize batch was in flight carries the size from
+	// BEFORE it, and would undo the pane_sizes frame that already resized this
+	// pane's VT — see adoptDaemonSize.
 	pane.follower = follower
-	pane.daemonCols, pane.daemonRows = int(info.Cols), int(info.Rows)
+	pane.adoptDaemonSize(int(info.Cols), int(info.Rows), info.SizeSeq)
 	// Unconditional copy, like the other daemon-authoritative fields: the
 	// daemon writes LastModel BEFORE broadcasting the hook event and IPC
 	// delivery is ordered per connection, so a snapshot can never lag behind

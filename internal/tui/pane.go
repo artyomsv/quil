@@ -178,6 +178,12 @@ type PaneModel struct {
 	// which arrives BEFORE the child's repaint at that size. See targetVTSize.
 	follower               bool
 	daemonCols, daemonRows int
+	// daemonSizeSeq is the daemon's number for daemonCols/daemonRows (see
+	// PaneInfo.SizeSeq). A size is adopted only when its number is not LOWER,
+	// so a stale broadcast cannot resize the VT back behind a newer
+	// pane_sizes frame with no PTY redraw to pair it. Zeroed on reattach,
+	// because a restarted daemon restarts the counter.
+	daemonSizeSeq uint64
 
 	// Render cache: View() output is reused while renderKey() is unchanged.
 	// contentGen covers VT-grid/raw-buffer mutations (the grid itself has no
@@ -651,6 +657,18 @@ func (p *PaneModel) acceptOutputGeneration(generation uint64) bool {
 // Only EMULATOR sizing goes through here. The resize producers
 // (resizeAllPanes, diffResizes) keep calling paneVTSize: a master sends its
 // own rect's size, and a follower sends nothing at all.
+// adoptDaemonSize records a daemon size for the pane unless the pane already
+// holds a NEWER one. Equal is adopted, so a repeat of the same announcement
+// is idempotent and a daemon without the counter (always 0) always wins.
+// Reports whether it adopted.
+func (p *PaneModel) adoptDaemonSize(cols, rows int, seq uint64) bool {
+	if seq < p.daemonSizeSeq {
+		return false
+	}
+	p.daemonCols, p.daemonRows, p.daemonSizeSeq = cols, rows, seq
+	return true
+}
+
 func (p *PaneModel) targetVTSize(rectW, rectH, nativeW, canvasW, canvasH int) (cols, rows int) {
 	if p.follower && p.daemonCols > 0 && p.daemonRows > 0 {
 		return p.daemonCols, p.daemonRows

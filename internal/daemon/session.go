@@ -243,8 +243,21 @@ type Pane struct {
 	// workspace broadcast; this guard turns the duplicates into no-ops.
 	// Zeroed when a new PTY is installed (spawnPane) so a fresh PTY
 	// always accepts its first resize. Guarded by PluginMu.
-	appliedCols     int
-	appliedRows     int
+	appliedCols int
+	appliedRows int
+	// sizeSeq numbers every size this pane's followers are TOLD, and colsSeq
+	// is the announcement Cols/Rows currently record. Two counters because
+	// the two are written at different moments: applyResizes announces a
+	// batch (pane_sizes) BEFORE the PTY resize and records Cols/Rows only
+	// AFTER it, so a broadcast built in between still carries the old
+	// Cols/Rows — stamped with the old colsSeq, which the TUI then rejects as
+	// older than the pane_sizes it already applied. Stamping the broadcast
+	// with sizeSeq instead would pass the old size off as the new one.
+	// Monotonic for the Pane's life (a restart keeps the struct); a daemon
+	// restart restarts both, which is why the TUI forgets them on reattach.
+	// Guarded by PluginMu.
+	sizeSeq         uint64
+	colsSeq         uint64
 	LastOutputAt    time.Time // Updated on every flushPaneOutput
 	IdleNotified    bool      // Prevents re-firing for same idle period
 	LastIdleEventAt time.Time // Cooldown: last time a idle event was emitted

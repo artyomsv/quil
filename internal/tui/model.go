@@ -195,6 +195,12 @@ type PaneInfo struct {
 	// Zero means the daemon has never applied a size — always send then.
 	Cols uint16
 	Rows uint16
+	// SizeSeq numbers Cols/Rows among every size the daemon announced for
+	// this pane (daemon Pane.colsSeq). A pane_sizes frame carries the same
+	// counter, so a broadcast built before a resize was recorded — older
+	// Cols/Rows, lower SizeSeq — cannot undo the frame a follower already
+	// applied. 0 from a daemon that predates it: always adopted.
+	SizeSeq uint64
 }
 
 // paneSettleRepaintMsg fires shortly after a pane's first live output and
@@ -6821,11 +6827,15 @@ func (m *Model) resizeTabs() {
 
 // applyPaneSizes records a daemon's pane_sizes frame on its panes and resizes
 // every follower pane's VT to match, at once (spec §4.1, §5.1). Scoped to
-// msg.dest: pane ids are only unique within one daemon. A pane that is not a
-// follower still records the size — it is what targetVTSize reads should this
-// client become a follower before the next broadcast — but its VT follows its
-// own box. ResizeVT is a no-op on an unchanged size and bumps contentGen on a
-// changed one, which is what marks the pane dirty for its render cache.
+// msg.dest: pane ids are only unique within one daemon. An entry older than
+// the size a pane already holds is ignored (adoptDaemonSize). A pane that is
+// not a follower records the size too, which keeps its sequence number
+// current, but its VT keeps following its own box: the daemon sends this
+// frame only to non-masters, so a non-follower receiving it is a client with
+// no master to follow (or one the next broadcast is about to demote, and
+// that broadcast resizes it). ResizeVT is a no-op on an unchanged size and
+// bumps contentGen on a changed one, which is what marks the pane dirty for
+// its render cache.
 func (m *Model) applyPaneSizes(msg paneSizesMsg) {
 	// The tab rides along for its canvas: targetVTSize falls back to
 	// paneVTSize for a size of 0x0, and a wide-canvas pane needs the canvas
@@ -6856,7 +6866,9 @@ func (m *Model) applyPaneSizes(msg paneSizesMsg) {
 			continue
 		}
 		p := at.pane
-		p.daemonCols, p.daemonRows = int(s.Cols), int(s.Rows)
+		if !p.adoptDaemonSize(int(s.Cols), int(s.Rows), s.SizeSeq) {
+			continue
+		}
 		if p.follower {
 			p.ResizeVT(p.targetVTSize(p.Width, p.Height, p.NativeW, at.tab.CanvasW, at.tab.CanvasH))
 		}
@@ -8127,6 +8139,9 @@ func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
 				}
 				if n, ok := pm["rows"].(float64); ok && n >= 0 && n <= math.MaxUint16 {
 					pi.Rows = uint16(n)
+				}
+				if n, ok := pm["size_seq"].(float64); ok && n >= 0 {
+					pi.SizeSeq = uint64(n)
 				}
 				state.Panes = append(state.Panes, pi)
 			}

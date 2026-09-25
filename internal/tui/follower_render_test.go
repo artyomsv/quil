@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
 )
 
@@ -32,6 +33,9 @@ func followerFixture(t *testing.T, master string, paneIDs []string,
 	m, conn := tinyTermModel(t)
 	m.SetClientID("me")
 	m.notifications = NewNotificationCenter(30, 50) // the mouse and View paths read it
+	// The shipped keymap, so a step can be driven through its real key.
+	km, _ := buildKeymap(config.Default().Keybindings)
+	m.keymap = km
 	// Receive() must not park the listen command each broadcast re-arms.
 	close(conn.recv)
 
@@ -39,15 +43,7 @@ func followerFixture(t *testing.T, master string, paneIDs []string,
 	runCmd(cmd)
 	m = next.(Model)
 
-	st := WorkspaceStateMsg{
-		Dest: "", Clients: 2,
-		ActiveProject: "proj-1", ActiveTab: "tab-1",
-		Projects: []ProjectInfo{{ID: "proj-1", Name: "Default", TabIDs: []string{"tab-1"}}},
-		Tabs:     []TabInfo{{ID: "tab-1", Name: "Shell", ProjectID: "proj-1", Panes: paneIDs}},
-	}
-	for _, id := range paneIDs {
-		st.Panes = append(st.Panes, PaneInfo{ID: id, TabID: "tab-1", Type: "terminal"})
-	}
+	st := fixtureState("", paneIDs)
 	next, cmd = m.Update(st)
 	runCmd(cmd)
 	m = next.(Model)
@@ -66,6 +62,29 @@ func followerFixture(t *testing.T, master string, paneIDs []string,
 	m = next.(Model)
 	clearSent(conn)
 	return m, conn
+}
+
+// fixtureState is the fixture's one-tab broadcast, naming master (or no
+// master) and carrying no pane sizes.
+func fixtureState(master string, paneIDs []string) WorkspaceStateMsg {
+	st := WorkspaceStateMsg{
+		Dest: "", SizeMaster: master, Clients: 2,
+		ActiveProject: "proj-1", ActiveTab: "tab-1",
+		Projects: []ProjectInfo{{ID: "proj-1", Name: "Default", TabIDs: []string{"tab-1"}}},
+		Tabs:     []TabInfo{{ID: "tab-1", Name: "Shell", ProjectID: "proj-1", Panes: paneIDs}},
+	}
+	for _, id := range paneIDs {
+		st.Panes = append(st.Panes, PaneInfo{ID: id, TabID: "tab-1", Type: "terminal"})
+	}
+	return st
+}
+
+// sizedBroadcast is a follower broadcast reporting pane-1 at cols x rows,
+// numbered seq.
+func sizedBroadcast(cols, rows int, seq uint64) WorkspaceStateMsg {
+	st := fixtureState("other", []string{"pane-1"})
+	st.Panes[0].Cols, st.Panes[0].Rows, st.Panes[0].SizeSeq = uint16(cols), uint16(rows), seq
+	return st
 }
 
 // paneByID resolves a tree pane or an overlay pane of the fixture's model.
@@ -196,6 +215,71 @@ func TestFollower_PaneSizesMsgResizesBeforeOutput(t *testing.T) {
 	}
 }
 
+// A broadcast the daemon built while a resize batch was in flight carries the
+// size from BEFORE the batch but reaches the follower AFTER the batch's
+// pane_sizes frame. Adopting it would resize the VT back with no PTY redraw to
+// pair it. Its lower size_seq is what marks it stale.
+func TestFollower_StaleBroadcastCannotUndoPaneSizes(t *testing.T) {
+	m, _ := followerFixture(t, "other", []string{"pane-1"}, fixedSize(180, 45), func(st *WorkspaceStateMsg) {
+		st.Panes[0].SizeSeq = 4
+	})
+	pane := func() *PaneModel { return paneByID(t, m, "pane-1") }
+	if c, r := vtSize(pane()); c != 180 || r != 45 {
+		t.Fatalf("setup: VT = %dx%d, want 180x45", c, r)
+	}
+
+	next, _ := m.Update(paneSizesMsg{dest: "", sizes: []ipc.ResizePanePayload{{PaneID: "pane-1", Cols: 200, Rows: 50, SizeSeq: 5}}})
+	m = next.(Model)
+	if c, r := vtSize(pane()); c != 200 || r != 50 {
+		t.Fatalf("after pane_sizes seq 5: VT = %dx%d, want 200x50", c, r)
+	}
+
+	next, cmd := m.Update(sizedBroadcast(180, 45, 4))
+	runCmd(cmd)
+	m = next.(Model)
+	if c, r := vtSize(pane()); c != 200 || r != 50 {
+		t.Fatalf("a stale broadcast (seq 4) resized the VT to %dx%d; want it kept at 200x50", c, r)
+	}
+
+	next, cmd = m.Update(sizedBroadcast(200, 50, 5))
+	runCmd(cmd)
+	m = next.(Model)
+	if c, r := vtSize(pane()); c != 200 || r != 50 {
+		t.Fatalf("the broadcast recording seq 5 moved the VT to %dx%d; want 200x50", c, r)
+	}
+
+	// A genuinely newer broadcast is still adopted: the counter guards order,
+	// it does not freeze the size.
+	next, cmd = m.Update(sizedBroadcast(190, 48, 6))
+	runCmd(cmd)
+	m = next.(Model)
+	if c, r := vtSize(pane()); c != 190 || r != 48 {
+		t.Fatalf("newer broadcast (seq 6): VT = %dx%d, want 190x48", c, r)
+	}
+
+	// And a stale pane_sizes entry is ignored the same way.
+	next, _ = m.Update(paneSizesMsg{dest: "", sizes: []ipc.ResizePanePayload{{PaneID: "pane-1", Cols: 170, Rows: 40, SizeSeq: 5}}})
+	m = next.(Model)
+	if c, r := vtSize(pane()); c != 190 || r != 48 {
+		t.Fatalf("a stale pane_sizes (seq 5) resized the VT to %dx%d; want 190x48", c, r)
+	}
+}
+
+// A reattach may be to a RESTARTED daemon, whose counter starts again from 1:
+// the reset must let the lower number through.
+func TestFollower_ReattachAcceptsLowerSizeSeq(t *testing.T) {
+	m, _ := followerFixture(t, "other", []string{"pane-1"}, fixedSize(200, 50), func(st *WorkspaceStateMsg) {
+		st.Panes[0].SizeSeq = 9
+	})
+	m.armReattachReset("")
+	next, cmd := m.Update(sizedBroadcast(170, 40, 1))
+	runCmd(cmd)
+	m = next.(Model)
+	if c, r := vtSize(paneByID(t, m, "pane-1")); c != 170 || r != 40 {
+		t.Fatalf("after reattach, VT = %dx%d; want the restarted daemon's 170x40 (seq 1)", c, r)
+	}
+}
+
 func TestFollower_RenderTooWideCropsLeftWithMarker(t *testing.T) {
 	var innerW int
 	m, _ := followerFixture(t, "other", []string{"pane-1"}, func(_ string, w, h int) (int, int) {
@@ -303,23 +387,34 @@ func TestFollower_RenderEveryRowExactWidth(t *testing.T) {
 		"tall":    func(_ string, w, h int) (int, int) { return w, h + 7 },
 		"both":    func(_ string, w, h int) (int, int) { return w + 40, h + 7 },
 		"smaller": func(_ string, w, h int) (int, int) { return w / 2, h / 2 },
+		// The preview path (too wide) with a grid SHORTER than the box: the
+		// preview bottom-anchors, so its padding comes from the short grid.
+		"wide-short": func(_ string, w, h int) (int, int) { return w + 40, h / 2 },
 	}
 	for name, fn := range cases {
 		t.Run(name, func(t *testing.T) {
 			m, _ := followerFixture(t, "other", []string{"pane-1"}, fn, nil)
 			p := paneByID(t, m, "pane-1")
 			c, r := vtSize(p)
+			// r+Height full-width rows: the extra ones scroll off into scrollback,
+			// more than a box of it, so the scrolled-back view has history to show.
 			var b strings.Builder
-			for i := 0; i < r; i++ {
+			for i := 0; i < r+p.Height; i++ {
 				if i > 0 {
 					b.WriteString("\r\n")
 				}
 				b.WriteString(strings.Repeat(string(rune('a'+i%26)), c))
 			}
 			m = feedOutput(t, m, "pane-1", b.String())
+			if p.vt.ScrollbackLen() == 0 {
+				t.Fatal("setup: no scrollback")
+			}
 			assertExactBox(t, p, p.View())
 			// Scrolled back too: the scrollbar column must not widen a row.
 			p.ScrollUp(2)
+			if p.scrollBack == 0 {
+				t.Fatal("setup: ScrollUp did not scroll")
+			}
 			assertExactBox(t, p, p.View())
 		})
 	}
@@ -374,9 +469,7 @@ func trackingMutate(st *WorkspaceStateMsg) {
 
 // Spec §5.3: box row r of a too-tall follower is grid row r + (vtH - innerH).
 func TestFollower_WheelForwardTranslatedToGridRow(t *testing.T) {
-	var innerH int
 	m, _ := followerFixture(t, "other", []string{"pane-1"}, func(_ string, w, h int) (int, int) {
-		innerH = h
 		return w, h + 10
 	}, trackingMutate)
 	m.inputCh = make(chan paneInput, inputForwardBuffer)
@@ -388,7 +481,6 @@ func TestFollower_WheelForwardTranslatedToGridRow(t *testing.T) {
 	if got := wheelForwarded(m); got != want {
 		t.Fatalf("forwarded %q, want %q (box row %d + %d cut rows)", got, want, relY, 10)
 	}
-	_ = innerH
 }
 
 // Spec §5.3: a position in the padding of a grid smaller than the box sends
@@ -526,15 +618,32 @@ func TestFollower_LocalRectChangesNeverResizeTheVT(t *testing.T) {
 	m.View()
 	check("notes off")
 
-	m.notifications.visible = true
-	m.View()
-	check("notification sidebar")
-	m.notifications.visible = false
+	// Both sidebars through their real keys (notification.toggle,
+	// sidebar.toggle), so the whole dispatch path is under test.
+	press := func(chord string) {
+		t.Helper()
+		key, ok := keyPressForChord(chord)
+		if !ok {
+			t.Fatalf("cannot build a key press for %q", chord)
+		}
+		next, cmd := m.Update(key)
+		runCmdNoWait(cmd)
+		m = next.(Model)
+		m.View()
+	}
+	press(m.keymap.Keys("notification.toggle")[0])
+	if !m.notifications.visible {
+		t.Fatal("setup: the notification sidebar did not open")
+	}
+	check("notification sidebar on")
+	press(m.keymap.Keys("notification.toggle")[0])
+	check("notification sidebar off")
 
-	next, cmd = m.toggleProjectSidebar()
-	runCmd(cmd)
-	m = next.(Model)
-	m.View()
+	wasOpen := m.sidebarOpen
+	press(m.keymap.Keys("sidebar.toggle")[0])
+	if m.sidebarOpen == wasOpen {
+		t.Fatal("setup: the project sidebar did not toggle")
+	}
 	check("project sidebar")
 
 	next, _ = m.Update(tea.WindowSizeMsg{Width: 150, Height: 50})

@@ -472,6 +472,12 @@ type ResizePanePayload struct {
 	PaneID string `json:"pane_id"`
 	Rows   uint16 `json:"rows"`
 	Cols   uint16 `json:"cols"`
+	// SizeSeq numbers a size the daemon announces in pane_sizes (daemon →
+	// follower only; a client → daemon resize leaves it zero). The broadcast's
+	// per-pane size_seq is the same counter, so a follower can tell a stale
+	// broadcast from a newer frame. omitempty keeps the client → daemon wire
+	// byte-identical, and an older client ignores the field.
+	SizeSeq uint64 `json:"size_seq,omitempty"`
 }
 
 // ResizePanesPayload batches a whole resize pass — a window resize or a

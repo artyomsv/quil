@@ -25,6 +25,11 @@ func (d *Daemon) newPaneSession(pane *Pane) apty.Session {
 	}
 	pane.PluginMu.Lock()
 	pane.Cols, pane.Rows = cols, rows
+	// A new announcement (see Pane.sizeSeq): the spawn size reaches followers
+	// only through the broadcast, and a restart reuses the Pane, so it must
+	// outrank every size announced for the previous child.
+	pane.sizeSeq++
+	pane.colsSeq = pane.sizeSeq
 	pane.PluginMu.Unlock()
 	return newSessionFn(cols, rows)
 }

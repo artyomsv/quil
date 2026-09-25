@@ -576,6 +576,8 @@ func (d *Daemon) Stop() {
 		if d.server != nil {
 			d.server.Stop()
 		}
+		// No client can attach any more, so nothing can re-arm it.
+		d.clients.stopTimer()
 		d.collectorWG.Wait()
 		// Pull the latest hook-recorded session ids into PluginState so
 		// the final snapshot survives even if the hook files are lost.
@@ -652,9 +654,10 @@ func (d *Daemon) snapshot() {
 	// N±1, surfacing as the "snapshot pane count oscillation" bug.
 	activeTab, tabs, panesByTab, projects, activeProject := d.session.SnapshotState()
 	state := d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab, projects, activeProject, false)
-	// Disk only, never on the broadcast: restoreWorkspace turns it into a short
-	// reservation so the previous size master gets its slot back after a
-	// restart, and the reattach resizes nothing.
+	// Written here explicitly, because workspaceStateFromSnapshot leaves it out
+	// (the broadcast adds its own in buildWorkspaceState): restoreWorkspace
+	// turns it into a short reservation so the previous size master gets its
+	// slot back after a restart, and the reattach resizes nothing.
 	if id := d.masterID(); id != "" {
 		state["size_master"] = id
 	}
@@ -1370,8 +1373,8 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	// several lines a second forever. Logging it would churn quild.log through
 	// its rotation and bury the lifecycle lines this log exists for.
 	switch msg.Type {
-	case ipc.MsgPaneInput, ipc.MsgResizePane, ipc.MsgUpdateLayout, ipc.MsgClientStat,
-		ipc.MsgClientGeometry:
+	case ipc.MsgPaneInput, ipc.MsgResizePane, ipc.MsgResizePanes, ipc.MsgUpdateLayout,
+		ipc.MsgClientStat, ipc.MsgClientGeometry:
 		// skip logging — too noisy
 	default:
 		log.Printf("ipc recv: %s", msg.Type)
@@ -1429,7 +1432,9 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		d.touchClientInput(conn)
 		d.handlePaneInput(conn, msg)
 	case ipc.MsgResizePane:
-		d.handleResizePane(msg)
+		d.handleResizePane(conn, msg)
+	case ipc.MsgResizePanes:
+		d.handleResizePanes(conn, msg)
 	case ipc.MsgReloadPlugins:
 		d.handleReloadPlugins()
 	case ipc.MsgOverlayPolicy:
@@ -1784,7 +1789,9 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 		defer d.broadcastState()
 	}
 
-	cols, rows := attach.Cols, attach.Rows
+	// clientSize sizes the first pane of an empty workspace below, and new
+	// panes whenever no master is elected (initialPaneSize).
+	cols, rows := clampClientDim(attach.Cols), clampClientDim(attach.Rows)
 	if cols <= 0 {
 		cols = 80
 	}
@@ -3552,68 +3559,159 @@ func (d *Daemon) notifyDegenerateResize(pane *Pane, cols, rows uint16) {
 	log.Printf("pane %s: refusing degenerate resize to %dx%d", pane.ID, cols, rows)
 }
 
-func (d *Daemon) handleResizePane(msg *ipc.Message) {
+// handleResizePane applies one pane's resize from conn. See applyResizes.
+func (d *Daemon) handleResizePane(conn *ipc.Conn, msg *ipc.Message) {
 	var payload ipc.ResizePanePayload
 	if err := msg.DecodePayload(&payload); err != nil {
 		return
 	}
+	d.applyResizes(conn, []ipc.ResizePanePayload{payload})
+}
 
-	pane := d.session.Pane(payload.PaneID)
-	if pane == nil {
+// handleResizePanes applies a batch of resizes from conn: a window resize or a
+// split-drag release, which moves many panes at once. See applyResizes.
+func (d *Daemon) handleResizePanes(conn *ipc.Conn, msg *ipc.Message) {
+	var payload ipc.ResizePanesPayload
+	if err := msg.DecodePayload(&payload); err != nil {
 		return
 	}
-	// Degenerate-geometry floor — see degenerateSize for why BOTH dimensions
-	// must be at the floor. A client with no console attached is reported by
-	// Bubble Tea as 1x1, and the TUI's own floors (paneVTSize) turn that into a
-	// request that looks perfectly legal by the time it lands here. Applied, it
-	// reflows every child to one column and each transcript re-wraps
-	// permanently — seen twice in production against a 48-tab workspace.
-	// Model.terminalPaintable now refuses to send it; this is the same refusal
-	// for an older or third-party client.
-	//
-	// BELOW the pane lookup, not above it, so the log names a pane that exists.
-	// PaneID is bounded only by the 10 MB IPC frame cap while quild.log's whole
-	// budget is 5 MB x 10 files, so an echo on a pre-lookup path lets a
-	// malformed payload evict the history an operator needs to diagnose this
-	// very incident. A resolved pane's id is one the daemon minted itself.
-	if degenerateSize(int(payload.Cols), int(payload.Rows)) {
-		d.notifyDegenerateResize(pane, payload.Cols, payload.Rows)
-		return
-	}
-	// Same-size guard: skip when this exact size was already applied to
-	// the current PTY (the TUI re-sends all pane sizes on every workspace
-	// broadcast). Guard fields are PluginMu-protected; the Resize syscall
-	// runs outside the lock.
-	pane.PluginMu.Lock()
-	pty := pane.PTY
-	typ := pane.Type
-	same := pane.appliedCols == int(payload.Cols) && pane.appliedRows == int(payload.Rows)
-	pane.PluginMu.Unlock()
-	if pty == nil || same {
-		return
-	}
-	if err := pty.Resize(payload.Rows, payload.Cols); err != nil {
-		// Record nothing on failure: a transient Resize error must not make
-		// the guard believe this size was applied, or the TUI's next
-		// identical re-send would be skipped and the failed resize never
-		// retried. Leaving appliedCols/Rows unchanged lets the next
-		// broadcast retry.
-		log.Printf("resize pane %s to %dx%d: %v", payload.PaneID, payload.Cols, payload.Rows, err)
-		return
-	}
-	// Record only after the syscall succeeds. Cols/Rows are written INSIDE the
-	// lock with the applied* guards: they used to be set just below it, which
-	// made them a genuine data race — this runs on the resizing conn's dispatch
-	// goroutine while handleAttach (another conn), the PTY output goroutine's
-	// resizeKick, and snapshot() all read them concurrently.
-	pane.PluginMu.Lock()
-	pane.appliedCols = int(payload.Cols)
-	pane.appliedRows = int(payload.Rows)
-	pane.Cols = int(payload.Cols)
-	pane.Rows = int(payload.Rows)
-	pane.PluginMu.Unlock()
+	d.applyResizes(conn, payload.Panes)
+}
 
-	d.repaintAfterResize(pane, typ)
+// applyResizes is the one implementation behind resize_pane and resize_panes.
+//
+// Only the size master may resize: each PTY has one size, and several clients
+// sizing it to their own windows would reflow the child on every broadcast.
+// While there is no master and no reserved slot, any client may, which is the
+// single-client behaviour and keeps an older client working. A refused resize
+// is dropped with no log line, because a follower on an older build sends one
+// for every pane on every broadcast.
+//
+// Every follower is told the new sizes BEFORE any PTY is resized, in ONE frame
+// for the whole batch. The frame goes on the must-deliver queue, which each
+// conn drains ahead of pane output, so a follower's VT holds the new size
+// before the child's repaint at that size arrives. Without it the repaint lands
+// in the old-sized VT and is then reflowed. One frame per batch rather than per
+// pane, because a window resize across 40+ panes would otherwise put 40+
+// must-deliver frames on a follower's 64-slot queue at once.
+func (d *Daemon) applyResizes(conn *ipc.Conn, items []ipc.ResizePanePayload) {
+	if !d.isMasterConn(conn) && !d.sizeAuthorityOpen() {
+		return // a follower or a stale sender: dropped silently (spec §4.1)
+	}
+	type todo struct {
+		pane         *Pane
+		pty          apty.Session
+		typ          string
+		cols, rows   uint16
+		prevC, prevR int
+	}
+	var work []todo
+	seen := make(map[string]int, len(items))
+	for _, it := range items {
+		pane := d.session.Pane(it.PaneID)
+		if pane == nil {
+			continue
+		}
+		// Degenerate-geometry floor — see degenerateSize for why BOTH dimensions
+		// must be at the floor. A client with no console attached is reported by
+		// Bubble Tea as 1x1, and the TUI's own floors (paneVTSize) turn that into a
+		// request that looks perfectly legal by the time it lands here. Applied, it
+		// reflows every child to one column and each transcript re-wraps
+		// permanently — seen twice in production against a 48-tab workspace.
+		// Model.terminalPaintable now refuses to send it; this is the same refusal
+		// for an older or third-party client.
+		//
+		// BELOW the pane lookup, not above it, so the log names a pane that exists.
+		// PaneID is bounded only by the 10 MB IPC frame cap while quild.log's whole
+		// budget is 5 MB x 10 files, so an echo on a pre-lookup path lets a
+		// malformed payload evict the history an operator needs to diagnose this
+		// very incident. A resolved pane's id is one the daemon minted itself.
+		if degenerateSize(int(it.Cols), int(it.Rows)) {
+			d.notifyDegenerateResize(pane, it.Cols, it.Rows)
+			continue
+		}
+		// Same-size guard: skip when this exact size was already applied to
+		// the current PTY (the TUI re-sends all pane sizes on every workspace
+		// broadcast). Guard fields are PluginMu-protected; the Resize syscall
+		// runs outside the lock.
+		pane.PluginMu.Lock()
+		pty, typ := pane.PTY, pane.Type
+		same := pane.appliedCols == int(it.Cols) && pane.appliedRows == int(it.Rows)
+		prevC, prevR := pane.appliedCols, pane.appliedRows
+		pane.PluginMu.Unlock()
+		if pty == nil || same {
+			continue
+		}
+		w := todo{pane, pty, typ, it.Cols, it.Rows, prevC, prevR}
+		// A pane named twice in one batch is resized once, to its last size.
+		// Otherwise each copy passes the guard above, which reads the size
+		// applied BEFORE this batch.
+		if i, dup := seen[pane.ID]; dup {
+			work[i] = w
+			continue
+		}
+		seen[pane.ID] = len(work)
+		work = append(work, w)
+	}
+	if len(work) == 0 {
+		return
+	}
+	sizes := make([]ipc.ResizePanePayload, len(work))
+	for i, w := range work {
+		sizes[i] = ipc.ResizePanePayload{PaneID: w.pane.ID, Cols: w.cols, Rows: w.rows}
+	}
+	d.sendPaneSizes(conn, sizes)
+
+	var failed []ipc.ResizePanePayload
+	for _, w := range work {
+		if err := w.pty.Resize(w.rows, w.cols); err != nil {
+			// Record nothing on failure: a transient Resize error must not make
+			// the guard believe this size was applied, or the TUI's next
+			// identical re-send would be skipped and the failed resize never
+			// retried. Leaving appliedCols/Rows unchanged lets the next
+			// broadcast retry.
+			log.Printf("resize pane %s to %dx%d: %v", w.pane.ID, w.cols, w.rows, err)
+			// The followers were already told the new size, and the child is
+			// still at the old one: tell them the old one again. A pane that
+			// never had a size applied has nothing to go back to.
+			if w.prevC > 0 && w.prevR > 0 {
+				failed = append(failed, ipc.ResizePanePayload{PaneID: w.pane.ID, Cols: uint16(w.prevC), Rows: uint16(w.prevR)})
+			}
+			continue
+		}
+		// Record only after the syscall succeeds. Cols/Rows are written INSIDE the
+		// lock with the applied* guards: they used to be set just below it, which
+		// made them a genuine data race — this runs on the resizing conn's dispatch
+		// goroutine while handleAttach (another conn), the PTY output goroutine's
+		// resizeKick, and snapshot() all read them concurrently.
+		w.pane.PluginMu.Lock()
+		w.pane.appliedCols, w.pane.appliedRows = int(w.cols), int(w.rows)
+		w.pane.Cols, w.pane.Rows = int(w.cols), int(w.rows)
+		w.pane.PluginMu.Unlock()
+
+		d.repaintAfterResize(w.pane, w.typ)
+	}
+	if len(failed) > 0 {
+		d.sendPaneSizes(conn, failed)
+	}
+}
+
+// sendPaneSizes queues one pane_sizes frame on every follower's must-deliver
+// queue, leaving out the sender. Send never blocks: a follower too wedged to
+// take the frame is disconnected by the transport, never waited for.
+func (d *Daemon) sendPaneSizes(sender *ipc.Conn, sizes []ipc.ResizePanePayload) {
+	followers := d.followerConns(sender)
+	if len(followers) == 0 {
+		return
+	}
+	msg, err := ipc.NewMessage(ipc.MsgPaneSizes, ipc.PaneSizesPayload{Panes: sizes})
+	if err != nil {
+		log.Printf("pane_sizes: encode: %v", err)
+		return
+	}
+	for _, c := range followers {
+		c.Send(msg)
+	}
 }
 
 // repaintAfterResize nudges a pane that has just been resized into repainting,
@@ -4329,6 +4427,12 @@ func (d *Daemon) buildWorkspaceState() map[string]any {
 	if info := d.currentUpdateInfo(); info != nil {
 		state["update"] = info
 	}
+	// Broadcast-only as well: the size master's client id ("" for none) and
+	// the attached-client count. Each TUI reads them to tell whether it is the
+	// master or a follower. snapshot() writes size_master to disk by itself,
+	// for the restart reserve; the count means nothing after a restart.
+	state["size_master"] = d.masterID()
+	state["clients"] = d.clientCount()
 	return state
 }
 

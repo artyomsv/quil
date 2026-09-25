@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"log"
 	"sort"
 	"sync"
 	"time"
@@ -9,6 +8,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/artyomsv/quil/internal/logger"
 )
 
 // Multi-client sync: the registry of ATTACHED clients and the size-master
@@ -40,6 +40,11 @@ const (
 	// maxClientIDLen bounds a client's self-reported id. A UUID is 36 bytes;
 	// the id is used only as a map key and a display value.
 	maxClientIDLen = 64
+
+	// maxClientDim bounds a client's self-reported window size, in cells, on
+	// each axis. The size feeds a new pane's PTY, so a value above it is taken
+	// as the ceiling rather than trusted verbatim.
+	maxClientDim = 1000
 )
 
 // clientRecord is one attached client. The registry is keyed by conn, and a
@@ -195,6 +200,18 @@ func (r *clientRegistry) reserveLocked(res *reservation, d time.Duration) {
 		after = realAfterFunc
 	}
 	r.timerStop = after(d, r.expire)
+}
+
+// stopTimer disarms the grace or reserve timer at daemon shutdown, so it never
+// fires into a stopped daemon. The reservation itself is kept: the final
+// snapshot still writes the reserved id as size_master.
+func (r *clientRegistry) stopTimer() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.timerStop != nil {
+		r.timerStop()
+		r.timerStop = nil
+	}
 }
 
 // expire is the timer callback. A stale fire (the timer was replaced or the
@@ -360,7 +377,14 @@ func (d *Daemon) registerClient(conn *ipc.Conn, attach ipc.AttachPayload) bool {
 		return false
 	}
 	id := truncateField(attach.ClientID, maxClientIDLen)
-	return d.clients.attach(conn, id, attach.Cols, attach.Rows, attach.CWD)
+	return d.clients.attach(conn, id, clampClientDim(attach.Cols), clampClientDim(attach.Rows), attach.CWD)
+}
+
+// clampClientDim bounds one axis of a self-reported window size to
+// [0, maxClientDim]. It never defaults: 0 stays 0, which eligibility reads as
+// "not paintable".
+func clampClientDim(v int) int {
+	return max(0, min(v, maxClientDim))
 }
 
 // forgetAttachedClient drops a conn whose link was lost, and with it every
@@ -388,7 +412,7 @@ func (d *Daemon) setClientGeometry(conn *ipc.Conn, cols, rows int) bool {
 func (d *Daemon) takeControl(conn *ipc.Conn) bool {
 	changed, accepted := d.clients.takeControl(conn)
 	if !accepted {
-		log.Printf("take_control: ignored (sender not attached or not paintable)")
+		logger.Debug("take_control: ignored (sender not attached or not paintable)")
 	}
 	return changed
 }
@@ -414,7 +438,7 @@ func (d *Daemon) handleClientGeometry(conn *ipc.Conn, msg *ipc.Message) {
 	if err := msg.DecodePayload(&p); err != nil {
 		return
 	}
-	if d.setClientGeometry(conn, p.Cols, p.Rows) {
+	if d.setClientGeometry(conn, clampClientDim(p.Cols), clampClientDim(p.Rows)) {
 		d.broadcastState()
 	}
 }

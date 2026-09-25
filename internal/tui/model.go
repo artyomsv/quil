@@ -3104,10 +3104,11 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 
 	case eventDismissedMsg:
 		// Applied locally, exactly like the daemon-side dismissal this mirrors:
-		// remove the card (or every card, "" = all) and report nothing — this
-		// broadcast IS the report, whether it originated here or on another
-		// attached client (spec §8.4).
-		m.notifications.DismissByID(msg.eventID)
+		// remove the card (or every card FROM THIS DEST, "" = all) and report
+		// nothing — this broadcast IS the report, whether it originated here or
+		// on another attached client (spec §8.4). destOfPane scopes "all" to
+		// msg.dest, since the sidebar holds cards from every attached daemon.
+		m.notifications.DismissByID(msg.eventID, msg.dest, m.destOfPane)
 		return m, m.listenForMessages()
 
 	case paneSeenMsg:
@@ -4468,7 +4469,15 @@ func (m Model) sendCreateTab(spec *ipc.FirstPaneSpec) tea.Cmd {
 	// receiver: this only reaches an existing map (every production Model's,
 	// from NewModel), matching switchTab's synchronous recording so the guard
 	// can never observe a create that is already in flight.
-	if proj := m.cur(); proj != nil && m.requestedTab != nil {
+	//
+	// proj.Dest == dest is required, not assumed: createPaneDest pins the
+	// destination at dialog OPEN, and the active project can move to a
+	// DIFFERENT destination while the dialog sits open. Recording under
+	// (dest, m.cur().ID) then would pair a foreign dest with the wrong
+	// project's id — a key applyTabMoveGuard could never legitimately match,
+	// since it always looks up (dest, THAT dest's own active project). Better
+	// to record nothing than to record a key that can only ever be wrong.
+	if proj := m.cur(); proj != nil && proj.Dest == dest && m.requestedTab != nil {
 		m.requestedTab[requestedTabKey(dest, proj.ID)] = pendingTabCreateToken
 	}
 	return func() tea.Msg {
@@ -5561,7 +5570,12 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if data := m.rawKeyFor(seqAction, key, msg); data != nil {
 		m.selection = nil
 		if tab := m.activeTabModel(); tab != nil {
-			if pane := tab.ActivePaneModel(); pane != nil {
+			// guardedInputPane, not ActivePaneModel directly: within the typing
+			// guard window (spec §8.1) the bytes below are headed at guardPaneID,
+			// not whatever tab.ActivePaneModel() now returns, and the scroll
+			// reset / blocked-answer must land on the pane that actually
+			// receives them.
+			if pane := m.guardedInputPane(tab.ActivePaneModel()); pane != nil {
 				pane.ResetScroll()
 				// A typed key is the answer a parked pane was waiting for;
 				// approving a permission prompt fires no hook of its own.
@@ -5799,7 +5813,11 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		m.selection = nil
 		if tab := m.activeTabModel(); tab != nil {
-			if pane := tab.ActivePaneModel(); pane != nil {
+			// guardedInputPane: within the typing guard window (spec §8.1)
+			// forwardInputBytes below redirects these bytes to guardPaneID, so
+			// the scroll reset, the blocked-answer and ESC's interrupt must act
+			// on THAT pane, not whatever tab.ActivePaneModel() now returns.
+			if pane := m.guardedInputPane(tab.ActivePaneModel()); pane != nil {
 				pane.ResetScroll()
 				// Same trigger as the scroll reset above — the user acted on
 				// this pane — and the answer a parked pane never otherwise
@@ -6075,35 +6093,93 @@ func (m *Model) handlePaneOutput(msg PaneOutputMsg) (tea.Cmd, bool) {
 	return nil, false
 }
 
+// tabsContainID reports whether tabs (a project's REBUILT tab list) still
+// holds id. applyTabMoveGuard needs this rather than trusting a non-nil
+// fromTab: a tab this client just destroyed, moved to another project, or
+// dissolved (its last pane moved out) is a tab THIS client took away from
+// itself, not one it was "switched away from" by another client.
+func tabsContainID(tabs []*TabModel, id string) bool {
+	for _, t := range tabs {
+		if t != nil && t.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// tabInputPaneID returns the pane id actually receiving keyboard input for
+// tab — the overlay's, while one is visible, matching ActivePaneModel's own
+// rule, else the tree's active pane. applyTabMoveGuard needs this rather than
+// the bare ActivePane field: a user typing into a lazygit overlay when a
+// remote switch lands must get the overlay back, not the tree pane sitting
+// behind it.
+func tabInputPaneID(tab *TabModel) string {
+	if tab.overlayVisible && tab.overlayPane != nil {
+		return tab.overlayPane.ID
+	}
+	return tab.ActivePane
+}
+
 // applyTabMoveGuard decides whether an active-tab change applyWorkspaceState
-// just observed for the ACTIVE project is this client's own switch landing or
-// one another attached client made, and arms the typing guard for the latter
-// (spec §8.1).
+// just observed for the ACTIVE project is this client's own request landing
+// or one another attached client made, and arms the typing guard for the
+// latter (spec §8.1). Returns the flash-expiry cmd when it arms, nil
+// otherwise — the caller must batch it, or the flash never clears itself.
+//
+// Called UNCONDITIONALLY for the active project on every broadcast, not only
+// when the tab actually moved: a token must be retired on an ORDINARY echo
+// too (fromTab == targetTab already, because switchTab updates the client's
+// own index synchronously before any broadcast can land) — leaving a matched
+// token in place would let it silently satisfy some LATER, unrelated
+// broadcast that happens to name the same tab id.
 //
 // "Not requested" is decided with the requestedTab TOKEN, never with a time
 // window: a local switch followed quickly by an unrelated remote one must
 // still be guarded, which a window alone cannot tell apart from the local
 // switch's own delayed echo.
 //
-// fromTab is the tab THIS client was showing right before the change — the
-// caller has already established it is non-nil. Its ActivePane is the pane
-// that owns the guard: the user was looking at THAT pane, not whatever the
-// new active tab's pane happens to be.
-func (m *Model) applyTabMoveGuard(dest, projectID, newActiveTab string, fromTab *TabModel) {
+// existedBefore reports whether newActiveTab was already one of this
+// client's tabs (any project) before this broadcast — the create-token's
+// only use for it, since a create_tab request has no id to compare by
+// equality ahead of time (the daemon mints one).
+func (m *Model) applyTabMoveGuard(dest, projectID, newActiveTab string, fromTab, targetTab *TabModel, tabs []*TabModel, existedBefore bool) tea.Cmd {
 	key := requestedTabKey(dest, projectID)
 	if req, ok := m.requestedTab[key]; ok {
-		// An exact match is an ordinary switchTab landing. pendingTabCreateToken
-		// matches whatever tab the daemon makes active next, since a create_tab
-		// request has no id to compare by equality — the daemon mints one.
-		if req == newActiveTab || req == pendingTabCreateToken {
+		switch {
+		case req == pendingTabCreateToken:
+			// One-shot: spent against the very next active-tab change either
+			// way, so a leftover token can never outlive the create it was
+			// minted for and silently swallow some LATER remote switch.
 			delete(m.requestedTab, key)
-			return
+			if !existedBefore {
+				return nil // the create's own tab landing
+			}
+			// Not the create landing — an unrelated change beat it there.
+			// Fall through to the ordinary remote-switch handling below.
+		case req == newActiveTab:
+			// An exact match is this client's own switchTab landing, echo or
+			// not — see the function comment for why this compare must run
+			// unconditionally rather than only inside a "moved" branch.
+			delete(m.requestedTab, key)
+			return nil
 		}
 	}
+	if fromTab == nil || fromTab == targetTab {
+		return nil // nothing moved, or this project's very first broadcast
+	}
+	// A vanished source tab (this client's own Ctrl+W, Move to project, or a
+	// dissolve/recovery that moved its last pane out) is not "switched away
+	// from" by another client — it is this client's own local action taking
+	// the tab away from under itself. Only arm when fromTab is still part of
+	// the broadcast's tab list for this project.
+	if !tabsContainID(tabs, fromTab.ID) {
+		return nil
+	}
 	m.remoteSwitchAt = m.clock()
-	m.guardPaneID = fromTab.ActivePane
+	m.guardPaneID = tabInputPaneID(fromTab)
 	m.remoteFocusUnacked = true
 	m.setFlash("Tab switched by another client")
+	return m.flashCmd()
 }
 
 // applyWorkspaceState rebuilds the TUI state from one daemon's broadcast.
@@ -6247,16 +6323,22 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]str
 		tabs, projPaneIDs, projResizeCmds := m.rebuildTabs(info, state, existingTabs, existingPanes, paneMap, dest)
 		proj.tabs = tabs
 		proj.activeTab = indexOfTab(proj.tabs, info.ActiveTab)
-		if targetTab := tabAt(proj.tabs, proj.activeTab); fromTab != targetTab {
-			tabMoves = append(tabMoves, activeTabMove{from: fromTab, target: targetTab})
-			// Typing guard (spec §8.1), scoped to the ACTIVE project only: a
-			// background project's active tab moving under it is not something
-			// anyone is typing into right now. ok (the project already existed)
-			// and fromTab != nil rule out this project's very first broadcast,
-			// which has no "before" for the guard to protect.
-			if info.ID == activeID && ok && fromTab != nil {
-				m.applyTabMoveGuard(dest, info.ID, info.ActiveTab, fromTab)
+		targetTab := tabAt(proj.tabs, proj.activeTab)
+		// Typing guard (spec §8.1), scoped to the ACTIVE project only: a
+		// background project's active tab moving under it is not something
+		// anyone is typing into right now. Called even when fromTab == targetTab
+		// (an ordinary echo) — see applyTabMoveGuard's own comment for why the
+		// requestedTab token must be retired on that path too, not only inside
+		// the "moved" branch below. ok (the project already existed) is what
+		// makes the token lookup meaningful; a brand new project has none.
+		if info.ID == activeID && ok {
+			_, existedBefore := existingTabs[info.ActiveTab]
+			if cmd := m.applyTabMoveGuard(dest, info.ID, info.ActiveTab, fromTab, targetTab, proj.tabs, existedBefore); cmd != nil {
+				overlayResizeCmds = append(overlayResizeCmds, cmd)
 			}
+		}
+		if fromTab != targetTab {
+			tabMoves = append(tabMoves, activeTabMove{from: fromTab, target: targetTab})
 		}
 		newPaneIDs = append(newPaneIDs, projPaneIDs...)
 		overlayResizeCmds = append(overlayResizeCmds, projResizeCmds...)
@@ -8023,12 +8105,18 @@ func (m Model) listenForMessages() tea.Cmd {
 
 		case ipc.MsgEventDismissed:
 			var payload ipc.EventDismissedPayload
-			msg.DecodePayload(&payload)
+			if err := msg.DecodePayload(&payload); err != nil {
+				log.Printf("decode event_dismissed: %v", err)
+				return listenContinueMsg{}
+			}
 			return eventDismissedMsg{dest: msg.Origin, eventID: payload.EventID}
 
 		case ipc.MsgPaneSeen:
 			var payload ipc.PaneSeenPayload
-			msg.DecodePayload(&payload)
+			if err := msg.DecodePayload(&payload); err != nil {
+				log.Printf("decode pane_seen: %v", err)
+				return listenContinueMsg{}
+			}
 			return paneSeenMsg{dest: msg.Origin, paneID: payload.PaneID}
 
 		case ipc.MsgResourceReportResp:
@@ -8790,6 +8878,30 @@ func (m Model) guardedInputTarget(paneID string) string {
 	return m.guardPaneID
 }
 
+// guardedInputPane resolves the PaneModel a keystroke or paste should
+// actually reach — guardedInputTarget's id, looked up live — for callers that
+// must act on the pane OBJECT itself rather than just its id: ResetScroll,
+// answerBlockedByInput, interruptWorkingPane, and pastePayload's bracketed-
+// paste encoding. Encoding or answering against the PRE-redirect pane while
+// the bytes themselves go to the guarded one credits and decodes for the
+// wrong pane — an unbracketed multi-line paste sent to a plain shell, say,
+// because it was encoded against a claude-code pane's bracketed-paste mode.
+// Returns from unchanged (including nil) when there is nothing to redirect
+// to, so callers can keep using their existing nil check.
+func (m Model) guardedInputPane(from *PaneModel) *PaneModel {
+	if from == nil {
+		return nil
+	}
+	targetID := m.guardedInputTarget(from.ID)
+	if targetID == from.ID {
+		return from
+	}
+	if pane, _, _ := m.findPaneAndTab(targetID); pane != nil {
+		return pane
+	}
+	return from
+}
+
 // sendPaneInput marshals and sends one MsgPaneInput frame to an ALREADY-RESOLVED
 // destination. It deliberately takes dest rather than calling sendForPane: the
 // forwarder goroutine must not walk m.projects (see paneInput). client.Send is
@@ -9422,7 +9534,12 @@ func (m Model) sendClipboardToPane(text string) {
 	if tab == nil {
 		return
 	}
-	pane := tab.ActivePaneModel()
+	// guardedInputPane, not ActivePaneModel directly: within the typing guard
+	// window (spec §8.1) the paste is headed at guardPaneID, and encoding
+	// against the wrong pane's bracketed-paste mode (pastePayload) sends an
+	// unbracketed multi-line paste to a plain shell, or a bracketed one to an
+	// app that never asked for it.
+	pane := m.guardedInputPane(tab.ActivePaneModel())
 	if pane == nil {
 		return
 	}
@@ -9445,16 +9562,19 @@ func (m Model) sendClipboardToPaneID(paneID, text string) {
 	if text == "" || paneID == "" {
 		return
 	}
-	pane, _, _ := m.findPaneAndTab(paneID)
-	if pane == nil {
+	bound, _, _ := m.findPaneAndTab(paneID)
+	if bound == nil {
 		logger.Debug("paste: pane %s vanished during the clipboard read — dropping", paneID)
 		return
 	}
 	// The target was bound when the user asked to paste, so it need not be the
 	// active pane any more — which is exactly why the answer is keyed to input
-	// reaching a pane rather than to which pane holds focus.
+	// reaching a pane rather than to which pane holds focus. guardedInputPane
+	// applies the SAME typing guard on top: the bound pane can itself be the
+	// one a remote switch just moved away from.
+	pane := m.guardedInputPane(bound)
 	pane.answerBlockedByInput()
-	m.enqueueKeyInput(paneID, pastePayload(pane, text))
+	m.enqueueKeyInput(pane.ID, pastePayload(pane, text))
 }
 
 func keyToBytes(keyMsg tea.KeyPressMsg) []byte {

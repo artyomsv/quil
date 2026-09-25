@@ -948,6 +948,23 @@ func (m *Model) armReattachReset(dest string) {
 	if m.selection != nil && m.destOfPane(m.selection.PaneID) == dest {
 		m.selection = nil
 	}
+	// Typing guard state (spec §8.1) is stale the moment its destination
+	// reattaches: a reattach replaces that daemon's whole state, so a pending
+	// requestedTab token can never land the broadcast it was waiting for (the
+	// tab it named may not even exist any more), and a guardPaneID pointing at
+	// one of its panes is redirecting input toward a pane about to be rebuilt
+	// out from under it. Requests for OTHER destinations are untouched — one
+	// daemon reconnecting says nothing about another's in-flight switches.
+	prefix := dest + "\x00"
+	for key := range m.requestedTab {
+		if strings.HasPrefix(key, prefix) {
+			delete(m.requestedTab, key)
+		}
+	}
+	if m.guardPaneID != "" && m.destOfPane(m.guardPaneID) == dest {
+		m.guardPaneID = ""
+		m.remoteFocusUnacked = false
+	}
 }
 
 // resetWorkStateForReattach zeroes in-flight execution state on every pane.

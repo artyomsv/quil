@@ -146,7 +146,7 @@ func TestSendForDestStrict_ReportsAnUnreachableDest(t *testing.T) {
 	// depend on it, which is why the strict one had to be added beside it rather
 	// than changing Router.Send.
 	if sendErr := m.sendForDest("gpu01", msg); sendErr != nil {
-		t.Errorf("sendForDest err = %v, want nil — resizeAllPanes and sendAllLayouts "+
+		t.Errorf("sendForDest err = %v, want nil — resizeAllPanes and sendDiffedLayouts "+
 			"must not break mid-iteration", sendErr)
 	}
 }

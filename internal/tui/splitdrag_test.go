@@ -171,7 +171,7 @@ func TestModel_FinishSplitDrag_CommitsToDaemon(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("finishSplitDrag must return the commit command")
 	}
-	// Execute the batch: resizeAllPanes + sendAllLayouts.
+	// Execute the batch: resizeAllPanes + markLayoutChanged.
 	if batch, ok := cmd().(tea.BatchMsg); ok {
 		for _, c := range batch {
 			if c != nil {

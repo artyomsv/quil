@@ -303,7 +303,7 @@ func (r *Router) Send(m *ipc.Message) error {
 
 	if !ok {
 		// Drop with a log. Returning an error would break resizeAllPanes and
-		// sendAllLayouts mid-iteration and leave other daemons unsynced.
+		// sendDiffedLayouts mid-iteration and leave other daemons unsynced.
 		log.Printf("router: dropping %s for unreachable dest %q", m.Type, dest)
 		return nil
 	}
@@ -455,7 +455,7 @@ var ErrDestUnreachable = errors.New("no connection for that destination")
 //
 // Router.Send DROPS a message for a dest it has no conn for, logs, and returns
 // nil. That is right for the bulk iterators it was written for — resizeAllPanes
-// and sendAllLayouts must not break mid-iteration and leave other daemons
+// and sendDiffedLayouts must not break mid-iteration and leave other daemons
 // unsynced — and wrong for an action a user confirmed, which would otherwise be
 // reported as done.
 //

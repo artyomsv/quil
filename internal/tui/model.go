@@ -12,7 +12,6 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -107,6 +106,9 @@ type TabInfo struct {
 	Layout         json.RawMessage
 	TemplateLayout string
 	TemplateMain   string
+	// LayoutRev is the daemon's revision of Layout: bumped on every stored
+	// write, 0 for a tab no client has described. See layoutsync.go.
+	LayoutRev uint64
 }
 
 type PaneInfo struct {
@@ -983,6 +985,11 @@ type Model struct {
 	// paneDrag is an Alt+drag of a whole pane (panedrag.go). Zero value = no
 	// drag. Rides clearDragState like every other drag.
 	paneDrag paneDragState
+
+	// closeRequested holds the panes THIS client's user confirmed closing.
+	// The broadcast that prunes one is a user change this client stores; any
+	// other prune waits for whoever asked (layoutsync.go).
+	closeRequested map[string]bool
 
 	// Project-sidebar edge drag. sidebarDragging is set while a drag is in
 	// flight; sidebarDragW is the PENDING width, painted as a preview rule and
@@ -2888,14 +2895,15 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		// used to cost one must-deliver frame per tab PLUS one per pane — 69
 		// frames on a 64-slot queue at 33 tabs/36 panes, which overflowed and
 		// made the client's own IPC layer close the connection (2026-08-09).
-		// Both diffs run here, on the Update goroutine, because they read
-		// m.projects, which applyWorkspaceState has just rebuilt.
+		// The diff runs here, on the Update goroutine, because it reads
+		// m.projects, which applyWorkspaceState has just rebuilt. Layout
+		// writes are not diffed at all: rebuildTabs returns the few this
+		// client owes among overlayResizeCmds (layoutsync.go).
 		cmds := []tea.Cmd{
 			templateFocusCmd,
 			pickerVanishCmd,
 			m.listenForMessages(),
 			m.sendDiffedResizes(m.diffResizes(msg)),
-			m.sendDiffedLayouts(m.diffLayouts(msg)),
 			groupsCmd,
 		}
 		// Resize overlay PTYs that just became visible on initial creation.
@@ -3903,20 +3911,24 @@ func (m *Model) dragSplitBorder(x, y int) {
 
 // finishSplitDrag commits an in-progress border drag: the daemon gets the
 // final pane sizes (one PTY resize per pane — children reflow once, per
-// the on-release-only design) and every tab's layout blob (persists the
-// new Ratio). resizeAllPanes/sendAllLayouts cover all panes/tabs; the
-// daemon's same-size guard drops the untouched panes' resizes, and layout
-// updates are stored opaquely without broadcast, so the extra breadth is
-// harmless and reuses tested plumbing.
+// the on-release-only design) and the dragged tab's layout (persists the
+// new Ratio). resizeAllPanes covers all panes; the daemon's same-size guard
+// drops the untouched panes' resizes. Only the active tab's tree moved, so
+// only it is stored (markLayoutChanged).
 func (m *Model) finishSplitDrag() tea.Cmd {
 	// The one VT resize of the whole drag: old size → final size, paired
 	// with the PTY resize below so the child's SIGWINCH redraw lands in a
 	// matching grid (mid-drag only rects moved — see resizeNodeRects).
-	if tab := m.activeTabModel(); tab != nil {
+	tab := m.activeTabModel()
+	if tab != nil {
 		tab.Resize(tab.Width, tab.Height)
 	}
 	m.clearDragState()
-	return tea.Batch(m.resizeAllPanes(), m.sendAllLayouts())
+	var layout tea.Cmd
+	if tab != nil {
+		layout = m.markLayoutChanged(m.destOfTab(tab.ID), tab)
+	}
+	return tea.Batch(m.resizeAllPanes(), layout)
 }
 
 // moveTab repositions the active project's tab at `from` to ordinal `to`,
@@ -6268,7 +6280,8 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]str
 // skipped rather than materialised as an empty tab.
 //
 // Returns the project's tabs, the pane IDs it created (the caller arms a
-// spinner per ID) and the overlay resize commands the caller must batch.
+// spinner per ID) and the commands the caller must batch: overlay resizes and
+// the layout writes this client owes (layoutsync.go).
 func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingTabs map[string]*TabModel, existingPanes map[string]*PaneModel, paneMap map[string]*PaneInfo, dest string) ([]*TabModel, []string, []tea.Cmd) {
 	var newPaneIDs []string
 	var overlayResizeCmds []tea.Cmd
@@ -6294,12 +6307,15 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 		}
 		// Reuse existing tab if possible (preserves layout tree).
 		tab, exists := existingTabs[tabInfo.ID]
+		restored := false
 		if exists && tab.templateLayoutPending && len(tabInfo.Layout) > 0 {
 			// Another client may have already saved the completed tree.
 			tab = m.restoreTabLayout(tab, tabInfo, paneMap, existingPanes, dest)
+			restored = true
 		}
 		if !exists {
 			tab = NewTabModel(tabInfo.ID, tabInfo.Name)
+			tab.layoutRev = tabInfo.LayoutRev
 
 			// New tab that doesn't exist locally — try to restore layout from daemon.
 			if len(tabInfo.Layout) > 0 {
@@ -6342,6 +6358,19 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 			daemonPaneSet[pid] = true
 		}
 
+		// Layout sync (layoutsync.go): adopt a newer stored tree, or settle
+		// the previous broadcast's local placements. A template tab still
+		// waiting for its panes has no tree worth either; it takes the
+		// broadcast's revision as the base of the write that builds it.
+		lp := layoutPass{oldTree: map[string]bool{}}
+		switch {
+		case tab.templateLayoutPending:
+			tab.layoutRev = tabInfo.LayoutRev
+		case exists && !restored:
+			lp = m.syncTabLayout(tab, tabInfo, daemonPaneSet, paneMap, existingPanes)
+			newPaneIDs = append(newPaneIDs, lp.created...)
+		}
+
 		// Prune panes the daemon removed.
 		if tab.Root != nil {
 			for id := range tab.Root.PaneIDs() {
@@ -6356,6 +6385,14 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 						tab.ExitFocus()
 					}
 					tab.RemovePane(id)
+					// A close THIS client confirmed is its user's change to
+					// store; any other prune waits for the requester's write.
+					if m.closeRequested[id] {
+						delete(m.closeRequested, id)
+						lp.send = true
+					} else {
+						tab.awaitGone(id)
+					}
 				}
 			}
 		}
@@ -6427,8 +6464,13 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 			// skipped just before. Every client of this daemon holds every tab
 			// of it, so every client sees the same reuse and places the pane
 			// the same way.
+			//
+			// Except after ADOPTION: a pane this tab held that the adopted tree
+			// lacks (lp.oldTree) also reuses its model, and it did not move —
+			// it takes the ordinary arrival rule, and fills no reservation.
 			pane, ok := existingPanes[paneID]
-			migrated := ok
+			migrated := ok && !lp.oldTree[paneID]
+			fresh := !ok
 			info := paneMap[paneID]
 			if !ok {
 				pane = NewPaneModel(paneID, m.replayBufSize())
@@ -6470,11 +6512,14 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 			if migrated && m.pendingSplit[tab.ID] != nil {
 				sparedReservation = true
 			}
-			if m.pendingSplit != nil && !migrated {
+			if m.pendingSplit != nil && fresh {
 				if placeholder, ok := m.pendingSplit[tab.ID]; ok {
 					placeholder.fill(pane)
 					tab.invalidateLeaves()
 					delete(m.pendingSplit, tab.ID)
+					// The pane this client asked for: its user's split, so
+					// this client — and only this one — stores the tree.
+					lp.send = true
 					// The pane LANDING is what retires a worktree create's
 					// prune exemption — not the daemon saying it succeeded.
 					// Dropping it on the success response instead would trust
@@ -6558,9 +6603,16 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 			if migrated && tab != m.activeTabModel() {
 				adoptMovedPane(tab, pane)
 			}
+			// Placed by this client alone, for an arrival nobody here asked
+			// for: the requester stores it (see layoutsync.go).
+			tab.awaitPane(paneID)
 		}
 
-		applyTemplateLayout(tab, tabInfo, paneMap)
+		if applyTemplateLayout(tab, tabInfo, paneMap) {
+			// The template's first real tree, built from the broadcast's
+			// revision (set above while the tab was pending).
+			lp.send = true
+		}
 
 		// Clean up any unfilled placeholders (e.g., rapid double-splits).
 		//
@@ -6607,6 +6659,17 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 
 		m.finalizeTabPanes(tab)
 		log.Printf("apply: tab %s finalized", tab.ID)
+
+		// The daemon holds no usable tree for this tab (fresh, restored before
+		// any client described it, or unparseable): describe it, once — a
+		// dirty tab's write is already on its way.
+		if !tab.templateLayoutPending && tab.Root != nil && !tab.layoutDirty &&
+			tabInfo.LayoutRev == tab.layoutRev && storedLayout(tabInfo.Layout) == nil {
+			lp.send = true
+		}
+		if lp.send {
+			overlayResizeCmds = append(overlayResizeCmds, m.markLayoutChanged(dest, tab))
+		}
 		out = append(out, tab)
 	}
 
@@ -6614,8 +6677,14 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 }
 
 // restoreTabLayout rebuilds a tab's layout tree from serialized daemon state.
+// The tree it builds IS the stored revision, so the tab holds that revision,
+// clean; panes the stored tree lacks are placed and awaited like any other
+// arrival nobody here asked for (layoutsync.go).
 func (m *Model) restoreTabLayout(tab *TabModel, tabInfo TabInfo, paneMap map[string]*PaneInfo, existingPanes map[string]*PaneModel, dest string) *TabModel {
 	tab.templateLayoutApplied, tab.templateLayoutPending = true, false
+	tab.layoutRev = tabInfo.LayoutRev
+	tab.layoutDirty, tab.layoutSent, tab.layoutResend = false, nil, false
+	tab.clearAwaiting()
 	log.Printf("restoreLayout: tab %s %q with %d panes", tab.ID, tabInfo.Name, len(tabInfo.Panes))
 	tab.Name = tabInfo.Name
 	tab.Color = tabInfo.Color
@@ -6671,6 +6740,7 @@ func (m *Model) restoreTabLayout(tab *TabModel, tabInfo TabInfo, paneMap map[str
 		} else {
 			splitForNewPane(tab, tab.Leaves(), pane)
 		}
+		tab.awaitPane(paneID)
 	}
 
 	m.finalizeTabPanes(tab)
@@ -8026,6 +8096,9 @@ func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
 						ti.Layout = data
 					}
 				}
+				if n, ok := tm["layout_rev"].(float64); ok && n >= 0 {
+					ti.LayoutRev = uint64(n)
+				}
 				state.Tabs = append(state.Tabs, ti)
 			}
 		}
@@ -8183,6 +8256,7 @@ func (m *Model) splitPane(dir SplitDir) tea.Cmd {
 		m.pendingSplit = make(map[string]*LayoutNode)
 	}
 	m.pendingSplit[tab.ID] = placeholder
+	tab.noteReservation(pane.ID, dir, false)
 	// The same node-local label the dialog path records. The payload below
 	// carries no Type and the daemon normalises an empty one to terminal, so
 	// this is what the pane will be rather than a guess about it.
@@ -9550,14 +9624,15 @@ func (m Model) toggleActivePaneEager() tea.Cmd {
 	}
 }
 
-// layoutSend and resizeSend are one decided frame each. The diff that produces
-// them runs on the Update goroutine and the command only ships the result —
-// the walk reads m.projects, which Update rebuilds on every broadcast, so
-// deciding inside the command would read a list that is being replaced.
+// layoutSend and resizeSend are one decided frame each. The decision runs on
+// the Update goroutine and the command only ships the result — it reads
+// m.projects and the tab trees, which Update rebuilds on every broadcast, so
+// deciding inside the command would read state that is being replaced.
 type layoutSend struct {
-	dest  string
-	tabID string
-	data  json.RawMessage
+	dest    string
+	tabID   string
+	data    json.RawMessage
+	baseRev uint64 // the revision the tree was built on (layoutsync.go)
 }
 
 type resizeSend struct {
@@ -9565,74 +9640,6 @@ type resizeSend struct {
 	paneID string
 	cols   uint16
 	rows   uint16
-}
-
-// layoutAgrees reports whether the daemon's stored layout for a tab already
-// describes the tree we hold.
-//
-// The comparison is STRUCTURAL, and that is not a style preference. The daemon
-// stores MarshalLayout's bytes — a struct, so Go emits its fields in
-// declaration order — but parseWorkspaceState decodes the whole broadcast into
-// map[string]any and re-marshals the layout sub-map, and Go sorts map keys
-// alphabetically. For any node with more than one key the two encodings differ
-// for the identical tree, so a byte comparison reports "changed" forever on
-// every tab containing a split, while still matching single-leaf tabs. That
-// asymmetry is invisible in a workspace of single-pane tabs, which is exactly
-// what the crash was reported from.
-//
-// Empty means the daemon holds nothing for this tab (fresh, or restored before
-// any client described it) — the caller must send, or the arrangement is never
-// persisted.
-func layoutAgrees(stored json.RawMessage, root *LayoutNode) bool {
-	if len(stored) == 0 {
-		return false
-	}
-	theirs, err := UnmarshalLayout(stored)
-	if err != nil {
-		return false
-	}
-	return reflect.DeepEqual(theirs, SerializeLayout(root))
-}
-
-// diffLayouts decides which tabs need their layout pushed after a broadcast.
-//
-// Scoped to the broadcast's OWN destination: a broadcast is the full state of
-// one daemon, so it says nothing about another daemon's tabs and cannot be
-// diffed against them. Before this scoping, any daemon's broadcast re-sent
-// every daemon's layouts.
-func (m *Model) diffLayouts(state WorkspaceStateMsg) []layoutSend {
-	stored := make(map[string]json.RawMessage, len(state.Tabs))
-	for _, ti := range state.Tabs {
-		stored[ti.ID] = ti.Layout
-	}
-	// A broadcast whose dest matches no project means every layout and every
-	// resize below is silently skipped, and the failure has no other symptom:
-	// splits revert on restart, panes keep a stale PTY width, and nothing logs.
-	// The invariant holds structurally today — ProjectModel.Dest is only ever
-	// assigned from a broadcast's own dest — so this line exists to make a
-	// future break greppable rather than a multi-hour hunt.
-	if len(m.projects) > 0 && !m.hasProjectForDest(state.Dest) {
-		log.Printf("apply: broadcast dest %q matches no project — no layout or "+
-			"resize will be sent for it", state.Dest)
-	}
-
-	var out []layoutSend
-	for _, proj := range m.projects {
-		if proj.Dest != state.Dest {
-			continue
-		}
-		for _, tab := range proj.tabs {
-			if tab.templateLayoutPending || tab.Root == nil || layoutAgrees(stored[tab.ID], tab.Root) {
-				continue
-			}
-			data, err := MarshalLayout(tab.Root)
-			if err != nil {
-				continue
-			}
-			out = append(out, layoutSend{dest: proj.Dest, tabID: tab.ID, data: data})
-		}
-	}
-	return out
 }
 
 // sizedKey scopes a sizedOnce entry to its owning destination. NUL separates
@@ -9667,6 +9674,16 @@ func (m *Model) hasProjectForDest(dest string) bool {
 // diffResizes decides which panes need a resize pushed after a broadcast.
 // See Model.sizedOnce for why the first send per pane is never suppressed.
 func (m *Model) diffResizes(state WorkspaceStateMsg) []resizeSend {
+	// A broadcast whose dest matches no project means every resize below is
+	// silently skipped, and the failure has no other symptom: panes keep a
+	// stale PTY width, and nothing logs. The invariant holds structurally
+	// today — ProjectModel.Dest is only ever assigned from a broadcast's own
+	// dest — so this line exists to make a future break greppable rather than
+	// a multi-hour hunt.
+	if len(m.projects) > 0 && !m.hasProjectForDest(state.Dest) {
+		log.Printf("apply: broadcast dest %q matches no project — no resize "+
+			"will be sent for it", state.Dest)
+	}
 	// Ahead of every sizedOnce write, so the first-resize kick each pane is
 	// owed survives until the terminal is paintable again. See terminalPaintable.
 	if !m.terminalPaintable() {
@@ -9736,16 +9753,19 @@ func (m *Model) diffResizes(state WorkspaceStateMsg) []resizeSend {
 	return out
 }
 
-// sendDiffedLayouts ships an already-decided layout list.
+// sendDiffedLayouts ships an already-decided layout list, each write carrying
+// the revision it was built on so the daemon can refuse a stale one.
 func (m Model) sendDiffedLayouts(items []layoutSend) tea.Cmd {
 	if len(items) == 0 {
 		return nil
 	}
 	return func() tea.Msg {
 		for _, it := range items {
+			base := it.baseRev
 			msg, err := ipc.NewMessage(ipc.MsgUpdateLayout, ipc.UpdateLayoutPayload{
-				TabID:  it.tabID,
-				Layout: it.data,
+				TabID:   it.tabID,
+				Layout:  it.data,
+				BaseRev: &base,
 			})
 			if err != nil {
 				continue
@@ -9779,30 +9799,6 @@ func (m Model) sendDiffedResizes(items []resizeSend) tea.Cmd {
 				continue
 			}
 			m.sendForDest(dest, msg)
-		}
-		return nil
-	}
-}
-
-// sendAllLayouts walks the projects for the same reason resizeAllPanes does —
-// every tab's layout has to reach the daemon that owns that tab.
-func (m Model) sendAllLayouts() tea.Cmd {
-	return func() tea.Msg {
-		for _, proj := range m.projects {
-			for _, tab := range proj.tabs {
-				if tab.templateLayoutPending || tab.Root == nil {
-					continue
-				}
-				data, err := MarshalLayout(tab.Root)
-				if err != nil {
-					continue
-				}
-				msg, _ := ipc.NewMessage(ipc.MsgUpdateLayout, ipc.UpdateLayoutPayload{
-					TabID:  tab.ID,
-					Layout: data,
-				})
-				m.sendForDest(proj.Dest, msg)
-			}
 		}
 		return nil
 	}

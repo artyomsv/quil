@@ -56,7 +56,55 @@ type TabModel struct {
 	// leavesCache memoizes Root.Leaves(); nil = invalid. The tab bar alone
 	// walks every tab's tree twice per render without it.
 	leavesCache []*PaneModel
+
+	// Layout sync between clients (layoutsync.go). layoutRev is the daemon's
+	// revision of the tree this tab holds. layoutDirty means a write built on
+	// that revision is in flight; layoutSent is what it carried, so its echo
+	// is recognised, and layoutResend is a local change made while it was in
+	// flight, sent once the echo lands.
+	layoutRev    uint64
+	layoutDirty  bool
+	layoutSent   *SerializedNode
+	layoutResend bool
+	// awaitingPanes / awaitingGone are ids this client placed or pruned on
+	// its own, for a change nobody here asked for (an MCP create, another
+	// client's split or close, a moved pane). The next broadcast says whether
+	// the requester already stored a tree covering them; only when it did not
+	// does this client send.
+	awaitingPanes map[string]bool
+	awaitingGone  map[string]bool
+	// reserveSibling/reserveDir describe this client's pendingSplit
+	// reservation when it was made — the pane it was split from and the
+	// direction, or (reserveReplace) the pane it stands in for — so adopting
+	// another client's tree can put the placeholder back where it was.
+	reserveSibling string
+	reserveDir     SplitDir
+	reserveReplace bool
 }
+
+// noteReservation records where this client's pendingSplit placeholder sits.
+// Called at every site that arms one.
+func (t *TabModel) noteReservation(sibling string, dir SplitDir, replace bool) {
+	t.reserveSibling, t.reserveDir, t.reserveReplace = sibling, dir, replace
+}
+
+// awaitPane and awaitGone record a local placement or prune nobody on this
+// client asked for (see awaitingPanes).
+func (t *TabModel) awaitPane(id string) {
+	if t.awaitingPanes == nil {
+		t.awaitingPanes = make(map[string]bool)
+	}
+	t.awaitingPanes[id] = true
+}
+
+func (t *TabModel) awaitGone(id string) {
+	if t.awaitingGone == nil {
+		t.awaitingGone = make(map[string]bool)
+	}
+	t.awaitingGone[id] = true
+}
+
+func (t *TabModel) clearAwaiting() { t.awaitingPanes, t.awaitingGone = nil, nil }
 
 func NewTabModel(id, name string) *TabModel {
 	return &TabModel{
@@ -460,12 +508,25 @@ func (t *TabModel) SplitAtPane(paneID string, dir SplitDir) *LayoutNode {
 // when the tree is nil or holds no pane leaf. The caller guarantees pane is
 // not already in the tree.
 func (t *TabModel) placeArrivingPane(pane *PaneModel, w, h int) bool {
-	if t.Root == nil {
+	ph := t.spiralSlot(w, h)
+	if ph == nil {
 		return false
+	}
+	ph.fill(pane)
+	t.invalidateLeaves()
+	return true
+}
+
+// spiralSlot is placeArrivingPane without the fill: it splits the spiral leaf
+// and returns the empty placeholder, or nil when the tree holds no pane leaf.
+// Adoption uses it to re-seat a reservation whose sibling is gone.
+func (t *TabModel) spiralSlot(w, h int) *LayoutNode {
+	if t.Root == nil {
+		return nil
 	}
 	leaf, parentSplit, hasParent := t.Root.spiralLeaf()
 	if leaf == nil {
-		return false
+		return nil
 	}
 
 	var rects []PaneRect
@@ -479,13 +540,7 @@ func (t *TabModel) placeArrivingPane(pane *PaneModel, w, h int) bool {
 	}
 
 	dir := arrivalSplitDir(spiralSplitDir(parentSplit, hasParent), rectW, rectH)
-	ph := t.SplitAtPane(leaf.Pane.ID, dir)
-	if ph == nil {
-		return false
-	}
-	ph.fill(pane)
-	t.invalidateLeaves()
-	return true
+	return t.SplitAtPane(leaf.Pane.ID, dir)
 }
 
 // RemovePane removes the pane with the given ID, promoting its sibling.

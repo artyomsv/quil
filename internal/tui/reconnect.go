@@ -933,6 +933,10 @@ func (m *Model) armReattachReset(dest string) {
 		// delete on a nil map is a no-op.
 		delete(m.sizedOnce, sizedKey(dest, p.ID))
 	})
+	// And every tab's layout revision: the daemon's stored tree is the
+	// authority after a reattach, and a restarted daemon's revision can be
+	// LOWER than ours (resetLayoutSync).
+	m.resetLayoutSync(dest)
 	// Selection is Model-level and anchors to row/column coordinates that any
 	// replay invalidates. Dropped now rather than armed: there is no per-pane
 	// chunk to hang it off, and a selection surviving an outage is worth nothing.

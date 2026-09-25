@@ -72,37 +72,6 @@ func TestBroadcastLayoutBytesDifferForASplit(t *testing.T) {
 	}
 }
 
-func TestLayoutAgrees(t *testing.T) {
-	t.Parallel()
-	leaf := NewLeaf(NewPaneModel("p1", 1024))
-	split := NewLeaf(NewPaneModel("p1", 1024))
-	split.SplitLeaf("p1", SplitHorizontal)
-	split.Right.Pane = NewPaneModel("p2", 1024)
-
-	tests := []struct {
-		name   string
-		stored json.RawMessage
-		root   *LayoutNode
-		want   bool
-	}{
-		{"empty stored means the daemon holds nothing", nil, leaf, false},
-		{"zero-length stored", json.RawMessage{}, leaf, false},
-		{"malformed stored", json.RawMessage(`{"split":`), leaf, false},
-		{"matching leaf", broadcastLayout(t, leaf), leaf, true},
-		{"matching split", broadcastLayout(t, split), split, true},
-		{"leaf stored against a split tree", broadcastLayout(t, leaf), split, false},
-		{"split stored against a leaf tree", broadcastLayout(t, split), leaf, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			if got := layoutAgrees(tt.stored, tt.root); got != tt.want {
-				t.Errorf("layoutAgrees = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
 // A layout the daemon stores but the client cannot parse must be re-sent, not
 // treated as agreeing — otherwise a corrupt stored tree is never corrected. It
 // costs one frame per broadcast for that tab until the daemon accepts the
@@ -166,13 +135,14 @@ func echoModel(t *testing.T) (Model, WorkspaceStateMsg) {
 	}
 
 	// The echo: same tabs and panes, now carrying the layout the daemon would
-	// have stored and broadcast back.
+	// have stored and broadcast back — at revision 1, since storing the
+	// client's first write is what bumped it from 0.
 	echo := initial
 	echo.Tabs = []TabInfo{
 		{ID: "t-split", Name: "Split", Panes: []string{"p1", "p2"},
-			Layout: broadcastLayout(t, m.curTabs()[0].Root)},
+			Layout: broadcastLayout(t, m.curTabs()[0].Root), LayoutRev: 1},
 		{ID: "t-solo", Name: "Solo", Panes: []string{"p3"},
-			Layout: broadcastLayout(t, m.curTabs()[1].Root)},
+			Layout: broadcastLayout(t, m.curTabs()[1].Root), LayoutRev: 1},
 	}
 	return m, echo
 }
@@ -698,6 +668,10 @@ func TestWorkspaceState_AbsentLayout_StillSends(t *testing.T) {
 
 // The mirror of the suppression test: a real divergence must still reach the
 // daemon, and only for the tab that diverged.
+//
+// Under layout sync (layoutsync.go) the stale tree is ADOPTED first, and the
+// pane it lacks is placed locally and awaited — nobody on this client asked
+// for it. Only the next broadcast, still lacking it, sends.
 func TestWorkspaceState_ChangedLayout_SendsOnlyThatTab(t *testing.T) {
 	t.Parallel()
 	m, echo := echoModel(t)
@@ -706,10 +680,18 @@ func TestWorkspaceState_ChangedLayout_SendsOnlyThatTab(t *testing.T) {
 	stale := NewLeaf(NewPaneModel("p1", 1024))
 	echo.Tabs[0].Layout = broadcastLayout(t, stale)
 
+	first := &echoRecorder{}
+	m.client = first
+	next, cmd := m.Update(echo)
+	runCmd(cmd)
+	m = next.(Model)
+	if layouts, _ := sentCounts(t, first); layouts != 0 {
+		t.Fatalf("the adopting broadcast sent %d layouts, want 0", layouts)
+	}
+
 	fs := &echoRecorder{}
 	m.client = fs
-
-	_, cmd := m.Update(echo)
+	_, cmd = m.Update(echo)
 	runCmd(cmd)
 
 	var gotTabs []string

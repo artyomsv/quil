@@ -274,6 +274,18 @@ type Daemon struct {
 	// mode this package keeps being bitten by. Nothing that takes PluginMu may
 	// be called while it is held, and nothing broadcasts while it is held.
 	clients clientRegistry
+
+	// holds keeps each attaching conn's live pane output while its replay is
+	// sent, keyed by conn (outputhold.go). holdMu is a leaf guarding it;
+	// holdGate orders a flush's hold append and broadcast against a conn's
+	// hold flag changing. Order: holdGate, then holdMu.
+	holdGate sync.RWMutex
+	holdMu   sync.Mutex
+	holds    map[*ipc.Conn]*outputHold
+	// afterHoldOutput is a test seam: when set, a flush calls it between its
+	// hold append and its broadcast. Set before any flush runs; nil in
+	// production.
+	afterHoldOutput func(paneID string)
 }
 
 func New(cfg config.Config) *Daemon {
@@ -620,6 +632,7 @@ func (d *Daemon) Stop() {
 // records there would clear a lone master (nobody left to protect) before the
 // snapshot writes size_master — so the restart would have no reserve.
 func (d *Daemon) onClientDisconnect(conn *ipc.Conn) {
+	d.dropOutputHold(conn)
 	d.requestSnapshot()
 	d.events.RemoveWatchersByConn(conn)
 	if !d.shuttingDown() && d.forgetAttachedClient(conn) {
@@ -1789,6 +1802,23 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 		defer d.broadcastState()
 	}
 
+	// Hold this conn off live pane output until its replay is sent, BEFORE
+	// the state frame is built: from here every flush is either already in
+	// the OutputBuf bytes the replay sends, or held and sent after it — the
+	// replay and the live stream reach this client once each, in order
+	// (outputhold.go). Every return below must end the hold, or the conn
+	// stays off live output for good.
+	d.beginOutputHold(conn)
+	holdReleased := false
+	defer func() {
+		if !holdReleased {
+			d.dropOutputHold(conn)
+		}
+	}()
+	// end records, per pane, the stream position its OutputBuf replay ended
+	// at — the point up to which this client already has the held bytes.
+	end := make(map[string]uint64)
+
 	// clientSize sizes the first pane of an empty workspace below, and new
 	// panes whenever no master is elected (initialPaneSize).
 	cols, rows := clampClientDim(attach.Cols), clampClientDim(attach.Rows)
@@ -1942,6 +1972,13 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 					}
 				}
 			}
+			// Only a replay of OutputBuf's own bytes has a stream position,
+			// read in this span with the Bytes() snapshot. A ghostsnap replay
+			// is a PREVIOUS session's bytes, so every held byte of the new
+			// child comes after it; a skipped replay covers nothing.
+			if len(ghost) > 0 && (source == "outputbuf" || source == "child-stream") {
+				end[pane.ID] = pane.outPos
+			}
 			// Captured in the same span as Type/GhostSnap: the redraw kick below
 			// needs a live PTY, and reading it separately would race a restart.
 			// Same discipline as handleResizePane — pointer under the lock, the
@@ -1976,6 +2013,11 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 			}
 		}
 	}
+
+	// The replay is queued: send what was held behind it, then let live
+	// output through.
+	d.releaseOutputHold(conn, end)
+	holdReleased = true
 
 	// Replay pending notification events, OLDEST FIRST — this is a replay of
 	// state transitions, not a listing. The TUI rebuilds each pane's work
@@ -4249,6 +4291,11 @@ func (d *Daemon) flushPaneOutputGeneration(paneID string, data []byte, generatio
 		}
 		pane.OutputBuf.Write(data)
 	}
+	// The stream position, in the SAME span as the OutputBuf write: an attach
+	// reads outPos beside the buffer bytes it replays, so the two always
+	// describe the same instant. Counted even with no OutputBuf.
+	start := pane.outPos
+	pane.outPos += uint64(len(data))
 
 	// Update idle tracking + mouse-mode state (guarded by PluginMu).
 	now := time.Now()
@@ -4306,7 +4353,18 @@ func (d *Daemon) flushPaneOutputGeneration(paneID string, data []byte, generatio
 		Data:       data,
 		Generation: generation,
 	})
+	// Held conns get a copy through their hold; the broadcast skips them. The
+	// gate makes the pair one step against a hold starting or ending, or a
+	// conn could get these bytes twice or not at all (outputhold.go).
+	// Outside PluginMu, and Broadcast only enqueues, so the gate is held
+	// across no I/O.
+	d.holdGate.RLock()
+	d.holdOutput(paneID, start, data, generation)
+	if d.afterHoldOutput != nil {
+		d.afterHoldOutput(paneID)
+	}
 	d.broadcast(msg)
+	d.holdGate.RUnlock()
 }
 
 // detectBellEvent checks for standalone bell characters (not OSC terminators).

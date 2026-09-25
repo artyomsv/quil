@@ -94,6 +94,13 @@ type Pane struct {
 	// the saved buffer grows by a screenful on every restart.
 	// PluginMu-protected.
 	ghostSeeded bool
+	// outPos is the total number of bytes ever appended to this pane's output
+	// stream: the stream position of the next byte. It never resets — not on
+	// OutputBuf.Reset, not on a restart (the generation marks the new run).
+	// An attach reads it beside the OutputBuf bytes it replays, so the bytes
+	// it held back can be cut where that replay ended (outputhold.go).
+	// Runtime-only, never on the wire. PluginMu-protected.
+	outPos uint64
 	// WorktreeOwned marks a pane created into a linked worktree Quil made for
 	// it. PERSISTED, and it is the only thing that lets restore tell a missing
 	// WORKTREE from a missing browsed directory — the snapshot stores just CWD

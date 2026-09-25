@@ -709,6 +709,18 @@ func (c *Conn) wantsPaneOutput() bool { return !c.noPaneOutput.Load() }
 // the replay is queued.
 func (c *Conn) SetHoldPaneOutput(on bool) { c.holdPaneOutput.Store(on) }
 
+// QueuedOutput reports how many live pane_output frames wait in this conn's
+// droppable queue, not yet taken by sendLoop. sendLoop drains the must-deliver
+// queue first, so a frame still waiting here is written AFTER any
+// must-deliver frame queued now. The daemon waits for zero after holding a
+// conn, so live frames queued before an attach cannot land behind its replay.
+func (c *Conn) QueuedOutput() int { return len(c.outCh) }
+
+// Done is closed once the conn is dead (closed, or its sendLoop gone). After
+// that the droppable queue never drains, so a wait on QueuedOutput selects on
+// it to stop.
+func (c *Conn) Done() <-chan struct{} { return c.done }
+
 // wantsFrame reports whether a frame of this type should be delivered to this
 // conn. Only the live pane-output stream is ever filtered: everything else is
 // must-deliver, and a client excusing itself from PTY bytes — or held off

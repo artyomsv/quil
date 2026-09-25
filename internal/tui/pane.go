@@ -451,7 +451,7 @@ const minAdaptiveScrollbackLines = 2000
 // goroutine in production, but a plain int makes every parallel test in the
 // package racy against any other that builds a pane, which the detector reports
 // as a failure of whichever pair it happens to catch. Same reasoning as
-// Daemon.clientCWD's atomic.Pointer.
+// Daemon.clientSize's atomic.Pointer.
 var explicitScrollback atomic.Int64
 
 // knownPaneCount is the workspace size the adaptive depth divides. Published by

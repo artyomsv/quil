@@ -1117,11 +1117,14 @@ type DestroyPaneRespPayload struct {
 
 type SetActivePanePayload struct {
 	PaneID string `json:"pane_id"`
-	// Client names which attached client this applies to. Empty keeps the
-	// historical broadcast-to-every-TUI behavior, which is what every
-	// existing producer (MCP's set_active_pane) sends and what a headless
-	// daemon with no attached client needs: with nobody attached, this only
-	// switches the tab and there is no client to target.
+	// Client names which ONE attached client the focus frame reaches — never
+	// every attached TUI. Empty means the IMPLICIT target: the client with
+	// the most recent input, or the oldest attached client while nobody has
+	// typed yet (Daemon.targetConn). Every existing producer (MCP's
+	// set_active_pane before this field existed) sent it empty, so an older
+	// caller keeps landing on a reasonable client rather than nothing. A
+	// headless daemon with no attached client only switches the tab; there
+	// is no client to target and nothing is sent.
 	Client string `json:"client,omitempty"`
 }
 
@@ -1129,11 +1132,15 @@ type HighlightPanePayload struct {
 	PaneID string `json:"pane_id"`
 }
 
-// CloseTUIPayload asks one specific client to exit, for multi-client sync
-// (e.g. the master asking a follower to close, or an admin action against one
-// client in the list). Client empty keeps the historical behavior of
-// MsgCloseTUI: broadcast to every attached TUI. A headless daemon with no
-// attached client sends nothing and must not panic.
+// CloseTUIPayload asks ONE client to exit — never every attached TUI, for the
+// same reason SetActivePanePayload.Client is scoped: closing a window is an
+// action against a specific client, not a daemon-wide broadcast. Client
+// empty means the IMPLICIT target: the client with the most recent input, or
+// the oldest attached client while nobody has typed yet (Daemon.targetConn).
+// Client naming an id that is not attached reaches nobody, logged rather
+// than guessed at. A headless daemon with no attached client sends nothing
+// and must not panic. Absent entirely (nil payload) is treated the same as
+// empty, because older bridges send nil.
 type CloseTUIPayload struct {
 	Client string `json:"client,omitempty"`
 }
@@ -1168,18 +1175,22 @@ type DismissEventPayload struct {
 	EventID string `json:"event_id"` // empty = dismiss all
 }
 
-// EventDismissedPayload is the daemon's broadcast of a dismissal to every
-// OTHER attached client, so a notification acted on in one client's sidebar
-// does not also sit there in a second one. Mirrors DismissEventPayload's
+// EventDismissedPayload is the daemon's broadcast of a dismissal to EVERY
+// attached client, the sender included, so a notification acted on in one
+// client's sidebar does not also sit there in a second one. The sender's own
+// echo is harmless — its sidebar already dismissed the same event locally,
+// and applying the mark again is idempotent. Mirrors DismissEventPayload's
 // "" = all convention rather than reusing the type, because the two travel in
 // opposite directions and one is a request while the other is a fact.
 type EventDismissedPayload struct {
 	EventID string `json:"event_id"` // "" = all
 }
 
-// PaneSeenPayload is the daemon's broadcast marking a pane as looked-at by
-// some client, so every OTHER client's sidebar clears the same "finished
-// while you were away" mark rather than each client tracking it alone.
+// PaneSeenPayload is the daemon's broadcast marking a pane as looked-at,
+// reaching EVERY attached client including the one that cleared the mark, so
+// every client's sidebar clears the same "finished while you were away" mark
+// rather than each one tracking it alone. The sender's own echo is a no-op —
+// its sidebar already cleared the mark locally before reporting it.
 type PaneSeenPayload struct {
 	PaneID string `json:"pane_id"`
 }

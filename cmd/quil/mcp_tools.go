@@ -676,9 +676,10 @@ func registerCloseTUITool(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogger) {
 	})
 }
 
-// registerListClientsTool lists every attached client (TUI or MCP bridge)
-// so an agent can target one explicitly with set_active_pane or close_tui
-// instead of landing on the implicit most-recently-active one.
+// registerListClientsTool lists every ATTACHED client — every TUI sharing
+// this daemon, never an MCP bridge, which is a connected conn but never
+// attaches — so an agent can target one explicitly with set_active_pane or
+// close_tui instead of landing on the implicit most-recently-active one.
 func registerListClientsTool(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogger) {
 	type Input struct {
 		Host string `json:"host,omitempty" jsonschema:"limit to one host (default: every connected host)"`
@@ -690,7 +691,7 @@ func registerListClientsTool(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogger) {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "list_clients",
-		Description: "List every attached TUI/bridge client: id, attach time, window size, whether it holds size master " +
+		Description: "List every attached TUI client: id, attach time, window size, whether it holds size master " +
 			"(the client whose geometry sizes every pane), and its last input time. Pass a client id to set_active_pane " +
 			"or close_tui to target that client instead of the one that typed most recently.",
 	}, func(_ context.Context, _ *mcp.CallToolRequest, input Input) (*mcp.CallToolResult, any, error) {

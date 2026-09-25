@@ -5748,7 +5748,7 @@ func resolveSpawnArgs(p *plugin.PanePlugin, pane *Pane, restoring, ownsRecord bo
 // it depends on which client is asking, and an MCP bridge (no attach at all)
 // asks on behalf of nobody in particular.
 //
-// Checked in order, each candidate validated exactly the same way
+// Checked in order, each DISTINCT candidate validated exactly the same way
 // (resolveSpawnDirWithin: os.Stat + EvalSymlinks, so a stale or unreachable
 // directory falls through rather than being trusted):
 //
@@ -5758,28 +5758,48 @@ func resolveSpawnArgs(p *plugin.PanePlugin, pane *Pane, restoring, ownsRecord bo
 //  3. the most recently active client's cwd;
 //  4. the daemon's own working directory.
 //
-// conn is nil for every restore and recovery caller (respawnPanes,
-// recoverEmptyTab, ensureTabNotEmpty, …), which has no requesting client at
-// all — those start at step 2. Symlinks are resolved so all callers see the
-// canonical path.
+// In the ORDINARY case — one attached TUI — steps 1 through 3 all name the
+// SAME client, so a candidate string already tried is skipped rather than
+// probed again: without that, a single dead directory cost this dispatch
+// goroutine up to three separate spawnDirProbeTimeout waits (6s) and
+// abandoned three claimBlockingFSCall permits instead of one. The remaining
+// probes also share ONE deadline rather than a fresh spawnDirProbeTimeout
+// each, so even three genuinely DIFFERENT unreachable candidates cost this
+// call no more than spawnDirProbeTimeout in total.
+//
+// conn is nil for every restore and recovery caller (recoverEmptyTab,
+// ensureTabNotEmpty, …), which has no requesting client at all — those start
+// at step 2. Symlinks are resolved so all callers see the canonical path.
 func (d *Daemon) defaultCWD(conn *ipc.Conn) string {
+	deadline := time.Now().Add(spawnDirProbeTimeout)
+	tried := make(map[string]bool, 3)
+	// tryCandidate skips a cwd already attempted (by value — the ordinary
+	// single-TUI case names the same directory at every step) and spends
+	// only what is left of the shared deadline.
+	tryCandidate := func(cwd string) string {
+		if cwd == "" || tried[cwd] {
+			return ""
+		}
+		tried[cwd] = true
+		return resolveSpawnDirWithin(cwd, time.Until(deadline))
+	}
 	if conn != nil {
 		if rec, ok := d.clientByConn(conn); ok {
-			if dir := resolveSpawnDirWithin(rec.cwd, spawnDirProbeTimeout); dir != "" {
+			if dir := tryCandidate(rec.cwd); dir != "" {
 				return dir
 			}
 		}
 	}
 	if mc := d.masterConn(); mc != nil {
 		if rec, ok := d.clientByConn(mc); ok {
-			if dir := resolveSpawnDirWithin(rec.cwd, spawnDirProbeTimeout); dir != "" {
+			if dir := tryCandidate(rec.cwd); dir != "" {
 				return dir
 			}
 		}
 	}
 	if ac := d.mostRecentlyActiveConn(); ac != nil {
 		if rec, ok := d.clientByConn(ac); ok {
-			if dir := resolveSpawnDirWithin(rec.cwd, spawnDirProbeTimeout); dir != "" {
+			if dir := tryCandidate(rec.cwd); dir != "" {
 				return dir
 			}
 		}
@@ -7456,6 +7476,8 @@ func (d *Daemon) handleSetActivePane(conn *ipc.Conn, msg *ipc.Message) {
 		}); err == nil {
 			target.Send(focus)
 		}
+	} else if req.Client != "" {
+		log.Printf("set_active_pane: no attached client %q; dropping the focus frame", req.Client)
 	}
 
 	d.broadcastState()

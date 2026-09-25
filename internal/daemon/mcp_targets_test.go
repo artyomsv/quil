@@ -1,8 +1,10 @@
 package daemon
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -55,33 +57,159 @@ func resolvedTemp(t *testing.T) string {
 	return resolved
 }
 
-// TestCloseTUI_ReachesMostRecentlyActiveOnly: three attached clients, B typed
-// last. Only B's conn receives close_tui; A and C get none.
+// readUntilID reads c's frames — COLLECTING every one — until a response of
+// respType with the given envelope id arrives, with NO SetReadDeadline.
+//
+// readFor and readUntil (resize_authority_test.go) both call
+// SetReadDeadline, and ipc.ReadMessage's io.ReadFull DISCARDS whatever
+// partial length-prefix or payload bytes it already consumed the instant
+// that deadline fires mid-read — the next call on the same conn then
+// misreads leftover bytes as a fresh frame header. That is fine for a
+// single terminal read, but a test that calls a deadline-based reader
+// MORE THAN ONCE on the same conn risks exactly that corruption on a slow
+// CI run. This helper is safe to call repeatedly on one conn: each call's
+// background goroutine reads until ITS match (or the conn closes, or the
+// caller's own timeout fires), and two calls never race because the first
+// one's goroutine has already returned by the time the caller sees its
+// result.
+func readUntilID(t *testing.T, c *ipc.Client, respType, id string, within time.Duration) []*ipc.Message {
+	t.Helper()
+	type result struct {
+		got []*ipc.Message
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		var got []*ipc.Message
+		for {
+			m, err := c.Receive()
+			if err != nil {
+				ch <- result{got, err}
+				return
+			}
+			got = append(got, m)
+			if m.Type == respType && m.ID == id {
+				ch <- result{got, nil}
+				return
+			}
+		}
+	}()
+	select {
+	case r := <-ch:
+		if r.err != nil {
+			t.Fatalf("waiting for %s(%s): %v", respType, id, r.err)
+		}
+		return r.got
+	case <-time.After(within):
+		t.Fatalf("timed out waiting for %s(%s)", respType, id)
+		return nil
+	}
+}
+
+// sendWithID sends payload as typ on c, stamping the envelope id so a
+// caller can correlate it with the resulting pane_op_resp/etc via
+// readUntilID.
+func sendWithID(t *testing.T, c *ipc.Client, typ, id string, payload any) {
+	t.Helper()
+	msg, err := ipc.NewMessage(typ, payload)
+	if err != nil {
+		t.Fatalf("build %s: %v", typ, err)
+	}
+	msg.ID = id
+	if err := c.Send(msg); err != nil {
+		t.Fatalf("send %s: %v", typ, err)
+	}
+}
+
+// workspaceStateActiveTab decodes a workspace_state frame's top-level
+// active_tab field.
+func workspaceStateActiveTab(t *testing.T, m *ipc.Message) string {
+	t.Helper()
+	var s struct {
+		ActiveTab string `json:"active_tab"`
+	}
+	if err := m.DecodePayload(&s); err != nil {
+		t.Fatal(err)
+	}
+	return s.ActiveTab
+}
+
+// sawActiveTab reports whether any workspace_state frame in msgs names
+// tabID as the active tab.
+func sawActiveTab(t *testing.T, msgs []*ipc.Message, tabID string) bool {
+	t.Helper()
+	for _, m := range msgs {
+		if m.Type == ipc.MsgWorkspaceState && workspaceStateActiveTab(t, m) == tabID {
+			return true
+		}
+	}
+	return false
+}
+
+// TestCloseTUI_ReachesMostRecentlyActiveOnly: three attached clients. C is
+// the NEWEST attached, but A — the OLDEST — types LAST, so the implicit
+// target must be A. This is what proves the choice is driven by input
+// recency and not merely by "the newest attached client" (which happens to
+// coincide with "typed last" unless a test goes out of its way to separate
+// them).
 func TestCloseTUI_ReachesMostRecentlyActiveOnly(t *testing.T) {
 	d, sock := overlayServerDaemon(t)
 	d.session.CreateTab("T") // skip the real-PTY default workspace on first attach
 
 	a := attachClientAs(t, sock, "A", 200, 50)
 	waitUntil(t, "A attached", func() bool { return d.clientCount() == 1 })
-	c := attachClientAs(t, sock, "C", 100, 30)
-	waitUntil(t, "C attached", func() bool { return d.clientCount() == 2 })
 	b := attachClientAs(t, sock, "B", 100, 30)
-	waitUntil(t, "B attached", func() bool { return d.clientCount() == 3 })
+	waitUntil(t, "B attached", func() bool { return d.clientCount() == 2 })
+	c := attachClientAs(t, sock, "C", 100, 30)
+	waitUntil(t, "C attached", func() bool { return d.clientCount() == 3 }) // C is newest attached
 
-	barrier(t, d, a, "A")
+	barrier(t, d, b, "B")
 	barrier(t, d, c, "C")
-	barrier(t, d, b, "B") // B typed most recently
+	barrier(t, d, a, "A") // A — the OLDEST attached — types last
 
 	bridge := dialBridge(t, sock)
 	sendClientMsg(t, bridge, ipc.MsgCloseTUI, nil)
 
-	bGot := readFor(b, 500*time.Millisecond)
-	if countType(bGot, ipc.MsgCloseTUI) != 1 {
-		t.Fatalf("B (most recently active) got close_tui %d times, want 1: %v", countType(bGot, ipc.MsgCloseTUI), bGot)
+	aGot := readFor(a, 500*time.Millisecond)
+	if countType(aGot, ipc.MsgCloseTUI) != 1 {
+		t.Fatalf("A (typed last, though oldest attached) got close_tui %d times, want 1: %v", countType(aGot, ipc.MsgCloseTUI), aGot)
 	}
-	aGot := readFor(a, 200*time.Millisecond)
-	if n := countType(aGot, ipc.MsgCloseTUI); n != 0 {
-		t.Errorf("A got close_tui %d times, want 0", n)
+	bGot := readFor(b, 200*time.Millisecond)
+	if n := countType(bGot, ipc.MsgCloseTUI); n != 0 {
+		t.Errorf("B got close_tui %d times, want 0", n)
+	}
+	cGot := readFor(c, 200*time.Millisecond)
+	if n := countType(cGot, ipc.MsgCloseTUI); n != 0 {
+		t.Errorf("C (newest attached, but did not type last) got close_tui %d times, want 0", n)
+	}
+}
+
+// TestCloseTUI_NobodyTypedYetReachesOldestAttached: with no input at all,
+// the implicit target is the OLDEST attached client — not the newest, which
+// is mostRecentlyActiveConn's OWN "nobody typed" answer (see targetConn's
+// doc comment for why the two deliberately disagree there).
+func TestCloseTUI_NobodyTypedYetReachesOldestAttached(t *testing.T) {
+	d, sock := overlayServerDaemon(t)
+	d.session.CreateTab("T")
+
+	a := attachClientAs(t, sock, "A", 200, 50)
+	waitUntil(t, "A attached", func() bool { return d.clientCount() == 1 })
+	b := attachClientAs(t, sock, "B", 100, 30)
+	waitUntil(t, "B attached", func() bool { return d.clientCount() == 2 })
+	c := attachClientAs(t, sock, "C", 100, 30)
+	waitUntil(t, "C attached", func() bool { return d.clientCount() == 3 })
+	// Nobody has sent any input.
+
+	bridge := dialBridge(t, sock)
+	sendClientMsg(t, bridge, ipc.MsgCloseTUI, nil)
+
+	aGot := readFor(a, 500*time.Millisecond)
+	if countType(aGot, ipc.MsgCloseTUI) != 1 {
+		t.Fatalf("A (oldest attached, nobody has typed) got close_tui %d times, want 1: %v", countType(aGot, ipc.MsgCloseTUI), aGot)
+	}
+	bGot := readFor(b, 200*time.Millisecond)
+	if n := countType(bGot, ipc.MsgCloseTUI); n != 0 {
+		t.Errorf("B got close_tui %d times, want 0", n)
 	}
 	cGot := readFor(c, 200*time.Millisecond)
 	if n := countType(cGot, ipc.MsgCloseTUI); n != 0 {
@@ -118,7 +246,10 @@ func TestCloseTUI_ExplicitClient(t *testing.T) {
 
 // TestSetActivePane_FocusFrameToOneConn: the tab-switch broadcast reaches
 // every attached conn, and the set_active_pane focus frame reaches only the
-// named client.
+// named client. The workspace is switched to a DIFFERENT tab before either
+// client attaches, so a workspace_state naming tab.ID as active can only be
+// the broadcast this set_active_pane triggers — never attach-time noise —
+// which lets this test read each conn exactly ONCE (no drain needed).
 func TestSetActivePane_FocusFrameToOneConn(t *testing.T) {
 	d, sock := overlayServerDaemon(t)
 	tab := d.session.CreateTab("T")
@@ -126,15 +257,13 @@ func TestSetActivePane_FocusFrameToOneConn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create pane: %v", err)
 	}
+	other := d.session.CreateTab("Other")
+	d.session.SwitchTab(other.ID)
 
 	a := attachClientAs(t, sock, "A", 200, 50)
 	waitUntil(t, "A attached", func() bool { return d.clientCount() == 1 })
 	b := attachClientAs(t, sock, "B", 100, 30)
 	waitUntil(t, "B attached", func() bool { return d.clientCount() == 2 })
-	// Drain each conn's own attach replay / other-client state frame before
-	// the assertions below, so the counts are about THIS set_active_pane.
-	readFor(a, 300*time.Millisecond)
-	readFor(b, 300*time.Millisecond)
 
 	bridge := dialBridge(t, sock)
 	sendClientMsg(t, bridge, ipc.MsgSetActivePane, ipc.SetActivePanePayload{PaneID: pane.ID, Client: "B"})
@@ -143,22 +272,24 @@ func TestSetActivePane_FocusFrameToOneConn(t *testing.T) {
 	if countType(bGot, ipc.MsgSetActivePane) != 1 {
 		t.Fatalf("B (named client) got set_active_pane %d times, want 1: %v", countType(bGot, ipc.MsgSetActivePane), bGot)
 	}
-	if countType(bGot, ipc.MsgWorkspaceState) == 0 {
-		t.Error("B never saw the tab-switch broadcast")
+	if !sawActiveTab(t, bGot, tab.ID) {
+		t.Error("B never saw the tab-switch broadcast (no workspace_state named tab.ID active)")
 	}
-	aGot := readFor(a, 200*time.Millisecond)
+	aGot := readFor(a, 300*time.Millisecond)
 	if n := countType(aGot, ipc.MsgSetActivePane); n != 0 {
 		t.Errorf("A got set_active_pane %d times, want 0", n)
 	}
-	if countType(aGot, ipc.MsgWorkspaceState) == 0 {
+	if !sawActiveTab(t, aGot, tab.ID) {
 		t.Error("A (not the named client) never saw the tab-switch broadcast — it must reach every attached conn")
 	}
 }
 
 // TestMCPTargets_NoAttachedClient: Review Focus 4. A headless daemon (no
-// attached client at all) must not panic on any of these, close_tui sends
+// attached client at all) must not panic on any of these: close_tui sends
 // nothing, set_active_pane only switches the tab, and create_pane_req with
-// an empty CWD falls all the way back to os.Getwd().
+// an empty CWD falls all the way back to os.Getwd(). The bridge conn that
+// SENT close_tui/set_active_pane is itself read afterward to confirm the
+// daemon did not echo either command back to its own sender.
 func TestMCPTargets_NoAttachedClient(t *testing.T) {
 	d, sock := overlayServerDaemon(t)
 	tab := d.session.CreateTab("T")
@@ -176,6 +307,22 @@ func TestMCPTargets_NoAttachedClient(t *testing.T) {
 	waitUntil(t, "the tab switched with nobody attached", func() bool {
 		return d.session.ActiveTabID() == tab.ID
 	})
+
+	// Nobody is attached to receive either command, and the sender itself
+	// (an MCP bridge, never attached) must not have it echoed back either.
+	bridgeGot := readFor(bridge, 300*time.Millisecond)
+	if n := countType(bridgeGot, ipc.MsgCloseTUI); n != 0 {
+		t.Errorf("close_tui echoed back to its own sender %d times, want 0", n)
+	}
+	if n := countType(bridgeGot, ipc.MsgSetActivePane); n != 0 {
+		t.Errorf("set_active_pane echoed back to its own sender %d times, want 0", n)
+	}
+	// readFor's SetReadDeadline is still armed and has already elapsed —
+	// clear it, or the roundTrip calls below inherit that stale deadline and
+	// fail with a spurious i/o timeout on their very first Receive.
+	if err := bridge.SetReadDeadline(time.Time{}); err != nil {
+		t.Fatalf("clear read deadline: %v", err)
+	}
 
 	hostCWD, err := os.Getwd()
 	if err != nil {
@@ -206,8 +353,7 @@ func TestMCPTargets_NoAttachedClient(t *testing.T) {
 // default directory, and a bridge conn (no attach at all) falls back to the
 // size master's directory. Driven through handleBrowseDirReq — an empty Path
 // asks for defaultCWD(conn) and echoes it back as Resolved, with no PTY
-// spawn — rather than through create_pane_req, whose behavior for the same
-// resolver is separately covered by TestMCPTargets_NoAttachedClient.
+// spawn.
 func TestDefaultCWD_PerClientAndBridge(t *testing.T) {
 	d, sock := overlayServerDaemon(t)
 	d.session.CreateTab("T")
@@ -236,15 +382,177 @@ func TestDefaultCWD_PerClientAndBridge(t *testing.T) {
 	}
 }
 
+// TestCreatePaneReq_FromNonMasterClientUsesItsOwnCWD (Important 3): the
+// CREATE path — not just the read-only browse path above — resolves against
+// the REQUESTING conn's own cwd, even when that conn is not the size
+// master. B is a follower here (A, the oldest attached, is master with
+// dirA); a create sent on B's own conn must land in dirB, not in A's.
+func TestCreatePaneReq_FromNonMasterClientUsesItsOwnCWD(t *testing.T) {
+	d, sock := overlayServerDaemon(t)
+	tab := d.session.CreateTab("T")
+
+	dirA := resolvedTemp(t)
+	dirB := resolvedTemp(t)
+	attachClientWithCWD(t, sock, "A", 200, 50, dirA)
+	waitUntil(t, "A attached", func() bool { return d.clientCount() == 1 })
+	b := attachClientWithCWD(t, sock, "B", 100, 30, dirB)
+	waitUntil(t, "B attached", func() bool { return d.clientCount() == 2 })
+	if d.masterID() != "A" {
+		t.Fatalf("masterID = %q, want A", d.masterID())
+	}
+
+	resp := decodeInto[ipc.CreatePaneRespPayload](t, roundTrip(t, b, ipc.MsgCreatePaneReq, ipc.MsgCreatePaneResp,
+		ipc.CreatePaneReqPayload{TabID: tab.ID}))
+	if resp.Error != "" {
+		t.Fatalf("create_pane_req: %s", resp.Error)
+	}
+	pane := d.session.Pane(resp.PaneID)
+	if pane == nil {
+		t.Fatal("pane not created")
+	}
+	pane.PluginMu.Lock()
+	gotCWD := pane.CWD
+	pane.PluginMu.Unlock()
+	if gotCWD != dirB {
+		t.Errorf("create from B (a follower) landed in %q, want its own cwd %q (not A's master cwd %q)", gotCWD, dirB, dirA)
+	}
+}
+
+// TestDefaultCWD_SameClientProbedOnce (Important 1): in the single-TUI case
+// the conn, master and most-recently-active steps all name the SAME client,
+// so a dead directory must be probed exactly once — not three times over,
+// each paying its own spawnDirProbeTimeout and abandoning its own
+// claimBlockingFSCall permit.
+func TestDefaultCWD_SameClientProbedOnce(t *testing.T) {
+	d, sock := overlayServerDaemon(t)
+	d.session.CreateTab("T")
+
+	var calls atomic.Int64
+	block := make(chan struct{})
+	orig := statPath
+	statPath = func(string) (os.FileInfo, error) {
+		calls.Add(1)
+		<-block
+		return nil, os.ErrNotExist
+	}
+	t.Cleanup(func() { restoreSeam(t, block, func() { statPath = orig }) })
+
+	attachClientWithCWD(t, sock, "A", 200, 50, "/mnt/dead-share/work")
+	waitUntil(t, "A attached", func() bool { return d.clientCount() == 1 })
+	master := d.masterConn()
+	if master == nil {
+		t.Fatal("A did not become master")
+	}
+
+	done := make(chan string, 1)
+	go func() { done <- d.defaultCWD(master) }()
+
+	select {
+	case got := <-done:
+		if got == "/mnt/dead-share/work" {
+			t.Errorf("defaultCWD returned the unreachable path %q", got)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("defaultCWD did not return within 10s — probably retrying the same dead path serially")
+	}
+
+	if n := calls.Load(); n != 1 {
+		t.Errorf("statPath called %d times, want exactly 1 (conn, master and most-recently-active all name the same client)", n)
+	}
+}
+
+// TestDefaultCWD_DedupesIdenticalPathsEvenWithBudgetToSpare isolates the
+// DEDUP half of the Important-1 fix from the shared-deadline half above: a
+// FAST-failing stat leaves the shared deadline almost entirely unspent, so
+// only the "skip a candidate already tried" check — not the deadline
+// running out — can be what stops a second and third identical probe here.
+func TestDefaultCWD_DedupesIdenticalPathsEvenWithBudgetToSpare(t *testing.T) {
+	d, sock := overlayServerDaemon(t)
+	d.session.CreateTab("T")
+
+	var calls atomic.Int64
+	orig := statPath
+	statPath = func(string) (os.FileInfo, error) {
+		calls.Add(1)
+		return nil, os.ErrNotExist
+	}
+	t.Cleanup(func() { statPath = orig })
+
+	attachClientWithCWD(t, sock, "A", 200, 50, "/mnt/dead-share/work")
+	waitUntil(t, "A attached", func() bool { return d.clientCount() == 1 })
+	master := d.masterConn()
+	if master == nil {
+		t.Fatal("A did not become master")
+	}
+
+	got := d.defaultCWD(master)
+	if got == "/mnt/dead-share/work" {
+		t.Errorf("defaultCWD returned the unreachable path %q", got)
+	}
+	if n := calls.Load(); n != 1 {
+		t.Errorf("statPath called %d times, want exactly 1 — the conn, master and most-recently-active steps all name A's own path", n)
+	}
+}
+
+// TestDefaultCWD_SharesOneDeadlineAcrossDifferentDeadCandidates isolates the
+// SHARED-DEADLINE half: three attached clients with three DIFFERENT
+// unreachable directories (so dedup-by-path cannot collapse them) must still
+// cost this call no more than roughly ONE spawnDirProbeTimeout, not three
+// paid serially.
+func TestDefaultCWD_SharesOneDeadlineAcrossDifferentDeadCandidates(t *testing.T) {
+	d, sock := overlayServerDaemon(t)
+	d.session.CreateTab("T")
+
+	block := make(chan struct{})
+	orig := statPath
+	statPath = func(string) (os.FileInfo, error) {
+		<-block
+		return nil, os.ErrNotExist
+	}
+	t.Cleanup(func() { restoreSeam(t, block, func() { statPath = orig }) })
+
+	attachClientWithCWD(t, sock, "A", 200, 50, "/mnt/dead-a") // oldest attached: becomes master
+	waitUntil(t, "A attached", func() bool { return d.clientCount() == 1 })
+	attachClientWithCWD(t, sock, "B", 100, 30, "/mnt/dead-b")
+	waitUntil(t, "B attached", func() bool { return d.clientCount() == 2 })
+	c := attachClientWithCWD(t, sock, "C", 100, 30, "/mnt/dead-c")
+	waitUntil(t, "C attached", func() bool { return d.clientCount() == 3 })
+	barrier(t, d, c, "C") // C is now the most-recently-active client
+
+	// The requesting conn is B: neither the master (A) nor the
+	// most-recently-active client (C), so all three steps of defaultCWD name
+	// three DIFFERENT dead directories.
+	rec, ok := clientRecordByID(d, "B")
+	if !ok {
+		t.Fatal("B not found in the registry")
+	}
+
+	start := time.Now()
+	got := d.defaultCWD(rec.conn)
+	elapsed := time.Since(start)
+
+	for _, dead := range []string{"/mnt/dead-a", "/mnt/dead-b", "/mnt/dead-c"} {
+		if got == dead {
+			t.Errorf("defaultCWD returned the unreachable path %q", got)
+		}
+	}
+	// Worst case without a shared deadline is 3 * spawnDirProbeTimeout (6s);
+	// this bound sits well below that and comfortably above the ~1x a shared
+	// deadline costs, so it separates the two without being timing-fragile.
+	if elapsed > 3*time.Second {
+		t.Errorf("defaultCWD took %s across 3 different dead candidates, want well under 3x spawnDirProbeTimeout (the deadline must be shared)", elapsed)
+	}
+}
+
 // TestDismiss_BroadcastsEventDismissed: a dismissal reaches every attached
 // client, so a card dismissed through one TUI's sidebar disappears from a
-// second one too.
+// second one too. event_dismissed never appears as ordinary attach noise, so
+// one read after the send is enough.
 func TestDismiss_BroadcastsEventDismissed(t *testing.T) {
 	d, sock := overlayServerDaemon(t)
 	d.session.CreateTab("T")
 	a := attachClientAs(t, sock, "A", 200, 50)
 	waitUntil(t, "A attached", func() bool { return d.clientCount() == 1 })
-	readFor(a, 300*time.Millisecond) // drain the attach state frame
 
 	bridge := dialBridge(t, sock)
 	sendClientMsg(t, bridge, ipc.MsgDismissEvent, ipc.DismissEventPayload{EventID: "evt-1"})
@@ -270,6 +578,13 @@ func TestDismiss_BroadcastsEventDismissed(t *testing.T) {
 
 // TestPaneSeen_OnlyOnTrueToFalse: false→false and true→true send no
 // pane_seen frame; only a true→false transition does, exactly once.
+//
+// Each update_pane is sent WITH an envelope id and checked via readUntilID,
+// which waits for that update's own pane_op_resp (sent, unconditionally,
+// AFTER handleUpdatePane returns — so any pane_seen broadcast the same
+// update triggered is already queued ahead of it on this same conn). That
+// makes three checkpoints on ONE conn safe: readUntilID sets no read
+// deadline, unlike calling readFor three times over on the same conn.
 func TestPaneSeen_OnlyOnTrueToFalse(t *testing.T) {
 	d, sock := overlayServerDaemon(t)
 	tab := d.session.CreateTab("T")
@@ -279,16 +594,18 @@ func TestPaneSeen_OnlyOnTrueToFalse(t *testing.T) {
 	}
 	a := attachClientAs(t, sock, "A", 200, 50)
 	waitUntil(t, "A attached", func() bool { return d.clientCount() == 1 })
-	readFor(a, 300*time.Millisecond) // drain the attach state frame
 
 	setUnseen := func(v bool) {
 		pane.PluginMu.Lock()
 		pane.Unseen = v
 		pane.PluginMu.Unlock()
 	}
+	step := 0
 	sendUnseen := func(v bool) []*ipc.Message {
-		sendClientMsg(t, a, ipc.MsgUpdatePane, ipc.UpdatePanePayload{PaneID: pane.ID, Unseen: &v})
-		return readFor(a, 300*time.Millisecond)
+		step++
+		id := fmt.Sprintf("pane-seen-step-%d", step)
+		sendWithID(t, a, ipc.MsgUpdatePane, id, ipc.UpdatePanePayload{PaneID: pane.ID, Unseen: &v})
+		return readUntilID(t, a, ipc.MsgPaneOpResp, id, 3*time.Second)
 	}
 
 	setUnseen(false)
@@ -374,7 +691,9 @@ func TestListClients_Fields(t *testing.T) {
 // actually acted on may stamp the sending client's last-input time —
 // otherwise a pane silently reporting its own CWD makes an idle client look
 // like the one somebody is driving, which is exactly what targetConn's
-// implicit fallback reads to pick a client.
+// implicit fallback reads to pick a client. Covers every user-originated
+// field (Name, Muted, Eager, PinnedAttention, MarkedForDeletion) and every
+// automatic one (CWD, OverlayVisible, Unseen).
 func TestUpdatePane_LastInputStampsOnlyUserFields(t *testing.T) {
 	d, sock := overlayServerDaemon(t)
 	tab := d.session.CreateTab("T")
@@ -385,7 +704,7 @@ func TestUpdatePane_LastInputStampsOnlyUserFields(t *testing.T) {
 	a := attachClientAs(t, sock, "A", 200, 50)
 	waitUntil(t, "A attached", func() bool { return d.clientCount() == 1 })
 
-	fenceMarker := 40 // eligible geometry, and distinct from A's 200x50 attach
+	fenceMarker := 40 // eligible geometry, distinct from A's 200x50 attach
 	fence := func() {
 		t.Helper()
 		fenceMarker++
@@ -395,9 +714,19 @@ func TestUpdatePane_LastInputStampsOnlyUserFields(t *testing.T) {
 			return rec.cols == fenceMarker && rec.rows == fenceMarker
 		})
 	}
+	clearStamp := func() {
+		d.clients.mu.Lock()
+		defer d.clients.mu.Unlock()
+		for _, rec := range d.clients.byConn {
+			if rec.id == "A" {
+				rec.lastInputAt = time.Time{}
+			}
+		}
+	}
 
 	notStamped := func(name string, payload ipc.UpdatePanePayload) {
 		t.Helper()
+		clearStamp()
 		payload.PaneID = pane.ID
 		sendClientMsg(t, a, ipc.MsgUpdatePane, payload)
 		// client_geometry never touches lastInputAt (see the dispatch table in
@@ -409,14 +738,24 @@ func TestUpdatePane_LastInputStampsOnlyUserFields(t *testing.T) {
 			t.Errorf("%s stamped lastInputAt, want it to stay unstamped", name)
 		}
 	}
+	stamped := func(name string, payload ipc.UpdatePanePayload) {
+		t.Helper()
+		clearStamp()
+		payload.PaneID = pane.ID
+		sendClientMsg(t, a, ipc.MsgUpdatePane, payload)
+		waitUntil(t, name+" stamps lastInputAt", func() bool {
+			rec, _ := clientRecordByID(d, "A")
+			return !rec.lastInputAt.IsZero()
+		})
+	}
 
 	notStamped("CWD-only", ipc.UpdatePanePayload{CWD: t.TempDir()})
 	notStamped("OverlayVisible-only", ipc.UpdatePanePayload{OverlayVisible: boolPtr(true)})
 	notStamped("Unseen-only", ipc.UpdatePanePayload{Unseen: boolPtr(true)})
 
-	sendClientMsg(t, a, ipc.MsgUpdatePane, ipc.UpdatePanePayload{PaneID: pane.ID, Name: "renamed"})
-	waitUntil(t, "Name stamps lastInputAt", func() bool {
-		rec, _ := clientRecordByID(d, "A")
-		return !rec.lastInputAt.IsZero()
-	})
+	stamped("Name", ipc.UpdatePanePayload{Name: "renamed"})
+	stamped("Muted", ipc.UpdatePanePayload{Muted: boolPtr(true)})
+	stamped("Eager", ipc.UpdatePanePayload{Eager: boolPtr(true)})
+	stamped("PinnedAttention", ipc.UpdatePanePayload{PinnedAttention: boolPtr(true)})
+	stamped("MarkedForDeletion", ipc.UpdatePanePayload{MarkedForDeletion: boolPtr(true)})
 }

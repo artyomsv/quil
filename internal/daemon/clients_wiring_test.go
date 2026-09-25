@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -131,6 +132,73 @@ func TestClientDispatch_AttachMasterChangeReachesOthersOnly(t *testing.T) {
 	})
 	if n := countType(readFor(big, 300*time.Millisecond), ipc.MsgWorkspaceState); n != 1 {
 		t.Errorf("the attaching client received %d workspace_state frames, want only its own 1", n)
+	}
+}
+
+// stateWith matches a workspace_state carrying this attached count.
+func stateWith(clients int) func(*ipc.Message) bool {
+	return func(m *ipc.Message) bool {
+		if m.Type != ipc.MsgWorkspaceState {
+			return false
+		}
+		var s map[string]any
+		return m.DecodePayload(&s) == nil && s["clients"] == float64(clients)
+	}
+}
+
+// wantOneCountFrame reads c until a state with this count arrives, checks it
+// kept the master, and checks no second state frame follows.
+func wantOneCountFrame(t *testing.T, c *ipc.Client, who string, clients int, master string) {
+	t.Helper()
+	got := readUntil(t, c, fmt.Sprintf("%s: a state with clients=%d", who, clients), stateWith(clients))
+	var s map[string]any
+	if err := got[len(got)-1].DecodePayload(&s); err != nil {
+		t.Fatalf("%s: decode state: %v", who, err)
+	}
+	if s["size_master"] != master {
+		t.Errorf("%s: size_master = %v, want %q unchanged", who, s["size_master"], master)
+	}
+	if n := countType(readFor(c, 200*time.Millisecond), ipc.MsgWorkspaceState); n != 0 {
+		t.Errorf("%s: %d more workspace_state frames after the count change, want 1 frame per event", who, n)
+	}
+}
+
+// The attached count rides the state, and each TUI shows [master]/[follower]
+// only while it is 2 or more. So an attach, a detach or a lost link that leaves
+// the master alone must still reach the other clients, once each. A bridge,
+// which never attaches, is not a client and changes nothing.
+func TestClientDispatch_CountChangeReachesOtherClients(t *testing.T) {
+	d, sock, _ := resizeAuthorityDaemon(t)
+	a, b := attachAB(t, d, sock)
+	readUntil(t, b, "B's attach state", isType(ipc.MsgWorkspaceState))
+	readUntil(t, a, "A: B's arrival", stateWith(2))
+
+	c := attachClientAs(t, sock, "C", 100, 30)
+	readUntil(t, c, "C's attach state", isType(ipc.MsgWorkspaceState))
+	wantOneCountFrame(t, a, "A after C attached", 3, "A")
+	wantOneCountFrame(t, b, "B after C attached", 3, "A")
+
+	sendClientMsg(t, c, ipc.MsgDetach, nil)
+	wantOneCountFrame(t, a, "A after C detached", 2, "A")
+	wantOneCountFrame(t, b, "B after C detached", 2, "A")
+
+	lost := attachClientAs(t, sock, "L", 100, 30)
+	readUntil(t, a, "A: L's arrival", stateWith(3))
+	readUntil(t, b, "B: L's arrival", stateWith(3))
+	lost.Close()
+	wantOneCountFrame(t, a, "A after L's link dropped", 2, "A")
+	wantOneCountFrame(t, b, "B after L's link dropped", 2, "A")
+
+	bridge, err := ipc.NewClient(sock)
+	if err != nil {
+		t.Fatalf("dial bridge: %v", err)
+	}
+	sendClientMsg(t, bridge, ipc.MsgClientHello, ipc.ClientHelloPayload{Role: "bridge", PID: 1})
+	bridge.Close()
+	for who, cl := range map[string]*ipc.Client{"A": a, "B": b} {
+		if n := countType(readFor(cl, 300*time.Millisecond), ipc.MsgWorkspaceState); n != 0 {
+			t.Errorf("%s received %d workspace_state frames for a bridge coming and going, want 0", who, n)
+		}
 	}
 }
 

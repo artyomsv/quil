@@ -443,9 +443,10 @@ func TestWorkspaceState_CarriesSizeMasterAndClients(t *testing.T) {
 }
 
 // A master change reaches every client as a broadcast carrying the new
-// size_master. A same-id reattach inside the grace changes nothing, so it
-// costs the follower no frame.
-func TestMasterChange_IsBroadcastAndReattachIsNot(t *testing.T) {
+// size_master. A same-id reattach inside the grace never changes size_master:
+// the follower's frames for the lost link and the reattach carry only the new
+// attached count.
+func TestMasterChange_IsBroadcastAndReattachKeepsMaster(t *testing.T) {
 	d, sock, _ := resizeAuthorityDaemon(t)
 	a, b := attachAB(t, d, sock)
 	readUntil(t, b, "B's attach state", isType(ipc.MsgWorkspaceState))
@@ -476,8 +477,22 @@ func TestMasterChange_IsBroadcastAndReattachIsNot(t *testing.T) {
 
 	a2 := attachClientAs(t, sock, "A", 200, 50)
 	readUntil(t, a2, "A's own attach state", isType(ipc.MsgWorkspaceState))
-	if n := countType(readFor(b, 300*time.Millisecond), ipc.MsgWorkspaceState); n != 0 {
-		t.Errorf("B received %d workspace_state frames for a same-id reattach, want 0", n)
+	var last map[string]any
+	for _, m := range readFor(b, 300*time.Millisecond) {
+		if m.Type != ipc.MsgWorkspaceState {
+			continue
+		}
+		var s map[string]any
+		if err := m.DecodePayload(&s); err != nil {
+			t.Fatalf("decode state: %v", err)
+		}
+		if s["size_master"] != "A" {
+			t.Errorf("B received size_master = %v around a same-id reattach, want A throughout", s["size_master"])
+		}
+		last = s
+	}
+	if last == nil || last["clients"] != float64(2) {
+		t.Errorf("B's last state = %v, want one carrying clients = 2 after the reattach", last)
 	}
 	if d.masterID() != "A" {
 		t.Errorf("masterID = %q after the reattach, want A", d.masterID())

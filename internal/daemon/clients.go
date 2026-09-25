@@ -76,6 +76,16 @@ type reservation struct {
 	protects map[string]bool
 }
 
+// clientChange is what one attach, detach or lost link changed. The state
+// carries both the master id and the attached-client count, so either change
+// is news to the other clients.
+type clientChange struct {
+	master bool // masterID changed
+	count  bool // the number of attached clients changed
+}
+
+func (c clientChange) any() bool { return c.master || c.count }
+
 // clientRegistry is the set of attached clients plus the master bookkeeping.
 //
 // Its mutex is a LEAF: never sm.mu, never a pane's PluginMu, and never held
@@ -229,12 +239,13 @@ func (r *clientRegistry) expire() {
 // attach records conn as the client id at a RAW geometry and elects. An empty
 // id is minted as "anon-<uuid>", scoped to the conn: a re-attach on the same
 // conn keeps it.
-func (r *clientRegistry) attach(conn *ipc.Conn, id string, cols, rows int, cwd string) bool {
+func (r *clientRegistry) attach(conn *ipc.Conn, id string, cols, rows int, cwd string) clientChange {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.byConn == nil {
 		r.byConn = make(map[*ipc.Conn]*clientRecord)
 	}
+	before := len(r.byConn)
 	rec, existed := r.byConn[conn]
 	if id == "" {
 		if existed {
@@ -270,19 +281,19 @@ func (r *clientRegistry) attach(conn *ipc.Conn, id string, cols, rows int, cwd s
 		// for. The election below keeps it when the client is eligible.
 		r.clearReservationLocked()
 	}
-	return r.electLocked()
+	return clientChange{master: r.electLocked(), count: len(r.byConn) != before}
 }
 
 // lose drops conn after a LOST link: the conn closed with no MsgDetach. A
 // master that leaves this way keeps its slot for the grace time, but only
 // while another client is attached. With nobody to protect, the grace would
 // only make a relaunched TUI (which has a new id) wait.
-func (r *clientRegistry) lose(conn *ipc.Conn) bool {
+func (r *clientRegistry) lose(conn *ipc.Conn) clientChange {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	rec, ok := r.byConn[conn]
 	if !ok {
-		return false
+		return clientChange{}
 	}
 	delete(r.byConn, conn)
 	if rec.id == r.masterID && r.grace > 0 && r.recordByID(rec.id) == nil {
@@ -299,19 +310,19 @@ func (r *clientRegistry) lose(conn *ipc.Conn) bool {
 			}, r.grace)
 		}
 	}
-	return r.electLocked()
+	return clientChange{master: r.electLocked(), count: true}
 }
 
 // detach drops conn after a clean exit and elects with NO reservation. The
 // disconnect that follows finds no record and does nothing more.
-func (r *clientRegistry) detach(conn *ipc.Conn) bool {
+func (r *clientRegistry) detach(conn *ipc.Conn) clientChange {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, ok := r.byConn[conn]; !ok {
-		return false
+		return clientChange{}
 	}
 	delete(r.byConn, conn)
-	return r.electLocked()
+	return clientChange{master: r.electLocked(), count: true}
 }
 
 // setGeometry records a client's new RAW window size and elects: a master
@@ -373,8 +384,14 @@ func (r *clientRegistry) reserveAfterRestart(id string) {
 // The geometry is the RAW one from the payload, taken before handleAttach
 // defaults it. It returns whether the master changed.
 func (d *Daemon) registerClient(conn *ipc.Conn, attach ipc.AttachPayload) bool {
+	return d.attachClient(conn, attach).master
+}
+
+// attachClient is registerClient reporting the count change too, for
+// handleAttach.
+func (d *Daemon) attachClient(conn *ipc.Conn, attach ipc.AttachPayload) clientChange {
 	if conn == nil {
-		return false
+		return clientChange{}
 	}
 	id := truncateField(attach.ClientID, maxClientIDLen)
 	return d.clients.attach(conn, id, clampClientDim(attach.Cols), clampClientDim(attach.Rows), attach.CWD)
@@ -392,13 +409,13 @@ func clampClientDim(v int) int {
 // already sent MsgDetach, is not in the set, so dropping it changes nothing.
 // It returns whether the master changed.
 func (d *Daemon) forgetAttachedClient(conn *ipc.Conn) bool {
-	return d.clients.lose(conn)
+	return d.clients.lose(conn).master
 }
 
 // detachClient handles a clean client exit. It returns whether the master
 // changed.
 func (d *Daemon) detachClient(conn *ipc.Conn) bool {
-	return d.clients.detach(conn)
+	return d.clients.detach(conn).master
 }
 
 // setClientGeometry records a client's RAW window size. It returns whether the
@@ -428,12 +445,14 @@ func (d *Daemon) shuttingDown() bool {
 }
 
 // sendStateToOtherClients sends the workspace state to every attached client
-// except the one given, for a master change an attach made.
+// except the one given, after an attach, detach or lost link changed the
+// master or the attached-client count. Each TUI shows [master]/[follower] only
+// while that count is 2 or more, so a count left stale is a wrong status bar.
 //
 // Not a broadcast. A broadcast also reached the attaching conn, which then got
 // two state frames back to back: its own attach state and this one, which says
 // nothing new. That is pressure on its must-deliver queue for no information.
-// A conn that never attached (an MCP bridge) has no use for the master either.
+// A conn that never attached (an MCP bridge) has no use for either value.
 func (d *Daemon) sendStateToOtherClients(except *ipc.Conn) {
 	d.clients.mu.Lock()
 	var conns []*ipc.Conn
@@ -456,9 +475,11 @@ func (d *Daemon) sendStateToOtherClients(except *ipc.Conn) {
 	}
 }
 
+// handleDetach removes a cleanly exiting client. The detach always changes
+// the attached count, so the other clients always get one state frame.
 func (d *Daemon) handleDetach(conn *ipc.Conn) {
-	if d.detachClient(conn) {
-		d.broadcastState()
+	if d.clients.detach(conn).any() {
+		d.sendStateToOtherClients(conn)
 	}
 }
 

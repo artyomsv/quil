@@ -640,8 +640,10 @@ func (d *Daemon) onClientDisconnect(conn *ipc.Conn) {
 	d.dropOutputHold(conn)
 	d.requestSnapshot()
 	d.events.RemoveWatchersByConn(conn)
-	if !d.shuttingDown() && d.forgetAttachedClient(conn) {
-		d.broadcastState()
+	// A lost link always changes the attached count, whether or not the
+	// master changed with it, so the other clients get one state frame.
+	if !d.shuttingDown() && d.clients.lose(conn).any() {
+		d.sendStateToOtherClients(conn)
 	}
 	// Drop this conn's identity with it: the process it described is gone,
 	// and a retained entry would be listed as running.
@@ -1800,10 +1802,10 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 	// any of the work below, which has early returns of its own, and before
 	// the 80x24 defaulting: the election reads the RAW geometry.
 	//
-	// A master change reaches the OTHER attached clients once this attach is
-	// answered. The attaching conn gets none: its own state below is built
-	// after this registration, so it already names the new master.
-	if d.registerClient(conn, attach) {
+	// A new client or a master change reaches the OTHER attached clients once
+	// this attach is answered. The attaching conn gets none: its own state
+	// below is built after this registration, so it already carries both.
+	if d.attachClient(conn, attach).any() {
 		defer d.sendStateToOtherClients(conn)
 	}
 

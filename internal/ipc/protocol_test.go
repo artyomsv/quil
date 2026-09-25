@@ -110,6 +110,14 @@ func TestMessageTypes(t *testing.T) {
 		ipc.MsgPaneHistoryEntryResp,
 		ipc.MsgPaneSearchReq,
 		ipc.MsgPaneSearchResp,
+		ipc.MsgPaneSizes,
+		ipc.MsgResizePanes,
+		ipc.MsgClientGeometry,
+		ipc.MsgTakeControl,
+		ipc.MsgListClientsReq,
+		ipc.MsgListClientsResp,
+		ipc.MsgEventDismissed,
+		ipc.MsgPaneSeen,
 	}
 	for _, typ := range types {
 		if typ == "" {
@@ -478,5 +486,207 @@ func TestOverlayPolicyPayload_RoundTrip(t *testing.T) {
 	}
 	if out.IdleTimeoutMinutes != 7 || out.MaxLive != 3 {
 		t.Errorf("payload = %+v, want {7 3}", out)
+	}
+}
+
+// Multi-client sync payload round trips.
+
+// TestAttachPayload_ClientIDRoundTrip locks in the wire-format contract for
+// the client id multi-client sync needs for master election and per-client
+// state. An older client that never sets it must decode to an empty string,
+// not an error.
+func TestAttachPayload_ClientIDRoundTrip(t *testing.T) {
+	cases := []struct {
+		name string
+		in   ipc.AttachPayload
+		want string
+	}{
+		{"new client with id", ipc.AttachPayload{Cols: 80, Rows: 24, ClientID: "client-abc"}, "client-abc"},
+		{"old client omits id", ipc.AttachPayload{Cols: 80, Rows: 24}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			msg, err := ipc.NewMessage(ipc.MsgAttach, tc.in)
+			if err != nil {
+				t.Fatalf("NewMessage: %v", err)
+			}
+			var got ipc.AttachPayload
+			if err := msg.DecodePayload(&got); err != nil {
+				t.Fatalf("DecodePayload: %v", err)
+			}
+			if got.ClientID != tc.want {
+				t.Errorf("ClientID: got %q, want %q", got.ClientID, tc.want)
+			}
+		})
+	}
+}
+
+func TestResizePanesPayload_RoundTrip(t *testing.T) {
+	req := ipc.ResizePanesPayload{Panes: []ipc.ResizePanePayload{
+		{PaneID: "p1", Cols: 80, Rows: 24},
+		{PaneID: "p2", Cols: 40, Rows: 12},
+	}}
+	msg, err := ipc.NewMessage(ipc.MsgResizePanes, req)
+	if err != nil {
+		t.Fatalf("NewMessage: %v", err)
+	}
+	var got ipc.ResizePanesPayload
+	if err := msg.DecodePayload(&got); err != nil {
+		t.Fatalf("DecodePayload: %v", err)
+	}
+	if len(got.Panes) != 2 || got.Panes[0].PaneID != "p1" || got.Panes[1].Cols != 40 {
+		t.Fatalf("round-trip mismatch: %+v", got)
+	}
+}
+
+func TestPaneSizesPayload_RoundTrip(t *testing.T) {
+	resp := ipc.PaneSizesPayload{Panes: []ipc.ResizePanePayload{{PaneID: "p1", Cols: 100, Rows: 30}}}
+	msg, err := ipc.NewMessage(ipc.MsgPaneSizes, resp)
+	if err != nil {
+		t.Fatalf("NewMessage: %v", err)
+	}
+	var got ipc.PaneSizesPayload
+	if err := msg.DecodePayload(&got); err != nil {
+		t.Fatalf("DecodePayload: %v", err)
+	}
+	if len(got.Panes) != 1 || got.Panes[0].PaneID != "p1" || got.Panes[0].Rows != 30 {
+		t.Fatalf("round-trip mismatch: %+v", got)
+	}
+}
+
+func TestClientGeometryPayload_RoundTrip(t *testing.T) {
+	msg, err := ipc.NewMessage(ipc.MsgClientGeometry, ipc.ClientGeometryPayload{Cols: 120, Rows: 40})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got ipc.ClientGeometryPayload
+	if err := msg.DecodePayload(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Cols != 120 || got.Rows != 40 {
+		t.Errorf("payload = %+v, want {120 40}", got)
+	}
+}
+
+// TestUpdateLayoutPayload_BaseRevNilVsZero is load-bearing for Task 5: an
+// absent base must stay nil (no base known) and an explicit revision 0 must
+// round-trip as a non-nil zero (based on the daemon's very first revision).
+// Collapsing the two would make the daemon unable to tell them apart.
+func TestUpdateLayoutPayload_BaseRevNilVsZero(t *testing.T) {
+	t.Run("absent stays nil", func(t *testing.T) {
+		b, err := json.Marshal(ipc.UpdateLayoutPayload{TabID: "t1", Layout: json.RawMessage(`{}`)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(b, []byte("base_rev")) {
+			t.Errorf("nil BaseRev must not appear on the wire: %s", b)
+		}
+		var got ipc.UpdateLayoutPayload
+		if err := json.Unmarshal(b, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.BaseRev != nil {
+			t.Errorf("BaseRev = %v, want nil", got.BaseRev)
+		}
+	})
+	t.Run("explicit zero round-trips non-nil", func(t *testing.T) {
+		var zero uint64
+		b, err := json.Marshal(ipc.UpdateLayoutPayload{TabID: "t1", Layout: json.RawMessage(`{}`), BaseRev: &zero})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got ipc.UpdateLayoutPayload
+		if err := json.Unmarshal(b, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.BaseRev == nil {
+			t.Fatal("BaseRev = nil, want a non-nil zero")
+		}
+		if *got.BaseRev != 0 {
+			t.Errorf("BaseRev = %d, want 0", *got.BaseRev)
+		}
+	})
+}
+
+func TestSetActivePanePayload_ClientRoundTrip(t *testing.T) {
+	msg, err := ipc.NewMessage(ipc.MsgSetActivePane, ipc.SetActivePanePayload{PaneID: "p1", Client: "client-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got ipc.SetActivePanePayload
+	if err := msg.DecodePayload(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.PaneID != "p1" || got.Client != "client-a" {
+		t.Errorf("payload = %+v, want {p1 client-a}", got)
+	}
+}
+
+func TestSetActivePanePayload_ClientOmittedWhenEmpty(t *testing.T) {
+	b, err := json.Marshal(ipc.SetActivePanePayload{PaneID: "p1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(b, []byte("client")) {
+		t.Errorf("empty Client must not appear on the wire: %s", b)
+	}
+}
+
+func TestCloseTUIPayload_RoundTrip(t *testing.T) {
+	msg, err := ipc.NewMessage(ipc.MsgCloseTUI, ipc.CloseTUIPayload{Client: "client-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got ipc.CloseTUIPayload
+	if err := msg.DecodePayload(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Client != "client-a" {
+		t.Errorf("Client = %q, want %q", got.Client, "client-a")
+	}
+}
+
+func TestListClientsRespPayload_RoundTrip(t *testing.T) {
+	resp := ipc.ListClientsRespPayload{Clients: []ipc.ClientInfo{
+		{Client: "c1", AttachedAt: "2026-09-25T00:00:00Z", Cols: 80, Rows: 24, Master: true, Role: "tui", PID: 123, Exe: "quil"},
+	}}
+	msg, err := ipc.NewMessage(ipc.MsgListClientsResp, resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got ipc.ListClientsRespPayload
+	if err := msg.DecodePayload(&got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Clients) != 1 || !got.Clients[0].Master || got.Clients[0].Client != "c1" {
+		t.Fatalf("round-trip mismatch: %+v", got)
+	}
+}
+
+func TestEventDismissedPayload_RoundTrip(t *testing.T) {
+	msg, err := ipc.NewMessage(ipc.MsgEventDismissed, ipc.EventDismissedPayload{EventID: "evt-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got ipc.EventDismissedPayload
+	if err := msg.DecodePayload(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.EventID != "evt-1" {
+		t.Errorf("EventID = %q, want %q", got.EventID, "evt-1")
+	}
+}
+
+func TestPaneSeenPayload_RoundTrip(t *testing.T) {
+	msg, err := ipc.NewMessage(ipc.MsgPaneSeen, ipc.PaneSeenPayload{PaneID: "pane-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got ipc.PaneSeenPayload
+	if err := msg.DecodePayload(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.PaneID != "pane-1" {
+		t.Errorf("PaneID = %q, want %q", got.PaneID, "pane-1")
 	}
 }

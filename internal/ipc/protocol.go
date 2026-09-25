@@ -11,7 +11,7 @@ import (
 const (
 	// Lifecycle
 	MsgAttach    = "attach"
-	MsgDetach    = "detach"
+	MsgDetach    = "detach" // multi-client sync: also means a clean client exit
 	MsgShutdown  = "shutdown"
 	MsgHeartbeat = "heartbeat"
 	// MsgSubscribe lets a client narrow what the daemon broadcasts to it.
@@ -282,6 +282,24 @@ const (
 	MsgWaitTaskResp     = "wait_task_resp"
 	MsgListTasksReq     = "list_tasks_req"
 	MsgListTasksResp    = "list_tasks_resp"
+
+	// Multi-client sync: several TUIs attached to the same daemon, one of
+	// them elected master and the rest following its geometry.
+	//
+	// MsgDetach, declared above, gains a second meaning here: a follower or
+	// the master sending it now also means "clean client exit", so the
+	// daemon can drop it from master election and the client list without
+	// waiting on the conn to close.
+	MsgPaneSizes      = "pane_sizes"      // daemon → follower clients (must-deliver)
+	MsgResizePanes    = "resize_panes"    // client → daemon, batched resize
+	MsgClientGeometry = "client_geometry" // client → daemon, raw window size
+	MsgTakeControl    = "take_control"    // client → daemon, no payload
+
+	MsgListClientsReq  = "list_clients_req"
+	MsgListClientsResp = "list_clients_resp"
+
+	MsgEventDismissed = "event_dismissed" // daemon → clients
+	MsgPaneSeen       = "pane_seen"       // daemon → clients
 )
 
 // Message is the wire format for IPC communication.
@@ -303,6 +321,12 @@ type AttachPayload struct {
 	Cols int    `json:"cols"`
 	Rows int    `json:"rows"`
 	CWD  string `json:"cwd,omitempty"`
+	// ClientID identifies this client across reconnects, for multi-client
+	// sync: master election, the client list and per-client geometry all key
+	// on it. Empty on an older client, which the daemon treats as a client
+	// that cannot participate in election — it is neither offered control
+	// nor handed a follower's resize_panes stream.
+	ClientID string `json:"client_id,omitempty"`
 }
 
 type CreatePanePayload struct {
@@ -448,6 +472,33 @@ type ResizePanePayload struct {
 	PaneID string `json:"pane_id"`
 	Rows   uint16 `json:"rows"`
 	Cols   uint16 `json:"cols"`
+}
+
+// ResizePanesPayload batches a whole resize pass — a window resize or a
+// split-drag release across every pane in a tab — into ONE client → daemon
+// frame, instead of one MsgResizePane per pane. A resize burst from the
+// master with a follower attached must not overflow that follower's
+// must-deliver queue with one pane_sizes echo per pane.
+type ResizePanesPayload struct {
+	Panes []ResizePanePayload `json:"panes"`
+}
+
+// PaneSizesPayload is the daemon's must-deliver echo of a resize batch to
+// every OTHER attached client (the master already has the sizes it sent).
+// Mirrors ResizePanesPayload's shape rather than reusing the name, because the
+// two travel in opposite directions and are never decoded as the same type.
+type PaneSizesPayload struct {
+	Panes []ResizePanePayload `json:"panes"`
+}
+
+// ClientGeometryPayload reports a client's own window size, in terminal
+// cells, independent of any pane. The master's geometry decides whether it
+// stays eligible: a window shrunk below the paintable floor reports 0x0 here
+// and loses master eligibility immediately, handing off to the next eligible
+// client.
+type ClientGeometryPayload struct {
+	Cols int `json:"cols"`
+	Rows int `json:"rows"`
 }
 
 type PaneInputPayload struct {
@@ -688,6 +739,14 @@ type UpdatePanePayload struct {
 type UpdateLayoutPayload struct {
 	TabID  string          `json:"tab_id"`
 	Layout json.RawMessage `json:"layout"`
+	// BaseRev is the layout revision this update was built against, for
+	// conflict detection between clients editing the same tab's tree. A
+	// POINTER so an unset field (an older client, or one that has not adopted
+	// revisions yet) is distinguishable from an explicit base of revision 0 —
+	// the daemon's very first assigned revision is 0, and collapsing that to
+	// "absent" would make the daemon unable to tell "no base known" from "based
+	// on the initial revision".
+	BaseRev *uint64 `json:"base_rev,omitempty"`
 }
 
 type PluginErrorPayload struct {
@@ -1058,10 +1117,25 @@ type DestroyPaneRespPayload struct {
 
 type SetActivePanePayload struct {
 	PaneID string `json:"pane_id"`
+	// Client names which attached client this applies to. Empty keeps the
+	// historical broadcast-to-every-TUI behavior, which is what every
+	// existing producer (MCP's set_active_pane) sends and what a headless
+	// daemon with no attached client needs: with nobody attached, this only
+	// switches the tab and there is no client to target.
+	Client string `json:"client,omitempty"`
 }
 
 type HighlightPanePayload struct {
 	PaneID string `json:"pane_id"`
+}
+
+// CloseTUIPayload asks one specific client to exit, for multi-client sync
+// (e.g. the master asking a follower to close, or an admin action against one
+// client in the list). Client empty keeps the historical behavior of
+// MsgCloseTUI: broadcast to every attached TUI. A headless daemon with no
+// attached client sends nothing and must not panic.
+type CloseTUIPayload struct {
+	Client string `json:"client,omitempty"`
 }
 
 // Notification center payloads (M12)
@@ -1092,6 +1166,22 @@ type PaneEventPayload struct {
 
 type DismissEventPayload struct {
 	EventID string `json:"event_id"` // empty = dismiss all
+}
+
+// EventDismissedPayload is the daemon's broadcast of a dismissal to every
+// OTHER attached client, so a notification acted on in one client's sidebar
+// does not also sit there in a second one. Mirrors DismissEventPayload's
+// "" = all convention rather than reusing the type, because the two travel in
+// opposite directions and one is a request while the other is a fact.
+type EventDismissedPayload struct {
+	EventID string `json:"event_id"` // "" = all
+}
+
+// PaneSeenPayload is the daemon's broadcast marking a pane as looked-at by
+// some client, so every OTHER client's sidebar clears the same "finished
+// while you were away" mark rather than each client tracking it alone.
+type PaneSeenPayload struct {
+	PaneID string `json:"pane_id"`
 }
 
 type GetNotificationsRespPayload struct {
@@ -1143,7 +1233,7 @@ type VersionRespPayload struct {
 // GatedRequests are the request types a daemon advertises in
 // VersionRespPayload.Requests. Add a type here when it is new enough that an
 // older daemon would drop it silently.
-var GatedRequests = []string{MsgCreateFromTemplateReq}
+var GatedRequests = []string{MsgCreateFromTemplateReq, MsgListClientsReq}
 
 // Memory reporting payloads
 
@@ -1294,6 +1384,31 @@ type ResourceReportRespPayload struct {
 	WithTrees bool `json:"with_trees,omitempty"`
 	// CPUSupported is false where the platform has no CPU source at all.
 	CPUSupported bool `json:"cpu_supported,omitempty"`
+}
+
+// ClientInfo is one attached client's row in the multi-client list — who is
+// attached, since when, at what size, and whether it currently holds master
+// (the client whose geometry sizes every pane's PTY).
+type ClientInfo struct {
+	Client     string `json:"client"`
+	AttachedAt string `json:"attached_at"` // RFC 3339
+	Cols       int    `json:"cols"`
+	Rows       int    `json:"rows"`
+	Master     bool   `json:"master"`
+	// LastInputAt is when this client last sent pane input, RFC 3339. Empty
+	// means never — a follower that has only watched, not typed.
+	LastInputAt string `json:"last_input_at,omitempty"`
+	// Role distinguishes a TUI from an MCP bridge sharing the same attach
+	// path, mirroring ClientHelloPayload.Role. Empty for a client that never
+	// sent one.
+	Role string `json:"role,omitempty"`
+	PID  int    `json:"pid,omitempty"`
+	Exe  string `json:"exe,omitempty"`
+}
+
+// ListClientsRespPayload answers MsgListClientsReq with every attached client.
+type ListClientsRespPayload struct {
+	Clients []ClientInfo `json:"clients"`
 }
 
 // ClientHelloPayload is a durable client's self-description.

@@ -459,14 +459,15 @@ type Model struct {
 	// the failure it guards — a SECOND reader of the router's channel — has no
 	// error to assert on, only reordering.
 	listenCountFn func()
-	// sizedOnce records panes this connection has sent at least one
-	// MsgResizePane for. A broadcast-driven resize is suppressed when the
-	// reported size already matches, but the FIRST one is always sent: the
-	// daemon's duplicate guard is appliedCols/appliedRows, which it zeroes on
-	// every PTY install, and repaintAfterResize's redraw kick for a restored
-	// pane rides that first client resize. Cleared by armReattachReset, since
-	// a reattach is exactly when the daemon's guard may have been zeroed, and
-	// pruned by applyWorkspaceState when a pane stops existing.
+	// sizedOnce records panes this connection has sent at least one resize
+	// for (batched into MsgResizePanes). A broadcast-driven resize is
+	// suppressed when the reported size already matches, but the FIRST one
+	// is always sent: the daemon's duplicate guard is
+	// appliedCols/appliedRows, which it zeroes on every PTY install, and
+	// repaintAfterResize's redraw kick for a restored pane rides that first
+	// client resize. Cleared by armReattachReset, since a reattach is
+	// exactly when the daemon's guard may have been zeroed, and pruned by
+	// applyWorkspaceState when a pane stops existing.
 	//
 	// Keyed by sizedKey(dest, paneID), not by pane id alone: this decides
 	// whether a pane's FIRST resize ships, so a shared key would let one
@@ -6100,12 +6101,20 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]str
 		// This client just became dest's size master. Every pane's last
 		// resize on dest was sent by whoever was master before (or by nobody,
 		// if there was none) — sizedOnce still reports "already sized" for
-		// sizes THIS client never sent, so the diff in resizeAllPanes/
-		// diffResizes would suppress the very sizes that just became
-		// authoritative. Clearing it re-arms the same first-resize kick
-		// armReattachReset re-arms after a reattach.
+		// sizes THIS client never sent, so diffResizes' diff would suppress
+		// the very sizes that just became authoritative.
+		//
+		// Clearing it is enough on its own, and calling resizeAllPanes() here
+		// as well — an earlier version of this did — is wrong, not merely
+		// redundant: diffResizes runs immediately after this function returns
+		// (the WorkspaceStateMsg arm in Update) and is scoped to this SAME
+		// dest, so with sizedOnce empty for it, every one of dest's panes
+		// fails the "already sized" check and rides that ONE
+		// sendDiffedResizes batch — exactly the same re-arm armReattachReset
+		// performs after a reattach. resizeAllPanes walks EVERY destination,
+		// so appending it here would also resize panes on other destinations
+		// this broadcast never mentioned.
 		m.clearSizedOnceForDest(dest)
-		overlayResizeCmds = append(overlayResizeCmds, m.resizeAllPanes())
 	}
 
 	// Dispose panes that did not survive reconciliation — both panes pruned
@@ -9133,10 +9142,11 @@ func keyToBytes(keyMsg tea.KeyPressMsg) []byte {
 // minTermWidth x minTermHeight and renders no panes at all, so a pane size
 // derived from a smaller geometry describes nothing that is on screen.
 //
-// It gates EVERY MsgResizePane this client produces — resizeAllPanes,
-// diffResizes and overlayResizeCmd — and it has to sit at those fan-outs rather
-// than further down, because by the time a size reaches the wire the degenerate
-// case is indistinguishable from a legal one: paneVTSize floors both dimensions
+// It gates every pane resize this client produces — resizeAllPanes,
+// diffResizes and overlayResizeCmd, batched into MsgResizePanes — and it has
+// to sit at those fan-outs rather than further down, because by the time a
+// size reaches the wire the degenerate case is indistinguishable from a
+// legal one: paneVTSize floors both dimensions
 // at 1 on purpose, since a genuinely narrow SPLIT pane needs that floor. A
 // client started with no console attached (`quil.exe --version` from a
 // non-interactive shell) is reported by Bubble Tea as 1x1, and the fan-out then
@@ -9233,32 +9243,42 @@ func (m Model) resizeAllPanes() tea.Cmd {
 	if !m.terminalPaintable() {
 		return nil // see terminalPaintable
 	}
-	return func() tea.Msg {
-		batches := make(map[string][]ipc.ResizePanePayload)
-		for _, proj := range m.projects {
-			if m.isFollower(proj.Dest) {
+	// Computed HERE, on the Update goroutine, and handed to the closure as a
+	// plain local map — never read live from inside the closure. Every
+	// tea.Cmd Bubble Tea returns runs on its OWN goroutine, concurrently with
+	// whatever Update call comes next, and m.sizeMaster is a map MUTATED IN
+	// PLACE by applyWorkspaceState (m.sizeMaster[dest] = state.SizeMaster),
+	// never reassigned wholesale — so a later isFollower read from inside the
+	// closure races that write. Go's runtime treats a concurrent map
+	// read/write as a fatal error, not merely a -race finding: it can crash
+	// the TUI outright. batches is allocated fresh by this call and shared
+	// with nobody, so the closure reading it from another goroutine is safe.
+	batches := make(map[string][]ipc.ResizePanePayload)
+	for _, proj := range m.projects {
+		if m.isFollower(proj.Dest) {
+			continue
+		}
+		for _, tab := range proj.tabs {
+			if tab.Root == nil {
 				continue
 			}
-			for _, tab := range proj.tabs {
-				if tab.Root == nil {
-					continue
-				}
-				for _, pane := range tab.Leaves() {
-					// paneVTSize keeps the PTY in lockstep with the VT: rect
-					// size for normal panes, tab canvas for wide-canvas panes.
-					// The daemon drops exact duplicates (same-size guard).
-					// pane.NativeW comes from the same resize pass that sized
-					// the VT, so the mode this reproduces cannot disagree with
-					// the one already applied.
-					cols, rows := paneVTSize(pane.WideCanvas, pane.MinNativeCols, pane.Width, pane.Height, pane.NativeW, tab.CanvasW, tab.CanvasH)
-					batches[proj.Dest] = append(batches[proj.Dest], ipc.ResizePanePayload{
-						PaneID: pane.ID,
-						Cols:   uint16(cols),
-						Rows:   uint16(rows),
-					})
-				}
+			for _, pane := range tab.Leaves() {
+				// paneVTSize keeps the PTY in lockstep with the VT: rect
+				// size for normal panes, tab canvas for wide-canvas panes.
+				// The daemon drops exact duplicates (same-size guard).
+				// pane.NativeW comes from the same resize pass that sized
+				// the VT, so the mode this reproduces cannot disagree with
+				// the one already applied.
+				cols, rows := paneVTSize(pane.WideCanvas, pane.MinNativeCols, pane.Width, pane.Height, pane.NativeW, tab.CanvasW, tab.CanvasH)
+				batches[proj.Dest] = append(batches[proj.Dest], ipc.ResizePanePayload{
+					PaneID: pane.ID,
+					Cols:   uint16(cols),
+					Rows:   uint16(rows),
+				})
 			}
 		}
+	}
+	return func() tea.Msg {
 		for dest, panes := range batches {
 			msg, err := ipc.NewMessage(ipc.MsgResizePanes, ipc.ResizePanesPayload{Panes: panes})
 			if err != nil {

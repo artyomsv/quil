@@ -6,6 +6,7 @@ import (
 	"log"
 	"math/rand"
 	"strings"
+	"sync"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -400,6 +401,23 @@ func sendDetach(c Client) {
 	}
 }
 
+// detachTimeout bounds how long CloseClient waits for every conn's detach
+// send to complete before moving on to the flush/close path.
+//
+// ipc.Client.Send is NOT a plain enqueue — it routes through SendBlocking and
+// can wait up to clientSendTimeout (5s, internal/ipc) against a peer whose
+// must-deliver queue stays full, e.g. a remote host whose link died without
+// the reconnect ladder having noticed yet. CloseClient can be releasing
+// several such conns at once, and detaching them ONE AT A TIME would let a
+// handful of dead hosts turn quitting the TUI itself into a multi-second (or
+// multi-ten-second) hang. 500ms is generous for the healthy case — an
+// ordinary Send returns in microseconds — and short enough that a wedged
+// host costs the user nothing beyond it.
+//
+// A var, not a const, mirroring clientSendTimeout's own reasoning: a test
+// that wants to prove the bound without actually waiting 500ms shrinks it.
+var detachTimeout = 500 * time.Millisecond
+
 // CloseClient releases every connection the Model currently holds. Called by
 // cmd/quil on exit, after the Bubble Tea program has returned.
 //
@@ -409,16 +427,47 @@ func sendDetach(c Client) {
 // child and every remote `quil --stdio` outlived the client, on top of the
 // per-reconnect leak retire used to cause. cmd/quil's own `defer client.Close()`
 // cannot cover this either: it captured the startup conn of ONE destination.
+//
+// Every conn's detach is sent CONCURRENTLY and the whole batch is bounded at
+// detachTimeout — see its doc comment. Order is still preserved for every
+// conn that finishes within the budget: detach is queued (Send) before
+// closeClient runs for that conn, and closeClient's own Flush is what
+// actually carries it to the socket. A conn that is still wedged past the
+// budget is closed anyway; its detach send may or may not have reached the
+// socket, which is no worse than the lost-link grace period it would
+// otherwise have cost the next election. Any straggling sendDetach goroutine
+// left running past the budget dies with the process — CloseClient runs on
+// the exit path, with nothing left to join it.
 func (m Model) CloseClient() {
+	var conns []Client
 	if r, ok := m.client.(*Router); ok {
-		for _, c := range r.Conns() {
-			sendDetach(c)
-			m.closeClient(c)
-		}
-		return
+		conns = r.Conns()
+	} else {
+		conns = []Client{m.client}
 	}
-	sendDetach(m.client)
-	m.closeClient(m.client)
+
+	var wg sync.WaitGroup
+	for _, c := range conns {
+		c := c
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sendDetach(c)
+		}()
+	}
+	allSent := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(allSent)
+	}()
+	select {
+	case <-allSent:
+	case <-time.After(detachTimeout):
+	}
+
+	for _, c := range conns {
+		m.closeClient(c)
+	}
 }
 
 // canReconnect reports whether a dropped link to dest should be retried rather

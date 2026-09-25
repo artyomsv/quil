@@ -112,17 +112,17 @@ func TestTemplateWorkspace_PreparingSwapAndCompletion_BuildsAndReportsOnlyComple
 	preparing.Panes[0].PreparingWorktree = "feat/template"
 	update(preparing)
 	runCmd(m.sendAllLayouts()) // Even an unrelated resize/action must not persist preparation.
-	if layouts, _ := sentCounts(recorder); layouts != 0 {
+	if layouts, _ := sentCounts(t, recorder); layouts != 0 {
 		t.Fatal("saved preparing placeholder")
 	}
 	update(templateWorkspace([]string{"first"}, "placeholder"))
-	if layouts, _ := sentCounts(recorder); layouts != 0 {
+	if layouts, _ := sentCounts(t, recorder); layouts != 0 {
 		t.Fatal("saved intermediate swap")
 	}
 	incomplete := templateWorkspace([]string{"first", "second", "main"}, "main")
 	incomplete.Panes = incomplete.Panes[:2]
 	update(incomplete)
-	if layouts, _ := sentCounts(recorder); layouts != 0 {
+	if layouts, _ := sentCounts(t, recorder); layouts != 0 {
 		t.Fatal("saved before every declared pane existed")
 	}
 	complete := templateWorkspace([]string{"first", "second", "main"}, "main")
@@ -132,7 +132,7 @@ func TestTemplateWorkspace_PreparingSwapAndCompletion_BuildsAndReportsOnlyComple
 	if got := templateShape(root); got != "H(main,V(first,second))" {
 		t.Fatal(got)
 	}
-	if layouts, _ := sentCounts(recorder); layouts != 1 {
+	if layouts, _ := sentCounts(t, recorder); layouts != 1 {
 		t.Fatalf("layout sends=%d want=1", layouts)
 	}
 	var saved ipc.UpdateLayoutPayload
@@ -151,7 +151,7 @@ func TestTemplateWorkspace_PreparingSwapAndCompletion_BuildsAndReportsOnlyComple
 	if tab.Root != root {
 		t.Fatal("rebuilt the tree on the second broadcast")
 	}
-	if layouts, _ := sentCounts(recorder); layouts != 1 {
+	if layouts, _ := sentCounts(t, recorder); layouts != 1 {
 		t.Fatal("echoed the saved layout")
 	}
 	// User changes survive subsequent completed frames too.

@@ -634,7 +634,8 @@ func (n *LayoutNode) FindPaneRectAt(x, y, ox, oy, w, h int) *PaneRect {
 
 // resizeNode recursively assigns dimensions to each node. canvasW/canvasH
 // are the full tab-area dimensions — wide-canvas panes size their VT to
-// the canvas (via paneVTSize) while their rect keeps following the tree.
+// the canvas (via paneVTSize) while their rect keeps following the tree,
+// and a follower pane's VT keeps the master's size (targetVTSize).
 //
 // fullW is w plus whatever the project sidebar reserved, split by the SAME
 // ratios all the way down, so each leaf learns the width it would have had
@@ -667,7 +668,7 @@ func resizeNode(n *LayoutNode, w, h, fullW, canvasW, canvasH int) {
 		n.Pane.Width = w
 		n.Pane.Height = h
 		n.Pane.NativeW = fullW
-		n.Pane.ResizeVT(paneVTSize(n.Pane.WideCanvas, n.Pane.MinNativeCols, w, h, fullW, canvasW, canvasH))
+		n.Pane.ResizeVT(n.Pane.targetVTSize(w, h, fullW, canvasW, canvasH))
 		return
 	}
 

@@ -29,13 +29,21 @@ type previewLayout struct {
 }
 
 // previewMode reports whether this pane renders the wrapped preview: a
-// wide-canvas pane whose viewport is narrower than its emulator.
+// wide-canvas pane whose viewport is narrower than its emulator, or a
+// follower pane whose master-sized grid exceeds its box in EITHER dimension
+// (spec §5.2). The preview already crops at the left edge and bottom-anchors
+// with scrollback above, which is exactly the follower's cut. A follower
+// grid that FITS takes the native path, which draws it top-left and lets the
+// body style pad the rest of the box.
 func (p *PaneModel) previewMode() bool {
-	if !p.WideCanvas {
+	innerW, innerH := p.Width-2, p.Height-2
+	if innerW < 1 {
 		return false
 	}
-	innerW := p.Width - 2
-	return innerW >= 1 && innerW < p.vt.Width()
+	if p.follower {
+		return innerW < p.vt.Width() || innerH < p.vt.Height()
+	}
+	return p.WideCanvas && innerW < p.vt.Width()
 }
 
 // previewLayoutFor returns the preview layout for innerW, rebuilding only

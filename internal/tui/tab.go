@@ -349,13 +349,14 @@ func (t *TabModel) activeIndex(leaves []*PaneModel) int {
 // sizePaneFull sizes a pane to fill the entire tab area (used by the
 // full-tab modes: focus and overlay). Wide-canvas panes resolve to the tab
 // canvas via paneVTSize — for them focus mode is a pure viewport change,
-// never a PTY/emulator resize.
+// never a PTY/emulator resize. A follower pane keeps the master's size
+// (targetVTSize), padded or cut into the full-tab box.
 func sizePaneFull(t *TabModel, p *PaneModel, w, h int) {
 	nativeW := w + t.ChromeW
 	p.Width = w
 	p.Height = h
 	p.NativeW = nativeW
-	p.ResizeVT(paneVTSize(p.WideCanvas, p.MinNativeCols, w, h, nativeW, t.CanvasW, t.CanvasH))
+	p.ResizeVT(p.targetVTSize(w, h, nativeW, t.CanvasW, t.CanvasH))
 }
 
 // Resize recomputes dimensions for the entire layout tree.

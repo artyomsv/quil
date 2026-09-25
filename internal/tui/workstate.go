@@ -878,7 +878,11 @@ func (m Model) workSpinnerTick() tea.Cmd {
 // suppresses the visible notification card (see emitEvent) — so the normal
 // completion edge keeps `working` accurate across the whole mute/unmute
 // window instead of going stale the instant the pane is muted.
-func syncPaneMeta(pane *PaneModel, info *PaneInfo, wideCanvas bool, minNativeCols int, restoresViaSession bool) {
+//
+// follower is Model.isFollower for the pane's destination, passed in for the
+// same reason wideCanvas is: this is a free function with no Model. It and
+// the daemon's size for the pane decide the pane's VT size (targetVTSize).
+func syncPaneMeta(pane *PaneModel, info *PaneInfo, wideCanvas bool, minNativeCols int, restoresViaSession bool, follower bool) {
 	pane.Name = info.Name
 	pane.CWD = info.CWD
 	pane.Type = info.Type
@@ -924,6 +928,10 @@ func syncPaneMeta(pane *PaneModel, info *PaneInfo, wideCanvas bool, minNativeCol
 	pane.daemonMouseTracking = info.MouseTracking
 	pane.daemonMouseSGR = info.MouseSGR
 	pane.daemonBracketedPaste = info.BracketedPaste
+	// Unconditional, like the rest: the last size the daemon ACCEPTED is the
+	// size a follower's VT takes, and 0x0 (never sized) must fall back.
+	pane.follower = follower
+	pane.daemonCols, pane.daemonRows = int(info.Cols), int(info.Rows)
 	// Unconditional copy, like the other daemon-authoritative fields: the
 	// daemon writes LastModel BEFORE broadcasting the hook event and IPC
 	// delivery is ordered per connection, so a snapshot can never lag behind

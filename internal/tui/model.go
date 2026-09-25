@@ -244,6 +244,15 @@ type setActivePaneMsg struct {
 	PaneID string
 }
 
+// paneSizesMsg carries a daemon's pane_sizes frame: the sizes its master just
+// applied, sent to this follower BEFORE the PTY resize, so it precedes the
+// child's repaint on the same ordered connection. dest is the frame's Origin
+// — sizes describe one daemon's panes and nobody else's.
+type paneSizesMsg struct {
+	dest  string
+	sizes []ipc.ResizePanePayload
+}
+
 // paneEventMsg delivers a notification event from the daemon.
 type paneEventMsg ipc.PaneEventPayload
 
@@ -2467,6 +2476,13 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 						}
 						relX := msg.X - rect.OX - 1
 						relY := msg.Y - rect.OY - 1
+						// A follower's grid is cut or padded into this box,
+						// so box coordinates are not grid coordinates; a notch
+						// over the padding has no cell to send.
+						relX, relY, inGrid := followerGridPos(pane, relX, relY)
+						if !inGrid {
+							return m, nil
+						}
 						if seq := pane.wheelForwardSeq(up, relX, relY); seq != nil {
 							logger.Debug("wheel: forward pane=%s type=%s btn=%v rel=(%d,%d) seq=%q (local n=%v b=%v a=%v sgr=%v daemonTrack=%v)",
 								pane.ID, pane.Type, msg.Button, relX, relY, string(seq),
@@ -2919,6 +2935,15 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 			log.Printf("set_active_pane: pane %s not found", msg.PaneID)
 		}
 		return m, tea.Batch(overlayCmd, m.listenForMessages())
+
+	case paneSizesMsg:
+		// Applied HERE, synchronously, never in a Cmd: the frame arrived on
+		// the must-deliver queue ahead of the repaint the master's resize
+		// triggers, and the very next PaneOutputMsg from this connection may
+		// be that repaint — it must land in a VT that already has the new
+		// size. Deliberately not skipRender: a resized VT is a changed frame.
+		m.applyPaneSizes(msg)
+		return m, m.listenForMessages()
 
 	case highlightPaneMsg:
 		m.mcpHighlights[msg.PaneID] = true
@@ -5263,9 +5288,11 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "pane.toggle_wrap":
 		// Flip the active wide-canvas pane's preview between left-edge
 		// crop (default) and soft-wrap. View-only state — no IPC, no PTY
-		// touch; the preview layout cache re-keys on the flag.
+		// touch; the preview layout cache re-keys on the flag. A follower
+		// pane renders the same preview when its grid is cut (spec §5.2),
+		// so the toggle reaches it too.
 		if tab := m.activeTabModel(); tab != nil {
-			if pane := tab.ActivePaneModel(); pane != nil && pane.WideCanvas {
+			if pane := tab.ActivePaneModel(); pane != nil && (pane.WideCanvas || pane.follower) {
 				pane.previewWrap = !pane.previewWrap
 			}
 		}
@@ -5977,6 +6004,30 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]str
 	// the depth the budget allows.
 	m.setDestPaneCount(dest, len(state.Panes))
 
+	// Multi-client sync (§4.2): this destination's size master and attached-
+	// client count. Read the PREVIOUS master before overwriting it — becoming
+	// master is a TRANSITION, not a state, and the resize kick at the end of
+	// this function must fire once, on the broadcast that flips it, never on
+	// every later broadcast that merely reconfirms it.
+	//
+	// Recorded BEFORE the rebuild, not after it: every syncPaneMeta below
+	// copies isFollower(dest) onto its pane, and that flag decides which size
+	// the pane's VT takes (targetVTSize). Recording it afterwards would size
+	// every pane by the PREVIOUS broadcast's master — the first broadcast that
+	// makes this client a follower would still size its VTs to its own boxes.
+	var prevMaster string
+	if m.sizeMaster != nil {
+		prevMaster = m.sizeMaster[dest]
+	}
+	if m.sizeMaster == nil {
+		m.sizeMaster = make(map[string]string)
+	}
+	m.sizeMaster[dest] = state.SizeMaster
+	if m.clientCount == nil {
+		m.clientCount = make(map[string]int)
+	}
+	m.clientCount[dest] = state.Clients
+
 	paneMap := make(map[string]*PaneInfo)
 	for i := range state.Panes {
 		paneMap[state.Panes[i].ID] = &state.Panes[i]
@@ -6075,23 +6126,6 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]str
 	// destination, and it self-skips when nothing changed.
 	m.cacheRemoteProjects(dest)
 
-	// Multi-client sync (§4.2): this destination's size master and attached-
-	// client count. Read the PREVIOUS master before overwriting it — becoming
-	// master is a TRANSITION, not a state, and the resize kick below must fire
-	// once, on the broadcast that flips it, never on every later broadcast
-	// that merely reconfirms it.
-	var prevMaster string
-	if m.sizeMaster != nil {
-		prevMaster = m.sizeMaster[dest]
-	}
-	if m.sizeMaster == nil {
-		m.sizeMaster = make(map[string]string)
-	}
-	m.sizeMaster[dest] = state.SizeMaster
-	if m.clientCount == nil {
-		m.clientCount = make(map[string]int)
-	}
-	m.clientCount[dest] = state.Clients
 	// The leading state.SizeMaster != "" guard matters on its own: without it,
 	// an empty m.clientID (never set — every real Model gets one from
 	// NewModel, but a bare Model literal in a test does not) would equal an
@@ -6256,14 +6290,14 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 		tab, exists := existingTabs[tabInfo.ID]
 		if exists && tab.templateLayoutPending && len(tabInfo.Layout) > 0 {
 			// Another client may have already saved the completed tree.
-			tab = m.restoreTabLayout(tab, tabInfo, paneMap, existingPanes)
+			tab = m.restoreTabLayout(tab, tabInfo, paneMap, existingPanes, dest)
 		}
 		if !exists {
 			tab = NewTabModel(tabInfo.ID, tabInfo.Name)
 
 			// New tab that doesn't exist locally — try to restore layout from daemon.
 			if len(tabInfo.Layout) > 0 {
-				tab = m.restoreTabLayout(tab, tabInfo, paneMap, existingPanes)
+				tab = m.restoreTabLayout(tab, tabInfo, paneMap, existingPanes, dest)
 				tab.Dest = dest
 				// All non-overlay panes in a restored tab are new.
 				for _, pid := range tabInfo.Panes {
@@ -6345,7 +6379,7 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 				if info, ok := paneMap[paneID]; ok {
 					if leaf := tab.Root.FindLeaf(paneID); leaf != nil {
 						wasPending := leaf.Pane.Pending
-						syncPaneMeta(leaf.Pane, info, m.pluginWideCanvas(info.Type), m.pluginMinNativeCols(info.Type), m.pluginRestoresViaSession(info.Type))
+						syncPaneMeta(leaf.Pane, info, m.pluginWideCanvas(info.Type), m.pluginMinNativeCols(info.Type), m.pluginRestoresViaSession(info.Type), m.isFollower(dest))
 						// A deferred pane that just lazy-spawned (Pending→running,
 						// e.g. on tab switch): arm the restore indicator NOW so it
 						// covers the real boot, and enroll it for spinner ticks.
@@ -6412,7 +6446,7 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 				newPaneIDs = append(newPaneIDs, paneID)
 			}
 			if info != nil {
-				syncPaneMeta(pane, info, m.pluginWideCanvas(info.Type), m.pluginMinNativeCols(info.Type), m.pluginRestoresViaSession(info.Type))
+				syncPaneMeta(pane, info, m.pluginWideCanvas(info.Type), m.pluginMinNativeCols(info.Type), m.pluginRestoresViaSession(info.Type), m.isFollower(dest))
 			}
 
 			// Try to fill a pending split placeholder first.
@@ -6574,7 +6608,7 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 }
 
 // restoreTabLayout rebuilds a tab's layout tree from serialized daemon state.
-func (m *Model) restoreTabLayout(tab *TabModel, tabInfo TabInfo, paneMap map[string]*PaneInfo, existingPanes map[string]*PaneModel) *TabModel {
+func (m *Model) restoreTabLayout(tab *TabModel, tabInfo TabInfo, paneMap map[string]*PaneInfo, existingPanes map[string]*PaneModel, dest string) *TabModel {
 	tab.templateLayoutApplied, tab.templateLayoutPending = true, false
 	log.Printf("restoreLayout: tab %s %q with %d panes", tab.ID, tabInfo.Name, len(tabInfo.Panes))
 	tab.Name = tabInfo.Name
@@ -6596,7 +6630,7 @@ func (m *Model) restoreTabLayout(tab *TabModel, tabInfo TabInfo, paneMap map[str
 			pane.resumeStart = time.Now()
 		}
 		if info, ok := paneMap[paneID]; ok {
-			syncPaneMeta(pane, info, m.pluginWideCanvas(info.Type), m.pluginMinNativeCols(info.Type), m.pluginRestoresViaSession(info.Type))
+			syncPaneMeta(pane, info, m.pluginWideCanvas(info.Type), m.pluginMinNativeCols(info.Type), m.pluginRestoresViaSession(info.Type), m.isFollower(dest))
 		}
 		paneModels[paneID] = pane
 	}
@@ -6709,7 +6743,7 @@ func (m *Model) reconcileOverlayPane(
 			}
 			newPaneIDs = append(newPaneIDs, overlayInfo.ID)
 		}
-		syncPaneMeta(pane, overlayInfo, m.pluginWideCanvas(overlayInfo.Type), m.pluginMinNativeCols(overlayInfo.Type), m.pluginRestoresViaSession(overlayInfo.Type))
+		syncPaneMeta(pane, overlayInfo, m.pluginWideCanvas(overlayInfo.Type), m.pluginMinNativeCols(overlayInfo.Type), m.pluginRestoresViaSession(overlayInfo.Type), m.isFollower(tab.Dest))
 		tab.overlayPane = pane
 		// Show the overlay immediately when this TUI's Alt+G triggered its
 		// creation (pendingOverlayShow entry). On plain reattach, default hidden.
@@ -6721,7 +6755,7 @@ func (m *Model) reconcileOverlayPane(
 		}
 	default:
 		// Same overlay pane — refresh metadata only.
-		syncPaneMeta(tab.overlayPane, overlayInfo, m.pluginWideCanvas(overlayInfo.Type), m.pluginMinNativeCols(overlayInfo.Type), m.pluginRestoresViaSession(overlayInfo.Type))
+		syncPaneMeta(tab.overlayPane, overlayInfo, m.pluginWideCanvas(overlayInfo.Type), m.pluginMinNativeCols(overlayInfo.Type), m.pluginRestoresViaSession(overlayInfo.Type), m.isFollower(tab.Dest))
 	}
 
 	return newPaneIDs, false, nil
@@ -6782,6 +6816,50 @@ func (m *Model) resizeTabs() {
 		tab.SetCanvas(m.paneAreaWidth(), tabH)
 		tab.SetChrome(m.projectSidebarWidth())
 		tab.Resize(m.paneAreaWidth(), tabH)
+	}
+}
+
+// applyPaneSizes records a daemon's pane_sizes frame on its panes and resizes
+// every follower pane's VT to match, at once (spec §4.1, §5.1). Scoped to
+// msg.dest: pane ids are only unique within one daemon. A pane that is not a
+// follower still records the size — it is what targetVTSize reads should this
+// client become a follower before the next broadcast — but its VT follows its
+// own box. ResizeVT is a no-op on an unchanged size and bumps contentGen on a
+// changed one, which is what marks the pane dirty for its render cache.
+func (m *Model) applyPaneSizes(msg paneSizesMsg) {
+	// The tab rides along for its canvas: targetVTSize falls back to
+	// paneVTSize for a size of 0x0, and a wide-canvas pane needs the canvas
+	// there to come out the same as the resize pass would make it.
+	type located struct {
+		pane *PaneModel
+		tab  *TabModel
+	}
+	byID := make(map[string]located)
+	for _, proj := range m.projects {
+		if proj.Dest != msg.dest {
+			continue
+		}
+		for _, tab := range proj.tabs {
+			if tab.Root != nil {
+				for _, p := range tab.Leaves() {
+					byID[p.ID] = located{p, tab}
+				}
+			}
+			if tab.overlayPane != nil {
+				byID[tab.overlayPane.ID] = located{tab.overlayPane, tab}
+			}
+		}
+	}
+	for _, s := range msg.sizes {
+		at, ok := byID[s.PaneID]
+		if !ok {
+			continue
+		}
+		p := at.pane
+		p.daemonCols, p.daemonRows = int(s.Cols), int(s.Rows)
+		if p.follower {
+			p.ResizeVT(p.targetVTSize(p.Width, p.Height, p.NativeW, at.tab.CanvasW, at.tab.CanvasH))
+		}
 	}
 }
 
@@ -7629,6 +7707,16 @@ func (m Model) listenForMessages() tea.Cmd {
 			msg.DecodePayload(&payload)
 			log.Printf("ipc recv: set_active_pane %s", payload.PaneID)
 			return setActivePaneMsg{PaneID: payload.PaneID}
+
+		case ipc.MsgPaneSizes:
+			var payload ipc.PaneSizesPayload
+			if err := msg.DecodePayload(&payload); err != nil {
+				log.Printf("decode pane_sizes: %v", err)
+				return listenContinueMsg{}
+			}
+			// Origin, like workspace_state's Dest: sizes name one daemon's
+			// panes, and it is not on the wire.
+			return paneSizesMsg{dest: msg.Origin, sizes: payload.Panes}
 
 		case ipc.MsgCloseTUI:
 			log.Print("ipc recv: close_tui")

@@ -1362,7 +1362,7 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			if m.closeRequested == nil {
 				m.closeRequested = make(map[string]bool)
 			}
-			m.closeRequested[id] = true
+			m.closeRequested[closeKey(dest, id)] = true
 		case "tab":
 			dest = m.destOfTab(id)
 		}

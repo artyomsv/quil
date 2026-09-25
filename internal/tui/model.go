@@ -981,6 +981,9 @@ type Model struct {
 	// (finishSplitDrag) — mid-drag only the local tree and VT change.
 	splitDragNode *LayoutNode
 	splitDragRect BorderHit
+	// splitDragRatio is the node's Ratio when the drag armed, so a release
+	// that moved nothing stores nothing (finishSplitDrag).
+	splitDragRatio float64
 
 	// paneDrag is an Alt+drag of a whole pane (panedrag.go). Zero value = no
 	// drag. Rides clearDragState like every other drag.
@@ -988,7 +991,8 @@ type Model struct {
 
 	// closeRequested holds the panes THIS client's user confirmed closing.
 	// The broadcast that prunes one is a user change this client stores; any
-	// other prune waits for whoever asked (layoutsync.go).
+	// other prune waits for whoever asked (layoutsync.go). Keyed by
+	// closeKey(dest, paneID); a reattach drops that dest's entries.
 	closeRequested map[string]bool
 
 	// Project-sidebar edge drag. sidebarDragging is set while a drag is in
@@ -2147,6 +2151,7 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 					m.clearDragState()
 					m.splitDragNode = hit.Node
 					m.splitDragRect = *hit
+					m.splitDragRatio = hit.Node.Ratio
 					m.selection = nil
 					m.setSplitDragHighlight(hit, true)
 					return m, nil
@@ -3751,6 +3756,7 @@ func (m *Model) clearDragState() {
 	m.viewerMouseDown = false
 	m.splitDragNode = nil
 	m.splitDragRect = BorderHit{}
+	m.splitDragRatio = 0
 	m.sidebarDragging = false
 	m.sidebarDragW = 0
 	m.paneDrag = paneDragState{}
@@ -3914,7 +3920,9 @@ func (m *Model) dragSplitBorder(x, y int) {
 // the on-release-only design) and the dragged tab's layout (persists the
 // new Ratio). resizeAllPanes covers all panes; the daemon's same-size guard
 // drops the untouched panes' resizes. Only the active tab's tree moved, so
-// only it is stored (markLayoutChanged).
+// only it is stored (markLayoutChanged) — and not at all when the release
+// left the ratio where the press found it: a click on a border is not a
+// change, and storing it would bump the revision for every other client.
 func (m *Model) finishSplitDrag() tea.Cmd {
 	// The one VT resize of the whole drag: old size → final size, paired
 	// with the PTY resize below so the child's SIGWINCH redraw lands in a
@@ -3923,9 +3931,10 @@ func (m *Model) finishSplitDrag() tea.Cmd {
 	if tab != nil {
 		tab.Resize(tab.Width, tab.Height)
 	}
+	moved := m.splitDragNode == nil || m.splitDragNode.Ratio != m.splitDragRatio
 	m.clearDragState()
 	var layout tea.Cmd
-	if tab != nil {
+	if tab != nil && moved {
 		layout = m.markLayoutChanged(m.destOfTab(tab.ID), tab)
 	}
 	return tea.Batch(m.resizeAllPanes(), layout)
@@ -6367,7 +6376,7 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 		case tab.templateLayoutPending:
 			tab.layoutRev = tabInfo.LayoutRev
 		case exists && !restored:
-			lp = m.syncTabLayout(tab, tabInfo, daemonPaneSet, paneMap, existingPanes)
+			lp = m.syncTabLayout(tab, tabInfo, daemonPaneSet, paneMap, existingPanes, dest)
 			newPaneIDs = append(newPaneIDs, lp.created...)
 		}
 
@@ -6387,8 +6396,7 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 					tab.RemovePane(id)
 					// A close THIS client confirmed is its user's change to
 					// store; any other prune waits for the requester's write.
-					if m.closeRequested[id] {
-						delete(m.closeRequested, id)
+					if m.takeCloseRequest(dest, id) {
 						lp.send = true
 					} else {
 						tab.awaitGone(id)
@@ -6408,9 +6416,10 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 			treePaneIDs = tab.Root.PaneIDs()
 		}
 		// Set when a moved pane arrived while this client held a reservation
-		// in this tab; the placeholder prune below then spares it for this
-		// pass (see there).
-		sparedReservation := false
+		// in this tab, or when adoption just re-seated that reservation in a
+		// new tree; the placeholder prune below then spares it for this pass
+		// (see there).
+		sparedReservation := lp.reseated
 		for _, paneID := range tabInfo.Panes {
 			// Overlay panes are reconciled separately — never insert into the tree.
 			if isOverlayPane(paneMap, paneID) {
@@ -6682,7 +6691,7 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 // arrival nobody here asked for (layoutsync.go).
 func (m *Model) restoreTabLayout(tab *TabModel, tabInfo TabInfo, paneMap map[string]*PaneInfo, existingPanes map[string]*PaneModel, dest string) *TabModel {
 	tab.templateLayoutApplied, tab.templateLayoutPending = true, false
-	tab.layoutRev = tabInfo.LayoutRev
+	tab.layoutRev, tab.adoptNext = tabInfo.LayoutRev, false
 	tab.layoutDirty, tab.layoutSent, tab.layoutResend = false, nil, false
 	tab.clearAwaiting()
 	log.Printf("restoreLayout: tab %s %q with %d panes", tab.ID, tabInfo.Name, len(tabInfo.Panes))

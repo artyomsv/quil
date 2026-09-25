@@ -72,11 +72,11 @@ func TestBroadcastLayoutBytesDifferForASplit(t *testing.T) {
 	}
 }
 
-// A layout the daemon stores but the client cannot parse must be re-sent, not
-// treated as agreeing — otherwise a corrupt stored tree is never corrected. It
-// costs one frame per broadcast for that tab until the daemon accepts the
-// replacement, which is bounded by the tab count and self-healing.
-func TestLayoutAgrees_MalformedStoredLayoutResends(t *testing.T) {
+// A layout the daemon stores but the client cannot parse counts as no layout
+// at all: the client describes the tab once, with the current base revision,
+// rather than keeping a tree nobody can restore. Treating it as agreeing
+// would leave a corrupt stored tree uncorrected forever.
+func TestWorkspaceState_MalformedStoredLayout_IsReplacedOnce(t *testing.T) {
 	t.Parallel()
 	m, echo := echoModel(t)
 	echo.Tabs[0].Layout = json.RawMessage(`{"split": "not-a-direction"`)

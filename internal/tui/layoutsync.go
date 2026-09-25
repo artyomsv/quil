@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"reflect"
+	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -130,11 +131,31 @@ type layoutPass struct {
 	oldTree map[string]bool
 	// created: pane ids adoption built a new PaneModel for.
 	created []string
+	// reseated: adoption put this client's reservation back into the new
+	// tree. The caller must spare it from this pass's placeholder prune, or
+	// pendingSplit is left pointing at a detached node and the requested pane
+	// lands in it invisibly.
+	reseated bool
+}
+
+// closeKey scopes a closeRequested entry to its destination, as sizedKey does
+// for sizedOnce: pane ids are per daemon.
+func closeKey(dest, paneID string) string { return sizedKey(dest, paneID) }
+
+// takeCloseRequest reports whether THIS client's user asked to close paneID
+// on dest, consuming the request.
+func (m *Model) takeCloseRequest(dest, paneID string) bool {
+	k := closeKey(dest, paneID)
+	if !m.closeRequested[k] {
+		return false
+	}
+	delete(m.closeRequested, k)
+	return true
 }
 
 // syncTabLayout runs for an EXISTING tab before its panes are reconciled, and
 // decides what the broadcast's revision means for the tree it holds.
-func (m *Model) syncTabLayout(tab *TabModel, ti TabInfo, paneSet map[string]bool, paneMap map[string]*PaneInfo, existingPanes map[string]*PaneModel) layoutPass {
+func (m *Model) syncTabLayout(tab *TabModel, ti TabInfo, paneSet map[string]bool, paneMap map[string]*PaneInfo, existingPanes map[string]*PaneModel, dest string) layoutPass {
 	lp := layoutPass{oldTree: map[string]bool{}}
 	if tab.Root != nil {
 		lp.oldTree = tab.Root.PaneIDs()
@@ -146,15 +167,20 @@ func (m *Model) syncTabLayout(tab *TabModel, ti TabInfo, paneSet map[string]bool
 	// parseWorkspaceState re-marshals the layout from map[string]any, which
 	// sorts keys — so the same split tree arrives as different bytes.
 	switch {
-	case ti.LayoutRev > tab.layoutRev:
+	case ti.LayoutRev > tab.layoutRev || tab.adoptNext:
+		// Higher revision, or the first broadcast after a reattach, whose
+		// revision can be anything — even the 0 of a restored workspace that
+		// no client has written since (resetLayoutSync).
+		//
 		// Our own write coming back: the tree we hold already contains it,
 		// plus anything done since, which the deferred resend now carries.
 		echo := tab.layoutDirty && stored != nil && reflect.DeepEqual(stored, tab.layoutSent)
 		resend := echo && tab.layoutResend
 		tab.layoutRev = ti.LayoutRev
+		tab.adoptNext = false
 		tab.layoutDirty, tab.layoutSent, tab.layoutResend = false, nil, false
 		if stored != nil && !echo && !reflect.DeepEqual(stored, m.layoutForSend(tab)) {
-			lp.created, lp.send = m.adoptTabLayout(tab, stored, paneSet, paneMap, existingPanes)
+			lp.created, lp.send, lp.reseated = m.adoptTabLayout(tab, stored, paneSet, paneMap, existingPanes, dest)
 			return lp
 		}
 		lp.send = resend
@@ -188,10 +214,11 @@ func (m *Model) syncTabLayout(tab *TabModel, ti TabInfo, paneSet map[string]bool
 // adoptTabLayout replaces tab's tree with the stored one. Pane models are
 // reused by id, so no emulator or scrollback is lost; ids the broadcast no
 // longer lists are dropped, and panes the stored tree lacks are left for the
-// caller's arrival loop to place. Returns the ids it built new models for, and
+// caller's arrival loop to place. Returns the ids it built new models for,
 // whether a pane THIS client closed was still in the stored tree (a user
-// change the requester must store).
-func (m *Model) adoptTabLayout(tab *TabModel, stored *SerializedNode, paneSet map[string]bool, paneMap map[string]*PaneInfo, existingPanes map[string]*PaneModel) (created []string, send bool) {
+// change the requester must store), and whether it re-seated this client's
+// reservation (which the caller must spare from this pass's prune).
+func (m *Model) adoptTabLayout(tab *TabModel, stored *SerializedNode, paneSet map[string]bool, paneMap map[string]*PaneInfo, existingPanes map[string]*PaneModel, dest string) (created []string, send, reseated bool) {
 	// A drag armed on this tab describes a tree that is about to go.
 	if (m.splitDragNode != nil && treeContains(tab.Root, m.splitDragNode)) ||
 		(m.paneDrag.active() && m.paneDrag.srcTabID == tab.ID) {
@@ -204,8 +231,7 @@ func (m *Model) adoptTabLayout(tab *TabModel, stored *SerializedNode, paneSet ma
 	for id := range serializedIDs(stored) {
 		if !paneSet[id] {
 			// Gone from the daemon but still in the stored tree.
-			if m.closeRequested[id] {
-				delete(m.closeRequested, id)
+			if m.takeCloseRequest(dest, id) {
 				send = true
 			} else {
 				gone = append(gone, id)
@@ -254,8 +280,9 @@ func (m *Model) adoptTabLayout(tab *TabModel, stored *SerializedNode, paneSet ma
 
 	if ph != nil {
 		m.reseatReservation(tab, ph, sentinel)
+		reseated = true
 	}
-	return created, send
+	return created, send, reseated
 }
 
 // reseatReservation puts this client's pendingSplit placeholder back into an
@@ -287,10 +314,13 @@ func (m *Model) reseatReservation(tab *TabModel, old *LayoutNode, sentinel *Pane
 	m.pendingSplit[tab.ID] = ph
 }
 
-// resetLayoutSync forgets every tab's revision on dest, so the first broadcast
-// after a reattach is adopted: the daemon's stored tree is the authority, and
-// after a daemon restart its revision can be LOWER than ours (the snapshot is
-// debounced), which the ordinary higher-wins rule would ignore forever.
+// resetLayoutSync forgets every tab's revision on dest and marks the first
+// broadcast after a reattach for adoption whatever its revision: the daemon's
+// stored tree is the authority, and after a daemon restart its revision can be
+// LOWER than ours (the snapshot is debounced) — as low as the 0 of a tree no
+// client has written since restore, which even a zeroed revision would not
+// adopt. Pending close requests for dest are dropped too: the daemon that
+// answers may not be the one they were sent to.
 func (m *Model) resetLayoutSync(dest string) {
 	for _, proj := range m.projects {
 		if proj.Dest != dest {
@@ -298,8 +328,15 @@ func (m *Model) resetLayoutSync(dest string) {
 		}
 		for _, tab := range proj.tabs {
 			tab.layoutRev = 0
+			tab.adoptNext = true
 			tab.layoutDirty, tab.layoutSent, tab.layoutResend = false, nil, false
 			tab.clearAwaiting()
+		}
+	}
+	prefix := dest + "\x00"
+	for k := range m.closeRequested {
+		if strings.HasPrefix(k, prefix) {
+			delete(m.closeRequested, k)
 		}
 	}
 }

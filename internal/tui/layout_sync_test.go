@@ -304,10 +304,12 @@ func TestLayoutSync_AdoptionCancelsDrag(t *testing.T) {
 		if m.splitDragNode != nil {
 			t.Error("the border drag survived adoption of another tree")
 		}
-		next, cmd := m.Update(tea.MouseReleaseMsg{X: 90, Y: 10, Button: tea.MouseLeft})
-		m = next.(Model)
+		// The recorder goes in BEFORE Update: the command captures the
+		// client it was built with.
 		rec := &echoRecorder{}
 		m.client = rec
+		next, cmd := m.Update(tea.MouseReleaseMsg{X: 90, Y: 10, Button: tea.MouseLeft})
+		m = next.(Model)
 		runCmd(cmd)
 		if sent := lsLayouts(t, rec); len(sent) != 0 {
 			t.Errorf("the release after adoption sent %d layouts, want 0", len(sent))
@@ -338,21 +340,21 @@ func TestLayoutSync_PendingSplitSurvivesBesideSibling(t *testing.T) {
 	m, _ = lsApply(t, m, lsState(1, lsWire(t, lsSplit(SplitHorizontal, 0.5, lsLeaf("p1"), lsLeaf("p2"))), "p1", "p2"))
 	tab := lsTab(t, &m)
 	tab.ActivePane = "p2"
+	// An ORDINARY split (Alt+Shift+V): no worktree create holds the
+	// placeholder open, so only the adoption's own spare keeps it.
 	_ = m.splitPane(SplitVertical)
 	if m.pendingSplit["t1"] == nil {
 		t.Fatal("setup: the split armed no reservation")
 	}
-	// Held open the way a worktree create holds it, so a broadcast that
-	// carries no new pane does not prune it.
-	m.worktreeCreates = map[string]string{"t1": "feat/x"}
 
-	// Another client swapped the two panes.
-	m, _ = lsApply(t, m, lsState(2, lsWire(t, lsSplit(SplitHorizontal, 0.5, lsLeaf("p2"), lsLeaf("p1"))), "p1", "p2"))
+	// Another client swapped the two panes; the requested pane has not come.
+	swapped := lsSplit(SplitHorizontal, 0.5, lsLeaf("p2"), lsLeaf("p1"))
+	m, _ = lsApply(t, m, lsState(2, lsWire(t, swapped), "p1", "p2"))
 
 	tab = lsTab(t, &m)
 	ph := m.pendingSplit["t1"]
 	if ph == nil || !treeHoldsNode(tab.Root, ph) {
-		t.Fatal("the reservation was lost on adoption — the requested pane would land nowhere")
+		t.Fatal("the reservation was pruned in the adopting pass — the requested pane would land nowhere")
 	}
 	parent, isLeft := lsParentOf(tab.Root, ph)
 	if parent == nil || isLeft || parent.Split != SplitVertical ||
@@ -360,14 +362,86 @@ func TestLayoutSync_PendingSplitSurvivesBesideSibling(t *testing.T) {
 		t.Fatalf("reservation is not below its sibling p2: tree %s", layoutString(SerializeLayout(tab.Root)))
 	}
 
-	// The requested pane lands in it, and this client — the requester — sends.
-	m, sent := lsApply(t, m, lsState(2, lsWire(t, lsSplit(SplitHorizontal, 0.5, lsLeaf("p2"), lsLeaf("p1"))), "p1", "p2", "p-new"))
+	// The requested pane lands in it, visibly, and this client — the
+	// requester — sends.
+	m, sent := lsApply(t, m, lsState(2, lsWire(t, swapped), "p1", "p2", "p-new"))
+	tab = lsTab(t, &m)
+	if ph.Pane == nil || ph.Pane.ID != "p-new" || !treeHoldsNode(tab.Root, ph) {
+		t.Fatalf("the requested pane did not fill the reservation in the tree (it holds %v)", ph.Pane)
+	}
+	if tab.ActivePane != "p-new" {
+		t.Errorf("ActivePane = %q, want p-new", tab.ActivePane)
+	}
 	want := lsSplit(SplitHorizontal, 0.5, lsSplit(SplitVertical, 0.5, lsLeaf("p2"), lsLeaf("p-new")), lsLeaf("p1"))
 	if got := lsTree(t, &m); !reflect.DeepEqual(got, want) {
 		t.Errorf("tree = %s, want %s", layoutString(got), layoutString(want))
 	}
 	if len(sent) != 1 || lsBase(sent[0]) != "2" {
-		t.Errorf("sent %d frames, want 1 with base 2", len(sent))
+		t.Fatalf("sent %d frames, want 1 with base 2", len(sent))
+	}
+	if got := lsSentTree(t, sent[0]); !reflect.DeepEqual(got, want) {
+		t.Errorf("sent %s, want %s", layoutString(got), layoutString(want))
+	}
+}
+
+// The sibling is gone from the adopted tree: the reservation falls back to
+// where the spiral would place an arrival.
+func TestLayoutSync_PendingSplitWithoutSiblingTakesTheSpiralSlot(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	m := newLayoutSyncModel(t)
+	m, _ = lsApply(t, m, lsState(1, lsWire(t, lsSplit(SplitHorizontal, 0.5, lsLeaf("p1"), lsLeaf("p2"))), "p1", "p2"))
+	lsTab(t, &m).ActivePane = "p2"
+	_ = m.splitPane(SplitVertical)
+
+	// Another client closed p2, the pane this client split.
+	m, _ = lsApply(t, m, lsState(2, lsWire(t, lsLeaf("p1")), "p1"))
+
+	tab := lsTab(t, &m)
+	ph := m.pendingSplit["t1"]
+	if ph == nil || !treeHoldsNode(tab.Root, ph) || tab.Root.Right != ph ||
+		tab.Root.Split != SplitHorizontal || tab.Root.Left.Pane == nil || tab.Root.Left.Pane.ID != "p1" {
+		t.Fatalf("tree = %s, want p1 left|right beside the reservation", layoutString(SerializeLayout(tab.Root)))
+	}
+
+	m, _ = lsApply(t, m, lsState(2, lsWire(t, lsLeaf("p1")), "p1", "p-new"))
+	want := lsSplit(SplitHorizontal, 0.5, lsLeaf("p1"), lsLeaf("p-new"))
+	if got := lsTree(t, &m); !reflect.DeepEqual(got, want) {
+		t.Errorf("tree = %s, want %s", layoutString(got), layoutString(want))
+	}
+}
+
+// A worktree REPLACE's reservation is the leaf of the pane it stands in for.
+// Adopting a tree that moved that pane puts the reservation where the pane now
+// is, and the replacing pane lands there.
+func TestLayoutSync_ReplaceReservationFollowsItsPane(t *testing.T) {
+	m := newLayoutSyncModel(t)
+	m, _ = lsApply(t, m, lsState(1, lsWire(t, lsSplit(SplitHorizontal, 0.5, lsLeaf("p1"), lsLeaf("p2"))), "p1", "p2"))
+	lsTab(t, &m).ActivePane = "p2"
+	m = armOwnWorktreeCreate(t, m, 2) // sets QUIL_HOME
+	if held := m.worktreeReplaced["t1"]; held == nil || held.ID != "p2" {
+		t.Fatal("setup: the replace did not hold p2")
+	}
+
+	// Another client stacked the panes, p2 on top; the daemon still has p2.
+	m, _ = lsApply(t, m, lsState(2, lsWire(t, lsSplit(SplitVertical, 0.5, lsLeaf("p2"), lsLeaf("p1"))), "p1", "p2"))
+	tab := lsTab(t, &m)
+	ph := m.pendingSplit["t1"]
+	if ph == nil || tab.Root.Left != ph || ph.Pane != nil || tab.Root.Split != SplitVertical {
+		t.Fatalf("tree = %s, want the reservation on top where p2 now is", layoutString(SerializeLayout(tab.Root)))
+	}
+	// What this client would store still names the live pane there.
+	if got, want := m.layoutForSend(tab), lsSplit(SplitVertical, 0.5, lsLeaf("p2"), lsLeaf("p1")); !reflect.DeepEqual(got, want) {
+		t.Errorf("layoutForSend = %s, want %s", layoutString(got), layoutString(want))
+	}
+
+	// The swap lands: p2 is gone, p-wt fills the reservation.
+	m, sent := lsApply(t, m, lsState(2, lsWire(t, lsSplit(SplitVertical, 0.5, lsLeaf("p2"), lsLeaf("p1"))), "p-wt", "p1"))
+	want := lsSplit(SplitVertical, 0.5, lsLeaf("p-wt"), lsLeaf("p1"))
+	if got := lsTree(t, &m); !reflect.DeepEqual(got, want) {
+		t.Errorf("tree = %s, want %s", layoutString(got), layoutString(want))
+	}
+	if len(sent) != 1 || lsBase(sent[0]) != "2" {
+		t.Fatalf("sent %d frames, want 1 with base 2", len(sent))
 	}
 }
 
@@ -463,6 +537,54 @@ func TestLayoutSync_ReattachAdoptsLowerRev(t *testing.T) {
 	}
 }
 
+// A daemon restored from an older workspace.json (or one that lost every
+// debounced write) reports revision 0 with a stored tree. The first broadcast
+// after a reattach is still adopted — even a zeroed revision would call that
+// "equal" and keep the local tree.
+func TestLayoutSync_ReattachAdoptsRevZeroStoredTree(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	m := newLayoutSyncModel(t)
+	m, _ = lsApply(t, m, lsState(5, lsWire(t, lsSplit(SplitHorizontal, 0.5, lsLeaf("p1"), lsLeaf("p2"))), "p1", "p2"))
+
+	m.armReattachReset("")
+
+	restored := lsSplit(SplitVertical, 0.5, lsLeaf("p2"), lsLeaf("p1"))
+	m, sent := lsApply(t, m, lsState(0, lsWire(t, restored), "p1", "p2"))
+	if got := lsTree(t, &m); !reflect.DeepEqual(got, restored) {
+		t.Errorf("tree = %s, want the daemon's %s adopted after the reattach", layoutString(got), layoutString(restored))
+	}
+	if len(sent) != 0 {
+		t.Errorf("sent %d frames, want 0", len(sent))
+	}
+
+	// Only the FIRST broadcast: after it, rev 0 is an ordinary equal rev.
+	m, _ = lsApply(t, m, lsState(0, lsWire(t, lsSplit(SplitHorizontal, 0.5, lsLeaf("p1"), lsLeaf("p2"))), "p1", "p2"))
+	if got := lsTree(t, &m); !reflect.DeepEqual(got, restored) {
+		t.Errorf("a second rev-0 broadcast replaced the tree with %s — only the first after a reattach is adopted", layoutString(got))
+	}
+}
+
+// A press on a border and a release without motion changed nothing, and
+// storing it would bump the revision under every other client.
+func TestLayoutSync_BorderClickWithoutMotionSendsNothing(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	m := newLayoutSyncModel(t)
+	m, _ = lsApply(t, m, lsState(1, lsWire(t, lsSplit(SplitHorizontal, 0.5, lsLeaf("p1"), lsLeaf("p2"))), "p1", "p2"))
+	next, _ := m.Update(tea.MouseClickMsg{X: 60, Y: 10, Button: tea.MouseLeft})
+	m = next.(Model)
+	if m.splitDragNode == nil {
+		t.Fatal("setup: the press did not arm a border drag")
+	}
+	rec := &echoRecorder{}
+	m.client = rec // before Update: the command captures this client
+	next, cmd := m.Update(tea.MouseReleaseMsg{X: 60, Y: 10, Button: tea.MouseLeft})
+	m = next.(Model)
+	runCmd(cmd)
+	if sent := lsLayouts(t, rec); len(sent) != 0 {
+		t.Errorf("a release that moved nothing sent %d layouts, want 0", len(sent))
+	}
+}
+
 func TestLayoutSync_EmptyStoredLayoutSendsOnce(t *testing.T) {
 	t.Setenv("QUIL_HOME", t.TempDir())
 	m := newLayoutSyncModel(t)
@@ -510,5 +632,28 @@ func TestLayoutSync_OwnCloseSendsBystanderWaits(t *testing.T) {
 	}
 	if got := lsSentTree(t, sentA[0]); !reflect.DeepEqual(got, lsLeaf("p1")) {
 		t.Errorf("sent %s, want p1", layoutString(got))
+	}
+}
+
+// A close request is scoped to the daemon it went to, and a reattach to that
+// daemon forgets it: the answering daemon may be a restarted one that never
+// saw the request.
+func TestLayoutSync_ReattachForgetsCloseRequests(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	m := newLayoutSyncModel(t)
+	m, _ = lsApply(t, m, lsState(2, lsWire(t, lsSplit(SplitHorizontal, 0.5, lsLeaf("p1"), lsLeaf("p2"))), "p1", "p2"))
+	lsTab(t, &m).ActivePane = "p2"
+	next, _ := m.openClosePaneConfirm()
+	m = next.(Model)
+	next, cmd := m.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
+	m = next.(Model)
+	runCmd(cmd)
+	if !m.closeRequested[closeKey("", "p2")] {
+		t.Fatal("setup: the confirmed close was not recorded under its destination")
+	}
+
+	m.armReattachReset("")
+	if len(m.closeRequested) != 0 {
+		t.Errorf("closeRequested = %v after the reattach, want empty", m.closeRequested)
 	}
 }

@@ -66,6 +66,9 @@ type TabModel struct {
 	layoutDirty  bool
 	layoutSent   *SerializedNode
 	layoutResend bool
+	// adoptNext: the next broadcast is adopted whatever its revision — set by
+	// a reattach, when the daemon's stored tree is the authority.
+	adoptNext bool
 	// awaitingPanes / awaitingGone are ids this client placed or pruned on
 	// its own, for a change nobody here asked for (an MCP create, another
 	// client's split or close, a moved pane). The next broadcast says whether

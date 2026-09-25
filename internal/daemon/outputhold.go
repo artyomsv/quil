@@ -32,8 +32,9 @@ import (
 //   - holdGate makes "append to the holds, then broadcast" ONE step against
 //     setting or clearing a conn's flag. A flush holds it for READ from its
 //     hold append through its broadcast (Broadcast only enqueues, so this
-//     blocks on nothing); beginOutputHold and the release's final clear hold
-//     it for WRITE. Without it, a flush could append its chunk, the release
+//     blocks on nothing). Every hold that starts or ends — beginOutputHold,
+//     the release's final clear, dropOutputHold — holds it for WRITE, which
+//     also keeps holdCount exact for a flush holding it for read. Without it, a flush could append its chunk, the release
 //     could send that chunk and clear the flag, and then the flush's broadcast
 //     would reach the now-unheld conn — the same bytes twice. At the other
 //     end, a flush could miss the new hold and then broadcast to a conn whose
@@ -103,25 +104,33 @@ func (d *Daemon) beginOutputHold(c *ipc.Conn) {
 	if d.holds == nil {
 		d.holds = make(map[*ipc.Conn]*outputHold)
 	}
+	if _, ok := d.holds[c]; !ok {
+		d.holdCount.Add(1)
+	}
 	d.holds[c] = &outputHold{}
 	c.SetHoldPaneOutput(true)
 	d.holdMu.Unlock()
 	d.holdGate.Unlock()
 
 	// Outside both locks: flushes must not wait on a client's socket.
-	deadline := time.Now().Add(holdDrainTimeout)
+	if c.QueuedOutput() == 0 {
+		return
+	}
+	deadline := time.NewTimer(holdDrainTimeout)
+	defer deadline.Stop()
+	tick := time.NewTicker(2 * time.Millisecond)
+	defer tick.Stop()
 	for c.QueuedOutput() > 0 {
-		if time.Now().After(deadline) {
-			logger.Debug("attach: %d live frames still queued after %v; proceeding (they may repeat replayed bytes)",
-				c.QueuedOutput(), holdDrainTimeout)
-			return
-		}
 		select {
 		case <-d.shutdown:
 			return
 		case <-c.Done():
 			return // dead conn: the queue never drains
-		case <-time.After(2 * time.Millisecond):
+		case <-deadline.C:
+			logger.Debug("attach: %d live frames still queued after %v; proceeding (they may repeat replayed bytes)",
+				c.QueuedOutput(), holdDrainTimeout)
+			return
+		case <-tick.C:
 		}
 	}
 }
@@ -130,6 +139,11 @@ func (d *Daemon) beginOutputHold(c *ipc.Conn) {
 // read and must NOT hold the pane's PluginMu. data is copied, because the
 // caller's read buffer is reused.
 func (d *Daemon) holdOutput(paneID string, start uint64, data []byte, gen uint64) {
+	// Nothing held, the common case: skip holdMu. Exact, because holdCount
+	// only changes under holdGate for write and the caller holds it for read.
+	if d.holdCount.Load() == 0 {
+		return
+	}
 	d.holdMu.Lock()
 	defer d.holdMu.Unlock()
 	var cp []byte
@@ -171,6 +185,11 @@ func (d *Daemon) releaseOutputHold(c *ipc.Conn, end map[string]uint64) {
 		d.holdMu.Unlock()
 
 		if len(batch) == 0 && len(lost) == 0 {
+			// A flush can append between the check above and the finish;
+			// finishOutputHold's recheck is what sends it round again.
+			if d.beforeFinishHold != nil {
+				d.beforeFinishHold(c)
+			}
 			if d.finishOutputHold(c) {
 				return
 			}
@@ -218,24 +237,33 @@ func (d *Daemon) finishOutputHold(c *ipc.Conn) bool {
 	if h == nil {
 		return true
 	}
+	// The recheck: a flush may have appended since the caller saw an empty
+	// batch. Ending the hold now would lose those bytes — the conn would be
+	// unheld and the flush's broadcast already skipped it.
 	if len(h.chunks) > 0 || len(h.lost) > 0 {
 		return false
 	}
 	delete(d.holds, c)
+	d.holdCount.Add(-1)
 	c.SetHoldPaneOutput(false)
 	return true
 }
 
 // dropOutputHold discards c's hold without sending it: the conn is gone, or
 // its attach stopped part way. The flag is cleared too, so a conn that is
-// still alive is not left off live output forever.
+// still alive is not left off live output forever. Its held bytes are lost to
+// it, which is the point; taking holdGate makes the clear atomic against
+// flushes like every other hold change, so none straddles it.
 func (d *Daemon) dropOutputHold(c *ipc.Conn) {
+	d.holdGate.Lock()
+	defer d.holdGate.Unlock()
 	d.holdMu.Lock()
 	defer d.holdMu.Unlock()
 	if _, ok := d.holds[c]; !ok {
 		return
 	}
 	delete(d.holds, c)
+	d.holdCount.Add(-1)
 	c.SetHoldPaneOutput(false)
 }
 

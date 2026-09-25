@@ -434,6 +434,69 @@ func TestHold_FlushStraddlingTheReleaseArrivesOnce(t *testing.T) {
 	}
 }
 
+// The LOSS half of the release straddle: a flush that appends after the
+// release saw its last, empty batch but before the hold ends. finishOutputHold
+// must notice it and send it; ending the hold anyway would lose it, since the
+// flush's broadcast skipped the still-held conn.
+func TestHold_FlushAfterLastBatchBeforeFinishArrivesOnce(t *testing.T) {
+	h := newHoldHarness(t)
+	tab := h.d.session.CreateTab("T")
+	p := h.pane(tab.ID, "terminal")
+	client, conn := h.dial("B")
+
+	var once sync.Once
+	h.d.beforeFinishHold = func(*ipc.Conn) {
+		once.Do(func() { h.d.flushPaneOutput(p.ID, []byte("s")) })
+	}
+	h.d.beginOutputHold(conn)
+	h.d.releaseOutputHold(conn, nil)
+	if n := h.holdCount(); n != 0 {
+		t.Fatalf("%d holds left after release, want 0", n)
+	}
+
+	h.d.flushPaneOutput(p.ID, []byte("Z"))
+	if got := string(paneData(t, readOutput(t, client, isChunk(p.ID, "Z")), p.ID)); got != "sZ" {
+		t.Fatalf("received %q, want %q", got, "sZ")
+	}
+}
+
+// A conn that dies while its droppable queue is backed up never drains it, so
+// beginOutputHold's wait must end on the close rather than sit out its bound.
+func TestHold_BeginDrainAbortsOnConnClose(t *testing.T) {
+	h := newHoldHarness(t)
+	tab := h.d.session.CreateTab("T")
+	p := h.pane(tab.ID, "terminal")
+	client, conn := h.dial("B")
+
+	// Nobody reads: the socket fills and the droppable queue backs up.
+	chunk := bytes.Repeat([]byte{'x'}, 8<<10)
+	for i := 0; conn.Dropped() == 0 && i < 4096; i++ {
+		h.d.flushPaneOutput(p.ID, chunk)
+	}
+	if conn.QueuedOutput() == 0 {
+		t.Fatal("setup: the droppable queue is empty")
+	}
+
+	returned := make(chan time.Time, 1)
+	go func() {
+		h.d.beginOutputHold(conn)
+		returned <- time.Now()
+	}()
+	waitUntil(t, "the hold to begin", func() bool { held, _, _ := h.holdOf(conn); return held })
+	time.Sleep(20 * time.Millisecond) // let the drain wait start
+	closedAt := time.Now()
+	client.Close()
+
+	select {
+	case at := <-returned:
+		if waited := at.Sub(closedAt); waited > holdDrainTimeout/2 {
+			t.Fatalf("beginOutputHold returned %v after the close, want well under %v", waited, holdDrainTimeout)
+		}
+	case <-time.After(2 * holdDrainTimeout):
+		t.Fatal("beginOutputHold never returned")
+	}
+}
+
 // The same straddle as a hold begins: a flush that appended before the hold
 // existed must still reach the conn through its broadcast, not find the conn
 // held and be skipped with nothing held.

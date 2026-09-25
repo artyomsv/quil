@@ -282,10 +282,15 @@ type Daemon struct {
 	holdGate sync.RWMutex
 	holdMu   sync.Mutex
 	holds    map[*ipc.Conn]*outputHold
-	// afterHoldOutput is a test seam: when set, a flush calls it between its
-	// hold append and its broadcast. Set before any flush runs; nil in
-	// production.
-	afterHoldOutput func(paneID string)
+	// holdCount is len(holds), written under holdGate (write) so a flush
+	// holding it for read can skip holdMu when nothing is held.
+	holdCount atomic.Int32
+	// afterHoldOutput and beforeFinishHold are test seams: a flush calls the
+	// first between its hold append and its broadcast; the release calls the
+	// second between seeing an empty batch and ending the hold. Set before
+	// any flush runs; nil in production.
+	afterHoldOutput  func(paneID string)
+	beforeFinishHold func(c *ipc.Conn)
 }
 
 func New(cfg config.Config) *Daemon {

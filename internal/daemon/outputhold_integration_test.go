@@ -132,9 +132,17 @@ func TestHold_LiveFramesQueuedBeforeAttachStayBeforeTheState(t *testing.T) {
 	last := next + perChunk - 1
 	sendClientMsg(t, client, ipc.MsgAttach, ipc.AttachPayload{ClientID: "B", Cols: 80, Rows: 24})
 	go func() {
+		// Seen held first, so "not held" below means released rather than
+		// not begun yet.
 		deadline := time.Now().Add(10 * time.Second)
 		for time.Now().Before(deadline) {
-			if held, _, _ := h.holdOf(conn); !held && h.d.clientCount() == 1 {
+			if held, _, _ := h.holdOf(conn); held {
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
+		for time.Now().Before(deadline) {
+			if held, _, _ := h.holdOf(conn); !held {
 				break
 			}
 			time.Sleep(2 * time.Millisecond)

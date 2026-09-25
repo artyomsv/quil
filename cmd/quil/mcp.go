@@ -260,6 +260,8 @@ const mcpInstructions = "Quil is a terminal multiplexer with projects, tabs and 
 	"- Projects: list_projects, create_project, update_project, switch_project, destroy_project; tabs: create_tab, rename_tab, destroy_tab.\n" +
 	"- Hosts: list_hosts shows the remote daemons this bridge reaches. Ids you discovered route to their host automatically; " +
 	"pass host explicitly to create things on a remote. delegate_task with notify only works when requester and target share a host.\n" +
+	"- Several TUIs can share one daemon: list_clients shows them, and its client id targets set_active_pane or close_tui at " +
+	"one of them instead of the one that typed most recently.\n" +
 	"- Destructive tools (restart_pane, destroy_pane, destroy_tab, destroy_project, close_tui): always confirm with the user before using.\n" +
 	"- watch_notifications: blocks until an event fires on specified panes (replaces polling). Use after starting long-running tasks.\n" +
 	"- get_notifications: returns all pending notification events without blocking.\n" +

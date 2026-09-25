@@ -64,11 +64,6 @@ type Daemon struct {
 	tasks     *taskRegistry
 	tasksOnce sync.Once
 	gitCache  *gitCache // per-checkout branch/worktree/divergence, refreshed on a ticker
-	// clientCWD is the last-known CWD from a TUI client, used as the
-	// default working directory for new panes/tabs. Read by defaultCWD()
-	// from any IPC dispatch goroutine and written by handleAttach on each
-	// connect — atomic.Pointer is what keeps that race-free.
-	clientCWD atomic.Pointer[string]
 	// Last attached terminal size, used before a client can resize a new pane.
 	clientSize atomic.Pointer[terminalSize]
 
@@ -1443,7 +1438,7 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		// The existence check happens HERE, before the handler, because the
 		// handler reports nothing and the tab is gone afterwards either way.
 		id, known := tabIDKnown(d, msg, "tab_id")
-		d.handleDestroyTab(msg)
+		d.handleDestroyTab(conn, msg)
 		answerOp(conn, msg, ipc.MsgTabOpResp, id, known, opErrUnless(known, "no such tab"))
 	case ipc.MsgSwitchTab:
 		d.touchClientInput(conn)
@@ -1462,7 +1457,14 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	case ipc.MsgDestroyPane:
 		d.handleDestroyPane(msg)
 	case ipc.MsgUpdatePane:
-		d.touchClientInput(conn)
+		// update_pane also carries automatic reports — an OSC 7 CWD change,
+		// overlay visibility, the unseen mark — that are not the user doing
+		// anything just now; only a field the user actually touched (rename,
+		// mute, eager, the two attention marks) should count as this
+		// client's input for targetConn's implicit-client fallback.
+		if updatePaneIsUserInput(msg) {
+			d.touchClientInput(conn)
+		}
 		id, known := paneIDKnown(d, msg)
 		d.handleUpdatePane(conn, msg)
 		answerOp(conn, msg, ipc.MsgPaneOpResp, id, known, opErrUnless(known, "no such pane"))
@@ -1509,7 +1511,7 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		// empty one renders as a blank screen the moment the user switches to
 		// it, and there is no in-band way out: Ctrl+T files its tab against
 		// the daemon's ACTIVE project, which a just-created one is not.
-		d.recoverEmptyProject(proj.ID)
+		d.recoverEmptyProject(conn, proj.ID)
 		d.broadcastState()
 		d.requestSnapshot()
 
@@ -1536,7 +1538,7 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		releasePanes(detached)
 		// Destroying the last project leaves nothing to render, and destroying
 		// the active one can promote a project that is itself empty.
-		d.recoverEmptyProject(d.session.ActiveProject())
+		d.recoverEmptyProject(conn, d.session.ActiveProject())
 		d.broadcastState()
 		d.requestSnapshot()
 		answerOp(conn, msg, ipc.MsgProjectOpResp, p.ProjectID, true, "")
@@ -1591,7 +1593,7 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		// which is a blank screen with no in-band way out — Ctrl+T files against
 		// the ACTIVE project, and that is the empty one. Create and destroy both
 		// recover here for the same reason.
-		d.recoverEmptyProject(p.ProjectID)
+		d.recoverEmptyProject(conn, p.ProjectID)
 		d.broadcastState()
 		// Reassigns tabs and DROPS project records, so a daemon killed inside
 		// the 30 s ticker window comes back holding the duplicates the user
@@ -1704,7 +1706,9 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	case ipc.MsgSetActivePane:
 		d.handleSetActivePane(conn, msg)
 	case ipc.MsgCloseTUI:
-		d.broadcast(msg)
+		d.handleCloseTUI(conn, msg)
+	case ipc.MsgListClientsReq:
+		d.handleListClientsReq(conn, msg)
 
 	// Notification center
 	case ipc.MsgDismissEvent:
@@ -1863,18 +1867,13 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 	log.Printf("attach: client connected (%dx%d), tabs=%d, restored=%v",
 		cols, rows, len(d.session.Tabs()), d.restored)
 
-	// Remember client CWD so new tabs/panes default to the TUI's directory
-	// instead of the daemon's (which is frozen at daemon start time). An
-	// empty value resets to "use daemon CWD" — preferable to retaining a
-	// stale value from a previous client.
-	cwd := attach.CWD
-	d.clientCWD.Store(&cwd)
-
 	// Create default workspace if empty (no tabs — neither fresh nor restored)
 	if len(d.session.Tabs()) == 0 {
 		log.Print("attach: creating default workspace (no tabs)")
 		tab := d.session.CreateTab("Shell")
-		pane, _ := d.session.CreatePane(tab.ID, d.defaultCWD())
+		// attachClient (above) already recorded attach.CWD on this conn's
+		// client record, so defaultCWD's first candidate is this very attach.
+		pane, _ := d.session.CreatePane(tab.ID, d.defaultCWD(conn))
 		setPaneType(pane, "terminal")
 
 		ptySession := apty.NewWithSize(cols, rows)
@@ -2218,7 +2217,7 @@ func (d *Daemon) handleCreateTab(conn *ipc.Conn, msg *ipc.Message) {
 			spec.Worktree = nil
 		}
 	}
-	cwd := d.resolveRequestedCWD(spec.CWD, d.projectCWD(tab.ProjectID))
+	cwd := d.resolveRequestedCWD(spec.CWD, d.projectCWD(conn, tab.ProjectID))
 
 	// The two construction paths are built SEPARATELY and share nothing but the
 	// type and the directory. `create` and its plugin-field block used to sit
@@ -2428,7 +2427,7 @@ func (d *Daemon) failPreparingPane(paneID, reason string) {
 	d.broadcastState()
 }
 
-func (d *Daemon) handleDestroyTab(msg *ipc.Message) {
+func (d *Daemon) handleDestroyTab(conn *ipc.Conn, msg *ipc.Message) {
 	var payload ipc.DestroyTabPayload
 	if err := msg.DecodePayload(&payload); err != nil {
 		return
@@ -2455,7 +2454,7 @@ func (d *Daemon) handleDestroyTab(msg *ipc.Message) {
 		d.cleanupPaneArtifacts(p.ID)
 	}
 
-	d.recoverEmptyProject(projectID)
+	d.recoverEmptyProject(conn, projectID)
 
 	d.broadcastState()
 	d.requestSnapshot()
@@ -2517,12 +2516,12 @@ func (d *Daemon) handleDestroyTab(msg *ipc.Message) {
 // whose project a racing DestroyProject removed. projectIsEmpty falls back to
 // the workspace-wide test there, and createTabLocked resolves the empty ID to
 // the active project or bootstraps one, so the workspace still recovers.
-func (d *Daemon) recoverEmptyProject(projectID string) {
+func (d *Daemon) recoverEmptyProject(conn *ipc.Conn, projectID string) {
 	if !d.projectIsEmpty(projectID) {
 		return
 	}
 	tab := d.session.CreateTabInProject(projectID, "Shell")
-	pane, err := d.session.CreatePane(tab.ID, d.projectCWD(tab.ProjectID))
+	pane, err := d.session.CreatePane(tab.ID, d.projectCWD(conn, tab.ProjectID))
 	if err != nil {
 		log.Printf("recover empty project %q: create pane: %v", projectID, err)
 		return
@@ -2565,9 +2564,9 @@ func (d *Daemon) projectIsEmpty(projectID string) bool {
 // value falls back rather than failing the spawn: a snapshot can outlive the
 // directory it names, and can be restored on a machine where that path never
 // existed.
-func (d *Daemon) projectCWD(projectID string) string {
+func (d *Daemon) projectCWD(conn *ipc.Conn, projectID string) string {
 	if projectID == "" {
-		return d.defaultCWD()
+		return d.defaultCWD(conn)
 	}
 	for _, p := range d.session.Projects() {
 		if p.ID != projectID {
@@ -2583,7 +2582,7 @@ func (d *Daemon) projectCWD(projectID string) string {
 		}
 		break
 	}
-	return d.defaultCWD()
+	return d.defaultCWD(conn)
 }
 
 func (d *Daemon) handleSwitchTab(msg *ipc.Message) {
@@ -2661,7 +2660,7 @@ func (d *Daemon) handleMoveTab(conn *ipc.Conn, msg *ipc.Message) {
 
 	// Moving the source project's LAST tab out leaves it exactly as empty as
 	// DestroyTab leaves one, and owes the same replacement Shell tab.
-	d.recoverEmptyProject(from)
+	d.recoverEmptyProject(conn, from)
 	// Each project keeps its OWN ActiveTab, and that is independent of the
 	// daemon's single GLOBAL active project/tab (sm.activeProject/activeTab):
 	// several clients can each be looking at a different project, so a
@@ -2715,7 +2714,7 @@ func (d *Daemon) handleCreatePane(conn *ipc.Conn, msg *ipc.Message) {
 	}
 
 	logger.Debug("create pane: received payload cwd=%q type=%s", payload.CWD, payload.Type)
-	cwd := d.resolveRequestedCWD(payload.CWD, d.defaultCWD())
+	cwd := d.resolveRequestedCWD(payload.CWD, d.defaultCWD(conn))
 
 	// Determine pane type
 	paneType := payload.Type
@@ -3128,7 +3127,9 @@ func (d *Daemon) recoverEmptyTab(tabID, reason string) {
 	// The overlay is left in place, UNLIKE ensureTabNotEmpty's orphan sweep:
 	// there the tab is losing its last pane for good, here it is getting a
 	// normal one back on the next line.
-	pane, err := d.session.CreatePane(tabID, d.defaultCWD())
+	// No conn: this runs from the destroy path with no requesting client in
+	// hand (a background recovery, like every other caller here).
+	pane, err := d.session.CreatePane(tabID, d.defaultCWD(nil))
 	if err != nil {
 		log.Printf("tab %s: could not recover an empty tab: %v", tabID, err)
 		return
@@ -3226,7 +3227,7 @@ func (d *Daemon) handleMovePane(conn *ipc.Conn, msg *ipc.Message) {
 	if destroyed {
 		// The source may have been its project's only tab — the same emptiness
 		// DestroyTab leaves, owed the same replacement Shell tab.
-		d.recoverEmptyProject(srcProject)
+		d.recoverEmptyProject(conn, srcProject)
 	}
 
 	// Spawn every selection this move touched; ensureTabSpawned is idempotent
@@ -3338,7 +3339,9 @@ func (d *Daemon) ensureTabNotEmpty(tabID string) {
 		d.cleanupPaneArtifacts(op.ID)
 		d.session.DestroyPane(op.ID)
 	}
-	if newPane, err := d.session.CreatePane(tabID, d.defaultCWD()); err == nil {
+	// No conn: ensureTabNotEmpty runs from destroy and exit paths with no
+	// requesting client in hand.
+	if newPane, err := d.session.CreatePane(tabID, d.defaultCWD(nil)); err == nil {
 		setPaneType(newPane, "terminal")
 		ptySession := apty.New()
 		if err := d.spawnPane(newPane, ptySession, false); err != nil {
@@ -3825,6 +3828,22 @@ func (d *Daemon) repaintAfterResize(pane *Pane, typ string) {
 	d.sendRedrawKey(pane, typ, p.Persistence.RedrawKey)
 }
 
+// updatePaneIsUserInput reports whether an update_pane payload carries a field
+// the user just acted on (rename, mute, eager, pin/unpin attention, mark/unmark
+// deletion) — as opposed to the automatic reports this same message also
+// carries (an OSC 7 CWD change, overlay visibility, the unseen mark). Only the
+// former should stamp the sending client's last-input time: a pane silently
+// reporting its own CWD, or a TUI clearing an unseen mark on focus, must not
+// make an idle client look like the one somebody is driving.
+func updatePaneIsUserInput(msg *ipc.Message) bool {
+	var p ipc.UpdatePanePayload
+	if err := msg.DecodePayload(&p); err != nil {
+		return false
+	}
+	return p.Name != "" || p.Muted != nil || p.Eager != nil ||
+		p.PinnedAttention != nil || p.MarkedForDeletion != nil
+}
+
 // handleUpdatePane applies a PARTIAL pane update. conn identifies the client
 // that sent it, which only the overlay-visibility field needs: that field is a
 // claim about one client's screen, not a daemon-wide fact.
@@ -3963,8 +3982,22 @@ func (d *Daemon) handleUpdatePane(conn *ipc.Conn, msg *ipc.Message) {
 		// from the replayed event history — a line per report would churn
 		// quild.log for no diagnostic gain.
 		pane.PluginMu.Lock()
+		wasUnseen := pane.Unseen
 		pane.Unseen = *payload.Unseen
 		pane.PluginMu.Unlock()
+		// Every OTHER attached client's sidebar carries the same "finished
+		// while you were away" mark for this pane, so the FALLING edge — and
+		// only the falling edge, never a re-affirmed true or an unchanged
+		// false — has to reach them too, or looking at the pane in one TUI
+		// leaves it marked in a second one. Sent before the quiet-field
+		// return below, which this field is one of.
+		if wasUnseen && !*payload.Unseen {
+			if seen, err := ipc.NewMessage(ipc.MsgPaneSeen, ipc.PaneSeenPayload{
+				PaneID: pane.ID,
+			}); err == nil {
+				d.broadcast(seen)
+			}
+		}
 	}
 	if payload.OverlayVisible != nil {
 		d.applyOverlayVisibility(conn, pane, *payload.OverlayVisible)
@@ -5708,16 +5741,48 @@ func resolveSpawnArgs(p *plugin.PanePlugin, pane *Pane, restoring, ownsRecord bo
 	return args
 }
 
-// defaultCWD returns the best working directory for a new pane: the last
-// known client CWD (from the most recent TUI attach) if it still points at
-// an existing directory, falling back to the daemon's own working
-// directory. Symlinks are resolved so all callers see the canonical path.
-func (d *Daemon) defaultCWD() string {
-	if p := d.clientCWD.Load(); p != nil && *p != "" {
-		if dir := resolveSpawnDirWithin(*p, spawnDirProbeTimeout); dir != "" {
-			return dir
+// defaultCWD returns the best working directory for a new pane, for a
+// requesting client's conn. Multi-client sync gives each attached client its
+// OWN cwd (the directory its own TUI was launched from), so "the last known
+// client CWD" is no longer a single value the daemon can read off one field —
+// it depends on which client is asking, and an MCP bridge (no attach at all)
+// asks on behalf of nobody in particular.
+//
+// Checked in order, each candidate validated exactly the same way
+// (resolveSpawnDirWithin: os.Stat + EvalSymlinks, so a stale or unreachable
+// directory falls through rather than being trusted):
+//
+//  1. conn's own attached-client cwd, when conn names an attached client;
+//  2. the size master's cwd — the client whose window sizes every PTY,
+//     the closest thing multi-client sync has to "the" TUI;
+//  3. the most recently active client's cwd;
+//  4. the daemon's own working directory.
+//
+// conn is nil for every restore and recovery caller (respawnPanes,
+// recoverEmptyTab, ensureTabNotEmpty, …), which has no requesting client at
+// all — those start at step 2. Symlinks are resolved so all callers see the
+// canonical path.
+func (d *Daemon) defaultCWD(conn *ipc.Conn) string {
+	if conn != nil {
+		if rec, ok := d.clientByConn(conn); ok {
+			if dir := resolveSpawnDirWithin(rec.cwd, spawnDirProbeTimeout); dir != "" {
+				return dir
+			}
 		}
-		// stale (directory removed since attach), or unreachable — fall through
+	}
+	if mc := d.masterConn(); mc != nil {
+		if rec, ok := d.clientByConn(mc); ok {
+			if dir := resolveSpawnDirWithin(rec.cwd, spawnDirProbeTimeout); dir != "" {
+				return dir
+			}
+		}
+	}
+	if ac := d.mostRecentlyActiveConn(); ac != nil {
+		if rec, ok := d.clientByConn(ac); ok {
+			if dir := resolveSpawnDirWithin(rec.cwd, spawnDirProbeTimeout); dir != "" {
+				return dir
+			}
+		}
 	}
 	// Best-effort; if Getwd fails we return "" and the spawn will fail
 	// with a clear error from os/exec rather than silently land somewhere.
@@ -7379,11 +7444,19 @@ func (d *Daemon) handleSetActivePane(conn *ipc.Conn, msg *ipc.Message) {
 	// Switch to the pane's tab
 	d.session.SwitchTab(pane.CurrentTabID())
 
-	// Broadcast to TUI clients so they can set focus
-	broadcast, _ := ipc.NewMessage(ipc.MsgSetActivePane, ipc.SetActivePanePayload{
-		PaneID: req.PaneID,
-	})
-	d.broadcast(broadcast)
+	// Focus reaches ONE client — req.Client, or the implicit target — never
+	// every attached TUI: a second TUI looking at something else must not
+	// have its focus yanked by a command aimed at the first. A headless
+	// daemon (nobody attached) has nothing to focus, so this send is
+	// nil-guarded rather than answered with a broadcast; the tab still
+	// switches for whoever attaches next.
+	if target := d.targetConn(req.Client); target != nil {
+		if focus, err := ipc.NewMessage(ipc.MsgSetActivePane, ipc.SetActivePanePayload{
+			PaneID: req.PaneID,
+		}); err == nil {
+			target.Send(focus)
+		}
+	}
 
 	d.broadcastState()
 	d.requestSnapshot()
@@ -7400,6 +7473,14 @@ func (d *Daemon) handleDismissEvent(msg *ipc.Message) {
 		d.events.DismissAll()
 	} else {
 		d.events.Dismiss(payload.EventID)
+	}
+	// Every attached client's sidebar is showing the same event(s); without
+	// this a card dismissed in one TUI keeps sitting in a second one until
+	// something else happens to refresh it.
+	if dismissed, err := ipc.NewMessage(ipc.MsgEventDismissed, ipc.EventDismissedPayload{
+		EventID: payload.EventID,
+	}); err == nil {
+		d.broadcast(dismissed)
 	}
 }
 

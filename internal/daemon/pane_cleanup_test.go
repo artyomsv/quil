@@ -59,7 +59,7 @@ func TestHandleDestroyTab_CleansHookArtifacts(t *testing.T) {
 	spoolFile, sessFile := seedPaneArtifacts(t, pane.ID)
 
 	msg, _ := ipc.NewMessage(ipc.MsgDestroyTab, ipc.DestroyTabPayload{TabID: tab.ID})
-	d.handleDestroyTab(msg)
+	d.handleDestroyTab(nil, msg)
 
 	assertGone(t, spoolFile, sessFile)
 }

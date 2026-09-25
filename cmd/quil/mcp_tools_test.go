@@ -1,8 +1,11 @@
 package main
 
 import (
+	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/artyomsv/quil/internal/ipc"
 )
@@ -128,5 +131,155 @@ func TestBuildTabMemSummaries_EmptyMemKeepsTabsAsZeroRows(t *testing.T) {
 		if s.PaneCount != 0 || s.TotalBytes != 0 {
 			t.Errorf("empty tab %s: count/total = %d/%d, want 0/0", s.TabID, s.PaneCount, s.TotalBytes)
 		}
+	}
+}
+
+// TestSetActivePane_ClientFieldReachesThePayload: the tool's optional
+// client input has to survive the trip onto the wire, or targeting one
+// specific TUI (multi-client sync) silently degrades to the implicit
+// most-recently-active target on every call.
+func TestSetActivePane_ClientFieldReachesThePayload(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	local := newFakeIPCDaemon(t, "pane-local")
+	session, _ := toolHarness(t, local, nil)
+
+	if _, err := callTool(t, session, "set_active_pane", map[string]any{
+		"pane_id": "pane-local", "client": "tui-B",
+	}); err != nil {
+		t.Fatalf("set_active_pane: %v", err)
+	}
+
+	// sendRaw only guarantees the frame is ENQUEUED by the time the tool call
+	// returns; the actual write happens on the bridge's own sendLoop
+	// goroutine (same reason mcp_hosts_test.go's waitUntil exists).
+	var got *ipc.SetActivePanePayload
+	waitUntil(func() bool {
+		local.mu.Lock()
+		defer local.mu.Unlock()
+		for _, m := range local.received {
+			if m.Type == ipc.MsgSetActivePane {
+				var p ipc.SetActivePanePayload
+				if err := m.DecodePayload(&p); err != nil {
+					t.Fatal(err)
+				}
+				got = &p
+			}
+		}
+		return got != nil
+	}, 500*time.Millisecond)
+	if got == nil {
+		t.Fatal("no set_active_pane frame reached the daemon")
+	}
+	if got.Client != "tui-B" {
+		t.Errorf("SetActivePanePayload.Client = %q, want %q", got.Client, "tui-B")
+	}
+}
+
+// closeTUIReceived polls the fake daemon for the LATEST close_tui frame it
+// received, up to 500ms. sendRaw only guarantees the frame is ENQUEUED by the
+// time the tool call returns — the actual socket write happens on the
+// bridge's own sendLoop goroutine, same as mcp_hosts_test.go's waitUntil
+// exists for.
+func closeTUIReceived(t *testing.T, f *fakeIPCDaemon) *ipc.CloseTUIPayload {
+	t.Helper()
+	var got *ipc.CloseTUIPayload
+	waitUntil(func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		for _, m := range f.received {
+			if m.Type == ipc.MsgCloseTUI {
+				var p ipc.CloseTUIPayload
+				if err := m.DecodePayload(&p); err != nil {
+					t.Fatal(err)
+				}
+				got = &p
+			}
+		}
+		return got != nil
+	}, 500*time.Millisecond)
+	return got
+}
+
+// TestCloseTUI_ClientFieldReachesThePayload is the close_tui half of the
+// same wiring check.
+func TestCloseTUI_ClientFieldReachesThePayload(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	local := newFakeIPCDaemon(t, "pane-local")
+	session, _ := toolHarness(t, local, nil)
+
+	if _, err := callTool(t, session, "close_tui", map[string]any{"client": "tui-A"}); err != nil {
+		t.Fatalf("close_tui: %v", err)
+	}
+
+	got := closeTUIReceived(t, local)
+	if got == nil {
+		t.Fatal("no close_tui frame reached the daemon")
+	}
+	if got.Client != "tui-A" {
+		t.Errorf("CloseTUIPayload.Client = %q, want %q", got.Client, "tui-A")
+	}
+}
+
+// TestCloseTUI_NoClientSendsAnEmptyPayload: an older-style call with no
+// client argument must still reach the daemon as a valid (empty) payload —
+// the historical broadcast-to-every-TUI shape a headless daemon and every
+// existing caller depend on.
+func TestCloseTUI_NoClientSendsAnEmptyPayload(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	local := newFakeIPCDaemon(t, "pane-local")
+	session, _ := toolHarness(t, local, nil)
+
+	if _, err := callTool(t, session, "close_tui", map[string]any{}); err != nil {
+		t.Fatalf("close_tui: %v", err)
+	}
+
+	got := closeTUIReceived(t, local)
+	if got == nil {
+		t.Fatal("no close_tui frame reached the daemon")
+	}
+	if got.Client != "" {
+		t.Errorf("CloseTUIPayload.Client = %q, want empty", got.Client)
+	}
+}
+
+// TestListClients_ReturnsTheDaemonsList exercises the new list_clients tool
+// end to end: it must gate on the daemon advertising list_clients_req (or a
+// version at least listClientsMinVersion), and decode the daemon's answer.
+func TestListClients_ReturnsTheDaemonsList(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	local := newFakeIPCDaemonVersion(t, "pane-local", listClientsMinVersion)
+	session, _ := toolHarness(t, local, nil)
+
+	text, err := callTool(t, session, "list_clients", map[string]any{})
+	if err != nil {
+		t.Fatalf("list_clients: %v", err)
+	}
+	var out []struct {
+		ipc.ClientInfo
+		Host string `json:"host"`
+	}
+	if err := json.Unmarshal([]byte(text), &out); err != nil {
+		t.Fatalf("decode: %v\n%s", err, text)
+	}
+	if len(out) != 1 || out[0].Client != "tui-pane-local" || !out[0].Master {
+		t.Fatalf("list_clients result = %+v", out)
+	}
+}
+
+// TestListClients_RefusedBelowItsOwnFloor: list_clients_req is new with
+// multi-client sync, so a daemon that neither advertises it nor clears
+// listClientsMinVersion must be refused with a named error — not a silent
+// drop and a timeout (the daemon simply ignores an unknown request type).
+func TestListClients_RefusedBelowItsOwnFloor(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	local := newFakeIPCDaemonRequests(t, "pane-local", "9.9.9", ipc.MsgCreateTabReq)
+	session, _ := toolHarness(t, local, nil)
+
+	_, err := callTool(t, session, "list_clients", map[string]any{})
+	if err == nil || !strings.Contains(err.Error(), ipc.MsgListClientsReq) {
+		t.Fatalf("expected a refusal naming %s, got %v", ipc.MsgListClientsReq, err)
+	}
+	if !local.sawNo(ipc.MsgListClientsReq) {
+		t.Fatal("refused request reached the daemon")
 	}
 }

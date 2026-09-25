@@ -177,7 +177,7 @@ Legend: ✅ full · 🟡 partial/different · ❌ absent · ❓ not re-verified
 | Repo config + lifecycle hooks | 🟡 | ✅ | ❌ |
 | Profiles (per-project workspaces) | 🟡 | ✅ | 🟡 (projects, v1.47 — a project scopes tabs and a root directory, not a saved profile) |
 | Auto-stop idle sessions | 🟡 | ✅ | ❌ |
-| Groups / favorites / snooze / archive / trash | 🟡 | ✅ | ❌ |
+| Groups / favorites / snooze / archive / trash | 🟡 | ✅ | 🟡 (project groups in the sidebar, v1.79 — named, collapsible, reorderable; no favorites, snooze, archive or trash) |
 | Self-update (in-app) | ✅ | ✅ | ✅ (check + stage in the background, prompt in the TUI, rename-aside swap with rollback applied at next launch) |
 | Self-update as a *CLI subcommand* | ✅ | ✅ | ❌ (there is no `quil update`; the CLI switch is daemon/mcp/notify/sandbox/version/remote/restart/status) |
 | Pane notes (per-pane editor) | ❌ | ❌ | ✅ |
@@ -220,7 +220,7 @@ current to-do list.
 | 17 | Themes + light/dark auto-switch | herdr, aoe | 8–18 presets, follows host OSC 10/11. Quil's theming is minimal. | S–M | ★★ | new |
 | 18 | Session fork | aoe | Branch a conversation into a new independent session, parent untouched. | M | ★★ | new |
 | 19 | Repo config + lifecycle hooks (`on_create`/`on_launch`/`on_destroy`) | aoe | Per-project `.quil.toml` hooks. Natural extension of workspace files. | M | ★★ | workspace-files |
-| 20 | Session lifecycle management (auto-stop idle, groups/favorites/snooze/archive) | aoe | Keep a large fleet tidy: reap idle sessions, organize + archive them. | M | ★★ | new |
+| 20 | Session lifecycle management (auto-stop idle, groups/favorites/snooze/archive) | aoe | Keep a large fleet tidy: reap idle sessions, organize + archive them. The grouping half is partly covered since v1.79: projects (not single sessions) go into named, collapsible sidebar groups. Auto-stop, favorites, snooze and archive are still open. | M | ★★ | new |
 
 Runners-up considered but cut from the top 20: named sessions, live server
 handoff, ACP structured view (novel but very large), `agent explain` detection

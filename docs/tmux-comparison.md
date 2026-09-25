@@ -54,11 +54,15 @@ prefix = "ctrl+a"
 
 ## Coverage at a glance
 
-| | Count |
-|---|---|
-| Same key, same meaning | 27 |
-| Close analogue on a different key | 12 |
-| No Quil equivalent | 23 |
+Counted per table row below, so a row such as `1`–`9` counts once.
+
+| | Status | Rows |
+|---|---|---|
+| Same key, same meaning | `exact` | 15 |
+| Close analogue | `analogue`, `approximate` | 11 |
+| Reachable, no default key | `mouse only`, `no key` | 6 |
+| Deliberately unbound | `by design` | 1 |
+| No Quil equivalent | `absent` | 15 |
 
 The tmux column throughout is the default prefix table for **tmux 3.x as shipped**. If you have a `.tmux.conf`, your bindings differ and this document says nothing about them.
 
@@ -96,15 +100,15 @@ The tmux column throughout is the default prefix table for **tmux 3.x as shipped
 | `;` | last-pane | Pane history back (`Alt+Backspace`) | analogue |
 | `C-←` / `M-←` | resize-pane by 1 / 5 cells | Drag the split border | mouse only |
 | `q` | display-panes | — | absent |
-| `{` / `}` | swap-pane -U / -D | — | absent |
+| `{` / `}` | swap-pane -U / -D | `Alt`+drag a pane onto the middle of another | mouse only |
 | `!` | break-pane | — | absent |
 | `Space` | next-layout | — | absent |
-| `M-1`–`M-5` | select-layout (preset layouts) | — | absent |
-| `E` | select-layout -E (spread) | — | absent |
+| `M-1`–`M-5` | select-layout (preset layouts) | Tab menu → Layout…, or `tab.layout_*` | no key |
+| `E` | select-layout -E (spread) | Tab menu → Layout… → Even out, or `tab.layout_even` | no key |
 | `C-o` / `M-o` | rotate-window | — | absent |
 | `m` / `M` | mark / unmark pane | — | absent |
 
-**The layout cluster is a concept gap, not a to-do.** tmux treats a window's panes as an arrangeable set with named layouts you cycle through. Quil uses a binary split tree that you shape directly, so there is nothing to cycle *to* — `Space`, `M-1`–`M-5`, `E`, `{`/`}` and the rotate keys have no meaning in that model.
+**Layouts are applied, not cycled.** tmux treats a window's panes as an arrangeable set with named layouts you cycle through. Quil keeps a binary split tree that you shape directly, and the tab menu's *Layout…* rebuilds that tree in one of six shapes — Even out, Columns, Rows, Grid, Main + stack, Spiral. The six are keymap actions (`tab.layout_even` … `tab.layout_spiral`) that ship unbound and that the `tmux` preset does not bind, so `M-1`–`M-5` and `E` have an equivalent but no key until you give them one. There is still no layout to cycle *to* (`Space`) and no rotate. Swapping two panes is a mouse gesture: hold `Alt` and drag one onto the middle of the other. `break-pane` has no equivalent — *Move to tab…* on the pane menu moves a pane into an existing tab, not a new one.
 
 ## Copy mode and buffers
 

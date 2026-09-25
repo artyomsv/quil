@@ -304,7 +304,7 @@ export const competitors: Record<CompetitorInfo["slug"], CompetitorInfo> = {
     keyGap:
       "Zero persistence across host reboots. You can bolt on tmux-resurrect or tmux-continuum, but even those only restore layout and working directories — not AI session state, not running processes, not scrollback.",
     migrationNote:
-      "Coming from tmux? Quil uses familiar keybindings (Ctrl+T new tab, Alt+H / Alt+V to split). Everything's remappable in ~/.quil/config.toml so you can reuse your tmux muscle memory verbatim.",
+      "Coming from tmux? Put `preset = \"tmux\"` in ~/.quil/bindings.toml for a Ctrl+B prefix keymap (Ctrl+B c for a new tab, Ctrl+B % to split). Any action can be rebound there too, including the six tab layouts that ship unbound.",
     faq: [
       {
         question: "Can I run Quil and tmux side by side?",
@@ -531,7 +531,7 @@ export const competitors: Record<CompetitorInfo["slug"], CompetitorInfo> = {
       { feature: "Breadth of agents supported", quil: "partial", them: "yes", note: "Quil: 3 deep (Claude Code, OpenCode, Codex) + tools. AoE: ~13 terminal + 7 ACP." },
       { feature: "Session fork / import from disk", quil: "no", them: "yes" },
       { feature: "Sound + push notifications", quil: "partial", them: "yes", note: "Quil raises real Windows toasts when an agent parks on a prompt or finishes a turn, and clicking one routes you to the pane that sent it. Still missing: sound, macOS/Linux, and anything that reaches a phone — AoE's Web Push does, which is the point of its browser surface." },
-      { feature: "Session lifecycle mgmt (auto-stop idle, groups, archive)", quil: "no", them: "yes" },
+      { feature: "Session lifecycle mgmt (auto-stop idle, groups, archive)", quil: "partial", them: "yes", note: "Quil groups projects, not single sessions: named sidebar groups that collapse to one row and still show their agents' state. It has no auto-stop for idle sessions and no archive." },
     ],
     faq: [
       {

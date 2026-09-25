@@ -438,6 +438,10 @@ When a pane plugin asks for a working directory (`prompts_cwd`, e.g. Claude Code
 
 Quil records the last project list seen on each remote destination in `~/.quil/remote-projects-<host>.json` (plus a bare `remote-projects.json` for the local daemon), so a host that is unreachable at launch can still be shown by name in the sidebar instead of vanishing. This file is managed by Quil — no hand-editing. A stale copy is harmless: it self-heals on the next successful broadcast from that host, and is removed automatically when the host is disconnected.
 
+## Project groups
+
+The sidebar's project groups (see [Features → Project groups](features.md#project-groups)) are stored in `~/.quil/project-groups.json`: each group's name, whether it is collapsed, and its projects. The file belongs to this machine, not to a daemon — no daemon reads it, which is what lets one group hold local and remote projects. It is managed by Quil — no hand-editing. Two Quil windows on one machine share it and the last change wins. A file Quil cannot read or parse is moved aside to `project-groups.json.bak` (or the next free `.bak.N`) and the sidebar starts with no groups, so nothing overwrites it.
+
 ## How edits get persisted
 
 - **Edits via the F1 → Settings dialog** auto-save on TUI exit. The setter for each row flips `m.configChanged = true`; `main.go` writes the file atomically via temp + rename.

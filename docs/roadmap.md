@@ -543,6 +543,16 @@ default-deny firewall needs `NET_ADMIN`, which Quil does not grant); bind-mount
 IO on Docker Desktop is ~20× slower and inotify does not cross it on Windows, so
 file watchers need polling; repositories with submodules are unsupported.
 
+### v1.76.0–v1.79.0: Reorganise Tabs, Panes and Projects
+> Move work where it belongs without restarting it.
+
+- **Tab bar wheel scroll (v1.76.0)** — the wheel over the tab bar scrolls the strip instead of the pane under it, without switching tabs; `«N` / `N»` count the tabs hidden on each side. A sideways wheel notch over vim, lazygit or Claude Code no longer scrolls it down
+- **Tab context menu (v1.77.0)** — right-click a tab in the tab bar or the sidebar: Rename tab, Set color…, Move to project… (another project on the same machine, panes still running). A rename or recolour is now saved at once instead of at the next 30 s snapshot
+- **Move a pane to another tab, and tidy a tab's layout (v1.78.0)** — *Move to tab…* on the pane menu; the pane keeps running and spirals into the target's last pane, and a tab left empty closes. The tab menu's *Layout…* offers Even out, Columns, Rows, Grid, Main + stack and Spiral, also in the palette and as unbound `tab.layout_*` actions. `Alt`+drag a pane to place it beside another, swap the two, or drop it on a tab
+- **Project groups (v1.79.0)** — named, collapsible groups in the sidebar with rolled-up badges; drag headers to reorder, drag projects in and out, *Move to group…* on the project menu. Kept on this machine in `project-groups.json`, so one group can mix local and remote projects. Rows under the pointer and rows being dragged are highlighted
+
+**Known limit:** another Quil window attached to the same daemon keeps its own arrangement of a tab and can overwrite a new layout with it — multi-client layout sync is a separate item.
+
 
 ---
 
@@ -832,6 +842,8 @@ review the diff.
     OSC 10/11 colors (herdr ships 18, AoE 8). Quil's theming is minimal today.
 16. **Session lifecycle management** — auto-stop idle sessions plus
     groups / favorites / snooze / archive to keep a large fleet tidy (AoE).
+    **Groups partly shipped (v1.79.0):** projects, not single sessions, go into
+    collapsible sidebar groups. Auto-stop, favorites, snooze and archive are open.
 
 ### M18: Remote & Web *(largest builds; deliberate "later")*
 

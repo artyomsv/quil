@@ -255,9 +255,10 @@ type Daemon struct {
 	// pushes runtime updates via MsgOverlayPolicy without a daemon restart.
 	overlayPolicyState overlayPolicyState
 
-	// attachedConns maps each conn that has sent MsgAttach — the clients, as
-	// distinct from every conn (see markClientAttached) — to the set of overlay
-	// panes that client currently has ON SCREEN.
+	// clients holds one record for each conn that has sent MsgAttach — the
+	// clients, as distinct from every conn (see registerClient) — with the
+	// size-master election over them (clients.go). Each record also carries
+	// the set of overlay panes that client currently has ON SCREEN.
 	//
 	// Visibility is per client rather than one daemon-wide field because
 	// otherwise whichever conn spoke last defines it: with two TUIs attached,
@@ -267,13 +268,12 @@ type Daemon struct {
 	// claims it, which is also what makes a detached session fall out for free
 	// — no clients, no claims, everything hidden.
 	//
-	// Written from each conn's own dispatch goroutine and from the disconnect
-	// callback, so it carries its own mutex: sm.mu is the wrong lock here,
-	// since a reader parked behind an RWMutex writer is the failure mode this
-	// package keeps being bitten by. Nothing that takes PluginMu may be called
-	// while it is held.
-	attachedMu    sync.Mutex
-	attachedConns map[*ipc.Conn]map[string]bool
+	// Written from each conn's own dispatch goroutine, the disconnect callback
+	// and the grace timer, so it carries its own mutex: sm.mu is the wrong
+	// lock here, since a reader parked behind an RWMutex writer is the failure
+	// mode this package keeps being bitten by. Nothing that takes PluginMu may
+	// be called while it is held, and nothing broadcasts while it is held.
+	clients clientRegistry
 }
 
 func New(cfg config.Config) *Daemon {
@@ -310,6 +310,10 @@ func New(cfg config.Config) *Daemon {
 	d.memReport = memreport.NewCollector(d.session, 5*time.Second)
 	d.procReport = newProcCollector(d.session, memreport.ProcRSSBatch)
 	d.hellos = newHelloRegistry()
+	d.clients.now = time.Now
+	d.clients.afterFn = realAfterFunc
+	d.clients.grace = cfg.Daemon.MasterGrace()
+	d.clients.onChange = d.broadcastState
 	d.startedAt = time.Now()
 	// Clamped like a pushed policy: config.toml is hand-edited, so it can carry
 	// exactly the values the IPC path is bounded against.
@@ -600,50 +604,25 @@ func (d *Daemon) Stop() {
 	})
 }
 
-// markClientAttached records a connection that has sent MsgAttach.
-//
-// ATTACHMENT, not connection, is what "a client is here" means, and the
-// difference is not academic: every live MCP bridge holds an IPC conn for its
-// whole lifetime (cmd/quil/mcp.go dials once and closes on exit), and a bridge
-// is a child of the claude process in a PANE — so bridges routinely outlive the
-// TUI. Counting raw conns therefore answered "is anything connected", which in
-// any session with a claude pane wired to `quil mcp` is permanently yes (21
-// conns in the session that reported 7 live overlays), and the detached-session
-// stamp below never fired in exactly the configuration it was designed for.
-// Re-attaching on the same conn keeps that client's existing overlay claims:
-// the entry is created only when absent.
-func (d *Daemon) markClientAttached(conn *ipc.Conn) {
-	if conn == nil {
-		return
-	}
-	d.attachedMu.Lock()
-	if d.attachedConns == nil {
-		d.attachedConns = make(map[*ipc.Conn]map[string]bool)
-	}
-	if _, ok := d.attachedConns[conn]; !ok {
-		d.attachedConns[conn] = map[string]bool{}
-	}
-	d.attachedMu.Unlock()
-}
-
-// forgetAttachedClient drops a disconnecting conn, and with it every overlay
-// that client claimed visible. A conn that never attached is not in the set, so
-// dropping it changes nothing.
-func (d *Daemon) forgetAttachedClient(conn *ipc.Conn) {
-	d.attachedMu.Lock()
-	delete(d.attachedConns, conn)
-	d.attachedMu.Unlock()
-}
-
 // onClientDisconnect is ipc.Server's disconnect callback.
 //
 // handleConn's defer removes the disconnecting conn (removeConn) before
 // invoking this, and the attached set is keyed on that same conn — so the state
 // here is already exclusive of the client that just left.
+//
+// A client that sent MsgDetach first is already gone from the registry, so
+// only a LOST link reaches the grace logic here.
+//
+// A disconnect caused by our own shutdown is not a lost link, and the record is
+// kept. Stop closes every conn while the final snapshot runs, and dropping the
+// records there would clear a lone master (nobody left to protect) before the
+// snapshot writes size_master — so the restart would have no reserve.
 func (d *Daemon) onClientDisconnect(conn *ipc.Conn) {
 	d.requestSnapshot()
 	d.events.RemoveWatchersByConn(conn)
-	d.forgetAttachedClient(conn)
+	if !d.shuttingDown() && d.forgetAttachedClient(conn) {
+		d.broadcastState()
+	}
 	// Drop this conn's identity with it: the process it described is gone,
 	// and a retained entry would be listed as running.
 	d.hellos.forget(conn)
@@ -673,6 +652,12 @@ func (d *Daemon) snapshot() {
 	// N±1, surfacing as the "snapshot pane count oscillation" bug.
 	activeTab, tabs, panesByTab, projects, activeProject := d.session.SnapshotState()
 	state := d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab, projects, activeProject, false)
+	// Disk only, never on the broadcast: restoreWorkspace turns it into a short
+	// reservation so the previous size master gets its slot back after a
+	// restart, and the reattach resizes nothing.
+	if id := d.masterID(); id != "" {
+		state["size_master"] = id
+	}
 
 	if err := persist.Save(config.WorkspacePath(), state); err != nil {
 		log.Printf("snapshot workspace: %v", err)
@@ -832,6 +817,8 @@ func (d *Daemon) restoreWorkspace() error {
 	tabs, _ := state["tabs"].([]any)
 	panes, _ := state["panes"].([]any)
 	activeProject, _ := state["active_project"].(string)
+	sizeMaster, _ := state["size_master"].(string)
+	d.clients.reserveAfterRestart(sizeMaster)
 
 	d.session.RestoreProjects(parseRestoredProjects(state["projects"]), activeProject)
 
@@ -1383,16 +1370,28 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	// several lines a second forever. Logging it would churn quild.log through
 	// its rotation and bury the lifecycle lines this log exists for.
 	switch msg.Type {
-	case ipc.MsgPaneInput, ipc.MsgResizePane, ipc.MsgUpdateLayout, ipc.MsgClientStat:
+	case ipc.MsgPaneInput, ipc.MsgResizePane, ipc.MsgUpdateLayout, ipc.MsgClientStat,
+		ipc.MsgClientGeometry:
 		// skip logging — too noisy
 	default:
 		log.Printf("ipc recv: %s", msg.Type)
 	}
 
+	// touchClientInput marks the user-originated messages below (input, tab
+	// switch, create, layout, pane update, take control). The latest one picks
+	// which client an untargeted MCP close_tui or set_active_pane reaches.
 	switch msg.Type {
 	case ipc.MsgAttach:
 		d.handleAttach(conn, msg)
+	case ipc.MsgDetach:
+		d.handleDetach(conn)
+	case ipc.MsgClientGeometry:
+		d.handleClientGeometry(conn, msg)
+	case ipc.MsgTakeControl:
+		d.touchClientInput(conn)
+		d.handleTakeControl(conn)
 	case ipc.MsgCreateTab:
+		d.touchClientInput(conn)
 		d.handleCreateTab(conn, msg)
 	case ipc.MsgDestroyTab:
 		// The existence check happens HERE, before the handler, because the
@@ -1401,6 +1400,7 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		d.handleDestroyTab(msg)
 		answerOp(conn, msg, ipc.MsgTabOpResp, id, known, opErrUnless(known, "no such tab"))
 	case ipc.MsgSwitchTab:
+		d.touchClientInput(conn)
 		d.handleSwitchTab(msg)
 	case ipc.MsgUpdateTab:
 		id, known := tabIDKnown(d, msg, "tab_id")
@@ -1411,18 +1411,22 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	case ipc.MsgMoveTab:
 		d.handleMoveTab(conn, msg)
 	case ipc.MsgCreatePane:
+		d.touchClientInput(conn)
 		d.handleCreatePane(conn, msg)
 	case ipc.MsgDestroyPane:
 		d.handleDestroyPane(msg)
 	case ipc.MsgUpdatePane:
+		d.touchClientInput(conn)
 		id, known := paneIDKnown(d, msg)
 		d.handleUpdatePane(conn, msg)
 		answerOp(conn, msg, ipc.MsgPaneOpResp, id, known, opErrUnless(known, "no such pane"))
 	case ipc.MsgMovePane:
 		d.handleMovePane(conn, msg)
 	case ipc.MsgUpdateLayout:
+		d.touchClientInput(conn)
 		d.handleUpdateLayout(msg)
 	case ipc.MsgPaneInput:
+		d.touchClientInput(conn)
 		d.handlePaneInput(conn, msg)
 	case ipc.MsgResizePane:
 		d.handleResizePane(msg)
@@ -1770,8 +1774,15 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 
 	// This is what makes the conn a CLIENT rather than just a connection — the
 	// distinction the detached-session overlay stamp turns on. Recorded before
-	// any of the work below, which has early returns of its own.
-	d.markClientAttached(conn)
+	// any of the work below, which has early returns of its own, and before
+	// the 80x24 defaulting: the election reads the RAW geometry.
+	//
+	// A master change is broadcast only once this attach is answered, so the
+	// new client's first workspace state is its own full one rather than a
+	// broadcast of a workspace this attach may be about to create.
+	if d.registerClient(conn, attach) {
+		defer d.broadcastState()
+	}
 
 	cols, rows := attach.Cols, attach.Rows
 	if cols <= 0 {

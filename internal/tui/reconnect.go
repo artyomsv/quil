@@ -10,6 +10,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+
+	"github.com/artyomsv/quil/internal/ipc"
 )
 
 // linkLostMsg reports that the connection to the daemon died.
@@ -375,6 +377,29 @@ func (m Model) closeClient(c Client) {
 	m.closeClientFn(c)
 }
 
+// sendDetach tells a conn's daemon that this client is exiting cleanly (§3.3's
+// "a clean exit skips the grace time"): the daemon drops it from master
+// election and the client list at once, rather than waiting out the lost-link
+// grace timer for a link that is not actually lost. Best-effort and silent —
+// this runs on the exit path, where there is nobody left to report a failure
+// to, and an older daemon simply ignores an unknown message type.
+//
+// Sent here, immediately before closeClient, rather than as a tea.Cmd: the
+// Update loop is already gone on the exit path (main.go), and closeClient's
+// own Flush is what actually carries a just-queued Send to the socket.
+func sendDetach(c Client) {
+	if c == nil {
+		return
+	}
+	msg, err := ipc.NewMessage(ipc.MsgDetach, nil)
+	if err != nil {
+		return
+	}
+	if err := c.Send(msg); err != nil {
+		log.Printf("detach: send: %v", err)
+	}
+}
+
 // CloseClient releases every connection the Model currently holds. Called by
 // cmd/quil on exit, after the Bubble Tea program has returned.
 //
@@ -387,10 +412,12 @@ func (m Model) closeClient(c Client) {
 func (m Model) CloseClient() {
 	if r, ok := m.client.(*Router); ok {
 		for _, c := range r.Conns() {
+			sendDetach(c)
 			m.closeClient(c)
 		}
 		return
 	}
+	sendDetach(m.client)
 	m.closeClient(m.client)
 }
 

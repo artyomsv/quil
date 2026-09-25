@@ -46,20 +46,22 @@ func TestUpdate_MCPHiddenPaneDimensions(t *testing.T) {
 			}
 			resized := false
 			for _, msg := range fs.sent {
-				if msg.Type != ipc.MsgResizePane {
+				if msg.Type != ipc.MsgResizePanes {
 					continue
 				}
-				var it ipc.ResizePanePayload
-				if err := msg.DecodePayload(&it); err != nil {
+				var batch ipc.ResizePanesPayload
+				if err := msg.DecodePayload(&batch); err != nil {
 					t.Fatal(err)
 				}
-				if it.PaneID != p.ID {
-					continue
-				}
-				resized = true
-				t.Logf("hidden: broadcast=80x24 emulator=%dx%d resize=%dx%d", p.vt.Width(), p.vt.Height(), it.Cols, it.Rows)
-				if p.vt.Width() != int(it.Cols) || p.vt.Height() != int(it.Rows) {
-					t.Fatal("emulator/PTY resize split")
+				for _, it := range batch.Panes {
+					if it.PaneID != p.ID {
+						continue
+					}
+					resized = true
+					t.Logf("hidden: broadcast=80x24 emulator=%dx%d resize=%dx%d", p.vt.Width(), p.vt.Height(), it.Cols, it.Rows)
+					if p.vt.Width() != int(it.Cols) || p.vt.Height() != int(it.Rows) {
+						t.Fatal("emulator/PTY resize split")
+					}
 				}
 			}
 			if !resized {

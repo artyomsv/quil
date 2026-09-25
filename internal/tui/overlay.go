@@ -481,9 +481,9 @@ func (m *Model) createOverlay(tab *TabModel, repo, pluginName string) tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-// overlayResizeCmd sends MsgResizePane for the overlay pane so the daemon's
-// PTY tracks the current tab dimensions. Cols/Rows subtract the 2-cell border;
-// each dimension is clamped to at least 1.
+// overlayResizeCmd sends a (single-entry) MsgResizePanes batch for the overlay
+// pane so the daemon's PTY tracks the current tab dimensions. Cols/Rows
+// subtract the 2-cell border; each dimension is clamped to at least 1.
 func (m *Model) overlayResizeCmd(tab *TabModel) tea.Cmd {
 	if tab.overlayPane == nil {
 		return nil
@@ -491,6 +491,13 @@ func (m *Model) overlayResizeCmd(tab *TabModel) tea.Cmd {
 	// The overlay fills the tab, so it collapses with the terminal. Same gate as
 	// the two tree fan-outs; see Model.terminalPaintable.
 	if !m.terminalPaintable() {
+		return nil
+	}
+	// Third of the three follower gates: an overlay pane sits outside the
+	// layout tree, so resizeAllPanes/diffResizes never reach it, and this is
+	// its only resize producer. A follower must stay silent here too, or its
+	// overlay's size fights the master's the same way a tree pane's would.
+	if m.isFollower(tab.Dest) {
 		return nil
 	}
 	paneID, dest := tab.overlayPane.ID, tab.Dest
@@ -505,10 +512,8 @@ func (m *Model) overlayResizeCmd(tab *TabModel) tea.Cmd {
 	c := uint16(cols)
 	r := uint16(rows)
 	return func() tea.Msg {
-		msg, err := ipc.NewMessage(ipc.MsgResizePane, ipc.ResizePanePayload{
-			PaneID: paneID,
-			Cols:   c,
-			Rows:   r,
+		msg, err := ipc.NewMessage(ipc.MsgResizePanes, ipc.ResizePanesPayload{
+			Panes: []ipc.ResizePanePayload{{PaneID: paneID, Cols: c, Rows: r}},
 		})
 		if err != nil {
 			log.Printf("overlay: resize pane encode: %v", err)

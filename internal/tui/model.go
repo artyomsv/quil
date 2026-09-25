@@ -20,6 +20,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/google/uuid"
 
 	"github.com/artyomsv/quil/internal/changelog"
 	"github.com/artyomsv/quil/internal/claudesessions"
@@ -67,6 +68,13 @@ type WorkspaceStateMsg struct {
 	Dest string
 	// Update is the daemon's announced newer release (nil when up to date).
 	Update *ipc.UpdateInfo
+	// SizeMaster is this destination's size-master client id, or "" when it
+	// has none. Clients is the number of clients currently attached to it
+	// (bridges excluded). Both ride every broadcast (buildWorkspaceState),
+	// which is what keeps Model.sizeMaster/clientCount current with no
+	// dedicated round trip — see isFollower.
+	SizeMaster string
+	Clients    int
 }
 
 // ProjectInfo is one daemon-side project as broadcast. TabIDs carries the
@@ -465,7 +473,22 @@ type Model struct {
 	// daemon's pane consume another's kick and let armReattachReset for one
 	// dest clear the other's flag. Two daemons minting the same UUID is not a
 	// realistic accident, but the invariant should not rest on that.
-	sizedOnce          map[string]bool
+	sizedOnce map[string]bool
+	// clientID identifies this PROCESS across reconnects — minted once in
+	// NewModel with uuid.NewString() and sent on every attach (attachMessage).
+	// It is never persisted to disk: two TUIs on one machine would then share
+	// it, and each is a distinct client to the daemon's master election.
+	clientID string
+	// sizeMaster records, per destination, the master client's id reported by
+	// the last broadcast ("" = no master on that destination). isFollower
+	// derives from it: this client is a follower of dest whenever sizeMaster
+	// names someone else. Updated in applyWorkspaceState from
+	// WorkspaceStateMsg.SizeMaster.
+	sizeMaster map[string]string
+	// clientCount records, per destination, the last broadcast's attached-
+	// client count (bridges excluded) — what renderStatusBar's role marker
+	// and D9's "most recent input" default both key off of at the TUI layer.
+	clientCount        map[string]int
 	renaming           bool
 	renameInput        string
 	renamingPane       bool
@@ -1146,10 +1169,14 @@ func (m *Model) SetRecentCWDs(list []string) { m.recentCWDs = list }
 // what had to move.) Nil when there is nothing to show.
 func NewModel(client Client, cfg config.Config, version string, registry *plugin.Registry, stalePlugins []plugin.StalePlugin, whatsNew *changelog.Window) Model {
 	m := Model{
-		client:  client,
-		cfg:     cfg,
-		version: version,
-		devMode: os.Getenv("QUIL_HOME") != "",
+		client: client,
+		cfg:    cfg,
+		// Minted once per process, per D3: stable across this process's own
+		// reconnects (it never changes after this), but a NEW process — a
+		// closed and relaunched TUI — is a new client with a new id.
+		clientID: uuid.NewString(),
+		version:  version,
+		devMode:  os.Getenv("QUIL_HOME") != "",
 		// See the field comment: a terminal with no focus reporting never
 		// corrects this, and assuming focused is the quiet failure.
 		termFocused:      true,
@@ -1196,6 +1223,23 @@ func NewModel(client Client, cfg config.Config, version string, registry *plugin
 // to call repeatedly; the last call wins.
 func (m *Model) initKeymap() {
 	m.keymap, m.keyConflicts = buildKeymap(m.cfg.Keybindings)
+}
+
+// SetClientID overrides the process-minted client id. A test seam: production
+// never needs a stable id across separate NewModel calls, but a test driving
+// two Models as two "clients" of one daemon needs to give them distinct,
+// known ids rather than two random UUIDs it cannot assert against.
+func (m *Model) SetClientID(id string) { m.clientID = id }
+
+// isFollower reports whether this client is NOT the size master of dest, and
+// there IS a master — see D4. A dest this client has never seen a broadcast
+// for (m.sizeMaster is nil, or holds no entry for it) answers false: the zero
+// value of "no master reported yet" must behave exactly like "no follower
+// gate applies", which is what every pre-multi-client-sync test and every
+// single-client session already assumes.
+func (m *Model) isFollower(dest string) bool {
+	master := m.sizeMaster[dest]
+	return master != "" && master != m.clientID
 }
 
 // WindowSize returns the last known window dimensions for persistence.
@@ -1538,7 +1582,8 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 			// statement. The same hazard the ledger comment above documents.
 			m.promptNextUpgrade()
 			resize, attach, wake := m.resizeAllPanes(), m.attachAllDests(), m.wakeOfflineDests()
-			return m, tea.Batch(resize, attach, wake)
+			geom := m.clientGeometryCmd()
+			return m, tea.Batch(resize, attach, wake, geom)
 		}
 
 		// A destination can join the router after the first resize (a host that
@@ -1726,6 +1771,12 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		// Also resize an active overlay pane so the daemon's PTY tracks the new size.
 		var overlayCmds []tea.Cmd
 		overlayCmds = append(overlayCmds, m.resizeAllPanes())
+		// The debounced report of THIS client's own window size, to every
+		// connected destination — see clientGeometryCmd. Riding the same
+		// debounce point as resizeAllPanes rather than the raw tea.WindowSizeMsg
+		// is deliberate: a resize burst (dragging the window edge) would
+		// otherwise cost one client_geometry per intermediate size report.
+		overlayCmds = append(overlayCmds, m.clientGeometryCmd())
 		// EVERY tab, not just the active one. An overlay pane sits outside the
 		// layout tree, so resizeAllPanes never walks it (it iterates
 		// tab.Leaves()) and diffResizes keeps no sizedOnce ledger for it —
@@ -5316,6 +5367,8 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// jumpToNextBlocked mutates m through a pointer receiver.
 		cmd := m.jumpToNextBlocked()
 		return m, cmd
+	case "client.take_control":
+		return m, m.sendTakeControl(m.activeDest())
 	}
 
 	// Everything from here to the late-tier lookup is skipped for a completed
@@ -6020,6 +6073,40 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]str
 	// the merge because that is where m.projects becomes authoritative for this
 	// destination, and it self-skips when nothing changed.
 	m.cacheRemoteProjects(dest)
+
+	// Multi-client sync (§4.2): this destination's size master and attached-
+	// client count. Read the PREVIOUS master before overwriting it — becoming
+	// master is a TRANSITION, not a state, and the resize kick below must fire
+	// once, on the broadcast that flips it, never on every later broadcast
+	// that merely reconfirms it.
+	var prevMaster string
+	if m.sizeMaster != nil {
+		prevMaster = m.sizeMaster[dest]
+	}
+	if m.sizeMaster == nil {
+		m.sizeMaster = make(map[string]string)
+	}
+	m.sizeMaster[dest] = state.SizeMaster
+	if m.clientCount == nil {
+		m.clientCount = make(map[string]int)
+	}
+	m.clientCount[dest] = state.Clients
+	// The leading state.SizeMaster != "" guard matters on its own: without it,
+	// an empty m.clientID (never set — every real Model gets one from
+	// NewModel, but a bare Model literal in a test does not) would equal an
+	// empty state.SizeMaster ("no master on dest"), and losing a master would
+	// misread as this client becoming one.
+	if state.SizeMaster != "" && state.SizeMaster == m.clientID && prevMaster != state.SizeMaster {
+		// This client just became dest's size master. Every pane's last
+		// resize on dest was sent by whoever was master before (or by nobody,
+		// if there was none) — sizedOnce still reports "already sized" for
+		// sizes THIS client never sent, so the diff in resizeAllPanes/
+		// diffResizes would suppress the very sizes that just became
+		// authoritative. Clearing it re-arms the same first-resize kick
+		// armReattachReset re-arms after a reattach.
+		m.clearSizedOnceForDest(dest)
+		overlayResizeCmds = append(overlayResizeCmds, m.resizeAllPanes())
+	}
 
 	// Dispose panes that did not survive reconciliation — both panes pruned
 	// from surviving tabs and every pane of tabs the daemon dropped. Without
@@ -7158,6 +7245,19 @@ func (m Model) renderStatusBar() string {
 	if m.devMode {
 		right = "[dev] " + right
 	}
+	// Multi-client sync (§4.3): the role marker sits beside [dev], in the same
+	// style, because it says something about how THIS process relates to the
+	// workspace rather than about any one pane or project. Shown only once a
+	// second client exists — with one client the question "who is the master"
+	// has exactly one uninteresting answer, and showing it on every ordinary
+	// single-client session would be noise nobody asked for. See isFollower.
+	if dest := m.activeDest(); m.clientCount[dest] >= 2 {
+		if m.isFollower(dest) {
+			right = "[follower] " + right
+		} else {
+			right = "[master] " + right
+		}
+	}
 	// Placed after [dev] so it renders leftmost of the two, i.e. first in
 	// reading order: which MACHINE you are driving outranks which build you
 	// are running. Without it the status bar is identical whether the panes
@@ -7393,9 +7493,10 @@ func (m Model) attachMessage(dest string) *ipc.Message {
 	// Best-effort; if Getwd fails the daemon falls back to its own CWD.
 	localCWD, _ := os.Getwd()
 	msg, _ := ipc.NewMessage(ipc.MsgAttach, ipc.AttachPayload{
-		Cols: cols,
-		Rows: rows,
-		CWD:  attachCWD(dest, localCWD),
+		Cols:     cols,
+		Rows:     rows,
+		CWD:      attachCWD(dest, localCWD),
+		ClientID: m.clientID,
 	})
 	return msg
 }
@@ -7738,6 +7839,16 @@ func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
 	}
 	if ap, ok := raw["active_project"].(string); ok {
 		state.ActiveProject = ap
+	}
+	// Multi-client sync: size_master ("" = no master) and clients (attached
+	// count, bridges excluded) — see buildWorkspaceState on the daemon side.
+	// Absent on an older daemon, which leaves both at their zero values, and
+	// isFollower already treats "" as "not a follower".
+	if sm, ok := raw["size_master"].(string); ok {
+		state.SizeMaster = sm
+	}
+	if c, ok := raw["clients"].(float64); ok {
+		state.Clients = int(c)
 	}
 	if projects, ok := raw["projects"].([]any); ok {
 		for _, p := range projects {
@@ -9044,15 +9155,90 @@ func (m *Model) terminalPaintable() bool {
 	return m.width >= minTermWidth && m.height >= minTermHeight
 }
 
+// clientGeometryCmd reports this client's own RAW window size to every
+// connected destination (§3.5's MsgClientGeometry) — 0x0 when
+// !terminalPaintable(), matching attachMessage's own zero-below-the-floor
+// rule, and the true m.width/m.height otherwise, never a pane or a rect. It
+// keeps a destination's master-eligibility test (and clientSize, the default
+// size for a new pane) current between broadcasts, in particular a MASTER
+// whose window shrinks below the paintable floor: that daemon must see this
+// arrive so it can hand off at once, per D4/Review-Focus-1.
+//
+// Connections are resolved HERE, on the Update goroutine — Router.Conns()
+// walks its own lock, so this is not required for safety, but every other
+// "resolve destinations, then send inside the Cmd" site in this file does it
+// this way, and a fire-and-forget geometry report is not the place to invent
+// a second convention.
+func (m Model) clientGeometryCmd() tea.Cmd {
+	cols, rows := m.width, m.height
+	if !m.terminalPaintable() {
+		cols, rows = 0, 0
+	}
+	var conns []Client
+	if r, ok := m.client.(*Router); ok {
+		conns = r.Conns()
+	} else if m.client != nil {
+		conns = []Client{m.client}
+	}
+	return func() tea.Msg {
+		msg, err := ipc.NewMessage(ipc.MsgClientGeometry, ipc.ClientGeometryPayload{Cols: cols, Rows: rows})
+		if err != nil {
+			return nil
+		}
+		for _, c := range conns {
+			if c == nil {
+				continue
+			}
+			if err := c.Send(msg); err != nil {
+				log.Printf("client_geometry: send: %v", err)
+			}
+		}
+		return nil
+	}
+}
+
+// sendTakeControl asks dest's daemon to make this client the size master at
+// once (D6). Fire-and-forget: MsgTakeControl carries no payload, and the
+// daemon either promotes an eligible, attached sender or logs and ignores an
+// ineligible one — there is nothing for the client to wait on, and the next
+// broadcast is what tells it whether the request took.
+func (m Model) sendTakeControl(dest string) tea.Cmd {
+	return func() tea.Msg {
+		msg, err := ipc.NewMessage(ipc.MsgTakeControl, nil)
+		if err != nil {
+			return nil
+		}
+		if err := m.sendForDest(dest, msg); err != nil {
+			log.Printf("take control: send: %v", err)
+		}
+		return nil
+	}
+}
+
 // resizeAllPanes walks the projects rather than allTabs() so each pane's
 // message can carry its own daemon: this is a broadcast over EVERY project, so
 // the active dest would be the right answer for at most one of them.
+//
+// Every destination's panes are batched into ONE MsgResizePanes frame rather
+// than one MsgResizePane per pane: a window resize or a split-drag release
+// across dozens of panes must not put one must-deliver frame per pane on a
+// follower's 64-slot queue (spec §4.1's "at most one frame per applied resize
+// per follower" bound assumes the master itself never sent more than one
+// batch to begin with).
+//
+// A FOLLOWER destination sends nothing at all — see isFollower. The master
+// already owns every pane's size there, and this client's own idea of what
+// size a pane should be is stale by construction once someone else is master.
 func (m Model) resizeAllPanes() tea.Cmd {
 	if !m.terminalPaintable() {
 		return nil // see terminalPaintable
 	}
 	return func() tea.Msg {
+		batches := make(map[string][]ipc.ResizePanePayload)
 		for _, proj := range m.projects {
+			if m.isFollower(proj.Dest) {
+				continue
+			}
 			for _, tab := range proj.tabs {
 				if tab.Root == nil {
 					continue
@@ -9065,14 +9251,20 @@ func (m Model) resizeAllPanes() tea.Cmd {
 					// the VT, so the mode this reproduces cannot disagree with
 					// the one already applied.
 					cols, rows := paneVTSize(pane.WideCanvas, pane.MinNativeCols, pane.Width, pane.Height, pane.NativeW, tab.CanvasW, tab.CanvasH)
-					msg, _ := ipc.NewMessage(ipc.MsgResizePane, ipc.ResizePanePayload{
+					batches[proj.Dest] = append(batches[proj.Dest], ipc.ResizePanePayload{
 						PaneID: pane.ID,
 						Cols:   uint16(cols),
 						Rows:   uint16(rows),
 					})
-					m.sendForDest(proj.Dest, msg)
 				}
 			}
+		}
+		for dest, panes := range batches {
+			msg, err := ipc.NewMessage(ipc.MsgResizePanes, ipc.ResizePanesPayload{Panes: panes})
+			if err != nil {
+				continue
+			}
+			m.sendForDest(dest, msg)
 		}
 		return nil
 	}
@@ -9325,6 +9517,20 @@ func (m *Model) diffLayouts(state WorkspaceStateMsg) []layoutSend {
 // of distinct inputs can collide on one key.
 func sizedKey(dest, paneID string) string { return dest + "\x00" + paneID }
 
+// clearSizedOnceForDest drops every sizedOnce entry recorded for dest — used
+// when this client becomes dest's size master (applyWorkspaceState), so the
+// first-resize kick resizeAllPanes/diffResizes rely on is owed again for
+// every one of dest's panes, exactly as a reattach re-arms it
+// (armReattachReset).
+func (m *Model) clearSizedOnceForDest(dest string) {
+	prefix := dest + "\x00"
+	for key := range m.sizedOnce {
+		if strings.HasPrefix(key, prefix) {
+			delete(m.sizedOnce, key)
+		}
+	}
+}
+
 // hasProjectForDest reports whether any project belongs to dest.
 func (m *Model) hasProjectForDest(dest string) bool {
 	for _, proj := range m.projects {
@@ -9341,6 +9547,16 @@ func (m *Model) diffResizes(state WorkspaceStateMsg) []resizeSend {
 	// Ahead of every sizedOnce write, so the first-resize kick each pane is
 	// owed survives until the terminal is paintable again. See terminalPaintable.
 	if !m.terminalPaintable() {
+		return nil
+	}
+	// A follower sends nothing for this destination, and — unlike the pending
+	// branch below — marks nothing in sizedOnce either: the whole function is
+	// scoped to state.Dest (every project this loop can reach has
+	// proj.Dest == state.Dest), so one check here covers it. Leaving sizedOnce
+	// untouched means a later election that hands this client the master role
+	// still owes every pane its first-resize kick, exactly as if it had never
+	// been diffed at all.
+	if m.isFollower(state.Dest) {
 		return nil
 	}
 	type size struct {
@@ -9417,22 +9633,29 @@ func (m Model) sendDiffedLayouts(items []layoutSend) tea.Cmd {
 	}
 }
 
-// sendDiffedResizes ships an already-decided resize list.
+// sendDiffedResizes ships an already-decided resize list, batched into one
+// MsgResizePanes per destination — diffResizes can name several panes across
+// one broadcast, and each must reach its daemon as a single must-deliver
+// frame rather than one per pane (see resizeAllPanes' doc comment for why).
 func (m Model) sendDiffedResizes(items []resizeSend) tea.Cmd {
 	if len(items) == 0 {
 		return nil
 	}
 	return func() tea.Msg {
+		batches := make(map[string][]ipc.ResizePanePayload, len(items))
 		for _, it := range items {
-			msg, err := ipc.NewMessage(ipc.MsgResizePane, ipc.ResizePanePayload{
+			batches[it.dest] = append(batches[it.dest], ipc.ResizePanePayload{
 				PaneID: it.paneID,
 				Cols:   it.cols,
 				Rows:   it.rows,
 			})
+		}
+		for dest, panes := range batches {
+			msg, err := ipc.NewMessage(ipc.MsgResizePanes, ipc.ResizePanesPayload{Panes: panes})
 			if err != nil {
 				continue
 			}
-			m.sendForDest(it.dest, msg)
+			m.sendForDest(dest, msg)
 		}
 		return nil
 	}

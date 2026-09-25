@@ -203,8 +203,11 @@ func sentCounts(fs *echoRecorder) (layouts, resizes int) {
 		switch msg.Type {
 		case ipc.MsgUpdateLayout:
 			layouts++
-		case ipc.MsgResizePane:
-			resizes++
+		case ipc.MsgResizePanes:
+			var p ipc.ResizePanesPayload
+			if err := json.Unmarshal(msg.Payload, &p); err == nil {
+				resizes += len(p.Panes)
+			}
 		}
 	}
 	return layouts, resizes
@@ -266,7 +269,7 @@ func TestWorkspaceState_FirstResizeAfterAttach_IsAlwaysSent(t *testing.T) {
 
 	_, resizes := sentCounts(fs)
 	if resizes != 3 {
-		t.Errorf("MsgResizePane count = %d, want 3 (one per pane) — the daemon "+
+		t.Errorf("resize count = %d, want 3 (one per pane) — the daemon "+
 			"zeroes its applied-size guard on PTY install and needs the first "+
 			"client resize to kick a repaint", resizes)
 	}
@@ -294,7 +297,7 @@ func TestWorkspaceState_UnchangedSizes_SendNoResizeOnRepeat(t *testing.T) {
 
 	_, resizes := sentCounts(fs)
 	if resizes != 0 {
-		t.Errorf("MsgResizePane count = %d, want 0 on a repeat broadcast — "+
+		t.Errorf("resize count = %d, want 0 on a repeat broadcast — "+
 			"every pane already has the size the broadcast reports", resizes)
 	}
 }
@@ -468,17 +471,19 @@ func TestWorkspaceState_PendingPane_IsNotResized(t *testing.T) {
 	runCmd(cmd)
 
 	for _, msg := range fs.sent {
-		if msg.Type != ipc.MsgResizePane {
+		if msg.Type != ipc.MsgResizePanes {
 			continue
 		}
-		var p ipc.ResizePanePayload
-		if err := json.Unmarshal(msg.Payload, &p); err != nil {
-			t.Fatalf("decode resize payload: %v", err)
+		var batch ipc.ResizePanesPayload
+		if err := json.Unmarshal(msg.Payload, &batch); err != nil {
+			t.Fatalf("decode resize_panes payload: %v", err)
 		}
-		if p.PaneID == echo.Panes[2].ID {
-			t.Errorf("resized deferred pane %s — the daemon drops it (nil PTY) "+
-				"and never records the size, so this repeats every broadcast "+
-				"forever", p.PaneID)
+		for _, p := range batch.Panes {
+			if p.PaneID == echo.Panes[2].ID {
+				t.Errorf("resized deferred pane %s — the daemon drops it (nil PTY) "+
+					"and never records the size, so this repeats every broadcast "+
+					"forever", p.PaneID)
+			}
 		}
 	}
 
@@ -493,15 +498,17 @@ func TestWorkspaceState_PendingPane_IsNotResized(t *testing.T) {
 
 	var sawSpawned bool
 	for _, msg := range fs2.sent {
-		if msg.Type != ipc.MsgResizePane {
+		if msg.Type != ipc.MsgResizePanes {
 			continue
 		}
-		var p ipc.ResizePanePayload
-		if err := json.Unmarshal(msg.Payload, &p); err != nil {
-			t.Fatalf("decode resize payload: %v", err)
+		var batch ipc.ResizePanesPayload
+		if err := json.Unmarshal(msg.Payload, &batch); err != nil {
+			t.Fatalf("decode resize_panes payload: %v", err)
 		}
-		if p.PaneID == echo.Panes[2].ID {
-			sawSpawned = true
+		for _, p := range batch.Panes {
+			if p.PaneID == echo.Panes[2].ID {
+				sawSpawned = true
+			}
 		}
 	}
 	if !sawSpawned {
@@ -593,7 +600,7 @@ func TestReattach_ReArmsTheFirstResizeKick(t *testing.T) {
 
 	_, resizes := sentCounts(fs)
 	if resizes != 3 {
-		t.Errorf("MsgResizePane count = %d after reattach, want 3 — the daemon "+
+		t.Errorf("resize count = %d after reattach, want 3 — the daemon "+
 			"zeroed its guard on PTY install, so the suppression state from "+
 			"before the outage describes a daemon that no longer exists", resizes)
 	}

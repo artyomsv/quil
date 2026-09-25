@@ -97,6 +97,8 @@ const (
 	palActMoveProjectDown
 	palActNewTemplate
 	palActTabLayout // arg = the keymap action id, e.g. "tab.layout_grid"
+	// Multi-client sync (D6): sends MsgTakeControl to the ACTIVE destination.
+	palActTakeControl
 )
 
 // paletteCommand is one row of the palette. Disabled rows render greyed and are
@@ -566,6 +568,7 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 		paletteCommand{action: palActDaemonLog, enabled: true, label: "View daemon log", keywords: []string{"log", "daemon"}},
 		paletteCommand{action: palActMCPLog, enabled: true, label: "View MCP logs", keywords: []string{"log", "mcp"}},
 		paletteCommand{action: palActRedraw, enabled: true, label: "Force redraw", detail: m.keymap.Display("app.redraw"), keywords: []string{"redraw", "repaint", "refresh"}},
+		paletteCommand{action: palActTakeControl, enabled: true, label: "Take control (size master)", detail: m.keymap.Display("client.take_control"), keywords: []string{"master", "control", "resize", "follower"}},
 	)
 
 	// --- Appearance --------------------------------------------------------
@@ -1237,6 +1240,8 @@ func (m Model) executePaletteCommand(c paletteCommand) (tea.Model, tea.Cmd) {
 		return m.openMCPLogsViewer()
 	case palActRedraw:
 		return m.forceRedraw()
+	case palActTakeControl:
+		return m, m.sendTakeControl(m.activeDest())
 
 	// --- Appearance --------------------------------------------------------
 	case palActDimToggle:

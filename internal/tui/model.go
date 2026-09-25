@@ -6648,9 +6648,20 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 		// way. That pane normally rides the very next broadcast; if it never
 		// comes, the next pass prunes as it always did.
 		tab.CreatingBranch = m.worktreeCreates[tab.ID]
-		if tab.Root != nil && tab.CreatingBranch == "" && !sparedReservation {
-			tab.Root.PrunePlaceholders()
-			tab.invalidateLeaves()
+		if tab.CreatingBranch == "" && !sparedReservation {
+			if tab.Root != nil {
+				tab.Root.PrunePlaceholders()
+				tab.invalidateLeaves()
+			}
+			// A reservation whose placeholder that prune detached is over: its
+			// pane is not coming into it. Left armed, it reports the tab busy
+			// for the rest of the session (tabLayoutBusy), the next fresh
+			// arrival fills a node no tree holds, and an adoption re-seats an
+			// empty slot nobody is waiting for.
+			if ph := m.pendingSplit[tab.ID]; ph != nil && !treeContains(tab.Root, ph) {
+				delete(m.pendingSplit, tab.ID)
+				tab.noteReservation("", 0, false)
+			}
 		}
 		if tab.Root != nil {
 			log.Printf("apply: tab %s panes reconciled (n=%d leaves)", tab.ID, len(tab.Leaves()))

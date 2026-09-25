@@ -384,6 +384,75 @@ func TestLayoutSync_PendingSplitSurvivesBesideSibling(t *testing.T) {
 	}
 }
 
+// An ordinary reservation whose pane never came is pruned by the next pass,
+// and with it the reservation itself: the tab is not busy any more, a later
+// adoption re-seats nothing, and an unrelated arrival is placed by the normal
+// rule rather than into a node no tree holds.
+func TestLayoutSync_AbandonedReservationIsForgotten(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	m := newLayoutSyncModel(t)
+	stored := lsSplit(SplitHorizontal, 0.5, lsLeaf("p1"), lsLeaf("p2"))
+	m, _ = lsApply(t, m, lsState(1, lsWire(t, stored), "p1", "p2"))
+	lsTab(t, &m).ActivePane = "p2"
+	_ = m.splitPane(SplitVertical)
+	if !m.tabLayoutBusy(lsTab(t, &m)) {
+		t.Fatal("setup: the reservation did not make the tab busy")
+	}
+
+	// A broadcast with no new pane: the placeholder is pruned.
+	m, _ = lsApply(t, m, lsState(1, lsWire(t, stored), "p1", "p2"))
+	tab := lsTab(t, &m)
+	if _, armed := m.pendingSplit["t1"]; armed {
+		t.Error("pendingSplit still armed after its placeholder was pruned")
+	}
+	if m.tabLayoutBusy(tab) {
+		t.Error("the tab still reads busy after its reservation was pruned")
+	}
+
+	// A later adoption re-seats nothing.
+	theirs := lsSplit(SplitVertical, 0.5, lsLeaf("p2"), lsLeaf("p1"))
+	m, _ = lsApply(t, m, lsState(2, lsWire(t, theirs), "p1", "p2"))
+	if got := lsTree(t, &m); !reflect.DeepEqual(got, theirs) {
+		t.Errorf("tree = %s, want exactly the adopted %s", layoutString(got), layoutString(theirs))
+	}
+
+	// An unrelated arrival takes the ordinary rule (first leaf, top|bottom),
+	// visibly, and without taking the tab's active pane.
+	m, sent := lsApply(t, m, lsState(2, lsWire(t, theirs), "p1", "p2", "p-mcp"))
+	tab = lsTab(t, &m)
+	want := lsSplit(SplitVertical, 0.5, lsSplit(SplitVertical, 0.5, lsLeaf("p2"), lsLeaf("p-mcp")), lsLeaf("p1"))
+	if got := lsTree(t, &m); !reflect.DeepEqual(got, want) {
+		t.Errorf("tree = %s, want %s", layoutString(got), layoutString(want))
+	}
+	if tab.ActivePane == "p-mcp" {
+		t.Error("the unrelated arrival took the tab's active pane, as a reservation fill would")
+	}
+	if len(sent) != 0 {
+		t.Errorf("the unrelated arrival sent %d frames, want 0 — nobody here asked for it", len(sent))
+	}
+}
+
+// Adoption re-seats only a reservation still in the tree it replaces; a
+// detached one is dropped rather than brought back as an empty slot.
+func TestLayoutSync_AdoptionDropsADetachedReservation(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	m := newLayoutSyncModel(t)
+	m, _ = lsApply(t, m, lsState(1, lsWire(t, lsSplit(SplitHorizontal, 0.5, lsLeaf("p1"), lsLeaf("p2"))), "p1", "p2"))
+	tab := lsTab(t, &m)
+	// A stale entry pointing at a node no tree holds.
+	m.pendingSplit = map[string]*LayoutNode{"t1": {Ratio: 0.5}}
+	tab.noteReservation("p2", SplitVertical, false)
+
+	theirs := lsSplit(SplitVertical, 0.5, lsLeaf("p2"), lsLeaf("p1"))
+	m, _ = lsApply(t, m, lsState(2, lsWire(t, theirs), "p1", "p2"))
+	if got := lsTree(t, &m); !reflect.DeepEqual(got, theirs) {
+		t.Errorf("tree = %s, want exactly the adopted %s — a detached reservation was re-seated", layoutString(got), layoutString(theirs))
+	}
+	if _, armed := m.pendingSplit["t1"]; armed {
+		t.Error("the detached reservation is still armed after adoption")
+	}
+}
+
 // The sibling is gone from the adopted tree: the reservation falls back to
 // where the spiral would place an arrival.
 func TestLayoutSync_PendingSplitWithoutSiblingTakesTheSpiralSlot(t *testing.T) {

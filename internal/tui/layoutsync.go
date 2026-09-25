@@ -257,7 +257,15 @@ func (m *Model) adoptTabLayout(tab *TabModel, stored *SerializedNode, paneSet ma
 	// The stored tree names the pane a REPLACE reservation stands in for;
 	// a sentinel keeps that leaf through the prune so the reservation can
 	// take its place.
+	//
+	// Only a reservation still IN the tree being replaced is re-seated; one
+	// whose placeholder is already detached was abandoned, and is dropped.
 	ph := m.pendingSplit[tab.ID]
+	if ph != nil && !treeContains(tab.Root, ph) {
+		delete(m.pendingSplit, tab.ID)
+		tab.noteReservation("", 0, false)
+		ph = nil
+	}
 	var sentinel *PaneModel
 	if ph != nil && tab.reserveReplace && tab.reserveSibling != "" && panes[tab.reserveSibling] == nil {
 		sentinel = &PaneModel{ID: tab.reserveSibling}

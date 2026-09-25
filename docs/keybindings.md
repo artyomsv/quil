@@ -14,6 +14,7 @@ Quil's full keymap. Every binding is configurable in `~/.quil/bindings.toml`, ei
 - [Clipboard](#clipboard)
 - [Text selection](#text-selection)
 - [Scrolling](#scrolling)
+- [Multi-client](#multi-client)
 - [Dialogs (F1 menus)](#dialogs-f1-menus)
 - [Keys that pass through to the PTY](#keys-that-pass-through-to-the-pty)
 
@@ -256,6 +257,15 @@ If the clipboard has no text but contains an image, Quil decodes the DIB, saves 
 | Click on scrollbar | Jump the scrollbar thumb to that Y position (rightmost content column of the pane) |
 | Click + drag on scrollbar | Continuous scroll — drag follows cursor Y, even off-pane |
 | `Alt+Up` / `Alt+Down` *(in log viewer)* | Jump cursor by `[ui] log_viewer_page_lines` (default 40) |
+
+## Multi-client
+
+Keys for when two or more Quil windows are attached to the same daemon — see
+[Multi-client sync](features.md#multi-client-sync).
+
+| Key | Action |
+|---|---|
+| *(unbound)* | `client.take_control` — "Take control (size master)". Makes this window the size master immediately. Also in the command palette's **System** group. Bind it in `bindings.toml`, e.g. `"client.take_control" = "alt+shift+m"`. |
 
 ## Command palette
 

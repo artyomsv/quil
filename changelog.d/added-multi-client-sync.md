@@ -1,0 +1,9 @@
+---
+headline: Two Quil windows can now share one daemon's workspace
+---
+- **Two or more Quil windows can attach to the same daemon and see one shared workspace** — the same projects, tabs, panes, names, colours and layout. A pane either window creates appears in both, and closing it in one closes it in the other.
+- One window is the size master (the oldest attached, with a large enough terminal of its own) and sets pane sizes; the status bar shows `[master]` or `[follower]` while two or more windows are attached. A follower's panes are cropped to fit its own box rather than resized, with a `…` marker on the cut edge, and pad rather than crop when they are smaller than it. **Take control** (unbound by default — bind `client.take_control`, or run it from the command palette) makes the current window the master immediately. If the master's window closes normally the next one takes over at once; if its connection merely drops, its slot is held for a few minutes (`[daemon] master_grace_minutes`, default 3) so a following window is not resized out from under it.
+- Splitting, closing, dragging a pane or a split border, and arranging a tab in one window is mirrored in every other attached window immediately, and survives closing and reopening both.
+- Switching the shared active tab from one window no longer steals keystrokes out from under someone typing in another — a short guard keeps your next few keys in the pane you were in and shows a flash saying another client switched.
+- Dismissing a notification, or clearing a pane's unseen mark, updates every attached window's sidebar.
+- A new MCP tool, `list_clients`, lists every attached window; `set_active_pane` and `close_tui` gain an optional `client` field to target one window instead of whichever typed most recently.

@@ -19,6 +19,10 @@ paths:
   - "**/internal/tui/splitdrag*.go"
   - "**/internal/tui/perf*.go"
   - "**/internal/tui/frame_*_test.go"
+  - "**/internal/tui/layoutsync*.go"
+  - "**/internal/tui/layout_sync_test.go"
+  - "**/internal/tui/typing_guard_test.go"
+  - "**/internal/tui/multiclient_role_test.go"
   - "**/internal/clipboard/**"
 ---
 
@@ -90,7 +94,7 @@ Release re-tracks at the release cell (a release with no motion still resolves, 
 
 A pane the daemon moved (`move_pane`) reaches the TUI only as a broadcast listing it under its new tab; there is no optimistic move and no mover-side pre-split. `rebuildTabs` reconciles it in the same pass as every other arrival, in `internal/tui/model.go`.
 
-**Detection is `existingPanes` reuse** (`migrated := ok` in the add loop). A hit there can only be a pane in ANOTHER tab's tree: panes already in this tree take the `treePaneIDs` branch, overlays never reach the loop, and the worktree-held pane is skipped before it. Every attached client of a daemon holds every tab of that daemon, so every client observes the same reuse — which is what lets a CLIENT-side rule stay in agreement across clients. A mover-only pre-split was rejected: other clients would place the pane differently, existing tabs never adopt the stored layout (`diffLayouts` only sends), so the clients would re-send each other's trees on every broadcast; and a pre-armed placeholder is pruned by any broadcast landing first (the 5 s git ticker), while a daemon refusal sends nothing that could unwind it.
+**Detection is `existingPanes` reuse** (`migrated := ok` in the add loop). A hit there can only be a pane in ANOTHER tab's tree: panes already in this tree take the `treePaneIDs` branch, overlays never reach the loop, and the worktree-held pane is skipped before it. Every attached client of a daemon holds every tab of that daemon, so every client observes the same reuse — which is what lets a CLIENT-side rule stay in agreement across clients. A mover-only pre-split is still rejected, but not for the reason it once was: layout sync (below) now lets every OTHER client adopt the daemon's stored tree by revision, so two clients no longer re-send each other's trees on disagreement. What survives is the arrival race a revision cannot arbitrate — the requesting client's own `pendingSplit` reservation is placed LOCALLY, before `create_pane`/`MovePane` ever reaches the daemon, so it carries no revision of its own and a bystander's broadcast can still land inside that window. See "A migrated pane never fills a reservation" below for the guard that covers exactly that race.
 
 **Placement: a spiral ("dwindle") into the last pane.** `placeArrivingPane` splits the LAST pane leaf in tree order (`spiralLeaf` — a descent preferring Right, skipping placeholder leaves) AGAINST its parent's direction (`spiralSplitDir`: parent left|right → top|bottom, parent top|bottom → left|right, a root leaf → left|right), and installs the pane in the right/bottom half at Ratio 0.5. Successive arrivals therefore spiral into the bottom-right corner — `A` → `A|new`, `A|B` → `A|(B/new)`, `A|(B/C)` → `A|(B/(C|new))`, `(A/B)` → `(A/(B|new))`. It replaced a largest-leaf rule that turned `p3|p4` into three thin columns. Both halves of the choice are properties of the tree alone, so equal trees choose the same leaf and direction whatever each client's window size. `arrivalSplitDir(pref, w, h)` then flips the direction only when the preferred one would leave a half under `minPaneW` (left|right) or `minPaneH` (top|bottom) AND the other one fits; neither fitting, or unknown geometry, keeps `pref`. The rect comes from the canonical `paneAreaWidth() × (height - chromeHeight)`, not the notes-squeezed width. The only client-dependent input is that fallback, which needs one client's leaf below the minimum and another's not. **"Equal trees" does not hold for a client with its own reservation** — its tab carries an extra placeholder split (`pendingSplit`) that no other client's copy has, since placeholders are pure client-local runtime state and are never broadcast, so THAT client's walk can choose a different leaf than everyone else (the spiral skips the placeholder, which may be the last leaf); see "A migrated pane never fills a reservation" below for why the divergence is contained rather than a thrash.
 
@@ -118,7 +122,217 @@ A pane the daemon moved (`move_pane`) reaches the TUI only as a broadcast listin
 
 `applyTabArrangement(tab, root, active)` (`arrange_apply.go`) is the ONE apply step for the six menu/palette/key actions and both in-tab drops. In order: notes mode → silent no-op; `tabLayoutBusy` → flash `Tab is busy — try again in a moment`; fewer than two panes → no-op; `fitsMinSize` against the CANONICAL geometry (`paneAreaWidth()` × `height-chromeHeight` — never the notes-squeezed width, and the menu may be arranging a BACKGROUND tab) → flash `Not enough room for that layout`; then the tree, `invalidateLeaves`, `ActivePane` plus every `Active` flag in the tab, `ExitFocus`, `SetCanvas`/`SetChrome`/`Resize`, and `tea.Batch(resizeAllPanes(), sendTabLayout(tab))`. `sendTabLayout` marshals on the Update goroutine and ships ONE `MsgUpdateLayout` for that tab through `sendDiffedLayouts`.
 
-**`tabLayoutBusy` = `tabInFlight` + this client's own `pendingSplit` reservation.** `tabInFlight` deliberately did not grow the reservation: it also gates Move to tab…, which has its own rule for reservations (a moved pane never fills one). For an arrangement the reservation is the dangerous case — the new tree is a copy, so `pendingSplit` would be left pointing at a placeholder no tree holds. **Known limit:** other attached TUIs keep their own tree for that tab until the separate layout-sync item lands — existing tabs never adopt the stored layout (`diffLayouts` only sends). Worse than "stale": on its next broadcast such a TUI sees the stored layout disagree with its tree and RE-SENDS its own, overwriting the arrangement; the layout a restart restores is whichever client sent last. Tests: `arrange_test.go`, `arrange_apply_test.go`.
+**`tabLayoutBusy` = `tabInFlight` + this client's own `pendingSplit` reservation.** `tabInFlight` deliberately did not grow the reservation: it also gates Move to tab…, which has its own rule for reservations (a moved pane never fills one). For an arrangement the reservation is the dangerous case — the new tree is a copy, so `pendingSplit` would be left pointing at a placeholder no tree holds. **Fixed by layout sync (below):** `sendTabLayout` now ships `MsgUpdateLayout{BaseRev: &tab.layoutRev}`, and every OTHER attached TUI adopts the daemon's higher-revision tree in `syncTabLayout`/`adoptTabLayout` instead of re-sending its own. Before that, other attached TUIs kept their own tree for the tab indefinitely — existing tabs never adopted the stored layout — so a second TUI's next broadcast disagreed with its OWN tree and RE-SENT it, overwriting the arrangement; the layout a restart restored was whichever client had sent last. Tests: `arrange_test.go`, `arrange_apply_test.go`, `layout_sync_test.go`.
+
+## Multi-client
+
+Several TUIs can attach to one daemon and share its workspace. `Model.clientID`
+(minted once per process, sent on every attach) and, per destination,
+`Model.sizeMaster[dest]`/`Model.clientCount[dest]` (kept from each broadcast's
+`SizeMaster`/`Clients` fields, `internal/tui/model.go`) are what a client uses
+to tell whether it is the size master. `isFollower(dest)` is
+`sizeMaster[dest] != "" && sizeMaster[dest] != m.clientID` — the zero value (no
+entry yet) answers false, so a client that has not heard from a destination
+behaves as it always did. See `.claude/rules/daemon-lifecycle.md`'s
+"Multi-client" section for the daemon-side registry and election this reads.
+
+### The resize gates and batching
+
+**A follower sends no `MsgResizePane`/`MsgResizePanes`.** The three resize
+producers named by the `terminalPaintable` invariant in `.claude/CLAUDE.md` —
+`resizeAllPanes`, `diffResizes`, `overlayResizeCmd` — each gate on
+`isFollower(dest)` in addition to `terminalPaintable()`; the gate sits at the
+same three fan-outs because those are the only three producers. A follower's
+`sizedOnce` is deliberately NOT marked, so if this client later becomes master
+the pane still gets its first-resize kick rather than reading as
+already-sized for a size it never sent. A local rect change that never reaches
+the daemon — entering focus mode, opening notes, toggling the notification
+sidebar — resizes nothing on a follower for the same reason it resizes nothing
+today: none of those three producers fires for it, follower or not.
+
+**Becoming master clears `sizedOnce` for that destination rather than calling
+`resizeAllPanes` directly** (`applyWorkspaceState`, guarded on
+`state.SizeMaster == m.clientID && prevMaster != state.SizeMaster`). Every
+pane's last-applied size was sent by whoever was master before (or by
+nobody), so `sizedOnce` still reads "already sized" for sizes this client
+never sent — `clearSizedOnceForDest` clears that, and `diffResizes` (which
+Update runs immediately afterward, scoped to the same `dest`) picks up every
+pane in ONE batch, the same re-arm `armReattachReset` performs after a
+reattach. Calling `resizeAllPanes()` here as well would walk every OTHER
+destination too, resizing panes this broadcast never mentioned.
+
+**Batching, daemon and client.** A window resize or a split-drag release
+sends `MsgResizePanes` (one frame for the whole destination) instead of one
+`MsgResizePane` per pane; `sendDiffedResizes` and `resizeAllPanes` both build
+one batch per dest. The daemon answers with at most one `pane_sizes` frame per
+applied batch to each follower (`applyResizes`/`sendPaneSizes`,
+`internal/daemon/daemon.go`), never one per pane — see the daemon-lifecycle
+note for why the frame goes out before `pty.Resize` runs. Every pane in a
+`pane_sizes` frame, and every `PaneInfo` in a workspace-state broadcast,
+carries `size_seq`; `PaneModel.adoptDaemonSize` adopts only `seq >=
+daemonSizeSeq`, so a workspace-state broadcast that raced a `pane_sizes` frame
+from the same resize cannot undo it.
+
+### Follower rendering
+
+**Grid size.** `PaneModel.targetVTSize` (`internal/tui/pane.go`) is the single
+decision point for a pane's EMULATOR size: a follower pane with a known
+daemon size (`p.follower && p.daemonCols > 0 && p.daemonRows > 0`) takes that
+size regardless of the box this client draws it in, at every site that sizes
+a VT — `TabModel.Resize`/`resizeNode` for layout leaves, `sizePaneFull` for
+focus mode and for overlay panes (lazygit), which sit outside `Leaves()`.
+Everyone else, and a follower pane with no daemon size yet (never sized, or
+pending — it falls back to `paneVTSize(rect)` for drawing and sends nothing),
+uses `paneVTSize`. Resizing a follower's VT to its own box instead would
+rewrap the master's output with no PTY redraw to pair it — the unpaired-resize
+corruption `ResizeVT`'s contract forbids for split drags applies here too.
+`p.follower` and `p.daemonCols`/`p.daemonRows` reach `PaneModel` through
+`syncPaneMeta` (`internal/tui/workstate.go`), the path that already copies
+every other daemon-derived field onto pane models; `adoptDaemonSize` is the
+seq-gated write into `daemonCols`/`daemonRows` described above.
+
+**Viewport (`pane_preview.go`).** A follower pane reuses the wide-canvas
+preview renderer instead of a second one. `previewMode()` is true for a
+follower whose grid exceeds its box in EITHER dimension (`innerW <
+vt.Width() || innerH < vt.Height()`), on top of its existing wide-canvas
+condition — a grid that FITS renders NATIVELY (top-left, padded), same as a
+non-follower pane. The preview already bottom-anchors with scrollback above
+(`renderPreview`, which shows `total - innerH - scrollBack`) and left-edge
+crops, which is exactly the follower's cut: width keeps the LEFT columns,
+height keeps the BOTTOM rows. Every rendered row stays exactly the pane's
+width, as for any preview pane.
+
+**Corner markers (`followerCutMark`, `internal/tui/pane.go`).**
+`buildTopBorderCut` swaps one top-border CORNER for `"…"` — one cell for one
+cell, so the border keeps its exact width and the label between the corners
+is untouched — top-left for a HEIGHT cut (rows above the box are hidden, the
+view is bottom-anchored) and top-right for a WIDTH cut (columns right of the
+box are hidden, the view is cropped at the left edge). Both can show at once.
+
+**Mouse.** There is no click forwarder in the TUI at all today, so follower
+grid translation applies only to the wheel forwarder
+(`wheelForwardSeq`/`sendInputToPane`): a notch translates box row `relY` to
+grid row `relY + max(0, vtH - innerH)` while the view is not scrolled back,
+with no horizontal offset (the crop is at the left already). A position past
+`vtW`/`vtH` (the padding) sends nothing. Mouse selection uses the existing
+`previewPosAt` mapping; keyboard selection works only when the grid fits the
+box, as for wide-canvas panes today.
+
+**Status bar.** While `clientCount[activeDest] >= 2`, the status bar shows
+`[master]` or `[follower]` for the active destination, next to `[dev]`
+(`internal/tui/model.go`, the status-bar assembly). With one client, nothing
+is shown — a single TUI on a daemon looks exactly as it always has. `Take
+control` (`client.take_control`, no default key, plus a palette command,
+"Take control (size master)") sends `MsgTakeControl` and makes this client
+master at once when the daemon accepts it.
+
+### Layout sync between clients
+
+`internal/tui/layoutsync.go`. The daemon numbers every stored write of a
+tab's tree (`layout_rev`, spec §7.1) and refuses a write whose `base_rev` is
+not the tab's current revision. A client sends a tab's tree only when ITS OWN
+USER changed it, and adopts any broadcast carrying a higher revision than the
+tree it holds — it never sends merely because the stored tree disagrees with
+its own, which is what let two clients re-send each other's trees forever
+before this landed (see the retired "Known limit" notes above).
+
+**`markLayoutChanged(dest, tab)`** is the one place a user-caused mutation —
+split, close, arrange, pane drag drop, split-border drag release, a client's
+own `pendingSplit` reservation being filled — records the change: it
+marshals the tree HERE, on the Update goroutine (the `tea.Cmd` it returns
+holds only bytes, never the tab), sets `tab.layoutDirty`, and sends
+`MsgUpdateLayout{TabID, Layout, BaseRev: &tab.layoutRev}` through
+`sendDiffedLayouts`. **A write already in flight defers the next one**
+(`tab.layoutResend`) instead of sending a second write on the same base —
+that would be refused behind the first and lost — and the deferred change
+rides the first write's own echo instead.
+
+**Arrivals nobody on this client asked for — an MCP-created pane, another
+client's split as a bystander sees it, a moved pane, a pane pruned because
+another client closed it — are placed or pruned LOCALLY with the ordinary
+arrival rules, so the screen is right at once, and recorded in
+`tab.awaitingPanes`/`awaitingGone` without sending.** `syncTabLayout` checks,
+on the NEXT broadcast for that tab, whether the stored tree still lacks any
+awaited id or still holds a pruned one; only then does this client send its
+tree with the current base rev, and the first such send from any client wins
+— the rest are refused and adopt. Otherwise the requester's own write already
+arrived at a higher revision and this client adopts it.
+
+**`syncTabLayout`** runs per existing tab, per broadcast, BEFORE panes are
+reconciled, and every comparison is STRUCTURAL (parsed `SerializedNode`),
+never by bytes — the daemon's stored bytes and a client's own re-marshal of
+the same tree encode differently (declaration order vs. `map[string]any`'s
+alphabetical order), the same caveat the layout-persistence invariant in
+`.claude/CLAUDE.md` states. A higher `layout_rev` (or `tab.adoptNext`, set
+after a reattach — see below) triggers `adoptTabLayout`, UNLESS the stored
+tree is this client's own write echoing back (`reflect.DeepEqual(stored,
+tab.layoutSent)`), which is adopted as a no-op and clears `layoutDirty`,
+resending only a deferred `layoutResend`. A LOWER revision, or a dirty tab,
+keeps the local tree — the write in flight will come back with a higher one.
+A refused write is simply superseded by the winner's broadcast and its local
+change is lost; that needs two users editing the same tab at the same moment.
+
+**`adoptTabLayout`** replaces the tab's tree with the stored one, reusing
+`*PaneModel`s by id (no lost emulator or scrollback), dropping ids the
+broadcast no longer lists, and leaving panes the stored tree lacks for the
+ordinary arrival loop to place (which then follows the "arrivals nobody asked
+for" rule above). It cancels an in-progress drag whose node is in this tab.
+**This client's own `pendingSplit` reservation survives adoption**
+(`reseatReservation`): it is put back BESIDE its original sibling pane, in
+the original direction and half, when that sibling is still in the adopted
+tree; only when the sibling is gone does it fall back to the spiral arrival
+slot, and failing that it becomes the whole tab. A reservation whose
+placeholder is no longer even IN the pre-adoption tree (abandoned) is
+forgotten instead of re-seated. `tabLayoutBusy` still gates arrangements
+throughout.
+
+**Reattach resets the revs.** `armReattachReset` calls `resetLayoutSync(dest)`,
+which zeros every tab's `layoutRev` on that destination and sets
+`tab.adoptNext = true`: the daemon's stored tree is authoritative, and its
+revision can be LOWER than this client's after a restart (the snapshot is
+debounced 500 ms) — as low as the 0 of a tree nobody has written since
+restore, which even a zeroed local revision would not otherwise adopt.
+`adoptNext` is what makes `syncTabLayout` adopt the very next broadcast
+whatever its revision. A tab whose stored layout is EMPTY (fresh, or restored
+before any client described it) is sent by the client with the current base
+rev — this replaces the retired `diffLayouts`' `len(stored)==0` branch.
+
+**Older clients during dev** (release builds refuse a version mismatch, so
+this matters only for dev builds): a client with no `BaseRev` support always
+has its write accepted and never adopts; new clients adopt its tree, so
+everyone converges on the old client's tree with no loop.
+
+Tests: `layout_sync_test.go`. Mutation-checked: the send-on-change gate, the
+rev compare-and-store (daemon side), the adopt condition, the arrival
+"only the requester sends" rule, and the reattach rev reset.
+
+### Typing guard across a remote tab switch
+
+When a broadcast changes THIS client's active tab for the active project,
+and this client did not itself request that switch, `Model.remoteSwitchAt`
+is stamped and `Model.guardPaneID` records the pane that was active
+immediately before the switch (`internal/tui/model.go`). "Requested" is
+decided by a TOKEN, never a time window: `Model.requestedTab`, keyed by
+`requestedTabKey(dest, projectID)`, records the tab this client asked for on
+every local `switchTab`/`create_tab`;
+a broadcast whose active tab equals it is this client's own switch landing
+and clears the token, and any other change is remote.
+
+**Keys reaching `enqueueInput` within `remoteSwitchGuardWindow` (250 ms) of
+`remoteSwitchAt` are redirected to `guardPaneID`**, if that pane still exists
+— otherwise they go to the new active pane. Only typed input is redirected;
+mouse input always targets whatever is under the pointer now, since a click
+is inherently aimed at what is on screen. A flash shows `Tab switched by
+another client`.
+
+**Unseen is not acknowledged until local input arrives.** A pane that became
+focused only because of a remote switch is skipped by `ackFocusedPane` (no
+`pane_seen` is sent) until this client receives a real key or mouse click —
+otherwise every attached client would clear the mark on every remote switch
+whether or not anyone actually looked at the pane.
+
+Tests: `typing_guard_test.go`. Mutation-checked: the 250 ms window itself and
+the `requestedTab` token gate.
 
 ### Mouse-wheel forwarding to tracking apps
 

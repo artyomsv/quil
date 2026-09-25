@@ -56,17 +56,186 @@ transport half by `TestBroadcast_SkipsPaneOutputForOptedOutConnOnly`.
 Every live MCP bridge holds a conn for its whole lifetime and those outlive the
 TUI, so in an ordinary session (21 conns observed, mostly bridges) `ConnCount()
 == 0` essentially never happens. Anything that means "nobody is driving this
-daemon any more" must therefore ask a different question. `attachedConns`
-(`daemon.go`, its own `attachedMu`, never `sm.mu`) is the set of conns that
-have sent `MsgAttach`; `markClientAttached` adds, `forgetAttachedClient` removes
-from `onClientDisconnect`. A bridge that never attaches is correctly not a
-client. Shipped once against the raw conn count and it was inert in exactly the
-case it was written for.
+daemon any more" must therefore ask a different question. `Daemon.clients`
+(`internal/daemon/clients.go`, a `clientRegistry` with its own leaf mutex, never
+`sm.mu`) is the set of conns that have sent `MsgAttach` — grown from a bare
+`attachedConns` set into a full record per client (id, conn, `attachedAt`, raw
+`cols`/`rows`, `cwd`, `lastInputAt`, overlay claims) once several TUIs on one
+daemon needed to elect a size master among them; see "Multi-client" below.
+`registerClient`/`attachClient` add on `handleAttach`, `forgetAttachedClient`
+removes a LOST link from `onClientDisconnect`, `detachClient` removes a clean
+exit (`MsgDetach`, before the conn closes). A bridge that never attaches is
+correctly not a client. Shipped once against the raw conn count and it was
+inert in exactly the case it was written for.
 
 `onClientDisconnect` runs from `handleConn`'s defer, which calls `removeConn`
 BEFORE invoking it — so the set is already exclusive of the client that just
 left and needs no self-filtering. That ordering is load-bearing; check it before
 relying on a count read inside the callback.
+
+### Multi-client: registry, size master, output hold, layout rev
+
+Several TUIs can attach to one daemon and see the same workspace (projects,
+tabs, panes, layout, the active tab of each project). What changes is only
+where clients would otherwise conflict: who sets a PTY's size, what a freshly
+attaching client's live output does to its history replay, and which client an
+untargeted MCP command reaches.
+
+**Client identity.** `AttachPayload.ClientID` is minted once per TUI PROCESS
+(`uuid.NewString()`) and sent on every attach and reattach to every
+destination — never persisted, so two TUIs on one machine never share it. An
+attach with no id (an older client, a test) gets `anon-<uuid>`, scoped to that
+conn. Ids are bounded (`maxClientIDLen`, `truncateField`) and used only as a
+map key and a display value.
+
+**Master election (`clientRegistry.electLocked`, `internal/daemon/clients.go`).**
+Each PTY has one size, so exactly one attached client — the size master — may
+set it: the OLDEST attached client with a PAINTABLE RAW geometry
+(`eligible`: `cols >= daemonMinClientCols && rows >= daemonMinClientRows`,
+40×10, the daemon-side mirror of the TUI's `terminalPaintable` floor — the two
+MUST move together, since a daemon floor below the TUI's would elect a window
+the TUI itself refuses to size panes from). The RAW value matters: a
+console-less client attaches at 0×0, and electing it on `handleAttach`'s
+80×24-defaulted `clientSize` is the 1×1 incident
+([[headless-attach-reflows-all-panes]]) coming back through a new door — a
+shrink below the floor (`setGeometry`, fed by `MsgClientGeometry`) drops
+eligibility and re-elects AT ONCE, with no grace, because the client is still
+attached and the daemon knows immediately.
+
+A master whose LINK IS LOST (no `MsgDetach`) keeps its slot for
+`master_grace_minutes` (`[daemon]`, default 3, clamped 0–60, `internal/config`;
+0 = no grace) — but ONLY while another client that was attached at the moment
+of loss is still attached (`reservation.protects`): the grace exists to protect
+FOLLOWERS from a resize while the master might still come back, and with no
+follower left to protect it would only make a relaunched TUI (a new id, since
+the id is per-process) wait for nothing. A clean exit sends `MsgDetach` (from
+`closeClient`, riding the existing `Flush`, not a `tea.Cmd` — the Update loop
+is already gone on the exit path) and skips the grace entirely: `detach` elects
+with no reservation. `take_control` (`MsgTakeControl`, no payload, keymap
+action `client.take_control`, no default key, plus a palette command) makes
+the sender master at once if it is attached and eligible, overriding any
+reserved slot; an ineligible or unattached sender is ignored with a debug log,
+never an error.
+
+**After a daemon restart**, the registry is runtime-only, so `size_master`
+(the master's id) is also written to `workspace.json` (top level, omitempty)
+on every snapshot. Restore turns it into a reservation with no `protects`
+condition, for `min(grace, 30s)` (`restartReserveCap`) — TUIs reattach with
+their SAME process id within seconds of a restart, so the previous master
+reclaims its slot (`attach` hands the reservation's `attachedAt` back to the
+returning record, so it stays the oldest) and nothing resizes.
+
+**Size authority (`applyResizes`, `internal/daemon/daemon.go`).** `resize_pane`
+and `resize_panes` share one implementation. A resize applies only from the
+master conn (`isMasterConn`), with one exception: while there is no master
+AND no reserved slot (`sizeAuthorityOpen`), any attached client's resize
+applies — today's single-client behaviour. A refused resize is dropped with no
+log line, because a follower on an older build sends one on every broadcast.
+`resize_panes` is the BATCHED form clients send for a window resize or a
+split-drag release across many panes; the plan's per-resize `pane_size` frame
+was replaced with one `pane_sizes` frame per APPLIED batch, sent to every
+OTHER attached conn on the must-deliver queue BEFORE any `pty.Resize` call —
+`sendLoop` drains that queue ahead of pane output, so a follower's VT holds the
+new size before the child's own repaint at that size arrives; without it the
+repaint lands in the OLD-sized VT and is reflowed, the unpaired-resize
+corruption `ResizeVT`'s contract forbids. One frame per BATCH, never per pane,
+because a resize burst across 40+ panes would otherwise put 40+ must-deliver
+frames on a follower's 64-slot queue at once (the 2026-08-09 shape, again).
+
+**Stale-broadcast races are closed with a per-pane size generation, not a
+lock across record-and-send.** Every applied resize numbers the pane
+(`Pane.sizeSeq`, bumped before the `pane_sizes` frame leaves, so the frame and
+the later-recorded `Cols`/`Rows` share the number) and stamps it on the wire in
+both `PaneInfo.SizeSeq` (workspace-state broadcasts) and `ResizePanePayload`
+(`pane_sizes` frames, field `SizeSeq`); a follower TUI's `PaneModel.adoptDaemonSize`
+adopts only `seq >= daemonSizeSeq`, so a workspace-state broadcast racing a
+`pane_sizes` frame from the same batch can never undo it, and reattach resets
+the counter (a fresh daemon incarnation renumbers from zero). A failed
+`pty.Resize` sends a second `pane_sizes` with the PREVIOUS size and a newer
+seq — a rollback is a newer announcement, not an undo, and `Cols`/`Rows` stay
+at whatever the syscall actually left the PTY at.
+
+**Output hold (`internal/daemon/outputhold.go`).** A client attaching while
+panes are writing must receive each pane's history replay and its live output
+EXACTLY ONCE, in order — without a hold, a live broadcast frame can land in
+the middle of the replay, or bytes written between the snapshot and the replay
+finishing arrive twice. `handleAttach` calls `beginOutputHold(conn)` BEFORE
+building the state frame: it sets `ipc.Conn.holdPaneOutput` (an atomic bool
+`Broadcast`'s `wantsFrame` already checks, the same shape as `noPaneOutput`)
+and then waits (`holdDrainTimeout`, 2s, polled every 2ms) for any live frames
+already queued on the conn's droppable `outCh` to drain — those bytes are
+already covered by the replay snapshot about to be taken, so without the wait
+a busy client received them again, behind the state frame. `Pane.outPos`
+(runtime-only, never on the wire) is the total bytes ever appended to a pane's
+stream; `flushPaneOutputGeneration` reads `start := pane.outPos` in the SAME
+`PluginMu` span as the `OutputBuf` write, so a hold entry's position and the
+replay's `OutputBuf` snapshot can never disagree about what has been sent.
+Every flush during a hold is copied into that conn's hold (`holdOutput`,
+keyed by `*ipc.Conn` under the daemon's `holdMu` leaf lock) BEFORE the ordinary
+broadcast. Two locks, always taken `holdGate` → `holdMu`: `holdGate` (an
+`RWMutex`) makes "append to the hold, then broadcast" one step against setting
+or clearing the conn's flag (a flush holding it for READ; every hold that
+starts or ends holding it for WRITE) — without it a flush could append and
+broadcast to a conn whose flag flipped in between, either duplicating the
+bytes or losing them.
+
+On release, held chunks are deduped against `end[paneID]` (the replay's own
+stream-position snapshot, read in the same `PluginMu` span as the `OutputBuf`
+bytes it replayed): a chunk fully covered by the replay is dropped, one
+straddling `end` is re-encoded from the overlap point, and the rest are sent
+in order through `SendBlocking` (must-deliver, so nothing sent after the flag
+clears can overtake them). Each hold is bounded at 4 MiB
+(`outputHoldLimit`) per conn; a pane that would pass it loses ALL its held
+bytes for that conn (never a partial pane) and gets one `redrawKick` at
+release instead — the conn itself is never closed for this. `finishOutputHold`
+rechecks under both locks before clearing the flag, because a flush can append
+between an empty-batch check and the finish; the recheck is what sends it
+round again rather than losing it. `onClientDisconnect` (`dropOutputHold`)
+discards a conn's hold without sending — `SendBlocking` would return
+`ErrConnClosed` and the drain loop stops anyway.
+
+**Layout revision (`Tab.LayoutRev`, spec §7).** Each tab's stored tree carries
+a `uint64` revision, persisted as `layout_rev` (omitempty) and put on the wire
+in every broadcast's per-tab entry. `SetTabLayout` (`internal/daemon/project.go`,
+under `sm.mu`, unchanged lock) now takes `UpdateLayoutPayload.BaseRev
+*uint64`: a nil `BaseRev` (an older client) or one equal to the tab's current
+revision stores, bumps the revision and broadcasts; a stale one is refused —
+no store, no broadcast, a debug log only. **The `// No broadcastState() —
+avoids feedback loop` note is retired**: a layout write now broadcasts,
+because clients no longer re-send on mere disagreement (they only send a
+change their OWN user made — see `tui-rendering.md`'s Layout sync), so the
+loop the old comment guarded against cannot occur any more. The broadcast
+itself goes through the SAME `requestBroadcast` 50 ms coalescer the snapshot
+debounce already uses, so several tabs written in one burst (`sendAllLayouts`
+after a border-drag release) still produce ONE frame, keeping the
+must-deliver queue safe.
+
+**MCP unicast targets (`internal/daemon/mcp_targets.go`).** `close_tui` and
+`set_active_pane`'s focus frame used to broadcast to every attached TUI; both
+now reach exactly ONE conn, via `targetConn(clientID)` — an explicit,
+attached `client` id, or (empty) whichever client typed most recently, falling
+back to the OLDEST attached client when nobody has typed yet. `targetConn`
+does not delegate to `mostRecentlyActiveConn`'s own "nobody typed" answer (the
+newest attached client) because the two callers want different defaults for
+that state. With no attached client at all (a headless daemon), `close_tui`
+sends nothing and logs, and `set_active_pane` still switches the shared active
+tab and broadcasts state — only the unicast focus frame has nobody to reach.
+`list_clients` (`handleListClientsReq` → `listClients`, `clients.go`) reports
+every attached client — id, `attached_at` (RFC 3339), raw `cols`/`rows`,
+whether it holds size master, `last_input_at` — merged with the hello
+registry's `role`/`pid`/`exe` by conn, read AFTER `clients.mu` is released
+since each registry keeps its own leaf lock.
+
+**`defaultCWD(conn)` chain** (`daemon.go`): the requesting conn's own recorded
+`cwd` (when it is an attached client) → the master's `cwd` → the most
+recently active client's `cwd` → the daemon's own `os.Getwd()`. Every step
+shares ONE probe deadline (`spawnDirProbeTimeout`) and skips a candidate
+directory string already tried, so the ordinary single-TUI case — where every
+step names the same client — cannot pay the dead-directory timeout more than
+once. `conn` is nil for every restore/recovery caller, which starts at step 2
+(the master). An MCP bridge never attaches, so `create_pane` with no CWD
+resolves through steps 2–3, keeping today's behaviour of opening in a TUI's
+directory rather than the daemon's frozen one.
 
 ### A per-pane broadcast is a queue-pressure decision, not a detail
 

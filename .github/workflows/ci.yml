@@ -3,6 +3,11 @@ name: CI
 on:
   pull_request:
     branches: [master]
+  # Push to master gives Codecov the base coverage every PR is compared
+  # against; without it the PR coverage report has nothing to diff. Only the
+  # `test` job runs here — `changelog` and `site` are gated to pull requests.
+  push:
+    branches: [master]
   workflow_dispatch:
     inputs:
       dry_run:
@@ -77,7 +82,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          go test -race -timeout 300s ./... 2>&1 | tee /tmp/test.log || {
+          go test -race -timeout 300s -coverprofile=coverage.out ./... 2>&1 | tee /tmp/test.log || {
             grep -E "^(--- FAIL|    --- FAIL|panic:|WARNING: DATA RACE|# |FAIL.*\[build failed\])|\.go:[0-9]+:" /tmp/test.log \
               | head -30 \
               | while IFS= read -r line; do
@@ -85,6 +90,15 @@ jobs:
                 done
             exit 1
           }
+      # Pinned by SHA like every other action here (v5 = v5.5.5). The profile
+      # comes from the unit run above only; the integration run is not merged.
+      # A Codecov outage does not fail the job (fail_ci_if_error defaults to
+      # false), and a fork PR has no secret, so it uploads tokenless.
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac  # v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage.out
       # The build tag keeps these out of the run above — and out of compilation
       # entirely, so without this step they are not even type-checked. They cover
       # what unit tests structurally cannot: that a handler is wired into the

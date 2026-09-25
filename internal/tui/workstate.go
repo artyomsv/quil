@@ -683,6 +683,15 @@ func (m *Model) ackFocusedPane() bool {
 	if !m.termFocused {
 		return false
 	}
+	// A pane focused only because ANOTHER client switched tabs is not one this
+	// user has looked at yet (spec §8.1) — Update's prologue clears the flag
+	// the moment local input (a key or a mouse click) actually arrives, so
+	// skipping the ack here does not mean skipping it forever, only until then.
+	// Without this, every attached client would clear the mark the instant one
+	// of them switched, whether or not anyone was watching that screen.
+	if m.remoteFocusUnacked {
+		return false
+	}
 	tab := m.activeTabModel()
 	if tab == nil || tab.Root == nil || tab.ActivePane == "" {
 		return false

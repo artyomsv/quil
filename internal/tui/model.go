@@ -264,6 +264,26 @@ type paneSizesMsg struct {
 // paneEventMsg delivers a notification event from the daemon.
 type paneEventMsg ipc.PaneEventPayload
 
+// eventDismissedMsg is the daemon's broadcast that a notification was
+// dismissed (event_dismissed, spec §8.4), reaching every attached client —
+// this client's own dismissal included. dest is carried for parity with the
+// wire event; the notification sidebar is not scoped per destination (a
+// pre-existing property this task does not change), so the removal applies to
+// the one shared list regardless of which daemon reported it.
+type eventDismissedMsg struct {
+	dest    string
+	eventID string // "" = dismiss every card
+}
+
+// paneSeenMsg is the daemon's broadcast that a pane's unseen mark was cleared
+// by SOME attached client (pane_seen, spec §8.4). This client clears its own
+// local copy of the mark and reports nothing back — reporting would echo the
+// clear it was just told about, forever.
+type paneSeenMsg struct {
+	dest   string
+	paneID string
+}
+
 // pasteRefreshMsg triggers a re-render after paste so the cursor updates.
 type pasteRefreshMsg struct{}
 
@@ -506,7 +526,39 @@ type Model struct {
 	// clientCount records, per destination, the last broadcast's attached-
 	// client count (bridges excluded) — what renderStatusBar's role marker
 	// and D9's "most recent input" default both key off of at the TUI layer.
-	clientCount        map[string]int
+	clientCount map[string]int
+	// requestedTab records, per (dest, project) key (requestedTabKey), the tab
+	// id THIS client last asked for via switchTab/switchTabBy or sendCreateTab.
+	// applyWorkspaceState consults it to tell this client's own switch landing
+	// apart from a change some OTHER client made (typing guard, spec §8.1):
+	// a broadcast whose adopted ActiveTab equals the recorded value is this
+	// client's own request landing (the entry is cleared); anything else is
+	// remote and arms remoteSwitchAt/guardPaneID/remoteFocusUnacked below.
+	requestedTab map[string]string
+	// remoteSwitchAt is m.clock() at the last REMOTE active-tab change this
+	// client observed for its active project — the typing guard's window
+	// (remoteSwitchGuardWindow) is measured from here.
+	remoteSwitchAt time.Time
+	// guardPaneID is the pane that was active, on THIS client, immediately
+	// before a remote tab switch moved focus elsewhere. Key-originated input
+	// (typed keys and paste — never mouse) arriving within the guard window
+	// retargets here instead of the pane the remote switch made active, since
+	// the user was mid-keystroke in THIS pane, not the one another client
+	// picked. Cleared implicitly once the window elapses or the pane stops
+	// existing (guardedInputTarget checks both, live, rather than expiring the
+	// field itself).
+	guardPaneID string
+	// remoteFocusUnacked is true from the moment a remote switch focuses a
+	// pane on this client until this client's own next key or mouse click.
+	// While set, ackFocusedPane skips its unseen-clearing report — a pane
+	// must not read as "seen" on every attached client just because one of
+	// them switched tabs, whether or not anyone actually looked.
+	remoteFocusUnacked bool
+	// now is the typing guard's clock seam: time.Now in NewModel, a fixed
+	// function in tests. Read through Model.clock(), never directly, since a
+	// Model literal built by a test (the common shape in this package) leaves
+	// it nil.
+	now                func() time.Time
 	renaming           bool
 	renameInput        string
 	renamingPane       bool
@@ -1222,6 +1274,8 @@ func NewModel(client Client, cfg config.Config, version string, registry *plugin
 		inputCh:          make(chan paneInput, inputForwardBuffer),
 		inputDone:        make(chan struct{}),
 		inputIdle:        make(chan struct{}),
+		requestedTab:     make(map[string]string),
+		now:              time.Now,
 	}
 	// Startup dialog priority: migration > what's-new > update-notice >
 	// disclaimer. Migration blocks startup until every stale plugin is
@@ -1399,6 +1453,17 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 	// means the flag describes THIS message and can never leak into the next.
 	m.skipRender = false
 	m.skipHidden = false
+	// Local input answers the typing guard's ack hold (spec §8.1): a pane that
+	// became focused only because ANOTHER client switched tabs must not read
+	// as "seen" until the user actually looks at it, which a key or a mouse
+	// click proves and a spinner tick or a PTY chunk does not. Cleared BEFORE
+	// ackFocusedPane runs below, so the very keystroke that answers the guard
+	// also acks the pane in the same Update call — there is no reason to make
+	// the user press twice.
+	switch msg.(type) {
+	case tea.KeyPressMsg, tea.MouseClickMsg:
+		m.remoteFocusUnacked = false
+	}
 	// Acknowledge the focused pane of the active tab before processing the
 	// message — focusing is the acknowledgement; see ackFocusedPane.
 	//
@@ -3037,6 +3102,23 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		}
 		return m, tea.Batch(cmds...)
 
+	case eventDismissedMsg:
+		// Applied locally, exactly like the daemon-side dismissal this mirrors:
+		// remove the card (or every card, "" = all) and report nothing — this
+		// broadcast IS the report, whether it originated here or on another
+		// attached client (spec §8.4).
+		m.notifications.DismissByID(msg.eventID)
+		return m, m.listenForMessages()
+
+	case paneSeenMsg:
+		// Some attached client (this one included) cleared the pane's unseen
+		// mark; mirror it locally without sending anything back, or every
+		// client would echo the clear at each other forever (spec §8.4).
+		if pane, _, _ := m.findPaneAndTab(msg.paneID); pane != nil {
+			pane.unseen = false
+		}
+		return m, m.listenForMessages()
+
 	case sidebarTickMsg:
 		// Re-render sidebar to update relative timestamps; schedule next tick if still visible.
 		//
@@ -4379,6 +4461,16 @@ func (m Model) handleNewTab() (tea.Model, tea.Cmd) {
 // windows regressed exactly that way when this function stamped unconditionally.
 func (m Model) sendCreateTab(spec *ipc.FirstPaneSpec) tea.Cmd {
 	dest := m.createPaneDest
+	// Typing guard (spec §8.1): this client is about to become the reason its
+	// active project's ActiveTab changes, so the landing broadcast must not
+	// read as another client's switch. There is no tab id to record yet — the
+	// daemon mints one — so pendingTabCreateToken stands in for it. Value
+	// receiver: this only reaches an existing map (every production Model's,
+	// from NewModel), matching switchTab's synchronous recording so the guard
+	// can never observe a create that is already in flight.
+	if proj := m.cur(); proj != nil && m.requestedTab != nil {
+		m.requestedTab[requestedTabKey(dest, proj.ID)] = pendingTabCreateToken
+	}
 	return func() tea.Msg {
 		msg, err := ipc.NewMessage(ipc.MsgCreateTab, ipc.CreateTabPayload{
 			Name:      "New Tab",
@@ -5983,6 +6075,37 @@ func (m *Model) handlePaneOutput(msg PaneOutputMsg) (tea.Cmd, bool) {
 	return nil, false
 }
 
+// applyTabMoveGuard decides whether an active-tab change applyWorkspaceState
+// just observed for the ACTIVE project is this client's own switch landing or
+// one another attached client made, and arms the typing guard for the latter
+// (spec §8.1).
+//
+// "Not requested" is decided with the requestedTab TOKEN, never with a time
+// window: a local switch followed quickly by an unrelated remote one must
+// still be guarded, which a window alone cannot tell apart from the local
+// switch's own delayed echo.
+//
+// fromTab is the tab THIS client was showing right before the change — the
+// caller has already established it is non-nil. Its ActivePane is the pane
+// that owns the guard: the user was looking at THAT pane, not whatever the
+// new active tab's pane happens to be.
+func (m *Model) applyTabMoveGuard(dest, projectID, newActiveTab string, fromTab *TabModel) {
+	key := requestedTabKey(dest, projectID)
+	if req, ok := m.requestedTab[key]; ok {
+		// An exact match is an ordinary switchTab landing. pendingTabCreateToken
+		// matches whatever tab the daemon makes active next, since a create_tab
+		// request has no id to compare by equality — the daemon mints one.
+		if req == newActiveTab || req == pendingTabCreateToken {
+			delete(m.requestedTab, key)
+			return
+		}
+	}
+	m.remoteSwitchAt = m.clock()
+	m.guardPaneID = fromTab.ActivePane
+	m.remoteFocusUnacked = true
+	m.setFlash("Tab switched by another client")
+}
+
 // applyWorkspaceState rebuilds the TUI state from one daemon's broadcast.
 // dest names the destination that broadcast arrived on (empty = the local
 // daemon) and scopes the merge: a broadcast is the FULL state of ONE daemon,
@@ -6126,6 +6249,14 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]str
 		proj.activeTab = indexOfTab(proj.tabs, info.ActiveTab)
 		if targetTab := tabAt(proj.tabs, proj.activeTab); fromTab != targetTab {
 			tabMoves = append(tabMoves, activeTabMove{from: fromTab, target: targetTab})
+			// Typing guard (spec §8.1), scoped to the ACTIVE project only: a
+			// background project's active tab moving under it is not something
+			// anyone is typing into right now. ok (the project already existed)
+			// and fromTab != nil rule out this project's very first broadcast,
+			// which has no "before" for the guard to protect.
+			if info.ID == activeID && ok && fromTab != nil {
+				m.applyTabMoveGuard(dest, info.ID, info.ActiveTab, fromTab)
+			}
 		}
 		newPaneIDs = append(newPaneIDs, projPaneIDs...)
 		overlayResizeCmds = append(overlayResizeCmds, projResizeCmds...)
@@ -7035,6 +7166,13 @@ func (m *Model) switchTab(idx int) tea.Cmd {
 	from := m.activeTabModel()
 	tabID, dest := target.ID, target.Dest
 	m.setActiveTabIdx(idx)
+	// Typing guard (spec §8.1): this client asked for tabID, so the broadcast
+	// that lands it must not be mistaken for another client's switch. Recorded
+	// against the CURRENT project — target and its project share one Dest, so
+	// this is the same key applyWorkspaceState looks up.
+	if proj := m.cur(); proj != nil {
+		m.recordRequestedTab(dest, proj.ID, tabID)
+	}
 	cmds := []tea.Cmd{func() tea.Msg {
 		msg, _ := ipc.NewMessage(ipc.MsgSwitchTab, ipc.SwitchTabPayload{
 			TabID: tabID,
@@ -7052,6 +7190,54 @@ func (m *Model) switchTab(idx int) tea.Cmd {
 		return cmds[0]
 	}
 	return tea.Batch(cmds...)
+}
+
+// remoteSwitchGuardWindow is the typing guard's window (spec §8.1, table in
+// global-constraints.md): key-originated input arriving this soon after a
+// REMOTE active-tab change still goes to the pane the user was looking at
+// before it, not the pane the switch made active.
+const remoteSwitchGuardWindow = 250 * time.Millisecond
+
+// pendingTabCreateToken marks requestedTab[key] while this client's own
+// create_tab is in flight for that project. Unlike switchTab, sendCreateTab
+// has no id to record ahead of time — the daemon mints the new tab's id — so
+// there is nothing to compare the eventual broadcast's ActiveTab against by
+// equality. The token can never collide with a real tab id (daemon-issued ids
+// never carry a NUL byte), and applyTabMoveGuard treats it as a match for
+// whatever tab the daemon makes active next.
+const pendingTabCreateToken = "\x00pending-create"
+
+// requestedTabKey identifies one project on one destination for
+// Model.requestedTab. Dest alone is not unique (each daemon mints its own
+// project ids independently) and a project id alone is not unique across
+// daemons either — the same (Dest, ID) pairing projectgroups.go uses for
+// exactly this reason.
+func requestedTabKey(dest, projectID string) string {
+	return dest + "\x00" + projectID
+}
+
+// recordRequestedTab notes that THIS client is the one asking for tabID to
+// become the active tab of (dest, projectID). Called by switchTab/
+// switchTabBy with the tab they are switching TO, and by sendCreateTab with
+// pendingTabCreateToken. See requestedTab's field comment.
+func (m *Model) recordRequestedTab(dest, projectID, tabID string) {
+	if m.requestedTab == nil {
+		m.requestedTab = make(map[string]string)
+	}
+	m.requestedTab[requestedTabKey(dest, projectID)] = tabID
+}
+
+// clock returns the typing guard's current time: m.now when the Model has
+// one (every production Model, via NewModel), else the real wall clock. The
+// fallback is what keeps the ~46 Model literals other tests build directly
+// safe to pass through applyWorkspaceState — none of them care about this
+// feature, and a nil-func-call panic on an unrelated broadcast would be a
+// surprising way to learn they now do.
+func (m Model) clock() time.Time {
+	if m.now != nil {
+		return m.now()
+	}
+	return time.Now()
 }
 
 // eagerTabMarker is a single-width BMP glyph (deliberately not an emoji — wide
@@ -7835,6 +8021,16 @@ func (m Model) listenForMessages() tea.Cmd {
 			log.Printf("ipc recv: pane_event %s %s %s", payload.Type, payload.PaneID, payload.Title)
 			return paneEventMsg(payload)
 
+		case ipc.MsgEventDismissed:
+			var payload ipc.EventDismissedPayload
+			msg.DecodePayload(&payload)
+			return eventDismissedMsg{dest: msg.Origin, eventID: payload.EventID}
+
+		case ipc.MsgPaneSeen:
+			var payload ipc.PaneSeenPayload
+			msg.DecodePayload(&payload)
+			return paneSeenMsg{dest: msg.Origin, paneID: payload.PaneID}
+
 		case ipc.MsgResourceReportResp:
 			var payload ipc.ResourceReportRespPayload
 			if err := msg.DecodePayload(&payload); err != nil {
@@ -8492,7 +8688,7 @@ func (m Model) forwardInputBytes(data []byte) tea.Cmd {
 	if pane == nil {
 		return nil
 	}
-	m.enqueueInput(pane.ID, data)
+	m.enqueueKeyInput(pane.ID, data)
 	return nil
 }
 
@@ -8558,6 +8754,40 @@ func (m Model) enqueueInput(paneID string, data []byte) {
 		return
 	}
 	m.inputCh <- paneInput{dest: dest, paneID: paneID, data: data}
+}
+
+// enqueueKeyInput is the entry point for KEY-originated input — typed
+// keystrokes (forwardInputBytes) and both paste paths (sendClipboardToPane,
+// sendClipboardToPaneID). Paste counts as a key here (spec §8.1): it is the
+// same user action the guard protects, delivered as one chunk instead of one
+// byte at a time. Mouse-originated input (a wheel notch, sendInputToPane)
+// must never call this — it goes straight to enqueueInput, because a remote
+// tab switch says nothing about where the pointer is now.
+//
+// The guard only RETARGETS the pane id; dest is still resolved by
+// enqueueInput's own destOfPane(paneID) for whichever id wins here, exactly
+// as today.
+func (m Model) enqueueKeyInput(paneID string, data []byte) {
+	m.enqueueInput(m.guardedInputTarget(paneID), data)
+}
+
+// guardedInputTarget applies the typing guard (spec §8.1): within
+// remoteSwitchGuardWindow of a remote tab switch, key-originated input still
+// goes to guardPaneID — the pane the user was mid-keystroke in — rather than
+// wherever the remote switch moved focus. It falls through to paneID once the
+// window has elapsed or the guarded pane no longer exists (closed, moved,
+// destroyed — there is nowhere left to redirect to).
+func (m Model) guardedInputTarget(paneID string) string {
+	if m.guardPaneID == "" {
+		return paneID
+	}
+	if m.clock().Sub(m.remoteSwitchAt) >= remoteSwitchGuardWindow {
+		return paneID
+	}
+	if pane, _, _ := m.findPaneAndTab(m.guardPaneID); pane == nil {
+		return paneID
+	}
+	return m.guardPaneID
 }
 
 // sendPaneInput marshals and sends one MsgPaneInput frame to an ALREADY-RESOLVED
@@ -9199,7 +9429,7 @@ func (m Model) sendClipboardToPane(text string) {
 	// Pasted text is the user acting on the pane, so it answers a parked one
 	// exactly as a typed key does.
 	pane.answerBlockedByInput()
-	m.enqueueInput(pane.ID, pastePayload(pane, text))
+	m.enqueueKeyInput(pane.ID, pastePayload(pane, text))
 }
 
 // sendClipboardToPaneID pastes into a NAMED pane rather than whichever is
@@ -9224,7 +9454,7 @@ func (m Model) sendClipboardToPaneID(paneID, text string) {
 	// active pane any more — which is exactly why the answer is keyed to input
 	// reaching a pane rather than to which pane holds focus.
 	pane.answerBlockedByInput()
-	m.enqueueInput(paneID, pastePayload(pane, text))
+	m.enqueueKeyInput(paneID, pastePayload(pane, text))
 }
 
 func keyToBytes(keyMsg tea.KeyPressMsg) []byte {

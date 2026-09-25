@@ -290,6 +290,27 @@ func (nc *NotificationCenter) DismissSelected() string {
 	return id
 }
 
+// DismissByID removes the event with the given id, or every event when id is
+// empty — the client-side application of the daemon's event_dismissed
+// broadcast (spec §8.4), which mirrors DismissEventPayload's own "" = all
+// convention. Unlike DismissSelected/DismissAll, this is driven by a REPORT
+// of what was already dismissed (this client's own action, or another
+// attached client's), so it must never send anything back — that would echo
+// the dismissal the broadcast just delivered.
+func (nc *NotificationCenter) DismissByID(id string) {
+	if id == "" {
+		nc.DismissAll()
+		return
+	}
+	for i, e := range nc.events {
+		if e.ID == id {
+			nc.events = append(nc.events[:i], nc.events[i+1:]...)
+			break
+		}
+	}
+	nc.clampCursor()
+}
+
 // DismissAll removes all events.
 //
 // Every stored event, not just the visible ones: the key is documented as

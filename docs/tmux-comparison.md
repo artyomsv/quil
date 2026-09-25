@@ -54,11 +54,15 @@ prefix = "ctrl+a"
 
 ## Coverage at a glance
 
-| | Count |
-|---|---|
-| Same key, same meaning | 27 |
-| Close analogue on a different key | 12 |
-| No Quil equivalent | 23 |
+Counted per table row below, so a row such as `1`–`9` counts once.
+
+| | Status | Rows |
+|---|---|---|
+| Same key, same meaning | `exact` | 15 |
+| Close analogue | `analogue`, `approximate` | 11 |
+| Reachable, no default key | `mouse only`, `no key` | 6 |
+| Deliberately unbound | `by design` | 1 |
+| No Quil equivalent | `absent` | 15 |
 
 The tmux column throughout is the default prefix table for **tmux 3.x as shipped**. If you have a `.tmux.conf`, your bindings differ and this document says nothing about them.
 

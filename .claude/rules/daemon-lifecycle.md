@@ -196,19 +196,33 @@ discards a conn's hold without sending — `SendBlocking` would return
 
 **Layout revision (`Tab.LayoutRev`, spec §7).** Each tab's stored tree carries
 a `uint64` revision, persisted as `layout_rev` (omitempty) and put on the wire
-in every broadcast's per-tab entry. `SetTabLayout` (`internal/daemon/project.go`,
-under `sm.mu`, unchanged lock) now takes `UpdateLayoutPayload.BaseRev
-*uint64`: a nil `BaseRev` (an older client) or one equal to the tab's current
-revision stores, bumps the revision and broadcasts; a stale one is refused —
-no store, no broadcast, a debug log only. **The `// No broadcastState() —
-avoids feedback loop` note is retired**: a layout write now broadcasts,
-because clients no longer re-send on mere disagreement (they only send a
-change their OWN user made — see `tui-rendering.md`'s Layout sync), so the
-loop the old comment guarded against cannot occur any more. The broadcast
-itself goes through the SAME `requestBroadcast` 50 ms coalescer the snapshot
-debounce already uses, so several tabs written in one burst (`sendAllLayouts`
-after a border-drag release) still produce ONE frame, keeping the
-must-deliver queue safe.
+in every broadcast's per-tab entry. `SetTabLayout` (`SessionManager.SetTabLayout`,
+`internal/daemon/session.go:1124`, under `sm.mu`, unchanged lock) now takes
+`UpdateLayoutPayload.BaseRev *uint64`: a nil `BaseRev` (an older client) or one
+equal to the tab's current revision stores, bumps the revision and
+broadcasts; a stale one is refused — no store, no broadcast, a debug log
+only. **The `// No broadcastState() — avoids feedback loop` note is
+retired**: a layout write now broadcasts, because clients no longer re-send
+on mere disagreement (they only send a change their OWN user made — see
+`tui-rendering.md`'s Layout sync), so the loop the old comment guarded
+against is now structurally impossible, not merely avoided by omission.
+
+The broadcast goes through its OWN trailing-edge coalescer,
+`requestBroadcast` (`internal/daemon/broadcast_coalesce.go`, 50 ms,
+single-flighted under its own `broadcastMu` — modeled on the snapshot
+debounce's shape, but a separate timer, not a reuse of it). A burst it needs
+to fold does not come from a border-drag release or an arrangement action —
+`finishSplitDrag` and `applyTabArrangement` each call `markLayoutChanged` for
+the ONE tab they changed, and there is no `sendAllLayouts` sweep any more.
+It comes from `rebuildTabs` calling `markLayoutChanged` for SEVERAL tabs
+within one broadcast-processing pass on the SAME client (each an empty
+stored layout describing itself, or an awaiting-panes condition just
+satisfied — see "Layout sync between clients" in `tui-rendering.md`), and
+from several different clients each accepting a write inside the same
+window. `sendDiffedLayouts` sends one `MsgUpdateLayout` frame PER TAB (unlike
+the resize batching above), so those land as separate `handleUpdateLayout`
+calls moments apart; the coalescer is what turns them back into one
+broadcast rather than one per accepted write.
 
 **MCP unicast targets (`internal/daemon/mcp_targets.go`).** `close_tui` and
 `set_active_pane`'s focus frame used to broadcast to every attached TUI; both

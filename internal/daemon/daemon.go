@@ -1795,11 +1795,11 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 	// any of the work below, which has early returns of its own, and before
 	// the 80x24 defaulting: the election reads the RAW geometry.
 	//
-	// A master change is broadcast only once this attach is answered, so the
-	// new client's first workspace state is its own full one rather than a
-	// broadcast of a workspace this attach may be about to create.
+	// A master change reaches the OTHER attached clients once this attach is
+	// answered. The attaching conn gets none: its own state below is built
+	// after this registration, so it already names the new master.
 	if d.registerClient(conn, attach) {
-		defer d.broadcastState()
+		defer d.sendStateToOtherClients(conn)
 	}
 
 	// Hold this conn off live pane output until its replay is sent, BEFORE

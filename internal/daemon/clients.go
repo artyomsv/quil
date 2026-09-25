@@ -427,6 +427,35 @@ func (d *Daemon) shuttingDown() bool {
 	}
 }
 
+// sendStateToOtherClients sends the workspace state to every attached client
+// except the one given, for a master change an attach made.
+//
+// Not a broadcast. A broadcast also reached the attaching conn, which then got
+// two state frames back to back: its own attach state and this one, which says
+// nothing new. That is pressure on its must-deliver queue for no information.
+// A conn that never attached (an MCP bridge) has no use for the master either.
+func (d *Daemon) sendStateToOtherClients(except *ipc.Conn) {
+	d.clients.mu.Lock()
+	var conns []*ipc.Conn
+	for _, rec := range d.clients.sortedRecordsLocked() {
+		if rec.conn != except {
+			conns = append(conns, rec.conn)
+		}
+	}
+	d.clients.mu.Unlock()
+	if len(conns) == 0 {
+		return
+	}
+	msg, err := ipc.NewMessage(ipc.MsgWorkspaceState, d.buildWorkspaceState())
+	if err != nil {
+		logger.Error("attach: build state for other clients: %v", err)
+		return
+	}
+	for _, c := range conns {
+		c.Send(msg)
+	}
+}
+
 func (d *Daemon) handleDetach(conn *ipc.Conn) {
 	if d.detachClient(conn) {
 		d.broadcastState()

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"testing"
+	"time"
 
 	"github.com/artyomsv/quil/internal/ipc"
 )
@@ -106,6 +107,30 @@ func TestClientDispatch_ZeroAttachNeverElectedDespiteDefault(t *testing.T) {
 	rec, _ := clientRecordByID(d, "headless")
 	if rec.cols != 0 || rec.rows != 0 {
 		t.Errorf("recorded geometry = %dx%d, want the raw 0x0", rec.cols, rec.rows)
+	}
+}
+
+// An attach that changes the master tells every OTHER attached client, and
+// sends the attaching client only its own state. That state already names the
+// new master; a broadcast on top of it was a second frame with nothing new.
+func TestClientDispatch_AttachMasterChangeReachesOthersOnly(t *testing.T) {
+	d, sock, _ := resizeAuthorityDaemon(t)
+	small := attachClientAs(t, sock, "small", 0, 0)
+	readUntil(t, small, "small's attach state", isType(ipc.MsgWorkspaceState))
+	if d.masterID() != "" {
+		t.Fatalf("masterID = %q, want none for a 0x0 client", d.masterID())
+	}
+
+	big := attachClientAs(t, sock, "big", 200, 50)
+	readUntil(t, small, "a state naming big the master", func(m *ipc.Message) bool {
+		if m.Type != ipc.MsgWorkspaceState {
+			return false
+		}
+		var s map[string]any
+		return m.DecodePayload(&s) == nil && s["size_master"] == "big"
+	})
+	if n := countType(readFor(big, 300*time.Millisecond), ipc.MsgWorkspaceState); n != 1 {
+		t.Errorf("the attaching client received %d workspace_state frames, want only its own 1", n)
 	}
 }
 

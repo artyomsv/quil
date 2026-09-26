@@ -67,3 +67,25 @@ func QuoteCommand(shell, binary string, args ...string) (string, error) {
 }
 
 var psQuotes = strings.NewReplacer("'", "''", "\u2018", "\u2018\u2018", "\u2019", "\u2019\u2019", "\u201a", "\u201a\u201a", "\u201b", "\u201b\u201b")
+
+// quoteArg quotes one argument for the host's default ssh shell. Unlike
+// QuoteCommand's literal args, this one varies — the extract command's
+// staging directory — so it is quoted rather than joined.
+func quoteArg(shell, s string) (string, error) {
+	switch shell {
+	case ShellPOSIX:
+		return ShellSingleQuote(s), nil
+	case ShellCmd:
+		if err := CheckRemotePathWindows("remote path", s); err != nil {
+			return "", err
+		}
+		return `"` + s + `"`, nil
+	case ShellPowerShell:
+		if err := CheckRemotePathWindows("remote path", s); err != nil {
+			return "", err
+		}
+		return "'" + psQuotes.Replace(s) + "'", nil
+	default:
+		return "", fmt.Errorf("unknown remote shell %q", shell)
+	}
+}

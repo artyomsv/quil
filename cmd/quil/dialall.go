@@ -171,7 +171,7 @@ func dialExtra(cfg config.Config, d config.Destination) func() (tui.Client, erro
 		}
 		if gateErr := gateExtraVersion(d, client, link); gateErr != nil {
 			client.Close()
-			return nil, classifyDialFailure(link, gateErr)
+			return nil, classifyDialFailure(d.Dest, link, gateErr)
 		}
 		return client, nil
 	}
@@ -191,16 +191,43 @@ func dialExtra(cfg config.Config, d config.Destination) func() (tui.Client, erro
 // Read AFTER Close, which is what reaps the child and makes the status final
 // — the mirror of LinkErr, which Close can clear. dialExtra closes the client
 // on the line above.
-func classifyDialFailure(link transport.LinkStatus, err error) error {
+//
+// Exit 1 is ambiguous — a Windows shell's "not found" and quil refusing to
+// start — so dest is probed to settle it, in batch mode: a background host
+// never prompts. A probe that fails settles nothing and leaves err as it was.
+func classifyDialFailure(dest string, link transport.LinkStatus, err error) error {
 	if link == nil {
 		// A dial that never produced a link failed before ssh ran at all, so
 		// there is no remote status to classify.
 		return err
 	}
-	if remoteinstall.ClassifyExit(link.ExitCode(), link.Established()) == remoteinstall.RemedyInstall {
+	switch remoteinstall.ClassifyExit(link.ExitCode(), link.Established()) {
+	case remoteinstall.RemedyInstall:
 		return fmt.Errorf("%w: %v", tui.ErrRemoteQuilMissing, err)
+	case remoteinstall.RemedyProbe:
+		p, perr := probeDestBatchFn(dest)
+		switch {
+		case perr != nil:
+			log.Printf("remote: probe after exit 1 failed for %s: %v", dest, perr)
+			return err
+		case p.ExistingPath == "":
+			return fmt.Errorf("%w: %v", tui.ErrRemoteQuilMissing, err)
+		default:
+			return fmt.Errorf("quil on %s exited before its daemon answered: %w", dest, err)
+		}
 	}
 	return err
+}
+
+// probeDestBatchTimeout bounds classifyDialFailure's probe. Batch mode cannot
+// wait on a human, so this covers one ssh connect plus two short scripts.
+const probeDestBatchTimeout = 30 * time.Second
+
+// probeDestBatchFn probes a background destination without prompting.
+var probeDestBatchFn = func(dest string) (remoteinstall.Probe, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), probeDestBatchTimeout)
+	defer cancel()
+	return remoteinstall.RunProbe(ctx, sshRunner{dest: dest, opts: transport.SSHOptions{Batch: true}})
 }
 
 // gateExtraVersion refuses a background destination whose daemon this client

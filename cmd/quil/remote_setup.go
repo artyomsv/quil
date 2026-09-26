@@ -52,6 +52,16 @@ var probeRemoteFn = func(dest string) (remoteinstall.Probe, error) {
 	return remoteinstall.RunProbe(ctx, sshRunner{dest: dest})
 }
 
+// setupRunnerFn builds the ssh runner runRemoteSetup installs through.
+// Swappable so the install sequence — including the Windows logon task and
+// the shell it records — is testable through runRemoteSetup itself.
+//
+// Batch=false: this runs before the TUI takes the terminal, so ssh may still
+// prompt for a host-key fingerprint or a key passphrase.
+var setupRunnerFn = func(dest string) remoteinstall.Runner {
+	return sshRunner{dest: dest, opts: transport.SSHOptions{}}
+}
+
 // recordRemoteBinaryFn and clearRemoteBinaryFn are the config writes, swappable
 // so a test can assert WHICH mutation a branch chose — the difference between
 // healing a stale record and destroying a good one.
@@ -165,13 +175,9 @@ func runRemoteSetup(dest string, opts setupOptions) error {
 	ctx, cancel := context.WithTimeout(context.Background(), remoteSetupTimeout)
 	defer cancel()
 
-	// Batch=false: this runs before the TUI takes the terminal, so ssh may
-	// still prompt for a host-key fingerprint or a key passphrase. stderr is
-	// sanitized because it carries whatever the remote shell wrote.
-	runner := sshRunner{
-		dest: dest,
-		opts: transport.SSHOptions{},
-	}
+	// Interactive (see setupRunnerFn). stderr is sanitized because it carries
+	// whatever the remote shell wrote.
+	runner := setupRunnerFn(dest)
 
 	// Reuse the caller's probe when it has one. The attach path probes to
 	// reconcile the recorded binary path (healRemoteRecord), and probing again
@@ -217,19 +223,36 @@ func runRemoteSetup(dest string, opts setupOptions) error {
 	var stopWarning string
 	if upgrade {
 		fmt.Fprintf(opts.out(), "Stopping the remote daemon…\n")
-		// Task 10: probe.Shell
-		stopWarning, err = remoteinstall.StopRemoteDaemon(ctx, runner, remoteinstall.ShellPOSIX, probe.ExistingPath)
+		stopWarning, err = remoteinstall.StopRemoteDaemon(ctx, runner, probe.Shell, probe.ExistingPath)
 		if err != nil {
 			return err
 		}
 	}
 
 	fmt.Fprintf(opts.out(), "Installing to %s…\n", target.Dir)
-	if err := remoteinstall.Push(ctx, runner, target, src); err != nil {
+	if err := remoteinstall.Push(ctx, runner, probe.Shell, target, src); err != nil {
 		return err
 	}
 
-	if err := recordRemoteBinaryFn(dest, target.BinaryPath()); err != nil {
+	// On Windows the daemon is started through its logon task, so it runs in
+	// the user's desktop session rather than inside the ssh session that asked
+	// for it. A failure is a warning: the install landed, and the command can
+	// be run by hand.
+	if probe.OS == "windows" {
+		fmt.Fprintf(opts.out(), "Registering the daemon's logon task…\n")
+		if w, err := remoteinstall.InstallLogonTask(ctx, runner, probe.Shell, target.BinaryPath()); err != nil || w != "" {
+			detail := w
+			if err != nil {
+				detail = err.Error()
+			}
+			// The path already passed QuoteCommand inside InstallLogonTask, or
+			// err above says why not; either way the hint is best effort.
+			cmd, _ := remoteinstall.QuoteCommand(probe.Shell, target.BinaryPath(), "daemon", "install-logon")
+			fmt.Fprintf(opts.out(), "  The logon task was not registered: %s\n  Run it on %s later: %s\n", detail, dest, cmd)
+		}
+	}
+
+	if err := recordRemoteBinaryFn(dest, target.BinaryPath(), probe.Shell); err != nil {
 		// The install succeeded; only the shortcut for next time did not.
 		// Reporting it as a failure would be wrong, and silence would leave a
 		// confusing "not found" on the next launch.
@@ -239,8 +262,7 @@ func runRemoteSetup(dest string, opts setupOptions) error {
 		return nil
 	}
 
-	// Task 10: probe.Shell
-	reportInstalled(opts.out(), dest, target, src, stopWarning, remoteinstall.ShellPOSIX)
+	reportInstalled(opts.out(), dest, target, src, stopWarning, probe.Shell)
 	return nil
 }
 
@@ -301,7 +323,11 @@ func confirmRemoteInstall(dest string, probe remoteinstall.Probe, target remotei
 		fmt.Fprintf(os.Stderr, "  Install Quil on %s\n\n", dest)
 	}
 	fmt.Fprintf(os.Stderr, "    remote platform:      %s\n", probe.Platform)
-	fmt.Fprintf(os.Stderr, "    install to:           %s/{quil,quild}\n", target.Dir)
+	if target.OS == "windows" {
+		fmt.Fprintf(os.Stderr, "    install to:           %s\\{quil,quild}.exe\n", strings.TrimRight(target.Dir, `\`))
+	} else {
+		fmt.Fprintf(os.Stderr, "    install to:           %s/{quil,quild}\n", target.Dir)
+	}
 	fmt.Fprintf(os.Stderr, "    version:              %s\n", version)
 	fmt.Fprintf(os.Stderr, "    source:               downloaded and checksum-verified here,\n")
 	fmt.Fprintf(os.Stderr, "                          pushed over this ssh connection\n")
@@ -349,9 +375,10 @@ func mutateConfig(fn func(*config.Config)) error {
 }
 
 // recordRemoteBinary saves the resolved absolute path so later launches skip
-// the remote's PATH entirely.
-func recordRemoteBinary(dest, binary string) error {
-	return mutateConfig(func(c *config.Config) { c.SetRemoteBinary(dest, binary) })
+// the remote's PATH entirely, with the host's default ssh shell (the probe's
+// Probe.Shell, "" for POSIX) that decides how the path is quoted there.
+func recordRemoteBinary(dest, binary, shell string) error {
+	return mutateConfig(func(c *config.Config) { c.SetRemoteHost(dest, binary, shell) })
 }
 
 // clearRemoteBinary forgets dest's recorded path.
@@ -467,7 +494,7 @@ func healRemoteRecord(dest string) (probed *remoteinstall.Probe, done, retry boo
 		}
 		return &probe, false, false
 
-	case probe.ExistingPath == recorded:
+	case samePath(probe, probe.ExistingPath, recorded):
 		// We ran exactly the path the host reports, and it still would not
 		// execute. This is the genuine wrong-architecture case, and the only
 		// one that must not loop: "offer forever" requires a path that exists,
@@ -482,8 +509,10 @@ func healRemoteRecord(dest string) (probed *remoteinstall.Probe, done, retry boo
 		// including the shadowed case, because ~/.local/bin has priority in that
 		// loop. So `recorded == probe.ExistingPath` is guaranteed after any
 		// install this tool performs. Reorder that shell loop and this guard
-		// breaks with every Go test still green.
-		reportRemoteBinaryWontRun(dest, probe.ExistingPath)
+		// breaks with every Go test still green. remote-probe.ps1 keeps the
+		// same promise for Windows by checking %LOCALAPPDATA%\Programs\quil
+		// before Get-Command, as the shell loop checks ~/.local/bin first.
+		reportRemoteBinaryWontRun(dest, probe.ExistingPath, probe.OS == "windows")
 		return &probe, true, false
 
 	default:
@@ -513,25 +542,46 @@ func healRemoteRecord(dest string) (probed *remoteinstall.Probe, done, retry boo
 				"not adopting it, offering an install instead", dest, probe.ExistingPath)
 			return &probe, false, false
 		}
-		log.Printf("remote: %s has quil at %q, not %q; correcting the record",
-			dest, probe.ExistingPath, recorded)
-		if err := recordRemoteBinaryFn(dest, probe.ExistingPath); err != nil {
-			// Without the record the retry would dial the same wrong path and
-			// land right back here, so this one does have to stop. The correct
-			// path IS known at this point, so hand it over rather than leaving
-			// the user with a bare error — reportRemoteBinaryWontRun sets the
-			// bar for this file.
-			fmt.Fprintf(os.Stderr,
-				"\n  Found quil at %s on %s, but could not record it: %v\n"+
-					"\n  Fix the config write, or add this to %s:\n"+
-					"    [remote.hosts.%q]\n"+
-					"      binary = %q\n\n",
-				probe.ExistingPath, dest, err, config.ConfigPath(), dest, probe.ExistingPath)
-			return &probe, true, false
-		}
-		fmt.Fprintf(os.Stderr, "\n  Found quil at %s on %s. Reconnecting…\n\n", probe.ExistingPath, dest)
-		return &probe, true, true
+		return &probe, true, adoptRemoteBinary(dest, probe, recorded)
 	}
+}
+
+// adoptRemoteBinary records the quil the probe found, with the host's shell,
+// and reports whether the caller should re-dial. The caller has already
+// checked that the probe reported the directory as exclusively writable.
+func adoptRemoteBinary(dest string, probe remoteinstall.Probe, recorded string) (retry bool) {
+	log.Printf("remote: %s has quil at %q, not %q; correcting the record",
+		dest, probe.ExistingPath, recorded)
+	if err := recordRemoteBinaryFn(dest, probe.ExistingPath, probe.Shell); err != nil {
+		// Without the record the retry would dial the same wrong path and
+		// land right back here, so this one does have to stop. The correct
+		// path IS known at this point, so hand it over rather than leaving
+		// the user with a bare error — reportRemoteBinaryWontRun sets the
+		// bar for this file.
+		shellLine := ""
+		if probe.Shell != "" {
+			shellLine = fmt.Sprintf("      shell = %q\n", probe.Shell)
+		}
+		fmt.Fprintf(os.Stderr,
+			"\n  Found quil at %s on %s, but could not record it: %v\n"+
+				"\n  Fix the config write, or add this to %s:\n"+
+				"    [remote.hosts.%q]\n"+
+				"      binary = %q\n%s\n",
+			probe.ExistingPath, dest, err, config.ConfigPath(), dest, probe.ExistingPath, shellLine)
+		return false
+	}
+	fmt.Fprintf(os.Stderr, "\n  Found quil at %s on %s. Reconnecting…\n\n", probe.ExistingPath, dest)
+	return true
+}
+
+// samePath compares remote paths with the host's own rules: Windows paths are
+// case-insensitive, and Get-Command may report a different case than the
+// planner used, which would otherwise cost a spurious "correcting the record".
+func samePath(p remoteinstall.Probe, a, b string) bool {
+	if p.OS == "windows" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
 }
 
 // reportRemoteBinaryWontRun explains a binary the host has and cannot execute.
@@ -549,7 +599,10 @@ func healRemoteRecord(dest string) (probed *remoteinstall.Probe, done, retry boo
 // interpolation inside single quotes lets a crafted path close the quote and
 // append a command that runs LOCALLY. It also simply breaks on legitimate
 // input: this package's own tests use /home/o'brien/bin/quil.
-func reportRemoteBinaryWontRun(dest, path string) {
+//
+// A Windows host gets the first two sentences only: `uname` and `file` do not
+// exist there, and quil publishes a single Windows architecture anyway.
+func reportRemoteBinaryWontRun(dest, path string, windows bool) {
 	fmt.Fprintf(os.Stderr,
 		"\n"+
 			"  Quil is installed on %s at %s, but will not run there.\n"+
@@ -557,11 +610,16 @@ func reportRemoteBinaryWontRun(dest, path string) {
 			"  The remote shell finds the file and cannot execute it, which\n"+
 			"  almost always means it was built for a different architecture\n"+
 			"  than the host actually runs.\n"+
-			"\n"+
-			"  Check what the host really is:\n"+
+			"\n",
+		dest, path)
+	if windows {
+		return
+	}
+	fmt.Fprintf(os.Stderr,
+		"  Check what the host really is:\n"+
 			"    ssh %s %s\n"+
 			"\n",
-		dest, path, dest, remoteinstall.ShellSingleQuote("uname -sm; file "+path))
+		dest, remoteinstall.ShellSingleQuote("uname -sm; file "+path))
 }
 
 // offerRemoteInstall handles a launch that failed because the far side has no
@@ -572,6 +630,9 @@ func reportRemoteBinaryWontRun(dest, path string) {
 // a stale record can resolve it without installing anything, when the host had
 // quil somewhere other than where we looked.
 func offerRemoteInstall(dest string, remedy remoteinstall.Remedy) bool {
+	if remedy == remoteinstall.RemedyProbe {
+		return resolveExitOne(dest)
+	}
 	if remedy == remoteinstall.RemedyNone {
 		return false
 	}
@@ -629,6 +690,67 @@ func offerRemoteInstall(dest string, remedy remoteinstall.Remedy) bool {
 		return false
 	}
 	return true
+}
+
+// remoteFailureReported is set when offerRemoteInstall has already explained a
+// dead link, so gateVersionCheck must not print reportRemoteLinkFailure's
+// "cannot reach the host" text beneath it. Same flag pattern as
+// remoteInstallRetry: the caller owns what happens next.
+var remoteFailureReported bool
+
+// resolveExitOne is offerRemoteInstall for RemedyProbe: exit 1 before any
+// byte, which a Windows shell answers for a command it cannot find and quil
+// answers when it refuses to start. The probe tells them apart.
+//
+// It mirrors healRemoteRecord's three states, with one difference: quil
+// present at the path we dialled is quil's OWN exit, not a binary that will
+// not execute — exit 1 means something ran — so it is reported as such and
+// never answered with an install.
+func resolveExitOne(dest string) bool {
+	recorded := recordedRemoteBinaryFn(dest)
+	// Announced for the same reason healRemoteRecord announces it: ssh may be
+	// waiting behind the silence for a passphrase.
+	fmt.Fprintf(os.Stderr, "Checking %s…\n", dest)
+	p, err := probeRemoteFn(dest)
+	if err != nil {
+		// Positive evidence only: a failed probe changes nothing, and the
+		// caller reports the link failure exactly as before.
+		log.Printf("remote: probe after exit 1 failed for %s: %v", dest, err)
+		return false
+	}
+	if p.ExistingPath != "" {
+		// quil is somewhere other than the path we dialled, in a directory we
+		// may adopt: exit 1 was most likely the shell not finding what we
+		// asked for. Correct the record and re-dial, as healRemoteRecord does
+		// for 127. It terminates: next time the two paths are the same.
+		if !samePath(p, p.ExistingPath, recorded) && p.ExistingDirWritable {
+			return adoptRemoteBinary(dest, p, recorded)
+		}
+		reportRemoteQuilExited(dest)
+		remoteFailureReported = true
+		return false
+	}
+	if recorded != "" {
+		log.Printf("remote: %s has no quil; clearing the recorded path %q", dest, recorded)
+		if err := clearRemoteBinaryFn(dest); err != nil {
+			fmt.Fprintf(os.Stderr, "\n  Could not clear the stale path in your config: %v\n", err)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "\n  Quil is not installed on %s.\n", dest)
+	if err := runRemoteSetup(dest, setupOptions{probe: &p}); err != nil {
+		if !errors.Is(err, errSetupAborted) {
+			fmt.Fprintf(os.Stderr, "\n  Install failed: %v\n", err)
+		}
+		return false
+	}
+	return true
+}
+
+// reportRemoteQuilExited explains exit 1 from a quil the host does have. Its
+// own message has already reached the terminal through ssh's stderr.
+func reportRemoteQuilExited(dest string) {
+	fmt.Fprintf(os.Stderr, "\n  quil on %s exited before its daemon answered.\n"+
+		"  Its own message is above. The ssh connection itself worked.\n\n", dest)
 }
 
 // handleRemote dispatches `quil remote <subcommand>`.
@@ -734,6 +856,6 @@ Flags:
   -y, --yes           Skip the confirmation prompt.
 
 Supported remote platforms: linux/amd64, linux/arm64, darwin/amd64,
-darwin/arm64.
+darwin/arm64, windows/amd64 (Windows 10 1803 or later, OpenSSH server).
 `)
 }

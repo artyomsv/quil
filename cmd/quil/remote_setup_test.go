@@ -17,7 +17,11 @@ func resetRemoteSetupState(t *testing.T) {
 	prevClear := clearRemoteBinaryFn
 	prevIsRelease := isReleaseFn
 	prevDest := remoteDest
+	prevReported := remoteFailureReported
+	prevRunner := setupRunnerFn
 	t.Cleanup(func() {
+		remoteFailureReported = prevReported
+		setupRunnerFn = prevRunner
 		recordedRemoteBinaryFn = prevRecorded
 		probeRemoteFn = prevProbe
 		recordRemoteBinaryFn = prevRecord
@@ -25,19 +29,22 @@ func resetRemoteSetupState(t *testing.T) {
 		isReleaseFn = prevIsRelease
 		remoteDest = prevDest
 	})
+	remoteFailureReported = false
 	// Default to a host that answers "nothing installed" so a test which does
 	// not care about the probe cannot accidentally reach the real ssh path.
 	probeRemoteFn = func(string) (remoteinstall.Probe, error) {
 		return remoteinstall.Probe{}, nil
 	}
+	// runRemoteSetup's own ssh runs fail rather than reach a real ssh.
+	setupRunnerFn = func(string) remoteinstall.Runner { return noSSHRunner{} }
 	recordedRemoteBinaryFn = func(string) string { return "" }
 	// The same argument applies with MORE force to the two writers: the accident
 	// there is not a slow test, it is a write to the developer's real
 	// ~/.quil/config.toml, which .claude/rules/dev-environment.md forbids
 	// touching. Fail loudly instead of defaulting to the live implementation —
 	// a test that needs these calls newHealSpy.
-	recordRemoteBinaryFn = func(dest, binary string) error {
-		t.Errorf("unstubbed recordRemoteBinaryFn(%q, %q) — call newHealSpy first", dest, binary)
+	recordRemoteBinaryFn = func(dest, binary, shell string) error {
+		t.Errorf("unstubbed recordRemoteBinaryFn(%q, %q, %q) — call newHealSpy first", dest, binary, shell)
 		return nil
 	}
 	clearRemoteBinaryFn = func(dest string) error {
@@ -52,6 +59,7 @@ func resetRemoteSetupState(t *testing.T) {
 type healSpy struct {
 	cleared  []string
 	recorded map[string]string
+	shells   map[string]string
 }
 
 // dropProbe discards healRemoteRecord's probe return so a test asserting only
@@ -62,13 +70,14 @@ func dropProbe(_ *remoteinstall.Probe, done, retry bool) (bool, bool) {
 
 func newHealSpy(t *testing.T) *healSpy {
 	t.Helper()
-	s := &healSpy{recorded: map[string]string{}}
+	s := &healSpy{recorded: map[string]string{}, shells: map[string]string{}}
 	clearRemoteBinaryFn = func(dest string) error {
 		s.cleared = append(s.cleared, dest)
 		return nil
 	}
-	recordRemoteBinaryFn = func(dest, binary string) error {
+	recordRemoteBinaryFn = func(dest, binary, shell string) error {
 		s.recorded[dest] = binary
+		s.shells[dest] = shell
 		return nil
 	}
 	return s
@@ -238,7 +247,7 @@ func TestHealRemoteRecord_GroupWritableDir_NotAdopted(t *testing.T) {
 // config test uses /home/o'brien/bin/quil.
 func TestReportRemoteBinaryWontRun_QuotesTheSuggestedCommand(t *testing.T) {
 	const evil = `/tmp/a'; touch /tmp/pwned; echo '`
-	out := captureStderr(t, func() { reportRemoteBinaryWontRun("gpu01", evil) })
+	out := captureStderr(t, func() { reportRemoteBinaryWontRun("gpu01", evil, false) })
 
 	// The payload must not sit outside a quoted region. Everything after the
 	// `ssh gpu01 ` prefix is one ShellSingleQuote'd argument, so the injected
@@ -311,8 +320,12 @@ func TestRecordAndClearRemoteBinary_RoundTripOnDisk(t *testing.T) {
 	t.Setenv("QUIL_HOME", t.TempDir())
 
 	// First write against a config.toml that does not exist yet.
-	if err := recordRemoteBinary("gpu01", "/home/a/.local/bin/quil"); err != nil {
+	if err := recordRemoteBinary("gpu01", "/home/a/.local/bin/quil", remoteinstall.ShellPOSIX); err != nil {
 		t.Fatalf("recordRemoteBinary on a missing config: %v", err)
+	}
+	// The shell travels with the path: it is what the next attach quotes by.
+	if err := recordRemoteBinary("win01", `C:\q\quil.exe`, remoteinstall.ShellCmd); err != nil {
+		t.Fatalf("recordRemoteBinary for a Windows host: %v", err)
 	}
 	cfg, err := config.Load(config.ConfigPath())
 	if err != nil {
@@ -320,6 +333,9 @@ func TestRecordAndClearRemoteBinary_RoundTripOnDisk(t *testing.T) {
 	}
 	if got := cfg.RemoteBinary("gpu01"); got != "/home/a/.local/bin/quil" {
 		t.Fatalf("RemoteBinary = %q, want the recorded path", got)
+	}
+	if got := cfg.RemoteShell("win01"); got != remoteinstall.ShellCmd {
+		t.Errorf("RemoteShell = %q, want %q", got, remoteinstall.ShellCmd)
 	}
 	// A default config must have been written, not a zeroed one — otherwise the
 	// first remote provisioned on a fresh machine silently resets every setting.

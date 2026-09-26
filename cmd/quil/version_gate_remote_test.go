@@ -338,3 +338,45 @@ func TestGateVersionCheck_NoRetryWhenInstallDeclined(t *testing.T) {
 		t.Error("remoteInstallRetry = true after a declined install")
 	}
 }
+
+// When offerRemoteInstall has already explained the dead link — quil ran over
+// there and refused to start — the gate must exit WITHOUT printing
+// reportRemoteLinkFailure's "cannot reach" text beneath it: the ssh
+// connection worked, and saying otherwise contradicts the line above.
+func TestGateVersionCheck_FailureAlreadyReported_ExitsWithoutLinkReport(t *testing.T) {
+	withRemote(t, "gpu01")
+
+	prevReported := remoteFailureReported
+	prevRetry := remoteInstallRetry
+	t.Cleanup(func() {
+		remoteFailureReported = prevReported
+		remoteInstallRetry = prevRetry
+	})
+	remoteFailureReported = false
+	remoteInstallRetry = false
+
+	offered := remoteGateSeams(t, false, 1)
+	offerRemoteInstallFn = func(_ string, r remoteinstall.Remedy) bool {
+		*offered = r
+		remoteFailureReported = true
+		return false
+	}
+	exitCode := -1
+	exitFn = func(code int) { exitCode = code }
+
+	var got *ipc.Client
+	out := captureStderr(t, func() { got = gateVersionCheck(deadClient(t)) })
+
+	if *offered != remoteinstall.RemedyProbe {
+		t.Errorf("remedy = %v, want RemedyProbe for exit 1 before any byte", *offered)
+	}
+	if exitCode != 1 {
+		t.Errorf("exit code = %d, want 1", exitCode)
+	}
+	if got != nil || remoteInstallRetry {
+		t.Errorf("client %v retry %v; want neither", got, remoteInstallRetry)
+	}
+	if strings.Contains(out, "Cannot reach the Quil daemon") {
+		t.Errorf("printed the link-failure report under an explanation that already ran:\n%s", out)
+	}
+}

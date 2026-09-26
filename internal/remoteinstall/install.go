@@ -164,8 +164,13 @@ func StopRemoteDaemon(ctx context.Context, r Runner, shell, binaryPath string) (
 	return detail, nil
 }
 
-// Push streams the archive into the remote install script.
-func Push(ctx context.Context, r Runner, t Target, src Source) error {
+// Push streams the archive into the remote install script. shell is the
+// host's default ssh shell (Probe.Shell); only the Windows install quotes a
+// command for it, since a POSIX host always runs the installer under `sh -c`.
+func Push(ctx context.Context, r Runner, shell string, t Target, src Source) error {
+	if t.OS == "windows" {
+		return pushWindows(ctx, r, shell, t, src)
+	}
 	stdout := &capWriter{limit: maxRemoteOutput}
 	stderr := &capWriter{limit: maxRemoteOutput}
 	code, err := r.Run(ctx, InstallCommand(t, src), bytes.NewReader(src.Archive), stdout, stderr)
@@ -183,6 +188,89 @@ func Push(ctx context.Context, r Runner, t Target, src Source) error {
 		return fmt.Errorf("install into %s failed: %s", t.Dir, detail)
 	}
 	return nil
+}
+
+// pushWindows installs on a Windows host in the three steps wincommand.go
+// describes: prepare, extract with the host's tar.exe, finalize.
+func pushWindows(ctx context.Context, r Runner, shell string, t Target, src Source) error {
+	prepare, err := WindowsPrepareCommand(t)
+	if err != nil {
+		return err
+	}
+	// Build the finalize command's hash table BEFORE anything runs, so a
+	// Source it would refuse cannot leave a staging dir behind on the host.
+	if _, err := hashTable(src.FileSHA256); err != nil {
+		return err
+	}
+
+	out, err := runStep(ctx, r, prepare, nil, "prepare "+t.Dir)
+	if err != nil {
+		return err
+	}
+	staging, tar, err := ParsePrepareOutput(t, out)
+	if err != nil {
+		return fmt.Errorf("prepare %s: %w", t.Dir, err)
+	}
+
+	extract, err := WindowsExtractCommand(shell, tar, staging)
+	if err != nil {
+		return err
+	}
+	if _, err := runStep(ctx, r, extract, bytes.NewReader(src.Archive), "copy the archive into "+staging); err != nil {
+		return err
+	}
+
+	finalize, err := WindowsFinalizeCommand(t, staging, src)
+	if err != nil {
+		return err
+	}
+	_, err = runStep(ctx, r, finalize, nil, "install into "+t.Dir)
+	return err
+}
+
+// runStep runs one remote command and turns a non-zero exit into
+// "<what> failed: <first line of stderr, else stdout>". It returns stdout.
+func runStep(ctx context.Context, r Runner, cmd string, stdin io.Reader, what string) (string, error) {
+	stdout := &capWriter{limit: maxRemoteOutput}
+	stderr := &capWriter{limit: maxRemoteOutput}
+	code, err := r.Run(ctx, cmd, stdin, stdout, stderr)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", what, err)
+	}
+	if code != 0 {
+		detail := firstLine(stderr.String())
+		if detail == "" {
+			detail = firstLine(stdout.String())
+		}
+		if detail == "" {
+			detail = fmt.Sprintf("exited %d", code)
+		}
+		return "", fmt.Errorf("%s failed: %s", what, detail)
+	}
+	return stdout.String(), nil
+}
+
+// InstallLogonTask registers the daemon's logon task on a Windows remote. Like
+// StopRemoteDaemon it returns a WARNING, not an error, for a non-zero exit:
+// the install already succeeded, and the task is an improvement the user can
+// add by hand.
+func InstallLogonTask(ctx context.Context, r Runner, shell, binaryPath string) (string, error) {
+	cmd, err := QuoteCommand(shell, binaryPath, "daemon", "install-logon")
+	if err != nil {
+		return "", err
+	}
+	out := &capWriter{limit: maxRemoteOutput}
+	code, err := r.Run(ctx, cmd, nil, out, out)
+	if err != nil {
+		return "", fmt.Errorf("register the logon task: %w", err)
+	}
+	if code == 0 {
+		return "", nil
+	}
+	if d := firstLine(out.String()); d != "" {
+		return d, nil
+	}
+	return fmt.Sprintf("exited %d with no output", code), nil
 }
 
 // firstLine trims remote output down to something an error message can carry.

@@ -77,6 +77,12 @@ func gateVersionCheck(client *ipc.Client) *ipc.Client {
 			remoteInstallRetry = true
 			return nil
 		}
+		if remoteFailureReported {
+			// offerRemoteInstall already said what happened — quil ran over
+			// there and exited — so "cannot reach the host" would contradict it.
+			exitFn(1)
+			return nil
+		}
 		reportRemoteLinkFailure(linkErr)
 		exitFn(1)
 		// exitFn is a swappable var, so the compiler cannot know it does not

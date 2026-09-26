@@ -26,3 +26,20 @@ var installScript string
 //
 //go:embed scripts/remote-probe.ps1
 var windowsProbeScript string
+
+// windowsPrepareScript creates the install directory and a fresh staging
+// directory under it, and prints both along with the host's own tar.exe.
+// Windows PowerShell started by Win32-OpenSSH cannot read ssh stdin, so the
+// archive cannot reach a PowerShell installer the way it reaches `sh -c`; the
+// host's tar.exe reads it instead, into the directory this step made.
+//
+//go:embed scripts/remote-prepare.ps1
+var windowsPrepareScript string
+
+// windowsFinalizeScript verifies every extracted file against its own
+// SHA-256 and swaps the set into place, renaming a running .exe aside rather
+// than overwriting it — Windows refuses to overwrite a running image, but
+// allows the rename.
+//
+//go:embed scripts/remote-finalize.ps1
+var windowsFinalizeScript string

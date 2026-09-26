@@ -49,7 +49,7 @@ func dialMCPHost(cfg config.Config, d config.Destination) (*ipc.Client, error) {
 	}
 	if gateErr := gateExtraVersion(d, client, link); gateErr != nil {
 		client.Close()
-		return nil, classifyDialFailure(link, gateErr)
+		return nil, classifyDialFailure(d.Dest, link, gateErr)
 	}
 	sendClientHello(client, helloRoleBridge)
 	return client, nil

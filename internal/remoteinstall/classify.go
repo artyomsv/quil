@@ -20,6 +20,13 @@ const (
 	// that just answered with its version is a visible contradiction — the
 	// probe on the very next line reports the install it supposedly lacks.
 	RemedyUpgrade
+
+	// RemedyProbe means the far side exited 1 before any byte arrived. Both
+	// cmd.exe and PowerShell use 1 for "command not found" (measured on
+	// Windows 10, issue #236 — not 9009), but so does `quil --stdio` refusing
+	// to start. The code cannot tell them apart, so the caller asks the host
+	// with the probe: no quil ⇒ install; quil present ⇒ it exited on its own.
+	RemedyProbe
 )
 
 func (r Remedy) String() string {
@@ -30,6 +37,8 @@ func (r Remedy) String() string {
 		return "reinstall"
 	case RemedyUpgrade:
 		return "upgrade"
+	case RemedyProbe:
+		return "probe"
 	default:
 		return "none"
 	}
@@ -43,6 +52,11 @@ const (
 	exitCommandNotFound = 127
 	exitNotExecutable   = 126
 )
+
+// exitGeneralFailure is what cmd.exe and PowerShell answer for a command they
+// cannot find — and what quil itself answers when it refuses to start. See
+// RemedyProbe.
+const exitGeneralFailure = 1
 
 // ClassifyExit maps an ssh exit status to a remedy.
 //
@@ -60,6 +74,8 @@ func ClassifyExit(exitCode int, established bool) Remedy {
 		return RemedyInstall
 	case exitNotExecutable:
 		return RemedyReinstall
+	case exitGeneralFailure:
+		return RemedyProbe
 	default:
 		return RemedyNone
 	}

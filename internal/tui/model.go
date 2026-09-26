@@ -488,6 +488,13 @@ type Model struct {
 	version    string
 	sized      bool            // the terminal has reported its geometry at least once
 	attached   map[string]bool // destinations already attached — see attachAllDests
+	// attachedOnce records every destination this PROCESS has sent an attach
+	// to, and is never cleared (attached is, on disconnect). It is the
+	// AttachPayload.Reattach flag: a destination unreachable at launch gets its
+	// first attach through finishReconnect, and that one must still say
+	// "first", or the lone TUI after that host's unclean restart waits out the
+	// restart reserve as a follower.
+	attachedOnce map[string]bool
 	// offlineWoken records which offline destinations have had their ladder
 	// started, so the wake-up fires once rather than on every resize.
 	offlineWoken map[string]bool
@@ -7942,11 +7949,12 @@ func (m *Model) attachAllDests() tea.Cmd {
 		if m.attached[dest] {
 			continue
 		}
-		if err := m.sendForDest(dest, m.attachMessage(dest, false)); err != nil {
+		if err := m.sendForDest(dest, m.attachMessage(dest, m.attachedOnce[dest])); err != nil {
 			log.Printf("attach to %q failed, retrying on the next resize: %v", dest, err)
 			continue
 		}
 		m.attached[dest] = true
+		m.markAttachedOnce(dest)
 		newlyAttached[dest] = true
 		// Batched per destination so each daemon is asked about its OWN
 		// registry; see requestPluginListFor.
@@ -8006,9 +8014,10 @@ func (m *Model) attachAllDests() tea.Cmd {
 // attachMessage builds the MsgAttach describing this client's geometry for one
 // destination.
 //
-// reattach is true only from the reconnect path (attachToDest). A daemon that
-// just restarted keeps the previous master's slot for its reconnecting TUIs,
-// and yields it to a first attach from a new process that is alone there.
+// reattach is m.attachedOnce[dest] at the call site: true once this process
+// has attached to dest before, whichever path sends it. A daemon that just
+// restarted keeps the previous master's slot for its reconnecting TUIs, and
+// yields it to a first attach from a new process that is alone there.
 func (m Model) attachMessage(dest string, reattach bool) *ipc.Message {
 	// Subtract chrome (tab bar + status bar), the project sidebar (if open),
 	// then pane border (2) — the same reservation resizeTabs applies, so the
@@ -8066,9 +8075,14 @@ func (m Model) attachMessage(dest string, reattach bool) *ipc.Message {
 // truth here the sweep destroys an overlay the user is looking at five minutes
 // after a link blip. attachAllDests never runs for this flow — finishReconnect
 // sets m.attached[dest] — so its copy of this report does not cover it.
+//
+// The Reattach flag is read HERE, on the Update goroutine, not inside the
+// command: the caller marks dest in attachedOnce right after this returns, and
+// the command runs later on its own goroutine.
 func (m Model) attachToDest(dest string) tea.Cmd {
+	reattach := m.attachedOnce[dest]
 	attachCmd := func() tea.Msg {
-		m.sendForDest(dest, m.attachMessage(dest, true))
+		m.sendForDest(dest, m.attachMessage(dest, reattach))
 		return nil
 	}
 	return tea.Batch(attachCmd, m.requestPluginListFor(dest), m.overlayTruthDestCmd(dest),
@@ -8076,6 +8090,15 @@ func (m Model) attachToDest(dest string) tea.Cmd {
 		// already know whether this daemon can host a container, rather than
 		// hiding the row until the second.
 		m.requestSandboxCap(dest))
+}
+
+// markAttachedOnce records that this process has sent dest an attach. Called
+// on the Update goroutine by both attach paths — see attachedOnce.
+func (m *Model) markAttachedOnce(dest string) {
+	if m.attachedOnce == nil {
+		m.attachedOnce = map[string]bool{}
+	}
+	m.attachedOnce[dest] = true
 }
 
 // listenContinueMsg signals the TUI to keep listening for daemon messages.

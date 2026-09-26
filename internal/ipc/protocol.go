@@ -327,12 +327,16 @@ type AttachPayload struct {
 	// that cannot participate in election — it is neither offered control
 	// nor handed a follower's resize_panes stream.
 	ClientID string `json:"client_id,omitempty"`
-	// Reattach is true on an attach sent from the client's reconnect path,
-	// and false on the process's first attach to this daemon. A daemon
-	// restart keeps the previous master's slot for a short reserve so the
-	// reconnecting TUIs resize nothing; a FIRST attach from a new process,
-	// alone on the daemon, is a cold start after an unclean stop, and the
-	// reserve yields to it rather than making it a follower for 30 s.
+	// Reattach is false on the process's first attach to this daemon and
+	// true on every later one, whichever client path sends it (a daemon
+	// unreachable at launch gets its first attach from the reconnect path).
+	// A daemon restart keeps the previous master's slot for a short reserve
+	// so the reconnecting TUIs resize nothing; a FIRST attach from a new
+	// process, alone on the daemon, is a cold start after an unclean stop,
+	// and the reserve yields to it rather than making it a follower for
+	// 30 s. Only an attach that carries a ClientID can clear the reserve: an
+	// older client sends neither field, so its reconnect looks like a cold
+	// start.
 	Reattach bool `json:"reattach,omitempty"`
 }
 

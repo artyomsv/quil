@@ -1195,8 +1195,13 @@ func (m Model) finishReconnect(dest string, c Client) (tea.Model, tea.Cmd) {
 		}
 	})
 
+	// attachToDest reads attachedOnce for the Reattach flag, so the mark comes
+	// after it: a destination unreachable at launch attaches here for the
+	// first time, and must say so.
+	attach := m.attachToDest(dest)
+	m.markAttachedOnce(dest)
 	if isRouter {
-		return m, m.attachToDest(dest)
+		return m, attach
 	}
-	return m, tea.Batch(m.attachToDest(dest), m.listenForMessages())
+	return m, tea.Batch(attach, m.listenForMessages())
 }

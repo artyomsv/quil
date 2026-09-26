@@ -486,7 +486,7 @@ func attachPayloads(t *testing.T, conn *fakeConn) []ipc.AttachPayload {
 // TestAttach_ReattachFlagMarksOnlyTheReconnectPath: the daemon's restart
 // reserve yields to a FIRST attach from a new process and keeps waiting for a
 // reconnecting one, so the flag must be false on the attach a WindowSizeMsg
-// sends and true on the one a completed redial sends.
+// sends and true on the one a completed redial sends after it.
 func TestAttach_ReattachFlagMarksOnlyTheReconnectPath(t *testing.T) {
 	t.Setenv("QUIL_HOME", t.TempDir())
 	first, fresh := newFakeConn(), newFakeConn()
@@ -513,6 +513,53 @@ func TestAttach_ReattachFlagMarksOnlyTheReconnectPath(t *testing.T) {
 	}
 	if !got[0].Reattach {
 		t.Error("the attach sent from the reconnect path must set reattach")
+	}
+}
+
+// TestAttach_FirstAttachThroughReconnectIsNotAReattach: a destination
+// unreachable at launch gets its FIRST attach from finishReconnect. The flag
+// is "has this process attached there before", not "which path sent it", so
+// that attach must say first — else the lone TUI after that host's unclean
+// restart is a follower for the whole restart reserve. Each destination keeps
+// its own answer.
+func TestAttach_FirstAttachThroughReconnectIsNotAReattach(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	up := newFakeConn()
+	r := NewRouter(map[string]Client{"gpu01": up}) // gpu02 was unreachable at launch
+	var m tea.Model = Model{client: r, cfg: config.Default()}
+
+	m, cmd := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	runCmdNoWait(cmd)
+	if got := attachPayloads(t, up); len(got) != 1 || got[0].Reattach {
+		t.Fatalf("gpu01 launch attach = %+v, want one with reattach=false", got)
+	}
+
+	redial := func(m tea.Model, dest string, c *fakeConn) tea.Model {
+		t.Helper()
+		mm := m.(Model)
+		mm.links = map[string]*reconnectState{dest: {active: true, gen: 1}}
+		m, cmd := mm.Update(redialResultMsg{gen: 1, dest: dest, client: c})
+		runCmdNoWait(cmd)
+		return m
+	}
+
+	first := newFakeConn()
+	m = redial(m, "gpu02", first)
+	if got := attachPayloads(t, first); len(got) != 1 || got[0].Reattach {
+		t.Errorf("gpu02 first attach (through reconnect) = %+v, want one with reattach=false", got)
+	}
+
+	second := newFakeConn()
+	m = redial(m, "gpu02", second)
+	if got := attachPayloads(t, second); len(got) != 1 || !got[0].Reattach {
+		t.Errorf("gpu02 second attach = %+v, want one with reattach=true", got)
+	}
+
+	// gpu02's history must not leak into a destination attached only once.
+	third := newFakeConn()
+	redial(m, "gpu03", third)
+	if got := attachPayloads(t, third); len(got) != 1 || got[0].Reattach {
+		t.Errorf("gpu03 first attach = %+v, want one with reattach=false", got)
 	}
 }
 

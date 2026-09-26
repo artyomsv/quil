@@ -30,7 +30,7 @@ func (d *Daemon) handleGitReposReq(conn *ipc.Conn, msg *ipc.Message) {
 		respondTo(conn, msg.ID, ipc.MsgGitReposResp, rejection)
 		return
 	}
-	fallback := d.defaultCWD()
+	fallback := d.defaultCWD(conn)
 	go func() {
 		defer d.gitDiscovering.Store(false)
 		respondTo(conn, msg.ID, ipc.MsgGitReposResp, gitReposResponse(gitReposReq(msg), fallback))

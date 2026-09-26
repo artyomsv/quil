@@ -187,7 +187,7 @@ func (d *Daemon) handleCreatePaneReq(conn *ipc.Conn, msg *ipc.Message) {
 		respondTo(conn, msg.ID, ipc.MsgCreatePaneResp, ipc.CreatePaneRespPayload{TabID: tabID, Error: "no such tab: " + tabID})
 		return
 	}
-	payload, cwd, err := d.buildCreatePayload(req, tabID, d.defaultCWD())
+	payload, cwd, err := d.buildCreatePayload(req, tabID, d.defaultCWD(conn))
 	if err != nil {
 		respondTo(conn, msg.ID, ipc.MsgCreatePaneResp, ipc.CreatePaneRespPayload{TabID: tabID, Error: err.Error()})
 		return
@@ -251,7 +251,7 @@ func (d *Daemon) handleCreateTabReq(conn *ipc.Conn, msg *ipc.Message) {
 	if projectID == "" {
 		projectID = d.session.ActiveProject()
 	}
-	payload, cwd, err := d.buildCreatePayload(first, "", d.projectCWD(projectID))
+	payload, cwd, err := d.buildCreatePayload(first, "", d.projectCWD(conn, projectID))
 	if err != nil {
 		respondTo(conn, msg.ID, ipc.MsgCreateTabResp, ipc.CreateTabRespPayload{Error: err.Error()})
 		return

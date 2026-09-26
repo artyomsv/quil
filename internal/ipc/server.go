@@ -120,6 +120,18 @@ type Conn struct {
 	// Atomic because the opt-out arrives on the conn's read goroutine while
 	// Broadcast reads it from whichever goroutine is emitting.
 	noPaneOutput atomic.Bool
+	// holdPaneOutput is a second, independent gate on the live MsgPaneOutput
+	// stream, for multi-client sync rather than the subscribe opt-out above:
+	// the daemon holds a newly-attaching client off live output while it
+	// delivers that client's replay, so replay bytes and live bytes cannot
+	// interleave into a torn screen. Released once the replay is queued.
+	//
+	// A second field rather than reusing noPaneOutput because the two are
+	// set by different actors for different reasons and must not be
+	// confused: noPaneOutput is the client's own durable choice (MsgSubscribe),
+	// while holdPaneOutput is the daemon's own transient bookkeeping around one
+	// attach. wantsFrame filters MsgPaneOutput when EITHER is set.
+	holdPaneOutput atomic.Bool
 	// pending counts must-deliver frames accepted by Send but not yet written
 	// to the socket. Send is non-blocking — it hands the frame to sendLoop —
 	// so an empty critCh does NOT mean the peer has it. Flush needs to know
@@ -690,15 +702,35 @@ func (c *Conn) setPaneOutputWanted(want bool) { c.noPaneOutput.Store(!want) }
 
 func (c *Conn) wantsPaneOutput() bool { return !c.noPaneOutput.Load() }
 
+// SetHoldPaneOutput holds this conn off the live MsgPaneOutput stream (on)
+// or releases it (off), independent of the MsgSubscribe opt-out above. The
+// daemon sets this while it delivers a newly-attaching client's replay, so a
+// live frame cannot be interleaved into the middle of it, and clears it once
+// the replay is queued.
+func (c *Conn) SetHoldPaneOutput(on bool) { c.holdPaneOutput.Store(on) }
+
+// QueuedOutput reports how many live pane_output frames wait in this conn's
+// droppable queue, not yet taken by sendLoop. sendLoop drains the must-deliver
+// queue first, so a frame still waiting here is written AFTER any
+// must-deliver frame queued now. The daemon waits for zero after holding a
+// conn, so live frames queued before an attach cannot land behind its replay.
+func (c *Conn) QueuedOutput() int { return len(c.outCh) }
+
+// Done is closed once the conn is dead (closed, or its sendLoop gone). After
+// that the droppable queue never drains, so a wait on QueuedOutput selects on
+// it to stop.
+func (c *Conn) Done() <-chan struct{} { return c.done }
+
 // wantsFrame reports whether a frame of this type should be delivered to this
 // conn. Only the live pane-output stream is ever filtered: everything else is
-// must-deliver, and a client excusing itself from PTY bytes still needs
-// workspace state, its own responses, and lifecycle frames.
+// must-deliver, and a client excusing itself from PTY bytes — or held off
+// them for a moment — still needs workspace state, its own responses, and
+// lifecycle frames.
 func (c *Conn) wantsFrame(msgType string) bool {
 	if msgType != MsgPaneOutput {
 		return true
 	}
-	return c.wantsPaneOutput()
+	return c.wantsPaneOutput() && !c.holdPaneOutput.Load()
 }
 
 func (s *Server) acceptLoop() {

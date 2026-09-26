@@ -500,19 +500,19 @@ func TestHandleCreateProjectShipsATabRootedAtTheProjectDir(t *testing.T) {
 // Neither may fail the spawn.
 func TestProjectCWDFallsBackForAnUnusableRoot(t *testing.T) {
 	d := newTestDaemon(t)
-	fallback := d.defaultCWD()
+	fallback := d.defaultCWD(nil)
 
 	gone := d.session.CreateProject("gone", filepath.Join(t.TempDir(), "never-existed"))
-	if got := d.projectCWD(gone.ID); got != fallback {
+	if got := d.projectCWD(nil, gone.ID); got != fallback {
 		t.Errorf("projectCWD(stale root) = %q, want the daemon default %q", got, fallback)
 	}
 
 	blank := d.session.CreateProject("blank", "")
-	if got := d.projectCWD(blank.ID); got != fallback {
+	if got := d.projectCWD(nil, blank.ID); got != fallback {
 		t.Errorf("projectCWD(no root) = %q, want the daemon default %q", got, fallback)
 	}
 
-	if got := d.projectCWD("proj-does-not-exist"); got != fallback {
+	if got := d.projectCWD(nil, "proj-does-not-exist"); got != fallback {
 		t.Errorf("projectCWD(unknown project) = %q, want the daemon default %q", got, fallback)
 	}
 
@@ -521,7 +521,7 @@ func TestProjectCWDFallsBackForAnUnusableRoot(t *testing.T) {
 		t.Fatalf("write file: %v", err)
 	}
 	notADir := d.session.CreateProject("file", file)
-	if got := d.projectCWD(notADir.ID); got != fallback {
+	if got := d.projectCWD(nil, notADir.ID); got != fallback {
 		t.Errorf("projectCWD(file as root) = %q, want the daemon default %q", got, fallback)
 	}
 }

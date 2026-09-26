@@ -26,6 +26,13 @@ import (
 const mcpDaemonMinVersion = "1.72.0"
 const createFromTemplateMinVersion = "1.74.0"
 
+// listClientsMinVersion is list_clients' own floor: list_clients_req is new
+// with multi-client sync, and the daemon-side handler does not exist before
+// it. A separate constant rather than raising mcpDaemonMinVersion — every
+// OTHER existing tool must keep working against a daemon that predates this
+// feature.
+const listClientsMinVersion = "1.80.0"
+
 // daemonVersionProbeTimeout bounds remote version probes. A pre-versioning
 // daemon drops the request silently. Local startup uses handshakeTimeout;
 // this is a package var so remote-bridge tests can keep it short.

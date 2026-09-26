@@ -25,7 +25,16 @@ type Tab struct {
 	Color          string
 	Panes          []string        // Pane IDs in order
 	Layout         json.RawMessage // Opaque layout tree from TUI
-	ProjectID      string          // Project this tab belongs to (see project.go)
+	// LayoutRev is bumped on every accepted SetTabLayout. It is the
+	// compare-and-store base a client sends back on its NEXT write
+	// (UpdateLayoutPayload.BaseRev) and the value every client compares its
+	// own copy against on a broadcast, to tell an update it should adopt from
+	// one it should ignore (spec §7.1). Zero both for a tab that has never
+	// had a layout written and for one restored from a workspace.json
+	// written before this field existed — the two are indistinguishable and
+	// that is fine, since both start the CAS from the same place.
+	LayoutRev uint64
+	ProjectID string // Project this tab belongs to (see project.go)
 }
 
 type Pane struct {
@@ -94,6 +103,13 @@ type Pane struct {
 	// the saved buffer grows by a screenful on every restart.
 	// PluginMu-protected.
 	ghostSeeded bool
+	// outPos is the total number of bytes ever appended to this pane's output
+	// stream: the stream position of the next byte. It never resets — not on
+	// OutputBuf.Reset, not on a restart (the generation marks the new run).
+	// An attach reads it beside the OutputBuf bytes it replays, so the bytes
+	// it held back can be cut where that replay ended (outputhold.go).
+	// Runtime-only, never on the wire. PluginMu-protected.
+	outPos uint64
 	// WorktreeOwned marks a pane created into a linked worktree Quil made for
 	// it. PERSISTED, and it is the only thing that lets restore tell a missing
 	// WORKTREE from a missing browsed directory — the snapshot stores just CWD
@@ -227,8 +243,21 @@ type Pane struct {
 	// workspace broadcast; this guard turns the duplicates into no-ops.
 	// Zeroed when a new PTY is installed (spawnPane) so a fresh PTY
 	// always accepts its first resize. Guarded by PluginMu.
-	appliedCols     int
-	appliedRows     int
+	appliedCols int
+	appliedRows int
+	// sizeSeq numbers every size this pane's followers are TOLD, and colsSeq
+	// is the announcement Cols/Rows currently record. Two counters because
+	// the two are written at different moments: applyResizes announces a
+	// batch (pane_sizes) BEFORE the PTY resize and records Cols/Rows only
+	// AFTER it, so a broadcast built in between still carries the old
+	// Cols/Rows — stamped with the old colsSeq, which the TUI then rejects as
+	// older than the pane_sizes it already applied. Stamping the broadcast
+	// with sizeSeq instead would pass the old size off as the new one.
+	// Monotonic for the Pane's life (a restart keeps the struct); a daemon
+	// restart restarts both, which is why the TUI forgets them on reattach.
+	// Guarded by PluginMu.
+	sizeSeq         uint64
+	colsSeq         uint64
 	LastOutputAt    time.Time // Updated on every flushPaneOutput
 	IdleNotified    bool      // Prevents re-firing for same idle period
 	LastIdleEventAt time.Time // Cooldown: last time a idle event was emitted
@@ -1083,18 +1112,27 @@ func (sm *SessionManager) UpdateTab(tabID, name, color string, clearColor bool) 
 	return true
 }
 
-// SetTabLayout replaces a tab's opaque layout under sm.mu. False for an
-// unknown tab. handleUpdateLayout used to write tab.Layout through the live
-// pointer with no lock, racing SnapshotState's copy — the handleUpdateTab
-// shape #229 fixed.
-func (sm *SessionManager) SetTabLayout(tabID string, layout json.RawMessage) bool {
+// SetTabLayout replaces a tab's opaque layout under sm.mu, gated by a
+// compare-and-store on baseRev: nil accepts unconditionally (an older client,
+// or one that has not adopted revisions yet), a value equal to the tab's
+// current LayoutRev accepts, and anything else is refused with NO write at
+// all — not to Layout, not to LayoutRev. False also for an unknown tab. An
+// accepted write bumps LayoutRev, which is the new base the caller's NEXT
+// update carries. handleUpdateLayout used to write tab.Layout through the
+// live pointer with no lock, racing SnapshotState's copy — the
+// handleUpdateTab shape #229 fixed.
+func (sm *SessionManager) SetTabLayout(tabID string, layout json.RawMessage, baseRev *uint64) bool {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	tab, ok := sm.tabs[tabID]
 	if !ok {
 		return false
 	}
+	if baseRev != nil && *baseRev != tab.LayoutRev {
+		return false
+	}
 	tab.Layout = layout
+	tab.LayoutRev++
 	return true
 }
 

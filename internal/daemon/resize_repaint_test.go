@@ -46,7 +46,7 @@ func TestHandleResizePane_RedrawsAPluginThatIgnoresSIGWINCH(t *testing.T) {
 	// The spawn-vs-attach disagreement: the pane came up at the persisted 91
 	// columns and the first client resize narrows it.
 	pane.appliedCols, pane.appliedRows = 91, 54
-	d.handleResizePane(resizeMsg(t, "p1", 80, 52))
+	d.handleResizePane(nil, resizeMsg(t, "p1", 80, 52))
 
 	if !waitForInput(t, pty, "\f") {
 		t.Errorf("child received %q after a resize, want %q (Ctrl+L)", pty.got(), "\f")
@@ -64,7 +64,7 @@ func TestHandleResizePane_NoInjectedInputWithoutAnOptIn(t *testing.T) {
 	d.session.panes["p1"] = pane
 	t.Cleanup(pane.StopInput)
 
-	d.handleResizePane(resizeMsg(t, "p1", 80, 52))
+	d.handleResizePane(nil, resizeMsg(t, "p1", 80, 52))
 
 	waitForNoInput(t, pty)
 }
@@ -81,7 +81,7 @@ func TestHandleResizePane_DuplicateSizeSendsNoRedraw(t *testing.T) {
 
 	// Already applied — this is the broadcast re-send, not a real resize.
 	pane.appliedCols, pane.appliedRows = 80, 52
-	d.handleResizePane(resizeMsg(t, "p1", 80, 52))
+	d.handleResizePane(nil, resizeMsg(t, "p1", 80, 52))
 
 	waitForNoInput(t, pty)
 }
@@ -96,7 +96,7 @@ func TestHandleResizePane_FailedResizeSendsNoRedraw(t *testing.T) {
 	d.session.panes["p1"] = pane
 	t.Cleanup(pane.StopInput)
 
-	d.handleResizePane(resizeMsg(t, "p1", 80, 52))
+	d.handleResizePane(nil, resizeMsg(t, "p1", 80, 52))
 
 	waitForNoInput(t, &pty.recordingSession)
 }

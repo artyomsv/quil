@@ -172,7 +172,7 @@ func TestTabLayoutMenu_ColumnsArrangesTheTabItWasOpenedOn(t *testing.T) {
 	if sends[0].TabID != "tab-b" {
 		t.Errorf("layout sent for %q, want tab-b", sends[0].TabID)
 	}
-	if !layoutAgrees(sends[0].Layout, tb.Root) {
+	if !sentLayoutIs(sends[0].Layout, tb.Root) {
 		t.Error("the sent layout does not match tab-b's new tree")
 	}
 }

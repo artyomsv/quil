@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -141,61 +140,23 @@ func TestWorkspaceStateFromSnapshot(t *testing.T) {
 	}
 }
 
-// TestDaemon_DefaultCWD covers the three branches of (*Daemon).defaultCWD:
-// (1) clientCWD set and valid → returns the resolved client path,
-// (2) clientCWD set but stale → falls back to os.Getwd(),
-// (3) clientCWD unset → falls back to os.Getwd().
+// TestDaemon_DefaultCWD_NilConnFallsBackToGetwd covers defaultCWD's last
+// candidate: a nil conn (every restore/recovery caller) on a daemon with no
+// attached client at all falls back to the daemon's own working directory.
 //
-// We bypass New() and build a minimal Daemon literal because defaultCWD only
-// depends on the atomic.Pointer field, not on session/registry/etc.
-func TestDaemon_DefaultCWD(t *testing.T) {
+// The per-client, per-master and most-recently-active candidates need a real
+// client registry with real conns attached over a socket — see
+// TestDefaultCWD_PerClientAndBridge in mcp_targets_test.go, which a zero
+// Daemon literal cannot exercise.
+func TestDaemon_DefaultCWD_NilConnFallsBackToGetwd(t *testing.T) {
 	hostCWD, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("Getwd: %v", err)
 	}
-
-	t.Run("client CWD set and valid", func(t *testing.T) {
-		dir := t.TempDir()
-		d := &Daemon{}
-		d.clientCWD.Store(&dir)
-		got := d.defaultCWD()
-		// EvalSymlinks is applied; on macOS t.TempDir() lives under
-		// /var/folders/... which symlinks to /private/var/folders/...,
-		// so we compare the resolved form.
-		want, err := filepath.EvalSymlinks(dir)
-		if err != nil {
-			t.Fatalf("EvalSymlinks: %v", err)
-		}
-		if got != want {
-			t.Errorf("defaultCWD = %q, want %q", got, want)
-		}
-	})
-
-	t.Run("client CWD set but stale", func(t *testing.T) {
-		dir := t.TempDir()
-		stale := dir + "/does-not-exist"
-		d := &Daemon{}
-		d.clientCWD.Store(&stale)
-		if got := d.defaultCWD(); got != hostCWD {
-			t.Errorf("stale path should fall back to os.Getwd(); got %q, want %q", got, hostCWD)
-		}
-	})
-
-	t.Run("client CWD unset", func(t *testing.T) {
-		d := &Daemon{}
-		if got := d.defaultCWD(); got != hostCWD {
-			t.Errorf("unset should fall back to os.Getwd(); got %q, want %q", got, hostCWD)
-		}
-	})
-
-	t.Run("client CWD empty string", func(t *testing.T) {
-		empty := ""
-		d := &Daemon{}
-		d.clientCWD.Store(&empty)
-		if got := d.defaultCWD(); got != hostCWD {
-			t.Errorf("empty string should fall back to os.Getwd(); got %q, want %q", got, hostCWD)
-		}
-	})
+	d := &Daemon{}
+	if got := d.defaultCWD(nil); got != hostCWD {
+		t.Errorf("defaultCWD(nil) = %q, want os.Getwd() %q", got, hostCWD)
+	}
 }
 
 // saveHookStubs captures and restores the package-level hook reader vars

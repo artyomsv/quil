@@ -32,6 +32,7 @@ func registerMCPTools(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogger) {
 	registerDestroyPaneTool(s, r, mcpLog)
 	registerSetActivePaneTool(s, r, mcpLog)
 	registerCloseTUITool(s, r, mcpLog)
+	registerListClientsTool(s, r, mcpLog)
 	// Notification tools
 	registerGetNotificationsTool(s, r, mcpLog)
 	registerWatchNotificationsTool(s, r, mcpLog)
@@ -625,6 +626,7 @@ func registerDestroyPaneTool(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogger) {
 func registerSetActivePaneTool(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogger) {
 	type Input struct {
 		PaneID string `json:"pane_id" jsonschema:"pane to focus (switches tab if needed)"`
+		Client string `json:"client,omitempty" jsonschema:"optional client id from list_clients; default: the client with the most recent input"`
 		Host   string `json:"host,omitempty" jsonschema:"daemon host from list_hosts (empty = the host the id was discovered on, else local)"`
 	}
 
@@ -636,7 +638,7 @@ func registerSetActivePaneTool(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogger) {
 		if err != nil {
 			return nil, nil, fmt.Errorf("set_active_pane: %w", err)
 		}
-		msg, err := ipc.NewMessage(ipc.MsgSetActivePane, ipc.SetActivePanePayload{PaneID: input.PaneID})
+		msg, err := ipc.NewMessage(ipc.MsgSetActivePane, ipc.SetActivePanePayload{PaneID: input.PaneID, Client: input.Client})
 		if err != nil {
 			return nil, nil, fmt.Errorf("set_active_pane: %w", err)
 		}
@@ -650,7 +652,8 @@ func registerSetActivePaneTool(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogger) {
 
 func registerCloseTUITool(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogger) {
 	type Input struct {
-		Host string `json:"host,omitempty" jsonschema:"daemon host from list_hosts (default: local)"`
+		Client string `json:"client,omitempty" jsonschema:"optional client id from list_clients; default: the client with the most recent input"`
+		Host   string `json:"host,omitempty" jsonschema:"daemon host from list_hosts (default: local)"`
 	}
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -662,7 +665,7 @@ func registerCloseTUITool(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogger) {
 		if err != nil {
 			return nil, nil, fmt.Errorf("close_tui: %w", err)
 		}
-		msg, err := ipc.NewMessage(ipc.MsgCloseTUI, nil)
+		msg, err := ipc.NewMessage(ipc.MsgCloseTUI, ipc.CloseTUIPayload{Client: input.Client})
 		if err != nil {
 			return nil, nil, fmt.Errorf("close_tui: %w", err)
 		}
@@ -670,6 +673,53 @@ func registerCloseTUITool(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogger) {
 			return nil, nil, fmt.Errorf("close_tui send: %w", err)
 		}
 		return textResult("TUI close signal sent. Daemon continues running."), nil, nil
+	})
+}
+
+// registerListClientsTool lists every ATTACHED client — every TUI sharing
+// this daemon, never an MCP bridge, which is a connected conn but never
+// attaches — so an agent can target one explicitly with set_active_pane or
+// close_tui instead of landing on the implicit most-recently-active one.
+func registerListClientsTool(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogger) {
+	type Input struct {
+		Host string `json:"host,omitempty" jsonschema:"limit to one host (default: every connected host)"`
+	}
+	type hostedClient struct {
+		ipc.ClientInfo
+		Host string `json:"host,omitempty"`
+	}
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "list_clients",
+		Description: "List every attached TUI client: id, attach time, window size, whether it holds size master " +
+			"(the client whose geometry sizes every pane), and its last input time. Pass a client id to set_active_pane " +
+			"or close_tui to target that client instead of the one that typed most recently.",
+	}, func(_ context.Context, _ *mcp.CallToolRequest, input Input) (*mcp.CallToolResult, any, error) {
+		var out []hostedClient
+		err := r.forEachHost(input.Host, func(hb hostBridge) error {
+			if err := hb.bridge.requireRequest("list_clients", ipc.MsgListClientsReq, listClientsMinVersion); err != nil {
+				return err
+			}
+			resp, err := hb.bridge.request(ipc.MsgListClientsReq, nil)
+			if err != nil {
+				return fmt.Errorf("list_clients%s: %w", hostSuffix(hb.host), err)
+			}
+			var payload ipc.ListClientsRespPayload
+			if err := resp.DecodePayload(&payload); err != nil {
+				return fmt.Errorf("list_clients decode: %w", err)
+			}
+			for _, c := range payload.Clients {
+				out = append(out, hostedClient{ClientInfo: c, Host: hb.host})
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, nil, fmt.Errorf("list_clients: %w", err)
+		}
+		if out == nil {
+			out = []hostedClient{}
+		}
+		return jsonResult(out), nil, nil
 	})
 }
 

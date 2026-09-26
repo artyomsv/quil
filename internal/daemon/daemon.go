@@ -64,11 +64,6 @@ type Daemon struct {
 	tasks     *taskRegistry
 	tasksOnce sync.Once
 	gitCache  *gitCache // per-checkout branch/worktree/divergence, refreshed on a ticker
-	// clientCWD is the last-known CWD from a TUI client, used as the
-	// default working directory for new panes/tabs. Read by defaultCWD()
-	// from any IPC dispatch goroutine and written by handleAttach on each
-	// connect — atomic.Pointer is what keeps that race-free.
-	clientCWD atomic.Pointer[string]
 	// Last attached terminal size, used before a client can resize a new pane.
 	clientSize atomic.Pointer[terminalSize]
 
@@ -255,9 +250,10 @@ type Daemon struct {
 	// pushes runtime updates via MsgOverlayPolicy without a daemon restart.
 	overlayPolicyState overlayPolicyState
 
-	// attachedConns maps each conn that has sent MsgAttach — the clients, as
-	// distinct from every conn (see markClientAttached) — to the set of overlay
-	// panes that client currently has ON SCREEN.
+	// clients holds one record for each conn that has sent MsgAttach — the
+	// clients, as distinct from every conn (see registerClient) — with the
+	// size-master election over them (clients.go). Each record also carries
+	// the set of overlay panes that client currently has ON SCREEN.
 	//
 	// Visibility is per client rather than one daemon-wide field because
 	// otherwise whichever conn spoke last defines it: with two TUIs attached,
@@ -267,13 +263,40 @@ type Daemon struct {
 	// claims it, which is also what makes a detached session fall out for free
 	// — no clients, no claims, everything hidden.
 	//
-	// Written from each conn's own dispatch goroutine and from the disconnect
-	// callback, so it carries its own mutex: sm.mu is the wrong lock here,
-	// since a reader parked behind an RWMutex writer is the failure mode this
-	// package keeps being bitten by. Nothing that takes PluginMu may be called
-	// while it is held.
-	attachedMu    sync.Mutex
-	attachedConns map[*ipc.Conn]map[string]bool
+	// Written from each conn's own dispatch goroutine, the disconnect callback
+	// and the grace timer, so it carries its own mutex: sm.mu is the wrong
+	// lock here, since a reader parked behind an RWMutex writer is the failure
+	// mode this package keeps being bitten by. Nothing that takes PluginMu may
+	// be called while it is held, and nothing broadcasts while it is held.
+	clients clientRegistry
+
+	// broadcastMu guards the single in-flight timer requestBroadcast arms
+	// (broadcast_coalesce.go), coalescing a burst of accepted layout writes
+	// into one broadcastState() call. broadcastAfterFn is the same seam
+	// shape as clientRegistry's afterFn — real time.AfterFunc from New(), a
+	// fake that fires by hand in tests — kept as its own field rather than
+	// reused because the two timers are armed and stopped independently
+	// (Stop() calls both stopBroadcastCoalescer() and clients.stopTimer()).
+	broadcastMu        sync.Mutex
+	broadcastTimerStop func() bool
+	broadcastAfterFn   func(time.Duration, func()) (stop func() bool)
+
+	// holds keeps each attaching conn's live pane output while its replay is
+	// sent, keyed by conn (outputhold.go). holdMu is a leaf guarding it;
+	// holdGate orders a flush's hold append and broadcast against a conn's
+	// hold flag changing. Order: holdGate, then holdMu.
+	holdGate sync.RWMutex
+	holdMu   sync.Mutex
+	holds    map[*ipc.Conn]*outputHold
+	// holdCount is len(holds), written under holdGate (write) so a flush
+	// holding it for read can skip holdMu when nothing is held.
+	holdCount atomic.Int32
+	// afterHoldOutput and beforeFinishHold are test seams: a flush calls the
+	// first between its hold append and its broadcast; the release calls the
+	// second between seeing an empty batch and ending the hold. Set before
+	// any flush runs; nil in production.
+	afterHoldOutput  func(paneID string)
+	beforeFinishHold func(c *ipc.Conn)
 }
 
 func New(cfg config.Config) *Daemon {
@@ -310,6 +333,11 @@ func New(cfg config.Config) *Daemon {
 	d.memReport = memreport.NewCollector(d.session, 5*time.Second)
 	d.procReport = newProcCollector(d.session, memreport.ProcRSSBatch)
 	d.hellos = newHelloRegistry()
+	d.clients.now = time.Now
+	d.clients.afterFn = realAfterFunc
+	d.clients.grace = cfg.Daemon.MasterGrace()
+	d.clients.onChange = d.broadcastState
+	d.broadcastAfterFn = realAfterFunc
 	d.startedAt = time.Now()
 	// Clamped like a pushed policy: config.toml is hand-edited, so it can carry
 	// exactly the values the IPC path is bounded against.
@@ -572,6 +600,9 @@ func (d *Daemon) Stop() {
 		if d.server != nil {
 			d.server.Stop()
 		}
+		// No client can attach any more, so nothing can re-arm it.
+		d.clients.stopTimer()
+		d.stopBroadcastCoalescer()
 		d.collectorWG.Wait()
 		// Pull the latest hook-recorded session ids into PluginState so
 		// the final snapshot survives even if the hook files are lost.
@@ -600,50 +631,28 @@ func (d *Daemon) Stop() {
 	})
 }
 
-// markClientAttached records a connection that has sent MsgAttach.
-//
-// ATTACHMENT, not connection, is what "a client is here" means, and the
-// difference is not academic: every live MCP bridge holds an IPC conn for its
-// whole lifetime (cmd/quil/mcp.go dials once and closes on exit), and a bridge
-// is a child of the claude process in a PANE — so bridges routinely outlive the
-// TUI. Counting raw conns therefore answered "is anything connected", which in
-// any session with a claude pane wired to `quil mcp` is permanently yes (21
-// conns in the session that reported 7 live overlays), and the detached-session
-// stamp below never fired in exactly the configuration it was designed for.
-// Re-attaching on the same conn keeps that client's existing overlay claims:
-// the entry is created only when absent.
-func (d *Daemon) markClientAttached(conn *ipc.Conn) {
-	if conn == nil {
-		return
-	}
-	d.attachedMu.Lock()
-	if d.attachedConns == nil {
-		d.attachedConns = make(map[*ipc.Conn]map[string]bool)
-	}
-	if _, ok := d.attachedConns[conn]; !ok {
-		d.attachedConns[conn] = map[string]bool{}
-	}
-	d.attachedMu.Unlock()
-}
-
-// forgetAttachedClient drops a disconnecting conn, and with it every overlay
-// that client claimed visible. A conn that never attached is not in the set, so
-// dropping it changes nothing.
-func (d *Daemon) forgetAttachedClient(conn *ipc.Conn) {
-	d.attachedMu.Lock()
-	delete(d.attachedConns, conn)
-	d.attachedMu.Unlock()
-}
-
 // onClientDisconnect is ipc.Server's disconnect callback.
 //
 // handleConn's defer removes the disconnecting conn (removeConn) before
 // invoking this, and the attached set is keyed on that same conn — so the state
 // here is already exclusive of the client that just left.
+//
+// A client that sent MsgDetach first is already gone from the registry, so
+// only a LOST link reaches the grace logic here.
+//
+// A disconnect caused by our own shutdown is not a lost link, and the record is
+// kept. Stop closes every conn while the final snapshot runs, and dropping the
+// records there would clear a lone master (nobody left to protect) before the
+// snapshot writes size_master — so the restart would have no reserve.
 func (d *Daemon) onClientDisconnect(conn *ipc.Conn) {
+	d.dropOutputHold(conn)
 	d.requestSnapshot()
 	d.events.RemoveWatchersByConn(conn)
-	d.forgetAttachedClient(conn)
+	// A lost link always changes the attached count, whether or not the
+	// master changed with it, so the other clients get one state frame.
+	if !d.shuttingDown() && d.clients.lose(conn).any() {
+		d.sendStateToOtherClients(conn, "lost link")
+	}
 	// Drop this conn's identity with it: the process it described is gone,
 	// and a retained entry would be listed as running.
 	d.hellos.forget(conn)
@@ -673,6 +682,13 @@ func (d *Daemon) snapshot() {
 	// N±1, surfacing as the "snapshot pane count oscillation" bug.
 	activeTab, tabs, panesByTab, projects, activeProject := d.session.SnapshotState()
 	state := d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab, projects, activeProject, false)
+	// Written here explicitly, because workspaceStateFromSnapshot leaves it out
+	// (the broadcast adds its own in buildWorkspaceState): restoreWorkspace
+	// turns it into a short reservation so the previous size master gets its
+	// slot back after a restart, and the reattach resizes nothing.
+	if id := d.masterID(); id != "" {
+		state["size_master"] = id
+	}
 
 	if err := persist.Save(config.WorkspacePath(), state); err != nil {
 		log.Printf("snapshot workspace: %v", err)
@@ -832,6 +848,8 @@ func (d *Daemon) restoreWorkspace() error {
 	tabs, _ := state["tabs"].([]any)
 	panes, _ := state["panes"].([]any)
 	activeProject, _ := state["active_project"].(string)
+	sizeMaster, _ := state["size_master"].(string)
+	d.clients.reserveAfterRestart(sizeMaster)
 
 	d.session.RestoreProjects(parseRestoredProjects(state["projects"]), activeProject)
 
@@ -884,6 +902,16 @@ func (d *Daemon) restoreWorkspace() error {
 			layoutBytes, err := json.Marshal(layoutRaw)
 			if err == nil {
 				tab.Layout = json.RawMessage(layoutBytes)
+			}
+		}
+
+		// Restore layout revision. Absent means 0 — a workspace.json written
+		// before layout revisioning existed, or a tab that never had a
+		// layout write. JSON numbers decode to float64 through this
+		// map[string]any, never a uint64 directly.
+		if revRaw, ok := tabMap["layout_rev"]; ok {
+			if rev, ok := revRaw.(float64); ok && rev >= 0 {
+				tab.LayoutRev = uint64(rev)
 			}
 		}
 
@@ -1383,24 +1411,37 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	// several lines a second forever. Logging it would churn quild.log through
 	// its rotation and bury the lifecycle lines this log exists for.
 	switch msg.Type {
-	case ipc.MsgPaneInput, ipc.MsgResizePane, ipc.MsgUpdateLayout, ipc.MsgClientStat:
+	case ipc.MsgPaneInput, ipc.MsgResizePane, ipc.MsgResizePanes, ipc.MsgUpdateLayout,
+		ipc.MsgClientStat, ipc.MsgClientGeometry:
 		// skip logging — too noisy
 	default:
 		log.Printf("ipc recv: %s", msg.Type)
 	}
 
+	// touchClientInput marks the user-originated messages below (input, tab
+	// switch, create, layout, pane update, take control). The latest one picks
+	// which client an untargeted MCP close_tui or set_active_pane reaches.
 	switch msg.Type {
 	case ipc.MsgAttach:
 		d.handleAttach(conn, msg)
+	case ipc.MsgDetach:
+		d.handleDetach(conn)
+	case ipc.MsgClientGeometry:
+		d.handleClientGeometry(conn, msg)
+	case ipc.MsgTakeControl:
+		d.touchClientInput(conn)
+		d.handleTakeControl(conn)
 	case ipc.MsgCreateTab:
+		d.touchClientInput(conn)
 		d.handleCreateTab(conn, msg)
 	case ipc.MsgDestroyTab:
 		// The existence check happens HERE, before the handler, because the
 		// handler reports nothing and the tab is gone afterwards either way.
 		id, known := tabIDKnown(d, msg, "tab_id")
-		d.handleDestroyTab(msg)
+		d.handleDestroyTab(conn, msg)
 		answerOp(conn, msg, ipc.MsgTabOpResp, id, known, opErrUnless(known, "no such tab"))
 	case ipc.MsgSwitchTab:
+		d.touchClientInput(conn)
 		d.handleSwitchTab(msg)
 	case ipc.MsgUpdateTab:
 		id, known := tabIDKnown(d, msg, "tab_id")
@@ -1411,21 +1452,34 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	case ipc.MsgMoveTab:
 		d.handleMoveTab(conn, msg)
 	case ipc.MsgCreatePane:
+		d.touchClientInput(conn)
 		d.handleCreatePane(conn, msg)
 	case ipc.MsgDestroyPane:
 		d.handleDestroyPane(msg)
 	case ipc.MsgUpdatePane:
+		// update_pane also carries automatic reports — an OSC 7 CWD change,
+		// overlay visibility, the unseen mark — that are not the user doing
+		// anything just now; only a field the user actually touched (rename,
+		// mute, eager, the two attention marks) should count as this
+		// client's input for targetConn's implicit-client fallback.
+		if updatePaneIsUserInput(msg) {
+			d.touchClientInput(conn)
+		}
 		id, known := paneIDKnown(d, msg)
 		d.handleUpdatePane(conn, msg)
 		answerOp(conn, msg, ipc.MsgPaneOpResp, id, known, opErrUnless(known, "no such pane"))
 	case ipc.MsgMovePane:
 		d.handleMovePane(conn, msg)
 	case ipc.MsgUpdateLayout:
+		d.touchClientInput(conn)
 		d.handleUpdateLayout(msg)
 	case ipc.MsgPaneInput:
+		d.touchClientInput(conn)
 		d.handlePaneInput(conn, msg)
 	case ipc.MsgResizePane:
-		d.handleResizePane(msg)
+		d.handleResizePane(conn, msg)
+	case ipc.MsgResizePanes:
+		d.handleResizePanes(conn, msg)
 	case ipc.MsgReloadPlugins:
 		d.handleReloadPlugins()
 	case ipc.MsgOverlayPolicy:
@@ -1457,7 +1511,7 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		// empty one renders as a blank screen the moment the user switches to
 		// it, and there is no in-band way out: Ctrl+T files its tab against
 		// the daemon's ACTIVE project, which a just-created one is not.
-		d.recoverEmptyProject(proj.ID)
+		d.recoverEmptyProject(conn, proj.ID)
 		d.broadcastState()
 		d.requestSnapshot()
 
@@ -1484,7 +1538,7 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		releasePanes(detached)
 		// Destroying the last project leaves nothing to render, and destroying
 		// the active one can promote a project that is itself empty.
-		d.recoverEmptyProject(d.session.ActiveProject())
+		d.recoverEmptyProject(conn, d.session.ActiveProject())
 		d.broadcastState()
 		d.requestSnapshot()
 		answerOp(conn, msg, ipc.MsgProjectOpResp, p.ProjectID, true, "")
@@ -1539,7 +1593,7 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		// which is a blank screen with no in-band way out — Ctrl+T files against
 		// the ACTIVE project, and that is the empty one. Create and destroy both
 		// recover here for the same reason.
-		d.recoverEmptyProject(p.ProjectID)
+		d.recoverEmptyProject(conn, p.ProjectID)
 		d.broadcastState()
 		// Reassigns tabs and DROPS project records, so a daemon killed inside
 		// the 30 s ticker window comes back holding the duplicates the user
@@ -1652,7 +1706,9 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	case ipc.MsgSetActivePane:
 		d.handleSetActivePane(conn, msg)
 	case ipc.MsgCloseTUI:
-		d.broadcast(msg)
+		d.handleCloseTUI(conn, msg)
+	case ipc.MsgListClientsReq:
+		d.handleListClientsReq(conn, msg)
 
 	// Notification center
 	case ipc.MsgDismissEvent:
@@ -1770,10 +1826,36 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 
 	// This is what makes the conn a CLIENT rather than just a connection — the
 	// distinction the detached-session overlay stamp turns on. Recorded before
-	// any of the work below, which has early returns of its own.
-	d.markClientAttached(conn)
+	// any of the work below, which has early returns of its own, and before
+	// the 80x24 defaulting: the election reads the RAW geometry.
+	//
+	// A new client or a master change reaches the OTHER attached clients once
+	// this attach is answered. The attaching conn gets none: its own state
+	// below is built after this registration, so it already carries both.
+	if d.attachClient(conn, attach).any() {
+		defer d.sendStateToOtherClients(conn, "attach")
+	}
 
-	cols, rows := attach.Cols, attach.Rows
+	// Hold this conn off live pane output until its replay is sent, BEFORE
+	// the state frame is built: from here every flush is either already in
+	// the OutputBuf bytes the replay sends, or held and sent after it — the
+	// replay and the live stream reach this client once each, in order
+	// (outputhold.go). Every return below must end the hold, or the conn
+	// stays off live output for good.
+	d.beginOutputHold(conn)
+	holdReleased := false
+	defer func() {
+		if !holdReleased {
+			d.dropOutputHold(conn)
+		}
+	}()
+	// end records, per pane, the stream position its OutputBuf replay ended
+	// at — the point up to which this client already has the held bytes.
+	end := make(map[string]uint64)
+
+	// clientSize sizes the first pane of an empty workspace below, and new
+	// panes whenever no master is elected (initialPaneSize).
+	cols, rows := clampClientDim(attach.Cols), clampClientDim(attach.Rows)
 	if cols <= 0 {
 		cols = 80
 	}
@@ -1785,18 +1867,13 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 	log.Printf("attach: client connected (%dx%d), tabs=%d, restored=%v",
 		cols, rows, len(d.session.Tabs()), d.restored)
 
-	// Remember client CWD so new tabs/panes default to the TUI's directory
-	// instead of the daemon's (which is frozen at daemon start time). An
-	// empty value resets to "use daemon CWD" — preferable to retaining a
-	// stale value from a previous client.
-	cwd := attach.CWD
-	d.clientCWD.Store(&cwd)
-
 	// Create default workspace if empty (no tabs — neither fresh nor restored)
 	if len(d.session.Tabs()) == 0 {
 		log.Print("attach: creating default workspace (no tabs)")
 		tab := d.session.CreateTab("Shell")
-		pane, _ := d.session.CreatePane(tab.ID, d.defaultCWD())
+		// attachClient (above) already recorded attach.CWD on this conn's
+		// client record, so defaultCWD's first candidate is this very attach.
+		pane, _ := d.session.CreatePane(tab.ID, d.defaultCWD(conn))
 		setPaneType(pane, "terminal")
 
 		ptySession := apty.NewWithSize(cols, rows)
@@ -1924,6 +2001,13 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 					}
 				}
 			}
+			// Only a replay of OutputBuf's own bytes has a stream position,
+			// read in this span with the Bytes() snapshot. A ghostsnap replay
+			// is a PREVIOUS session's bytes, so every held byte of the new
+			// child comes after it; a skipped replay covers nothing.
+			if len(ghost) > 0 && (source == "outputbuf" || source == "child-stream") {
+				end[pane.ID] = pane.outPos
+			}
 			// Captured in the same span as Type/GhostSnap: the redraw kick below
 			// needs a live PTY, and reading it separately would race a restart.
 			// Same discipline as handleResizePane — pointer under the lock, the
@@ -1958,6 +2042,11 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 			}
 		}
 	}
+
+	// The replay is queued: send what was held behind it, then let live
+	// output through.
+	d.releaseOutputHold(conn, end)
+	holdReleased = true
 
 	// Replay pending notification events, OLDEST FIRST — this is a replay of
 	// state transitions, not a listing. The TUI rebuilds each pane's work
@@ -2128,7 +2217,7 @@ func (d *Daemon) handleCreateTab(conn *ipc.Conn, msg *ipc.Message) {
 			spec.Worktree = nil
 		}
 	}
-	cwd := d.resolveRequestedCWD(spec.CWD, d.projectCWD(tab.ProjectID))
+	cwd := d.resolveRequestedCWD(spec.CWD, d.projectCWD(conn, tab.ProjectID))
 
 	// The two construction paths are built SEPARATELY and share nothing but the
 	// type and the directory. `create` and its plugin-field block used to sit
@@ -2338,7 +2427,7 @@ func (d *Daemon) failPreparingPane(paneID, reason string) {
 	d.broadcastState()
 }
 
-func (d *Daemon) handleDestroyTab(msg *ipc.Message) {
+func (d *Daemon) handleDestroyTab(conn *ipc.Conn, msg *ipc.Message) {
 	var payload ipc.DestroyTabPayload
 	if err := msg.DecodePayload(&payload); err != nil {
 		return
@@ -2365,7 +2454,7 @@ func (d *Daemon) handleDestroyTab(msg *ipc.Message) {
 		d.cleanupPaneArtifacts(p.ID)
 	}
 
-	d.recoverEmptyProject(projectID)
+	d.recoverEmptyProject(conn, projectID)
 
 	d.broadcastState()
 	d.requestSnapshot()
@@ -2427,12 +2516,12 @@ func (d *Daemon) handleDestroyTab(msg *ipc.Message) {
 // whose project a racing DestroyProject removed. projectIsEmpty falls back to
 // the workspace-wide test there, and createTabLocked resolves the empty ID to
 // the active project or bootstraps one, so the workspace still recovers.
-func (d *Daemon) recoverEmptyProject(projectID string) {
+func (d *Daemon) recoverEmptyProject(conn *ipc.Conn, projectID string) {
 	if !d.projectIsEmpty(projectID) {
 		return
 	}
 	tab := d.session.CreateTabInProject(projectID, "Shell")
-	pane, err := d.session.CreatePane(tab.ID, d.projectCWD(tab.ProjectID))
+	pane, err := d.session.CreatePane(tab.ID, d.projectCWD(conn, tab.ProjectID))
 	if err != nil {
 		log.Printf("recover empty project %q: create pane: %v", projectID, err)
 		return
@@ -2475,9 +2564,9 @@ func (d *Daemon) projectIsEmpty(projectID string) bool {
 // value falls back rather than failing the spawn: a snapshot can outlive the
 // directory it names, and can be restored on a machine where that path never
 // existed.
-func (d *Daemon) projectCWD(projectID string) string {
+func (d *Daemon) projectCWD(conn *ipc.Conn, projectID string) string {
 	if projectID == "" {
-		return d.defaultCWD()
+		return d.defaultCWD(conn)
 	}
 	for _, p := range d.session.Projects() {
 		if p.ID != projectID {
@@ -2493,7 +2582,7 @@ func (d *Daemon) projectCWD(projectID string) string {
 		}
 		break
 	}
-	return d.defaultCWD()
+	return d.defaultCWD(conn)
 }
 
 func (d *Daemon) handleSwitchTab(msg *ipc.Message) {
@@ -2571,7 +2660,7 @@ func (d *Daemon) handleMoveTab(conn *ipc.Conn, msg *ipc.Message) {
 
 	// Moving the source project's LAST tab out leaves it exactly as empty as
 	// DestroyTab leaves one, and owes the same replacement Shell tab.
-	d.recoverEmptyProject(from)
+	d.recoverEmptyProject(conn, from)
 	// Each project keeps its OWN ActiveTab, and that is independent of the
 	// daemon's single GLOBAL active project/tab (sm.activeProject/activeTab):
 	// several clients can each be looking at a different project, so a
@@ -2625,7 +2714,7 @@ func (d *Daemon) handleCreatePane(conn *ipc.Conn, msg *ipc.Message) {
 	}
 
 	logger.Debug("create pane: received payload cwd=%q type=%s", payload.CWD, payload.Type)
-	cwd := d.resolveRequestedCWD(payload.CWD, d.defaultCWD())
+	cwd := d.resolveRequestedCWD(payload.CWD, d.defaultCWD(conn))
 
 	// Determine pane type
 	paneType := payload.Type
@@ -3038,7 +3127,9 @@ func (d *Daemon) recoverEmptyTab(tabID, reason string) {
 	// The overlay is left in place, UNLIKE ensureTabNotEmpty's orphan sweep:
 	// there the tab is losing its last pane for good, here it is getting a
 	// normal one back on the next line.
-	pane, err := d.session.CreatePane(tabID, d.defaultCWD())
+	// No conn: this runs from the destroy path with no requesting client in
+	// hand (a background recovery, like every other caller here).
+	pane, err := d.session.CreatePane(tabID, d.defaultCWD(nil))
 	if err != nil {
 		log.Printf("tab %s: could not recover an empty tab: %v", tabID, err)
 		return
@@ -3136,7 +3227,7 @@ func (d *Daemon) handleMovePane(conn *ipc.Conn, msg *ipc.Message) {
 	if destroyed {
 		// The source may have been its project's only tab — the same emptiness
 		// DestroyTab leaves, owed the same replacement Shell tab.
-		d.recoverEmptyProject(srcProject)
+		d.recoverEmptyProject(conn, srcProject)
 	}
 
 	// Spawn every selection this move touched; ensureTabSpawned is idempotent
@@ -3248,7 +3339,9 @@ func (d *Daemon) ensureTabNotEmpty(tabID string) {
 		d.cleanupPaneArtifacts(op.ID)
 		d.session.DestroyPane(op.ID)
 	}
-	if newPane, err := d.session.CreatePane(tabID, d.defaultCWD()); err == nil {
+	// No conn: ensureTabNotEmpty runs from destroy and exit paths with no
+	// requesting client in hand.
+	if newPane, err := d.session.CreatePane(tabID, d.defaultCWD(nil)); err == nil {
 		setPaneType(newPane, "terminal")
 		ptySession := apty.New()
 		if err := d.spawnPane(newPane, ptySession, false); err != nil {
@@ -3541,68 +3634,181 @@ func (d *Daemon) notifyDegenerateResize(pane *Pane, cols, rows uint16) {
 	log.Printf("pane %s: refusing degenerate resize to %dx%d", pane.ID, cols, rows)
 }
 
-func (d *Daemon) handleResizePane(msg *ipc.Message) {
+// handleResizePane applies one pane's resize from conn. See applyResizes.
+func (d *Daemon) handleResizePane(conn *ipc.Conn, msg *ipc.Message) {
 	var payload ipc.ResizePanePayload
 	if err := msg.DecodePayload(&payload); err != nil {
 		return
 	}
+	d.applyResizes(conn, []ipc.ResizePanePayload{payload})
+}
 
-	pane := d.session.Pane(payload.PaneID)
-	if pane == nil {
+// handleResizePanes applies a batch of resizes from conn: a window resize or a
+// split-drag release, which moves many panes at once. See applyResizes.
+func (d *Daemon) handleResizePanes(conn *ipc.Conn, msg *ipc.Message) {
+	var payload ipc.ResizePanesPayload
+	if err := msg.DecodePayload(&payload); err != nil {
 		return
 	}
-	// Degenerate-geometry floor — see degenerateSize for why BOTH dimensions
-	// must be at the floor. A client with no console attached is reported by
-	// Bubble Tea as 1x1, and the TUI's own floors (paneVTSize) turn that into a
-	// request that looks perfectly legal by the time it lands here. Applied, it
-	// reflows every child to one column and each transcript re-wraps
-	// permanently — seen twice in production against a 48-tab workspace.
-	// Model.terminalPaintable now refuses to send it; this is the same refusal
-	// for an older or third-party client.
-	//
-	// BELOW the pane lookup, not above it, so the log names a pane that exists.
-	// PaneID is bounded only by the 10 MB IPC frame cap while quild.log's whole
-	// budget is 5 MB x 10 files, so an echo on a pre-lookup path lets a
-	// malformed payload evict the history an operator needs to diagnose this
-	// very incident. A resolved pane's id is one the daemon minted itself.
-	if degenerateSize(int(payload.Cols), int(payload.Rows)) {
-		d.notifyDegenerateResize(pane, payload.Cols, payload.Rows)
-		return
-	}
-	// Same-size guard: skip when this exact size was already applied to
-	// the current PTY (the TUI re-sends all pane sizes on every workspace
-	// broadcast). Guard fields are PluginMu-protected; the Resize syscall
-	// runs outside the lock.
-	pane.PluginMu.Lock()
-	pty := pane.PTY
-	typ := pane.Type
-	same := pane.appliedCols == int(payload.Cols) && pane.appliedRows == int(payload.Rows)
-	pane.PluginMu.Unlock()
-	if pty == nil || same {
-		return
-	}
-	if err := pty.Resize(payload.Rows, payload.Cols); err != nil {
-		// Record nothing on failure: a transient Resize error must not make
-		// the guard believe this size was applied, or the TUI's next
-		// identical re-send would be skipped and the failed resize never
-		// retried. Leaving appliedCols/Rows unchanged lets the next
-		// broadcast retry.
-		log.Printf("resize pane %s to %dx%d: %v", payload.PaneID, payload.Cols, payload.Rows, err)
-		return
-	}
-	// Record only after the syscall succeeds. Cols/Rows are written INSIDE the
-	// lock with the applied* guards: they used to be set just below it, which
-	// made them a genuine data race — this runs on the resizing conn's dispatch
-	// goroutine while handleAttach (another conn), the PTY output goroutine's
-	// resizeKick, and snapshot() all read them concurrently.
-	pane.PluginMu.Lock()
-	pane.appliedCols = int(payload.Cols)
-	pane.appliedRows = int(payload.Rows)
-	pane.Cols = int(payload.Cols)
-	pane.Rows = int(payload.Rows)
-	pane.PluginMu.Unlock()
+	d.applyResizes(conn, payload.Panes)
+}
 
-	d.repaintAfterResize(pane, typ)
+// applyResizes is the one implementation behind resize_pane and resize_panes.
+//
+// Only the size master may resize: each PTY has one size, and several clients
+// sizing it to their own windows would reflow the child on every broadcast.
+// While there is no master and no reserved slot, any client may, which is the
+// single-client behaviour and keeps an older client working. A refused resize
+// is dropped with no log line, because a follower on an older build sends one
+// for every pane on every broadcast.
+//
+// Every follower is told the new sizes BEFORE any PTY is resized, in ONE frame
+// for the whole batch. The frame goes on the must-deliver queue, which each
+// conn drains ahead of pane output, so a follower's VT holds the new size
+// before the child's repaint at that size arrives. Without it the repaint lands
+// in the old-sized VT and is then reflowed. One frame per batch rather than per
+// pane, because a window resize across 40+ panes would otherwise put 40+
+// must-deliver frames on a follower's 64-slot queue at once.
+func (d *Daemon) applyResizes(conn *ipc.Conn, items []ipc.ResizePanePayload) {
+	if !d.isMasterConn(conn) && !d.sizeAuthorityOpen() {
+		return // a follower or a stale sender: dropped silently (spec §4.1)
+	}
+	type todo struct {
+		pane         *Pane
+		pty          apty.Session
+		typ          string
+		cols, rows   uint16
+		prevC, prevR int
+	}
+	var work []todo
+	seen := make(map[string]int, len(items))
+	for _, it := range items {
+		pane := d.session.Pane(it.PaneID)
+		if pane == nil {
+			continue
+		}
+		// Degenerate-geometry floor — see degenerateSize for why BOTH dimensions
+		// must be at the floor. A client with no console attached is reported by
+		// Bubble Tea as 1x1, and the TUI's own floors (paneVTSize) turn that into a
+		// request that looks perfectly legal by the time it lands here. Applied, it
+		// reflows every child to one column and each transcript re-wraps
+		// permanently — seen twice in production against a 48-tab workspace.
+		// Model.terminalPaintable now refuses to send it; this is the same refusal
+		// for an older or third-party client.
+		//
+		// BELOW the pane lookup, not above it, so the log names a pane that exists.
+		// PaneID is bounded only by the 10 MB IPC frame cap while quild.log's whole
+		// budget is 5 MB x 10 files, so an echo on a pre-lookup path lets a
+		// malformed payload evict the history an operator needs to diagnose this
+		// very incident. A resolved pane's id is one the daemon minted itself.
+		if degenerateSize(int(it.Cols), int(it.Rows)) {
+			d.notifyDegenerateResize(pane, it.Cols, it.Rows)
+			continue
+		}
+		// Same-size guard: skip when this exact size was already applied to
+		// the current PTY (the TUI re-sends all pane sizes on every workspace
+		// broadcast). Guard fields are PluginMu-protected; the Resize syscall
+		// runs outside the lock.
+		pane.PluginMu.Lock()
+		pty, typ := pane.PTY, pane.Type
+		same := pane.appliedCols == int(it.Cols) && pane.appliedRows == int(it.Rows)
+		prevC, prevR := pane.appliedCols, pane.appliedRows
+		pane.PluginMu.Unlock()
+		if pty == nil || same {
+			continue
+		}
+		w := todo{pane, pty, typ, it.Cols, it.Rows, prevC, prevR}
+		// A pane named twice in one batch is resized once, to its last size.
+		// Otherwise each copy passes the guard above, which reads the size
+		// applied BEFORE this batch.
+		if i, dup := seen[pane.ID]; dup {
+			work[i] = w
+			continue
+		}
+		seen[pane.ID] = len(work)
+		work = append(work, w)
+	}
+	if len(work) == 0 {
+		return
+	}
+	// Each pane's announcement is numbered BEFORE the frame leaves, so the
+	// frame carries it and the Cols/Rows recorded after the resize can be
+	// stamped with the same number (see Pane.sizeSeq).
+	sizes := make([]ipc.ResizePanePayload, len(work))
+	seqs := make([]uint64, len(work))
+	for i, w := range work {
+		w.pane.PluginMu.Lock()
+		w.pane.sizeSeq++
+		seqs[i] = w.pane.sizeSeq
+		w.pane.PluginMu.Unlock()
+		sizes[i] = ipc.ResizePanePayload{PaneID: w.pane.ID, Cols: w.cols, Rows: w.rows, SizeSeq: seqs[i]}
+	}
+	d.sendPaneSizes(conn, sizes)
+
+	var failed []ipc.ResizePanePayload
+	for i, w := range work {
+		if err := w.pty.Resize(w.rows, w.cols); err != nil {
+			// Record nothing on failure: a transient Resize error must not make
+			// the guard believe this size was applied, or the TUI's next
+			// identical re-send would be skipped and the failed resize never
+			// retried. Leaving appliedCols/Rows unchanged lets the next
+			// broadcast retry.
+			log.Printf("resize pane %s to %dx%d: %v", w.pane.ID, w.cols, w.rows, err)
+			// The followers were already told the new size, and the child is
+			// still at the old one: tell them the old one again. A pane that
+			// never had a size applied has nothing to go back to.
+			// The rollback is a newer announcement than the one it undoes,
+			// so it takes a new number; Cols/Rows and colsSeq are left
+			// alone, so a broadcast still carrying them is older than both.
+			if w.prevC > 0 && w.prevR > 0 {
+				w.pane.PluginMu.Lock()
+				w.pane.sizeSeq++
+				seq := w.pane.sizeSeq
+				w.pane.PluginMu.Unlock()
+				failed = append(failed, ipc.ResizePanePayload{PaneID: w.pane.ID, Cols: uint16(w.prevC), Rows: uint16(w.prevR), SizeSeq: seq})
+			}
+			continue
+		}
+		// Record only after the syscall succeeds. Cols/Rows are written INSIDE the
+		// lock with the applied* guards: they used to be set just below it, which
+		// made them a genuine data race — this runs on the resizing conn's dispatch
+		// goroutine while handleAttach (another conn), the PTY output goroutine's
+		// resizeKick, and snapshot() all read them concurrently.
+		w.pane.PluginMu.Lock()
+		w.pane.appliedCols, w.pane.appliedRows = int(w.cols), int(w.rows)
+		w.pane.Cols, w.pane.Rows = int(w.cols), int(w.rows)
+		// Never backwards. Should another batch's newer announcement already
+		// be recorded, this resize still ran LAST, so Cols/Rows above are the
+		// PTY's real size — and keeping the newer number is what lets a
+		// broadcast carry that truth past the newer, now-wrong frame.
+		if seqs[i] > w.pane.colsSeq {
+			w.pane.colsSeq = seqs[i]
+		}
+		w.pane.PluginMu.Unlock()
+
+		d.repaintAfterResize(w.pane, w.typ)
+	}
+	if len(failed) > 0 {
+		d.sendPaneSizes(conn, failed)
+	}
+}
+
+// sendPaneSizes queues one pane_sizes frame on every follower's must-deliver
+// queue, leaving out the sender. Send never blocks: a follower too wedged to
+// take the frame is disconnected by the transport, never waited for.
+func (d *Daemon) sendPaneSizes(sender *ipc.Conn, sizes []ipc.ResizePanePayload) {
+	followers := d.followerConns(sender)
+	if len(followers) == 0 {
+		return
+	}
+	msg, err := ipc.NewMessage(ipc.MsgPaneSizes, ipc.PaneSizesPayload{Panes: sizes})
+	if err != nil {
+		log.Printf("pane_sizes: encode: %v", err)
+		return
+	}
+	for _, c := range followers {
+		c.Send(msg)
+	}
 }
 
 // repaintAfterResize nudges a pane that has just been resized into repainting,
@@ -3642,6 +3848,22 @@ func (d *Daemon) repaintAfterResize(pane *Pane, typ string) {
 	// the older reason: a child that has stopped reading stdin blocks the
 	// writer forever, and this runs on the resizing conn's dispatch goroutine.
 	d.sendRedrawKey(pane, typ, p.Persistence.RedrawKey)
+}
+
+// updatePaneIsUserInput reports whether an update_pane payload carries a field
+// the user just acted on (rename, mute, eager, pin/unpin attention, mark/unmark
+// deletion) — as opposed to the automatic reports this same message also
+// carries (an OSC 7 CWD change, overlay visibility, the unseen mark). Only the
+// former should stamp the sending client's last-input time: a pane silently
+// reporting its own CWD, or a TUI clearing an unseen mark on focus, must not
+// make an idle client look like the one somebody is driving.
+func updatePaneIsUserInput(msg *ipc.Message) bool {
+	var p ipc.UpdatePanePayload
+	if err := msg.DecodePayload(&p); err != nil {
+		return false
+	}
+	return p.Name != "" || p.Muted != nil || p.Eager != nil ||
+		p.PinnedAttention != nil || p.MarkedForDeletion != nil
 }
 
 // handleUpdatePane applies a PARTIAL pane update. conn identifies the client
@@ -3782,8 +4004,22 @@ func (d *Daemon) handleUpdatePane(conn *ipc.Conn, msg *ipc.Message) {
 		// from the replayed event history — a line per report would churn
 		// quild.log for no diagnostic gain.
 		pane.PluginMu.Lock()
+		wasUnseen := pane.Unseen
 		pane.Unseen = *payload.Unseen
 		pane.PluginMu.Unlock()
+		// Every OTHER attached client's sidebar carries the same "finished
+		// while you were away" mark for this pane, so the FALLING edge — and
+		// only the falling edge, never a re-affirmed true or an unchanged
+		// false — has to reach them too, or looking at the pane in one TUI
+		// leaves it marked in a second one. Sent before the quiet-field
+		// return below, which this field is one of.
+		if wasUnseen && !*payload.Unseen {
+			if seen, err := ipc.NewMessage(ipc.MsgPaneSeen, ipc.PaneSeenPayload{
+				PaneID: pane.ID,
+			}); err == nil {
+				d.broadcast(seen)
+			}
+		}
 	}
 	if payload.OverlayVisible != nil {
 		d.applyOverlayVisibility(conn, pane, *payload.OverlayVisible)
@@ -3856,12 +4092,18 @@ func (d *Daemon) handleUpdateLayout(msg *ipc.Message) {
 
 	// Under sm.mu: SnapshotState copies Layout under the same lock, and
 	// MovePane reads it there for its template check.
-	if !d.session.SetTabLayout(payload.TabID, payload.Layout) {
+	if !d.session.SetTabLayout(payload.TabID, payload.Layout, payload.BaseRev) {
+		logger.Debug("update_layout: refused tab=%s (unknown tab or stale base_rev)", payload.TabID)
 		return
 	}
-	// No broadcastState() — avoids feedback loop.
-	// Snapshot ensures layout is persisted to disk.
+	// Every client now sends an update only after ITS OWN change and adopts
+	// a broadcast whose layout_rev is newer than what it holds (spec §7.1),
+	// so echoing this accepted write back to the sender cannot make it send
+	// again — the feedback loop this comment used to warn about is
+	// structurally impossible now, not merely avoided by omission.
+	// requestBroadcast coalesces a burst of these (see broadcast_coalesce.go).
 	d.requestSnapshot()
+	d.requestBroadcast()
 }
 
 // resizeKick re-applies a pane's last known size to its PTY, with a
@@ -4140,6 +4382,11 @@ func (d *Daemon) flushPaneOutputGeneration(paneID string, data []byte, generatio
 		}
 		pane.OutputBuf.Write(data)
 	}
+	// The stream position, in the SAME span as the OutputBuf write: an attach
+	// reads outPos beside the buffer bytes it replays, so the two always
+	// describe the same instant. Counted even with no OutputBuf.
+	start := pane.outPos
+	pane.outPos += uint64(len(data))
 
 	// Update idle tracking + mouse-mode state (guarded by PluginMu).
 	now := time.Now()
@@ -4197,7 +4444,18 @@ func (d *Daemon) flushPaneOutputGeneration(paneID string, data []byte, generatio
 		Data:       data,
 		Generation: generation,
 	})
+	// Held conns get a copy through their hold; the broadcast skips them. The
+	// gate makes the pair one step against a hold starting or ending, or a
+	// conn could get these bytes twice or not at all (outputhold.go).
+	// Outside PluginMu, and Broadcast only enqueues, so the gate is held
+	// across no I/O.
+	d.holdGate.RLock()
+	d.holdOutput(paneID, start, data, generation)
+	if d.afterHoldOutput != nil {
+		d.afterHoldOutput(paneID)
+	}
 	d.broadcast(msg)
+	d.holdGate.RUnlock()
 }
 
 // detectBellEvent checks for standalone bell characters (not OSC terminators).
@@ -4318,6 +4576,12 @@ func (d *Daemon) buildWorkspaceState() map[string]any {
 	if info := d.currentUpdateInfo(); info != nil {
 		state["update"] = info
 	}
+	// Broadcast-only as well: the size master's client id ("" for none) and
+	// the attached-client count. Each TUI reads them to tell whether it is the
+	// master or a follower. snapshot() writes size_master to disk by itself,
+	// for the restart reserve; the count means nothing after a restart.
+	state["size_master"] = d.masterID()
+	state["clients"] = d.clientCount()
 	return state
 }
 
@@ -4366,6 +4630,11 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			"color":      tab.Color,
 			"panes":      paneIDs,
 			"project_id": tab.ProjectID,
+			// Unconditional, unlike "layout" below: every client compares
+			// this against its own copy on every broadcast to decide whether
+			// to adopt (spec §7.1), including a tab whose layout has never
+			// been written, so it must be on the wire even at its zero value.
+			"layout_rev": tab.LayoutRev,
 		}
 		if len(tab.Layout) > 0 {
 			tabData["layout"] = tab.Layout
@@ -4514,7 +4783,15 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			// goroutine while handleResizePane writes them from a conn dispatch
 			// goroutine.
 			snapCols, snapRows := pane.Cols, pane.Rows
+			// In the same span as Cols/Rows: the number must describe exactly
+			// the size read beside it (see Pane.sizeSeq).
+			snapSizeSeq := pane.colsSeq
 			pane.PluginMu.Unlock()
+			// Broadcast-only, runtime: the counter restarts with the daemon,
+			// so a persisted one would mean nothing.
+			if includeOverlays && snapSizeSeq > 0 {
+				paneData["size_seq"] = snapSizeSeq
+			}
 			// Pending (deferred, not yet lazy-spawned) is spawnMu-guarded —
 			// read it the same way list_panes does. The TUI uses it to show the
 			// restore indicator on deferred panes and to re-arm the indicator
@@ -5494,16 +5771,74 @@ func resolveSpawnArgs(p *plugin.PanePlugin, pane *Pane, restoring, ownsRecord bo
 	return args
 }
 
-// defaultCWD returns the best working directory for a new pane: the last
-// known client CWD (from the most recent TUI attach) if it still points at
-// an existing directory, falling back to the daemon's own working
-// directory. Symlinks are resolved so all callers see the canonical path.
-func (d *Daemon) defaultCWD() string {
-	if p := d.clientCWD.Load(); p != nil && *p != "" {
-		if dir := resolveSpawnDirWithin(*p, spawnDirProbeTimeout); dir != "" {
-			return dir
+// defaultCWD returns the best working directory for a new pane, for a
+// requesting client's conn. Multi-client sync gives each attached client its
+// OWN cwd (the directory its own TUI was launched from), so "the last known
+// client CWD" is no longer a single value the daemon can read off one field —
+// it depends on which client is asking, and an MCP bridge (no attach at all)
+// asks on behalf of nobody in particular.
+//
+// Checked in order, each DISTINCT candidate validated exactly the same way
+// (resolveSpawnDirWithin: os.Stat + EvalSymlinks, so a stale or unreachable
+// directory falls through rather than being trusted):
+//
+//  1. conn's own attached-client cwd, when conn names an attached client;
+//  2. the size master's cwd — the client whose window sizes every PTY,
+//     the closest thing multi-client sync has to "the" TUI;
+//  3. the most recently active client's cwd;
+//  4. the daemon's own working directory.
+//
+// In the ORDINARY case — one attached TUI — steps 1 through 3 all name the
+// SAME client, so a candidate string already tried is skipped rather than
+// probed again: without that, a single dead directory cost this dispatch
+// goroutine up to three separate spawnDirProbeTimeout waits (6s) and
+// abandoned three claimBlockingFSCall permits instead of one. The remaining
+// probes also share ONE deadline rather than a fresh spawnDirProbeTimeout
+// each, so even three genuinely DIFFERENT unreachable candidates cost this
+// call no more than spawnDirProbeTimeout in total.
+//
+// The shared deadline has a known cost, accepted: a DEAD earlier candidate
+// can spend the whole budget, and a later candidate that is live and distinct
+// then gets no time and falls through to step 4, so the pane opens in the
+// daemon's own directory. It needs one client's recorded cwd on a dead mount
+// first; bounding the total wait on dead mounts is worth more than that case.
+//
+// conn is nil for every restore and recovery caller (recoverEmptyTab,
+// ensureTabNotEmpty, …), which has no requesting client at all — those start
+// at step 2. Symlinks are resolved so all callers see the canonical path.
+func (d *Daemon) defaultCWD(conn *ipc.Conn) string {
+	deadline := time.Now().Add(spawnDirProbeTimeout)
+	tried := make(map[string]bool, 3)
+	// tryCandidate skips a cwd already attempted (by value — the ordinary
+	// single-TUI case names the same directory at every step) and spends
+	// only what is left of the shared deadline.
+	tryCandidate := func(cwd string) string {
+		if cwd == "" || tried[cwd] {
+			return ""
 		}
-		// stale (directory removed since attach), or unreachable — fall through
+		tried[cwd] = true
+		return resolveSpawnDirWithin(cwd, time.Until(deadline))
+	}
+	if conn != nil {
+		if rec, ok := d.clientByConn(conn); ok {
+			if dir := tryCandidate(rec.cwd); dir != "" {
+				return dir
+			}
+		}
+	}
+	if mc := d.masterConn(); mc != nil {
+		if rec, ok := d.clientByConn(mc); ok {
+			if dir := tryCandidate(rec.cwd); dir != "" {
+				return dir
+			}
+		}
+	}
+	if ac := d.mostRecentlyActiveConn(); ac != nil {
+		if rec, ok := d.clientByConn(ac); ok {
+			if dir := tryCandidate(rec.cwd); dir != "" {
+				return dir
+			}
+		}
 	}
 	// Best-effort; if Getwd fails we return "" and the spawn will fail
 	// with a clear error from os/exec rather than silently land somewhere.
@@ -7165,11 +7500,21 @@ func (d *Daemon) handleSetActivePane(conn *ipc.Conn, msg *ipc.Message) {
 	// Switch to the pane's tab
 	d.session.SwitchTab(pane.CurrentTabID())
 
-	// Broadcast to TUI clients so they can set focus
-	broadcast, _ := ipc.NewMessage(ipc.MsgSetActivePane, ipc.SetActivePanePayload{
-		PaneID: req.PaneID,
-	})
-	d.broadcast(broadcast)
+	// Focus reaches ONE client — req.Client, or the implicit target — never
+	// every attached TUI: a second TUI looking at something else must not
+	// have its focus yanked by a command aimed at the first. A headless
+	// daemon (nobody attached) has nothing to focus, so this send is
+	// nil-guarded rather than answered with a broadcast; the tab still
+	// switches for whoever attaches next.
+	if target := d.targetConn(req.Client); target != nil {
+		if focus, err := ipc.NewMessage(ipc.MsgSetActivePane, ipc.SetActivePanePayload{
+			PaneID: req.PaneID,
+		}); err == nil {
+			target.Send(focus)
+		}
+	} else if req.Client != "" {
+		log.Printf("set_active_pane: no attached client %q; dropping the focus frame", req.Client)
+	}
 
 	d.broadcastState()
 	d.requestSnapshot()
@@ -7186,6 +7531,14 @@ func (d *Daemon) handleDismissEvent(msg *ipc.Message) {
 		d.events.DismissAll()
 	} else {
 		d.events.Dismiss(payload.EventID)
+	}
+	// Every attached client's sidebar is showing the same event(s); without
+	// this a card dismissed in one TUI keeps sitting in a second one until
+	// something else happens to refresh it.
+	if dismissed, err := ipc.NewMessage(ipc.MsgEventDismissed, ipc.EventDismissedPayload{
+		EventID: payload.EventID,
+	}); err == nil {
+		d.broadcast(dismissed)
 	}
 }
 

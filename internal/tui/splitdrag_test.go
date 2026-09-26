@@ -171,7 +171,7 @@ func TestModel_FinishSplitDrag_CommitsToDaemon(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("finishSplitDrag must return the commit command")
 	}
-	// Execute the batch: resizeAllPanes + sendAllLayouts.
+	// Execute the batch: resizeAllPanes + markLayoutChanged.
 	if batch, ok := cmd().(tea.BatchMsg); ok {
 		for _, c := range batch {
 			if c != nil {
@@ -184,14 +184,18 @@ func TestModel_FinishSplitDrag_CommitsToDaemon(t *testing.T) {
 	var resizes, layouts int
 	for _, sent := range fs.sent {
 		switch sent.Type {
-		case ipc.MsgResizePane:
-			resizes++
+		case ipc.MsgResizePanes:
+			var p ipc.ResizePanesPayload
+			if err := sent.DecodePayload(&p); err != nil {
+				t.Fatalf("decode resize_panes: %v", err)
+			}
+			resizes += len(p.Panes)
 		case ipc.MsgUpdateLayout:
 			layouts++
 		}
 	}
 	if resizes != 2 {
-		t.Errorf("MsgResizePane count = %d, want 2", resizes)
+		t.Errorf("resize count = %d, want 2", resizes)
 	}
 	if layouts != 1 {
 		t.Errorf("MsgUpdateLayout count = %d, want 1", layouts)

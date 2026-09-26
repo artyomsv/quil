@@ -258,7 +258,7 @@ func TestHandleDestroyTab_RemovesEveryOwnedWorktreeInTheTab(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewMessage: %v", err)
 	}
-	d.handleDestroyTab(msg)
+	d.handleDestroyTab(nil, msg)
 
 	got := map[string]bool{}
 	for range 2 {

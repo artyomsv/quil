@@ -58,6 +58,15 @@ var registry = []Action{
 	// project. Early tier with the rest of the project keys.
 	{ID: "project.move_up", Label: "Move project up", Group: "Projects", Tier: TierEarly, Order: 1800, Default: "alt+shift+up"},
 	{ID: "project.move_down", Label: "Move project down", Group: "Projects", Tier: TierEarly, Order: 1900, Default: "alt+shift+down"},
+	// Multi-client sync (D6): makes this client the size master of the active
+	// destination at once. Grouped with System, where the other daemon/window
+	// actions live, rather than with Projects or Panes — it names no project
+	// or pane, it names a CLIENT. Early tier so it wins over a plugin's
+	// raw_keys claim on whatever chord a user binds it to, like every other
+	// early action; no default chord, because taking control from a running
+	// follower resizes every one of its panes, which must never happen to a
+	// key a fresh install already owns.
+	{ID: "client.take_control", Label: "Take control (size master)", Group: "System", Tier: TierEarly, Order: 1950, Default: ""},
 
 	// --- Late tier: handleKey's second switch, after tryPluginRawKey ---
 	{ID: "app.quit", Label: "Quit", Group: "System", Tier: TierLate, Order: 2000, Default: "ctrl+q"},

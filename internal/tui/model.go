@@ -12,7 +12,6 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -20,6 +19,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/google/uuid"
 
 	"github.com/artyomsv/quil/internal/changelog"
 	"github.com/artyomsv/quil/internal/claudesessions"
@@ -67,6 +67,13 @@ type WorkspaceStateMsg struct {
 	Dest string
 	// Update is the daemon's announced newer release (nil when up to date).
 	Update *ipc.UpdateInfo
+	// SizeMaster is this destination's size-master client id, or "" when it
+	// has none. Clients is the number of clients currently attached to it
+	// (bridges excluded). Both ride every broadcast (buildWorkspaceState),
+	// which is what keeps Model.sizeMaster/clientCount current with no
+	// dedicated round trip — see isFollower.
+	SizeMaster string
+	Clients    int
 }
 
 // ProjectInfo is one daemon-side project as broadcast. TabIDs carries the
@@ -99,6 +106,9 @@ type TabInfo struct {
 	Layout         json.RawMessage
 	TemplateLayout string
 	TemplateMain   string
+	// LayoutRev is the daemon's revision of Layout: bumped on every stored
+	// write, 0 for a tab no client has described. See layoutsync.go.
+	LayoutRev uint64
 }
 
 type PaneInfo struct {
@@ -187,6 +197,12 @@ type PaneInfo struct {
 	// Zero means the daemon has never applied a size — always send then.
 	Cols uint16
 	Rows uint16
+	// SizeSeq numbers Cols/Rows among every size the daemon announced for
+	// this pane (daemon Pane.colsSeq). A pane_sizes frame carries the same
+	// counter, so a broadcast built before a resize was recorded — older
+	// Cols/Rows, lower SizeSeq — cannot undo the frame a follower already
+	// applied. 0 from a daemon that predates it: always adopted.
+	SizeSeq uint64
 }
 
 // paneSettleRepaintMsg fires shortly after a pane's first live output and
@@ -236,8 +252,36 @@ type setActivePaneMsg struct {
 	PaneID string
 }
 
+// paneSizesMsg carries a daemon's pane_sizes frame: the sizes its master just
+// applied, sent to this follower BEFORE the PTY resize, so it precedes the
+// child's repaint on the same ordered connection. dest is the frame's Origin
+// — sizes describe one daemon's panes and nobody else's.
+type paneSizesMsg struct {
+	dest  string
+	sizes []ipc.ResizePanePayload
+}
+
 // paneEventMsg delivers a notification event from the daemon.
 type paneEventMsg ipc.PaneEventPayload
+
+// eventDismissedMsg is the daemon's broadcast that a notification was
+// dismissed (event_dismissed, spec §8.4), reaching every attached client —
+// this client's own dismissal included. dest is the daemon that sent it:
+// DismissByID removes one card by id, and a dismiss-all (empty eventID)
+// removes only that daemon's cards from the shared sidebar list.
+type eventDismissedMsg struct {
+	dest    string
+	eventID string // "" = dismiss every card
+}
+
+// paneSeenMsg is the daemon's broadcast that a pane's unseen mark was cleared
+// by SOME attached client (pane_seen, spec §8.4). This client clears its own
+// local copy of the mark and reports nothing back — reporting would echo the
+// clear it was just told about, forever.
+type paneSeenMsg struct {
+	dest   string
+	paneID string
+}
 
 // pasteRefreshMsg triggers a re-render after paste so the cursor updates.
 type pasteRefreshMsg struct{}
@@ -444,6 +488,13 @@ type Model struct {
 	version    string
 	sized      bool            // the terminal has reported its geometry at least once
 	attached   map[string]bool // destinations already attached — see attachAllDests
+	// attachedOnce records every destination this PROCESS has sent an attach
+	// to, and is never cleared (attached is, on disconnect). It is the
+	// AttachPayload.Reattach flag: a destination unreachable at launch gets its
+	// first attach through finishReconnect, and that one must still say
+	// "first", or the lone TUI after that host's unclean restart waits out the
+	// restart reserve as a follower.
+	attachedOnce map[string]bool
 	// offlineWoken records which offline destinations have had their ladder
 	// started, so the wake-up fires once rather than on every resize.
 	offlineWoken map[string]bool
@@ -451,21 +502,71 @@ type Model struct {
 	// the failure it guards — a SECOND reader of the router's channel — has no
 	// error to assert on, only reordering.
 	listenCountFn func()
-	// sizedOnce records panes this connection has sent at least one
-	// MsgResizePane for. A broadcast-driven resize is suppressed when the
-	// reported size already matches, but the FIRST one is always sent: the
-	// daemon's duplicate guard is appliedCols/appliedRows, which it zeroes on
-	// every PTY install, and repaintAfterResize's redraw kick for a restored
-	// pane rides that first client resize. Cleared by armReattachReset, since
-	// a reattach is exactly when the daemon's guard may have been zeroed, and
-	// pruned by applyWorkspaceState when a pane stops existing.
+	// sizedOnce records panes this connection has sent at least one resize
+	// for (batched into MsgResizePanes). A broadcast-driven resize is
+	// suppressed when the reported size already matches, but the FIRST one
+	// is always sent: the daemon's duplicate guard is
+	// appliedCols/appliedRows, which it zeroes on every PTY install, and
+	// repaintAfterResize's redraw kick for a restored pane rides that first
+	// client resize. Cleared by armReattachReset, since a reattach is
+	// exactly when the daemon's guard may have been zeroed, and pruned by
+	// applyWorkspaceState when a pane stops existing.
 	//
 	// Keyed by sizedKey(dest, paneID), not by pane id alone: this decides
 	// whether a pane's FIRST resize ships, so a shared key would let one
 	// daemon's pane consume another's kick and let armReattachReset for one
 	// dest clear the other's flag. Two daemons minting the same UUID is not a
 	// realistic accident, but the invariant should not rest on that.
-	sizedOnce          map[string]bool
+	sizedOnce map[string]bool
+	// clientID identifies this PROCESS across reconnects — minted once in
+	// NewModel with uuid.NewString() and sent on every attach (attachMessage).
+	// It is never persisted to disk: two TUIs on one machine would then share
+	// it, and each is a distinct client to the daemon's master election.
+	clientID string
+	// sizeMaster records, per destination, the master client's id reported by
+	// the last broadcast ("" = no master on that destination). isFollower
+	// derives from it: this client is a follower of dest whenever sizeMaster
+	// names someone else. Updated in applyWorkspaceState from
+	// WorkspaceStateMsg.SizeMaster.
+	sizeMaster map[string]string
+	// clientCount records, per destination, the last broadcast's attached-
+	// client count (bridges excluded) — what renderStatusBar's role marker
+	// and D9's "most recent input" default both key off of at the TUI layer.
+	clientCount map[string]int
+	// requestedTab records, per (dest, project) key (requestedTabKey), THIS
+	// client's own in-flight switchTab/switchTabBy/sendCreateTab request.
+	// applyTabMoveGuard consults it to tell this client's own switch landing
+	// apart from a change some OTHER client made (typing guard, spec §8.1): a
+	// broadcast whose adopted ActiveTab equals pendingSwitch.target is this
+	// client's own request landing (the entry is cleared); one naming
+	// pendingSwitch.from within the stale window is a network-ordering
+	// leftover from before the request and is rejected outright; anything
+	// else is remote and arms remoteSwitchAt/guardPaneID/remoteFocusUnacked.
+	requestedTab map[string]pendingSwitch
+	// remoteSwitchAt is m.clock() at the last REMOTE active-tab change this
+	// client observed for its active project — the typing guard's window
+	// (remoteSwitchGuardWindow) is measured from here.
+	remoteSwitchAt time.Time
+	// guardPaneID is the pane that was active, on THIS client, immediately
+	// before a remote tab switch moved focus elsewhere. Key-originated input
+	// (typed keys and paste — never mouse) arriving within the guard window
+	// retargets here instead of the pane the remote switch made active, since
+	// the user was mid-keystroke in THIS pane, not the one another client
+	// picked. Cleared implicitly once the window elapses or the pane stops
+	// existing (guardedInputTarget checks both, live, rather than expiring the
+	// field itself).
+	guardPaneID string
+	// remoteFocusUnacked is true from the moment a remote switch focuses a
+	// pane on this client until this client's own next key or mouse click.
+	// While set, ackFocusedPane skips its unseen-clearing report — a pane
+	// must not read as "seen" on every attached client just because one of
+	// them switched tabs, whether or not anyone actually looked.
+	remoteFocusUnacked bool
+	// now is the typing guard's clock seam: time.Now in NewModel, a fixed
+	// function in tests. Read through Model.clock(), never directly, since a
+	// Model literal built by a test (the common shape in this package) leaves
+	// it nil.
+	now                func() time.Time
 	renaming           bool
 	renameInput        string
 	renamingPane       bool
@@ -940,10 +1041,19 @@ type Model struct {
 	// (finishSplitDrag) — mid-drag only the local tree and VT change.
 	splitDragNode *LayoutNode
 	splitDragRect BorderHit
+	// splitDragRatio is the node's Ratio when the drag armed, so a release
+	// that moved nothing stores nothing (finishSplitDrag).
+	splitDragRatio float64
 
 	// paneDrag is an Alt+drag of a whole pane (panedrag.go). Zero value = no
 	// drag. Rides clearDragState like every other drag.
 	paneDrag paneDragState
+
+	// closeRequested holds the panes THIS client's user confirmed closing.
+	// The broadcast that prunes one is a user change this client stores; any
+	// other prune waits for whoever asked (layoutsync.go). Keyed by
+	// closeKey(dest, paneID); a reattach drops that dest's entries.
+	closeRequested map[string]bool
 
 	// Project-sidebar edge drag. sidebarDragging is set while a drag is in
 	// flight; sidebarDragW is the PENDING width, painted as a preview rule and
@@ -1146,10 +1256,14 @@ func (m *Model) SetRecentCWDs(list []string) { m.recentCWDs = list }
 // what had to move.) Nil when there is nothing to show.
 func NewModel(client Client, cfg config.Config, version string, registry *plugin.Registry, stalePlugins []plugin.StalePlugin, whatsNew *changelog.Window) Model {
 	m := Model{
-		client:  client,
-		cfg:     cfg,
-		version: version,
-		devMode: os.Getenv("QUIL_HOME") != "",
+		client: client,
+		cfg:    cfg,
+		// Minted once per process, per D3: stable across this process's own
+		// reconnects (it never changes after this), but a NEW process — a
+		// closed and relaunched TUI — is a new client with a new id.
+		clientID: uuid.NewString(),
+		version:  version,
+		devMode:  os.Getenv("QUIL_HOME") != "",
 		// See the field comment: a terminal with no focus reporting never
 		// corrects this, and assuming focused is the quiet failure.
 		termFocused:      true,
@@ -1168,6 +1282,8 @@ func NewModel(client Client, cfg config.Config, version string, registry *plugin
 		inputCh:          make(chan paneInput, inputForwardBuffer),
 		inputDone:        make(chan struct{}),
 		inputIdle:        make(chan struct{}),
+		requestedTab:     make(map[string]pendingSwitch),
+		now:              time.Now,
 	}
 	// Startup dialog priority: migration > what's-new > update-notice >
 	// disclaimer. Migration blocks startup until every stale plugin is
@@ -1196,6 +1312,23 @@ func NewModel(client Client, cfg config.Config, version string, registry *plugin
 // to call repeatedly; the last call wins.
 func (m *Model) initKeymap() {
 	m.keymap, m.keyConflicts = buildKeymap(m.cfg.Keybindings)
+}
+
+// SetClientID overrides the process-minted client id. A test seam: production
+// never needs a stable id across separate NewModel calls, but a test driving
+// two Models as two "clients" of one daemon needs to give them distinct,
+// known ids rather than two random UUIDs it cannot assert against.
+func (m *Model) SetClientID(id string) { m.clientID = id }
+
+// isFollower reports whether this client is NOT the size master of dest, and
+// there IS a master — see D4. A dest this client has never seen a broadcast
+// for (m.sizeMaster is nil, or holds no entry for it) answers false: the zero
+// value of "no master reported yet" must behave exactly like "no follower
+// gate applies", which is what every pre-multi-client-sync test and every
+// single-client session already assumes.
+func (m *Model) isFollower(dest string) bool {
+	master := m.sizeMaster[dest]
+	return master != "" && master != m.clientID
 }
 
 // WindowSize returns the last known window dimensions for persistence.
@@ -1328,6 +1461,17 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 	// means the flag describes THIS message and can never leak into the next.
 	m.skipRender = false
 	m.skipHidden = false
+	// Local input answers the typing guard's ack hold (spec §8.1): a pane that
+	// became focused only because ANOTHER client switched tabs must not read
+	// as "seen" until the user actually looks at it, which a key or a mouse
+	// click proves and a spinner tick or a PTY chunk does not. Cleared BEFORE
+	// ackFocusedPane runs below, so the very keystroke that answers the guard
+	// also acks the pane in the same Update call — there is no reason to make
+	// the user press twice.
+	switch msg.(type) {
+	case tea.KeyPressMsg, tea.MouseClickMsg:
+		m.remoteFocusUnacked = false
+	}
 	// Acknowledge the focused pane of the active tab before processing the
 	// message — focusing is the acknowledgement; see ackFocusedPane.
 	//
@@ -1538,7 +1682,8 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 			// statement. The same hazard the ledger comment above documents.
 			m.promptNextUpgrade()
 			resize, attach, wake := m.resizeAllPanes(), m.attachAllDests(), m.wakeOfflineDests()
-			return m, tea.Batch(resize, attach, wake)
+			geom := m.clientGeometryCmd()
+			return m, tea.Batch(resize, attach, wake, geom)
 		}
 
 		// A destination can join the router after the first resize (a host that
@@ -1726,6 +1871,12 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		// Also resize an active overlay pane so the daemon's PTY tracks the new size.
 		var overlayCmds []tea.Cmd
 		overlayCmds = append(overlayCmds, m.resizeAllPanes())
+		// The debounced report of THIS client's own window size, to every
+		// connected destination — see clientGeometryCmd. Riding the same
+		// debounce point as resizeAllPanes rather than the raw tea.WindowSizeMsg
+		// is deliberate: a resize burst (dragging the window edge) would
+		// otherwise cost one client_geometry per intermediate size report.
+		overlayCmds = append(overlayCmds, m.clientGeometryCmd())
 		// EVERY tab, not just the active one. An overlay pane sits outside the
 		// layout tree, so resizeAllPanes never walks it (it iterates
 		// tab.Leaves()) and diffResizes keeps no sizedOnce ledger for it —
@@ -2073,6 +2224,7 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 					m.clearDragState()
 					m.splitDragNode = hit.Node
 					m.splitDragRect = *hit
+					m.splitDragRatio = hit.Node.Ratio
 					m.selection = nil
 					m.setSplitDragHighlight(hit, true)
 					return m, nil
@@ -2415,6 +2567,13 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 						}
 						relX := msg.X - rect.OX - 1
 						relY := msg.Y - rect.OY - 1
+						// A follower's grid is cut or padded into this box,
+						// so box coordinates are not grid coordinates; a notch
+						// over the padding has no cell to send.
+						relX, relY, inGrid := followerGridPos(pane, relX, relY)
+						if !inGrid {
+							return m, nil
+						}
 						if seq := pane.wheelForwardSeq(up, relX, relY); seq != nil {
 							logger.Debug("wheel: forward pane=%s type=%s btn=%v rel=(%d,%d) seq=%q (local n=%v b=%v a=%v sgr=%v daemonTrack=%v)",
 								pane.ID, pane.Type, msg.Button, relX, relY, string(seq),
@@ -2814,14 +2973,15 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		// used to cost one must-deliver frame per tab PLUS one per pane — 69
 		// frames on a 64-slot queue at 33 tabs/36 panes, which overflowed and
 		// made the client's own IPC layer close the connection (2026-08-09).
-		// Both diffs run here, on the Update goroutine, because they read
-		// m.projects, which applyWorkspaceState has just rebuilt.
+		// The diff runs here, on the Update goroutine, because it reads
+		// m.projects, which applyWorkspaceState has just rebuilt. Layout
+		// writes are not diffed at all: rebuildTabs returns the few this
+		// client owes among overlayResizeCmds (layoutsync.go).
 		cmds := []tea.Cmd{
 			templateFocusCmd,
 			pickerVanishCmd,
 			m.listenForMessages(),
 			m.sendDiffedResizes(m.diffResizes(msg)),
-			m.sendDiffedLayouts(m.diffLayouts(msg)),
 			groupsCmd,
 		}
 		// Resize overlay PTYs that just became visible on initial creation.
@@ -2867,6 +3027,15 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 			log.Printf("set_active_pane: pane %s not found", msg.PaneID)
 		}
 		return m, tea.Batch(overlayCmd, m.listenForMessages())
+
+	case paneSizesMsg:
+		// Applied HERE, synchronously, never in a Cmd: the frame arrived on
+		// the must-deliver queue ahead of the repaint the master's resize
+		// triggers, and the very next PaneOutputMsg from this connection may
+		// be that repaint — it must land in a VT that already has the new
+		// size. Deliberately not skipRender: a resized VT is a changed frame.
+		m.applyPaneSizes(msg)
+		return m, m.listenForMessages()
 
 	case highlightPaneMsg:
 		m.mcpHighlights[msg.PaneID] = true
@@ -2940,6 +3109,24 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 			cmds = append(cmds, m.startSidebarTick())
 		}
 		return m, tea.Batch(cmds...)
+
+	case eventDismissedMsg:
+		// Applied locally, exactly like the daemon-side dismissal this mirrors:
+		// remove the card (or every card FROM THIS DEST, "" = all) and report
+		// nothing — this broadcast IS the report, whether it originated here or
+		// on another attached client (spec §8.4). destOfPane scopes "all" to
+		// msg.dest, since the sidebar holds cards from every attached daemon.
+		m.notifications.DismissByID(msg.eventID, msg.dest, m.destOfPane)
+		return m, m.listenForMessages()
+
+	case paneSeenMsg:
+		// Some attached client (this one included) cleared the pane's unseen
+		// mark; mirror it locally without sending anything back, or every
+		// client would echo the clear at each other forever (spec §8.4).
+		if pane, _, _ := m.findPaneAndTab(msg.paneID); pane != nil {
+			pane.unseen = false
+		}
+		return m, m.listenForMessages()
 
 	case sidebarTickMsg:
 		// Re-render sidebar to update relative timestamps; schedule next tick if still visible.
@@ -3660,6 +3847,7 @@ func (m *Model) clearDragState() {
 	m.viewerMouseDown = false
 	m.splitDragNode = nil
 	m.splitDragRect = BorderHit{}
+	m.splitDragRatio = 0
 	m.sidebarDragging = false
 	m.sidebarDragW = 0
 	m.paneDrag = paneDragState{}
@@ -3820,20 +4008,27 @@ func (m *Model) dragSplitBorder(x, y int) {
 
 // finishSplitDrag commits an in-progress border drag: the daemon gets the
 // final pane sizes (one PTY resize per pane — children reflow once, per
-// the on-release-only design) and every tab's layout blob (persists the
-// new Ratio). resizeAllPanes/sendAllLayouts cover all panes/tabs; the
-// daemon's same-size guard drops the untouched panes' resizes, and layout
-// updates are stored opaquely without broadcast, so the extra breadth is
-// harmless and reuses tested plumbing.
+// the on-release-only design) and the dragged tab's layout (persists the
+// new Ratio). resizeAllPanes covers all panes; the daemon's same-size guard
+// drops the untouched panes' resizes. Only the active tab's tree moved, so
+// only it is stored (markLayoutChanged) — and not at all when the release
+// left the ratio where the press found it: a click on a border is not a
+// change, and storing it would bump the revision for every other client.
 func (m *Model) finishSplitDrag() tea.Cmd {
 	// The one VT resize of the whole drag: old size → final size, paired
 	// with the PTY resize below so the child's SIGWINCH redraw lands in a
 	// matching grid (mid-drag only rects moved — see resizeNodeRects).
-	if tab := m.activeTabModel(); tab != nil {
+	tab := m.activeTabModel()
+	if tab != nil {
 		tab.Resize(tab.Width, tab.Height)
 	}
+	moved := m.splitDragNode == nil || m.splitDragNode.Ratio != m.splitDragRatio
 	m.clearDragState()
-	return tea.Batch(m.resizeAllPanes(), m.sendAllLayouts())
+	var layout tea.Cmd
+	if tab != nil && moved {
+		layout = m.markLayoutChanged(m.destOfTab(tab.ID), tab)
+	}
+	return tea.Batch(m.resizeAllPanes(), layout)
 }
 
 // moveTab repositions the active project's tab at `from` to ordinal `to`,
@@ -4275,6 +4470,24 @@ func (m Model) handleNewTab() (tea.Model, tea.Cmd) {
 // windows regressed exactly that way when this function stamped unconditionally.
 func (m Model) sendCreateTab(spec *ipc.FirstPaneSpec) tea.Cmd {
 	dest := m.createPaneDest
+	// Typing guard (spec §8.1): this client is about to become the reason its
+	// active project's ActiveTab changes, so the landing broadcast must not
+	// read as another client's switch. There is no tab id to record yet — the
+	// daemon mints one — so pendingTabCreateToken stands in for it. Value
+	// receiver: this only reaches an existing map (every production Model's,
+	// from NewModel), matching switchTab's synchronous recording so the guard
+	// can never observe a create that is already in flight.
+	//
+	// proj.Dest == dest is required, not assumed: createPaneDest pins the
+	// destination at dialog OPEN, and the active project can move to a
+	// DIFFERENT destination while the dialog sits open. Recording under
+	// (dest, m.cur().ID) then would pair a foreign dest with the wrong
+	// project's id — a key applyTabMoveGuard could never legitimately match,
+	// since it always looks up (dest, THAT dest's own active project). Better
+	// to record nothing than to record a key that can only ever be wrong.
+	if proj := m.cur(); proj != nil && proj.Dest == dest && m.requestedTab != nil {
+		m.requestedTab[requestedTabKey(dest, proj.ID)] = pendingSwitch{target: pendingTabCreateToken, at: m.clock()}
+	}
 	return func() tea.Msg {
 		msg, err := ipc.NewMessage(ipc.MsgCreateTab, ipc.CreateTabPayload{
 			Name:      "New Tab",
@@ -5211,9 +5424,11 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "pane.toggle_wrap":
 		// Flip the active wide-canvas pane's preview between left-edge
 		// crop (default) and soft-wrap. View-only state — no IPC, no PTY
-		// touch; the preview layout cache re-keys on the flag.
+		// touch; the preview layout cache re-keys on the flag. A follower
+		// pane renders the same preview when its grid is cut (spec §5.2),
+		// so the toggle reaches it too.
 		if tab := m.activeTabModel(); tab != nil {
-			if pane := tab.ActivePaneModel(); pane != nil && pane.WideCanvas {
+			if pane := tab.ActivePaneModel(); pane != nil && (pane.WideCanvas || pane.follower) {
 				pane.previewWrap = !pane.previewWrap
 			}
 		}
@@ -5316,6 +5531,8 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// jumpToNextBlocked mutates m through a pointer receiver.
 		cmd := m.jumpToNextBlocked()
 		return m, cmd
+	case "client.take_control":
+		return m, m.sendTakeControl(m.activeDest())
 	}
 
 	// Everything from here to the late-tier lookup is skipped for a completed
@@ -5361,7 +5578,12 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if data := m.rawKeyFor(seqAction, key, msg); data != nil {
 		m.selection = nil
 		if tab := m.activeTabModel(); tab != nil {
-			if pane := tab.ActivePaneModel(); pane != nil {
+			// guardedInputPane, not ActivePaneModel directly: within the typing
+			// guard window (spec §8.1) the bytes below are headed at guardPaneID,
+			// not whatever tab.ActivePaneModel() now returns, and the scroll
+			// reset / blocked-answer must land on the pane that actually
+			// receives them.
+			if pane := m.guardedInputPane(tab.ActivePaneModel()); pane != nil {
 				pane.ResetScroll()
 				// A typed key is the answer a parked pane was waiting for;
 				// approving a permission prompt fires no hook of its own.
@@ -5599,7 +5821,11 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		m.selection = nil
 		if tab := m.activeTabModel(); tab != nil {
-			if pane := tab.ActivePaneModel(); pane != nil {
+			// guardedInputPane: within the typing guard window (spec §8.1)
+			// forwardInputBytes below redirects these bytes to guardPaneID, so
+			// the scroll reset, the blocked-answer and ESC's interrupt must act
+			// on THAT pane, not whatever tab.ActivePaneModel() now returns.
+			if pane := m.guardedInputPane(tab.ActivePaneModel()); pane != nil {
 				pane.ResetScroll()
 				// Same trigger as the scroll reset above — the user acted on
 				// this pane — and the answer a parked pane never otherwise
@@ -5875,6 +6101,133 @@ func (m *Model) handlePaneOutput(msg PaneOutputMsg) (tea.Cmd, bool) {
 	return nil, false
 }
 
+// tabsContainID reports whether tabs (a project's REBUILT tab list) still
+// holds id. applyTabMoveGuard needs this rather than trusting a non-nil
+// fromTab: a tab this client just destroyed, moved to another project, or
+// dissolved (its last pane moved out) is a tab THIS client took away from
+// itself, not one it was "switched away from" by another client.
+func tabsContainID(tabs []*TabModel, id string) bool {
+	for _, t := range tabs {
+		if t != nil && t.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// tabInputPaneID returns the pane id actually receiving keyboard input for
+// tab — the overlay's, while one is visible, matching ActivePaneModel's own
+// rule, else the tree's active pane. applyTabMoveGuard needs this rather than
+// the bare ActivePane field: a user typing into a lazygit overlay when a
+// remote switch lands must get the overlay back, not the tree pane sitting
+// behind it.
+func tabInputPaneID(tab *TabModel) string {
+	if tab.overlayVisible && tab.overlayPane != nil {
+		return tab.overlayPane.ID
+	}
+	return tab.ActivePane
+}
+
+// applyTabMoveGuard decides, for the ACTIVE project, what active tab this
+// broadcast should actually settle on — the daemon's own report, this
+// client's pending request held in place instead (a stale echo), or the
+// daemon's report adopted with the typing guard armed (spec §8.1) — and
+// returns that tab id alongside the flash-expiry cmd when the guard armed
+// (nil otherwise; the caller must batch a non-nil one, or the flash never
+// clears itself).
+//
+// Called UNCONDITIONALLY for the active project on every broadcast, not only
+// when the tab actually moved: a token must be retired on an ORDINARY echo
+// too (fromTab.ID == newActiveTab already, because switchTab updates the
+// client's own index synchronously before any broadcast can land) — leaving
+// a matched token in place would let it silently satisfy some LATER,
+// unrelated broadcast that happens to name the same tab id. The SAME reason
+// is why the create-token case below must not spend itself on a broadcast
+// that changes nothing (review round 2): applyTabMoveGuard now runs on every
+// broadcast including the ordinary ones a pending create sits through (the
+// git ticker, an OSC 7 CWD update, another client's unrelated action) before
+// its own tab ever lands.
+//
+// "Not requested" is decided with the requestedTab TOKEN, never with a time
+// window: a local switch followed quickly by an unrelated remote one must
+// still be guarded, which a window alone cannot tell apart from the local
+// switch's own delayed echo. The one exception is pendingSwitch.from within
+// requestedSwitchStaleWindow (review round 2's pre-existing issue): a
+// broadcast already in flight when switchTab ran still names the tab this
+// client just left, and adopting it would jump the tab visibly back for the
+// width of one round trip before the requester's own echo corrects it — so
+// that report is rejected outright rather than merely un-guarded.
+//
+// existedBefore reports whether newActiveTab was already one of this
+// client's tabs (any project) before this broadcast — the create-token's
+// only use for it, since a create_tab request has no id to compare by
+// equality ahead of time (the daemon mints one).
+func (m *Model) applyTabMoveGuard(dest, projectID, newActiveTab string, fromTab *TabModel, tabs []*TabModel, existedBefore bool) (string, tea.Cmd) {
+	key := requestedTabKey(dest, projectID)
+	if req, ok := m.requestedTab[key]; ok {
+		switch {
+		case req.target == pendingTabCreateToken:
+			if fromTab != nil && fromTab.ID == newActiveTab {
+				// Nothing has changed yet: an ordinary broadcast landed
+				// before the pending create's own tab. Keep waiting — the
+				// token must not be spent on a broadcast that names the
+				// tab we were ALREADY on.
+				return newActiveTab, nil
+			}
+			// One-shot from here: spent against this active-tab change
+			// either way, so a leftover token can never outlive the create
+			// it was minted for and silently swallow some LATER remote
+			// switch.
+			delete(m.requestedTab, key)
+			if !existedBefore {
+				return newActiveTab, nil // the create's own tab landing
+			}
+			// Not the create landing — an unrelated change beat it there.
+			// Fall through to the ordinary remote-switch handling below.
+		case req.target == newActiveTab:
+			// An exact match is this client's own switchTab landing, echo or
+			// not — see the function comment for why this compare must run
+			// unconditionally rather than only inside a "moved" branch.
+			delete(m.requestedTab, key)
+			return newActiveTab, nil
+		case req.from != "" && req.from == newActiveTab && m.clock().Sub(req.at) < requestedSwitchStaleWindow:
+			// This broadcast reports the tab we just switched AWAY FROM —
+			// network-ordering leftover from before the request, not a
+			// switch back to it (a genuine one arrives, if it happens at
+			// all, only after this client's own confirmation, by which
+			// point the token above is gone and this case cannot match).
+			// Reject it outright: hold the tab this client is on, keep the
+			// token, arm no guard.
+			//
+			// Only while that tab still exists. Another client can destroy
+			// it inside the window, and holding a missing id resolves to
+			// index 0 rather than to anything anyone chose: then the
+			// daemon's tab is adopted, and the token has nothing left to
+			// wait for.
+			if fromTab != nil && tabsContainID(tabs, fromTab.ID) {
+				return fromTab.ID, nil
+			}
+			delete(m.requestedTab, key)
+		}
+	}
+	if fromTab == nil || fromTab.ID == newActiveTab {
+		return newActiveTab, nil // nothing moved, or this project's very first broadcast
+	}
+	// A vanished source tab (this client's own Ctrl+W, Move to project, or a
+	// dissolve/recovery that moved its last pane out) is not "switched away
+	// from" by another client — it is this client's own local action taking
+	// the tab away from under itself. Only arm when fromTab is still part of
+	// the broadcast's tab list for this project.
+	if !tabsContainID(tabs, fromTab.ID) {
+		return newActiveTab, nil
+	}
+	m.remoteSwitchAt = m.clock()
+	m.guardPaneID = tabInputPaneID(fromTab)
+	m.remoteFocusUnacked = true
+	m.setFlash("Tab switched by another client")
+	return newActiveTab, m.flashCmd()
+}
+
 // applyWorkspaceState rebuilds the TUI state from one daemon's broadcast.
 // dest names the destination that broadcast arrived on (empty = the local
 // daemon) and scopes the merge: a broadcast is the FULL state of ONE daemon,
@@ -5922,6 +6275,30 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]str
 	// emulators in one TUI, and publishing 15 would hand each pane three times
 	// the depth the budget allows.
 	m.setDestPaneCount(dest, len(state.Panes))
+
+	// Multi-client sync (§4.2): this destination's size master and attached-
+	// client count. Read the PREVIOUS master before overwriting it — becoming
+	// master is a TRANSITION, not a state, and the resize kick at the end of
+	// this function must fire once, on the broadcast that flips it, never on
+	// every later broadcast that merely reconfirms it.
+	//
+	// Recorded BEFORE the rebuild, not after it: every syncPaneMeta below
+	// copies isFollower(dest) onto its pane, and that flag decides which size
+	// the pane's VT takes (targetVTSize). Recording it afterwards would size
+	// every pane by the PREVIOUS broadcast's master — the first broadcast that
+	// makes this client a follower would still size its VTs to its own boxes.
+	var prevMaster string
+	if m.sizeMaster != nil {
+		prevMaster = m.sizeMaster[dest]
+	}
+	if m.sizeMaster == nil {
+		m.sizeMaster = make(map[string]string)
+	}
+	m.sizeMaster[dest] = state.SizeMaster
+	if m.clientCount == nil {
+		m.clientCount = make(map[string]int)
+	}
+	m.clientCount[dest] = state.Clients
 
 	paneMap := make(map[string]*PaneInfo)
 	for i := range state.Panes {
@@ -5991,8 +6368,29 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]str
 		proj.Offline = nil
 		tabs, projPaneIDs, projResizeCmds := m.rebuildTabs(info, state, existingTabs, existingPanes, paneMap, dest)
 		proj.tabs = tabs
-		proj.activeTab = indexOfTab(proj.tabs, info.ActiveTab)
-		if targetTab := tabAt(proj.tabs, proj.activeTab); fromTab != targetTab {
+		// Typing guard (spec §8.1), scoped to the ACTIVE project only: a
+		// background project's active tab moving under it is not something
+		// anyone is typing into right now. Called even when nothing moved (an
+		// ordinary echo, or an unrelated broadcast while a request is pending)
+		// — see applyTabMoveGuard's own comment for why the requestedTab token
+		// must be retired (or deliberately KEPT) on those paths too, not only
+		// inside a "moved" branch. ok (the project already existed) is what
+		// makes the token lookup meaningful; a brand new project has none.
+		// effectiveActiveTab may differ from info.ActiveTab: a rejected stale
+		// broadcast (pendingSwitch.from) holds the tab this client is on,
+		// while that tab still exists, instead of adopting the daemon's report.
+		effectiveActiveTab := info.ActiveTab
+		if info.ID == activeID && ok {
+			_, existedBefore := existingTabs[info.ActiveTab]
+			var cmd tea.Cmd
+			effectiveActiveTab, cmd = m.applyTabMoveGuard(dest, info.ID, info.ActiveTab, fromTab, proj.tabs, existedBefore)
+			if cmd != nil {
+				overlayResizeCmds = append(overlayResizeCmds, cmd)
+			}
+		}
+		proj.activeTab = indexOfTab(proj.tabs, effectiveActiveTab)
+		targetTab := tabAt(proj.tabs, proj.activeTab)
+		if fromTab != targetTab {
 			tabMoves = append(tabMoves, activeTabMove{from: fromTab, target: targetTab})
 		}
 		newPaneIDs = append(newPaneIDs, projPaneIDs...)
@@ -6020,6 +6418,31 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]str
 	// the merge because that is where m.projects becomes authoritative for this
 	// destination, and it self-skips when nothing changed.
 	m.cacheRemoteProjects(dest)
+
+	// The leading state.SizeMaster != "" guard matters on its own: without it,
+	// an empty m.clientID (never set — every real Model gets one from
+	// NewModel, but a bare Model literal in a test does not) would equal an
+	// empty state.SizeMaster ("no master on dest"), and losing a master would
+	// misread as this client becoming one.
+	if state.SizeMaster != "" && state.SizeMaster == m.clientID && prevMaster != state.SizeMaster {
+		// This client just became dest's size master. Every pane's last
+		// resize on dest was sent by whoever was master before (or by nobody,
+		// if there was none) — sizedOnce still reports "already sized" for
+		// sizes THIS client never sent, so diffResizes' diff would suppress
+		// the very sizes that just became authoritative.
+		//
+		// Clearing it is enough on its own, and calling resizeAllPanes() here
+		// as well — an earlier version of this did — is wrong, not merely
+		// redundant: diffResizes runs immediately after this function returns
+		// (the WorkspaceStateMsg arm in Update) and is scoped to this SAME
+		// dest, so with sizedOnce empty for it, every one of dest's panes
+		// fails the "already sized" check and rides that ONE
+		// sendDiffedResizes batch — exactly the same re-arm armReattachReset
+		// performs after a reattach. resizeAllPanes walks EVERY destination,
+		// so appending it here would also resize panes on other destinations
+		// this broadcast never mentioned.
+		m.clearSizedOnceForDest(dest)
+	}
 
 	// Dispose panes that did not survive reconciliation — both panes pruned
 	// from surviving tabs and every pane of tabs the daemon dropped. Without
@@ -6132,7 +6555,8 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]str
 // skipped rather than materialised as an empty tab.
 //
 // Returns the project's tabs, the pane IDs it created (the caller arms a
-// spinner per ID) and the overlay resize commands the caller must batch.
+// spinner per ID) and the commands the caller must batch: overlay resizes and
+// the layout writes this client owes (layoutsync.go).
 func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingTabs map[string]*TabModel, existingPanes map[string]*PaneModel, paneMap map[string]*PaneInfo, dest string) ([]*TabModel, []string, []tea.Cmd) {
 	var newPaneIDs []string
 	var overlayResizeCmds []tea.Cmd
@@ -6158,16 +6582,19 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 		}
 		// Reuse existing tab if possible (preserves layout tree).
 		tab, exists := existingTabs[tabInfo.ID]
+		restored := false
 		if exists && tab.templateLayoutPending && len(tabInfo.Layout) > 0 {
 			// Another client may have already saved the completed tree.
-			tab = m.restoreTabLayout(tab, tabInfo, paneMap, existingPanes)
+			tab = m.restoreTabLayout(tab, tabInfo, paneMap, existingPanes, dest)
+			restored = true
 		}
 		if !exists {
 			tab = NewTabModel(tabInfo.ID, tabInfo.Name)
+			tab.layoutRev = tabInfo.LayoutRev
 
 			// New tab that doesn't exist locally — try to restore layout from daemon.
 			if len(tabInfo.Layout) > 0 {
-				tab = m.restoreTabLayout(tab, tabInfo, paneMap, existingPanes)
+				tab = m.restoreTabLayout(tab, tabInfo, paneMap, existingPanes, dest)
 				tab.Dest = dest
 				// All non-overlay panes in a restored tab are new.
 				for _, pid := range tabInfo.Panes {
@@ -6206,6 +6633,19 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 			daemonPaneSet[pid] = true
 		}
 
+		// Layout sync (layoutsync.go): adopt a newer stored tree, or settle
+		// the previous broadcast's local placements. A template tab still
+		// waiting for its panes has no tree worth either; it takes the
+		// broadcast's revision as the base of the write that builds it.
+		lp := layoutPass{oldTree: map[string]bool{}}
+		switch {
+		case tab.templateLayoutPending:
+			tab.layoutRev = tabInfo.LayoutRev
+		case exists && !restored:
+			lp = m.syncTabLayout(tab, tabInfo, daemonPaneSet, paneMap, existingPanes, dest)
+			newPaneIDs = append(newPaneIDs, lp.created...)
+		}
+
 		// Prune panes the daemon removed.
 		if tab.Root != nil {
 			for id := range tab.Root.PaneIDs() {
@@ -6220,6 +6660,13 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 						tab.ExitFocus()
 					}
 					tab.RemovePane(id)
+					// A close THIS client confirmed is its user's change to
+					// store; any other prune waits for the requester's write.
+					if m.takeCloseRequest(dest, id) {
+						lp.send = true
+					} else {
+						tab.awaitGone(id)
+					}
 				}
 			}
 		}
@@ -6235,9 +6682,10 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 			treePaneIDs = tab.Root.PaneIDs()
 		}
 		// Set when a moved pane arrived while this client held a reservation
-		// in this tab; the placeholder prune below then spares it for this
-		// pass (see there).
-		sparedReservation := false
+		// in this tab, or when adoption just re-seated that reservation in a
+		// new tree; the placeholder prune below then spares it for this pass
+		// (see there).
+		sparedReservation := lp.reseated
 		for _, paneID := range tabInfo.Panes {
 			// Overlay panes are reconciled separately — never insert into the tree.
 			if isOverlayPane(paneMap, paneID) {
@@ -6249,7 +6697,7 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 				if info, ok := paneMap[paneID]; ok {
 					if leaf := tab.Root.FindLeaf(paneID); leaf != nil {
 						wasPending := leaf.Pane.Pending
-						syncPaneMeta(leaf.Pane, info, m.pluginWideCanvas(info.Type), m.pluginMinNativeCols(info.Type), m.pluginRestoresViaSession(info.Type))
+						syncPaneMeta(leaf.Pane, info, m.pluginWideCanvas(info.Type), m.pluginMinNativeCols(info.Type), m.pluginRestoresViaSession(info.Type), m.isFollower(dest))
 						// A deferred pane that just lazy-spawned (Pending→running,
 						// e.g. on tab switch): arm the restore indicator NOW so it
 						// covers the real boot, and enroll it for spinner ticks.
@@ -6291,8 +6739,13 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 			// skipped just before. Every client of this daemon holds every tab
 			// of it, so every client sees the same reuse and places the pane
 			// the same way.
+			//
+			// Except after ADOPTION: a pane this tab held that the adopted tree
+			// lacks (lp.oldTree) also reuses its model, and it did not move —
+			// it takes the ordinary arrival rule, and fills no reservation.
 			pane, ok := existingPanes[paneID]
-			migrated := ok
+			migrated := ok && !lp.oldTree[paneID]
+			fresh := !ok
 			info := paneMap[paneID]
 			if !ok {
 				pane = NewPaneModel(paneID, m.replayBufSize())
@@ -6316,7 +6769,7 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 				newPaneIDs = append(newPaneIDs, paneID)
 			}
 			if info != nil {
-				syncPaneMeta(pane, info, m.pluginWideCanvas(info.Type), m.pluginMinNativeCols(info.Type), m.pluginRestoresViaSession(info.Type))
+				syncPaneMeta(pane, info, m.pluginWideCanvas(info.Type), m.pluginMinNativeCols(info.Type), m.pluginRestoresViaSession(info.Type), m.isFollower(dest))
 			}
 
 			// Try to fill a pending split placeholder first.
@@ -6334,11 +6787,14 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 			if migrated && m.pendingSplit[tab.ID] != nil {
 				sparedReservation = true
 			}
-			if m.pendingSplit != nil && !migrated {
+			if m.pendingSplit != nil && fresh {
 				if placeholder, ok := m.pendingSplit[tab.ID]; ok {
 					placeholder.fill(pane)
 					tab.invalidateLeaves()
 					delete(m.pendingSplit, tab.ID)
+					// The pane this client asked for: its user's split, so
+					// this client — and only this one — stores the tree.
+					lp.send = true
 					// The pane LANDING is what retires a worktree create's
 					// prune exemption — not the daemon saying it succeeded.
 					// Dropping it on the success response instead would trust
@@ -6422,9 +6878,16 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 			if migrated && tab != m.activeTabModel() {
 				adoptMovedPane(tab, pane)
 			}
+			// Placed by this client alone, for an arrival nobody here asked
+			// for: the requester stores it (see layoutsync.go).
+			tab.awaitPane(paneID)
 		}
 
-		applyTemplateLayout(tab, tabInfo, paneMap)
+		if applyTemplateLayout(tab, tabInfo, paneMap) {
+			// The template's first real tree, built from the broadcast's
+			// revision (set above while the tab was pending).
+			lp.send = true
+		}
 
 		// Clean up any unfilled placeholders (e.g., rapid double-splits).
 		//
@@ -6451,9 +6914,20 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 		// way. That pane normally rides the very next broadcast; if it never
 		// comes, the next pass prunes as it always did.
 		tab.CreatingBranch = m.worktreeCreates[tab.ID]
-		if tab.Root != nil && tab.CreatingBranch == "" && !sparedReservation {
-			tab.Root.PrunePlaceholders()
-			tab.invalidateLeaves()
+		if tab.CreatingBranch == "" && !sparedReservation {
+			if tab.Root != nil {
+				tab.Root.PrunePlaceholders()
+				tab.invalidateLeaves()
+			}
+			// A reservation whose placeholder that prune detached is over: its
+			// pane is not coming into it. Left armed, it reports the tab busy
+			// for the rest of the session (tabLayoutBusy), the next fresh
+			// arrival fills a node no tree holds, and an adoption re-seats an
+			// empty slot nobody is waiting for.
+			if ph := m.pendingSplit[tab.ID]; ph != nil && !treeContains(tab.Root, ph) {
+				delete(m.pendingSplit, tab.ID)
+				tab.noteReservation("", 0, false)
+			}
 		}
 		if tab.Root != nil {
 			log.Printf("apply: tab %s panes reconciled (n=%d leaves)", tab.ID, len(tab.Leaves()))
@@ -6471,6 +6945,17 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 
 		m.finalizeTabPanes(tab)
 		log.Printf("apply: tab %s finalized", tab.ID)
+
+		// The daemon holds no usable tree for this tab (fresh, restored before
+		// any client described it, or unparseable): describe it, once — a
+		// dirty tab's write is already on its way.
+		if !tab.templateLayoutPending && tab.Root != nil && !tab.layoutDirty &&
+			tabInfo.LayoutRev == tab.layoutRev && storedLayout(tabInfo.Layout) == nil {
+			lp.send = true
+		}
+		if lp.send {
+			overlayResizeCmds = append(overlayResizeCmds, m.markLayoutChanged(dest, tab))
+		}
 		out = append(out, tab)
 	}
 
@@ -6478,8 +6963,14 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 }
 
 // restoreTabLayout rebuilds a tab's layout tree from serialized daemon state.
-func (m *Model) restoreTabLayout(tab *TabModel, tabInfo TabInfo, paneMap map[string]*PaneInfo, existingPanes map[string]*PaneModel) *TabModel {
+// The tree it builds IS the stored revision, so the tab holds that revision,
+// clean; panes the stored tree lacks are placed and awaited like any other
+// arrival nobody here asked for (layoutsync.go).
+func (m *Model) restoreTabLayout(tab *TabModel, tabInfo TabInfo, paneMap map[string]*PaneInfo, existingPanes map[string]*PaneModel, dest string) *TabModel {
 	tab.templateLayoutApplied, tab.templateLayoutPending = true, false
+	tab.layoutRev, tab.adoptNext = tabInfo.LayoutRev, false
+	tab.layoutDirty, tab.layoutSent, tab.layoutResend = false, nil, false
+	tab.clearAwaiting()
 	log.Printf("restoreLayout: tab %s %q with %d panes", tab.ID, tabInfo.Name, len(tabInfo.Panes))
 	tab.Name = tabInfo.Name
 	tab.Color = tabInfo.Color
@@ -6500,7 +6991,7 @@ func (m *Model) restoreTabLayout(tab *TabModel, tabInfo TabInfo, paneMap map[str
 			pane.resumeStart = time.Now()
 		}
 		if info, ok := paneMap[paneID]; ok {
-			syncPaneMeta(pane, info, m.pluginWideCanvas(info.Type), m.pluginMinNativeCols(info.Type), m.pluginRestoresViaSession(info.Type))
+			syncPaneMeta(pane, info, m.pluginWideCanvas(info.Type), m.pluginMinNativeCols(info.Type), m.pluginRestoresViaSession(info.Type), m.isFollower(dest))
 		}
 		paneModels[paneID] = pane
 	}
@@ -6535,6 +7026,7 @@ func (m *Model) restoreTabLayout(tab *TabModel, tabInfo TabInfo, paneMap map[str
 		} else {
 			splitForNewPane(tab, tab.Leaves(), pane)
 		}
+		tab.awaitPane(paneID)
 	}
 
 	m.finalizeTabPanes(tab)
@@ -6613,7 +7105,7 @@ func (m *Model) reconcileOverlayPane(
 			}
 			newPaneIDs = append(newPaneIDs, overlayInfo.ID)
 		}
-		syncPaneMeta(pane, overlayInfo, m.pluginWideCanvas(overlayInfo.Type), m.pluginMinNativeCols(overlayInfo.Type), m.pluginRestoresViaSession(overlayInfo.Type))
+		syncPaneMeta(pane, overlayInfo, m.pluginWideCanvas(overlayInfo.Type), m.pluginMinNativeCols(overlayInfo.Type), m.pluginRestoresViaSession(overlayInfo.Type), m.isFollower(tab.Dest))
 		tab.overlayPane = pane
 		// Show the overlay immediately when this TUI's Alt+G triggered its
 		// creation (pendingOverlayShow entry). On plain reattach, default hidden.
@@ -6625,7 +7117,7 @@ func (m *Model) reconcileOverlayPane(
 		}
 	default:
 		// Same overlay pane — refresh metadata only.
-		syncPaneMeta(tab.overlayPane, overlayInfo, m.pluginWideCanvas(overlayInfo.Type), m.pluginMinNativeCols(overlayInfo.Type), m.pluginRestoresViaSession(overlayInfo.Type))
+		syncPaneMeta(tab.overlayPane, overlayInfo, m.pluginWideCanvas(overlayInfo.Type), m.pluginMinNativeCols(overlayInfo.Type), m.pluginRestoresViaSession(overlayInfo.Type), m.isFollower(tab.Dest))
 	}
 
 	return newPaneIDs, false, nil
@@ -6686,6 +7178,56 @@ func (m *Model) resizeTabs() {
 		tab.SetCanvas(m.paneAreaWidth(), tabH)
 		tab.SetChrome(m.projectSidebarWidth())
 		tab.Resize(m.paneAreaWidth(), tabH)
+	}
+}
+
+// applyPaneSizes records a daemon's pane_sizes frame on its panes and resizes
+// every follower pane's VT to match, at once (spec §4.1, §5.1). Scoped to
+// msg.dest: pane ids are only unique within one daemon. An entry older than
+// the size a pane already holds is ignored (adoptDaemonSize). A pane that is
+// not a follower records the size too, which keeps its sequence number
+// current, but its VT keeps following its own box: the daemon sends this
+// frame only to non-masters, so a non-follower receiving it is a client with
+// no master to follow (or one the next broadcast is about to demote, and
+// that broadcast resizes it). ResizeVT is a no-op on an unchanged size and
+// bumps contentGen on a changed one, which is what marks the pane dirty for
+// its render cache.
+func (m *Model) applyPaneSizes(msg paneSizesMsg) {
+	// The tab rides along for its canvas: targetVTSize falls back to
+	// paneVTSize for a size of 0x0, and a wide-canvas pane needs the canvas
+	// there to come out the same as the resize pass would make it.
+	type located struct {
+		pane *PaneModel
+		tab  *TabModel
+	}
+	byID := make(map[string]located)
+	for _, proj := range m.projects {
+		if proj.Dest != msg.dest {
+			continue
+		}
+		for _, tab := range proj.tabs {
+			if tab.Root != nil {
+				for _, p := range tab.Leaves() {
+					byID[p.ID] = located{p, tab}
+				}
+			}
+			if tab.overlayPane != nil {
+				byID[tab.overlayPane.ID] = located{tab.overlayPane, tab}
+			}
+		}
+	}
+	for _, s := range msg.sizes {
+		at, ok := byID[s.PaneID]
+		if !ok {
+			continue
+		}
+		p := at.pane
+		if !p.adoptDaemonSize(int(s.Cols), int(s.Rows), s.SizeSeq) {
+			continue
+		}
+		if p.follower {
+			p.ResizeVT(p.targetVTSize(p.Width, p.Height, p.NativeW, at.tab.CanvasW, at.tab.CanvasH))
+		}
 	}
 }
 
@@ -6759,6 +7301,20 @@ func (m *Model) switchTab(idx int) tea.Cmd {
 	from := m.activeTabModel()
 	tabID, dest := target.ID, target.Dest
 	m.setActiveTabIdx(idx)
+	// Typing guard (spec §8.1): this client asked for tabID, so the broadcast
+	// that lands it must not be mistaken for another client's switch. Recorded
+	// against the CURRENT project — target and its project share one Dest, so
+	// this is the same key applyWorkspaceState looks up. fromID lets a
+	// broadcast still describing the PRE-switch state (in flight when this
+	// ran) be recognised as stale rather than adopted as a switch back — see
+	// requestedSwitchStaleWindow.
+	if proj := m.cur(); proj != nil {
+		fromID := ""
+		if from != nil {
+			fromID = from.ID
+		}
+		m.recordRequestedTab(dest, proj.ID, tabID, fromID)
+	}
 	cmds := []tea.Cmd{func() tea.Msg {
 		msg, _ := ipc.NewMessage(ipc.MsgSwitchTab, ipc.SwitchTabPayload{
 			TabID: tabID,
@@ -6776,6 +7332,85 @@ func (m *Model) switchTab(idx int) tea.Cmd {
 		return cmds[0]
 	}
 	return tea.Batch(cmds...)
+}
+
+// remoteSwitchGuardWindow is the typing guard's window (spec §8.1, table in
+// global-constraints.md): key-originated input arriving this soon after a
+// REMOTE active-tab change still goes to the pane the user was looking at
+// before it, not the pane the switch made active.
+const remoteSwitchGuardWindow = 250 * time.Millisecond
+
+// requestedSwitchStaleWindow bounds how long a broadcast naming the tab a
+// pending LOCAL switch moved AWAY FROM (pendingSwitch.from) is rejected as a
+// stale echo of the pre-switch state, rather than adopted as a genuine switch
+// back to it. review round 2: a broadcast already in flight when switchTab
+// runs still names the OLD active tab; without this bound, that broadcast is
+// indistinguishable from another client genuinely switching back, and the
+// tab visibly jumped to the old one for the width of one round trip before
+// the requester's own echo corrected it. Past the bound the local switch is
+// assumed lost (never reached the daemon, or was overtaken) and a broadcast
+// naming `from` is adopted normally, guard included.
+const requestedSwitchStaleWindow = 2 * time.Second
+
+// pendingTabCreateToken marks pendingSwitch.target while this client's own
+// create_tab is in flight for that project. Unlike switchTab, sendCreateTab
+// has no id to record ahead of time — the daemon mints the new tab's id — so
+// there is nothing to compare the eventual broadcast's ActiveTab against by
+// equality. The token can never collide with a real tab id (daemon-issued ids
+// never carry a NUL byte), and applyTabMoveGuard treats it as a match for
+// whatever tab the daemon makes active next.
+const pendingTabCreateToken = "\x00pending-create"
+
+// pendingSwitch is requestedTab's value — see that field's comment for the
+// decisions it drives.
+type pendingSwitch struct {
+	// target is the tab id this client asked for (switchTab), or
+	// pendingTabCreateToken when the daemon has not minted one yet
+	// (sendCreateTab).
+	target string
+	// from is the tab this project was showing right before the request —
+	// "" for a create, which never moves this client's own active tab ahead
+	// of the daemon's answer, so there is no "pre-request state" a broadcast
+	// could stale-echo. See requestedSwitchStaleWindow.
+	from string
+	// at is m.clock() when the request was recorded — requestedSwitchStaleWindow
+	// is measured from here.
+	at time.Time
+}
+
+// requestedTabKey identifies one project on one destination for
+// Model.requestedTab. Dest alone is not unique (each daemon mints its own
+// project ids independently) and a project id alone is not unique across
+// daemons either — the same (Dest, ID) pairing projectgroups.go uses for
+// exactly this reason.
+func requestedTabKey(dest, projectID string) string {
+	return dest + "\x00" + projectID
+}
+
+// recordRequestedTab notes that THIS client is the one asking for target to
+// become the active tab of (dest, projectID), moving there FROM the tab this
+// project was showing before (from — "" when not applicable, e.g. a create).
+// Called by switchTab/switchTabBy with the tab they are switching TO and the
+// tab they are leaving, and by sendCreateTab with pendingTabCreateToken and
+// no from. See requestedTab's field comment.
+func (m *Model) recordRequestedTab(dest, projectID, target, from string) {
+	if m.requestedTab == nil {
+		m.requestedTab = make(map[string]pendingSwitch)
+	}
+	m.requestedTab[requestedTabKey(dest, projectID)] = pendingSwitch{target: target, from: from, at: m.clock()}
+}
+
+// clock returns the typing guard's current time: m.now when the Model has
+// one (every production Model, via NewModel), else the real wall clock. The
+// fallback is what keeps the ~46 Model literals other tests build directly
+// safe to pass through applyWorkspaceState — none of them care about this
+// feature, and a nil-func-call panic on an unrelated broadcast would be a
+// surprising way to learn they now do.
+func (m Model) clock() time.Time {
+	if m.now != nil {
+		return m.now()
+	}
+	return time.Now()
 }
 
 // eagerTabMarker is a single-width BMP glyph (deliberately not an emoji — wide
@@ -7158,6 +7793,19 @@ func (m Model) renderStatusBar() string {
 	if m.devMode {
 		right = "[dev] " + right
 	}
+	// Multi-client sync (§4.3): the role marker sits beside [dev], in the same
+	// style, because it says something about how THIS process relates to the
+	// workspace rather than about any one pane or project. Shown only once a
+	// second client exists — with one client the question "who is the master"
+	// has exactly one uninteresting answer, and showing it on every ordinary
+	// single-client session would be noise nobody asked for. See isFollower.
+	if dest := m.activeDest(); m.clientCount[dest] >= 2 {
+		if m.isFollower(dest) {
+			right = "[follower] " + right
+		} else {
+			right = "[master] " + right
+		}
+	}
 	// Placed after [dev] so it renders leftmost of the two, i.e. first in
 	// reading order: which MACHINE you are driving outranks which build you
 	// are running. Without it the status bar is identical whether the panes
@@ -7301,11 +7949,12 @@ func (m *Model) attachAllDests() tea.Cmd {
 		if m.attached[dest] {
 			continue
 		}
-		if err := m.sendForDest(dest, m.attachMessage(dest)); err != nil {
+		if err := m.sendForDest(dest, m.attachMessage(dest, m.attachedOnce[dest])); err != nil {
 			log.Printf("attach to %q failed, retrying on the next resize: %v", dest, err)
 			continue
 		}
 		m.attached[dest] = true
+		m.markAttachedOnce(dest)
 		newlyAttached[dest] = true
 		// Batched per destination so each daemon is asked about its OWN
 		// registry; see requestPluginListFor.
@@ -7364,7 +8013,12 @@ func (m *Model) attachAllDests() tea.Cmd {
 
 // attachMessage builds the MsgAttach describing this client's geometry for one
 // destination.
-func (m Model) attachMessage(dest string) *ipc.Message {
+//
+// reattach is m.attachedOnce[dest] at the call site: true once this process
+// has attached to dest before, whichever path sends it. A daemon that just
+// restarted keeps the previous master's slot for its reconnecting TUIs, and
+// yields it to a first attach from a new process that is alone there.
+func (m Model) attachMessage(dest string, reattach bool) *ipc.Message {
 	// Subtract chrome (tab bar + status bar), the project sidebar (if open),
 	// then pane border (2) — the same reservation resizeTabs applies, so the
 	// very first spawned pane isn't sized wider than what's about to be
@@ -7393,9 +8047,11 @@ func (m Model) attachMessage(dest string) *ipc.Message {
 	// Best-effort; if Getwd fails the daemon falls back to its own CWD.
 	localCWD, _ := os.Getwd()
 	msg, _ := ipc.NewMessage(ipc.MsgAttach, ipc.AttachPayload{
-		Cols: cols,
-		Rows: rows,
-		CWD:  attachCWD(dest, localCWD),
+		Cols:     cols,
+		Rows:     rows,
+		CWD:      attachCWD(dest, localCWD),
+		ClientID: m.clientID,
+		Reattach: reattach,
 	})
 	return msg
 }
@@ -7419,9 +8075,14 @@ func (m Model) attachMessage(dest string) *ipc.Message {
 // truth here the sweep destroys an overlay the user is looking at five minutes
 // after a link blip. attachAllDests never runs for this flow — finishReconnect
 // sets m.attached[dest] — so its copy of this report does not cover it.
+//
+// The Reattach flag is read HERE, on the Update goroutine, not inside the
+// command: the caller marks dest in attachedOnce right after this returns, and
+// the command runs later on its own goroutine.
 func (m Model) attachToDest(dest string) tea.Cmd {
+	reattach := m.attachedOnce[dest]
 	attachCmd := func() tea.Msg {
-		m.sendForDest(dest, m.attachMessage(dest))
+		m.sendForDest(dest, m.attachMessage(dest, reattach))
 		return nil
 	}
 	return tea.Batch(attachCmd, m.requestPluginListFor(dest), m.overlayTruthDestCmd(dest),
@@ -7429,6 +8090,15 @@ func (m Model) attachToDest(dest string) tea.Cmd {
 		// already know whether this daemon can host a container, rather than
 		// hiding the row until the second.
 		m.requestSandboxCap(dest))
+}
+
+// markAttachedOnce records that this process has sent dest an attach. Called
+// on the Update goroutine by both attach paths — see attachedOnce.
+func (m *Model) markAttachedOnce(dest string) {
+	if m.attachedOnce == nil {
+		m.attachedOnce = map[string]bool{}
+	}
+	m.attachedOnce[dest] = true
 }
 
 // listenContinueMsg signals the TUI to keep listening for daemon messages.
@@ -7520,6 +8190,16 @@ func (m Model) listenForMessages() tea.Cmd {
 			log.Printf("ipc recv: set_active_pane %s", payload.PaneID)
 			return setActivePaneMsg{PaneID: payload.PaneID}
 
+		case ipc.MsgPaneSizes:
+			var payload ipc.PaneSizesPayload
+			if err := msg.DecodePayload(&payload); err != nil {
+				log.Printf("decode pane_sizes: %v", err)
+				return listenContinueMsg{}
+			}
+			// Origin, like workspace_state's Dest: sizes name one daemon's
+			// panes, and it is not on the wire.
+			return paneSizesMsg{dest: msg.Origin, sizes: payload.Panes}
+
 		case ipc.MsgCloseTUI:
 			log.Print("ipc recv: close_tui")
 			return tea.QuitMsg{}
@@ -7534,6 +8214,22 @@ func (m Model) listenForMessages() tea.Cmd {
 			msg.DecodePayload(&payload)
 			log.Printf("ipc recv: pane_event %s %s %s", payload.Type, payload.PaneID, payload.Title)
 			return paneEventMsg(payload)
+
+		case ipc.MsgEventDismissed:
+			var payload ipc.EventDismissedPayload
+			if err := msg.DecodePayload(&payload); err != nil {
+				log.Printf("decode event_dismissed: %v", err)
+				return listenContinueMsg{}
+			}
+			return eventDismissedMsg{dest: msg.Origin, eventID: payload.EventID}
+
+		case ipc.MsgPaneSeen:
+			var payload ipc.PaneSeenPayload
+			if err := msg.DecodePayload(&payload); err != nil {
+				log.Printf("decode pane_seen: %v", err)
+				return listenContinueMsg{}
+			}
+			return paneSeenMsg{dest: msg.Origin, paneID: payload.PaneID}
 
 		case ipc.MsgResourceReportResp:
 			var payload ipc.ResourceReportRespPayload
@@ -7739,6 +8435,16 @@ func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
 	if ap, ok := raw["active_project"].(string); ok {
 		state.ActiveProject = ap
 	}
+	// Multi-client sync: size_master ("" = no master) and clients (attached
+	// count, bridges excluded) — see buildWorkspaceState on the daemon side.
+	// Absent on an older daemon, which leaves both at their zero values, and
+	// isFollower already treats "" as "not a follower".
+	if sm, ok := raw["size_master"].(string); ok {
+		state.SizeMaster = sm
+	}
+	if c, ok := raw["clients"].(float64); ok {
+		state.Clients = int(c)
+	}
 	if projects, ok := raw["projects"].([]any); ok {
 		for _, p := range projects {
 			pm, ok := p.(map[string]any)
@@ -7805,6 +8511,9 @@ func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
 					if data, err := json.Marshal(layout); err == nil {
 						ti.Layout = data
 					}
+				}
+				if n, ok := tm["layout_rev"].(float64); ok && n >= 0 {
+					ti.LayoutRev = uint64(n)
 				}
 				state.Tabs = append(state.Tabs, ti)
 			}
@@ -7920,6 +8629,9 @@ func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
 				if n, ok := pm["rows"].(float64); ok && n >= 0 && n <= math.MaxUint16 {
 					pi.Rows = uint16(n)
 				}
+				if n, ok := pm["size_seq"].(float64); ok && n >= 0 {
+					pi.SizeSeq = uint64(n)
+				}
 				state.Panes = append(state.Panes, pi)
 			}
 		}
@@ -7960,6 +8672,7 @@ func (m *Model) splitPane(dir SplitDir) tea.Cmd {
 		m.pendingSplit = make(map[string]*LayoutNode)
 	}
 	m.pendingSplit[tab.ID] = placeholder
+	tab.noteReservation(pane.ID, dir, false)
 	// The same node-local label the dialog path records. The payload below
 	// carries no Type and the daemon normalises an empty one to terminal, so
 	// this is what the pane will be rather than a guess about it.
@@ -8175,7 +8888,7 @@ func (m Model) forwardInputBytes(data []byte) tea.Cmd {
 	if pane == nil {
 		return nil
 	}
-	m.enqueueInput(pane.ID, data)
+	m.enqueueKeyInput(pane.ID, data)
 	return nil
 }
 
@@ -8241,6 +8954,64 @@ func (m Model) enqueueInput(paneID string, data []byte) {
 		return
 	}
 	m.inputCh <- paneInput{dest: dest, paneID: paneID, data: data}
+}
+
+// enqueueKeyInput is the entry point for KEY-originated input — typed
+// keystrokes (forwardInputBytes) and both paste paths (sendClipboardToPane,
+// sendClipboardToPaneID). Paste counts as a key here (spec §8.1): it is the
+// same user action the guard protects, delivered as one chunk instead of one
+// byte at a time. Mouse-originated input (a wheel notch, sendInputToPane)
+// must never call this — it goes straight to enqueueInput, because a remote
+// tab switch says nothing about where the pointer is now.
+//
+// The guard only RETARGETS the pane id; dest is still resolved by
+// enqueueInput's own destOfPane(paneID) for whichever id wins here, exactly
+// as today.
+func (m Model) enqueueKeyInput(paneID string, data []byte) {
+	m.enqueueInput(m.guardedInputTarget(paneID), data)
+}
+
+// guardedInputTarget applies the typing guard (spec §8.1): within
+// remoteSwitchGuardWindow of a remote tab switch, key-originated input still
+// goes to guardPaneID — the pane the user was mid-keystroke in — rather than
+// wherever the remote switch moved focus. It falls through to paneID once the
+// window has elapsed or the guarded pane no longer exists (closed, moved,
+// destroyed — there is nowhere left to redirect to).
+func (m Model) guardedInputTarget(paneID string) string {
+	if m.guardPaneID == "" {
+		return paneID
+	}
+	if m.clock().Sub(m.remoteSwitchAt) >= remoteSwitchGuardWindow {
+		return paneID
+	}
+	if pane, _, _ := m.findPaneAndTab(m.guardPaneID); pane == nil {
+		return paneID
+	}
+	return m.guardPaneID
+}
+
+// guardedInputPane resolves the PaneModel a keystroke or paste should
+// actually reach — guardedInputTarget's id, looked up live — for callers that
+// must act on the pane OBJECT itself rather than just its id: ResetScroll,
+// answerBlockedByInput, interruptWorkingPane, and pastePayload's bracketed-
+// paste encoding. Encoding or answering against the PRE-redirect pane while
+// the bytes themselves go to the guarded one credits and decodes for the
+// wrong pane — an unbracketed multi-line paste sent to a plain shell, say,
+// because it was encoded against a claude-code pane's bracketed-paste mode.
+// Returns from unchanged (including nil) when there is nothing to redirect
+// to, so callers can keep using their existing nil check.
+func (m Model) guardedInputPane(from *PaneModel) *PaneModel {
+	if from == nil {
+		return nil
+	}
+	targetID := m.guardedInputTarget(from.ID)
+	if targetID == from.ID {
+		return from
+	}
+	if pane, _, _ := m.findPaneAndTab(targetID); pane != nil {
+		return pane
+	}
+	return from
 }
 
 // sendPaneInput marshals and sends one MsgPaneInput frame to an ALREADY-RESOLVED
@@ -8875,14 +9646,19 @@ func (m Model) sendClipboardToPane(text string) {
 	if tab == nil {
 		return
 	}
-	pane := tab.ActivePaneModel()
+	// guardedInputPane, not ActivePaneModel directly: within the typing guard
+	// window (spec §8.1) the paste is headed at guardPaneID, and encoding
+	// against the wrong pane's bracketed-paste mode (pastePayload) sends an
+	// unbracketed multi-line paste to a plain shell, or a bracketed one to an
+	// app that never asked for it.
+	pane := m.guardedInputPane(tab.ActivePaneModel())
 	if pane == nil {
 		return
 	}
 	// Pasted text is the user acting on the pane, so it answers a parked one
 	// exactly as a typed key does.
 	pane.answerBlockedByInput()
-	m.enqueueInput(pane.ID, pastePayload(pane, text))
+	m.enqueueKeyInput(pane.ID, pastePayload(pane, text))
 }
 
 // sendClipboardToPaneID pastes into a NAMED pane rather than whichever is
@@ -8898,16 +9674,19 @@ func (m Model) sendClipboardToPaneID(paneID, text string) {
 	if text == "" || paneID == "" {
 		return
 	}
-	pane, _, _ := m.findPaneAndTab(paneID)
-	if pane == nil {
+	bound, _, _ := m.findPaneAndTab(paneID)
+	if bound == nil {
 		logger.Debug("paste: pane %s vanished during the clipboard read — dropping", paneID)
 		return
 	}
 	// The target was bound when the user asked to paste, so it need not be the
 	// active pane any more — which is exactly why the answer is keyed to input
-	// reaching a pane rather than to which pane holds focus.
+	// reaching a pane rather than to which pane holds focus. guardedInputPane
+	// applies the SAME typing guard on top: the bound pane can itself be the
+	// one a remote switch just moved away from.
+	pane := m.guardedInputPane(bound)
 	pane.answerBlockedByInput()
-	m.enqueueInput(paneID, pastePayload(pane, text))
+	m.enqueueKeyInput(pane.ID, pastePayload(pane, text))
 }
 
 func keyToBytes(keyMsg tea.KeyPressMsg) []byte {
@@ -9022,10 +9801,11 @@ func keyToBytes(keyMsg tea.KeyPressMsg) []byte {
 // minTermWidth x minTermHeight and renders no panes at all, so a pane size
 // derived from a smaller geometry describes nothing that is on screen.
 //
-// It gates EVERY MsgResizePane this client produces — resizeAllPanes,
-// diffResizes and overlayResizeCmd — and it has to sit at those fan-outs rather
-// than further down, because by the time a size reaches the wire the degenerate
-// case is indistinguishable from a legal one: paneVTSize floors both dimensions
+// It gates every pane resize this client produces — resizeAllPanes,
+// diffResizes and overlayResizeCmd, batched into MsgResizePanes — and it has
+// to sit at those fan-outs rather than further down, because by the time a
+// size reaches the wire the degenerate case is indistinguishable from a
+// legal one: paneVTSize floors both dimensions
 // at 1 on purpose, since a genuinely narrow SPLIT pane needs that floor. A
 // client started with no console attached (`quil.exe --version` from a
 // non-interactive shell) is reported by Bubble Tea as 1x1, and the fan-out then
@@ -9044,35 +9824,126 @@ func (m *Model) terminalPaintable() bool {
 	return m.width >= minTermWidth && m.height >= minTermHeight
 }
 
+// clientGeometryCmd reports this client's own RAW window size to every
+// connected destination (§3.5's MsgClientGeometry) — 0x0 when
+// !terminalPaintable(), matching attachMessage's own zero-below-the-floor
+// rule, and the true m.width/m.height otherwise, never a pane or a rect. It
+// keeps a destination's master-eligibility test (and clientSize, the default
+// size for a new pane) current between broadcasts, in particular a MASTER
+// whose window shrinks below the paintable floor: that daemon must see this
+// arrive so it can hand off at once, per D4/Review-Focus-1.
+//
+// Connections are resolved HERE, on the Update goroutine — Router.Conns()
+// walks its own lock, so this is not required for safety, but every other
+// "resolve destinations, then send inside the Cmd" site in this file does it
+// this way, and a fire-and-forget geometry report is not the place to invent
+// a second convention.
+func (m Model) clientGeometryCmd() tea.Cmd {
+	cols, rows := m.width, m.height
+	if !m.terminalPaintable() {
+		cols, rows = 0, 0
+	}
+	var conns []Client
+	if r, ok := m.client.(*Router); ok {
+		conns = r.Conns()
+	} else if m.client != nil {
+		conns = []Client{m.client}
+	}
+	return func() tea.Msg {
+		msg, err := ipc.NewMessage(ipc.MsgClientGeometry, ipc.ClientGeometryPayload{Cols: cols, Rows: rows})
+		if err != nil {
+			return nil
+		}
+		for _, c := range conns {
+			if c == nil {
+				continue
+			}
+			if err := c.Send(msg); err != nil {
+				log.Printf("client_geometry: send: %v", err)
+			}
+		}
+		return nil
+	}
+}
+
+// sendTakeControl asks dest's daemon to make this client the size master at
+// once (D6). Fire-and-forget: MsgTakeControl carries no payload, and the
+// daemon either promotes an eligible, attached sender or logs and ignores an
+// ineligible one — there is nothing for the client to wait on, and the next
+// broadcast is what tells it whether the request took.
+func (m Model) sendTakeControl(dest string) tea.Cmd {
+	return func() tea.Msg {
+		msg, err := ipc.NewMessage(ipc.MsgTakeControl, nil)
+		if err != nil {
+			return nil
+		}
+		if err := m.sendForDest(dest, msg); err != nil {
+			log.Printf("take control: send: %v", err)
+		}
+		return nil
+	}
+}
+
 // resizeAllPanes walks the projects rather than allTabs() so each pane's
 // message can carry its own daemon: this is a broadcast over EVERY project, so
 // the active dest would be the right answer for at most one of them.
+//
+// Every destination's panes are batched into ONE MsgResizePanes frame rather
+// than one MsgResizePane per pane: a window resize or a split-drag release
+// across dozens of panes must not put one must-deliver frame per pane on a
+// follower's 64-slot queue (spec §4.1's "at most one frame per applied resize
+// per follower" bound assumes the master itself never sent more than one
+// batch to begin with).
+//
+// A FOLLOWER destination sends nothing at all — see isFollower. The master
+// already owns every pane's size there, and this client's own idea of what
+// size a pane should be is stale by construction once someone else is master.
 func (m Model) resizeAllPanes() tea.Cmd {
 	if !m.terminalPaintable() {
 		return nil // see terminalPaintable
 	}
-	return func() tea.Msg {
-		for _, proj := range m.projects {
-			for _, tab := range proj.tabs {
-				if tab.Root == nil {
-					continue
-				}
-				for _, pane := range tab.Leaves() {
-					// paneVTSize keeps the PTY in lockstep with the VT: rect
-					// size for normal panes, tab canvas for wide-canvas panes.
-					// The daemon drops exact duplicates (same-size guard).
-					// pane.NativeW comes from the same resize pass that sized
-					// the VT, so the mode this reproduces cannot disagree with
-					// the one already applied.
-					cols, rows := paneVTSize(pane.WideCanvas, pane.MinNativeCols, pane.Width, pane.Height, pane.NativeW, tab.CanvasW, tab.CanvasH)
-					msg, _ := ipc.NewMessage(ipc.MsgResizePane, ipc.ResizePanePayload{
-						PaneID: pane.ID,
-						Cols:   uint16(cols),
-						Rows:   uint16(rows),
-					})
-					m.sendForDest(proj.Dest, msg)
-				}
+	// Computed HERE, on the Update goroutine, and handed to the closure as a
+	// plain local map — never read live from inside the closure. Every
+	// tea.Cmd Bubble Tea returns runs on its OWN goroutine, concurrently with
+	// whatever Update call comes next, and m.sizeMaster is a map MUTATED IN
+	// PLACE by applyWorkspaceState (m.sizeMaster[dest] = state.SizeMaster),
+	// never reassigned wholesale — so a later isFollower read from inside the
+	// closure races that write. Go's runtime treats a concurrent map
+	// read/write as a fatal error, not merely a -race finding: it can crash
+	// the TUI outright. batches is allocated fresh by this call and shared
+	// with nobody, so the closure reading it from another goroutine is safe.
+	batches := make(map[string][]ipc.ResizePanePayload)
+	for _, proj := range m.projects {
+		if m.isFollower(proj.Dest) {
+			continue
+		}
+		for _, tab := range proj.tabs {
+			if tab.Root == nil {
+				continue
 			}
+			for _, pane := range tab.Leaves() {
+				// paneVTSize keeps the PTY in lockstep with the VT: rect
+				// size for normal panes, tab canvas for wide-canvas panes.
+				// The daemon drops exact duplicates (same-size guard).
+				// pane.NativeW comes from the same resize pass that sized
+				// the VT, so the mode this reproduces cannot disagree with
+				// the one already applied.
+				cols, rows := paneVTSize(pane.WideCanvas, pane.MinNativeCols, pane.Width, pane.Height, pane.NativeW, tab.CanvasW, tab.CanvasH)
+				batches[proj.Dest] = append(batches[proj.Dest], ipc.ResizePanePayload{
+					PaneID: pane.ID,
+					Cols:   uint16(cols),
+					Rows:   uint16(rows),
+				})
+			}
+		}
+	}
+	return func() tea.Msg {
+		for dest, panes := range batches {
+			msg, err := ipc.NewMessage(ipc.MsgResizePanes, ipc.ResizePanesPayload{Panes: panes})
+			if err != nil {
+				continue
+			}
+			m.sendForDest(dest, msg)
 		}
 		return nil
 	}
@@ -9235,14 +10106,15 @@ func (m Model) toggleActivePaneEager() tea.Cmd {
 	}
 }
 
-// layoutSend and resizeSend are one decided frame each. The diff that produces
-// them runs on the Update goroutine and the command only ships the result —
-// the walk reads m.projects, which Update rebuilds on every broadcast, so
-// deciding inside the command would read a list that is being replaced.
+// layoutSend and resizeSend are one decided frame each. The decision runs on
+// the Update goroutine and the command only ships the result — it reads
+// m.projects and the tab trees, which Update rebuilds on every broadcast, so
+// deciding inside the command would read state that is being replaced.
 type layoutSend struct {
-	dest  string
-	tabID string
-	data  json.RawMessage
+	dest    string
+	tabID   string
+	data    json.RawMessage
+	baseRev uint64 // the revision the tree was built on (layoutsync.go)
 }
 
 type resizeSend struct {
@@ -9252,78 +10124,24 @@ type resizeSend struct {
 	rows   uint16
 }
 
-// layoutAgrees reports whether the daemon's stored layout for a tab already
-// describes the tree we hold.
-//
-// The comparison is STRUCTURAL, and that is not a style preference. The daemon
-// stores MarshalLayout's bytes — a struct, so Go emits its fields in
-// declaration order — but parseWorkspaceState decodes the whole broadcast into
-// map[string]any and re-marshals the layout sub-map, and Go sorts map keys
-// alphabetically. For any node with more than one key the two encodings differ
-// for the identical tree, so a byte comparison reports "changed" forever on
-// every tab containing a split, while still matching single-leaf tabs. That
-// asymmetry is invisible in a workspace of single-pane tabs, which is exactly
-// what the crash was reported from.
-//
-// Empty means the daemon holds nothing for this tab (fresh, or restored before
-// any client described it) — the caller must send, or the arrangement is never
-// persisted.
-func layoutAgrees(stored json.RawMessage, root *LayoutNode) bool {
-	if len(stored) == 0 {
-		return false
-	}
-	theirs, err := UnmarshalLayout(stored)
-	if err != nil {
-		return false
-	}
-	return reflect.DeepEqual(theirs, SerializeLayout(root))
-}
-
-// diffLayouts decides which tabs need their layout pushed after a broadcast.
-//
-// Scoped to the broadcast's OWN destination: a broadcast is the full state of
-// one daemon, so it says nothing about another daemon's tabs and cannot be
-// diffed against them. Before this scoping, any daemon's broadcast re-sent
-// every daemon's layouts.
-func (m *Model) diffLayouts(state WorkspaceStateMsg) []layoutSend {
-	stored := make(map[string]json.RawMessage, len(state.Tabs))
-	for _, ti := range state.Tabs {
-		stored[ti.ID] = ti.Layout
-	}
-	// A broadcast whose dest matches no project means every layout and every
-	// resize below is silently skipped, and the failure has no other symptom:
-	// splits revert on restart, panes keep a stale PTY width, and nothing logs.
-	// The invariant holds structurally today — ProjectModel.Dest is only ever
-	// assigned from a broadcast's own dest — so this line exists to make a
-	// future break greppable rather than a multi-hour hunt.
-	if len(m.projects) > 0 && !m.hasProjectForDest(state.Dest) {
-		log.Printf("apply: broadcast dest %q matches no project — no layout or "+
-			"resize will be sent for it", state.Dest)
-	}
-
-	var out []layoutSend
-	for _, proj := range m.projects {
-		if proj.Dest != state.Dest {
-			continue
-		}
-		for _, tab := range proj.tabs {
-			if tab.templateLayoutPending || tab.Root == nil || layoutAgrees(stored[tab.ID], tab.Root) {
-				continue
-			}
-			data, err := MarshalLayout(tab.Root)
-			if err != nil {
-				continue
-			}
-			out = append(out, layoutSend{dest: proj.Dest, tabID: tab.ID, data: data})
-		}
-	}
-	return out
-}
-
 // sizedKey scopes a sizedOnce entry to its owning destination. NUL separates
 // the halves because it cannot occur in either a dest or a pane id, so no pair
 // of distinct inputs can collide on one key.
 func sizedKey(dest, paneID string) string { return dest + "\x00" + paneID }
+
+// clearSizedOnceForDest drops every sizedOnce entry recorded for dest — used
+// when this client becomes dest's size master (applyWorkspaceState), so the
+// first-resize kick resizeAllPanes/diffResizes rely on is owed again for
+// every one of dest's panes, exactly as a reattach re-arms it
+// (armReattachReset).
+func (m *Model) clearSizedOnceForDest(dest string) {
+	prefix := dest + "\x00"
+	for key := range m.sizedOnce {
+		if strings.HasPrefix(key, prefix) {
+			delete(m.sizedOnce, key)
+		}
+	}
+}
 
 // hasProjectForDest reports whether any project belongs to dest.
 func (m *Model) hasProjectForDest(dest string) bool {
@@ -9338,9 +10156,29 @@ func (m *Model) hasProjectForDest(dest string) bool {
 // diffResizes decides which panes need a resize pushed after a broadcast.
 // See Model.sizedOnce for why the first send per pane is never suppressed.
 func (m *Model) diffResizes(state WorkspaceStateMsg) []resizeSend {
+	// A broadcast whose dest matches no project means every resize below is
+	// silently skipped, and the failure has no other symptom: panes keep a
+	// stale PTY width, and nothing logs. The invariant holds structurally
+	// today — ProjectModel.Dest is only ever assigned from a broadcast's own
+	// dest — so this line exists to make a future break greppable rather than
+	// a multi-hour hunt.
+	if len(m.projects) > 0 && !m.hasProjectForDest(state.Dest) {
+		log.Printf("apply: broadcast dest %q matches no project — no resize "+
+			"will be sent for it", state.Dest)
+	}
 	// Ahead of every sizedOnce write, so the first-resize kick each pane is
 	// owed survives until the terminal is paintable again. See terminalPaintable.
 	if !m.terminalPaintable() {
+		return nil
+	}
+	// A follower sends nothing for this destination, and — unlike the pending
+	// branch below — marks nothing in sizedOnce either: the whole function is
+	// scoped to state.Dest (every project this loop can reach has
+	// proj.Dest == state.Dest), so one check here covers it. Leaving sizedOnce
+	// untouched means a later election that hands this client the master role
+	// still owes every pane its first-resize kick, exactly as if it had never
+	// been diffed at all.
+	if m.isFollower(state.Dest) {
 		return nil
 	}
 	type size struct {
@@ -9397,16 +10235,19 @@ func (m *Model) diffResizes(state WorkspaceStateMsg) []resizeSend {
 	return out
 }
 
-// sendDiffedLayouts ships an already-decided layout list.
+// sendDiffedLayouts ships an already-decided layout list, each write carrying
+// the revision it was built on so the daemon can refuse a stale one.
 func (m Model) sendDiffedLayouts(items []layoutSend) tea.Cmd {
 	if len(items) == 0 {
 		return nil
 	}
 	return func() tea.Msg {
 		for _, it := range items {
+			base := it.baseRev
 			msg, err := ipc.NewMessage(ipc.MsgUpdateLayout, ipc.UpdateLayoutPayload{
-				TabID:  it.tabID,
-				Layout: it.data,
+				TabID:   it.tabID,
+				Layout:  it.data,
+				BaseRev: &base,
 			})
 			if err != nil {
 				continue
@@ -9417,46 +10258,29 @@ func (m Model) sendDiffedLayouts(items []layoutSend) tea.Cmd {
 	}
 }
 
-// sendDiffedResizes ships an already-decided resize list.
+// sendDiffedResizes ships an already-decided resize list, batched into one
+// MsgResizePanes per destination — diffResizes can name several panes across
+// one broadcast, and each must reach its daemon as a single must-deliver
+// frame rather than one per pane (see resizeAllPanes' doc comment for why).
 func (m Model) sendDiffedResizes(items []resizeSend) tea.Cmd {
 	if len(items) == 0 {
 		return nil
 	}
 	return func() tea.Msg {
+		batches := make(map[string][]ipc.ResizePanePayload, len(items))
 		for _, it := range items {
-			msg, err := ipc.NewMessage(ipc.MsgResizePane, ipc.ResizePanePayload{
+			batches[it.dest] = append(batches[it.dest], ipc.ResizePanePayload{
 				PaneID: it.paneID,
 				Cols:   it.cols,
 				Rows:   it.rows,
 			})
+		}
+		for dest, panes := range batches {
+			msg, err := ipc.NewMessage(ipc.MsgResizePanes, ipc.ResizePanesPayload{Panes: panes})
 			if err != nil {
 				continue
 			}
-			m.sendForDest(it.dest, msg)
-		}
-		return nil
-	}
-}
-
-// sendAllLayouts walks the projects for the same reason resizeAllPanes does —
-// every tab's layout has to reach the daemon that owns that tab.
-func (m Model) sendAllLayouts() tea.Cmd {
-	return func() tea.Msg {
-		for _, proj := range m.projects {
-			for _, tab := range proj.tabs {
-				if tab.templateLayoutPending || tab.Root == nil {
-					continue
-				}
-				data, err := MarshalLayout(tab.Root)
-				if err != nil {
-					continue
-				}
-				msg, _ := ipc.NewMessage(ipc.MsgUpdateLayout, ipc.UpdateLayoutPayload{
-					TabID:  tab.ID,
-					Layout: data,
-				})
-				m.sendForDest(proj.Dest, msg)
-			}
+			m.sendForDest(dest, msg)
 		}
 		return nil
 	}

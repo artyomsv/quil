@@ -47,16 +47,23 @@ func tinyTermModel(t *testing.T) (Model, *fakeConn) {
 	return m, conn
 }
 
-// countResizes reports how many MsgResizePane frames reached the wire.
+// countResizes reports how many individual pane resizes reached the wire,
+// across every MsgResizePanes batch (resizeAllPanes/diffResizes/
+// overlayResizeCmd all batch into one frame per destination now).
 func countResizes(t *testing.T, conn *fakeConn) int {
 	t.Helper()
 	n := 0
 	conn.mu.Lock()
 	defer conn.mu.Unlock()
 	for _, msg := range conn.sent {
-		if msg.Type == ipc.MsgResizePane {
-			n++
+		if msg.Type != ipc.MsgResizePanes {
+			continue
 		}
+		var p ipc.ResizePanesPayload
+		if err := msg.DecodePayload(&p); err != nil {
+			t.Fatalf("decode resize_panes payload: %v", err)
+		}
+		n += len(p.Panes)
 	}
 	return n
 }
@@ -225,21 +232,24 @@ func TestUpdate_GrowBackAboveMinimum_ResizesABackgroundTabsOverlay(t *testing.T)
 	}
 }
 
-// sawResizeFor reports whether a MsgResizePane for paneID reached the wire.
+// sawResizeFor reports whether a resize for paneID reached the wire, inside
+// any MsgResizePanes batch.
 func sawResizeFor(t *testing.T, conn *fakeConn, paneID string) bool {
 	t.Helper()
 	conn.mu.Lock()
 	defer conn.mu.Unlock()
 	for _, msg := range conn.sent {
-		if msg.Type != ipc.MsgResizePane {
+		if msg.Type != ipc.MsgResizePanes {
 			continue
 		}
-		var p ipc.ResizePanePayload
+		var p ipc.ResizePanesPayload
 		if err := msg.DecodePayload(&p); err != nil {
-			t.Fatalf("decode resize payload: %v", err)
+			t.Fatalf("decode resize_panes payload: %v", err)
 		}
-		if p.PaneID == paneID {
-			return true
+		for _, rp := range p.Panes {
+			if rp.PaneID == paneID {
+				return true
+			}
 		}
 	}
 	return false
@@ -264,7 +274,7 @@ func TestAttachMessage_ReportsNoGeometryBelowTheMinimum(t *testing.T) {
 			m := Model{cfg: config.Default(), width: tt.width, height: tt.height}
 
 			var p ipc.AttachPayload
-			if err := m.attachMessage("").DecodePayload(&p); err != nil {
+			if err := m.attachMessage("", false).DecodePayload(&p); err != nil {
 				t.Fatalf("decode attach payload: %v", err)
 			}
 

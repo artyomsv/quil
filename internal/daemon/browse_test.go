@@ -1001,7 +1001,7 @@ func TestProjectCWD_DoesNotWedgeOnAnUnreachableRoot(t *testing.T) {
 	t.Cleanup(func() { restoreSeam(t, block, func() { statPath = orig }) })
 
 	done := make(chan string, 1)
-	go func() { done <- d.projectCWD(p.ID) }()
+	go func() { done <- d.projectCWD(nil, p.ID) }()
 
 	select {
 	case got := <-done:

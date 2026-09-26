@@ -18,3 +18,11 @@ var probeScript string
 //
 //go:embed scripts/remote-install.sh
 var installScript string
+
+// windowsProbeScript reports a Windows remote's platform and any existing
+// install, run via EncodePowerShell rather than sent as-is: a Windows default
+// ssh shell (cmd or PowerShell) has no way to receive a script on stdin the
+// way `sh -s` does.
+//
+//go:embed scripts/remote-probe.ps1
+var windowsProbeScript string

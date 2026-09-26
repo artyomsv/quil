@@ -17,7 +17,9 @@ const probeLines = 5
 
 // Probe is what the remote host reported about itself.
 type Probe struct {
-	// Home is the remote $HOME, used to site the ~/.local/bin fallback.
+	// Home is the remote $HOME, used to site the ~/.local/bin fallback. For a
+	// Windows host this holds %LOCALAPPDATA% instead — the single source for
+	// both the existing-install lookup and the install directory there.
 	Home string
 
 	// Platform is the remote's Go build target, already validated against the
@@ -33,6 +35,16 @@ type Probe struct {
 	// the difference between upgrading in place and falling back to
 	// ~/.local/bin.
 	ExistingDirWritable bool
+
+	// OS is "" for a POSIX host and "windows" for a Windows host. Only
+	// ParseWindowsProbe ever sets it — the POSIX ParseProbe refuses a
+	// platform whose GOOS is "windows" rather than let one arrive by another
+	// route.
+	OS string
+
+	// Shell is the ShellCmd/ShellPowerShell/ShellPOSIX value QuoteCommand
+	// needs to build the attach command for this host.
+	Shell string
 }
 
 // ParseProbe reads remote-probe.sh's output.
@@ -82,6 +94,14 @@ func ParseProbe(out string) (Probe, error) {
 	platform, err := PlatformFor(fields[1], fields[2])
 	if err != nil {
 		return Probe{}, err
+	}
+	// uname never prints "Windows" — a Windows host is detected by the
+	// absence of sh, not by its answer to this probe — so only a forged or
+	// otherwise wrong `uname -s` reaches here with a windows platform. Refuse
+	// it explicitly rather than let a POSIX probe report an OS only
+	// ParseWindowsProbe is meant to yield.
+	if platform.GOOS == "windows" {
+		return Probe{}, fmt.Errorf("remote uname reports %q, which resolves to windows; a POSIX probe cannot report Windows", fields[1])
 	}
 
 	p := Probe{Home: home, Platform: platform}
@@ -147,4 +167,76 @@ func isControl(r rune) bool {
 		return true
 	}
 	return false
+}
+
+// windowsProbeSentinel marks where remote-probe.ps1's own output begins, the
+// same role probeSentinel plays for the POSIX script.
+const windowsProbeSentinel = "__quil_probe_win__"
+
+// windowsProbeLines is how many lines remote-probe.ps1 prints after the
+// sentinel: LOCALAPPDATA, "windows", PROCESSOR_ARCHITECTURE, an existing
+// quil.exe (or "-"), rw|ro|"-", and the OpenSSH DefaultShell (or "-").
+const windowsProbeLines = 6
+
+// ParseWindowsProbe reads remote-probe.ps1's output.
+func ParseWindowsProbe(out string) (Probe, error) {
+	lines := strings.Split(out, "\n")
+	start := -1
+	for i := range lines {
+		lines[i] = strings.TrimRight(lines[i], "\r")
+		if strings.TrimSpace(lines[i]) == windowsProbeSentinel {
+			start = i + 1
+		}
+	}
+	if start < 0 || len(lines)-start < windowsProbeLines {
+		return Probe{}, fmt.Errorf("malformed Windows probe output")
+	}
+	f := lines[start : start+windowsProbeLines]
+
+	home := strings.TrimSpace(f[0])
+	if err := CheckRemotePathWindows("remote LOCALAPPDATA", home); err != nil {
+		return Probe{}, err
+	}
+
+	platform, err := PlatformFor(f[1], f[2])
+	if err != nil {
+		return Probe{}, err
+	}
+
+	shell, err := ShellFromDefault(strings.TrimSpace(f[5]))
+	if err != nil {
+		return Probe{}, err
+	}
+
+	p := Probe{Home: home, Platform: platform, OS: "windows", Shell: shell}
+	if existing := strings.TrimSpace(f[3]); existing != "-" && existing != "" {
+		if err := CheckRemotePathWindows("remote quil path", existing); err != nil {
+			return Probe{}, err
+		}
+		p.ExistingPath = existing
+		p.ExistingDirWritable = strings.TrimSpace(f[4]) == "rw"
+	}
+	return p, nil
+}
+
+// ShellFromDefault maps the OpenSSH DefaultShell registry value onto the
+// shell constants QuoteCommand accepts.
+//
+// Unknown shells are refused rather than guessed: a wrong guess quotes the
+// recorded attach command for the wrong parser, and a misquoted command runs
+// on the remote as something other than what it displayed.
+func ShellFromDefault(v string) (string, error) {
+	if v == "" || v == "-" {
+		return ShellCmd, nil
+	}
+	base := strings.ToLower(v[strings.LastIndexAny(v, `\/`)+1:])
+	switch base {
+	case "cmd.exe":
+		return ShellCmd, nil
+	case "powershell.exe", "pwsh.exe":
+		return ShellPowerShell, nil
+	case "bash.exe", "sh.exe":
+		return ShellPOSIX, nil
+	}
+	return "", fmt.Errorf("the host's ssh default shell %q is not supported (cmd, PowerShell or bash)", v)
 }

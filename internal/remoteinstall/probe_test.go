@@ -143,6 +143,10 @@ func TestParseProbe_Rejects(t *testing.T) {
 		{"too few lines after the sentinel", probeSentinel + "\n/h\nLinux\n", "want 5"},
 		{"unsupported arch", probeOut("/h", "Linux", "armv7l", "-", "-"), "armv7l"},
 		{"unsupported os", probeOut("/h", "FreeBSD", "amd64", "-", "-"), "FreeBSD"},
+		// uname never prints "Windows"; only a forged or malformed answer
+		// could reach ParseProbe with a windows platform, and only the
+		// dedicated Windows probe may ever set Probe.OS to "windows".
+		{"windows os refused", probeOut("/h", "Windows", "amd64", "-", "-"), "Windows"},
 		// An unset HOME leaves no way to compute the ~/.local/bin fallback, so
 		// it must fail loudly rather than resolve to "/.local/bin" at the root.
 		{"empty home", probeOut("", "Linux", "x86_64", "-", "-"), "HOME"},

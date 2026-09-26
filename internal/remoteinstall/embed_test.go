@@ -53,6 +53,7 @@ func embeddedScripts() map[string]string {
 	return map[string]string{
 		"remote-probe.sh":   probeScript,
 		"remote-install.sh": installScript,
+		"remote-probe.ps1":  windowsProbeScript,
 	}
 }
 

@@ -48,3 +48,7 @@ internal/changelog/highlights.txt text eol=lf
 # against terminal control characters, CR included. A CRLF checkout therefore
 # makes DefaultTemplates panic at daemon start, and CI never sees it.
 internal/config/templates.toml text eol=lf
+
+# PowerShell scripts go:embed'ed into quil and sent base64-encoded to Windows
+# remotes. LF keeps the encoded size stable and matches the no-CR test.
+internal/remoteinstall/scripts/*.ps1 text eol=lf

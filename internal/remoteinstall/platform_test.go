@@ -18,6 +18,8 @@ func TestPlatformFor(t *testing.T) {
 		{name: "intel mac", unameS: "Darwin", unameM: "x86_64", want: Platform{"darwin", "amd64"}},
 		{name: "case insensitive", unameS: "linux", unameM: "X86_64", want: Platform{"linux", "amd64"}},
 		{name: "surrounding whitespace", unameS: " Linux ", unameM: " x86_64 ", want: Platform{"linux", "amd64"}},
+		{name: "windows", unameS: "windows", unameM: "AMD64", want: Platform{"windows", "amd64"}},
+		{name: "windows arm64 unsupported", unameS: "windows", unameM: "ARM64", wantErr: true},
 
 		// 32-bit ARM is the live failure: a 64-bit-kernel Raspberry Pi OS can
 		// report aarch64 while its userland loader is armhf, so guessing here

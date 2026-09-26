@@ -50,7 +50,18 @@ func (w *capWriter) Write(p []byte) (int, error) {
 
 func (w *capWriter) String() string { return w.buf.String() }
 
+// exitSSHOwnFailure is ssh's status for a failure of its own (auth, host key,
+// connection). The remote command's status passes through untouched.
+const exitSSHOwnFailure = 255
+
 // RunProbe asks the remote host what it is and whether quil is already there.
+//
+// A Windows host has no `sh`: both cmd and PowerShell exit 1 for a missing
+// command, and a host running Git for Windows' `sh` answers but reports
+// `uname -s` as MINGW64_NT-… rather than Linux or Darwin. Either shape
+// switches to the PowerShell probe (runWindowsProbe) rather than failing —
+// ssh's OWN failure (255) is excluded, since retrying with a second command
+// after ssh itself could not connect would just fail the same way again.
 func RunProbe(ctx context.Context, r Runner) (Probe, error) {
 	stdout := &capWriter{limit: maxRemoteOutput}
 	stderr := &capWriter{limit: maxRemoteOutput}
@@ -58,18 +69,60 @@ func RunProbe(ctx context.Context, r Runner) (Probe, error) {
 	if err != nil {
 		return Probe{}, fmt.Errorf("run remote probe: %w", err)
 	}
-	// The probe script always exits 0, deliberately, so a non-zero status here
-	// came from ssh rather than from anything the probe found. Reporting it as
-	// a probe failure would send the user looking at the wrong machine.
+	switch {
+	case code == 0:
+		// The probe script always exits 0, deliberately, so success here means
+		// the shell ran it. A Git-for-Windows `sh` also exits 0, which is why
+		// this branch still has to check the ANSWER, not just the code.
+		p, perr := ParseProbe(stdout.String())
+		if perr == nil {
+			return p, nil
+		}
+		if !unameLooksWindows(stdout.String()) {
+			return Probe{}, perr
+		}
+		return runWindowsProbe(ctx, r)
+	case code != exitSSHOwnFailure && !strings.Contains(stdout.String(), probeSentinel):
+		// No `sh` on the far side: cmd and PowerShell both exit 1 for a
+		// missing command. A Windows host answers the second probe.
+		return runWindowsProbe(ctx, r)
+	}
+	return Probe{}, fmt.Errorf("ssh exited %d before the probe could run: %s", code, firstLine(stderr.String()))
+}
+
+// runWindowsProbe sends remote-probe.ps1, base64-encoded, to a host that
+// answered the POSIX probe with neither a parseable report nor an
+// sh-not-found status.
+func runWindowsProbe(ctx context.Context, r Runner) (Probe, error) {
+	stdout := &capWriter{limit: maxRemoteOutput}
+	stderr := &capWriter{limit: maxRemoteOutput}
+	code, err := r.Run(ctx, EncodePowerShell(windowsProbeScript), nil, stdout, stderr)
+	if err != nil {
+		return Probe{}, fmt.Errorf("run Windows probe: %w", err)
+	}
 	if code != 0 {
-		return Probe{}, fmt.Errorf("ssh exited %d before the probe could run: %s",
+		return Probe{}, fmt.Errorf("the host has neither sh nor PowerShell (probe exited %d): %s",
 			code, firstLine(stderr.String()))
 	}
-	p, err := ParseProbe(stdout.String())
-	if err != nil {
-		return Probe{}, err
+	return ParseWindowsProbe(stdout.String())
+}
+
+// unameLooksWindows reports a POSIX probe answered by Git for Windows, MSYS2
+// or Cygwin: uname -s (the 2nd line after the last sentinel) starts MINGW,
+// MSYS or CYGWIN.
+func unameLooksWindows(out string) bool {
+	lines := strings.Split(out, "\n")
+	start := -1
+	for i, l := range lines {
+		if strings.TrimSpace(strings.TrimRight(l, "\r")) == probeSentinel {
+			start = i + 1
+		}
 	}
-	return p, nil
+	if start < 0 || len(lines) <= start+1 {
+		return false
+	}
+	u := strings.ToUpper(strings.TrimSpace(lines[start+1]))
+	return strings.HasPrefix(u, "MINGW") || strings.HasPrefix(u, "MSYS") || strings.HasPrefix(u, "CYGWIN")
 }
 
 // notRunningMarker is what `quil daemon stop` prints when there was nothing to

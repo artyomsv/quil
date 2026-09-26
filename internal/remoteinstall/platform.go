@@ -33,9 +33,11 @@ func PlatformFor(unameS, unameM string) (Platform, error) {
 		goos = "linux"
 	case "darwin":
 		goos = "darwin"
+	case "windows":
+		goos = "windows"
 	default:
 		return Platform{}, fmt.Errorf(
-			"unsupported remote OS %q: quil publishes releases for Linux and macOS", unameS)
+			"unsupported remote OS %q: quil publishes releases for Linux, macOS and Windows", unameS)
 	}
 
 	var goarch string
@@ -47,6 +49,12 @@ func PlatformFor(unameS, unameM string) (Platform, error) {
 	default:
 		return Platform{}, fmt.Errorf(
 			"unsupported remote architecture %q: quil publishes amd64 and arm64", unameM)
+	}
+
+	// quil publishes windows/amd64 only; a Windows arm64 host must be refused
+	// here rather than allowed to reach an install that cannot exec.
+	if goos == "windows" && goarch != "amd64" {
+		return Platform{}, fmt.Errorf("unsupported remote platform windows/%s: quil publishes windows/amd64 only", goarch)
 	}
 
 	return Platform{GOOS: goos, GOARCH: goarch}, nil

@@ -9011,12 +9011,6 @@ func (m Model) enqueueKeyInput(paneID string, data []byte) {
 	m.enqueueInput(m.guardedInputTarget(paneID), data)
 }
 
-// guardedInputTarget applies the typing guard (spec §8.1): within
-// remoteSwitchGuardWindow of a remote tab switch, key-originated input still
-// goes to guardPaneID — the pane the user was mid-keystroke in — rather than
-// wherever the remote switch moved focus. It falls through to paneID once the
-// window has elapsed or the guarded pane no longer exists (closed, moved,
-// destroyed — there is nowhere left to redirect to).
 // retireTypingGuard ends the typing guard at once. The guard is for keys typed
 // straight through a remote switch; the moment this client's own user picks a
 // tab, a project or a pane, what they type next is meant for that choice, and
@@ -9046,6 +9040,12 @@ func (m Model) localFocus() localFocusKey {
 	return k
 }
 
+// guardedInputTarget applies the typing guard (spec §8.1): within
+// remoteSwitchGuardWindow of a remote tab switch, key-originated input still
+// goes to guardPaneID — the pane the user was mid-keystroke in — rather than
+// wherever the remote switch moved focus. It falls through to paneID once the
+// window has elapsed or the guarded pane no longer exists (closed, moved,
+// destroyed — there is nowhere left to redirect to).
 func (m Model) guardedInputTarget(paneID string) string {
 	if m.guardPaneID == "" {
 		return paneID

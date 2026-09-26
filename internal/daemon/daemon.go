@@ -4459,9 +4459,16 @@ func (d *Daemon) flushPaneOutputGeneration(paneID string, data []byte, generatio
 	d.holdGate.RUnlock()
 
 	// After the gate, not inside it: broadcastState builds the whole
-	// workspace, and the state frame travels on the must-deliver queue, which
-	// sendLoop drains ahead of pane output anyway — so enqueueing it before or
-	// after this chunk never decided which the client saw first.
+	// workspace, which must not be held under holdGate. The cost is order:
+	// sendLoop prefers the must-deliver queue only when both queues hold a
+	// frame at the same moment, so an idle sendLoop usually writes this chunk
+	// BEFORE the state frame. Enabling is unaffected — the TUI's own emulator
+	// sees ?1000h in the chunk, and tracking is local OR daemon. Disabling
+	// opens a window of a few milliseconds where the daemon flag is still true
+	// after the chunk cleared the local one, so a wheel notch then can type
+	// SGR mouse escapes into a program that just turned tracking off.
+	// Accepted: it is far smaller than the 250 ms mouseModeBroadcastCooldown
+	// gap that already exists.
 	if doMouseBroadcast {
 		logger.Debug("pane %s: mouse-mode change tracking=%v sgr=%v", paneID, newModes.tracking(), newModes.sgr)
 		d.broadcastState()

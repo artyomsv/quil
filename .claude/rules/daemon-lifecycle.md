@@ -223,9 +223,14 @@ anywhere takes `holdGate` while holding a `PluginMu` (`beginOutputHold`,
 `finishOutputHold`, `dropOutputHold` and `handleAttach`'s replay span all keep
 the two apart). The gated span does no I/O and spawns nothing, which is why
 the mouse-mode `broadcastState` (decided inside the `PluginMu` span, sent
-after the gate — the state frame rides the must-deliver queue, which
-`sendLoop` drains ahead of pane output, so its enqueue order against this
-chunk never decided delivery order) and the bell / hand-start / OSC 133 /
+after the gate because it builds the whole workspace — `sendLoop` prefers the
+must-deliver queue only when both queues hold a frame at once, so an idle one
+usually writes the chunk BEFORE the state frame; enabling is unaffected since
+the TUI's emulator sees `?1000h` in the chunk and tracking is local OR daemon,
+while disabling leaves a few-millisecond window where the daemon flag is still
+true after the chunk cleared the local one, so a wheel notch can type SGR
+mouse escapes into a program that just turned tracking off — accepted as far
+smaller than the existing 250 ms `mouseModeBroadcastCooldown` gap) and the bell / hand-start / OSC 133 /
 plugin detectors run AFTER it: the hand-start conversion restarts the pane,
 and a flush re-entered from there would ask for the read lock again behind a
 waiting writer.

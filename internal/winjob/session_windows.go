@@ -4,7 +4,6 @@ package winjob
 
 import (
 	"fmt"
-	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -52,14 +51,15 @@ func UserHasInteractiveSession() (bool, error) {
 	defer windows.WTSFreeMemory(uintptr(unsafe.Pointer(sessions)))
 
 	for _, s := range unsafe.Slice(sessions, count) {
-		if s.SessionID == 0 || (s.State != windows.WTSActive && s.State != windows.WTSDisconnected) {
-			continue
-		}
 		name, err := wtsString(s.SessionID, wtsUserName)
-		if err != nil || !strings.EqualFold(name, account) {
+		if err != nil {
 			continue
 		}
-		if dom, err := wtsString(s.SessionID, wtsDomainName); err == nil && strings.EqualFold(dom, domain) {
+		dom, err := wtsString(s.SessionID, wtsDomainName)
+		if err != nil {
+			continue
+		}
+		if sessionQualifies(s.SessionID, s.State, name, dom, account, domain) {
 			return true, nil
 		}
 	}

@@ -14,15 +14,17 @@ var (
 	procIsProcessInJob = modkernel32.NewProc("IsProcessInJob")
 )
 
-// InKillOnCloseJob reports whether this process sits in a job that kills its
+// InKillOnCloseJob reports whether this process may sit in a job that kills its
 // members when the job closes — the job Win32-OpenSSH puts each session in —
-// and whether that job lets a child break away.
+// and whether a child may break away from it.
 //
-// A job WITHOUT kill-on-close is reported as "not in a job": it cannot take
-// the daemon down, so the normal spawn is right there. Only the innermost job
-// is visible to the query; an outer job that forbids breakaway surfaces later
-// as ERROR_ACCESS_DENIED from CreateProcess, which spawnLowered maps to
-// ErrBreakawayDenied.
+// Only the innermost job is visible to the query, and an inner job can hide an
+// outer kill-on-close one. So an innermost job WITHOUT kill-on-close that
+// allows breakaway is still reported as a job with breakaway: the daemon may
+// die with an unseen outer job, and breaking away is safe either way. Only an
+// innermost job that allows neither is reported as "not in a job", because
+// breakaway is impossible there and the normal spawn is the only one that can
+// work. jobVerdict holds the table.
 func InKillOnCloseJob() (inJob, breakawayOK bool, err error) {
 	var in int32
 	r, _, e := procIsProcessInJob.Call(uintptr(windows.CurrentProcess()), 0, uintptr(unsafe.Pointer(&in)))
@@ -37,9 +39,6 @@ func InKillOnCloseJob() (inJob, breakawayOK bool, err error) {
 		uintptr(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)), nil); err != nil {
 		return false, false, fmt.Errorf("QueryInformationJobObject: %w", err)
 	}
-	flags := info.BasicLimitInformation.LimitFlags
-	if flags&windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE == 0 {
-		return false, false, nil
-	}
-	return true, flags&windows.JOB_OBJECT_LIMIT_BREAKAWAY_OK != 0, nil
+	inJob, breakawayOK = jobVerdict(true, info.BasicLimitInformation.LimitFlags)
+	return inJob, breakawayOK, nil
 }

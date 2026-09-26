@@ -11,7 +11,43 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/windows"
 )
+
+// The untagged files mirror these so Linux CI can test the decisions.
+func TestJobConstants_MatchXSys(t *testing.T) {
+	if jobLimitBreakawayOK != windows.JOB_OBJECT_LIMIT_BREAKAWAY_OK {
+		t.Errorf("jobLimitBreakawayOK = %#x, want %#x", jobLimitBreakawayOK, windows.JOB_OBJECT_LIMIT_BREAKAWAY_OK)
+	}
+	if jobLimitKillOnJobClose != windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE {
+		t.Errorf("jobLimitKillOnJobClose = %#x, want %#x", jobLimitKillOnJobClose, windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)
+	}
+	if wtsStateActive != windows.WTSActive {
+		t.Errorf("wtsStateActive = %d, want %d", wtsStateActive, windows.WTSActive)
+	}
+	if wtsStateDisconnected != windows.WTSDisconnected {
+		t.Errorf("wtsStateDisconnected = %d, want %d", wtsStateDisconnected, windows.WTSDisconnected)
+	}
+}
+
+// Logged, not asserted: the answer depends on the host.
+func TestUserHasInteractiveSession_DesktopHost_Answers(t *testing.T) {
+	has, err := UserHasInteractiveSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("hasInteractiveSession=%v", has)
+}
+
+// Logged, not asserted: the answer depends on the host.
+func TestAboveMedium_Answers(t *testing.T) {
+	above, err := AboveMedium()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("aboveMedium=%v", above)
+}
 
 // Logged, not asserted: whether the test host itself sits in a kill-on-close
 // job depends on the terminal it runs from.

@@ -38,6 +38,7 @@ import (
 	"github.com/artyomsv/quil/internal/sandbox"
 	"github.com/artyomsv/quil/internal/shellinit"
 	"github.com/artyomsv/quil/internal/version"
+	"github.com/artyomsv/quil/internal/winjob"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/vt"
 	"github.com/google/uuid"
@@ -46,6 +47,9 @@ import (
 // oscBellRe matches OSC sequences terminated by BEL (\x07), e.g., \x1b]0;title\x07.
 // Used to strip these before bell detection so OSC terminators aren't treated as bells.
 var oscBellRe = regexp.MustCompile(`\x1b\][^\x07]*\x07`)
+
+// inServiceSessionFn is a test seam over winjob.InServiceSession.
+var inServiceSessionFn = winjob.InServiceSession
 
 type Daemon struct {
 	cfg          config.Config
@@ -73,6 +77,10 @@ type Daemon struct {
 	procReport *procCollector
 	// startedAt is when this daemon process began, for its own uptime row.
 	startedAt time.Time
+	// limited is true when this daemon runs in session 0 (Windows): no saved
+	// credentials, no visible windows. Set once in New from InServiceSession
+	// and read-only afterwards, so no lock guards it.
+	limited bool
 	// killRunning single-flights the kill handler's worker goroutine. A client
 	// looping the message would otherwise stack goroutines each running a full
 	// process enumeration.
@@ -325,6 +333,10 @@ func New(cfg config.Config) *Daemon {
 		events:     newEventQueue(maxEvents),
 		gitCache:   newGitCache(),
 		snapGens:   make(map[string]uint64),
+	}
+	d.limited = inServiceSessionFn()
+	if d.limited {
+		log.Printf("daemon: running in session 0 (limited: no saved credentials, windows opened by panes are invisible)")
 	}
 	d.sandboxReg = newSandboxRegistry(config.QuilDir())
 	if cfg.Sandbox.SharedClaudeConfig {
@@ -4614,6 +4626,11 @@ func (d *Daemon) buildWorkspaceState() map[string]any {
 	// for the restart reserve; the count means nothing after a restart.
 	state["size_master"] = d.masterID()
 	state["clients"] = d.clientCount()
+	// Broadcast-only, omitted unless true: a daemon in session 0 (started over
+	// ssh, or by a service) has no saved credentials and no visible desktop.
+	if d.limited {
+		state["daemon_limited"] = true
+	}
 	return state
 }
 

@@ -171,7 +171,9 @@ note for why the frame goes out before `pty.Resize` runs. Every pane in a
 `pane_sizes` frame, and every `PaneInfo` in a workspace-state broadcast,
 carries `size_seq`; `PaneModel.adoptDaemonSize` adopts only `seq >=
 daemonSizeSeq`, so a workspace-state broadcast that raced a `pane_sizes` frame
-from the same resize cannot undo it.
+from the same resize cannot undo it. A new TUI against an OLDER daemon (dev
+builds only; release builds are version-gated) sends only `resize_panes`,
+which that daemon drops as an unknown type, so its panes are never resized.
 
 ### Follower rendering
 

@@ -124,6 +124,12 @@ condition, for `min(grace, 30s)` (`restartReserveCap`) — TUIs reattach with
 their SAME process id within seconds of a restart, so the previous master
 reclaims its slot (`attach` hands the reservation's `attachedAt` back to the
 returning record, so it stays the oldest) and nothing resizes.
+`AttachPayload.Reattach` separates those reconnects from a COLD start: the
+TUI sets it only on the attach its reconnect path sends. After an unclean
+stop (reboot, kill) the next TUI is a new process with a new id, and a first
+attach (`Reattach` false) from a different id that is the ONLY attached client
+clears the restart reserve and is elected at once — otherwise it would be a
+follower for 30 s with nobody to protect. Reconnecting clients still wait.
 
 **Size authority (`applyResizes`, `internal/daemon/daemon.go`).** `resize_pane`
 and `resize_panes` share one implementation. A resize applies only from the
@@ -154,6 +160,15 @@ the counter (a fresh daemon incarnation renumbers from zero). A failed
 `pty.Resize` sends a second `pane_sizes` with the PREVIOUS size and a newer
 seq — a rollback is a newer announcement, not an undo, and `Cols`/`Rows` stay
 at whatever the syscall actually left the PTY at.
+
+**Accepted gap: a follower attaching INSIDE a batch.** `sendPaneSizes` picks
+its recipients before the `pty.Resize` calls, and `Cols`/`Rows` are recorded
+after them. A follower whose FIRST attach lands between the two misses the
+frame, and its attach state can still carry the pre-batch size. Its VT then
+takes the new size from the next broadcast (seconds later) with no PTY redraw
+to pair it: one unpaired correction, once, on that pane. Accepted as rare
+(it needs a master resize and a new follower in the same instant); the cost
+is a one-time garble, not a lasting one.
 
 **Output hold (`internal/daemon/outputhold.go`).** A client attaching while
 panes are writing must receive each pane's history replay and its live output
@@ -431,7 +446,8 @@ destroys nothing and `recoverEmptyProject` does not run.
 
 **`SetTabLayout`** replaces `handleUpdateLayout`'s unlocked write through the
 live `*Tab`, which raced `SnapshotState`'s copy (the `handleUpdateTab` shape
-#229 fixed) and now also `MovePane`'s template check. Still no broadcast.
+#229 fixed) and now also `MovePane`'s template check. An accepted write now
+broadcasts, through the 50 ms coalescer (see "Layout revision" above).
 Events already queued keep the `TabID` they were emitted with; TUI navigation
 is by pane id, so only MCP `get_notifications` reports a stale tab.
 

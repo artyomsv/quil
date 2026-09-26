@@ -7,3 +7,4 @@ headline: Two Quil windows can now share one daemon's workspace
 - Switching the shared active tab from one window no longer steals keystrokes out from under someone typing in another — a short guard keeps your next few keys in the pane you were in and shows a flash saying another client switched.
 - Dismissing a notification, or clearing a pane's unseen mark, updates every attached window's sidebar.
 - A new MCP tool, `list_clients`, lists every attached window; `set_active_pane` and `close_tui` gain an optional `client` field to target one window instead of whichever typed most recently.
+- With a single window attached, two small costs remain: each layout change now costs one workspace-state frame back from the daemon (coalesced over 50 ms), and attaching can wait up to 2 s for a busy live-output queue to drain so each pane's history and live output arrive exactly once.

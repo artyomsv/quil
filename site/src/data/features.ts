@@ -128,7 +128,7 @@ export const features: Feature[] = [
       "Run `quil mcp` and an AI agent can manage projects across remote hosts, create AI panes, and delegate work between them.",
     category: "ai",
     detail: [
-      "35 tools exposed over the Model Context Protocol (Anthropic's open standard for AI tool use).",
+      "36 tools exposed over the Model Context Protocol (Anthropic's open standard for AI tool use).",
       "Create tabs and AI panes with named toggles, session resume, worktree and sandbox options; manage projects across configured remote hosts.",
       "Delegate tasks between panes, track completion, and notify the requester when it is ready. Read output, send keys, inspect screens, watch events, and query memory use.",
       "Lets any MCP-capable client (Claude Desktop, Claude Code, Cursor) reach directly into your running Quil session.",

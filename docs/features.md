@@ -698,7 +698,9 @@ back; with nobody left to protect, a relaunched window takes over at once
 instead of waiting. **Take control** (unbound by default — bind
 `client.take_control` in `bindings.toml`, or run it from the command palette)
 makes the window you are typing in the master immediately, whatever the
-election above would otherwise pick.
+election above would otherwise pick. After a daemon restart, the previous
+master's window gets its slot back when it reconnects, so nothing resizes; a
+freshly started window that is alone on the daemon becomes master at once.
 
 **Typing guard.** If another window switches your shared active tab while you
 are mid-keystroke, your next 250 ms of typing still lands in the pane you were
@@ -724,6 +726,12 @@ rather than every one of them: by default the window you last typed in, or
 name one explicitly with the `client` field (see [`list_clients`](mcp.md#tui-cooperation)
 for the ids to choose from). With no window attached at all, `close_tui` sends
 nothing rather than erroring.
+
+**Cost with a single window.** Two small costs apply even when only one window
+is attached. Each layout change (a split, a close, an arrangement, a border
+drag) now costs one workspace-state frame back from the daemon, coalesced over
+50 ms. And attaching can wait up to 2 s for a busy live-output queue to drain,
+so a pane's history replay and its live output arrive exactly once, in order.
 
 ---
 

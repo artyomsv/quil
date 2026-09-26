@@ -651,7 +651,7 @@ func (d *Daemon) onClientDisconnect(conn *ipc.Conn) {
 	// A lost link always changes the attached count, whether or not the
 	// master changed with it, so the other clients get one state frame.
 	if !d.shuttingDown() && d.clients.lose(conn).any() {
-		d.sendStateToOtherClients(conn)
+		d.sendStateToOtherClients(conn, "lost link")
 	}
 	// Drop this conn's identity with it: the process it described is gone,
 	// and a retained entry would be listed as running.
@@ -1833,7 +1833,7 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 	// this attach is answered. The attaching conn gets none: its own state
 	// below is built after this registration, so it already carries both.
 	if d.attachClient(conn, attach).any() {
-		defer d.sendStateToOtherClients(conn)
+		defer d.sendStateToOtherClients(conn, "attach")
 	}
 
 	// Hold this conn off live pane output until its replay is sent, BEFORE
@@ -5796,6 +5796,12 @@ func resolveSpawnArgs(p *plugin.PanePlugin, pane *Pane, restoring, ownsRecord bo
 // probes also share ONE deadline rather than a fresh spawnDirProbeTimeout
 // each, so even three genuinely DIFFERENT unreachable candidates cost this
 // call no more than spawnDirProbeTimeout in total.
+//
+// The shared deadline has a known cost, accepted: a DEAD earlier candidate
+// can spend the whole budget, and a later candidate that is live and distinct
+// then gets no time and falls through to step 4, so the pane opens in the
+// daemon's own directory. It needs one client's recorded cwd on a dead mount
+// first; bounding the total wait on dead mounts is worth more than that case.
 //
 // conn is nil for every restore and recovery caller (recoverEmptyTab,
 // ensureTabNotEmpty, …), which has no requesting client at all — those start

@@ -1422,9 +1422,9 @@ type ClientInfo struct {
 	// LastInputAt is when this client last sent pane input, RFC 3339. Empty
 	// means never — a follower that has only watched, not typed.
 	LastInputAt string `json:"last_input_at,omitempty"`
-	// Role distinguishes a TUI from an MCP bridge sharing the same attach
-	// path, mirroring ClientHelloPayload.Role. Empty for a client that never
-	// sent one.
+	// Role is the role this client declared in its hello, mirroring
+	// ClientHelloPayload.Role — "tui" in practice, since an MCP bridge never
+	// attaches and so is never listed. Empty for a client that sent no hello.
 	Role string `json:"role,omitempty"`
 	PID  int    `json:"pid,omitempty"`
 	Exe  string `json:"exe,omitempty"`

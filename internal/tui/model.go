@@ -266,10 +266,9 @@ type paneEventMsg ipc.PaneEventPayload
 
 // eventDismissedMsg is the daemon's broadcast that a notification was
 // dismissed (event_dismissed, spec §8.4), reaching every attached client —
-// this client's own dismissal included. dest is carried for parity with the
-// wire event; the notification sidebar is not scoped per destination (a
-// pre-existing property this task does not change), so the removal applies to
-// the one shared list regardless of which daemon reported it.
+// this client's own dismissal included. dest is the daemon that sent it:
+// DismissByID removes one card by id, and a dismiss-all (empty eventID)
+// removes only that daemon's cards from the shared sidebar list.
 type eventDismissedMsg struct {
 	dest    string
 	eventID string // "" = dismiss every card

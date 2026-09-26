@@ -463,7 +463,10 @@ func (d *Daemon) shuttingDown() bool {
 // two state frames back to back: its own attach state and this one, which says
 // nothing new. That is pressure on its must-deliver queue for no information.
 // A conn that never attached (an MCP bridge) has no use for either value.
-func (d *Daemon) sendStateToOtherClients(except *ipc.Conn) {
+//
+// cause names the event that called it ("attach", "detach", "lost link"),
+// for the log line.
+func (d *Daemon) sendStateToOtherClients(except *ipc.Conn, cause string) {
 	d.clients.mu.Lock()
 	var conns []*ipc.Conn
 	for _, rec := range d.clients.sortedRecordsLocked() {
@@ -477,7 +480,7 @@ func (d *Daemon) sendStateToOtherClients(except *ipc.Conn) {
 	}
 	msg, err := ipc.NewMessage(ipc.MsgWorkspaceState, d.buildWorkspaceState())
 	if err != nil {
-		logger.Error("attach: build state for other clients: %v", err)
+		logger.Error("%s: build state for other clients: %v", cause, err)
 		return
 	}
 	for _, c := range conns {
@@ -489,7 +492,7 @@ func (d *Daemon) sendStateToOtherClients(except *ipc.Conn) {
 // the attached count, so the other clients always get one state frame.
 func (d *Daemon) handleDetach(conn *ipc.Conn) {
 	if d.clients.detach(conn).any() {
-		d.sendStateToOtherClients(conn)
+		d.sendStateToOtherClients(conn, "detach")
 	}
 }
 

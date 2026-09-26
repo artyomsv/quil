@@ -517,6 +517,54 @@ func TestAttach_ReattachOnlyAfterThisProcessAttachedThere(t *testing.T) {
 	}
 }
 
+// TestAttach_ReconnectCarriesTheRawWindow: the daemon elects on the RAW
+// window, and the reconnect attach is the one no client_geometry follows — so
+// it must carry the raw window itself (WinCols/WinRows), with Cols/Rows left
+// as the pane interior the first pane spawns at. Review finding M-2: an 80x12
+// window sent only its 78x8 interior and was ineligible against the 40x10
+// floor on every reattach.
+func TestAttach_ReconnectCarriesTheRawWindow(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	first, fresh := newFakeConn(), newFakeConn()
+	r := NewRouter(map[string]Client{"gpu01": first})
+	var m tea.Model = Model{client: r, cfg: config.Default()}
+
+	m, cmd := m.Update(tea.WindowSizeMsg{Width: 80, Height: 12})
+	runCmdNoWait(cmd)
+	mm := m.(Model)
+	mm.links = map[string]*reconnectState{"gpu01": {active: true, gen: 1}}
+	_, cmd = mm.Update(redialResultMsg{gen: 1, dest: "gpu01", client: fresh})
+	runCmdNoWait(cmd)
+
+	for name, conn := range map[string]*fakeConn{"launch": first, "reconnect": fresh} {
+		got := attachPayloads(t, conn)
+		if len(got) != 1 {
+			t.Fatalf("%s attach count = %d, want 1", name, len(got))
+		}
+		p := got[0]
+		if p.WinCols != 80 || p.WinRows != 12 {
+			t.Errorf("%s attach raw window = %dx%d, want 80x12", name, p.WinCols, p.WinRows)
+		}
+		if p.Cols >= p.WinCols || p.Rows >= p.WinRows || p.Cols < 1 || p.Rows < 1 {
+			t.Errorf("%s attach interior = %dx%d, want the pane interior inside the 80x12 window", name, p.Cols, p.Rows)
+		}
+	}
+}
+
+// TestAttachMessage_NoRawWindowBelowTheFloor: an unpaintable window reports
+// 0x0 raw, exactly as client_geometry does, so the daemon never elects it.
+func TestAttachMessage_NoRawWindowBelowTheFloor(t *testing.T) {
+	t.Parallel()
+	m := Model{cfg: config.Default(), width: minTermWidth - 1, height: 40}
+	var p ipc.AttachPayload
+	if err := m.attachMessage("", false).DecodePayload(&p); err != nil {
+		t.Fatalf("decode attach payload: %v", err)
+	}
+	if p.WinCols != 0 || p.WinRows != 0 {
+		t.Errorf("raw window = %dx%d below the floor, want 0x0", p.WinCols, p.WinRows)
+	}
+}
+
 // TestAttach_FirstAttachThroughReconnectIsNotAReattach: a destination
 // unreachable at launch gets its FIRST attach from finishReconnect. The flag
 // is "has this process attached there before", not "which path sent it", so

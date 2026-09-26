@@ -102,6 +102,21 @@ shrink below the floor (`setGeometry`, fed by `MsgClientGeometry`) drops
 eligibility and re-elects AT ONCE, with no grace, because the client is still
 attached and the daemon knows immediately.
 
+**Raw means the WINDOW, and the attach carries it separately.**
+`AttachPayload.Cols`/`Rows` are the first pane's SPAWN size — the pane
+interior `attachMessage` computes (window minus sidebar, chrome and border).
+The raw window rides beside them in `WinCols`/`WinRows` (`win_cols`/`win_rows`,
+omitempty; 0x0 below the paintable floor exactly like `client_geometry`), and
+`attachWindowSize` (`clients.go`) feeds the registry — eligibility and
+`list_clients` — from that pair, falling back to `Cols`/`Rows` only when it is
+absent (an older client). Electing on the interior made a paintable window
+near the floor ineligible (80x12 sends a 78x8 interior, under 40x10); the
+first `WindowSizeMsg`'s `client_geometry` hid that on launch, but a reconnect
+or runtime host attach (`attachToDest`) sends no geometry after it, so a
+returning master lost its slot to a follower
+(`TestClientDispatch_ReattachNearTheFloorKeepsTheSlot`,
+`TestAttach_ReconnectCarriesTheRawWindow`).
+
 A master whose LINK IS LOST (no `MsgDetach`) keeps its slot for
 `master_grace_minutes` (`[daemon]`, default 3, clamped 0–60, `internal/config`;
 0 = no grace) — but ONLY while another client that was attached at the moment

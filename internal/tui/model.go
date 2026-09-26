@@ -8074,11 +8074,21 @@ func (m Model) attachMessage(dest string, reattach bool) *ipc.Message {
 			rows = 1
 		}
 	}
+	// The RAW window as well, which is what the daemon elects a master on —
+	// the same pair clientGeometryCmd reports. The interior above is only the
+	// first pane's spawn size; electing on it made a paintable window near the
+	// floor ineligible, and on a reattach no client_geometry follows to fix it.
+	winCols, winRows := m.width, m.height
+	if !m.terminalPaintable() {
+		winCols, winRows = 0, 0
+	}
 	// Best-effort; if Getwd fails the daemon falls back to its own CWD.
 	localCWD, _ := os.Getwd()
 	msg, _ := ipc.NewMessage(ipc.MsgAttach, ipc.AttachPayload{
 		Cols:     cols,
 		Rows:     rows,
+		WinCols:  winCols,
+		WinRows:  winRows,
 		CWD:      attachCWD(dest, localCWD),
 		ClientID: m.clientID,
 		Reattach: reattach,

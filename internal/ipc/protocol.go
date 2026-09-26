@@ -318,9 +318,20 @@ type Message struct {
 // Payload types
 
 type AttachPayload struct {
+	// Cols and Rows are the size to spawn the first pane of an empty
+	// workspace at: the pane INTERIOR (the window minus the sidebar, the
+	// chrome and the pane border), or 0x0 below the paintable floor.
 	Cols int    `json:"cols"`
 	Rows int    `json:"rows"`
 	CWD  string `json:"cwd,omitempty"`
+	// WinCols and WinRows are the RAW window size, exactly what
+	// MsgClientGeometry reports: 0x0 below the paintable floor (so both are
+	// omitted), the true window otherwise. Master eligibility and
+	// list_clients read these, never the interior above — an 80x12 window
+	// has a 78x8 interior, which is below the daemon's 40x10 floor. Absent
+	// from an older client, whose Cols/Rows the daemon falls back to.
+	WinCols int `json:"win_cols,omitempty"`
+	WinRows int `json:"win_rows,omitempty"`
 	// ClientID identifies this client across reconnects, for multi-client
 	// sync: master election, the client list and per-client geometry all key
 	// on it. Empty on an older client: the daemon mints an "anon-<uuid>" id

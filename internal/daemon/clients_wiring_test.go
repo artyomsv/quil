@@ -202,6 +202,74 @@ func TestClientDispatch_CountChangeReachesOtherClients(t *testing.T) {
 	}
 }
 
+// attachTUIAs attaches the way a current TUI does: Cols/Rows are the pane
+// interior (the window minus the chrome and the border, as attachMessage
+// computes it) and WinCols/WinRows the raw window.
+func attachTUIAs(t *testing.T, sock, id string, winCols, winRows int, reattach bool) *ipc.Client {
+	t.Helper()
+	c, err := ipc.NewClient(sock)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { c.Close() })
+	sendClientMsg(t, c, ipc.MsgAttach, ipc.AttachPayload{
+		ClientID: id, Cols: winCols - 2, Rows: winRows - 4,
+		WinCols: winCols, WinRows: winRows, Reattach: reattach,
+	})
+	return c
+}
+
+// Review finding M-2: eligibility is judged on the RAW window. An 80x12 TUI
+// sends a 78x8 interior, below the 40x10 floor; judged on that it was never
+// master, and after a lost link its reattach (which no client_geometry
+// follows) handed the slot to the follower. list_clients reports the raw
+// size too.
+func TestClientDispatch_ReattachNearTheFloorKeepsTheSlot(t *testing.T) {
+	d, sock := overlayServerDaemon(t)
+	(&clientsHarness{t: t}).install(d, testGrace)
+	a := attachTUIAs(t, sock, "A", 80, 12, false)
+	// A TUI follows its first attach with client_geometry (its first
+	// WindowSizeMsg), which is what used to hide the interior-size bug here.
+	sendClientMsg(t, a, ipc.MsgClientGeometry, ipc.ClientGeometryPayload{Cols: 80, Rows: 12})
+	waitUntil(t, "A master", func() bool { return d.masterID() == "A" })
+	attachTUIAs(t, sock, "B", 120, 40, false)
+	waitUntil(t, "B registered", func() bool { return d.clientCount() == 2 })
+
+	a.Close()
+	waitUntil(t, "A's disconnect processed", func() bool { return d.clientCount() == 1 })
+	attachTUIAs(t, sock, "A", 80, 12, true)
+	waitUntil(t, "A reattached", func() bool { return d.clientCount() == 2 })
+	if got := d.masterID(); got != "A" {
+		t.Errorf("masterID = %q after A's reattach, want A (the returning master keeps its slot)", got)
+	}
+
+	var sawA bool
+	for _, c := range d.listClients() {
+		if c.Client != "A" {
+			continue
+		}
+		sawA = true
+		if c.Cols != 80 || c.Rows != 12 || !c.Master {
+			t.Errorf("list_clients A = %dx%d master=%v, want 80x12 master=true (the raw window)", c.Cols, c.Rows, c.Master)
+		}
+	}
+	if !sawA {
+		t.Error("list_clients does not list A")
+	}
+}
+
+// An older client sends no raw pair: its Cols/Rows are all it has, and they
+// are used as they always were.
+func TestAttachWindowSize_FallsBackToColsRowsForAnOlderClient(t *testing.T) {
+	d, sock := overlayServerDaemon(t)
+	attachClientAs(t, sock, "old", 100, 30)
+	waitUntil(t, "old registered", func() bool { return d.clientCount() == 1 })
+	rec, ok := clientRecordByID(d, "old")
+	if !ok || rec.cols != 100 || rec.rows != 30 {
+		t.Errorf("record = %+v (found %v), want 100x30 from Cols/Rows", rec, ok)
+	}
+}
+
 // A lost link through the real server keeps the master's slot while a
 // follower is attached.
 func TestClientDispatch_LostLinkReservesSlot(t *testing.T) {

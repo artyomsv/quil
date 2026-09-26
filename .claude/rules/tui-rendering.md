@@ -136,6 +136,14 @@ entry yet) answers false, so a client that has not heard from a destination
 behaves as it always did. See `.claude/rules/daemon-lifecycle.md`'s
 "Multi-client" section for the daemon-side registry and election this reads.
 
+**`attachMessage` sends two sizes.** `Cols`/`Rows` stay the pane interior the
+daemon spawns an empty workspace's first pane at; `WinCols`/`WinRows` are the
+raw window (`m.width`/`m.height`, 0x0 when `!terminalPaintable()` — the pair
+`clientGeometryCmd` reports), which the daemon elects on. Both attach paths
+carry it, and the reconnect one (`attachToDest`) must: no `client_geometry`
+follows it, so a raw size missing there left an 80x12 master judged on its
+78x8 interior until the next resize.
+
 ### The resize gates and batching
 
 **A follower sends no `MsgResizePane`/`MsgResizePanes`.** The three resize

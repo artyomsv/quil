@@ -414,7 +414,23 @@ func (d *Daemon) attachClient(conn *ipc.Conn, attach ipc.AttachPayload) clientCh
 		return clientChange{}
 	}
 	id := truncateField(attach.ClientID, maxClientIDLen)
-	return d.clients.attach(conn, id, clampClientDim(attach.Cols), clampClientDim(attach.Rows), attach.CWD, attach.Reattach)
+	cols, rows := attachWindowSize(attach)
+	return d.clients.attach(conn, id, clampClientDim(cols), clampClientDim(rows), attach.CWD, attach.Reattach)
+}
+
+// attachWindowSize is the RAW window size an attach reports, which is what
+// eligibility and list_clients mean by a client's geometry. A current client
+// sends it in WinCols/WinRows; Cols/Rows are its pane interior, smaller by the
+// sidebar, the chrome and the border, so electing on them made a paintable
+// window near the floor (80x12 → 78x8) ineligible on every reattach, where no
+// client_geometry follows to correct it. An older client sends only Cols/Rows,
+// and they are its best answer. Both pairs are 0x0 below the paintable floor,
+// so an absent raw pair and an unpaintable one read the same.
+func attachWindowSize(attach ipc.AttachPayload) (cols, rows int) {
+	if attach.WinCols > 0 || attach.WinRows > 0 {
+		return attach.WinCols, attach.WinRows
+	}
+	return attach.Cols, attach.Rows
 }
 
 // clampClientDim bounds one axis of a self-reported window size to

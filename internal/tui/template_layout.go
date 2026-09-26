@@ -53,20 +53,22 @@ func templateStack(panes []*PaneModel, dir SplitDir) *LayoutNode {
 	return &LayoutNode{Split: dir, Ratio: 1 / float64(len(panes)), Left: NewLeaf(panes[0]), Right: templateStack(panes[1:], dir)}
 }
 
-func applyTemplateLayout(tab *TabModel, info TabInfo, paneMap map[string]*PaneInfo) {
+// applyTemplateLayout reports whether it built the tree — the one moment a
+// template tab's layout is first worth storing.
+func applyTemplateLayout(tab *TabModel, info TabInfo, paneMap map[string]*PaneInfo) bool {
 	if !tab.templateLayoutPending {
-		return
+		return false
 	}
 	panes := make([]*PaneModel, 0, len(info.Panes))
 	main := -1
 	for i, id := range info.Panes {
 		meta := paneMap[id]
 		if meta == nil || meta.TabID != tab.ID || meta.PreparingWorktree != "" || meta.Overlay {
-			return
+			return false
 		}
 		leaf := tab.Root.FindLeaf(id)
 		if leaf == nil || leaf.Pane == nil {
-			return
+			return false
 		}
 		panes = append(panes, leaf.Pane)
 		if id == info.TemplateMain {
@@ -76,9 +78,10 @@ func applyTemplateLayout(tab *TabModel, info TabInfo, paneMap map[string]*PaneIn
 	// The preparing and swap frames lack a final anchor. Do not consume the
 	// keyword or publish a layout containing their soon-to-be-replaced pane.
 	if main < 0 {
-		return
+		return false
 	}
 	tab.Root = templateLayout(info.TemplateLayout, panes, main)
 	tab.invalidateLeaves()
 	tab.templateLayoutApplied, tab.templateLayoutPending = true, false
+	return true
 }

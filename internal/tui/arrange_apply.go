@@ -1,8 +1,6 @@
 package tui
 
 import (
-	"log"
-
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/artyomsv/quil/internal/keymap"
@@ -82,8 +80,8 @@ func (m *Model) arrangeTab(tab *TabModel, kind layoutKind) tea.Cmd {
 // the tab being arranged may not be the one on screen.
 //
 // On success: the tree, the active pane (and every Active flag in the tab),
-// focus mode off, one resize at the canonical geometry, and one layout send
-// for THIS tab.
+// focus mode off, one resize at the canonical geometry, and one layout write
+// for THIS tab (markLayoutChanged).
 func (m *Model) applyTabArrangement(tab *TabModel, newRoot *LayoutNode, active *PaneModel) tea.Cmd {
 	if tab == nil || newRoot == nil || m.notesMode {
 		return nil
@@ -116,20 +114,5 @@ func (m *Model) applyTabArrangement(tab *TabModel, newRoot *LayoutNode, active *
 	tab.SetCanvas(w, h)
 	tab.SetChrome(m.projectSidebarWidth())
 	tab.Resize(w, h)
-	return tea.Batch(m.resizeAllPanes(), m.sendTabLayout(tab))
-}
-
-// sendTabLayout persists ONE tab's tree. It marshals here, on the Update
-// goroutine, and ships through sendDiffedLayouts — sendAllLayouts would re-send
-// every tab of every project, reading the trees from a Cmd goroutine.
-func (m *Model) sendTabLayout(tab *TabModel) tea.Cmd {
-	if tab == nil || tab.Root == nil {
-		return nil
-	}
-	data, err := MarshalLayout(tab.Root)
-	if err != nil {
-		log.Printf("tab layout: marshal %s: %v", tab.ID, err)
-		return nil
-	}
-	return m.sendDiffedLayouts([]layoutSend{{dest: m.destOfTab(tab.ID), tabID: tab.ID, data: data}})
+	return tea.Batch(m.resizeAllPanes(), m.markLayoutChanged(m.destOfTab(tab.ID), tab))
 }

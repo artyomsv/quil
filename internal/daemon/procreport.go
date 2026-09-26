@@ -246,7 +246,7 @@ type helloRecord struct {
 
 // helloRegistry tracks which connections have identified themselves.
 //
-// Its own mutex, never sm.mu — the same rule attachedConns follows, and for the
+// Its own mutex, never sm.mu — the same rule the client registry follows, and for the
 // same reason: this is read while assembling a report and written from every
 // dispatch goroutine, and coupling it to the session lock would put a second
 // writer in front of the snapshot loop.
@@ -299,6 +299,18 @@ func (r *helloRegistry) roleOf(conn *ipc.Conn) string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.byConn[conn].payload.Role
+}
+
+// helloOf returns a connection's self-description, and false when it never
+// said hello.
+func (r *helloRegistry) helloOf(conn *ipc.Conn) (ipc.ClientHelloPayload, bool) {
+	if conn == nil {
+		return ipc.ClientHelloPayload{}, false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	rec, ok := r.byConn[conn]
+	return rec.payload, ok
 }
 
 // putStat records a client's latest self-measurement.

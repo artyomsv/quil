@@ -189,27 +189,27 @@ func (d *Daemon) setOverlayClaim(conn *ipc.Conn, paneID string, visible bool) {
 	if conn == nil {
 		return
 	}
-	d.attachedMu.Lock()
-	defer d.attachedMu.Unlock()
-	claims, ok := d.attachedConns[conn]
+	d.clients.mu.Lock()
+	defer d.clients.mu.Unlock()
+	rec, ok := d.clients.byConn[conn]
 	if !ok {
 		return
 	}
 	if visible {
-		claims[paneID] = true
+		rec.overlays[paneID] = true
 		return
 	}
-	delete(claims, paneID)
+	delete(rec.overlays, paneID)
 }
 
 // overlayClaimed reports whether ANY attached client currently has this overlay
 // on screen. The attached set holds one entry per client (one, occasionally
 // two), so the walk is trivially cheap.
 func (d *Daemon) overlayClaimed(paneID string) bool {
-	d.attachedMu.Lock()
-	defer d.attachedMu.Unlock()
-	for _, claims := range d.attachedConns {
-		if claims[paneID] {
+	d.clients.mu.Lock()
+	defer d.clients.mu.Unlock()
+	for _, rec := range d.clients.byConn {
+		if rec.overlays[paneID] {
 			return true
 		}
 	}
@@ -221,10 +221,10 @@ func (d *Daemon) overlayClaimed(paneID string) bool {
 // owes, so a destroyed overlay cannot leave its id in a live client's claim set
 // for the life of a daemon that runs for weeks.
 func (d *Daemon) forgetOverlayClaimsFor(paneID string) {
-	d.attachedMu.Lock()
-	defer d.attachedMu.Unlock()
-	for _, claims := range d.attachedConns {
-		delete(claims, paneID)
+	d.clients.mu.Lock()
+	defer d.clients.mu.Unlock()
+	for _, rec := range d.clients.byConn {
+		delete(rec.overlays, paneID)
 	}
 }
 
@@ -237,7 +237,7 @@ func (d *Daemon) forgetOverlayClaimsFor(paneID string) {
 // model — two TUIs used to mean the second one's tab switch started a
 // five-minute countdown on the first one's visible lazygit.
 //
-// The claim is resolved BEFORE PluginMu is taken. attachedMu must never nest
+// The claim is resolved BEFORE PluginMu is taken. clients.mu must never nest
 // inside a pane lock.
 func (d *Daemon) applyOverlayVisibility(conn *ipc.Conn, pane *Pane, visible bool) {
 	d.setOverlayClaim(conn, pane.ID, visible)

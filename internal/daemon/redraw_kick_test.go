@@ -268,7 +268,7 @@ func TestPaneSize_ConcurrentResizeAndRead(t *testing.T) {
 	go func() {
 		defer close(done)
 		for _, m := range msgs {
-			d.handleResizePane(m)
+			d.handleResizePane(nil, m)
 		}
 	}()
 

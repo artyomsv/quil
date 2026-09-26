@@ -14,7 +14,7 @@ The result: your AI can **see what's in your build pane and react**, instead of 
   - [VS Code (GitHub Copilot Chat)](#vs-code-github-copilot-chat)
   - [Any MCP-capable client](#any-mcp-capable-client)
 - [Verify the connection](#verify-the-connection)
-- [The 35 tools](#the-35-tools)
+- [The 36 tools](#the-36-tools)
   - [Discovery](#discovery)
   - [Reading pane output](#reading-pane-output)
   - [Interacting with panes](#interacting-with-panes)
@@ -70,7 +70,7 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) o
 }
 ```
 
-Restart Claude Desktop. The 🔌 icon in the input bar should show Quil with 35 tools.
+Restart Claude Desktop. The 🔌 icon in the input bar should show Quil with 36 tools.
 
 ### Claude Code (CLI)
 
@@ -139,7 +139,7 @@ In your AI client, ask:
 
 The AI should call `list_panes` and return a JSON array with each pane's `id`, `type`, `tab_id`, `cwd`, etc. If you see "no Quil panes" or an error, check [Troubleshooting](#troubleshooting).
 
-## The 35 tools
+## The 36 tools
 
 Tools are grouped below by purpose. Every tool returns a `text` content block; many return JSON-formatted payloads.
 
@@ -296,13 +296,18 @@ The daemon does not parse the target's reply. The excerpt is raw output; the req
 
 ### TUI cooperation
 
-These steer the live TUI window (if one is attached).
+These steer the live TUI window(s) attached to the daemon — see
+[Multi-client sync](features.md#multi-client-sync) for what it means to have
+more than one.
 
 | Tool | Input | Returns | Notes |
 |---|---|---|---|
-| `switch_tab` | `tab_id` (required) | "Switched to tab <id>" | Brings a different tab into view in the TUI. |
-| `set_active_pane` | `pane_id` (required) | "Set active pane to <id>" | Focuses the pane. Auto-switches tab if needed. |
-| `close_tui` | — | "TUI close signal sent. Daemon continues running." | Closes the TUI window. Daemon and all pane processes keep running — reattach by running `quil` again. |
+| `switch_tab` | `tab_id` (required) | "Switched to tab <id>" | Brings a different tab into view — in every attached window, since the active tab is shared. |
+| `set_active_pane` | `pane_id` (required), `client` (optional) | "Set active pane to <id>" | Switches the shared active tab if needed, then focuses the pane in ONE window: the one named by `client`, or, when omitted, whichever window you last typed in. |
+| `close_tui` | `client` (optional) | "TUI close signal sent. Daemon continues running." | Closes ONE window — named by `client`, or the one you last typed in — not every attached window. Daemon and all pane processes keep running regardless; reattach by running `quil` again. With no window attached at all, nothing is sent. |
+| `list_clients` | `host` (optional) | JSON array: `{client, attached_at, cols, rows, master, last_input_at, role, pid, exe}` | Every attached window (and any other attached client), oldest first. `client` is the id to pass to `set_active_pane`/`close_tui`; `master` marks which one currently sets pane sizes. `attached_at`/`last_input_at` are RFC 3339, and `last_input_at` is absent for a window that has only watched. **Requires daemon 1.80.0+.** |
+
+`client` picks an EXACT window and never falls back to another one — but both tools are fire-and-forget, so a `client` that names no attached window still returns success; the daemon simply has nothing to send it to (logged daemon-side). Use `list_clients` right before to confirm the id is current. Omit `client` to get today's single-window behaviour unchanged — with one window attached, there is only ever one to choose.
 
 ### Event observation
 

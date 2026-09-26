@@ -56,9 +56,9 @@ func (d *Daemon) handleCreateProjectReq(conn *ipc.Conn, msg *ipc.Message) {
 		respondTo(conn, msg.ID, ipc.MsgCreateProjectResp, ipc.CreateProjectRespPayload{Error: "name is required"})
 		return
 	}
-	rootDir := d.resolveRequestedCWD(req.RootDir, d.defaultCWD())
+	rootDir := d.resolveRequestedCWD(req.RootDir, d.defaultCWD(conn))
 	proj := d.session.CreateProject(req.Name, rootDir)
-	d.recoverEmptyProject(proj.ID)
+	d.recoverEmptyProject(conn, proj.ID)
 	d.broadcastState()
 	d.requestSnapshot()
 	log.Printf("project created over IPC request: %s %q", proj.ID, proj.Name)

@@ -61,3 +61,27 @@ func TestConn_SubscribedConnWantsEverything(t *testing.T) {
 		}
 	}
 }
+
+// TestConn_HoldPaneOutputSkipsOnlyPaneOutput covers SetHoldPaneOutput, the
+// daemon's own transient gate used to keep live output from interleaving into
+// a newly-attaching client's replay. It is independent of the client's own
+// MsgSubscribe opt-out above (setPaneOutputWanted): only pane_output is ever
+// filtered, and releasing the hold must restore it.
+func TestConn_HoldPaneOutputSkipsOnlyPaneOutput(t *testing.T) {
+	local, remote := net.Pipe()
+	t.Cleanup(func() { local.Close(); remote.Close() })
+	c := newConn(local)
+	c.SetHoldPaneOutput(true)
+	if c.wantsFrame(MsgPaneOutput) {
+		t.Fatal("held conn must skip pane_output")
+	}
+	for _, typ := range []string{MsgWorkspaceState, MsgPaneSizes, MsgPaneEvent} {
+		if !c.wantsFrame(typ) {
+			t.Fatalf("held conn must still want %s", typ)
+		}
+	}
+	c.SetHoldPaneOutput(false)
+	if !c.wantsFrame(MsgPaneOutput) {
+		t.Fatal("released conn must want pane_output")
+	}
+}

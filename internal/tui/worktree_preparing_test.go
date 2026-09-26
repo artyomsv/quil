@@ -78,12 +78,12 @@ func TestPaneView_PreparingNeverOutgrowsThePane(t *testing.T) {
 // carries no branch, and a guarded copy would leave a finished checkout spinning.
 func TestSyncPaneMeta_CarriesAndClearsPreparingWorktree(t *testing.T) {
 	pane := &PaneModel{ID: "p1"}
-	syncPaneMeta(pane, &PaneInfo{ID: "p1", PreparingWorktree: "feat/x"}, false, 0, false)
+	syncPaneMeta(pane, &PaneInfo{ID: "p1", PreparingWorktree: "feat/x"}, false, 0, false, false)
 	if pane.PreparingWorktree != "feat/x" {
 		t.Fatalf("PreparingWorktree = %q, want the daemon's branch", pane.PreparingWorktree)
 	}
 
-	syncPaneMeta(pane, &PaneInfo{ID: "p1"}, false, 0, false)
+	syncPaneMeta(pane, &PaneInfo{ID: "p1"}, false, 0, false, false)
 	if pane.PreparingWorktree != "" {
 		t.Errorf("PreparingWorktree = %q after a clean update, want it cleared", pane.PreparingWorktree)
 	}

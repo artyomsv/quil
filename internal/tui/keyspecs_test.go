@@ -30,6 +30,9 @@ var promotedActions = map[keymap.ActionID]bool{
 	"tab.layout_grid": true, "tab.layout_main": true, "tab.layout_spiral": true,
 	// The project-group actions arrived after bindings.toml too.
 	"project.group_toggle": true, "project.groups_collapse_all": true,
+	// client.take_control is new with multi-client sync and never had a
+	// [keybindings] field either.
+	"client.take_control": true,
 }
 
 func TestKeySpecsFromConfig_MapsEveryConfigBackedAction(t *testing.T) {

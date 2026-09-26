@@ -370,6 +370,21 @@ type DaemonConfig struct {
 	SnapshotInterval  string `toml:"snapshot_interval"`
 	AutoStart         bool   `toml:"auto_start"`
 	WarmShellPoolSize int    `toml:"warm_shell_pool_size"` // 0 disables pooling.
+	// MasterGraceMinutes is how long a size master whose link dropped keeps
+	// its slot while another client is attached. Read it through MasterGrace,
+	// which clamps it.
+	MasterGraceMinutes int `toml:"master_grace_minutes"`
+}
+
+// MaxMasterGraceMinutes bounds master_grace_minutes. A longer grace would
+// freeze every PTY size behind a client that is not coming back.
+const MaxMasterGraceMinutes = 60
+
+// MasterGrace is MasterGraceMinutes clamped to 0–MaxMasterGraceMinutes, as a
+// duration. Zero means no grace: a lost master is replaced at once.
+func (c DaemonConfig) MasterGrace() time.Duration {
+	m := min(max(c.MasterGraceMinutes, 0), MaxMasterGraceMinutes)
+	return time.Duration(m) * time.Minute
 }
 
 type GhostBufferConfig struct {
@@ -613,9 +628,10 @@ type KeybindingsConfig struct {
 func Default() Config {
 	return Config{
 		Daemon: DaemonConfig{
-			SnapshotInterval:  "30s",
-			AutoStart:         true,
-			WarmShellPoolSize: 1,
+			SnapshotInterval:   "30s",
+			AutoStart:          true,
+			WarmShellPoolSize:  1,
+			MasterGraceMinutes: 3,
 		},
 		GhostBuffer: GhostBufferConfig{
 			MaxLines: 500,

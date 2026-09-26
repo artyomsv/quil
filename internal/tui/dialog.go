@@ -1359,6 +1359,10 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		switch kind {
 		case "pane":
 			dest = m.destOfPane(id)
+			if m.closeRequested == nil {
+				m.closeRequested = make(map[string]bool)
+			}
+			m.closeRequested[closeKey(dest, id)] = true
 		case "tab":
 			dest = m.destOfTab(id)
 		}
@@ -2748,6 +2752,7 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 				m.pendingSplit = make(map[string]*LayoutNode)
 			}
 			m.pendingSplit[tab.ID] = leaf
+			tab.noteReservation(oldPaneID, 0, true)
 			// What the reserved leaf is waiting for, recorded on the node so it
 			// dies with it. A replace disposes the pane it stands in for at send
 			// time, so on a single-pane tab this placeholder IS the tab.
@@ -2819,6 +2824,7 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 		m.pendingSplit = make(map[string]*LayoutNode)
 	}
 	m.pendingSplit[tab.ID] = placeholder
+	tab.noteReservation(pane.ID, dir, false)
 	// See the replace arm: recorded on the node, so it needs no unwinding.
 	placeholder.phType = pluginName
 

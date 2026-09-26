@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"reflect"
 	"testing"
 	"time"
@@ -674,12 +675,28 @@ func TestNewPaneFromElsewhere_StillUsesLegacyPlacement(t *testing.T) {
 // Two clients with the same prior state and geometry place the moved pane
 // identically, and once one of them has pushed its tree the other agrees with
 // what the daemon stores — no layout thrash.
+//
+// Nobody on either client asked for the move's placement, so neither sends on
+// the move itself; the next broadcast, whose stored trees still predate it,
+// makes each send once (layoutsync.go).
 func TestMovedPane_TwoClientsConverge(t *testing.T) {
 	t.Parallel()
-	before := mpState("tab-src",
-		mpTab{"tab-src", []string{"p1", "p2"}}, mpTab{"tab-tgt", []string{"p3", "p4"}})
-	after := mpState("tab-src",
-		mpTab{"tab-src", []string{"p1"}}, mpTab{"tab-tgt", []string{"p3", "p4", "p2"}})
+	stored := func(st WorkspaceStateMsg) WorkspaceStateMsg {
+		st.Tabs = append([]TabInfo(nil), st.Tabs...)
+		for i := range st.Tabs {
+			switch st.Tabs[i].ID {
+			case "tab-src":
+				st.Tabs[i].Layout = lsWire(t, lsSplit(SplitVertical, 0.5, lsLeaf("p1"), lsLeaf("p2")))
+			case "tab-tgt":
+				st.Tabs[i].Layout = lsWire(t, lsSplit(SplitVertical, 0.5, lsLeaf("p3"), lsLeaf("p4")))
+			}
+		}
+		return st
+	}
+	before := stored(mpState("tab-src",
+		mpTab{"tab-src", []string{"p1", "p2"}}, mpTab{"tab-tgt", []string{"p3", "p4"}}))
+	after := stored(mpState("tab-src",
+		mpTab{"tab-src", []string{"p1"}}, mpTab{"tab-tgt", []string{"p3", "p4", "p2"}}))
 
 	a := newMovePaneModel(t, 120, 40)
 	b := newMovePaneModel(t, 120, 40)
@@ -692,10 +709,11 @@ func TestMovedPane_TwoClientsConverge(t *testing.T) {
 		t.Fatalf("the two clients placed the moved pane differently:\nA=%+v\nB=%+v", treeA, treeB)
 	}
 
-	var pushed *layoutSend
-	for _, s := range a.diffLayouts(after) {
-		if s.tabID == "tab-tgt" {
-			pushed = &s
+	a, sentA := lsApply(t, a, after)
+	var pushed json.RawMessage
+	for _, s := range sentA {
+		if s.TabID == "tab-tgt" {
+			pushed = s.Layout
 		}
 	}
 	if pushed == nil {
@@ -706,13 +724,17 @@ func TestMovedPane_TwoClientsConverge(t *testing.T) {
 	third.Tabs = append([]TabInfo(nil), after.Tabs...)
 	for i := range third.Tabs {
 		if third.Tabs[i].ID == "tab-tgt" {
-			third.Tabs[i].Layout = pushed.data
+			third.Tabs[i].Layout = pushed
+			third.Tabs[i].LayoutRev = 1
 		}
 	}
-	b = mpApply(t, b, third)
-	for _, s := range b.diffLayouts(third) {
-		if s.tabID == "tab-tgt" {
+	b, sentB := lsApply(t, b, third)
+	for _, s := range sentB {
+		if s.TabID == "tab-tgt" {
 			t.Error("client B disagrees with the tree client A stored — the two would re-send each other's layout forever")
 		}
+	}
+	if got := SerializeLayout(mpTabOf(t, &b, "tab-tgt").Root); !reflect.DeepEqual(got, treeA) {
+		t.Errorf("client B holds %+v, want A's stored %+v", got, treeA)
 	}
 }

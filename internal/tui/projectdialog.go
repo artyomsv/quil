@@ -246,7 +246,7 @@ func (m *Model) submitNewProject(name, rootDir string) tea.Cmd {
 	}
 	// Reachability is checked HERE because the send cannot report it. Router.Send
 	// drops a message aimed at a dest it has no connection for, logs, and returns
-	// NIL — deliberately, so resizeAllPanes and sendAllLayouts cannot break
+	// NIL — deliberately, so resizeAllPanes and sendDiffedLayouts cannot break
 	// mid-iteration and leave other daemons unsynced. Every `if err := send(…)`
 	// below is therefore blind to the likeliest failure of all: the host going
 	// away while this dialog is open.

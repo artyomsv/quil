@@ -6,10 +6,13 @@ import (
 	"log"
 	"math/rand"
 	"strings"
+	"sync"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+
+	"github.com/artyomsv/quil/internal/ipc"
 )
 
 // linkLostMsg reports that the connection to the daemon died.
@@ -375,6 +378,46 @@ func (m Model) closeClient(c Client) {
 	m.closeClientFn(c)
 }
 
+// sendDetach tells a conn's daemon that this client is exiting cleanly (§3.3's
+// "a clean exit skips the grace time"): the daemon drops it from master
+// election and the client list at once, rather than waiting out the lost-link
+// grace timer for a link that is not actually lost. Best-effort and silent —
+// this runs on the exit path, where there is nobody left to report a failure
+// to, and an older daemon simply ignores an unknown message type.
+//
+// Sent here, immediately before closeClient, rather than as a tea.Cmd: the
+// Update loop is already gone on the exit path (main.go), and closeClient's
+// own Flush is what actually carries a just-queued Send to the socket.
+func sendDetach(c Client) {
+	if c == nil {
+		return
+	}
+	msg, err := ipc.NewMessage(ipc.MsgDetach, nil)
+	if err != nil {
+		return
+	}
+	if err := c.Send(msg); err != nil {
+		log.Printf("detach: send: %v", err)
+	}
+}
+
+// detachTimeout bounds how long CloseClient waits for every conn's detach
+// send to complete before moving on to the flush/close path.
+//
+// ipc.Client.Send is NOT a plain enqueue — it routes through SendBlocking and
+// can wait up to clientSendTimeout (5s, internal/ipc) against a peer whose
+// must-deliver queue stays full, e.g. a remote host whose link died without
+// the reconnect ladder having noticed yet. CloseClient can be releasing
+// several such conns at once, and detaching them ONE AT A TIME would let a
+// handful of dead hosts turn quitting the TUI itself into a multi-second (or
+// multi-ten-second) hang. 500ms is generous for the healthy case — an
+// ordinary Send returns in microseconds — and short enough that a wedged
+// host costs the user nothing beyond it.
+//
+// A var, not a const, mirroring clientSendTimeout's own reasoning: a test
+// that wants to prove the bound without actually waiting 500ms shrinks it.
+var detachTimeout = 500 * time.Millisecond
+
 // CloseClient releases every connection the Model currently holds. Called by
 // cmd/quil on exit, after the Bubble Tea program has returned.
 //
@@ -384,14 +427,47 @@ func (m Model) closeClient(c Client) {
 // child and every remote `quil --stdio` outlived the client, on top of the
 // per-reconnect leak retire used to cause. cmd/quil's own `defer client.Close()`
 // cannot cover this either: it captured the startup conn of ONE destination.
+//
+// Every conn's detach is sent CONCURRENTLY and the whole batch is bounded at
+// detachTimeout — see its doc comment. Order is still preserved for every
+// conn that finishes within the budget: detach is queued (Send) before
+// closeClient runs for that conn, and closeClient's own Flush is what
+// actually carries it to the socket. A conn that is still wedged past the
+// budget is closed anyway; its detach send may or may not have reached the
+// socket, which is no worse than the lost-link grace period it would
+// otherwise have cost the next election. Any straggling sendDetach goroutine
+// left running past the budget dies with the process — CloseClient runs on
+// the exit path, with nothing left to join it.
 func (m Model) CloseClient() {
+	var conns []Client
 	if r, ok := m.client.(*Router); ok {
-		for _, c := range r.Conns() {
-			m.closeClient(c)
-		}
-		return
+		conns = r.Conns()
+	} else {
+		conns = []Client{m.client}
 	}
-	m.closeClient(m.client)
+
+	var wg sync.WaitGroup
+	for _, c := range conns {
+		c := c
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sendDetach(c)
+		}()
+	}
+	allSent := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(allSent)
+	}()
+	select {
+	case <-allSent:
+	case <-time.After(detachTimeout):
+	}
+
+	for _, c := range conns {
+		m.closeClient(c)
+	}
 }
 
 // canReconnect reports whether a dropped link to dest should be retried rather
@@ -847,6 +923,9 @@ func (m *Model) armReattachReset(dest string) {
 		p.reattachReset = true
 		// The daemon may have restarted too, resetting its PTY run counter.
 		p.outputGeneration = 0
+		// And its per-pane size counter: a restarted daemon numbers sizes from
+		// 1 again, and a kept number would refuse every one of them as stale.
+		p.daemonSizeSeq = 0
 		// Forget that this pane has been sized. The suppression in diffResizes
 		// describes a daemon-side guard (appliedCols/appliedRows) that a PTY
 		// reinstall zeroes, so carrying it across an outage would withhold the
@@ -854,6 +933,10 @@ func (m *Model) armReattachReset(dest string) {
 		// delete on a nil map is a no-op.
 		delete(m.sizedOnce, sizedKey(dest, p.ID))
 	})
+	// And every tab's layout revision: the daemon's stored tree is the
+	// authority after a reattach, and a restarted daemon's revision can be
+	// LOWER than ours (resetLayoutSync).
+	m.resetLayoutSync(dest)
 	// Selection is Model-level and anchors to row/column coordinates that any
 	// replay invalidates. Dropped now rather than armed: there is no per-pane
 	// chunk to hang it off, and a selection surviving an outage is worth nothing.
@@ -864,6 +947,23 @@ func (m *Model) armReattachReset(dest string) {
 	// reconnecting — which is the case its content is about to be replaced in.
 	if m.selection != nil && m.destOfPane(m.selection.PaneID) == dest {
 		m.selection = nil
+	}
+	// Typing guard state (spec §8.1) is stale the moment its destination
+	// reattaches: a reattach replaces that daemon's whole state, so a pending
+	// requestedTab token can never land the broadcast it was waiting for (the
+	// tab it named may not even exist any more), and a guardPaneID pointing at
+	// one of its panes is redirecting input toward a pane about to be rebuilt
+	// out from under it. Requests for OTHER destinations are untouched — one
+	// daemon reconnecting says nothing about another's in-flight switches.
+	prefix := dest + "\x00"
+	for key := range m.requestedTab {
+		if strings.HasPrefix(key, prefix) {
+			delete(m.requestedTab, key)
+		}
+	}
+	if m.guardPaneID != "" && m.destOfPane(m.guardPaneID) == dest {
+		m.guardPaneID = ""
+		m.remoteFocusUnacked = false
 	}
 }
 
@@ -1095,8 +1195,13 @@ func (m Model) finishReconnect(dest string, c Client) (tea.Model, tea.Cmd) {
 		}
 	})
 
+	// attachToDest reads attachedOnce for the Reattach flag, so the mark comes
+	// after it: a destination unreachable at launch attaches here for the
+	// first time, and must say so.
+	attach := m.attachToDest(dest)
+	m.markAttachedOnce(dest)
 	if isRouter {
-		return m, m.attachToDest(dest)
+		return m, attach
 	}
-	return m, tea.Batch(m.attachToDest(dest), m.listenForMessages())
+	return m, tea.Batch(attach, m.listenForMessages())
 }

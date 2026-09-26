@@ -2,7 +2,7 @@
 
 A capability-by-capability tour of what Quil does. For configuration knobs, see [Configuration](configuration.md). For keystrokes, see [Keybindings](keybindings.md). For AI integration, see [MCP](mcp.md).
 
-Quil exposes **35 MCP tools**: agents can manage [projects and tabs](mcp.md#projects-and-tabs), discover and route work across [remote hosts](mcp.md#remote-hosts), and create AI panes with the TUI dialog's options. [`delegate_task`](mcp.md#delegating-work-to-another-pane) tracks pane-to-pane work and can notify the requester after completion, when it is ready to receive input.
+Quil exposes **36 MCP tools**: agents can manage [projects and tabs](mcp.md#projects-and-tabs), discover and route work across [remote hosts](mcp.md#remote-hosts), and create AI panes with the TUI dialog's options. [`delegate_task`](mcp.md#delegating-work-to-another-pane) tracks pane-to-pane work and can notify the requester after completion, when it is ready to receive input.
 
 ## Table of contents
 
@@ -48,6 +48,7 @@ Quil exposes **35 MCP tools**: agents can manage [projects and tabs](mcp.md#proj
 - [Projects](#projects)
   - [Project groups](#project-groups)
   - [Projects on another machine](#projects-on-another-machine)
+- [Multi-client sync](#multi-client-sync)
 - [Pane notes](#pane-notes)
 - [Operations](#operations)
   - [Self-healing daemon](#self-healing-daemon)
@@ -669,6 +670,70 @@ A configured remote host that's unreachable when you launch no longer drops out 
 
 ---
 
+## Multi-client sync
+
+Two or more Quil windows can attach to the same daemon and see one shared
+workspace: the same projects, tabs, panes, names, colours and layout. A pane
+either of them creates appears in both; closing one in either window closes it
+for both. There is no per-client copy of the workspace to fall out of sync.
+
+**Size master.** Each pane's PTY has one size, so exactly one attached client
+sets it — the **size master**, the oldest attached window whose own terminal
+is large enough to draw panes at all. While two or more clients are attached,
+the status bar shows `[master]` or `[follower]` next to `[dev]`; with a single
+window attached, nothing is shown, and it behaves exactly as it always has.
+A follower's panes are sized to whatever the master last set: too wide or too
+tall for the follower's own box, they are cropped rather than reflowed — width
+keeps the left columns, height keeps the bottom rows, each with a `…` marker
+on the cut border edge — and too small, they are simply padded. Scrolling the
+wheel into a cropped pane reveals the cut rows first, then real scrollback.
+
+If the master's window closes normally, the next-oldest attached window
+becomes master immediately, and its panes resize once to fit it. If the
+master's *connection* merely drops (a network hiccup, not a quit) its slot is
+held for a few minutes — `master_grace_minutes` in
+[Configuration](configuration.md#daemon), default 3 — so a following window's
+panes are not resized out from under it while the master might still come
+back; with nobody left to protect, a relaunched window takes over at once
+instead of waiting. **Take control** (unbound by default — bind
+`client.take_control` in `bindings.toml`, or run it from the command palette)
+makes the window you are typing in the master immediately, whatever the
+election above would otherwise pick. After a daemon restart, the previous
+master's window gets its slot back when it reconnects, so nothing resizes; a
+freshly started window that is alone on the daemon becomes master at once.
+
+**Typing guard.** If another window switches your shared active tab while you
+are mid-keystroke, your next 250 ms of typing still lands in the pane you were
+in — a flash reads `Tab switched by another client` — rather than being
+redirected into whatever the switch brought to the front. A pane that becomes
+focused only because of someone else's switch does not clear its unseen mark
+until you actually type or click in this window; otherwise every attached
+window would silently mark a pane "seen" the moment anyone else looked at it.
+
+**Layout.** Splitting, closing, dragging a pane, dragging a split border or
+arranging a tab in one window is mirrored in every other attached window at
+once, and survives quitting and reopening both. Two windows editing the same
+tab's layout at the exact same moment is resolved by "first write wins" — the
+losing window's change is superseded by the other's, which is expected only
+when two people are actively rearranging one tab together.
+
+**Marks.** Dismissing a notification, or clearing a pane's unseen mark by
+viewing it, updates every attached window's sidebar — not just the one that
+did it.
+
+**MCP.** `set_active_pane` and `close_tui` each act on one attached window
+rather than every one of them: by default the window you last typed in, or
+name one explicitly with the `client` field (see [`list_clients`](mcp.md#tui-cooperation)
+for the ids to choose from). With no window attached at all, `close_tui` sends
+nothing rather than erroring.
+
+**Cost with a single window.** Two small costs apply even when only one window
+is attached. Each layout change (a split, a close, an arrangement, a border
+drag) now costs one workspace-state frame back from the daemon, coalesced over
+50 ms. And attaching can wait up to 2 s for a busy live-output queue to drain,
+so a pane's history replay and its live output arrive exactly once, in order.
+
+---
 
 ## Pane notes
 

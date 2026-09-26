@@ -238,7 +238,7 @@ unnamed and its root IS the daemon's default, so writing it back is a no-op.
 
 **Reachability is checked in the client, because the send cannot report it.**
 `Router.Send` DROPS a message aimed at a dest it has no conn for, logs, and
-returns nil — deliberately, so `resizeAllPanes`/`sendAllLayouts` cannot break
+returns nil — deliberately, so `resizeAllPanes` (or `markLayoutChanged` for the changed tab) cannot break
 mid-iteration. Every `if err := send(…)` in the dialog is therefore blind to the
 likeliest failure of all. `destReachable` guards the whole `projectFormDest != ""`
 branch rather than the fold alone, because a host that disconnects between the

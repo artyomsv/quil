@@ -290,6 +290,42 @@ func (nc *NotificationCenter) DismissSelected() string {
 	return id
 }
 
+// DismissByID removes the event with the given id, or every event whose pane
+// belongs to dest when id is empty — the client-side application of the
+// daemon's event_dismissed broadcast (spec §8.4). Empty mirrors
+// DismissEventPayload's own "" = all convention, but "all" is scoped to the
+// DEST that broadcast it: the notification list holds cards from every
+// destination this client is attached to, and a dismiss-all from ONE daemon
+// must not clear another daemon's cards too. destOf resolves an event's pane
+// to its destination (Model.destOfPane) — the stored event carries no
+// destination of its own. A named id needs no such scoping: an id can only
+// ever match the one event the dismissing daemon reported.
+//
+// Unlike DismissSelected/DismissAll, this is driven by a REPORT of what was
+// already dismissed (this client's own action, or another attached client's),
+// so it must never send anything back — that would echo the dismissal the
+// broadcast just delivered.
+func (nc *NotificationCenter) DismissByID(id, dest string, destOf func(paneID string) string) {
+	if id == "" {
+		kept := nc.events[:0]
+		for _, e := range nc.events {
+			if destOf(e.PaneID) != dest {
+				kept = append(kept, e)
+			}
+		}
+		nc.events = kept
+		nc.clampCursor()
+		return
+	}
+	for i, e := range nc.events {
+		if e.ID == id {
+			nc.events = append(nc.events[:i], nc.events[i+1:]...)
+			break
+		}
+	}
+	nc.clampCursor()
+}
+
 // DismissAll removes all events.
 //
 // Every stored event, not just the visible ones: the key is documented as

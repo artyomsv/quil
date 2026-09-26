@@ -35,12 +35,12 @@ func TestHandleResizePane_DuplicateSize_SkipsPTYResize(t *testing.T) {
 	pane := &Pane{ID: "p1", PTY: fake}
 	d.session.panes["p1"] = pane
 
-	d.handleResizePane(resizeMsg(t, "p1", 100, 40))
-	d.handleResizePane(resizeMsg(t, "p1", 100, 40))
+	d.handleResizePane(nil, resizeMsg(t, "p1", 100, 40))
+	d.handleResizePane(nil, resizeMsg(t, "p1", 100, 40))
 	if len(fake.resizes) != 1 {
 		t.Fatalf("PTY.Resize called %d times, want 1 (duplicate must be skipped)", len(fake.resizes))
 	}
-	d.handleResizePane(resizeMsg(t, "p1", 120, 40))
+	d.handleResizePane(nil, resizeMsg(t, "p1", 120, 40))
 	if len(fake.resizes) != 2 {
 		t.Fatalf("PTY.Resize called %d times, want 2 (changed size must apply)", len(fake.resizes))
 	}
@@ -55,7 +55,7 @@ func TestHandleResizePane_FreshPTY_AcceptsSameSize(t *testing.T) {
 	pane := &Pane{ID: "p1", PTY: fake}
 	d.session.panes["p1"] = pane
 
-	d.handleResizePane(resizeMsg(t, "p1", 100, 40))
+	d.handleResizePane(nil, resizeMsg(t, "p1", 100, 40))
 
 	// Simulate restart: new PTY installed the way spawnPane does it.
 	fake2 := &fakeSession{}
@@ -64,7 +64,7 @@ func TestHandleResizePane_FreshPTY_AcceptsSameSize(t *testing.T) {
 	pane.appliedCols, pane.appliedRows = 0, 0
 	pane.PluginMu.Unlock()
 
-	d.handleResizePane(resizeMsg(t, "p1", 100, 40))
+	d.handleResizePane(nil, resizeMsg(t, "p1", 100, 40))
 	if len(fake2.resizes) != 1 {
 		t.Fatalf("fresh PTY got %d resizes, want 1 (guard must reset on PTY install)", len(fake2.resizes))
 	}
@@ -74,7 +74,7 @@ func TestHandleResizePane_NilPTY_NoApply(t *testing.T) {
 	d := &Daemon{session: NewSessionManager(4096)}
 	pane := &Pane{ID: "p1"}
 	d.session.panes["p1"] = pane
-	d.handleResizePane(resizeMsg(t, "p1", 100, 40)) // must not panic
+	d.handleResizePane(nil, resizeMsg(t, "p1", 100, 40)) // must not panic
 	if pane.Cols != 0 {
 		t.Errorf("pane.Cols = %d, want 0 (no PTY, nothing applied)", pane.Cols)
 	}
@@ -84,7 +84,7 @@ func TestHandleResizePane_NilPTY_NoApply(t *testing.T) {
 	pane.PluginMu.Lock()
 	pane.PTY = fake
 	pane.PluginMu.Unlock()
-	d.handleResizePane(resizeMsg(t, "p1", 100, 40))
+	d.handleResizePane(nil, resizeMsg(t, "p1", 100, 40))
 	if len(fake.resizes) != 1 {
 		t.Fatalf("PTY got %d resizes, want 1 (nil-PTY request must not poison the guard)", len(fake.resizes))
 	}
@@ -121,7 +121,7 @@ func TestSpawnPane_ResetsResizeGuard(t *testing.T) {
 			pane.appliedCols, pane.appliedRows)
 	}
 	// A resize at the old size now goes through to the new PTY.
-	d.handleResizePane(resizeMsg(t, "p-reset", 100, 40))
+	d.handleResizePane(nil, resizeMsg(t, "p-reset", 100, 40))
 	if len(fake.resizes) < 1 {
 		t.Errorf("fresh PTY got %d resizes at the old size, want at least 1", len(fake.resizes))
 	}
@@ -136,12 +136,12 @@ func TestHandleResizePane_FailedResizeDoesNotStickGuard(t *testing.T) {
 	pane := &Pane{ID: "p-fail", PTY: fake}
 	d.session.panes["p-fail"] = pane
 
-	d.handleResizePane(resizeMsg(t, "p-fail", 90, 30)) // fails
+	d.handleResizePane(nil, resizeMsg(t, "p-fail", 90, 30)) // fails
 	if pane.appliedCols != 0 || pane.appliedRows != 0 {
 		t.Fatalf("failed resize stuck the guard at %dx%d, want 0x0", pane.appliedCols, pane.appliedRows)
 	}
 	fake.fail = false
-	d.handleResizePane(resizeMsg(t, "p-fail", 90, 30)) // retry succeeds
+	d.handleResizePane(nil, resizeMsg(t, "p-fail", 90, 30)) // retry succeeds
 	if pane.appliedCols != 90 || pane.appliedRows != 30 {
 		t.Errorf("retry after failure did not apply: guard %dx%d, want 90x30", pane.appliedCols, pane.appliedRows)
 	}
@@ -203,7 +203,7 @@ func TestHandleResizePane_DegenerateSize_IsRefused(t *testing.T) {
 				appliedCols: 200, appliedRows: 50,
 			}
 
-			d.handleResizePane(resizeMsg(t, "p1", tt.cols, tt.rows))
+			d.handleResizePane(nil, resizeMsg(t, "p1", tt.cols, tt.rows))
 
 			if len(fake.resizes) != tt.want {
 				t.Fatalf("PTY.Resize called %d times for %dx%d, want %d",
@@ -237,8 +237,8 @@ func TestHandleResizePane_DegenerateResize_LogsOncePerCooldownWindow(t *testing.
 		appliedCols: 200, appliedRows: 50,
 	}
 
-	d.handleResizePane(resizeMsg(t, "pane-1", 1, 1))
-	d.handleResizePane(resizeMsg(t, "pane-1", 1, 1))
+	d.handleResizePane(nil, resizeMsg(t, "pane-1", 1, 1))
+	d.handleResizePane(nil, resizeMsg(t, "pane-1", 1, 1))
 
 	got := strings.Count(buf.String(), "refusing degenerate resize")
 	if got != 1 {

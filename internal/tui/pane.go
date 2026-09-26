@@ -169,6 +169,22 @@ type PaneModel struct {
 	daemonMouseSGR       bool
 	daemonBracketedPaste bool
 
+	// Multi-client sync (spec §5). follower mirrors Model.isFollower for this
+	// pane's destination: another client is the size master, so this pane's
+	// VT takes the size the master chose (daemonCols x daemonRows, the last
+	// size the daemon accepted) instead of its own box, and View cuts or pads
+	// that grid into the box. Set by syncPaneMeta from every broadcast; the
+	// daemon size is also updated between broadcasts by a pane_sizes frame,
+	// which arrives BEFORE the child's repaint at that size. See targetVTSize.
+	follower               bool
+	daemonCols, daemonRows int
+	// daemonSizeSeq is the daemon's number for daemonCols/daemonRows (see
+	// PaneInfo.SizeSeq). A size is adopted only when its number is not LOWER,
+	// so a stale broadcast cannot resize the VT back behind a newer
+	// pane_sizes frame with no PTY redraw to pair it. Zeroed on reattach,
+	// because a restarted daemon restarts the counter.
+	daemonSizeSeq uint64
+
 	// Render cache: View() output is reused while renderKey() is unchanged.
 	// contentGen covers VT-grid/raw-buffer mutations (the grid itself has no
 	// public change counter; PaneModel mediates all writes via AppendOutput/
@@ -238,6 +254,7 @@ type paneRenderKey struct {
 	name, cwd                      string
 	paneType, sessionID            string
 	wideCanvas, previewWrap        bool
+	follower                       bool // previewMode and the cut markers read it
 	historyLines                   int
 	selActive                      bool
 	sel                            Selection
@@ -279,6 +296,7 @@ func (p *PaneModel) renderKey() paneRenderKey {
 		sessionID:          p.SessionID,
 		wideCanvas:         p.WideCanvas,
 		previewWrap:        p.previewWrap,
+		follower:           p.follower,
 		historyLines:       p.HistoryLines,
 	}
 	// renderContent only honors a selection whose PaneID matches this pane;
@@ -451,7 +469,7 @@ const minAdaptiveScrollbackLines = 2000
 // goroutine in production, but a plain int makes every parallel test in the
 // package racy against any other that builds a pane, which the detector reports
 // as a failure of whichever pair it happens to catch. Same reasoning as
-// Daemon.clientCWD's atomic.Pointer.
+// Daemon.clientSize's atomic.Pointer.
 var explicitScrollback atomic.Int64
 
 // knownPaneCount is the workspace size the adaptive depth divides. Published by
@@ -628,6 +646,36 @@ func (p *PaneModel) acceptOutputGeneration(generation uint64) bool {
 	return true
 }
 
+// targetVTSize is the single decision point for the size a pane's VT
+// emulator takes. A follower pane (spec §5.1) takes the size the master chose
+// for it, whatever box this client draws it in — resizing the VT to its own
+// box would rewrap the master's output with no PTY redraw to pair it, the
+// unpaired-resize corruption ResizeVT's contract forbids. A follower with no
+// daemon size yet (never sized, or pending) falls back to its rect, and sends
+// nothing either way. Everyone else uses paneVTSize.
+//
+// Only EMULATOR sizing goes through here. The resize producers
+// (resizeAllPanes, diffResizes) keep calling paneVTSize: a master sends its
+// own rect's size, and a follower sends nothing at all.
+// adoptDaemonSize records a daemon size for the pane unless the pane already
+// holds a NEWER one. Equal is adopted, so a repeat of the same announcement
+// is idempotent and a daemon without the counter (always 0) always wins.
+// Reports whether it adopted.
+func (p *PaneModel) adoptDaemonSize(cols, rows int, seq uint64) bool {
+	if seq < p.daemonSizeSeq {
+		return false
+	}
+	p.daemonCols, p.daemonRows, p.daemonSizeSeq = cols, rows, seq
+	return true
+}
+
+func (p *PaneModel) targetVTSize(rectW, rectH, nativeW, canvasW, canvasH int) (cols, rows int) {
+	if p.follower && p.daemonCols > 0 && p.daemonRows > 0 {
+		return p.daemonCols, p.daemonRows
+	}
+	return paneVTSize(p.WideCanvas, p.MinNativeCols, rectW, rectH, nativeW, canvasW, canvasH)
+}
+
 func (p *PaneModel) ResizeVT(cols, rows int) {
 	if cols <= 0 || rows <= 0 || (cols == p.vt.Width() && rows == p.vt.Height()) {
 		return
@@ -783,6 +831,44 @@ func (p *PaneModel) wheelForwardSeq(up bool, relX, relY int) []byte {
 		relY = x10Max
 	}
 	return []byte(ansi.MouseX10(b, relX, relY))
+}
+
+// followerGridPos maps a box-relative mouse position (0-based, inside the
+// border) to the follower's grid (spec §5.3), for forwarding to a tracking
+// app. The grid is cropped at the left, so gx is relX; rows follow what the
+// renderer shows — bottom-anchored in the preview, so a live too-tall view
+// maps box row r to grid row r + (vtH - innerH). ok is false where no grid
+// cell is drawn: the padding right of or below a grid smaller than the box,
+// and a scrollback row, which the app has no coordinate for. A non-follower
+// pane is returned unchanged, exactly as it was forwarded before.
+func followerGridPos(p *PaneModel, relX, relY int) (gx, gy int, ok bool) {
+	if !p.follower {
+		return relX, relY, true
+	}
+	if relX < 0 || relY < 0 {
+		return 0, 0, false
+	}
+	if p.previewMode() {
+		innerW, innerH := max(1, p.Width-2), max(1, p.Height-2)
+		l := p.previewLayoutFor(innerW)
+		total := l.totalVisual()
+		// renderPreview's own viewStart: the inverse must agree with it.
+		viewStart := max(0, total-innerH-p.scrollBack)
+		v := viewStart + relY
+		if v >= total {
+			return 0, 0, false
+		}
+		absRow, s := l.locate(v)
+		gx, gy = s.start+relX, absRow-p.vt.ScrollbackLen()
+	} else {
+		// Native: drawn top-left, scrollBack counting emulator scrollback
+		// lines above the screen.
+		gx, gy = relX, relY-p.scrollBack
+	}
+	if gy < 0 || gx >= p.vt.Width() || gy >= p.vt.Height() {
+		return 0, 0, false
+	}
+	return gx, gy, true
 }
 
 // ScrollToRelY positions the scrollback so that the scrollbar thumb's TOP
@@ -1271,8 +1357,14 @@ func (p *PaneModel) View() string {
 	// The worktree wait reuses the `preparing` label slot rather than adding a
 	// third: "preparing..." is what it is, and the branch is already in the
 	// pane body, where there is room to elide it honestly.
-	topLine := buildTopBorder(p.Width, p.CWD, rightLabel, borderColor, p.ghost, p.resuming,
-		p.preparing || p.PreparingWorktree != "", p.focusMode, p.spinnerFrame, p.working, p.workFrame)
+	// Follower cut markers (spec §5.2): only a follower's grid can exceed its
+	// box in height, and a wide-canvas pane's width crop is its normal state,
+	// not a cut someone else's size imposed — so both are follower-only.
+	cutRows := p.follower && p.vt.Height() > innerH
+	cutCols := p.follower && p.vt.Width() > innerW
+	topLine := buildTopBorderCut(p.Width, p.CWD, rightLabel, borderColor, p.ghost, p.resuming,
+		p.preparing || p.PreparingWorktree != "", p.focusMode, p.spinnerFrame, p.working, p.workFrame,
+		cutRows, cutCols)
 
 	out := topLine + "\n" + body
 	p.cachedKey, p.cachedView, p.hasCache = key, out, true
@@ -1280,6 +1372,20 @@ func (p *PaneModel) View() string {
 }
 
 func buildTopBorder(width int, cwd, name string, color color.Color, ghost, resuming, preparing, focus bool, spinnerFrame int, working bool, workFrame int) string {
+	return buildTopBorderCut(width, cwd, name, color, ghost, resuming, preparing, focus, spinnerFrame, working, workFrame, false, false)
+}
+
+// followerCutMark replaces a top-border corner to say the box cut part of a
+// follower's grid (spec §5.2). One cell for one cell, so the border keeps its
+// exact width, and it never touches the labels between the corners.
+const followerCutMark = "…"
+
+// buildTopBorderCut is buildTopBorder with the follower cut markers: cutRows
+// puts followerCutMark in place of the top-left corner (rows above the box
+// are hidden — the view is bottom-anchored), cutCols in place of the
+// top-right corner, the right border's cell on the title row (columns right
+// of the box are hidden — the view is cropped at the left edge).
+func buildTopBorderCut(width int, cwd, name string, color color.Color, ghost, resuming, preparing, focus bool, spinnerFrame int, working bool, workFrame int, cutRows, cutCols bool) string {
 	if ghost {
 		if name == "" {
 			name = "restored"
@@ -1300,6 +1406,12 @@ func buildTopBorder(width int, cwd, name string, color color.Color, ghost, resum
 
 	style := lipgloss.NewStyle().Foreground(color)
 	b := lipgloss.RoundedBorder()
+	if cutRows {
+		b.TopLeft = followerCutMark
+	}
+	if cutCols {
+		b.TopRight = followerCutMark
+	}
 	innerW := width - 2
 	if innerW < 1 {
 		return style.Render(b.TopLeft + b.TopRight)

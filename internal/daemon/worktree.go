@@ -36,7 +36,7 @@ func (d *Daemon) handleWorktreeListReq(conn *ipc.Conn, msg *ipc.Message) {
 		respondTo(conn, msg.ID, ipc.MsgWorktreeListResp, rejection)
 		return
 	}
-	fallback := d.defaultCWD()
+	fallback := d.defaultCWD(conn)
 	go func() {
 		defer d.worktreeScanning.Store(false)
 		respondTo(conn, msg.ID, ipc.MsgWorktreeListResp,

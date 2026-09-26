@@ -98,8 +98,8 @@ func templateWorkspace(ids []string, main string) WorkspaceStateMsg {
 func TestTemplateWorkspace_PreparingSwapAndCompletion_BuildsAndReportsOnlyCompletedTree(t *testing.T) {
 	t.Setenv("QUIL_HOME", t.TempDir())
 	m := paletteModelWithProjects(t)
-	// Count this workspace's sends only; sendAllLayouts also legitimately
-	// saves unrelated remote tabs in the shared palette fixture.
+	// Count this workspace's sends only; the fixture's other tabs have no
+	// stored layout and would legitimately describe theirs.
 	m.projects = m.projects[:1]
 	recorder := &echoRecorder{}
 	m.client = recorder
@@ -111,18 +111,18 @@ func TestTemplateWorkspace_PreparingSwapAndCompletion_BuildsAndReportsOnlyComple
 	preparing := templateWorkspace([]string{"placeholder"}, "placeholder")
 	preparing.Panes[0].PreparingWorktree = "feat/template"
 	update(preparing)
-	runCmd(m.sendAllLayouts()) // Even an unrelated resize/action must not persist preparation.
-	if layouts, _ := sentCounts(recorder); layouts != 0 {
+	runCmd(m.resizeAllPanes()) // Even an unrelated resize/action must not persist preparation.
+	if layouts, _ := sentCounts(t, recorder); layouts != 0 {
 		t.Fatal("saved preparing placeholder")
 	}
 	update(templateWorkspace([]string{"first"}, "placeholder"))
-	if layouts, _ := sentCounts(recorder); layouts != 0 {
+	if layouts, _ := sentCounts(t, recorder); layouts != 0 {
 		t.Fatal("saved intermediate swap")
 	}
 	incomplete := templateWorkspace([]string{"first", "second", "main"}, "main")
 	incomplete.Panes = incomplete.Panes[:2]
 	update(incomplete)
-	if layouts, _ := sentCounts(recorder); layouts != 0 {
+	if layouts, _ := sentCounts(t, recorder); layouts != 0 {
 		t.Fatal("saved before every declared pane existed")
 	}
 	complete := templateWorkspace([]string{"first", "second", "main"}, "main")
@@ -132,7 +132,7 @@ func TestTemplateWorkspace_PreparingSwapAndCompletion_BuildsAndReportsOnlyComple
 	if got := templateShape(root); got != "H(main,V(first,second))" {
 		t.Fatal(got)
 	}
-	if layouts, _ := sentCounts(recorder); layouts != 1 {
+	if layouts, _ := sentCounts(t, recorder); layouts != 1 {
 		t.Fatalf("layout sends=%d want=1", layouts)
 	}
 	var saved ipc.UpdateLayoutPayload
@@ -143,7 +143,7 @@ func TestTemplateWorkspace_PreparingSwapAndCompletion_BuildsAndReportsOnlyComple
 			}
 		}
 	}
-	if saved.TabID != tab.ID || !layoutAgrees(saved.Layout, root) {
+	if saved.TabID != tab.ID || !sentLayoutIs(saved.Layout, root) {
 		t.Fatal("reported wrong tree", saved)
 	}
 	complete.Tabs[0].Layout = saved.Layout
@@ -151,7 +151,7 @@ func TestTemplateWorkspace_PreparingSwapAndCompletion_BuildsAndReportsOnlyComple
 	if tab.Root != root {
 		t.Fatal("rebuilt the tree on the second broadcast")
 	}
-	if layouts, _ := sentCounts(recorder); layouts != 1 {
+	if layouts, _ := sentCounts(t, recorder); layouts != 1 {
 		t.Fatal("echoed the saved layout")
 	}
 	// User changes survive subsequent completed frames too.

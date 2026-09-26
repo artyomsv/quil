@@ -105,6 +105,42 @@ func TestLoad_WarmShellPoolSize(t *testing.T) {
 	}
 }
 
+// The grace time a lost size master keeps its slot. An old config file has no
+// key and must get the default, and a hand-edited value outside 0–60 is
+// clamped rather than honoured: a day-long grace would freeze every PTY size
+// behind a client that is never coming back.
+func TestConfig_MasterGraceDefaultAndClamp(t *testing.T) {
+	if got := config.Default().Daemon.MasterGraceMinutes; got != 3 {
+		t.Errorf("Default MasterGraceMinutes = %d, want 3", got)
+	}
+	tests := []struct {
+		name string
+		toml string
+		want time.Duration
+	}{
+		{"absent key", "[daemon]\nauto_start = true\n", 3 * time.Minute},
+		{"explicit", "[daemon]\nmaster_grace_minutes = 7\n", 7 * time.Minute},
+		{"zero means no grace", "[daemon]\nmaster_grace_minutes = 0\n", 0},
+		{"above the ceiling", "[daemon]\nmaster_grace_minutes = 99\n", 60 * time.Minute},
+		{"negative", "[daemon]\nmaster_grace_minutes = -5\n", 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(path, []byte(tt.toml), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := config.Load(path)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if got := cfg.Daemon.MasterGrace(); got != tt.want {
+				t.Errorf("MasterGrace() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestQuilDir(t *testing.T) {
 	dir := config.QuilDir()
 	if dir == "" {

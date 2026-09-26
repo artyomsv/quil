@@ -4,8 +4,8 @@ import "testing"
 
 func TestActions_RegistryIntegrity(t *testing.T) {
 	acts := Actions()
-	if len(acts) != 66 {
-		t.Fatalf("registry has %d actions, want 66 (42 config-backed + 12 promoted from the reserved-key switch + 4 reorder + 6 tab layout + 2 project groups)", len(acts))
+	if len(acts) != 67 {
+		t.Fatalf("registry has %d actions, want 67 (42 config-backed + 12 promoted from the reserved-key switch + 4 reorder + 6 tab layout + 2 project groups + 1 multi-client sync)", len(acts))
 	}
 	seen := make(map[ActionID]bool, len(acts))
 	orders := make(map[int]ActionID, len(acts))
@@ -40,6 +40,12 @@ func TestActions_TierSplitMatchesLegacySwitches(t *testing.T) {
 	// and command_history, which is the early switch. The two overlay toggles
 	// share one slot per tab, so splitting them across the seam would let a
 	// plugin's raw_keys claim one of the pair and not the other.
+	//
+	// client.take_control has no pre-rewrite position either — it is a
+	// multi-client-sync action with no legacy handleKey switch at all. It is
+	// early tier by design (see its registry comment in action.go): a chord
+	// bound to it must win over a plugin's raw_keys claim, like every other
+	// early action.
 	early := map[ActionID]bool{
 		"notification.toggle": true, "notification.focus": true,
 		"sidebar.toggle": true, "pane.go_back": true, "pane.mute": true,
@@ -51,9 +57,10 @@ func TestActions_TierSplitMatchesLegacySwitches(t *testing.T) {
 		"project.next": true, "project.prev": true,
 		"project.toggle": true, "project.attention_queue": true,
 		"project.move_up": true, "project.move_down": true,
+		"client.take_control": true,
 	}
-	if len(early) != 20 {
-		t.Fatalf("expected-early table has %d entries, want 20", len(early))
+	if len(early) != 21 {
+		t.Fatalf("expected-early table has %d entries, want 21", len(early))
 	}
 	for _, a := range Actions() {
 		want := TierLate

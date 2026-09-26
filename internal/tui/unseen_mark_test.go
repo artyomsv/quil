@@ -61,22 +61,22 @@ func TestParseWorkspaceState_ReadsTheUnseenWireKey(t *testing.T) {
 func TestSyncPaneMeta_SeedsUnseenOnceThenLeavesItToTheClient(t *testing.T) {
 	t.Parallel()
 	pane := NewPaneModel("p1", 1024)
-	syncPaneMeta(pane, &PaneInfo{ID: "p1", Unseen: true}, false, 0, false)
+	syncPaneMeta(pane, &PaneInfo{ID: "p1", Unseen: true}, false, 0, false, false)
 	if !pane.unseen {
 		t.Fatal("the first sync must seed the mark from the daemon")
 	}
-	syncPaneMeta(pane, &PaneInfo{ID: "p1", Unseen: false}, false, 0, false)
+	syncPaneMeta(pane, &PaneInfo{ID: "p1", Unseen: false}, false, 0, false, false)
 	if !pane.unseen {
 		t.Error("a later broadcast must not overwrite the client's live mark")
 	}
 
 	fresh := NewPaneModel("p2", 1024)
-	syncPaneMeta(fresh, &PaneInfo{ID: "p2"}, false, 0, false)
+	syncPaneMeta(fresh, &PaneInfo{ID: "p2"}, false, 0, false, false)
 	if fresh.unseen {
 		t.Error("a pane the daemon holds no mark for must seed unmarked")
 	}
 	fresh.unseen = true
-	syncPaneMeta(fresh, &PaneInfo{ID: "p2"}, false, 0, false)
+	syncPaneMeta(fresh, &PaneInfo{ID: "p2"}, false, 0, false, false)
 	if !fresh.unseen {
 		t.Error("a later broadcast must not clear a mark the client set")
 	}
@@ -201,7 +201,7 @@ func TestFinishReconnect_RestatesUnseenMarks(t *testing.T) {
 // still does.
 func TestRaiseDeferredToasts_SkipsASeededMark(t *testing.T) {
 	m, f, pane := toastModel(t)
-	syncPaneMeta(pane, &PaneInfo{ID: pane.ID, Unseen: true}, false, 0, false)
+	syncPaneMeta(pane, &PaneInfo{ID: pane.ID, Unseen: true}, false, 0, false, false)
 	if !pane.unseen {
 		t.Fatal("setup: the seed must mark the pane")
 	}

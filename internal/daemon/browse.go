@@ -51,7 +51,7 @@ func (d *Daemon) handleBrowseDirReq(conn *ipc.Conn, msg *ipc.Message) {
 		respondTo(conn, msg.ID, ipc.MsgBrowseDirResp, rejection)
 		return
 	}
-	fallback := d.defaultCWD()
+	fallback := d.defaultCWD(conn)
 	go func() {
 		defer d.browseScanning.Store(false)
 		respondTo(conn, msg.ID, ipc.MsgBrowseDirResp, browseDirResponse(req, fallback))

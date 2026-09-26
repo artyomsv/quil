@@ -233,7 +233,7 @@ func TestSwitchProjectNotifiesDaemonAndResyncsGeometry(t *testing.T) {
 	// was current when it went to the background.
 	var sawResize bool
 	for _, msg := range fake.sent {
-		if msg.Type == ipc.MsgResizePane {
+		if msg.Type == ipc.MsgResizePanes {
 			sawResize = true
 		}
 	}
@@ -1794,15 +1794,17 @@ func TestSidebarDoesNotRemodeAWideCanvasPane(t *testing.T) {
 	wireCols := func(t *testing.T, conn *fakeConn, paneID string) int {
 		t.Helper()
 		for _, msg := range conn.sent {
-			if msg.Type != ipc.MsgResizePane {
+			if msg.Type != ipc.MsgResizePanes {
 				continue
 			}
-			var p ipc.ResizePanePayload
+			var p ipc.ResizePanesPayload
 			if err := msg.DecodePayload(&p); err != nil {
-				t.Fatalf("decode resize: %v", err)
+				t.Fatalf("decode resize_panes: %v", err)
 			}
-			if p.PaneID == paneID {
-				return int(p.Cols)
+			for _, rp := range p.Panes {
+				if rp.PaneID == paneID {
+					return int(rp.Cols)
+				}
 			}
 		}
 		t.Fatalf("no resize sent for pane %s", paneID)

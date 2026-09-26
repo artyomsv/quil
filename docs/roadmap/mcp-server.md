@@ -17,7 +17,7 @@ make this harder: the relevant project may be on another machine.
 
 ## Implemented solution
 
-`quil mcp` exposes 35 Model Context Protocol tools over stdio. An MCP-capable
+`quil mcp` exposes 36 Model Context Protocol tools over stdio. An MCP-capable
 client can discover the workspace, create tabs and AI panes using the same
 validated options as the TUI, manage projects across configured remote hosts,
 and delegate work between panes with completion tracking and notify-back.
@@ -25,7 +25,7 @@ and delegate work between panes with completion tracking and notify-back.
 This PRD records the capability and its constraints. The [MCP guide](../mcp.md)
 is the reference for client configuration, input schemas, responses and examples.
 
-## Tools by purpose (35 total)
+## Tools by purpose (36 total)
 
 ### Discovery (6)
 
@@ -97,12 +97,13 @@ task finishes on shell command completion. Notify-back waits until the requester
 can receive input and is limited to panes on the same daemon. Tasks are bounded
 and runtime-only. See [task delegation](../mcp.md#delegating-work-to-another-pane).
 
-### TUI cooperation (2)
+### TUI cooperation (3)
 
 | Tool | Purpose |
 |------|---------|
-| `set_active_pane` | Focus a pane, including across tabs |
-| `close_tui` | Close the frontend while the daemon and panes remain alive |
+| `set_active_pane` | Focus a pane, including across tabs, in one attached window |
+| `close_tui` | Close one attached window while the daemon and panes remain alive |
+| `list_clients` | List attached windows, which one sets pane sizes, and their ids (daemon 1.80.0+) |
 
 ### Event observation (3)
 
@@ -153,7 +154,7 @@ old terminal state and discard late output from the replaced process.
 
 ## Acceptance
 
-- MCP clients can connect through stdio and discover all 35 registered tools.
+- MCP clients can connect through stdio and discover all 36 registered tools.
 - Agents can manage projects, tabs and panes on local and configured remote daemons.
 - Unscoped discovery recovers hosts after the retry backoff without a named call.
 - Pane creation honors TUI-equivalent options and reports validation or spawn errors.

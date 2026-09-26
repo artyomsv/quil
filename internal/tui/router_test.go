@@ -224,7 +224,7 @@ func TestPaneInputForALocalPaneWhileARemoteProjectIsActive(t *testing.T) {
 	}
 }
 
-// The same hole on the broadcast paths: resizeAllPanes, sendAllLayouts and
+// The same hole on the broadcast paths: resizeAllPanes, sendDiffedLayouts and
 // overlayResizeCmd all stamp a project's or tab's dest, which is "" for local.
 func TestSendForDestLocalIsHonouredWhileARemoteProjectIsActive(t *testing.T) {
 	local, gpu := newFakeConn(), newFakeConn()

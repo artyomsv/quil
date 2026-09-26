@@ -166,8 +166,10 @@ func (m *Model) jumpToPane(paneID string) (bool, tea.Cmd) {
 	// active when it runs, so calling it afterwards reverts the wrong one.
 	//
 	// This is the choke point for every cross-tab jump that is not switchTab —
-	// MCP set_active_pane, the notification sidebar, pane-history back, the
-	// palette and the attention queue all arrive here. They each moved the
+	// MCP set_active_pane, the notification sidebar, pane-history back and the
+	// palette all arrive here. The attention queue (jumpToNextBlocked) does
+	// NOT: it moves activeTab by hand, so it repeats this teardown and the
+	// typing-guard token itself. They each moved the
 	// active tab with the editor still open, bound to a pane in the tab being
 	// left, still claiming its share of the width. notesKeyExempt does not
 	// cover it: that branch only runs while the EDITOR has focus, and notes
@@ -194,9 +196,25 @@ func (m *Model) jumpToPane(paneID string) (bool, tea.Cmd) {
 			break
 		}
 	}
+	// The tab this project showed before the jump, for the typing guard's
+	// token below. It is the project's OWN previous tab, not `from`: after a
+	// cross-project jump `from` is in another project, while a broadcast in
+	// flight from before the jump names this project's old active tab.
+	prevID := ""
+	if prev := proj.activeTab; prev >= 0 && prev < len(proj.tabs) {
+		prevID = proj.tabs[prev].ID
+	}
 	proj.activeTab = tabIdx
 	target := proj.tabs[tabIdx]
 	target.ActivePane = paneID
+	// Typing guard (spec §8.1): this jump is THIS client's own switch, exactly
+	// as switchTab's is, so its broadcast must not read as another client's.
+	// See switchTab for the token and requestedSwitchStaleWindow for prevID.
+	// A jump that keeps the project's tab records nothing, so it cannot
+	// overwrite a token an earlier switch is still waiting on.
+	if prevID != target.ID {
+		m.recordRequestedTab(target.Dest, proj.ID, target.ID, prevID)
+	}
 	// The Active FLAG is set here, not left to the caller. ActivePane alone
 	// routes keystrokes, but Active is what draws the pane's cursor
 	// (renderPane) and its focused border — so a pane raised without it looks
@@ -683,6 +701,15 @@ func (m *Model) ackFocusedPane() bool {
 	if !m.termFocused {
 		return false
 	}
+	// A pane focused only because ANOTHER client switched tabs is not one this
+	// user has looked at yet (spec §8.1) — Update's prologue clears the flag
+	// the moment local input (a key or a mouse click) actually arrives, so
+	// skipping the ack here does not mean skipping it forever, only until then.
+	// Without this, every attached client would clear the mark the instant one
+	// of them switched, whether or not anyone was watching that screen.
+	if m.remoteFocusUnacked {
+		return false
+	}
 	tab := m.activeTabModel()
 	if tab == nil || tab.Root == nil || tab.ActivePane == "" {
 		return false
@@ -878,7 +905,11 @@ func (m Model) workSpinnerTick() tea.Cmd {
 // suppresses the visible notification card (see emitEvent) — so the normal
 // completion edge keeps `working` accurate across the whole mute/unmute
 // window instead of going stale the instant the pane is muted.
-func syncPaneMeta(pane *PaneModel, info *PaneInfo, wideCanvas bool, minNativeCols int, restoresViaSession bool) {
+//
+// follower is Model.isFollower for the pane's destination, passed in for the
+// same reason wideCanvas is: this is a free function with no Model. It and
+// the daemon's size for the pane decide the pane's VT size (targetVTSize).
+func syncPaneMeta(pane *PaneModel, info *PaneInfo, wideCanvas bool, minNativeCols int, restoresViaSession bool, follower bool) {
 	pane.Name = info.Name
 	pane.CWD = info.CWD
 	pane.Type = info.Type
@@ -924,6 +955,13 @@ func syncPaneMeta(pane *PaneModel, info *PaneInfo, wideCanvas bool, minNativeCol
 	pane.daemonMouseTracking = info.MouseTracking
 	pane.daemonMouseSGR = info.MouseSGR
 	pane.daemonBracketedPaste = info.BracketedPaste
+	// The last size the daemon ACCEPTED is the size a follower's VT takes, and
+	// 0x0 (never sized) must fall back. NOT unconditional like the rest: a
+	// broadcast built while a resize batch was in flight carries the size from
+	// BEFORE it, and would undo the pane_sizes frame that already resized this
+	// pane's VT — see adoptDaemonSize.
+	pane.follower = follower
+	pane.adoptDaemonSize(int(info.Cols), int(info.Rows), info.SizeSeq)
 	// Unconditional copy, like the other daemon-authoritative fields: the
 	// daemon writes LastModel BEFORE broadcasting the hook event and IPC
 	// delivery is ordered per connection, so a snapshot can never lag behind

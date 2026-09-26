@@ -52,11 +52,11 @@ func TestParseWorkspaceState_ReadsTheDeletionMarkWireKey(t *testing.T) {
 func TestSyncPaneMeta_AdoptsTheDaemonsDeletionMark(t *testing.T) {
 	t.Parallel()
 	pane := &PaneModel{ID: "p1"}
-	syncPaneMeta(pane, &PaneInfo{ID: "p1", MarkedForDeletion: true}, false, 0, false)
+	syncPaneMeta(pane, &PaneInfo{ID: "p1", MarkedForDeletion: true}, false, 0, false, false)
 	if !pane.markedForDeletion {
 		t.Fatal("a daemon-reported deletion mark was not adopted")
 	}
-	syncPaneMeta(pane, &PaneInfo{ID: "p1", MarkedForDeletion: false}, false, 0, false)
+	syncPaneMeta(pane, &PaneInfo{ID: "p1", MarkedForDeletion: false}, false, 0, false, false)
 	if pane.markedForDeletion {
 		t.Error("a daemon-reported CLEAR was not adopted — the copy must be unconditional, " +
 			"or an unmark from another client can never reach this one")

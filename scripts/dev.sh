@@ -141,9 +141,15 @@ refuse_if_binaries_held() {
   leaving a mismatched set — typically a new TUI against a stale daemon,
   which then fails the version gate at launch.
 
-  Close any Quil started from this directory. If a dev daemon is running:
+  Any dev daemon, dev TUI or dev MCP bridge found running from this
+  directory was stopped first. Close whatever else holds these files: a
+  quil or quil-debug started from this directory, a dev process that could
+  not be stopped (another user's, an elevated one), or a scanner. For a dev
+  daemon that is still running:
 
     QUIL_HOME="$PROJECT_DIR/.quil" "$PROJECT_DIR/quil-dev$EXE" daemon stop
+
+  and close any dev TUI window by hand.
 
   Only files in $PROJECT_DIR were checked.
   A production install elsewhere is untouched.
@@ -153,11 +159,175 @@ EOF
   }
 }
 
+# stop_dev_processes stops the DEV variant started from this directory, so a
+# dev daemon or dev TUI left running no longer turns `build` into a refusal
+# and an extra round trip. refuse_if_binaries_held still runs afterwards and
+# still has the last word.
+#
+# Scope is exactly two files: quil-dev and quild-dev in $PROJECT_DIR. A
+# process is matched by its FULL executable path, never by name — every
+# worktree has its own quil-dev, and the name alone would stop another
+# checkout's session. quil/quild (production) and quil-debug/quild-debug
+# (which serve the production ~/.quil) are never stopped, and ~/.quil is
+# never read.
+#
+# Order: the dev daemon first, gracefully, through the dev binary itself —
+# `daemon stop` writes the final snapshot and closes the panes' PTYs, which a
+# kill does not. Only when .quil/quild.pid names a live process running this
+# directory's quild-dev. Then every remaining matching process is stopped by
+# PID alone, never as a tree (taskkill /T), because a tree kill reaches the
+# panes' children and wrapper parents that are not ours to end.
+stop_dev_processes() {
+  case "$(host_goos)" in windows) host_exe=".exe" ;; *) host_exe="" ;; esac
+  dev_tui="$PROJECT_DIR/quil-dev$host_exe"
+  dev_daemon="$PROJECT_DIR/quild-dev$host_exe"
+  # Fast path: a file the probe can open for writing has no process running
+  # it — the assumption refuse_if_binaries_held already rests on — so an
+  # ordinary build never pays for a process listing (seconds of PowerShell
+  # startup on Windows).
+  dev_binaries_held || return 0
+
+  running="$(dev_processes list)"
+  [ -n "$running" ] || return 0
+
+  pid_file="$PROJECT_DIR/.quil/quild.pid"
+  if [ -f "$pid_file" ] && [ -f "$dev_tui" ]; then
+    daemon_pid="$(tr -dc '0-9' < "$pid_file")"
+    if [ -n "$daemon_pid" ] && printf '%s\n' "$running" | grep -q "^$daemon_pid "; then
+      # QUIL_HOME is explicit rather than left to the dev build's own default,
+      # so the stop cannot reach any daemon but the one this pid file names.
+      if out="$(QUIL_HOME="$PROJECT_DIR/.quil" "$dev_tui" daemon stop 2>&1)"; then
+        echo "stopped dev daemon (pid $daemon_pid, graceful): $dev_daemon" >&2
+      else
+        printf 'dev daemon did not stop gracefully, stopping it by pid:\n%s\n' "$out" >&2
+      fi
+    fi
+  fi
+
+  stopped="$(dev_processes stop)"
+  if [ -n "$stopped" ]; then
+    printf '%s\n' "$stopped" | while IFS= read -r line; do
+      echo "stopped dev process (pid ${line%% *}): ${line#* }" >&2
+    done
+  fi
+
+  # Windows releases an image file a moment AFTER its process exits. Poll the
+  # same probe refuse_if_binaries_held uses, for at most 5 s; anything still
+  # held after that is left for it to report. Reached only when something was
+  # running, so an ordinary build pays nothing here.
+  tries=0
+  while dev_binaries_held && [ "$tries" -lt 10 ]; do
+    sleep 0.5
+    tries=$((tries + 1))
+  done
+}
+
+# dev_binaries_held succeeds when $dev_tui or $dev_daemon cannot be opened for
+# append — refuse_if_binaries_held's probe, over the two dev files only.
+dev_binaries_held() {
+  for f in "$dev_tui" "$dev_daemon"; do
+    [ -f "$f" ] || continue
+    (exec 3>>"$f") 2>/dev/null || return 0
+  done
+  return 1
+}
+
+# dev_processes list prints "<pid> <path>" for every process whose executable
+# is $dev_tui or $dev_daemon; dev_processes stop stops each of them and prints
+# the ones it stopped, in the same format.
+dev_processes() {
+  mode="$1"
+  if [ "$(host_goos)" = "windows" ]; then
+    dev_processes_windows "$mode"
+  else
+    dev_processes_unix "$mode"
+  fi
+}
+
+# Win32_Process.ExecutablePath is the image path the loader opened, so the
+# comparison is exact; case and slashes are normalised because Windows paths
+# are case-insensitive and PROJECT_DIR comes from `pwd -W` with forward
+# slashes. Paths travel in the environment rather than in the command text, so
+# no quoting of the project path can break the script. A process whose path
+# cannot be read (another user's, an elevated one) is skipped: it is not
+# stopped, and the probe then reports its file as held.
+dev_processes_windows() {
+  ps_exe="$(command -v powershell.exe 2>/dev/null || true)"
+  if [ -z "$ps_exe" ]; then
+    # shellcheck disable=SC1003 # a literal backslash, not an escaped quote
+    ps_exe="$(printf '%s' "${SYSTEMROOT:-C:/Windows}" | tr '\\' '/')/System32/WindowsPowerShell/v1.0/powershell.exe"
+  fi
+  [ -f "$ps_exe" ] || { echo "powershell.exe not found; dev processes not stopped" >&2; return 0; }
+  # shellcheck disable=SC2016 # PowerShell's $ variables, not the shell's
+  QUIL_DEV_PATHS="$dev_tui|$dev_daemon" QUIL_DEV_MODE="$1" MSYS_NO_PATHCONV=1 \
+    "$ps_exe" -NoProfile -NonInteractive -Command '
+      $want = $env:QUIL_DEV_PATHS.Split("|") | ForEach-Object { $_.Replace("/", "\").ToLowerInvariant() }
+      $names = ($want | ForEach-Object { "Name=`"" + (Split-Path $_ -Leaf) + "`"" }) -join " OR "
+      Get-CimInstance Win32_Process -Filter $names |
+        Where-Object { $_.ExecutablePath -and ($want -contains $_.ExecutablePath.ToLowerInvariant()) } |
+        ForEach-Object {
+          if ($env:QUIL_DEV_MODE -eq "stop") {
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+            Wait-Process -Id $_.ProcessId -Timeout 5 -ErrorAction SilentlyContinue
+            if (Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue) { return }
+          }
+          "{0} {1}" -f $_.ProcessId, $_.ExecutablePath
+        }' | tr -d '\r' || true
+}
+
+# Linux reads /proc/<pid>/exe, which the kernel resolves (a binary replaced
+# since it started reads "<path> (deleted)" and is still ours). macOS has no
+# /proc: `ps` names the candidates and lsof resolves each one's executable, as
+# `ps -o comm` shows the path the process was STARTED with, which is relative
+# for `./quil-dev`. Both compare against the physical project path.
+dev_processes_unix() {
+  mode="$1"
+  phys="$(cd "$PROJECT_DIR" && pwd -P)"
+  want_tui="$phys/$(basename "$dev_tui")"
+  want_daemon="$phys/$(basename "$dev_daemon")"
+  found=""
+  if [ -e /proc/self/exe ]; then
+    for d in /proc/[0-9]*; do
+      exe="$(readlink "$d/exe" 2>/dev/null)" || continue
+      case "$exe" in
+        "$want_tui" | "$want_tui (deleted)" | "$want_daemon" | "$want_daemon (deleted)")
+          found="$found${d#/proc/} ${exe% (deleted)}
+" ;;
+      esac
+    done
+  else
+    candidates="$(ps -axo pid=,comm= | awk '$NF ~ /(^|\/)quild?-dev$/ { print $1 }')"
+    for pid in $candidates; do
+      exe="$(lsof -a -p "$pid" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)"
+      case "$exe" in
+        "$want_tui" | "$want_daemon") found="$found$pid $exe
+" ;;
+      esac
+    done
+  fi
+  printf '%s' "$found" | while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    pid="${line%% *}"
+    if [ "$mode" = "stop" ]; then
+      kill "$pid" 2>/dev/null || continue
+      n=0
+      while kill -0 "$pid" 2>/dev/null && [ "$n" -lt 20 ]; do
+        sleep 0.1
+        n=$((n + 1))
+      done
+      kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
+      kill -0 "$pid" 2>/dev/null && continue
+    fi
+    printf '%s\n' "$line"
+  done
+}
+
 case "${1:-help}" in
   build)
     # Cheap, host-side, and it fails BEFORE the Docker run so a docs-size
     # problem costs a second rather than a full build.
     sh "$PROJECT_DIR/scripts/check-claude-md-size.sh"
+    stop_dev_processes
     refuse_if_binaries_held
     echo "building for $TARGET_GOOS/$TARGET_GOARCH (override: QUIL_BUILD_GOOS / QUIL_BUILD_GOARCH)" >&2
 
@@ -314,6 +484,7 @@ case "${1:-help}" in
   clean)
     # Same reason as build: rm cannot remove a held executable, and `set -e`
     # would abort the cleanup partway through.
+    stop_dev_processes
     refuse_if_binaries_held
     # Driven off BUILT_BINARIES so the two lists cannot drift. The hand-written
     # list this replaces named only the .exe spellings plus bare quil/quild, so

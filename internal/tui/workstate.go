@@ -166,8 +166,10 @@ func (m *Model) jumpToPane(paneID string) (bool, tea.Cmd) {
 	// active when it runs, so calling it afterwards reverts the wrong one.
 	//
 	// This is the choke point for every cross-tab jump that is not switchTab —
-	// MCP set_active_pane, the notification sidebar, pane-history back, the
-	// palette and the attention queue all arrive here. They each moved the
+	// MCP set_active_pane, the notification sidebar, pane-history back and the
+	// palette all arrive here. The attention queue (jumpToNextBlocked) does
+	// NOT: it moves activeTab by hand, so it repeats this teardown and the
+	// typing-guard token itself. They each moved the
 	// active tab with the editor still open, bound to a pane in the tab being
 	// left, still claiming its share of the width. notesKeyExempt does not
 	// cover it: that branch only runs while the EDITOR has focus, and notes

@@ -85,12 +85,27 @@ func (m *Model) jumpToNextBlocked() tea.Cmd {
 				m.exitNotesModeInPlace()
 			}
 			cmd := m.switchProject(i)
+			// The project's OWN previous tab, for the typing guard's token
+			// below — jumpToPane's prevID, for the same reason.
+			prevID := ""
+			if prev := target.Project.activeTab; prev >= 0 && prev < len(target.Project.tabs) {
+				prevID = target.Project.tabs[prev].ID
+			}
 			target.Project.activeTab = target.TabIndex
 			// TabModel.ActivePane is the pane-ID field; ActivePaneModel()
 			// repairs a stale value on next read, so assigning it is the
 			// whole focus change.
 			targetTab := target.Project.tabs[target.TabIndex]
 			targetTab.ActivePane = target.Pane.ID
+			// Typing guard (spec §8.1): recorded exactly as jumpToPane records
+			// it, because this function moves activeTab by hand rather than
+			// routing through it (switchProject does work jumpToPane does not).
+			// Without the token a broadcast in flight from before the jump
+			// names the old tab and reads as another client switching back:
+			// the tab jumps back, the guard arms and the flash shows.
+			if prevID != targetTab.ID {
+				m.recordRequestedTab(targetTab.Dest, target.Project.ID, targetTab.ID, prevID)
+			}
 			// MsgSwitchProject only reaches the project's REMEMBERED tab; the
 			// blocked pane is routinely in a different one, whose panes are
 			// still Pending after a lazy restore. Without this the queue lands

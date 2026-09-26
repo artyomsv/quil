@@ -21,7 +21,9 @@
 // Everything it may do is in notify.RunActivation: parse the URI, validate the
 // pane id, and send that id to the TUI over a per-PID pipe. There
 // is deliberately no path from a registered URI — which any local process can
-// invoke — to spawning a pane, sending input, or running a command.
+// invoke — to spawning a pane, sending input, or running a command. The one
+// command it runs, `start-daemon`, is reachable only as argv[1], which a URI
+// activation never is (isStartDaemon).
 package main
 
 import (
@@ -31,6 +33,10 @@ import (
 )
 
 func main() {
+	if isStartDaemon(os.Args) {
+		runStartDaemon(os.Args[2:])
+		return
+	}
 	scheme, home, raw := parseArgs(os.Args[1:])
 	if raw == "" || scheme == "" {
 		// Nothing to report and nowhere to report it: without --home there is

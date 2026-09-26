@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -24,6 +25,7 @@ import (
 	"github.com/artyomsv/quil/internal/transport"
 	"github.com/artyomsv/quil/internal/tui"
 	versionpkg "github.com/artyomsv/quil/internal/version"
+	"github.com/artyomsv/quil/internal/winjob"
 )
 
 var (
@@ -250,6 +252,14 @@ func findDaemonBinary() string {
 // waitForDaemonReady). Returns 0 only when a daemon was already listening (no
 // process spawned) — that invariant lets callers treat pid==0 as "socket is
 // already up". Spawn failures exit the process (os.Exit) rather than return 0.
+//
+// Inside a kill-on-close job (every Win32-OpenSSH session), the spawn goes
+// through winjob.StartDaemon instead of a direct exec.Command: the logon
+// task, else a wait for an already-starting daemon, else a lowered breakaway
+// spawn — never the unlowered token, which is High for an admin over ssh.
+// Those first two paths return PID 0, the same "socket is already up"
+// convention as the pre-existing check above, because the task or the
+// waited-for daemon produced the socket, not this process.
 func startDaemon(quiet bool) int {
 	if remoteMode() {
 		// Defense in depth: launchTUI never reaches here in remote mode, but
@@ -296,31 +306,30 @@ func startDaemon(quiet bool) int {
 		exitFn(1)
 		return -1 // unreachable in production; see the guard above for why
 	}
-	cmd := exec.Command(quild, "--background")
-	cmd.Dir = quilDir
-	cmd.Stdout = nil
-	// Capture the daemon's stderr (runtime panics, SIGQUIT goroutine dumps)
-	// instead of discarding it — stderr at /dev/null cost us the post-mortem
-	// for the 2026-06-11 daemon wedge. The parent's handle is closed after
-	// Start; the child keeps its own dup.
-	cmd.Stderr = nil
-	if f, ferr := os.OpenFile(filepath.Join(quilDir, "quild.stderr.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600); ferr == nil {
-		cmd.Stderr = f
-		defer f.Close()
-	}
-	cmd.SysProcAttr = daemonSysProcAttr()
-	if err := cmd.Start(); err != nil {
+	res, err := winjob.StartDaemon(startDepsFn(quild, quilDir, sockPath))
+	switch {
+	case errors.Is(err, winjob.ErrNoBreakaway):
+		fmt.Fprintln(os.Stderr, winjob.NoBreakawayMessage)
+		exitFn(1)
+		return -1 // unreachable in production; see the guard above for why
+	case err != nil:
 		fmt.Fprintf(os.Stderr, "failed to start daemon: %v\n", err)
 		exitFn(1)
 		return -1 // unreachable in production; see the guard above for why
 	}
-
-	pid := cmd.Process.Pid
-	cmd.Process.Release()
 	if !quiet {
-		fmt.Printf("daemon started (pid %d)\n", pid)
+		switch res.Via {
+		case winjob.ViaTask:
+			fmt.Println("daemon started by the logon task")
+		case winjob.ViaWaited:
+			fmt.Println("daemon already starting")
+		case winjob.ViaLowered:
+			fmt.Printf("daemon started (pid %d), limited: outside the desktop session\n", res.PID)
+		default:
+			fmt.Printf("daemon started (pid %d)\n", res.PID)
+		}
 	}
-	return pid
+	return res.PID
 }
 
 func stopDaemon() {

@@ -456,11 +456,63 @@ func TestAttach_CarriesClientID(t *testing.T) {
 	m.SetClientID("my-client-id")
 
 	var p ipc.AttachPayload
-	if err := m.attachMessage("").DecodePayload(&p); err != nil {
+	if err := m.attachMessage("", false).DecodePayload(&p); err != nil {
 		t.Fatalf("decode attach payload: %v", err)
 	}
 	if p.ClientID != "my-client-id" {
 		t.Errorf("ClientID = %q, want %q", p.ClientID, "my-client-id")
+	}
+}
+
+// attachPayloads decodes every MsgAttach a conn received, in order.
+func attachPayloads(t *testing.T, conn *fakeConn) []ipc.AttachPayload {
+	t.Helper()
+	conn.mu.Lock()
+	defer conn.mu.Unlock()
+	var out []ipc.AttachPayload
+	for _, msg := range conn.sent {
+		if msg.Type != ipc.MsgAttach {
+			continue
+		}
+		var p ipc.AttachPayload
+		if err := msg.DecodePayload(&p); err != nil {
+			t.Fatalf("decode attach payload: %v", err)
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// TestAttach_ReattachFlagMarksOnlyTheReconnectPath: the daemon's restart
+// reserve yields to a FIRST attach from a new process and keeps waiting for a
+// reconnecting one, so the flag must be false on the attach a WindowSizeMsg
+// sends and true on the one a completed redial sends.
+func TestAttach_ReattachFlagMarksOnlyTheReconnectPath(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	first, fresh := newFakeConn(), newFakeConn()
+	r := NewRouter(map[string]Client{"gpu01": first})
+	var m tea.Model = Model{client: r, cfg: config.Default()}
+
+	m, cmd := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	runCmdNoWait(cmd)
+	got := attachPayloads(t, first)
+	if len(got) != 1 {
+		t.Fatalf("first attach count = %d, want 1", len(got))
+	}
+	if got[0].Reattach {
+		t.Error("the process's first attach must not set reattach")
+	}
+
+	mm := m.(Model)
+	mm.links = map[string]*reconnectState{"gpu01": {active: true, gen: 1}}
+	m, cmd = mm.Update(redialResultMsg{gen: 1, dest: "gpu01", client: fresh})
+	runCmdNoWait(cmd)
+	got = attachPayloads(t, fresh)
+	if len(got) != 1 {
+		t.Fatalf("reconnect attach count = %d, want 1", len(got))
+	}
+	if !got[0].Reattach {
+		t.Error("the attach sent from the reconnect path must set reattach")
 	}
 }
 

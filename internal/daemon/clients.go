@@ -239,7 +239,10 @@ func (r *clientRegistry) expire() {
 // attach records conn as the client id at a RAW geometry and elects. An empty
 // id is minted as "anon-<uuid>", scoped to the conn: a re-attach on the same
 // conn keeps it.
-func (r *clientRegistry) attach(conn *ipc.Conn, id string, cols, rows int, cwd string) clientChange {
+//
+// reattach is the payload's Reattach flag: false on a process's first attach
+// to this daemon, which a restart reserve yields to when it is alone.
+func (r *clientRegistry) attach(conn *ipc.Conn, id string, cols, rows int, cwd string, reattach bool) clientChange {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.byConn == nil {
@@ -279,6 +282,12 @@ func (r *clientRegistry) attach(conn *ipc.Conn, id string, cols, rows int, cwd s
 	if res := r.reserved; res != nil && res.id == id {
 		// The reserved client is back, so the slot has nothing left to wait
 		// for. The election below keeps it when the client is eligible.
+		r.clearReservationLocked()
+	} else if res != nil && res.protects == nil && !reattach && len(r.byConn) == 1 {
+		// A restart reserve waits for TUIs RECONNECTING after the restart. A
+		// new process attaching alone is a cold start after an unclean stop
+		// (reboot, kill): the previous master went with its process, and
+		// waiting would make the only client a follower for the reserve.
 		r.clearReservationLocked()
 	}
 	return clientChange{master: r.electLocked(), count: len(r.byConn) != before}
@@ -356,7 +365,8 @@ func (r *clientRegistry) takeControl(conn *ipc.Conn) (changed, accepted bool) {
 
 // reserveAfterRestart keeps a restored size_master's slot for
 // min(grace, restartReserveCap), with no follower condition: after a restart
-// nobody is attached yet, and the TUIs reattach with their same ids.
+// nobody is attached yet, and the TUIs reattach with their same ids. A new
+// process's FIRST attach, alone on the daemon, ends it early (see attach).
 func (r *clientRegistry) reserveAfterRestart(id string) {
 	id = truncateField(id, maxClientIDLen)
 	d := min(r.grace, restartReserveCap)
@@ -394,7 +404,7 @@ func (d *Daemon) attachClient(conn *ipc.Conn, attach ipc.AttachPayload) clientCh
 		return clientChange{}
 	}
 	id := truncateField(attach.ClientID, maxClientIDLen)
-	return d.clients.attach(conn, id, clampClientDim(attach.Cols), clampClientDim(attach.Rows), attach.CWD)
+	return d.clients.attach(conn, id, clampClientDim(attach.Cols), clampClientDim(attach.Rows), attach.CWD, attach.Reattach)
 }
 
 // clampClientDim bounds one axis of a self-reported window size to

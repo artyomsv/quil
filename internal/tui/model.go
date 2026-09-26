@@ -7934,7 +7934,7 @@ func (m *Model) attachAllDests() tea.Cmd {
 		if m.attached[dest] {
 			continue
 		}
-		if err := m.sendForDest(dest, m.attachMessage(dest)); err != nil {
+		if err := m.sendForDest(dest, m.attachMessage(dest, false)); err != nil {
 			log.Printf("attach to %q failed, retrying on the next resize: %v", dest, err)
 			continue
 		}
@@ -7997,7 +7997,11 @@ func (m *Model) attachAllDests() tea.Cmd {
 
 // attachMessage builds the MsgAttach describing this client's geometry for one
 // destination.
-func (m Model) attachMessage(dest string) *ipc.Message {
+//
+// reattach is true only from the reconnect path (attachToDest). A daemon that
+// just restarted keeps the previous master's slot for its reconnecting TUIs,
+// and yields it to a first attach from a new process that is alone there.
+func (m Model) attachMessage(dest string, reattach bool) *ipc.Message {
 	// Subtract chrome (tab bar + status bar), the project sidebar (if open),
 	// then pane border (2) — the same reservation resizeTabs applies, so the
 	// very first spawned pane isn't sized wider than what's about to be
@@ -8030,6 +8034,7 @@ func (m Model) attachMessage(dest string) *ipc.Message {
 		Rows:     rows,
 		CWD:      attachCWD(dest, localCWD),
 		ClientID: m.clientID,
+		Reattach: reattach,
 	})
 	return msg
 }
@@ -8055,7 +8060,7 @@ func (m Model) attachMessage(dest string) *ipc.Message {
 // sets m.attached[dest] — so its copy of this report does not cover it.
 func (m Model) attachToDest(dest string) tea.Cmd {
 	attachCmd := func() tea.Msg {
-		m.sendForDest(dest, m.attachMessage(dest))
+		m.sendForDest(dest, m.attachMessage(dest, true))
 		return nil
 	}
 	return tea.Batch(attachCmd, m.requestPluginListFor(dest), m.overlayTruthDestCmd(dest),

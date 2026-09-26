@@ -274,7 +274,7 @@ func TestAttachMessage_ReportsNoGeometryBelowTheMinimum(t *testing.T) {
 			m := Model{cfg: config.Default(), width: tt.width, height: tt.height}
 
 			var p ipc.AttachPayload
-			if err := m.attachMessage("").DecodePayload(&p); err != nil {
+			if err := m.attachMessage("", false).DecodePayload(&p); err != nil {
 				t.Fatalf("decode attach payload: %v", err)
 			}
 

@@ -87,6 +87,13 @@ func (h *clientsHarness) attach(id string, cols, rows int) (*ipc.Conn, bool) {
 	return c, changed
 }
 
+// reattach is attach from a client's reconnect path: Reattach is set.
+func (h *clientsHarness) reattach(id string, cols, rows int) (*ipc.Conn, bool) {
+	c := new(ipc.Conn)
+	changed := h.d.registerClient(c, ipc.AttachPayload{ClientID: id, Cols: cols, Rows: rows, Reattach: true})
+	return c, changed
+}
+
 func (h *clientsHarness) wantMaster(want string) {
 	h.t.Helper()
 	if got := h.d.masterID(); got != want {
@@ -332,9 +339,9 @@ func TestRestartReserve_PreviousMasterReclaims(t *testing.T) {
 
 	t.Run("previous master reattaches after another client", func(t *testing.T) {
 		h := restartedWithMaster(t)
-		b, changed := h.attach("B", 100, 30)
+		b, changed := h.reattach("B", 100, 30)
 		if changed || h.d.isMasterConn(b) {
-			t.Error("a client attaching first after a restart must not take the reserved slot")
+			t.Error("a client reattaching first after a restart must not take the reserved slot")
 		}
 		if h.d.sizeAuthorityOpen() {
 			t.Error("the restart reservation must keep size authority closed")
@@ -354,7 +361,7 @@ func TestRestartReserve_PreviousMasterReclaims(t *testing.T) {
 
 	t.Run("previous master never comes", func(t *testing.T) {
 		h := restartedWithMaster(t)
-		b, _ := h.attach("B", 100, 30)
+		b, _ := h.reattach("B", 100, 30)
 		h.advance(restartReserveCap)
 		h.fire()
 		if !h.d.isMasterConn(b) {
@@ -363,6 +370,31 @@ func TestRestartReserve_PreviousMasterReclaims(t *testing.T) {
 		if h.changes != 1 {
 			t.Errorf("changes = %d, want 1", h.changes)
 		}
+	})
+
+	// After an unclean stop (reboot, kill) the next TUI is a new process with
+	// a new id. Kept waiting on the reserve, it would be a follower for 30 s
+	// with nobody else attached to protect.
+	t.Run("fresh single first attach takes the slot at once", func(t *testing.T) {
+		h := restartedWithMaster(t)
+		b, changed := h.attach("B", 100, 30)
+		if !changed || !h.d.isMasterConn(b) {
+			t.Error("a new process attaching alone during the restart reserve must be the master at once")
+		}
+		if h.armed() != nil {
+			t.Error("the restart timer must be stopped once the reserve yields")
+		}
+		h.wantMaster("B")
+	})
+
+	t.Run("fresh first attach beside a reattached client keeps the reserve", func(t *testing.T) {
+		h := restartedWithMaster(t)
+		h.reattach("B", 100, 30)
+		c, changed := h.attach("C", 100, 30)
+		if changed || h.d.isMasterConn(c) {
+			t.Error("a first attach that is not the only client must not take the reserved slot")
+		}
+		h.wantMaster("A")
 	})
 }
 

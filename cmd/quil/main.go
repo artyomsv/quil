@@ -192,7 +192,7 @@ func handleDaemon() {
 	}
 
 	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "usage: quil daemon [start|stop|restart|status]")
+		fmt.Fprintln(os.Stderr, "usage: quil daemon [start|stop|restart|status|install-logon]")
 		os.Exit(1)
 	}
 
@@ -209,17 +209,20 @@ func handleDaemon() {
 		restartDaemonCmd()
 	case "status":
 		runStatus(os.Args[3:])
+	case "install-logon":
+		os.Exit(runInstallLogon(os.Args[3:]))
 	default:
 		fmt.Fprintf(os.Stderr, "unknown daemon command: %s\n", os.Args[2])
 		os.Exit(1)
 	}
 }
 
+// findDaemonBinaryFn is a seam so install-logon's decisions test without a
+// real filesystem lookup.
+var findDaemonBinaryFn = findDaemonBinary
+
 func findDaemonBinary() string {
-	name := "quild"
-	if daemonBinary != "" {
-		name = daemonBinary
-	}
+	name := daemonName()
 
 	// 1. Check PATH first
 	if p, err := exec.LookPath(name); err == nil {

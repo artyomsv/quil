@@ -91,9 +91,13 @@ const notRunningMarker = "daemon not running"
 // So: classify on the marker our own CLI prints, and treat everything else as
 // worth surfacing. A remote running an OLDER quil may word it differently,
 // which costs a spurious warning — never a silent failure.
-func StopRemoteDaemon(ctx context.Context, r Runner, binaryPath string) (warning string, err error) {
+func StopRemoteDaemon(ctx context.Context, r Runner, shell, binaryPath string) (warning string, err error) {
+	cmd, err := DaemonStopCommand(shell, binaryPath)
+	if err != nil {
+		return "", err
+	}
 	out := &capWriter{limit: maxRemoteOutput}
-	code, err := r.Run(ctx, DaemonStopCommand(binaryPath), nil, out, out)
+	code, err := r.Run(ctx, cmd, nil, out, out)
 	if err != nil {
 		return "", fmt.Errorf("stop remote daemon: %w", err)
 	}

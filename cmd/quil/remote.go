@@ -97,16 +97,23 @@ func redirectRemoteStderr(w io.Writer) {
 // becomes the remote command. That is what makes attaching work on a host where
 // quil lives in ~/.local/bin: `ssh host quil --stdio` runs a non-interactive
 // shell, which on Debian and Ubuntu returns from ~/.bashrc before reaching any
-// PATH line, so the directory is invisible there.
+// PATH line, so the directory is invisible there. The recorded shell decides
+// how that path is quoted — POSIX, cmd or PowerShell — and a path a Windows
+// shell cannot quote safely is refused here rather than run.
 //
 // With nothing recorded the transport's default (`quil --stdio`) applies, which
 // works when the remote's non-interactive PATH can already see it.
-func remoteSSHOptions(cfg config.Config, dest string) transport.SSHOptions {
+func remoteSSHOptions(cfg config.Config, dest string) (transport.SSHOptions, error) {
 	var opts transport.SSHOptions
 	if binary := cfg.RemoteBinary(dest); binary != "" {
-		opts.RemoteCommand = remoteinstall.ShellSingleQuote(binary) + " --stdio"
+		cmd, err := remoteinstall.QuoteCommand(cfg.RemoteShell(dest), binary, "--stdio")
+		if err != nil {
+			return opts, fmt.Errorf("recorded quil path for %s: %w (fix [remote.hosts.%q] in %s)",
+				dest, err, dest, config.ConfigPath())
+		}
+		opts.RemoteCommand = cmd
 	}
-	return opts
+	return opts, nil
 }
 
 // remoteLinkError reports a dead remote transport, or nil when the link is
@@ -272,7 +279,10 @@ func dialRemote(cfg config.Config, dest string) (*ipc.Client, error) {
 // owns the ssh child and releases it on Close, so a caller may cancel this
 // context the moment the dial returns without killing the session it opened.
 func dialRemoteTransport(ctx context.Context, cfg config.Config, dest string, batch bool, stderrSink io.Writer) (*ipc.Client, transport.LinkStatus, error) {
-	opts := remoteSSHOptions(cfg, dest)
+	opts, err := remoteSSHOptions(cfg, dest)
+	if err != nil {
+		return nil, nil, err
+	}
 	opts.Batch = batch
 	// Only consulted on a batch dial. The interactive dial's stderr belongs on
 	// the terminal, where host-key and passphrase prompts have to be readable,

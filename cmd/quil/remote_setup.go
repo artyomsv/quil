@@ -217,7 +217,8 @@ func runRemoteSetup(dest string, opts setupOptions) error {
 	var stopWarning string
 	if upgrade {
 		fmt.Fprintf(opts.out(), "Stopping the remote daemon…\n")
-		stopWarning, err = remoteinstall.StopRemoteDaemon(ctx, runner, probe.ExistingPath)
+		// Task 10: probe.Shell
+		stopWarning, err = remoteinstall.StopRemoteDaemon(ctx, runner, remoteinstall.ShellPOSIX, probe.ExistingPath)
 		if err != nil {
 			return err
 		}
@@ -238,7 +239,8 @@ func runRemoteSetup(dest string, opts setupOptions) error {
 		return nil
 	}
 
-	reportInstalled(opts.out(), dest, target, src, stopWarning)
+	// Task 10: probe.Shell
+	reportInstalled(opts.out(), dest, target, src, stopWarning, remoteinstall.ShellPOSIX)
 	return nil
 }
 
@@ -360,7 +362,7 @@ func clearRemoteBinary(dest string) error {
 	return mutateConfig(func(c *config.Config) { c.ClearRemoteBinary(dest) })
 }
 
-func reportInstalled(out io.Writer, dest string, target remoteinstall.Target, src remoteinstall.Source, stopWarning string) {
+func reportInstalled(out io.Writer, dest string, target remoteinstall.Target, src remoteinstall.Source, stopWarning, shell string) {
 	fmt.Fprintf(out, "\n  Installed %s on %s.\n\n", displayVersion(src), dest)
 	fmt.Fprintf(out, "    %s\n", target.BinaryPath())
 	if stopWarning != "" {
@@ -372,12 +374,18 @@ func reportInstalled(out io.Writer, dest string, target remoteinstall.Target, sr
 			"\n  Warning: the remote daemon did not confirm shutdown:\n"+
 				"    %s\n"+
 				"  The new binaries are installed, but a daemon still running keeps\n"+
-				"  serving the old version. If attaching reports a version mismatch:\n"+
-				"    ssh %s %s\n",
-			stopWarning, dest,
-			// Quoted, so a path with an apostrophe yields a command the user can
-			// actually paste rather than one that breaks on the shell.
-			remoteinstall.ShellSingleQuote(remoteinstall.DaemonStopCommand(target.BinaryPath())))
+				"  serving the old version.\n",
+			stopWarning)
+		stop, err := remoteinstall.DaemonStopCommand(shell, target.BinaryPath())
+		if err != nil {
+			log.Printf("remote setup: could not build the stop-daemon hint for %s: %v", dest, err)
+		} else {
+			// Quoted for the user's OWN (POSIX) shell, so a path with an
+			// apostrophe yields a command that can actually be pasted rather
+			// than one that breaks on it.
+			fmt.Fprintf(out, "  If attaching reports a version mismatch:\n    ssh %s %s\n",
+				dest, remoteinstall.ShellSingleQuote(stop))
+		}
 	}
 	if target.Shadowed != "" {
 		fmt.Fprintf(out, "\n  %s is still present and is what a bare `ssh %s quil` finds.\n",

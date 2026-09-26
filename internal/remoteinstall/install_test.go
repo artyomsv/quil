@@ -98,7 +98,10 @@ func TestInstallCommand_QuotesEveryInterpolatedValue(t *testing.T) {
 }
 
 func TestDaemonStopCommand_QuotesThePath(t *testing.T) {
-	got := DaemonStopCommand("/home/o'brien/.local/bin/quil")
+	got, err := DaemonStopCommand(ShellPOSIX, "/home/o'brien/.local/bin/quil")
+	if err != nil {
+		t.Fatalf("DaemonStopCommand error = %v", err)
+	}
 	if !strings.Contains(got, `'\''brien`) {
 		t.Errorf("binary path was not escaped: %q", got)
 	}
@@ -373,7 +376,7 @@ func TestStopRemoteDaemon_ClassifiesTheOutcome(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := &fakeRunner{exitCode: tt.exitCode, stdout: tt.output}
-			warning, err := StopRemoteDaemon(context.Background(), r, "/usr/local/bin/quil")
+			warning, err := StopRemoteDaemon(context.Background(), r, ShellPOSIX, "/usr/local/bin/quil")
 			if err != nil {
 				t.Fatalf("error = %v, want nil", err)
 			}

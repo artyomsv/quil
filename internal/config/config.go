@@ -183,15 +183,26 @@ type RemoteHost struct {
 	// see the install directory — the normal case for ~/.local/bin on Debian
 	// and Ubuntu, where ~/.bashrc returns before reaching any PATH line.
 	Binary string `toml:"binary"`
+
+	// Shell is the host's default ssh shell as `quil remote setup` found it:
+	// "" (POSIX — every record made before Windows support), "cmd" or
+	// "powershell". It decides how Binary is quoted in the remote command.
+	Shell string `toml:"shell,omitempty"`
 }
 
-// SetRemoteBinary records where quil lives on dest, creating the map on first
-// use so callers need not care whether the config predates this section.
-func (c *Config) SetRemoteBinary(dest, binary string) {
+// SetRemoteHost records where quil lives on dest and how to quote it there.
+func (c *Config) SetRemoteHost(dest, binary, shell string) {
 	if c.Remote.Hosts == nil {
 		c.Remote.Hosts = make(map[string]RemoteHost)
 	}
-	c.Remote.Hosts[dest] = RemoteHost{Binary: binary}
+	c.Remote.Hosts[dest] = RemoteHost{Binary: binary, Shell: shell}
+}
+
+// SetRemoteBinary records where quil lives on dest, preserving any Shell
+// already recorded for it, creating the map on first use so callers need not
+// care whether the config predates this section.
+func (c *Config) SetRemoteBinary(dest, binary string) {
+	c.SetRemoteHost(dest, binary, c.Remote.Hosts[dest].Shell)
 }
 
 // RemoteBinary returns the recorded quil path for dest, or "" when none has
@@ -200,6 +211,9 @@ func (c *Config) SetRemoteBinary(dest, binary string) {
 func (c *Config) RemoteBinary(dest string) string {
 	return c.Remote.Hosts[dest].Binary
 }
+
+// RemoteShell is dest's recorded shell, "" (POSIX) when none is recorded.
+func (c Config) RemoteShell(dest string) string { return c.Remote.Hosts[dest].Shell }
 
 // ClearRemoteBinary forgets the recorded quil path for dest.
 //

@@ -7,7 +7,6 @@ import (
 	"io"
 	"log"
 	"net/url"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1019,7 +1018,7 @@ func (p *PaneModel) restoreContext() string {
 	}
 	detail := p.Name
 	if detail == "" && p.CWD != "" {
-		detail = filepath.Base(p.CWD)
+		detail = displayBase(p.CWD)
 	}
 	if detail == "" {
 		return typ

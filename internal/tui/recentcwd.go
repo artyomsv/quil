@@ -37,9 +37,14 @@ func pushRecentCWD(list []string, dir string, limit int) []string {
 	return out
 }
 
-// pathEqual compares two paths, case-insensitively on Windows where the
-// filesystem is case-preserving but case-insensitive.
+// pathEqual compares two paths: case-insensitively and with either separator
+// when both are Windows-shaped (they came from a Windows daemon, whatever this
+// client runs), else case-insensitively only on a Windows client.
 func pathEqual(a, b string) bool {
+	if isWindowsPath(a) && isWindowsPath(b) {
+		norm := func(s string) string { return strings.TrimRight(strings.ReplaceAll(s, "/", `\`), `\`) }
+		return strings.EqualFold(norm(a), norm(b))
+	}
 	return pathEqualCase(a, b, runtime.GOOS == "windows")
 }
 

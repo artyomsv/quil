@@ -663,6 +663,44 @@ func TestTypingGuard_StaleFromTabBroadcastIsRejectedWhilePending(t *testing.T) {
 	}
 }
 
+// TestTypingGuard_JumpRecordsARequestedTab: jumpToPane (MCP set_active_pane,
+// sidebar clicks, Alt+Backspace, the palette, attention jumps) moves this
+// client's active tab exactly as switchTab does, so it must record the same
+// token. Without one, a broadcast still in flight from before the jump names
+// the old tab and reads as another client switching back: the tab jumps
+// back, the guard arms and the flash shows.
+func TestTypingGuard_JumpRecordsARequestedTab(t *testing.T) {
+	t.Parallel()
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	m, _ := typingGuardModel(t, t0, "t1", "t2")
+
+	updated, _ := m.Update(setActivePaneMsg{PaneID: "p2"})
+	got := updated.(Model)
+	if got.activeTabModel().ID != "t2" {
+		t.Fatalf("setup: active tab = %q, want t2", got.activeTabModel().ID)
+	}
+
+	got.now = func() time.Time { return t0.Add(100 * time.Millisecond) }
+	updated, _ = got.Update(typingGuardBroadcast("t1", "t1", "t2"))
+	got2 := updated.(Model)
+	if got2.activeTabModel().ID != "t2" {
+		t.Errorf("active tab = %q after a stale t1 broadcast, want t2 (no jump back)", got2.activeTabModel().ID)
+	}
+	if got2.guardPaneID != "" {
+		t.Errorf("guardPaneID = %q, want empty — the jump was this client's own", got2.guardPaneID)
+	}
+	if got2.flashText != "" {
+		t.Errorf("flashText = %q, want empty", got2.flashText)
+	}
+
+	// The jump's own echo lands and retires the token.
+	updated, _ = got2.Update(typingGuardBroadcast("t2", "t1", "t2"))
+	got3 := updated.(Model)
+	if got3.guardPaneID != "" || got3.flashText != "" {
+		t.Errorf("the jump's echo armed the guard (%q) or flashed (%q)", got3.guardPaneID, got3.flashText)
+	}
+}
+
 // TestTypingGuard_StaleFromTabBroadcastIsAdoptedPastTheBound is the other
 // side of requestedSwitchStaleWindow: once it elapses, the local switch is
 // assumed lost (never reached the daemon, or was overtaken), and a broadcast

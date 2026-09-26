@@ -194,9 +194,25 @@ func (m *Model) jumpToPane(paneID string) (bool, tea.Cmd) {
 			break
 		}
 	}
+	// The tab this project showed before the jump, for the typing guard's
+	// token below. It is the project's OWN previous tab, not `from`: after a
+	// cross-project jump `from` is in another project, while a broadcast in
+	// flight from before the jump names this project's old active tab.
+	prevID := ""
+	if prev := proj.activeTab; prev >= 0 && prev < len(proj.tabs) {
+		prevID = proj.tabs[prev].ID
+	}
 	proj.activeTab = tabIdx
 	target := proj.tabs[tabIdx]
 	target.ActivePane = paneID
+	// Typing guard (spec §8.1): this jump is THIS client's own switch, exactly
+	// as switchTab's is, so its broadcast must not read as another client's.
+	// See switchTab for the token and requestedSwitchStaleWindow for prevID.
+	// A jump that keeps the project's tab records nothing, so it cannot
+	// overwrite a token an earlier switch is still waiting on.
+	if prevID != target.ID {
+		m.recordRequestedTab(target.Dest, proj.ID, target.ID, prevID)
+	}
 	// The Active FLAG is set here, not left to the caller. ActivePane alone
 	// routes keystrokes, but Active is what draws the pane's cursor
 	// (renderPane) and its focused border — so a pane raised without it looks

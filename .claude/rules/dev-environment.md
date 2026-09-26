@@ -38,7 +38,7 @@ Every code change in this repo follows the same loop:
 
 1. Edit code (`internal/…`, `cmd/…`).
 2. Rebuild: `./scripts/dev.sh build`.
-3. If a dev daemon from a previous iteration is running, stop it by PID from `./.quil/quild.pid` (or manually via Task Manager / `kill`).
+3. Nothing to do by hand: `./scripts/dev.sh build` (and `clean`) now stops this directory's dev daemon (gracefully, via `quil-dev daemon stop`) and any dev TUI first, matching `quil-dev`/`quild-dev` by full executable path. It never stops `quil`/`quild` or `quil-debug`/`quild-debug`, and a dev TUI you had open is closed by design. If the build still refuses, something else holds a binary here — stop a stray dev daemon by PID from `./.quil/quild.pid` only, never from `~/.quil/quild.pid`.
 4. Launch: `./scripts/quil-dev.ps1` (Windows) or `./scripts/quil-dev.sh` (Unix).
 5. Verify `[dev]` is visible in the status bar before testing.
 6. Test the change. When done, close the dev TUI — do NOT run any `kill-daemon` / `reset-daemon` helper scripts.

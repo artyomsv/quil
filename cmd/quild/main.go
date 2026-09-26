@@ -1,11 +1,13 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/daemon"
@@ -123,6 +125,25 @@ func main() {
 		}()
 	}
 
+	// Single-instance lock: see acquireStartupLock. Taken before anything that
+	// touches shared files, and held until exit.
+	releaseLock, err := acquireStartupLock(config.QuilDir(), startupLockWait, 100*time.Millisecond)
+	switch {
+	case errors.Is(err, errLockHeld):
+		log.Printf("another quild is starting or running for %s; exiting (no second daemon)", config.QuilDir())
+		if !background {
+			fmt.Println("quild already running")
+		}
+		return
+	case err != nil:
+		// A lock we cannot take for another reason (a filesystem without
+		// locking) must not stop the daemon: fall back to the socket probe
+		// below, which was the only guard before this lock existed.
+		log.Printf("startup lock unavailable (%v); relying on the socket probe", err)
+	default:
+		defer releaseLock()
+	}
+
 	// Extract the bundled ConPTY host (Windows only; no-op elsewhere) so panes
 	// spawn through the newer OpenConsole instead of the OS conhost. Non-fatal:
 	// on failure the PTY layer falls back to the inbox ConPTY.
@@ -141,8 +162,9 @@ func main() {
 	// wedged daemon or a foreign process squatting the path would accept a
 	// connection but can't serve clients, and deferring to it would wrongly
 	// refuse a legitimate startup. A stale/wedged/foreign socket is left for
-	// Server.Start to reclaim. (Residual: two daemons that both fail the probe
-	// before either listens can still race — availability-only, same-UID.)
+	// Server.Start to reclaim. The startup lock above closes the race of two
+	// daemons that both fail this probe before either listens; this probe
+	// remains for a socket held by a wedged or foreign process.
 	if daemonAlreadyHealthy(config.SocketPath()) {
 		log.Printf("a healthy quild is already serving %s; exiting (no orphan spawn)", config.SocketPath())
 		if !background {

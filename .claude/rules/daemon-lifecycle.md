@@ -125,11 +125,16 @@ their SAME process id within seconds of a restart, so the previous master
 reclaims its slot (`attach` hands the reservation's `attachedAt` back to the
 returning record, so it stays the oldest) and nothing resizes.
 `AttachPayload.Reattach` separates those reconnects from a COLD start: the
-TUI sets it only on the attach its reconnect path sends. After an unclean
+TUI sets it once THIS PROCESS has attached to that destination before
+(`Model.attachedOnce`, written by both attach paths and never cleared) — not
+by which path sends it, because a destination unreachable at launch gets its
+first attach from `finishReconnect`. After an unclean
 stop (reboot, kill) the next TUI is a new process with a new id, and a first
 attach (`Reattach` false) from a different id that is the ONLY attached client
 clears the restart reserve and is elected at once — otherwise it would be a
-follower for 30 s with nobody to protect. Reconnecting clients still wait.
+follower for 30 s with nobody to protect. Reconnecting clients still wait, and
+so does an attach with NO `ClientID`: a TUI older than this feature sends
+neither field, so its reconnect is indistinguishable from a cold start.
 
 **Size authority (`applyResizes`, `internal/daemon/daemon.go`).** `resize_pane`
 and `resize_panes` share one implementation. A resize applies only from the

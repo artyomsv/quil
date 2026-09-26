@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/winjob"
 )
 
 // stubStopSpawn swaps both side effects of restartDaemonForUpgrade for the
@@ -145,5 +146,63 @@ func TestRestartDaemonForUpgrade_SpawnFails_Reports(t *testing.T) {
 	// passes that too, just slowly.
 	if !strings.Contains(err.Error(), "exec: no such file") {
 		t.Errorf("error = %q, want it to carry the spawn failure", err)
+	}
+}
+
+// TestSpawnDaemonForUpgrade_InKillOnCloseJob_NeverUsesTheUnloweredToken is the
+// upgrade-path sibling of TestStartDaemon_UsesDecision_NormalPathReturnsItsPID:
+// the version gate's restart must go through the same winjob.StartDaemon
+// decision as startDaemon, or a TUI running inside an ssh session's
+// kill-on-close job spawns the replacement daemon with the unlowered token —
+// High, for an admin over ssh — exactly the defect this test guards against.
+func TestSpawnDaemonForUpgrade_InKillOnCloseJob_NeverUsesTheUnloweredToken(t *testing.T) {
+	quilHome(t)
+	prev := startDepsFn
+	t.Cleanup(func() { startDepsFn = prev })
+	var normalCalled, loweredCalled bool
+	startDepsFn = func(quild, quilDir, sock string) winjob.StartDeps {
+		return winjob.StartDeps{
+			InJob:         func() (bool, bool, error) { return true, true, nil },
+			TaskExists:    func() bool { return false },
+			LiveDaemonPID: func() bool { return false },
+			SpawnNormal:   func() (int, error) { normalCalled = true; return 1111, nil },
+			SpawnLowered:  func() (int, error) { loweredCalled = true; return 4242, nil },
+		}
+	}
+	pid, err := spawnDaemonForUpgrade()
+	if err != nil {
+		t.Fatalf("spawnDaemonForUpgrade: %v", err)
+	}
+	if pid != 4242 {
+		t.Errorf("pid = %d, want 4242 (SpawnLowered's)", pid)
+	}
+	if normalCalled {
+		t.Error("SpawnNormal was called; want only SpawnLowered inside a kill-on-close job")
+	}
+	if !loweredCalled {
+		t.Error("SpawnLowered was never called")
+	}
+}
+
+// TestSpawnDaemonForUpgrade_NoBreakaway_ErrorSurvives verifies the error
+// identity survives spawnDaemonForUpgrade's return, so a caller can (and
+// gateVersionCheck does) special-case ErrNoBreakaway to show
+// winjob.NoBreakawayMessage instead of the generic "daemon restart failed"
+// advice, which would be actively wrong here — the old daemon stopped fine;
+// this session simply cannot start a replacement that outlives it.
+func TestSpawnDaemonForUpgrade_NoBreakaway_ErrorSurvives(t *testing.T) {
+	quilHome(t)
+	prev := startDepsFn
+	t.Cleanup(func() { startDepsFn = prev })
+	startDepsFn = func(string, string, string) winjob.StartDeps {
+		return winjob.StartDeps{
+			InJob:         func() (bool, bool, error) { return true, false, nil },
+			TaskExists:    func() bool { return false },
+			LiveDaemonPID: func() bool { return false },
+		}
+	}
+	_, err := spawnDaemonForUpgrade()
+	if !errors.Is(err, winjob.ErrNoBreakaway) {
+		t.Fatalf("err = %v, want errors.Is(err, winjob.ErrNoBreakaway)", err)
 	}
 }

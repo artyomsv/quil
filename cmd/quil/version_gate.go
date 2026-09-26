@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/remoteinstall"
 	versionpkg "github.com/artyomsv/quil/internal/version"
+	"github.com/artyomsv/quil/internal/winjob"
 )
 
 // releasesURL is shown to users running an older TUI against a newer
@@ -166,6 +168,18 @@ func gateVersionCheck(client *ipc.Client) *ipc.Client {
 		client.Close()
 		newClient, err := restartDaemonForUpgrade()
 		if err != nil {
+			if errors.Is(err, winjob.ErrNoBreakaway) {
+				// Not the orphan-daemon case below: the old daemon stopped
+				// cleanly, but this session cannot start its replacement — it
+				// is inside a kill-on-close job (an ssh session into this
+				// machine) with no logon task and no breakaway. "quil daemon
+				// stop"/"status" below would be actively wrong advice here,
+				// so this gets its own message instead of the generic one.
+				log.Printf("version gate: daemon restart refused: %v", err)
+				fmt.Fprintln(os.Stderr, winjob.NoBreakawayMessage)
+				exitFn(1)
+				return nil
+			}
 			// Every later launch hits this same wall — the old daemon is
 			// still there and still the wrong version — so a bare one-liner
 			// would strand the user with a TUI that refuses to start and no
@@ -327,22 +341,29 @@ func restartDaemonForUpgrade() (*ipc.Client, error) {
 // spawnDaemonForUpgrade starts a detached daemon and returns its pid. Prefers
 // the executable-adjacent binary over PATH so a stale `quild` earlier on PATH
 // doesn't shadow the bundled one the user just upgraded to.
+//
+// Routes through the same decision as startDaemon (winjob.StartDaemon via
+// startDepsFn) rather than exec'ing directly: this restart is exactly the
+// moment an ssh session into this machine tries to relaunch the daemon it is
+// about to disconnect from, so it must never use the unlowered token either.
+// A byproduct of sharing newStartDeps: the normal path now also captures the
+// daemon's stderr to quilDir/quild.stderr.log and runs it with Dir=quilDir,
+// which this function previously did not (it discarded stderr and inherited
+// the TUI's own cwd) — see daemonspawn.Start, which startDaemon's normal path
+// already relied on.
 func spawnDaemonForUpgrade() (int, error) {
 	binary := findDaemonBinaryForUpgrade()
 	log.Printf("restart: spawning %s", binary)
-	cmd := exec.Command(binary, "--background")
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	cmd.SysProcAttr = daemonSysProcAttr()
-	if err := cmd.Start(); err != nil {
-		return 0, fmt.Errorf("spawn daemon %q: %w", binary, err)
+	res, err := winjob.StartDaemon(startDepsFn(binary, config.QuilDir(), config.SocketPath()))
+	if err != nil {
+		return 0, err
 	}
-	// Start succeeded, so cmd.Process is set. Returning 0 here instead would
-	// silently downgrade waitForDaemonReady to a blind 30 s poll with no
-	// crash detection.
-	pid := cmd.Process.Pid
-	cmd.Process.Release()
-	return pid, nil
+	// PID 0 only on the task/waited paths, meaning a *different* process
+	// already has the socket open — the same "already up" convention
+	// startDaemon uses. waitForDaemonReady tolerates it (falls back to a
+	// plain poll instead of watching a spawned pid), and the socket is
+	// already listening by construction on those two paths.
+	return res.PID, nil
 }
 
 // findDaemonBinaryForUpgrade is the upgrade-path analogue of

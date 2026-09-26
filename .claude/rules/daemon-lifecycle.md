@@ -193,11 +193,27 @@ replay's `OutputBuf` snapshot can never disagree about what has been sent.
 Every flush during a hold is copied into that conn's hold (`holdOutput`,
 keyed by `*ipc.Conn` under the daemon's `holdMu` leaf lock) BEFORE the ordinary
 broadcast. Two locks, always taken `holdGate` → `holdMu`: `holdGate` (an
-`RWMutex`) makes "append to the hold, then broadcast" one step against setting
-or clearing the conn's flag (a flush holding it for READ; every hold that
-starts or ends holding it for WRITE) — without it a flush could append and
-broadcast to a conn whose flag flipped in between, either duplicating the
-bytes or losing them.
+`RWMutex`) makes "publish to `OutputBuf`, append to the hold, then broadcast"
+one step against setting or clearing the conn's flag (a flush holding it for
+READ; every hold that starts or ends holding it for WRITE) — without it a flush
+could append and broadcast to a conn whose flag flipped in between, either
+duplicating the bytes or losing them. **The read lock is taken BEFORE the
+`OutputBuf` write and `outPos` advance, not after them**: taken after, a whole
+`handleAttach` fitted between publication and broadcast — its replay already
+carried the bytes (`end = outPos`), its hold never saw the flush, and the
+resumed broadcast sent them again to the now-unheld conn (`ONEONEEND`,
+`TestHold_AttachInsideAPublishedFlushGetsItsBytesOnce`, seam
+`afterFlushPublish`). So the flush takes `holdGate` → `PluginMu`, and nothing
+anywhere takes `holdGate` while holding a `PluginMu` (`beginOutputHold`,
+`finishOutputHold`, `dropOutputHold` and `handleAttach`'s replay span all keep
+the two apart). The gated span does no I/O and spawns nothing, which is why
+the mouse-mode `broadcastState` (decided inside the `PluginMu` span, sent
+after the gate — the state frame rides the must-deliver queue, which
+`sendLoop` drains ahead of pane output, so its enqueue order against this
+chunk never decided delivery order) and the bell / hand-start / OSC 133 /
+plugin detectors run AFTER it: the hand-start conversion restarts the pane,
+and a flush re-entered from there would ask for the read lock again behind a
+waiting writer.
 
 On release, held chunks are deduped against `end[paneID]` (the replay's own
 stream-position snapshot, read in the same `PluginMu` span as the `OutputBuf`

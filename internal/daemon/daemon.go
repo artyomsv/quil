@@ -291,12 +291,15 @@ type Daemon struct {
 	// holdCount is len(holds), written under holdGate (write) so a flush
 	// holding it for read can skip holdMu when nothing is held.
 	holdCount atomic.Int32
-	// afterHoldOutput and beforeFinishHold are test seams: a flush calls the
-	// first between its hold append and its broadcast; the release calls the
-	// second between seeing an empty batch and ending the hold. Set before
-	// any flush runs; nil in production.
-	afterHoldOutput  func(paneID string)
-	beforeFinishHold func(c *ipc.Conn)
+	// afterHoldOutput, beforeFinishHold and afterFlushPublish are test seams:
+	// a flush calls the first between its hold append and its broadcast; the
+	// release calls the second between seeing an empty batch and ending the
+	// hold; a flush calls the third right after its OutputBuf write and
+	// outPos advance, before its hold append. Set before any flush runs; nil
+	// in production.
+	afterHoldOutput   func(paneID string)
+	beforeFinishHold  func(c *ipc.Conn)
+	afterFlushPublish func(paneID string)
 }
 
 func New(cfg config.Config) *Daemon {
@@ -4355,9 +4358,29 @@ func (d *Daemon) flushPaneOutputGeneration(paneID string, data []byte, generatio
 	if pane == nil {
 		return
 	}
+	// holdGate is held for read from BEFORE the OutputBuf write until after
+	// the hold append and broadcast, so publishing these bytes and delivering
+	// them are one step against an attach's hold (outputhold.go). Taken any
+	// later, a whole handleAttach fits between the two: its replay already
+	// carries the bytes (end = outPos), its hold never sees them, and the
+	// broadcast then sends them again to the now-unheld conn.
+	//
+	// Order holdGate → PluginMu, as everywhere: nothing takes holdGate while
+	// holding a PluginMu. The span below does no I/O and spawns nothing —
+	// Broadcast only enqueues — which is why the detectors and plugin
+	// handlers run after it: the hand-start conversion restarts the pane,
+	// and a flush re-entered from there would ask for the read lock again
+	// behind a waiting writer.
+	msg, _ := ipc.NewMessage(ipc.MsgPaneOutput, ipc.PaneOutputPayload{
+		PaneID:     paneID,
+		Data:       data,
+		Generation: generation,
+	})
+	d.holdGate.RLock()
 	pane.PluginMu.Lock()
 	if generation != 0 && (generation != pane.ptyGen || pane.PTY == nil) {
 		pane.PluginMu.Unlock()
+		d.holdGate.RUnlock()
 		return
 	}
 	if pane.OutputBuf != nil {
@@ -4421,11 +4444,31 @@ func (d *Daemon) flushPaneOutputGeneration(paneID string, data []byte, generatio
 		doMouseBroadcast = true
 	}
 	pane.PluginMu.Unlock()
+	if d.afterFlushPublish != nil {
+		d.afterFlushPublish(paneID)
+	}
+
+	// Held conns get a copy through their hold; the broadcast skips them.
+	// Outside PluginMu, and Broadcast only enqueues, so the gate is held
+	// across no I/O.
+	d.holdOutput(paneID, start, data, generation)
+	if d.afterHoldOutput != nil {
+		d.afterHoldOutput(paneID)
+	}
+	d.broadcast(msg)
+	d.holdGate.RUnlock()
+
+	// After the gate, not inside it: broadcastState builds the whole
+	// workspace, and the state frame travels on the must-deliver queue, which
+	// sendLoop drains ahead of pane output anyway — so enqueueing it before or
+	// after this chunk never decided which the client saw first.
 	if doMouseBroadcast {
 		logger.Debug("pane %s: mouse-mode change tracking=%v sgr=%v", paneID, newModes.tracking(), newModes.sgr)
 		d.broadcastState()
 	}
 
+	// The detectors read the same bytes the clients were just sent; none of
+	// them changes what this chunk is or which generation it carries.
 	d.detectBellEvent(pane, paneID, data)
 	// Before the OSC 133 detector: a conversion restarts the pane, and the
 	// shell's own prompt hooks emit a D for the command it never ran. Running
@@ -4438,24 +4481,6 @@ func (d *Daemon) flushPaneOutputGeneration(paneID string, data []byte, generatio
 	d.detectHandStart(pane, paneID, data, flushedAt)
 	d.detectOSC133Exit(pane, paneID, data)
 	d.applyPluginHandlers(pane, paneID, data)
-
-	msg, _ := ipc.NewMessage(ipc.MsgPaneOutput, ipc.PaneOutputPayload{
-		PaneID:     paneID,
-		Data:       data,
-		Generation: generation,
-	})
-	// Held conns get a copy through their hold; the broadcast skips them. The
-	// gate makes the pair one step against a hold starting or ending, or a
-	// conn could get these bytes twice or not at all (outputhold.go).
-	// Outside PluginMu, and Broadcast only enqueues, so the gate is held
-	// across no I/O.
-	d.holdGate.RLock()
-	d.holdOutput(paneID, start, data, generation)
-	if d.afterHoldOutput != nil {
-		d.afterHoldOutput(paneID)
-	}
-	d.broadcast(msg)
-	d.holdGate.RUnlock()
 }
 
 // detectBellEvent checks for standalone bell characters (not OSC terminators).

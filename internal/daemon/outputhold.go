@@ -29,10 +29,16 @@ import (
 //   - holdMu is a LEAF guarding the holds map and each hold's contents. It is
 //     never held with PluginMu or the client registry mutex, and never across
 //     SendBlocking.
-//   - holdGate makes "append to the holds, then broadcast" ONE step against
-//     setting or clearing a conn's flag. A flush holds it for READ from its
-//     hold append through its broadcast (Broadcast only enqueues, so this
-//     blocks on nothing). Every hold that starts or ends — beginOutputHold,
+//   - holdGate makes "publish to OutputBuf, append to the holds, then
+//     broadcast" ONE step against setting or clearing a conn's flag. A flush
+//     holds it for READ from BEFORE its OutputBuf write (and outPos advance)
+//     through its broadcast, taking the pane's PluginMu inside it — so the
+//     order is holdGate → PluginMu, and nothing takes holdGate while holding
+//     a PluginMu. Publishing outside the gate let a whole attach run between
+//     the write and the broadcast: its replay carried the bytes, its hold
+//     never saw them, and the broadcast sent them a second time. The span
+//     does no I/O (Broadcast only enqueues) and spawns nothing; the flush's
+//     detectors run after it. Every hold that starts or ends — beginOutputHold,
 //     the release's final clear, dropOutputHold — holds it for WRITE, which
 //     also keeps holdCount exact for a flush holding it for read. Without it, a flush could append its chunk, the release
 //     could send that chunk and clear the flag, and then the flush's broadcast

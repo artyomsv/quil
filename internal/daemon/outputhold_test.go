@@ -540,6 +540,105 @@ func TestHold_FlushStraddlingTheBeginArrivesOnce(t *testing.T) {
 	}
 }
 
+// An attach arriving while a flush sits between publishing its bytes to
+// OutputBuf and broadcasting them. From the attach's state frame on, the
+// client must see those bytes once: in the replay or live, never both.
+//
+// Publishing outside holdGate let the whole attach run in that gap: its
+// replay carried "ONE" (end = outPos), its hold never saw the flush, and the
+// resumed broadcast sent "ONE" again to the now-unheld conn — "ONEONEEND".
+// With publication inside the gate the attach parks in beginOutputHold until
+// the flush finishes; the flush's live frame then lands BEFORE the state frame
+// (the client was not attached yet), and after it come the replay and "END".
+func TestHold_AttachInsideAPublishedFlushGetsItsBytesOnce(t *testing.T) {
+	h := newHoldHarness(t)
+	tab := h.d.session.CreateTab("T")
+	p := h.pane(tab.ID, "terminal")
+	client, conn := h.dial("B")
+
+	paused, resume := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	h.d.afterFlushPublish = func(id string) {
+		if id != p.ID {
+			return
+		}
+		once.Do(func() {
+			close(paused)
+			<-resume
+		})
+	}
+	flushed := make(chan struct{})
+	go func() {
+		h.d.flushPaneOutput(p.ID, []byte("ONE"))
+		close(flushed)
+	}()
+	<-paused
+
+	attach, err := ipc.NewMessage(ipc.MsgAttach, ipc.AttachPayload{Cols: 120, Rows: 40, ClientID: "B"})
+	if err != nil {
+		t.Fatalf("attach message: %v", err)
+	}
+	attached := make(chan struct{})
+	go func() {
+		h.d.handleAttach(conn, attach)
+		close(attached)
+	}()
+	// Either the attach finished inside the gap (the defect) or it parked
+	// on holdGate behind the paused flush. A PENDING writer blocks new
+	// readers, so TryRLock failing is the proof it parked.
+	waitUntil(t, "the attach to finish or park on holdGate", func() bool {
+		select {
+		case <-attached:
+			return true
+		default:
+		}
+		if h.d.holdGate.TryRLock() {
+			h.d.holdGate.RUnlock()
+			return false
+		}
+		return true
+	})
+	close(resume)
+	<-flushed
+	<-attached
+	h.d.flushPaneOutput(p.ID, []byte("END"))
+
+	if err := client.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	var afterState []byte
+	stateSeen := false
+	for {
+		m, err := client.Receive()
+		if err != nil {
+			t.Fatalf("read: %v (after the state frame so far: %q)", err, afterState)
+		}
+		if m.Type == ipc.MsgWorkspaceState {
+			stateSeen = true
+			continue
+		}
+		if m.Type != ipc.MsgPaneOutput {
+			continue
+		}
+		var f ipc.PaneOutputPayload
+		if err := m.DecodePayload(&f); err != nil {
+			t.Fatalf("decode pane_output: %v", err)
+		}
+		if f.PaneID != p.ID {
+			continue
+		}
+		if stateSeen {
+			afterState = append(afterState, f.Data...)
+		}
+		if string(f.Data) == "END" {
+			break
+		}
+	}
+	if got := string(afterState); got != "ONEEND" {
+		t.Fatalf("from the attach's state frame on, received %q, want %q", got, "ONEEND")
+	}
+}
+
 func TestHold_DisconnectDropsHold(t *testing.T) {
 	h := newHoldHarness(t)
 	tab := h.d.session.CreateTab("T")

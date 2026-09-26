@@ -354,3 +354,20 @@ func TestInstallLogonTask(t *testing.T) {
 		t.Error("accepted a UNC binary")
 	}
 }
+
+// An in-place install adopts a directory the USER owns, so the finalize
+// step's cleanup may delete only the files quil itself renamed aside there —
+// never someone's own backup.old. The sweep's pattern is the one match in the
+// script, anchored to the three names quil installs.
+func TestFinalizeScript_SweepsOnlyQuilsOwnOldFiles(t *testing.T) {
+	const narrow = `-match '^(quil|quild|quil-activate)\.exe\.old(\.\d+)?$'`
+	if !strings.Contains(windowsFinalizeScript, narrow) {
+		t.Errorf("finalize script lacks the anchored sweep %s", narrow)
+	}
+	if n := strings.Count(windowsFinalizeScript, "-match"); n != 1 {
+		t.Errorf("finalize script has %d -match clauses, want only the anchored sweep", n)
+	}
+	if n := strings.Count(windowsFinalizeScript, `\.old`); n != 1 {
+		t.Errorf("finalize script matches `\\.old` %d times, want only the anchored sweep", n)
+	}
+}

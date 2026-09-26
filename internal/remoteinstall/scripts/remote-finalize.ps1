@@ -28,7 +28,7 @@ foreach ($f in $got) {
   Move-Item -LiteralPath $f.FullName -Destination $dst
 }
 Remove-Item -LiteralPath $st -Recurse -Force -ErrorAction SilentlyContinue
-Get-ChildItem -LiteralPath $dir -File | Where-Object { $_.Name -match '\.old(\.\d+)?$' } | ForEach-Object {
+Get-ChildItem -LiteralPath $dir -File | Where-Object { $_.Name -match '^(quil|quild|quil-activate)\.exe\.old(\.\d+)?$' } | ForEach-Object {
   try { Remove-Item -LiteralPath $_.FullName -Force } catch {}
 }
 Write-Output '__quil_install__'

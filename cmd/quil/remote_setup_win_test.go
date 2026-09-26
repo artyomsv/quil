@@ -270,6 +270,7 @@ func TestOfferRemoteInstall_Probe_RecordedPathInOtherCase_ReportsExit(t *testing
 	resetRemoteSetupState(t)
 	spy := newHealSpy(t)
 	recordedRemoteBinaryFn = func(string) string { return strings.ToUpper(winQuil) }
+	recordedRemoteShellFn = func(string) string { return remoteinstall.ShellCmd }
 	probeRemoteFn = func(string) (remoteinstall.Probe, error) {
 		p := winProbe()
 		p.ExistingPath, p.ExistingDirWritable = winQuil, true
@@ -314,11 +315,16 @@ func TestOfferRemoteInstall_Probe_QuilElsewhere_AdoptsAndRetries(t *testing.T) {
 	}
 }
 
-func TestOfferRemoteInstall_Probe_NoQuil_OffersInstall(t *testing.T) {
+// A Windows-recorded host whose probe finds no quil is offered the install,
+// and its record is NOT cleared: the probe never tests the recorded path, so
+// "none found" is not positive evidence against it. A successful install
+// records the new path anyway.
+func TestOfferRemoteInstall_Probe_WindowsRecordedNoQuil_OffersInstallKeepsRecord(t *testing.T) {
 	resetRemoteSetupState(t)
 	spy := newHealSpy(t)
 	isReleaseFn = func() bool { return false } // runRemoteSetup stops at plannedVersion
 	recordedRemoteBinaryFn = func(string) string { return `C:\old\quil.exe` }
+	recordedRemoteShellFn = func(string) string { return remoteinstall.ShellCmd }
 	calls := 0
 	probeRemoteFn = func(string) (remoteinstall.Probe, error) {
 		calls++
@@ -342,11 +348,110 @@ func TestOfferRemoteInstall_Probe_NoQuil_OffersInstall(t *testing.T) {
 	if !strings.Contains(out, "development build") {
 		t.Errorf("the install offer was not reached:\n%s", out)
 	}
-	if len(spy.cleared) != 1 || spy.cleared[0] != "win" {
-		t.Errorf("stale record not cleared: %v", spy.cleared)
+	if len(spy.cleared) != 0 || len(spy.recorded) != 0 {
+		t.Errorf("record mutated on the exit-1 path: cleared %v recorded %v", spy.cleared, spy.recorded)
 	}
 	if remoteFailureReported {
 		t.Error("flagged as reported, which would hide the install's own failure")
+	}
+}
+
+// First contact (no record): the host may be Windows, so exit 1 is probed,
+// and a probe that finds nothing offers the install — with nothing to clear.
+func TestOfferRemoteInstall_Probe_NoRecordNoQuil_OffersInstall(t *testing.T) {
+	resetRemoteSetupState(t)
+	spy := newHealSpy(t)
+	isReleaseFn = func() bool { return false }
+	calls := 0
+	probeRemoteFn = func(string) (remoteinstall.Probe, error) {
+		calls++
+		return winProbe(), nil
+	}
+
+	out := captureStderr(t, func() { offerRemoteInstall("win", remoteinstall.RemedyProbe) })
+	if calls != 1 {
+		t.Errorf("probed %d times, want 1", calls)
+	}
+	if !strings.Contains(out, "Quil is not installed on win") || !strings.Contains(out, "development build") {
+		t.Errorf("install not offered:\n%s", out)
+	}
+	if len(spy.cleared) != 0 || len(spy.recorded) != 0 {
+		t.Errorf("record mutated: cleared %v recorded %v", spy.cleared, spy.recorded)
+	}
+}
+
+// A host recorded as POSIX says 127 for a missing command, so its exit 1 is
+// quil's own: no probe, no "Checking…", no record change — RemedyNone, as it
+// was before Windows support.
+func TestOfferRemoteInstall_Probe_POSIXRecorded_NoProbe(t *testing.T) {
+	resetRemoteSetupState(t)
+	spy := newHealSpy(t)
+	recordedRemoteBinaryFn = func(string) string { return "/home/a/.local/bin/quil" }
+	probed := false
+	probeRemoteFn = func(string) (remoteinstall.Probe, error) {
+		probed = true
+		return remoteinstall.Probe{}, nil
+	}
+
+	var retry bool
+	out := captureStderr(t, func() { retry = offerRemoteInstall("gpu01", remoteinstall.RemedyProbe) })
+	if retry || probed || remoteFailureReported {
+		t.Errorf("retry %v probed %v reported %v; want none", retry, probed, remoteFailureReported)
+	}
+	if out != "" {
+		t.Errorf("printed for a POSIX exit 1, which the gate reports itself:\n%s", out)
+	}
+	if len(spy.cleared) != 0 || len(spy.recorded) != 0 {
+		t.Errorf("record mutated: cleared %v recorded %v", spy.cleared, spy.recorded)
+	}
+}
+
+// The same gate end to end: the version gate prints its usual link failure
+// for a POSIX-recorded host, and the record is untouched.
+func TestGateVersionCheck_POSIXRecordedExitOne_ReportsLinkFailure(t *testing.T) {
+	withRemote(t, "gpu01")
+	resetRemoteSetupState(t)
+	spy := newHealSpy(t)
+	remoteGateSeams(t, false, 1)
+	offerRemoteInstallFn = offerRemoteInstall // the real one, gate included
+	recordedRemoteBinaryFn = func(string) string { return "/home/a/.local/bin/quil" }
+	probed := false
+	probeRemoteFn = func(string) (remoteinstall.Probe, error) {
+		probed = true
+		return remoteinstall.Probe{}, nil
+	}
+	exitCode := -1
+	exitFn = func(code int) { exitCode = code }
+
+	out := captureStderr(t, func() { gateVersionCheck(deadClient(t)) })
+	if probed {
+		t.Error("probed a POSIX-recorded host for exit 1")
+	}
+	if exitCode != 1 || !strings.Contains(out, "Cannot reach the Quil daemon on gpu01") {
+		t.Errorf("exit %d, want 1 with the link-failure report:\n%s", exitCode, out)
+	}
+	if len(spy.cleared) != 0 || len(spy.recorded) != 0 {
+		t.Errorf("record mutated: cleared %v recorded %v", spy.cleared, spy.recorded)
+	}
+}
+
+// A POSIX host reached for the first time (no record) is probed, but a POSIX
+// shell would have answered 127 for a missing path — so a quil found in an
+// adoptable directory is quil's own exit, not a path to adopt.
+func TestOfferRemoteInstall_Probe_POSIXProbeFindsQuil_ReportsExitNoAdopt(t *testing.T) {
+	resetRemoteSetupState(t)
+	spy := newHealSpy(t)
+	probeRemoteFn = func(string) (remoteinstall.Probe, error) {
+		return remoteinstall.Probe{Home: "/home/a", ExistingPath: "/home/a/.local/bin/quil", ExistingDirWritable: true}, nil
+	}
+
+	var retry bool
+	out := captureStderr(t, func() { retry = offerRemoteInstall("gpu01", remoteinstall.RemedyProbe) })
+	if retry || !remoteFailureReported || !strings.Contains(out, "exited before its daemon answered") {
+		t.Errorf("retry %v reported %v:\n%s", retry, remoteFailureReported, out)
+	}
+	if len(spy.recorded) != 0 {
+		t.Errorf("adopted a path on a POSIX host: %v", spy.recorded)
 	}
 }
 
@@ -357,12 +462,18 @@ func TestOfferRemoteInstall_Probe_Error_NoRecordChange(t *testing.T) {
 	spy := newHealSpy(t)
 	isReleaseFn = func() bool { return false }
 	recordedRemoteBinaryFn = func(string) string { return winQuil }
+	recordedRemoteShellFn = func(string) string { return remoteinstall.ShellCmd }
+	probed := false
 	probeRemoteFn = func(string) (remoteinstall.Probe, error) {
+		probed = true
 		return remoteinstall.Probe{}, errors.New("host down")
 	}
 
 	var retry bool
 	out := captureStderr(t, func() { retry = offerRemoteInstall("win", remoteinstall.RemedyProbe) })
+	if !probed {
+		t.Fatal("the probe never ran, so this test proves nothing")
+	}
 	if retry {
 		t.Fatal("re-dial after a failed probe")
 	}

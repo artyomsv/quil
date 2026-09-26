@@ -44,6 +44,35 @@ var recordedRemoteBinaryFn = func(dest string) string {
 	return cfg.RemoteBinary(dest)
 }
 
+// recordedRemoteShellFn reads the shell recorded for dest, "" (POSIX) when
+// none is. Swappable for tests, like recordedRemoteBinaryFn.
+var recordedRemoteShellFn = func(dest string) string {
+	cfg, err := config.Load(config.ConfigPath())
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return ""
+	}
+	return cfg.RemoteShell(dest)
+}
+
+// exitOneProbeWanted reports whether exit 1 from dest is worth a probe.
+//
+// Exit 1 is ambiguous only where the shell may be Windows: cmd and PowerShell
+// answer 1 for a missing command, while a POSIX shell answers 127 — so on a
+// host recorded as POSIX, exit 1 means quil ran and failed, and it is handled
+// exactly as before Windows support (RemedyNone). A host with NO record is
+// first contact and may be Windows, so it is probed.
+func exitOneProbeWanted(dest string) bool {
+	if recordedRemoteBinaryFn(dest) == "" {
+		return true
+	}
+	switch recordedRemoteShellFn(dest) {
+	case remoteinstall.ShellCmd, remoteinstall.ShellPowerShell:
+		return true
+	default:
+		return false
+	}
+}
+
 // probeRemoteFn asks the host what quil it actually has. Swappable so the
 // reconciliation truth table is testable without ssh.
 var probeRemoteFn = func(dest string) (remoteinstall.Probe, error) {
@@ -631,6 +660,9 @@ func reportRemoteBinaryWontRun(dest, path string, windows bool) {
 // quil somewhere other than where we looked.
 func offerRemoteInstall(dest string, remedy remoteinstall.Remedy) bool {
 	if remedy == remoteinstall.RemedyProbe {
+		if !exitOneProbeWanted(dest) {
+			return false // a POSIX host's exit 1: RemedyNone, as before
+		}
 		return resolveExitOne(dest)
 	}
 	if remedy == remoteinstall.RemedyNone {
@@ -702,10 +734,12 @@ var remoteFailureReported bool
 // byte, which a Windows shell answers for a command it cannot find and quil
 // answers when it refuses to start. The probe tells them apart.
 //
-// It mirrors healRemoteRecord's three states, with one difference: quil
-// present at the path we dialled is quil's OWN exit, not a binary that will
-// not execute — exit 1 means something ran — so it is reported as such and
-// never answered with an install.
+// It is deliberately weaker than healRemoteRecord. quil present at the path we
+// dialled is quil's OWN exit — exit 1 means something ran — so it is reported
+// as such and never answered with an install. And the record is never
+// cleared: the probe does not test the recorded path, so "no quil found" is
+// not positive evidence against it; a successful install records a new path
+// anyway. Only the caller's exitOneProbeWanted gate lets a host reach here.
 func resolveExitOne(dest string) bool {
 	recorded := recordedRemoteBinaryFn(dest)
 	// Announced for the same reason healRemoteRecord announces it: ssh may be
@@ -719,22 +753,18 @@ func resolveExitOne(dest string) bool {
 		return false
 	}
 	if p.ExistingPath != "" {
-		// quil is somewhere other than the path we dialled, in a directory we
-		// may adopt: exit 1 was most likely the shell not finding what we
-		// asked for. Correct the record and re-dial, as healRemoteRecord does
-		// for 127. It terminates: next time the two paths are the same.
-		if !samePath(p, p.ExistingPath, recorded) && p.ExistingDirWritable {
+		// On a WINDOWS host, quil somewhere other than the path we dialled,
+		// in a directory we may adopt, means exit 1 was most likely cmd not
+		// finding what we asked for. Correct the record and re-dial, as
+		// healRemoteRecord does for 127. It terminates: next time the two
+		// paths are the same. A POSIX shell would have said 127 for that, so
+		// on a POSIX host this is quil's own exit and nothing is adopted.
+		if p.OS == "windows" && !samePath(p, p.ExistingPath, recorded) && p.ExistingDirWritable {
 			return adoptRemoteBinary(dest, p, recorded)
 		}
 		reportRemoteQuilExited(dest)
 		remoteFailureReported = true
 		return false
-	}
-	if recorded != "" {
-		log.Printf("remote: %s has no quil; clearing the recorded path %q", dest, recorded)
-		if err := clearRemoteBinaryFn(dest); err != nil {
-			fmt.Fprintf(os.Stderr, "\n  Could not clear the stale path in your config: %v\n", err)
-		}
 	}
 	fmt.Fprintf(os.Stderr, "\n  Quil is not installed on %s.\n", dest)
 	if err := runRemoteSetup(dest, setupOptions{probe: &p}); err != nil {

@@ -14,10 +14,22 @@ import (
 	"github.com/artyomsv/quil/internal/tui"
 )
 
+// stubRecord sets what the config records for every destination, so the
+// exit-1 gate never reads a real config.toml.
+func stubRecord(t *testing.T, binary, shell string) {
+	t.Helper()
+	prevBinary, prevShell := recordedRemoteBinaryFn, recordedRemoteShellFn
+	t.Cleanup(func() { recordedRemoteBinaryFn, recordedRemoteShellFn = prevBinary, prevShell })
+	recordedRemoteBinaryFn = func(string) string { return binary }
+	recordedRemoteShellFn = func(string) string { return shell }
+}
+
 // stubProbeDestBatch replaces the batch probe and records which destinations
-// it was asked about.
+// it was asked about. The host defaults to unrecorded — first contact, which
+// the exit-1 gate probes; call stubRecord afterwards to change that.
 func stubProbeDestBatch(t *testing.T, p remoteinstall.Probe, err error) *[]string {
 	t.Helper()
+	stubRecord(t, "", "")
 	prev := probeDestBatchFn
 	t.Cleanup(func() { probeDestBatchFn = prev })
 	var asked []string
@@ -63,6 +75,32 @@ func TestClassifyDialFailure_ExitOne_AsksTheHost(t *testing.T) {
 			t.Errorf("err = %v, want the original error unchanged", err)
 		}
 	})
+}
+
+// Exit 1 is ambiguous only where the shell may be Windows. A background host
+// recorded as POSIX answers 127 for a missing command, so its exit 1 is
+// quil's own: no probe, and never the sidebar's "install" row.
+func TestClassifyDialFailure_POSIXRecordedExitOne_NoProbe(t *testing.T) {
+	cause := errors.New("no version response from gpu01")
+	asked := stubProbeDestBatch(t, remoteinstall.Probe{}, nil) // would answer "no quil"
+	stubRecord(t, "/home/a/.local/bin/quil", remoteinstall.ShellPOSIX)
+
+	err := classifyDialFailure("gpu01", fakeLink{exitCode: 1}, cause)
+	if err != cause {
+		t.Errorf("err = %v, want the original error unchanged", err)
+	}
+	if errors.Is(err, tui.ErrRemoteQuilMissing) {
+		t.Error("a POSIX host's exit 1 was reported as a missing install")
+	}
+	if len(*asked) != 0 {
+		t.Errorf("probed %v", *asked)
+	}
+
+	// The control: the same host recorded with a Windows shell IS probed.
+	stubRecord(t, `C:\q\quil.exe`, remoteinstall.ShellPowerShell)
+	if err := classifyDialFailure("gpu01", fakeLink{exitCode: 1}, cause); !errors.Is(err, tui.ErrRemoteQuilMissing) || len(*asked) != 1 {
+		t.Errorf("Windows-recorded: err %v, probed %v", err, *asked)
+	}
 }
 
 // The probe costs an ssh round trip, so it runs ONLY for the ambiguous code.

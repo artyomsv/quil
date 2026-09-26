@@ -195,6 +195,8 @@ func dialExtra(cfg config.Config, d config.Destination) func() (tui.Client, erro
 // Exit 1 is ambiguous — a Windows shell's "not found" and quil refusing to
 // start — so dest is probed to settle it, in batch mode: a background host
 // never prompts. A probe that fails settles nothing and leaves err as it was.
+// A host recorded as POSIX is never probed (exitOneProbeWanted): its shell
+// says 127 for a missing command, so its exit 1 is quil's own.
 func classifyDialFailure(dest string, link transport.LinkStatus, err error) error {
 	if link == nil {
 		// A dial that never produced a link failed before ssh ran at all, so
@@ -205,6 +207,9 @@ func classifyDialFailure(dest string, link transport.LinkStatus, err error) erro
 	case remoteinstall.RemedyInstall:
 		return fmt.Errorf("%w: %v", tui.ErrRemoteQuilMissing, err)
 	case remoteinstall.RemedyProbe:
+		if !exitOneProbeWanted(dest) {
+			return err // a POSIX host's exit 1: quil ran and failed, as before
+		}
 		p, perr := probeDestBatchFn(dest)
 		switch {
 		case perr != nil:

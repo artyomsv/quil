@@ -12,6 +12,7 @@ import (
 func resetRemoteSetupState(t *testing.T) {
 	t.Helper()
 	prevRecorded := recordedRemoteBinaryFn
+	prevShell := recordedRemoteShellFn
 	prevProbe := probeRemoteFn
 	prevRecord := recordRemoteBinaryFn
 	prevClear := clearRemoteBinaryFn
@@ -23,6 +24,7 @@ func resetRemoteSetupState(t *testing.T) {
 		remoteFailureReported = prevReported
 		setupRunnerFn = prevRunner
 		recordedRemoteBinaryFn = prevRecorded
+		recordedRemoteShellFn = prevShell
 		probeRemoteFn = prevProbe
 		recordRemoteBinaryFn = prevRecord
 		clearRemoteBinaryFn = prevClear
@@ -38,6 +40,7 @@ func resetRemoteSetupState(t *testing.T) {
 	// runRemoteSetup's own ssh runs fail rather than reach a real ssh.
 	setupRunnerFn = func(string) remoteinstall.Runner { return noSSHRunner{} }
 	recordedRemoteBinaryFn = func(string) string { return "" }
+	recordedRemoteShellFn = func(string) string { return "" }
 	// The same argument applies with MORE force to the two writers: the accident
 	// there is not a slow test, it is a write to the developer's real
 	// ~/.quil/config.toml, which .claude/rules/dev-environment.md forbids

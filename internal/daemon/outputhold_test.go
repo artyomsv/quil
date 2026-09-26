@@ -518,7 +518,17 @@ func TestHold_FlushStraddlingTheBeginArrivesOnce(t *testing.T) {
 		h.d.beginOutputHold(conn)
 		close(begun)
 	}()
-	time.Sleep(50 * time.Millisecond) // let the begin set the flag, if it can
+	// The paused flush holds holdGate for read, so the begin parks in
+	// holdGate.Lock. A PENDING writer blocks new readers, so TryRLock failing
+	// is the proof it got there; a read lock the probe does get is released
+	// at once so the writer is never held up by it.
+	waitUntil(t, "beginOutputHold parked on holdGate", func() bool {
+		if h.d.holdGate.TryRLock() {
+			h.d.holdGate.RUnlock()
+			return false
+		}
+		return true
+	})
 	close(resume)
 	<-flushed
 	<-begun

@@ -141,9 +141,15 @@ refuse_if_binaries_held() {
   leaving a mismatched set — typically a new TUI against a stale daemon,
   which then fails the version gate at launch.
 
-  The dev daemon and dev TUIs from this directory were already stopped.
-  Close whatever else is running these files: a quil or quil-debug started
-  from this directory, or a scanner holding them.
+  Any dev daemon, dev TUI or dev MCP bridge found running from this
+  directory was stopped first. Close whatever else holds these files: a
+  quil or quil-debug started from this directory, a dev process that could
+  not be stopped (another user's, an elevated one), or a scanner. For a dev
+  daemon that is still running:
+
+    QUIL_HOME="$PROJECT_DIR/.quil" "$PROJECT_DIR/quil-dev$EXE" daemon stop
+
+  and close any dev TUI window by hand.
 
   Only files in $PROJECT_DIR were checked.
   A production install elsewhere is untouched.

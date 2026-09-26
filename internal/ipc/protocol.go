@@ -323,9 +323,11 @@ type AttachPayload struct {
 	CWD  string `json:"cwd,omitempty"`
 	// ClientID identifies this client across reconnects, for multi-client
 	// sync: master election, the client list and per-client geometry all key
-	// on it. Empty on an older client, which the daemon treats as a client
-	// that cannot participate in election — it is neither offered control
-	// nor handed a follower's resize_panes stream.
+	// on it. Empty on an older client: the daemon mints an "anon-<uuid>" id
+	// scoped to that conn, and the client is otherwise treated like any
+	// other — with a paintable geometry it CAN be elected master. The one
+	// difference is that an attach with no ClientID never clears a restart
+	// reserve (see Reattach).
 	ClientID string `json:"client_id,omitempty"`
 	// Reattach is false on the process's first attach to this daemon and
 	// true on every later one, whichever client path sends it (a daemon

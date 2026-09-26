@@ -483,11 +483,12 @@ func attachPayloads(t *testing.T, conn *fakeConn) []ipc.AttachPayload {
 	return out
 }
 
-// TestAttach_ReattachFlagMarksOnlyTheReconnectPath: the daemon's restart
+// TestAttach_ReattachOnlyAfterThisProcessAttachedThere: the daemon's restart
 // reserve yields to a FIRST attach from a new process and keeps waiting for a
-// reconnecting one, so the flag must be false on the attach a WindowSizeMsg
-// sends and true on the one a completed redial sends after it.
-func TestAttach_ReattachFlagMarksOnlyTheReconnectPath(t *testing.T) {
+// reconnecting one, so the flag is false on this process's first attach to a
+// destination (here the one a WindowSizeMsg sends) and true on every later
+// one (here the one a completed redial sends).
+func TestAttach_ReattachOnlyAfterThisProcessAttachedThere(t *testing.T) {
 	t.Setenv("QUIL_HOME", t.TempDir())
 	first, fresh := newFakeConn(), newFakeConn()
 	r := NewRouter(map[string]Client{"gpu01": first})

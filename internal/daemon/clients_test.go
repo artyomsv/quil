@@ -387,6 +387,24 @@ func TestRestartReserve_PreviousMasterReclaims(t *testing.T) {
 		h.wantMaster("B")
 	})
 
+	// A TUI older than this branch sends no ClientID and no Reattach, so its
+	// reconnect looks like a cold start. Missing fields say nothing: it must
+	// not clear the reserve, even alone.
+	t.Run("attach with no client id alone keeps the reserve", func(t *testing.T) {
+		h := restartedWithMaster(t)
+		c := new(ipc.Conn)
+		if changed := h.d.registerClient(c, ipc.AttachPayload{Cols: 100, Rows: 30}); changed {
+			t.Error("an attach with no ClientID must not change the master during the restart reserve")
+		}
+		if h.d.isMasterConn(c) {
+			t.Error("an attach with no ClientID must not take the reserved slot")
+		}
+		if h.armed() == nil {
+			t.Error("the restart timer must still be armed")
+		}
+		h.wantMaster("A")
+	})
+
 	t.Run("fresh first attach beside a reattached client keeps the reserve", func(t *testing.T) {
 		h := restartedWithMaster(t)
 		h.reattach("B", 100, 30)

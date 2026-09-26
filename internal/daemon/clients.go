@@ -241,7 +241,8 @@ func (r *clientRegistry) expire() {
 // conn keeps it.
 //
 // reattach is the payload's Reattach flag: false on a process's first attach
-// to this daemon, which a restart reserve yields to when it is alone.
+// to this daemon, which a restart reserve yields to when it is alone — but
+// only when the attach carried its own id (an older client sends neither).
 func (r *clientRegistry) attach(conn *ipc.Conn, id string, cols, rows int, cwd string, reattach bool) clientChange {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -249,6 +250,9 @@ func (r *clientRegistry) attach(conn *ipc.Conn, id string, cols, rows int, cwd s
 		r.byConn = make(map[*ipc.Conn]*clientRecord)
 	}
 	before := len(r.byConn)
+	// Taken before an empty id is minted below: only a client that sent its
+	// own id can also have sent a meaningful Reattach flag.
+	sentID := id != ""
 	rec, existed := r.byConn[conn]
 	if id == "" {
 		if existed {
@@ -283,11 +287,17 @@ func (r *clientRegistry) attach(conn *ipc.Conn, id string, cols, rows int, cwd s
 		// The reserved client is back, so the slot has nothing left to wait
 		// for. The election below keeps it when the client is eligible.
 		r.clearReservationLocked()
-	} else if res != nil && res.protects == nil && !reattach && len(r.byConn) == 1 {
+	} else if res != nil && res.protects == nil && sentID && !reattach && len(r.byConn) == 1 {
 		// A restart reserve waits for TUIs RECONNECTING after the restart. A
 		// new process attaching alone is a cold start after an unclean stop
 		// (reboot, kill): the previous master went with its process, and
 		// waiting would make the only client a follower for the reserve.
+		//
+		// sentID: a client older than the multi-client branch sends neither a
+		// ClientID nor Reattach, so its RECONNECT after the restart reads
+		// exactly like a cold start. Absence of the flag says nothing there,
+		// so such an attach never clears the reserve; it waits it out like
+		// any reconnecting client.
 		r.clearReservationLocked()
 	}
 	return clientChange{master: r.electLocked(), count: len(r.byConn) != before}

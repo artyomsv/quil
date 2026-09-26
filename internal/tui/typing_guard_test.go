@@ -701,6 +701,40 @@ func TestTypingGuard_JumpRecordsARequestedTab(t *testing.T) {
 	}
 }
 
+// TestTypingGuard_StaleRejectAdoptsTheDaemonTabWhenTheTargetIsGone: a
+// broadcast naming the tab this client just left is normally a stale echo and
+// is rejected, holding the tab the client is on. When another client
+// DESTROYED that tab inside the window, there is nothing left to hold: the
+// broadcast must be adopted, landing on the daemon's tab rather than whatever
+// index a missing id resolves to.
+func TestTypingGuard_StaleRejectAdoptsTheDaemonTabWhenTheTargetIsGone(t *testing.T) {
+	t.Parallel()
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	m, _ := typingGuardModel(t, t0, "t1", "t2", "t3")
+
+	updated, _ := m.Update(altKey('2'))
+	got := updated.(Model)
+	updated, _ = got.Update(typingGuardBroadcast("t2", "t1", "t2", "t3")) // echo retires the token
+	got = updated.(Model)
+	updated, _ = got.Update(altKey('3')) // requests t3, leaving t2
+	got = updated.(Model)
+	if got.activeTabModel().ID != "t3" {
+		t.Fatalf("setup: active tab = %q, want t3", got.activeTabModel().ID)
+	}
+
+	// Another client destroyed t3 inside the stale window; the daemon's
+	// active tab for the project is t2.
+	got.now = func() time.Time { return t0.Add(500 * time.Millisecond) }
+	updated, _ = got.Update(typingGuardBroadcast("t2", "t1", "t2"))
+	got2 := updated.(Model)
+	if got2.activeTabModel().ID != "t2" {
+		t.Errorf("active tab = %q, want t2 (the daemon's tab, since t3 is gone)", got2.activeTabModel().ID)
+	}
+	if got2.guardPaneID != "" {
+		t.Errorf("guardPaneID = %q, want empty — the tab this client was on is gone", got2.guardPaneID)
+	}
+}
+
 // TestTypingGuard_StaleFromTabBroadcastIsAdoptedPastTheBound is the other
 // side of requestedSwitchStaleWindow: once it elapses, the local switch is
 // assumed lost (never reached the daemon, or was overtaken), and a broadcast

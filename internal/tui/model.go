@@ -6190,9 +6190,18 @@ func (m *Model) applyTabMoveGuard(dest, projectID, newActiveTab string, fromTab 
 			// switch back to it (a genuine one arrives, if it happens at
 			// all, only after this client's own confirmation, by which
 			// point the token above is gone and this case cannot match).
-			// Reject it outright: hold the tab at what we asked for, keep
-			// the token, arm no guard.
-			return req.target, nil
+			// Reject it outright: hold the tab this client is on, keep the
+			// token, arm no guard.
+			//
+			// Only while that tab still exists. Another client can destroy
+			// it inside the window, and holding a missing id resolves to
+			// index 0 rather than to anything anyone chose: then the
+			// daemon's tab is adopted, and the token has nothing left to
+			// wait for.
+			if fromTab != nil && tabsContainID(tabs, fromTab.ID) {
+				return fromTab.ID, nil
+			}
+			delete(m.requestedTab, key)
 		}
 	}
 	if fromTab == nil || fromTab.ID == newActiveTab {
@@ -6362,8 +6371,8 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]str
 		// inside a "moved" branch. ok (the project already existed) is what
 		// makes the token lookup meaningful; a brand new project has none.
 		// effectiveActiveTab may differ from info.ActiveTab: a rejected stale
-		// broadcast (pendingSwitch.from) holds the tab at this client's own
-		// pending request instead of adopting the daemon's report.
+		// broadcast (pendingSwitch.from) holds the tab this client is on,
+		// while that tab still exists, instead of adopting the daemon's report.
 		effectiveActiveTab := info.ActiveTab
 		if info.ID == activeID && ok {
 			_, existedBefore := existingTabs[info.ActiveTab]

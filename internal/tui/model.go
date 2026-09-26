@@ -1450,6 +1450,25 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 			retModel = mm
 		}
 	}()
+	// Typing guard (spec §8.1): a key that MOVES this client's own focus — a
+	// pane-navigation key, the palette, the attention queue, pane history,
+	// opening an overlay — retires the guard, so the next key reaches the pane
+	// the user just chose instead of the one they left. Measured on the named
+	// return, for the reason the defer above gives: every navigation path
+	// returns through it, and a retire sprinkled into each is one a future path
+	// forgets. switchTab also retires it itself, so choosing the tab focus is
+	// already on still counts (a project switch always moves focus, since it
+	// refuses the active project). Armed only while a guard is live, so an
+	// ordinary keystroke pays nothing.
+	if _, isKey := msg.(tea.KeyPressMsg); isKey && m.guardPaneID != "" {
+		before := m.localFocus()
+		defer func() {
+			if mm, ok := retModel.(Model); ok && mm.guardPaneID != "" && mm.localFocus() != before {
+				mm.retireTypingGuard()
+				retModel = mm
+			}
+		}()
+	}
 	start := time.Now()
 	markUpdateStart(start)
 	defer func() {
@@ -1468,9 +1487,17 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 	// ackFocusedPane runs below, so the very keystroke that answers the guard
 	// also acks the pane in the same Update call — there is no reason to make
 	// the user press twice.
+	//
+	// A click also retires the typing guard outright, wherever it lands: the
+	// user has left the keyboard, so nothing they type next is continuing
+	// through the remote switch — and a click on the pane the remote switch
+	// focused changes no focus, so only this can tell that choice apart.
 	switch msg.(type) {
-	case tea.KeyPressMsg, tea.MouseClickMsg:
+	case tea.KeyPressMsg:
 		m.remoteFocusUnacked = false
+	case tea.MouseClickMsg:
+		m.remoteFocusUnacked = false
+		m.retireTypingGuard()
 	}
 	// Acknowledge the focused pane of the active tab before processing the
 	// message — focusing is the acknowledgement; see ackFocusedPane.
@@ -7301,6 +7328,9 @@ func (m *Model) switchTab(idx int) tea.Cmd {
 	from := m.activeTabModel()
 	tabID, dest := target.ID, target.Dest
 	m.setActiveTabIdx(idx)
+	// The user picked this tab, even when it is the one a remote switch just
+	// focused: the typing guard no longer describes where they are typing.
+	m.retireTypingGuard()
 	// Typing guard (spec §8.1): this client asked for tabID, so the broadcast
 	// that lands it must not be mistaken for another client's switch. Recorded
 	// against the CURRENT project — target and its project share one Dest, so
@@ -8977,6 +9007,35 @@ func (m Model) enqueueKeyInput(paneID string, data []byte) {
 // wherever the remote switch moved focus. It falls through to paneID once the
 // window has elapsed or the guarded pane no longer exists (closed, moved,
 // destroyed — there is nowhere left to redirect to).
+// retireTypingGuard ends the typing guard at once. The guard is for keys typed
+// straight through a remote switch; the moment this client's own user picks a
+// tab, a project or a pane, what they type next is meant for that choice, and
+// redirecting it to the pane they left would put it somewhere they are no
+// longer looking.
+func (m *Model) retireTypingGuard() {
+	m.guardPaneID = ""
+	m.remoteSwitchAt = time.Time{}
+}
+
+// localFocusKey names where this client's keystrokes go without the guard:
+// the active project, its active tab and that tab's input pane. The typing
+// guard compares it across one key press to tell a key that navigated from one
+// that was typed.
+type localFocusKey struct {
+	dest, project, tab, pane string
+}
+
+func (m Model) localFocus() localFocusKey {
+	var k localFocusKey
+	if p := m.cur(); p != nil {
+		k.dest, k.project = p.Dest, p.ID
+	}
+	if tab := m.activeTabModel(); tab != nil {
+		k.tab, k.pane = tab.ID, tabInputPaneID(tab)
+	}
+	return k
+}
+
 func (m Model) guardedInputTarget(paneID string) string {
 	if m.guardPaneID == "" {
 		return paneID

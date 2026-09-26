@@ -792,6 +792,160 @@ func TestTypingGuard_StaleFromTabBroadcastIsAdoptedPastTheBound(t *testing.T) {
 	}
 }
 
+// splitGuardTab turns tab idx of m's current project into a horizontal split
+// of its own pane (left) and a second pane "<pane>b" (right), leaving the left
+// one active, and re-lays out the tabs so clicks have real geometry.
+func splitGuardTab(t *testing.T, m *Model, idx int) (left, right string) {
+	t.Helper()
+	tab := m.curTabs()[idx]
+	left = tab.ActivePane
+	right = left + "b"
+	tab.Root.SplitLeaf(left, SplitHorizontal)
+	tab.Root.Right.Pane = NewPaneModel(right, 1024)
+	tab.ActivePane = left
+	m.resizeTabs()
+	return left, right
+}
+
+// splitGuardBroadcast is typingGuardBroadcast for a model whose tab splitTab
+// also holds splitPane (splitGuardTab's right pane).
+func splitGuardBroadcast(activeTab, splitTab, splitPane string, tabIDs ...string) WorkspaceStateMsg {
+	state := typingGuardBroadcast(activeTab, tabIDs...)
+	for i := range state.Tabs {
+		if state.Tabs[i].ID == splitTab {
+			state.Tabs[i].Panes = append(state.Tabs[i].Panes, splitPane)
+		}
+	}
+	state.Panes = append(state.Panes, PaneInfo{ID: splitPane, TabID: splitTab})
+	return state
+}
+
+// assertKeyAndPasteReach types one key and then pastes, both through Update,
+// and asserts each reached want.
+func assertKeyAndPasteReach(t *testing.T, m Model, want string) {
+	t.Helper()
+	updated, _ := m.Update(tea.KeyPressMsg{Text: "x"})
+	got := updated.(Model)
+	if in := drainOneInput(t, &got); in.paneID != want {
+		t.Errorf("typed key queued for %q, want %q (the pane the user just chose)", in.paneID, want)
+	}
+	updated, _ = got.Update(tea.PasteMsg{Content: "pasted"})
+	got = updated.(Model)
+	if in := drainOneInput(t, &got); in.paneID != want {
+		t.Errorf("paste queued for %q, want %q (the pane the user just chose)", in.paneID, want)
+	}
+}
+
+// remoteSwitchThenWait delivers a remote switch, checks it armed the guard for
+// wantGuard, and moves the clock 100 ms on — well inside the guard window, so
+// only the navigation under test can explain input escaping the guard.
+func remoteSwitchThenWait(t *testing.T, m *Model, t0 time.Time, state WorkspaceStateMsg, wantGuard string) Model {
+	t.Helper()
+	updated, _ := m.Update(state)
+	got := updated.(Model)
+	if got.guardPaneID != wantGuard {
+		t.Fatalf("setup: guardPaneID = %q, want %q", got.guardPaneID, wantGuard)
+	}
+	got.now = func() time.Time { return t0.Add(100 * time.Millisecond) }
+	return got
+}
+
+// Review finding M-1: explicit local navigation inside the guard window retires
+// the guard. Uninterrupted typing across the remote switch stays guarded
+// (TestTypingGuard_KeyWithinWindowGoesToOldPane); a user who then CHOOSES a
+// tab, pane or project is typing into that choice, not the pane they left.
+
+func TestTypingGuard_LocalTabKeyRetiresTheGuard(t *testing.T) {
+	t.Parallel()
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	m, _ := typingGuardModel(t, t0, "t1", "t2", "t3")
+	got := remoteSwitchThenWait(t, m, t0, typingGuardBroadcast("t2", "t1", "t2", "t3"), "p1")
+
+	updated, _ := got.Update(altKey('3'))
+	got = updated.(Model)
+	if got.activeTabModel().ID != "t3" {
+		t.Fatalf("active tab = %q after Alt+3, want t3", got.activeTabModel().ID)
+	}
+	assertKeyAndPasteReach(t, got, "p3")
+}
+
+// Alt+N naming the tab the remote switch already focused changes no focus, and
+// is still the user's choice of that tab.
+func TestTypingGuard_LocalTabKeyToTheRemoteTabRetiresTheGuard(t *testing.T) {
+	t.Parallel()
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	m, _ := typingGuardModel(t, t0, "t1", "t2")
+	got := remoteSwitchThenWait(t, m, t0, typingGuardBroadcast("t2", "t1", "t2"), "p1")
+
+	updated, _ := got.Update(altKey('2'))
+	assertKeyAndPasteReach(t, updated.(Model), "p2")
+}
+
+func TestTypingGuard_PaneClickRetiresTheGuard(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		x    int
+		want string
+	}{
+		{"click on the other pane", 75, "p2b"},
+		{"click on the pane the remote switch focused", 20, "p2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+			m, _ := typingGuardModel(t, t0, "t1", "t2")
+			_, right := splitGuardTab(t, m, 1)
+			got := remoteSwitchThenWait(t, m, t0, splitGuardBroadcast("t2", "t2", right, "t1", "t2"), "p1")
+
+			updated, _ := got.Update(tea.MouseClickMsg{X: tc.x, Y: 10, Button: tea.MouseLeft})
+			got = updated.(Model)
+			updated, _ = got.Update(tea.MouseReleaseMsg{X: tc.x, Y: 10, Button: tea.MouseLeft})
+			got = updated.(Model)
+			if active := got.activeTabModel().ActivePane; active != tc.want {
+				t.Fatalf("active pane = %q after the click, want %q", active, tc.want)
+			}
+			assertKeyAndPasteReach(t, got, tc.want)
+		})
+	}
+}
+
+func TestTypingGuard_PaneNavigationKeyRetiresTheGuard(t *testing.T) {
+	t.Parallel()
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	m, _ := typingGuardModel(t, t0, "t1", "t2")
+	_, right := splitGuardTab(t, m, 1)
+	got := remoteSwitchThenWait(t, m, t0, splitGuardBroadcast("t2", "t2", right, "t1", "t2"), "p1")
+
+	updated, _ := got.Update(tea.KeyPressMsg{Code: tea.KeyRight, Mod: tea.ModAlt}) // pane.right
+	got = updated.(Model)
+	if active := got.activeTabModel().ActivePane; active != right {
+		t.Fatalf("active pane = %q after Alt+Right, want %q", active, right)
+	}
+	assertKeyAndPasteReach(t, got, right)
+}
+
+func TestTypingGuard_ProjectSwitchRetiresTheGuard(t *testing.T) {
+	t.Parallel()
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	m, _ := typingGuardModel(t, t0, "t1", "t2")
+	// A second project on another host: the local broadcast below replaces
+	// only the local daemon's projects, so this one survives it.
+	t3 := NewTabModel("t3", "t3")
+	t3.Root = NewLeaf(NewPaneModel("p3", 1024))
+	t3.ActivePane = "p3"
+	m.projects = append(m.projects, &ProjectModel{ID: "proj-b", Name: "B", Dest: "hostB", tabs: []*TabModel{t3}})
+	m.resizeTabs()
+	got := remoteSwitchThenWait(t, m, t0, typingGuardBroadcast("t2", "t1", "t2"), "p1")
+
+	updated, _ := got.Update(tea.KeyPressMsg{Code: tea.KeyRight, Mod: tea.ModAlt | tea.ModShift}) // project.next
+	got = updated.(Model)
+	if p := got.cur(); p == nil || p.ID != "proj-b" {
+		t.Fatalf("active project = %v after project.next, want proj-b", p)
+	}
+	assertKeyAndPasteReach(t, got, "p3")
+}
+
 // TestArmReattachReset_ClearsTypingGuardStateForThatDest pins review round
 // 1's minor 3: a reattach replaces its destination's whole state, so a
 // pending requestedTab token can never land the broadcast it was waiting for,

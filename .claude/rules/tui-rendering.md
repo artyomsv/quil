@@ -327,14 +327,30 @@ mouse input always targets whatever is under the pointer now, since a click
 is inherently aimed at what is on screen. A flash shows `Tab switched by
 another client`.
 
+**Explicit local navigation retires the guard** (`retireTypingGuard` clears
+`guardPaneID` and `remoteSwitchAt`). The guard protects keys typed straight
+through a remote switch; once the user CHOOSES a tab, pane or project, what
+they type next is meant for that choice. Three sites, each needed: any
+`tea.MouseClickMsg` (in `Update`'s prologue, beside the `remoteFocusUnacked`
+clear — a click on the pane the remote switch focused changes no focus, so no
+diff could tell that choice apart); a `tea.KeyPressMsg` whose handling changed
+`localFocus()` (dest, project, active tab, input pane — a defer on `Update`'s
+named return, armed only while a guard is live, covering pane-navigation
+keys, the palette, the attention queue, pane history and opening an overlay
+without a retire in each); and `switchTab` itself, so Alt+N naming the tab
+the remote switch already focused still counts. Before this, Alt+3 or a click
+inside the window moved focus while the next key still went to the pane the
+user had left.
+
 **Unseen is not acknowledged until local input arrives.** A pane that became
 focused only because of a remote switch is skipped by `ackFocusedPane` (no
 `pane_seen` is sent) until this client receives a real key or mouse click —
 otherwise every attached client would clear the mark on every remote switch
 whether or not anyone actually looked at the pane.
 
-Tests: `typing_guard_test.go`. Mutation-checked: the 250 ms window itself and
-the `requestedTab` token gate.
+Tests: `typing_guard_test.go`. Mutation-checked: the 250 ms window itself,
+the `requestedTab` token gate, and each of the three retire sites
+(`TestTypingGuard_*RetiresTheGuard`).
 
 ### Mouse-wheel forwarding to tracking apps
 

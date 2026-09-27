@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/artyomsv/quil/internal/transport"
 	"github.com/artyomsv/quil/internal/tui"
@@ -478,6 +479,9 @@ type fakeLink struct {
 func (f fakeLink) LinkErr() error    { return f.err }
 func (f fakeLink) Established() bool { return f.established }
 func (f fakeLink) ExitCode() int     { return f.exitCode }
+
+// WaitExited answers at once: a fakeLink's status is already final.
+func (f fakeLink) WaitExited(time.Duration) bool { return true }
 
 // TestMarkPermanentLinkFailure joins the two halves neither package's own tests
 // can: the classifier is covered in internal/transport and the TUI's reaction to

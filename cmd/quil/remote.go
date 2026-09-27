@@ -73,6 +73,37 @@ func remoteExitCode() int {
 	return remoteExitCodeFn()
 }
 
+// remoteWaitExitedFn waits a bounded time for the ssh child to exit on its own.
+// Installed alongside remoteLinkErrFn.
+var remoteWaitExitedFn func(time.Duration) bool
+
+// deadLinkExitGrace is how long a link that never delivered a byte may take to
+// exit on its own before it is closed, and closing kills it. A var so tests can
+// shorten it.
+//
+// Measured need: with Windows PowerShell as the OpenSSH DefaultShell, the
+// remote shell takes a second or two to start before it rejects the command
+// and exits 1. Closed before that, the kill replaced the 1 with -1, the probe
+// that would have healed a stale shell record or offered the install never
+// ran, and the user was told the host could not be reached.
+var deadLinkExitGrace = 5 * time.Second
+
+// awaitRemoteExit gives the dialled ssh child deadLinkExitGrace to exit by
+// itself. A no-op when no probe is installed.
+func awaitRemoteExit() {
+	if remoteWaitExitedFn != nil && !remoteWaitExitedFn(deadLinkExitGrace) {
+		log.Printf("remote: ssh still running after %s — closing it", deadLinkExitGrace)
+	}
+}
+
+// remoteGateTimeout bounds the version gate's round trip over ssh. The local
+// handshakeTimeout (2 s) is sized for a Unix socket; over ssh the far side may
+// legitimately spend the connect timeout plus `quil --stdio`'s own wait for a
+// cold daemon before it answers, and giving up earlier reported a slow but
+// healthy host as unreachable. A link that is really dead ends the wait early:
+// ssh exits and the read fails at once.
+const remoteGateTimeout = extraDialTimeout
+
 // remoteStderrRedirectFn moves ssh's diagnostics off the terminal. Installed by
 // dialRemote when the transport supports it; nil in a local session.
 var remoteStderrRedirectFn func(io.Writer)
@@ -259,6 +290,7 @@ func dialRemote(cfg config.Config, dest string) (*ipc.Client, error) {
 		remoteLinkErrFn = link.LinkErr
 		remoteLinkEstablishedFn = link.Established
 		remoteExitCodeFn = link.ExitCode
+		remoteWaitExitedFn = link.WaitExited
 	}
 	return client, err
 }

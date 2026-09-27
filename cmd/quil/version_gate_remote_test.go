@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/remoteinstall"
@@ -204,10 +205,16 @@ func TestGateVersionCheck_ReadsExitCodeAfterClose(t *testing.T) {
 		exitFn = prevExit
 	})
 
+	prevWait := remoteWaitExitedFn
+	t.Cleanup(func() { remoteWaitExitedFn = prevWait })
+
 	var order []string
 	remoteLinkEstablishedFn = func() bool { return false }
 	remoteLinkErrFn = func() error { order = append(order, "linkerr"); return errLinkTest }
 	remoteExitCodeFn = func() int { order = append(order, "exitcode"); return 127 }
+	// The natural-exit wait must come before Close, which would otherwise kill
+	// a child still on its way out and replace its status.
+	remoteWaitExitedFn = func(time.Duration) bool { order = append(order, "wait"); return true }
 	offerRemoteInstallFn = func(string, remoteinstall.Remedy) bool { return false }
 	exitFn = func(int) {}
 
@@ -218,7 +225,7 @@ func TestGateVersionCheck_ReadsExitCodeAfterClose(t *testing.T) {
 	client := clientRecordingClose(t, &order)
 	captureStderr(t, func() { gateVersionCheck(client) })
 
-	want := []string{"linkerr", "close", "exitcode"}
+	want := []string{"wait", "linkerr", "close", "exitcode"}
 	if !slices.Equal(order, want) {
 		t.Errorf("order = %v, want %v", order, want)
 	}

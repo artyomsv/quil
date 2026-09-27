@@ -403,6 +403,17 @@ type LinkStatus interface {
 	// final. This is the mirror image of LinkErr, which must be read BEFORE
 	// Close because Close can clear it.
 	ExitCode() int
+
+	// WaitExited waits up to d for the child to exit ON ITS OWN and be reaped,
+	// and reports whether it was. Call it before Close on a link that never
+	// delivered a byte: Close kills a child that is still running, and a kill
+	// replaces the status ExitCode would have reported. A remote shell that is
+	// slow to start (Windows PowerShell as the OpenSSH DefaultShell takes a
+	// second or two) is still running when a handshake gives up, so without the
+	// wait its "command not found" exit 1 became -1 and read as an unreachable
+	// host. False means the child is still running after d; Close then behaves
+	// exactly as it did before this existed.
+	WaitExited(d time.Duration) bool
 }
 
 // Established reports whether the far side has ever delivered a byte. See
@@ -414,6 +425,27 @@ func (c *stdioConn) Established() bool { return c.bytesIn.Load() > 0 }
 // reaped. See LinkStatus.ExitCode for what the ssh values mean and why this is
 // read after Close rather than before.
 func (c *stdioConn) ExitCode() int { return int(c.exitCode.Load()) }
+
+// WaitExited waits up to d for the child to exit by itself. See
+// LinkStatus.WaitExited.
+//
+// It reaps from its own goroutine rather than waiting for pump to: pump reaps
+// only after stdout EOFs, and a pump parked handing a chunk to a reader that is
+// gone would never get there. reap is idempotent (reapOnce), and Wait closes
+// none of the parent's descriptors, so reaping beside a live pump is safe. When
+// the child outlives d that goroutine stays parked in Wait until Close kills
+// the child — every caller closes the conn next.
+func (c *stdioConn) WaitExited(d time.Duration) bool {
+	go c.reap()
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-c.reaped:
+		return true
+	case <-t.C:
+		return false
+	}
+}
 
 // exitGrace is how long Close waits for a child that is already exiting to
 // finish, before killing it. Long enough for ssh's teardown after it closes

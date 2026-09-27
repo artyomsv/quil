@@ -265,7 +265,17 @@ func gateExtraVersion(d config.Destination, client *ipc.Client, link transport.L
 		// version gate documents and pins: Close unblocks the transport pump,
 		// and that return path can complete without ever setting pumpErr, so a
 		// read afterwards comes back nil and loses ssh's own words.
+		//
+		// Both callers close next, and Close kills a child still running — so a
+		// link that never delivered a byte first gets deadLinkExitGrace to exit
+		// by itself. A remote shell slow to start (PowerShell) is usually on its
+		// way out, and its real status is what classifyDialFailure decides by;
+		// the kill would replace it with -1. Waiting first also lets LinkErr
+		// carry ssh's words once the pipe has closed.
 		if link != nil {
+			if !link.Established() && !link.WaitExited(deadLinkExitGrace) {
+				log.Printf("remote: %s still running after %s — closing it", d.Label(), deadLinkExitGrace)
+			}
 			if le := link.LinkErr(); le != nil {
 				return le
 			}

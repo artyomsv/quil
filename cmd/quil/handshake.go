@@ -100,17 +100,37 @@ func versionHandshakeWithin(client *ipc.Client, timeout time.Duration) handshake
 		return handshakeResult{ClientSkipped: true}
 	}
 
+	version, ok := requestDaemonVersion(client, timeout)
+	if !ok {
+		return handshakeResult{DaemonUnknown: true}
+	}
+	cmp, err := versionpkg.Compare(tuiVer, version)
+	if err != nil {
+		log.Printf("handshake: compare %q vs %q: %v", tuiVer, version, err)
+		return handshakeResult{DaemonVersion: version, DaemonUnknown: true}
+	}
+	return handshakeResult{
+		Matched:       cmp == 0,
+		Cmp:           cmp,
+		DaemonVersion: version,
+	}
+}
+
+// requestDaemonVersion sends MsgVersionReq and waits up to timeout for the
+// matching MsgVersionResp. ok is false when no usable answer arrived: a send
+// or receive error, the timeout, or an undecodable payload.
+func requestDaemonVersion(client *ipc.Client, timeout time.Duration) (version string, ok bool) {
 	reqID := fmt.Sprintf("hs-%d", time.Now().UnixNano())
 	req, err := ipc.NewMessage(ipc.MsgVersionReq, struct{}{})
 	if err != nil {
 		log.Printf("handshake: build request: %v", err)
-		return handshakeResult{DaemonUnknown: true}
+		return "", false
 	}
 	req.ID = reqID
 
 	if err := client.Send(req); err != nil {
 		log.Printf("handshake: send MsgVersionReq: %v", err)
-		return handshakeResult{DaemonUnknown: true}
+		return "", false
 	}
 
 	// Install a read deadline so a pre-versioning daemon (which drops
@@ -118,7 +138,7 @@ func versionHandshakeWithin(client *ipc.Client, timeout time.Duration) handshake
 	deadline := time.Now().Add(timeout)
 	if err := client.SetReadDeadline(deadline); err != nil {
 		log.Printf("handshake: set read deadline: %v", err)
-		return handshakeResult{DaemonUnknown: true}
+		return "", false
 	}
 	defer client.SetReadDeadline(time.Time{})
 
@@ -133,7 +153,7 @@ func versionHandshakeWithin(client *ipc.Client, timeout time.Duration) handshake
 			} else {
 				log.Printf("handshake: receive: %v", err)
 			}
-			return handshakeResult{DaemonUnknown: true}
+			return "", false
 		}
 		if msg.Type != ipc.MsgVersionResp || msg.ID != reqID {
 			log.Printf("handshake: ignoring unrelated message type=%q id=%q", msg.Type, msg.ID)
@@ -143,27 +163,16 @@ func versionHandshakeWithin(client *ipc.Client, timeout time.Duration) handshake
 		var payload ipc.VersionRespPayload
 		if err := msg.DecodePayload(&payload); err != nil {
 			log.Printf("handshake: decode payload: %v", err)
-			return handshakeResult{DaemonUnknown: true}
+			return "", false
 		}
-		// Clamped at the door, before anything reads it — the log line below
-		// included. Nothing else bounds this string: the daemon may be remote
-		// and the only ceiling on the wire is ipc.maxFrameSize (10 MB), while
-		// versionpkg.Parsed truncates at the first "-" or "+", so
+		// Clamped at the door, before anything reads it — the log line in the
+		// caller included. Nothing else bounds this string: the daemon may be
+		// remote and the only ceiling on the wire is ipc.maxFrameSize (10 MB),
+		// while versionpkg.Parsed truncates at the first "-" or "+", so
 		// "1.0.0-"+<megabytes> compares as a perfectly ordinary 1.0.0 and the
 		// whole payload flows on into gateExtraVersion's error text, from there
 		// into OfflineState.Detail, and gets re-measured on every frame the
 		// offline pane area draws.
-		payload.Version = clampVersionString(payload.Version)
-
-		cmp, err := versionpkg.Compare(tuiVer, payload.Version)
-		if err != nil {
-			log.Printf("handshake: compare %q vs %q: %v", tuiVer, payload.Version, err)
-			return handshakeResult{DaemonVersion: payload.Version, DaemonUnknown: true}
-		}
-		return handshakeResult{
-			Matched:       cmp == 0,
-			Cmp:           cmp,
-			DaemonVersion: payload.Version,
-		}
+		return clampVersionString(payload.Version), true
 	}
 }

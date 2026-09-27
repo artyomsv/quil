@@ -32,23 +32,27 @@ const releasesURL = "https://github.com/artyomsv/quil/releases"
 //
 // Returns the client the caller should use from here on, or exits.
 func gateVersionCheck(client *ipc.Client) *ipc.Client {
-	res := versionHandshake(client)
+	res := gateHandshake(client)
 
 	// Checked BEFORE the switch, not inside the mismatch arm, for two reasons.
 	//
 	// A dead transport invalidates every branch below it — there is no daemon
 	// version to compare, no upgrade to offer, and nothing to attach to. And
-	// the switch's first arm returns early for any non-release build, so a
-	// check placed further down never runs on a dev binary at all: the gate
-	// would hand back a client whose connection is closed and the TUI would
-	// launch against it, showing a blank screen with no diagnosis. Since
-	// .claude/rules/dev-environment.md mandates dev builds for work on this
-	// repo, that is the path exercised most.
+	// the switch's first arm returns early for an UNSTAMPED build (version
+	// "dev", e.g. a plain `go build`; every dev.sh variant is stamped from
+	// VERSION and counts as a release), so a check placed further down never
+	// runs for one at all: the gate would hand back a client whose connection
+	// is closed and the TUI would launch against it, showing a blank screen
+	// with no diagnosis.
 	//
 	// Ordering note: this must also precede any client.Close() below. Close
 	// unblocks pump via <-done, which can return WITHOUT ever setting pumpErr,
 	// so LinkErr() would go nil and the misdiagnosis would return.
 	if remoteMode() && !remoteLinkEstablished() {
+		// Before Close, which kills a child still running: a remote shell slow
+		// to start is usually on its way out with a status that decides the
+		// remedy below, and the kill would replace it with -1.
+		awaitRemoteExit()
 		// Read BEFORE Close, per the ordering note above.
 		linkErr := remoteLinkError()
 		client.Close()
@@ -231,6 +235,31 @@ func gateVersionCheck(client *ipc.Client) *ipc.Client {
 		log.Printf("version gate: reconnected to daemon %s after restart", verify.DaemonVersion)
 		return newClient
 	}
+}
+
+// gateHandshake is the version handshake the gate runs.
+//
+// Over ssh it waits remoteGateTimeout, not the local 2 s. A stamped client —
+// every binary dev.sh builds, dev and debug variants included, carries
+// VERSION — gave up after 2 s on a remote still connecting, starting a cold
+// daemon, or (measured) still starting Windows PowerShell, and the dead-link
+// branch then read that as an unreachable host.
+//
+// It also makes the round trip for an UNSTAMPED build (version "dev"), whose
+// version is never compared. The dead-link guard reads Established, and a
+// request is what makes the far side send anything: skipped, the guard ran
+// microseconds after ssh started and found no byte.
+func gateHandshake(client *ipc.Client) handshakeResult {
+	if !remoteMode() {
+		return versionHandshake(client)
+	}
+	if versionpkg.IsRelease() {
+		return versionHandshakeWithin(client, remoteGateTimeout)
+	}
+	if v, ok := requestDaemonVersion(client, remoteGateTimeout); ok {
+		log.Printf("version gate: remote daemon %q answered a non-release TUI", v)
+	}
+	return handshakeResult{ClientSkipped: true}
 }
 
 // promptUpgradeClient tells the user their TUI is too old and exits.

@@ -94,6 +94,37 @@ func stagingFor(dir string) string {
 	return winJoin(dir, ".quil-staging-"+strings.Repeat("0f", 16))
 }
 
+// The prepare script creates directories literally (New-Item -Path treats [ and
+// ] as wildcards) and clears only stale staging dirs directly under the
+// install dir.
+func TestWindowsPrepareCommand_LiteralDirsAndScopedStagingCleanup(t *testing.T) {
+	cmd, err := WindowsPrepareCommand(Target{OS: "windows", Dir: longWinDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := decodePowerShell(t, cmd)
+	for _, want := range []string{
+		"[IO.Directory]::CreateDirectory($dir) | Out-Null",
+		"[IO.Directory]::CreateDirectory($st) | Out-Null",
+		"Get-ChildItem -LiteralPath $dir -Directory -Filter '.quil-staging-*'",
+		"Remove-Item -LiteralPath $_.FullName -Recurse -Force",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("prepare script lacks %q:\n%s", want, script)
+		}
+	}
+	if strings.Contains(script, "New-Item") {
+		t.Errorf("prepare script still uses New-Item:\n%s", script)
+	}
+	if strings.Contains(script, "-Recurse -Filter") || strings.Contains(script, "Get-ChildItem -Path") {
+		t.Errorf("staging cleanup is not scoped to the install dir itself:\n%s", script)
+	}
+	// Cleanup must run before the new staging dir exists, or it deletes it.
+	if strings.Index(script, "-Filter '.quil-staging-*'") > strings.Index(script, "CreateDirectory($st)") {
+		t.Errorf("stale staging cleanup runs after the new staging dir is created:\n%s", script)
+	}
+}
+
 func TestWindowsPrepareCommand(t *testing.T) {
 	tgt := Target{OS: "windows", Dir: longWinDir}
 	cmd, err := WindowsPrepareCommand(tgt)

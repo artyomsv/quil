@@ -69,7 +69,7 @@ func runInstallLogon(args []string) int {
 		fmt.Fprintf(os.Stderr, "install-logon: %s is missing; it starts the daemon without a console window\n", launcher)
 		return 1
 	}
-	quild := findDaemonBinaryFn()
+	quild := logonDaemonBinary(exe)
 	sid, err := currentUserSIDFn()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "install-logon: %v\n", err)
@@ -99,6 +99,21 @@ func runInstallLogon(args []string) int {
 	fmt.Printf("registered logon task %q: the daemon now starts when you log on.\n", name)
 	fmt.Println("Start it now with: quil daemon start")
 	return 0
+}
+
+// logonDaemonBinary picks the daemon the logon task will start: the one beside
+// exe first, then whatever findDaemonBinary finds. The order is the reverse of
+// findDaemonBinary's for the reason findDaemonBinaryForUpgrade gives: the
+// sibling shipped in the same archive as this quil, while a quild found on PATH
+// can be an older install. The task pins the path it is given, so a PATH-first
+// pick here would start the old daemon at every logon and fail the version gate
+// every time.
+func logonDaemonBinary(exe string) string {
+	sibling := filepath.Join(filepath.Dir(exe), daemonName()+".exe")
+	if _, err := statFn(sibling); err == nil {
+		return sibling
+	}
+	return findDaemonBinaryFn()
 }
 
 // accessHint explains the one failure schtasks reports without a useful

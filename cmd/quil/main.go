@@ -324,7 +324,10 @@ func startDaemon(quiet bool) int {
 		case winjob.ViaWaited:
 			fmt.Println("daemon already starting")
 		case winjob.ViaLowered:
-			fmt.Printf("daemon started (pid %d), limited: outside the desktop session\n", res.PID)
+			// Not "limited": a lowered spawn from a breakaway job on the
+			// desktop is session 1 and fully capable. The TUI's [limited]
+			// marker, which the daemon decides, is the one that says so.
+			fmt.Printf("daemon started (pid %d) with a lowered token\n", res.PID)
 		default:
 			fmt.Printf("daemon started (pid %d)\n", res.PID)
 		}

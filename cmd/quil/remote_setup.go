@@ -223,6 +223,9 @@ func runRemoteSetup(dest string, opts setupOptions) error {
 			return err
 		}
 	}
+	if err := refuseUnmeasuredShell(probe); err != nil {
+		return err
+	}
 
 	target := remoteinstall.PlanTarget(probe)
 
@@ -292,6 +295,24 @@ func runRemoteSetup(dest string, opts setupOptions) error {
 	}
 
 	reportInstalled(opts.out(), dest, target, src, stopWarning, probe.Shell)
+	return nil
+}
+
+// errSetupPowerShellShell refuses an install on a Windows host whose OpenSSH
+// DefaultShell is PowerShell. The install's extract step pipes the archive into
+// tar.exe through that shell, and Windows PowerShell under Win32-OpenSSH cannot
+// read ssh stdin (measured); whether its native child still gets the pipe has
+// not been measured. Refusing before any remote write is safer than a partial
+// install. Delete this and refuseUnmeasuredShell once it is measured to work.
+// Attaching with a recorded PowerShell shell is not affected.
+var errSetupPowerShellShell = errors.New("quil remote setup does not support a PowerShell OpenSSH DefaultShell yet; " +
+	"set it to cmd.exe for the install (see docs/remote-windows.md, section 4), then switch back if you want")
+
+// refuseUnmeasuredShell is the one place errSetupPowerShellShell is raised.
+func refuseUnmeasuredShell(probe remoteinstall.Probe) error {
+	if probe.OS == "windows" && probe.Shell == remoteinstall.ShellPowerShell {
+		return errSetupPowerShellShell
+	}
 	return nil
 }
 

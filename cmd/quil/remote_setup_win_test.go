@@ -159,6 +159,29 @@ func TestRunRemoteSetup_Windows_LogonTaskFailure_WarnsAndStillRecords(t *testing
 	}
 }
 
+// A PowerShell DefaultShell is refused before any remote write: the extract
+// step pipes the archive through that shell, which is unmeasured there.
+func TestRunRemoteSetup_WindowsPowerShellShell_RefusesBeforeAnyRemoteWrite(t *testing.T) {
+	resetRemoteSetupState(t)
+	spy := newHealSpy(t)
+	r := &stepRunner{t: t} // no steps: any remote command fails the test
+	setupRunnerFn = func(string) remoteinstall.Runner { return r }
+
+	probe := winProbe()
+	probe.Shell = remoteinstall.ShellPowerShell
+	var out bytes.Buffer
+	err := runRemoteSetup("win01", setupOptions{FromDir: winFromDir(t), Yes: true, Out: &out, probe: &probe})
+	if err == nil || !strings.Contains(err.Error(), "PowerShell") || !strings.Contains(err.Error(), "cmd.exe") {
+		t.Fatalf("err = %v, want the PowerShell DefaultShell refusal", err)
+	}
+	if len(r.ran) != 0 {
+		t.Errorf("ran remote commands before refusing: %q", r.ran)
+	}
+	if len(spy.recorded) != 0 {
+		t.Errorf("recorded a path for a refused install: %v", spy.recorded)
+	}
+}
+
 // An upgrade stops the old daemon first, with the command quoted for cmd.
 func TestRunRemoteSetup_WindowsUpgrade_StopsDaemonWithHostQuoting(t *testing.T) {
 	resetRemoteSetupState(t)

@@ -7,6 +7,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/artyomsv/quil/internal/config"
@@ -173,6 +175,16 @@ func main() {
 		return
 	}
 
+	// The PID file is written BEFORE Start, not after it: Start respawns the
+	// restored panes before the listener is up, which takes many seconds on a
+	// heavy workspace, and a client that finds no socket asks the PID file
+	// whether a daemon is already starting (LiveDaemonPID in cmd/quil). Written
+	// after Start, that question always answered "no" during exactly that
+	// window, so the client spawned a second daemon that then lost the startup
+	// lock. Every exit before this point is a process that is not the daemon.
+	writePIDFile()
+	defer removePIDFile()
+
 	d := daemon.New(cfg)
 	log.Printf("quild v%s starting...", version)
 	if !background {
@@ -183,12 +195,9 @@ func main() {
 		if !background {
 			fmt.Fprintf(os.Stderr, "failed to start daemon: %v\n", err)
 		}
+		removePIDFile() // os.Exit skips the deferred removal
 		os.Exit(1)
 	}
-
-	// Write PID file after Start() ensures ~/.quil/ exists
-	writePIDFile()
-	defer removePIDFile()
 
 	log.Printf("quild ready (pid %d)", os.Getpid())
 	if !background {
@@ -219,6 +228,12 @@ func writePIDFile() {
 		log.Println("warning: cannot determine quil dir, skipping PID file")
 		return
 	}
+	// The startup lock normally created the directory already; its fallback
+	// branch runs when that failed, so create it here rather than skip the file.
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		log.Printf("warning: failed to create %s for the PID file: %v", dir, err)
+		return
+	}
 	path := config.PidPath()
 	if err := os.WriteFile(path, []byte(fmt.Sprintf("%d", os.Getpid())), 0600); err != nil {
 		log.Printf("warning: failed to write PID file: %v", err)
@@ -226,5 +241,23 @@ func writePIDFile() {
 }
 
 func removePIDFile() {
-	os.Remove(config.PidPath())
+	removePIDFileIfOwned(config.PidPath(), os.Getpid())
+}
+
+// removePIDFileIfOwned removes path only while it still names pid. A daemon
+// that exits must never delete a PID file another daemon has since written:
+// clients read that file to decide whether a daemon is starting, and losing
+// it makes them spawn a second one.
+func removePIDFileIfOwned(path string, pid int) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	owner, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || owner != pid {
+		return
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		log.Printf("warning: failed to remove PID file: %v", err)
+	}
 }

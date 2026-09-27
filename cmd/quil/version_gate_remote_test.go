@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -378,5 +379,54 @@ func TestGateVersionCheck_FailureAlreadyReported_ExitsWithoutLinkReport(t *testi
 	}
 	if strings.Contains(out, "Cannot reach the Quil daemon") {
 		t.Errorf("printed the link-failure report under an explanation that already ran:\n%s", out)
+	}
+}
+
+// Answering N at the install offer ends the launch with exit 1 — and without
+// the "cannot reach" block, which contradicted the "Quil is not installed"
+// line the user had just answered. Both offer paths: exit 127 (the POSIX
+// shell's "not found") and exit 1 (a Windows shell's, settled by the probe).
+func TestGateVersionCheck_InstallDeclined_ExitsWithoutLinkReport(t *testing.T) {
+	for _, code := range []int{127, 1} {
+		t.Run(fmt.Sprintf("exit %d", code), func(t *testing.T) {
+			withRemote(t, "gpu01")
+			resetRemoteSetupState(t)
+			isReleaseFn = func() bool { return true } // reach the prompt, not the dev-build refusal
+			prevRetry := remoteInstallRetry
+			t.Cleanup(func() { remoteInstallRetry = prevRetry })
+			remoteInstallRetry = false
+
+			remoteGateSeams(t, false, code)
+			offerRemoteInstallFn = offerRemoteInstall
+			exitCode := -1
+			exitFn = func(c int) { exitCode = c }
+
+			r, w, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			prevStdin := os.Stdin
+			os.Stdin = r
+			t.Cleanup(func() { os.Stdin = prevStdin; r.Close() })
+			if _, err := w.WriteString("n\n"); err != nil {
+				t.Fatal(err)
+			}
+			w.Close()
+
+			out := captureStderr(t, func() { gateVersionCheck(deadClient(t)) })
+
+			if !strings.Contains(out, "Continue? [y/N]") {
+				t.Fatalf("the install offer never ran:\n%s", out)
+			}
+			if exitCode != 1 {
+				t.Errorf("exit code = %d, want 1", exitCode)
+			}
+			if remoteInstallRetry {
+				t.Error("a declined install asked for a re-dial")
+			}
+			if strings.Contains(out, "Cannot reach the Quil daemon") {
+				t.Errorf("printed the link-failure report after a declined install:\n%s", out)
+			}
+		})
 	}
 }

@@ -759,6 +759,7 @@ func offerRemoteInstall(dest string, remedy remoteinstall.Remedy) bool {
 
 	if err := runRemoteSetup(dest, setupOptions{probe: probe}); err != nil {
 		if errors.Is(err, errSetupAborted) {
+			declinedRemoteInstall(dest)
 			return false
 		}
 		fmt.Fprintf(os.Stderr, "\n  Install failed: %v\n", err)
@@ -817,12 +818,23 @@ func resolveExitOne(dest string) bool {
 	}
 	fmt.Fprintf(os.Stderr, "\n  Quil is not installed on %s.\n", dest)
 	if err := runRemoteSetup(dest, setupOptions{probe: &p}); err != nil {
-		if !errors.Is(err, errSetupAborted) {
+		if errors.Is(err, errSetupAborted) {
+			declinedRemoteInstall(dest)
+		} else {
 			fmt.Fprintf(os.Stderr, "\n  Install failed: %v\n", err)
 		}
 		return false
 	}
 	return true
+}
+
+// declinedRemoteInstall closes a launch the user ended by answering no to the
+// install offer. The lines above it already said why quil cannot start there,
+// and the probe that preceded them reached the host — so the gate's "cannot
+// reach the Quil daemon" text beneath would contradict both.
+func declinedRemoteInstall(dest string) {
+	fmt.Fprintf(os.Stderr, "\n  Aborted — nothing was written to %s.\n\n", dest)
+	remoteFailureReported = true
 }
 
 // reportRemoteQuilExited explains exit 1 from a quil the host does have. Its

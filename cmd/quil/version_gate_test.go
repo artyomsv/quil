@@ -162,7 +162,9 @@ func TestSpawnDaemonForUpgrade_InKillOnCloseJob_NeverUsesTheUnloweredToken(t *te
 	var normalCalled, loweredCalled bool
 	startDepsFn = func(quild, quilDir, sock string) winjob.StartDeps {
 		return winjob.StartDeps{
-			InJob:         func() (bool, bool, error) { return true, true, nil },
+			InJob: func() (winjob.JobInfo, error) {
+				return winjob.JobInfo{InJob: true, KillOnClose: true, BreakawayOK: true}, nil
+			},
 			TaskExists:    func() bool { return false },
 			LiveDaemonPID: func() bool { return false },
 			SpawnNormal:   func() (int, error) { normalCalled = true; return 1111, nil },
@@ -196,7 +198,7 @@ func TestSpawnDaemonForUpgrade_NoBreakaway_ErrorSurvives(t *testing.T) {
 	t.Cleanup(func() { startDepsFn = prev })
 	startDepsFn = func(string, string, string) winjob.StartDeps {
 		return winjob.StartDeps{
-			InJob:         func() (bool, bool, error) { return true, false, nil },
+			InJob:         func() (winjob.JobInfo, error) { return winjob.JobInfo{InJob: true, KillOnClose: true}, nil },
 			TaskExists:    func() bool { return false },
 			LiveDaemonPID: func() bool { return false },
 		}

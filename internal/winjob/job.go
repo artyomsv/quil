@@ -1,33 +1,33 @@
 package winjob
 
-// Job limit flags, mirrored from x/sys/windows so the verdict compiles and is
+// Job limit flags, mirrored from x/sys/windows so the mapping compiles and is
 // tested on Linux CI. TestJobConstants_MatchXSys pins them on Windows.
 const (
 	jobLimitBreakawayOK    = 0x00000800 // JOB_OBJECT_LIMIT_BREAKAWAY_OK
 	jobLimitKillOnJobClose = 0x00002000 // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
 )
 
-// jobVerdict turns "is this process in a job" and the INNERMOST job's limit
-// flags into InKillOnCloseJob's answer. Only the innermost job is visible, so
-// an outer kill-on-close job (sshd's) can sit behind an inner one without it:
+// JobInfo describes the innermost job this process is in.
 //
-//   - not in any job: (false, false).
-//   - innermost kills on close: (true, breakaway allowed).
-//   - innermost does not kill on close but allows breakaway: (true, true). An
-//     unseen outer kill-on-close job may still take the daemon down, and
-//     breaking away is safe whether or not one exists.
-//   - innermost allows neither: (false, false). Breaking away is impossible, so
-//     the normal spawn is the only one that can work.
-func jobVerdict(in bool, flags uint32) (inJob, breakawayOK bool) {
+// Only the innermost job is visible to the query, and an inner job can hide an
+// outer kill-on-close one (sshd's). So InJob without KillOnClose does NOT mean
+// "safe to spawn normally": StartDaemon decides what each combination means.
+type JobInfo struct {
+	InJob       bool // in any job at all
+	KillOnClose bool // the innermost job kills its members when it closes
+	BreakawayOK bool // the innermost job lets a child break away
+}
+
+// jobInfo maps "is this process in a job" and the innermost job's limit flags
+// into a JobInfo. It is a pure mapping of the flags; every policy lives in
+// StartDaemon.
+func jobInfo(in bool, flags uint32) JobInfo {
 	if !in {
-		return false, false
+		return JobInfo{}
 	}
-	breakaway := flags&jobLimitBreakawayOK != 0
-	if flags&jobLimitKillOnJobClose != 0 {
-		return true, breakaway
+	return JobInfo{
+		InJob:       true,
+		KillOnClose: flags&jobLimitKillOnJobClose != 0,
+		BreakawayOK: flags&jobLimitBreakawayOK != 0,
 	}
-	if breakaway {
-		return true, true
-	}
-	return false, false
 }

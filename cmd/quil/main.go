@@ -323,7 +323,7 @@ func startDaemon(quiet bool) int {
 			fmt.Println("daemon started by the logon task")
 		case winjob.ViaWaited:
 			fmt.Println("daemon already starting")
-		case winjob.ViaLowered:
+		case winjob.ViaLowered, winjob.ViaLoweredInPlace:
 			// Not "limited": a lowered spawn from a breakaway job on the
 			// desktop is session 1 and fully capable. The TUI's [limited]
 			// marker, which the daemon decides, is the one that says so.

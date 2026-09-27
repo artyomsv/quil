@@ -22,7 +22,7 @@ var startDepsFn = newStartDeps
 func newStartDeps(quild, quilDir, sockPath string) winjob.StartDeps {
 	task := logonTaskNameForThisBuild()
 	return winjob.StartDeps{
-		InJob:      winjob.InKillOnCloseJob,
+		InJob:      winjob.JobState,
 		TaskExists: func() bool { return winjob.TaskExists(task) },
 		InteractiveSession: func() bool {
 			ok, err := winjob.UserHasInteractiveSession()
@@ -41,9 +41,20 @@ func newStartDeps(quild, quilDir, sockPath string) winjob.StartDeps {
 			alive, comm := processProbe(pid)
 			return alive && isQuildName(comm)
 		},
+		// An unreadable token answers true: lowering a Medium token is
+		// harmless, spawning an elevated one inside a job is the defect.
+		AboveMedium: func() bool {
+			above, err := winjob.AboveMedium()
+			if err != nil {
+				log.Printf("daemon start: token integrity query: %v", err)
+				return true
+			}
+			return above
+		},
 		SpawnNormal: func() (int, error) {
 			return daemonspawn.Start(daemonspawn.Spec{Quild: quild, Home: quilDir, SysProcAttr: daemonSysProcAttr()})
 		},
-		SpawnLowered: func() (int, error) { return spawnLowered(quild, quilDir) },
+		SpawnLowered:        func() (int, error) { return spawnLowered(quild, quilDir) },
+		SpawnLoweredInPlace: func() (int, error) { return spawnLoweredInPlace(quild, quilDir) },
 	}
 }

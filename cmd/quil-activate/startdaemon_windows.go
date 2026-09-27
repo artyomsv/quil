@@ -26,7 +26,7 @@ func runStartDaemon(args []string) {
 	}
 	logf := notify.ActivationLogger(home)
 	flags := uint32(syscall.CREATE_NEW_PROCESS_GROUP | 0x00000008) // DETACHED_PROCESS
-	if in, ok, _ := winjob.InKillOnCloseJob(); in && ok {
+	if info, _ := winjob.JobState(); info.InJob && info.BreakawayOK {
 		flags |= windows.CREATE_BREAKAWAY_FROM_JOB
 	}
 	_, err = daemonspawn.Start(daemonspawn.Spec{

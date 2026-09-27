@@ -49,14 +49,14 @@ func TestAboveMedium_Answers(t *testing.T) {
 	t.Logf("aboveMedium=%v", above)
 }
 
-// Logged, not asserted: whether the test host itself sits in a kill-on-close
-// job depends on the terminal it runs from.
-func TestInKillOnCloseJob_Answers(t *testing.T) {
-	in, ok, err := InKillOnCloseJob()
+// Logged, not asserted: whether the test host itself sits in a job, and which
+// one, depends on the terminal it runs from.
+func TestJobState_Answers(t *testing.T) {
+	info, err := JobState()
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("inJob=%v breakawayOK=%v", in, ok)
+	t.Logf("job=%+v", info)
 }
 
 // A child started with LoweredToken runs at Medium with Administrators

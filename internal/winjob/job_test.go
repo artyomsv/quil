@@ -2,27 +2,27 @@ package winjob
 
 import "testing"
 
-func TestJobVerdict(t *testing.T) {
+func TestJobInfo_MapsEachFlagCombination(t *testing.T) {
 	tests := []struct {
-		name          string
-		in            bool
-		flags         uint32
-		wantInJob     bool
-		wantBreakaway bool
+		name  string
+		in    bool
+		flags uint32
+		want  JobInfo
 	}{
-		{"not in any job", false, jobLimitKillOnJobClose | jobLimitBreakawayOK, false, false},
-		{"kill-on-close with breakaway", true, jobLimitKillOnJobClose | jobLimitBreakawayOK, true, true},
-		{"kill-on-close without breakaway", true, jobLimitKillOnJobClose, true, false},
-		{"breakaway without kill-on-close may hide an outer job", true, jobLimitBreakawayOK, true, true},
-		{"no flags cannot break away so spawns normally", true, 0, false, false},
-		{"unrelated flags only", true, 0x1 | 0x100, false, false},
+		{"not in any job ignores the flags", false, jobLimitKillOnJobClose | jobLimitBreakawayOK, JobInfo{}},
+		{"kill-on-close with breakaway", true, jobLimitKillOnJobClose | jobLimitBreakawayOK,
+			JobInfo{InJob: true, KillOnClose: true, BreakawayOK: true}},
+		{"kill-on-close without breakaway", true, jobLimitKillOnJobClose,
+			JobInfo{InJob: true, KillOnClose: true}},
+		{"breakaway without kill-on-close", true, jobLimitBreakawayOK,
+			JobInfo{InJob: true, BreakawayOK: true}},
+		{"no flags is still in a job", true, 0, JobInfo{InJob: true}},
+		{"unrelated flags only is still in a job", true, 0x1 | 0x100, JobInfo{InJob: true}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			inJob, breakaway := jobVerdict(tt.in, tt.flags)
-			if inJob != tt.wantInJob || breakaway != tt.wantBreakaway {
-				t.Errorf("jobVerdict(%v, %#x) = (%v, %v), want (%v, %v)",
-					tt.in, tt.flags, inJob, breakaway, tt.wantInJob, tt.wantBreakaway)
+			if got := jobInfo(tt.in, tt.flags); got != tt.want {
+				t.Errorf("jobInfo(%v, %#x) = %+v, want %+v", tt.in, tt.flags, got, tt.want)
 			}
 		})
 	}

@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/artyomsv/quil/internal/winjob"
@@ -19,6 +20,18 @@ func shortHome(t *testing.T) string {
 	return d
 }
 
+// A nil effect panics only when the decision first reaches it — for the
+// ambiguous-job row, only on a Windows host inside such a job.
+func TestNewStartDeps_EveryEffectIsWired(t *testing.T) {
+	t.Setenv("QUIL_HOME", shortHome(t))
+	v := reflect.ValueOf(newStartDeps("quild", "home", "sock"))
+	for i := 0; i < v.NumField(); i++ {
+		if v.Field(i).IsNil() {
+			t.Errorf("StartDeps.%s is nil", v.Type().Field(i).Name)
+		}
+	}
+}
+
 func TestStartDaemon_UsesDecision_NormalPathReturnsItsPID(t *testing.T) {
 	t.Setenv("QUIL_HOME", shortHome(t))
 	prev := startDepsFn
@@ -26,7 +39,7 @@ func TestStartDaemon_UsesDecision_NormalPathReturnsItsPID(t *testing.T) {
 	var got []string
 	startDepsFn = func(quild, quilDir, sock string) winjob.StartDeps {
 		return winjob.StartDeps{
-			InJob:       func() (bool, bool, error) { return false, false, nil },
+			InJob:       func() (winjob.JobInfo, error) { return winjob.JobInfo{}, nil },
 			SpawnNormal: func() (int, error) { got = append(got, "normal:"+filepath.Base(quilDir)); return 4242, nil },
 		}
 	}
@@ -44,7 +57,7 @@ func TestStartDaemon_NoBreakaway_ExitsWithMessage(t *testing.T) {
 	t.Cleanup(func() { startDepsFn, exitFn = prev, prevExit })
 	startDepsFn = func(string, string, string) winjob.StartDeps {
 		return winjob.StartDeps{
-			InJob:              func() (bool, bool, error) { return true, false, nil },
+			InJob:              func() (winjob.JobInfo, error) { return winjob.JobInfo{InJob: true, KillOnClose: true}, nil },
 			TaskExists:         func() bool { return false },
 			InteractiveSession: func() bool { return false },
 			LiveDaemonPID:      func() bool { return false },

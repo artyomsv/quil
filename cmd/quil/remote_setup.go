@@ -544,6 +544,12 @@ func healRemoteRecord(dest string) (probed *remoteinstall.Probe, done, retry boo
 		}
 		return &probe, false, false
 
+	case shellChanged(dest, probe, recorded):
+		// The right file under a shell the record no longer names: the attach
+		// command was quoted for the old shell. Checked BEFORE the same-path
+		// case, which would otherwise call it a binary that will not run.
+		return &probe, true, reshellRemoteBinary(dest, recorded, probe.Shell)
+
 	case samePath(probe, probe.ExistingPath, recorded):
 		// We ran exactly the path the host reports, and it still would not
 		// execute. This is the genuine wrong-architecture case, and the only
@@ -622,6 +628,45 @@ func adoptRemoteBinary(dest string, probe remoteinstall.Probe, recorded string) 
 	}
 	fmt.Fprintf(os.Stderr, "\n  Found quil at %s on %s. Reconnecting…\n\n", probe.ExistingPath, dest)
 	return true
+}
+
+// shellChanged reports a Windows probe that found quil at exactly the recorded
+// path while the host's ssh default shell is no longer the recorded one — the
+// documented "install with cmd, then switch back to PowerShell" workflow. The
+// recorded command is then quoted for the wrong parser and fails before quil
+// starts, while the path comparison alone sees nothing to fix.
+func shellChanged(dest string, p remoteinstall.Probe, recorded string) bool {
+	return p.OS == "windows" && samePath(p, p.ExistingPath, recorded) &&
+		p.Shell != recordedRemoteShellFn(dest)
+}
+
+// reshellRemoteBinary records the host's current shell beside the unchanged
+// path and reports whether the caller should re-dial. No install is needed, so
+// the setup refusal for a PowerShell default shell does not apply. It
+// terminates: the re-dial sees the same path AND shell, so shellChanged is
+// false and the existing handling for an unchanged pair applies.
+func reshellRemoteBinary(dest, recorded, shell string) (retry bool) {
+	log.Printf("remote: %s ssh shell is now %q; re-recording %q", dest, shell, recorded)
+	if err := recordRemoteBinaryFn(dest, recorded, shell); err != nil {
+		fmt.Fprintf(os.Stderr,
+			"\n  quil on %s is at %s, but its ssh shell is now %s and could not be recorded: %v\n"+
+				"\n  Fix the config write, or set this in %s:\n"+
+				"    [remote.hosts.%q]\n"+
+				"      shell = %q\n\n",
+			dest, recorded, shellName(shell), err, config.ConfigPath(), dest, shell)
+		return false
+	}
+	fmt.Fprintf(os.Stderr, "\n  Found quil at %s on %s; its ssh shell is now %s. Reconnecting…\n\n",
+		recorded, dest, shellName(shell))
+	return true
+}
+
+// shellName is a recorded shell value as a user reads it.
+func shellName(shell string) string {
+	if shell == remoteinstall.ShellPOSIX {
+		return "sh"
+	}
+	return shell
 }
 
 // samePath compares remote paths with the host's own rules: Windows paths are
@@ -774,6 +819,12 @@ func resolveExitOne(dest string) bool {
 		return false
 	}
 	if p.ExistingPath != "" {
+		// Quil at the path we dialled under a shell the record no longer
+		// names: the shell rejected a command quoted for another one, which is
+		// cmd's or PowerShell's exit 1, not quil's.
+		if shellChanged(dest, p, recorded) {
+			return reshellRemoteBinary(dest, recorded, p.Shell)
+		}
 		// On a WINDOWS host, quil somewhere other than the path we dialled,
 		// in a directory we may adopt, means exit 1 was most likely cmd not
 		// finding what we asked for. Correct the record and re-dial, as

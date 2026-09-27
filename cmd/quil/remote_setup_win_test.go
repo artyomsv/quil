@@ -518,6 +518,7 @@ func TestHealRemoteRecord_WindowsSamePathOtherCase_StopsWithoutUnameHint(t *test
 	resetRemoteSetupState(t)
 	spy := newHealSpy(t)
 	recordedRemoteBinaryFn = func(string) string { return strings.ToLower(winQuil) }
+	recordedRemoteShellFn = func(string) string { return remoteinstall.ShellCmd } // unchanged shell
 	probeRemoteFn = func(string) (remoteinstall.Probe, error) {
 		p := winProbe()
 		p.ExistingPath, p.ExistingDirWritable = winQuil, true
@@ -538,4 +539,149 @@ func TestHealRemoteRecord_WindowsSamePathOtherCase_StopsWithoutUnameHint(t *test
 	if !strings.Contains(out, "will not run there") {
 		t.Errorf("no explanation printed:\n%s", out)
 	}
+}
+
+// The documented workflow: install with cmd as DefaultShell, then switch back
+// to PowerShell. The record still says cmd, so every attach sends a command
+// quoted for cmd to PowerShell. The probe finds the SAME file under the new
+// shell; both reconciliation paths must re-record the shell and re-dial, and
+// the re-dial must then settle without a second rewrite. The config is
+// simulated by the spy: the second pass reads back what the first recorded.
+func TestOfferRemoteInstall_WindowsShellChangedSamePath_RecordsShellOnceAndRetries(t *testing.T) {
+	for _, remedy := range []remoteinstall.Remedy{remoteinstall.RemedyInstall, remoteinstall.RemedyProbe} {
+		t.Run(remedyName(remedy), func(t *testing.T) {
+			resetRemoteSetupState(t)
+			spy := newHealSpy(t)
+			isReleaseFn = func() bool { return false } // an install attempt would print "development build"
+			recordedRemoteBinaryFn = func(dest string) string {
+				if p, ok := spy.recorded[dest]; ok {
+					return p
+				}
+				return winQuil
+			}
+			recordedRemoteShellFn = func(dest string) string {
+				if s, ok := spy.shells[dest]; ok {
+					return s
+				}
+				return remoteinstall.ShellCmd
+			}
+			probeRemoteFn = func(string) (remoteinstall.Probe, error) {
+				p := winProbe()
+				p.Shell = remoteinstall.ShellPowerShell
+				p.ExistingPath, p.ExistingDirWritable = winQuil, true
+				return p, nil
+			}
+
+			var retry bool
+			out := captureStderr(t, func() { retry = offerRemoteInstall("win", remedy) })
+			if !retry {
+				t.Fatalf("no re-dial after the shell changed:\n%s", out)
+			}
+			if spy.recorded["win"] != winQuil || spy.shells["win"] != remoteinstall.ShellPowerShell {
+				t.Errorf("recorded %q shell %q, want %q shell %q",
+					spy.recorded["win"], spy.shells["win"], winQuil, remoteinstall.ShellPowerShell)
+			}
+			want := "Found quil at " + winQuil + " on win; its ssh shell is now powershell. Reconnecting"
+			if !strings.Contains(out, want) {
+				t.Errorf("output lacks %q:\n%s", want, out)
+			}
+			if strings.Contains(out, "development build") || strings.Contains(out, "will not run there") {
+				t.Errorf("treated a shell change as an install or a broken binary:\n%s", out)
+			}
+
+			// The re-dial fails again for some other reason: the pair is now
+			// unchanged, so the existing handling applies and nothing is
+			// rewritten a second time.
+			spy.recorded, spy.shells = map[string]string{"win": winQuil}, map[string]string{"win": remoteinstall.ShellPowerShell}
+			rewrites := 0
+			recordRemoteBinaryFn = func(string, string, string) error { rewrites++; return nil }
+			out = captureStderr(t, func() { retry = offerRemoteInstall("win", remedy) })
+			if retry || rewrites != 0 {
+				t.Errorf("second pass: retry %v, rewrites %d; want the unchanged-pair handling:\n%s", retry, rewrites, out)
+			}
+		})
+	}
+}
+
+// The unchanged-pair guard is not weakened: a Windows probe at the recorded
+// path under the recorded shell never rewrites, on either path.
+func TestOfferRemoteInstall_WindowsSamePathSameShell_NoRewrite(t *testing.T) {
+	for _, remedy := range []remoteinstall.Remedy{remoteinstall.RemedyInstall, remoteinstall.RemedyProbe} {
+		t.Run(remedyName(remedy), func(t *testing.T) {
+			resetRemoteSetupState(t)
+			spy := newHealSpy(t)
+			recordedRemoteBinaryFn = func(string) string { return winQuil }
+			recordedRemoteShellFn = func(string) string { return remoteinstall.ShellPowerShell }
+			probeRemoteFn = func(string) (remoteinstall.Probe, error) {
+				p := winProbe()
+				p.Shell = remoteinstall.ShellPowerShell
+				p.ExistingPath, p.ExistingDirWritable = winQuil, true
+				return p, nil
+			}
+			var retry bool
+			captureStderr(t, func() { retry = offerRemoteInstall("win", remedy) })
+			if retry || len(spy.recorded) != 0 {
+				t.Errorf("retry %v recorded %v; want neither", retry, spy.recorded)
+			}
+		})
+	}
+}
+
+// Positive evidence only: a probe that failed never changes the shell.
+func TestOfferRemoteInstall_WindowsShellProbeError_NoRecordChange(t *testing.T) {
+	for _, remedy := range []remoteinstall.Remedy{remoteinstall.RemedyInstall, remoteinstall.RemedyProbe} {
+		t.Run(remedyName(remedy), func(t *testing.T) {
+			resetRemoteSetupState(t)
+			spy := newHealSpy(t)
+			isReleaseFn = func() bool { return false }
+			recordedRemoteBinaryFn = func(string) string { return winQuil }
+			recordedRemoteShellFn = func(string) string { return remoteinstall.ShellCmd }
+			probed := false
+			probeRemoteFn = func(string) (remoteinstall.Probe, error) {
+				probed = true
+				return remoteinstall.Probe{}, errors.New("host down")
+			}
+			var retry bool
+			captureStderr(t, func() { retry = offerRemoteInstall("win", remedy) })
+			if !probed {
+				t.Fatal("the probe never ran, so this test proves nothing")
+			}
+			if retry || len(spy.recorded) != 0 || len(spy.cleared) != 0 {
+				t.Errorf("retry %v recorded %v cleared %v; want none", retry, spy.recorded, spy.cleared)
+			}
+		})
+	}
+}
+
+// Only a WINDOWS probe carries a shell worth re-recording. A POSIX probe at
+// the recorded path keeps the wrong-architecture answer, even under a record
+// whose shell differs from the probe's.
+func TestHealRemoteRecord_POSIXProbeSamePath_ShellNotRewritten(t *testing.T) {
+	resetRemoteSetupState(t)
+	spy := newHealSpy(t)
+	const path = "/home/a/.local/bin/quil"
+	recordedRemoteBinaryFn = func(string) string { return path }
+	recordedRemoteShellFn = func(string) string { return remoteinstall.ShellCmd }
+	probeRemoteFn = func(string) (remoteinstall.Probe, error) {
+		return remoteinstall.Probe{Home: "/home/a", ExistingPath: path, ExistingDirWritable: true}, nil
+	}
+
+	var done, retry bool
+	out := captureStderr(t, func() { done, retry = dropProbe(healRemoteRecord("gpu01")) })
+	if !done || retry || len(spy.recorded) != 0 {
+		t.Errorf("done %v retry %v recorded %v; want the unchanged wrong-arch stop", done, retry, spy.recorded)
+	}
+	if !strings.Contains(out, "uname") {
+		t.Errorf("POSIX wrong-arch hint missing:\n%s", out)
+	}
+}
+
+func remedyName(r remoteinstall.Remedy) string {
+	switch r {
+	case remoteinstall.RemedyInstall:
+		return "exit 127 heal"
+	case remoteinstall.RemedyProbe:
+		return "exit 1 probe"
+	}
+	return "other"
 }

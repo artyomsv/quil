@@ -65,8 +65,11 @@ in quil itself.
   setup` yet: setup refuses before it writes anything. The install pipes the
   archive through the default shell, and that has not been measured under
   Windows PowerShell. Set the default shell to `cmd.exe` for the install (see
-  below), then switch back if you want. Attaching with PowerShell as the
-  default shell is covered by unit tests but untested against a real host.
+  below), then switch back if you want. You don't need to run setup again
+  after you switch: the next `quil --remote` attach fails once, quil sees
+  that the host's shell changed, records the new shell and reconnects.
+  Attaching with PowerShell as the default shell is covered by unit tests
+  but untested against a real host.
 - **bash**, from Git for Windows, is expected to work (untested). The probe
   sees `uname -s` start with `MINGW`, `MSYS` or `CYGWIN` and treats the host
   as Windows: the Windows install, in the Windows install directory, with

@@ -965,6 +965,8 @@ func (m *Model) armReattachReset(dest string) {
 		m.guardPaneID = ""
 		m.remoteFocusUnacked = false
 	}
+	// A reattach may reach a different daemon; explain [limited] again.
+	delete(m.limitedFlashed, dest)
 }
 
 // resetWorkStateForReattach zeroes in-flight execution state on every pane.

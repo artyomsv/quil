@@ -35,12 +35,48 @@ type Source struct {
 	// --from-dir source, whose contents carry no version metadata.
 	Version string
 
-	// Archive is the tar.gz itself.
+	// Archive is the tar.gz itself, on every platform: a Windows host's own
+	// tar.exe (bsdtar) reads gzip, and PowerShell there cannot read ssh stdin
+	// at all, so a zip would have nothing on the far side able to receive it.
 	Archive []byte
 
 	// SHA256 is the archive's hex digest, computed here and re-checked on the
 	// far side so a truncated transfer cannot install.
 	SHA256 string
+
+	// FileSHA256 maps each archive entry name to the lower-case hex SHA-256 of
+	// its bytes. Only the Windows installer uses it: tar.exe extracts from
+	// stdin and never sees the archive as a file, so the far side verifies the
+	// EXTRACTED files instead.
+	FileSHA256 map[string]string
+}
+
+// packEntry is one binary PackDir looks for.
+type packEntry struct {
+	name     string // the base name findBinary searches for
+	entry    string // the name inside the archive, which is the installed name
+	optional bool   // skipped, rather than refused, when absent
+}
+
+// packEntries lists what goes into the archive for p. POSIX is exactly
+// binaryNames under their plain names — unchanged, because the POSIX install
+// script re-verifies the archive's digest and extracts those two names.
+// Windows adds quil-activate.exe when present, as update.OptionalBinaryNames
+// does: `quil daemon install-logon` needs it, but a --from-dir build may lack
+// it, and the install-logon failure then says so.
+func packEntries(p Platform) []packEntry {
+	if p.GOOS == "windows" {
+		return []packEntry{
+			{name: "quil", entry: "quil.exe"},
+			{name: "quild", entry: "quild.exe"},
+			{name: "quil-activate", entry: "quil-activate.exe", optional: true},
+		}
+	}
+	entries := make([]packEntry, 0, len(binaryNames))
+	for _, n := range binaryNames {
+		entries = append(entries, packEntry{name: n, entry: n})
+	}
+	return entries
 }
 
 // FetchRelease downloads a release for the remote's platform and repacks it.
@@ -99,10 +135,15 @@ func PackDir(dir string, p Platform) (Source, error) {
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gz)
+	fileSHA := map[string]string{}
 
-	for _, name := range binaryNames {
-		path, info, err := findBinary(dir, name, p)
+	for _, e := range packEntries(p) {
+		name := e.entry
+		path, info, err := findBinary(dir, e.name, p)
 		if err != nil {
+			if e.optional {
+				continue
+			}
 			return Source{}, err
 		}
 		if info.Size() > maxBinarySize {
@@ -131,6 +172,8 @@ func PackDir(dir string, p Platform) (Source, error) {
 		if _, err := tw.Write(body); err != nil {
 			return Source{}, fmt.Errorf("write %s into archive: %w", name, err)
 		}
+		fileSum := sha256.Sum256(body)
+		fileSHA[name] = hex.EncodeToString(fileSum[:])
 	}
 
 	if err := tw.Close(); err != nil {
@@ -141,7 +184,7 @@ func PackDir(dir string, p Platform) (Source, error) {
 	}
 
 	sum := sha256.Sum256(buf.Bytes())
-	return Source{Archive: buf.Bytes(), SHA256: hex.EncodeToString(sum[:])}, nil
+	return Source{Archive: buf.Bytes(), SHA256: hex.EncodeToString(sum[:]), FileSHA256: fileSHA}, nil
 }
 
 // findBinary locates one binary inside a --from-dir directory.
@@ -151,11 +194,18 @@ func PackDir(dir string, p Platform) (Source, error) {
 // this repo's own `scripts/dev.sh cross` writes `dist/quil-linux-arm64` and
 // friends. A dev build has no release to fetch, so --from-dir IS its only
 // route — requiring a manual rename first would make the documented workflow
-// fail on its first use.
+// fail on its first use. A Windows target looks for the same two spellings
+// with `.exe`, which is what both a release zip and `dev.sh cross` write.
 func findBinary(dir, name string, p Platform) (string, os.FileInfo, error) {
 	candidates := []string{
 		name,
 		fmt.Sprintf("%s-%s-%s", name, p.GOOS, p.GOARCH),
+	}
+	if p.GOOS == "windows" {
+		candidates = []string{
+			name + ".exe",
+			fmt.Sprintf("%s-%s-%s.exe", name, p.GOOS, p.GOARCH),
+		}
 	}
 	for _, candidate := range candidates {
 		path := filepath.Join(dir, candidate)
@@ -184,6 +234,10 @@ func checkBinaryFormat(name string, body []byte, p Platform) error {
 		return fmt.Errorf("%s is too small to be an executable", name)
 	}
 	switch {
+	case p.GOOS == "windows":
+		if !bytes.HasPrefix(body, []byte("MZ")) {
+			return fmt.Errorf("%s is not a Windows executable, but the remote host is %s", name, p)
+		}
 	case bytes.HasPrefix(body, []byte("MZ")):
 		return fmt.Errorf("%s is a Windows executable, but the remote host is %s", name, p)
 	case p.GOOS == "linux" && !bytes.HasPrefix(body, []byte("\x7fELF")):
@@ -204,6 +258,12 @@ const (
 	elfMachineARM64   = 0xb7 // EM_AARCH64
 	machoCPUTypeAMD64 = 0x01000007
 	machoCPUTypeARM64 = 0x0100000c
+)
+
+// PE COFF Machine values, from the Microsoft PE format spec.
+const (
+	peMachineAMD64 = 0x8664 // IMAGE_FILE_MACHINE_AMD64
+	peMachineARM64 = 0xaa64 // IMAGE_FILE_MACHINE_ARM64
 )
 
 // maxFatSlices caps how many architectures a universal binary may declare
@@ -309,6 +369,22 @@ func binaryArch(body []byte) (arch string, ok bool) {
 		case elfMachineAMD64:
 			return "amd64", true
 		case elfMachineARM64:
+			return "arm64", true
+		}
+	case bytes.HasPrefix(body, []byte("MZ")):
+		// A PE image: e_lfanew at 0x3c points at the "PE\0\0" signature, and
+		// the COFF Machine field follows it.
+		if len(body) < 0x40 {
+			return "", false
+		}
+		off := int(binary.LittleEndian.Uint32(body[0x3c:0x40]))
+		if off < 0 || off+6 > len(body) || !bytes.Equal(body[off:off+4], []byte("PE\x00\x00")) {
+			return "", false
+		}
+		switch binary.LittleEndian.Uint16(body[off+4 : off+6]) {
+		case peMachineAMD64:
+			return "amd64", true
+		case peMachineARM64:
 			return "arm64", true
 		}
 	case bytes.HasPrefix(body, []byte{0xcf, 0xfa, 0xed, 0xfe}): // 64-bit little-endian

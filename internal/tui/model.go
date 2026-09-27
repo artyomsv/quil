@@ -74,6 +74,10 @@ type WorkspaceStateMsg struct {
 	// dedicated round trip — see isFollower.
 	SizeMaster string
 	Clients    int
+	// DaemonLimited is true when this destination's daemon runs outside its
+	// desktop session (Windows session 0): no saved credentials, no visible
+	// windows. See daemon.Daemon.limited.
+	DaemonLimited bool
 }
 
 // ProjectInfo is one daemon-side project as broadcast. TabIDs carries the
@@ -533,6 +537,14 @@ type Model struct {
 	// client count (bridges excluded) — what renderStatusBar's role marker
 	// and D9's "most recent input" default both key off of at the TUI layer.
 	clientCount map[string]int
+	// daemonLimited records, per destination, the last broadcast's
+	// DaemonLimited — renderStatusBar reads it for the active destination to
+	// show [limited]. limitedFlashed tracks which destinations have already
+	// had the explanation flashed since their last attach, so it shows once
+	// per attach rather than on every broadcast; armReattachReset clears a
+	// destination's entry on reattach, since it may reach a different daemon.
+	daemonLimited  map[string]bool
+	limitedFlashed map[string]bool
 	// requestedTab records, per (dest, project) key (requestedTabKey), THIS
 	// client's own in-flight switchTab/switchTabBy/sendCreateTab request.
 	// applyTabMoveGuard consults it to tell this client's own switch landing
@@ -6255,6 +6267,14 @@ func (m *Model) applyTabMoveGuard(dest, projectID, newActiveTab string, fromTab 
 	return newActiveTab, m.flashCmd()
 }
 
+// limitedDaemonFlash explains [limited] once per attach. Toasts are NOT
+// listed: the TUI raises them, not the daemon. Kept short on purpose:
+// renderStatusBar drops the WHOLE right side (hints, markers, everything)
+// when it overflows the bar width, so a flash has to stay short enough to
+// fit beside the other markers and hints at 120 columns. The full
+// explanation lives in docs/remote-windows.md.
+const limitedDaemonFlash = "Limited daemon: no saved logins or windows"
+
 // applyWorkspaceState rebuilds the TUI state from one daemon's broadcast.
 // dest names the destination that broadcast arrived on (empty = the local
 // daemon) and scopes the merge: a broadcast is the FULL state of ONE daemon,
@@ -6326,6 +6346,18 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]str
 		m.clientCount = make(map[string]int)
 	}
 	m.clientCount[dest] = state.Clients
+	if m.daemonLimited == nil {
+		m.daemonLimited = make(map[string]bool)
+	}
+	m.daemonLimited[dest] = state.DaemonLimited
+	if state.DaemonLimited && !m.limitedFlashed[dest] {
+		if m.limitedFlashed == nil {
+			m.limitedFlashed = make(map[string]bool)
+		}
+		m.limitedFlashed[dest] = true
+		m.setFlash(limitedDaemonFlash)
+		overlayResizeCmds = append(overlayResizeCmds, m.flashCmd())
+	}
 
 	paneMap := make(map[string]*PaneInfo)
 	for i := range state.Panes {
@@ -7823,6 +7855,9 @@ func (m Model) renderStatusBar() string {
 	if m.devMode {
 		right = "[dev] " + right
 	}
+	if m.daemonLimited[m.activeDest()] {
+		right = "[limited] " + right
+	}
 	// Multi-client sync (§4.3): the role marker sits beside [dev], in the same
 	// style, because it says something about how THIS process relates to the
 	// workspace rather than about any one pane or project. Shown only once a
@@ -8484,6 +8519,9 @@ func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
 	}
 	if c, ok := raw["clients"].(float64); ok {
 		state.Clients = int(c)
+	}
+	if v, ok := raw["daemon_limited"].(bool); ok {
+		state.DaemonLimited = v
 	}
 	if projects, ok := raw["projects"].([]any); ok {
 		for _, p := range projects {

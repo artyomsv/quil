@@ -884,11 +884,12 @@ This also solves a problem that is otherwise easy to hit and hard to diagnose. `
 |---|---|
 | `linux/amd64`, `linux/arm64` | Yes |
 | `darwin/amd64`, `darwin/arm64` | Yes |
-| `windows/amd64` | No — see below |
+| `windows/amd64` | Yes — see [Windows remotes over SSH](remote-windows.md) |
+| `windows/arm64` | No — quil publishes no release for it |
 
 Any local platform can provision any supported remote; a Windows laptop setting up a Linux ARM server is not a special case. The far side needs only `sh`, `uname`, `tar`, and either `sha256sum` or `shasum`. Alpine and other musl distributions work, because releases are built with `CGO_ENABLED=0` and are statically linked.
 
-Windows remotes are excluded for a concrete reason rather than a lack of interest: a running `.exe` cannot be overwritten. Renaming over a running ELF binary works — the process keeps its inode — which is what makes upgrading a live daemon safe on Unix. Windows locks the image file instead. A fresh install would be straightforward; the upgrade path is the hard half, and shipping one without the other would strand you the second time you used it.
+**Windows is a different install shape**, because a running `.exe` cannot be overwritten the way a running ELF binary can (renaming over a live Unix binary works because the process keeps its inode; Windows locks the image file instead). Setup works around it with a rename-aside-then-swap, installs to `%LOCALAPPDATA%\Programs\quil`, and — because Windows has no logon shell to inherit a desktop session from — registers a per-user logon task (`quil daemon install-logon`) so the daemon can start with full rights the next time you log on. A daemon started over ssh with no such task runs anyway, with a normal (never admin) token and no desktop, and shows `[limited]` in the status bar. Full walkthrough: [Windows remotes over SSH](remote-windows.md).
 
 `--from-dir <path>` pushes locally built binaries instead of a release. Development builds have no matching release to download, so this is the only path available to them.
 

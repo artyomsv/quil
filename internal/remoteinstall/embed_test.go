@@ -51,8 +51,11 @@ func TestEmbeddedScripts_HaveNoShebang(t *testing.T) {
 
 func embeddedScripts() map[string]string {
 	return map[string]string{
-		"remote-probe.sh":   probeScript,
-		"remote-install.sh": installScript,
+		"remote-probe.sh":     probeScript,
+		"remote-install.sh":   installScript,
+		"remote-probe.ps1":    windowsProbeScript,
+		"remote-prepare.ps1":  windowsPrepareScript,
+		"remote-finalize.ps1": windowsFinalizeScript,
 	}
 }
 

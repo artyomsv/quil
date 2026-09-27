@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/remoteinstall"
 	versionpkg "github.com/artyomsv/quil/internal/version"
+	"github.com/artyomsv/quil/internal/winjob"
 )
 
 // releasesURL is shown to users running an older TUI against a newer
@@ -30,23 +32,27 @@ const releasesURL = "https://github.com/artyomsv/quil/releases"
 //
 // Returns the client the caller should use from here on, or exits.
 func gateVersionCheck(client *ipc.Client) *ipc.Client {
-	res := versionHandshake(client)
+	res := gateHandshake(client)
 
 	// Checked BEFORE the switch, not inside the mismatch arm, for two reasons.
 	//
 	// A dead transport invalidates every branch below it — there is no daemon
 	// version to compare, no upgrade to offer, and nothing to attach to. And
-	// the switch's first arm returns early for any non-release build, so a
-	// check placed further down never runs on a dev binary at all: the gate
-	// would hand back a client whose connection is closed and the TUI would
-	// launch against it, showing a blank screen with no diagnosis. Since
-	// .claude/rules/dev-environment.md mandates dev builds for work on this
-	// repo, that is the path exercised most.
+	// the switch's first arm returns early for an UNSTAMPED build (version
+	// "dev", e.g. a plain `go build`; every dev.sh variant is stamped from
+	// VERSION and counts as a release), so a check placed further down never
+	// runs for one at all: the gate would hand back a client whose connection
+	// is closed and the TUI would launch against it, showing a blank screen
+	// with no diagnosis.
 	//
 	// Ordering note: this must also precede any client.Close() below. Close
 	// unblocks pump via <-done, which can return WITHOUT ever setting pumpErr,
 	// so LinkErr() would go nil and the misdiagnosis would return.
 	if remoteMode() && !remoteLinkEstablished() {
+		// Before Close, which kills a child still running: a remote shell slow
+		// to start is usually on its way out with a status that decides the
+		// remedy below, and the kill would replace it with -1.
+		awaitRemoteExit()
 		// Read BEFORE Close, per the ordering note above.
 		linkErr := remoteLinkError()
 		client.Close()
@@ -73,6 +79,12 @@ func gateVersionCheck(client *ipc.Client) *ipc.Client {
 			// them retype the command. The caller owns dialling, which is why
 			// this is a flag and not a return value.
 			remoteInstallRetry = true
+			return nil
+		}
+		if remoteFailureReported {
+			// offerRemoteInstall already said what happened — quil ran over
+			// there and exited — so "cannot reach the host" would contradict it.
+			exitFn(1)
 			return nil
 		}
 		reportRemoteLinkFailure(linkErr)
@@ -166,6 +178,18 @@ func gateVersionCheck(client *ipc.Client) *ipc.Client {
 		client.Close()
 		newClient, err := restartDaemonForUpgrade()
 		if err != nil {
+			if errors.Is(err, winjob.ErrNoBreakaway) {
+				// Not the orphan-daemon case below: the old daemon stopped
+				// cleanly, but this session cannot start its replacement — it
+				// is inside a kill-on-close job (an ssh session into this
+				// machine) with no logon task and no breakaway. "quil daemon
+				// stop"/"status" below would be actively wrong advice here,
+				// so this gets its own message instead of the generic one.
+				log.Printf("version gate: daemon restart refused: %v", err)
+				fmt.Fprintln(os.Stderr, winjob.NoBreakawayMessage)
+				exitFn(1)
+				return nil
+			}
 			// Every later launch hits this same wall — the old daemon is
 			// still there and still the wrong version — so a bare one-liner
 			// would strand the user with a TUI that refuses to start and no
@@ -211,6 +235,31 @@ func gateVersionCheck(client *ipc.Client) *ipc.Client {
 		log.Printf("version gate: reconnected to daemon %s after restart", verify.DaemonVersion)
 		return newClient
 	}
+}
+
+// gateHandshake is the version handshake the gate runs.
+//
+// Over ssh it waits remoteGateTimeout, not the local 2 s. A stamped client —
+// every binary dev.sh builds, dev and debug variants included, carries
+// VERSION — gave up after 2 s on a remote still connecting, starting a cold
+// daemon, or (measured) still starting Windows PowerShell, and the dead-link
+// branch then read that as an unreachable host.
+//
+// It also makes the round trip for an UNSTAMPED build (version "dev"), whose
+// version is never compared. The dead-link guard reads Established, and a
+// request is what makes the far side send anything: skipped, the guard ran
+// microseconds after ssh started and found no byte.
+func gateHandshake(client *ipc.Client) handshakeResult {
+	if !remoteMode() {
+		return versionHandshake(client)
+	}
+	if versionpkg.IsRelease() {
+		return versionHandshakeWithin(client, remoteGateTimeout)
+	}
+	if v, ok := requestDaemonVersion(client, remoteGateTimeout); ok {
+		log.Printf("version gate: remote daemon %q answered a non-release TUI", v)
+	}
+	return handshakeResult{ClientSkipped: true}
 }
 
 // promptUpgradeClient tells the user their TUI is too old and exits.
@@ -327,22 +376,29 @@ func restartDaemonForUpgrade() (*ipc.Client, error) {
 // spawnDaemonForUpgrade starts a detached daemon and returns its pid. Prefers
 // the executable-adjacent binary over PATH so a stale `quild` earlier on PATH
 // doesn't shadow the bundled one the user just upgraded to.
+//
+// Routes through the same decision as startDaemon (winjob.StartDaemon via
+// startDepsFn) rather than exec'ing directly: this restart is exactly the
+// moment an ssh session into this machine tries to relaunch the daemon it is
+// about to disconnect from, so it must never use the unlowered token either.
+// A byproduct of sharing newStartDeps: the normal path now also captures the
+// daemon's stderr to quilDir/quild.stderr.log and runs it with Dir=quilDir,
+// which this function previously did not (it discarded stderr and inherited
+// the TUI's own cwd) — see daemonspawn.Start, which startDaemon's normal path
+// already relied on.
 func spawnDaemonForUpgrade() (int, error) {
 	binary := findDaemonBinaryForUpgrade()
 	log.Printf("restart: spawning %s", binary)
-	cmd := exec.Command(binary, "--background")
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	cmd.SysProcAttr = daemonSysProcAttr()
-	if err := cmd.Start(); err != nil {
-		return 0, fmt.Errorf("spawn daemon %q: %w", binary, err)
+	res, err := winjob.StartDaemon(startDepsFn(binary, config.QuilDir(), config.SocketPath()))
+	if err != nil {
+		return 0, err
 	}
-	// Start succeeded, so cmd.Process is set. Returning 0 here instead would
-	// silently downgrade waitForDaemonReady to a blind 30 s poll with no
-	// crash detection.
-	pid := cmd.Process.Pid
-	cmd.Process.Release()
-	return pid, nil
+	// PID 0 only on the task/waited paths, meaning a *different* process
+	// already has the socket open — the same "already up" convention
+	// startDaemon uses. waitForDaemonReady tolerates it (falls back to a
+	// plain poll instead of watching a spawned pid), and the socket is
+	// already listening by construction on those two paths.
+	return res.PID, nil
 }
 
 // findDaemonBinaryForUpgrade is the upgrade-path analogue of

@@ -25,10 +25,10 @@ func InstallCommand(t Target, src Source) string {
 }
 
 // DaemonStopCommand asks an existing remote quil to stop its daemon before its
-// binary is replaced.
+// binary is replaced, quoted for the host's shell.
 //
 // Addressed by absolute path for the same reason the attach command is: a
 // non-interactive shell usually cannot see ~/.local/bin.
-func DaemonStopCommand(binaryPath string) string {
-	return ShellSingleQuote(binaryPath) + " daemon stop"
+func DaemonStopCommand(shell, binaryPath string) (string, error) {
+	return QuoteCommand(shell, binaryPath, "daemon", "stop")
 }

@@ -112,9 +112,15 @@ func stopDaemonEscalating(verbose bool) (wasRunning bool, err error) {
 	}
 	if !isQuildName(comm) {
 		// PID reuse: the recorded PID now belongs to something else. Never
-		// signal it — just clear the stale bookkeeping.
+		// signal it — just clear the stale bookkeeping. An empty comm is a
+		// process this account cannot open (Windows access denied): its
+		// identity is unknown, so it is never signalled either.
 		if verbose {
-			fmt.Printf("pid %d is %q, not a quil daemon — clearing stale files\n", pid, comm)
+			if comm == "" {
+				fmt.Printf("pid %d cannot be inspected, not treating it as a quil daemon — clearing stale files\n", pid)
+			} else {
+				fmt.Printf("pid %d is %q, not a quil daemon — clearing stale files\n", pid, comm)
+			}
 		}
 		cleanupDaemonFiles(sockPath)
 		return wasRunning, nil

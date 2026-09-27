@@ -99,3 +99,78 @@ func TestConfig_LoadWithoutRemoteSection(t *testing.T) {
 		t.Error("expected no recorded remote binaries")
 	}
 }
+
+func TestConfig_SetRemoteHost_RecordsBinaryAndShell(t *testing.T) {
+	var cfg Config
+	cfg.SetRemoteHost("winbox", `C:\q\quil.exe`, "cmd")
+	if got := cfg.RemoteBinary("winbox"); got != `C:\q\quil.exe` {
+		t.Errorf("RemoteBinary = %q", got)
+	}
+	if got := cfg.RemoteShell("winbox"); got != "cmd" {
+		t.Errorf("RemoteShell = %q, want %q", got, "cmd")
+	}
+}
+
+// RemoteShell on an unrecorded destination must be POSIX, not a panic on a
+// nil map — the same guarantee RemoteBinary already gives.
+func TestConfig_RemoteShell_UnknownDestination(t *testing.T) {
+	var cfg Config
+	if got := cfg.RemoteShell("never-seen"); got != "" {
+		t.Errorf("RemoteShell = %q, want empty (POSIX)", got)
+	}
+}
+
+// SetRemoteBinary is called on the reconciliation path (healRemoteRecord),
+// which knows nothing about shells — it must not clobber a shell recorded by
+// `quil remote setup`.
+func TestConfig_SetRemoteBinary_KeepsARecordedShell(t *testing.T) {
+	var cfg Config
+	cfg.SetRemoteHost("winbox", `C:\old\quil.exe`, "powershell")
+	cfg.SetRemoteBinary("winbox", `C:\new\quil.exe`)
+
+	if got := cfg.RemoteBinary("winbox"); got != `C:\new\quil.exe` {
+		t.Errorf("RemoteBinary = %q, want the new path", got)
+	}
+	if got := cfg.RemoteShell("winbox"); got != "powershell" {
+		t.Errorf("RemoteShell = %q, want the shell preserved across SetRemoteBinary", got)
+	}
+}
+
+// The shell has to survive the same TOML round trip as the binary, or every
+// launch after a restart falls back to POSIX quoting for a Windows host.
+func TestConfig_RemoteHost_ShellRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	cfg := Default()
+	cfg.SetRemoteHost("winbox", `C:\q\quil.exe`, "cmd")
+
+	if err := Save(path, cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.RemoteShell("winbox") != "cmd" {
+		t.Errorf("round trip lost the shell: %+v", got.Remote)
+	}
+}
+
+// A record written before Shell existed has no `shell` key at all. It must
+// load as POSIX — the shell every pre-Windows record implicitly was — rather
+// than fail to decode.
+func TestConfig_RemoteHost_NoShellKey_LoadsAsPOSIX(t *testing.T) {
+	var cfg Config
+	cfg.SetRemoteBinary("gpu01", "/home/a/.local/bin/quil")
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := Save(path, cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.RemoteShell("gpu01") != "" {
+		t.Errorf("RemoteShell = %q, want empty (POSIX) for a pre-existing record", got.RemoteShell("gpu01"))
+	}
+}

@@ -1,11 +1,15 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/daemon"
@@ -123,6 +127,25 @@ func main() {
 		}()
 	}
 
+	// Single-instance lock: see acquireStartupLock. Taken before anything that
+	// touches shared files, and held until exit.
+	releaseLock, err := acquireStartupLock(config.QuilDir(), startupLockWait, 100*time.Millisecond)
+	switch {
+	case errors.Is(err, errLockHeld):
+		log.Printf("another quild is starting or running for %s; exiting (no second daemon)", config.QuilDir())
+		if !background {
+			fmt.Println("quild already running")
+		}
+		return
+	case err != nil:
+		// A lock we cannot take for another reason (a filesystem without
+		// locking) must not stop the daemon: fall back to the socket probe
+		// below, which was the only guard before this lock existed.
+		log.Printf("startup lock unavailable (%v); relying on the socket probe", err)
+	default:
+		defer releaseLock()
+	}
+
 	// Extract the bundled ConPTY host (Windows only; no-op elsewhere) so panes
 	// spawn through the newer OpenConsole instead of the OS conhost. Non-fatal:
 	// on failure the PTY layer falls back to the inbox ConPTY.
@@ -141,8 +164,9 @@ func main() {
 	// wedged daemon or a foreign process squatting the path would accept a
 	// connection but can't serve clients, and deferring to it would wrongly
 	// refuse a legitimate startup. A stale/wedged/foreign socket is left for
-	// Server.Start to reclaim. (Residual: two daemons that both fail the probe
-	// before either listens can still race — availability-only, same-UID.)
+	// Server.Start to reclaim. The startup lock above closes the race of two
+	// daemons that both fail this probe before either listens; this probe
+	// remains for a socket held by a wedged or foreign process.
 	if daemonAlreadyHealthy(config.SocketPath()) {
 		log.Printf("a healthy quild is already serving %s; exiting (no orphan spawn)", config.SocketPath())
 		if !background {
@@ -150,6 +174,16 @@ func main() {
 		}
 		return
 	}
+
+	// The PID file is written BEFORE Start, not after it: Start respawns the
+	// restored panes before the listener is up, which takes many seconds on a
+	// heavy workspace, and a client that finds no socket asks the PID file
+	// whether a daemon is already starting (LiveDaemonPID in cmd/quil). Written
+	// after Start, that question always answered "no" during exactly that
+	// window, so the client spawned a second daemon that then lost the startup
+	// lock. Every exit before this point is a process that is not the daemon.
+	writePIDFile()
+	defer removePIDFile()
 
 	d := daemon.New(cfg)
 	log.Printf("quild v%s starting...", version)
@@ -161,12 +195,9 @@ func main() {
 		if !background {
 			fmt.Fprintf(os.Stderr, "failed to start daemon: %v\n", err)
 		}
+		removePIDFile() // os.Exit skips the deferred removal
 		os.Exit(1)
 	}
-
-	// Write PID file after Start() ensures ~/.quil/ exists
-	writePIDFile()
-	defer removePIDFile()
 
 	log.Printf("quild ready (pid %d)", os.Getpid())
 	if !background {
@@ -197,6 +228,12 @@ func writePIDFile() {
 		log.Println("warning: cannot determine quil dir, skipping PID file")
 		return
 	}
+	// The startup lock normally created the directory already; its fallback
+	// branch runs when that failed, so create it here rather than skip the file.
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		log.Printf("warning: failed to create %s for the PID file: %v", dir, err)
+		return
+	}
 	path := config.PidPath()
 	if err := os.WriteFile(path, []byte(fmt.Sprintf("%d", os.Getpid())), 0600); err != nil {
 		log.Printf("warning: failed to write PID file: %v", err)
@@ -204,5 +241,23 @@ func writePIDFile() {
 }
 
 func removePIDFile() {
-	os.Remove(config.PidPath())
+	removePIDFileIfOwned(config.PidPath(), os.Getpid())
+}
+
+// removePIDFileIfOwned removes path only while it still names pid. A daemon
+// that exits must never delete a PID file another daemon has since written:
+// clients read that file to decide whether a daemon is starting, and losing
+// it makes them spawn a second one.
+func removePIDFileIfOwned(path string, pid int) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	owner, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || owner != pid {
+		return
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		log.Printf("warning: failed to remove PID file: %v", err)
+	}
 }

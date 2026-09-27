@@ -21,7 +21,11 @@ func TestClassifyExit(t *testing.T) {
 		{name: "not exited", exitCode: -1, want: RemedyNone},
 
 		{name: "quil ran and exited cleanly", exitCode: 0, want: RemedyNone},
-		{name: "quil ran and failed", exitCode: 1, want: RemedyNone},
+		// cmd.exe and PowerShell both exit 1 for a command they cannot find
+		// (measured, issue #236), and so does quil refusing to start. The
+		// code alone cannot say which, so the caller must ask the host.
+		{name: "exit 1 before any byte", exitCode: 1, want: RemedyProbe},
+		{name: "quil ran and failed", exitCode: 1, established: true, want: RemedyNone},
 
 		// Established is the override: if a byte arrived, quil ran over there,
 		// so whatever the exit code says happened afterwards is not a missing
@@ -50,6 +54,8 @@ func TestRemedy_String(t *testing.T) {
 		{RemedyNone, "none"},
 		{RemedyInstall, "install"},
 		{RemedyReinstall, "reinstall"},
+		{RemedyUpgrade, "upgrade"},
+		{RemedyProbe, "probe"},
 	}
 	for _, tt := range tests {
 		if got := tt.remedy.String(); got != tt.want {

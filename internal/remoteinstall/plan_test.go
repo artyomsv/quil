@@ -61,6 +61,26 @@ func TestPlanTarget(t *testing.T) {
 	}
 }
 
+func TestPlanTarget_Windows(t *testing.T) {
+	la := `C:\Users\a\AppData\Local`
+	fresh := PlanTarget(Probe{OS: "windows", Home: la})
+	if fresh.Dir != la+`\Programs\quil` || fresh.OS != "windows" || fresh.BinaryPath() != la+`\Programs\quil\quil.exe` {
+		t.Errorf("fresh = %+v / %q", fresh, fresh.BinaryPath())
+	}
+	inPlace := PlanTarget(Probe{OS: "windows", Home: la, ExistingPath: `D:\tools\quil\quil.exe`, ExistingDirWritable: true})
+	if inPlace.Dir != `D:\tools\quil` {
+		t.Errorf("in place = %+v", inPlace)
+	}
+	root := PlanTarget(Probe{OS: "windows", Home: la, ExistingPath: `D:\quil.exe`, ExistingDirWritable: true})
+	if root.Dir != `D:\` || root.BinaryPath() != `D:\quil.exe` {
+		t.Errorf("drive root = %+v / %q", root, root.BinaryPath())
+	}
+	shadow := PlanTarget(Probe{OS: "windows", Home: la, ExistingPath: `C:\Program Files\quil\quil.exe`})
+	if shadow.Dir != la+`\Programs\quil` || shadow.Shadowed != `C:\Program Files\quil\quil.exe` {
+		t.Errorf("shadow = %+v", shadow)
+	}
+}
+
 // The binary path is what gets persisted and used as the ssh remote command, so
 // it must be the full path to quil rather than the directory.
 func TestTarget_BinaryPath(t *testing.T) {

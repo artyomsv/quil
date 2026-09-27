@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"os"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/remoteinstall"
@@ -203,10 +205,16 @@ func TestGateVersionCheck_ReadsExitCodeAfterClose(t *testing.T) {
 		exitFn = prevExit
 	})
 
+	prevWait := remoteWaitExitedFn
+	t.Cleanup(func() { remoteWaitExitedFn = prevWait })
+
 	var order []string
 	remoteLinkEstablishedFn = func() bool { return false }
 	remoteLinkErrFn = func() error { order = append(order, "linkerr"); return errLinkTest }
 	remoteExitCodeFn = func() int { order = append(order, "exitcode"); return 127 }
+	// The natural-exit wait must come before Close, which would otherwise kill
+	// a child still on its way out and replace its status.
+	remoteWaitExitedFn = func(time.Duration) bool { order = append(order, "wait"); return true }
 	offerRemoteInstallFn = func(string, remoteinstall.Remedy) bool { return false }
 	exitFn = func(int) {}
 
@@ -217,7 +225,7 @@ func TestGateVersionCheck_ReadsExitCodeAfterClose(t *testing.T) {
 	client := clientRecordingClose(t, &order)
 	captureStderr(t, func() { gateVersionCheck(client) })
 
-	want := []string{"linkerr", "close", "exitcode"}
+	want := []string{"wait", "linkerr", "close", "exitcode"}
 	if !slices.Equal(order, want) {
 		t.Errorf("order = %v, want %v", order, want)
 	}
@@ -336,5 +344,132 @@ func TestGateVersionCheck_NoRetryWhenInstallDeclined(t *testing.T) {
 
 	if remoteInstallRetry {
 		t.Error("remoteInstallRetry = true after a declined install")
+	}
+}
+
+// When offerRemoteInstall has already explained the dead link — quil ran over
+// there and refused to start — the gate must exit WITHOUT printing
+// reportRemoteLinkFailure's "cannot reach" text beneath it: the ssh
+// connection worked, and saying otherwise contradicts the line above.
+func TestGateVersionCheck_FailureAlreadyReported_ExitsWithoutLinkReport(t *testing.T) {
+	withRemote(t, "gpu01")
+
+	prevReported := remoteFailureReported
+	prevRetry := remoteInstallRetry
+	t.Cleanup(func() {
+		remoteFailureReported = prevReported
+		remoteInstallRetry = prevRetry
+	})
+	remoteFailureReported = false
+	remoteInstallRetry = false
+
+	offered := remoteGateSeams(t, false, 1)
+	offerRemoteInstallFn = func(_ string, r remoteinstall.Remedy) bool {
+		*offered = r
+		remoteFailureReported = true
+		return false
+	}
+	exitCode := -1
+	exitFn = func(code int) { exitCode = code }
+
+	var got *ipc.Client
+	out := captureStderr(t, func() { got = gateVersionCheck(deadClient(t)) })
+
+	if *offered != remoteinstall.RemedyProbe {
+		t.Errorf("remedy = %v, want RemedyProbe for exit 1 before any byte", *offered)
+	}
+	if exitCode != 1 {
+		t.Errorf("exit code = %d, want 1", exitCode)
+	}
+	if got != nil || remoteInstallRetry {
+		t.Errorf("client %v retry %v; want neither", got, remoteInstallRetry)
+	}
+	if strings.Contains(out, "Cannot reach the Quil daemon") {
+		t.Errorf("printed the link-failure report under an explanation that already ran:\n%s", out)
+	}
+}
+
+// An install that was attempted and failed — here the dev-build refusal, which
+// comes before any prompt — prints its own error, so the gate must exit 1
+// without the "cannot reach" block that blames the network for it.
+func TestGateVersionCheck_InstallFailed_ExitsWithoutLinkReport(t *testing.T) {
+	for _, code := range []int{127, 1} {
+		t.Run(fmt.Sprintf("exit %d", code), func(t *testing.T) {
+			withRemote(t, "gpu01")
+			resetRemoteSetupState(t)
+			isReleaseFn = func() bool { return false }
+			prevRetry := remoteInstallRetry
+			t.Cleanup(func() { remoteInstallRetry = prevRetry })
+			remoteInstallRetry = false
+
+			remoteGateSeams(t, false, code)
+			offerRemoteInstallFn = offerRemoteInstall
+			exitCode := -1
+			exitFn = func(c int) { exitCode = c }
+
+			out := captureStderr(t, func() { gateVersionCheck(deadClient(t)) })
+
+			if !strings.Contains(out, "Install failed") || !strings.Contains(out, "development build") {
+				t.Fatalf("the dev-build refusal was not reported:\n%s", out)
+			}
+			if exitCode != 1 {
+				t.Errorf("exit code = %d, want 1", exitCode)
+			}
+			if remoteInstallRetry {
+				t.Error("a failed install asked for a re-dial")
+			}
+			if strings.Contains(out, "Cannot reach the Quil daemon") {
+				t.Errorf("printed the link-failure report under the install error:\n%s", out)
+			}
+		})
+	}
+}
+
+// Answering N at the install offer ends the launch with exit 1 — and without
+// the "cannot reach" block, which contradicted the "Quil is not installed"
+// line the user had just answered. Both offer paths: exit 127 (the POSIX
+// shell's "not found") and exit 1 (a Windows shell's, settled by the probe).
+func TestGateVersionCheck_InstallDeclined_ExitsWithoutLinkReport(t *testing.T) {
+	for _, code := range []int{127, 1} {
+		t.Run(fmt.Sprintf("exit %d", code), func(t *testing.T) {
+			withRemote(t, "gpu01")
+			resetRemoteSetupState(t)
+			isReleaseFn = func() bool { return true } // reach the prompt, not the dev-build refusal
+			prevRetry := remoteInstallRetry
+			t.Cleanup(func() { remoteInstallRetry = prevRetry })
+			remoteInstallRetry = false
+
+			remoteGateSeams(t, false, code)
+			offerRemoteInstallFn = offerRemoteInstall
+			exitCode := -1
+			exitFn = func(c int) { exitCode = c }
+
+			r, w, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			prevStdin := os.Stdin
+			os.Stdin = r
+			t.Cleanup(func() { os.Stdin = prevStdin; r.Close() })
+			if _, err := w.WriteString("n\n"); err != nil {
+				t.Fatal(err)
+			}
+			w.Close()
+
+			out := captureStderr(t, func() { gateVersionCheck(deadClient(t)) })
+
+			if !strings.Contains(out, "Continue? [y/N]") {
+				t.Fatalf("the install offer never ran:\n%s", out)
+			}
+			if exitCode != 1 {
+				t.Errorf("exit code = %d, want 1", exitCode)
+			}
+			if remoteInstallRetry {
+				t.Error("a declined install asked for a re-dial")
+			}
+			if strings.Contains(out, "Cannot reach the Quil daemon") {
+				t.Errorf("printed the link-failure report after a declined install:\n%s", out)
+			}
+		})
 	}
 }

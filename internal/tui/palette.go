@@ -368,7 +368,7 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 					enabled:  true,
 					label:    formatPaneNav(i, j, p, projName),
 					detail:   shortCWD(p.CWD, home),
-					keywords: []string{"go to", "goto", "pane", "focus", p.Name, filepath.Base(p.CWD), paneType, proj.Name},
+					keywords: []string{"go to", "goto", "pane", "focus", p.Name, displayBase(p.CWD), paneType, proj.Name},
 				})
 			}
 		}

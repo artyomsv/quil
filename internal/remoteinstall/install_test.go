@@ -98,7 +98,10 @@ func TestInstallCommand_QuotesEveryInterpolatedValue(t *testing.T) {
 }
 
 func TestDaemonStopCommand_QuotesThePath(t *testing.T) {
-	got := DaemonStopCommand("/home/o'brien/.local/bin/quil")
+	got, err := DaemonStopCommand(ShellPOSIX, "/home/o'brien/.local/bin/quil")
+	if err != nil {
+		t.Fatalf("DaemonStopCommand error = %v", err)
+	}
 	if !strings.Contains(got, `'\''brien`) {
 		t.Errorf("binary path was not escaped: %q", got)
 	}
@@ -110,7 +113,7 @@ func TestDaemonStopCommand_QuotesThePath(t *testing.T) {
 func TestPush_SendsArchiveOnStdin(t *testing.T) {
 	r := &fakeRunner{}
 	src := Source{Archive: []byte("ARCHIVE-BYTES"), SHA256: "deadbeef"}
-	if err := Push(context.Background(), r, Target{Dir: "/opt/bin"}, src); err != nil {
+	if err := Push(context.Background(), r, ShellPOSIX, Target{Dir: "/opt/bin"}, src); err != nil {
 		t.Fatalf("Push error = %v", err)
 	}
 	if string(r.gotStdin) != "ARCHIVE-BYTES" {
@@ -121,7 +124,7 @@ func TestPush_SendsArchiveOnStdin(t *testing.T) {
 func TestPush_ReportsRemoteFailure(t *testing.T) {
 	// Exit 2 is the install script's checksum-mismatch status.
 	r := &fakeRunner{exitCode: 2, stderr: "quil-install: archive checksum mismatch (transfer corrupted)"}
-	err := Push(context.Background(), r, Target{Dir: "/opt/bin"}, Source{SHA256: "x"})
+	err := Push(context.Background(), r, ShellPOSIX, Target{Dir: "/opt/bin"}, Source{SHA256: "x"})
 	if err == nil {
 		t.Fatal("error = nil, want error")
 	}
@@ -134,7 +137,7 @@ func TestPush_ReportsRemoteFailure(t *testing.T) {
 // carry escape sequences or unbounded text into an error line.
 func TestPush_SanitizesAndBoundsRemoteOutput(t *testing.T) {
 	r := &fakeRunner{exitCode: 1, stderr: "\x1b]52;c;cGF3bmVk\x07evil\x1b[2J" + strings.Repeat("A", 5000)}
-	err := Push(context.Background(), r, Target{Dir: "/opt/bin"}, Source{})
+	err := Push(context.Background(), r, ShellPOSIX, Target{Dir: "/opt/bin"}, Source{})
 	if err == nil {
 		t.Fatal("error = nil, want error")
 	}
@@ -149,7 +152,7 @@ func TestPush_SanitizesAndBoundsRemoteOutput(t *testing.T) {
 
 func TestPush_SilentNonZeroExitStillExplains(t *testing.T) {
 	r := &fakeRunner{exitCode: 3}
-	err := Push(context.Background(), r, Target{Dir: "/opt/bin"}, Source{})
+	err := Push(context.Background(), r, ShellPOSIX, Target{Dir: "/opt/bin"}, Source{})
 	if err == nil || !strings.Contains(err.Error(), "3") {
 		t.Errorf("error = %v, want it to name the exit status", err)
 	}
@@ -373,7 +376,7 @@ func TestStopRemoteDaemon_ClassifiesTheOutcome(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := &fakeRunner{exitCode: tt.exitCode, stdout: tt.output}
-			warning, err := StopRemoteDaemon(context.Background(), r, "/usr/local/bin/quil")
+			warning, err := StopRemoteDaemon(context.Background(), r, ShellPOSIX, "/usr/local/bin/quil")
 			if err != nil {
 				t.Fatalf("error = %v, want nil", err)
 			}

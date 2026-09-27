@@ -149,20 +149,29 @@ quil remote setup gpu01 --version 1.43.1   # pin a release
 ```
 
 Supported **remote** platforms: `linux/amd64`, `linux/arm64`, `darwin/amd64`,
-`darwin/arm64`. Any local platform can provision any of them — the download and
-verification happen locally, so what the laptop runs is irrelevant to what the
-server gets. Requirements on the far side are `sh`, `uname`, `tar` and either
-`sha256sum` or `shasum`. Alpine/musl works: releases are built `CGO_ENABLED=0`.
+`darwin/arm64`, `windows/amd64`. Any local platform can provision any of them —
+the download and verification happen locally, so what the laptop runs is
+irrelevant to what the server gets. POSIX hosts need only `sh`, `uname`, `tar`
+and either `sha256sum` or `shasum`; Alpine/musl works, because releases are
+built `CGO_ENABLED=0`. `windows/arm64` has no published release and is refused.
 
-**Windows remotes are not supported.** There is no `uname` or `sh` (the OpenSSH
-server's default shell is `cmd.exe`), the archives are `.zip`, and — the actual
-blocker — a running `.exe` cannot be overwritten. `mv -f` over a running ELF
-works because the process keeps its inode; Windows locks the image file, which
-is why the local updater carries the `freeBackupPath` rename-aside logic. A
-fresh install would be easy; upgrade is the hard half, and shipping one without
-the other strands the user on second use.
+**Windows remotes install differently, because a running `.exe` cannot be
+overwritten the way a running ELF binary can** — `mv -f` over a live Unix
+binary works because the process keeps its inode, while Windows locks the
+image file instead, which is why the local updater carries the same
+rename-aside logic. Setup installs to `%LOCALAPPDATA%\Programs\quil`; the
+transfer is three separate ssh round trips rather than one, because Windows
+PowerShell started by OpenSSH cannot read piped ssh stdin, so the host's own
+`tar.exe` does the extraction while PowerShell only prepares the directory
+and verifies-and-swaps the files afterward. Because Windows has no logon
+shell to inherit a desktop session from, setup also registers a per-user
+logon task (`quil daemon install-logon`) so the daemon starts with full
+rights the next time you log on — a daemon started over ssh with no such
+task runs anyway, at reduced (never admin) rights with no desktop, and shows
+`[limited]` in the status bar. Full walkthrough:
+[Windows remotes over SSH](../remote-windows.md).
 
-Installs go to `~/.local/bin` — **never `sudo`**. An upgrade replaces the
+POSIX installs go to `~/.local/bin` — **never `sudo`**. An upgrade replaces the
 existing binary in place when that directory is already writable, and otherwise
 falls back to `~/.local/bin` and tells you the old copy is now shadowed.
 

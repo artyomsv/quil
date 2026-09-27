@@ -171,7 +171,7 @@ func dialExtra(cfg config.Config, d config.Destination) func() (tui.Client, erro
 		}
 		if gateErr := gateExtraVersion(d, client, link); gateErr != nil {
 			client.Close()
-			return nil, classifyDialFailure(link, gateErr)
+			return nil, classifyDialFailure(d.Dest, link, gateErr)
 		}
 		return client, nil
 	}
@@ -191,16 +191,48 @@ func dialExtra(cfg config.Config, d config.Destination) func() (tui.Client, erro
 // Read AFTER Close, which is what reaps the child and makes the status final
 // — the mirror of LinkErr, which Close can clear. dialExtra closes the client
 // on the line above.
-func classifyDialFailure(link transport.LinkStatus, err error) error {
+//
+// Exit 1 is ambiguous — a Windows shell's "not found" and quil refusing to
+// start — so dest is probed to settle it, in batch mode: a background host
+// never prompts. A probe that fails settles nothing and leaves err as it was.
+// A host recorded as POSIX is never probed (exitOneProbeWanted): its shell
+// says 127 for a missing command, so its exit 1 is quil's own.
+func classifyDialFailure(dest string, link transport.LinkStatus, err error) error {
 	if link == nil {
 		// A dial that never produced a link failed before ssh ran at all, so
 		// there is no remote status to classify.
 		return err
 	}
-	if remoteinstall.ClassifyExit(link.ExitCode(), link.Established()) == remoteinstall.RemedyInstall {
+	switch remoteinstall.ClassifyExit(link.ExitCode(), link.Established()) {
+	case remoteinstall.RemedyInstall:
 		return fmt.Errorf("%w: %v", tui.ErrRemoteQuilMissing, err)
+	case remoteinstall.RemedyProbe:
+		if !exitOneProbeWanted(dest) {
+			return err // a POSIX host's exit 1: quil ran and failed, as before
+		}
+		p, perr := probeDestBatchFn(dest)
+		switch {
+		case perr != nil:
+			log.Printf("remote: probe after exit 1 failed for %s: %v", dest, perr)
+			return err
+		case p.ExistingPath == "":
+			return fmt.Errorf("%w: %v", tui.ErrRemoteQuilMissing, err)
+		default:
+			return fmt.Errorf("quil on %s exited before its daemon answered: %w", dest, err)
+		}
 	}
 	return err
+}
+
+// probeDestBatchTimeout bounds classifyDialFailure's probe. Batch mode cannot
+// wait on a human, so this covers one ssh connect plus two short scripts.
+const probeDestBatchTimeout = 30 * time.Second
+
+// probeDestBatchFn probes a background destination without prompting.
+var probeDestBatchFn = func(dest string) (remoteinstall.Probe, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), probeDestBatchTimeout)
+	defer cancel()
+	return remoteinstall.RunProbe(ctx, sshRunner{dest: dest, opts: transport.SSHOptions{Batch: true}})
 }
 
 // gateExtraVersion refuses a background destination whose daemon this client
@@ -233,7 +265,17 @@ func gateExtraVersion(d config.Destination, client *ipc.Client, link transport.L
 		// version gate documents and pins: Close unblocks the transport pump,
 		// and that return path can complete without ever setting pumpErr, so a
 		// read afterwards comes back nil and loses ssh's own words.
+		//
+		// Both callers close next, and Close kills a child still running — so a
+		// link that never delivered a byte first gets deadLinkExitGrace to exit
+		// by itself. A remote shell slow to start (PowerShell) is usually on its
+		// way out, and its real status is what classifyDialFailure decides by;
+		// the kill would replace it with -1. Waiting first also lets LinkErr
+		// carry ssh's words once the pipe has closed.
 		if link != nil {
+			if !link.Established() && !link.WaitExited(deadLinkExitGrace) {
+				log.Printf("remote: %s still running after %s — closing it", d.Label(), deadLinkExitGrace)
+			}
 			if le := link.LinkErr(); le != nil {
 				return le
 			}

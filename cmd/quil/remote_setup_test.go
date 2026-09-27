@@ -12,32 +12,42 @@ import (
 func resetRemoteSetupState(t *testing.T) {
 	t.Helper()
 	prevRecorded := recordedRemoteBinaryFn
+	prevShell := recordedRemoteShellFn
 	prevProbe := probeRemoteFn
 	prevRecord := recordRemoteBinaryFn
 	prevClear := clearRemoteBinaryFn
 	prevIsRelease := isReleaseFn
 	prevDest := remoteDest
+	prevReported := remoteFailureReported
+	prevRunner := setupRunnerFn
 	t.Cleanup(func() {
+		remoteFailureReported = prevReported
+		setupRunnerFn = prevRunner
 		recordedRemoteBinaryFn = prevRecorded
+		recordedRemoteShellFn = prevShell
 		probeRemoteFn = prevProbe
 		recordRemoteBinaryFn = prevRecord
 		clearRemoteBinaryFn = prevClear
 		isReleaseFn = prevIsRelease
 		remoteDest = prevDest
 	})
+	remoteFailureReported = false
 	// Default to a host that answers "nothing installed" so a test which does
 	// not care about the probe cannot accidentally reach the real ssh path.
 	probeRemoteFn = func(string) (remoteinstall.Probe, error) {
 		return remoteinstall.Probe{}, nil
 	}
+	// runRemoteSetup's own ssh runs fail rather than reach a real ssh.
+	setupRunnerFn = func(string) remoteinstall.Runner { return noSSHRunner{} }
 	recordedRemoteBinaryFn = func(string) string { return "" }
+	recordedRemoteShellFn = func(string) string { return "" }
 	// The same argument applies with MORE force to the two writers: the accident
 	// there is not a slow test, it is a write to the developer's real
 	// ~/.quil/config.toml, which .claude/rules/dev-environment.md forbids
 	// touching. Fail loudly instead of defaulting to the live implementation —
 	// a test that needs these calls newHealSpy.
-	recordRemoteBinaryFn = func(dest, binary string) error {
-		t.Errorf("unstubbed recordRemoteBinaryFn(%q, %q) — call newHealSpy first", dest, binary)
+	recordRemoteBinaryFn = func(dest, binary, shell string) error {
+		t.Errorf("unstubbed recordRemoteBinaryFn(%q, %q, %q) — call newHealSpy first", dest, binary, shell)
 		return nil
 	}
 	clearRemoteBinaryFn = func(dest string) error {
@@ -52,6 +62,7 @@ func resetRemoteSetupState(t *testing.T) {
 type healSpy struct {
 	cleared  []string
 	recorded map[string]string
+	shells   map[string]string
 }
 
 // dropProbe discards healRemoteRecord's probe return so a test asserting only
@@ -62,13 +73,14 @@ func dropProbe(_ *remoteinstall.Probe, done, retry bool) (bool, bool) {
 
 func newHealSpy(t *testing.T) *healSpy {
 	t.Helper()
-	s := &healSpy{recorded: map[string]string{}}
+	s := &healSpy{recorded: map[string]string{}, shells: map[string]string{}}
 	clearRemoteBinaryFn = func(dest string) error {
 		s.cleared = append(s.cleared, dest)
 		return nil
 	}
-	recordRemoteBinaryFn = func(dest, binary string) error {
+	recordRemoteBinaryFn = func(dest, binary, shell string) error {
 		s.recorded[dest] = binary
+		s.shells[dest] = shell
 		return nil
 	}
 	return s
@@ -238,7 +250,7 @@ func TestHealRemoteRecord_GroupWritableDir_NotAdopted(t *testing.T) {
 // config test uses /home/o'brien/bin/quil.
 func TestReportRemoteBinaryWontRun_QuotesTheSuggestedCommand(t *testing.T) {
 	const evil = `/tmp/a'; touch /tmp/pwned; echo '`
-	out := captureStderr(t, func() { reportRemoteBinaryWontRun("gpu01", evil) })
+	out := captureStderr(t, func() { reportRemoteBinaryWontRun("gpu01", evil, false) })
 
 	// The payload must not sit outside a quoted region. Everything after the
 	// `ssh gpu01 ` prefix is one ShellSingleQuote'd argument, so the injected
@@ -311,8 +323,12 @@ func TestRecordAndClearRemoteBinary_RoundTripOnDisk(t *testing.T) {
 	t.Setenv("QUIL_HOME", t.TempDir())
 
 	// First write against a config.toml that does not exist yet.
-	if err := recordRemoteBinary("gpu01", "/home/a/.local/bin/quil"); err != nil {
+	if err := recordRemoteBinary("gpu01", "/home/a/.local/bin/quil", remoteinstall.ShellPOSIX); err != nil {
 		t.Fatalf("recordRemoteBinary on a missing config: %v", err)
+	}
+	// The shell travels with the path: it is what the next attach quotes by.
+	if err := recordRemoteBinary("win01", `C:\q\quil.exe`, remoteinstall.ShellCmd); err != nil {
+		t.Fatalf("recordRemoteBinary for a Windows host: %v", err)
 	}
 	cfg, err := config.Load(config.ConfigPath())
 	if err != nil {
@@ -320,6 +336,9 @@ func TestRecordAndClearRemoteBinary_RoundTripOnDisk(t *testing.T) {
 	}
 	if got := cfg.RemoteBinary("gpu01"); got != "/home/a/.local/bin/quil" {
 		t.Fatalf("RemoteBinary = %q, want the recorded path", got)
+	}
+	if got := cfg.RemoteShell("win01"); got != remoteinstall.ShellCmd {
+		t.Errorf("RemoteShell = %q, want %q", got, remoteinstall.ShellCmd)
 	}
 	// A default config must have been written, not a zeroed one — otherwise the
 	// first remote provisioned on a fresh machine silently resets every setting.
@@ -506,34 +525,70 @@ func TestParseRemoteArgs(t *testing.T) {
 // non-interactive PATH cannot see the install directory.
 func TestRemoteSSHOptions(t *testing.T) {
 	t.Run("no recorded binary falls back to the transport default", func(t *testing.T) {
-		if got := remoteSSHOptions(config.Config{}, "gpu01").RemoteCommand; got != "" {
-			t.Errorf("RemoteCommand = %q, want empty so transport's default applies", got)
+		opts, err := remoteSSHOptions(config.Config{}, "gpu01")
+		if err != nil {
+			t.Fatalf("remoteSSHOptions error = %v", err)
+		}
+		if opts.RemoteCommand != "" {
+			t.Errorf("RemoteCommand = %q, want empty so transport's default applies", opts.RemoteCommand)
 		}
 	})
 
 	t.Run("recorded binary becomes the remote command", func(t *testing.T) {
 		var cfg config.Config
 		cfg.SetRemoteBinary("gpu01", "/home/a/.local/bin/quil")
-		got := remoteSSHOptions(cfg, "gpu01").RemoteCommand
-		if want := `'/home/a/.local/bin/quil' --stdio`; got != want {
-			t.Errorf("RemoteCommand = %q, want %q", got, want)
+		opts, err := remoteSSHOptions(cfg, "gpu01")
+		if err != nil {
+			t.Fatalf("remoteSSHOptions error = %v", err)
+		}
+		if want := `'/home/a/.local/bin/quil' --stdio`; opts.RemoteCommand != want {
+			t.Errorf("RemoteCommand = %q, want %q", opts.RemoteCommand, want)
 		}
 	})
 
 	t.Run("a path with an apostrophe is escaped", func(t *testing.T) {
 		var cfg config.Config
 		cfg.SetRemoteBinary("gpu01", "/home/o'brien/bin/quil")
-		got := remoteSSHOptions(cfg, "gpu01").RemoteCommand
-		if !strings.Contains(got, `'\''brien`) {
-			t.Errorf("RemoteCommand = %q, want the apostrophe escaped", got)
+		opts, err := remoteSSHOptions(cfg, "gpu01")
+		if err != nil {
+			t.Fatalf("remoteSSHOptions error = %v", err)
+		}
+		if !strings.Contains(opts.RemoteCommand, `'\''brien`) {
+			t.Errorf("RemoteCommand = %q, want the apostrophe escaped", opts.RemoteCommand)
 		}
 	})
 
 	t.Run("another host's entry is not used", func(t *testing.T) {
 		var cfg config.Config
 		cfg.SetRemoteBinary("other-host", "/opt/quil")
-		if got := remoteSSHOptions(cfg, "gpu01").RemoteCommand; got != "" {
-			t.Errorf("RemoteCommand = %q, want empty for an unrecorded destination", got)
+		opts, err := remoteSSHOptions(cfg, "gpu01")
+		if err != nil {
+			t.Fatalf("remoteSSHOptions error = %v", err)
+		}
+		if opts.RemoteCommand != "" {
+			t.Errorf("RemoteCommand = %q, want empty for an unrecorded destination", opts.RemoteCommand)
+		}
+	})
+
+	t.Run("a cmd-shell host quotes with double quotes", func(t *testing.T) {
+		var cfg config.Config
+		cfg.SetRemoteHost("winbox", `C:\q\quil.exe`, remoteinstall.ShellCmd)
+		opts, err := remoteSSHOptions(cfg, "winbox")
+		if err != nil {
+			t.Fatalf("remoteSSHOptions error = %v", err)
+		}
+		if want := `"C:\q\quil.exe" --stdio`; opts.RemoteCommand != want {
+			t.Errorf("RemoteCommand = %q, want %q", opts.RemoteCommand, want)
+		}
+	})
+
+	// A hand-edited config naming a UNC path cannot be quoted safely for any
+	// Windows shell — attach must refuse rather than run it.
+	t.Run("a UNC path for a cmd-shell host is refused", func(t *testing.T) {
+		var cfg config.Config
+		cfg.SetRemoteHost("winbox", `\\srv\share\quil.exe`, remoteinstall.ShellCmd)
+		if _, err := remoteSSHOptions(cfg, "winbox"); err == nil {
+			t.Error("remoteSSHOptions accepted a UNC path")
 		}
 	})
 }

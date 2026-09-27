@@ -73,6 +73,37 @@ func remoteExitCode() int {
 	return remoteExitCodeFn()
 }
 
+// remoteWaitExitedFn waits a bounded time for the ssh child to exit on its own.
+// Installed alongside remoteLinkErrFn.
+var remoteWaitExitedFn func(time.Duration) bool
+
+// deadLinkExitGrace is how long a link that never delivered a byte may take to
+// exit on its own before it is closed, and closing kills it. A var so tests can
+// shorten it.
+//
+// Measured need: with Windows PowerShell as the OpenSSH DefaultShell, the
+// remote shell takes a second or two to start before it rejects the command
+// and exits 1. Closed before that, the kill replaced the 1 with -1, the probe
+// that would have healed a stale shell record or offered the install never
+// ran, and the user was told the host could not be reached.
+var deadLinkExitGrace = 5 * time.Second
+
+// awaitRemoteExit gives the dialled ssh child deadLinkExitGrace to exit by
+// itself. A no-op when no probe is installed.
+func awaitRemoteExit() {
+	if remoteWaitExitedFn != nil && !remoteWaitExitedFn(deadLinkExitGrace) {
+		log.Printf("remote: ssh still running after %s — closing it", deadLinkExitGrace)
+	}
+}
+
+// remoteGateTimeout bounds the version gate's round trip over ssh. The local
+// handshakeTimeout (2 s) is sized for a Unix socket; over ssh the far side may
+// legitimately spend the connect timeout plus `quil --stdio`'s own wait for a
+// cold daemon before it answers, and giving up earlier reported a slow but
+// healthy host as unreachable. A link that is really dead ends the wait early:
+// ssh exits and the read fails at once.
+const remoteGateTimeout = extraDialTimeout
+
 // remoteStderrRedirectFn moves ssh's diagnostics off the terminal. Installed by
 // dialRemote when the transport supports it; nil in a local session.
 var remoteStderrRedirectFn func(io.Writer)
@@ -97,16 +128,23 @@ func redirectRemoteStderr(w io.Writer) {
 // becomes the remote command. That is what makes attaching work on a host where
 // quil lives in ~/.local/bin: `ssh host quil --stdio` runs a non-interactive
 // shell, which on Debian and Ubuntu returns from ~/.bashrc before reaching any
-// PATH line, so the directory is invisible there.
+// PATH line, so the directory is invisible there. The recorded shell decides
+// how that path is quoted — POSIX, cmd or PowerShell — and a path a Windows
+// shell cannot quote safely is refused here rather than run.
 //
 // With nothing recorded the transport's default (`quil --stdio`) applies, which
 // works when the remote's non-interactive PATH can already see it.
-func remoteSSHOptions(cfg config.Config, dest string) transport.SSHOptions {
+func remoteSSHOptions(cfg config.Config, dest string) (transport.SSHOptions, error) {
 	var opts transport.SSHOptions
 	if binary := cfg.RemoteBinary(dest); binary != "" {
-		opts.RemoteCommand = remoteinstall.ShellSingleQuote(binary) + " --stdio"
+		cmd, err := remoteinstall.QuoteCommand(cfg.RemoteShell(dest), binary, "--stdio")
+		if err != nil {
+			return opts, fmt.Errorf("recorded quil path for %s: %w (fix [remote.hosts.%q] in %s)",
+				dest, err, dest, config.ConfigPath())
+		}
+		opts.RemoteCommand = cmd
 	}
-	return opts
+	return opts, nil
 }
 
 // remoteLinkError reports a dead remote transport, or nil when the link is
@@ -252,6 +290,7 @@ func dialRemote(cfg config.Config, dest string) (*ipc.Client, error) {
 		remoteLinkErrFn = link.LinkErr
 		remoteLinkEstablishedFn = link.Established
 		remoteExitCodeFn = link.ExitCode
+		remoteWaitExitedFn = link.WaitExited
 	}
 	return client, err
 }
@@ -272,7 +311,10 @@ func dialRemote(cfg config.Config, dest string) (*ipc.Client, error) {
 // owns the ssh child and releases it on Close, so a caller may cancel this
 // context the moment the dial returns without killing the session it opened.
 func dialRemoteTransport(ctx context.Context, cfg config.Config, dest string, batch bool, stderrSink io.Writer) (*ipc.Client, transport.LinkStatus, error) {
-	opts := remoteSSHOptions(cfg, dest)
+	opts, err := remoteSSHOptions(cfg, dest)
+	if err != nil {
+		return nil, nil, err
+	}
 	opts.Batch = batch
 	// Only consulted on a batch dial. The interactive dial's stderr belongs on
 	// the terminal, where host-key and passphrase prompts have to be readable,

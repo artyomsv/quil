@@ -149,7 +149,9 @@ quil daemon install-logon --remove # remove
 
 `quil remote setup` runs this for you, but you can also run it by hand,
 including from an ssh session, with no elevation required. It registers a
-per-user "run at logon" scheduled task (`Quil daemon`) so the daemon starts
+per-user "run at logon" scheduled task (named `Quil daemon (quild <id>)`,
+where `<id>` is a short code derived from your quil data folder, so every
+user on the PC gets their own task) so the daemon starts
 in your desktop session — with your saved logins and the ability to open
 windows — the next time you log on, instead of running detached and
 `[limited]` (§9).

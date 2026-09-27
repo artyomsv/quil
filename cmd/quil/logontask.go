@@ -24,8 +24,7 @@ var (
 // logonTaskNameForThisBuild names this variant's task for the current
 // QUIL_HOME. startDaemon computes the same name to find the task.
 func logonTaskNameForThisBuild() string {
-	dir := config.QuilDir()
-	return winjob.LogonTaskName(daemonName(), dir, config.IsDefaultQuilDir(dir))
+	return winjob.LogonTaskName(daemonName(), config.QuilDir())
 }
 
 // runInstallLogon implements `quil daemon install-logon [--remove]` and returns

@@ -191,3 +191,11 @@ desktop to run in.
 daemon restart` there — the daemon detects the desktop session and starts
 fully. Or install the logon task once (§8): the next time you log on, the
 daemon starts in your desktop session automatically.
+
+**Standard (non-admin) accounts:** from an ssh session, a standard account
+cannot see its own desktop session — Windows refuses it the session list. So
+quil never uses the logon task from ssh for such an account: when no daemon
+is running, `quil --remote` starts a `[limited]` one, even while you are
+logged on at the PC. The logon task still starts the daemon in your desktop
+session at your next desktop logon, and a daemon that is already running is
+used as it is.

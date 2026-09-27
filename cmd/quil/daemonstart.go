@@ -24,11 +24,14 @@ func newStartDeps(quild, quilDir, sockPath string) winjob.StartDeps {
 	return winjob.StartDeps{
 		InJob:      winjob.JobState,
 		TaskExists: func() bool { return winjob.TaskExists(task) },
+		// The error is deliberately not logged. For a standard (non-admin)
+		// account in an ssh session WTSEnumerateSessions fails as a matter of
+		// course ("No more data is available"), and the answer — no session,
+		// so no logon task and a lowered daemon — is the right one. `quil
+		// --stdio` has no log file, so log.Printf lands on stderr, and ssh
+		// relays that to the CLIENT's terminal above the TUI.
 		InteractiveSession: func() bool {
-			ok, err := winjob.UserHasInteractiveSession()
-			if err != nil {
-				log.Printf("daemon start: session query: %v", err)
-			}
+			ok, _ := winjob.UserHasInteractiveSession()
 			return ok
 		},
 		RunTask:   func() error { return winjob.RunTask(task) },

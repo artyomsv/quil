@@ -389,6 +389,42 @@ func TestGateVersionCheck_FailureAlreadyReported_ExitsWithoutLinkReport(t *testi
 	}
 }
 
+// An install that was attempted and failed — here the dev-build refusal, which
+// comes before any prompt — prints its own error, so the gate must exit 1
+// without the "cannot reach" block that blames the network for it.
+func TestGateVersionCheck_InstallFailed_ExitsWithoutLinkReport(t *testing.T) {
+	for _, code := range []int{127, 1} {
+		t.Run(fmt.Sprintf("exit %d", code), func(t *testing.T) {
+			withRemote(t, "gpu01")
+			resetRemoteSetupState(t)
+			isReleaseFn = func() bool { return false }
+			prevRetry := remoteInstallRetry
+			t.Cleanup(func() { remoteInstallRetry = prevRetry })
+			remoteInstallRetry = false
+
+			remoteGateSeams(t, false, code)
+			offerRemoteInstallFn = offerRemoteInstall
+			exitCode := -1
+			exitFn = func(c int) { exitCode = c }
+
+			out := captureStderr(t, func() { gateVersionCheck(deadClient(t)) })
+
+			if !strings.Contains(out, "Install failed") || !strings.Contains(out, "development build") {
+				t.Fatalf("the dev-build refusal was not reported:\n%s", out)
+			}
+			if exitCode != 1 {
+				t.Errorf("exit code = %d, want 1", exitCode)
+			}
+			if remoteInstallRetry {
+				t.Error("a failed install asked for a re-dial")
+			}
+			if strings.Contains(out, "Cannot reach the Quil daemon") {
+				t.Errorf("printed the link-failure report under the install error:\n%s", out)
+			}
+		})
+	}
+}
+
 // Answering N at the install offer ends the launch with exit 1 — and without
 // the "cannot reach" block, which contradicted the "Quil is not installed"
 // line the user had just answered. Both offer paths: exit 127 (the POSIX

@@ -382,8 +382,11 @@ func TestOfferRemoteInstall_Probe_WindowsRecordedNoQuil_OffersInstallKeepsRecord
 	if len(spy.cleared) != 0 || len(spy.recorded) != 0 {
 		t.Errorf("record mutated on the exit-1 path: cleared %v recorded %v", spy.cleared, spy.recorded)
 	}
-	if remoteFailureReported {
-		t.Error("flagged as reported, which would hide the install's own failure")
+	// The install's own failure is printed above ("Install failed: ... development
+	// build"), so the flag must be set: it only keeps the gate from adding the
+	// "cannot reach the host" block, which would contradict that message.
+	if !remoteFailureReported {
+		t.Error("not flagged as reported; the gate would print the link-failure block under the install error")
 	}
 }
 

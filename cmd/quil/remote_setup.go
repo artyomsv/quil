@@ -762,7 +762,7 @@ func offerRemoteInstall(dest string, remedy remoteinstall.Remedy) bool {
 			declinedRemoteInstall(dest)
 			return false
 		}
-		fmt.Fprintf(os.Stderr, "\n  Install failed: %v\n", err)
+		failedRemoteInstall(err)
 		return false
 	}
 	return true
@@ -821,11 +821,21 @@ func resolveExitOne(dest string) bool {
 		if errors.Is(err, errSetupAborted) {
 			declinedRemoteInstall(dest)
 		} else {
-			fmt.Fprintf(os.Stderr, "\n  Install failed: %v\n", err)
+			failedRemoteInstall(err)
 		}
 		return false
 	}
 	return true
+}
+
+// failedRemoteInstall reports an install that was attempted and failed — the
+// dev-build refusal, a download, the push, or setup's own probe. That error
+// is the explanation (an ssh failure included, in ssh's words), and the gate's
+// "cannot reach the Quil daemon ... not anything about Quil itself" block
+// beneath it would contradict it.
+func failedRemoteInstall(err error) {
+	fmt.Fprintf(os.Stderr, "\n  Install failed: %v\n", err)
+	remoteFailureReported = true
 }
 
 // declinedRemoteInstall closes a launch the user ended by answering no to the

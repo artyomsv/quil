@@ -60,9 +60,11 @@ in quil itself.
 
 - **cmd.exe** (OpenSSH's own default) is tested end to end, including a
   profile path with spaces, `(x86)`, and `@`.
-- **Windows PowerShell** as the ssh `DefaultShell` is supported for both
-  `quil remote setup` and `quil --remote`: the install's extract step and an
-  attach were measured under it on Windows 10. If you switch the default
+- **Windows PowerShell** as the ssh `DefaultShell` is tested end to end on
+  Windows 10 with a standard account: `quil remote setup` upgrading an
+  existing install, `quil --remote` attaching, and a host with no quil being
+  detected and offered the install (answering no aborts without writing
+  anything). If you switch the default
   shell after the install, you don't need to run setup again: the next `quil
   --remote` attach fails once, quil sees that the host's shell changed,
   records the new shell and reconnects.

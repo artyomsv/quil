@@ -223,10 +223,6 @@ func runRemoteSetup(dest string, opts setupOptions) error {
 			return err
 		}
 	}
-	if err := refuseUnmeasuredShell(probe); err != nil {
-		return err
-	}
-
 	target := remoteinstall.PlanTarget(probe)
 
 	// Resolve WHICH version before asking, but download it after. The version
@@ -295,24 +291,6 @@ func runRemoteSetup(dest string, opts setupOptions) error {
 	}
 
 	reportInstalled(opts.out(), dest, target, src, stopWarning, probe.Shell)
-	return nil
-}
-
-// errSetupPowerShellShell refuses an install on a Windows host whose OpenSSH
-// DefaultShell is PowerShell. The install's extract step pipes the archive into
-// tar.exe through that shell, and Windows PowerShell under Win32-OpenSSH cannot
-// read ssh stdin (measured); whether its native child still gets the pipe has
-// not been measured. Refusing before any remote write is safer than a partial
-// install. Delete this and refuseUnmeasuredShell once it is measured to work.
-// Attaching with a recorded PowerShell shell is not affected.
-var errSetupPowerShellShell = errors.New("quil remote setup does not support a PowerShell OpenSSH DefaultShell yet; " +
-	"set it to cmd.exe for the install (see docs/remote-windows.md, section 4), then switch back if you want")
-
-// refuseUnmeasuredShell is the one place errSetupPowerShellShell is raised.
-func refuseUnmeasuredShell(probe remoteinstall.Probe) error {
-	if probe.OS == "windows" && probe.Shell == remoteinstall.ShellPowerShell {
-		return errSetupPowerShellShell
-	}
 	return nil
 }
 
@@ -631,9 +609,9 @@ func adoptRemoteBinary(dest string, probe remoteinstall.Probe, recorded string) 
 }
 
 // shellChanged reports a Windows probe that found quil at exactly the recorded
-// path while the host's ssh default shell is no longer the recorded one — the
-// documented "install with cmd, then switch back to PowerShell" workflow. The
-// recorded command is then quoted for the wrong parser and fails before quil
+// path while the host's ssh default shell is no longer the recorded one — for
+// example installed under cmd, then switched to PowerShell. The recorded
+// command is then quoted for the wrong parser and fails before quil
 // starts, while the path comparison alone sees nothing to fix.
 func shellChanged(dest string, p remoteinstall.Probe, recorded string) bool {
 	return p.OS == "windows" && samePath(p, p.ExistingPath, recorded) &&
@@ -641,8 +619,7 @@ func shellChanged(dest string, p remoteinstall.Probe, recorded string) bool {
 }
 
 // reshellRemoteBinary records the host's current shell beside the unchanged
-// path and reports whether the caller should re-dial. No install is needed, so
-// the setup refusal for a PowerShell default shell does not apply. It
+// path and reports whether the caller should re-dial. No install is needed. It
 // terminates: the re-dial sees the same path AND shell, so shellChanged is
 // false and the existing handling for an unchanged pair applies.
 func reshellRemoteBinary(dest, recorded, shell string) (retry bool) {

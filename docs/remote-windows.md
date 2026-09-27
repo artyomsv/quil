@@ -59,17 +59,13 @@ remote setup` detects it and records the answer, so you don't set anything
 in quil itself.
 
 - **cmd.exe** (OpenSSH's own default) is tested end to end, including a
-  profile path with spaces, `(x86)`, and `@`. `quil remote setup` currently
-  needs it.
-- **PowerShell** as the ssh `DefaultShell` is not supported by `quil remote
-  setup` yet: setup refuses before it writes anything. The install pipes the
-  archive through the default shell, and that has not been measured under
-  Windows PowerShell. Set the default shell to `cmd.exe` for the install (see
-  below), then switch back if you want. You don't need to run setup again
-  after you switch: the next `quil --remote` attach fails once, quil sees
-  that the host's shell changed, records the new shell and reconnects.
-  Attaching with PowerShell as the default shell is covered by unit tests
-  but untested against a real host.
+  profile path with spaces, `(x86)`, and `@`.
+- **Windows PowerShell** as the ssh `DefaultShell` is supported for both
+  `quil remote setup` and `quil --remote`: the install's extract step and an
+  attach were measured under it on Windows 10. If you switch the default
+  shell after the install, you don't need to run setup again: the next `quil
+  --remote` attach fails once, quil sees that the host's shell changed,
+  records the new shell and reconnects.
 - **bash**, from Git for Windows, is expected to work (untested). The probe
   sees `uname -s` start with `MINGW`, `MSYS` or `CYGWIN` and treats the host
   as Windows: the Windows install, in the Windows install directory, with

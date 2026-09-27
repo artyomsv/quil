@@ -159,26 +159,34 @@ func TestRunRemoteSetup_Windows_LogonTaskFailure_WarnsAndStillRecords(t *testing
 	}
 }
 
-// A PowerShell DefaultShell is refused before any remote write: the extract
-// step pipes the archive through that shell, which is unmeasured there.
-func TestRunRemoteSetup_WindowsPowerShellShell_RefusesBeforeAnyRemoteWrite(t *testing.T) {
+// A PowerShell DefaultShell installs like cmd does, with every command quoted
+// for PowerShell. Setup used to refuse it before any remote write, because the
+// extract step pipes the archive through that shell; measured on Windows 10,
+// `& 'C:\Windows\System32\tar.exe' -tvzf -` reads a 2 MB archive from ssh stdin
+// under Windows PowerShell and exits 0.
+func TestRunRemoteSetup_WindowsPowerShellShell_Installs(t *testing.T) {
 	resetRemoteSetupState(t)
 	spy := newHealSpy(t)
-	r := &stepRunner{t: t} // no steps: any remote command fails the test
+	r := &stepRunner{t: t, steps: []runStep{
+		{prefix: "powershell.exe ", out: "__quil_prepare__\r\n" + winStaging + "\r\n" + winTar + "\r\n"},
+		{prefix: `& '` + winTar + `' -xf - -C '` + winStaging + `'`},
+		{prefix: "powershell.exe ", out: "__quil_install__\r\n" + winQuil + "\r\n"},
+		{prefix: `& '` + winQuil + `' daemon install-logon`, out: "registered"},
+	}}
 	setupRunnerFn = func(string) remoteinstall.Runner { return r }
 
 	probe := winProbe()
 	probe.Shell = remoteinstall.ShellPowerShell
 	var out bytes.Buffer
-	err := runRemoteSetup("win01", setupOptions{FromDir: winFromDir(t), Yes: true, Out: &out, probe: &probe})
-	if err == nil || !strings.Contains(err.Error(), "PowerShell") || !strings.Contains(err.Error(), "cmd.exe") {
-		t.Fatalf("err = %v, want the PowerShell DefaultShell refusal", err)
+	if err := runRemoteSetup("win01", setupOptions{FromDir: winFromDir(t), Yes: true, Out: &out, probe: &probe}); err != nil {
+		t.Fatalf("runRemoteSetup: %v\n%s", err, out.String())
 	}
-	if len(r.ran) != 0 {
-		t.Errorf("ran remote commands before refusing: %q", r.ran)
+	if len(r.ran) != 4 {
+		t.Fatalf("ran %d remote commands, want 4 (prepare, tar, finalize, install-logon):\n%q", len(r.ran), r.ran)
 	}
-	if len(spy.recorded) != 0 {
-		t.Errorf("recorded a path for a refused install: %v", spy.recorded)
+	if spy.recorded["win01"] != winQuil || spy.shells["win01"] != remoteinstall.ShellPowerShell {
+		t.Errorf("recorded (%q, %q), want (%q, %q)",
+			spy.recorded["win01"], spy.shells["win01"], winQuil, remoteinstall.ShellPowerShell)
 	}
 }
 

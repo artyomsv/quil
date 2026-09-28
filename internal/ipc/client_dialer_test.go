@@ -29,7 +29,7 @@ func TestNewClientWithDialer_UsesDialer_ReturnsWorkingClient(t *testing.T) {
 
 	// Server reads what the client sends.
 	go func() {
-		msg, _ := NewMessage(MsgHeartbeat, nil)
+		msg, _ := NewMessage(testMsgType, nil)
 		_ = c.Send(msg)
 	}()
 
@@ -37,8 +37,8 @@ func TestNewClientWithDialer_UsesDialer_ReturnsWorkingClient(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadMessage: %v", err)
 	}
-	if got.Type != MsgHeartbeat {
-		t.Errorf("Type = %q, want %q", got.Type, MsgHeartbeat)
+	if got.Type != testMsgType {
+		t.Errorf("Type = %q, want %q", got.Type, testMsgType)
 	}
 }
 

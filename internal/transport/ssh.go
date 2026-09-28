@@ -55,9 +55,8 @@ var forcedSSHOptions = []string{
 // of its life.
 //
 // ServerAlive* make ssh itself notice a dead ESTABLISHED link and exit, which
-// EOFs our pipes. There is no application-layer heartbeat — ipc.MsgHeartbeat is
-// declared but never sent anywhere — so this is the only liveness check once
-// the session is up.
+// EOFs our pipes. There is no application-layer heartbeat message, so this is
+// the only liveness check once the session is up.
 //
 // ConnectTimeout bounds the other end: the TCP handshake. Without it ssh
 // inherits the OS connect timeout, which on a silently-dropped SYN (firewall,

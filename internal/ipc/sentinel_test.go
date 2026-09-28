@@ -35,7 +35,7 @@ func TestClientSend_PostOverflowSendsReturnTheSameSentinel(t *testing.T) {
 	// Drive it into overflow.
 	var first error
 	for first == nil {
-		msg, err := NewMessage(MsgStateUpdate, map[string]string{"x": "y"})
+		msg, err := NewMessage(testMsgType, map[string]string{"x": "y"})
 		if err != nil {
 			t.Fatalf("NewMessage: %v", err)
 		}
@@ -47,7 +47,7 @@ func TestClientSend_PostOverflowSendsReturnTheSameSentinel(t *testing.T) {
 
 	// Every send after the flag is set must report the same cause.
 	for i := 0; i < 5; i++ {
-		msg, err := NewMessage(MsgStateUpdate, map[string]string{"x": "y"})
+		msg, err := NewMessage(testMsgType, map[string]string{"x": "y"})
 		if err != nil {
 			t.Fatalf("NewMessage: %v", err)
 		}
@@ -83,7 +83,7 @@ func TestClientSend_ConcurrentSendersAgreeOnTheSentinel(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for {
-				msg, err := NewMessage(MsgStateUpdate, map[string]string{"x": "y"})
+				msg, err := NewMessage(testMsgType, map[string]string{"x": "y"})
 				if err != nil {
 					errs <- err
 					return

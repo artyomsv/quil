@@ -10,10 +10,9 @@ import (
 // Message type constants
 const (
 	// Lifecycle
-	MsgAttach    = "attach"
-	MsgDetach    = "detach" // multi-client sync: also means a clean client exit
-	MsgShutdown  = "shutdown"
-	MsgHeartbeat = "heartbeat"
+	MsgAttach   = "attach"
+	MsgDetach   = "detach" // multi-client sync: also means a clean client exit
+	MsgShutdown = "shutdown"
 	// MsgSubscribe lets a client narrow what the daemon broadcasts to it.
 	// Optional in both directions: a client that never sends it receives
 	// everything, exactly as before this message existed.
@@ -60,7 +59,6 @@ const (
 
 	// State sync (Daemon -> Client)
 	MsgWorkspaceState = "workspace_state"
-	MsgStateUpdate    = "state_update"
 
 	// Plugin (Daemon -> Client)
 	MsgPluginError = "plugin_error"

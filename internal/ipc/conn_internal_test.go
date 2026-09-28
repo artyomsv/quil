@@ -172,7 +172,7 @@ func TestConn_SendFrameAfterCloseShortCircuits(t *testing.T) {
 		t.Errorf("sendFrame after Close: got %v, want ErrSendOverflow", err)
 	}
 
-	msg, _ := NewMessage(MsgStateUpdate, map[string]string{"x": "y"})
+	msg, _ := NewMessage(testMsgType, map[string]string{"x": "y"})
 	if err := c.Send(msg); err != ErrSendOverflow {
 		t.Errorf("Send after Close: got %v, want ErrSendOverflow", err)
 	}

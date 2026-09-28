@@ -101,7 +101,7 @@ func TestServerBroadcast(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// Broadcast
-	msg, _ := ipc.NewMessage(ipc.MsgStateUpdate, map[string]string{"action": "test"})
+	msg, _ := ipc.NewMessage(testMsgType, map[string]string{"action": "test"})
 	srv.Broadcast(msg)
 
 	// Both clients should receive
@@ -109,15 +109,15 @@ func TestServerBroadcast(t *testing.T) {
 	if err != nil {
 		t.Fatalf("c1 receive: %v", err)
 	}
-	if r1.Type != ipc.MsgStateUpdate {
-		t.Errorf("c1 type: got %q, want %q", r1.Type, ipc.MsgStateUpdate)
+	if r1.Type != testMsgType {
+		t.Errorf("c1 type: got %q, want %q", r1.Type, testMsgType)
 	}
 
 	r2, err := c2.Receive()
 	if err != nil {
 		t.Fatalf("c2 receive: %v", err)
 	}
-	if r2.Type != ipc.MsgStateUpdate {
-		t.Errorf("c2 type: got %q, want %q", r2.Type, ipc.MsgStateUpdate)
+	if r2.Type != testMsgType {
+		t.Errorf("c2 type: got %q, want %q", r2.Type, testMsgType)
 	}
 }

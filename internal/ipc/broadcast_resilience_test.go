@@ -12,6 +12,11 @@ import (
 	"github.com/artyomsv/quil/internal/ipc"
 )
 
+// testMsgType is a generic must-deliver message type for transport tests.
+// The transport tests used state_update and heartbeat for this, which were
+// never sent by anything and are now deleted.
+const testMsgType = "test_msg"
+
 // waitForConnCount polls the server until it reaches the expected client count
 // or the deadline elapses. Replaces fragile time.Sleep-after-connect patterns
 // that race the daemon's accept goroutine and can silently lose connections
@@ -117,7 +122,7 @@ func TestBroadcast_SlowConnDoesNotBlockFastConn(t *testing.T) {
 		if i > 0 && i%10 == 0 {
 			time.Sleep(200 * time.Microsecond)
 		}
-		msg, _ := ipc.NewMessage(ipc.MsgStateUpdate, payload)
+		msg, _ := ipc.NewMessage(testMsgType, payload)
 		start := time.Now()
 		srv.Broadcast(msg)
 		broadcastDur += time.Since(start)
@@ -213,7 +218,7 @@ func TestBroadcast_ContinuesAfterSlowConnDisconnects(t *testing.T) {
 	// fast drain goroutine ahead.
 	bigPayload := map[string]string{"data": string(make([]byte, 4000))}
 	for i := 0; i < 150; i++ {
-		msg, _ := ipc.NewMessage(ipc.MsgStateUpdate, bigPayload)
+		msg, _ := ipc.NewMessage(testMsgType, bigPayload)
 		srv.Broadcast(msg)
 		time.Sleep(time.Millisecond)
 	}
@@ -233,7 +238,7 @@ func TestBroadcast_ContinuesAfterSlowConnDisconnects(t *testing.T) {
 	// see them — the absence of slow in the broadcast fan-out is the
 	// post-overflow invariant we care about.
 	for i := 0; i < 50; i++ {
-		msg, _ := ipc.NewMessage(ipc.MsgStateUpdate, bigPayload)
+		msg, _ := ipc.NewMessage(testMsgType, bigPayload)
 		srv.Broadcast(msg)
 		time.Sleep(time.Millisecond)
 	}
@@ -295,7 +300,7 @@ func TestBroadcast_MarshalErrorLogsAndReturns(t *testing.T) {
 
 	// Verify the server is still functional — broadcast a good message and
 	// the client receives it.
-	good, _ := ipc.NewMessage(ipc.MsgStateUpdate, map[string]string{"ok": "yes"})
+	good, _ := ipc.NewMessage(testMsgType, map[string]string{"ok": "yes"})
 	srv.Broadcast(good)
 
 	if err := client.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
@@ -305,7 +310,7 @@ func TestBroadcast_MarshalErrorLogsAndReturns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("client receive after bad broadcast: %v", err)
 	}
-	if got.Type != ipc.MsgStateUpdate {
-		t.Errorf("expected MsgStateUpdate, got %q", got.Type)
+	if got.Type != testMsgType {
+		t.Errorf("expected %s, got %q", testMsgType, got.Type)
 	}
 }

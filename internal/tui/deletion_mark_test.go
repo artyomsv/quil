@@ -23,12 +23,12 @@ import (
 // TestSnapshot_MarkedForDeletionUsesTheWireKey in internal/daemon.
 func TestParseWorkspaceState_ReadsTheDeletionMarkWireKey(t *testing.T) {
 	t.Parallel()
-	got := parseWorkspaceState(map[string]any{
+	got := parseWorkspaceState(stateFromMap(t, map[string]any{
 		"panes": []any{
 			map[string]any{"id": "p1", "tab_id": "t1", "marked_for_deletion": true},
 			map[string]any{"id": "p2", "tab_id": "t1"},
 		},
-	})
+	}))
 	if len(got.Panes) != 2 {
 		t.Fatalf("parsed %d panes, want 2", len(got.Panes))
 	}

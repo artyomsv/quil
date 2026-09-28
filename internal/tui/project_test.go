@@ -109,7 +109,7 @@ func TestInterimProjectReusesProjectZero(t *testing.T) {
 // key that drifts apart from that shape does not error anywhere — it parses to
 // an empty project list, and every tab silently disappears from the client.
 func TestParseWorkspaceStateReadsProjects(t *testing.T) {
-	state := parseWorkspaceState(map[string]any{
+	state := parseWorkspaceState(stateFromMap(t, map[string]any{
 		"active_tab":     "tab-1",
 		"active_project": "proj-a",
 		"projects": []any{map[string]any{
@@ -117,7 +117,7 @@ func TestParseWorkspaceStateReadsProjects(t *testing.T) {
 			"tab_ids": []any{"tab-1", "tab-2"}, "active_tab": "tab-2",
 		}},
 		"tabs": []any{map[string]any{"id": "tab-1", "name": "One", "project_id": "proj-a"}},
-	})
+	}))
 
 	if state.ActiveProject != "proj-a" {
 		t.Errorf("ActiveProject = %q, want proj-a", state.ActiveProject)

@@ -45,12 +45,12 @@ func TestLimitedDaemon_StatusBarAndOneFlashPerAttach(t *testing.T) {
 }
 
 func TestParseWorkspaceState_ReadsDaemonLimited(t *testing.T) {
-	state := parseWorkspaceState(map[string]any{"daemon_limited": true})
+	state := parseWorkspaceState(stateFromMap(t, map[string]any{"daemon_limited": true}))
 	if !state.DaemonLimited {
 		t.Error("DaemonLimited = false, want true when the key is present and true")
 	}
 
-	state = parseWorkspaceState(map[string]any{})
+	state = parseWorkspaceState(stateFromMap(t, map[string]any{}))
 	if state.DaemonLimited {
 		t.Error("DaemonLimited = true, want false when the key is absent")
 	}

@@ -32,7 +32,7 @@ func TestParseWorkspaceState_BoundsThePreparingBranch(t *testing.T) {
 		}},
 	}
 
-	ws := parseWorkspaceState(state)
+	ws := parseWorkspaceState(stateFromMap(t, state))
 	var got string
 	for _, p := range ws.Panes {
 		if p.ID == "pane-1" {
@@ -63,7 +63,7 @@ func TestParseWorkspaceState_KeepsAnOrdinaryBranchIntact(t *testing.T) {
 		}},
 	}
 
-	ws := parseWorkspaceState(state)
+	ws := parseWorkspaceState(stateFromMap(t, state))
 	for _, p := range ws.Panes {
 		if p.ID == "pane-1" && p.PreparingWorktree != branch {
 			t.Errorf("PreparingWorktree = %q, want %q untouched", p.PreparingWorktree, branch)
@@ -84,7 +84,7 @@ func TestParseWorkspaceState_CutsThePreparingBranchOnARuneBoundary(t *testing.T)
 		}},
 	}
 
-	ws := parseWorkspaceState(state)
+	ws := parseWorkspaceState(stateFromMap(t, state))
 	for _, p := range ws.Panes {
 		if p.ID == "pane-1" && !utf8.ValidString(p.PreparingWorktree) {
 			t.Error("the cap cut through a multi-byte rune, leaving invalid UTF-8")

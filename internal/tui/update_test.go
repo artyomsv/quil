@@ -42,7 +42,7 @@ func TestParseWorkspaceState_UpdateKey(t *testing.T) {
 			"install_writable": true,
 		},
 	}
-	state := parseWorkspaceState(raw)
+	state := parseWorkspaceState(stateFromMap(t, raw))
 	if state.Update == nil {
 		t.Fatal("state.Update = nil, want parsed info")
 	}
@@ -51,7 +51,7 @@ func TestParseWorkspaceState_UpdateKey(t *testing.T) {
 		t.Errorf("state.Update = %+v", state.Update)
 	}
 
-	if got := parseWorkspaceState(map[string]any{"active_tab": "t"}); got.Update != nil {
+	if got := parseWorkspaceState(stateFromMap(t, map[string]any{"active_tab": "t"})); got.Update != nil {
 		t.Errorf("no update key: state.Update = %+v, want nil", got.Update)
 	}
 }

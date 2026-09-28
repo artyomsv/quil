@@ -30,6 +30,7 @@ func TestMain(m *testing.M) {
 	gitScanTimeout = 10 * time.Millisecond
 	kubeScanTimeout = 10 * time.Millisecond
 	recentScanTimeout = 10 * time.Millisecond
+	stateReqTimeout = 10 * time.Millisecond
 
 	cleanupQuilHome := ensureIsolatedQuilHome()
 	code := m.Run()

@@ -78,6 +78,10 @@ type WorkspaceStateMsg struct {
 	// desktop session (Windows session 0): no saved credentials, no visible
 	// windows. See daemon.Daemon.limited.
 	DaemonLimited bool
+	// Rev and RunID number this frame within its daemon's process lifetime —
+	// 0/"" from an older daemon that numbers nothing. See acceptStateRev.
+	Rev   uint64
+	RunID string
 }
 
 // ProjectInfo is one daemon-side project as broadcast. TabIDs carries the
@@ -522,6 +526,17 @@ type Model struct {
 	// dest clear the other's flag. Two daemons minting the same UUID is not a
 	// realistic accident, but the invariant should not rest on that.
 	sizedOnce map[string]bool
+	// stateSeen records, per destination, the newest state frame this client
+	// has APPLIED (rev/run_id) — acceptStateRev's drop rule. Forgotten on
+	// reattach (forgetStateMark), since a restarted daemon's numbering starts
+	// over and a kept mark would refuse its first frame as stale.
+	stateSeen map[string]stateMark
+	// stateReqGen records an outstanding state_req per destination — non-nil
+	// entry means "single-flighted, awaiting an applied frame or a timeout".
+	// See requestStateFor/endStateReq.
+	stateReqGen map[string]uint64
+	// stateGenSeq mints requestStateFor's generation numbers, process-wide.
+	stateGenSeq uint64
 	// clientID identifies this PROCESS across reconnects — minted once in
 	// NewModel with uuid.NewString() and sent on every attach (attachMessage).
 	// It is never persisted to disk: two TUIs on one machine would then share
@@ -2944,6 +2959,9 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 			log.Printf("ignoring workspace state from %s: disconnected", msg.Dest)
 			return m, m.listenForMessages()
 		}
+		if !m.acceptStateRev(msg) {
+			return m, m.listenForMessages()
+		}
 		m.noteWorkspaceState(msg.Update, msg.Dest)
 		// TODO(freeze-diagnostic): the 8 "apply: ..." breadcrumbs in this case
 		// and inside applyWorkspaceState were added to pinpoint a TUI Update
@@ -3325,6 +3343,15 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 	case recentScanTimeoutMsg:
 		// Local timer, so deliberately no re-arm.
 		return m, m.applyExistingDirsTimeout(msg.gen)
+
+	case stateDecodeFailedMsg:
+		// MUST re-arm the listen loop, like every other IPC response branch.
+		return m, tea.Batch(m.listenForMessages(), m.requestStateFor(msg.Dest))
+
+	case stateReqTimeoutMsg:
+		// Local timer, so deliberately no re-arm.
+		m.endStateReq(msg)
+		return m, nil
 
 	case pluginListMsg:
 		// MUST re-arm the listen loop, like every other IPC response branch.
@@ -8240,9 +8267,15 @@ func (m Model) listenForMessages() tea.Cmd {
 
 		case ipc.MsgWorkspaceState:
 			log.Print("ipc recv: workspace_state")
-			var raw map[string]any
-			msg.DecodePayload(&raw)
-			state := parseWorkspaceState(raw)
+			var ws ipc.WorkspaceState
+			if err := msg.DecodePayload(&ws); err != nil {
+				// Never turn an unreadable frame into an EMPTY state: applying
+				// one reconciles every tab away. Drop it; Update decides whether
+				// to ask for a full copy.
+				log.Printf("ipc recv: workspace_state from %q undecodable, dropped: %v", msg.Origin, err)
+				return stateDecodeFailedMsg{Dest: msg.Origin}
+			}
+			state := parseWorkspaceState(ws)
 			// Origin is client-side routing state, never on the wire, so it
 			// cannot come out of the payload — stamp it here, where the message
 			// still exists. Empty means the local daemon.
@@ -8497,235 +8530,130 @@ func (m Model) listenForMessages() tea.Cmd {
 	}
 }
 
-func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
-	state := WorkspaceStateMsg{}
-	if at, ok := raw["active_tab"].(string); ok {
-		state.ActiveTab = at
+// parseWorkspaceState converts the daemon's typed workspace_state frame into
+// the client's own representation. It is a typed conversion, not a decode —
+// DecodePayload already did that — so every field access is direct; the
+// rules that survive from the old map-based parser are the ones that are not
+// mere presence checks (see the comments below).
+func parseWorkspaceState(ws ipc.WorkspaceState) WorkspaceStateMsg {
+	state := WorkspaceStateMsg{
+		ActiveTab:     ws.ActiveTab,
+		ActiveProject: ws.ActiveProject,
+		DaemonLimited: ws.DaemonLimited,
+		Rev:           ws.Rev,
+		RunID:         ws.RunID,
 	}
-	if u, ok := raw["update"].(map[string]any); ok {
-		info := &ipc.UpdateInfo{}
-		if s, ok := u["latest_version"].(string); ok {
-			info.LatestVersion = s
-		}
-		if s, ok := u["release_url"].(string); ok {
-			info.ReleaseURL = s
-		}
-		if s, ok := u["staged_version"].(string); ok {
-			info.StagedVersion = s
-		}
-		if b, ok := u["install_writable"].(bool); ok {
-			info.InstallWritable = b
-		}
-		if info.LatestVersion != "" {
-			state.Update = info
-		}
-	}
-	if ap, ok := raw["active_project"].(string); ok {
-		state.ActiveProject = ap
+	// An update is reported only once it names a version — a zero-value
+	// ipc.UpdateInfo (no "update" key on the wire, or one JSON-decoded from
+	// nothing) must not read as "a newer release exists".
+	if ws.Update != nil && ws.Update.LatestVersion != "" {
+		info := *ws.Update
+		state.Update = &info
 	}
 	// Multi-client sync: size_master ("" = no master) and clients (attached
 	// count, bridges excluded) — see buildWorkspaceState on the daemon side.
-	// Absent on an older daemon, which leaves both at their zero values, and
-	// isFollower already treats "" as "not a follower".
-	if sm, ok := raw["size_master"].(string); ok {
-		state.SizeMaster = sm
+	// Both are pointers so an older daemon that sends neither leaves them at
+	// their zero values, and isFollower already treats "" as "not a follower".
+	if ws.SizeMaster != nil {
+		state.SizeMaster = *ws.SizeMaster
 	}
-	if c, ok := raw["clients"].(float64); ok {
-		state.Clients = int(c)
+	if ws.Clients != nil {
+		state.Clients = *ws.Clients
 	}
-	if v, ok := raw["daemon_limited"].(bool); ok {
-		state.DaemonLimited = v
-	}
-	if projects, ok := raw["projects"].([]any); ok {
-		for _, p := range projects {
-			pm, ok := p.(map[string]any)
-			if !ok {
-				continue
-			}
-			pi := ProjectInfo{}
-			if id, ok := pm["id"].(string); ok {
-				pi.ID = id
-			}
-			if name, ok := pm["name"].(string); ok {
-				pi.Name = name
-			}
-			if root, ok := pm["root_dir"].(string); ok {
-				pi.RootDir = root
-			}
-			if at, ok := pm["active_tab"].(string); ok {
-				pi.ActiveTab = at
-			}
-			if b, ok := pm["bootstrap"].(bool); ok {
-				pi.Bootstrap = b
-			}
-			if ids, ok := pm["tab_ids"].([]any); ok {
-				for _, tid := range ids {
-					if s, ok := tid.(string); ok {
-						pi.TabIDs = append(pi.TabIDs, s)
-					}
-				}
-			}
-			// A project with no ID cannot be matched against the client's own
-			// list, so every broadcast would rebuild it from scratch.
-			if pi.ID != "" {
-				state.Projects = append(state.Projects, pi)
-			}
+	for _, p := range ws.Projects {
+		// A project with no ID cannot be matched against the client's own
+		// list, so every broadcast would rebuild it from scratch.
+		if p.ID == "" {
+			continue
 		}
+		state.Projects = append(state.Projects, ProjectInfo{
+			ID:        p.ID,
+			Name:      p.Name,
+			RootDir:   p.RootDir,
+			TabIDs:    p.TabIDs,
+			ActiveTab: p.ActiveTab,
+			Bootstrap: p.Bootstrap,
+		})
 	}
-	if tabs, ok := raw["tabs"].([]any); ok {
-		for _, t := range tabs {
-			if tm, ok := t.(map[string]any); ok {
-				ti := TabInfo{}
-				ti.TemplateLayout, _ = tm["template_layout"].(string)
-				ti.TemplateMain, _ = tm["template_main"].(string)
-				if id, ok := tm["id"].(string); ok {
-					ti.ID = id
-				}
-				if name, ok := tm["name"].(string); ok {
-					ti.Name = name
-				}
-				if pid, ok := tm["project_id"].(string); ok {
-					ti.ProjectID = pid
-				}
-				if color, ok := tm["color"].(string); ok {
-					ti.Color = color
-				}
-				if panes, ok := tm["panes"].([]any); ok {
-					for _, p := range panes {
-						if s, ok := p.(string); ok {
-							ti.Panes = append(ti.Panes, s)
-						}
-					}
-				}
-				if layout, ok := tm["layout"]; ok && layout != nil {
-					// Re-marshal the nested map back to json.RawMessage
-					if data, err := json.Marshal(layout); err == nil {
-						ti.Layout = data
-					}
-				}
-				if n, ok := tm["layout_rev"].(float64); ok && n >= 0 {
-					ti.LayoutRev = uint64(n)
-				}
-				state.Tabs = append(state.Tabs, ti)
-			}
+	for _, t := range ws.Tabs {
+		ti := TabInfo{
+			ID:             t.ID,
+			Name:           t.Name,
+			ProjectID:      t.ProjectID,
+			Color:          t.Color,
+			Panes:          t.Panes,
+			TemplateLayout: t.TemplateLayout,
+			TemplateMain:   t.TemplateMain,
+			LayoutRev:      t.LayoutRev,
 		}
+		// Copied only when non-empty — a tab nobody has described yet carries
+		// no "layout" key on the wire, and json.RawMessage(nil) already reads
+		// that way to every consumer, so this is a direct forwarding of the
+		// decoded bytes rather than a re-marshal.
+		if len(t.Layout) > 0 {
+			ti.Layout = t.Layout
+		}
+		state.Tabs = append(state.Tabs, ti)
 	}
-	if panes, ok := raw["panes"].([]any); ok {
-		for _, p := range panes {
-			if pm, ok := p.(map[string]any); ok {
-				pi := PaneInfo{}
-				if id, ok := pm["id"].(string); ok {
-					pi.ID = id
-				}
-				if tabID, ok := pm["tab_id"].(string); ok {
-					pi.TabID = tabID
-				}
-				if cwd, ok := pm["cwd"].(string); ok {
-					pi.CWD = cwd
-				}
-				if name, ok := pm["name"].(string); ok {
-					pi.Name = name
-				}
-				if typ, ok := pm["type"].(string); ok {
-					pi.Type = typ
-				}
-				if muted, ok := pm["muted"].(bool); ok {
-					pi.Muted = muted
-				}
-				if eager, ok := pm["eager"].(bool); ok {
-					pi.Eager = eager
-				}
-				if pinned, ok := pm["pinned_attention"].(bool); ok {
-					pi.PinnedAttention = pinned
-				}
-				if marked, ok := pm["marked_for_deletion"].(bool); ok {
-					pi.MarkedForDeletion = marked
-				}
-				if unseen, ok := pm["unseen"].(bool); ok {
-					pi.Unseen = unseen
-				}
-				if overlay, ok := pm["overlay"].(bool); ok {
-					pi.Overlay = overlay
-				}
-				if pending, ok := pm["pending"].(bool); ok {
-					pi.Pending = pending
-				}
-				if sid, ok := pm["session_id"].(string); ok {
-					pi.SessionID = sid
-				}
-				if hl, ok := pm["history_lines"].(float64); ok {
-					pi.HistoryLines = int(hl)
-				}
-				if mt, ok := pm["mouse_tracking"].(bool); ok {
-					pi.MouseTracking = mt
-				}
-				if ms, ok := pm["mouse_sgr"].(bool); ok {
-					pi.MouseSGR = ms
-				}
-				if bp, ok := pm["bracketed_paste"].(bool); ok {
-					pi.BracketedPaste = bp
-				}
-				if model, ok := pm["model"].(string); ok {
-					pi.Model = model
-				}
-				if ct, ok := pm["context_tokens"].(float64); ok {
-					pi.ContextTokens = int64(ct)
-				}
-				if s, ok := pm["spawn_error"].(string); ok {
-					pi.SpawnError = s
-				}
-				if s, ok := pm["preparing_worktree"].(string); ok {
-					pi.PreparingWorktree = boundBranch(s)
-				}
-				if b, ok := pm["git_branch"].(string); ok {
-					pi.GitBranch = b
-				}
-				if b, ok := pm["git_detached"].(bool); ok {
-					pi.GitDetached = b
-				}
-				if b, ok := pm["git_worktree"].(bool); ok {
-					pi.GitWorktree = b
-				}
-				if s, ok := pm["git_worktree_name"].(string); ok {
-					pi.GitWorktreeName = s
-				}
-				if b, ok := pm["worktree_owned"].(bool); ok {
-					pi.WorktreeOwned = b
-				}
-				if s, ok := pm["worktree_path"].(string); ok {
-					pi.WorktreePath = s
-				}
-				if b, ok := pm["git_upstream"].(bool); ok {
-					pi.GitUpstream = b
-				}
-				if n, ok := pm["git_ahead"].(float64); ok {
-					pi.GitAhead = int(n)
-				}
-				if n, ok := pm["git_behind"].(float64); ok {
-					pi.GitBehind = int(n)
-				}
-				if b, ok := pm["git_stale"].(bool); ok {
-					pi.GitStale = b
-				}
-				// Range-checked: Go leaves an out-of-range float→integer
-				// conversion implementation-dependent, so a daemon reporting
-				// 1e300, -1 or NaN would yield an unspecified uint16 rather
-				// than an obviously wrong one. Out-of-range is left at 0,
-				// which reads as "never sized" and re-sends — the safe
-				// direction, since the alternative is suppressing a resize
-				// against a garbage comparison.
-				if n, ok := pm["cols"].(float64); ok && n >= 0 && n <= math.MaxUint16 {
-					pi.Cols = uint16(n)
-				}
-				if n, ok := pm["rows"].(float64); ok && n >= 0 && n <= math.MaxUint16 {
-					pi.Rows = uint16(n)
-				}
-				if n, ok := pm["size_seq"].(float64); ok && n >= 0 {
-					pi.SizeSeq = uint64(n)
-				}
-				state.Panes = append(state.Panes, pi)
-			}
+	for _, p := range ws.Panes {
+		pi := PaneInfo{
+			ID:                p.ID,
+			TabID:             p.TabID,
+			CWD:               p.CWD,
+			Name:              p.Name,
+			Type:              p.Type,
+			Muted:             p.Muted,
+			Eager:             p.Eager,
+			PinnedAttention:   p.PinnedAttention,
+			MarkedForDeletion: p.MarkedForDeletion,
+			Unseen:            p.Unseen,
+			Overlay:           p.Overlay,
+			Pending:           p.Pending,
+			SessionID:         p.SessionID,
+			HistoryLines:      p.HistoryLines,
+			MouseTracking:     p.MouseTracking,
+			MouseSGR:          p.MouseSGR,
+			BracketedPaste:    p.BracketedPaste,
+			Model:             p.Model,
+			SpawnError:        p.SpawnError,
+			// PreparingWorktree is bounded at ingest: it is re-sanitized on
+			// every render while a checkout runs, and an unbounded daemon
+			// (or, under --remote, a host the user does not control) would
+			// otherwise cost hundreds of MB/s of transient garbage on the
+			// single Update goroutine. boundBranch("") is a no-op.
+			PreparingWorktree: boundBranch(p.PreparingWorktree),
+			GitBranch:         p.GitBranch,
+			GitDetached:       p.GitDetached,
+			GitWorktree:       p.GitWorktree,
+			GitWorktreeName:   p.GitWorktreeName,
+			WorktreeOwned:     p.WorktreeOwned,
+			WorktreePath:      p.WorktreePath,
+			GitUpstream:       p.GitUpstream,
+			GitStale:          p.GitStale,
+			SizeSeq:           p.SizeSeq,
 		}
+		if p.ContextTokens != nil {
+			pi.ContextTokens = *p.ContextTokens
+		}
+		if p.GitAhead != nil {
+			pi.GitAhead = *p.GitAhead
+		}
+		if p.GitBehind != nil {
+			pi.GitBehind = *p.GitBehind
+		}
+		// Range-checked: the wire type is a plain int, so a daemon reporting
+		// a negative value or one past uint16 would otherwise wrap rather
+		// than produce an obviously wrong one. Out-of-range is left at 0,
+		// which reads as "never sized" and re-sends — the safe direction,
+		// since the alternative is suppressing a resize against a garbage
+		// comparison.
+		if p.Cols >= 0 && p.Cols <= math.MaxUint16 {
+			pi.Cols = uint16(p.Cols)
+		}
+		if p.Rows >= 0 && p.Rows <= math.MaxUint16 {
+			pi.Rows = uint16(p.Rows)
+		}
+		state.Panes = append(state.Panes, pi)
 	}
 	return state
 }

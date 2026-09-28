@@ -161,6 +161,12 @@ func startClientStatReports(client statSender) {
 	if client == nil {
 		return
 	}
+	// Read on the CALLER's goroutine, before the go func below starts. A test
+	// that swaps statPushInterval after this call returns races with the
+	// spawned goroutine's own read of the same package var otherwise (that
+	// goroutine can still be running from a PRIOR test's call, since its only
+	// exit is a send error) — this read happens-before the goroutine exists.
+	interval := statPushInterval
 	go func() {
 		sampler := proctree.NewSelfSampler()
 		// Primed here so the FIRST tick carries a real percentage. A rate needs
@@ -168,7 +174,7 @@ func startClientStatReports(client statSender) {
 		// first, leaving cpu unknown until +10 s.
 		sampler.Percent(time.Now())
 
-		t := time.NewTicker(statPushInterval)
+		t := time.NewTicker(interval)
 		defer t.Stop()
 
 		for range t.C {

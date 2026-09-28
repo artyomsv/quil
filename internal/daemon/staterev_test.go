@@ -5,6 +5,7 @@ import (
 	"os"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
@@ -114,6 +115,15 @@ func TestHandleAttach_StateFrame_CarriesRev(t *testing.T) {
 	if err := client.Send(attach); err != nil {
 		t.Fatalf("send attach: %v", err)
 	}
+
+	// A bounded read deadline, the same shape as waitFrameWithID: Receive
+	// blocks with no timeout of its own, so a regression that stops sending
+	// the state frame would otherwise hang this test — and CI — for 10
+	// minutes rather than failing.
+	if err := client.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline: %v", err)
+	}
+	defer client.SetReadDeadline(time.Time{})
 
 	for {
 		msg, err := client.Receive()

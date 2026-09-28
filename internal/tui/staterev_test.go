@@ -106,6 +106,23 @@ func stateFromMap(t *testing.T, raw map[string]any) ipc.WorkspaceState {
 	return ws
 }
 
+// An explicit "layout": null on the wire (a tab a client has touched and then
+// described with no tree — the daemon writes json.RawMessage(nil), which
+// marshals to the literal null) must forward as NO layout, exactly like an
+// absent "layout" key. json.RawMessage's own len()>0 check does not catch
+// this: null decodes to the four bytes "null", which is non-empty.
+func TestParseWorkspaceState_LayoutNull_ForwardsNoLayout(t *testing.T) {
+	state := parseWorkspaceState(stateFromMap(t, map[string]any{
+		"tabs": []any{map[string]any{"id": "t", "layout": nil}},
+	}))
+	if len(state.Tabs) != 1 {
+		t.Fatalf("tabs = %d, want 1", len(state.Tabs))
+	}
+	if state.Tabs[0].Layout != nil {
+		t.Errorf("Layout = %q, want nil for an explicit null", state.Tabs[0].Layout)
+	}
+}
+
 func TestUpdate_StaleRev_IsDropped(t *testing.T) {
 	m := connectedTestModel(t) // local dest "" connected
 	m = updateWith(t, m, stateMsg("run-a", 5, "tab-new"))
@@ -242,6 +259,65 @@ func TestArmReattachReset_ForgetsStateMark(t *testing.T) {
 	m = updateWith(t, m, stateMsg("run-a", 1, "tab-b"))
 	if !hasTab(m, "tab-b") {
 		t.Error("after a reattach, rev 1 was still compared against the old mark")
+	}
+}
+
+// acceptStateRev keys its high-water mark by DESTINATION (stateSeen is a
+// map[string]stateMark), never by a single shared scalar. A mark recorded for
+// the local dest must not make a DIFFERENT destination's own first (rev 1)
+// frame read as stale — a regression collapsing the two into one field would
+// pass every single-destination test above and only show up with two daemons
+// attached at once.
+func TestUpdate_StateMark_IsPerDestination(t *testing.T) {
+	local, hostA := newFakeConn(), newFakeConn()
+	close(local.recv)
+	close(hostA.recv)
+	m := Model{
+		cfg:            config.Default(),
+		client:         NewRouter(map[string]Client{"": local, "hostA": hostA}),
+		tabDragFromIdx: -1,
+	}
+
+	// A high-water mark on the LOCAL destination only (rev 5).
+	m = updateWith(t, m, stateMsg("run-local", 5, "tab-local"))
+	if !hasTab(m, "tab-local") {
+		t.Fatalf("precondition: the local tab was not applied")
+	}
+
+	// hostA's first-ever frame: rev 1, an unrelated run id. If the mark above
+	// were not scoped to "", this would be refused as <= the local rev.
+	hostMsg := stateMsg("run-hostA", 1, "tab-hostA")
+	hostMsg.Dest = "hostA"
+	m = updateWith(t, m, hostMsg)
+
+	if !hasTab(m, "tab-hostA") {
+		t.Error("hostA's rev 1 frame was dropped as stale — a mark on a different destination must not affect it")
+	}
+}
+
+// Both the stale-drop branch and the decode-failure branch MUST re-arm
+// listenForMessages, like every other IPC response branch in Update — a
+// regression here silently ends IPC for the session, since nothing else reads
+// the client after the sole listener exits. listenCountFn (the seam
+// offline_wakeup_test.go also uses) counts how many times listenForMessages is
+// CALLED while building Update's returned Cmd tree, which is exactly what a
+// missing re-arm would change.
+func TestUpdate_ReArmsListenLoop_AfterStaleDropAndDecodeFailure(t *testing.T) {
+	m := connectedTestModel(t)
+	m = updateWith(t, m, stateMsg("run-a", 5, "tab-new"))
+
+	listens := 0
+	m.listenCountFn = func() { listens++ }
+
+	m = updateWith(t, m, stateMsg("run-a", 4, "tab-old")) // stale, dropped
+	if listens != 1 {
+		t.Errorf("listenForMessages armed %d times after a stale-drop, want 1", listens)
+	}
+
+	listens = 0
+	m = updateWith(t, m, stateDecodeFailedMsg{Dest: ""})
+	if listens != 1 {
+		t.Errorf("listenForMessages armed %d times after a decode failure, want 1", listens)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -19,7 +20,16 @@ import (
 // silence. The list is read from protocol.go itself so a new request type is
 // covered the day it is added.
 func TestHandleMessage_EveryReqType_AnswersABadPayload(t *testing.T) {
-	types := reqTypesFromProtocolSource(t) // go/parser over ../ipc/protocol.go and ../ipc/hello.go: every Msg* const whose value ends in "_req"
+	types := reqTypesFromProtocolSource(t) // go/parser over every non-test ../ipc/*.go: every Msg* const whose value ends in "_req"
+	// A parse regression (a glob that stops matching, a broken path) must not
+	// silently shrink this to an empty list and pass every remaining
+	// sub-test vacuously — assert two request types from TWO DIFFERENT files
+	// are actually present: version_req from protocol.go, and
+	// create_from_template_req from template.go, which this glob is what
+	// makes reachable at all (an earlier version parsed only protocol.go and
+	// hello.go by name, so template.go's own *_req types were never covered).
+	requireReqType(t, types, ipc.MsgVersionReq)
+	requireReqType(t, types, ipc.MsgCreateFromTemplateReq)
 	_, client := mcpTestDaemon(t)
 	roundTrip(t, client, ipc.MsgHello, ipc.MsgHelloResp, ipc.HelloPayload{Kind: "script", Proto: 1, PID: os.Getpid()})
 	for _, typ := range types {
@@ -48,15 +58,37 @@ var skipBadPayload = map[string]string{
 	ipc.MsgUpdateCheckReq: "fire-and-forget by design (handler takes no conn/msg) and would hit the network when update checks are enabled",
 }
 
-// reqTypesFromProtocolSource parses ../ipc/protocol.go and ../ipc/hello.go
-// with go/parser and returns every Msg* const whose string value ends in
-// "_req" — a source-derived list so a new request type is covered the day
-// it is added, rather than the day someone remembers to update a hand-typed
-// list here.
+// requireReqType fails the test if want is absent from got — the guard
+// against reqTypesFromProtocolSource silently shrinking to an empty or
+// partial list and every sub-test above passing vacuously over nothing.
+func requireReqType(t *testing.T, got []string, want string) {
+	t.Helper()
+	for _, typ := range got {
+		if typ == want {
+			return
+		}
+	}
+	t.Fatalf("reqTypesFromProtocolSource did not find %q in %v", want, got)
+}
+
+// reqTypesFromProtocolSource parses every non-test ../ipc/*.go file with
+// go/parser and returns every Msg* const whose string value ends in "_req" —
+// a source-derived list so a new request type, in a new file, is covered the
+// day it is added, rather than the day someone remembers to update a
+// hand-typed file list here. A fixed two-file list (protocol.go, hello.go)
+// silently missed create_from_template_req in template.go — the glob is what
+// makes a new *_req file self-covering.
 func reqTypesFromProtocolSource(t *testing.T) []string {
 	t.Helper()
+	paths, err := filepath.Glob("../ipc/*.go")
+	if err != nil {
+		t.Fatalf("glob ../ipc/*.go: %v", err)
+	}
 	var out []string
-	for _, path := range []string{"../ipc/protocol.go", "../ipc/hello.go"} {
+	for _, path := range paths {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
 		fset := token.NewFileSet()
 		f, err := parser.ParseFile(fset, path, nil, 0)
 		if err != nil {

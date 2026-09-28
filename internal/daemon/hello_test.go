@@ -86,6 +86,13 @@ func TestHandleMessage_ClientHelloAfterHello_KeepsProto(t *testing.T) {
 
 func TestHelloRegistry_PIDZero_NonLegacyButNotInDialog(t *testing.T) {
 	_, client := mcpTestDaemon(t)
+	// Baseline BEFORE the pid-less hello, on the same conn mcpTestDaemon
+	// already registered via client_hello (role "bridge", a real PID) — this
+	// is what "did not grow" below is measured against.
+	before := roundTrip(t, client, ipc.MsgResourceReportReq, ipc.MsgResourceReportResp,
+		ipc.ResourceReportReqPayload{WithTrees: true})
+	baseline := decodeInto[ipc.ResourceReportRespPayload](t, before)
+
 	roundTrip(t, client, ipc.MsgHello, ipc.MsgHelloResp, ipc.HelloPayload{
 		Kind: "web", Proto: 1, PID: 0,
 	})
@@ -96,13 +103,30 @@ func TestHelloRegistry_PIDZero_NonLegacyButNotInDialog(t *testing.T) {
 	if e := decodeInto[ipc.ErrorPayload](t, resp); e.Code != ipc.ErrCodeUnknownType {
 		t.Errorf("error = %+v, want unknown_type — a PID-less hello did not register the protocol", e)
 	}
+
 	report := roundTrip(t, client, ipc.MsgResourceReportReq, ipc.MsgResourceReportResp,
 		ipc.ResourceReportReqPayload{WithTrees: true})
 	got := decodeInto[ipc.ResourceReportRespPayload](t, report)
+	// Asserting on row.Role == "web" is a check on a LABEL, not on the
+	// invariant this test names — a future build that spells the role
+	// differently (or never populates it) would pass whether or not a
+	// PID-less row is actually excluded. The invariant is: no row reports
+	// PID 0, and this conn's OWN row — already present in the baseline, from
+	// mcpTestDaemon's client_hello — disappears rather than a second,
+	// separate row for the same conn being added alongside it (describe()
+	// skips a conn whose CURRENT record has PID<=0, so overwriting the
+	// record removes the row rather than growing the list).
 	for _, row := range got.Quil {
-		if row.PID == 0 || row.Role == "web" {
-			t.Errorf("process dialog lists a PID-less client: %+v", row)
+		if row.PID == 0 {
+			t.Errorf("process dialog lists a PID-less row: %+v", row)
 		}
+	}
+	if want := len(baseline.Quil) - 1; len(got.Quil) != want {
+		t.Errorf("row count = %d after the web hello, want %d (this conn's own "+
+			"row gone, everything else — including the daemon's own self row — "+
+			"unchanged); a growing count means the pid-0 hello added a row "+
+			"instead of only overwriting this conn's existing one",
+			len(got.Quil), want)
 	}
 }
 

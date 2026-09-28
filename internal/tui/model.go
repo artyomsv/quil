@@ -537,10 +537,13 @@ type Model struct {
 	stateReqGen map[string]uint64
 	// stateGenSeq mints requestStateFor's generation numbers, process-wide.
 	stateGenSeq uint64
-	// clientID identifies this PROCESS across reconnects — minted once in
-	// NewModel with uuid.NewString() and sent on every attach (attachMessage).
-	// It is never persisted to disk: two TUIs on one machine would then share
-	// it, and each is a distinct client to the daemon's master election.
+	// clientID identifies this PROCESS across reconnects — minted in NewModel
+	// with uuid.NewString(), sent on every attach (attachMessage), and
+	// overridden in production right after NewModel returns
+	// (model.SetClientID(processClientID), cmd/quil/main.go) so hello and
+	// attach name the same process identically. It is never persisted to
+	// disk: two TUIs on one machine would then share it, and each is a
+	// distinct client to the daemon's master election.
 	clientID string
 	// sizeMaster records, per destination, the master client's id reported by
 	// the last broadcast ("" = no master on that destination). isFollower
@@ -1341,10 +1344,12 @@ func (m *Model) initKeymap() {
 	m.keymap, m.keyConflicts = buildKeymap(m.cfg.Keybindings)
 }
 
-// SetClientID overrides the process-minted client id. A test seam: production
-// never needs a stable id across separate NewModel calls, but a test driving
-// two Models as two "clients" of one daemon needs to give them distinct,
-// known ids rather than two random UUIDs it cannot assert against.
+// SetClientID overrides the process-minted client id. Production calls this
+// once, right after NewModel (cmd/quil/main.go), with the same processClientID
+// hello sends — so hello and attach name one process identically. It also
+// serves as a test seam: a test driving two Models as two "clients" of one
+// daemon needs to give them distinct, known ids rather than two random UUIDs
+// it cannot assert against.
 func (m *Model) SetClientID(id string) { m.clientID = id }
 
 // isFollower reports whether this client is NOT the size master of dest, and
@@ -3346,7 +3351,13 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 
 	case stateDecodeFailedMsg:
 		// MUST re-arm the listen loop, like every other IPC response branch.
-		return m, tea.Batch(m.listenForMessages(), m.requestStateFor(msg.Dest))
+		// requestStateFor is called on its own line, BEFORE the tea.Batch: it
+		// mutates m.stateReqGen/m.stateGenSeq, and a return statement leaves
+		// the order of its own operand evaluation unspecified — folding the
+		// mutation into the same expression as the read of m risks a data
+		// race between them.
+		cmd := m.requestStateFor(msg.Dest)
+		return m, tea.Batch(m.listenForMessages(), cmd)
 
 	case stateReqTimeoutMsg:
 		// Local timer, so deliberately no re-arm.
@@ -8589,8 +8600,11 @@ func parseWorkspaceState(ws ipc.WorkspaceState) WorkspaceStateMsg {
 		// Copied only when non-empty — a tab nobody has described yet carries
 		// no "layout" key on the wire, and json.RawMessage(nil) already reads
 		// that way to every consumer, so this is a direct forwarding of the
-		// decoded bytes rather than a re-marshal.
-		if len(t.Layout) > 0 {
+		// decoded bytes rather than a re-marshal. An EXPLICIT "layout": null
+		// decodes to the 4 non-empty bytes "null", which len()>0 alone would
+		// forward as if it were a real (if odd) layout value — excluded
+		// separately so a null on the wire reads exactly like an absent key.
+		if len(t.Layout) > 0 && string(t.Layout) != "null" {
 			ti.Layout = t.Layout
 		}
 		state.Tabs = append(state.Tabs, ti)

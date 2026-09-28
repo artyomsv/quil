@@ -1,0 +1,119 @@
+package daemon
+
+import (
+	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/artyomsv/quil/internal/ipc"
+)
+
+// Every *_req type the protocol defines must answer an unreadable payload
+// from a hello'd conn — with its own response or an error reply — never with
+// silence. The list is read from protocol.go itself so a new request type is
+// covered the day it is added.
+func TestHandleMessage_EveryReqType_AnswersABadPayload(t *testing.T) {
+	types := reqTypesFromProtocolSource(t) // go/parser over ../ipc/protocol.go and ../ipc/hello.go: every Msg* const whose value ends in "_req"
+	_, client := mcpTestDaemon(t)
+	roundTrip(t, client, ipc.MsgHello, ipc.MsgHelloResp, ipc.HelloPayload{Kind: "script", Proto: 1, PID: os.Getpid()})
+	for _, typ := range types {
+		if reason, skip := skipBadPayload[typ]; skip {
+			t.Logf("skip %s: %s", typ, reason)
+			continue
+		}
+		t.Run(typ, func(t *testing.T) {
+			msg := &ipc.Message{Type: typ, ID: "bad-" + typ, Payload: json.RawMessage(`"not an object"`)}
+			if err := client.Send(msg); err != nil {
+				t.Fatal(err)
+			}
+			waitFrameWithID(t, client, msg.ID, 5*time.Second) // any type, same ID
+		})
+	}
+}
+
+// skipBadPayload lists request types whose handler ignores its payload AND
+// has a side effect a test must not trigger. Every entry needs its reason.
+var skipBadPayload = map[string]string{
+	// handleUpdateCheckReq takes no conn/msg at all (dispatched as
+	// d.handleUpdateCheckReq(), no arguments) — it is fire-and-forget by
+	// design, like client_hello, and nothing could ever answer this
+	// request's id, good payload or bad. When update checks are enabled it
+	// also triggers a real network call to check for a new release.
+	ipc.MsgUpdateCheckReq: "fire-and-forget by design (handler takes no conn/msg) and would hit the network when update checks are enabled",
+}
+
+// reqTypesFromProtocolSource parses ../ipc/protocol.go and ../ipc/hello.go
+// with go/parser and returns every Msg* const whose string value ends in
+// "_req" — a source-derived list so a new request type is covered the day
+// it is added, rather than the day someone remembers to update a hand-typed
+// list here.
+func reqTypesFromProtocolSource(t *testing.T) []string {
+	t.Helper()
+	var out []string
+	for _, path := range []string{"../ipc/protocol.go", "../ipc/hello.go"} {
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		for _, decl := range f.Decls {
+			gen, ok := decl.(*ast.GenDecl)
+			if !ok || gen.Tok != token.CONST {
+				continue
+			}
+			for _, spec := range gen.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				for i, name := range vs.Names {
+					if !strings.HasPrefix(name.Name, "Msg") {
+						continue
+					}
+					if i >= len(vs.Values) {
+						continue
+					}
+					lit, ok := vs.Values[i].(*ast.BasicLit)
+					if !ok || lit.Kind != token.STRING {
+						continue
+					}
+					val, err := strconv.Unquote(lit.Value)
+					if err != nil {
+						continue
+					}
+					if strings.HasSuffix(val, "_req") {
+						out = append(out, val)
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
+// waitFrameWithID reads frames until one with the given ID arrives (any
+// type), or fails the test at the deadline.
+func waitFrameWithID(t *testing.T, client *ipc.Client, id string, timeout time.Duration) *ipc.Message {
+	t.Helper()
+	deadline := time.After(timeout)
+	for {
+		select {
+		case <-deadline:
+			t.Fatalf("no frame arrived for id %s", id)
+		default:
+		}
+		resp, err := client.Receive()
+		if err != nil {
+			t.Fatalf("receive: %v", err)
+		}
+		if resp.ID == id {
+			return resp
+		}
+	}
+}

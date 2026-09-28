@@ -1794,6 +1794,14 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	// other state frame. No attach required.
 	case ipc.MsgStateReq:
 		d.handleStateReq(conn, msg)
+
+	// hello: a conn stating its identity and protocol version. Answered with
+	// hello_resp; it is what makes a conn non-legacy for replyError.
+	case ipc.MsgHello:
+		d.handleHello(conn, msg)
+
+	default:
+		d.replyError(conn, msg, ipc.ErrCodeUnknownType, "unknown message type")
 	}
 }
 
@@ -7784,6 +7792,7 @@ const historyPreviewBytes = 512
 func (d *Daemon) handlePaneHistoryReq(conn *ipc.Conn, msg *ipc.Message) {
 	var p ipc.PaneHistoryReqPayload
 	if err := msg.DecodePayload(&p); err != nil {
+		d.replyError(conn, msg, ipc.ErrCodeBadPayload, err.Error())
 		return
 	}
 	resp := ipc.PaneHistoryRespPayload{PaneID: p.PaneID}
@@ -7814,6 +7823,7 @@ func (d *Daemon) handlePaneHistoryReq(conn *ipc.Conn, msg *ipc.Message) {
 func (d *Daemon) handlePaneHistoryEntryReq(conn *ipc.Conn, msg *ipc.Message) {
 	var p ipc.PaneHistoryEntryReqPayload
 	if err := msg.DecodePayload(&p); err != nil {
+		d.replyError(conn, msg, ipc.ErrCodeBadPayload, err.Error())
 		return
 	}
 	resp := ipc.PaneHistoryEntryRespPayload{PaneID: p.PaneID, TsMs: p.TsMs}

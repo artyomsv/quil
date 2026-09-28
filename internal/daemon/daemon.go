@@ -4639,11 +4639,16 @@ func (d *Daemon) broadcastState() {
 // state field, then take the next rev" is one step: the size master and
 // client count are read OUTSIDE SnapshotState, and without the lock two
 // concurrent builders could interleave their reads with their rev bumps and
-// hand out a rev whose number disagrees with which content it describes. See
-// the lock-order note in the task report — nothing this function calls
-// (SnapshotState's sm.mu, a pane's PluginMu/spawnMu, gitCache's lock,
-// clients.mu, updateMu) is ever held by a caller of buildWorkspaceState or
-// broadcastState, so this cannot deadlock against them.
+// hand out a rev whose number disagrees with which content it describes.
+//
+// The rule this depends on: NEVER call buildWorkspaceState or broadcastState
+// while holding sm.mu, a pane's PluginMu or spawnMu, gitCache's lock,
+// clients.mu, or the update-info lock — this function takes every one of
+// them (through SnapshotState, masterID, clientCount, currentUpdateInfo), so
+// a caller already holding one would self-deadlock. One known pre-existing
+// path violates this — lazy restore's spawnPane, on the sandbox sign-in
+// announce, calls broadcastState while still holding the pane's own
+// spawnMu — and is tracked separately rather than fixed here.
 func (d *Daemon) buildWorkspaceState() ipc.WorkspaceState {
 	d.stateMu.Lock()
 	defer d.stateMu.Unlock()

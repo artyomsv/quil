@@ -26,10 +26,13 @@ Length-prefixed JSON protocol (4-byte big-endian uint32 + JSON). Each `Conn` own
 pre-existing `client_hello` — `sendClientHello` (`cmd/quil/hello.go`), every
 durable dial (TUI, every MCP bridge, a redial). Nothing in this phase blocks
 waiting on `hello_resp`: making it mandatory now would refuse a fleet the
-version gate already tolerates a mix of. **Error replies go only to a conn
-whose `hello` registered `proto >= 1`** (`helloRegistry.protoOf`,
-`internal/daemon/procreport.go`; the send side is `Daemon.replyError`/
-`sendError`, `internal/daemon/hello.go`) — a pre-3a MCP bridge's
+version gate already tolerates a mix of. **Error replies go only to an
+ID-BEARING request on a conn whose `hello` registered `proto >= 1`**
+(`helloRegistry.protoOf`, `internal/daemon/procreport.go`; the send side is
+`Daemon.replyError`/`sendError`, `internal/daemon/hello.go`, which checks
+`msg.ID == ""` first) — an id-less send (the TUI's own per-keystroke
+messages) gets nothing whatever the conn's protocol, the same silence it
+always had. A pre-3a MCP bridge's
 `requestWithTimeout` matched a response to its request by correlation id ALONE
 and never checked `resp.Type`, so handing it an `error` frame for a request it
 does not know would have it decode the error payload as if it were the tool's

@@ -81,6 +81,14 @@ type Daemon struct {
 	// credentials, no visible windows. Set once in New from InServiceSession
 	// and read-only afterwards, so no lock guards it.
 	limited bool
+	// runID is new per daemon process; every state frame carries it so a
+	// client can tell a restart (rev starts again at 1) from a stale frame.
+	runID string
+	// stateMu makes "read every state field, then take the next rev" one
+	// step, so rev order equals content order across concurrent builders —
+	// the size master and client count are read OUTSIDE SnapshotState.
+	stateMu  sync.Mutex
+	stateRev uint64
 	// killRunning single-flights the kill handler's worker goroutine. A client
 	// looping the message would otherwise stack goroutines each running a full
 	// process enumeration.
@@ -333,6 +341,7 @@ func New(cfg config.Config) *Daemon {
 		events:     newEventQueue(maxEvents),
 		gitCache:   newGitCache(),
 		snapGens:   make(map[string]uint64),
+		runID:      uuid.NewString(),
 	}
 	d.limited = inServiceSessionFn()
 	if d.limited {
@@ -1780,6 +1789,11 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 			// cannot say for a build made from a branch — see the field.
 			Requests: ipc.GatedRequests,
 		})
+
+	// state_req: a conn asks for the current full state, numbered like every
+	// other state frame. No attach required.
+	case ipc.MsgStateReq:
+		d.handleStateReq(conn, msg)
 	}
 }
 
@@ -4613,7 +4627,19 @@ func (d *Daemon) broadcastState() {
 	d.broadcast(resp)
 }
 
+// buildWorkspaceState is guarded by stateMu for its whole body, so "read every
+// state field, then take the next rev" is one step: the size master and
+// client count are read OUTSIDE SnapshotState, and without the lock two
+// concurrent builders could interleave their reads with their rev bumps and
+// hand out a rev whose number disagrees with which content it describes. See
+// the lock-order note in the task report — nothing this function calls
+// (SnapshotState's sm.mu, a pane's PluginMu/spawnMu, gitCache's lock,
+// clients.mu, updateMu) is ever held by a caller of buildWorkspaceState or
+// broadcastState, so this cannot deadlock against them.
 func (d *Daemon) buildWorkspaceState() ipc.WorkspaceState {
+	d.stateMu.Lock()
+	defer d.stateMu.Unlock()
+
 	activeTab, tabs, panesByTab, projects, activeProject := d.session.SnapshotState()
 	state := d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab, projects, activeProject, true)
 	// Broadcast-only (never persisted): announced newer release, if any.
@@ -4631,6 +4657,16 @@ func (d *Daemon) buildWorkspaceState() ipc.WorkspaceState {
 	// Broadcast-only, omitted unless true: a daemon in session 0 (started over
 	// ssh, or by a service) has no saved credentials and no visible desktop.
 	state.DaemonLimited = d.limited
+
+	// LAST, under the same lock as everything above: rev order must equal
+	// content order, or a client applying frames by rev can adopt a lower-
+	// numbered one that actually describes newer state. RunID is new per
+	// daemon process (New), so a client can tell a restart (rev starts again
+	// at 1) from a stale frame. workspaceStateFromSnapshot/snapshot() do not
+	// set either — a disk snapshot is not a numbered frame.
+	d.stateRev++
+	state.Rev = d.stateRev
+	state.RunID = d.runID
 	return state
 }
 

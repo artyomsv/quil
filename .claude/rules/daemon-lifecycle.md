@@ -35,9 +35,16 @@ and never checked `resp.Type`, so handing it an `error` frame for a request it
 does not know would have it decode the error payload as if it were the tool's
 own result. Any conn that never says hello (an old build, a bare probe like
 `quil status`) sees exactly the old silence: an unknown or malformed request
-is dropped with no reply. `handleHello` must stay synchronous — frames on one
-conn dispatch in order, which is the only thing guaranteeing a request sent
-right after `hello` is already seen as non-legacy.
+is dropped with no reply. **For a conn that HAS said hello, only `unknown_type`
+is universal** — the default dispatch arm (`daemon.go`'s message-type switch)
+sends it for any `Type` the switch has no case for. `bad_payload` answers
+exactly two handlers so far, `handlePaneHistoryReq`/`handlePaneHistoryEntryReq`
+(plus `handleHello`'s own malformed-hello case, which runs before the conn is
+even registered) — every OTHER handler still decodes a payload it cannot read
+the pre-3a way, its own typed error field or a log, unchanged by this phase.
+`handleHello` must stay synchronous — frames on one conn dispatch in order,
+which is the only thing guaranteeing a request sent right after `hello` is
+already seen as non-legacy.
 
 `internal/ipc/state.go` replaces the old `map[string]any` `workspace_state`
 builder with typed `WorkspaceState`/`TabState`/`PaneState`/`ProjectState`,

@@ -163,9 +163,14 @@ func (m *Model) syncTabLayout(tab *TabModel, ti TabInfo, paneSet map[string]bool
 	stored := storedLayout(ti.Layout)
 
 	// Every tree comparison here is STRUCTURAL (parsed SerializedNode), never
-	// bytes: the daemon stores the struct-ordered bytes a client sent, but
-	// parseWorkspaceState re-marshals the layout from map[string]any, which
-	// sorts keys — so the same split tree arrives as different bytes.
+	// bytes. Since the phase 3a typed schema, TabState.Layout travels as the
+	// daemon's stored json.RawMessage verbatim — parseWorkspaceState forwards
+	// the decoded bytes directly, with no map[string]any re-marshal to sort
+	// keys out of order any more. The comparison stays structural because the
+	// LOCAL side of it is never bytes at all: tab.layoutSent/layoutForSend
+	// are *SerializedNode values built straight off the live tree, so parsing
+	// the incoming JSON once (storedLayout) and comparing values is the form
+	// both sides already need, not a workaround for divergent encodings.
 	switch {
 	case ti.LayoutRev > tab.layoutRev || tab.adoptNext:
 		// Higher revision, or the first broadcast after a reattach, whose

@@ -1008,7 +1008,7 @@ not a field-by-field rebind.
 
 **Implementation:**
 
-- `internal/ipc/hello.go` — `MsgHello`/`MsgHelloResp`/`MsgError`/`MsgStateReq`, `ProtocolVersion = 1`, `HelloPayload`/`HelloRespPayload`/`ErrorPayload`, the three active error codes plus the reserved `refused`, and `DaemonCaps()` (`error`, `state_rev`, `state_req` alongside the pre-existing `GatedRequests`).
+- `internal/ipc/hello.go` — `MsgHello`/`MsgHelloResp`/`MsgError`/`MsgStateReq`, `ProtocolVersion = 1`, `HelloPayload`/`HelloRespPayload`/`ErrorPayload`, the two active error codes plus the reserved `refused`, and `DaemonCaps()` (`error`, `state_rev`, `state_req` alongside the pre-existing `GatedRequests`).
 - `internal/daemon/hello.go` — `handleHello` (synchronous by requirement: frames on one conn dispatch in order, which is what guarantees a request sent right after `hello` is already seen as non-legacy) and `replyError`/`sendError`. `internal/daemon/procreport.go`'s `helloRegistry` gained `putHello`/`protoOf` alongside its pre-existing `client_hello` bookkeeping — a hello with no PID (a web or script client) makes a conn non-legacy but names no process for the dialog to list.
 - `internal/daemon/staterev.go` — `handleStateReq`. `internal/daemon/daemon.go`'s `buildWorkspaceState` and the default dispatch arm (`replyError` with `unknown_type`); `handlePaneHistoryReq`/`handlePaneHistoryEntryReq` now reply `bad_payload` on an undecodable request instead of silently answering nothing.
 - `internal/tui/staterev.go` — `acceptStateRev`, `requestStateFor`, `endStateReq`, `forgetStateMark` (called on reattach, `internal/tui/reconnect.go` — a restarted daemon's numbering starts over, so what a client has "seen" for that destination must be forgotten, not merely superseded).

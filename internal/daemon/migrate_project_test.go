@@ -67,8 +67,7 @@ func TestBroadcastStateCarriesProjects(t *testing.T) {
 
 	state := d.buildWorkspaceState()
 
-	projects, _ := state["projects"].([]any)
-	if len(projects) != 1 {
+	if len(state.Projects) != 1 {
 		t.Fatal("the LIVE broadcast must carry projects, not just the disk snapshot")
 	}
 }

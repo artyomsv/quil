@@ -196,7 +196,7 @@ func TestTemplateWorkspace_StoredLayout_WinsOverKeyword(t *testing.T) {
 
 func TestParseWorkspaceState_TemplateFields_PreservesAnchorAndKeyword(t *testing.T) {
 	t.Setenv("QUIL_HOME", t.TempDir())
-	state := parseWorkspaceState(map[string]any{"tabs": []any{map[string]any{"id": "t", "template_layout": "main-top", "template_main": "p"}}})
+	state := parseWorkspaceState(stateFromMap(t, map[string]any{"tabs": []any{map[string]any{"id": "t", "template_layout": "main-top", "template_main": "p"}}}))
 	if len(state.Tabs) != 1 || state.Tabs[0].TemplateLayout != "main-top" || state.Tabs[0].TemplateMain != "p" {
 		t.Fatal(state.Tabs)
 	}

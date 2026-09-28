@@ -937,6 +937,10 @@ func (m *Model) armReattachReset(dest string) {
 	// authority after a reattach, and a restarted daemon's revision can be
 	// LOWER than ours (resetLayoutSync).
 	m.resetLayoutSync(dest)
+	// And the state-frame rev mark: a restarted daemon numbers from 1 again
+	// under a new run_id, and a kept mark would compare a fresh rev 1 against
+	// the old run's high-water mark and drop it as stale.
+	m.forgetStateMark(dest)
 	// Selection is Model-level and anchors to row/column coordinates that any
 	// replay invalidates. Dropped now rather than armed: there is no per-pane
 	// chunk to hang it off, and a selection surviving an outage is worth nothing.

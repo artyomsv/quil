@@ -236,6 +236,11 @@ type helloRecord struct {
 	payload  ipc.ClientHelloPayload
 	received time.Time
 
+	// proto is the protocol version the conn's hello registered; 0 means a
+	// legacy conn (client_hello only, or nothing). Only proto >= 1 conns are
+	// sent error replies.
+	proto int
+
 	// stat is the most recent MsgClientStat from this connection, and statAt is
 	// when it ARRIVED on the daemon's clock. A zero statAt means this process
 	// has never reported — distinct from a report that has gone stale, and the
@@ -275,8 +280,37 @@ func (r *helloRegistry) put(conn *ipc.Conn, p ipc.ClientHelloPayload) {
 		return
 	}
 	r.mu.Lock()
-	r.byConn[conn] = helloRecord{payload: p, received: r.nowFunc()}
+	proto := r.byConn[conn].proto
+	r.byConn[conn] = helloRecord{payload: p, received: r.nowFunc(), proto: proto}
 	r.mu.Unlock()
+}
+
+// putHello records a hello. Kind becomes the process-dialog role, so hello
+// and client_hello describe a conn the same way.
+func (r *helloRegistry) putHello(conn *ipc.Conn, p ipc.HelloPayload) {
+	if conn == nil {
+		return
+	}
+	r.mu.Lock()
+	r.byConn[conn] = helloRecord{
+		payload: ipc.ClientHelloPayload{
+			Role: p.Kind, PID: p.PID, Version: p.Version, ExeName: p.ExeName, UptimeMS: p.UptimeMS,
+		},
+		received: r.nowFunc(),
+		proto:    p.Proto,
+	}
+	r.mu.Unlock()
+}
+
+// protoOf returns the protocol version a conn's hello registered, or 0 for a
+// legacy conn (client_hello only, or nothing).
+func (r *helloRegistry) protoOf(conn *ipc.Conn) int {
+	if conn == nil {
+		return 0
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.byConn[conn].proto
 }
 
 // roleOf returns a connection's self-declared role ("tui" or "bridge"), or ""
@@ -369,6 +403,11 @@ func (r *helloRegistry) describe(conns []*ipc.Conn, daemonVersion string, now ti
 			if now.Sub(r.openedAtOf(conn)) >= procUnidentifiedAge {
 				unidentified++
 			}
+			continue
+		}
+		// A hello with no PID (a web or script client) makes the conn
+		// non-legacy but names no process to list.
+		if rec.payload.PID <= 0 {
 			continue
 		}
 		// A process that has never reported is UNKNOWN, not idle. The zero

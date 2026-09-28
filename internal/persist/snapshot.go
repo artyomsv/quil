@@ -7,9 +7,11 @@ import (
 	"os"
 )
 
-// Save writes workspace state as JSON to path atomically.
+// Save writes workspace state as JSON to path atomically. state is typically
+// ipc.WorkspaceState (the broadcast/disk builder's return type) but any value
+// json.Marshal accepts works — persist does not need to know the shape.
 // The previous file is renamed to path.bak for rollback.
-func Save(path string, state map[string]any) error {
+func Save(path string, state any) error {
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal workspace: %w", err)

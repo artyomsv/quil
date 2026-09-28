@@ -501,18 +501,17 @@ func TestWorkspaceState_PaneTabIDFollowsTheListingTab(t *testing.T) {
 	d := overlayTestDaemon(t, config.Default())
 	_, dst, _, s2, _ := movePaneHandlerFixture(t, d)
 
-	check := func(state map[string]any) {
+	check := func(state ipc.WorkspaceState) {
 		t.Helper()
 		listedIn := map[string]string{}
-		for _, tab := range state["tabs"].([]map[string]any) {
-			for _, pid := range tab["panes"].([]string) {
-				listedIn[pid] = tab["id"].(string)
+		for _, tab := range state.Tabs {
+			for _, pid := range tab.Panes {
+				listedIn[pid] = tab.ID
 			}
 		}
-		for _, pane := range state["panes"].([]map[string]any) {
-			id := pane["id"].(string)
-			if pane["tab_id"] != listedIn[id] {
-				t.Errorf("pane %s: tab_id = %v, but it is listed in %q", id, pane["tab_id"], listedIn[id])
+		for _, pane := range state.Panes {
+			if pane.TabID != listedIn[pane.ID] {
+				t.Errorf("pane %s: tab_id = %v, but it is listed in %q", pane.ID, pane.TabID, listedIn[pane.ID])
 			}
 		}
 	}

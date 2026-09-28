@@ -81,6 +81,14 @@ type Daemon struct {
 	// credentials, no visible windows. Set once in New from InServiceSession
 	// and read-only afterwards, so no lock guards it.
 	limited bool
+	// runID is new per daemon process; every state frame carries it so a
+	// client can tell a restart (rev starts again at 1) from a stale frame.
+	runID string
+	// stateMu makes "read every state field, then take the next rev" one
+	// step, so rev order equals content order across concurrent builders —
+	// the size master and client count are read OUTSIDE SnapshotState.
+	stateMu  sync.Mutex
+	stateRev uint64
 	// killRunning single-flights the kill handler's worker goroutine. A client
 	// looping the message would otherwise stack goroutines each running a full
 	// process enumeration.
@@ -333,6 +341,7 @@ func New(cfg config.Config) *Daemon {
 		events:     newEventQueue(maxEvents),
 		gitCache:   newGitCache(),
 		snapGens:   make(map[string]uint64),
+		runID:      uuid.NewString(),
 	}
 	d.limited = inServiceSessionFn()
 	if d.limited {
@@ -702,7 +711,7 @@ func (d *Daemon) snapshot() {
 	// turns it into a short reservation so the previous size master gets its
 	// slot back after a restart, and the reattach resizes nothing.
 	if id := d.masterID(); id != "" {
-		state["size_master"] = id
+		state.SizeMaster = &id
 	}
 
 	if err := persist.Save(config.WorkspacePath(), state); err != nil {
@@ -1780,6 +1789,19 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 			// cannot say for a build made from a branch — see the field.
 			Requests: ipc.GatedRequests,
 		})
+
+	// state_req: a conn asks for the current full state, numbered like every
+	// other state frame. No attach required.
+	case ipc.MsgStateReq:
+		d.handleStateReq(conn, msg)
+
+	// hello: a conn stating its identity and protocol version. Answered with
+	// hello_resp; it is what makes a conn non-legacy for replyError.
+	case ipc.MsgHello:
+		d.handleHello(conn, msg)
+
+	default:
+		d.replyError(conn, msg, ipc.ErrCodeUnknownType, "unknown message type")
 	}
 }
 
@@ -4613,24 +4635,51 @@ func (d *Daemon) broadcastState() {
 	d.broadcast(resp)
 }
 
-func (d *Daemon) buildWorkspaceState() map[string]any {
+// buildWorkspaceState is guarded by stateMu for its whole body, so "read every
+// state field, then take the next rev" is one step: the size master and
+// client count are read OUTSIDE SnapshotState, and without the lock two
+// concurrent builders could interleave their reads with their rev bumps and
+// hand out a rev whose number disagrees with which content it describes.
+//
+// The rule this depends on: NEVER call buildWorkspaceState or broadcastState
+// while holding sm.mu, a pane's PluginMu or spawnMu, gitCache's lock,
+// clients.mu, or the update-info lock — this function takes every one of
+// them (through SnapshotState, masterID, clientCount, currentUpdateInfo), so
+// a caller already holding one would self-deadlock. One known pre-existing
+// path violates this — lazy restore's spawnPane, on the sandbox sign-in
+// announce, calls broadcastState while still holding the pane's own
+// spawnMu — and is tracked separately rather than fixed here.
+func (d *Daemon) buildWorkspaceState() ipc.WorkspaceState {
+	d.stateMu.Lock()
+	defer d.stateMu.Unlock()
+
 	activeTab, tabs, panesByTab, projects, activeProject := d.session.SnapshotState()
 	state := d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab, projects, activeProject, true)
 	// Broadcast-only (never persisted): announced newer release, if any.
 	if info := d.currentUpdateInfo(); info != nil {
-		state["update"] = info
+		state.Update = info
 	}
 	// Broadcast-only as well: the size master's client id ("" for none) and
 	// the attached-client count. Each TUI reads them to tell whether it is the
 	// master or a follower. snapshot() writes size_master to disk by itself,
 	// for the restart reserve; the count means nothing after a restart.
-	state["size_master"] = d.masterID()
-	state["clients"] = d.clientCount()
+	master := d.masterID()
+	state.SizeMaster = &master
+	n := d.clientCount()
+	state.Clients = &n
 	// Broadcast-only, omitted unless true: a daemon in session 0 (started over
 	// ssh, or by a service) has no saved credentials and no visible desktop.
-	if d.limited {
-		state["daemon_limited"] = true
-	}
+	state.DaemonLimited = d.limited
+
+	// LAST, under the same lock as everything above: rev order must equal
+	// content order, or a client applying frames by rev can adopt a lower-
+	// numbered one that actually describes newer state. RunID is new per
+	// daemon process (New), so a client can tell a restart (rev starts again
+	// at 1) from a stale frame. workspaceStateFromSnapshot/snapshot() do not
+	// set either — a disk snapshot is not a numbered frame.
+	d.stateRev++
+	state.Rev = d.stateRev
+	state.RunID = d.runID
 	return state
 }
 
@@ -4648,9 +4697,9 @@ func (d *Daemon) buildWorkspaceState() map[string]any {
 // snapshot and the live broadcast because this function is shared by both
 // (buildWorkspaceState and snapshot()); writing them only at the persist.Save
 // call site would leave every broadcast project-less.
-func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panesByTab map[string][]*Pane, projects []Project, activeProject string, includeOverlays bool) map[string]any {
-	tabList := make([]map[string]any, 0, len(tabs))
-	paneList := make([]map[string]any, 0)
+func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panesByTab map[string][]*Pane, projects []Project, activeProject string, includeOverlays bool) ipc.WorkspaceState {
+	tabList := make([]ipc.TabState, 0, len(tabs))
+	paneList := make([]ipc.PaneState, 0)
 
 	for _, tab := range tabs {
 		// Overlay is PluginMu-guarded like Muted: handleCreatePane sets it
@@ -4673,26 +4722,26 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			}
 			paneIDs = append(paneIDs, pid)
 		}
-		tabData := map[string]any{
-			"id":         tab.ID,
-			"name":       tab.Name,
-			"color":      tab.Color,
-			"panes":      paneIDs,
-			"project_id": tab.ProjectID,
-			// Unconditional, unlike "layout" below: every client compares
+		tabData := ipc.TabState{
+			ID:        tab.ID,
+			Name:      tab.Name,
+			Color:     tab.Color,
+			Panes:     paneIDs,
+			ProjectID: tab.ProjectID,
+			// Unconditional, unlike Layout below: every client compares
 			// this against its own copy on every broadcast to decide whether
 			// to adopt (spec §7.1), including a tab whose layout has never
 			// been written, so it must be on the wire even at its zero value.
-			"layout_rev": tab.LayoutRev,
+			LayoutRev: tab.LayoutRev,
 		}
 		if len(tab.Layout) > 0 {
-			tabData["layout"] = tab.Layout
+			tabData.Layout = tab.Layout
 		}
 		if tab.TemplateLayout != "" {
-			tabData["template_layout"] = tab.TemplateLayout
+			tabData.TemplateLayout = tab.TemplateLayout
 		}
 		if tab.TemplateMain != "" {
-			tabData["template_main"] = tab.TemplateMain
+			tabData.TemplateMain = tab.TemplateMain
 		}
 		tabList = append(tabList, tabData)
 
@@ -4706,12 +4755,12 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			// pane.TabID read afterwards: a MovePane between SnapshotState and
 			// here would make the two disagree within one frame, and the TUI's
 			// applyTemplateLayout bails on exactly that mismatch.
-			paneData := map[string]any{
-				"id":     pane.ID,
-				"tab_id": tab.ID,
+			paneData := ipc.PaneState{
+				ID:    pane.ID,
+				TabID: tab.ID,
 			}
 			if pane.Name != "" {
-				paneData["name"] = pane.Name
+				paneData.Name = pane.Name
 			}
 			// Type and CWD are PluginMu-protected: spawnRestoredPane mutates
 			// them on the lazy-spawn error paths (CWD="" when the saved dir is
@@ -4735,26 +4784,26 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 				for k, v := range pane.PluginState {
 					ps[k] = v
 				}
-				paneData["plugin_state"] = ps
+				paneData.PluginState = ps
 			}
 			if pane.Muted {
-				paneData["muted"] = true
+				paneData.Muted = true
 			}
 			if pane.Eager {
-				paneData["eager"] = true
+				paneData.Eager = true
 			}
 			// PERSISTED because the loop it serves spans restarts: a user whose
 			// habit is shell -> agent -> /exit -> shell would otherwise find
 			// every cycle after a daemon restart ending on a dead agent pane.
 			if pane.ConvertedFromTerminal != "" {
-				paneData["converted_from"] = pane.ConvertedFromTerminal
+				paneData.ConvertedFrom = pane.ConvertedFromTerminal
 			}
 			// PERSISTED so the restore resumes the conversation the user
 			// started by hand. Without it the session id in plugin_state is
 			// indistinguishable from one Quil itself preassigned, and the
 			// UI would claim tracking that a restart silently dropped.
 			if pane.Adopted {
-				paneData["adopted"] = true
+				paneData.Adopted = true
 			}
 			// PERSISTED for the reason the field exists: the mark is the user's
 			// own, nothing re-derives it, and a hook edge that would set it
@@ -4762,7 +4811,7 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			// includeOverlays block so ONE line serves both the disk snapshot
 			// and the broadcast — the same arrangement muted has.
 			if pane.PinnedAttention {
-				paneData["pinned_attention"] = true
+				paneData.PinnedAttention = true
 			}
 			// PERSISTED for the same reason, and the case for it is stronger:
 			// the mark is set precisely so the user can walk away from a pane
@@ -4770,7 +4819,7 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			// routinely spans a restart. A mark lost there sends them back to
 			// reading the scrollback, which is what the mark replaces.
 			if pane.MarkedForDeletion {
-				paneData["marked_for_deletion"] = true
+				paneData.MarkedForDeletion = true
 			}
 			// PERSISTED so the green "finished while you were away" tab
 			// survives a TUI restart, which is when the user most needs it:
@@ -4779,22 +4828,22 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			// only has to outlive the client. Same one-line-serves-both
 			// arrangement as the pin.
 			if pane.Unseen {
-				paneData["unseen"] = true
+				paneData.Unseen = true
 			}
 			// PERSISTED, unlike SpawnError beside it: this is how restore tells
 			// a missing worktree from a stale browsed directory, and without it
 			// the snapshot carries only CWD, which cannot distinguish them.
 			if pane.WorktreeOwned {
-				paneData["worktree_owned"] = true
+				paneData.WorktreeOwned = true
 			}
 			if pane.QuilMCP {
-				paneData["quil_mcp"] = true
+				paneData.QuilMCP = true
 			}
 			// Persisted for the same reason, and it is the half that says WHICH
 			// directory. Without it a restored pane can only name its CWD, which
 			// the shell has been rewriting all along — see Pane.WorktreePath.
 			if pane.WorktreePath != "" {
-				paneData["worktree_path"] = pane.WorktreePath
+				paneData.WorktreePath = pane.WorktreePath
 			}
 			// The sandbox pair. The image is what makes a restored pane
 			// sandboxed at all; the container CWD is what the resume path
@@ -4808,19 +4857,20 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			// agent on the host, silently un-sandboxed — where an unknown
 			// type falls back to a plain shell.
 			if pane.SandboxImage != "" {
-				paneData["sandbox_image"] = pane.SandboxImage
-				paneData["sandbox_auth"] = pane.SandboxAuth
-				paneData["type"] = sandboxPaneType(pane.Type)
+				paneData.SandboxImage = pane.SandboxImage
+				auth := pane.SandboxAuth
+				paneData.SandboxAuth = &auth
+				paneData.Type = sandboxPaneType(pane.Type)
 			}
 			if pane.ContainerCWD != "" {
-				paneData["container_cwd"] = pane.ContainerCWD
+				paneData.ContainerCWD = pane.ContainerCWD
 			}
 			// PERSISTED, unlike the branch it stands for. A snapshot landing
 			// inside the checkout window would otherwise restore an ordinary
 			// terminal in the repository root — the bug this feature removes,
 			// brought back from disk. See Pane.WorktreeInterrupted.
 			if pane.PreparingWorktree != "" || pane.WorktreeInterrupted {
-				paneData["worktree_interrupted"] = true
+				paneData.WorktreeInterrupted = true
 			}
 			// SpawnError is captured for the BROADCAST only — see
 			// includeOverlays below. It is never written to paneData.
@@ -4839,7 +4889,7 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			// Broadcast-only, runtime: the counter restarts with the daemon,
 			// so a persisted one would mean nothing.
 			if includeOverlays && snapSizeSeq > 0 {
-				paneData["size_seq"] = snapSizeSeq
+				paneData.SizeSeq = snapSizeSeq
 			}
 			// Pending (deferred, not yet lazy-spawned) is spawnMu-guarded —
 			// read it the same way list_panes does. The TUI uses it to show the
@@ -4852,7 +4902,7 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 				pending := pane.Pending
 				pane.spawnMu.Unlock()
 				if pending {
-					paneData["pending"] = true
+					paneData.Pending = true
 				}
 			}
 			// Broadcast-only restore-checklist hints (runtime, never persisted):
@@ -4860,21 +4910,21 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			// shows in the per-pane restore checklist.
 			if includeOverlays {
 				if sessionID != "" {
-					paneData["session_id"] = sessionID
+					paneData.SessionID = sessionID
 				}
 				if historyLines > 0 {
-					paneData["history_lines"] = historyLines
+					paneData.HistoryLines = historyLines
 				}
 				// Mouse-mode state is runtime-only (broadcast, never persisted):
 				// it is re-derived from the live PTY stream on every spawn.
 				if mouseTracking {
-					paneData["mouse_tracking"] = true
+					paneData.MouseTracking = true
 				}
 				if mouseSGR {
-					paneData["mouse_sgr"] = true
+					paneData.MouseSGR = true
 				}
 				if bracketedPaste {
-					paneData["bracketed_paste"] = true
+					paneData.BracketedPaste = true
 				}
 				// Why the pane has no process, runtime-only: a fresh daemon
 				// re-stats and re-derives it, and persisting it would
@@ -4882,7 +4932,7 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 				// restored. Broadcast rather than logged because a relocation
 				// nobody sees is the failure mode this replaces.
 				if spawnErr != "" {
-					paneData["spawn_error"] = spawnErr
+					paneData.SpawnError = spawnErr
 				}
 				// The branch a checkout is running for, runtime-only for the
 				// same reason and one more: a snapshot landing inside the
@@ -4892,15 +4942,16 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 				// ordinary blank terminal — which is what it looked like for the
 				// whole of a monorepo-sized checkout.
 				if preparingWorktree != "" {
-					paneData["preparing_worktree"] = preparingWorktree
+					paneData.PreparingWorktree = preparingWorktree
 				}
 				// Model/context usage of the last completed AI turn is
 				// runtime-only (broadcast, never persisted): a stale token
 				// count from a previous daemon run would be wrong until the
 				// next turn refreshes it.
 				if lastModel != "" {
-					paneData["model"] = lastModel
-					paneData["context_tokens"] = lastContextTokens
+					paneData.Model = lastModel
+					tokens := lastContextTokens
+					paneData.ContextTokens = &tokens
 				}
 				// Git state is runtime-only for the same reason: a branch name
 				// from a previous daemon run describes a checkout nobody has
@@ -4908,85 +4959,82 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 				// broadcast down whatever the filesystem is doing.
 				if info, ok, stale := d.gitCache.lookup(cwd); ok {
 					if info.Branch != "" {
-						paneData["git_branch"] = info.Branch
+						paneData.GitBranch = info.Branch
 					}
 					if info.Detached {
-						paneData["git_detached"] = true
+						paneData.GitDetached = true
 					}
 					if info.LinkedWorktree {
-						paneData["git_worktree"] = true
+						paneData.GitWorktree = true
 						// Conditional like git_branch: an absent key decodes
 						// to the zero value on the client, where the copy is
 						// unconditional and therefore clears it.
 						if info.WorktreeName != "" {
-							paneData["git_worktree_name"] = info.WorktreeName
+							paneData.GitWorktreeName = info.WorktreeName
 						}
 					}
 					if info.HasUpstream {
 						// Sent even at zero: "0 ahead, 0 behind" means in sync,
 						// which is a different statement from having no
 						// upstream to compare against.
-						paneData["git_upstream"] = true
-						paneData["git_ahead"] = info.Ahead
-						paneData["git_behind"] = info.Behind
+						paneData.GitUpstream = true
+						ahead, behind := info.Ahead, info.Behind
+						paneData.GitAhead = &ahead
+						paneData.GitBehind = &behind
 					}
 					if stale {
-						paneData["git_stale"] = true
+						paneData.GitStale = true
 					}
 				}
 			}
-			paneData["cwd"] = cwd
+			paneData.CWD = cwd
 			if typ != "" && typ != "terminal" {
-				paneData["type"] = typ
+				paneData.Type = typ
 			}
 			if pane.InstanceName != "" {
-				paneData["instance_name"] = pane.InstanceName
+				paneData.InstanceName = pane.InstanceName
 			}
 			if len(pane.InstanceArgs) > 0 {
-				paneData["instance_args"] = pane.InstanceArgs
+				paneData.InstanceArgs = pane.InstanceArgs
 			}
 			// Persist last known size so respawnPanes can recreate the
 			// ConPTY at the right dimensions instead of the 80x24 default
 			// (children that boot before the first resize event would
 			// otherwise render an 80-column UI — see resizeKick).
 			if snapCols > 0 && snapRows > 0 {
-				paneData["cols"] = snapCols
-				paneData["rows"] = snapRows
+				paneData.Cols = snapCols
+				paneData.Rows = snapRows
 			}
 			if isOverlay {
-				paneData["overlay"] = true
+				paneData.Overlay = true
 			}
 			paneList = append(paneList, paneData)
 		}
 	}
 
-	// []any (not []map[string]any, unlike tabList/paneList above): in-process
-	// callers (buildWorkspaceState's own tests, e.g.) read this key with a
-	// plain `.([]any)` assertion, matching what a JSON-decoded array becomes
-	// on the wire — so the Go-side value already carries that shape rather
-	// than the tabs/panes convention.
-	projectList := make([]any, 0, len(projects))
+	projectList := make([]ipc.ProjectState, 0, len(projects))
 	for _, p := range projects {
-		projectList = append(projectList, map[string]any{
-			"id":         p.ID,
-			"name":       p.Name,
-			"root_dir":   p.RootDir,
-			"tab_ids":    p.TabIDs,
-			"active_tab": p.ActiveTab,
+		projectList = append(projectList, ipc.ProjectState{
+			ID:      p.ID,
+			Name:    p.Name,
+			RootDir: p.RootDir,
+			// Passed through unchanged: a nil list stays JSON null, as today.
+			TabIDs:    p.TabIDs,
+			ActiveTab: p.ActiveTab,
 			// Reaches the client AND the disk snapshot from here, because this
-			// map is both. The client needs it to decide whether naming a
+			// struct is both. The client needs it to decide whether naming a
 			// project adopts this one; the snapshot needs it so a restart does
 			// not turn an un-adopted default into a real project.
-			"bootstrap": p.Bootstrap,
+			Bootstrap: p.Bootstrap,
 		})
 	}
 
-	return map[string]any{
-		"active_tab":     activeTab,
-		"tabs":           tabList,
-		"panes":          paneList,
-		"projects":       projectList,
-		"active_project": activeProject,
+	return ipc.WorkspaceState{
+		ActiveTab:     activeTab,
+		Tabs:          tabList,
+		Panes:         paneList,
+		Projects:      projectList,
+		ActiveProject: activeProject,
 	}
 }
 
@@ -7749,6 +7797,7 @@ const historyPreviewBytes = 512
 func (d *Daemon) handlePaneHistoryReq(conn *ipc.Conn, msg *ipc.Message) {
 	var p ipc.PaneHistoryReqPayload
 	if err := msg.DecodePayload(&p); err != nil {
+		d.replyError(conn, msg, ipc.ErrCodeBadPayload, err.Error())
 		return
 	}
 	resp := ipc.PaneHistoryRespPayload{PaneID: p.PaneID}
@@ -7779,6 +7828,7 @@ func (d *Daemon) handlePaneHistoryReq(conn *ipc.Conn, msg *ipc.Message) {
 func (d *Daemon) handlePaneHistoryEntryReq(conn *ipc.Conn, msg *ipc.Message) {
 	var p ipc.PaneHistoryEntryReqPayload
 	if err := msg.DecodePayload(&p); err != nil {
+		d.replyError(conn, msg, ipc.ErrCodeBadPayload, err.Error())
 		return
 	}
 	resp := ipc.PaneHistoryEntryRespPayload{PaneID: p.PaneID, TsMs: p.TsMs}

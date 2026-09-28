@@ -35,7 +35,7 @@ func TestClientSend_BlocksInsteadOfSelfClosingWhenThePeerLags(t *testing.T) {
 	sendErr := make(chan error, 1)
 	go func() {
 		for i := 0; i < n; i++ {
-			msg, err := NewMessage(MsgStateUpdate, map[string]int{"i": i})
+			msg, err := NewMessage(testMsgType, map[string]int{"i": i})
 			if err != nil {
 				sendErr <- err
 				return

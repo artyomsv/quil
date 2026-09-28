@@ -41,7 +41,7 @@ func TestClientSend_WedgedPeerFailsWithinTheBound(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		for {
-			msg, err := NewMessage(MsgStateUpdate, map[string]string{"x": "y"})
+			msg, err := NewMessage(testMsgType, map[string]string{"x": "y"})
 			if err != nil {
 				done <- err
 				return

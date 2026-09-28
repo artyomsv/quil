@@ -28,7 +28,7 @@ func TestAppendEnvelope_MatchesJSONMarshal(t *testing.T) {
 		name string
 		msg  Message
 	}{
-		{"type only", Message{Type: MsgHeartbeat}},
+		{"type only", Message{Type: testMsgType}},
 		{"type and payload", Message{Type: MsgPaneOutput, Payload: json.RawMessage(`{"a":1}`)}},
 		{"type id payload", Message{Type: MsgListPanesResp, ID: "req-42", Payload: json.RawMessage(`{"panes":[]}`)}},
 		{"type and id", Message{Type: MsgDetach, ID: "x"}},

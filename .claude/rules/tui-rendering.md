@@ -270,10 +270,18 @@ arrived at a higher revision and this client adopts it.
 
 **`syncTabLayout`** runs per existing tab, per broadcast, BEFORE panes are
 reconciled, and every comparison is STRUCTURAL (parsed `SerializedNode`),
-never by bytes — the daemon's stored bytes and a client's own re-marshal of
-the same tree encode differently (declaration order vs. `map[string]any`'s
-alphabetical order), the same caveat the layout-persistence invariant in
-`.claude/CLAUDE.md` states. A higher `layout_rev` (or `tab.adoptNext`, set
+never by bytes. Since the phase 3a typed schema (`.claude/rules/daemon-lifecycle.md`'s
+"Protocol base" section), the wire bytes for a tab's `layout` key are the
+daemon's stored `json.RawMessage` forwarded verbatim — no intermediate
+`map[string]any` re-marshal exists any more to reorder keys, so two equal
+trees no longer arrive as different bytes for that reason. The comparison
+stays structural because the CLIENT side of it never has bytes to begin
+with: `tab.layoutSent`/`m.layoutForSend(tab)` are `*SerializedNode` values
+built straight off the live tree, so parsing the incoming JSON once
+(`storedLayout`) — which `adoptTabLayout` needs anyway — and comparing
+values is the natural form, not a workaround for divergent encodings — see
+the layout-persistence invariant in `.claude/CLAUDE.md` for the same point.
+A higher `layout_rev` (or `tab.adoptNext`, set
 after a reattach — see below) triggers `adoptTabLayout`, UNLESS the stored
 tree is this client's own write echoing back (`reflect.DeepEqual(stored,
 tab.layoutSent)`), which is adopted as a no-op and clears `layoutDirty`,

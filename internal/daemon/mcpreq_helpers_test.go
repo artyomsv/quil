@@ -45,6 +45,13 @@ func registerShippedPlugins(t *testing.T, d *Daemon) {
 
 // roundTrip sends an ID-bearing request and returns the first response of
 // respType carrying the same ID, skipping broadcasts.
+//
+// The read deadline is what actually bounds this: Receive blocks with no
+// timeout of its own, so a bare time.After checked only BETWEEN successful
+// reads never interrupts one that never arrives — exactly the failure this
+// helper exists to catch. SetReadDeadline unparks a Receive already in
+// progress, which is why it is set before the loop rather than raced against
+// it.
 func roundTrip(t *testing.T, client *ipc.Client, msgType, respType string, payload any) *ipc.Message {
 	t.Helper()
 	msg, err := ipc.NewMessage(msgType, payload)
@@ -55,16 +62,14 @@ func roundTrip(t *testing.T, client *ipc.Client, msgType, respType string, paylo
 	if err := client.Send(msg); err != nil {
 		t.Fatalf("send %s: %v", msgType, err)
 	}
-	deadline := time.After(5 * time.Second)
+	if err := client.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline: %v", err)
+	}
+	defer client.SetReadDeadline(time.Time{})
 	for {
-		select {
-		case <-deadline:
-			t.Fatalf("no %s arrived for %s", respType, msgType)
-		default:
-		}
 		resp, err := client.Receive()
 		if err != nil {
-			t.Fatalf("receive: %v", err)
+			t.Fatalf("no %s arrived for %s: %v", respType, msgType, err)
 		}
 		if resp.Type == respType && resp.ID == msg.ID {
 			return resp

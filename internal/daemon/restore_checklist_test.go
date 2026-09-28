@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/ringbuf"
 )
 
@@ -39,18 +40,12 @@ func TestSnapshotRestore_HistoryLineCount(t *testing.T) {
 	}
 }
 
-// paneMapByID pulls the pane entries out of a workspace-state map keyed by id.
-// Only valid for a map returned directly by workspaceStateFromSnapshot — after a
-// JSON round-trip "panes" would be []any, not []map[string]any.
-func paneMapByID(t *testing.T, state map[string]any) map[string]map[string]any {
+// paneMapByID pulls the pane entries out of a workspace state keyed by id.
+func paneMapByID(t *testing.T, state ipc.WorkspaceState) map[string]ipc.PaneState {
 	t.Helper()
-	out := map[string]map[string]any{}
-	panes, ok := state["panes"].([]map[string]any)
-	if !ok {
-		t.Fatalf("state[panes] wrong type: %T", state["panes"])
-	}
-	for _, p := range panes {
-		out[p["id"].(string)] = p
+	out := map[string]ipc.PaneState{}
+	for _, p := range state.Panes {
+		out[p.ID] = p
 	}
 	return out
 }
@@ -66,19 +61,19 @@ func TestWorkspaceState_BroadcastsSessionIDAndHistoryLines(t *testing.T) {
 	d.session.RestoreTab(&Tab{ID: "tab-aa", Name: "A", Panes: []string{"pane-aa"}}, []*Pane{pane})
 
 	bc := paneMapByID(t, d.buildWorkspaceState())["pane-aa"]
-	if bc["session_id"] != "8f2e1c00-dead-beef" {
-		t.Errorf("broadcast session_id = %v, want full id", bc["session_id"])
+	if bc.SessionID != "8f2e1c00-dead-beef" {
+		t.Errorf("broadcast session_id = %v, want full id", bc.SessionID)
 	}
-	if hl, _ := bc["history_lines"].(int); hl != 3 {
-		t.Errorf("broadcast history_lines = %v, want 3", bc["history_lines"])
+	if bc.HistoryLines != 3 {
+		t.Errorf("broadcast history_lines = %v, want 3", bc.HistoryLines)
 	}
 
 	active, tabs, byTab, projects, activeProject := d.session.SnapshotState()
 	disk := paneMapByID(t, d.workspaceStateFromSnapshot(active, tabs, byTab, projects, activeProject, false))["pane-aa"]
-	if _, ok := disk["session_id"]; ok {
+	if disk.SessionID != "" {
 		t.Error("disk snapshot must not contain session_id")
 	}
-	if _, ok := disk["history_lines"]; ok {
+	if disk.HistoryLines != 0 {
 		t.Error("disk snapshot must not contain history_lines")
 	}
 }
@@ -91,10 +86,10 @@ func TestWorkspaceState_OmitsEmptyChecklistHints(t *testing.T) {
 	}
 	d.session.RestoreTab(&Tab{ID: "tab-bb", Name: "B", Panes: []string{"pane-bb"}}, []*Pane{pane})
 	bc := paneMapByID(t, d.buildWorkspaceState())["pane-bb"]
-	if _, ok := bc["session_id"]; ok {
+	if bc.SessionID != "" {
 		t.Error("session_id must be omitted when empty")
 	}
-	if _, ok := bc["history_lines"]; ok {
+	if bc.HistoryLines != 0 {
 		t.Error("history_lines must be omitted when zero")
 	}
 }

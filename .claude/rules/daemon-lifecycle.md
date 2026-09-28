@@ -19,6 +19,69 @@ Extracted verbatim from `.claude/CLAUDE.md`. Loaded only when the files above ar
 
 Length-prefixed JSON protocol (4-byte big-endian uint32 + JSON). Each `Conn` owns TWO 64-slot queues — `critCh` (must-deliver: state, responses, ghost replay, lifecycle) and `outCh` (droppable: live `MsgPaneOutput` broadcast frames) — drained by a priority `sendLoop` (critical-first). `Conn.Send`/`sendFrame` are non-blocking (this is the DAEMON-side path; `ipc.Client.Send` is not — see below); `SendBlocking` (unicast bulk: ghost replay + attach event replay, which routinely exceed 64 frames — two full 256 KB ghost buffers = 64 chunks) waits for `critCh` to drain below half capacity (`sendHeadroom`) instead of tripping the overflow close — backpressure slows only that client's replay, the reserved half keeps concurrent broadcast criticals from hitting a replay-saturated queue, and it aborts on conn close (`ErrConnClosed`) or a caller cancel channel (`ErrSendCanceled`, daemon shutdown). `Broadcast` marshals once and fans the SAME frame out via `enqueue(frame, droppable)` where `droppable = msg.Type == MsgPaneOutput` — there is no clone, and the comment at `server.go:610` is the contract: `EncodeFrame` returns a **freshly allocated, never-pooled** slice on every call, so all per-conn `sendLoop`s can share it read-only. That freshness is relied on by `Send`, `SendBlocking` and the `Broadcast` fan-out at once, and it is also what makes the decode side's payload aliasing safe — so `EncodeFrame` must never grow a `sync.Pool` or any other buffer reuse, which is the next optimization someone reaches for and would break all four at the same time. **The same ban applies to `ReadMessage`'s read buffer, for a different reason**: `parseEnvelope` returns `Message.Payload` as a slice ALIASING that buffer rather than copying it (the `json.Unmarshal` fallback copies, so the two decode paths have different lifetime semantics — check which one ran before reasoning about a retained payload). `data` is `make([]byte, length)` per call and `io.ReadFull` copies out of the `bufio.Reader`, so no alias ever points at shared state today; pooling or reusing it would turn into cross-frame payload corruption with nothing else failing. `TestReadMessage_PayloadsDoNotShareBackingArrays` pins it. The alias is confined to `pane_output` — every other type goes through `json.Unmarshal`, which is why the long-lived `tab.Layout = layout` that `handleUpdateLayout` stores through `SessionManager.SetTabLayout` is structurally out of reach of it; `Send` (unicast: ghost replay, MCP responses) is always must-deliver. A full `outCh` DROPS the frame silently (tracked via `Dropped()`) — the conn survives (lossy live output, cosmetically superseded by the next frame). A full `critCh` trips a CAS-guarded overflow (`ErrSendOverflow`), logs once, and spawns `go c.Close()` — only a genuinely wedged peer is disconnected; other clients are never blocked. `sendLoop` also enforces a 30 s `SetWriteDeadline` per frame as a belt-and-suspenders catch for kernel-buffer wedges — and that deadline is a **PROGRESS window, not a patience limit**, which is the correction the 2026-08-11 incident forced. `write` used to return false on any error and let `sendLoop` exit, documented as "the read side detects the matching error + runs `handleConn`'s defer cleanup": true for a peer disconnect, FALSE for a deadline, which is a LOCAL timeout on a live socket the reader sees nothing wrong with. `sendLoop` is the only drainer of `critCh`, so its silent exit produced a conn that read forever and could never write again — the daemon kept accepting requests and queueing must-deliver answers for FOUR MINUTES until `critCh` hit 64/64 and the overflow path finally closed it, while a TUI holding 33 tabs sat starved behind "the local daemon is gone — its panes are lost" over a daemon that was healthy throughout (its snapshot loop never missed a 30 s tick). Two documented contracts depended on the close that never came: `SendBlocking`'s own comment ("deadline trips → conn closes → done fires → this returns" — it instead spun on its 2 ms poll, so a ghost-replay attach into a stalled conn would spin until daemon shutdown) and `Flush`'s, since `pending` stops decrementing the moment `sendLoop` is gone, burning the full timeout on every TUI exit. **`write` now closes the conn itself** (DIRECT, never `go c.Close()` — `closed` must be true before `sendLoop` exits, or `SendBlocking`'s guard still passes against a dead drainer, which is the window the CLIENT-side half of the incident lived in: five hours of every send paying the full `clientSendTimeout`), with `defer c.Close()` at the top of `sendLoop` as the structural backstop so no future return path can leave the conn open. **A deadline expiry WITH PROGRESS is not a failure and does not close**: the deadline bounds one `Write` call, not the peer's health, and a large state frame into a nearly-full buffer can legitimately outlast the window while the peer drains continuously — exactly the slow-but-alive TUI that got dropped. Zero bytes in a whole window is the wedge; anything else is backpressure, and the enqueue-side overflow close remains the bound on a peer merely too slow to keep up. The retry MUST resume at `frame[n:]` — `Write` reports what it placed before giving up, so re-sending the prefix desynchronises a length-prefixed stream, i.e. corruption rather than a drop. **A REFUSED write deadline is reported once per conn** (`reportDeadlineRefused`) rather than discarded: `stdioConn` answers `os.ErrNoDeadline` for every frame, so remote conns have no ceiling at all and the overflow close is their only bound — a real gap that used to be discoverable only by reading the transport. Once per conn because `SetWriteDeadline` runs before EVERY write and every one of them fails over ssh; `DEBUG` for `ErrNoDeadline` (a documented property of a supported transport) and `WARN` for anything else (a Unix socket refusing what it should support). The write window is a **per-conn field** set at construction (`newConnWithWriteWindow`), never a mutable package var — every live `sendLoop` reads it, including ones outliving the parallel test that made them, which is a race the detector catches only sometimes; `TestNewConn_UsesTheProductionWriteWindow` pins the production wiring, because every other test in that file constructs conns through the seam and would not notice `newConn` drifting off `writeDeadline` (verified by mutation: a 1 s window leaves the package green). Regression tests in `conn_writestall_test.go` drive **real** deadlines over `net.Pipe` rather than a fake `net.Conn`, because a fake returning `os.ErrDeadlineExceeded` from `Write` keeps passing even if `SetWriteDeadline` is never called — and the ssh transport is exactly that case in production, since `stdioConn` answers `os.ErrNoDeadline` and remote conns run with the overflow close as their only bound. `Server.ConnCount()` exposes the live count for tests. **`ipc.Client.Send` (every TUI→daemon frame: input, resize, layout, requests) routes through `SendBlocking` with a `clientSendTimeout` grace period, NOT through the non-blocking `Conn.Send`** — the overflow→`Close` policy exists so a daemon can drop one wedged peer rather than stall its fan-out, and a client has no fan-out to protect, so on a client it only ended the session (2026-08-09: 69 must-deliver frames from one broadcast on a 64-slot queue, three self-inflicted disconnects in 70 seconds). On expiry the conn is closed and `ErrSendOverflow` returned, i.e. the pre-existing behaviour with a grace period in front of it — an undelivered must-deliver frame must surface as a link error rather than be reported as accepted. **The bound is load-bearing, not defensive**: deferring to `sendLoop`'s 30 s write deadline instead would park `inputForwarder` for 30 s, and since `inputForwardBuffer` is 1024 deep and `enqueueInput` blocks rather than drop a keystroke, a filled buffer blocks the Update goroutine — the whole TUI, not just input. `inputDrainTimeout` (2 s) is deliberately shorter, so exit out-waits nothing. Daemon-side per-event size caps (4 KiB Message, 1 KiB per Data value — fits a multi-line excerpt in `data.excerpt`, front-truncated with `…[truncated]` marker, reserved `_quil_truncated` flag) live in `internal/daemon/event.go:toPaneEventPayload`
 
+### Protocol base: hello, error replies, numbered typed state (ADR-32)
+
+`internal/ipc/hello.go` adds `hello`/`hello_resp`/`error`/`state_req` under
+`ProtocolVersion = 1`, sent fire-and-forget from the same funnel as the
+pre-existing `client_hello` — `sendClientHello` (`cmd/quil/hello.go`), every
+durable dial (TUI, every MCP bridge, a redial). Nothing in this phase blocks
+waiting on `hello_resp`: making it mandatory now would refuse a fleet the
+version gate already tolerates a mix of. **Error replies go only to an
+ID-BEARING request on a conn whose `hello` registered `proto >= 1`**
+(`helloRegistry.protoOf`, `internal/daemon/procreport.go`; the send side is
+`Daemon.replyError`/`sendError`, `internal/daemon/hello.go`, which checks
+`msg.ID == ""` first) — an id-less send (the TUI's own per-keystroke
+messages) gets nothing whatever the conn's protocol, the same silence it
+always had. A pre-3a MCP bridge's
+`requestWithTimeout` matched a response to its request by correlation id ALONE
+and never checked `resp.Type`, so handing it an `error` frame for a request it
+does not know would have it decode the error payload as if it were the tool's
+own result. Any conn that never says hello (an old build, a bare probe like
+`quil status`) sees exactly the old silence: an unknown or malformed request
+is dropped with no reply. **For a conn that HAS said hello, only `unknown_type`
+is universal** — the default dispatch arm (`daemon.go`'s message-type switch)
+sends it for any `Type` the switch has no case for. `bad_payload` answers
+exactly two handlers so far, `handlePaneHistoryReq`/`handlePaneHistoryEntryReq`
+(plus `handleHello`'s own malformed-hello case, which runs before the conn is
+even registered) — every OTHER handler still decodes a payload it cannot read
+the pre-3a way, its own typed error field or a log, unchanged by this phase.
+`handleHello` must stay synchronous — frames on one conn dispatch in order,
+which is the only thing guaranteeing a request sent right after `hello` is
+already seen as non-legacy.
+
+`internal/ipc/state.go` replaces the old `map[string]any` `workspace_state`
+builder with typed `WorkspaceState`/`TabState`/`PaneState`/`ProjectState`,
+keeping the SAME JSON keys and the SAME presence rules (`omitempty` only where
+the map wrote conditionally) — a frozen copy of the old builder
+(`internal/daemon/state_oracle_test.go`) is compared field-for-field against
+the typed one, so do not "fix" that file to make a test pass; if the two
+disagree the typed builder is what is wrong. `buildWorkspaceState`
+(`daemon.go`) takes `Daemon.stateMu` for its WHOLE body and bumps `d.stateRev`
+**last**, immediately before returning: rev order must equal content order, or
+a client applying frames by number could adopt a lower rev that actually
+describes newer state. `RunID` is minted once per daemon process, so a client
+tells a restart (rev restarting at 1) from a stale frame of the same run.
+`state_req` (`handleStateReq`, `internal/daemon/staterev.go`) answers with the
+current state numbered like any other frame and needs no attach — a script or
+bridge can ask cold.
+
+Client side (`internal/tui/staterev.go`): a `workspace_state` this client
+cannot DECODE is never applied as an empty state (that would reconcile every
+tab away for one malformed frame) — it is dropped, and for a destination that
+has already applied at least one numbered frame (so the daemon is known to
+answer `state_req`), exactly one `state_req` goes out: single-flighted per
+destination, an 8 s timeout, generation-guarded so a late timeout cannot clear
+a newer request's own bookkeeping. A frame that DOES decode is refused only by
+number (`acceptStateRev`) — `rev <= ` the highest already applied for that
+`(dest, run_id)` — never by comparing content, because every frame is a full
+snapshot and there is nothing to reconcile a skipped number against.
+`forgetStateMark` runs on reattach (`internal/tui/reconnect.go`): a restarted
+daemon's numbering starts over, so what this client has "seen" for that
+destination must be forgotten outright, not merely superseded. `refused`
+(`ipc.ErrCodeRefused`) is defined but unused in this phase — reserved for
+phase 4's rights checks. Full context and the wire-format table: ADR-32,
+`docs/architecture.md`.
+
 ### Broadcast subscription (`MsgSubscribe`)
 
 `Broadcast` consults `Conn.wantsFrame(msg.Type)` BEFORE `enqueue`, so the

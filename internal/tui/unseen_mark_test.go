@@ -35,12 +35,12 @@ func unseenUpdatesSent(t *testing.T, fake *fakeSender, paneID string) []bool {
 // by construction and stop testing anything.
 func TestParseWorkspaceState_ReadsTheUnseenWireKey(t *testing.T) {
 	t.Parallel()
-	got := parseWorkspaceState(map[string]any{
+	got := parseWorkspaceState(stateFromMap(t, map[string]any{
 		"panes": []any{
 			map[string]any{"id": "p1", "tab_id": "t1", "unseen": true},
 			map[string]any{"id": "p2", "tab_id": "t1"},
 		},
-	})
+	}))
 	if len(got.Panes) != 2 {
 		t.Fatalf("parsed %d panes, want 2", len(got.Panes))
 	}

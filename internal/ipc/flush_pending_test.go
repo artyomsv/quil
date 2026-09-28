@@ -32,7 +32,7 @@ func TestFlush_ClientSendsAreCounted(t *testing.T) {
 
 	// One send is enough: net.Pipe is unbuffered, so sendLoop parks on the
 	// write and the frame is still outstanding.
-	msg, err := NewMessage(MsgStateUpdate, map[string]string{"x": "y"})
+	msg, err := NewMessage(testMsgType, map[string]string{"x": "y"})
 	if err != nil {
 		t.Fatalf("NewMessage: %v", err)
 	}

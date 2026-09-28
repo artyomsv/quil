@@ -422,15 +422,13 @@ func TestPaneSizes_FailedResizeSendsPreviousSize(t *testing.T) {
 	}
 }
 
-// broadcastSizeSeq reads pane id's size_seq out of a broadcast state map; 0
+// broadcastSizeSeq reads pane id's size_seq out of a broadcast state; 0
 // when absent. No t here: it also runs inside a PTY hook, off the test
 // goroutine, where t.Fatal is not allowed.
-func broadcastSizeSeq(state map[string]any, id string) uint64 {
-	panes, _ := state["panes"].([]map[string]any)
-	for _, p := range panes {
-		if p["id"] == id {
-			n, _ := p["size_seq"].(uint64)
-			return n
+func broadcastSizeSeq(state ipc.WorkspaceState, id string) uint64 {
+	for _, p := range state.Panes {
+		if p.ID == id {
+			return p.SizeSeq
 		}
 	}
 	return 0
@@ -491,20 +489,21 @@ func TestWorkspaceState_CarriesSizeMasterAndClients(t *testing.T) {
 	attachAB(t, d, sock)
 
 	state := d.buildWorkspaceState()
-	if got, _ := state["size_master"].(string); got != "A" {
-		t.Errorf("size_master = %v, want A", state["size_master"])
+	if state.SizeMaster == nil || *state.SizeMaster != "A" {
+		t.Errorf("size_master = %v, want A", state.SizeMaster)
 	}
-	if got, _ := state["clients"].(int); got != 2 {
-		t.Errorf("clients = %v, want 2", state["clients"])
+	if state.Clients == nil || *state.Clients != 2 {
+		t.Errorf("clients = %v, want 2", state.Clients)
 	}
 
 	activeTab, tabs, panesByTab, projects, activeProject := d.session.SnapshotState()
 	for _, overlays := range []bool{false, true} {
 		m := d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab, projects, activeProject, overlays)
-		for _, k := range []string{"size_master", "clients"} {
-			if _, ok := m[k]; ok {
-				t.Errorf("workspaceStateFromSnapshot(includeOverlays=%v) has %q", overlays, k)
-			}
+		if m.SizeMaster != nil {
+			t.Errorf("workspaceStateFromSnapshot(includeOverlays=%v) has size_master", overlays)
+		}
+		if m.Clients != nil {
+			t.Errorf("workspaceStateFromSnapshot(includeOverlays=%v) has clients", overlays)
 		}
 	}
 }

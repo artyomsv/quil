@@ -8,6 +8,7 @@ import (
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/memreport"
 	"github.com/artyomsv/quil/internal/proctree"
+	"github.com/google/uuid"
 )
 
 // processStart is when this process began, for the uptime it reports.
@@ -15,6 +16,12 @@ import (
 // A package var set at init rather than a value threaded through: every dial
 // site needs it and none of them has a natural place to carry it.
 var processStart = time.Now()
+
+// processClientID identifies this process to every daemon it talks to. The
+// TUI hands the same value to the model (SetClientID), so hello and attach
+// name the client identically — phase 3a's spec 4.1 calls this "the same id
+// attach carries".
+var processClientID = uuid.NewString()
 
 // Roles a quil process can report itself as.
 const (
@@ -45,6 +52,8 @@ func sendClientHello(client *ipc.Client, role string) {
 	if client == nil {
 		return
 	}
+	sendHello(client, role)
+
 	msg, err := ipc.NewMessage(ipc.MsgClientHello, ipc.ClientHelloPayload{
 		Role:    role,
 		PID:     os.Getpid(),
@@ -66,6 +75,31 @@ func sendClientHello(client *ipc.Client, role string) {
 	// not fail loudly, it would just show an em dash forever in a diagnostic
 	// dialog nobody opens until something is already wrong.
 	startClientStatReports(client)
+}
+
+// sendHello registers this conn as a protocol-1 client. Fire and forget: no
+// 3a client needs anything from hello_resp, and an older daemon drops the
+// type (the client_hello that follows keeps its process dialog working).
+//
+// Called only from sendClientHello, after its nil check — this is not a
+// second public entry point, it is the hello half of that one funnel split
+// out so the wire shape has a name of its own.
+func sendHello(client *ipc.Client, kind string) {
+	msg, err := ipc.NewMessage(ipc.MsgHello, ipc.HelloPayload{
+		Kind:     kind,
+		Proto:    ipc.ProtocolVersion,
+		ClientID: processClientID,
+		Version:  version,
+		PID:      os.Getpid(),
+		ExeName:  currentExeName(),
+		UptimeMS: time.Since(processStart).Milliseconds(),
+	})
+	if err != nil {
+		return
+	}
+	msg.ID = "hello-" + uuid.NewString()
+	// Best effort, like client_hello: a failed send only leaves this conn legacy.
+	_ = client.Send(msg)
 }
 
 // statPushInterval matches the daemon's proc-collector tick, so a client's

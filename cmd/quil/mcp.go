@@ -164,6 +164,13 @@ func (b *mcpBridge) requestWithTimeout(msgType string, payload any, timeout time
 		if !ok {
 			return nil, fmt.Errorf("connection lost while waiting for %s response", msgType)
 		}
+		if resp.Type == ipc.MsgError {
+			var e ipc.ErrorPayload
+			if err := resp.DecodePayload(&e); err != nil {
+				return nil, fmt.Errorf("daemon refused %s (unreadable error reply: %v)", msgType, err)
+			}
+			return nil, fmt.Errorf("daemon refused %s: %s (%s)", msgType, e.Message, e.Code)
+		}
 		return resp, nil
 	case <-timer.C:
 		b.mu.Lock()

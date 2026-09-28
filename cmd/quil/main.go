@@ -628,6 +628,10 @@ func launchTUI() {
 	// would keep the default for its whole life.
 	tui.SetScrollbackLines(cfg.UI.ScrollbackLines)
 	model := tui.NewModel(router, cfg, version, reg, stalePlugins, whatsNew)
+	// Hello (sendClientHello, above) and attach must name this process
+	// identically, or the daemon's process dialog and its attached-client
+	// registry disagree about who this is.
+	model.SetClientID(processClientID)
 	// Seed a row for every configured destination that did not connect. Without
 	// this the host simply vanishes from the sidebar, which reads as Quil having
 	// deleted the user's projects — and after a client auto-update it happens on

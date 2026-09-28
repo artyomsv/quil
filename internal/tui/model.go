@@ -8477,6 +8477,19 @@ func (m Model) listenForMessages() tea.Cmd {
 			}
 			return stageUpdateRespMsg{Resp: payload}
 
+		case ipc.MsgHelloResp:
+			// sendClientHello's hello is fire-and-forget; nothing waits on this.
+			return listenContinueMsg{}
+
+		case ipc.MsgError:
+			var e ipc.ErrorPayload
+			if err := msg.DecodePayload(&e); err != nil {
+				log.Printf("ipc recv: error reply (undecodable): %v", err)
+				return listenContinueMsg{}
+			}
+			log.Printf("ipc recv: error reply for %s id=%s: %s (%s)", e.Type, msg.ID, e.Message, e.Code)
+			return listenContinueMsg{}
+
 		default:
 			log.Printf("ipc recv: unknown type %q", msg.Type)
 			return listenContinueMsg{}

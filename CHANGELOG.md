@@ -11,6 +11,12 @@ version section here and deletes them.
 
 ## [Unreleased]
 
+## [1.82.0] - 2026-09-28
+
+### Changed
+- Every client now says `hello` to the daemon. A request the daemon does not know, or cannot read, gets an error reply instead of a silent timeout — the MCP bridge shows that error.
+- Workspace updates are numbered. A client drops an out-of-date update, and an update it cannot read is never applied as an empty workspace; it asks the daemon for a full copy instead.
+
 ## [1.81.0] - 2026-09-27
 
 ### Added

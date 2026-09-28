@@ -5,19 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
 )
-
-func helloMsg(t *testing.T, id string, p ipc.HelloPayload) *ipc.Message {
-	t.Helper()
-	m, err := ipc.NewMessage(ipc.MsgHello, p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	m.ID = id
-	return m
-}
 
 func TestHandleMessage_Hello_AnswersAndRegistersProto(t *testing.T) {
 	d, client := mcpTestDaemon(t)
@@ -80,31 +69,40 @@ func TestHandleMessage_HelloedConn_NoID_NoReply(t *testing.T) {
 }
 
 func TestHandleMessage_ClientHelloAfterHello_KeepsProto(t *testing.T) {
-	t.Setenv("QUIL_HOME", t.TempDir())
-	d := New(config.Default())
-	conn := &ipc.Conn{}
-	d.handleMessage(conn, helloMsg(t, "h1", ipc.HelloPayload{Kind: "tui", Proto: 1, PID: 9}))
-	ch, err := ipc.NewMessage(ipc.MsgClientHello, ipc.ClientHelloPayload{Role: "tui", PID: 9})
-	if err != nil {
-		t.Fatal(err)
-	}
-	d.handleMessage(conn, ch)
-	if d.hellos.protoOf(conn) != 1 {
-		t.Error("client_hello after hello reset the conn to legacy")
+	_, client := mcpTestDaemon(t)
+	roundTrip(t, client, ipc.MsgHello, ipc.MsgHelloResp, ipc.HelloPayload{
+		Kind: "tui", Proto: 1, PID: os.Getpid(),
+	})
+	sendNoID(t, client, ipc.MsgClientHello, ipc.ClientHelloPayload{Role: "tui", PID: os.Getpid()})
+	// If client_hello following hello had reset the conn to legacy (proto 0),
+	// this unknown type would get silence instead — replyError only answers
+	// proto >= 1. Getting an error back is the on-the-wire proof that proto
+	// survived the client_hello that came after the hello.
+	resp := roundTrip(t, client, "no_such_req", ipc.MsgError, struct{}{})
+	if e := decodeInto[ipc.ErrorPayload](t, resp); e.Code != ipc.ErrCodeUnknownType {
+		t.Errorf("error = %+v, want unknown_type — client_hello after hello reset the conn to legacy", e)
 	}
 }
 
 func TestHelloRegistry_PIDZero_NonLegacyButNotInDialog(t *testing.T) {
-	t.Setenv("QUIL_HOME", t.TempDir())
-	d := New(config.Default())
-	conn := &ipc.Conn{}
-	d.handleMessage(conn, helloMsg(t, "h1", ipc.HelloPayload{Kind: "web", Proto: 1, PID: 0}))
-	if d.hellos.protoOf(conn) != 1 {
-		t.Error("a PID-less hello did not register the protocol")
+	_, client := mcpTestDaemon(t)
+	roundTrip(t, client, ipc.MsgHello, ipc.MsgHelloResp, ipc.HelloPayload{
+		Kind: "web", Proto: 1, PID: 0,
+	})
+	// Same on-the-wire proof as above: a PID-less hello must still register
+	// the protocol, or this unknown type would get silence instead of an
+	// error.
+	resp := roundTrip(t, client, "no_such_req", ipc.MsgError, struct{}{})
+	if e := decodeInto[ipc.ErrorPayload](t, resp); e.Code != ipc.ErrCodeUnknownType {
+		t.Errorf("error = %+v, want unknown_type — a PID-less hello did not register the protocol", e)
 	}
-	rows, _ := d.hellos.describe([]*ipc.Conn{conn}, "1.81.0", time.Now())
-	if len(rows) != 0 {
-		t.Errorf("process dialog lists a PID-less client: %+v", rows)
+	report := roundTrip(t, client, ipc.MsgResourceReportReq, ipc.MsgResourceReportResp,
+		ipc.ResourceReportReqPayload{WithTrees: true})
+	got := decodeInto[ipc.ResourceReportRespPayload](t, report)
+	for _, row := range got.Quil {
+		if row.PID == 0 || row.Role == "web" {
+			t.Errorf("process dialog lists a PID-less client: %+v", row)
+		}
 	}
 }
 

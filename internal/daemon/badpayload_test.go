@@ -98,19 +98,22 @@ func reqTypesFromProtocolSource(t *testing.T) []string {
 }
 
 // waitFrameWithID reads frames until one with the given ID arrives (any
-// type), or fails the test at the deadline.
+// type), or fails the test once the read deadline trips.
+//
+// The deadline is on the socket itself (SetReadDeadline), not a bare
+// time.After checked between reads — Receive blocks with no timeout of its
+// own, so only a real read deadline can unpark one that never arrives, which
+// is exactly the failure this helper exists to catch.
 func waitFrameWithID(t *testing.T, client *ipc.Client, id string, timeout time.Duration) *ipc.Message {
 	t.Helper()
-	deadline := time.After(timeout)
+	if err := client.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		t.Fatalf("SetReadDeadline: %v", err)
+	}
+	defer client.SetReadDeadline(time.Time{})
 	for {
-		select {
-		case <-deadline:
-			t.Fatalf("no frame arrived for id %s", id)
-		default:
-		}
 		resp, err := client.Receive()
 		if err != nil {
-			t.Fatalf("receive: %v", err)
+			t.Fatalf("no frame arrived for id %s: %v", id, err)
 		}
 		if resp.ID == id {
 			return resp

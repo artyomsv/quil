@@ -107,9 +107,13 @@ func TestHelloRegistry_PIDZero_NonLegacyButNotInDialog(t *testing.T) {
 }
 
 // drainNoFrameWithID sends a version_req with a fresh ID, then reads frames
-// (5 s deadline) until that version_resp arrives. It fails the test on any
-// frame read before it whose ID == id — or, when id == "", whose Type ==
-// ipc.MsgError. The deadline is cleared before returning.
+// until that version_resp arrives, bounded by a 5 s deadline ON THE READ
+// ITSELF (SetReadDeadline) rather than a bare time.After checked only
+// between successful reads — Receive blocks with no timeout of its own, so
+// only a real read deadline unparks one that never arrives, which is exactly
+// the failure this helper exists to catch. It fails the test on any frame
+// read before the version_resp whose ID == id — or, when id == "", whose
+// Type == ipc.MsgError. The deadline is cleared before returning.
 func drainNoFrameWithID(t *testing.T, client *ipc.Client, id string) {
 	t.Helper()
 	probe, err := ipc.NewMessage(ipc.MsgVersionReq, struct{}{})
@@ -120,16 +124,14 @@ func drainNoFrameWithID(t *testing.T, client *ipc.Client, id string) {
 	if err := client.Send(probe); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.After(5 * time.Second)
+	if err := client.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline: %v", err)
+	}
+	defer client.SetReadDeadline(time.Time{})
 	for {
-		select {
-		case <-deadline:
-			t.Fatalf("no %s arrived for probe %s", ipc.MsgVersionResp, probe.ID)
-		default:
-		}
 		resp, err := client.Receive()
 		if err != nil {
-			t.Fatalf("receive: %v", err)
+			t.Fatalf("no %s arrived for probe %s: %v", ipc.MsgVersionResp, probe.ID, err)
 		}
 		if resp.Type == ipc.MsgVersionResp && resp.ID == probe.ID {
 			return

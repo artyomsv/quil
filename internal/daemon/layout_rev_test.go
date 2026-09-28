@@ -196,33 +196,30 @@ func TestWorkspaceState_TabCarriesLayoutRev(t *testing.T) {
 	d := newTestDaemon(t)
 	tab := d.session.CreateTab("layout")
 
-	findTab := func(state map[string]any) map[string]any {
+	findTab := func(state ipc.WorkspaceState) ipc.TabState {
 		t.Helper()
-		tabsOut, _ := state["tabs"].([]map[string]any)
-		for _, tb := range tabsOut {
-			if tb["id"] == tab.ID {
+		for _, tb := range state.Tabs {
+			if tb.ID == tab.ID {
 				return tb
 			}
 		}
 		t.Fatalf("tab %s missing from workspace state", tab.ID)
-		return nil
+		return ipc.TabState{}
 	}
 
+	// layout_rev has no omitempty — it must be on the wire even at its zero
+	// value, unlike layout below — so a stateMap round trip would find it
+	// present either way. The typed field is the more direct check.
 	tb := findTab(d.buildWorkspaceState())
-	rev, ok := tb["layout_rev"]
-	if !ok {
-		t.Fatal("layout_rev missing from a tab that has never had a layout written")
-	}
-	if rev != uint64(0) {
-		t.Errorf("layout_rev = %v, want 0", rev)
+	if tb.LayoutRev != 0 {
+		t.Errorf("layout_rev = %v, want 0", tb.LayoutRev)
 	}
 
 	if !d.session.SetTabLayout(tab.ID, json.RawMessage(`{"v":1}`), nil) {
 		t.Fatal("SetTabLayout should be accepted")
 	}
 	tb = findTab(d.buildWorkspaceState())
-	rev, ok = tb["layout_rev"]
-	if !ok || rev != uint64(1) {
-		t.Errorf("layout_rev after one accepted write = %v (present=%v), want 1", rev, ok)
+	if tb.LayoutRev != 1 {
+		t.Errorf("layout_rev after one accepted write = %v, want 1", tb.LayoutRev)
 	}
 }

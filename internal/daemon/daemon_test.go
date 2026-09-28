@@ -87,56 +87,54 @@ func TestWorkspaceStateFromSnapshot(t *testing.T) {
 
 	state := d.workspaceStateFromSnapshot("tab-aaaaaaaa", tabs, panesByTab, nil, "", false)
 
-	if got := state["active_tab"]; got != "tab-aaaaaaaa" {
+	if got := state.ActiveTab; got != "tab-aaaaaaaa" {
 		t.Errorf("active_tab = %v, want tab-aaaaaaaa", got)
 	}
 
-	tabsOut, _ := state["tabs"].([]map[string]any)
+	tabsOut := state.Tabs
 	if len(tabsOut) != 2 {
 		t.Fatalf("tabs len = %d, want 2", len(tabsOut))
 	}
-	if tabsOut[0]["id"] != "tab-aaaaaaaa" || tabsOut[0]["color"] != "blue" {
+	if tabsOut[0].ID != "tab-aaaaaaaa" || tabsOut[0].Color != "blue" {
 		t.Errorf("tab[0] = %+v", tabsOut[0])
 	}
-	if _, ok := tabsOut[0]["layout"]; !ok {
-		t.Error("tab[0] missing layout key")
+	if len(tabsOut[0].Layout) == 0 {
+		t.Error("tab[0] missing layout")
 	}
-	if _, ok := tabsOut[1]["layout"]; ok {
+	if len(tabsOut[1].Layout) != 0 {
 		t.Error("tab[1] has layout — should be elided when zero-length")
 	}
 
-	panesOut, _ := state["panes"].([]map[string]any)
+	panesOut := state.Panes
 	if len(panesOut) != 2 {
 		t.Fatalf("panes len = %d, want 2", len(panesOut))
 	}
 
 	pane0 := panesOut[0]
-	if pane0["id"] != "pane-11111111" || pane0["cwd"] != "/home/user" {
+	if pane0.ID != "pane-11111111" || pane0.CWD != "/home/user" {
 		t.Errorf("pane[0] basic fields = %+v", pane0)
 	}
-	if pane0["name"] != "make" {
-		t.Errorf("pane[0] name = %v, want 'make'", pane0["name"])
+	if pane0.Name != "make" {
+		t.Errorf("pane[0] name = %v, want 'make'", pane0.Name)
 	}
-	if pane0["type"] != "claude-code" {
-		t.Errorf("pane[0] type = %v, want 'claude-code'", pane0["type"])
+	if pane0.Type != "claude-code" {
+		t.Errorf("pane[0] type = %v, want 'claude-code'", pane0.Type)
 	}
-	if pane0["instance_name"] != "default" {
-		t.Errorf("pane[0] instance_name = %v", pane0["instance_name"])
+	if pane0.InstanceName != "default" {
+		t.Errorf("pane[0] instance_name = %v", pane0.InstanceName)
 	}
-	if args, ok := pane0["instance_args"].([]string); !ok || !reflect.DeepEqual(args, []string{"--resume", "abc"}) {
-		t.Errorf("pane[0] instance_args = %v, want [--resume abc]", pane0["instance_args"])
+	if !reflect.DeepEqual(pane0.InstanceArgs, []string{"--resume", "abc"}) {
+		t.Errorf("pane[0] instance_args = %v, want [--resume abc]", pane0.InstanceArgs)
 	}
-	if ps, ok := pane0["plugin_state"].(map[string]string); !ok || ps["session_id"] != "abc" {
-		t.Errorf("pane[0] plugin_state = %v", pane0["plugin_state"])
+	if pane0.PluginState["session_id"] != "abc" {
+		t.Errorf("pane[0] plugin_state = %v", pane0.PluginState)
 	}
 
 	// Pane 2 is a default terminal with no extras → optional fields must
 	// all be elided to keep workspace.json compact.
 	pane1 := panesOut[1]
-	for _, k := range []string{"name", "type", "instance_name", "instance_args", "plugin_state"} {
-		if _, ok := pane1[k]; ok {
-			t.Errorf("pane[1] has unexpected %q key: %v", k, pane1[k])
-		}
+	if pane1.Name != "" || pane1.Type != "" || pane1.InstanceName != "" || pane1.InstanceArgs != nil || pane1.PluginState != nil {
+		t.Errorf("pane[1] has an unexpected field set: %+v", pane1)
 	}
 }
 
@@ -322,17 +320,17 @@ func TestWorkspaceState_OverlayPane_BroadcastVsDisk(t *testing.T) {
 
 	// Broadcast: overlay pane must be included and carry overlay=true.
 	live := d.workspaceStateFromSnapshot(tab.ID, tabs, panesByTab, nil, "", true)
-	livePanes := live["panes"].([]map[string]any)
+	livePanes := live.Panes
 	if len(livePanes) != 2 {
 		t.Fatalf("broadcast panes = %d, want 2", len(livePanes))
 	}
 	var flagged bool
 	for _, p := range livePanes {
-		if p["id"] == overlay.ID {
-			if p["overlay"] == true {
+		if p.ID == overlay.ID {
+			if p.Overlay {
 				flagged = true
 			} else {
-				t.Errorf("broadcast overlay pane missing overlay=true; got %v", p["overlay"])
+				t.Errorf("broadcast overlay pane missing overlay=true; got %v", p.Overlay)
 			}
 		}
 	}
@@ -343,18 +341,18 @@ func TestWorkspaceState_OverlayPane_BroadcastVsDisk(t *testing.T) {
 	// Disk: overlay pane must be absent from both the pane list and the
 	// tab's pane-ID list.
 	disk := d.workspaceStateFromSnapshot(tab.ID, tabs, panesByTab, nil, "", false)
-	diskPanes := disk["panes"].([]map[string]any)
+	diskPanes := disk.Panes
 	if len(diskPanes) != 1 {
 		t.Fatalf("disk panes = %d, want 1", len(diskPanes))
 	}
-	if diskPanes[0]["id"] != normal.ID {
-		t.Fatalf("disk panes[0].id = %v, want %s", diskPanes[0]["id"], normal.ID)
+	if diskPanes[0].ID != normal.ID {
+		t.Fatalf("disk panes[0].id = %v, want %s", diskPanes[0].ID, normal.ID)
 	}
-	diskTabs := disk["tabs"].([]map[string]any)
+	diskTabs := disk.Tabs
 	if len(diskTabs) != 1 {
 		t.Fatalf("disk tabs = %d, want 1", len(diskTabs))
 	}
-	ids := diskTabs[0]["panes"].([]string)
+	ids := diskTabs[0].Panes
 	for _, id := range ids {
 		if id == overlay.ID {
 			t.Error("disk tab pane-ID list must not reference the overlay pane")

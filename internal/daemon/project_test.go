@@ -44,20 +44,11 @@ func broadcastTabIDs(t *testing.T, sm *SessionManager, projectID string) []strin
 	d := New(config.Default())
 	activeTab, tabs, panesByTab, projects, activeProject := sm.SnapshotState()
 	state := d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab, projects, activeProject, false)
-	list, ok := state["projects"].([]any)
-	if !ok {
-		t.Fatalf("projects = %T, want []any", state["projects"])
-	}
-	for _, raw := range list {
-		p, ok := raw.(map[string]any)
-		if !ok || p["id"] != projectID {
+	for _, p := range state.Projects {
+		if p.ID != projectID {
 			continue
 		}
-		ids, ok := p["tab_ids"].([]string)
-		if !ok {
-			t.Fatalf("tab_ids = %T, want []string", p["tab_ids"])
-		}
-		return ids
+		return p.TabIDs
 	}
 	t.Fatalf("project %q missing from the broadcast", projectID)
 	return nil

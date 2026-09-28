@@ -41,19 +41,19 @@ func TestFlushPaneOutput_DetectsMouseTracking(t *testing.T) {
 
 	// The broadcast snapshot must carry the runtime flags so the TUI sees them.
 	state := d.buildWorkspaceState()
-	panes, _ := state["panes"].([]map[string]any)
+	panes := state.Panes
 	if len(panes) == 0 {
 		t.Fatal("workspace state has no panes")
 	}
 	var found bool
 	for _, p := range panes {
-		if p["id"] == pane.ID {
+		if p.ID == pane.ID {
 			found = true
-			if p["mouse_tracking"] != true {
-				t.Errorf("snapshot mouse_tracking = %v, want true", p["mouse_tracking"])
+			if !p.MouseTracking {
+				t.Errorf("snapshot mouse_tracking = %v, want true", p.MouseTracking)
 			}
-			if p["mouse_sgr"] != true {
-				t.Errorf("snapshot mouse_sgr = %v, want true", p["mouse_sgr"])
+			if !p.MouseSGR {
+				t.Errorf("snapshot mouse_sgr = %v, want true", p.MouseSGR)
 			}
 		}
 	}

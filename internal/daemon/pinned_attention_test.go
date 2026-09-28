@@ -180,13 +180,14 @@ func TestSnapshot_PinnedAttentionUsesTheWireKey(t *testing.T) {
 	// which is why it is written outside that block.
 	for _, includeOverlays := range []bool{false, true} {
 		activeTab, tabs, panesByTab, projects, activeProject := d.session.SnapshotState()
-		state := d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab, projects, activeProject, includeOverlays)
-		panes, ok := state["panes"].([]map[string]any)
+		state := stateMap(t, d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab, projects, activeProject, includeOverlays))
+		panes, ok := state["panes"].([]any)
 		if !ok {
-			t.Fatalf("includeOverlays=%v: panes is %T, want []map[string]any", includeOverlays, state["panes"])
+			t.Fatalf("includeOverlays=%v: panes is %T, want []any", includeOverlays, state["panes"])
 		}
 		var found bool
-		for _, pd := range panes {
+		for _, raw := range panes {
+			pd, _ := raw.(map[string]any)
 			if pd["id"] != pane.ID {
 				continue
 			}

@@ -31,7 +31,7 @@ func TestBuildWorkspaceState_UpdateKey(t *testing.T) {
 	d := New(config.Default())
 
 	state := d.buildWorkspaceState()
-	if _, ok := state["update"]; ok {
+	if state.Update != nil {
 		t.Error("update key present with no update info")
 	}
 
@@ -44,18 +44,18 @@ func TestBuildWorkspaceState_UpdateKey(t *testing.T) {
 	}
 
 	state = d.buildWorkspaceState()
-	got, ok := state["update"].(*ipc.UpdateInfo)
-	if !ok {
-		t.Fatalf("state[update] = %T, want *ipc.UpdateInfo", state["update"])
+	got := state.Update
+	if got == nil {
+		t.Fatalf("state.Update = nil, want *ipc.UpdateInfo")
 	}
 	if got.LatestVersion != "0.0.2" || got.StagedVersion != "0.0.2" || !got.InstallWritable {
-		t.Errorf("state[update] = %+v", got)
+		t.Errorf("state.Update = %+v", got)
 	}
 
 	if changed := d.setUpdateInfo(nil); !changed {
 		t.Error("setUpdateInfo(nil after set) = false, want true")
 	}
-	if _, ok := d.buildWorkspaceState()["update"]; ok {
+	if d.buildWorkspaceState().Update != nil {
 		t.Error("update key present after clearing info")
 	}
 }

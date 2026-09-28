@@ -9,11 +9,11 @@ import "testing"
 // (explicit false) agree.
 func TestBuildWorkspaceState_DaemonLimitedOnlyWhenLimited(t *testing.T) {
 	d := newTestDaemon(t)
-	if _, ok := d.buildWorkspaceState()["daemon_limited"]; ok {
+	if _, ok := stateMap(t, d.buildWorkspaceState())["daemon_limited"]; ok {
 		t.Error("daemon_limited present on a normal daemon")
 	}
 	d.limited = true
-	if v, _ := d.buildWorkspaceState()["daemon_limited"].(bool); !v {
+	if v, _ := stateMap(t, d.buildWorkspaceState())["daemon_limited"].(bool); !v {
 		t.Error("daemon_limited missing on a limited daemon")
 	}
 }
@@ -30,7 +30,7 @@ func TestNew_InServiceSession_BroadcastsDaemonLimited(t *testing.T) {
 	if !d.limited {
 		t.Fatal("New did not mark a session-0 daemon limited")
 	}
-	if v, _ := d.buildWorkspaceState()["daemon_limited"].(bool); !v {
+	if v, _ := stateMap(t, d.buildWorkspaceState())["daemon_limited"].(bool); !v {
 		t.Error("daemon_limited missing from the broadcast state of a session-0 daemon")
 	}
 }

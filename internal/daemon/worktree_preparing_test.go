@@ -140,13 +140,12 @@ func TestWorkspaceState_BroadcastsPreparingWorktree(t *testing.T) {
 
 	state := d.workspaceStateFromSnapshot(tab.ID, []*Tab{tab},
 		map[string][]*Pane{tab.ID: {pane}}, nil, "", true)
-	panes, _ := state["panes"].([]map[string]any)
-	for _, p := range panes {
-		if p["id"] != pane.ID {
+	for _, p := range state.Panes {
+		if p.ID != pane.ID {
 			continue
 		}
-		if p["preparing_worktree"] != "feat/x" {
-			t.Errorf("preparing_worktree = %v, want feat/x", p["preparing_worktree"])
+		if p.PreparingWorktree != "feat/x" {
+			t.Errorf("preparing_worktree = %v, want feat/x", p.PreparingWorktree)
 		}
 		return
 	}

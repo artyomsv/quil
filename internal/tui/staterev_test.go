@@ -106,11 +106,13 @@ func stateFromMap(t *testing.T, raw map[string]any) ipc.WorkspaceState {
 	return ws
 }
 
-// An explicit "layout": null on the wire (a tab a client has touched and then
-// described with no tree — the daemon writes json.RawMessage(nil), which
-// marshals to the literal null) must forward as NO layout, exactly like an
-// absent "layout" key. json.RawMessage's own len()>0 check does not catch
-// this: null decodes to the four bytes "null", which is non-empty.
+// An explicit "layout": null on the wire — TabState.Layout is `omitempty`
+// (internal/ipc/state.go), so a nil json.RawMessage is OMITTED rather than
+// marshaled to null; a literal null reaches the wire only when the stored
+// layout bytes are themselves the four bytes "null" — must forward as NO
+// layout, exactly like an absent "layout" key. json.RawMessage's own
+// len()>0 check does not catch this: null decodes to those four bytes,
+// which is non-empty.
 func TestParseWorkspaceState_LayoutNull_ForwardsNoLayout(t *testing.T) {
 	state := parseWorkspaceState(stateFromMap(t, map[string]any{
 		"tabs": []any{map[string]any{"id": "t", "layout": nil}},
@@ -263,9 +265,11 @@ func TestArmReattachReset_ForgetsStateMark(t *testing.T) {
 }
 
 // acceptStateRev keys its high-water mark by DESTINATION (stateSeen is a
-// map[string]stateMark), never by a single shared scalar. A mark recorded for
-// the local dest must not make a DIFFERENT destination's own first (rev 1)
-// frame read as stale — a regression collapsing the two into one field would
+// map[string]stateMark), never by a single shared scalar. Both frames below
+// share the SAME run id, so a mark collapsed onto one shared field would
+// compare hostA's rev 1 against the local rev 5 mark and refuse it as stale
+// (mark.runID == msg.RunID && msg.Rev <= mark.rev) — the failure this test
+// exists to catch. A regression collapsing the two into one field would
 // pass every single-destination test above and only show up with two daemons
 // attached at once.
 func TestUpdate_StateMark_IsPerDestination(t *testing.T) {
@@ -278,15 +282,16 @@ func TestUpdate_StateMark_IsPerDestination(t *testing.T) {
 		tabDragFromIdx: -1,
 	}
 
-	// A high-water mark on the LOCAL destination only (rev 5).
-	m = updateWith(t, m, stateMsg("run-local", 5, "tab-local"))
+	// A high-water mark on the LOCAL destination only (rev 5), run "run-a".
+	m = updateWith(t, m, stateMsg("run-a", 5, "tab-local"))
 	if !hasTab(m, "tab-local") {
 		t.Fatalf("precondition: the local tab was not applied")
 	}
 
-	// hostA's first-ever frame: rev 1, an unrelated run id. If the mark above
-	// were not scoped to "", this would be refused as <= the local rev.
-	hostMsg := stateMsg("run-hostA", 1, "tab-hostA")
+	// hostA's first-ever frame: rev 1, the SAME run id as the local mark. If
+	// the mark above were not scoped to "", this rev-1-vs-rev-5 comparison
+	// under the same run id would refuse it as stale.
+	hostMsg := stateMsg("run-a", 1, "tab-hostA")
 	hostMsg.Dest = "hostA"
 	m = updateWith(t, m, hostMsg)
 

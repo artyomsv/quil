@@ -3354,8 +3354,10 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		// requestStateFor is called on its own line, BEFORE the tea.Batch: it
 		// mutates m.stateReqGen/m.stateGenSeq, and a return statement leaves
 		// the order of its own operand evaluation unspecified — folding the
-		// mutation into the same expression as the read of m risks a data
-		// race between them.
+		// mutation into the same expression as `return m, ...` risks reading
+		// m's old field values if the compiler evaluates that operand before
+		// the mutating call runs (an eval-order hazard, not a data race: this
+		// is all single-goroutine code with no concurrent access).
 		cmd := m.requestStateFor(msg.Dest)
 		return m, tea.Batch(m.listenForMessages(), cmd)
 

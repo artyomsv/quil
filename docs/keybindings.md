@@ -187,6 +187,13 @@ Terminal.app has no distinct combo for a multi-word "fast jump" (`Option+Shift+A
 to `Option+Arrow` and `Cmd` is reserved by macOS), so that remains available only on
 Kitty-protocol terminals (Ghostty, WezTerm, iTerm2).
 
+### Newline in an AI pane's prompt (macOS)
+
+Terminal.app sends the same bytes for `Shift+Enter` as for `Enter`, so with **Use Option as
+Meta key** enabled, `Option+Enter` is the chord that inserts a newline in claude-code's prompt.
+Quil forwards it to the pane as `ESC CR`, exactly as Terminal.app sends it. `Ctrl+J` also works
+in every terminal.
+
 Note: `Alt+A` (`Option+A` under Option-as-Meta) is bound to `pane.quick_actions` — opening the
 pane context menu — so `ESC-a` (emacs `M-a`, backward-sentence) no longer reaches the PTY. This
 is deliberate and consistent with the other single-letter Alt-layer bindings Quil already

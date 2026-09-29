@@ -9767,6 +9767,16 @@ func keyToBytes(keyMsg tea.KeyPressMsg) []byte {
 		return []byte("\x1b[Z")
 	case "backspace":
 		return []byte{0x7f}
+	case "alt+enter", "alt+tab", "alt+backspace":
+		// Meta encoding for the single-byte special keys: ESC + the key's own
+		// byte, which is what a terminal with Option/Alt-as-Meta sends and what
+		// the decoder turned into these names. The printable Meta branch below
+		// cannot reach them (Enter is 0x0d, not printable), so without these
+		// cases they were dropped — and macOS Terminal.app sends the same bytes
+		// for Shift+Enter as for Enter, leaving Option+Enter as the only chord
+		// that inserts a newline in claude-code (#244). alt+backspace is bound
+		// to pane.go_back by default and only lands here once unbound.
+		return append([]byte{0x1b}, keyToBytes(tea.KeyPressMsg{Code: keyMsg.Code})...)
 	case "space":
 		return []byte(" ")
 	case "esc":

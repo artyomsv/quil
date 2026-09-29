@@ -2,7 +2,9 @@ package tui
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -65,6 +67,11 @@ type pendingImport struct {
 	// notesDeferred: the request budget left notes out, so a "notes" answer
 	// does not finish the kind — the rest go with the next launch's import.
 	notesDeferred bool
+	// groupsSnap: the groups this import carried for dest (name, collapsed,
+	// dest's members), as the file held them when it was sent — what a
+	// refusal backs up (backupRefusedGroups). The frame that follows the
+	// send may already have replaced them in the file.
+	groupsSnap projectGroups
 }
 
 // maxImportErrors is how many error replies one destination may give this
@@ -323,18 +330,24 @@ func (m *Model) maybeImport(msg WorkspaceStateMsg) tea.Cmd {
 	}
 	dest := msg.Dest
 	payload := ipc.SharedImportPayload{Kinds: want}
+	var groupsSnap projectGroups
 	if !kinds.Groups {
 		// This destination's members; a group with no member anywhere goes to
 		// the LOCAL daemon only, so the name lives on.
 		for _, grp := range m.groups.Groups {
 			var ids []string
+			var members []groupMember
 			for _, mb := range grp.Members {
 				if mb.Dest == dest {
 					ids = append(ids, mb.ID)
+					members = append(members, mb)
 				}
 			}
 			if len(ids) > 0 || (dest == "" && len(grp.Members) == 0) {
 				payload.Groups = append(payload.Groups, ipc.SharedImportGroup{Name: grp.Name, ProjectIDs: ids})
+			}
+			if len(members) > 0 {
+				groupsSnap.Groups = append(groupsSnap.Groups, projectGroup{Name: grp.Name, Collapsed: grp.Collapsed, Members: members})
 			}
 		}
 	}
@@ -374,7 +387,7 @@ func (m *Model) maybeImport(msg WorkspaceStateMsg) tea.Cmd {
 	}
 	id := "imp-" + m.nextReqGen()
 	req.ID = id
-	m.pendingImports[id] = pendingImport{dest: dest, notesDeferred: notesDeferred}
+	m.pendingImports[id] = pendingImport{dest: dest, notesDeferred: notesDeferred, groupsSnap: groupsSnap}
 	if err := m.sendForDestStrict(dest, req); err != nil {
 		delete(m.pendingImports, id)
 		delete(m.importAsked, dest) // the next frame from dest tries again
@@ -481,7 +494,71 @@ func (m *Model) applySharedImportResp(msg sharedImportRespMsg) tea.Cmd {
 	if !groupsNow {
 		return nil
 	}
-	return m.openGroupSends(dest)
+	var flash tea.Cmd
+	if !msg.resp.GroupsApplied {
+		flash = m.backupRefusedGroups(dest, p.groupsSnap)
+	}
+	return tea.Batch(flash, m.openGroupSends(dest))
+}
+
+// groupsBackupPath is where backupRefusedGroups keeps a destination's old
+// groups: beside project-groups.json, one file per destination.
+func groupsBackupPath(dest string) string {
+	return filepath.Join(config.QuilDir(), "project-groups.before-shared-"+config.DestFileKey(dest)+".json")
+}
+
+// backupRefusedGroups keeps this client's groups for dest when its import was
+// refused because the daemon already held groups (another client imported
+// first). From then on the daemon's frame replaces this client's cached
+// members for dest — the first frame after the send already did — so any
+// membership the daemon does not share would otherwise be gone from both
+// sides (spec 1, "never lost"). snap is the file view the import carried.
+//
+// Written only when something would be lost (a member the daemon files under
+// another group, or none), and never over an earlier backup: the first one
+// is the one holding the pre-shared state.
+func (m *Model) backupRefusedGroups(dest string, snap projectGroups) tea.Cmd {
+	if len(snap.Groups) == 0 || !m.groupsWouldBeLost(dest, snap) {
+		return nil
+	}
+	path := groupsBackupPath(dest)
+	if _, err := os.Lstat(path); err == nil {
+		log.Printf("groups: %s import refused; an earlier backup exists at %s, not overwritten", hostLabel(dest), path)
+		return nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		log.Printf("groups: %s import refused; backup %s: %v", hostLabel(dest), path, err)
+		return nil
+	}
+	if err := saveProjectGroups(path, snap); err != nil {
+		log.Printf("groups: %s import refused; backup %s failed: %v", hostLabel(dest), path, err)
+		return nil
+	}
+	log.Printf("groups: %s import refused (its daemon already held groups); this client's old groups for it are in %s", hostLabel(dest), path)
+	host := elideEnd(sanitizeRemoteText(hostLabel(dest)), sharedOpErrCap)
+	m.setFlash(fmt.Sprintf("Groups on %s came from another client; your old ones are in %s", host, filepath.Base(path)))
+	return m.flashCmd()
+}
+
+// groupsWouldBeLost reports whether any member snap files on dest is filed
+// differently by dest's daemon (its projects' Group, from the latest frame).
+// A project the daemon no longer has is not counted: its membership meant
+// nothing there anyway.
+func (m *Model) groupsWouldBeLost(dest string, snap projectGroups) bool {
+	daemon := map[string]string{}
+	for _, p := range m.projects {
+		if p != nil && p.Dest == dest && p.Offline == nil {
+			daemon[p.ID] = p.Group
+		}
+	}
+	for _, grp := range snap.Groups {
+		for _, mb := range grp.Members {
+			group, ok := daemon[mb.ID]
+			if ok && !strings.EqualFold(group, grp.Name) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // openGroupSends marks dest's groups settled for this session and sends the

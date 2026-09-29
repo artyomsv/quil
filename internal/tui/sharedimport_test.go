@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -700,5 +701,99 @@ func TestDisconnectDest_ForgetsTheImportInFlight(t *testing.T) {
 	}
 	if m.importAsked["hostA"] {
 		t.Error("importAsked survived the disconnect; a re-added host never re-sends")
+	}
+}
+
+// refusedGroupsAnswer is the daemon's answer to an import it refused because
+// it already held groups: groups answered, not applied.
+func refusedGroupsAnswer(id string) sharedImportRespMsg {
+	return sharedImportRespMsg{dest: "", id: id, resp: ipc.SharedImportRespPayload{Answered: []string{ipc.ImportKindGroups, ipc.ImportKindRecent}}}
+}
+
+func loadBackup(t *testing.T, path string) projectGroupsFile {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("no backup at %s: %v", path, err)
+	}
+	var f projectGroupsFile
+	if err := json.Unmarshal(data, &f); err != nil {
+		t.Fatalf("backup does not parse: %v", err)
+	}
+	return f
+}
+
+// R-8 (1): a second client joins a daemon that already holds groups. Its
+// import is refused and the frame replaces its cached members, so the
+// membership the daemon does not share is backed up — old members only for
+// this destination — and the cache is still replaced.
+func TestUpdate_RefusedImport_DifferingMembership_BacksUpTheOldGroups(t *testing.T) {
+	m, local, _ := importTestModel(t)
+	m.groups.Groups[0].Collapsed = true
+	m = updateNoWait(t, m, sharedFrame("r", 1, "proj-1", "Other", "Other"))
+	_, id := importPayload(t, local)
+	m = updateNoWait(t, m, refusedGroupsAnswer(id))
+	f := loadBackup(t, groupsBackupPath(""))
+	if len(f.Groups) != 1 || f.Groups[0].Name != "Infra" || !f.Groups[0].Collapsed ||
+		len(f.Groups[0].Members) != 1 || f.Groups[0].Members[0] != (groupMember{Dest: "", ID: "proj-1"}) {
+		t.Errorf("backup = %+v, want Infra (collapsed) holding the local proj-1 only", f.Groups)
+	}
+	if info, err := os.Stat(groupsBackupPath("")); err == nil && runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+		t.Errorf("backup mode = %v, want 0600", info.Mode().Perm())
+	}
+	if g := m.groups.groupOf("", "proj-1"); g != m.groups.indexOf("Other") {
+		t.Errorf("the cache was not replaced: proj-1 in group %d, want Other", g)
+	}
+	if !strings.Contains(m.flashText, "came from another client") || !strings.Contains(m.flashText, filepath.Base(groupsBackupPath(""))) {
+		t.Errorf("flash = %q", m.flashText)
+	}
+}
+
+// R-8 (2): the daemon files every cached member the same way — nothing would
+// be lost, so no backup.
+func TestUpdate_RefusedImport_IdenticalMembership_NoBackup(t *testing.T) {
+	m, local, _ := importTestModel(t)
+	m = updateNoWait(t, m, sharedFrame("r", 1, "proj-1", "infra", "infra"))
+	_, id := importPayload(t, local)
+	m = updateNoWait(t, m, refusedGroupsAnswer(id))
+	if _, err := os.Stat(groupsBackupPath("")); !os.IsNotExist(err) {
+		t.Errorf("a backup was written with nothing to lose (stat err %v)", err)
+	}
+}
+
+// R-8 (3): an applied import gave the daemon this client's groups.
+func TestUpdate_AppliedImport_NoBackup(t *testing.T) {
+	m, local, _ := importTestModel(t)
+	m = updateNoWait(t, m, sharedFrame("r", 1, "proj-1", ""))
+	_, id := importPayload(t, local)
+	resp := refusedGroupsAnswer(id)
+	resp.resp.GroupsApplied = true
+	// The daemon's next frame already disagrees (another client moved it):
+	// still no backup, the import was applied.
+	m = updateNoWait(t, m, sharedFrame("r", 2, "proj-1", "Other", "Infra", "Empty", "Other"))
+	m = updateNoWait(t, m, resp)
+	if _, err := os.Stat(groupsBackupPath("")); !os.IsNotExist(err) {
+		t.Errorf("a backup was written for an applied import (stat err %v)", err)
+	}
+}
+
+// R-8 (4): an earlier backup is the one holding the pre-shared state; it is
+// never overwritten.
+func TestUpdate_RefusedImport_ExistingBackupIsNeverOverwritten(t *testing.T) {
+	m, local, _ := importTestModel(t)
+	path := groupsBackupPath("")
+	earlier := []byte(`{"version":1,"groups":[{"name":"Earlier","collapsed":false,"members":[]}]}`)
+	if err := os.WriteFile(path, earlier, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m = updateNoWait(t, m, sharedFrame("r", 1, "proj-1", "Other", "Other"))
+	_, id := importPayload(t, local)
+	m = updateNoWait(t, m, refusedGroupsAnswer(id))
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(earlier) {
+		t.Errorf("the earlier backup was overwritten: %s", got)
 	}
 }

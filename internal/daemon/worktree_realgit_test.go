@@ -77,13 +77,13 @@ func TestWorktreeAddAndCreate_RealGit_PaneLandsInTheNewWorktree(t *testing.T) {
 	}
 
 	want := gitworktree.DerivePath(repo, "feat/login")
-	if !samePath(pane.CWD, want) {
+	if !samePathResolved(pane.CWD, want) {
 		t.Errorf("pane CWD = %q, want the worktree %q", pane.CWD, want)
 	}
 	// Stated separately from the equality above: if DerivePath itself ever
 	// returned the repo root, the check above would pass and this one would
 	// still catch the pane running on master.
-	if samePath(pane.CWD, repo) {
+	if samePathResolved(pane.CWD, repo) {
 		t.Error("pane CWD is the REPOSITORY ROOT — the isolation the feature promises is absent")
 	}
 	if !pane.WorktreeOwned {
@@ -125,10 +125,10 @@ func TestWorktreeAddAndCreate_RealGit_ReplaceLandsInTheNewWorktree(t *testing.T)
 		t.Fatalf("new pane %s is not in the session", resp.PaneID)
 	}
 	want := gitworktree.DerivePath(repo, "feat/swap")
-	if !samePath(pane.CWD, want) {
+	if !samePathResolved(pane.CWD, want) {
 		t.Errorf("pane CWD = %q, want the worktree %q", pane.CWD, want)
 	}
-	if samePath(pane.CWD, repo) {
+	if samePathResolved(pane.CWD, repo) {
 		t.Error("the replacement pane is at the REPOSITORY ROOT, not in a worktree")
 	}
 	if _, err := os.Stat(filepath.Join(pane.CWD, "f.txt")); err != nil {
@@ -196,10 +196,13 @@ func TestWorktreeAddAndCreate_RealGit_DuplicateBranchCreatesNoPane(t *testing.T)
 	}
 }
 
-// samePath compares two filesystem paths for equality, tolerating the
-// separator and case differences Windows introduces between a path git printed
-// and one filepath built.
-func samePath(a, b string) bool {
+// samePathResolved compares two filesystem paths for equality, tolerating the
+// separator and case differences Windows introduces between a path git
+// printed and one filepath built, plus a symlink resolution difference
+// (macOS /var vs /private/var). Distinct from the production samePath in
+// shared.go, which compares two ALREADY-CLEANED paths with no symlink
+// resolution of its own.
+func samePathResolved(a, b string) bool {
 	a, b = filepath.Clean(a), filepath.Clean(b)
 	if ra, err := filepath.EvalSymlinks(a); err == nil {
 		a = filepath.Clean(ra)

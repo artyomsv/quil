@@ -86,6 +86,11 @@ type Project struct {
 	// up under the name the user chose instead of beside it. Persisted, because
 	// a daemon restart must not turn an un-adopted default into a real project.
 	Bootstrap bool
+
+	// Group is the group name this project is filed under, "" = ungrouped.
+	// Every non-empty value is also in SessionManager.groups (the invariant
+	// set_project_group keeps and RestoreShared repairs). Persisted, broadcast.
+	Group string
 }
 
 func (sm *SessionManager) CreateProject(name, rootDir string) *Project {

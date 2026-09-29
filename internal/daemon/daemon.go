@@ -876,6 +876,7 @@ func (d *Daemon) restoreWorkspace() error {
 	d.clients.reserveAfterRestart(sizeMaster)
 
 	d.session.RestoreProjects(parseRestoredProjects(state["projects"]), activeProject)
+	d.session.RestoreShared(stringList(state["groups"]), stringList(state["recent_cwds"]))
 
 	// Build pane lookup
 	panesByID := make(map[string]map[string]any, len(panes))
@@ -1033,6 +1034,7 @@ func (d *Daemon) restoreWorkspace() error {
 				sandboxImage, _ := paneData["sandbox_image"].(string)
 				sandboxAuth, _ := paneData["sandbox_auth"].(string)
 				containerCWD, _ := paneData["container_cwd"].(string)
+				noteRev, _ := paneData["note_rev"].(float64)
 				// The persisted type carries a sandbox prefix; strip it here
 				// so the registry lookup finds the plugin. spawnPane does the
 				// same, and re-derives "is this sandboxed" from either half —
@@ -1096,6 +1098,7 @@ func (d *Daemon) restoreWorkspace() error {
 					// CWD, which is the value that cannot be trusted for a
 					// force-delete.
 					WorktreePath: worktreePath,
+					NoteRev:      uint64(noteRev),
 				}
 
 				// Load ghost buffer from disk
@@ -1164,6 +1167,7 @@ func parseRestoredProjects(raw any) []*Project {
 		}
 		activeTab, _ := pm["active_tab"].(string)
 		bootstrap, _ := pm["bootstrap"].(bool)
+		group, _ := pm["group"].(string)
 		var tabIDs []string
 		if rawIDs, ok := pm["tab_ids"].([]any); ok {
 			tabIDs = make([]string, 0, len(rawIDs))
@@ -1180,6 +1184,7 @@ func parseRestoredProjects(raw any) []*Project {
 			TabIDs:    tabIDs,
 			ActiveTab: activeTab,
 			Bootstrap: bootstrap,
+			Group:     group,
 		})
 	}
 	return projects
@@ -1666,6 +1671,11 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		// order lived only until the next unrelated snapshot happened to run,
 		// and a daemon restart before that undid the drag.
 		d.requestSnapshot()
+
+	case ipc.MsgSetProjectGroup:
+		d.handleSetProjectGroup(conn, msg)
+	case ipc.MsgGroupOp:
+		d.handleGroupOp(conn, msg)
 
 	// MCP request-response
 	case ipc.MsgListProjectsReq:
@@ -2254,7 +2264,7 @@ func (d *Daemon) handleCreateTab(conn *ipc.Conn, msg *ipc.Message) {
 			spec.Worktree = nil
 		}
 	}
-	cwd := d.resolveRequestedCWD(spec.CWD, d.projectCWD(conn, tab.ProjectID))
+	cwd := d.resolveRequestedCWDRecording(spec.CWD, d.projectCWD(conn, tab.ProjectID))
 
 	// The two construction paths are built SEPARATELY and share nothing but the
 	// type and the directory. `create` and its plugin-field block used to sit
@@ -2744,6 +2754,7 @@ func (d *Daemon) handleCreatePane(conn *ipc.Conn, msg *ipc.Message) {
 	// broadcast would put one client's failure in front of every other client
 	// while giving the requester nothing correlatable to unwind with.
 	if payload.Worktree != nil {
+		d.recordRequestedCWD(payload.CWD)
 		go func() {
 			respondTo(conn, msg.ID, ipc.MsgCreatePaneResp, d.worktreeAddAndCreate(payload))
 		}()
@@ -2751,7 +2762,7 @@ func (d *Daemon) handleCreatePane(conn *ipc.Conn, msg *ipc.Message) {
 	}
 
 	logger.Debug("create pane: received payload cwd=%q type=%s", payload.CWD, payload.Type)
-	cwd := d.resolveRequestedCWD(payload.CWD, d.defaultCWD(conn))
+	cwd := d.resolveRequestedCWDRecording(payload.CWD, d.defaultCWD(conn))
 
 	// Determine pane type
 	paneType := payload.Type
@@ -4670,6 +4681,8 @@ func (d *Daemon) buildWorkspaceState() ipc.WorkspaceState {
 	// Broadcast-only, omitted unless true: a daemon in session 0 (started over
 	// ssh, or by a service) has no saved credentials and no visible desktop.
 	state.DaemonLimited = d.limited
+	// Broadcast-only: this daemon owns groups, recents and notes (spec 4.1).
+	state.SharedData = true
 
 	// LAST, under the same lock as everything above: rev order must equal
 	// content order, or a client applying frames by rev can adopt a lower-
@@ -4886,6 +4899,11 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			// the size read beside it (see Pane.sizeSeq).
 			snapSizeSeq := pane.colsSeq
 			pane.PluginMu.Unlock()
+			// noteMu is a separate leaf lock from PluginMu (see Pane.noteMu) —
+			// read OUTSIDE the PluginMu span above rather than folded into it.
+			pane.noteMu.Lock()
+			paneData.NoteRev = pane.NoteRev
+			pane.noteMu.Unlock()
 			// Broadcast-only, runtime: the counter restarts with the daemon,
 			// so a persisted one would mean nothing.
 			if includeOverlays && snapSizeSeq > 0 {
@@ -5026,15 +5044,19 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			// project adopts this one; the snapshot needs it so a restart does
 			// not turn an un-adopted default into a real project.
 			Bootstrap: p.Bootstrap,
+			Group:     p.Group,
 		})
 	}
 
+	groups, recent := d.session.SharedSnapshot()
 	return ipc.WorkspaceState{
 		ActiveTab:     activeTab,
 		Tabs:          tabList,
 		Panes:         paneList,
 		Projects:      projectList,
 		ActiveProject: activeProject,
+		Groups:        groups,
+		RecentCWDs:    recent,
 	}
 }
 

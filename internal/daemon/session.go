@@ -231,7 +231,14 @@ type Pane struct {
 	// "immutable once set" and written just outside this lock, which made all
 	// three readers data races. ID and the OutputBuf pointer are immutable;
 	// TabID has its own leaf lock (tabIDMu).
-	PluginMu     sync.Mutex
+	PluginMu sync.Mutex
+	// noteMu is a LEAF lock guarding NoteRev and the note file on disk: every
+	// note read/write holds it across the version check and the file I/O, so
+	// two saves from one base cannot both apply. Never held while acquiring
+	// another lock, and PluginMu is never held across note I/O (F-1).
+	noteMu  sync.Mutex
+	NoteRev uint64 // 0 = no note. Persisted (note_rev), broadcast. Under noteMu.
+
 	InstanceName string    // Which instance config was used
 	InstanceArgs []string  // Args used to start (for rerun strategy)
 	ExitCode     *int      // nil = still running, non-nil = exited
@@ -470,6 +477,12 @@ type SessionManager struct {
 	projects      map[string]*Project
 	projectOrder  []string
 	activeProject string
+
+	// groups is this daemon's group-name list, creation order (display order
+	// is per client — spec D-1a); recentCWDs the last MaxRecentCWDs folders a
+	// create named, most recent first. Both under mu, both persisted.
+	groups     []string
+	recentCWDs []string
 }
 
 // inputQueueSize bounds the per-pane stdin queue. Generous for interactive

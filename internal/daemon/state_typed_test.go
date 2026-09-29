@@ -177,8 +177,9 @@ func TestWorkspaceStateFromSnapshot_Typed_MatchesOldMap(t *testing.T) {
 func TestBuildWorkspaceState_Typed_MatchesOldMapExceptRev(t *testing.T) {
 	d := richStateDaemon(t)
 	got := stateMap(t, d.buildWorkspaceState())
-	delete(got, "rev")    // new in 3a, Task 4
-	delete(got, "run_id") // new in 3a, Task 4
+	delete(got, "rev")         // new in 3a, Task 4
+	delete(got, "run_id")      // new in 3a, Task 4
+	delete(got, "shared_data") // new in 3b, broadcast-only
 	want := stateMap(t, d.oldBuildWorkspaceStateMap())
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("typed broadcast differs from the pre-3a map\n got: %v\nwant: %v", got, want)

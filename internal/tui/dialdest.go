@@ -245,6 +245,9 @@ func (m *Model) disconnectDest(dest string) {
 	// text stays dirty, a closed editor's goes to notes-conflicts now rather
 	// than at quit.
 	m.settleNoteSavesFor(dest, "host disconnected")
+	// Its in-flight import can no longer be answered either; re-adding the
+	// host in this session sends it again on the first shared frame.
+	m.forgetImportFor(dest)
 	var conn Client
 	if r, ok := m.client.(*Router); ok {
 		conn = r.Conn(dest)

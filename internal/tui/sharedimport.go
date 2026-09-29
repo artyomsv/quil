@@ -344,11 +344,17 @@ func (m *Model) maybeImport(msg WorkspaceStateMsg) tea.Cmd {
 	notesDeferred := false
 	if !kinds.Notes {
 		// Mine is the frame's own pane list — the daemon's whole state, a
-		// pane in no tab included; the others come from what this client
+		// pane in no tab included — less every pane the daemon already has
+		// note history for (NoteRev > 0): it refuses those anyway, so sending
+		// them would spend the budget on the same batch every launch and the
+		// deferred rest would never go, and it keeps a note deleted on the
+		// daemon from coming back. The others come from what this client
 		// holds of every other connected destination.
 		mine := make(map[string]bool, len(msg.Panes))
 		for _, p := range msg.Panes {
-			mine[p.ID] = true
+			if p.NoteRev == 0 {
+				mine[p.ID] = true
+			}
 		}
 		others := map[string]bool{}
 		for d, set := range m.paneIDsByDest() {
@@ -475,6 +481,12 @@ func (m *Model) applySharedImportResp(msg sharedImportRespMsg) tea.Cmd {
 	if !groupsNow {
 		return nil
 	}
+	return m.openGroupSends(dest)
+}
+
+// openGroupSends marks dest's groups settled for this session and sends the
+// group changes held back until now, in order.
+func (m *Model) openGroupSends(dest string) tea.Cmd {
 	m.groupsImported[dest] = true
 	held := m.deferredGroupOps[dest]
 	delete(m.deferredGroupOps, dest)
@@ -484,6 +496,21 @@ func (m *Model) applySharedImportResp(msg sharedImportRespMsg) tea.Cmd {
 		cmds = append(cmds, m.sendSharedOp(dest, op.msgType, op.payload, op.what))
 	}
 	return tea.Batch(cmds...)
+}
+
+// settleCappedImport opens group sends for this SESSION (never the marker)
+// once dest has refused its import maxImportErrors times AND lists a group:
+// that daemon's frames are authoritative (frameAuthoritativeFor), so an edit
+// still held would be stripped from view and file and never sent. With the
+// daemon holding a group, the import would be refused anyway, so no send can
+// make it drop anything. Checked on every shared frame from dest (a capped
+// daemon may list its first group later) and at the cap itself.
+func (m *Model) settleCappedImport(dest string) tea.Cmd {
+	if m.importErrors[dest] < maxImportErrors || m.groupsImported[dest] || len(m.daemonGroups[dest]) == 0 {
+		return nil
+	}
+	log.Printf("shared import %q: capped, and its daemon lists groups — sending held group changes for this session", dest)
+	return m.openGroupSends(dest)
 }
 
 // applySharedImportTimeout only logs. The request stays pending: a late
@@ -499,18 +526,20 @@ func (m *Model) applySharedImportTimeout(msg sharedImportTimeoutMsg) {
 // daemon refused the request as a whole, so nothing is answered and the
 // marker is untouched. The next shared frame from dest sends it again, until
 // dest has given maxImportErrors error replies this session; then it waits
-// for the next launch, and group sends to dest stay held until then.
-func (m *Model) applySharedImportErr(msg sharedImportErrMsg) {
+// for the next launch, and group sends to dest stay held until its daemon
+// lists a group (settleCappedImport).
+func (m *Model) applySharedImportErr(msg sharedImportErrMsg) tea.Cmd {
 	p, ok := m.pendingImports[msg.id]
 	if !ok || p.dest != msg.dest {
-		return
+		return nil
 	}
 	delete(m.pendingImports, msg.id)
 	m.importErrors[p.dest]++
 	if n := m.importErrors[p.dest]; n < maxImportErrors {
 		delete(m.importAsked, p.dest)
 		log.Printf("shared import %q refused (%d/%d): %s; sent again on its next frame", p.dest, n, maxImportErrors, msg.text)
-		return
+		return nil
 	}
 	log.Printf("shared import %q refused (%d/%d): %s; retried next launch", p.dest, m.importErrors[p.dest], maxImportErrors, msg.text)
+	return m.settleCappedImport(p.dest)
 }

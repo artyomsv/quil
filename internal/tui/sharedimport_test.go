@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -522,14 +524,48 @@ func TestUpdate_HeldCreateThenDelete_BothReplayedInOrder(t *testing.T) {
 	}
 }
 
-// M-2: the marker is written through a unique temp file that never lingers.
-func TestSaveImportMarker_LeavesOnlyTheMarker(t *testing.T) {
+// M-2: two clients sharing a QUIL_HOME save the marker at once. Each save
+// goes through its own uniquely named temp file, so none fails, the file
+// always parses as one of the two, and no temp file is left behind. A fixed
+// path+".tmp" makes one writer rename the other's file away (ENOENT) or
+// publish a torn write.
+func TestSaveImportMarker_ConcurrentSavesNeverCollide(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "shared-import.json")
-	for i := 0; i < 2; i++ {
-		if err := saveImportMarker(path, sharedImportMarker{Version: 1, Dests: map[string]importMarkerKinds{"local": {Groups: true}}}); err != nil {
-			t.Fatal(err)
-		}
+	long := sharedImportMarker{Version: 1, Dests: map[string]importMarkerKinds{}}
+	for i := 0; i < 60; i++ {
+		long.Dests[fmt.Sprintf("host-%02d-%s", i, strings.Repeat("x", 20))] = importMarkerKinds{Groups: true, Recent: true}
+	}
+	short := sharedImportMarker{Version: 1, Dests: map[string]importMarkerKinds{"local": {Notes: true}}}
+	var wg sync.WaitGroup
+	errs := make(chan error, 400)
+	for _, mk := range []sharedImportMarker{long, short} {
+		wg.Add(1)
+		go func(mk sharedImportMarker) {
+			defer wg.Done()
+			for i := 0; i < 200; i++ {
+				if err := saveImportMarker(path, mk); err != nil {
+					errs <- err
+					return
+				}
+			}
+		}(mk)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("a concurrent save failed: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got sharedImportMarker
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("the marker does not parse after concurrent saves: %v", err)
+	}
+	if !reflect.DeepEqual(got, long) && !reflect.DeepEqual(got, short) {
+		t.Errorf("the marker holds %d dests, neither snapshot", len(got.Dests))
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -538,7 +574,131 @@ func TestSaveImportMarker_LeavesOnlyTheMarker(t *testing.T) {
 	if len(entries) != 1 || entries[0].Name() != "shared-import.json" {
 		t.Errorf("dir holds %v, want the marker alone", entries)
 	}
-	if !loadImportMarker(path).Dests["local"].Groups {
-		t.Error("marker did not round-trip")
+}
+
+// N-1: panes the daemon already has note history for (NoteRev > 0) are not
+// sent, so the next launch's import carries the notes the budget deferred
+// instead of the same first batch again.
+func TestUpdate_DeferredNotes_NextLaunchSendsTheRestNotTheFirstBatch(t *testing.T) {
+	m, _, remote := importTestModel(t)
+	rf := sharedFrame("q", 1, "proj-2", "")
+	rf.Dest = "hostA"
+	n := (ipc.MaxSharedImportBytes-importReserveBytes)/ipc.MaxNoteBytes + 1
+	text := strings.Repeat("x", ipc.MaxNoteBytes)
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("pane-n%02d", i)
+		if err := persist.SaveNotes(config.NotesDir(), id, text); err != nil {
+			t.Fatal(err)
+		}
+		rf.Panes = append(rf.Panes, PaneInfo{ID: id, TabID: "tab-proj-2", Type: "terminal"})
+		rf.Tabs[0].Panes = append(rf.Tabs[0].Panes, id)
+	}
+	m = updateNoWait(t, m, rf)
+	p, id := importPayload(t, remote)
+	sent1 := map[string]bool{}
+	for _, nt := range p.Notes {
+		sent1[nt.PaneID] = true
+	}
+	if len(sent1) == 0 || len(sent1) >= n {
+		t.Fatalf("first import sent %d of %d notes, want some deferred", len(sent1), n)
+	}
+	all := []string{ipc.ImportKindGroups, ipc.ImportKindRecent, ipc.ImportKindNotes}
+	m = updateNoWait(t, m, sharedImportRespMsg{dest: "hostA", id: id, resp: ipc.SharedImportRespPayload{Answered: all, NotesApplied: len(p.Notes)}})
+
+	// Next launch: the daemon holds a note for every pane of the first batch.
+	rf2 := rf
+	rf2.Panes = append([]PaneInfo(nil), rf.Panes...)
+	for i := range rf2.Panes {
+		if sent1[rf2.Panes[i].ID] {
+			rf2.Panes[i].NoteRev = 1
+		}
+	}
+	next, _, remote2 := twoDestModel(t)
+	next.SetSharedImportMarker(config.SharedImportPath())
+	next = updateNoWait(t, next, rf2)
+	p2, id2 := importPayload(t, remote2)
+	if len(p2.Notes) != n-len(sent1) {
+		t.Errorf("next launch sent %d notes, want the %d deferred", len(p2.Notes), n-len(sent1))
+	}
+	for _, nt := range p2.Notes {
+		if sent1[nt.PaneID] {
+			t.Errorf("next launch re-sent %s, which the daemon already has", nt.PaneID)
+		}
+	}
+	// Nothing deferred this time, so the answer finishes the kind.
+	next = updateNoWait(t, next, sharedImportRespMsg{dest: "hostA", id: id2, resp: ipc.SharedImportRespPayload{Answered: []string{ipc.ImportKindNotes}}})
+	if !loadImportMarker(config.SharedImportPath()).Dests[config.DestFileKey("hostA")].Notes {
+		t.Error("notes kind still pending after every note was sent")
+	}
+}
+
+// N-2: after maxImportErrors error replies, a held assign on a daemon that
+// lists a group is sent, not stripped by the authoritative frame and held
+// forever. The marker is untouched: next launch still imports.
+func TestUpdate_ImportErrorCap_DaemonListingGroups_SendsTheHeldAssign(t *testing.T) {
+	m, local, _ := importTestModel(t)
+	rev := uint64(1)
+	m = updateNoWait(t, m, sharedFrame("r", rev, "proj-1", ""))
+	for i := 1; i <= maxImportErrors; i++ {
+		_, id := importPayload(t, local)
+		m = updateNoWait(t, m, sharedImportErrMsg{dest: "", id: id, text: "bad_payload: x"})
+		rev++
+		m = updateNoWait(t, m, sharedFrame("r", rev, "proj-1", ""))
+	}
+	runCmd(m.moveProjectToGroup("", "proj-1", "Empty"))
+	if n := countSent(local, ipc.MsgSetProjectGroup); n != 0 {
+		t.Fatalf("set_project_group sent %d times while the daemon lists no group", n)
+	}
+	rev++
+	m = updateNoWait(t, m, sharedFrame("r", rev, "proj-1", "", "Other"))
+	if n := countSent(local, ipc.MsgSetProjectGroup); n != 1 {
+		t.Fatalf("set_project_group sent %d times, want the held assign once the daemon lists a group", n)
+	}
+	if p := decodeSetProjectGroup(t, local); p.ProjectID != "proj-1" || p.Group != "Empty" {
+		t.Errorf("sent %+v", p)
+	}
+	if mk := loadImportMarker(config.SharedImportPath()); mk.Dests["local"].Groups {
+		t.Error("a capped import marked groups done; the next launch would never import")
+	}
+}
+
+// N-2, at the cap itself: a daemon that already lists a group opens sends on
+// the third error reply.
+func TestUpdate_ImportErrorCap_AlreadyListingGroups_OpensOnTheLastError(t *testing.T) {
+	m, local, _ := importTestModel(t)
+	rev := uint64(1)
+	m = updateNoWait(t, m, sharedFrame("r", rev, "proj-1", "", "Other"))
+	runCmd(m.moveProjectToGroup("", "proj-1", "Empty"))
+	for i := 1; i <= maxImportErrors; i++ {
+		_, id := importPayload(t, local)
+		m = updateNoWait(t, m, sharedImportErrMsg{dest: "", id: id, text: "bad_payload: x"})
+		if i < maxImportErrors {
+			rev++
+			m = updateNoWait(t, m, sharedFrame("r", rev, "proj-1", "", "Other"))
+		}
+	}
+	if n := countSent(local, ipc.MsgSetProjectGroup); n != 1 {
+		t.Errorf("set_project_group sent %d times, want the held assign on the last error", n)
+	}
+}
+
+// N-3: disconnecting a host forgets its in-flight import, so re-adding it in
+// the same session sends the import again.
+func TestDisconnectDest_ForgetsTheImportInFlight(t *testing.T) {
+	m, _, _ := importTestModel(t)
+	rf := sharedFrame("q", 1, "proj-2", "")
+	rf.Dest = "hostA"
+	m = updateNoWait(t, m, rf)
+	if !m.importAsked["hostA"] {
+		t.Fatal("setup: no import asked for hostA")
+	}
+	m.disconnectDest("hostA")
+	for _, p := range m.pendingImports {
+		if p.dest == "hostA" {
+			t.Error("a pending import for the disconnected host survived")
+		}
+	}
+	if m.importAsked["hostA"] {
+		t.Error("importAsked survived the disconnect; a re-added host never re-sends")
 	}
 }

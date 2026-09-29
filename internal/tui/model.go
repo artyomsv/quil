@@ -3041,7 +3041,7 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		newPaneIDs, overlayResizeCmds := m.applyWorkspaceState(msg, msg.Dest)
 		// The import needs this frame's panes (applied above) and must record
 		// a groups answer from the marker before the merge below reads it.
-		importCmd := m.maybeImport(msg)
+		importCmd := tea.Batch(m.settleCappedImport(msg.Dest), m.maybeImport(msg))
 		// After the merge, and only here: this arm is reached only for a
 		// connected destination whose state arrived (the gate above).
 		groupsCmd := tea.Batch(m.pruneProjectGroupsFor(msg), m.rebuildGroupsView())
@@ -3545,8 +3545,7 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		return m, tea.Batch(m.listenForMessages(), m.applySharedImportResp(msg))
 
 	case sharedImportErrMsg:
-		m.applySharedImportErr(msg)
-		return m, m.listenForMessages()
+		return m, tea.Batch(m.listenForMessages(), m.applySharedImportErr(msg))
 
 	case sharedImportTimeoutMsg:
 		// Local timer: does NOT re-arm listenForMessages.

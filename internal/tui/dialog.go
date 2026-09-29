@@ -2564,15 +2564,19 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 	newBranch, newBranchRepo := m.worktreeNewBranch, m.worktrees.root
 	if cwd != "" {
 		m.lastSelectedCWD = cwd
-		m.recentCWDs = pushRecentCWD(m.recentCWDs, cwd, recentCWDMax)
-		// Scoped to the daemon the DIALOG was opened against, not the active
-		// project's: the directory was browsed on that machine's disk, so filing
-		// it anywhere else offers a path that does not exist there. The two
-		// differ exactly when createPaneDest exists to matter — the active
-		// project moved while the dialog was open — and the pane itself goes to
-		// createPaneDest, so the recent list has to follow it.
-		if err := SaveRecentCWDs(config.RecentCWDsPath(m.createPaneDialogDest()), m.recentCWDs); err != nil {
-			log.Printf("create pane: save recent cwds: %v", err)
+		// A shared daemon records this itself (spec 4.4) and sends the list back
+		// on its frame, so neither the client list nor its file is touched.
+		if !m.sharedData[m.createPaneDialogDest()] {
+			m.recentCWDs = pushRecentCWD(m.recentCWDs, cwd, recentCWDMax)
+			// Scoped to the daemon the DIALOG was opened against, not the active
+			// project's: the directory was browsed on that machine's disk, so
+			// filing it anywhere else offers a path that does not exist there.
+			// The two differ exactly when createPaneDest exists to matter — the
+			// active project moved while the dialog was open — and the pane
+			// itself goes to createPaneDest, so the recent list has to follow it.
+			if err := SaveRecentCWDs(config.RecentCWDsPath(m.createPaneDialogDest()), m.recentCWDs); err != nil {
+				log.Printf("create pane: save recent cwds: %v", err)
+			}
 		}
 	}
 	m.dialog = dialogNone
@@ -3853,7 +3857,8 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 // split it, because "did the scan find anything" is no longer known at the
 // point enterSetupOrSplit returns.
 func (m *Model) fallbackToRecentOrBrowser() tea.Cmd {
-	if len(m.recentCWDs) > 0 {
+	// A shared destination's list comes from its own frame (spec 4.4).
+	if list := m.recentListFor(m.createPaneDialogDest()); len(list) > 0 {
 		// Which of the remembered directories still exist is a question about
 		// the DAEMON's disk. Answered here with os.Stat until RD-024, which
 		// reads the machine drawing the UI: against a remote host every server
@@ -3863,7 +3868,7 @@ func (m *Model) fallbackToRecentOrBrowser() tea.Cmd {
 		//
 		// The fallback to the browser moves with it, into applyExistingDirs:
 		// whether anything survives is no longer known when this returns.
-		return m.requestExistingDirs(m.recentCWDs)
+		return m.requestExistingDirs(list)
 	}
 	return m.initSetupBrowser()
 }

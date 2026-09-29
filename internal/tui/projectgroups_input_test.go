@@ -111,8 +111,8 @@ func TestSidebarGroups_HeaderDragReordersGroupsWithoutToggling(t *testing.T) {
 	if cmd != nil {
 		t.Error("a group drag saves on release, not per motion event")
 	}
-	if got.groupDragIdx != 0 || !got.groupDragMoved {
-		t.Fatalf("drag = (%d, moved %v), want (0, true)", got.groupDragIdx, got.groupDragMoved)
+	if got.groupDragName != "G-B" || !got.groupDragMoved {
+		t.Fatalf("drag = (%q, moved %v), want (G-B, true)", got.groupDragName, got.groupDragMoved)
 	}
 	got, _ = grpMotion(got, 2) // stationary, now over G-B itself
 	if names := grpNames(got.groups); names != "G-B,G-A" {

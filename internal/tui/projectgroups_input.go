@@ -8,6 +8,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+
+	"github.com/artyomsv/quil/internal/ipc"
 )
 
 // groupBlockSpanIn is the screen-row extent of group g's block — its header
@@ -40,8 +42,10 @@ func (m *Model) trackGroupDrag(x, y int) {
 	if !ok || !row.inGroup {
 		return
 	}
-	from := m.groupDragIdx
-	if from < 0 || from >= len(m.groups.Groups) {
+	// By NAME (F-6): a frame can insert or remove a group while the drag is
+	// armed, and a held index would then name its neighbour.
+	from := m.groups.indexOf(m.groupDragName)
+	if from < 0 {
 		return
 	}
 	start, size := groupBlockSpanIn(rows, row.group)
@@ -52,7 +56,6 @@ func (m *Model) trackGroupDrag(x, y int) {
 	if to == from || !m.groups.moveGroup(from, to) {
 		return
 	}
-	m.groupDragIdx = to
 	m.groupDragMoved = true
 }
 
@@ -76,17 +79,21 @@ func (m *Model) finishProjectDrag(x, y int) tea.Cmd {
 	// The same rule the drop-target highlight was painted from, applied to the
 	// release row — so the green row is exactly what the release does.
 	_, row, ok := m.sidebarDragRows(x, y)
+	var cmd tea.Cmd
 	switch d := m.projectDropFor(idx, row, ok); {
 	case d.group != "":
-		if !m.groups.assign(m.groups.indexOf(d.group), p.Dest, p.ID) {
+		g := m.groups.indexOf(d.group)
+		if !m.groups.assign(g, p.Dest, p.ID) {
 			return nil
 		}
+		cmd = m.sendSetProjectGroup(p.Dest, p.ID, m.groups.Groups[g].Name)
 	case d.ungroup:
 		m.groups.unassign(p.Dest, p.ID)
+		cmd = m.sendSetProjectGroup(p.Dest, p.ID, "")
 	default:
 		return nil
 	}
-	return m.saveGroupsCmd()
+	return tea.Batch(m.saveGroupsCmd(), cmd)
 }
 
 // buildProjectGroupItems is the Move to group… list: one row per group (the
@@ -157,7 +164,7 @@ func (m *Model) moveProjectToGroup(dest, id, name string) tea.Cmd {
 	if g < 0 || !m.groups.assign(g, dest, id) {
 		return nil
 	}
-	return m.saveGroupsCmd()
+	return tea.Batch(m.saveGroupsCmd(), m.sendSetProjectGroup(dest, id, m.groups.Groups[g].Name))
 }
 
 // ungroupProject takes (dest, id) out of its group.
@@ -165,7 +172,7 @@ func (m *Model) ungroupProject(dest, id string) tea.Cmd {
 	if !m.groups.unassign(dest, id) {
 		return nil
 	}
-	return m.saveGroupsCmd()
+	return tea.Batch(m.saveGroupsCmd(), m.sendSetProjectGroup(dest, id, ""))
 }
 
 // buildGroupCtxMenuItems is the header menu for group g of n. Move up/down
@@ -240,8 +247,10 @@ func (m Model) executeGroupCtxMenuItem(name string, item ctxMenuItem) (tea.Model
 		return m, cmd
 	case ctxActDeleteGroup:
 		// The group only: its members become ungrouped, nothing is closed.
+		// Every shared daemon listing the name deletes it too.
+		name := m.groups.Groups[g].Name
 		m.groups.deleteGroup(g)
-		cmd := m.saveGroupsCmd()
+		cmd := tea.Batch(m.saveGroupsCmd(), m.sendGroupOpEverywhere(ipc.GroupOpDelete, name, ""))
 		return m, cmd
 	}
 	return m, nil
@@ -331,10 +340,15 @@ func (m Model) handleGroupEditKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // commitGroupEdit applies the dialog. A refused name flashes — shown INSIDE the
 // box, see groupNameRefusal — and leaves the dialog OPEN with the text kept, so
 // the user fixes it rather than retyping.
+//
+// The refusal is also the pre-check for a shared rename (spec 4.2, F-7):
+// m.groups is the MERGED view, so validName refuses a name any destination
+// holds before anything is sent.
 func (m Model) commitGroupEdit() (tea.Model, tea.Cmd) {
 	e := m.groupEdit
 	changed := false
 	var err error
+	var opCmd tea.Cmd
 	switch e.mode {
 	case groupEditNew:
 		var g int
@@ -342,6 +356,9 @@ func (m Model) commitGroupEdit() (tea.Model, tea.Cmd) {
 			changed = true
 			if e.projectID != "" {
 				m.groups.assign(g, e.dest, e.projectID)
+				opCmd = m.sendSetProjectGroup(e.dest, e.projectID, m.groups.Groups[g].Name)
+			} else {
+				opCmd = m.sendGroupOpEverywhere(ipc.GroupOpCreate, m.groups.Groups[g].Name, "")
 			}
 		}
 	case groupEditRename:
@@ -349,6 +366,7 @@ func (m Model) commitGroupEdit() (tea.Model, tea.Cmd) {
 		if g := m.groups.indexOf(e.target); g >= 0 {
 			if err = m.groups.renameGroup(g, e.input); err == nil {
 				changed = true
+				opCmd = m.sendGroupOpEverywhere(ipc.GroupOpRename, e.target, m.groups.Groups[g].Name)
 			}
 		}
 	}
@@ -360,7 +378,7 @@ func (m Model) commitGroupEdit() (tea.Model, tea.Cmd) {
 	if !changed {
 		return m, nil
 	}
-	cmd := m.saveGroupsCmd()
+	cmd := tea.Batch(m.saveGroupsCmd(), opCmd)
 	return m, cmd
 }
 

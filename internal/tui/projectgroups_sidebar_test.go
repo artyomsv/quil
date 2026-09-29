@@ -209,8 +209,8 @@ func TestSidebarGroups_HeaderClickTogglesAndSaves(t *testing.T) {
 	m.SetProjectGroups(ProjectGroupsState{groups: m.groups}, config.ProjectGroupsPath())
 
 	got, _ := grpPress(*m, 6, tea.MouseLeft)
-	if !got.groupDragging || got.groupDragIdx != 1 {
-		t.Fatalf("drag = (%v, %d) after pressing G-B's header, want (true, 1)", got.groupDragging, got.groupDragIdx)
+	if !got.groupDragging || got.groupDragName != "G-B" {
+		t.Fatalf("drag = (%v, %q) after pressing G-B's header, want (true, G-B)", got.groupDragging, got.groupDragName)
 	}
 	if !got.groups.Groups[1].Collapsed {
 		t.Fatal("the PRESS toggled the group; the toggle belongs to the release, or every drag would collapse it")

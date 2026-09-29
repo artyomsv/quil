@@ -102,7 +102,7 @@ func TestModel_ClearDragState(t *testing.T) {
 		sidebarTabDragging: true,
 		sidebarTabDragIdx:  3,
 		groupDragging:      true,
-		groupDragIdx:       4,
+		groupDragName:      "G-4",
 		groupDragMoved:     true,
 		paneDrag:           paneDragState{srcPaneID: "p1", srcTabID: "t1", targetPaneID: "p2", zone: zoneLeft, overTabID: "t2"},
 	}
@@ -149,8 +149,8 @@ func TestModel_ClearDragState(t *testing.T) {
 	if m.sidebarTabDragIdx != 0 {
 		t.Errorf("sidebarTabDragIdx = %d, want 0", m.sidebarTabDragIdx)
 	}
-	if m.groupDragging || m.groupDragIdx != 0 || m.groupDragMoved {
-		t.Errorf("group drag = (%v, %d, %v), want all zero", m.groupDragging, m.groupDragIdx, m.groupDragMoved)
+	if m.groupDragging || m.groupDragName != "" || m.groupDragMoved {
+		t.Errorf("group drag = (%v, %q, %v), want all zero", m.groupDragging, m.groupDragName, m.groupDragMoved)
 	}
 	if m.paneDrag != (paneDragState{}) {
 		t.Errorf("paneDrag = %+v, want zero value", m.paneDrag)

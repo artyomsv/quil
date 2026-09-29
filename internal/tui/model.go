@@ -82,6 +82,12 @@ type WorkspaceStateMsg struct {
 	// 0/"" from an older daemon that numbers nothing. See acceptStateRev.
 	Rev   uint64
 	RunID string
+	// SharedData: this destination's daemon owns groups, recent folders and
+	// notes (spec 4.1). Groups is its group-name list; RecentCWDs its recent
+	// folders, most recent first. Absent from an older daemon.
+	SharedData bool
+	Groups     []string
+	RecentCWDs []string
 }
 
 // ProjectInfo is one daemon-side project as broadcast. TabIDs carries the
@@ -99,6 +105,8 @@ type ProjectInfo struct {
 	// project on a fresh host adopt the host's tabs instead of leaving a
 	// "Default" beside them.
 	Bootstrap bool
+	// Group is the daemon's group name for this project, "" = ungrouped.
+	Group string
 }
 
 type TabInfo struct {
@@ -139,8 +147,12 @@ type PaneInfo struct {
 	// you were not looking" mark. It seeds a pane the client sees for the
 	// first time (a TUI restart) and is otherwise ignored: the client owns the
 	// live value, and reports every change back so the copy stays current.
-	Unseen       bool
-	Overlay      bool
+	Unseen  bool
+	Overlay bool
+	// NoteRev is the daemon's monotonic note version for this pane. A delete
+	// bumps it rather than resetting it, so 0 means only "never had a note",
+	// never "no note right now".
+	NoteRev      uint64
 	Pending      bool // deferred restore — not yet lazy-spawned
 	SessionID    string
 	HistoryLines int
@@ -1054,10 +1066,20 @@ type Model struct {
 	groupsPath   string
 	groupsWriter *groupsWriter
 	groupsSeq    uint64
+	// Shared data (spec 4.1), per destination, from every frame's shared_data:
+	// true means that daemon owns groups, recents and notes for its projects
+	// and panes; a destination never seen true keeps today's client files.
+	// Not forgotten on reattach — a release daemon does not downgrade.
+	sharedData   map[string]bool
+	daemonGroups map[string][]string // each shared destination's group-name list, from its last frame
+	daemonRecent map[string][]string // each shared destination's recent folders, from its last frame
+	// pendingGroupOps correlates an id-bearing set_project_group/group_op with
+	// the host it went to, so a refusal can be flashed naming it.
+	pendingGroupOps map[string]pendingGroupOp
 	// A press on a group header. The release TOGGLES the group only when
 	// groupDragMoved is still false; a drag reorders the groups instead.
 	groupDragging  bool
-	groupDragIdx   int
+	groupDragName  string // the dragged group's NAME (F-6): a frame can insert or remove a group while a drag is armed
 	groupDragMoved bool
 	// sidebarHover names the PROJECTS row under a buttonless pointer, painted
 	// light grey (sidebar_hover.go). A KEY, not a row index: a broadcast can
@@ -2068,7 +2090,9 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 						m.sidebarTabDragIdx = idx
 					case sidebarRowGroup:
 						m.groupDragging = true
-						m.groupDragIdx = idx
+						if idx >= 0 && idx < len(m.groups.Groups) {
+							m.groupDragName = m.groups.Groups[idx].Name
+						}
 						m.groupDragMoved = false
 					}
 					return m.activateSidebarRow(kind, idx)
@@ -2967,6 +2991,7 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		if !m.acceptStateRev(msg) {
 			return m, m.listenForMessages()
 		}
+		m.noteSharedData(msg)
 		m.noteWorkspaceState(msg.Update, msg.Dest)
 		// TODO(freeze-diagnostic): the 8 "apply: ..." breadcrumbs in this case
 		// and inside applyWorkspaceState were added to pinpoint a TUI Update
@@ -2978,7 +3003,7 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		newPaneIDs, overlayResizeCmds := m.applyWorkspaceState(msg, msg.Dest)
 		// After the merge, and only here: this arm is reached only for a
 		// connected destination whose state arrived (the gate above).
-		groupsCmd := m.pruneProjectGroupsFor(msg)
+		groupsCmd := tea.Batch(m.pruneProjectGroupsFor(msg), m.rebuildGroupsView())
 		templateFocusCmd := m.focusNewTemplateTab()
 		log.Printf("apply: returned, %d new panes", len(newPaneIDs))
 		// An open project picker holds a filtered snapshot taken when it opened.
@@ -3456,6 +3481,9 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		m.skipRender = !prologueChangedView
 		return m, m.listenForMessages()
 
+	case sharedOpRespMsg:
+		return m, tea.Batch(m.listenForMessages(), m.applySharedOpResp(msg))
+
 	default:
 		// No case matched, so nothing in this switch touched the model and the
 		// frame cannot have moved. This is reached by message types the TUI
@@ -3917,7 +3945,7 @@ func (m *Model) clearDragState() {
 	m.sidebarTabDragging = false
 	m.sidebarTabDragIdx = 0
 	m.groupDragging = false
-	m.groupDragIdx = 0
+	m.groupDragName = ""
 	m.groupDragMoved = false
 	m.scrollDragPaneID = ""
 	m.scrollDragRect = PaneRect{}
@@ -6458,7 +6486,7 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]str
 		if ok && proj.activeTab >= 0 && proj.activeTab < len(proj.tabs) {
 			fromTab = proj.tabs[proj.activeTab]
 		}
-		proj.Name, proj.RootDir, proj.Bootstrap = info.Name, info.RootDir, info.Bootstrap
+		proj.Name, proj.RootDir, proj.Bootstrap, proj.Group = info.Name, info.RootDir, info.Bootstrap, info.Group
 		// The daemon answered, so whatever this row was standing in for is over.
 		// This is the ONLY clear point, and it is here rather than in
 		// finishReconnect because it also covers a host brought back through
@@ -8536,6 +8564,14 @@ func (m Model) listenForMessages() tea.Cmd {
 			log.Printf("ipc recv: error reply for %s id=%s: %s (%s)", e.Type, msg.ID, e.Message, e.Code)
 			return listenContinueMsg{}
 
+		case ipc.MsgProjectOpResp, ipc.MsgGroupOpResp:
+			var p ipc.OpRespPayload
+			if err := msg.DecodePayload(&p); err != nil {
+				log.Printf("decode %s: %v", msg.Type, err)
+				return listenContinueMsg{}
+			}
+			return sharedOpRespMsg{dest: msg.Origin, id: msg.ID, resp: p}
+
 		default:
 			log.Printf("ipc recv: unknown type %q", msg.Type)
 			return listenContinueMsg{}
@@ -8555,6 +8591,9 @@ func parseWorkspaceState(ws ipc.WorkspaceState) WorkspaceStateMsg {
 		DaemonLimited: ws.DaemonLimited,
 		Rev:           ws.Rev,
 		RunID:         ws.RunID,
+		SharedData:    ws.SharedData,
+		Groups:        ws.Groups,
+		RecentCWDs:    ws.RecentCWDs,
 	}
 	// An update is reported only once it names a version — a zero-value
 	// ipc.UpdateInfo (no "update" key on the wire, or one JSON-decoded from
@@ -8586,6 +8625,7 @@ func parseWorkspaceState(ws ipc.WorkspaceState) WorkspaceStateMsg {
 			TabIDs:    p.TabIDs,
 			ActiveTab: p.ActiveTab,
 			Bootstrap: p.Bootstrap,
+			Group:     p.Group,
 		})
 	}
 	for _, t := range ws.Tabs {
@@ -8624,6 +8664,7 @@ func parseWorkspaceState(ws ipc.WorkspaceState) WorkspaceStateMsg {
 			MarkedForDeletion: p.MarkedForDeletion,
 			Unseen:            p.Unseen,
 			Overlay:           p.Overlay,
+			NoteRev:           p.NoteRev,
 			Pending:           p.Pending,
 			SessionID:         p.SessionID,
 			HistoryLines:      p.HistoryLines,

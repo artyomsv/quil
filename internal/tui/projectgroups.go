@@ -258,6 +258,25 @@ func (g projectGroups) clone() projectGroups {
 	return out
 }
 
+// withoutMembersOf is clone minus the members of the given destinations — the
+// FILE projection once a destination's members come from its daemon. A group
+// left with no member gets a nil list, as clone gives one, so two projections
+// of the same file compare equal however their members were arrived at.
+func (g projectGroups) withoutMembersOf(dests map[string]bool) projectGroups {
+	out := projectGroups{Groups: make([]projectGroup, len(g.Groups))}
+	for i, grp := range g.Groups {
+		var kept []groupMember
+		for _, mb := range grp.Members {
+			if !dests[mb.Dest] {
+				kept = append(kept, mb)
+			}
+		}
+		grp.Members = kept
+		out.Groups[i] = grp
+	}
+	return out
+}
+
 // sanitizeLoadedGroups holds a loaded file to the same rules the operations
 // enforce: blank and duplicate names dropped (first wins), empty IDs dropped,
 // and a project claimed by an earlier group dropped from a later one.

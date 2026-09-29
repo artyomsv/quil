@@ -241,6 +241,10 @@ func (m *Model) disconnectDest(dest string) {
 	if dest == "" {
 		return // the local daemon is not disconnectable; its panes died with it
 	}
+	// Note saves pending there can no longer be answered: the open editor's
+	// text stays dirty, a closed editor's goes to notes-conflicts now rather
+	// than at quit.
+	m.settleNoteSavesFor(dest, "host disconnected")
 	var conn Client
 	if r, ok := m.client.(*Router); ok {
 		conn = r.Conn(dest)

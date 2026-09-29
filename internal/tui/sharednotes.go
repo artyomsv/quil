@@ -71,36 +71,44 @@ func (m *Model) openNotesEditorFor(pane *PaneModel) (*NotesEditor, tea.Cmd, erro
 	ed.dest = dest
 	m.notesEditor = ed
 	m.noteSaveID = ""
-	return ed, m.sendNoteGet(dest, pane.ID), nil
+	_, cmd := m.sendNoteGet(dest, pane.ID)
+	return ed, cmd, nil
 }
 
 // sendNoteGet asks the daemon for the open editor's note. Synchronous send on
 // the Update goroutine (one-shot, user-driven); the returned Cmd is only the
-// timeout tick. The answer may NOT replace an edited buffer — only
-// reloadNote's confirmed Ctrl+R may, and it says so after this returns.
-func (m *Model) sendNoteGet(dest, paneID string) tea.Cmd {
+// timeout tick; id is the request's, "" when nothing was sent. The answer may
+// NOT replace an edited buffer — only reloadNote's confirmed Ctrl+R may.
+//
+// A send that fails turns only a FIRST load into the read-only error editor;
+// a failed reload leaves the loaded text editable and says so in the flash.
+func (m *Model) sendNoteGet(dest, paneID string) (id string, cmd tea.Cmd) {
 	msg, err := ipc.NewMessage(ipc.MsgNoteGet, ipc.NoteGetPayload{PaneID: paneID})
 	if err != nil {
 		log.Printf("notes: encode note_get: %v", err)
-		return nil
+		return "", nil
 	}
 	msg.ID = "note-" + m.nextReqGen()
 	m.noteLoadID, m.noteLoadDiscards = msg.ID, false
 	if err := m.sendForDestStrict(dest, msg); err != nil {
-		m.notesEditor.ApplyLoadError(err.Error())
 		m.noteLoadID = ""
-		return nil
+		if m.notesEditor.Loading() {
+			m.notesEditor.ApplyLoadError(err.Error())
+			return "", nil
+		}
+		m.setFlash("Note not reloaded: " + err.Error())
+		return "", m.flashCmd()
 	}
-	id := msg.ID
-	return tea.Tick(noteLoadTimeout, func(time.Time) tea.Msg { return noteLoadTimeoutMsg{id: id} })
+	id = msg.ID
+	return id, tea.Tick(noteLoadTimeout, func(time.Time) tea.Msg { return noteLoadTimeoutMsg{id: id} })
 }
 
 // reloadNote is the confirmed Ctrl+R: the one load whose answer may replace
 // the user's edits, because they chose to discard them.
 func (m *Model) reloadNote() tea.Cmd {
 	ed := m.notesEditor
-	cmd := m.sendNoteGet(ed.Dest(), ed.PaneID())
-	m.noteLoadDiscards = m.noteLoadID != ""
+	id, cmd := m.sendNoteGet(ed.Dest(), ed.PaneID())
+	m.noteLoadDiscards = id != ""
 	return cmd
 }
 
@@ -290,7 +298,8 @@ func (m *Model) reconcileNoteRev(msg WorkspaceStateMsg) tea.Cmd {
 			ed.MarkConflict(p.NoteRev)
 			return nil
 		}
-		return m.sendNoteGet(msg.Dest, ed.PaneID())
+		_, cmd := m.sendNoteGet(msg.Dest, ed.PaneID())
+		return cmd
 	}
 	return nil
 }

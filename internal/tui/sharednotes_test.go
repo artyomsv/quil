@@ -430,54 +430,148 @@ func TestLinkLost_PendingNoteSaves_AreSettled(t *testing.T) {
 	}
 }
 
-// A closed editor's save goes to the daemon the editor was opened against,
-// not to whatever destination is active once its pane has vanished.
-func TestExitNotes_PaneVanished_SaveGoesToPinnedDest(t *testing.T) {
+// twoDestNotes is twoDestModel with a shared project on each destination
+// ("proj-1" local, "proj-2" on hostA) and the notes editor open on one of
+// them, loaded at rev 1 and edited ("x" typed before "a").
+type twoDestNotes struct {
+	t             *testing.T
+	m             Model
+	local, remote *fakeConn
+}
+
+func newTwoDestNotes(t *testing.T, openOn string) *twoDestNotes {
+	t.Helper()
 	t.Setenv("QUIL_HOME", t.TempDir())
 	m, local, remote := twoDestModel(t)
 	m.SetBindings(config.Bindings{})
 	m.width, m.height = 100, 40
-	// Update without running its Cmds: every send asserted on is synchronous,
-	// and a re-armed listen on this router blocks once both closed conns have
-	// reported their loss.
-	step := func(msg tea.Msg) {
-		t.Helper()
-		out, _ := m.Update(msg)
-		m = out.(Model)
-	}
-	step(sharedFrame("r", 1, "proj-1", ""))
+	h := &twoDestNotes{t: t, m: m, local: local, remote: remote}
+	h.step(sharedFrame("r", 1, "proj-1", ""))
 	far := sharedFrame("q", 1, "proj-2", "")
 	far.Dest = "hostA"
-	step(far)
-	idx := func(dest string) int {
-		for i, p := range m.projects {
-			if p.Dest == dest {
-				return i
-			}
-		}
-		t.Fatalf("no project for %q", dest)
-		return -1
-	}
-	m.activeProject = idx("")
-	m.syncActiveDest()
-	out, cmd := m.toggleNotesMode()
+	far.Tabs[0].ProjectID = "proj-2" // stateMsg files its tab under proj-1
+	h.step(far)
+	h.activate(openOn)
+	out, cmd := h.m.toggleNotesMode()
 	runCmdNoWait(cmd) // the notes autosave tick sleeps seconds; every send is synchronous
-	m = out.(Model)
-	id := lastSent(t, local, ipc.MsgNoteGet).ID
-	step(noteRespMsg{dest: "", id: id, resp: ipc.NoteRespPayload{PaneID: "tab-proj-1-pane", Text: "a\n", Rev: 1}})
-	step(typed("x"))
+	h.m = out.(Model)
+	conn, pane := local, "tab-proj-1-pane"
+	if openOn != "" {
+		conn, pane = remote, "tab-proj-2-pane"
+	}
+	id := lastSent(t, conn, ipc.MsgNoteGet).ID
+	h.step(noteRespMsg{dest: openOn, id: id, resp: ipc.NoteRespPayload{PaneID: pane, Text: "a\n", Rev: 1}})
+	h.step(typed("x"))
+	return h
+}
 
-	m.activeProject = idx("hostA") // e.g. an MCP switch, while the editor is open
-	m.syncActiveDest()
+// step runs Update WITHOUT its Cmds: every send asserted on is synchronous,
+// and a re-armed listen on this router blocks once both closed conns have
+// reported their loss.
+func (h *twoDestNotes) step(msg tea.Msg) {
+	h.t.Helper()
+	out, _ := h.m.Update(msg)
+	h.m = out.(Model)
+}
+
+// activate makes dest's project the active one.
+func (h *twoDestNotes) activate(dest string) {
+	h.t.Helper()
+	for i, p := range h.m.projects {
+		if p.Dest == dest {
+			h.m.activeProject = i
+			h.m.syncActiveDest()
+			return
+		}
+	}
+	h.t.Fatalf("no project for %q", dest)
+}
+
+// A closed editor's save goes to the daemon the editor was opened against,
+// not to whatever destination is active once its pane has vanished.
+func TestExitNotes_PaneVanished_SaveGoesToPinnedDest(t *testing.T) {
+	h := newTwoDestNotes(t, "")
+	h.activate("hostA") // e.g. an MCP switch, while the editor is open
 	gone := sharedFrame("r", 2, "proj-1", "")
 	gone.Tabs[0].Panes = []string{"tab-proj-1-other"}
 	gone.Panes[0].ID = "tab-proj-1-other"
-	step(gone)
-	if m.notesMode {
+	h.step(gone)
+	if h.m.notesMode {
 		t.Fatal("setup: notes mode survived its pane")
 	}
-	if countSent(remote, ipc.MsgNoteSet) != 0 || countSent(local, ipc.MsgNoteSet) != 1 {
-		t.Errorf("note_set local=%d remote=%d, want 1 to the pinned local daemon", countSent(local, ipc.MsgNoteSet), countSent(remote, ipc.MsgNoteSet))
+	if countSent(h.remote, ipc.MsgNoteSet) != 0 || countSent(h.local, ipc.MsgNoteSet) != 1 {
+		t.Errorf("note_set local=%d remote=%d, want 1 to the pinned local daemon", countSent(h.local, ipc.MsgNoteSet), countSent(h.remote, ipc.MsgNoteSet))
+	}
+}
+
+// Disconnecting a host settles the note saves pending on it at once: a
+// closed editor's text is kept in notes-conflicts now, not at quit.
+func TestDisconnectHost_PendingNoteSave_KeptInConflictsFile(t *testing.T) {
+	h := newTwoDestNotes(t, "hostA")
+	out, _ := h.m.exitNotesMode()
+	h.m = out.(Model)
+	if countSent(h.remote, ipc.MsgNoteSet) != 1 || len(h.m.pendingNoteSaves) != 1 {
+		t.Fatalf("setup: note_set=%d pending=%d", countSent(h.remote, ipc.MsgNoteSet), len(h.m.pendingNoteSaves))
+	}
+	h.m.dialog, h.m.confirmKind, h.m.confirmID = dialogConfirm, confirmKindDisconnectHost, "hostA"
+	h.step(typed("y"))
+	if h.m.dialog != dialogNone {
+		t.Fatal("setup: the disconnect confirm did not run")
+	}
+	files := conflictFiles(t)
+	if len(h.m.pendingNoteSaves) != 0 || len(files) != 1 || !strings.HasPrefix(files[0], config.DestFileKey("hostA")+"-tab-proj-2-pane-") {
+		t.Errorf("after disconnect: pending=%d files=%v", len(h.m.pendingNoteSaves), files)
+	}
+}
+
+// A save made DURING an outage is enqueued on the dead connection and never
+// answered; only the reattach settle un-sticks it. The open editor resends
+// from the same base on the new connection; a closed editor's text is kept.
+func TestReattach_NoteSaveSentDuringOutage_IsSettled(t *testing.T) {
+	for _, closed := range []bool{false, true} {
+		t.Run(map[bool]string{false: "open editor", true: "closed editor"}[closed], func(t *testing.T) {
+			m, conn := loadedNotesModel(t, "a\n", 1)
+			m.SetRedialFunc("", func(Client) (Client, error) { return nil, errors.New("unused") })
+			m = updateWith(t, m, typed("x"))
+			out, _ := m.Update(linkLostMsg{gen: m.clientGen, dest: "", err: errors.New("EOF")})
+			m = out.(Model)
+			autosave := func() {
+				m.notesEditor.lastEditAt = time.Now().Add(-2 * notesDebounceWindow)
+				out, _ := m.Update(notesTickMsg{}) // its Cmd is the next 5 s tick: not run
+				m = out.(Model)
+			}
+			if closed {
+				out, _ = m.exitNotesMode()
+				m = out.(Model)
+			} else {
+				autosave()
+			}
+			if countSent(conn, ipc.MsgNoteSet) != 1 || len(m.pendingNoteSaves) != 1 {
+				t.Fatalf("setup: the outage save: sent=%d pending=%d", countSent(conn, ipc.MsgNoteSet), len(m.pendingNoteSaves))
+			}
+
+			fresh := newFakeConn()
+			close(fresh.recv)
+			out, _ = m.Update(redialResultMsg{gen: m.linkOf("").gen, dest: "", client: fresh})
+			m = out.(Model)
+			if m.linkOf("").active || len(m.pendingNoteSaves) != 0 {
+				t.Fatalf("after reattach: link active=%v pending=%d", m.linkOf("").active, len(m.pendingNoteSaves))
+			}
+			if closed {
+				if n := len(conflictFiles(t)); n != 1 {
+					t.Errorf("%d conflict files, want the closed editor's text kept", n)
+				}
+				return
+			}
+			if m.notesEditor.SaveInFlight() || !m.notesEditor.Dirty() {
+				t.Fatalf("editor after reattach: inflight=%v dirty=%v", m.notesEditor.SaveInFlight(), m.notesEditor.Dirty())
+			}
+			autosave()
+			var p ipc.NoteSetPayload
+			if err := lastSent(t, fresh, ipc.MsgNoteSet).DecodePayload(&p); err != nil || p.BaseRev != 1 || !strings.HasPrefix(p.Text, "xa") {
+				t.Errorf("resend on the new connection = %+v err=%v, want base 1", p, err)
+			}
+		})
 	}
 }
 

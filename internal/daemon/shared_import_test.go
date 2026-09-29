@@ -87,6 +87,39 @@ func TestHandleMessage_SharedImport_KindNotListedIsNeitherAppliedNorAnswered(t *
 	}
 }
 
+// sharedImportNoT sends a shared_import and returns its response or an
+// error, calling no *testing.T method — t.Fatal/t.Errorf are unsafe from any
+// goroutine but the test's own, so the concurrent test below cannot use
+// roundTrip/decodeInto (both call t.Fatalf) from its worker goroutines.
+// Mirrors noteSetNoT (notes_test.go).
+func sharedImportNoT(client *ipc.Client, tag string, payload ipc.SharedImportPayload) (ipc.SharedImportRespPayload, error) {
+	msg, err := ipc.NewMessage(ipc.MsgSharedImport, payload)
+	if err != nil {
+		return ipc.SharedImportRespPayload{}, err
+	}
+	msg.ID = "conc-" + tag + "-" + time.Now().Format("150405.000000000")
+	if err := client.Send(msg); err != nil {
+		return ipc.SharedImportRespPayload{}, err
+	}
+	if err := client.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return ipc.SharedImportRespPayload{}, err
+	}
+	defer client.SetReadDeadline(time.Time{})
+	for {
+		resp, err := client.Receive()
+		if err != nil {
+			return ipc.SharedImportRespPayload{}, err
+		}
+		if resp.Type == ipc.MsgSharedImportResp && resp.ID == msg.ID {
+			var out ipc.SharedImportRespPayload
+			if err := resp.DecodePayload(&out); err != nil {
+				return ipc.SharedImportRespPayload{}, err
+			}
+			return out, nil
+		}
+	}
+}
+
 // TC-4: two clients importing at once — exactly one applies.
 func TestHandleMessage_SharedImport_ConcurrentImports_ExactlyOneApplies(t *testing.T) {
 	d, a, sock, _ := notesTestDaemon(t)
@@ -97,26 +130,34 @@ func TestHandleMessage_SharedImport_ConcurrentImports_ExactlyOneApplies(t *testi
 	t.Cleanup(func() { b.Close() })
 	sendNoID(t, b, ipc.MsgClientHello, ipc.ClientHelloPayload{Role: "bridge", PID: os.Getpid()})
 	var wg sync.WaitGroup
-	results := make([]ipc.SharedImportRespPayload, 2)
+	type result struct {
+		resp ipc.SharedImportRespPayload
+		err  error
+	}
+	results := make([]result, 2)
 	for i, c := range []*ipc.Client{a, b} {
 		wg.Add(1)
 		go func(i int, c *ipc.Client) {
 			defer wg.Done()
-			results[i] = decodeInto[ipc.SharedImportRespPayload](t, roundTrip(t, c, ipc.MsgSharedImport, ipc.MsgSharedImportResp, ipc.SharedImportPayload{
+			resp, err := sharedImportNoT(c, string(rune('a'+i)), ipc.SharedImportPayload{
 				Kinds:  []string{ipc.ImportKindGroups, ipc.ImportKindRecent},
 				Groups: []ipc.SharedImportGroup{{Name: "G" + string(rune('a'+i))}},
 				Recent: []string{"/r" + string(rune('a'+i))},
-			}))
+			})
+			results[i] = result{resp, err}
 		}(i, c)
 	}
 	wg.Wait()
 	applied := 0
-	for _, r := range results {
-		if r.GroupsApplied {
+	for i, r := range results {
+		if r.err != nil {
+			t.Fatalf("goroutine %d: %v", i, r.err)
+		}
+		if r.resp.GroupsApplied {
 			applied++
 		}
-		if r.GroupsApplied != r.RecentApplied {
-			t.Errorf("one client's kinds split: %+v", r)
+		if r.resp.GroupsApplied != r.resp.RecentApplied {
+			t.Errorf("one client's kinds split: %+v", r.resp)
 		}
 	}
 	if applied != 1 {

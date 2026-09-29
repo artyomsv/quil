@@ -246,8 +246,11 @@ type Pane struct {
 	// only "this pane has never had a note". Persisted (note_rev), broadcast.
 	// atomic.Uint64 rather than noteMu-guarded: the workspace-state build
 	// reads it with a bare Load(), with no noteMu, so a slow note_set's disk
-	// I/O never stalls every OTHER pane's broadcast. Written only under
-	// noteMu (Store happens after the response is enqueued — see notes.go).
+	// I/O never stalls every OTHER pane's broadcast. Written under noteMu by
+	// note_set and the import (Store happens after the response is enqueued
+	// — see notes.go); restore is the one exception, storing it with NO lock
+	// at all, because that write happens before the pane is published to any
+	// other goroutine (daemon.go) and so races nothing yet.
 	NoteRev atomic.Uint64
 
 	InstanceName string    // Which instance config was used

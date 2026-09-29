@@ -98,7 +98,11 @@ type PaneState struct {
 	Cols                int      `json:"cols,omitempty"`
 	Rows                int      `json:"rows,omitempty"`
 	Overlay             bool     `json:"overlay,omitempty"`
-	// NoteRev is the pane's note version; 0 = no note. Persisted and broadcast; the note text never rides the frame.
+	// NoteRev is the pane's note version: 0 = this pane has never had a note;
+	// a nonzero rev with an empty note text (fetched separately, via
+	// note_get) means the note was deleted, not that none ever existed — the
+	// counter never resets (spec ruling R-2). Persisted and broadcast; the
+	// note text itself never rides the frame.
 	NoteRev uint64 `json:"note_rev,omitempty"`
 
 	// Broadcast-only (includeOverlays == true).

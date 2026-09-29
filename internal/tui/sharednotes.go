@@ -68,6 +68,7 @@ func (m *Model) openNotesEditorFor(pane *PaneModel) (*NotesEditor, tea.Cmd, erro
 		return ed, nil, err
 	}
 	ed := NewRemoteNotesEditor(pane.ID, pane.Name, 1, 1)
+	ed.dest = dest
 	m.notesEditor = ed
 	m.noteSaveID = ""
 	return ed, m.sendNoteGet(dest, pane.ID), nil
@@ -75,7 +76,8 @@ func (m *Model) openNotesEditorFor(pane *PaneModel) (*NotesEditor, tea.Cmd, erro
 
 // sendNoteGet asks the daemon for the open editor's note. Synchronous send on
 // the Update goroutine (one-shot, user-driven); the returned Cmd is only the
-// timeout tick.
+// timeout tick. The answer may NOT replace an edited buffer — only
+// reloadNote's confirmed Ctrl+R may, and it says so after this returns.
 func (m *Model) sendNoteGet(dest, paneID string) tea.Cmd {
 	msg, err := ipc.NewMessage(ipc.MsgNoteGet, ipc.NoteGetPayload{PaneID: paneID})
 	if err != nil {
@@ -83,7 +85,7 @@ func (m *Model) sendNoteGet(dest, paneID string) tea.Cmd {
 		return nil
 	}
 	msg.ID = "note-" + m.nextReqGen()
-	m.noteLoadID = msg.ID
+	m.noteLoadID, m.noteLoadDiscards = msg.ID, false
 	if err := m.sendForDestStrict(dest, msg); err != nil {
 		m.notesEditor.ApplyLoadError(err.Error())
 		m.noteLoadID = ""
@@ -93,12 +95,22 @@ func (m *Model) sendNoteGet(dest, paneID string) tea.Cmd {
 	return tea.Tick(noteLoadTimeout, func(time.Time) tea.Msg { return noteLoadTimeoutMsg{id: id} })
 }
 
+// reloadNote is the confirmed Ctrl+R: the one load whose answer may replace
+// the user's edits, because they chose to discard them.
+func (m *Model) reloadNote() tea.Cmd {
+	ed := m.notesEditor
+	cmd := m.sendNoteGet(ed.Dest(), ed.PaneID())
+	m.noteLoadDiscards = m.noteLoadID != ""
+	return cmd
+}
+
 func (m *Model) applyNoteResp(msg noteRespMsg) {
 	ed := m.notesEditor
 	if ed == nil || !ed.Remote() || msg.id == "" || msg.id != m.noteLoadID {
 		return
 	}
-	m.noteLoadID = ""
+	discards := m.noteLoadDiscards
+	m.noteLoadID, m.noteLoadDiscards = "", false
 	if msg.resp.Error != "" {
 		// A reload that fails leaves the loaded text as it was; only a first
 		// load has nothing to show and becomes the read-only error editor.
@@ -109,8 +121,10 @@ func (m *Model) applyNoteResp(msg noteRespMsg) {
 	}
 	// A silent reload (clean editor, newer frame rev) that finds the user
 	// typing since it was sent must not replace the typing: it is a conflict.
-	// A Ctrl+R reload is already a conflict, and discarding was confirmed.
-	if !ed.Loading() && ed.Dirty() && !ed.Conflict() {
+	// That holds even when the editor is ALREADY conflicted — a later frame,
+	// or a Ctrl+S answer overtaking this one, can mark it so while the reload
+	// is in flight. Only the confirmed Ctrl+R reload discards.
+	if !ed.Loading() && ed.Dirty() && !discards {
 		ed.MarkConflict(msg.resp.Rev)
 		return
 	}
@@ -155,10 +169,10 @@ func (m *Model) sendNoteSave(overwrite bool) tea.Cmd {
 	if !ok {
 		return nil
 	}
-	dest := m.destOfPane(ed.PaneID())
+	dest := ed.Dest()
 	msg, err := ipc.NewMessage(ipc.MsgNoteSet, ipc.NoteSetPayload{PaneID: ed.PaneID(), Text: text, BaseRev: base})
 	if err != nil {
-		ed.ApplySaveResult(ipc.NoteSetRespPayload{Error: err.Error()})
+		ed.AbandonSave(err.Error())
 		return nil
 	}
 	msg.ID = "note-" + m.nextReqGen()
@@ -170,9 +184,30 @@ func (m *Model) sendNoteSave(overwrite bool) tea.Cmd {
 	if err := m.sendForDestStrict(dest, msg); err != nil {
 		delete(m.pendingNoteSaves, msg.ID)
 		m.noteSaveID = ""
-		ed.ApplySaveResult(ipc.NoteSetRespPayload{Error: err.Error()})
+		ed.AbandonSave(err.Error())
 	}
 	return nil
+}
+
+// settleNoteSavesFor settles every save pending on dest when its link is lost
+// or reattached: the old connection's answers will never arrive, and an
+// unanswered save otherwise leaves the open editor "saving…" for good —
+// refusing saves, ignoring frames, blocking Ctrl+R. The open editor keeps its
+// text dirty and sends it again from the same base once the link is back; a
+// closed editor's text goes to notes-conflicts.
+func (m *Model) settleNoteSavesFor(dest, reason string) {
+	for id, p := range m.pendingNoteSaves {
+		if p.dest != dest {
+			continue
+		}
+		delete(m.pendingNoteSaves, id)
+		if ed := m.notesEditor; ed != nil && id == m.noteSaveID {
+			m.noteSaveID = ""
+			ed.AbandonSave(reason)
+			continue
+		}
+		m.keepNoteText(p.dest, p.paneID, p.text, "Note save lost with the link to "+hostLabel(dest))
+	}
 }
 
 // flushRemoteNotesInPlace is the remote editor's Close(): a dirty editor
@@ -186,8 +221,7 @@ func (m *Model) flushRemoteNotesInPlace() {
 	}
 	m.sendNoteSave(false)
 	if text, ok := ed.Unsent(); ok {
-		dest := m.destOfPane(ed.PaneID())
-		m.keepNoteText(dest, ed.PaneID(), text, "Note not saved on the daemon")
+		m.keepNoteText(ed.Dest(), ed.PaneID(), text, "Note not saved on the daemon")
 	}
 	// The closed editor's answers are settled through pendingNoteSaves alone.
 	m.noteSaveID, m.noteLoadID = "", ""
@@ -245,7 +279,7 @@ func (m *Model) applyNoteSetResp(msg noteSetRespMsg) tea.Cmd {
 // them too), so only a higher one means another client changed the note.
 func (m *Model) reconcileNoteRev(msg WorkspaceStateMsg) tea.Cmd {
 	ed := m.notesEditor
-	if ed == nil || !ed.Remote() || ed.Loading() || ed.SaveInFlight() || msg.Dest != m.destOfPane(ed.PaneID()) {
+	if ed == nil || !ed.Remote() || ed.Loading() || ed.SaveInFlight() || msg.Dest != ed.Dest() {
 		return nil
 	}
 	for _, p := range msg.Panes {

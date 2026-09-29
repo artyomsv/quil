@@ -1010,6 +1010,7 @@ type Model struct {
 	// Shared notes (sharednotes.go).
 	pendingNoteSaves map[string]pendingNoteSave // remote saves unanswered by the daemon, by request id; outlive the editor (F-2)
 	noteLoadID       string                     // the open editor's in-flight note_get id
+	noteLoadDiscards bool                       // that note_get is a confirmed Ctrl+R reload, the one load allowed to replace edits
 	noteSaveID       string                     // the open editor's in-flight note_set id; "" once the editor closed
 	quitWaiting      bool                       // app.quit is waiting for pendingNoteSaves (requestQuit)
 
@@ -1415,7 +1416,7 @@ func (m Model) FlushNotes() {
 			// Reached without requestQuit (close_tui, a lost link): no save
 			// can be sent any more, so text none covers goes to a file.
 			if text, ok := ed.Unsent(); ok {
-				m.keepNoteText(m.destOfPane(ed.PaneID()), ed.PaneID(), text, "Note not saved on the daemon")
+				m.keepNoteText(ed.Dest(), ed.PaneID(), text, "Note not saved on the daemon")
 			}
 		} else if err := ed.Close(); err != nil {
 			log.Printf("flush notes on exit: %v", err)
@@ -5457,7 +5458,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			case notesActionSave:
 				return m, m.sendNoteSave(m.notesEditor.Conflict())
 			case notesActionReload:
-				return m, m.sendNoteGet(m.destOfPane(m.notesEditor.PaneID()), m.notesEditor.PaneID())
+				return m, m.reloadNote()
 			}
 			return m, cmd
 		}
@@ -5470,6 +5471,11 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// still reachable when the overlay is hidden (this block only fires when
 	// overlayVisible is true).
 	if tab := m.activeTabModel(); tab != nil && tab.overlayVisible && tab.overlayPane != nil && m.dialog == dialogNone && !m.renaming && !m.renamingPane {
+		// Quit is taken here rather than inside handleOverlayKey, which
+		// returns only a Cmd: requestQuit may have to wait for note saves.
+		if m.isAction(key, "app.quit") {
+			return m.requestQuit()
+		}
 		return m, m.handleOverlayKey(msg, tab)
 	}
 

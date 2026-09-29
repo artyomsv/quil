@@ -1,10 +1,12 @@
 package tui
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -197,6 +199,12 @@ func TestUpdate_ConflictCtrlRTwice_Reloads(t *testing.T) {
 	if countSent(conn, ipc.MsgNoteGet) != before+1 {
 		t.Fatal("two Ctrl+R did not reload")
 	}
+	// The confirmed reload is the one load that replaces the edits.
+	id = lastSent(t, conn, ipc.MsgNoteGet).ID
+	m = updateWith(t, m, noteRespMsg{dest: "", id: id, resp: ipc.NoteRespPayload{PaneID: "tab-proj-1-pane", Text: "b\n", Rev: 2}})
+	if m.notesEditor.Conflict() || m.notesEditor.Dirty() || m.notesEditor.Content() != "b\n" {
+		t.Errorf("after the confirmed reload: conflict=%v dirty=%v content=%q", m.notesEditor.Conflict(), m.notesEditor.Dirty(), m.notesEditor.Content())
+	}
 }
 
 func TestExitNotes_DirtyRemote_SaveOutlivesEditor_ConflictWritesFile(t *testing.T) {
@@ -358,14 +366,165 @@ func TestUpdate_NoteResp_StripsControlRunesKeepsLineBreaks(t *testing.T) {
 
 // A silent reload answered after the user started typing must not replace
 // the typing: the answer is a conflict, not a load.
+//
+// The frame at rev 3 between the typing and the answer marks the editor
+// conflicted while the SILENT reload is still in flight; being conflicted must
+// not read as "the user confirmed Ctrl+R" when its answer lands.
 func TestUpdate_ReloadAnswerAfterTyping_MarksConflictKeepsText(t *testing.T) {
 	m, conn := loadedNotesModel(t, "a\n", 1)
 	m = updateWith(t, m, noteFrame(2, 2)) // clean → reload sent
 	id := lastSent(t, conn, ipc.MsgNoteGet).ID
 	m = updateWith(t, m, typed("x"))
+	m = updateWith(t, m, noteFrame(3, 3)) // dirty → conflicted, reload still in flight
+	if !m.notesEditor.Conflict() {
+		t.Fatal("setup: the rev-3 frame did not mark a conflict")
+	}
 	m = updateWith(t, m, noteRespMsg{dest: "", id: id, resp: ipc.NoteRespPayload{PaneID: "tab-proj-1-pane", Text: "b\n", Rev: 2}})
 	if !m.notesEditor.Conflict() || !strings.HasPrefix(m.notesEditor.Content(), "xa") {
-		t.Errorf("conflict=%v content=%q", m.notesEditor.Conflict(), m.notesEditor.Content())
+		t.Fatalf("conflict=%v content=%q", m.notesEditor.Conflict(), m.notesEditor.Content())
+	}
+	// The overwrite names the newest rev known (3), not the older answer's 2.
+	m = updateWith(t, m, ctrl('s'))
+	var p ipc.NoteSetPayload
+	if err := lastSent(t, conn, ipc.MsgNoteSet).DecodePayload(&p); err != nil || p.BaseRev != 3 {
+		t.Errorf("overwrite base_rev = %d err=%v, want 3", p.BaseRev, err)
+	}
+}
+
+// A save whose answer the lost link took away must not leave the editor
+// "saving…" forever: it goes dirty again and saves from the same base once the
+// link is back. A CLOSED editor's pending text is kept in notes-conflicts.
+func TestLinkLost_PendingNoteSaves_AreSettled(t *testing.T) {
+	m, conn := loadedNotesModel(t, "a\n", 1)
+	m.SetRedialFunc("", func(Client) (Client, error) { return nil, errors.New("unused") })
+	m = updateWith(t, m, typed("x"))
+	m = updateWith(t, m, ctrl('s'))
+	if !m.notesEditor.SaveInFlight() {
+		t.Fatal("setup: save not in flight")
+	}
+	out, _ := m.Update(linkLostMsg{gen: m.clientGen, dest: "", err: errors.New("EOF")})
+	m = out.(Model)
+	if m.notesEditor.SaveInFlight() || !m.notesEditor.Dirty() || len(m.pendingNoteSaves) != 0 {
+		t.Fatalf("after link loss: inflight=%v dirty=%v pending=%d", m.notesEditor.SaveInFlight(), m.notesEditor.Dirty(), len(m.pendingNoteSaves))
+	}
+	*m.linkFor("") = reconnectState{} // the reattach completed
+	m = updateWith(t, m, ctrl('s'))
+	if n := countSent(conn, ipc.MsgNoteSet); n != 2 {
+		t.Fatalf("%d note_set sent, want the resend after the link came back", n)
+	}
+	var p ipc.NoteSetPayload
+	if err := lastSent(t, conn, ipc.MsgNoteSet).DecodePayload(&p); err != nil || p.BaseRev != 1 {
+		t.Errorf("resend = %+v err=%v, want base 1", p, err)
+	}
+
+	// Closed editor: the pending save's text is kept on disk.
+	out, _ = m.exitNotesMode()
+	m = out.(Model)
+	if len(m.pendingNoteSaves) != 1 {
+		t.Fatalf("setup: pending = %d", len(m.pendingNoteSaves))
+	}
+	out, _ = m.Update(linkLostMsg{gen: m.clientGen, dest: "", err: errors.New("EOF")})
+	m = out.(Model)
+	if len(m.pendingNoteSaves) != 0 || len(conflictFiles(t)) != 1 {
+		t.Errorf("closed editor after link loss: pending=%d files=%v", len(m.pendingNoteSaves), conflictFiles(t))
+	}
+}
+
+// A closed editor's save goes to the daemon the editor was opened against,
+// not to whatever destination is active once its pane has vanished.
+func TestExitNotes_PaneVanished_SaveGoesToPinnedDest(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	m, local, remote := twoDestModel(t)
+	m.SetBindings(config.Bindings{})
+	m.width, m.height = 100, 40
+	// Update without running its Cmds: every send asserted on is synchronous,
+	// and a re-armed listen on this router blocks once both closed conns have
+	// reported their loss.
+	step := func(msg tea.Msg) {
+		t.Helper()
+		out, _ := m.Update(msg)
+		m = out.(Model)
+	}
+	step(sharedFrame("r", 1, "proj-1", ""))
+	far := sharedFrame("q", 1, "proj-2", "")
+	far.Dest = "hostA"
+	step(far)
+	idx := func(dest string) int {
+		for i, p := range m.projects {
+			if p.Dest == dest {
+				return i
+			}
+		}
+		t.Fatalf("no project for %q", dest)
+		return -1
+	}
+	m.activeProject = idx("")
+	m.syncActiveDest()
+	out, cmd := m.toggleNotesMode()
+	runCmdNoWait(cmd) // the notes autosave tick sleeps seconds; every send is synchronous
+	m = out.(Model)
+	id := lastSent(t, local, ipc.MsgNoteGet).ID
+	step(noteRespMsg{dest: "", id: id, resp: ipc.NoteRespPayload{PaneID: "tab-proj-1-pane", Text: "a\n", Rev: 1}})
+	step(typed("x"))
+
+	m.activeProject = idx("hostA") // e.g. an MCP switch, while the editor is open
+	m.syncActiveDest()
+	gone := sharedFrame("r", 2, "proj-1", "")
+	gone.Tabs[0].Panes = []string{"tab-proj-1-other"}
+	gone.Panes[0].ID = "tab-proj-1-other"
+	step(gone)
+	if m.notesMode {
+		t.Fatal("setup: notes mode survived its pane")
+	}
+	if countSent(remote, ipc.MsgNoteSet) != 0 || countSent(local, ipc.MsgNoteSet) != 1 {
+		t.Errorf("note_set local=%d remote=%d, want 1 to the pinned local daemon", countSent(local, ipc.MsgNoteSet), countSent(remote, ipc.MsgNoteSet))
+	}
+}
+
+// Quit from the overlay key path waits for pending note saves too.
+func TestUpdate_QuitFromOverlay_WaitsForPendingSave(t *testing.T) {
+	m, _ := loadedNotesModel(t, "a\n", 1)
+	m = updateWith(t, m, typed("x"))
+	out, _ := m.exitNotesMode()
+	m = out.(Model)
+	tab := m.activeTabModel()
+	overlay := NewPaneModel("pane-o", 1024)
+	overlay.Type = overlayPluginLazygit
+	tab.overlayPane = overlay
+	tab.overlayVisible = true
+	out, cmd := m.Update(ctrl('q'))
+	m = out.(Model)
+	if cmdQuits(cmd) || !m.quitWaiting {
+		t.Errorf("quit from the overlay did not wait (waiting=%v)", m.quitWaiting)
+	}
+}
+
+// A save the daemon refused (too large) is not resent by autosave every tick;
+// the next real edit resumes it.
+func TestUpdate_RefusedSave_NoAutosaveUntilEdited(t *testing.T) {
+	m, conn := loadedNotesModel(t, "a\n", 1)
+	m = updateWith(t, m, typed("x"))
+	m = updateWith(t, m, ctrl('s'))
+	sent := lastSent(t, conn, ipc.MsgNoteSet)
+	m = updateWith(t, m, noteSetRespMsg{dest: "", id: sent.ID, resp: ipc.NoteSetRespPayload{PaneID: "tab-proj-1-pane", Error: "too large"}})
+	tick := func() {
+		m.notesEditor.lastEditAt = time.Now().Add(-2 * notesDebounceWindow)
+		out, _ := m.Update(notesTickMsg{}) // its Cmd is the next 5 s tick: not run
+		m = out.(Model)
+	}
+	tick()
+	if n := countSent(conn, ipc.MsgNoteSet); n != 1 {
+		t.Fatalf("%d note_set after a refusal, want no autosave resend", n)
+	}
+	m = updateWith(t, m, tea.KeyPressMsg{Code: tea.KeyRight}) // not an edit
+	tick()
+	if n := countSent(conn, ipc.MsgNoteSet); n != 1 {
+		t.Fatalf("%d note_set after a cursor move, want still 1", n)
+	}
+	m = updateWith(t, m, typed("y"))
+	tick()
+	if n := countSent(conn, ipc.MsgNoteSet); n != 2 {
+		t.Errorf("%d note_set after an edit, want the autosave to resume", n)
 	}
 }
 

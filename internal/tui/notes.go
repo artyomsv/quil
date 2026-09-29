@@ -55,8 +55,14 @@ type NotesEditor struct {
 	// (reload, confirmed by a second Ctrl+R) or Ctrl+S (overwrite from
 	// currentRev). inFlightText is the buffer as it was when the save in
 	// flight was taken, so an OK answer clears dirty only when nothing was
-	// typed since.
+	// typed since. dest is the daemon the editor was opened against, pinned
+	// then: once the pane vanishes, destOfPane falls back to the ACTIVE
+	// destination, which can be another host. autoSaveHold stops autosave
+	// after the daemon refused a save (too large, a write error) until the
+	// user edits — resending the same text every tick cannot succeed.
 	remote       bool
+	dest         string
+	autoSaveHold bool
 	rev          uint64
 	loading      bool
 	loadErr      string
@@ -80,6 +86,14 @@ func NewRemoteNotesEditor(paneID, paneName string, viewW, viewH int) *NotesEdito
 
 func (n *NotesEditor) Remote() bool  { return n != nil && n.remote }
 func (n *NotesEditor) Loading() bool { return n != nil && n.loading }
+
+// Dest is the destination a remote editor was opened against ("" for local).
+func (n *NotesEditor) Dest() string {
+	if n == nil {
+		return ""
+	}
+	return n.dest
+}
 
 func (n *NotesEditor) LoadError() string {
 	if n == nil {
@@ -113,7 +127,7 @@ func (n *NotesEditor) ApplyLoaded(text string, rev uint64) {
 	n.editor = ed
 	n.rev, n.loading, n.loadErr = rev, false, ""
 	n.dirty, n.conflict, n.reloadArmed, n.saveInFlight = false, false, false, false
-	n.inFlightText = ""
+	n.inFlightText, n.saveErr, n.autoSaveHold = "", "", false
 }
 
 func (n *NotesEditor) ApplyLoadError(msg string) {
@@ -163,19 +177,36 @@ func (n *NotesEditor) ApplySaveResult(resp ipc.NoteSetRespPayload) {
 		}
 		n.conflict, n.reloadArmed = false, false
 		n.lastSavedAt = time.Now()
-		n.saveErr = ""
+		n.saveErr, n.autoSaveHold = "", false
 	case resp.Conflict:
 		n.MarkConflict(resp.CurrentRev)
 	default:
 		n.saveErr = resp.Error
+		n.autoSaveHold = true
 	}
 	n.inFlightText = ""
 }
 
-// MarkConflict keeps the text, stops autosave and shows the choice.
+// AbandonSave forgets the save in flight without a verdict from the daemon —
+// the send failed, or the link it went out on was lost. The text stays dirty
+// and autosave sends it again (from the same base), unlike a daemon refusal.
+func (n *NotesEditor) AbandonSave(reason string) {
+	if n == nil {
+		return
+	}
+	n.saveInFlight, n.inFlightText = false, ""
+	n.saveErr = reason
+}
+
+// MarkConflict keeps the text, stops autosave and shows the choice. Revs only
+// grow, so the higher of an earlier conflict's rev and this one is the
+// daemon's latest — the base an overwrite must name.
 func (n *NotesEditor) MarkConflict(currentRev uint64) {
 	if n == nil {
 		return
+	}
+	if n.conflict && n.currentRev > currentRev {
+		currentRev = n.currentRev
 	}
 	n.conflict, n.currentRev, n.reloadArmed = true, currentRev, false
 }
@@ -184,7 +215,7 @@ func (n *NotesEditor) MarkConflict(currentRev uint64) {
 // is a send the Model owns.
 func (n *NotesEditor) WantsAutoSave() bool {
 	return n != nil && n.remote && n.dirty && !n.conflict && !n.saveInFlight && !n.loading &&
-		time.Since(n.lastEditAt) >= notesDebounceWindow
+		!n.autoSaveHold && time.Since(n.lastEditAt) >= notesDebounceWindow
 }
 
 // Unsent is the remote editor's text that no save covers: dirty, and not
@@ -348,10 +379,20 @@ func (n *NotesEditor) HandleKey(key string) (notesAction, tea.Cmd) {
 		return notesActionExit, nil
 	}
 
+	// The hold ends with a real edit, not a cursor move: the inner editor's
+	// Dirty stays set after the first edit, so it cannot tell them apart.
+	// Compared only while held, which is rare.
+	var before string
+	if n.autoSaveHold {
+		before = n.editor.Content()
+	}
 	_, _, cmd := n.editor.HandleKey(key)
 	if n.editor.Dirty {
 		n.dirty = true
 		n.lastEditAt = time.Now()
+	}
+	if n.autoSaveHold && n.editor.Content() != before {
+		n.autoSaveHold = false
 	}
 	return notesActionNone, cmd
 }
@@ -367,6 +408,7 @@ func (n *NotesEditor) HandlePaste(text string) {
 	n.editor.InsertMultiLine(text)
 	n.dirty = true
 	n.lastEditAt = time.Now()
+	n.autoSaveHold = false
 }
 
 // HasSelection reports whether a non-empty selection is currently active

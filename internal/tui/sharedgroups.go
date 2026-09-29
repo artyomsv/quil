@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 
@@ -248,8 +249,18 @@ func (m *Model) sendGroupOpEverywhere(op, name, newName string) tea.Cmd {
 		}
 		return m.sendGroupOp(dest, op, name, newName)
 	}
+	// A destination whose groups import is unanswered lists nothing yet but
+	// will list the name once the import lands: the op is held for it and
+	// replayed after the answer (sharedimport.go), or the authoritative frame
+	// that follows would undo it.
+	targets := m.destsListingGroup(name)
+	for _, d := range m.destsHoldingGroupName(name) {
+		if !slices.Contains(targets, d) {
+			targets = append(targets, d)
+		}
+	}
 	var cmds []tea.Cmd
-	for _, dest := range m.destsListingGroup(name) {
+	for _, dest := range targets {
 		if !m.destConnected(dest) {
 			continue
 		}

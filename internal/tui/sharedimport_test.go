@@ -3,7 +3,9 @@ package tui
 import (
 	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -189,9 +191,12 @@ func TestCollectImportNotes_BudgetDefersTheRest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := collectImportNotes(dir, mine, nil, len(enc)+10)
-	if len(got) != 1 || got[0].PaneID != "pane-a" {
-		t.Errorf("notes = %+v, want pane-a alone", got)
+	got, deferred := collectImportNotes(dir, mine, nil, len(enc)+10)
+	if len(got) != 1 || got[0].PaneID != "pane-a" || !deferred {
+		t.Errorf("notes = %+v deferred=%v, want pane-a alone and deferred", got, deferred)
+	}
+	if _, deferred := collectImportNotes(dir, mine, nil, 1<<20); deferred {
+		t.Error("deferred reported with room for every note")
 	}
 }
 
@@ -326,5 +331,214 @@ func TestListenForMessages_SharedImportResp_BecomesSharedImportRespMsg(t *testin
 	}
 	if got.id != "imp-3" || !got.resp.RecentApplied || len(got.resp.Answered) != 1 {
 		t.Errorf("got %+v", got)
+	}
+}
+
+// decodeSetProjectGroup decodes the last set_project_group sent on conn.
+func decodeSetProjectGroup(t *testing.T, conn *fakeConn) ipc.SetProjectGroupPayload {
+	t.Helper()
+	var p ipc.SetProjectGroupPayload
+	if err := lastSent(t, conn, ipc.MsgSetProjectGroup).DecodePayload(&p); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// I-1: an import in flight when the link drops can never be answered. The
+// first shared frame after the reattach sends it again, and ITS answer opens
+// group sends and replays the held assign. The old id's answer settles
+// nothing.
+func TestUpdate_ImportLostWithTheLink_ReattachFrameResendsAndItsAnswerReplays(t *testing.T) {
+	m, local, _ := importTestModel(t)
+	m = updateNoWait(t, m, sharedFrame("r", 1, "proj-1", ""))
+	_, oldID := importPayload(t, local)
+	runCmd(m.moveProjectToGroup("", "proj-1", "Empty"))
+	m = updateNoWait(t, m, linkLostMsg{dest: "", err: errLinkLost})
+	m = updateNoWait(t, m, sharedFrame("r2", 1, "proj-1", ""))
+	if n := countSent(local, ipc.MsgSharedImport); n != 2 {
+		t.Fatalf("shared_import sent %d times, want it re-sent after the reattach", n)
+	}
+	p, newID := importPayload(t, local)
+	if newID == oldID {
+		t.Fatal("the re-sent import reused the old id")
+	}
+	// The file view already holds the held assign, so the re-sent import
+	// carries it.
+	for _, g := range p.Groups {
+		if g.Name == "Empty" && (len(g.ProjectIDs) != 1 || g.ProjectIDs[0] != "proj-1") {
+			t.Errorf("re-sent Empty = %+v, want proj-1", g)
+		}
+	}
+	m = updateNoWait(t, m, sharedImportRespMsg{dest: "", id: oldID, resp: ipc.SharedImportRespPayload{Answered: []string{ipc.ImportKindGroups}}})
+	if n := countSent(local, ipc.MsgSetProjectGroup); n != 0 {
+		t.Fatalf("the dead link's answer opened group sends (%d sent)", n)
+	}
+	m = updateNoWait(t, m, sharedImportRespMsg{dest: "", id: newID, resp: ipc.SharedImportRespPayload{Answered: []string{ipc.ImportKindGroups, ipc.ImportKindRecent}}})
+	if n := countSent(local, ipc.MsgSetProjectGroup); n != 1 {
+		t.Fatalf("set_project_group sent %d times after the answer, want the held one", n)
+	}
+	if p := decodeSetProjectGroup(t, local); p.ProjectID != "proj-1" || p.Group != "Empty" {
+		t.Errorf("replayed %+v", p)
+	}
+}
+
+// The reattach path clears the in-flight import too.
+func TestArmReattachReset_ForgetsTheImportInFlight(t *testing.T) {
+	m, local, _ := importTestModel(t)
+	m = updateNoWait(t, m, sharedFrame("r", 1, "proj-1", ""))
+	m.armReattachReset("")
+	m = updateNoWait(t, m, sharedFrame("r2", 1, "proj-1", ""))
+	if n := countSent(local, ipc.MsgSharedImport); n != 2 {
+		t.Errorf("shared_import sent %d times, want it re-sent after the reattach", n)
+	}
+}
+
+// I-1: an error reply to the import is no answer — the next frame sends it
+// again, up to maxImportErrors error replies this session.
+func TestUpdate_ImportErrorReply_NextFrameResendsUntilTheCap(t *testing.T) {
+	m, local, _ := importTestModel(t)
+	rev := uint64(1)
+	m = updateNoWait(t, m, sharedFrame("r", rev, "proj-1", ""))
+	for i := 1; i <= maxImportErrors; i++ {
+		_, id := importPayload(t, local)
+		m = updateNoWait(t, m, sharedImportErrMsg{dest: "", id: id, text: "bad_payload: x"})
+		rev++
+		m = updateNoWait(t, m, sharedFrame("r", rev, "proj-1", ""))
+		want := i + 1
+		if i == maxImportErrors {
+			want = i
+		}
+		if n := countSent(local, ipc.MsgSharedImport); n != want {
+			t.Fatalf("after error %d: shared_import sent %d times, want %d", i, n, want)
+		}
+	}
+	if mk := loadImportMarker(config.SharedImportPath()); mk.Dests["local"].Groups || mk.Dests["local"].Recent {
+		t.Errorf("an error reply set the marker: %+v", mk.Dests["local"])
+	}
+}
+
+func TestListenForMessages_SharedImportErrorReply_BecomesSharedImportErrMsg(t *testing.T) {
+	conn := newFakeConn()
+	m := Model{cfg: config.Default(), client: conn, tabDragFromIdx: -1}
+	reply, err := ipc.NewMessage(ipc.MsgError, ipc.ErrorPayload{Code: ipc.ErrCodeBadPayload, Message: "import request too large", Type: ipc.MsgSharedImport})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply.ID = "imp-9"
+	conn.recv <- reply
+	got, ok := m.listenForMessages()().(sharedImportErrMsg)
+	if !ok {
+		t.Fatal("an error reply to shared_import did not become a sharedImportErrMsg")
+	}
+	if got.id != "imp-9" || !strings.Contains(got.text, "too large") {
+		t.Errorf("got %+v", got)
+	}
+}
+
+// I-2: notes the request budget left out keep the notes kind pending, and the
+// next launch (a fresh Model) sends it again.
+func TestUpdate_ImportNotesDeferredByBudget_NextLaunchSendsTheNotesKind(t *testing.T) {
+	m, _, remote := importTestModel(t)
+	rf := sharedFrame("q", 1, "proj-2", "")
+	rf.Dest = "hostA"
+	// One note more than the 8 MiB request can carry at the per-note cap.
+	n := (ipc.MaxSharedImportBytes-importReserveBytes)/ipc.MaxNoteBytes + 1
+	text := strings.Repeat("x", ipc.MaxNoteBytes)
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("pane-n%02d", i)
+		if err := persist.SaveNotes(config.NotesDir(), id, text); err != nil {
+			t.Fatal(err)
+		}
+		rf.Panes = append(rf.Panes, PaneInfo{ID: id, TabID: "tab-proj-2", Type: "terminal"})
+		rf.Tabs[0].Panes = append(rf.Tabs[0].Panes, id)
+	}
+	m = updateNoWait(t, m, rf)
+	p, id := importPayload(t, remote)
+	if len(p.Notes) == 0 || len(p.Notes) >= n {
+		t.Fatalf("notes sent = %d of %d, want some deferred", len(p.Notes), n)
+	}
+	all := []string{ipc.ImportKindGroups, ipc.ImportKindRecent, ipc.ImportKindNotes}
+	m = updateNoWait(t, m, sharedImportRespMsg{dest: "hostA", id: id, resp: ipc.SharedImportRespPayload{Answered: all, NotesApplied: len(p.Notes)}})
+	mk := loadImportMarker(config.SharedImportPath())
+	if k := mk.Dests[config.DestFileKey("hostA")]; !k.Groups || !k.Recent || k.Notes {
+		t.Fatalf("marker = %+v, want groups+recent done and notes pending", k)
+	}
+
+	next, _, remote2 := twoDestModel(t)
+	next.SetSharedImportMarker(config.SharedImportPath())
+	next = updateNoWait(t, next, rf)
+	p2, _ := importPayload(t, remote2)
+	if strings.Join(p2.Kinds, ",") != ipc.ImportKindNotes || len(p2.Notes) == 0 {
+		t.Errorf("next launch: kinds = %v, %d notes; want the notes kind alone", p2.Kinds, len(p2.Notes))
+	}
+}
+
+// M-1: a rename made before the groups answer is held for every destination
+// that will list the name once its import lands, and replayed after.
+func TestUpdate_GroupRenameBeforeImportAnswer_IsHeldThenReplayed(t *testing.T) {
+	m, local, _ := importTestModel(t)
+	m = updateNoWait(t, m, sharedFrame("r", 1, "proj-1", ""))
+	_, id := importPayload(t, local)
+	m.beginGroupEdit(groupEditState{mode: groupEditRename, target: "Infra", input: "Platform"})
+	out, cmd := m.commitGroupEdit()
+	runCmd(cmd)
+	m = out.(Model)
+	if n := countSent(local, ipc.MsgGroupOp); n != 0 {
+		t.Fatalf("group_op sent %d times before the import answer", n)
+	}
+	m = updateNoWait(t, m, sharedImportRespMsg{dest: "", id: id, resp: ipc.SharedImportRespPayload{Answered: []string{ipc.ImportKindGroups}}})
+	if n := countSent(local, ipc.MsgGroupOp); n != 1 {
+		t.Fatalf("group_op sent %d times after the answer, want the held rename", n)
+	}
+	var p ipc.GroupOpPayload
+	if err := lastSent(t, local, ipc.MsgGroupOp).DecodePayload(&p); err != nil {
+		t.Fatal(err)
+	}
+	if p.Op != ipc.GroupOpRename || p.Name != "Infra" || p.NewName != "Platform" {
+		t.Errorf("replayed %+v", p)
+	}
+}
+
+// M-1: a held create makes a later delete of that name held too, in order.
+func TestUpdate_HeldCreateThenDelete_BothReplayedInOrder(t *testing.T) {
+	m, local, _ := importTestModel(t)
+	m = updateNoWait(t, m, sharedFrame("r", 1, "proj-1", ""))
+	_, id := importPayload(t, local)
+	m.beginGroupEdit(groupEditState{mode: groupEditNew, input: "Fresh"})
+	out, cmd := m.commitGroupEdit()
+	runCmd(cmd)
+	m = out.(Model)
+	runCmd(m.sendGroupOpEverywhere(ipc.GroupOpDelete, "Fresh", ""))
+	m = updateNoWait(t, m, sharedImportRespMsg{dest: "", id: id, resp: ipc.SharedImportRespPayload{Answered: []string{ipc.ImportKindGroups}}})
+	if n := countSent(local, ipc.MsgGroupOp); n != 2 {
+		t.Fatalf("group_op sent %d times, want create then delete", n)
+	}
+	var p ipc.GroupOpPayload
+	if err := lastSent(t, local, ipc.MsgGroupOp).DecodePayload(&p); err != nil {
+		t.Fatal(err)
+	}
+	if p.Op != ipc.GroupOpDelete || p.Name != "Fresh" {
+		t.Errorf("last replayed %+v, want the delete", p)
+	}
+}
+
+// M-2: the marker is written through a unique temp file that never lingers.
+func TestSaveImportMarker_LeavesOnlyTheMarker(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "shared-import.json")
+	for i := 0; i < 2; i++ {
+		if err := saveImportMarker(path, sharedImportMarker{Version: 1, Dests: map[string]importMarkerKinds{"local": {Groups: true}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "shared-import.json" {
+		t.Errorf("dir holds %v, want the marker alone", entries)
+	}
+	if !loadImportMarker(path).Dests["local"].Groups {
+		t.Error("marker did not round-trip")
 	}
 }

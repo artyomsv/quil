@@ -1089,15 +1089,20 @@ type Model struct {
 	// the host it went to, so a refusal can be flashed naming it.
 	pendingGroupOps map[string]pendingGroupOp
 	// One-time import (sharedimport.go): "" = off; asked once per destination
-	// per launch; id → dest for the answer; groupsImported = the destinations
-	// whose groups import is answered (marker or this session), which opens
-	// group sends and makes the frame authoritative; deferredGroupOps = the
-	// group sends held until then, replayed in order on the answer.
+	// per connection (a lost link or an error reply asks again); id → the
+	// pending request for the answer; groupsImported = the destinations whose
+	// groups import is answered (marker or this session), which opens group
+	// sends and makes the frame authoritative; deferredGroupOps = the group
+	// sends held until then, replayed in order on the answer; importNames =
+	// the group names each unanswered daemon will list once they land;
+	// importErrors = error replies per destination this session.
 	importMarkerPath string
 	importAsked      map[string]bool
-	pendingImports   map[string]string
+	pendingImports   map[string]pendingImport
 	groupsImported   map[string]bool
 	deferredGroupOps map[string][]deferredGroupOp
+	importNames      map[string][]string
+	importErrors     map[string]int
 	// A press on a group header. The release TOGGLES the group only when
 	// groupDragMoved is still false; a drag reorders the groups instead.
 	groupDragging  bool
@@ -1856,6 +1861,9 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 			log.Printf("ignoring link loss from gen %d (current %d)", msg.gen, m.clientGen)
 			return m, nil
 		}
+		// An import in flight on the dead link can never be answered; the
+		// first shared frame after the reattach sends it again.
+		m.forgetImportFor(msg.dest)
 		// The listen loop stopped when it returned this message, and with a
 		// router that loop is the ONLY reader of every other daemon's messages —
 		// leaving it unarmed parks a healthy daemon's output behind a dead one's
@@ -3535,6 +3543,10 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 
 	case sharedImportRespMsg:
 		return m, tea.Batch(m.listenForMessages(), m.applySharedImportResp(msg))
+
+	case sharedImportErrMsg:
+		m.applySharedImportErr(msg)
+		return m, m.listenForMessages()
 
 	case sharedImportTimeoutMsg:
 		// Local timer: does NOT re-arm listenForMessages.
@@ -8649,6 +8661,11 @@ func (m Model) listenForMessages() tea.Cmd {
 					return noteRespMsg{dest: msg.Origin, id: msg.ID, resp: ipc.NoteRespPayload{Error: text}}
 				}
 				return noteSetRespMsg{dest: msg.Origin, id: msg.ID, resp: ipc.NoteSetRespPayload{Error: text}}
+			}
+			// A refused import is no answer: delivered so the client sends it
+			// again rather than holding group sends for the whole session.
+			if msg.ID != "" && e.Type == ipc.MsgSharedImport {
+				return sharedImportErrMsg{dest: msg.Origin, id: msg.ID, text: e.Code + ": " + e.Message}
 			}
 			return listenContinueMsg{}
 

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -46,8 +47,29 @@ type sharedImportRespMsg struct {
 	resp ipc.SharedImportRespPayload
 }
 
+// sharedImportErrMsg is an error reply to a shared_import (the daemon
+// refused the request itself, e.g. a bad payload). An IPC response: its
+// Update arm re-arms listenForMessages.
+type sharedImportErrMsg struct {
+	dest string
+	id   string
+	text string
+}
+
 // sharedImportTimeoutMsg is a local timer; it does not re-arm the listen.
 type sharedImportTimeoutMsg struct{ id string }
+
+// pendingImport is one shared_import awaiting its answer.
+type pendingImport struct {
+	dest string
+	// notesDeferred: the request budget left notes out, so a "notes" answer
+	// does not finish the kind — the rest go with the next launch's import.
+	notesDeferred bool
+}
+
+// maxImportErrors is how many error replies one destination may give this
+// session before its import waits for the next launch instead of re-sending.
+const maxImportErrors = 3
 
 var sharedImportTimeout = 8 * time.Second
 
@@ -83,19 +105,46 @@ func loadImportMarker(path string) sharedImportMarker {
 	return mk
 }
 
+// saveImportMarker writes the marker through a uniquely named temp file and a
+// rename, the saveProjectGroups pattern: two clients sharing a QUIL_HOME never
+// write the same temp path.
 func saveImportMarker(path string, mk sharedImportMarker) error {
 	data, err := json.MarshalIndent(mk, "", "  ")
 	if err != nil {
-		return err
+		return fmt.Errorf("encode import marker: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("create %s: %w", dir, err)
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return err
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp.*")
+	if err != nil {
+		return fmt.Errorf("create temp for %s: %w", path, err)
 	}
-	return os.Rename(tmp, path)
+	tmpPath := tmp.Name()
+	committed := false
+	defer func() {
+		if !committed {
+			// Best effort: the error being returned is the one worth reporting.
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write %s: %w", tmpPath, err)
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("chmod %s: %w", tmpPath, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close %s: %w", tmpPath, err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("rename %s: %w", tmpPath, err)
+	}
+	committed = true
+	return nil
 }
 
 // groupsImportAnswered reports whether dest's daemon has answered this
@@ -130,10 +179,70 @@ func (m *Model) deferGroupOp(dest, msgType string, payload any, what string) {
 		ops = kept
 	}
 	if len(ops) >= maxDeferredGroupOps {
-		log.Printf("groups: %s for %q not sent — too many changes wait for the import answer; the file keeps it", what, dest)
+		log.Printf("groups: %s for %q DROPPED — %d changes already wait for the import answer; the daemon's next frame will undo it", what, dest, len(ops))
 		return
 	}
 	m.deferredGroupOps[dest] = append(ops, deferredGroupOp{msgType: msgType, payload: payload, what: what})
+	if op, ok := payload.(ipc.GroupOpPayload); ok {
+		m.noteHeldGroupName(dest, op)
+	}
+}
+
+// noteHeldGroupName keeps importNames[dest] — the names dest's daemon will
+// list once the import and the held ops land — in step with a held group op,
+// so a later rename or delete of such a name is held for dest too.
+func (m *Model) noteHeldGroupName(dest string, op ipc.GroupOpPayload) {
+	if m.importNames == nil {
+		m.importNames = map[string][]string{}
+	}
+	names := m.importNames[dest]
+	drop := func(name string) {
+		kept := names[:0]
+		for _, n := range names {
+			if !strings.EqualFold(n, name) {
+				kept = append(kept, n)
+			}
+		}
+		names = kept
+	}
+	switch op.Op {
+	case ipc.GroupOpCreate:
+		if !containsFold(names, op.Name) {
+			names = append(names, op.Name)
+		}
+	case ipc.GroupOpRename:
+		drop(op.Name)
+		names = append(names, op.NewName)
+	case ipc.GroupOpDelete:
+		drop(op.Name)
+	}
+	m.importNames[dest] = names
+}
+
+// destsHoldingGroupName is every shared, connected destination whose groups
+// import is unanswered and whose daemon will list name once it lands — the
+// held half of a rename or delete fan-out (sendGroupOpEverywhere).
+func (m *Model) destsHoldingGroupName(name string) []string {
+	var out []string
+	for _, d := range m.sharedDestsInOrder() {
+		if !m.groupSendsOpen(d) && m.destConnected(d) && containsFold(m.importNames[d], name) {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// forgetImportFor drops dest's in-flight import: its answer cannot arrive on
+// a new connection, so the next shared frame from dest sends it again. The
+// daemon side is idempotent — a refusal is an answer, which opens group sends
+// and replays the held ops. The held ops themselves are kept.
+func (m *Model) forgetImportFor(dest string) {
+	for id, p := range m.pendingImports {
+		if p.dest == dest {
+			delete(m.pendingImports, id)
+		}
+	}
+	delete(m.importAsked, dest)
 }
 
 // paneIDsByDest is every connected destination's live pane ids, from
@@ -179,8 +288,10 @@ func (m *Model) maybeImport(msg WorkspaceStateMsg) tea.Cmd {
 	}
 	if m.importAsked == nil {
 		m.importAsked = map[string]bool{}
-		m.pendingImports = map[string]string{}
+		m.pendingImports = map[string]pendingImport{}
 		m.groupsImported = map[string]bool{}
+		m.importNames = map[string][]string{}
+		m.importErrors = map[string]int{}
 	}
 	m.importAsked[msg.Dest] = true
 	mk := loadImportMarker(m.importMarkerPath)
@@ -230,6 +341,7 @@ func (m *Model) maybeImport(msg WorkspaceStateMsg) tea.Cmd {
 	if !kinds.Recent {
 		payload.Recent = LoadRecentCWDs(config.RecentCWDsPath(dest))
 	}
+	notesDeferred := false
 	if !kinds.Notes {
 		// Mine is the frame's own pane list — the daemon's whole state, a
 		// pane in no tab included; the others come from what this client
@@ -247,7 +359,7 @@ func (m *Model) maybeImport(msg WorkspaceStateMsg) tea.Cmd {
 				others[id] = true
 			}
 		}
-		payload.Notes = collectImportNotes(config.NotesDir(), mine, others, ipc.MaxSharedImportBytes-importReserveBytes)
+		payload.Notes, notesDeferred = collectImportNotes(config.NotesDir(), mine, others, ipc.MaxSharedImportBytes-importReserveBytes)
 	}
 	req, err := ipc.NewMessage(ipc.MsgSharedImport, payload)
 	if err != nil {
@@ -256,25 +368,35 @@ func (m *Model) maybeImport(msg WorkspaceStateMsg) tea.Cmd {
 	}
 	id := "imp-" + m.nextReqGen()
 	req.ID = id
-	m.pendingImports[id] = dest
+	m.pendingImports[id] = pendingImport{dest: dest, notesDeferred: notesDeferred}
 	if err := m.sendForDestStrict(dest, req); err != nil {
 		delete(m.pendingImports, id)
-		log.Printf("shared import %q: not sent: %v; retried next launch", dest, err)
+		delete(m.importAsked, dest) // the next frame from dest tries again
+		log.Printf("shared import %q: not sent: %v; retried on its next frame", dest, err)
 		return nil
+	}
+	if !kinds.Groups {
+		// The file view already holds every held change, so the payload's
+		// names are what this daemon will list once the import lands.
+		names := make([]string, 0, len(payload.Groups))
+		for _, g := range payload.Groups {
+			names = append(names, g.Name)
+		}
+		m.importNames[dest] = names
 	}
 	return tea.Tick(sharedImportTimeout, func(time.Time) tea.Msg { return sharedImportTimeoutMsg{id: id} })
 }
 
 // collectImportNotes reads every notes/<paneID>.md whose id is in mine and
 // not in others, skipping (and logging) ambiguous ids, files over the note
-// cap, and anything past budget — those wait for the next launch. The budget
-// counts each note as JSON-encoded, which is what the daemon measures.
-func collectImportNotes(dir string, mine, others map[string]bool, budget int) []ipc.SharedImportNote {
+// cap, and anything past budget — those wait for the next launch, and
+// deferred reports that some did. The budget counts each note as
+// JSON-encoded, which is what the daemon measures.
+func collectImportNotes(dir string, mine, others map[string]bool, budget int) (out []ipc.SharedImportNote, deferred bool) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil
+		return nil, false
 	}
-	var out []ipc.SharedImportNote
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
 			continue
@@ -309,21 +431,23 @@ func collectImportNotes(dir string, mine, others map[string]bool, budget int) []
 		}
 		if len(enc) > budget {
 			log.Printf("shared import: note %s deferred to the next launch (request budget)", id)
+			deferred = true
 			continue
 		}
 		budget -= len(enc) + 1 // the comma between list items
 		out = append(out, note)
 	}
-	return out
+	return out, deferred
 }
 
 // applySharedImportResp records every kind the daemon answered in the marker
 // and, once groups are answered, sends the group changes held back until now.
 func (m *Model) applySharedImportResp(msg sharedImportRespMsg) tea.Cmd {
-	dest, ok := m.pendingImports[msg.id]
-	if !ok || dest != msg.dest {
+	p, ok := m.pendingImports[msg.id]
+	if !ok || p.dest != msg.dest {
 		return nil
 	}
+	dest := p.dest
 	delete(m.pendingImports, msg.id)
 	mk := loadImportMarker(m.importMarkerPath)
 	key := config.DestFileKey(dest)
@@ -337,7 +461,9 @@ func (m *Model) applySharedImportResp(msg sharedImportRespMsg) tea.Cmd {
 		case ipc.ImportKindRecent:
 			kinds.Recent = true
 		case ipc.ImportKindNotes:
-			kinds.Notes = true
+			// Notes the budget left out are still pending: the next launch
+			// sends them (the daemon skips a pane that already has a note).
+			kinds.Notes = !p.notesDeferred
 		}
 	}
 	mk.Dests[key] = kinds
@@ -352,6 +478,7 @@ func (m *Model) applySharedImportResp(msg sharedImportRespMsg) tea.Cmd {
 	m.groupsImported[dest] = true
 	held := m.deferredGroupOps[dest]
 	delete(m.deferredGroupOps, dest)
+	delete(m.importNames, dest)
 	var cmds []tea.Cmd
 	for _, op := range held {
 		cmds = append(cmds, m.sendSharedOp(dest, op.msgType, op.payload, op.what))
@@ -360,9 +487,30 @@ func (m *Model) applySharedImportResp(msg sharedImportRespMsg) tea.Cmd {
 }
 
 // applySharedImportTimeout only logs. The request stays pending: a late
-// answer is still the daemon's answer, and it is what opens group sends.
+// answer is still the daemon's answer, and it is what opens group sends. A
+// lost link drops it instead (forgetImportFor), and the reattach re-sends.
 func (m *Model) applySharedImportTimeout(msg sharedImportTimeoutMsg) {
-	if dest, ok := m.pendingImports[msg.id]; ok {
-		log.Printf("shared import %q: no answer yet; the marker is unchanged, retried next launch", dest)
+	if p, ok := m.pendingImports[msg.id]; ok {
+		log.Printf("shared import %q: no answer yet; still waiting (a reconnect sends it again)", p.dest)
 	}
+}
+
+// applySharedImportErr handles an error reply to this client's import: the
+// daemon refused the request as a whole, so nothing is answered and the
+// marker is untouched. The next shared frame from dest sends it again, until
+// dest has given maxImportErrors error replies this session; then it waits
+// for the next launch, and group sends to dest stay held until then.
+func (m *Model) applySharedImportErr(msg sharedImportErrMsg) {
+	p, ok := m.pendingImports[msg.id]
+	if !ok || p.dest != msg.dest {
+		return
+	}
+	delete(m.pendingImports, msg.id)
+	m.importErrors[p.dest]++
+	if n := m.importErrors[p.dest]; n < maxImportErrors {
+		delete(m.importAsked, p.dest)
+		log.Printf("shared import %q refused (%d/%d): %s; sent again on its next frame", p.dest, n, maxImportErrors, msg.text)
+		return
+	}
+	log.Printf("shared import %q refused (%d/%d): %s; retried next launch", p.dest, m.importErrors[p.dest], maxImportErrors, msg.text)
 }

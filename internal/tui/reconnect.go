@@ -940,6 +940,9 @@ func (m *Model) armReattachReset(dest string) {
 	// And every note save still pending there: it went out on the old
 	// connection, so its answer cannot arrive on this one.
 	m.settleNoteSavesFor(dest, "reconnected — will save again")
+	// And the shared-data import in flight there, for the same reason: the
+	// first shared frame on this connection sends it again.
+	m.forgetImportFor(dest)
 	// And the state-frame rev mark: a restarted daemon numbers from 1 again
 	// under a new run_id, and a kept mark would compare a fresh rev 1 against
 	// the old run's high-water mark and drop it as stale.

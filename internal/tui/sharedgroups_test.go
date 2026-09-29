@@ -78,10 +78,16 @@ func TestUpdate_AuthoritativeDest_FrameReplacesItsMembersInTheFile(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if saved.groupOf("", "proj-1") != saved.indexOf("B") {
-		t.Errorf("file members = %+v, want proj-1 moved to B", saved.Groups)
+	// The file must exist and hold both groups first: a missing file loads
+	// as empty, and every -1 below would then compare equal.
+	a, b := saved.indexOf("A"), saved.indexOf("B")
+	if a < 0 || b < 0 {
+		t.Fatalf("saved file = %+v, want groups A and B", saved.Groups)
 	}
-	if saved.groupOf("hostA", "proj-far") != saved.indexOf("A") {
+	if !hasMember(saved.Groups[b], "", "proj-1") || hasMember(saved.Groups[a], "", "proj-1") {
+		t.Errorf("file members = %+v, want proj-1 in B and not in A", saved.Groups)
+	}
+	if !hasMember(saved.Groups[a], "hostA", "proj-far") {
 		t.Errorf("another destination's cached member was touched: %+v", saved.Groups)
 	}
 	// An unchanged frame writes nothing.
@@ -193,28 +199,57 @@ func TestUpdate_SharedDaemonWithNoGroups_FileMembersStay(t *testing.T) {
 	}
 }
 
-// Test 2 (D-1a/D-5): order and collapsed state survive a launch. "GPU" is
-// first and collapsed with members only on hostA; the local frame arrives
-// first, then hostA's listing GPU.
-func TestUpdate_FileOrderAndCollapsedSurviveTheFirstFrames(t *testing.T) {
-	m, _, _ := twoDestModel(t)
-	m.SetProjectGroups(ProjectGroupsState{groups: projectGroups{Groups: []projectGroup{
+// Test 2 (D-1a/D-5): order and collapsed state survive a RELAUNCH. "GPU" is
+// first and collapsed with its only member on hostA. Launch 1 sees both
+// destinations and saves; launch 2 loads that saved file, and its local
+// frame arrives before hostA's. Stripping hostA's member from the file (the
+// old rule) left GPU empty on disk, and launch 2's local frame then dropped
+// it; hostA's frame re-added it last and expanded.
+func TestUpdate_FileOrderAndCollapsedSurviveARelaunch(t *testing.T) {
+	path := t.TempDir() + "/project-groups.json"
+	launch := func(groups projectGroups) Model {
+		m, _, _ := twoDestModel(t)
+		m.SetProjectGroups(ProjectGroupsState{groups: groups}, path)
+		m = updateWith(t, m, sharedFrame("r", 1, "proj-1", "Local", "Local"))
+		rf := sharedFrame("q", 1, "proj-2", "GPU", "GPU")
+		rf.Dest = "hostA"
+		return updateWith(t, m, rf)
+	}
+
+	m := launch(projectGroups{Groups: []projectGroup{
 		{Name: "GPU", Collapsed: true, Members: []groupMember{{Dest: "hostA", ID: "proj-2"}}},
-		{Name: "Local"},
-	}}}, "")
-	m = updateWith(t, m, sharedFrame("r", 1, "proj-1", "Local", "Local"))
-	rf := sharedFrame("q", 1, "proj-2", "GPU", "GPU")
-	rf.Dest = "hostA"
-	m = updateWith(t, m, rf)
+		{Name: "Local", Members: []groupMember{{Dest: "", ID: "proj-1"}}},
+	}})
+	// Any later change saves the whole view — a collapse toggle, a drag.
+	runCmd(m.saveGroupsCmd())
+
+	saved, err := loadProjectGroups(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.indexOf("GPU") < 0 {
+		t.Fatalf("saved file = %+v, want GPU in it", saved.Groups)
+	}
+	m = launch(saved)
 	if got := groupNames(m); len(got) != 2 || got[0] != "GPU" || got[1] != "Local" {
-		t.Fatalf("groups = %v, want GPU still first", got)
+		t.Fatalf("groups after relaunch = %v, want GPU still first", got)
 	}
 	if !m.groups.Groups[0].Collapsed {
-		t.Error("GPU lost its collapsed state")
+		t.Error("GPU lost its collapsed state across the relaunch")
 	}
 	if m.groups.groupOf("hostA", "proj-2") != 0 || m.groups.groupOf("", "proj-1") != 1 {
 		t.Errorf("members = %+v", m.groups.Groups)
 	}
+}
+
+// hasMember reports whether grp holds (dest, id).
+func hasMember(grp projectGroup, dest, id string) bool {
+	for _, mb := range grp.Members {
+		if mb.Dest == dest && mb.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 // Test 4 (I-1, TC-5): a delete made in another client shows here — hostA

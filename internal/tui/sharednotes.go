@@ -89,7 +89,7 @@ func (m *Model) sendNoteGet(dest, paneID string) (id string, cmd tea.Cmd) {
 		return "", nil
 	}
 	msg.ID = "note-" + m.nextReqGen()
-	m.noteLoadID, m.noteLoadDiscards = msg.ID, false
+	m.noteLoadID, m.noteLoadDiscards, m.noteLoadSnapshot = msg.ID, false, ""
 	if err := m.sendForDestStrict(dest, msg); err != nil {
 		m.noteLoadID = ""
 		if m.notesEditor.Loading() {
@@ -104,11 +104,16 @@ func (m *Model) sendNoteGet(dest, paneID string) (id string, cmd tea.Cmd) {
 }
 
 // reloadNote is the confirmed Ctrl+R: the one load whose answer may replace
-// the user's edits, because they chose to discard them.
+// the user's edits, because they chose to discard them. What they chose to
+// discard is the buffer AS IT IS NOW, so it is snapshotted: typing after the
+// confirmation, or an overwrite sent after it, is not part of that choice.
 func (m *Model) reloadNote() tea.Cmd {
 	ed := m.notesEditor
 	id, cmd := m.sendNoteGet(ed.Dest(), ed.PaneID())
 	m.noteLoadDiscards = id != ""
+	if m.noteLoadDiscards {
+		m.noteLoadSnapshot = ed.Content()
+	}
 	return cmd
 }
 
@@ -117,8 +122,12 @@ func (m *Model) applyNoteResp(msg noteRespMsg) {
 	if ed == nil || !ed.Remote() || msg.id == "" || msg.id != m.noteLoadID {
 		return
 	}
-	discards := m.noteLoadDiscards
-	m.noteLoadID, m.noteLoadDiscards = "", false
+	// The confirmed reload discards only the buffer the user confirmed on, and
+	// never under a save in flight: that save's answer would then land on the
+	// reloaded buffer (ApplyLoaded clears saveInFlight while noteSaveID stays
+	// set) and report as clean a text the daemon no longer holds.
+	discards := m.noteLoadDiscards && !ed.SaveInFlight() && ed.Content() == m.noteLoadSnapshot
+	m.noteLoadID, m.noteLoadDiscards, m.noteLoadSnapshot = "", false, ""
 	if msg.resp.Error != "" {
 		// A reload that fails leaves the loaded text as it was; only a first
 		// load has nothing to show and becomes the read-only error editor.
@@ -131,8 +140,9 @@ func (m *Model) applyNoteResp(msg noteRespMsg) {
 	// typing since it was sent must not replace the typing: it is a conflict.
 	// That holds even when the editor is ALREADY conflicted — a later frame,
 	// or a Ctrl+S answer overtaking this one, can mark it so while the reload
-	// is in flight. Only the confirmed Ctrl+R reload discards.
-	if !ed.Loading() && ed.Dirty() && !discards {
+	// is in flight. Only the confirmed Ctrl+R reload discards. A save in
+	// flight counts as unsaved text too: its buffer is not the daemon's yet.
+	if !ed.Loading() && (ed.Dirty() || ed.SaveInFlight()) && !discards {
 		ed.MarkConflict(msg.resp.Rev)
 		return
 	}
@@ -232,7 +242,7 @@ func (m *Model) flushRemoteNotesInPlace() {
 		m.keepNoteText(ed.Dest(), ed.PaneID(), text, "Note not saved on the daemon")
 	}
 	// The closed editor's answers are settled through pendingNoteSaves alone.
-	m.noteSaveID, m.noteLoadID = "", ""
+	m.noteSaveID, m.noteLoadID, m.noteLoadDiscards, m.noteLoadSnapshot = "", "", false, ""
 }
 
 // keepNoteText writes text the daemon will not hold to notes-conflicts and

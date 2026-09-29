@@ -1011,6 +1011,7 @@ type Model struct {
 	pendingNoteSaves map[string]pendingNoteSave // remote saves unanswered by the daemon, by request id; outlive the editor (F-2)
 	noteLoadID       string                     // the open editor's in-flight note_get id
 	noteLoadDiscards bool                       // that note_get is a confirmed Ctrl+R reload, the one load allowed to replace edits
+	noteLoadSnapshot string                     // the buffer the user confirmed discarding; edits after it are kept
 	noteSaveID       string                     // the open editor's in-flight note_set id; "" once the editor closed
 	quitWaiting      bool                       // app.quit is waiting for pendingNoteSaves (requestQuit)
 

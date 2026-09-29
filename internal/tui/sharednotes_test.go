@@ -184,6 +184,77 @@ func TestUpdate_NewerFrameRev_CleanReloadsDirtyConflicts(t *testing.T) {
 	}
 }
 
+// conflictedAndReloading is loaded "a" at rev 1, "x" typed, a rev-2 frame
+// (conflict), and a confirmed Ctrl+R reload in flight; it returns that
+// note_get's id.
+func conflictedAndReloading(t *testing.T) (Model, *fakeConn, string) {
+	t.Helper()
+	m, conn := loadedNotesModel(t, "a\n", 1)
+	m = updateWith(t, m, typed("x"))
+	m = updateWith(t, m, noteFrame(2, 2))
+	m = updateWith(t, m, ctrl('r'))
+	m = updateWith(t, m, ctrl('r'))
+	return m, conn, lastSent(t, conn, ipc.MsgNoteGet).ID
+}
+
+// Typing AFTER the reload was confirmed is not what the user agreed to
+// discard: the answer keeps it and reads as a conflict.
+func TestUpdate_ConfirmedReload_TypingWhileInFlight_IsKept(t *testing.T) {
+	m, _, id := conflictedAndReloading(t)
+	m = updateWith(t, m, typed("y"))
+	m = updateWith(t, m, noteRespMsg{dest: "", id: id, resp: ipc.NoteRespPayload{PaneID: "tab-proj-1-pane", Text: "b\n", Rev: 2}})
+	if !strings.HasPrefix(m.notesEditor.Content(), "xya") || !m.notesEditor.Dirty() || !m.notesEditor.Conflict() {
+		t.Errorf("after the answer: content=%q dirty=%v conflict=%v, want the typing kept as a conflict",
+			m.notesEditor.Content(), m.notesEditor.Dirty(), m.notesEditor.Conflict())
+	}
+}
+
+// An overwrite sent after the reload was confirmed wins over it: the get's
+// answer (first, FIFO) must not replace the buffer or clear the save in
+// flight, and the set's answer then leaves the user's text clean at its rev.
+func TestUpdate_ConfirmedReload_OverwriteWhileInFlight_Wins(t *testing.T) {
+	m, conn, id := conflictedAndReloading(t)
+	m = updateWith(t, m, ctrl('s'))
+	set := lastSent(t, conn, ipc.MsgNoteSet)
+	m = updateWith(t, m, noteRespMsg{dest: "", id: id, resp: ipc.NoteRespPayload{PaneID: "tab-proj-1-pane", Text: "b\n", Rev: 2}})
+	if !m.notesEditor.SaveInFlight() || !strings.HasPrefix(m.notesEditor.Content(), "xa") {
+		t.Fatalf("after the get's answer: inflight=%v content=%q", m.notesEditor.SaveInFlight(), m.notesEditor.Content())
+	}
+	m = updateWith(t, m, noteSetRespMsg{dest: "", id: set.ID, resp: ipc.NoteSetRespPayload{PaneID: "tab-proj-1-pane", OK: true, Rev: 3}})
+	ed := m.notesEditor
+	if !strings.HasPrefix(ed.Content(), "xa") || ed.Dirty() || ed.Conflict() || ed.Rev() != 3 {
+		t.Errorf("after the overwrite's answer: content=%q dirty=%v conflict=%v rev=%d, want the overwrite clean at 3",
+			ed.Content(), ed.Dirty(), ed.Conflict(), ed.Rev())
+	}
+}
+
+// A reload that cannot be SENT (host unreachable) leaves an already-loaded
+// editor as it was — editable, with its text — never the read-only error
+// editor a failed FIRST load becomes.
+func TestUpdate_ReloadSendFails_EditorStaysEditable(t *testing.T) {
+	h := newTwoDestNotes(t, "hostA")
+	h.step(func() WorkspaceStateMsg {
+		f := sharedFrame("q", 2, "proj-2", "")
+		f.Dest = "hostA"
+		f.Tabs[0].ProjectID = "proj-2"
+		f.Panes[0].NoteRev = 2
+		return f
+	}())
+	if !h.m.notesEditor.Conflict() {
+		t.Fatal("setup: no conflict")
+	}
+	h.m.client.(*Router).Remove("hostA")
+	h.step(ctrl('r'))
+	h.step(ctrl('r'))
+	if h.m.notesEditor.LoadError() != "" || h.m.notesEditor.editor.ReadOnly {
+		t.Fatalf("after a failed reload send: loadErr=%q readOnly=%v", h.m.notesEditor.LoadError(), h.m.notesEditor.editor.ReadOnly)
+	}
+	h.step(typed("z"))
+	if !strings.HasPrefix(h.m.notesEditor.Content(), "xza") {
+		t.Errorf("editor did not take input after a failed reload: %q", h.m.notesEditor.Content())
+	}
+}
+
 func TestUpdate_ConflictCtrlRTwice_Reloads(t *testing.T) {
 	m, conn := notesTestModel(t)
 	id := lastSent(t, conn, ipc.MsgNoteGet).ID

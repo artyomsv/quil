@@ -31,6 +31,8 @@ func TestMain(m *testing.M) {
 	kubeScanTimeout = 10 * time.Millisecond
 	recentScanTimeout = 10 * time.Millisecond
 	stateReqTimeout = 10 * time.Millisecond
+	noteLoadTimeout = 10 * time.Millisecond
+	noteQuitWait = 10 * time.Millisecond
 
 	cleanupQuilHome := ensureIsolatedQuilHome()
 	code := m.Run()

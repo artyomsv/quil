@@ -1007,6 +1007,12 @@ type Model struct {
 	viewerAnchorRow   int          // document row where a viewer drag began (resolved once on click)
 	viewerAnchorCol   int          // document col where a viewer drag began (resolved once on click)
 
+	// Shared notes (sharednotes.go).
+	pendingNoteSaves map[string]pendingNoteSave // remote saves unanswered by the daemon, by request id; outlive the editor (F-2)
+	noteLoadID       string                     // the open editor's in-flight note_get id
+	noteSaveID       string                     // the open editor's in-flight note_set id; "" once the editor closed
+	quitWaiting      bool                       // app.quit is waiting for pendingNoteSaves (requestQuit)
+
 	// Scrollbar click-and-drag. Set on a left-click that hits a pane's
 	// rightmost content column (the scrollbar track). While
 	// scrollDragPaneID is non-empty, every MouseMotionMsg with the left
@@ -1404,11 +1410,19 @@ func (m Model) Config() config.Config { return m.cfg }
 // Update goroutine is no longer pumping events. Calling concurrently with the
 // Update loop is unsafe — the editor is mutable shared state.
 func (m Model) FlushNotes() {
-	if m.notesEditor != nil {
-		if err := m.notesEditor.Close(); err != nil {
+	if ed := m.notesEditor; ed != nil {
+		if ed.Remote() {
+			// Reached without requestQuit (close_tui, a lost link): no save
+			// can be sent any more, so text none covers goes to a file.
+			if text, ok := ed.Unsent(); ok {
+				m.keepNoteText(m.destOfPane(ed.PaneID()), ed.PaneID(), text, "Note not saved on the daemon")
+			}
+		} else if err := ed.Close(); err != nil {
 			log.Printf("flush notes on exit: %v", err)
 		}
 	}
+	// Backstop: the program has exited, so an answer can no longer arrive.
+	m.writePendingNoteConflicts()
 }
 
 // ConfigChanged reports whether the config was modified and needs saving.
@@ -3008,6 +3022,7 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		// After the merge, and only here: this arm is reached only for a
 		// connected destination whose state arrived (the gate above).
 		groupsCmd := tea.Batch(m.pruneProjectGroupsFor(msg), m.rebuildGroupsView())
+		noteRevCmd := m.reconcileNoteRev(msg)
 		templateFocusCmd := m.focusNewTemplateTab()
 		log.Printf("apply: returned, %d new panes", len(newPaneIDs))
 		// An open project picker holds a filtered snapshot taken when it opened.
@@ -3074,6 +3089,7 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 			m.listenForMessages(),
 			m.sendDiffedResizes(m.diffResizes(msg)),
 			groupsCmd,
+			noteRevCmd,
 		}
 		// Resize overlay PTYs that just became visible on initial creation.
 		// resizeAllPanes only walks tab.Leaves() (the layout tree), so overlay
@@ -3235,7 +3251,13 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 	case notesTickMsg:
 		// Debounce check: save if dirty and idle for >= notesDebounceWindow.
 		if m.notesMode && m.notesEditor != nil {
-			m.notesEditor.MaybeAutoSave()
+			if m.notesEditor.Remote() {
+				if m.notesEditor.WantsAutoSave() {
+					m.sendNoteSave(false)
+				}
+			} else {
+				m.notesEditor.MaybeAutoSave()
+			}
 			return m, m.notesTick() // chain continues; running flag stays set
 		}
 		m.notesTickRunning = false
@@ -3487,6 +3509,23 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 
 	case sharedOpRespMsg:
 		return m, tea.Batch(m.listenForMessages(), m.applySharedOpResp(msg))
+
+	case noteRespMsg:
+		m.applyNoteResp(msg)
+		return m, m.listenForMessages()
+
+	case noteSetRespMsg:
+		return m, tea.Batch(m.listenForMessages(), m.applyNoteSetResp(msg))
+
+	case noteLoadTimeoutMsg:
+		// Local timer: does NOT re-arm listenForMessages.
+		m.applyNoteLoadTimeout(msg)
+		return m, nil
+
+	case noteQuitTimeoutMsg:
+		// Local timer. Whatever is still unanswered is kept on disk.
+		m.writePendingNoteConflicts()
+		return m, tea.Quit
 
 	default:
 		// No case matched, so nothing in this switch touched the model and the
@@ -4284,8 +4323,9 @@ func (m Model) toggleNotesMode() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	// Initial dimensions are placeholders — View() will Resize the editor
-	// to fit the actual notes panel area on the next render pass.
-	editor, err := NewNotesEditor(config.NotesDir(), pane.ID, pane.Name, 1, 1)
+	// to fit the actual notes panel area on the next render pass. A shared
+	// destination's editor opens loading, with its note_get already sent.
+	editor, loadCmd, err := m.openNotesEditorFor(pane)
 	if err != nil {
 		log.Printf("open notes: %v", err)
 		return m, nil
@@ -4302,7 +4342,7 @@ func (m Model) toggleNotesMode() (tea.Model, tea.Cmd) {
 	m.notesEditor = editor
 	m.notesEnteredFocus = enteredFocus
 	m.notesPaneFocused = false // editor starts focused so the user can immediately type
-	return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes(), m.startNotesTick())
+	return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes(), m.startNotesTick(), loadCmd)
 }
 
 // openClosePaneConfirm opens the close-pane confirm dialog for the active
@@ -5079,7 +5119,9 @@ func (m Model) notesKeyExempt(key string) bool {
 // at the time of the call. Callers that are about to change that tab
 // (e.g. switchTab) must invoke this FIRST so focus reverts on the old tab.
 func (m *Model) exitNotesModeInPlace() {
-	if m.notesEditor != nil {
+	if m.notesEditor.Remote() {
+		m.flushRemoteNotesInPlace()
+	} else if m.notesEditor != nil {
 		if err := m.notesEditor.Close(); err != nil {
 			log.Printf("save notes on exit: %v", err)
 		}
@@ -5376,10 +5418,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case m.isAction(key, "pane.notes_toggle"):
 			return m.exitNotesMode()
 		case m.isAction(key, "app.quit"):
-			if err := m.notesEditor.Close(); err != nil {
-				log.Printf("save notes on quit: %v", err)
-			}
-			return m, tea.Quit
+			return m.requestQuit()
 		case m.isAction(key, "pane.left"):
 			// Alt+Left — focus the bound pane (on the left in notes layout).
 			// Idempotent: no-op if the pane is already focused.
@@ -5412,8 +5451,13 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		} else {
 			// Editor has focus and the key is plain text input.
 			action, cmd := m.notesEditor.HandleKey(key)
-			if action == notesActionExit {
+			switch action {
+			case notesActionExit:
 				return m.exitNotesMode()
+			case notesActionSave:
+				return m, m.sendNoteSave(m.notesEditor.Conflict())
+			case notesActionReload:
+				return m, m.sendNoteGet(m.destOfPane(m.notesEditor.PaneID()), m.notesEditor.PaneID())
 			}
 			return m, cmd
 		}
@@ -5474,10 +5518,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			case seqAction == "pane.notes_toggle":
 				return m.exitNotesMode()
 			case seqAction == "app.quit":
-				if err := m.notesEditor.Close(); err != nil {
-					log.Printf("save notes on quit: %v", err)
-				}
-				return m, tea.Quit
+				return m.requestQuit()
 			case seqAction == "pane.left":
 				m.notesPaneFocused = true
 				return m, nil
@@ -5724,7 +5765,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	switch lateID {
 	case "app.quit":
-		return m, tea.Quit
+		return m.requestQuit()
 
 	case "tab.new":
 		return m.handleNewTab()
@@ -8566,6 +8607,20 @@ func (m Model) listenForMessages() tea.Cmd {
 				return listenContinueMsg{}
 			}
 			log.Printf("ipc recv: error reply for %s id=%s: %s (%s)", e.Type, msg.ID, e.Message, e.Code)
+			// The daemon refuses a note request for a pane it does not have
+			// with an error reply, not the request's own response. Delivered
+			// as that response so the editor stops loading and a pending
+			// save is settled rather than waiting out the quit timer.
+			if msg.ID != "" && (e.Type == ipc.MsgNoteGet || e.Type == ipc.MsgNoteSet) {
+				text := e.Message
+				if text == "" {
+					text = "refused (" + e.Code + ")"
+				}
+				if e.Type == ipc.MsgNoteGet {
+					return noteRespMsg{dest: msg.Origin, id: msg.ID, resp: ipc.NoteRespPayload{Error: text}}
+				}
+				return noteSetRespMsg{dest: msg.Origin, id: msg.ID, resp: ipc.NoteSetRespPayload{Error: text}}
+			}
 			return listenContinueMsg{}
 
 		case ipc.MsgProjectOpResp, ipc.MsgGroupOpResp:
@@ -8575,6 +8630,22 @@ func (m Model) listenForMessages() tea.Cmd {
 				return listenContinueMsg{}
 			}
 			return sharedOpRespMsg{dest: msg.Origin, id: msg.ID, resp: p}
+
+		case ipc.MsgNoteResp:
+			var p ipc.NoteRespPayload
+			if err := msg.DecodePayload(&p); err != nil {
+				log.Printf("decode %s: %v", msg.Type, err)
+				return listenContinueMsg{}
+			}
+			return noteRespMsg{dest: msg.Origin, id: msg.ID, resp: p}
+
+		case ipc.MsgNoteSetResp:
+			var p ipc.NoteSetRespPayload
+			if err := msg.DecodePayload(&p); err != nil {
+				log.Printf("decode %s: %v", msg.Type, err)
+				return listenContinueMsg{}
+			}
+			return noteSetRespMsg{dest: msg.Origin, id: msg.ID, resp: p}
 
 		default:
 			log.Printf("ipc recv: unknown type %q", msg.Type)

@@ -935,7 +935,7 @@ func (m Model) handleCtxMenuKey(key string) (tea.Model, tea.Cmd) {
 		return m, nil
 	case m.isAction(key, "app.quit"):
 		m.closeCtxMenu()
-		return m, tea.Quit
+		return m.requestQuit()
 	}
 	return m, nil
 }

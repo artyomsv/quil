@@ -1011,6 +1011,29 @@ func NotesDir() string {
 	return filepath.Join(QuilDir(), "notes")
 }
 
+// NotesConflictsDir holds note text the daemon refused (a stale save answered
+// with a conflict after the editor closed, or a save unanswered at quit).
+// Client-side only: the text is the user's, and losing it silently is the one
+// outcome spec 4.3 forbids.
+func NotesConflictsDir() string {
+	return filepath.Join(QuilDir(), "notes-conflicts")
+}
+
+// SharedImportPath is the client marker recording which data kinds were
+// imported into which daemon (spec 4.5).
+func SharedImportPath() string {
+	return filepath.Join(QuilDir(), "shared-import.json")
+}
+
+// DestFileKey is destFileKey with the local daemon spelled "local", for
+// files that name a destination in a component.
+func DestFileKey(dest string) string {
+	if dest == "" {
+		return "local"
+	}
+	return destFileKey(dest)
+}
+
 // EventsDir returns the directory where Claude / opencode hooks append
 // per-pane JSONL event spool files (<paneID>.jsonl). The daemon's
 // hookEventsWatcher polls these files on a 200 ms ticker, parses new

@@ -1689,6 +1689,8 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		d.handleNoteGet(conn, msg)
 	case ipc.MsgNoteSet:
 		d.handleNoteSet(conn, msg)
+	case ipc.MsgSharedImport:
+		d.handleSharedImport(conn, msg)
 
 	// MCP request-response
 	case ipc.MsgListProjectsReq:

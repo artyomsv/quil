@@ -85,7 +85,10 @@ func TestHandleMessage_SetProjectGroup_UnknownProjectRefused(t *testing.T) {
 // Review focus 1.
 func TestHandleMessage_GroupOp_RefusesStrippedRunes(t *testing.T) {
 	d, client := mcpTestDaemon(t)
-	for _, name := range []string{"", "   ", "a‮b", "a\x1b[31mb", "a\u009bb", "abcdefghijklmnopqrstuvwxyzabcdefg"} {
+	// Built from the code point (U+202E, RIGHT-TO-LEFT OVERRIDE) rather than
+	// an escape literal in source: this file must never carry the raw rune.
+	bidiOverride := "a" + string(rune(0x202e)) + "b"
+	for _, name := range []string{"", "   ", bidiOverride, "a\x1b[31mb", "a\u009bb", "abcdefghijklmnopqrstuvwxyzabcdefg"} {
 		resp := roundTrip(t, client, ipc.MsgGroupOp, ipc.MsgGroupOpResp, ipc.GroupOpPayload{Op: ipc.GroupOpCreate, Name: name})
 		if op := decodeInto[ipc.OpRespPayload](t, resp); op.OK {
 			t.Errorf("name %q accepted", name)
@@ -224,6 +227,60 @@ func TestHandleMessage_CreatePane_RecordsRequestedCWDNotDefault(t *testing.T) {
 	roundTrip(t, client, ipc.MsgCreatePaneReq, ipc.MsgCreatePaneResp, ipc.CreatePaneReqPayload{TabID: tab.ID, CWD: dir + "/gone"})
 	if _, again := d.session.SharedSnapshot(); len(again) != 1 {
 		t.Errorf("an unusable CWD was recorded: %v", again)
+	}
+}
+
+// TestHandleMessage_CreatePane_TUIPathRecordsRealCWD covers the ORDINARY
+// create_pane arm (Ctrl+N and everything else that spawns a pane into an
+// existing tab), which is a fire-and-forget message with no create_pane_resp
+// — the only recording site the CreatePane_RecordsRequestedCWDNotDefault
+// test above does NOT exercise, since that one goes through create_pane_req
+// (the MCP path). Without this test, reverting the ordinary arm's call back
+// to the non-recording resolveRequestedCWD fails nothing.
+func TestHandleMessage_CreatePane_TUIPathRecordsRealCWD(t *testing.T) {
+	d, client := mcpTestDaemon(t)
+	dir := t.TempDir()
+	tab := d.session.CreateTab("t")
+	sendNoID(t, client, ipc.MsgCreatePane, ipc.CreatePanePayload{TabID: tab.ID, CWD: dir})
+	roundTrip(t, client, ipc.MsgVersionReq, ipc.MsgVersionResp, struct{}{}) // ordered on one conn: the create ran
+	_, recent := d.session.SharedSnapshot()
+	if len(recent) != 1 || !samePath(recent[0], dir) {
+		t.Errorf("recent = %v, want [%s]", recent, dir)
+	}
+}
+
+// TestHandleMessage_CreatePane_TUIPathEmptyCWDRecordsNothing is the
+// defaulted-CWD half of the test above: an empty request falls back to
+// d.defaultCWD(conn), which must never be recorded as something the user
+// picked.
+func TestHandleMessage_CreatePane_TUIPathEmptyCWDRecordsNothing(t *testing.T) {
+	d, client := mcpTestDaemon(t)
+	tab := d.session.CreateTab("t")
+	sendNoID(t, client, ipc.MsgCreatePane, ipc.CreatePanePayload{TabID: tab.ID})
+	roundTrip(t, client, ipc.MsgVersionReq, ipc.MsgVersionResp, struct{}{})
+	if _, recent := d.session.SharedSnapshot(); len(recent) != 0 {
+		t.Errorf("a defaulted CWD was recorded: %v", recent)
+	}
+}
+
+// TestHandleMessage_CreatePane_OverlayDoesNotRecordItsRepoRoot is I-1: the
+// lazygit/hunk overlay (internal/tui/overlay.go) sends an ordinary
+// create_pane naming its host tab's repo root as CWD with Overlay: true.
+// That is not a folder the user or agent picked (spec 4.4), so every Alt+G
+// must not push the repo root to the front of the recent-folder list.
+func TestHandleMessage_CreatePane_OverlayDoesNotRecordItsRepoRoot(t *testing.T) {
+	d, client := mcpTestDaemon(t)
+	dir := t.TempDir()
+	tab := d.session.CreateTab("t")
+	sendNoID(t, client, ipc.MsgCreatePane, ipc.CreatePanePayload{
+		TabID:   tab.ID,
+		CWD:     dir,
+		Type:    "terminal",
+		Overlay: true,
+	})
+	roundTrip(t, client, ipc.MsgVersionReq, ipc.MsgVersionResp, struct{}{}) // ordered: the overlay create ran
+	if _, recent := d.session.SharedSnapshot(); len(recent) != 0 {
+		t.Errorf("overlay create recorded its repo root: %v", recent)
 	}
 }
 

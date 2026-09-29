@@ -2762,7 +2762,16 @@ func (d *Daemon) handleCreatePane(conn *ipc.Conn, msg *ipc.Message) {
 	}
 
 	logger.Debug("create pane: received payload cwd=%q type=%s", payload.CWD, payload.Type)
-	cwd := d.resolveRequestedCWDRecording(payload.CWD, d.defaultCWD(conn))
+	// An overlay (lazygit/hunk toggle) names its host tab's repo root, not a
+	// folder the user or agent picked — spec 4.4 records only the latter, and
+	// every Alt+G would otherwise push the same repo root to the front of the
+	// recent list. resolveRequestedCWD (no recording) is used for it instead.
+	var cwd string
+	if payload.Overlay {
+		cwd = d.resolveRequestedCWD(payload.CWD, d.defaultCWD(conn))
+	} else {
+		cwd = d.resolveRequestedCWDRecording(payload.CWD, d.defaultCWD(conn))
+	}
 
 	// Determine pane type
 	paneType := payload.Type

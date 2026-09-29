@@ -1034,7 +1034,13 @@ func (d *Daemon) restoreWorkspace() error {
 				sandboxImage, _ := paneData["sandbox_image"].(string)
 				sandboxAuth, _ := paneData["sandbox_auth"].(string)
 				containerCWD, _ := paneData["container_cwd"].(string)
-				noteRev, _ := paneData["note_rev"].(float64)
+				// note_rev absent (a pre-3b snapshot) with a note file present
+				// means the local TUI kept a note for this daemon's own pane:
+				// adopt it as rev 1 so it is served rather than shadowed.
+				noteRev, hasNoteRev := paneData["note_rev"].(float64)
+				if !hasNoteRev && noteFileExists(paneID) {
+					noteRev = 1
+				}
 				// The persisted type carries a sandbox prefix; strip it here
 				// so the registry lookup finds the plugin. spawnPane does the
 				// same, and re-derives "is this sandboxed" from either half —
@@ -1676,6 +1682,10 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		d.handleSetProjectGroup(conn, msg)
 	case ipc.MsgGroupOp:
 		d.handleGroupOp(conn, msg)
+	case ipc.MsgNoteGet:
+		d.handleNoteGet(conn, msg)
+	case ipc.MsgNoteSet:
+		d.handleNoteSet(conn, msg)
 
 	// MCP request-response
 	case ipc.MsgListProjectsReq:

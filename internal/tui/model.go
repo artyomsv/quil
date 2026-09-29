@@ -1073,6 +1073,10 @@ type Model struct {
 	sharedData   map[string]bool
 	daemonGroups map[string][]string // each shared destination's group-name list, from its last frame
 	daemonRecent map[string][]string // each shared destination's recent folders, from its last frame
+	// vanishedGroups: the names the frame being applied dropped from its
+	// destination's previous list (noteSharedData), read once by
+	// rebuildGroupsView — the only evidence a group was deleted elsewhere.
+	vanishedGroups []string
 	// pendingGroupOps correlates an id-bearing set_project_group/group_op with
 	// the host it went to, so a refusal can be flashed naming it.
 	pendingGroupOps map[string]pendingGroupOp

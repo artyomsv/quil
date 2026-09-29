@@ -32,9 +32,7 @@ func (m *Model) saveGroupsCmd() tea.Cmd {
 	if m.groupsPath == "" || m.groupsWriter == nil {
 		return nil
 	}
-	// A shared destination's members come from its daemon (rebuildGroupsView),
-	// so the file keeps only the order, the collapsed flags and legacy members.
-	seq, path, w, snap := m.groupsSeq, m.groupsPath, m.groupsWriter, m.groups.withoutMembersOf(m.sharedData)
+	seq, path, w, snap := m.groupsSeq, m.groupsPath, m.groupsWriter, m.groups.clone()
 	return func() tea.Msg {
 		if err := w.write(path, seq, snap); err != nil {
 			log.Printf("project groups: save: %v", err)
@@ -116,7 +114,7 @@ func (m *Model) finishGroupDrag(x, y int) tea.Cmd {
 // that destination. Such a broadcast names zero real projects, so it is the
 // empty case above.
 func (m *Model) pruneProjectGroupsFor(state WorkspaceStateMsg) tea.Cmd {
-	if m.sharedData[state.Dest] {
+	if m.frameAuthoritativeFor(state.Dest) {
 		return nil // its members come from the frame (rebuildGroupsView)
 	}
 	if len(m.groups.Groups) == 0 {

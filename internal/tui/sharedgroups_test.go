@@ -62,19 +62,33 @@ func TestUpdate_SharedFrame_BuildsMergedGroupsFromDaemonMembers(t *testing.T) {
 	}
 }
 
-// A shared destination's member leaving (its project destroyed) is the
-// daemon's business: the file never held it, so the legacy prune must not
-// run for that destination and rewrite the file over it.
-func TestUpdate_SharedProjectGone_DoesNotRewriteTheFile(t *testing.T) {
+// The file is a CACHE of an authoritative destination's members: an assign
+// made in another client (the frame moves a project's Group) replaces that
+// destination's members in the saved file, and nothing else in it.
+func TestUpdate_AuthoritativeDest_FrameReplacesItsMembersInTheFile(t *testing.T) {
 	m := connectedTestModel(t)
-	m = updateWith(t, m, sharedFrame("r", 1, "proj-1", "Infra", "Infra"))
-	seq := m.groupsSeq
-	m = updateWith(t, m, sharedFrame("r", 2, "proj-2", "", "Infra"))
-	if m.groups.groupOf("", "proj-1") >= 0 {
-		t.Error("the destroyed project is still a member")
+	path := t.TempDir() + "/project-groups.json"
+	m.SetProjectGroups(ProjectGroupsState{groups: projectGroups{Groups: []projectGroup{
+		{Name: "A", Members: []groupMember{{Dest: "", ID: "proj-1"}, {Dest: "hostA", ID: "proj-far"}}},
+		{Name: "B"},
+	}}}, path)
+	m = updateWith(t, m, sharedFrame("r", 1, "proj-1", "A", "A", "B"))
+	m = updateWith(t, m, sharedFrame("r", 2, "proj-1", "B", "A", "B"))
+	saved, err := loadProjectGroups(path)
+	if err != nil {
+		t.Fatal(err)
 	}
+	if saved.groupOf("", "proj-1") != saved.indexOf("B") {
+		t.Errorf("file members = %+v, want proj-1 moved to B", saved.Groups)
+	}
+	if saved.groupOf("hostA", "proj-far") != saved.indexOf("A") {
+		t.Errorf("another destination's cached member was touched: %+v", saved.Groups)
+	}
+	// An unchanged frame writes nothing.
+	seq := m.groupsSeq
+	m = updateWith(t, m, sharedFrame("r", 3, "proj-1", "B", "A", "B"))
 	if m.groupsSeq != seq {
-		t.Errorf("a shared member leaving saved the groups (seq %d -> %d)", seq, m.groupsSeq)
+		t.Errorf("an unchanged frame saved (seq %d -> %d)", seq, m.groupsSeq)
 	}
 }
 
@@ -111,13 +125,14 @@ func TestUpdate_MixedDestinations_LegacyMembersStayInFileSharedComeFromFrame(t *
 	if m.groups.groupOf("", "proj-stale") >= 0 {
 		t.Error("a shared destination's file member survived the frame")
 	}
-	// The file keeps the legacy member and never the shared one.
+	// The file keeps the legacy member and caches the authoritative
+	// destination's frame membership in place of its stale entry.
 	runCmd(m.saveGroupsCmd())
 	saved, err := loadProjectGroups(dir + "/project-groups.json")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if saved.groupOf("hostA", "proj-old") < 0 || saved.groupOf("", "proj-1") >= 0 {
+	if saved.groupOf("hostA", "proj-old") < 0 || saved.groupOf("", "proj-1") < 0 || saved.groupOf("", "proj-stale") >= 0 {
 		t.Errorf("file members = %+v", saved.Groups)
 	}
 }
@@ -144,25 +159,112 @@ func TestUpdate_SharedFrame_DaemonNameUnknownToFileIsAppended(t *testing.T) {
 	}
 }
 
-func TestUpdate_SharedLocal_EmptyFileGroupNobodyListsIsPruned(t *testing.T) {
+// A name no daemon ever listed is never deleted — not on a destination's
+// first frame, not on a later one: only a name that DISAPPEARS goes (I-1).
+func TestUpdate_SharedLocal_EmptyFileGroupNobodyListedIsKept(t *testing.T) {
 	m := connectedTestModel(t)
-	m.SetProjectGroups(ProjectGroupsState{groups: projectGroups{Groups: []projectGroup{{Name: "Gone"}}}}, "")
+	m.SetProjectGroups(ProjectGroupsState{groups: projectGroups{Groups: []projectGroup{{Name: "Kept"}}}}, "")
 	m = updateWith(t, m, sharedFrame("r", 1, "proj-1", "", "Listed"))
-	if got := groupNames(m); len(got) != 1 || got[0] != "Listed" {
-		t.Errorf("groups = %v", got)
+	m = updateWith(t, m, sharedFrame("r", 2, "proj-1", "", "Listed"))
+	if got := groupNames(m); len(got) != 2 || got[0] != "Kept" || got[1] != "Listed" {
+		t.Errorf("groups = %v, want Kept kept and Listed appended", got)
 	}
 }
 
-// Empty groups live on the LOCAL daemon (spec 4.5), so with only a remote
-// shared the file's empty group is kept: nothing could have imported it.
-func TestUpdate_RemoteSharedOnly_EmptyFileGroupIsKept(t *testing.T) {
+// Test 1 (C-1): a shared daemon holding no groups yet has not been imported
+// into, so the file's members for it are the only record — shown and saved.
+func TestUpdate_SharedDaemonWithNoGroups_FileMembersStay(t *testing.T) {
+	m := connectedTestModel(t)
+	path := t.TempDir() + "/project-groups.json"
+	m.SetProjectGroups(ProjectGroupsState{groups: projectGroups{Groups: []projectGroup{
+		{Name: "G", Members: []groupMember{{Dest: "", ID: "proj-1"}}},
+	}}}, path)
+	m = updateWith(t, m, sharedFrame("r", 1, "proj-1", "")) // shared, lists no groups
+	if m.groups.groupOf("", "proj-1") != m.groups.indexOf("G") || m.groups.indexOf("G") < 0 {
+		t.Errorf("displayed groups = %+v, want proj-1 still in G", m.groups.Groups)
+	}
+	runCmd(m.saveGroupsCmd())
+	saved, err := loadProjectGroups(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.indexOf("G") < 0 || saved.groupOf("", "proj-1") != saved.indexOf("G") {
+		t.Errorf("file = %+v, want G holding proj-1", saved.Groups)
+	}
+}
+
+// Test 2 (D-1a/D-5): order and collapsed state survive a launch. "GPU" is
+// first and collapsed with members only on hostA; the local frame arrives
+// first, then hostA's listing GPU.
+func TestUpdate_FileOrderAndCollapsedSurviveTheFirstFrames(t *testing.T) {
 	m, _, _ := twoDestModel(t)
-	m.SetProjectGroups(ProjectGroupsState{groups: projectGroups{Groups: []projectGroup{{Name: "Kept"}}}}, "")
-	rf := sharedFrame("q", 1, "proj-2", "", "Listed")
+	m.SetProjectGroups(ProjectGroupsState{groups: projectGroups{Groups: []projectGroup{
+		{Name: "GPU", Collapsed: true, Members: []groupMember{{Dest: "hostA", ID: "proj-2"}}},
+		{Name: "Local"},
+	}}}, "")
+	m = updateWith(t, m, sharedFrame("r", 1, "proj-1", "Local", "Local"))
+	rf := sharedFrame("q", 1, "proj-2", "GPU", "GPU")
 	rf.Dest = "hostA"
 	m = updateWith(t, m, rf)
-	if got := groupNames(m); len(got) != 2 || got[0] != "Kept" || got[1] != "Listed" {
-		t.Errorf("groups = %v, want Kept kept and Listed appended", got)
+	if got := groupNames(m); len(got) != 2 || got[0] != "GPU" || got[1] != "Local" {
+		t.Fatalf("groups = %v, want GPU still first", got)
+	}
+	if !m.groups.Groups[0].Collapsed {
+		t.Error("GPU lost its collapsed state")
+	}
+	if m.groups.groupOf("hostA", "proj-2") != 0 || m.groups.groupOf("", "proj-1") != 1 {
+		t.Errorf("members = %+v", m.groups.Groups)
+	}
+}
+
+// Test 4 (I-1, TC-5): a delete made in another client shows here — hostA
+// listed "X" in its previous frame, drops it now, and X has no member.
+func TestUpdate_GroupNameDisappears_GroupIsRemoved(t *testing.T) {
+	m, _, _ := twoDestModel(t)
+	f1 := sharedFrame("q", 1, "proj-2", "Y", "X", "Y")
+	f1.Dest = "hostA"
+	m = updateWith(t, m, f1)
+	if got := groupNames(m); len(got) != 2 {
+		t.Fatalf("setup: groups = %v", got)
+	}
+	f2 := sharedFrame("q", 2, "proj-2", "Y", "Y")
+	f2.Dest = "hostA"
+	m = updateWith(t, m, f2)
+	if got := groupNames(m); len(got) != 1 || got[0] != "Y" {
+		t.Errorf("groups = %v, want X removed", got)
+	}
+}
+
+// A vanished name that still has a member anywhere is kept: here a legacy
+// destination's cached member.
+func TestUpdate_GroupNameDisappears_KeptWhileItHasMembers(t *testing.T) {
+	m, _, _ := twoDestModel(t)
+	m.SetProjectGroups(ProjectGroupsState{groups: projectGroups{Groups: []projectGroup{
+		{Name: "X", Members: []groupMember{{Dest: "hostA", ID: "proj-old"}}},
+	}}}, "")
+	m = updateWith(t, m, sharedFrame("r", 1, "proj-1", "", "X", "Y"))
+	m = updateWith(t, m, sharedFrame("r", 2, "proj-1", "", "Y"))
+	if m.groups.indexOf("X") < 0 || m.groups.groupOf("hostA", "proj-old") < 0 {
+		t.Errorf("groups = %+v, want X kept with its legacy member", m.groups.Groups)
+	}
+}
+
+// An in-flight frame during an optimistic rename still lists the OLD name;
+// the new one was never listed, so it cannot vanish, and it keeps its slot.
+func TestUpdate_OptimisticRename_InFlightFrameKeepsTheNewNamesSlot(t *testing.T) {
+	m := connectedTestModel(t)
+	m = updateWith(t, m, sharedFrame("r", 1, "proj-1", "A", "X", "A", "Y"))
+	m.beginGroupEdit(groupEditState{mode: groupEditRename, target: "A", input: "B"})
+	out, cmd := m.commitGroupEdit()
+	runCmd(cmd)
+	m = out.(Model)
+	m = updateWith(t, m, sharedFrame("r", 2, "proj-1", "A", "X", "A", "Y")) // in flight
+	m = updateWith(t, m, sharedFrame("r", 3, "proj-1", "B", "X", "B", "Y"))
+	if got := groupNames(m); len(got) != 3 || got[0] != "X" || got[1] != "B" || got[2] != "Y" {
+		t.Errorf("groups = %v, want X,B,Y", got)
+	}
+	if m.groups.groupOf("", "proj-1") != 1 {
+		t.Errorf("proj-1 in group %d, want 1 (B)", m.groups.groupOf("", "proj-1"))
 	}
 }
 
@@ -280,8 +382,8 @@ func TestExecuteGroupCtxMenuItem_Delete_SendsGroupOpDelete(t *testing.T) {
 	}
 }
 
-// A create while a LEGACY project is active goes to the shared local daemon:
-// sent nowhere, the empty group would be pruned by the next local frame.
+// A create while a LEGACY project is active goes to the shared local daemon,
+// where empty groups live: sent nowhere, no other client would ever see it.
 func TestCommitGroupEdit_NewEmptyGroupWithLegacyActive_CreatesOnLocal(t *testing.T) {
 	m, local, remote := twoDestModel(t)
 	m = updateWith(t, m, sharedFrame("r", 1, "proj-1", ""))
@@ -309,27 +411,62 @@ func TestCommitGroupEdit_NewEmptyGroupWithLegacyActive_CreatesOnLocal(t *testing
 	}
 }
 
-// F-6: a frame that adds a group ahead of the dragged one mid-drag must not
-// move the wrong group.
-func TestGroupDrag_KeyedByName_SurvivesAFrameThatInsertsAGroup(t *testing.T) {
-	m := connectedTestModel(t)
-	m.width, m.height = 100, 40
-	m.SetProjectGroups(ProjectGroupsState{groups: projectGroups{Groups: []projectGroup{{Name: "B"}, {Name: "C"}}}}, "")
-	m = updateWith(t, m, sharedFrame("r", 1, "proj-1", "", "B", "C"))
-	m.groupDragging, m.groupDragName = true, "C"
-	// Another client created "A": the daemon lists it first and it is appended
-	// to the file order, so C's index changes only if the plan appends — it
-	// does; the point is the drag still resolves C by NAME.
-	m = updateWith(t, m, sharedFrame("r", 2, "proj-1", "", "A", "B", "C"))
+// sharedSidebarModel is a sidebar-painting Model whose local destination
+// frames are driven through Update (the conn's receive side is closed, as in
+// connectedTestModelCapturingSends).
+func sharedSidebarModel(t *testing.T) Model {
+	t.Helper()
+	m := *newSplitDragTestModel(t)
+	conn := newFakeConn()
+	close(conn.recv)
+	m.client = conn
+	m.sidebarOpen = true
+	m.sidebarWidth = 22
+	return m
+}
+
+// headerRow is the sidebar row of the group named name, or fails.
+func headerRow(t *testing.T, m Model, name string) int {
+	t.Helper()
+	rows, _ := m.sidebarRows(22)
+	for y, r := range rows {
+		if r.kind == sidebarRowGroup && r.index < len(m.groups.Groups) && m.groups.Groups[r.index].Name == name {
+			return y
+		}
+	}
+	t.Fatalf("no header row for group %q in %v", name, groupNames(m))
+	return -1
+}
+
+// F-6 / I-2: the header drag is keyed by NAME, through the real press,
+// motion and release. Another client deletes "A" — BEFORE the dragged "C" —
+// while the drag is armed, so C's index shifts under it; an index-keyed drag
+// would then move D instead.
+func TestGroupDrag_FrameDeletesAGroupBeforeTheDraggedOne_MovesTheRightGroup(t *testing.T) {
+	m := sharedSidebarModel(t)
+	m = updateWith(t, m, sharedFrame("r", 1, "proj-1", "", "A", "B", "C", "D"))
+	if got := strings.Join(groupNames(m), ","); got != "A,B,C,D" {
+		t.Fatalf("setup: groups = %s", got)
+	}
+	m, _ = grpPress(m, headerRow(t, m, "C"), tea.MouseLeft)
 	if !m.groupDragging || m.groupDragName != "C" {
-		t.Fatalf("drag state = %v %q", m.groupDragging, m.groupDragName)
+		t.Fatalf("setup: drag = (%v, %q), want armed on C", m.groupDragging, m.groupDragName)
 	}
-	from := m.groups.indexOf("C")
-	if !m.groups.moveGroup(from, 0) {
-		t.Fatal("moveGroup refused")
+	m = updateWith(t, m, sharedFrame("r", 2, "proj-1", "", "B", "C", "D"))
+	if got := strings.Join(groupNames(m), ","); got != "B,C,D" {
+		t.Fatalf("the other client's delete did not show: %s", got)
 	}
-	if got := groupNames(m); got[0] != "C" {
-		t.Errorf("groups = %v, want C first", got)
+	if !m.groupDragging {
+		t.Fatal("the frame ended the drag")
+	}
+	y := headerRow(t, m, "D")
+	m, _ = grpMotion(m, y)
+	m, _ = grpRelease(m, y)
+	if got := strings.Join(groupNames(m), ","); got != "B,D,C" {
+		t.Errorf("groups = %s, want B,D,C (C dropped onto D's slot, B untouched)", got)
+	}
+	if m.groupDragging {
+		t.Error("release did not end the drag")
 	}
 }
 

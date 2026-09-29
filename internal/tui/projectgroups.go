@@ -259,9 +259,9 @@ func (g projectGroups) clone() projectGroups {
 }
 
 // withoutMembersOf is clone minus the members of the given destinations — the
-// FILE projection once a destination's members come from its daemon. A group
-// left with no member gets a nil list, as clone gives one, so two projections
-// of the same file compare equal however their members were arrived at.
+// step before an authoritative destination's members are re-filled from its
+// frame (rebuildGroupsView). A group left with no member gets a nil list, as
+// clone gives one.
 func (g projectGroups) withoutMembersOf(dests map[string]bool) projectGroups {
 	out := projectGroups{Groups: make([]projectGroup, len(g.Groups))}
 	for i, grp := range g.Groups {

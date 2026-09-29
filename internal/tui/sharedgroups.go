@@ -13,9 +13,13 @@ import (
 )
 
 // Client side of shared groups (spec 4.2). m.groups stays the ONE displayed
-// structure every sidebar/hover/drag reader indexes; this file rebuilds its
-// membership from each shared destination's frame and keeps the file to
-// order + collapsed (+ legacy members).
+// structure every sidebar/hover/drag reader indexes, and project-groups.json
+// is exactly m.groups: order, collapsed state, and every member. For a
+// destination whose frame is authoritative (frameAuthoritativeFor) the file's
+// members are a CACHE the frame replaces; for every other destination —
+// legacy, not connected yet, or shared but not imported into — they are the
+// only record and are shown and kept as before. Nothing is removed from the
+// file merely because a destination is shared.
 
 type pendingGroupOp struct {
 	dest string
@@ -33,7 +37,13 @@ type sharedOpRespMsg struct {
 // noteSharedData records a frame's shared-data facts for its destination.
 // Runs BEFORE applyWorkspaceState so the import (sharedimport.go) and the
 // merged view see them on the same frame.
+//
+// It also records which names this frame DROPPED from the destination's list
+// (vanishedGroups, consumed by rebuildGroupsView on the same frame). Only a
+// destination heard from before this session can drop anything: on its first
+// frame there is no previous list, so nothing it omits reads as a delete.
 func (m *Model) noteSharedData(msg WorkspaceStateMsg) {
+	m.vanishedGroups = nil
 	if !msg.SharedData {
 		return
 	}
@@ -42,9 +52,34 @@ func (m *Model) noteSharedData(msg WorkspaceStateMsg) {
 		m.daemonGroups = map[string][]string{}
 		m.daemonRecent = map[string][]string{}
 	}
+	if old, seen := m.daemonGroups[msg.Dest]; seen {
+		for _, name := range old {
+			if !containsFold(msg.Groups, name) {
+				m.vanishedGroups = append(m.vanishedGroups, name)
+			}
+		}
+	}
 	m.sharedData[msg.Dest] = true
 	m.daemonGroups[msg.Dest] = append([]string(nil), msg.Groups...)
 	m.daemonRecent[msg.Dest] = append([]string(nil), msg.RecentCWDs...)
+}
+
+// frameAuthoritativeFor reports whether dest's frame, not the file, holds its
+// group members: it sent shared_data this session AND its daemon lists at
+// least one group. A shared daemon holding no groups has not been imported
+// into yet, so the file's members for it are still the only record.
+// (Task 8 extends this with "|| its groups import is marked done".)
+func (m *Model) frameAuthoritativeFor(dest string) bool {
+	return m.sharedData[dest] && len(m.daemonGroups[dest]) > 0
+}
+
+func containsFold(list []string, name string) bool {
+	for _, s := range list {
+		if strings.EqualFold(s, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // sharedDestsInOrder is every shared destination, local first, then sorted —
@@ -69,38 +104,45 @@ func (m *Model) sharedDestsInOrder() []string {
 func (m *Model) destsListingGroup(name string) []string {
 	var out []string
 	for _, d := range m.sharedDestsInOrder() {
-		for _, g := range m.daemonGroups[d] {
-			if strings.EqualFold(g, name) {
-				out = append(out, d)
-				break
-			}
+		if containsFold(m.daemonGroups[d], name) {
+			out = append(out, d)
 		}
 	}
 	return out
 }
 
 // rebuildGroupsView is the merged view (spec 4.2), run after every applied
-// frame: members of shared destinations come from the frame (the project's
-// own Group), names any shared daemon lists are appended in destination
-// order, and — only when the LOCAL daemon is shared, since that is where
-// empty groups live — a file group with no member that no daemon lists is
-// dropped. With no shared destination at all nothing here runs, so a
-// legacy-only setup behaves exactly as before. Saves only when the FILE
-// projection changed, not on every frame.
+// frame. For each AUTHORITATIVE destination its members are replaced by the
+// frame's (each project's own Group); every other destination's members are
+// left exactly as the file holds them. Names any shared daemon lists and the
+// view lacks are appended in destination order, so the user's order and
+// collapsed state stand.
+//
+// A group is deleted only when its name DISAPPEARED: a destination that
+// listed it in its previous frame dropped it in this one (vanishedGroups), no
+// destination lists it now, and it has no member left anywhere. So a
+// destination's first frame deletes nothing, a name no daemon ever listed is
+// kept, and an in-flight frame during an optimistic rename cannot take the
+// new name (it was never listed, so it cannot vanish) — while a delete made
+// in another client still shows here.
+//
+// With no shared destination nothing here runs, so a legacy-only setup
+// behaves exactly as before. Saves only when the view — which is the file —
+// actually changed, not on every frame.
 func (m *Model) rebuildGroupsView() tea.Cmd {
+	vanished := m.vanishedGroups
+	m.vanishedGroups = nil
 	if len(m.sharedData) == 0 {
 		return nil
 	}
-	before := m.groups.withoutMembersOf(m.sharedData)
-	for g := range m.groups.Groups {
-		kept := m.groups.Groups[g].Members[:0]
-		for _, mb := range m.groups.Groups[g].Members {
-			if !m.sharedData[mb.Dest] {
-				kept = append(kept, mb)
-			}
+	before := m.groups.clone()
+	auth := map[string]bool{}
+	for d := range m.sharedData {
+		if m.frameAuthoritativeFor(d) {
+			auth[d] = true
 		}
-		m.groups.Groups[g].Members = kept
 	}
+	m.groups = m.groups.withoutMembersOf(auth)
 	for _, dest := range m.sharedDestsInOrder() {
 		for _, name := range m.daemonGroups[dest] {
 			if m.groups.indexOf(name) < 0 {
@@ -111,7 +153,7 @@ func (m *Model) rebuildGroupsView() tea.Cmd {
 		}
 	}
 	for _, p := range m.projects {
-		if p == nil || !m.sharedData[p.Dest] || p.Group == "" {
+		if p == nil || !auth[p.Dest] || p.Group == "" {
 			continue
 		}
 		g := m.groups.indexOf(p.Group)
@@ -123,15 +165,15 @@ func (m *Model) rebuildGroupsView() tea.Cmd {
 		}
 		m.groups.assign(g, p.Dest, p.ID)
 	}
-	if m.sharedData[""] {
-		for g := len(m.groups.Groups) - 1; g >= 0; g-- {
-			grp := m.groups.Groups[g]
-			if len(grp.Members) == 0 && len(m.destsListingGroup(grp.Name)) == 0 {
-				m.groups.deleteGroup(g)
-			}
+	for g := len(m.groups.Groups) - 1; g >= 0; g-- {
+		grp := m.groups.Groups[g]
+		if len(grp.Members) == 0 && containsFold(vanished, grp.Name) && len(m.destsListingGroup(grp.Name)) == 0 {
+			m.groups.deleteGroup(g)
 		}
 	}
-	if reflect.DeepEqual(before, m.groups.withoutMembersOf(m.sharedData)) {
+	// Both sides through clone, which gives an empty group a nil member list
+	// however it got there, so an unchanged view compares equal.
+	if reflect.DeepEqual(before, m.groups.clone()) {
 		return nil
 	}
 	return m.saveGroupsCmd()
@@ -184,9 +226,9 @@ func (m *Model) sendGroupOp(dest, op, name, newName string) tea.Cmd {
 // sendGroupOpEverywhere fans a rename or delete out to every shared
 // destination listing the name (each with its own id); a create goes to the
 // active destination only — or, when that one is a legacy daemon, to the
-// local one if it is shared: an empty group nobody lists is pruned by the
-// next local frame (rebuildGroupsView), and the local daemon is where empty
-// groups live (spec 4.5). Best-effort across hosts (spec 4.2): a refusal
+// local one if it is shared: the local daemon is where empty groups live
+// (spec 4.5), and sent nowhere the group would reach no other client of any
+// daemon. Best-effort across hosts (spec 4.2): a refusal
 // flashes, an offline host is skipped, and the group shows split until the
 // user repeats the operation.
 func (m *Model) sendGroupOpEverywhere(op, name, newName string) tea.Cmd {

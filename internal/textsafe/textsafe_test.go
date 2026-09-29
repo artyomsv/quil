@@ -9,14 +9,14 @@ func TestStrip_TableOfRunes(t *testing.T) {
 		want string
 	}{
 		{"plain ascii", "hello", "hello"},
-		{"non-ascii kept", "Ünïcödé 構築 👨‍👩‍👧", "Ünïcödé 構築 👨‍👩‍👧"},
+		{"non-ascii kept", "Ünïcödé 構築 👨\u200d👩\u200d👧", "Ünïcödé 構築 👨\u200d👩\u200d👧"},
 		{"tab becomes space", "a\tb", "a b"},
 		{"C0 dropped", "a\x1b[31mb\x00c", "a[31mbc"},
 		{"DEL dropped", "a\x7fb", "ab"},
 		{"C1 CSI dropped", "a\u009bb", "ab"},
-		{"bidi override dropped", "a‮b", "ab"},
-		{"bidi isolate dropped", "a⁦b⁩c", "abc"},
-		{"zero width joiner kept", "a‍b", "a‍b"},
+		{"bidi override dropped", "a\u202eb", "ab"},
+		{"bidi isolate dropped", "a\u2066b\u2069c", "abc"},
+		{"zero width joiner kept", "a\u200db", "a\u200db"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -38,7 +38,7 @@ func TestHasStripped_ReportsOnlyStrippedRunes(t *testing.T) {
 	if HasStripped("plain") {
 		t.Error("HasStripped(plain) = true")
 	}
-	if !HasStripped("a‮b") {
+	if !HasStripped("a\u202eb") {
 		t.Error("HasStripped(bidi) = false")
 	}
 	if !HasStripped("a\tb") {

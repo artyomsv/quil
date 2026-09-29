@@ -65,12 +65,14 @@ func (m *Model) noteSharedData(msg WorkspaceStateMsg) {
 }
 
 // frameAuthoritativeFor reports whether dest's frame, not the file, holds its
-// group members: it sent shared_data this session AND its daemon lists at
-// least one group. A shared daemon holding no groups has not been imported
-// into yet, so the file's members for it are still the only record.
-// (Task 8 extends this with "|| its groups import is marked done".)
+// group members: it sent shared_data this session AND either its daemon has
+// answered this client's groups import (sharedimport.go) or it lists at least
+// one group. A shared daemon holding no groups and not yet imported into has
+// only the file's members as a record. The second arm covers a client whose
+// import is still pending while another client's import already filled the
+// daemon: that import will be refused, and the daemon's list is the truth.
 func (m *Model) frameAuthoritativeFor(dest string) bool {
-	return m.sharedData[dest] && len(m.daemonGroups[dest]) > 0
+	return m.sharedData[dest] && (m.groupsImportAnswered(dest) || len(m.daemonGroups[dest]) > 0)
 }
 
 func containsFold(list []string, name string) bool {
@@ -189,6 +191,13 @@ const sharedOpErrCap = 80
 // Clear-attention precedent): a one-shot the user asked for, never a bulk
 // iterator. Returns a flash Cmd when the destination is unreachable.
 func (m *Model) sendSharedOp(dest, msgType string, payload any, what string) tea.Cmd {
+	if !m.groupSendsOpen(dest) {
+		// Before the groups import is answered a send could reach the daemon
+		// first and make it refuse the import (sharedimport.go). The change
+		// is in the file already; the send waits for the answer.
+		m.deferGroupOp(dest, msgType, payload, what)
+		return nil
+	}
 	msg, err := ipc.NewMessage(msgType, payload)
 	if err != nil {
 		log.Printf("groups: encode %s: %v", msgType, err)

@@ -664,6 +664,7 @@ func launchTUI() {
 		log.Printf("project groups: %v; starting with none", groupsErr)
 	}
 	model.SetProjectGroups(groupsState, groupsPath)
+	model.SetSharedImportMarker(config.SharedImportPath())
 
 	// Keybindings. Migrate the legacy [keybindings] table on first launch, then
 	// resolve the layers. Loaded here rather than inside NewModel for the same

@@ -1088,6 +1088,16 @@ type Model struct {
 	// pendingGroupOps correlates an id-bearing set_project_group/group_op with
 	// the host it went to, so a refusal can be flashed naming it.
 	pendingGroupOps map[string]pendingGroupOp
+	// One-time import (sharedimport.go): "" = off; asked once per destination
+	// per launch; id → dest for the answer; groupsImported = the destinations
+	// whose groups import is answered (marker or this session), which opens
+	// group sends and makes the frame authoritative; deferredGroupOps = the
+	// group sends held until then, replayed in order on the answer.
+	importMarkerPath string
+	importAsked      map[string]bool
+	pendingImports   map[string]string
+	groupsImported   map[string]bool
+	deferredGroupOps map[string][]deferredGroupOp
 	// A press on a group header. The release TOGGLES the group only when
 	// groupDragMoved is still false; a drag reorders the groups instead.
 	groupDragging  bool
@@ -3021,6 +3031,9 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		// runs, then either delete or demote them to logger.Debug.
 		log.Printf("WorkspaceState: %d tabs, %d panes", len(msg.Tabs), len(msg.Panes))
 		newPaneIDs, overlayResizeCmds := m.applyWorkspaceState(msg, msg.Dest)
+		// The import needs this frame's panes (applied above) and must record
+		// a groups answer from the marker before the merge below reads it.
+		importCmd := m.maybeImport(msg)
 		// After the merge, and only here: this arm is reached only for a
 		// connected destination whose state arrived (the gate above).
 		groupsCmd := tea.Batch(m.pruneProjectGroupsFor(msg), m.rebuildGroupsView())
@@ -3092,6 +3105,7 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 			m.sendDiffedResizes(m.diffResizes(msg)),
 			groupsCmd,
 			noteRevCmd,
+			importCmd,
 		}
 		// Resize overlay PTYs that just became visible on initial creation.
 		// resizeAllPanes only walks tab.Leaves() (the layout tree), so overlay
@@ -3518,6 +3532,14 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 
 	case noteSetRespMsg:
 		return m, tea.Batch(m.listenForMessages(), m.applyNoteSetResp(msg))
+
+	case sharedImportRespMsg:
+		return m, tea.Batch(m.listenForMessages(), m.applySharedImportResp(msg))
+
+	case sharedImportTimeoutMsg:
+		// Local timer: does NOT re-arm listenForMessages.
+		m.applySharedImportTimeout(msg)
+		return m, nil
 
 	case noteLoadTimeoutMsg:
 		// Local timer: does NOT re-arm listenForMessages.
@@ -8653,6 +8675,14 @@ func (m Model) listenForMessages() tea.Cmd {
 				return listenContinueMsg{}
 			}
 			return noteSetRespMsg{dest: msg.Origin, id: msg.ID, resp: p}
+
+		case ipc.MsgSharedImportResp:
+			var p ipc.SharedImportRespPayload
+			if err := msg.DecodePayload(&p); err != nil {
+				log.Printf("decode %s: %v", msg.Type, err)
+				return listenContinueMsg{}
+			}
+			return sharedImportRespMsg{dest: msg.Origin, id: msg.ID, resp: p}
 
 		default:
 			log.Printf("ipc recv: unknown type %q", msg.Type)

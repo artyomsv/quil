@@ -33,6 +33,7 @@ func TestMain(m *testing.M) {
 	stateReqTimeout = 10 * time.Millisecond
 	noteLoadTimeout = 10 * time.Millisecond
 	noteQuitWait = 10 * time.Millisecond
+	sharedImportTimeout = 10 * time.Millisecond
 
 	cleanupQuilHome := ensureIsolatedQuilHome()
 	code := m.Run()

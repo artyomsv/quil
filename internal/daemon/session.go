@@ -232,12 +232,23 @@ type Pane struct {
 	// three readers data races. ID and the OutputBuf pointer are immutable;
 	// TabID has its own leaf lock (tabIDMu).
 	PluginMu sync.Mutex
-	// noteMu is a LEAF lock guarding NoteRev and the note file on disk: every
-	// note read/write holds it across the version check and the file I/O, so
-	// two saves from one base cannot both apply. Never held while acquiring
-	// another lock, and PluginMu is never held across note I/O (F-1).
-	noteMu  sync.Mutex
-	NoteRev uint64 // 0 = no note. Persisted (note_rev), broadcast. Under noteMu.
+	// noteMu is a LEAF lock guarding the note file on disk and NoteRev's
+	// read-modify-write in note_set: every note write holds it across the
+	// version check and the file I/O, so two saves from one base cannot both
+	// apply. Never held while acquiring another lock, and PluginMu is never
+	// held across note I/O (F-1).
+	noteMu sync.Mutex
+	// NoteRev is the pane's note-version counter: MONOTONIC, never reset to
+	// 0 by note_set — a delete increments it exactly like a save, because
+	// resetting it would let a save based on a rev the deleter had already
+	// invalidated silently overwrite whatever a later writer put there
+	// (spec ruling R-2). "No note" is an empty file/text, not rev 0; 0 means
+	// only "this pane has never had a note". Persisted (note_rev), broadcast.
+	// atomic.Uint64 rather than noteMu-guarded: the workspace-state build
+	// reads it with a bare Load(), with no noteMu, so a slow note_set's disk
+	// I/O never stalls every OTHER pane's broadcast. Written only under
+	// noteMu (Store happens after the response is enqueued — see notes.go).
+	NoteRev atomic.Uint64
 
 	InstanceName string    // Which instance config was used
 	InstanceArgs []string  // Args used to start (for rerun strategy)

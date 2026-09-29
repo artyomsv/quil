@@ -32,7 +32,7 @@ func (d *Daemon) handleNoteGet(conn *ipc.Conn, msg *ipc.Message) {
 	go func() {
 		pane.noteMu.Lock()
 		text, err := persist.LoadNotes(config.NotesDir(), pane.ID)
-		rev := pane.NoteRev
+		rev := pane.NoteRev.Load()
 		pane.noteMu.Unlock()
 		resp := ipc.NoteRespPayload{PaneID: pane.ID, Text: text, Rev: rev}
 		if err != nil {
@@ -60,8 +60,8 @@ func (d *Daemon) handleNoteSet(conn *ipc.Conn, msg *ipc.Message) {
 	}
 	go func() {
 		pane.noteMu.Lock()
-		if p.BaseRev != pane.NoteRev {
-			cur := pane.NoteRev
+		cur := pane.NoteRev.Load()
+		if p.BaseRev != cur {
 			pane.noteMu.Unlock()
 			respondTo(conn, msg.ID, ipc.MsgNoteSetResp, ipc.NoteSetRespPayload{PaneID: pane.ID, Conflict: true, CurrentRev: cur})
 			return
@@ -69,26 +69,31 @@ func (d *Daemon) handleNoteSet(conn *ipc.Conn, msg *ipc.Message) {
 		var err error
 		if p.Text == "" {
 			err = persist.DeleteNotes(config.NotesDir(), pane.ID)
-			if err == nil {
-				pane.NoteRev = 0
-			}
 		} else {
 			err = persist.SaveNotes(config.NotesDir(), pane.ID, p.Text)
-			if err == nil {
-				pane.NoteRev++
-			}
 		}
-		rev := pane.NoteRev
-		pane.noteMu.Unlock()
 		if err != nil {
+			pane.noteMu.Unlock()
 			log.Printf("note_set %s: %v", pane.ID, err)
 			respondTo(conn, msg.ID, ipc.MsgNoteSetResp, ipc.NoteSetRespPayload{PaneID: pane.ID, Error: err.Error()})
 			return
 		}
-		// The answer BEFORE the broadcast request (F-3): both reach this conn
-		// through its must-deliver queue in order, and the coalescer adds
-		// 50 ms besides, so the saver holds its new rev when the frame lands.
-		respondTo(conn, msg.ID, ipc.MsgNoteSetResp, ipc.NoteSetRespPayload{PaneID: pane.ID, OK: true, Rev: rev})
+		// NoteRev is monotonic: a delete increments it exactly like a save,
+		// never resets to 0 (spec ruling R-2) — "no note" is an empty
+		// file/text, not rev 0, so a stale save cannot be reissued against a
+		// rev a delete already invalidated.
+		newRev := cur + 1
+		// F-3, proven by program order rather than by noteMu: the
+		// workspace-state build reads NoteRev with a bare Load() and takes no
+		// lock (daemon.go), so nothing stops it from racing this write. Store
+		// runs strictly AFTER respondTo's enqueue call returns, on this same
+		// goroutine — so any Load() anywhere that ever observes newRev
+		// necessarily happens after our response was already enqueued, and a
+		// state frame built from that value can only land behind it on this
+		// conn's FIFO must-deliver queue, never ahead of it.
+		respondTo(conn, msg.ID, ipc.MsgNoteSetResp, ipc.NoteSetRespPayload{PaneID: pane.ID, OK: true, Rev: newRev})
+		pane.NoteRev.Store(newRev)
+		pane.noteMu.Unlock()
 		d.requestBroadcast()
 		d.requestSnapshot()
 	}()

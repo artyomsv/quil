@@ -27,7 +27,7 @@ func TestSharedData_WireDiskAndRestoreRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	pane.noteMu.Lock()
-	pane.NoteRev = 7
+	pane.NoteRev.Store(7)
 	pane.noteMu.Unlock()
 
 	wire := stateMap(t, d.buildWorkspaceState())
@@ -75,7 +75,7 @@ func TestSharedData_WireDiskAndRestoreRoundTrip(t *testing.T) {
 		t.Fatal("pane not restored")
 	}
 	rp.noteMu.Lock()
-	rev := rp.NoteRev
+	rev := rp.NoteRev.Load()
 	rp.noteMu.Unlock()
 	if rev != 7 {
 		t.Errorf("restored note_rev = %d, want 7", rev)

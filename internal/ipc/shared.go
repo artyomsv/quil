@@ -57,7 +57,10 @@ type NoteGetPayload struct {
 	PaneID string `json:"pane_id"`
 }
 
-// NoteRespPayload answers note_get. Rev 0 and an empty Text mean no note.
+// NoteRespPayload answers note_get. An empty Text means no note; Rev is the
+// daemon's monotonic version counter for this pane's note and is never reset
+// by a delete, so 0 means only "this pane has never had a note" — not "no
+// note right now".
 type NoteRespPayload struct {
 	PaneID string `json:"pane_id"`
 	Text   string `json:"text"`
@@ -73,7 +76,9 @@ type NoteSetPayload struct {
 }
 
 // NoteSetRespPayload answers note_set. Conflict means BaseRev was stale and
-// nothing was written; CurrentRev is what the daemon holds.
+// nothing was written; CurrentRev is what the daemon holds. On a successful
+// delete (empty Text), Rev is the PREVIOUS rev plus one, never 0 — the
+// counter is monotonic, so a subsequent save must use this Rev as its base.
 type NoteSetRespPayload struct {
 	PaneID     string `json:"pane_id"`
 	OK         bool   `json:"ok"`

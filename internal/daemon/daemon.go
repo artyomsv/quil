@@ -1104,8 +1104,11 @@ func (d *Daemon) restoreWorkspace() error {
 					// CWD, which is the value that cannot be trusted for a
 					// force-delete.
 					WorktreePath: worktreePath,
-					NoteRev:      uint64(noteRev),
 				}
+				// NoteRev is atomic.Uint64: cannot be set in the struct
+				// literal above, so it is stored once here, before the pane
+				// is published to any other goroutine.
+				pane.NoteRev.Store(uint64(noteRev))
 
 				// Load ghost buffer from disk
 				if bufData, err := persist.LoadBuffer(bufDir, paneID); err == nil && len(bufData) > 0 {
@@ -4918,11 +4921,12 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			// the size read beside it (see Pane.sizeSeq).
 			snapSizeSeq := pane.colsSeq
 			pane.PluginMu.Unlock()
-			// noteMu is a separate leaf lock from PluginMu (see Pane.noteMu) —
-			// read OUTSIDE the PluginMu span above rather than folded into it.
-			pane.noteMu.Lock()
-			paneData.NoteRev = pane.NoteRev
-			pane.noteMu.Unlock()
+			// NoteRev is atomic.Uint64 precisely so this read never waits on
+			// noteMu — a note_set can hold that lock across disk I/O, and
+			// stalling every pane's broadcast behind one slow note write
+			// would be the queue-pressure hazard this repo already fixed
+			// once for output broadcasts (see daemon-lifecycle.md).
+			paneData.NoteRev = pane.NoteRev.Load()
 			// Broadcast-only, runtime: the counter restarts with the daemon,
 			// so a persisted one would mean nothing.
 			if includeOverlays && snapSizeSeq > 0 {

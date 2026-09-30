@@ -949,6 +949,8 @@ Groups are a CLIENT-side view over `m.projects`: `projectgroups.go` is the pure 
 
 **Group sends to a shared destination are HELD until its groups import is answered** (`groupSendsOpen`/`deferGroupOp`), then replayed in order (`openGroupSends`). A daemon refuses an import once it holds any group, and `set_project_group` creates the group it names — so a send that overtook the import would make the daemon drop every member the import carries. The change is applied to the file at once; only the send waits. A rename or delete is held for a destination whose import is unanswered even though it lists nothing yet (`destsHoldingGroupName`): it will list the name once the import lands, and the authoritative frame that follows would otherwise undo the change.
 
+**A follow-up rename or delete made before the daemon's next frame goes where the first op went.** A daemon's list comes only from its frames, so after rename A→B the list still says A until the next frame, and a rename B→C (or create-then-delete) aimed only by that list reached nobody. `recordGroupNameSent` keeps, per destination, the names this client's own create/rename sends put there; `sendGroupOpEverywhere` adds those destinations to the fan-out, and sends to one daemon stay in order. A delete or a rename away removes the name, a refusal undoes what its op recorded (`undoGroupNameSent`), and a disconnect forgets the destination. It is used ONLY for targeting — never to show or delete a group — so a stale entry costs one op the daemon refuses.
+
 ## Git subsystem (`gitinfo` + `gitcache.go`)
 
 Three plumbing calls per checkout: branch, linked worktree, ahead/behind.

@@ -133,15 +133,21 @@ recent applies only while its own list is empty — so of several clients
 importing at once, at most one actually changes anything, and the rest find
 the first one's data already there. The notes half of an import runs on a
 worker like any other note write, per pane under that pane's `noteMu`,
-applied only while the pane has no note file on disk yet. That daemon-side
-check is a second, narrower guard, not the reason a deleted note stays
-deleted — the real guard is client-side (`internal/tui/sharedimport.go`'s
-`maybeImport`): a pane only enters the import payload when the FRAME already
-shows `NoteRev == 0` for it, and the revision never resets on a delete, so a
-note this daemon has ever held — including one since deleted — is never even
-offered by a client that has seen that frame. The file-existence check here
-only covers the daemon's own bookkeeping for a pane no connected client has
-reported on yet.
+applied only while the pane has NO note history: `NoteRev` still 0 AND no
+note file on disk. The rev check under `noteMu` is the guard that keeps a
+deleted note deleted. The client (`internal/tui/sharedimport.go`) offers only
+panes its frame showed at `NoteRev == 0`, but that frame can be old by the
+time the worker runs — another client can save and then delete the note in
+between, leaving no file and a nonzero rev (a delete never resets it). The
+file check covers a note on disk that no rev records yet.
+
+**The client sends a note only when its pane id is on that daemon and on no
+other connected one** (a copied workspace can give two daemons the same pane
+id). So a destination's notes kind WAITS (`notesWaiting`) while any other
+connected destination has not sent a workspace frame yet
+(`paneInventoryMissing`); its groups and recent folders go at once, and the
+notes follow in a notes-only import once every pane id is known
+(`sendWaitingNotes`, run on every applied frame).
 
 **Recent folders are recorded from the request, never guessed.**
 `RecordRecentCWD` is called only for a directory the request itself named and
@@ -154,7 +160,9 @@ CWD is never recorded, and there is no pruning tick — the list is capped at
 `ipc.MaxRecentCWDs` (5) and the client still filters it through `dirs_exist`
 when the pick list opens.
 
-Caps enforced daemon-side (`internal/ipc/shared.go`): 256 KiB per note, group
+Caps enforced daemon-side (`internal/ipc/shared.go`): 256 KiB per note (a
+note stored before the cap existed may be larger; a save up to its stored
+size is accepted, so it stays editable but cannot grow), group
 names 1–32 runes validated through `internal/textsafe` (moved out of
 `internal/tui/remotetext.go` so the daemon can apply the identical rule to a
 name from any IPC client), 64 groups per daemon, 5 recent folders, 8 MiB per

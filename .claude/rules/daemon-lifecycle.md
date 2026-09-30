@@ -89,6 +89,11 @@ the daemon that owns the projects and panes they describe. `WorkspaceState.Share
 (`shared_data`, broadcast-only) is `true` on every frame a 3b daemon sends, so a
 client decides PER DESTINATION whether that daemon answers for its own
 groups/recent/notes or the client still keeps its own files for it.
+Both frame builders (`buildWorkspaceState`, `snapshot()`) take the group and
+recent lists from the SAME `sm.mu` hold as the projects (`SnapshotView` →
+`workspaceStateFromView`): read in a second hold, a rename between the two
+sent projects naming a group their own frame's list lacked, and every client
+kept that old name as an empty group for good.
 
 Five new id-bearing request types, all in `internal/ipc/shared.go`:
 `set_project_group` and `group_op` (create/rename/delete) mutate

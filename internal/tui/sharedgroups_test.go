@@ -424,29 +424,22 @@ func TestNewGroupFromProjectMenu_FollowUpBeforeTheFrame_IsSent(t *testing.T) {
 	}
 }
 
-// A refused assignment created nothing, so the name is forgotten.
-func TestUpdate_RefusedAssignToNewGroup_ForgetsTheSentName(t *testing.T) {
+// Two assignments to a new group before the next frame: the first creates
+// it, the second is refused (its project went away). The refusal must not
+// drop the name, or a rename right after it reaches nobody.
+func TestUpdate_OneOfTwoAssignsRefused_RenameStillReachesTheDaemon(t *testing.T) {
 	m, conn := connectedTestModelCapturingSends(t)
 	m = updateWith(t, m, sharedFrame("r", 1, "proj-1", ""))
 	runCmd(m.sendSetProjectGroup("", "proj-1", "Tmp"))
-	id := lastSent(t, conn, ipc.MsgSetProjectGroup).ID
-	m = updateWith(t, m, sharedOpRespMsg{dest: "", id: id, resp: ipc.OpRespPayload{OK: false, Error: "set group: too many groups"}})
-	if containsFold(m.groupNamesSent[""], "Tmp") {
-		t.Errorf("groupNamesSent = %v, want Tmp forgotten after the refusal", m.groupNamesSent[""])
-	}
-}
-
-// A refused create leaves nothing on the daemon, so a later op on that name
-// is not aimed there.
-func TestUpdate_RefusedCreate_ForgetsTheSentName(t *testing.T) {
-	m, conn := connectedTestModelCapturingSends(t)
-	m = updateWith(t, m, sharedFrame("r", 1, "proj-1", ""))
-	runCmd(m.sendGroupOpEverywhere(ipc.GroupOpCreate, "Tmp", ""))
-	id := conn.lastSent().ID
-	m = updateWith(t, m, sharedOpRespMsg{dest: "", id: id, resp: ipc.OpRespPayload{OK: false, Error: "create: too many groups"}})
-	runCmd(m.sendGroupOpEverywhere(ipc.GroupOpDelete, "Tmp", ""))
-	if n := countSent(conn, ipc.MsgGroupOp); n != 1 {
-		t.Errorf("group_op sent %d times, want only the refused create", n)
+	okID := lastSent(t, conn, ipc.MsgSetProjectGroup).ID
+	runCmd(m.sendSetProjectGroup("", "proj-gone", "Tmp"))
+	refusedID := lastSent(t, conn, ipc.MsgSetProjectGroup).ID
+	m = updateWith(t, m, sharedOpRespMsg{dest: "", id: okID, resp: ipc.OpRespPayload{OK: true}})
+	m = updateWith(t, m, sharedOpRespMsg{dest: "", id: refusedID, resp: ipc.OpRespPayload{OK: false, Error: "set group: no such project"}})
+	runCmd(m.sendGroupOpEverywhere(ipc.GroupOpRename, "Tmp", "Tmp2"))
+	ops := groupOpsSent(t, conn)
+	if len(ops) != 1 || ops[0].Op != ipc.GroupOpRename || ops[0].Name != "Tmp" {
+		t.Errorf("group_ops = %+v, want the rename of Tmp", ops)
 	}
 }
 

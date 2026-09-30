@@ -25,13 +25,6 @@ import (
 type pendingGroupOp struct {
 	dest string
 	what string
-	// group is the group_op this id carried, nil for set_project_group: a
-	// refusal undoes what it recorded in groupNamesSent.
-	group *ipc.GroupOpPayload
-	// assignGroup is the group a set_project_group named (it creates the
-	// group on the daemon when missing); a refusal forgets it in
-	// groupNamesSent unless the daemon lists it.
-	assignGroup string
 }
 
 // sharedOpRespMsg is a project_op_resp/group_op_resp for an id this client
@@ -237,14 +230,7 @@ func (m *Model) sendSharedOp(dest, msgType string, payload any, what string) tea
 	if m.pendingGroupOps == nil {
 		m.pendingGroupOps = map[string]pendingGroupOp{}
 	}
-	op := pendingGroupOp{dest: dest, what: what}
-	if g, ok := payload.(ipc.GroupOpPayload); ok {
-		op.group = &g
-	}
-	if a, ok := payload.(ipc.SetProjectGroupPayload); ok {
-		op.assignGroup = a.Group
-	}
-	m.pendingGroupOps[msg.ID] = op
+	m.pendingGroupOps[msg.ID] = pendingGroupOp{dest: dest, what: what}
 	if err := m.sendForDestStrict(dest, msg); err != nil {
 		delete(m.pendingGroupOps, msg.ID)
 		m.setFlash(fmt.Sprintf("%s: %s not sent — %v", hostLabel(dest), what, err))
@@ -280,9 +266,12 @@ func (m *Model) sendGroupOp(dest, op, name, newName string) tea.Cmd {
 // frames, so a name just created or renamed to is not in it until the next
 // frame; a rename or delete of that name made before then must still go to
 // that destination, after the op that made it (sends to one daemon stay in
-// order). A delete, or a rename away, removes the name again. An entry that
-// outlives its group (another client deleted it) only sends one more op the
-// daemon refuses; it is never used to show or delete a group.
+// order). A delete, or a rename away, removes the name again. A REFUSAL
+// removes nothing: another op still in flight (or already answered) may have
+// created the same name, and the answers cannot tell which one did. So a
+// wrong entry only ever ADDS a target — one more op the daemon refuses, with
+// a flash — never drops one, which would lose the user's edit silently. It is
+// never used to show or delete a group.
 func (m *Model) recordGroupNameSent(dest, op, name, newName string) {
 	if m.groupNamesSent == nil {
 		m.groupNamesSent = map[string][]string{}
@@ -303,19 +292,6 @@ func (m *Model) recordGroupNameSent(dest, op, name, newName string) {
 		add(newName)
 	case ipc.GroupOpDelete:
 		drop(name)
-	}
-}
-
-// undoGroupNameSent reverses recordGroupNameSent for an op the daemon
-// refused: the daemon still holds what it held before it.
-func (m *Model) undoGroupNameSent(dest string, g ipc.GroupOpPayload) {
-	switch g.Op {
-	case ipc.GroupOpCreate:
-		m.recordGroupNameSent(dest, ipc.GroupOpDelete, g.Name, "")
-	case ipc.GroupOpRename:
-		m.recordGroupNameSent(dest, ipc.GroupOpRename, g.NewName, g.Name)
-	case ipc.GroupOpDelete:
-		m.recordGroupNameSent(dest, ipc.GroupOpCreate, g.Name, "")
 	}
 }
 
@@ -373,12 +349,6 @@ func (m *Model) applySharedOpResp(msg sharedOpRespMsg) tea.Cmd {
 	delete(m.pendingGroupOps, msg.id)
 	if msg.resp.OK {
 		return nil
-	}
-	if op.group != nil {
-		m.undoGroupNameSent(op.dest, *op.group)
-	}
-	if op.assignGroup != "" && !containsFold(m.daemonGroups[op.dest], op.assignGroup) {
-		m.recordGroupNameSent(op.dest, ipc.GroupOpDelete, op.assignGroup, "")
 	}
 	// Filed against the destination the request went to (pendingGroupOps),
 	// never the answer's own Origin: the id is what this client minted.

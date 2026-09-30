@@ -18,6 +18,11 @@ import (
 // noteMu across the version check AND the file write, so two saves from one
 // base cannot both apply. PluginMu is never taken here.
 
+// maxPersistedNoteRev is the largest note_rev restore accepts from
+// workspace.json: the JSON decode yields a float64, which holds every integer
+// only up to 2^53.
+const maxPersistedNoteRev = 1 << 53
+
 func (d *Daemon) handleNoteGet(conn *ipc.Conn, msg *ipc.Message) {
 	var p ipc.NoteGetPayload
 	if err := msg.DecodePayload(&p); err != nil {

@@ -145,12 +145,16 @@ func (sm *SessionManager) GroupOp(op, name, newName string) error {
 }
 
 // SharedSnapshot returns COPIES of the group list and the recent-folder list.
-// A separate RLock from SnapshotState, taken only after that one has
-// returned — never nested inside it (the oscillation hazard SnapshotState's
-// doc comment names).
+// Never for building a state frame: a frame needs the lists and the projects
+// from one hold, which is SnapshotView.
 func (sm *SessionManager) SharedSnapshot() (groups, recent []string) {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
+	return sm.sharedLocked()
+}
+
+// sharedLocked copies the two lists. Caller holds sm.mu.
+func (sm *SessionManager) sharedLocked() (groups, recent []string) {
 	if len(sm.groups) > 0 {
 		groups = append([]string(nil), sm.groups...)
 	}
@@ -241,7 +245,7 @@ func (d *Daemon) handleSetProjectGroup(conn *ipc.Conn, msg *ipc.Message) {
 		return
 	}
 	if err := d.session.SetProjectGroup(p.ProjectID, p.Group); err != nil {
-		log.Printf("set project group %s %q: %v", p.ProjectID, p.Group, err)
+		log.Printf("set project group %q %q: %v", p.ProjectID, p.Group, err)
 		answerOp(conn, msg, ipc.MsgProjectOpResp, p.ProjectID, false, err.Error())
 		return
 	}
@@ -257,7 +261,7 @@ func (d *Daemon) handleGroupOp(conn *ipc.Conn, msg *ipc.Message) {
 		return
 	}
 	if err := d.session.GroupOp(p.Op, p.Name, p.NewName); err != nil {
-		log.Printf("group op %s %q→%q: %v", p.Op, p.Name, p.NewName, err)
+		log.Printf("group op %q %q→%q: %v", p.Op, p.Name, p.NewName, err)
 		answerOp(conn, msg, ipc.MsgGroupOpResp, p.Name, false, fmt.Sprintf("%s: %v", p.Op, err))
 		return
 	}

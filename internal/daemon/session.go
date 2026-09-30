@@ -1267,6 +1267,39 @@ func (sm *SessionManager) RestoreProjects(projects []*Project, activeProject str
 func (sm *SessionManager) SnapshotState() (activeTab string, tabs []*Tab, panesByTab map[string][]*Pane, projects []Project, activeProject string) {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
+	return sm.snapshotStateLocked()
+}
+
+// sessionView is one consistent read of everything a workspace-state frame
+// and workspace.json take from the session: SnapshotState's five values plus
+// the group and recent-folder lists.
+type sessionView struct {
+	activeTab     string
+	tabs          []*Tab
+	panesByTab    map[string][]*Pane
+	projects      []Project
+	activeProject string
+	groups        []string
+	recent        []string
+}
+
+// SnapshotView is SnapshotState plus the shared lists, all under ONE sm.mu
+// hold. The frame builders read only this. With the lists taken in a second
+// hold, a rename landing between the two sent a frame whose projects named
+// the old group while its list held only the new one — and every client
+// then kept an empty group under the old name for good, since that name
+// vanished from a list in a frame that still used it.
+func (sm *SessionManager) SnapshotView() sessionView {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	var v sessionView
+	v.activeTab, v.tabs, v.panesByTab, v.projects, v.activeProject = sm.snapshotStateLocked()
+	v.groups, v.recent = sm.sharedLocked()
+	return v
+}
+
+// snapshotStateLocked is SnapshotState's body. Caller holds sm.mu.
+func (sm *SessionManager) snapshotStateLocked() (activeTab string, tabs []*Tab, panesByTab map[string][]*Pane, projects []Project, activeProject string) {
 	activeTab = sm.activeTab
 	tabs = make([]*Tab, 0, len(sm.tabOrder))
 	panesByTab = make(map[string][]*Pane)

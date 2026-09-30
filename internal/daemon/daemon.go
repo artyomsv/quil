@@ -704,9 +704,10 @@ func (d *Daemon) snapshot() {
 	// allowed a pane create/destroy between the two calls to slip through
 	// — the workspace.json said N panes while the buffer flush iterated
 	// N±1, surfacing as the "snapshot pane count oscillation" bug.
-	activeTab, tabs, panesByTab, projects, activeProject := d.session.SnapshotState()
-	state := d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab, projects, activeProject, false)
-	// Written here explicitly, because workspaceStateFromSnapshot leaves it out
+	view := d.session.SnapshotView()
+	tabs, panesByTab := view.tabs, view.panesByTab
+	state := d.workspaceStateFromView(view, false)
+	// Written here explicitly, because workspaceStateFromView leaves it out
 	// (the broadcast adds its own in buildWorkspaceState): restoreWorkspace
 	// turns it into a short reservation so the previous size master gets its
 	// slot back after a restart, and the reattach resizes nothing.
@@ -1038,6 +1039,16 @@ func (d *Daemon) restoreWorkspace() error {
 				// means the local TUI kept a note for this daemon's own pane:
 				// adopt it as rev 1 so it is served rather than shadowed.
 				noteRev, hasNoteRev := paneData["note_rev"].(float64)
+				// A corrupt value (negative, NaN) reads as absent: converting it
+				// to uint64 is undefined. A huge one is capped for the same
+				// reason; the cap still outranks any revision a client can have
+				// seen.
+				if noteRev < 0 || noteRev != noteRev {
+					noteRev, hasNoteRev = 0, false
+				}
+				if noteRev > maxPersistedNoteRev {
+					noteRev = maxPersistedNoteRev
+				}
 				if !hasNoteRev && noteFileExists(paneID) {
 					noteRev = 1
 				}
@@ -2769,8 +2780,10 @@ func (d *Daemon) handleCreatePane(conn *ipc.Conn, msg *ipc.Message) {
 	// broadcast would put one client's failure in front of every other client
 	// while giving the requester nothing correlatable to unwind with.
 	if payload.Worktree != nil {
-		d.recordRequestedCWD(payload.CWD)
 		go func() {
+			// On the worker too: recording stats the directory, which can take
+			// up to spawnDirProbeTimeout on a dead mount.
+			d.recordRequestedCWD(payload.CWD)
 			respondTo(conn, msg.ID, ipc.MsgCreatePaneResp, d.worktreeAddAndCreate(payload))
 		}()
 		return
@@ -4680,7 +4693,7 @@ func (d *Daemon) broadcastState() {
 // The rule this depends on: NEVER call buildWorkspaceState or broadcastState
 // while holding sm.mu, a pane's PluginMu or spawnMu, gitCache's lock,
 // clients.mu, or the update-info lock — this function takes every one of
-// them (through SnapshotState, masterID, clientCount, currentUpdateInfo), so
+// them (through SnapshotView, masterID, clientCount, currentUpdateInfo), so
 // a caller already holding one would self-deadlock. One known pre-existing
 // path violates this — lazy restore's spawnPane, on the sandbox sign-in
 // announce, calls broadcastState while still holding the pane's own
@@ -4689,8 +4702,7 @@ func (d *Daemon) buildWorkspaceState() ipc.WorkspaceState {
 	d.stateMu.Lock()
 	defer d.stateMu.Unlock()
 
-	activeTab, tabs, panesByTab, projects, activeProject := d.session.SnapshotState()
-	state := d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab, projects, activeProject, true)
+	state := d.workspaceStateFromView(d.session.SnapshotView(), true)
 	// Broadcast-only (never persisted): announced newer release, if any.
 	if info := d.currentUpdateInfo(); info != nil {
 		state.Update = info
@@ -5076,16 +5088,24 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 		})
 	}
 
-	groups, recent := d.session.SharedSnapshot()
 	return ipc.WorkspaceState{
 		ActiveTab:     activeTab,
 		Tabs:          tabList,
 		Panes:         paneList,
 		Projects:      projectList,
 		ActiveProject: activeProject,
-		Groups:        groups,
-		RecentCWDs:    recent,
 	}
+}
+
+// workspaceStateFromView is the one builder buildWorkspaceState and
+// snapshot() share: workspaceStateFromSnapshot plus the group and recent
+// lists, all from the SAME SnapshotView — see its doc comment for the torn
+// frame a second read produced.
+func (d *Daemon) workspaceStateFromView(v sessionView, includeOverlays bool) ipc.WorkspaceState {
+	state := d.workspaceStateFromSnapshot(v.activeTab, v.tabs, v.panesByTab, v.projects, v.activeProject, includeOverlays)
+	state.Groups = v.groups
+	state.RecentCWDs = v.recent
+	return state
 }
 
 // transcriptExistsFn probes an ABSOLUTE transcript path recorded by the hook.

@@ -117,6 +117,22 @@ func TestUpdate_NoteResp_LoadsTextAndRev(t *testing.T) {
 	}
 }
 
+// Request ids are this client's counter, so another connected host can send
+// an answer with the id the editor waits for. It must change nothing, and the
+// editor's own host's answer must still load after it.
+func TestUpdate_NoteResp_FromAnotherDestIsIgnored(t *testing.T) {
+	m, conn := notesTestModel(t)
+	id := lastSent(t, conn, ipc.MsgNoteGet).ID
+	m = updateWith(t, m, noteRespMsg{dest: "hostA", id: id, resp: ipc.NoteRespPayload{PaneID: "tab-proj-1-pane", Text: "foreign\n", Rev: 7}})
+	if !m.notesEditor.Loading() || m.noteLoadID != id {
+		t.Fatalf("a foreign answer was taken: loading=%v loadID=%q content=%q", m.notesEditor.Loading(), m.noteLoadID, m.notesEditor.Content())
+	}
+	m = updateWith(t, m, noteRespMsg{dest: "", id: id, resp: ipc.NoteRespPayload{PaneID: "tab-proj-1-pane", Text: "mine\n", Rev: 2}})
+	if m.notesEditor.Loading() || m.notesEditor.Content() != "mine\n" || m.notesEditor.Rev() != 2 {
+		t.Errorf("own answer after a foreign one: loading=%v rev=%d content=%q", m.notesEditor.Loading(), m.notesEditor.Rev(), m.notesEditor.Content())
+	}
+}
+
 func TestUpdate_NoteLoadTimeout_MakesEditorReadOnly(t *testing.T) {
 	m, conn := notesTestModel(t)
 	id := lastSent(t, conn, ipc.MsgNoteGet).ID

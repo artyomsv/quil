@@ -336,6 +336,73 @@ func TestUpdate_OptimisticRename_InFlightFrameKeepsTheNewNamesSlot(t *testing.T)
 	}
 }
 
+// groupOpsSent decodes every group_op sent on conn, in order.
+func groupOpsSent(t *testing.T, conn *fakeConn) []ipc.GroupOpPayload {
+	t.Helper()
+	conn.mu.Lock()
+	defer conn.mu.Unlock()
+	var out []ipc.GroupOpPayload
+	for _, msg := range conn.sent {
+		if msg.Type != ipc.MsgGroupOp {
+			continue
+		}
+		var p ipc.GroupOpPayload
+		if err := msg.DecodePayload(&p); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+func commitRename(t *testing.T, m Model, from, to string) Model {
+	t.Helper()
+	m.beginGroupEdit(groupEditState{mode: groupEditRename, target: from, input: to})
+	out, cmd := m.commitGroupEdit()
+	runCmd(cmd)
+	return out.(Model)
+}
+
+// A second rename made before the frame of the first reaches the daemon: its
+// list still says A, but the op for B goes to the daemon the first went to.
+func TestCommitGroupEdit_RenameTwiceBeforeTheFrame_SendsBoth(t *testing.T) {
+	m, conn := connectedTestModelCapturingSends(t)
+	m = updateWith(t, m, sharedFrame("r", 1, "proj-1", "A", "A"))
+	m = commitRename(t, m, "A", "B")
+	m = commitRename(t, m, "B", "C")
+	ops := groupOpsSent(t, conn)
+	if len(ops) != 2 || ops[0].Name != "A" || ops[0].NewName != "B" || ops[1].Name != "B" || ops[1].NewName != "C" {
+		t.Fatalf("group_ops = %+v, want rename A→B then B→C", ops)
+	}
+}
+
+// Create and delete before the create's frame: the delete must reach the
+// daemon too, or the group comes back with the next frame.
+func TestSendGroupOpEverywhere_CreateThenDeleteBeforeTheFrame_SendsBoth(t *testing.T) {
+	m, conn := connectedTestModelCapturingSends(t)
+	m = updateWith(t, m, sharedFrame("r", 1, "proj-1", ""))
+	runCmd(m.sendGroupOpEverywhere(ipc.GroupOpCreate, "Tmp", ""))
+	runCmd(m.sendGroupOpEverywhere(ipc.GroupOpDelete, "Tmp", ""))
+	ops := groupOpsSent(t, conn)
+	if len(ops) != 2 || ops[0].Op != ipc.GroupOpCreate || ops[1].Op != ipc.GroupOpDelete || ops[1].Name != "Tmp" {
+		t.Fatalf("group_ops = %+v, want create then delete of Tmp", ops)
+	}
+}
+
+// A refused create leaves nothing on the daemon, so a later op on that name
+// is not aimed there.
+func TestUpdate_RefusedCreate_ForgetsTheSentName(t *testing.T) {
+	m, conn := connectedTestModelCapturingSends(t)
+	m = updateWith(t, m, sharedFrame("r", 1, "proj-1", ""))
+	runCmd(m.sendGroupOpEverywhere(ipc.GroupOpCreate, "Tmp", ""))
+	id := conn.lastSent().ID
+	m = updateWith(t, m, sharedOpRespMsg{dest: "", id: id, resp: ipc.OpRespPayload{OK: false, Error: "create: too many groups"}})
+	runCmd(m.sendGroupOpEverywhere(ipc.GroupOpDelete, "Tmp", ""))
+	if n := countSent(conn, ipc.MsgGroupOp); n != 1 {
+		t.Errorf("group_op sent %d times, want only the refused create", n)
+	}
+}
+
 func TestMoveProjectToGroup_SharedDest_SendsIDBearingSetProjectGroup(t *testing.T) {
 	m, conn := connectedTestModelCapturingSends(t)
 	m = updateWith(t, m, sharedFrame("r", 1, "proj-1", "", "Infra"))

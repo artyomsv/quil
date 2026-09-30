@@ -119,7 +119,10 @@ func (m *Model) reloadNote() tea.Cmd {
 
 func (m *Model) applyNoteResp(msg noteRespMsg) {
 	ed := m.notesEditor
-	if ed == nil || !ed.Remote() || msg.id == "" || msg.id != m.noteLoadID {
+	// An answer from a daemon other than the editor's is not the answer: ids
+	// are this client's counter, so another host can hold a matching one. It
+	// must not take the load id, or the real answer is dropped after it.
+	if ed == nil || !ed.Remote() || msg.id == "" || msg.id != m.noteLoadID || msg.dest != ed.Dest() {
 		return
 	}
 	// The confirmed reload discards only the buffer the user confirmed on, and

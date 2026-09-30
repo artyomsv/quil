@@ -248,6 +248,10 @@ func (m *Model) disconnectDest(dest string) {
 	// Its in-flight import can no longer be answered either; re-adding the
 	// host in this session sends it again on the first shared frame.
 	m.forgetImportFor(dest)
+	// Its pane ids are no longer known; re-added, it must send a frame again
+	// before another destination's notes wait no longer for it.
+	delete(m.paneInventory, dest)
+	delete(m.groupNamesSent, dest)
 	var conn Client
 	if r, ok := m.client.(*Router); ok {
 		conn = r.Conn(dest)

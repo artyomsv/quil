@@ -25,6 +25,9 @@ import (
 type pendingGroupOp struct {
 	dest string
 	what string
+	// group is the group_op this id carried, nil for set_project_group: a
+	// refusal undoes what it recorded in groupNamesSent.
+	group *ipc.GroupOpPayload
 }
 
 // sharedOpRespMsg is a project_op_resp/group_op_resp for an id this client
@@ -230,7 +233,11 @@ func (m *Model) sendSharedOp(dest, msgType string, payload any, what string) tea
 	if m.pendingGroupOps == nil {
 		m.pendingGroupOps = map[string]pendingGroupOp{}
 	}
-	m.pendingGroupOps[msg.ID] = pendingGroupOp{dest: dest, what: what}
+	op := pendingGroupOp{dest: dest, what: what}
+	if g, ok := payload.(ipc.GroupOpPayload); ok {
+		op.group = &g
+	}
+	m.pendingGroupOps[msg.ID] = op
 	if err := m.sendForDestStrict(dest, msg); err != nil {
 		delete(m.pendingGroupOps, msg.ID)
 		m.setFlash(fmt.Sprintf("%s: %s not sent — %v", hostLabel(dest), what, err))
@@ -252,7 +259,52 @@ func (m *Model) sendGroupOp(dest, op, name, newName string) tea.Cmd {
 	if !m.sharedData[dest] {
 		return nil
 	}
+	m.recordGroupNameSent(dest, op, name, newName)
 	return m.sendSharedOp(dest, ipc.MsgGroupOp, ipc.GroupOpPayload{Op: op, Name: name, NewName: newName}, op+" group")
+}
+
+// recordGroupNameSent keeps, per destination, the group names this client's
+// own create and rename sends put there. A daemon's list comes only from its
+// frames, so a name just created or renamed to is not in it until the next
+// frame; a rename or delete of that name made before then must still go to
+// that destination, after the op that made it (sends to one daemon stay in
+// order). A delete, or a rename away, removes the name again. An entry that
+// outlives its group (another client deleted it) only sends one more op the
+// daemon refuses; it is never used to show or delete a group.
+func (m *Model) recordGroupNameSent(dest, op, name, newName string) {
+	if m.groupNamesSent == nil {
+		m.groupNamesSent = map[string][]string{}
+	}
+	drop := func(n string) {
+		m.groupNamesSent[dest] = slices.DeleteFunc(m.groupNamesSent[dest], func(s string) bool { return strings.EqualFold(s, n) })
+	}
+	add := func(n string) {
+		if !containsFold(m.groupNamesSent[dest], n) {
+			m.groupNamesSent[dest] = append(m.groupNamesSent[dest], n)
+		}
+	}
+	switch op {
+	case ipc.GroupOpCreate:
+		add(name)
+	case ipc.GroupOpRename:
+		drop(name)
+		add(newName)
+	case ipc.GroupOpDelete:
+		drop(name)
+	}
+}
+
+// undoGroupNameSent reverses recordGroupNameSent for an op the daemon
+// refused: the daemon still holds what it held before it.
+func (m *Model) undoGroupNameSent(dest string, g ipc.GroupOpPayload) {
+	switch g.Op {
+	case ipc.GroupOpCreate:
+		m.recordGroupNameSent(dest, ipc.GroupOpDelete, g.Name, "")
+	case ipc.GroupOpRename:
+		m.recordGroupNameSent(dest, ipc.GroupOpRename, g.NewName, g.Name)
+	case ipc.GroupOpDelete:
+		m.recordGroupNameSent(dest, ipc.GroupOpCreate, g.Name, "")
+	}
 }
 
 // sendGroupOpEverywhere fans a rename or delete out to every shared
@@ -280,6 +332,13 @@ func (m *Model) sendGroupOpEverywhere(op, name, newName string) tea.Cmd {
 			targets = append(targets, d)
 		}
 	}
+	// A name this client created or renamed to is not in the daemon's list
+	// until its next frame; the op still goes there, after the first.
+	for _, d := range m.sharedDestsInOrder() {
+		if containsFold(m.groupNamesSent[d], name) && !slices.Contains(targets, d) {
+			targets = append(targets, d)
+		}
+	}
 	var cmds []tea.Cmd
 	for _, dest := range targets {
 		if !m.destConnected(dest) {
@@ -302,6 +361,9 @@ func (m *Model) applySharedOpResp(msg sharedOpRespMsg) tea.Cmd {
 	delete(m.pendingGroupOps, msg.id)
 	if msg.resp.OK {
 		return nil
+	}
+	if op.group != nil {
+		m.undoGroupNameSent(op.dest, *op.group)
 	}
 	// Filed against the destination the request went to (pendingGroupOps),
 	// never the answer's own Origin: the id is what this client minted.

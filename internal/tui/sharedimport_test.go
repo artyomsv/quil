@@ -127,6 +127,32 @@ func TestUpdate_Import_AnswerAfterTimeout_StillSetsTheMarker(t *testing.T) {
 	}
 }
 
+// Another TUI window on this machine writes the same marker. A flag it set
+// while this window's import was in flight stays set, even when this
+// window's own answer would leave that kind pending.
+func TestUpdate_ImportResp_KeepsAFlagAnotherWindowSet(t *testing.T) {
+	m, _, remote := importTestModel(t)
+	m = updateNoWait(t, m, sharedFrame("r", 1, "proj-1", ""))
+	rf := sharedFrame("q", 1, "proj-2", "")
+	rf.Dest = "hostA"
+	m = updateNoWait(t, m, rf)
+	_, id := importPayload(t, remote)
+	key := config.DestFileKey("hostA")
+	mk := loadImportMarker(config.SharedImportPath())
+	mk.Dests[key] = importMarkerKinds{Notes: true}
+	if err := saveImportMarker(config.SharedImportPath(), mk); err != nil {
+		t.Fatal(err)
+	}
+	p := m.pendingImports[id]
+	p.notesDeferred = true // this window's own notes did not all fit
+	m.pendingImports[id] = p
+	all := []string{ipc.ImportKindGroups, ipc.ImportKindRecent, ipc.ImportKindNotes}
+	m = updateNoWait(t, m, sharedImportRespMsg{dest: "hostA", id: id, resp: ipc.SharedImportRespPayload{Answered: all}})
+	if k := loadImportMarker(config.SharedImportPath()).Dests[key]; !k.Groups || !k.Recent || !k.Notes {
+		t.Errorf("marker = %+v, want every flag set (notes by the other window)", k)
+	}
+}
+
 // An answer arriving from a daemon other than the one asked settles nothing.
 func TestUpdate_ImportResp_FromAnotherDestination_IsIgnored(t *testing.T) {
 	m, local, _ := importTestModel(t)
@@ -177,6 +203,47 @@ func TestUpdate_Import_AmbiguousPaneIDIsSkippedAndKept(t *testing.T) {
 	var file projectGroupsFile
 	if err := json.Unmarshal(saved, &file); err != nil || len(file.Groups) != 2 {
 		t.Errorf("project-groups.json changed shape: %s", saved)
+	}
+}
+
+// The same check with the frames in the other order. The remote frame comes
+// first, while the local daemon's pane ids are not known yet: its import goes
+// without notes, and the notes follow once the local frame shows which ids are
+// ambiguous.
+func TestUpdate_Import_RemoteFrameFirst_NotesWaitForTheOtherInventory(t *testing.T) {
+	m, _, remote := importTestModel(t)
+	for id, text := range map[string]string{"pane-shared": "ambiguous\n", "pane-only": "mine\n"} {
+		if err := persist.SaveNotes(config.NotesDir(), id, text); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rf := sharedFrame("q", 1, "proj-2", "")
+	rf.Dest = "hostA"
+	rf.Panes = append(rf.Panes, PaneInfo{ID: "pane-shared", TabID: "tab-proj-2", Type: "terminal"},
+		PaneInfo{ID: "pane-only", TabID: "tab-proj-2", Type: "terminal"})
+	rf.Tabs[0].Panes = append(rf.Tabs[0].Panes, "pane-shared", "pane-only")
+	m = updateNoWait(t, m, rf)
+	first, _ := importPayload(t, remote)
+	if strings.Join(first.Kinds, ",") != "groups,recent" || len(first.Notes) != 0 {
+		t.Fatalf("first import kinds = %v notes = %+v; notes must wait for the local pane ids", first.Kinds, first.Notes)
+	}
+	localFrame := sharedFrame("r", 1, "proj-1", "")
+	localFrame.Panes = append(localFrame.Panes, PaneInfo{ID: "pane-shared", TabID: "tab-proj-1", Type: "terminal"})
+	localFrame.Tabs[0].Panes = append(localFrame.Tabs[0].Panes, "pane-shared")
+	m = updateNoWait(t, m, localFrame)
+	if n := countSent(remote, ipc.MsgSharedImport); n != 2 {
+		t.Fatalf("imports sent to hostA = %d, want 2 (the notes follow)", n)
+	}
+	second, _ := importPayload(t, remote)
+	if strings.Join(second.Kinds, ",") != "notes" {
+		t.Errorf("second import kinds = %v, want notes only", second.Kinds)
+	}
+	if len(second.Notes) != 1 || second.Notes[0].PaneID != "pane-only" {
+		t.Errorf("notes = %+v, want only pane-only (pane-shared is on both daemons)", second.Notes)
+	}
+	m = updateNoWait(t, m, localFrame)
+	if n := countSent(remote, ipc.MsgSharedImport); n != 2 {
+		t.Errorf("imports sent to hostA = %d after another frame, want still 2", n)
 	}
 }
 
@@ -455,6 +522,7 @@ func TestUpdate_ImportNotesDeferredByBudget_NextLaunchSendsTheNotesKind(t *testi
 		rf.Panes = append(rf.Panes, PaneInfo{ID: id, TabID: "tab-proj-2", Type: "terminal"})
 		rf.Tabs[0].Panes = append(rf.Tabs[0].Panes, id)
 	}
+	m = updateNoWait(t, m, sharedFrame("r", 1, "proj-1", "")) // the local pane ids come first
 	m = updateNoWait(t, m, rf)
 	p, id := importPayload(t, remote)
 	if len(p.Notes) == 0 || len(p.Notes) >= n {
@@ -469,6 +537,7 @@ func TestUpdate_ImportNotesDeferredByBudget_NextLaunchSendsTheNotesKind(t *testi
 
 	next, _, remote2 := twoDestModel(t)
 	next.SetSharedImportMarker(config.SharedImportPath())
+	next = updateNoWait(t, next, sharedFrame("r", 1, "proj-1", ""))
 	next = updateNoWait(t, next, rf)
 	p2, _ := importPayload(t, remote2)
 	if strings.Join(p2.Kinds, ",") != ipc.ImportKindNotes || len(p2.Notes) == 0 {
@@ -594,6 +663,7 @@ func TestUpdate_DeferredNotes_NextLaunchSendsTheRestNotTheFirstBatch(t *testing.
 		rf.Panes = append(rf.Panes, PaneInfo{ID: id, TabID: "tab-proj-2", Type: "terminal"})
 		rf.Tabs[0].Panes = append(rf.Tabs[0].Panes, id)
 	}
+	m = updateNoWait(t, m, sharedFrame("r", 1, "proj-1", "")) // the local pane ids come first
 	m = updateNoWait(t, m, rf)
 	p, id := importPayload(t, remote)
 	sent1 := map[string]bool{}
@@ -616,6 +686,7 @@ func TestUpdate_DeferredNotes_NextLaunchSendsTheRestNotTheFirstBatch(t *testing.
 	}
 	next, _, remote2 := twoDestModel(t)
 	next.SetSharedImportMarker(config.SharedImportPath())
+	next = updateNoWait(t, next, sharedFrame("r", 1, "proj-1", ""))
 	next = updateNoWait(t, next, rf2)
 	p2, id2 := importPayload(t, remote2)
 	if len(p2.Notes) != n-len(sent1) {

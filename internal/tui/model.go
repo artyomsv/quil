@@ -1091,6 +1091,10 @@ type Model struct {
 	// pendingGroupOps correlates an id-bearing set_project_group/group_op with
 	// the host it went to, so a refusal can be flashed naming it.
 	pendingGroupOps map[string]pendingGroupOp
+	// groupNamesSent: per destination, the group names this client's own
+	// create/rename sends put there (recordGroupNameSent) — the targets of a
+	// follow-up rename or delete made before that daemon's next frame.
+	groupNamesSent map[string][]string
 	// One-time import (sharedimport.go): "" = off; asked once per destination
 	// per connection (a lost link or an error reply asks again); id → the
 	// pending request for the answer; groupsImported = the destinations whose
@@ -1098,8 +1102,14 @@ type Model struct {
 	// sends and makes the frame authoritative; deferredGroupOps = the group
 	// sends held until then, replayed in order on the answer; importNames =
 	// the group names each unanswered daemon will list once they land;
-	// importErrors = error replies per destination this session.
+	// importErrors = error replies per destination this session;
+	// paneInventory = the destinations whose workspace frame was applied at
+	// least once while connected, so their pane ids are known; notesWaiting =
+	// the destinations whose notes import waits for another destination's
+	// pane ids, with the panes of their own first frame.
 	importMarkerPath string
+	paneInventory    map[string]bool
+	notesWaiting     map[string][]PaneInfo
 	importAsked      map[string]bool
 	pendingImports   map[string]pendingImport
 	groupsImported   map[string]bool
@@ -3042,9 +3052,10 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		// runs, then either delete or demote them to logger.Debug.
 		log.Printf("WorkspaceState: %d tabs, %d panes", len(msg.Tabs), len(msg.Panes))
 		newPaneIDs, overlayResizeCmds := m.applyWorkspaceState(msg, msg.Dest)
+		m.notePaneInventory(msg.Dest)
 		// The import needs this frame's panes (applied above) and must record
 		// a groups answer from the marker before the merge below reads it.
-		importCmd := tea.Batch(m.settleCappedImport(msg.Dest), m.maybeImport(msg))
+		importCmd := tea.Batch(m.settleCappedImport(msg.Dest), m.maybeImport(msg), m.sendWaitingNotes())
 		// After the merge, and only here: this arm is reached only for a
 		// connected destination whose state arrived (the gate above).
 		groupsCmd := tea.Batch(m.pruneProjectGroupsFor(msg), m.rebuildGroupsView())

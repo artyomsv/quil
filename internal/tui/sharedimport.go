@@ -251,6 +251,7 @@ func (m *Model) forgetImportFor(dest string) {
 		}
 	}
 	delete(m.importAsked, dest)
+	delete(m.notesWaiting, dest) // the next frame's maybeImport decides again
 }
 
 // paneIDsByDest is every connected destination's live pane ids, from
@@ -324,12 +325,69 @@ func (m *Model) maybeImport(msg WorkspaceStateMsg) tea.Cmd {
 		want = append(want, ipc.ImportKindRecent)
 	}
 	if !kinds.Notes {
-		want = append(want, ipc.ImportKindNotes)
+		if m.paneInventoryMissing(msg.Dest) {
+			// A note file is sent only when its pane id is on this daemon and
+			// on no other one. Another connected daemon whose pane ids are not
+			// known yet could hold the same id, and a note sent now cannot be
+			// taken back. So the notes wait for that daemon's first frame
+			// (sendWaitingNotes); groups and recent folders go now.
+			if m.notesWaiting == nil {
+				m.notesWaiting = map[string][]PaneInfo{}
+			}
+			m.notesWaiting[msg.Dest] = msg.Panes
+			kinds.Notes = true // this request carries no notes
+		} else {
+			want = append(want, ipc.ImportKindNotes)
+		}
 	}
 	if len(want) == 0 {
 		return nil
 	}
-	dest := msg.Dest
+	return m.sendImport(msg.Dest, kinds, want, msg.Panes)
+}
+
+// notePaneInventory records that dest's pane ids are known: its workspace
+// frame was applied.
+func (m *Model) notePaneInventory(dest string) {
+	if m.paneInventory == nil {
+		m.paneInventory = map[string]bool{}
+	}
+	m.paneInventory[dest] = true
+}
+
+// paneInventoryMissing reports whether a connected destination other than
+// dest has not sent a workspace frame yet, so its pane ids are unknown.
+func (m *Model) paneInventoryMissing(dest string) bool {
+	for _, d := range m.knownDests() {
+		if d != dest && !m.paneInventory[d] {
+			return true
+		}
+	}
+	return false
+}
+
+// sendWaitingNotes sends the notes import of every destination that waited
+// for another destination's pane ids, once all of them are known. It runs on
+// every applied frame, after maybeImport.
+func (m *Model) sendWaitingNotes() tea.Cmd {
+	var cmds []tea.Cmd
+	for dest, panes := range m.notesWaiting {
+		if m.paneInventoryMissing(dest) {
+			continue
+		}
+		delete(m.notesWaiting, dest)
+		if !m.destConnected(dest) {
+			continue
+		}
+		cmds = append(cmds, m.sendImport(dest, importMarkerKinds{Groups: true, Recent: true}, []string{ipc.ImportKindNotes}, panes))
+	}
+	return tea.Batch(cmds...)
+}
+
+// sendImport sends one shared_import to dest for the kinds in want. kinds is
+// the marker's state: a kind already true there is not built into the
+// payload. panes is dest's pane list from its frame.
+func (m *Model) sendImport(dest string, kinds importMarkerKinds, want []string, panes []PaneInfo) tea.Cmd {
 	payload := ipc.SharedImportPayload{Kinds: want}
 	var groupsSnap projectGroups
 	if !kinds.Groups {
@@ -364,8 +422,8 @@ func (m *Model) maybeImport(msg WorkspaceStateMsg) tea.Cmd {
 		// deferred rest would never go, and it keeps a note deleted on the
 		// daemon from coming back. The others come from what this client
 		// holds of every other connected destination.
-		mine := make(map[string]bool, len(msg.Panes))
-		for _, p := range msg.Panes {
+		mine := make(map[string]bool, len(panes))
+		for _, p := range panes {
 			if p.NoteRev == 0 {
 				mine[p.ID] = true
 			}
@@ -469,6 +527,10 @@ func (m *Model) applySharedImportResp(msg sharedImportRespMsg) tea.Cmd {
 	}
 	dest := p.dest
 	delete(m.pendingImports, msg.id)
+	// Another TUI window on this machine writes the same marker. Reading it
+	// again right before the write, and only ever setting flags, keeps what
+	// that window recorded; a flag lost to a write in the same instant costs
+	// one repeated request, which the daemon answers without applying.
 	mk := loadImportMarker(m.importMarkerPath)
 	key := config.DestFileKey(dest)
 	kinds := mk.Dests[key]
@@ -483,7 +545,7 @@ func (m *Model) applySharedImportResp(msg sharedImportRespMsg) tea.Cmd {
 		case ipc.ImportKindNotes:
 			// Notes the budget left out are still pending: the next launch
 			// sends them (the daemon skips a pane that already has a note).
-			kinds.Notes = !p.notesDeferred
+			kinds.Notes = kinds.Notes || !p.notesDeferred
 		}
 	}
 	mk.Dests[key] = kinds

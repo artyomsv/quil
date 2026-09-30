@@ -8062,7 +8062,16 @@ func (m Model) renderStatusBar() string {
 }
 
 // flashDuration is how long a flash message stays in the status bar.
-const flashDuration = 3 * time.Second
+//
+// A var rather than a const purely so the test binary can shorten it, the
+// same reason browseTimeout is one: tea.Tick's Cmd blocks for its whole
+// duration, and the test helper that drains a tea.Batch (runCmd) runs its
+// children synchronously, so any test whose Update path reaches flashCmd —
+// dozens do, across dialogs, overlays, groups, notes and import — otherwise
+// sleeps the full three seconds for a timer it is not asserting on. It is
+// overridden ONCE, from TestMain — these tests run in parallel, so mutating
+// it mid-run would be a genuine data race.
+var flashDuration = 3 * time.Second
 
 // flashExpireMsg is sent by flashCmd when the flash timer fires.
 type flashExpireMsg struct{}

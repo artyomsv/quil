@@ -18,6 +18,14 @@ import (
 // DO exercise a timeout path call applyBrowseTimeout / applyGitScanTimeout
 // directly with an explicit key instead of waiting for a timer.
 //
+// flashDuration and notesTickInterval are the same shape but a different
+// cost curve: flashCmd is reached from dozens of ordinary Update paths
+// (dialogs, overlays, groups, notes, import), not just a handful of explicit
+// timeout tests, so leaving it at its real three seconds was the single
+// largest contributor to this package's -race time — three or six real
+// seconds (one or two flashes) per affected test, paid by any test whose Cmd
+// tree runCmd happens to walk into a flash.
+//
 // Done once, here, rather than per test: these tests use t.Parallel(), so
 // assigning to the package vars mid-run would be a data race that -race would
 // (correctly) fail on.
@@ -34,6 +42,10 @@ func TestMain(m *testing.M) {
 	noteLoadTimeout = 10 * time.Millisecond
 	noteQuitWait = 10 * time.Millisecond
 	sharedImportTimeout = 10 * time.Millisecond
+	flashDuration = 10 * time.Millisecond
+	notesTickInterval = 10 * time.Millisecond
+	worktreeScanTimeout = 10 * time.Millisecond
+	worktreeStatusTimeout = 10 * time.Millisecond
 
 	cleanupQuilHome := ensureIsolatedQuilHome()
 	code := m.Run()

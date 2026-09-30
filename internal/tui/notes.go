@@ -18,7 +18,13 @@ const notesDebounceWindow = 30 * time.Second
 
 // notesTickInterval is how often the model polls the notes editor to check
 // whether the debounce window has elapsed.
-const notesTickInterval = 5 * time.Second
+//
+// A var rather than a const for the reason flashDuration is one: a test
+// whose Update path opens notes mode arms notesTick(), and runCmd drains its
+// tea.Batch synchronously, so it would otherwise sleep the full five seconds
+// for a debounce check it is not asserting on. Overridden ONCE, from
+// TestMain.
+var notesTickInterval = 5 * time.Second
 
 // notesTickMsg triggers periodic debounce checks while notes mode is active.
 type notesTickMsg struct{}

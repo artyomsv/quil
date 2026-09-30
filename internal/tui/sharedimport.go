@@ -252,6 +252,9 @@ func (m *Model) forgetImportFor(dest string) {
 	}
 	delete(m.importAsked, dest)
 	delete(m.notesWaiting, dest) // the next frame's maybeImport decides again
+	// The pane ids came from the old connection. Until the new one sends a
+	// frame, another destination's notes wait for this one again.
+	delete(m.paneInventory, dest)
 }
 
 // paneIDsByDest is every connected destination's live pane ids, from
@@ -292,6 +295,10 @@ func (m *Model) paneIDsByDest() map[string]map[string]bool {
 // a Cmd runs on its own goroutine with no order against anything else, and
 // the import must be on the wire before any group send can follow it.
 func (m *Model) maybeImport(msg WorkspaceStateMsg) tea.Cmd {
+	if _, waiting := m.notesWaiting[msg.Dest]; waiting && msg.SharedData {
+		// The waiting notes import uses the newest pane list, not the first.
+		m.notesWaiting[msg.Dest] = msg.Panes
+	}
 	if !msg.SharedData || m.importMarkerPath == "" || m.importAsked[msg.Dest] {
 		return nil
 	}

@@ -247,6 +247,57 @@ func TestUpdate_Import_RemoteFrameFirst_NotesWaitForTheOtherInventory(t *testing
 	}
 }
 
+// A waiting notes import uses the pane list of the host's NEWEST frame: a
+// pane that appeared after its first frame still has its note sent.
+func TestUpdate_Import_WaitingNotesUseTheNewestPaneList(t *testing.T) {
+	m, _, remote := importTestModel(t)
+	if err := persist.SaveNotes(config.NotesDir(), "pane-late", "late\n"); err != nil {
+		t.Fatal(err)
+	}
+	rf := sharedFrame("q", 1, "proj-2", "")
+	rf.Dest = "hostA"
+	m = updateNoWait(t, m, rf)
+	rf2 := sharedFrame("q", 2, "proj-2", "")
+	rf2.Dest = "hostA"
+	rf2.Panes = append(rf2.Panes, PaneInfo{ID: "pane-late", TabID: "tab-proj-2", Type: "terminal"})
+	rf2.Tabs[0].Panes = append(rf2.Tabs[0].Panes, "pane-late")
+	m = updateNoWait(t, m, rf2)
+	m = updateNoWait(t, m, sharedFrame("r", 1, "proj-1", ""))
+	p, _ := importPayload(t, remote)
+	if strings.Join(p.Kinds, ",") != "notes" || len(p.Notes) != 1 || p.Notes[0].PaneID != "pane-late" {
+		t.Errorf("notes import = kinds %v notes %+v, want pane-late", p.Kinds, p.Notes)
+	}
+}
+
+// After a reattach the local daemon's old pane ids are not trusted: a remote
+// host's notes wait for the new connection's frame, which may show a pane id
+// the remote host also has.
+func TestUpdate_Import_ReattachForgetsThePaneInventory(t *testing.T) {
+	m, _, remote := importTestModel(t)
+	if err := persist.SaveNotes(config.NotesDir(), "pane-shared", "ambiguous\n"); err != nil {
+		t.Fatal(err)
+	}
+	m = updateNoWait(t, m, sharedFrame("r", 1, "proj-1", ""))
+	m.armReattachReset("")
+	rf := sharedFrame("q", 1, "proj-2", "")
+	rf.Dest = "hostA"
+	rf.Panes = append(rf.Panes, PaneInfo{ID: "pane-shared", TabID: "tab-proj-2", Type: "terminal"})
+	rf.Tabs[0].Panes = append(rf.Tabs[0].Panes, "pane-shared")
+	m = updateNoWait(t, m, rf)
+	first, _ := importPayload(t, remote)
+	if strings.Join(first.Kinds, ",") != "groups,recent" || len(first.Notes) != 0 {
+		t.Fatalf("import before the new local frame = kinds %v notes %+v; notes must wait", first.Kinds, first.Notes)
+	}
+	fresh := sharedFrame("r2", 1, "proj-1", "")
+	fresh.Panes = append(fresh.Panes, PaneInfo{ID: "pane-shared", TabID: "tab-proj-1", Type: "terminal"})
+	fresh.Tabs[0].Panes = append(fresh.Tabs[0].Panes, "pane-shared")
+	m = updateNoWait(t, m, fresh)
+	second, _ := importPayload(t, remote)
+	if strings.Join(second.Kinds, ",") != "notes" || len(second.Notes) != 0 {
+		t.Errorf("notes import = kinds %v notes %+v, want the ambiguous note left out", second.Kinds, second.Notes)
+	}
+}
+
 // The request budget counts each note as encoded: a note that fits alone but
 // not beside the others waits for the next launch.
 func TestCollectImportNotes_BudgetDefersTheRest(t *testing.T) {

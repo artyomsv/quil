@@ -28,6 +28,10 @@ type pendingGroupOp struct {
 	// group is the group_op this id carried, nil for set_project_group: a
 	// refusal undoes what it recorded in groupNamesSent.
 	group *ipc.GroupOpPayload
+	// assignGroup is the group a set_project_group named (it creates the
+	// group on the daemon when missing); a refusal forgets it in
+	// groupNamesSent unless the daemon lists it.
+	assignGroup string
 }
 
 // sharedOpRespMsg is a project_op_resp/group_op_resp for an id this client
@@ -237,6 +241,9 @@ func (m *Model) sendSharedOp(dest, msgType string, payload any, what string) tea
 	if g, ok := payload.(ipc.GroupOpPayload); ok {
 		op.group = &g
 	}
+	if a, ok := payload.(ipc.SetProjectGroupPayload); ok {
+		op.assignGroup = a.Group
+	}
 	m.pendingGroupOps[msg.ID] = op
 	if err := m.sendForDestStrict(dest, msg); err != nil {
 		delete(m.pendingGroupOps, msg.ID)
@@ -251,6 +258,11 @@ func (m *Model) sendSharedOp(dest, msgType string, payload any, what string) tea
 func (m *Model) sendSetProjectGroup(dest, projectID, group string) tea.Cmd {
 	if !m.sharedData[dest] {
 		return nil
+	}
+	// The daemon creates a group it does not have yet, so a name first
+	// named here is a create for the follow-up targets too.
+	if group != "" && !containsFold(m.daemonGroups[dest], group) {
+		m.recordGroupNameSent(dest, ipc.GroupOpCreate, group, "")
 	}
 	return m.sendSharedOp(dest, ipc.MsgSetProjectGroup, ipc.SetProjectGroupPayload{ProjectID: projectID, Group: group}, "group change")
 }
@@ -364,6 +376,9 @@ func (m *Model) applySharedOpResp(msg sharedOpRespMsg) tea.Cmd {
 	}
 	if op.group != nil {
 		m.undoGroupNameSent(op.dest, *op.group)
+	}
+	if op.assignGroup != "" && !containsFold(m.daemonGroups[op.dest], op.assignGroup) {
+		m.recordGroupNameSent(op.dest, ipc.GroupOpDelete, op.assignGroup, "")
 	}
 	// Filed against the destination the request went to (pendingGroupOps),
 	// never the answer's own Origin: the id is what this client minted.

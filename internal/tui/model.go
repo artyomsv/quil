@@ -1103,8 +1103,9 @@ type Model struct {
 	// sends held until then, replayed in order on the answer; importNames =
 	// the group names each unanswered daemon will list once they land;
 	// importErrors = error replies per destination this session;
-	// paneInventory = the destinations whose workspace frame was applied at
-	// least once while connected, so their pane ids are known; notesWaiting =
+	// paneInventory = the destinations whose workspace frame was applied on
+	// their CURRENT connection, so their pane ids are known (a lost link or a
+	// reattach forgets it, forgetImportFor); notesWaiting =
 	// the destinations whose notes import waits for another destination's
 	// pane ids, with the panes of their own first frame.
 	importMarkerPath string

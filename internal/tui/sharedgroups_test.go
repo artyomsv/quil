@@ -389,6 +389,53 @@ func TestSendGroupOpEverywhere_CreateThenDeleteBeforeTheFrame_SendsBoth(t *testi
 	}
 }
 
+// The project menu's New group sends only set_project_group, which creates
+// the group on the daemon. A rename or delete of it before the daemon's next
+// frame must still reach that daemon.
+func TestNewGroupFromProjectMenu_FollowUpBeforeTheFrame_IsSent(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		act  func(t *testing.T, m Model) Model
+		want ipc.GroupOpPayload
+	}{
+		{"rename", func(t *testing.T, m Model) Model { return commitRename(t, m, "Tmp", "Tmp2") },
+			ipc.GroupOpPayload{Op: ipc.GroupOpRename, Name: "Tmp", NewName: "Tmp2"}},
+		{"delete", func(t *testing.T, m Model) Model {
+			runCmd(m.sendGroupOpEverywhere(ipc.GroupOpDelete, "Tmp", ""))
+			return m
+		}, ipc.GroupOpPayload{Op: ipc.GroupOpDelete, Name: "Tmp"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, conn := connectedTestModelCapturingSends(t)
+			m = updateWith(t, m, sharedFrame("r", 1, "proj-1", ""))
+			m.beginGroupEdit(groupEditState{mode: groupEditNew, input: "Tmp", dest: "", projectID: "proj-1"})
+			out, cmd := m.commitGroupEdit()
+			runCmd(cmd)
+			m = out.(Model)
+			if n := countSent(conn, ipc.MsgSetProjectGroup); n != 1 {
+				t.Fatalf("set_project_group sent %d times", n)
+			}
+			m = tc.act(t, m)
+			ops := groupOpsSent(t, conn)
+			if len(ops) != 1 || ops[0] != tc.want {
+				t.Errorf("group_ops = %+v, want %+v", ops, tc.want)
+			}
+		})
+	}
+}
+
+// A refused assignment created nothing, so the name is forgotten.
+func TestUpdate_RefusedAssignToNewGroup_ForgetsTheSentName(t *testing.T) {
+	m, conn := connectedTestModelCapturingSends(t)
+	m = updateWith(t, m, sharedFrame("r", 1, "proj-1", ""))
+	runCmd(m.sendSetProjectGroup("", "proj-1", "Tmp"))
+	id := lastSent(t, conn, ipc.MsgSetProjectGroup).ID
+	m = updateWith(t, m, sharedOpRespMsg{dest: "", id: id, resp: ipc.OpRespPayload{OK: false, Error: "set group: too many groups"}})
+	if containsFold(m.groupNamesSent[""], "Tmp") {
+		t.Errorf("groupNamesSent = %v, want Tmp forgotten after the refusal", m.groupNamesSent[""])
+	}
+}
+
 // A refused create leaves nothing on the daemon, so a later op on that name
 // is not aimed there.
 func TestUpdate_RefusedCreate_ForgetsTheSentName(t *testing.T) {

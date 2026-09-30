@@ -72,6 +72,32 @@ func TestHandleMessage_SharedImport_SkipsAKindTheDaemonAlreadyHolds(t *testing.T
 	}
 }
 
+// An import prepared from a frame at note_rev 0 can arrive after another
+// client saved and then deleted the note. The delete leaves no file and a
+// nonzero rev, and the old text must not come back.
+func TestHandleMessage_SharedImport_DoesNotRestoreANoteDeletedMeanwhile(t *testing.T) {
+	d, client, _, paneID := notesTestDaemon(t)
+	roundTrip(t, client, ipc.MsgNoteSet, ipc.MsgNoteSetResp, ipc.NoteSetPayload{PaneID: paneID, Text: "saved\n", BaseRev: 0})
+	del := decodeInto[ipc.NoteSetRespPayload](t, roundTrip(t, client, ipc.MsgNoteSet, ipc.MsgNoteSetResp, ipc.NoteSetPayload{PaneID: paneID, Text: "", BaseRev: 1}))
+	if !del.OK || del.Rev != 2 {
+		t.Fatalf("delete = %+v, want ok rev 2", del)
+	}
+	resp := decodeInto[ipc.SharedImportRespPayload](t, roundTrip(t, client, ipc.MsgSharedImport, ipc.MsgSharedImportResp, ipc.SharedImportPayload{
+		Kinds: []string{ipc.ImportKindNotes},
+		Notes: []ipc.SharedImportNote{{PaneID: paneID, Text: "old client text\n"}},
+	}))
+	if resp.NotesApplied != 0 || resp.NotesSkipped != 1 {
+		t.Errorf("resp = %+v, want the note skipped", resp)
+	}
+	path, _ := persist.NotesPath(config.NotesDir(), paneID)
+	if _, err := os.Lstat(path); err == nil {
+		t.Error("the deleted note was written back")
+	}
+	if noteRevOf(d, paneID) != 2 {
+		t.Errorf("rev = %d, want 2", noteRevOf(d, paneID))
+	}
+}
+
 func TestHandleMessage_SharedImport_KindNotListedIsNeitherAppliedNorAnswered(t *testing.T) {
 	d, client, _, _ := notesTestDaemon(t)
 	resp := decodeInto[ipc.SharedImportRespPayload](t, roundTrip(t, client, ipc.MsgSharedImport, ipc.MsgSharedImportResp, ipc.SharedImportPayload{

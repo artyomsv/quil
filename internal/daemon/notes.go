@@ -59,12 +59,18 @@ func (d *Daemon) handleNoteSet(conn *ipc.Conn, msg *ipc.Message) {
 		d.replyError(conn, msg, ipc.ErrCodeBadPayload, "no such pane: "+p.PaneID)
 		return
 	}
-	if len(p.Text) > ipc.MaxNoteBytes {
-		respondTo(conn, msg.ID, ipc.MsgNoteSetResp, ipc.NoteSetRespPayload{PaneID: pane.ID, Error: "too large"})
-		return
-	}
 	go func() {
 		pane.noteMu.Lock()
+		// The cap applies to growth only. A note written before the cap
+		// existed can be larger, and restore adopts it as it is; refusing
+		// every save of it would make it uneditable. So a save up to the
+		// stored note's own size is accepted, which lets the user edit and
+		// shorten it, but not grow it further.
+		if len(p.Text) > ipc.MaxNoteBytes && int64(len(p.Text)) > noteFileSize(pane.ID) {
+			pane.noteMu.Unlock()
+			respondTo(conn, msg.ID, ipc.MsgNoteSetResp, ipc.NoteSetRespPayload{PaneID: pane.ID, Error: "too large"})
+			return
+		}
 		cur := pane.NoteRev.Load()
 		if p.BaseRev != cur {
 			pane.noteMu.Unlock()
@@ -113,4 +119,18 @@ func noteFileExists(paneID string) bool {
 	}
 	fi, err := os.Lstat(path)
 	return err == nil && fi.Mode().IsRegular()
+}
+
+// noteFileSize is the size of paneID's regular note file, or 0 when there is
+// none — the ceiling for a save of a note already over the cap.
+func noteFileSize(paneID string) int64 {
+	path, err := persist.NotesPath(config.NotesDir(), paneID)
+	if err != nil {
+		return 0
+	}
+	fi, err := os.Lstat(path)
+	if err != nil || !fi.Mode().IsRegular() {
+		return 0
+	}
+	return fi.Size()
 }

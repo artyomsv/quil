@@ -163,6 +163,31 @@ func TestHandleMessage_NoteSet_OverCapRefused(t *testing.T) {
 	}
 }
 
+// A note stored before the cap existed can be larger than it. It stays
+// editable: a save up to its stored size is accepted, a save that grows it
+// past that is refused.
+func TestHandleMessage_NoteSet_OverCapNoteStaysEditableButCannotGrow(t *testing.T) {
+	d, client, _, paneID := notesTestDaemon(t)
+	stored := ipc.MaxNoteBytes + 100
+	if err := persist.SaveNotes(config.NotesDir(), paneID, strings.Repeat("o", stored)); err != nil {
+		t.Fatal(err)
+	}
+	d.session.Pane(paneID).NoteRev.Store(1) // what restore adopts an existing file as
+	edited := strings.Repeat("e", stored-10)
+	resp := decodeInto[ipc.NoteSetRespPayload](t, roundTrip(t, client, ipc.MsgNoteSet, ipc.MsgNoteSetResp, ipc.NoteSetPayload{PaneID: paneID, Text: edited, BaseRev: 1}))
+	if !resp.OK || resp.Rev != 2 {
+		t.Fatalf("save of an edited over-cap note = %+v, want ok rev 2", resp)
+	}
+	grown := strings.Repeat("g", stored)
+	resp = decodeInto[ipc.NoteSetRespPayload](t, roundTrip(t, client, ipc.MsgNoteSet, ipc.MsgNoteSetResp, ipc.NoteSetPayload{PaneID: paneID, Text: grown, BaseRev: 2}))
+	if resp.OK || resp.Error == "" {
+		t.Errorf("save that grows the note past its stored size = %+v, want refused", resp)
+	}
+	if text, _ := persist.LoadNotes(config.NotesDir(), paneID); text != edited {
+		t.Errorf("stored note changed by the refused save (len %d)", len(text))
+	}
+}
+
 // Pins > vs >= at the cap boundary: exactly MaxNoteBytes must be accepted.
 func TestHandleMessage_NoteSet_ExactlyMaxBytesAccepted(t *testing.T) {
 	_, client, _, paneID := notesTestDaemon(t)

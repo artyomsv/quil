@@ -75,12 +75,13 @@ func hasKind(kinds []string, kind string) bool {
 // handleSharedImport applies a client's old files once. Groups and recent are
 // decided synchronously under sm.mu; the notes part writes files, so it runs
 // on a worker with each pane's noteMu — a note is imported only while the
-// pane has NO note file on disk yet. That is a second, belt-and-braces guard:
-// the real one is client-side (sharedimport.go), which never offers a pane
-// whose frame already shows a nonzero note_rev, and the rev never resets on a
-// delete — so a note a user deleted here cannot be resurrected by an old
-// file from another client, and this check only catches the case where the
-// daemon itself already holds a file the client does not yet know about.
+// pane has NO note history: note_rev still 0 and no note file on disk. The
+// rev is the guard that matters. The client offers only panes its frame
+// showed at note_rev 0, but that frame can be old by the time this worker
+// runs: another client may have saved and then deleted the note meanwhile,
+// which leaves no file and a nonzero rev (a delete never resets it), and the
+// old text must not come back. The file check covers a note the daemon
+// already holds on disk that no rev records yet.
 // The answer is sent when everything asked for is done.
 func (d *Daemon) handleSharedImport(conn *ipc.Conn, msg *ipc.Message) {
 	if len(msg.Payload) > ipc.MaxSharedImportBytes {
@@ -112,7 +113,7 @@ func (d *Daemon) handleSharedImport(conn *ipc.Conn, msg *ipc.Message) {
 					continue
 				}
 				pane.noteMu.Lock()
-				if noteFileExists(pane.ID) {
+				if pane.NoteRev.Load() != 0 || noteFileExists(pane.ID) {
 					pane.noteMu.Unlock()
 					resp.NotesSkipped++
 					continue

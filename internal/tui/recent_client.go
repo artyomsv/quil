@@ -63,16 +63,24 @@ type recentScanState struct {
 func (m *Model) requestExistingDirs(paths []string) tea.Cmd {
 	gen := m.nextReqGen()
 	m.recentScan = recentScanState{gen: gen, asked: paths}
+	msg, err := ipc.NewMessage(ipc.MsgDirsExistReq, ipc.DirsExistReqPayload{Paths: paths})
+	if err != nil {
+		log.Printf("recent locations: encode: %v", err)
+		return recentScanTimeoutCmd(gen) // the timeout still hands over to the browser
+	}
+	// The daemon's respondTo echoes ID back verbatim; it is the whole
+	// correlator here, since the request carries no usable content key.
+	msg.ID = gen
+	// Stamped here, on the Update goroutine, for the daemon the dialog is
+	// pinned to — the one whose recent list this is. Unstamped, the router
+	// sends to whichever project is active when the Cmd runs. An unpinned
+	// dialog (a startup window, see pinnableDest) stays unstamped so the
+	// router's sole-conn fallback can still deliver it.
+	if dest := m.createPaneDest; dest != "" {
+		stampDest(msg, dest)
+	}
 	return tea.Batch(
 		func() tea.Msg {
-			msg, err := ipc.NewMessage(ipc.MsgDirsExistReq, ipc.DirsExistReqPayload{Paths: paths})
-			if err != nil {
-				log.Printf("recent locations: encode: %v", err)
-				return nil
-			}
-			// The daemon's respondTo echoes ID back verbatim; it is the whole
-			// correlator here, since the request carries no usable content key.
-			msg.ID = gen
 			m.client.Send(msg)
 			return nil
 		},

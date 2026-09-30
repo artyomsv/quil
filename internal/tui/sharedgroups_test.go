@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -59,6 +60,38 @@ func TestUpdate_SharedFrame_BuildsMergedGroupsFromDaemonMembers(t *testing.T) {
 	m = updateWith(t, m, sharedFrame("r", 2, "proj-1", "Infra", "Infra", "Empty"))
 	if m.groupsSeq != seq {
 		t.Errorf("an unchanged frame saved the groups (seq %d -> %d)", seq, m.groupsSeq)
+	}
+}
+
+// A remote daemon may not be honest about its caps: a frame over them keeps
+// the first N of each list, and logs once however many frames repeat it.
+func TestUpdate_OversizedSharedFrame_ListsCappedAndLoggedOnce(t *testing.T) {
+	m := connectedTestModel(t)
+	f := sharedFrame("r", 1, "proj-1", "")
+	for i := 0; i < ipc.MaxGroupsPerDaemon+36; i++ {
+		f.Groups = append(f.Groups, fmt.Sprintf("g%03d", i))
+	}
+	for i := 0; i < ipc.MaxRecentCWDs+15; i++ {
+		f.RecentCWDs = append(f.RecentCWDs, fmt.Sprintf("/d%02d", i))
+	}
+	m = updateWith(t, m, f)
+	groups, recent := m.daemonGroups[""], m.recentListFor("")
+	if len(groups) != ipc.MaxGroupsPerDaemon || groups[0] != "g000" || groups[len(groups)-1] != fmt.Sprintf("g%03d", ipc.MaxGroupsPerDaemon-1) {
+		t.Errorf("daemon groups = %d names (%v…), want the first %d", len(groups), groups[:min(3, len(groups))], ipc.MaxGroupsPerDaemon)
+	}
+	if len(recent) != ipc.MaxRecentCWDs || recent[0] != "/d00" {
+		t.Errorf("recent = %v, want the first %d", recent, ipc.MaxRecentCWDs)
+	}
+	if got := len(groupNames(m)); got > ipc.MaxGroupsPerDaemon {
+		t.Errorf("merged view holds %d groups, over the cap", got)
+	}
+	if len(m.sharedCapLogged) != 2 {
+		t.Fatalf("cap log keys = %v, want one per list", m.sharedCapLogged)
+	}
+	f.Rev = 2
+	m = updateWith(t, m, f)
+	if len(m.sharedCapLogged) != 2 || len(m.daemonGroups[""]) != ipc.MaxGroupsPerDaemon {
+		t.Errorf("second oversized frame: log keys %d, groups %d", len(m.sharedCapLogged), len(m.daemonGroups[""]))
 	}
 }
 

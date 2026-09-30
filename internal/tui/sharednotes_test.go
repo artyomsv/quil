@@ -228,6 +228,25 @@ func TestUpdate_ConfirmedReload_OverwriteWhileInFlight_Wins(t *testing.T) {
 	}
 }
 
+// The overwrite's answer can arrive BEFORE the reload's (the daemon runs each
+// note request on its own worker). The reload's answer then carries an older
+// revision than the editor already holds, and must not replace the overwrite.
+func TestUpdate_ConfirmedReload_OverwriteAnsweredFirst_StaleGetIgnored(t *testing.T) {
+	m, conn, id := conflictedAndReloading(t)
+	m = updateWith(t, m, ctrl('s'))
+	set := lastSent(t, conn, ipc.MsgNoteSet)
+	m = updateWith(t, m, noteSetRespMsg{dest: "", id: set.ID, resp: ipc.NoteSetRespPayload{PaneID: "tab-proj-1-pane", OK: true, Rev: 3}})
+	if ed := m.notesEditor; ed.Rev() != 3 || ed.Dirty() {
+		t.Fatalf("after the overwrite's answer: rev=%d dirty=%v", ed.Rev(), ed.Dirty())
+	}
+	m = updateWith(t, m, noteRespMsg{dest: "", id: id, resp: ipc.NoteRespPayload{PaneID: "tab-proj-1-pane", Text: "b\n", Rev: 2}})
+	ed := m.notesEditor
+	if !strings.HasPrefix(ed.Content(), "xa") || ed.Rev() != 3 || ed.Dirty() || ed.Conflict() {
+		t.Errorf("after the stale get's answer: content=%q rev=%d dirty=%v conflict=%v, want the overwrite clean at 3",
+			ed.Content(), ed.Rev(), ed.Dirty(), ed.Conflict())
+	}
+}
+
 // A reload that cannot be SENT (host unreachable) leaves an already-loaded
 // editor as it was — editable, with its text — never the read-only error
 // editor a failed FIRST load becomes.

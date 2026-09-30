@@ -136,6 +136,12 @@ func (m *Model) applyNoteResp(msg noteRespMsg) {
 		}
 		return
 	}
+	// Revisions only grow, so an answer older than what the editor holds is
+	// stale — an overwrite sent after this get can answer first (each note
+	// request runs on its own daemon worker), and that answer is the newer.
+	if !ed.Loading() && msg.resp.Rev < ed.Rev() {
+		return
+	}
 	// A silent reload (clean editor, newer frame rev) that finds the user
 	// typing since it was sent must not replace the typing: it is a conflict.
 	// That holds even when the editor is ALREADY conflicted — a later frame,
@@ -152,7 +158,9 @@ func (m *Model) applyNoteResp(msg noteRespMsg) {
 // sanitizeRemoteNote is the remote-text rule for a note: the
 // editor draws the text without a VT emulator, so escapes, C1 and bidi
 // controls go; unlike a one-row name, line breaks and tabs are the note's
-// own structure and stay.
+// own structure and stay. It runs when the note is LOADED, not only when it
+// is drawn, so the editor holds the cleaned text and a later save stores it
+// on the daemon in place of the original.
 func sanitizeRemoteNote(s string) string {
 	return strings.Map(func(r rune) rune {
 		if r == '\n' || r == '\t' {

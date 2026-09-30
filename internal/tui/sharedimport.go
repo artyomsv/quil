@@ -75,7 +75,8 @@ type pendingImport struct {
 }
 
 // maxImportErrors is how many error replies one destination may give this
-// session before its import waits for the next launch instead of re-sending.
+// session before its import stops re-sending on each frame; after that only a
+// reconnect or the next launch sends it again.
 const maxImportErrors = 3
 
 var sharedImportTimeout = 8 * time.Second
@@ -602,9 +603,10 @@ func (m *Model) applySharedImportTimeout(msg sharedImportTimeoutMsg) {
 // applySharedImportErr handles an error reply to this client's import: the
 // daemon refused the request as a whole, so nothing is answered and the
 // marker is untouched. The next shared frame from dest sends it again, until
-// dest has given maxImportErrors error replies this session; then it waits
-// for the next launch, and group sends to dest stay held until its daemon
-// lists a group (settleCappedImport).
+// dest has given maxImportErrors error replies this session; then it is not
+// sent again on this connection — a reconnect (forgetImportFor) or the next
+// launch sends it once more — and group sends to dest stay held until its
+// daemon lists a group (settleCappedImport).
 func (m *Model) applySharedImportErr(msg sharedImportErrMsg) tea.Cmd {
 	p, ok := m.pendingImports[msg.id]
 	if !ok || p.dest != msg.dest {
@@ -617,6 +619,6 @@ func (m *Model) applySharedImportErr(msg sharedImportErrMsg) tea.Cmd {
 		log.Printf("shared import %q refused (%d/%d): %s; sent again on its next frame", p.dest, n, maxImportErrors, msg.text)
 		return nil
 	}
-	log.Printf("shared import %q refused (%d/%d): %s; retried next launch", p.dest, m.importErrors[p.dest], maxImportErrors, msg.text)
+	log.Printf("shared import %q refused (%d/%d): %s; not sent again on this connection (a reconnect or the next launch sends it once more)", p.dest, m.importErrors[p.dest], maxImportErrors, msg.text)
 	return m.settleCappedImport(p.dest)
 }

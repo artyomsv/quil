@@ -1081,6 +1081,9 @@ type Model struct {
 	sharedData   map[string]bool
 	daemonGroups map[string][]string // each shared destination's group-name list, from its last frame
 	daemonRecent map[string][]string // each shared destination's recent folders, from its last frame
+	// sharedCapLogged: which (destination, list) already logged a frame over
+	// its cap, so an oversized frame logs once rather than per broadcast.
+	sharedCapLogged map[string]bool
 	// vanishedGroups: the names the frame being applied dropped from its
 	// destination's previous list (noteSharedData), read once by
 	// rebuildGroupsView — the only evidence a group was deleted elsewhere.

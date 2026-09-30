@@ -53,16 +53,37 @@ func (m *Model) noteSharedData(msg WorkspaceStateMsg) {
 		m.daemonGroups = map[string][]string{}
 		m.daemonRecent = map[string][]string{}
 	}
+	// The daemon caps both lists, but a remote host is one the user may not
+	// control: keep the first N, as an honest daemon would have sent.
+	groups := m.capSharedList(msg.Dest, "groups", msg.Groups, ipc.MaxGroupsPerDaemon)
+	recent := m.capSharedList(msg.Dest, "recent folders", msg.RecentCWDs, ipc.MaxRecentCWDs)
 	if old, seen := m.daemonGroups[msg.Dest]; seen {
 		for _, name := range old {
-			if !containsFold(msg.Groups, name) {
+			if !containsFold(groups, name) {
 				m.vanishedGroups = append(m.vanishedGroups, name)
 			}
 		}
 	}
 	m.sharedData[msg.Dest] = true
-	m.daemonGroups[msg.Dest] = append([]string(nil), msg.Groups...)
-	m.daemonRecent[msg.Dest] = append([]string(nil), msg.RecentCWDs...)
+	m.daemonGroups[msg.Dest] = append([]string(nil), groups...)
+	m.daemonRecent[msg.Dest] = append([]string(nil), recent...)
+}
+
+// capSharedList cuts a frame's list to limit, logging once per destination
+// and list: an oversized frame repeats on every broadcast.
+func (m *Model) capSharedList(dest, what string, list []string, limit int) []string {
+	if len(list) <= limit {
+		return list
+	}
+	key := dest + "\x00" + what
+	if !m.sharedCapLogged[key] {
+		if m.sharedCapLogged == nil {
+			m.sharedCapLogged = map[string]bool{}
+		}
+		m.sharedCapLogged[key] = true
+		log.Printf("shared data: daemon %q sent %d %s, over the cap of %d; keeping the first %d", dest, len(list), what, limit, limit)
+	}
+	return list[:limit]
 }
 
 // frameAuthoritativeFor reports whether dest's frame, not the file, holds its
@@ -163,6 +184,7 @@ func (m *Model) rebuildGroupsView() tea.Cmd {
 		if g < 0 {
 			var err error
 			if g, err = m.groups.addGroup(p.Group); err != nil {
+				log.Printf("groups: daemon %q filed project %q under %q: %v; shown ungrouped", p.Dest, p.ID, p.Group, err)
 				continue
 			}
 		}

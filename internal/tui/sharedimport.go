@@ -18,8 +18,8 @@ import (
 	"github.com/artyomsv/quil/internal/persist"
 )
 
-// One-time import of the client's old files into each shared daemon
-// (spec 4.5). Automatic on the first shared frame from a destination, once
+// One-time import of the client's old files into each shared daemon.
+// Automatic on the first shared frame from a destination, once
 // per launch; the marker records what each daemon ANSWERED, so a kind that
 // got no answer is retried next launch. Old files are never modified.
 //
@@ -305,7 +305,7 @@ func (m *Model) maybeImport(msg WorkspaceStateMsg) tea.Cmd {
 	key := config.DestFileKey(msg.Dest)
 	kinds := mk.Dests[key]
 	if msg.Dest == "" && !kinds.Notes {
-		// F-12: the local daemon adopts the files itself (restore, note_rev 1).
+		// The local daemon adopts the files itself (restore, note_rev 1).
 		kinds.Notes = true
 		mk.Dests[key] = kinds
 		if err := saveImportMarker(m.importMarkerPath, mk); err != nil {
@@ -512,7 +512,7 @@ func groupsBackupPath(dest string) string {
 // first). From then on the daemon's frame replaces this client's cached
 // members for dest — the first frame after the send already did — so any
 // membership the daemon does not share would otherwise be gone from both
-// sides (spec 1, "never lost"). snap is the file view the import carried.
+// sides, with nothing keeping it. snap is the file view the import carried.
 //
 // Written only when something would be lost (a member the daemon files under
 // another group, or none), and never over an earlier backup: the first one

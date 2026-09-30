@@ -120,7 +120,7 @@ func sharedImportNoT(client *ipc.Client, tag string, payload ipc.SharedImportPay
 	}
 }
 
-// TC-4: two clients importing at once — exactly one applies.
+// Two clients importing at once — exactly one applies.
 func TestHandleMessage_SharedImport_ConcurrentImports_ExactlyOneApplies(t *testing.T) {
 	d, a, sock, _ := notesTestDaemon(t)
 	b, err := ipc.NewClient(sock)

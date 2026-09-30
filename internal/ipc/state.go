@@ -32,8 +32,8 @@ type WorkspaceState struct {
 	RunID string `json:"run_id,omitempty"`
 
 	// SharedData is broadcast-only and always true from a 3b daemon: this
-	// daemon owns groups, recent folders and notes for its projects and panes
-	// (spec 4.1). Never written to workspace.json.
+	// daemon owns groups, recent folders and notes for its projects and
+	// panes. Never written to workspace.json.
 	SharedData bool `json:"shared_data,omitempty"`
 	// Groups is this daemon's group-name list, creation order (no display
 	// meaning — order is per client). RecentCWDs is its recent-folder list,
@@ -101,8 +101,8 @@ type PaneState struct {
 	// NoteRev is the pane's note version: 0 = this pane has never had a note;
 	// a nonzero rev with an empty note text (fetched separately, via
 	// note_get) means the note was deleted, not that none ever existed — the
-	// counter never resets (spec ruling R-2). Persisted and broadcast; the
-	// note text itself never rides the frame.
+	// counter never resets. Persisted and broadcast; the note text itself
+	// never rides the frame.
 	NoteRev uint64 `json:"note_rev,omitempty"`
 
 	// Broadcast-only (includeOverlays == true).

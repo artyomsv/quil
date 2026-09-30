@@ -144,7 +144,7 @@ func TestUpdate_CtrlS_SendsNoteSetWithBaseRev_FrameRevIgnoredWhileInFlight(t *te
 	if !m.notesEditor.SaveInFlight() {
 		t.Fatal("save not marked in flight")
 	}
-	// F-3: a frame carrying a newer rev while OUR save is unanswered is not a
+	// A frame carrying a newer rev while OUR save is unanswered is not a
 	// conflict — it is our own save's frame, or one we will learn about from
 	// the answer.
 	m = updateWith(t, m, noteFrame(2, 3))
@@ -401,7 +401,7 @@ func TestExitNotes_ConflictedEditor_KeepsTextInConflictsFile(t *testing.T) {
 	}
 }
 
-// R-2: emptying the note is a delete (text ""), and the save after it uses
+// Emptying the note is a delete (text ""), and the save after it uses
 // the rev the delete returned — never 0.
 func TestUpdate_EmptiedNote_SendsDeleteAndNextSaveUsesItsRev(t *testing.T) {
 	m, conn := loadedNotesModel(t, "a", 4)

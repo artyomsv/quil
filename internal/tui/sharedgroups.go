@@ -13,7 +13,7 @@ import (
 	"github.com/artyomsv/quil/internal/ipc"
 )
 
-// Client side of shared groups (spec 4.2). m.groups stays the ONE displayed
+// Client side of shared groups. m.groups stays the ONE displayed
 // structure every sidebar/hover/drag reader indexes, and project-groups.json
 // is exactly m.groups: order, collapsed state, and every member. For a
 // destination whose frame is authoritative (frameAuthoritativeFor) the file's
@@ -114,7 +114,7 @@ func (m *Model) destsListingGroup(name string) []string {
 	return out
 }
 
-// rebuildGroupsView is the merged view (spec 4.2), run after every applied
+// rebuildGroupsView is the merged view, run after every applied
 // frame. For each AUTHORITATIVE destination its members are replaced by the
 // frame's (each project's own Group); every other destination's members are
 // left exactly as the file holds them. Names any shared daemon lists and the
@@ -236,11 +236,10 @@ func (m *Model) sendGroupOp(dest, op, name, newName string) tea.Cmd {
 // sendGroupOpEverywhere fans a rename or delete out to every shared
 // destination listing the name (each with its own id); a create goes to the
 // active destination only — or, when that one is a legacy daemon, to the
-// local one if it is shared: the local daemon is where empty groups live
-// (spec 4.5), and sent nowhere the group would reach no other client of any
-// daemon. Best-effort across hosts (spec 4.2): a refusal
-// flashes, an offline host is skipped, and the group shows split until the
-// user repeats the operation.
+// local one if it is shared: the local daemon is where empty groups live,
+// and sent nowhere the group would reach no other client of any daemon.
+// Best-effort across hosts: a refusal flashes, an offline host is skipped,
+// and the group shows split until the user repeats the operation.
 func (m *Model) sendGroupOpEverywhere(op, name, newName string) tea.Cmd {
 	if op == ipc.GroupOpCreate {
 		dest := m.activeDest()

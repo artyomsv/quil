@@ -32,8 +32,9 @@ const (
 	MaxSharedImportBytes = 8 << 20
 )
 
-// Group operations for GroupOpPayload.Op. There is no "move": display order
-// is per client (spec D-1a).
+// Group operations for GroupOpPayload.Op. There is no "move": a merged group
+// can span several daemons with no shared sequence to index into, so display
+// order stays a client preference instead.
 const (
 	GroupOpCreate = "create"
 	GroupOpRename = "rename"

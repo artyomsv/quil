@@ -173,7 +173,7 @@ func TestHandleMessage_NoteSet_ExactlyMaxBytesAccepted(t *testing.T) {
 	}
 }
 
-// R-2: NoteRev is monotonic. A delete increments it like any other write, so
+// NoteRev is monotonic. A delete increments it like any other write, so
 // a stale save based on the pre-delete rev is refused rather than silently
 // accepted and overwriting whatever a concurrent writer put there afterward.
 func TestHandleMessage_NoteSet_EmptyTextDeletesAndIncrementsRev(t *testing.T) {
@@ -235,7 +235,7 @@ func TestHandleMessage_NoteGet_UnknownPaneIsBadPayloadToHelloedConn(t *testing.T
 	}
 }
 
-// F-3: the saving client must learn its new rev BEFORE the frame that carries
+// The saving client must learn its new rev BEFORE the frame that carries
 // it, or it reads its own save back as another client's change.
 func TestHandleMessage_NoteSet_ResponsePrecedesTheBroadcast(t *testing.T) {
 	_, client, _, paneID := notesTestDaemon(t)

@@ -10,3 +10,7 @@ headline: Groups, recent folders and pane notes follow you to every client
   the editor keeps what you typed and offers `Ctrl+R` reload or `Ctrl+S` overwrite.
   Text the daemon refused after the editor closed, or at quit, is kept under
   `~/.quil/notes-conflicts/`.
+- **Connecting to a daemon another client already filled with groups never drops
+  yours.** If your own groups for it differ, they are kept in
+  `~/.quil/project-groups.before-shared-<destination>.json` before the daemon's
+  take over.

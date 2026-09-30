@@ -16,7 +16,7 @@ import (
 	"github.com/artyomsv/quil/internal/textsafe"
 )
 
-// Client side of shared notes (spec 4.3). The editor (notes.go) holds the
+// Client side of shared notes. The editor (notes.go) holds the
 // text and its version; this file owns every send, every answer, and the
 // two rules that keep text from being lost: a save outlives the editor that
 // made it (pendingNoteSaves), and quit waits for the answer.
@@ -149,7 +149,7 @@ func (m *Model) applyNoteResp(msg noteRespMsg) {
 	ed.ApplyLoaded(sanitizeRemoteNote(msg.resp.Text), msg.resp.Rev)
 }
 
-// sanitizeRemoteNote is the remote-text rule for a note (spec 4.7): the
+// sanitizeRemoteNote is the remote-text rule for a note: the
 // editor draws the text without a VT emulator, so escapes, C1 and bidi
 // controls go; unlike a one-row name, line breaks and tabs are the note's
 // own structure and stay.
@@ -176,8 +176,8 @@ func (m *Model) applyNoteLoadTimeout(msg noteLoadTimeoutMsg) {
 }
 
 // sendNoteSave sends the open remote editor's text and records it as pending
-// until the daemon answers — the record is what survives the editor closing
-// (F-2). overwrite saves from the daemon's rev after a conflict.
+// until the daemon answers — the record is what survives the editor closing.
+// overwrite saves from the daemon's rev after a conflict.
 func (m *Model) sendNoteSave(overwrite bool) tea.Cmd {
 	ed := m.notesEditor
 	if ed == nil {
@@ -291,7 +291,7 @@ func (m *Model) applyNoteSetResp(msg noteSetRespMsg) tea.Cmd {
 
 // reconcileNoteRev applies a frame's note_rev to the open remote editor: a
 // newer rev reloads a clean editor silently and marks a dirty one conflicted.
-// Ignored while this client's own save is unanswered (F-3). A rev lower than
+// Ignored while this client's own save is unanswered. A rev lower than
 // or EQUAL to the editor's is stale — a frame built before our own save's
 // answer can still arrive after it — and revs never go down (a delete bumps
 // them too), so only a higher one means another client changed the note.
@@ -316,7 +316,7 @@ func (m *Model) reconcileNoteRev(msg WorkspaceStateMsg) tea.Cmd {
 
 // requestQuit is every app.quit arm's exit: flush the open editor, then quit
 // at once when nothing is pending, else wait up to noteQuitWait for the
-// answers (P-4). A remote editor is closed here, so its answers settle
+// answers. A remote editor is closed here, so its answers settle
 // through pendingNoteSaves and a refusal lands in notes-conflicts rather than
 // on an editor about to vanish. A second quit while waiting stops waiting. A
 // conflict or no answer ends in notes-conflicts, never in silently lost text.

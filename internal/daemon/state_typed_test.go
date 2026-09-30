@@ -172,14 +172,14 @@ func TestWorkspaceStateFromSnapshot_Typed_MatchesOldMap(t *testing.T) {
 
 // TestBuildWorkspaceState_Typed_MatchesOldMapExceptRev is the same oracle for
 // the broadcast entry point, which also carries update/size_master/clients/
-// daemon_limited. rev and run_id are new in 3a (Task 4) and have no map-side
+// daemon_limited. rev and run_id are new in phase 3a and have no map-side
 // counterpart.
 func TestBuildWorkspaceState_Typed_MatchesOldMapExceptRev(t *testing.T) {
 	d := richStateDaemon(t)
 	got := stateMap(t, d.buildWorkspaceState())
-	delete(got, "rev")         // new in 3a, Task 4
-	delete(got, "run_id")      // new in 3a, Task 4
-	delete(got, "shared_data") // new in 3b, broadcast-only
+	delete(got, "rev")         // new in phase 3a
+	delete(got, "run_id")      // new in phase 3a
+	delete(got, "shared_data") // new in phase 3b, broadcast-only
 	want := stateMap(t, d.oldBuildWorkspaceStateMap())
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("typed broadcast differs from the pre-3a map\n got: %v\nwant: %v", got, want)

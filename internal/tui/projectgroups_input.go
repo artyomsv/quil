@@ -42,7 +42,7 @@ func (m *Model) trackGroupDrag(x, y int) {
 	if !ok || !row.inGroup {
 		return
 	}
-	// By NAME (F-6): a frame can insert or remove a group while the drag is
+	// By NAME: a frame can insert or remove a group while the drag is
 	// armed, and a held index would then name its neighbour.
 	from := m.groups.indexOf(m.groupDragName)
 	if from < 0 {
@@ -341,9 +341,9 @@ func (m Model) handleGroupEditKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // box, see groupNameRefusal — and leaves the dialog OPEN with the text kept, so
 // the user fixes it rather than retyping.
 //
-// The refusal is also the pre-check for a shared rename (spec 4.2, F-7):
-// m.groups is the MERGED view, so validName refuses a name any destination
-// holds before anything is sent.
+// The refusal is also the pre-check for a shared rename: m.groups is the
+// MERGED view, so validName refuses a name any destination holds before
+// anything is sent.
 func (m Model) commitGroupEdit() (tea.Model, tea.Cmd) {
 	e := m.groupEdit
 	changed := false

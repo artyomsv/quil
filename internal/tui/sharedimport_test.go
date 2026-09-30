@@ -86,7 +86,7 @@ func TestUpdate_FirstSharedFrame_SendsOneImportForPendingKinds(t *testing.T) {
 		t.Errorf("groups = %+v", p.Groups)
 	}
 	if mk := loadImportMarker(config.SharedImportPath()); !mk.Dests["local"].Notes {
-		t.Error("local notes marker not set at once (F-12)")
+		t.Error("local notes marker not set at once")
 	}
 	m = updateNoWait(t, m, sharedFrame("r", 2, "proj-1", ""))
 	if countSent(local, ipc.MsgSharedImport) != 1 {
@@ -211,7 +211,7 @@ func TestUpdate_Import_WithoutMarkerPath_IsOff(t *testing.T) {
 	}
 }
 
-// R-5: the daemon creates a group on set_project_group and refuses an import
+// The daemon creates a group on set_project_group and refuses an import
 // once it holds one, so a group send ahead of the import answer would make
 // it drop every member the import carries. Before the answer the change goes
 // to the file only; the answer replays it; after it, sends go straight out.
@@ -347,7 +347,7 @@ func decodeSetProjectGroup(t *testing.T, conn *fakeConn) ipc.SetProjectGroupPayl
 	return p
 }
 
-// I-1: an import in flight when the link drops can never be answered. The
+// An import in flight when the link drops can never be answered. The
 // first shared frame after the reattach sends it again, and ITS answer opens
 // group sends and replays the held assign. The old id's answer settles
 // nothing.
@@ -396,7 +396,7 @@ func TestArmReattachReset_ForgetsTheImportInFlight(t *testing.T) {
 	}
 }
 
-// I-1: an error reply to the import is no answer — the next frame sends it
+// An error reply to the import is no answer — the next frame sends it
 // again, up to maxImportErrors error replies this session.
 func TestUpdate_ImportErrorReply_NextFrameResendsUntilTheCap(t *testing.T) {
 	m, local, _ := importTestModel(t)
@@ -438,7 +438,7 @@ func TestListenForMessages_SharedImportErrorReply_BecomesSharedImportErrMsg(t *t
 	}
 }
 
-// I-2: notes the request budget left out keep the notes kind pending, and the
+// Notes the request budget left out keep the notes kind pending, and the
 // next launch (a fresh Model) sends it again.
 func TestUpdate_ImportNotesDeferredByBudget_NextLaunchSendsTheNotesKind(t *testing.T) {
 	m, _, remote := importTestModel(t)
@@ -476,7 +476,7 @@ func TestUpdate_ImportNotesDeferredByBudget_NextLaunchSendsTheNotesKind(t *testi
 	}
 }
 
-// M-1: a rename made before the groups answer is held for every destination
+// A rename made before the groups answer is held for every destination
 // that will list the name once its import lands, and replayed after.
 func TestUpdate_GroupRenameBeforeImportAnswer_IsHeldThenReplayed(t *testing.T) {
 	m, local, _ := importTestModel(t)
@@ -502,7 +502,7 @@ func TestUpdate_GroupRenameBeforeImportAnswer_IsHeldThenReplayed(t *testing.T) {
 	}
 }
 
-// M-1: a held create makes a later delete of that name held too, in order.
+// A held create makes a later delete of that name held too, in order.
 func TestUpdate_HeldCreateThenDelete_BothReplayedInOrder(t *testing.T) {
 	m, local, _ := importTestModel(t)
 	m = updateNoWait(t, m, sharedFrame("r", 1, "proj-1", ""))
@@ -525,7 +525,7 @@ func TestUpdate_HeldCreateThenDelete_BothReplayedInOrder(t *testing.T) {
 	}
 }
 
-// M-2: two clients sharing a QUIL_HOME save the marker at once. Each save
+// Two clients sharing a QUIL_HOME save the marker at once. Each save
 // goes through its own uniquely named temp file, so none fails, the file
 // always parses as one of the two, and no temp file is left behind. A fixed
 // path+".tmp" makes one writer rename the other's file away (ENOENT) or
@@ -577,7 +577,7 @@ func TestSaveImportMarker_ConcurrentSavesNeverCollide(t *testing.T) {
 	}
 }
 
-// N-1: panes the daemon already has note history for (NoteRev > 0) are not
+// Panes the daemon already has note history for (NoteRev > 0) are not
 // sent, so the next launch's import carries the notes the budget deferred
 // instead of the same first batch again.
 func TestUpdate_DeferredNotes_NextLaunchSendsTheRestNotTheFirstBatch(t *testing.T) {
@@ -633,7 +633,7 @@ func TestUpdate_DeferredNotes_NextLaunchSendsTheRestNotTheFirstBatch(t *testing.
 	}
 }
 
-// N-2: after maxImportErrors error replies, a held assign on a daemon that
+// After maxImportErrors error replies, a held assign on a daemon that
 // lists a group is sent, not stripped by the authoritative frame and held
 // forever. The marker is untouched: next launch still imports.
 func TestUpdate_ImportErrorCap_DaemonListingGroups_SendsTheHeldAssign(t *testing.T) {
@@ -663,7 +663,7 @@ func TestUpdate_ImportErrorCap_DaemonListingGroups_SendsTheHeldAssign(t *testing
 	}
 }
 
-// N-2, at the cap itself: a daemon that already lists a group opens sends on
+// At the cap itself: a daemon that already lists a group opens sends on
 // the third error reply.
 func TestUpdate_ImportErrorCap_AlreadyListingGroups_OpensOnTheLastError(t *testing.T) {
 	m, local, _ := importTestModel(t)
@@ -683,7 +683,7 @@ func TestUpdate_ImportErrorCap_AlreadyListingGroups_OpensOnTheLastError(t *testi
 	}
 }
 
-// N-3: disconnecting a host forgets its in-flight import, so re-adding it in
+// Disconnecting a host forgets its in-flight import, so re-adding it in
 // the same session sends the import again.
 func TestDisconnectDest_ForgetsTheImportInFlight(t *testing.T) {
 	m, _, _ := importTestModel(t)
@@ -723,7 +723,7 @@ func loadBackup(t *testing.T, path string) projectGroupsFile {
 	return f
 }
 
-// R-8 (1): a second client joins a daemon that already holds groups. Its
+// A second client joins a daemon that already holds groups. Its
 // import is refused and the frame replaces its cached members, so the
 // membership the daemon does not share is backed up — old members only for
 // this destination — and the cache is still replaced.
@@ -749,7 +749,7 @@ func TestUpdate_RefusedImport_DifferingMembership_BacksUpTheOldGroups(t *testing
 	}
 }
 
-// R-8 (2): the daemon files every cached member the same way — nothing would
+// The daemon files every cached member the same way — nothing would
 // be lost, so no backup.
 func TestUpdate_RefusedImport_IdenticalMembership_NoBackup(t *testing.T) {
 	m, local, _ := importTestModel(t)
@@ -761,7 +761,7 @@ func TestUpdate_RefusedImport_IdenticalMembership_NoBackup(t *testing.T) {
 	}
 }
 
-// R-8 (3): an applied import gave the daemon this client's groups.
+// An applied import gave the daemon this client's groups.
 func TestUpdate_AppliedImport_NoBackup(t *testing.T) {
 	m, local, _ := importTestModel(t)
 	m = updateNoWait(t, m, sharedFrame("r", 1, "proj-1", ""))
@@ -777,7 +777,7 @@ func TestUpdate_AppliedImport_NoBackup(t *testing.T) {
 	}
 }
 
-// R-8 (4): an earlier backup is the one holding the pre-shared state; it is
+// An earlier backup is the one holding the pre-shared state; it is
 // never overwritten.
 func TestUpdate_RefusedImport_ExistingBackupIsNeverOverwritten(t *testing.T) {
 	m, local, _ := importTestModel(t)

@@ -932,15 +932,23 @@ func InstancesPath() string {
 	return filepath.Join(QuilDir(), "instances.json")
 }
 
-// ProjectGroupsPath is the TUI-owned file holding the sidebar's project groups.
-// Client-side only — no daemon reads it — so one group can mix projects from
-// several hosts. Several TUIs on one machine share it; the last write wins.
+// ProjectGroupsPath is the client file holding the sidebar's project groups.
+// For a destination whose daemon owns groups (phase 3b), this file is a
+// CACHE of that daemon's own membership, plus the group order and collapsed
+// state, which stay a client preference no daemon holds; for any other
+// destination the file is still the only record, exactly as before, which is
+// what lets one group mix projects from several hosts. Several TUIs on one
+// machine share it; the last write wins.
 func ProjectGroupsPath() string {
 	return filepath.Join(QuilDir(), "project-groups.json")
 }
 
 // RecentCWDsPath returns the file storing the last-used working directories
-// offered as a quick pick in the pane setup dialog. TUI-owned, single writer.
+// offered as a quick pick in the pane setup dialog. TUI-owned, single writer
+// — the daemon never reads or writes it directly. For a destination whose
+// daemon owns the recent list itself (phase 3b), the client reads this file
+// only once, to hand its contents to that daemon on import, and stops
+// writing to it: the quick pick then comes from the daemon's own frame.
 //
 // dest scopes the file to one remote destination. Empty — the local case —
 // keeps the historical name exactly, so existing installs need no migration.
@@ -1014,13 +1022,13 @@ func NotesDir() string {
 // NotesConflictsDir holds note text the daemon refused (a stale save answered
 // with a conflict after the editor closed, or a save unanswered at quit).
 // Client-side only: the text is the user's, and losing it silently is the one
-// outcome spec 4.3 forbids.
+// outcome this exists to prevent.
 func NotesConflictsDir() string {
 	return filepath.Join(QuilDir(), "notes-conflicts")
 }
 
 // SharedImportPath is the client marker recording which data kinds were
-// imported into which daemon (spec 4.5).
+// imported into which daemon.
 func SharedImportPath() string {
 	return filepath.Join(QuilDir(), "shared-import.json")
 }

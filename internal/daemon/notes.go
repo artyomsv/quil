@@ -14,7 +14,7 @@ import (
 // persist functions the TUI used locally; only Pane.NoteRev rides the frame.
 //
 // Every read and write runs on a worker goroutine — file I/O on the conn's
-// dispatch goroutine blocks that client's input (F-1) — and holds the pane's
+// dispatch goroutine blocks that client's input — and holds the pane's
 // noteMu across the version check AND the file write, so two saves from one
 // base cannot both apply. PluginMu is never taken here.
 
@@ -79,11 +79,11 @@ func (d *Daemon) handleNoteSet(conn *ipc.Conn, msg *ipc.Message) {
 			return
 		}
 		// NoteRev is monotonic: a delete increments it exactly like a save,
-		// never resets to 0 (spec ruling R-2) — "no note" is an empty
-		// file/text, not rev 0, so a stale save cannot be reissued against a
-		// rev a delete already invalidated.
+		// never resets to 0 — "no note" is an empty file/text, not rev 0, so a
+		// stale save cannot be reissued against a rev a delete already
+		// invalidated.
 		newRev := cur + 1
-		// F-3, proven by program order rather than by noteMu: the
+		// Proven by program order rather than by noteMu: the
 		// workspace-state build reads NoteRev with a bare Load() and takes no
 		// lock (daemon.go), so nothing stops it from racing this write. Store
 		// runs strictly AFTER respondTo's enqueue call returns, on this same

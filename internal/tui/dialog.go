@@ -2564,7 +2564,7 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 	newBranch, newBranchRepo := m.worktreeNewBranch, m.worktrees.root
 	if cwd != "" {
 		m.lastSelectedCWD = cwd
-		// A shared daemon records this itself (spec 4.4) and sends the list back
+		// A shared daemon records this itself and sends the list back
 		// on its frame, so neither the client list nor its file is touched.
 		if !m.sharedData[m.createPaneDialogDest()] {
 			m.recentCWDs = pushRecentCWD(m.recentCWDs, cwd, recentCWDMax)
@@ -3857,7 +3857,7 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 // split it, because "did the scan find anything" is no longer known at the
 // point enterSetupOrSplit returns.
 func (m *Model) fallbackToRecentOrBrowser() tea.Cmd {
-	// A shared destination's list comes from its own frame (spec 4.4).
+	// A shared destination's list comes from its own frame.
 	if list := m.recentListFor(m.createPaneDialogDest()); len(list) > 0 {
 		// Which of the remembered directories still exist is a question about
 		// the DAEMON's disk. Answered here with os.Stat until RD-024, which

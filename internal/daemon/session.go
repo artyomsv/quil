@@ -236,13 +236,13 @@ type Pane struct {
 	// read-modify-write in note_set: every note write holds it across the
 	// version check and the file I/O, so two saves from one base cannot both
 	// apply. Never held while acquiring another lock, and PluginMu is never
-	// held across note I/O (F-1).
+	// held across note I/O.
 	noteMu sync.Mutex
 	// NoteRev is the pane's note-version counter: MONOTONIC, never reset to
 	// 0 by note_set — a delete increments it exactly like a save, because
 	// resetting it would let a save based on a rev the deleter had already
-	// invalidated silently overwrite whatever a later writer put there
-	// (spec ruling R-2). "No note" is an empty file/text, not rev 0; 0 means
+	// invalidated silently overwrite whatever a later writer put there.
+	// "No note" is an empty file/text, not rev 0; 0 means
 	// only "this pane has never had a note". Persisted (note_rev), broadcast.
 	// atomic.Uint64 rather than noteMu-guarded: the workspace-state build
 	// reads it with a bare Load(), with no noteMu, so a slow note_set's disk
@@ -492,9 +492,12 @@ type SessionManager struct {
 	projectOrder  []string
 	activeProject string
 
-	// groups is this daemon's group-name list, creation order (display order
-	// is per client — spec D-1a); recentCWDs the last MaxRecentCWDs folders a
-	// create named, most recent first. Both under mu, both persisted.
+	// groups is this daemon's group-name list, creation order — the order the
+	// SIDEBAR draws groups in, and whether each is collapsed, is a client
+	// preference this daemon does not hold, since a merged group can span
+	// several daemons with no shared sequence to index into; recentCWDs the
+	// last MaxRecentCWDs folders a create named, most recent first. Both
+	// under mu, both persisted.
 	groups     []string
 	recentCWDs []string
 }

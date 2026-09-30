@@ -83,8 +83,8 @@ type WorkspaceStateMsg struct {
 	Rev   uint64
 	RunID string
 	// SharedData: this destination's daemon owns groups, recent folders and
-	// notes (spec 4.1). Groups is its group-name list; RecentCWDs its recent
-	// folders, most recent first. Absent from an older daemon.
+	// notes. Groups is its group-name list; RecentCWDs its recent folders,
+	// most recent first. Absent from an older daemon.
 	SharedData bool
 	Groups     []string
 	RecentCWDs []string
@@ -1008,7 +1008,7 @@ type Model struct {
 	viewerAnchorCol   int          // document col where a viewer drag began (resolved once on click)
 
 	// Shared notes (sharednotes.go).
-	pendingNoteSaves map[string]pendingNoteSave // remote saves unanswered by the daemon, by request id; outlive the editor (F-2)
+	pendingNoteSaves map[string]pendingNoteSave // remote saves unanswered by the daemon, by request id; outlive the editor
 	noteLoadID       string                     // the open editor's in-flight note_get id
 	noteLoadDiscards bool                       // that note_get is a confirmed Ctrl+R reload, the one load allowed to replace edits
 	noteLoadSnapshot string                     // the buffer the user confirmed discarding; edits after it are kept
@@ -1074,8 +1074,8 @@ type Model struct {
 	groupsPath   string
 	groupsWriter *groupsWriter
 	groupsSeq    uint64
-	// Shared data (spec 4.1), per destination, from every frame's shared_data:
-	// true means that daemon owns groups, recents and notes for its projects
+	// Shared data, per destination, from every frame's shared_data: true
+	// means that daemon owns groups, recents and notes for its projects
 	// and panes; a destination never seen true keeps today's client files.
 	// Not forgotten on reattach — a release daemon does not downgrade.
 	sharedData   map[string]bool
@@ -1106,7 +1106,7 @@ type Model struct {
 	// A press on a group header. The release TOGGLES the group only when
 	// groupDragMoved is still false; a drag reorders the groups instead.
 	groupDragging  bool
-	groupDragName  string // the dragged group's NAME (F-6): a frame can insert or remove a group while a drag is armed
+	groupDragName  string // the dragged group's NAME: a frame can insert or remove a group while a drag is armed
 	groupDragMoved bool
 	// sidebarHover names the PROJECTS row under a buttonless pointer, painted
 	// light grey (sidebar_hover.go). A KEY, not a row index: a broadcast can

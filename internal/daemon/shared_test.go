@@ -263,10 +263,10 @@ func TestHandleMessage_CreatePane_TUIPathEmptyCWDRecordsNothing(t *testing.T) {
 	}
 }
 
-// TestHandleMessage_CreatePane_OverlayDoesNotRecordItsRepoRoot is I-1: the
+// TestHandleMessage_CreatePane_OverlayDoesNotRecordItsRepoRoot: the
 // lazygit/hunk overlay (internal/tui/overlay.go) sends an ordinary
 // create_pane naming its host tab's repo root as CWD with Overlay: true.
-// That is not a folder the user or agent picked (spec 4.4), so every Alt+G
+// That is not a folder the user or agent picked, so every Alt+G
 // must not push the repo root to the front of the recent-folder list.
 func TestHandleMessage_CreatePane_OverlayDoesNotRecordItsRepoRoot(t *testing.T) {
 	d, client := mcpTestDaemon(t)
@@ -299,9 +299,8 @@ func TestHandleMessage_CreateTab_RecordsFirstPaneCWD(t *testing.T) {
 // TUI-shaped create_pane naming a worktree through the stubbed
 // addWorktreeFn, and checks that what lands in the recent-folder list is the
 // browsed directory the request named — not the checkout path the stub
-// answered with (spec 4.4 / F-5: a worktree create's pane does not spawn in
-// the browsed directory, but the client still recorded it there, and so must
-// the daemon).
+// answered with. A worktree create's pane does not spawn in the browsed
+// directory, but the client still recorded it there, and so must the daemon.
 func TestHandleMessage_CreatePane_WorktreeRecordsBrowsedDirNotWorktree(t *testing.T) {
 	d, client := mcpTestDaemon(t)
 	dir := t.TempDir()

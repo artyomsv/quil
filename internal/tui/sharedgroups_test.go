@@ -166,7 +166,7 @@ func TestUpdate_SharedFrame_DaemonNameUnknownToFileIsAppended(t *testing.T) {
 }
 
 // A name no daemon ever listed is never deleted — not on a destination's
-// first frame, not on a later one: only a name that DISAPPEARS goes (I-1).
+// first frame, not on a later one: only a name that DISAPPEARS goes.
 func TestUpdate_SharedLocal_EmptyFileGroupNobodyListedIsKept(t *testing.T) {
 	m := connectedTestModel(t)
 	m.SetProjectGroups(ProjectGroupsState{groups: projectGroups{Groups: []projectGroup{{Name: "Kept"}}}}, "")
@@ -177,7 +177,7 @@ func TestUpdate_SharedLocal_EmptyFileGroupNobodyListedIsKept(t *testing.T) {
 	}
 }
 
-// Test 1 (C-1): a shared daemon holding no groups yet has not been imported
+// A shared daemon holding no groups yet has not been imported
 // into, so the file's members for it are the only record — shown and saved.
 func TestUpdate_SharedDaemonWithNoGroups_FileMembersStay(t *testing.T) {
 	m := connectedTestModel(t)
@@ -199,7 +199,7 @@ func TestUpdate_SharedDaemonWithNoGroups_FileMembersStay(t *testing.T) {
 	}
 }
 
-// Test 2 (D-1a/D-5): order and collapsed state survive a RELAUNCH. "GPU" is
+// Order and collapsed state survive a RELAUNCH. "GPU" is
 // first and collapsed with its only member on hostA. Launch 1 sees both
 // destinations and saves; launch 2 loads that saved file, and its local
 // frame arrives before hostA's. Stripping hostA's member from the file (the
@@ -252,7 +252,7 @@ func hasMember(grp projectGroup, dest, id string) bool {
 	return false
 }
 
-// Test 4 (I-1, TC-5): a delete made in another client shows here — hostA
+// A delete made in another client shows here — hostA
 // listed "X" in its previous frame, drops it now, and X has no member.
 func TestUpdate_GroupNameDisappears_GroupIsRemoved(t *testing.T) {
 	m, _, _ := twoDestModel(t)
@@ -473,7 +473,7 @@ func headerRow(t *testing.T, m Model, name string) int {
 	return -1
 }
 
-// F-6 / I-2: the header drag is keyed by NAME, through the real press,
+// The header drag is keyed by NAME, through the real press,
 // motion and release. Another client deletes "A" — BEFORE the dragged "C" —
 // while the drag is armed, so C's index shifts under it; an index-keyed drag
 // would then move D instead.
@@ -534,7 +534,7 @@ func TestEnterSetup_SharedDest_AsksAboutTheDaemonsRecentList(t *testing.T) {
 	}
 }
 
-// A shared daemon records the folder itself (spec 4.4): the client neither
+// A shared daemon records the folder itself: the client neither
 // pushes it onto its own list nor writes recent-cwds.json.
 func TestHandleCreatePaneSplit_SharedDest_RecordsNothingLocally(t *testing.T) {
 	t.Setenv("QUIL_HOME", t.TempDir())

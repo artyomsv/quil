@@ -2778,9 +2778,10 @@ func (d *Daemon) handleCreatePane(conn *ipc.Conn, msg *ipc.Message) {
 
 	logger.Debug("create pane: received payload cwd=%q type=%s", payload.CWD, payload.Type)
 	// An overlay (lazygit/hunk toggle) names its host tab's repo root, not a
-	// folder the user or agent picked — spec 4.4 records only the latter, and
-	// every Alt+G would otherwise push the same repo root to the front of the
-	// recent list. resolveRequestedCWD (no recording) is used for it instead.
+	// folder the user or agent picked, and only a picked folder belongs on the
+	// recent list — recording this one too would push the same repo root to
+	// the front every time Alt+G runs. resolveRequestedCWD (no recording) is
+	// used for it instead.
 	var cwd string
 	if payload.Overlay {
 		cwd = d.resolveRequestedCWD(payload.CWD, d.defaultCWD(conn))
@@ -4705,7 +4706,9 @@ func (d *Daemon) buildWorkspaceState() ipc.WorkspaceState {
 	// Broadcast-only, omitted unless true: a daemon in session 0 (started over
 	// ssh, or by a service) has no saved credentials and no visible desktop.
 	state.DaemonLimited = d.limited
-	// Broadcast-only: this daemon owns groups, recents and notes (spec 4.1).
+	// Broadcast-only: every 3b daemon owns its own groups, recent folders and
+	// notes, and states so on every frame — the TUI never reads hello_resp, so
+	// this is the one frame it can learn the capability from.
 	state.SharedData = true
 
 	// LAST, under the same lock as everything above: rev order must equal

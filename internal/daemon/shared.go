@@ -267,9 +267,8 @@ func (d *Daemon) handleGroupOp(conn *ipc.Conn, msg *ipc.Message) {
 }
 
 // resolveRequestedCWDRecording is resolveRequestedCWD plus the recent-folder
-// record: the request's own directory is recorded exactly when it resolved
-// (spec 4.4 / F-5). A defaulted CWD (empty request) and an unusable one are
-// never recorded.
+// record: the request's own directory is recorded exactly when it resolved.
+// A defaulted CWD (empty request) and an unusable one are never recorded.
 func (d *Daemon) resolveRequestedCWDRecording(cwd, fallback string) string {
 	if cwd == "" {
 		return fallback

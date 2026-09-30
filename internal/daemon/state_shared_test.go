@@ -82,7 +82,7 @@ func TestSharedData_WireDiskAndRestoreRoundTrip(t *testing.T) {
 	}
 }
 
-// F-9: a project whose group is missing from the list gets the name appended.
+// A project whose group is missing from the list gets the name appended.
 func TestRestoreShared_RepairsAProjectGroupMissingFromTheList(t *testing.T) {
 	sm := NewSessionManager(1024)
 	p := sm.CreateProject("api", "/r")

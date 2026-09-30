@@ -128,9 +128,15 @@ recent applies only while its own list is empty — so of several clients
 importing at once, at most one actually changes anything, and the rest find
 the first one's data already there. The notes half of an import runs on a
 worker like any other note write, per pane under that pane's `noteMu`,
-applied only while the pane has no note file yet at all — never one already
-deleted on this daemon (`NoteRev > 0` with no file), which is how a note a
-user deleted here cannot be resurrected by an old client's copy.
+applied only while the pane has no note file on disk yet. That daemon-side
+check is a second, narrower guard, not the reason a deleted note stays
+deleted — the real guard is client-side (`internal/tui/sharedimport.go`'s
+`maybeImport`): a pane only enters the import payload when the FRAME already
+shows `NoteRev == 0` for it, and the revision never resets on a delete, so a
+note this daemon has ever held — including one since deleted — is never even
+offered by a client that has seen that frame. The file-existence check here
+only covers the daemon's own bookkeeping for a pane no connected client has
+reported on yet.
 
 **Recent folders are recorded from the request, never guessed.**
 `RecordRecentCWD` is called only for a directory the request itself named and

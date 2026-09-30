@@ -50,8 +50,9 @@ type NotesEditor struct {
 
 	// Remote editors (a shared destination): the DAEMON holds the text and
 	// its version; the Model half is in sharednotes.go. rev is the version
-	// loaded or last saved; while saveInFlight a frame's note_rev is ignored
-	// (F-3); conflict keeps the user's text and stops autosave until Ctrl+R
+	// loaded or last saved; while saveInFlight a frame's note_rev is ignored,
+	// since it can only be describing a rev this editor's own save already
+	// supersedes; conflict keeps the user's text and stops autosave until Ctrl+R
 	// (reload, confirmed by a second Ctrl+R) or Ctrl+S (overwrite from
 	// currentRev). inFlightText is the buffer as it was when the save in
 	// flight was taken, so an OK answer clears dirty only when nothing was

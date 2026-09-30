@@ -147,7 +147,10 @@ id). So a destination's notes kind WAITS (`notesWaiting`) while any other
 connected destination has not sent a workspace frame yet
 (`paneInventoryMissing`); its groups and recent folders go at once, and the
 notes follow in a notes-only import once every pane id is known
-(`sendWaitingNotes`, run on every applied frame).
+(`sendWaitingNotes`, run on every applied frame), built from the waiting
+destination's NEWEST frame. "Known" means a frame on the CURRENT connection:
+a lost link or a reattach forgets that destination's pane ids
+(`forgetImportFor`), so an old connection's list never opens the wait.
 
 **Recent folders are recorded from the request, never guessed.**
 `RecordRecentCWD` is called only for a directory the request itself named and

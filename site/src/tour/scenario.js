@@ -580,7 +580,9 @@ import { tourIntro, useCases, tourOutro } from "../data/usecases";
     { from: 3.40, to: 3.60, at: "screen", head: "The lid is closed.", text: "gpu01 keeps running every pane." },
     { from: 3.70, to: 3.99, at: { pane: "t1" }, text: "Nothing restarted. The output kept coming while you were away." },
     { from: 4.12, to: 4.99, at: { pane: "d1" }, kind: "box", text: "Docker container: only ~/work/storefront is inside." },
-    { from: 4.20, to: 4.99, at: { foot: "d1" }, text: "No confirmations. The worst it can break is the box." },
+    // Not "the worst it can break is the box": the checkout is mounted read-write and
+    // branches can still move (docs/sandbox-panes.md, "What the sandbox does and does not bound").
+    { from: 4.20, to: 4.99, at: { foot: "d1" }, text: "No confirmations. It can still edit this checkout and move branches." },
     { from: 4.54, to: 4.99, at: { pane: "d2" }, text: "Your machine: ~/.ssh and ~/.aws stay out here." },
     { from: 4.98, to: 5.14, at: { row: "▲" }, head: "▲ waiting  ⠹ working  ✓ finished", text: "Every project rolls up its agents in the sidebar." },
     { from: 5.155, to: 5.41, at: { pane: "q1" }, text: "Alt+Shift+A jumped here. This agent waited longest." },

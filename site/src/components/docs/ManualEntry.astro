@@ -53,10 +53,12 @@ const text = [e.persona, e.heading, ...e.steps, ...e.keys.flat(), ...e.read.map(
   ol { margin: 0; padding: 0; list-style: none; counter-reset: s; display: grid; gap: 9px; }
   ol li { counter-increment: s; display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 8px; font-size: 14px; line-height: 1.5; color: var(--t-text); }
   ol li::before { content: counter(s); font: 700 12px/1.75 var(--mono); color: var(--t-hint); }
-  code { font: 12.5px var(--mono); color: var(--t-title); background: var(--t-line); padding: 0 5px; white-space: nowrap; }
+  /* A command wraps inside its own column, never under the next one: the
+     columns stay narrow at every width because the page width is capped. */
+  code { font: 12.5px var(--mono); color: var(--t-title); background: var(--t-line); padding: 0 5px; overflow-wrap: anywhere; }
   .keys2 { display: grid; gap: 8px; }
   .k { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; font: 12.5px var(--mono); color: var(--t-mute); }
-  kbd { font: 700 12px var(--mono); color: #080808; background: var(--t-title); padding: 1px 7px; border-radius: 3px; box-shadow: 0 2px 0 #9e9e7a; white-space: nowrap; }
+  kbd { font: 700 12px var(--mono); color: #080808; background: var(--t-title); padding: 1px 7px; border-radius: 3px; box-shadow: 0 2px 0 #9e9e7a; max-width: 100%; overflow-wrap: anywhere; }
   .reads { display: grid; gap: 6px; }
   .reads a { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: baseline; font: 12.5px/1.45 var(--mono); color: var(--t-soft); padding: 3px 0; border-bottom: 1px dashed var(--t-line-2); }
   .reads a:last-child { border-bottom: 0; }
@@ -65,6 +67,6 @@ const text = [e.persona, e.heading, ...e.steps, ...e.keys.flat(), ...e.read.map(
   .ar { color: var(--t-hint); }
   .reads a:hover .s { text-decoration: underline; text-underline-offset: 3px; }
   @media (max-width: 980px) { .cols { grid-template-columns: minmax(0, 1fr); } .col + .col { border-left: 0; border-top: 1px solid var(--t-line-2); } }
-  @media (max-width: 600px) { .entry { grid-template-columns: minmax(0, 1fr); } .idx { font-size: 20px; margin-bottom: 8px; } h2, .cols { grid-column: 1; } code { white-space: normal; } }
+  @media (max-width: 600px) { .entry { grid-template-columns: minmax(0, 1fr); } .idx { font-size: 20px; margin-bottom: 8px; } h2, .cols { grid-column: 1; } }
   @media (prefers-reduced-motion: reduce) { .entry:target { animation: none; } }
 </style>

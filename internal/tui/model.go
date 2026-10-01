@@ -1459,6 +1459,52 @@ func (m *Model) refuseReadOnly() tea.Cmd {
 	return m.flashCmd()
 }
 
+// noAdminFlash is what a daemon-wide action says on a connection whose token
+// is not full: read-only and standard tokens both lack it.
+const noAdminFlash = "this connection's token lacks full rights — that action is disabled"
+
+// destCanAdmin reports whether dest may be sent admin-class messages (stop the
+// daemon, reload its plugins, kill a process, set its overlay policy): the
+// local socket and ssh record no rights, and a token must be full.
+func (m Model) destCanAdmin(dest string) bool {
+	r := m.destRights[dest]
+	return r == "" || r == ipc.RightsFull
+}
+
+// refuseNoAdmin flashes why a daemon-wide action did nothing.
+func (m *Model) refuseNoAdmin() tea.Cmd {
+	m.setFlash(noAdminFlash)
+	return m.flashCmd()
+}
+
+// rightsDest is the destination an action with no pane or tab of its own is
+// aimed at, for the rights checks. It is activeDest — except before the first
+// broadcast, and on a daemon that has none to report, when there is no
+// project to name one: then it is the destination this client was started
+// against, which is also where the router's sole-conn fallback sends.
+// Answering "" there would read a read-only --connect session as local and
+// full until its first broadcast.
+func (m *Model) rightsDest() string {
+	if p := m.cur(); p == nil || m.onlyOfflineProjects() {
+		return m.homeDest
+	}
+	return m.activeDest()
+}
+
+// followedProject is the project a viewer of this broadcast shows: the one
+// holding the daemon's active tab — the last switch any client made. The
+// daemon's own active project is not that: a switch_tab into another project
+// moves the active tab and leaves the active project where it was. It is the
+// fallback for a frame whose active tab names no project.
+func followedProject(state WorkspaceStateMsg) string {
+	for _, t := range state.Tabs {
+		if t.ID == state.ActiveTab && t.ProjectID != "" {
+			return t.ProjectID
+		}
+	}
+	return state.ActiveProject
+}
+
 // leavesViewerTab reports whether focusing paneID would move a read-only
 // destination's view off what its daemon shows: a pane in another of its
 // tabs, or — arriving from another destination's project — any project but
@@ -2214,7 +2260,7 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 							m.projectDragPressY = msg.Y
 						}
 					case sidebarRowTab:
-						if !m.destReadOnly(m.activeDest()) {
+						if !m.destReadOnly(m.rightsDest()) {
 							m.sidebarTabDragging = true
 							m.sidebarTabDragIdx = idx
 						}
@@ -2366,7 +2412,7 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 				m.clearDragState()
 				if idx := m.hitTestTab(msg.X); idx >= 0 {
 					// A viewer's tab order is the daemon's: no reorder drag.
-					if !m.destReadOnly(m.activeDest()) {
+					if !m.destReadOnly(m.rightsDest()) {
 						m.tabDragFromIdx = idx
 					}
 					// Checked BEFORE switchTab moves the active tab: manual
@@ -2440,7 +2486,7 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 					// A viewer shows the daemon's split ratios: the press is
 					// refused rather than arming a drag whose layout write
 					// would be dropped, leaving this tree diverged for good.
-					if m.destReadOnly(m.activeDest()) {
+					if m.destReadOnly(m.rightsDest()) {
 						m.clearDragState()
 						cmd := m.refuseReadOnly()
 						return m, cmd
@@ -3259,6 +3305,11 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		// a background project — jumpToPane spans every project so the
 		// request cannot silently no-op just because the target isn't in the
 		// project currently on screen.
+		if m.leavesViewerTab(msg.PaneID) {
+			log.Printf("set_active_pane: pane %s is on another tab of a read-only destination; this viewer follows its daemon", msg.PaneID)
+			cmd := m.refuseReadOnly()
+			return m, tea.Batch(cmd, m.listenForMessages())
+		}
 		ok, overlayCmd := m.jumpToPane(msg.PaneID)
 		if ok {
 			log.Printf("set_active_pane: switched to pane %s", msg.PaneID)
@@ -3754,7 +3805,7 @@ func (m Model) handleNotificationKey(key string) (tea.Model, tea.Cmd) {
 	// drop an event every other client still shows. Refused before HandleKey,
 	// which removes it locally.
 	if key == "d" || key == "D" {
-		readOnly := m.destReadOnly(m.activeDest())
+		readOnly := m.destReadOnly(m.rightsDest())
 		if e := m.notifications.SelectedEvent(); key == "d" && e != nil && m.destReadOnly(m.destOfPane(e.PaneID)) {
 			readOnly = true
 		}
@@ -3779,6 +3830,12 @@ func (m Model) handleNotificationKey(key string) (tea.Model, tea.Cmd) {
 		// doesn't grow history for a jump that never happened.
 		if pane, _, _ := m.findPaneAndTab(paneID); pane == nil {
 			return m, nil
+		}
+		// Refused BEFORE the history push, the focus toggle and the sidebar
+		// unfocus below, so a jump a viewer cannot make leaves nothing behind.
+		if m.leavesViewerTab(paneID) {
+			cmd := m.refuseReadOnly()
+			return m, cmd
 		}
 		m.pushPaneHistory()
 		_, overlayCmd := m.jumpToPane(paneID)
@@ -3837,6 +3894,12 @@ func (m *Model) pushPaneHistory() {
 func (m Model) popPaneHistory() (tea.Model, tea.Cmd) {
 	for len(m.paneHistory) > 0 {
 		ref := m.paneHistory[len(m.paneHistory)-1]
+		// A jump a viewer cannot make is refused with the entry left in
+		// place, not popped: history is unchanged by a refusal.
+		if m.leavesViewerTab(ref.PaneID) {
+			cmd := m.refuseReadOnly()
+			return m, cmd
+		}
 		m.paneHistory = m.paneHistory[:len(m.paneHistory)-1]
 		for _, proj := range m.projects {
 			if proj.ID != ref.ProjectID {
@@ -4507,7 +4570,7 @@ func (m Model) toggleNotesMode() (tea.Model, tea.Cmd) {
 func (m Model) openClosePaneConfirm() (tea.Model, tea.Cmd) {
 	// Two statements: Go does not order the operand m against the call in
 	// `return m, m.refuseReadOnly()`, so the flash could miss the copy.
-	if m.destReadOnly(m.activeDest()) {
+	if m.destReadOnly(m.rightsDest()) {
 		cmd := m.refuseReadOnly()
 		return m, cmd
 	}
@@ -4533,7 +4596,7 @@ func (m Model) openClosePaneConfirm() (tea.Model, tea.Cmd) {
 // openRestartPaneConfirm opens the restart confirm dialog for the active
 // pane. Extracted from the kb.RestartPane case; shared with the context menu.
 func (m Model) openRestartPaneConfirm() (tea.Model, tea.Cmd) {
-	if m.destReadOnly(m.activeDest()) {
+	if m.destReadOnly(m.rightsDest()) {
 		cmd := m.refuseReadOnly()
 		return m, cmd
 	}
@@ -4559,7 +4622,7 @@ func (m Model) openRestartPaneConfirm() (tea.Model, tea.Cmd) {
 // beginPaneRename enters inline pane-rename mode for the active pane.
 // Extracted from the kb.RenamePane case; shared with the context menu.
 func (m Model) beginPaneRename() (tea.Model, tea.Cmd) {
-	if m.destReadOnly(m.activeDest()) {
+	if m.destReadOnly(m.rightsDest()) {
 		cmd := m.refuseReadOnly()
 		return m, cmd
 	}
@@ -4629,7 +4692,7 @@ func (m Model) openHistoryForActivePane() (tea.Model, tea.Cmd) {
 	// Input history is disclosure beyond the workspace, which only an acting
 	// client may ask for; the request would be dropped and the dialog would
 	// wait on an answer that never comes.
-	if m.destReadOnly(m.activeDest()) {
+	if m.destReadOnly(m.rightsDest()) {
 		cmd := m.refuseReadOnly()
 		return m, cmd
 	}
@@ -4657,7 +4720,7 @@ func (m Model) openHistoryForActivePane() (tea.Model, tea.Cmd) {
 // openCloseTabConfirm opens the close-tab confirm for the active tab. Extracted
 // from the kb.CloseTab case; shared with the command palette.
 func (m Model) openCloseTabConfirm() (tea.Model, tea.Cmd) {
-	if m.destReadOnly(m.activeDest()) {
+	if m.destReadOnly(m.rightsDest()) {
 		cmd := m.refuseReadOnly()
 		return m, cmd
 	}
@@ -4680,7 +4743,7 @@ func (m Model) openCloseTabConfirm() (tea.Model, tea.Cmd) {
 // beginTabRename enters inline tab-rename mode for the active tab. Extracted
 // from the kb.RenameTab case; shared with the command palette.
 func (m Model) beginTabRename() (tea.Model, tea.Cmd) {
-	if m.destReadOnly(m.activeDest()) {
+	if m.destReadOnly(m.rightsDest()) {
 		cmd := m.refuseReadOnly()
 		return m, cmd
 	}
@@ -4728,7 +4791,7 @@ func (m Model) openCreatePaneDialog() (tea.Model, tea.Cmd) {
 // of, and the reason this is a parameter rather than a field somebody sets
 // afterwards.
 func (m Model) openCreatePaneDialogFor(target paneTarget) (tea.Model, tea.Cmd) {
-	if m.destReadOnly(m.activeDest()) {
+	if m.destReadOnly(m.rightsDest()) {
 		cmd := m.refuseReadOnly()
 		return m, cmd
 	}
@@ -6709,14 +6772,15 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]str
 	// when that changes, like a screen share. It cannot switch locally
 	// (switchTab/switchProject refuse), so there is no local choice for this
 	// to override. Never pulls focus off another daemon's project.
-	viewer := m.destReadOnly(dest) && state.ActiveProject != ""
+	follow := followedProject(state)
+	viewer := m.destReadOnly(dest) && follow != ""
 	if viewer {
 		if m.followProject == nil {
 			m.followProject = make(map[string]string)
 		}
-		m.followProject[dest] = state.ActiveProject
+		m.followProject[dest] = follow
 		if p := m.cur(); p == nil || p.Dest == dest || m.onlyOfflineProjects() {
-			activeID = state.ActiveProject
+			activeID = follow
 		}
 	}
 
@@ -8201,7 +8265,7 @@ func (m Model) renderStatusBar() string {
 	if m.daemonLimited[m.activeDest()] {
 		right = "[limited] " + right
 	}
-	if m.destReadOnly(m.activeDest()) {
+	if m.destReadOnly(m.rightsDest()) {
 		right = "[read-only] " + right
 	}
 	// Multi-client sync (§4.3): the role marker sits beside [dev], in the same
@@ -10339,7 +10403,7 @@ func (m Model) clientGeometryCmd() tea.Cmd {
 // broadcast is what tells it whether the request took.
 // takeControl is the key and palette entry point: a viewer cannot be master.
 func (m *Model) takeControl() tea.Cmd {
-	if m.destReadOnly(m.activeDest()) {
+	if m.destReadOnly(m.rightsDest()) {
 		return m.refuseReadOnly()
 	}
 	return m.sendTakeControl(m.activeDest())

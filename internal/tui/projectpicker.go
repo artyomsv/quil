@@ -97,7 +97,26 @@ func (m *Model) cycleProject(delta int) tea.Cmd {
 	if n < 2 {
 		return nil
 	}
-	return m.switchProject(((m.activeProject+delta)%n + n) % n)
+	// From a read-only destination's project, that destination's OTHER
+	// projects are not stops: its daemon decides which of them is shown, so
+	// next/prev steps past them to the next project the viewer can reach,
+	// rather than stopping on a refusal.
+	skipDest, skip := "", false
+	if p := m.cur(); p != nil && m.destReadOnly(p.Dest) {
+		skipDest, skip = p.Dest, true
+	}
+	i := m.activeProject
+	for step := 0; step < n-1; step++ {
+		i = ((i+delta)%n + n) % n
+		if skip && m.projects[i].Dest == skipDest {
+			continue
+		}
+		return m.switchProject(i)
+	}
+	if skip {
+		return m.refuseReadOnly() // every other project is on that destination
+	}
+	return nil
 }
 
 func (m *Model) toggleLastProject() tea.Cmd {

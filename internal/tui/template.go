@@ -50,7 +50,7 @@ func templateEditorRows(height int) int {
 }
 
 func (m Model) openNewTemplate() (tea.Model, tea.Cmd) {
-	if m.destReadOnly(m.activeDest()) {
+	if m.destReadOnly(m.rightsDest()) {
 		cmd := m.refuseReadOnly()
 		return m, cmd
 	}

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -155,10 +156,19 @@ func TestReadOnly_MenusGreyCreateCloseRename(t *testing.T) {
 	}{{ipc.RightsReadOnly, false}, {ipc.RightsFull, true}} {
 		t.Run(tc.rights, func(t *testing.T) {
 			m, _ := readOnlyModel(t, tc.rights)
-			m.width, m.height = 172, 48
+			m.sidebarOpen = true
+			m = roUpdate(t, m, tea.WindowSizeMsg{Width: 172, Height: 48})
+
+			// The palette, opened by its key.
+			m = roUpdate(t, m, tea.KeyPressMsg{Code: 'p', Mod: tea.ModAlt | tea.ModShift})
+			if m.dialog != dialogCommandPalette {
+				t.Fatal("setup: the palette did not open")
+			}
+			palette := m.paletteDisplay()
+			m = roUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
 
 			greyed := 0
-			for _, c := range m.buildPaletteCommands() {
+			for _, c := range palette {
 				if !readOnlyGreyedPalette[c.action] {
 					continue
 				}
@@ -171,7 +181,7 @@ func TestReadOnly_MenusGreyCreateCloseRename(t *testing.T) {
 				t.Fatalf("only %d create/close/rename palette rows found — the set or the builder drifted", greyed)
 			}
 			// Rows the palette enables unconditionally on a full destination.
-			for _, c := range m.buildPaletteCommands() {
+			for _, c := range palette {
 				switch c.action {
 				case palActNewPane, palActClosePane, palActRenamePane, palActRenameTab, palActCloseTab,
 					palActCycleTabColor, palActMute, palActEager, palActRestartPane, palActProcesses:
@@ -186,20 +196,49 @@ func TestReadOnly_MenusGreyCreateCloseRename(t *testing.T) {
 				}
 			}
 
-			tab := m.activeTabModel()
-			m.openCtxMenu(tab.ActivePaneModel(), 2, 2)
+			// The pane menu, by its key (quick actions).
+			m = roUpdate(t, m, tea.KeyPressMsg{Code: 'a', Mod: tea.ModAlt})
 			assertCtxRows(t, m.ctxMenu.items, tc.enabled, ctxActRename, ctxActClose,
 				ctxActMute, ctxActAttention, ctxActMarkDeletion, ctxActRestart)
-			m.closeCtxMenu()
-			m.openTabCtxMenu(tab, 2, 2)
+			m = roUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
+
+			// The tab menu, by a right-click on the tab bar.
+			spans := m.tabSpans()
+			m = roUpdate(t, m, tea.MouseClickMsg{X: m.projectSidebarWidth() + spans[0].start + 1, Y: 0, Button: tea.MouseRight})
 			assertCtxRows(t, m.ctxMenu.items, tc.enabled, ctxActRenameTab, ctxActTabColorList)
-			m.closeCtxMenu()
-			m.openProjectCtxMenu(m.cur(), 2, 2)
+			m = roUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
+
+			// The project menu, by a right-click on its sidebar row.
+			m = roUpdate(t, m, tea.MouseClickMsg{X: 1, Y: sidebarRowY(t, m, sidebarRowProject), Button: tea.MouseRight})
 			assertCtxRows(t, m.ctxMenu.items, tc.enabled, ctxActRenameProject, ctxActGroupList)
 			// Client-side only: enabled whatever the rights.
 			assertCtxRows(t, m.ctxMenu.items, true, ctxActDisconnectHost)
 		})
 	}
+}
+
+// ctxItemIndex is the index of the menu row with id.
+func ctxItemIndex(t *testing.T, items []ctxMenuItem, id ctxMenuAction) int {
+	t.Helper()
+	for i, it := range items {
+		if it.id == id {
+			return i
+		}
+	}
+	t.Fatalf("setup: menu row %d missing", id)
+	return -1
+}
+
+// sidebarRowY is the screen row of the first sidebar row of kind.
+func sidebarRowY(t *testing.T, m Model, kind string) int {
+	t.Helper()
+	for y, r := range m.sidebarVisibleRows(m.projectSidebarWidth(), m.sidebarContentHeight()) {
+		if r.kind == kind {
+			return y
+		}
+	}
+	t.Fatalf("setup: no %q row in the sidebar", kind)
+	return -1
 }
 
 func assertCtxRows(t *testing.T, items []ctxMenuItem, enabled bool, ids ...ctxMenuAction) {
@@ -320,6 +359,29 @@ func TestReadOnly_FollowsDaemonActiveTab(t *testing.T) {
 	}
 }
 
+// The followed project is the one holding the daemon's ACTIVE TAB: an MCP
+// switch_tab into another project moves the active tab and leaves the
+// daemon's active project where it was.
+func TestReadOnly_FollowsTheActiveTabsProject(t *testing.T) {
+	for _, tc := range []struct {
+		rights, wantProject string
+	}{{ipc.RightsReadOnly, "proj-b"}, {ipc.RightsFull, "proj-a"}} {
+		t.Run(tc.rights, func(t *testing.T) {
+			m, _ := readOnlyModel(t, tc.rights)
+			m = roUpdate(t, m, followState("proj-a", "t1"))
+			// The daemon's active tab is now t2 (proj-b), its active project
+			// still proj-a.
+			m = roUpdate(t, m, followState("proj-a", "t2"))
+			if got := m.cur().ID; got != tc.wantProject {
+				t.Fatalf("active project = %s, want %s", got, tc.wantProject)
+			}
+			if tc.rights == ipc.RightsReadOnly && m.activeTabModel().ID != "t2" {
+				t.Fatalf("viewer active tab = %s, want t2", m.activeTabModel().ID)
+			}
+		})
+	}
+}
+
 // A daemon-side tab switch inside the viewer's project is followed as is: the
 // typing guard (and its "switched by another client" flash) protects keys a
 // viewer never sends. A full client arms it, as before.
@@ -377,8 +439,15 @@ func TestReadOnly_ProjectSwitchAcrossDestinations(t *testing.T) {
 				runCmdNoWait(cmd)
 				m = next.(Model)
 			}
-			// proj-b → proj-a: within the daemon's own projects.
-			press(tea.KeyLeft)
+			// proj-b → proj-a from the palette: within the daemon's own
+			// projects, refused with the flash.
+			m = roUpdate(t, m, tea.KeyPressMsg{Code: 'p', Mod: tea.ModAlt | tea.ModShift})
+			for i, c := range m.paletteDisplay() {
+				if c.action == palActSwitchProject && c.arg == "proj-a" {
+					m.palette.cursor = i
+				}
+			}
+			m = roUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 			want := "proj-a"
 			if rights == ipc.RightsReadOnly {
 				want = "proj-b"
@@ -389,12 +458,23 @@ func TestReadOnly_ProjectSwitchAcrossDestinations(t *testing.T) {
 			if flashed := m.flashText == readOnlyFlash; flashed != (rights == ipc.RightsReadOnly) {
 				t.Fatalf("within the destination: read-only flash = %v (flash %q)", flashed, m.flashText)
 			}
-			// Leave for the local project: always allowed.
-			m.activeProject = indexOfProject(m.projects, "proj-a")
+			// Previous from proj-b: a viewer steps PAST proj-a (same read-only
+			// destination) to the local project instead of stopping on a
+			// refusal.
+			m.activeProject = indexOfProject(m.projects, "proj-b")
+			m.flashText = ""
 			press(tea.KeyLeft)
-			if got := m.cur().ID; got != "proj-l" {
-				t.Fatalf("leaving: active = %s, want proj-l", got)
+			want = "proj-a"
+			if rights == ipc.RightsReadOnly {
+				want = "proj-l"
 			}
+			if got := m.cur().ID; got != want {
+				t.Fatalf("previous: active = %s, want %s", got, want)
+			}
+			if m.flashText == readOnlyFlash {
+				t.Fatal("previous: a skip flashed a refusal")
+			}
+			m.activeProject = indexOfProject(m.projects, "proj-l")
 			// Come back: next from proj-l reaches proj-a; a viewer lands on
 			// the daemon's active proj-b instead.
 			press(tea.KeyRight)
@@ -404,6 +484,30 @@ func TestReadOnly_ProjectSwitchAcrossDestinations(t *testing.T) {
 			}
 			if got := m.cur().ID; got != want {
 				t.Fatalf("coming back: active = %s, want %s", got, want)
+			}
+		})
+	}
+}
+
+// Next/previous with only the viewer's own destination's projects to step to:
+// refused with the flash, nothing moves.
+func TestReadOnly_ProjectCycleOnlyOwnDestination(t *testing.T) {
+	for _, rights := range []string{ipc.RightsReadOnly, ipc.RightsFull} {
+		t.Run(rights, func(t *testing.T) {
+			readOnly := rights == ipc.RightsReadOnly
+			m, _ := readOnlyModel(t, rights)
+			m = roUpdate(t, m, followState("proj-b", "t2"))
+			m.activeProject = indexOfProject(m.projects, "proj-b")
+			m = roUpdate(t, m, tea.KeyPressMsg{Mod: tea.ModAlt | tea.ModShift, Code: tea.KeyRight})
+			want := "proj-a"
+			if readOnly {
+				want = "proj-b"
+			}
+			if got := m.cur().ID; got != want {
+				t.Fatalf("active = %s, want %s", got, want)
+			}
+			if flashed := m.flashText == readOnlyFlash; flashed != readOnly {
+				t.Fatalf("read-only flash = %v (flash %q)", flashed, m.flashText)
 			}
 		})
 	}
@@ -684,17 +788,33 @@ func TestReadOnly_GroupChangesRefused(t *testing.T) {
 		t.Run(rights, func(t *testing.T) {
 			t.Setenv("QUIL_HOME", t.TempDir())
 			readOnly := rights == ipc.RightsReadOnly
-			m, _ := twoPaneReadOnlyModel(t, rights)
+			m, _ := readOnlyModel(t, rights)
 			m.groups = projectGroups{Groups: []projectGroup{
 				{Name: "G", Members: []groupMember{{Dest: roDest, ID: "proj-1"}}},
 				{Name: "H"},
 			}}
-			m.openGroupCtxMenu(0, 2, 2)
-			assertCtxRows(t, m.ctxMenu.items, !readOnly, ctxActRenameGroup, ctxActDeleteGroup)
-			m.closeCtxMenu()
+			m.sidebarOpen = true
+			m = roUpdate(t, m, tea.WindowSizeMsg{Width: 172, Height: 48})
 
-			cmd := m.moveProjectToGroup(roDest, "proj-1", "H")
-			runCmdNoWait(cmd)
+			// Right-click on G's header: Rename and Delete greyed for a viewer.
+			m = roUpdate(t, m, tea.MouseClickMsg{X: 1, Y: sidebarRowY(t, m, sidebarRowGroup), Button: tea.MouseRight})
+			assertCtxRows(t, m.ctxMenu.items, !readOnly, ctxActRenameGroup, ctxActDeleteGroup)
+			m = roUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
+
+			// Right-click on the project, then Enter on "Move to group…".
+			m = roUpdate(t, m, tea.MouseClickMsg{X: 1, Y: sidebarRowY(t, m, sidebarRowProject), Button: tea.MouseRight})
+			assertCtxRows(t, m.ctxMenu.items, !readOnly, ctxActGroupList)
+			m.ctxMenu.cursor = ctxItemIndex(t, m.ctxMenu.items, ctxActGroupList)
+			m = roUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+			if !readOnly {
+				// The list opened in place; choose H.
+				for i, it := range m.ctxMenu.items {
+					if it.id == ctxActSetGroup && it.groupName == "H" {
+						m.ctxMenu.cursor = i
+					}
+				}
+				m = roUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+			}
 			if moved := m.groups.groupOf(roDest, "proj-1") == 1; moved == readOnly {
 				t.Fatalf("project moved to group H = %v on rights %q", moved, rights)
 			}
@@ -718,5 +838,203 @@ func TestReadOnly_RemoteNoteIsViewOnly(t *testing.T) {
 				t.Fatalf("editor ReadOnly = %v after load on rights %q", got, rights)
 			}
 		})
+	}
+}
+
+// roCmdQuits runs cmd's tree (abandoning slow ticks) and reports whether any
+// leaf answered tea.QuitMsg.
+func roCmdQuits(cmd tea.Cmd) bool {
+	if cmd == nil {
+		return false
+	}
+	done := make(chan tea.Msg, 1)
+	go func() { done <- cmd() }()
+	select {
+	case msg := <-done:
+		switch msg := msg.(type) {
+		case tea.QuitMsg:
+			return true
+		case tea.BatchMsg:
+			for _, c := range msg {
+				if roCmdQuits(c) {
+					return true
+				}
+			}
+		}
+	case <-time.After(200 * time.Millisecond):
+	}
+	return false
+}
+
+func sentType(conn *fakeConn, typ string) bool {
+	conn.mu.Lock()
+	defer conn.mu.Unlock()
+	for _, msg := range conn.sent {
+		if msg.Type == typ {
+			return true
+		}
+	}
+	return false
+}
+
+// Stop daemon is admin-class: a read-only or a standard token gets a greyed
+// row, a refusal and a flash — no shutdown sent, and the TUI does not quit.
+// Full stops the daemon and quits, as before.
+func TestNoAdmin_StopDaemonRefused(t *testing.T) {
+	for _, rights := range []string{ipc.RightsReadOnly, ipc.RightsStandard, ipc.RightsFull} {
+		t.Run(rights, func(t *testing.T) {
+			canAdmin := rights == ipc.RightsFull
+			m, conn := readOnlyModel(t, rights)
+			m = roUpdate(t, m, tea.WindowSizeMsg{Width: 172, Height: 48})
+			m = roUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyF1})
+			if m.dialog != dialogAbout {
+				t.Fatal("setup: F1 did not open About")
+			}
+			if greyed := strings.Contains(m.renderAboutDialog(), dialogSubtle.Render("Stop daemon")); greyed == canAdmin {
+				t.Fatalf("Stop daemon row greyed = %v on rights %q", greyed, rights)
+			}
+			m.dialogCursor = aboutStopDaemonIndex
+			m = roUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+			if opened := m.dialog == dialogConfirm; opened != canAdmin {
+				t.Fatalf("shutdown confirm opened = %v on rights %q", opened, rights)
+			}
+			// The confirm itself refuses too, for a confirm reached some other way.
+			m.dialog, m.confirmKind = dialogConfirm, confirmKindShutdown
+			m.flashText = ""
+			next, cmd := m.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
+			m = next.(Model)
+			if quits := roCmdQuits(cmd); quits != canAdmin {
+				t.Fatalf("TUI quit = %v on rights %q", quits, rights)
+			}
+			if sent := sentType(conn, ipc.MsgShutdown); sent != canAdmin {
+				t.Fatalf("shutdown sent = %v on rights %q", sent, rights)
+			}
+			if flashed := m.flashText == noAdminFlash; flashed == canAdmin {
+				t.Fatalf("no-admin flash = %v on rights %q (flash %q)", flashed, rights, m.flashText)
+			}
+		})
+	}
+}
+
+// The overlay policy is sent only where it is accepted: not to a read-only or
+// a standard token's daemon, whose refusals would be audit noise.
+func TestNoAdmin_OverlayPolicyNotSent(t *testing.T) {
+	for _, rights := range []string{ipc.RightsReadOnly, ipc.RightsStandard, ipc.RightsFull} {
+		t.Run(rights, func(t *testing.T) {
+			m, conn := readOnlyModel(t, rights)
+			m = roUpdate(t, m, tea.WindowSizeMsg{Width: 172, Height: 48})
+			if sent := sentType(conn, ipc.MsgOverlayPolicy); sent != (rights == ipc.RightsFull) {
+				t.Fatalf("overlay_policy sent = %v on rights %q", sent, rights)
+			}
+		})
+	}
+}
+
+// Before the first broadcast — or on a daemon with nothing to report — there
+// is no project, so the rights come from the destination this client started
+// against: the tag shows, and Ctrl+T / Ctrl+N send nothing.
+func TestReadOnly_NoProjectsYet(t *testing.T) {
+	for _, rights := range []string{ipc.RightsReadOnly, ipc.RightsFull} {
+		t.Run(rights, func(t *testing.T) {
+			readOnly := rights == ipc.RightsReadOnly
+			conn := newFakeConn()
+			t.Cleanup(func() { close(conn.recv) })
+			r := NewRouter(map[string]Client{roDest: conn})
+			m := Model{
+				cfg: config.Default(), client: r, tabDragFromIdx: -1, termFocused: true,
+				notifications: NewNotificationCenter(30, 50),
+			}
+			m.initKeymap()
+			m.SetHomeDest(roDest)
+			m.SetDestRights(roDest, rights)
+			m = roUpdate(t, m, tea.WindowSizeMsg{Width: 172, Height: 48})
+			if tagged := strings.Contains(m.renderStatusBar(), "[read-only]"); tagged != readOnly {
+				t.Fatalf("[read-only] shown = %v on rights %q", tagged, rights)
+			}
+			for _, key := range []tea.KeyPressMsg{{Code: 't', Mod: tea.ModCtrl}, {Code: 'n', Mod: tea.ModCtrl}} {
+				m.dialog = dialogNone
+				m = roUpdate(t, m, key)
+				if opened := m.dialog == dialogCreatePane; opened == readOnly {
+					t.Fatalf("%s opened the create dialog = %v on rights %q", key.String(), opened, rights)
+				}
+			}
+			if readOnly {
+				if got := actSent(conn); len(got) != 0 {
+					t.Fatalf("a viewer with no projects sent act messages: %v", got)
+				}
+			}
+		})
+	}
+}
+
+// The router keys rights by the conn it actually picks: an unstamped send
+// before the first broadcast (active dest "") reaches the sole conn, and that
+// conn is read-only.
+func TestRouter_SoleConnFallbackKeepsItsRights(t *testing.T) {
+	for _, rights := range []string{ipc.RightsReadOnly, ipc.RightsFull} {
+		t.Run(rights, func(t *testing.T) {
+			conn := newFakeConn()
+			defer close(conn.recv)
+			r := NewRouter(map[string]Client{roDest: conn})
+			r.SetDestRights(roDest, rights)
+			act, _ := ipc.NewMessage(ipc.MsgCreateTab, ipc.CreateTabPayload{})
+			_ = r.Send(act) // unstamped; the active dest is still ""
+			if sent := sentType(conn, ipc.MsgCreateTab); sent != (rights == ipc.RightsFull) {
+				t.Fatalf("create_tab reached the sole conn = %v on rights %q", sent, rights)
+			}
+		})
+	}
+}
+
+// A notification for a pane in another of the viewer's tabs: Enter refuses,
+// and leaves no history entry, no focus-mode toggle and the sidebar focused.
+func TestReadOnly_NotificationJumpLeavesNoTrace(t *testing.T) {
+	for _, rights := range []string{ipc.RightsReadOnly, ipc.RightsFull} {
+		t.Run(rights, func(t *testing.T) {
+			readOnly := rights == ipc.RightsReadOnly
+			m, _ := readOnlyModel(t, rights)
+			p9 := NewPaneModel("pane-9", testRingBufSize)
+			t.Cleanup(p9.Dispose)
+			tab2 := m.projects[0].tabs[1]
+			tab2.Root, tab2.ActivePane = NewLeaf(p9), "pane-9"
+			m = roUpdate(t, m, tea.WindowSizeMsg{Width: 172, Height: 48})
+			m.notifications.visible = true
+			m.notifications.AddEvent(ipc.PaneEventPayload{ID: "e1", PaneID: "pane-9", TabID: "tab-2",
+				Type: "command_complete", Title: "done", Severity: "info"})
+			m.sidebarFocused = true
+			m = roUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+			if moved := m.activeTabModel().ID == "tab-2"; moved == readOnly {
+				t.Fatalf("jumped to tab-2 = %v on rights %q", moved, rights)
+			}
+			if readOnly {
+				if len(m.paneHistory) != 0 || !m.sidebarFocused || m.activeTabModel().FocusMode() {
+					t.Fatalf("a refused jump left history=%d sidebarFocused=%v focus=%v",
+						len(m.paneHistory), m.sidebarFocused, m.activeTabModel().FocusMode())
+				}
+				if m.flashText != readOnlyFlash {
+					t.Fatalf("flash = %q, want the read-only flash", m.flashText)
+				}
+			}
+		})
+	}
+}
+
+// Disconnecting a host forgets its rights and what its viewer followed, in
+// the Model and in the router.
+func TestReadOnly_DisconnectForgetsRights(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir()) // forgetting a host rewrites config
+	m, _ := readOnlyModel(t, ipc.RightsReadOnly)
+	m = roUpdate(t, m, followState("proj-a", "t1"))
+	m.confirmKind, m.confirmID, m.dialog = confirmKindDisconnectHost, roDest, dialogConfirm
+	m = roUpdate(t, m, tea.KeyPressMsg{Code: 'y', Text: "y"})
+	if m.destReadOnly(roDest) || m.followProject[roDest] != "" {
+		t.Fatalf("after disconnect: readOnly=%v follow=%q", m.destReadOnly(roDest), m.followProject[roDest])
+	}
+	r := m.client.(*Router)
+	r.mu.RLock()
+	_, kept := r.rights[roDest]
+	r.mu.RUnlock()
+	if kept {
+		t.Fatal("after disconnect: the router still holds the destination's rights")
 	}
 }

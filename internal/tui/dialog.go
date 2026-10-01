@@ -888,7 +888,7 @@ func (m Model) handleAboutKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.dialog = dialogPlugins
 			m.dialogCursor = 0
 		case 3:
-			if m.destReadOnly(m.activeDest()) {
+			if m.destReadOnly(m.rightsDest()) {
 				cmd := m.refuseReadOnly()
 				return m, cmd
 			}
@@ -923,7 +923,13 @@ func (m Model) handleAboutKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case aboutStopDaemonIndex:
 			// Stop daemon: route to the shutdown confirm. Enter here only
 			// opens the confirm; the confirm itself requires `y` to fire
-			// MsgShutdown (see handleConfirmKey).
+			// MsgShutdown (see handleConfirmKey). Greyed, and refused, on a
+			// connection whose token is not full: the daemon would refuse
+			// the shutdown, and the TUI would quit for nothing.
+			if !m.destCanAdmin(m.rightsDest()) {
+				cmd := m.refuseNoAdmin()
+				return m, cmd
+			}
 			m.dialog = dialogConfirm
 			m.confirmKind = confirmKindShutdown
 			m.resetConfirmWorktrees()
@@ -1194,6 +1200,12 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			// the outcome renders as a line in that dialog. The removed
 			// version's Esc path disagreed with its own accept path here.
 			m.dialog = dialogProcesses
+			// Kill is admin-class: refused for a token that is not full,
+			// against the destination of the pane the process runs under.
+			if !m.destCanAdmin(m.destOfPane(m.confirmID)) {
+				cmd := m.refuseNoAdmin()
+				return m, cmd
+			}
 			return m, m.sendKillProcess()
 		}
 
@@ -1245,6 +1257,12 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// user explicitly asked to stop, the TUI exits either way.
 		if kind == confirmKindShutdown {
 			m.dialog = dialogNone
+			// Second line behind the greyed About row: no shutdown is sent
+			// and the TUI does not quit when the token cannot stop it.
+			if !m.destCanAdmin(m.rightsDest()) {
+				cmd := m.refuseNoAdmin()
+				return m, cmd
+			}
 			if m.client != nil {
 				req, _ := ipc.NewMessage(ipc.MsgShutdown, nil)
 				if sendErr := m.client.Send(req); sendErr != nil {
@@ -1564,9 +1582,14 @@ func (m Model) renderAboutDialog() string {
 		"What's New",
 		"Stop daemon",
 	}
+	// Stop daemon is greyed (not hidden) for a token that cannot stop it.
+	noAdmin := !m.destCanAdmin(m.rightsDest())
 	for i, item := range items {
 		cursor := "  "
 		style := dialogNormal
+		if i == aboutStopDaemonIndex && noAdmin {
+			style = dialogSubtle
+		}
 		if i == m.dialogCursor {
 			cursor = "> "
 			style = dialogSelected
@@ -3277,6 +3300,11 @@ func (m Model) handlePluginsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 
 		btnIdx := m.dialogCursor - len(allPlugins)
+		// Both buttons end in a daemon plugin reload, which is admin-class.
+		if !m.destCanAdmin(m.rightsDest()) {
+			cmd := m.refuseNoAdmin()
+			return m, cmd
+		}
 		if btnIdx == 1 {
 			plugin.EnsureDefaultPlugins(config.PluginsDir())
 		}
@@ -3429,6 +3457,12 @@ func (m Model) handleTOMLEditorKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.tomlEditor = nil
 		m.dialog = dialogPlugins
 		m.dialogCursor = 0
+		// The file is this client's own and stays saved, and the local
+		// registry above is reloaded; only the daemon's reload is admin-class.
+		if !m.destCanAdmin(m.rightsDest()) {
+			refuse := m.refuseNoAdmin()
+			return m, tea.Batch(refuse, cmd)
+		}
 		reloadCmd := reloadPluginsThenAskCmd(m.client)
 		if cmd != nil {
 			return m, tea.Batch(reloadCmd, cmd)

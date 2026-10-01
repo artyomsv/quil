@@ -644,7 +644,7 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 		})
 	}
 
-	if m.destReadOnly(m.activeDest()) {
+	if m.destReadOnly(m.rightsDest()) {
 		greyReadOnlyPalette(cmds)
 	}
 	return cmds
@@ -1136,7 +1136,9 @@ func (m Model) executePaletteCommand(c paletteCommand) (tea.Model, tea.Cmd) {
 	case palActSwitchTab:
 		for i, tab := range m.curTabs() {
 			if tab != nil && tab.ID == c.arg {
-				return m, m.switchTab(i)
+				// Two statements: switchTab can set a flash through the pointer.
+				cmd := m.switchTab(i)
+				return m, cmd
 			}
 		}
 		return m, nil
@@ -1273,7 +1275,7 @@ func (m Model) executePaletteCommand(c paletteCommand) (tea.Model, tea.Cmd) {
 		return m, tea.ClearScreen
 	case palActProcesses:
 		// The report it asks for is act-class; a viewer would wait on nothing.
-		if m.destReadOnly(m.activeDest()) {
+		if m.destReadOnly(m.rightsDest()) {
 			cmd := m.refuseReadOnly()
 			return m, cmd
 		}

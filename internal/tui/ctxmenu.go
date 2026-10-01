@@ -480,7 +480,7 @@ func (m *Model) openCtxMenu(pane *PaneModel, anchorX, anchorY int) {
 	}
 	// Greyed before firstEnabled, so the cursor never starts on a dead row.
 	// The pane menu always targets a pane of the active tab.
-	if m.destReadOnly(m.activeDest()) {
+	if m.destReadOnly(m.rightsDest()) {
 		greyReadOnlyItems(s.items)
 	}
 	s.cursor = firstEnabled(s.items)

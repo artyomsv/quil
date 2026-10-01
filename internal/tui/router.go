@@ -57,6 +57,16 @@ func NewRouter(conns map[string]Client) *Router {
 // looking at. Safe from any goroutine.
 func (r *Router) SetActiveDest(dest string) { r.activeDest.Store(dest) }
 
+// ForgetDestRights drops a destination's rights, for a host the user
+// disconnected: a later connect of the same name logs in again and records
+// its own. Not part of Remove, which a reconnect also calls between the
+// re-login that set the new rights and the Add.
+func (r *Router) ForgetDestRights(dest string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.rights, dest)
+}
+
 // SetDestRights records a destination's rights level. Safe from any goroutine.
 func (r *Router) SetDestRights(dest, rights string) {
 	r.mu.Lock()
@@ -311,19 +321,24 @@ func (r *Router) Send(m *ipc.Message) error {
 	m.Origin = dest
 
 	r.mu.RLock()
-	readOnly := r.rights[dest] == ipc.RightsReadOnly
 	c, ok := r.conns[dest]
+	// key is the destination of the conn actually chosen. The sole-conn
+	// fallback below can pick a conn whose key is not dest (an unstamped send
+	// before the first broadcast, when the active dest is still ""), and the
+	// rights belong to the conn the bytes go to, not to the name asked for.
+	key := dest
 	if !ok && !stamped && len(r.conns) == 1 {
-		for _, only := range r.conns {
-			c, ok = only, true
+		for k, only := range r.conns {
+			c, ok, key = only, true, k
 		}
 	}
+	readOnly := r.rights[key] == ipc.RightsReadOnly
 	r.mu.RUnlock()
 
 	if readOnly && !clientauth.IsView(m.Type) {
 		// The daemon would refuse it anyway; not sending it keeps a viewer's
 		// keystrokes, resizes and OSC 7 reports off the wire.
-		logger.Debug("router: read-only %q: dropping %s", dest, m.Type)
+		logger.Debug("router: read-only %q: dropping %s", key, m.Type)
 		return nil
 	}
 

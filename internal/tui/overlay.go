@@ -342,7 +342,15 @@ func (m *Model) overlayPolicyCmd() tea.Cmd {
 		IdleTimeoutMinutes: m.cfg.Overlay.IdleTimeoutMinutes,
 		MaxLive:            m.cfg.Overlay.MaxLive,
 	}
-	dests := m.knownDests()
+	// Admin-class: only the local socket, ssh and full tokens may set it. A
+	// read-only or standard token would be refused and audited on every
+	// attach and Settings commit, so it is not sent there at all.
+	var dests []string
+	for _, d := range m.knownDests() {
+		if m.destCanAdmin(d) {
+			dests = append(dests, d)
+		}
+	}
 	return func() tea.Msg {
 		// A fresh Message per destination — sendForDest stamps Origin, so a
 		// message shared across destinations would be re-stamped mid-flight.

@@ -261,6 +261,14 @@ func (m *Model) disconnectDest(dest string) {
 	delete(m.redialFns, dest)
 	delete(m.attached, dest)
 	delete(m.links, dest)
+	// The rights the last login granted, and what a viewer of it followed: a
+	// later connect of the same name logs in again and records its own, and a
+	// leftover read-only entry would gate a destination that no longer exists.
+	delete(m.destRights, dest)
+	delete(m.followProject, dest)
+	if r, ok := m.client.(*Router); ok {
+		r.ForgetDestRights(dest)
+	}
 	// Every other per-destination table goes with them. These two are read
 	// through the ACTIVE dest today, so a leftover entry is unreachable rather
 	// than wrong — but they are the same class of key as the three above, and

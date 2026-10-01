@@ -1052,9 +1052,12 @@ func (m Model) submitProjectForm() (tea.Model, tea.Cmd) {
 	// button did nothing the user could see.
 	rootDir := m.cwdBrowseDir
 	if m.projectFormID == "" {
-		return m, m.submitNewProject(m.projectFormName, rootDir)
+		// Two statements: submitNewProject sets the form error through the pointer.
+		cmd := m.submitNewProject(m.projectFormName, rootDir)
+		return m, cmd
 	}
-	return m, m.submitRenameProject(m.projectFormID, m.projectFormName, rootDir)
+	cmd := m.submitRenameProject(m.projectFormID, m.projectFormName, rootDir)
+	return m, cmd
 }
 
 // renderProjectDialog renders both dialogProjectNew and dialogProjectRename

@@ -29,7 +29,7 @@ type Config struct {
 	Remote       RemoteConfig       `toml:"remote"`
 	Sandbox      SandboxConfig      `toml:"sandbox"`
 	Agents       AgentsConfig       `toml:"agents"`
-	// Listener is the daemon's token-authenticated TCP listener (phase 4).
+	// Listener is the daemon's token-authenticated TCP listener.
 	Listener ListenerConfig `toml:"listener"`
 	// Destinations are the ADDITIONAL daemons this client attaches to beside
 	// the local one, each contributing its projects to the same sidebar. A

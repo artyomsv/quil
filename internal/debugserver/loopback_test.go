@@ -37,8 +37,8 @@ func TestLoopbackAddr(t *testing.T) {
 	}
 }
 
-// Ruling P-15: extracting LoopbackAddr leaves every QUIL_PPROF message
-// byte-identical (these strings are what a user greps for).
+// Extracting LoopbackAddr must leave every QUIL_PPROF message byte-identical:
+// these strings are what a user greps for.
 func TestAddr_PprofMessageUnchanged(t *testing.T) {
 	for in, want := range map[string]string{
 		"0.0.0.0:6060": `QUIL_PPROF="0.0.0.0:6060" would bind "0.0.0.0", which is not loopback; ` +

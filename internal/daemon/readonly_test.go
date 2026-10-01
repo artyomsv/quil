@@ -77,6 +77,7 @@ func TestReadOnly_AttachDropsCWD(t *testing.T) {
 	if rec, _ := h.d.clientByConn(viewerConn(t, h, "owner")); rec.cwd == "" {
 		t.Fatal("control: a full attach recorded no cwd — the test cannot fail")
 	}
+	finishDispatch(t, full) // the full attach bootstraps a tab past its state frame
 }
 
 // deferredPane builds a restored-but-not-spawned pane and counts spawns
@@ -285,6 +286,7 @@ func TestClientID_ViewerCannotClaimOwnersID(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("%d refused-attach audit lines for 3 attempts in a minute, want 1", n)
 	}
+	finishDispatch(t, owner) // the owner's attach bootstraps a tab past the election
 }
 
 // GUARD (ruling P-7): a local reconnect replacing its own dead record passes
@@ -300,6 +302,8 @@ func TestClientID_LocalReconnectReplaces(t *testing.T) {
 	if h.d.clientCount() != 1 {
 		t.Fatalf("clients=%d, want the dead record replaced", h.d.clientCount())
 	}
+	finishDispatch(t, first)
+	finishDispatch(t, second)
 }
 
 func attachTestClientID(t *testing.T, sock, id string) *ipc.Client {

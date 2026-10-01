@@ -216,6 +216,7 @@ func TestLogin_UnauthConnReadsNoBroadcast(t *testing.T) {
 	tab := h.d.session.CreateTab("t")
 	sendNoID(t, local, ipc.MsgCreatePane, ipc.CreatePanePayload{TabID: tab.ID})
 	expectNoFrame(t, raw, 500*time.Millisecond)
+	finishDispatch(t, local) // the create's spawn reads newSessionFn, which cleanup restores
 }
 
 func TestLogin_OversizeFirstFrameClosed(t *testing.T) {

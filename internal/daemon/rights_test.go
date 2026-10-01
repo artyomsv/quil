@@ -349,6 +349,25 @@ func TestRights_PrivilegedAudited(t *testing.T) {
 	h.waitAudit(t, "privileged create", func(e auditEntry) bool {
 		return e.Event == "privileged" && e.Type == ipc.MsgCreatePane && e.Reason == "raw instance arguments"
 	})
+	// The audit line is written BEFORE dispatch, so the create may still be
+	// running here — and its spawn reads newSessionFn, which the harness's
+	// cleanup restores. One conn's frames dispatch in order, so an answered
+	// request sent after it means the create has returned.
+	finishDispatch(t, local)
+	if n := len(h.d.session.Panes(tab.ID)); n != 1 {
+		t.Fatalf("the audited create left %d pane(s) in the tab, want 1", n)
+	}
+}
+
+// finishDispatch returns once every frame c sent before it has been handled:
+// one conn's frames dispatch in order, so the answer to a request sent now
+// arrives only after the earlier handlers returned. A test that sent an
+// id-less request whose handler spawns calls it before ending, or the
+// handler can still be reading the package's spawn seam when the harness's
+// cleanup restores it.
+func finishDispatch(t *testing.T, c *ipc.Client) {
+	t.Helper()
+	roundTrip(t, c, ipc.MsgListTabsReq, ipc.MsgListTabsResp, struct{}{})
 }
 
 // A full TCP conn's admin action is audited with the token that made it.
@@ -365,6 +384,7 @@ func TestRights_PrivilegedAuditedFromTCP(t *testing.T) {
 		return e.Event == "privileged" && e.Type == ipc.MsgReloadPlugins && e.Transport == ipc.TransportTCP &&
 			e.TokenID == tokenID && e.TokenName == "admin" && e.Rights == ipc.RightsFull
 	})
+	finishDispatch(t, full) // the reload may still be running past its audit line
 }
 
 // A type in no class is admin at runtime, so it is refused below full. Its

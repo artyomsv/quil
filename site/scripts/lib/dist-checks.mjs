@@ -66,7 +66,8 @@ export function readPage(html) {
     const tag = links.find((t) => (attr(t, "rel") ?? "").toLowerCase() === rel);
     return tag ? attr(tag, "href") : null;
   };
-  const scripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)];
+  // A browser ends a script at "</script" plus anything up to ">", e.g. "</script >".
+  const scripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\b[^>]*>/gi)];
   const isLd = (open) => /type\s*=\s*["']application\/ld\+json["']/i.test(open);
   const refresh = meta("http-equiv", "refresh");
   return {

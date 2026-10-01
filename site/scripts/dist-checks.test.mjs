@@ -92,6 +92,13 @@ test("readPage counts inline scripts but not JSON-LD or src scripts", () => {
   assert.equal(p.jsonLd.length, 1);
 });
 
+test("readPage ends a script at </script followed by whitespace, as browsers do", () => {
+  const tabNewline = String.fromCharCode(9, 10);
+  const p = readPage(`<script type="application/ld+json">{"a":1}</script ><script type="module">alert(1)</script${tabNewline} x>`);
+  assert.deepEqual(p.jsonLd, ['{"a":1}']);
+  assert.equal(p.inlineScripts, 1);
+});
+
 test("githubSlug follows GitHub's heading anchors", () => {
   assert.equal(githubSlug("The 36 tools"), "the-36-tools");
   assert.equal(githubSlug("Client/daemon version handshake"), "clientdaemon-version-handshake");

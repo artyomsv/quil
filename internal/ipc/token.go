@@ -1,6 +1,6 @@
 package ipc
 
-// Token management (phase 4, §6). Class `local`: the daemon accepts these from
+// Token management. Class `local`: the daemon accepts these from
 // the local socket only, whatever a TCP conn's rights.
 const (
 	MsgTokenCreateReq  = "token_create_req"

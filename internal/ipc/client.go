@@ -154,7 +154,7 @@ func NewClientWithDialer(ctx context.Context, dial DialFunc) (*Client, error) {
 }
 
 // ReceiveByID reads frames until one carries id, or timeout passes. It is for
-// the TCP login only (§10): it runs BEFORE any receive loop owns the conn, so
+// the TCP login only: it runs BEFORE any receive loop owns the conn, so
 // it is the sole reader, and an unauthenticated conn is sent no broadcast, so a
 // frame with another id is unexpected and discarded.
 func (c *Client) ReceiveByID(id string, timeout time.Duration) (*Message, error) {

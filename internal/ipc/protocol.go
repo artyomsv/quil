@@ -409,7 +409,7 @@ type CreatePanePayload struct {
 	// reachable from the wire. The MCP bridge deliberately does not expose
 	// the field.
 	Sandbox *SandboxSpec `json:"sandbox,omitempty"`
-	// Toggles and KubeContext are the setup dialog's NAMED choices (§7.3):
+	// Toggles and KubeContext are the setup dialog's NAMED choices:
 	// toggle names and a kube context, resolved to arguments by the daemon.
 	// The TUI sends these instead of folding them into InstanceArgs, which a
 	// standard-rights token may not send.
@@ -857,7 +857,7 @@ type ReadPaneOutputRespPayload struct {
 	Lines  int    `json:"lines"`
 	// NotRunning: the pane has no live process (deferred, exited, or a
 	// placeholder). A read-only viewer is answered from what exists instead
-	// of spawning it (§7.5).
+	// of spawning it.
 	NotRunning bool `json:"not_running,omitempty"`
 }
 
@@ -2072,9 +2072,10 @@ func ReadMessage(r io.Reader) (*Message, error) {
 	return ReadMessageLimit(r, maxFrameSize)
 }
 
-// ReadMessageLimit is ReadMessage with an explicit frame cap. The cap is
-// checked against the length prefix BEFORE the payload buffer exists, which
-// is what lets a pre-login TCP conn be held to 4 KiB (§5.2).
+// ReadMessageLimit reads one length-prefixed frame and refuses a length
+// prefix above limit BEFORE the payload buffer exists, which is what lets a
+// pre-login TCP conn be held to 4 KiB. ReadMessage is ReadMessageLimit with
+// the default cap.
 func ReadMessageLimit(r io.Reader, limit uint32) (*Message, error) {
 	var lenBuf [4]byte
 	if _, err := io.ReadFull(r, lenBuf[:]); err != nil {

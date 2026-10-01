@@ -1499,6 +1499,10 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		d.handlePreLogin(conn, msg)
 		return
 	}
+	release, ok := d.admitRequest(conn, conn.Auth(), msg)
+	if !ok {
+		return
+	}
 
 	// Log all IPC messages except high-frequency ones (input, resize, layout,
 	// client stat).
@@ -1768,7 +1772,7 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	case ipc.MsgGetTaskReq:
 		d.handleGetTaskReq(conn, msg)
 	case ipc.MsgWaitTaskReq:
-		d.handleWaitTaskReq(conn, msg)
+		d.handleWaitTaskReq(conn, msg, release)
 	case ipc.MsgListTasksReq:
 		d.handleListTasksReq(conn, msg)
 	case ipc.MsgListPanesReq:
@@ -1825,7 +1829,7 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	case ipc.MsgGetNotificationsReq:
 		d.handleGetNotificationsReq(conn, msg)
 	case ipc.MsgWatchNotificationsReq:
-		d.handleWatchNotificationsReq(conn, msg)
+		d.handleWatchNotificationsReq(conn, msg, release)
 
 	// Broadcast subscription
 	case ipc.MsgSubscribe:
@@ -7769,7 +7773,15 @@ func (d *Daemon) handleGetNotificationsReq(conn *ipc.Conn, msg *ipc.Message) {
 	})
 }
 
-func (d *Daemon) handleWatchNotificationsReq(conn *ipc.Conn, msg *ipc.Message) {
+// release returns the conn's parked-request slot. It runs when the parked
+// goroutine ends, or at once on every path that never parks.
+func (d *Daemon) handleWatchNotificationsReq(conn *ipc.Conn, msg *ipc.Message, release func()) {
+	parked := false
+	defer func() {
+		if !parked {
+			release()
+		}
+	}()
 	var req ipc.WatchNotificationsReqPayload
 	if err := msg.DecodePayload(&req); err != nil {
 		log.Printf("handleWatchNotificationsReq: decode: %v", err)
@@ -7816,7 +7828,9 @@ func (d *Daemon) handleWatchNotificationsReq(conn *ipc.Conn, msg *ipc.Message) {
 	d.events.AddWatcher(watcher)
 
 	// Block in goroutine — respond when event fires or timeout
+	parked = true
 	go func() {
+		defer release()
 		timer := time.NewTimer(time.Duration(timeoutMs) * time.Millisecond)
 		defer timer.Stop()
 

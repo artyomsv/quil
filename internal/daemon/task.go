@@ -552,7 +552,15 @@ func (d *Daemon) handleGetTaskReq(conn *ipc.Conn, msg *ipc.Message) {
 	respondTo(conn, msg.ID, ipc.MsgGetTaskResp, ipc.GetTaskRespPayload{Task: d.tasksRegistry().info(t)})
 }
 
-func (d *Daemon) handleWaitTaskReq(conn *ipc.Conn, msg *ipc.Message) {
+// release returns the conn's parked-request slot. It runs when the parked
+// goroutine ends, or at once on every path that never parks.
+func (d *Daemon) handleWaitTaskReq(conn *ipc.Conn, msg *ipc.Message, release func()) {
+	parked := false
+	defer func() {
+		if !parked {
+			release()
+		}
+	}()
 	var req ipc.WaitTaskReqPayload
 	if err := msg.DecodePayload(&req); err != nil {
 		respondTo(conn, msg.ID, ipc.MsgWaitTaskResp, ipc.WaitTaskRespPayload{Error: "malformed payload: " + err.Error()})
@@ -574,7 +582,9 @@ func (d *Daemon) handleWaitTaskReq(conn *ipc.Conn, msg *ipc.Message) {
 	// Off the dispatch goroutine, like watch_notifications: this blocks for
 	// up to five minutes and the goroutine carries every message from the
 	// requesting client.
+	parked = true
 	go func() {
+		defer release()
 		timer := time.NewTimer(time.Duration(timeoutMs) * time.Millisecond)
 		defer timer.Stop()
 		select {

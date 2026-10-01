@@ -9,6 +9,9 @@ clock (`#capture` hides everything but the tour), steps through the segments in 
 encodes a looping GIF with ffmpeg and gifsicle. Everything that moves is driven by the fake clock,
 so the same inputs give the same picture; a few anti-aliased pixels on rounded corners can still
 differ between runs (Chromium raster noise), so do not expect byte-identical files.
+The site's fonts come from Google Fonts, so the render needs network access;
+`capture.mjs` stops before the first frame when they did not load, because a GIF
+in fallback fonts is not the site.
 
 `stops` in `cut.json` lists the tour chapters the cut plays (1 agents … 6 reboot). The page then
 numbers its stop bar and cards from that list, so a four-stop cut reads 1 / 4 … 4 / 4. Keep it in

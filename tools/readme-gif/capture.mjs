@@ -48,7 +48,23 @@ await page.clock.pauseAt(T0 + 1000);
 // from them, so a cut of four stops reads 1 / 4 … 4 / 4 rather than 1 / 6, 3 / 6 ….
 if (Array.isArray(cut.stops)) await page.addInitScript((s) => { window.__quilCaptureStops = s; }, cut.stops);
 await page.goto(`http://127.0.0.1:${port}/#capture`, { waitUntil: "load" });
-await page.evaluate(() => document.fonts.ready);
+// The fonts come from Google Fonts, and document.fonts.ready resolves even when
+// they never arrive: the frames then show the container's fallback fonts, not
+// the site (one render came out that way). Load every face the site uses and
+// stop unless each one arrived. The timer is Node's; the page clock is paused.
+const FACES = ["400", "500", "700", "800"].map((w) => `${w} 16px "JetBrains Mono"`)
+  .concat(["400", "600"].map((w) => `${w} 16px "Inter"`));
+const fontsLoaded = await Promise.race([
+  page.evaluate(async (specs) => {
+    await document.fonts.ready;
+    const lists = await Promise.all(specs.map((s) => document.fonts.load(s)));
+    return lists.every((faces) => faces.length > 0 && faces.every((f) => f.status === "loaded"));
+  }, FACES),
+  new Promise((ok) => setTimeout(() => ok(false), 30_000)),
+]);
+if (!fontsLoaded) {
+  throw new Error("capture.mjs: the site fonts (Inter, JetBrains Mono) did not load from Google Fonts, so the frames would show fallback fonts; check the network and run make.sh again");
+}
 if ((await page.evaluate(() => typeof window.__quilTour)) !== "object") throw new Error("window.__quilTour is missing — is this the tour build?");
 
 await mkdir(OUT, { recursive: true });

@@ -112,6 +112,23 @@ func (d *Daemon) applyNamedSelections(paneType string, instanceArgs, toggles []s
 	return append(out, toggleArgs...), nil
 }
 
+// refuseCreate answers a create_pane / create_tab whose named selections were
+// refused. A WORKTREE create is answered with the create_pane_resp that path
+// always sends, even to an id-less request: the requesting TUI holds a
+// "creating worktree" placeholder (or, for a new tab, a branch entry) that
+// only that answer unwinds — without it the placeholder waits out the whole
+// create timeout and then reports a misleading "timed out". tabID and the
+// echoed spec are the keys the client matches on, the same shape
+// worktreeAddAndCreate sends on failure. Any other create keeps the generic
+// error reply, which reaches only an id-bearing request.
+func (d *Daemon) refuseCreate(conn *ipc.Conn, msg *ipc.Message, tabID string, wt *ipc.WorktreeSpec, err error) {
+	if wt != nil {
+		respondTo(conn, msg.ID, ipc.MsgCreatePaneResp, ipc.CreatePaneRespPayload{TabID: tabID, Error: err.Error(), Worktree: wt})
+		return
+	}
+	d.replyError(conn, msg, ipc.ErrCodeBadPayload, err.Error())
+}
+
 // resolveWorktreeRoot answers the repository root for a directory, the way
 // the worktree-list request does — with the same permit and deadline, because
 // the directory can be a dead mount. The main checkout's own path is the

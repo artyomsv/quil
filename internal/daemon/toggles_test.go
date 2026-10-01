@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -8,6 +10,7 @@ import (
 	"time"
 
 	"github.com/artyomsv/quil/internal/clientauth"
+	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
 	apty "github.com/artyomsv/quil/internal/pty"
 )
@@ -227,7 +230,7 @@ func TestToggles_RefusedSelectionsCreateNothing(t *testing.T) {
 
 // The MCP request path resolves the kube context by the same rule: placed
 // before the toggles, and refused for a plugin that does not discover kube.
-func TestCreatePaneReq_KubeContextResolvesBeforeToggles(t *testing.T) {
+func TestCreatePaneReq_KubeContextOrder(t *testing.T) {
 	d, client := mcpTestDaemon(t)
 	tab := d.session.CreateTab("t")
 
@@ -245,6 +248,130 @@ func TestCreatePaneReq_KubeContextResolvesBeforeToggles(t *testing.T) {
 		ipc.CreatePaneReqPayload{TabID: tab.ID, Type: "claude-code", KubeContext: "prod"}))
 	if resp.PaneID != "" || !strings.Contains(resp.Error, "kube") {
 		t.Fatalf("kube context on claude-code: %+v", resp)
+	}
+}
+
+// The exact argv the selections become, in the order the dialog always
+// built it: the instance's own args, then --context <ctx>, then each toggle's
+// ArgsWhenOn in the order the plugin declares them (not the order named).
+func TestApplyNamedSelections_ExactOrder(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	d := New(config.Default())
+	dir := t.TempDir()
+	const toml = `
+[plugin]
+name = "kubetool"
+category = "tools"
+
+[command]
+cmd = "kubetool"
+discover = "kube"
+
+[[command.toggles]]
+name = "readonly"
+label = "Read-only"
+args_when_on = ["--readonly"]
+
+[[command.toggles]]
+name = "pods"
+label = "Pods view"
+args_when_on = ["--command", "pods"]
+`
+	if err := os.WriteFile(filepath.Join(dir, "kubetool.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.registry.LoadFromDir(dir); err != nil {
+		t.Fatalf("LoadFromDir: %v", err)
+	}
+
+	got, err := d.applyNamedSelections("kubetool", []string{"--kubeconfig", "/k"}, []string{"readonly", "pods"}, "prod")
+	want := []string{"--kubeconfig", "/k", "--context", "prod", "--readonly", "--command", "pods"}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v err=%v, want %v", got, err, want)
+	}
+
+	// Nothing named leaves the instance args exactly as given.
+	got, err = d.applyNamedSelections("kubetool", []string{"--kubeconfig", "/k"}, nil, "")
+	if err != nil || !reflect.DeepEqual(got, []string{"--kubeconfig", "/k"}) {
+		t.Fatalf("no selections: got %v err=%v", got, err)
+	}
+}
+
+// awaitCreatePaneResp reads frames until a create_pane_resp arrives,
+// skipping broadcasts.
+func awaitCreatePaneResp(t *testing.T, c *ipc.Client) ipc.CreatePaneRespPayload {
+	t.Helper()
+	if err := c.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	defer c.SetReadDeadline(time.Time{})
+	for {
+		msg, err := c.Receive()
+		if err != nil {
+			t.Fatalf("no create_pane_resp arrived: %v", err)
+		}
+		if msg.Type == ipc.MsgCreatePaneResp {
+			return decodeInto[ipc.CreatePaneRespPayload](t, msg)
+		}
+	}
+}
+
+// A refused selection on a WORKTREE create is still answered with the
+// create_pane_resp that path always sends, even to an id-less request: the
+// TUI holds a "creating worktree" placeholder (split, replace) or a branch
+// entry (new tab) that only that answer unwinds. The answer echoes the tab
+// and the spec, which are the keys the TUI matches on.
+func TestToggles_RefusedWorktreeCreateIsAnswered(t *testing.T) {
+	h := newAuthHarness(t)
+	local := h.local(t)
+	tab := h.d.session.CreateTab("t")
+	spec := &ipc.WorktreeSpec{RepoRoot: "/repo", Branch: "feat/x"}
+
+	for name, p := range map[string]ipc.CreatePanePayload{
+		"split":   {TabID: tab.ID, Type: "claude-code", Toggles: []string{"nope"}, Worktree: spec},
+		"replace": {TabID: tab.ID, Type: "claude-code", Toggles: []string{"nope"}, Worktree: spec, ReplacePaneID: "pane-x"},
+	} {
+		before := len(h.d.session.Panes(tab.ID))
+		sendNoID(t, local, ipc.MsgCreatePane, p)
+		resp := awaitCreatePaneResp(t, local)
+		if resp.TabID != tab.ID || resp.Worktree == nil || resp.Worktree.Branch != "feat/x" ||
+			!strings.Contains(resp.Error, "unknown toggle") || resp.PaneID != "" {
+			t.Errorf("%s: resp = %+v", name, resp)
+		}
+		if n := len(h.d.session.Panes(tab.ID)); n != before {
+			t.Errorf("%s: a pane was created", name)
+		}
+	}
+
+	// New tab: no tab is minted, so the answer names none — the TUI keys
+	// this create by its branch alone.
+	tabsBefore := len(h.d.session.Tabs())
+	sendNoID(t, local, ipc.MsgCreateTab, ipc.CreateTabPayload{Name: "n",
+		FirstPane: &ipc.FirstPaneSpec{Type: "claude-code", Toggles: []string{"nope"}, Worktree: spec}})
+	resp := awaitCreatePaneResp(t, local)
+	if resp.TabID != "" || resp.Worktree == nil || resp.Worktree.Branch != "feat/x" || !strings.Contains(resp.Error, "unknown toggle") {
+		t.Errorf("new tab: resp = %+v", resp)
+	}
+	if n := len(h.d.session.Tabs()); n != tabsBefore {
+		t.Errorf("new tab: a tab was created (%d, had %d)", n, tabsBefore)
+	}
+}
+
+// A refused ordinary create is answered only when the request carries an
+// id, as an error frame; the TUI's id-less sends still get nothing.
+func TestToggles_RefusedIDBearingCreateGetsError(t *testing.T) {
+	h := newAuthHarness(t)
+	std, _ := h.login(t, h.mint(t, "std", clientauth.LevelStandard, nil))
+	tab := h.d.session.CreateTab("t")
+	for _, typ := range []string{ipc.MsgCreatePane, ipc.MsgCreateTab} {
+		var payload any = ipc.CreatePanePayload{TabID: tab.ID, Type: "claude-code", Toggles: []string{"nope"}}
+		if typ == ipc.MsgCreateTab {
+			payload = ipc.CreateTabPayload{FirstPane: &ipc.FirstPaneSpec{Type: "claude-code", Toggles: []string{"nope"}}}
+		}
+		e := decodeInto[ipc.ErrorPayload](t, roundTrip(t, std, typ, ipc.MsgError, payload))
+		if e.Code != ipc.ErrCodeBadPayload || !strings.Contains(e.Message, "unknown toggle") {
+			t.Errorf("%s: error = %+v", typ, e)
+		}
 	}
 }
 

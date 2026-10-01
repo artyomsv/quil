@@ -2345,7 +2345,9 @@ func (d *Daemon) handleCreateTab(conn *ipc.Conn, msg *ipc.Message) {
 		args, err := d.applyNamedSelections(fp.Type, fp.InstanceArgs, fp.Toggles, fp.KubeContext)
 		if err != nil {
 			log.Printf("new tab: refused: %v", err)
-			d.replyError(conn, msg, ipc.ErrCodeBadPayload, err.Error())
+			// No tab was minted, so the answer names none: the client keys a
+			// new-tab worktree create by its branch.
+			d.refuseCreate(conn, msg, "", fp.Worktree, err)
 			return
 		}
 		fp.InstanceArgs, fp.Toggles, fp.KubeContext = args, nil, ""
@@ -2894,7 +2896,7 @@ func (d *Daemon) handleCreatePane(conn *ipc.Conn, msg *ipc.Message) {
 	args, err := d.applyNamedSelections(payload.Type, payload.InstanceArgs, payload.Toggles, payload.KubeContext)
 	if err != nil {
 		log.Printf("create pane: refused: %v", err)
-		d.replyError(conn, msg, ipc.ErrCodeBadPayload, err.Error())
+		d.refuseCreate(conn, msg, payload.TabID, payload.Worktree, err)
 		return
 	}
 	payload.InstanceArgs, payload.Toggles, payload.KubeContext = args, nil, ""

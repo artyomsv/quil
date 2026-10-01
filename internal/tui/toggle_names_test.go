@@ -2,6 +2,7 @@ package tui
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/artyomsv/quil/internal/ipc"
@@ -76,6 +77,88 @@ func TestSplitAndReplace_SubmitSendToggleNames(t *testing.T) {
 				t.Fatal("the teardown left the named choices for the next Ctrl+N")
 			}
 		})
+	}
+}
+
+// refusalFor builds the answer the daemon sends when it refuses a worktree
+// create's named selections: the request's tab (none for a new tab) and its
+// spec echoed back, with the error.
+func refusalFor(tabID string, spec *ipc.WorktreeSpec) createPaneRespMsg {
+	return createPaneRespMsg{Resp: ipc.CreatePaneRespPayload{
+		TabID: tabID, Error: `unknown toggle "nope" for plugin k9s (see list_plugins)`, Worktree: spec,
+	}}
+}
+
+// A worktree split whose toggle the daemon refuses is unwound by that answer
+// at once, not by the give-up tick 150 s later.
+func TestWorktreeSplit_ToggleRefusalUnwinds(t *testing.T) {
+	m := newBranchModel(t)
+	f := &fakeSender{}
+	m.client = f
+	m.selectedPlugin = "k9s"
+	m.selectedCWD = "/repo"
+	m.worktreeNewBranch = "feat/x"
+	m.selectedToggles = []string{"nope"}
+	m.dialogCursor = 0
+	tabID := m.curTabs()[0].ID
+
+	out, cmd := m.handleCreatePaneSplit()
+	runCmd(cmd)
+	got := out.(Model)
+	var sent ipc.CreatePanePayload
+	for _, msg := range f.sent {
+		if msg.Type == ipc.MsgCreatePane {
+			if err := msg.DecodePayload(&sent); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if sent.Worktree == nil || sent.TabID != tabID || len(sent.Toggles) != 1 {
+		t.Fatalf("sent %+v", sent)
+	}
+
+	updated, _ := got.Update(refusalFor(sent.TabID, sent.Worktree))
+	after := updated.(Model)
+	if _, ok := after.pendingSplit[tabID]; ok || after.worktreeCreates[tabID] != "" {
+		t.Error("the refused create is still armed")
+	}
+	if tab := after.tabByID(tabID); tab != nil && countPlaceholders(tab.Root) != 0 {
+		t.Error("a placeholder leaf survived the refusal")
+	}
+	if !strings.Contains(after.flashText, "unknown toggle") {
+		t.Errorf("flash = %q", after.flashText)
+	}
+}
+
+// The new-tab form has no tab to name; the answer is matched by its branch,
+// and that entry is consumed.
+func TestNewTabWorktree_ToggleRefusalUnwinds(t *testing.T) {
+	m := newBranchModel(t)
+	t.Setenv("QUIL_HOME", t.TempDir())
+	f := &fakeSender{}
+	m.client = f
+	m.projects[0].ID = "proj-1"
+	m.createPaneTarget = paneTargetNewTab
+	m.selectedPlugin = "k9s"
+	m.selectedCWD = "/repo"
+	m.worktreeNewBranch = "feat/x"
+	m.selectedToggles = []string{"nope"}
+
+	out, cmd := m.handleCreatePaneSplit()
+	runCmd(cmd)
+	got := out.(Model)
+	p := decodeCreateTab(t, f)
+	if p.FirstPane == nil || p.FirstPane.Worktree == nil || !got.newTabWorktrees["feat/x"] {
+		t.Fatalf("first pane = %+v armed=%v", p.FirstPane, got.newTabWorktrees)
+	}
+
+	updated, _ := got.Update(refusalFor("", p.FirstPane.Worktree))
+	after := updated.(Model)
+	if after.newTabWorktrees["feat/x"] {
+		t.Error("the branch entry was not consumed")
+	}
+	if !strings.Contains(after.flashText, "unknown toggle") {
+		t.Errorf("flash = %q", after.flashText)
 	}
 }
 

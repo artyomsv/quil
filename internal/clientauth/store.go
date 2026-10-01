@@ -140,6 +140,15 @@ func OpenStore(path string) (*Store, error) {
 			s.dropped++
 			continue
 		}
+		// ParseLevel("") returns LevelStandard with no error — that default is
+		// for a human leaving --rights unset on the command line, not for an
+		// on-disk record. A blank or absent rights field here means the file
+		// is corrupt or was hand-edited, and must be dropped like an unknown
+		// level, never silently upgraded to standard.
+		if e.Rights == "" {
+			s.dropped++
+			continue
+		}
 		if _, err := ParseLevel(string(e.Rights)); err != nil {
 			s.dropped++
 			continue

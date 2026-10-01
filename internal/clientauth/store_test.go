@@ -296,16 +296,22 @@ func TestStore_CallbacksRunUnderTheLock(t *testing.T) {
 }
 
 // TestOpenStore_DropsInvalidEntriesAndCounts covers loading a file written
-// by something other than this Store: an entry with a malformed id or an
-// unrecognized rights level is dropped rather than kept half-understood, and
-// the count is exposed so the daemon can log it instead of silently serving
-// fewer tokens than the file on disk names.
+// by something other than this Store: an entry with a malformed id, an
+// unrecognized rights level, or a blank/missing rights field is dropped
+// rather than kept half-understood, and the count is exposed so the daemon
+// can log it instead of silently serving fewer tokens than the file on disk
+// names. A blank or absent "rights" is deliberately NOT the same as
+// ParseLevel("")'s CLI default (LevelStandard, no error): that default is
+// for a human leaving `--rights` unset on the command line, not for
+// reinterpreting a corrupt or hand-edited on-disk record as standard rights.
 func TestOpenStore_DropsInvalidEntriesAndCounts(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tokens.json")
 	raw := `{"version":1,"tokens":[
 		{"id":"0a1b2c3d","name":"good","stored_key":"00","server_key":"00","rights":"standard","created":"2026-01-01T00:00:00Z"},
 		{"id":"not-hex!","name":"bad-id","stored_key":"00","server_key":"00","rights":"standard","created":"2026-01-01T00:00:00Z"},
-		{"id":"deadbeef","name":"bad-rights","stored_key":"00","server_key":"00","rights":"super-admin","created":"2026-01-01T00:00:00Z"}
+		{"id":"deadbeef","name":"bad-rights","stored_key":"00","server_key":"00","rights":"super-admin","created":"2026-01-01T00:00:00Z"},
+		{"id":"cafebabe","name":"blank-rights","stored_key":"00","server_key":"00","rights":"","created":"2026-01-01T00:00:00Z"},
+		{"id":"f00dfeed","name":"missing-rights","stored_key":"00","server_key":"00","created":"2026-01-01T00:00:00Z"}
 	]}`
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
@@ -314,8 +320,8 @@ func TestOpenStore_DropsInvalidEntriesAndCounts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := s.Dropped(); got != 2 {
-		t.Fatalf("Dropped() = %d, want 2", got)
+	if got := s.Dropped(); got != 4 {
+		t.Fatalf("Dropped() = %d, want 4", got)
 	}
 	if got := s.List(); len(got) != 1 || got[0].ID != "0a1b2c3d" {
 		t.Fatalf("List() = %+v, want only the valid entry", got)

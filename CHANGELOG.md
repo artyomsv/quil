@@ -11,6 +11,23 @@ version section here and deletes them.
 
 ## [Unreleased]
 
+## [1.83.0] - 2026-10-01
+
+### Added
+- **Project groups, recent folders and pane notes now live on the daemon.** A second
+  TUI on the same machine, or one attached over ssh, sees the same groups, the same
+  recent-folder list in `Ctrl+N` and the same notes. Group order and collapsed state
+  stay per client. Your existing `project-groups.json`, `recent-cwds*.json` and
+  `notes/*.md` are imported once, automatically, and never modified.
+- **Editing one note from two places is safe.** A save from stale text is refused;
+  the editor keeps what you typed and offers `Ctrl+R` reload or `Ctrl+S` overwrite.
+  Text the daemon refused after the editor closed, or at quit, is kept under
+  `~/.quil/notes-conflicts/`.
+- **Connecting to a daemon another client already filled with groups never drops
+  yours.** If your own groups for it differ, they are kept in
+  `~/.quil/project-groups.before-shared-<destination>.json` before the daemon's
+  take over.
+
 ## [1.82.1] - 2026-09-29
 
 ### Fixed

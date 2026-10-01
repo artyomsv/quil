@@ -52,7 +52,18 @@ import (
 // EnvVar names the environment variable that enables profiling.
 const EnvVar = "QUIL_PPROF"
 
-// Addr resolves a QUIL_PPROF value into a listen address.
+// pprofWhy is QUIL_PPROF's reason in the non-loopback error, kept verbatim so
+// the message is byte-identical to the one before the extraction below.
+const pprofWhy = "profiles expose argv and goroutine state"
+
+// Addr resolves a QUIL_PPROF value into a listen address. See LoopbackAddr.
+func Addr(v string) (string, bool, error) { return LoopbackAddr(EnvVar, pprofWhy, v) }
+
+// LoopbackAddr resolves a loopback listen address. name labels errors (the
+// env var, "[listener] tcp", "--connect"); why is the CALLER's own reason a
+// non-loopback host is refused, so no caller borrows another's wording.
+// Shared by the pprof listener, the daemon's TCP listener and `quil
+// --connect`, so the three cannot drift.
 //
 // ok is false with a nil error only for the unset case — "profiling was not
 // asked for" is not a failure. Every other rejection returns an error, because
@@ -63,14 +74,14 @@ const EnvVar = "QUIL_PPROF"
 // A value WITH a colon must name a loopback host explicitly: ":6060" is the
 // form that binds every interface by accident, so it is refused rather than
 // helpfully corrected.
-func Addr(v string) (string, bool, error) {
+func LoopbackAddr(name, why, v string) (string, bool, error) {
 	v = strings.TrimSpace(v)
 	if v == "" {
 		return "", false, nil
 	}
 
 	if !strings.Contains(v, ":") {
-		if err := checkPort(v); err != nil {
+		if err := checkPort(name, v); err != nil {
 			return "", false, err
 		}
 		return net.JoinHostPort("127.0.0.1", v), true, nil
@@ -78,16 +89,15 @@ func Addr(v string) (string, bool, error) {
 
 	host, port, err := net.SplitHostPort(v)
 	if err != nil {
-		return "", false, fmt.Errorf("%s=%q is not a valid address: %w", EnvVar, v, err)
+		return "", false, fmt.Errorf("%s=%q is not a valid address: %w", name, v, err)
 	}
-	if err := checkPort(port); err != nil {
+	if err := checkPort(name, port); err != nil {
 		return "", false, err
 	}
 	if !isLoopbackHost(host) {
 		return "", false, fmt.Errorf(
-			"%s=%q would bind %q, which is not loopback; profiles expose argv and "+
-				"goroutine state, so only 127.0.0.1, ::1 or localhost are accepted",
-			EnvVar, v, host)
+			"%s=%q would bind %q, which is not loopback; %s, so only 127.0.0.1, ::1 or localhost are accepted",
+			name, v, host, why)
 	}
 	// Resolve "localhost" HERE rather than letting net.Listen do it. It is the
 	// one accepted host that is a name, and passing a name to net.Listen hands
@@ -116,17 +126,17 @@ func isLoopbackHost(host string) bool {
 }
 
 // checkPort accepts 0 (ask the OS for a free port) through 65535.
-func checkPort(p string) error {
+func checkPort(name, p string) error {
 	n, err := strconv.Atoi(p)
 	if err != nil {
 		// Names the convention as well as the failure: a colon-less value is
 		// read as a bare port, so QUIL_PPROF=127.0.0.1 lands here complaining
 		// about a "port" the user thinks they supplied as a host.
 		return fmt.Errorf("%s port %q is not a number "+
-			"(a value with no colon is treated as a port; use host:port)", EnvVar, p)
+			"(a value with no colon is treated as a port; use host:port)", name, p)
 	}
 	if n < 0 || n > 65535 {
-		return fmt.Errorf("%s port %d is out of range 0-65535", EnvVar, n)
+		return fmt.Errorf("%s port %d is out of range 0-65535", name, n)
 	}
 	return nil
 }

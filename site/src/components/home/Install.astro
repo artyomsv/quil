@@ -1,0 +1,51 @@
+---
+// #install — only the documented steps (docs/installation.md).
+import { SITE, GITHUB_BLOB } from "@/data/seo";
+---
+<section class="sec" id="install" aria-labelledby="install-h">
+  <div class="wrap">
+    <div class="eyebrow">Install</div>
+    <h2 id="install-h">Two binaries: quil and quild</h2>
+    <p class="lede">Linux, macOS and native Windows. No WSL, no account. <code>quil</code> is the screen; <code>quild</code> is the daemon that keeps the panes alive.</p>
+    <div class="inst-grid">
+      <div>
+        <h3>Linux and macOS</h3>
+        <pre class="cmd"><span class="g">$ </span>curl -sSfL https://raw.githubusercontent.com/artyomsv/quil/master/scripts/install.sh | sh</pre>
+        <p>Checks the SHA-256 and installs both binaries to <code>~/.local/bin</code>. Put that folder on your <code>PATH</code>.</p>
+      </div>
+      <div>
+        <h3>Windows</h3>
+        <ol>
+          <li>Download <code>quil-windows-amd64.zip</code> from the <a href={`${SITE.github}/releases/latest`} rel="noopener">latest release</a>.</li>
+          <li>Extract <code>quil.exe</code> and <code>quild.exe</code> to a folder on your <code>PATH</code>, for example <code>%LOCALAPPDATA%\Programs\Quil\</code>.</li>
+          <li>Open Windows Terminal and run <code>quil</code>.</li>
+        </ol>
+      </div>
+      <div>
+        <h3>With Go 1.25 or newer</h3>
+        <pre class="cmd"><span class="g">$ </span>go install github.com/artyomsv/quil/cmd/quil@latest
+<span class="g">$ </span>go install github.com/artyomsv/quil/cmd/quild@latest</pre>
+      </div>
+      <div>
+        <h3>Check it</h3>
+        <pre class="cmd"><span class="g">$ </span>quil version
+<span class="g">$ </span>quild version</pre>
+        <p>Both must print the same version.</p>
+      </div>
+    </div>
+    <p class="more"><a href={`${GITHUB_BLOB}docs/installation.md`} rel="noopener">Every install option, uninstall and building from source: docs/installation.md ↗</a></p>
+  </div>
+</section>
+
+<style>
+  .lede code, .inst-grid code { font-size: .88em; background: var(--t-line); color: var(--t-title); padding: 0 .35em; }
+  .inst-grid { margin-top: 28px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 28px 36px; }
+  .inst-grid h3 { margin: 0; font: 700 15px var(--mono); color: var(--t-title); }
+  .inst-grid p, .inst-grid ol { margin: 10px 0 0; font-size: 15px; }
+  .inst-grid ol { padding-left: 1.3rem; }
+  .inst-grid li { margin-bottom: .3rem; }
+  .inst-grid a { color: var(--t-hint); text-decoration: underline; text-underline-offset: 3px; }
+  /* minmax(0, …), not 1fr: a 1fr column never shrinks below its widest line,
+     and the curl one-liner is one long line — at 390 px it widened the page to 783 px. */
+  @media (max-width: 760px) { .inst-grid { grid-template-columns: minmax(0, 1fr); } }
+</style>

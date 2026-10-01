@@ -27,6 +27,7 @@ const {
   seoTitle,
   brandSuffix = true,
   ogType = "website",
+  robots = "index, follow",
 } = Astro.props;
 
 // `seoTitle` overrides the editorial title for the SERP only; `brandSuffix`
@@ -38,10 +39,11 @@ const canonicalURL = canonical(path);
 // Relative-or-absolute handling lives in absoluteURL (see seo.ts) so the
 // JSON-LD path in the blog template resolves images the same way.
 const ogImageURL = absoluteURL(ogImage ?? SITE.defaultOgImage);
+const noindex = /noindex/i.test(robots);
 ---
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<meta name="theme-color" content="#080402" />
+<meta name="theme-color" content="#0c0c0c" />
 <meta name="color-scheme" content="dark" />
 
 <!--
@@ -75,7 +77,7 @@ const ogImageURL = absoluteURL(ogImage ?? SITE.defaultOgImage);
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link
   rel="stylesheet"
-  href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+  href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&family=JetBrains+Mono:wght@400;500;700;800&display=swap"
 />
 
 <!-- Title + description -->
@@ -84,7 +86,7 @@ const ogImageURL = absoluteURL(ogImage ?? SITE.defaultOgImage);
 {keywords && keywords.length > 0 && (
   <meta name="keywords" content={keywords.join(", ")} />
 )}
-<link rel="canonical" href={canonicalURL} />
+{!noindex && <link rel="canonical" href={canonicalURL} />}
 
 <!-- Open Graph -->
 <meta property="og:type" content={ogType} />
@@ -113,14 +115,14 @@ const ogImageURL = absoluteURL(ogImage ?? SITE.defaultOgImage);
 <meta name="format-detection" content="telephone=no" />
 
 <!-- Sitemap + feed discovery -->
-<link rel="sitemap" href="/sitemap-index.xml" />
+<link rel="sitemap" href="/sitemap.xml" />
 <link
   rel="alternate"
   type="application/rss+xml"
   title={`${SITE.name} — blog`}
   href="/rss.xml"
 />
-<meta name="robots" content="index, follow" />
+<meta name="robots" content={robots} />
 
 <!-- Generator tag (informational, not SEO-critical) -->
 <meta name="generator" content={Astro.generator} />

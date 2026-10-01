@@ -1,94 +1,35 @@
 ---
 /**
- * Site header — sticky top nav with brand, primary links, compare
- * dropdown, version chip, and GitHub CTA.
+ * The site header, drawn the way Quil draws its own tab bar: number, colon,
+ * name, and the current page marked "*" on a violet tab. The tour runtime
+ * measures `header.hdr` to place the pinned terminal — keep the class.
  *
- * Zero JS: the compare dropdown uses the native <details>/<summary>
- * element, which gives click-to-open, Escape-to-close, and mobile
- * collapse without a single line of JavaScript.
- *
- * Styling lives in src/styles/ember.css under the `.site-header`
- * scope — keeping class names terse here (the CSS is specific enough
- * that utility overrides aren't needed).
+ * Every internal href keeps its trailing slash (scripts/check-trailing-slash.mjs).
  */
 import { SITE } from "@/data/seo";
-import { compareNav } from "@/data/competitors";
 
-// Every internal href carries its trailing slash — see
-// scripts/check-trailing-slash.mjs for why a slashless one is a bug and
-// not a cosmetic difference.
-const navLinks = [
-  { href: "/features/", label: "features" },
-  { href: "/plugins/",  label: "plugins"  },
-  { href: "/install/",  label: "install"  },
-  { href: "/docs/",     label: "docs"     },
-  { href: "/blog/",     label: "blog"     },
+const tabs = [
+  { href: "/", label: "tour", on: (p: string) => p === "/" },
+  { href: "/#install", label: "install", on: () => false },
+  { href: "/docs/", label: "docs", on: (p: string) => p.startsWith("/docs/") },
+  { href: "/blog/", label: "blog", on: (p: string) => p.startsWith("/blog/") },
+  { href: "/#compare", label: "compare", on: (p: string) => p.startsWith("/vs/") },
 ];
-
-// Derived from src/data/competitors.ts, never hand-listed here. This used
-// to be a literal array and it fell four pages behind the data file —
-// herdr and Agent of Empires shipped with /vs/ pages, a footer link, and
-// a "see also" tile, but no entry in the one menu most visitors use.
-const compareLinks = compareNav;
-
-// Both sides are compared slash-stripped. The hrefs above are canonical
-// (trailing slash) while `pathname` may arrive either way depending on
-// how the page was reached, so normalising only one side makes every
-// nav item compare unequal and quietly drops the active state sitewide.
-const strip = (p: string) => p.replace(/\/+$/, "") || "/";
-const currentPath = strip(Astro.url.pathname);
-
-function isActive(href: string): boolean {
-  const target = strip(href);
-  if (target === "/") return currentPath === "/";
-  return currentPath === target || currentPath.startsWith(target + "/");
-}
-
-const compareOpen = compareLinks.some((link) => isActive(link.href));
+const path = Astro.url.pathname.endsWith("/") ? Astro.url.pathname : `${Astro.url.pathname}/`;
 ---
-<header class="site-header">
-  <nav class="nav" aria-label="Main">
-    <a href="/" class="brand">
-      <img src="/brand/mark.svg" alt="" aria-hidden="true" width="24" height="26" />
-      <span>quil</span>
-    </a>
-
-    <ul class="nav-links">
-      {navLinks.map((link) => (
-        <li>
-          <a
-            href={link.href}
-            class:list={["nav-link", { active: isActive(link.href) }]}
-          >
-            {link.label}
-          </a>
-        </li>
-      ))}
-
-      <li>
-        <details class="nav-dd" open={compareOpen || undefined}>
-          <summary>
-            compare <span class="slash">▾</span>
-          </summary>
-          <ul class="dd-menu">
-            {compareLinks.map((link) => (
-              <li>
-                <a href={link.href}>{link.label}</a>
-              </li>
-            ))}
-          </ul>
-        </details>
-      </li>
-    </ul>
-
-    <div class="nav-right">
-      <span class="version-chip">v<b>{SITE.software.version}</b> · {SITE.software.license}</span>
-      <a href={SITE.github} class="btn btn-ghost" rel="noopener external">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-          <path d="M12 .5C5.65.5.5 5.65.5 12a11.5 11.5 0 0 0 7.86 10.92c.57.1.78-.25.78-.55v-1.92c-3.2.7-3.88-1.54-3.88-1.54-.52-1.33-1.28-1.68-1.28-1.68-1.04-.72.08-.7.08-.7 1.16.08 1.77 1.2 1.77 1.2 1.03 1.77 2.71 1.26 3.37.96.1-.75.4-1.26.73-1.55-2.56-.3-5.25-1.28-5.25-5.7 0-1.26.45-2.3 1.19-3.1-.12-.3-.52-1.48.11-3.1 0 0 .97-.3 3.18 1.18a11.1 11.1 0 0 1 5.8 0c2.2-1.48 3.17-1.18 3.17-1.18.63 1.62.23 2.8.12 3.1.74.8 1.19 1.84 1.19 3.1 0 4.43-2.7 5.4-5.27 5.68.42.36.78 1.07.78 2.16v3.2c0 .3.2.66.78.55A11.5 11.5 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5Z" />
-        </svg>
-        github
-      </a>
-    </div>
+<header class="hdr">
+  <a class="brand" href="/" aria-label="Quil home">
+    <img src="/brand/mark.svg" alt="" width="16" height="18" />
+    quil
+  </a>
+  <nav aria-label="Main">
+    {tabs.map((t, i) => {
+      const on = t.on(path);
+      return <a href={t.href} aria-current={on ? "page" : undefined}>{on ? "* " : ""}{i + 1}:{t.label}</a>;
+    })}
   </nav>
+  <div class="r">
+    <span class="v">v<b>{SITE.software.version}</b></span>
+    <a href={SITE.github} rel="noopener">github</a>
+  </div>
 </header>

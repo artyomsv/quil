@@ -13,36 +13,29 @@ const seo = {
   title: "Legal notice",
   description:
     "Quil is open-source software under the Apache License 2.0. No telemetry, no cookies, no tracking. What you run inside Quil is your responsibility and subject to the laws of your jurisdiction.",
-  path: "/legal",
+  path: "/legal/",
   ogImage: "/og/legal.png",
 };
 
 const schemas = [
   breadcrumbSchema([
     { name: "Quil",  path: "/"      },
-    { name: "Legal", path: "/legal" },
+    { name: "Legal", path: "/legal/" },
   ]),
 ];
 ---
 <Page {...seo} schemas={schemas}>
-  <section class="page-hero">
-    <div class="container-ember stack">
-      <div class="hero-ruler">
-        <span>§ LEGAL</span>
-        <span style="margin-left:auto;">Apache 2.0 · No telemetry · No cookies</span>
-      </div>
-      <span class="eyebrow">LEGAL NOTICE</span>
-      <h1>Legal notice.</h1>
-      <p>
-        Quil is a developer tool. The following applies both to the
-        software itself and to this website.
-      </p>
+  <section class="page-head">
+    <div class="wrap">
+      <div class="eyebrow">Legal notice · Apache 2.0 · No telemetry · No cookies</div>
+      <h1>Legal notice</h1>
+      <p class="lede">Quil is a developer tool. The following applies both to the software itself and to this website.</p>
     </div>
   </section>
 
-  <section style="padding: 48px 0 80px;">
-    <div class="container-narrow stack">
-      <article class="legal-prose">
+  <section class="sec">
+    <div class="wrap narrow">
+      <article class="prose">
         <h2>License</h2>
         <p>
           Quil is released under the
@@ -134,48 +127,3 @@ const schemas = [
     </div>
   </section>
 </Page>
-
-<style>
-  .legal-prose {
-    color: var(--ink-2);
-    font-size: 15px;
-    line-height: 1.75;
-  }
-  .legal-prose h2 {
-    font-family: var(--mono-stack);
-    font-size: 20px;
-    font-weight: 700;
-    color: var(--ink);
-    letter-spacing: -0.01em;
-    margin: 40px 0 12px 0;
-    padding-bottom: 8px;
-    border-bottom: 1px solid var(--line-2);
-  }
-  .legal-prose h2:first-child {
-    margin-top: 0;
-  }
-  .legal-prose p {
-    margin-bottom: 14px;
-  }
-  .legal-prose a {
-    color: var(--flame);
-    text-decoration: underline;
-    text-underline-offset: 3px;
-  }
-  .legal-prose a:hover {
-    color: var(--flame-hot);
-  }
-  .legal-prose code {
-    background: var(--bg-2);
-    padding: 2px 6px;
-    border: 1px solid var(--line);
-    border-radius: 2px;
-    font-family: var(--mono-stack);
-    font-size: 13px;
-    color: var(--ink);
-  }
-  .legal-prose strong {
-    color: var(--ink);
-    font-weight: 600;
-  }
-</style>

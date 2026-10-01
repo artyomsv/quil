@@ -1,0 +1,34 @@
+/* quil.cc palette — the TUI's own xterm-256 colours (internal/tui/styles.go,
+   via the B2 mock's live.css), so the site and the tour are one surface.
+   One dark theme, deliberately: the product is a dark terminal. */
+:root {
+  --t-bg: #0c0c0c;
+  --t-panel: #121212;
+  --t-raise: #1a1a1a;
+  --t-line: #262626;
+  --t-line-2: #303030;
+  --t-fg: #cccccc;
+  --t-text: #d0d0d0;
+  --t-soft: #bcbcbc;
+  --t-title: #ffffd7;
+  --t-dim: #767676;
+  --t-mute: #8a8a8a;
+  --t-sub: #626262;
+  --t-violet: #5f00ff;
+  --t-dialog: #5f5fff;
+  --t-hint: #8787ff;
+  --t-amber: #ffaf00;
+  --t-blue: #00afff;
+  --t-green: #008700;
+  --t-ok: #16c60c;
+  --t-red: #e74856;
+  --t-pin: #af87ff;
+  --t-mcp: #ff8700;
+  --t-status: #303030;
+  --t-tab: #444444;
+  --mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+  --sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --hh: 34px;
+  --wrap: 1180px;
+  color-scheme: dark;
+}

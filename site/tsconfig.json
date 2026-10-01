@@ -6,7 +6,7 @@
       "@/*": ["src/*"]
     },
     "jsx": "preserve",
-    "types": ["astro/client"]
+    "types": ["astro/client", "node"]
   },
   "include": [".astro/types.d.ts", "**/*"],
   "exclude": ["dist", "node_modules"]

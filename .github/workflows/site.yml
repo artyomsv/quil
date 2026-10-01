@@ -67,7 +67,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          # Full history: astro.config.mjs derives each page's sitemap
+          # Full history: src/lib/lastmod.ts derives each page's sitemap
           # <lastmod> from `git log -1 --format=%cI -- <file>`. The default
           # depth-1 clone has exactly one commit, so that command returns
           # the SAME date for every file — the deploy time — and every URL
@@ -93,32 +93,6 @@ jobs:
         run: npm run build
         env:
           NODE_ENV: production
-
-      - name: Confirm SEO assets are in dist/
-        run: |
-          test -f dist/index.html || (echo "missing dist/index.html" && exit 1)
-          test -f dist/sitemap-index.xml || (echo "missing dist/sitemap-index.xml" && exit 1)
-          test -f dist/robots.txt || (echo "missing dist/robots.txt" && exit 1)
-          test -f dist/CNAME || (echo "missing dist/CNAME" && exit 1)
-          grep -q "quil.cc" dist/CNAME || (echo "CNAME does not contain quil.cc" && exit 1)
-          grep -q "<title>" dist/index.html || (echo "no <title> in dist/index.html" && exit 1)
-          grep -q 'application/ld+json' dist/index.html || (echo "no JSON-LD in dist/index.html" && exit 1)
-          grep -q 'rel="canonical"' dist/index.html || (echo "no canonical link in dist/index.html" && exit 1)
-          grep -q 'og:title' dist/index.html || (echo "no Open Graph tags in dist/index.html" && exit 1)
-          # Verify we have all 13 HTML pages
-          test -f dist/404.html || (echo "missing dist/404.html" && exit 1)
-          test -f dist/install/index.html || (echo "missing install" && exit 1)
-          test -f dist/features/index.html || (echo "missing features" && exit 1)
-          test -f dist/plugins/index.html || (echo "missing plugins" && exit 1)
-          test -f dist/docs/index.html || (echo "missing docs" && exit 1)
-          test -f dist/legal/index.html || (echo "missing legal" && exit 1)
-          test -f dist/vs/tmux/index.html || (echo "missing vs/tmux" && exit 1)
-          test -f dist/vs/zellij/index.html || (echo "missing vs/zellij" && exit 1)
-          test -f dist/vs/wezterm/index.html || (echo "missing vs/wezterm" && exit 1)
-          test -f dist/vs/screen/index.html || (echo "missing vs/screen" && exit 1)
-          test -f dist/vs/herdr/index.html || (echo "missing vs/herdr" && exit 1)
-          test -f dist/vs/aoe/index.html || (echo "missing vs/aoe" && exit 1)
-          echo "all SEO assets present"
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

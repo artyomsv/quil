@@ -96,7 +96,7 @@ export function softwareApplicationSchema(): Record<string, unknown> {
     license: "https://www.apache.org/licenses/LICENSE-2.0",
     releaseNotes: SITE.github + "/blob/master/CHANGELOG.md",
     downloadUrl: SITE.github + "/releases/latest",
-    installUrl: SITE.url + "/install",
+    installUrl: SITE.url + "/#install",
     codeRepository: SITE.github,
     programmingLanguage: "Go",
     runtimePlatform: "Go 1.25",
@@ -118,7 +118,7 @@ export function softwareApplicationSchema(): Record<string, unknown> {
     datePublished: SITE.releaseDate,
     dateModified: SITE.releaseDate,
     image: SITE.url + "/og/home.png",
-    screenshot: SITE.url + "/og/home.png",
+    screenshot: "https://cdn.stukans.com/quil/screenshots/pane-restoration-1280.png",
     keywords: [
       "terminal multiplexer",
       "persistent terminal",

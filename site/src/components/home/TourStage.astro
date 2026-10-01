@@ -1,0 +1,45 @@
+---
+/**
+ * The pinned tour. Server-renders what a crawler or a no-JS reader needs —
+ * the intro card with the page's only <h1>, the scroll marks — and leaves
+ * the terminal to src/tour/home.js.
+ *
+ * The marks get their heights here, in viewport units, so the page has its
+ * full length before any script runs. Without that, a link straight to
+ * /#install lands on the section and is then pushed about twelve screens
+ * down when the runtime lengthens the tour (plan, Review Focus 3).
+ */
+import { tourChapterIds, tourWeights } from "@/data/usecases";
+
+const last = tourChapterIds.length - 1;
+const height = (i: number) => {
+  const vh = Math.round(tourWeights[i] * 100);
+  return i === last ? `height: calc(${vh}vh + 100vh - var(--hh))` : `height: ${vh}vh`;
+};
+---
+<section class="live" id="live" aria-label="A guided tour of a Quil session">
+  <a class="skip-tour" href="#use-cases">Skip the tour</a>
+  <div class="pin" id="pin">
+    <nav class="stops" id="stops" aria-label="Tour stops"></nav>
+    <div class="tui" id="tui" aria-hidden="true"></div>
+    <div class="tour tour-intro static" id="tour-intro">
+      <span class="bt">─ tour ─</span>
+      <div class="per">TERMINAL MULTIPLEXER · AI CODING AGENTS</div>
+      <h1>Quil: one terminal for all your AI agents.</h1>
+      <p>This page is one Quil session. Scroll and it plays: agents side by side, an agent that runs the others, a remote GPU box, a sandbox, the everything-at-once view, and a reboot.</p>
+      <noscript>
+        <p class="nojs">The tour needs JavaScript. The same six stories are <a href="#use-cases">written out below</a>.</p>
+        <style>.marks, .tour-intro .go { display: none; }</style>
+      </noscript>
+      <div class="nav"><a class="dim" href="#use-cases">skip the tour ↓</a><button type="button" class="go" data-next>scroll to start <span class="chev">▼</span></button></div>
+    </div>
+    <div class="tour" id="tour" aria-live="polite" hidden></div>
+  </div>
+  <div class="marks" id="marks">
+    {tourChapterIds.map((id, i) => <div id={`tour-${id}`} style={height(i)}></div>)}
+  </div>
+</section>
+
+<script>
+  import "@/tour/home.js";
+</script>

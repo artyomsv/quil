@@ -1,0 +1,74 @@
+/* Shared site styles. Page-specific rules live in each page's own <style>. */
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; scroll-padding-top: calc(var(--hh) + 12px); }
+body { margin: 0; min-height: 100vh; display: flex; flex-direction: column; background: var(--t-bg); color: var(--t-text); font: 16px/1.6 var(--sans); -webkit-font-smoothing: antialiased; }
+main { flex: 1; }
+a { color: inherit; text-decoration: none; }
+img { max-width: 100%; height: auto; }
+code, kbd, pre { font-family: var(--mono); }
+[hidden] { display: none !important; }
+:focus-visible { outline: 1px solid var(--t-dialog); outline-offset: 2px; }
+::selection { background: var(--t-violet); color: var(--t-title); }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+.skip { position: absolute; left: 12px; top: -100px; z-index: 50; padding: 4px 1.2ch; background: var(--t-violet); color: var(--t-title); font: 700 13px var(--mono); }
+.skip:focus { top: calc(var(--hh) + 8px); }
+
+/* header — a TUI tab bar, as in the B2 mock. The tour runtime measures .hdr. */
+.hdr { position: sticky; top: 0; z-index: 30; height: var(--hh); display: flex; align-items: center; gap: 1ch; padding: 0 12px; background: var(--t-bg); border-bottom: 1px solid var(--t-line); font: 13px var(--mono); white-space: nowrap; }
+.hdr .brand { display: flex; align-items: center; gap: 8px; font-weight: 800; color: var(--t-title); margin-right: 1ch; flex: none; }
+.hdr nav { display: flex; gap: 1ch; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.hdr nav::-webkit-scrollbar { display: none; }
+.hdr nav a { padding: 1px 1ch; background: var(--t-tab); color: var(--t-soft); flex: none; }
+.hdr nav a:hover { background: #585858; color: #eeeeee; }
+.hdr nav a[aria-current="page"] { background: var(--t-violet); color: var(--t-title); font-weight: 700; }
+.hdr .r { margin-left: auto; display: flex; gap: 1.5ch; color: var(--t-dim); flex: none; padding-left: 1ch; }
+.hdr .r b { color: var(--t-title); font-weight: 500; }
+.hdr .r a:hover { color: var(--t-title); }
+@media (max-width: 900px) { .hdr .r .v { display: none; } }
+
+/* sections */
+.wrap { max-width: var(--wrap); margin: 0 auto; padding-inline: 16px; }
+.wrap.narrow { max-width: 820px; }
+.sec { padding-block: 72px 24px; }
+.sec + .sec { border-top: 1px solid var(--t-line); }
+.eyebrow { font: 700 11.5px var(--mono); letter-spacing: .18em; color: var(--t-mute); text-transform: uppercase; }
+.eyebrow a { color: var(--t-hint); }
+.sec h2, .page-head h1 { margin: 10px 0 0; font: 800 clamp(26px, 3.4vw, 40px)/1.1 var(--mono); letter-spacing: -0.02em; color: var(--t-title); text-wrap: balance; }
+.page-head { padding-block: 56px 28px; border-bottom: 1px solid var(--t-line); }
+.page-head h1 { font-size: clamp(32px, 4.8vw, 56px); }
+.lede { margin: 14px 0 0; max-width: 68ch; color: var(--t-soft); font-size: 17px; }
+.more { margin-top: 26px; font: 13.5px var(--mono); }
+.more a { color: var(--t-hint); }
+.more a:hover { color: var(--t-title); }
+pre.cmd { margin: 10px 0 0; padding: 12px 14px; background: var(--t-raise); color: var(--t-text); font-size: 13.5px; line-height: 1.6; overflow-x: auto; border-left: 2px solid var(--t-violet); }
+pre.cmd .g { color: var(--t-ok); user-select: none; }
+.btn { display: inline-block; padding: 3px 1.2ch; background: var(--t-tab); color: #eeeeee; font: 700 13.5px var(--mono); }
+.btn:hover { background: #585858; }
+.btn.p { background: var(--t-violet); color: var(--t-title); }
+.btn.p:hover { background: #7a2bff; }
+.badge { margin-left: .6ch; padding: 0 .6ch; font: 700 10.5px var(--mono); letter-spacing: .1em; background: var(--t-amber); color: #080808; text-transform: uppercase; vertical-align: 1px; }
+
+/* long-form text: blog, legal */
+.prose { max-width: 70ch; font-size: 17px; line-height: 1.75; }
+.prose h2 { margin: 2.2em 0 .6em; font: 800 24px/1.25 var(--mono); color: var(--t-title); }
+.prose h3 { margin: 1.8em 0 .5em; font: 700 19px/1.3 var(--mono); color: var(--t-title); }
+.prose p, .prose ul, .prose ol { margin: 0 0 1.25rem; }
+.prose ul, .prose ol { padding-left: 1.4rem; }
+.prose li { margin-bottom: .4rem; }
+.prose a { color: var(--t-hint); text-decoration: underline; text-underline-offset: 3px; }
+.prose a:hover { color: var(--t-title); }
+.prose strong { color: var(--t-title); font-weight: 600; }
+.prose code { font-size: .88em; background: var(--t-line); padding: .1em .35em; color: var(--t-title); }
+.prose pre { margin: 1.5rem 0; padding: 1rem 1.1rem; overflow-x: auto; font-size: .9rem; line-height: 1.6; }
+.prose pre code { background: none; padding: 0; color: inherit; }
+.prose blockquote { margin: 1.5em 0; padding-left: 1rem; border-left: 2px solid var(--t-dialog); color: var(--t-soft); }
+.prose img { margin: 2rem 0; border: 1px solid var(--t-line); }
+
+/* footer — link columns over a status line */
+.site-foot { margin-top: 80px; border-top: 1px solid var(--t-line); font: 13px/1.8 var(--mono); color: var(--t-soft); }
+.site-foot .cols { max-width: var(--wrap); margin: 0 auto; padding: 36px 16px 28px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 24px; }
+.site-foot h2 { margin: 0 0 8px; font: 700 11.5px var(--mono); letter-spacing: .18em; text-transform: uppercase; color: var(--t-mute); }
+.site-foot ul { list-style: none; margin: 0; padding: 0; }
+.site-foot a:hover { color: var(--t-title); }
+.site-foot .status { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px 24px; padding: 2px 12px; background: var(--t-status); color: var(--t-soft); font-size: 12.5px; }
+@media (max-width: 760px) { .site-foot .cols { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

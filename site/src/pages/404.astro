@@ -1,52 +1,35 @@
 ---
 /**
- * 404 — rendered via `src/pages/404.astro`. GitHub Pages serves
- * `/404.html` automatically for unmatched paths.
+ * 404 — GitHub Pages serves dist/404.html for unmatched paths. noindex, and
+ * therefore no canonical (BaseHead).
  */
 import Page from "@/layouts/Page.astro";
 
 const seo = {
   title: "Page not found",
-  description:
-    "That workspace wasn't persisted. Head back to quil.cc to find what you were looking for.",
+  description: "That pane was not restored. The page you asked for is not on quil.cc; the tour, the docs and the install steps are one click away.",
   path: "/404",
+  robots: "noindex",
 };
 ---
 <Page {...seo}>
-  <section style="padding: 120px 0 140px;">
-    <div class="container-ember stack">
-      <div class="cta-inner" style="max-width:720px;">
-        <div class="hero-ruler" style="justify-content:center;">
-          <span>§ 404 · NOT FOUND</span>
-          <span>REV <b>────</b></span>
-          <span>GHOST-BUF <b>empty</b></span>
-        </div>
-
-        <pre class="cta-ascii" aria-hidden="true" style="margin-top:32px;">
-    ┌────────────────────────────────────────────┐
-    │                                            │
-    │          ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓          │
-    │          ▓    PANE NOT RESTORED    ▓          │
-    │          ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓          │
-    │                                            │
-    └────────────────────────────────────────────┘
-        </pre>
-
-        <h2 style="font-size: clamp(32px, 5vw, 60px); margin-top:8px;">
-          That workspace <span class="flame-text">wasn't persisted.</span>
-        </h2>
-
-        <p>
-          The page you're looking for isn't in the workspace tree.
-          Maybe it was never checked in, or maybe a pane split changed
-          its path.
-        </p>
-
-        <div class="actions">
-          <a href="/" class="btn btn-primary">▸ back to home</a>
-          <a href="/install/" class="btn btn-outline">install quil</a>
-        </div>
-      </div>
+  <section class="sec">
+    <div class="wrap nf">
+      <pre aria-hidden="true">┌──────────────────────────────┐
+│                              │
+│      ▲  PANE NOT RESTORED     │
+│                              │
+└──────────────────────────────┘</pre>
+      <h1>That pane was not restored.</h1>
+      <p class="lede">The page you asked for is not here. It may have moved when the site got smaller.</p>
+      <p class="nf-acts"><a class="btn p" href="/">▸ take the tour</a> <a class="btn" href="/docs/">docs</a> <a class="btn" href="/#install">install</a></p>
     </div>
   </section>
 </Page>
+
+<style>
+  .nf { padding-block: 40px 60px; }
+  pre { margin: 0; color: var(--t-amber); font-size: 14px; line-height: 1.3; overflow-x: auto; }
+  h1 { margin: 24px 0 0; font: 800 clamp(30px, 4.6vw, 52px)/1.1 var(--mono); color: var(--t-title); }
+  .nf-acts { margin-top: 26px; display: flex; gap: 12px; flex-wrap: wrap; }
+</style>

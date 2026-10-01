@@ -1969,7 +1969,21 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 	// A new client or a master change reaches the OTHER attached clients once
 	// this attach is answered. The attaching conn gets none: its own state
 	// below is built after this registration, so it already carries both.
-	if d.attachClient(conn, attach).any() {
+	//
+	// A read-only viewer attaches to WATCH: it never sizes anything, never
+	// bootstraps a workspace, never kicks a child, never consumes the owner's
+	// first-attach replay, and its CWD never becomes a default spawn
+	// directory (defaultCWD's chain reads attached clients' cwd).
+	readOnly := conn.Auth().ReadOnly()
+	if readOnly {
+		attach.CWD = ""
+	}
+	change, err := d.attachClient(conn, attach)
+	if err != nil {
+		d.refuseAttach(conn, msg, err)
+		return
+	}
+	if change.any() {
 		defer d.sendStateToOtherClients(conn, "attach")
 	}
 
@@ -1999,13 +2013,15 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 	if rows <= 0 {
 		rows = 24
 	}
-	d.clientSize.Store(&terminalSize{cols: cols, rows: rows})
+	if !readOnly {
+		d.clientSize.Store(&terminalSize{cols: cols, rows: rows})
+	}
 
 	log.Printf("attach: client connected (%dx%d), tabs=%d, restored=%v",
 		cols, rows, len(d.session.Tabs()), d.restored)
 
 	// Create default workspace if empty (no tabs — neither fresh nor restored)
-	if len(d.session.Tabs()) == 0 {
+	if len(d.session.Tabs()) == 0 && !readOnly {
 		log.Print("attach: creating default workspace (no tabs)")
 		tab := d.session.CreateTab("Shell")
 		// attachClient (above) already recorded attach.CWD on this conn's
@@ -2089,8 +2105,14 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 			// without this: attach while `vim` is up, quit vim, attach again.
 			// It also stops the snapshot being retained in memory (it counts
 			// toward the pane's HeapBytes) for a pane that will never use it.
+			//
+			// A read-only viewer leaves it for the owner: it still sees the
+			// snapshot, but the one-shot belongs to the client that drives
+			// the pane.
 			snap := pane.GhostSnap
-			pane.GhostSnap = nil
+			if !readOnly {
+				pane.GhostSnap = nil
+			}
 
 			var ghost []byte
 			source := "ghostsnap"
@@ -2149,7 +2171,7 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 			// needs a live PTY, and reading it separately would race a restart.
 			// Same discipline as handleResizePane — pointer under the lock, the
 			// Resize syscall outside it.
-			kickRunning := pane.PTY != nil && pane.ExitCode == nil
+			kickRunning := paneRunning(pane)
 			pane.PluginMu.Unlock()
 			if !ghostEnabled || len(ghost) == 0 {
 				if source == "skipped-child-repaints" {
@@ -2158,8 +2180,10 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 				}
 				// Nothing was replayed, so this pane's rectangle is blank on the
 				// client that just attached — even though the process behind it
-				// is alive and mid-conversation. Ask the child to repaint.
-				if kickRunning {
+				// is alive and mid-conversation. Ask the child to repaint —
+				// unless the client is a read-only viewer: the kick is a key
+				// written to the owner's PTY or a resize, both side effects.
+				if kickRunning && !readOnly {
 					d.redrawKick(pane, typ)
 				}
 				continue
@@ -2199,6 +2223,27 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 			return // client disconnected or daemon shutting down
 		}
 	}
+}
+
+// refuseAttach answers an attach whose client id belongs to another
+// principal. The attach does not register. Its audit line goes through the
+// same per-(conn, type)-per-minute limit as every other refusal: a client
+// retrying an attach must not flood audit.log.
+func (d *Daemon) refuseAttach(conn *ipc.Conn, msg *ipc.Message, err error) {
+	auth := conn.Auth()
+	if auth.ShouldAuditRefusal(msg.Type, time.Now()) {
+		d.writeAudit(d.auditFor(conn, auth, auditEntry{Event: "refused", Type: ipc.MsgAttach, Reason: err.Error()}))
+	}
+	sendError(conn, msg.ID, msg.Type, ipc.ErrCodeRefused, err.Error())
+}
+
+// paneRunning reports a live process: a PTY and no exit code. Deferred,
+// exited and placeholder panes are not running. The ONE copy of this check;
+// the CALLER HOLDS pane.PluginMu, so it shares a lock span with whatever is
+// read beside it — onPaneExit landing between two spans would pair a
+// live-looking PTY with an exit code.
+func paneRunning(pane *Pane) bool {
+	return pane.PTY != nil && pane.ExitCode == nil
 }
 
 // sendGhostChunked sends a ghost buffer in 8 KB chunks with a 2 ms yield
@@ -7193,7 +7238,7 @@ func (d *Daemon) buildPaneInfos() []ipc.PaneInfo {
 			pane.PluginMu.Lock()
 			typ := pane.Type
 			cwd := pane.CWD
-			running := pane.PTY != nil && pane.ExitCode == nil
+			running := paneRunning(pane)
 			preparing := pane.PreparingWorktree
 			adopted := pane.Adopted
 			pane.PluginMu.Unlock()
@@ -7251,8 +7296,15 @@ func (d *Daemon) handleReadPaneOutputReq(conn *ipc.Conn, msg *ipc.Message) {
 		})
 		return
 	}
-	d.ensurePaneSpawned(pane)
-	d.highlightPane(pane.ID)
+	// A read-only viewer reads what exists: a deferred pane answers from its
+	// restored buffer and is NOT spawned; nothing is highlighted.
+	if !conn.Auth().ReadOnly() {
+		d.ensurePaneSpawned(pane)
+		d.highlightPane(pane.ID)
+	}
+	pane.PluginMu.Lock()
+	running := paneRunning(pane)
+	pane.PluginMu.Unlock()
 
 	lastLines := req.LastLines
 	if lastLines <= 0 {
@@ -7277,9 +7329,10 @@ func (d *Daemon) handleReadPaneOutputReq(conn *ipc.Conn, msg *ipc.Message) {
 	text := strings.Join(allLines, "\n")
 
 	respondTo(conn, msg.ID, ipc.MsgReadPaneOutputResp, ipc.ReadPaneOutputRespPayload{
-		PaneID: req.PaneID,
-		Text:   text,
-		Lines:  len(allLines),
+		PaneID:     req.PaneID,
+		Text:       text,
+		Lines:      len(allLines),
+		NotRunning: !running,
 	})
 }
 
@@ -7292,7 +7345,7 @@ func (d *Daemon) buildPaneStatus(pane *Pane) ipc.PaneStatusRespPayload {
 	typ := pane.Type
 	cwd := pane.CWD
 	exitCode := pane.ExitCode
-	running := pane.PTY != nil && exitCode == nil
+	running := paneRunning(pane)
 	preparing := pane.PreparingWorktree
 	pane.PluginMu.Unlock()
 	if typ == "" {
@@ -7337,7 +7390,9 @@ func (d *Daemon) handlePaneStatusReq(conn *ipc.Conn, msg *ipc.Message) {
 		})
 		return
 	}
-	d.highlightPane(pane.ID)
+	if !conn.Auth().ReadOnly() {
+		d.highlightPane(pane.ID)
+	}
 
 	// Match buildPaneInfos: a deferred pane (PTY==nil) reports Running=false even
 	// though ExitCode is nil, so get_pane_status and list_panes agree. This
@@ -7532,8 +7587,13 @@ func (d *Daemon) handleScreenshotPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 		})
 		return
 	}
-	d.ensurePaneSpawned(pane)
-	d.highlightPane(pane.ID)
+	if !conn.Auth().ReadOnly() {
+		d.ensurePaneSpawned(pane)
+		d.highlightPane(pane.ID)
+	}
+	pane.PluginMu.Lock()
+	running := paneRunning(pane)
+	pane.PluginMu.Unlock()
 
 	// Snapshotted together under PluginMu — a concurrent resize would
 	// otherwise render the screenshot at a geometry that never existed.
@@ -7589,10 +7649,11 @@ func (d *Daemon) handleScreenshotPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 	cursor := em.CursorPosition()
 
 	respondTo(conn, msg.ID, ipc.MsgScreenshotPaneResp, ipc.ScreenshotPaneRespPayload{
-		PaneID:  pane.ID,
-		Text:    strings.Join(lines, "\n"),
-		CursorX: cursor.X,
-		CursorY: cursor.Y,
+		PaneID:     pane.ID,
+		Text:       strings.Join(lines, "\n"),
+		CursorX:    cursor.X,
+		CursorY:    cursor.Y,
+		NotRunning: !running,
 	})
 }
 

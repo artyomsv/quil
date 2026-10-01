@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"sort"
 	"sync"
 	"time"
@@ -47,6 +48,11 @@ const (
 	maxClientDim = 1000
 )
 
+// errClientIDInUse refuses a client id already held by ANOTHER principal: a
+// viewer cannot take the owner's record, master role or reserved slot by
+// naming its id (list_clients shows ids).
+var errClientIDInUse = errors.New("client id in use")
+
 // clientRecord is one attached client. The registry is keyed by conn, and a
 // conn that never sent MsgAttach (an MCP bridge) has no record.
 type clientRecord struct {
@@ -61,12 +67,21 @@ type clientRecord struct {
 	// overlays is the set of overlay panes this client has ON SCREEN — see
 	// setOverlayClaim for why visibility is per client.
 	overlays map[string]bool
+	// principal is "local" or "token <id>"; an id is bound to it.
+	principal string
+	// readOnly records a viewer: kept for list_clients, targeting and output
+	// holds, but never eligible for size master.
+	readOnly bool
 }
 
 // reservation keeps a lost master's slot until `until`.
 type reservation struct {
 	id    string
 	until time.Time
+	// principal is the lost master's principal. "" is a RESTART reserve: the
+	// daemon restarted and does not know who held the slot, so it admits only
+	// the LOCAL principal.
+	principal string
 	// attachedAt is the lost master's first attach, handed back to it when it
 	// returns, so it stays the oldest client. Zero for a restart reserve.
 	attachedAt time.Time
@@ -123,8 +138,26 @@ func (r *clientRegistry) clock() time.Time {
 // eligible reports whether a client's RAW window is paintable. The raw value
 // matters: handleAttach defaults a 0x0 attach to 80x24 for clientSize, and a
 // console-less client electing itself on that default is the 1x1 incident.
+// A read-only viewer is never eligible: it watches, it never sizes a PTY.
 func eligible(rec *clientRecord) bool {
-	return rec.cols >= daemonMinClientCols && rec.rows >= daemonMinClientRows
+	return !rec.readOnly && rec.cols >= daemonMinClientCols && rec.rows >= daemonMinClientRows
+}
+
+// reservationAdmits: a read-only client never claims a reserved slot; any
+// other claimant must be the principal that lost it. A restart reserve
+// (principal unknown) admits only the local principal: a TCP claimant of an
+// id reserved for another principal is refused, and an unknown principal
+// cannot be shown to be the same one. Cost, accepted: a full-token TUI that
+// was master before a restart has its attach refused (client id in use)
+// until the reserve lapses, at most restartReserveCap.
+func reservationAdmits(res *reservation, principal string, readOnly bool) bool {
+	if readOnly {
+		return false
+	}
+	if res.principal == "" {
+		return principal == ipc.PrincipalLocal
+	}
+	return res.principal == principal
 }
 
 func (r *clientRegistry) recordByID(id string) *clientRecord {
@@ -243,7 +276,11 @@ func (r *clientRegistry) expire() {
 // reattach is the payload's Reattach flag: false on a process's first attach
 // to this daemon, which a restart reserve yields to when it is alone — but
 // only when the attach carried its own id (an older client sends neither).
-func (r *clientRegistry) attach(conn *ipc.Conn, id string, cols, rows int, cwd string, reattach bool) clientChange {
+//
+// principal and readOnly are the conn's login. An id is bound to its
+// principal: a TCP claimant of an id another principal holds or has reserved
+// is refused with errClientIDInUse and registers nothing.
+func (r *clientRegistry) attach(conn *ipc.Conn, id string, cols, rows int, cwd string, reattach bool, principal string, readOnly bool) (clientChange, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.byConn == nil {
@@ -259,6 +296,21 @@ func (r *clientRegistry) attach(conn *ipc.Conn, id string, cols, rows int, cwd s
 			id = rec.id
 		} else {
 			id = "anon-" + uuid.NewString()
+		}
+	}
+	// The local socket always wins: a token holder can read the owner's id
+	// through list_clients and claim it while the owner's TUI reconnects, and
+	// a symmetric rule would then refuse the OWNER's own reattach. So only a
+	// TCP claimant is checked; a local claimant replaces any record with that
+	// id through the existing loop below, which drops the squatter's record.
+	if principal != ipc.PrincipalLocal {
+		for c, other := range r.byConn {
+			if c != conn && other.id == id && other.principal != principal {
+				return clientChange{}, errClientIDInUse
+			}
+		}
+		if res := r.reserved; res != nil && res.id == id && !reservationAdmits(res, principal, readOnly) {
+			return clientChange{}, errClientIDInUse
 		}
 	}
 	if !existed {
@@ -283,6 +335,7 @@ func (r *clientRegistry) attach(conn *ipc.Conn, id string, cols, rows int, cwd s
 	rec.id = id
 	rec.cols, rec.rows = cols, rows
 	rec.cwd = cwd
+	rec.principal, rec.readOnly = principal, readOnly
 	if res := r.reserved; res != nil && res.id == id {
 		// The reserved client is back, so the slot has nothing left to wait
 		// for. The election below keeps it when the client is eligible.
@@ -300,7 +353,7 @@ func (r *clientRegistry) attach(conn *ipc.Conn, id string, cols, rows int, cwd s
 		// any reconnecting client.
 		r.clearReservationLocked()
 	}
-	return clientChange{master: r.electLocked(), count: len(r.byConn) != before}
+	return clientChange{master: r.electLocked(), count: len(r.byConn) != before}, nil
 }
 
 // lose drops conn after a LOST link: the conn closed with no MsgDetach. A
@@ -326,6 +379,7 @@ func (r *clientRegistry) lose(conn *ipc.Conn) clientChange {
 				until:      r.clock().Add(r.grace),
 				attachedAt: rec.attachedAt,
 				protects:   protects,
+				principal:  rec.principal,
 			}, r.grace)
 		}
 	}
@@ -350,7 +404,7 @@ func (r *clientRegistry) setGeometry(conn *ipc.Conn, cols, rows int) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	rec, ok := r.byConn[conn]
-	if !ok {
+	if !ok || rec.readOnly {
 		return false
 	}
 	rec.cols, rec.rows = cols, rows
@@ -363,7 +417,7 @@ func (r *clientRegistry) takeControl(conn *ipc.Conn) (changed, accepted bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	rec, ok := r.byConn[conn]
-	if !ok || !eligible(rec) {
+	if !ok || rec.readOnly || !eligible(rec) {
 		return false, false
 	}
 	// An explicit request overrides a slot kept for someone else.
@@ -404,18 +458,25 @@ func (r *clientRegistry) reserveAfterRestart(id string) {
 // The geometry is the RAW one from the payload, taken before handleAttach
 // defaults it. It returns whether the master changed.
 func (d *Daemon) registerClient(conn *ipc.Conn, attach ipc.AttachPayload) bool {
-	return d.attachClient(conn, attach).master
+	change, _ := d.attachClient(conn, attach)
+	return change.master
 }
 
-// attachClient is registerClient reporting the count change too, for
-// handleAttach.
-func (d *Daemon) attachClient(conn *ipc.Conn, attach ipc.AttachPayload) clientChange {
+// attachClient is registerClient reporting the count change and a refusal
+// too, for handleAttach. The conn's login supplies the principal the id is
+// bound to; a conn with no login state (a test's nil or zero conn) is local.
+func (d *Daemon) attachClient(conn *ipc.Conn, attach ipc.AttachPayload) (clientChange, error) {
 	if conn == nil {
-		return clientChange{}
+		return clientChange{}, nil
+	}
+	auth := conn.Auth()
+	principal, readOnly := ipc.PrincipalLocal, false
+	if auth != nil {
+		principal, readOnly = auth.Principal(), auth.ReadOnly()
 	}
 	id := truncateField(attach.ClientID, maxClientIDLen)
 	cols, rows := attachWindowSize(attach)
-	return d.clients.attach(conn, id, clampClientDim(cols), clampClientDim(rows), attach.CWD, attach.Reattach)
+	return d.clients.attach(conn, id, clampClientDim(cols), clampClientDim(rows), attach.CWD, attach.Reattach, principal, readOnly)
 }
 
 // attachWindowSize is the RAW window size an attach reports, which is what

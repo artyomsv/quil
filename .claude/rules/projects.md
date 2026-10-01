@@ -624,6 +624,17 @@ so the levels line up; and middle-elision for branch names and ssh
 destinations, since cutting either end of `feat/…` or `user@…` leaves a column
 where every row looks the same.
 
+**The host row appears only for a project NOT on the start host**
+(`p.Dest != m.homeDest`, `appendProjectRows`). `Model.homeDest` is the
+destination the client was started against (`SetHomeDest(primaryDest)` in
+`cmd/quil/main.go`): `""` for a local start, so every remote project still
+shows its host, and the ssh destination under `quil --remote <host>`, where
+every project of that host repeated the same address on a second row. A local
+project in a `--remote` session is the one that differs, so it is named
+`this machine` (`hostLabel`) rather than shown blank. Only the sidebar drops
+it: the palette and the project picker keep `displayName()` (`name@dest`),
+because there the name alone can match two hosts.
+
 **That "levels line up" claim has an unstated exception below ~5 cells.**
 `sidebarTabHeading` budgets ordinal → marker → name, so a narrow tab row gives
 up its `▸ ` marker first, to keep the ordinal — the part that maps the row to

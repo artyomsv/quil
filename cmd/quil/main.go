@@ -632,6 +632,8 @@ func launchTUI() {
 	// identically, or the daemon's process dialog and its attached-client
 	// registry disagree about who this is.
 	model.SetClientID(processClientID)
+	// The sidebar names a project's host only when it is not this one.
+	model.SetHomeDest(primaryDest)
 	// Seed a row for every configured destination that did not connect. Without
 	// this the host simply vanishes from the sidebar, which reads as Quil having
 	// deleted the user's projects — and after a client auto-update it happens on

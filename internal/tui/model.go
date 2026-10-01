@@ -557,6 +557,12 @@ type Model struct {
 	// disk: two TUIs on one machine would then share it, and each is a
 	// distinct client to the daemon's master election.
 	clientID string
+	// homeDest is the destination this client was started against: "" for a
+	// local start, the ssh destination under `quil --remote <host>`. The
+	// sidebar names a project's host only when it differs from this one
+	// (appendProjectRows) — under --remote every project of the start host
+	// would otherwise carry the same host row.
+	homeDest string
 	// sizeMaster records, per destination, the master client's id reported by
 	// the last broadcast ("" = no master on that destination). isFollower
 	// derives from it: this client is a follower of dest whenever sizeMaster
@@ -1414,6 +1420,10 @@ func (m *Model) initKeymap() {
 // daemon needs to give them distinct, known ids rather than two random UUIDs
 // it cannot assert against.
 func (m *Model) SetClientID(id string) { m.clientID = id }
+
+// SetHomeDest records the destination this client was started against (see
+// Model.homeDest). A pure setter, called once after NewModel.
+func (m *Model) SetHomeDest(dest string) { m.homeDest = dest }
 
 // isFollower reports whether this client is NOT the size master of dest, and
 // there IS a master — see D4. A dest this client has never seen a broadcast

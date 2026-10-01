@@ -411,10 +411,15 @@ func (m *Model) appendProjectRows(rows []sidebarRow, i, w, g int) []sidebarRow {
 		inGroup: indent,
 		group:   g,
 	})
-	if p.Dest != "" {
+	// The host row names a project's daemon only when it is not the one this
+	// client was started against: under --remote every project of the start
+	// host would repeat the same address.
+	if p.Dest != m.homeDest {
 		rows = append(rows, sidebarRow{
 			text: indentSidebarRow(indent, w, hl, func(w int) string {
-				return projectDestRow(sanitizeRemoteText(p.Dest), w, hl)
+				// hostLabel: under --remote a local project ("") is the one
+				// that differs, and it is named rather than shown blank.
+				return projectDestRow(sanitizeRemoteText(hostLabel(p.Dest)), w, hl)
 			}),
 			kind:    sidebarRowProject,
 			index:   i,

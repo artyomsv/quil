@@ -64,6 +64,50 @@ func TestSidebarSanitizesRemoteStrings(t *testing.T) {
 	}
 }
 
+// The host row names a project's daemon only when it is not the one this
+// client was started against: under --remote every project of the start host
+// would otherwise repeat the same address.
+func TestSidebar_HostRowOnlyForADifferentHost(t *testing.T) {
+	projects := []*ProjectModel{
+		{ID: "proj-a", Name: "alpha", Dest: "gpu01"},
+		{ID: "proj-b", Name: "beta", Dest: "gpu02"},
+		{ID: "proj-c", Name: "gamma"},
+	}
+	for _, tc := range []struct {
+		home     string
+		shown    []string
+		notShown []string
+	}{
+		{home: "", shown: []string{"@gpu01", "@gpu02"}, notShown: []string{"@this machine"}},
+		{home: "gpu01", shown: []string{"@gpu02", "@this machine"}, notShown: []string{"@gpu01"}},
+	} {
+		t.Run("home="+tc.home, func(t *testing.T) {
+			m := Model{projects: projects, sidebarOpen: true, sidebarWidth: 22, homeDest: tc.home}
+			out := m.renderSidebar(30)
+			for _, s := range tc.shown {
+				if !strings.Contains(out, s) {
+					t.Errorf("sidebar lacks %q:\n%s", s, out)
+				}
+			}
+			for _, s := range tc.notShown {
+				if strings.Contains(out, s) {
+					t.Errorf("sidebar shows %q:\n%s", s, out)
+				}
+			}
+			rows, _ := m.sidebarRows(22)
+			hosts := 0
+			for _, r := range rows {
+				if strings.Contains(r.text, "@") {
+					hosts++
+				}
+			}
+			if hosts != 2 {
+				t.Errorf("host rows = %d, want 2 (paint and hit test share these rows)", hosts)
+			}
+		})
+	}
+}
+
 func TestSidebarWidthZeroWhenClosedOrNarrow(t *testing.T) {
 	if got := sidebarWidth(200, false, 22); got != 0 {
 		t.Fatalf("closed = %d, want 0", got)

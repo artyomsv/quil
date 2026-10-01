@@ -380,6 +380,16 @@ func (d *Daemon) Start() error {
 	if err := os.MkdirAll(quilDir, 0700); err != nil {
 		return fmt.Errorf("create quil dir: %w", err)
 	}
+	// Before the socket or any token/audit file exists: on Windows the
+	// directory DACL is what every later file inherits at creation.
+	if err := ipc.ProtectDir(quilDir); err != nil {
+		log.Printf("warning: could not restrict %s to this account: %v", quilDir, err)
+	}
+	if w, err := ipc.DirAccessWarning(quilDir); err != nil {
+		log.Printf("warning: could not read the access list of %s: %v", quilDir, err)
+	} else if w != "" {
+		log.Printf("warning: %s", w)
+	}
 
 	if err := shellinit.EnsureInitDir(quilDir); err != nil {
 		log.Printf("warning: failed to write shell init scripts: %v", err)

@@ -727,11 +727,14 @@ func NewServer(socketPath string, handler MessageHandler, onDisconnect func(*Con
 func (s *Server) Start() error {
 	os.Remove(s.path) // Clean up stale socket
 
-	ln, err := net.Listen("unix", s.path)
+	ln, err := listenUnixPrivate(s.path)
 	if err != nil {
 		return err
 	}
-	os.Chmod(s.path, 0600) // restrict socket permissions
+	if err := protectSocket(s.path); err != nil {
+		ln.Close()
+		return err
+	}
 	s.listener = ln
 
 	go s.acceptLoop()

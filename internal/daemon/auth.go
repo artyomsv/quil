@@ -26,6 +26,9 @@ const (
 	defaultBackoffBase  = 250 * time.Millisecond
 	defaultBackoffCap   = 2 * time.Second
 	refusalFlushTimeout = time.Second
+	// connDrainTimeout bounds how long Stop waits for the conns' disconnect
+	// callbacks before it closes the audit log they write to.
+	connDrainTimeout = 2 * time.Second
 )
 
 // The login timer, the step timeout and the backoff base/cap are package vars
@@ -41,7 +44,7 @@ var (
 
 // listenerWhy is the [listener] tcp reason in LoopbackAddr's non-loopback
 // error (each caller keeps its own wording).
-const listenerWhy = "the TCP listener is loopback-only until TLS (phase 6); reach it from another machine with ssh -L"
+const listenerWhy = "the TCP listener is loopback-only until it supports TLS; reach it from another machine with ssh -L"
 
 // Login states. The FIRST frame moves pending → checking with a CAS, which is
 // what clears the deadline: a timer that fires afterwards finds the state
@@ -367,7 +370,7 @@ func (d *Daemon) onTCPAccepted(conn *ipc.Conn) {
 // dispatch goroutine, and the conn is closed as soon as it returns.
 func (d *Daemon) onTCPRejected(reason string, conn *ipc.Conn) {
 	if conn == nil {
-		d.writeAudit(auditEntry{Event: "login_failed", Transport: ipc.TransportTCP, Reason: reason})
+		d.writeAudit(loginFailed(nil, nil, reason))
 		return
 	}
 	// A logged-in conn's oversized frame ends that conn, but it is not a
@@ -377,7 +380,7 @@ func (d *Daemon) onTCPRejected(reason string, conn *ipc.Conn) {
 	}
 	s := d.auth.session(conn)
 	if s == nil {
-		d.writeAudit(auditEntry{Event: "login_failed", Transport: ipc.TransportTCP, Reason: reason})
+		d.writeAudit(loginFailed(nil, nil, reason))
 		return
 	}
 	switch {
@@ -441,10 +444,12 @@ func (d *Daemon) handlePreLogin(conn *ipc.Conn, msg *ipc.Message) {
 		s.disarm()
 		d.loginProof(conn, s, msg)
 	}
-	// Any other state — loginRefusing (the timer or a bad frame refused this
-	// conn and the refusal is flushing) or loginChecking (a frame overtook
-	// one being checked) — the frame is ignored and the conn is left to
-	// refuseLogin's own Close.
+	// Any other state: loginRefusing (the timer or a bad frame refused this
+	// conn and the refusal is flushing) — the frame is ignored and the conn
+	// is left to refuseLogin's own Close. loginChecking and loginDone are
+	// unreachable here: one conn's frames are dispatched one at a time on its
+	// own goroutine, so no frame arrives while one is being checked, and a
+	// done conn is authenticated and never routed to this function.
 }
 
 func (d *Daemon) loginHello(conn *ipc.Conn, s *loginSession, msg *ipc.Message) {

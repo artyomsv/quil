@@ -162,15 +162,7 @@ func TestLogin_OversizeDuringRefusalKeepsTheFlush(t *testing.T) {
 func TestLogin_UnknownIDStillChallenged(t *testing.T) {
 	h := newAuthHarness(t)
 	c := h.dialRaw(t)
-	nonceC, _ := clientauth.NewNonce()
-	hello := testLoginHello()
-	hello.TokenID, hello.Nonce = "deadbeef", nonceC
-	writeRaw(t, c, ipc.MsgHello, "U1", hello)
-	c.SetReadDeadline(time.Now().Add(3 * time.Second))
-	ch, err := ipc.ReadMessage(c)
-	if err != nil || ch.Type != ipc.MsgAuthChallenge {
-		t.Fatalf("unknown id answered %v %v, want auth_challenge", ch, err)
-	}
+	helloAndChallenge(t, c, "U1", loginHelloFor("deadbeef"))
 	writeRaw(t, c, ipc.MsgAuthProof, "U1", ipc.AuthProofPayload{Proof: strings.Repeat("A", 43)})
 	expectRefusal(t, c, "token refused", 3*time.Second)
 	expectEOF(t, c, 3*time.Second)
@@ -416,11 +408,33 @@ func TestLogin_NoSecretsInLogs(t *testing.T) {
 	var buf safeBuffer
 	logger.Init("debug", &buf)
 	t.Cleanup(func() { logger.Init("info", io.Discard) })
+	// Short enough for the proof-step timeout below, long enough for the
+	// logins that answer at once.
+	setLoginVar(t, &loginStepTimeout, 500*time.Millisecond)
+	setLoginVar(t, &loginBackoffBase, time.Millisecond)
 	h := newAuthHarness(t)
 	tok := h.mint(t, "a", clientauth.LevelFull, nil)
 	nonceC, nonceS, proof, serverSig := manualLogin(t, h.dialRaw(t), tok)
 	v := clientauth.DeriveVerifier(tok)
 	h.waitAudit(t, "login_ok", func(e auditEntry) bool { return e.Event == "login_ok" })
+
+	// A refused proof: its nonces and the proof itself.
+	id, _ := clientauth.ParseToken(tok)
+	wrong, _, _ := clientauth.NewToken()
+	c := h.dialRaw(t)
+	refusedC, refusedS, refusedProof := sendHelloAndProof(t, c, "qtk_"+id+wrong[len("qtk_")+8:])
+	expectRefusal(t, c, "token refused", 3*time.Second)
+	// A proof-step timeout: the nonces of a login that never finished.
+	c2 := h.dialRaw(t)
+	timedOutC, timedOutS := helloAndChallenge(t, c2, "T1", loginHelloFor(id))
+	expectRefusal(t, c2, "login timeout", 3*time.Second)
+	h.waitAudit(t, "login_failed token refused", func(e auditEntry) bool {
+		return e.Event == "login_failed" && e.Reason == "token refused"
+	})
+	h.waitAudit(t, "login_failed timeout", func(e auditEntry) bool {
+		return e.Event == "login_failed" && e.Reason == "timeout"
+	})
+
 	audit, _ := readFileString(h.home + "/" + auditFile)
 	logs := buf.String()
 	// Everything after "qtk_<8 hex>_". Not LastIndex("_"): the secret is
@@ -433,7 +447,9 @@ func TestLogin_NoSecretsInLogs(t *testing.T) {
 	for name, secret := range map[string]string{
 		"token": secretPart, "stored key": hex.EncodeToString(v.StoredKey),
 		"server key": hex.EncodeToString(v.ServerKey), "nonce_c": nonceC, "nonce_s": nonceS, "proof": proof,
-		"server_sig": serverSig,
+		"server_sig":      serverSig,
+		"refused nonce_c": refusedC, "refused nonce_s": refusedS, "refused proof": refusedProof,
+		"timed-out nonce_c": timedOutC, "timed-out nonce_s": timedOutS,
 	} {
 		if strings.Contains(logs, secret) {
 			t.Errorf("quild.log contains the %s", name)
@@ -447,40 +463,6 @@ func TestLogin_NoSecretsInLogs(t *testing.T) {
 func readFileString(path string) (string, error) {
 	b, err := os.ReadFile(path)
 	return string(b), err
-}
-
-// expectRefusalID is expectRefusal that also pins the frame's request ID: the
-// client reads the login's answers by the hello's ID and drops any other, so
-// a refusal under another ID reaches the user as a bare EOF.
-func expectRefusalID(t *testing.T, c net.Conn, reason, wantID string, within time.Duration) {
-	t.Helper()
-	c.SetReadDeadline(time.Now().Add(within))
-	defer c.SetReadDeadline(time.Time{})
-	msg, err := ipc.ReadMessage(c)
-	if err != nil {
-		t.Fatalf("expected error refused (%s), read failed: %v", reason, err)
-	}
-	var p ipc.ErrorPayload
-	if msg.Type != ipc.MsgError || msg.DecodePayload(&p) != nil || p.Code != ipc.ErrCodeRefused ||
-		p.Message != reason || msg.ID != wantID {
-		t.Fatalf("got %s id=%q %s, want error refused %q with id %q", msg.Type, msg.ID, msg.Payload, reason, wantID)
-	}
-}
-
-// helloAndChallenge opens a login under request id for tokenID and reads the
-// challenge it must earn.
-func helloAndChallenge(t *testing.T, c net.Conn, id, tokenID string) {
-	t.Helper()
-	nonce, _ := clientauth.NewNonce()
-	hello := testLoginHello()
-	hello.TokenID, hello.Nonce = tokenID, nonce
-	writeRaw(t, c, ipc.MsgHello, id, hello)
-	c.SetReadDeadline(time.Now().Add(3 * time.Second))
-	defer c.SetReadDeadline(time.Time{})
-	ch, err := ipc.ReadMessage(c)
-	if err != nil || ch.Type != ipc.MsgAuthChallenge || ch.ID != id {
-		t.Fatalf("challenge: %v %v", ch, err)
-	}
 }
 
 // A token id that is not 8 lowercase hex digits is refused at the hello,
@@ -515,13 +497,13 @@ func TestLogin_EveryRefusalCarriesTheHelloID(t *testing.T) {
 
 	t.Run("wrong proof", func(t *testing.T) {
 		c := h.dialRaw(t)
-		helloAndChallenge(t, c, "B1", goodID)
+		helloAndChallenge(t, c, "B1", loginHelloFor(goodID))
 		writeRaw(t, c, ipc.MsgAuthProof, "B1", badProof)
 		expectRefusalID(t, c, "token refused", "B1", 3*time.Second)
 	})
 	t.Run("unknown id", func(t *testing.T) {
 		c := h.dialRaw(t)
-		helloAndChallenge(t, c, "B2", "deadbeef")
+		helloAndChallenge(t, c, "B2", loginHelloFor("deadbeef"))
 		writeRaw(t, c, ipc.MsgAuthProof, "B2", badProof)
 		expectRefusalID(t, c, "token refused", "B2", 3*time.Second)
 	})
@@ -532,25 +514,25 @@ func TestLogin_EveryRefusalCarriesTheHelloID(t *testing.T) {
 	})
 	t.Run("timeout at the proof step", func(t *testing.T) {
 		c := h.dialRaw(t)
-		helloAndChallenge(t, c, "B3", goodID)
+		helloAndChallenge(t, c, "B3", loginHelloFor(goodID))
 		expectRefusalID(t, c, "login timeout", "B3", 3*time.Second)
 		expectEOF(t, c, 3*time.Second)
 	})
 	t.Run("proof under another id", func(t *testing.T) {
 		c := h.dialRaw(t)
-		helloAndChallenge(t, c, "B4", goodID)
+		helloAndChallenge(t, c, "B4", loginHelloFor(goodID))
 		writeRaw(t, c, ipc.MsgAuthProof, "other", badProof)
 		expectRefusalID(t, c, "login required", "B4", 3*time.Second)
 	})
 	t.Run("another type at the proof step", func(t *testing.T) {
 		c := h.dialRaw(t)
-		helloAndChallenge(t, c, "B5", goodID)
+		helloAndChallenge(t, c, "B5", loginHelloFor(goodID))
 		writeRaw(t, c, ipc.MsgListTabsReq, "B5", struct{}{})
 		expectRefusalID(t, c, "login required", "B5", 3*time.Second)
 	})
 	t.Run("too large at the proof step", func(t *testing.T) {
 		c := h.dialRaw(t)
-		helloAndChallenge(t, c, "B6", goodID)
+		helloAndChallenge(t, c, "B6", loginHelloFor(goodID))
 		var hdr [4]byte
 		binary.BigEndian.PutUint32(hdr[:], 10<<20)
 		if _, err := c.Write(hdr[:]); err != nil {
@@ -572,14 +554,9 @@ func TestLogin_AuditFieldsAreCut(t *testing.T) {
 	long := strings.Repeat("k", 300)
 
 	c := h.dialRaw(t)
-	nonce, _ := clientauth.NewNonce()
-	hello := testLoginHello()
-	hello.ClientID, hello.Kind, hello.TokenID, hello.Nonce = long, long, "deadbeef", nonce
-	writeRaw(t, c, ipc.MsgHello, "G1", hello)
-	c.SetReadDeadline(time.Now().Add(3 * time.Second))
-	if ch, err := ipc.ReadMessage(c); err != nil || ch.Type != ipc.MsgAuthChallenge {
-		t.Fatalf("challenge: %v %v", ch, err)
-	}
+	hello := loginHelloFor("deadbeef")
+	hello.ClientID, hello.Kind = long, long
+	helloAndChallenge(t, c, "G1", hello)
 	writeRaw(t, c, ipc.MsgAuthProof, "G1", ipc.AuthProofPayload{Proof: strings.Repeat("A", 43)})
 	expectRefusal(t, c, "token refused", 3*time.Second)
 
@@ -744,5 +721,38 @@ func TestLogin_OversizeAfterLoginIsNotAFailedLogin(t *testing.T) {
 		if e.Event == "login_failed" {
 			t.Fatalf("a logged-in conn's oversized frame was audited as a failed login: %+v", e)
 		}
+	}
+}
+
+// Stop closes the audit log only after every conn's disconnect callback has
+// run: a TCP conn open at Stop gets its tcp_disconnect line, and a proof
+// check still in its backoff when its conn was closed gets its login_failed.
+func TestStop_AuditsTheConnsOpenAtStop(t *testing.T) {
+	setLoginVar(t, &loginBackoffBase, 500*time.Millisecond)
+	h := newAuthHarness(t)
+	tok := h.mint(t, "a", clientauth.LevelFull, nil)
+	h.login(t, tok) // logged in, and still open at Stop
+	id, _ := clientauth.ParseToken(tok)
+	wrong, _, _ := clientauth.NewToken()
+	h.d.auth.failures.Store(1) // the next proof check sleeps 500 ms first
+	c := h.dialRaw(t)
+	sendHelloAndProof(t, c, "qtk_"+id+wrong[len("qtk_")+8:])
+	time.Sleep(100 * time.Millisecond) // the proof is now in its backoff
+	h.d.Stop()
+
+	var loggedInGone, refused bool
+	disconnects := 0
+	for _, e := range h.auditEntries(t) {
+		switch {
+		case e.Event == "tcp_disconnect":
+			disconnects++
+			loggedInGone = loggedInGone || e.TokenName == "a"
+		case e.Event == "login_failed" && e.Reason == "token refused":
+			refused = true
+		}
+	}
+	if !loggedInGone || !refused || disconnects < 2 {
+		t.Fatalf("after Stop: logged-in disconnect=%v, in-flight refusal=%v, disconnects=%d; have %+v",
+			loggedInGone, refused, disconnects, h.auditEntries(t))
 	}
 }

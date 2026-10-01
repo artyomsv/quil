@@ -710,6 +710,9 @@ type Server struct {
 	tcpListener  net.Listener
 	tcpHooks     TCPHooks
 	pendingTCP   atomic.Int32
+	// handling counts handleConn goroutines that have not returned yet,
+	// disconnect callback included (WaitConns).
+	handling atomic.Int64
 	// stopOnce makes Stop idempotent: a second close(s.done) would panic,
 	// and harnesses both call Stop and register it in Cleanup.
 	stopOnce sync.Once
@@ -829,6 +832,7 @@ func (s *Server) acceptTCP(ln net.Listener, hooks TCPHooks) {
 		if hooks.Accepted != nil {
 			hooks.Accepted(conn)
 		}
+		s.handling.Add(1)
 		go s.handleConn(conn)
 	}
 }
@@ -955,11 +959,31 @@ func (s *Server) acceptLoop() {
 		s.mu.Unlock()
 
 		logger.Info("ipc: client connected (total=%d)", count)
+		s.handling.Add(1)
 		go s.handleConn(conn)
 	}
 }
 
+// WaitConns waits, up to timeout, until every conn's handler goroutine has
+// returned — its disconnect callback included — and reports whether they all
+// did. Stop closes the conns but does not wait for those callbacks; a caller
+// that tears down something they write to (the daemon's audit log) waits here
+// first. Bounded because a handler can be in the middle of a slow request.
+func (s *Server) WaitConns(timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for s.handling.Load() > 0 {
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(flushPollInterval)
+	}
+	return true
+}
+
 func (s *Server) handleConn(conn *Conn) {
+	// Registered first so it runs last: the count drops only after the
+	// disconnect callback has returned.
+	defer s.handling.Add(-1)
 	defer func() {
 		conn.Close()
 		conn.releasePendingSlot()

@@ -659,6 +659,12 @@ func (d *Daemon) Stop() {
 		d.refreshPluginStateFromHooks()
 		log.Print("daemon stopping, writing final snapshot...")
 		d.snapshot()
+		// Every conn's disconnect callback writes to the audit log (a
+		// tcp_disconnect, or a login_failed from a check still in flight
+		// when its conn was closed), so it closes only after they ran.
+		if d.server != nil && !d.server.WaitConns(connDrainTimeout) {
+			log.Printf("stop: some conn handlers had not returned after %v", connDrainTimeout)
+		}
 		d.closeAuth()
 		// Sandbox panes, after the snapshot and before the PTY closes: the
 		// harvest puts their commits in the repository while the containers

@@ -141,8 +141,9 @@ func writeRaw(t *testing.T, c net.Conn, typ, id string, payload any) {
 	}
 }
 
-// expectRefusal reads one frame and requires `error refused` with reason.
-func expectRefusal(t *testing.T, c net.Conn, reason string, within time.Duration) {
+// readRefusal reads one frame, requires `error refused` with reason, and
+// returns the frame.
+func readRefusal(t *testing.T, c net.Conn, reason string, within time.Duration) *ipc.Message {
 	t.Helper()
 	c.SetReadDeadline(time.Now().Add(within))
 	defer c.SetReadDeadline(time.Time{})
@@ -154,6 +155,53 @@ func expectRefusal(t *testing.T, c net.Conn, reason string, within time.Duration
 	if msg.Type != ipc.MsgError || msg.DecodePayload(&p) != nil || p.Code != ipc.ErrCodeRefused || p.Message != reason {
 		t.Fatalf("got %s %s, want error refused %q", msg.Type, msg.Payload, reason)
 	}
+	return msg
+}
+
+// expectRefusal reads one frame and requires `error refused` with reason.
+func expectRefusal(t *testing.T, c net.Conn, reason string, within time.Duration) {
+	t.Helper()
+	readRefusal(t, c, reason, within)
+}
+
+// expectRefusalID is expectRefusal that also pins the frame's request ID: the
+// client reads the login's answers by the hello's ID and drops any other, so
+// a refusal under another ID reaches the user as a bare EOF.
+func expectRefusalID(t *testing.T, c net.Conn, reason, wantID string, within time.Duration) {
+	t.Helper()
+	if msg := readRefusal(t, c, reason, within); msg.ID != wantID {
+		t.Fatalf("refusal %q carries id %q, want %q", reason, msg.ID, wantID)
+	}
+}
+
+// loginHelloFor is the test hello opening a login for tokenID.
+func loginHelloFor(tokenID string) ipc.HelloPayload {
+	hello := testLoginHello()
+	hello.TokenID = tokenID
+	return hello
+}
+
+// helloAndChallenge sends hello (with a fresh nonce_c) under request id and
+// reads the challenge it must earn. It returns both nonces.
+func helloAndChallenge(t *testing.T, c net.Conn, id string, hello ipc.HelloPayload) (nonceC, nonceS string) {
+	t.Helper()
+	nonceC, err := clientauth.NewNonce()
+	if err != nil {
+		t.Fatal(err)
+	}
+	hello.Nonce = nonceC
+	writeRaw(t, c, ipc.MsgHello, id, hello)
+	c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	defer c.SetReadDeadline(time.Time{})
+	ch, err := ipc.ReadMessage(c)
+	if err != nil || ch.Type != ipc.MsgAuthChallenge || ch.ID != id {
+		t.Fatalf("challenge: %v %v", ch, err)
+	}
+	var cp ipc.AuthChallengePayload
+	if err := ch.DecodePayload(&cp); err != nil {
+		t.Fatal(err)
+	}
+	return nonceC, cp.Nonce
 }
 
 // expectEOF requires the daemon to close the conn (not merely go silent).
@@ -191,34 +239,32 @@ func sendHelloAndProof(t *testing.T, c net.Conn, token string) (nonceC, nonceS, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	nonceC, _ = clientauth.NewNonce()
-	hello := testLoginHello()
-	hello.TokenID, hello.Nonce = id, nonceC
-	writeRaw(t, c, ipc.MsgHello, "L1", hello)
-	c.SetReadDeadline(time.Now().Add(5 * time.Second))
-	ch, err := ipc.ReadMessage(c)
-	c.SetReadDeadline(time.Time{})
-	if err != nil || ch.Type != ipc.MsgAuthChallenge {
-		t.Fatalf("challenge: %v %v", ch, err)
-	}
-	var cp ipc.AuthChallengePayload
-	_ = ch.DecodePayload(&cp)
-	nonceS = cp.Nonce
+	nonceC, nonceS = helloAndChallenge(t, c, "L1", loginHelloFor(id))
 	proof = clientauth.ClientProof(token, clientauth.AuthMessage(id, nonceC, nonceS))
 	writeRaw(t, c, ipc.MsgAuthProof, "L1", ipc.AuthProofPayload{Proof: proof})
 	return nonceC, nonceS, proof
 }
 
 // manualLogin is sendHelloAndProof plus the hello_resp it must earn. It
-// returns everything a log must never contain, server_sig included.
+// returns everything a log must never contain, server_sig included. Frames
+// under another ID are skipped: the conn is authenticated (and so open to
+// broadcasts) just before hello_resp is sent.
 func manualLogin(t *testing.T, c net.Conn, token string) (nonceC, nonceS, proof, serverSig string) {
 	t.Helper()
 	nonceC, nonceS, proof = sendHelloAndProof(t, c, token)
 	c.SetReadDeadline(time.Now().Add(5 * time.Second))
-	resp, err := ipc.ReadMessage(c)
-	c.SetReadDeadline(time.Time{})
-	if err != nil || resp.Type != ipc.MsgHelloResp {
-		t.Fatalf("hello_resp: %v %v", resp, err)
+	defer c.SetReadDeadline(time.Time{})
+	var (
+		resp *ipc.Message
+		err  error
+	)
+	for resp == nil || resp.ID != "L1" {
+		if resp, err = ipc.ReadMessage(c); err != nil {
+			t.Fatalf("hello_resp: %v", err)
+		}
+	}
+	if resp.Type != ipc.MsgHelloResp {
+		t.Fatalf("hello_resp: got %s %s", resp.Type, resp.Payload)
 	}
 	var hr ipc.HelloRespPayload
 	if err := resp.DecodePayload(&hr); err != nil || hr.ServerSig == "" {

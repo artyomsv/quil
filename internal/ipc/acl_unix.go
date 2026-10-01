@@ -4,9 +4,7 @@ package ipc
 
 import (
 	"fmt"
-	"net"
 	"os"
-	"syscall"
 )
 
 // ProtectDir is a no-op on Unix: QUIL_HOME is created 0700 and
@@ -31,16 +29,6 @@ func DirAccessWarning(dir string) (string, error) {
 		return fmt.Sprintf("%s has mode %04o: other accounts can reach the daemon's directory (want 0700)", dir, perm), nil
 	}
 	return "", nil
-}
-
-// listenUnixPrivate binds under umask 0077, so the socket is never wider
-// than 0600 — not even between Listen and the chmod that follows.
-// umask is process-wide; this runs once, at daemon start, and anything
-// created concurrently only gets stricter permissions.
-func listenUnixPrivate(path string) (net.Listener, error) {
-	old := syscall.Umask(0o077)
-	defer syscall.Umask(old)
-	return net.Listen("unix", path)
 }
 
 // protectSocket chmods the socket 0600 and REPORTS a failure: the daemon

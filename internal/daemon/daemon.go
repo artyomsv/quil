@@ -381,7 +381,10 @@ func (d *Daemon) Start() error {
 		return fmt.Errorf("create quil dir: %w", err)
 	}
 	// Before the socket or any token/audit file exists: on Windows the
-	// directory DACL is what every later file inherits at creation.
+	// directory DACL is what every later file inherits at creation. Both
+	// are warnings here; if the socket's own ACL then fails as well,
+	// Server.Start reads this directory back and refuses to serve unless it
+	// is owner-only, so the two guards cannot fail open together.
 	if err := ipc.ProtectDir(quilDir); err != nil {
 		log.Printf("warning: could not restrict %s to this account: %v", quilDir, err)
 	}

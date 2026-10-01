@@ -9,10 +9,12 @@ import (
 	"testing"
 )
 
-// GUARD (ruling P-7): today's Start already chmods 0600, so this passes on the
-// current tree. It pins the end state through the listenUnixPrivate rewrite;
-// TestListenUnixPrivate_RestoresUmask and TestProtectSocket_ReportsChmodFailure
-// are the tests that fail before this task.
+// GUARD (ruling P-7): Start chmodded the socket 0600 before listenUnixPrivate
+// existed, so this passed then too. It pins the end state through that
+// rewrite; TestListenUnixPrivate_RestoresUmask,
+// TestListenUnixPrivate_BindsUnderOwnerOnlyUmask and
+// TestProtectSocket_ReportsChmodFailure are the tests that failed before
+// listenUnixPrivate existed.
 func TestServerStart_SocketIsOwnerOnly(t *testing.T) {
 	sock := filepath.Join(t.TempDir(), "s")
 	s := NewServer(sock, func(*Conn, *Message) {}, nil)

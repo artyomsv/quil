@@ -359,17 +359,6 @@ func TestRights_PrivilegedAudited(t *testing.T) {
 	}
 }
 
-// finishDispatch returns once every frame c sent before it has been handled:
-// one conn's frames dispatch in order, so the answer to a request sent now
-// arrives only after the earlier handlers returned. A test that sent an
-// id-less request whose handler spawns calls it before ending, or the
-// handler can still be reading the package's spawn seam when the harness's
-// cleanup restores it.
-func finishDispatch(t *testing.T, c *ipc.Client) {
-	t.Helper()
-	roundTrip(t, c, ipc.MsgListTabsReq, ipc.MsgListTabsResp, struct{}{})
-}
-
 // A full TCP conn's admin action is audited with the token that made it.
 func TestRights_PrivilegedAuditedFromTCP(t *testing.T) {
 	h := newAuthHarness(t)

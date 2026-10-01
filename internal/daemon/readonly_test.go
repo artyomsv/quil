@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bytes"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -314,4 +315,147 @@ func attachTestClientID(t *testing.T, sock, id string) *ipc.Client {
 	}
 	attachOn(t, c, id)
 	return c
+}
+
+// highlightSeen reports whether a highlight_pane for paneID reaches c before
+// the answer to a request c sends now. A highlight broadcast by a handler
+// that already returned is on c's ordered queue ahead of that answer.
+func highlightSeen(t *testing.T, c *ipc.Client, paneID string) bool {
+	t.Helper()
+	probe := mustMessage(t, ipc.MsgListTabsReq, "hl-probe-"+time.Now().Format("150405.000000000"), struct{}{})
+	if err := c.Send(probe); err != nil {
+		t.Fatal(err)
+	}
+	c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	defer c.SetReadDeadline(time.Time{})
+	seen := false
+	for {
+		f, err := c.Receive()
+		if err != nil {
+			t.Fatalf("no answer to the highlight probe: %v", err)
+		}
+		if f.Type == ipc.MsgHighlightPane {
+			var p ipc.HighlightPanePayload
+			if f.DecodePayload(&p) == nil && p.PaneID == paneID {
+				seen = true
+			}
+		}
+		if f.ID == probe.ID && f.Type == ipc.MsgListTabsResp {
+			return seen
+		}
+	}
+}
+
+// A viewer's pane_status_req answers without flashing the pane on every
+// attached screen; a full conn's (the control) still highlights it.
+func TestReadOnly_PaneStatusNoHighlight(t *testing.T) {
+	h := newAuthHarness(t)
+	pane, _ := livePane(t, h)
+	observer := h.local(t)
+	ro, _ := h.login(t, h.mint(t, "viewer", clientauth.LevelReadOnly, nil))
+	roundTrip(t, ro, ipc.MsgPaneStatusReq, ipc.MsgPaneStatusResp, ipc.PaneStatusReqPayload{PaneID: pane.ID})
+	if highlightSeen(t, observer, pane.ID) {
+		t.Fatal("a read-only pane_status_req highlighted the pane")
+	}
+	full, _ := h.login(t, h.mint(t, "owner", clientauth.LevelFull, nil))
+	roundTrip(t, full, ipc.MsgPaneStatusReq, ipc.MsgPaneStatusResp, ipc.PaneStatusReqPayload{PaneID: pane.ID})
+	if !highlightSeen(t, observer, pane.ID) {
+		t.Fatal("control: a full pane_status_req did not highlight the pane — the test cannot fail")
+	}
+}
+
+// reattachAs sends a RECONNECT's attach (Reattach set) as the client id: a
+// first attach alone would end a restart reserve as a cold start.
+func reattachAs(t *testing.T, c *ipc.Client, id string) {
+	t.Helper()
+	sendNoID(t, c, ipc.MsgAttach, ipc.AttachPayload{Cols: 120, Rows: 40, WinCols: 120, WinRows: 40,
+		ClientID: id, Reattach: true, CWD: t.TempDir()})
+}
+
+// waitState reads c's workspace_state frames until one satisfies pred.
+func waitState(t *testing.T, c *ipc.Client, what string, pred func(ipc.WorkspaceState) bool) ipc.WorkspaceState {
+	t.Helper()
+	c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	defer c.SetReadDeadline(time.Time{})
+	for {
+		f, err := c.Receive()
+		if err != nil {
+			t.Fatalf("no state frame with %s: %v", what, err)
+		}
+		if f.Type != ipc.MsgWorkspaceState {
+			continue
+		}
+		var s ipc.WorkspaceState
+		if err := f.DecodePayload(&s); err != nil {
+			t.Fatal(err)
+		}
+		if pred(s) {
+			return s
+		}
+	}
+}
+
+func sizeMasterOf(s ipc.WorkspaceState) string {
+	if s.SizeMaster == nil {
+		return ""
+	}
+	return *s.SizeMaster
+}
+
+// A token client wearing the id a restart reserve keeps must not take every
+// LOCAL TUI out of follower mode: a TUI reads size_master "" as "no master"
+// and sizes panes from its own window, while the reserve still drops every
+// resize. Driven through handleMessage: the follower reads the frames the
+// daemon actually sends it.
+func TestClientID_TokenUnderRestartReserveKeepsLocalFollowers(t *testing.T) {
+	h := newAuthHarness(t)
+	ch := &clientsHarness{t: t}
+	ch.install(h.d, testGrace)
+	h.d.clients.mu.Lock()
+	h.d.clients.onChange = h.d.broadcastState // what Start wires
+	h.d.clients.mu.Unlock()
+	h.d.clients.reserveAfterRestart("owner")
+
+	follower := h.local(t)
+	reattachAs(t, follower, "follower")
+	s := waitState(t, follower, "the follower attached", func(s ipc.WorkspaceState) bool {
+		return s.Clients != nil && *s.Clients == 1
+	})
+	if m := sizeMasterOf(s); m != "owner" {
+		t.Fatalf("size_master = %q before the token attached, want the reserved id", m)
+	}
+	finishDispatch(t, follower)
+	h.d.clients.mu.Lock()
+	ch.advance(time.Second) // the follower stays the older client
+	h.d.clients.mu.Unlock()
+
+	tok, _ := h.login(t, h.mint(t, "remote", clientauth.LevelFull, nil))
+	reattachAs(t, tok, "owner")
+	s = waitState(t, follower, "the token attached", func(s ipc.WorkspaceState) bool {
+		return s.Clients != nil && *s.Clients == 2
+	})
+	if m := sizeMasterOf(s); m == "" || m == "follower" || m == "owner" {
+		t.Fatalf("size_master = %q while the token wears the reserved id; want a marker naming no client", m)
+	}
+	finishDispatch(t, tok)
+
+	// The reserve lapses with no local claimant: the frame names the elected
+	// master (the follower, the older client) again.
+	h.d.clients.mu.Lock()
+	ch.advance(restartReserveCap)
+	tm := ch.armed()
+	if tm == nil {
+		h.d.clients.mu.Unlock()
+		t.Fatal("no reserve timer is armed")
+	}
+	tm.stopped = true
+	h.d.clients.mu.Unlock()
+	tm.f()
+	s = waitState(t, follower, "the lapse", func(s ipc.WorkspaceState) bool {
+		return !strings.HasPrefix(sizeMasterOf(s), reservedMasterPrefix)
+	})
+	if m := sizeMasterOf(s); m != "follower" || m != h.d.masterID() {
+		t.Fatalf("size_master = %q after the lapse, want the elected %q", m, h.d.masterID())
+	}
+	finishDispatch(t, follower)
 }

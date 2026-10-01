@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/artyomsv/quil/internal/ipc"
@@ -63,7 +64,10 @@ func TestClients_LocalOwnerReclaimsIDFromTokenConn(t *testing.T) {
 }
 
 // wantNoMasterConn requires that no attached conn holds the slot, by every
-// reader of it: the slot lookup, each conn, and list_clients.
+// reader of it: the slot lookup, each conn, list_clients, and the state
+// frame — which must still name SOME master (a TUI reads "" as "no master"
+// and leaves follower mode while every resize is still dropped), but one no
+// attached client can mistake for itself.
 func wantNoMasterConn(t *testing.T, d *Daemon, conns ...*ipc.Conn) {
 	t.Helper()
 	if c := d.masterConn(); c != nil {
@@ -79,8 +83,14 @@ func wantNoMasterConn(t *testing.T, d *Daemon, conns ...*ipc.Conn) {
 			t.Fatalf("list_clients reports %q as master", info.Client)
 		}
 	}
-	if id := d.sizeMasterForState(); id != "" {
-		t.Fatalf("the state frame names %q as size master", id)
+	id := d.sizeMasterForState()
+	if id == "" {
+		t.Fatal("the state frame names no size master, so every TUI leaves follower mode")
+	}
+	for _, info := range d.listClients() {
+		if info.Client == id {
+			t.Fatalf("the state frame names attached client %q as size master", id)
+		}
 	}
 }
 
@@ -219,6 +229,49 @@ func TestClients_TokenFirstAttachUnderRestartReserveKeepsTheReserve(t *testing.T
 		t.Fatal("a lone first attach naming the reserved id cleared the restart reserve")
 	}
 	wantNoMasterConn(t, h.d, tok)
+}
+
+// A restart reserve waits for the LOCAL principal, so a token client — a
+// viewer or a full one — attaching first and alone under ANOTHER id is no
+// cold start that may end the wait.
+func TestClients_TokenFirstAttachAloneKeepsTheRestartReserve(t *testing.T) {
+	for _, readOnly := range []bool{true, false} {
+		h := newClientsHarness(t, testGrace)
+		r := &h.d.clients
+		r.reserveAfterRestart("owner")
+		if _, err := r.attach(new(ipc.Conn), "newcomer", 200, 50, "", false, "token 0a1b2c3d", readOnly); err != nil {
+			t.Fatal(err)
+		}
+		if r.reserved == nil {
+			t.Fatalf("readOnly=%v: a lone token first attach cleared the restart reserve", readOnly)
+		}
+		h.wantMaster("owner")
+	}
+	// Control: a lone LOCAL first attach is the cold start that clears it.
+	h := newClientsHarness(t, testGrace)
+	r := &h.d.clients
+	r.reserveAfterRestart("owner")
+	if _, err := r.attach(new(ipc.Conn), "newcomer", 200, 50, "", false, ipc.PrincipalLocal, false); err != nil {
+		t.Fatal(err)
+	}
+	if r.reserved != nil {
+		t.Fatal("control: a lone local first attach did not clear the restart reserve")
+	}
+	h.wantMaster("newcomer")
+}
+
+// The marker a state frame names for a shadowed slot is longer than any
+// client id attach can register, so no TUI can read it as its own.
+func TestReservedMasterMarker_NamesNoClient(t *testing.T) {
+	for _, id := range []string{"a", "owner", strings.Repeat("x", maxClientIDLen)} {
+		m := reservedMasterMarker(id)
+		if !strings.HasPrefix(m, reservedMasterPrefix) {
+			t.Errorf("marker %q lacks the prefix", m)
+		}
+		if len(m) <= maxClientIDLen || truncateField(m, maxClientIDLen) == m {
+			t.Errorf("marker %q (len %d) fits a client id", m, len(m))
+		}
+	}
 }
 
 // Losing the admitted token's link leaves the restart reserve as it was: the

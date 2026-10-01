@@ -110,6 +110,17 @@ func (h *authHarness) auditEntries(t *testing.T) []auditEntry {
 	return readAudit(t, h.home)
 }
 
+// finishDispatch returns once every frame c sent before it has been handled:
+// one conn's frames dispatch in order, so the answer to a request sent now
+// arrives only after the earlier handlers returned. A test that sent an
+// id-less request whose handler spawns calls it before ending, or the
+// handler can still be reading the package's spawn seam when the harness's
+// cleanup restores it.
+func finishDispatch(t *testing.T, c *ipc.Client) {
+	t.Helper()
+	roundTrip(t, c, ipc.MsgListTabsReq, ipc.MsgListTabsResp, struct{}{})
+}
+
 // waitAudit polls audit.log until pred matches an entry.
 func (h *authHarness) waitAudit(t *testing.T, what string, pred func(auditEntry) bool) {
 	t.Helper()

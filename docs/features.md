@@ -650,7 +650,7 @@ With many projects — especially remote ones, which take two rows each — the 
 - **Right-click a header** for Rename group (the same name dialog), Collapse / Expand, Move up / down and Delete group. Deleting a group only ungroups its projects — nothing is closed.
 - Two keymap actions ship unbound: `project.group_toggle` (the active project's group) and `project.groups_collapse_all` (collapse every group, or expand them all when all are collapsed). Bind them in `bindings.toml`.
 
-Group names are unique (ignoring case) and at most 32 characters. Groups live on this machine, in `project-groups.json` beside `config.toml`, and survive a restart; a project whose host is offline stays in its group, and one its daemon reports as gone leaves it. Two Quil windows on one machine share the file: the last change wins, and the other window picks it up on its next start. The project picker, `Alt+Shift+←/→` and `Alt+Shift+A` still reach every project, including those in collapsed groups.
+Group names are unique (ignoring case) and at most 32 characters. A project's group is held by the daemon that owns the project, so a second Quil window on this machine, or one attached to that host over ssh, shows the same groups and the same membership at once — putting a project into a group in one window updates every other window looking at that daemon. The order groups are drawn in, and whether each is collapsed, stays a per-window preference, saved in `project-groups.json` beside `config.toml`; two windows on one machine share that file, so the last one to reorder or collapse a group wins, and the other picks it up on its next start. A project whose host is offline stays in its group, and one its daemon reports as gone leaves it. Renaming or deleting a group reaches every window's daemon that lists it; one that is offline, or refuses, keeps the old name until you try again there. A group deleted in another window while this window was closed shows here as an empty group; delete it once. The first time this window connects to a daemon that keeps groups itself, it hands over the groups this window kept for that daemon; if another window got there first, the daemon keeps its own, and any membership this window would lose is saved in `project-groups.before-shared-<destination>.json` beside `project-groups.json` (`<destination>` is `local` for this machine's daemon, a file-safe form of the host name otherwise). A daemon from before this feature keeps its groups exactly as they worked before — held only in this window's file, with nothing shared. The project picker, `Alt+Shift+←/→` and `Alt+Shift+A` still reach every project, including those in collapsed groups.
 
 ### Projects on another machine
 
@@ -738,6 +738,8 @@ so a pane's history replay and its live output arrive exactly once, in order.
 ## Pane notes
 
 `Alt+E` opens a plain-text editor alongside the active pane (split ~60/40). Notes are stored one file per pane at `~/.quil/notes/<pane-id>.md` with atomic temp+rename and symlink rejection. Three save safety nets: 30 s debounce, `Ctrl+S` explicit save, flush on exit. Notes survive pane destruction — orphans are kept.
+
+For a pane whose daemon holds shared data (see [Multi-client sync](#multi-client-sync)), the note lives on that daemon's own machine instead of yours, so every window attached there — including one over ssh — opens the same note. Editing it from two windows at once is safe: a save built on stale text is refused, the editor keeps what you typed, and its footer offers `Ctrl+R` to reload the other window's version or `Ctrl+S` to overwrite it. Text a save could not land — refused after you had already closed the editor, or still waiting for an answer when you quit — is kept in `~/.quil/notes-conflicts/` on your own machine rather than lost.
 
 Soft-wrap (opt-in via `TextEditor.SoftWrap`): long logical lines wrap onto the next visual row instead of being hard-truncated with `~`. Selections remain contiguous across wrap boundaries.
 
@@ -916,7 +918,7 @@ dialogs to the server. These are known and scoped, not bugs:
 | `quil status` refuses under `--remote` | It would report on the local daemon. Use `ssh <host> quil status`. |
 | Update controls hidden in remote mode | The banner describes the remote daemon while every apply path writes to local disk, so it is suppressed rather than offered wrongly. |
 | Clipboard image paste is local-only | The PNG is written locally and a local path is typed into a remote pane, where it does not resolve. |
-| Notes and the log viewer are local | By design — the daemon's own logs are reachable over SSH. |
+| The log viewer is local | By design — the daemon's own logs are reachable over SSH. |
 
 What Phase 3 already fixed: the working-directory browser, `~` expansion,
 relative paths, drive and root listings, and git-repository discovery — both

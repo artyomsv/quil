@@ -42,6 +42,8 @@ type ProjectModel struct {
 	// needed a home, not because anyone named it. Naming a project on a host
 	// whose only project is this one renames it in place.
 	Bootstrap bool
+	// Group is the daemon's group name for this project (shared destinations only).
+	Group string
 	// Offline marks a row the client is showing on a destination's behalf while
 	// that destination has no connection. Nil for every live project.
 	//

@@ -82,6 +82,12 @@ type WorkspaceStateMsg struct {
 	// 0/"" from an older daemon that numbers nothing. See acceptStateRev.
 	Rev   uint64
 	RunID string
+	// SharedData: this destination's daemon owns groups, recent folders and
+	// notes. Groups is its group-name list; RecentCWDs its recent folders,
+	// most recent first. Absent from an older daemon.
+	SharedData bool
+	Groups     []string
+	RecentCWDs []string
 }
 
 // ProjectInfo is one daemon-side project as broadcast. TabIDs carries the
@@ -99,6 +105,8 @@ type ProjectInfo struct {
 	// project on a fresh host adopt the host's tabs instead of leaving a
 	// "Default" beside them.
 	Bootstrap bool
+	// Group is the daemon's group name for this project, "" = ungrouped.
+	Group string
 }
 
 type TabInfo struct {
@@ -139,8 +147,12 @@ type PaneInfo struct {
 	// you were not looking" mark. It seeds a pane the client sees for the
 	// first time (a TUI restart) and is otherwise ignored: the client owns the
 	// live value, and reports every change back so the copy stays current.
-	Unseen       bool
-	Overlay      bool
+	Unseen  bool
+	Overlay bool
+	// NoteRev is the daemon's monotonic note version for this pane. A delete
+	// bumps it rather than resetting it, so 0 means only "never had a note",
+	// never "no note right now".
+	NoteRev      uint64
 	Pending      bool // deferred restore — not yet lazy-spawned
 	SessionID    string
 	HistoryLines int
@@ -545,6 +557,12 @@ type Model struct {
 	// disk: two TUIs on one machine would then share it, and each is a
 	// distinct client to the daemon's master election.
 	clientID string
+	// homeDest is the destination this client was started against: "" for a
+	// local start, the ssh destination under `quil --remote <host>`. The
+	// sidebar names a project's host only when it differs from this one
+	// (appendProjectRows) — under --remote every project of the start host
+	// would otherwise carry the same host row.
+	homeDest string
 	// sizeMaster records, per destination, the master client's id reported by
 	// the last broadcast ("" = no master on that destination). isFollower
 	// derives from it: this client is a follower of dest whenever sizeMaster
@@ -995,6 +1013,14 @@ type Model struct {
 	viewerAnchorRow   int          // document row where a viewer drag began (resolved once on click)
 	viewerAnchorCol   int          // document col where a viewer drag began (resolved once on click)
 
+	// Shared notes (sharednotes.go).
+	pendingNoteSaves map[string]pendingNoteSave // remote saves unanswered by the daemon, by request id; outlive the editor
+	noteLoadID       string                     // the open editor's in-flight note_get id
+	noteLoadDiscards bool                       // that note_get is a confirmed Ctrl+R reload, the one load allowed to replace edits
+	noteLoadSnapshot string                     // the buffer the user confirmed discarding; edits after it are kept
+	noteSaveID       string                     // the open editor's in-flight note_set id; "" once the editor closed
+	quitWaiting      bool                       // app.quit is waiting for pendingNoteSaves (requestQuit)
+
 	// Scrollbar click-and-drag. Set on a left-click that hits a pane's
 	// rightmost content column (the scrollbar track). While
 	// scrollDragPaneID is non-empty, every MouseMotionMsg with the left
@@ -1054,10 +1080,53 @@ type Model struct {
 	groupsPath   string
 	groupsWriter *groupsWriter
 	groupsSeq    uint64
+	// Shared data, per destination, from every frame's shared_data: true
+	// means that daemon owns groups, recents and notes for its projects
+	// and panes; a destination never seen true keeps today's client files.
+	// Not forgotten on reattach — a release daemon does not downgrade.
+	sharedData   map[string]bool
+	daemonGroups map[string][]string // each shared destination's group-name list, from its last frame
+	daemonRecent map[string][]string // each shared destination's recent folders, from its last frame
+	// sharedCapLogged: which (destination, list) already logged a frame over
+	// its cap, so an oversized frame logs once rather than per broadcast.
+	sharedCapLogged map[string]bool
+	// vanishedGroups: the names the frame being applied dropped from its
+	// destination's previous list (noteSharedData), read once by
+	// rebuildGroupsView — the only evidence a group was deleted elsewhere.
+	vanishedGroups []string
+	// pendingGroupOps correlates an id-bearing set_project_group/group_op with
+	// the host it went to, so a refusal can be flashed naming it.
+	pendingGroupOps map[string]pendingGroupOp
+	// groupNamesSent: per destination, the group names this client's own
+	// create/rename sends put there (recordGroupNameSent) — the targets of a
+	// follow-up rename or delete made before that daemon's next frame.
+	groupNamesSent map[string][]string
+	// One-time import (sharedimport.go): "" = off; asked once per destination
+	// per connection (a lost link or an error reply asks again); id → the
+	// pending request for the answer; groupsImported = the destinations whose
+	// groups import is answered (marker or this session), which opens group
+	// sends and makes the frame authoritative; deferredGroupOps = the group
+	// sends held until then, replayed in order on the answer; importNames =
+	// the group names each unanswered daemon will list once they land;
+	// importErrors = error replies per destination this session;
+	// paneInventory = the destinations whose workspace frame was applied on
+	// their CURRENT connection, so their pane ids are known (a lost link or a
+	// reattach forgets it, forgetImportFor); notesWaiting =
+	// the destinations whose notes import waits for another destination's
+	// pane ids, with the panes of their own first frame.
+	importMarkerPath string
+	paneInventory    map[string]bool
+	notesWaiting     map[string][]PaneInfo
+	importAsked      map[string]bool
+	pendingImports   map[string]pendingImport
+	groupsImported   map[string]bool
+	deferredGroupOps map[string][]deferredGroupOp
+	importNames      map[string][]string
+	importErrors     map[string]int
 	// A press on a group header. The release TOGGLES the group only when
 	// groupDragMoved is still false; a drag reorders the groups instead.
 	groupDragging  bool
-	groupDragIdx   int
+	groupDragName  string // the dragged group's NAME: a frame can insert or remove a group while a drag is armed
 	groupDragMoved bool
 	// sidebarHover names the PROJECTS row under a buttonless pointer, painted
 	// light grey (sidebar_hover.go). A KEY, not a row index: a broadcast can
@@ -1352,6 +1421,10 @@ func (m *Model) initKeymap() {
 // it cannot assert against.
 func (m *Model) SetClientID(id string) { m.clientID = id }
 
+// SetHomeDest records the destination this client was started against (see
+// Model.homeDest). A pure setter, called once after NewModel.
+func (m *Model) SetHomeDest(dest string) { m.homeDest = dest }
+
 // isFollower reports whether this client is NOT the size master of dest, and
 // there IS a master — see D4. A dest this client has never seen a broadcast
 // for (m.sizeMaster is nil, or holds no entry for it) answers false: the zero
@@ -1378,11 +1451,19 @@ func (m Model) Config() config.Config { return m.cfg }
 // Update goroutine is no longer pumping events. Calling concurrently with the
 // Update loop is unsafe — the editor is mutable shared state.
 func (m Model) FlushNotes() {
-	if m.notesEditor != nil {
-		if err := m.notesEditor.Close(); err != nil {
+	if ed := m.notesEditor; ed != nil {
+		if ed.Remote() {
+			// Reached without requestQuit (close_tui, a lost link): no save
+			// can be sent any more, so text none covers goes to a file.
+			if text, ok := ed.Unsent(); ok {
+				m.keepNoteText(ed.Dest(), ed.PaneID(), text, "Note not saved on the daemon")
+			}
+		} else if err := ed.Close(); err != nil {
 			log.Printf("flush notes on exit: %v", err)
 		}
 	}
+	// Backstop: the program has exited, so an answer can no longer arrive.
+	m.writePendingNoteConflicts()
 }
 
 // ConfigChanged reports whether the config was modified and needs saving.
@@ -1804,6 +1885,9 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 			log.Printf("ignoring link loss from gen %d (current %d)", msg.gen, m.clientGen)
 			return m, nil
 		}
+		// An import in flight on the dead link can never be answered; the
+		// first shared frame after the reattach sends it again.
+		m.forgetImportFor(msg.dest)
 		// The listen loop stopped when it returned this message, and with a
 		// router that loop is the ONLY reader of every other daemon's messages —
 		// leaving it unarmed parks a healthy daemon's output behind a dead one's
@@ -2068,7 +2152,9 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 						m.sidebarTabDragIdx = idx
 					case sidebarRowGroup:
 						m.groupDragging = true
-						m.groupDragIdx = idx
+						if idx >= 0 && idx < len(m.groups.Groups) {
+							m.groupDragName = m.groups.Groups[idx].Name
+						}
 						m.groupDragMoved = false
 					}
 					return m.activateSidebarRow(kind, idx)
@@ -2967,6 +3053,7 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		if !m.acceptStateRev(msg) {
 			return m, m.listenForMessages()
 		}
+		m.noteSharedData(msg)
 		m.noteWorkspaceState(msg.Update, msg.Dest)
 		// TODO(freeze-diagnostic): the 8 "apply: ..." breadcrumbs in this case
 		// and inside applyWorkspaceState were added to pinpoint a TUI Update
@@ -2976,9 +3063,14 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		// runs, then either delete or demote them to logger.Debug.
 		log.Printf("WorkspaceState: %d tabs, %d panes", len(msg.Tabs), len(msg.Panes))
 		newPaneIDs, overlayResizeCmds := m.applyWorkspaceState(msg, msg.Dest)
+		m.notePaneInventory(msg.Dest)
+		// The import needs this frame's panes (applied above) and must record
+		// a groups answer from the marker before the merge below reads it.
+		importCmd := tea.Batch(m.settleCappedImport(msg.Dest), m.maybeImport(msg), m.sendWaitingNotes())
 		// After the merge, and only here: this arm is reached only for a
 		// connected destination whose state arrived (the gate above).
-		groupsCmd := m.pruneProjectGroupsFor(msg)
+		groupsCmd := tea.Batch(m.pruneProjectGroupsFor(msg), m.rebuildGroupsView())
+		noteRevCmd := m.reconcileNoteRev(msg)
 		templateFocusCmd := m.focusNewTemplateTab()
 		log.Printf("apply: returned, %d new panes", len(newPaneIDs))
 		// An open project picker holds a filtered snapshot taken when it opened.
@@ -3045,6 +3137,8 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 			m.listenForMessages(),
 			m.sendDiffedResizes(m.diffResizes(msg)),
 			groupsCmd,
+			noteRevCmd,
+			importCmd,
 		}
 		// Resize overlay PTYs that just became visible on initial creation.
 		// resizeAllPanes only walks tab.Leaves() (the layout tree), so overlay
@@ -3206,7 +3300,13 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 	case notesTickMsg:
 		// Debounce check: save if dirty and idle for >= notesDebounceWindow.
 		if m.notesMode && m.notesEditor != nil {
-			m.notesEditor.MaybeAutoSave()
+			if m.notesEditor.Remote() {
+				if m.notesEditor.WantsAutoSave() {
+					m.sendNoteSave(false)
+				}
+			} else {
+				m.notesEditor.MaybeAutoSave()
+			}
 			return m, m.notesTick() // chain continues; running flag stays set
 		}
 		m.notesTickRunning = false
@@ -3455,6 +3555,37 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		// Inert: re-arms the IPC listen loop only.
 		m.skipRender = !prologueChangedView
 		return m, m.listenForMessages()
+
+	case sharedOpRespMsg:
+		return m, tea.Batch(m.listenForMessages(), m.applySharedOpResp(msg))
+
+	case noteRespMsg:
+		m.applyNoteResp(msg)
+		return m, m.listenForMessages()
+
+	case noteSetRespMsg:
+		return m, tea.Batch(m.listenForMessages(), m.applyNoteSetResp(msg))
+
+	case sharedImportRespMsg:
+		return m, tea.Batch(m.listenForMessages(), m.applySharedImportResp(msg))
+
+	case sharedImportErrMsg:
+		return m, tea.Batch(m.listenForMessages(), m.applySharedImportErr(msg))
+
+	case sharedImportTimeoutMsg:
+		// Local timer: does NOT re-arm listenForMessages.
+		m.applySharedImportTimeout(msg)
+		return m, nil
+
+	case noteLoadTimeoutMsg:
+		// Local timer: does NOT re-arm listenForMessages.
+		m.applyNoteLoadTimeout(msg)
+		return m, nil
+
+	case noteQuitTimeoutMsg:
+		// Local timer. Whatever is still unanswered is kept on disk.
+		m.writePendingNoteConflicts()
+		return m, tea.Quit
 
 	default:
 		// No case matched, so nothing in this switch touched the model and the
@@ -3917,7 +4048,7 @@ func (m *Model) clearDragState() {
 	m.sidebarTabDragging = false
 	m.sidebarTabDragIdx = 0
 	m.groupDragging = false
-	m.groupDragIdx = 0
+	m.groupDragName = ""
 	m.groupDragMoved = false
 	m.scrollDragPaneID = ""
 	m.scrollDragRect = PaneRect{}
@@ -4252,8 +4383,9 @@ func (m Model) toggleNotesMode() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	// Initial dimensions are placeholders — View() will Resize the editor
-	// to fit the actual notes panel area on the next render pass.
-	editor, err := NewNotesEditor(config.NotesDir(), pane.ID, pane.Name, 1, 1)
+	// to fit the actual notes panel area on the next render pass. A shared
+	// destination's editor opens loading, with its note_get already sent.
+	editor, loadCmd, err := m.openNotesEditorFor(pane)
 	if err != nil {
 		log.Printf("open notes: %v", err)
 		return m, nil
@@ -4270,7 +4402,7 @@ func (m Model) toggleNotesMode() (tea.Model, tea.Cmd) {
 	m.notesEditor = editor
 	m.notesEnteredFocus = enteredFocus
 	m.notesPaneFocused = false // editor starts focused so the user can immediately type
-	return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes(), m.startNotesTick())
+	return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes(), m.startNotesTick(), loadCmd)
 }
 
 // openClosePaneConfirm opens the close-pane confirm dialog for the active
@@ -5047,7 +5179,9 @@ func (m Model) notesKeyExempt(key string) bool {
 // at the time of the call. Callers that are about to change that tab
 // (e.g. switchTab) must invoke this FIRST so focus reverts on the old tab.
 func (m *Model) exitNotesModeInPlace() {
-	if m.notesEditor != nil {
+	if m.notesEditor.Remote() {
+		m.flushRemoteNotesInPlace()
+	} else if m.notesEditor != nil {
 		if err := m.notesEditor.Close(); err != nil {
 			log.Printf("save notes on exit: %v", err)
 		}
@@ -5344,10 +5478,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case m.isAction(key, "pane.notes_toggle"):
 			return m.exitNotesMode()
 		case m.isAction(key, "app.quit"):
-			if err := m.notesEditor.Close(); err != nil {
-				log.Printf("save notes on quit: %v", err)
-			}
-			return m, tea.Quit
+			return m.requestQuit()
 		case m.isAction(key, "pane.left"):
 			// Alt+Left — focus the bound pane (on the left in notes layout).
 			// Idempotent: no-op if the pane is already focused.
@@ -5380,8 +5511,13 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		} else {
 			// Editor has focus and the key is plain text input.
 			action, cmd := m.notesEditor.HandleKey(key)
-			if action == notesActionExit {
+			switch action {
+			case notesActionExit:
 				return m.exitNotesMode()
+			case notesActionSave:
+				return m, m.sendNoteSave(m.notesEditor.Conflict())
+			case notesActionReload:
+				return m, m.reloadNote()
 			}
 			return m, cmd
 		}
@@ -5394,6 +5530,11 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// still reachable when the overlay is hidden (this block only fires when
 	// overlayVisible is true).
 	if tab := m.activeTabModel(); tab != nil && tab.overlayVisible && tab.overlayPane != nil && m.dialog == dialogNone && !m.renaming && !m.renamingPane {
+		// Quit is taken here rather than inside handleOverlayKey, which
+		// returns only a Cmd: requestQuit may have to wait for note saves.
+		if m.isAction(key, "app.quit") {
+			return m.requestQuit()
+		}
 		return m, m.handleOverlayKey(msg, tab)
 	}
 
@@ -5442,10 +5583,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			case seqAction == "pane.notes_toggle":
 				return m.exitNotesMode()
 			case seqAction == "app.quit":
-				if err := m.notesEditor.Close(); err != nil {
-					log.Printf("save notes on quit: %v", err)
-				}
-				return m, tea.Quit
+				return m.requestQuit()
 			case seqAction == "pane.left":
 				m.notesPaneFocused = true
 				return m, nil
@@ -5692,7 +5830,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	switch lateID {
 	case "app.quit":
-		return m, tea.Quit
+		return m.requestQuit()
 
 	case "tab.new":
 		return m.handleNewTab()
@@ -6458,7 +6596,7 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]str
 		if ok && proj.activeTab >= 0 && proj.activeTab < len(proj.tabs) {
 			fromTab = proj.tabs[proj.activeTab]
 		}
-		proj.Name, proj.RootDir, proj.Bootstrap = info.Name, info.RootDir, info.Bootstrap
+		proj.Name, proj.RootDir, proj.Bootstrap, proj.Group = info.Name, info.RootDir, info.Bootstrap, info.Group
 		// The daemon answered, so whatever this row was standing in for is over.
 		// This is the ONLY clear point, and it is here rather than in
 		// finishReconnect because it also covers a host brought back through
@@ -7949,7 +8087,16 @@ func (m Model) renderStatusBar() string {
 }
 
 // flashDuration is how long a flash message stays in the status bar.
-const flashDuration = 3 * time.Second
+//
+// A var rather than a const purely so the test binary can shorten it, the
+// same reason browseTimeout is one: tea.Tick's Cmd blocks for its whole
+// duration, and the test helper that drains a tea.Batch (runCmd) runs its
+// children synchronously, so any test whose Update path reaches flashCmd —
+// dozens do, across dialogs, overlays, groups, notes and import — otherwise
+// sleeps the full three seconds for a timer it is not asserting on. It is
+// overridden ONCE, from TestMain — these tests run in parallel, so mutating
+// it mid-run would be a genuine data race.
+var flashDuration = 3 * time.Second
 
 // flashExpireMsg is sent by flashCmd when the flash timer fires.
 type flashExpireMsg struct{}
@@ -8534,7 +8681,58 @@ func (m Model) listenForMessages() tea.Cmd {
 				return listenContinueMsg{}
 			}
 			log.Printf("ipc recv: error reply for %s id=%s: %s (%s)", e.Type, msg.ID, e.Message, e.Code)
+			// The daemon refuses a note request for a pane it does not have
+			// with an error reply, not the request's own response. Delivered
+			// as that response so the editor stops loading and a pending
+			// save is settled rather than waiting out the quit timer.
+			if msg.ID != "" && (e.Type == ipc.MsgNoteGet || e.Type == ipc.MsgNoteSet) {
+				text := e.Message
+				if text == "" {
+					text = "refused (" + e.Code + ")"
+				}
+				if e.Type == ipc.MsgNoteGet {
+					return noteRespMsg{dest: msg.Origin, id: msg.ID, resp: ipc.NoteRespPayload{Error: text}}
+				}
+				return noteSetRespMsg{dest: msg.Origin, id: msg.ID, resp: ipc.NoteSetRespPayload{Error: text}}
+			}
+			// A refused import is no answer: delivered so the client sends it
+			// again rather than holding group sends for the whole session.
+			if msg.ID != "" && e.Type == ipc.MsgSharedImport {
+				return sharedImportErrMsg{dest: msg.Origin, id: msg.ID, text: e.Code + ": " + e.Message}
+			}
 			return listenContinueMsg{}
+
+		case ipc.MsgProjectOpResp, ipc.MsgGroupOpResp:
+			var p ipc.OpRespPayload
+			if err := msg.DecodePayload(&p); err != nil {
+				log.Printf("decode %s: %v", msg.Type, err)
+				return listenContinueMsg{}
+			}
+			return sharedOpRespMsg{dest: msg.Origin, id: msg.ID, resp: p}
+
+		case ipc.MsgNoteResp:
+			var p ipc.NoteRespPayload
+			if err := msg.DecodePayload(&p); err != nil {
+				log.Printf("decode %s: %v", msg.Type, err)
+				return listenContinueMsg{}
+			}
+			return noteRespMsg{dest: msg.Origin, id: msg.ID, resp: p}
+
+		case ipc.MsgNoteSetResp:
+			var p ipc.NoteSetRespPayload
+			if err := msg.DecodePayload(&p); err != nil {
+				log.Printf("decode %s: %v", msg.Type, err)
+				return listenContinueMsg{}
+			}
+			return noteSetRespMsg{dest: msg.Origin, id: msg.ID, resp: p}
+
+		case ipc.MsgSharedImportResp:
+			var p ipc.SharedImportRespPayload
+			if err := msg.DecodePayload(&p); err != nil {
+				log.Printf("decode %s: %v", msg.Type, err)
+				return listenContinueMsg{}
+			}
+			return sharedImportRespMsg{dest: msg.Origin, id: msg.ID, resp: p}
 
 		default:
 			log.Printf("ipc recv: unknown type %q", msg.Type)
@@ -8555,6 +8753,9 @@ func parseWorkspaceState(ws ipc.WorkspaceState) WorkspaceStateMsg {
 		DaemonLimited: ws.DaemonLimited,
 		Rev:           ws.Rev,
 		RunID:         ws.RunID,
+		SharedData:    ws.SharedData,
+		Groups:        ws.Groups,
+		RecentCWDs:    ws.RecentCWDs,
 	}
 	// An update is reported only once it names a version — a zero-value
 	// ipc.UpdateInfo (no "update" key on the wire, or one JSON-decoded from
@@ -8586,6 +8787,7 @@ func parseWorkspaceState(ws ipc.WorkspaceState) WorkspaceStateMsg {
 			TabIDs:    p.TabIDs,
 			ActiveTab: p.ActiveTab,
 			Bootstrap: p.Bootstrap,
+			Group:     p.Group,
 		})
 	}
 	for _, t := range ws.Tabs {
@@ -8624,6 +8826,7 @@ func parseWorkspaceState(ws ipc.WorkspaceState) WorkspaceStateMsg {
 			MarkedForDeletion: p.MarkedForDeletion,
 			Unseen:            p.Unseen,
 			Overlay:           p.Overlay,
+			NoteRev:           p.NoteRev,
 			Pending:           p.Pending,
 			SessionID:         p.SessionID,
 			HistoryLines:      p.HistoryLines,

@@ -44,6 +44,25 @@ func TestRequestExistingDirs_CarriesGenerationOnTheWire(t *testing.T) {
 	}
 }
 
+// The recent list came from the dialog's pinned destination, so the check
+// goes there too — not to whichever project is active when the Cmd runs. An
+// unpinned dialog (a startup window) stays unstamped for the router's
+// sole-conn fallback.
+func TestRequestExistingDirs_StampedForThePinnedDestination(t *testing.T) {
+	for _, tc := range []struct{ pinned, want string }{{"hostA", "hostA"}, {"", ""}} {
+		m := recentClientModel(t)
+		m.createPaneDest = tc.pinned
+		runCmd(m.requestExistingDirs([]string{"/a"}))
+		sent := m.client.(*fakeSender).sent
+		if len(sent) == 0 {
+			t.Fatal("no message sent")
+		}
+		if got := sent[len(sent)-1].Origin; got != tc.want {
+			t.Errorf("pinned %q: Origin = %q, want %q", tc.pinned, got, tc.want)
+		}
+	}
+}
+
 func TestRequestExistingDirs_SendsThePathsAsked(t *testing.T) {
 	m := recentClientModel(t)
 	want := []string{"/one", "/two"}

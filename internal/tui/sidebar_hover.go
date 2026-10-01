@@ -243,7 +243,7 @@ func (m *Model) projectRowHighlight(i int) rowHighlight {
 // so a click on the header never flashes it; the drop colour marks the group
 // a moved project drag would join.
 func (m *Model) groupRowHighlight(g int) rowHighlight {
-	if m.groupDragging && m.groupDragMoved && m.groupDragIdx == g {
+	if m.groupDragging && m.groupDragMoved && m.groups.indexOf(m.groupDragName) == g {
 		return rowHighlightDrag
 	}
 	name := m.groups.Groups[g].Name

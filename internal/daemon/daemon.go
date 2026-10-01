@@ -704,9 +704,10 @@ func (d *Daemon) snapshot() {
 	// allowed a pane create/destroy between the two calls to slip through
 	// — the workspace.json said N panes while the buffer flush iterated
 	// N±1, surfacing as the "snapshot pane count oscillation" bug.
-	activeTab, tabs, panesByTab, projects, activeProject := d.session.SnapshotState()
-	state := d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab, projects, activeProject, false)
-	// Written here explicitly, because workspaceStateFromSnapshot leaves it out
+	view := d.session.SnapshotView()
+	tabs, panesByTab := view.tabs, view.panesByTab
+	state := d.workspaceStateFromView(view, false)
+	// Written here explicitly, because workspaceStateFromView leaves it out
 	// (the broadcast adds its own in buildWorkspaceState): restoreWorkspace
 	// turns it into a short reservation so the previous size master gets its
 	// slot back after a restart, and the reattach resizes nothing.
@@ -876,6 +877,7 @@ func (d *Daemon) restoreWorkspace() error {
 	d.clients.reserveAfterRestart(sizeMaster)
 
 	d.session.RestoreProjects(parseRestoredProjects(state["projects"]), activeProject)
+	d.session.RestoreShared(stringList(state["groups"]), stringList(state["recent_cwds"]))
 
 	// Build pane lookup
 	panesByID := make(map[string]map[string]any, len(panes))
@@ -1033,6 +1035,23 @@ func (d *Daemon) restoreWorkspace() error {
 				sandboxImage, _ := paneData["sandbox_image"].(string)
 				sandboxAuth, _ := paneData["sandbox_auth"].(string)
 				containerCWD, _ := paneData["container_cwd"].(string)
+				// note_rev absent (a pre-3b snapshot) with a note file present
+				// means the local TUI kept a note for this daemon's own pane:
+				// adopt it as rev 1 so it is served rather than shadowed.
+				noteRev, hasNoteRev := paneData["note_rev"].(float64)
+				// A corrupt value (negative, NaN) reads as absent: converting it
+				// to uint64 is undefined. A huge one is capped for the same
+				// reason; the cap still outranks any revision a client can have
+				// seen.
+				if noteRev < 0 || noteRev != noteRev {
+					noteRev, hasNoteRev = 0, false
+				}
+				if noteRev > maxPersistedNoteRev {
+					noteRev = maxPersistedNoteRev
+				}
+				if !hasNoteRev && noteFileExists(paneID) {
+					noteRev = 1
+				}
 				// The persisted type carries a sandbox prefix; strip it here
 				// so the registry lookup finds the plugin. spawnPane does the
 				// same, and re-derives "is this sandboxed" from either half —
@@ -1097,6 +1116,10 @@ func (d *Daemon) restoreWorkspace() error {
 					// force-delete.
 					WorktreePath: worktreePath,
 				}
+				// NoteRev is atomic.Uint64: cannot be set in the struct
+				// literal above, so it is stored once here, before the pane
+				// is published to any other goroutine.
+				pane.NoteRev.Store(uint64(noteRev))
 
 				// Load ghost buffer from disk
 				if bufData, err := persist.LoadBuffer(bufDir, paneID); err == nil && len(bufData) > 0 {
@@ -1164,6 +1187,7 @@ func parseRestoredProjects(raw any) []*Project {
 		}
 		activeTab, _ := pm["active_tab"].(string)
 		bootstrap, _ := pm["bootstrap"].(bool)
+		group, _ := pm["group"].(string)
 		var tabIDs []string
 		if rawIDs, ok := pm["tab_ids"].([]any); ok {
 			tabIDs = make([]string, 0, len(rawIDs))
@@ -1180,6 +1204,7 @@ func parseRestoredProjects(raw any) []*Project {
 			TabIDs:    tabIDs,
 			ActiveTab: activeTab,
 			Bootstrap: bootstrap,
+			Group:     group,
 		})
 	}
 	return projects
@@ -1666,6 +1691,17 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		// order lived only until the next unrelated snapshot happened to run,
 		// and a daemon restart before that undid the drag.
 		d.requestSnapshot()
+
+	case ipc.MsgSetProjectGroup:
+		d.handleSetProjectGroup(conn, msg)
+	case ipc.MsgGroupOp:
+		d.handleGroupOp(conn, msg)
+	case ipc.MsgNoteGet:
+		d.handleNoteGet(conn, msg)
+	case ipc.MsgNoteSet:
+		d.handleNoteSet(conn, msg)
+	case ipc.MsgSharedImport:
+		d.handleSharedImport(conn, msg)
 
 	// MCP request-response
 	case ipc.MsgListProjectsReq:
@@ -2254,7 +2290,7 @@ func (d *Daemon) handleCreateTab(conn *ipc.Conn, msg *ipc.Message) {
 			spec.Worktree = nil
 		}
 	}
-	cwd := d.resolveRequestedCWD(spec.CWD, d.projectCWD(conn, tab.ProjectID))
+	cwd := d.resolveRequestedCWDRecording(spec.CWD, d.projectCWD(conn, tab.ProjectID))
 
 	// The two construction paths are built SEPARATELY and share nothing but the
 	// type and the directory. `create` and its plugin-field block used to sit
@@ -2745,13 +2781,26 @@ func (d *Daemon) handleCreatePane(conn *ipc.Conn, msg *ipc.Message) {
 	// while giving the requester nothing correlatable to unwind with.
 	if payload.Worktree != nil {
 		go func() {
+			// On the worker too: recording stats the directory, which can take
+			// up to spawnDirProbeTimeout on a dead mount.
+			d.recordRequestedCWD(payload.CWD)
 			respondTo(conn, msg.ID, ipc.MsgCreatePaneResp, d.worktreeAddAndCreate(payload))
 		}()
 		return
 	}
 
 	logger.Debug("create pane: received payload cwd=%q type=%s", payload.CWD, payload.Type)
-	cwd := d.resolveRequestedCWD(payload.CWD, d.defaultCWD(conn))
+	// An overlay (lazygit/hunk toggle) names its host tab's repo root, not a
+	// folder the user or agent picked, and only a picked folder belongs on the
+	// recent list — recording this one too would push the same repo root to
+	// the front every time Alt+G runs. resolveRequestedCWD (no recording) is
+	// used for it instead.
+	var cwd string
+	if payload.Overlay {
+		cwd = d.resolveRequestedCWD(payload.CWD, d.defaultCWD(conn))
+	} else {
+		cwd = d.resolveRequestedCWDRecording(payload.CWD, d.defaultCWD(conn))
+	}
 
 	// Determine pane type
 	paneType := payload.Type
@@ -4644,7 +4693,7 @@ func (d *Daemon) broadcastState() {
 // The rule this depends on: NEVER call buildWorkspaceState or broadcastState
 // while holding sm.mu, a pane's PluginMu or spawnMu, gitCache's lock,
 // clients.mu, or the update-info lock — this function takes every one of
-// them (through SnapshotState, masterID, clientCount, currentUpdateInfo), so
+// them (through SnapshotView, masterID, clientCount, currentUpdateInfo), so
 // a caller already holding one would self-deadlock. One known pre-existing
 // path violates this — lazy restore's spawnPane, on the sandbox sign-in
 // announce, calls broadcastState while still holding the pane's own
@@ -4653,8 +4702,7 @@ func (d *Daemon) buildWorkspaceState() ipc.WorkspaceState {
 	d.stateMu.Lock()
 	defer d.stateMu.Unlock()
 
-	activeTab, tabs, panesByTab, projects, activeProject := d.session.SnapshotState()
-	state := d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab, projects, activeProject, true)
+	state := d.workspaceStateFromView(d.session.SnapshotView(), true)
 	// Broadcast-only (never persisted): announced newer release, if any.
 	if info := d.currentUpdateInfo(); info != nil {
 		state.Update = info
@@ -4670,6 +4718,10 @@ func (d *Daemon) buildWorkspaceState() ipc.WorkspaceState {
 	// Broadcast-only, omitted unless true: a daemon in session 0 (started over
 	// ssh, or by a service) has no saved credentials and no visible desktop.
 	state.DaemonLimited = d.limited
+	// Broadcast-only: every 3b daemon owns its own groups, recent folders and
+	// notes, and states so on every frame — the TUI never reads hello_resp, so
+	// this is the one frame it can learn the capability from.
+	state.SharedData = true
 
 	// LAST, under the same lock as everything above: rev order must equal
 	// content order, or a client applying frames by rev can adopt a lower-
@@ -4886,6 +4938,12 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			// the size read beside it (see Pane.sizeSeq).
 			snapSizeSeq := pane.colsSeq
 			pane.PluginMu.Unlock()
+			// NoteRev is atomic.Uint64 precisely so this read never waits on
+			// noteMu — a note_set can hold that lock across disk I/O, and
+			// stalling every pane's broadcast behind one slow note write
+			// would be the queue-pressure hazard this repo already fixed
+			// once for output broadcasts (see daemon-lifecycle.md).
+			paneData.NoteRev = pane.NoteRev.Load()
 			// Broadcast-only, runtime: the counter restarts with the daemon,
 			// so a persisted one would mean nothing.
 			if includeOverlays && snapSizeSeq > 0 {
@@ -5026,6 +5084,7 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			// project adopts this one; the snapshot needs it so a restart does
 			// not turn an un-adopted default into a real project.
 			Bootstrap: p.Bootstrap,
+			Group:     p.Group,
 		})
 	}
 
@@ -5036,6 +5095,17 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 		Projects:      projectList,
 		ActiveProject: activeProject,
 	}
+}
+
+// workspaceStateFromView is the one builder buildWorkspaceState and
+// snapshot() share: workspaceStateFromSnapshot plus the group and recent
+// lists, all from the SAME SnapshotView — see its doc comment for the torn
+// frame a second read produced.
+func (d *Daemon) workspaceStateFromView(v sessionView, includeOverlays bool) ipc.WorkspaceState {
+	state := d.workspaceStateFromSnapshot(v.activeTab, v.tabs, v.panesByTab, v.projects, v.activeProject, includeOverlays)
+	state.Groups = v.groups
+	state.RecentCWDs = v.recent
+	return state
 }
 
 // transcriptExistsFn probes an ABSOLUTE transcript path recorded by the hook.

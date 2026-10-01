@@ -82,6 +82,95 @@ destination must be forgotten outright, not merely superseded. `refused`
 phase 4's rights checks. Full context and the wire-format table: ADR-32,
 `docs/architecture.md`.
 
+### Shared data (ADR-33): groups, recent folders, notes
+
+Project groups, recent folders and pane notes moved from client files onto
+the daemon that owns the projects and panes they describe. `WorkspaceState.SharedData`
+(`shared_data`, broadcast-only) is `true` on every frame a 3b daemon sends, so a
+client decides PER DESTINATION whether that daemon answers for its own
+groups/recent/notes or the client still keeps its own files for it.
+Both frame builders (`buildWorkspaceState`, `snapshot()`) take the group and
+recent lists from the SAME `sm.mu` hold as the projects (`SnapshotView` →
+`workspaceStateFromView`): read in a second hold, a rename between the two
+sent projects naming a group their own frame's list lacked, and every client
+kept that old name as an empty group for good.
+
+Five new id-bearing request types, all in `internal/ipc/shared.go`:
+`set_project_group` and `group_op` (create/rename/delete) mutate
+`SessionManager.groups` (`Project.Group` plus the daemon's own group-name
+list — `internal/daemon/shared.go`) and are answered with `OpRespPayload`
+through `answerOp`, exactly like the pre-existing project mutations: no ID on
+the request, no answer. `note_get`/`note_set` (`internal/daemon/notes.go`)
+read and write `QUIL_HOME/notes/<pane-id>.md` on the daemon's own machine.
+`shared_import` (`internal/daemon/shared_import.go`) is the one-time pull of
+a client's old files.
+
+**Note I/O never runs on the dispatch goroutine.** `handleNoteGet` and
+`handleNoteSet` each spawn a worker; every read and write of a pane's note
+holds `Pane.noteMu`, a LEAF lock scoped to that one pane, across the revision
+check and the file write together, so two saves racing the same base cannot
+both apply. `PluginMu` is never held across the I/O and nothing already
+holding it calls in. `NoteRev` is an `atomic.Uint64` rather than
+`noteMu`-guarded specifically so the workspace-state build (a bare `Load()`,
+no lock) never waits behind a slow save's disk I/O. It is MONOTONIC: a
+delete increments it exactly like a save (never resets to 0), so "no note
+right now" is an empty file at a nonzero revision and only 0 itself means
+"this pane has never had a note" — resetting on delete would let a save based
+on a revision the delete had already invalidated silently overwrite whatever
+a later writer put there. **`handleNoteSet` answers before it stores the
+bumped revision or asks for a broadcast** — `respondTo` runs first, `Store`
+and `requestBroadcast` after, on the same goroutine — so a state frame
+carrying the new `note_rev` can only reach the wire behind the save's own
+answer on that conn's ordered queue, never ahead of it; without that order a
+client's own save could race its own frame and misread itself as a conflict.
+Restore adopts a pane with no persisted `note_rev` but an existing note file
+as revision 1 (this daemon's own pre-3b local note), stored once before the
+pane is published to any other goroutine, so no lock is needed there.
+
+**`ImportShared` is one check-and-apply under `sm.mu`, never a merge.**
+Groups apply only while the daemon holds no group and no grouped project;
+recent applies only while its own list is empty — so of several clients
+importing at once, at most one actually changes anything, and the rest find
+the first one's data already there. The notes half of an import runs on a
+worker like any other note write, per pane under that pane's `noteMu`,
+applied only while the pane has NO note history: `NoteRev` still 0 AND no
+note file on disk. The rev check under `noteMu` is the guard that keeps a
+deleted note deleted. The client (`internal/tui/sharedimport.go`) offers only
+panes its frame showed at `NoteRev == 0`, but that frame can be old by the
+time the worker runs — another client can save and then delete the note in
+between, leaving no file and a nonzero rev (a delete never resets it). The
+file check covers a note on disk that no rev records yet.
+
+**The client sends a note only when its pane id is on that daemon and on no
+other connected one** (a copied workspace can give two daemons the same pane
+id). So a destination's notes kind WAITS (`notesWaiting`) while any other
+connected destination has not sent a workspace frame yet
+(`paneInventoryMissing`); its groups and recent folders go at once, and the
+notes follow in a notes-only import once every pane id is known
+(`sendWaitingNotes`, run on every applied frame), built from the waiting
+destination's NEWEST frame. "Known" means a frame on the CURRENT connection:
+a lost link or a reattach forgets that destination's pane ids
+(`forgetImportFor`), so an old connection's list never opens the wait.
+
+**Recent folders are recorded from the request, never guessed.**
+`RecordRecentCWD` is called only for a directory the request itself named and
+that actually resolved — `resolveRequestedCWDRecording` wraps
+`resolveRequestedCWD` for `handleCreatePane`/`handleCreateTab`'s first pane
+and the MCP `create_pane_req` path, and `recordRequestedCWD` covers the
+browsed directory of a worktree create (whose pane itself lands in the new
+checkout, not the browsed folder). A defaulted, empty, or template-derived
+CWD is never recorded, and there is no pruning tick — the list is capped at
+`ipc.MaxRecentCWDs` (5) and the client still filters it through `dirs_exist`
+when the pick list opens.
+
+Caps enforced daemon-side (`internal/ipc/shared.go`): 256 KiB per note (a
+note stored before the cap existed may be larger; a save up to its stored
+size is accepted, so it stays editable but cannot grow), group
+names 1–32 runes validated through `internal/textsafe` (moved out of
+`internal/tui/remotetext.go` so the daemon can apply the identical rule to a
+name from any IPC client), 64 groups per daemon, 5 recent folders, 8 MiB per
+`shared_import` request.
+
 ### Broadcast subscription (`MsgSubscribe`)
 
 `Broadcast` consults `Conn.wantsFrame(msg.Type)` BEFORE `enqueue`, so the

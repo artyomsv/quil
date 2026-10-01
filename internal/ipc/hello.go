@@ -65,8 +65,8 @@ type ErrorPayload struct {
 	Type    string `json:"type"`
 }
 
-// DaemonCaps returns a fresh copy of what a 3a daemon advertises.
+// DaemonCaps returns a fresh copy of what this daemon advertises.
 func DaemonCaps() []string {
-	out := []string{CapError, CapStateRev, CapStateReq}
+	out := []string{CapError, CapStateRev, CapStateReq, CapSharedData}
 	return append(out, GatedRequests...)
 }

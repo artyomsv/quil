@@ -8,6 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/persist"
 )
 
@@ -17,7 +18,13 @@ const notesDebounceWindow = 30 * time.Second
 
 // notesTickInterval is how often the model polls the notes editor to check
 // whether the debounce window has elapsed.
-const notesTickInterval = 5 * time.Second
+//
+// A var rather than a const for the reason flashDuration is one: a test
+// whose Update path opens notes mode arms notesTick(), and runCmd drains its
+// tea.Batch synchronously, so it would otherwise sleep the full five seconds
+// for a debounce check it is not asserting on. Overridden ONCE, from
+// TestMain.
+var notesTickInterval = 5 * time.Second
 
 // notesTickMsg triggers periodic debounce checks while notes mode is active.
 type notesTickMsg struct{}
@@ -30,6 +37,8 @@ type notesAction int
 const (
 	notesActionNone notesAction = iota
 	notesActionExit
+	notesActionSave   // remote: the Model sends note_set
+	notesActionReload // remote: the Model sends note_get
 )
 
 // NotesEditor is a plain-text notes editor bound to a pane. It wraps the
@@ -44,6 +53,191 @@ type NotesEditor struct {
 	lastEditAt  time.Time
 	lastSavedAt time.Time
 	saveErr     string
+
+	// Remote editors (a shared destination): the DAEMON holds the text and
+	// its version; the Model half is in sharednotes.go. rev is the version
+	// loaded or last saved; while saveInFlight a frame's note_rev is ignored,
+	// since it can only be describing a rev this editor's own save already
+	// supersedes; conflict keeps the user's text and stops autosave until Ctrl+R
+	// (reload, confirmed by a second Ctrl+R) or Ctrl+S (overwrite from
+	// currentRev). inFlightText is the buffer as it was when the save in
+	// flight was taken, so an OK answer clears dirty only when nothing was
+	// typed since. dest is the daemon the editor was opened against, pinned
+	// then: once the pane vanishes, destOfPane falls back to the ACTIVE
+	// destination, which can be another host. autoSaveHold stops autosave
+	// after the daemon refused a save (too large, a write error) until the
+	// user edits — resending the same text every tick cannot succeed.
+	remote       bool
+	dest         string
+	autoSaveHold bool
+	rev          uint64
+	loading      bool
+	loadErr      string
+	saveInFlight bool
+	inFlightText string
+	conflict     bool
+	currentRev   uint64
+	reloadArmed  bool
+}
+
+// NewRemoteNotesEditor opens an editor whose text is still on its way from
+// the daemon: read-only and "Loading…" until ApplyLoaded, read-only for good
+// after ApplyLoadError.
+func NewRemoteNotesEditor(paneID, paneName string, viewW, viewH int) *NotesEditor {
+	ed := NewTextEditor("", "", viewW, viewH)
+	ed.Highlight = HighlightPlain
+	ed.SoftWrap = true
+	ed.ReadOnly = true
+	return &NotesEditor{editor: ed, paneID: paneID, paneName: paneName, remote: true, loading: true}
+}
+
+func (n *NotesEditor) Remote() bool  { return n != nil && n.remote }
+func (n *NotesEditor) Loading() bool { return n != nil && n.loading }
+
+// Dest is the destination a remote editor was opened against ("" for local).
+func (n *NotesEditor) Dest() string {
+	if n == nil {
+		return ""
+	}
+	return n.dest
+}
+
+func (n *NotesEditor) LoadError() string {
+	if n == nil {
+		return ""
+	}
+	return n.loadErr
+}
+
+func (n *NotesEditor) Rev() uint64 {
+	if n == nil {
+		return 0
+	}
+	return n.rev
+}
+
+func (n *NotesEditor) SaveInFlight() bool { return n != nil && n.saveInFlight }
+func (n *NotesEditor) Conflict() bool     { return n != nil && n.conflict }
+
+// ApplyLoaded installs the daemon's text at rev and makes the editor
+// editable, discarding the buffer. Callers keep typing from being discarded:
+// the first load is read-only until here, a Ctrl+R reload was confirmed, and
+// the Model turns a silent reload that finds edits into a conflict instead.
+func (n *NotesEditor) ApplyLoaded(text string, rev uint64) {
+	if n == nil {
+		return
+	}
+	w, h := n.editor.ViewWidth, n.editor.ViewHeight
+	ed := NewTextEditor(text, "", w, h)
+	ed.Highlight = HighlightPlain
+	ed.SoftWrap = true
+	n.editor = ed
+	n.rev, n.loading, n.loadErr = rev, false, ""
+	n.dirty, n.conflict, n.reloadArmed, n.saveInFlight = false, false, false, false
+	n.inFlightText, n.saveErr, n.autoSaveHold = "", "", false
+}
+
+func (n *NotesEditor) ApplyLoadError(msg string) {
+	if n == nil {
+		return
+	}
+	n.loading, n.loadErr = false, msg
+	n.editor.ReadOnly = true
+}
+
+// TakeSave hands the Model the text to send and marks the save in flight.
+// Refused while loading, unloadable, clean, already in flight, or in a
+// conflict the caller did not choose to overwrite — an overwrite saves from
+// the daemon's current rev, which is what makes it win. An emptied buffer is
+// sent as "" — the daemon's delete — rather than as a lone newline, which
+// would keep a blank note forever.
+func (n *NotesEditor) TakeSave(overwrite bool) (text string, baseRev uint64, ok bool) {
+	if n == nil || !n.remote || n.loading || n.loadErr != "" || n.saveInFlight || !n.dirty {
+		return "", 0, false
+	}
+	if n.conflict && !overwrite {
+		return "", 0, false
+	}
+	base := n.rev
+	if n.conflict {
+		base = n.currentRev
+	}
+	raw := n.editor.Content()
+	content := raw
+	if content != "" && !strings.HasSuffix(content, "\n") {
+		content += "\n"
+	}
+	n.saveInFlight, n.inFlightText = true, raw
+	return content, base, true
+}
+
+func (n *NotesEditor) ApplySaveResult(resp ipc.NoteSetRespPayload) {
+	if n == nil {
+		return
+	}
+	n.saveInFlight = false
+	switch {
+	case resp.OK:
+		n.rev = resp.Rev
+		if n.editor.Content() == n.inFlightText {
+			n.dirty, n.editor.Dirty = false, false
+		}
+		n.conflict, n.reloadArmed = false, false
+		n.lastSavedAt = time.Now()
+		n.saveErr, n.autoSaveHold = "", false
+	case resp.Conflict:
+		n.MarkConflict(resp.CurrentRev)
+	default:
+		n.saveErr = resp.Error
+		n.autoSaveHold = true
+	}
+	n.inFlightText = ""
+}
+
+// AbandonSave forgets the save in flight without a verdict from the daemon —
+// the send failed, or the link it went out on was lost. The text stays dirty
+// and autosave sends it again (from the same base), unlike a daemon refusal.
+func (n *NotesEditor) AbandonSave(reason string) {
+	if n == nil {
+		return
+	}
+	n.saveInFlight, n.inFlightText = false, ""
+	n.saveErr = reason
+}
+
+// MarkConflict keeps the text, stops autosave and shows the choice. Revs only
+// grow, so the higher of an earlier conflict's rev and this one is the
+// daemon's latest — the base an overwrite must name.
+func (n *NotesEditor) MarkConflict(currentRev uint64) {
+	if n == nil {
+		return
+	}
+	if n.conflict && n.currentRev > currentRev {
+		currentRev = n.currentRev
+	}
+	n.conflict, n.currentRev, n.reloadArmed = true, currentRev, false
+}
+
+// WantsAutoSave is MaybeAutoSave's decision for a remote editor, whose save
+// is a send the Model owns.
+func (n *NotesEditor) WantsAutoSave() bool {
+	return n != nil && n.remote && n.dirty && !n.conflict && !n.saveInFlight && !n.loading &&
+		!n.autoSaveHold && time.Since(n.lastEditAt) >= notesDebounceWindow
+}
+
+// Unsent is the remote editor's text that no save covers: dirty, and not
+// exactly what the save in flight carries. Only closing needs it — a
+// conflicted editor cannot save without the user's overwrite, and an edit
+// after an unanswered save cannot be sent until that answer names its base.
+func (n *NotesEditor) Unsent() (string, bool) {
+	if n == nil || !n.remote || !n.dirty {
+		return "", false
+	}
+	content := n.editor.Content()
+	if n.saveInFlight && content == n.inFlightText {
+		return "", false
+	}
+	return content, true
 }
 
 // NewNotesEditor loads the notes file for paneID (creating the editor even
@@ -116,7 +310,8 @@ func (n *NotesEditor) Content() string {
 // a no-op in that case. Ensures the saved file ends with a newline so it
 // behaves like a normal POSIX text file.
 func (n *NotesEditor) Save() error {
-	if n == nil || !n.dirty {
+	// A remote editor's save is a send the Model owns — see TakeSave.
+	if n == nil || !n.dirty || n.remote {
 		return nil
 	}
 	content := n.editor.Content()
@@ -150,6 +345,34 @@ func (n *NotesEditor) HandleKey(key string) (notesAction, tea.Cmd) {
 		return notesActionNone, nil
 	}
 
+	if n.remote {
+		if key != "ctrl+r" {
+			n.reloadArmed = false
+		}
+		switch key {
+		case "ctrl+s":
+			return notesActionSave, nil
+		case "ctrl+r":
+			// Not while our own save is unanswered: its answer would land on
+			// the reloaded buffer and name a rev that buffer does not hold.
+			if !n.conflict || n.saveInFlight {
+				break
+			}
+			if n.reloadArmed {
+				n.reloadArmed = false
+				return notesActionReload, nil
+			}
+			n.reloadArmed = true
+			return notesActionNone, nil
+		}
+		if n.loading || n.loadErr != "" {
+			if key == "esc" {
+				return notesActionExit, nil
+			}
+			return notesActionNone, nil
+		}
+	}
+
 	switch key {
 	case "ctrl+s":
 		_ = n.Save() // error is captured in n.saveErr and rendered in the footer
@@ -163,22 +386,36 @@ func (n *NotesEditor) HandleKey(key string) (notesAction, tea.Cmd) {
 		return notesActionExit, nil
 	}
 
+	// The hold ends with a real edit, not a cursor move: the inner editor's
+	// Dirty stays set after the first edit, so it cannot tell them apart.
+	// Compared only while held, which is rare.
+	var before string
+	if n.autoSaveHold {
+		before = n.editor.Content()
+	}
 	_, _, cmd := n.editor.HandleKey(key)
 	if n.editor.Dirty {
 		n.dirty = true
 		n.lastEditAt = time.Now()
+	}
+	if n.autoSaveHold && n.editor.Content() != before {
+		n.autoSaveHold = false
 	}
 	return notesActionNone, cmd
 }
 
 // HandlePaste applies pasted content at the cursor position.
 func (n *NotesEditor) HandlePaste(text string) {
-	if n == nil || text == "" {
+	// ReadOnly: a remote editor still loading, or unloadable. Checked here as
+	// well as in InsertMultiLine, which would otherwise leave dirty set on a
+	// buffer that did not change.
+	if n == nil || text == "" || n.editor.ReadOnly {
 		return
 	}
 	n.editor.InsertMultiLine(text)
 	n.dirty = true
 	n.lastEditAt = time.Now()
+	n.autoSaveHold = false
 }
 
 // HasSelection reports whether a non-empty selection is currently active
@@ -293,7 +530,7 @@ func (n *NotesEditor) SelectSentenceAt(row, col int) bool {
 // MaybeAutoSave saves when the debounce window has elapsed since the last edit.
 // No-op if the editor is clean or the user is still actively editing.
 func (n *NotesEditor) MaybeAutoSave() {
-	if n == nil || !n.dirty {
+	if n == nil || !n.dirty || n.remote {
 		return
 	}
 	if time.Since(n.lastEditAt) < notesDebounceWindow {
@@ -421,6 +658,24 @@ func (n *NotesEditor) headerLineWithFocus(width int, editorFocused bool) string 
 
 func (n *NotesEditor) footerLine(width int, focused bool) string {
 	var hint string
+	if n.remote {
+		switch {
+		case n.loading:
+			hint = "Loading…  Esc"
+		case n.loadErr != "":
+			hint = "could not load: " + n.loadErr + "  Esc"
+		case n.conflict && n.reloadArmed:
+			hint = "Ctrl+R again to discard your edits · Ctrl+S overwrite"
+		case n.conflict:
+			hint = "Changed by another client — Ctrl+R reload, Ctrl+S overwrite"
+		case n.saveInFlight:
+			hint = "saving…"
+		}
+		if hint != "" {
+			hint = truncateRunes(hint, width)
+			return lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(hint)
+		}
+	}
 	switch {
 	case n.saveErr != "":
 		hint = "save err: " + n.saveErr

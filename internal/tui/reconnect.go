@@ -937,6 +937,12 @@ func (m *Model) armReattachReset(dest string) {
 	// authority after a reattach, and a restarted daemon's revision can be
 	// LOWER than ours (resetLayoutSync).
 	m.resetLayoutSync(dest)
+	// And every note save still pending there: it went out on the old
+	// connection, so its answer cannot arrive on this one.
+	m.settleNoteSavesFor(dest, "reconnected — will save again")
+	// And the shared-data import in flight there, for the same reason: the
+	// first shared frame on this connection sends it again.
+	m.forgetImportFor(dest)
 	// And the state-frame rev mark: a restarted daemon numbers from 1 again
 	// under a new run_id, and a kept mark would compare a fresh rev 1 against
 	// the old run's high-water mark and drop it as stale.
@@ -1032,6 +1038,9 @@ type redialResultMsg struct {
 // renders the parked project with its last content. Being teleported into a
 // different daemon's work is worse than stale work honestly labelled.
 func (m *Model) handleLinkLost(dest string, err error) {
+	// Before the early return: saves sent on the dead connection will never be
+	// answered, whichever path reported the loss.
+	m.settleNoteSavesFor(dest, "link lost — will save again")
 	ls := m.linkFor(dest)
 	if ls.active {
 		// One ladder per destination. Re-entering would reset attempt and lose the

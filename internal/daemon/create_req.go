@@ -112,7 +112,7 @@ func (d *Daemon) buildCreatePayload(req ipc.CreatePaneReqPayload, tabID, fallbac
 	if len(req.InstanceArgs) > 0 || len(toggleArgs) > 0 {
 		instanceArgs = append(append([]string(nil), req.InstanceArgs...), toggleArgs...)
 	}
-	cwd := d.resolveRequestedCWD(req.CWD, fallbackCWD)
+	cwd := d.resolveRequestedCWDRecording(req.CWD, fallbackCWD)
 	payload := ipc.CreatePanePayload{
 		TabID:           tabID,
 		CWD:             cwd,

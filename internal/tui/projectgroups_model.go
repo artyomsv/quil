@@ -83,8 +83,11 @@ func (m *Model) toggleGroup(g int) tea.Cmd {
 // changes nothing. Toggling on the press instead would collapse every group
 // the user starts to drag.
 func (m *Model) finishGroupDrag(x, y int) tea.Cmd {
-	g, moved := m.groupDragIdx, m.groupDragMoved
+	g, moved := m.groups.indexOf(m.groupDragName), m.groupDragMoved
 	m.clearDragState()
+	if g < 0 {
+		return nil // the group vanished while the drag was armed
+	}
 	if moved {
 		return m.saveGroupsCmd()
 	}
@@ -111,6 +114,9 @@ func (m *Model) finishGroupDrag(x, y int) tea.Cmd {
 // that destination. Such a broadcast names zero real projects, so it is the
 // empty case above.
 func (m *Model) pruneProjectGroupsFor(state WorkspaceStateMsg) tea.Cmd {
+	if m.frameAuthoritativeFor(state.Dest) {
+		return nil // its members come from the frame (rebuildGroupsView)
+	}
 	if len(m.groups.Groups) == 0 {
 		return nil
 	}

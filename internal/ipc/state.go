@@ -30,6 +30,16 @@ type WorkspaceState struct {
 	// is new per daemon process. Zero/empty means an older daemon.
 	Rev   uint64 `json:"rev,omitempty"`
 	RunID string `json:"run_id,omitempty"`
+
+	// SharedData is broadcast-only and always true from a 3b daemon: this
+	// daemon owns groups, recent folders and notes for its projects and
+	// panes. Never written to workspace.json.
+	SharedData bool `json:"shared_data,omitempty"`
+	// Groups is this daemon's group-name list, creation order (no display
+	// meaning — order is per client). RecentCWDs is its recent-folder list,
+	// most recent first, at most MaxRecentCWDs. Both persist.
+	Groups     []string `json:"groups,omitempty"`
+	RecentCWDs []string `json:"recent_cwds,omitempty"`
 }
 
 // TabState is one tab. Panes is never nil on the wire.
@@ -54,6 +64,8 @@ type ProjectState struct {
 	TabIDs    []string `json:"tab_ids"`
 	ActiveTab string   `json:"active_tab"`
 	Bootstrap bool     `json:"bootstrap"`
+	// Group is the group name this project is filed under; "" = ungrouped.
+	Group string `json:"group,omitempty"`
 }
 
 // PaneState is one pane. Numeric fields are wide on purpose: a client
@@ -86,6 +98,12 @@ type PaneState struct {
 	Cols                int      `json:"cols,omitempty"`
 	Rows                int      `json:"rows,omitempty"`
 	Overlay             bool     `json:"overlay,omitempty"`
+	// NoteRev is the pane's note version: 0 = this pane has never had a note;
+	// a nonzero rev with an empty note text (fetched separately, via
+	// note_get) means the note was deleted, not that none ever existed — the
+	// counter never resets. Persisted and broadcast; the note text itself
+	// never rides the frame.
+	NoteRev uint64 `json:"note_rev,omitempty"`
 
 	// Broadcast-only (includeOverlays == true).
 	SizeSeq           uint64 `json:"size_seq,omitempty"`

@@ -231,7 +231,28 @@ type Pane struct {
 	// "immutable once set" and written just outside this lock, which made all
 	// three readers data races. ID and the OutputBuf pointer are immutable;
 	// TabID has its own leaf lock (tabIDMu).
-	PluginMu     sync.Mutex
+	PluginMu sync.Mutex
+	// noteMu is a LEAF lock guarding the note file on disk and NoteRev's
+	// read-modify-write in note_set: every note write holds it across the
+	// version check and the file I/O, so two saves from one base cannot both
+	// apply. Never held while acquiring another lock, and PluginMu is never
+	// held across note I/O.
+	noteMu sync.Mutex
+	// NoteRev is the pane's note-version counter: MONOTONIC, never reset to
+	// 0 by note_set — a delete increments it exactly like a save, because
+	// resetting it would let a save based on a rev the deleter had already
+	// invalidated silently overwrite whatever a later writer put there.
+	// "No note" is an empty file/text, not rev 0; 0 means
+	// only "this pane has never had a note". Persisted (note_rev), broadcast.
+	// atomic.Uint64 rather than noteMu-guarded: the workspace-state build
+	// reads it with a bare Load(), with no noteMu, so a slow note_set's disk
+	// I/O never stalls every OTHER pane's broadcast. Written under noteMu by
+	// note_set and the import (Store happens after the response is enqueued
+	// — see notes.go); restore is the one exception, storing it with NO lock
+	// at all, because that write happens before the pane is published to any
+	// other goroutine (daemon.go) and so races nothing yet.
+	NoteRev atomic.Uint64
+
 	InstanceName string    // Which instance config was used
 	InstanceArgs []string  // Args used to start (for rerun strategy)
 	ExitCode     *int      // nil = still running, non-nil = exited
@@ -470,6 +491,15 @@ type SessionManager struct {
 	projects      map[string]*Project
 	projectOrder  []string
 	activeProject string
+
+	// groups is this daemon's group-name list, creation order — the order the
+	// SIDEBAR draws groups in, and whether each is collapsed, is a client
+	// preference this daemon does not hold, since a merged group can span
+	// several daemons with no shared sequence to index into; recentCWDs the
+	// last MaxRecentCWDs folders a create named, most recent first. Both
+	// under mu, both persisted.
+	groups     []string
+	recentCWDs []string
 }
 
 // inputQueueSize bounds the per-pane stdin queue. Generous for interactive
@@ -1237,6 +1267,39 @@ func (sm *SessionManager) RestoreProjects(projects []*Project, activeProject str
 func (sm *SessionManager) SnapshotState() (activeTab string, tabs []*Tab, panesByTab map[string][]*Pane, projects []Project, activeProject string) {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
+	return sm.snapshotStateLocked()
+}
+
+// sessionView is one consistent read of everything a workspace-state frame
+// and workspace.json take from the session: SnapshotState's five values plus
+// the group and recent-folder lists.
+type sessionView struct {
+	activeTab     string
+	tabs          []*Tab
+	panesByTab    map[string][]*Pane
+	projects      []Project
+	activeProject string
+	groups        []string
+	recent        []string
+}
+
+// SnapshotView is SnapshotState plus the shared lists, all under ONE sm.mu
+// hold. The frame builders read only this. With the lists taken in a second
+// hold, a rename landing between the two sent a frame whose projects named
+// the old group while its list held only the new one — and every client
+// then kept an empty group under the old name for good, since that name
+// vanished from a list in a frame that still used it.
+func (sm *SessionManager) SnapshotView() sessionView {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	var v sessionView
+	v.activeTab, v.tabs, v.panesByTab, v.projects, v.activeProject = sm.snapshotStateLocked()
+	v.groups, v.recent = sm.sharedLocked()
+	return v
+}
+
+// snapshotStateLocked is SnapshotState's body. Caller holds sm.mu.
+func (sm *SessionManager) snapshotStateLocked() (activeTab string, tabs []*Tab, panesByTab map[string][]*Pane, projects []Project, activeProject string) {
 	activeTab = sm.activeTab
 	tabs = make([]*Tab, 0, len(sm.tabOrder))
 	panesByTab = make(map[string][]*Pane)

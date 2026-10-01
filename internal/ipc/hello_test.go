@@ -43,7 +43,7 @@ func TestErrorPayload_JSONKeys_Stable(t *testing.T) {
 
 func TestDaemonCaps_IncludesGatedRequestsAndProtocolCaps(t *testing.T) {
 	caps := DaemonCaps()
-	want := append([]string{CapError, CapStateRev, CapStateReq}, GatedRequests...)
+	want := append([]string{CapError, CapStateRev, CapStateReq, CapSharedData}, GatedRequests...)
 	if !reflect.DeepEqual(caps, want) {
 		t.Errorf("DaemonCaps() = %v, want %v", caps, want)
 	}

@@ -734,8 +734,13 @@ type Model struct {
 	instanceStore        InstanceStore // saved plugin instances (loaded from instances.json)
 	instanceFormValues   []string      // form field values (indexed by FormField position)
 	instanceFormCursor   int           // active field in instance form
-	selectedInstanceArgs []string      // args from selected instance (for IPC); toggles are appended here
+	selectedInstanceArgs []string      // args of the selected plugin INSTANCE (ssh/stripe forms) — full rights only over TCP
 	selectedInstanceName string        // name from selected instance (for IPC)
+	// selectedToggles and selectedKubeContext are the setup dialog's NAMED
+	// choices. They go to the daemon as names, never folded into
+	// selectedInstanceArgs, which a standard-rights token may not send.
+	selectedToggles     []string
+	selectedKubeContext string
 	// Setup-dialog state. selectedCWD is the value committed at submit time
 	// (a snapshot of cwdBrowseDir) and is what handleCreatePaneSplit reads
 	// for CreatePanePayload.CWD. The two fields exist separately so that the

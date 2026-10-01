@@ -2339,6 +2339,18 @@ func (d *Daemon) handleCreateTab(conn *ipc.Conn, msg *ipc.Message) {
 		return
 	}
 
+	// Resolved before the tab is minted, so a refused selection creates no
+	// tab at all rather than one with a pane the request did not ask for.
+	if fp := payload.FirstPane; fp != nil {
+		args, err := d.applyNamedSelections(fp.Type, fp.InstanceArgs, fp.Toggles, fp.KubeContext)
+		if err != nil {
+			log.Printf("new tab: refused: %v", err)
+			d.replyError(conn, msg, ipc.ErrCodeBadPayload, err.Error())
+			return
+		}
+		fp.InstanceArgs, fp.Toggles, fp.KubeContext = args, nil, ""
+	}
+
 	// An empty or unknown ProjectID resolves to the active project inside
 	// createTabLocked, which is exactly the historical behaviour.
 	tab := d.session.CreateTabInProject(payload.ProjectID, payload.Name)
@@ -2876,6 +2888,16 @@ func (d *Daemon) handleCreatePane(conn *ipc.Conn, msg *ipc.Message) {
 	if err := msg.DecodePayload(&payload); err != nil {
 		return
 	}
+
+	// Named selections become arguments HERE, once, before any branch
+	// (worktree, replace, ordinary), so every route spawns the same argv.
+	args, err := d.applyNamedSelections(payload.Type, payload.InstanceArgs, payload.Toggles, payload.KubeContext)
+	if err != nil {
+		log.Printf("create pane: refused: %v", err)
+		d.replyError(conn, msg, ipc.ErrCodeBadPayload, err.Error())
+		return
+	}
+	payload.InstanceArgs, payload.Toggles, payload.KubeContext = args, nil, ""
 
 	// A create carrying a worktree spec goes to a WORKER goroutine and answers
 	// the requester directly. `git worktree add` checks out a tree — seconds on

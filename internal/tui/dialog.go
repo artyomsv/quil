@@ -2392,6 +2392,8 @@ func (m Model) handleCreatePaneSelect() (tea.Model, tea.Cmd) {
 		m.selectedPlugin = plugins[m.dialogCursor].Name
 		m.selectedInstanceArgs = nil
 		m.selectedInstanceName = ""
+		m.selectedToggles = nil
+		m.selectedKubeContext = ""
 		m.dialogCursor = 0
 
 		// If plugin has form fields → instance list (step 2)
@@ -2538,6 +2540,7 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 	pluginName := m.selectedPlugin
 	instanceName := m.selectedInstanceName
 	instanceArgs := m.selectedInstanceArgs
+	toggles, kubeContext := m.selectedToggles, m.selectedKubeContext
 	resumeSessionID := m.selectedSessionID
 	cwd := m.selectedCWD
 	// The sandbox choice is captured here for exactly the reason the paragraph
@@ -2584,6 +2587,8 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 	m.selectedCWD = ""
 	m.cwdInputError = ""
 	m.toggleStates = nil
+	m.selectedToggles = nil
+	m.selectedKubeContext = ""
 	m.setupFieldCursor = 0
 	m.cwdBrowseDir = ""
 	m.cwdBrowseEntries = nil
@@ -2646,6 +2651,8 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 			CWD:             cwd,
 			InstanceName:    instanceName,
 			InstanceArgs:    instanceArgs,
+			Toggles:         toggles,
+			KubeContext:     kubeContext,
 			ResumeSessionID: resumeSessionID,
 			Worktree:        spec,
 			Sandbox:         sbox,
@@ -2788,6 +2795,8 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 				Type:            pluginName,
 				InstanceName:    instanceName,
 				InstanceArgs:    instanceArgs,
+				Toggles:         toggles,
+				KubeContext:     kubeContext,
 				ReplacePaneID:   oldPaneID,
 				ResumeSessionID: resumeSessionID,
 				Worktree:        spec,
@@ -2862,6 +2871,8 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 			Type:            pluginName,
 			InstanceName:    instanceName,
 			InstanceArgs:    instanceArgs,
+			Toggles:         toggles,
+			KubeContext:     kubeContext,
 			ResumeSessionID: resumeSessionID,
 			Worktree:        spec,
 			Sandbox:         sbox,
@@ -5093,27 +5104,18 @@ func (m Model) submitSetupDialog(p *plugin.PanePlugin) (tea.Model, tea.Cmd) {
 		m.selectedSessionID = ""
 	}
 
-	// Inject the chosen kube context (row 0 = Default = no --context flag).
+	// The kube context and the checked toggles are recorded as NAMES; the
+	// daemon turns them into arguments, in the same order this dialog used to
+	// build them (instance args, --context, toggles). Row 0 = Default = none.
+	m.selectedKubeContext = ""
 	if p.Command.Discover == "kube" && m.kubeCursor > 0 && m.kubeCursor-1 < len(m.kubeContexts) {
-		ctx := m.kubeContexts[m.kubeCursor-1].Name
-		merged := make([]string, 0, len(m.selectedInstanceArgs)+2)
-		merged = append(merged, m.selectedInstanceArgs...)
-		merged = append(merged, "--context", ctx)
-		m.selectedInstanceArgs = merged
+		m.selectedKubeContext = m.kubeContexts[m.kubeCursor-1].Name
 	}
-
-	// Append enabled-toggle args to whatever instance args came in.
-	var extra []string
+	m.selectedToggles = nil
 	for i, t := range p.Command.Toggles {
 		if i < len(m.toggleStates) && m.toggleStates[i] {
-			extra = append(extra, t.ArgsWhenOn...)
+			m.selectedToggles = append(m.selectedToggles, t.Name)
 		}
-	}
-	if len(extra) > 0 {
-		merged := make([]string, 0, len(m.selectedInstanceArgs)+len(extra))
-		merged = append(merged, m.selectedInstanceArgs...)
-		merged = append(merged, extra...)
-		m.selectedInstanceArgs = merged
 	}
 
 	m.dialogEdit = false

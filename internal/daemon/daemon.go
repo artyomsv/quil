@@ -4820,7 +4820,7 @@ func (d *Daemon) buildWorkspaceState() ipc.WorkspaceState {
 	// the attached-client count. Each TUI reads them to tell whether it is the
 	// master or a follower. snapshot() writes size_master to disk by itself,
 	// for the restart reserve; the count means nothing after a restart.
-	master := d.masterID()
+	master := d.sizeMasterForState()
 	state.SizeMaster = &master
 	n := d.clientCount()
 	state.Clients = &n

@@ -62,11 +62,81 @@ func TestClients_LocalOwnerReclaimsIDFromTokenConn(t *testing.T) {
 	}
 }
 
-func TestClients_ViewerCannotTakeReservedSlot(t *testing.T) {
+// wantNoMasterConn requires that no attached conn holds the slot, by every
+// reader of it: the slot lookup, each conn, and list_clients.
+func wantNoMasterConn(t *testing.T, d *Daemon, conns ...*ipc.Conn) {
+	t.Helper()
+	if c := d.masterConn(); c != nil {
+		t.Fatal("a conn holds the master slot")
+	}
+	for _, c := range conns {
+		if d.isMasterConn(c) {
+			t.Fatal("isMasterConn is true for a conn that must not hold the slot")
+		}
+	}
+	for _, info := range d.listClients() {
+		if info.Master {
+			t.Fatalf("list_clients reports %q as master", info.Client)
+		}
+	}
+	if id := d.sizeMasterForState(); id != "" {
+		t.Fatalf("the state frame names %q as size master", id)
+	}
+}
+
+// lostTokenMaster leaves a lost-master reservation for "owner" that recorded
+// the token principal it was held by, with a local follower attached.
+func lostTokenMaster(t *testing.T, h *clientsHarness, principal string) {
+	t.Helper()
+	r := &h.d.clients
+	m := new(ipc.Conn)
+	if _, err := r.attach(m, "owner", 200, 50, "", false, principal, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.attach(new(ipc.Conn), "follower", 200, 50, "", false, ipc.PrincipalLocal, false); err != nil {
+		t.Fatal(err)
+	}
+	h.wantMaster("owner")
+	r.lose(m)
+	if r.reserved == nil || r.reserved.principal != principal {
+		t.Fatalf("reservation = %+v, want one recording %q", r.reserved, principal)
+	}
+}
+
+// A viewer naming an id a restart reserve keeps is admitted as an ordinary
+// client: a read-only record never holds the slot, and the reserve keeps
+// waiting for a local claimant.
+func TestClients_ViewerUnderRestartReserveGetsNoSlot(t *testing.T) {
 	h := newClientsHarness(t, testGrace)
 	h.d.clients.reserveAfterRestart("owner")
-	if _, err := h.d.clients.attach(new(ipc.Conn), "owner", 200, 50, "", true, "token 0a1b2c3d", true); !errors.Is(err, errClientIDInUse) {
-		t.Fatalf("err = %v, want errClientIDInUse for a viewer claiming a reserved id", err)
+	c := new(ipc.Conn)
+	if _, err := h.d.clients.attach(c, "owner", 200, 50, "", true, "token 0a1b2c3d", true); err != nil {
+		t.Fatalf("a viewer naming a restart-reserved id was refused: %v", err)
+	}
+	wantNoMasterConn(t, h.d, c)
+	if h.d.clients.reserved == nil {
+		t.Fatal("the viewer's attach consumed the restart reserve")
+	}
+}
+
+// A reservation that recorded its principal refuses any other: another
+// token, and a viewer.
+func TestClients_GraceReserveRefusesAnotherPrincipal(t *testing.T) {
+	h := newClientsHarness(t, testGrace)
+	lostTokenMaster(t, h, "token 0a1b2c3d")
+	r := &h.d.clients
+	if _, err := r.attach(new(ipc.Conn), "owner", 200, 50, "", true, "token ffffffff", false); !errors.Is(err, errClientIDInUse) {
+		t.Fatalf("err = %v, want errClientIDInUse for another token", err)
+	}
+	if _, err := r.attach(new(ipc.Conn), "owner", 200, 50, "", true, "token ffffffff", true); !errors.Is(err, errClientIDInUse) {
+		t.Fatalf("err = %v, want errClientIDInUse for a viewer", err)
+	}
+	back := new(ipc.Conn)
+	if _, err := r.attach(back, "owner", 200, 50, "", true, "token 0a1b2c3d", false); err != nil {
+		t.Fatalf("the principal that lost the slot could not reclaim it: %v", err)
+	}
+	if !h.d.isMasterConn(back) {
+		t.Fatal("the returning principal did not get its slot back")
 	}
 }
 
@@ -101,17 +171,100 @@ func TestReservationAdmits(t *testing.T) {
 	}
 }
 
-// A RESTART reservation does not know the lost master's principal, so it
-// admits only the LOCAL principal — even a full-rights token that was master
-// before the restart attaches as an ordinary client.
-func TestClients_TokenCannotTakeRestartSlot(t *testing.T) {
+// A RESTART reservation does not know the lost master's principal, so only
+// the LOCAL principal can claim it. A full-rights token naming that id is
+// ADMITTED as an ordinary client — refusing it would strand a remote TUI,
+// which logs an attach error and never retries — but does not inherit the
+// slot, and the reserve stays claimable by a later local attach.
+func TestClients_TokenUnderRestartReserveIsAdmittedWithoutTheSlot(t *testing.T) {
 	h := newClientsHarness(t, testGrace)
-	h.d.clients.reserveAfterRestart("owner")
-	if _, err := h.d.clients.attach(new(ipc.Conn), "owner", 200, 50, "", true, "token 0a1b2c3d", false); !errors.Is(err, errClientIDInUse) {
-		t.Fatalf("err = %v, want errClientIDInUse for a full token claiming a restart-reserved id", err)
+	r := &h.d.clients
+	r.reserveAfterRestart("owner")
+	tok := new(ipc.Conn)
+	if _, err := r.attach(tok, "owner", 200, 50, "", true, "token 0a1b2c3d", false); err != nil {
+		t.Fatalf("a full token naming a restart-reserved id was refused: %v", err)
 	}
-	if _, err := h.d.clients.attach(new(ipc.Conn), "owner", 200, 50, "", true, ipc.PrincipalLocal, false); err != nil {
+	if h.d.clientCount() != 1 {
+		t.Fatalf("clients = %d, want the token's record registered", h.d.clientCount())
+	}
+	wantNoMasterConn(t, h.d, tok)
+	if r.reserved == nil {
+		t.Fatal("the token's attach consumed the restart reserve")
+	}
+
+	owner := new(ipc.Conn)
+	if _, err := r.attach(owner, "owner", 200, 50, "", true, ipc.PrincipalLocal, false); err != nil {
 		t.Fatalf("the local owner could not claim its restart slot: %v", err)
 	}
-	h.wantMaster("owner")
+	if !h.d.isMasterConn(owner) || h.d.sizeMasterForState() != "owner" {
+		t.Fatal("the local owner did not get the reserved slot")
+	}
+	if _, ok := r.byConn[tok]; ok {
+		t.Error("the token conn still holds a record for the owner's id")
+	}
+}
+
+// A first attach (Reattach false) that names the reserved id without
+// claiming it is no cold start of a new process, so it does not end the wait
+// for the local claimant even when it is alone.
+func TestClients_TokenFirstAttachUnderRestartReserveKeepsTheReserve(t *testing.T) {
+	h := newClientsHarness(t, testGrace)
+	r := &h.d.clients
+	r.reserveAfterRestart("owner")
+	tok := new(ipc.Conn)
+	if _, err := r.attach(tok, "owner", 200, 50, "", false, "token 0a1b2c3d", false); err != nil {
+		t.Fatal(err)
+	}
+	if r.reserved == nil {
+		t.Fatal("a lone first attach naming the reserved id cleared the restart reserve")
+	}
+	wantNoMasterConn(t, h.d, tok)
+}
+
+// Losing the admitted token's link leaves the restart reserve as it was: the
+// token never held the slot, so it leaves no grace reserve of its own behind.
+func TestClients_LosingTheTokenKeepsTheRestartReserve(t *testing.T) {
+	h := newClientsHarness(t, testGrace)
+	r := &h.d.clients
+	r.reserveAfterRestart("owner")
+	tok := new(ipc.Conn)
+	if _, err := r.attach(tok, "owner", 200, 50, "", true, "token 0a1b2c3d", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.attach(new(ipc.Conn), "follower", 200, 50, "", true, ipc.PrincipalLocal, false); err != nil {
+		t.Fatal(err)
+	}
+	r.lose(tok)
+	if r.reserved == nil || r.reserved.principal != "" {
+		t.Fatalf("reservation = %+v, want the restart reserve kept", r.reserved)
+	}
+	owner := new(ipc.Conn)
+	if _, err := r.attach(owner, "owner", 200, 50, "", true, ipc.PrincipalLocal, false); err != nil {
+		t.Fatal(err)
+	}
+	if !h.d.isMasterConn(owner) {
+		t.Fatal("the local owner did not get its restart slot")
+	}
+}
+
+// With no local claimant, the restart reserve lapses and the admitted token
+// is elected like any other client — and the change is published, because
+// the id the state frame names goes from "" to its own.
+func TestClients_TokenUnderRestartReserveElectedWhenItLapses(t *testing.T) {
+	h := newClientsHarness(t, testGrace)
+	r := &h.d.clients
+	r.reserveAfterRestart("owner")
+	tok := new(ipc.Conn)
+	if _, err := r.attach(tok, "owner", 200, 50, "", true, "token 0a1b2c3d", false); err != nil {
+		t.Fatal(err)
+	}
+	wantNoMasterConn(t, h.d, tok)
+	h.advance(restartReserveCap)
+	h.fire()
+	if !h.d.isMasterConn(tok) || h.d.sizeMasterForState() != "owner" {
+		t.Fatal("the token was not elected once the reserve lapsed")
+	}
+	if h.changes != 1 {
+		t.Fatalf("changes = %d, want the election published once", h.changes)
+	}
 }

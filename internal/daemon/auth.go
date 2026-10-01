@@ -221,6 +221,20 @@ func (a *authService) markRevoked(tokenID string) []*ipc.Conn {
 	return out
 }
 
+// firstExpiry reports true the first time a token is seen expired.
+func (a *authService) firstExpiry(tokenID string) bool {
+	a.idxMu.Lock()
+	defer a.idxMu.Unlock()
+	if a.expiredSeen == nil {
+		a.expiredSeen = make(map[string]bool)
+	}
+	if a.expiredSeen[tokenID] {
+		return false
+	}
+	a.expiredSeen[tokenID] = true
+	return true
+}
+
 // backoff is min(base * 2^(n-1), cap) after n consecutive failures; by
 // default min(250 ms * 2^(n-1), 2 s).
 func (a *authService) backoff() time.Duration {
@@ -295,6 +309,9 @@ func (d *Daemon) initAuth(home string) error {
 	} else {
 		d.audit = audit
 	}
+	// Read on THIS goroutine and handed over as arguments: the loop never
+	// touches the package vars a test restores in t.Cleanup.
+	go d.expiryLoop(expiryTick, expiryClock)
 	return errors.Join(errs...)
 }
 

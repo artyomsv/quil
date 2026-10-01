@@ -133,6 +133,9 @@ func main() {
 		case "daemon":
 			handleDaemon()
 			return
+		case "clients":
+			handleClients()
+			return
 		case "mcp":
 			runMCP()
 			return

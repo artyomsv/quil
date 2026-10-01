@@ -1892,6 +1892,14 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	case ipc.MsgHello:
 		d.handleHello(conn, msg)
 
+	// Token management — class local: refused from any TCP conn.
+	case ipc.MsgTokenCreateReq:
+		d.handleTokenCreateReq(conn, msg)
+	case ipc.MsgTokenListReq:
+		d.handleTokenListReq(conn, msg)
+	case ipc.MsgTokenRevokeReq:
+		d.handleTokenRevokeReq(conn, msg)
+
 	default:
 		d.replyError(conn, msg, ipc.ErrCodeUnknownType, "unknown message type")
 	}

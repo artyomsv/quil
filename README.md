@@ -14,6 +14,8 @@ A terminal multiplexer built for developers who orchestrate 5–10 sessions per 
 
 Type `quil` after a reboot — every tab, pane, working directory, layout split, and AI conversation is right where you left it.
 
+If Quil saves you time, a ⭐ helps other developers find it.
+
 <p align="center">
   <img src="https://cdn.stukans.com/quil/screenshots/pane-restoration-1280.png"
        alt="Quil restoring tabs, panes, and Claude Code sessions after a reboot" width="880">

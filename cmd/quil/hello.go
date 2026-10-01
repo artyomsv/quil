@@ -77,6 +77,21 @@ func sendClientHello(client *ipc.Client, role string) {
 	startClientStatReports(client)
 }
 
+// helloPayload is this process's self-description, for every hello it sends:
+// the ordinary one (sendHello) and the --connect login hello (dialTCP), so
+// what a TCP daemon registers cannot drift from what a unix one does.
+func helloPayload(kind string) ipc.HelloPayload {
+	return ipc.HelloPayload{
+		Kind:     kind,
+		Proto:    ipc.ProtocolVersion,
+		ClientID: processClientID,
+		Version:  version,
+		PID:      os.Getpid(),
+		ExeName:  currentExeName(),
+		UptimeMS: time.Since(processStart).Milliseconds(),
+	}
+}
+
 // sendHello registers this conn as a protocol-1 client. Fire and forget: no
 // 3a client needs anything from hello_resp, and an older daemon drops the
 // type (the client_hello that follows keeps its process dialog working).
@@ -85,15 +100,7 @@ func sendClientHello(client *ipc.Client, role string) {
 // second public entry point, it is the hello half of that one funnel split
 // out so the wire shape has a name of its own.
 func sendHello(client *ipc.Client, kind string) {
-	msg, err := ipc.NewMessage(ipc.MsgHello, ipc.HelloPayload{
-		Kind:     kind,
-		Proto:    ipc.ProtocolVersion,
-		ClientID: processClientID,
-		Version:  version,
-		PID:      os.Getpid(),
-		ExeName:  currentExeName(),
-		UptimeMS: time.Since(processStart).Milliseconds(),
-	})
+	msg, err := ipc.NewMessage(ipc.MsgHello, helloPayload(kind))
 	if err != nil {
 		return
 	}

@@ -2,13 +2,16 @@
 // #features + #plugins — everything Quil does, one line each, from the same
 // data the old /features/ and /plugins/ pages used. Each line folds open to
 // that page's full detail, so the words those pages carried for readers and
-// crawlers are still on the site (spec Goal 2).
+// crawlers are still on the site (spec Goal 2). Entries keep the old pages'
+// ids (feature slug, cat-<category>, plugin slug), so the /features/ and
+// /plugins/ stubs can forward an old deep link to the same entry here.
 import { features, featureCategories, type Feature } from "@/data/features";
 import { plugins } from "@/data/plugins";
 import { GITHUB_BLOB } from "@/data/seo";
 import { splitTicks } from "@/lib/ticks";
 
 const groups = (Object.keys(featureCategories) as Feature["category"][]).map((cat) => ({
+  cat,
   label: featureCategories[cat],
   items: features.filter((f) => f.category === cat),
 }));
@@ -19,11 +22,11 @@ const groups = (Object.keys(featureCategories) as Feature["category"][]).map((ca
     <h2 id="features-h">Everything Quil does, one line each</h2>
     <div class="feat-groups">
       {groups.map((g) => (
-        <div class="feat-group">
+        <div class="feat-group" id={`cat-${g.cat}`}>
           <h3>{g.label}</h3>
           <ul>
             {g.items.map((f) => (
-              <li>
+              <li id={f.slug}>
                 <details>
                   <summary><b>{f.title}</b>{f.badge && <span class="badge">beta</span>} — {splitTicks(f.blurb).map((s, j) => (j % 2 ? <code>{s}</code> : s))}</summary>
                   <ul class="detail">{f.detail.map((d) => <li>{splitTicks(d).map((s, j) => (j % 2 ? <code>{s}</code> : s))}</li>)}</ul>
@@ -41,7 +44,7 @@ const groups = (Object.keys(featureCategories) as Feature["category"][]).map((ca
       <p>A pane knows what runs in it, so it comes back the right way after a restart. Add your own type in one TOML file.</p>
       <ul>
         {plugins.map((p) => (
-          <li>
+          <li id={p.slug}>
             <details>
               <summary><b>{p.name}</b>{p.beta && <span class="badge">beta</span>} — {p.description}</summary>
               <ul class="detail">{p.features.map((x) => <li>{x}</li>)}</ul>
@@ -69,6 +72,7 @@ const groups = (Object.keys(featureCategories) as Feature["category"][]).map((ca
   .detail { margin: 6px 0 6px 1.6ch; padding-left: 12px; border-left: 1px solid var(--t-line-2); gap: 4px; }
   .detail li { font-size: 14px; color: var(--t-mute); }
   .plugins { margin-top: 44px; padding-top: 30px; border-top: 1px dashed var(--t-line-2); scroll-margin-top: calc(var(--hh) + 16px); }
+  .feat-group, li[id] { scroll-margin-top: calc(var(--hh) + 16px); }
   .plugins > p:first-of-type { margin: 0 0 14px; color: var(--t-soft); max-width: 70ch; }
   @media (max-width: 760px) { .feat-groups { grid-template-columns: minmax(0, 1fr); } }
 </style>

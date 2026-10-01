@@ -1,5 +1,7 @@
 ---
-// Folded into the home page (spec Part B). Old links and bookmarks still work.
+// Folded into the home page (spec Part B). Old links and bookmarks still work,
+// and a deep link such as /plugins/#claude-code lands on that pane type.
 import Redirect from "@/components/Redirect.astro";
+import { plugins } from "@/data/plugins";
 ---
-<Redirect to="/#plugins" title="Quil — pane types" />
+<Redirect to="/#plugins" title="Quil — pane types" keep={plugins.map((p) => p.slug)} />

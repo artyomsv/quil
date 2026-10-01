@@ -70,6 +70,8 @@ export function readPage(html) {
   const scripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\b[^>]*>/gi)];
   const isLd = (open) => /type\s*=\s*["']application\/ld\+json["']/i.test(open);
   const refresh = meta("http-equiv", "refresh");
+  const idList = [...html.matchAll(/\sid\s*=\s*["']([^"']+)["']/gi)].map((m) => m[1]);
+  const keepTag = /<a\b[^>]*\sdata-keep\s*=[^>]*>/i.exec(html)?.[0];
   return {
     titles: [...html.matchAll(/<title>([\s\S]*?)<\/title>/gi)].map((m) => decode(m[1].trim())),
     description: meta("name", "description"),
@@ -82,7 +84,10 @@ export function readPage(html) {
     jsonLd: scripts.filter((m) => isLd(m[1])).map((m) => m[2]),
     inlineScripts: scripts.filter((m) => !isLd(m[1]) && !/\ssrc\s*=/i.test(m[1])).length,
     scriptSrcs: scripts.map((m) => attr(`<x${m[1]}>`, "src")).filter((s) => s !== null),
-    ids: new Set([...html.matchAll(/\sid\s*=\s*["']([^"']+)["']/gi)].map((m) => m[1])),
+    ids: new Set(idList),
+    duplicateIds: [...new Set(idList.filter((id, i) => idList.indexOf(id) !== i))],
+    /** A redirect stub's data-keep: old fragments its script carries over to the target page. */
+    keep: ((keepTag && attr(keepTag, "data-keep")) ?? "").split(/\s+/).filter(Boolean),
     hrefs: [...html.matchAll(/<a\b[^>]*?\shref\s*=\s*["']([^"']*)["']/gi)].map((m) => decode(m[1])),
   };
 }
@@ -149,6 +154,34 @@ export function checkHref(site, from, href, fail) {
   }
 }
 
+/** The dist files of a page's own scripts ("/_astro/x.js" → "_astro/x.js"). */
+export const localScripts = (page) =>
+  page.scriptSrcs.map((src) => internalTarget(src)?.file).filter((file) => file !== undefined);
+
+/**
+ * Every JS file the entries load, following static and dynamic imports.
+ * `entries` are [dist file, the page that loads it] pairs; `missing` names
+ * each file that is not in dist and the page or module that asked for it.
+ * `readText` reads a dist file, so this stays free of file-system access.
+ */
+export function jsClosure(entries, files, readText) {
+  const found = new Set();
+  const missing = [];
+  const visit = (file, from) => {
+    if (found.has(file) || missing.some((m) => m.file === file)) return;
+    if (!files.has(file)) {
+      missing.push({ file, from });
+      return;
+    }
+    found.add(file);
+    for (const m of readText(file).matchAll(/(?:\bimport|\bfrom)\s*\(?\s*["']([^"']+\.js)["']/g)) {
+      visit(new URL(m[1], `https://dist/${file}`).pathname.slice(1), file);
+    }
+  };
+  for (const [file, from] of entries) visit(file, from);
+  return { files: found, missing };
+}
+
 /** All rules. Returns one message per violation; empty when the site passes. */
 export function checkSite(site) {
   const errors = [];
@@ -193,6 +226,11 @@ export function checkSite(site) {
       const t = internalTarget(p.refresh);
       if (!t || !files.has(t.file)) fail(`${url}: redirect target is not a built file: ${p.refresh}`);
       if (!p.canonical || !want.has(p.canonical)) fail(`${url}: redirect canonical must be a listed page, is ${p.canonical ?? "missing"}`);
+      // A kept fragment must exist on the target, or the old deep link lands on nothing.
+      const target = t ? pages.get(t.url) : undefined;
+      for (const id of p.keep) {
+        if (!target?.ids.has(id)) fail(`${url}: keeps #${id}, but ${t?.url ?? p.refresh} has no such id`);
+      }
     } else {
       // Rule 2 — the head of every page, the 404 included.
       if (p.titles.length !== 1) fail(`${url}: has ${p.titles.length} <title> elements, want 1`);
@@ -222,6 +260,14 @@ export function checkSite(site) {
     }
     // Rules 5 and 6 — every link resolves.
     for (const href of p.hrefs) checkHref(site, url, href, fail);
+    // Rule 11 — an id names one element; a link to a repeated id reaches only the first.
+    for (const id of p.duplicateIds) fail(`${url}: id "${id}" appears more than once`);
+  }
+
+  // Rule 10 — every script a page loads, and every module those import, is in dist.
+  const entries = [...pages].flatMap(([url, p]) => localScripts(p).map((file) => [file, url]));
+  for (const m of jsClosure(entries, files, site.distText).missing) {
+    fail(`${m.from}: loads ${m.file}, which is not in dist`);
   }
 
   // Rule 9 — llms.txt exists and every link in it resolves like a page link.

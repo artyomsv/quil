@@ -5,6 +5,10 @@
  * canonical names the page that replaces this one. No noindex: it would
  * contradict the canonical (spec Part B). Not in the sitemap; nothing on the
  * site links here (check-dist rule 5 fails a link to a stub).
+ *
+ * A meta refresh drops the old URL's fragment. `keep` lists the old page's
+ * ids that the target page still has; the script below carries those over,
+ * and check-dist rule 3 fails the build if one of them is missing there.
  */
 import { SITE } from "@/data/seo";
 
@@ -12,8 +16,10 @@ interface Props {
   /** Site-absolute target, e.g. "/#install". */
   to: string;
   title: string;
+  /** Old fragments that exist on the target page, e.g. ["remote-daemon-ssh"]. */
+  keep?: string[];
 }
-const { to, title } = Astro.props;
+const { to, title, keep = [] } = Astro.props;
 ---
 <!doctype html>
 <html lang={SITE.htmlLang}>
@@ -24,6 +30,15 @@ const { to, title } = Astro.props;
     <meta http-equiv="refresh" content={`0; url=${to}`} />
   </head>
   <body>
-    <a href={to}>{title}</a>
+    <a href={to} data-keep={keep.length ? keep.join(" ") : undefined}>{title}</a>
+    <script>
+      // A module script runs before the load event, and the refresh waits for
+      // load, so a kept fragment wins. Without JS the refresh still works.
+      const link = document.querySelector<HTMLAnchorElement>("a[data-keep]");
+      const id = location.hash.slice(1);
+      if (link && id && (link.dataset.keep ?? "").split(" ").includes(id)) {
+        location.replace(`${link.pathname}#${id}`);
+      }
+    </script>
   </body>
 </html>

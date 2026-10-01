@@ -1,5 +1,9 @@
 ---
-// Folded into the home page (spec Part B). Old links and bookmarks still work.
+// Folded into the home page (spec Part B). Old links and bookmarks still work,
+// and a deep link such as /features/#remote-daemon-ssh lands on that entry.
 import Redirect from "@/components/Redirect.astro";
+import { features, featureCategories } from "@/data/features";
+
+const keep = [...Object.keys(featureCategories).map((cat) => `cat-${cat}`), ...features.map((f) => f.slug)];
 ---
-<Redirect to="/#features" title="Quil — features" />
+<Redirect to="/#features" title="Quil — features" keep={keep} />

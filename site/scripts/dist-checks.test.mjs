@@ -3,7 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   ORIGIN, urlForDistFile, internalTarget, parseSitemap, readPage,
-  githubSlug, markdownAnchors, checkSite,
+  githubSlug, markdownAnchors, jsClosure, checkSite,
 } from "./lib/dist-checks.mjs";
 
 function html({
@@ -28,7 +28,10 @@ function html({
   ].join("");
 }
 
-const stub = (to) => readPage(`<title>moved</title><link rel="canonical" href="${ORIGIN}/"><meta http-equiv="refresh" content="0; url=${to}">`);
+const stub = (to, keep = null) => readPage(
+  `<title>moved</title><link rel="canonical" href="${ORIGIN}/"><meta http-equiv="refresh" content="0; url=${to}">` +
+  (keep === null ? "" : `<a href="${to}" data-keep="${keep}">moved</a>`),
+);
 
 /** A small site that passes every rule. Each test breaks exactly one thing. */
 function goodSite() {
@@ -37,8 +40,10 @@ function goodSite() {
       ["/", readPage(html({ canonical: `${ORIGIN}/`, body: '<p id="install"></p><a href="/docs/#agents">docs</a><a href="#install">install</a><script type="module" src="/_astro/home.js"></script>' }))],
       ["/docs/", readPage(html({ canonical: `${ORIGIN}/docs/`, body: '<article id="agents"></article><a href="https://github.com/artyomsv/quil/blob/master/docs/mcp.md#the-36-tools">mcp</a>' }))],
       ["/404.html", readPage(html({ robots: "noindex", body: '<a href="/">home</a>' }))],
+      ["/install/", stub("/#install", "install")],
     ]),
-    files: new Set(["index.html", "docs/index.html", "404.html", "og/home.png", "sitemap.xml", "robots.txt", "_astro/home.js"]),
+    files: new Set(["index.html", "docs/index.html", "404.html", "install/index.html", "og/home.png", "sitemap.xml", "robots.txt", "_astro/home.js", "_astro/kit.js"]),
+    distText: (file) => ({ "_astro/home.js": 'import "./kit.js";', "_astro/kit.js": "export const k = 1;" })[file] ?? null,
     sitemapXml: `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>${ORIGIN}/</loc><lastmod>2026-09-30T10:00:00+02:00</lastmod></url><url><loc>${ORIGIN}/docs/</loc><lastmod>2026-09-29T08:00:00Z</lastmod></url></urlset>`,
     robotsTxt: `User-agent: *\nAllow: /\n\nSitemap: ${ORIGIN}/sitemap.xml\n`,
     cname: "quil.cc\n",
@@ -83,6 +88,22 @@ test("parseSitemap reads loc and an optional lastmod", () => {
 test("readPage finds a meta refresh target", () => {
   assert.equal(stub("/#install").refresh, "/#install");
   assert.equal(readPage(html()).refresh, null);
+});
+
+test("readPage reads the fragments a stub keeps, and ids used twice", () => {
+  assert.deepEqual(stub("/#features", "cat-core remote-daemon-ssh").keep, ["cat-core", "remote-daemon-ssh"]);
+  assert.deepEqual(stub("/#install").keep, []);
+  assert.deepEqual(readPage('<p id="a"></p><p id="b"></p><p id="a"></p>').duplicateIds, ["a"]);
+});
+
+test("jsClosure follows imports and names what is not in dist", () => {
+  const code = { "_astro/home.js": 'import "./kit.js"; import("/_astro/tour.js");', "_astro/kit.js": "export const k = 1;" };
+  const r = jsClosure([["_astro/home.js", "/"], ["_astro/gone.js", "/"]], new Set(Object.keys(code)), (f) => code[f]);
+  assert.deepEqual([...r.files].sort(), ["_astro/home.js", "_astro/kit.js"]);
+  assert.deepEqual(r.missing, [
+    { file: "_astro/tour.js", from: "_astro/home.js" },
+    { file: "_astro/gone.js", from: "/" },
+  ]);
 });
 
 test("readPage counts inline scripts but not JSON-LD or src scripts", () => {
@@ -140,6 +161,8 @@ test("rule 2: 404 without noindex", () => expectError((s) => s.pages.set("/404.h
 test("rule 2: og:image missing from dist", () => expectError((s) => s.files.delete("og/home.png"), /og:image is not in dist/));
 test("rule 3: a stub's target must exist", () =>
   expectError((s) => { s.pages.set("/old/", stub("/nowhere/")); s.files.add("old/index.html"); }, /redirect target is not a built file/));
+test("rule 3: a stub keeps a fragment its target page lacks", () =>
+  expectError((s) => s.pages.set("/install/", stub("/#install", "install plat-go")), /\/install\/: keeps #plat-go, but \/ has no such id/));
 test("rule 4: robots.txt names the old sitemap", () =>
   expectError((s) => { s.robotsTxt = "User-agent: *\nSitemap: https://quil.cc/sitemap-index.xml\n"; }, /robots\.txt must say/));
 test("rule 4: dist/CNAME must name quil.cc (GitHub Pages reads the custom domain from it)", () =>
@@ -168,3 +191,9 @@ test("rule 8: home JavaScript over budget", () => expectError((s) => { s.homeJsG
 test("rule 9: llms.txt is required", () => expectError((s) => { s.llmsTxt = null; }, /dist\/llms\.txt is missing/));
 test("rule 9: a broken link in llms.txt", () =>
   expectError((s) => { s.llmsTxt += `- [Gone](${ORIGIN}/gone/): no\n`; }, /\/llms\.txt: broken link \/gone\//));
+test("rule 10: a script a page loads is not in dist", () =>
+  expectError((s) => s.files.delete("_astro/home.js"), /^\/: loads _astro\/home\.js, which is not in dist/));
+test("rule 10: a module a script imports is not in dist", () =>
+  expectError((s) => s.files.delete("_astro/kit.js"), /^_astro\/home\.js: loads _astro\/kit\.js, which is not in dist/));
+test("rule 11: an id used twice on a page", () =>
+  expectError((s) => setDocs(s, { body: '<p id="x"></p><p id="x"></p>' }), /\/docs\/: id "x" appears more than once/));

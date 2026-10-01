@@ -6,9 +6,9 @@
  */
 import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { gzipSync } from "node:zlib";
-import { dirname, join, posix, resolve, sep } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { checkSite, readPage, urlForDistFile } from "./lib/dist-checks.mjs";
+import { checkSite, jsClosure, localScripts, readPage, urlForDistFile } from "./lib/dist-checks.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const DIST = resolve(here, "..", "dist");
@@ -26,19 +26,10 @@ const files = new Set(walk(DIST));
 const pages = new Map();
 for (const f of files) if (f.endsWith(".html")) pages.set(urlForDistFile(f), readPage(readFileSync(join(DIST, f), "utf8")));
 
-/** Every JS file an entry loads, following static and dynamic imports. */
-function jsClosure(entry, seen = new Set()) {
-  if (seen.has(entry) || !files.has(entry)) return seen;
-  seen.add(entry);
-  const code = readFileSync(join(DIST, entry), "utf8");
-  for (const m of code.matchAll(/(?:\bimport|\bfrom)\s*\(?\s*["']([^"']+\.js)["']/g)) {
-    const spec = m[1];
-    jsClosure(spec.startsWith("/") ? spec.slice(1) : posix.join(posix.dirname(entry), spec), seen);
-  }
-  return seen;
-}
-const homeJs = new Set();
-for (const src of pages.get("/")?.scriptSrcs ?? []) if (src.startsWith("/")) jsClosure(src.slice(1), homeJs);
+const distText = (file) => readFileSync(join(DIST, file), "utf8");
+// A file missing from dist is not counted here; rule 10 fails the build for it.
+const home = pages.get("/");
+const homeJs = home ? jsClosure(localScripts(home).map((file) => [file, "/"]), files, distText).files : new Set();
 const homeJsGzipBytes = [...homeJs].reduce((n, f) => n + gzipSync(readFileSync(join(DIST, f))).length, 0);
 
 const errors = checkSite({
@@ -52,6 +43,7 @@ const errors = checkSite({
     const full = resolve(REPO, path);
     return full.startsWith(REPO + sep) ? read(full) : null;
   },
+  distText,
   homeJsGzipBytes,
   ci: process.env.CI === "true",
   now: Date.now(),

@@ -88,6 +88,13 @@ func TestStore_AdmitVerifiesThenExpiry(t *testing.T) {
 		func(Entry) { t.Error("admitted an expired token") }); !errors.Is(err, ErrExpired) {
 		t.Fatalf("expired err = %v", err)
 	}
+	// A wrong proof against an EXPIRED token still reads as refused, never as
+	// expired: the proof is checked before expiry, so expiry is never
+	// revealed to someone who does not hold the key.
+	if _, _, err := s.Admit(e2.ID, time.Now(), func(Verifier) bool { return false },
+		func(Entry) { t.Error("admitted an expired token with a bad proof") }); !errors.Is(err, ErrRefused) {
+		t.Fatalf("expired + bad proof err = %v, want ErrRefused", err)
+	}
 }
 
 // The dummy-key path: an unknown id still runs verify, so the answer time
@@ -191,7 +198,7 @@ func TestStore_CreateRetriesOnMintCollision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	real := NewToken
+	realMint := NewToken
 	calls := 0
 	s.mint = func() (string, string, error) {
 		calls++
@@ -199,7 +206,7 @@ func TestStore_CreateRetriesOnMintCollision(t *testing.T) {
 			// Collide with the id already in the store.
 			return fixedToken, first.ID, nil
 		}
-		return real()
+		return realMint()
 	}
 	tok2, second, err := s.Create("second", LevelFull, nil)
 	if err != nil {
@@ -219,10 +226,11 @@ func TestStore_CreateRetriesOnMintCollision(t *testing.T) {
 	}
 }
 
-// TestStore_CreateFailsAfterRepeatedMintCollisions covers the bound on the
-// retry: a mint seam that always returns an id already in the store must
-// eventually report an error instead of looping forever.
-func TestStore_CreateFailsAfterRepeatedMintCollisions(t *testing.T) {
+// TestStore_CreateFailsOnMintCollisions covers the exact bound on the retry:
+// a mint seam that always returns an id already in the store must make
+// exactly maxMintAttempts calls, then report an error instead of looping
+// forever or trying one call more or fewer than the documented bound.
+func TestStore_CreateFailsOnMintCollisions(t *testing.T) {
 	s, _ := openTestStore(t)
 	_, first, err := s.Create("first", LevelFull, nil)
 	if err != nil {
@@ -236,11 +244,94 @@ func TestStore_CreateFailsAfterRepeatedMintCollisions(t *testing.T) {
 	if _, _, err := s.Create("second", LevelFull, nil); err == nil {
 		t.Fatal("Create succeeded despite a mint seam that never produces a free id")
 	}
-	if calls < 2 {
-		t.Fatalf("mint called only %d time(s), want several retries before giving up", calls)
+	if calls != maxMintAttempts {
+		t.Fatalf("mint called %d time(s), want exactly %d", calls, maxMintAttempts)
 	}
 	if got := s.List(); len(got) != 1 {
 		t.Fatalf("store has %d entries after a failed Create, want 1 (unchanged)", len(got))
+	}
+}
+
+// TestStore_CallbacksRunUnderTheLock pins the store's main security
+// property: Admit, Revoke and ExpireSweep call their callback WHILE the
+// store's lock is still held, so there is no window in which a login can
+// register between a revoke's removal and its write, or between an expiry
+// sweep's check and its report. Each callback asserts TryLock() fails.
+func TestStore_CallbacksRunUnderTheLock(t *testing.T) {
+	s, _ := openTestStore(t)
+	assertLocked := func(t *testing.T, who string) {
+		t.Helper()
+		if s.mu.TryLock() {
+			s.mu.Unlock()
+			t.Errorf("%s's callback ran without the store lock held", who)
+		}
+	}
+
+	tok, e, _ := s.Create("a", LevelFull, nil)
+	am := AuthMessage(e.ID, "nc", "ns")
+	admitChecked := false
+	if _, _, err := s.Admit(e.ID, time.Now(), func(v Verifier) bool { return VerifyProof(v, am, ClientProof(tok, am)) },
+		func(Entry) { admitChecked = true; assertLocked(t, "Admit") }); err != nil || !admitChecked {
+		t.Fatalf("Admit: err=%v checked=%v", err, admitChecked)
+	}
+
+	revokeChecked := false
+	if _, err := s.Revoke(e.ID, func(Entry) { revokeChecked = true; assertLocked(t, "Revoke") }); err != nil || !revokeChecked {
+		t.Fatalf("Revoke: err=%v checked=%v", err, revokeChecked)
+	}
+
+	soon := time.Now().Add(time.Minute)
+	_, short, _ := s.Create("short", LevelFull, &soon)
+	sweepChecked := false
+	s.ExpireSweep(time.Now().Add(2*time.Minute), func(x Entry) {
+		if x.ID != short.ID {
+			return
+		}
+		sweepChecked = true
+		assertLocked(t, "ExpireSweep")
+	})
+	if !sweepChecked {
+		t.Fatal("ExpireSweep did not report the expired entry")
+	}
+}
+
+// TestOpenStore_DropsInvalidEntriesAndCounts covers loading a file written
+// by something other than this Store: an entry with a malformed id or an
+// unrecognized rights level is dropped rather than kept half-understood, and
+// the count is exposed so the daemon can log it instead of silently serving
+// fewer tokens than the file on disk names.
+func TestOpenStore_DropsInvalidEntriesAndCounts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tokens.json")
+	raw := `{"version":1,"tokens":[
+		{"id":"0a1b2c3d","name":"good","stored_key":"00","server_key":"00","rights":"standard","created":"2026-01-01T00:00:00Z"},
+		{"id":"not-hex!","name":"bad-id","stored_key":"00","server_key":"00","rights":"standard","created":"2026-01-01T00:00:00Z"},
+		{"id":"deadbeef","name":"bad-rights","stored_key":"00","server_key":"00","rights":"super-admin","created":"2026-01-01T00:00:00Z"}
+	]}`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Dropped(); got != 2 {
+		t.Fatalf("Dropped() = %d, want 2", got)
+	}
+	if got := s.List(); len(got) != 1 || got[0].ID != "0a1b2c3d" {
+		t.Fatalf("List() = %+v, want only the valid entry", got)
+	}
+}
+
+// TestOpenStore_RefusesANewerVersion covers a tokens.json written by a later
+// build: OpenStore must refuse it outright rather than silently treat it as
+// v1 and risk rewriting away fields this build does not know about.
+func TestOpenStore_RefusesANewerVersion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tokens.json")
+	if err := os.WriteFile(path, []byte(`{"version":2,"tokens":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenStore(path); err == nil {
+		t.Fatal("OpenStore accepted a tokens.json from a newer version")
 	}
 }
 

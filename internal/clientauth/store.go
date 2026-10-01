@@ -35,9 +35,10 @@ const (
 	lastUsedPersistEvery = time.Minute
 	storeVersion         = 1
 	// maxMintAttempts bounds Create's retry when a freshly minted token id
-	// collides with one already in the store. The id is 8 hex digits (32
-	// bits), so a collision is rare but not impossible, and a loop with no
-	// bound would hang the daemon instead of reporting the problem.
+	// collides with one already in the store: at most this many mint() calls
+	// are made before Create gives up. The id is 8 hex digits (32 bits), so a
+	// collision is rare but not impossible, and a loop with no bound would
+	// hang the daemon instead of reporting the problem.
 	maxMintAttempts = 8
 )
 
@@ -88,10 +89,23 @@ type Store struct {
 	rename      func(oldpath, newpath string) error
 	// mint is NewToken; a test seam so a fixture can pin a token id.
 	mint func() (token, id string, err error)
+	// dropped is how many entries OpenStore discarded on load (a bad id or an
+	// unknown rights level). Set once at construction, before the Store is
+	// shared with any other goroutine, so reading it later needs no lock.
+	dropped int
 }
+
+// Dropped reports how many entries OpenStore discarded on load, so the
+// daemon can log it instead of silently serving a smaller token list than
+// the file on disk names.
+func (s *Store) Dropped() int { return s.dropped }
 
 // OpenStore loads path; a missing file is an empty store. The path is a
 // parameter (the internal/keymap pattern), so tests never touch QUIL_HOME.
+// An entry with an invalid id or an unrecognized rights level is dropped
+// rather than kept half-understood; a file whose version is newer than this
+// build supports is refused outright rather than silently reread as v1 and
+// possibly rewritten with fields this build does not know about.
 func OpenStore(path string) (*Store, error) {
 	dummyToken, _, err := NewToken()
 	if err != nil {
@@ -117,11 +131,20 @@ func OpenStore(path string) (*Store, error) {
 	if err := json.Unmarshal(data, &f); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
+	if f.Version > storeVersion {
+		return nil, fmt.Errorf("%s: version %d is newer than this build supports (%d)", path, f.Version, storeVersion)
+	}
 	for i := range f.Tokens {
 		e := f.Tokens[i]
-		if ValidID(e.ID) {
-			s.entries[e.ID] = &e
+		if !ValidID(e.ID) {
+			s.dropped++
+			continue
 		}
+		if _, err := ParseLevel(string(e.Rights)); err != nil {
+			s.dropped++
+			continue
+		}
+		s.entries[e.ID] = &e
 	}
 	return s, nil
 }
@@ -186,21 +209,24 @@ func (s *Store) Create(name string, rights Level, expires *time.Time) (string, E
 		}
 	}
 	// The id is 8 hex digits (32 bits): a fresh mint can collide with an
-	// entry already in the store. Retry with a bound rather than silently
-	// overwrite the existing entry or loop forever.
+	// entry already in the store. Retry with an exact bound — at most
+	// maxMintAttempts calls to mint() — rather than silently overwrite the
+	// existing entry or loop forever.
 	var token, id string
-	for attempt := 0; ; attempt++ {
+	minted := false
+	for attempt := 0; attempt < maxMintAttempts; attempt++ {
 		t, tid, err := s.mint()
 		if err != nil {
 			return "", Entry{}, err
 		}
 		if _, taken := s.entries[tid]; !taken {
 			token, id = t, tid
+			minted = true
 			break
 		}
-		if attempt == maxMintAttempts {
-			return "", Entry{}, errors.New("could not mint a unique token id")
-		}
+	}
+	if !minted {
+		return "", Entry{}, errors.New("could not mint a unique token id")
 	}
 	v := DeriveVerifier(token)
 	e := &Entry{
@@ -226,6 +252,9 @@ func (s *Store) List() []Entry {
 // succeeded calls onRevoked — still under the admission lock, so the caller
 // can mark every live conn of the token revoked before any new login of it
 // can register. An exact id beats a name; names match case-insensitively.
+// onRevoked runs while the store's lock is held and must not call back into
+// the Store (Admit, Revoke, TouchLastUsed, …) — sync.Mutex is not reentrant,
+// so such a call would deadlock.
 func (s *Store) Revoke(target string, onRevoked func(Entry)) (Entry, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -256,7 +285,11 @@ func (s *Store) Revoke(target string, onRevoked func(Entry)) (Entry, error) {
 // Admit is the single admission step, under one lock: lookup, verify, expiry
 // check, then admit. An unknown id is verified against a fixed dummy so the
 // answer time does not reveal which ids exist; the proof is checked BEFORE
-// expiry. admit runs under the lock.
+// expiry, so a wrong proof against an expired token still reads as refused,
+// never as expired — expiry is not revealed to someone without the key.
+// admit runs while the store's lock is held and must not call back into the
+// Store (Admit, Revoke, TouchLastUsed, …) — sync.Mutex is not reentrant, so
+// such a call would deadlock.
 func (s *Store) Admit(id string, now time.Time, verify func(Verifier) bool, admit func(Entry)) (Entry, Verifier, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -283,7 +316,10 @@ func (s *Store) Admit(id string, now time.Time, verify func(Verifier) bool, admi
 }
 
 // ExpireSweep calls onExpired for every expired entry, under the lock. An
-// entry without an expiry is skipped. Expired entries stay listed.
+// entry without an expiry is skipped. Expired entries stay listed. onExpired
+// runs while the store's lock is held and must not call back into the Store
+// (Admit, Revoke, TouchLastUsed, …) — sync.Mutex is not reentrant, so such a
+// call would deadlock.
 func (s *Store) ExpireSweep(now time.Time, onExpired func(Entry)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

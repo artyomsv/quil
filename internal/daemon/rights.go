@@ -45,13 +45,50 @@ func (d *Daemon) admitRequest(conn *ipc.Conn, auth *ipc.AuthState, msg *ipc.Mess
 	if auth.Transport != ipc.TransportTCP || !parksGoroutine(msg.Type) {
 		return func() {}, true
 	}
-	if !auth.TryPark(maxParkedPerConn) {
+	return d.admitParked(conn, auth, msg)
+}
+
+// admitParked applies the per-conn cap on parked requests. The parked
+// counter holds the waits; the conn's watch is counted by its PRESENCE in
+// the event queue instead, because a conn holds at most one watcher. That
+// gives a watch two properties a counted slot could not without a race:
+// one that only replaces the conn's own watch passes even at the cap (it
+// adds no goroutine — the evicted one ends at once), and its slot comes back
+// the moment the watcher leaves the queue, which every way out does before
+// answering.
+//
+// The replacement needs no branch of its own: while a watcher is registered
+// waits are capped one lower, so the waits alone never fill the cap and the
+// room check below always passes for it.
+func (d *Daemon) admitParked(conn *ipc.Conn, auth *ipc.AuthState, msg *ipc.Message) (func(), bool) {
+	watching := d.events.HasWatcher(conn)
+	if msg.Type == ipc.MsgWatchNotificationsReq {
+		// Room for one more: claim and hand straight back, since the
+		// watcher itself will hold the slot. One conn's frames dispatch in
+		// order, so nothing else of this conn can claim in between.
+		if !auth.TryPark(maxParkedPerConn) {
+			d.refuseRequest(conn, auth, msg, "too many waiting requests")
+			return nil, false
+		}
+		auth.Unpark()
+		return func() {}, true
+	}
+	limit := int32(maxParkedPerConn)
+	if watching {
+		limit--
+	}
+	if !auth.TryPark(limit) {
 		d.refuseRequest(conn, auth, msg, "too many waiting requests")
 		return nil, false
 	}
 	var once sync.Once
 	return func() { once.Do(auth.Unpark) }, true
 }
+
+// unclassifiedAuditKey is the refusal-audit rate key for every type in no
+// class: the type is a client-chosen string, so keying on it would let a
+// sender write one line per invented name.
+const unclassifiedAuditKey = "unclassified"
 
 // refuseRequest answers an id-bearing request with `error refused` INSTEAD of
 // its usual response — no OpRespPayload{ok:false}, no pane_input_resp, since
@@ -63,7 +100,11 @@ func (d *Daemon) admitRequest(conn *ipc.Conn, auth *ipc.AuthState, msg *ipc.Mess
 // A LOCAL conn is refused only for a never-class type; it keeps the rule that
 // a conn which never said hello gets silence, via replyError.
 func (d *Daemon) refuseRequest(conn *ipc.Conn, auth *ipc.AuthState, msg *ipc.Message, reason string) {
-	if auth.ShouldAuditRefusal(msg.Type, time.Now()) {
+	key := msg.Type
+	if !clientauth.Classified(msg.Type) {
+		key = unclassifiedAuditKey
+	}
+	if auth.ShouldAuditRefusal(key, time.Now()) {
 		d.writeAudit(d.auditFor(conn, auth, auditEntry{Event: "refused", Type: msg.Type, Reason: reason}))
 	}
 	if auth.Transport == ipc.TransportLocal {

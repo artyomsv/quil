@@ -68,7 +68,10 @@ type Daemon struct {
 	// tasksRegistry so the hand-built daemons in tests need no setup.
 	tasks     *taskRegistry
 	tasksOnce sync.Once
-	gitCache  *gitCache // per-checkout branch/worktree/divergence, refreshed on a ticker
+	// parkedWaits counts the live parked wait_task goroutines, so a test can
+	// see them end when their conn closes.
+	parkedWaits atomic.Int32
+	gitCache    *gitCache // per-checkout branch/worktree/divergence, refreshed on a ticker
 	// Last attached terminal size, used before a client can resize a new pane.
 	clientSize atomic.Pointer[terminalSize]
 
@@ -1829,7 +1832,7 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	case ipc.MsgGetNotificationsReq:
 		d.handleGetNotificationsReq(conn, msg)
 	case ipc.MsgWatchNotificationsReq:
-		d.handleWatchNotificationsReq(conn, msg, release)
+		d.handleWatchNotificationsReq(conn, msg)
 
 	// Broadcast subscription
 	case ipc.MsgSubscribe:
@@ -7773,15 +7776,9 @@ func (d *Daemon) handleGetNotificationsReq(conn *ipc.Conn, msg *ipc.Message) {
 	})
 }
 
-// release returns the conn's parked-request slot. It runs when the parked
-// goroutine ends, or at once on every path that never parks.
-func (d *Daemon) handleWatchNotificationsReq(conn *ipc.Conn, msg *ipc.Message, release func()) {
-	parked := false
-	defer func() {
-		if !parked {
-			release()
-		}
-	}()
+// The conn's parked-request slot for a watch is the registered watcher itself
+// (see admitParked): every way out removes the watcher before answering.
+func (d *Daemon) handleWatchNotificationsReq(conn *ipc.Conn, msg *ipc.Message) {
 	var req ipc.WatchNotificationsReqPayload
 	if err := msg.DecodePayload(&req); err != nil {
 		log.Printf("handleWatchNotificationsReq: decode: %v", err)
@@ -7828,9 +7825,7 @@ func (d *Daemon) handleWatchNotificationsReq(conn *ipc.Conn, msg *ipc.Message, r
 	d.events.AddWatcher(watcher)
 
 	// Block in goroutine — respond when event fires or timeout
-	parked = true
 	go func() {
-		defer release()
 		timer := time.NewTimer(time.Duration(timeoutMs) * time.Millisecond)
 		defer timer.Stop()
 

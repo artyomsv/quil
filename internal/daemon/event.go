@@ -215,6 +215,19 @@ func (q *eventQueue) RemoveWatcher(w *connWatcher) {
 	}
 }
 
+// HasWatcher reports whether conn has a watcher registered. A conn holds at
+// most one: a new watch evicts the old one through RemoveWatchersByConn.
+func (q *eventQueue) HasWatcher(conn *ipc.Conn) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for _, w := range q.watchers {
+		if w.conn == conn {
+			return true
+		}
+	}
+	return false
+}
+
 // RemoveWatchersByConn removes all watchers for a specific connection
 // and closes their channels to unblock any waiting goroutines.
 func (q *eventQueue) RemoveWatchersByConn(conn *ipc.Conn) {

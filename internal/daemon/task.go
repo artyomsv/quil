@@ -552,9 +552,12 @@ func (d *Daemon) handleGetTaskReq(conn *ipc.Conn, msg *ipc.Message) {
 	respondTo(conn, msg.ID, ipc.MsgGetTaskResp, ipc.GetTaskRespPayload{Task: d.tasksRegistry().info(t)})
 }
 
-// release returns the conn's parked-request slot. It runs when the parked
-// goroutine ends, or at once on every path that never parks.
+// release returns the conn's parked-request slot. Every arm calls it BEFORE
+// answering: a client at the cap that sends its next wait the moment a reply
+// lands must find the slot already free. The deferred call covers any path
+// that returns without parking; release runs at most once.
 func (d *Daemon) handleWaitTaskReq(conn *ipc.Conn, msg *ipc.Message, release func()) {
+	release = sync.OnceFunc(release)
 	parked := false
 	defer func() {
 		if !parked {
@@ -563,12 +566,14 @@ func (d *Daemon) handleWaitTaskReq(conn *ipc.Conn, msg *ipc.Message, release fun
 	}()
 	var req ipc.WaitTaskReqPayload
 	if err := msg.DecodePayload(&req); err != nil {
+		release()
 		respondTo(conn, msg.ID, ipc.MsgWaitTaskResp, ipc.WaitTaskRespPayload{Error: "malformed payload: " + err.Error()})
 		return
 	}
 	reg := d.tasksRegistry()
 	t := reg.get(req.TaskID)
 	if t == nil {
+		release()
 		respondTo(conn, msg.ID, ipc.MsgWaitTaskResp, ipc.WaitTaskRespPayload{Error: "no such task: " + req.TaskID})
 		return
 	}
@@ -582,17 +587,31 @@ func (d *Daemon) handleWaitTaskReq(conn *ipc.Conn, msg *ipc.Message, release fun
 	// Off the dispatch goroutine, like watch_notifications: this blocks for
 	// up to five minutes and the goroutine carries every message from the
 	// requesting client.
+	//
+	// It also ends when its conn does: nobody is left to answer, and a token
+	// holder could otherwise park, disconnect and log in again to keep
+	// goroutines and timers alive for up to five minutes each.
+	var connDone <-chan struct{}
+	if conn != nil {
+		connDone = conn.Done()
+	}
 	parked = true
+	d.parkedWaits.Add(1)
 	go func() {
-		defer release()
+		defer d.parkedWaits.Add(-1)
 		timer := time.NewTimer(time.Duration(timeoutMs) * time.Millisecond)
 		defer timer.Stop()
 		select {
 		case <-t.done:
+			release()
 			respondTo(conn, msg.ID, ipc.MsgWaitTaskResp, ipc.WaitTaskRespPayload{Task: reg.info(t)})
 		case <-timer.C:
+			release()
 			respondTo(conn, msg.ID, ipc.MsgWaitTaskResp, ipc.WaitTaskRespPayload{Task: reg.info(t), Timeout: true})
+		case <-connDone:
+			release()
 		case <-d.shutdown:
+			release()
 		}
 	}()
 }

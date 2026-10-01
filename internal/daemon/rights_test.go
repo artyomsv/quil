@@ -3,6 +3,7 @@ package daemon
 import (
 	"encoding/json"
 	"sort"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -34,12 +35,50 @@ func sendAndProbe(t *testing.T, c *ipc.Client, msg *ipc.Message) bool {
 		}
 		if f.ID == msg.ID && f.Type == ipc.MsgError {
 			var p ipc.ErrorPayload
-			_ = f.DecodePayload(&p)
+			if err := f.DecodePayload(&p); err != nil {
+				t.Fatalf("%s: undecodable error frame: %v", msg.Type, err)
+			}
 			refused = refused || p.Code == ipc.ErrCodeRefused
 		}
 		if f.ID == sentinel.ID {
 			return refused
 		}
+	}
+}
+
+// mustMessage builds a request with the given ID.
+func mustMessage(t *testing.T, typ, id string, payload any) *ipc.Message {
+	t.Helper()
+	m, err := ipc.NewMessage(typ, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.ID = id
+	return m
+}
+
+// waitReq is a wait_task_req with the given ID.
+func waitReq(t *testing.T, id, taskID string, timeoutMs int) *ipc.Message {
+	t.Helper()
+	return mustMessage(t, ipc.MsgWaitTaskReq, id, ipc.WaitTaskReqPayload{TaskID: taskID, TimeoutMs: timeoutMs})
+}
+
+// liveTask registers a task nothing will finish, so a wait on it parks.
+func liveTask(h *authHarness, id string) *task {
+	tk := &task{id: id, to: "pane-" + id, state: taskSent, done: make(chan struct{})}
+	h.d.tasksRegistry().addLive(tk)
+	return tk
+}
+
+// pollUntil waits up to 3 s for cond.
+func pollUntil(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
@@ -113,12 +152,15 @@ func TestRights_StandardPayloadCarriers(t *testing.T) {
 		"create_tab first":     mk(ipc.MsgCreateTab, ipc.CreateTabPayload{FirstPane: &ipc.FirstPaneSpec{InstanceArgs: []string{"x"}}}),
 		"create_tab_req first": mk(ipc.MsgCreateTabReq, ipc.CreateTabReqPayload{FirstPane: &ipc.CreatePaneReqPayload{InstanceArgs: []string{"x"}}}),
 	} {
-		before := len(h.d.session.Tabs())
+		before, beforePanes := len(h.d.session.Tabs()), len(h.d.session.Panes(tab.ID))
 		if !sendAndProbe(t, c, msg) {
 			t.Errorf("%s: not refused for standard", name)
 		}
 		if len(h.d.session.Tabs()) != before {
 			t.Errorf("%s: a refused request created a tab", name)
+		}
+		if n := len(h.d.session.Panes(tab.ID)); n != beforePanes {
+			t.Errorf("%s: a refused request changed the tab's panes (%d -> %d)", name, beforePanes, n)
 		}
 	}
 	// Positive control: the same create without args is allowed.
@@ -192,13 +234,17 @@ func livePane(t *testing.T, h *authHarness) (*Pane, *authRecordingSession) {
 // per minute; id-bearing refused with no pane_input_resp.
 func TestRights_ReadOnlyPaneInput(t *testing.T) {
 	h := newAuthHarness(t)
-	ro, _ := h.login(t, h.mint(t, "viewer", clientauth.LevelReadOnly, nil))
+	tok := h.mint(t, "viewer", clientauth.LevelReadOnly, nil)
+	tokenID, err := clientauth.ParseToken(tok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ro, _ := h.login(t, tok)
 	pane, sess := livePane(t, h)
 	for i := 0; i < 3; i++ {
 		sendNoID(t, ro, ipc.MsgPaneInput, ipc.PaneInputPayload{PaneID: pane.ID, Data: []byte("x")})
 	}
-	msg, _ := ipc.NewMessage(ipc.MsgPaneInput, ipc.PaneInputPayload{PaneID: pane.ID, Data: []byte("y")})
-	msg.ID = "ro-input"
+	msg := mustMessage(t, ipc.MsgPaneInput, "ro-input", ipc.PaneInputPayload{PaneID: pane.ID, Data: []byte("y")})
 	if err := ro.Send(msg); err != nil {
 		t.Fatal(err)
 	}
@@ -213,6 +259,10 @@ func TestRights_ReadOnlyPaneInput(t *testing.T) {
 	for _, e := range h.auditEntries(t) {
 		if e.Event == "refused" && e.Type == ipc.MsgPaneInput {
 			n++
+			// The line names who was refused, not just what.
+			if e.Transport != ipc.TransportTCP || e.TokenID != tokenID || e.TokenName != "viewer" || e.Rights != ipc.RightsReadOnly {
+				t.Errorf("refused line lacks the token: %+v", e)
+			}
 		}
 	}
 	if n != 1 {
@@ -228,28 +278,19 @@ func TestRights_ReadOnlyPaneInput(t *testing.T) {
 func TestRights_ParkedRequestsCapped(t *testing.T) {
 	h := newAuthHarness(t)
 	full, _ := h.login(t, h.mint(t, "full", clientauth.LevelFull, nil))
-	h.d.tasksRegistry().addLive(&task{id: "task-park", to: "pane-park", state: taskSent, done: make(chan struct{})})
-	waitReq := func(id, taskID string) *ipc.Message {
-		m, err := ipc.NewMessage(ipc.MsgWaitTaskReq, ipc.WaitTaskReqPayload{TaskID: taskID, TimeoutMs: 60000})
-		if err != nil {
-			t.Fatal(err)
-		}
-		m.ID = id
-		return m
-	}
+	liveTask(h, "task-park")
 	for i := 0; i < 2*maxParkedPerConn; i++ {
-		if sendAndProbe(t, full, waitReq("unknown-"+string(rune('a'+i)), "no-such-task")) {
+		if sendAndProbe(t, full, waitReq(t, "unknown-"+string(rune('a'+i)), "no-such-task", 60000)) {
 			t.Fatal("a wait_task that never parks kept its slot")
 		}
 	}
 	refused := 0
-	watch, _ := ipc.NewMessage(ipc.MsgWatchNotificationsReq, ipc.WatchNotificationsReqPayload{TimeoutMs: 60000})
-	watch.ID = "park-watch"
+	watch := mustMessage(t, ipc.MsgWatchNotificationsReq, "park-watch", ipc.WatchNotificationsReqPayload{TimeoutMs: 60000})
 	if sendAndProbe(t, full, watch) {
 		refused++
 	}
 	for i := 1; i < maxParkedPerConn+1; i++ {
-		if sendAndProbe(t, full, waitReq("park-"+string(rune('a'+i)), "task-park")) {
+		if sendAndProbe(t, full, waitReq(t, "park-"+string(rune('a'+i)), "task-park", 60000)) {
 			refused++
 		}
 	}
@@ -261,7 +302,7 @@ func TestRights_ParkedRequestsCapped(t *testing.T) {
 	local := h.local(t)
 	roundTrip(t, local, ipc.MsgHello, ipc.MsgHelloResp, testLoginHello())
 	for i := 0; i < maxParkedPerConn+1; i++ {
-		if sendAndProbe(t, local, waitReq("lpark-"+string(rune('a'+i)), "task-park")) {
+		if sendAndProbe(t, local, waitReq(t, "lpark-"+string(rune('a'+i)), "task-park", 60000)) {
 			t.Fatal("the local socket is capped too")
 		}
 	}
@@ -282,8 +323,7 @@ func TestRights_RevokedConnRefusedBeforeTheHandler(t *testing.T) {
 	if conns := h.d.auth.markRevoked(id); len(conns) != 1 {
 		t.Fatalf("revoked %d conns, want the one logged in", len(conns))
 	}
-	msg, _ := ipc.NewMessage(ipc.MsgPaneInput, ipc.PaneInputPayload{PaneID: pane.ID, Data: []byte("z")})
-	msg.ID = "revoked-input"
+	msg := mustMessage(t, ipc.MsgPaneInput, "revoked-input", ipc.PaneInputPayload{PaneID: pane.ID, Data: []byte("z")})
 	if err := c.Send(msg); err != nil {
 		t.Fatal(err)
 	}
@@ -309,4 +349,178 @@ func TestRights_PrivilegedAudited(t *testing.T) {
 	h.waitAudit(t, "privileged create", func(e auditEntry) bool {
 		return e.Event == "privileged" && e.Type == ipc.MsgCreatePane && e.Reason == "raw instance arguments"
 	})
+}
+
+// A full TCP conn's admin action is audited with the token that made it.
+func TestRights_PrivilegedAuditedFromTCP(t *testing.T) {
+	h := newAuthHarness(t)
+	tok := h.mint(t, "admin", clientauth.LevelFull, nil)
+	tokenID, err := clientauth.ParseToken(tok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	full, _ := h.login(t, tok)
+	sendNoID(t, full, ipc.MsgReloadPlugins, nil)
+	h.waitAudit(t, "privileged reload_plugins from tcp", func(e auditEntry) bool {
+		return e.Event == "privileged" && e.Type == ipc.MsgReloadPlugins && e.Transport == ipc.TransportTCP &&
+			e.TokenID == tokenID && e.TokenName == "admin" && e.Rights == ipc.RightsFull
+	})
+}
+
+// A type in no class is admin at runtime, so it is refused below full. Its
+// refusals share one audit key: the type is the sender's own string, and
+// keying on it would let one conn write a line per invented name.
+func TestRights_UnclassifiedTypesRefusedAndAuditedOnce(t *testing.T) {
+	h := newAuthHarness(t)
+	for _, lvl := range []clientauth.Level{clientauth.LevelReadOnly, clientauth.LevelStandard} {
+		c, _ := h.login(t, h.mint(t, "u-"+string(lvl), lvl, nil))
+		for i := 0; i < 50; i++ {
+			typ := "zz_invented_" + string(lvl) + "_" + strconv.Itoa(i)
+			msg := &ipc.Message{Type: typ, ID: "uc-" + typ, Payload: json.RawMessage(`{}`)}
+			if !sendAndProbe(t, c, msg) {
+				t.Fatalf("unclassified %s from %s was not refused", typ, lvl)
+			}
+		}
+	}
+	lines := map[string]int{}
+	for _, e := range h.auditEntries(t) {
+		if e.Event == "refused" && !clientauth.Classified(e.Type) {
+			lines[e.TokenName]++
+		}
+	}
+	for _, name := range []string{"u-" + string(clientauth.LevelReadOnly), "u-" + string(clientauth.LevelStandard)} {
+		if lines[name] != 1 {
+			t.Errorf("%s: %d refused lines for 50 unclassified types, want 1 per minute", name, lines[name])
+		}
+	}
+}
+
+// A parked wait gives its slot back when it ends — by completion or by
+// timeout — and BEFORE its answer is sent, so a client at the cap may send
+// its next wait the moment a reply lands. No poll: the slots must already be
+// free when the last answer arrives.
+func TestRights_ParkedWaitReturnsItsSlotWhenItEnds(t *testing.T) {
+	h := newAuthHarness(t)
+	full, _ := h.login(t, h.mint(t, "full", clientauth.LevelFull, nil))
+	parkAll := func(prefix, taskID string, timeoutMs int) []string {
+		t.Helper()
+		var ids []string
+		for i := 0; i < maxParkedPerConn; i++ {
+			id := prefix + string(rune('a'+i))
+			if sendAndProbe(t, full, waitReq(t, id, taskID, timeoutMs)) {
+				t.Fatalf("%s refused with %d slots taken before it", id, i)
+			}
+			ids = append(ids, id)
+		}
+		return ids
+	}
+	// The answers come from separate goroutines in any order.
+	answered := func(ids []string) {
+		t.Helper()
+		want := map[string]bool{}
+		for _, id := range ids {
+			want[id] = true
+		}
+		if err := full.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		defer full.SetReadDeadline(time.Time{})
+		for len(want) > 0 {
+			f, err := full.Receive()
+			if err != nil {
+				t.Fatalf("still waiting for %v: %v", want, err)
+			}
+			if want[f.ID] {
+				if f.Type != ipc.MsgWaitTaskResp {
+					t.Fatalf("%s: got %s, want wait_task_resp", f.ID, f.Type)
+				}
+				delete(want, f.ID)
+			}
+		}
+	}
+
+	done := liveTask(h, "task-done")
+	ids := parkAll("done-", "task-done", 60000)
+	close(done.done)
+	answered(ids)
+
+	// Completion returned all four; the timeout arm must too.
+	liveTask(h, "task-slow")
+	ids = parkAll("timeout-", "task-slow", 1000)
+	answered(ids)
+
+	parkAll("again-", "task-slow", 60000)
+}
+
+// A watch that only replaces the conn's own watch adds no goroutine, so it
+// is admitted at the cap; the watch slot comes back when the watch answers.
+func TestRights_WatchReplacementAdmittedAtTheCap(t *testing.T) {
+	h := newAuthHarness(t)
+	full, _ := h.login(t, h.mint(t, "full", clientauth.LevelFull, nil))
+	liveTask(h, "task-w")
+	for i := 0; i < maxParkedPerConn-1; i++ {
+		if sendAndProbe(t, full, waitReq(t, "w-"+string(rune('a'+i)), "task-w", 60000)) {
+			t.Fatalf("wait %d refused below the cap", i)
+		}
+	}
+	watch := func(id string, timeoutMs int) *ipc.Message {
+		return mustMessage(t, ipc.MsgWatchNotificationsReq, id, ipc.WatchNotificationsReqPayload{TimeoutMs: timeoutMs})
+	}
+	if sendAndProbe(t, full, watch("watch-1", 60000)) {
+		t.Fatal("the first watch was refused below the cap")
+	}
+	if !sendAndProbe(t, full, waitReq(t, "over-1", "task-w", 60000)) {
+		t.Fatal("a wait past the cap was admitted")
+	}
+	if sendAndProbe(t, full, watch("watch-2", 1000)) {
+		t.Fatal("a watch that only replaces the conn's own was refused at the cap")
+	}
+	// watch-2 holds the slot watch-1 had: still at the cap.
+	if !sendAndProbe(t, full, waitReq(t, "over-2", "task-w", 60000)) {
+		t.Fatal("replacing a watch freed a slot")
+	}
+	f := waitFrameWithID(t, full, "watch-2", 3*time.Second)
+	var p ipc.WatchNotificationsRespPayload
+	if f.Type != ipc.MsgWatchNotificationsResp || f.DecodePayload(&p) != nil || !p.Timeout {
+		t.Fatalf("watch-2: got %s %s, want a timeout answer", f.Type, f.Payload)
+	}
+	if sendAndProbe(t, full, waitReq(t, "after", "task-w", 60000)) {
+		t.Fatal("the watch's slot was not back when its answer arrived")
+	}
+}
+
+// Waits alone can fill the cap, and then a watch — which would add a parked
+// goroutine, not replace one — is refused.
+func TestRights_WatchRefusedWhenWaitsFillTheCap(t *testing.T) {
+	h := newAuthHarness(t)
+	full, _ := h.login(t, h.mint(t, "full", clientauth.LevelFull, nil))
+	liveTask(h, "task-full")
+	for i := 0; i < maxParkedPerConn; i++ {
+		if sendAndProbe(t, full, waitReq(t, "f-"+string(rune('a'+i)), "task-full", 60000)) {
+			t.Fatalf("wait %d refused below the cap", i)
+		}
+	}
+	watch := mustMessage(t, ipc.MsgWatchNotificationsReq, "watch-over", ipc.WatchNotificationsReqPayload{TimeoutMs: 60000})
+	if !sendAndProbe(t, full, watch) {
+		t.Fatal("a watch past a cap the waits filled was admitted")
+	}
+}
+
+// Parked waits end with their conn: nobody is left to answer, and a token
+// holder could otherwise park, disconnect and log in again to keep
+// goroutines and timers alive for minutes each.
+func TestRights_ParkedWaitsEndWithTheirConn(t *testing.T) {
+	h := newAuthHarness(t)
+	full, _ := h.login(t, h.mint(t, "full", clientauth.LevelFull, nil))
+	liveTask(h, "task-gone")
+	for i := 0; i < maxParkedPerConn; i++ {
+		if sendAndProbe(t, full, waitReq(t, "g-"+string(rune('a'+i)), "task-gone", 300000)) {
+			t.Fatalf("wait %d refused below the cap", i)
+		}
+	}
+	pollUntil(t, "the waits to park", func() bool { return h.d.parkedWaits.Load() == maxParkedPerConn })
+	if err := full.Close(); err != nil {
+		t.Fatal(err)
+	}
+	pollUntil(t, "the parked waits to end with their conn", func() bool { return h.d.parkedWaits.Load() == 0 })
 }

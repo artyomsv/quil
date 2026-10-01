@@ -22,6 +22,7 @@ import (
 	"regexp"
 
 	"github.com/artyomsv/quil/internal/claudehook"
+	"github.com/artyomsv/quil/internal/clientauth"
 	"github.com/artyomsv/quil/internal/codexhook"
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/gitworktree"
@@ -316,6 +317,13 @@ type Daemon struct {
 	afterHoldOutput   func(paneID string)
 	beforeFinishHold  func(c *ipc.Conn)
 	afterFlushPublish func(paneID string)
+
+	// tokens is tokens.json; audit is audit.log; auth is the TCP login state
+	// and the tokenID → conns index (auth.go). tokens and audit are nil when
+	// they could not be opened — then no TCP listener.
+	tokens *clientauth.Store
+	audit  *auditLog
+	auth   authService
 }
 
 func New(cfg config.Config) *Daemon {
@@ -458,12 +466,17 @@ func (d *Daemon) Start() error {
 	go d.sandboxStartupHousekeeping()
 	go d.harvestLoop()
 
+	if err := d.initAuth(quilDir); err != nil {
+		log.Printf("warning: %v — the TCP listener stays off", err)
+	}
+
 	sockPath := config.SocketPath()
 	d.server = ipc.NewServer(sockPath, d.handleMessage, d.onClientDisconnect)
 
 	if err := d.server.Start(); err != nil {
 		return fmt.Errorf("start IPC server: %w", err)
 	}
+	d.startConfiguredListener()
 
 	go d.idleChecker()
 	go d.updateChecker()
@@ -646,6 +659,7 @@ func (d *Daemon) Stop() {
 		d.refreshPluginStateFromHooks()
 		log.Print("daemon stopping, writing final snapshot...")
 		d.snapshot()
+		d.closeAuth()
 		// Sandbox panes, after the snapshot and before the PTY closes: the
 		// harvest puts their commits in the repository while the containers
 		// are still up, and the kill stops agents that would otherwise keep
@@ -682,6 +696,15 @@ func (d *Daemon) Stop() {
 // records there would clear a lone master (nobody left to protect) before the
 // snapshot writes size_master — so the restart would have no reserve.
 func (d *Daemon) onClientDisconnect(conn *ipc.Conn) {
+	if conn.Transport() == ipc.TransportTCP {
+		d.onTCPDisconnect(conn)
+		if conn.Auth() == nil {
+			// It never logged in, so it never reached anything below: no
+			// hold, no watcher, no attach, no hello. Returning here also keeps
+			// an unauthenticated peer from requesting a snapshot per connect.
+			return
+		}
+	}
 	d.dropOutputHold(conn)
 	d.requestSnapshot()
 	d.events.RemoveWatchersByConn(conn)
@@ -1464,6 +1487,13 @@ var newSessionFn = func(cols, rows int) apty.Session {
 }
 
 func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
+	// An unauthenticated TCP conn reaches the login code and nothing else:
+	// not the switch below, not even its log line.
+	if conn.Auth() == nil {
+		d.handlePreLogin(conn, msg)
+		return
+	}
+
 	// Log all IPC messages except high-frequency ones (input, resize, layout,
 	// client stat).
 	//

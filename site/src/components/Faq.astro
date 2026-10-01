@@ -34,33 +34,11 @@ const { items } = Astro.props;
 )}
 
 <style>
-  .faq-item {
-    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-    padding: 0.9rem 0;
-  }
-  .faq-item summary {
-    cursor: pointer;
-    font-weight: 600;
-    font-size: 1.05rem;
-    line-height: 1.4;
-    list-style: none;
-    display: flex;
-    justify-content: space-between;
-    gap: 1rem;
-  }
+  .faq-item { border-bottom: 1px solid var(--t-line); padding: 0.9rem 0; }
+  .faq-item summary { cursor: pointer; list-style: none; display: flex; justify-content: space-between; gap: 1rem; font: 700 15.5px/1.45 var(--mono); color: var(--t-title); }
   .faq-item summary::-webkit-details-marker { display: none; }
-  .faq-item summary::after {
-    content: "+";
-    color: var(--flame, #ff6a2b);
-    font-weight: 400;
-    transition: transform 0.15s;
-  }
+  .faq-item summary::after { content: "+"; color: var(--t-hint); font-weight: 400; }
   .faq-item[open] summary::after { content: "−"; }
-  .faq-item summary:hover { color: var(--flame, #ff6a2b); }
-  .faq-item p {
-    margin: 0.75rem 0 0.25rem;
-    font-size: 1.02rem;
-    line-height: 1.7;
-    opacity: 0.85;
-  }
+  .faq-item summary:hover { color: #ffffff; }
+  .faq-item p { margin: 0.75rem 0 0.25rem; color: var(--t-soft); line-height: 1.7; max-width: 72ch; }
 </style>

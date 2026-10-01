@@ -1,0 +1,24 @@
+{
+  "name": "quil-tour-v1",
+  "viewport": [1280, 720],
+  "width": 960,
+  "fps": 12,
+  "colors": 128,
+  "lossy": 40,
+  "maxBytes": 5242880,
+  "posterPos": 1.6,
+  "stops": [1, 3, 4, 6],
+  "segments": [
+    { "label": "agents: read the card", "from": 1.001, "to": 1.001, "seconds": 2.0 },
+    { "label": "agents", "from": 1.001, "to": 1.97, "seconds": 10.0 },
+    { "label": "remote: read the card", "from": 3.001, "to": 3.001, "seconds": 2.0 },
+    { "label": "remote", "from": 3.001, "to": 3.97, "seconds": 10.0 },
+    { "label": "sandbox: read the card", "from": 4.001, "to": 4.001, "seconds": 2.0 },
+    { "label": "sandbox", "from": 4.001, "to": 4.97, "seconds": 10.0 },
+    { "label": "reboot: read the card", "from": 6.001, "to": 6.001, "seconds": 2.0 },
+    { "label": "reboot: quit, sudo reboot", "from": 6.001, "to": 6.07, "seconds": 2.0 },
+    { "label": "reboot: powered off, power on, quil", "from": 6.07, "to": 6.58, "seconds": 5.0 },
+    { "label": "reboot: the workspace comes back", "from": 6.58, "to": 6.99, "seconds": 8.0 },
+    { "label": "reboot: hold before the loop", "from": 6.99, "to": 6.99, "seconds": 1.5 }
+  ]
+}

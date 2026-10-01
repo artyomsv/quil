@@ -39,10 +39,10 @@ export const SITE = {
 
   /** Software metadata for the SoftwareApplication JSON-LD schema
    *  that ships on the home page. The version is the single source
-   *  of truth for the home page hero pill. The release.yml workflow
-   *  bumps these two fields automatically as part of its version
-   *  bump step — manual edits are normally unnecessary but harmless
-   *  (the next release will overwrite both via sed). */
+   *  of truth for the version in the header, footer and tour. The
+   *  release.yml workflow bumps these two fields automatically as part
+   *  of its version bump step — manual edits are normally unnecessary
+   *  but harmless (the next release will overwrite both via sed). */
   software: {
     version: "1.83.0",
     license: "Apache-2.0",
@@ -51,9 +51,13 @@ export const SITE = {
     runtime: "Cross-platform binary",
   },
 
-  /** ISO 8601 release date for structured data + sitemap lastmod. */
+  /** ISO 8601 release date for structured data. The sitemap's lastmod
+   *  comes from git instead (src/lib/lastmod.ts). */
   releaseDate: "2026-10-01",
 } as const;
+
+/** Base for links to a file in the repository: `${GITHUB_BLOB}docs/mcp.md`. */
+export const GITHUB_BLOB = `${SITE.github}/blob/master/`;
 
 export interface Page {
   /** Required: page title without the brand suffix (BaseHead adds " · Quil").
@@ -97,6 +101,12 @@ export interface Page {
    * article-level fields entirely.
    */
   ogType?: "website" | "article";
+  /**
+   * Optional robots meta, default "index, follow". A page that sets
+   * "noindex" also loses its canonical link (BaseHead): the two contradict
+   * each other. Only the 404 page uses it.
+   */
+  robots?: string;
 }
 
 /**

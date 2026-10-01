@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-label="Quil — Notes from the workspace.">
+  <defs>
+    <linearGradient id="qs" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#B33500"/><stop offset="35%" stop-color="#E85D0E"/><stop offset="70%" stop-color="#FF8A1F"/><stop offset="100%" stop-color="#FFD580"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="630" fill="#0c0c0c"/>
+  <rect x="36" y="36" width="1128" height="558" fill="#0c0c0c" stroke="#5f5fff" stroke-width="2"/>
+  <!-- tab bar, drawn the way Quil draws its own -->
+  <rect x="37" y="37" width="1126" height="42" fill="#121212"/>
+  <text x="62" y="65" font-family="JetBrains Mono" font-weight="800" font-size="20" fill="#ffffd7">quil</text>
+  <rect x="128" y="47" width="270" height="24" fill="#5f00ff"/>
+  <text x="140" y="65" font-family="JetBrains Mono" font-weight="700" font-size="16" fill="#ffffd7">* 1:quil.cc/blog</text>
+  <!-- brand mark -->
+  <g transform="translate(1004,118) scale(0.9)">
+    <path d="M60 21A34 34 0 1 0 84 79C92 89 102 102 112 122" fill="none" stroke="url(#qs)" stroke-width="10" stroke-linecap="round"/>
+    <path d="M102 108L93 102" fill="none" stroke="#FFB24A" stroke-width="6" stroke-linecap="round"/>
+  </g>
+  <!-- words -->
+  <text x="84" y="200" font-family="JetBrains Mono" font-weight="700" font-size="18" letter-spacing="4" fill="#8787ff">BLOG</text>
+  <text x="84" y="370" font-family="JetBrains Mono" font-weight="800" font-size="84" fill="#ffffd7">Notes from</text>
+  <text x="84" y="458" font-family="JetBrains Mono" font-weight="800" font-size="84" fill="#ffffd7">the workspace.</text>
+  <text x="84" y="518" font-family="JetBrains Mono" font-size="24" fill="#d0d0d0">Reboot-proof workflows and AI session continuity.</text>
+  <!-- status line -->
+  <rect x="37" y="560" width="1126" height="33" fill="#303030"/>
+  <text x="58" y="582" font-family="JetBrains Mono" font-size="16" fill="#bcbcbc">~/quil.cc · Apache-2.0 · Linux · macOS · Windows</text>
+  <text x="1142" y="582" text-anchor="end" font-family="JetBrains Mono" font-size="16" fill="#ffffd7">quil.cc</text>
+</svg>

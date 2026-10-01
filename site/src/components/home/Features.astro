@@ -1,0 +1,74 @@
+---
+// #features + #plugins — everything Quil does, one line each, from the same
+// data the old /features/ and /plugins/ pages used. Each line folds open to
+// that page's full detail, so the words those pages carried for readers and
+// crawlers are still on the site (spec Goal 2).
+import { features, featureCategories, type Feature } from "@/data/features";
+import { plugins } from "@/data/plugins";
+import { GITHUB_BLOB } from "@/data/seo";
+import { splitTicks } from "@/lib/ticks";
+
+const groups = (Object.keys(featureCategories) as Feature["category"][]).map((cat) => ({
+  label: featureCategories[cat],
+  items: features.filter((f) => f.category === cat),
+}));
+---
+<section class="sec" id="features" aria-labelledby="features-h">
+  <div class="wrap">
+    <div class="eyebrow">What else is in the box</div>
+    <h2 id="features-h">Everything Quil does, one line each</h2>
+    <div class="feat-groups">
+      {groups.map((g) => (
+        <div class="feat-group">
+          <h3>{g.label}</h3>
+          <ul>
+            {g.items.map((f) => (
+              <li>
+                <details>
+                  <summary><b>{f.title}</b>{f.badge && <span class="badge">beta</span>} — {splitTicks(f.blurb).map((s, j) => (j % 2 ? <code>{s}</code> : s))}</summary>
+                  <ul class="detail">{f.detail.map((d) => <li>{splitTicks(d).map((s, j) => (j % 2 ? <code>{s}</code> : s))}</li>)}</ul>
+                </details>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
+    </div>
+    <p class="more"><a href={`${GITHUB_BLOB}docs/features.md`} rel="noopener">All of it in detail: docs/features.md ↗</a></p>
+
+    <div class="plugins" id="plugins">
+      <h3>Pane types</h3>
+      <p>A pane knows what runs in it, so it comes back the right way after a restart. Add your own type in one TOML file.</p>
+      <ul>
+        {plugins.map((p) => (
+          <li>
+            <details>
+              <summary><b>{p.name}</b>{p.beta && <span class="badge">beta</span>} — {p.description}</summary>
+              <ul class="detail">{p.features.map((x) => <li>{x}</li>)}</ul>
+            </details>
+          </li>
+        ))}
+      </ul>
+      <p class="more"><a href={`${GITHUB_BLOB}docs/plugin-reference.md`} rel="noopener">Write a pane type: docs/plugin-reference.md ↗</a></p>
+    </div>
+  </div>
+</section>
+
+<style>
+  .feat-groups { margin-top: 28px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 30px 40px; }
+  h3 { margin: 0 0 10px; font: 700 12px var(--mono); letter-spacing: .18em; text-transform: uppercase; color: var(--t-mute); }
+  ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+  li { font-size: 15px; line-height: 1.55; color: var(--t-soft); }
+  b { color: var(--t-title); font: 700 14px var(--mono); }
+  code { font-size: .88em; background: var(--t-line); color: var(--t-title); padding: 0 .35em; }
+  summary { cursor: pointer; list-style: none; }
+  summary::-webkit-details-marker { display: none; }
+  summary::before { content: "+"; display: inline-block; width: 1.6ch; color: var(--t-hint); font: 700 13px var(--mono); }
+  details[open] > summary::before { content: "−"; }
+  summary:hover b { text-decoration: underline; text-underline-offset: 3px; }
+  .detail { margin: 6px 0 6px 1.6ch; padding-left: 12px; border-left: 1px solid var(--t-line-2); gap: 4px; }
+  .detail li { font-size: 14px; color: var(--t-mute); }
+  .plugins { margin-top: 44px; padding-top: 30px; border-top: 1px dashed var(--t-line-2); scroll-margin-top: calc(var(--hh) + 16px); }
+  .plugins > p:first-of-type { margin: 0 0 14px; color: var(--t-soft); max-width: 70ch; }
+  @media (max-width: 760px) { .feat-groups { grid-template-columns: minmax(0, 1fr); } }
+</style>

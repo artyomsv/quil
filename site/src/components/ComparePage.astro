@@ -10,6 +10,7 @@
  * updates all four pages.
  */
 import Page from "@/layouts/Page.astro";
+import Faq from "@/components/Faq.astro";
 import {
   competitorMatrix,
   competitors,
@@ -92,161 +93,106 @@ function cellGlyph(support: Support): CellGlyph {
 }
 ---
 <Page {...seo} schemas={schemas}>
-  <section class="page-hero">
-    <div class="container-ember stack">
-      <div class="hero-ruler">
-        <span>§ COMPARE · VS {info.name.toUpperCase()}</span>
-        <span>FEATURES <b>{rows.length}</b></span>
-        <span style="margin-left:auto;">← <a href="/" style="color:var(--ink-3);">all comparisons</a></span>
-      </div>
-      <span class="eyebrow">QUIL vs {info.name.toUpperCase()}</span>
-      <h1>Quil <span class="flame-text">vs</span> {info.name}.</h1>
-      <p>{info.description}</p>
+  <section class="page-head">
+    <div class="wrap">
+      <div class="eyebrow">Compare · <a href="/#compare">all comparisons</a></div>
+      <h1>Quil vs {info.name}</h1>
+      <p class="lede">{info.description}</p>
     </div>
   </section>
 
-  <!-- Where each tool fits -->
-  <section style="padding: 72px 0; border-bottom: 1px solid var(--line);">
-    <div class="container-ember stack">
-      <div class="compare-grid">
-        <div>
-          <span class="eyebrow">{info.name.toUpperCase()} · WHERE IT WINS</span>
-          <h2 class="h2" style="margin-top:14px; font-size:28px;">{info.keyStrength.split(".")[0]}.</h2>
-          <p style="margin-top:18px; color:var(--ink-2);">{info.keyStrength}</p>
+  <section class="sec">
+    <div class="wrap">
+      <div class="two">
+        <div class="panel">
+          <div class="eyebrow">{info.name} · where it wins</div>
+          <h2>{info.keyStrength.split(".")[0]}.</h2>
+          <p>{info.keyStrength}</p>
         </div>
-        <div>
-          <span class="eyebrow">QUIL · WHERE IT TAKES OVER</span>
-          <h2 class="h2" style="margin-top:14px; font-size:28px;">{quilHeadline}</h2>
-          <p style="margin-top:18px; color:var(--ink-2);">{info.keyGap}</p>
+        <div class="panel">
+          <div class="eyebrow">Quil · where it takes over</div>
+          <h2>{quilHeadline}</h2>
+          <p>{info.keyGap}</p>
         </div>
       </div>
-
-      <div style="margin-top:48px; padding:24px; border:1px solid var(--line-2); background:var(--bg-2);">
-        <div class="section-tag"><span class="dot"></span>WHERE THEY FIT</div>
-        <p style="margin-top:14px; color:var(--ink-2); font-size:16px; line-height:1.7;">{info.positioning}</p>
+      <div class="fit">
+        <div class="eyebrow">Where they fit</div>
+        <p>{info.positioning}</p>
       </div>
     </div>
   </section>
 
-  <!-- Feature matrix -->
-  <section style="padding: 72px 0; border-bottom: 1px solid var(--line);">
-    <div class="container-ember stack">
-      <span class="eyebrow">CAPABILITY MATRIX</span>
-      <h2 class="h2" style="margin-top:10px;">Feature by feature.</h2>
-
-      <table class="cmp-table">
-        <thead>
-          <tr>
-            <th>capability</th>
-            <th class="quil val">quil</th>
-            <th class="val">{info.name}</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row) => {
-            const quilCell = cellGlyph(row.quil);
-            const otherCell = cellGlyph(row.them);
-            return (
-              <>
-                <tr>
-                  <td class="feat">{row.feature}</td>
-                  <td class="val"><b class={quilCell.klass}>{quilCell.label}</b></td>
-                  <td class="val"><b class={otherCell.klass}>{otherCell.label}</b></td>
-                </tr>
-                {row.note && (
+  <section class="sec">
+    <div class="wrap">
+      <div class="eyebrow">Capability matrix</div>
+      <h2>Feature by feature</h2>
+      <div class="table-scroll">
+        <table class="cmp">
+          <thead><tr><th scope="col">capability</th><th scope="col">quil</th><th scope="col">{info.name}</th></tr></thead>
+          <tbody>
+            {rows.map((row) => {
+              const q = cellGlyph(row.quil);
+              const o = cellGlyph(row.them);
+              return (
+                <>
                   <tr>
-                    <td colspan="3" style="padding-top:0; font-size:11.5px; color:var(--ink-4); font-style:italic;">
-                      └── {row.note}
-                    </td>
+                    <td>{row.feature}</td>
+                    <td class="v"><b class={q.klass}><span aria-hidden="true">{q.label}</span><span class="sr-only">{q.klass}</span></b></td>
+                    <td class="v"><b class={o.klass}><span aria-hidden="true">{o.label}</span><span class="sr-only">{o.klass}</span></b></td>
                   </tr>
-                )}
-              </>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
-  </section>
-
-  <!-- Migration + FAQ -->
-  <section style="padding: 72px 0; border-bottom: 1px solid var(--line);">
-    <div class="container-narrow stack">
-      <span class="eyebrow">MIGRATING FROM {info.name.toUpperCase()}</span>
-      <h2 class="h2" style="margin-top:10px;">Coming from {info.name}?</h2>
-      <p style="margin-top:18px; color:var(--ink-2); font-size:16px; line-height:1.7;">{info.migrationNote}</p>
-
-      <div style="margin-top:32px; padding:24px; border:1px solid var(--line-2); background:var(--bg-2);">
-        <div class="eyebrow" style="color:var(--flame);">FAQ</div>
-        <div class="faq-list">
-          {info.faq.map((item) => (
-            <details class="faq-item">
-              <summary>▸ {item.question}</summary>
-              <p>{item.answer}</p>
-            </details>
-          ))}
-        </div>
+                  {row.note && <tr class="note"><td colspan="3">└── {row.note}</td></tr>}
+                </>
+              );
+            })}
+          </tbody>
+        </table>
       </div>
     </div>
   </section>
 
-  <!-- See also -->
-  <section style="padding: 72px 0; border-bottom: 1px solid var(--line);">
-    <div class="container-ember stack">
-      <span class="eyebrow">SEE ALSO</span>
-      <h2 class="h2" style="margin-top:10px; font-size:28px;">Other comparisons.</h2>
-      <div class="compare-tiles" style="margin-top:24px; grid-template-columns: repeat(3, 1fr);">
-        {otherCompetitors.map((other) => (
-          <a href={`/vs/${other}/`} class="compare-tile">
-            <span class="vs">vs ·</span>
-            <span class="name">{competitors[other].name}</span>
-            <span class="arrow">→ compare</span>
-          </a>
-        ))}
-      </div>
+  <section class="sec">
+    <div class="wrap narrow">
+      <div class="eyebrow">Migrating from {info.name}</div>
+      <h2>Coming from {info.name}?</h2>
+      <p class="lede">{info.migrationNote}</p>
+      <h2 class="faq-h">Questions</h2>
+      <Faq items={info.faq} />
     </div>
   </section>
 
-  <!-- CTA -->
-  <section class="cta" style="padding: 80px 0;">
-    <div class="container-ember stack">
-      <div class="cta-inner">
-        <h2 style="font-size: clamp(32px, 4.5vw, 52px);">
-          Try them both. <span class="flame-text">Pick a side.</span>
-        </h2>
-        <p>Quil installs side-by-side with {info.name}. Nothing to uninstall first.</p>
-        <div class="actions">
-          <a href="/install/" class="btn btn-primary">▸ install quil</a>
-          <a href="/features/" class="btn btn-outline">every capability →</a>
-        </div>
-      </div>
+  <section class="sec">
+    <div class="wrap">
+      <div class="eyebrow">See also</div>
+      <h2>Other comparisons</h2>
+      <ul class="others">
+        {otherCompetitors.map((other) => <li><a href={`/vs/${other}/`}>Quil vs {competitors[other].name} →</a></li>)}
+      </ul>
+      <p class="cta"><a class="btn p" href="/#install">▸ install quil</a> <a class="btn" href="/#features">every capability →</a></p>
+      <p class="side">Quil installs side by side with {info.name}. Nothing to uninstall first.</p>
     </div>
   </section>
 </Page>
 
 <style>
-  .faq-list {
-    margin-top: 16px;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-  .faq-item summary {
-    cursor: pointer;
-    font-family: var(--mono-stack);
-    color: var(--ink);
-    padding: 8px 0;
-    list-style: none;
-  }
-  .faq-item summary::-webkit-details-marker {
-    display: none;
-  }
-  .faq-item[open] summary {
-    color: var(--flame);
-  }
-  .faq-item p {
-    padding: 10px 0 0 14px;
-    color: var(--ink-2);
-    font-size: 14px;
-    line-height: 1.65;
-  }
+  .two { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; }
+  .panel { border: 1px solid var(--t-line-2); padding: 20px 22px; }
+  .panel h2 { font-size: clamp(20px, 2.2vw, 26px); }
+  .panel p, .fit p { margin: 12px 0 0; color: var(--t-soft); }
+  .fit { margin-top: 24px; padding: 18px 22px; background: var(--t-panel); border-left: 2px solid var(--t-dialog); }
+  .table-scroll { margin-top: 22px; overflow-x: auto; }
+  .cmp { width: 100%; border-collapse: collapse; font: 14px/1.5 var(--mono); }
+  .cmp th { text-align: left; padding: 8px 10px; color: var(--t-mute); font-weight: 700; border-bottom: 1px solid var(--t-line-2); }
+  .cmp th:not(:first-child), .cmp td.v { text-align: center; width: 7em; }
+  .cmp td { padding: 9px 10px; border-bottom: 1px solid var(--t-line); color: var(--t-text); vertical-align: top; }
+  .cmp b.yes { color: var(--t-ok); }
+  .cmp b.no { color: var(--t-red); }
+  .cmp b.partial { color: var(--t-amber); }
+  .cmp tr.note td { padding-top: 0; color: var(--t-sub); font-size: 12px; font-style: italic; }
+  .faq-h { margin-top: 40px; font-size: 22px; }
+  .others { list-style: none; margin: 18px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px 22px; font: 14px var(--mono); }
+  .others a { color: var(--t-hint); }
+  .others a:hover { color: var(--t-title); }
+  .cta { margin-top: 30px; display: flex; gap: 12px; flex-wrap: wrap; }
+  .side { color: var(--t-mute); font-size: 14px; }
+  @media (max-width: 760px) { .two { grid-template-columns: minmax(0, 1fr); } }
 </style>

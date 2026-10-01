@@ -55,7 +55,7 @@ export const homeFaq: FaqItem[] = [
   {
     question: "Can I write my own plugins?",
     answer:
-      "Yes. Plugins are single TOML files in ~/.quil/plugins/<name>.toml with sections for spawn, resume, keybindings, error handlers, and status lines. No compilation, no restart, hot-reload on save. See the plugin reference on GitHub or the /plugins page for a walk-through.",
+      "Yes. Plugins are single TOML files in ~/.quil/plugins/<name>.toml with sections for spawn, resume, keybindings, error handlers, and status lines. No compilation, no restart, hot-reload on save. The pane types section on this page lists the built-in ones, and the plugin reference on GitHub (docs/plugin-reference.md) walks through writing your own.",
   },
   {
     question: "What happens when I upgrade Quil and plugin configs have changed?",
@@ -75,7 +75,7 @@ export const homeFaq: FaqItem[] = [
   {
     question: "How do I install it?",
     answer:
-      "On Linux or macOS: `curl -sSfL https://raw.githubusercontent.com/artyomsv/quil/master/scripts/install.sh | sh`. Go users can `go install github.com/artyomsv/quil/cmd/quil@latest`. Windows users download the .zip from the latest GitHub release. Full instructions at /install.",
+      "On Linux or macOS: `curl -sSfL https://raw.githubusercontent.com/artyomsv/quil/master/scripts/install.sh | sh`. Go users run both `go install github.com/artyomsv/quil/cmd/quil@latest` and `go install github.com/artyomsv/quil/cmd/quild@latest` — quil needs its daemon, quild. Windows users download the .zip from the latest GitHub release. Full instructions are in the Install section of this page and in docs/installation.md on GitHub.",
   },
   {
     question: "Can I run an AI agent in a container so it can't touch the rest of my machine?",

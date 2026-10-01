@@ -112,7 +112,7 @@ Quil earns its place when **persistence across reboots and juggling multiple age
 - Claude Code sessions live on disk (`~/.claude/projects/`) but the running process dies on reboot.
 - Manual fix: `claude --continue` (latest) or `claude --resume` (pick one) from the project directory.
 - It doesn't scale to multiple projects/agents, and it doesn't restore the rest of your workspace.
-- To make it automatic across reboots — layout, directories, *and* each AI session — use a reboot-proof multiplexer like [Quil](/install/).
+- To make it automatic across reboots — layout, directories, *and* each AI session — use a reboot-proof multiplexer like [Quil](/#install).
 
 Install Quil (Linux/macOS):
 

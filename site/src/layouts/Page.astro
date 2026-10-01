@@ -1,12 +1,8 @@
 ---
-// Base layout for every page. Renders the full HTML shell, the
-// site-wide JSON-LD (Organization + WebSite), the per-page Head, and
-// the Header / Footer.
-//
-// Pages should import this and pass their SEO frontmatter through.
-
-import "@/styles/global.css";
-import "@/styles/ember.css";
+// Base layout for every page: the HTML shell, site-wide JSON-LD
+// (Organization + WebSite), the per-page head, header and footer.
+import "@/styles/tokens.css";
+import "@/styles/site.css";
 import BaseHead from "@/components/BaseHead.astro";
 import JsonLd from "@/components/JsonLd.astro";
 import Header from "@/components/Header.astro";
@@ -15,16 +11,13 @@ import { organizationSchema, websiteSchema } from "@/data/schemas";
 import { SITE, type Page } from "@/data/seo";
 
 interface Props extends Page {
-  /** Optional extra JSON-LD documents specific to the page. */
+  /** Extra JSON-LD documents for this page. */
   schemas?: Record<string, unknown>[];
 }
 
-// Everything except `schemas` is a BaseHead concern and is forwarded
-// verbatim. Spreading rather than re-listing each field means a new
-// optional on `Page` reaches <head> without a second edit here — the
-// class of bug where a page sets `ogType` and silently gets the default.
+// Everything except `schemas` is a BaseHead concern and is forwarded as is,
+// so a new optional field on `Page` reaches <head> without an edit here.
 const { schemas = [], ...page } = Astro.props;
-
 const sitewideSchemas = [organizationSchema(), websiteSchema(), ...schemas];
 ---
 <!doctype html>
@@ -33,17 +26,10 @@ const sitewideSchemas = [organizationSchema(), websiteSchema(), ...schemas];
     <BaseHead {...page} />
     <JsonLd data={sitewideSchemas} />
   </head>
-  <body class="min-h-screen flex flex-col">
-    <a
-      href="#main"
-      class="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-lg focus:bg-primary focus:px-4 focus:py-2 focus:text-primary-foreground"
-    >
-      Skip to content
-    </a>
+  <body>
+    <a href="#main" class="skip">Skip to content</a>
     <Header />
-    <main id="main" class="flex-1">
-      <slot />
-    </main>
+    <main id="main"><slot /></main>
     <Footer />
   </body>
 </html>

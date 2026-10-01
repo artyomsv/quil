@@ -1,0 +1,18 @@
+---
+// The card right after the tour: what the session became, the one-liner,
+// and where to go next. #census is filled by src/tour/home.js.
+import { SITE } from "@/data/seo";
+---
+<section class="after" id="after" aria-label="After the tour">
+  <div class="card">
+    <h2>That was the tour. It was all one Quil session.</h2>
+    <div class="census" id="census"></div>
+    <p>Every screen above is drawn the way Quil draws it. Open source under Apache 2.0, for Linux, macOS and native Windows.</p>
+    <div class="inst"><span class="g">$</span><span id="cmd">curl -sSfL https://raw.githubusercontent.com/artyomsv/quil/master/scripts/install.sh | sh</span><button type="button" id="copybtn">copy</button></div>
+    <div class="acts">
+      <a class="p" href="/#install">▸ all install options</a>
+      <a href="/docs/"><b>docs</b> how each use case works</a>
+      <a href={SITE.github} rel="noopener"><b>github</b> artyomsv/quil</a>
+    </div>
+  </div>
+</section>

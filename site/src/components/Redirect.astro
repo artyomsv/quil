@@ -1,0 +1,29 @@
+---
+/**
+ * A redirect for GitHub Pages, which cannot answer with an HTTP redirect.
+ * Google treats an instant meta refresh as a permanent redirect, and the
+ * canonical names the page that replaces this one. No noindex: it would
+ * contradict the canonical (spec Part B). Not in the sitemap; nothing on the
+ * site links here (check-dist rule 5 fails a link to a stub).
+ */
+import { SITE } from "@/data/seo";
+
+interface Props {
+  /** Site-absolute target, e.g. "/#install". */
+  to: string;
+  title: string;
+}
+const { to, title } = Astro.props;
+---
+<!doctype html>
+<html lang={SITE.htmlLang}>
+  <head>
+    <meta charset="utf-8" />
+    <title>{title}</title>
+    <link rel="canonical" href={`${SITE.url}/`} />
+    <meta http-equiv="refresh" content={`0; url=${to}`} />
+  </head>
+  <body>
+    <a href={to}>{title}</a>
+  </body>
+</html>

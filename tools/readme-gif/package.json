@@ -1,0 +1,9 @@
+{
+  "name": "quil-readme-gif",
+  "private": true,
+  "type": "module",
+  "version": "1.0.0",
+  "description": "Renders the quil.cc home-page tour into the README GIF (Playwright + ffmpeg + gifsicle, in Docker).",
+  "scripts": { "capture": "node capture.mjs" },
+  "dependencies": { "playwright": "1.63.0" }
+}

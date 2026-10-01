@@ -5,7 +5,8 @@
   "private": true,
   "scripts": {
     "dev": "astro dev",
-    "build": "node scripts/check-header-stacking.mjs && node scripts/check-trailing-slash.mjs && astro check && astro build",
+    "test": "node --test scripts/dist-checks.test.mjs",
+    "build": "npm test && node scripts/check-trailing-slash.mjs && astro check && astro build && node scripts/check-dist.mjs",
     "preview": "astro preview --host 0.0.0.0 --port 4321",
     "astro": "astro",
     "og:svg": "node scripts/build-og.mjs",
@@ -15,10 +16,8 @@
   "dependencies": {
     "@astrojs/check": "^0.9.4",
     "@astrojs/rss": "^4.0.19",
-    "@astrojs/sitemap": "^3.2.1",
-    "@tailwindcss/vite": "^4.2.0",
+    "@types/node": "^24.12.2",
     "astro": "^5.0.0",
-    "tailwindcss": "^4.2.0",
     "typescript": "^5.6.3"
   }
 }

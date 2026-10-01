@@ -107,8 +107,8 @@ const displayDate = post.data.pubDate.toLocaleDateString("en-US", {
     )}
 
     <footer class="blog-foot">
-      <a href="/install/" class="btn btn-primary"><span>▸ install quil</span></a>
-      <a href="/blog/" class="btn btn-ghost">← all posts</a>
+      <a href="/#install" class="btn p"><span>▸ install quil</span></a>
+      <a href="/blog/" class="btn">← all posts</a>
     </footer>
   </article>
 </Page>
@@ -129,9 +129,11 @@ const displayDate = post.data.pubDate.toLocaleDateString("en-US", {
     gap: 0.6rem;
   }
   .blog-crumbs a { color: inherit; text-decoration: none; }
-  .blog-crumbs a:hover { color: var(--flame, #ff6a2b); }
+  .blog-crumbs a:hover { color: var(--t-hint); }
 
   .blog-head h1 {
+    font-family: var(--mono);
+    color: var(--t-title);
     font-size: clamp(1.9rem, 4vw, 2.8rem);
     line-height: 1.1;
     margin: 0 0 0.75rem;
@@ -146,11 +148,15 @@ const displayDate = post.data.pubDate.toLocaleDateString("en-US", {
   /* Rendered Markdown — scoped styles don't reach <Content/>, so target
      the body via :global() under the wrapper. */
   .blog-body :global(h2) {
+    font-family: var(--mono);
+    color: var(--t-title);
     font-size: 1.5rem;
     margin: 2.5rem 0 0.9rem;
     line-height: 1.2;
   }
   .blog-body :global(h3) {
+    font-family: var(--mono);
+    color: var(--t-title);
     font-size: 1.2rem;
     margin: 2rem 0 0.7rem;
   }
@@ -165,7 +171,7 @@ const displayDate = post.data.pubDate.toLocaleDateString("en-US", {
   .blog-body :global(ol) { padding-left: 1.4rem; }
   .blog-body :global(li) { margin-bottom: 0.4rem; }
   .blog-body :global(a) {
-    color: var(--flame, #ff6a2b);
+    color: var(--t-hint);
     text-underline-offset: 3px;
   }
   .blog-body :global(strong) { font-weight: 600; }
@@ -174,10 +180,10 @@ const displayDate = post.data.pubDate.toLocaleDateString("en-US", {
     height: auto;
     border-radius: 10px;
     margin: 2rem 0;
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    border: 1px solid var(--t-line);
   }
   .blog-body :global(blockquote) {
-    border-left: 3px solid var(--flame, #ff6a2b);
+    border-left: 3px solid var(--t-hint);
     padding-left: 1rem;
     margin: 1.5rem 0;
     opacity: 0.85;
@@ -186,7 +192,7 @@ const displayDate = post.data.pubDate.toLocaleDateString("en-US", {
   .blog-body :global(:not(pre) > code) {
     font-family: "JetBrains Mono", ui-monospace, monospace;
     font-size: 0.9em;
-    background: rgba(255, 255, 255, 0.07);
+    background: var(--t-line);
     padding: 0.1em 0.35em;
     border-radius: 4px;
   }
@@ -206,7 +212,7 @@ const displayDate = post.data.pubDate.toLocaleDateString("en-US", {
   .blog-faq {
     margin-top: 3.5rem;
     padding-top: 2rem;
-    border-top: 1px solid rgba(255, 255, 255, 0.1);
+    border-top: 1px solid var(--t-line-2);
   }
   .blog-faq h2 {
     font-size: 1.5rem;
@@ -217,7 +223,7 @@ const displayDate = post.data.pubDate.toLocaleDateString("en-US", {
   .blog-foot {
     margin-top: 3.5rem;
     padding-top: 2rem;
-    border-top: 1px solid rgba(255, 255, 255, 0.1);
+    border-top: 1px solid var(--t-line-2);
     display: flex;
     gap: 1rem;
     flex-wrap: wrap;

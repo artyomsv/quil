@@ -15,6 +15,7 @@ const seo = {
   description:
     "Guides and notes on reboot-proof terminal workflows, running Claude Code, OpenCode and Codex across restarts, and getting more out of Quil.",
   path: "/blog",
+  ogImage: "/og/blog.png",
   keywords: [
     "quil blog",
     "claude code tips",
@@ -69,6 +70,8 @@ function fmt(date: Date): string {
   .blog-index-head h1 {
     font-size: clamp(2rem, 5vw, 3rem);
     margin: 0 0 0.5rem;
+    font-family: var(--mono);
+    color: var(--t-title);
   }
   .blog-index-head p { opacity: 0.65; margin: 0 0 3rem; }
 
@@ -78,12 +81,12 @@ function fmt(date: Date): string {
     text-decoration: none;
     color: inherit;
     padding: 1.5rem;
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    border: 1px solid var(--t-line-2);
     border-radius: 12px;
     transition: border-color 0.15s ease, transform 0.15s ease;
   }
   .blog-card a:hover {
-    border-color: var(--flame, #ff6a2b);
+    border-color: var(--t-hint);
     transform: translateY(-2px);
   }
   .blog-card time {
@@ -92,8 +95,8 @@ function fmt(date: Date): string {
     text-transform: uppercase;
     opacity: 0.55;
   }
-  .blog-card h2 { font-size: 1.35rem; margin: 0.5rem 0 0.6rem; line-height: 1.25; }
+  .blog-card h2 { font-size: 1.35rem; margin: 0.5rem 0 0.6rem; line-height: 1.25; font-family: var(--mono); color: var(--t-title); }
   .blog-card p { opacity: 0.75; margin: 0 0 0.9rem; line-height: 1.6; }
-  .blog-card .read { color: var(--flame, #ff6a2b); font-weight: 600; font-size: 0.9rem; }
+  .blog-card .read { color: var(--t-hint); font-weight: 600; font-size: 0.9rem; }
   .blog-empty { opacity: 0.6; }
 </style>

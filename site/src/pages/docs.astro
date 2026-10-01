@@ -1,184 +1,161 @@
 ---
 /**
- * Docs landing — GitHub is the canonical source of truth. This page
- * is a map: every tile opens the Markdown file in the repo.
+ * /docs/ — the field manual. It answers "what am I trying to do?" and routes
+ * to the exact section of the docs on GitHub; it copies none of them. Every
+ * entry is server-rendered; the filter is progressive enhancement.
  */
 import Page from "@/layouts/Page.astro";
-import { SITE } from "@/data/seo";
+import ManualEntry from "@/components/docs/ManualEntry.astro";
+import { manual, shelf } from "@/data/docs";
+import { GITHUB_BLOB, canonical } from "@/data/seo";
 import { breadcrumbSchema, itemListSchema } from "@/data/schemas";
 
 const seo = {
-  title: "Documentation — VISION, PRD, architecture, plugin reference",
+  title: "Docs: use cases, keys and the GitHub docs",
   description:
-    "Every Quil document lives in the GitHub repo as plain Markdown. Vision, PRD, architecture decision records, roadmap, plugin authoring reference, contributing guide, and changelog.",
-  path: "/docs",
+    "A field manual for Quil: thirteen ways to use it, the keys for each, and the exact section of the documentation on GitHub that explains it.",
+  path: "/docs/",
   ogImage: "/og/docs.png",
-  keywords: [
-    "quil docs",
-    "quil documentation",
-    "quil architecture",
-    "quil plugin reference",
-    "quil vision",
-  ],
+  keywords: ["quil documentation", "quil docs", "quil keybindings", "quil mcp", "terminal multiplexer docs"],
 };
-
-interface DocEntry {
-  name: string;
-  path: string;
-  desc: string;
-  tag: string;
-}
-
-interface DocSection {
-  title: string;
-  items: DocEntry[];
-}
-
-const sections: DocSection[] = [
-  {
-    title: "Getting started",
-    items: [
-      { name: "README",            path: "README.md",                tag: "← OVERVIEW",     desc: "Landing page: what Quil is, one-line install, five keys to remember, MCP wiring snippet, link to deep docs." },
-      { name: "Installation",      path: "docs/installation.md",     tag: "← INSTALL",      desc: "Pre-built binary (Linux / macOS one-liner, Windows zip), Go install, build from source with Docker or local Go." },
-      { name: "Quick start",       path: "docs/quick-start.md",      tag: "← FIRST RUN",    desc: "First-launch walkthrough — five keys, opening a typed pane, automatic persistence, AI assistant connection." },
-      { name: "Troubleshooting",   path: "docs/troubleshooting.md",  tag: "← HELP",         desc: "Daemon won't start, MCP not detected, log file locations, force-stop scripts, full reset." },
-    ],
-  },
-  {
-    title: "Using Quil",
-    items: [
-      { name: "Features",          path: "docs/features.md",         tag: "← TOUR",         desc: "Capability tour grouped by area: persistence, remote attach over SSH, the command palette, layout, typed panes, clipboard, observability, pane notes." },
-      { name: "Keybindings",       path: "docs/keybindings.md",      tag: "← KEYS",         desc: "Full keymap, customization syntax, what to bind and what to leave passing through to the PTY." },
-      { name: "Configuration",     path: "docs/configuration.md",    tag: "← CONFIG",       desc: "~/.quil/config.toml reference — every section and every key with defaults and effects." },
-      { name: "MCP",               path: "docs/mcp.md",              tag: "← AI",           desc: "Let your AI assistant drive Quil. Client wiring for Claude / Cursor / VS Code, all 36 tools, redaction model." },
-      { name: "Workspace templates", path: "docs/workspace-templates.md", tag: "← SETUP",  desc: "Describe a tab once — its panes, their layout, and each one's opening prompt — and create it from the palette. Every pane field, the five layouts, the prompt placeholders, and the limits worth knowing before writing a team prompt." },
-    ],
-  },
-  {
-    title: "Authoring & extending",
-    items: [
-      { name: "Plugin reference",  path: "docs/plugin-reference.md", tag: "← PLUGINS",      desc: "Complete TOML plugin schema: [plugin], [command], [persistence], [[error_handlers]], runtime toggles, examples." },
-      { name: "Sandbox panes",     path: "docs/sandbox-panes.md",    tag: "← DOCKER",       desc: "Run an AI pane inside a Docker container: prerequisites, building and verifying the image, the sign-in flow for each agent, and exactly what the mount set does and does not bound." },
-      { name: "Contributing",      path: "CONTRIBUTING.md",          tag: "← CONTRIB",      desc: "Branch / commit conventions, how to submit changes, where to read deeper architectural rationale." },
-    ],
-  },
-  {
-    title: "Project context",
-    items: [
-      { name: "Vision",            path: "docs/vision.md",           tag: "← PHILOSOPHY",   desc: "Why Quil exists, who it's for, and what problem the reboot-proof workspace promise solves." },
-      { name: "Architecture",      path: "docs/architecture.md",     tag: "← INTERNALS",    desc: "Client-daemon model, PTY backends, IPC protocol, state persistence — 31 ADRs covering every meaningful decision." },
-      { name: "PRD",               path: "docs/prd.md",              tag: "← SPEC",         desc: "Original v1 product requirements: personas, user stories, success metrics, scope boundaries. Historical reference." },
-      { name: "Roadmap",           path: "docs/roadmap.md",          tag: "← PLAN",         desc: "Milestone-by-milestone progress through the latest release, plus in-flight polish work and the competitive-gap milestones." },
-      { name: "Competitive analysis", path: "docs/competitive-analysis.md", tag: "← COMPARE", desc: "Deep comparison vs herdr and Agent of Empires — capability matrix, the 20 gaps worth chasing, and where Quil leads. See also /vs/herdr and /vs/aoe." },
-      { name: "Versioning",        path: "docs/versioning.md",       tag: "← SEMVER",       desc: "Semantic versioning policy driven by Conventional Commits." },
-      { name: "CHANGELOG",         path: "CHANGELOG.md",             tag: "← HISTORY",      desc: "Keep-a-Changelog formatted history of every release from v0.1.0 onward." },
-    ],
-  },
-  {
-    title: "Feature PRDs — shipped & in flight",
-    items: [
-      { name: "Remote daemon attach", path: "docs/roadmap/remote-daemon.md",  tag: "← BETA",    desc: "`quil --remote <host>`: the transport, the reconnect loop, and the work to make every dialog describe the server rather than your laptop. Phases 1–3 shipped; mTLS is planned." },
-      { name: "Command palette",   path: "docs/roadmap/command-palette.md",   tag: "← SHIPPED", desc: "Fuzzy launcher for every pane, tab, and action, plus cross-pane scrollback search. Shipped — Alt+Shift+P (Ctrl+Shift+P is opt-in, since many terminals intercept it)." },
-    ],
-  },
-  {
-    title: "Future roadmap PRDs",
-    items: [
-      { name: "Community plugins", path: "docs/roadmap/community-plugins.md", tag: "← FUTURE", desc: "A registry + discovery mechanism for user-contributed TOML plugins." },
-      { name: "Session sharing",   path: "docs/roadmap/session-sharing.md",   tag: "← FUTURE", desc: "Read-only tunnel into a live Quil workspace so a collaborator can watch your panes." },
-      { name: "Process health",    path: "docs/roadmap/process-health.md",    tag: "← FUTURE", desc: "Liveness probes per pane with automatic restart policies. Think systemd for pane processes." },
-      { name: "Tmux migration",    path: "docs/roadmap/tmux-migration.md",    tag: "← FUTURE", desc: "Import tmux sessions — read ~/.tmux/resurrect/ and map them into Quil's workspace model." },
-      { name: "Workspace files",   path: "docs/roadmap/workspace-files.md",   tag: "← FUTURE", desc: "Declarative workspace definitions in quil.toml checked into project repos." },
-    ],
-  },
-];
-
-const allDocItems = sections.flatMap((section) =>
-  section.items.map((item) => ({
-    name: item.name,
-    description: item.desc,
-    url: `${SITE.github}/blob/master/${item.path}`,
-  })),
-);
-
 const schemas = [
-  breadcrumbSchema([
-    { name: "Quil",          path: "/" },
-    { name: "Documentation", path: "/docs" },
-  ]),
+  breadcrumbSchema([{ name: "Quil", path: "/" }, { name: "Docs", path: "/docs/" }]),
   itemListSchema({
     name: "Quil documentation",
-    description:
-      "All Quil project docs — vision, PRD, architecture, roadmap, plugin reference, contributing guide, and future-milestone PRDs.",
-    url: SITE.url + "/docs",
-    items: allDocItems,
+    description: "The main documents in the Quil repository.",
+    url: canonical("/docs/"),
+    items: shelf.map((s) => ({ name: s.file, description: s.what, url: GITHUB_BLOB + s.file })),
   }),
 ];
+const tour = manual.filter((e) => e.tour);
+const more = manual.filter((e) => !e.tour);
 ---
 <Page {...seo} schemas={schemas}>
-  <section class="page-hero">
-    <div class="container-ember stack">
-      <div class="hero-ruler">
-        <span>§ DOCS · ENTRY POINTS</span>
-        <span style="margin-left:auto;">canonical source of truth: github</span>
+  <section class="hero">
+    <div class="wrap">
+      <div class="crumb">QUIL / <b>DOCS</b> · THE DOCS LIVE ON GITHUB, THIS PAGE ROUTES TO THEM</div>
+      <h1>What are you trying to do?</h1>
+      <p>Each row is one way to use Quil: the steps, the keys, and the exact section of the docs that explains it. The first six are the stops of the <a href="/">tour on the home page</a>.</p>
+      <div class="tools">
+        <label class="filter" for="q"><span class="g">&gt;</span><input id="q" type="search" placeholder="filter: worktree, docker, resume, ssh…" autocomplete="off" spellcheck="false" /><kbd>/</kbd></label>
+        <div class="start">new here?
+          <a href={`${GITHUB_BLOB}docs/installation.md`} rel="noopener">install</a>
+          <a href={`${GITHUB_BLOB}docs/quick-start.md`} rel="noopener">quick start</a>
+          <a href={`${GITHUB_BLOB}docs/keybindings.md`} rel="noopener">keys</a>
+        </div>
       </div>
-      <span class="eyebrow">DOCUMENTATION</span>
-      <h1>Read the source.</h1>
-      <p>
-        Quil's docs live on GitHub next to the code — README, VISION,
-        PRD, ARCHITECTURE, ROADMAP, plugin reference. This page is a
-        map.
-      </p>
     </div>
   </section>
 
-  {sections.map((section, sectionIdx) => (
-    <section class="feat-category">
-      <div class="container-ember stack">
-        <div class="feat-category-head">
-          <div>
-            <span class="eyebrow">§ {String(sectionIdx + 1).padStart(2, "0")} / {String(sections.length).padStart(2, "0")}</span>
-            <h2 style="margin-top:10px;">{section.title}</h2>
-          </div>
-          <span class="count">{section.items.length} {section.items.length === 1 ? "DOC" : "DOCS"}</span>
-        </div>
+  <div class="wrap layout">
+    <nav class="tree" aria-label="Use cases">
+      <div class="h">TOUR</div>
+      <ul>{tour.map((e) => <li data-id={e.id}><a href={`#${e.id}`}><span class="g">○</span>{e.persona.toLowerCase()}</a></li>)}</ul>
+      <div class="h">MORE</div>
+      <ul>{more.map((e) => <li data-id={e.id}><a href={`#${e.id}`}><span class="g">○</span>{e.persona.toLowerCase()}</a></li>)}</ul>
+      <div class="h">SHELF</div>
+      <ul><li><a href="#shelf"><span class="g">○</span>{shelf.length} docs on github</a></li></ul>
+    </nav>
+    <div>
+      <div class="group">IN THE TOUR · <b>{tour.length}</b></div>
+      {tour.map((e, i) => <ManualEntry e={e} n={i + 1} />)}
+      <div class="group more-group">MORE WAYS TO USE IT · <b>{more.length}</b></div>
+      {more.map((e, i) => <ManualEntry e={e} n={tour.length + i + 1} />)}
+      <div class="empty" id="empty" hidden>No use case matches. Try the shelf below.</div>
+    </div>
+  </div>
 
-        <div class="feature-grid">
-          {section.items.map((item) => (
-            <a
-              href={`${SITE.github}/blob/master/${item.path}`}
-              rel="noopener external"
-              class="feature-cell"
-              style="text-decoration:none;"
-            >
-              <div class="feat-head">
-                <span class="feat-num">↗</span>
-                <span class="feat-title">{item.name}</span>
-              </div>
-              <p class="feat-body">{item.desc}</p>
-              <span class="feat-tag">{item.tag}</span>
-            </a>
-          ))}
-        </div>
-      </div>
-    </section>
-  ))}
-
-  <section class="cta" style="padding: 80px 0;">
-    <div class="container-ember stack">
-      <div class="cta-inner">
-        <h2 style="font-size: clamp(30px, 4vw, 52px);">
-          Reading the source? <span class="flame-text">Start here.</span>
-        </h2>
-        <p>
-          Daemon at <code>cmd/quild/</code>, TUI client at <code>cmd/quil/</code>,
-          shared internals under <code>internal/</code>. Issues and PRs welcome.
-        </p>
-        <div class="actions">
-          <a href={SITE.github} class="btn btn-primary" rel="noopener external">▸ browse repo</a>
-          <a href={SITE.github + "/issues"} class="btn btn-outline" rel="noopener external">open an issue</a>
-        </div>
+  <section class="shelf" id="shelf">
+    <div class="wrap">
+      <h2>The shelf</h2>
+      <p>The main documents in the repository, in plain Markdown.</p>
+      <div class="books">
+        {shelf.map((b) => <a href={GITHUB_BLOB + b.file} rel="noopener"><span class="p">{b.file}</span><span class="w">{b.what}</span><span class="ar">↗</span></a>)}
       </div>
     </div>
   </section>
 </Page>
+
+<script>
+  const q = document.getElementById("q");
+  const empty = document.getElementById("empty");
+  const entries = [...document.querySelectorAll<HTMLElement>(".entry")];
+  if (q instanceof HTMLInputElement && empty) {
+    const filter = () => {
+      const words = q.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+      let shown = 0;
+      for (const el of entries) {
+        const hit = words.every((w) => (el.dataset.text ?? "").includes(w));
+        el.hidden = !hit;
+        if (hit) shown++;
+        document.querySelector(`.tree li[data-id="${el.id}"]`)?.classList.toggle("hide", !hit);
+      }
+      empty.hidden = shown > 0;
+    };
+    q.addEventListener("input", filter);
+    addEventListener("keydown", (e) => {
+      const t = e.target;
+      const typing = t instanceof HTMLElement && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) || t.isContentEditable);
+      if (e.key === "/" && !typing) { e.preventDefault(); q.focus(); }
+      if (e.key === "Escape" && document.activeElement === q) { q.value = ""; filter(); q.blur(); }
+    });
+  }
+  // The tree marks the entry in view, like Quil's sidebar marks the active pane.
+  const links = new Map([...document.querySelectorAll<HTMLAnchorElement>(".tree a[href^='#']")].map((a) => [a.getAttribute("href")!.slice(1), a]));
+  if ("IntersectionObserver" in window) {
+    const io = new IntersectionObserver((xs) => {
+      for (const x of xs) {
+        if (!x.isIntersecting) continue;
+        links.forEach((a) => { a.classList.remove("on"); a.querySelector(".g")!.textContent = "○"; });
+        const a = links.get(x.target.id);
+        if (a) { a.classList.add("on"); a.querySelector(".g")!.textContent = "▸"; }
+      }
+    }, { rootMargin: "-30% 0px -60% 0px" });
+    entries.forEach((el) => io.observe(el));
+  }
+</script>
+
+<style>
+  .hero { padding-block: 52px 30px; border-bottom: 1px solid var(--t-line); }
+  .crumb { font: 11px var(--mono); letter-spacing: .14em; color: var(--t-dim); }
+  .crumb b { color: var(--t-hint); font-weight: 700; }
+  h1 { margin: 14px 0 0; font: 800 clamp(32px, 4.8vw, 56px)/1.02 var(--mono); letter-spacing: -0.03em; color: var(--t-title); }
+  .hero p { margin: 14px 0 0; max-width: 64ch; color: var(--t-soft); font-size: 16.5px; line-height: 1.6; }
+  .hero p a { color: var(--t-hint); text-decoration: underline; text-underline-offset: 3px; }
+  .tools { margin-top: 24px; display: flex; flex-wrap: wrap; gap: 12px 18px; align-items: center; }
+  .filter { display: flex; align-items: center; gap: 10px; flex: 1 1 360px; max-width: 560px; padding: 9px 14px; border: 1px solid var(--t-dialog); border-radius: 6px; background: var(--t-bg); font: 14px var(--mono); }
+  .filter:focus-within { box-shadow: 0 0 0 3px #5f5fff33; }
+  .filter .g { color: var(--t-title); font-weight: 700; }
+  .filter input { all: unset; flex: 1; min-width: 0; color: var(--t-title); }
+  .filter input::placeholder { color: var(--t-sub); }
+  .filter kbd { font: 11px var(--mono); color: var(--t-soft); background: var(--t-line-2); padding: 1px 6px; }
+  .start { display: flex; flex-wrap: wrap; gap: 6px 14px; font: 13px var(--mono); color: var(--t-dim); }
+  .start a { color: var(--t-title); background: var(--t-line-2); padding: 1px 1ch; }
+  .start a:hover { background: var(--t-violet); }
+  .layout { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 44px; padding-block: 30px 40px; }
+  .tree { position: sticky; top: calc(var(--hh) + 22px); align-self: start; font: 13px/1.72 var(--mono); white-space: nowrap; max-height: calc(100vh - var(--hh) - 44px); overflow-y: auto; overflow-x: hidden; }
+  .tree .h { color: var(--t-mute); font-weight: 700; margin-top: 12px; }
+  .tree .h:first-child { margin-top: 0; }
+  .tree ul { list-style: none; margin: 0; padding: 0; }
+  .tree a { display: block; color: var(--t-soft); overflow: hidden; text-overflow: ellipsis; }
+  .tree a .g { display: inline-block; width: 2ch; color: var(--t-dim); }
+  .tree a:hover { color: var(--t-title); }
+  .tree a.on { color: var(--t-title); font-weight: 700; }
+  .tree a.on .g { color: var(--t-blue); }
+  .tree li.hide { display: none; }
+  .group { font: 700 12px var(--mono); letter-spacing: .18em; color: var(--t-mute); padding: 6px 0 12px; }
+  .group b { color: var(--t-hint); }
+  .more-group { margin-top: 30px; }
+  .empty { padding: 40px 0; font: 14px var(--mono); color: var(--t-dim); border-top: 1px solid var(--t-line); }
+  .shelf { padding-block: 30px 40px; border-top: 1px solid var(--t-line); }
+  .shelf h2 { margin: 0; font: 800 clamp(22px, 2.8vw, 32px)/1.1 var(--mono); color: var(--t-title); }
+  .shelf p { margin: 8px 0 0; color: var(--t-dim); font-size: 15px; }
+  .books { margin-top: 22px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 40px; }
+  .books a { display: grid; grid-template-columns: minmax(0, 15em) minmax(0, 1fr) auto; gap: 14px; align-items: baseline; padding: 10px 2px; border-bottom: 1px solid var(--t-line); font: 13px var(--mono); }
+  .books .p { color: var(--t-title); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .books .w { color: var(--t-mute); font-family: var(--sans); font-size: 14px; }
+  .books .ar { color: var(--t-hint); }
+  .books a:hover .p { text-decoration: underline; text-underline-offset: 3px; }
+  @media (max-width: 980px) { .layout { grid-template-columns: minmax(0, 1fr); gap: 0; } .tree { display: none; } .books { grid-template-columns: minmax(0, 1fr); } }
+  @media (max-width: 600px) { .books a { grid-template-columns: minmax(0, 1fr) auto; } .books .w { display: none; } }
+</style>

@@ -1,0 +1,52 @@
+---
+// #use-cases — the tour's six stops written out, for readers and crawlers.
+// Same data as the tour card (src/data/usecases.ts).
+import { useCases } from "@/data/usecases";
+import { splitTicks } from "@/lib/ticks";
+---
+<section class="sec" id="use-cases" aria-labelledby="use-cases-h">
+  <div class="wrap">
+    <div class="eyebrow">The tour, in words</div>
+    <h2 id="use-cases-h">Six things people do with Quil</h2>
+    <p class="lede">The tour above is one Quil session. Here is the same story as text, with the keys and the docs for each step.</p>
+    <div class="uc-list">
+      {useCases.map((u, i) => (
+        <article class="uc" id={u.id}>
+          <div class="uc-n">{String(i + 1).padStart(2, "0")}</div>
+          <div>
+            <div class="eyebrow">{u.persona}</div>
+            <h3>{u.title}</h3>
+            {u.body.map((para) => <p>{splitTicks(para).map((s, j) => (j % 2 ? <code>{s}</code> : s))}</p>)}
+            <dl class="uc-keys">
+              {u.keys.map(([k, what]) => <div><dt><kbd>{k}</kbd></dt><dd>{what}</dd></div>)}
+            </dl>
+            <ul class="uc-read">
+              {u.read.map((r) => (
+                <li><a href={r.href} rel={r.href.startsWith("http") ? "noopener" : undefined}>{r.label} {r.href.startsWith("http") ? "↗" : "→"}</a></li>
+              ))}
+              <li><a href={`/#tour-${u.id}`}>replay this stop in the tour ↑</a></li>
+            </ul>
+          </div>
+        </article>
+      ))}
+    </div>
+  </div>
+</section>
+
+<style>
+  .uc-list { margin-top: 28px; }
+  .uc { display: grid; grid-template-columns: 58px minmax(0, 1fr); gap: 0 18px; padding-block: 26px; border-top: 1px solid var(--t-line); scroll-margin-top: calc(var(--hh) + 16px); }
+  .uc-n { font: 800 26px/1 var(--mono); color: var(--t-hint); font-variant-numeric: tabular-nums; padding-top: 2px; }
+  .uc h3 { margin: 8px 0 0; font: 800 clamp(20px, 2vw, 26px)/1.25 var(--mono); letter-spacing: -0.015em; color: var(--t-title); text-wrap: balance; }
+  .uc p { margin: 12px 0 0; max-width: 70ch; }
+  .uc code { font-size: .88em; background: var(--t-line); color: var(--t-title); padding: 0 .35em; }
+  .uc-keys { margin: 16px 0 0; display: flex; flex-wrap: wrap; gap: 8px 18px; }
+  .uc-keys div { display: flex; gap: 8px; align-items: baseline; }
+  .uc-keys dt { margin: 0; }
+  .uc-keys dd { margin: 0; color: var(--t-mute); font: 12.5px var(--mono); }
+  .uc-keys kbd { font: 700 12px var(--mono); color: #080808; background: var(--t-title); padding: 1px 7px; border-radius: 3px; box-shadow: 0 2px 0 #9e9e7a; white-space: nowrap; }
+  .uc-read { list-style: none; margin: 14px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px 20px; font: 13px var(--mono); }
+  .uc-read a { color: var(--t-hint); }
+  .uc-read a:hover { color: var(--t-title); text-decoration: underline; text-underline-offset: 3px; }
+  @media (max-width: 600px) { .uc { grid-template-columns: minmax(0, 1fr); } .uc-n { font-size: 20px; margin-bottom: 6px; } }
+</style>

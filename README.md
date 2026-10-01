@@ -17,8 +17,11 @@ Type `quil` after a reboot — every tab, pane, working directory, layout split,
 If Quil saves you time, a ⭐ helps other developers find it.
 
 <p align="center">
-  <img src="https://cdn.stukans.com/quil/screenshots/pane-restoration-1280.png"
-       alt="Quil restoring tabs, panes, and Claude Code sessions after a reboot" width="880">
+  <a href="https://quil.cc/">
+    <img src="https://cdn.stukans.com/quil/media/quil-tour-v1.gif"
+         alt="A one-minute tour of one Quil session: Claude Code, Codex and OpenCode side by side, a remote GPU host that keeps working while the laptop is closed, an agent in a Docker sandbox, and a reboot that brings everything back"
+         width="880">
+  </a>
 </p>
 
 ## See it

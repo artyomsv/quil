@@ -1,0 +1,31 @@
+---
+// #compare — one line per comparison page. The body link (not only the
+// footer) matters: footer links alone left /vs/aoe/ and /vs/ghostty/
+// "unknown to Google" (spec §A.1).
+import { competitors, compareNav, type CompetitorInfo } from "@/data/competitors";
+
+const items = compareNav.map(({ href }) => {
+  const slug = href.split("/")[2] as CompetitorInfo["slug"];
+  return { href, name: competitors[slug].name, what: competitors[slug].description };
+});
+---
+<section class="sec" id="compare" aria-labelledby="compare-h">
+  <div class="wrap">
+    <div class="eyebrow">Compare</div>
+    <h2 id="compare-h">Quil next to the tools you know</h2>
+    <ul class="cmp-list">
+      {items.map((c) => (
+        <li><a href={c.href}><span class="vs">Quil vs {c.name} →</span><span class="what">{c.what}</span></a></li>
+      ))}
+    </ul>
+  </div>
+</section>
+
+<style>
+  .cmp-list { list-style: none; margin: 28px 0 0; padding: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 40px; }
+  .cmp-list a { display: block; padding: 14px 2px; border-bottom: 1px solid var(--t-line); }
+  .vs { display: block; font: 700 15px var(--mono); color: var(--t-title); }
+  .what { display: block; margin-top: 4px; color: var(--t-mute); font-size: 14.5px; }
+  .cmp-list a:hover .vs { text-decoration: underline; text-underline-offset: 3px; }
+  @media (max-width: 760px) { .cmp-list { grid-template-columns: minmax(0, 1fr); } }
+</style>

@@ -284,18 +284,23 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Does this PR touch the site?
+      # The site build also reads docs/, README.md and CHANGELOG.md: check-dist
+      # (site/scripts/check-dist.mjs, rule 6) fails on a link to a file or a
+      # heading anchor that no longer exists. A docs-only PR that renamed a
+      # heading would otherwise merge green and break the NEXT site deploy —
+      # site.yml runs on the release commit, with no PR left to blame.
+      - name: Does this PR touch the site or the docs it links?
         id: changed
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           MERGE_BASE=$(git merge-base "$BASE" "$HEAD")
-          if git diff --name-only "$MERGE_BASE" "$HEAD" | grep -q '^site/'; then
-            echo "::notice::site/ touched — installing and building"
+          if git diff --name-only "$MERGE_BASE" "$HEAD" | grep -qE '^(site|docs)/|^(README|CHANGELOG)\.md$'; then
+            echo "::notice::site/ or the docs it links touched — installing and building"
             echo "site=true" >> "$GITHUB_OUTPUT"
           else
-            echo "::notice::No site/ changes — nothing to build"
+            echo "::notice::No site/ or linked-docs changes — nothing to build"
             echo "site=false" >> "$GITHUB_OUTPUT"
           fi
 

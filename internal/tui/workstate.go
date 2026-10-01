@@ -161,6 +161,11 @@ func (m *Model) jumpToPane(paneID string) (bool, tea.Cmd) {
 	if pane == nil {
 		return false, nil
 	}
+	// A viewer shows the tab its daemon has active; a jump elsewhere in it is
+	// a local switch, which switchTab and switchProject refuse too.
+	if m.leavesViewerTab(paneID) {
+		return false, m.refuseReadOnly()
+	}
 	// Notes mode is torn down BEFORE the tab moves, which is the contract
 	// exitNotesModeInPlace states: it reverts focus mode on the tab that is
 	// active when it runs, so calling it afterwards reverts the wrong one.

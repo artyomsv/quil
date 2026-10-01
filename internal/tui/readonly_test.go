@@ -173,7 +173,8 @@ func TestReadOnly_MenusGreyCreateCloseRename(t *testing.T) {
 			// Rows the palette enables unconditionally on a full destination.
 			for _, c := range m.buildPaletteCommands() {
 				switch c.action {
-				case palActNewPane, palActClosePane, palActRenamePane, palActRenameTab, palActCloseTab:
+				case palActNewPane, palActClosePane, palActRenamePane, palActRenameTab, palActCloseTab,
+					palActCycleTabColor, palActMute, palActEager, palActRestartPane, palActProcesses:
 					if c.enabled != tc.enabled {
 						t.Errorf("palette %q enabled=%v, want %v", c.label, c.enabled, tc.enabled)
 					}
@@ -187,13 +188,14 @@ func TestReadOnly_MenusGreyCreateCloseRename(t *testing.T) {
 
 			tab := m.activeTabModel()
 			m.openCtxMenu(tab.ActivePaneModel(), 2, 2)
-			assertCtxRows(t, m.ctxMenu.items, tc.enabled, ctxActRename, ctxActClose)
+			assertCtxRows(t, m.ctxMenu.items, tc.enabled, ctxActRename, ctxActClose,
+				ctxActMute, ctxActAttention, ctxActMarkDeletion, ctxActRestart)
 			m.closeCtxMenu()
 			m.openTabCtxMenu(tab, 2, 2)
-			assertCtxRows(t, m.ctxMenu.items, tc.enabled, ctxActRenameTab)
+			assertCtxRows(t, m.ctxMenu.items, tc.enabled, ctxActRenameTab, ctxActTabColorList)
 			m.closeCtxMenu()
 			m.openProjectCtxMenu(m.cur(), 2, 2)
-			assertCtxRows(t, m.ctxMenu.items, tc.enabled, ctxActRenameProject)
+			assertCtxRows(t, m.ctxMenu.items, tc.enabled, ctxActRenameProject, ctxActGroupList)
 			// Client-side only: enabled whatever the rights.
 			assertCtxRows(t, m.ctxMenu.items, true, ctxActDisconnectHost)
 		})
@@ -500,6 +502,220 @@ func TestReadOnly_RuntimeDialAppliesRights(t *testing.T) {
 			}
 			if c := m.client.(*Router).Conn(dest); c != Client(fresh) {
 				t.Fatalf("router holds %T, want the unwrapped conn", c)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Every workspace mutation a viewer cannot send is refused locally, with the
+// read-only flash, and leaves the screen as the daemon has it.
+// ---------------------------------------------------------------------------
+
+// twoPaneReadOnlyModel is readOnlyModel with tab-1 split left|right, sized.
+func twoPaneReadOnlyModel(t *testing.T, rights string) (Model, *fakeConn) {
+	t.Helper()
+	m, conn := readOnlyModel(t, rights)
+	p2 := NewPaneModel("pane-2", testRingBufSize)
+	t.Cleanup(p2.Dispose)
+	tab := m.projects[0].tabs[0]
+	tab.Root = &LayoutNode{Split: SplitHorizontal, Ratio: 0.5, Left: tab.Root, Right: NewLeaf(p2)}
+	next, cmd := m.Update(tea.WindowSizeMsg{Width: 172, Height: 48})
+	runCmdNoWait(cmd)
+	return next.(Model), conn
+}
+
+func roUpdate(t *testing.T, m Model, msgs ...tea.Msg) Model {
+	t.Helper()
+	for _, msg := range msgs {
+		next, cmd := m.Update(msg)
+		runCmdNoWait(cmd)
+		m = next.(Model)
+	}
+	return m
+}
+
+// Key family: moving and recolouring a tab.
+func TestReadOnly_TabMoveAndColourKeysRefused(t *testing.T) {
+	for _, rights := range []string{ipc.RightsReadOnly, ipc.RightsFull} {
+		t.Run(rights, func(t *testing.T) {
+			readOnly := rights == ipc.RightsReadOnly
+			m, conn := twoPaneReadOnlyModel(t, rights)
+			m = roUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyPgDown, Mod: tea.ModAlt | tea.ModShift})
+			if moved := m.curTabs()[0].ID != "tab-1"; moved == readOnly {
+				t.Fatalf("tab moved = %v on rights %q", moved, rights)
+			}
+			if flashed := m.flashText == readOnlyFlash; flashed != readOnly {
+				t.Fatalf("move: read-only flash = %v (flash %q)", flashed, m.flashText)
+			}
+			m.flashText = ""
+			before := m.activeTabModel().Color
+			m = roUpdate(t, m, tea.KeyPressMsg{Code: 'c', Mod: tea.ModAlt})
+			if changed := m.activeTabModel().Color != before; changed == readOnly {
+				t.Fatalf("tab colour changed = %v on rights %q", changed, rights)
+			}
+			if flashed := m.flashText == readOnlyFlash; flashed != readOnly {
+				t.Fatalf("colour: read-only flash = %v (flash %q)", flashed, m.flashText)
+			}
+			if sent := len(actSent(conn)) > 0; sent == readOnly {
+				t.Fatalf("act messages sent = %v on rights %q: %v", sent, rights, actSent(conn))
+			}
+		})
+	}
+}
+
+// Key family, the apply step itself: a bound layout key reaches
+// applyTabArrangement with no menu or palette grey in front of it.
+func TestReadOnly_LayoutKeyRefused(t *testing.T) {
+	for _, rights := range []string{ipc.RightsReadOnly, ipc.RightsFull} {
+		t.Run(rights, func(t *testing.T) {
+			readOnly := rights == ipc.RightsReadOnly
+			m, _ := twoPaneReadOnlyModel(t, rights)
+			press := layBind(t, &m, "tab.layout_rows")
+			m = roUpdate(t, m, press)
+			if arranged := m.activeTabModel().Root.Split == SplitVertical; arranged == readOnly {
+				t.Fatalf("layout arranged = %v on rights %q", arranged, rights)
+			}
+			if flashed := m.flashText == readOnlyFlash; flashed != readOnly {
+				t.Fatalf("read-only flash = %v (flash %q)", flashed, m.flashText)
+			}
+		})
+	}
+}
+
+// Menu/palette family: a layout arrangement from the command palette.
+func TestReadOnly_PaletteLayoutRefused(t *testing.T) {
+	for _, rights := range []string{ipc.RightsReadOnly, ipc.RightsFull} {
+		t.Run(rights, func(t *testing.T) {
+			readOnly := rights == ipc.RightsReadOnly
+			m, _ := twoPaneReadOnlyModel(t, rights)
+			m = roUpdate(t, m, tea.KeyPressMsg{Code: 'p', Mod: tea.ModAlt | tea.ModShift})
+			if m.dialog != dialogCommandPalette {
+				t.Fatal("setup: the palette did not open")
+			}
+			row := -1
+			for i, c := range m.paletteDisplay() {
+				if c.action == palActTabLayout && c.arg == "tab.layout_rows" {
+					row = i
+				}
+			}
+			if row < 0 {
+				t.Fatal("setup: no Layout: rows row")
+			}
+			m.palette.cursor = row
+			m = roUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+			if arranged := m.activeTabModel().Root.Split == SplitVertical; arranged == readOnly {
+				t.Fatalf("layout arranged = %v on rights %q", arranged, rights)
+			}
+		})
+	}
+}
+
+// Mouse family: a tab-bar drag, an Alt+drag of a pane, a split-border drag.
+func TestReadOnly_MouseDragsRefused(t *testing.T) {
+	for _, rights := range []string{ipc.RightsReadOnly, ipc.RightsFull} {
+		t.Run(rights, func(t *testing.T) {
+			readOnly := rights == ipc.RightsReadOnly
+			m, conn := twoPaneReadOnlyModel(t, rights)
+
+			// Tab bar: press on tab 1, drag past tab 2's middle, release.
+			spans := m.tabSpans()
+			if len(spans) < 2 {
+				t.Fatal("setup: fewer than two tab spans")
+			}
+			off := m.projectSidebarWidth()
+			m = roUpdate(t, m,
+				tea.MouseClickMsg{X: off + spans[0].start + 1, Y: 0, Button: tea.MouseLeft},
+				tea.MouseMotionMsg{X: off + spans[1].start + spans[1].width - 1, Y: 0, Button: tea.MouseLeft},
+				tea.MouseReleaseMsg{X: off + spans[1].start + spans[1].width - 1, Y: 0, Button: tea.MouseLeft},
+			)
+			if moved := m.curTabs()[0].ID != "tab-1"; moved == readOnly {
+				t.Fatalf("tab-bar drag moved the tab = %v on rights %q", moved, rights)
+			}
+
+			// Alt+press on a pane arms a pane drag.
+			px, py := 0, 0
+			for y := 2; y < m.height-2 && px == 0; y++ {
+				for x := 0; x < m.width; x++ {
+					if r := m.paneRectAt(x, y); r != nil && r.Pane != nil && r.Pane.ID == "pane-1" {
+						px, py = x+2, y+2
+						break
+					}
+				}
+			}
+			m = roUpdate(t, m, tea.MouseClickMsg{X: px, Y: py, Button: tea.MouseLeft, Mod: tea.ModAlt})
+			if armed := m.paneDrag.active(); armed == readOnly {
+				t.Fatalf("pane drag armed = %v on rights %q", armed, rights)
+			}
+			m = roUpdate(t, m, tea.MouseReleaseMsg{X: px, Y: py, Button: tea.MouseLeft})
+
+			// Split border: the press must not arm the drag.
+			bx, by := -1, 10
+			for x := 0; x < m.width && bx < 0; x++ {
+				if m.hitTestSplitBorder(x, by) != nil {
+					bx = x
+				}
+			}
+			if bx < 0 {
+				t.Fatal("setup: no split border on row 10")
+			}
+			m.flashText = ""
+			m = roUpdate(t, m, tea.MouseClickMsg{X: bx, Y: by, Button: tea.MouseLeft})
+			if armed := m.splitDragNode != nil; armed == readOnly {
+				t.Fatalf("split-border drag armed = %v on rights %q", armed, rights)
+			}
+			if flashed := m.flashText == readOnlyFlash; flashed != readOnly {
+				t.Fatalf("split border: read-only flash = %v (flash %q)", flashed, m.flashText)
+			}
+			if readOnly {
+				if got := actSent(conn); len(got) != 0 {
+					t.Fatalf("a viewer's drags sent %v", got)
+				}
+			}
+		})
+	}
+}
+
+// A group change on a read-only destination's project is refused: the header
+// menu greys Rename/Delete for a group holding one, and assigning one of its
+// projects to a group leaves membership as it was.
+func TestReadOnly_GroupChangesRefused(t *testing.T) {
+	for _, rights := range []string{ipc.RightsReadOnly, ipc.RightsFull} {
+		t.Run(rights, func(t *testing.T) {
+			t.Setenv("QUIL_HOME", t.TempDir())
+			readOnly := rights == ipc.RightsReadOnly
+			m, _ := twoPaneReadOnlyModel(t, rights)
+			m.groups = projectGroups{Groups: []projectGroup{
+				{Name: "G", Members: []groupMember{{Dest: roDest, ID: "proj-1"}}},
+				{Name: "H"},
+			}}
+			m.openGroupCtxMenu(0, 2, 2)
+			assertCtxRows(t, m.ctxMenu.items, !readOnly, ctxActRenameGroup, ctxActDeleteGroup)
+			m.closeCtxMenu()
+
+			cmd := m.moveProjectToGroup(roDest, "proj-1", "H")
+			runCmdNoWait(cmd)
+			if moved := m.groups.groupOf(roDest, "proj-1") == 1; moved == readOnly {
+				t.Fatalf("project moved to group H = %v on rights %q", moved, rights)
+			}
+		})
+	}
+}
+
+// A shared note opens view-only on a read-only destination.
+func TestReadOnly_RemoteNoteIsViewOnly(t *testing.T) {
+	for _, rights := range []string{ipc.RightsReadOnly, ipc.RightsFull} {
+		t.Run(rights, func(t *testing.T) {
+			m, _ := twoPaneReadOnlyModel(t, rights)
+			m.sharedData = map[string]bool{roDest: true}
+			m = roUpdate(t, m, tea.KeyPressMsg{Code: 'e', Mod: tea.ModAlt})
+			ed := m.notesEditor
+			if ed == nil || !ed.Remote() {
+				t.Fatal("setup: no remote notes editor opened")
+			}
+			ed.ApplyLoaded("hello\n", 3)
+			if got := ed.editor.ReadOnly; got != (rights == ipc.RightsReadOnly) {
+				t.Fatalf("editor ReadOnly = %v after load on rights %q", got, rights)
 			}
 		})
 	}

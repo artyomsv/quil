@@ -1459,6 +1459,26 @@ func (m *Model) refuseReadOnly() tea.Cmd {
 	return m.flashCmd()
 }
 
+// leavesViewerTab reports whether focusing paneID would move a read-only
+// destination's view off what its daemon shows: a pane in another of its
+// tabs, or — arriving from another destination's project — any project but
+// the one the daemon has active. Focusing another pane of the tab on screen
+// is not a switch and stays allowed.
+func (m *Model) leavesViewerTab(paneID string) bool {
+	pane, proj, tabIdx := m.findPaneAndTab(paneID)
+	if pane == nil || proj == nil || !m.destReadOnly(proj.Dest) {
+		return false
+	}
+	if tabIdx != proj.activeTab {
+		return true
+	}
+	if proj == m.cur() {
+		return false
+	}
+	follow := m.followProject[proj.Dest]
+	return follow != "" && follow != proj.ID
+}
+
 // SetHomeDest records the destination this client was started against (see
 // Model.homeDest). A pure setter, called once after NewModel.
 func (m *Model) SetHomeDest(dest string) { m.homeDest = dest }
@@ -2183,16 +2203,21 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 					// motion handler moves the row once the pointer crosses a
 					// neighbour's midpoint (trackProjectDrag). Armed BEFORE the
 					// activate call, whose value receiver carries the flag on.
+					// A read-only destination's projects and tabs are never
+					// dragged: the order and the group membership are its
+					// daemon's, and a viewer cannot change them.
 					switch kind {
 					case sidebarRowProject:
-						if idx >= 0 && idx < len(m.projects) {
+						if idx >= 0 && idx < len(m.projects) && !m.destReadOnly(m.projects[idx].Dest) {
 							m.projectDragging = true
 							m.projectDragKey = groupMember{Dest: m.projects[idx].Dest, ID: m.projects[idx].ID}
 							m.projectDragPressY = msg.Y
 						}
 					case sidebarRowTab:
-						m.sidebarTabDragging = true
-						m.sidebarTabDragIdx = idx
+						if !m.destReadOnly(m.activeDest()) {
+							m.sidebarTabDragging = true
+							m.sidebarTabDragIdx = idx
+						}
 					case sidebarRowGroup:
 						m.groupDragging = true
 						if idx >= 0 && idx < len(m.groups.Groups) {
@@ -2340,7 +2365,10 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 				// "one drag at a time" invariant.
 				m.clearDragState()
 				if idx := m.hitTestTab(msg.X); idx >= 0 {
-					m.tabDragFromIdx = idx
+					// A viewer's tab order is the daemon's: no reorder drag.
+					if !m.destReadOnly(m.activeDest()) {
+						m.tabDragFromIdx = idx
+					}
 					// Checked BEFORE switchTab moves the active tab: manual
 					// mode is a statement about the tab being LEFT, and
 					// switchTab itself never touches the anchor (that is
@@ -2409,6 +2437,14 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 				// the drawn line (asymmetric extent, layout.go), so the
 				// scrollbar's drawn thumb column stays clickable.
 				if hit := m.hitTestSplitBorder(msg.X, msg.Y); hit != nil {
+					// A viewer shows the daemon's split ratios: the press is
+					// refused rather than arming a drag whose layout write
+					// would be dropped, leaving this tree diverged for good.
+					if m.destReadOnly(m.activeDest()) {
+						m.clearDragState()
+						cmd := m.refuseReadOnly()
+						return m, cmd
+					}
 					m.clearDragState()
 					m.splitDragNode = hit.Node
 					m.splitDragRect = *hit
@@ -3713,6 +3749,20 @@ func (m Model) handleNotificationWheel(msg tea.MouseWheelMsg) (tea.Model, tea.Cm
 }
 
 func (m Model) handleNotificationKey(key string) (tea.Model, tea.Cmd) {
+	// A dismissal is applied here and sent to the active destination (and is
+	// about the selected event's own pane), so a viewer on either side would
+	// drop an event every other client still shows. Refused before HandleKey,
+	// which removes it locally.
+	if key == "d" || key == "D" {
+		readOnly := m.destReadOnly(m.activeDest())
+		if e := m.notifications.SelectedEvent(); key == "d" && e != nil && m.destReadOnly(m.destOfPane(e.PaneID)) {
+			readOnly = true
+		}
+		if readOnly {
+			cmd := m.refuseReadOnly()
+			return m, cmd
+		}
+	}
 	action, eventID, paneID := m.notifications.HandleKey(key)
 	// Keyboard navigation must bring the selection into view. Done here rather
 	// than inside HandleKey because the height belongs to the Model, and
@@ -4483,6 +4533,10 @@ func (m Model) openClosePaneConfirm() (tea.Model, tea.Cmd) {
 // openRestartPaneConfirm opens the restart confirm dialog for the active
 // pane. Extracted from the kb.RestartPane case; shared with the context menu.
 func (m Model) openRestartPaneConfirm() (tea.Model, tea.Cmd) {
+	if m.destReadOnly(m.activeDest()) {
+		cmd := m.refuseReadOnly()
+		return m, cmd
+	}
 	if tab := m.activeTabModel(); tab != nil {
 		if pane := tab.ActivePaneModel(); pane != nil {
 			m.dialog = dialogConfirm
@@ -4572,6 +4626,13 @@ func (m Model) toggleFocusForActiveTab() (tea.Model, tea.Cmd) {
 // pane, gated on the plugin's record_history opt-in. Extracted from the
 // kb.CommandHistory case; shared with the context menu.
 func (m Model) openHistoryForActivePane() (tea.Model, tea.Cmd) {
+	// Input history is disclosure beyond the workspace, which only an acting
+	// client may ask for; the request would be dropped and the dialog would
+	// wait on an answer that never comes.
+	if m.destReadOnly(m.activeDest()) {
+		cmd := m.refuseReadOnly()
+		return m, cmd
+	}
 	tab := m.activeTabModel()
 	if tab == nil {
 		return m, nil
@@ -5704,9 +5765,11 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "pane.go_back":
 		return m.popPaneHistory()
 	case "pane.mute":
-		return m, m.toggleActivePaneMute()
+		cmd := m.toggleActivePaneMute()
+		return m, cmd
 	case "pane.toggle_eager":
-		return m, m.toggleActivePaneEager()
+		cmd := m.toggleActivePaneEager()
+		return m, cmd
 	case "pane.toggle_wrap":
 		// Flip the active wide-canvas pane's preview between left-edge
 		// crop (default) and soft-wrap. View-only state — no IPC, no PTY
@@ -5720,9 +5783,11 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "pane.toggle_lazygit":
-		return m, m.handleToggleLazygit()
+		cmd := m.handleToggleLazygit()
+		return m, cmd
 	case "pane.toggle_hunk":
-		return m, m.handleToggleHunk()
+		cmd := m.handleToggleHunk()
+		return m, cmd
 	case "pane.command_history":
 		return m.openHistoryForActivePane()
 	case "pane.quick_actions":
@@ -5818,7 +5883,8 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		cmd := m.jumpToNextBlocked()
 		return m, cmd
 	case "client.take_control":
-		return m, m.sendTakeControl(m.activeDest())
+		cmd := m.takeControl()
+		return m, cmd
 	}
 
 	// Everything from here to the late-tier lookup is skipped for a completed
@@ -5936,7 +6002,8 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.beginPaneRename()
 
 	case "tab.cycle_color":
-		return m, m.cycleTabColor()
+		cmd := m.cycleTabColor()
+		return m, cmd
 
 	case "app.redraw":
 		// Recovery hatch for rendering artifacts: cell-diff drift (width
@@ -9123,10 +9190,15 @@ func (m Model) sendReorderTab(tabID string, newIdx int) tea.Cmd {
 	}
 }
 
-func (m Model) cycleTabColor() tea.Cmd {
+func (m *Model) cycleTabColor() tea.Cmd {
 	tab := m.activeTabModel()
 	if tab == nil {
 		return nil
+	}
+	// Before the optimistic local write below: a viewer's colour would be
+	// one the daemon never hears of.
+	if m.destReadOnly(tab.Dest) {
+		return m.refuseReadOnly()
 	}
 
 	// Find current color index and cycle to next
@@ -10265,6 +10337,14 @@ func (m Model) clientGeometryCmd() tea.Cmd {
 // daemon either promotes an eligible, attached sender or logs and ignores an
 // ineligible one — there is nothing for the client to wait on, and the next
 // broadcast is what tells it whether the request took.
+// takeControl is the key and palette entry point: a viewer cannot be master.
+func (m *Model) takeControl() tea.Cmd {
+	if m.destReadOnly(m.activeDest()) {
+		return m.refuseReadOnly()
+	}
+	return m.sendTakeControl(m.activeDest())
+}
+
 func (m Model) sendTakeControl(dest string) tea.Cmd {
 	return func() tea.Msg {
 		msg, err := ipc.NewMessage(ipc.MsgTakeControl, nil)
@@ -10369,10 +10449,13 @@ func (m Model) updatePaneCWD(paneID, cwd string) tea.Cmd {
 // sends the update to the daemon. The daemon is the source of truth — it
 // echoes the new state back via the next workspace_state broadcast and the
 // pane border's `[muted]` chip updates from there. No-op if no active pane.
-func (m Model) toggleActivePaneMute() tea.Cmd {
+func (m *Model) toggleActivePaneMute() tea.Cmd {
 	tab := m.activeTabModel()
 	if tab == nil {
 		return nil
+	}
+	if m.destReadOnly(tab.Dest) {
+		return m.refuseReadOnly()
 	}
 	pane := tab.ActivePaneModel()
 	if pane == nil {
@@ -10473,10 +10556,13 @@ func (m Model) sendPinnedAttention(paneID string, pinned bool) tea.Cmd {
 // toggleActivePaneEager flips the eager-restore flag on the focused pane and
 // sends the daemon the authoritative update; the eager state updates from the
 // next workspace_state broadcast. No-op if no active pane.
-func (m Model) toggleActivePaneEager() tea.Cmd {
+func (m *Model) toggleActivePaneEager() tea.Cmd {
 	tab := m.activeTabModel()
 	if tab == nil {
 		return nil
+	}
+	if m.destReadOnly(tab.Dest) {
+		return m.refuseReadOnly()
 	}
 	pane := tab.ActivePaneModel()
 	if pane == nil {

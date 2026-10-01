@@ -61,6 +61,11 @@ func (m *Model) handleToggleOverlay(pluginName string) tea.Cmd {
 	if tab == nil {
 		return nil
 	}
+	// Every step below creates, replaces or reports an overlay pane, and a
+	// viewer may do none of those.
+	if m.destReadOnly(tab.Dest) {
+		return m.refuseReadOnly()
+	}
 
 	// Step 1: this plugin's overlay is visible → hide.
 	if tab.overlayVisible && tab.overlayRuns(pluginName) {

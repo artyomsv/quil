@@ -131,6 +131,10 @@ func (m Model) openProjectPicker() (tea.Model, tea.Cmd) {
 // leads here when moveTabCandidates is empty — but this function does not
 // re-check either, matching openProjectPicker's own lack of preconditions.
 func (m Model) openMoveTabPicker(tabID string) (tea.Model, tea.Cmd) {
+	if p := m.projectOf(tabID); p != nil && m.destReadOnly(p.Dest) {
+		cmd := m.refuseReadOnly()
+		return m, cmd
+	}
 	m.projectPick = projectPickState{moveTabID: tabID}
 	m.projectPick.filtered = m.filterProjects("")
 	m.dialog = dialogProjectPick

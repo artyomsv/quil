@@ -295,21 +295,19 @@ func (m *Model) recordGroupNameSent(dest, op, name, newName string) {
 	}
 }
 
-// sendGroupOpEverywhere fans a rename or delete out to every shared
-// destination listing the name (each with its own id); a create goes to the
-// active destination only — or, when that one is a legacy daemon, to the
-// local one if it is shared: the local daemon is where empty groups live,
-// and sent nowhere the group would reach no other client of any daemon.
-// Best-effort across hosts: a refusal flashes, an offline host is skipped,
-// and the group shows split until the user repeats the operation.
-func (m *Model) sendGroupOpEverywhere(op, name, newName string) tea.Cmd {
-	if op == ipc.GroupOpCreate {
-		dest := m.activeDest()
-		if !m.sharedData[dest] && m.sharedData[""] {
-			dest = ""
-		}
-		return m.sendGroupOp(dest, op, name, newName)
+// groupCreateDest is where a group created with no project goes: the active
+// destination, or the local one when the active daemon is a legacy one and
+// the local daemon is shared.
+func (m *Model) groupCreateDest() string {
+	dest := m.activeDest()
+	if !m.sharedData[dest] && m.sharedData[""] {
+		dest = ""
 	}
+	return dest
+}
+
+// groupOpTargets is every destination a rename or delete of name goes to.
+func (m *Model) groupOpTargets(name string) []string {
 	// A destination whose groups import is unanswered lists nothing yet but
 	// will list the name once the import lands: the op is held for it and
 	// replayed after the answer (sharedimport.go), or the authoritative frame
@@ -327,8 +325,42 @@ func (m *Model) sendGroupOpEverywhere(op, name, newName string) tea.Cmd {
 			targets = append(targets, d)
 		}
 	}
+	return targets
+}
+
+// groupTouchesReadOnly reports whether renaming or deleting group name would
+// change a read-only destination: a member project lives there, or the
+// fan-out names it. A viewer cannot send either change, and making it only in
+// this client's file would leave the group split from the daemon's.
+func (m *Model) groupTouchesReadOnly(name string) bool {
+	if g := m.groups.indexOf(name); g >= 0 {
+		for _, mem := range m.groups.Groups[g].Members {
+			if m.destReadOnly(mem.Dest) {
+				return true
+			}
+		}
+	}
+	for _, d := range m.groupOpTargets(name) {
+		if m.destReadOnly(d) {
+			return true
+		}
+	}
+	return false
+}
+
+// sendGroupOpEverywhere fans a rename or delete out to every shared
+// destination listing the name (each with its own id); a create goes to the
+// active destination only — or, when that one is a legacy daemon, to the
+// local one if it is shared: the local daemon is where empty groups live,
+// and sent nowhere the group would reach no other client of any daemon.
+// Best-effort across hosts: a refusal flashes, an offline host is skipped,
+// and the group shows split until the user repeats the operation.
+func (m *Model) sendGroupOpEverywhere(op, name, newName string) tea.Cmd {
+	if op == ipc.GroupOpCreate {
+		return m.sendGroupOp(m.groupCreateDest(), op, name, newName)
+	}
 	var cmds []tea.Cmd
-	for _, dest := range targets {
+	for _, dest := range m.groupOpTargets(name) {
 		if !m.destConnected(dest) {
 			continue
 		}

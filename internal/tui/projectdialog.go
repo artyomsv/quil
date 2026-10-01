@@ -235,6 +235,12 @@ func (m *Model) submitNewProject(name, rootDir string) tea.Cmd {
 	if name == "" {
 		return nil
 	}
+	// Create, adopt and fold all change that host's projects, which a
+	// read-only connection cannot do. Said in the form, where the user is.
+	if m.destReadOnly(m.projectFormDest) {
+		m.setFormError(readOnlyFlash)
+		return nil
+	}
 	// A daemon with no project support accepts this message and does nothing
 	// with it, so the dialog would close on a project that never appears —
 	// which is how it was reported: "the name I gave was not respected", the

@@ -888,6 +888,10 @@ func (m Model) handleAboutKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.dialog = dialogPlugins
 			m.dialogCursor = 0
 		case 3:
+			if m.destReadOnly(m.activeDest()) {
+				cmd := m.refuseReadOnly()
+				return m, cmd
+			}
 			m = m.openProcessesDialog()
 			// Batched with the refresh for the same reason the Shortcuts row
 			// above clears: the box goes from dialogWidth (60) to

@@ -5,6 +5,7 @@ import (
 	"go/parser"
 	"go/token"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -109,4 +110,192 @@ func TestSweep_EveryMessageTypeHasAClass(t *testing.T) {
 			t.Errorf("%s (%q) is a client→daemon type classed never", name, v)
 		}
 	}
+}
+
+// wantClassTable is written out independently of rights.go's own classes and
+// neverAccepted maps, by hand, from the design's class table (view, act,
+// admin, local, never — one entry per type). The sweep test above only
+// proves every type has SOME class; it would not notice a type moved to the
+// wrong one (demoting claude_sessions_req to view, say, would still pass it).
+// This test catches that by comparing the two independently-built tables.
+var wantClassTable = map[string]Class{
+	// view: every level, read-only.
+	ipc.MsgHello:                 ClassView,
+	ipc.MsgClientHello:           ClassView,
+	ipc.MsgClientStat:            ClassView,
+	ipc.MsgVersionReq:            ClassView,
+	ipc.MsgStateReq:              ClassView,
+	ipc.MsgAttach:                ClassView,
+	ipc.MsgDetach:                ClassView,
+	ipc.MsgSubscribe:             ClassView,
+	ipc.MsgListPanesReq:          ClassView,
+	ipc.MsgReadPaneOutputReq:     ClassView,
+	ipc.MsgPaneStatusReq:         ClassView,
+	ipc.MsgScreenshotPaneReq:     ClassView,
+	ipc.MsgPaneSearchReq:         ClassView,
+	ipc.MsgListTabsReq:           ClassView,
+	ipc.MsgListProjectsReq:       ClassView,
+	ipc.MsgListClientsReq:        ClassView,
+	ipc.MsgGetNotificationsReq:   ClassView,
+	ipc.MsgWatchNotificationsReq: ClassView,
+	ipc.MsgGetTaskReq:            ClassView,
+	ipc.MsgWaitTaskReq:           ClassView,
+	ipc.MsgListTasksReq:          ClassView,
+	ipc.MsgMemoryReportReq:       ClassView,
+	ipc.MsgPluginListReq:         ClassView,
+	ipc.MsgPluginCatalogReq:      ClassView,
+	ipc.MsgSandboxCapReq:         ClassView,
+	ipc.MsgNoteGet:               ClassView,
+
+	// act: standard and full. Input and workspace mutations.
+	ipc.MsgPaneInput:             ClassAct,
+	ipc.MsgCreatePane:            ClassAct,
+	ipc.MsgCreatePaneReq:         ClassAct,
+	ipc.MsgDestroyPane:           ClassAct,
+	ipc.MsgDestroyPaneReq:        ClassAct,
+	ipc.MsgRestartPaneReq:        ClassAct,
+	ipc.MsgUpdatePane:            ClassAct,
+	ipc.MsgUpdateLayout:          ClassAct,
+	ipc.MsgMovePane:              ClassAct,
+	ipc.MsgResizePane:            ClassAct,
+	ipc.MsgResizePanes:           ClassAct,
+	ipc.MsgClientGeometry:        ClassAct,
+	ipc.MsgTakeControl:           ClassAct,
+	ipc.MsgCreateTab:             ClassAct,
+	ipc.MsgCreateTabReq:          ClassAct,
+	ipc.MsgDestroyTab:            ClassAct,
+	ipc.MsgUpdateTab:             ClassAct,
+	ipc.MsgReorderTab:            ClassAct,
+	ipc.MsgMoveTab:               ClassAct,
+	ipc.MsgSwitchTab:             ClassAct,
+	ipc.MsgSwitchTabReq:          ClassAct,
+	ipc.MsgSetActivePane:         ClassAct,
+	ipc.MsgCloseTUI:              ClassAct,
+	ipc.MsgCreateProject:         ClassAct,
+	ipc.MsgCreateProjectReq:      ClassAct,
+	ipc.MsgDestroyProject:        ClassAct,
+	ipc.MsgUpdateProject:         ClassAct,
+	ipc.MsgMergeProjects:         ClassAct,
+	ipc.MsgSwitchProject:         ClassAct,
+	ipc.MsgReorderProject:        ClassAct,
+	ipc.MsgDismissEvent:          ClassAct,
+	ipc.MsgDelegateTaskReq:       ClassAct,
+	ipc.MsgSetProjectGroup:       ClassAct,
+	ipc.MsgGroupOp:               ClassAct,
+	ipc.MsgNoteSet:               ClassAct,
+	ipc.MsgSharedImport:          ClassAct,
+	ipc.MsgCreateFromTemplateReq: ClassAct,
+	// act: disclosure beyond the workspace.
+	ipc.MsgBrowseDirReq:           ClassAct,
+	ipc.MsgDirsExistReq:           ClassAct,
+	ipc.MsgGitReposReq:            ClassAct,
+	ipc.MsgKubeCtxReq:             ClassAct,
+	ipc.MsgWorktreeListReq:        ClassAct,
+	ipc.MsgWorktreeStatusReq:      ClassAct,
+	ipc.MsgClaudeSessionsReq:      ClassAct,
+	ipc.MsgClaudeSessionDetailReq: ClassAct,
+	ipc.MsgPaneHistoryReq:         ClassAct,
+	ipc.MsgPaneHistoryEntryReq:    ClassAct,
+	ipc.MsgResourceReportReq:      ClassAct,
+
+	// admin: full only. Daemon lifecycle and daemon-wide settings.
+	ipc.MsgShutdown:       ClassAdmin,
+	ipc.MsgReloadPlugins:  ClassAdmin,
+	ipc.MsgOverlayPolicy:  ClassAdmin,
+	ipc.MsgKillProcessReq: ClassAdmin,
+	ipc.MsgStageUpdateReq: ClassAdmin,
+	ipc.MsgUpdateCheckReq: ClassAdmin,
+
+	// local: the local socket only, whatever the level.
+	ipc.MsgTokenCreateReq: ClassLocal,
+	ipc.MsgTokenListReq:   ClassLocal,
+	ipc.MsgTokenRevokeReq: ClassLocal,
+
+	// never accepted: every daemon→client type, plus auth_proof (client→daemon,
+	// but read only by the login code, never dispatched to a handler).
+	ipc.MsgPaneInputResp:           ClassNever,
+	ipc.MsgListPanesResp:           ClassNever,
+	ipc.MsgReadPaneOutputResp:      ClassNever,
+	ipc.MsgPaneStatusResp:          ClassNever,
+	ipc.MsgCreatePaneResp:          ClassNever,
+	ipc.MsgRestartPaneResp:         ClassNever,
+	ipc.MsgScreenshotPaneResp:      ClassNever,
+	ipc.MsgSwitchTabResp:           ClassNever,
+	ipc.MsgListTabsResp:            ClassNever,
+	ipc.MsgDestroyPaneResp:         ClassNever,
+	ipc.MsgGetNotificationsResp:    ClassNever,
+	ipc.MsgWatchNotificationsResp:  ClassNever,
+	ipc.MsgVersionResp:             ClassNever,
+	ipc.MsgMemoryReportResp:        ClassNever,
+	ipc.MsgResourceReportResp:      ClassNever,
+	ipc.MsgKillProcessResp:         ClassNever,
+	ipc.MsgPaneHistoryResp:         ClassNever,
+	ipc.MsgPaneHistoryEntryResp:    ClassNever,
+	ipc.MsgPaneSearchResp:          ClassNever,
+	ipc.MsgClaudeSessionsResp:      ClassNever,
+	ipc.MsgClaudeSessionDetailResp: ClassNever,
+	ipc.MsgBrowseDirResp:           ClassNever,
+	ipc.MsgGitReposResp:            ClassNever,
+	ipc.MsgWorktreeListResp:        ClassNever,
+	ipc.MsgWorktreeStatusResp:      ClassNever,
+	ipc.MsgDirsExistResp:           ClassNever,
+	ipc.MsgSandboxCapResp:          ClassNever,
+	ipc.MsgStageUpdateResp:         ClassNever,
+	ipc.MsgKubeCtxResp:             ClassNever,
+	ipc.MsgPluginListResp:          ClassNever,
+	ipc.MsgListProjectsResp:        ClassNever,
+	ipc.MsgCreateProjectResp:       ClassNever,
+	ipc.MsgProjectOpResp:           ClassNever,
+	ipc.MsgTabOpResp:               ClassNever,
+	ipc.MsgPaneOpResp:              ClassNever,
+	ipc.MsgCreateTabResp:           ClassNever,
+	ipc.MsgPluginCatalogResp:       ClassNever,
+	ipc.MsgDelegateTaskResp:        ClassNever,
+	ipc.MsgGetTaskResp:             ClassNever,
+	ipc.MsgWaitTaskResp:            ClassNever,
+	ipc.MsgListTasksResp:           ClassNever,
+	ipc.MsgListClientsResp:         ClassNever,
+	ipc.MsgGroupOpResp:             ClassNever,
+	ipc.MsgNoteResp:                ClassNever,
+	ipc.MsgNoteSetResp:             ClassNever,
+	ipc.MsgSharedImportResp:        ClassNever,
+	ipc.MsgCreateFromTemplateResp:  ClassNever,
+	ipc.MsgHelloResp:               ClassNever,
+	ipc.MsgTokenCreateResp:         ClassNever,
+	ipc.MsgTokenListResp:           ClassNever,
+	ipc.MsgTokenRevokeResp:         ClassNever,
+	ipc.MsgError:                   ClassNever,
+	ipc.MsgWorkspaceState:          ClassNever,
+	ipc.MsgPaneOutput:              ClassNever,
+	ipc.MsgPaneEvent:               ClassNever,
+	ipc.MsgPaneSizes:               ClassNever,
+	ipc.MsgPluginError:             ClassNever,
+	ipc.MsgLinkLost:                ClassNever,
+	ipc.MsgHighlightPane:           ClassNever,
+	ipc.MsgEventDismissed:          ClassNever,
+	ipc.MsgPaneSeen:                ClassNever,
+	ipc.MsgAuthChallenge:           ClassNever,
+	ipc.MsgAuthProof:               ClassNever,
+}
+
+func TestClassTable_MatchesSpec(t *testing.T) {
+	got := ClassTable()
+	if reflect.DeepEqual(got, wantClassTable) {
+		return
+	}
+	// DeepEqual already failed; this pass only narrows down which entries
+	// differ, since a bare map diff is unreadable at 146 entries.
+	for k, want := range wantClassTable {
+		if g, ok := got[k]; !ok {
+			t.Errorf("%s: missing from ClassTable(), want class %d", k, want)
+		} else if g != want {
+			t.Errorf("%s: class %d, want %d", k, g, want)
+		}
+	}
+	for k, g := range got {
+		if _, ok := wantClassTable[k]; !ok {
+			t.Errorf("%s: class %d, not in the spec's table at all", k, g)
+		}
+	}
+	t.Errorf("ClassTable() does not match the spec's class table")
 }

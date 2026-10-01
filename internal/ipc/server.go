@@ -3,6 +3,7 @@ package ipc
 import (
 	"bufio"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"strings"
@@ -141,6 +142,17 @@ type Conn struct {
 	// construction and never written again, so sendLoop reads it without
 	// synchronisation.
 	writeWindow time.Duration
+	// transport is TransportLocal (unix socket; net.Pipe in tests) or
+	// TransportTCP. Set at construction, before sendLoop starts, never again.
+	transport string
+	// auth is this conn's login, stored once. A TCP conn reads nil until
+	// MarkAuthenticated; a local conn gets its own newLocalAuth() at
+	// construction, so MarkAuthenticated is refused on it.
+	auth atomic.Pointer[AuthState]
+	// releasePending returns this conn's slot among TCP conns still logging
+	// in; pendingOnce lets login and disconnect both call it. nil if local.
+	releasePending func()
+	pendingOnce    sync.Once
 }
 
 func newConn(raw net.Conn) *Conn { return newConnWithWriteWindow(raw, writeDeadline) }
@@ -150,17 +162,86 @@ func newConn(raw net.Conn) *Conn { return newConnWithWriteWindow(raw, writeDeadl
 // passed at construction rather than set afterwards because sendLoop starts
 // here and would race any later write to the field.
 func newConnWithWriteWindow(raw net.Conn, window time.Duration) *Conn {
+	return newConnWith(raw, window, TransportLocal, nil)
+}
+
+// newTCPConn wraps a conn accepted on the TCP listener. It starts
+// unauthenticated; release returns its pending-login slot.
+func newTCPConn(raw net.Conn, release func()) *Conn {
+	return newConnWith(raw, writeDeadline, TransportTCP, release)
+}
+
+// newConnWith sets every immutable field BEFORE sendLoop starts, so nothing
+// read later without a lock can race its own initialisation.
+func newConnWith(raw net.Conn, window time.Duration, transport string, release func()) *Conn {
 	c := &Conn{
-		raw:         raw,
-		br:          bufio.NewReader(raw),
-		critCh:      make(chan []byte, sendBufSize),
-		outCh:       make(chan []byte, sendBufSize),
-		done:        make(chan struct{}),
-		writeWindow: window,
-		openedAt:    time.Now(),
+		raw:            raw,
+		br:             bufio.NewReader(raw),
+		critCh:         make(chan []byte, sendBufSize),
+		outCh:          make(chan []byte, sendBufSize),
+		done:           make(chan struct{}),
+		writeWindow:    window,
+		openedAt:       time.Now(),
+		transport:      transport,
+		releasePending: release,
+	}
+	if transport != TransportTCP {
+		c.auth.Store(newLocalAuth())
 	}
 	go c.sendLoop()
 	return c
+}
+
+// Auth is this conn's login state. nil means an unauthenticated TCP conn —
+// the only case. Every local conn reads its OWN full/local state. A zero
+// Conn (tests build them with new(Conn)) gets one on first read and keeps
+// it; a nil *Conn (tests drive handlers that way) has nowhere to keep one
+// and reads a fresh state per call.
+func (c *Conn) Auth() *AuthState {
+	if c == nil {
+		return newLocalAuth()
+	}
+	if a := c.auth.Load(); a != nil {
+		return a
+	}
+	if c.transport == TransportTCP {
+		return nil
+	}
+	c.auth.CompareAndSwap(nil, newLocalAuth())
+	return c.auth.Load()
+}
+
+// Transport is TransportLocal or TransportTCP.
+func (c *Conn) Transport() string {
+	if c == nil || c.transport != TransportTCP {
+		return TransportLocal
+	}
+	return TransportTCP
+}
+
+// MarkAuthenticated completes a TCP login: it opens broadcasts to the conn
+// and lifts the pre-login frame cap. Set once; a second call is refused.
+func (c *Conn) MarkAuthenticated(a *AuthState) bool {
+	if a == nil || !c.auth.CompareAndSwap(nil, a) {
+		return false
+	}
+	c.releasePendingSlot()
+	return true
+}
+
+func (c *Conn) releasePendingSlot() {
+	c.pendingOnce.Do(func() {
+		if c.releasePending != nil {
+			c.releasePending()
+		}
+	})
+}
+
+// silenced: a revoked conn is sent nothing but the error frame that tells it
+// why.
+func (c *Conn) silenced(msgType string) bool {
+	a := c.auth.Load()
+	return a != nil && a.Revoked() && msgType != MsgError
 }
 
 // Send marshals msg into the wire frame and queues it for transmission. Returns
@@ -171,6 +252,9 @@ func newConnWithWriteWindow(raw net.Conn, window time.Duration) *Conn {
 // marshal entirely for a known-dead conn. The actual race-safe check happens
 // inside sendFrame next to the channel send — do not remove either one.
 func (c *Conn) Send(msg *Message) error {
+	if c.silenced(msg.Type) {
+		return nil
+	}
 	if c.closed.Load() || c.overflow.Load() {
 		return ErrSendOverflow
 	}
@@ -198,6 +282,9 @@ func (c *Conn) Send(msg *Message) error {
 // overflowed, so a caller looping on this can tell "dropped one" (nil) from
 // "the link is gone" (error) and stop.
 func (c *Conn) SendDroppable(msg *Message) error {
+	if c.silenced(msg.Type) {
+		return nil
+	}
 	if c.closed.Load() || c.overflow.Load() {
 		return ErrSendOverflow
 	}
@@ -331,6 +418,9 @@ func (c *Conn) enqueue(frame []byte, droppable bool) error {
 // force-closed whenever replay volume exceeded sendBufSize frames — two full
 // 256 KB ghost buffers were enough — locking the client out on every attach.
 func (c *Conn) SendBlocking(msg *Message, cancel <-chan struct{}) error {
+	if c.silenced(msg.Type) {
+		return nil
+	}
 	frame, err := EncodeFrame(msg)
 	if err != nil {
 		return err
@@ -502,6 +592,11 @@ func (c *Conn) reportDeadlineRefused(err error) {
 // the version handshake, then the receive loop, sequentially — so br needs
 // no locking.
 func (c *Conn) Receive() (*Message, error) {
+	// Before login a TCP conn's frame may be at most PreLoginFrameMax; the
+	// length prefix is checked before the payload exists.
+	if c.transport == TransportTCP && c.auth.Load() == nil {
+		return ReadMessageLimit(c.br, PreLoginFrameMax)
+	}
 	return ReadMessage(c.br)
 }
 
@@ -587,6 +682,22 @@ func (c *Conn) markDead() {
 	})
 }
 
+// Pre-login limits for the TCP listener.
+const (
+	MaxPendingTCP    = 8
+	PreLoginFrameMax = 4 << 10
+	RejectTooMany    = "too many"
+	RejectTooLarge   = "too large"
+)
+
+// TCPHooks lets the daemon run its login code and audit log. Accepted runs
+// for every admitted conn before its first read; Rejected for a conn turned
+// away before login (conn is nil for RejectTooMany: it was never wrapped).
+type TCPHooks struct {
+	Accepted func(*Conn)
+	Rejected func(reason string, c *Conn)
+}
+
 // Server listens for client connections over a Unix socket.
 type Server struct {
 	path         string
@@ -596,6 +707,12 @@ type Server struct {
 	conns        []*Conn
 	mu           sync.Mutex
 	done         chan struct{}
+	tcpListener  net.Listener
+	tcpHooks     TCPHooks
+	pendingTCP   atomic.Int32
+	// stopOnce makes Stop idempotent: a second close(s.done) would panic,
+	// and harnesses both call Stop and register it in Cleanup.
+	stopOnce sync.Once
 }
 
 func NewServer(socketPath string, handler MessageHandler, onDisconnect func(*Conn)) *Server {
@@ -625,15 +742,92 @@ func (s *Server) Start() error {
 // conn's send buffer at the moment of Stop are discarded — Daemon.Stop's
 // shutdown sequence does not rely on a final IPC broadcast reaching clients
 // (the final-snapshot durability lives in the on-disk workspace.json path,
-// not in the wire).
+// not in the wire). Idempotent: a second call does nothing and returns nil.
 func (s *Server) Stop() error {
-	close(s.done)
-	s.mu.Lock()
-	for _, c := range s.conns {
-		c.Close()
+	var err error
+	s.stopOnce.Do(func() {
+		close(s.done)
+		s.mu.Lock()
+		for _, c := range s.conns {
+			c.Close()
+		}
+		tcp := s.tcpListener
+		s.mu.Unlock()
+		if tcp != nil {
+			tcp.Close()
+		}
+		if s.listener != nil {
+			err = s.listener.Close()
+		}
+	})
+	return err
+}
+
+// StartTCP opens the loopback TCP listener. The address must already be
+// validated (debugserver.LoopbackAddr); a bind that is not loopback is closed
+// and refused anyway, so no caller can widen it by accident.
+func (s *Server) StartTCP(addr string, hooks TCPHooks) (net.Addr, error) {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
 	}
+	if tcp, ok := ln.Addr().(*net.TCPAddr); !ok || !tcp.IP.IsLoopback() {
+		ln.Close()
+		return nil, fmt.Errorf("refusing a non-loopback TCP listener on %s", ln.Addr())
+	}
+	s.mu.Lock()
+	s.tcpListener, s.tcpHooks = ln, hooks
 	s.mu.Unlock()
-	return s.listener.Close()
+	go s.acceptTCP(ln, hooks)
+	return ln.Addr(), nil
+}
+
+// TCPAddr is the bound TCP address, or nil when there is no listener.
+func (s *Server) TCPAddr() net.Addr {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.tcpListener == nil {
+		return nil
+	}
+	return s.tcpListener.Addr()
+}
+
+func (s *Server) acceptTCP(ln net.Listener, hooks TCPHooks) {
+	for {
+		raw, err := ln.Accept()
+		if err != nil {
+			select {
+			case <-s.done:
+				return
+			default:
+			}
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
+			logger.Error("ipc: tcp accept error: %v", err)
+			continue
+		}
+		// Closed at accept, before any read and with no frame.
+		if s.pendingTCP.Load() >= MaxPendingTCP {
+			raw.Close()
+			logger.Warn("ipc: tcp conn refused at accept: %d logins already pending", MaxPendingTCP)
+			if hooks.Rejected != nil {
+				hooks.Rejected(RejectTooMany, nil)
+			}
+			continue
+		}
+		s.pendingTCP.Add(1)
+		conn := newTCPConn(raw, func() { s.pendingTCP.Add(-1) })
+		s.mu.Lock()
+		s.conns = append(s.conns, conn)
+		count := len(s.conns)
+		s.mu.Unlock()
+		logger.Info("ipc: tcp client connected (total=%d)", count)
+		if hooks.Accepted != nil {
+			hooks.Accepted(conn)
+		}
+		go s.handleConn(conn)
+	}
 }
 
 // ConnCount returns the number of currently-connected clients. Test-friendly
@@ -727,6 +921,11 @@ func (c *Conn) Done() <-chan struct{} { return c.done }
 // them for a moment — still needs workspace state, its own responses, and
 // lifecycle frames.
 func (c *Conn) wantsFrame(msgType string) bool {
+	// Broadcast gate: an unauthenticated or revoked conn is sent no broadcast
+	// of ANY type.
+	if a := c.Auth(); a == nil || a.Revoked() {
+		return false
+	}
 	if msgType != MsgPaneOutput {
 		return true
 	}
@@ -760,6 +959,7 @@ func (s *Server) acceptLoop() {
 func (s *Server) handleConn(conn *Conn) {
 	defer func() {
 		conn.Close()
+		conn.releasePendingSlot()
 		s.removeConn(conn)
 		s.mu.Lock()
 		count := len(s.conns)
@@ -773,6 +973,14 @@ func (s *Server) handleConn(conn *Conn) {
 	for {
 		msg, err := conn.Receive()
 		if err != nil {
+			if errors.Is(err, ErrFrameTooLarge) && conn.transport == TransportTCP {
+				s.mu.Lock()
+				rejected := s.tcpHooks.Rejected
+				s.mu.Unlock()
+				if rejected != nil {
+					rejected(RejectTooLarge, conn)
+				}
+			}
 			return
 		}
 		s.handler(conn, msg)

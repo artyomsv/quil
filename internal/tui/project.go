@@ -72,6 +72,26 @@ func (m *Model) switchProject(i int) tea.Cmd {
 	if i < 0 || i >= len(m.projects) || i == m.activeProject {
 		return nil
 	}
+	// A viewer shows the project its daemon has active (applyWorkspaceState).
+	// Moving among that daemon's own projects is refused; arriving from
+	// another destination's project is not — a viewer must be able to come
+	// back — and lands on the project the daemon has active, not on the one
+	// the key or click happened to reach.
+	if dest := m.projects[i].Dest; m.destReadOnly(dest) {
+		if cur := m.cur(); cur != nil && cur.Dest == dest {
+			return m.refuseReadOnly()
+		}
+		// Matched on (Dest, ID): two daemons can mint the same project ID.
+		for _, p := range m.projectsOnDest(dest) {
+			if p.ID == m.followProject[dest] {
+				i = indexOfProjectPtr(m.projects, p)
+				break
+			}
+		}
+		if i == m.activeProject {
+			return nil
+		}
+	}
 	// Each project carries its own activeTab, so switching projects changes
 	// the active tab implicitly — which makes this one of the callers
 	// exitNotesModeInPlace's contract names ("callers that are about to

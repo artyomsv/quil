@@ -487,7 +487,6 @@ func launchTUI() {
 			}
 		}
 	}
-	_ = connectResp
 	if err != nil {
 		if spawnedButNotReady {
 			// We DID spawn a daemon; it just never opened its socket (crashed
@@ -664,6 +663,12 @@ func launchTUI() {
 	model.SetClientID(processClientID)
 	// The sidebar names a project's host only when it is not this one.
 	model.SetHomeDest(primaryDest)
+	// What the token login granted. Every later login (a reconnect, or the
+	// New Project dialog) hands its own answer to the Model — see
+	// redialTCPDest and dialTCPDest.
+	if connectMode() {
+		model.SetDestRights(primaryDest, connectResp.Rights)
+	}
 	// Seed a row for every configured destination that did not connect. Without
 	// this the host simply vanishes from the sidebar, which reads as Quil having
 	// deleted the user's projects — and after a client auto-update it happens on

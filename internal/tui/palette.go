@@ -123,6 +123,27 @@ type paletteCommand struct {
 // it — everything except section headers, status rows, and disabled rows.
 func (c paletteCommand) selectable() bool { return !c.header && !c.info && c.enabled }
 
+// readOnlyGreyedPalette is every palette action that creates, closes or
+// renames something on the active destination — greyed (never hidden) when
+// that destination is read-only, so the rows stay where the eye expects them
+// and their state says why. "New project" and "Disconnect host…" are not
+// here: the first may target another destination, the second is client-side
+// only.
+var readOnlyGreyedPalette = map[paletteAction]bool{
+	palActNewTemplate: true, palActNewTab: true, palActCloseTab: true, palActRenameTab: true,
+	palActRenameProject: true, palActSplitH: true, palActSplitV: true, palActNewPane: true,
+	palActRenamePane: true, palActClosePane: true,
+}
+
+// greyReadOnlyPalette disables readOnlyGreyedPalette's rows in place.
+func greyReadOnlyPalette(cmds []paletteCommand) {
+	for i := range cmds {
+		if readOnlyGreyedPalette[cmds[i].action] {
+			cmds[i].enabled = false
+		}
+	}
+}
+
 // fuzzyScore reports whether query is a case-insensitive subsequence of target
 // and, if so, a score (higher = better). It rewards consecutive runs, a match
 // at the target start, a match right after a separator, and earlier position.
@@ -617,6 +638,9 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 		})
 	}
 
+	if m.destReadOnly(m.activeDest()) {
+		greyReadOnlyPalette(cmds)
+	}
 	return cmds
 }
 
@@ -1148,12 +1172,16 @@ func (m Model) executePaletteCommand(c paletteCommand) (tea.Model, tea.Cmd) {
 		if tab := m.activeTabModel(); tab != nil && tab.FocusMode() {
 			tab.ExitFocus()
 		}
-		return m, m.splitPane(SplitHorizontal)
+		// Sequenced: splitPane may set a flash on m.
+		cmd := m.splitPane(SplitHorizontal)
+		return m, cmd
 	case palActSplitV:
 		if tab := m.activeTabModel(); tab != nil && tab.FocusMode() {
 			tab.ExitFocus()
 		}
-		return m, m.splitPane(SplitVertical)
+		// Sequenced: splitPane may set a flash on m.
+		cmd := m.splitPane(SplitVertical)
+		return m, cmd
 	case palActFocus:
 		return m.toggleFocusForActiveTab()
 	case palActNotes:

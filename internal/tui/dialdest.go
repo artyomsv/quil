@@ -43,6 +43,9 @@ type destDialedMsg struct {
 	dest   string
 	client Client
 	err    error
+	// rights is what the login granted; login says there was one.
+	rights string
+	login  bool
 }
 
 // dialDest connects a destination in the background and reports the result.
@@ -58,7 +61,8 @@ func (m *Model) dialDest(dest string) tea.Cmd {
 	dial := m.dialDestFn
 	return func() tea.Msg {
 		c, err := dial(dest)
-		return destDialedMsg{dest: dest, client: c, err: err}
+		c, rights, login := splitLogin(c)
+		return destDialedMsg{dest: dest, client: c, err: err, rights: rights, login: login}
 	}
 }
 

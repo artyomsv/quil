@@ -238,7 +238,7 @@ func dialTCPDest(dest string) (tui.Client, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), redialTimeout)
 	defer cancel()
-	client, _, err := dialTCP(ctx, addr, token)
+	client, resp, err := dialTCP(ctx, addr, token)
 	if err != nil {
 		return nil, errors.New(describeConnectError(addr, err))
 	}
@@ -247,7 +247,8 @@ func dialTCPDest(dest string) (tui.Client, error) {
 		return nil, err
 	}
 	sendClientHello(client, helloRoleTUI)
-	return client, nil
+	// The rights ride back with the conn; the Model unwraps it before use.
+	return &tui.LoggedIn{Client: client, Rights: resp.Rights}, nil
 }
 
 // redialTCPDest reconnects a tcp: destination with the same token. A refused
@@ -265,7 +266,7 @@ func redialTCPDest(dest string) tui.RedialFunc {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), redialTimeout)
 		defer cancel()
-		client, _, err := dialTCP(ctx, addr, token)
+		client, resp, err := dialTCP(ctx, addr, token)
 		if err != nil {
 			var refused *clientauth.RefusedError
 			if errors.As(err, &refused) || errors.Is(err, clientauth.ErrServerUnproven) {
@@ -274,7 +275,11 @@ func redialTCPDest(dest string) tui.RedialFunc {
 			return nil, err
 		}
 		sendClientHello(client, helloRoleTUI)
-		return client, nil
+		// Every login answers with the token's CURRENT level — it can have
+		// changed while the link was down — so it rides back with the conn
+		// and the Model re-applies it before the reattach.
+		log.Printf("connect %s: logged in again as token %q (rights %q)", addr, resp.TokenName, resp.Rights)
+		return &tui.LoggedIn{Client: client, Rights: resp.Rights}, nil
 	}
 }
 

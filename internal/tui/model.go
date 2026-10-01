@@ -569,6 +569,13 @@ type Model struct {
 	// names someone else. Updated in applyWorkspaceState from
 	// WorkspaceStateMsg.SizeMaster.
 	sizeMaster map[string]string
+	// destRights is each destination's rights level from its hello_resp
+	// ("" = full: the local socket and ssh). Only --connect sets it today.
+	destRights map[string]string
+	// followProject is, per read-only destination, the project its daemon
+	// last reported active — where a viewer arriving from another
+	// destination's project lands (switchProject).
+	followProject map[string]string
 	// clientCount records, per destination, the last broadcast's attached-
 	// client count (bridges excluded) — what renderStatusBar's role marker
 	// and D9's "most recent input" default both key off of at the TUI layer.
@@ -1426,6 +1433,32 @@ func (m *Model) initKeymap() {
 // it cannot assert against.
 func (m *Model) SetClientID(id string) { m.clientID = id }
 
+// readOnlyFlash is what a disabled action says on a read-only destination.
+const readOnlyFlash = "read-only connection — that action is disabled"
+
+// SetDestRights records dest's rights for the Model and its router. Called by
+// main before the program starts, and again from Update whenever a reconnect
+// logs in, so the level is always the one the daemon granted last.
+func (m *Model) SetDestRights(dest, rights string) {
+	if m.destRights == nil {
+		m.destRights = make(map[string]string)
+	}
+	m.destRights[dest] = rights
+	if r, ok := m.client.(*Router); ok {
+		r.SetDestRights(dest, rights)
+	}
+}
+
+// destReadOnly reports whether dest was granted read-only rights: it sees
+// the workspace and follows the daemon, and acts on nothing.
+func (m Model) destReadOnly(dest string) bool { return m.destRights[dest] == ipc.RightsReadOnly }
+
+// refuseReadOnly flashes why an action did nothing.
+func (m *Model) refuseReadOnly() tea.Cmd {
+	m.setFlash(readOnlyFlash)
+	return m.flashCmd()
+}
+
 // SetHomeDest records the destination this client was started against (see
 // Model.homeDest). A pure setter, called once after NewModel.
 func (m *Model) SetHomeDest(dest string) { m.homeDest = dest }
@@ -1997,6 +2030,11 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 				return m, nil
 			}
 			return m.scheduleRedial(msg.dest)
+		}
+		// Before finishReconnect: the reattach it sends, and the unseen
+		// marks it restates, go through the router's rights gate.
+		if msg.login {
+			m.SetDestRights(msg.dest, msg.rights)
 		}
 		return m.finishReconnect(msg.dest, msg.client)
 
@@ -2986,6 +3024,10 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 			}
 			m.setFormError("cannot connect: " + truncateToWidth(sanitizeRemoteText(msg.err.Error()), formMsgDetailCap))
 			return m, nil
+		}
+		// Before adoptDest, whose attach goes through the router's rights gate.
+		if msg.login {
+			m.SetDestRights(msg.dest, msg.rights)
 		}
 		attach := m.adoptDest(msg.dest, msg.client)
 		m.setFormOK("connected to " + sanitizeRemoteText(msg.dest))
@@ -4413,6 +4455,12 @@ func (m Model) toggleNotesMode() (tea.Model, tea.Cmd) {
 // openClosePaneConfirm opens the close-pane confirm dialog for the active
 // pane. Extracted from the kb.ClosePane case; shared with the context menu.
 func (m Model) openClosePaneConfirm() (tea.Model, tea.Cmd) {
+	// Two statements: Go does not order the operand m against the call in
+	// `return m, m.refuseReadOnly()`, so the flash could miss the copy.
+	if m.destReadOnly(m.activeDest()) {
+		cmd := m.refuseReadOnly()
+		return m, cmd
+	}
 	if tab := m.activeTabModel(); tab != nil {
 		if pane := tab.ActivePaneModel(); pane != nil {
 			m.dialog = dialogConfirm
@@ -4457,6 +4505,10 @@ func (m Model) openRestartPaneConfirm() (tea.Model, tea.Cmd) {
 // beginPaneRename enters inline pane-rename mode for the active pane.
 // Extracted from the kb.RenamePane case; shared with the context menu.
 func (m Model) beginPaneRename() (tea.Model, tea.Cmd) {
+	if m.destReadOnly(m.activeDest()) {
+		cmd := m.refuseReadOnly()
+		return m, cmd
+	}
 	if tab := m.activeTabModel(); tab != nil {
 		if pane := tab.ActivePaneModel(); pane != nil {
 			m.renamingPane = true
@@ -4544,6 +4596,10 @@ func (m Model) openHistoryForActivePane() (tea.Model, tea.Cmd) {
 // openCloseTabConfirm opens the close-tab confirm for the active tab. Extracted
 // from the kb.CloseTab case; shared with the command palette.
 func (m Model) openCloseTabConfirm() (tea.Model, tea.Cmd) {
+	if m.destReadOnly(m.activeDest()) {
+		cmd := m.refuseReadOnly()
+		return m, cmd
+	}
 	if tab := m.activeTabModel(); tab != nil {
 		m.dialog = dialogConfirm
 		m.confirmKind = "tab"
@@ -4563,6 +4619,10 @@ func (m Model) openCloseTabConfirm() (tea.Model, tea.Cmd) {
 // beginTabRename enters inline tab-rename mode for the active tab. Extracted
 // from the kb.RenameTab case; shared with the command palette.
 func (m Model) beginTabRename() (tea.Model, tea.Cmd) {
+	if m.destReadOnly(m.activeDest()) {
+		cmd := m.refuseReadOnly()
+		return m, cmd
+	}
 	if tab := m.activeTabModel(); tab != nil {
 		m.renaming = true
 		m.renameInput = tab.Name
@@ -4607,6 +4667,10 @@ func (m Model) openCreatePaneDialog() (tea.Model, tea.Cmd) {
 // of, and the reason this is a parameter rather than a field somebody sets
 // afterwards.
 func (m Model) openCreatePaneDialogFor(target paneTarget) (tea.Model, tea.Cmd) {
+	if m.destReadOnly(m.activeDest()) {
+		cmd := m.refuseReadOnly()
+		return m, cmd
+	}
 	m.dialog = dialogCreatePane
 	m.dialogCursor = 0
 	m.createPaneStep = 0
@@ -5853,13 +5917,17 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if tab := m.activeTabModel(); tab != nil && tab.FocusMode() {
 			tab.ExitFocus()
 		}
-		return m, m.splitPane(SplitHorizontal)
+		// Sequenced: splitPane may set a flash on m.
+		cmd := m.splitPane(SplitHorizontal)
+		return m, cmd
 
 	case "pane.split_v":
 		if tab := m.activeTabModel(); tab != nil && tab.FocusMode() {
 			tab.ExitFocus()
 		}
-		return m, m.splitPane(SplitVertical)
+		// Sequenced: splitPane may set a flash on m.
+		cmd := m.splitPane(SplitVertical)
+		return m, cmd
 
 	case "tab.rename":
 		return m.beginTabRename()
@@ -6569,6 +6637,21 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]str
 	if activeID == "" {
 		activeID = state.ActiveProject
 	}
+	// A read-only viewer FOLLOWS the daemon: it shows the project and tab of
+	// the daemon's active tab — the last switch any client made — and moves
+	// when that changes, like a screen share. It cannot switch locally
+	// (switchTab/switchProject refuse), so there is no local choice for this
+	// to override. Never pulls focus off another daemon's project.
+	viewer := m.destReadOnly(dest) && state.ActiveProject != ""
+	if viewer {
+		if m.followProject == nil {
+			m.followProject = make(map[string]string)
+		}
+		m.followProject[dest] = state.ActiveProject
+		if p := m.cur(); p == nil || p.Dest == dest || m.onlyOfflineProjects() {
+			activeID = state.ActiveProject
+		}
+	}
 
 	// Active-tab moves the DAEMON made, collected here and reported after the
 	// merge below. Every path where the CLIENT changes the active tab reports
@@ -6622,7 +6705,9 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]str
 		// broadcast (pendingSwitch.from) holds the tab this client is on,
 		// while that tab still exists, instead of adopting the daemon's report.
 		effectiveActiveTab := info.ActiveTab
-		if info.ID == activeID && ok {
+		// A viewer adopts info.ActiveTab as is: the typing guard protects
+		// keys a viewer never sends.
+		if info.ID == activeID && ok && !viewer {
 			_, existedBefore := existingTabs[info.ActiveTab]
 			var cmd tea.Cmd
 			effectiveActiveTab, cmd = m.applyTabMoveGuard(dest, info.ID, info.ActiveTab, fromTab, proj.tabs, existedBefore)
@@ -7533,6 +7618,14 @@ func (m *Model) switchTab(idx int) tea.Cmd {
 	if idx < 0 || idx >= len(m.curTabs()) {
 		return nil
 	}
+	// A viewer shows the tab the daemon has active (applyWorkspaceState).
+	// Re-picking the tab already shown is not a switch, so it says nothing.
+	if m.destReadOnly(m.curTabs()[idx].Dest) {
+		if idx == m.activeTabIdx() {
+			return nil
+		}
+		return m.refuseReadOnly()
+	}
 	// Switching tabs leaves the notes-bound pane behind. Flush and exit
 	// notes mode BEFORE the active tab changes so exitNotesModeInPlace
 	// reverts focus mode on the OLD tab.
@@ -8040,6 +8133,9 @@ func (m Model) renderStatusBar() string {
 	}
 	if m.daemonLimited[m.activeDest()] {
 		right = "[limited] " + right
+	}
+	if m.destReadOnly(m.activeDest()) {
+		right = "[read-only] " + right
 	}
 	// Multi-client sync (§4.3): the role marker sits beside [dev], in the same
 	// style, because it says something about how THIS process relates to the
@@ -8887,6 +8983,11 @@ func (m *Model) splitPane(dir SplitDir) tea.Cmd {
 	if tab == nil {
 		return nil
 	}
+	// Before the placeholder below: the create it reserves room for would be
+	// dropped, and the empty leaf would stay on screen.
+	if m.destReadOnly(tab.Dest) {
+		return m.refuseReadOnly()
+	}
 	pane := tab.ActivePaneModel()
 	if pane == nil {
 		return nil
@@ -9190,6 +9291,11 @@ func (m Model) enqueueInput(paneID string, data []byte) {
 	// is bytes for a child process, by construction — the four producers are
 	// keystroke forwarding, wheel notches and the two paste paths.
 	if m.linkOf(dest).active {
+		return
+	}
+	// A viewer types into nothing; dropping here keeps the bytes off the
+	// input queue as well as off the wire.
+	if m.destReadOnly(dest) {
 		return
 	}
 	if m.inputCh == nil {
@@ -10127,7 +10233,13 @@ func (m Model) clientGeometryCmd() tea.Cmd {
 	}
 	var conns []Client
 	if r, ok := m.client.(*Router); ok {
-		conns = r.Conns()
+		// Straight to each conn, past Router.Send — so past its rights gate
+		// too, which is why a read-only destination is skipped here.
+		for _, dest := range r.Dests() {
+			if !m.destReadOnly(dest) {
+				conns = append(conns, r.Conn(dest))
+			}
+		}
 	} else if m.client != nil {
 		conns = []Client{m.client}
 	}

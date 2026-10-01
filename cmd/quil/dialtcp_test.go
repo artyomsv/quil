@@ -350,6 +350,56 @@ func TestRedialTCP_RefusalPermanentConnRefusedNot(t *testing.T) {
 	}
 }
 
+// signedLogin is a listener that completes the login for tok and grants rights.
+func signedLogin(t *testing.T, tok, rights string) string {
+	t.Helper()
+	addr, _ := fakeListener(t, func(c net.Conn) error {
+		return challengeThen(c, func(h *ipc.Message, hp ipc.HelloPayload, nonceS string) *ipc.Message {
+			am := clientauth.AuthMessage(hp.TokenID, hp.Nonce, nonceS)
+			m, _ := ipc.NewMessage(ipc.MsgHelloResp, ipc.HelloRespPayload{Rights: rights, TokenName: "t",
+				ServerSig: clientauth.ServerSignature(clientauth.DeriveVerifier(tok), am)})
+			m.ID = h.ID
+			return m
+		})
+	})
+	return addr
+}
+
+// A re-login hands the daemon's CURRENT rights to the Model with the conn, so
+// a token whose level changed while the link was down changes the mode; the
+// runtime dial (New Project dialog) does the same.
+func TestDialTCPDest_HandsTheLoginRightsToTheModel(t *testing.T) {
+	tok, _, _ := clientauth.NewToken()
+	prevAddr, prevTok := connectAddr, connectToken
+	t.Cleanup(func() { connectAddr, connectToken = prevAddr, prevTok })
+	for _, rights := range []string{ipc.RightsReadOnly, ipc.RightsFull} {
+		for name, dial := range map[string]func(dest string) (tui.Client, error){
+			"redial": func(dest string) (tui.Client, error) { return redialTCPDest(dest)(nil) },
+			"dial":   dialTCPDest,
+		} {
+			t.Run(name+"/"+rights, func(t *testing.T) {
+				connectAddr, connectToken = signedLogin(t, tok, rights), tok
+				c, err := dial(tcpDestPrefix + connectAddr)
+				if err != nil {
+					t.Fatalf("login failed: %v", err)
+				}
+				li, ok := c.(*tui.LoggedIn)
+				if !ok {
+					t.Fatalf("dial returned %T, want *tui.LoggedIn carrying the rights", c)
+				}
+				ic, ok := li.Client.(*ipc.Client)
+				if !ok {
+					t.Fatalf("wrapped conn is %T, want *ipc.Client (the closer seam asserts it)", li.Client)
+				}
+				defer ic.Close()
+				if li.Rights != rights {
+					t.Fatalf("rights = %q, want %q", li.Rights, rights)
+				}
+			})
+		}
+	}
+}
+
 // The login hello and the ordinary hello are ONE builder, so the
 // self-description a TCP daemon registers cannot drift from the unix one.
 func TestDialTCP_LoginHelloIsSendHellos(t *testing.T) {

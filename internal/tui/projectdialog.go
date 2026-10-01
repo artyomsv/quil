@@ -562,6 +562,10 @@ func (m Model) beginProjectRename(id string) (tea.Model, tea.Cmd) {
 	if p == nil {
 		return m, nil
 	}
+	if m.destReadOnly(p.Dest) {
+		cmd := m.refuseReadOnly()
+		return m, cmd
+	}
 	m.dialog = dialogProjectRename
 	m.projectFormID = p.ID
 	m.projectFormName = p.Name

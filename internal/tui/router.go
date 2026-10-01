@@ -7,7 +7,9 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/artyomsv/quil/internal/clientauth"
 	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/artyomsv/quil/internal/logger"
 )
 
 // Router multiplexes several daemon connections behind the single tuiClient
@@ -27,6 +29,12 @@ type Router struct {
 	// the local daemon. The running program pushes here instead, via
 	// SetActiveDest.
 	activeDest atomic.Value // string
+
+	// rights is each destination's rights level from its login hello_resp
+	// (guarded by mu). A read-only destination is sent view-class messages
+	// only: this is the ONE choke point every send passes, the same reason
+	// freezeInput is one choke point for input.
+	rights map[string]string
 }
 
 // NewRouter builds a router over the given connections, keyed by destination.
@@ -48,6 +56,16 @@ func NewRouter(conns map[string]Client) *Router {
 // changes, so the router's default routing target tracks what the user is
 // looking at. Safe from any goroutine.
 func (r *Router) SetActiveDest(dest string) { r.activeDest.Store(dest) }
+
+// SetDestRights records a destination's rights level. Safe from any goroutine.
+func (r *Router) SetDestRights(dest, rights string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.rights == nil {
+		r.rights = make(map[string]string)
+	}
+	r.rights[dest] = rights
+}
 
 func (r *Router) currentDest() string {
 	d, _ := r.activeDest.Load().(string)
@@ -293,6 +311,7 @@ func (r *Router) Send(m *ipc.Message) error {
 	m.Origin = dest
 
 	r.mu.RLock()
+	readOnly := r.rights[dest] == ipc.RightsReadOnly
 	c, ok := r.conns[dest]
 	if !ok && !stamped && len(r.conns) == 1 {
 		for _, only := range r.conns {
@@ -300,6 +319,13 @@ func (r *Router) Send(m *ipc.Message) error {
 		}
 	}
 	r.mu.RUnlock()
+
+	if readOnly && !clientauth.IsView(m.Type) {
+		// The daemon would refuse it anyway; not sending it keeps a viewer's
+		// keystrokes, resizes and OSC 7 reports off the wire.
+		logger.Debug("router: read-only %q: dropping %s", dest, m.Type)
+		return nil
+	}
 
 	if !ok {
 		// Drop with a log. Returning an error would break resizeAllPanes and

@@ -75,6 +75,23 @@ const (
 	ctxActDeleteGroup
 )
 
+// readOnlyGreyedItems are the context-menu rows that create, close or rename
+// — greyed on a read-only destination. Disconnect host stays: it is
+// client-side only.
+var readOnlyGreyedItems = map[ctxMenuAction]bool{
+	ctxActRename: true, ctxActClose: true, ctxActRenameTab: true,
+	ctxActRenameProject: true, ctxActDestroyProject: true,
+}
+
+// greyReadOnlyItems disables readOnlyGreyedItems' rows in place.
+func greyReadOnlyItems(items []ctxMenuItem) {
+	for i := range items {
+		if readOnlyGreyedItems[items[i].id] {
+			items[i].enabled = false
+		}
+	}
+}
+
 // ctxMenuItem is one row of the menu. Disabled rows render greyed, are
 // skipped by cursor movement, and are inert to clicks. gapAfter draws a
 // blank separator row below this item in the spaced layout — used at group
@@ -453,6 +470,11 @@ func (m *Model) openCtxMenu(pane *PaneModel, anchorX, anchorY int) {
 		cursor: -1,
 		items:  m.buildCtxMenuItems(pane),
 	}
+	// Greyed before firstEnabled, so the cursor never starts on a dead row.
+	// The pane menu always targets a pane of the active tab.
+	if m.destReadOnly(m.activeDest()) {
+		greyReadOnlyItems(s.items)
+	}
 	s.cursor = firstEnabled(s.items)
 	w, h := s.boxSize()
 	// Prefer the spaced layout (blank row between items — forgiving mouse
@@ -544,6 +566,9 @@ func (m *Model) openProjectCtxMenu(p *ProjectModel, anchorX, anchorY int) {
 		spaced:      false,
 		cursor:      -1,
 		items:       buildProjectCtxMenuItems(p.Dest != "", !m.projectActionable(p)),
+	}
+	if m.destReadOnly(p.Dest) {
+		greyReadOnlyItems(s.items)
 	}
 	s.cursor = firstEnabled(s.items)
 	w, h := s.boxSize()
@@ -725,6 +750,9 @@ func (m *Model) openTabCtxMenu(tab *TabModel, anchorX, anchorY int) {
 		spaced: false,
 		cursor: -1,
 		items:  m.buildTabCtxMenuItems(tab),
+	}
+	if m.destReadOnly(tab.Dest) {
+		greyReadOnlyItems(s.items)
 	}
 	s.cursor = firstEnabled(s.items)
 	w, h := s.boxSize()

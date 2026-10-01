@@ -50,6 +50,10 @@ func templateEditorRows(height int) int {
 }
 
 func (m Model) openNewTemplate() (tea.Model, tea.Cmd) {
+	if m.destReadOnly(m.activeDest()) {
+		cmd := m.refuseReadOnly()
+		return m, cmd
+	}
 	f := templateDialogState{dest: m.activeDest()}
 	if p := m.activeProjectModel(); p != nil {
 		f.projectID, f.projectName, f.root = p.ID, p.Name, p.RootDir

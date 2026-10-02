@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -65,6 +66,52 @@ func TestRights_SandboxCapRequestsCapped(t *testing.T) {
 		if sendAndProbe(t, local, capReq("lcap-"+string(rune('a'+i)))) {
 			t.Fatal("the local socket is capped too")
 		}
+	}
+}
+
+// The per-conn cap alone is not a bound: a new conn starts with an empty
+// count. Waiting sandbox checks must therefore end with their conn, or a
+// viewer logging in again and again stacks them without limit. The probe
+// stays blocked throughout, so only the conn's close can end the waits.
+func TestRights_SandboxCapWaitersEndWithTheirConn(t *testing.T) {
+	block := make(chan struct{})
+	var unblock sync.Once
+	prev := sandboxProbeFn
+	sandboxProbeFn = func(context.Context) (sandbox.Info, error) {
+		<-block
+		return sandbox.Info{ServerVersion: "1", OSType: "linux", Arch: "amd64"}, nil
+	}
+	t.Cleanup(func() { sandboxProbeFn = prev })
+	t.Cleanup(func() { unblock.Do(func() { close(block) }) })
+
+	h := newAuthHarness(t)
+	tok := h.mint(t, "viewer", clientauth.LevelReadOnly, nil)
+	for round := 0; round < 3; round++ {
+		viewer, _ := h.login(t, tok)
+		for i := 0; i < maxParkedPerConn; i++ {
+			id := fmt.Sprintf("cap-%d-%d", round, i)
+			if sendAndProbe(t, viewer, mustMessage(t, ipc.MsgSandboxCapReq, id, ipc.SandboxCapReqPayload{})) {
+				t.Fatalf("round %d: probe %d refused below the cap", round, i)
+			}
+		}
+		// The first request of the first round runs the shared probe; every
+		// other one waits on it.
+		want := int32(maxParkedPerConn)
+		if round == 0 {
+			want--
+		}
+		pollUntil(t, "the requests to wait on the probe", func() bool { return h.d.sandboxCap.waiting.Load() == want })
+		if err := viewer.Close(); err != nil {
+			t.Fatal(err)
+		}
+		pollUntil(t, "the waits to end with their conn", func() bool { return h.d.sandboxCap.waiting.Load() == 0 })
+	}
+	// The shared probe outlives every conn by design. Let it finish before
+	// the cleanup restores sandboxProbeFn, which it read: this get waits on
+	// the probe's own completion, which orders that read before the restore.
+	unblock.Do(func() { close(block) })
+	if got := h.d.sandboxCap.get(context.Background()); !got.Available {
+		t.Fatalf("the shared probe's answer = %+v, want available", got)
 	}
 }
 
@@ -238,4 +285,48 @@ func TestCloseAuth_WaitsForTheExpirySweep(t *testing.T) {
 		}
 	}
 	t.Fatal("the sweep's token_expired line was lost")
+}
+
+// A waiter that leaves gets the canceled answer at once, and the shared probe
+// it was waiting on still completes and is cached for everyone else: one
+// client's disconnect must not store "docker not available" for 30 seconds.
+func TestSandboxCap_CanceledWaiterDoesNotPoisonTheCache(t *testing.T) {
+	block := make(chan struct{})
+	started := make(chan struct{})
+	var once sync.Once
+	prev := sandboxProbeFn
+	sandboxProbeFn = func(ctx context.Context) (sandbox.Info, error) {
+		once.Do(func() { close(started) })
+		select {
+		case <-block:
+		case <-ctx.Done():
+			return sandbox.Info{}, ctx.Err()
+		}
+		return sandbox.Info{ServerVersion: "1", OSType: "linux", Arch: "amd64"}, nil
+	}
+	t.Cleanup(func() { sandboxProbeFn = prev })
+
+	var c sandboxCap
+	proberCtx, cancelProber := context.WithCancel(context.Background())
+	probed := make(chan ipc.SandboxCapRespPayload, 1)
+	go func() { probed <- c.get(proberCtx) }()
+	<-started
+
+	waiterCtx, cancelWaiter := context.WithCancel(context.Background())
+	waited := make(chan ipc.SandboxCapRespPayload, 1)
+	go func() { waited <- c.get(waiterCtx) }()
+	pollUntil(t, "the waiter to park", func() bool { return c.waiting.Load() == 1 })
+	cancelWaiter()
+	if got := <-waited; got.Error != errSandboxCapCanceled {
+		t.Fatalf("canceled waiter got %+v, want the canceled answer", got)
+	}
+	// Even the PROBER's own caller leaving must not cut the shared probe short.
+	cancelProber()
+	close(block)
+	if got := <-probed; !got.Available {
+		t.Fatalf("the shared probe was cut short by its caller's cancel: %+v", got)
+	}
+	if got := c.get(context.Background()); !got.Available {
+		t.Fatalf("cached answer = %+v, want available", got)
+	}
 }

@@ -127,7 +127,12 @@ func (d *Daemon) revokeToken(target string) (clientauth.Entry, int, error) {
 // a 1 s flush per conn must not stall the requesting conn.
 func (d *Daemon) closeAuthConns(conns []*ipc.Conn, reason string) {
 	for _, c := range conns {
+		// Counted so closeAuth can wait: the close is what makes the conn's
+		// handler write its tcp_disconnect line, which must land before
+		// audit.log closes.
+		d.auth.closeWG.Add(1)
 		go func(c *ipc.Conn) {
+			defer d.auth.closeWG.Done()
 			sendError(c, "", "", ipc.ErrCodeRefused, reason)
 			c.Flush(refusalFlushTimeout)
 			c.Close()

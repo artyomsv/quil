@@ -150,6 +150,9 @@ type authService struct {
 	expiryStop     chan struct{}
 	expiryDone     chan struct{}
 	expiryStopOnce sync.Once
+	// closeWG counts the workers closeAuthConns starts for a revoke or an
+	// expiry; closeAuth waits for them before closing audit.log.
+	closeWG sync.WaitGroup
 
 	// afterRevokeMark is a test seam between revoke phases 1 and 2.
 	afterRevokeMark func()
@@ -337,6 +340,9 @@ func (d *Daemon) closeAuth() {
 		d.auth.expiryStopOnce.Do(func() { close(d.auth.expiryStop) })
 		<-d.auth.expiryDone
 	}
+	// After the loop: a sweep that just ended may have started close
+	// workers. Each is bounded by its 1 s refusal flush.
+	d.auth.closeWG.Wait()
 	d.flushPreLoginAudit(time.Now(), true)
 	d.auth.closePersist()
 	if err := d.audit.Close(); err != nil {

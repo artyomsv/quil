@@ -353,8 +353,8 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 	// the one handleToggleOverlay would create the overlay on.
 	if m.pluginRegistry != nil {
 		dest := m.activeDest()
-		lazygitOK = m.pluginAvailableFor(dest, overlayPluginLazygit)
-		hunkOK = m.pluginAvailableFor(dest, overlayPluginHunk)
+		lazygitOK = m.pluginAvailableFor(dest, overlayPluginLazygit) && m.canOpenOverlay(dest, overlayPluginLazygit)
+		hunkOK = m.pluginAvailableFor(dest, overlayPluginHunk) && m.canOpenOverlay(dest, overlayPluginHunk)
 	}
 
 	// --- Go to pane: navigation leads — jumping to a pane is the most common

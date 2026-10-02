@@ -2419,6 +2419,12 @@ func (m Model) handleCreatePaneSelect() (tea.Model, tea.Cmd) {
 		if !m.pluginAvailableFor(m.createPaneDialogDest(), plugins[m.dialogCursor].Name) {
 			return m, nil
 		}
+		// A plugin with form fields is started by INSTANCE, whose arguments go
+		// to the daemon raw — refused for a token without that right. Said
+		// here, before the form is filled in, rather than after it.
+		if len(plugins[m.dialogCursor].Command.FormFields) > 0 && !m.destCanRawArgs(m.createPaneDialogDest()) {
+			return m, m.refuseInstanceCreate()
+		}
 		m.selectedPlugin = plugins[m.dialogCursor].Name
 		m.selectedInstanceArgs = nil
 		m.selectedInstanceName = ""
@@ -2564,8 +2570,27 @@ func (m *Model) openInstanceForm(p *plugin.PanePlugin) {
 	m.dialog = dialogInstanceForm
 }
 
+// refuseInstanceCreate closes the create-pane dialog and flashes why: the
+// destination's token may not send a plugin instance's raw arguments. The
+// dialog is closed rather than left open because it covers the status bar the
+// flash is drawn on.
+func (m *Model) refuseInstanceCreate() tea.Cmd {
+	m.dialog = dialogNone
+	m.createPaneStep = 0
+	m.dialogCursor = 0
+	m.selectedInstanceArgs = nil
+	m.selectedInstanceName = ""
+	return m.refuseNoRawArgs()
+}
+
 // handleCreatePaneSplit handles the final split direction selection (step 3).
 func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
+	// The submit itself refuses too, for an instance reached some other way:
+	// this create is sent id-less, so the daemon's refusal would be silent.
+	if len(m.selectedInstanceArgs) > 0 && !m.destCanRawArgs(m.createPaneDialogDest()) {
+		cmd := m.refuseInstanceCreate()
+		return m, cmd
+	}
 	target := m.createPaneTarget
 	pluginName := m.selectedPlugin
 	instanceName := m.selectedInstanceName

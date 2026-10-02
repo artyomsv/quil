@@ -186,8 +186,8 @@ func (m *Model) buildCtxMenuItems(pane *PaneModel) []ctxMenuItem {
 		// an installation. Asked of the active project's daemon, which is the
 		// one handleToggleOverlay would create the overlay on.
 		dest := m.activeDest()
-		lazygitOK = m.pluginAvailableFor(dest, overlayPluginLazygit)
-		hunkOK = m.pluginAvailableFor(dest, overlayPluginHunk)
+		lazygitOK = m.pluginAvailableFor(dest, overlayPluginLazygit) && m.canOpenOverlay(dest, overlayPluginLazygit)
+		hunkOK = m.pluginAvailableFor(dest, overlayPluginHunk) && m.canOpenOverlay(dest, overlayPluginHunk)
 	}
 	muteLabel := "Mute notifications"
 	if pane.Muted {

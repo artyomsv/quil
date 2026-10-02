@@ -28,6 +28,19 @@ const (
 func (m *Model) handleToggleLazygit() tea.Cmd { return m.handleToggleOverlay(overlayPluginLazygit) }
 func (m *Model) handleToggleHunk() tea.Cmd    { return m.handleToggleOverlay(overlayPluginHunk) }
 
+// canOpenOverlay reports whether the menu and palette rows for pluginName's
+// overlay can do anything on dest's active tab: a token without raw-argument
+// rights cannot create one, so its row is live only while that tab already
+// runs this plugin's overlay — the one the key would show. The binary check
+// is the caller's, as before.
+func (m *Model) canOpenOverlay(dest, pluginName string) bool {
+	if m.destCanRawArgs(dest) {
+		return true
+	}
+	tab := m.activeTabModel()
+	return tab != nil && tab.overlayRuns(pluginName)
+}
+
 // handleToggleOverlay implements the overlay state machine (spec §4) for one
 // overlay plugin.
 //
@@ -71,6 +84,14 @@ func (m *Model) handleToggleOverlay(pluginName string) tea.Cmd {
 	if tab.overlayVisible && tab.overlayRuns(pluginName) {
 		tab.overlayVisible = false
 		return tea.Batch(tea.ClearScreen, m.overlayVisibilityCmd(tab, false))
+	}
+
+	// A token that may not create an overlay can still show or hide one the
+	// tab already runs; with none to show, every remaining step ends in a
+	// create the daemon refuses without a word, so say so here instead of
+	// asking it about repositories first.
+	if !m.destCanRawArgs(tab.Dest) && !tab.overlayRuns(pluginName) {
+		return m.refuseNoRawArgs()
 	}
 
 	// Step 2: resolve candidates from the active NORMAL pane's CWD.
@@ -133,6 +154,13 @@ func (m *Model) resolveOverlay(tab *TabModel, candidates []string, pluginName st
 				return m.showOverlay(tab)
 			}
 		}
+	}
+
+	// Every step from here creates (or replaces) an overlay pane, which a
+	// token without raw-argument rights may not do: refused before the picker
+	// too, so its Enter is never the step that fails.
+	if !m.destCanRawArgs(tab.Dest) {
+		return m.refuseNoRawArgs()
 	}
 
 	// Step 5: availability gate — must come before the picker so a missing
@@ -400,6 +428,11 @@ func (m *Model) createOverlay(tab *TabModel, repo, pluginName string) tea.Cmd {
 	if !m.pluginAvailableFor(tab.Dest, pluginName) {
 		m.setFlash(pluginName + " not installed")
 		return m.flashCmd()
+	}
+	// Defense-in-depth too: the daemon refuses an overlay create from a token
+	// without raw-argument rights, and this send carries no id to answer.
+	if !m.destCanRawArgs(tab.Dest) {
+		return m.refuseNoRawArgs()
 	}
 
 	var cmds []tea.Cmd

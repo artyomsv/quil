@@ -1477,6 +1477,26 @@ func (m *Model) refuseNoAdmin() tea.Cmd {
 	return m.flashCmd()
 }
 
+// noRawArgsFlash is what an overlay or a plugin instance says on a connection
+// whose token may not start a program by raw arguments.
+const noRawArgsFlash = "this connection's token cannot start a program by raw arguments"
+
+// destCanRawArgs reports whether dest accepts a create carrying raw program
+// arguments — a plugin instance's instance_args, or an overlay pane: the local
+// socket and ssh record no rights, and a token must be full. The daemon refuses
+// both for a standard token, and the TUI sends them id-less, so the refusal
+// would otherwise be silent: nothing happens and nothing says why.
+func (m Model) destCanRawArgs(dest string) bool {
+	r := m.destRights[dest]
+	return r == "" || r == ipc.RightsFull
+}
+
+// refuseNoRawArgs flashes why an overlay or an instance did not start.
+func (m *Model) refuseNoRawArgs() tea.Cmd {
+	m.setFlash(noRawArgsFlash)
+	return m.flashCmd()
+}
+
 // rightsDest is the destination an action with no pane or tab of its own is
 // aimed at, for the rights checks. It is activeDest — except before the first
 // broadcast, and on a daemon that has none to report, when there is no
@@ -1535,7 +1555,16 @@ func (m *Model) SetHomeDest(dest string) { m.homeDest = dest }
 // value of "no master reported yet" must behave exactly like "no follower
 // gate applies", which is what every pre-multi-client-sync test and every
 // single-client session already assumes.
+//
+// A read-only destination is ALWAYS a follower, master or not. Its client is
+// never eligible for the master role, so with no other client attached the
+// daemon reports no master at all — and "no master" would otherwise hand the
+// viewer its own geometry: VTs sized to its own boxes, rewrapping output the
+// PTY was never resized to match, since a viewer can resize nothing.
 func (m *Model) isFollower(dest string) bool {
+	if m.destReadOnly(dest) {
+		return true
+	}
 	master := m.sizeMaster[dest]
 	return master != "" && master != m.clientID
 }

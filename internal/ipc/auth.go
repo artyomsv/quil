@@ -61,7 +61,9 @@ func (a *AuthState) Principal() string {
 func (a *AuthState) ReadOnly() bool { return a != nil && a.Level == RightsReadOnly }
 
 // Revoke silences this conn at once (the first phase of a revoke): Broadcast
-// skips it and Send drops everything but an error frame.
+// skips it and every send path drops everything but an error frame. Frames
+// already queued before it — at most the conn's send buffer, each authorised
+// when it was queued — may still be written; nothing new is queued after it.
 func (a *AuthState) Revoke() { a.revoked.Store(true) }
 
 // Revoked is nil-safe.

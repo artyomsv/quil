@@ -14,6 +14,7 @@ Quil reads `~/.quil/config.toml` (or `$QUIL_HOME/config.toml` when `QUIL_HOME` i
 - [`[overlay]`](#overlay)
 - [`[update]`](#update)
 - [`[[destinations]]`](#destinations)
+- [`[listener]`](#listener)
 - [`[keybindings]`](#keybindings) — legacy, migrated to `bindings.toml`
 - [`bindings.toml`](#bindingstoml)
 - [Per-plugin instances](#per-plugin-instances)
@@ -95,6 +96,9 @@ max_live = 5                    # cap live overlays across all tabs; 0 disables
 [update]
 check = true                    # Daily check for new releases
 auto = true                     # Download and stage in background
+
+[listener]
+tcp = ""                        # off; e.g. "127.0.0.1:7878" — loopback only
 
 # Extra daemons to attach beside the local one. Optional and omitted by
 # default; one table per host. See [[destinations]] below.
@@ -355,6 +359,12 @@ Notes:
   explanation in `quil.log`; run `quil remote setup <dest>` to upgrade it.
 - `quil --remote <host>` **ignores this list**. That mode means "drive that one
   machine", so it attaches to that host alone and to no local daemon.
+
+## `[listener]`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `tcp` | `""` (off) | Token-authenticated TCP listener. A bare port (`"7878"`) or a loopback `host:port` (`127.0.0.1`, `[::1]`, `localhost`). Any other host, and `":7878"`, are refused: the daemon logs why and starts the unix socket only. Requires the audit log and token store to open. Reach it from another machine with `ssh -L`. Read at daemon start — restart the daemon after changing it. See [Security](security.md). |
 
 ## `[keybindings]`
 

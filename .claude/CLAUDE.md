@@ -272,7 +272,7 @@ Project docs are now organized as a navigable tree under `docs/` (with the index
 - `docs/troubleshooting.md` — Daemon won't start, MCP not detected, log file locations, reset
 - `docs/sandbox-panes.md` — Docker sandbox panes: building the image, signing in, what the sandbox does and does not bound
 - `docs/security.md` — tokens, rights levels, the TCP listener, audit log, Windows ACL status
-- `docs/architecture.md` — 25 ADRs (moved from root `ARCHITECTURE.md`)
+- `docs/architecture.md` — 34 ADRs (moved from root `ARCHITECTURE.md`)
 - `docs/vision.md` — Project vision (moved from root `VISION.md`)
 - `docs/prd.md` — Original v1 PRD, historical reference (moved from root `PRD.md`)
 - `docs/roadmap.md` — Milestone status + planned work (moved from root `ROADMAP.md`)

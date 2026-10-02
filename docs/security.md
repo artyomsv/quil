@@ -4,7 +4,7 @@ Quil's daemon accepts clients on two transports.
 
 | Transport | Who | Guard | Rights |
 |---|---|---|---|
-| Local socket (`QUIL_HOME/quild.sock`) | the TUI, `quil mcp` bridges, scripts, `quil --stdio` for ssh | your OS account: socket mode `0600` (Unix), owner-only ACL (Windows) | full |
+| Local socket (`QUIL_HOME/quild.sock`) | the TUI, `quil mcp` bridges, scripts, `quil --stdio` for ssh | your OS account: socket mode `0600` (Unix), owner-only ACL (Windows — see [Windows status](#windows-status)) | full |
 | TCP listener (opt-in, loopback only) | a client with a token — another local account, or another machine via `ssh -L` | a token and a mutual proof | the token's level |
 
 The listener is off until you set `[listener] tcp` in `config.toml` (see [Configuration](configuration.md#listener)). The local socket needs no setup and works exactly as before; nothing on this page changes it except the tighter file permissions described under [Local socket](#local-socket).
@@ -27,6 +27,8 @@ The listener is off until you set `[listener] tcp` in `config.toml` (see [Config
 | `standard` | everything a user does in the TUI, including typing into a shell (which runs code as you) and the setup dialog's toggles and kube context | start a program by raw arguments (plugin instances such as ssh/stripe), open overlay panes (lazygit), stop the daemon, reload its plugins, set its overlay policy, stop a process from the Processes dialog, check for or stage updates, manage tokens |
 | `full` | everything a local client can | manage tokens (local socket only) |
 
+Every TCP connection, whatever its level, may hold at most 4 waiting requests at once (`watch_notifications` and `wait_task`, which each park until something happens); the local socket has no such cap.
+
 `standard` does not stop code execution — typing into a shell is running code. It stops what would leave no trace on screen (a program started by raw arguments) and daemon-wide actions. A sandbox pane can run any image your Docker can reach, inside the sandbox's mount boundary.
 
 `read-only` is the only level that grants no code execution. It never spawns, types into or resizes a pane: a viewer reading a pane that has not started yet gets what is buffered, and the pane stays unstarted.
@@ -36,7 +38,7 @@ The listener is off until you set `[listener] tcp` in `config.toml` (see [Config
 The TUI is told its level when it logs in, and applies it before the daemon has to:
 
 - A read-only connection shows `[read-only]` in the status bar. It follows the daemon: the project holding the daemon's active tab, and that tab. Every workspace change aimed at it — creating, closing or renaming panes and tabs, switching tabs, reordering, layout arrangements, pane and border drags, mute, pin and deletion marks, tab colours — is refused on the spot with a flash, and nothing changes on screen. Create, close and rename are greyed in the command palette and context menus. Keystrokes, resizes and other non-view messages are never sent.
-- Stop daemon (greyed in F1 → About), plugin reload, stopping a process and the overlay policy are refused for `read-only` and `standard` alike, with a flash; the TUI does not quit after a stop it could not make.
+- Stop daemon (greyed in F1 → About), plugin reload and stopping a process are refused for `read-only` and `standard` alike, with a flash; the TUI does not quit after a stop it could not make. The overlay policy (your `[overlay]` settings, which a client normally pushes to every daemon it attaches to) is not sent to such a destination at all.
 - The setup dialog sends toggle and kube-context NAMES, which the daemon turns into arguments itself. That is why a `standard` token keeps the dialog while raw arguments stay full-only.
 
 ## Tokens
@@ -58,7 +60,7 @@ What you see when a login fails:
 | Message | Meaning |
 |---|---|
 | `no listener at <addr>` | nothing listens there — the daemon is down or `[listener] tcp` is off |
-| `token refused (wrong, expired or revoked)` | the daemon refused the login. The daemon's own reason is in `quil.log`: `login required`, `token refused`, `login timeout`, or `too large` (a proof frame over 4 KiB) |
+| `token refused (wrong, expired or revoked)` | the daemon refused the login. The daemon's own reason is in `quil.log` (for every login: at launch, from the New Project dialog, and on a reconnect): `login required`, `token refused`, `login timeout`, or `too large` (a proof frame over 4 KiB) |
 | `the listener at <addr> could not prove it is your daemon` | whatever answered does not hold this token's verifier — an impostor on the port, or a daemon with another `tokens.json`. Nothing more was sent to it |
 
 A revoked or refused re-login parks the destination with that reason instead of retrying; a refused connection (a restarting daemon) keeps retrying.
@@ -79,9 +81,9 @@ If the audit log or the token store cannot be opened, the TCP listener does not 
 
 On Unix the socket is created under a restrictive umask (Linux) and chmodded `0600` at once; a failed chmod stops the daemon. `QUIL_HOME` is created `0700`, and a wider mode is reported in `quild.log`.
 
-On Windows, Quil gives `QUIL_HOME` a protected owner-only access list — your account and SYSTEM, not Administrators — before creating anything in it, so every file inside inherits owner-only access, and sets the same list on the socket, `tokens.json` and `audit.log` (`tokens.json` is created with it, never fixed afterwards). Two consequences of the upgrade:
+On Windows, Quil gives `QUIL_HOME` a protected owner-only access list — your account and SYSTEM, not Administrators — at every daemon start, before the socket, `tokens.json` or `audit.log` is created. Files that already exist in it (the lock and pid files, `quild.log`, everything from earlier runs) get the same list through inheritance, and every file created later inherits it at creation. The socket and `audit.log` are then given the list explicitly as well, and `tokens.json` is created with it, never fixed afterwards. Rotated `audit.log` archives rely on the inherited list. Two consequences of the upgrade:
 
-- **The first start of the updated daemon rewrites the quil folder's access list, recursively.** Every file and folder already under `QUIL_HOME` that inherits its permissions ends up owner + SYSTEM only. A tool running as another account that used to read those files (a backup agent, for one) loses access.
+- **The first start of the updated daemon rewrites the quil folder's access list, recursively.** Every file and folder already under `QUIL_HOME` that inherits its permissions ends up owner + SYSTEM only; an entry set explicitly on one file stays. A tool running as another account that used to read those files (a backup agent, for one) loses access.
 - **`QUIL_HOME` must be on a volume with access lists (NTFS).** On FAT or exFAT the folder cannot be protected, and when the socket file cannot be protected either the daemon refuses to start rather than serve an unguarded socket.
 
 ## Windows status
@@ -102,4 +104,4 @@ On Windows, Quil gives `QUIL_HOME` a protected owner-only access list — your a
 3. Stop the server (Ctrl+C) and restart it with `$env:QUIL_ACL_SOCKET='protected'` (it creates a NEW `quil-acl-*` directory and prints a new sock path), run the step 2 `runas` command again with that path writing `step3.txt`, then the step 1 owner client again with that path.
    → expect `RESULT: REFUSED` in `step3.txt` and `RESULT: ACCEPTED` for the owner. Delete any `C:\Temp\quil-acl\quil-acl-*` directory left behind by a Ctrl+C, and the `quilacl2` account (`net user quilacl2 /delete`) when done.
 
-If step 3 is not refused, AF_UNIX on Windows does not enforce the socket file's ACL and the directory ACL is the only guard; record that here. Record the date and Windows build of the run in this section and replace the status line.
+What the test settles, and what it does not: it keeps the probe's FOLDER permissive in every step and varies only the socket file's own ACL. If step 3 is refused, the socket file's ACL is enforced — record that here with the date and Windows build, and replace the status line. If it is not refused, the socket file's ACL is NOT enforced and only the owner-only folder ACL around the socket may still keep another account out; this test does not check that, so record only the first half and leave the folder's protection marked "not yet verified".

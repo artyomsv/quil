@@ -208,6 +208,47 @@ func TestLogin_LateHelloUnderBackoff(t *testing.T) {
 	manualLogin(t, c, tok)
 }
 
+// The proof step's timer must be cleared when the proof ARRIVES, not when
+// the login finishes: a proof sent 300 ms into a 1 s step, followed by a
+// 1.5 s backoff, is still being checked when the step timer would fire (at
+// 1 s). Arming the next step or forgetting the session on success both stop
+// the timer too, so only this shape — the timer due during the backoff —
+// fails if the clear on arrival, or the timer's own state check, is lost.
+// Margins: the proof lands 700 ms before the timer is due, and the backoff
+// outlasts it by 500 ms.
+func TestLogin_ProofTimerClearedBeforeBackoff(t *testing.T) {
+	setLoginVar(t, &loginStepTimeout, time.Second)
+	setLoginVar(t, &loginBackoffBase, 1500*time.Millisecond)
+	setLoginVar(t, &loginBackoffCap, 1500*time.Millisecond)
+	h := newAuthHarness(t)
+	tok := h.mint(t, "a", clientauth.LevelFull, nil)
+	h.d.auth.failures.Store(1) // one earlier failure: a 1.5 s backoff
+	c := h.dialRaw(t)
+	id, err := clientauth.ParseToken(tok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonceC, nonceS := helloAndChallenge(t, c, "L1", loginHelloFor(id))
+	time.Sleep(300 * time.Millisecond)
+	proof := clientauth.ClientProof(tok, clientauth.AuthMessage(id, nonceC, nonceS))
+	writeRaw(t, c, ipc.MsgAuthProof, "L1", ipc.AuthProofPayload{Proof: proof})
+	c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	defer c.SetReadDeadline(time.Time{})
+	for {
+		resp, err := ipc.ReadMessage(c)
+		if err != nil {
+			t.Fatalf("hello_resp: %v", err)
+		}
+		if resp.ID != "L1" {
+			continue // a broadcast: the conn is authenticated just before hello_resp
+		}
+		if resp.Type != ipc.MsgHelloResp {
+			t.Fatalf("want hello_resp, got %s %s", resp.Type, resp.Payload)
+		}
+		return
+	}
+}
+
 func TestLogin_UnauthConnReadsNoBroadcast(t *testing.T) {
 	h := newAuthHarness(t)
 	raw := h.dialRaw(t)

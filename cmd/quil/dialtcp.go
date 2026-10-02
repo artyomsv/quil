@@ -45,9 +45,16 @@ var errNoListener = errors.New("no listener")
 // Called first thing in main, whatever the mode.
 func takeTokenEnv() string {
 	v := os.Getenv("QUIL_TOKEN")
-	os.Unsetenv("QUIL_TOKEN")
+	if err := unsetenvFn("QUIL_TOKEN"); err != nil {
+		// A failure means every child would inherit the token, so it is worth
+		// a line — naming the variable, never its value.
+		log.Printf("could not remove QUIL_TOKEN from this process's environment: %v", err)
+	}
 	return v
 }
+
+// unsetenvFn is os.Unsetenv, a var so a test can make it fail.
+var unsetenvFn = os.Unsetenv
 
 // parseConnectFlags extracts --connect <addr> (or --connect=<addr>) and
 // --token-file <path>. The address is loopback-only until TLS exists, which is

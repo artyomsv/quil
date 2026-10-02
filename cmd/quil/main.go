@@ -171,7 +171,7 @@ func main() {
 			return
 		case "restart":
 			if remoteMode() {
-				fmt.Fprintf(os.Stderr, "quil restart: not available with --remote (target: %s)\n", remoteDest)
+				fmt.Fprint(os.Stderr, remoteRefusal("restart", false))
 				os.Exit(1)
 			}
 			// Recovery path for a hung/wedged daemon: stop with bounded
@@ -190,9 +190,7 @@ func main() {
 				// --json emits {"running":true,...} with no field saying which
 				// host replied. Refused rather than silently wrong; reading the
 				// remote status over the transport is Phase 3 work.
-				fmt.Fprintf(os.Stderr, "quil status: not available with --remote (target: %s)\n"+
-					"Run it on the remote host instead:\n"+
-					"    ssh %s quil status\n", remoteDest, remoteDest)
+				fmt.Fprint(os.Stderr, remoteRefusal("status", true))
 				os.Exit(1)
 			}
 			runStatus(os.Args[2:])
@@ -201,6 +199,25 @@ func main() {
 	}
 
 	launchTUI()
+}
+
+// remoteRefusal is what a command acting on the LOCAL daemon prints when this
+// session is attached to another one. --connect names a TCP address, not an
+// ssh destination, so it gets its own flag in the text and no `ssh <target>`
+// advice — that command would try to resolve "tcp:127.0.0.1:7878" as a host.
+func remoteRefusal(cmd string, runThere bool) string {
+	if connectMode() {
+		msg := fmt.Sprintf("quil %s: not available with --connect (target: %s)\n", cmd, connectAddr)
+		if runThere {
+			msg += fmt.Sprintf("Run it on the machine whose daemon listens on %s.\n", connectAddr)
+		}
+		return msg
+	}
+	msg := fmt.Sprintf("quil %s: not available with --remote (target: %s)\n", cmd, remoteDest)
+	if runThere {
+		msg += fmt.Sprintf("Run it on the remote host instead:\n    ssh %s quil %s\n", remoteDest, cmd)
+	}
+	return msg
 }
 
 func handleDaemon() {
@@ -283,7 +300,7 @@ func startDaemon(quiet bool) int {
 		// Defense in depth: launchTUI never reaches here in remote mode, but
 		// startDaemon spawns against config.SocketPath() and a future caller
 		// that forgets would start a daemon on the wrong machine.
-		fmt.Fprintln(os.Stderr, "internal error: startDaemon called while attached to a remote daemon")
+		fmt.Fprintf(os.Stderr, "internal error: startDaemon called while attached to another daemon (%s)\n", remoteDest)
 		exitFn(1)
 		// Unreachable in production: exitFn is os.Exit, which never returns.
 		// The explicit return exists so a test double that DOES return (a

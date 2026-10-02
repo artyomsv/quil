@@ -79,6 +79,27 @@ func TestTakeTokenEnv_Unsets(t *testing.T) {
 	}
 }
 
+// A failed unset is logged — children would inherit the token — naming the
+// variable and never its value, and the token is still returned.
+func TestTakeTokenEnv_UnsetFailureIsLoggedWithoutTheValue(t *testing.T) {
+	logged := captureLog(t)
+	const secret = "qtk_0a1b2c3d_secretvalue"
+	t.Setenv("QUIL_TOKEN", secret)
+	prev := unsetenvFn
+	unsetenvFn = func(string) error { return errors.New("environment is read-only") }
+	t.Cleanup(func() { unsetenvFn = prev })
+	if got := takeTokenEnv(); got != secret {
+		t.Fatalf("got %q", got)
+	}
+	out := logged.String()
+	if !strings.Contains(out, "QUIL_TOKEN") || !strings.Contains(out, "environment is read-only") {
+		t.Fatalf("the failed unset was not logged: %q", out)
+	}
+	if strings.Contains(out, "secretvalue") {
+		t.Fatalf("the log carries the token: %q", out)
+	}
+}
+
 // withConnectState restores every package var applyConnectFlags writes.
 func withConnectState(t *testing.T) {
 	t.Helper()
@@ -87,6 +108,35 @@ func withConnectState(t *testing.T) {
 		remoteDest, connectAddr, connectToken, exitFn, os.Args = prevDest, prevAddr, prevTok, prevExit, prevArgs
 	})
 	remoteDest, connectAddr, connectToken = "", "", ""
+}
+
+// The refusals of commands that act on the local daemon name the flag the
+// session was started with. Under --connect they never offer `ssh tcp:…`
+// advice, which would try to resolve the address as a host; under --remote
+// they keep it.
+func TestRemoteRefusal_WordedForConnect(t *testing.T) {
+	withConnectState(t)
+	remoteDest, connectAddr = tcpDestPrefix+"127.0.0.1:7878", "127.0.0.1:7878"
+	for name, msg := range map[string]string{
+		"status": remoteRefusal("status", true),
+		"mcp":    mcpRemoteRefusal(),
+	} {
+		if !strings.Contains(msg, "--connect") || strings.Contains(msg, "--remote") ||
+			strings.Contains(msg, "ssh ") || strings.Contains(msg, tcpDestPrefix) {
+			t.Errorf("%s under --connect: %q", name, msg)
+		}
+		if !strings.Contains(msg, "127.0.0.1:7878") {
+			t.Errorf("%s under --connect does not name the address: %q", name, msg)
+		}
+	}
+
+	remoteDest, connectAddr = "gpu01", ""
+	if msg := remoteRefusal("status", true); !strings.Contains(msg, "--remote") || !strings.Contains(msg, "ssh gpu01 quil status") {
+		t.Errorf("status under --remote lost its ssh advice: %q", msg)
+	}
+	if msg := mcpRemoteRefusal(); !strings.Contains(msg, "--remote gpu01") {
+		t.Errorf("mcp under --remote: %q", msg)
+	}
 }
 
 // --connect must arm every --remote guard: `quil clients` and `quil daemon`
@@ -416,7 +466,12 @@ func TestDialTCP_LoginHelloIsSendHellos(t *testing.T) {
 		return nil // closing makes the login fail; only the hello matters here
 	})
 	_, _, _ = dialTCP(context.Background(), addr, tok)
-	got := <-seen
+	var got ipc.HelloPayload
+	select {
+	case got = <-seen:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the listener never received a login hello")
+	}
 	want := helloPayload(helloRoleTUI)
 	got.TokenID, got.Nonce, got.UptimeMS, want.UptimeMS = "", "", 0, 0
 	if !reflect.DeepEqual(got, want) { // HelloPayload holds a slice (Caps)

@@ -3,13 +3,17 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"log"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
 )
 
@@ -131,6 +135,99 @@ func TestTokenRequest_OldDaemonTimesOut(t *testing.T) {
 	}
 	if !strings.Contains(errOut.String(), "did not answer") {
 		t.Fatalf("stderr = %q", errOut.String())
+	}
+}
+
+// A daemon that reads the request and then CLOSES the connection is not an
+// older daemon: it had the request, and a revoke may have taken effect. The
+// message says how to check instead of blaming the version; only silence
+// (the test above) still reads as "did not answer".
+func TestTokenRequest_ClosedConnectionIsNotAnOldDaemon(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				_, _ = ipc.ReadMessage(c) // the request arrives, then the conn ends
+			}()
+		}
+	}()
+	prevDial, prevTimeout := tokenDialFn, tokenRequestTimeout
+	tokenDialFn = func() (*ipc.Client, error) {
+		return ipc.NewClientWithDialer(context.Background(), func(ctx context.Context) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "tcp", ln.Addr().String())
+		})
+	}
+	tokenRequestTimeout = 3 * time.Second
+	t.Cleanup(func() { tokenDialFn, tokenRequestTimeout = prevDial, prevTimeout })
+
+	var out, errOut bytes.Buffer
+	if code := runTokenRevoke([]string{"laptop"}, &out, &errOut); code == 0 {
+		t.Fatal("revoke succeeded without an answer")
+	}
+	got := errOut.String()
+	if !strings.Contains(got, "closed the connection") || !strings.Contains(got, "quil clients token list") {
+		t.Fatalf("stderr = %q, want the closed-connection advice", got)
+	}
+	if strings.Contains(got, "older") {
+		t.Fatalf("a closed connection was blamed on the daemon's version: %q", got)
+	}
+}
+
+// [daemon] auto_start = false: a token command against a daemon that is not
+// running fails with the reason and never spawns one, like the TUI and the
+// MCP bridge. With auto_start on (the default) it does try to start one.
+func TestLocalClientForCommand_HonoursAutoStart(t *testing.T) {
+	for _, autoStart := range []bool{false, true} {
+		t.Run(fmt.Sprintf("auto_start=%v", autoStart), func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("QUIL_HOME", home)
+			body := fmt.Sprintf("[daemon]\nauto_start = %v\n", autoStart)
+			if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			prev := clientsStartDaemonFn
+			started := 0
+			// The stand-in "daemon" is a bare server on the socket, so a start
+			// is observable as a connection and nothing real is spawned.
+			clientsStartDaemonFn = func(bool) int {
+				started++
+				srv := ipc.NewServer(config.SocketPath(), func(*ipc.Conn, *ipc.Message) {}, nil)
+				if err := srv.Start(); err != nil {
+					t.Errorf("stand-in daemon: %v", err)
+					return 0
+				}
+				t.Cleanup(func() { srv.Stop() })
+				return 0 // "already listening": nothing for the wait to watch
+			}
+			t.Cleanup(func() { clientsStartDaemonFn = prev })
+
+			c, err := localClientForCommand()
+			if c != nil {
+				c.Close()
+			}
+			if autoStart {
+				if started != 1 || err != nil {
+					t.Fatalf("auto_start on: started %d times, err %v; want one start and a connection", started, err)
+				}
+				return
+			}
+			if started != 0 {
+				t.Fatalf("auto_start off: startDaemon called %d times", started)
+			}
+			if err == nil || !strings.Contains(err.Error(), "auto_start is off") {
+				t.Fatalf("auto_start off: err = %v, want it to say auto_start is off", err)
+			}
+		})
 	}
 }
 

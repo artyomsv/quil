@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"text/tabwriter"
 	"time"
@@ -23,12 +24,27 @@ var tokenRequestTimeout = 5 * time.Second
 
 var errDaemonDidNotAnswer = errors.New("the daemon did not answer — it may be older than this quil; restart it with `quil daemon restart`")
 
+var errDaemonClosedConn = errors.New("the daemon closed the connection — run `quil clients token list` to see whether it took effect")
+
+// isTimeout reports whether err is a read deadline expiring, as opposed to
+// the connection ending.
+func isTimeout(err error) bool {
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		return true
+	}
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
+}
+
 // tokenRequestFn is the seam the command tests stub; tokenDialFn is the one
 // TestTokenRequest_OldDaemonTimesOut swaps so the real sendTokenRequest talks
 // to a silent fake instead of the local daemon.
 var (
 	tokenRequestFn = sendTokenRequest
 	tokenDialFn    = localClientForCommand
+	// clientsStartDaemonFn is startDaemon, swapped by the auto_start test so
+	// a regression records a call instead of spawning a daemon.
+	clientsStartDaemonFn = startDaemon
 )
 
 func handleClients() { handleClientsArgs(os.Args) }
@@ -162,7 +178,14 @@ func sendTokenRequest(msgType string, payload any) (*ipc.Message, error) {
 	}
 	resp, err := client.ReceiveByID(msg.ID, tokenRequestTimeout)
 	if err != nil {
-		return nil, errDaemonDidNotAnswer
+		// Only silence suggests an older daemon. A closed connection is a
+		// daemon that had the request and went away — a create or revoke may
+		// already have taken effect, so say how to check rather than blaming
+		// the version.
+		if isTimeout(err) {
+			return nil, errDaemonDidNotAnswer
+		}
+		return nil, errDaemonClosedConn
 	}
 	if resp.Type == ipc.MsgError {
 		var p ipc.ErrorPayload
@@ -174,10 +197,22 @@ func sendTokenRequest(msgType string, payload any) (*ipc.Message, error) {
 
 func localClientForCommand() (*ipc.Client, error) {
 	sock := config.SocketPath()
-	if c, err := ipc.NewClient(sock); err == nil {
+	c, err := ipc.NewClient(sock)
+	if err == nil {
 		return c, nil
 	}
-	pid := startDaemon(true)
+	// [daemon] auto_start = false means no command spawns a daemon — the
+	// rule the TUI and the MCP bridge already follow.
+	cfg := config.Default()
+	if path := config.ConfigPath(); fileExists(path) {
+		if loaded, loadErr := config.Load(path); loadErr == nil {
+			cfg = loaded
+		}
+	}
+	if !cfg.Daemon.AutoStart {
+		return nil, fmt.Errorf("cannot connect to daemon: %w — auto_start is off; run 'quil daemon start' first", err)
+	}
+	pid := clientsStartDaemonFn(true)
 	if !waitForDaemonReady(sock, pid) {
 		return nil, errors.New("daemon did not come up — check the daemon log (see 'quil daemon status')")
 	}

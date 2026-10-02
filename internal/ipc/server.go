@@ -829,10 +829,14 @@ func (s *Server) acceptTCP(ln net.Listener, hooks TCPHooks) {
 		count := len(s.conns)
 		s.mu.Unlock()
 		logger.Info("ipc: tcp client connected (total=%d)", count)
+		// Counted BEFORE the hook: the conn is already in s.conns, so a Stop
+		// landing while the hook runs closes it, and WaitConns must not report
+		// "every handler returned" for a conn whose handler — and disconnect
+		// callback — has yet to run.
+		s.handling.Add(1)
 		if hooks.Accepted != nil {
 			hooks.Accepted(conn)
 		}
-		s.handling.Add(1)
 		go s.handleConn(conn)
 	}
 }

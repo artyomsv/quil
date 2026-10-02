@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -202,23 +203,36 @@ func waitConns(t *testing.T, s *Server, n int) {
 	}
 }
 
+// Every send path of a revoked conn drops all but an error: the must-deliver
+// Send, the droppable telemetry path and the blocking broadcast path.
 func TestSend_RevokedSendsOnlyErrors(t *testing.T) {
-	a, b := net.Pipe()
-	defer b.Close()
-	c := newTCPConn(a, nil)
-	defer c.Close()
-	c.MarkAuthenticated(NewTokenAuth("0a1b2c3d", "t", RightsFull))
-	c.Auth().Revoke()
-	if err := c.Send(&Message{Type: MsgWorkspaceState}); err != nil {
-		t.Fatal(err)
-	}
-	if err := c.Send(&Message{Type: MsgError, ID: "x"}); err != nil {
-		t.Fatal(err)
-	}
-	b.SetReadDeadline(time.Now().Add(2 * time.Second))
-	msg, err := ReadMessage(b)
-	if err != nil || msg.Type != MsgError {
-		t.Fatalf("first frame on a revoked conn = %v, %v; want only the error", msg, err)
+	for _, tc := range []struct {
+		name string
+		send func(c *Conn, m *Message) error
+	}{
+		{"Send", func(c *Conn, m *Message) error { return c.Send(m) }},
+		{"SendDroppable", func(c *Conn, m *Message) error { return c.SendDroppable(m) }},
+		{"SendBlocking", func(c *Conn, m *Message) error { return c.SendBlocking(m, nil) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, b := net.Pipe()
+			defer b.Close()
+			c := newTCPConn(a, nil)
+			defer c.Close()
+			c.MarkAuthenticated(NewTokenAuth("0a1b2c3d", "t", RightsFull))
+			c.Auth().Revoke()
+			if err := tc.send(c, &Message{Type: MsgWorkspaceState}); err != nil {
+				t.Fatal(err)
+			}
+			if err := tc.send(c, &Message{Type: MsgError, ID: "x"}); err != nil {
+				t.Fatal(err)
+			}
+			b.SetReadDeadline(time.Now().Add(2 * time.Second))
+			msg, err := ReadMessage(b)
+			if err != nil || msg.Type != MsgError {
+				t.Fatalf("first frame on a revoked conn = %v, %v; want only the error", msg, err)
+			}
+		})
 	}
 }
 
@@ -249,23 +263,74 @@ func TestStartTCP_NinthPendingClosed(t *testing.T) {
 	_ = raws
 }
 
+// The pre-login cap is exact: a frame of PreLoginFrameMax bytes reaches the
+// handler, one byte more closes the conn at its length prefix, as does a
+// length far past it. "Closed" means the read ENDED — a read that merely timed
+// out is a conn left open, and must not pass for one that was closed.
 func TestReceive_PreLoginFrameCap(t *testing.T) {
-	h := newTCPHarness(t)
-	raw := h.dial(t)
-	h.waitAccepted(t, 1)
-	var hdr [4]byte
-	binary.BigEndian.PutUint32(hdr[:], 10<<20)
-	if _, err := raw.Write(hdr[:]); err != nil {
-		t.Fatal(err)
+	for _, tc := range []struct {
+		name   string
+		length uint32
+		closed bool
+	}{
+		{"10 MiB", 10 << 20, true},
+		{"cap plus one", PreLoginFrameMax + 1, true},
+		{"exactly the cap", PreLoginFrameMax, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTCPHarness(t)
+			raw := h.dial(t)
+			h.waitAccepted(t, 1)
+			if tc.closed {
+				var hdr [4]byte
+				binary.BigEndian.PutUint32(hdr[:], tc.length)
+				if _, err := raw.Write(hdr[:]); err != nil {
+					t.Fatal(err)
+				}
+				raw.SetReadDeadline(time.Now().Add(2 * time.Second))
+				var b [1]byte
+				_, err := raw.Read(b[:])
+				var ne net.Error
+				if err == nil || (errors.As(err, &ne) && ne.Timeout()) {
+					t.Fatalf("conn still open after a %d-byte pre-login frame (read: %v)", tc.length, err)
+				}
+				if rej := h.waitRejected(t, 1); len(rej) != 1 || rej[0] != RejectTooLarge {
+					t.Fatalf("rejected = %v, want [%q]", rej, RejectTooLarge)
+				}
+				return
+			}
+			frame := capSizedFrame(t, int(tc.length))
+			if _, err := raw.Write(frame); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case m := <-h.got:
+				if m.Type != MsgHello {
+					t.Fatalf("handler got %q, want hello", m.Type)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatalf("a %d-byte pre-login frame never reached the handler", tc.length)
+			}
+			if rej := h.waitRejected(t, 0); len(rej) != 0 {
+				t.Fatalf("a frame at the cap was rejected: %v", rej)
+			}
+		})
 	}
-	raw.SetReadDeadline(time.Now().Add(2 * time.Second))
-	var b [1]byte
-	if _, err := raw.Read(b[:]); err == nil {
-		t.Fatal("conn still open after an oversized pre-login frame")
+}
+
+// capSizedFrame is a length-prefixed hello whose JSON body is exactly n bytes,
+// padded through its ID.
+func capSizedFrame(t *testing.T, n int) []byte {
+	t.Helper()
+	const head, tail = `{"type":"hello","id":"`, `"}`
+	pad := n - len(head) - len(tail)
+	if pad < 0 {
+		t.Fatalf("setup: %d bytes cannot hold a hello", n)
 	}
-	if rej := h.waitRejected(t, 1); len(rej) != 1 || rej[0] != RejectTooLarge {
-		t.Fatalf("rejected = %v, want [%q]", rej, RejectTooLarge)
-	}
+	body := head + strings.Repeat("a", pad) + tail
+	frame := make([]byte, 4, 4+len(body))
+	binary.BigEndian.PutUint32(frame, uint32(len(body)))
+	return append(frame, body...)
 }
 
 // After login the 4 KiB cap lifts. The login is completed INSIDE the handler,
@@ -314,6 +379,47 @@ func TestReceive_CapLiftsAfterLogin(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("a logged-in conn's 5 KB frame never reached the handler")
+	}
+}
+
+// An accepted TCP conn is counted for WaitConns before its Accepted hook runs:
+// it is already registered, so a Stop during the hook closes it, and its
+// handler and disconnect callback are still to come.
+func TestWaitConns_CountsAConnWhileItsAcceptHookRuns(t *testing.T) {
+	inHook, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	s := NewServer(filepath.Join(t.TempDir(), "s"), func(*Conn, *Message) {}, nil)
+	if err := s.Start(); err != nil {
+		t.Fatal(err)
+	}
+	addr, err := s.StartTCP("127.0.0.1:0", TCPHooks{Accepted: func(*Conn) {
+		close(inHook)
+		<-release
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		releaseOnce.Do(func() { close(release) })
+		s.Stop()
+	})
+	raw, err := net.Dial("tcp", addr.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	select {
+	case <-inHook:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the Accepted hook never ran")
+	}
+	if s.WaitConns(50 * time.Millisecond) {
+		t.Fatal("WaitConns reported every handler returned while a conn was still in its accept hook")
+	}
+	releaseOnce.Do(func() { close(release) })
+	raw.Close()
+	if !s.WaitConns(3 * time.Second) {
+		t.Fatal("the conn's handler never returned after its client closed")
 	}
 }
 

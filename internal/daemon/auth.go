@@ -27,8 +27,13 @@ const (
 	defaultBackoffCap   = 2 * time.Second
 	refusalFlushTimeout = time.Second
 	// connDrainTimeout bounds how long Stop waits for the conns' disconnect
-	// callbacks before it closes the audit log they write to.
-	connDrainTimeout = 2 * time.Second
+	// callbacks before it closes the audit log they write to. A proof check
+	// can be asleep in its longest backoff when Stop closes its conn, and then
+	// flushes its refusal for up to refusalFlushTimeout before the handler
+	// returns — so the wait outlasts both, plus a second for the callback
+	// itself. Equal to the backoff cap alone, the refusal's login_failed was
+	// written after the audit log had closed.
+	connDrainTimeout = defaultBackoffCap + refusalFlushTimeout + time.Second
 )
 
 // The login timer, the step timeout and the backoff base/cap are package vars

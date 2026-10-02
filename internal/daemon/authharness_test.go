@@ -26,11 +26,22 @@ type authHarness struct {
 
 func newAuthHarness(t *testing.T) *authHarness {
 	t.Helper()
+	return newAuthHarnessWith(t, nil)
+}
+
+// newAuthHarnessWith runs setup after initAuth and BEFORE either listener
+// starts, so a field it sets on the authService (the sleep seam) is written
+// before any conn goroutine exists to read it.
+func newAuthHarnessWith(t *testing.T, setup func(*Daemon)) *authHarness {
+	t.Helper()
 	d := overlayTestDaemon(t, config.Default())
 	registerShippedPlugins(t, d)
 	home := config.QuilDir()
 	if err := d.initAuth(home); err != nil {
 		t.Fatalf("initAuth: %v", err)
+	}
+	if setup != nil {
+		setup(d)
 	}
 	sock := filepath.Join(home, "s.sock")
 	d.server = ipc.NewServer(sock, d.handleMessage, d.onClientDisconnect)

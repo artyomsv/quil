@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -769,9 +770,28 @@ func TestLogin_OversizeAfterLoginIsNotAFailedLogin(t *testing.T) {
 // Stop closes the audit log only after every conn's disconnect callback has
 // run: a TCP conn open at Stop gets its tcp_disconnect line, and a proof
 // check still in its backoff when its conn was closed gets its login_failed.
+// Stop's wait for the conns' disconnect callbacks must outlast a proof check
+// caught at its longest backoff plus the refusal flush that follows it, or
+// that refusal's audit line is written after the audit log closed. Equal to
+// the backoff cap alone, the wait ran out a full flush early.
+func TestConnDrainTimeout_OutlastsBackoffAndFlush(t *testing.T) {
+	if need := defaultBackoffCap + refusalFlushTimeout; connDrainTimeout <= need {
+		t.Fatalf("connDrainTimeout = %v, want more than backoff cap + refusal flush = %v", connDrainTimeout, need)
+	}
+}
+
 func TestStop_AuditsTheConnsOpenAtStop(t *testing.T) {
 	setLoginVar(t, &loginBackoffBase, 500*time.Millisecond)
-	h := newAuthHarness(t)
+	// The sleep seam says when the proof check has started its backoff, so
+	// Stop lands inside it on any scheduler rather than after a fixed guess.
+	inBackoff := make(chan struct{})
+	var once sync.Once
+	h := newAuthHarnessWith(t, func(d *Daemon) {
+		d.auth.sleep = func(dur time.Duration) {
+			once.Do(func() { close(inBackoff) })
+			time.Sleep(dur)
+		}
+	})
 	tok := h.mint(t, "a", clientauth.LevelFull, nil)
 	h.login(t, tok) // logged in, and still open at Stop
 	id, _ := clientauth.ParseToken(tok)
@@ -779,7 +799,11 @@ func TestStop_AuditsTheConnsOpenAtStop(t *testing.T) {
 	h.d.auth.failures.Store(1) // the next proof check sleeps 500 ms first
 	c := h.dialRaw(t)
 	sendHelloAndProof(t, c, "qtk_"+id+wrong[len("qtk_")+8:])
-	time.Sleep(100 * time.Millisecond) // the proof is now in its backoff
+	select {
+	case <-inBackoff:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the proof check never reached its backoff")
+	}
 	h.d.Stop()
 
 	var loggedInGone, refused bool

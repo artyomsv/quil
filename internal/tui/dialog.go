@@ -1203,6 +1203,9 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			// Kill is admin-class: refused for a token that is not full,
 			// against the destination of the pane the process runs under.
 			if !m.destCanAdmin(m.destOfPane(m.confirmID)) {
+				// Said in the dialog it returns to, as the first-line gate
+				// does: the status-bar flash is hidden behind it.
+				m.proc.notice = noAdminFlash
 				cmd := m.refuseNoAdmin()
 				return m, cmd
 			}

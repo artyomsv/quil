@@ -188,6 +188,14 @@ func (m Model) saveMigrationAndAdvance() (tea.Model, tea.Cmd) {
 	// RD-023 exists to remove.
 	// Hence the shared command rather than a bare MsgReloadPlugins; see
 	// reloadPluginsThenAskCmd for why the two sends must leave together.
+	//
+	// The files are this client's own and stay migrated, and the local registry
+	// above is reloaded; only the daemon's reload is admin-class, refused for a
+	// token that is not full.
+	if !m.destCanAdmin(m.rightsDest()) {
+		refuse := m.refuseNoAdmin()
+		return m, tea.Batch(refuse, tea.ClearScreen)
+	}
 	client := m.client
 	reloadCmd := func() tea.Msg {
 		if client == nil {

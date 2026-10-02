@@ -2,6 +2,9 @@ package tui
 
 import (
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +14,7 @@ import (
 	"github.com/artyomsv/quil/internal/clientauth"
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/artyomsv/quil/internal/plugin"
 )
 
 const roDest = "tcp:127.0.0.1:7878"
@@ -1036,5 +1040,191 @@ func TestReadOnly_DisconnectForgetsRights(t *testing.T) {
 	r.mu.RUnlock()
 	if kept {
 		t.Fatal("after disconnect: the router still holds the destination's rights")
+	}
+}
+
+var adminRightsCases = []string{ipc.RightsReadOnly, ipc.RightsStandard, ipc.RightsFull}
+
+// checkNoAdmin asserts the outcome of an admin-class action: sent and no
+// flash on full, neither on read-only or standard. Read-only alone would
+// pass on the router's drop, so the flash is what proves its gate; standard
+// passes the router, so its send is what proves it.
+func checkNoAdmin(t *testing.T, m Model, conn *fakeConn, msgType, rights string) {
+	t.Helper()
+	canAdmin := rights == ipc.RightsFull
+	if sent := sentType(conn, msgType); sent != canAdmin {
+		t.Fatalf("%s sent = %v on rights %q", msgType, sent, rights)
+	}
+	if flashed := m.flashText == noAdminFlash; flashed == canAdmin {
+		t.Fatalf("no-admin flash = %v on rights %q (flash %q)", flashed, rights, m.flashText)
+	}
+}
+
+// F1 → Plugins → Reload / Restore defaults: both end in a daemon plugin
+// reload, which is admin-class.
+func TestNoAdmin_PluginsDialogButtonsRefused(t *testing.T) {
+	for _, btn := range []int{0, 1} {
+		for _, rights := range adminRightsCases {
+			t.Run(fmt.Sprintf("button%d/%s", btn, rights), func(t *testing.T) {
+				t.Setenv("QUIL_HOME", t.TempDir())
+				m, conn := readOnlyModel(t, rights)
+				m.pluginRegistry = plugin.NewRegistry()
+				m = roUpdate(t, m, tea.WindowSizeMsg{Width: 172, Height: 48}, tea.KeyPressMsg{Code: tea.KeyF1})
+				m.dialogCursor = 2 // Plugins
+				m = roUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+				if m.dialog != dialogPlugins {
+					t.Fatal("setup: F1 → Plugins did not open")
+				}
+				m.dialogCursor = len(m.sortedPlugins()) + btn
+				m = roUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+				checkNoAdmin(t, m, conn, ipc.MsgReloadPlugins, rights)
+			})
+		}
+	}
+}
+
+// A plugin TOML saved from the editor stays saved (it is this client's own
+// file); only the daemon reload is refused.
+func TestNoAdmin_PluginEditorSaveRefusesTheReload(t *testing.T) {
+	for _, rights := range adminRightsCases {
+		t.Run(rights, func(t *testing.T) {
+			t.Setenv("QUIL_HOME", t.TempDir())
+			m, conn := readOnlyModel(t, rights)
+			m.pluginRegistry = plugin.NewRegistry()
+			m = roUpdate(t, m, tea.WindowSizeMsg{Width: 172, Height: 48})
+			// The editor saves only inside the plugins directory.
+			if err := os.MkdirAll(config.PluginsDir(), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			fp := filepath.Join(config.PluginsDir(), "x.toml")
+			if err := os.WriteFile(fp, []byte("[plugin]\nname = \"x\"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			m.tomlEditor = NewTextEditor("[plugin]\nname = \"x\"\n", fp, 70, 20)
+			m.dialog = dialogTOMLEditor
+			m = roUpdate(t, m, tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
+			if m.dialog != dialogPlugins {
+				t.Fatalf("setup: the save did not complete (dialog %v)", m.dialog)
+			}
+			checkNoAdmin(t, m, conn, ipc.MsgReloadPlugins, rights)
+		})
+	}
+}
+
+// The schema-migration dialog's final save reloads the daemon's plugins too.
+func TestNoAdmin_MigrationSaveRefusesTheReload(t *testing.T) {
+	for _, rights := range adminRightsCases {
+		t.Run(rights, func(t *testing.T) {
+			t.Setenv("QUIL_HOME", t.TempDir())
+			m, conn := readOnlyModel(t, rights)
+			m.pluginRegistry = plugin.NewRegistry()
+			m = roUpdate(t, m, tea.WindowSizeMsg{Width: 172, Height: 48})
+			fp := filepath.Join(t.TempDir(), "claude-code.toml")
+			content := "[plugin]\nname = \"claude-code\"\nschema_version = 6\n[command]\ncmd = \"claude\"\n"
+			m.migrationPlugins = []plugin.StalePlugin{{Name: "claude-code", FilePath: fp,
+				DefaultData: []byte("[plugin]\nschema_version = 6\n")}}
+			m.migrationIdx = 0
+			m.migrationLeft = NewTextEditor(content, fp, 80, 24)
+			m.dialog = dialogPluginMigration
+			m = roUpdate(t, m, tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
+			if m.dialog != dialogNone {
+				t.Fatalf("setup: the migration did not complete (dialog %v, err %q)", m.dialog, m.migrationError)
+			}
+			checkNoAdmin(t, m, conn, ipc.MsgReloadPlugins, rights)
+		})
+	}
+}
+
+// procDialogModel is readOnlyModel with F1 → Processes open on procReport,
+// the cursor on the killable node vite build.
+func procDialogModel(t *testing.T, rights string) (Model, *fakeConn) {
+	t.Helper()
+	m, conn := readOnlyModel(t, rights)
+	m.lastWidth = 200
+	m = m.openProcessesDialog()
+	m.proc.expandedTabs["tab-1"] = true
+	m.proc.expandedPanes["pane-a"] = true
+	m = m.applyResourceReport(procReport())
+	for i, r := range m.procRows() {
+		if r.pid == 5219 {
+			m.proc.cursor = i
+		}
+	}
+	return m, conn
+}
+
+// A kill from the Processes dialog: K is refused with the reason in the
+// dialog for a token that is not full; full opens the confirm and y sends.
+func TestNoAdmin_KillFromProcessesDialogRefused(t *testing.T) {
+	for _, rights := range adminRightsCases {
+		t.Run(rights, func(t *testing.T) {
+			canAdmin := rights == ipc.RightsFull
+			m, conn := procDialogModel(t, rights)
+			m = roUpdate(t, m, tea.KeyPressMsg{Code: 'K', Text: "K"})
+			if opened := m.dialog == dialogConfirm && m.confirmKind == confirmKindKillProcess; opened != canAdmin {
+				t.Fatalf("kill confirm opened = %v on rights %q", opened, rights)
+			}
+			if !canAdmin && m.proc.notice != noAdminFlash {
+				t.Fatalf("dialog notice = %q, want the refusal", m.proc.notice)
+			}
+			if canAdmin {
+				m = roUpdate(t, m, tea.KeyPressMsg{Code: 'y', Text: "y"})
+			}
+			checkNoAdmin(t, m, conn, ipc.MsgKillProcessReq, rights)
+		})
+	}
+}
+
+// A kill confirm reached some other way refuses too, and says so in the
+// Processes dialog it returns to.
+func TestNoAdmin_KillConfirmRefused(t *testing.T) {
+	for _, rights := range adminRightsCases {
+		t.Run(rights, func(t *testing.T) {
+			canAdmin := rights == ipc.RightsFull
+			m, conn := procDialogModel(t, rights)
+			m.dialog, m.confirmKind, m.confirmID = dialogConfirm, confirmKindKillProcess, "pane-a"
+			m.killPID = 5219
+			m = roUpdate(t, m, tea.KeyPressMsg{Code: 'y', Text: "y"})
+			if m.dialog != dialogProcesses {
+				t.Fatalf("dialog = %v, want back on Processes", m.dialog)
+			}
+			if refused := m.proc.notice == noAdminFlash; refused == canAdmin {
+				t.Fatalf("dialog notice shows the refusal = %v on rights %q (notice %q)", refused, rights, m.proc.notice)
+			}
+			checkNoAdmin(t, m, conn, ipc.MsgKillProcessReq, rights)
+		})
+	}
+}
+
+// Before the first broadcast of a --connect session there is no project, so
+// activeDest is "" and read as local; the update check and stage requests
+// would go to the sole (remote) conn. A local session sends both, as before.
+func TestUpdateRequests_SkippedBeforeFirstBroadcastOfARemote(t *testing.T) {
+	for _, home := range []string{roDest, ""} {
+		t.Run("home="+home, func(t *testing.T) {
+			remote := home != ""
+			conn := newFakeConn()
+			t.Cleanup(func() { close(conn.recv) })
+			r := NewRouter(map[string]Client{home: conn})
+			m := Model{
+				cfg: config.Default(), client: r, tabDragFromIdx: -1, termFocused: true,
+				notifications: NewNotificationCenter(30, 50), version: "0.0.1",
+			}
+			m.initKeymap()
+			m.SetHomeDest(home)
+			m.SetDestRights(home, ipc.RightsFull)
+			m = roUpdate(t, m, tea.WindowSizeMsg{Width: 172, Height: 48}, tea.KeyPressMsg{Code: tea.KeyF1})
+			if sent := sentType(conn, ipc.MsgUpdateCheckReq); sent == remote {
+				t.Fatalf("update_check_req sent = %v with home %q", sent, home)
+			}
+			m.dialogCursor = aboutUpdateIndex
+			m = roUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+			if sent := sentType(conn, ipc.MsgStageUpdateReq); sent == remote {
+				t.Fatalf("stage_update_req sent = %v with home %q", sent, home)
+			}
+			if m.updateReqInFlight == remote {
+				t.Fatalf("updateReqInFlight = %v with home %q", m.updateReqInFlight, home)
+			}
+		})
 	}
 }

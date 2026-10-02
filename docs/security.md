@@ -27,7 +27,7 @@ The listener is off until you set `[listener] tcp` in `config.toml` (see [Config
 |---|---|---|
 | `read-only` | see the workspace, every pane's output, pane status, notes, tasks, notifications, the plugin and client lists, the memory report; follows the project of the daemon's active tab | type, resize, create, close, rename, switch tabs or projects, reorder, rearrange, open filesystem dialogs, read Claude transcripts or input history, see process trees, take control of the size |
 | `standard` | everything a user does in the TUI, including typing into a shell (which runs code as you) and the setup dialog's toggles and kube context | start a program by raw arguments (plugin instances such as ssh/stripe), open overlay panes (lazygit), stop the daemon, reload its plugins, set its overlay policy, stop a process from the Processes dialog, check for or stage updates, manage tokens |
-| `full` | everything a local client can | manage tokens (local socket only) |
+| `full` | everything a local client can | manage tokens (local socket only); through `--connect` the TUI also offers no update check or install: the update would be staged on the daemon's machine but installed on the client's |
 
 Every TCP connection, whatever its level, may hold at most 4 waiting requests at once: `watch_notifications` and `wait_task`, which each park until something happens, and the requests the daemon answers from a worker of their own — the sandbox check (which waits for Docker) and note reads and saves. The local socket has no such cap.
 
@@ -56,7 +56,7 @@ These talk to the LOCAL daemon (starting it if needed) and are refused under `--
 
 Connect: `QUIL_TOKEN=<token> quil --connect 127.0.0.1:7878` or `quil --connect 7878 --token-file ~/.quil-token`. The token is never accepted on the command line, and `QUIL_TOKEN` is removed from the environment at startup, so nothing Quil spawns inherits it. `--connect` takes a bare port or a loopback address only.
 
-Under `--connect` the session is a remote one: `quil daemon`, `quil clients`, `quil restart`, `quil status` and `quil mcp` refuse to run, Quil never starts, restarts or installs a daemon, a version mismatch is refused, and a staged update is not applied at launch (it applies on your next local launch). A lost link logs in again with the same token; the level is re-read on every login.
+Under `--connect` the session is a remote one: `quil daemon`, `quil clients`, `quil restart`, `quil status` and `quil mcp` refuse to run, Quil never starts, restarts or installs a daemon, a version mismatch is refused, and a staged update is not applied at launch (it applies on your next local launch) and the TUI offers no update check or install for that destination. A lost link logs in again with the same token; the level is re-read on every login.
 
 What you see when a login fails:
 

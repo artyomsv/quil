@@ -71,7 +71,10 @@ Good for: a second device of your own, a person you pair with.
 
 ### full — "everything"
 
-The client can do everything a local client can, except one thing: it cannot manage tokens. Only your own account, on the daemon's machine, can do that.
+The client can do almost everything a local client can. Two things stay on the daemon's machine:
+
+- **Tokens.** Only your own account, on the daemon's machine, can make or revoke them.
+- **Updates.** Through `--connect` the Quil window never checks for or installs updates, whatever the level: the update would be downloaded on the daemon's machine but installed on yours, two different machines. Update by starting Quil on each machine itself.
 
 Good for: your own devices, when you need lazygit, instances or daemon control.
 
@@ -89,8 +92,8 @@ Good for: your own devices, when you need lazygit, instances or daemon control.
 | Overlays (lazygit, hunk) | no | no | yes |
 | Stop the daemon, reload plugins | no | no | yes |
 | Stop a process (F1 → Processes) | no | no | yes |
-| Updates | no | no | yes |
-| Make or revoke tokens | no | no | no (local only) |
+| Updates | no | no | no (on the daemon's machine only) |
+| Make or revoke tokens | no | no | no (on the daemon's machine only) |
 
 ## Turn the listener on
 

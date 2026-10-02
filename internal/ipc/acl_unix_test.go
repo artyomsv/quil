@@ -58,7 +58,10 @@ func TestCreatePrivateFile_ExclusiveAnd0600(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.Close()
-	fi, _ := os.Stat(p)
+	fi, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if perm := fi.Mode().Perm(); perm != 0o600 {
 		t.Fatalf("mode = %04o, want 0600", perm)
 	}

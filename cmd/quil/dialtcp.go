@@ -240,6 +240,10 @@ func dialTCPDest(dest string) (tui.Client, error) {
 	defer cancel()
 	client, resp, err := dialTCP(ctx, addr, token)
 	if err != nil {
+		// The full error (the daemon's refusal reason included; never the
+		// token) goes to quil.log, as at launch: the one-line description
+		// deliberately drops it.
+		log.Printf("connect %s: %v", addr, err)
 		return nil, errors.New(describeConnectError(addr, err))
 	}
 	if err := gateTCPVersion(client, addr); err != nil {
@@ -268,6 +272,7 @@ func redialTCPDest(dest string) tui.RedialFunc {
 		defer cancel()
 		client, resp, err := dialTCP(ctx, addr, token)
 		if err != nil {
+			log.Printf("connect %s: re-login: %v", addr, err)
 			var refused *clientauth.RefusedError
 			if errors.As(err, &refused) || errors.Is(err, clientauth.ErrServerUnproven) {
 				return nil, fmt.Errorf("%s: %w", describeConnectError(addr, err), tui.ErrLinkPermanent)

@@ -29,6 +29,8 @@ type Config struct {
 	Remote       RemoteConfig       `toml:"remote"`
 	Sandbox      SandboxConfig      `toml:"sandbox"`
 	Agents       AgentsConfig       `toml:"agents"`
+	// Listener is the daemon's token-authenticated TCP listener.
+	Listener ListenerConfig `toml:"listener"`
 	// Destinations are the ADDITIONAL daemons this client attaches to beside
 	// the local one, each contributing its projects to the same sidebar. A
 	// slice rather than a map because order is meaningful — it is the order the
@@ -38,6 +40,16 @@ type Config struct {
 	// THAT machine", and quietly attaching the configured extras to it would
 	// make one flag mean two different things.
 	Destinations []Destination `toml:"destinations"`
+}
+
+// ListenerConfig configures the loopback TCP listener.
+type ListenerConfig struct {
+	// TCP is the listen address: a bare port, or a loopback host:port
+	// ("127.0.0.1", "::1" or "localhost"). "" — the zero value — is OFF, so
+	// Save writing the whole struct can never turn it on. Any other host,
+	// and ":port", are refused at daemon start with no TCP listener; the
+	// unix socket is unaffected. Other machines reach it with `ssh -L`.
+	TCP string `toml:"tcp"`
 }
 
 // SandboxConfig controls AI panes that run inside a Docker container.

@@ -1,7 +1,9 @@
 package daemon
 
 import (
+	"errors"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -47,6 +49,11 @@ const (
 	maxClientDim = 1000
 )
 
+// errClientIDInUse refuses a client id already held by ANOTHER principal: a
+// viewer cannot take the owner's record, master role or reserved slot by
+// naming its id (list_clients shows ids).
+var errClientIDInUse = errors.New("client id in use")
+
 // clientRecord is one attached client. The registry is keyed by conn, and a
 // conn that never sent MsgAttach (an MCP bridge) has no record.
 type clientRecord struct {
@@ -61,12 +68,21 @@ type clientRecord struct {
 	// overlays is the set of overlay panes this client has ON SCREEN — see
 	// setOverlayClaim for why visibility is per client.
 	overlays map[string]bool
+	// principal is "local" or "token <id>"; an id is bound to it.
+	principal string
+	// readOnly records a viewer: kept for list_clients, targeting and output
+	// holds, but never eligible for size master.
+	readOnly bool
 }
 
 // reservation keeps a lost master's slot until `until`.
 type reservation struct {
 	id    string
 	until time.Time
+	// principal is the lost master's principal. "" is a RESTART reserve: the
+	// daemon restarted and does not know who held the slot, so it admits only
+	// the LOCAL principal.
+	principal string
 	// attachedAt is the lost master's first attach, handed back to it when it
 	// returns, so it stays the oldest client. Zero for a restart reserve.
 	attachedAt time.Time
@@ -80,7 +96,7 @@ type reservation struct {
 // carries both the master id and the attached-client count, so either change
 // is news to the other clients.
 type clientChange struct {
-	master bool // masterID changed
+	master bool // the published master id changed (publishedMasterLocked)
 	count  bool // the number of attached clients changed
 }
 
@@ -123,8 +139,31 @@ func (r *clientRegistry) clock() time.Time {
 // eligible reports whether a client's RAW window is paintable. The raw value
 // matters: handleAttach defaults a 0x0 attach to 80x24 for clientSize, and a
 // console-less client electing itself on that default is the 1x1 incident.
+// A read-only viewer is never eligible: it watches, it never sizes a PTY.
 func eligible(rec *clientRecord) bool {
-	return rec.cols >= daemonMinClientCols && rec.rows >= daemonMinClientRows
+	return !rec.readOnly && rec.cols >= daemonMinClientCols && rec.rows >= daemonMinClientRows
+}
+
+// reservationAdmits reports whether a claimant may take a reserved SLOT: a
+// read-only client never does; any other must be the principal that lost it.
+// A restart reserve (principal unknown) admits only the local principal,
+// because an unknown principal cannot be shown to be the same one.
+//
+// Taking the slot is not the same as attaching. A TCP claimant of an id
+// reserved for a KNOWN other principal is refused outright; one naming an id
+// a restart reserve keeps is attached as an ordinary client that does not
+// inherit the slot (see attach and shadowedLocked) — refusing it would strand
+// a remote TUI, which logs an attach error and never retries. Cost, accepted:
+// a full-token TUI that was master before a restart is a follower until the
+// reserve lapses, at most restartReserveCap.
+func reservationAdmits(res *reservation, principal string, readOnly bool) bool {
+	if readOnly {
+		return false
+	}
+	if res.principal == "" {
+		return principal == ipc.PrincipalLocal
+	}
+	return res.principal == principal
 }
 
 func (r *clientRegistry) recordByID(id string) *clientRecord {
@@ -137,6 +176,57 @@ func (r *clientRegistry) recordByID(id string) *clientRecord {
 		}
 	}
 	return nil
+}
+
+// shadowedLocked reports a record wearing an id that a RESTART reserve is
+// still keeping for a local claimant. The master slot is named by id, so
+// without this a TCP client admitted under that id would hold the slot by
+// the name alone; while the reserve stands it is an ordinary client.
+func (r *clientRegistry) shadowedLocked(rec *clientRecord) bool {
+	res := r.reserved
+	return res != nil && res.principal == "" && res.id == rec.id && rec.principal != ipc.PrincipalLocal
+}
+
+// isMasterLocked reports whether rec holds the master slot.
+func (r *clientRegistry) isMasterLocked(rec *clientRecord) bool {
+	return r.masterID != "" && rec.id == r.masterID && !r.shadowedLocked(rec)
+}
+
+// masterRecordLocked returns the connected record holding the master slot,
+// or nil when none does (none elected, or the slot is reserved).
+func (r *clientRegistry) masterRecordLocked() *clientRecord {
+	if rec := r.recordByID(r.masterID); rec != nil && !r.shadowedLocked(rec) {
+		return rec
+	}
+	return nil
+}
+
+// publishedMasterLocked is the master id clients are told. A shadowed id is
+// replaced by reservedMasterMarker: each TUI decides it is master by
+// comparing this id to its own, and the TCP client wearing a restart-reserved
+// id is not master. Nor may the value be "", which every TUI reads as "no
+// master" and so leaves follower mode — while the reserve still keeps size
+// authority closed and every resize is dropped.
+func (r *clientRegistry) publishedMasterLocked() string {
+	if rec := r.recordByID(r.masterID); rec != nil && r.shadowedLocked(rec) {
+		return reservedMasterMarker(r.masterID)
+	}
+	return r.masterID
+}
+
+// reservedMasterPrefix starts the size_master a state frame names while a
+// restart reserve is kept for a local claimant and a TCP client wears its id.
+const reservedMasterPrefix = "reserved-for-local:"
+
+// reservedMasterMarker names a reserved slot in a state frame. It is longer
+// than maxClientIDLen, and attach cuts every client id to that length, so no
+// attached client can ever be named by it: every TUI stays a follower.
+func reservedMasterMarker(id string) string {
+	m := reservedMasterPrefix + id
+	if pad := maxClientIDLen + 1 - len(m); pad > 0 {
+		m += strings.Repeat(".", pad)
+	}
+	return m
 }
 
 func (r *clientRegistry) reserveStillProtects(res *reservation) bool {
@@ -168,18 +258,23 @@ func (r *clientRegistry) oldestEligibleLocked() *clientRecord {
 }
 
 // electLocked runs the election. Called with r.mu held. It returns whether
-// masterID changed; the caller broadcasts once, after releasing r.mu.
+// the PUBLISHED master id changed; the caller broadcasts once, after
+// releasing r.mu. A caller that also changed records or the reservation
+// before electing compares across its whole span instead (see attach).
 func (r *clientRegistry) electLocked() bool {
+	before := r.publishedMasterLocked()
+	r.electSlotLocked()
+	return r.publishedMasterLocked() != before
+}
+
+func (r *clientRegistry) electSlotLocked() {
 	now := r.clock()
-	if rec := r.recordByID(r.masterID); rec != nil && eligible(rec) {
-		return false // rule 1: a connected, eligible master keeps the slot
+	if rec := r.masterRecordLocked(); rec != nil && eligible(rec) {
+		return // rule 1: a connected, eligible master keeps the slot
 	}
 	if res := r.reserved; res != nil && now.Before(res.until) && r.reserveStillProtects(res) {
-		if r.masterID != res.id {
-			r.masterID = res.id
-			return true
-		}
-		return false // rule 2: the reserved slot is kept
+		r.masterID = res.id // rule 2: the reserved slot is kept
+		return
 	}
 	r.clearReservationLocked()
 	best := r.oldestEligibleLocked() // rule 3
@@ -187,9 +282,7 @@ func (r *clientRegistry) electLocked() bool {
 	if best != nil {
 		id = best.id
 	}
-	changed := id != r.masterID
 	r.masterID = id
-	return changed
 }
 
 func (r *clientRegistry) clearReservationLocked() {
@@ -243,13 +336,21 @@ func (r *clientRegistry) expire() {
 // reattach is the payload's Reattach flag: false on a process's first attach
 // to this daemon, which a restart reserve yields to when it is alone — but
 // only when the attach carried its own id (an older client sends neither).
-func (r *clientRegistry) attach(conn *ipc.Conn, id string, cols, rows int, cwd string, reattach bool) clientChange {
+//
+// principal and readOnly are the conn's login. An id is bound to its
+// principal: a TCP claimant of an id another principal holds, or that a
+// reservation recorded for another principal keeps, is refused with
+// errClientIDInUse and registers nothing. A TCP claimant of an id a RESTART
+// reserve keeps (principal unknown) is attached as an ordinary client and
+// does not inherit the slot.
+func (r *clientRegistry) attach(conn *ipc.Conn, id string, cols, rows int, cwd string, reattach bool, principal string, readOnly bool) (clientChange, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.byConn == nil {
 		r.byConn = make(map[*ipc.Conn]*clientRecord)
 	}
 	before := len(r.byConn)
+	masterBefore := r.publishedMasterLocked()
 	// Taken before an empty id is minted below: only a client that sent its
 	// own id can also have sent a meaningful Reattach flag.
 	sentID := id != ""
@@ -261,6 +362,28 @@ func (r *clientRegistry) attach(conn *ipc.Conn, id string, cols, rows int, cwd s
 			id = "anon-" + uuid.NewString()
 		}
 	}
+	// The local socket always wins: a token holder can read the owner's id
+	// through list_clients and claim it while the owner's TUI reconnects, and
+	// a symmetric rule would then refuse the OWNER's own reattach. So only a
+	// TCP claimant is checked; a local claimant replaces any record with that
+	// id through the existing loop below, which drops the squatter's record.
+	if principal != ipc.PrincipalLocal {
+		for c, other := range r.byConn {
+			if c != conn && other.id == id && other.principal != principal {
+				return clientChange{}, errClientIDInUse
+			}
+		}
+		if res := r.reserved; res != nil && res.id == id && res.principal != "" && !reservationAdmits(res, principal, readOnly) {
+			return clientChange{}, errClientIDInUse
+		}
+	}
+	// claims: this attach takes the reserved slot for its id — its age, and
+	// the end of the reserve. The local principal always does; anyone else
+	// only when the reservation admits it, which a restart reserve never does
+	// for a TCP claimant: that one is an ordinary client while the reserve
+	// waits on (shadowedLocked).
+	res := r.reserved
+	claims := res != nil && res.id == id && (principal == ipc.PrincipalLocal || reservationAdmits(res, principal, readOnly))
 	if !existed {
 		rec = &clientRecord{conn: conn, overlays: map[string]bool{}}
 		r.byConn[conn] = rec
@@ -276,18 +399,19 @@ func (r *clientRegistry) attach(conn *ipc.Conn, id string, cols, rows int, cwd s
 				delete(r.byConn, c)
 			}
 		}
-		if res := r.reserved; res != nil && res.id == id && !res.attachedAt.IsZero() {
+		if claims && !res.attachedAt.IsZero() {
 			rec.attachedAt = res.attachedAt
 		}
 	}
 	rec.id = id
 	rec.cols, rec.rows = cols, rows
 	rec.cwd = cwd
-	if res := r.reserved; res != nil && res.id == id {
+	rec.principal, rec.readOnly = principal, readOnly
+	if claims {
 		// The reserved client is back, so the slot has nothing left to wait
 		// for. The election below keeps it when the client is eligible.
 		r.clearReservationLocked()
-	} else if res != nil && res.protects == nil && sentID && !reattach && len(r.byConn) == 1 {
+	} else if res != nil && res.protects == nil && principal == ipc.PrincipalLocal && !readOnly && sentID && !reattach && len(r.byConn) == 1 {
 		// A restart reserve waits for TUIs RECONNECTING after the restart. A
 		// new process attaching alone is a cold start after an unclean stop
 		// (reboot, kill): the previous master went with its process, and
@@ -298,9 +422,18 @@ func (r *clientRegistry) attach(conn *ipc.Conn, id string, cols, rows int, cwd s
 		// exactly like a cold start. Absence of the flag says nothing there,
 		// so such an attach never clears the reserve; it waits it out like
 		// any reconnecting client.
+		//
+		// Local only: a restart reserve waits for the LOCAL principal (only it
+		// can claim the slot), so a TCP client — a viewer above all, which can
+		// never be master — must not end that wait by attaching first. A
+		// local attach naming the reserved id claims it in the branch above,
+		// so the id here is always another one.
 		r.clearReservationLocked()
 	}
-	return clientChange{master: r.electLocked(), count: len(r.byConn) != before}
+	// Compared across the whole attach, not just the election: admitting or
+	// replacing a shadowed record changes the published id by itself.
+	r.electSlotLocked()
+	return clientChange{master: r.publishedMasterLocked() != masterBefore, count: len(r.byConn) != before}, nil
 }
 
 // lose drops conn after a LOST link: the conn closed with no MsgDetach. A
@@ -314,8 +447,12 @@ func (r *clientRegistry) lose(conn *ipc.Conn) clientChange {
 	if !ok {
 		return clientChange{}
 	}
+	masterBefore := r.publishedMasterLocked()
+	// A shadowed record wears the master id without holding the slot, so its
+	// loss must not replace the restart reserve with a grace reserve of its own.
+	wasMaster := r.isMasterLocked(rec)
 	delete(r.byConn, conn)
-	if rec.id == r.masterID && r.grace > 0 && r.recordByID(rec.id) == nil {
+	if wasMaster && r.grace > 0 && r.recordByID(rec.id) == nil {
 		protects := make(map[string]bool, len(r.byConn))
 		for _, other := range r.byConn {
 			protects[other.id] = true
@@ -326,10 +463,12 @@ func (r *clientRegistry) lose(conn *ipc.Conn) clientChange {
 				until:      r.clock().Add(r.grace),
 				attachedAt: rec.attachedAt,
 				protects:   protects,
+				principal:  rec.principal,
 			}, r.grace)
 		}
 	}
-	return clientChange{master: r.electLocked(), count: true}
+	r.electSlotLocked()
+	return clientChange{master: r.publishedMasterLocked() != masterBefore, count: true}
 }
 
 // detach drops conn after a clean exit and elects with NO reservation. The
@@ -340,8 +479,10 @@ func (r *clientRegistry) detach(conn *ipc.Conn) clientChange {
 	if _, ok := r.byConn[conn]; !ok {
 		return clientChange{}
 	}
+	masterBefore := r.publishedMasterLocked()
 	delete(r.byConn, conn)
-	return clientChange{master: r.electLocked(), count: true}
+	r.electSlotLocked()
+	return clientChange{master: r.publishedMasterLocked() != masterBefore, count: true}
 }
 
 // setGeometry records a client's new RAW window size and elects: a master
@@ -350,7 +491,7 @@ func (r *clientRegistry) setGeometry(conn *ipc.Conn, cols, rows int) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	rec, ok := r.byConn[conn]
-	if !ok {
+	if !ok || rec.readOnly {
 		return false
 	}
 	rec.cols, rec.rows = cols, rows
@@ -363,14 +504,14 @@ func (r *clientRegistry) takeControl(conn *ipc.Conn) (changed, accepted bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	rec, ok := r.byConn[conn]
-	if !ok || !eligible(rec) {
+	if !ok || rec.readOnly || !eligible(rec) {
 		return false, false
 	}
 	// An explicit request overrides a slot kept for someone else.
+	masterBefore := r.publishedMasterLocked()
 	r.clearReservationLocked()
-	changed = r.masterID != rec.id
 	r.masterID = rec.id
-	return changed, true
+	return r.publishedMasterLocked() != masterBefore, true
 }
 
 // reserveAfterRestart keeps a restored size_master's slot for
@@ -404,18 +545,25 @@ func (r *clientRegistry) reserveAfterRestart(id string) {
 // The geometry is the RAW one from the payload, taken before handleAttach
 // defaults it. It returns whether the master changed.
 func (d *Daemon) registerClient(conn *ipc.Conn, attach ipc.AttachPayload) bool {
-	return d.attachClient(conn, attach).master
+	change, _ := d.attachClient(conn, attach)
+	return change.master
 }
 
-// attachClient is registerClient reporting the count change too, for
-// handleAttach.
-func (d *Daemon) attachClient(conn *ipc.Conn, attach ipc.AttachPayload) clientChange {
+// attachClient is registerClient reporting the count change and a refusal
+// too, for handleAttach. The conn's login supplies the principal the id is
+// bound to; a conn with no login state (a test's nil or zero conn) is local.
+func (d *Daemon) attachClient(conn *ipc.Conn, attach ipc.AttachPayload) (clientChange, error) {
 	if conn == nil {
-		return clientChange{}
+		return clientChange{}, nil
+	}
+	auth := conn.Auth()
+	principal, readOnly := ipc.PrincipalLocal, false
+	if auth != nil {
+		principal, readOnly = auth.Principal(), auth.ReadOnly()
 	}
 	id := truncateField(attach.ClientID, maxClientIDLen)
 	cols, rows := attachWindowSize(attach)
-	return d.clients.attach(conn, id, clampClientDim(cols), clampClientDim(rows), attach.CWD, attach.Reattach)
+	return d.clients.attach(conn, id, clampClientDim(cols), clampClientDim(rows), attach.CWD, attach.Reattach, principal, readOnly)
 }
 
 // attachWindowSize is the RAW window size an attach reports, which is what
@@ -543,7 +691,7 @@ func (d *Daemon) handleTakeControl(conn *ipc.Conn) {
 func (d *Daemon) masterConn() *ipc.Conn {
 	d.clients.mu.Lock()
 	defer d.clients.mu.Unlock()
-	if rec := d.clients.recordByID(d.clients.masterID); rec != nil {
+	if rec := d.clients.masterRecordLocked(); rec != nil {
 		return rec.conn
 	}
 	return nil
@@ -556,7 +704,7 @@ func (d *Daemon) isMasterConn(c *ipc.Conn) bool {
 	d.clients.mu.Lock()
 	defer d.clients.mu.Unlock()
 	rec, ok := d.clients.byConn[c]
-	return ok && d.clients.masterID != "" && rec.id == d.clients.masterID
+	return ok && d.clients.isMasterLocked(rec)
 }
 
 // sizeAuthorityOpen reports the legacy state in which any attached client may
@@ -567,10 +715,22 @@ func (d *Daemon) sizeAuthorityOpen() bool {
 	return d.clients.masterID == "" && d.clients.reserved == nil
 }
 
+// masterID is the id the slot is kept for, including a reserved one. It is
+// what the snapshot persists, so a reserve outlives another restart.
 func (d *Daemon) masterID() string {
 	d.clients.mu.Lock()
 	defer d.clients.mu.Unlock()
 	return d.clients.masterID
+}
+
+// sizeMasterForState is the master id the state frame tells clients. It
+// differs from masterID only while a TCP client wears an id a restart reserve
+// keeps for a local claimant: then it is reservedMasterMarker, so that client
+// does not read itself as master and nobody else reads "no master".
+func (d *Daemon) sizeMasterForState() string {
+	d.clients.mu.Lock()
+	defer d.clients.mu.Unlock()
+	return d.clients.publishedMasterLocked()
 }
 
 func (d *Daemon) clientCount() int {
@@ -601,7 +761,7 @@ func (d *Daemon) followerConns(except *ipc.Conn) []*ipc.Conn {
 	defer d.clients.mu.Unlock()
 	var out []*ipc.Conn
 	for _, rec := range d.clients.sortedRecordsLocked() {
-		if rec.conn == except || (d.clients.masterID != "" && rec.id == d.clients.masterID) {
+		if rec.conn == except || d.clients.isMasterLocked(rec) {
 			continue
 		}
 		out = append(out, rec.conn)
@@ -670,7 +830,7 @@ func (d *Daemon) listClients() []ipc.ClientInfo {
 			AttachedAt: rec.attachedAt.UTC().Format(time.RFC3339),
 			Cols:       rec.cols,
 			Rows:       rec.rows,
-			Master:     d.clients.masterID != "" && rec.id == d.clients.masterID,
+			Master:     d.clients.isMasterLocked(rec),
 		}
 		if !rec.lastInputAt.IsZero() {
 			info.LastInputAt = rec.lastInputAt.UTC().Format(time.RFC3339)

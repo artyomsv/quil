@@ -426,11 +426,11 @@ raw_keys = ["shift+tab"]
 	})
 }
 
-// TestSubmitSetupDialog_AppendsToggleArgsAndCommitsCWD verifies the critical
-// path that threads user choices through to CreatePanePayload: cwdBrowseDir
-// is copied into selectedCWD, and enabled-toggle args are appended to
-// selectedInstanceArgs without dropping prior args.
-func TestSubmitSetupDialog_AppendsToggleArgsAndCommitsCWD(t *testing.T) {
+// TestSubmitSetup_RecordsToggleNamesAndCWD verifies the critical path that
+// threads user choices through to CreatePanePayload: cwdBrowseDir is copied
+// into selectedCWD, and checked toggles are recorded by NAME for the daemon
+// to resolve, leaving selectedInstanceArgs exactly as the instance set it.
+func TestSubmitSetup_RecordsToggleNamesAndCWD(t *testing.T) {
 	p := &plugin.PanePlugin{
 		Name: "claude-code",
 		Command: plugin.CommandConfig{
@@ -442,49 +442,27 @@ func TestSubmitSetupDialog_AppendsToggleArgsAndCommitsCWD(t *testing.T) {
 		},
 	}
 
-	t.Run("toggles off — selectedInstanceArgs untouched, CWD copied", func(t *testing.T) {
-		m := Model{
-			selectedInstanceArgs: []string{"--existing"},
-			toggleStates:         []bool{false, false},
-			cwdBrowseDir:         "/home/user/proj",
-		}
+	t.Run("toggles off — no names recorded, instance args untouched, CWD copied", func(t *testing.T) {
+		m := Model{selectedInstanceArgs: []string{"--existing"}, toggleStates: []bool{false, false}, cwdBrowseDir: "/home/user/proj"}
 		next, _ := m.submitSetupDialog(p)
 		m = next.(Model)
-
 		if m.selectedCWD != "/home/user/proj" {
-			t.Errorf("selectedCWD = %q, want /home/user/proj", m.selectedCWD)
+			t.Errorf("selectedCWD = %q", m.selectedCWD)
 		}
-		want := []string{"--existing"}
-		if !reflect.DeepEqual(m.selectedInstanceArgs, want) {
-			t.Errorf("selectedInstanceArgs = %v, want %v", m.selectedInstanceArgs, want)
-		}
-	})
-
-	t.Run("only first toggle on — its args appended", func(t *testing.T) {
-		m := Model{
-			selectedInstanceArgs: nil,
-			toggleStates:         []bool{true, false},
-			cwdBrowseDir:         "/home/user/proj",
-		}
-		next, _ := m.submitSetupDialog(p)
-		m = next.(Model)
-		want := []string{"--dangerously-skip-permissions"}
-		if !reflect.DeepEqual(m.selectedInstanceArgs, want) {
-			t.Errorf("selectedInstanceArgs = %v, want %v", m.selectedInstanceArgs, want)
+		if !reflect.DeepEqual(m.selectedInstanceArgs, []string{"--existing"}) || len(m.selectedToggles) != 0 {
+			t.Errorf("args=%v toggles=%v", m.selectedInstanceArgs, m.selectedToggles)
 		}
 	})
 
-	t.Run("multiple toggles + pre-existing instance args — order preserved", func(t *testing.T) {
-		m := Model{
-			selectedInstanceArgs: []string{"--model", "opus"},
-			toggleStates:         []bool{true, true},
-			cwdBrowseDir:         "/home/user/proj",
-		}
+	t.Run("checked toggles are recorded as NAMES, never as args", func(t *testing.T) {
+		m := Model{selectedInstanceArgs: []string{"--model", "opus"}, toggleStates: []bool{true, true}, cwdBrowseDir: "/home/user/proj"}
 		next, _ := m.submitSetupDialog(p)
 		m = next.(Model)
-		want := []string{"--model", "opus", "--dangerously-skip-permissions", "-v"}
-		if !reflect.DeepEqual(m.selectedInstanceArgs, want) {
-			t.Errorf("selectedInstanceArgs = %v, want %v", m.selectedInstanceArgs, want)
+		if !reflect.DeepEqual(m.selectedToggles, []string{"skip", "verbose"}) {
+			t.Errorf("selectedToggles = %v, want [skip verbose] in plugin order", m.selectedToggles)
+		}
+		if !reflect.DeepEqual(m.selectedInstanceArgs, []string{"--model", "opus"}) {
+			t.Errorf("toggle args leaked into selectedInstanceArgs: %v", m.selectedInstanceArgs)
 		}
 	})
 
@@ -1527,15 +1505,15 @@ func TestSetupKubeKey_DownMoves(t *testing.T) {
 	}
 }
 
-func TestSubmitSetup_KubeContext_InjectsContextArg(t *testing.T) {
+func TestSubmitSetup_KubeContext_RecordsName(t *testing.T) {
 	m := kubePickModel(t, []kubediscover.Context{{Name: "prod"}, {Name: "staging"}})
 	p := m.pluginRegistry.Get("k9s")
 	m.kubeCursor = 2 // row 0 = Default, row 1 = prod, row 2 = staging
 	out, _ := m.submitSetupDialog(p)
 	got := out.(Model)
-	want := []string{"--context", "staging"}
-	if len(got.selectedInstanceArgs) != 2 || got.selectedInstanceArgs[0] != want[0] || got.selectedInstanceArgs[1] != want[1] {
-		t.Errorf("selectedInstanceArgs = %v, want %v", got.selectedInstanceArgs, want)
+	if got.selectedKubeContext != "staging" || len(got.selectedInstanceArgs) != 0 {
+		t.Errorf("selectedKubeContext = %q, selectedInstanceArgs = %v; want staging and no args",
+			got.selectedKubeContext, got.selectedInstanceArgs)
 	}
 }
 
@@ -1545,10 +1523,8 @@ func TestSubmitSetup_KubeDefaultRow_NoContextArg(t *testing.T) {
 	m.kubeCursor = 0 // Default context
 	out, _ := m.submitSetupDialog(p)
 	got := out.(Model)
-	for _, a := range got.selectedInstanceArgs {
-		if a == "--context" {
-			t.Errorf("Default row must not inject --context, got %v", got.selectedInstanceArgs)
-		}
+	if got.selectedKubeContext != "" {
+		t.Errorf("Default row must record no context, got %q", got.selectedKubeContext)
 	}
 }
 
@@ -1578,8 +1554,8 @@ func TestSetupKubeKey_EnterSubmitsAndInjects(t *testing.T) {
 	if got.dialog != dialogCreatePane || got.createPaneStep != 3 {
 		t.Errorf("dialog/step = %v/%d, want dialogCreatePane/3 (advanced via enter dispatch)", got.dialog, got.createPaneStep)
 	}
-	if len(got.selectedInstanceArgs) != 2 || got.selectedInstanceArgs[0] != "--context" || got.selectedInstanceArgs[1] != "prod" {
-		t.Errorf("selectedInstanceArgs = %v, want [--context prod]", got.selectedInstanceArgs)
+	if got.selectedKubeContext != "prod" {
+		t.Errorf("selectedKubeContext = %q, want prod", got.selectedKubeContext)
 	}
 }
 

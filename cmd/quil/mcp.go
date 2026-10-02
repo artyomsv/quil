@@ -302,14 +302,27 @@ func refuseRemoteMCP() bool {
 	if !remoteMode() {
 		return false
 	}
-	fmt.Fprintf(os.Stderr,
-		"quil mcp: refusing to start — this session is attached to --remote %s.\n"+
-			"The MCP bridge must run on the same host as the daemon it drives: run "+
-			"'quil mcp' on %s itself (e.g. inside a pane there), not by bridging to "+
-			"it from this machine.\n",
-		remoteDest, remoteDest)
+	fmt.Fprint(os.Stderr, mcpRemoteRefusal())
 	exitFn(1)
 	return true
+}
+
+// mcpRemoteRefusal names the flag the session was started with: under
+// --connect the target is a TCP address, so "run quil mcp on tcp:…" would name
+// no machine at all.
+func mcpRemoteRefusal() string {
+	if connectMode() {
+		return fmt.Sprintf("quil mcp: refusing to start — this session is attached to --connect %s.\n"+
+			"The MCP bridge must run on the same host as the daemon it drives: run "+
+			"'quil mcp' on the machine whose daemon listens on %s (e.g. inside a pane "+
+			"there), not by bridging to it from this machine.\n",
+			connectAddr, connectAddr)
+	}
+	return fmt.Sprintf("quil mcp: refusing to start — this session is attached to --remote %s.\n"+
+		"The MCP bridge must run on the same host as the daemon it drives: run "+
+		"'quil mcp' on %s itself (e.g. inside a pane there), not by bridging to "+
+		"it from this machine.\n",
+		remoteDest, remoteDest)
 }
 
 // connectToDaemon connects to the daemon socket, auto-starting it if needed.

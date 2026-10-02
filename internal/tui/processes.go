@@ -802,6 +802,13 @@ func (m Model) confirmKillProcess(rows []procRow) (tea.Model, tea.Cmd) {
 		m.proc.notice = "only processes started inside a pane can be stopped here"
 		return m, nil
 	}
+	// Said in the dialog, where the user is: the status-bar flash is hidden
+	// behind it. The confirm refuses again for the same reason.
+	if !m.destCanAdmin(m.destOfPane(row.paneID)) {
+		m.proc.notice = noAdminFlash
+		cmd := m.refuseNoAdmin()
+		return m, cmd
+	}
 
 	m.dialog = dialogConfirm
 	m.confirmKind = confirmKindKillProcess

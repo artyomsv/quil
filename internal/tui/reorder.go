@@ -473,6 +473,10 @@ func (m *Model) moveActiveTab(delta int) tea.Cmd {
 	if to < 0 || to >= len(tabs) || from < 0 || from >= len(tabs) {
 		return nil
 	}
+	// A viewer's tab order is the daemon's.
+	if m.destReadOnly(tabs[from].Dest) {
+		return m.refuseReadOnly()
+	}
 	tabID := tabs[from].ID
 	if !m.moveTab(from, to) {
 		return nil
@@ -645,6 +649,10 @@ func (m *Model) moveProjectWithinSection(p *ProjectModel, toPos int) (tea.Cmd, b
 	from := indexOfProjectPtr(m.projects, p)
 	if from < 0 {
 		return nil, false
+	}
+	// A read-only destination's project order is its daemon's.
+	if m.destReadOnly(p.Dest) {
+		return m.refuseReadOnly(), false
 	}
 	section := m.sectionOf(from)
 	if toPos < 0 || toPos >= len(section) {

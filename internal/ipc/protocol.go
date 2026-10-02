@@ -3,6 +3,7 @@ package ipc
 import (
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 )
@@ -408,6 +409,12 @@ type CreatePanePayload struct {
 	// reachable from the wire. The MCP bridge deliberately does not expose
 	// the field.
 	Sandbox *SandboxSpec `json:"sandbox,omitempty"`
+	// Toggles and KubeContext are the setup dialog's NAMED choices:
+	// toggle names and a kube context, resolved to arguments by the daemon.
+	// The TUI sends these instead of folding them into InstanceArgs, which a
+	// standard-rights token may not send.
+	Toggles     []string `json:"toggles,omitempty"`
+	KubeContext string   `json:"kube_context,omitempty"`
 }
 
 // SandboxSpec asks the daemon to run a pane inside a container.
@@ -617,6 +624,9 @@ type FirstPaneSpec struct {
 	// no container and no error. Any field added here must also be added to
 	// that copy in createFirstPaneWorktree.
 	Sandbox *SandboxSpec `json:"sandbox,omitempty"`
+	// See CreatePanePayload.Toggles.
+	Toggles     []string `json:"toggles,omitempty"`
+	KubeContext string   `json:"kube_context,omitempty"`
 }
 
 type DestroyTabPayload struct {
@@ -845,6 +855,10 @@ type ReadPaneOutputRespPayload struct {
 	PaneID string `json:"pane_id"`
 	Text   string `json:"text"`
 	Lines  int    `json:"lines"`
+	// NotRunning: the pane has no live process (deferred, exited, or a
+	// placeholder). A read-only viewer is answered from what exists instead
+	// of spawning it.
+	NotRunning bool `json:"not_running,omitempty"`
 }
 
 type PaneStatusReqPayload struct {
@@ -891,6 +905,8 @@ type CreatePaneReqPayload struct {
 	WorktreeBranch string `json:"worktree_branch,omitempty"`
 	// Sandbox: see CreatePanePayload. Validated daemon-side.
 	Sandbox *SandboxSpec `json:"sandbox,omitempty"`
+	// KubeContext: see CreatePanePayload. Validated daemon-side.
+	KubeContext string `json:"kube_context,omitempty"`
 }
 
 type CreatePaneRespPayload struct {
@@ -951,6 +967,8 @@ type ScreenshotPaneRespPayload struct {
 	Text    string `json:"text"`
 	CursorX int    `json:"cursor_x"`
 	CursorY int    `json:"cursor_y"`
+	// NotRunning: see ReadPaneOutputRespPayload.
+	NotRunning bool `json:"not_running,omitempty"`
 }
 
 type SwitchTabReqPayload struct {
@@ -2045,16 +2063,28 @@ func WriteMessage(w io.Writer, msg *Message) error {
 	return nil
 }
 
+// ErrFrameTooLarge is returned when a frame's length prefix exceeds the
+// reader's limit. The payload is never allocated.
+var ErrFrameTooLarge = errors.New("ipc: frame too large")
+
 // ReadMessage reads a length-prefixed JSON message from r.
 func ReadMessage(r io.Reader) (*Message, error) {
+	return ReadMessageLimit(r, maxFrameSize)
+}
+
+// ReadMessageLimit reads one length-prefixed frame and refuses a length
+// prefix above limit BEFORE the payload buffer exists, which is what lets a
+// pre-login TCP conn be held to 4 KiB. ReadMessage is ReadMessageLimit with
+// the default cap.
+func ReadMessageLimit(r io.Reader, limit uint32) (*Message, error) {
 	var lenBuf [4]byte
 	if _, err := io.ReadFull(r, lenBuf[:]); err != nil {
 		return nil, fmt.Errorf("read length: %w", err)
 	}
 	length := binary.BigEndian.Uint32(lenBuf[:])
 
-	if length > maxFrameSize {
-		return nil, fmt.Errorf("message too large: %d bytes", length)
+	if length > limit {
+		return nil, fmt.Errorf("%w: %d bytes (limit %d)", ErrFrameTooLarge, length, limit)
 	}
 
 	data := make([]byte, length)

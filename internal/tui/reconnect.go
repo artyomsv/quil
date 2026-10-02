@@ -238,6 +238,27 @@ func reconnectDelay(attempt int, jitter float64) time.Duration {
 // value is really an *ipc.Client.
 type RedialFunc func(old Client) (Client, error)
 
+// LoggedIn is a dialled connection together with the rights its token login
+// was granted. A dialer that logs in returns one so the rights reach Update on
+// the same message as the connection — they come from the daemon on every
+// login, and a token's level can change between two of them. redialCmd and
+// dialDest unwrap it before the connection is used, so the router, the
+// closer seam (which type-asserts the concrete conn) and every other reader
+// only ever see Client itself.
+type LoggedIn struct {
+	Client
+	Rights string
+}
+
+// splitLogin unwraps a LoggedIn. ok is false for a dialer that does not log
+// in (local socket, ssh): those destinations' rights are left as they are.
+func splitLogin(c Client) (conn Client, rights string, ok bool) {
+	if li, isLogin := c.(*LoggedIn); isLogin && li != nil {
+		return li.Client, li.Rights, true
+	}
+	return c, "", false
+}
+
 // SetRedialFunc installs the reconnect dialer for ONE destination. Called by
 // cmd/quil in remote mode only; a destination with no func never reconnects,
 // which is what local sessions get.
@@ -1030,6 +1051,9 @@ type redialResultMsg struct {
 	dest   string
 	client Client
 	err    error
+	// rights is what the re-login granted; login says there was one.
+	rights string
+	login  bool
 }
 
 // handleLinkLost marks ONE destination as reconnecting.
@@ -1130,7 +1154,8 @@ func (m Model) redialCmd(dest string) tea.Cmd {
 	gen, dial, old := m.linkOf(dest).gen, m.redialFns[dest], m.connFor(dest)
 	return func() tea.Msg {
 		c, err := dial(old)
-		return redialResultMsg{gen: gen, dest: dest, client: c, err: err}
+		c, rights, login := splitLogin(c)
+		return redialResultMsg{gen: gen, dest: dest, client: c, err: err, rights: rights, login: login}
 	}
 }
 

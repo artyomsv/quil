@@ -43,6 +43,9 @@ type destDialedMsg struct {
 	dest   string
 	client Client
 	err    error
+	// rights is what the login granted; login says there was one.
+	rights string
+	login  bool
 }
 
 // dialDest connects a destination in the background and reports the result.
@@ -58,7 +61,8 @@ func (m *Model) dialDest(dest string) tea.Cmd {
 	dial := m.dialDestFn
 	return func() tea.Msg {
 		c, err := dial(dest)
-		return destDialedMsg{dest: dest, client: c, err: err}
+		c, rights, login := splitLogin(c)
+		return destDialedMsg{dest: dest, client: c, err: err, rights: rights, login: login}
 	}
 }
 
@@ -257,6 +261,14 @@ func (m *Model) disconnectDest(dest string) {
 	delete(m.redialFns, dest)
 	delete(m.attached, dest)
 	delete(m.links, dest)
+	// The rights the last login granted, and what a viewer of it followed: a
+	// later connect of the same name logs in again and records its own, and a
+	// leftover read-only entry would gate a destination that no longer exists.
+	delete(m.destRights, dest)
+	delete(m.followProject, dest)
+	if r, ok := m.client.(*Router); ok {
+		r.ForgetDestRights(dest)
+	}
 	// Every other per-destination table goes with them. These two are read
 	// through the ACTIVE dest today, so a leftover entry is unreachable rather
 	// than wrong — but they are the same class of key as the three above, and

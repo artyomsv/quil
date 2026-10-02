@@ -76,6 +76,11 @@ func (m *Model) finishProjectDrag(x, y int) tea.Cmd {
 		return nil
 	}
 	p := m.projects[idx]
+	// The press never arms a drag for a read-only destination's project; this
+	// is the second line, ahead of any membership change.
+	if m.destReadOnly(p.Dest) {
+		return m.refuseReadOnly()
+	}
 	// The same rule the drop-target highlight was painted from, applied to the
 	// release row — so the green row is exactly what the release does.
 	_, row, ok := m.sidebarDragRows(x, y)
@@ -160,6 +165,10 @@ func (m *Model) openProjectGroupList() tea.Cmd {
 // a group renamed, moved or deleted while the list was open is found by name
 // or not at all.
 func (m *Model) moveProjectToGroup(dest, id, name string) tea.Cmd {
+	// A read-only destination's project groups are its daemon's.
+	if m.destReadOnly(dest) {
+		return m.refuseReadOnly()
+	}
 	g := m.groups.indexOf(name)
 	if g < 0 || !m.groups.assign(g, dest, id) {
 		return nil
@@ -169,6 +178,9 @@ func (m *Model) moveProjectToGroup(dest, id, name string) tea.Cmd {
 
 // ungroupProject takes (dest, id) out of its group.
 func (m *Model) ungroupProject(dest, id string) tea.Cmd {
+	if m.destReadOnly(dest) {
+		return m.refuseReadOnly()
+	}
 	if !m.groups.unassign(dest, id) {
 		return nil
 	}
@@ -206,6 +218,15 @@ func (m *Model) openGroupCtxMenu(g, anchorX, anchorY int) {
 		cursor:    -1,
 		items:     buildGroupCtxMenuItems(g, len(m.groups.Groups), grp.Collapsed),
 	}
+	// Rename and Delete would change a read-only destination's groups; the
+	// order and the collapsed state are this client's own and stay enabled.
+	if m.groupTouchesReadOnly(grp.Name) {
+		for i := range s.items {
+			if s.items[i].id == ctxActRenameGroup || s.items[i].id == ctxActDeleteGroup {
+				s.items[i].enabled = false
+			}
+		}
+	}
 	s.cursor = firstEnabled(s.items)
 	w, h := s.boxSize()
 	if w > m.width || h > m.height-2 {
@@ -226,6 +247,10 @@ func (m Model) executeGroupCtxMenuItem(name string, item ctxMenuItem) (tea.Model
 	g := m.groups.indexOf(name)
 	if g < 0 || !item.enabled {
 		return m, nil
+	}
+	if (item.id == ctxActRenameGroup || item.id == ctxActDeleteGroup) && m.groupTouchesReadOnly(name) {
+		cmd := m.refuseReadOnly()
+		return m, cmd
 	}
 	switch item.id {
 	case ctxActRenameGroup:
@@ -346,6 +371,24 @@ func (m Model) handleGroupEditKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // anything is sent.
 func (m Model) commitGroupEdit() (tea.Model, tea.Cmd) {
 	e := m.groupEdit
+	// The menus never open this editor for a change a viewer cannot send;
+	// refused here too, before the file is touched.
+	refuse := false
+	switch e.mode {
+	case groupEditNew:
+		if e.projectID != "" {
+			refuse = m.destReadOnly(e.dest)
+		} else {
+			refuse = m.destReadOnly(m.groupCreateDest())
+		}
+	case groupEditRename:
+		refuse = m.groupTouchesReadOnly(e.target)
+	}
+	if refuse {
+		m.closeGroupNameDialog()
+		cmd := m.refuseReadOnly()
+		return m, cmd
+	}
 	changed := false
 	var err error
 	var opCmd tea.Cmd

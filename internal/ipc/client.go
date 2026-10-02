@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
 	"time"
 
 	"github.com/artyomsv/quil/internal/logger"
@@ -150,4 +151,28 @@ func NewClientWithDialer(ctx context.Context, dial DialFunc) (*Client, error) {
 		return nil, err
 	}
 	return &Client{conn: newConn(raw)}, nil
+}
+
+// ReceiveByID reads frames until one carries id, or timeout passes. It is for
+// the TCP login only: it runs BEFORE any receive loop owns the conn, so
+// it is the sole reader, and an unauthenticated conn is sent no broadcast, so a
+// frame with another id is unexpected and discarded.
+func (c *Client) ReceiveByID(id string, timeout time.Duration) (*Message, error) {
+	until := time.Now().Add(timeout)
+	if err := c.conn.raw.SetReadDeadline(until); err != nil {
+		return nil, err
+	}
+	defer c.conn.raw.SetReadDeadline(time.Time{})
+	for {
+		msg, err := c.conn.Receive()
+		if err != nil {
+			return nil, err
+		}
+		if msg.ID == id {
+			return msg, nil
+		}
+		if !time.Now().Before(until) {
+			return nil, os.ErrDeadlineExceeded
+		}
+	}
 }

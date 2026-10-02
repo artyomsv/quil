@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -120,6 +121,12 @@ func newMCPRouter(local *mcpBridge, cfg config.Config, dial hostDialFn) *mcpRout
 	seen := map[string]bool{}
 	for _, d := range cfg.Destinations {
 		if d.Dest == "" || seen[d.Dest] {
+			continue
+		}
+		// Hosts are dialled over ssh, which would take "tcp:<addr>" for a host
+		// name, and a bridge holds no token to log in with.
+		if strings.HasPrefix(d.Dest, tcpDestPrefix) {
+			log.Printf("mcp: skipping destination %q: tcp destinations are reached with --connect only", d.Dest)
 			continue
 		}
 		seen[d.Dest] = true

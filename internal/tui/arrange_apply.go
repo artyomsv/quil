@@ -86,6 +86,11 @@ func (m *Model) applyTabArrangement(tab *TabModel, newRoot *LayoutNode, active *
 	if tab == nil || newRoot == nil || m.notesMode {
 		return nil
 	}
+	// A viewer's trees are the daemon's: its layout write would be dropped,
+	// and the tree it kept would be marked dirty and never converge.
+	if m.destReadOnly(tab.Dest) {
+		return m.refuseReadOnly()
+	}
 	if m.tabLayoutBusy(tab) {
 		m.setFlash(tabBusyFlash)
 		return m.flashCmd()

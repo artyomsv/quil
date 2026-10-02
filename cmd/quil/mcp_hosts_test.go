@@ -84,6 +84,36 @@ func testRouter(t *testing.T, dial hostDialFn, dests ...string) *mcpRouter {
 	return r
 }
 
+// The bridge dials every host over ssh and holds no token, so a configured
+// "tcp:<addr>" destination is not one of its hosts: it is skipped with a log
+// line, never dialled, and the ssh host beside it is kept.
+func TestMCPRouter_SkipsTCPDestinations(t *testing.T) {
+	logged := captureLog(t)
+	var dialled []string
+	dial := func(cfg config.Config, d config.Destination) (*ipc.Client, error) {
+		dialled = append(dialled, d.Dest)
+		return nil, errors.New("not dialled in this test")
+	}
+	r := testRouter(t, dial, "tcp:127.0.0.1:7878", "gpu")
+	if len(r.order) != 1 || r.order[0] != "gpu" {
+		t.Fatalf("hosts = %v, want only gpu", r.order)
+	}
+	if _, ok := r.hosts["tcp:127.0.0.1:7878"]; ok {
+		t.Fatal("the tcp destination became a bridge host")
+	}
+	if _, _, err := r.bridgeFor("tcp:127.0.0.1:7878", ""); err == nil {
+		t.Fatal("an explicit tcp host resolved")
+	}
+	for _, d := range dialled {
+		if strings.HasPrefix(d, tcpDestPrefix) {
+			t.Fatalf("the tcp destination was dialled: %v", dialled)
+		}
+	}
+	if !strings.Contains(logged.String(), "tcp destinations are reached with --connect only") {
+		t.Fatalf("no skip line logged: %q", logged.String())
+	}
+}
+
 func TestMCPRouter_ResolutionOrder(t *testing.T) {
 	remoteSock := echoServer(t, "pane-remote")
 	var dials atomic.Int32

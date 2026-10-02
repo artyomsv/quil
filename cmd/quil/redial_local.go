@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -112,6 +113,9 @@ func localRedialFailure(failures *atomic.Int64, err error) error {
 func redialFor(dest string, cfgOf func() *config.Config) tui.RedialFunc {
 	if dest == "" {
 		return redialLocal()
+	}
+	if strings.HasPrefix(dest, tcpDestPrefix) {
+		return redialTCPDest(dest)
 	}
 	return redialRemote(cfgOf, dest)
 }

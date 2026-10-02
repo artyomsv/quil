@@ -123,6 +123,33 @@ type paletteCommand struct {
 // it — everything except section headers, status rows, and disabled rows.
 func (c paletteCommand) selectable() bool { return !c.header && !c.info && c.enabled }
 
+// readOnlyGreyedPalette is every palette action that changes the workspace on
+// the active destination, or asks its daemon for something only an acting
+// client may (history, processes, an overlay) — greyed (never hidden) when that
+// destination is read-only, so the rows stay where the eye expects them and
+// their state says why. "New project" and "Disconnect host…" are not here: the
+// first may target another destination, the second is client-side only. The
+// navigation rows (switch to a tab, project or pane) are not either: they can
+// name another destination, and their handlers refuse a viewer's own.
+var readOnlyGreyedPalette = map[paletteAction]bool{
+	palActNewTemplate: true, palActNewTab: true, palActCloseTab: true, palActRenameTab: true,
+	palActRenameProject: true, palActSplitH: true, palActSplitV: true, palActNewPane: true,
+	palActRenamePane: true, palActClosePane: true,
+	palActCycleTabColor: true, palActMoveTabLeft: true, palActMoveTabRight: true, palActTabLayout: true,
+	palActMoveProjectUp: true, palActMoveProjectDown: true, palActMute: true, palActEager: true,
+	palActHistory: true, palActLazygit: true, palActHunk: true, palActRestartPane: true,
+	palActProcesses: true, palActTakeControl: true,
+}
+
+// greyReadOnlyPalette disables readOnlyGreyedPalette's rows in place.
+func greyReadOnlyPalette(cmds []paletteCommand) {
+	for i := range cmds {
+		if readOnlyGreyedPalette[cmds[i].action] {
+			cmds[i].enabled = false
+		}
+	}
+}
+
 // fuzzyScore reports whether query is a case-insensitive subsequence of target
 // and, if so, a score (higher = better). It rewards consecutive runs, a match
 // at the target start, a match right after a separator, and earlier position.
@@ -326,8 +353,8 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 	// the one handleToggleOverlay would create the overlay on.
 	if m.pluginRegistry != nil {
 		dest := m.activeDest()
-		lazygitOK = m.pluginAvailableFor(dest, overlayPluginLazygit)
-		hunkOK = m.pluginAvailableFor(dest, overlayPluginHunk)
+		lazygitOK = m.pluginAvailableFor(dest, overlayPluginLazygit) && m.canOpenOverlay(dest, overlayPluginLazygit)
+		hunkOK = m.pluginAvailableFor(dest, overlayPluginHunk) && m.canOpenOverlay(dest, overlayPluginHunk)
 	}
 
 	// --- Go to pane: navigation leads — jumping to a pane is the most common
@@ -617,6 +644,9 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 		})
 	}
 
+	if m.destReadOnly(m.rightsDest()) {
+		greyReadOnlyPalette(cmds)
+	}
 	return cmds
 }
 
@@ -1067,6 +1097,11 @@ func lastCellsToWidth(s string, w int) string {
 // repaint); jumpToPane itself sends no IPC, so the daemon is told about the
 // new active tab via switchTab afterward.
 func (m Model) goToPane(paneID string) (tea.Model, tea.Cmd) {
+	// Ahead of the Active-flag write below, which a refused jump must not leave.
+	if m.leavesViewerTab(paneID) {
+		cmd := m.refuseReadOnly()
+		return m, cmd
+	}
 	if cur := m.activeTabModel(); cur != nil {
 		if old := cur.ActivePaneModel(); old != nil {
 			old.Active = false
@@ -1101,7 +1136,9 @@ func (m Model) executePaletteCommand(c paletteCommand) (tea.Model, tea.Cmd) {
 	case palActSwitchTab:
 		for i, tab := range m.curTabs() {
 			if tab != nil && tab.ID == c.arg {
-				return m, m.switchTab(i)
+				// Two statements: switchTab can set a flash through the pointer.
+				cmd := m.switchTab(i)
+				return m, cmd
 			}
 		}
 		return m, nil
@@ -1148,12 +1185,16 @@ func (m Model) executePaletteCommand(c paletteCommand) (tea.Model, tea.Cmd) {
 		if tab := m.activeTabModel(); tab != nil && tab.FocusMode() {
 			tab.ExitFocus()
 		}
-		return m, m.splitPane(SplitHorizontal)
+		// Sequenced: splitPane may set a flash on m.
+		cmd := m.splitPane(SplitHorizontal)
+		return m, cmd
 	case palActSplitV:
 		if tab := m.activeTabModel(); tab != nil && tab.FocusMode() {
 			tab.ExitFocus()
 		}
-		return m, m.splitPane(SplitVertical)
+		// Sequenced: splitPane may set a flash on m.
+		cmd := m.splitPane(SplitVertical)
+		return m, cmd
 	case palActFocus:
 		return m.toggleFocusForActiveTab()
 	case palActNotes:
@@ -1161,15 +1202,19 @@ func (m Model) executePaletteCommand(c paletteCommand) (tea.Model, tea.Cmd) {
 	case palActRenamePane:
 		return m.beginPaneRename()
 	case palActMute:
-		return m, m.toggleActivePaneMute()
+		cmd := m.toggleActivePaneMute()
+		return m, cmd
 	case palActEager:
-		return m, m.toggleActivePaneEager()
+		cmd := m.toggleActivePaneEager()
+		return m, cmd
 	case palActHistory:
 		return m.openHistoryForActivePane()
 	case palActLazygit:
-		return m, m.handleToggleLazygit()
+		cmd := m.handleToggleLazygit()
+		return m, cmd
 	case palActHunk:
-		return m, m.handleToggleHunk()
+		cmd := m.handleToggleHunk()
+		return m, cmd
 	case palActRestartPane:
 		return m.openRestartPaneConfirm()
 	case palActClosePane:
@@ -1183,7 +1228,8 @@ func (m Model) executePaletteCommand(c paletteCommand) (tea.Model, tea.Cmd) {
 	case palActRenameTab:
 		return m.beginTabRename()
 	case palActCycleTabColor:
-		return m, m.cycleTabColor()
+		cmd := m.cycleTabColor()
+		return m, cmd
 	// Sequenced, not inlined: the move helpers mutate m through a pointer
 	// receiver, and Go does not order a plain operand against a call in the
 	// same return statement.
@@ -1228,6 +1274,11 @@ func (m Model) executePaletteCommand(c paletteCommand) (tea.Model, tea.Cmd) {
 		m.dialogCursor = 0
 		return m, tea.ClearScreen
 	case palActProcesses:
+		// The report it asks for is act-class; a viewer would wait on nothing.
+		if m.destReadOnly(m.rightsDest()) {
+			cmd := m.refuseReadOnly()
+			return m, cmd
+		}
 		m = m.openProcessesDialog()
 		return m, m.refreshResources(true)
 	case palActAbout:
@@ -1241,7 +1292,8 @@ func (m Model) executePaletteCommand(c paletteCommand) (tea.Model, tea.Cmd) {
 	case palActRedraw:
 		return m.forceRedraw()
 	case palActTakeControl:
-		return m, m.sendTakeControl(m.activeDest())
+		cmd := m.takeControl()
+		return m, cmd
 
 	// --- Appearance --------------------------------------------------------
 	case palActDimToggle:

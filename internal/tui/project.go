@@ -192,6 +192,12 @@ func (m Model) focusSidebarPane(tabIdx int, paneID string) (tea.Model, tea.Cmd) 
 	}
 	var cmd tea.Cmd
 	if tabIdx != m.activeTabIdx() {
+		// A viewer cannot switch tabs, so it cannot pick a pane in another
+		// one either: changing that tab's focus here would show a pane the
+		// daemon never selected once the daemon does activate the tab.
+		if m.destReadOnly(tabs[tabIdx].Dest) {
+			return m, m.refuseReadOnly()
+		}
 		cmd = m.switchTab(tabIdx)
 	}
 	tab := tabs[tabIdx]

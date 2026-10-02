@@ -1228,3 +1228,50 @@ func TestUpdateRequests_SkippedBeforeFirstBroadcastOfARemote(t *testing.T) {
 		})
 	}
 }
+
+// A sidebar click on a pane of ANOTHER tab is a tab switch, which a viewer
+// cannot make, so it must not move that tab's focus either: the daemon
+// would later activate the tab and the viewer would show a pane it never
+// selected. The full-rights control switches and focuses.
+func TestReadOnly_SidebarPaneInOtherTabLeavesFocus(t *testing.T) {
+	for _, rights := range []string{ipc.RightsReadOnly, ipc.RightsFull} {
+		t.Run(rights, func(t *testing.T) {
+			readOnly := rights == ipc.RightsReadOnly
+			m, conn := readOnlyModel(t, rights)
+			a := NewPaneModel("pane-2a", testRingBufSize)
+			b := NewPaneModel("pane-2b", testRingBufSize)
+			t.Cleanup(a.Dispose)
+			t.Cleanup(b.Dispose)
+			tab2 := m.projects[0].tabs[1]
+			tab2.Root = &LayoutNode{Split: SplitHorizontal, Ratio: 0.5, Left: NewLeaf(a), Right: NewLeaf(b)}
+			tab2.ActivePane = "pane-2a"
+			m = roUpdate(t, m, tea.WindowSizeMsg{Width: 172, Height: 48})
+			index := -1
+			for _, row := range m.sidebarVisibleRows(m.projectSidebarWidth(), m.sidebarContentHeight()) {
+				if row.kind == sidebarRowPane && row.paneID == "pane-2b" {
+					index = row.index
+				}
+			}
+			if index < 0 {
+				t.Fatal("setup: no sidebar row for pane-2b")
+			}
+			next, cmd := m.activateSidebarRow(sidebarRowPane, index)
+			runCmdNoWait(cmd)
+			m = next.(Model)
+			if moved := tab2.ActivePane == "pane-2b"; moved == readOnly {
+				t.Fatalf("other tab's focus moved = %v on rights %q", moved, rights)
+			}
+			if switched := m.activeTabIdx() == 1; switched == readOnly {
+				t.Fatalf("tab switched = %v on rights %q", switched, rights)
+			}
+			if readOnly {
+				if m.flashText != readOnlyFlash {
+					t.Fatalf("flash = %q, want the read-only flash", m.flashText)
+				}
+				if got := actSent(conn); len(got) != 0 {
+					t.Fatalf("a viewer's sidebar click sent %v", got)
+				}
+			}
+		})
+	}
+}

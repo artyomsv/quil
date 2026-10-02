@@ -91,9 +91,10 @@ On Windows, Quil gives `QUIL_HOME` a protected owner-only access list — your a
 0. Create a second, standard account: `net user quilacl2 <password> /add`, and the probe directory: `mkdir C:\Temp\quil-acl`. Build the probe from the repo root (Git Bash):
    `MSYS_NO_PATHCONV=1 docker run --rm -v "$(pwd -W)":/src -v quil-gomod:/go/pkg/mod -v C:/Temp/quil-acl:/out -w /src -e GOOS=windows -e GOARCH=amd64 golang:1.25 go test -c -o /out/ipc_test.exe ./internal/ipc`
 1. Owner, permissive socket: in PowerShell (owner) start the server. `QUIL_ACL_DIR` must be an EXISTING directory the second account can traverse; the server never changes its ACL — it creates a fresh `quil-acl-*` directory inside it, makes only that one permissive, and prints `LISTENING mode=... sock=<path>`:
-   `$env:QUIL_ACL_ROLE='server'; $env:QUIL_ACL_DIR='C:\Temp\quil-acl'; $env:QUIL_ACL_SOCKET='permissive'; C:\Temp\quil-acl\ipc_test.exe -test.run TestACLTwoAccount -test.v -test.timeout 30m`
+   `$env:QUIL_ACL_ROLE='server'; $env:QUIL_ACL_DIR='C:\Temp\quil-acl'; $env:QUIL_ACL_SOCKET='permissive'; C:\Temp\quil-acl\ipc_test.exe '-test.run=TestACLTwoAccount' '-test.v' '-test.timeout=30m'`
    and in a second owner PowerShell, with the printed path:
-   `$env:QUIL_ACL_ROLE='client'; $env:QUIL_ACL_SOCK='<sock path the server printed>'; C:\Temp\quil-acl\ipc_test.exe -test.run TestACLTwoAccount -test.v`
+   `$env:QUIL_ACL_ROLE='client'; $env:QUIL_ACL_SOCK='<sock path the server printed>'; C:\Temp\quil-acl\ipc_test.exe '-test.run=TestACLTwoAccount' '-test.v'`
+   (Keep the flags quoted in PowerShell: unquoted, it splits `-test.run` at the dot and the binary refuses `-test`.)
    → expect `RESULT: ACCEPTED` (the socket works).
 2. Second account, permissive socket (server still running from step 1):
    `runas /user:quilacl2 "cmd /c set QUIL_ACL_ROLE=client&& set QUIL_ACL_SOCK=<sock path the server printed>&& C:\Temp\quil-acl\ipc_test.exe -test.run TestACLTwoAccount -test.v > C:\Temp\quil-acl\step2.txt 2>&1"`

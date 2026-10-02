@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -104,6 +105,9 @@ func TestTokens_SecretNeverLogged(t *testing.T) {
 	if cr.Error != "" {
 		t.Fatalf("create = %+v", cr)
 	}
+	// The verifier is as secret as the token for these logs: it is what a
+	// login is checked against. Read before the revoke removes it.
+	stored, server := storedVerifierHex(t, h.home, cr.ID)
 	c, _ := h.login(t, cr.Token)
 	roundTrip(t, local, ipc.MsgTokenListReq, ipc.MsgTokenListResp, struct{}{})
 	roundTrip(t, local, ipc.MsgTokenRevokeReq, ipc.MsgTokenRevokeResp, ipc.TokenRevokeReqPayload{Target: cr.ID})
@@ -114,10 +118,39 @@ func TestTokens_SecretNeverLogged(t *testing.T) {
 		t.Fatal(err)
 	}
 	for where, text := range map[string]string{"quild.log": buf.String(), "audit.log": string(audit)} {
-		if strings.Contains(text, cr.Token) || strings.Contains(text, secret) {
-			t.Fatalf("%s carries the token:\n%s", where, text)
+		for what, s := range map[string]string{"token": cr.Token, "token secret": secret,
+			"stored key": stored, "server key": server} {
+			if strings.Contains(text, s) {
+				t.Fatalf("%s carries the %s:\n%s", where, what, text)
+			}
 		}
 	}
+}
+
+// storedVerifierHex reads token id's stored and server keys, as hex, from
+// tokens.json.
+func storedVerifierHex(t *testing.T, home, id string) (stored, server string) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(home, "tokens.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var file struct {
+		Tokens []clientauth.Entry `json:"tokens"`
+	}
+	if err := json.Unmarshal(data, &file); err != nil {
+		t.Fatalf("decode tokens.json: %v", err)
+	}
+	for _, e := range file.Tokens {
+		if e.ID == id {
+			if e.StoredKey == "" || e.ServerKey == "" {
+				t.Fatalf("setup: token %s has an empty verifier", id)
+			}
+			return e.StoredKey, e.ServerKey
+		}
+	}
+	t.Fatalf("setup: token %s not in tokens.json", id)
+	return "", ""
 }
 
 func TestRevoke_ClosesConnKeepsOthers(t *testing.T) {

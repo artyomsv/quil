@@ -327,6 +327,11 @@ type Daemon struct {
 	tokens *clientauth.Store
 	audit  *auditLog
 	auth   authService
+
+	// preLoginAudit caps audit lines about conns that have not logged in.
+	preLoginAudit auditBudget
+	// homeUnprotected: ProtectDir failed at start, so no TCP listener.
+	homeUnprotected bool
 }
 
 func New(cfg config.Config) *Daemon {
@@ -398,6 +403,10 @@ func (d *Daemon) Start() error {
 	// is owner-only, so the two guards cannot fail open together.
 	if err := ipc.ProtectDir(quilDir); err != nil {
 		log.Printf("warning: could not restrict %s to this account: %v", quilDir, err)
+		// The local socket may still serve (Server.Start decides), but the
+		// TCP listener does not: rotated audit.log archives and anything
+		// else in the folder rely on the folder's inherited protection.
+		d.homeUnprotected = true
 	}
 	if w, err := ipc.DirAccessWarning(quilDir); err != nil {
 		log.Printf("warning: could not read the access list of %s: %v", quilDir, err)
@@ -1753,9 +1762,9 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	case ipc.MsgGroupOp:
 		d.handleGroupOp(conn, msg)
 	case ipc.MsgNoteGet:
-		d.handleNoteGet(conn, msg)
+		d.handleNoteGet(conn, msg, release)
 	case ipc.MsgNoteSet:
-		d.handleNoteSet(conn, msg)
+		d.handleNoteSet(conn, msg, release)
 	case ipc.MsgSharedImport:
 		d.handleSharedImport(conn, msg)
 
@@ -1800,7 +1809,7 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	case ipc.MsgWorktreeStatusReq:
 		d.handleWorktreeStatusReq(conn, msg)
 	case ipc.MsgSandboxCapReq:
-		d.handleSandboxCapReq(conn, msg)
+		d.handleSandboxCapReq(conn, msg, release)
 	case ipc.MsgKubeCtxReq:
 		d.handleKubeCtxReq(conn, msg)
 	case ipc.MsgPluginListReq:

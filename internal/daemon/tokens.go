@@ -156,13 +156,19 @@ func (d *Daemon) expireTokens(now time.Time) {
 	d.closeAuthConns(victims, "token expired")
 }
 
-func (d *Daemon) expiryLoop(tick time.Duration, now func() time.Time) {
+// expiryLoop also reports, once a minute, how many pre-login audit lines the
+// cap suppressed in a window that has ended. It returns on daemon shutdown or
+// when stop closes (closeAuth).
+func (d *Daemon) expiryLoop(tick time.Duration, now func() time.Time, stop <-chan struct{}) {
 	t := time.NewTicker(tick)
 	defer t.Stop()
 	for {
 		select {
 		case <-t.C:
 			d.expireTokens(now())
+			d.flushPreLoginAudit(time.Now(), false)
+		case <-stop:
+			return
 		case <-d.shutdown:
 			return
 		}

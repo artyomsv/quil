@@ -29,7 +29,7 @@ The listener is off until you set `[listener] tcp` in `config.toml` (see [Config
 | `standard` | everything a user does in the TUI, including typing into a shell (which runs code as you) and the setup dialog's toggles and kube context | start a program by raw arguments (plugin instances such as ssh/stripe), open overlay panes (lazygit), stop the daemon, reload its plugins, set its overlay policy, stop a process from the Processes dialog, check for or stage updates, manage tokens |
 | `full` | everything a local client can | manage tokens (local socket only) |
 
-Every TCP connection, whatever its level, may hold at most 4 waiting requests at once (`watch_notifications` and `wait_task`, which each park until something happens); the local socket has no such cap.
+Every TCP connection, whatever its level, may hold at most 4 waiting requests at once: `watch_notifications` and `wait_task`, which each park until something happens, and the requests the daemon answers from a worker of their own — the sandbox check (which waits for Docker) and note reads and saves. The local socket has no such cap.
 
 `standard` does not stop code execution — typing into a shell is running code. It stops what would leave no trace on screen (a program started by raw arguments) and daemon-wide actions. A sandbox pane can run any image your Docker can reach, inside the sandbox's mount boundary.
 
@@ -78,7 +78,9 @@ After a daemon restart, the slot of the previous size master is kept for up to 3
 
 `QUIL_HOME/audit.log` (JSON lines, 5 MiB x 10): TCP connects and disconnects, logins and their failures, refusals (at most one line per connection and message type per minute), token create/revoke/expiry, and privileged requests from any transport — stop, plugin reload, overlay policy, kill process, update check and staging, and a create carrying raw arguments. It never contains a token, a key, a nonce, a proof, terminal output, notes or input. Every value a client chose is cut to 64 bytes and written as a JSON string, so a chosen name cannot forge a line.
 
-If the audit log or the token store cannot be opened, the TCP listener does not start (the reason is in `quild.log`); the local socket is unaffected.
+Lines about connections that have not logged in (connects, failed logins and their disconnects) are capped at 120 a minute for the whole daemon: anyone who can reach the port can produce them without a token, and a flood would otherwise rotate the real history out of the log. The rest are counted, not written, and one `audit_suppressed` line reports how many. Successful logins and everything a logged-in connection does are never capped.
+
+If the audit log or the token store cannot be opened, the audit log cannot be restricted to your account, or (on Windows) the quil folder cannot be protected, the TCP listener does not start (the reason is in `quild.log`); the local socket is unaffected.
 
 ## Local socket
 

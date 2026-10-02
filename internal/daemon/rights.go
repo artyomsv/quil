@@ -15,9 +15,18 @@ import (
 const maxParkedPerConn = 4
 
 // parksGoroutine reports a request whose handler can leave a goroutine
-// waiting on the conn's behalf after the dispatch returns.
+// waiting on the conn's behalf after the dispatch returns. Besides the two
+// long waits, that is every handler that answers from a worker of its own
+// with no daemon-wide single-flight slot: a sandbox probe waits up to the
+// probe's timeout for Docker, and a note request waits for the pane's note
+// lock. Uncounted, a token holder could stack any number of them.
 func parksGoroutine(msgType string) bool {
-	return msgType == ipc.MsgWatchNotificationsReq || msgType == ipc.MsgWaitTaskReq
+	switch msgType {
+	case ipc.MsgWatchNotificationsReq, ipc.MsgWaitTaskReq,
+		ipc.MsgSandboxCapReq, ipc.MsgNoteGet, ipc.MsgNoteSet:
+		return true
+	}
+	return false
 }
 
 // privilegedTypes are audited from ANY transport, beside a create that

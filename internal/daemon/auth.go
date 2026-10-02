@@ -144,6 +144,13 @@ type authService struct {
 	persistClosed bool
 	persistWG     sync.WaitGroup
 
+	// expiryStop ends the expiry loop and expiryDone says it has returned:
+	// closeAuth waits for it, so a sweep running at shutdown writes its
+	// token_expired line before the audit log closes, not after.
+	expiryStop     chan struct{}
+	expiryDone     chan struct{}
+	expiryStopOnce sync.Once
+
 	// afterRevokeMark is a test seam between revoke phases 1 and 2.
 	afterRevokeMark func()
 	// beforeRefusalFlush is a test seam between a refusal's send and its
@@ -316,11 +323,21 @@ func (d *Daemon) initAuth(home string) error {
 	}
 	// Read on THIS goroutine and handed over as arguments: the loop never
 	// touches the package vars a test restores in t.Cleanup.
-	go d.expiryLoop(expiryTick, expiryClock)
+	d.auth.expiryStop = make(chan struct{})
+	d.auth.expiryDone = make(chan struct{})
+	go func() {
+		defer close(d.auth.expiryDone)
+		d.expiryLoop(expiryTick, expiryClock, d.auth.expiryStop)
+	}()
 	return errors.Join(errs...)
 }
 
 func (d *Daemon) closeAuth() {
+	if d.auth.expiryStop != nil {
+		d.auth.expiryStopOnce.Do(func() { close(d.auth.expiryStop) })
+		<-d.auth.expiryDone
+	}
+	d.flushPreLoginAudit(time.Now(), true)
 	d.auth.closePersist()
 	if err := d.audit.Close(); err != nil {
 		log.Printf("audit: close: %v", err)
@@ -354,6 +371,10 @@ func (d *Daemon) startConfiguredListener() {
 		log.Printf("listener: the audit log or token store could not be opened — no TCP listener; the unix socket is unaffected")
 		return
 	}
+	if d.homeUnprotected {
+		log.Printf("listener: the quil folder could not be restricted to this account — no TCP listener; the unix socket is unaffected")
+		return
+	}
 	bound, err := d.startTCPListener(raw)
 	if err != nil {
 		log.Printf("listener: %v — no TCP listener; the unix socket is unaffected", err)
@@ -381,8 +402,29 @@ func (d *Daemon) writeAudit(e auditEntry) {
 	d.audit.write(e)
 }
 
+// writePreLoginAudit writes a line about a conn that has not logged in,
+// within preLoginAuditPerMinute. A login_ok and everything after it go
+// through writeAudit uncapped: only a token holder can produce those.
+func (d *Daemon) writePreLoginAudit(e auditEntry) {
+	ok, ended := d.preLoginAudit.take(time.Now())
+	if ended > 0 {
+		d.writeAudit(suppressedEntry(ended))
+	}
+	if ok {
+		d.writeAudit(e)
+	}
+}
+
+// flushPreLoginAudit reports a suppressed count whose window has ended (the
+// expiry tick calls it every minute), or the current one at shutdown.
+func (d *Daemon) flushPreLoginAudit(now time.Time, force bool) {
+	if n := d.preLoginAudit.drain(now, force); n > 0 {
+		d.writeAudit(suppressedEntry(n))
+	}
+}
+
 func (d *Daemon) onTCPAccepted(conn *ipc.Conn) {
-	d.writeAudit(auditEntry{Event: "tcp_connect", Transport: ipc.TransportTCP})
+	d.writePreLoginAudit(auditEntry{Event: "tcp_connect", Transport: ipc.TransportTCP})
 	s := d.auth.begin(conn)
 	s.arm(d.auth.step(), func() { d.loginTimedOut(conn, s, loginPending) })
 }
@@ -392,7 +434,7 @@ func (d *Daemon) onTCPAccepted(conn *ipc.Conn) {
 // dispatch goroutine, and the conn is closed as soon as it returns.
 func (d *Daemon) onTCPRejected(reason string, conn *ipc.Conn) {
 	if conn == nil {
-		d.writeAudit(loginFailed(nil, nil, reason))
+		d.writePreLoginAudit(loginFailed(nil, nil, reason))
 		return
 	}
 	// A logged-in conn's oversized frame ends that conn, but it is not a
@@ -402,7 +444,7 @@ func (d *Daemon) onTCPRejected(reason string, conn *ipc.Conn) {
 	}
 	s := d.auth.session(conn)
 	if s == nil {
-		d.writeAudit(loginFailed(nil, nil, reason))
+		d.writePreLoginAudit(loginFailed(nil, nil, reason))
 		return
 	}
 	switch {
@@ -410,7 +452,7 @@ func (d *Daemon) onTCPRejected(reason string, conn *ipc.Conn) {
 		// The first frame: no request ID exists yet, so there is nothing a
 		// refusal frame could be matched to. Closed at once, with no frame.
 		s.disarm()
-		d.writeAudit(loginFailed(nil, s, reason))
+		d.writePreLoginAudit(loginFailed(nil, s, reason))
 	case s.state.CompareAndSwap(loginProofPending, loginRefusing):
 		// The client is waiting on the hello's ID: tell it why.
 		d.refuseLogin(conn, nil, s, reason, reason)
@@ -428,9 +470,12 @@ func (d *Daemon) onTCPDisconnect(conn *ipc.Conn) {
 	d.auth.forget(conn)
 	d.auth.indexRemove(conn)
 	e := auditEntry{Event: "tcp_disconnect", Transport: ipc.TransportTCP}
-	if a := conn.Auth(); a != nil {
-		e.TokenID, e.TokenName, e.Rights = a.TokenID, a.TokenName, a.Level
+	a := conn.Auth()
+	if a == nil {
+		d.writePreLoginAudit(e)
+		return
 	}
+	e.TokenID, e.TokenName, e.Rights = a.TokenID, a.TokenName, a.Level
 	d.writeAudit(e)
 }
 
@@ -589,7 +634,7 @@ func (d *Daemon) refuseLogin(conn *ipc.Conn, msg *ipc.Message, s *loginSession, 
 		s.disarm()
 		defer s.refusedOnce.Do(func() { close(s.refused) })
 	}
-	d.writeAudit(loginFailed(msg, s, auditReason))
+	d.writePreLoginAudit(loginFailed(msg, s, auditReason))
 	sendError(conn, s.requestID(msg), typ, ipc.ErrCodeRefused, reason)
 	if hook := d.auth.beforeRefusalFlush.Load(); hook != nil {
 		(*hook)()

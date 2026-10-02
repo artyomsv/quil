@@ -124,13 +124,20 @@ func dockerUnavailableMessage(err error) string {
 // same reason.
 //
 // On a worker goroutine like every other dialog RPC, because the probe blocks.
-func (d *Daemon) handleSandboxCapReq(conn *ipc.Conn, msg *ipc.Message) {
+//
+// release returns the conn's waiting-request slot (admitParked); it runs
+// before the answer, so a client may ask again the moment it reads one. The
+// worker keeps the request's ID only, never the message: a client-padded
+// payload would otherwise stay in memory for as long as the probe waits.
+func (d *Daemon) handleSandboxCapReq(conn *ipc.Conn, msg *ipc.Message, release func()) {
+	id := msg.ID
 	go func() {
 		answer := d.sandboxCap.get(context.Background())
 		if answer.Error != "" {
 			log.Printf("sandbox: capability probe: %s", answer.Error)
 		}
-		respondTo(conn, msg.ID, ipc.MsgSandboxCapResp, answer)
+		release()
+		respondTo(conn, id, ipc.MsgSandboxCapResp, answer)
 	}()
 }
 

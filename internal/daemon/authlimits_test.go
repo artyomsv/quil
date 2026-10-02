@@ -94,13 +94,8 @@ func TestRights_SandboxCapWaitersEndWithTheirConn(t *testing.T) {
 				t.Fatalf("round %d: probe %d refused below the cap", round, i)
 			}
 		}
-		// The first request of the first round runs the shared probe; every
-		// other one waits on it.
-		want := int32(maxParkedPerConn)
-		if round == 0 {
-			want--
-		}
-		pollUntil(t, "the requests to wait on the probe", func() bool { return h.d.sandboxCap.waiting.Load() == want })
+		// Every request waits, the one that started the shared probe too.
+		pollUntil(t, "the requests to wait on the probe", func() bool { return h.d.sandboxCap.waiting.Load() == maxParkedPerConn })
 		if err := viewer.Close(); err != nil {
 			t.Fatal(err)
 		}
@@ -287,9 +282,10 @@ func TestCloseAuth_WaitsForTheExpirySweep(t *testing.T) {
 	t.Fatal("the sweep's token_expired line was lost")
 }
 
-// A waiter that leaves gets the canceled answer at once, and the shared probe
-// it was waiting on still completes and is cached for everyone else: one
-// client's disconnect must not store "docker not available" for 30 seconds.
+// A caller that leaves gets the canceled answer at once — the one that
+// started the probe as well as a later one — and the shared probe still
+// completes and is cached for everyone else: one client's disconnect must not
+// store "docker not available" for 30 seconds.
 func TestSandboxCap_CanceledWaiterDoesNotPoisonTheCache(t *testing.T) {
 	block := make(chan struct{})
 	started := make(chan struct{})
@@ -315,18 +311,98 @@ func TestSandboxCap_CanceledWaiterDoesNotPoisonTheCache(t *testing.T) {
 	waiterCtx, cancelWaiter := context.WithCancel(context.Background())
 	waited := make(chan ipc.SandboxCapRespPayload, 1)
 	go func() { waited <- c.get(waiterCtx) }()
-	pollUntil(t, "the waiter to park", func() bool { return c.waiting.Load() == 1 })
+	pollUntil(t, "both callers to park", func() bool { return c.waiting.Load() == 2 })
 	cancelWaiter()
 	if got := <-waited; got.Error != errSandboxCapCanceled {
 		t.Fatalf("canceled waiter got %+v, want the canceled answer", got)
 	}
-	// Even the PROBER's own caller leaving must not cut the shared probe short.
+	// The caller that STARTED the probe leaves too, while it still runs: it
+	// returns at once, and the probe goes on for everyone else.
 	cancelProber()
-	close(block)
-	if got := <-probed; !got.Available {
-		t.Fatalf("the shared probe was cut short by its caller's cancel: %+v", got)
+	if got := <-probed; got.Error != errSandboxCapCanceled {
+		t.Fatalf("canceled initiator got %+v, want the canceled answer", got)
 	}
+	close(block)
 	if got := c.get(context.Background()); !got.Available {
 		t.Fatalf("cached answer = %+v, want available", got)
+	}
+}
+
+// The request that finds no probe running starts one and must still keep its
+// OWN deadline: the plugin catalog waits at most 2 s for the sandbox answer,
+// and its conn's dispatch goroutine — every later request on that conn —
+// waits with it. A probe held past the deadline must not hold the catalog.
+func TestPluginCatalog_FirstProbeKeepsTheCatalogDeadline(t *testing.T) {
+	block := make(chan struct{})
+	var unblock sync.Once
+	prev := sandboxProbeFn
+	sandboxProbeFn = func(context.Context) (sandbox.Info, error) {
+		<-block
+		return sandbox.Info{ServerVersion: "1", OSType: "linux", Arch: "amd64"}, nil
+	}
+	t.Cleanup(func() { sandboxProbeFn = prev })
+	t.Cleanup(func() { unblock.Do(func() { close(block) }) })
+
+	h := newAuthHarness(t)
+	c, _ := h.login(t, h.mint(t, "owner", clientauth.LevelFull, nil))
+	start := time.Now()
+	for _, m := range []*ipc.Message{
+		mustMessage(t, ipc.MsgPluginCatalogReq, "catalog", struct{}{}),
+		mustMessage(t, ipc.MsgListTabsReq, "tabs", ipc.ListTabsReqPayload{}),
+	} {
+		if err := c.Send(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c.SetReadDeadline(time.Now().Add(8 * time.Second))
+	got := map[string]time.Duration{}
+	for len(got) < 2 {
+		f, err := c.Receive()
+		if err != nil {
+			t.Fatalf("answers so far %v: %v", got, err)
+		}
+		if f.ID == "catalog" || f.ID == "tabs" {
+			got[f.ID] = time.Since(start)
+			if f.ID == "catalog" {
+				var p ipc.PluginCatalogRespPayload
+				if err := f.DecodePayload(&p); err != nil {
+					t.Fatal(err)
+				}
+				if p.SandboxAvailable {
+					t.Fatal("the catalog reported a sandbox the probe never answered for")
+				}
+			}
+		}
+	}
+	c.SetReadDeadline(time.Time{})
+	for id, d := range got {
+		if d > 3*time.Second {
+			t.Fatalf("%s answered after %v; the catalog's 2 s budget was not kept", id, d)
+		}
+	}
+	// Let the shared probe finish before the cleanup restores the seam.
+	unblock.Do(func() { close(block) })
+	if a := h.d.sandboxCap.get(context.Background()); !a.Available {
+		t.Fatalf("the shared probe's answer = %+v, want available", a)
+	}
+}
+
+// A revoke whose handler runs after closeAuth (the conn drain timed out while
+// it was still writing the store) starts no close worker: audit.log is
+// already closed, and Stop has already closed every conn.
+func TestCloseAuthConns_AfterCloseAuthStartsNoWorker(t *testing.T) {
+	h := newAuthHarness(t)
+	tok := h.mint(t, "late", clientauth.LevelFull, nil)
+	c, _ := h.login(t, tok)
+	id, err := clientauth.ParseToken(tok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.d.closeAuth()
+	h.d.closeAuthConns(h.d.auth.markRevoked(id), "token revoked")
+	c.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	defer c.SetReadDeadline(time.Time{})
+	if f, err := c.Receive(); err == nil {
+		t.Fatalf("a close worker ran after closeAuth: got %s %s", f.Type, f.ID)
 	}
 }

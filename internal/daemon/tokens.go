@@ -125,11 +125,19 @@ func (d *Daemon) revokeToken(target string) (clientauth.Entry, int, error) {
 // closeAuthConns is phase 2. Close reaches onClientDisconnect, so the
 // attached-client cleanup is the existing path. Each conn on its own worker:
 // a 1 s flush per conn must not stall the requesting conn.
+//
+// Workers are counted under closeMu so closeAuth can wait for them, and none
+// starts once closeAuth has begun: a revoke handler can still be running when
+// Stop's conn drain times out, and a worker it started then would write after
+// audit.log closed. Nothing is lost by skipping it — Stop has already closed
+// every conn.
 func (d *Daemon) closeAuthConns(conns []*ipc.Conn, reason string) {
+	d.auth.closeMu.Lock()
+	defer d.auth.closeMu.Unlock()
+	if d.auth.closeClosed {
+		return
+	}
 	for _, c := range conns {
-		// Counted so closeAuth can wait: the close is what makes the conn's
-		// handler write its tcp_disconnect line, which must land before
-		// audit.log closes.
 		d.auth.closeWG.Add(1)
 		go func(c *ipc.Conn) {
 			defer d.auth.closeWG.Done()

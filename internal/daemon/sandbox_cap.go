@@ -49,12 +49,17 @@ const errSandboxCapCanceled = "sandbox check canceled"
 // get returns a fresh-enough answer, probing at most once across concurrent
 // callers.
 //
-// ctx bounds only THIS caller's wait. A waiter whose ctx ends (its conn
-// closed) returns at once, so a client cannot keep goroutines parked here by
-// disconnecting and logging in again. The probe itself ignores the
-// cancellation (context.WithoutCancel; it has its own timeout): it is shared,
-// and a probe cut short by one caller would cache "docker not available" for
-// every caller for sandboxCapTTL.
+// ctx bounds only THIS caller's wait, and every caller waits the same way —
+// including the one whose request found no probe running and started it. A
+// caller whose ctx ends (its conn closed, or its own deadline passed, like
+// the plugin catalog's 2 s) returns at once with the canceled answer, so a
+// client cannot park goroutines here by reconnecting, and a request never
+// holds its conn's dispatch goroutine for longer than it asked to.
+//
+// The probe runs on its OWN goroutine with its own timeout (sandbox.Probe's),
+// started from context.Background: it is shared, and a probe cut short by
+// one caller would cache "docker not available" for every caller for
+// sandboxCapTTL. At most one runs daemon-wide.
 func (c *sandboxCap) get(ctx context.Context) ipc.SandboxCapRespPayload {
 	c.mu.Lock()
 	if time.Since(c.fetched) < sandboxCapTTL && !c.fetched.IsZero() {
@@ -62,31 +67,35 @@ func (c *sandboxCap) get(ctx context.Context) ipc.SandboxCapRespPayload {
 		c.mu.Unlock()
 		return answer
 	}
-	if done := c.inflight; done != nil {
-		// Someone else is probing. Wait for their answer rather than
-		// starting a second probe against the same engine.
-		c.mu.Unlock()
-		c.waiting.Add(1)
-		defer c.waiting.Add(-1)
-		select {
-		case <-done:
-		case <-ctx.Done():
-			return ipc.SandboxCapRespPayload{Error: errSandboxCapCanceled}
-		}
-		c.mu.Lock()
-		answer := c.answer
-		c.mu.Unlock()
-		return answer
+	done := c.inflight
+	if done == nil {
+		done = make(chan struct{})
+		c.inflight = done
+		go c.probe(done)
 	}
-	done := make(chan struct{})
-	c.inflight = done
 	c.mu.Unlock()
 
-	// The release runs in a defer, and that is not tidiness: this goroutine
-	// holds the ONLY thing that can wake every waiter, so a panic anywhere in
-	// the probe would leave inflight set and the channel open — and every
-	// later caller, including the spawn path, would block on it forever. A
-	// daemon-wide deadlock behind one failed probe.
+	c.waiting.Add(1)
+	defer c.waiting.Add(-1)
+	select {
+	case <-done:
+	case <-ctx.Done():
+		return ipc.SandboxCapRespPayload{Error: errSandboxCapCanceled}
+	}
+	c.mu.Lock()
+	answer := c.answer
+	c.mu.Unlock()
+	return answer
+}
+
+// probe runs the one shared probe and wakes every waiter.
+//
+// The release runs in a defer, and that is not tidiness: this goroutine holds
+// the ONLY thing that can wake every waiter, so a probe that returned early
+// without it would leave inflight set and the channel open — and every later
+// caller without a deadline, including the spawn path, would block on it
+// forever.
+func (c *sandboxCap) probe(done chan struct{}) {
 	var answer ipc.SandboxCapRespPayload
 	defer func() {
 		c.mu.Lock()
@@ -96,8 +105,7 @@ func (c *sandboxCap) get(ctx context.Context) ipc.SandboxCapRespPayload {
 		c.mu.Unlock()
 		close(done)
 	}()
-	answer = probeSandbox(context.WithoutCancel(ctx))
-	return answer
+	answer = probeSandbox(context.Background())
 }
 
 // probeSandbox asks the engine what it is and turns that into a wire answer.

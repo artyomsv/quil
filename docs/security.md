@@ -1,5 +1,7 @@
 # Security: clients, tokens and rights
 
+> Want to set it up? Start with the step-by-step guide, [Sharing a workspace](sharing-a-workspace.md). This page is the reference: the threat model and the exact rules.
+
 Quil's daemon accepts clients on two transports.
 
 | Transport | Who | Guard | Rights |

@@ -47,7 +47,15 @@ packages, so they cost nothing on unrelated work.
 
 ## Building
 
-Go and make are NOT installed locally. Use `scripts/dev.sh` (Docker-based):
+**Agents do not run `dev.sh` on this host — CI does.** One host serves many agents across many
+repositories, and one local test run can hold every core for minutes (2026-10-04: a single
+vitest run stalled every quil pane). `ci.yml` runs `go vet`, `go test -race`, the integration-tag
+suite, the Windows cross-compile and vet, and shellcheck on every pull request: push the branch
+and read `gh pr checks <n> --watch`, then `gh run view <run-id> --log-failed` for a red check.
+Run any `dev.sh` command (including `build` for a dev-mode smoke test) only when the user asks
+for it in the current conversation. The global rule is `~/.claude/rules/no-local-builds.md`.
+
+Go and make are NOT installed locally. `scripts/dev.sh` (Docker-based) is the user's tool:
 
 ```bash
 ./scripts/dev.sh build          # Build prod, dev, debug pairs FOR THIS HOST (+ quil-activate.exe on Windows)

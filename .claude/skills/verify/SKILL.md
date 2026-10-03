@@ -7,6 +7,10 @@ description: Build and drive the quil daemon to observe a change at runtime. Use
 
 Quil is a Go client-daemon TUI. Host has no Go/make — everything runs in Docker.
 
+**Build only when the user asks for a runtime check in the current conversation.** A docker
+`go build` is a local build (`~/.claude/rules/no-local-builds.md`); unit tests, vet and the
+cross-compile are CI's job — read `gh pr checks <n>` instead.
+
 ## Build (dev binaries, review-fix aware)
 
 CRLF in shell scripts breaks `./scripts/dev.sh build`; build directly:

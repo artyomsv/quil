@@ -20,7 +20,7 @@ Quil is a persistent workflow orchestrator. The developer of this project runs *
    - `quil` (without `--dev`) — attaches to the production daemon
 
 4. **Always use dev mode for building, running, and testing.** Dev mode stores all state in `.quil/` at the project root (already in `.gitignore`, pattern `/.quil/`). Dev mode uses a separate socket, PID file, and workspace — it coexists with production cleanly.
-   - Build: `./scripts/dev.sh build` (Docker-based; host has no Go/make)
+   - Build: `./scripts/dev.sh build` (Docker-based; host has no Go/make) — only when the user asks for a dev build; agents never build on their own (`~/.claude/rules/no-local-builds.md`)
    - Run on Windows: `./scripts/quil-dev.ps1` (wrapper around `quil.exe --dev`)
    - Run on Unix: `./scripts/quil-dev.sh` (wrapper around `quil --dev`)
    - Or directly: `./quil --dev` / `./quil.exe --dev`
@@ -34,7 +34,8 @@ Quil is a persistent workflow orchestrator. The developer of this project runs *
 
 ## Workflow
 
-Every code change in this repo follows the same loop:
+Every code change in this repo is verified by CI (`gh pr checks <n> --watch`), not by a local
+build. The loop below is for a dev-mode smoke test, and only when the user asks for one:
 
 1. Edit code (`internal/…`, `cmd/…`).
 2. Rebuild: `./scripts/dev.sh build`.

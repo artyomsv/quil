@@ -121,6 +121,11 @@ func (m *Model) beginPaneDrag(x, y int) tea.Cmd {
 		m.setFlash(tabBusyFlash)
 		return m.flashCmd()
 	}
+	// Both drops change the workspace (a move, or a rearranged tree), and a
+	// viewer can send neither.
+	if m.destReadOnly(tab.Dest) {
+		return m.refuseReadOnly()
+	}
 	r := m.paneRectAt(x, y)
 	if r == nil || r.Pane == nil {
 		return nil

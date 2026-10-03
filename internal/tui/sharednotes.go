@@ -69,6 +69,8 @@ func (m *Model) openNotesEditorFor(pane *PaneModel) (*NotesEditor, tea.Cmd, erro
 	}
 	ed := NewRemoteNotesEditor(pane.ID, pane.Name, 1, 1)
 	ed.dest = dest
+	// Reading a note is a view; saving one is not.
+	ed.viewOnly = m.destReadOnly(dest)
 	m.notesEditor = ed
 	m.noteSaveID = ""
 	_, cmd := m.sendNoteGet(dest, pane.ID)

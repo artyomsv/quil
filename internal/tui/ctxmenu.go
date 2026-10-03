@@ -75,6 +75,31 @@ const (
 	ctxActDeleteGroup
 )
 
+// readOnlyGreyedItems are the context-menu rows that change the workspace, or
+// ask the daemon for something only an acting client may — greyed on a
+// read-only destination, and refused by the executors as well. Focus mode and
+// notes stay (local view; a shared note opens view-only), as does Disconnect
+// host (client-side only).
+var readOnlyGreyedItems = map[ctxMenuAction]bool{
+	ctxActRename: true, ctxActClose: true, ctxActRenameTab: true,
+	ctxActRenameProject: true, ctxActDestroyProject: true,
+	ctxActHistory: true, ctxActLazygit: true, ctxActHunk: true, ctxActMute: true,
+	ctxActAttention: true, ctxActClearAttention: true, ctxActMarkDeletion: true,
+	ctxActRestart: true, ctxActMovePane: true,
+	ctxActTabColorList: true, ctxActSetTabColor: true, ctxActTabLayoutList: true,
+	ctxActTabLayout: true, ctxActMoveTab: true,
+	ctxActGroupList: true, ctxActSetGroup: true, ctxActNewGroup: true, ctxActUngroup: true,
+}
+
+// greyReadOnlyItems disables readOnlyGreyedItems' rows in place.
+func greyReadOnlyItems(items []ctxMenuItem) {
+	for i := range items {
+		if readOnlyGreyedItems[items[i].id] {
+			items[i].enabled = false
+		}
+	}
+}
+
 // ctxMenuItem is one row of the menu. Disabled rows render greyed, are
 // skipped by cursor movement, and are inert to clicks. gapAfter draws a
 // blank separator row below this item in the spaced layout — used at group
@@ -161,8 +186,8 @@ func (m *Model) buildCtxMenuItems(pane *PaneModel) []ctxMenuItem {
 		// an installation. Asked of the active project's daemon, which is the
 		// one handleToggleOverlay would create the overlay on.
 		dest := m.activeDest()
-		lazygitOK = m.pluginAvailableFor(dest, overlayPluginLazygit)
-		hunkOK = m.pluginAvailableFor(dest, overlayPluginHunk)
+		lazygitOK = m.pluginAvailableFor(dest, overlayPluginLazygit) && m.canOpenOverlay(dest, overlayPluginLazygit)
+		hunkOK = m.pluginAvailableFor(dest, overlayPluginHunk) && m.canOpenOverlay(dest, overlayPluginHunk)
 	}
 	muteLabel := "Mute notifications"
 	if pane.Muted {
@@ -453,6 +478,11 @@ func (m *Model) openCtxMenu(pane *PaneModel, anchorX, anchorY int) {
 		cursor: -1,
 		items:  m.buildCtxMenuItems(pane),
 	}
+	// Greyed before firstEnabled, so the cursor never starts on a dead row.
+	// The pane menu always targets a pane of the active tab.
+	if m.destReadOnly(m.rightsDest()) {
+		greyReadOnlyItems(s.items)
+	}
 	s.cursor = firstEnabled(s.items)
 	w, h := s.boxSize()
 	// Prefer the spaced layout (blank row between items — forgiving mouse
@@ -544,6 +574,9 @@ func (m *Model) openProjectCtxMenu(p *ProjectModel, anchorX, anchorY int) {
 		spaced:      false,
 		cursor:      -1,
 		items:       buildProjectCtxMenuItems(p.Dest != "", !m.projectActionable(p)),
+	}
+	if m.destReadOnly(p.Dest) {
+		greyReadOnlyItems(s.items)
 	}
 	s.cursor = firstEnabled(s.items)
 	w, h := s.boxSize()
@@ -726,6 +759,9 @@ func (m *Model) openTabCtxMenu(tab *TabModel, anchorX, anchorY int) {
 		cursor: -1,
 		items:  m.buildTabCtxMenuItems(tab),
 	}
+	if m.destReadOnly(tab.Dest) {
+		greyReadOnlyItems(s.items)
+	}
 	s.cursor = firstEnabled(s.items)
 	w, h := s.boxSize()
 	if w > m.width || h > m.height-2 {
@@ -833,6 +869,13 @@ func (m Model) executeTabCtxMenuItem(tabID string, item ctxMenuItem) (tea.Model,
 		return m, nil
 	}
 	tab := proj.tabs[idx]
+	// The rows are greyed for a viewer already; this is the second line, for
+	// a row a re-populated list enabled after the menu opened.
+	if readOnlyGreyedItems[item.id] && m.destReadOnly(tab.Dest) {
+		m.closeCtxMenu()
+		cmd := m.refuseReadOnly()
+		return m, cmd
+	}
 	switch item.id {
 	case ctxActRenameTab:
 		m.closeCtxMenu()
@@ -951,6 +994,13 @@ func (m Model) executeCtxMenuItem(item ctxMenuItem) (tea.Model, tea.Cmd) {
 	// the shared confirm dialog, same as ctxActClose/ctxActRestart.
 	if projectID := m.ctxMenu.projectID; projectID != "" {
 		dest := m.ctxMenu.projectDest
+		// Greyed for a read-only destination's project already; refused here
+		// too, for a row a re-populated list enabled after the menu opened.
+		if item.enabled && readOnlyGreyedItems[item.id] && m.destReadOnly(dest) {
+			m.closeCtxMenu()
+			cmd := m.refuseReadOnly()
+			return m, cmd
+		}
 		// Move to group… re-populates the menu in place, so it is the one row
 		// that runs BEFORE the close below.
 		if item.enabled && item.id == ctxActGroupList {
@@ -1036,6 +1086,11 @@ func (m Model) executeCtxMenuItem(item ctxMenuItem) (tea.Model, tea.Cmd) {
 	if proj != m.cur() || tabIdx != m.activeTabIdx() {
 		return m, nil
 	}
+	// Greyed for a viewer already; refused here too, before the focus sync.
+	if readOnlyGreyedItems[item.id] && m.destReadOnly(proj.Dest) {
+		cmd := m.refuseReadOnly()
+		return m, cmd
+	}
 	// Sync the Active bool alongside ActivePane — mirrors the mouse-release
 	// pane-focus path (model.go) and NavigateDirection (tab.go). Leaving
 	// the old pane's Active flag set would keep its purple border while
@@ -1055,9 +1110,11 @@ func (m Model) executeCtxMenuItem(item ctxMenuItem) (tea.Model, tea.Cmd) {
 	case ctxActNotes:
 		return m.toggleNotesMode()
 	case ctxActLazygit:
-		return m, m.handleToggleLazygit()
+		cmd := m.handleToggleLazygit()
+		return m, cmd
 	case ctxActHunk:
-		return m, m.handleToggleHunk()
+		cmd := m.handleToggleHunk()
+		return m, cmd
 	case ctxActRename:
 		return m.beginPaneRename()
 	case ctxActMovePane:
@@ -1067,7 +1124,8 @@ func (m Model) executeCtxMenuItem(item ctxMenuItem) (tea.Model, tea.Cmd) {
 		// closed over here.
 		return m.openMovePanePicker(paneID)
 	case ctxActMute:
-		return m, m.toggleActivePaneMute()
+		cmd := m.toggleActivePaneMute()
+		return m, cmd
 	case ctxActAttention:
 		if pane, _, _ := m.findPaneAndTab(paneID); pane != nil {
 			// Sent, not written. The pin is daemon-owned now, and

@@ -888,6 +888,10 @@ func (m Model) handleAboutKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.dialog = dialogPlugins
 			m.dialogCursor = 0
 		case 3:
+			if m.destReadOnly(m.rightsDest()) {
+				cmd := m.refuseReadOnly()
+				return m, cmd
+			}
 			m = m.openProcessesDialog()
 			// Batched with the refresh for the same reason the Shortcuts row
 			// above clears: the box goes from dialogWidth (60) to
@@ -919,7 +923,13 @@ func (m Model) handleAboutKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case aboutStopDaemonIndex:
 			// Stop daemon: route to the shutdown confirm. Enter here only
 			// opens the confirm; the confirm itself requires `y` to fire
-			// MsgShutdown (see handleConfirmKey).
+			// MsgShutdown (see handleConfirmKey). Greyed, and refused, on a
+			// connection whose token is not full: the daemon would refuse
+			// the shutdown, and the TUI would quit for nothing.
+			if !m.destCanAdmin(m.rightsDest()) {
+				cmd := m.refuseNoAdmin()
+				return m, cmd
+			}
 			m.dialog = dialogConfirm
 			m.confirmKind = confirmKindShutdown
 			m.resetConfirmWorktrees()
@@ -1190,6 +1200,15 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			// the outcome renders as a line in that dialog. The removed
 			// version's Esc path disagreed with its own accept path here.
 			m.dialog = dialogProcesses
+			// Kill is admin-class: refused for a token that is not full,
+			// against the destination of the pane the process runs under.
+			if !m.destCanAdmin(m.destOfPane(m.confirmID)) {
+				// Said in the dialog it returns to, as the first-line gate
+				// does: the status-bar flash is hidden behind it.
+				m.proc.notice = noAdminFlash
+				cmd := m.refuseNoAdmin()
+				return m, cmd
+			}
 			return m, m.sendKillProcess()
 		}
 
@@ -1241,6 +1260,12 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// user explicitly asked to stop, the TUI exits either way.
 		if kind == confirmKindShutdown {
 			m.dialog = dialogNone
+			// Second line behind the greyed About row: no shutdown is sent
+			// and the TUI does not quit when the token cannot stop it.
+			if !m.destCanAdmin(m.rightsDest()) {
+				cmd := m.refuseNoAdmin()
+				return m, cmd
+			}
 			if m.client != nil {
 				req, _ := ipc.NewMessage(ipc.MsgShutdown, nil)
 				if sendErr := m.client.Send(req); sendErr != nil {
@@ -1560,9 +1585,14 @@ func (m Model) renderAboutDialog() string {
 		"What's New",
 		"Stop daemon",
 	}
+	// Stop daemon is greyed (not hidden) for a token that cannot stop it.
+	noAdmin := !m.destCanAdmin(m.rightsDest())
 	for i, item := range items {
 		cursor := "  "
 		style := dialogNormal
+		if i == aboutStopDaemonIndex && noAdmin {
+			style = dialogSubtle
+		}
 		if i == m.dialogCursor {
 			cursor = "> "
 			style = dialogSelected
@@ -2389,9 +2419,17 @@ func (m Model) handleCreatePaneSelect() (tea.Model, tea.Cmd) {
 		if !m.pluginAvailableFor(m.createPaneDialogDest(), plugins[m.dialogCursor].Name) {
 			return m, nil
 		}
+		// A plugin with form fields is started by INSTANCE, whose arguments go
+		// to the daemon raw — refused for a token without that right. Said
+		// here, before the form is filled in, rather than after it.
+		if len(plugins[m.dialogCursor].Command.FormFields) > 0 && !m.destCanRawArgs(m.createPaneDialogDest()) {
+			return m, m.refuseInstanceCreate()
+		}
 		m.selectedPlugin = plugins[m.dialogCursor].Name
 		m.selectedInstanceArgs = nil
 		m.selectedInstanceName = ""
+		m.selectedToggles = nil
+		m.selectedKubeContext = ""
 		m.dialogCursor = 0
 
 		// If plugin has form fields → instance list (step 2)
@@ -2532,12 +2570,32 @@ func (m *Model) openInstanceForm(p *plugin.PanePlugin) {
 	m.dialog = dialogInstanceForm
 }
 
+// refuseInstanceCreate closes the create-pane dialog and flashes why: the
+// destination's token may not send a plugin instance's raw arguments. The
+// dialog is closed rather than left open because it covers the status bar the
+// flash is drawn on.
+func (m *Model) refuseInstanceCreate() tea.Cmd {
+	m.dialog = dialogNone
+	m.createPaneStep = 0
+	m.dialogCursor = 0
+	m.selectedInstanceArgs = nil
+	m.selectedInstanceName = ""
+	return m.refuseNoRawArgs()
+}
+
 // handleCreatePaneSplit handles the final split direction selection (step 3).
 func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
+	// The submit itself refuses too, for an instance reached some other way:
+	// this create is sent id-less, so the daemon's refusal would be silent.
+	if len(m.selectedInstanceArgs) > 0 && !m.destCanRawArgs(m.createPaneDialogDest()) {
+		cmd := m.refuseInstanceCreate()
+		return m, cmd
+	}
 	target := m.createPaneTarget
 	pluginName := m.selectedPlugin
 	instanceName := m.selectedInstanceName
 	instanceArgs := m.selectedInstanceArgs
+	toggles, kubeContext := m.selectedToggles, m.selectedKubeContext
 	resumeSessionID := m.selectedSessionID
 	cwd := m.selectedCWD
 	// The sandbox choice is captured here for exactly the reason the paragraph
@@ -2584,6 +2642,8 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 	m.selectedCWD = ""
 	m.cwdInputError = ""
 	m.toggleStates = nil
+	m.selectedToggles = nil
+	m.selectedKubeContext = ""
 	m.setupFieldCursor = 0
 	m.cwdBrowseDir = ""
 	m.cwdBrowseEntries = nil
@@ -2646,6 +2706,8 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 			CWD:             cwd,
 			InstanceName:    instanceName,
 			InstanceArgs:    instanceArgs,
+			Toggles:         toggles,
+			KubeContext:     kubeContext,
 			ResumeSessionID: resumeSessionID,
 			Worktree:        spec,
 			Sandbox:         sbox,
@@ -2788,6 +2850,8 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 				Type:            pluginName,
 				InstanceName:    instanceName,
 				InstanceArgs:    instanceArgs,
+				Toggles:         toggles,
+				KubeContext:     kubeContext,
 				ReplacePaneID:   oldPaneID,
 				ResumeSessionID: resumeSessionID,
 				Worktree:        spec,
@@ -2862,6 +2926,8 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 			Type:            pluginName,
 			InstanceName:    instanceName,
 			InstanceArgs:    instanceArgs,
+			Toggles:         toggles,
+			KubeContext:     kubeContext,
 			ResumeSessionID: resumeSessionID,
 			Worktree:        spec,
 			Sandbox:         sbox,
@@ -3262,6 +3328,11 @@ func (m Model) handlePluginsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 
 		btnIdx := m.dialogCursor - len(allPlugins)
+		// Both buttons end in a daemon plugin reload, which is admin-class.
+		if !m.destCanAdmin(m.rightsDest()) {
+			cmd := m.refuseNoAdmin()
+			return m, cmd
+		}
 		if btnIdx == 1 {
 			plugin.EnsureDefaultPlugins(config.PluginsDir())
 		}
@@ -3414,6 +3485,12 @@ func (m Model) handleTOMLEditorKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.tomlEditor = nil
 		m.dialog = dialogPlugins
 		m.dialogCursor = 0
+		// The file is this client's own and stays saved, and the local
+		// registry above is reloaded; only the daemon's reload is admin-class.
+		if !m.destCanAdmin(m.rightsDest()) {
+			refuse := m.refuseNoAdmin()
+			return m, tea.Batch(refuse, cmd)
+		}
 		reloadCmd := reloadPluginsThenAskCmd(m.client)
 		if cmd != nil {
 			return m, tea.Batch(reloadCmd, cmd)
@@ -5093,27 +5170,18 @@ func (m Model) submitSetupDialog(p *plugin.PanePlugin) (tea.Model, tea.Cmd) {
 		m.selectedSessionID = ""
 	}
 
-	// Inject the chosen kube context (row 0 = Default = no --context flag).
+	// The kube context and the checked toggles are recorded as NAMES; the
+	// daemon turns them into arguments, in the same order this dialog used to
+	// build them (instance args, --context, toggles). Row 0 = Default = none.
+	m.selectedKubeContext = ""
 	if p.Command.Discover == "kube" && m.kubeCursor > 0 && m.kubeCursor-1 < len(m.kubeContexts) {
-		ctx := m.kubeContexts[m.kubeCursor-1].Name
-		merged := make([]string, 0, len(m.selectedInstanceArgs)+2)
-		merged = append(merged, m.selectedInstanceArgs...)
-		merged = append(merged, "--context", ctx)
-		m.selectedInstanceArgs = merged
+		m.selectedKubeContext = m.kubeContexts[m.kubeCursor-1].Name
 	}
-
-	// Append enabled-toggle args to whatever instance args came in.
-	var extra []string
+	m.selectedToggles = nil
 	for i, t := range p.Command.Toggles {
 		if i < len(m.toggleStates) && m.toggleStates[i] {
-			extra = append(extra, t.ArgsWhenOn...)
+			m.selectedToggles = append(m.selectedToggles, t.Name)
 		}
-	}
-	if len(extra) > 0 {
-		merged := make([]string, 0, len(m.selectedInstanceArgs)+len(extra))
-		merged = append(merged, m.selectedInstanceArgs...)
-		merged = append(merged, extra...)
-		m.selectedInstanceArgs = merged
 	}
 
 	m.dialogEdit = false

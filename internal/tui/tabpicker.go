@@ -123,6 +123,10 @@ func (m Model) openMovePanePicker(paneID string) (tea.Model, tea.Cmd) {
 	if pane == nil || proj == nil || tabIdx < 0 || tabIdx >= len(proj.tabs) {
 		return m, nil
 	}
+	if m.destReadOnly(proj.Dest) {
+		cmd := m.refuseReadOnly()
+		return m, cmd
+	}
 	m.tabPick = tabPickState{paneID: paneID, srcTabID: proj.tabs[tabIdx].ID}
 	m.tabPick.filtered = m.filterTabPick("")
 	m.dialog = dialogTabPick

@@ -133,7 +133,9 @@ Several TUIs can attach to one daemon and share its workspace. `Model.clientID`
 to tell whether it is the size master. `isFollower(dest)` is
 `sizeMaster[dest] != "" && sizeMaster[dest] != m.clientID` — the zero value (no
 entry yet) answers false, so a client that has not heard from a destination
-behaves as it always did. See `.claude/rules/daemon-lifecycle.md`'s
+behaves as it always did — EXCEPT a read-only destination, which is always a
+follower: a viewer is never eligible, so alone on a daemon it sees no master,
+and it must still take the daemon's size (see `client-auth.md`). See `.claude/rules/daemon-lifecycle.md`'s
 "Multi-client" section for the daemon-side registry and election this reads.
 
 **`attachMessage` sends two sizes.** `Cols`/`Rows` stay the pane interior the

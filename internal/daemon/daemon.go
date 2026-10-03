@@ -22,6 +22,7 @@ import (
 	"regexp"
 
 	"github.com/artyomsv/quil/internal/claudehook"
+	"github.com/artyomsv/quil/internal/clientauth"
 	"github.com/artyomsv/quil/internal/codexhook"
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/gitworktree"
@@ -67,7 +68,10 @@ type Daemon struct {
 	// tasksRegistry so the hand-built daemons in tests need no setup.
 	tasks     *taskRegistry
 	tasksOnce sync.Once
-	gitCache  *gitCache // per-checkout branch/worktree/divergence, refreshed on a ticker
+	// parkedWaits counts the live parked wait_task goroutines, so a test can
+	// see them end when their conn closes.
+	parkedWaits atomic.Int32
+	gitCache    *gitCache // per-checkout branch/worktree/divergence, refreshed on a ticker
 	// Last attached terminal size, used before a client can resize a new pane.
 	clientSize atomic.Pointer[terminalSize]
 
@@ -316,6 +320,18 @@ type Daemon struct {
 	afterHoldOutput   func(paneID string)
 	beforeFinishHold  func(c *ipc.Conn)
 	afterFlushPublish func(paneID string)
+
+	// tokens is tokens.json; audit is audit.log; auth is the TCP login state
+	// and the tokenID → conns index (auth.go). tokens and audit are nil when
+	// they could not be opened — then no TCP listener.
+	tokens *clientauth.Store
+	audit  *auditLog
+	auth   authService
+
+	// preLoginAudit caps audit lines about conns that have not logged in.
+	preLoginAudit auditBudget
+	// homeUnprotected: ProtectDir failed at start, so no TCP listener.
+	homeUnprotected bool
 }
 
 func New(cfg config.Config) *Daemon {
@@ -379,6 +395,23 @@ func (d *Daemon) Start() error {
 	}
 	if err := os.MkdirAll(quilDir, 0700); err != nil {
 		return fmt.Errorf("create quil dir: %w", err)
+	}
+	// Before the socket or any token/audit file exists: on Windows the
+	// directory DACL is what every later file inherits at creation. Both
+	// are warnings here; if the socket's own ACL then fails as well,
+	// Server.Start reads this directory back and refuses to serve unless it
+	// is owner-only, so the two guards cannot fail open together.
+	if err := ipc.ProtectDir(quilDir); err != nil {
+		log.Printf("warning: could not restrict %s to this account: %v", quilDir, err)
+		// The local socket may still serve (Server.Start decides), but the
+		// TCP listener does not: rotated audit.log archives and anything
+		// else in the folder rely on the folder's inherited protection.
+		d.homeUnprotected = true
+	}
+	if w, err := ipc.DirAccessWarning(quilDir); err != nil {
+		log.Printf("warning: could not read the access list of %s: %v", quilDir, err)
+	} else if w != "" {
+		log.Printf("warning: %s", w)
 	}
 
 	if err := shellinit.EnsureInitDir(quilDir); err != nil {
@@ -445,12 +478,17 @@ func (d *Daemon) Start() error {
 	go d.sandboxStartupHousekeeping()
 	go d.harvestLoop()
 
+	if err := d.initAuth(quilDir); err != nil {
+		log.Printf("warning: %v — the TCP listener stays off", err)
+	}
+
 	sockPath := config.SocketPath()
 	d.server = ipc.NewServer(sockPath, d.handleMessage, d.onClientDisconnect)
 
 	if err := d.server.Start(); err != nil {
 		return fmt.Errorf("start IPC server: %w", err)
 	}
+	d.startConfiguredListener()
 
 	go d.idleChecker()
 	go d.updateChecker()
@@ -633,6 +671,13 @@ func (d *Daemon) Stop() {
 		d.refreshPluginStateFromHooks()
 		log.Print("daemon stopping, writing final snapshot...")
 		d.snapshot()
+		// Every conn's disconnect callback writes to the audit log (a
+		// tcp_disconnect, or a login_failed from a check still in flight
+		// when its conn was closed), so it closes only after they ran.
+		if d.server != nil && !d.server.WaitConns(connDrainTimeout) {
+			log.Printf("stop: some conn handlers had not returned after %v", connDrainTimeout)
+		}
+		d.closeAuth()
 		// Sandbox panes, after the snapshot and before the PTY closes: the
 		// harvest puts their commits in the repository while the containers
 		// are still up, and the kill stops agents that would otherwise keep
@@ -669,6 +714,15 @@ func (d *Daemon) Stop() {
 // records there would clear a lone master (nobody left to protect) before the
 // snapshot writes size_master — so the restart would have no reserve.
 func (d *Daemon) onClientDisconnect(conn *ipc.Conn) {
+	if conn.Transport() == ipc.TransportTCP {
+		d.onTCPDisconnect(conn)
+		if conn.Auth() == nil {
+			// It never logged in, so it never reached anything below: no
+			// hold, no watcher, no attach, no hello. Returning here also keeps
+			// an unauthenticated peer from requesting a snapshot per connect.
+			return
+		}
+	}
 	d.dropOutputHold(conn)
 	d.requestSnapshot()
 	d.events.RemoveWatchersByConn(conn)
@@ -1451,6 +1505,17 @@ var newSessionFn = func(cols, rows int) apty.Session {
 }
 
 func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
+	// An unauthenticated TCP conn reaches the login code and nothing else:
+	// not the switch below, not even its log line.
+	if conn.Auth() == nil {
+		d.handlePreLogin(conn, msg)
+		return
+	}
+	release, ok := d.admitRequest(conn, conn.Auth(), msg)
+	if !ok {
+		return
+	}
+
 	// Log all IPC messages except high-frequency ones (input, resize, layout,
 	// client stat).
 	//
@@ -1697,9 +1762,9 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	case ipc.MsgGroupOp:
 		d.handleGroupOp(conn, msg)
 	case ipc.MsgNoteGet:
-		d.handleNoteGet(conn, msg)
+		d.handleNoteGet(conn, msg, release)
 	case ipc.MsgNoteSet:
-		d.handleNoteSet(conn, msg)
+		d.handleNoteSet(conn, msg, release)
 	case ipc.MsgSharedImport:
 		d.handleSharedImport(conn, msg)
 
@@ -1719,7 +1784,7 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	case ipc.MsgGetTaskReq:
 		d.handleGetTaskReq(conn, msg)
 	case ipc.MsgWaitTaskReq:
-		d.handleWaitTaskReq(conn, msg)
+		d.handleWaitTaskReq(conn, msg, release)
 	case ipc.MsgListTasksReq:
 		d.handleListTasksReq(conn, msg)
 	case ipc.MsgListPanesReq:
@@ -1744,7 +1809,7 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	case ipc.MsgWorktreeStatusReq:
 		d.handleWorktreeStatusReq(conn, msg)
 	case ipc.MsgSandboxCapReq:
-		d.handleSandboxCapReq(conn, msg)
+		d.handleSandboxCapReq(conn, msg, release)
 	case ipc.MsgKubeCtxReq:
 		d.handleKubeCtxReq(conn, msg)
 	case ipc.MsgPluginListReq:
@@ -1836,6 +1901,14 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	case ipc.MsgHello:
 		d.handleHello(conn, msg)
 
+	// Token management — class local: refused from any TCP conn.
+	case ipc.MsgTokenCreateReq:
+		d.handleTokenCreateReq(conn, msg)
+	case ipc.MsgTokenListReq:
+		d.handleTokenListReq(conn, msg)
+	case ipc.MsgTokenRevokeReq:
+		d.handleTokenRevokeReq(conn, msg)
+
 	default:
 		d.replyError(conn, msg, ipc.ErrCodeUnknownType, "unknown message type")
 	}
@@ -1905,7 +1978,21 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 	// A new client or a master change reaches the OTHER attached clients once
 	// this attach is answered. The attaching conn gets none: its own state
 	// below is built after this registration, so it already carries both.
-	if d.attachClient(conn, attach).any() {
+	//
+	// A read-only viewer attaches to WATCH: it never sizes anything, never
+	// bootstraps a workspace, never kicks a child, never consumes the owner's
+	// first-attach replay, and its CWD never becomes a default spawn
+	// directory (defaultCWD's chain reads attached clients' cwd).
+	readOnly := conn.Auth().ReadOnly()
+	if readOnly {
+		attach.CWD = ""
+	}
+	change, err := d.attachClient(conn, attach)
+	if err != nil {
+		d.refuseAttach(conn, msg, err)
+		return
+	}
+	if change.any() {
 		defer d.sendStateToOtherClients(conn, "attach")
 	}
 
@@ -1935,13 +2022,15 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 	if rows <= 0 {
 		rows = 24
 	}
-	d.clientSize.Store(&terminalSize{cols: cols, rows: rows})
+	if !readOnly {
+		d.clientSize.Store(&terminalSize{cols: cols, rows: rows})
+	}
 
 	log.Printf("attach: client connected (%dx%d), tabs=%d, restored=%v",
 		cols, rows, len(d.session.Tabs()), d.restored)
 
 	// Create default workspace if empty (no tabs — neither fresh nor restored)
-	if len(d.session.Tabs()) == 0 {
+	if len(d.session.Tabs()) == 0 && !readOnly {
 		log.Print("attach: creating default workspace (no tabs)")
 		tab := d.session.CreateTab("Shell")
 		// attachClient (above) already recorded attach.CWD on this conn's
@@ -2025,8 +2114,14 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 			// without this: attach while `vim` is up, quit vim, attach again.
 			// It also stops the snapshot being retained in memory (it counts
 			// toward the pane's HeapBytes) for a pane that will never use it.
+			//
+			// A read-only viewer leaves it for the owner: it still sees the
+			// snapshot, but the one-shot belongs to the client that drives
+			// the pane.
 			snap := pane.GhostSnap
-			pane.GhostSnap = nil
+			if !readOnly {
+				pane.GhostSnap = nil
+			}
 
 			var ghost []byte
 			source := "ghostsnap"
@@ -2085,7 +2180,7 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 			// needs a live PTY, and reading it separately would race a restart.
 			// Same discipline as handleResizePane — pointer under the lock, the
 			// Resize syscall outside it.
-			kickRunning := pane.PTY != nil && pane.ExitCode == nil
+			kickRunning := paneRunning(pane)
 			pane.PluginMu.Unlock()
 			if !ghostEnabled || len(ghost) == 0 {
 				if source == "skipped-child-repaints" {
@@ -2094,8 +2189,10 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 				}
 				// Nothing was replayed, so this pane's rectangle is blank on the
 				// client that just attached — even though the process behind it
-				// is alive and mid-conversation. Ask the child to repaint.
-				if kickRunning {
+				// is alive and mid-conversation. Ask the child to repaint —
+				// unless the client is a read-only viewer: the kick is a key
+				// written to the owner's PTY or a resize, both side effects.
+				if kickRunning && !readOnly {
 					d.redrawKick(pane, typ)
 				}
 				continue
@@ -2135,6 +2232,27 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 			return // client disconnected or daemon shutting down
 		}
 	}
+}
+
+// refuseAttach answers an attach whose client id belongs to another
+// principal. The attach does not register. Its audit line goes through the
+// same per-(conn, type)-per-minute limit as every other refusal: a client
+// retrying an attach must not flood audit.log.
+func (d *Daemon) refuseAttach(conn *ipc.Conn, msg *ipc.Message, err error) {
+	auth := conn.Auth()
+	if auth.ShouldAuditRefusal(msg.Type, time.Now()) {
+		d.writeAudit(d.auditFor(conn, auth, auditEntry{Event: "refused", Type: ipc.MsgAttach, Reason: err.Error()}))
+	}
+	sendError(conn, msg.ID, msg.Type, ipc.ErrCodeRefused, err.Error())
+}
+
+// paneRunning reports a live process: a PTY and no exit code. Deferred,
+// exited and placeholder panes are not running. The ONE copy of this check;
+// the CALLER HOLDS pane.PluginMu, so it shares a lock span with whatever is
+// read beside it — onPaneExit landing between two spans would pair a
+// live-looking PTY with an exit code.
+func paneRunning(pane *Pane) bool {
+	return pane.PTY != nil && pane.ExitCode == nil
 }
 
 // sendGhostChunked sends a ghost buffer in 8 KB chunks with a 2 ms yield
@@ -2228,6 +2346,20 @@ func (d *Daemon) handleCreateTab(conn *ipc.Conn, msg *ipc.Message) {
 	var payload ipc.CreateTabPayload
 	if err := msg.DecodePayload(&payload); err != nil {
 		return
+	}
+
+	// Resolved before the tab is minted, so a refused selection creates no
+	// tab at all rather than one with a pane the request did not ask for.
+	if fp := payload.FirstPane; fp != nil {
+		args, err := d.applyNamedSelections(fp.Type, fp.InstanceArgs, fp.Toggles, fp.KubeContext)
+		if err != nil {
+			log.Printf("new tab: refused: %v", err)
+			// No tab was minted, so the answer names none: the client keys a
+			// new-tab worktree create by its branch.
+			d.refuseCreate(conn, msg, "", fp.Worktree, err)
+			return
+		}
+		fp.InstanceArgs, fp.Toggles, fp.KubeContext = args, nil, ""
 	}
 
 	// An empty or unknown ProjectID resolves to the active project inside
@@ -2767,6 +2899,16 @@ func (d *Daemon) handleCreatePane(conn *ipc.Conn, msg *ipc.Message) {
 	if err := msg.DecodePayload(&payload); err != nil {
 		return
 	}
+
+	// Named selections become arguments HERE, once, before any branch
+	// (worktree, replace, ordinary), so every route spawns the same argv.
+	args, err := d.applyNamedSelections(payload.Type, payload.InstanceArgs, payload.Toggles, payload.KubeContext)
+	if err != nil {
+		log.Printf("create pane: refused: %v", err)
+		d.refuseCreate(conn, msg, payload.TabID, payload.Worktree, err)
+		return
+	}
+	payload.InstanceArgs, payload.Toggles, payload.KubeContext = args, nil, ""
 
 	// A create carrying a worktree spec goes to a WORKER goroutine and answers
 	// the requester directly. `git worktree add` checks out a tree — seconds on
@@ -4711,7 +4853,7 @@ func (d *Daemon) buildWorkspaceState() ipc.WorkspaceState {
 	// the attached-client count. Each TUI reads them to tell whether it is the
 	// master or a follower. snapshot() writes size_master to disk by itself,
 	// for the restart reserve; the count means nothing after a restart.
-	master := d.masterID()
+	master := d.sizeMasterForState()
 	state.SizeMaster = &master
 	n := d.clientCount()
 	state.Clients = &n
@@ -7129,7 +7271,7 @@ func (d *Daemon) buildPaneInfos() []ipc.PaneInfo {
 			pane.PluginMu.Lock()
 			typ := pane.Type
 			cwd := pane.CWD
-			running := pane.PTY != nil && pane.ExitCode == nil
+			running := paneRunning(pane)
 			preparing := pane.PreparingWorktree
 			adopted := pane.Adopted
 			pane.PluginMu.Unlock()
@@ -7187,8 +7329,15 @@ func (d *Daemon) handleReadPaneOutputReq(conn *ipc.Conn, msg *ipc.Message) {
 		})
 		return
 	}
-	d.ensurePaneSpawned(pane)
-	d.highlightPane(pane.ID)
+	// A read-only viewer reads what exists: a deferred pane answers from its
+	// restored buffer and is NOT spawned; nothing is highlighted.
+	if !conn.Auth().ReadOnly() {
+		d.ensurePaneSpawned(pane)
+		d.highlightPane(pane.ID)
+	}
+	pane.PluginMu.Lock()
+	running := paneRunning(pane)
+	pane.PluginMu.Unlock()
 
 	lastLines := req.LastLines
 	if lastLines <= 0 {
@@ -7213,9 +7362,10 @@ func (d *Daemon) handleReadPaneOutputReq(conn *ipc.Conn, msg *ipc.Message) {
 	text := strings.Join(allLines, "\n")
 
 	respondTo(conn, msg.ID, ipc.MsgReadPaneOutputResp, ipc.ReadPaneOutputRespPayload{
-		PaneID: req.PaneID,
-		Text:   text,
-		Lines:  len(allLines),
+		PaneID:     req.PaneID,
+		Text:       text,
+		Lines:      len(allLines),
+		NotRunning: !running,
 	})
 }
 
@@ -7228,7 +7378,7 @@ func (d *Daemon) buildPaneStatus(pane *Pane) ipc.PaneStatusRespPayload {
 	typ := pane.Type
 	cwd := pane.CWD
 	exitCode := pane.ExitCode
-	running := pane.PTY != nil && exitCode == nil
+	running := paneRunning(pane)
 	preparing := pane.PreparingWorktree
 	pane.PluginMu.Unlock()
 	if typ == "" {
@@ -7273,7 +7423,9 @@ func (d *Daemon) handlePaneStatusReq(conn *ipc.Conn, msg *ipc.Message) {
 		})
 		return
 	}
-	d.highlightPane(pane.ID)
+	if !conn.Auth().ReadOnly() {
+		d.highlightPane(pane.ID)
+	}
 
 	// Match buildPaneInfos: a deferred pane (PTY==nil) reports Running=false even
 	// though ExitCode is nil, so get_pane_status and list_panes agree. This
@@ -7468,8 +7620,13 @@ func (d *Daemon) handleScreenshotPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 		})
 		return
 	}
-	d.ensurePaneSpawned(pane)
-	d.highlightPane(pane.ID)
+	if !conn.Auth().ReadOnly() {
+		d.ensurePaneSpawned(pane)
+		d.highlightPane(pane.ID)
+	}
+	pane.PluginMu.Lock()
+	running := paneRunning(pane)
+	pane.PluginMu.Unlock()
 
 	// Snapshotted together under PluginMu — a concurrent resize would
 	// otherwise render the screenshot at a geometry that never existed.
@@ -7525,10 +7682,11 @@ func (d *Daemon) handleScreenshotPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 	cursor := em.CursorPosition()
 
 	respondTo(conn, msg.ID, ipc.MsgScreenshotPaneResp, ipc.ScreenshotPaneRespPayload{
-		PaneID:  pane.ID,
-		Text:    strings.Join(lines, "\n"),
-		CursorX: cursor.X,
-		CursorY: cursor.Y,
+		PaneID:     pane.ID,
+		Text:       strings.Join(lines, "\n"),
+		CursorX:    cursor.X,
+		CursorY:    cursor.Y,
+		NotRunning: !running,
 	})
 }
 
@@ -7720,6 +7878,8 @@ func (d *Daemon) handleGetNotificationsReq(conn *ipc.Conn, msg *ipc.Message) {
 	})
 }
 
+// The conn's parked-request slot for a watch is the registered watcher itself
+// (see admitParked): every way out removes the watcher before answering.
 func (d *Daemon) handleWatchNotificationsReq(conn *ipc.Conn, msg *ipc.Message) {
 	var req ipc.WatchNotificationsReqPayload
 	if err := msg.DecodePayload(&req); err != nil {

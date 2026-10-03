@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -50,6 +51,10 @@ const (
 )
 
 func main() {
+	// Read QUIL_TOKEN once and remove it before anything can be spawned, in
+	// every mode, so no daemon, pane or bridge inherits a token.
+	envToken := takeTokenEnv()
+
 	// Publish this binary's version to the shared version package so
 	// subcommands (MCP bridge, handshake logic) and the TUI all read
 	// from one place.
@@ -128,10 +133,22 @@ func main() {
 		os.Args = rest
 	}
 
+	// --connect binds this TUI to a daemon's token-authenticated TCP listener.
+	// remoteDest carries "tcp:<addr>" so every --remote guard covers it.
+	if rest, err := applyConnectFlags(os.Args, envToken); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	} else {
+		os.Args = rest
+	}
+
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "daemon":
 			handleDaemon()
+			return
+		case "clients":
+			handleClients()
 			return
 		case "mcp":
 			runMCP()
@@ -154,7 +171,7 @@ func main() {
 			return
 		case "restart":
 			if remoteMode() {
-				fmt.Fprintf(os.Stderr, "quil restart: not available with --remote (target: %s)\n", remoteDest)
+				fmt.Fprint(os.Stderr, remoteRefusal("restart", false))
 				os.Exit(1)
 			}
 			// Recovery path for a hung/wedged daemon: stop with bounded
@@ -173,9 +190,7 @@ func main() {
 				// --json emits {"running":true,...} with no field saying which
 				// host replied. Refused rather than silently wrong; reading the
 				// remote status over the transport is Phase 3 work.
-				fmt.Fprintf(os.Stderr, "quil status: not available with --remote (target: %s)\n"+
-					"Run it on the remote host instead:\n"+
-					"    ssh %s quil status\n", remoteDest, remoteDest)
+				fmt.Fprint(os.Stderr, remoteRefusal("status", true))
 				os.Exit(1)
 			}
 			runStatus(os.Args[2:])
@@ -186,11 +201,31 @@ func main() {
 	launchTUI()
 }
 
+// remoteRefusal is what a command acting on the LOCAL daemon prints when this
+// session is attached to another one. --connect names a TCP address, not an
+// ssh destination, so it gets its own flag in the text and no `ssh <target>`
+// advice — that command would try to resolve "tcp:127.0.0.1:7878" as a host.
+func remoteRefusal(cmd string, runThere bool) string {
+	if connectMode() {
+		msg := fmt.Sprintf("quil %s: not available with --connect (target: %s)\n", cmd, connectAddr)
+		if runThere {
+			msg += fmt.Sprintf("Run it on the machine whose daemon listens on %s.\n", connectAddr)
+		}
+		return msg
+	}
+	msg := fmt.Sprintf("quil %s: not available with --remote (target: %s)\n", cmd, remoteDest)
+	if runThere {
+		msg += fmt.Sprintf("Run it on the remote host instead:\n    ssh %s quil %s\n", remoteDest, cmd)
+	}
+	return msg
+}
+
 func handleDaemon() {
 	if remoteMode() {
-		fmt.Fprintf(os.Stderr, "quil daemon: not available with --remote (target: %s)\n"+
-			"Manage the remote daemon over ssh, or drop --remote to manage the local one.\n", remoteDest)
-		os.Exit(1)
+		fmt.Fprintf(os.Stderr, "quil daemon: not available with --remote or --connect (target: %s)\n"+
+			"Manage that daemon on its own machine, or drop the flag to manage the local one.\n", remoteDest)
+		exitFn(1)
+		return
 	}
 
 	if len(os.Args) < 3 {
@@ -265,7 +300,7 @@ func startDaemon(quiet bool) int {
 		// Defense in depth: launchTUI never reaches here in remote mode, but
 		// startDaemon spawns against config.SocketPath() and a future caller
 		// that forgets would start a daemon on the wrong machine.
-		fmt.Fprintln(os.Stderr, "internal error: startDaemon called while attached to a remote daemon")
+		fmt.Fprintf(os.Stderr, "internal error: startDaemon called while attached to another daemon (%s)\n", remoteDest)
 		exitFn(1)
 		// Unreachable in production: exitFn is os.Exit, which never returns.
 		// The explicit return exists so a test double that DOES return (a
@@ -424,7 +459,7 @@ func launchTUI() {
 	// new binary was respawned and has already run the whole session — this
 	// process was just a wrapper. On decline/failure, fall through to a
 	// normal launch; cleanup only runs when nothing is being applied.
-	if maybeApplyStagedUpdate(false) {
+	if applyStagedAtLaunch() {
 		return
 	}
 	cleanupAppliedUpdate()
@@ -433,10 +468,18 @@ func launchTUI() {
 	log.Printf("config loaded, AutoStart=%v", cfg.Daemon.AutoStart)
 
 	var client *ipc.Client
+	var connectResp ipc.HelloRespPayload
 	var err error
 	spawnedButNotReady := false
 
-	if remoteMode() {
+	if connectMode() {
+		// Login and the version gate both happen inside: connectTUI exits the
+		// process on any failure, and never starts or restarts a daemon.
+		client, connectResp = connectTUI()
+		if client == nil {
+			return
+		}
+	} else if remoteMode() {
 		// No local daemon is involved: `quil --stdio` on the far side ensures
 		// the remote one. Batch=false so this first dial can prompt for a
 		// host-key fingerprint or key passphrase — it runs before tea.NewProgram
@@ -481,8 +524,11 @@ func launchTUI() {
 	// gateVersionCheck either returns the same client (match / skipped),
 	// returns a NEW client connected to a freshly-spawned daemon (after
 	// user-confirmed upgrade restart), or exits the process outright
-	// (TUI older than daemon — blocking dialog path).
-	client = gateVersionCheck(client)
+	// (TUI older than daemon — blocking dialog path). --connect already ran
+	// its own remote-only gate in connectTUI.
+	if !connectMode() {
+		client = gateVersionCheck(client)
+	}
 
 	// The reason this launch failed is gone — either an install just succeeded,
 	// or healRemoteRecord found quil at a path other than the one we dialed and
@@ -634,6 +680,12 @@ func launchTUI() {
 	model.SetClientID(processClientID)
 	// The sidebar names a project's host only when it is not this one.
 	model.SetHomeDest(primaryDest)
+	// What the token login granted. Every later login (a reconnect, or the
+	// New Project dialog) hands its own answer to the Model — see
+	// redialTCPDest and dialTCPDest.
+	if connectMode() {
+		model.SetDestRights(primaryDest, connectResp.Rights)
+	}
 	// Seed a row for every configured destination that did not connect. Without
 	// this the host simply vanishes from the sidebar, which reads as Quil having
 	// deleted the user's projects — and after a client auto-update it happens on
@@ -805,6 +857,9 @@ func launchTUI() {
 	// and offers the install it just completed. Observed as a five-second
 	// install loop.
 	model.SetDialFunc(func(dest string) (tui.Client, error) {
+		if strings.HasPrefix(dest, tcpDestPrefix) {
+			return dialTCPDest(dest)
+		}
 		return dialExtra(*liveCfg.Load(), config.Destination{Dest: dest})()
 	})
 	// The reconnect ladder reads the config through the same pointer, and for
@@ -814,6 +869,9 @@ func launchTUI() {
 	// `quil`, gets 127, and — since nothing marks that permanent — retries
 	// forever without ever reconnecting.
 	model.SetRedialFactory(func(dest string) tui.RedialFunc {
+		if strings.HasPrefix(dest, tcpDestPrefix) {
+			return redialTCPDest(dest)
+		}
 		return redialRemote(liveCfg.Load, dest)
 	})
 	// Provisioning a host from the dialog, for the dial that comes back

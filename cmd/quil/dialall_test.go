@@ -182,6 +182,25 @@ func TestExtraDestinationsSkipsThePrimaryAndDuplicates(t *testing.T) {
 	}
 }
 
+// A "tcp:<addr>" entry is never dialled at launch: every extra goes over ssh,
+// which would try to resolve "tcp:127.0.0.1:7878" as a host name. It is skipped
+// with one line saying where such a destination is reached; an ssh entry beside
+// it is unaffected.
+func TestExtraDestinationsSkipsTCPEntries(t *testing.T) {
+	logged := captureLog(t)
+	cfg := config.Config{Destinations: []config.Destination{
+		{Dest: "tcp:127.0.0.1:7878"},
+		{Dest: "gpu"},
+	}}
+	got := extraDestinations(cfg, "")
+	if len(got) != 1 || got[0].Dest != "gpu" {
+		t.Fatalf("got %v, want only the ssh destination", got)
+	}
+	if !strings.Contains(logged.String(), "tcp destinations are reached with --connect only") {
+		t.Fatalf("no skip line logged: %q", logged.String())
+	}
+}
+
 // Label is what the "unreachable at launch" warning prints, so it must never be
 // empty — an ssh destination is often user@10.0.0.4 and a config that names it
 // should be able to say something friendlier.

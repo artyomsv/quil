@@ -314,7 +314,7 @@ Define your own pane types in TOML — see the [plugin reference](docs/plugin-re
 | **Custom plugins** | [plugin-reference.md](docs/plugin-reference.md) |
 | **Sandbox panes (Docker)** | [sandbox-panes.md](docs/sandbox-panes.md) |
 | **Troubleshooting** | [troubleshooting.md](docs/troubleshooting.md) |
-| **Architecture (31 ADRs)** | [architecture.md](docs/architecture.md) |
+| **Architecture (34 ADRs)** | [architecture.md](docs/architecture.md) |
 | **Roadmap** | [roadmap.md](docs/roadmap.md) |
 | **Why Quil exists** | [vision.md](docs/vision.md) |
 | **v1 requirements (historical)** | [prd.md](docs/prd.md) |

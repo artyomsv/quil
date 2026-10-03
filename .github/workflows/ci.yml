@@ -145,6 +145,12 @@ jobs:
       - name: changelog promoter regression test
         run: sh scripts/test-promote-changelog.sh
 
+      # sandbox-image.sh must hand docker build an EXACT agent version, or a
+      # rebuild reuses the cached install layer and the agent never updates.
+      # A stub docker stands in, so this needs neither Docker nor the network.
+      - name: sandbox image version regression test
+        run: sh scripts/test-sandbox-image.sh
+
   # The release workflow does not write changelog prose — it only collects the
   # fragments under `changelog.d/` into a version section. So an entry that is
   # not written HERE, while the author still has the context, is never written

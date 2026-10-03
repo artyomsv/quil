@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/artyomsv/quil/internal/gitworktree"
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/plugin"
+	"github.com/artyomsv/quil/internal/textsafe"
 )
 
 // This file is the MCP create path: create_pane_req and create_tab_req carry
@@ -56,6 +58,77 @@ func resolveToggles(p *plugin.PanePlugin, names []string) ([]string, error) {
 	return args, nil
 }
 
+// maxKubeContextLen bounds a kube context name at the length of a DNS
+// subdomain; the usual generated names (an EKS ARN, a GKE
+// gke_<project>_<zone>_<cluster>) fit well inside it.
+const maxKubeContextLen = 253
+
+// validKubeContext keeps a context name a VALUE: it rides as its own argv
+// element after --context, so it cannot be a flag (no leading '-') and must
+// carry no control or bidi rune.
+func validKubeContext(s string) error {
+	switch {
+	case len(s) > maxKubeContextLen:
+		return fmt.Errorf("kube context longer than %d bytes", maxKubeContextLen)
+	case strings.HasPrefix(s, "-"):
+		return fmt.Errorf("kube context %q begins with '-'", s)
+	case textsafe.HasStripped(s):
+		return fmt.Errorf("kube context contains control or bidi characters")
+	}
+	return nil
+}
+
+// applyNamedSelections resolves a create's NAMED choices — toggle names and a
+// kube context — into the argument list the spawn uses. Every transport sends
+// names; only the daemon turns them into arguments, so a standard-rights
+// token can use the dialog's choices without being allowed raw
+// instance_args. Order is the dialog's: instance args, --context, then each
+// toggle. Unknown names and two names from one group are refused.
+func (d *Daemon) applyNamedSelections(paneType string, instanceArgs, toggles []string, kubeContext string) ([]string, error) {
+	if len(toggles) == 0 && kubeContext == "" {
+		return instanceArgs, nil
+	}
+	if paneType == "" {
+		paneType = "terminal"
+	}
+	p := d.registry.Get(paneType)
+	var ctxArgs []string
+	if kubeContext != "" {
+		if p == nil || p.Command.Discover != "kube" {
+			return nil, fmt.Errorf("kube_context given for %s, which does not discover kube contexts", paneType)
+		}
+		if err := validKubeContext(kubeContext); err != nil {
+			return nil, err
+		}
+		ctxArgs = []string{"--context", kubeContext}
+	}
+	toggleArgs, err := resolveToggles(p, toggles)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(instanceArgs)+len(ctxArgs)+len(toggleArgs))
+	out = append(out, instanceArgs...)
+	out = append(out, ctxArgs...)
+	return append(out, toggleArgs...), nil
+}
+
+// refuseCreate answers a create_pane / create_tab whose named selections were
+// refused. A WORKTREE create is answered with the create_pane_resp that path
+// always sends, even to an id-less request: the requesting TUI holds a
+// "creating worktree" placeholder (or, for a new tab, a branch entry) that
+// only that answer unwinds — without it the placeholder waits out the whole
+// create timeout and then reports a misleading "timed out". tabID and the
+// echoed spec are the keys the client matches on, the same shape
+// worktreeAddAndCreate sends on failure. Any other create keeps the generic
+// error reply, which reaches only an id-bearing request.
+func (d *Daemon) refuseCreate(conn *ipc.Conn, msg *ipc.Message, tabID string, wt *ipc.WorktreeSpec, err error) {
+	if wt != nil {
+		respondTo(conn, msg.ID, ipc.MsgCreatePaneResp, ipc.CreatePaneRespPayload{TabID: tabID, Error: err.Error(), Worktree: wt})
+		return
+	}
+	d.replyError(conn, msg, ipc.ErrCodeBadPayload, err.Error())
+}
+
 // resolveWorktreeRoot answers the repository root for a directory, the way
 // the worktree-list request does — with the same permit and deadline, because
 // the directory can be a dead mount. The main checkout's own path is the
@@ -100,17 +173,15 @@ func (d *Daemon) buildCreatePayload(req ipc.CreatePaneReqPayload, tabID, fallbac
 	if len(req.InstanceArgs) > 0 && p != nil && p.Category == "ai" {
 		return ipc.CreatePanePayload{}, "", fmt.Errorf("instance_args replace %s's own arguments — use toggles for an AI pane (see list_plugins)", paneType)
 	}
-	toggleArgs, err := resolveToggles(p, req.Toggles)
+	// The order the dialog uses: the instance's own args, then the kube
+	// context, then each checked toggle in plugin order. Together they REPLACE
+	// the plugin's Command.Args in resolveSpawnArgs.
+	instanceArgs, err := d.applyNamedSelections(paneType, req.InstanceArgs, req.Toggles, req.KubeContext)
 	if err != nil {
 		return ipc.CreatePanePayload{}, "", err
 	}
-	// The order the dialog uses: the instance's own args first, then each
-	// checked toggle in plugin order. Together they REPLACE the plugin's
-	// Command.Args in resolveSpawnArgs, which is the contract the dialog
-	// already lives with.
-	var instanceArgs []string
-	if len(req.InstanceArgs) > 0 || len(toggleArgs) > 0 {
-		instanceArgs = append(append([]string(nil), req.InstanceArgs...), toggleArgs...)
+	if len(instanceArgs) == 0 {
+		instanceArgs = nil
 	}
 	cwd := d.resolveRequestedCWDRecording(req.CWD, fallbackCWD)
 	payload := ipc.CreatePanePayload{

@@ -23,17 +23,23 @@ import (
 // only up to 2^53.
 const maxPersistedNoteRev = 1 << 53
 
-func (d *Daemon) handleNoteGet(conn *ipc.Conn, msg *ipc.Message) {
+// release returns the conn's waiting-request slot (admitParked) on every way
+// out, before the answer. The worker keeps only the request ID, never the
+// message, so a padded payload is not held while the note lock is awaited.
+func (d *Daemon) handleNoteGet(conn *ipc.Conn, msg *ipc.Message, release func()) {
 	var p ipc.NoteGetPayload
 	if err := msg.DecodePayload(&p); err != nil {
+		release()
 		d.replyError(conn, msg, ipc.ErrCodeBadPayload, err.Error())
 		return
 	}
 	pane := d.session.Pane(p.PaneID)
 	if pane == nil {
+		release()
 		d.replyError(conn, msg, ipc.ErrCodeBadPayload, "no such pane: "+p.PaneID)
 		return
 	}
+	id := msg.ID
 	go func() {
 		pane.noteMu.Lock()
 		text, err := persist.LoadNotes(config.NotesDir(), pane.ID)
@@ -44,20 +50,31 @@ func (d *Daemon) handleNoteGet(conn *ipc.Conn, msg *ipc.Message) {
 			log.Printf("note_get %s: %v", pane.ID, err)
 			resp = ipc.NoteRespPayload{PaneID: pane.ID, Error: err.Error()}
 		}
-		respondTo(conn, msg.ID, ipc.MsgNoteResp, resp)
+		release()
+		respondTo(conn, id, ipc.MsgNoteResp, resp)
 	}()
 }
 
-func (d *Daemon) handleNoteSet(conn *ipc.Conn, msg *ipc.Message) {
+// handleNoteSet frees its slot the same way as handleNoteGet: reply runs
+// release before every answer. The decoded text (capped at MaxNoteBytes for
+// growth) is what the worker keeps, not the raw message.
+func (d *Daemon) handleNoteSet(conn *ipc.Conn, msg *ipc.Message, release func()) {
 	var p ipc.NoteSetPayload
 	if err := msg.DecodePayload(&p); err != nil {
+		release()
 		d.replyError(conn, msg, ipc.ErrCodeBadPayload, err.Error())
 		return
 	}
 	pane := d.session.Pane(p.PaneID)
 	if pane == nil {
+		release()
 		d.replyError(conn, msg, ipc.ErrCodeBadPayload, "no such pane: "+p.PaneID)
 		return
+	}
+	id := msg.ID
+	reply := func(resp ipc.NoteSetRespPayload) {
+		release()
+		respondTo(conn, id, ipc.MsgNoteSetResp, resp)
 	}
 	go func() {
 		pane.noteMu.Lock()
@@ -68,13 +85,13 @@ func (d *Daemon) handleNoteSet(conn *ipc.Conn, msg *ipc.Message) {
 		// shorten it, but not grow it further.
 		if len(p.Text) > ipc.MaxNoteBytes && int64(len(p.Text)) > noteFileSize(pane.ID) {
 			pane.noteMu.Unlock()
-			respondTo(conn, msg.ID, ipc.MsgNoteSetResp, ipc.NoteSetRespPayload{PaneID: pane.ID, Error: "too large"})
+			reply(ipc.NoteSetRespPayload{PaneID: pane.ID, Error: "too large"})
 			return
 		}
 		cur := pane.NoteRev.Load()
 		if p.BaseRev != cur {
 			pane.noteMu.Unlock()
-			respondTo(conn, msg.ID, ipc.MsgNoteSetResp, ipc.NoteSetRespPayload{PaneID: pane.ID, Conflict: true, CurrentRev: cur})
+			reply(ipc.NoteSetRespPayload{PaneID: pane.ID, Conflict: true, CurrentRev: cur})
 			return
 		}
 		var err error
@@ -86,7 +103,7 @@ func (d *Daemon) handleNoteSet(conn *ipc.Conn, msg *ipc.Message) {
 		if err != nil {
 			pane.noteMu.Unlock()
 			log.Printf("note_set %s: %v", pane.ID, err)
-			respondTo(conn, msg.ID, ipc.MsgNoteSetResp, ipc.NoteSetRespPayload{PaneID: pane.ID, Error: err.Error()})
+			reply(ipc.NoteSetRespPayload{PaneID: pane.ID, Error: err.Error()})
 			return
 		}
 		// NoteRev is monotonic: a delete increments it exactly like a save,
@@ -102,7 +119,7 @@ func (d *Daemon) handleNoteSet(conn *ipc.Conn, msg *ipc.Message) {
 		// necessarily happens after our response was already enqueued, and a
 		// state frame built from that value can only land behind it on this
 		// conn's FIFO must-deliver queue, never ahead of it.
-		respondTo(conn, msg.ID, ipc.MsgNoteSetResp, ipc.NoteSetRespPayload{PaneID: pane.ID, OK: true, Rev: newRev})
+		reply(ipc.NoteSetRespPayload{PaneID: pane.ID, OK: true, Rev: newRev})
 		pane.NoteRev.Store(newRev)
 		pane.noteMu.Unlock()
 		d.requestBroadcast()

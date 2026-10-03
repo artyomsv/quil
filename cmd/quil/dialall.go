@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -132,6 +133,13 @@ func extraDestinations(cfg config.Config, primary string) []config.Destination {
 	for _, d := range cfg.Destinations {
 		if d.Dest == "" {
 			log.Printf("config: ignoring a [[destinations]] entry with no dest")
+			continue
+		}
+		// Every extra is dialled over ssh, which would treat "tcp:<addr>" as a
+		// host name. The only token this process could log in with is the one
+		// --connect brings, and --connect dials no extras at all.
+		if strings.HasPrefix(d.Dest, tcpDestPrefix) {
+			log.Printf("config: skipping destination %q: tcp destinations are reached with --connect only", d.Dest)
 			continue
 		}
 		if seen[d.Dest] {

@@ -60,6 +60,11 @@ func (m *Model) jumpToNextBlocked() tea.Cmd {
 			}
 		}
 	}
+	// A blocked pane in another tab of a read-only destination is a local
+	// switch a viewer cannot make.
+	if m.leavesViewerTab(target.Pane.ID) {
+		return m.refuseReadOnly()
+	}
 
 	for i, p := range m.projects {
 		if p == target.Project {

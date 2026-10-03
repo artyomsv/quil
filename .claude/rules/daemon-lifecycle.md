@@ -78,8 +78,8 @@ snapshot and there is nothing to reconcile a skipped number against.
 `forgetStateMark` runs on reattach (`internal/tui/reconnect.go`): a restarted
 daemon's numbering starts over, so what this client has "seen" for that
 destination must be forgotten outright, not merely superseded. `refused`
-(`ipc.ErrCodeRefused`) is defined but unused in this phase — reserved for
-phase 4's rights checks. Full context and the wire-format table: ADR-32,
+(`ipc.ErrCodeRefused`) answers a request the conn's rights do not allow
+(phase 4) — see `.claude/rules/client-auth.md`. Full context and the wire-format table: ADR-32,
 `docs/architecture.md`.
 
 ### Shared data (ADR-33): groups, recent folders, notes
@@ -701,3 +701,7 @@ daemon logs IPC dispatch (excluding high-frequency input/resize/layout), client 
 ## Hand-started agents (#221)
 
 Hand-started agents (#221): a terminal pane's shell SHADOWS `claude`/`codex`/`opencode` with a function (`internal/shellinit/scripts/*`, armed only when the daemon supplies both `QUIL_INTERCEPT` and `QUIL_INTERCEPT_TOKEN`). It emits `OSC 7770` carrying the exact argv, `$PWD` and the NAMES of agent env vars, then reads EXACTLY 8 bytes with a 1 s deadline — no terminator, because LF is not Enter under ConPTY and a late terminated reply would submit itself as a prompt. Fields are percent-encoded (`%`, `;`, `,`): `$PWD` sits between fixed fields and a directory holding a `;` would shift every field after it. The token is per SHELL, not per pane — the warm pool's env is captured pane-less at daemon start, so a pane-keyed value cannot exist there; `spawnPane` binds whatever the claimed shell carries and the daemon resolves the pane from the PTY the marker arrived on. A token is only ever COMPARED. Daemon side is `internal/daemon/handstart*.go`; `detectHandStart` runs BEFORE `detectOSC133Exit` and conversion runs SYNCHRONOUSLY on the output goroutine, so the shell's post-return `133;D` lands on a superseded generation. Conversion retires the pane's session records and sets a one-shot `disownRecords`: `ownsRecord` means "a child of this pane wrote the record under its id", and a converting pane raised `ptyGen` by running a SHELL, which wrote nothing. **Quil never attaches to a running agent** — `--settings` is argv, read once; adoption only WRITES DOWN a session id read off disk. Fish is uncovered (`shellinit.Configure` returns nil for it)
+
+## Client authentication (phase 4)
+
+`ipc.Server` has a second, loopback-only TCP listener; every TCP conn logs in with a token before it reaches `handleMessage`'s switch, and every request of every conn passes `admitRequest` first. Local conns are unchanged (full, no token). The rules — pre-login caps, the proof, atomic revoke, read-only no-side-effects, principal-bound client ids — are in `.claude/rules/client-auth.md`.

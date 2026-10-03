@@ -16,10 +16,15 @@
 ARG BASE_IMAGE=node:22-bookworm-slim
 FROM ${BASE_IMAGE}
 
-# CLAUDE_CODE_VERSION pins what npm installs. "latest" tracks releases; pin an
-# exact version for a reproducible image, which is what Anthropic's own
-# dev-container guidance recommends for a team.
+# CLAUDE_CODE_VERSION pins what npm installs. scripts/sandbox-image.sh always
+# passes an EXACT version — it resolves "latest" to a number first — because
+# the build cache keys a RUN line on its text: with the literal "latest" a
+# rebuild reuses the old layer and the agent never updates, while the build
+# still reports success. Pin an exact version for a reproducible team image,
+# which is what Anthropic's own dev-container guidance recommends.
 ARG CLAUDE_CODE_VERSION=latest
+ARG CODEX_VERSION=latest
+ARG OPENCODE_VERSION=latest
 
 # AGENT_USER must not be root. Claude Code REFUSES to start with
 # --dangerously-skip-permissions as root on Linux and macOS, and running
@@ -53,8 +58,8 @@ ARG AGENTS=""
 RUN set -eu; \
     for a in ${AGENTS}; do \
       case "$a" in \
-        codex)    npm install -g "@openai/codex" ;; \
-        opencode) npm install -g "opencode-ai" ;; \
+        codex)    npm install -g "@openai/codex@${CODEX_VERSION}" ;; \
+        opencode) npm install -g "opencode-ai@${OPENCODE_VERSION}" ;; \
         *) echo "unknown agent: $a" >&2; exit 1 ;; \
       esac; \
     done
@@ -65,6 +70,12 @@ RUN set -eu; \
 RUN useradd --create-home --uid "${AGENT_UID}" --shell /bin/bash "${AGENT_USER}"
 
 USER ${AGENT_USER}
+
+# Claude Code's self-update cannot work here: the package is installed for
+# root, and every pane starts a fresh container from this image, so an update
+# made inside one is gone at the next start. Updating means rebuilding the
+# image with scripts/sandbox-image.sh.
+ENV DISABLE_AUTOUPDATER=1
 
 # Quil overrides the working directory per pane (-w). This is only a sane
 # default for someone running the image by hand to check it.

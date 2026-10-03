@@ -67,7 +67,10 @@ type NotesEditor struct {
 	// destination, which can be another host. autoSaveHold stops autosave
 	// after the daemon refused a save (too large, a write error) until the
 	// user edits — resending the same text every tick cannot succeed.
-	remote       bool
+	remote bool
+	// viewOnly keeps a loaded note read-only: it belongs to a read-only
+	// destination, whose daemon refuses note_set.
+	viewOnly     bool
 	dest         string
 	autoSaveHold bool
 	rev          uint64
@@ -131,6 +134,7 @@ func (n *NotesEditor) ApplyLoaded(text string, rev uint64) {
 	ed := NewTextEditor(text, "", w, h)
 	ed.Highlight = HighlightPlain
 	ed.SoftWrap = true
+	ed.ReadOnly = n.viewOnly
 	n.editor = ed
 	n.rev, n.loading, n.loadErr = rev, false, ""
 	n.dirty, n.conflict, n.reloadArmed, n.saveInFlight = false, false, false, false
@@ -152,7 +156,7 @@ func (n *NotesEditor) ApplyLoadError(msg string) {
 // sent as "" — the daemon's delete — rather than as a lone newline, which
 // would keep a blank note forever.
 func (n *NotesEditor) TakeSave(overwrite bool) (text string, baseRev uint64, ok bool) {
-	if n == nil || !n.remote || n.loading || n.loadErr != "" || n.saveInFlight || !n.dirty {
+	if n == nil || !n.remote || n.viewOnly || n.loading || n.loadErr != "" || n.saveInFlight || !n.dirty {
 		return "", 0, false
 	}
 	if n.conflict && !overwrite {
@@ -664,6 +668,8 @@ func (n *NotesEditor) footerLine(width int, focused bool) string {
 			hint = "Loading…  Esc"
 		case n.loadErr != "":
 			hint = "could not load: " + n.loadErr + "  Esc"
+		case n.viewOnly:
+			hint = "read-only connection — view only  Esc"
 		case n.conflict && n.reloadArmed:
 			hint = "Ctrl+R again to discard your edits · Ctrl+S overwrite"
 		case n.conflict:

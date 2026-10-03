@@ -802,6 +802,8 @@ install that predates the feature.
 
 `quil --remote gpu01` attaches the TUI to a daemon running on another machine. The panes, tabs, and AI sessions live on that host and keep running there when you close the laptop — the TUI is only a viewer.
 
+To share a workspace with LESS than full control — a viewer who can only watch, or a second device that cannot stop the daemon — use a token and `quil --connect` instead. See [Sharing a workspace](sharing-a-workspace.md).
+
 ```
    your laptop                                  gpu01
 ┌────────────────┐                     ┌──────────────────────┐

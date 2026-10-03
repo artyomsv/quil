@@ -217,6 +217,14 @@ func (d *Daemon) releaseOutputHold(c *ipc.Conn, end map[string]uint64) {
 				return
 			}
 		}
+		// A read-only viewer never makes a pane repaint: the kick is a redraw
+		// key written to the owner's PTY or a resize jiggle, both side
+		// effects. Its lost panes stay blank until their next output.
+		if len(lost) > 0 && c.Auth().ReadOnly() {
+			log.Printf("attach: held output for %d pane(s) passed %d bytes for a read-only client; dropped without a repaint",
+				len(lost), outputHoldLimit)
+			lost = nil
+		}
 		for paneID := range lost {
 			p := d.session.Pane(paneID)
 			if p == nil {
@@ -279,7 +287,7 @@ func (d *Daemon) dropOutputHold(c *ipc.Conn) {
 func (d *Daemon) redrawKickPane(p *Pane) {
 	p.PluginMu.Lock()
 	typ := p.Type
-	running := p.PTY != nil && p.ExitCode == nil
+	running := paneRunning(p)
 	p.PluginMu.Unlock()
 	if running {
 		d.redrawKick(p, typ)

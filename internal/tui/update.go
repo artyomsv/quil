@@ -118,7 +118,10 @@ func (m Model) handleUpdateAction() (tea.Model, tea.Cmd) {
 	// earlier press would make an ordinary download open the apply confirm the
 	// user did not ask for.
 	m.pendingApplyVer = ""
-	if m.remoteModeFor(m.activeDest()) {
+	// rightsDest, not activeDest: before the first broadcast of a --connect
+	// session there is no project, activeDest is "" and would read as local,
+	// while the request goes to the sole (remote) conn.
+	if m.remoteModeFor(m.rightsDest()) {
 		// Every value on this row came from the active project's daemon, and
 		// the request below would go back to it — but applying swaps the
 		// binaries on THIS machine, out of THIS machine's staging dir. Staging
@@ -217,7 +220,9 @@ func (m Model) sendUpdateCheckReq() {
 	// Skipped for a remote active project for the reason handleUpdateAction
 	// refuses there: the answer would describe the far host's releases, and it
 	// would spend that host's GitHub quota to tell this machine nothing.
-	if m.client == nil || !version.UpdatesEnabled() || m.remoteModeFor(m.activeDest()) {
+	// rightsDest for the same reason handleUpdateAction uses it: with no
+	// project yet, "" is not the destination this request reaches.
+	if m.client == nil || !version.UpdatesEnabled() || m.remoteModeFor(m.rightsDest()) {
 		return
 	}
 	req, err := ipc.NewMessage(ipc.MsgUpdateCheckReq, nil)

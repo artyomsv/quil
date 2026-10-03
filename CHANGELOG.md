@@ -11,6 +11,13 @@ version section here and deletes them.
 
 ## [Unreleased]
 
+## [1.84.0] - 2026-10-03
+
+### Added
+- **Token-authenticated TCP listener (opt-in).** Set `[listener] tcp = "127.0.0.1:7878"` and another account, or another machine through `ssh -L`, can attach with `quil --connect 7878` and a token from `quil clients token create`. The login is a mutual proof: the token never crosses the wire, and the client refuses a listener that cannot prove it is your daemon. Tokens expire (90 days by default), can be revoked at once, and carry one of three rights levels — `read-only` (watch, following the daemon's active tab), `standard` (everything but raw program arguments, overlay panes, daemon lifecycle and settings, and token management) and `full`. Every TCP login, refusal and privileged request is written to `audit.log`. The local socket is now created owner-only (`0600` under a restrictive umask on Linux, an owner-only access list on Windows); local clients need no token and work as before. See `docs/security.md`.
+- **On Windows, the first start of the updated daemon restricts the whole quil folder to your account and SYSTEM.** Files and folders already in it that inherit their permissions lose the access other accounts had through the folder (an entry set explicitly on a file stays), and a quil folder on a FAT or exFAT volume (no access lists) now stops the daemon from starting when its socket cannot be protected either — keep it on NTFS.
+- **Rebuilding the sandbox image now updates the agents.** `scripts/sandbox-image.sh` installed Claude Code (and codex/opencode) as `latest`, and Docker's build cache reused the first build's layer, so a rebuild never picked up a new release while still reporting success. The script now resolves each agent to its exact current version before building, prints what changed (`2.1.263 -> 2.1.288`), and the image turns Claude Code's self-update off, since a pane's fresh container cannot keep one. The docs also show how to run the script from PowerShell.
+
 ## [1.83.0] - 2026-10-01
 
 ### Added

@@ -131,18 +131,26 @@ fi
 # number changes the line when a release lands and keeps the cache when none
 # has. Asked from inside the base image, which the build needs anyway, so no
 # host npm is required.
+#
+# The fast path is a FULL match of an exact semantic version, never a glob: a
+# pattern like [0-9]*.[0-9]*.[0-9]* also accepts the ranges `2.1.0 - 2.1.999`
+# and `2.1.0 || 2.1.289`, which would then reach the build unresolved and
+# bring back the stale cache this function exists to prevent.
+EXACT_SEMVER='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
 exact_version() {
   pkg="$1"; spec="$2"
-  case "$spec" in
-    [0-9]*.[0-9]*.[0-9]*) printf '%s' "$spec"; return ;;
-  esac
+  if [[ "$spec" =~ $EXACT_SEMVER ]]; then
+    printf '%s' "$spec"
+    return
+  fi
   # A tag answers with one bare line; a range answers one `pkg@v 'v'` line
   # per match, highest last — so the last field of the last line, unquoted.
   v="$(docker run --rm "$BASE_IMAGE" npm view "$pkg@$spec" version 2>/dev/null | tail -n 1 | awk '{print $NF}' | tr -d "'\r" || true)"
-  case "$v" in
-    [0-9]*.[0-9]*.[0-9]*) printf '%s' "$v" ;;
-    *) die "could not resolve $pkg@$spec to a version (no network, or no npm in $BASE_IMAGE); pass an exact version" ;;
-  esac
+  if [[ "$v" =~ $EXACT_SEMVER ]]; then
+    printf '%s' "$v"
+    return
+  fi
+  die "could not resolve $pkg@$spec to a version (no network, or no npm in $BASE_IMAGE); pass an exact version"
 }
 
 # installed_version prints what the image under TAG has now, or nothing.

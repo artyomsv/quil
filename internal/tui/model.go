@@ -18,6 +18,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/google/uuid"
 
@@ -1215,6 +1216,10 @@ type Model struct {
 	// Update can set skipRender and still be rebuilt if the cache is invalid.
 	skipHidden bool
 
+	// mouseTail drops the key presses that finish an SGR mouse report the
+	// terminal reader split in two (see mouseTailGuard).
+	mouseTail mouseTailGuard
+
 	// Plugin migration dialog state
 	migrationPlugins    []plugin.StalePlugin // stale plugins needing migration
 	migrationIdx        int                  // active plugin tab index
@@ -1726,6 +1731,19 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 	// means the flag describes THIS message and can never leak into the next.
 	m.skipRender = false
 	m.skipHidden = false
+	// A mouse report split across two reads arrives as an unknown head plus
+	// key presses for its tail. Checked before anything treats those keys as
+	// user input — they must not ack a pane or reach a PTY. Returning before
+	// the prologue mutates nothing, so the frame cannot have moved.
+	switch ev := msg.(type) {
+	case uv.UnknownEvent:
+		m.mouseTail.arm(ev, start)
+	case tea.KeyPressMsg:
+		if m.mouseTail.swallow(ev, start) {
+			m.skipRender = true
+			return m, nil
+		}
+	}
 	// Local input answers the typing guard's ack hold (spec §8.1): a pane that
 	// became focused only because ANOTHER client switched tabs must not read
 	// as "seen" until the user actually looks at it, which a key or a mouse

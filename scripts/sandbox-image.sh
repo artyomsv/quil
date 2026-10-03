@@ -122,11 +122,70 @@ fi
 
 [ -f "$CONTEXT_DIR/Dockerfile" ] || die "missing $CONTEXT_DIR/Dockerfile"
 
-printf 'building %s (base=%s claude=%s agents=%s)\n' \
-  "$TAG" "$BASE_IMAGE" "$CLAUDE_VERSION" "${AGENTS:-none}"
+# exact_version turns a version SPEC into the exact version npm would install.
+#
+# This is what makes a rebuild update anything at all. Docker keys a RUN layer
+# on its text, so `npm install pkg@latest` is the same line every time and a
+# rebuild reuses the cached layer — the agent stays on whatever version was
+# current at the first build, and the build still reports success. An exact
+# number changes the line when a release lands and keeps the cache when none
+# has. Asked from inside the base image, which the build needs anyway, so no
+# host npm is required.
+exact_version() {
+  pkg="$1"; spec="$2"
+  case "$spec" in
+    [0-9]*.[0-9]*.[0-9]*) printf '%s' "$spec"; return ;;
+  esac
+  # A tag answers with one bare line; a range answers one `pkg@v 'v'` line
+  # per match, highest last — so the last field of the last line, unquoted.
+  v="$(docker run --rm "$BASE_IMAGE" npm view "$pkg@$spec" version 2>/dev/null | tail -n 1 | awk '{print $NF}' | tr -d "'\r" || true)"
+  case "$v" in
+    [0-9]*.[0-9]*.[0-9]*) printf '%s' "$v" ;;
+    *) die "could not resolve $pkg@$spec to a version (no network, or no npm in $BASE_IMAGE); pass an exact version" ;;
+  esac
+}
+
+# installed_version prints what the image under TAG has now, or nothing.
+installed_version() {
+  docker image inspect "$TAG" >/dev/null 2>&1 || return 0
+  docker run --rm --entrypoint sh "$TAG" -c "$1 --version" 2>/dev/null | head -n 1 | tr -d '\r' || true
+}
+
+CLAUDE_EXACT="$(exact_version @anthropic-ai/claude-code "$CLAUDE_VERSION")"
+CODEX_EXACT="latest"
+OPENCODE_EXACT="latest"
+for a in $AGENTS; do
+  case "$a" in
+    codex)    CODEX_EXACT="$(exact_version @openai/codex latest)" ;;
+    opencode) OPENCODE_EXACT="$(exact_version opencode-ai latest)" ;;
+  esac
+done
+
+report_change() {
+  name="$1"; before="$2"; after="$3"
+  if [ -z "$before" ]; then
+    printf '  %-9s: %s (new image)\n' "$name" "$after"
+  elif [ "$before" = "$after" ]; then
+    printf '  %-9s: %s (already current)\n' "$name" "$after"
+  else
+    printf '  %-9s: %s -> %s\n' "$name" "$before" "$after"
+  fi
+}
+
+printf 'building %s (base=%s agents=%s)\n' "$TAG" "$BASE_IMAGE" "${AGENTS:-none}"
+report_change claude "$(installed_version claude | awk '{print $1}')" "$CLAUDE_EXACT"
+for a in $AGENTS; do
+  case "$a" in
+    codex)    report_change codex "$(installed_version codex | awk '{print $NF}')" "$CODEX_EXACT" ;;
+    opencode) report_change opencode "$(installed_version opencode | awk '{print $NF}')" "$OPENCODE_EXACT" ;;
+  esac
+done
+
 docker build \
   --build-arg "BASE_IMAGE=$BASE_IMAGE" \
-  --build-arg "CLAUDE_CODE_VERSION=$CLAUDE_VERSION" \
+  --build-arg "CLAUDE_CODE_VERSION=$CLAUDE_EXACT" \
+  --build-arg "CODEX_VERSION=$CODEX_EXACT" \
+  --build-arg "OPENCODE_VERSION=$OPENCODE_EXACT" \
   --build-arg "AGENTS=$AGENTS" \
   -t "$TAG" \
   "$CONTEXT_DIR"

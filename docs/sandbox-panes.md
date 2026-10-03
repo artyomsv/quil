@@ -59,6 +59,12 @@ new one.
 scripts/sandbox-image.sh
 ```
 
+From PowerShell on Windows, run it through the Git Bash that Git for Windows installs:
+
+```powershell
+& "C:\Program Files\Git\bin\bash.exe" scripts/sandbox-image.sh
+```
+
 That builds `quil-sandbox:latest` on your machine from
 `docker/sandbox/Dockerfile`, then **verifies the result** — it asks the image
 for a non-root user, a working `claude`, and `git`, rather than reporting
@@ -77,7 +83,7 @@ default_image = "quil-sandbox:latest"
 |---|---|
 | `--tag NAME:TAG` | Build under a different tag. Default `quil-sandbox:latest` |
 | `--base IMAGE` | Different base image. Default `node:22-bookworm-slim` |
-| `--claude-version V` | Pin the Claude Code npm version. Default `latest` |
+| `--claude-version V` | Pin the Claude Code npm version (exact, a range, or a tag). Default `latest`, resolved to an exact number before the build |
 | `--with codex,opencode` | Install those agents beside Claude Code |
 | `--check --tag T` | Run the verification only, against an image you already have |
 
@@ -93,6 +99,25 @@ scripts/sandbox-image.sh --with codex,opencode
 # Check an image you built yourself, by hand, from your own Dockerfile.
 scripts/sandbox-image.sh --check --tag my-own-image:latest
 ```
+
+### Updating the agents
+
+Run the same command again, with the same `--with` list:
+
+```bash
+scripts/sandbox-image.sh --with codex,opencode
+```
+
+The script asks npm for each agent's current version and builds with that exact number, then prints what changed:
+
+```
+  claude   : 2.1.263 -> 2.1.288
+  codex    : 0.160.0 (already current)
+```
+
+When nothing changed, Docker reuses its cache and the rebuild takes seconds. New sandbox panes use the new image; a pane that is already running keeps its container until you restart it (Alt+R).
+
+The agents cannot update themselves inside a pane. Each pane starts a fresh container from the image, so an update made inside one would be gone at the next start. The image turns Claude Code's self-update off (`DISABLE_AUTOUPDATER=1`) for that reason.
 
 The verification is the part worth keeping. A build that succeeds proves the
 `RUN` lines exited zero; it does not prove `claude` is on the agent user's

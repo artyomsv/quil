@@ -216,6 +216,8 @@ image with no `claude` on PATH that failed at spawn with the error the same doc
 page described three paragraphs later. `--check --tag <tag>` runs the assertions
 against a user's own image.
 
+**The script passes EXACT agent versions, never `latest`** (`exact_version`, asked of npm inside the base image). Docker keys a `RUN` layer on its text, so `npm install pkg@latest` is the same line on every build and a rebuild reused the first build's layer — the image stayed on that agent version forever while the script reported success (found 2026-10-03: an image at Claude 2.1.263 with 2.1.288 out). An exact number changes the line when a release lands and keeps the cache when none has. The same holds for `CODEX_VERSION`/`OPENCODE_VERSION`. The image sets `DISABLE_AUTOUPDATER=1`: the package is root-owned and every pane starts a fresh container, so self-update can only fail or vanish; updating means rebuilding.
+
 `pwd -W` in that script is load-bearing on Windows, exactly as in `dev.sh`:
 under Git Bash a plain `pwd` yields `/e/...`, which Docker Desktop — a native
 Windows process — cannot resolve, and the build fails with "unable to prepare

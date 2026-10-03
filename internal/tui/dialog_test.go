@@ -33,6 +33,7 @@ func TestSettingsFields_LabelsAndInitialValues(t *testing.T) {
 		"Unfocused dim level",
 		"Overlay idle timeout (min)",
 		"Notifications",
+		"Sandbox",
 		"Max live overlays",
 		"Log level",
 		"Show disclaimer",

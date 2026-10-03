@@ -209,6 +209,10 @@ type settingsField struct {
 	// declares it, so renaming a label cannot silently break it.
 	submenu          bool
 	templateSettings bool
+	// sandboxSettings opens F1 → Settings → Sandbox. A separate flag from
+	// submenu, matching templateSettings, so settingsSubmenuIndex keeps
+	// finding the Notifications row.
+	sandboxSettings bool
 }
 
 // settingsFields returns the editable Settings rows. Every setter that
@@ -460,6 +464,14 @@ func settingsFields() []settingsField {
 			get:     func(m *Model) string { return "…" },
 			set:     func(m *Model, _ string) {},
 			submenu: true,
+		},
+		{
+			// The Ctrl+N sandbox defaults: image and sign-in. Its own screen
+			// because the sign-in row needs a warning line per choice.
+			label:           "Sandbox",
+			get:             func(m *Model) string { return "…" },
+			set:             func(m *Model, _ string) {},
+			sandboxSettings: true,
 		},
 		{
 			label: "Max live overlays",
@@ -721,6 +733,8 @@ func (m Model) dispatchDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handleSettingsKey(msg)
 	case dialogNotifySettings:
 		return m.handleNotifySettingsKey(msg)
+	case dialogSandboxSettings:
+		return m.handleSandboxSettingsKey(msg)
 	case dialogNewTemplate:
 		return m.handleTemplateDialogKey(msg)
 	case dialogShortcuts:
@@ -1033,6 +1047,13 @@ func (m Model) handleSettingsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		switch {
 		case f.templateSettings:
 			return m.openTemplateSettings()
+		case f.sandboxSettings:
+			m.dialog = dialogSandboxSettings
+			m.dialogCursor = 0
+			m.dialogEdit = false
+			// A box of a different height: force a full frame so no Settings
+			// border is left painted around it.
+			return m, tea.ClearScreen
 		case f.submenu:
 			m.dialog = dialogNotifySettings
 			m.dialogCursor = firstNotifyRow(notifySettingsRows())
@@ -1482,6 +1503,8 @@ func (m Model) renderDialog() string {
 		content = m.renderSettingsDialog()
 	case dialogNotifySettings:
 		content = m.renderNotifySettingsDialog()
+	case dialogSandboxSettings:
+		content = m.renderSandboxSettingsDialog()
 	case dialogNewTemplate:
 		content = m.renderTemplateDialog()
 	case dialogShortcuts:
@@ -2604,6 +2627,11 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 	// A reset landed in this teardown by mistake; reading the row after it
 	// yields the zero value, which is "off".
 	sbox := m.sandboxSpec()
+	// Filed under the dialog's PINNED destination, like the recent CWDs: the
+	// image is pulled by THAT host's docker.
+	if sbox != nil {
+		m.rememberSandboxImage(m.createPaneDialogDest(), sbox.Image)
+	}
 	// Captured with the other choices, BEFORE the teardown below clears them.
 	// Reading these after that reset yields the zero value, so the spec would
 	// silently never be sent and every "new branch" would spawn an ordinary

@@ -189,6 +189,13 @@ type Pane struct {
 	// a token would silently drop the model they chose it for — and one opened
 	// for zero-prompt work must not start demanding a sign-in.
 	SandboxAuth string
+	// SandboxClaudeConfig is the Claude config directory choice this pane was
+	// created with: "own", "shared", or empty to follow
+	// [sandbox] shared_claude_config. PERSISTED, PluginMu-protected, written
+	// once at creation. Persisted for the reason SandboxAuth is, and one more:
+	// the resume path maps the transcript through it, so a pane restored under
+	// the other directory would look for its session where it is not.
+	SandboxClaudeConfig string
 	// ContainerCWD is the directory the agent ran in INSIDE the container.
 	// PERSISTED, PluginMu-protected.
 	//

@@ -325,3 +325,17 @@ func TestListClients_RefusedBelowItsOwnVersionFloor(t *testing.T) {
 		t.Fatal("refused request reached the daemon")
 	}
 }
+
+// The Claude config directory choice reaches the create payload, and counts
+// as a dialog option for the daemon-version check like the other sandbox
+// fields.
+func TestCreatePaneInput_CarriesTheClaudeConfigChoice(t *testing.T) {
+	in := createPaneInput{SandboxImage: "img:1", SandboxClaudeConfig: "shared"}
+	req := in.toReq("t1")
+	if req.Sandbox == nil || req.Sandbox.ClaudeConfig != "shared" {
+		t.Errorf("Sandbox = %+v, want claude_config shared", req.Sandbox)
+	}
+	if !(createPaneInput{SandboxClaudeConfig: "own"}).usesDialogOptions() {
+		t.Error("the field is not version-checked with the other dialog options")
+	}
+}

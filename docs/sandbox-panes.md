@@ -33,10 +33,11 @@ daemon reported.
 2. Pick an AI plugin — **Claude Code**, **Codex** or **OpenCode**.
 3. Choose the directory.
 4. Turn on **Run in a Docker container**.
-5. Type the image name, or leave the pre-filled one from
-   `[sandbox] default_image`.
-6. **Claude Code only:** pick **Sign in** — `Browser` (default) or `Token`. See
-   [Signing in](#signing-in).
+5. Type the image name, or leave the pre-filled one. Quil remembers the last
+   image you used on each host (local or remote) and fills it in next time;
+   before the first one, it uses `[sandbox] default_image`.
+6. **Claude Code only:** pick **Sign in** — `Browser` (default), `Shared` (sign
+   in once for all Shared panes) or `Token`. See [Signing in](#signing-in).
 7. Press **Continue**.
 
 Closing the pane removes its container. Restarting the pane (`Alt+R`) builds a
@@ -46,7 +47,7 @@ new one.
 
 | Plugin | Sandbox | Sign-in inside the container |
 |---|---|---|
-| **Claude Code** | Yes | Browser once per pane (default), or a forwarded token — you choose per pane |
+| **Claude Code** | Yes | Browser once per pane (default), once for all Shared panes, or a forwarded token — you choose per pane |
 | **Codex** | Yes | None. Quil copies your host `~/.codex/auth.json` into the pane |
 | **OpenCode** | Yes | Once per container, in the container |
 | Terminal, lazygit, k9s, … | No | The row is not offered — these are not AI panes |
@@ -70,12 +71,16 @@ That builds `quil-sandbox:latest` on your machine from
 for a non-root user, a working `claude`, and `git`, rather than reporting
 success from a clean build log.
 
-Point the dialog at it once:
+Type `quil-sandbox:latest` in the dialog once — it is remembered for that host.
+To pre-fill it before the first pane, set it in **F1 → Settings → Sandbox**, or:
 
 ```toml
 [sandbox]
 default_image = "quil-sandbox:latest"
 ```
+
+One image serves all three agents when you build it with `--with
+codex,opencode`, so there is one default image, not one per agent.
 
 ### Flags
 
@@ -238,14 +243,29 @@ mechanism. Quil follows the vendor's own container guidance in each case.
 
 ### Claude Code
 
-Two flows, both from Anthropic's dev-container documentation. **Pick one per
-pane** on the **Sign in** row of the create dialog, or set the default in
-config:
+Two flows, both from Anthropic's dev-container documentation, and the browser
+flow comes in two forms. **Pick one per pane** on the **Sign in** row of the
+create dialog:
+
+| Choice | What it does |
+|---|---|
+| **Browser** (default) | Sign in inside this pane's container. Its own config directory. |
+| **Shared** | Sign in once; every other Shared pane reuses it. They share one config directory — see [Signing in once](#signing-in-once-instead-of-once-per-pane). |
+| **Token** | No sign-in. Read the warning below first. |
+
+Set the default in **F1 → Settings → Sandbox**, or in config:
 
 ```toml
 [sandbox]
-auth = "browser"    # or "token"
+auth = "browser"              # or "token"
+shared_claude_config = false  # true = Shared is the default
 ```
+
+The default is a setting of the client you create the pane from: the dialog
+sends the choice it shows, so it applies at once and for remote projects too.
+Existing panes keep the choice they were made with. The daemon reads the same
+keys at its own start, but only for panes created without a choice (MCP
+`create_pane` without the sandbox sign-in fields, or an older client).
 
 `auth` accepts `"browser"`, `"token"`, and the empty string, which means
 `"browser"`. Anything else — a typo, the wrong case — also resolves to
@@ -293,7 +313,7 @@ reach the container, copy the code shown in the browser and paste it at the
 `Paste code here if prompted` prompt.
 
 Each pane has its own config directory, so this is **once per pane** — unless
-you set `shared_claude_config`, below.
+you pick **Shared**, below.
 
 #### Token — no per-pane sign-in
 
@@ -352,14 +372,21 @@ its own environment, so the token never appears in a command line or in
 
 #### Signing in once instead of once per pane
 
-`shared_claude_config = true` gives every sandbox pane one config directory, so
-the browser sign-in happens **once ever** rather than per pane, and every pane
-still gets the full subscription. It also merges them into **one trust domain**:
-any sandbox pane can then write a hook or an MCP server that every other sandbox
-pane's claude runs. Off by default.
+Pick **Shared** on the Sign in row. Every Shared pane mounts one config
+directory, so the browser sign-in happens **once** rather than per pane, and
+every pane still gets the full subscription.
 
-That is the trade to weigh against `auth = "token"` — one shared trust domain,
-or a credential every Claude on the machine picks up.
+It also merges those panes into **one trust domain**: any Shared pane can write
+a hook or an MCP server that every other Shared pane's claude runs. Only the
+panes that picked Shared are in it — a Browser pane keeps its own directory,
+and a Codex or OpenCode container never gets the shared one. Off by default
+(`shared_claude_config = true` makes Shared the default).
+
+That is the trade to weigh against **Token** — one shared trust domain, or a
+credential every Claude on the machine picks up.
+
+The choice is recorded on the pane. Changing the default later does not move an
+existing pane to the other directory, so its conversation still resumes.
 
 #### What Quil never does
 

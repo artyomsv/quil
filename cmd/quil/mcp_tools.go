@@ -287,23 +287,25 @@ func registerGetPaneStatusTool(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogger) {
 
 // createPaneInput is shared by create_pane and create_tab's first_pane.
 type createPaneInput struct {
-	CWD             string   `json:"cwd,omitempty" jsonschema:"working directory for the new pane (on the daemon's filesystem)"`
-	Type            string   `json:"type,omitempty" jsonschema:"plugin type from list_plugins: terminal (default), claude-code, opencode, codex, ssh, stripe, ..."`
-	Name            string   `json:"name,omitempty" jsonschema:"pane label"`
-	Toggles         []string `json:"toggles,omitempty" jsonschema:"plugin toggle names from list_plugins, e.g. dangerously_skip_permissions, enable_auto_mode, chrome, search"`
-	ResumeSessionID string   `json:"resume_session_id,omitempty" jsonschema:"Claude session id from list_sessions to resume instead of starting fresh"`
-	WorktreeBranch  string   `json:"worktree_branch,omitempty" jsonschema:"create a NEW git worktree on this branch (off the repo containing cwd) and open the pane inside it"`
-	SandboxImage    string   `json:"sandbox_image,omitempty" jsonschema:"run the pane inside a Docker container from this image (requires sandbox_available from list_plugins)"`
-	SandboxAuth     string   `json:"sandbox_auth,omitempty" jsonschema:"sandbox sign-in mode for claude-code: token or browser (empty = config default)"`
-	InstanceName    string   `json:"instance_name,omitempty" jsonschema:"saved instance name for plugins with instances (ssh, stripe)"`
-	InstanceArgs    []string `json:"instance_args,omitempty" jsonschema:"instance arguments for plugins with instances (ssh, stripe); they REPLACE the plugin's own args and are REFUSED for AI panes — use toggles there"`
+	CWD                 string   `json:"cwd,omitempty" jsonschema:"working directory for the new pane (on the daemon's filesystem)"`
+	Type                string   `json:"type,omitempty" jsonschema:"plugin type from list_plugins: terminal (default), claude-code, opencode, codex, ssh, stripe, ..."`
+	Name                string   `json:"name,omitempty" jsonschema:"pane label"`
+	Toggles             []string `json:"toggles,omitempty" jsonschema:"plugin toggle names from list_plugins, e.g. dangerously_skip_permissions, enable_auto_mode, chrome, search"`
+	ResumeSessionID     string   `json:"resume_session_id,omitempty" jsonschema:"Claude session id from list_sessions to resume instead of starting fresh"`
+	WorktreeBranch      string   `json:"worktree_branch,omitempty" jsonschema:"create a NEW git worktree on this branch (off the repo containing cwd) and open the pane inside it"`
+	SandboxImage        string   `json:"sandbox_image,omitempty" jsonschema:"run the pane inside a Docker container from this image (requires sandbox_available from list_plugins)"`
+	SandboxAuth         string   `json:"sandbox_auth,omitempty" jsonschema:"sandbox sign-in mode for claude-code: token or browser (empty = config default)"`
+	SandboxClaudeConfig string   `json:"sandbox_claude_config,omitempty" jsonschema:"claude-code sandbox config directory: own (sign in per pane) or shared (one directory for every shared pane: sign in once, but those panes share hooks, MCP servers and history); empty = daemon config default"`
+	InstanceName        string   `json:"instance_name,omitempty" jsonschema:"saved instance name for plugins with instances (ssh, stripe)"`
+	InstanceArgs        []string `json:"instance_args,omitempty" jsonschema:"instance arguments for plugins with instances (ssh, stripe); they REPLACE the plugin's own args and are REFUSED for AI panes — use toggles there"`
 }
 
 // usesDialogOptions reports whether the request carries any field a daemon
 // older than mcpDaemonMinVersion would silently drop.
 func (in createPaneInput) usesDialogOptions() bool {
 	return in.Name != "" || len(in.Toggles) > 0 || in.ResumeSessionID != "" ||
-		in.WorktreeBranch != "" || in.SandboxImage != "" || in.SandboxAuth != ""
+		in.WorktreeBranch != "" || in.SandboxImage != "" || in.SandboxAuth != "" ||
+		in.SandboxClaudeConfig != ""
 }
 
 func (in createPaneInput) toReq(tabID string) ipc.CreatePaneReqPayload {
@@ -319,7 +321,7 @@ func (in createPaneInput) toReq(tabID string) ipc.CreatePaneReqPayload {
 		WorktreeBranch:  in.WorktreeBranch,
 	}
 	if in.SandboxImage != "" {
-		req.Sandbox = &ipc.SandboxSpec{Image: in.SandboxImage, Auth: in.SandboxAuth}
+		req.Sandbox = &ipc.SandboxSpec{Image: in.SandboxImage, Auth: in.SandboxAuth, ClaudeConfig: in.SandboxClaudeConfig}
 	}
 	return req
 }

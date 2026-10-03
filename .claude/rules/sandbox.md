@@ -546,11 +546,12 @@ sandbox pane: **Fable 5.1 is absent from `/model`** (the list is Default /
 Sonnet / Opus / Haiku) and **Remote Control reports the login expired**. Same
 Claude Code build as the host, so it is the credential and not the image.
 
-`shared_claude_config = true` with `auth = "browser"` is the other side of that
-trade: one directory mounted over `/quil/claude` for every pane, so the browser
-sign-in happens ONCE ever rather than per pane, and the pane gets full
-subscription auth. The cost is the documented one — every sandbox pane then
-shares one trust domain.
+The **Shared** choice (browser auth + `claude_config: "shared"`; the default
+when `shared_claude_config = true`) is the other side of that trade: one
+directory mounted over `/quil/claude` for every Shared pane, so the browser
+sign-in happens ONCE rather than per pane, and the pane gets full subscription
+auth. The cost is the documented one — every Shared pane shares one trust
+domain. See "The Claude config directory is PER PANE too" above.
 
 ## The sign-in mode is PER PANE
 
@@ -587,6 +588,56 @@ dropping the wire value passes every other test in the package.
 An unrecognised value read back from a SNAPSHOT falls back to the config too,
 so a future version's mode cannot pin a pane to something this build has no
 implementation for.
+
+## The Claude config directory is PER PANE too (#251)
+
+`SandboxSpec.ClaudeConfig` (`"own"`/`"shared"`, empty = follow
+`[sandbox] shared_claude_config`) → `Pane.SandboxClaudeConfig` (persisted as
+`sandbox_claude_config`) → `sharesClaudeConfig(choice, cfgShared, plugin)`
+(`internal/daemon/sandbox_shared.go`), the ONE rule. It replaced a daemon-global
+switch that the resume path recorded once at start.
+
+**The mount and the resume path must read the same decision.**
+`prepareSandbox` sets `SharedClaudeRoot` from it and `hostTranscriptPath` maps
+`/quil/claude/...` through it; splitting them mounts one directory and looks
+for the transcript in the other — exit 129. The resume path has no `Daemon`,
+so it reads `sharedClaudeConfigDefault` (a BOOL set at start) plus the pane's
+own choice, and derives the path with `sharedClaudeConfigDir`. The old package
+var held the DIRECTORY and was set only when the config was on, so a `"shared"`
+pane on a config-off daemon had nothing to map to.
+`TestHostTranscriptPath_FollowsThePaneChoice` pins both directions.
+
+**A non-Claude agent never gets the shared directory** — rule 1 of
+`sharesClaudeConfig`, gated on `plugin.UsesClaudeAuthName` like the sign-in,
+the token, the CLI env and the stamp. Before #251 the global switch mounted it
+read-write into codex and opencode containers too, so either could plant a hook
+every shared Claude pane then ran. Verified by mutation
+(`TestSharesClaudeConfig`, `TestPrepareSandbox_SharedRootFollowsThePaneChoice`).
+
+**The TUI row is a three-way CHOICE, not a mode** (`sandboxAuthChoices`:
+browser / shared / token) and `sandboxSignInFields` maps it onto both wire
+fields, so `"shared"` never reaches `Auth`. Token sends `claude_config: "own"`:
+a dialog-made token pane never enters the shared directory, so that directory
+serves browser panes only and its `.quil-auth` stamp cannot alternate. **The
+row always sends what it displays**, untouched or not — an empty `Auth` used to
+resolve through the DAEMON's config, which for a remote project is another
+machine's, so the row could show one mode while the pane got the other.
+`defaultSandboxSignIn` is the one config→choice mapping (token wins over
+shared), shared by the dialog and F1 → Settings → Sandbox, and the page writes
+BOTH keys for every choice so it can never write `token` + `shared`. The one
+remaining way to mix modes in the shared directory is that pair hand-edited and
+an MCP create naming no `sandbox_claude_config`. An explicit `token` + `shared` is stored as `own` by `applySandboxSpec` (`TestApplySandboxSpec_TokenPaneNeverShares`).
+
+**A field cannot be version-gated** (only a request type can), so `shared` sent
+to an older daemon silently becomes `own`: a repeated sign-in, never a loss of
+isolation. Release TUIs are exact-match gated.
+
+**The image is remembered per destination, client-side**
+(`config.SandboxImagePath`, `internal/tui/sandbox_image_store.go`), written on
+submit under `createPaneDialogDest()`, never in `config.toml` (whose `Save`
+rewrites the file). Disk access goes through `SetSandboxImageStore`, installed
+by `cmd/quil/main.go`; a `Model` built in a test has none. Unlike recent CWDs
+under `shared_data` it is not shared between two TUIs on one daemon — accepted.
 
 ## Codex and opencode ARE supported; their credentials are not Claude's
 

@@ -448,6 +448,19 @@ type SandboxSpec struct {
 	// guessing wrong is either a pane that cannot authenticate or one that
 	// silently loses the model the user picked it for.
 	Auth string `json:"auth,omitempty"`
+
+	// ClaudeConfig picks THIS pane's Claude config directory: "own" (its own,
+	// the default) or "shared" (one directory for every pane that chose it, so
+	// the user signs in once). Empty follows [sandbox] shared_claude_config,
+	// which is what every older client, every restore of an older snapshot and
+	// MCP without the field send.
+	//
+	// Per-pane so a config change never moves an existing pane's transcripts,
+	// and so the shared trust domain holds only the panes that opted into it.
+	// Validated like Auth; an unknown value follows the config. A daemon too
+	// old to know the field ignores it and uses its own directory, which costs
+	// a sign-in and never isolation.
+	ClaudeConfig string `json:"claude_config,omitempty"`
 }
 
 // WorktreeSpec asks the daemon to create a linked worktree for a new pane.

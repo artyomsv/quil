@@ -364,10 +364,9 @@ func New(cfg config.Config) *Daemon {
 		log.Printf("daemon: running in session 0 (limited: no saved credentials, windows opened by panes are invisible)")
 	}
 	d.sandboxReg = newSandboxRegistry(config.QuilDir())
-	if cfg.Sandbox.SharedClaudeConfig {
-		// Recorded for the resume path, which has no Daemon to ask.
-		setSharedClaudeRoot(filepath.Join(sandboxRoot(config.QuilDir()), "claude"))
-	}
+	// Recorded for the resume path, which has no Daemon to ask. A pane's own
+	// recorded choice overrides it (sharesClaudeConfig).
+	setSharedClaudeConfigDefault(cfg.Sandbox.SharedClaudeConfig)
 	d.spoolFwd = newSpoolForwarder()
 	d.sandboxReg.load()
 	d.memReport = memreport.NewCollector(d.session, 5*time.Second)
@@ -1088,6 +1087,7 @@ func (d *Daemon) restoreWorkspace() error {
 				worktreeInterrupted, _ := paneData["worktree_interrupted"].(bool)
 				sandboxImage, _ := paneData["sandbox_image"].(string)
 				sandboxAuth, _ := paneData["sandbox_auth"].(string)
+				sandboxClaudeConfig, _ := paneData["sandbox_claude_config"].(string)
 				containerCWD, _ := paneData["container_cwd"].(string)
 				// note_rev absent (a pre-3b snapshot) with a note file present
 				// means the local TUI kept a note for this daemon's own pane:
@@ -1136,8 +1136,12 @@ func (d *Daemon) restoreWorkspace() error {
 					// [sandbox] auth. That is the same behaviour those panes
 					// had before the choice existed, so a restore cannot move
 					// a pane to a mode it was never opened in.
-					SandboxAuth:  sandboxAuth,
-					ContainerCWD: containerCWD,
+					SandboxAuth: sandboxAuth,
+					// Absent on an older snapshot → empty, which follows
+					// [sandbox] shared_claude_config — the behaviour those
+					// panes had before the choice existed.
+					SandboxClaudeConfig: sandboxClaudeConfig,
+					ContainerCWD:        containerCWD,
 					// Absent on pre-pin snapshots → false, which is the only
 					// safe default: inventing a mark the user never set would
 					// put a "look here" on a pane with nothing to look at, and
@@ -5054,6 +5058,8 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 				paneData.SandboxImage = pane.SandboxImage
 				auth := pane.SandboxAuth
 				paneData.SandboxAuth = &auth
+				claudeConfig := pane.SandboxClaudeConfig
+				paneData.SandboxClaudeConfig = &claudeConfig
 				paneData.Type = sandboxPaneType(pane.Type)
 			}
 			if pane.ContainerCWD != "" {

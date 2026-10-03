@@ -179,7 +179,13 @@ func runSandboxStatus() {
 	}
 
 	if mode == config.SandboxAuthBrowser {
-		fmt.Println("\nSandbox panes will ask you to sign in inside the container, once per pane.")
+		if cfg.Sandbox.SharedClaudeConfig {
+			fmt.Println("\nSandbox panes default to Shared: you sign in inside a container once, and")
+			fmt.Println("every Shared pane reuses it. The create dialog can still pick per pane.")
+		} else {
+			fmt.Println("\nSandbox panes will ask you to sign in inside the container, once per pane,")
+			fmt.Println("unless you pick Shared in the create dialog (sign in once for all Shared panes).")
+		}
 		return
 	}
 	if !inProcess {

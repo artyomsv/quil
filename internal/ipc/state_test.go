@@ -35,8 +35,8 @@ func TestPaneState_ZeroValue_OnlyAlwaysPresentKeys(t *testing.T) {
 
 func TestPaneState_PointerZeroes_ArePresent(t *testing.T) {
 	zero64, zeroInt, empty := int64(0), 0, ""
-	got := keysOf(t, PaneState{ContextTokens: &zero64, GitAhead: &zeroInt, GitBehind: &zeroInt, SandboxAuth: &empty})
-	for _, k := range []string{"context_tokens", "git_ahead", "git_behind", "sandbox_auth"} {
+	got := keysOf(t, PaneState{ContextTokens: &zero64, GitAhead: &zeroInt, GitBehind: &zeroInt, SandboxAuth: &empty, SandboxClaudeConfig: &empty})
+	for _, k := range []string{"context_tokens", "git_ahead", "git_behind", "sandbox_auth", "sandbox_claude_config"} {
 		if _, ok := got[k]; !ok {
 			t.Errorf("%q set to a zero pointer was omitted; the daemon sends it even at zero", k)
 		}

@@ -36,6 +36,7 @@ func hostTranscriptPath(pane *Pane, recorded string) string {
 	}
 	pane.PluginMu.Lock()
 	sandboxed := pane.SandboxImage != ""
+	choice, typ := pane.SandboxClaudeConfig, pane.Type
 	pane.PluginMu.Unlock()
 	if !sandboxed {
 		return recorded
@@ -50,10 +51,11 @@ func hostTranscriptPath(pane *Pane, recorded string) string {
 	// backs it is not: shared mode mounts one directory over the per-pane one.
 	// Mapping to the per-pane path regardless would classify every valid
 	// SHARED transcript as missing, and a restored pane would take the fresh
-	// --session-id path for a session that already has one: exit 129.
+	// --session-id path for a session that already has one: exit 129. Decided
+	// by the same rule the mount used, from the pane's own recorded choice.
 	hostRoot := sandboxClaudeConfigDir(config.QuilDir(), pane.ID)
-	if sharedClaudeRoot != nil && *sharedClaudeRoot != "" {
-		hostRoot = *sharedClaudeRoot
+	if sharesClaudeConfig(choice, sharedClaudeConfigDefault, typ) {
+		hostRoot = sharedClaudeConfigDir(config.QuilDir())
 	}
 	joined := filepath.Join(hostRoot, filepath.FromSlash(strings.TrimPrefix(slashed, prefix)))
 	// filepath.Join CLEANS a traversal rather than refusing it, so the
@@ -73,14 +75,17 @@ func hostTranscriptPath(pane *Pane, recorded string) string {
 	return joined
 }
 
-// sharedClaudeRoot is the shared config directory when the user opted into
-// one, and nil otherwise. A package var rather than a config read so the
-// resume path needs no Daemon, which is how every test here drives it.
-var sharedClaudeRoot *string
+// sharedClaudeConfigDefault is [sandbox] shared_claude_config, recorded at
+// daemon start for the resume path. A package var rather than a config read so
+// the resume path needs no Daemon, which is how every test here drives it. It
+// is a bool, not the directory: a pane that recorded "shared" on a config-off
+// daemon must still map to the shared directory, so the path is derived
+// rather than handed over only when the config is on.
+var sharedClaudeConfigDefault bool
 
-// setSharedClaudeRoot records the mode for the resume path. Called once at
+// setSharedClaudeConfigDefault records the config default. Called once at
 // daemon start.
-func setSharedClaudeRoot(dir string) { sharedClaudeRoot = &dir }
+func setSharedClaudeConfigDefault(on bool) { sharedClaudeConfigDefault = on }
 
 // realPathWithin resolves the deepest EXISTING ancestor of child and reports
 // whether it is still inside dir.

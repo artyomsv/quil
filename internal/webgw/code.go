@@ -3,6 +3,7 @@ package webgw
 import (
 	"io"
 	"strings"
+	"unicode"
 )
 
 const codeAlphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ" // Crockford base32
@@ -25,10 +26,15 @@ func newLoginCode(r io.Reader) (string, error) {
 
 // normalizeCode reads a typed code the way Crockford base32 intends: case
 // does not matter, I and L mean 1, O means 0, and hyphens and spaces are
-// ignored.
+// ignored. Anything outside ASCII is kept as it is and never matches: upper
+// casing first would fold characters such as dotless i and long s into the
+// alphabet.
 func normalizeCode(s string) string {
 	var b strings.Builder
-	for _, c := range strings.ToUpper(s) {
+	for _, c := range s {
+		if c < 0x80 {
+			c = unicode.ToUpper(c)
+		}
 		switch c {
 		case '-', ' ', '\t':
 			continue

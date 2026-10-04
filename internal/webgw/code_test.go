@@ -43,3 +43,16 @@ func TestFormatCode(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+// Upper casing first would fold dotless i and long s into I and S; they must
+// stay outside the alphabet.
+func TestNormalizeCode_NonASCIIDoesNotFold(t *testing.T) {
+	got := normalizeCode("ıſ")
+	if strings.ContainsAny(got, "1IS") || got == "" {
+		t.Fatalf("normalizeCode folded to %q", got)
+	}
+	a := "S7M2Q9TXV4"
+	if normalizeCode("ſ"+a[1:]) == a {
+		t.Fatal("a non-ASCII letter matched an alphabet letter")
+	}
+}

@@ -231,6 +231,53 @@ func webHello(id string) ipc.HelloPayload {
 	return ipc.HelloPayload{Kind: "web", Proto: ipc.ProtocolVersion, ClientID: id}
 }
 
+func TestSession_AnswersByCookie(t *testing.T) {
+	h := newWSHarness(t, nil)
+	get := func(method, host, cookie string) *http.Response {
+		t.Helper()
+		req, err := http.NewRequest(method, h.ts.URL+"/session", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if host != "" {
+			req.Host = host
+		}
+		if cookie != "" {
+			req.Header.Set("Cookie", SessionCookie+"="+cookie)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp
+	}
+
+	if got := get(http.MethodGet, "", "").StatusCode; got != http.StatusUnauthorized {
+		t.Fatalf("no cookie: %d, want 401", got)
+	}
+	if got := get(http.MethodGet, "", "not-a-session").StatusCode; got != http.StatusUnauthorized {
+		t.Fatalf("unknown cookie: %d, want 401", got)
+	}
+	s := h.login()
+	resp := get(http.MethodGet, "", s.cookie)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("after login: %d, want 204", resp.StatusCode)
+	}
+	if cc := resp.Header.Get("Cache-Control"); cc != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", cc)
+	}
+	if resp.Header.Get("Content-Security-Policy") != CSP {
+		t.Fatal("no CSP on /session: the route is not behind withSecurity")
+	}
+	if got := get(http.MethodGet, "evil.example", s.cookie).StatusCode; got != http.StatusForbidden {
+		t.Fatalf("foreign Host: %d, want 403", got)
+	}
+	if got := get(http.MethodPost, "", s.cookie).StatusCode; got != http.StatusMethodNotAllowed {
+		t.Fatalf("POST: %d, want 405", got)
+	}
+}
+
 func TestWS_NoSessionRefusedBeforeDial(t *testing.T) {
 	h := newWSHarness(t, nil)
 	ctx := testCtx(t)

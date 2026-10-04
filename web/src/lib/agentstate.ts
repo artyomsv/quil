@@ -16,6 +16,7 @@ export class AgentStatePoller {
   private timer: unknown;
   private flightTimer: unknown;
   private inFlight = false;
+  private inFlightId = '';
   private dirty = false;
   private lastSentAt = -Infinity;
   private seq = 0;
@@ -38,12 +39,13 @@ export class AgentStatePoller {
     }, REFRESH_MS);
   }
 
-  // pane id -> working | idle | blocked | '' (unknown). Answers the request
-  // in flight.
-  response(panes: PaneInfo[]): Map<string, string> {
+  // pane id -> working | idle | blocked | '' (unknown). Only the answer to
+  // the request in flight releases it: a late answer to a request that timed
+  // out still carries usable states, but the newer request is still waiting.
+  response(id: string | undefined, panes: PaneInfo[]): Map<string, string> {
     const out = new Map<string, string>();
     for (const p of panes) out.set(p.id, p.agent_state ?? '');
-    this.settle();
+    if (this.inFlight && id !== undefined && id === this.inFlightId) this.settle();
     return out;
   }
 
@@ -54,6 +56,7 @@ export class AgentStatePoller {
     this.timer = undefined;
     this.flightTimer = undefined;
     this.inFlight = false;
+    this.inFlightId = '';
     this.dirty = false;
     this.started = false;
   }
@@ -75,14 +78,16 @@ export class AgentStatePoller {
     }
     this.lastSentAt = this.clock.now();
     this.inFlight = true;
+    this.inFlightId = `agent-${++this.seq}`;
     this.flightTimer = this.clock.setTimeout(() => this.settle(), IN_FLIGHT_MS);
-    this.send({ type: 'list_panes_req', id: `agent-${++this.seq}` });
+    this.send({ type: 'list_panes_req', id: this.inFlightId });
   }
 
   private settle(): void {
     if (this.flightTimer !== undefined) this.clock.clearTimeout(this.flightTimer);
     this.flightTimer = undefined;
     this.inFlight = false;
+    this.inFlightId = '';
     if (this.dirty) {
       this.dirty = false;
       this.ask();

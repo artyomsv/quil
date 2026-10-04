@@ -122,6 +122,7 @@ func New(cfg Config) *Server {
 	s.mux = http.NewServeMux()
 	s.mux.Handle("/", StaticHandler())
 	s.mux.HandleFunc("/login", loginHandler(s.auth, cfg.Logf))
+	s.mux.HandleFunc("/session", sessionHandler(s.auth))
 	s.mux.HandleFunc("/ws", s.handleWS)
 	return s
 }

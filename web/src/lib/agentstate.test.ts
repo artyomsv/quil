@@ -57,7 +57,7 @@ describe('AgentStatePoller', () => {
   it('sends one request, 250 ms after the first event of a burst', () => {
     const { poller, clock, sent } = rig();
     poller.stateApplied();
-    poller.response([]);
+    poller.response(sent[0]?.id, []);
     for (let i = 0; i < 10; i++) {
       poller.paneEvent();
       clock.advance(5);
@@ -74,7 +74,7 @@ describe('AgentStatePoller', () => {
   it('keeps a second applied state inside the 250 ms spacing', () => {
     const { poller, clock, sent } = rig();
     poller.stateApplied();
-    poller.response([]);
+    poller.response(sent[0]?.id, []);
     clock.advance(100);
     poller.stateApplied();
     expect(sent).toHaveLength(1);
@@ -90,7 +90,7 @@ describe('AgentStatePoller', () => {
     poller.paneEvent();
     clock.advance(250);
     expect(sent).toHaveLength(1);
-    poller.response([]);
+    poller.response(sent[0]?.id, []);
     expect(sent).toHaveLength(2);
     expect(sent[0]?.id).not.toBe(sent[1]?.id);
   });
@@ -110,7 +110,7 @@ describe('AgentStatePoller', () => {
   it('stop() cancels a pending refresh and waits for the next state', () => {
     const { poller, clock, sent } = rig();
     poller.stateApplied();
-    poller.response([]);
+    poller.response(sent[0]?.id, []);
     poller.paneEvent();
     poller.stop();
     clock.advance(5000);
@@ -122,9 +122,39 @@ describe('AgentStatePoller', () => {
     expect(sent).toHaveLength(2);
   });
 
+  it('a late answer to a timed-out request does not release the newer one', () => {
+    const { poller, clock, sent } = rig();
+    poller.stateApplied();
+    clock.advance(2000);
+    poller.paneEvent();
+    clock.advance(250);
+    expect(sent).toHaveLength(2);
+    poller.paneEvent();
+    clock.advance(250);
+    expect(sent).toHaveLength(2);
+    const late = poller.response(sent[0]?.id, [{ id: 'a', tab_id: 't', agent_state: 'idle' }]);
+    expect([...late]).toEqual([['a', 'idle']]);
+    clock.advance(250);
+    expect(sent).toHaveLength(2);
+    poller.response(sent[1]?.id, []);
+    expect(sent).toHaveLength(3);
+  });
+
+  it('an answer with no id or a foreign id releases nothing', () => {
+    const { poller, clock, sent } = rig();
+    poller.stateApplied();
+    poller.paneEvent();
+    clock.advance(250);
+    poller.response(undefined, []);
+    poller.response('someone-else', []);
+    expect(sent).toHaveLength(1);
+    poller.response(sent[0]?.id, []);
+    expect(sent).toHaveLength(2);
+  });
+
   it('maps agent_state per pane, empty for unknown', () => {
     const { poller } = rig();
-    const got = poller.response([
+    const got = poller.response(undefined, [
       { id: 'a', tab_id: 't', agent_state: 'working' },
       { id: 'b', tab_id: 't', agent_state: 'blocked' },
       { id: 'c', tab_id: 't' },

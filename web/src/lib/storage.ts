@@ -7,6 +7,23 @@ export interface StorageLike {
 export const CLIENT_ID_KEY = 'quil.web.client_id';
 export const LOGIN_KEY = 'quil.web.key';
 
+// routedStorage keeps the client id per browser tab (session storage) and
+// every other key, the login key among them, per origin (local storage). Two
+// tabs sharing one stored client id would each present the other's id after a
+// resync and lose their own lease. Reading window.localStorage itself can
+// throw, so each store is fetched on every access; SafeStorage catches it.
+export function routedStorage(
+  local: () => StorageLike | undefined,
+  session: () => StorageLike | undefined,
+): StorageLike {
+  const pick = (k: string): StorageLike | undefined => (k === CLIENT_ID_KEY ? session() : local());
+  return {
+    getItem: (k) => pick(k)?.getItem(k) ?? null,
+    setItem: (k, v) => pick(k)?.setItem(k, v),
+    removeItem: (k) => pick(k)?.removeItem(k),
+  };
+}
+
 // SafeStorage wraps a browser storage whose every access may throw (private
 // windows, blocked site data). A failed write keeps the value in memory, so
 // the page still works for its own life; a failed read answers from memory.

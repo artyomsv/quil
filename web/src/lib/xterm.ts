@@ -3,6 +3,9 @@ import { WebglAddon } from '@xterm/addon-webgl';
 import '@xterm/xterm/css/xterm.css';
 import type { TermLike } from './terminals';
 
+// The font size a terminal starts at, and the one a size master lays out at.
+export const BASE_FONT = 14;
+
 export interface XtermPane extends TermLike {
   // open() on first show, then move the element; adds the WebGL renderer.
   attach(el: HTMLElement): void;
@@ -12,6 +15,9 @@ export interface XtermPane extends TermLike {
   // Pixels per cell at the current font.
   measureCell(): { width: number; height: number };
   onData(fn: (s: string) => void): void;
+  focus(): void;
+  // The buffer as text, trailing blank lines removed (the end-to-end hook).
+  text(): string;
 }
 
 // createXtermPane makes the terminal un-opened: writes before open() fill its
@@ -20,7 +26,7 @@ export interface XtermPane extends TermLike {
 // The WebGL renderer is attached only while visible, because browsers cap
 // WebGL contexts at about 16; the DOM renderer covers context loss.
 export function createXtermPane(_paneId: string): XtermPane {
-  const term = new Terminal({ scrollback: 1000, allowProposedApi: false, fontSize: 14, cursorBlink: false });
+  const term = new Terminal({ scrollback: 1000, allowProposedApi: false, fontSize: BASE_FONT, cursorBlink: false });
   let host: HTMLElement | null = null;
   let webgl: WebglAddon | null = null;
   let dataSub: { dispose(): void } | null = null;
@@ -84,6 +90,16 @@ export function createXtermPane(_paneId: string): XtermPane {
       if (disposed) return;
       dataSub?.dispose();
       dataSub = term.onData(fn);
+    },
+    focus() {
+      if (!disposed) term.focus();
+    },
+    text() {
+      if (disposed) return '';
+      const buf = term.buffer.active;
+      const lines: string[] = [];
+      for (let i = 0; i < buf.length; i++) lines.push(buf.getLine(i)?.translateToString(true) ?? '');
+      return lines.join('\n').trimEnd();
     },
   };
 }

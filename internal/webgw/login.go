@@ -151,6 +151,25 @@ func sessionOf(r *http.Request) string {
 	return c.Value
 }
 
+// sessionHandler is GET /session: 204 when the request carries a live session
+// cookie, 401 otherwise. The page asks it on load to choose between the login
+// form and the workspace.
+func sessionHandler(a *authStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		if !a.Valid(sessionOf(r)) {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
 // loginHandler is POST /login with {"code": "..."} as application/json (a
 // cross-site form cannot send that type without a preflight). Origin must be
 // this page (blocks login CSRF); the body is bounded in size and time per

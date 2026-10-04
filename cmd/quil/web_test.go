@@ -1,8 +1,17 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"log"
+	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/webgw"
 )
 
 func TestParseWebFlags(t *testing.T) {
@@ -59,5 +68,45 @@ func TestWebVersionMismatch(t *testing.T) {
 		if got := webVersionMismatch(c.res); got != c.want {
 			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
 		}
+	}
+}
+
+func TestOpenWebLog_WritesUnderQuilHome(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	prev := log.Writer()
+	closeLog := openWebLog(config.Default())
+	log.Print("web log probe")
+	closeLog()
+	log.SetOutput(prev)
+	data, err := os.ReadFile(filepath.Join(config.QuilDir(), "web.log"))
+	if err != nil || !strings.Contains(string(data), "web log probe") {
+		t.Fatalf("web.log = %q, %v", data, err)
+	}
+}
+
+func TestEnsureLocalDaemon_AutoStartOffNamesTheCommand(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	cfg := config.Default()
+	cfg.Daemon.AutoStart = false
+	err := ensureLocalDaemon(config.SocketPath(), cfg)
+	if err == nil || !strings.Contains(err.Error(), "quil daemon start") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestWebDialers_FailWithoutADaemon(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	if _, _, err := localWebDialer(config.SocketPath())(context.Background(), "c1"); err == nil {
+		t.Fatal("local dial succeeded with no daemon")
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	_, _, err = tokenWebDialer(addr, "qtk_unused")(context.Background(), "c1")
+	if err == nil || errors.Is(err, webgw.ErrTokenRefused) {
+		t.Fatalf("a missing listener must fail as a plain dial error, got %v", err)
 	}
 }

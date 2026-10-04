@@ -215,27 +215,74 @@ export async function listPanes(home: string): Promise<PaneListing[]> {
   return (r.payload as { panes?: PaneListing[] }).panes ?? [];
 }
 
+export interface TabSnapshot {
+  id: string;
+  panes: string[];
+  layout_rev?: number;
+  layout?: { pane_id?: string; split?: number; ratio?: number; left?: unknown; right?: unknown };
+}
+
+export interface StateSnapshot {
+  size_master?: string;
+  tabs?: TabSnapshot[];
+  panes?: { id: string; tab_id: string; cwd: string; [k: string]: unknown }[];
+}
+
 export interface FakeTUI {
   // The newest workspace_state payload received, or undefined before one.
-  state(): { size_master?: string } | undefined;
+  state(): StateSnapshot | undefined;
+  // Every workspace_state received since attach, oldest first.
+  states(): StateSnapshot[];
   // Sends a message on the TUI's own connection (resize_panes as master).
   send(m: Message): void;
   close(): void;
 }
 
 // fakeTUI attaches like a TUI with an 80x24 window, so it is a paintable
-// client the daemon can make size master, and keeps the latest state.
+// client the daemon can make size master, and keeps every state.
 export async function fakeTUI(home: string, clientId: string): Promise<FakeTUI> {
   const c = await FrameConn.open(home);
-  let latest: { size_master?: string } | undefined;
+  const all: StateSnapshot[] = [];
   c.onMessage = (m) => {
-    if (m.type === 'workspace_state') latest = m.payload as { size_master?: string };
+    if (m.type === 'workspace_state') all.push(m.payload as StateSnapshot);
   };
   await hello(c, 'tui', clientId);
   const first = c.next((m) => m.type === 'workspace_state');
   c.send({ type: 'attach', payload: { cols: 80, rows: 24, win_cols: 80, win_rows: 24, client_id: clientId } });
   await first;
-  return { state: () => latest, send: (m) => c.send(m), close: () => c.close() };
+  return {
+    state: () => all[all.length - 1],
+    states: () => [...all],
+    send: (m) => c.send(m),
+    close: () => c.close(),
+  };
+}
+
+// layoutIds lists every pane id in a serialized tree.
+export function layoutIds(n: unknown): string[] {
+  const node = n as { pane_id?: string; left?: unknown; right?: unknown } | undefined;
+  if (!node) return [];
+  if (node.pane_id) return [node.pane_id];
+  return [...layoutIds(node.left), ...layoutIds(node.right)];
+}
+
+export function tabOf(s: StateSnapshot | undefined, tabId: string): TabSnapshot | undefined {
+  return s?.tabs?.find((t) => t.id === tabId);
+}
+
+// paste pastes text into a pane through the page's own paste flow.
+export async function paste(page: Page, paneId: string, text: string): Promise<void> {
+  await page.evaluate(([id, t]) => (window as unknown as TestHookWindow).__quilTest?.paste(id, t), [paneId, text] as [string, string]);
+}
+
+// activePane is the pane the page treats as active.
+export function activePane(page: Page): Promise<string> {
+  return page.evaluate(() => (window as unknown as TestHookWindow).__quilTest?.activePane() ?? '');
+}
+
+// paneMenu opens a pane's menu by the pane's title text.
+export async function paneMenu(page: Page, title: string): Promise<void> {
+  await page.locator('.pane', { has: page.locator('.title', { hasText: title }) }).getByRole('button', { name: 'Pane menu' }).click();
 }
 
 // stopDaemon stops the daemon behind quil web; quil web keeps running.
@@ -244,7 +291,13 @@ export function stopDaemon(home: string): void {
 }
 
 interface TestHookWindow {
-  __quilTest?: { bufferText(paneId: string): string; screenLine(paneId: string, row: number): string; clientId(): string };
+  __quilTest?: {
+    bufferText(paneId: string): string;
+    screenLine(paneId: string, row: number): string;
+    clientId(): string;
+    paste(paneId: string, text: string): void;
+    activePane(): string;
+  };
   __quilCSP?: (v: string) => void;
 }
 

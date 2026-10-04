@@ -48,6 +48,16 @@ export interface PaneState {
   overlay?: boolean;
   pending?: boolean;
   spawn_error?: string;
+  muted?: boolean;
+  unseen?: boolean;
+  worktree_owned?: boolean;
+  worktree_path?: string;
+  plugin_state?: Record<string, string>;
+  instance_name?: string;
+  instance_args?: string[];
+  sandbox_image?: string;
+  sandbox_auth?: string;
+  sandbox_claude_config?: string;
 }
 
 export interface ProjectState {
@@ -107,3 +117,39 @@ export const CLOSE = {
 // internal/webgw/server.go; keep the two equal). Unlike other 1008s it is not
 // final: the page retries with the normal back-off.
 export const CLOSE_REPLACED_REASON = 'replaced by a newer connection';
+
+export type Placement = 'right' | 'below' | 'replace' | 'new_tab' | 'overlay';
+
+// The pane half of split_pane_req: the same field names as the daemon's
+// create_pane payload. instance_args never comes from the page (the gateway
+// fills it from instance_id, see internal/webgw); a worktree is {branch} for
+// a new branch (the daemon resolves the repository from cwd) or
+// {existing_path} for an existing worktree — exactly one (R-A, ipc.SplitWorktree).
+export interface PaneSpec {
+  type?: string;
+  name?: string;
+  cwd: string;
+  toggles?: string[];
+  instance_id?: string;
+  kube_context?: string;
+  resume_session_id?: string;
+  worktree?: { branch: string } | { existing_path: string };
+  sandbox?: { image: string; auth?: string; claude_config?: string };
+}
+
+export interface SplitPaneReq {
+  target_pane_id?: string;
+  tab_id?: string;
+  placement: Placement;
+  new_tab?: { name: string; project_id: string };
+  overlay_kind?: 'lazygit' | 'hunk';
+  pane: PaneSpec;
+}
+
+export interface SplitPaneResp {
+  pane_id: string;
+  tab_id: string;
+  layout_rev: number;
+  preparing?: boolean;
+  error?: string;
+}

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { WorkspaceState } from './protocol';
-import { activeProjectOf, parseWorkspaceState, placedPanes, sidebarModel, tabBarModel } from './view';
+import { activeProjectOf, activeTree, parseWorkspaceState, placedPanes, sidebarModel, tabBarModel } from './view';
 
 const ESC = String.fromCodePoint(0x1b);
 const RLO = String.fromCodePoint(0x202e);
@@ -116,6 +116,27 @@ describe('placedPanes', () => {
     expect(got[0]?.rect).toEqual({ x: 0, y: 0, w: 0.25, h: 1 });
     expect(got[1]?.rect).toEqual({ x: 0.25, y: 0, w: 0.75, h: 1 });
     expect(got[1]?.spawnError).toBe('no such file');
+  });
+
+  it('carries the mute and worktree marks', () => {
+    const s = ws();
+    s.panes = s.panes.map((p) => (p.id === 'x2' ? { ...p, muted: true, worktree_owned: true } : p));
+    const got = placedPanes(s);
+    expect(got.map((p) => [p.muted, p.worktreeOwned])).toEqual([
+      [true, true],
+      [false, false],
+    ]);
+  });
+
+  it('draws a preview for the active tab in place of its tree; one for another tab changes nothing', () => {
+    const tree = { split: 0, ratio: 0.6, left: { pane_id: 'x2' }, right: { pane_id: 'x3' } };
+    const moved = placedPanes(ws(), { tabId: 't2', tree });
+    expect(moved[0]?.rect.w).toBeCloseTo(0.6);
+    expect(activeTree(ws(), { tabId: 't2', tree })?.ratio).toBe(0.6);
+    const other = placedPanes(ws(), { tabId: 't1', tree });
+    expect(other[0]?.rect).toEqual({ x: 0, y: 0, w: 0.25, h: 1 });
+    expect(activeTree(ws(), null)?.ratio).toBe(0.25);
+    expect(activeTree(null)).toBeUndefined();
   });
 
   it('is empty when the active tab is unknown or has no panes', () => {

@@ -1,14 +1,27 @@
+import { nextTabColor, quickSplit } from './actions';
+import { pickActive, unseenToClear } from './activepane';
 import { AgentStatePoller } from './agentstate';
 import { bannerFor, type BannerState, isLoginRequired } from './banner';
 import { type AttachSizes, type Clock, Connection, type SocketLike } from './connection';
 import { type QuilTestHook, shouldRegisterE2EHook } from './e2ehook';
 import { type FetchLike, hasSession, postLogin, sessionGone } from './login';
-import type { Message, PaneInfo, PaneSize, WebWelcome, WorkspaceState } from './protocol';
+import { PasteFlow } from './paste';
+import type { Message, PaneInfo, PaneSize, SplitPaneReq, WebWelcome, WorkspaceState } from './protocol';
+import { type Outcome, Requests, STILL_WORKING } from './requests';
 import { cellFromProbe, DaemonSizes, fitFontSize, gridFor, isFollower, Sizer, windowCells } from './sizing';
+import { SplitDrag } from './splitbars';
 import { StateRev } from './staterev';
 import { LOGIN_KEY, routedStorage, SafeStorage } from './storage';
 import { TerminalStore } from './terminals';
-import { activeProjectOf, activeTabOf, parseWorkspaceState, placedPanes, sidebarModel, tabBarModel } from './view';
+import {
+  activeProjectOf,
+  activeTabOf,
+  type LayoutPreview,
+  parseWorkspaceState,
+  placedPanes,
+  sidebarModel,
+  tabBarModel,
+} from './view';
 import { BASE_FONT, createXtermPane, FONT_FAMILY, type XtermPane } from './xterm';
 
 // How often, and how many times, layout retries measuring a cell from a drawn
@@ -68,6 +81,11 @@ export type View = 'checking' | 'login' | 'workspace';
 // The page always shows the daemon's active tab: a click sends switch_tab or
 // switch_project and the view changes when the daemon's next state says so.
 // A read-only tab sends nothing at all: no input, no resize, no switch.
+//
+// Editing (5b) sends id-bearing requests through Requests and shows nothing
+// optimistically: a refusal shows a notice, and success shows when the
+// daemon's next state does. Every editing control renders only while
+// editable (full or standard rights and a live state on this socket).
 export class App {
   view = $state<View>('checking');
   welcome = $state.raw<WebWelcome | null>(null);
@@ -75,12 +93,28 @@ export class App {
   agentStates = $state.raw<Record<string, string>>({});
   banner = $state.raw<BannerState | null>(null);
   readOnly = $state(false);
+  // A short message about an edit that did not happen (or a paste that
+  // stopped); it clears itself.
+  notice = $state.raw<string | null>(null);
+  // The pane this browser tab treats as active: the daemon has no such
+  // notion per client, so it is the page's own choice.
+  activePane = $state('');
+  dragPreview = $state.raw<LayoutPreview | null>(null);
+  // A workspace_state has been applied on the current socket.
+  live = $state(false);
+  // Ask dialogs live on the App, not in the component, so the pane menu and
+  // a key (Task 8) open the SAME dialog. At most one of each is open.
+  paneAsk = $state.raw<{ kind: 'rename' | 'close'; paneId: string } | null>(null);
+  tabAsk = $state.raw<{ kind: 'rename' | 'close'; tabId: string } | null>(null);
   activeTabId = $derived(activeTabOf(this.state));
   activeProjectId = $derived(activeProjectOf(this.state));
   sidebar = $derived(sidebarModel(this.state, this.agentStates));
   tabBar = $derived(tabBarModel(this.state, this.agentStates));
-  placed = $derived(placedPanes(this.state));
+  placed = $derived(placedPanes(this.state, this.dragPreview));
   isMaster = $derived(this.welcome !== null && this.state?.size_master === this.welcome.client_id);
+  editable = $derived(!this.readOnly && this.live);
+  readonly requests: Requests;
+  readonly drag: SplitDrag;
 
   // One storage for the login form and the connection: the key one writes is
   // the key the other sends.
@@ -118,6 +152,13 @@ export class App {
   private layoutTimer: number | undefined;
   private retryTimer: number | undefined;
   private unwatch: (() => void) | undefined;
+  private readonly pasteFlow: PasteFlow;
+  // Panes this tab has asked the daemon to clear the unseen mark of; a pane
+  // leaves the set when a state shows its mark gone.
+  private readonly unseenAsked = new Set<string>();
+  // The last output generation seen per pane: a higher one is a restart.
+  private readonly gens = new Map<string, bigint>();
+  private noticeTimer: number | undefined;
 
   constructor() {
     const send = (m: Message): void => this.conn.send(m);
@@ -140,19 +181,42 @@ export class App {
       {
         onWelcome: (w) => this.onWelcome(w),
         onMessage: (m) => this.onMessage(m),
-        onOutput: (f) => this.terminals.output(f),
+        onOutput: (f) => {
+          const last = this.gens.get(f.paneId);
+          if (f.generation !== 0n) {
+            if (last !== undefined && last !== 0n && f.generation > last) this.pasteFlow.paneRestarted(f.paneId);
+            this.gens.set(f.paneId, f.generation);
+          }
+          this.terminals.output(f);
+        },
         onReconnecting: () => this.resetLink(),
         onClosed: (code, reason, retrying) => this.onClosed(code, reason, retrying),
+        onAttached: () => this.attached(),
       },
       () => this.attachSizes(),
       Math.random,
       () => sessionGone(this.fetchFn),
     );
+    this.requests = new Requests((m) => this.conn.trySend(m), browserClock);
+    this.drag = new SplitDrag(browserClock, (tabId, layout, baseRev) =>
+      this.requests.request('update_layout', { tab_id: tabId, layout, base_rev: baseRev }, { quietMs: 2000 }),
+    );
+    this.drag.onChange = () => {
+      this.dragPreview = this.drag.preview;
+    };
+    this.pasteFlow = new PasteFlow({
+      sendChunk: (paneId, b64) => this.requests.request('pane_input', { pane_id: paneId, data: b64 }),
+      sendKeys: (paneId, data) => this.conn.sendInput(paneId, data),
+      notice: (t) => this.showNotice(t),
+      sleep: (ms) => new Promise((r) => window.setTimeout(r, ms)),
+    });
     if (shouldRegisterE2EHook(import.meta.env)) {
       const hook: QuilTestHook = {
         bufferText: (id) => this.xterms.get(id)?.text() ?? '',
         screenLine: (id, row) => this.xterms.get(id)?.screenLine(row) ?? '',
         clientId: () => this.welcome?.client_id ?? '',
+        paste: (id, text) => this.paste(id, text),
+        activePane: () => this.activePane,
       };
       (window as unknown as { __quilTest?: QuilTestHook }).__quilTest = hook;
     }
@@ -209,9 +273,11 @@ export class App {
     this.conn.send({ type: 'take_control' });
   }
 
+  // input goes through the paste flow: typed input goes out at once, unless
+  // a paste is running, which it waits behind.
   input(paneId: string, s: string): void {
     if (this.readOnly) return;
-    this.conn.sendInput(paneId, s);
+    this.pasteFlow.input(paneId, s);
   }
 
   // paneShown puts the pane's terminal into el. A read-only tab attaches no
@@ -220,6 +286,7 @@ export class App {
     const x = this.xterms.get(paneId);
     if (!x) return;
     x.attach(el);
+    x.onFocus(() => this.setActivePane(paneId));
     if (!this.readOnly) x.onData((d) => this.input(paneId, d));
     this.shown.set(paneId, { el, w: 0, h: 0 });
     if (this.focusPending === paneId) {
@@ -264,6 +331,7 @@ export class App {
   }
 
   private onMessage(m: Message): void {
+    if (this.requests.answer(m)) return;
     switch (m.type) {
       case 'workspace_state':
         this.applyState(m.payload);
@@ -325,6 +393,13 @@ export class App {
     this.terminals.stateApplied(verdict === 'apply-new-run');
     this.fresh = true;
     this.state = s;
+    this.live = true;
+    for (const t of s.tabs) this.drag.stateArrived(t.id, t.layout_rev);
+    this.activePane = pickActive(this.activePane, placedPanes(s).map((p) => p.id));
+    for (const id of [...this.unseenAsked]) {
+      if (!s.panes.find((p) => p.id === id)?.unseen) this.unseenAsked.delete(id);
+    }
+    this.clearUnseen();
     this.applyDaemonGrids();
     // A pane that this state does not place (an overlay, another tab) will
     // not be shown, so a focus waiting for it is dropped.
@@ -362,6 +437,18 @@ export class App {
     this.poller.stop();
     this.laidOut.clear();
     this.fresh = false;
+    this.linkLost();
+  }
+
+  // linkLost ends everything that belongs to the socket that went away: its
+  // requests, a running paste, a border drag, and the editing controls until
+  // the next socket's first state.
+  private linkLost(): void {
+    this.live = false;
+    this.requests.reconnecting();
+    this.pasteFlow.reconnecting();
+    this.drag.linkLost();
+    this.gens.clear();
   }
 
   private onClosed(code: number, reason: string, retrying: boolean): void {
@@ -374,9 +461,125 @@ export class App {
       this.view = 'login';
       return;
     }
-    if (!retrying) this.poller.stop();
+    if (!retrying) {
+      this.poller.stop();
+      this.linkLost();
+    }
     this.banner = bannerFor(code, reason, retrying);
   }
+
+  showNotice(text: string): void {
+    this.notice = text;
+    if (this.noticeTimer !== undefined) window.clearTimeout(this.noticeTimer);
+    this.noticeTimer = window.setTimeout(() => {
+      this.notice = null;
+      this.noticeTimer = undefined;
+    }, 6000);
+  }
+
+  // act sends an id-bearing request and shows the refusal; no optimistic UI.
+  private async act(type: string, payload: unknown, timeoutText?: string): Promise<Outcome> {
+    if (!this.editable) return { ok: false, code: 'offline', error: 'not available' };
+    const out = await this.requests.request(type, payload, { timeoutText });
+    if (!out.ok) this.showNotice(out.error);
+    return out;
+  }
+
+  setActivePane(paneId: string): void {
+    this.activePane = paneId;
+    this.clearUnseen();
+  }
+
+  private clearUnseen(): void {
+    const s = this.state;
+    if (!s || !this.editable) return;
+    const id = unseenToClear(s, this.activePane, this.unseenAsked);
+    if (!id) return;
+    this.unseenAsked.add(id);
+    void this.requests.request('update_pane', { pane_id: id, unseen: false });
+  }
+
+  // sendSplit sends split_pane_req and makes the answered pane active. A
+  // worktree create answers preparing with its placeholder; the final pane
+  // replaces it in a later state.
+  async sendSplit(req: SplitPaneReq): Promise<Outcome> {
+    const out = await this.act('split_pane_req', req, STILL_WORKING);
+    const id = (out.ok ? (out.reply?.payload as { pane_id?: string } | undefined)?.pane_id : undefined) ?? '';
+    if (id) {
+      this.activePane = id;
+      this.focus(id);
+    }
+    return out;
+  }
+
+  splitQuick(paneId: string, placement: 'right' | 'below'): void {
+    if (this.state) void this.sendSplit(quickSplit(this.state, paneId, placement));
+  }
+
+  closePane(paneId: string, removeWorktree: boolean): void {
+    void this.act('destroy_pane_req', { pane_id: paneId, remove_worktree: removeWorktree });
+  }
+
+  renamePane(paneId: string, name: string): void {
+    void this.act('update_pane', { pane_id: paneId, name });
+  }
+
+  setMuted(paneId: string, muted: boolean): void {
+    void this.act('update_pane', { pane_id: paneId, muted });
+  }
+
+  restartPane(paneId: string): void {
+    void this.act('restart_pane_req', { pane_id: paneId });
+  }
+
+  movePane(paneId: string, tabId: string): void {
+    void this.act('move_pane', { pane_id: paneId, tab_id: tabId });
+  }
+
+  renameTab(tabId: string, name: string): void {
+    void this.act('update_tab', { tab_id: tabId, name });
+  }
+
+  closeTab(tabId: string): void {
+    void this.act('destroy_tab', { tab_id: tabId });
+  }
+
+  // An empty colour is the default: update_tab says so with clear_color,
+  // since an empty color field means "no change".
+  setTabColor(tabId: string, color: string): void {
+    void this.act('update_tab', color === '' ? { tab_id: tabId, clear_color: true } : { tab_id: tabId, color });
+  }
+
+  paste(paneId: string, text: string): void {
+    if (this.editable) this.pasteFlow.input(paneId, text);
+  }
+
+  askClosePane(paneId: string): void {
+    if (this.editable) this.paneAsk = { kind: 'close', paneId };
+  }
+
+  startRenamePane(paneId: string): void {
+    if (this.editable) this.paneAsk = { kind: 'rename', paneId };
+  }
+
+  askCloseTab(tabId: string): void {
+    if (this.editable) this.tabAsk = { kind: 'close', tabId };
+  }
+
+  startRenameTab(tabId: string): void {
+    if (this.editable) this.tabAsk = { kind: 'rename', tabId };
+  }
+
+  // cycleTabColor moves the tab to the next TAB_COLORS entry (wrapping to
+  // "none"), as the TUI's tab-color key does.
+  cycleTabColor(tabId: string): void {
+    this.setTabColor(tabId, nextTabColor(this.state?.tabs.find((t) => t.id === tabId)?.color ?? ''));
+  }
+
+  // attached runs once per (re)attach, after the attach's own state is
+  // applied (ConnectionEvents.onAttached). Task 8 adds the notification
+  // store's rebuild as its body.
+  private attached(): void {}
 
   private focus(paneId: string): void {
     const x = this.shown.has(paneId) ? this.xterms.get(paneId) : undefined;

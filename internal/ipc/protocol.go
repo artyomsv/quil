@@ -577,6 +577,11 @@ type PaneInputRespPayload struct {
 	Error     string `json:"error,omitempty"`
 }
 
+// PaneInputQueueFull is the pane_input_resp error for a full input queue. The
+// browser's paste flow waits and resends on exactly this text and stops on
+// every other one (web/src/lib/paste.ts, QUEUE_FULL_PREFIX).
+const PaneInputQueueFull = "pane input queue is full — its child has stopped reading stdin"
+
 type PaneOutputPayload struct {
 	PaneID string `json:"pane_id"`
 	Data   []byte `json:"data"`

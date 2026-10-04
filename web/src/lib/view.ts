@@ -13,6 +13,8 @@ export interface PaneDot {
 export interface TabItem {
   id: string;
   name: string;
+  // The daemon's colour value (TAB_COLORS in actions.ts); '' is the default.
+  color: string;
   active: boolean;
   dots: PaneDot[];
 }
@@ -29,6 +31,15 @@ export interface PlacedPane {
   name: string;
   rect: Rect;
   spawnError: string;
+  muted: boolean;
+  worktreeOwned: boolean;
+}
+
+// A border drag's tree, drawn for its tab in place of the stored one until
+// the daemon confirms or refuses it.
+export interface LayoutPreview {
+  tabId: string;
+  tree: SerializedNode;
 }
 
 const isObject = (v: unknown): v is Record<string, unknown> =>
@@ -61,6 +72,7 @@ export function parseWorkspaceState(p: unknown): WorkspaceState | null {
     tabs: tabs.map((t) => ({
       ...t,
       name: str(t.name),
+      color: str(t.color),
       panes: strings(t.panes),
       project_id: str(t.project_id),
       layout: isObject(t.layout) ? (t.layout as SerializedNode) : undefined,
@@ -102,7 +114,7 @@ function tabItem(s: WorkspaceState, tab: TabState, panes: Map<string, PaneState>
     if (!p || p.overlay) continue;
     dots.push({ id, name: paneName(p), state: dotOf(agents[id]) });
   }
-  return { id: tab.id, name: sanitizeRemoteText(tab.name), active: tab.id === s.active_tab, dots };
+  return { id: tab.id, name: sanitizeRemoteText(tab.name), color: tab.color, active: tab.id === s.active_tab, dots };
 }
 
 // sidebarModel lists the projects in the daemon's order, each with its tabs
@@ -136,24 +148,50 @@ export function tabBarModel(s: WorkspaceState | null, agents: Record<string, str
   return sidebarModel(s, agents).find((p) => p.id === pid)?.tabs ?? [];
 }
 
-// placedPanes is the active tab's panes where the layout puts them, overlay
-// panes left out.
-export function placedPanes(s: WorkspaceState | null): PlacedPane[] {
-  if (!s) return [];
+// activeTab is the active tab with its non-overlay panes, and the tree to
+// draw for it: preview's tree when preview is for that tab, else the stored
+// tree as displayLayout completes it.
+function activeTab(
+  s: WorkspaceState,
+  preview: LayoutPreview | null | undefined,
+): { panes: Map<string, PaneState>; ids: string[]; tree: SerializedNode | undefined } | null {
   const tab = s.tabs.find((t) => t.id === s.active_tab);
-  if (!tab) return [];
+  if (!tab) return null;
   const panes = new Map(s.panes.map((p) => [p.id, p]));
   const ids = tab.panes.filter((id) => {
     const p = panes.get(id);
     return p !== undefined && !p.overlay;
   });
-  const rects = paneRects(displayLayout(tab.layout, ids, tab.template_layout ?? '', tab.template_main ?? ''));
+  const stored = preview?.tabId === tab.id ? preview.tree : tab.layout;
+  return { panes, ids, tree: displayLayout(stored, ids, tab.template_layout ?? '', tab.template_main ?? '') };
+}
+
+// activeTree is the tree drawn for the active tab (the split bars sit on it).
+export function activeTree(s: WorkspaceState | null, preview?: LayoutPreview | null): SerializedNode | undefined {
+  return s ? activeTab(s, preview)?.tree : undefined;
+}
+
+// placedPanes is the active tab's panes where the layout puts them, overlay
+// panes left out. A preview for the active tab is drawn in place of its
+// stored tree.
+export function placedPanes(s: WorkspaceState | null, preview?: LayoutPreview | null): PlacedPane[] {
+  if (!s) return [];
+  const at = activeTab(s, preview);
+  if (!at) return [];
+  const rects = paneRects(at.tree);
   const out: PlacedPane[] = [];
-  for (const id of ids) {
+  for (const id of at.ids) {
     const rect = rects.get(id);
-    const p = panes.get(id);
+    const p = at.panes.get(id);
     if (!rect || !p) continue;
-    out.push({ id, name: paneName(p), rect, spawnError: sanitizeRemoteText(p.spawn_error ?? '') });
+    out.push({
+      id,
+      name: paneName(p),
+      rect,
+      spawnError: sanitizeRemoteText(p.spawn_error ?? ''),
+      muted: p.muted === true,
+      worktreeOwned: p.worktree_owned === true,
+    });
   }
   return out;
 }

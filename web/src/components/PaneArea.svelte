@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { App } from '../lib/app.svelte';
   import PaneView from './PaneView.svelte';
+  import SplitBars from './SplitBars.svelte';
 
   interface Props {
     app: App;
@@ -26,7 +27,14 @@
 <div class="area" bind:this={area}>
   {#each app.placed as p (p.id)}
     <div class="slot" style:left={pct(p.rect.x)} style:top={pct(p.rect.y)} style:width={pct(p.rect.w)} style:height={pct(p.rect.h)}>
-      <PaneView {app} paneId={p.id} name={p.name} spawnError={p.spawnError} />
+      <PaneView
+        {app}
+        paneId={p.id}
+        name={p.name}
+        spawnError={p.spawnError}
+        muted={p.muted}
+        worktreeOwned={p.worktreeOwned}
+      />
     </div>
   {:else}
     {#if app.state}
@@ -35,6 +43,7 @@
       <p class="empty">Connecting…</p>
     {/if}
   {/each}
+  <SplitBars {app} {area} />
 </div>
 
 <style>

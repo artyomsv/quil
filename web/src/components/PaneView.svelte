@@ -1,15 +1,33 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import type { App } from '../lib/app.svelte';
+  import type { MenuItem } from '../lib/menu';
+  import Confirm from './Confirm.svelte';
+  import Menu from './Menu.svelte';
+  import Prompt from './Prompt.svelte';
 
   interface Props {
     app: App;
     paneId: string;
     name: string;
     spawnError: string;
+    muted: boolean;
+    worktreeOwned: boolean;
   }
 
-  let { app, paneId, name, spawnError }: Props = $props();
+  let { app, paneId, name, spawnError, muted, worktreeOwned }: Props = $props();
+  const items: MenuItem[] = $derived([
+    { label: 'Split right', run: () => app.splitQuick(paneId, 'right') },
+    { label: 'Split below', run: () => app.splitQuick(paneId, 'below') },
+    { label: 'Rename…', run: () => app.startRenamePane(paneId) },
+    { label: muted ? 'Unmute' : 'Mute', run: () => app.setMuted(paneId, !muted) },
+    { label: 'Restart', run: () => app.restartPane(paneId) },
+    ...app.tabBar
+      .filter((t) => !t.active)
+      .map((t) => ({ label: `Move to ${t.name || '—'}`, run: () => app.movePane(paneId, t.id) })),
+    { label: 'Close…', run: () => app.askClosePane(paneId) },
+  ]);
+  const ask = $derived(app.paneAsk?.paneId === paneId ? app.paneAsk.kind : null);
   let host: HTMLDivElement | undefined = $state();
   // Every workspace_state hands the pane new prop objects with the same
   // values. The effect reads these deriveds, which change only with the
@@ -37,14 +55,44 @@
   });
 </script>
 
-<div class="pane">
-  <div class="title">{name}</div>
+<!-- Focus anywhere in the pane (its terminal, its menu) makes it this tab's
+     active pane. -->
+<div class="pane" class:active={app.activePane === paneId} onfocusin={() => app.setActivePane(paneId)}>
+  <div class="title">
+    <span class="name">{name}</span>
+    {#if muted}<span class="mark" title="Muted">muted</span>{/if}
+    {#if app.editable}<Menu label="Pane menu" {items} />{/if}
+  </div>
   {#if spawnError}
     <p class="error">{spawnError}</p>
   {:else}
     <div class="term" bind:this={host}></div>
   {/if}
 </div>
+{#if ask === 'rename'}
+  <Prompt
+    title="Rename pane"
+    value={name}
+    submitLabel="Rename"
+    onsubmit={(v) => {
+      app.paneAsk = null;
+      app.renamePane(paneId, v);
+    }}
+    oncancel={() => (app.paneAsk = null)}
+  />
+{:else if ask === 'close'}
+  <Confirm
+    title="Close pane"
+    body={`Close ${name}?`}
+    confirmLabel="Close"
+    checkLabel={worktreeOwned ? 'Also remove its worktree' : undefined}
+    onconfirm={(rm) => {
+      app.paneAsk = null;
+      app.closePane(paneId, rm);
+    }}
+    oncancel={() => (app.paneAsk = null)}
+  />
+{/if}
 
 <style>
   .pane {
@@ -56,15 +104,32 @@
     background: #000;
   }
 
+  .pane.active {
+    border-color: #3d6fd8;
+  }
+
   .title {
     flex: none;
+    display: flex;
+    align-items: center;
+    gap: 6px;
     padding: 1px 6px;
     background: #1b1e26;
     color: #9aa0ad;
     font-size: 12px;
+  }
+
+  .name {
+    flex: 1;
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .mark {
+    flex: none;
+    color: #5c6170;
   }
 
   .term {

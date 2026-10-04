@@ -3740,7 +3740,7 @@ func (d *Daemon) paneInputOutcome(payload ipc.PaneInputPayload) ipc.PaneInputRes
 	// EnqueueInput hands the data to the pane's own writer goroutine.
 	if !pane.EnqueueInput(payload.Data) {
 		d.notifyInputBlocked(pane)
-		return refuse("pane input queue is full — its child has stopped reading stdin")
+		return refuse("%s", ipc.PaneInputQueueFull)
 	}
 	// Delivered means QUEUED, which is as far as any caller can be told
 	// synchronously — the writer goroutine owns the PTY write precisely so a

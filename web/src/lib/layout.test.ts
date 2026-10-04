@@ -27,6 +27,13 @@ describe('displayLayout matches the Go DisplayLayout vectors', () => {
   }
 });
 
+describe('displayLayout with every stored pane gone', () => {
+  it('starts over from the listed pane', () => {
+    const stored: SerializedNode = { split: 0, ratio: 0.5, left: { pane_id: 'a' }, right: { pane_id: 'b' } };
+    expect(displayLayout(stored, ['c'], '', '')).toEqual({ pane_id: 'c' });
+  });
+});
+
 describe('displayLayout split normalisation', () => {
   it('gives an inner node with no split the side-by-side default', () => {
     const got = displayLayout({ ratio: 0.5, left: { pane_id: 'a' }, right: { pane_id: 'b' } }, ['a', 'b'], '', '');

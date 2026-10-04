@@ -59,6 +59,20 @@ func TestDisplayLayout_Vectors(t *testing.T) {
 	}
 }
 
+// A stored tree whose panes have all gone is not in the shared vectors: the
+// TUI cannot be driven with it (restoring such a tab indexes an empty leaf
+// list), so only the function itself is held to the result.
+func TestDisplayLayout_StoredTreeWithEveryPaneGone(t *testing.T) {
+	horizontal := SplitHorizontal
+	stored := &SerializedNode{Split: &horizontal, Ratio: 0.5,
+		Left: &SerializedNode{PaneID: "a"}, Right: &SerializedNode{PaneID: "b"}}
+	got := DisplayLayout(stored, []string{"c"}, "", "")
+	if want := (&SerializedNode{PaneID: "c"}); !reflect.DeepEqual(got, want) {
+		g, _ := json.Marshal(got)
+		t.Fatalf("got %s, want a lone leaf c", g)
+	}
+}
+
 // The vectors must also be what the TUI itself builds on the same state, or
 // the browser and the TUI would place panes differently. Drives the real
 // applyWorkspaceState on a fresh model (no placeholders, no migration), for

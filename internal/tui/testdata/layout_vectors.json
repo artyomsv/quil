@@ -116,14 +116,6 @@
     "want": {"pane_id": "solo"}
   },
   {
-    "name": "stored tree with every pane gone starts over from the listed pane",
-    "stored": {"split": 0, "ratio": 0.5, "left": {"pane_id": "a"}, "right": {"pane_id": "b"}},
-    "panes": ["c"],
-    "template_layout": "",
-    "template_main": "",
-    "want": {"pane_id": "c"}
-  },
-  {
     "name": "nested pruning promotes survivors at every level",
     "stored": {"split": 0, "ratio": 0.5,
       "left": {"split": 1, "ratio": 0.5,

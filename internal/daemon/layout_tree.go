@@ -153,6 +153,25 @@ func (sm *SessionManager) insertPaneLocked(tab *Tab, paneID, target string, dir 
 	return true
 }
 
+// revalidateRestoredLayout runs a restored tab's stored tree through the same
+// validation as SetTabLayout, once its panes are in the session. A
+// workspace.json written by an older daemon stored whatever a client sent, and
+// restore itself skips a pane id it cannot accept, so the file can name a pane
+// that is not live; without this the first broadcast would carry it (AC-7).
+// A valid tree keeps its bytes. LayoutRev is left as restored: every client
+// adopts the first broadcast after a reattach whatever its revision.
+func (sm *SessionManager) revalidateRestoredLayout(tabID string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	tab, ok := sm.tabs[tabID]
+	if !ok || len(tab.Layout) == 0 {
+		// No tree: a template tab still waiting for its first one must stay
+		// without, and an ordinary tab gets its tree from the next write.
+		return
+	}
+	tab.Layout = sm.validLayoutLocked(tab, tab.Layout)
+}
+
 // validLayoutLocked is what SetTabLayout stores for a client's tree: the
 // client's own bytes when the tree is already valid — so the TUI's echo
 // detection, which compares against what it sent, still recognises its write

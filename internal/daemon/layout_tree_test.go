@@ -2,9 +2,11 @@ package daemon
 
 import (
 	"encoding/json"
+	"os"
 	"reflect"
 	"testing"
 
+	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/layouttree"
 )
@@ -312,9 +314,9 @@ func TestSetTabLayout_MalformedShapesAreRepaired(t *testing.T) {
 	}
 }
 
-// AC-7 after snapshot/restore: a dead leaf a write carried never reaches the
-// workspace file.
-func TestSetTabLayout_DeadLeafNotRestored(t *testing.T) {
+// AC-7 across snapshot/restore: a dead leaf a write carried is dropped before
+// the snapshot, so it never reaches the workspace file and cannot come back.
+func TestSetTabLayout_DeadLeafNeverReachesTheWorkspaceFile(t *testing.T) {
 	dir := t.TempDir()
 	d := newTestDaemonInDir(t, dir)
 	tab, id := ltTabWith(t, d, 2)
@@ -332,6 +334,87 @@ func TestSetTabLayout_DeadLeafNotRestored(t *testing.T) {
 			t.Fatal("the restored tree names a pane that was never live")
 		}
 	}
+}
+
+// AC-7 for a workspace.json this daemon did not validate (an older daemon
+// stored writes unchecked, and restore skips a pane id it cannot accept): the
+// restored tree loses every leaf that is not a live pane before anything is
+// broadcast or snapshotted, keeps the rest of its shape, and keeps its
+// revision. A tab whose file tree is already valid keeps its bytes.
+func TestRestoreWorkspace_PrunesDeadAndSkippedLeaves(t *testing.T) {
+	dir := t.TempDir()
+	d := newTestDaemonInDir(t, dir)
+	bad, b := ltTabWith(t, d, 2)
+	good, g := ltTabWith(t, d, 2)
+	ltStore(t, d, bad.ID, ltSplit(layouttree.Horizontal, 0.3, ltLeaf(b[0]), ltLeaf(b[1])))
+	goodTree := ltSplit(layouttree.Vertical, 0.6, ltLeaf(g[0]), ltLeaf(g[1]))
+	ltStore(t, d, good.ID, goodTree)
+	d.snapshot()
+
+	// Rewrite the file as an older daemon could have left it: the bad tab's
+	// tree names a pane that is not live and one whose id restore skips, and
+	// its pane list carries the skipped id too.
+	const dead, skipped = "pane-dead0001", "pane-NOTHEX!"
+	path := config.WorkspacePath()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ws map[string]any
+	if err := json.Unmarshal(raw, &ws); err != nil {
+		t.Fatal(err)
+	}
+	var fileTree map[string]any
+	if err := json.Unmarshal(ltRaw(t, ltSplit(layouttree.Horizontal, 0.3, ltLeaf(b[0]),
+		ltSplit(layouttree.Vertical, 0.5, ltLeaf(b[1]),
+			ltSplit(layouttree.Horizontal, 0.5, ltLeaf(dead), ltLeaf(skipped))))), &fileTree); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, tb := range ws["tabs"].([]any) {
+		tm := tb.(map[string]any)
+		if tm["id"] == bad.ID {
+			tm["layout"] = fileTree
+			tm["panes"] = append(tm["panes"].([]any), skipped)
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("tab %s missing from workspace.json", bad.ID)
+	}
+	out, err := json.Marshal(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, out, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	d2 := newTestDaemonInDir(t, dir)
+	if err := d2.restoreWorkspace(); err != nil {
+		t.Fatalf("restoreWorkspace: %v", err)
+	}
+
+	// The broadcast is what clients adopt; the snapshot is what the next
+	// restart reads. Both come from the same stored tree.
+	var got json.RawMessage
+	for _, tb := range d2.buildWorkspaceState().Tabs {
+		if tb.ID == bad.ID {
+			got = tb.Layout
+		}
+	}
+	tree, err := layouttree.Parse(got)
+	if err != nil {
+		t.Fatalf("broadcast layout does not parse: %v (%s)", err, got)
+	}
+	want := ltSplit(layouttree.Horizontal, 0.3, ltLeaf(b[0]), ltLeaf(b[1]))
+	if !reflect.DeepEqual(tree, want) {
+		g, _ := json.Marshal(tree)
+		w, _ := json.Marshal(want)
+		t.Errorf("broadcast tree = %s, want %s", g, w)
+	}
+	ltWant(t, d2, bad.ID, want, 1)
+	ltWant(t, d2, good.ID, goodTree, 1)
 }
 
 func TestInsertPaneLocked_SplitsTheTargetInTheNormalizedTree(t *testing.T) {

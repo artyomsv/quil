@@ -298,15 +298,17 @@ func (m *Model) adoptTabLayout(tab *TabModel, stored *SerializedNode, paneSet ma
 
 	// Replace already done: the pane the reservation stands in for is gone
 	// from both the broadcast and the stored tree, and the stored tree holds
-	// exactly one pane the previous tree did not — the daemon substituted it
-	// into the old leaf. Re-seating would leave a blank slot beside it (and,
-	// for a worktree, a spinner until the create timeout restored the old pane).
+	// exactly one FRESH pane — one no tab here had a model for, which is what
+	// the replacing pane always is — so the daemon substituted it into the old
+	// leaf. A pane that moved in (reused from another tab) never counts, nor
+	// does anything when two fresh panes arrive at once: which one replaced is
+	// then unknowable, and the reservation is re-seated as before. Re-seating
+	// a done replace would leave a blank slot beside it (and, for a worktree, a
+	// spinner until the create timeout restored the old pane).
 	if ph != nil && tab.reserveReplace && tab.reserveSibling != "" &&
-		!paneSet[tab.reserveSibling] && !storedIDs[tab.reserveSibling] {
-		if id := soleNewID(storedIDs, prev); id != "" {
-			m.fillDaemonReplace(tab, id)
-			ph = nil
-		}
+		!paneSet[tab.reserveSibling] && !storedIDs[tab.reserveSibling] && len(created) == 1 {
+		m.fillDaemonReplace(tab, created[0])
+		ph = nil
 	}
 
 	// The stored tree names the pane a REPLACE reservation stands in for;
@@ -337,22 +339,6 @@ func (m *Model) adoptTabLayout(tab *TabModel, stored *SerializedNode, paneSet ma
 		reseated = true
 	}
 	return created, moved, send, reseated
-}
-
-// soleNewID is the one id in stored that prev lacks, or "" when there is none
-// or more than one.
-func soleNewID(stored, prev map[string]bool) string {
-	found := ""
-	for id := range stored {
-		if prev[id] {
-			continue
-		}
-		if found != "" {
-			return ""
-		}
-		found = id
-	}
-	return found
 }
 
 // fillDaemonReplace retires this client's REPLACE reservation because the

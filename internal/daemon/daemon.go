@@ -1197,6 +1197,10 @@ func (d *Daemon) restoreWorkspace() error {
 
 		// Insert tab and all its panes under a single lock hold
 		d.session.RestoreTab(tab, tabPanes)
+		// The file's tree may name a pane that is not live (an older daemon
+		// stored writes unchecked; a skipped id above): validate it now that
+		// the panes are attached.
+		d.session.revalidateRestoredLayout(tab.ID)
 		restoredPanes += len(tabPanes)
 	}
 

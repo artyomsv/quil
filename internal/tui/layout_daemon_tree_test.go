@@ -215,3 +215,99 @@ func TestDaemonTree_OwnCloseAdoptsWithoutSending(t *testing.T) {
 		t.Error("the close request was consumed by an adoption that needed no send")
 	}
 }
+
+// The replacing pane is always FRESH. A pane another client moved into the
+// same tab in the same broadcast is also new to this tree, but it reuses an
+// existing model and must not count against the fill.
+func TestDaemonTree_ReplaceFillIgnoresAPaneThatMovedIn(t *testing.T) {
+	m := newMovePaneModel(t, 120, 40)
+	m, _ = lsApply(t, m, dtState(t, "tab-tgt",
+		dtTab{"tab-src", []string{"p3", "p4"}, lsSplit(SplitHorizontal, 0.5, lsLeaf("p3"), lsLeaf("p4")), 1},
+		dtTab{"tab-tgt", []string{"p1", "p2"}, lsSplit(SplitHorizontal, 0.3, lsLeaf("p1"), lsLeaf("p2")), 1}))
+	mpTabOf(t, &m, "tab-tgt").ActivePane = "p2"
+	m = armOwnReplace(t, m)
+	movedModel := mpPane(t, mpTabOf(t, &m, "tab-src"), "p4")
+
+	// The daemon substituted p-new for p2, then placed the moved p4 by the
+	// spiral rule: one broadcast, two new leaves in the target.
+	want := lsSplit(SplitHorizontal, 0.3, lsLeaf("p1"), lsSplit(SplitVertical, 0.5, lsLeaf("p-new"), lsLeaf("p4")))
+	m, sent := lsApply(t, m, dtState(t, "tab-tgt",
+		dtTab{"tab-src", []string{"p3"}, lsLeaf("p3"), 2},
+		dtTab{"tab-tgt", []string{"p1", "p-new", "p4"}, want, 3}))
+
+	tgt := mpTabOf(t, &m, "tab-tgt")
+	if got := SerializeLayout(tgt.Root); !reflect.DeepEqual(got, want) {
+		t.Errorf("tree = %s, want %s", layoutString(got), layoutString(want))
+	}
+	if tgt.Root.HasPlaceholder() || m.pendingSplit["tab-tgt"] != nil || tgt.reserveReplace {
+		t.Error("the replace reservation was not filled — the moved pane counted as a candidate")
+	}
+	if mpPane(t, tgt, "p4") != movedModel {
+		t.Error("the moved pane got a new PaneModel")
+	}
+	if tgt.ActivePane != "p-new" {
+		t.Errorf("ActivePane = %q, want the replacing pane", tgt.ActivePane)
+	}
+	if len(sent) != 0 {
+		t.Errorf("sent %d update_layout frames, want 0", len(sent))
+	}
+}
+
+// Two fresh panes in one broadcast: which one replaced is unknowable, so the
+// reservation is not filled and stays armed in the tree, as before.
+func TestDaemonTree_TwoFreshPanesDoNotFillTheReplace(t *testing.T) {
+	m := newLayoutSyncModel(t)
+	m, _ = lsApply(t, m, lsState(1, lsWire(t, lsSplit(SplitHorizontal, 0.3, lsLeaf("p1"), lsLeaf("p2"))), "p1", "p2"))
+	lsTab(t, &m).ActivePane = "p2"
+	m = armOwnReplace(t, m)
+
+	m, _ = lsApply(t, m, lsState(2, lsWire(t, lsSplit(SplitHorizontal, 0.3, lsLeaf("p1"),
+		lsSplit(SplitVertical, 0.5, lsLeaf("p-new"), lsLeaf("p-mcp")))), "p1", "p-new", "p-mcp"))
+
+	tab := lsTab(t, &m)
+	ph := m.pendingSplit["t1"]
+	if ph == nil || !treeHoldsNode(tab.Root, ph) || !tab.reserveReplace {
+		t.Fatal("the reservation was retired although two fresh panes arrived")
+	}
+	ids := tab.Root.PaneIDs()
+	for _, id := range []string{"p1", "p-new", "p-mcp"} {
+		if !ids[id] {
+			t.Errorf("pane %s is missing from the adopted tree", id)
+		}
+	}
+}
+
+// The bystander exception holds for a daemon-placed move too: a client
+// sitting in the TARGET tab keeps its active pane and focus mode.
+func TestDaemonTree_MovedIntoTheActiveTabKeepsFocus(t *testing.T) {
+	m := newMovePaneModel(t, 120, 40)
+	m, _ = lsApply(t, m, dtState(t, "tab-tgt",
+		dtTab{"tab-src", []string{"p1", "p2"}, lsSplit(SplitHorizontal, 0.5, lsLeaf("p1"), lsLeaf("p2")), 1},
+		dtTab{"tab-tgt", []string{"p3", "p4"}, lsSplit(SplitHorizontal, 0.5, lsLeaf("p3"), lsLeaf("p4")), 1}))
+	moved := mpPane(t, mpTabOf(t, &m, "tab-src"), "p2")
+	tgt := mpTabOf(t, &m, "tab-tgt")
+	tgt.ActivePane = "p3"
+	tgt.ToggleFocus()
+	if !tgt.FocusMode() {
+		t.Fatal("setup: the target did not enter focus mode")
+	}
+
+	m, sent := lsApply(t, m, dtState(t, "tab-tgt",
+		dtTab{"tab-src", []string{"p1"}, lsLeaf("p1"), 2},
+		dtTab{"tab-tgt", []string{"p3", "p4", "p2"},
+			lsSplit(SplitHorizontal, 0.5, lsLeaf("p3"), lsSplit(SplitVertical, 0.5, lsLeaf("p4"), lsLeaf("p2"))), 2}))
+
+	tgt = mpTabOf(t, &m, "tab-tgt")
+	if got := mpTreeOf(t, &m, "tab-tgt"); got != "(p3|(p4/p2))" {
+		t.Errorf("target tree = %s, want the daemon's (p3|(p4/p2))", got)
+	}
+	if mpPane(t, tgt, "p2") != moved {
+		t.Error("the moved pane got a new PaneModel — its scrollback was lost")
+	}
+	if !tgt.FocusMode() || tgt.ActivePane != "p3" {
+		t.Errorf("focus=%v ActivePane=%q, want focus kept on p3 — the arrival stole the bystander's pane", tgt.FocusMode(), tgt.ActivePane)
+	}
+	if len(sent) != 0 {
+		t.Errorf("sent %d update_layout frames, want 0", len(sent))
+	}
+}

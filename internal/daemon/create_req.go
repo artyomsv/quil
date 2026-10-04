@@ -312,9 +312,53 @@ func (d *Daemon) createTabFromReq(conn *ipc.Conn, req ipc.CreateTabReqPayload) (
 	if req.ProjectID != "" && !d.projectExists(req.ProjectID) {
 		return ipc.CreateTabRespPayload{Error: "no such project: " + req.ProjectID}, nil
 	}
+	cwd, picked := d.newTabCWD(conn, req)
+	return d.createTabIn(conn, req, cwd, picked)
+}
+
+// newTabCWD resolves, ONCE, the directory a new tab's first pane opens in: the
+// requested one when it resolves, else the project root. The fallback has to
+// come from the project id rather than from the tab — there is no tab yet —
+// and an empty id means the active project, which is where
+// CreateTabInProject files it. picked says the requested directory was used,
+// which is what the recent-folder list records. Each resolve is a bounded
+// probe on the dispatch goroutine, so the project root is probed only when it
+// is needed.
+func (d *Daemon) newTabCWD(conn *ipc.Conn, req ipc.CreateTabReqPayload) (cwd string, picked bool) {
+	projectID := req.ProjectID
+	if projectID == "" {
+		projectID = d.session.ActiveProject()
+	}
+	requested := ""
+	if req.FirstPane != nil {
+		requested = req.FirstPane.CWD
+	}
+	if requested != "" {
+		if dir := resolveSpawnDirWithin(requested, spawnDirProbeTimeout); dir != "" {
+			return dir, true
+		}
+	}
+	fallback := d.projectCWD(conn, projectID)
+	if requested != "" {
+		log.Printf("spawn cwd: rejecting %q (missing, not a directory, or did not answer in time); using %q", requested, fallback)
+	}
+	return fallback, false
+}
+
+// createTabIn is createTabFromReq after the project check, with the first
+// pane's directory already resolved (newTabCWD), so a caller that needed the
+// directory first — split_pane_req checks a resume transcript in it — does
+// not pay a second filesystem probe for it.
+func (d *Daemon) createTabIn(conn *ipc.Conn, req ipc.CreateTabReqPayload, cwd string, picked bool) (ipc.CreateTabRespPayload, func()) {
 	first := ipc.CreatePaneReqPayload{}
 	if req.FirstPane != nil {
 		first = *req.FirstPane
+	}
+	// Already resolved: an empty CWD makes buildCreatePayload take cwd as
+	// given, without probing it again.
+	first.CWD = ""
+	if picked {
+		d.session.RecordRecentCWD(cwd)
 	}
 	name := req.Name
 	if name == "" {
@@ -326,15 +370,7 @@ func (d *Daemon) createTabFromReq(conn *ipc.Conn, req ipc.CreateTabReqPayload) (
 	// conflicting toggle pair or an unresolvable worktree root with a tab
 	// holding a fallback shell nobody asked for, reported through a response
 	// that still carried tab_id and therefore read as success at the tool.
-	//
-	// The fallback CWD is the project root, and it has to be resolved from the
-	// project id rather than from the tab: there is no tab yet. An empty id
-	// means the active project, which is where CreateTabInProject files it.
-	projectID := req.ProjectID
-	if projectID == "" {
-		projectID = d.session.ActiveProject()
-	}
-	payload, cwd, err := d.buildCreatePayload(first, "", d.projectCWD(conn, projectID))
+	payload, cwd, err := d.buildCreatePayload(first, "", cwd)
 	if err != nil {
 		return ipc.CreateTabRespPayload{Error: err.Error()}, nil
 	}

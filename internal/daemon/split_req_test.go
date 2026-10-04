@@ -541,8 +541,9 @@ func TestSplitPaneReq_BadSandboxCreatesNothingOnAnyArm(t *testing.T) {
 	} {
 		tabs, panes := len(d.session.Tabs()), len(d.buildPaneInfos())
 		resp := split(t, client, req)
-		if resp.Error == "" || resp.PaneID != "" || resp.Preparing {
-			t.Errorf("%s: resp = %+v, want a refusal", name, resp)
+		// The sandbox's own refusal, so an earlier unrelated one cannot pass.
+		if !strings.Contains(resp.Error, "invalid container image reference") || resp.PaneID != "" || resp.Preparing {
+			t.Errorf("%s: resp = %+v, want the sandbox refusal", name, resp)
 		}
 		if n := len(d.session.Tabs()); n != tabs {
 			t.Errorf("%s: tabs %d → %d", name, tabs, n)
@@ -755,6 +756,132 @@ func TestWorktreeCreates_AnswerPrecedesTheCheckoutsFrames(t *testing.T) {
 			}
 			time.Sleep(20 * time.Millisecond)
 		}
+	}
+}
+
+// The strict claim lost AFTER publish (M1), made deterministic: buildPane is
+// called directly, past checkResumeRequest, for a session a live pane holds.
+// The published pane is destroyed and a state frame without it goes out — a
+// client that saw it in an earlier frame must learn it is gone.
+func TestBuildPane_LostStrictClaimIsDestroyedAndBroadcast(t *testing.T) {
+	d, client := mcpTestDaemon(t)
+	tabID, first := seedTab(t, d, client)
+	prev := transcriptExistsFn
+	transcriptExistsFn = func(string) (bool, bool) { return true, true }
+	t.Cleanup(func() { transcriptExistsFn = prev })
+	const id = "0f3c2a9e-1b2c-4d5e-8f90-1a2b3c4d5e6f"
+	holder := split(t, client, ipc.SplitPaneReqPayload{TargetPaneID: first, Placement: ipc.PlacementRight,
+		Pane: ipc.SplitPaneSpec{Type: "claude-code", ResumeSessionID: id, CWD: t.TempDir()}})
+	if holder.PaneID == "" {
+		t.Fatalf("holder: %+v", holder)
+	}
+	// Ordered after every frame the holder's create sent.
+	roundTrip(t, client, ipc.MsgVersionReq, ipc.MsgVersionResp, struct{}{})
+	want := map[string]bool{}
+	for _, p := range d.session.Panes(tabID) {
+		want[p.ID] = true
+	}
+
+	pane, _, err := d.buildPane(ipc.CreatePanePayload{TabID: tabID, Type: "claude-code", ResumeSessionID: id}, t.TempDir(), "claude-code",
+		buildOpts{Slot: paneSlot{TabID: tabID, Split: true, TargetID: first, Dir: layouttree.Vertical}, StrictResume: true})
+	var taken *errResumeTaken
+	if pane != nil || !errors.As(err, &taken) || taken.holder != holder.PaneID {
+		t.Fatalf("buildPane = %v, %v; want a refusal naming %s", pane, err, holder.PaneID)
+	}
+	if n := len(d.session.Panes(tabID)); n != len(want) {
+		t.Fatalf("tab holds %d panes, want %d", n, len(want))
+	}
+	if err := client.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	defer client.SetReadDeadline(time.Time{})
+	for {
+		f, err := client.Receive()
+		if err != nil {
+			t.Fatalf("no state frame after the lost claim: %v", err)
+		}
+		if f.Type != ipc.MsgWorkspaceState {
+			continue
+		}
+		ws := decodeInto[ipc.WorkspaceState](t, f)
+		got := 0
+		for _, p := range ws.Panes {
+			if p.TabID != tabID {
+				continue
+			}
+			if !want[p.ID] {
+				t.Fatalf("the state frame still carries the destroyed pane %s", p.ID)
+			}
+			got++
+		}
+		if got != len(want) {
+			t.Fatalf("the state frame carries %d of the tab's %d panes", got, len(want))
+		}
+		return
+	}
+}
+
+// A worktree replace whose new pane fails to start after the swap: in a tab
+// it left empty, the recovery pane shows the reason and no worktree_failed
+// card repeats it; in a tab with other panes nothing shows it, so the card
+// is raised.
+func TestSplitPaneReq_WorktreeReplaceSpawnFailureIsToldOnce(t *testing.T) {
+	d, client := mcpTestDaemon(t)
+	lonelyTab, lonely := seedTab(t, d, client)
+	_, keep := seedTab(t, d, client)
+	crowded := split(t, client, ipc.SplitPaneReqPayload{TargetPaneID: keep, Placement: ipc.PlacementRight, Pane: ipc.SplitPaneSpec{CWD: t.TempDir()}}).PaneID
+	repo := worktreeRepo(t)
+	stubAdd(t, func(_ context.Context, _, path, _ string) error { return os.MkdirAll(path, 0o755) })
+	// A failed create abandons its checkout; nothing here is a real repository.
+	prevRm := removeWorktreeFn
+	removeWorktreeFn = func(context.Context, string, string, string) error { return nil }
+	t.Cleanup(func() { removeWorktreeFn = prevRm })
+	prev := newSessionFn
+	newSessionFn = func(cols, rows int) apty.Session { return &startFailSession{} }
+	t.Cleanup(func() { newSessionFn = prev })
+	failedFor := func(paneID string) bool {
+		for _, e := range d.events.Events() {
+			if e.Type == "worktree_failed" && e.PaneID == paneID {
+				return true
+			}
+		}
+		return false
+	}
+
+	resp := split(t, client, ipc.SplitPaneReqPayload{TargetPaneID: lonely, Placement: ipc.PlacementReplace,
+		Pane: ipc.SplitPaneSpec{CWD: repo, Worktree: &ipc.SplitWorktree{Branch: "feat/a"}}})
+	if !resp.Preparing {
+		t.Fatalf("lonely: %+v", resp)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		panes := d.session.Panes(lonelyTab)
+		if len(panes) == 1 && panes[0].ID != lonely && strings.Contains(spawnErrorOf(panes[0]), "spawn refused by the test") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the emptied tab got no recovery pane carrying the reason")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// The second replace queues behind the first's single-flight worktree
+	// slot and takes far longer than the first worker's last step, so by the
+	// time its card exists the first one would have too.
+	resp = split(t, client, ipc.SplitPaneReqPayload{TargetPaneID: crowded, Placement: ipc.PlacementReplace,
+		Pane: ipc.SplitPaneSpec{CWD: repo, Worktree: &ipc.SplitWorktree{Branch: "feat/b"}}})
+	if !resp.Preparing {
+		t.Fatalf("crowded: %+v", resp)
+	}
+	deadline = time.Now().Add(5 * time.Second)
+	for !failedFor(crowded) {
+		if time.Now().After(deadline) {
+			t.Fatal("a swap that left no pane showing the failure raised no worktree_failed card")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if failedFor(lonely) {
+		t.Fatal("worktree_failed repeated a failure the recovery pane already shows")
 	}
 }
 

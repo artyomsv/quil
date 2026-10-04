@@ -3276,12 +3276,16 @@ func (d *Daemon) replacePaneAt(payload ipc.CreatePanePayload, cwd, paneType stri
 		// rather than by ensureTabNotEmpty's replacement shell: a shell would
 		// be a live child underneath renderSpawnError's block, which is the
 		// hazard the restart guard exists to prevent, one path over.
-		d.recoverEmptyTab(payload.TabID, fmt.Sprintf("pane could not start: %v", err))
+		recovered := d.recoverEmptyTab(payload.TabID, fmt.Sprintf("pane could not start: %v", err))
 		d.broadcastState()
 		d.requestSnapshot()
 		// swapped=true: the old pane went with the swap above and is not coming
 		// back, even though this is an error.
-		return nil, true, fmt.Errorf("start PTY (dead pane removed): %w", err)
+		failed := fmt.Errorf("start PTY (dead pane removed): %w", err)
+		if recovered {
+			return nil, true, &tabRecoveredError{failed}
+		}
+		return nil, true, failed
 	}
 	d.broadcastState()
 	d.requestSnapshot()
@@ -3424,7 +3428,8 @@ func (d *Daemon) teardownAfterDestroy(paneID string, worktrees []string) {
 // terminal pane when a tab has no normal panes left. Shared by the TUI
 // destroy path (handleDestroyPane) and the MCP path (handleDestroyPaneReq).
 // recoverEmptyTab gives a tab that just lost its last pane one that explains
-// itself: no child process, the reason on screen, Alt+R to get a shell.
+// itself: no child process, the reason on screen, Alt+R to get a shell. It
+// reports whether it made that pane.
 //
 // A no-op when the tab still holds a pane — an ordinary split-replace keeps its
 // siblings, so only the single-pane case pays for this — and when the tab is
@@ -3436,9 +3441,9 @@ func (d *Daemon) teardownAfterDestroy(paneID string, worktrees []string) {
 // closed leaves a tab empty, and the wrong one here — the user asked for a
 // specific pane, it failed, and a shell that appears instead with no
 // explanation is the silent substitution this whole feature exists to remove.
-func (d *Daemon) recoverEmptyTab(tabID, reason string) {
+func (d *Daemon) recoverEmptyTab(tabID, reason string) bool {
 	if tabID == "" || d.session.Tab(tabID) == nil {
-		return
+		return false
 	}
 	// NORMAL panes only, the same split ensureTabNotEmpty makes twenty lines
 	// below and for the same reason. Counting everything let an open OVERLAY
@@ -3452,7 +3457,7 @@ func (d *Daemon) recoverEmptyTab(tabID, reason string) {
 		isOverlay := p.Overlay
 		p.PluginMu.Unlock()
 		if !isOverlay {
-			return
+			return false
 		}
 	}
 	// The overlay is left in place, UNLIKE ensureTabNotEmpty's orphan sweep:
@@ -3463,13 +3468,14 @@ func (d *Daemon) recoverEmptyTab(tabID, reason string) {
 	pane, err := d.session.CreatePane(tabID, d.defaultCWD(nil))
 	if err != nil {
 		log.Printf("tab %s: could not recover an empty tab: %v", tabID, err)
-		return
+		return false
 	}
 	pane.PluginMu.Lock()
 	pane.Type = "terminal"
 	pane.SpawnError = reason
 	pane.PluginMu.Unlock()
 	log.Printf("tab %s: recovered with an unspawned pane: %s", tabID, reason)
+	return true
 }
 
 // handleMovePane moves one pane into another tab on this daemon. It answers
@@ -3921,8 +3927,8 @@ func (d *Daemon) notifyPaneDestroyed(pane *Pane, by string) {
 //
 // Emitted only on the success path: a failed add already surfaces as SpawnError
 // inside the placeholder pane, and a second telling of the same failure in the
-// sidebar adds nothing. The one failure with no placeholder to carry it is
-// notifyWorktreeFailed's.
+// sidebar adds nothing. A split_pane_req worktree REPLACE has no placeholder,
+// so its failures are notifyWorktreeFailed's.
 func (d *Daemon) notifyWorktreeReady(pane *Pane, branch string) {
 	if pane == nil {
 		return
@@ -3953,8 +3959,9 @@ const maxWorktreeErrorField = 400
 // SpawnError a split's placeholder shows, and the answer has already gone. The
 // TUI's own replace learns from its create_pane_resp; this is the same news
 // for a requester whose answer came first. paneID is the pane the request
-// named, which may be gone when the swap happened and the new pane then failed
-// to start.
+// named, which is gone when the swap happened and the new pane then failed to
+// start. Not emitted when that failure left a recovery pane showing the
+// reason (CreatePaneRespPayload.RecoveredTab): the reason is on screen.
 func (d *Daemon) notifyWorktreeFailed(paneID, tabID, branch, reason string) {
 	d.emitEvent(PaneEvent{
 		ID:        uuid.New().String(),

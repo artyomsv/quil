@@ -242,14 +242,17 @@ func (d *Daemon) splitIntoWorktree(payload ipc.CreatePanePayload, cwd string, sl
 			go func() {
 				resp := d.worktreeAddAndCreate(payload)
 				if resp.Error != "" {
-					// The answer said preparing and went; the target is still on
-					// screen (an add that failed swapped nothing), or the swap
-					// happened and the new pane failed to start. Either way the
-					// requester is told the way a finished worktree is: in the
-					// sidebar, on the pane it asked about.
 					log.Printf("split replace: worktree %s for pane %s not created: %s", branch, target, resp.Error)
+				}
+				// The answer said preparing and went, so a failure is told the
+				// way a finished worktree is: in the sidebar, on the pane the
+				// request named. Except when a pane already carries it — a swap
+				// whose new pane failed to start in a tab it left empty gets a
+				// recovery pane showing the reason (recoverEmptyTab). A swap in
+				// a tab with other panes leaves no pane to carry it, so it is
+				// reported like a failed add.
+				if resp.Error != "" && !(resp.Swapped && resp.RecoveredTab) {
 					d.notifyWorktreeFailed(target, tabID, branch, resp.Error)
-					return
 				}
 				applyPaneName(d.session.Pane(resp.PaneID), name)
 			}()
@@ -284,7 +287,7 @@ func (d *Daemon) splitIntoWorktree(payload ipc.CreatePanePayload, cwd string, sl
 // splitIntoNewTab is the "new tab" placement: create_tab_req's code. The
 // resume check runs first, against the directory the pane will really open
 // in — an empty cwd is the project root, as create_tab_req resolves it —
-// because createTabFromReq makes the tab before its first pane is built, and
+// because createTabIn makes the tab before its first pane is built, and
 // its resume claim is lenient.
 func (d *Daemon) splitIntoNewTab(conn *ipc.Conn, req ipc.SplitPaneReqPayload) (ipc.SplitPaneRespPayload, func()) {
 	fail := func(err error) (ipc.SplitPaneRespPayload, func()) {
@@ -301,17 +304,14 @@ func (d *Daemon) splitIntoNewTab(conn *ipc.Conn, req ipc.SplitPaneReqPayload) (i
 	if treq.ProjectID != "" && !d.projectExists(treq.ProjectID) {
 		return fail(fmt.Errorf("no such project: %s", treq.ProjectID))
 	}
-	projectID := treq.ProjectID
-	if projectID == "" {
-		projectID = d.session.ActiveProject()
-	}
-	// Not recorded: createTabFromReq records the directory when it creates.
-	cwd := d.resolveRequestedCWD(creq.CWD, d.projectCWD(conn, projectID))
+	// Resolved once, here, and handed on: createTabIn neither probes it again
+	// nor records it before a refusal below could still come.
+	cwd, picked := d.newTabCWD(conn, treq)
 	if err := d.checkResumeRequest(ipc.CreatePanePayload{ResumeSessionID: creq.ResumeSessionID, Sandbox: creq.Sandbox}, cwd); err != nil {
 		return fail(err)
 	}
-	// The sandbox is checked inside createTabFromReq, before its tab exists.
-	resp, start := d.createTabFromReq(conn, treq)
+	// The sandbox is checked inside createTabIn, before its tab exists.
+	resp, start := d.createTabIn(conn, treq, cwd, picked)
 	return ipc.SplitPaneRespPayload{PaneID: resp.PaneID, TabID: resp.TabID, LayoutRev: d.tabLayoutRev(resp.TabID),
 		Preparing: resp.PreparingWorktree != "", Error: resp.Error}, start
 }

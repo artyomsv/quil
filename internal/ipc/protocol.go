@@ -930,9 +930,12 @@ type CreatePaneReqPayload struct {
 type CreatePaneRespPayload struct {
 	// InvalidSubdir is worker-local failure classification, never sent over IPC.
 	// Template creation uses it to discard its provisional tab after checkout.
-	InvalidSubdir bool   `json:"-"`
-	PaneID        string `json:"pane_id"`
-	TabID         string `json:"tab_id"`
+	InvalidSubdir bool `json:"-"`
+	// RecoveredTab is worker-local too: a replace whose new pane failed to
+	// start left the tab a recovery pane that carries the reason on screen.
+	RecoveredTab bool   `json:"-"`
+	PaneID       string `json:"pane_id"`
+	TabID        string `json:"tab_id"`
 	// Error explains a create that produced NO pane. Only a create carrying a
 	// WorktreeSpec can fail this way — an ordinary create is synchronous and
 	// its result arrives in the next workspace broadcast, as it always has.

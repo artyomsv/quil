@@ -358,22 +358,32 @@ func (s *Server) tabFor(ctx context.Context, hint, session string, mine *sockRef
 	s.tabs[id] = t
 	s.mu.Unlock()
 
-	go func() {
-		b.run(s.ctx)
-		b.close(CloseGoingAway, "web server stopped")
-		s.mu.Lock()
-		cur := t.id
-		if s.tabs[cur] == t {
-			delete(s.tabs, cur)
-		}
-		if t.timer != nil {
-			t.timer.Stop()
-		}
-		t.held = false
-		s.mu.Unlock()
-		s.leases.release(cur)
-	}()
+	go s.runTab(t)
 	return t, nil, nil
+}
+
+// runTab reads the tab's daemon connection until it fails or the server
+// stops, then takes the tab out of the table. On a stop the close is left to
+// Shutdown, which waits for the page's 1001; closing here would race it and
+// let Shutdown return before that close was written. Every tab live at the
+// stop is Shutdown's to close: tabFor adds none once stopped is set.
+func (s *Server) runTab(t *tab) {
+	b := t.b
+	b.run(s.ctx)
+	if s.ctx.Err() == nil {
+		b.close(CloseGoingAway, "web server stopped")
+	}
+	s.mu.Lock()
+	cur := t.id
+	if s.tabs[cur] == t {
+		delete(s.tabs, cur)
+	}
+	if t.timer != nil {
+		t.timer.Stop()
+	}
+	t.held = false
+	s.mu.Unlock()
+	s.leases.release(cur)
 }
 
 // renewID gives a tab whose client id the daemon refused as in use (another

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -145,6 +146,82 @@ func TestShutdown_WaitsForEveryPageClose(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Shutdown did not return after every page closed")
+	}
+}
+
+// lateFrameDaemon delivers one frame only once the server's context is
+// cancelled, the moment Shutdown has cancelled and not yet closed the tabs;
+// after that it is an ordinary fake daemon.
+type lateFrameDaemon struct {
+	*fakeDaemon
+	stop  <-chan struct{}
+	frame *ipc.Message
+	once  sync.Once
+}
+
+func (d *lateFrameDaemon) Receive() (*ipc.Message, error) {
+	var first bool
+	d.once.Do(func() { first = true })
+	if first {
+		<-d.stop
+		return d.frame, nil
+	}
+	return d.fakeDaemon.Receive()
+}
+
+// A frame arriving between Shutdown's cancel and its page closes ends the
+// tab's reader on the cancelled context. The reader must leave the close to
+// Shutdown: Shutdown still returns only after the page's 1001 has finished.
+func TestShutdown_WaitsForThePageWhenAFrameArrivesAfterCancel(t *testing.T) {
+	s := New(Config{Dial: func(context.Context, string) (DaemonConn, string, error) {
+		return nil, "", errors.New("not used")
+	}})
+	frame, err := ipc.NewMessage(ipc.MsgWorkspaceState, struct{}{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &lateFrameDaemon{fakeDaemon: newFakeDaemon(), stop: s.ctx.Done(), frame: frame}
+	p := &fakePage{closeBlock: make(chan struct{})}
+	b := newBridge(d, testLimits(), s.budget, time.Now, func(string, ...any) {})
+	if _, err := b.attachPage(p); err != nil {
+		t.Fatal(err)
+	}
+	tb := &tab{id: "web-test-0", b: b}
+	s.tabs[tb.id] = tb
+	ran := make(chan struct{})
+	go func() { s.runTab(tb); close(ran) }()
+
+	done := make(chan struct{})
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		s.Shutdown(ctx)
+		close(done)
+	}()
+	waitFor(t, "the page's 1001", func() bool { return p.closeCode() == CloseGoingAway })
+	// The reader has seen the late frame on a cancelled context by now or
+	// will; either way Shutdown owns the close and is still inside it.
+	select {
+	case <-done:
+		t.Fatal("Shutdown returned while the page close was running")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(p.closeBlock)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Shutdown did not return after the page closed")
+	}
+	select {
+	case <-ran:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the tab's reader did not end")
+	}
+	s.mu.Lock()
+	left := len(s.tabs)
+	s.mu.Unlock()
+	if left != 0 || !d.isClosed() {
+		t.Fatalf("tabs left %d, daemon closed %v", left, d.isClosed())
 	}
 }
 

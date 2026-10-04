@@ -329,6 +329,30 @@ describe('Connection', () => {
     expect(r.sockets).toHaveLength(2);
   });
 
+  it('on a refused old key, keeps the newer key another tab stored and reconnects with it', () => {
+    const shared = new FakeStorage();
+    const tabA = new SafeStorage(shared);
+    const tabB = new SafeStorage(shared);
+    const r = rig(undefined, undefined, tabA);
+    tabA.setItem('quil.web.key', 'k1');
+    const s = opened(r);
+    expect(s.sent[0]!.payload).toMatchObject({ key: 'k1' });
+    // Tab B logs in before the gateway refuses A's k1.
+    tabB.setItem('quil.web.key', 'k2');
+    s.closeWith(1008, 'login required');
+    expect(shared.getItem('quil.web.key')).toBe('k2');
+    expect(r.closed).toEqual([]);
+    expect(r.sockets).toHaveLength(2);
+    const s2 = r.sockets[1]!;
+    s2.open();
+    expect(s2.sent[0]!.payload).toMatchObject({ key: 'k2' });
+    // When the newer key is refused too, it is cleared and the login shows.
+    s2.closeWith(1008, 'login required');
+    expect(shared.getItem('quil.web.key')).toBeNull();
+    expect(r.closed).toEqual([[1008, 'login required', false]]);
+    expect(r.sockets).toHaveLength(2);
+  });
+
   it('keeps the key another tab stored through its own wrapper over the shared store', async () => {
     // As in the page: each tab has its own SafeStorage over one localStorage.
     const shared = new FakeStorage();

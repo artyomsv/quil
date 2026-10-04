@@ -80,6 +80,8 @@ export class Connection {
   // Counts start() calls, so a session check from before a new login acts
   // on nothing.
   private starts = 0;
+  // The login key the current socket sent in web_open.
+  private sentKey = '';
 
   constructor(
     private readonly open: () => SocketLike,
@@ -171,11 +173,12 @@ export class Connection {
     s.onopen = () => {
       if (this.socket !== s) return;
       this.opened = true;
+      this.sentKey = this.storage.getItem(LOGIN_KEY) ?? '';
       this.sendRaw({
         type: 'web_open',
         payload: {
           client_id_hint: this.storage.getItem(CLIENT_ID_KEY) ?? '',
-          key: this.storage.getItem(LOGIN_KEY) ?? '',
+          key: this.sentKey,
         },
       });
       this.stableTimer = this.clock.setTimeout(() => {
@@ -285,7 +288,18 @@ export class Connection {
     }
     if (this.stopped) return;
     if (code === 1008) {
-      if (reason === 'login required') this.storage.removeItem(LOGIN_KEY);
+      if (reason === 'login required') {
+        // Only the key this socket sent was refused. Another tab may have
+        // logged in and stored a newer one since: reconnect with that, and
+        // leave it in place.
+        const stored = this.storage.getItem(LOGIN_KEY);
+        if (stored !== null && stored !== '' && stored !== this.sentKey) {
+          this.events.onReconnecting();
+          this.connect();
+          return;
+        }
+        this.storage.removeItem(LOGIN_KEY);
+      }
       this.events.onClosed(code, reason, false);
       return;
     }

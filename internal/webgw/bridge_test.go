@@ -81,6 +81,9 @@ type fakePage struct {
 	frames []pageFrame
 	closed int
 	block  chan struct{} // non-nil: writes wait on it
+	gen    uint64        // set by attach
+
+	closeBlock chan struct{} // non-nil: Close records its code, then waits on it
 }
 
 func (p *fakePage) write(bin bool, b []byte) error {
@@ -95,9 +98,16 @@ func (p *fakePage) write(bin bool, b []byte) error {
 
 func (p *fakePage) WriteText(_ context.Context, b []byte) error   { return p.write(false, b) }
 func (p *fakePage) WriteBinary(_ context.Context, b []byte) error { return p.write(true, b) }
-func (p *fakePage) Close(code int, _ string)                      { p.mu.Lock(); p.closed = code; p.mu.Unlock() }
-func (p *fakePage) closeCode() int                                { p.mu.Lock(); defer p.mu.Unlock(); return p.closed }
-func (p *fakePage) count() int                                    { p.mu.Lock(); defer p.mu.Unlock(); return len(p.frames) }
+func (p *fakePage) Close(code int, _ string) {
+	p.mu.Lock()
+	p.closed = code
+	p.mu.Unlock()
+	if p.closeBlock != nil {
+		<-p.closeBlock
+	}
+}
+func (p *fakePage) closeCode() int { p.mu.Lock(); defer p.mu.Unlock(); return p.closed }
+func (p *fakePage) count() int     { p.mu.Lock(); defer p.mu.Unlock(); return len(p.frames) }
 
 func testLimits() bridgeLimits {
 	return bridgeLimits{ControlMax: 512, LiveUnackedMax: 2 << 20, ReplayTabMax: 64 << 20, WriteTimeout: 10 * time.Second, ResyncsPerMin: 3, Version: "9.9.9"}
@@ -124,11 +134,26 @@ func outputMsg(t *testing.T, pane string, data []byte, ghost bool, gen uint64) *
 	return m
 }
 
+// attach attaches p and records the generation fromPage needs for it.
+func attach(t *testing.T, b *bridge, p *fakePage) {
+	t.Helper()
+	gen, err := b.attachPage(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.gen = gen
+}
+
 func startBridgeAt(t *testing.T, lim bridgeLimits, now func() time.Time, p *fakePage) (*bridge, *fakeDaemon) {
 	t.Helper()
+	return startBridgeWith(t, lim, newReplayBudget(128<<20), now, p)
+}
+
+func startBridgeWith(t *testing.T, lim bridgeLimits, budget *replayBudget, now func() time.Time, p *fakePage) (*bridge, *fakeDaemon) {
+	t.Helper()
 	d := newFakeDaemon()
-	b := newBridge(d, lim, newReplayBudget(128<<20), now, t.Logf)
-	b.attachPage(p)
+	b := newBridge(d, lim, budget, now, t.Logf)
+	attach(t, b, p)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { b.run(ctx); close(done) }()
@@ -191,7 +216,7 @@ func TestBridge_AcksFreeRoom(t *testing.T) {
 		d.in <- outputMsg(t, "p1", []byte("01234"), false, 1)
 		waitFor(t, "frame", func() bool { return p.count() == i+1 })
 		ack, _ := json.Marshal(map[string]any{"type": MsgWebAck, "payload": WebAckPayload{Bytes: 5}})
-		if err := b.fromPage(ack); err != nil {
+		if err := b.fromPage(p.gen, ack); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -228,14 +253,9 @@ func TestBridge_ReplayOverTheTabCapClosesTooSlow(t *testing.T) {
 }
 
 func TestBridge_ReplayOverTheSharedBudgetClosesTooSlow(t *testing.T) {
-	d := newFakeDaemon()
 	budget := newReplayBudget(15)
-	b := newBridge(d, testLimits(), budget, time.Now, t.Logf)
 	p := &fakePage{block: make(chan struct{})}
-	b.attachPage(p)
-	ctx, cancel := context.WithCancel(context.Background())
-	go b.run(ctx)
-	t.Cleanup(func() { cancel(); b.close(CloseGoingAway, "test over") })
+	_, d := startBridgeWith(t, testLimits(), budget, time.Now, p)
 	d.in <- outputMsg(t, "p1", []byte("0123456789"), true, 0)
 	d.in <- outputMsg(t, "p1", []byte("0123456789"), true, 0)
 	waitFor(t, "close 4002", func() bool { return p.closeCode() == CloseTooSlow })
@@ -257,13 +277,12 @@ func TestBridge_CloseDetachesAndFlushes(t *testing.T) {
 		t.Fatalf("sent %v, want detach last", types)
 	}
 	d.mu.Lock()
-	defer d.mu.Unlock()
-	if !d.flushed || !d.closed {
-		t.Fatalf("flushed=%v closed=%v", d.flushed, d.closed)
+	flushed, closed := d.flushed, d.closed
+	d.mu.Unlock()
+	if !flushed || !closed {
+		t.Fatalf("flushed=%v closed=%v", flushed, closed)
 	}
-	if p.closeCode() != CloseGoingAway {
-		t.Fatalf("page closed with %d", p.closeCode())
-	}
+	waitFor(t, "close 1001", func() bool { return p.closeCode() == CloseGoingAway })
 }
 
 func TestBridge_CloseTUIClosesWithCloseByAgent(t *testing.T) {
@@ -292,7 +311,7 @@ func TestBridge_ReattachAfterResyncStartsClean(t *testing.T) {
 	d.in <- outputMsg(t, "p1", []byte("X"), false, 1)
 	waitFor(t, "resync", func() bool { return p.closeCode() == CloseResync })
 	p2 := &fakePage{}
-	b.attachPage(p2)
+	attach(t, b, p2)
 	d.in <- outputMsg(t, "p1", []byte("01234"), false, 1)
 	waitFor(t, "frame on the new page", func() bool { return p2.count() == 1 })
 	if p2.closeCode() != 0 {
@@ -335,7 +354,7 @@ func TestBridge_ResyncLimitTurnsIntoTooSlow(t *testing.T) {
 			t.Fatalf("resyncs in the last minute = %d, want %d", got, i+1)
 		}
 		p = &fakePage{}
-		b.attachPage(p)
+		attach(t, b, p)
 	}
 	d.in <- outputMsg(t, "p1", []byte("0123456789"), false, 1)
 	d.in <- outputMsg(t, "p1", []byte("X"), false, 1)
@@ -348,9 +367,9 @@ func TestBridge_ResyncLimitTurnsIntoTooSlow(t *testing.T) {
 // An acknowledgement is gateway-local: it works before any hello and is never
 // forwarded.
 func TestBridge_AckBeforeHelloIsHandledLocally(t *testing.T) {
-	b, d, _ := startBridge(t, testLimits())
+	b, d, p := startBridge(t, testLimits())
 	ack, _ := json.Marshal(map[string]any{"type": MsgWebAck, "payload": WebAckPayload{Bytes: 5}})
-	if err := b.fromPage(ack); err != nil {
+	if err := b.fromPage(p.gen, ack); err != nil {
 		t.Fatalf("ack before hello: %v", err)
 	}
 	if got := d.sentTypes(); len(got) != 0 {
@@ -375,9 +394,9 @@ func helloFrame(t *testing.T, id string) []byte {
 // The hello that reaches the daemon carries the gateway's version, and a new
 // lease asks for a fresh hello while keeping that version.
 func TestBridge_LeaseGatesTheHelloAndKeepsTheVersion(t *testing.T) {
-	b, d, _ := startBridge(t, testLimits())
+	b, d, p := startBridge(t, testLimits())
 	b.setLease("web-a-1")
-	if err := b.fromPage(helloFrame(t, "web-a-1")); err != nil {
+	if err := b.fromPage(p.gen, helloFrame(t, "web-a-1")); err != nil {
 		t.Fatal(err)
 	}
 	d.mu.Lock()
@@ -389,7 +408,7 @@ func TestBridge_LeaseGatesTheHelloAndKeepsTheVersion(t *testing.T) {
 	}
 
 	b.setLease("web-a-2")
-	if err := b.fromPage(helloFrame(t, "web-a-1")); err == nil {
+	if err := b.fromPage(p.gen, helloFrame(t, "web-a-1")); err == nil {
 		t.Fatal("hello naming the old lease was accepted after a new lease")
 	}
 }
@@ -398,14 +417,122 @@ func TestBridge_FatalFirstMessageClosesTheTab(t *testing.T) {
 	b, d, p := startBridge(t, testLimits())
 	b.setLease("web-a-1")
 	stateReq, _ := json.Marshal(&ipc.Message{Type: ipc.MsgStateReq})
-	if err := b.fromPage(stateReq); err == nil {
+	if err := b.fromPage(p.gen, stateReq); err == nil {
 		t.Fatal("a first message other than hello was accepted")
 	}
 	waitFor(t, "page closed", func() bool { return p.closeCode() != 0 })
 	if !d.isClosed() {
 		t.Fatal("daemon conn still open")
 	}
-	if err := b.fromPage(stateReq); !errors.Is(err, errClosed) {
+	if err := b.fromPage(p.gen, stateReq); !errors.Is(err, errClosed) {
 		t.Fatalf("frame after close: %v, want errClosed", err)
+	}
+}
+
+// A page close can block (a WebSocket close waits for the peer). The reader
+// must keep draining the daemon meanwhile, or the daemon drops the connection.
+func TestBridge_ReaderKeepsDrainingWhileAPageCloseBlocks(t *testing.T) {
+	lim := testLimits()
+	lim.LiveUnackedMax = 10
+	p := &fakePage{closeBlock: make(chan struct{})}
+	_, d := startBridgeAt(t, lim, time.Now, p)
+	t.Cleanup(func() { close(p.closeBlock) })
+	d.in <- outputMsg(t, "p1", []byte("0123456789"), false, 1)
+	d.in <- outputMsg(t, "p1", []byte("X"), false, 1)
+	waitFor(t, "close 4001 started", func() bool { return p.closeCode() == CloseResync })
+	for i := 0; i < 20; i++ {
+		m, _ := ipc.NewMessage(ipc.MsgWorkspaceState, struct{}{})
+		d.in <- m
+	}
+	waitFor(t, "reader to drain the daemon side", func() bool { return len(d.in) == 0 })
+}
+
+func TestBridge_AttachOnAClosedBridgeIsRefused(t *testing.T) {
+	b, _, _ := startBridge(t, testLimits())
+	b.close(CloseGoingAway, "going away")
+	if _, err := b.attachPage(&fakePage{}); !errors.Is(err, errClosed) {
+		t.Fatalf("attachPage after close = %v, want errClosed", err)
+	}
+}
+
+// A re-attach replaces the writer: the old page gets nothing more.
+func TestBridge_ReattachMovesOutputToTheNewPage(t *testing.T) {
+	b, d, p1 := startBridge(t, testLimits())
+	p2 := &fakePage{}
+	attach(t, b, p2)
+	d.in <- outputMsg(t, "p1", []byte("x"), false, 1)
+	waitFor(t, "frame on the new page", func() bool { return p2.count() == 1 })
+	if p1.count() != 0 {
+		t.Fatalf("old page received %d frames", p1.count())
+	}
+}
+
+// A late acknowledgement from the socket that was resynced away must not
+// credit the page that replaced it.
+func TestBridge_StaleAckDoesNotCreditTheNewPage(t *testing.T) {
+	lim := testLimits()
+	lim.LiveUnackedMax = 10
+	b, d, p1 := startBridge(t, lim)
+	d.in <- outputMsg(t, "p1", []byte("0123456789"), false, 1)
+	d.in <- outputMsg(t, "p1", []byte("X"), false, 1)
+	waitFor(t, "resync", func() bool { return p1.closeCode() == CloseResync })
+	p2 := &fakePage{}
+	attach(t, b, p2)
+	d.in <- outputMsg(t, "p1", []byte("0123456789"), false, 1)
+	waitFor(t, "frame on the new page", func() bool { return p2.count() == 1 })
+
+	ack, _ := json.Marshal(map[string]any{"type": MsgWebAck, "payload": WebAckPayload{Bytes: 10}})
+	if err := b.fromPage(p1.gen, ack); !errors.Is(err, errStalePage) {
+		t.Fatalf("stale ack = %v, want errStalePage", err)
+	}
+	b.mu.Lock()
+	live := b.liveOut
+	b.mu.Unlock()
+	if live != 10 {
+		t.Fatalf("liveOut = %d after a stale ack, want 10", live)
+	}
+	d.in <- outputMsg(t, "p1", []byte("X"), false, 1)
+	waitFor(t, "second resync", func() bool { return p2.closeCode() == CloseResync })
+}
+
+// An ack larger than what was written is clamped; it cannot drive the
+// counters negative and so buy room for later output.
+func TestBridge_OverAckIsClamped(t *testing.T) {
+	b, d, p := startBridge(t, testLimits())
+	d.in <- outputMsg(t, "p1", []byte("01234"), false, 1)
+	waitFor(t, "frame", func() bool { return p.count() == 1 })
+	ack, _ := json.Marshal(map[string]any{"type": MsgWebAck, "payload": WebAckPayload{Bytes: 100}})
+	if err := b.fromPage(p.gen, ack); err != nil {
+		t.Fatal(err)
+	}
+	b.mu.Lock()
+	live, inFlight := b.liveOut, len(b.inFlight)
+	b.mu.Unlock()
+	if live != 0 || inFlight != 0 {
+		t.Fatalf("liveOut=%d inFlight=%d after an over-ack, want 0 and 0", live, inFlight)
+	}
+}
+
+// One acknowledgement can cover replay and live frames written in between.
+func TestBridge_OneAckCoversInterleavedReplayAndLive(t *testing.T) {
+	budget := newReplayBudget(128 << 20)
+	p := &fakePage{}
+	b, d := startBridgeWith(t, testLimits(), budget, time.Now, p)
+	d.in <- outputMsg(t, "p1", []byte("0123"), true, 0)
+	d.in <- outputMsg(t, "p1", []byte("012345"), false, 1)
+	d.in <- outputMsg(t, "p2", []byte("012"), true, 0)
+	waitFor(t, "3 frames", func() bool { return p.count() == 3 })
+	ack, _ := json.Marshal(map[string]any{"type": MsgWebAck, "payload": WebAckPayload{Bytes: 13}})
+	if err := b.fromPage(p.gen, ack); err != nil {
+		t.Fatal(err)
+	}
+	b.mu.Lock()
+	live, replay, inFlight := b.liveOut, b.replayTab, len(b.inFlight)
+	b.mu.Unlock()
+	budget.mu.Lock()
+	used := budget.used
+	budget.mu.Unlock()
+	if live != 0 || replay != 0 || inFlight != 0 || used != 0 {
+		t.Fatalf("live=%d replay=%d inFlight=%d budget=%d, want all 0", live, replay, inFlight, used)
 	}
 }

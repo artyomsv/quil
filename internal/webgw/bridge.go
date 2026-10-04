@@ -19,7 +19,9 @@ type DaemonConn interface {
 	Close() error
 }
 
-// pageConn is the WebSocket side, narrowed for tests.
+// pageConn is the WebSocket side, narrowed for tests. Close may block (a
+// WebSocket close waits for the peer), so the bridge always calls it on its
+// own goroutine, never on the one reading the daemon.
 type pageConn interface {
 	WriteText(ctx context.Context, b []byte) error
 	WriteBinary(ctx context.Context, b []byte) error
@@ -121,14 +123,16 @@ type bridge struct {
 	mu        sync.Mutex
 	cond      *sync.Cond
 	page      pageConn
-	pageGen   int // bumps on every attach/detach; frames queued for an older page are dropped
+	pageGen   uint64 // bumps on every attach/detach; frames queued for an older page are dropped
 	queue     []queued
 	controls  int
 	inFlight  []sentOutput // written to the page, not yet acknowledged
 	liveOut   int64        // live bytes queued or unacknowledged
 	replayTab int64        // replay bytes queued or unacknowledged (this tab)
-	resyncs   []time.Time
-	closed    bool
+
+	replayPanes map[string]bool // panes with replay buffered for this page
+	resyncs     []time.Time
+	closed      bool
 }
 
 func newBridge(d DaemonConn, lim bridgeLimits, budget *replayBudget, now func() time.Time, logf func(string, ...any)) *bridge {
@@ -145,22 +149,32 @@ func (b *bridge) setLease(id string) {
 	b.gateMu.Unlock()
 }
 
-// attachPage starts writing to p. Anything queued for a previous page is
-// discarded and the counters restart at zero.
-func (b *bridge) attachPage(p pageConn) {
+// attachPage starts writing to p and returns the generation that identifies
+// this page: fromPage drops frames carrying any other. Anything queued for a
+// previous page is discarded and the counters restart at zero; a writer still
+// parked for the previous page exits. A closed bridge refuses, and the caller
+// closes p.
+func (b *bridge) attachPage(p pageConn) (uint64, error) {
 	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return 0, errClosed
+	}
 	b.resetLocked()
 	b.page = p
 	b.pageGen++
 	gen := b.pageGen
+	b.cond.Broadcast()
 	b.mu.Unlock()
 	go b.writeLoop(p, gen)
+	return gen, nil
 }
 
 func (b *bridge) resetLocked() {
 	b.budget.give(b.replayTab)
 	b.queue, b.inFlight = nil, nil
 	b.controls, b.liveOut, b.replayTab = 0, 0, 0
+	b.replayPanes = nil
 }
 
 // detachPage closes the page. For a resync the daemon connection stays open
@@ -179,7 +193,7 @@ func (b *bridge) detachPage(code int, reason string) {
 	b.cond.Broadcast()
 	b.mu.Unlock()
 	if p != nil {
-		p.Close(code, reason)
+		go p.Close(code, reason)
 	}
 }
 
@@ -205,7 +219,7 @@ func (b *bridge) close(code int, reason string) {
 	}
 	_ = b.d.Close()
 	if p != nil {
-		p.Close(code, reason)
+		go p.Close(code, reason)
 	}
 }
 
@@ -280,7 +294,7 @@ func (b *bridge) fromDaemon(m *ipc.Message) {
 		if err != nil {
 			return
 		}
-		b.enqueueOutput(frame, int64(len(p.Data)), p.Ghost)
+		b.enqueueOutput(p.PaneID, frame, int64(len(p.Data)), p.Ghost)
 		return
 	}
 	raw, err := json.Marshal(m)
@@ -310,7 +324,7 @@ func (b *bridge) enqueueControl(raw []byte) {
 	b.mu.Unlock()
 }
 
-func (b *bridge) enqueueOutput(frame []byte, n int64, ghost bool) {
+func (b *bridge) enqueueOutput(pane string, frame []byte, n int64, ghost bool) {
 	b.mu.Lock()
 	if b.page == nil {
 		b.mu.Unlock()
@@ -318,13 +332,17 @@ func (b *bridge) enqueueOutput(frame []byte, n int64, ghost bool) {
 	}
 	if ghost {
 		if b.replayTab+n > b.lim.ReplayTabMax || !b.budget.take(n) {
-			total := b.replayTab + n
+			total, panes := b.replayTab+n, len(b.replayPanes)
 			b.mu.Unlock()
-			b.logf("replay over the buffer cap (tab %d bytes): closing as too slow", total)
+			b.logf("replay over the buffer cap (%d bytes across %d panes): closing as too slow", total, panes)
 			b.close(CloseTooSlow, "too slow")
 			return
 		}
 		b.replayTab += n
+		if b.replayPanes == nil {
+			b.replayPanes = map[string]bool{}
+		}
+		b.replayPanes[pane] = true
 	} else {
 		if b.liveOut+n > b.lim.LiveUnackedMax {
 			b.mu.Unlock()
@@ -340,7 +358,7 @@ func (b *bridge) enqueueOutput(frame []byte, n int64, ghost bool) {
 
 // writeLoop writes queued frames to one page until that page is replaced or
 // closed. A write over the timeout closes the tab as too slow.
-func (b *bridge) writeLoop(p pageConn, gen int) {
+func (b *bridge) writeLoop(p pageConn, gen uint64) {
 	for {
 		b.mu.Lock()
 		for len(b.queue) == 0 && b.pageGen == gen && !b.closed {
@@ -380,15 +398,20 @@ func (b *bridge) writeLoop(p pageConn, gen int) {
 	}
 }
 
-// fromPage handles one text frame from the page: an acknowledgement, or a
-// message for the daemon after the forward gate. Acknowledgements are handled
-// here, before the gate, because they are gateway-local and not forwardable.
-func (b *bridge) fromPage(raw []byte) error {
+// fromPage handles one text frame from the page that attachPage returned gen
+// for: an acknowledgement, or a message for the daemon after the forward gate.
+// A frame from any other page generation (a socket that was resynced away) is
+// dropped. Acknowledgements are handled here, before the gate, because they
+// are gateway-local and not forwardable.
+func (b *bridge) fromPage(gen uint64, raw []byte) error {
 	b.mu.Lock()
-	closed := b.closed
+	closed, stale := b.closed, b.pageGen != gen
 	b.mu.Unlock()
 	if closed {
 		return errClosed
+	}
+	if stale {
+		return errStalePage
 	}
 	var m ipc.Message
 	if err := json.Unmarshal(raw, &m); err != nil {
@@ -397,7 +420,7 @@ func (b *bridge) fromPage(raw []byte) error {
 	if m.Type == MsgWebAck {
 		var a WebAckPayload
 		if err := json.Unmarshal(m.Payload, &a); err == nil && a.Bytes > 0 {
-			b.ack(a.Bytes)
+			b.ack(gen, a.Bytes)
 		}
 		return nil
 	}
@@ -418,10 +441,14 @@ func (b *bridge) fromPage(raw []byte) error {
 }
 
 // ack credits acknowledged terminal bytes in the order they were written. An
-// ack for bytes discarded by a resync finds nothing in flight and is ignored.
-func (b *bridge) ack(n int64) {
+// ack from a stale page generation is ignored, and so is any part of an ack
+// beyond what was written.
+func (b *bridge) ack(gen uint64, n int64) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.pageGen != gen {
+		return
+	}
 	for n > 0 && len(b.inFlight) > 0 {
 		head := &b.inFlight[0]
 		take := head.n
@@ -442,4 +469,7 @@ func (b *bridge) ack(n int64) {
 	}
 }
 
-var errClosed = errors.New("bridge closed")
+var (
+	errClosed    = errors.New("bridge closed")
+	errStalePage = errors.New("frame from a page that is no longer attached")
+)

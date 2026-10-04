@@ -42,24 +42,27 @@ const (
 // A digit after the head is not proof of mouse data: the user may be typing
 // numbers while a head's tail never comes. So keys that continue the report
 // are HELD, not dropped, and only the final M/m — which completes the report —
-// discards them. Anything that breaks the report, a new head, or the window
-// running out hands the held keys back to be delivered in order.
+// discards them. Anything that breaks the report, a new head, terminal input
+// such as a click, or the window running out hands the held keys back to be
+// delivered in order (Model.deliverHeld).
 type mouseTailGuard struct {
-	seq  string            // the report so far, starting with ESC[<; empty = disarmed
-	at   time.Time         // when the head arrived
-	held []tea.KeyPressMsg // keys that continued the report, in arrival order
-	gen  uint64            // bumped per head, so a stale expiry is ignored
+	seq   string            // the report so far, starting with ESC[<; empty = disarmed
+	at    time.Time         // when the head arrived
+	held  []tea.KeyPressMsg // keys that continued the report, in arrival order
+	gen   uint64            // bumped per head, so a stale expiry is ignored
+	focus localFocusKey     // where input was focused when the head arrived
 }
 
 // arm starts tracking a broken mouse-report head and reports whether ev was
-// one; when it was, the caller schedules expiry for g.gen. The caller must
-// first take and deliver anything still held for an earlier head (reset), or
-// those keys would be held again behind this one.
-func (g *mouseTailGuard) arm(ev uv.UnknownEvent, now time.Time) bool {
+// one; when it was, the caller schedules expiry for g.gen. focus is where
+// input is focused now — where held keys belong. The caller must first take
+// and deliver anything still held for an earlier head (reset), or those keys
+// would be held again behind this one.
+func (g *mouseTailGuard) arm(ev uv.UnknownEvent, now time.Time, focus localFocusKey) bool {
 	g.reset()
 	s := string(ev)
 	if prefix, complete := sgrMouseReport(s); prefix && !complete {
-		g.seq, g.at = s, now
+		g.seq, g.at, g.focus = s, now, focus
 		g.gen++
 		return true
 	}
@@ -67,8 +70,8 @@ func (g *mouseTailGuard) arm(ev uv.UnknownEvent, now time.Time) bool {
 }
 
 // feed classifies key against the armed report. On mouseTailRelease the
-// returned keys — everything held, then key itself — must be delivered in
-// order; they never pass through the guard again, because it is disarmed.
+// returned keys are what was held, to be delivered before key itself; the
+// guard is disarmed, so key then passes through as ordinary input.
 func (g *mouseTailGuard) feed(key tea.KeyPressMsg, now time.Time) (mouseTailVerdict, []tea.KeyPressMsg) {
 	if g.seq == "" {
 		return mouseTailPass, nil
@@ -85,7 +88,7 @@ func (g *mouseTailGuard) feed(key tea.KeyPressMsg, now time.Time) (mouseTailVerd
 			return mouseTailHold, nil
 		}
 	}
-	return mouseTailRelease, append(g.reset(), key)
+	return mouseTailRelease, g.reset()
 }
 
 // expire hands back the keys held for generation gen when its report never
@@ -101,25 +104,21 @@ func (g *mouseTailGuard) expire(gen uint64) []tea.KeyPressMsg {
 // holding reports whether keys are waiting on the armed report.
 func (g *mouseTailGuard) holding() bool { return len(g.held) > 0 }
 
-// mouseTailKeepsHolding lists the messages that may arrive while keys are held
-// without the keys being released first. Held keys are delivered by replaying
-// them through Update, so they go wherever input is focused at REPLAY time;
-// any message that could move that focus — a click, a paste, a workspace
-// broadcast switching tabs, a notification jump — must therefore see them
-// delivered first, as if they had never been held. Only messages that cannot
-// move focus are listed: the guard's own three, timer ticks, pane output, and
-// buttonless motion (sidebar hover). Everything else releases, so a new
-// message type is safe by default. The listed ones are what can land between
-// a split report's head and its tail without breaking the tail apart.
-func mouseTailKeepsHolding(msg tea.Msg) bool {
+// mouseTailFromTerminal reports whether msg is terminal input that releases
+// held keys before it is handled. The terminal reader delivers input strictly
+// in order, so once a click, a paste or a drag arrives, the held keys' tail
+// can no longer follow — and they were typed BEFORE that input, so they go
+// first. Key presses are left out because feed classifies them, and key
+// releases because win32-input-mode interleaves one after every key of a
+// real tail. Anything not from the terminal (a daemon broadcast, a Cmd
+// result) may land in the middle of a tail and must not break it apart.
+func mouseTailFromTerminal(msg tea.Msg) bool {
 	switch msg := msg.(type) {
-	case tea.KeyPressMsg, uv.UnknownEvent, mouseTailExpireMsg:
-		return true
-	case PaneOutputMsg, listenContinueMsg, spinnerTickMsg, workSpinnerTickMsg,
-		sidebarTickMsg, notesTickMsg, resourceTickMsg, sizePollMsg, resizeTickMsg:
+	case tea.MouseClickMsg, tea.MouseReleaseMsg, tea.MouseWheelMsg,
+		tea.PasteMsg, tea.PasteStartMsg, tea.PasteEndMsg:
 		return true
 	case tea.MouseMotionMsg:
-		return msg.Button == tea.MouseNone
+		return msg.Button != tea.MouseNone
 	}
 	return false
 }
@@ -137,8 +136,28 @@ func (g *mouseTailGuard) expireCmd() tea.Cmd {
 	return tea.Tick(mouseTailWindow, func(time.Time) tea.Msg { return mouseTailExpireMsg{gen: gen} })
 }
 
-// replayKeys delivers keys the mouse-tail guard held, in order, through the
-// normal Update path. The guard is disarmed by then, so none is held again.
+// deliverHeld delivers keys the mouse-tail guard held where they were typed.
+// While a non-terminal message moved nothing, they replay through Update like
+// any key. If one moved focus during the hold — another client switching
+// tabs, a notification jump — replaying would type them into the new pane, so
+// they go straight to the pane that was focused when the head arrived. Held
+// keys are only ever single printable characters, so their bytes are their
+// text.
+func (m Model) deliverHeld(keys []tea.KeyPressMsg) (Model, tea.Cmd) {
+	if len(keys) == 0 {
+		return m, nil
+	}
+	if target := m.mouseTail.focus; m.localFocus() != target {
+		for _, k := range keys {
+			m.enqueueInput(target.pane, []byte(k.Text))
+		}
+		return m, nil
+	}
+	return m.replayKeys(keys)
+}
+
+// replayKeys delivers keys through the normal Update path. The guard is
+// disarmed by then, so none is held again.
 func (m Model) replayKeys(keys []tea.KeyPressMsg) (Model, tea.Cmd) {
 	var cmds []tea.Cmd
 	for _, k := range keys {

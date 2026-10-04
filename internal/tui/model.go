@@ -1737,19 +1737,23 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 	// key returns before the prologue and mutates nothing, so the frame cannot
 	// have moved; released keys replay through Update and render as usual.
 	//
-	// Held keys are delivered BEFORE any message that could move input focus
-	// (see mouseTailKeepsHolding), so they reach the pane they were typed
-	// into. The message is then handled as normal; its own branch may mark
-	// the frame inert, so the defer re-arms rendering for the replayed keys.
-	if m.mouseTail.holding() && !mouseTailKeepsHolding(msg) {
-		var replayCmd tea.Cmd
-		m, replayCmd = m.replayKeys(m.mouseTail.reset())
+	// Terminal input is strictly ordered, so a click or paste arriving while
+	// keys are held proves the tail is not coming: the held keys go first,
+	// ahead of the input that followed them. Any other message — a daemon
+	// broadcast, a Cmd result — can land in the middle of a real tail, so it
+	// leaves them held; deliverHeld routes them to the pane that had focus
+	// when holding began if one of those moved it. The message is then handled
+	// as normal; its own branch may mark the frame inert, so the defer re-arms
+	// rendering for the delivered keys.
+	if m.mouseTail.holding() && mouseTailFromTerminal(msg) {
+		var heldCmd tea.Cmd
+		m, heldCmd = m.deliverHeld(m.mouseTail.reset())
 		defer func() {
 			if mm, ok := retModel.(Model); ok {
 				mm.skipRender = false
 				retModel = mm
 			}
-			retCmd = tea.Batch(replayCmd, retCmd)
+			retCmd = tea.Batch(heldCmd, retCmd)
 		}()
 	}
 	switch ev := msg.(type) {
@@ -1759,9 +1763,9 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		var cmd tea.Cmd
 		release := m.mouseTail.reset()
 		if len(release) > 0 {
-			m, cmd = m.replayKeys(release)
+			m, cmd = m.deliverHeld(release)
 		}
-		if m.mouseTail.arm(ev, start) {
+		if m.mouseTail.arm(ev, start, m.localFocus()) {
 			m.skipRender = len(release) == 0
 			return m, tea.Batch(cmd, m.mouseTail.expireCmd())
 		}
@@ -1774,14 +1778,19 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 			m.skipRender = true
 			return m, nil
 		}
-		return m.replayKeys(release)
+		return m.deliverHeld(release)
 	case tea.KeyPressMsg:
-		switch verdict, release := m.mouseTail.feed(ev, start); verdict {
+		switch verdict, held := m.mouseTail.feed(ev, start); verdict {
 		case mouseTailHold, mouseTailComplete:
 			m.skipRender = true
 			return m, nil
 		case mouseTailRelease:
-			return m.replayKeys(release)
+			// The held keys first, then this key as ordinary input — it is
+			// not part of a report, so it goes wherever focus is now.
+			var heldCmd, keyCmd tea.Cmd
+			m, heldCmd = m.deliverHeld(held)
+			m, keyCmd = m.replayKeys([]tea.KeyPressMsg{ev})
+			return m, tea.Batch(heldCmd, keyCmd)
 		}
 	}
 	// Local input answers the typing guard's ack hold (spec §8.1): a pane that

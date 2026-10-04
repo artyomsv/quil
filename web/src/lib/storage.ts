@@ -17,14 +17,16 @@ export class SafeStorage implements StorageLike {
 
   constructor(private readonly backing: StorageLike | undefined) {}
 
+  // Memory is read first: it holds the latest value this page wrote, which
+  // is newer than a backing value left stale by a failed write.
   getItem(k: string): string | null {
+    const m = this.memory.get(k);
+    if (m !== undefined) return m;
     try {
-      const v = this.backing?.getItem(k);
-      if (v !== undefined && v !== null) return v;
+      return this.backing?.getItem(k) ?? null;
     } catch {
-      // fall through to memory
+      return null;
     }
-    return this.memory.get(k) ?? null;
   }
 
   setItem(k: string, v: string): void {

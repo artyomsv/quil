@@ -1,5 +1,5 @@
 import { utf8ToBase64 } from './base64';
-import { decodePaneOutput, FRAME_HEADER } from './frame';
+import { decodePaneOutput, undecodableDataLength } from './frame';
 import { CLOSE, type Message, type PaneOutputFrame, type WebWelcome } from './protocol';
 import { CLIENT_ID_KEY, LOGIN_KEY, SafeStorage, type StorageLike } from './storage';
 
@@ -66,6 +66,7 @@ export class Connection {
   private reconnectTimer: unknown = null;
   private stableTimer: unknown = null;
   private unacked = 0;
+  private socketEpoch = 0;
   private ackTimer: unknown = null;
 
   constructor(
@@ -95,9 +96,20 @@ export class Connection {
     this.sendRaw({ type: 'pane_input', payload: { pane_id: paneId, data: utf8ToBase64(data) } });
   }
 
+  // epoch counts sockets; it changes on every new one. Terminal code reads it
+  // when it writes a frame and passes it back to processed(), so a write that
+  // finishes after a reconnect cannot credit bytes the gateway has reset.
+  get epoch(): number {
+    return this.socketEpoch;
+  }
+
   // processed reports terminal bytes that xterm finished with. Acks are sent
   // when 64 KiB have built up or 100 ms after the first unacknowledged byte.
-  processed(bytes: number): void {
+  // It does nothing while no socket is open, or when epoch is given and is
+  // not the current one.
+  processed(bytes: number, epoch?: number): void {
+    if (!this.opened) return;
+    if (epoch !== undefined && epoch !== this.socketEpoch) return;
     if (bytes <= 0) return;
     this.unacked += bytes;
     if (this.unacked >= ACK_BYTES) {
@@ -128,6 +140,7 @@ export class Connection {
     const s = this.open();
     s.binaryType = 'arraybuffer';
     this.socket = s;
+    this.socketEpoch++;
     this.opened = false;
     s.onopen = () => {
       if (this.socket !== s) return;
@@ -162,9 +175,9 @@ export class Connection {
       try {
         f = decodePaneOutput(data);
       } catch {
-        // The gateway counted these bytes when it sent them; acknowledge
-        // what the frame held so the count drains.
-        this.processed(Math.max(0, data.byteLength - FRAME_HEADER));
+        // The gateway counted the data bytes when it sent them; acknowledge
+        // what a lenient parse finds so the count drains.
+        this.processed(undecodableDataLength(data));
         return;
       }
       this.events.onOutput(f);

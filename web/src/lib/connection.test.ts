@@ -77,7 +77,7 @@ interface Rig {
   closed: Array<[number, string, boolean]>;
 }
 
-function rig(): Rig {
+function rig(random: () => number = () => 0.5): Rig {
   const r = { sockets: [], welcomes: 0, messages: [], outputs: [], reconnecting: 0, closed: [] } as unknown as Rig;
   r.storage = new FakeStorage();
   r.clock = new FakeClock();
@@ -98,7 +98,7 @@ function rig(): Rig {
     r.clock,
     events,
     () => ({ cols: 80, rows: 24, winCols: 100, winRows: 30 }),
-    () => 0.5, // no jitter
+    random, // default 0.5 means no jitter
   );
   return r;
 }
@@ -167,14 +167,63 @@ describe('Connection', () => {
     expect(s.sent[s.sent.length - 1]).toEqual({ type: 'web_ack', payload: { bytes: 10 } });
   });
 
-  it('acknowledges a binary frame it cannot decode', () => {
+  it('acknowledges only the data bytes of an undecodable frame', () => {
     const r = rig();
     const s = opened(r);
-    const bad = new Uint8Array(11 + 70_000);
+    const bad = new Uint8Array(11 + 3 + 500);
     bad[0] = 9; // unknown kind
+    bad[10] = 3; // pane id length
     s.onmessage?.({ data: bad.buffer });
-    expect(r.outputs).toHaveLength(0);
-    expect(s.sent.filter((m) => m.type === 'web_ack')).toEqual([{ type: 'web_ack', payload: { bytes: 70_000 } }]);
+    expect(s.sent.filter((m) => m.type === 'web_ack')).toHaveLength(0);
+    r.clock.advance(100);
+    expect(s.sent.filter((m) => m.type === 'web_ack')).toEqual([{ type: 'web_ack', payload: { bytes: 500 } }]);
+  });
+
+  it('acknowledges nothing for a frame too short to parse', () => {
+    const r = rig();
+    const s = opened(r);
+    s.onmessage?.({ data: new Uint8Array(5).buffer });
+    const lying = new Uint8Array(20);
+    lying[10] = 200; // id length past the end
+    s.onmessage?.({ data: lying.buffer });
+    r.clock.advance(1000);
+    expect(s.sent.filter((m) => m.type === 'web_ack')).toHaveLength(0);
+  });
+
+  it('ignores processed() after the socket closed', () => {
+    const r = rig();
+    const s = opened(r);
+    s.closeWith(1006);
+    r.conn.processed(70_000);
+    r.clock.advance(1000);
+    expect(s.sent.filter((m) => m.type === 'web_ack')).toHaveLength(0);
+  });
+
+  it('ignores processed() carrying a stale epoch after a reconnect', () => {
+    const r = rig();
+    const s = opened(r);
+    const old = r.conn.epoch;
+    s.closeWith(4001);
+    const s2 = r.sockets[1]!;
+    s2.open();
+    expect(r.conn.epoch).not.toBe(old);
+    r.conn.processed(70_000, old);
+    r.clock.advance(1000);
+    expect(s2.sent.filter((m) => m.type === 'web_ack')).toHaveLength(0);
+    r.conn.processed(70_000, r.conn.epoch);
+    expect(s2.sent.filter((m) => m.type === 'web_ack')).toHaveLength(1);
+  });
+
+  it('jitters the first back-off by 20 percent either way', () => {
+    for (const [random, wait] of [[0, 800], [1, 1200]] as const) {
+      const r = rig(() => random);
+      const s = opened(r);
+      s.closeWith(4003);
+      r.clock.advance(wait - 1);
+      expect(r.sockets).toHaveLength(1);
+      r.clock.advance(1);
+      expect(r.sockets).toHaveLength(2);
+    }
   });
 
   it('reconnects at once on 4001 and with back-off on 4003', () => {

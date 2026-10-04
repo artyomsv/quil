@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { decodePaneOutput } from './frame';
+import { decodePaneOutput, undecodableDataLength } from './frame';
 
 interface Vector {
   name: string;
@@ -32,6 +32,10 @@ describe('decodePaneOutput', () => {
       expect(Array.from(f.data)).toEqual(Array.from(hex(v.data_hex)));
     });
   }
+  it('rejects a pane id that is not valid UTF-8', () => {
+    expect(() => decodePaneOutput(hex('0100000000000000000001ff41').buffer as ArrayBuffer)).toThrow();
+    expect(undecodableDataLength(hex('0100000000000000000001ff41').buffer as ArrayBuffer)).toBe(1);
+  });
   it('rejects a truncated frame', () => {
     expect(() => decodePaneOutput(hex('0100000000').buffer as ArrayBuffer)).toThrow();
     expect(() => decodePaneOutput(hex('0200000000000000000001' + '70').buffer as ArrayBuffer)).toThrow();

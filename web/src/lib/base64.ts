@@ -7,7 +7,8 @@ export function bytesToBase64(b: Uint8Array): string {
   return btoa(s);
 }
 
-// The daemon's pane_input carries []byte, which Go's JSON encodes as base64.
-export function utf8ToBase64(s: string): string {
-  return bytesToBase64(encoder.encode(s));
+// The daemon's pane_input carries []byte, which Go's JSON encodes as base64:
+// text goes out as its UTF-8 bytes through bytesToBase64.
+export function utf8Bytes(s: string): Uint8Array {
+  return encoder.encode(s);
 }

@@ -295,6 +295,12 @@ func TestWS_NoSessionRefusedBeforeDial(t *testing.T) {
 	if err == nil || resp == nil || resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("no origin: err=%v resp=%v, want 403", err, resp)
 	}
+	// Origin is checked before the cookie: a foreign page learns nothing
+	// about whether a session exists.
+	_, resp, err = websocket.Dial(ctx, "ws://"+h.host+"/ws", &websocket.DialOptions{HTTPHeader: h.header("", "http://evil.example")})
+	if err == nil || resp == nil || resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("foreign origin without a cookie: err=%v resp=%v, want 403", err, resp)
+	}
 	if n := h.dials.Load(); n != 0 {
 		t.Fatalf("daemon dialled %d times for refused sockets", n)
 	}
@@ -450,12 +456,13 @@ func TestWS_DuplicatedTabGetsANewID(t *testing.T) {
 
 func TestWS_PermanentDialErrorsMapToCloseCodes(t *testing.T) {
 	for _, tc := range []struct {
-		err  error
-		code int
+		err    error
+		code   int
+		reason string
 	}{
-		{fmt.Errorf("%w: x", ErrTokenRefused), CloseTokenRefused},
-		{fmt.Errorf("%w: x", ErrVersionMismatch), CloseVersionMismatch},
-		{errors.New("connection refused"), CloseDaemonUnavailable},
+		{fmt.Errorf("%w: token expired", ErrTokenRefused), CloseTokenRefused, "token expired"},
+		{fmt.Errorf("%w: daemon 1.2.3", ErrVersionMismatch), CloseVersionMismatch, "daemon 1.2.3; quil web is 9.9.9"},
+		{errors.New("connection refused"), CloseDaemonUnavailable, "connection refused"},
 	} {
 		h := newWSHarness(t, nil)
 		h.mu.Lock()
@@ -468,11 +475,11 @@ func TestWS_PermanentDialErrorsMapToCloseCodes(t *testing.T) {
 			t.Fatal(err)
 		}
 		sendMsg(t, ctx, c, MsgWebOpen, "", WebOpenPayload{Key: s.key})
-		if code, _ := closeOf(t, ctx, c); code != tc.code {
-			t.Fatalf("%v: closed %d, want %d", tc.err, code, tc.code)
+		if code, reason := closeOf(t, ctx, c); code != tc.code || reason != tc.reason {
+			t.Fatalf("%v: closed %d %q, want %d %q", tc.err, code, reason, tc.code, tc.reason)
 		}
 		h.s.mu.Lock()
-		n := len(h.s.tabs) + h.s.dialing
+		n := len(h.s.tabs) + h.s.pending
 		h.s.mu.Unlock()
 		if n != 0 {
 			t.Fatalf("%v: %d tabs left after a failed dial", tc.err, n)
@@ -492,6 +499,13 @@ func TestWS_ShutdownDetachesEveryTab(t *testing.T) {
 		return len(h.daemon(0).sentTypes()) == 1 && len(h.daemon(1).sentTypes()) == 1
 	})
 
+	// The pages read while the server stops, as a browser does: Shutdown waits
+	// for each close handshake, which a page completes only by reading.
+	codes := make([]chan int, 2)
+	for i, c := range []*websocket.Conn{a, b} {
+		codes[i] = make(chan int, 1)
+		go func() { codes[i] <- readCloseCode(ctx, c) }()
+	}
 	h.s.Shutdown(ctx)
 
 	for i := 0; i < 2; i++ {
@@ -504,9 +518,24 @@ func TestWS_ShutdownDetachesEveryTab(t *testing.T) {
 			t.Fatalf("daemon %d: sent %v flushed=%v closed=%v, want hello then a flushed detach and a close", i, got, flushed, closed)
 		}
 	}
-	for i, c := range []*websocket.Conn{a, b} {
-		if code, _ := closeOf(t, ctx, c); code != CloseGoingAway {
+	for i := range codes {
+		if code := <-codes[i]; code != CloseGoingAway {
 			t.Fatalf("page %d closed %d, want 1001", i, code)
+		}
+	}
+}
+
+// readCloseCode reads until the socket fails and returns its close code, or
+// -1 when it failed without a close frame. Unlike closeOf it is safe off the
+// test goroutine.
+func readCloseCode(ctx context.Context, c *websocket.Conn) int {
+	for {
+		if _, _, err := c.Read(ctx); err != nil {
+			var ce websocket.CloseError
+			if !errors.As(err, &ce) {
+				return -1
+			}
+			return int(ce.Code)
 		}
 	}
 }

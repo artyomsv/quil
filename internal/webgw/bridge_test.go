@@ -80,6 +80,7 @@ type fakePage struct {
 	mu     sync.Mutex
 	frames []pageFrame
 	closed int
+	reason string
 	block  chan struct{} // non-nil: writes wait on it
 	gen    uint64        // set by attach
 
@@ -98,16 +99,17 @@ func (p *fakePage) write(bin bool, b []byte) error {
 
 func (p *fakePage) WriteText(_ context.Context, b []byte) error   { return p.write(false, b) }
 func (p *fakePage) WriteBinary(_ context.Context, b []byte) error { return p.write(true, b) }
-func (p *fakePage) Close(code int, _ string) {
+func (p *fakePage) Close(code int, reason string) {
 	p.mu.Lock()
-	p.closed = code
+	p.closed, p.reason = code, reason
 	p.mu.Unlock()
 	if p.closeBlock != nil {
 		<-p.closeBlock
 	}
 }
-func (p *fakePage) closeCode() int { p.mu.Lock(); defer p.mu.Unlock(); return p.closed }
-func (p *fakePage) count() int     { p.mu.Lock(); defer p.mu.Unlock(); return len(p.frames) }
+func (p *fakePage) closeCode() int      { p.mu.Lock(); defer p.mu.Unlock(); return p.closed }
+func (p *fakePage) closeReason() string { p.mu.Lock(); defer p.mu.Unlock(); return p.reason }
+func (p *fakePage) count() int          { p.mu.Lock(); defer p.mu.Unlock(); return len(p.frames) }
 
 func testLimits() bridgeLimits {
 	return bridgeLimits{ControlMax: 512, LiveUnackedMax: 2 << 20, ReplayTabMax: 64 << 20, WriteTimeout: 10 * time.Second, ResyncsPerMin: 3, Version: "9.9.9"}
@@ -301,6 +303,37 @@ func TestBridge_DaemonLossClosesWith4003(t *testing.T) {
 	waitFor(t, "close 4003", func() bool { return p.closeCode() == CloseDaemonUnavailable })
 }
 
+func errorMsg(t *testing.T, id, message string) *ipc.Message {
+	t.Helper()
+	m, err := ipc.NewMessage(ipc.MsgError, ipc.ErrorPayload{Code: ipc.ErrCodeRefused, Message: message})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.ID = id
+	return m
+}
+
+// A revoked token: the daemon sends an id-less refusal, then closes. The page
+// is closed with 4004 and the daemon's reason, not with 4003.
+func TestBridge_RevokeThenLossClosesWith4004(t *testing.T) {
+	_, d, p := startBridge(t, testLimits())
+	d.in <- errorMsg(t, "", "token revoked")
+	_ = d.Close()
+	waitFor(t, "a close", func() bool { return p.closeCode() != 0 })
+	if p.closeCode() != CloseTokenRefused || p.closeReason() != "token revoked" {
+		t.Fatalf("closed %d %q, want 4004 \"token revoked\"", p.closeCode(), p.closeReason())
+	}
+}
+
+// A refusal that answers a request is not the daemon's last word: a loss after
+// it is still 4003.
+func TestBridge_AnsweredRefusalThenLossClosesWith4003(t *testing.T) {
+	_, d, p := startBridge(t, testLimits())
+	d.in <- errorMsg(t, "r1", "not allowed")
+	_ = d.Close()
+	waitFor(t, "close 4003", func() bool { return p.closeCode() == CloseDaemonUnavailable })
+}
+
 // After a resync the counters start at zero and output for the old page is
 // gone: the new page starts clean.
 func TestBridge_ReattachAfterResyncStartsClean(t *testing.T) {
@@ -421,6 +454,9 @@ func TestBridge_FatalFirstMessageClosesTheTab(t *testing.T) {
 		t.Fatal("a first message other than hello was accepted")
 	}
 	waitFor(t, "page closed", func() bool { return p.closeCode() != 0 })
+	if p.closeCode() != 1008 || p.closeReason() != "protocol error" {
+		t.Fatalf("closed %d %q, want 1008 \"protocol error\"", p.closeCode(), p.closeReason())
+	}
 	if !d.isClosed() {
 		t.Fatal("daemon conn still open")
 	}

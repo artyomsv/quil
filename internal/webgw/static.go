@@ -4,6 +4,8 @@ import (
 	"embed"
 	"io/fs"
 	"net/http"
+	"path"
+	"strings"
 )
 
 // dist holds the built browser client. In a checkout without a web build it
@@ -43,5 +45,21 @@ func StaticHandler() http.Handler {
 			_, _ = w.Write([]byte(noUIPage))
 		})
 	}
-	return http.FileServer(http.FS(distFS()))
+	return filesOnly(distFS())
+}
+
+// filesOnly serves the files of fsys and answers 404 for every directory but
+// the root (which serves index.html), so nothing lists the embedded tree.
+func filesOnly(fsys fs.FS) http.Handler {
+	files := http.FileServer(http.FS(fsys))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		name := strings.Trim(path.Clean("/"+r.URL.Path), "/")
+		if name != "" {
+			if st, err := fs.Stat(fsys, name); err == nil && st.IsDir() {
+				http.NotFound(w, r)
+				return
+			}
+		}
+		files.ServeHTTP(w, r)
+	})
 }

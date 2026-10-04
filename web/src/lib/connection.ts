@@ -1,4 +1,4 @@
-import { utf8ToBase64 } from './base64';
+import { bytesToBase64, utf8Bytes } from './base64';
 import { decodePaneOutput, undecodableDataLength } from './frame';
 import { CLOSE, type Message, type PaneOutputFrame, type WebWelcome } from './protocol';
 import { CLIENT_ID_KEY, LOGIN_KEY, SafeStorage, type StorageLike } from './storage';
@@ -55,6 +55,9 @@ const BACKOFF_MIN_MS = 1000;
 const BACKOFF_MAX_MS = 30000;
 const STABLE_MS = 60000;
 const JITTER = 0.2;
+// The gateway reads at most 1 MiB per frame, and base64 grows data by a
+// third, so input goes out in pieces of at most this many bytes.
+export const INPUT_CHUNK = 256 * 1024;
 
 export class Connection {
   private readonly storage: SafeStorage;
@@ -70,6 +73,10 @@ export class Connection {
   private unacked = 0;
   private socketEpoch = 0;
   private ackTimer: unknown = null;
+  // The id of this socket's latest hello, and whether the daemon answered it.
+  // A workspace_state is passed on only after the answer: see onFrame.
+  private helloId = '';
+  private helloAnswered = false;
 
   constructor(
     private readonly open: () => SocketLike,
@@ -93,9 +100,17 @@ export class Connection {
   }
 
   // sendInput sends pane_input without an id (the daemon answers only
-  // id-bearing input, and one reply per keystroke would flood the queue).
+  // id-bearing input, and one reply per keystroke would flood the queue). A
+  // large paste goes out as several messages of at most INPUT_CHUNK bytes. A
+  // cut can fall inside a character: the pieces travel in order on the one
+  // socket and the daemon writes them to the pane in order, so the pane reads
+  // the same bytes.
   sendInput(paneId: string, data: string): void {
-    this.sendRaw({ type: 'pane_input', payload: { pane_id: paneId, data: utf8ToBase64(data) } });
+    const bytes = utf8Bytes(data);
+    for (let i = 0; i < bytes.length; i += INPUT_CHUNK) {
+      const piece = bytesToBase64(bytes.subarray(i, i + INPUT_CHUNK));
+      this.sendRaw({ type: 'pane_input', payload: { pane_id: paneId, data: piece } });
+    }
   }
 
   // epoch counts sockets; it changes on every new one. Terminal code reads it
@@ -144,6 +159,8 @@ export class Connection {
     this.socket = s;
     this.socketEpoch++;
     this.opened = false;
+    this.helloId = '';
+    this.helloAnswered = false;
     s.onopen = () => {
       if (this.socket !== s) return;
       this.opened = true;
@@ -195,15 +212,30 @@ export class Connection {
       this.onWelcome(m.payload as WebWelcome);
       return;
     }
+    // After a resync the page re-attaches on the same daemon connection, and
+    // a workspace_state the daemon queued for it before the new hello still
+    // arrives first. The first state applied after a reconnect resets every
+    // terminal, so applying that stale one would let live bytes land before
+    // the replay. The daemon handles one connection's frames in order and
+    // answers hello before it reads the attach, so states are held back until
+    // the answer to this socket's hello (hello_resp, or an error naming it).
+    if (this.helloId !== '' && m.id === this.helloId && (m.type === 'hello_resp' || m.type === 'error')) {
+      this.helloAnswered = true;
+    }
+    if (m.type === 'workspace_state' && !this.helloAnswered) return;
     this.events.onMessage(m);
   }
 
   private onWelcome(w: WebWelcome): void {
     this.clientId = w.client_id;
     this.storage.setItem(CLIENT_ID_KEY, w.client_id);
+    // A second welcome on one socket (the gateway renewed an id the daemon
+    // refused as in use) starts a new hello, and states wait for its answer.
+    this.helloId = `hello-${++this.seq}`;
+    this.helloAnswered = false;
     this.sendRaw({
       type: 'hello',
-      id: `hello-${++this.seq}`,
+      id: this.helloId,
       payload: {
         kind: 'web',
         proto: 1,

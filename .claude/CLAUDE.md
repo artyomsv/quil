@@ -284,7 +284,7 @@ Project docs are now organized as a navigable tree under `docs/` (with the index
 - `docs/security.md` — tokens, rights levels, the TCP listener, audit log, Windows ACL status
 - `docs/sharing-a-workspace.md` — user guide in simple words: listener set-up, token examples per level, `--connect` locally and through an ssh tunnel, error messages
 - `docs/web.md` — user guide for `quil web`: start, the login code, ssh access, token mode, size, limits, troubleshooting by banner and close code
-- `docs/architecture.md` — 34 ADRs (moved from root `ARCHITECTURE.md`)
+- `docs/architecture.md` — 35 ADRs (moved from root `ARCHITECTURE.md`)
 - `docs/vision.md` — Project vision (moved from root `VISION.md`)
 - `docs/prd.md` — Original v1 PRD, historical reference (moved from root `PRD.md`)
 - `docs/roadmap.md` — Milestone status + planned work (moved from root `ROADMAP.md`)

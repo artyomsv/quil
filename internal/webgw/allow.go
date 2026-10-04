@@ -71,12 +71,26 @@ func newForwardGate(leasedID, version string) *forwardGate {
 }
 
 // ownHello returns a copy of a validated hello whose process fields are the
-// gateway's, not the page's.
+// gateway's, not the page's. A login's token id and nonce are never the
+// page's to send: they are blanked.
 func (g *forwardGate) ownHello(m *ipc.Message, h ipc.HelloPayload) (*ipc.Message, error) {
 	h.PID = os.Getpid()
 	h.ExeName = g.exeName
 	h.Version = g.version
-	p, err := json.Marshal(h)
+	h.TokenID, h.Nonce = "", ""
+	return withPayload(m, h)
+}
+
+// ownAttach returns a copy of a validated attach without a working
+// directory: the daemon's default directory for new panes must never come
+// from a browser page.
+func ownAttach(m *ipc.Message, a ipc.AttachPayload) (*ipc.Message, error) {
+	a.CWD = ""
+	return withPayload(m, a)
+}
+
+func withPayload(m *ipc.Message, payload any) (*ipc.Message, error) {
+	p, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
 	}
@@ -125,6 +139,11 @@ func (g *forwardGate) check(m *ipc.Message) (fwd, refuse *ipc.Message, fatal err
 		if err := json.Unmarshal(m.Payload, &a); err != nil || a.ClientID != g.leasedID {
 			return nil, refusal(m, "attach must name this tab's client id"), nil
 		}
+		c, err := ownAttach(m, a)
+		if err != nil {
+			return nil, refusal(m, "attach is malformed"), nil
+		}
+		return c, nil, nil
 	}
 	if idless[m.Type] {
 		c := *m

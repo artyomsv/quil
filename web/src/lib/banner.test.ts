@@ -31,6 +31,10 @@ describe('bannerFor', () => {
       text: 'The web server refused this page: expected web_open',
       retrying: false,
     });
+    expect(bannerFor(1008, 'protocol error', true)).toEqual({
+      text: 'The web server refused this page: protocol error',
+      retrying: false,
+    });
     expect(bannerFor(1008, '', true)).toEqual({
       text: 'The web server refused this page: no reason given',
       retrying: false,

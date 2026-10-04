@@ -9,8 +9,11 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/coder/websocket"
@@ -39,9 +42,10 @@ const (
 	// closeLoginRequired is the policy-violation close a page gets when its
 	// key does not match its session; the page answers it with the login form.
 	closeLoginRequired = int(websocket.StatusPolicyViolation)
+	// maxCloseReason is the most a WebSocket close reason can carry: a control
+	// frame holds 125 bytes and the close code takes two of them.
+	maxCloseReason = 123
 )
-
-var errTooManyTabs = errors.New("too many browser tabs")
 
 type Config struct {
 	Dial    Dialer
@@ -89,9 +93,11 @@ type Server struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	mu      sync.Mutex
-	tabs    map[string]*tab // live and held, by client id
-	dialing int             // tabs being dialled; they count toward the limit
+	mu   sync.Mutex
+	tabs map[string]*tab // live and held, by client id
+	// pending counts sockets accepted and not yet a tab: waiting for web_open
+	// or being dialled. They count toward the limit.
+	pending int
 	stopped bool
 	srv     *http.Server
 }
@@ -147,21 +153,27 @@ func (s *Server) Serve(l net.Listener) error {
 	return srv.Serve(l)
 }
 
+// handleWS checks Origin and then the cookie (Host was checked by
+// withSecurity), and takes a pending slot before the upgrade: a socket that
+// never sends web_open still holds one of the 16 places until it goes.
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
+	if !originAllowed(r.Header.Get("Origin"), r.Host) {
+		s.cfg.Logf("websocket refused: foreign origin")
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
 	session := sessionOf(r)
 	if !s.auth.Valid(session) {
 		s.cfg.Logf("websocket refused: no session")
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
-	if !originAllowed(r.Header.Get("Origin"), r.Host) {
-		s.cfg.Logf("websocket refused: foreign origin")
-		w.WriteHeader(http.StatusForbidden)
-		return
-	}
 	s.mu.Lock()
-	full := len(s.tabs)+s.dialing >= maxBridges
+	full := len(s.tabs)+s.pending >= maxBridges
 	stopped := s.stopped
+	if !full && !stopped {
+		s.pending++
+	}
 	s.mu.Unlock()
 	if full || stopped {
 		s.cfg.Logf("websocket refused: %d browser tabs already open", maxBridges)
@@ -175,16 +187,29 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		CompressionMode:    websocket.CompressionNoContextTakeover,
 	})
 	if err != nil {
+		s.releasePending()
 		return
 	}
 	c.SetReadLimit(pageFrameMax)
 	s.serveTab(r.Context(), c, session)
 }
 
+func (s *Server) releasePending() {
+	s.mu.Lock()
+	s.pending--
+	s.mu.Unlock()
+}
+
+// serveTab runs one socket. It holds the pending slot handleWS took until it
+// hands it to tabFor, which gives it back on every path.
 func (s *Server) serveTab(parent context.Context, c *websocket.Conn, session string) {
 	ctx, cancel := context.WithCancel(parent)
 	mine := &sockRef{cancel: cancel, done: make(chan struct{})}
+	holding := true
 	defer func() {
+		if holding {
+			s.releasePending()
+		}
 		cancel()
 		close(mine.done)
 	}()
@@ -212,6 +237,7 @@ func (s *Server) serveTab(parent context.Context, c *websocket.Conn, session str
 		return
 	}
 
+	holding = false
 	t, old, err := s.tabFor(ctx, open.ClientIDHint, session, mine)
 	if err != nil {
 		code := CloseDaemonUnavailable
@@ -220,11 +246,9 @@ func (s *Server) serveTab(parent context.Context, c *websocket.Conn, session str
 			code = CloseTokenRefused
 		case errors.Is(err, ErrVersionMismatch):
 			code = CloseVersionMismatch
-		case errors.Is(err, errTooManyTabs):
-			code = int(websocket.StatusTryAgainLater)
 		}
 		s.cfg.Logf("tab not opened: %v", err)
-		page.Close(code, closeReason(code))
+		page.Close(code, s.dialCloseReason(code, err))
 		return
 	}
 	// A page re-attaching on a held bridge: its previous socket's reader must
@@ -237,12 +261,9 @@ func (s *Server) serveTab(parent context.Context, c *websocket.Conn, session str
 		}
 	}
 
-	t.b.setLease(t.id)
-	welcome, err := ipc.NewMessage(MsgWebWelcome, WebWelcomePayload{ClientID: t.id, Rights: t.rights, Version: s.cfg.Version})
-	var wb []byte
-	if err == nil {
-		wb, err = json.Marshal(welcome)
-	}
+	id := s.idOf(t)
+	t.b.setLease(id)
+	wb, err := s.welcomeFrame(id, t.rights)
 	if err != nil {
 		t.b.close(CloseGoingAway, "page closed")
 		return
@@ -252,7 +273,7 @@ func (s *Server) serveTab(parent context.Context, c *websocket.Conn, session str
 		page.Close(CloseDaemonUnavailable, closeReason(CloseDaemonUnavailable))
 		return
 	}
-	s.cfg.Logf("tab opened: %s (%s)", t.id, t.rights)
+	s.cfg.Logf("tab opened: %s (%s)", id, t.rights)
 
 	go s.pinger(ctx, cancel, c)
 	for {
@@ -265,21 +286,40 @@ func (s *Server) serveTab(parent context.Context, c *websocket.Conn, session str
 			continue
 		}
 		if err := t.b.fromPage(gen, raw); err != nil {
-			s.cfg.Logf("tab %s: %v", t.id, err)
+			s.cfg.Logf("tab %s: %v", id, err)
 		}
 	}
 }
 
+// idOf reads a tab's client id, which renewID can change.
+func (s *Server) idOf(t *tab) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return t.id
+}
+
+func (s *Server) welcomeFrame(id, rights string) ([]byte, error) {
+	m, err := ipc.NewMessage(MsgWebWelcome, WebWelcomePayload{ClientID: id, Rights: rights, Version: s.cfg.Version})
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(m)
+}
+
 // tabFor returns the tab for a page that offered hint. A held bridge of the
 // same session and id is reclaimed (its previous socket is returned so the
-// caller can stop it); anything else dials a new daemon connection.
+// caller can stop it); anything else dials a new daemon connection. The
+// caller's pending slot is given back on every path: a reclaimed tab is
+// already counted, and a dialled one is counted as a tab from then on.
 func (s *Server) tabFor(ctx context.Context, hint, session string, mine *sockRef) (t *tab, old *sockRef, err error) {
 	s.mu.Lock()
 	if s.stopped {
+		s.pending--
 		s.mu.Unlock()
 		return nil, nil, errors.New("the web server is stopping")
 	}
 	if h := s.tabs[hint]; h != nil && h.held && h.session == session {
+		s.pending--
 		h.held = false
 		if h.timer != nil {
 			h.timer.Stop()
@@ -288,11 +328,6 @@ func (s *Server) tabFor(ctx context.Context, hint, session string, mine *sockRef
 		s.mu.Unlock()
 		return h, old, nil
 	}
-	if len(s.tabs)+s.dialing >= maxBridges {
-		s.mu.Unlock()
-		return nil, nil, errTooManyTabs
-	}
-	s.dialing++
 	s.mu.Unlock()
 
 	id := s.leases.acquire(hint, session)
@@ -303,7 +338,7 @@ func (s *Server) tabFor(ctx context.Context, hint, session string, mine *sockRef
 	stopWatch()
 	cancel()
 	s.mu.Lock()
-	s.dialing--
+	s.pending--
 	stopping := err == nil && s.stopped
 	if err != nil || stopping {
 		s.mu.Unlock()
@@ -319,6 +354,7 @@ func (s *Server) tabFor(ctx context.Context, hint, session string, mine *sockRef
 	})
 	t = &tab{id: id, b: b, session: session, rights: rights, sock: mine}
 	b.onResync = func() { s.hold(t) }
+	b.onIDInUse = func() { s.renewID(t) }
 	s.tabs[id] = t
 	s.mu.Unlock()
 
@@ -326,17 +362,40 @@ func (s *Server) tabFor(ctx context.Context, hint, session string, mine *sockRef
 		b.run(s.ctx)
 		b.close(CloseGoingAway, "web server stopped")
 		s.mu.Lock()
-		if s.tabs[id] == t {
-			delete(s.tabs, id)
+		cur := t.id
+		if s.tabs[cur] == t {
+			delete(s.tabs, cur)
 		}
 		if t.timer != nil {
 			t.timer.Stop()
 		}
 		t.held = false
 		s.mu.Unlock()
-		s.leases.release(id)
+		s.leases.release(cur)
 	}()
 	return t, nil, nil
+}
+
+// renewID gives a tab whose client id the daemon refused as in use (another
+// principal holds it) a freshly minted id, and sends its page a new
+// web_welcome. The page then says hello and attaches again under that id.
+func (s *Server) renewID(t *tab) {
+	s.mu.Lock()
+	if s.stopped || s.tabs[t.id] != t {
+		s.mu.Unlock()
+		return
+	}
+	old := t.id
+	id := s.leases.renew(old, t.session)
+	delete(s.tabs, old)
+	t.id = id
+	s.tabs[id] = t
+	s.mu.Unlock()
+	t.b.relabel(id)
+	s.cfg.Logf("tab %s: client id in use; renewed as %s", old, id)
+	if wb, err := s.welcomeFrame(id, t.rights); err == nil {
+		t.b.enqueueControl(wb)
+	}
 }
 
 // hold keeps a resynced bridge for the lease so its page can come back on the
@@ -388,8 +447,12 @@ func (s *Server) pinger(ctx context.Context, drop context.CancelFunc, c *websock
 	}
 }
 
-// Shutdown detaches every tab, live or held, and stops serving. It waits for
-// the detaches no longer than ctx allows.
+// Shutdown detaches every tab, live or held, closes every page with 1001 and
+// stops serving. It waits for the detaches and the page closes no longer than
+// ctx allows. The page close is waited for here because http.Server.Shutdown
+// does not wait for hijacked WebSocket connections: the process could exit
+// before the 1001 was written, and the page would read 1006 and retry a port
+// nobody listens on.
 func (s *Server) Shutdown(ctx context.Context) {
 	s.mu.Lock()
 	s.stopped = true
@@ -409,7 +472,7 @@ func (s *Server) Shutdown(ctx context.Context) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			t.b.close(CloseGoingAway, "the web server stopped")
+			t.b.closeWait(CloseGoingAway, "the web server stopped")
 		}()
 	}
 	done := make(chan struct{})
@@ -441,4 +504,47 @@ func closeReason(code int) string {
 		return "going away"
 	}
 	return fmt.Sprintf("closed (%d)", code)
+}
+
+// dialCloseReason is the close reason for a tab whose dial failed: what went
+// wrong, without the sentinel's own words (the page names the code), and for
+// a version mismatch both versions.
+func (s *Server) dialCloseReason(code int, err error) string {
+	detail := err.Error()
+	for _, sentinel := range []error{ErrTokenRefused, ErrVersionMismatch} {
+		if errors.Is(err, sentinel) {
+			detail = strings.TrimPrefix(detail, sentinel.Error()+": ")
+		}
+	}
+	if code == CloseVersionMismatch && s.cfg.Version != "" {
+		detail += "; quil web is " + s.cfg.Version
+	}
+	return reasonText(detail, code)
+}
+
+// reasonText makes text fit a close frame, or falls back to the code's
+// fixed reason when nothing printable is left.
+func reasonText(text string, code int) string {
+	if r := printable(text, maxCloseReason); r != "" {
+		return r
+	}
+	return closeReason(code)
+}
+
+// printable keeps the printable runes of s and drops the rest (control and
+// format characters, bidi overrides, invalid UTF-8), cutting the result to at
+// most max bytes on a rune boundary. Text from the daemon or the page goes
+// through it before it reaches a close frame or the log.
+func printable(s string, max int) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r == utf8.RuneError || !unicode.IsPrint(r) {
+			continue
+		}
+		if b.Len()+utf8.RuneLen(r) > max {
+			break
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }

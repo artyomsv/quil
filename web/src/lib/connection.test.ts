@@ -311,7 +311,105 @@ describe('Connection', () => {
   it('passes other daemon messages to onMessage', () => {
     const r = rig();
     const s = opened(r);
+    s.recv(welcome);
+    s.recv({ type: 'hello_resp', id: s.sent[1]!.id, payload: {} });
     s.recv({ type: 'workspace_state', payload: {} });
-    expect(r.messages.map((m) => m.type)).toEqual(['workspace_state']);
+    expect(r.messages.map((m) => m.type)).toEqual(['hello_resp', 'workspace_state']);
+  });
+
+  it('holds back workspace_state until this socket hello is answered', () => {
+    const r = rig();
+    let s = opened(r);
+    s.recv({ type: 'workspace_state', payload: { rev: 1 } });
+    s.recv(welcome);
+    s.recv({ type: 'workspace_state', payload: { rev: 2 } });
+    s.recv({ type: 'pane_sizes', payload: { panes: [] } });
+    s.recv({ type: 'hello_resp', id: 'not-ours', payload: {} });
+    s.recv({ type: 'workspace_state', payload: { rev: 3 } });
+    expect(r.messages.map((m) => m.type)).toEqual(['pane_sizes', 'hello_resp']);
+    s.recv({ type: 'hello_resp', id: s.sent[1]!.id, payload: {} });
+    s.recv({ type: 'workspace_state', payload: { rev: 4 } });
+    expect(r.messages[r.messages.length - 1]).toEqual({ type: 'workspace_state', payload: { rev: 4 } });
+
+    // A resynced socket re-attaches on the same daemon connection: a state the
+    // daemon queued before the new hello must not be applied.
+    s.closeWith(4001);
+    s = r.sockets[1]!;
+    s.open();
+    s.recv(welcome);
+    const before = r.messages.length;
+    s.recv({ type: 'workspace_state', payload: { rev: 5 } });
+    expect(r.messages).toHaveLength(before);
+    s.recv({ type: 'hello_resp', id: s.sent[1]!.id, payload: {} });
+    s.recv({ type: 'workspace_state', payload: { rev: 6 } });
+    expect(r.messages.slice(before).map((m) => m.payload)).toEqual([{}, { rev: 6 }]);
+  });
+
+  it('counts an error naming the hello as its answer', () => {
+    const r = rig();
+    const s = opened(r);
+    s.recv(welcome);
+    s.recv({ type: 'error', id: s.sent[1]!.id, payload: { code: 'bad_payload', message: 'x', type: 'hello' } });
+    s.recv({ type: 'workspace_state', payload: {} });
+    expect(r.messages.map((m) => m.type)).toEqual(['error', 'workspace_state']);
+  });
+
+  it('answers a second welcome with a new hello and attach under the new id', () => {
+    const r = rig();
+    const s = opened(r);
+    s.recv(welcome);
+    s.recv({ type: 'hello_resp', id: s.sent[1]!.id, payload: {} });
+    s.recv({ type: 'error', id: s.sent[2]!.id, payload: { code: 'refused', message: 'client id in use', type: 'attach' } });
+    s.recv({ type: 'web_welcome', payload: { client_id: 'c-2', rights: 'full', version: '1.2.3' } });
+    const [hello, attach] = s.sent.slice(3);
+    expect(hello!.payload).toMatchObject({ client_id: 'c-2' });
+    expect(attach!.payload).toMatchObject({ client_id: 'c-2' });
+    expect(r.storage.getItem('quil.web.client_id')).toBe('c-2');
+    // States wait for the answer to the new hello.
+    const before = r.messages.length;
+    s.recv({ type: 'workspace_state', payload: {} });
+    expect(r.messages).toHaveLength(before);
+    s.recv({ type: 'hello_resp', id: hello!.id, payload: {} });
+    s.recv({ type: 'workspace_state', payload: {} });
+    expect(r.messages.map((m) => m.type).slice(before)).toEqual(['hello_resp', 'workspace_state']);
+  });
+
+  it('sends a paste over 256 KiB as ordered id-less pieces that fit a frame', () => {
+    const r = rig();
+    const s = opened(r);
+    // In the second text one byte precedes the two-byte characters, so the
+    // cut at 256 KiB falls inside a character; the bytes still reassemble.
+    for (const text of ['x'.repeat(600 * 1024), 'a' + 'é'.repeat(300 * 1024)]) {
+      s.sent = [];
+      r.conn.sendInput('p1', text);
+      const frames = s.sent.filter((m) => m.type === 'pane_input');
+      const pieces = frames.map((m) => {
+        expect(m.id).toBeUndefined();
+        const p = m.payload as { pane_id: string; data: string };
+        expect(p.pane_id).toBe('p1');
+        return Uint8Array.from(atob(p.data), (c) => c.charCodeAt(0));
+      });
+      expect(pieces.length).toBeGreaterThan(1);
+      for (const p of pieces) expect(p.length).toBeLessThanOrEqual(256 * 1024);
+      for (const m of frames) expect(JSON.stringify(m).length).toBeLessThan(1 << 20);
+      const all = new Uint8Array(pieces.reduce((n, p) => n + p.length, 0));
+      let at = 0;
+      for (const p of pieces) {
+        all.set(p, at);
+        at += p.length;
+      }
+      expect(new TextDecoder().decode(all)).toBe(text);
+    }
+  });
+
+  it('stays down on a protocol error (1008) and keeps the login key', () => {
+    const r = rig();
+    r.storage.setItem('quil.web.key', 'k-1');
+    const s = opened(r);
+    s.closeWith(1008, 'protocol error');
+    r.clock.advance(60_000);
+    expect(r.sockets).toHaveLength(1);
+    expect(r.storage.getItem('quil.web.key')).toBe('k-1');
+    expect(r.closed).toEqual([[1008, 'protocol error', false]]);
   });
 });

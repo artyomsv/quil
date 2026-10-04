@@ -37,6 +37,12 @@ const (
 	CloseVersionMismatch   = 4005
 	CloseByAgent           = 4006
 	CloseGoingAway         = 1001
+	// closeProtocolError is the WebSocket policy-violation code: the page
+	// broke the protocol (a first message that is not its hello). It shows a
+	// banner and does not reconnect, since a retry would do the same.
+	closeProtocolError = 1008
+	// maxLoggedType bounds a page-chosen message type written to the log.
+	maxLoggedType = 64
 )
 
 type bridgeLimits struct {
@@ -133,11 +139,22 @@ type bridge struct {
 	replayPanes map[string]bool // panes with replay buffered for this page
 	resyncs     []time.Time
 	closed      bool
+	// attachID is the message ID of the last attach forwarded to the daemon,
+	// so a refusal answering it can be told from any other.
+	attachID string
+	// refused is the reason of an id-less refusal from the daemon, which it
+	// sends just before it closes the connection (the token was revoked or
+	// expired). The close that follows is then 4004, not 4003.
+	refused string
 
 	// onResync, set before run starts, is called after a resync detaches the
 	// page and before the page is told, so the owner can start waiting for the
 	// page to come back before the page can possibly reconnect.
 	onResync func()
+	// onIDInUse, set before run starts, is called on the daemon reader when
+	// the daemon refuses the page's attach (its client id is held by another
+	// principal), after the refusal was queued for the page.
+	onIDInUse func()
 }
 
 func newBridge(d DaemonConn, lim bridgeLimits, budget *replayBudget, now func() time.Time, logf func(string, ...any)) *bridge {
@@ -151,6 +168,15 @@ func newBridge(d DaemonConn, lim bridgeLimits, budget *replayBudget, now func() 
 func (b *bridge) setLease(id string) {
 	b.gateMu.Lock()
 	b.gate = newForwardGate(id, b.lim.Version)
+	b.gateMu.Unlock()
+}
+
+// relabel moves the tab to a new client id after the daemon refused the old
+// one as in use. The page's hello was already checked, so the gate keeps it;
+// only the id the page's hello and attach must name changes.
+func (b *bridge) relabel(id string) {
+	b.gateMu.Lock()
+	b.gate.leasedID = id
 	b.gateMu.Unlock()
 }
 
@@ -208,6 +234,7 @@ func (b *bridge) detachPage(code int, reason string) {
 	if b.onResync != nil {
 		b.onResync()
 	}
+	b.logf("resynced (%d)", code)
 	if p != nil {
 		go p.Close(code, reason)
 	}
@@ -217,26 +244,43 @@ func (b *bridge) detachPage(code int, reason string) {
 // went away by itself. A page that was already replaced, resynced away or
 // closed leaves the bridge alone.
 func (b *bridge) closePage(gen uint64, code int, reason string) {
-	b.closeIf(func() bool { return b.page != nil && b.pageGen == gen }, code, reason)
+	if p := b.shut(func() bool { return b.page != nil && b.pageGen == gen }, code, reason); p != nil {
+		go p.Close(code, reason)
+	}
 }
 
 // close sends detach and flushes it before closing the daemon connection —
 // a queued frame is discarded by a close — so a held master slot is released
-// at once rather than after the daemon's grace time. Then the page closes.
-func (b *bridge) close(code int, reason string) { b.closeIf(nil, code, reason) }
+// at once rather than after the daemon's grace time. Then the page closes, on
+// its own goroutine: close runs on the daemon reader too, which must not wait
+// for a page.
+func (b *bridge) close(code int, reason string) {
+	if p := b.shut(nil, code, reason); p != nil {
+		go p.Close(code, reason)
+	}
+}
 
-// closeIf is close that proceeds only when cond, evaluated under the bridge's
-// lock, holds (nil means always). The check and the close are one critical
-// section, so a resync cannot slip between them.
-func (b *bridge) closeIf(cond func() bool, code int, reason string) {
+// closeWait is close that returns only once the page's close has finished,
+// for the shutdown path, which must not let the process exit first.
+func (b *bridge) closeWait(code int, reason string) {
+	if p := b.shut(nil, code, reason); p != nil {
+		p.Close(code, reason)
+	}
+}
+
+// shut detaches, flushes and closes the daemon side when cond, evaluated
+// under the bridge's lock, holds (nil means always), and returns the page
+// that was attached for the caller to close. The check and the close are one
+// critical section, so a resync cannot slip between them.
+func (b *bridge) shut(cond func() bool, code int, reason string) pageConn {
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
-		return
+		return nil
 	}
 	if cond != nil && !cond() {
 		b.mu.Unlock()
-		return
+		return nil
 	}
 	b.closed = true
 	p := b.page
@@ -250,9 +294,8 @@ func (b *bridge) closeIf(cond func() bool, code int, reason string) {
 		b.d.Flush(detachFlushTimeout)
 	}
 	_ = b.d.Close()
-	if p != nil {
-		go p.Close(code, reason)
-	}
+	b.logf("closed (%d %s)", code, reason)
+	return p
 }
 
 func (b *bridge) resyncsInLastMinute() int {
@@ -298,9 +341,13 @@ func (b *bridge) run(ctx context.Context) {
 		m, err := b.d.Receive()
 		if err != nil {
 			b.mu.Lock()
-			closed := b.closed
+			closed, refused := b.closed, b.refused
 			b.mu.Unlock()
-			if !closed {
+			switch {
+			case closed:
+			case refused != "":
+				b.close(CloseTokenRefused, reasonText(refused, CloseTokenRefused))
+			default:
 				b.close(CloseDaemonUnavailable, "daemon unavailable")
 			}
 			return
@@ -329,11 +376,41 @@ func (b *bridge) fromDaemon(m *ipc.Message) {
 		b.enqueueOutput(p.PaneID, frame, int64(len(p.Data)), p.Ghost)
 		return
 	}
+	renew := m.Type == ipc.MsgError && b.noteRefusal(m)
 	raw, err := json.Marshal(m)
 	if err != nil {
 		return
 	}
 	b.enqueueControl(raw)
+	if renew && b.onIDInUse != nil {
+		b.onIDInUse()
+	}
+}
+
+// noteRefusal reads an error from the daemon for what it means to the
+// bridge. An id-less refusal is the last frame before the daemon closes the
+// connection: it is remembered for the close code. A refusal answering the
+// page's attach means another principal holds the client id; noteRefusal
+// reports true and the owner mints a new one.
+func (b *bridge) noteRefusal(m *ipc.Message) bool {
+	var p ipc.ErrorPayload
+	if m.DecodePayload(&p) != nil || p.Code != ipc.ErrCodeRefused {
+		return false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if m.ID == "" {
+		b.refused = p.Message
+		if b.refused == "" {
+			b.refused = closeReason(CloseTokenRefused)
+		}
+		return false
+	}
+	if m.ID != b.attachID {
+		return false
+	}
+	b.attachID = ""
+	return true
 }
 
 // enqueueControl queues one JSON frame for the page, or closes the tab as too
@@ -460,14 +537,20 @@ func (b *bridge) fromPage(gen uint64, raw []byte) error {
 	fwd, refuse, fatal := b.gate.check(&m)
 	b.gateMu.Unlock()
 	if fatal != nil {
-		b.close(CloseTooSlow, "protocol error")
+		b.close(closeProtocolError, "protocol error")
 		return fatal
 	}
 	if refuse != nil {
+		b.logf("refused %s from the page", printable(m.Type, maxLoggedType))
 		if out, err := json.Marshal(refuse); err == nil {
 			b.enqueueControl(out)
 		}
 		return nil
+	}
+	if fwd.Type == ipc.MsgAttach && fwd.ID != "" {
+		b.mu.Lock()
+		b.attachID = fwd.ID
+		b.mu.Unlock()
 	}
 	return b.d.Send(fwd)
 }

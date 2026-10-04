@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/artyomsv/quil/internal/clientauth"
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/logger"
 	"github.com/artyomsv/quil/internal/webgw"
@@ -32,23 +35,51 @@ func webHarness(t *testing.T) *authHarness {
 }
 
 type webRig struct {
+	srv    *webgw.Server
 	host   string
 	cookie string
 	key    string
 }
 
-// newWebRig serves a gateway whose dialer connects each tab to h's daemon, and
-// logs in.
+// newWebRig serves a gateway whose dialer connects each tab to h's daemon
+// socket, and logs in.
 func newWebRig(t *testing.T, h *authHarness) *webRig {
 	t.Helper()
+	return newWebRigWith(t, func(ctx context.Context, clientID string) (webgw.DaemonConn, string, error) {
+		c, err := ipc.NewClient(h.sock)
+		if err != nil {
+			return nil, "", err
+		}
+		return c, ipc.RightsFull, nil
+	})
+}
+
+// tokenWebDial logs each tab in to h's TCP listener with token, as quil web
+// --connect does.
+func tokenWebDial(h *authHarness, token string) webgw.Dialer {
+	return func(ctx context.Context, clientID string) (webgw.DaemonConn, string, error) {
+		c, err := ipc.NewClientWithDialer(ctx, func(ctx context.Context) (net.Conn, error) {
+			var dd net.Dialer
+			return dd.DialContext(ctx, "tcp", h.addr)
+		})
+		if err != nil {
+			return nil, "", err
+		}
+		hello := ipc.HelloPayload{Kind: "web", Proto: ipc.ProtocolVersion, ClientID: clientID}
+		resp, err := clientauth.ClientLogin(c, token, hello, 5*time.Second)
+		if err != nil {
+			c.Close()
+			return nil, "", fmt.Errorf("%w: %v", webgw.ErrTokenRefused, err)
+		}
+		return c, resp.Rights, nil
+	}
+}
+
+// newWebRigWith serves a gateway with dial, and logs in.
+func newWebRigWith(t *testing.T, dial webgw.Dialer) *webRig {
+	t.Helper()
 	srv := webgw.New(webgw.Config{
-		Dial: func(ctx context.Context, clientID string) (webgw.DaemonConn, string, error) {
-			c, err := ipc.NewClient(h.sock)
-			if err != nil {
-				return nil, "", err
-			}
-			return c, ipc.RightsFull, nil
-		},
+		Dial:    dial,
 		Version: "test",
 		Logf:    func(string, ...any) {},
 		Sleep:   func(time.Duration) {},
@@ -60,7 +91,7 @@ func newWebRig(t *testing.T, h *authHarness) *webRig {
 		defer cancel()
 		srv.Shutdown(ctx)
 	})
-	r := &webRig{host: ts.Listener.Addr().String()}
+	r := &webRig{srv: srv, host: ts.Listener.Addr().String()}
 
 	code, err := srv.NewCode()
 	if err != nil {
@@ -113,7 +144,11 @@ type webTab struct {
 }
 
 // open connects a new tab and reads its welcome.
-func (r *webRig) open(t *testing.T) *webTab {
+func (r *webRig) open(t *testing.T) *webTab { t.Helper(); return r.openAs(t, "") }
+
+// openAs connects a tab offering hint, the id the page held before, as a page
+// does when it reconnects.
+func (r *webRig) openAs(t *testing.T, hint string) *webTab {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -126,7 +161,7 @@ func (r *webRig) open(t *testing.T) *webTab {
 	}
 	t.Cleanup(func() { c.CloseNow() })
 	w := &webTab{t: t, c: c}
-	w.send("web_open", "", webgw.WebOpenPayload{Key: r.key})
+	w.send("web_open", "", webgw.WebOpenPayload{ClientIDHint: hint, Key: r.key})
 	f, err := w.next(ctx)
 	if err != nil || f.msg == nil || f.msg.Type != webgw.MsgWebWelcome {
 		t.Fatalf("first frame = %+v, %v; want web_welcome", f, err)
@@ -194,28 +229,105 @@ func (w *webTab) until(what string, match func(webFrame) bool) []webFrame {
 // closeCode reads until the socket fails and returns its close code.
 func (w *webTab) closeCode(ctx context.Context) int {
 	w.t.Helper()
+	code, _ := w.closeOf(ctx)
+	return code
+}
+
+// closeOf reads until the socket fails and returns its close code and reason.
+func (w *webTab) closeOf(ctx context.Context) (int, string) {
+	w.t.Helper()
+	code, reason, err := w.readToClose(ctx)
+	if err != nil {
+		w.t.Fatalf("the socket failed without a close frame: %v", err)
+	}
+	return code, reason
+}
+
+// readToClose is closeOf for a goroutine other than the test's: it reports a
+// socket that failed without a close frame as an error.
+func (w *webTab) readToClose(ctx context.Context) (int, string, error) {
 	for {
 		if _, err := w.next(ctx); err != nil {
 			var ce websocket.CloseError
 			if !errors.As(err, &ce) {
-				w.t.Fatalf("the socket failed without a close frame: %v", err)
+				return 0, "", err
 			}
-			return int(ce.Code)
+			return int(ce.Code), ce.Reason, nil
 		}
 	}
 }
 
 // attach says hello and attaches at a 120x40 window, then waits for the
 // daemon to finish the attach: a state_req is answered only after the attach
-// before it has been handled.
-func (w *webTab) attach() {
+// before it has been handled. It returns every frame read.
+func (w *webTab) attach() []webFrame {
+	w.t.Helper()
+	return w.attachSized(120, 40)
+}
+
+// attachSized is attach at a winCols x winRows window, with the pane
+// interior a current client reports beside it.
+func (w *webTab) attachSized(winCols, winRows int) []webFrame {
 	w.t.Helper()
 	w.send(ipc.MsgHello, "w-hello", ipc.HelloPayload{Kind: "web", Proto: ipc.ProtocolVersion, ClientID: w.id})
-	w.send(ipc.MsgAttach, "", ipc.AttachPayload{ClientID: w.id, Cols: 118, Rows: 36, WinCols: 120, WinRows: 40})
+	w.send(ipc.MsgAttach, "", ipc.AttachPayload{ClientID: w.id, Cols: winCols - 2, Rows: winRows - 4, WinCols: winCols, WinRows: winRows})
 	w.send(ipc.MsgStateReq, "w-state", struct{}{})
-	w.until("the state_req answer", func(f webFrame) bool {
+	return w.until("the state_req answer", func(f webFrame) bool {
 		return f.msg != nil && f.msg.Type == ipc.MsgWorkspaceState && f.msg.ID == "w-state"
 	})
+}
+
+// ack acknowledges a terminal-output frame, as the page does once xterm has
+// written it.
+func (w *webTab) ack(f webFrame) {
+	w.t.Helper()
+	if f.binary && len(f.data) > 0 {
+		w.send(webgw.MsgWebAck, "", webgw.WebAckPayload{Bytes: int64(len(f.data))})
+	}
+}
+
+// drainClient reads c until it fails, so the daemon never blocks on a client the
+// test does not read.
+func drainClient(c *ipc.Client) {
+	go func() {
+		for {
+			if _, err := c.Receive(); err != nil {
+				return
+			}
+		}
+	}()
+}
+
+// floodUntilClosed prints live output into pane until w (which reads and never
+// acknowledges) is closed, and returns the close code.
+func floodUntilClosed(t *testing.T, h *authHarness, paneID string, w *webTab) int {
+	t.Helper()
+	var stop atomic.Bool
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		chunk := bytes.Repeat([]byte("x"), 8192)
+		deadline := time.Now().Add(10 * time.Second)
+		for !stop.Load() && time.Now().Before(deadline) {
+			h.d.flushPaneOutput(paneID, chunk)
+			time.Sleep(200 * time.Microsecond)
+		}
+	}()
+	defer func() { stop.Store(true); <-done }()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	return w.closeCode(ctx)
+}
+
+func newTerminalPane(t *testing.T, h *authHarness) *Pane {
+	t.Helper()
+	tab := h.d.session.CreateTab("T")
+	pane, err := h.d.session.CreatePane(tab.ID, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	setPaneType(pane, "terminal")
+	return pane
 }
 
 func isWebState(f webFrame) bool { return f.msg != nil && f.msg.Type == ipc.MsgWorkspaceState }

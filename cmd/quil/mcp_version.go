@@ -33,13 +33,6 @@ const createFromTemplateMinVersion = "1.74.0"
 // feature.
 const listClientsMinVersion = "1.80.0"
 
-// sandboxClaudeConfigMinVersion is the fallback floor for create's
-// sandbox_claude_config field, used only for a daemon too old to send the
-// Requests list. Every daemon that sends the list is asked instead (the field
-// is in ipc.GatedRequests), so this number only has to be above every release
-// that lacks the field.
-const sandboxClaudeConfigMinVersion = "1.85.0"
-
 // daemonVersionProbeTimeout bounds remote version probes. A pre-versioning
 // daemon drops the request silently. Local startup uses handshakeTimeout;
 // this is a package var so remote-bridge tests can keep it short.

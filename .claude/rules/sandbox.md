@@ -644,9 +644,12 @@ direction is the reverse of the obvious one: with its own
 `shared_claude_config` on, an explicit `own` lands in the shared directory. So
 `ipc.FeatureSandboxClaudeConfig` is listed in `ipc.GatedRequests` and the MCP
 bridge's `requireCreateFields` sends the field only to a daemon whose Requests
-list names it (both `create_pane` and `create_tab.first_pane`); a daemon with
-no list falls back to `sandboxClaudeConfigMinVersion`. Release TUIs are
-exact-match gated; a dev TUI against an older daemon is the accepted gap.
+list names it (both `create_pane` and `create_tab.first_pane`). It fails
+CLOSED, unlike `requireRequest`: a daemon with no list — an unstamped `dev`
+build or an unknown version included — is refused, because there refusing is
+the only way to keep the isolation the caller asked for (Greptile, PR #252).
+Release TUIs are exact-match gated; a dev TUI against an older daemon is the
+accepted gap.
 
 **The F1 page owns paste on every row** (`pasteIntoSandboxSettings`, a branch in
 `Update`'s `tea.PasteMsg` arm). The generic `dialogEdit` arm only catches a

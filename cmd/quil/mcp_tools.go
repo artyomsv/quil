@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -313,17 +314,25 @@ func (in createPaneInput) usesDialogOptions() bool {
 // sandbox_claude_config has its own gate on top of the dialog-option floor: a
 // daemon that predates it IGNORES the field, and when that daemon's own
 // shared_claude_config is on, an explicit "own" lands in the shared directory —
-// an isolation request silently dropped. So the field goes only to a daemon
-// that lists it (ipc.GatedRequests); a daemon with no list at all falls back to
-// sandboxClaudeConfigMinVersion.
+// an isolation request silently dropped. So the field goes ONLY to a daemon
+// whose Requests list names it (ipc.GatedRequests). Unlike requireRequest this
+// fails CLOSED: a daemon with no list — an unstamped "dev" build or an unknown
+// version included — cannot say it honours the field, and the usual "unknown
+// is never a reason to refuse" rule does not hold where refusing is the only
+// way to keep a requested isolation.
 func (b *mcpBridge) requireCreateFields(tool string, in createPaneInput) error {
 	if in.usesDialogOptions() {
 		if err := b.requireDaemon(tool + " with name/toggles/resume/worktree/sandbox"); err != nil {
 			return err
 		}
 	}
-	if in.SandboxClaudeConfig != "" {
-		return b.requireRequest(tool+" with sandbox_claude_config", ipc.FeatureSandboxClaudeConfig, sandboxClaudeConfigMinVersion)
+	if in.SandboxClaudeConfig != "" && !slices.Contains(b.daemonRequests, ipc.FeatureSandboxClaudeConfig) {
+		v := b.daemonVersion
+		if v == "" {
+			v = "an unknown version"
+		}
+		return fmt.Errorf("%s with sandbox_claude_config: that daemon (%s) does not say it handles the field, and would ignore it — omit sandbox_claude_config or upgrade the daemon (quil remote setup <host> pushes this client's build)",
+			tool, v)
 	}
 	return nil
 }

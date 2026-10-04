@@ -292,7 +292,8 @@ func TestSandboxClaudeConfig_AllowedWhenTheDaemonHandlesIt(t *testing.T) {
 		{"named", &mcpBridge{daemonVersion: "1.84.0", daemonRequests: []string{ipc.FeatureSandboxClaudeConfig}}, "own", false},
 		{"not named", &mcpBridge{daemonVersion: "9.9.9", daemonRequests: []string{ipc.MsgListClientsReq}}, "own", true},
 		{"no list, older release", &mcpBridge{daemonVersion: "1.84.0"}, "shared", true},
-		{"no list, dev", &mcpBridge{daemonVersion: "dev"}, "own", false},
+		{"no list, dev", &mcpBridge{daemonVersion: "dev"}, "own", true},
+		{"no list, no version", &mcpBridge{}, "own", true},
 		{"field absent", &mcpBridge{daemonVersion: "1.84.0", daemonRequests: []string{ipc.MsgListClientsReq}}, "", false},
 	}
 	for _, tc := range cases {

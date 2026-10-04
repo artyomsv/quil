@@ -372,21 +372,33 @@ func TestWeb_AttachReplayAndLiveReachThePage(t *testing.T) {
 	})
 }
 
-func TestWeb_PaneInputIsIDlessAndNoRespArrives(t *testing.T) {
+// A paste chunk keeps its ID and is answered (spec 5b §4.3); a keystroke is
+// id-less and never is, since the daemon answers on a 64-slot must-deliver
+// queue.
+func TestWeb_PasteIsAnsweredKeystrokeIsNot(t *testing.T) {
 	h := webHarness(t)
 	r := newWebRig(t, h)
 	pane, sess := livePane(t, h)
 	w := r.open(t)
 	w.attach()
 
+	w.send(ipc.MsgPaneInput, "paste-1", ipc.PaneInputPayload{PaneID: pane.ID, Data: []byte("p")})
+	w.until("the paste chunk's answer", func(f webFrame) bool {
+		if f.msg == nil || f.msg.Type != ipc.MsgPaneInputResp || f.msg.ID != "paste-1" {
+			return false
+		}
+		var p ipc.PaneInputRespPayload
+		return json.Unmarshal(f.msg.Payload, &p) == nil && p.Delivered
+	})
+
 	before, _ := sess.counts()
-	w.send(ipc.MsgPaneInput, "k1", ipc.PaneInputPayload{PaneID: pane.ID, Data: []byte("x")})
+	w.send(ipc.MsgPaneInput, "", ipc.PaneInputPayload{PaneID: pane.ID, Data: []byte("x")})
 	waitUntil(t, "the input to reach the pane", func() bool {
 		n, _ := sess.counts()
 		return n > before
 	})
 
-	// The gateway strips the ID, so the daemon never answers it. This is the
+	// The keystroke has no ID, so the daemon never answers it. This is the
 	// last read on the socket: an expired read context closes it.
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()

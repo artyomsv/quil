@@ -142,3 +142,37 @@ func TestCheckForward_AttachWithoutClientIDIsRefused(t *testing.T) {
 		t.Fatal("attach without a client id was forwarded")
 	}
 }
+
+// A login's token id and nonce, and a working directory for new panes, are
+// never the page's to send: the forwarded hello and attach drop them and keep
+// everything else.
+func TestCheckForward_DropsLoginFieldsAndAttachCWD(t *testing.T) {
+	g := newForwardGate("web-p-1", "9.9.9")
+	hello := msg(t, ipc.MsgHello, "h1", ipc.HelloPayload{
+		Kind: "web", Proto: ipc.ProtocolVersion, ClientID: "web-p-1", TokenID: "tok-1", Nonce: "n-1",
+	})
+	fwd, _, fatal := g.check(hello)
+	if fwd == nil || fatal != nil {
+		t.Fatalf("hello: %v %v", fwd, fatal)
+	}
+	var h ipc.HelloPayload
+	if err := json.Unmarshal(fwd.Payload, &h); err != nil || h.TokenID != "" || h.Nonce != "" || h.ClientID != "web-p-1" {
+		t.Fatalf("forwarded hello %+v (%v)", h, err)
+	}
+
+	attach := msg(t, ipc.MsgAttach, "a1", ipc.AttachPayload{
+		ClientID: "web-p-1", Cols: 80, Rows: 24, WinCols: 100, WinRows: 30, Reattach: true, CWD: "/home/someone",
+	})
+	fwd, refuse, fatal := g.check(attach)
+	if fwd == nil || refuse != nil || fatal != nil {
+		t.Fatalf("attach: %v %v %v", fwd, refuse, fatal)
+	}
+	var a ipc.AttachPayload
+	if err := json.Unmarshal(fwd.Payload, &a); err != nil {
+		t.Fatal(err)
+	}
+	want := ipc.AttachPayload{ClientID: "web-p-1", Cols: 80, Rows: 24, WinCols: 100, WinRows: 30, Reattach: true}
+	if a != want || fwd.ID != "a1" {
+		t.Fatalf("forwarded attach %+v id %q, want %+v", a, fwd.ID, want)
+	}
+}

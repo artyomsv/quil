@@ -83,6 +83,20 @@ type tab struct {
 	holdGen uint64
 }
 
+// reclaimSlot is the place of one socket let in over the limit to reclaim a
+// held tab. Its fields are guarded by Server.mu.
+type reclaimSlot struct {
+	session string
+	conn    *websocket.Conn // set once the upgrade is done
+	// opened is set once the socket's first frame arrived; from then on a
+	// newer socket cannot take its place.
+	opened bool
+	// preempted is set when a newer socket of the session took the place.
+	// The slot is then already off the list, and the socket gives back
+	// nothing when it ends.
+	preempted bool
+}
+
 type Server struct {
 	cfg    Config
 	auth   *authStore
@@ -103,12 +117,12 @@ type Server struct {
 	// pending counts sockets accepted and not yet a tab: waiting for web_open
 	// or being dialled. They count toward the limit.
 	pending int
-	// reclaimPending counts, per session, sockets let in over the limit to
-	// reclaim a held tab and not yet past tabFor. A session gets at most one
-	// per tab held for it.
-	reclaimPending map[string]int
-	stopped        bool
-	srv            *http.Server
+	// reclaiming lists, per session and oldest first, the sockets let in
+	// over the limit to reclaim a held tab and not yet past tabFor. A session
+	// has at most one per tab held for it.
+	reclaiming map[string][]*reclaimSlot
+	stopped    bool
+	srv        *http.Server
 }
 
 func New(cfg Config) *Server {
@@ -134,7 +148,7 @@ func New(cfg Config) *Server {
 		openWait: openTimeout,
 		tabs:     map[string]*tab{},
 
-		reclaimPending: map[string]int{},
+		reclaiming: map[string][]*reclaimSlot{},
 	}
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	s.mux = http.NewServeMux()
@@ -173,7 +187,11 @@ func (s *Server) Serve(l net.Listener) error {
 // in, without a slot: its page is coming back for that tab, and reclaiming it
 // adds none. Until web_open names the tab this cannot be known, so tabFor
 // makes the final decision and refuses such a socket anything else. Such
-// sockets are bounded too: one waiting per tab held for the session.
+// sockets are bounded too: one per tab held for the session. When all of
+// those places are taken, the oldest socket that has sent nothing yet gives
+// its place to the new one and is closed with 1008 "replaced by a newer
+// connection", so a silent socket cannot keep the page from its tab until
+// the lease runs out.
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	if !originAllowed(r.Header.Get("Origin"), r.Host) {
 		s.cfg.Logf("websocket refused: foreign origin")
@@ -187,12 +205,23 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mu.Lock()
-	reserved := len(s.tabs)+s.pending < maxBridges
-	admit := !s.stopped && (reserved || s.heldTabsLocked(session) > s.reclaimPending[session])
-	if admit {
-		s.acquireLocked(reserved, session)
+	// rs is nil for a socket that took a pending slot.
+	var rs *reclaimSlot
+	var victim *websocket.Conn
+	admit := false
+	switch {
+	case s.stopped:
+	case len(s.tabs)+s.pending < maxBridges:
+		s.pending++
+		admit = true
+	default:
+		rs, victim, admit = s.reclaimPlaceLocked(session)
 	}
 	s.mu.Unlock()
+	if victim != nil {
+		// Off the lock and off this request: a close waits for the peer.
+		go victim.Close(websocket.StatusPolicyViolation, closeReplaced)
+	}
 	if !admit {
 		s.cfg.Logf("websocket refused: %d browser tabs already open", maxBridges)
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -205,11 +234,91 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		CompressionMode:    websocket.CompressionNoContextTakeover,
 	})
 	if err != nil {
-		s.release(reserved, session)
+		s.release(rs)
 		return
 	}
 	c.SetReadLimit(pageFrameMax)
-	s.serveTab(r.Context(), c, session, reserved)
+	if rs != nil && !s.bindReclaim(rs, c) {
+		// A newer socket took the place while this one was upgrading.
+		c.Close(websocket.StatusPolicyViolation, closeReplaced)
+		return
+	}
+	s.serveTab(r.Context(), c, session, rs)
+}
+
+// closeReplaced is the reason a waiting reclaim socket is closed with when a
+// newer socket of its session takes its place.
+const closeReplaced = "replaced by a newer connection"
+
+// reclaimPlaceLocked gives an over-the-limit socket of session a reclaim
+// place: a free one while the session has fewer than one per held tab, else
+// the place of its oldest socket still waiting for its first frame, whose
+// conn is returned for the caller to close (nil while that one is still
+// upgrading; it closes itself in bindReclaim). Caller holds s.mu.
+func (s *Server) reclaimPlaceLocked(session string) (rs *reclaimSlot, victim *websocket.Conn, ok bool) {
+	held := s.heldTabsLocked(session)
+	if held == 0 {
+		return nil, nil, false
+	}
+	q := s.reclaiming[session]
+	rs = &reclaimSlot{session: session}
+	if len(q) < held {
+		s.reclaiming[session] = append(q, rs)
+		return rs, nil, true
+	}
+	for i, old := range q {
+		if old.opened {
+			continue
+		}
+		old.preempted = true
+		next := make([]*reclaimSlot, 0, len(q))
+		next = append(next, q[:i]...)
+		next = append(next, q[i+1:]...)
+		s.reclaiming[session] = append(next, rs)
+		return rs, old.conn, true
+	}
+	return nil, nil, false
+}
+
+// bindReclaim records an upgraded socket's conn on its place, so a newer
+// socket can close it. false means the place was already taken.
+func (s *Server) bindReclaim(rs *reclaimSlot, c *websocket.Conn) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rs.conn = c
+	return !rs.preempted
+}
+
+// openedLocked marks a reclaim socket's first frame. false means the place
+// was taken first, and the socket must end. Caller holds s.mu.
+func (s *Server) openedLocked(rs *reclaimSlot) bool {
+	if rs.preempted {
+		return false
+	}
+	rs.opened = true
+	return true
+}
+
+// dropReclaimLocked takes rs off its session's list, unless a newer socket
+// already took its place. Caller holds s.mu.
+func (s *Server) dropReclaimLocked(rs *reclaimSlot) {
+	if rs.preempted {
+		return
+	}
+	q := s.reclaiming[rs.session]
+	for i, x := range q {
+		if x != rs {
+			continue
+		}
+		if len(q) == 1 {
+			delete(s.reclaiming, rs.session)
+			return
+		}
+		next := make([]*reclaimSlot, 0, len(q)-1)
+		next = append(next, q[:i]...)
+		s.reclaiming[rs.session] = append(next, q[i+1:]...)
+		return
+	}
 }
 
 // heldTabsLocked counts the resynced tabs held for session. Caller holds s.mu.
@@ -223,45 +332,28 @@ func (s *Server) heldTabsLocked(session string) int {
 	return n
 }
 
-// acquireLocked takes a socket's place: a pending slot when reserved, else
-// one of its session's reclaim places. Caller holds s.mu.
-func (s *Server) acquireLocked(reserved bool, session string) {
-	if reserved {
-		s.pending++
-		return
-	}
-	s.reclaimPending[session]++
-}
-
-// releaseLocked gives back what acquireLocked took. Caller holds s.mu.
-func (s *Server) releaseLocked(reserved bool, session string) {
-	if reserved {
+// release gives back a socket's place: the pending slot when rs is nil, else
+// its reclaim place.
+func (s *Server) release(rs *reclaimSlot) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if rs == nil {
 		s.pending--
 		return
 	}
-	if s.reclaimPending[session] <= 1 {
-		delete(s.reclaimPending, session)
-		return
-	}
-	s.reclaimPending[session]--
-}
-
-func (s *Server) release(reserved bool, session string) {
-	s.mu.Lock()
-	s.releaseLocked(reserved, session)
-	s.mu.Unlock()
+	s.dropReclaimLocked(rs)
 }
 
 // serveTab runs one socket. It holds the place handleWS took (a pending slot
-// when reserved, else a reclaim place) until it hands it to tabFor, which
+// when rs is nil, else a reclaim place) until it hands it to tabFor, which
 // gives it back on every path.
-func (s *Server) serveTab(parent context.Context, c *websocket.Conn, session string, reserved bool) {
+func (s *Server) serveTab(parent context.Context, c *websocket.Conn, session string, rs *reclaimSlot) {
 	ctx, cancel := context.WithCancel(parent)
 	mine := &sockRef{cancel: cancel, done: make(chan struct{})}
 	holding := true
 	defer func() {
 		if holding {
-			s.release(reserved, session)
+			s.release(rs)
 		}
 		cancel()
 		close(mine.done)
@@ -275,6 +367,15 @@ func (s *Server) serveTab(parent context.Context, c *websocket.Conn, session str
 	if err != nil || typ != websocket.MessageText {
 		page.Close(int(websocket.StatusPolicyViolation), "expected web_open")
 		return
+	}
+	if rs != nil {
+		s.mu.Lock()
+		ok := s.openedLocked(rs)
+		s.mu.Unlock()
+		if !ok {
+			// A newer socket took the place first; its close is under way.
+			return
+		}
 	}
 	var m ipc.Message
 	var open WebOpenPayload
@@ -291,7 +392,7 @@ func (s *Server) serveTab(parent context.Context, c *websocket.Conn, session str
 	}
 
 	holding = false
-	t, old, err := s.tabFor(ctx, open.ClientIDHint, session, mine, reserved)
+	t, old, err := s.tabFor(ctx, open.ClientIDHint, session, mine, rs)
 	if err != nil {
 		code := CloseDaemonUnavailable
 		switch {
@@ -365,14 +466,15 @@ func (s *Server) welcomeFrame(id, rights string) ([]byte, error) {
 // caller's pending slot is given back on every path: a reclaimed tab is
 // already counted, and a dialled one is counted as a tab from then on.
 //
-// A socket handleWS let in without a slot (reserved false) gives its reclaim
+// A socket handleWS let in without a slot (rs not nil) gives its reclaim
 // place back at once, under the same lock as the reclaim itself. It may
 // reclaim, and may dial only if a place is free now, which it then takes like
 // any other.
-func (s *Server) tabFor(ctx context.Context, hint, session string, mine *sockRef, reserved bool) (t *tab, old *sockRef, err error) {
+func (s *Server) tabFor(ctx context.Context, hint, session string, mine *sockRef, rs *reclaimSlot) (t *tab, old *sockRef, err error) {
+	reserved := rs == nil
 	s.mu.Lock()
 	if !reserved {
-		s.releaseLocked(false, session)
+		s.dropReclaimLocked(rs)
 	}
 	if s.stopped {
 		if reserved {

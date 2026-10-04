@@ -471,7 +471,7 @@ func TestWS_FullGatewayStillReclaimsAHeldTab(t *testing.T) {
 	waitFor(t, "the reclaim place back after the refusal", func() bool {
 		h.s.mu.Lock()
 		defer h.s.mu.Unlock()
-		return len(h.s.reclaimPending) == 0
+		return len(h.s.reclaiming) == 0
 	})
 
 	// Another session has no held tab and no place.
@@ -526,14 +526,14 @@ func TestWS_ReclaimSocketsOverTheCapAreBounded(t *testing.T) {
 		h.s.mu.Lock()
 		defer h.s.mu.Unlock()
 		n := 0
-		for _, v := range h.s.reclaimPending {
-			n += v
+		for _, q := range h.s.reclaiming {
+			n += len(q)
 		}
 		return n
 	}
-	refused := func(what string) {
+	refused := func(what, cookie string) {
 		t.Helper()
-		_, resp, err := websocket.Dial(ctx, "ws://"+h.host+"/ws", &websocket.DialOptions{HTTPHeader: h.header(s.cookie, h.origin())})
+		_, resp, err := websocket.Dial(ctx, "ws://"+h.host+"/ws", &websocket.DialOptions{HTTPHeader: h.header(cookie, h.origin())})
 		if err == nil || resp == nil || resp.StatusCode != http.StatusServiceUnavailable {
 			t.Fatalf("%s: err=%v resp=%v, want 503", what, err, resp)
 		}
@@ -550,7 +550,7 @@ func TestWS_ReclaimSocketsOverTheCapAreBounded(t *testing.T) {
 
 	// A bad first frame gives the place back.
 	c := waiting("first attempt")
-	refused("a second socket while one waits")
+	refused("another session while one waits", h.login().cookie)
 	if err := c.Write(ctx, websocket.MessageText, []byte("not json")); err != nil {
 		t.Fatal(err)
 	}
@@ -583,7 +583,7 @@ func TestWS_ReclaimSocketsOverTheCapAreBounded(t *testing.T) {
 		t.Fatalf("first frame is %s, want web_welcome", m.Type)
 	}
 	h.s.mu.Lock()
-	tabs, pending, rp := len(h.s.tabs), h.s.pending, len(h.s.reclaimPending)
+	tabs, pending, rp := len(h.s.tabs), h.s.pending, len(h.s.reclaiming)
 	h.s.mu.Unlock()
 	if tabs != maxBridges || pending != 0 || rp != 0 {
 		t.Fatalf("after the reclaim: %d tabs, %d pending, %d sessions reclaiming; want %d, 0, 0", tabs, pending, rp, maxBridges)
@@ -591,7 +591,73 @@ func TestWS_ReclaimSocketsOverTheCapAreBounded(t *testing.T) {
 	if n := h.dials.Load(); n != maxBridges {
 		t.Fatalf("daemon dialled %d times, want %d", n, maxBridges)
 	}
-	refused("a socket once nothing is held")
+	refused("a socket once nothing is held", s.cookie)
+}
+
+// A silent socket cannot keep a session's reclaim place: the session's next
+// socket takes it, and the silent one is closed.
+func TestWS_NewerReclaimSocketReplacesASilentOne(t *testing.T) {
+	h := newWSHarness(t, smallLiveCap)
+	ctx := testCtx(t)
+	s := h.login()
+	var held *websocket.Conn
+	var heldID string
+	for i := 0; i < maxBridges; i++ {
+		c, w := h.open(ctx, s, "")
+		if i == 0 {
+			held, heldID = c, w.ClientID
+		}
+	}
+	pushLive(t, h.daemon(0))
+	if code, _ := closeOf(t, ctx, held); code != CloseResync {
+		t.Fatalf("closed %d, want 4001", code)
+	}
+	reclaiming := func() int {
+		h.s.mu.Lock()
+		defer h.s.mu.Unlock()
+		n := 0
+		for _, q := range h.s.reclaiming {
+			n += len(q)
+		}
+		return n
+	}
+
+	silent, _, err := h.connect(ctx, s.cookie)
+	if err != nil {
+		t.Fatalf("silent socket: %v", err)
+	}
+	waitFor(t, "the silent socket to hold the place", func() bool { return reclaiming() == 1 })
+
+	page, _, err := h.connect(ctx, s.cookie)
+	if err != nil {
+		t.Fatalf("the page's socket was refused while a silent one waited: %v", err)
+	}
+	if code, reason := closeOf(t, ctx, silent); code != int(websocket.StatusPolicyViolation) || reason != closeReplaced {
+		t.Fatalf("silent socket closed %d %q, want 1008 %q", code, reason, closeReplaced)
+	}
+	if n := reclaiming(); n != 1 {
+		t.Fatalf("%d reclaim places taken after the handover, want 1", n)
+	}
+	_, resp, err := websocket.Dial(ctx, "ws://"+h.host+"/ws", &websocket.DialOptions{HTTPHeader: h.header(h.login().cookie, h.origin())})
+	if err == nil || resp == nil || resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("another session: err=%v resp=%v, want 503", err, resp)
+	}
+
+	sendMsg(t, ctx, page, MsgWebOpen, "", WebOpenPayload{ClientIDHint: heldID, Key: s.key})
+	m := readMsg(t, ctx, page)
+	var w WebWelcomePayload
+	if m.Type != MsgWebWelcome || m.DecodePayload(&w) != nil || w.ClientID != heldID {
+		t.Fatalf("got %s %s, want web_welcome for %s", m.Type, m.Payload, heldID)
+	}
+	h.s.mu.Lock()
+	tabs, pending, rp := len(h.s.tabs), h.s.pending, len(h.s.reclaiming)
+	h.s.mu.Unlock()
+	if tabs != maxBridges || pending != 0 || rp != 0 {
+		t.Fatalf("after the reclaim: %d tabs, %d pending, %d sessions reclaiming; want %d, 0, 0", tabs, pending, rp, maxBridges)
+	}
+	if n := h.dials.Load(); n != maxBridges {
+		t.Fatalf("daemon dialled %d times, want %d", n, maxBridges)
+	}
 }
 
 func TestWS_DuplicatedTabGetsANewID(t *testing.T) {

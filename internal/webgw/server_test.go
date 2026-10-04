@@ -218,7 +218,7 @@ func (h *wsHarness) open(ctx context.Context, s session, hint string) (*websocke
 	return c, w
 }
 
-func helloFor(id string) ipc.HelloPayload {
+func webHello(id string) ipc.HelloPayload {
 	return ipc.HelloPayload{Kind: "web", Proto: ipc.ProtocolVersion, ClientID: id}
 }
 
@@ -273,7 +273,7 @@ func TestWS_OpenWelcomeAndForward(t *testing.T) {
 	}
 	d := h.daemon(0)
 
-	sendMsg(t, ctx, c, ipc.MsgHello, "h1", helloFor(w.ClientID))
+	sendMsg(t, ctx, c, ipc.MsgHello, "h1", webHello(w.ClientID))
 	waitFor(t, "hello at the daemon", func() bool { return strings.Join(d.sentTypes(), ",") == ipc.MsgHello })
 
 	sendMsg(t, ctx, c, ipc.MsgTokenCreateReq, "t1", struct{}{})
@@ -314,7 +314,7 @@ func TestWS_ResyncReattachesOnTheSameDaemonConn(t *testing.T) {
 	if n := h.dials.Load(); n != 1 {
 		t.Fatalf("daemon dialled %d times, want 1", n)
 	}
-	sendMsg(t, ctx, c2, ipc.MsgHello, "h2", helloFor(w2.ClientID))
+	sendMsg(t, ctx, c2, ipc.MsgHello, "h2", webHello(w2.ClientID))
 	waitFor(t, "hello on the kept connection", func() bool { return strings.Join(d.sentTypes(), ",") == ipc.MsgHello })
 	if d.isClosed() {
 		t.Fatal("the kept daemon connection was closed")
@@ -430,8 +430,8 @@ func TestWS_ShutdownDetachesEveryTab(t *testing.T) {
 	s := h.login()
 	a, wa := h.open(ctx, s, "")
 	b, wb := h.open(ctx, s, "")
-	sendMsg(t, ctx, a, ipc.MsgHello, "h", helloFor(wa.ClientID))
-	sendMsg(t, ctx, b, ipc.MsgHello, "h", helloFor(wb.ClientID))
+	sendMsg(t, ctx, a, ipc.MsgHello, "h", webHello(wa.ClientID))
+	sendMsg(t, ctx, b, ipc.MsgHello, "h", webHello(wb.ClientID))
 	waitFor(t, "both hellos", func() bool {
 		return len(h.daemon(0).sentTypes()) == 1 && len(h.daemon(1).sentTypes()) == 1
 	})
@@ -460,7 +460,7 @@ func TestWS_LogHasNoSecrets(t *testing.T) {
 	ctx := testCtx(t)
 	s := h.login()
 	c, w := h.open(ctx, s, "")
-	sendMsg(t, ctx, c, ipc.MsgHello, "h", helloFor(w.ClientID))
+	sendMsg(t, ctx, c, ipc.MsgHello, "h", webHello(w.ClientID))
 	sendMsg(t, ctx, c, ipc.MsgPaneInput, "", ipc.PaneInputPayload{PaneID: "p1", Data: []byte("SECRETDATA")})
 	d := h.daemon(0)
 	waitFor(t, "input at the daemon", func() bool { return len(d.sentTypes()) == 2 })

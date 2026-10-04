@@ -436,6 +436,9 @@ const (
 	dialogNewTemplate
 	dialogTabPick   // pane context menu's "Move to tab…" picker — see tabpicker.go
 	dialogGroupName // New group… / Rename group name editor — see projectgroups_input.go
+	// F1 → Settings → Sandbox: the Ctrl+N sandbox defaults — see
+	// dialog_sandboxsettings.go
+	dialogSandboxSettings
 )
 
 // tuiClient is the subset of *ipc.Client the TUI uses on the Model. Defined
@@ -702,10 +705,14 @@ type Model struct {
 	// sandboxOn and sandboxImage are the create dialog's own row state.
 	sandboxOn    bool
 	sandboxImage string
-	// sandboxAuth is the sign-in mode chosen for THIS pane, "" until the user
-	// touches the row — which means "follow [sandbox] auth", so the dialog
-	// never silently overrides a configured default just by being opened.
-	sandboxAuth string
+	// sandboxImages remembers the last image per destination (nil functions
+	// = no memory; see SetSandboxImageStore).
+	sandboxImages sandboxImageStore
+	// sandboxSignIn is the sign-in CHOICE for this pane — "browser", "shared"
+	// or "token" — and "" until the user touches the row, which displays the
+	// configured default (defaultSandboxSignIn). A choice, not an auth mode:
+	// sandboxSignInFields maps it onto the two wire fields.
+	sandboxSignIn string
 	// sandboxErr is why the last Continue was refused, drawn on the row
 	// itself.
 	//
@@ -2924,6 +2931,14 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 			text := msg.Content // InsertMultiLine turns CR line breaks into newlines
 			m.tomlEditor.InsertMultiLine(text)
 			m.tomlEditor.Dirty = true
+			return m, nil
+		} else if m.dialog == dialogSandboxSettings {
+			// The page owns paste on every row: outside edit mode the generic
+			// dialogEdit arm below misses it, and the paste fell through to
+			// sendClipboardToPane — a trailing CR ran it in the hidden pane.
+			// While editing the image it is sanitized and bounded like a
+			// keypress.
+			m.pasteIntoSandboxSettings(msg.Content)
 			return m, nil
 		} else if m.dialog != dialogNone && m.dialogEdit {
 			m.dialogInput += sanitizeDialogInput(msg.Content)

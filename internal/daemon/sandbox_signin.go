@@ -242,7 +242,8 @@ func (d *Daemon) beginSandboxSignIn(pane *Pane, p *plugin.PanePlugin) bool {
 
 	d.announce(pane.ID, "Signing in to Claude Code.\r\n"+
 		"A browser window is opening — click Authorize there.\r\n"+
-		"This happens once; every sandbox pane after this is signed in.\r\n\r\n")
+		"This happens once; every Token sandbox pane after this is signed in.\r\n"+
+		"(Browser and Shared panes sign in inside their own container.)\r\n\r\n")
 
 	// Add BEFORE the go statement, never inside it: a Wait racing an Add that
 	// has not run yet returns immediately and the handle guarantees nothing.

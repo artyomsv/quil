@@ -718,6 +718,17 @@ func launchTUI() {
 		log.Printf("project groups: %v; starting with none", groupsErr)
 	}
 	model.SetProjectGroups(groupsState, groupsPath)
+	// The remembered sandbox image, per destination. Installed here rather
+	// than in NewModel for the reason SetRecentCWDs is: tests build a Model
+	// directly and must never touch the real ~/.quil.
+	model.SetSandboxImageStore(
+		func(dest string) string { return tui.LoadSandboxImage(config.SandboxImagePath(dest)) },
+		func(dest, image string) {
+			if err := tui.SaveSandboxImage(config.SandboxImagePath(dest), image); err != nil {
+				log.Printf("sandbox: remember image: %v", err)
+			}
+		},
+	)
 	model.SetSharedImportMarker(config.SharedImportPath())
 
 	// Keybindings. Migrate the legacy [keybindings] table on first launch, then

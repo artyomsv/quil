@@ -256,6 +256,9 @@ func registerCreateTabTool(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogger) {
 		}
 		req := ipc.CreateTabReqPayload{Name: input.Name, ProjectID: input.ProjectID}
 		if input.FirstPane != nil {
+			if err := bridge.requireCreateFields("create_tab", *input.FirstPane); err != nil {
+				return nil, nil, fmt.Errorf("create_tab: %w", err)
+			}
 			fp := input.FirstPane.toReq("")
 			req.FirstPane = &fp
 		}

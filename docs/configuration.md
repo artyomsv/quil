@@ -523,18 +523,24 @@ Controls AI panes that run inside a Docker container. Full guide:
 # daemon.
 #
 # Each pane can override this in the create dialog; this is only the default.
+# Also editable in F1 → Settings → Sandbox. The dialog sends the choice it
+# shows, so this client's value applies to remote projects too; the daemon
+# reads it only for panes created without a choice (MCP, older clients).
 # Quil never reads, copies, stores or refreshes a Claude credential in either
 # mode, and the token never reaches a command line or a log.
 auth = ""
 
-# One Claude config directory for every sandbox pane, so you sign in once.
-# It also merges them into ONE trust domain: that directory holds hooks and MCP
-# server definitions, so any sandbox pane can then write something every other
-# sandbox pane's claude executes inside its own container.
+# true makes "Shared" the dialog's default sign-in: one Claude config directory
+# for every Shared pane, so you sign in once. It also merges those panes into
+# ONE trust domain: that directory holds hooks and MCP server definitions, so
+# any Shared pane can write something every other Shared pane's claude runs.
+# Browser panes, and Codex/OpenCode containers, never get it. Each pane keeps
+# the choice it was made with.
 shared_claude_config = false
 
-# Pre-fills the dialog's image field. Ships empty and has no built-in fallback —
-# Quil publishes no image.
+# Pre-fills the dialog's image field until you create a sandbox pane on a host;
+# after that the dialog remembers the last image used on that host. Ships empty
+# and has no built-in fallback — Quil publishes no image.
 default_image = ""
 ```
 

@@ -569,81 +569,119 @@ func TestSetupFieldKind_SandboxAuthSitsUnderTheSwitch(t *testing.T) {
 	}
 }
 
-// An untouched row follows [sandbox] auth, so merely opening the dialog cannot
-// override a configured default.
-func TestEffectiveSandboxAuth_FollowsTheConfigUntilPicked(t *testing.T) {
+// The choice a config selects. Token wins whatever shared_claude_config says
+// (ResolveAuth decides the mode); browser + shared is Shared. Shared with the
+// F1 page so the two cannot disagree.
+func TestDefaultSandboxSignIn(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		auth   string
+		shared bool
+		want   string
+	}{
+		{"default is browser", "", false, "browser"},
+		{"browser + shared is shared", "browser", true, "shared"},
+		{"token wins over shared (legacy pair)", "token", true, "token"},
+		{"typo resolves to browser", "Token", false, "browser"},
+	}
+	for _, tt := range tests {
+		c := config.SandboxConfig{Auth: tt.auth, SharedClaudeConfig: tt.shared}
+		if got := defaultSandboxSignIn(c); got != tt.want {
+			t.Errorf("%s: got %q, want %q", tt.name, got, tt.want)
+		}
+	}
+}
+
+// An untouched row shows the configured default; picking overrides it.
+func TestEffectiveSandboxSignIn_FollowsTheConfigUntilPicked(t *testing.T) {
 	t.Parallel()
 	var m Model
 	m.cfg = config.Default()
-	m.cfg.Sandbox.Auth = "browser"
+	m.cfg.Sandbox.SharedClaudeConfig = true
 
-	if got := m.effectiveSandboxAuth(); got != "browser" {
-		t.Errorf("untouched row shows %q, want the configured browser", got)
+	if got := m.effectiveSandboxSignIn(); got != "shared" {
+		t.Errorf("untouched row shows %q, want the configured shared", got)
 	}
-	m.sandboxAuth = "token"
-	if got := m.effectiveSandboxAuth(); got != "token" {
+	m.sandboxSignIn = "token"
+	if got := m.effectiveSandboxSignIn(); got != "token" {
 		t.Errorf("after picking, row shows %q, want token", got)
 	}
 }
 
-// Arrows and space move between the two modes; typing must not.
-func TestHandleSandboxAuthFieldKey(t *testing.T) {
+// Arrows and space cycle the three choices in display order; typing must not.
+func TestHandleSandboxAuthFieldKey_CyclesThreeChoices(t *testing.T) {
 	t.Parallel()
 	var m Model
-	m.cfg = config.Default() // browser by default
-
-	if got := m.effectiveSandboxAuth(); got != "browser" {
-		t.Fatalf("the untouched row shows %q, want the browser default — a row that "+
-			"opens on the token would offer it to someone who never asked", got)
+	m.cfg = config.Default()
+	want := []string{"browser", "shared", "token", "browser"}
+	if got := m.effectiveSandboxSignIn(); got != want[0] {
+		t.Fatalf("untouched row shows %q, want browser — a row that opens on "+
+			"anything else offers a trade nobody asked for", got)
 	}
-	if !m.handleSandboxAuthFieldKey(tea.KeyPressMsg{Code: tea.KeyRight}) {
-		t.Fatal("right was not consumed")
+	for _, w := range want[1:] {
+		if !m.handleSandboxAuthFieldKey(tea.KeyPressMsg{Code: tea.KeyRight}) {
+			t.Fatal("right was not consumed")
+		}
+		if got := m.effectiveSandboxSignIn(); got != w {
+			t.Errorf("after right: %q, want %q", got, w)
+		}
 	}
-	if m.effectiveSandboxAuth() != "token" {
-		t.Errorf("right gave %q, want token", m.effectiveSandboxAuth())
+	m.handleSandboxAuthFieldKey(tea.KeyPressMsg{Code: tea.KeyLeft})
+	if got := m.effectiveSandboxSignIn(); got != "token" {
+		t.Errorf("left wrapped to %q, want token", got)
 	}
 	m.handleSandboxAuthFieldKey(tea.KeyPressMsg{Code: ' ', Text: " "})
-	if m.effectiveSandboxAuth() != "browser" {
-		t.Errorf("space did not cycle back, got %q", m.effectiveSandboxAuth())
+	if got := m.effectiveSandboxSignIn(); got != "browser" {
+		t.Errorf("space did not cycle on, got %q", got)
 	}
-
-	// Navigation and submit must always reach the dialog.
 	for _, k := range []tea.KeyPressMsg{{Code: tea.KeyTab}, {Code: tea.KeyEnter}, {Code: tea.KeyEsc}} {
 		if m.handleSandboxAuthFieldKey(k) {
 			t.Errorf("%v was consumed by the sign-in row", k)
 		}
 	}
-	// A value is not typed here.
 	if m.handleSandboxAuthFieldKey(tea.KeyPressMsg{Code: 'x', Text: "x"}) {
-		t.Error("a printable key was consumed by a two-way choice")
+		t.Error("a printable key was consumed by a choice row")
 	}
 }
 
-// The pane carries the chosen mode, or the daemon cannot honour it.
-func TestSandboxSpec_CarriesTheChosenAuth(t *testing.T) {
+// The row sends what it SHOWS, so the TUI's default reaches a remote daemon
+// (an empty Auth would resolve through THAT machine's config), and "shared"
+// can never land in Auth, where applySandboxSpec would drop it.
+func TestSandboxSpec_SendsTheDisplayedChoice(t *testing.T) {
 	t.Parallel()
-	var m Model
-	m.sandboxOn = true
-	m.sandboxImage = "img"
-
-	if spec := m.sandboxSpec(); spec == nil || spec.Auth != "" {
-		t.Errorf("untouched spec Auth = %+v, want empty so the daemon follows its config", spec)
+	tests := []struct {
+		name, pick      string
+		cfg             config.SandboxConfig
+		auth, claudeCfg string
+	}{
+		{"untouched default", "", config.SandboxConfig{}, "browser", "own"},
+		{"untouched config shared", "", config.SandboxConfig{SharedClaudeConfig: true}, "browser", "shared"},
+		{"untouched config token", "", config.SandboxConfig{Auth: "token"}, "token", "own"},
+		{"picked shared", "shared", config.SandboxConfig{}, "browser", "shared"},
+		{"picked token over shared config", "token", config.SandboxConfig{SharedClaudeConfig: true}, "token", "own"},
+		{"picked browser over shared config", "browser", config.SandboxConfig{SharedClaudeConfig: true}, "browser", "own"},
 	}
-	m.sandboxAuth = "browser"
-	if spec := m.sandboxSpec(); spec == nil || spec.Auth != "browser" {
-		t.Errorf("spec = %+v, want the chosen browser mode", spec)
+	for _, tt := range tests {
+		var m Model
+		m.cfg.Sandbox = tt.cfg
+		m.sandboxOn, m.sandboxImage, m.sandboxSignIn = true, "img", tt.pick
+		spec := m.sandboxSpec()
+		if spec == nil || spec.Auth != tt.auth || spec.ClaudeConfig != tt.claudeCfg {
+			t.Errorf("%s: spec = %+v, want auth=%q claude_config=%q", tt.name, spec, tt.auth, tt.claudeCfg)
+		}
 	}
 }
 
-// A mode picked for the LAST pane must not govern the next, which may be
+// A choice picked for the LAST pane must not govern the next, which may be
 // opened for the opposite reason.
-func TestResetSandboxField_ClearsTheAuthChoice(t *testing.T) {
+func TestResetSandboxField_ClearsTheSignInChoice(t *testing.T) {
 	t.Parallel()
 	var m Model
-	m.sandboxAuth = "browser"
+	m.sandboxSignIn = "shared"
 	m.resetSandboxField("")
-	if m.sandboxAuth != "" {
-		t.Errorf("the auth choice survived a reset: %q", m.sandboxAuth)
+	if m.sandboxSignIn != "" {
+		t.Errorf("the sign-in choice survived a reset: %q", m.sandboxSignIn)
 	}
 }
 
@@ -691,7 +729,7 @@ func TestRenderSetupDialog_DrawsTheSignInRow(t *testing.T) {
 	m := sandboxKeyModel(t)
 	frame := m.renderCreatePaneSetupDialog()
 
-	for _, want := range []string{"Sign in", "Token", "Browser"} {
+	for _, want := range []string{"Sign in", "Token", "Browser", "Shared"} {
 		if !strings.Contains(frame, want) {
 			t.Errorf("the frame does not contain %q — the sign-in row is not drawn:\n%s", want, frame)
 		}

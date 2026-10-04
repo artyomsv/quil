@@ -206,6 +206,7 @@ func (d *Daemon) oldWorkspaceStateMap(activeTab string, tabs []*Tab, panesByTab 
 			if pane.SandboxImage != "" {
 				paneData["sandbox_image"] = pane.SandboxImage
 				paneData["sandbox_auth"] = pane.SandboxAuth
+				paneData["sandbox_claude_config"] = pane.SandboxClaudeConfig
 				paneData["type"] = sandboxPaneType(pane.Type)
 			}
 			if pane.ContainerCWD != "" {

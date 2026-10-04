@@ -90,7 +90,9 @@ type PaneState struct {
 	WorktreePath      string            `json:"worktree_path,omitempty"`
 	SandboxImage      string            `json:"sandbox_image,omitempty"`
 	// SandboxAuth is present (possibly "") whenever SandboxImage is set.
-	SandboxAuth         *string  `json:"sandbox_auth,omitempty"`
+	SandboxAuth *string `json:"sandbox_auth,omitempty"`
+	// SandboxClaudeConfig is present (possibly "") whenever SandboxImage is set.
+	SandboxClaudeConfig *string  `json:"sandbox_claude_config,omitempty"`
 	ContainerCWD        string   `json:"container_cwd,omitempty"`
 	WorktreeInterrupted bool     `json:"worktree_interrupted,omitempty"`
 	InstanceName        string   `json:"instance_name,omitempty"`

@@ -448,6 +448,19 @@ type SandboxSpec struct {
 	// guessing wrong is either a pane that cannot authenticate or one that
 	// silently loses the model the user picked it for.
 	Auth string `json:"auth,omitempty"`
+
+	// ClaudeConfig picks THIS pane's Claude config directory: "own" (its own,
+	// the default) or "shared" (one directory for every pane that chose it, so
+	// the user signs in once). Empty follows [sandbox] shared_claude_config,
+	// which is what every older client, every restore of an older snapshot and
+	// MCP without the field send.
+	//
+	// Per-pane so a config change never moves an existing pane's transcripts,
+	// and so the shared trust domain holds only the panes that opted into it.
+	// Validated like Auth; an unknown value follows the config. A daemon too
+	// old to know the field ignores it and uses its own directory, which costs
+	// a sign-in and never isolation.
+	ClaudeConfig string `json:"claude_config,omitempty"`
 }
 
 // WorktreeSpec asks the daemon to create a linked worktree for a new pane.
@@ -1289,8 +1302,15 @@ type VersionRespPayload struct {
 
 // GatedRequests are the request types a daemon advertises in
 // VersionRespPayload.Requests. Add a type here when it is new enough that an
-// older daemon would drop it silently.
-var GatedRequests = []string{MsgCreateFromTemplateReq, MsgListClientsReq}
+// older daemon would drop it silently — or a request FIELD an older daemon
+// would ignore where ignoring it is unsafe (FeatureSandboxClaudeConfig).
+var GatedRequests = []string{MsgCreateFromTemplateReq, MsgListClientsReq, FeatureSandboxClaudeConfig}
+
+// FeatureSandboxClaudeConfig is listed in GatedRequests by a daemon that honours
+// SandboxSpec.ClaudeConfig. A daemon that predates it ignores the field, so an
+// explicit "own" would land in the shared directory when that daemon's own
+// shared_claude_config is on; the MCP bridge refuses to send the field there.
+const FeatureSandboxClaudeConfig = "sandbox_claude_config"
 
 // Memory reporting payloads
 

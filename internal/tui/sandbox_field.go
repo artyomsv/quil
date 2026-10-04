@@ -4,7 +4,9 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
+	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/plugin"
 )
@@ -104,7 +106,7 @@ func (m *Model) editSandboxRow(msg tea.KeyPressMsg) bool {
 	case " ", "space":
 		m.sandboxOn = !m.sandboxOn
 		if m.sandboxOn && m.sandboxImage == "" {
-			m.sandboxImage = m.cfg.Sandbox.DefaultImage
+			m.sandboxImage = m.sandboxImageDefault(m.createPaneDialogDest())
 		}
 		return true
 	case "backspace":
@@ -148,6 +150,12 @@ func (m Model) sandboxSubmitError() string {
 // Nil unless the user turned the row on. That keeps every other create
 // byte-identical on the wire and takes no new branch anywhere in the daemon —
 // the same property the worktree spec has, and for the same reason.
+//
+// The sign-in fields always carry the choice the row DISPLAYS, untouched or
+// not. An empty Auth used to mean "follow the daemon's config", but for a
+// remote project that is another machine's config, so the row could show one
+// mode while the pane got the other. The daemon gates every Claude-auth use on
+// the plugin, so a codex or opencode pane carrying these fields is unaffected.
 func (m Model) sandboxSpec() *ipc.SandboxSpec {
 	if !m.sandboxOn {
 		return nil
@@ -160,7 +168,8 @@ func (m Model) sandboxSpec() *ipc.SandboxSpec {
 		// daemon to run `docker run ""`.
 		return nil
 	}
-	return &ipc.SandboxSpec{Image: image, Auth: m.sandboxAuth}
+	auth, claudeConfig := sandboxSignInFields(m.effectiveSandboxSignIn())
+	return &ipc.SandboxSpec{Image: image, Auth: auth, ClaudeConfig: claudeConfig}
 }
 
 // resetSandboxField clears the row's state.
@@ -172,10 +181,10 @@ func (m Model) sandboxSpec() *ipc.SandboxSpec {
 // other fields learned this the same way.
 func (m *Model) resetSandboxField(dest string) {
 	m.sandboxOn = false
-	m.sandboxImage = m.cfg.Sandbox.DefaultImage
-	// Cleared with the rest: a mode chosen for the LAST pane must not silently
+	m.sandboxImage = m.sandboxImageDefault(dest)
+	// Cleared with the rest: a choice made for the LAST pane must not silently
 	// govern the next one, which may be opened for the opposite reason.
-	m.sandboxAuth = ""
+	m.sandboxSignIn = ""
 	m.sandboxErr = ""
 	// Pin the capability answer for the life of the dialog. It is fetched
 	// asynchronously and re-probed on a timer, so reading it live would add
@@ -213,21 +222,56 @@ func (m Model) renderSetupSandboxUnavailable() string {
 //
 // Its own focusable field rather than more keys on the switch row, because it
 // is a THIRD kind of control: the switch takes space, the image takes typing,
-// and a two-way choice needs neither of those meanings. Shown only while the
-// sandbox is ON, since it describes how that container authenticates.
+// and a choice needs neither of those meanings. Shown only while the sandbox is
+// ON, since it describes how that container authenticates.
 
-// sandboxAuthChoices are the modes the row offers, in display order. "" is not
-// among them: an untouched row follows the configured default, and picking is
-// what makes a pane carry its own answer.
-// Browser leads because it is the configured default and the only one of the
-// two that changes nothing outside the pane. Token's detail names the reach
+// sandboxAuthChoices are the choices the row offers, in display order. A
+// choice is NOT an auth mode: sandboxSignInFields maps it onto the two wire
+// fields, so "shared" can never reach SandboxSpec.Auth, where the daemon would
+// drop it as unknown.
+//
+// Browser leads because it is the default and the only one of the three that
+// changes nothing outside the pane. Shared's detail names the trust domain it
+// joins: every Shared pane mounts one config directory, so any of them can
+// plant a hook or MCP server the others run. Token's detail names the reach
 // rather than only the loss: the sign-in it skips saves a credential into the
-// user's environment, which every process started afterwards inherits — so the
-// cost lands on ORDINARY panes as well as this one, and the row is the last
-// place to say so before it does.
-var sandboxAuthChoices = []struct{ mode, label, detail string }{
-	{"browser", "Browser", "sign in in the container · full subscription"},
+// user's environment, which every process started afterwards inherits — so
+// the cost lands on ORDINARY panes as well as this one, and the row is the
+// last place to say so before it does.
+var sandboxAuthChoices = []struct{ choice, label, detail string }{
+	{"browser", "Browser", "sign in in this container · full subscription"},
+	// Cost first and short: the F1 page has ~50 cells for this line, and a
+	// warning cut to "they share ho…" states no cost at all.
+	{"shared", "Shared", "shares hooks, MCP servers, history · sign in once"},
 	{"token", "Token", "no sign-in · saves a token every later Claude uses"},
+}
+
+// sandboxSignInFields maps a row choice onto (Auth, ClaudeConfig) for the
+// wire. Token sends "own": a token pane opened from the dialog never enters
+// the shared directory, so that directory only ever serves browser panes and
+// its sign-in mode stamp cannot flip back and forth between the two.
+func sandboxSignInFields(choice string) (auth, claudeConfig string) {
+	switch choice {
+	case "shared":
+		return string(config.SandboxAuthBrowser), config.SandboxClaudeConfigShared
+	case "token":
+		return string(config.SandboxAuthToken), config.SandboxClaudeConfigOwn
+	}
+	return string(config.SandboxAuthBrowser), config.SandboxClaudeConfigOwn
+}
+
+// defaultSandboxSignIn is the choice a config selects. Token wins whatever
+// shared_claude_config says, because ResolveAuth decides the mode and a token
+// pane does not share; browser + shared is Shared. The F1 → Settings →
+// Sandbox page reads the same function, so the two cannot disagree.
+func defaultSandboxSignIn(c config.SandboxConfig) string {
+	if mode, _ := c.ResolveAuth(); mode == config.SandboxAuthToken {
+		return "token"
+	}
+	if c.SharedClaudeConfig {
+		return "shared"
+	}
+	return "browser"
 }
 
 // showSandboxAuthField reports whether the setup dialog offers the sign-in row.
@@ -236,33 +280,31 @@ var sandboxAuthChoices = []struct{ mode, label, detail string }{
 // is safe here and nowhere else in this dialog: the switch and this row are
 // adjacent, and toggling the switch is what moves the cursor onto or off it.
 func (m Model) showSandboxAuthField(p *plugin.PanePlugin) bool {
-	// Claude Code only: the two modes it offers are a CLAUDE_CODE_OAUTH_TOKEN
-	// and a Claude browser sign-in. Codex keeps its own ~/.codex credentials
-	// and opencode its own again, so the choice would describe an agent the
-	// user did not pick — and the daemon ignores it for them anyway.
+	// Claude Code only: the choices it offers are a CLAUDE_CODE_OAUTH_TOKEN
+	// and a Claude browser sign-in, own or shared. Codex keeps its own
+	// ~/.codex credentials and opencode its own again, so the choice would
+	// describe an agent the user did not pick — and the daemon ignores it for
+	// them anyway.
 	return m.showSandboxField(p) && m.sandboxOn && p.UsesClaudeAuth()
 }
 
-// effectiveSandboxAuth is the mode the row DISPLAYS: the user's pick, or the
-// configured default while they have not picked.
-//
-// The row must never show a choice the pane would not actually get, so this
-// resolves through the same rule the daemon uses.
-func (m Model) effectiveSandboxAuth() string {
-	if m.sandboxAuth != "" {
-		return m.sandboxAuth
+// effectiveSandboxSignIn is the choice the row DISPLAYS: the user's pick, or
+// the configured default while they have not picked. sandboxSpec sends exactly
+// this, so the row never shows a choice the pane would not actually get.
+func (m Model) effectiveSandboxSignIn() string {
+	if m.sandboxSignIn != "" {
+		return m.sandboxSignIn
 	}
-	mode, _ := m.cfg.Sandbox.ResolveAuth()
-	return string(mode)
+	return defaultSandboxSignIn(m.cfg.Sandbox)
 }
 
-// renderSetupSandboxAuthField draws the two-way choice.
+// renderSetupSandboxAuthField draws the choice.
 func (m Model) renderSetupSandboxAuthField(focused bool) string {
 	prefix, style := "  ", dialogNormal
 	if focused {
 		prefix, style = "> ", dialogSelected
 	}
-	cur := m.effectiveSandboxAuth()
+	cur := m.effectiveSandboxSignIn()
 
 	var b strings.Builder
 	b.WriteString(prefix + style.Render("Sign in") + "  ")
@@ -271,26 +313,32 @@ func (m Model) renderSetupSandboxAuthField(focused bool) string {
 			b.WriteString("  ")
 		}
 		mark := "( ) "
-		if c.mode == cur {
+		if c.choice == cur {
 			mark = "(•) "
 		}
 		b.WriteString(dialogValStyle.Render(mark + c.label))
 	}
 	if focused {
-		// The detail of the SELECTED mode, not both: the trade is what the
-		// user needs to see, and two lines of it would push Continue off a
-		// short terminal — the constraint every field in this dialog obeys.
+		// The detail of the SELECTED choice only: the trade is what the user
+		// needs to see, and more lines of it would push Continue off a short
+		// terminal — the constraint every field in this dialog obeys.
+		// The key hint gives way to the detail when both do not fit: the
+		// detail is the trade the user is choosing, the keys are in the footer.
+		budget := m.setupTextWidth() - setupRowIndent
 		for _, c := range sandboxAuthChoices {
-			if c.mode == cur {
-				b.WriteString("\n    " + dialogSubtle.Render(truncateToWidth(
-					c.detail+" — ←/→ or space to change", m.setupTextWidth()-setupRowIndent)))
+			if c.choice == cur {
+				line := c.detail + " — ←/→ or space to change"
+				if lipgloss.Width(line) > budget {
+					line = c.detail
+				}
+				b.WriteString("\n    " + dialogSubtle.Render(truncateToWidth(line, budget)))
 			}
 		}
 	}
 	return b.String()
 }
 
-// handleSandboxAuthFieldKey moves between the two modes. Reports whether it
+// handleSandboxAuthFieldKey moves between the choices. Reports whether it
 // consumed the key.
 //
 // Left/right and space, not typing: this is a choice, not a value. Tab and
@@ -308,21 +356,24 @@ func (m *Model) handleSandboxAuthFieldKey(msg tea.KeyPressMsg) bool {
 	return false
 }
 
-// stepSandboxAuth cycles the selection, wrapping. Two options, so a wrap and a
-// toggle are the same thing — written as a cycle so a third mode needs no new
-// key handling.
+// stepSandboxAuth cycles the selection, wrapping.
 func (m *Model) stepSandboxAuth(delta int) {
-	cur := m.effectiveSandboxAuth()
+	m.sandboxSignIn = stepSandboxChoice(m.effectiveSandboxSignIn(), delta)
+	// Any edit of the sandbox rows invalidates the last refusal, exactly as
+	// the switch row's edits do.
+	m.sandboxErr = ""
+}
+
+// stepSandboxChoice is the choice delta steps away from cur, wrapping. Shared
+// with the F1 → Settings → Sandbox page.
+func stepSandboxChoice(cur string, delta int) string {
 	idx := 0
 	for i, c := range sandboxAuthChoices {
-		if c.mode == cur {
+		if c.choice == cur {
 			idx = i
 			break
 		}
 	}
 	n := len(sandboxAuthChoices)
-	m.sandboxAuth = sandboxAuthChoices[((idx+delta)%n+n)%n].mode
-	// Any edit of the sandbox rows invalidates the last refusal, exactly as
-	// the switch row's edits do.
-	m.sandboxErr = ""
+	return sandboxAuthChoices[((idx+delta)%n+n)%n].choice
 }

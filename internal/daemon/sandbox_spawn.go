@@ -79,10 +79,23 @@ func applySandboxSpec(pane *Pane, spec *ipc.SandboxSpec) error {
 		log.Printf("pane %s: ignoring unknown sandbox auth mode of length %d; using the configured default",
 			pane.ID, len(spec.Auth))
 	}
+	// Validated like the auth mode: "shared" mounts a directory other panes'
+	// agents can write, so only a value this build understands is stored.
+	claudeConfig := ""
+	switch spec.ClaudeConfig {
+	case config.SandboxClaudeConfigOwn, config.SandboxClaudeConfigShared:
+		claudeConfig = spec.ClaudeConfig
+	case "":
+		// Absent: follow [sandbox] shared_claude_config.
+	default:
+		log.Printf("pane %s: ignoring unknown sandbox claude_config of length %d; using the configured default",
+			pane.ID, len(spec.ClaudeConfig))
+	}
 
 	pane.PluginMu.Lock()
 	pane.SandboxImage = spec.Image
 	pane.SandboxAuth = auth
+	pane.SandboxClaudeConfig = claudeConfig
 	pane.PluginMu.Unlock()
 	return nil
 }
@@ -156,8 +169,8 @@ func (d *Daemon) prepareSandbox(ctx context.Context, pane *Pane, pluginName, ima
 		return sandbox.Mapping{}, err
 	}
 	m.HostQuild = quild
-	if d.cfg.Sandbox.SharedClaudeConfig {
-		m.SharedClaudeRoot = filepath.Join(sandboxRoot(quilDir), "claude")
+	if d.paneSharesClaudeConfig(pane, pluginName) {
+		m.SharedClaudeRoot = sharedClaudeConfigDir(quilDir)
 	}
 
 	// The per-pane tree. Every directory the hook writes into lives under
@@ -352,8 +365,8 @@ func (d *Daemon) sandboxIdentity(pane *Pane, pluginName, hookMode string, record
 			log.Printf("sandbox: pane %s: [sandbox] auth is the token flow but %s is not set "+
 				"in the DAEMON's environment — the pane will ask you to sign in inside the "+
 				"container instead. Run `claude setup-token`, export the result where quild "+
-				"runs, and restart the daemon; or set [sandbox] auth = \"browser\" to choose "+
-				"the per-pane sign-in deliberately", pane.ID, oauthTokenEnv)
+				"runs, and restart the daemon; or pick Browser, or Shared (sign in once for "+
+				"all Shared panes), in the Ctrl+N dialog or F1 → Settings → Sandbox", pane.ID, oauthTokenEnv)
 		}
 	}
 	if runtime.GOOS != "windows" {

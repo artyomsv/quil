@@ -89,22 +89,37 @@ type SandboxConfig struct {
 	// Quil never reads, copies, stores or refreshes a credential in either
 	// mode. Copying ~/.claude/.credentials.json is deliberately NOT
 	// implemented — see docs/sandbox-panes.md.
+	//
+	// This is a DEFAULT. The Ctrl+N dialog pre-selects from it (with
+	// SharedClaudeConfig, through the TUI's defaultSandboxSignIn) and sends the
+	// choice it shows, so the client's value is what reaches a remote daemon.
+	// The daemon reads its own copy only for a create that names no mode (MCP,
+	// older clients). Editable in F1 → Settings → Sandbox, which writes this
+	// and SharedClaudeConfig together so it never writes token + shared.
 	Auth string `toml:"auth"`
 
-	// SharedClaudeConfig gives every sandbox pane ONE Claude config
-	// directory, so the user signs in once instead of once per pane.
+	// SharedClaudeConfig makes "Shared" the default Claude config directory
+	// choice: ONE directory for every pane that picked Shared, so the user
+	// signs in once instead of once per pane.
 	//
-	// It merges them into one trust domain, and the cost is real: that
+	// It merges those panes into one trust domain, and the cost is real: that
 	// directory holds user-scope settings (hooks), .claude.json (MCP
-	// servers), every transcript and the prompt history, so any sandbox pane
-	// can then plant a hook or an MCP server that every OTHER sandbox pane's
+	// servers), every transcript and the prompt history, so any Shared pane
+	// can then plant a hook or an MCP server that every OTHER Shared pane's
 	// claude executes inside its own container. Off by default for that
 	// reason. It is the alternative to `auth = "token"` for signing in once
 	// instead of once per pane, and the trade to weigh against it: one shared
 	// trust domain here, or a credential every later Claude inherits there.
+	//
+	// The choice is PER PANE (ipc.SandboxSpec.ClaudeConfig, persisted on the
+	// pane): this is only the default the dialog pre-selects, and what the
+	// daemon uses for a pane that recorded no choice. A non-Claude agent never
+	// gets the shared directory (daemon sharesClaudeConfig).
 	SharedClaudeConfig bool `toml:"shared_claude_config"`
 
-	// DefaultImage pre-fills the setup dialog's image field.
+	// DefaultImage pre-fills the setup dialog's image field until a sandbox
+	// pane has been created on that destination; after that the client's
+	// per-destination memory (SandboxImagePath) pre-fills instead.
 	//
 	// Ships empty and there is no built-in fallback. Quil publishes no image:
 	// running Claude Code inside a vendor's own image triggers the Commercial
@@ -124,6 +139,13 @@ const (
 	SandboxAuthToken SandboxAuthMode = "token"
 	// SandboxAuthBrowser signs in inside the container, once per pane.
 	SandboxAuthBrowser SandboxAuthMode = "browser"
+)
+
+// The two values a pane's Claude config directory choice can name. "" is not
+// among them: it means "follow [sandbox] shared_claude_config".
+const (
+	SandboxClaudeConfigOwn    = "own"
+	SandboxClaudeConfigShared = "shared"
 )
 
 // ResolveAuth maps the configured Auth string onto the mode to act on, and
@@ -972,6 +994,18 @@ func RecentCWDsPath(dest string) string {
 		return filepath.Join(QuilDir(), "recent-cwds.json")
 	}
 	return filepath.Join(QuilDir(), "recent-cwds-"+destFileKey(dest)+".json")
+}
+
+// SandboxImagePath is where the client remembers the last sandbox image used
+// on one destination, so the Ctrl+N dialog pre-fills it. TUI-owned, single
+// writer. Keyed like RecentCWDsPath and for the same reasons: an image built on
+// one host's docker may not exist on another's, and the destination reaches a
+// filename.
+func SandboxImagePath(dest string) string {
+	if dest == "" {
+		return filepath.Join(QuilDir(), "sandbox-image.json")
+	}
+	return filepath.Join(QuilDir(), "sandbox-image-"+destFileKey(dest)+".json")
 }
 
 // destFileKey turns an ssh destination into a safe, stable filename component.

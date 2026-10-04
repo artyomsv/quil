@@ -250,3 +250,56 @@ func TestCreateFromTemplate_DaemonWithoutTheRequest_IsRefusedHoweverNewItReads(t
 		t.Fatalf("released list_projects refused: %v", err)
 	}
 }
+
+// An older daemon IGNORES claude_config, and if its own shared_claude_config
+// is on, an explicit "own" then lands in the shared directory — isolation the
+// caller asked for, silently lost. So the field is sent only to a daemon that
+// says it handles it, on both create paths, and never otherwise.
+func TestSandboxClaudeConfig_RefusedByADaemonThatDoesNotHandleIt(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	// 1.84.0 answers the Requests list but does not name the field.
+	local := newFakeIPCDaemonRequests(t, "pane-local", "1.84.0", ipc.MsgCreateFromTemplateReq, ipc.MsgListClientsReq)
+	remote := newFakeIPCDaemonVersion(t, "pane-remote", "1.84.0")
+	session, _ := toolHarness(t, local, remote)
+	pane := map[string]any{"sandbox_image": "img:1", "sandbox_claude_config": "own"}
+	for _, host := range []string{"", "gpu"} {
+		args := map[string]any{"host": host}
+		for k, v := range pane {
+			args[k] = v
+		}
+		if _, err := callTool(t, session, "create_pane", args); err == nil || !strings.Contains(err.Error(), "sandbox_claude_config") {
+			t.Errorf("create_pane host %q: want a refusal naming the field, got %v", host, err)
+		}
+		if _, err := callTool(t, session, "create_tab", map[string]any{"host": host, "first_pane": pane}); err == nil || !strings.Contains(err.Error(), "sandbox_claude_config") {
+			t.Errorf("create_tab host %q: want a refusal naming the field, got %v", host, err)
+		}
+	}
+	if !local.sawNo(ipc.MsgCreatePaneReq) || !local.sawNo(ipc.MsgCreateTabReq) ||
+		!remote.sawNo(ipc.MsgCreatePaneReq) || !remote.sawNo(ipc.MsgCreateTabReq) {
+		t.Fatal("a refused create reached a daemon that would ignore the field")
+	}
+}
+
+// A daemon that names the field gets it; a create without the field is not
+// gated by it at all.
+func TestSandboxClaudeConfig_AllowedWhenTheDaemonHandlesIt(t *testing.T) {
+	cases := []struct {
+		name    string
+		b       *mcpBridge
+		field   string
+		refused bool
+	}{
+		{"named", &mcpBridge{daemonVersion: "1.84.0", daemonRequests: []string{ipc.FeatureSandboxClaudeConfig}}, "own", false},
+		{"not named", &mcpBridge{daemonVersion: "9.9.9", daemonRequests: []string{ipc.MsgListClientsReq}}, "own", true},
+		{"no list, older release", &mcpBridge{daemonVersion: "1.84.0"}, "shared", true},
+		{"no list, dev", &mcpBridge{daemonVersion: "dev"}, "own", true},
+		{"no list, no version", &mcpBridge{}, "own", true},
+		{"field absent", &mcpBridge{daemonVersion: "1.84.0", daemonRequests: []string{ipc.MsgListClientsReq}}, "", false},
+	}
+	for _, tc := range cases {
+		err := tc.b.requireCreateFields("create_pane", createPaneInput{SandboxImage: "img:1", SandboxClaudeConfig: tc.field})
+		if (err != nil) != tc.refused {
+			t.Errorf("%s: refused=%v (%v), want %v", tc.name, err != nil, err, tc.refused)
+		}
+	}
+}

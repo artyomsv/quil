@@ -1737,24 +1737,26 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 	// key returns before the prologue and mutates nothing, so the frame cannot
 	// have moved; released keys replay through Update and render as usual.
 	//
-	// Terminal input is strictly ordered, so a click or paste arriving while
-	// keys are held proves the tail is not coming: the held keys go first,
-	// ahead of the input that followed them. Any other message — a daemon
-	// broadcast, a Cmd result — can land in the middle of a real tail, so it
-	// leaves them held; deliverHeld routes them to the pane that had focus
-	// when holding began if one of those moved it. The message is then handled
-	// as normal; its own branch may mark the frame inert, so the defer re-arms
-	// rendering for the delivered keys.
-	if m.mouseTail.holding() && mouseTailFromTerminal(msg) {
-		var heldCmd tea.Cmd
-		m, heldCmd = m.deliverHeld(m.mouseTail.reset())
-		defer func() {
-			if mm, ok := retModel.(Model); ok {
-				mm.skipRender = false
-				retModel = mm
-			}
-			retCmd = tea.Batch(heldCmd, retCmd)
-		}()
+	// Terminal input is strictly ordered, so a click, a paste or another mouse
+	// report arriving while a head is armed proves its tail is not coming: the
+	// guard disarms, and any held keys go first, ahead of the input that
+	// followed them. Any other message — a daemon broadcast, a Cmd result —
+	// can land in the middle of a real tail, so it leaves the guard armed;
+	// deliverHeld still routes each key to where it was typed if one of those
+	// moved focus. The message is then handled as normal; its own branch may
+	// mark the frame inert, so the defer re-arms rendering for delivered keys.
+	if m.mouseTail.armed() && mouseTailFromTerminal(msg) {
+		if held := m.mouseTail.reset(); len(held) > 0 {
+			var heldCmd tea.Cmd
+			m, heldCmd = m.deliverHeld(held)
+			defer func() {
+				if mm, ok := retModel.(Model); ok {
+					mm.skipRender = false
+					retModel = mm
+				}
+				retCmd = tea.Batch(heldCmd, retCmd)
+			}()
+		}
 	}
 	switch ev := msg.(type) {
 	case uv.UnknownEvent:
@@ -1765,7 +1767,7 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		if len(release) > 0 {
 			m, cmd = m.deliverHeld(release)
 		}
-		if m.mouseTail.arm(ev, start, m.localFocus()) {
+		if m.mouseTail.arm(ev, start) {
 			m.skipRender = len(release) == 0
 			return m, tea.Batch(cmd, m.mouseTail.expireCmd())
 		}
@@ -1780,7 +1782,12 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		}
 		return m.deliverHeld(release)
 	case tea.KeyPressMsg:
-		switch verdict, held := m.mouseTail.feed(ev, start); verdict {
+		if !m.mouseTail.armed() {
+			break
+		}
+		// The key's target is taken now, as it is held: where it was typed is
+		// where it goes, whatever moves focus before it is delivered.
+		switch verdict, held := m.mouseTail.feed(ev, start, m.effectiveFocus()); verdict {
 		case mouseTailHold, mouseTailComplete:
 			m.skipRender = true
 			return m, nil

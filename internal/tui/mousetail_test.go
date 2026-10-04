@@ -240,8 +240,62 @@ func TestUpdate_HeldKeysGoBeforeTerminalInput(t *testing.T) {
 	if got := drainByPane(pm); got != "p1:4 p1:2 " {
 		t.Errorf("delivered = %q, want both keys in p1", got)
 	}
-	if guard := m.(Model).mouseTail; guard.holding() {
+	if guard := m.(Model).mouseTail; guard.armed() || len(guard.held) > 0 {
 		t.Error("the guard still holds keys after releasing them")
+	}
+}
+
+// TestUpdate_TerminalInputEndsAnArmedHeadWithNothingHeld: a click, paste or
+// another mouse report after a head proves its tail is over even before any
+// key was held, so typing that follows must not complete the stale report —
+// the `m` of "make" was eaten.
+func TestUpdate_TerminalInputEndsAnArmedHeadWithNothingHeld(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name     string
+		boundary []tea.Msg
+	}{
+		{"paste", []tea.Msg{tea.PasteStartMsg{}, tea.PasteEndMsg{}}},
+		{"another mouse report", nil}, // decoded from the terminal bytes below
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pm, _ := inputOrderTestModel(t, "p1", true)
+			var m tea.Model = *pm
+			msgs := decodeAsReader(t, "\x1b[<35;90;35")
+			if tt.boundary == nil {
+				msgs = append(msgs, decodeAsReader(t, "\x1b[<35;91;35M")...)
+			} else {
+				msgs = append(msgs, tt.boundary...)
+			}
+			msgs = append(msgs, decodeAsReader(t, "make")...)
+			for _, msg := range msgs {
+				m, _ = m.Update(msg)
+			}
+			if got := drainAll(pm); got != "make" {
+				t.Errorf("typed into pane = %q, want %q", got, "make")
+			}
+		})
+	}
+}
+
+// TestUpdate_HeldKeysGoWhereTheyWereTyped: focus that moves between the head
+// and the first held key is where the user typed, so the held digits and the
+// key that breaks the report all land there.
+func TestUpdate_HeldKeysGoWhereTheyWereTyped(t *testing.T) {
+	t.Parallel()
+	pm, tab := twoPaneModel()
+	var m tea.Model = *pm
+	for _, msg := range decodeAsReader(t, "\x1b[<3") {
+		m, _ = m.Update(msg)
+	}
+	m, _ = m.Update(daemonMsg{})
+	m = focusP2(tab, m.(Model))
+	for _, msg := range decodeAsReader(t, "42x") {
+		m, _ = m.Update(msg)
+	}
+	if got := drainByPane(pm); got != "p2:4 p2:2 p2:x " {
+		t.Errorf("delivered = %q, want every key in p2", got)
 	}
 }
 
@@ -250,7 +304,8 @@ func TestMouseTailFromTerminal(t *testing.T) {
 	t.Parallel()
 	release := []tea.Msg{
 		tea.MouseClickMsg{}, tea.MouseReleaseMsg{}, tea.MouseWheelMsg{},
-		tea.MouseMotionMsg{Button: tea.MouseLeft}, tea.PasteMsg{}, tea.PasteStartMsg{}, tea.PasteEndMsg{},
+		tea.MouseMotionMsg{Button: tea.MouseLeft}, tea.MouseMotionMsg{Button: tea.MouseNone},
+		tea.PasteMsg{}, tea.PasteStartMsg{}, tea.PasteEndMsg{},
 	}
 	for _, msg := range release {
 		if !mouseTailFromTerminal(msg) {
@@ -259,7 +314,7 @@ func TestMouseTailFromTerminal(t *testing.T) {
 	}
 	keep := []tea.Msg{
 		tea.KeyPressMsg{}, tea.KeyReleaseMsg{}, uv.UnknownEvent(""), mouseTailExpireMsg{},
-		tea.MouseMotionMsg{Button: tea.MouseNone}, PaneOutputMsg{}, WorkspaceStateMsg{},
+		PaneOutputMsg{}, WorkspaceStateMsg{},
 		clipboardPastedMsg{}, daemonMsg{},
 	}
 	for _, msg := range keep {
@@ -279,15 +334,15 @@ func TestMouseTailGuard_LateKeyReleasesWhatIsHeld(t *testing.T) {
 	t.Parallel()
 	var g mouseTailGuard
 	now := time.Unix(0, 0)
-	g.arm(uv.UnknownEvent("\x1b[<3"), now, localFocusKey{})
-	if v, _ := g.feed(key5, now); v != mouseTailHold {
+	g.arm(uv.UnknownEvent("\x1b[<3"), now)
+	if v, _ := g.feed(key5, now, localFocusKey{}); v != mouseTailHold {
 		t.Fatalf("first key verdict = %v, want hold", v)
 	}
-	v, release := g.feed(key5, now.Add(mouseTailWindow+time.Millisecond))
+	v, release := g.feed(key5, now.Add(mouseTailWindow+time.Millisecond), localFocusKey{})
 	if v != mouseTailRelease || len(release) != 1 {
 		t.Fatalf("late key = (%v, %d keys), want release of the 1 held", v, len(release))
 	}
-	if v, _ := g.feed(key5, now.Add(mouseTailWindow+2*time.Millisecond)); v != mouseTailPass {
+	if v, _ := g.feed(key5, now.Add(mouseTailWindow+2*time.Millisecond), localFocusKey{}); v != mouseTailPass {
 		t.Fatalf("after release verdict = %v, want pass — the guard stayed armed", v)
 	}
 }
@@ -298,10 +353,10 @@ func TestMouseTailGuard_StaleExpiryIsIgnored(t *testing.T) {
 	t.Parallel()
 	var g mouseTailGuard
 	now := time.Unix(0, 0)
-	g.arm(uv.UnknownEvent("\x1b[<3"), now, localFocusKey{})
+	g.arm(uv.UnknownEvent("\x1b[<3"), now)
 	old := g.gen
-	g.arm(uv.UnknownEvent("\x1b[<3"), now, localFocusKey{})
-	g.feed(key5, now)
+	g.arm(uv.UnknownEvent("\x1b[<3"), now)
+	g.feed(key5, now, localFocusKey{})
 	if got := g.expire(old); got != nil {
 		t.Fatalf("stale expiry released %d keys", len(got))
 	}
@@ -317,10 +372,10 @@ func TestMouseTailGuard_OnlyMouseHeadsArm(t *testing.T) {
 	for _, head := range []string{"\x1b[3", "\x1b[?1", "\x1b]11;", "\x1b[<35;90;35M", "\x1b[<;"} {
 		var g mouseTailGuard
 		now := time.Unix(0, 0)
-		if g.arm(uv.UnknownEvent(head), now, localFocusKey{}) {
+		if g.arm(uv.UnknownEvent(head), now) {
 			t.Errorf("head %q armed the guard", head)
 		}
-		if v, _ := g.feed(key5, now); v != mouseTailPass {
+		if v, _ := g.feed(key5, now, localFocusKey{}); v != mouseTailPass {
 			t.Errorf("head %q: key verdict = %v, want pass", head, v)
 		}
 	}

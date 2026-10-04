@@ -6,5 +6,9 @@
   {"name": "largest generation, non-UTF-8 bytes", "pane_id": "p", "ghost": false, "generation": "18446744073709551615",
    "data_hex": "00ff80", "frame_hex": "0100ffffffffffffffff017000ff80"},
   {"name": "empty data", "pane_id": "pane-1", "ghost": false, "generation": "1",
-   "data_hex": "", "frame_hex": "010000000000000000010670616e652d31"}
+   "data_hex": "", "frame_hex": "010000000000000000010670616e652d31"},
+  {"name": "255-byte pane id", "pane_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "ghost": false, "generation": "2",
+   "data_hex": "41", "frame_hex": "01000000000000000002ff61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616141"},
+  {"name": "non-ASCII pane id", "pane_id": "pane-é漢", "ghost": false, "generation": "3",
+   "data_hex": "6869", "frame_hex": "010000000000000000030a70616e652dc3a9e6bca26869"}
 ]

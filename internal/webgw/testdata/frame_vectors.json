@@ -1,0 +1,10 @@
+[
+  {"name": "ghost replay, generation 0", "pane_id": "pane-1", "ghost": true, "generation": "0",
+   "data_hex": "41", "frame_hex": "010100000000000000000670616e652d3141"},
+  {"name": "live, generation 7", "pane_id": "pane-1", "ghost": false, "generation": "7",
+   "data_hex": "1b5b324a", "frame_hex": "010000000000000000070670616e652d311b5b324a"},
+  {"name": "largest generation, non-UTF-8 bytes", "pane_id": "p", "ghost": false, "generation": "18446744073709551615",
+   "data_hex": "00ff80", "frame_hex": "0100ffffffffffffffff017000ff80"},
+  {"name": "empty data", "pane_id": "pane-1", "ghost": false, "generation": "1",
+   "data_hex": "", "frame_hex": "010000000000000000010670616e652d31"}
+]

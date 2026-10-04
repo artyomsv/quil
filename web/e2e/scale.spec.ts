@@ -59,6 +59,11 @@ test('70 panes stay within the memory and main-thread budget', async ({ page, qu
   expect(busy).toHaveLength(BUSY_PANES);
   for (const id of busy) await typeInto(quil.home, id, 'while true; do echo x; sleep 0.5; done\r');
 
+  // The page holds the busy output: count one hidden pane's lines of x.
+  const xLines = async (): Promise<number> =>
+    (await bufferText(page, busy[0] ?? '')).split('\n').filter((l) => l.trim() === 'x').length;
+  await expect.poll(xLines).toBeGreaterThan(0);
+  const xBefore = await xLines();
   await cdp.send('Profiler.enable');
   await cdp.send('Profiler.setSamplingInterval', { interval: 1000 });
   await cdp.send('Profiler.start');
@@ -76,6 +81,9 @@ test('70 panes stay within the memory and main-thread budget', async ({ page, qu
   }
   const top = [...byFn.entries()].sort((a, b) => b[1] - a[1]).slice(0, 40);
   console.log(`scale profile:\n${top.map(([k, v]) => `${v.toFixed(1)} ms  ${k}`).join('\n')}`);
+  const xAfter = await xLines();
+  console.log(`scale: busy pane x lines ${xBefore} -> ${xAfter}`);
+  expect(xAfter - xBefore).toBeGreaterThanOrEqual(5);
   expect(heap).toBeLessThan(HEAP_LIMIT);
   expect(task).toBeLessThan(TASK_LIMIT_S);
 });

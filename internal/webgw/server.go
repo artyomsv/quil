@@ -203,6 +203,12 @@ func (s *Server) Serve(l net.Listener) error {
 // place for openWait at most, and the page's own retry (503, then back-off)
 // gets in once it is replaced or times out. The page retries after a
 // "replaced" close too.
+//
+// What this does not stop: a holder of the cookie that keeps reopening a
+// silent socket just inside the grace can keep the page out until the lease
+// ends, and the page then needs a free place like any new tab. Doing that
+// takes the cookie and a forged exact Origin, so in practice a process of the
+// same user, which can already open tabs of its own.
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	if !originAllowed(r.Header.Get("Origin"), r.Host) {
 		s.cfg.Logf("websocket refused: foreign origin")

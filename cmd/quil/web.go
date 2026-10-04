@@ -183,7 +183,13 @@ func runWeb(args []string) {
 		dial = localWebDialer(sock)
 	}
 
-	srv := webgw.New(webgw.Config{Dial: dial, Version: version, Logf: log.Printf, Rand: rand.Reader, Now: time.Now, Sleep: time.Sleep})
+	srv := webgw.New(webgw.Config{
+		Dial: dial, Version: version, Logf: log.Printf, Rand: rand.Reader, Now: time.Now, Sleep: time.Sleep,
+		// Saved instances are expanded from THIS machine's files, as the TUI
+		// expands them from its own (spec 5b E7).
+		PluginsDir:    config.PluginsDir(),
+		InstancesPath: config.InstancesPath(),
+	})
 	ln, err := net.Listen("tcp", flags.Listen)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)

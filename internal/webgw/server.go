@@ -61,6 +61,11 @@ type Config struct {
 	Rand    io.Reader            // crypto/rand in production
 	Now     func() time.Time
 	Sleep   func(time.Duration)
+	// PluginsDir and InstancesPath are THIS machine's plugin definitions and
+	// instances.json (spec 5b E7). A page's saved-instance id is expanded from
+	// them; Task 7's /api/client and /api/instances read the same two.
+	PluginsDir    string
+	InstancesPath string
 }
 
 // sockRef is the WebSocket currently serving a tab: cancel stops its reader
@@ -156,6 +161,7 @@ func New(cfg Config) *Server {
 
 		reclaiming: map[string][]*reclaimSlot{},
 	}
+	s.limits.ExpandInstance = s.expandInstance
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	s.mux = http.NewServeMux()
 	s.mux.Handle("/", StaticHandler())

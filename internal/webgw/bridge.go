@@ -54,6 +54,9 @@ type bridgeLimits struct {
 	// Version is the gateway build's version; the forward gate writes it into
 	// every hello the page sends.
 	Version string
+	// ExpandInstance resolves saved instances for split_pane_req; see
+	// forwardGate.expand.
+	ExpandInstance func(pluginType, instanceID string) (string, []string, error)
 }
 
 func defaultBridgeLimits(version string) bridgeLimits {
@@ -158,7 +161,7 @@ type bridge struct {
 }
 
 func newBridge(d DaemonConn, lim bridgeLimits, budget *replayBudget, now func() time.Time, logf func(string, ...any)) *bridge {
-	b := &bridge{d: d, lim: lim, budget: budget, now: now, logf: logf, gate: newForwardGate("", lim.Version)}
+	b := &bridge{d: d, lim: lim, budget: budget, now: now, logf: logf, gate: newForwardGate("", lim.Version, lim.ExpandInstance)}
 	b.cond = sync.NewCond(&b.mu)
 	return b
 }
@@ -167,7 +170,7 @@ func newBridge(d DaemonConn, lim bridgeLimits, budget *replayBudget, now func() 
 // requirement: a page that re-attaches after a resync begins with a new hello.
 func (b *bridge) setLease(id string) {
 	b.gateMu.Lock()
-	b.gate = newForwardGate(id, b.lim.Version)
+	b.gate = newForwardGate(id, b.lim.Version, b.lim.ExpandInstance)
 	b.gateMu.Unlock()
 }
 
@@ -375,6 +378,11 @@ func (b *bridge) fromDaemon(m *ipc.Message) {
 		}
 		b.enqueueOutput(p.PaneID, frame, int64(len(p.Data)), p.Ghost)
 		return
+	}
+	if m.ID != "" && (m.Type == ipc.MsgPaneInputResp || m.Type == ipc.MsgError) {
+		b.gateMu.Lock()
+		b.gate.answered(m)
+		b.gateMu.Unlock()
 	}
 	renew := m.Type == ipc.MsgError && b.noteRefusal(m)
 	raw, err := json.Marshal(m)

@@ -588,3 +588,17 @@ func TestClosePage_StalePageLeavesAResyncedBridgeOpen(t *testing.T) {
 	b.closePage(p2.gen, CloseGoingAway, "page closed")
 	waitFor(t, "the current page's close to shut the bridge", d.isClosed)
 }
+
+// A pane_input_resp from the daemon frees the paste place its id held.
+func TestBridge_PasteAnswerFreesThePlace(t *testing.T) {
+	g := newForwardGate("web-p-1", "v", nil)
+	g.helloSeen = true
+	b := &bridge{gate: g, logf: func(string, ...any) {}}
+	g.pastes = map[string]bool{"c1": true, "c2": true}
+	ans, _ := ipc.NewMessage(ipc.MsgPaneInputResp, ipc.PaneInputRespPayload{PaneID: "p", Delivered: true})
+	ans.ID = "c1"
+	b.fromDaemon(ans)
+	if g.pastes["c1"] || !g.pastes["c2"] {
+		t.Fatalf("pastes after the answer: %v", g.pastes)
+	}
+}

@@ -440,6 +440,62 @@ func TestWS_SixteenTabsThenRefused(t *testing.T) {
 	}
 }
 
+// With every place taken, a page coming back for its held tab still gets it;
+// the same session asking for anything else, and any other session, does not.
+func TestWS_FullGatewayStillReclaimsAHeldTab(t *testing.T) {
+	h := newWSHarness(t, smallLiveCap)
+	ctx := testCtx(t)
+	s := h.login()
+	var held *websocket.Conn
+	var heldID string
+	for i := 0; i < maxBridges; i++ {
+		c, w := h.open(ctx, s, "")
+		if i == 0 {
+			held, heldID = c, w.ClientID
+		}
+	}
+	pushLive(t, h.daemon(0))
+	if code, _ := closeOf(t, ctx, held); code != CloseResync {
+		t.Fatalf("closed %d, want 4001", code)
+	}
+
+	// The same session without the held id: let in, then refused at web_open.
+	c, _, err := h.connect(ctx, s.cookie)
+	if err != nil {
+		t.Fatalf("a session holding a tab was refused before web_open: %v", err)
+	}
+	sendMsg(t, ctx, c, MsgWebOpen, "", WebOpenPayload{Key: s.key})
+	if code, _ := closeOf(t, ctx, c); code != CloseDaemonUnavailable {
+		t.Fatalf("a new tab over the cap closed %d, want 4003", code)
+	}
+
+	// Another session has no held tab and no place.
+	_, resp, err := websocket.Dial(ctx, "ws://"+h.host+"/ws", &websocket.DialOptions{HTTPHeader: h.header(h.login().cookie, h.origin())})
+	if err == nil || resp == nil || resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("another session: err=%v resp=%v, want 503", err, resp)
+	}
+
+	_, w := h.open(ctx, s, heldID)
+	if w.ClientID != heldID {
+		t.Fatalf("re-attached under %s, want %s", w.ClientID, heldID)
+	}
+	if n := h.dials.Load(); n != maxBridges {
+		t.Fatalf("daemon dialled %d times, want %d", n, maxBridges)
+	}
+	h.s.mu.Lock()
+	tabs, pending := len(h.s.tabs), h.s.pending
+	h.s.mu.Unlock()
+	if tabs != maxBridges || pending != 0 {
+		t.Fatalf("%d tabs and %d pending after the reclaim, want %d and 0", tabs, pending, maxBridges)
+	}
+
+	// Reclaimed, the tab is no longer held: its session is at the cap too.
+	_, resp, err = websocket.Dial(ctx, "ws://"+h.host+"/ws", &websocket.DialOptions{HTTPHeader: h.header(s.cookie, h.origin())})
+	if err == nil || resp == nil || resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("17th tab after the reclaim: err=%v resp=%v, want 503", err, resp)
+	}
+}
+
 func TestWS_DuplicatedTabGetsANewID(t *testing.T) {
 	h := newWSHarness(t, nil)
 	ctx := testCtx(t)

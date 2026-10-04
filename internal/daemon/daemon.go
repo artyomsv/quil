@@ -1590,7 +1590,7 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		d.handleMovePane(conn, msg)
 	case ipc.MsgUpdateLayout:
 		d.touchClientInput(conn)
-		d.handleUpdateLayout(msg)
+		d.handleUpdateLayout(conn, msg)
 	case ipc.MsgPaneInput:
 		d.touchClientInput(conn)
 		d.handlePaneInput(conn, msg)
@@ -3041,7 +3041,11 @@ func (d *Daemon) createPaneAt(payload ipc.CreatePanePayload, cwd, paneType strin
 // A spawn failure returns the pane alongside the error, so a caller that must
 // leave nothing behind can destroy it.
 func (d *Daemon) constructPaneAt(payload ipc.CreatePanePayload, cwd, paneType string) (*Pane, error) {
-	pane, err := d.session.CreatePane(payload.TabID, cwd)
+	create := d.session.CreatePane
+	if payload.Overlay {
+		create = d.session.CreateOverlayPane
+	}
+	pane, err := create(payload.TabID, cwd)
 	if err != nil {
 		return nil, fmt.Errorf("create pane error: %w", err)
 	}
@@ -4316,7 +4320,7 @@ func (d *Daemon) handleReloadPlugins() {
 	log.Printf("plugins reloaded")
 }
 
-func (d *Daemon) handleUpdateLayout(msg *ipc.Message) {
+func (d *Daemon) handleUpdateLayout(conn *ipc.Conn, msg *ipc.Message) {
 	var payload ipc.UpdateLayoutPayload
 	if err := msg.DecodePayload(&payload); err != nil {
 		return
@@ -4324,8 +4328,17 @@ func (d *Daemon) handleUpdateLayout(msg *ipc.Message) {
 
 	// Under sm.mu: SnapshotState copies Layout under the same lock, and
 	// MovePane reads it there for its template check.
-	if !d.session.SetTabLayout(payload.TabID, payload.Layout, payload.BaseRev) {
-		logger.Debug("update_layout: refused tab=%s (unknown tab or stale base_rev)", payload.TabID)
+	switch d.session.SetTabLayout(payload.TabID, payload.Layout, payload.BaseRev) {
+	case layoutStale:
+		logger.Debug("update_layout: refused tab=%s (stale base_rev)", payload.TabID)
+		// Answered only when the write carries an ID (replyError): the
+		// browser reverts its drag preview at once. The TUI sends none and
+		// adopts the next broadcast instead.
+		d.replyError(conn, msg, ipc.ErrCodeStale, "the layout changed since base_rev")
+		return
+	case layoutNoTab:
+		logger.Debug("update_layout: refused tab=%s (unknown tab)", payload.TabID)
+		d.replyError(conn, msg, ipc.ErrCodeStale, "no such tab")
 		return
 	}
 	// Every client now sends an update only after ITS OWN change and adopts

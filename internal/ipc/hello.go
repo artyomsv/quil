@@ -53,6 +53,10 @@ const (
 	// ErrCodeRefused answers a request (or a login) the conn's rights do not
 	// allow. It replaces the type's usual response.
 	ErrCodeRefused = "refused"
+	// ErrCodeStale answers an ID-bearing write made against a revision that
+	// is no longer current (update_layout's base_rev), or against a tab that
+	// is gone. Nothing was stored.
+	ErrCodeStale = "stale"
 )
 
 // Capabilities a daemon lists in HelloRespPayload.Caps, beside GatedRequests.

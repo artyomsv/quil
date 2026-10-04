@@ -24,7 +24,7 @@ type Tab struct {
 	Name           string
 	Color          string
 	Panes          []string        // Pane IDs in order
-	Layout         json.RawMessage // Opaque layout tree from TUI
+	Layout         json.RawMessage // Stored layout tree (layouttree JSON); kept consistent with Panes under sm.mu (layout_tree.go)
 	// LayoutRev is bumped on every accepted SetTabLayout. It is the
 	// compare-and-store base a client sends back on its NEXT write
 	// (UpdateLayoutPayload.BaseRev) and the value every client compares its
@@ -419,6 +419,11 @@ type Pane struct {
 	// pane is already published to the session maps; concurrent snapshots
 	// may read it). Excluded from disk snapshots.
 	Overlay bool
+	// treeless marks a pane that never belongs in its tab's layout tree (an
+	// overlay). Unlike Overlay it is set BEFORE the pane is published
+	// (CreateOverlayPane) and never changes, so the tree operations read it
+	// under sm.mu alone — they must not take PluginMu, which guards Overlay.
+	treeless bool
 	// OverlayHiddenAt is when the TUI last hid this overlay; zero means it is
 	// on screen. OverlayShownAt is when it was last shown, and orders the LRU
 	// eviction. Both are PluginMu-protected like Overlay itself.
@@ -873,6 +878,17 @@ func (sm *SessionManager) destroyTabLocked(tab *Tab) []*Pane {
 }
 
 func (sm *SessionManager) CreatePane(tabID string, cwd string) (*Pane, error) {
+	return sm.createPane(tabID, cwd, false)
+}
+
+// CreateOverlayPane is CreatePane for an overlay: the pane is published
+// already marked treeless, so no layout write in the window before
+// constructPaneAt sets Overlay can place it in the tab's tree.
+func (sm *SessionManager) CreateOverlayPane(tabID string, cwd string) (*Pane, error) {
+	return sm.createPane(tabID, cwd, true)
+}
+
+func (sm *SessionManager) createPane(tabID, cwd string, treeless bool) (*Pane, error) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -889,7 +905,8 @@ func (sm *SessionManager) CreatePane(tabID string, cwd string) (*Pane, error) {
 		OutputBuf: ringbuf.NewRingBuffer(sm.bufSize),
 		// This id has just been invented, so any hook record already filed
 		// under it belongs to a pane that no longer exists. See Pane.freshID.
-		freshID: true,
+		freshID:  true,
+		treeless: treeless,
 	}
 
 	sm.panes[id] = pane
@@ -929,6 +946,9 @@ func (sm *SessionManager) ReplacePane(oldPaneID string, newPane *Pane) error {
 				break
 			}
 		}
+		// The new pane takes the old leaf: position, orientation and ratio
+		// stay (AC-13), in the same hold as the membership swap.
+		substituteTreeLocked(tab, oldPaneID, newPane.ID)
 	}
 
 	newPane.TabID = oldPane.TabID
@@ -962,6 +982,7 @@ func (sm *SessionManager) DestroyPane(paneID string) error {
 				break
 			}
 		}
+		pruneTreeLocked(tab, paneID)
 	}
 
 	delete(sm.panes, paneID)
@@ -991,9 +1012,10 @@ const (
 // Pane.TabID follows — under tabIDMu as well as sm.mu, because every reader
 // outside this lock reads it through CurrentTabID. The pane itself (process,
 // output buffer, CWD, session ids, worktree, sandbox) is untouched, and so is
-// everything else: projects, the active tab and project, tabOrder, both
-// Layouts and both TemplateMains. The daemon has no active-pane state, and the
-// layout is the clients' to re-send.
+// everything else but the two layout trees: the source tree loses the pane,
+// the target tree (when it has one) gains it by layouttree.PlaceMoved, each
+// with its own LayoutRev bump; clients adopt both and send nothing (spec 5b
+// §3.2). The daemon has no active-pane state.
 //
 // A template tab that no client has laid out yet is refused on either side:
 // the client builds its tree from Tab.Panes (applyTemplateLayout), so a pane
@@ -1028,9 +1050,13 @@ func (sm *SessionManager) MovePane(paneID, tabID string) (from string, res moveP
 	if src != nil {
 		// Order-preserving, and a copy rather than an in-place shift.
 		src.Panes = removeString(src.Panes, paneID)
+		pruneTreeLocked(src, paneID)
 	}
 	if indexOfString(dst.Panes, paneID) < 0 {
 		dst.Panes = append(dst.Panes, paneID)
+	}
+	if !pane.treeless {
+		sm.placeMovedLocked(dst, paneID)
 	}
 	pane.tabIDMu.Lock()
 	pane.TabID = tabID
@@ -1149,28 +1175,30 @@ func (sm *SessionManager) UpdateTab(tabID, name, color string, clearColor bool) 
 	return true
 }
 
-// SetTabLayout replaces a tab's opaque layout under sm.mu, gated by a
+// SetTabLayout stores a client's tree for a tab under sm.mu, gated by a
 // compare-and-store on baseRev: nil accepts unconditionally (an older client,
 // or one that has not adopted revisions yet), a value equal to the tab's
-// current LayoutRev accepts, and anything else is refused with NO write at
-// all — not to Layout, not to LayoutRev. False also for an unknown tab. An
-// accepted write bumps LayoutRev, which is the new base the caller's NEXT
-// update carries. handleUpdateLayout used to write tab.Layout through the
-// live pointer with no lock, racing SnapshotState's copy — the
-// handleUpdateTab shape #229 fixed.
-func (sm *SessionManager) SetTabLayout(tabID string, layout json.RawMessage, baseRev *uint64) bool {
+// current LayoutRev accepts, and anything else is refused (layoutStale) with
+// NO write at all — not to Layout, not to LayoutRev. An accepted write is
+// validated first (validLayoutLocked): it can never store a dead, foreign,
+// overlay or repeated leaf, and it gains any live pane it lacks. An accepted
+// write bumps LayoutRev, which is the new base the caller's NEXT update
+// carries. handleUpdateLayout used to write tab.Layout through the live
+// pointer with no lock, racing SnapshotState's copy — the handleUpdateTab
+// shape #229 fixed.
+func (sm *SessionManager) SetTabLayout(tabID string, layout json.RawMessage, baseRev *uint64) layoutWrite {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	tab, ok := sm.tabs[tabID]
 	if !ok {
-		return false
+		return layoutNoTab
 	}
 	if baseRev != nil && *baseRev != tab.LayoutRev {
-		return false
+		return layoutStale
 	}
-	tab.Layout = layout
+	tab.Layout = sm.validLayoutLocked(tab, layout)
 	tab.LayoutRev++
-	return true
+	return layoutStored
 }
 
 func (sm *SessionManager) SwitchTab(tabID string) {

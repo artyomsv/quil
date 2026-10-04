@@ -7225,6 +7225,16 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 		case exists && !restored:
 			lp = m.syncTabLayout(tab, tabInfo, daemonPaneSet, paneMap, existingPanes, dest)
 			newPaneIDs = append(newPaneIDs, lp.created...)
+			// A pane the daemon already placed here after a move: the same
+			// adoption (and the same bystander exception) the arrival loop
+			// applies to a move it places itself.
+			if tab != m.activeTabModel() {
+				for _, id := range lp.moved {
+					if leaf := tab.Root.FindLeaf(id); leaf != nil {
+						adoptMovedPane(tab, leaf.Pane)
+					}
+				}
+			}
 		}
 
 		// Prune panes the daemon removed.

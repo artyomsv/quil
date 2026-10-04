@@ -59,7 +59,23 @@ test('70 panes stay within the memory and main-thread budget', async ({ page, qu
   expect(busy).toHaveLength(BUSY_PANES);
   for (const id of busy) await typeInto(quil.home, id, 'while true; do echo x; sleep 0.5; done\r');
 
+  await cdp.send('Profiler.enable');
+  await cdp.send('Profiler.setSamplingInterval', { interval: 1000 });
+  await cdp.send('Profiler.start');
   const { heap, task } = await idle('busy');
+  const { profile } = await cdp.send('Profiler.stop');
+  const selfMs = new Map<number, number>();
+  const samples = profile.samples ?? [];
+  const deltas = profile.timeDeltas ?? [];
+  samples.forEach((id, i) => selfMs.set(id, (selfMs.get(id) ?? 0) + (deltas[i] ?? 0) / 1000));
+  const byFn = new Map<string, number>();
+  for (const n of profile.nodes) {
+    const f = n.callFrame;
+    const key = `${f.functionName || '(anon)'} ${f.url.split('/').pop() ?? ''}:${f.lineNumber}:${f.columnNumber}`;
+    byFn.set(key, (byFn.get(key) ?? 0) + (selfMs.get(n.id) ?? 0));
+  }
+  const top = [...byFn.entries()].sort((a, b) => b[1] - a[1]).slice(0, 40);
+  console.log(`scale profile:\n${top.map(([k, v]) => `${v.toFixed(1)} ms  ${k}`).join('\n')}`);
   expect(heap).toBeLessThan(HEAP_LIMIT);
   expect(task).toBeLessThan(TASK_LIMIT_S);
 });

@@ -22,6 +22,7 @@ func keysModel(t *testing.T, file string) Model {
 		}
 	}
 	m := seqModel(t, nil)
+	disposeAtEnd(t, &m)
 	b, err := config.LoadBindings()
 	if err == nil {
 		m.SetBindings(b)

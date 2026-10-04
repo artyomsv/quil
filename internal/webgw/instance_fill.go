@@ -14,7 +14,7 @@ import (
 // read per call: a submit is rare, and nothing goes stale.
 func (s *Server) expandInstance(pluginType, id string) (string, []string, error) {
 	reg := plugin.NewRegistry()
-	if err := reg.LoadFromDir(s.cfg.PluginsDir); err != nil {
+	if err := reg.LoadFromDirQuiet(s.cfg.PluginsDir); err != nil {
 		return "", nil, fmt.Errorf("plugins: %w", err)
 	}
 	p := reg.Get(pluginType)

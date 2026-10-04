@@ -117,7 +117,16 @@ func CategoryOrder() []struct{ Key, Label string } {
 // registry that no longer has a corresponding TOML file on disk is dropped,
 // EXCEPT the Go-built-in "terminal" plugin which always survives. This makes
 // "delete a TOML, hit reload" behave the way users expect.
-func (r *Registry) LoadFromDir(dir string) error {
+func (r *Registry) LoadFromDir(dir string) error { return r.loadFromDir(dir, false) }
+
+// LoadFromDirQuiet is LoadFromDir without the per-plugin progress lines
+// (loaded, removed, deprecated), for a caller that loads a throwaway
+// registry on every request — the web gateway's saved-instance expansion —
+// and would otherwise write a dozen lines per request. A file that fails to
+// load is still logged.
+func (r *Registry) LoadFromDirQuiet(dir string) error { return r.loadFromDir(dir, true) }
+
+func (r *Registry) loadFromDir(dir string, quiet bool) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -147,7 +156,7 @@ func (r *Registry) LoadFromDir(dir string) error {
 		// Warn once per stale plugin per registry lifetime so authors notice
 		// and migrate off the deprecated [[notification_handlers]]; subsequent
 		// reloads (e.g. MsgReloadPlugins) stay silent to avoid log spam.
-		if len(p.NotificationHandlers) > 0 {
+		if len(p.NotificationHandlers) > 0 && !quiet {
 			if _, already := r.deprecationWarned.LoadOrStore(p.Name, struct{}{}); !already {
 				log.Printf("plugin %q: [[notification_handlers]] is deprecated and no longer evaluated; "+
 					"migrate to [[idle_handlers]] (same fields: pattern, title, severity)", p.Name)
@@ -155,7 +164,9 @@ func (r *Registry) LoadFromDir(dir string) error {
 		}
 		r.plugins[p.Name] = p
 		loaded[p.Name] = struct{}{}
-		log.Printf("loaded plugin %q from %q", p.Name, e.Name())
+		if !quiet {
+			log.Printf("loaded plugin %q from %q", p.Name, e.Name())
+		}
 	}
 
 	// Prune in-memory entries whose backing TOML file vanished. The Go
@@ -169,7 +180,9 @@ func (r *Registry) LoadFromDir(dir string) error {
 			continue
 		}
 		delete(r.plugins, name)
-		log.Printf("plugin %q removed from registry (no backing TOML)", name)
+		if !quiet {
+			log.Printf("plugin %q removed from registry (no backing TOML)", name)
+		}
 	}
 
 	return nil

@@ -136,8 +136,14 @@ func withPayload(m *ipc.Message, payload any) (*ipc.Message, error) {
 }
 
 // check returns the message to forward, or a refusal to send back to the
-// page, or a fatal error that closes the tab.
+// page, or a fatal error that closes the tab. It expands a saved instance
+// in place; the bridge calls prefill outside its lock and then checkFilled.
 func (g *forwardGate) check(m *ipc.Message) (fwd, refuse *ipc.Message, fatal error) {
+	return g.checkFilled(m, prefill(g.expand, m))
+}
+
+// checkFilled is check with the saved-instance expansion already done.
+func (g *forwardGate) checkFilled(m *ipc.Message, fill *instanceFill) (fwd, refuse *ipc.Message, fatal error) {
 	if !g.helloSeen {
 		if m.Type != ipc.MsgHello || m.ID == "" {
 			return nil, nil, errBadFirstMessage
@@ -189,7 +195,9 @@ func (g *forwardGate) check(m *ipc.Message) (fwd, refuse *ipc.Message, fatal err
 		if m.ID == "" {
 			return m, nil, nil
 		}
-		if len(g.pastes) >= pasteCap {
+		// A repeated id would hold no new place, so it could go past the
+		// cap; it is busy until its first copy is answered.
+		if len(g.pastes) >= pasteCap || g.pastes[m.ID] {
 			return nil, busy(m), nil
 		}
 		if g.pastes == nil {
@@ -213,7 +221,7 @@ func (g *forwardGate) check(m *ipc.Message) (fwd, refuse *ipc.Message, fatal err
 			return nil, refusal(m, "update_layout needs base_rev"), nil
 		}
 	case ipc.MsgSplitPaneReq:
-		return g.ownSplit(m)
+		return ownSplit(m, fill)
 	}
 	if idless[m.Type] {
 		c := *m
@@ -236,11 +244,52 @@ type pageSplitPane struct {
 	InstanceID string `json:"instance_id,omitempty"`
 }
 
+// instanceFill is a saved instance expanded for one split_pane_req: the
+// plugin type and id it was asked for, and the expander's answer.
+type instanceFill struct {
+	typ, id string
+	name    string
+	args    []string
+	err     error
+}
+
+var errNoInstances = errors.New("saved instances are not available")
+
+// splitPluginType is the plugin a split pane runs: an empty type is a
+// terminal, as on the daemon.
+func splitPluginType(p ipc.SplitPaneSpec) string {
+	if p.Type == "" {
+		return "terminal"
+	}
+	return p.Type
+}
+
+// prefill expands the saved instance a split_pane_req names, if any. It
+// reads files, so the bridge runs it before taking its gate lock; it touches
+// no gate state. Nil when the message names no instance (or does not parse:
+// ownSplit refuses that).
+func prefill(expand func(string, string) (string, []string, error), m *ipc.Message) *instanceFill {
+	if m.Type != ipc.MsgSplitPaneReq {
+		return nil
+	}
+	var in pageSplit
+	if json.Unmarshal(m.Payload, &in) != nil || in.Pane.InstanceID == "" {
+		return nil
+	}
+	f := &instanceFill{typ: splitPluginType(in.Pane.SplitPaneSpec), id: in.Pane.InstanceID}
+	if expand == nil {
+		f.err = errNoInstances
+		return f
+	}
+	f.name, f.args, f.err = expand(f.typ, f.id)
+	return f
+}
+
 // ownSplit drops page-supplied instance args and fills them, with the
 // instance's name, from the saved instance the page named by id, on the
 // gateway's disk (spec 5b E7, Ruling R-B). The forwarded frame is re-encoded
 // from the daemon's own type, so instance_id and unknown fields are gone.
-func (g *forwardGate) ownSplit(m *ipc.Message) (fwd, refuse *ipc.Message, fatal error) {
+func ownSplit(m *ipc.Message, fill *instanceFill) (fwd, refuse *ipc.Message, fatal error) {
 	var in pageSplit
 	if err := json.Unmarshal(m.Payload, &in); err != nil {
 		return nil, refusal(m, "split_pane_req is malformed"), nil
@@ -249,18 +298,13 @@ func (g *forwardGate) ownSplit(m *ipc.Message) (fwd, refuse *ipc.Message, fatal 
 	r.Pane = in.Pane.SplitPaneSpec
 	r.Pane.InstanceArgs, r.Pane.InstanceName = nil, ""
 	if id := in.Pane.InstanceID; id != "" {
-		if g.expand == nil {
-			return nil, refusal(m, "saved instances are not available"), nil
+		if fill == nil || fill.id != id || fill.typ != splitPluginType(r.Pane) {
+			return nil, refusal(m, errNoInstances.Error()), nil
 		}
-		typ := r.Pane.Type
-		if typ == "" {
-			typ = "terminal"
+		if fill.err != nil {
+			return nil, refusal(m, fill.err.Error()), nil
 		}
-		name, args, err := g.expand(typ, id)
-		if err != nil {
-			return nil, refusal(m, err.Error()), nil
-		}
-		r.Pane.InstanceName, r.Pane.InstanceArgs = name, args
+		r.Pane.InstanceName, r.Pane.InstanceArgs = fill.name, fill.args
 	}
 	c, err := withPayload(m, r)
 	if err != nil {
@@ -269,10 +313,22 @@ func (g *forwardGate) ownSplit(m *ipc.Message) (fwd, refuse *ipc.Message, fatal 
 	return c, nil, nil
 }
 
-// answered frees a paste place when the daemon answers a chunk, with
-// pane_input_resp or an error envelope carrying its id.
+// answered frees a paste place when the daemon answers a chunk: its
+// pane_input_resp, or an error about a pane_input (the daemon names the
+// refused type in both of its error paths). An error answering some other
+// request that reused the id frees nothing.
 func (g *forwardGate) answered(m *ipc.Message) {
-	if m.ID == "" || (m.Type != ipc.MsgPaneInputResp && m.Type != ipc.MsgError) {
+	if m.ID == "" || !g.pastes[m.ID] {
+		return
+	}
+	switch m.Type {
+	case ipc.MsgPaneInputResp:
+	case ipc.MsgError:
+		var p ipc.ErrorPayload
+		if m.DecodePayload(&p) != nil || p.Type != ipc.MsgPaneInput {
+			return
+		}
+	default:
 		return
 	}
 	delete(g.pastes, m.ID)

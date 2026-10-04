@@ -168,6 +168,12 @@ func newBridge(d DaemonConn, lim bridgeLimits, budget *replayBudget, now func() 
 
 // setLease names the client id this tab may use and starts a fresh hello
 // requirement: a page that re-attaches after a resync begins with a new hello.
+//
+// The fresh gate also forgets the paste places. Chunks the old page sent can
+// still be in flight on the same daemon conn, and a late answer whose id the
+// new page reuses frees one of its places early. That is bounded: at most
+// pasteCap (2) chunks per resync, and ResyncsPerMin resyncs a minute, so the
+// daemon's per-pane queue never sees more than a few extra chunks.
 func (b *bridge) setLease(id string) {
 	b.gateMu.Lock()
 	b.gate = newForwardGate(id, b.lim.Version, b.lim.ExpandInstance)
@@ -541,8 +547,12 @@ func (b *bridge) fromPage(gen uint64, raw []byte) error {
 		}
 		return nil
 	}
+	// A saved instance is expanded from disk before the lock, so the daemon
+	// reader's answered() never waits behind file reads. b.lim.ExpandInstance
+	// is what every gate of this bridge holds as expand.
+	fill := prefill(b.lim.ExpandInstance, &m)
 	b.gateMu.Lock()
-	fwd, refuse, fatal := b.gate.check(&m)
+	fwd, refuse, fatal := b.gate.checkFilled(&m, fill)
 	b.gateMu.Unlock()
 	if fatal != nil {
 		b.close(closeProtocolError, "protocol error")

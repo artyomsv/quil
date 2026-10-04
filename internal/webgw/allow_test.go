@@ -115,11 +115,56 @@ func TestCheckForward_PasteCap(t *testing.T) {
 	if fwd, refuse := chunk("c4"); fwd == nil || refuse != nil {
 		t.Fatal("an answered chunk did not free a place")
 	}
-	errAns, _ := ipc.NewMessage(ipc.MsgError, ipc.ErrorPayload{Code: ipc.ErrCodeRefused})
+	errAns, _ := ipc.NewMessage(ipc.MsgError, ipc.ErrorPayload{Code: ipc.ErrCodeRefused, Type: ipc.MsgPaneInput})
 	errAns.ID = "c2"
 	g.answered(errAns)
 	if fwd, refuse := chunk("c5"); fwd == nil || refuse != nil {
 		t.Fatal("an error answer did not free a place")
+	}
+}
+
+// A pending id cannot be sent again to take a second place, and only an
+// answer about a pane_input frees a place: an error answering some other
+// request that reused the id does not.
+func TestCheckForward_PasteCapCannotBeBypassed(t *testing.T) {
+	g := &forwardGate{leasedID: "web-p-1", helloSeen: true}
+	chunk := func(id string) (*ipc.Message, *ipc.Message) {
+		fwd, refuse, _ := g.check(msg(t, ipc.MsgPaneInput, id, ipc.PaneInputPayload{PaneID: "p", Data: []byte("x")}))
+		return fwd, refuse
+	}
+	if fwd, refuse := chunk("c1"); fwd == nil || refuse != nil {
+		t.Fatal("c1 refused")
+	}
+	fwd, refuse := chunk("c1")
+	if fwd != nil || refuse == nil || refuse.ID != "c1" {
+		t.Fatalf("a repeated pending id: fwd=%v refuse=%v", fwd, refuse)
+	}
+	var p ipc.ErrorPayload
+	if err := json.Unmarshal(refuse.Payload, &p); err != nil || p.Code != ErrCodeBusy {
+		t.Fatalf("refusal %+v", p)
+	}
+	if fwd, refuse := chunk("c2"); fwd == nil || refuse != nil {
+		t.Fatal("c2 refused")
+	}
+
+	other, _ := ipc.NewMessage(ipc.MsgError, ipc.ErrorPayload{Code: "stale", Type: ipc.MsgUpdateLayout})
+	other.ID = "c1"
+	g.answered(other)
+	if fwd, _ := chunk("c3"); fwd != nil {
+		t.Fatal("an update_layout error with a paste's id freed its place")
+	}
+	untyped, _ := ipc.NewMessage(ipc.MsgError, ipc.ErrorPayload{Code: ipc.ErrCodeRefused})
+	untyped.ID = "c1"
+	g.answered(untyped)
+	if fwd, _ := chunk("c3"); fwd != nil {
+		t.Fatal("an error naming no type freed a paste place")
+	}
+
+	mine, _ := ipc.NewMessage(ipc.MsgError, ipc.ErrorPayload{Code: ipc.ErrCodeRefused, Type: ipc.MsgPaneInput})
+	mine.ID = "c1"
+	g.answered(mine)
+	if fwd, refuse := chunk("c3"); fwd == nil || refuse != nil {
+		t.Fatal("a pane_input error did not free its place")
 	}
 }
 

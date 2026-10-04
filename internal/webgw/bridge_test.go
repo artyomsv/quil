@@ -602,3 +602,44 @@ func TestBridge_PasteAnswerFreesThePlace(t *testing.T) {
 		t.Fatalf("pastes after the answer: %v", g.pastes)
 	}
 }
+
+// A saved instance is expanded from disk before the gate lock is taken, so
+// the daemon reader's answered() never waits behind the file reads.
+func TestBridge_InstanceExpandsOutsideTheGateLock(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	lim := testLimits()
+	lim.ExpandInstance = func(string, string) (string, []string, error) {
+		close(entered)
+		<-release
+		return "box", []string{"u@h"}, nil
+	}
+	b, d, p := startBridge(t, lim)
+	frame := func(m *ipc.Message) []byte {
+		raw, err := json.Marshal(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+	hello := msg(t, ipc.MsgHello, "h1", ipc.HelloPayload{Kind: "web", Proto: ipc.ProtocolVersion})
+	if err := b.fromPage(p.gen, frame(hello)); err != nil {
+		t.Fatal(err)
+	}
+	split := msg(t, ipc.MsgSplitPaneReq, "s1", map[string]any{"placement": "right", "pane": map[string]any{"type": "ssh", "instance_id": "i1"}})
+	done := make(chan error, 1)
+	go func() { done <- b.fromPage(p.gen, frame(split)) }()
+	<-entered
+	if !b.gateMu.TryLock() {
+		close(release)
+		t.Fatal("the gate lock is held while the instance is read from disk")
+	}
+	b.gateMu.Unlock()
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the split to reach the daemon", func() bool {
+		types := d.sentTypes()
+		return len(types) > 0 && types[len(types)-1] == ipc.MsgSplitPaneReq
+	})
+}

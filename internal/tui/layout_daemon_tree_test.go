@@ -35,6 +35,25 @@ func armOwnReplace(t *testing.T, m Model) Model {
 	return got
 }
 
+// disposeAtEnd disposes every pane *m holds when the test ends, read at that
+// time, so the panes later broadcasts created are included. An undisposed
+// pane leaves a drain goroutine running for the rest of the package.
+func disposeAtEnd(t *testing.T, m *Model) {
+	t.Helper()
+	t.Cleanup(func() {
+		for _, tab := range m.allTabs() {
+			for _, p := range tab.Leaves() {
+				if p != nil {
+					p.Dispose()
+				}
+			}
+			if tab.overlayPane != nil {
+				tab.overlayPane.Dispose()
+			}
+		}
+	})
+}
+
 // dtTab is one tab of a daemon-shaped broadcast: panes, stored tree, revision.
 type dtTab struct {
 	id    string
@@ -59,6 +78,7 @@ func dtState(t *testing.T, active string, tabs ...dtTab) WorkspaceStateMsg {
 
 func TestDaemonTree_SubstitutedReplaceFillsTheReservation(t *testing.T) {
 	m := newLayoutSyncModel(t)
+	disposeAtEnd(t, &m)
 	m, _ = lsApply(t, m, lsState(1, lsWire(t, lsSplit(SplitHorizontal, 0.3, lsLeaf("p1"), lsLeaf("p2"))), "p1", "p2"))
 	lsTab(t, &m).ActivePane = "p2"
 	m = armOwnReplace(t, m)
@@ -87,6 +107,7 @@ func TestDaemonTree_SubstitutedReplaceFillsTheReservation(t *testing.T) {
 // the spinner runs until the create timeout restores the OLD pane.
 func TestDaemonTree_WorktreeReplaceCompletionClearsTheSpinner(t *testing.T) {
 	m := newLayoutSyncModel(t)
+	disposeAtEnd(t, &m)
 	m, _ = lsApply(t, m, lsState(1, lsWire(t, lsSplit(SplitHorizontal, 0.5, lsLeaf("p1"), lsLeaf("p2"))), "p1", "p2"))
 	lsTab(t, &m).ActivePane = "p2"
 	m = armOwnWorktreeCreate(t, m, 2)
@@ -120,6 +141,7 @@ func TestDaemonTree_WorktreeReplaceCompletionClearsTheSpinner(t *testing.T) {
 
 func TestDaemonTree_MovedInIsAdoptedAndFocused(t *testing.T) {
 	m := newMovePaneModel(t, 120, 40)
+	disposeAtEnd(t, &m)
 	m, _ = lsApply(t, m, dtState(t, "tab-src",
 		dtTab{"tab-src", []string{"p1", "p2"}, lsSplit(SplitHorizontal, 0.5, lsLeaf("p1"), lsLeaf("p2")), 1},
 		dtTab{"tab-tgt", []string{"p3", "p4"}, lsSplit(SplitHorizontal, 0.5, lsLeaf("p3"), lsLeaf("p4")), 1}))
@@ -153,6 +175,7 @@ func TestDaemonTree_MovedInIsAdoptedAndFocused(t *testing.T) {
 
 func TestDaemonTree_MovedOutExitsSourceFocusMode(t *testing.T) {
 	m := newMovePaneModel(t, 120, 40)
+	disposeAtEnd(t, &m)
 	m, _ = lsApply(t, m, dtState(t, "tab-src",
 		dtTab{"tab-src", []string{"p1", "p2", "p3"},
 			lsSplit(SplitHorizontal, 0.5, lsLeaf("p1"), lsSplit(SplitVertical, 0.5, lsLeaf("p2"), lsLeaf("p3"))), 1},
@@ -173,6 +196,7 @@ func TestDaemonTree_MovedOutExitsSourceFocusMode(t *testing.T) {
 // A DESTROYED pane keeps today's behaviour under the daemon shape too.
 func TestDaemonTree_DestroyedKeepsSourceFocusMode(t *testing.T) {
 	m := newMovePaneModel(t, 120, 40)
+	disposeAtEnd(t, &m)
 	m, _ = lsApply(t, m, dtState(t, "tab-src",
 		dtTab{"tab-src", []string{"p1", "p2", "p3"},
 			lsSplit(SplitHorizontal, 0.5, lsLeaf("p1"), lsSplit(SplitVertical, 0.5, lsLeaf("p2"), lsLeaf("p3"))), 1},
@@ -195,6 +219,7 @@ func TestDaemonTree_DestroyedKeepsSourceFocusMode(t *testing.T) {
 func TestDaemonTree_OwnCloseAdoptsWithoutSending(t *testing.T) {
 	t.Setenv("QUIL_HOME", t.TempDir())
 	m := newLayoutSyncModel(t)
+	disposeAtEnd(t, &m)
 	m, _ = lsApply(t, m, lsState(2, lsWire(t, lsSplit(SplitHorizontal, 0.5, lsLeaf("p1"), lsLeaf("p2"))), "p1", "p2"))
 	lsTab(t, &m).ActivePane = "p2"
 	next, _ := m.openClosePaneConfirm()
@@ -221,6 +246,7 @@ func TestDaemonTree_OwnCloseAdoptsWithoutSending(t *testing.T) {
 // existing model and must not count against the fill.
 func TestDaemonTree_ReplaceFillIgnoresAPaneThatMovedIn(t *testing.T) {
 	m := newMovePaneModel(t, 120, 40)
+	disposeAtEnd(t, &m)
 	m, _ = lsApply(t, m, dtState(t, "tab-tgt",
 		dtTab{"tab-src", []string{"p3", "p4"}, lsSplit(SplitHorizontal, 0.5, lsLeaf("p3"), lsLeaf("p4")), 1},
 		dtTab{"tab-tgt", []string{"p1", "p2"}, lsSplit(SplitHorizontal, 0.3, lsLeaf("p1"), lsLeaf("p2")), 1}))
@@ -257,6 +283,7 @@ func TestDaemonTree_ReplaceFillIgnoresAPaneThatMovedIn(t *testing.T) {
 // reservation is not filled and stays armed in the tree, as before.
 func TestDaemonTree_TwoFreshPanesDoNotFillTheReplace(t *testing.T) {
 	m := newLayoutSyncModel(t)
+	disposeAtEnd(t, &m)
 	m, _ = lsApply(t, m, lsState(1, lsWire(t, lsSplit(SplitHorizontal, 0.3, lsLeaf("p1"), lsLeaf("p2"))), "p1", "p2"))
 	lsTab(t, &m).ActivePane = "p2"
 	m = armOwnReplace(t, m)
@@ -281,6 +308,7 @@ func TestDaemonTree_TwoFreshPanesDoNotFillTheReplace(t *testing.T) {
 // sitting in the TARGET tab keeps its active pane and focus mode.
 func TestDaemonTree_MovedIntoTheActiveTabKeepsFocus(t *testing.T) {
 	m := newMovePaneModel(t, 120, 40)
+	disposeAtEnd(t, &m)
 	m, _ = lsApply(t, m, dtState(t, "tab-tgt",
 		dtTab{"tab-src", []string{"p1", "p2"}, lsSplit(SplitHorizontal, 0.5, lsLeaf("p1"), lsLeaf("p2")), 1},
 		dtTab{"tab-tgt", []string{"p3", "p4"}, lsSplit(SplitHorizontal, 0.5, lsLeaf("p3"), lsLeaf("p4")), 1}))

@@ -748,7 +748,6 @@ func TestWorktreeCreates_AnswerPrecedesTheCheckoutsFrames(t *testing.T) {
 			}
 		}
 		client.SetReadDeadline(time.Time{})
-		// Let the checkout finish so the next case's add finds the slot free.
 		deadline := time.Now().Add(5 * time.Second)
 		for !paneWithCWD(d, wt) {
 			if time.Now().After(deadline) {
@@ -756,6 +755,7 @@ func TestWorktreeCreates_AnswerPrecedesTheCheckoutsFrames(t *testing.T) {
 			}
 			time.Sleep(20 * time.Millisecond)
 		}
+		waitWorktreeSlotFree(t, d)
 	}
 }
 
@@ -865,9 +865,11 @@ func TestSplitPaneReq_WorktreeReplaceSpawnFailureIsToldOnce(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 
-	// The second replace queues behind the first's single-flight worktree
-	// slot and takes far longer than the first worker's last step, so by the
-	// time its card exists the first one would have too.
+	// The first worker decides about its card right after the add returns,
+	// which is when the slot is released; the second replace then takes a
+	// round trip and a whole add, so by the time its card exists the first
+	// one would have too.
+	waitWorktreeSlotFree(t, d)
 	resp = split(t, client, ipc.SplitPaneReqPayload{TargetPaneID: crowded, Placement: ipc.PlacementReplace,
 		Pane: ipc.SplitPaneSpec{CWD: repo, Worktree: &ipc.SplitWorktree{Branch: "feat/b"}}})
 	if !resp.Preparing {
@@ -939,7 +941,6 @@ func TestSplitPaneReq_WorktreeResumeLooksInTheCheckout(t *testing.T) {
 		if resp.Error != "" || !resp.Preparing || resp.PaneID == "" {
 			t.Fatalf("%s: transcript in the checkout: %+v, want it accepted", arm, resp)
 		}
-		// Let this checkout finish before the next arm claims the slot.
 		deadline := time.Now().Add(5 * time.Second)
 		for !paneWithCWD(d, checkout) {
 			if time.Now().After(deadline) {
@@ -947,6 +948,22 @@ func TestSplitPaneReq_WorktreeResumeLooksInTheCheckout(t *testing.T) {
 			}
 			time.Sleep(20 * time.Millisecond)
 		}
+		waitWorktreeSlotFree(t, d)
+	}
+}
+
+// waitWorktreeSlotFree waits for the daemon-wide worktree-creation slot to be
+// released. The finished pane appears INSIDE the add (the swap), before the
+// slot is let go, so a next add sent on that sight alone can be refused with
+// "another worktree is being created".
+func waitWorktreeSlotFree(t *testing.T, d *Daemon) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for d.worktreeAdding.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("the worktree slot was never released")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

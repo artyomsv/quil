@@ -15,7 +15,7 @@ import (
 // as a TUI with the gateway process's id.
 func TestWebHelloPayload_KindAndClientID(t *testing.T) {
 	p := webHelloPayload("web-abc-123")
-	if p.Kind != helloRoleWeb || p.Kind != "web" {
+	if p.Kind != "web" {
 		t.Fatalf("kind = %q, want web", p.Kind)
 	}
 	if p.ClientID != "web-abc-123" {

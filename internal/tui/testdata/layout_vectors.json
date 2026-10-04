@@ -1,0 +1,80 @@
+[
+  {
+    "name": "no tree, one pane",
+    "stored": null,
+    "panes": ["p1"],
+    "template_layout": "",
+    "template_main": "",
+    "want": {"pane_id": "p1"}
+  },
+  {
+    "name": "no tree, three panes stack under the first leaf",
+    "stored": null,
+    "panes": ["p1", "p2", "p3"],
+    "template_layout": "",
+    "template_main": "",
+    "want": {"split": 1, "ratio": 0.5,
+      "left": {"split": 1, "ratio": 0.5, "left": {"pane_id": "p1"}, "right": {"pane_id": "p3"}},
+      "right": {"pane_id": "p2"}}
+  },
+  {
+    "name": "stored side by side kept as is",
+    "stored": {"split": 0, "ratio": 0.6, "left": {"pane_id": "a"}, "right": {"pane_id": "b"}},
+    "panes": ["a", "b"],
+    "template_layout": "",
+    "template_main": "",
+    "want": {"split": 0, "ratio": 0.6, "left": {"pane_id": "a"}, "right": {"pane_id": "b"}}
+  },
+  {
+    "name": "stored leaf for a gone pane is pruned, sibling promoted",
+    "stored": {"split": 0, "ratio": 0.5, "left": {"pane_id": "a"}, "right": {"pane_id": "gone"}},
+    "panes": ["a"],
+    "template_layout": "",
+    "template_main": "",
+    "want": {"pane_id": "a"}
+  },
+  {
+    "name": "pane missing from the stored tree splits the first leaf",
+    "stored": {"split": 0, "ratio": 0.5, "left": {"pane_id": "a"}, "right": {"pane_id": "b"}},
+    "panes": ["a", "b", "c"],
+    "template_layout": "",
+    "template_main": "",
+    "want": {"split": 0, "ratio": 0.5,
+      "left": {"split": 1, "ratio": 0.5, "left": {"pane_id": "a"}, "right": {"pane_id": "c"}},
+      "right": {"pane_id": "b"}}
+  },
+  {
+    "name": "template columns with main",
+    "stored": null,
+    "panes": ["x", "y", "z"],
+    "template_layout": "columns",
+    "template_main": "x",
+    "want": {"split": 0, "ratio": 0.3333333333333333, "left": {"pane_id": "x"},
+      "right": {"split": 0, "ratio": 0.5, "left": {"pane_id": "y"}, "right": {"pane_id": "z"}}}
+  },
+  {
+    "name": "template main-left",
+    "stored": null,
+    "panes": ["x", "y", "z"],
+    "template_layout": "main-left",
+    "template_main": "y",
+    "want": {"split": 0, "ratio": 0.5, "left": {"pane_id": "y"},
+      "right": {"split": 1, "ratio": 0.5, "left": {"pane_id": "x"}, "right": {"pane_id": "z"}}}
+  },
+  {
+    "name": "template keyword without a matching main falls back to the arrival rule",
+    "stored": null,
+    "panes": ["x", "y"],
+    "template_layout": "columns",
+    "template_main": "nope",
+    "want": {"split": 1, "ratio": 0.5, "left": {"pane_id": "x"}, "right": {"pane_id": "y"}}
+  },
+  {
+    "name": "empty pane list",
+    "stored": {"pane_id": "a"},
+    "panes": [],
+    "template_layout": "",
+    "template_main": "",
+    "want": null
+  }
+]

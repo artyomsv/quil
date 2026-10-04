@@ -128,6 +128,22 @@
     "want": {"split": 0, "ratio": 0.5, "left": {"pane_id": "a"}, "right": {"pane_id": "d"}}
   },
   {
+    "name": "stored tree with every pane gone starts over from the panes",
+    "stored": {"split": 0, "ratio": 0.5, "left": {"pane_id": "a"}, "right": {"pane_id": "b"}},
+    "panes": ["c"],
+    "template_layout": "",
+    "template_main": "",
+    "want": {"pane_id": "c"}
+  },
+  {
+    "name": "stored leaf for a gone pane, two new panes stack",
+    "stored": {"pane_id": "a"},
+    "panes": ["c", "d"],
+    "template_layout": "",
+    "template_main": "",
+    "want": {"split": 1, "ratio": 0.5, "left": {"pane_id": "c"}, "right": {"pane_id": "d"}}
+  },
+  {
     "name": "a stored tree wins over a template keyword",
     "stored": {"split": 0, "ratio": 0.6, "left": {"pane_id": "a"}, "right": {"pane_id": "b"}},
     "panes": ["a", "b"],

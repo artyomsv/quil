@@ -3074,6 +3074,12 @@ type buildOpts struct {
 	StrictResume bool
 }
 
+// buildResult is buildPane's report beside the pane: see buildPane.
+type buildResult struct {
+	Notice    string
+	LayoutRev uint64
+}
+
 // errResumeTaken is buildPane's refusal for a lost resume claim.
 type errResumeTaken struct{ holder string }
 
@@ -3087,13 +3093,15 @@ func (e *errResumeTaken) Error() string {
 // (2b) claim the resume session, now that the pane is visible to a racing
 // create; (3) spawn outside every lock. The caller broadcasts.
 //
-// The string return is a notice for an answer that succeeded with a
-// difference the user asked not to have (R3-b: a replace whose resume claim
-// was lost starts a fresh session).
+// buildResult carries what the answer needs: the stored tree's revision as
+// this create's publish left it (never re-read later, which could name a
+// revision a later change produced), and a notice for an answer that
+// succeeded with a difference the user asked not to have (R3-b: a replace
+// whose resume claim was lost starts a fresh session).
 //
 // A spawn failure returns the pane with the error and leaves it in its slot
 // with SpawnError set, as before.
-func (d *Daemon) buildPane(payload ipc.CreatePanePayload, cwd, paneType string, opts buildOpts) (*Pane, string, error) {
+func (d *Daemon) buildPane(payload ipc.CreatePanePayload, cwd, paneType string, opts buildOpts) (*Pane, buildResult, error) {
 	pane := d.session.NewPane(cwd)
 	// Unpublished: no other goroutine can see these fields yet, so they need
 	// no PluginMu. They used to be written after CreatePane had published the
@@ -3119,28 +3127,33 @@ func (d *Daemon) buildPane(payload ipc.CreatePanePayload, cwd, paneType string, 
 	// host. A REJECTED image creates nothing — the user asked for isolation,
 	// and quietly not providing it is the one outcome that must never happen.
 	if err := d.applySandboxSpecFor(pane, payload.Sandbox); err != nil {
-		return nil, "", err
+		return nil, buildResult{}, err
 	}
 	res, err := d.session.PublishPane(pane, opts.Slot)
 	if err != nil {
-		return nil, "", fmt.Errorf("create pane error: %w", err)
+		return nil, buildResult{}, fmt.Errorf("create pane error: %w", err)
 	}
 	d.finishDetached(res)
 	if res.Reused {
-		return res.Pane, "", nil
+		return res.Pane, buildResult{LayoutRev: res.LayoutRev}, nil
 	}
 	if payload.Overlay {
 		d.enforceOverlayCap(pane.ID)
 	}
-	var notice string
+	built := buildResult{LayoutRev: res.LayoutRev}
 	if payload.ResumeSessionID != "" {
 		if holder, ok := d.claimResumeSessionID(pane, payload.ResumeSessionID); !ok && opts.StrictResume {
 			if opts.Slot.ReplaceID == "" {
 				d.cleanupPaneArtifacts(pane.ID)
 				_ = d.session.DestroyPane(pane.ID)
-				return nil, "", &errResumeTaken{holder: holder}
+				// The pane was published, so a broadcast or snapshot may
+				// already carry it: announce that it is gone, or a client
+				// keeps a pane that no longer exists.
+				d.broadcastState()
+				d.requestSnapshot()
+				return nil, buildResult{}, &errResumeTaken{holder: holder}
 			}
-			notice = "that Claude session was opened in pane " + holder + " meanwhile; this pane started a fresh session"
+			built.Notice = "that Claude session was opened in pane " + holder + " meanwhile; this pane started a fresh session"
 		}
 	}
 	log.Printf("pane created: %s (type=%s, tab=%s, overlay=%v)", pane.ID, paneType, opts.Slot.TabID, payload.Overlay)
@@ -3163,9 +3176,9 @@ func (d *Daemon) buildPane(payload ipc.CreatePanePayload, cwd, paneType string, 
 		pane.PluginMu.Lock()
 		pane.SpawnError = err.Error()
 		pane.PluginMu.Unlock()
-		return pane, notice, fmt.Errorf("start PTY error: %w", err)
+		return pane, built, fmt.Errorf("start PTY error: %w", err)
 	}
-	return pane, notice, nil
+	return pane, built, nil
 }
 
 // finishDetached closes what PublishPane took out of the session, off-lock:
@@ -3908,7 +3921,8 @@ func (d *Daemon) notifyPaneDestroyed(pane *Pane, by string) {
 //
 // Emitted only on the success path: a failed add already surfaces as SpawnError
 // inside the placeholder pane, and a second telling of the same failure in the
-// sidebar adds nothing.
+// sidebar adds nothing. The one failure with no placeholder to carry it is
+// notifyWorktreeFailed's.
 func (d *Daemon) notifyWorktreeReady(pane *Pane, branch string) {
 	if pane == nil {
 		return
@@ -3925,6 +3939,31 @@ func (d *Daemon) notifyWorktreeReady(pane *Pane, branch string) {
 		Type:      "worktree_ready",
 		Title:     "Worktree ready: " + branch,
 		Severity:  "info",
+		Timestamp: time.Now(),
+		Data:      map[string]string{"branch": branch},
+	})
+}
+
+// maxWorktreeErrorField bounds git's stderr in a worktree_failed card.
+const maxWorktreeErrorField = 400
+
+// notifyWorktreeFailed says a worktree REPLACE that split_pane_req answered
+// "preparing" did not happen. Such a replace has no placeholder — the target
+// stays on screen until git succeeds (R3-a) — so there is no pane to carry the
+// SpawnError a split's placeholder shows, and the answer has already gone. The
+// TUI's own replace learns from its create_pane_resp; this is the same news
+// for a requester whose answer came first. paneID is the pane the request
+// named, which may be gone when the swap happened and the new pane then failed
+// to start.
+func (d *Daemon) notifyWorktreeFailed(paneID, tabID, branch, reason string) {
+	d.emitEvent(PaneEvent{
+		ID:        uuid.New().String(),
+		PaneID:    paneID,
+		TabID:     tabID,
+		Type:      "worktree_failed",
+		Title:     "Worktree not created: " + branch,
+		Message:   truncateField(reason, maxWorktreeErrorField),
+		Severity:  "error",
 		Timestamp: time.Now(),
 		Data:      map[string]string{"branch": branch},
 	})

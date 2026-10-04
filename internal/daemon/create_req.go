@@ -296,14 +296,21 @@ func (d *Daemon) handleCreateTabReq(conn *ipc.Conn, msg *ipc.Message) {
 		respondTo(conn, msg.ID, ipc.MsgCreateTabResp, ipc.CreateTabRespPayload{Error: "malformed payload: " + err.Error()})
 		return
 	}
-	respondTo(conn, msg.ID, ipc.MsgCreateTabResp, d.createTabFromReq(conn, req))
+	resp, start := d.createTabFromReq(conn, req)
+	respondTo(conn, msg.ID, ipc.MsgCreateTabResp, resp)
+	if start != nil {
+		start()
+	}
 }
 
 // createTabFromReq is create_tab_req's work, returning the answer rather than
-// sending it, so split_pane_req's "new tab" placement runs the same code.
-func (d *Daemon) createTabFromReq(conn *ipc.Conn, req ipc.CreateTabReqPayload) ipc.CreateTabRespPayload {
+// sending it, so split_pane_req's "new tab" placement runs the same code. The
+// returned func (nil when there is none) starts a worktree checkout; the
+// caller runs it AFTER sending the answer, so the requester hears about its
+// placeholder before anything the checkout broadcasts.
+func (d *Daemon) createTabFromReq(conn *ipc.Conn, req ipc.CreateTabReqPayload) (ipc.CreateTabRespPayload, func()) {
 	if req.ProjectID != "" && !d.projectExists(req.ProjectID) {
-		return ipc.CreateTabRespPayload{Error: "no such project: " + req.ProjectID}
+		return ipc.CreateTabRespPayload{Error: "no such project: " + req.ProjectID}, nil
 	}
 	first := ipc.CreatePaneReqPayload{}
 	if req.FirstPane != nil {
@@ -329,7 +336,13 @@ func (d *Daemon) createTabFromReq(conn *ipc.Conn, req ipc.CreateTabReqPayload) i
 	}
 	payload, cwd, err := d.buildCreatePayload(first, "", d.projectCWD(conn, projectID))
 	if err != nil {
-		return ipc.CreateTabRespPayload{Error: err.Error()}
+		return ipc.CreateTabRespPayload{Error: err.Error()}, nil
+	}
+	// The sandbox too: refused here it costs nothing, while refused at build
+	// time it leaves a tab holding a recovery shell — or, for a worktree, a
+	// placeholder and a whole checkout for a pane that can never start.
+	if err := d.checkSandboxRequest(payload.Type, cwd, payload.Sandbox); err != nil {
+		return ipc.CreateTabRespPayload{Error: err.Error()}, nil
 	}
 	tab := d.session.CreateTabInProject(req.ProjectID, name)
 	payload.TabID = tab.ID
@@ -346,7 +359,7 @@ func (d *Daemon) createTabFromReq(conn *ipc.Conn, req ipc.CreateTabReqPayload) i
 			d.ensureTabNotEmpty(tab.ID)
 			d.broadcastState()
 			d.requestSnapshot()
-			return ipc.CreateTabRespPayload{TabID: tab.ID, Error: err.Error()}
+			return ipc.CreateTabRespPayload{TabID: tab.ID, Error: err.Error()}, nil
 		}
 		applyPaneName(pane, first.Name)
 		d.broadcastState()
@@ -358,15 +371,17 @@ func (d *Daemon) createTabFromReq(conn *ipc.Conn, req ipc.CreateTabReqPayload) i
 		}
 		payload.ReplacePaneID = pane.ID
 		placeholderID := pane.ID
-		go func() {
-			resp := d.worktreeAddAndCreate(payload)
-			if resp.Error != "" && !resp.Swapped {
-				d.failPreparingPane(placeholderID, "worktree not created: "+resp.Error)
-				return
-			}
-			applyPaneName(d.session.Pane(resp.PaneID), first.Name)
-		}()
-		return answer
+		start := func() {
+			go func() {
+				resp := d.worktreeAddAndCreate(payload)
+				if resp.Error != "" && !resp.Swapped {
+					d.failPreparingPane(placeholderID, "worktree not created: "+resp.Error)
+					return
+				}
+				applyPaneName(d.session.Pane(resp.PaneID), first.Name)
+			}()
+		}
+		return answer, start
 	}
 
 	// constructPaneAt, not createPaneAt: tab and pane reach clients as ONE
@@ -383,7 +398,7 @@ func (d *Daemon) createTabFromReq(conn *ipc.Conn, req ipc.CreateTabReqPayload) i
 	}
 	d.broadcastState()
 	d.requestSnapshot()
-	return resp
+	return resp, nil
 }
 
 // handlePluginCatalogReq answers what create_pane can be asked for, per

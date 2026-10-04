@@ -66,6 +66,7 @@ var plainEventGroups = map[string]string{
 	"agent_adopted":    groupSystem,
 	"agent_untracked":  groupSystem,
 	"worktree_ready":   groupSystem,
+	"worktree_failed":  groupSystem,
 	"command_complete": groupCommands,
 	"output_idle":      groupIdle,
 }

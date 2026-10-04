@@ -13,6 +13,12 @@ import (
 // pane, the tree built by the daemon under the same lock that publishes the
 // pane. Every option is a NAME resolved through the create_pane_req code
 // (buildCreatePayload), so a refusal the MCP path gives, this path gives.
+//
+// Every refusal is decided before anything exists: no tab, no placeholder, no
+// `git worktree add`. A step that has to run after the answer (a worktree
+// checkout) is returned as a start func the handler calls once the answer is
+// sent, so the requester always hears about its pane before anything that
+// pane's worker broadcasts.
 
 // overlayInstanceArgs mirrors internal/tui/overlay.go's function of the same
 // name: lazygit takes the repository as a flag; hunk reads its working
@@ -30,15 +36,20 @@ func (d *Daemon) handleSplitPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 		respondTo(conn, msg.ID, ipc.MsgSplitPaneResp, ipc.SplitPaneRespPayload{Error: "malformed payload: " + err.Error()})
 		return
 	}
-	respondTo(conn, msg.ID, ipc.MsgSplitPaneResp, d.splitPane(conn, req))
+	resp, start := d.splitPane(conn, req)
+	respondTo(conn, msg.ID, ipc.MsgSplitPaneResp, resp)
+	if start != nil {
+		start()
+	}
 }
 
-// splitPane runs the request and returns its answer. A worktree checkout is
-// handed to a worker; everything else is synchronous on the requesting
-// conn's goroutine, which holds no lock any other client needs.
-func (d *Daemon) splitPane(conn *ipc.Conn, req ipc.SplitPaneReqPayload) ipc.SplitPaneRespPayload {
-	fail := func(tabID, format string, args ...any) ipc.SplitPaneRespPayload {
-		return ipc.SplitPaneRespPayload{TabID: tabID, Error: fmt.Sprintf(format, args...)}
+// splitPane runs the request and returns its answer, plus the work that must
+// begin only once the answer is sent (nil for none). A worktree checkout is
+// handed to a worker; everything else is synchronous on the requesting conn's
+// goroutine, which holds no lock any other client needs.
+func (d *Daemon) splitPane(conn *ipc.Conn, req ipc.SplitPaneReqPayload) (ipc.SplitPaneRespPayload, func()) {
+	fail := func(tabID, format string, args ...any) (ipc.SplitPaneRespPayload, func()) {
+		return ipc.SplitPaneRespPayload{TabID: tabID, Error: fmt.Sprintf(format, args...)}, nil
 	}
 	switch req.Placement {
 	case ipc.PlacementRight, ipc.PlacementBelow, ipc.PlacementReplace, ipc.PlacementNewTab, ipc.PlacementOverlay:
@@ -74,7 +85,7 @@ func (d *Daemon) splitPane(conn *ipc.Conn, req ipc.SplitPaneReqPayload) ipc.Spli
 		return fail(tabID, "no such tab: %s", tabID)
 	}
 	if req.Placement == ipc.PlacementOverlay {
-		return d.splitOverlay(tabID, req)
+		return d.splitOverlay(tabID, req), nil
 	}
 
 	// (1) Validate and resolve, outside every lock.
@@ -87,6 +98,11 @@ func (d *Daemon) splitPane(conn *ipc.Conn, req ipc.SplitPaneReqPayload) ipc.Spli
 		return fail(tabID, "%v", err)
 	}
 	if err := d.checkResumeRequest(payload, cwd); err != nil {
+		return fail(tabID, "%v", err)
+	}
+	// Here and not only in buildPane: the worktree arm publishes a
+	// placeholder and starts a checkout long before buildPane runs.
+	if err := d.checkSandboxRequest(payload.Type, cwd, payload.Sandbox); err != nil {
 		return fail(tabID, "%v", err)
 	}
 	slot := paneSlot{TabID: tabID}
@@ -104,7 +120,7 @@ func (d *Daemon) splitPane(conn *ipc.Conn, req ipc.SplitPaneReqPayload) ipc.Spli
 	}
 
 	// (2)–(3) Publish + tree, claim, spawn.
-	pane, notice, err := d.buildPane(payload, cwd, payload.Type, buildOpts{Slot: slot, StrictResume: true})
+	pane, built, err := d.buildPane(payload, cwd, payload.Type, buildOpts{Slot: slot, StrictResume: true})
 	if pane == nil {
 		return fail(tabID, "%v", err)
 	}
@@ -112,11 +128,11 @@ func (d *Daemon) splitPane(conn *ipc.Conn, req ipc.SplitPaneReqPayload) ipc.Spli
 	// (4) One broadcast and snapshot.
 	d.broadcastState()
 	d.requestSnapshot()
-	resp := ipc.SplitPaneRespPayload{PaneID: pane.ID, TabID: tabID, LayoutRev: d.tabLayoutRev(tabID), Error: spawnErrorOf(pane)}
+	resp := ipc.SplitPaneRespPayload{PaneID: pane.ID, TabID: tabID, LayoutRev: built.LayoutRev, Error: spawnErrorOf(pane)}
 	if resp.Error == "" {
-		resp.Error = notice
+		resp.Error = built.Notice
 	}
-	return resp
+	return resp, nil
 }
 
 // splitCreateReq maps the dialog's spec onto create_pane_req's payload, so
@@ -152,7 +168,8 @@ func (d *Daemon) splitCreateReq(s ipc.SplitPaneSpec) (ipc.CreatePaneReqPayload, 
 // transcript is not there, or which a live pane already holds — before
 // anything is created. The claim itself is made after publish (buildPane).
 // A sandbox pane's transcripts live in its container config, so the host
-// transcript check is skipped for it.
+// transcript check is skipped for it. cwd must be the directory the pane will
+// open in, already resolved: the transcript is filed under it.
 func (d *Daemon) checkResumeRequest(p ipc.CreatePanePayload, cwd string) error {
 	id := p.ResumeSessionID
 	if id == "" {
@@ -172,6 +189,20 @@ func (d *Daemon) checkResumeRequest(p ipc.CreatePanePayload, cwd string) error {
 	return nil
 }
 
+// checkSandboxRequest validates a sandbox spec the way buildPane will, on a
+// scratch pane nobody can see, so a spec that would be refused at build time
+// is refused before a tab, a placeholder or a checkout exists.
+func (d *Daemon) checkSandboxRequest(paneType, cwd string, spec *ipc.SandboxSpec) error {
+	if spec == nil {
+		return nil
+	}
+	if paneType == "" {
+		paneType = "terminal"
+	}
+	scratch := &Pane{ID: "(new pane)", Type: paneType, CWD: cwd}
+	return d.applySandboxSpecFor(scratch, spec)
+}
+
 // splitOverlay creates or reuses the tab's overlay (one slot per tab; the
 // rule is in PublishPane, so it binds the TUI's create_pane{overlay} too).
 // The repository is the page's cwd — it came from git_repos_req — and must
@@ -186,76 +217,108 @@ func (d *Daemon) splitOverlay(tabID string, req ipc.SplitPaneReqPayload) ipc.Spl
 		return ipc.SplitPaneRespPayload{TabID: tabID, Error: "the overlay needs a repository folder that exists"}
 	}
 	payload := ipc.CreatePanePayload{TabID: tabID, CWD: repo, Type: kind, InstanceArgs: overlayInstanceArgs(kind, repo), Overlay: true}
-	pane, _, err := d.buildPane(payload, repo, kind, buildOpts{Slot: paneSlot{TabID: tabID, OverlayKey: overlayKey(kind, repo)}})
+	pane, built, err := d.buildPane(payload, repo, kind, buildOpts{Slot: paneSlot{TabID: tabID, OverlayKey: overlayKey(kind, repo)}})
 	if pane == nil {
 		return ipc.SplitPaneRespPayload{TabID: tabID, Error: err.Error()}
 	}
 	d.broadcastState()
 	d.requestSnapshot()
-	return ipc.SplitPaneRespPayload{PaneID: pane.ID, TabID: tabID, LayoutRev: d.tabLayoutRev(tabID), Error: spawnErrorOf(pane)}
+	return ipc.SplitPaneRespPayload{PaneID: pane.ID, TabID: tabID, LayoutRev: built.LayoutRev, Error: spawnErrorOf(pane)}
 }
 
 // splitIntoWorktree is the worktree arm. A split publishes a PTY-less
 // placeholder (PreparingWorktree set, so every client shows the spinner) in
 // the requested slot now, and the ordinary worktree REPLACE swaps the
 // finished pane into that slot (ReplacePane substitutes the tree). A REPLACE
-// does not: the target stays until git succeeds (R3-a).
-func (d *Daemon) splitIntoWorktree(payload ipc.CreatePanePayload, cwd string, slot paneSlot, name string) ipc.SplitPaneRespPayload {
+// does not: the target stays until git succeeds (R3-a). Either way the
+// checkout starts only after the answer is sent (the returned func).
+func (d *Daemon) splitIntoWorktree(payload ipc.CreatePanePayload, cwd string, slot paneSlot, name string) (ipc.SplitPaneRespPayload, func()) {
 	tabID := slot.TabID
+	branch := payload.Worktree.Branch
 	if slot.ReplaceID != "" {
-		payload.ReplacePaneID = slot.ReplaceID
-		go func() {
-			resp := d.worktreeAddAndCreate(payload)
-			applyPaneName(d.session.Pane(resp.PaneID), name)
-		}()
-		return ipc.SplitPaneRespPayload{PaneID: slot.ReplaceID, TabID: tabID, LayoutRev: d.tabLayoutRev(tabID), Preparing: true}
+		target := slot.ReplaceID
+		payload.ReplacePaneID = target
+		start := func() {
+			go func() {
+				resp := d.worktreeAddAndCreate(payload)
+				if resp.Error != "" {
+					// The answer said preparing and went; the target is still on
+					// screen (an add that failed swapped nothing), or the swap
+					// happened and the new pane failed to start. Either way the
+					// requester is told the way a finished worktree is: in the
+					// sidebar, on the pane it asked about.
+					log.Printf("split replace: worktree %s for pane %s not created: %s", branch, target, resp.Error)
+					d.notifyWorktreeFailed(target, tabID, branch, resp.Error)
+					return
+				}
+				applyPaneName(d.session.Pane(resp.PaneID), name)
+			}()
+		}
+		return ipc.SplitPaneRespPayload{PaneID: target, TabID: tabID, LayoutRev: d.tabLayoutRev(tabID), Preparing: true}, start
 	}
 	placeholder := d.session.NewPane(cwd)
 	// Unpublished: set without PluginMu, before PublishPane makes it visible.
 	placeholder.Type = "terminal"
-	placeholder.PreparingWorktree = payload.Worktree.Branch
+	placeholder.PreparingWorktree = branch
 	res, err := d.session.PublishPane(placeholder, slot)
 	if err != nil {
-		return ipc.SplitPaneRespPayload{TabID: tabID, Error: err.Error()}
+		return ipc.SplitPaneRespPayload{TabID: tabID, Error: err.Error()}, nil
 	}
-	log.Printf("pane created: %s (placeholder, tab=%s, awaiting worktree %s)", placeholder.ID, tabID, payload.Worktree.Branch)
+	log.Printf("pane created: %s (placeholder, tab=%s, awaiting worktree %s)", placeholder.ID, tabID, branch)
 	d.broadcastState()
 	d.requestSnapshot()
 	payload.ReplacePaneID = placeholder.ID
-	go func() {
-		resp := d.worktreeAddAndCreate(payload)
-		if resp.Error != "" && !resp.Swapped {
-			d.failPreparingPane(placeholder.ID, "worktree not created: "+resp.Error)
-			return
-		}
-		applyPaneName(d.session.Pane(resp.PaneID), name)
-	}()
-	return ipc.SplitPaneRespPayload{PaneID: placeholder.ID, TabID: tabID, LayoutRev: res.LayoutRev, Preparing: true}
+	start := func() {
+		go func() {
+			resp := d.worktreeAddAndCreate(payload)
+			if resp.Error != "" && !resp.Swapped {
+				d.failPreparingPane(placeholder.ID, "worktree not created: "+resp.Error)
+				return
+			}
+			applyPaneName(d.session.Pane(resp.PaneID), name)
+		}()
+	}
+	return ipc.SplitPaneRespPayload{PaneID: placeholder.ID, TabID: tabID, LayoutRev: res.LayoutRev, Preparing: true}, start
 }
 
-// splitIntoNewTab is the "new tab" placement: create_tab_req's code. Its
-// first pane goes through constructPaneAt, whose resume claim is lenient, so
-// a session already held is refused here first.
-func (d *Daemon) splitIntoNewTab(conn *ipc.Conn, req ipc.SplitPaneReqPayload) ipc.SplitPaneRespPayload {
+// splitIntoNewTab is the "new tab" placement: create_tab_req's code. The
+// resume check runs first, against the directory the pane will really open
+// in — an empty cwd is the project root, as create_tab_req resolves it —
+// because createTabFromReq makes the tab before its first pane is built, and
+// its resume claim is lenient.
+func (d *Daemon) splitIntoNewTab(conn *ipc.Conn, req ipc.SplitPaneReqPayload) (ipc.SplitPaneRespPayload, func()) {
+	fail := func(err error) (ipc.SplitPaneRespPayload, func()) {
+		return ipc.SplitPaneRespPayload{Error: err.Error()}, nil
+	}
 	creq, err := d.splitCreateReq(req.Pane)
 	if err != nil {
-		return ipc.SplitPaneRespPayload{Error: err.Error()}
-	}
-	if creq.ResumeSessionID != "" {
-		if err := d.checkResumeRequest(ipc.CreatePanePayload{ResumeSessionID: creq.ResumeSessionID, Sandbox: creq.Sandbox}, creq.CWD); err != nil {
-			return ipc.SplitPaneRespPayload{Error: err.Error()}
-		}
+		return fail(err)
 	}
 	treq := ipc.CreateTabReqPayload{FirstPane: &creq}
 	if req.NewTab != nil {
 		treq.Name, treq.ProjectID = req.NewTab.Name, req.NewTab.ProjectID
 	}
-	resp := d.createTabFromReq(conn, treq)
+	if treq.ProjectID != "" && !d.projectExists(treq.ProjectID) {
+		return fail(fmt.Errorf("no such project: %s", treq.ProjectID))
+	}
+	projectID := treq.ProjectID
+	if projectID == "" {
+		projectID = d.session.ActiveProject()
+	}
+	// Not recorded: createTabFromReq records the directory when it creates.
+	cwd := d.resolveRequestedCWD(creq.CWD, d.projectCWD(conn, projectID))
+	if err := d.checkResumeRequest(ipc.CreatePanePayload{ResumeSessionID: creq.ResumeSessionID, Sandbox: creq.Sandbox}, cwd); err != nil {
+		return fail(err)
+	}
+	// The sandbox is checked inside createTabFromReq, before its tab exists.
+	resp, start := d.createTabFromReq(conn, treq)
 	return ipc.SplitPaneRespPayload{PaneID: resp.PaneID, TabID: resp.TabID, LayoutRev: d.tabLayoutRev(resp.TabID),
-		Preparing: resp.PreparingWorktree != "", Error: resp.Error}
+		Preparing: resp.PreparingWorktree != "", Error: resp.Error}, start
 }
 
-// tabLayoutRev reads a tab's revision under the session lock.
+// tabLayoutRev reads a tab's revision under the session lock. Used where no
+// publish of this request produced one: a replace still waiting on git, and a
+// new tab, whose first pane takes no place in a tree.
 func (d *Daemon) tabLayoutRev(tabID string) uint64 {
 	_, tabs, _, _, _ := d.session.SnapshotState()
 	for _, t := range tabs {

@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/artyomsv/quil/internal/claudesessions"
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/gitworktree"
 	"github.com/artyomsv/quil/internal/ipc"
@@ -507,4 +509,263 @@ func TestSplitPaneReq_AnswerJSONShape(t *testing.T) {
 	if string(raw) != `{"pane_id":"p","tab_id":"t","layout_rev":3,"preparing":true}` {
 		t.Fatalf("wire shape %s", raw)
 	}
+}
+
+// A sandbox the build would refuse is refused before ANYTHING exists, on
+// every arm — the worktree arms included, which publish a placeholder and
+// start a checkout long before the pane is built.
+func TestSplitPaneReq_BadSandboxCreatesNothingOnAnyArm(t *testing.T) {
+	d, client := mcpTestDaemon(t)
+	_, first := seedTab(t, d, client)
+	repo := worktreeRepo(t)
+	var addMu sync.Mutex
+	adds := 0
+	stubAdd(t, func(_ context.Context, _, path, _ string) error {
+		addMu.Lock()
+		adds++
+		addMu.Unlock()
+		return os.MkdirAll(path, 0o755)
+	})
+	proj := d.session.CreateProject("web", repo)
+	bad := &ipc.SandboxSpec{Image: "bad image"}
+	branch := &ipc.SplitWorktree{Branch: "feat/x"}
+	for name, req := range map[string]ipc.SplitPaneReqPayload{
+		"worktree split": {TargetPaneID: first, Placement: ipc.PlacementRight,
+			Pane: ipc.SplitPaneSpec{Type: "claude-code", CWD: repo, Worktree: branch, Sandbox: bad}},
+		"worktree replace": {TargetPaneID: first, Placement: ipc.PlacementReplace,
+			Pane: ipc.SplitPaneSpec{Type: "claude-code", CWD: repo, Worktree: branch, Sandbox: bad}},
+		"new tab": {Placement: ipc.PlacementNewTab, NewTab: &ipc.SplitNewTab{ProjectID: proj.ID},
+			Pane: ipc.SplitPaneSpec{Type: "claude-code", Sandbox: bad}},
+		"new tab worktree": {Placement: ipc.PlacementNewTab, NewTab: &ipc.SplitNewTab{ProjectID: proj.ID},
+			Pane: ipc.SplitPaneSpec{Type: "claude-code", CWD: repo, Worktree: branch, Sandbox: bad}},
+	} {
+		tabs, panes := len(d.session.Tabs()), len(d.buildPaneInfos())
+		resp := split(t, client, req)
+		if resp.Error == "" || resp.PaneID != "" || resp.Preparing {
+			t.Errorf("%s: resp = %+v, want a refusal", name, resp)
+		}
+		if n := len(d.session.Tabs()); n != tabs {
+			t.Errorf("%s: tabs %d → %d", name, tabs, n)
+		}
+		if n := len(d.buildPaneInfos()); n != panes {
+			t.Errorf("%s: panes %d → %d", name, panes, n)
+		}
+	}
+	// One conn dispatches in order, so a round trip proves every refusal's
+	// handler has returned; a checkout would have been started by then.
+	roundTrip(t, client, ipc.MsgVersionReq, ipc.MsgVersionResp, struct{}{})
+	time.Sleep(100 * time.Millisecond)
+	addMu.Lock()
+	defer addMu.Unlock()
+	if adds != 0 {
+		t.Fatalf("git worktree add ran %d times for refused requests", adds)
+	}
+}
+
+// A new tab's empty cwd is its project root, so the resume check must look
+// for the transcript there — not under "".
+func TestSplitPaneReq_NewTabResumeLooksInTheProjectRoot(t *testing.T) {
+	d, client := mcpTestDaemon(t)
+	root := t.TempDir()
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proj := d.session.CreateProject("web", root)
+	const id = "0f3c2a9e-1b2c-4d5e-8f90-1a2b3c4d5e6f"
+	want := map[string]bool{
+		claudesessions.TranscriptPath(root, id):     true,
+		claudesessions.TranscriptPath(resolved, id): true,
+	}
+	prev := transcriptExistsFn
+	transcriptExistsFn = func(p string) (bool, bool) { return want[p], true }
+	t.Cleanup(func() { transcriptExistsFn = prev })
+
+	resp := split(t, client, ipc.SplitPaneReqPayload{Placement: ipc.PlacementNewTab, NewTab: &ipc.SplitNewTab{ProjectID: proj.ID},
+		Pane: ipc.SplitPaneSpec{Type: "claude-code", ResumeSessionID: id}})
+	if resp.Error != "" || resp.PaneID == "" {
+		t.Fatalf("resp = %+v, want the session resumed in the project root", resp)
+	}
+}
+
+// startFailSession is a PTY whose child never starts.
+type startFailSession struct{ fakeSession }
+
+func (s *startFailSession) Start(string, ...string) error {
+	return errors.New("spawn refused by the test")
+}
+
+// A pane whose child cannot start stays in its slot and says why, and the
+// answer carries the same reason.
+func TestSplitPaneReq_SpawnFailureCarriesTheError(t *testing.T) {
+	d, client := mcpTestDaemon(t)
+	tabID, first := seedTab(t, d, client)
+	prev := newSessionFn
+	newSessionFn = func(cols, rows int) apty.Session { return &startFailSession{} }
+	t.Cleanup(func() { newSessionFn = prev })
+
+	resp := split(t, client, ipc.SplitPaneReqPayload{TargetPaneID: first, Placement: ipc.PlacementRight, Pane: ipc.SplitPaneSpec{CWD: t.TempDir()}})
+	if resp.PaneID == "" || !strings.Contains(resp.Error, "spawn refused by the test") {
+		t.Fatalf("resp = %+v, want the pane and its spawn error", resp)
+	}
+	pane := d.session.Pane(resp.PaneID)
+	if pane == nil {
+		t.Fatal("the pane that failed to start is gone")
+	}
+	if spawnErrorOf(pane) == "" {
+		t.Fatal("the pane carries no SpawnError")
+	}
+	if tree, _ := tabTree(t, d, tabID); tree == nil || tree.Right == nil || tree.Right.PaneID != resp.PaneID {
+		t.Fatalf("the failed pane lost its slot: %+v", tree)
+	}
+}
+
+// A placeholder moved to another tab during the checkout: the add is
+// abandoned and removed, no finished pane is built anywhere, and the moved
+// placeholder says why.
+func TestSplitPaneReq_PlaceholderMovedDuringCheckout(t *testing.T) {
+	d, client := mcpTestDaemon(t)
+	tabID, first := seedTab(t, d, client)
+	other := d.session.CreateTab("other")
+	repo := worktreeRepo(t)
+	gate := make(chan struct{})
+	stubAdd(t, func(_ context.Context, _, path, _ string) error { <-gate; return os.MkdirAll(path, 0o755) })
+	removed := make(chan string, 1)
+	prevRm := removeWorktreeFn
+	removeWorktreeFn = func(_ context.Context, _, path, _ string) error { removed <- path; return nil }
+	t.Cleanup(func() { removeWorktreeFn = prevRm })
+
+	resp := split(t, client, ipc.SplitPaneReqPayload{TargetPaneID: first, Placement: ipc.PlacementRight,
+		Pane: ipc.SplitPaneSpec{CWD: repo, Worktree: &ipc.SplitWorktree{Branch: "feat/x"}}})
+	if !resp.Preparing {
+		close(gate)
+		t.Fatalf("resp = %+v", resp)
+	}
+	// The session call, not move_pane: the handler refuses a move while a
+	// checkout runs in the tab, and this pins what happens if one lands anyway.
+	if _, res := d.session.MovePane(resp.PaneID, other.ID); res != movePaneMoved {
+		close(gate)
+		t.Fatalf("move: %v", res)
+	}
+	close(gate)
+	select {
+	case <-removed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the abandoned worktree was not removed")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for spawnErrorOf(d.session.Pane(resp.PaneID)) == "" {
+		if time.Now().After(deadline) {
+			t.Fatal("the moved placeholder never said why its worktree is missing")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := d.session.Panes(tabID); len(got) != 1 || got[0].ID != first {
+		t.Fatalf("source tab holds %d panes, want only %s", len(got), first)
+	}
+	if got := d.session.Panes(other.ID); len(got) != 1 || got[0].ID != resp.PaneID {
+		t.Fatalf("other tab holds %d panes, want only the placeholder", len(got))
+	}
+}
+
+// A worktree REPLACE has no placeholder; when its add fails after the
+// "preparing" answer has gone, the requester hears it in the sidebar, on the
+// pane it named, and that pane is untouched.
+func TestSplitPaneReq_WorktreeReplaceFailureIsReported(t *testing.T) {
+	d, client := mcpTestDaemon(t)
+	_, first := seedTab(t, d, client)
+	repo := worktreeRepo(t)
+	stubAdd(t, func(context.Context, string, string, string) error { return errors.New("branch already exists") })
+
+	resp := split(t, client, ipc.SplitPaneReqPayload{TargetPaneID: first, Placement: ipc.PlacementReplace,
+		Pane: ipc.SplitPaneSpec{CWD: repo, Worktree: &ipc.SplitWorktree{Branch: "feat/x"}}})
+	if !resp.Preparing || resp.PaneID != first {
+		t.Fatalf("resp = %+v", resp)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		for _, e := range d.events.Events() {
+			if e.Type == "worktree_failed" && e.PaneID == first {
+				if !strings.Contains(e.Message, "branch already exists") {
+					t.Fatalf("event message %q lacks git's reason", e.Message)
+				}
+				if d.session.Pane(first) == nil {
+					t.Fatal("the target was destroyed by a failed add")
+				}
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no worktree_failed event for the replace target")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// The answer naming a worktree placeholder reaches the requester before any
+// frame the checkout's worker sends: no state frame ahead of the answer may
+// already hold the finished pane (create_tab_req and split_pane_req alike).
+func TestWorktreeCreates_AnswerPrecedesTheCheckoutsFrames(t *testing.T) {
+	d, client := mcpTestDaemon(t)
+	_, first := seedTab(t, d, client)
+	repo := worktreeRepo(t)
+	stubAdd(t, func(_ context.Context, _, path, _ string) error { return os.MkdirAll(path, 0o755) })
+	for i, tc := range []struct {
+		msgType, respType string
+		payload           any
+	}{
+		{ipc.MsgCreateTabReq, ipc.MsgCreateTabResp, ipc.CreateTabReqPayload{FirstPane: &ipc.CreatePaneReqPayload{CWD: repo, WorktreeBranch: "feat/a"}}},
+		{ipc.MsgSplitPaneReq, ipc.MsgSplitPaneResp, ipc.SplitPaneReqPayload{TargetPaneID: first, Placement: ipc.PlacementRight,
+			Pane: ipc.SplitPaneSpec{CWD: repo, Worktree: &ipc.SplitWorktree{Branch: "feat/b"}}}},
+	} {
+		branch := []string{"feat/a", "feat/b"}[i]
+		wt := gitworktree.DerivePath(repo, branch)
+		msg, _ := ipc.NewMessage(tc.msgType, tc.payload)
+		msg.ID = "order-" + branch
+		if err := client.Send(msg); err != nil {
+			t.Fatal(err)
+		}
+		if err := client.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		for {
+			f, err := client.Receive()
+			if err != nil {
+				t.Fatalf("%s: no answer: %v", tc.msgType, err)
+			}
+			if f.Type == tc.respType && f.ID == msg.ID {
+				break
+			}
+			if f.Type != ipc.MsgWorkspaceState {
+				continue
+			}
+			ws := decodeInto[ipc.WorkspaceState](t, f)
+			for _, p := range ws.Panes {
+				if p.CWD == wt {
+					t.Fatalf("%s: a state frame carried the finished pane before the answer", tc.msgType)
+				}
+			}
+		}
+		client.SetReadDeadline(time.Time{})
+		// Let the checkout finish so the next case's add finds the slot free.
+		deadline := time.Now().Add(5 * time.Second)
+		for !paneWithCWD(d, wt) {
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: the worktree pane never arrived", tc.msgType)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+}
+
+func paneWithCWD(d *Daemon, cwd string) bool {
+	for _, p := range d.session.AllPanes() {
+		p.PluginMu.Lock()
+		got := p.CWD
+		p.PluginMu.Unlock()
+		if got == cwd {
+			return true
+		}
+	}
+	return false
 }

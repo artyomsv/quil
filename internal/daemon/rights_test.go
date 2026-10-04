@@ -171,6 +171,24 @@ func TestRights_StandardPayloadCarriers(t *testing.T) {
 	}
 }
 
+// split_pane_req rides TestRights_EveryLevelEveryType through the class table
+// (act); its answer is classed never, which that test skips. Both are pinned
+// here at every level, so neither can drift without a red row.
+func TestRights_SplitPaneTypesAtEveryLevel(t *testing.T) {
+	h := newAuthHarness(t)
+	for _, lvl := range []clientauth.Level{clientauth.LevelReadOnly, clientauth.LevelStandard, clientauth.LevelFull} {
+		c, _ := h.login(t, h.mint(t, "split-"+string(lvl), lvl, nil))
+		req := &ipc.Message{Type: ipc.MsgSplitPaneReq, ID: "split-req-" + string(lvl), Payload: json.RawMessage(`{"placement":"diagonal"}`)}
+		if refused := sendAndProbe(t, c, req); refused != (lvl == clientauth.LevelReadOnly) {
+			t.Errorf("split_pane_req from %s: refused=%v", lvl, refused)
+		}
+		resp := &ipc.Message{Type: ipc.MsgSplitPaneResp, ID: "split-resp-" + string(lvl), Payload: json.RawMessage(`{}`)}
+		if !sendAndProbe(t, c, resp) {
+			t.Errorf("split_pane_resp from %s was accepted", lvl)
+		}
+	}
+}
+
 func TestRights_TokenRequestsLocalOnly(t *testing.T) {
 	h := newAuthHarness(t)
 	full, _ := h.login(t, h.mint(t, "full", clientauth.LevelFull, nil))

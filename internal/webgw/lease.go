@@ -3,23 +3,26 @@ package webgw
 import (
 	"encoding/hex"
 	"io"
-	"strings"
 	"sync"
 )
 
 // leases hands each browser tab a client id. A page offers the id it had
-// (sessionStorage); it gets it back only if this gateway minted it and no
-// other live tab holds it — a duplicated browser tab copies sessionStorage,
-// and two live tabs with one id would replace each other in the daemon.
+// (sessionStorage); it gets it back only if this gateway minted that exact id
+// and no other live tab holds it. Anything else — a duplicated browser tab's
+// copy of a live id, an id from another gateway, a made-up, over-long or
+// control-character string — gets a freshly minted id, so every id a daemon
+// sees has the minted shape and two live tabs never share one (they would
+// replace each other in the daemon).
 type leases struct {
-	rand io.Reader
-	pfx  string
-	mu   sync.Mutex
-	live map[string]bool
+	rand   io.Reader
+	pfx    string
+	mu     sync.Mutex
+	minted map[string]bool
+	live   map[string]bool
 }
 
 func newLeases(r io.Reader) *leases {
-	return &leases{rand: r, pfx: randHex(r, 4), live: map[string]bool{}}
+	return &leases{rand: r, pfx: randHex(r, 4), minted: map[string]bool{}, live: map[string]bool{}}
 }
 
 func (l *leases) prefix() string { return l.pfx }
@@ -27,11 +30,12 @@ func (l *leases) prefix() string { return l.pfx }
 func (l *leases) acquire(hint string) string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if strings.HasPrefix(hint, "web-"+l.pfx+"-") && !l.live[hint] {
+	if l.minted[hint] && !l.live[hint] {
 		l.live[hint] = true
 		return hint
 	}
 	id := "web-" + l.pfx + "-" + randHex(l.rand, 6)
+	l.minted[id] = true
 	l.live[id] = true
 	return id
 }
@@ -43,7 +47,9 @@ func (l *leases) release(id string) {
 }
 
 func (l *leases) renew(old string) string {
-	l.release(old)
+	l.mu.Lock()
+	delete(l.live, old)
+	l.mu.Unlock()
 	return l.acquire("")
 }
 

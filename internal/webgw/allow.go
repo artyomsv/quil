@@ -3,6 +3,8 @@ package webgw
 import (
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 
 	"github.com/artyomsv/quil/internal/ipc"
 )
@@ -53,6 +55,34 @@ var errBadFirstMessage = errors.New("the first message must be hello of kind web
 type forwardGate struct {
 	leasedID  string
 	helloSeen bool
+	// exeName and version describe the gateway process. They replace whatever
+	// the page put in its hello, so list_clients shows the real process.
+	exeName string
+	version string
+}
+
+// newForwardGate builds the gate for one tab; version is the gateway build's.
+func newForwardGate(leasedID, version string) *forwardGate {
+	exe := "quil"
+	if p, err := os.Executable(); err == nil {
+		exe = filepath.Base(p)
+	}
+	return &forwardGate{leasedID: leasedID, exeName: exe, version: version}
+}
+
+// ownHello returns a copy of a validated hello whose process fields are the
+// gateway's, not the page's.
+func (g *forwardGate) ownHello(m *ipc.Message, h ipc.HelloPayload) (*ipc.Message, error) {
+	h.PID = os.Getpid()
+	h.ExeName = g.exeName
+	h.Version = g.version
+	p, err := json.Marshal(h)
+	if err != nil {
+		return nil, err
+	}
+	c := *m
+	c.Payload = p
+	return &c, nil
 }
 
 // check returns the message to forward, or a refusal to send back to the
@@ -66,8 +96,12 @@ func (g *forwardGate) check(m *ipc.Message) (fwd, refuse *ipc.Message, fatal err
 		if err := json.Unmarshal(m.Payload, &h); err != nil || h.Kind != "web" || h.ClientID != g.leasedID {
 			return nil, nil, errBadFirstMessage
 		}
+		c, err := g.ownHello(m, h)
+		if err != nil {
+			return nil, nil, errBadFirstMessage
+		}
 		g.helloSeen = true
-		return m, nil, nil
+		return c, nil, nil
 	}
 	if !forwardable[m.Type] {
 		return nil, refusal(m, "not available in the web client"), nil
@@ -78,6 +112,14 @@ func (g *forwardGate) check(m *ipc.Message) (fwd, refuse *ipc.Message, fatal err
 		if err := json.Unmarshal(m.Payload, &h); err != nil || h.Kind != "web" || h.ClientID != g.leasedID {
 			return nil, refusal(m, "hello must name this tab's client id"), nil
 		}
+		if m.ID == "" {
+			return nil, refusal(m, "hello needs an ID"), nil
+		}
+		c, err := g.ownHello(m, h)
+		if err != nil {
+			return nil, refusal(m, "hello is malformed"), nil
+		}
+		return c, nil, nil
 	case ipc.MsgAttach:
 		var a ipc.AttachPayload
 		if err := json.Unmarshal(m.Payload, &a); err != nil || a.ClientID != g.leasedID {

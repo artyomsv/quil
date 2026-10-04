@@ -2,6 +2,7 @@ package webgw
 
 import (
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 
@@ -94,5 +95,50 @@ func TestWebOpenPayload_DecodesHintAndKey(t *testing.T) {
 	}
 	if p.ClientIDHint != "web-ab-1" || p.Key != "k-1" {
 		t.Fatalf("decoded %+v", p)
+	}
+}
+
+func TestCheckForward_HelloCarriesTheGatewaysOwnProcessFields(t *testing.T) {
+	g := newForwardGate("web-p-1", "9.9.9")
+	forged := msg(t, ipc.MsgHello, "h1", ipc.HelloPayload{
+		Kind: "web", Proto: ipc.ProtocolVersion, ClientID: "web-p-1",
+		PID: 1, ExeName: "quil.exe", Version: "0.0.1",
+	})
+	for i, m := range []*ipc.Message{forged, forged} { // first hello, then a repeat
+		fwd, refuse, fatal := g.check(m)
+		if fwd == nil || refuse != nil || fatal != nil {
+			t.Fatalf("hello %d: %v %v %v", i, fwd, refuse, fatal)
+		}
+		var h ipc.HelloPayload
+		if err := json.Unmarshal(fwd.Payload, &h); err != nil {
+			t.Fatal(err)
+		}
+		if h.PID != os.Getpid() || h.ExeName != g.exeName || h.ExeName == "quil.exe" || h.Version != "9.9.9" {
+			t.Fatalf("hello %d forwarded with page-supplied fields: %+v", i, h)
+		}
+		if h.Kind != "web" || h.ClientID != "web-p-1" || fwd.ID != "h1" {
+			t.Fatalf("hello %d lost its pinned fields: %+v id %q", i, h, fwd.ID)
+		}
+	}
+}
+
+func TestCheckForward_SecondHelloIsPinnedToo(t *testing.T) {
+	g := &forwardGate{leasedID: "web-p-1", helloSeen: true}
+	for name, m := range map[string]*ipc.Message{
+		"other id":   helloFor(t, "web-p-2", "web"),
+		"other kind": helloFor(t, "web-p-1", "tui"),
+		"no id":      msg(t, ipc.MsgHello, "", ipc.HelloPayload{Kind: "web", ClientID: "web-p-1"}),
+	} {
+		fwd, refuse, fatal := g.check(m)
+		if fwd != nil || refuse == nil || fatal != nil {
+			t.Errorf("%s: fwd=%v refuse=%v fatal=%v", name, fwd, refuse, fatal)
+		}
+	}
+}
+
+func TestCheckForward_AttachWithoutClientIDIsRefused(t *testing.T) {
+	g := &forwardGate{leasedID: "web-p-1", helloSeen: true}
+	if fwd, refuse, _ := g.check(msg(t, ipc.MsgAttach, "a1", ipc.AttachPayload{})); fwd != nil || refuse == nil {
+		t.Fatal("attach without a client id was forwarded")
 	}
 }

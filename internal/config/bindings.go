@@ -26,6 +26,11 @@ type Bindings struct {
 	Overrides       map[keymap.ActionID]string
 }
 
+// Settings hands the file's values to keymap.FromSettings.
+func (b Bindings) Settings() keymap.Settings {
+	return keymap.Settings{Preset: b.Preset, Prefix: b.Prefix, Timeout: b.SequenceTimeout, Overrides: b.Overrides}
+}
+
 // bindingsFile is the wire shape, shared with the shipped presets so a user can
 // rename their bindings.toml into presets/ and select it by name.
 //

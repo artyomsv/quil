@@ -54,6 +54,10 @@ func ExpandPrefix(specs map[ActionID]string, prefix string) (map[ActionID]string
 	return out, conflicts
 }
 
+// ValidatePrefix is validatePrefix for callers outside the package: the F1
+// Keys page checks a typed prefix before it saves one.
+func ValidatePrefix(prefix string) (string, error) { return validatePrefix(prefix) }
+
 // validatePrefix returns the canonical form of a prefix chord.
 //
 // Each rejection maps to a specific silent failure rather than to tidiness:

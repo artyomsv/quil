@@ -213,6 +213,8 @@ type settingsField struct {
 	// submenu, matching templateSettings, so settingsSubmenuIndex keeps
 	// finding the Notifications row.
 	sandboxSettings bool
+	// keysSettings opens F1 → Settings → Keys.
+	keysSettings bool
 }
 
 // settingsFields returns the editable Settings rows. Every setter that
@@ -472,6 +474,14 @@ func settingsFields() []settingsField {
 			get:             func(m *Model) string { return "…" },
 			set:             func(m *Model, _ string) {},
 			sandboxSettings: true,
+		},
+		{
+			// Preset and prefix, applied at once. Its own screen because the
+			// conflict lines need room.
+			label:        "Keys",
+			get:          func(m *Model) string { return "…" },
+			set:          func(m *Model, _ string) {},
+			keysSettings: true,
 		},
 		{
 			label: "Max live overlays",
@@ -735,6 +745,8 @@ func (m Model) dispatchDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handleNotifySettingsKey(msg)
 	case dialogSandboxSettings:
 		return m.handleSandboxSettingsKey(msg)
+	case dialogKeySettings:
+		return m.handleKeySettingsKey(msg)
 	case dialogNewTemplate:
 		return m.handleTemplateDialogKey(msg)
 	case dialogShortcuts:
@@ -1047,6 +1059,8 @@ func (m Model) handleSettingsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		switch {
 		case f.templateSettings:
 			return m.openTemplateSettings()
+		case f.keysSettings:
+			return m.openKeySettings()
 		case f.sandboxSettings:
 			m.dialog = dialogSandboxSettings
 			m.dialogCursor = 0
@@ -1505,6 +1519,8 @@ func (m Model) renderDialog() string {
 		content = m.renderNotifySettingsDialog()
 	case dialogSandboxSettings:
 		content = m.renderSandboxSettingsDialog()
+	case dialogKeySettings:
+		content = m.renderKeySettingsDialog()
 	case dialogNewTemplate:
 		content = m.renderTemplateDialog()
 	case dialogShortcuts:

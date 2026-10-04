@@ -217,20 +217,24 @@ func (b *bridge) detachPage(code int, reason string) {
 // went away by itself. A page that was already replaced, resynced away or
 // closed leaves the bridge alone.
 func (b *bridge) closePage(gen uint64, code int, reason string) {
-	b.mu.Lock()
-	current := !b.closed && b.page != nil && b.pageGen == gen
-	b.mu.Unlock()
-	if current {
-		b.close(code, reason)
-	}
+	b.closeIf(func() bool { return b.page != nil && b.pageGen == gen }, code, reason)
 }
 
 // close sends detach and flushes it before closing the daemon connection —
 // a queued frame is discarded by a close — so a held master slot is released
 // at once rather than after the daemon's grace time. Then the page closes.
-func (b *bridge) close(code int, reason string) {
+func (b *bridge) close(code int, reason string) { b.closeIf(nil, code, reason) }
+
+// closeIf is close that proceeds only when cond, evaluated under the bridge's
+// lock, holds (nil means always). The check and the close are one critical
+// section, so a resync cannot slip between them.
+func (b *bridge) closeIf(cond func() bool, code int, reason string) {
 	b.mu.Lock()
 	if b.closed {
+		b.mu.Unlock()
+		return
+	}
+	if cond != nil && !cond() {
 		b.mu.Unlock()
 		return
 	}

@@ -71,6 +71,8 @@ type tab struct {
 	sock  *sockRef
 	held  bool
 	timer *time.Timer
+	// holdGen numbers the holds so an old timer cannot close a newer one.
+	holdGen uint64
 }
 
 type Server struct {
@@ -292,18 +294,22 @@ func (s *Server) tabFor(ctx context.Context, hint, session string, mine *sockRef
 	s.dialing++
 	s.mu.Unlock()
 
-	id := s.leases.acquire(hint)
+	id := s.leases.acquire(hint, session)
+	// Shutdown cancels a dial in flight as well as the page going away.
 	dctx, cancel := context.WithTimeout(ctx, dialTimeout)
+	stopWatch := context.AfterFunc(s.ctx, cancel)
 	conn, rights, err := s.cfg.Dial(dctx, id)
+	stopWatch()
 	cancel()
 	s.mu.Lock()
 	s.dialing--
-	if err == nil && s.stopped {
-		err = errors.New("the web server is stopping")
-		_ = conn.Close()
-	}
-	if err != nil {
+	stopping := err == nil && s.stopped
+	if err != nil || stopping {
 		s.mu.Unlock()
+		if stopping {
+			_ = conn.Close()
+			err = errors.New("the web server is stopping")
+		}
 		s.leases.release(id)
 		return nil, nil, err
 	}
@@ -341,12 +347,17 @@ func (s *Server) hold(t *tab) {
 		return
 	}
 	t.held = true
-	t.timer = time.AfterFunc(s.lease, func() { s.expire(t) })
+	t.holdGen++
+	gen := t.holdGen
+	t.timer = time.AfterFunc(s.lease, func() { s.expire(t, gen) })
 }
 
-func (s *Server) expire(t *tab) {
+// expire closes a tab whose hold number gen is still the current one; a timer
+// left over from an earlier hold (the page came back and was resynced again)
+// acts on nothing.
+func (s *Server) expire(t *tab, gen uint64) {
 	s.mu.Lock()
-	if !t.held {
+	if !t.held || t.holdGen != gen {
 		s.mu.Unlock()
 		return
 	}

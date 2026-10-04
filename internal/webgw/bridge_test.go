@@ -536,3 +536,19 @@ func TestBridge_OneAckCoversInterleavedReplayAndLive(t *testing.T) {
 		t.Fatalf("live=%d replay=%d inFlight=%d budget=%d, want all 0", live, replay, inFlight, used)
 	}
 }
+
+// The close for a page that went away must not take down a bridge that a
+// resync already detached and a reloading page is about to reclaim.
+func TestClosePage_StalePageLeavesAResyncedBridgeOpen(t *testing.T) {
+	b, d, p := startBridge(t, testLimits())
+	b.detachPage(CloseResync, "resync")
+	b.closePage(p.gen, CloseGoingAway, "page closed")
+	if d.isClosed() {
+		t.Fatal("a stale page's close shut a held bridge")
+	}
+
+	p2 := &fakePage{}
+	attach(t, b, p2)
+	b.closePage(p2.gen, CloseGoingAway, "page closed")
+	waitFor(t, "the current page's close to shut the bridge", d.isClosed)
+}

@@ -45,10 +45,11 @@ type wsHarness struct {
 	logs  *logSink
 	dials atomic.Int32
 
-	mu      sync.Mutex
-	daemons []*fakeDaemon
-	ids     []string
-	dialErr error
+	mu       sync.Mutex
+	daemons  []*fakeDaemon
+	ids      []string
+	dialErr  error
+	dialHook func(ctx context.Context) error
 }
 
 func newWSHarness(t *testing.T, tune func(*Server)) *wsHarness {
@@ -69,8 +70,16 @@ func newWSHarness(t *testing.T, tune func(*Server)) *wsHarness {
 	return h
 }
 
-func (h *wsHarness) dial(_ context.Context, id string) (DaemonConn, string, error) {
+func (h *wsHarness) dial(ctx context.Context, id string) (DaemonConn, string, error) {
 	h.dials.Add(1)
+	h.mu.Lock()
+	hook := h.dialHook
+	h.mu.Unlock()
+	if hook != nil {
+		if err := hook(ctx); err != nil {
+			return nil, "", err
+		}
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.dialErr != nil {
@@ -477,5 +486,67 @@ func TestWS_LogHasNoSecrets(t *testing.T) {
 		if strings.Contains(logs, secret) {
 			t.Fatalf("the log contains the %s:\n%s", name, logs)
 		}
+	}
+}
+
+func TestWS_StaleLeaseTimerDoesNotCloseANewerHold(t *testing.T) {
+	h := newWSHarness(t, smallLiveCap)
+	ctx := testCtx(t)
+	s := h.login()
+	c, w := h.open(ctx, s, "")
+	d := h.daemon(0)
+	pushLive(t, d)
+	if code, _ := closeOf(t, ctx, c); code != CloseResync {
+		t.Fatalf("closed %d, want 4001", code)
+	}
+	h.s.mu.Lock()
+	tb, firstGen := h.s.tabs[w.ClientID], h.s.tabs[w.ClientID].holdGen
+	h.s.mu.Unlock()
+
+	// The page comes back and is resynced again: a second hold.
+	c2, _ := h.open(ctx, s, w.ClientID)
+	pushLive(t, d)
+	if code, _ := closeOf(t, ctx, c2); code != CloseResync {
+		t.Fatalf("closed %d, want 4001", code)
+	}
+
+	// The first hold's timer fires late.
+	h.s.expire(tb, firstGen)
+	h.s.mu.Lock()
+	held := tb.held
+	h.s.mu.Unlock()
+	if !held || d.isClosed() {
+		t.Fatalf("an old hold's timer closed the newer hold (held=%v closed=%v)", held, d.isClosed())
+	}
+}
+
+func TestWS_ShutdownCancelsADialInFlight(t *testing.T) {
+	h := newWSHarness(t, nil)
+	ctx := testCtx(t)
+	s := h.login()
+	started, ended := make(chan struct{}), make(chan struct{})
+	h.mu.Lock()
+	h.dialHook = func(dctx context.Context) error {
+		close(started)
+		defer close(ended)
+		<-dctx.Done()
+		return dctx.Err()
+	}
+	h.mu.Unlock()
+
+	c, _, err := h.connect(ctx, s.cookie)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sendMsg(t, ctx, c, MsgWebOpen, "", WebOpenPayload{Key: s.key})
+	<-started
+	h.s.Shutdown(ctx)
+	select {
+	case <-ended:
+	case <-ctx.Done():
+		t.Fatal("the dial was still running after Shutdown")
+	}
+	if code, _ := closeOf(t, ctx, c); code != CloseDaemonUnavailable {
+		t.Fatalf("closed %d, want 4003", code)
 	}
 }

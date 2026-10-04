@@ -45,6 +45,53 @@ describe('SafeStorage', () => {
     s.setItem('k', 'v');
     expect(s.getItem('k')).toBe('v');
   });
+
+  it('sees what another tab wrote after its own write', () => {
+    const shared = new MapStorage();
+    const a = new SafeStorage(shared);
+    const b = new SafeStorage(shared);
+    a.setItem('k', 'k1');
+    b.setItem('k', 'k2');
+    expect(a.getItem('k')).toBe('k2');
+    b.removeItem('k');
+    expect(a.getItem('k')).toBeNull();
+  });
+
+  it('hands a key back to the backing store once a write succeeds', () => {
+    const shared = new MapStorage();
+    let fail = true;
+    const flaky: StorageLike = {
+      getItem: (k) => shared.getItem(k),
+      setItem: (k, v) => {
+        if (fail) throw new Error('quota');
+        shared.setItem(k, v);
+      },
+      removeItem: (k) => shared.removeItem(k),
+    };
+    const a = new SafeStorage(flaky);
+    a.setItem('k', 'mine');
+    shared.data.set('k', 'other');
+    expect(a.getItem('k')).toBe('mine');
+    fail = false;
+    a.setItem('k', 'mine2');
+    shared.data.set('k', 'other2');
+    expect(a.getItem('k')).toBe('other2');
+  });
+
+  it('answers from memory when a read throws', () => {
+    const s = new SafeStorage({
+      getItem: () => {
+        throw new Error('SecurityError');
+      },
+      setItem: () => {
+        throw new Error('SecurityError');
+      },
+      removeItem: () => {},
+    });
+    expect(s.getItem('k')).toBeNull();
+    s.setItem('k', 'v');
+    expect(s.getItem('k')).toBe('v');
+  });
 });
 
 describe('routedStorage', () => {
@@ -73,5 +120,12 @@ describe('routedStorage', () => {
     s.setItem(LOGIN_KEY, 'key1');
     expect(s.getItem(LOGIN_KEY)).toBe('key1');
     expect(s.getItem(CLIENT_ID_KEY)).toBeNull();
+  });
+
+  it('keeps a value in memory when the store is missing', () => {
+    const s = new SafeStorage(routedStorage(() => undefined, () => undefined));
+    expect(s.getItem(CLIENT_ID_KEY)).toBeNull();
+    s.setItem(CLIENT_ID_KEY, 'web-a-1');
+    expect(s.getItem(CLIENT_ID_KEY)).toBe('web-a-1');
   });
 });

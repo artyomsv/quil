@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { Connection, type Clock, type ConnectionEvents, type SocketLike, type StorageLike } from './connection';
 import type { Message, PaneOutputFrame } from './protocol';
+import { SafeStorage } from './storage';
 
 class FakeSocket implements SocketLike {
   binaryType = '';
@@ -77,7 +78,11 @@ interface Rig {
   closed: Array<[number, string, boolean]>;
 }
 
-function rig(random: () => number = () => 0.5, sessionGone: () => Promise<boolean> = async () => false): Rig {
+function rig(
+  random: () => number = () => 0.5,
+  sessionGone: () => Promise<boolean> = async () => false,
+  store?: StorageLike,
+): Rig {
   const r = { sockets: [], welcomes: 0, messages: [], outputs: [], reconnecting: 0, closed: [] } as unknown as Rig;
   r.storage = new FakeStorage();
   r.clock = new FakeClock();
@@ -94,7 +99,7 @@ function rig(random: () => number = () => 0.5, sessionGone: () => Promise<boolea
       r.sockets.push(s);
       return s;
     },
-    r.storage,
+    store ?? r.storage,
     r.clock,
     events,
     () => ({ cols: 80, rows: 24, winCols: 100, winRows: 30 }),
@@ -319,6 +324,27 @@ describe('Connection', () => {
     r.sockets[0]!.closeWith(1006);
     await settle();
     expect(r.storage.getItem('quil.web.key')).toBe('k-2');
+    expect(r.closed).toEqual([[1006, '', true]]);
+    r.clock.advance(1000);
+    expect(r.sockets).toHaveLength(2);
+  });
+
+  it('keeps the key another tab stored through its own wrapper over the shared store', async () => {
+    // As in the page: each tab has its own SafeStorage over one localStorage.
+    const shared = new FakeStorage();
+    const tabA = new SafeStorage(shared);
+    const tabB = new SafeStorage(shared);
+    let answer: (gone: boolean) => void = () => {};
+    const r = rig(undefined, () => new Promise<boolean>((resolve) => (answer = resolve)), tabA);
+    tabA.setItem('quil.web.key', 'k1');
+    r.conn.start();
+    r.sockets[0]!.closeWith(1006);
+    // Tab B logs in before tab A's old check answers 401.
+    tabB.setItem('quil.web.key', 'k2');
+    answer(true);
+    await settle();
+    expect(shared.getItem('quil.web.key')).toBe('k2');
+    expect(tabA.getItem('quil.web.key')).toBe('k2');
     expect(r.closed).toEqual([[1006, '', true]]);
     r.clock.advance(1000);
     expect(r.sockets).toHaveLength(2);

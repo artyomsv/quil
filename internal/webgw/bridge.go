@@ -133,6 +133,11 @@ type bridge struct {
 	replayPanes map[string]bool // panes with replay buffered for this page
 	resyncs     []time.Time
 	closed      bool
+
+	// onResync, set before run starts, is called after a resync detaches the
+	// page and before the page is told, so the owner can start waiting for the
+	// page to come back before the page can possibly reconnect.
+	onResync func()
 }
 
 func newBridge(d DaemonConn, lim bridgeLimits, budget *replayBudget, now func() time.Time, logf func(string, ...any)) *bridge {
@@ -154,13 +159,21 @@ func (b *bridge) setLease(id string) {
 // previous page is discarded and the counters restart at zero; a writer still
 // parked for the previous page exits. A closed bridge refuses, and the caller
 // closes p.
-func (b *bridge) attachPage(p pageConn) (uint64, error) {
+func (b *bridge) attachPage(p pageConn) (uint64, error) { return b.attachPageFirst(p, nil) }
+
+// attachPageFirst is attachPage with one JSON frame queued ahead of anything
+// the daemon sends, so the page's welcome is always its first frame.
+func (b *bridge) attachPageFirst(p pageConn, first []byte) (uint64, error) {
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
 		return 0, errClosed
 	}
 	b.resetLocked()
+	if first != nil {
+		b.controls++
+		b.queue = append(b.queue, queued{b: first})
+	}
 	b.page = p
 	b.pageGen++
 	gen := b.pageGen
@@ -192,8 +205,23 @@ func (b *bridge) detachPage(code int, reason string) {
 	b.resetLocked()
 	b.cond.Broadcast()
 	b.mu.Unlock()
+	if b.onResync != nil {
+		b.onResync()
+	}
 	if p != nil {
 		go p.Close(code, reason)
+	}
+}
+
+// closePage closes the bridge when gen is still the attached page: the page
+// went away by itself. A page that was already replaced, resynced away or
+// closed leaves the bridge alone.
+func (b *bridge) closePage(gen uint64, code int, reason string) {
+	b.mu.Lock()
+	current := !b.closed && b.page != nil && b.pageGen == gen
+	b.mu.Unlock()
+	if current {
+		b.close(code, reason)
 	}
 }
 

@@ -18,6 +18,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/google/uuid"
 
@@ -1222,6 +1223,10 @@ type Model struct {
 	// Update can set skipRender and still be rebuilt if the cache is invalid.
 	skipHidden bool
 
+	// mouseTail drops the key presses that finish an SGR mouse report the
+	// terminal reader split in two (see mouseTailGuard).
+	mouseTail mouseTailGuard
+
 	// Plugin migration dialog state
 	migrationPlugins    []plugin.StalePlugin // stale plugins needing migration
 	migrationIdx        int                  // active plugin tab index
@@ -1733,6 +1738,75 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 	// means the flag describes THIS message and can never leak into the next.
 	m.skipRender = false
 	m.skipHidden = false
+	// A mouse report split across two reads arrives as an unknown head plus
+	// key presses for its tail. Checked before anything treats those keys as
+	// user input — they must not ack a pane or reach a PTY. A held or dropped
+	// key returns before the prologue and mutates nothing, so the frame cannot
+	// have moved; released keys replay through Update and render as usual.
+	//
+	// Terminal input is strictly ordered, so a click, a paste or another mouse
+	// report arriving while a head is armed proves its tail is not coming: the
+	// guard disarms, and any held keys go first, ahead of the input that
+	// followed them. Any other message — a daemon broadcast, a Cmd result —
+	// can land in the middle of a real tail, so it leaves the guard armed;
+	// deliverHeld still routes each key to where it was typed if one of those
+	// moved focus. The message is then handled as normal; its own branch may
+	// mark the frame inert, so the defer re-arms rendering for delivered keys.
+	if m.mouseTail.armed() && mouseTailFromTerminal(msg) {
+		if held := m.mouseTail.reset(); len(held) > 0 {
+			var heldCmd tea.Cmd
+			m, heldCmd = m.deliverHeld(held)
+			defer func() {
+				if mm, ok := retModel.(Model); ok {
+					mm.skipRender = false
+					retModel = mm
+				}
+				retCmd = tea.Batch(heldCmd, retCmd)
+			}()
+		}
+	}
+	switch ev := msg.(type) {
+	case uv.UnknownEvent:
+		// Keys held for an earlier head go first, while the guard is disarmed,
+		// so they are delivered rather than held again behind this head.
+		var cmd tea.Cmd
+		release := m.mouseTail.reset()
+		if len(release) > 0 {
+			m, cmd = m.deliverHeld(release)
+		}
+		if m.mouseTail.arm(ev, start) {
+			m.skipRender = len(release) == 0
+			return m, tea.Batch(cmd, m.mouseTail.expireCmd())
+		}
+		if len(release) > 0 {
+			return m, cmd
+		}
+	case mouseTailExpireMsg:
+		release := m.mouseTail.expire(ev.gen)
+		if len(release) == 0 {
+			m.skipRender = true
+			return m, nil
+		}
+		return m.deliverHeld(release)
+	case tea.KeyPressMsg:
+		if !m.mouseTail.armed() {
+			break
+		}
+		// The key's target is taken now, as it is held: where it was typed is
+		// where it goes, whatever moves focus before it is delivered.
+		switch verdict, held := m.mouseTail.feed(ev, start, m.effectiveFocus()); verdict {
+		case mouseTailHold, mouseTailComplete:
+			m.skipRender = true
+			return m, nil
+		case mouseTailRelease:
+			// The held keys first, then this key as ordinary input — it is
+			// not part of a report, so it goes wherever focus is now.
+			var heldCmd, keyCmd tea.Cmd
+			m, heldCmd = m.deliverHeld(held)
+			m, keyCmd = m.replayKeys([]tea.KeyPressMsg{ev})
+			return m, tea.Batch(heldCmd, keyCmd)
+		}
+	}
 	// Local input answers the typing guard's ack hold (spec §8.1): a pane that
 	// became focused only because ANOTHER client switched tabs must not read
 	// as "seen" until the user actually looks at it, which a key or a mouse
@@ -1747,7 +1821,12 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 	// focused changes no focus, so only this can tell that choice apart.
 	switch msg.(type) {
 	case tea.KeyPressMsg:
-		m.remoteFocusUnacked = false
+		// Except held keys redirected to the pane they were typed into
+		// (deliverHeld): they were typed BEFORE the switch, so they say
+		// nothing about the pane it focused.
+		if !m.mouseTail.redirecting {
+			m.remoteFocusUnacked = false
+		}
 	case tea.MouseClickMsg:
 		m.remoteFocusUnacked = false
 		m.retireTypingGuard()

@@ -51,6 +51,11 @@ type mouseTailGuard struct {
 	held  []tea.KeyPressMsg // keys that continued the report, in arrival order
 	gen   uint64            // bumped per head, so a stale expiry is ignored
 	focus localFocusKey     // where input was focused when the head arrived
+
+	// redirecting is true while deliverHeld replays keys to the pane they were
+	// typed into after focus moved. Those keys predate the move, so Update
+	// must not treat them as the user acknowledging the newly focused pane.
+	redirecting bool
 }
 
 // arm starts tracking a broken mouse-report head and reports whether ev was
@@ -156,7 +161,9 @@ func (m Model) deliverHeld(keys []tea.KeyPressMsg) (Model, tea.Cmd) {
 	}
 	prevPane, prevAt := m.guardPaneID, m.remoteSwitchAt
 	m.guardPaneID, m.remoteSwitchAt = target.pane, m.clock()
+	m.mouseTail.redirecting = true
 	m, cmd := m.replayKeys(keys)
+	m.mouseTail.redirecting = false
 	m.guardPaneID, m.remoteSwitchAt = prevPane, prevAt
 	return m, cmd
 }

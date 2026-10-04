@@ -1807,7 +1807,12 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 	// focused changes no focus, so only this can tell that choice apart.
 	switch msg.(type) {
 	case tea.KeyPressMsg:
-		m.remoteFocusUnacked = false
+		// Except held keys redirected to the pane they were typed into
+		// (deliverHeld): they were typed BEFORE the switch, so they say
+		// nothing about the pane it focused.
+		if !m.mouseTail.redirecting {
+			m.remoteFocusUnacked = false
+		}
 	case tea.MouseClickMsg:
 		m.remoteFocusUnacked = false
 		m.retireTypingGuard()

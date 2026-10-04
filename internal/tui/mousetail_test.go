@@ -201,6 +201,30 @@ func TestUpdate_HeldKeysReachThePaneTheyWereTypedInto(t *testing.T) {
 	}
 }
 
+// TestUpdate_RedirectedHeldKeysDoNotAckTheNewPane: keys typed before a remote
+// switch and redirected to their pane are not the user looking at the pane
+// the switch focused, so its unseen mark must stay.
+func TestUpdate_RedirectedHeldKeysDoNotAckTheNewPane(t *testing.T) {
+	t.Parallel()
+	pm, tab := twoPaneModel()
+	var m tea.Model = *pm
+	for _, msg := range decodeAsReader(t, "\x1b[<3", "42") {
+		m, _ = m.Update(msg)
+	}
+	mm := focusP2(tab, m.(Model)) // a remote switch, as applyWorkspaceState marks it
+	mm.remoteFocusUnacked = true
+	m, _ = mm.Update(mouseTailExpireMsg{gen: 1})
+	if got := drainByPane(pm); got != "p1:4 p1:2 " {
+		t.Fatalf("delivered = %q, want both keys in p1", got)
+	}
+	if !m.(Model).remoteFocusUnacked {
+		t.Error("redirected held keys acknowledged the pane the remote switch focused")
+	}
+	if m.(Model).mouseTail.redirecting {
+		t.Error("redirecting was left set after delivery")
+	}
+}
+
 // TestUpdate_HeldKeysGoBeforeTerminalInput: terminal input is ordered, so a paste
 // or click after held keys releases them first, into the pane they were typed
 // into, before that input can move focus. (A click needs more Model than this

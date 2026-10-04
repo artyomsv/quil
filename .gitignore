@@ -57,3 +57,8 @@ Thumbs.db
 
 # Fetched pprof profiles (scripts/pprof.sh)
 /.pprof/
+
+# quil web: the built client is embedded at build time and never committed.
+/internal/webgw/dist/*
+!/internal/webgw/dist/.keep
+/web/node_modules/

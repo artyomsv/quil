@@ -1,0 +1,180 @@
+import { describe, expect, it } from 'vitest';
+import type { PaneOutputFrame } from './protocol';
+import { TerminalStore, type TermLike } from './terminals';
+
+type Op = ['write', string] | ['reset'];
+
+class FakeTerm implements TermLike {
+  ops: Op[] = [];
+  disposed = false;
+  // When set, write() parks its done callback here instead of finishing.
+  held: Array<() => void> | null = null;
+
+  write(data: Uint8Array, done: () => void): void {
+    this.ops.push(['write', new TextDecoder().decode(data)]);
+    if (this.held) this.held.push(done);
+    else queueMicrotask(done);
+  }
+  reset(): void {
+    this.ops.push(['reset']);
+  }
+  resize(): void {}
+  dispose(): void {
+    this.disposed = true;
+  }
+}
+
+const frame = (paneId: string, text: string, generation: bigint, ghost = false): PaneOutputFrame => ({
+  paneId,
+  ghost,
+  generation,
+  data: new TextEncoder().encode(text),
+});
+
+const flush = () => new Promise<void>((r) => setTimeout(r, 0));
+
+function setup() {
+  const terms = new Map<string, FakeTerm>();
+  const acks: Array<[number, number]> = [];
+  let epoch = 1;
+  const store = new TerminalStore(
+    (id) => {
+      const t = new FakeTerm();
+      terms.set(id, t);
+      return t;
+    },
+    (bytes, e) => acks.push([bytes, e]),
+    () => epoch,
+  );
+  store.sync(['p1']);
+  return {
+    store,
+    terms,
+    acks,
+    term: terms.get('p1')!,
+    setEpoch: (e: number) => {
+      epoch = e;
+    },
+  };
+}
+
+describe('TerminalStore', () => {
+  it('writes ghost history and the first live generation with no reset', async () => {
+    const { store, term } = setup();
+    store.output(frame('p1', 'old', 0n, true));
+    store.output(frame('p1', 'live', 5n));
+    await flush();
+    expect(term.ops).toEqual([['write', 'old'], ['write', 'live']]);
+  });
+
+  it('resets before the data of a higher generation', async () => {
+    const { store, term } = setup();
+    store.output(frame('p1', 'a', 5n));
+    store.output(frame('p1', 'b', 6n));
+    await flush();
+    expect(term.ops).toEqual([['write', 'a'], ['reset'], ['write', 'b']]);
+  });
+
+  it('drops a lower generation but still credits its bytes', async () => {
+    const { store, term, acks } = setup();
+    store.output(frame('p1', 'new', 6n));
+    store.output(frame('p1', 'stale', 5n));
+    await flush();
+    expect(term.ops).toEqual([['write', 'new']]);
+    expect(acks).toContainEqual([5, 1]);
+  });
+
+  it('drops and credits output while reconnecting, then resets once on the first state', async () => {
+    const { store, term, acks } = setup();
+    store.output(frame('p1', 'x', 4n));
+    await flush();
+    store.reconnecting();
+    store.output(frame('p1', 'lost', 4n));
+    expect(acks).toContainEqual([4, 1]);
+    store.stateApplied(false);
+    store.stateApplied(false);
+    await flush();
+    expect(term.ops).toEqual([['write', 'x'], ['reset']]);
+    // generations were forgotten: 2 is a baseline, not a reset
+    store.output(frame('p1', 'y', 2n));
+    await flush();
+    expect(term.ops).toEqual([['write', 'x'], ['reset'], ['write', 'y']]);
+  });
+
+  it('resets every terminal on a new run without reconnecting', async () => {
+    const { store, terms } = setup();
+    store.sync(['p1', 'p2']);
+    store.stateApplied(true);
+    await flush();
+    expect(terms.get('p1')!.ops).toEqual([['reset']]);
+    expect(terms.get('p2')!.ops).toEqual([['reset']]);
+  });
+
+  it('ignores a state that is neither a reconnect nor a new run', async () => {
+    const { store, term } = setup();
+    store.stateApplied(false);
+    await flush();
+    expect(term.ops).toEqual([]);
+  });
+
+  it('parses output for a pane nobody shows', async () => {
+    const { store, term } = setup();
+    store.output(frame('p1', 'hidden', 1n));
+    await flush();
+    expect(term.ops).toEqual([['write', 'hidden']]);
+  });
+
+  it('shows only the new run after a pane restarted while hidden', async () => {
+    const { store, term } = setup();
+    store.output(frame('p1', 'run3', 3n));
+    store.output(frame('p1', 'run4', 4n));
+    await flush();
+    expect(term.ops).toEqual([['write', 'run3'], ['reset'], ['write', 'run4']]);
+  });
+
+  it('keeps write, reset, write in order when the first done is late', async () => {
+    const { store, term } = setup();
+    term.held = [];
+    store.output(frame('p1', 'A', 1n));
+    store.output(frame('p1', 'B', 2n));
+    await flush();
+    expect(term.ops).toEqual([['write', 'A']]);
+    term.held!.shift()!();
+    await flush();
+    expect(term.ops).toEqual([['write', 'A'], ['reset'], ['write', 'B']]);
+  });
+
+  it('disposes a departed pane and creates new ones on sync', () => {
+    const { store, terms, term } = setup();
+    store.sync(['p2']);
+    expect(term.disposed).toBe(true);
+    expect(store.get('p1')).toBeUndefined();
+    expect(store.get('p2')).toBe(terms.get('p2'));
+  });
+
+  it('credits an unknown pane', () => {
+    const { store, acks } = setup();
+    store.output(frame('nope', 'abc', 1n));
+    expect(acks).toEqual([[3, 1]]);
+  });
+
+  it('credits bytes only after done', async () => {
+    const { store, term, acks } = setup();
+    term.held = [];
+    store.output(frame('p1', 'abcd', 1n));
+    await flush();
+    expect(acks).toEqual([]);
+    term.held!.shift()!();
+    expect(acks).toEqual([[4, 1]]);
+  });
+
+  it('credits a write with the epoch it arrived under, not the one at finish', async () => {
+    const { store, term, acks, setEpoch } = setup();
+    term.held = [];
+    store.output(frame('p1', 'abcd', 1n));
+    await flush();
+    setEpoch(2);
+    term.held!.shift()!();
+    expect(acks).toEqual([[4, 1]]);
+  });
+});

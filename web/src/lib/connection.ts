@@ -29,7 +29,9 @@ export interface ConnectionEvents {
   // receives a frame and does not write it to a terminal (a stale generation,
   // an unknown pane, a frame that arrives before the first workspace_state of
   // a reconnect) must still call processed(frame.data.length), or the count
-  // never drains.
+  // never drains. Callers read epoch when the frame arrives and pass it as
+  // processed(frame.data.length, epoch), so a late finish cannot credit a
+  // newer socket.
   onOutput(f: PaneOutputFrame): void;
   // The next workspace_state resets every terminal.
   onReconnecting(): void;

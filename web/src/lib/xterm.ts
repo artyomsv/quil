@@ -1,0 +1,79 @@
+import { Terminal } from '@xterm/xterm';
+import { WebglAddon } from '@xterm/addon-webgl';
+import '@xterm/xterm/css/xterm.css';
+import type { TermLike } from './terminals';
+
+export interface XtermPane extends TermLike {
+  // open() on first show, then move the element; adds the WebGL renderer.
+  attach(el: HTMLElement): void;
+  // Removes the WebGL renderer (browsers allow about 16 contexts).
+  detach(): void;
+  setFontSize(px: number): void;
+  // Pixels per cell at the current font.
+  measureCell(): { width: number; height: number };
+  onData(fn: (s: string) => void): void;
+}
+
+// createXtermPane makes the terminal un-opened: writes before open() fill its
+// buffer with no renderer, so a hidden pane costs memory and parsing only.
+// open() runs the first time the pane is shown; later shows move its element.
+// The WebGL renderer is attached only while visible, because browsers cap
+// WebGL contexts at about 16; the DOM renderer covers context loss.
+export function createXtermPane(_paneId: string): XtermPane {
+  const term = new Terminal({ scrollback: 1000, allowProposedApi: false, fontSize: 14, cursorBlink: false });
+  let host: HTMLElement | null = null;
+  let webgl: WebglAddon | null = null;
+  return {
+    write(data, done) {
+      term.write(data, done);
+    },
+    reset() {
+      term.reset();
+    },
+    resize(cols, rows) {
+      if (cols > 0 && rows > 0) term.resize(cols, rows);
+    },
+    dispose() {
+      webgl?.dispose();
+      term.dispose();
+    },
+    attach(el) {
+      if (!host) {
+        host = document.createElement('div');
+        host.style.width = '100%';
+        host.style.height = '100%';
+        el.appendChild(host);
+        term.open(host);
+      } else if (host.parentElement !== el) {
+        el.appendChild(host);
+      }
+      if (!webgl) {
+        try {
+          webgl = new WebglAddon();
+          webgl.onContextLoss(() => {
+            webgl?.dispose();
+            webgl = null;
+          });
+          term.loadAddon(webgl);
+        } catch {
+          webgl = null; // the DOM renderer stays
+        }
+      }
+    },
+    detach() {
+      webgl?.dispose();
+      webgl = null;
+    },
+    setFontSize(px) {
+      if (term.options.fontSize !== px) term.options.fontSize = px;
+    },
+    measureCell() {
+      const el = host?.querySelector('.xterm-screen') as HTMLElement | null;
+      if (!el || term.cols === 0 || term.rows === 0) return { width: 0, height: 0 };
+      return { width: el.clientWidth / term.cols, height: el.clientHeight / term.rows };
+    },
+    onData(fn) {
+      term.onData(fn);
+    },
+  };
+}

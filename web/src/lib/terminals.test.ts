@@ -9,9 +9,12 @@ class FakeTerm implements TermLike {
   disposed = false;
   // When set, write() parks its done callback here instead of finishing.
   held: Array<() => void> | null = null;
+  // When set, write() throws after recording the op.
+  throwOnWrite = false;
 
   write(data: Uint8Array, done: () => void): void {
     this.ops.push(['write', new TextDecoder().decode(data)]);
+    if (this.throwOnWrite) throw new Error('write failed');
     if (this.held) this.held.push(done);
     else queueMicrotask(done);
   }
@@ -150,6 +153,60 @@ describe('TerminalStore', () => {
     expect(term.disposed).toBe(true);
     expect(store.get('p1')).toBeUndefined();
     expect(store.get('p2')).toBe(terms.get('p2'));
+  });
+
+  it('follows the same generation rules for a ghost frame with a non-zero generation', async () => {
+    const { store, term, acks } = setup();
+    store.output(frame('p1', 'a', 5n, true));
+    store.output(frame('p1', 'b', 6n, true));
+    store.output(frame('p1', 'c', 5n, true));
+    await flush();
+    expect(term.ops).toEqual([['write', 'a'], ['reset'], ['write', 'b']]);
+    expect(acks).toContainEqual([1, 1]);
+    expect(acks).toHaveLength(3);
+  });
+
+  it('acknowledges queued frames once when the pane is disposed mid-chain', async () => {
+    const { store, term, acks } = setup();
+    term.held = [];
+    store.output(frame('p1', 'AA', 1n));
+    store.output(frame('p1', 'BBB', 2n));
+    await flush();
+    expect(acks).toEqual([]);
+    store.sync([]);
+    expect(acks).toEqual([[2, 1], [3, 1]]);
+    // the late done of the parked write must not acknowledge again
+    term.held.shift()!();
+    await flush();
+    expect(acks).toHaveLength(2);
+    // the queued reset and write never touched the disposed terminal
+    expect(term.ops).toEqual([['write', 'AA']]);
+  });
+
+  it('acknowledges a frame whose write throws and still writes the next one', async () => {
+    const { store, term, acks } = setup();
+    term.throwOnWrite = true;
+    store.output(frame('p1', 'bad', 1n));
+    await flush();
+    expect(acks).toEqual([[3, 1]]);
+    term.throwOnWrite = false;
+    store.output(frame('p1', 'good', 1n));
+    await flush();
+    expect(term.ops).toEqual([['write', 'bad'], ['write', 'good']]);
+    expect(acks).toEqual([[3, 1], [4, 1]]);
+  });
+
+  it('survives a throwing terminal on reset', async () => {
+    const { store, term, acks } = setup();
+    term.reset = () => {
+      throw new Error('reset failed');
+    };
+    store.output(frame('p1', 'a', 1n));
+    store.output(frame('p1', 'b', 2n));
+    store.output(frame('p1', 'c', 2n));
+    await flush();
+    expect(acks).toEqual([[1, 1], [1, 1], [1, 1]]);
+    expect(term.ops).toEqual([['write', 'a'], ['write', 'c']]);
   });
 
   it('credits an unknown pane', () => {

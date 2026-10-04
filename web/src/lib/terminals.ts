@@ -10,10 +10,18 @@ export interface TermLike {
 
 export type TermFactory = (paneId: string) => TermLike;
 
+// A frame accepted for writing and not yet acknowledged.
+interface Pending {
+  bytes: number;
+  epoch: number;
+}
+
 interface Slot {
   term: TermLike;
   generation: bigint; // 0n = no baseline yet
   chain: Promise<void>;
+  disposed: boolean;
+  pending: Set<Pending>;
 }
 
 // TerminalStore keeps one terminal per pane for the pane's whole life,
@@ -39,23 +47,44 @@ export class TerminalStore {
     const want = new Set(paneIds);
     for (const [id, slot] of this.slots) {
       if (!want.has(id)) {
-        slot.term.dispose();
+        // A disposed terminal may never call back, so every frame still
+        // waiting on it is acknowledged now; the chain skips the rest.
+        slot.disposed = true;
+        for (const p of [...slot.pending]) this.finish(slot, p);
+        try {
+          slot.term.dispose();
+        } catch {
+          // already gone
+        }
         this.slots.delete(id);
       }
     }
     for (const id of paneIds) {
       if (!this.slots.has(id)) {
-        this.slots.set(id, { term: this.factory(id), generation: 0n, chain: Promise.resolve() });
+        this.slots.set(id, {
+          term: this.factory(id),
+          generation: 0n,
+          chain: Promise.resolve(),
+          disposed: false,
+          pending: new Set(),
+        });
       }
     }
+  }
+
+  // finish acknowledges a pending frame, once.
+  private finish(slot: Slot, p: Pending): void {
+    if (!slot.pending.delete(p)) return;
+    this.processed(p.bytes, p.epoch);
   }
 
   get(paneId: string): TermLike | undefined {
     return this.slots.get(paneId)?.term;
   }
 
-  // output applies the TUI's generation rules. Ghost frames (replayed
-  // history) are written and leave the tracked generation alone. The first
+  // output applies the TUI's generation rules, keyed on the generation alone.
+  // Generation 0 (replayed history) is written and leaves the tracked
+  // generation alone. The first
   // live generation sets the baseline with no reset. A lower generation is
   // dropped. A higher one resets the terminal before its bytes are written.
   // Writes and resets for one pane run in order: a reset waits for every
@@ -69,7 +98,7 @@ export class TerminalStore {
       return;
     }
     let reset = false;
-    if (!f.ghost && f.generation !== 0n) {
+    if (f.generation !== 0n) {
       if (slot.generation === 0n) {
         slot.generation = f.generation;
       } else if (f.generation < slot.generation) {
@@ -81,16 +110,34 @@ export class TerminalStore {
       }
     }
     const data = f.data.slice();
-    slot.chain = slot.chain.then(
-      () =>
-        new Promise<void>((resolve) => {
+    const p: Pending = { bytes: n, epoch };
+    slot.pending.add(p);
+    this.enqueue(slot, () => {
+      if (slot.disposed) {
+        this.finish(slot, p);
+        return Promise.resolve();
+      }
+      return new Promise<void>((resolve) => {
+        try {
           if (reset) slot.term.reset();
           slot.term.write(data, () => {
-            this.processed(n, epoch);
+            this.finish(slot, p);
             resolve();
           });
-        }),
-    );
+        } catch {
+          // A terminal that throws must not stall the pane: acknowledge the
+          // frame and let the next one run.
+          this.finish(slot, p);
+          resolve();
+        }
+      });
+    });
+  }
+
+  // enqueue appends a step to the pane's chain. The chain never stays
+  // rejected, or every later step would be skipped.
+  private enqueue(slot: Slot, step: () => Promise<void>): void {
+    slot.chain = slot.chain.then(step).catch(() => {});
   }
 
   // reconnecting makes output() drop (and acknowledge) every frame until the
@@ -107,7 +154,9 @@ export class TerminalStore {
     this.ignoring = false;
     for (const slot of this.slots.values()) {
       slot.generation = 0n;
-      slot.chain = slot.chain.then(() => slot.term.reset());
+      this.enqueue(slot, async () => {
+        if (!slot.disposed) slot.term.reset();
+      });
     }
   }
 }

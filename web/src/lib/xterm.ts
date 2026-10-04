@@ -23,6 +23,8 @@ export function createXtermPane(_paneId: string): XtermPane {
   const term = new Terminal({ scrollback: 1000, allowProposedApi: false, fontSize: 14, cursorBlink: false });
   let host: HTMLElement | null = null;
   let webgl: WebglAddon | null = null;
+  let dataSub: { dispose(): void } | null = null;
+  let disposed = false;
   return {
     write(data, done) {
       term.write(data, done);
@@ -34,10 +36,15 @@ export function createXtermPane(_paneId: string): XtermPane {
       if (cols > 0 && rows > 0) term.resize(cols, rows);
     },
     dispose() {
+      disposed = true;
+      dataSub?.dispose();
+      dataSub = null;
       webgl?.dispose();
+      webgl = null;
       term.dispose();
     },
     attach(el) {
+      if (disposed) return;
       if (!host) {
         host = document.createElement('div');
         host.style.width = '100%';
@@ -72,8 +79,11 @@ export function createXtermPane(_paneId: string): XtermPane {
       if (!el || term.cols === 0 || term.rows === 0) return { width: 0, height: 0 };
       return { width: el.clientWidth / term.cols, height: el.clientHeight / term.rows };
     },
+    // One listener at a time: a new one replaces the previous.
     onData(fn) {
-      term.onData(fn);
+      if (disposed) return;
+      dataSub?.dispose();
+      dataSub = term.onData(fn);
     },
   };
 }

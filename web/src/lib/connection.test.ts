@@ -308,6 +308,22 @@ describe('Connection', () => {
     expect(r.sockets).toHaveLength(1);
   });
 
+  it('keeps the key another tab stored while the session check was out', async () => {
+    const r = rig(undefined, async () => {
+      // Another tab logs in before this check answers.
+      r.storage.setItem('quil.web.key', 'k-2');
+      return true;
+    });
+    r.storage.setItem('quil.web.key', 'k-1');
+    r.conn.start();
+    r.sockets[0]!.closeWith(1006);
+    await settle();
+    expect(r.storage.getItem('quil.web.key')).toBe('k-2');
+    expect(r.closed).toEqual([[1006, '', true]]);
+    r.clock.advance(1000);
+    expect(r.sockets).toHaveLength(2);
+  });
+
   it('after a refused handshake with the session live or unknown, keeps retrying', async () => {
     const r = rig(undefined, async () => false);
     r.storage.setItem('quil.web.key', 'k-1');

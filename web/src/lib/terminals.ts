@@ -108,6 +108,10 @@ export class TerminalStore {
     if (f.ghost && slot.awaitReplay) {
       slot.awaitReplay = false;
       reset = true;
+      // The wiped gap output must not leave its generation as the baseline:
+      // a restart between the gap and the replay would make the next live
+      // frame look newer and reset the replay away.
+      slot.generation = 0n;
     }
     if (f.generation !== 0n) {
       if (slot.generation === 0n) {

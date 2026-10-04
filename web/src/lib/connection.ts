@@ -318,9 +318,14 @@ export class Connection {
   // ends like a "login required" close; anything else keeps retrying.
   private recheckSession(): void {
     const starts = this.starts;
+    const key = this.storage.getItem(LOGIN_KEY);
     void this.sessionGone().then((gone) => {
       // A socket that opened since then has a session after all.
       if (!gone || this.stopped || this.opened || starts !== this.starts) return;
+      // Another tab logged in while the check was out: the cookie and the
+      // stored key are new, so the next retry succeeds. Clearing the key here
+      // would log both tabs out again.
+      if (this.storage.getItem(LOGIN_KEY) !== key) return;
       if (this.reconnectTimer !== null) {
         this.clock.clearTimeout(this.reconnectTimer);
         this.reconnectTimer = null;

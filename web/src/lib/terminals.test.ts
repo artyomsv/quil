@@ -289,6 +289,26 @@ describe('TerminalStore', () => {
     expect(acks.reduce((n, [b]) => n + b, 0)).toBe(3 + 3 + 4 + 3 + 4);
   });
 
+  it('forgets the gap output generation at the replay, so a restart keeps the replay', async () => {
+    const { store, term } = setup();
+    store.reconnecting();
+    store.stateApplied(false);
+    // Live output from the old run reaches the gap, then the pane restarts
+    // before the attach: its replay and live output carry the new run.
+    store.output(frame('p1', 'gap', 3n));
+    store.stateApplied(false);
+    store.output(frame('p1', 'hist', 0n, true));
+    store.output(frame('p1', 'live', 4n));
+    await flush();
+    expect(term.ops).toEqual([
+      ['reset'],
+      ['write', 'gap'],
+      ['reset'],
+      ['write', 'hist'],
+      ['write', 'live'],
+    ]);
+  });
+
   it('keeps the state-time reset alone for a pane with no replay', async () => {
     const { store, term } = setup();
     store.reconnecting();

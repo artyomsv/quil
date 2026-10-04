@@ -156,6 +156,9 @@ func main() {
 		case "notify":
 			handleNotify()
 			return
+		case "web":
+			runWeb(os.Args[2:])
+			return
 		case "sandbox":
 			handleSandbox()
 			return

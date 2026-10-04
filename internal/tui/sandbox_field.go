@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
@@ -239,7 +240,9 @@ func (m Model) renderSetupSandboxUnavailable() string {
 // last place to say so before it does.
 var sandboxAuthChoices = []struct{ choice, label, detail string }{
 	{"browser", "Browser", "sign in in this container · full subscription"},
-	{"shared", "Shared", "sign in once for all Shared panes · they share hooks, MCP servers, history"},
+	// Cost first and short: the F1 page has ~50 cells for this line, and a
+	// warning cut to "they share ho…" states no cost at all.
+	{"shared", "Shared", "shares hooks, MCP servers, history · sign in once"},
 	{"token", "Token", "no sign-in · saves a token every later Claude uses"},
 }
 
@@ -319,10 +322,16 @@ func (m Model) renderSetupSandboxAuthField(focused bool) string {
 		// The detail of the SELECTED choice only: the trade is what the user
 		// needs to see, and more lines of it would push Continue off a short
 		// terminal — the constraint every field in this dialog obeys.
+		// The key hint gives way to the detail when both do not fit: the
+		// detail is the trade the user is choosing, the keys are in the footer.
+		budget := m.setupTextWidth() - setupRowIndent
 		for _, c := range sandboxAuthChoices {
 			if c.choice == cur {
-				b.WriteString("\n    " + dialogSubtle.Render(truncateToWidth(
-					c.detail+" — ←/→ or space to change", m.setupTextWidth()-setupRowIndent)))
+				line := c.detail + " — ←/→ or space to change"
+				if lipgloss.Width(line) > budget {
+					line = c.detail
+				}
+				b.WriteString("\n    " + dialogSubtle.Render(truncateToWidth(line, budget)))
 			}
 		}
 	}

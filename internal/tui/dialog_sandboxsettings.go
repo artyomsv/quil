@@ -38,6 +38,21 @@ func (m *Model) setSandboxSignInDefault(choice string) {
 	m.configChanged = true
 }
 
+// pasteIntoSandboxSettings takes a paste while the page is open. Only the
+// image field accepts text, and only while it is being edited; a paste
+// anywhere else on the page is dropped, never forwarded to a pane.
+func (m *Model) pasteIntoSandboxSettings(content string) {
+	if !m.dialogEdit || m.dialogCursor != sandboxSettingsImageRow {
+		return
+	}
+	room := sandboxImageMax - len([]rune(m.dialogInput))
+	add := []rune(sanitizeDialogInput(content))
+	if len(add) > room {
+		add = add[:max(0, room)]
+	}
+	m.dialogInput += string(add)
+}
+
 // handleSandboxSettingsKey drives the screen.
 func (m Model) handleSandboxSettingsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()

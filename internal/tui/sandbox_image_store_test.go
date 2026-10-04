@@ -115,3 +115,45 @@ func TestCreatePaneSubmit_NoSandboxRemembersNothing(t *testing.T) {
 		t.Errorf("a non-sandbox create remembered %v", mem)
 	}
 }
+
+// A create the client refuses before sending (here: a new-branch worktree
+// whose repository root is not known yet) created nothing, so the image must
+// not be remembered as used on that host.
+func TestCreatePaneSubmit_RefusedCreateRemembersNothing(t *testing.T) {
+	m := newTabModel(t)
+	m.createPaneTarget = paneTargetNewTab
+	m.dialog = dialogCreatePane
+	m.selectedPlugin = "claude-code"
+	m.worktreeNewBranch = "feat/x" // with no worktrees.root: refused locally
+	m.sandboxOn, m.sandboxImage = true, "quil-sandbox:latest"
+	mem := memStore(&m)
+
+	m.handleCreatePaneSplit()
+
+	if len(mem) != 0 {
+		t.Errorf("a refused create remembered %v", mem)
+	}
+}
+
+// The split and replace forms send from their own closures; both remember the
+// image once the create actually leaves.
+func TestCreatePaneSubmit_SplitAndReplaceRememberTheImage(t *testing.T) {
+	for name, cursor := range map[string]int{"split": 0, "replace": 2} {
+		t.Run(name, func(t *testing.T) {
+			m := newBranchModel(t)
+			m.client = &fakeSender{}
+			m.selectedPlugin = "claude-code"
+			m.selectedCWD = "/repo"
+			m.dialogCursor = cursor
+			m.sandboxOn, m.sandboxImage = true, "quil-sandbox:latest"
+			mem := memStore(&m)
+
+			_, cmd := m.handleCreatePaneSplit()
+			runCmd(cmd)
+
+			if mem[""] != "quil-sandbox:latest" {
+				t.Errorf("remembered = %v, want the image under the local dest", mem)
+			}
+		})
+	}
+}

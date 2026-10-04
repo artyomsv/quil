@@ -8,6 +8,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/ipc"
 )
 
 // openSandboxSettings drives F1 → Settings → Sandbox through the real Enter
@@ -146,6 +147,82 @@ func TestRenderSandboxSettingsDialog_EveryLineFitsTheBox(t *testing.T) {
 							width, choice, editing, i, w, inner, stripANSI(line))
 					}
 				}
+			}
+		}
+	}
+}
+
+// The page owns paste like every other dialog: on either row, outside edit
+// mode, a paste must reach NO pane — a trailing CR there would run it in the
+// hidden pane. While editing the image it goes into the field, sanitized and
+// bounded.
+func TestSandboxSettings_PasteNeverReachesAPane(t *testing.T) {
+	sentPaneInput := func(f *fakeSender) bool {
+		for _, msg := range f.sent {
+			if msg.Type == ipc.MsgPaneInput {
+				return true
+			}
+		}
+		return false
+	}
+	for _, row := range []int{sandboxSettingsImageRow, sandboxSettingsSignInRow} {
+		m := newTabModel(t)
+		f := m.client.(*fakeSender)
+		m.dialog, m.dialogCursor = dialogSandboxSettings, row
+		upd, cmd := m.Update(tea.PasteMsg{Content: "TEST-clipboard\r"})
+		runCmd(cmd)
+		got := upd.(Model)
+		if sentPaneInput(f) {
+			t.Errorf("row %d: a paste on the Sandbox page was sent to a pane", row)
+		}
+		if got.dialog != dialogSandboxSettings || got.cfg.Sandbox.DefaultImage != "" {
+			t.Errorf("row %d: dialog=%v image=%q — a non-edit paste must change nothing", row, got.dialog, got.cfg.Sandbox.DefaultImage)
+		}
+	}
+
+	m := newTabModel(t)
+	f := m.client.(*fakeSender)
+	m.dialog, m.dialogCursor = dialogSandboxSettings, sandboxSettingsImageRow
+	m.dialogEdit, m.dialogInput = true, ""
+	upd, cmd := m.Update(tea.PasteMsg{Content: "quil-sandbox:latest\r\n" + strings.Repeat("x", 400)})
+	runCmd(cmd)
+	got := upd.(Model)
+	if sentPaneInput(f) {
+		t.Error("a paste while editing the image was sent to a pane")
+	}
+	if !strings.HasPrefix(got.dialogInput, "quil-sandbox:latest") || strings.ContainsAny(got.dialogInput, "\r\n") {
+		t.Errorf("edit paste gave %q, want the image with no line breaks", got.dialogInput)
+	}
+	if n := len([]rune(got.dialogInput)); n > sandboxImageMax {
+		t.Errorf("edit paste holds %d runes, want at most %d", n, sandboxImageMax)
+	}
+}
+
+// The cost of Shared must be readable where it is chosen — all three shared
+// things, not "they share ho…" — on the F1 page and in the create dialog.
+func TestSharedWarning_FullyVisibleWhereItIsChosen(t *testing.T) {
+	want := []string{"hooks", "MCP servers", "history"}
+
+	cfg := config.Default()
+	cfg.Sandbox.SharedClaudeConfig = true
+	page := Model{cfg: cfg, dialog: dialogSandboxSettings}
+	page.width, page.height = 120, 40
+	pageFrame := stripANSI(page.renderSandboxSettingsDialog())
+
+	m := sandboxKeyModel(t)
+	m.sandboxSignIn = "shared"
+	p := m.pluginRegistry.Get("claude-code")
+	for i := 0; i < m.setupFieldCount(p); i++ {
+		if k, _ := m.setupFieldKind(p, i); k == "sandboxauth" {
+			m.setupFieldCursor = i
+		}
+	}
+	dialogFrame := stripANSI(m.renderCreatePaneSetupDialog())
+
+	for name, frame := range map[string]string{"F1 page": pageFrame, "create dialog": dialogFrame} {
+		for _, w := range want {
+			if !strings.Contains(frame, w) {
+				t.Errorf("%s: the Shared warning lacks %q:\n%s", name, w, frame)
 			}
 		}
 	}

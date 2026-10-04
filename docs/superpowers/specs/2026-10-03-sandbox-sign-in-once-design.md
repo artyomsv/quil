@@ -111,7 +111,7 @@ and one table maps a choice to both wire fields — so `"shared"` can never reac
 | Choice | Label | Sends | Detail line (when focused) |
 |---|---|---|---|
 | `browser` | Browser | `auth: "browser"`, `claude_config: "own"` | sign in in this container · full subscription |
-| `shared` | Shared | `auth: "browser"`, `claude_config: "shared"` | sign in once for all Shared panes · they share hooks, MCP servers, history |
+| `shared` | Shared | `auth: "browser"`, `claude_config: "shared"` | shares hooks, MCP servers, history · sign in once |
 | `token` | Token | `auth: "token"`, `claude_config: "own"` | no sign-in · saves a token every later Claude uses |
 
 `m.sandboxAuth` / `effectiveSandboxAuth` become `m.sandboxSignIn` /

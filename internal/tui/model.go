@@ -2932,6 +2932,14 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 			m.tomlEditor.InsertMultiLine(text)
 			m.tomlEditor.Dirty = true
 			return m, nil
+		} else if m.dialog == dialogSandboxSettings {
+			// The page owns paste on every row: outside edit mode the generic
+			// dialogEdit arm below misses it, and the paste fell through to
+			// sendClipboardToPane — a trailing CR ran it in the hidden pane.
+			// While editing the image it is sanitized and bounded like a
+			// keypress.
+			m.pasteIntoSandboxSettings(msg.Content)
+			return m, nil
 		} else if m.dialog != dialogNone && m.dialogEdit {
 			m.dialogInput += sanitizeDialogInput(msg.Content)
 			return m, nil

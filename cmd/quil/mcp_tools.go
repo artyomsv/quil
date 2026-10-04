@@ -308,6 +308,26 @@ func (in createPaneInput) usesDialogOptions() bool {
 		in.SandboxClaudeConfig != ""
 }
 
+// requireCreateFields refuses a create whose fields this daemon would ignore.
+//
+// sandbox_claude_config has its own gate on top of the dialog-option floor: a
+// daemon that predates it IGNORES the field, and when that daemon's own
+// shared_claude_config is on, an explicit "own" lands in the shared directory —
+// an isolation request silently dropped. So the field goes only to a daemon
+// that lists it (ipc.GatedRequests); a daemon with no list at all falls back to
+// sandboxClaudeConfigMinVersion.
+func (b *mcpBridge) requireCreateFields(tool string, in createPaneInput) error {
+	if in.usesDialogOptions() {
+		if err := b.requireDaemon(tool + " with name/toggles/resume/worktree/sandbox"); err != nil {
+			return err
+		}
+	}
+	if in.SandboxClaudeConfig != "" {
+		return b.requireRequest(tool+" with sandbox_claude_config", ipc.FeatureSandboxClaudeConfig, sandboxClaudeConfigMinVersion)
+	}
+	return nil
+}
+
 func (in createPaneInput) toReq(tabID string) ipc.CreatePaneReqPayload {
 	req := ipc.CreatePaneReqPayload{
 		TabID:           tabID,
@@ -357,10 +377,8 @@ func registerCreatePaneTool(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogger) {
 		// answered since M10; the dialog options are not, and an older daemon
 		// IGNORES unknown fields — it would start the pane without the
 		// permission mode or worktree that was asked for, silently.
-		if input.usesDialogOptions() {
-			if err := bridge.requireDaemon("create_pane with name/toggles/resume/worktree/sandbox"); err != nil {
-				return nil, nil, fmt.Errorf("create_pane: %w", err)
-			}
+		if err := bridge.requireCreateFields("create_pane", input.createPaneInput); err != nil {
+			return nil, nil, fmt.Errorf("create_pane: %w", err)
 		}
 		resp, err := bridge.requestWithTimeout(ipc.MsgCreatePaneReq, input.toReq(input.TabID), createTimeout(input.WorktreeBranch != ""))
 		if err != nil {

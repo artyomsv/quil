@@ -3,6 +3,7 @@ package daemon
 import (
 	"testing"
 
+	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
 )
 
@@ -77,8 +78,9 @@ func TestSnapshot_ClaudeConfigChoiceSurvivesTheRoundTrip(t *testing.T) {
 // browser panes in that directory would keep resetting each other's
 // onboarding through the .quil-auth stamp.
 func TestApplySandboxSpec_TokenPaneNeverShares(t *testing.T) {
+	d := &Daemon{cfg: config.Default()}
 	pane := &Pane{ID: "p1"}
-	if err := applySandboxSpec(pane, &ipc.SandboxSpec{Image: "img:1", Auth: "token", ClaudeConfig: "shared"}); err != nil {
+	if err := d.applySandboxSpecFor(pane, &ipc.SandboxSpec{Image: "img:1", Auth: "token", ClaudeConfig: "shared"}); err != nil {
 		t.Fatalf("applySandboxSpec: %v", err)
 	}
 	pane.PluginMu.Lock()
@@ -86,5 +88,62 @@ func TestApplySandboxSpec_TokenPaneNeverShares(t *testing.T) {
 	pane.PluginMu.Unlock()
 	if auth != "token" || cc != "own" {
 		t.Errorf("auth=%q claude_config=%q, want token + own", auth, cc)
+	}
+}
+
+// The token-never-shares rule must hold for the EFFECTIVE values, not only the
+// literal wire pair: an empty auth or an empty choice is filled in from the
+// daemon's config, and either way the pane would otherwise end up a token pane
+// in the shared directory. A pane whose effective values do not conflict keeps
+// its recorded choice, empty included.
+func TestSettleSandboxSharing_UsesTheEffectiveValues(t *testing.T) {
+	tests := []struct {
+		name         string
+		auth, choice string
+		cfgAuth      string
+		cfgShared    bool
+		wantChoice   string
+	}{
+		{"shared choice, auth from a token config", "", "shared", "token", false, "own"},
+		{"token auth, choice from a shared config", "token", "", "", true, "own"},
+		{"both from a token+shared config", "", "", "token", true, "own"},
+		{"browser follows a shared config", "browser", "", "", true, ""},
+		{"browser shared stays shared", "browser", "shared", "token", false, "shared"},
+		{"token own stays own", "token", "own", "", true, "own"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := &Daemon{cfg: config.Default()}
+			d.cfg.Sandbox.Auth, d.cfg.Sandbox.SharedClaudeConfig = tt.cfgAuth, tt.cfgShared
+			pane := &Pane{ID: "p1"}
+			if err := d.applySandboxSpecFor(pane, &ipc.SandboxSpec{Image: "img:1", Auth: tt.auth, ClaudeConfig: tt.choice}); err != nil {
+				t.Fatalf("applySandboxSpecFor: %v", err)
+			}
+			if pane.SandboxClaudeConfig != tt.wantChoice {
+				t.Errorf("SandboxClaudeConfig = %q, want %q", pane.SandboxClaudeConfig, tt.wantChoice)
+			}
+		})
+	}
+}
+
+// And the create path uses it: a create that names neither field, on a
+// daemon configured token + shared, records "own".
+func TestHandleCreateTab_TokenSharedConfigRecordsOwn(t *testing.T) {
+	cfg := config.Default()
+	cfg.Sandbox.Auth, cfg.Sandbox.SharedClaudeConfig = "token", true
+	d := overlayTestDaemon(t, cfg)
+	stubSandboxMapping(t)
+
+	d.handleCreateTab(nil, createTabMsg(t, &ipc.FirstPaneSpec{
+		Type:    "terminal",
+		Sandbox: &ipc.SandboxSpec{Image: "quil-sandbox:latest"},
+	}))
+
+	p := newTabPane(t, d)
+	p.PluginMu.Lock()
+	got := p.SandboxClaudeConfig
+	p.PluginMu.Unlock()
+	if got != "own" {
+		t.Errorf("SandboxClaudeConfig = %q, want own — a token pane would mount the shared directory", got)
 	}
 }

@@ -2628,9 +2628,14 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 	// yields the zero value, which is "off".
 	sbox := m.sandboxSpec()
 	// Filed under the dialog's PINNED destination, like the recent CWDs: the
-	// image is pulled by THAT host's docker.
-	if sbox != nil {
-		m.rememberSandboxImage(m.createPaneDialogDest(), sbox.Image)
+	// image is pulled by THAT host's docker. Captured now, called only at the
+	// three points that actually send a create — a create refused before it
+	// leaves created nothing, so its image was not used on that host.
+	imageDest := m.createPaneDialogDest()
+	rememberImage := func(m Model) {
+		if sbox != nil {
+			m.rememberSandboxImage(imageDest, sbox.Image)
+		}
 	}
 	// Captured with the other choices, BEFORE the teardown below clears them.
 	// Reading these after that reset yields the zero value, so the spec would
@@ -2729,6 +2734,7 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 		}
 		logger.Debug("create tab: submitting cwd=%q type=%s instance=%s branch=%q repo=%q",
 			cwd, pluginName, instanceName, newBranch, newBranchRepo)
+		rememberImage(m)
 		return m, m.sendCreateTab(&ipc.FirstPaneSpec{
 			Type:            pluginName,
 			CWD:             cwd,
@@ -2886,6 +2892,7 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 				Sandbox:         sbox,
 			})
 			m.sendForDest(tabDest, msg)
+			rememberImage(m)
 			return nil
 		}
 		if spec == nil {
@@ -2961,6 +2968,7 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 			Sandbox:         sbox,
 		})
 		m.sendForDest(tabDest, msg)
+		rememberImage(m)
 		return nil
 	}
 	if spec == nil {

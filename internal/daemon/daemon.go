@@ -3065,7 +3065,7 @@ func (d *Daemon) constructPaneAt(payload ipc.CreatePanePayload, cwd, paneType st
 	// host. A REJECTED image destroys the pane rather than spawning it
 	// un-sandboxed — the user asked for isolation, and quietly not providing
 	// it is the one outcome that must never happen.
-	if err := applySandboxSpec(pane, payload.Sandbox); err != nil {
+	if err := d.applySandboxSpecFor(pane, payload.Sandbox); err != nil {
 		d.session.DestroyPane(pane.ID)
 		return nil, err
 	}
@@ -3143,7 +3143,7 @@ func (d *Daemon) replacePaneAt(payload ipc.CreatePanePayload, cwd, paneType stri
 	// refusal costs nothing — whereas past ReplacePane the OLD pane is gone
 	// whatever else fails, and refusing there would leave the tab short a
 	// pane to satisfy a validation the caller could have failed earlier.
-	if err := applySandboxSpec(newPane, payload.Sandbox); err != nil {
+	if err := d.applySandboxSpecFor(newPane, payload.Sandbox); err != nil {
 		return nil, false, err
 	}
 	log.Printf("pane replace: %s -> %s (type=%s)", payload.ReplacePaneID, newPane.ID, paneType)

@@ -91,14 +91,6 @@ func applySandboxSpec(pane *Pane, spec *ipc.SandboxSpec) error {
 		log.Printf("pane %s: ignoring unknown sandbox claude_config of length %d; using the configured default",
 			pane.ID, len(spec.ClaudeConfig))
 	}
-	// A token pane never shares, whoever asks: the dialog never sends that
-	// pair, but any IPC client can. In the shared directory a token pane and
-	// the browser panes would keep resetting each other's onboarding through
-	// the .quil-auth stamp (reconcileClaudeAuthMode).
-	if auth == string(config.SandboxAuthToken) && claudeConfig == config.SandboxClaudeConfigShared {
-		log.Printf("pane %s: a token pane does not share the Claude config directory; using its own", pane.ID)
-		claudeConfig = config.SandboxClaudeConfigOwn
-	}
 
 	pane.PluginMu.Lock()
 	pane.SandboxImage = spec.Image

@@ -624,13 +624,36 @@ resolve through the DAEMON's config, which for a remote project is another
 machine's, so the row could show one mode while the pane got the other.
 `defaultSandboxSignIn` is the one config→choice mapping (token wins over
 shared), shared by the dialog and F1 → Settings → Sandbox, and the page writes
-BOTH keys for every choice so it can never write `token` + `shared`. The one
-remaining way to mix modes in the shared directory is that pair hand-edited and
-an MCP create naming no `sandbox_claude_config`. An explicit `token` + `shared` is stored as `own` by `applySandboxSpec` (`TestApplySandboxSpec_TokenPaneNeverShares`).
+BOTH keys for every choice so it can never write `token` + `shared`.
 
-**A field cannot be version-gated** (only a request type can), so `shared` sent
-to an older daemon silently becomes `own`: a repeated sign-in, never a loss of
-isolation. Release TUIs are exact-match gated.
+**A token pane never shares, decided on the EFFECTIVE values at creation**
+(`Daemon.applySandboxSpecFor`, the create-path wrapper of `applySandboxSpec`).
+Either field may be empty and filled in from the daemon's config — an MCP create
+naming only `shared` on a daemon configured `auth = "token"`, or naming neither
+on a daemon configured token + shared — so checking the literal wire pair
+missed both (review findings on PR #252). Such a pane is recorded `own`. Only
+creates run it: a restored pane keeps what its snapshot recorded, empty
+included, so an upgrade moves nobody's transcripts — which means a pre-#251
+token pane under a token + shared config stays in the shared directory.
+`TestSettleSandboxSharing_UsesTheEffectiveValues`,
+`TestHandleCreateTab_TokenSharedConfigRecordsOwn` (mutation-checked).
+
+**A field cannot be version-gated by NUMBER, so it is gated by the daemon's
+own answer.** An older daemon IGNORES `claude_config`, and the dangerous
+direction is the reverse of the obvious one: with its own
+`shared_claude_config` on, an explicit `own` lands in the shared directory. So
+`ipc.FeatureSandboxClaudeConfig` is listed in `ipc.GatedRequests` and the MCP
+bridge's `requireCreateFields` sends the field only to a daemon whose Requests
+list names it (both `create_pane` and `create_tab.first_pane`); a daemon with
+no list falls back to `sandboxClaudeConfigMinVersion`. Release TUIs are
+exact-match gated; a dev TUI against an older daemon is the accepted gap.
+
+**The F1 page owns paste on every row** (`pasteIntoSandboxSettings`, a branch in
+`Update`'s `tea.PasteMsg` arm). The generic `dialogEdit` arm only catches a
+paste while a field is being edited, so on this page a paste outside edit mode
+fell through to `sendClipboardToPane` and ran in the hidden pane. The image is
+remembered only at the three points that actually SEND a create, never for one
+refused locally.
 
 **The image is remembered per destination, client-side**
 (`config.SandboxImagePath`, `internal/tui/sandbox_image_store.go`), written on

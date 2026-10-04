@@ -1302,8 +1302,15 @@ type VersionRespPayload struct {
 
 // GatedRequests are the request types a daemon advertises in
 // VersionRespPayload.Requests. Add a type here when it is new enough that an
-// older daemon would drop it silently.
-var GatedRequests = []string{MsgCreateFromTemplateReq, MsgListClientsReq}
+// older daemon would drop it silently — or a request FIELD an older daemon
+// would ignore where ignoring it is unsafe (FeatureSandboxClaudeConfig).
+var GatedRequests = []string{MsgCreateFromTemplateReq, MsgListClientsReq, FeatureSandboxClaudeConfig}
+
+// FeatureSandboxClaudeConfig is listed in GatedRequests by a daemon that honours
+// SandboxSpec.ClaudeConfig. A daemon that predates it ignores the field, so an
+// explicit "own" would land in the shared directory when that daemon's own
+// shared_claude_config is on; the MCP bridge refuses to send the field there.
+const FeatureSandboxClaudeConfig = "sandbox_claude_config"
 
 // Memory reporting payloads
 

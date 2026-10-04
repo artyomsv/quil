@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Message } from './protocol';
 import {
+  cellFromProbe,
   DaemonSizes,
   fitFontSize,
   gridFor,
@@ -69,6 +70,26 @@ function input(over: Partial<SizerInput> = {}): SizerInput {
     ...over,
   };
 }
+
+describe('cellFromProbe', () => {
+  it('divides the run by its length and rounds rows up to whole pixels', () => {
+    expect(cellFromProbe(268.8, 16.2, 32)).toEqual({ w: 8.4, h: 17 });
+  });
+
+  it('gives windowCells real cells for a probed viewport, still 0x0 below the floor', () => {
+    const cell = cellFromProbe(268.8, 17, 32);
+    if (!cell) throw new Error('no cell');
+    expect(windowCells(1000, 600, cell.w, cell.h)).toEqual({ cols: 119, rows: 35 });
+    expect(windowCells(300, 600, cell.w, cell.h)).toEqual({ cols: 0, rows: 0 });
+  });
+
+  it('is undefined when the probe measured nothing', () => {
+    expect(cellFromProbe(0, 17, 32)).toBeUndefined();
+    expect(cellFromProbe(268.8, 0, 32)).toBeUndefined();
+    expect(cellFromProbe(268.8, 17, 0)).toBeUndefined();
+    expect(cellFromProbe(Number.NaN, 17, 32)).toBeUndefined();
+  });
+});
 
 describe('Sizer', () => {
   it('never resizes as a follower, whatever is visible', () => {

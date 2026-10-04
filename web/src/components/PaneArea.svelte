@@ -29,7 +29,11 @@
       <PaneView {app} paneId={p.id} name={p.name} spawnError={p.spawnError} />
     </div>
   {:else}
-    <p class="empty">No panes</p>
+    {#if app.state}
+      <p class="empty">No panes</p>
+    {:else if !app.banner}
+      <p class="empty">Connecting…</p>
+    {/if}
   {/each}
 </div>
 

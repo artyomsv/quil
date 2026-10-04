@@ -5,6 +5,9 @@ import type { TermLike } from './terminals';
 
 // The font size a terminal starts at, and the one a size master lays out at.
 export const BASE_FONT = 14;
+// xterm.js's own default, named so the page can measure a cell in it before
+// any terminal is drawn.
+export const FONT_FAMILY = 'courier-new, courier, monospace';
 
 export interface XtermPane extends TermLike {
   // open() on first show, then move the element; adds the WebGL renderer.
@@ -26,7 +29,13 @@ export interface XtermPane extends TermLike {
 // The WebGL renderer is attached only while visible, because browsers cap
 // WebGL contexts at about 16; the DOM renderer covers context loss.
 export function createXtermPane(_paneId: string): XtermPane {
-  const term = new Terminal({ scrollback: 1000, allowProposedApi: false, fontSize: BASE_FONT, cursorBlink: false });
+  const term = new Terminal({
+    scrollback: 1000,
+    allowProposedApi: false,
+    fontSize: BASE_FONT,
+    fontFamily: FONT_FAMILY,
+    cursorBlink: false,
+  });
   let host: HTMLElement | null = null;
   let webgl: WebglAddon | null = null;
   let dataSub: { dispose(): void } | null = null;

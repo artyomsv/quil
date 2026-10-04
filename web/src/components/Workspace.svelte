@@ -19,11 +19,9 @@
     {#if app.banner}
       <Banner text={app.banner.text} retrying={app.banner.retrying} />
     {/if}
-    {#if app.state}
-      <PaneArea {app} />
-    {:else if !app.banner}
-      <p class="empty">Connecting…</p>
-    {/if}
+    <!-- Always present, even before the first state: its size is the window
+         this tab reports in attach. -->
+    <PaneArea {app} />
   </div>
 </div>
 
@@ -38,10 +36,5 @@
     min-width: 0;
     display: flex;
     flex-direction: column;
-  }
-
-  .empty {
-    margin: 16px;
-    color: #9aa0ad;
   }
 </style>

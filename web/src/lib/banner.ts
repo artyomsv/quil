@@ -6,6 +6,13 @@ export interface BannerState {
   retrying: boolean;
 }
 
+// Close 1008 with this reason means the login key was refused; the page shows
+// the login form. Any other 1008 is a refusal the user cannot fix by logging
+// in, and gets a banner.
+export function isLoginRequired(code: number, reason: string): boolean {
+  return code === 1008 && reason === 'login required';
+}
+
 // bannerFor says what the page shows after the socket closed with code. A
 // resync (4001) reconnects at once and shows nothing; null means no banner.
 // The reason comes from the gateway, which may relay the daemon's words, so it
@@ -27,6 +34,8 @@ export function bannerFor(code: number, reason: string, retrying: boolean): Bann
       return { text: 'Closed by an agent', retrying: false };
     case CLOSE.goingAway:
       return { text: 'The web server stopped', retrying: false };
+    case 1008:
+      return { text: `The web server refused this page: ${why || 'no reason given'}`, retrying: false };
     default:
       return retrying
         ? { text: 'Connection lost — reconnecting', retrying: true }

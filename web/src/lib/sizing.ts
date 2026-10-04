@@ -39,6 +39,14 @@ export function gridFor(boxW: number, boxH: number, cellW: number, cellH: number
   return { cols: Math.max(1, Math.floor(boxW / cellW)), rows: Math.max(1, Math.floor(boxH / cellH)) };
 }
 
+// The cell size from a probe: a run of chars characters measured at the base
+// font before any terminal is drawn. Rows are whole pixels, as xterm draws
+// them. undefined when the probe measured nothing (not laid out yet).
+export function cellFromProbe(width: number, height: number, chars: number): { w: number; h: number } | undefined {
+  if (chars < 1 || !(width > 0) || !(height > 0)) return undefined;
+  return { w: width / chars, h: Math.ceil(height) };
+}
+
 // The whole cells that fit the viewport; 0x0 below the floor.
 export function windowCells(viewW: number, viewH: number, cellW: number, cellH: number): { cols: number; rows: number } {
   if (cellW <= 0 || cellH <= 0) return { cols: 0, rows: 0 };

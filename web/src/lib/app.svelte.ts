@@ -1,20 +1,43 @@
 import { AgentStatePoller } from './agentstate';
-import { bannerFor, type BannerState } from './banner';
+import { bannerFor, type BannerState, isLoginRequired } from './banner';
 import { type AttachSizes, type Clock, Connection, type SocketLike } from './connection';
 import { type QuilTestHook, shouldRegisterE2EHook } from './e2ehook';
 import { type FetchLike, hasSession, postLogin } from './login';
 import type { Message, PaneInfo, PaneSize, WebWelcome, WorkspaceState } from './protocol';
-import { DaemonSizes, fitFontSize, gridFor, isFollower, Sizer, windowCells } from './sizing';
+import { cellFromProbe, DaemonSizes, fitFontSize, gridFor, isFollower, Sizer, windowCells } from './sizing';
 import { StateRev } from './staterev';
 import { LOGIN_KEY, routedStorage, SafeStorage } from './storage';
 import { TerminalStore } from './terminals';
 import { activeProjectOf, activeTabOf, parseWorkspaceState, placedPanes, sidebarModel, tabBarModel } from './view';
-import { BASE_FONT, createXtermPane, type XtermPane } from './xterm';
+import { BASE_FONT, createXtermPane, FONT_FAMILY, type XtermPane } from './xterm';
 
-// How often, and how many times, layout retries while no terminal has been
-// drawn yet to measure a cell from.
+// How often, and how many times, layout retries measuring a cell from a drawn
+// terminal. The budget starts over on every zoom change or return to view.
 const CELL_RETRY_MS = 100;
 const CELL_RETRIES = 20;
+const PROBE_CHARS = 32;
+
+// probeCell measures one cell at the terminals' base font from an offscreen
+// run of characters, so the page knows its window in cells before any
+// terminal is drawn, and when the active tab has none.
+function probeCell(): { w: number; h: number } | undefined {
+  const el = document.createElement('span');
+  el.setAttribute('aria-hidden', 'true');
+  el.textContent = 'W'.repeat(PROBE_CHARS);
+  const st = el.style;
+  st.position = 'absolute';
+  st.left = '-10000px';
+  st.top = '0';
+  st.visibility = 'hidden';
+  st.whiteSpace = 'pre';
+  st.lineHeight = 'normal';
+  st.fontFamily = FONT_FAMILY;
+  st.fontSize = `${BASE_FONT}px`;
+  document.body.appendChild(el);
+  const r = el.getBoundingClientRect();
+  el.remove();
+  return cellFromProbe(r.width, r.height, PROBE_CHARS);
+}
 
 const browserClock: Clock = {
   setTimeout: (fn, ms) => window.setTimeout(fn, ms),
@@ -79,14 +102,18 @@ export class App {
   private readonly shown = new Map<string, Shown>();
   private area = { w: 0, h: 0 };
   private win = { cols: 0, rows: 0 };
-  // Pixels per cell at BASE_FONT, measured from the first drawn terminal.
-  private cell: { w: number; h: number } | undefined;
+  // Pixels per cell at BASE_FONT: from the offscreen probe, and from a drawn
+  // terminal once one is, which wins when the two differ.
+  private probed: { w: number; h: number } | undefined;
+  private measured: { w: number; h: number } | undefined;
   private cellRetries = 0;
   // A workspace_state has been applied on the current socket. Nothing about
   // size goes out before it: the daemon behind a new socket may not know us.
   private fresh = false;
   private focusPending = '';
   private layoutTimer: number | undefined;
+  private retryTimer: number | undefined;
+  private unwatch: (() => void) | undefined;
 
   constructor() {
     const send = (m: Message): void => this.conn.send(m);
@@ -127,6 +154,8 @@ export class App {
   // boot shows the workspace when the server still knows this browser's
   // session and the page still holds its key; otherwise the login form.
   async boot(): Promise<void> {
+    this.watchDisplay();
+    this.probed = probeCell();
     const live = await hasSession(this.fetchFn);
     if (live && this.storage.getItem(LOGIN_KEY)) this.start();
     else this.view = 'login';
@@ -150,6 +179,12 @@ export class App {
   stop(): void {
     this.conn.stop();
     this.poller.stop();
+    if (this.layoutTimer !== undefined) window.clearTimeout(this.layoutTimer);
+    if (this.retryTimer !== undefined) window.clearTimeout(this.retryTimer);
+    this.layoutTimer = undefined;
+    this.retryTimer = undefined;
+    this.unwatch?.();
+    this.unwatch = undefined;
   }
 
   switchTab(id: string): void {
@@ -281,6 +316,11 @@ export class App {
     this.terminals.stateApplied(verdict === 'apply-new-run');
     this.fresh = true;
     this.state = s;
+    // A pane that this state does not place (an overlay, another tab) will
+    // not be shown, so a focus waiting for it is dropped.
+    if (this.focusPending !== '' && !placedPanes(s).some((p) => p.id === this.focusPending)) {
+      this.focusPending = '';
+    }
     this.poller.stateApplied();
     this.scheduleLayout();
   }
@@ -297,7 +337,7 @@ export class App {
   }
 
   private onClosed(code: number, reason: string, retrying: boolean): void {
-    if (code === 1008) {
+    if (isLoginRequired(code, reason)) {
       // The key was refused (the connection already cleared it).
       this.resetLink();
       this.state = null;
@@ -333,10 +373,13 @@ export class App {
   // the daemon has no size yet, and sends nothing. A confirmed master lays out
   // at the base font and sends the grids in one batch through the Sizer.
   private layout(): void {
+    const cell = this.cellSize();
+    // The window in cells needs only the pane area and a cell, so attach can
+    // carry it before any state or terminal exists.
+    if (cell && this.area.w > 0 && this.area.h > 0) this.win = windowCells(this.area.w, this.area.h, cell.w, cell.h);
     const s = this.state;
     const w = this.welcome;
     if (!s || !w) return;
-    const cell = this.cellSize();
     const follower = isFollower(s.size_master, w.client_id, this.readOnly);
     const visible = new Map<string, { cols: number; rows: number }>();
     for (const [id, sh] of this.shown) {
@@ -357,16 +400,14 @@ export class App {
       x.resize(g.cols, g.rows);
       if (!follower) visible.set(id, g);
     }
-    if (!cell) {
-      if (this.shown.size > 0 && this.cellRetries < CELL_RETRIES) {
-        this.cellRetries++;
-        window.setTimeout(() => this.scheduleLayout(), CELL_RETRY_MS);
-      }
-      return;
+    if (!this.measured && this.shown.size > 0 && this.cellRetries < CELL_RETRIES && this.retryTimer === undefined) {
+      this.cellRetries++;
+      this.retryTimer = window.setTimeout(() => {
+        this.retryTimer = undefined;
+        this.scheduleLayout();
+      }, CELL_RETRY_MS);
     }
-    if (this.area.w <= 0 || this.area.h <= 0) return;
-    this.win = windowCells(this.area.w, this.area.h, cell.w, cell.h);
-    if (!this.fresh) return;
+    if (!cell || this.area.w <= 0 || this.area.h <= 0 || !this.fresh) return;
     this.sizer.update({
       myId: w.client_id,
       readOnly: this.readOnly,
@@ -378,18 +419,51 @@ export class App {
     this.sizer.geometry(this.win.cols, this.win.rows);
   }
 
-  // The cell size at BASE_FONT, from a drawn terminal still at that font.
+  // The cell size at BASE_FONT: a drawn terminal still at that font refines
+  // the probe's answer once, since xterm's own metrics are what it draws with.
   private cellSize(): { w: number; h: number } | undefined {
-    if (this.cell) return this.cell;
+    if (this.measured) return this.measured;
     for (const id of this.shown.keys()) {
       if (this.fonts.get(id) !== BASE_FONT) continue;
       const m = this.xterms.get(id)?.measureCell();
       if (m && m.width > 0 && m.height > 0) {
-        this.cell = { w: m.width, h: m.height };
-        return this.cell;
+        this.measured = { w: m.width, h: m.height };
+        return this.measured;
       }
     }
-    return undefined;
+    return this.probed;
+  }
+
+  // watchDisplay re-measures the cell when the zoom (devicePixelRatio)
+  // changes and when the page comes back into view.
+  private watchDisplay(): void {
+    if (this.unwatch) return;
+    let query: MediaQueryList | undefined;
+    const onZoom = (): void => {
+      arm();
+      this.remeasure();
+    };
+    const arm = (): void => {
+      query?.removeEventListener('change', onZoom);
+      query = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+      query.addEventListener('change', onZoom);
+    };
+    const onVisible = (): void => {
+      if (document.visibilityState === 'visible') this.remeasure();
+    };
+    arm();
+    document.addEventListener('visibilitychange', onVisible);
+    this.unwatch = () => {
+      query?.removeEventListener('change', onZoom);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }
+
+  private remeasure(): void {
+    this.measured = undefined;
+    this.probed = probeCell() ?? this.probed;
+    this.cellRetries = 0;
+    this.scheduleLayout();
   }
 
   private setFont(id: string, x: XtermPane, px: number): void {
@@ -405,8 +479,9 @@ export class App {
     let rows = 0;
     const first = this.placed[0];
     const sh = first ? this.shown.get(first.id) : undefined;
-    if (sh && this.cell && sh.w > 0 && sh.h > 0) {
-      const g = gridFor(sh.w, sh.h, this.cell.w, this.cell.h);
+    const cell = this.measured ?? this.probed;
+    if (sh && cell && sh.w > 0 && sh.h > 0) {
+      const g = gridFor(sh.w, sh.h, cell.w, cell.h);
       cols = g.cols;
       rows = g.rows;
     }

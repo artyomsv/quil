@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { bannerFor } from './banner';
+import { bannerFor, isLoginRequired } from './banner';
 
 describe('bannerFor', () => {
   it('shows nothing for a resync', () => {
@@ -17,6 +17,24 @@ describe('bannerFor', () => {
 
   it('never claims a retry for the permanent codes', () => {
     for (const code of [4004, 4005, 4006, 1001]) expect(bannerFor(code, '', true)?.retrying).toBe(false);
+  });
+
+  it('sends only 1008 "login required" to the login form', () => {
+    expect(isLoginRequired(1008, 'login required')).toBe(true);
+    expect(isLoginRequired(1008, 'expected web_open')).toBe(false);
+    expect(isLoginRequired(1008, '')).toBe(false);
+    expect(isLoginRequired(4004, 'login required')).toBe(false);
+  });
+
+  it('gives any other 1008 a banner with the reason and no retry', () => {
+    expect(bannerFor(1008, 'expected web_open', false)).toEqual({
+      text: 'The web server refused this page: expected web_open',
+      retrying: false,
+    });
+    expect(bannerFor(1008, '', true)).toEqual({
+      text: 'The web server refused this page: no reason given',
+      retrying: false,
+    });
   });
 
   it('covers a network drop', () => {

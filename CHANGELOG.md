@@ -11,6 +11,14 @@ version section here and deletes them.
 
 ## [Unreleased]
 
+## [1.86.0] - 2026-10-04
+
+### Added
+- **`quil web`: a browser client for the same workspace.** It serves on loopback, starts the daemon if needed, and shows a one-time login code in its own terminal. The browser shows your projects, tabs and panes live, keeps every pane's history while its tab is hidden, lets you type, switch tabs and projects, and take control of the pane size. With `--connect` and a token it uses that token's rights; a read-only browser only watches. Creating and closing panes from the browser comes next. See `docs/web.md`.
+
+### Fixed
+- **The TUI no longer crashes when it opens a tab whose saved layout names none of the tab's panes.** This happened when a tab's last pane ended while no TUI was attached (for example, an agent closed it): the daemon put a fresh pane in the tab but kept the old layout, and the next TUI to attach crashed. The TUI now rebuilds the layout from the tab's panes.
+
 ## [1.85.1] - 2026-10-04
 
 ### Fixed

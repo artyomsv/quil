@@ -90,9 +90,10 @@ type Server struct {
 	budget *replayBudget
 	mux    *http.ServeMux
 
-	// limits and lease are fields so tests can shrink them.
-	limits bridgeLimits
-	lease  time.Duration
+	// limits, lease and openWait are fields so tests can shrink them.
+	limits   bridgeLimits
+	lease    time.Duration
+	openWait time.Duration
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -102,8 +103,12 @@ type Server struct {
 	// pending counts sockets accepted and not yet a tab: waiting for web_open
 	// or being dialled. They count toward the limit.
 	pending int
-	stopped bool
-	srv     *http.Server
+	// reclaimPending counts, per session, sockets let in over the limit to
+	// reclaim a held tab and not yet past tabFor. A session gets at most one
+	// per tab held for it.
+	reclaimPending map[string]int
+	stopped        bool
+	srv            *http.Server
 }
 
 func New(cfg Config) *Server {
@@ -120,13 +125,16 @@ func New(cfg Config) *Server {
 		cfg.Sleep = time.Sleep
 	}
 	s := &Server{
-		cfg:    cfg,
-		auth:   newAuthStore(cfg.Rand, cfg.Sleep),
-		leases: newLeases(cfg.Rand),
-		budget: newReplayBudget(replayTotalMax),
-		limits: defaultBridgeLimits(cfg.Version),
-		lease:  resyncLease,
-		tabs:   map[string]*tab{},
+		cfg:      cfg,
+		auth:     newAuthStore(cfg.Rand, cfg.Sleep),
+		leases:   newLeases(cfg.Rand),
+		budget:   newReplayBudget(replayTotalMax),
+		limits:   defaultBridgeLimits(cfg.Version),
+		lease:    resyncLease,
+		openWait: openTimeout,
+		tabs:     map[string]*tab{},
+
+		reclaimPending: map[string]int{},
 	}
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	s.mux = http.NewServeMux()
@@ -164,7 +172,8 @@ func (s *Server) Serve(l net.Listener) error {
 // When every place is taken, a session that holds a resynced tab is still let
 // in, without a slot: its page is coming back for that tab, and reclaiming it
 // adds none. Until web_open names the tab this cannot be known, so tabFor
-// makes the final decision and refuses such a socket anything else.
+// makes the final decision and refuses such a socket anything else. Such
+// sockets are bounded too: one waiting per tab held for the session.
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	if !originAllowed(r.Header.Get("Origin"), r.Host) {
 		s.cfg.Logf("websocket refused: foreign origin")
@@ -179,9 +188,9 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	reserved := len(s.tabs)+s.pending < maxBridges
-	admit := !s.stopped && (reserved || s.holdsTabLocked(session))
-	if admit && reserved {
-		s.pending++
+	admit := !s.stopped && (reserved || s.heldTabsLocked(session) > s.reclaimPending[session])
+	if admit {
+		s.acquireLocked(reserved, session)
 	}
 	s.mu.Unlock()
 	if !admit {
@@ -196,41 +205,63 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		CompressionMode:    websocket.CompressionNoContextTakeover,
 	})
 	if err != nil {
-		if reserved {
-			s.releasePending()
-		}
+		s.release(reserved, session)
 		return
 	}
 	c.SetReadLimit(pageFrameMax)
 	s.serveTab(r.Context(), c, session, reserved)
 }
 
-// holdsTabLocked reports whether session has a resynced tab held for it.
-// Caller holds s.mu.
-func (s *Server) holdsTabLocked(session string) bool {
+// heldTabsLocked counts the resynced tabs held for session. Caller holds s.mu.
+func (s *Server) heldTabsLocked(session string) int {
+	n := 0
 	for _, t := range s.tabs {
 		if t.held && t.session == session {
-			return true
+			n++
 		}
 	}
-	return false
+	return n
 }
 
-func (s *Server) releasePending() {
+// acquireLocked takes a socket's place: a pending slot when reserved, else
+// one of its session's reclaim places. Caller holds s.mu.
+func (s *Server) acquireLocked(reserved bool, session string) {
+	if reserved {
+		s.pending++
+		return
+	}
+	s.reclaimPending[session]++
+}
+
+// releaseLocked gives back what acquireLocked took. Caller holds s.mu.
+func (s *Server) releaseLocked(reserved bool, session string) {
+	if reserved {
+		s.pending--
+		return
+	}
+	if s.reclaimPending[session] <= 1 {
+		delete(s.reclaimPending, session)
+		return
+	}
+	s.reclaimPending[session]--
+}
+
+func (s *Server) release(reserved bool, session string) {
 	s.mu.Lock()
-	s.pending--
+	s.releaseLocked(reserved, session)
 	s.mu.Unlock()
 }
 
-// serveTab runs one socket. When reserved, it holds the pending slot handleWS
-// took until it hands it to tabFor, which gives it back on every path.
+// serveTab runs one socket. It holds the place handleWS took (a pending slot
+// when reserved, else a reclaim place) until it hands it to tabFor, which
+// gives it back on every path.
 func (s *Server) serveTab(parent context.Context, c *websocket.Conn, session string, reserved bool) {
 	ctx, cancel := context.WithCancel(parent)
 	mine := &sockRef{cancel: cancel, done: make(chan struct{})}
-	holding := reserved
+	holding := true
 	defer func() {
 		if holding {
-			s.releasePending()
+			s.release(reserved, session)
 		}
 		cancel()
 		close(mine.done)
@@ -238,7 +269,7 @@ func (s *Server) serveTab(parent context.Context, c *websocket.Conn, session str
 	page := wsPage{c}
 
 	// The first frame is web_open with the id the page had and its key.
-	rctx, rcancel := context.WithTimeout(ctx, openTimeout)
+	rctx, rcancel := context.WithTimeout(ctx, s.openWait)
 	typ, raw, err := c.Read(rctx)
 	rcancel()
 	if err != nil || typ != websocket.MessageText {
@@ -334,10 +365,15 @@ func (s *Server) welcomeFrame(id, rights string) ([]byte, error) {
 // caller's pending slot is given back on every path: a reclaimed tab is
 // already counted, and a dialled one is counted as a tab from then on.
 //
-// A socket handleWS let in without a slot (reserved false) may reclaim, and
-// may dial only if a place is free now, which it then takes like any other.
+// A socket handleWS let in without a slot (reserved false) gives its reclaim
+// place back at once, under the same lock as the reclaim itself. It may
+// reclaim, and may dial only if a place is free now, which it then takes like
+// any other.
 func (s *Server) tabFor(ctx context.Context, hint, session string, mine *sockRef, reserved bool) (t *tab, old *sockRef, err error) {
 	s.mu.Lock()
+	if !reserved {
+		s.releaseLocked(false, session)
+	}
 	if s.stopped {
 		if reserved {
 			s.pending--

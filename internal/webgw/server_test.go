@@ -468,6 +468,11 @@ func TestWS_FullGatewayStillReclaimsAHeldTab(t *testing.T) {
 	if code, _ := closeOf(t, ctx, c); code != CloseDaemonUnavailable {
 		t.Fatalf("a new tab over the cap closed %d, want 4003", code)
 	}
+	waitFor(t, "the reclaim place back after the refusal", func() bool {
+		h.s.mu.Lock()
+		defer h.s.mu.Unlock()
+		return len(h.s.reclaimPending) == 0
+	})
 
 	// Another session has no held tab and no place.
 	_, resp, err := websocket.Dial(ctx, "ws://"+h.host+"/ws", &websocket.DialOptions{HTTPHeader: h.header(h.login().cookie, h.origin())})
@@ -494,6 +499,99 @@ func TestWS_FullGatewayStillReclaimsAHeldTab(t *testing.T) {
 	if err == nil || resp == nil || resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("17th tab after the reclaim: err=%v resp=%v, want 503", err, resp)
 	}
+}
+
+// Over the cap, a session gets one socket waiting for web_open per tab held
+// for it, and the place comes back on every way that socket ends.
+func TestWS_ReclaimSocketsOverTheCapAreBounded(t *testing.T) {
+	h := newWSHarness(t, func(s *Server) {
+		smallLiveCap(s)
+		s.openWait = 200 * time.Millisecond
+	})
+	ctx := testCtx(t)
+	s := h.login()
+	var held *websocket.Conn
+	var heldID string
+	for i := 0; i < maxBridges; i++ {
+		c, w := h.open(ctx, s, "")
+		if i == 0 {
+			held, heldID = c, w.ClientID
+		}
+	}
+	pushLive(t, h.daemon(0))
+	if code, _ := closeOf(t, ctx, held); code != CloseResync {
+		t.Fatalf("closed %d, want 4001", code)
+	}
+	reclaiming := func() int {
+		h.s.mu.Lock()
+		defer h.s.mu.Unlock()
+		n := 0
+		for _, v := range h.s.reclaimPending {
+			n += v
+		}
+		return n
+	}
+	refused := func(what string) {
+		t.Helper()
+		_, resp, err := websocket.Dial(ctx, "ws://"+h.host+"/ws", &websocket.DialOptions{HTTPHeader: h.header(s.cookie, h.origin())})
+		if err == nil || resp == nil || resp.StatusCode != http.StatusServiceUnavailable {
+			t.Fatalf("%s: err=%v resp=%v, want 503", what, err, resp)
+		}
+	}
+	waiting := func(what string) *websocket.Conn {
+		t.Helper()
+		c, _, err := h.connect(ctx, s.cookie)
+		if err != nil {
+			t.Fatalf("%s: %v", what, err)
+		}
+		waitFor(t, what+" to hold a reclaim place", func() bool { return reclaiming() == 1 })
+		return c
+	}
+
+	// A bad first frame gives the place back.
+	c := waiting("first attempt")
+	refused("a second socket while one waits")
+	if err := c.Write(ctx, websocket.MessageText, []byte("not json")); err != nil {
+		t.Fatal(err)
+	}
+	if code, _ := closeOf(t, ctx, c); code != 1008 {
+		t.Fatalf("bad frame closed %d, want 1008", code)
+	}
+	waitFor(t, "the place back after a bad frame", func() bool { return reclaiming() == 0 })
+
+	// So does a socket that never sends web_open.
+	// The socket ends with 1008, or without a close frame when the timed-out
+	// read has already torn it down.
+	c = waiting("second attempt")
+	if code := readCloseCode(ctx, c); code != 1008 && code != -1 {
+		t.Fatalf("silent socket closed %d, want 1008 or a dropped socket", code)
+	}
+	waitFor(t, "the place back after the web_open timeout", func() bool { return reclaiming() == 0 })
+
+	// And a wrong key.
+	c = waiting("third attempt")
+	sendMsg(t, ctx, c, MsgWebOpen, "", WebOpenPayload{ClientIDHint: heldID, Key: "not-the-key"})
+	if code, reason := closeOf(t, ctx, c); code != 1008 || reason != "login required" {
+		t.Fatalf("wrong key closed %d %q, want 1008 login required", code, reason)
+	}
+	waitFor(t, "the place back after a wrong key", func() bool { return reclaiming() == 0 })
+
+	// The page still reclaims its tab.
+	c = waiting("the page's attempt")
+	sendMsg(t, ctx, c, MsgWebOpen, "", WebOpenPayload{ClientIDHint: heldID, Key: s.key})
+	if m := readMsg(t, ctx, c); m.Type != MsgWebWelcome {
+		t.Fatalf("first frame is %s, want web_welcome", m.Type)
+	}
+	h.s.mu.Lock()
+	tabs, pending, rp := len(h.s.tabs), h.s.pending, len(h.s.reclaimPending)
+	h.s.mu.Unlock()
+	if tabs != maxBridges || pending != 0 || rp != 0 {
+		t.Fatalf("after the reclaim: %d tabs, %d pending, %d sessions reclaiming; want %d, 0, 0", tabs, pending, rp, maxBridges)
+	}
+	if n := h.dials.Load(); n != maxBridges {
+		t.Fatalf("daemon dialled %d times, want %d", n, maxBridges)
+	}
+	refused("a socket once nothing is held")
 }
 
 func TestWS_DuplicatedTabGetsANewID(t *testing.T) {

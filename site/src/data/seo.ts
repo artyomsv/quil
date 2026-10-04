@@ -44,7 +44,7 @@ export const SITE = {
    *  of its version bump step — manual edits are normally unnecessary
    *  but harmless (the next release will overwrite both via sed). */
   software: {
-    version: "1.84.0",
+    version: "1.85.0",
     license: "Apache-2.0",
     operatingSystem: "Linux, macOS, Windows",
     applicationCategory: "DeveloperApplication",
@@ -53,7 +53,7 @@ export const SITE = {
 
   /** ISO 8601 release date for structured data. The sitemap's lastmod
    *  comes from git instead (src/lib/lastmod.ts). */
-  releaseDate: "2026-10-03",
+  releaseDate: "2026-10-04",
 } as const;
 
 /** Base for links to a file in the repository: `${GITHUB_BLOB}docs/mcp.md`. */

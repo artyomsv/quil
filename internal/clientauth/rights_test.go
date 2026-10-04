@@ -68,6 +68,9 @@ func TestAllows_StandardPayloadCarriers(t *testing.T) {
 		{"create_tab first pane args", "FirstPaneSpec.instance_args", msgOf(t, ipc.MsgCreateTab, ipc.CreateTabPayload{FirstPane: &ipc.FirstPaneSpec{InstanceArgs: []string{"x"}}})},
 		{"create_tab_req first pane args", "CreatePaneReqPayload.instance_args", msgOf(t, ipc.MsgCreateTabReq, ipc.CreateTabReqPayload{FirstPane: &ipc.CreatePaneReqPayload{InstanceArgs: []string{"x"}}})},
 		{"malformed create_pane", "", &ipc.Message{Type: ipc.MsgCreatePane, Payload: json.RawMessage(`"x"`)}},
+		{"split_pane_req args", "SplitPaneReqPayload.pane.instance_args", msgOf(t, ipc.MsgSplitPaneReq, ipc.SplitPaneReqPayload{Placement: ipc.PlacementRight, Pane: ipc.SplitPaneSpec{Type: "ssh", InstanceArgs: []string{"u@h"}}})},
+		{"split_pane_req overlay", "SplitPaneReqPayload.placement", msgOf(t, ipc.MsgSplitPaneReq, ipc.SplitPaneReqPayload{Placement: ipc.PlacementOverlay, OverlayKind: "lazygit"})},
+		{"malformed split_pane_req", "", &ipc.Message{Type: ipc.MsgSplitPaneReq, Payload: json.RawMessage(`"x"`)}},
 	}
 	covered := map[string]bool{}
 	for _, tt := range refused {
@@ -93,6 +96,7 @@ func TestAllows_StandardPayloadCarriers(t *testing.T) {
 		msgOf(t, ipc.MsgCreatePane, ipc.CreatePanePayload{Type: "k9s", Toggles: []string{"readonly"}, KubeContext: "prod"}),
 		msgOf(t, ipc.MsgCreateTab, ipc.CreateTabPayload{FirstPane: &ipc.FirstPaneSpec{Toggles: []string{"chrome"}}}),
 		msgOf(t, ipc.MsgCreateTab, nil),
+		msgOf(t, ipc.MsgSplitPaneReq, ipc.SplitPaneReqPayload{Placement: ipc.PlacementBelow, Pane: ipc.SplitPaneSpec{Type: "claude-code", Toggles: []string{"chrome"}, InstanceName: "work"}}),
 	}
 	for _, m := range allowed {
 		if ok, reason := Allows(LevelStandard, "tcp", m); !ok {
@@ -163,6 +167,27 @@ var standardFieldAudit = map[string]map[string]fieldAudit{
 		"sandbox.claude_config": {"allow", "own or shared, validated daemon-side; a standard conn can already open a host shell that reaches the shared directory"},
 		"kube_context":          {"allow", "one value after --context, validated against discover = \"kube\""},
 	},
+	"SplitPaneReqPayload": {
+		"target_pane_id":              {"allow", "names a pane; splitting or replacing it is act (destroy_pane is allowed)"},
+		"tab_id":                      {"allow", "names a tab; creating a pane is act"},
+		"placement":                   {"refuse", "the value \"overlay\" is full-only, as CreatePanePayload.overlay is; the other values are act"},
+		"new_tab.name":                {"allow", "a display name"},
+		"new_tab.project_id":          {"allow", "names a project; creating a tab is act"},
+		"overlay_kind":                {"allow", "read only with placement overlay, which the placement row refuses"},
+		"pane.type":                   {"allow", "a plugin NAME; its Command.Args come from the daemon's registry"},
+		"pane.name":                   {"allow", "a display name"},
+		"pane.cwd":                    {"allow", "a directory; a shell in the pane can cd anywhere anyway"},
+		"pane.toggles":                {"allow", "names, resolved by resolveToggles; unknown or conflicting names are refused"},
+		"pane.instance_name":          {"allow", "a display label; never executed"},
+		"pane.instance_args":          {"refuse", "REPLACES Command.Args: any program, any argv, no shell, no screen trail"},
+		"pane.kube_context":           {"allow", "one value after --context, validated against discover = \"kube\""},
+		"pane.resume_session_id":      {"allow", "validated daemon-side (format, transcript, claim): an id, not an argument"},
+		"pane.worktree.branch":        {"allow", "a branch name; the repo root is resolved daemon-side from the CWD"},
+		"pane.worktree.existing_path": {"allow", "a directory; a shell in the pane can cd anywhere anyway"},
+		"pane.sandbox.image":          {"allow", "any image the owner's Docker can reach, inside the sandbox mount boundary"},
+		"pane.sandbox.auth":           {"allow", "any image the owner's Docker can reach, inside the sandbox mount boundary"},
+		"pane.sandbox.claude_config":  {"allow", "own or shared, validated daemon-side; a standard conn can already open a host shell that reaches the shared directory"},
+	},
 }
 
 // GUARD (ruling P-7): passes on the tree as it stands today. A field added to
@@ -173,6 +198,7 @@ var standardFieldAudit = map[string]map[string]fieldAudit{
 func TestCreatePayloads_EveryFieldAudited(t *testing.T) {
 	for _, typ := range []reflect.Type{
 		reflect.TypeOf(ipc.CreatePanePayload{}), reflect.TypeOf(ipc.FirstPaneSpec{}), reflect.TypeOf(ipc.CreatePaneReqPayload{}),
+		reflect.TypeOf(ipc.SplitPaneReqPayload{}),
 	} {
 		audit := standardFieldAudit[typ.Name()]
 		seen := map[string]bool{}

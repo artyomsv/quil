@@ -83,6 +83,11 @@ const (
 	MsgPaneStatusResp     = "pane_status_resp"
 	MsgCreatePaneReq      = "create_pane_req"
 	MsgCreatePaneResp     = "create_pane_resp"
+	// split_pane_req creates a pane AND places it: the daemon builds the
+	// tree (spec 5b §3.3). Answered with split_pane_resp, always, to an
+	// id-bearing request.
+	MsgSplitPaneReq       = "split_pane_req"
+	MsgSplitPaneResp      = "split_pane_resp"
 	MsgRestartPaneReq     = "restart_pane_req"
 	MsgRestartPaneResp    = "restart_pane_resp"
 	MsgScreenshotPaneReq  = "screenshot_pane_req"
@@ -958,6 +963,70 @@ type CreatePaneRespPayload struct {
 	Worktree *WorktreeSpec `json:"worktree,omitempty"`
 }
 
+// Placements a split_pane_req can ask for.
+const (
+	PlacementRight   = "right"
+	PlacementBelow   = "below"
+	PlacementReplace = "replace"
+	PlacementNewTab  = "new_tab"
+	PlacementOverlay = "overlay"
+)
+
+// SplitPaneReqPayload asks the daemon to create a pane and put it in the
+// tab's tree itself. TargetPaneID names the pane to split or replace; the
+// tab is derived from it and TabID is read only when it is empty (the tab's
+// first leaf) or for an overlay with no target.
+type SplitPaneReqPayload struct {
+	TargetPaneID string        `json:"target_pane_id,omitempty"`
+	TabID        string        `json:"tab_id,omitempty"`
+	Placement    string        `json:"placement"`
+	NewTab       *SplitNewTab  `json:"new_tab,omitempty"`
+	OverlayKind  string        `json:"overlay_kind,omitempty"`
+	Pane         SplitPaneSpec `json:"pane"`
+}
+
+// SplitNewTab names the tab a "new_tab" placement opens.
+type SplitNewTab struct {
+	Name      string `json:"name,omitempty"`
+	ProjectID string `json:"project_id,omitempty"`
+}
+
+// SplitPaneSpec is the create-pane dialog's choices, as NAMES the daemon
+// resolves. InstanceArgs reach the daemon only from the web gateway, which
+// fills them from a saved instance on its own disk; clientauth refuses them
+// from a standard conn as for every other create.
+type SplitPaneSpec struct {
+	Type            string         `json:"type,omitempty"`
+	Name            string         `json:"name,omitempty"`
+	CWD             string         `json:"cwd,omitempty"`
+	Toggles         []string       `json:"toggles,omitempty"`
+	InstanceName    string         `json:"instance_name,omitempty"`
+	InstanceArgs    []string       `json:"instance_args,omitempty"`
+	KubeContext     string         `json:"kube_context,omitempty"`
+	ResumeSessionID string         `json:"resume_session_id,omitempty"`
+	Worktree        *SplitWorktree `json:"worktree,omitempty"`
+	Sandbox         *SandboxSpec   `json:"sandbox,omitempty"`
+}
+
+// SplitWorktree is either a NEW branch (a worktree the daemon creates off the
+// repository containing CWD) or an EXISTING worktree directory to open in.
+// Exactly one is set.
+type SplitWorktree struct {
+	Branch       string `json:"branch,omitempty"`
+	ExistingPath string `json:"existing_path,omitempty"`
+}
+
+// SplitPaneRespPayload answers split_pane_req. Preparing means a worktree is
+// being checked out: PaneID is the placeholder (or, for a replace, the pane
+// that will be replaced), and the final pane arrives in a broadcast.
+type SplitPaneRespPayload struct {
+	PaneID    string `json:"pane_id,omitempty"`
+	TabID     string `json:"tab_id,omitempty"`
+	LayoutRev uint64 `json:"layout_rev"`
+	Preparing bool   `json:"preparing,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
 // Phase B MCP payloads
 
 type RestartPaneReqPayload struct {
@@ -1168,6 +1237,9 @@ type ListTasksRespPayload struct {
 
 type DestroyPaneReqPayload struct {
 	PaneID string `json:"pane_id"`
+	// RemoveWorktree: see DestroyPanePayload.RemoveWorktree. A bool, never a
+	// path, for the same reason.
+	RemoveWorktree bool `json:"remove_worktree,omitempty"`
 }
 
 type DestroyPaneRespPayload struct {

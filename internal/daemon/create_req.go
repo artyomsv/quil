@@ -296,9 +296,14 @@ func (d *Daemon) handleCreateTabReq(conn *ipc.Conn, msg *ipc.Message) {
 		respondTo(conn, msg.ID, ipc.MsgCreateTabResp, ipc.CreateTabRespPayload{Error: "malformed payload: " + err.Error()})
 		return
 	}
+	respondTo(conn, msg.ID, ipc.MsgCreateTabResp, d.createTabFromReq(conn, req))
+}
+
+// createTabFromReq is create_tab_req's work, returning the answer rather than
+// sending it, so split_pane_req's "new tab" placement runs the same code.
+func (d *Daemon) createTabFromReq(conn *ipc.Conn, req ipc.CreateTabReqPayload) ipc.CreateTabRespPayload {
 	if req.ProjectID != "" && !d.projectExists(req.ProjectID) {
-		respondTo(conn, msg.ID, ipc.MsgCreateTabResp, ipc.CreateTabRespPayload{Error: "no such project: " + req.ProjectID})
-		return
+		return ipc.CreateTabRespPayload{Error: "no such project: " + req.ProjectID}
 	}
 	first := ipc.CreatePaneReqPayload{}
 	if req.FirstPane != nil {
@@ -324,8 +329,7 @@ func (d *Daemon) handleCreateTabReq(conn *ipc.Conn, msg *ipc.Message) {
 	}
 	payload, cwd, err := d.buildCreatePayload(first, "", d.projectCWD(conn, projectID))
 	if err != nil {
-		respondTo(conn, msg.ID, ipc.MsgCreateTabResp, ipc.CreateTabRespPayload{Error: err.Error()})
-		return
+		return ipc.CreateTabRespPayload{Error: err.Error()}
 	}
 	tab := d.session.CreateTabInProject(req.ProjectID, name)
 	payload.TabID = tab.ID
@@ -342,17 +346,16 @@ func (d *Daemon) handleCreateTabReq(conn *ipc.Conn, msg *ipc.Message) {
 			d.ensureTabNotEmpty(tab.ID)
 			d.broadcastState()
 			d.requestSnapshot()
-			respondTo(conn, msg.ID, ipc.MsgCreateTabResp, ipc.CreateTabRespPayload{TabID: tab.ID, Error: err.Error()})
-			return
+			return ipc.CreateTabRespPayload{TabID: tab.ID, Error: err.Error()}
 		}
 		applyPaneName(pane, first.Name)
 		d.broadcastState()
 		d.requestSnapshot()
-		respondTo(conn, msg.ID, ipc.MsgCreateTabResp, ipc.CreateTabRespPayload{
+		answer := ipc.CreateTabRespPayload{
 			TabID:             tab.ID,
 			PaneID:            pane.ID,
 			PreparingWorktree: payload.Worktree.Branch,
-		})
+		}
 		payload.ReplacePaneID = pane.ID
 		placeholderID := pane.ID
 		go func() {
@@ -363,7 +366,7 @@ func (d *Daemon) handleCreateTabReq(conn *ipc.Conn, msg *ipc.Message) {
 			}
 			applyPaneName(d.session.Pane(resp.PaneID), first.Name)
 		}()
-		return
+		return answer
 	}
 
 	// constructPaneAt, not createPaneAt: tab and pane reach clients as ONE
@@ -380,7 +383,7 @@ func (d *Daemon) handleCreateTabReq(conn *ipc.Conn, msg *ipc.Message) {
 	}
 	d.broadcastState()
 	d.requestSnapshot()
-	respondTo(conn, msg.ID, ipc.MsgCreateTabResp, resp)
+	return resp
 }
 
 // handlePluginCatalogReq answers what create_pane can be asked for, per

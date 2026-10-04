@@ -18,7 +18,7 @@ import (
 // type without that suffix is a decision, not an accident.
 var daemonToClient = []string{
 	ipc.MsgPaneInputResp, ipc.MsgListPanesResp, ipc.MsgReadPaneOutputResp, ipc.MsgPaneStatusResp,
-	ipc.MsgCreatePaneResp, ipc.MsgRestartPaneResp, ipc.MsgScreenshotPaneResp, ipc.MsgSwitchTabResp,
+	ipc.MsgCreatePaneResp, ipc.MsgSplitPaneResp, ipc.MsgRestartPaneResp, ipc.MsgScreenshotPaneResp, ipc.MsgSwitchTabResp,
 	ipc.MsgListTabsResp, ipc.MsgDestroyPaneResp, ipc.MsgGetNotificationsResp, ipc.MsgWatchNotificationsResp,
 	ipc.MsgVersionResp, ipc.MsgMemoryReportResp, ipc.MsgResourceReportResp, ipc.MsgKillProcessResp,
 	ipc.MsgPaneHistoryResp, ipc.MsgPaneHistoryEntryResp, ipc.MsgPaneSearchResp, ipc.MsgClaudeSessionsResp,
@@ -151,6 +151,7 @@ var wantClassTable = map[string]Class{
 	ipc.MsgPaneInput:             ClassAct,
 	ipc.MsgCreatePane:            ClassAct,
 	ipc.MsgCreatePaneReq:         ClassAct,
+	ipc.MsgSplitPaneReq:          ClassAct,
 	ipc.MsgDestroyPane:           ClassAct,
 	ipc.MsgDestroyPaneReq:        ClassAct,
 	ipc.MsgRestartPaneReq:        ClassAct,
@@ -218,6 +219,7 @@ var wantClassTable = map[string]Class{
 	ipc.MsgReadPaneOutputResp:      ClassNever,
 	ipc.MsgPaneStatusResp:          ClassNever,
 	ipc.MsgCreatePaneResp:          ClassNever,
+	ipc.MsgSplitPaneResp:           ClassNever,
 	ipc.MsgRestartPaneResp:         ClassNever,
 	ipc.MsgScreenshotPaneResp:      ClassNever,
 	ipc.MsgSwitchTabResp:           ClassNever,

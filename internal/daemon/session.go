@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/artyomsv/quil/internal/hookevents"
+	"github.com/artyomsv/quil/internal/layouttree"
 	"github.com/artyomsv/quil/internal/logger"
 	memreport "github.com/artyomsv/quil/internal/memreport"
 	apty "github.com/artyomsv/quil/internal/pty"
@@ -35,6 +36,13 @@ type Tab struct {
 	// that is fine, since both start the CAS from the same place.
 	LayoutRev uint64
 	ProjectID string // Project this tab belongs to (see project.go)
+	// overlayID/overlayKey are the tab's ONE overlay slot (spec 5b §3.3):
+	// the overlay pane it holds and the kind+repo it was created for. Under
+	// sm.mu, runtime only — overlays are never persisted. The slot is
+	// decided here rather than from Pane.Overlay so no PluginMu is taken
+	// under sm.mu.
+	overlayID  string
+	overlayKey string
 }
 
 type Pane struct {
@@ -931,11 +939,24 @@ func (sm *SessionManager) NewPane(cwd string) *Pane {
 // position in the tab's pane list. The old pane's PTY is closed.
 func (sm *SessionManager) ReplacePane(oldPaneID string, newPane *Pane) error {
 	sm.mu.Lock()
+	oldPane, err := sm.replacePaneLocked(oldPaneID, newPane)
+	sm.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	releasePanes([]*Pane{oldPane})
+	return nil
+}
 
+// replacePaneLocked is ReplacePane's swap without the lock and without the
+// close: the new pane takes the old one's place in the tab's pane list and its
+// leaf in the stored tree, and the overlay slot is cleared when the old pane
+// held it. Returns the detached old pane for the caller to release AFTER
+// unlocking. sm.mu held (write).
+func (sm *SessionManager) replacePaneLocked(oldPaneID string, newPane *Pane) (*Pane, error) {
 	oldPane, ok := sm.panes[oldPaneID]
 	if !ok {
-		sm.mu.Unlock()
-		return fmt.Errorf("pane not found: %s", oldPaneID)
+		return nil, fmt.Errorf("pane not found: %s", oldPaneID)
 	}
 
 	// Replace in tab's pane list at the same index
@@ -949,14 +970,120 @@ func (sm *SessionManager) ReplacePane(oldPaneID string, newPane *Pane) error {
 		// The new pane takes the old leaf: position, orientation and ratio
 		// stay (AC-13), in the same hold as the membership swap.
 		substituteTreeLocked(tab, oldPaneID, newPane.ID)
+		if tab.overlayID == oldPaneID {
+			tab.overlayID, tab.overlayKey = "", ""
+		}
 	}
 
+	newPane.tabIDMu.Lock()
 	newPane.TabID = oldPane.TabID
+	newPane.tabIDMu.Unlock()
 	delete(sm.panes, oldPaneID)
 	sm.panes[newPane.ID] = newPane
-	sm.mu.Unlock()
-	releasePanes([]*Pane{oldPane})
-	return nil
+	return oldPane, nil
+}
+
+// paneSlot says where PublishPane puts a pane.
+type paneSlot struct {
+	TabID string
+	// Split inserts the pane into the stored tree next to TargetID, in Dir.
+	// An empty TargetID means the tab's first leaf; a tab with no leaves
+	// gets the pane as its only leaf.
+	Split    bool
+	TargetID string
+	Dir      layouttree.SplitDir
+	// ReplaceID substitutes the pane for this one, in the same slot.
+	ReplaceID string
+	// OverlayKey makes the pane the tab's overlay: kind + repo (overlayKey).
+	OverlayKey string
+}
+
+// publishResult reports what PublishPane did.
+type publishResult struct {
+	// Pane is the pane now in the slot: the new one, or the reused overlay.
+	Pane *Pane
+	// Reused: the tab's overlay already ran this kind on this repo, so the
+	// new pane was NOT published and must not be spawned.
+	Reused bool
+	// Evicted and Replaced are already detached from the session maps; the
+	// caller closes them off-lock (finishDetached).
+	Evicted, Replaced *Pane
+	LayoutRev         uint64
+}
+
+// PublishPane is the one locked step of every pane create (spec 5b §3.3
+// step 2): re-check the slot, publish the pane, and change the stored tree,
+// in ONE sm.mu hold, so a snapshot or broadcast never sees the pane without
+// its place or the place without the pane. p must be unpublished (NewPane).
+// Takes no PluginMu: the overlay decision reads the tab's slot, and the
+// tree operations read Pane.treeless, both guarded by sm.mu alone.
+func (sm *SessionManager) PublishPane(p *Pane, slot paneSlot) (publishResult, error) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	tab, ok := sm.tabs[slot.TabID]
+	if !ok {
+		return publishResult{}, fmt.Errorf("no such tab: %s", slot.TabID)
+	}
+	var res publishResult
+	switch {
+	case slot.OverlayKey != "":
+		if cur, live := sm.panes[tab.overlayID]; live && tab.overlayID != "" {
+			if tab.overlayKey == slot.OverlayKey {
+				return publishResult{Pane: cur, Reused: true, LayoutRev: tab.LayoutRev}, nil
+			}
+			sm.detachPaneLocked(tab, cur)
+			res.Evicted = cur
+		}
+		sm.addPaneLocked(tab, p)
+		tab.overlayID, tab.overlayKey = p.ID, slot.OverlayKey
+	case slot.ReplaceID != "":
+		old, live := sm.panes[slot.ReplaceID]
+		if !live || old.TabID != tab.ID {
+			return publishResult{}, fmt.Errorf("the pane to replace is gone or in another tab")
+		}
+		if _, err := sm.replacePaneLocked(slot.ReplaceID, p); err != nil {
+			return publishResult{}, err
+		}
+		res.Replaced = old
+	case slot.Split:
+		if target := slot.TargetID; target != "" {
+			if t, live := sm.panes[target]; !live || t.TabID != tab.ID {
+				return publishResult{}, fmt.Errorf("the pane to split is gone or in another tab")
+			}
+		}
+		sm.addPaneLocked(tab, p)
+		// target "" = first leaf of the normalized tree (insertPaneLocked).
+		if !sm.insertPaneLocked(tab, p.ID, slot.TargetID, slot.Dir) {
+			sm.detachPaneLocked(tab, p)
+			return publishResult{}, fmt.Errorf("the pane to split is not in the tab's layout")
+		}
+	default:
+		sm.addPaneLocked(tab, p)
+	}
+	res.Pane, res.LayoutRev = p, tab.LayoutRev
+	return res, nil
+}
+
+// addPaneLocked publishes an unpublished pane into tab. sm.mu held.
+func (sm *SessionManager) addPaneLocked(tab *Tab, p *Pane) {
+	p.tabIDMu.Lock()
+	p.TabID = tab.ID
+	p.tabIDMu.Unlock()
+	sm.panes[p.ID] = p
+	tab.Panes = append(tab.Panes, p.ID)
+}
+
+// detachPaneLocked removes a pane from the maps without closing it, and
+// clears the overlay slot when it held it. sm.mu held; the caller releases
+// the pane off-lock. The stored tree is pruned too, which is a no-op for a
+// treeless overlay and for a pane insertPaneLocked refused to place.
+func (sm *SessionManager) detachPaneLocked(tab *Tab, p *Pane) {
+	tab.Panes = removeString(tab.Panes, p.ID)
+	delete(sm.panes, p.ID)
+	pruneTreeLocked(tab, p.ID)
+	if tab.overlayID == p.ID {
+		tab.overlayID, tab.overlayKey = "", ""
+	}
 }
 
 // ErrPaneNotFound is returned by DestroyPane for a pane the session no longer
@@ -983,6 +1110,9 @@ func (sm *SessionManager) DestroyPane(paneID string) error {
 			}
 		}
 		pruneTreeLocked(tab, paneID)
+		if tab.overlayID == paneID {
+			tab.overlayID, tab.overlayKey = "", ""
+		}
 	}
 
 	delete(sm.panes, paneID)
@@ -1051,6 +1181,9 @@ func (sm *SessionManager) MovePane(paneID, tabID string) (from string, res moveP
 		// Order-preserving, and a copy rather than an in-place shift.
 		src.Panes = removeString(src.Panes, paneID)
 		pruneTreeLocked(src, paneID)
+		if src.overlayID == paneID {
+			src.overlayID, src.overlayKey = "", ""
+		}
 	}
 	if indexOfString(dst.Panes, paneID) < 0 {
 		dst.Panes = append(dst.Panes, paneID)

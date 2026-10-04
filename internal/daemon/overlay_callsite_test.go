@@ -125,10 +125,12 @@ func TestCreatePaneAt_OverlayPastTheCapEvictsThroughTheCreatePath(t *testing.T) 
 	cfg := config.Default()
 	cfg.Overlay.MaxLive = 2
 	d := overlayTestDaemon(t, cfg)
-	tab := d.session.CreateTab("t")
 
+	// One tab per overlay: a tab holds ONE overlay (its slot), and the cap is
+	// global, across tabs.
 	newOverlay := func() *Pane {
 		t.Helper()
+		tab := d.session.CreateTab("t")
 		p, err := d.createPaneAt(ipc.CreatePanePayload{TabID: tab.ID, Overlay: true}, "", "terminal")
 		if err != nil {
 			t.Fatalf("createPaneAt: %v", err)
@@ -226,10 +228,11 @@ func TestSweepIdleOverlays_EvictionIsQuietAndBroadcastsOnce(t *testing.T) {
 	cfg := config.Default()
 	cfg.Overlay.MaxLive = 0 // creation must not evict; the sweep is under test
 	d, sock := overlayServerDaemonWithConfig(t, cfg)
-	tab := d.session.CreateTab("t")
 
+	// One tab per overlay: a tab's overlay slot holds one.
 	var ids []string
 	for i := 0; i < 2; i++ {
+		tab := d.session.CreateTab("t")
 		p, err := d.createPaneAt(ipc.CreatePanePayload{TabID: tab.ID, Overlay: true}, "", "terminal")
 		if err != nil {
 			t.Fatalf("createPaneAt: %v", err)

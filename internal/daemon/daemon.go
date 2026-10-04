@@ -1826,6 +1826,9 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		d.handlePaneStatusReq(conn, msg)
 	case ipc.MsgCreatePaneReq:
 		d.handleCreatePaneReq(conn, msg)
+	case ipc.MsgSplitPaneReq:
+		d.touchClientInput(conn)
+		d.handleSplitPaneReq(conn, msg)
 	case ipc.MsgRestartPaneReq:
 		d.handleRestartPaneReq(conn, msg)
 	case ipc.MsgScreenshotPaneReq:
@@ -2054,6 +2057,10 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 
 	state := d.buildWorkspaceState()
 	resp, _ := ipc.NewMessage(ipc.MsgWorkspaceState, state)
+	// The attach's own id (spec 5b §3.5): a page ignores state frames until
+	// the one answering ITS attach. The TUI attaches with no id and the MCP
+	// bridge never attaches, so neither sees a change.
+	resp.ID = msg.ID
 	conn.Send(resp)
 
 	// Replay buffered output so reconnecting clients see previous terminal content.
@@ -3033,8 +3040,10 @@ func (d *Daemon) createPaneAt(payload ipc.CreatePanePayload, cwd, paneType strin
 	return pane, nil
 }
 
-// constructPaneAt is createPaneAt without the publish — allocate, apply the
-// payload's plugin fields, claim a resume session, spawn.
+// constructPaneAt is createPaneAt without the publish to clients — validate,
+// publish into the session, claim a resume session, spawn. Its callers
+// (handleCreatePane, handleCreateTab, handleCreateTabReq, templates) keep
+// their behaviour; the steps live in buildPane, which split_pane_req shares.
 //
 // Split out for handleCreateTab, which creates a tab AND its first pane and
 // must emit ONE workspace-state frame for the pair. Calling createPaneAt there
@@ -3042,56 +3051,99 @@ func (d *Daemon) createPaneAt(payload ipc.CreatePanePayload, cwd, paneType strin
 // every new tab — the 2026-08-09 force-disconnect shape — and each frame also
 // drives a full applyWorkspaceState reconciliation on every attached client.
 //
+// An overlay takes the tab's one overlay slot (PublishPane): the same kind on
+// the same repository reuses the overlay already there, anything else
+// replaces it.
+//
 // A spawn failure returns the pane alongside the error, so a caller that must
 // leave nothing behind can destroy it.
 func (d *Daemon) constructPaneAt(payload ipc.CreatePanePayload, cwd, paneType string) (*Pane, error) {
-	create := d.session.CreatePane
+	slot := paneSlot{TabID: payload.TabID}
 	if payload.Overlay {
-		create = d.session.CreateOverlayPane
+		slot.OverlayKey = overlayKey(paneType, cwd)
 	}
-	pane, err := create(payload.TabID, cwd)
-	if err != nil {
-		return nil, fmt.Errorf("create pane error: %w", err)
-	}
+	pane, _, err := d.buildPane(payload, cwd, paneType, buildOpts{Slot: slot})
+	return pane, err
+}
 
-	// Under PluginMu for the same reason the Overlay block below states:
-	// CreatePane has already PUBLISHED the pane into the session maps, so a
-	// snapshot or broadcast goroutine can be reading these fields already, and
-	// Type/CWD are on the documented PluginMu-protected set. These three writes
-	// were unlocked — pre-existing, and reachable: the race detector reports
-	// them against any concurrent reader of Type the moment a create runs on a
-	// conn goroutine rather than the test's own.
-	pane.PluginMu.Lock()
+// buildOpts tunes buildPane for split_pane_req.
+type buildOpts struct {
+	Slot paneSlot
+	// StrictResume refuses a resume session another pane claimed between
+	// validation and publish, instead of starting a fresh session.
+	StrictResume bool
+}
+
+// errResumeTaken is buildPane's refusal for a lost resume claim.
+type errResumeTaken struct{ holder string }
+
+func (e *errResumeTaken) Error() string {
+	return "that Claude session is already open in pane " + e.holder
+}
+
+// buildPane is the shared pane construction, in the order spec 5b §3.3
+// fixes: (1) build and validate the pane UNPUBLISHED — the sandbox probe can
+// take seconds and holds no lock; (2) PublishPane, the one sm.mu hold;
+// (2b) claim the resume session, now that the pane is visible to a racing
+// create; (3) spawn outside every lock. The caller broadcasts.
+//
+// The string return is a notice for an answer that succeeded with a
+// difference the user asked not to have (R3-b: a replace whose resume claim
+// was lost starts a fresh session).
+//
+// A spawn failure returns the pane with the error and leaves it in its slot
+// with SpawnError set, as before.
+func (d *Daemon) buildPane(payload ipc.CreatePanePayload, cwd, paneType string, opts buildOpts) (*Pane, string, error) {
+	pane := d.session.NewPane(cwd)
+	// Unpublished: no other goroutine can see these fields yet, so they need
+	// no PluginMu. They used to be written after CreatePane had published the
+	// pane, which is why the race detector once reported them against any
+	// concurrent reader of Type.
 	pane.Type = paneType
 	pane.InstanceName = payload.InstanceName
 	pane.InstanceArgs = payload.InstanceArgs
 	pane.QuilMCP = payload.QuilMCP
-	pane.PluginMu.Unlock()
-	// The sandbox spec joins the fields above, and its absence here was the
-	// whole feature failing open: spawnPane gates the container branch on
-	// pane.SandboxImage, so a create that never set it ran the agent on the
-	// host. A REJECTED image destroys the pane rather than spawning it
-	// un-sandboxed — the user asked for isolation, and quietly not providing
-	// it is the one outcome that must never happen.
-	if err := d.applySandboxSpecFor(pane, payload.Sandbox); err != nil {
-		d.session.DestroyPane(pane.ID)
-		return nil, err
-	}
 	if payload.Overlay {
-		// CreatePane already PUBLISHED the pane into the session maps, so a
-		// concurrent snapshot/broadcast goroutine may be reading it — both
-		// writes go under PluginMu (same discipline as Muted).
-		pane.PluginMu.Lock()
+		// treeless before publish, so no tree operation in the publish hold
+		// or after it can place the overlay in the tab's layout.
+		pane.treeless = true
 		pane.Overlay = true
 		pane.OverlayShownAt = time.Now()
 		// Overlay panes are muted at the source: a hidden lazygit
 		// refreshing must not ping the notification sidebar.
 		pane.Muted = true
-		pane.PluginMu.Unlock()
+	}
+	// The sandbox spec joins the fields above, and its absence here was the
+	// whole feature failing open: spawnPane gates the container branch on
+	// pane.SandboxImage, so a create that never set it ran the agent on the
+	// host. A REJECTED image creates nothing — the user asked for isolation,
+	// and quietly not providing it is the one outcome that must never happen.
+	if err := d.applySandboxSpecFor(pane, payload.Sandbox); err != nil {
+		return nil, "", err
+	}
+	res, err := d.session.PublishPane(pane, opts.Slot)
+	if err != nil {
+		return nil, "", fmt.Errorf("create pane error: %w", err)
+	}
+	d.finishDetached(res)
+	if res.Reused {
+		return res.Pane, "", nil
+	}
+	if payload.Overlay {
 		d.enforceOverlayCap(pane.ID)
 	}
-	d.applyResumeSessionID(pane, payload.ResumeSessionID)
-	log.Printf("pane created: %s (type=%s, tab=%s, overlay=%v)", pane.ID, paneType, payload.TabID, payload.Overlay)
+	var notice string
+	if payload.ResumeSessionID != "" {
+		if holder, ok := d.claimResumeSessionID(pane, payload.ResumeSessionID); !ok && opts.StrictResume {
+			if opts.Slot.ReplaceID == "" {
+				d.cleanupPaneArtifacts(pane.ID)
+				_ = d.session.DestroyPane(pane.ID)
+				return nil, "", &errResumeTaken{holder: holder}
+			}
+			notice = "that Claude session was opened in pane " + holder + " meanwhile; this pane started a fresh session"
+		}
+	}
+	log.Printf("pane created: %s (type=%s, tab=%s, overlay=%v)", pane.ID, paneType, opts.Slot.TabID, payload.Overlay)
 
 	// Size before spawn: the child can paint before a hidden tab's resize lands.
 	ptySession := d.newPaneSession(pane)
@@ -3104,17 +3156,37 @@ func (d *Daemon) constructPaneAt(payload ipc.CreatePanePayload, cwd, paneType st
 		// precisely so the user is told rather than silently given an
 		// un-isolated pane, and a black pane tells them nothing.
 		//
-		// Under PluginMu because CreatePane has already published the pane and
-		// a snapshot or broadcast goroutine may be reading it. Not persisted —
+		// Under PluginMu because PublishPane has published the pane and a
+		// snapshot or broadcast goroutine may be reading it. Not persisted —
 		// spawnPane clears it on a later success, and a stale error surviving
 		// a restart would describe a condition that may be long gone.
 		pane.PluginMu.Lock()
 		pane.SpawnError = err.Error()
 		pane.PluginMu.Unlock()
-		return pane, fmt.Errorf("start PTY error: %w", err)
+		return pane, notice, fmt.Errorf("start PTY error: %w", err)
 	}
-	return pane, nil
+	return pane, notice, nil
 }
+
+// finishDetached closes what PublishPane took out of the session, off-lock:
+// the overlay a create replaced, or the pane a replace removed.
+func (d *Daemon) finishDetached(res publishResult) {
+	for _, old := range []*Pane{res.Evicted, res.Replaced} {
+		if old == nil {
+			continue
+		}
+		d.cleanupPaneArtifacts(old.ID)
+		releasePanes([]*Pane{old})
+		go d.teardownSandbox(context.Background(), old.ID)
+	}
+	if res.Evicted != nil {
+		log.Printf("overlay replace: %s (another kind or repo took the tab's slot)", res.Evicted.ID)
+	}
+}
+
+// overlayKey names an overlay's kind and repository: the tab's one slot is
+// reused only for the same pair.
+func overlayKey(kind, repo string) string { return kind + "\x00" + repo }
 
 // handleReplacePane is the fire-and-forget entry point: it logs what
 // replacePaneAt reports and returns. Kept so the ordinary replace path behaves
@@ -3308,25 +3380,31 @@ func (d *Daemon) handleDestroyPane(msg *ipc.Message) {
 	// after three attempts at 250 ms. Teardown also harvests the pane's git
 	// objects before anything is deleted, so closing a pane never loses
 	// commits made inside the container.
-	closing := payload.PaneID
-	if len(worktrees) > 0 {
-		go func() {
-			// GATED, not merely ordered. A container that could not be removed
-			// still holds the worktree as a bind mount, and
-			// removeOwnedWorktrees FORCES the removal after three attempts —
-			// so proceeding deletes the directory out from under a live agent.
-			// The teardown says so on its own log line and raises a sidebar
-			// event; the worktree survives for the next daemon start to clean
-			// up, which is the recoverable half of the same decision.
-			if !d.teardownSandbox(context.Background(), closing) {
-				log.Printf("pane %s: worktree removal skipped — its container is still running", closing)
-				return
-			}
-			d.removeOwnedWorktrees(worktrees)
-		}()
+	d.teardownAfterDestroy(payload.PaneID, worktrees)
+}
+
+// teardownAfterDestroy brings a destroyed pane's container down and, when
+// worktrees is non-empty, removes them — GATED on the container being gone,
+// for the reason handleDestroyPane documents.
+func (d *Daemon) teardownAfterDestroy(paneID string, worktrees []string) {
+	if len(worktrees) == 0 {
+		go d.teardownSandbox(context.Background(), paneID)
 		return
 	}
-	go d.teardownSandbox(context.Background(), closing)
+	go func() {
+		// GATED, not merely ordered. A container that could not be removed
+		// still holds the worktree as a bind mount, and removeOwnedWorktrees
+		// FORCES the removal after three attempts — so proceeding deletes the
+		// directory out from under a live agent. The teardown says so on its
+		// own log line and raises a sidebar event; the worktree survives for
+		// the next daemon start to clean up, which is the recoverable half of
+		// the same decision.
+		if !d.teardownSandbox(context.Background(), paneID) {
+			log.Printf("pane %s: worktree removal skipped — its container is still running", paneID)
+			return
+		}
+		removeOwnedWorktreesFn(d, worktrees)
+	}()
 }
 
 // ensureTabNotEmpty destroys orphaned overlay panes and spawns a fresh
@@ -7781,6 +7859,12 @@ func (d *Daemon) handleDestroyPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 		return
 	}
 	d.highlightPane(pane.ID)
+	var worktrees []string
+	if req.RemoveWorktree {
+		// Captured before DestroyPane, which takes the pane (and with it the
+		// only record of its worktree) out of the session maps.
+		worktrees = ownedWorktreePaths([]*Pane{pane})
+	}
 
 	// Captured BEFORE DestroyPane, which takes the pane out of the session
 	// maps, but emitted only AFTER it succeeds: this handler answers
@@ -7822,8 +7906,9 @@ func (d *Daemon) handleDestroyPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 	// missing it leaks a running container plus a permanent alternates line
 	// in the user's repository — which makes every git command there fail
 	// once its object store is eventually removed. MCP destroy_pane is an
-	// ordinary way to close a pane, not an edge case.
-	go d.teardownSandbox(context.Background(), req.PaneID)
+	// ordinary way to close a pane, not an edge case. A requested worktree
+	// removal follows it, gated on the container being gone.
+	d.teardownAfterDestroy(req.PaneID, worktrees)
 
 	respondTo(conn, msg.ID, ipc.MsgDestroyPaneResp, ipc.DestroyPaneRespPayload{
 		Success: true,

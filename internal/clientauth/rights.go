@@ -35,7 +35,7 @@ var classes = map[string]Class{
 	ipc.MsgSandboxCapReq: ClassView, ipc.MsgNoteGet: ClassView,
 
 	// act — input and workspace mutations
-	ipc.MsgPaneInput: ClassAct, ipc.MsgCreatePane: ClassAct, ipc.MsgCreatePaneReq: ClassAct,
+	ipc.MsgPaneInput: ClassAct, ipc.MsgCreatePane: ClassAct, ipc.MsgCreatePaneReq: ClassAct, ipc.MsgSplitPaneReq: ClassAct,
 	ipc.MsgDestroyPane: ClassAct, ipc.MsgDestroyPaneReq: ClassAct, ipc.MsgRestartPaneReq: ClassAct,
 	ipc.MsgUpdatePane: ClassAct, ipc.MsgUpdateLayout: ClassAct, ipc.MsgMovePane: ClassAct,
 	ipc.MsgResizePane: ClassAct, ipc.MsgResizePanes: ClassAct, ipc.MsgClientGeometry: ClassAct,
@@ -66,7 +66,7 @@ var classes = map[string]Class{
 // ClassOf/Classified rather than an init function.
 var neverAccepted = map[string]bool{
 	ipc.MsgPaneInputResp: true, ipc.MsgListPanesResp: true, ipc.MsgReadPaneOutputResp: true,
-	ipc.MsgPaneStatusResp: true, ipc.MsgCreatePaneResp: true, ipc.MsgRestartPaneResp: true,
+	ipc.MsgPaneStatusResp: true, ipc.MsgCreatePaneResp: true, ipc.MsgSplitPaneResp: true, ipc.MsgRestartPaneResp: true,
 	ipc.MsgScreenshotPaneResp: true, ipc.MsgSwitchTabResp: true, ipc.MsgListTabsResp: true,
 	ipc.MsgDestroyPaneResp: true, ipc.MsgGetNotificationsResp: true, ipc.MsgWatchNotificationsResp: true,
 	ipc.MsgVersionResp: true, ipc.MsgMemoryReportResp: true, ipc.MsgResourceReportResp: true,
@@ -176,7 +176,7 @@ func checkStandardPayload(msg *ipc.Message) (bool, string) {
 	return true, ""
 }
 
-// carriers decodes the four create shapes. ok is false only for a payload
+// carriers decodes the five create shapes. ok is false only for a payload
 // that is present and does not decode; an absent payload is the zero value.
 func carriers(msg *ipc.Message) (rawArgs, overlay, ok bool) {
 	switch msg.Type {
@@ -204,6 +204,12 @@ func carriers(msg *ipc.Message) (rawArgs, overlay, ok bool) {
 			return false, false, false
 		}
 		return p.FirstPane != nil && len(p.FirstPane.InstanceArgs) > 0, false, true
+	case ipc.MsgSplitPaneReq:
+		var p ipc.SplitPaneReqPayload
+		if !decodeIfPresent(msg, &p) {
+			return false, false, false
+		}
+		return len(p.Pane.InstanceArgs) > 0, p.Placement == ipc.PlacementOverlay, true
 	}
 	return false, false, true
 }

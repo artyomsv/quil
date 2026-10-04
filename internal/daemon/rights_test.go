@@ -145,12 +145,14 @@ func TestRights_StandardPayloadCarriers(t *testing.T) {
 		return m
 	}
 	for name, msg := range map[string]*ipc.Message{
-		"create_pane args":     mk(ipc.MsgCreatePane, ipc.CreatePanePayload{TabID: tab.ID, InstanceArgs: []string{"-c", "id"}}),
-		"create_pane replace":  mk(ipc.MsgCreatePane, ipc.CreatePanePayload{TabID: tab.ID, ReplacePaneID: "x", InstanceArgs: []string{"y"}}),
-		"create_pane overlay":  mk(ipc.MsgCreatePane, ipc.CreatePanePayload{TabID: tab.ID, Overlay: true}),
-		"create_pane_req term": mk(ipc.MsgCreatePaneReq, ipc.CreatePaneReqPayload{TabID: tab.ID, Type: "terminal", InstanceArgs: []string{"-c", "id"}}),
-		"create_tab first":     mk(ipc.MsgCreateTab, ipc.CreateTabPayload{FirstPane: &ipc.FirstPaneSpec{InstanceArgs: []string{"x"}}}),
-		"create_tab_req first": mk(ipc.MsgCreateTabReq, ipc.CreateTabReqPayload{FirstPane: &ipc.CreatePaneReqPayload{InstanceArgs: []string{"x"}}}),
+		"create_pane args":       mk(ipc.MsgCreatePane, ipc.CreatePanePayload{TabID: tab.ID, InstanceArgs: []string{"-c", "id"}}),
+		"create_pane replace":    mk(ipc.MsgCreatePane, ipc.CreatePanePayload{TabID: tab.ID, ReplacePaneID: "x", InstanceArgs: []string{"y"}}),
+		"create_pane overlay":    mk(ipc.MsgCreatePane, ipc.CreatePanePayload{TabID: tab.ID, Overlay: true}),
+		"create_pane_req term":   mk(ipc.MsgCreatePaneReq, ipc.CreatePaneReqPayload{TabID: tab.ID, Type: "terminal", InstanceArgs: []string{"-c", "id"}}),
+		"create_tab first":       mk(ipc.MsgCreateTab, ipc.CreateTabPayload{FirstPane: &ipc.FirstPaneSpec{InstanceArgs: []string{"x"}}}),
+		"create_tab_req first":   mk(ipc.MsgCreateTabReq, ipc.CreateTabReqPayload{FirstPane: &ipc.CreatePaneReqPayload{InstanceArgs: []string{"x"}}}),
+		"split_pane_req args":    mk(ipc.MsgSplitPaneReq, ipc.SplitPaneReqPayload{TabID: tab.ID, Placement: ipc.PlacementRight, Pane: ipc.SplitPaneSpec{InstanceArgs: []string{"-c", "id"}}}),
+		"split_pane_req overlay": mk(ipc.MsgSplitPaneReq, ipc.SplitPaneReqPayload{TabID: tab.ID, Placement: ipc.PlacementOverlay, OverlayKind: "lazygit"}),
 	} {
 		before, beforePanes := len(h.d.session.Tabs()), len(h.d.session.Panes(tab.ID))
 		if !sendAndProbe(t, c, msg) {

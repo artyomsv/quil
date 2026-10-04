@@ -1,4 +1,4 @@
-import { CLOSE } from './protocol';
+import { CLOSE, CLOSE_REPLACED_REASON } from './protocol';
 import { sanitizeRemoteText } from './sanitize';
 
 export interface BannerState {
@@ -35,6 +35,8 @@ export function bannerFor(code: number, reason: string, retrying: boolean): Bann
     case CLOSE.goingAway:
       return { text: 'The web server stopped', retrying: false };
     case 1008:
+      // A 1008 is final, except the "replaced" close, which retries.
+      if (reason === CLOSE_REPLACED_REASON && retrying) return { text: 'Connection lost — reconnecting', retrying: true };
       return { text: `The web server refused this page: ${why || 'no reason given'}`, retrying: false };
     default:
       return retrying

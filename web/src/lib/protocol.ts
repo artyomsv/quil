@@ -101,3 +101,9 @@ export const CLOSE = {
   byAgent: 4006,
   goingAway: 1001,
 } as const;
+
+// The reason of the 1008 the gateway closes a socket with when a newer socket
+// of the same login took its place over the tab limit (closeReplaced in
+// internal/webgw/server.go; keep the two equal). Unlike other 1008s it is not
+// final: the page retries with the normal back-off.
+export const CLOSE_REPLACED_REASON = 'replaced by a newer connection';

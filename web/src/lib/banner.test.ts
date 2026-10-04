@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { bannerFor, isLoginRequired } from './banner';
+import { CLOSE_REPLACED_REASON } from './protocol';
 
 describe('bannerFor', () => {
   it('shows nothing for a resync', () => {
@@ -39,6 +40,10 @@ describe('bannerFor', () => {
       text: 'The web server refused this page: no reason given',
       retrying: false,
     });
+  });
+
+  it('shows a reconnect for the replaced close, which retries', () => {
+    expect(bannerFor(1008, CLOSE_REPLACED_REASON, true)).toEqual({ text: 'Connection lost — reconnecting', retrying: true });
   });
 
   it('covers a network drop', () => {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { Connection, type Clock, type ConnectionEvents, type SocketLike, type StorageLike } from './connection';
-import type { Message, PaneOutputFrame } from './protocol';
+import { CLOSE_REPLACED_REASON, type Message, type PaneOutputFrame } from './protocol';
 import { SafeStorage } from './storage';
 
 class FakeSocket implements SocketLike {
@@ -282,6 +282,20 @@ describe('Connection', () => {
       expect(r.sockets).toHaveLength(1);
       expect(r.closed).toEqual([[code, 'why', false]]);
     }
+  });
+
+  it('retries with back-off after the replaced close and keeps the key', () => {
+    const r = rig();
+    r.storage.setItem('quil.web.key', 'k-1');
+    const s = opened(r);
+    s.closeWith(1008, CLOSE_REPLACED_REASON);
+    expect(r.reconnecting).toBe(1);
+    expect(r.closed).toEqual([[1008, CLOSE_REPLACED_REASON, true]]);
+    expect(r.storage.getItem('quil.web.key')).toBe('k-1');
+    // Back-off, not at once.
+    expect(r.sockets).toHaveLength(1);
+    r.clock.advance(1000);
+    expect(r.sockets).toHaveLength(2);
   });
 
   it('on a refused login key clears it and does not reconnect', () => {

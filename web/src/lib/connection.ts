@@ -1,6 +1,6 @@
 import { bytesToBase64, utf8Bytes } from './base64';
 import { decodePaneOutput, undecodableDataLength } from './frame';
-import { CLOSE, type Message, type PaneOutputFrame, type WebWelcome } from './protocol';
+import { CLOSE, CLOSE_REPLACED_REASON, type Message, type PaneOutputFrame, type WebWelcome } from './protocol';
 import { CLIENT_ID_KEY, LOGIN_KEY, SafeStorage, type StorageLike } from './storage';
 
 export type { StorageLike };
@@ -287,6 +287,14 @@ export class Connection {
       this.stableTimer = null;
     }
     if (this.stopped) return;
+    if (code === 1008 && reason === CLOSE_REPLACED_REASON) {
+      // Another socket of this login took the place this one waited in; the
+      // page's own socket is not that one, so it tries again.
+      this.events.onReconnecting();
+      this.events.onClosed(code, reason, true);
+      this.scheduleReconnect();
+      return;
+    }
     if (code === 1008) {
       if (reason === 'login required') {
         // Only the key this socket sent was refused. Another tab may have

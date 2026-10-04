@@ -1733,15 +1733,39 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 	m.skipHidden = false
 	// A mouse report split across two reads arrives as an unknown head plus
 	// key presses for its tail. Checked before anything treats those keys as
-	// user input — they must not ack a pane or reach a PTY. Returning before
-	// the prologue mutates nothing, so the frame cannot have moved.
+	// user input — they must not ack a pane or reach a PTY. A held or dropped
+	// key returns before the prologue and mutates nothing, so the frame cannot
+	// have moved; released keys replay through Update and render as usual.
 	switch ev := msg.(type) {
 	case uv.UnknownEvent:
-		m.mouseTail.arm(ev, start)
-	case tea.KeyPressMsg:
-		if m.mouseTail.swallow(ev, start) {
+		// Keys held for an earlier head go first, while the guard is disarmed,
+		// so they are delivered rather than held again behind this head.
+		var cmd tea.Cmd
+		release := m.mouseTail.reset()
+		if len(release) > 0 {
+			m, cmd = m.replayKeys(release)
+		}
+		if m.mouseTail.arm(ev, start) {
+			m.skipRender = len(release) == 0
+			return m, tea.Batch(cmd, m.mouseTail.expireCmd())
+		}
+		if len(release) > 0 {
+			return m, cmd
+		}
+	case mouseTailExpireMsg:
+		release := m.mouseTail.expire(ev.gen)
+		if len(release) == 0 {
 			m.skipRender = true
 			return m, nil
+		}
+		return m.replayKeys(release)
+	case tea.KeyPressMsg:
+		switch verdict, release := m.mouseTail.feed(ev, start); verdict {
+		case mouseTailHold, mouseTailComplete:
+			m.skipRender = true
+			return m, nil
+		case mouseTailRelease:
+			return m.replayKeys(release)
 		}
 	}
 	// Local input answers the typing guard's ack hold (spec §8.1): a pane that

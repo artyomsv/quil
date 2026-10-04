@@ -7,14 +7,28 @@ import (
 	uv "github.com/charmbracelet/ultraviolet"
 )
 
-// mouseTailWindow bounds how long after a broken mouse-report head the guard
-// still swallows its tail. The reader flushes the head after its 50 ms escape
-// timeout and the tail is the very next input, so both reach Update back to
-// back even when Update itself is running late; the window only has to stop a
-// dangling head from eating digits the user types much later.
-const mouseTailWindow = time.Second
+// mouseTailWindow bounds how long the guard holds keys after a broken
+// mouse-report head. The reader flushes the head after its 50 ms escape timeout
+// and the tail is the very next input, so both reach Update back to back even
+// when Update itself is running late. The window is also the longest a key the
+// user really typed can be delayed, when a head's tail never comes.
+const mouseTailWindow = 500 * time.Millisecond
 
-// mouseTailGuard swallows the tail of an SGR mouse report that the terminal
+// mouseTailExpireMsg releases the keys held for the head of generation gen if
+// its report has not completed by then.
+type mouseTailExpireMsg struct{ gen uint64 }
+
+// mouseTailVerdict says what Update does with a key press the guard has seen.
+type mouseTailVerdict int
+
+const (
+	mouseTailPass     mouseTailVerdict = iota // not the guard's business: handle normally
+	mouseTailHold                             // may continue the report: held, deliver nothing yet
+	mouseTailComplete                         // finished the report: drop it and everything held
+	mouseTailRelease                          // the report is broken: deliver the returned keys in order
+)
+
+// mouseTailGuard drops the tail of an SGR mouse report that the terminal
 // reader split in two.
 //
 // While the project sidebar or a context menu is painted, Quil asks for
@@ -25,46 +39,90 @@ const mouseTailWindow = time.Second
 // key presses — which Quil then typed into the active pane. Observed as stray
 // "5;90;35M" text in a pane's input line.
 //
-// The head is the evidence: only a key that CONTINUES the report it started is
-// swallowed, so a real key press disarms the guard and is handled normally.
+// A digit after the head is not proof of mouse data: the user may be typing
+// numbers while a head's tail never comes. So keys that continue the report
+// are HELD, not dropped, and only the final M/m — which completes the report —
+// discards them. Anything that breaks the report, a new head, or the window
+// running out hands the held keys back to be delivered in order.
 type mouseTailGuard struct {
-	seq string    // the report so far, starting with ESC[<; empty = disarmed
-	at  time.Time // when the head arrived
+	seq  string            // the report so far, starting with ESC[<; empty = disarmed
+	at   time.Time         // when the head arrived
+	held []tea.KeyPressMsg // keys that continued the report, in arrival order
+	gen  uint64            // bumped per head, so a stale expiry is ignored
 }
 
-// arm starts tracking a broken mouse-report head. Anything that is not a
-// proper prefix of an SGR mouse report leaves the guard disarmed.
-func (g *mouseTailGuard) arm(ev uv.UnknownEvent, now time.Time) {
+// arm starts tracking a broken mouse-report head and reports whether ev was
+// one; when it was, the caller schedules expiry for g.gen. The caller must
+// first take and deliver anything still held for an earlier head (reset), or
+// those keys would be held again behind this one.
+func (g *mouseTailGuard) arm(ev uv.UnknownEvent, now time.Time) bool {
+	g.reset()
 	s := string(ev)
 	if prefix, complete := sgrMouseReport(s); prefix && !complete {
 		g.seq, g.at = s, now
-		return
+		g.gen++
+		return true
 	}
-	g.seq = ""
+	return false
 }
 
-// swallow reports whether key is the next byte of the armed report and must
-// be dropped. Any other key disarms the guard.
-func (g *mouseTailGuard) swallow(key tea.KeyPressMsg, now time.Time) bool {
+// feed classifies key against the armed report. On mouseTailRelease the
+// returned keys — everything held, then key itself — must be delivered in
+// order; they never pass through the guard again, because it is disarmed.
+func (g *mouseTailGuard) feed(key tea.KeyPressMsg, now time.Time) (mouseTailVerdict, []tea.KeyPressMsg) {
 	if g.seq == "" {
-		return false
+		return mouseTailPass, nil
 	}
-	if now.Sub(g.at) > mouseTailWindow || len(key.Text) != 1 || key.Mod&^tea.ModShift != 0 {
-		g.seq = ""
-		return false
+	if now.Sub(g.at) <= mouseTailWindow && len(key.Text) == 1 && key.Mod&^tea.ModShift == 0 {
+		next := g.seq + key.Text
+		if prefix, complete := sgrMouseReport(next); prefix {
+			if complete {
+				g.reset()
+				return mouseTailComplete, nil
+			}
+			g.seq = next
+			g.held = append(g.held, key)
+			return mouseTailHold, nil
+		}
 	}
-	next := g.seq + key.Text
-	prefix, complete := sgrMouseReport(next)
-	switch {
-	case !prefix:
-		g.seq = ""
-		return false
-	case complete:
-		g.seq = ""
-	default:
-		g.seq = next
+	return mouseTailRelease, append(g.reset(), key)
+}
+
+// expire hands back the keys held for generation gen when its report never
+// completed. A stale gen — the report completed, broke, or a newer head took
+// over — returns nothing.
+func (g *mouseTailGuard) expire(gen uint64) []tea.KeyPressMsg {
+	if g.seq == "" || gen != g.gen {
+		return nil
 	}
-	return true
+	return g.reset()
+}
+
+// reset disarms the guard and returns what it was holding.
+func (g *mouseTailGuard) reset() []tea.KeyPressMsg {
+	held := g.held
+	g.seq, g.held = "", nil
+	return held
+}
+
+// expireCmd schedules the release of keys held for the current head.
+func (g *mouseTailGuard) expireCmd() tea.Cmd {
+	gen := g.gen
+	return tea.Tick(mouseTailWindow, func(time.Time) tea.Msg { return mouseTailExpireMsg{gen: gen} })
+}
+
+// replayKeys delivers keys the mouse-tail guard held, in order, through the
+// normal Update path. The guard is disarmed by then, so none is held again.
+func (m Model) replayKeys(keys []tea.KeyPressMsg) (Model, tea.Cmd) {
+	var cmds []tea.Cmd
+	for _, k := range keys {
+		next, cmd := m.Update(k)
+		if mm, ok := next.(Model); ok {
+			m = mm
+		}
+		cmds = append(cmds, cmd)
+	}
+	return m, tea.Batch(cmds...)
 }
 
 // sgrMouseReport classifies s against the SGR mouse grammar

@@ -270,4 +270,4 @@ It never records a token, a key, terminal output, notes or what someone typed.
 
 ## What is coming
 
-This is the base for a **browser client**: a web page that shows your workspace. A browser client needs exactly this: a login, levels and a log. It will use these same tokens and levels. TLS on the listener, so that the ssh tunnel is not needed, is also planned. Both are separate steps in the multi-client plan.
+The browser client is here: `quil web --connect <addr> --token-file <path>` uses these same tokens and levels. See [Quil in a browser](web.md). TLS on the listener, so that the ssh tunnel is not needed, is still planned.

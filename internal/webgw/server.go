@@ -34,14 +34,17 @@ var (
 var errTabsFull = fmt.Errorf("%d browser tabs already open", maxBridges)
 
 const (
-	maxBridges        = 16
-	resyncLease       = 10 * time.Second
-	pingEvery         = 20 * time.Second
-	pongBudget        = 60 * time.Second
-	pageFrameMax      = 1 << 20
-	replayTotalMax    = 128 << 20
-	dialTimeout       = 15 * time.Second
-	openTimeout       = 10 * time.Second
+	maxBridges     = 16
+	resyncLease    = 10 * time.Second
+	pingEvery      = 20 * time.Second
+	pongBudget     = 60 * time.Second
+	pageFrameMax   = 1 << 20
+	replayTotalMax = 128 << 20
+	dialTimeout    = 15 * time.Second
+	openTimeout    = 10 * time.Second
+	// replaceGrace is how long a reclaim socket may wait for its first frame
+	// before a newer socket of its session can take its place; see handleWS.
+	replaceGrace      = 1500 * time.Millisecond
 	readHeaderTimeout = 10 * time.Second
 	// closeLoginRequired is the policy-violation close a page gets when its
 	// key does not match its session; the page answers it with the login form.
@@ -86,8 +89,9 @@ type tab struct {
 // reclaimSlot is the place of one socket let in over the limit to reclaim a
 // held tab. Its fields are guarded by Server.mu.
 type reclaimSlot struct {
-	session string
-	conn    *websocket.Conn // set once the upgrade is done
+	session  string
+	conn     *websocket.Conn // set once the upgrade is done
+	admitted time.Time       // when handleWS gave it the place
 	// opened is set once the socket's first frame arrived; from then on a
 	// newer socket cannot take its place.
 	opened bool
@@ -104,10 +108,11 @@ type Server struct {
 	budget *replayBudget
 	mux    *http.ServeMux
 
-	// limits, lease and openWait are fields so tests can shrink them.
+	// limits, lease, openWait and grace are fields so tests can shrink them.
 	limits   bridgeLimits
 	lease    time.Duration
 	openWait time.Duration
+	grace    time.Duration
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -146,6 +151,7 @@ func New(cfg Config) *Server {
 		limits:   defaultBridgeLimits(cfg.Version),
 		lease:    resyncLease,
 		openWait: openTimeout,
+		grace:    replaceGrace,
 		tabs:     map[string]*tab{},
 
 		reclaiming: map[string][]*reclaimSlot{},
@@ -188,10 +194,15 @@ func (s *Server) Serve(l net.Listener) error {
 // adds none. Until web_open names the tab this cannot be known, so tabFor
 // makes the final decision and refuses such a socket anything else. Such
 // sockets are bounded too: one per tab held for the session. When all of
-// those places are taken, the oldest socket that has sent nothing yet gives
-// its place to the new one and is closed with 1008 "replaced by a newer
-// connection", so a silent socket cannot keep the page from its tab until
-// the lease runs out.
+// those places are taken, the oldest socket that has sent nothing for at
+// least the grace period (1.5 s) gives its place to the new one and is closed
+// with 1008 "replaced by a newer connection"; with none such, the new socket
+// gets 503. The page sends web_open as soon as its socket opens, so it leaves
+// the waiting set within a round trip and is never the one replaced, however
+// fast another holder of the cookie opens sockets. A silent socket holds the
+// place for openWait at most, and the page's own retry (503, then back-off)
+// gets in once it is replaced or times out. The page retries after a
+// "replaced" close too.
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	if !originAllowed(r.Header.Get("Origin"), r.Host) {
 		s.cfg.Logf("websocket refused: foreign origin")
@@ -252,22 +263,23 @@ const closeReplaced = "replaced by a newer connection"
 
 // reclaimPlaceLocked gives an over-the-limit socket of session a reclaim
 // place: a free one while the session has fewer than one per held tab, else
-// the place of its oldest socket still waiting for its first frame, whose
-// conn is returned for the caller to close (nil while that one is still
-// upgrading; it closes itself in bindReclaim). Caller holds s.mu.
+// the place of its oldest socket that has waited at least s.grace without a
+// first frame, whose conn is returned for the caller to close (nil while that
+// one is still upgrading; it closes itself in bindReclaim). Caller holds s.mu.
 func (s *Server) reclaimPlaceLocked(session string) (rs *reclaimSlot, victim *websocket.Conn, ok bool) {
 	held := s.heldTabsLocked(session)
 	if held == 0 {
 		return nil, nil, false
 	}
 	q := s.reclaiming[session]
-	rs = &reclaimSlot{session: session}
+	now := s.cfg.Now()
+	rs = &reclaimSlot{session: session, admitted: now}
 	if len(q) < held {
 		s.reclaiming[session] = append(q, rs)
 		return rs, nil, true
 	}
 	for i, old := range q {
-		if old.opened {
+		if old.opened || now.Sub(old.admitted) < s.grace {
 			continue
 		}
 		old.preempted = true

@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -597,7 +599,10 @@ func TestWS_ReclaimSocketsOverTheCapAreBounded(t *testing.T) {
 // A silent socket cannot keep a session's reclaim place: the session's next
 // socket takes it, and the silent one is closed.
 func TestWS_NewerReclaimSocketReplacesASilentOne(t *testing.T) {
-	h := newWSHarness(t, smallLiveCap)
+	h := newWSHarness(t, func(s *Server) {
+		smallLiveCap(s)
+		s.grace = 0
+	})
 	ctx := testCtx(t)
 	s := h.login()
 	var held *websocket.Conn
@@ -657,6 +662,193 @@ func TestWS_NewerReclaimSocketReplacesASilentOne(t *testing.T) {
 	}
 	if n := h.dials.Load(); n != maxBridges {
 		t.Fatalf("daemon dialled %d times, want %d", n, maxBridges)
+	}
+}
+
+// The page retries a "replaced" close only when it knows the reason word for
+// word; this keeps the Go and TypeScript copies equal.
+func TestCloseReplaced_MatchesThePage(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "..", "web", "src", "lib", "protocol.ts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "export const CLOSE_REPLACED_REASON = '" + closeReplaced + "';"
+	if !strings.Contains(string(src), want) {
+		t.Fatalf("web/src/lib/protocol.ts does not hold %q", want)
+	}
+}
+
+// testClock is a Config.Now the test moves by hand; safe across goroutines.
+type testClock struct{ off atomic.Int64 }
+
+var testEpoch = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+func (c *testClock) now() time.Time          { return testEpoch.Add(time.Duration(c.off.Load())) }
+func (c *testClock) advance(d time.Duration) { c.off.Add(int64(d)) }
+
+// A waiting socket is replaced only once it has waited the grace period, so
+// the page, which sends web_open at once, is never the one replaced.
+func TestWS_ReclaimReplacementWaitsForTheGrace(t *testing.T) {
+	h := newWSHarness(t, func(s *Server) {
+		smallLiveCap(s)
+		s.grace = time.Hour
+	})
+	ctx := testCtx(t)
+	s := h.login()
+	var held *websocket.Conn
+	var heldID string
+	for i := 0; i < maxBridges; i++ {
+		c, w := h.open(ctx, s, "")
+		if i == 0 {
+			held, heldID = c, w.ClientID
+		}
+	}
+	pushLive(t, h.daemon(0))
+	if code, _ := closeOf(t, ctx, held); code != CloseResync {
+		t.Fatalf("closed %d, want 4001", code)
+	}
+	reclaiming := func() int {
+		h.s.mu.Lock()
+		defer h.s.mu.Unlock()
+		n := 0
+		for _, q := range h.s.reclaiming {
+			n += len(q)
+		}
+		return n
+	}
+	setGrace := func(d time.Duration) {
+		h.s.mu.Lock()
+		h.s.grace = d
+		h.s.mu.Unlock()
+	}
+	sameSession503 := func(what string) {
+		t.Helper()
+		_, resp, err := websocket.Dial(ctx, "ws://"+h.host+"/ws", &websocket.DialOptions{HTTPHeader: h.header(s.cookie, h.origin())})
+		if err == nil || resp == nil || resp.StatusCode != http.StatusServiceUnavailable {
+			t.Fatalf("%s: err=%v resp=%v, want 503", what, err, resp)
+		}
+	}
+
+	silent, _, err := h.connect(ctx, s.cookie)
+	if err != nil {
+		t.Fatalf("silent socket: %v", err)
+	}
+	waitFor(t, "the silent socket to hold the place", func() bool { return reclaiming() == 1 })
+
+	// Inside the grace (an hour here): the waiting socket keeps its place.
+	sameSession503("a socket inside the grace period")
+	if n := reclaiming(); n != 1 {
+		t.Fatalf("%d places taken after a refusal, want 1", n)
+	}
+
+	setGrace(0)
+	page, _, err := h.connect(ctx, s.cookie)
+	if err != nil {
+		t.Fatalf("a socket after the grace period was refused: %v", err)
+	}
+	if code, reason := closeOf(t, ctx, silent); code != int(websocket.StatusPolicyViolation) || reason != closeReplaced {
+		t.Fatalf("silent socket closed %d %q, want 1008 %q", code, reason, closeReplaced)
+	}
+	// The new socket is inside its own grace period: nothing replaces it.
+	setGrace(time.Hour)
+	sameSession503("a socket racing the page")
+	if n := reclaiming(); n != 1 {
+		t.Fatalf("%d places taken, want 1", n)
+	}
+
+	sendMsg(t, ctx, page, MsgWebOpen, "", WebOpenPayload{ClientIDHint: heldID, Key: s.key})
+	if m := readMsg(t, ctx, page); m.Type != MsgWebWelcome {
+		t.Fatalf("first frame is %s, want web_welcome", m.Type)
+	}
+	h.s.mu.Lock()
+	rp, pending := len(h.s.reclaiming), h.s.pending
+	h.s.mu.Unlock()
+	if rp != 0 || pending != 0 {
+		t.Fatalf("after the reclaim: %d sessions reclaiming, %d pending; want 0, 0", rp, pending)
+	}
+}
+
+// The place bookkeeping, driven directly so each race is taken on purpose:
+// an opened socket is never replaced, and a replaced one gives back nothing
+// whether it is still upgrading or reads its first frame afterwards.
+func TestReclaimPlaces_ReplacementBookkeeping(t *testing.T) {
+	clock := &testClock{}
+	s := New(Config{Dial: func(context.Context, string) (DaemonConn, string, error) {
+		return nil, "", errors.New("no dial in this test")
+	}, Now: clock.now})
+	s.tabs["held"] = &tab{id: "held", session: "S", held: true}
+	place := func() (*reclaimSlot, *websocket.Conn, bool) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.reclaimPlaceLocked("S")
+	}
+	count := func() int {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return len(s.reclaiming["S"])
+	}
+
+	// Every place has sent its first frame: refused, however long it waited.
+	a, _, ok := place()
+	if !ok {
+		t.Fatal("first socket refused")
+	}
+	s.mu.Lock()
+	opened := s.openedLocked(a)
+	s.mu.Unlock()
+	if !opened {
+		t.Fatal("first socket could not mark its first frame")
+	}
+	clock.advance(time.Hour)
+	if _, _, ok := place(); ok {
+		t.Fatal("a socket that sent its first frame was replaced")
+	}
+	s.release(a)
+	if n := count(); n != 0 {
+		t.Fatalf("%d places after the release, want 0", n)
+	}
+
+	// A waiting socket inside the grace is kept; past it, it is replaced.
+	b, _, ok := place()
+	if !ok {
+		t.Fatal("second socket refused")
+	}
+	clock.advance(s.grace - time.Nanosecond)
+	if _, _, ok := place(); ok {
+		t.Fatal("a socket inside the grace period was replaced")
+	}
+	clock.advance(time.Nanosecond)
+	c, victim, ok := place()
+	if !ok || victim != nil {
+		t.Fatalf("replacement: ok=%v victim=%v, want ok and no conn (still upgrading)", ok, victim)
+	}
+	if n := count(); n != 1 {
+		t.Fatalf("%d places after the replacement, want 1", n)
+	}
+
+	// The replaced socket finishes its upgrade: it must close and give back
+	// nothing, and the same for reading its first frame and ending.
+	if s.bindReclaim(b, nil) {
+		t.Fatal("bindReclaim accepted a replaced socket")
+	}
+	s.release(b)
+	s.mu.Lock()
+	opened = s.openedLocked(b)
+	s.mu.Unlock()
+	if opened {
+		t.Fatal("a replaced socket marked its first frame")
+	}
+	s.release(b)
+	if n := count(); n != 1 {
+		t.Fatalf("%d places after the replaced socket ended, want 1", n)
+	}
+
+	s.release(c)
+	s.mu.Lock()
+	rp := len(s.reclaiming)
+	s.mu.Unlock()
+	if rp != 0 {
+		t.Fatalf("%d sessions still reclaiming, want 0", rp)
 	}
 }
 

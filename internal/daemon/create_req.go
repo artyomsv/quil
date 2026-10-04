@@ -313,7 +313,7 @@ func (d *Daemon) createTabFromReq(conn *ipc.Conn, req ipc.CreateTabReqPayload) (
 		return ipc.CreateTabRespPayload{Error: "no such project: " + req.ProjectID}, nil
 	}
 	cwd, picked := d.newTabCWD(conn, req)
-	return d.createTabIn(conn, req, cwd, picked)
+	return d.createTabIn(conn, req, cwd, picked, false)
 }
 
 // newTabCWD resolves, ONCE, the directory a new tab's first pane opens in: the
@@ -347,9 +347,14 @@ func (d *Daemon) newTabCWD(conn *ipc.Conn, req ipc.CreateTabReqPayload) (cwd str
 
 // createTabIn is createTabFromReq after the project check, with the first
 // pane's directory already resolved (newTabCWD), so a caller that needed the
-// directory first — split_pane_req checks a resume transcript in it — does
-// not pay a second filesystem probe for it.
-func (d *Daemon) createTabIn(conn *ipc.Conn, req ipc.CreateTabReqPayload, cwd string, picked bool) (ipc.CreateTabRespPayload, func()) {
+// directory first does not pay a second filesystem probe for it.
+//
+// strictResume (split_pane_req) refuses, before the tab exists, a resume
+// session that is malformed, has no transcript where the pane will run, or is
+// held by a live pane (checkResumeRequest). create_tab_req keeps its lenient
+// claim: a session it cannot have becomes a fresh one. A strict request
+// records its directory only once it has passed that check.
+func (d *Daemon) createTabIn(conn *ipc.Conn, req ipc.CreateTabReqPayload, cwd string, picked, strictResume bool) (ipc.CreateTabRespPayload, func()) {
 	first := ipc.CreatePaneReqPayload{}
 	if req.FirstPane != nil {
 		first = *req.FirstPane
@@ -357,7 +362,7 @@ func (d *Daemon) createTabIn(conn *ipc.Conn, req ipc.CreateTabReqPayload, cwd st
 	// Already resolved: an empty CWD makes buildCreatePayload take cwd as
 	// given, without probing it again.
 	first.CWD = ""
-	if picked {
+	if picked && !strictResume {
 		d.session.RecordRecentCWD(cwd)
 	}
 	name := req.Name
@@ -379,6 +384,14 @@ func (d *Daemon) createTabIn(conn *ipc.Conn, req ipc.CreateTabReqPayload, cwd st
 	// placeholder and a whole checkout for a pane that can never start.
 	if err := d.checkSandboxRequest(payload.Type, cwd, payload.Sandbox); err != nil {
 		return ipc.CreateTabRespPayload{Error: err.Error()}, nil
+	}
+	if strictResume {
+		if err := d.checkResumeRequest(payload, cwd); err != nil {
+			return ipc.CreateTabRespPayload{Error: err.Error()}, nil
+		}
+		if picked {
+			d.session.RecordRecentCWD(cwd)
+		}
 	}
 	tab := d.session.CreateTabInProject(req.ProjectID, name)
 	payload.TabID = tab.ID

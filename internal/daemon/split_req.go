@@ -5,6 +5,7 @@ import (
 	"log"
 
 	"github.com/artyomsv/quil/internal/claudesessions"
+	"github.com/artyomsv/quil/internal/gitworktree"
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/layouttree"
 )
@@ -168,8 +169,11 @@ func (d *Daemon) splitCreateReq(s ipc.SplitPaneSpec) (ipc.CreatePaneReqPayload, 
 // transcript is not there, or which a live pane already holds — before
 // anything is created. The claim itself is made after publish (buildPane).
 // A sandbox pane's transcripts live in its container config, so the host
-// transcript check is skipped for it. cwd must be the directory the pane will
-// open in, already resolved: the transcript is filed under it.
+// transcript check is skipped for it.
+//
+// Claude files a transcript under the directory it RUNS in, so the lookup uses
+// the pane's run directory (paneRunDir): cwd as resolved, or — for a new
+// worktree — the checkout, which is not where the request pointed.
 func (d *Daemon) checkResumeRequest(p ipc.CreatePanePayload, cwd string) error {
 	id := p.ResumeSessionID
 	if id == "" {
@@ -179,14 +183,28 @@ func (d *Daemon) checkResumeRequest(p ipc.CreatePanePayload, cwd string) error {
 		return fmt.Errorf("resume_session_id is not a session id")
 	}
 	if p.Sandbox == nil {
-		if exists, answered := transcriptExistsFn(claudesessions.TranscriptPath(cwd, id)); answered && !exists {
-			return fmt.Errorf("no Claude session %s in %s", id, cwd)
+		dir := paneRunDir(p, cwd)
+		if exists, answered := transcriptExistsFn(claudesessions.TranscriptPath(dir, id)); answered && !exists {
+			return fmt.Errorf("no Claude session %s in %s", id, dir)
 		}
 	}
 	if holder, busy := d.claimedClaudeSessionIDs()[id]; busy {
 		return fmt.Errorf("that Claude session is already open in pane %s", holder)
 	}
 	return nil
+}
+
+// paneRunDir is the directory a create's pane will run in. For a new worktree
+// that is the checkout: worktreeAddAndCreate creates it at
+// gitworktree.DerivePath(RepoRoot, Branch) and spawns the pane there
+// (createPaneInWorktree), so the path is known before `git worktree add` runs.
+// The root came from git's own worktree list, so it is already the resolved
+// path. split_pane_req sets no Subdir; a template's Subdir is not resolved here.
+func paneRunDir(p ipc.CreatePanePayload, cwd string) string {
+	if w := p.Worktree; w != nil && w.RepoRoot != "" && w.Branch != "" {
+		return gitworktree.DerivePath(w.RepoRoot, w.Branch)
+	}
+	return cwd
 }
 
 // checkSandboxRequest validates a sandbox spec the way buildPane will, on a
@@ -284,11 +302,11 @@ func (d *Daemon) splitIntoWorktree(payload ipc.CreatePanePayload, cwd string, sl
 	return ipc.SplitPaneRespPayload{PaneID: placeholder.ID, TabID: tabID, LayoutRev: res.LayoutRev, Preparing: true}, start
 }
 
-// splitIntoNewTab is the "new tab" placement: create_tab_req's code. The
-// resume check runs first, against the directory the pane will really open
-// in — an empty cwd is the project root, as create_tab_req resolves it —
-// because createTabIn makes the tab before its first pane is built, and
-// its resume claim is lenient.
+// splitIntoNewTab is the "new tab" placement: create_tab_req's code, with the
+// strict resume check createTabIn runs before its tab exists (the first
+// pane's own claim is lenient). The check needs the resolved payload — an
+// empty cwd is the project root, and a worktree runs in its checkout — which
+// is why it runs inside createTabIn and not here.
 func (d *Daemon) splitIntoNewTab(conn *ipc.Conn, req ipc.SplitPaneReqPayload) (ipc.SplitPaneRespPayload, func()) {
 	fail := func(err error) (ipc.SplitPaneRespPayload, func()) {
 		return ipc.SplitPaneRespPayload{Error: err.Error()}, nil
@@ -304,14 +322,11 @@ func (d *Daemon) splitIntoNewTab(conn *ipc.Conn, req ipc.SplitPaneReqPayload) (i
 	if treq.ProjectID != "" && !d.projectExists(treq.ProjectID) {
 		return fail(fmt.Errorf("no such project: %s", treq.ProjectID))
 	}
-	// Resolved once, here, and handed on: createTabIn neither probes it again
-	// nor records it before a refusal below could still come.
+	// Resolved once, here, and handed on; createTabIn does not probe it again.
 	cwd, picked := d.newTabCWD(conn, treq)
-	if err := d.checkResumeRequest(ipc.CreatePanePayload{ResumeSessionID: creq.ResumeSessionID, Sandbox: creq.Sandbox}, cwd); err != nil {
-		return fail(err)
-	}
-	// The sandbox is checked inside createTabIn, before its tab exists.
-	resp, start := d.createTabIn(conn, treq, cwd, picked)
+	// The sandbox and the resume session are checked inside createTabIn,
+	// before its tab exists.
+	resp, start := d.createTabIn(conn, treq, cwd, picked, true)
 	return ipc.SplitPaneRespPayload{PaneID: resp.PaneID, TabID: resp.TabID, LayoutRev: d.tabLayoutRev(resp.TabID),
 		Preparing: resp.PreparingWorktree != "", Error: resp.Error}, start
 }

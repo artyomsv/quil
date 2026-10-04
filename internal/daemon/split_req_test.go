@@ -885,6 +885,71 @@ func TestSplitPaneReq_WorktreeReplaceSpawnFailureIsToldOnce(t *testing.T) {
 	}
 }
 
+// A resumed pane in a NEW worktree runs in the checkout, so its transcript is
+// looked up there — not in the repository the request named. Split and new
+// tab alike: a transcript in the checkout is accepted, one only in the
+// repository is refused with the usual text, naming the checkout.
+func TestSplitPaneReq_WorktreeResumeLooksInTheCheckout(t *testing.T) {
+	d, client := mcpTestDaemon(t)
+	_, first := seedTab(t, d, client)
+	repo := worktreeRepo(t)
+	stubAdd(t, func(_ context.Context, _, path, _ string) error { return os.MkdirAll(path, 0o755) })
+	present := map[string]bool{}
+	var presentMu sync.Mutex
+	prev := transcriptExistsFn
+	transcriptExistsFn = func(p string) (bool, bool) {
+		presentMu.Lock()
+		defer presentMu.Unlock()
+		return present[p], true
+	}
+	t.Cleanup(func() { transcriptExistsFn = prev })
+	only := func(dir, id string) {
+		presentMu.Lock()
+		defer presentMu.Unlock()
+		clear(present)
+		present[claudesessions.TranscriptPath(dir, id)] = true
+	}
+	for i, mk := range []func(branch, id string) ipc.SplitPaneReqPayload{
+		func(branch, id string) ipc.SplitPaneReqPayload {
+			return ipc.SplitPaneReqPayload{TargetPaneID: first, Placement: ipc.PlacementBelow,
+				Pane: ipc.SplitPaneSpec{Type: "claude-code", CWD: repo, ResumeSessionID: id, Worktree: &ipc.SplitWorktree{Branch: branch}}}
+		},
+		func(branch, id string) ipc.SplitPaneReqPayload {
+			return ipc.SplitPaneReqPayload{Placement: ipc.PlacementNewTab,
+				Pane: ipc.SplitPaneSpec{Type: "claude-code", CWD: repo, ResumeSessionID: id, Worktree: &ipc.SplitWorktree{Branch: branch}}}
+		},
+	} {
+		arm := []string{"split", "new tab"}[i]
+		branch := []string{"feat/split", "feat/tab"}[i]
+		// One session per arm: the first arm's pane holds its session afterwards.
+		id := []string{"0f3c2a9e-1b2c-4d5e-8f90-1a2b3c4d5e6f", "1f3c2a9e-1b2c-4d5e-8f90-1a2b3c4d5e6f"}[i]
+		checkout := gitworktree.DerivePath(repo, branch)
+
+		only(repo, id)
+		tabs := len(d.session.Tabs())
+		if resp := split(t, client, mk(branch, id)); resp.PaneID != "" || !strings.Contains(resp.Error, "no Claude session "+id+" in "+checkout) {
+			t.Fatalf("%s: transcript only in the repository: %+v, want a refusal naming %s", arm, resp, checkout)
+		}
+		if n := len(d.session.Tabs()); n != tabs {
+			t.Fatalf("%s: a refused resume made a tab", arm)
+		}
+
+		only(checkout, id)
+		resp := split(t, client, mk(branch, id))
+		if resp.Error != "" || !resp.Preparing || resp.PaneID == "" {
+			t.Fatalf("%s: transcript in the checkout: %+v, want it accepted", arm, resp)
+		}
+		// Let this checkout finish before the next arm claims the slot.
+		deadline := time.Now().Add(5 * time.Second)
+		for !paneWithCWD(d, checkout) {
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: the worktree pane never arrived", arm)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+}
+
 func paneWithCWD(d *Daemon, cwd string) bool {
 	for _, p := range d.session.AllPanes() {
 		p.PluginMu.Lock()

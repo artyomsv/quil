@@ -27,6 +27,7 @@ var processClientID = uuid.NewString()
 const (
 	helloRoleTUI    = "tui"
 	helloRoleBridge = "bridge"
+	helloRoleWeb    = "web"
 )
 
 // sendClientHello tells the daemon what this process is.
@@ -90,6 +91,15 @@ func helloPayload(kind string) ipc.HelloPayload {
 		ExeName:  currentExeName(),
 		UptimeMS: time.Since(processStart).Milliseconds(),
 	}
+}
+
+// webHelloPayload is a browser tab's self-description: kind web, and the id
+// the gateway leased to that tab rather than this process's own id — each
+// tab is its own client to the daemon.
+func webHelloPayload(clientID string) ipc.HelloPayload {
+	p := helloPayload(helloRoleWeb)
+	p.ClientID = clientID
+	return p
 }
 
 // sendHello registers this conn as a protocol-1 client. Fire and forget: no

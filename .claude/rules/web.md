@@ -23,7 +23,7 @@ User guide: `docs/web.md`. Design: ADR-35 in `docs/architecture.md`. The gateway
 - **Pane output is binary frames** (`internal/webgw/frame.go` and `web/src/lib/frame.ts`). Whoever receives a frame and does not write it to a terminal must still report the bytes as processed, or the gateway's unacknowledged count never drains.
 - **The page's terminals answer no queries** (`web/src/lib/queries.ts`), as the TUI answers none: a terminal parses replayed history too, so a reply would be fresh input to the pane.
 - **Every terminal grid change is queued in the pane's write chain** (`TerminalStore.resize`), for hidden panes too, from the daemon's sizes as each state or `pane_sizes` arrives. A resize applied out of order lets output parse at the wrong size, which no later resize repairs.
-- **The shared vector files are the contract for both languages**: `internal/webgw/testdata/frame_vectors.json` (frames) and `internal/tui/testdata/layout_vectors.json` (layout). Change a vector and both test suites together.
+- **The shared vector files are the contract for both languages**: `internal/webgw/testdata/frame_vectors.json` (frames) and `internal/layouttree/testdata/layout_vectors.json` (layout). Change a vector and both test suites together.
 - **The page is embedded** from `internal/webgw/dist`. A checkout with no build serves a notice (`HasUI` is false). `dev.sh cross`, `dev.sh image` and the Dockerfile build without the page; `docs/web.md` says so.
 
 ## Working here

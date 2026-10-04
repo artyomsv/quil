@@ -20,7 +20,7 @@ type layoutVector struct {
 
 func loadLayoutVectors(t *testing.T) []layoutVector {
 	t.Helper()
-	b, err := os.ReadFile("testdata/layout_vectors.json")
+	b, err := os.ReadFile("../layouttree/testdata/layout_vectors.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,31 +32,6 @@ func loadLayoutVectors(t *testing.T) []layoutVector {
 		t.Fatal("no vectors")
 	}
 	return vs
-}
-
-// The vectors are the contract the browser's TypeScript port is tested
-// against, so the Go function must produce them exactly.
-func TestDisplayLayout_Vectors(t *testing.T) {
-	for _, v := range loadLayoutVectors(t) {
-		t.Run(v.Name, func(t *testing.T) {
-			var before []byte
-			if v.Stored != nil {
-				before, _ = json.Marshal(v.Stored)
-			}
-			got := DisplayLayout(v.Stored, v.Panes, v.TemplateLayout, v.TemplateMain)
-			if !reflect.DeepEqual(got, v.Want) {
-				g, _ := json.Marshal(got)
-				w, _ := json.Marshal(v.Want)
-				t.Fatalf("got %s\nwant %s", g, w)
-			}
-			if v.Stored != nil {
-				after, _ := json.Marshal(v.Stored)
-				if string(after) != string(before) {
-					t.Fatalf("stored tree was mutated: %s -> %s", before, after)
-				}
-			}
-		})
-	}
 }
 
 // The vectors must also be what the TUI itself builds on the same state, or

@@ -1,5 +1,7 @@
 package tui
 
+import "github.com/artyomsv/quil/internal/layouttree"
+
 // splitForNewPane preserves ordinary tab insertion. Template tabs replace
 // this temporary tree with their initial layout once the completed frame arrives.
 func splitForNewPane(tab *TabModel, leaves []*PaneModel, pane *PaneModel) {
@@ -16,47 +18,16 @@ func splitForNewPane(tab *TabModel, leaves []*PaneModel, pane *PaneModel) {
 
 // templateLayout builds only the initial tree. Pane order is preserved within
 // each region; main selects an anchor without changing creation/prompt order.
+// The shape is layouttree.Template's, so the daemon and the TUI build the same
+// tree; the leaves are the given pane models.
 func templateLayout(keyword string, panes []*PaneModel, main int) *LayoutNode {
-	if len(panes) == 0 {
-		return nil
+	ids := make([]string, len(panes))
+	byID := make(map[string]*PaneModel, len(panes))
+	for i, p := range panes {
+		ids[i] = p.ID
+		byID[p.ID] = p
 	}
-	if len(panes) == 1 {
-		return NewLeaf(panes[0])
-	}
-	if main < 0 || main >= len(panes) {
-		main = 0
-	}
-	switch keyword {
-	case "columns":
-		return templateStack(panes, SplitHorizontal)
-	case "main-left", "main-top":
-		rest := append([]*PaneModel(nil), panes[:main]...)
-		rest = append(rest, panes[main+1:]...)
-		dir, other := SplitHorizontal, SplitVertical
-		if keyword == "main-top" {
-			dir, other = SplitVertical, SplitHorizontal
-		}
-		return &LayoutNode{Split: dir, Ratio: 0.5, Left: NewLeaf(panes[main]), Right: templateStack(rest, other)}
-	case "grid":
-		// Fill the left column top-to-bottom, then the right; an odd last
-		// pane spans both columns underneath them.
-		pairs := len(panes) / 2
-		top := &LayoutNode{Split: SplitHorizontal, Ratio: 0.5,
-			Left: templateStack(panes[:pairs], SplitVertical), Right: templateStack(panes[pairs:2*pairs], SplitVertical)}
-		if len(panes)%2 == 0 {
-			return top
-		}
-		return &LayoutNode{Split: SplitVertical, Ratio: float64(pairs) / float64(pairs+1), Left: top, Right: NewLeaf(panes[len(panes)-1])}
-	default:
-		return templateStack(panes, SplitVertical)
-	}
-}
-
-func templateStack(panes []*PaneModel, dir SplitDir) *LayoutNode {
-	if len(panes) == 1 {
-		return NewLeaf(panes[0])
-	}
-	return &LayoutNode{Split: dir, Ratio: 1 / float64(len(panes)), Left: NewLeaf(panes[0]), Right: templateStack(panes[1:], dir)}
+	return DeserializeLayout(layouttree.Template(keyword, ids, main), byID)
 }
 
 // applyTemplateLayout reports whether it built the tree — the one moment a

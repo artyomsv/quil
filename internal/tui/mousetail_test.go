@@ -93,6 +93,89 @@ func TestUpdate_SplitMouseReportNeverReachesThePane(t *testing.T) {
 	}
 }
 
+// focusMoverMsg stands for any message that is not on the keeps-holding list —
+// a click, a broadcast, a notification jump. Update ignores it; the test moves
+// focus itself, the way such a message would while it is handled.
+type focusMoverMsg struct{}
+
+// TestUpdate_HeldKeysReachThePaneTheyWereTypedInto: keys held after an
+// abandoned head are delivered before a message that may move focus, so a
+// click on another pane within the hold window cannot redirect them.
+func TestUpdate_HeldKeysReachThePaneTheyWereTypedInto(t *testing.T) {
+	t.Parallel()
+	p1, p2 := NewPaneModel("p1", 1024), NewPaneModel("p2", 1024)
+	tab := NewTabModel("tab-1", "t")
+	tab.Root = &LayoutNode{Split: SplitHorizontal, Ratio: 0.5, Left: NewLeaf(p1), Right: NewLeaf(p2)}
+	tab.ActivePane = "p1"
+	pm := &Model{projects: oneProject(tab), client: &fakeSender{}, inputCh: make(chan paneInput, inputForwardBuffer)}
+
+	var m tea.Model = *pm
+	for _, msg := range decodeAsReader(t, "\x1b[<3", "42") {
+		m, _ = m.Update(msg)
+	}
+	m, _ = m.Update(focusMoverMsg{})
+	tab.ActivePane = "p2" // the focus move that message made
+	m, _ = m.Update(mouseTailExpireMsg{gen: m.(Model).mouseTail.gen})
+
+	got := ""
+	for {
+		select {
+		case in := <-pm.inputCh:
+			got += in.paneID + ":" + string(in.data) + " "
+			continue
+		default:
+		}
+		break
+	}
+	if got != "p1:4 p1:2 " {
+		t.Errorf("delivered = %q, want both keys in p1", got)
+	}
+}
+
+// TestUpdate_HeldKeysGoBeforeAPaste keeps typed order across a release: the
+// held digits reach the pane before the paste that released them.
+func TestUpdate_HeldKeysGoBeforeAPaste(t *testing.T) {
+	t.Parallel()
+	pm, _ := inputOrderTestModel(t, "p1", true)
+	var m tea.Model = *pm
+	for _, msg := range decodeAsReader(t, "\x1b[<3", "42") {
+		m, _ = m.Update(msg)
+	}
+	m, _ = m.Update(clipboardPastedMsg{text: "P", paneID: "p1"})
+	if got := drainAll(pm); got != "42P" {
+		t.Errorf("typed into pane = %q, want %q", got, "42P")
+	}
+	if guard := m.(Model).mouseTail; guard.holding() {
+		t.Error("the guard still holds keys after releasing them")
+	}
+}
+
+// TestMouseTailKeepsHolding pins which messages may land between a split
+// report's head and tail without releasing what is held.
+func TestMouseTailKeepsHolding(t *testing.T) {
+	t.Parallel()
+	keep := []tea.Msg{
+		tea.KeyPressMsg{}, uv.UnknownEvent(""), mouseTailExpireMsg{}, PaneOutputMsg{},
+		listenContinueMsg{}, spinnerTickMsg{}, sidebarTickMsg{}, resourceTickMsg{},
+		tea.MouseMotionMsg{Button: tea.MouseNone},
+	}
+	for _, msg := range keep {
+		if !mouseTailKeepsHolding(msg) {
+			t.Errorf("%T released held keys; it cannot move focus", msg)
+		}
+	}
+	release := []tea.Msg{
+		tea.MouseClickMsg{}, tea.MouseReleaseMsg{}, tea.MouseWheelMsg{},
+		tea.MouseMotionMsg{Button: tea.MouseLeft}, tea.PasteMsg{}, WorkspaceStateMsg{},
+		clipboardPastedMsg{}, focusMoverMsg{},
+	}
+	for _, msg := range release {
+		if mouseTailKeepsHolding(msg) {
+			t.Errorf("%T kept keys held; it may move focus", msg)
+		}
+	}
+}
+
 var key5 = tea.KeyPressMsg{Code: '5', Text: "5"}
 
 // TestMouseTailGuard_LateKeyReleasesWhatIsHeld pins the time bound: past the

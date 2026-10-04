@@ -98,6 +98,32 @@ func (g *mouseTailGuard) expire(gen uint64) []tea.KeyPressMsg {
 	return g.reset()
 }
 
+// holding reports whether keys are waiting on the armed report.
+func (g *mouseTailGuard) holding() bool { return len(g.held) > 0 }
+
+// mouseTailKeepsHolding lists the messages that may arrive while keys are held
+// without the keys being released first. Held keys are delivered by replaying
+// them through Update, so they go wherever input is focused at REPLAY time;
+// any message that could move that focus — a click, a paste, a workspace
+// broadcast switching tabs, a notification jump — must therefore see them
+// delivered first, as if they had never been held. Only messages that cannot
+// move focus are listed: the guard's own three, timer ticks, pane output, and
+// buttonless motion (sidebar hover). Everything else releases, so a new
+// message type is safe by default. The listed ones are what can land between
+// a split report's head and its tail without breaking the tail apart.
+func mouseTailKeepsHolding(msg tea.Msg) bool {
+	switch msg := msg.(type) {
+	case tea.KeyPressMsg, uv.UnknownEvent, mouseTailExpireMsg:
+		return true
+	case PaneOutputMsg, listenContinueMsg, spinnerTickMsg, workSpinnerTickMsg,
+		sidebarTickMsg, notesTickMsg, resourceTickMsg, sizePollMsg, resizeTickMsg:
+		return true
+	case tea.MouseMotionMsg:
+		return msg.Button == tea.MouseNone
+	}
+	return false
+}
+
 // reset disarms the guard and returns what it was holding.
 func (g *mouseTailGuard) reset() []tea.KeyPressMsg {
 	held := g.held

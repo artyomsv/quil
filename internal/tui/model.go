@@ -1736,6 +1736,22 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 	// user input — they must not ack a pane or reach a PTY. A held or dropped
 	// key returns before the prologue and mutates nothing, so the frame cannot
 	// have moved; released keys replay through Update and render as usual.
+	//
+	// Held keys are delivered BEFORE any message that could move input focus
+	// (see mouseTailKeepsHolding), so they reach the pane they were typed
+	// into. The message is then handled as normal; its own branch may mark
+	// the frame inert, so the defer re-arms rendering for the replayed keys.
+	if m.mouseTail.holding() && !mouseTailKeepsHolding(msg) {
+		var replayCmd tea.Cmd
+		m, replayCmd = m.replayKeys(m.mouseTail.reset())
+		defer func() {
+			if mm, ok := retModel.(Model); ok {
+				mm.skipRender = false
+				retModel = mm
+			}
+			retCmd = tea.Batch(replayCmd, retCmd)
+		}()
+	}
 	switch ev := msg.(type) {
 	case uv.UnknownEvent:
 		// Keys held for an earlier head go first, while the guard is disarmed,

@@ -6,8 +6,12 @@ const BUSY_PANES = 20;
 const HEAP_LIMIT = 400 * 1024 * 1024;
 const TASK_LIMIT_S = 2.5;
 const IDLE_MS = 5_000;
+// Logged for every window, so a failure says where the main thread went.
+const DURATIONS = ['TaskDuration', 'ScriptDuration', 'LayoutDuration', 'RecalcStyleDuration'];
 
-test.use({ viewport: { width: 1600, height: 1000 } });
+// A trace records screenshots and snapshots in the page, which is main-thread
+// work of its own; this test measures the page alone.
+test.use({ viewport: { width: 1600, height: 1000 }, trace: 'off' });
 
 test('70 panes stay within the memory and main-thread budget', async ({ page, quil }) => {
   test.setTimeout(300_000);
@@ -29,22 +33,33 @@ test('70 panes stay within the memory and main-thread budget', async ({ page, qu
     for (const id of t.panes) await expect.poll(() => bufferText(page, id)).not.toBe('');
   }
 
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send('Performance.enable');
+  const snapshot = async (): Promise<Map<string, number>> => {
+    const { metrics } = await cdp.send('Performance.getMetrics');
+    return new Map(metrics.map((m) => [m.name, m.value]));
+  };
+  // idle waits IDLE_MS and returns how much each metric grew meanwhile, and
+  // the values at its end.
+  const idle = async (label: string) => {
+    const before = await snapshot();
+    await page.waitForTimeout(IDLE_MS);
+    const after = await snapshot();
+    const delta = (n: string): number => (after.get(n) ?? Number.NaN) - (before.get(n) ?? Number.NaN);
+    const parts = DURATIONS.map((n) => `${n} ${delta(n).toFixed(3)} s`);
+    const heap = after.get('JSHeapUsedSize') ?? Number.NaN;
+    console.log(`scale ${label}: JSHeapUsedSize ${(heap / 1024 / 1024).toFixed(1)} MB, over ${IDLE_MS} ms: ${parts.join(', ')}`);
+    return { heap, task: delta('TaskDuration') };
+  };
+
+  await idle('quiet');
+
   // The last tab stays in view; the busy panes are all in hidden tabs.
   const busy = tabs.slice(0, -1).flatMap((t) => t.panes).slice(0, BUSY_PANES);
   expect(busy).toHaveLength(BUSY_PANES);
   for (const id of busy) await typeInto(quil.home, id, 'while true; do echo x; sleep 0.5; done\r');
 
-  const cdp = await page.context().newCDPSession(page);
-  await cdp.send('Performance.enable');
-  const metric = async (name: string): Promise<number> => {
-    const { metrics } = await cdp.send('Performance.getMetrics');
-    return metrics.find((m) => m.name === name)?.value ?? Number.NaN;
-  };
-  const taskBefore = await metric('TaskDuration');
-  await page.waitForTimeout(IDLE_MS);
-  const taskDelta = (await metric('TaskDuration')) - taskBefore;
-  const heap = await metric('JSHeapUsedSize');
-  console.log(`scale: JSHeapUsedSize ${(heap / 1024 / 1024).toFixed(1)} MB, TaskDuration over ${IDLE_MS} ms ${taskDelta.toFixed(3)} s`);
+  const { heap, task } = await idle('busy');
   expect(heap).toBeLessThan(HEAP_LIMIT);
-  expect(taskDelta).toBeLessThan(TASK_LIMIT_S);
+  expect(task).toBeLessThan(TASK_LIMIT_S);
 });

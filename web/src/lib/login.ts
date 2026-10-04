@@ -51,6 +51,18 @@ export async function postLogin(fetchFn: FetchLike, code: string): Promise<Login
   }
 }
 
+// sessionGone is true only when the server answered that it does not know
+// this browser's session (401). No answer, or any other one, is false: an
+// unreachable server is not a reason to log out.
+export async function sessionGone(fetchFn: FetchLike): Promise<boolean> {
+  try {
+    const res = await fetchFn('/session', { method: 'GET', credentials: 'same-origin' });
+    return res.status === 401;
+  } catch {
+    return false;
+  }
+}
+
 // hasSession asks whether the session cookie is still live on the server: 204
 // yes, anything else (or no answer) no.
 export async function hasSession(fetchFn: FetchLike): Promise<boolean> {

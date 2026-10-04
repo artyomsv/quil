@@ -2,7 +2,7 @@ import { AgentStatePoller } from './agentstate';
 import { bannerFor, type BannerState, isLoginRequired } from './banner';
 import { type AttachSizes, type Clock, Connection, type SocketLike } from './connection';
 import { type QuilTestHook, shouldRegisterE2EHook } from './e2ehook';
-import { type FetchLike, hasSession, postLogin } from './login';
+import { type FetchLike, hasSession, postLogin, sessionGone } from './login';
 import type { Message, PaneInfo, PaneSize, WebWelcome, WorkspaceState } from './protocol';
 import { cellFromProbe, DaemonSizes, fitFontSize, gridFor, isFollower, Sizer, windowCells } from './sizing';
 import { StateRev } from './staterev';
@@ -100,6 +100,10 @@ export class App {
   private readonly xterms = new Map<string, XtermPane>();
   private readonly fonts = new Map<string, number>();
   private readonly shown = new Map<string, Shown>();
+  // Panes whose grid this tab set from their box at the last layout, as a
+  // size master: the daemon is about to apply that grid, so an older size in
+  // a frame that crosses the resize does not overwrite it.
+  private laidOut = new Set<string>();
   private area = { w: 0, h: 0 };
   private win = { cols: 0, rows: 0 };
   // Pixels per cell at BASE_FONT: from the offscreen probe, and from a drawn
@@ -141,10 +145,13 @@ export class App {
         onClosed: (code, reason, retrying) => this.onClosed(code, reason, retrying),
       },
       () => this.attachSizes(),
+      Math.random,
+      () => sessionGone(this.fetchFn),
     );
     if (shouldRegisterE2EHook(import.meta.env)) {
       const hook: QuilTestHook = {
         bufferText: (id) => this.xterms.get(id)?.text() ?? '',
+        screenLine: (id, row) => this.xterms.get(id)?.screenLine(row) ?? '',
         clientId: () => this.welcome?.client_id ?? '',
       };
       (window as unknown as { __quilTest?: QuilTestHook }).__quilTest = hook;
@@ -265,6 +272,7 @@ export class App {
         const panes = (m.payload as { panes?: unknown } | null)?.panes;
         if (!Array.isArray(panes)) return;
         this.daemonSizes.fromPaneSizes(panes as PaneSize[]);
+        this.applyDaemonGrids();
         this.scheduleLayout();
         return;
       }
@@ -312,10 +320,12 @@ export class App {
       this.xterms.delete(id);
       this.fonts.delete(id);
       this.shown.delete(id);
+      this.laidOut.delete(id);
     }
     this.terminals.stateApplied(verdict === 'apply-new-run');
     this.fresh = true;
     this.state = s;
+    this.applyDaemonGrids();
     // A pane that this state does not place (an overlay, another tab) will
     // not be shown, so a focus waiting for it is dropped.
     if (this.focusPending !== '' && !placedPanes(s).some((p) => p.id === this.focusPending)) {
@@ -323,6 +333,23 @@ export class App {
     }
     this.poller.stateApplied();
     this.scheduleLayout();
+  }
+
+  // applyDaemonGrids gives every terminal, shown or not, the grid the daemon
+  // holds for its pane. It runs as each state or pane_sizes is handled, so
+  // the resize is queued behind the output before it and ahead of the output
+  // after it: a hidden pane parses cursor moves at its real size, which no
+  // later resize could repair. A size master's own panes keep the grid its
+  // last layout gave them; the daemon is applying that one.
+  private applyDaemonGrids(): void {
+    const s = this.state;
+    const w = this.welcome;
+    const follower = !s || !w || isFollower(s.size_master, w.client_id, this.readOnly);
+    for (const id of this.xterms.keys()) {
+      if (!follower && this.laidOut.has(id)) continue;
+      const g = this.daemonSizes.get(id);
+      if (g) this.terminals.resize(id, g.cols, g.rows);
+    }
   }
 
   // resetLink runs on every reconnect: the socket that comes next starts with
@@ -333,6 +360,7 @@ export class App {
     this.stateRev.forget();
     this.terminals.reconnecting();
     this.poller.stop();
+    this.laidOut.clear();
     this.fresh = false;
   }
 
@@ -372,6 +400,7 @@ export class App {
   // fits the font to the box, or draws at the box size at the base font while
   // the daemon has no size yet, and sends nothing. A confirmed master lays out
   // at the base font and sends the grids in one batch through the Sizer.
+  // Every grid change goes through the TerminalStore, in order with output.
   private layout(): void {
     const cell = this.cellSize();
     // The window in cells needs only the pane area and a cell, so attach can
@@ -382,12 +411,13 @@ export class App {
     if (!s || !w) return;
     const follower = isFollower(s.size_master, w.client_id, this.readOnly);
     const visible = new Map<string, { cols: number; rows: number }>();
+    const laidOut = new Set<string>();
     for (const [id, sh] of this.shown) {
       const x = this.xterms.get(id);
       if (!x || sh.w <= 0 || sh.h <= 0) continue;
       const grid = follower ? this.daemonSizes.get(id) : undefined;
       if (grid) {
-        x.resize(grid.cols, grid.rows);
+        this.terminals.resize(id, grid.cols, grid.rows);
         const px = cell
           ? fitFontSize(grid.cols, grid.rows, sh.w, sh.h, cell.w / BASE_FONT, cell.h / BASE_FONT)
           : BASE_FONT;
@@ -397,9 +427,15 @@ export class App {
       this.setFont(id, x, BASE_FONT);
       if (!cell) continue;
       const g = gridFor(sh.w, sh.h, cell.w, cell.h);
-      x.resize(g.cols, g.rows);
-      if (!follower) visible.set(id, g);
+      this.terminals.resize(id, g.cols, g.rows);
+      if (!follower) {
+        visible.set(id, g);
+        laidOut.add(id);
+      }
     }
+    this.laidOut = laidOut;
+    // A pane this tab no longer lays out takes the daemon's grid again.
+    this.applyDaemonGrids();
     if (!this.measured && this.shown.size > 0 && this.cellRetries < CELL_RETRIES && this.retryTimer === undefined) {
       this.cellRetries++;
       this.retryTimer = window.setTimeout(() => {

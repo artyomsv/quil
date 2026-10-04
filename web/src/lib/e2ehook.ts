@@ -5,6 +5,9 @@ export interface QuilTestHook {
   // The pane's terminal buffer as text, trailing blank lines removed; ''
   // for a pane the page does not hold.
   bufferText(paneId: string): string;
+  // One row of the pane's screen (0 is the top), trailing blanks removed;
+  // '' for a pane the page does not hold.
+  screenLine(paneId: string, row: number): string;
   // The client id the gateway leased to this tab; '' before the welcome.
   clientId(): string;
 }

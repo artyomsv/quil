@@ -7,6 +7,7 @@ import {
   LOGIN_UNREACHABLE,
   LOGIN_WRONG_CODE,
   postLogin,
+  sessionGone,
 } from './login';
 
 interface Call {
@@ -84,5 +85,22 @@ describe('hasSession', () => {
       throw new TypeError('network');
     };
     expect(await hasSession(fetchFn)).toBe(false);
+  });
+});
+
+describe('sessionGone', () => {
+  it('is true only for 401', async () => {
+    const gone = fakeFetch(401);
+    expect(await sessionGone(gone.fetchFn)).toBe(true);
+    expect(gone.calls[0]?.url).toBe('/session');
+    expect(gone.calls[0]?.init.credentials).toBe('same-origin');
+    for (const status of [204, 200, 403, 500, 503]) expect(await sessionGone(fakeFetch(status).fetchFn)).toBe(false);
+  });
+
+  it('is false when fetch throws (the server is unreachable)', async () => {
+    const fetchFn: FetchLike = async () => {
+      throw new TypeError('network');
+    };
+    expect(await sessionGone(fetchFn)).toBe(false);
   });
 });

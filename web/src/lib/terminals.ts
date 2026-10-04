@@ -22,6 +22,11 @@ interface Slot {
   chain: Promise<void>;
   disposed: boolean;
   pending: Set<Pending>;
+  // The grid last queued by resize(); undefined until the first.
+  size: { cols: number; rows: number } | undefined;
+  // Set by the reset that follows a reconnect: the pane's first replayed
+  // frame resets the terminal again, see stateApplied.
+  awaitReplay: boolean;
 }
 
 // TerminalStore keeps one terminal per pane for the pane's whole life,
@@ -67,6 +72,8 @@ export class TerminalStore {
           chain: Promise.resolve(),
           disposed: false,
           pending: new Set(),
+          size: undefined,
+          awaitReplay: false,
         });
       }
     }
@@ -98,6 +105,10 @@ export class TerminalStore {
       return;
     }
     let reset = false;
+    if (f.ghost && slot.awaitReplay) {
+      slot.awaitReplay = false;
+      reset = true;
+    }
     if (f.generation !== 0n) {
       if (slot.generation === 0n) {
         slot.generation = f.generation;
@@ -134,6 +145,20 @@ export class TerminalStore {
     });
   }
 
+  // resize queues a grid change behind the pane's earlier writes, so bytes
+  // that arrived before it are parsed at the old size and every later one at
+  // the new size, whether or not the terminal is shown. Repeating the queued
+  // size queues nothing.
+  resize(paneId: string, cols: number, rows: number): void {
+    const slot = this.slots.get(paneId);
+    if (!slot || cols < 1 || rows < 1) return;
+    if (slot.size && slot.size.cols === cols && slot.size.rows === rows) return;
+    slot.size = { cols, rows };
+    this.enqueue(slot, async () => {
+      if (!slot.disposed) slot.term.resize(cols, rows);
+    });
+  }
+
   // enqueue appends a step to the pane's chain. The chain never stays
   // rejected, or every later step would be skipped.
   private enqueue(slot: Slot, step: () => Promise<void>): void {
@@ -149,11 +174,18 @@ export class TerminalStore {
   // stateApplied runs for each workspace_state. The first one after a
   // reconnect, or one that starts a new daemon run, resets every terminal and
   // forgets the generations, because the daemon replays history after it.
+  //
+  // That first state is not always the attach's own: a broadcast can arrive
+  // between the daemon's answer to hello and its handling of attach, and live
+  // output can follow it before the attach's replay. The replay holds that
+  // output too, so each pane's first replayed frame resets its terminal
+  // again. A pane the daemon replays nothing for keeps this reset alone.
   stateApplied(newRun: boolean): void {
     if (!this.ignoring && !newRun) return;
     this.ignoring = false;
     for (const slot of this.slots.values()) {
       slot.generation = 0n;
+      slot.awaitReplay = true;
       this.enqueue(slot, async () => {
         if (!slot.disposed) slot.term.reset();
       });

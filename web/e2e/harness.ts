@@ -218,6 +218,8 @@ export async function listPanes(home: string): Promise<PaneListing[]> {
 export interface FakeTUI {
   // The newest workspace_state payload received, or undefined before one.
   state(): { size_master?: string } | undefined;
+  // Sends a message on the TUI's own connection (resize_panes as master).
+  send(m: Message): void;
   close(): void;
 }
 
@@ -233,11 +235,16 @@ export async function fakeTUI(home: string, clientId: string): Promise<FakeTUI> 
   const first = c.next((m) => m.type === 'workspace_state');
   c.send({ type: 'attach', payload: { cols: 80, rows: 24, win_cols: 80, win_rows: 24, client_id: clientId } });
   await first;
-  return { state: () => latest, close: () => c.close() };
+  return { state: () => latest, send: (m) => c.send(m), close: () => c.close() };
+}
+
+// stopDaemon stops the daemon behind quil web; quil web keeps running.
+export function stopDaemon(home: string): void {
+  spawnSync(QUIL, ['daemon', 'stop'], { cwd: ROOT, env: { ...process.env, QUIL_HOME: home }, timeout: 15_000 });
 }
 
 interface TestHookWindow {
-  __quilTest?: { bufferText(paneId: string): string; clientId(): string };
+  __quilTest?: { bufferText(paneId: string): string; screenLine(paneId: string, row: number): string; clientId(): string };
   __quilCSP?: (v: string) => void;
 }
 
@@ -245,6 +252,14 @@ interface TestHookWindow {
 // VITE_QUIL_E2E=1 build registers.
 export function bufferText(page: Page, paneId: string): Promise<string> {
   return page.evaluate((id) => (window as unknown as TestHookWindow).__quilTest?.bufferText(id) ?? '', paneId);
+}
+
+// screenLine is one row of the pane's screen in the page (0 is the top).
+export function screenLine(page: Page, paneId: string, row: number): Promise<string> {
+  return page.evaluate(
+    ([id, r]) => (window as unknown as TestHookWindow).__quilTest?.screenLine(id, r) ?? '',
+    [paneId, row] as [string, number],
+  );
 }
 
 export async function clientId(page: Page): Promise<string> {

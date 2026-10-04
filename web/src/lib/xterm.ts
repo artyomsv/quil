@@ -1,6 +1,7 @@
 import { Terminal } from '@xterm/xterm';
 import { WebglAddon } from '@xterm/addon-webgl';
 import '@xterm/xterm/css/xterm.css';
+import { swallowQueries } from './queries';
 import type { TermLike } from './terminals';
 
 // The font size a terminal starts at, and the one a size master lays out at.
@@ -21,6 +22,9 @@ export interface XtermPane extends TermLike {
   focus(): void;
   // The buffer as text, trailing blank lines removed (the end-to-end hook).
   text(): string;
+  // One row of the screen (0 is the top), trailing blanks removed (the
+  // end-to-end hook).
+  screenLine(row: number): string;
 }
 
 // createXtermPane makes the terminal un-opened: writes before open() fill its
@@ -36,6 +40,7 @@ export function createXtermPane(_paneId: string): XtermPane {
     fontFamily: FONT_FAMILY,
     cursorBlink: false,
   });
+  swallowQueries(term.parser);
   let host: HTMLElement | null = null;
   let webgl: WebglAddon | null = null;
   let dataSub: { dispose(): void } | null = null;
@@ -109,6 +114,11 @@ export function createXtermPane(_paneId: string): XtermPane {
       const lines: string[] = [];
       for (let i = 0; i < buf.length; i++) lines.push(buf.getLine(i)?.translateToString(true) ?? '');
       return lines.join('\n').trimEnd();
+    },
+    screenLine(row) {
+      if (disposed) return '';
+      const buf = term.buffer.active;
+      return buf.getLine(buf.baseY + row)?.translateToString(true) ?? '';
     },
   };
 }

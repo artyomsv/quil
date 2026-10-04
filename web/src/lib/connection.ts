@@ -77,6 +77,9 @@ export class Connection {
   // A workspace_state is passed on only after the answer: see onFrame.
   private helloId = '';
   private helloAnswered = false;
+  // Counts start() calls, so a session check from before a new login acts
+  // on nothing.
+  private starts = 0;
 
   constructor(
     private readonly open: () => SocketLike,
@@ -85,12 +88,16 @@ export class Connection {
     private readonly events: ConnectionEvents,
     private readonly sizes: () => AttachSizes,
     private readonly random: () => number = Math.random,
+    // Asked after a socket closed without ever opening: true when the server
+    // no longer knows the session (see onSocketClosed).
+    private readonly sessionGone: () => Promise<boolean> = async () => false,
   ) {
     this.storage = storage instanceof SafeStorage ? storage : new SafeStorage(storage);
   }
 
   start(): void {
     this.stopped = false;
+    this.starts++;
     this.connect();
   }
 
@@ -182,9 +189,10 @@ export class Connection {
     };
     s.onclose = (ev) => {
       if (this.socket !== s) return;
+      const wasOpen = this.opened;
       this.socket = null;
       this.opened = false;
-      this.onSocketClosed(ev.code, ev.reason);
+      this.onSocketClosed(ev.code, ev.reason, wasOpen);
     };
   }
 
@@ -263,7 +271,7 @@ export class Connection {
     this.events.onWelcome(w);
   }
 
-  private onSocketClosed(code: number, reason: string): void {
+  private onSocketClosed(code: number, reason: string, wasOpen: boolean): void {
     // Acks belong to the connection that carried the bytes; a new one starts
     // its count at zero.
     this.unacked = 0;
@@ -298,7 +306,34 @@ export class Connection {
         this.events.onReconnecting();
         this.events.onClosed(code, reason, true);
         this.scheduleReconnect();
+        if (!wasOpen) this.recheckSession();
     }
+  }
+
+  // recheckSession runs when a socket closed before it opened. A browser
+  // reports a refused handshake only as 1006, the same as an unreachable
+  // server, and the gateway refuses with 401 once it no longer knows the
+  // cookie (it restarted, or the cookie was cleared). So /session is asked
+  // while the back-off runs: a confirmed unknown session clears the key and
+  // ends like a "login required" close; anything else keeps retrying.
+  private recheckSession(): void {
+    const starts = this.starts;
+    void this.sessionGone().then((gone) => {
+      // A socket that opened since then has a session after all.
+      if (!gone || this.stopped || this.opened || starts !== this.starts) return;
+      if (this.reconnectTimer !== null) {
+        this.clock.clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = null;
+      }
+      const s = this.socket;
+      this.socket = null;
+      if (s) {
+        s.onopen = s.onmessage = s.onclose = null;
+        s.close();
+      }
+      this.storage.removeItem(LOGIN_KEY);
+      this.events.onClosed(1008, 'login required', false);
+    });
   }
 
   private scheduleReconnect(): void {

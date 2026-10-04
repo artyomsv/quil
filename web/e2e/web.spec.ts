@@ -9,6 +9,8 @@ import {
   listPanes,
   login,
   readPaneOutput,
+  screenLine,
+  stopDaemon,
   tabButton,
   test,
   typeInto,
@@ -76,6 +78,41 @@ test('a hidden tab keeps its history and shows it on first view', async ({ page,
       return text !== '' && text.includes('marker-123');
     })
     .toBe(true);
+});
+
+test('a hidden pane parses cursor moves at the daemon size', async ({ page, quil }) => {
+  const tui = await fakeTUI(quil.home, 'e2e-fake-tui');
+  try {
+    await expect.poll(() => tui.state()?.size_master).toBe('e2e-fake-tui');
+    await login(page, quil);
+    const { paneId } = await createTab(quil.home, 'second', 'hidden-pane');
+    await expect(tabButton(page, 'second')).toBeVisible();
+    // The master sizes the pane past the default 80x24; the page follows.
+    tui.send({ type: 'resize_panes', payload: { panes: [{ pane_id: paneId, cols: 120, rows: 40 }] } });
+    await typeInto(quil.home, paneId, 'stty size\r');
+    await expect.poll(() => readPaneOutput(quil.home, paneId)).toContain('40 120');
+    // Row 35, column 100: outside an 80x24 grid, which would clamp it.
+    await typeInto(quil.home, paneId, "printf '\\033[35;100Hmark-%d\\n' $((40+2))\r");
+    await expect.poll(() => readPaneOutput(quil.home, paneId)).toContain('mark-42');
+    const at = async (): Promise<number> => (await screenLine(page, paneId, 34)).indexOf('mark-42');
+    await expect.poll(at).toBe(99);
+
+    await tabButton(page, 'second').click();
+    await expect(page.locator('.pane .title', { hasText: 'hidden-pane' })).toBeVisible();
+    await page.waitForTimeout(500);
+    expect(await at()).toBe(99);
+  } finally {
+    tui.close();
+  }
+});
+
+test('a lost session during a reconnect shows the login form', async ({ page, quil }) => {
+  await login(page, quil);
+  // The gateway forgets nothing here; the browser loses its cookie, so the
+  // next handshake is refused with 401, which the page sees only as 1006.
+  await page.context().clearCookies();
+  stopDaemon(quil.home);
+  await expect(page.locator('#code')).toBeVisible({ timeout: 30_000 });
 });
 
 test('typing in the page reaches the pane', async ({ page, quil }) => {

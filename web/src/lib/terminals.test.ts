@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { PaneOutputFrame } from './protocol';
 import { TerminalStore, type TermLike } from './terminals';
 
-type Op = ['write', string] | ['reset'];
+type Op = ['write', string] | ['reset'] | ['resize', number, number];
 
 class FakeTerm implements TermLike {
   ops: Op[] = [];
@@ -21,7 +21,9 @@ class FakeTerm implements TermLike {
   reset(): void {
     this.ops.push(['reset']);
   }
-  resize(): void {}
+  resize(cols: number, rows: number): void {
+    this.ops.push(['resize', cols, rows]);
+  }
   dispose(): void {
     this.disposed = true;
   }
@@ -233,5 +235,74 @@ describe('TerminalStore', () => {
     setEpoch(2);
     term.held!.shift()!();
     expect(acks).toEqual([[4, 1]]);
+  });
+
+  it('resizes a hidden terminal after the bytes before it and before the bytes after it', async () => {
+    const { store, term } = setup();
+    term.held = [];
+    store.output(frame('p1', 'before', 1n));
+    store.resize('p1', 120, 40);
+    store.output(frame('p1', '\x1b[35;100Hmark', 1n));
+    await flush();
+    // The first write has not finished parsing: the resize waits for it.
+    expect(term.ops).toEqual([['write', 'before']]);
+    term.held.shift()!();
+    await flush();
+    expect(term.ops).toEqual([['write', 'before'], ['resize', 120, 40], ['write', '\x1b[35;100Hmark']]);
+  });
+
+  it('queues a size once and skips a repeat of it', async () => {
+    const { store, term } = setup();
+    store.resize('p1', 120, 40);
+    store.resize('p1', 120, 40);
+    store.resize('p1', 0, 40);
+    store.resize('nope', 120, 40);
+    store.resize('p1', 100, 30);
+    await flush();
+    expect(term.ops).toEqual([['resize', 120, 40], ['resize', 100, 30]]);
+  });
+
+  it('wipes live output from the reconnect gap at the first replayed frame', async () => {
+    const { store, term, acks } = setup();
+    store.output(frame('p1', 'old', 3n));
+    await flush();
+    store.reconnecting();
+    // A broadcast state arrives before the attach's own one, then live output.
+    store.stateApplied(false);
+    store.output(frame('p1', 'gap', 3n));
+    // The attach's state, its replay in two chunks, then held live output.
+    store.stateApplied(false);
+    store.output(frame('p1', 'hist', 0n, true));
+    store.output(frame('p1', 'ory', 0n, true));
+    store.output(frame('p1', 'next', 3n));
+    await flush();
+    expect(term.ops).toEqual([
+      ['write', 'old'],
+      ['reset'],
+      ['write', 'gap'],
+      ['reset'],
+      ['write', 'hist'],
+      ['write', 'ory'],
+      ['write', 'next'],
+    ]);
+    // Every byte is acknowledged, the wiped ones included.
+    expect(acks.reduce((n, [b]) => n + b, 0)).toBe(3 + 3 + 4 + 3 + 4);
+  });
+
+  it('keeps the state-time reset alone for a pane with no replay', async () => {
+    const { store, term } = setup();
+    store.reconnecting();
+    store.stateApplied(false);
+    store.output(frame('p1', 'live', 2n));
+    await flush();
+    expect(term.ops).toEqual([['reset'], ['write', 'live']]);
+  });
+
+  it('does not reset for a replay outside a reconnect', async () => {
+    const { store, term } = setup();
+    store.output(frame('p1', 'a', 0n, true));
+    store.output(frame('p1', 'b', 0n, true));
+    await flush();
+    expect(term.ops).toEqual([['write', 'a'], ['write', 'b']]);
   });
 });

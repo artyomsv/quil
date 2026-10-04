@@ -77,7 +77,7 @@ interface Rig {
   closed: Array<[number, string, boolean]>;
 }
 
-function rig(random: () => number = () => 0.5): Rig {
+function rig(random: () => number = () => 0.5, sessionGone: () => Promise<boolean> = async () => false): Rig {
   const r = { sockets: [], welcomes: 0, messages: [], outputs: [], reconnecting: 0, closed: [] } as unknown as Rig;
   r.storage = new FakeStorage();
   r.clock = new FakeClock();
@@ -99,9 +99,13 @@ function rig(random: () => number = () => 0.5): Rig {
     events,
     () => ({ cols: 80, rows: 24, winCols: 100, winRows: 30 }),
     random, // default 0.5 means no jitter
+    sessionGone,
   );
   return r;
 }
+
+// settle lets pending promise callbacks (a session check's answer) run.
+const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
 
 const welcome: Message = { type: 'web_welcome', payload: { client_id: 'c-1', rights: 'full', version: '1.2.3' } };
 
@@ -284,6 +288,66 @@ describe('Connection', () => {
     expect(r.storage.getItem('quil.web.key')).toBeNull();
     expect(r.sockets).toHaveLength(1);
     expect(r.closed).toEqual([[1008, 'login required', false]]);
+  });
+
+  it('after a refused handshake with the session gone, clears the key and shows the login', async () => {
+    let checks = 0;
+    const r = rig(undefined, async () => {
+      checks++;
+      return true;
+    });
+    r.storage.setItem('quil.web.key', 'k-1');
+    r.conn.start();
+    // A 401 at the upgrade reaches the page as 1006 with no open before it.
+    r.sockets[0]!.closeWith(1006);
+    await settle();
+    expect(checks).toBe(1);
+    expect(r.storage.getItem('quil.web.key')).toBeNull();
+    expect(r.closed[r.closed.length - 1]).toEqual([1008, 'login required', false]);
+    r.clock.advance(60_000);
+    expect(r.sockets).toHaveLength(1);
+  });
+
+  it('after a refused handshake with the session live or unknown, keeps retrying', async () => {
+    const r = rig(undefined, async () => false);
+    r.storage.setItem('quil.web.key', 'k-1');
+    r.conn.start();
+    r.sockets[0]!.closeWith(1006);
+    await settle();
+    expect(r.storage.getItem('quil.web.key')).toBe('k-1');
+    expect(r.closed).toEqual([[1006, '', true]]);
+    r.clock.advance(1000);
+    expect(r.sockets).toHaveLength(2);
+  });
+
+  it('does not ask for the session when an open socket drops', async () => {
+    let checks = 0;
+    const r = rig(undefined, async () => {
+      checks++;
+      return true;
+    });
+    const s = opened(r);
+    s.closeWith(1006);
+    await settle();
+    expect(checks).toBe(0);
+    r.clock.advance(1000);
+    expect(r.sockets).toHaveLength(2);
+  });
+
+  it('ignores a session answer that comes back after a new login', async () => {
+    let answer: (gone: boolean) => void = () => {};
+    const r = rig(undefined, () => new Promise<boolean>((resolve) => (answer = resolve)));
+    r.conn.start();
+    r.sockets[0]!.closeWith(1006);
+    r.conn.stop();
+    r.storage.setItem('quil.web.key', 'k-2');
+    // The new login's socket is still connecting when the old answer lands.
+    r.conn.start();
+    answer(true);
+    await settle();
+    expect(r.storage.getItem('quil.web.key')).toBe('k-2');
+    expect(r.closed).toEqual([[1006, '', true]]);
+    expect(r.sockets[1]!.onclose).not.toBeNull();
   });
 
   it('drops pending acknowledgements when the socket closes', () => {

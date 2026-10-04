@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -25,10 +26,20 @@ const (
 )
 
 // keyDraft is the page's unsaved selection. prefix "" means "the preset's own".
+//
+// overrides and timeout are the FILE's, read when the page opens and after a
+// save, because Save re-reads the file: the conflict preview must describe what
+// Save will apply, not what was loaded at launch.
 type keyDraft struct {
-	preset string
-	prefix string
+	preset    string
+	prefix    string
+	overrides map[keymap.ActionID]string
+	timeout   time.Duration
 }
+
+// maxKeyConflictLines caps the preview so a many-conflict file cannot push the
+// Save row off a short terminal.
+const maxKeyConflictLines = 6
 
 // keysSavedMsg carries the result of the disk write back to Update, which is
 // the only place the keymap may change.
@@ -48,11 +59,18 @@ func presetUsesPrefix(name string) bool {
 }
 
 func (m Model) openKeySettings() (tea.Model, tea.Cmd) {
-	preset := m.bindings.Preset
-	if preset == "" {
-		preset = keymap.DefaultPresetName
+	// The draft starts from what is LIVE: an unknown preset name in the file
+	// fell back to the default, and Save must not write the bad name back.
+	b := m.bindings
+	if disk, err := config.LoadBindings(); err == nil {
+		b = disk
 	}
-	m.keyDraft = keyDraft{preset: preset, prefix: m.bindings.Prefix}
+	m.keyDraft = keyDraft{
+		preset:    keymap.FromSettings(m.bindings.Settings()).Preset,
+		prefix:    m.bindings.Prefix,
+		overrides: b.Overrides,
+		timeout:   b.SequenceTimeout,
+	}
 	m.keyStatus = ""
 	m.dialog = dialogKeySettings
 	m.dialogCursor = keysRowPreset
@@ -82,7 +100,13 @@ func saveKeysCmd(d keyDraft) tea.Cmd {
 		if err != nil {
 			return keysSavedMsg{err: fmt.Errorf("bindings.toml is unreadable, not saved: %w", err)}
 		}
-		b.Preset, b.Prefix = d.preset, d.prefix
+		// A preset that writes no ${prefix} has nothing to hold one; a stale
+		// prefix would silently come back with the next tmux switch.
+		prefix := d.prefix
+		if !presetUsesPrefix(d.preset) {
+			prefix = ""
+		}
+		b.Preset, b.Prefix = d.preset, prefix
 		if err := config.WriteBindings(b); err != nil {
 			return keysSavedMsg{err: fmt.Errorf("not saved: %w", err)}
 		}
@@ -97,6 +121,9 @@ func (m Model) applyKeysSaved(msg keysSavedMsg) (tea.Model, tea.Cmd) {
 	}
 	m.cancelSequence()
 	m.SetBindings(msg.b)
+	m.keyDraft.overrides = msg.b.Overrides
+	m.keyDraft.timeout = msg.b.SequenceTimeout
+	m.keyDraft.prefix = msg.b.Prefix
 	m.keyStatus = "saved and applied — other TUIs at their next start, the browser at its next load"
 	return m, nil
 }
@@ -220,12 +247,12 @@ func (m Model) renderKeySettingsDialog() string {
 	inner := dialogInnerWidth(m.width, dialogWidth)
 	draft := keymap.FromSettings(keymap.Settings{
 		Preset: m.keyDraft.preset, Prefix: m.keyDraft.prefix,
-		Timeout: m.bindings.SequenceTimeout, Overrides: m.bindings.Overrides,
+		Timeout: m.keyDraft.timeout, Overrides: m.keyDraft.overrides,
 	})
-	if len(draft.Conflicts) > 0 {
+	if lines := conflictLines(draft.Conflicts, inner-2); len(lines) > 0 {
 		b.WriteByte('\n')
-		for _, c := range draft.Conflicts {
-			b.WriteString("  " + dialogSubtle.Render(truncateRunes("! "+c.String(), inner-2)) + "\n")
+		for _, l := range lines {
+			b.WriteString("  " + dialogSubtle.Render(l) + "\n")
 		}
 	}
 	if m.keyStatus != "" {
@@ -235,4 +262,18 @@ func (m Model) renderKeySettingsDialog() string {
 	b.WriteByte('\n')
 	b.WriteString(dialogSubtle.Render("  ↑↓ move  ←→ preset  Enter edit/save  Esc back"))
 	return b.String()
+}
+
+// conflictLines renders at most maxKeyConflictLines conflicts, then a count of
+// the rest.
+func conflictLines(cs []keymap.Conflict, width int) []string {
+	var out []string
+	for i, c := range cs {
+		if i == maxKeyConflictLines {
+			out = append(out, fmt.Sprintf("+%d more", len(cs)-maxKeyConflictLines))
+			break
+		}
+		out = append(out, truncateRunes("! "+c.String(), width))
+	}
+	return out
 }

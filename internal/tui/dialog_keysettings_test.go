@@ -247,3 +247,57 @@ func TestKeySettings_PasteOutsideEditDoesNotReachThePane(t *testing.T) {
 		t.Errorf("dialog = %v after a paste", m.dialog)
 	}
 }
+
+// A prefix chosen for tmux does not outlive a switch back to default: the
+// default preset has no ${prefix}, so the file must not keep one that would
+// silently return with the next tmux switch.
+func TestKeySettings_SwitchingBackToDefaultClearsThePrefix(t *testing.T) {
+	m := keysModel(t, "preset = \"tmux\"\nprefix = \"ctrl+a\"\n")
+	m = openKeys(t, m)
+	if m.keyDraft.prefix != "ctrl+a" {
+		t.Fatalf("draft prefix = %q, want the file's ctrl+a", m.keyDraft.prefix)
+	}
+	m = selectPreset(t, m, keymap.DefaultPresetName)
+	m = saveKeys(t, m)
+	b, err := config.LoadBindings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Preset != keymap.DefaultPresetName || b.Prefix != "" {
+		t.Errorf("file holds preset=%q prefix=%q, want default and no prefix", b.Preset, b.Prefix)
+	}
+}
+
+// An unknown preset in the file fell back to the default live; the draft must
+// start from that, or Save would write the unknown name back.
+func TestKeySettings_UnknownPresetStartsTheDraftFromTheLiveOne(t *testing.T) {
+	m := keysModel(t, "preset = \"no-such\"\n")
+	m = openKeys(t, m)
+	if m.keyDraft.preset != keymap.DefaultPresetName {
+		t.Errorf("draft preset = %q, want %q", m.keyDraft.preset, keymap.DefaultPresetName)
+	}
+}
+
+// The conflict preview reads the file as Save will, not as it was at launch.
+func TestKeySettings_PreviewUsesTheFileNotTheLaunchSnapshot(t *testing.T) {
+	m := keysModel(t, "")
+	if err := os.WriteFile(config.BindingsPath(), []byte("[bindings]\n\"pane.rename\" = \"ctrl+b\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m = openKeys(t, m)
+	m = selectPreset(t, m, "tmux")
+	if frame := stripANSI(m.renderKeySettingsDialog()); !strings.Contains(frame, "unreachable binding") {
+		t.Errorf("an override added after launch is missing from the preview:\n%s", frame)
+	}
+}
+
+func TestConflictLines_CapsAndCounts(t *testing.T) {
+	cs := make([]keymap.Conflict, maxKeyConflictLines+3)
+	lines := conflictLines(cs, 80)
+	if len(lines) != maxKeyConflictLines+1 || lines[len(lines)-1] != "+3 more" {
+		t.Errorf("got %d lines, last %q; want %d lines ending in \"+3 more\"", len(lines), lines[len(lines)-1], maxKeyConflictLines+1)
+	}
+	if got := conflictLines(cs[:2], 80); len(got) != 2 {
+		t.Errorf("under the cap got %d lines, want 2", len(got))
+	}
+}

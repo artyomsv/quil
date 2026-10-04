@@ -520,8 +520,8 @@ type Model struct {
 	keyDraft  keyDraft
 	keyStatus string
 	version   string
-	sized      bool            // the terminal has reported its geometry at least once
-	attached   map[string]bool // destinations already attached — see attachAllDests
+	sized     bool            // the terminal has reported its geometry at least once
+	attached  map[string]bool // destinations already attached — see attachAllDests
 	// attachedOnce records every destination this PROCESS has sent an attach
 	// to, and is never cleared (attached is, on disconnect). It is the
 	// AttachPayload.Reattach flag: a destination unreachable at launch gets its

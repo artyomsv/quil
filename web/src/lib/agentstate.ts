@@ -3,13 +3,21 @@ import type { Message, PaneInfo } from './protocol';
 
 // At most four refreshes a second.
 const REFRESH_MS = 250;
+// An unanswered request stops blocking the next one after this long.
+const IN_FLIGHT_MS = 2000;
 
 // Agent state is not in workspace_state; it comes from list_panes_req. The
 // first applied state asks at once, and pane events ask again on the trailing
-// edge of a burst.
+// edge of a burst. Requests are spaced REFRESH_MS apart and never overlap:
+// one asked for while another is outstanding goes out when that one is
+// answered or times out. Nothing is sent before the first applied state.
 export class AgentStatePoller {
   private started = false;
   private timer: unknown;
+  private flightTimer: unknown;
+  private inFlight = false;
+  private dirty = false;
+  private lastSentAt = -Infinity;
   private seq = 0;
 
   constructor(
@@ -18,27 +26,66 @@ export class AgentStatePoller {
   ) {}
 
   stateApplied(): void {
-    if (this.started) return;
     this.started = true;
-    this.request();
+    this.ask();
   }
 
   paneEvent(): void {
-    if (this.timer !== undefined) return;
+    if (!this.started || this.timer !== undefined) return;
     this.timer = this.clock.setTimeout(() => {
       this.timer = undefined;
-      this.request();
+      this.ask();
     }, REFRESH_MS);
   }
 
-  // pane id -> working | idle | blocked | '' (unknown)
+  // pane id -> working | idle | blocked | '' (unknown). Answers the request
+  // in flight.
   response(panes: PaneInfo[]): Map<string, string> {
     const out = new Map<string, string>();
     for (const p of panes) out.set(p.id, p.agent_state ?? '');
+    this.settle();
     return out;
   }
 
-  private request(): void {
+  // On disconnect: drops pending work. The next stateApplied starts over.
+  stop(): void {
+    if (this.timer !== undefined) this.clock.clearTimeout(this.timer);
+    if (this.flightTimer !== undefined) this.clock.clearTimeout(this.flightTimer);
+    this.timer = undefined;
+    this.flightTimer = undefined;
+    this.inFlight = false;
+    this.dirty = false;
+    this.started = false;
+  }
+
+  private ask(): void {
+    const wait = this.lastSentAt + REFRESH_MS - this.clock.now();
+    if (wait > 0) {
+      if (this.timer === undefined) {
+        this.timer = this.clock.setTimeout(() => {
+          this.timer = undefined;
+          this.ask();
+        }, wait);
+      }
+      return;
+    }
+    if (this.inFlight) {
+      this.dirty = true;
+      return;
+    }
+    this.lastSentAt = this.clock.now();
+    this.inFlight = true;
+    this.flightTimer = this.clock.setTimeout(() => this.settle(), IN_FLIGHT_MS);
     this.send({ type: 'list_panes_req', id: `agent-${++this.seq}` });
+  }
+
+  private settle(): void {
+    if (this.flightTimer !== undefined) this.clock.clearTimeout(this.flightTimer);
+    this.flightTimer = undefined;
+    this.inFlight = false;
+    if (this.dirty) {
+      this.dirty = false;
+      this.ask();
+    }
   }
 }

@@ -45,13 +45,19 @@ describe('AgentStatePoller', () => {
     expect(sent).toHaveLength(1);
     expect(sent[0]?.type).toBe('list_panes_req');
     expect(sent[0]?.id).toBeTruthy();
-    poller.stateApplied();
-    expect(sent).toHaveLength(1);
+  });
+
+  it('sends nothing before the first applied state', () => {
+    const { poller, clock, sent } = rig();
+    poller.paneEvent();
+    clock.advance(1000);
+    expect(sent).toEqual([]);
   });
 
   it('sends one request, 250 ms after the first event of a burst', () => {
     const { poller, clock, sent } = rig();
     poller.stateApplied();
+    poller.response([]);
     for (let i = 0; i < 10; i++) {
       poller.paneEvent();
       clock.advance(5);
@@ -65,14 +71,55 @@ describe('AgentStatePoller', () => {
     expect(sent).toHaveLength(2);
   });
 
-  it('sends the next burst as its own request', () => {
+  it('keeps a second applied state inside the 250 ms spacing', () => {
     const { poller, clock, sent } = rig();
+    poller.stateApplied();
+    poller.response([]);
+    clock.advance(100);
+    poller.stateApplied();
+    expect(sent).toHaveLength(1);
+    clock.advance(149);
+    expect(sent).toHaveLength(1);
+    clock.advance(1);
+    expect(sent).toHaveLength(2);
+  });
+
+  it('holds a request while one is outstanding, then sends it on the answer', () => {
+    const { poller, clock, sent } = rig();
+    poller.stateApplied();
     poller.paneEvent();
     clock.advance(250);
-    poller.paneEvent();
-    clock.advance(250);
+    expect(sent).toHaveLength(1);
+    poller.response([]);
     expect(sent).toHaveLength(2);
     expect(sent[0]?.id).not.toBe(sent[1]?.id);
+  });
+
+  it('stops waiting for an answer after 2 s', () => {
+    const { poller, clock, sent } = rig();
+    poller.stateApplied();
+    poller.paneEvent();
+    clock.advance(250);
+    expect(sent).toHaveLength(1);
+    clock.advance(1749);
+    expect(sent).toHaveLength(1);
+    clock.advance(1);
+    expect(sent).toHaveLength(2);
+  });
+
+  it('stop() cancels a pending refresh and waits for the next state', () => {
+    const { poller, clock, sent } = rig();
+    poller.stateApplied();
+    poller.response([]);
+    poller.paneEvent();
+    poller.stop();
+    clock.advance(5000);
+    expect(sent).toHaveLength(1);
+    poller.paneEvent();
+    clock.advance(5000);
+    expect(sent).toHaveLength(1);
+    poller.stateApplied();
+    expect(sent).toHaveLength(2);
   });
 
   it('maps agent_state per pane, empty for unknown', () => {

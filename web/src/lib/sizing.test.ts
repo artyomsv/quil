@@ -90,6 +90,26 @@ describe('Sizer', () => {
     ]);
   });
 
+  it('sends no geometry before the first update', () => {
+    const { sizer, sent } = rig();
+    sizer.geometry(120, 40);
+    expect(sent).toEqual([]);
+    sizer.update(input({ sizeMaster: 'other' }));
+    sizer.geometry(120, 40);
+    expect(sent).toHaveLength(1);
+  });
+
+  it('reset() makes the next update and geometry send again', () => {
+    const { sizer, sent } = rig();
+    sizer.update(input());
+    sizer.geometry(120, 40);
+    expect(sent).toHaveLength(2);
+    sizer.reset();
+    sizer.update(input());
+    sizer.geometry(120, 40);
+    expect(sent).toHaveLength(4);
+  });
+
   it('sends no geometry from a read-only tab', () => {
     const { sizer, sent } = rig();
     sizer.update(input({ readOnly: true }));

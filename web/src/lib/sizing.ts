@@ -65,12 +65,14 @@ export interface SizerInput {
 export class Sizer {
   private sent = new Map<string, { cols: number; rows: number }>();
   private lastGeometry: { cols: number; rows: number } | undefined;
-  private readOnly = false;
+  // Not writable until the first update says so: a read-only tab must never
+  // send before it is known to be one.
+  private writable = false;
 
   constructor(private readonly send: (m: Message) => void) {}
 
   update(input: SizerInput): void {
-    this.readOnly = input.readOnly;
+    this.writable = !input.readOnly;
     if (
       isFollower(input.sizeMaster, input.myId, input.readOnly) ||
       !input.paintable ||
@@ -93,9 +95,16 @@ export class Sizer {
     this.send({ type: 'resize_panes', payload: { panes } });
   }
 
+  // Forgets what was sent. The app calls it on every reconnect: the daemon
+  // behind the new socket knows neither this tab's sizes nor its window.
+  reset(): void {
+    this.sent.clear();
+    this.lastGeometry = undefined;
+  }
+
   // Sent from every writable tab, follower or not, whenever it changes.
   geometry(cols: number, rows: number): void {
-    if (this.readOnly) return;
+    if (!this.writable) return;
     if (this.lastGeometry && this.lastGeometry.cols === cols && this.lastGeometry.rows === rows) return;
     this.lastGeometry = { cols, rows };
     this.send({ type: 'client_geometry', payload: { cols, rows } });

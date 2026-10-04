@@ -15,6 +15,13 @@ test.use({ viewport: { width: 1600, height: 1000 }, trace: 'off' });
 
 test('70 panes stay within the memory and main-thread budget', async ({ page, quil }) => {
   test.setTimeout(300_000);
+  // Every workspace_state the page receives, for the log lines below.
+  let states = 0;
+  page.on('websocket', (ws) => {
+    ws.on('framereceived', (f) => {
+      if (typeof f.payload === 'string' && f.payload.includes('"type":"workspace_state"')) states++;
+    });
+  });
   await login(page, quil);
 
   const tabs: { name: string; panes: string[] }[] = [];
@@ -43,12 +50,15 @@ test('70 panes stay within the memory and main-thread budget', async ({ page, qu
   // the values at its end.
   const idle = async (label: string) => {
     const before = await snapshot();
+    const statesBefore = states;
     await page.waitForTimeout(IDLE_MS);
     const after = await snapshot();
     const delta = (n: string): number => (after.get(n) ?? Number.NaN) - (before.get(n) ?? Number.NaN);
     const parts = DURATIONS.map((n) => `${n} ${delta(n).toFixed(3)} s`);
     const heap = after.get('JSHeapUsedSize') ?? Number.NaN;
-    console.log(`scale ${label}: JSHeapUsedSize ${(heap / 1024 / 1024).toFixed(1)} MB, over ${IDLE_MS} ms: ${parts.join(', ')}`);
+    console.log(
+      `scale ${label}: JSHeapUsedSize ${(heap / 1024 / 1024).toFixed(1)} MB, over ${IDLE_MS} ms: ${parts.join(', ')}, workspace_state frames ${states - statesBefore}`,
+    );
     return { heap, task: delta('TaskDuration') };
   };
 
@@ -58,6 +68,9 @@ test('70 panes stay within the memory and main-thread budget', async ({ page, qu
   const busy = tabs.slice(0, -1).flatMap((t) => t.panes).slice(0, BUSY_PANES);
   expect(busy).toHaveLength(BUSY_PANES);
   for (const id of busy) await typeInto(quil.home, id, 'while true; do echo x; sleep 0.5; done\r');
+  // Logged only: the first window holds the loops starting up. The budget
+  // applies to the steady state after it.
+  await idle('busy start');
 
   // The page holds the busy output: count one hidden pane's lines of x.
   const xLines = async (): Promise<number> =>

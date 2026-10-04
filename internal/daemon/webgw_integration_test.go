@@ -160,6 +160,9 @@ func (r *webRig) openAs(t *testing.T, hint string) *webTab {
 		t.Fatalf("web socket: %v", err)
 	}
 	t.Cleanup(func() { c.CloseNow() })
+	// A browser reads frames of any size; the library's 32 KiB default would
+	// refuse a large output frame.
+	c.SetReadLimit(1 << 20)
 	w := &webTab{t: t, c: c}
 	w.send("web_open", "", webgw.WebOpenPayload{ClientIDHint: hint, Key: r.key})
 	f, err := w.next(ctx)

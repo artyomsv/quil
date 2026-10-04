@@ -125,7 +125,7 @@ Opening a browser tab does not change the size your terminal uses. If your termi
 - **Keys the browser keeps.** Ctrl+W, Ctrl+T, Ctrl+N and Ctrl+Tab are used by the browser itself. They never reach a pane. Use the terminal for programs that need them.
 - **Browsers.** Chrome, Edge and Firefox are supported. Safari should work but is not tested.
 - **Tabs.** At most 16 browser tabs at once.
-- **Builds without the web page.** `./scripts/dev.sh cross`, `./scripts/dev.sh image` and the Dockerfile build binaries **without** the web page. There, `quil web` prints "This build has no web UI" and the page says the same. `./scripts/dev.sh build` and release builds include it.
+- **Builds without the web page.** `./scripts/dev.sh cross`, `./scripts/dev.sh image` and the Dockerfile build binaries **without** the web page. There, `quil web` prints "This build has no web UI", and the page reads: "This build of quil has no web UI. Install a release build, or build it with ./scripts/dev.sh build." `./scripts/dev.sh build` and release builds include it.
 - **No remote daemon.** `quil web` does not run over `--remote`. Run it on the daemon's machine, or use `--connect`.
 
 ## Troubleshooting
@@ -151,7 +151,7 @@ Other things you may see:
 - **"Too many logins"** (HTTP 429): see [A flood of wrong codes](#a-flood-of-wrong-codes-can-lock-you-out).
 - **Blank page that says "no web UI"**: this build has no web page. Install a release build.
 - **403 when you open the address**: you used a name that is not loopback (for example a domain that points to `127.0.0.1`). Use `localhost` or `127.0.0.1`.
-- **Reload or open a second browser tab**: each browser tab has its own client id, kept for that tab. A reload keeps the id, and a reload within 10 seconds of a resync also keeps the tab's place. A copied tab gets a new id.
+- **Reload or open a second browser tab**: each browser tab has its own client id, kept for that tab. A reload normally keeps the id. If the old connection has not closed yet, the tab gets a new id: the old id is released only after the old connection closes. A copied tab gets a new id.
 
 ### The log
 

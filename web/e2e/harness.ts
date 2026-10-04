@@ -34,11 +34,19 @@ export async function startQuilWeb(): Promise<QuilWeb> {
   child.stderr?.on('data', (b: Buffer) => {
     err += b.toString();
   });
+  // A start that fails still leaves no quil web or daemon behind: the child
+  // is stopped and the daemon it may have started is told to stop.
+  let failed = false;
+  const fail = (reject: (e: Error) => void, msg: string): void => {
+    if (failed) return;
+    failed = true;
+    void stopQuilWeb(child, env).finally(() => reject(new Error(msg)));
+  };
   const ready = await new Promise<{ url: string; code: string }>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`quil web did not start: ${out}${err}`)), 30_000);
+    const timer = setTimeout(() => fail(reject, `quil web did not start: ${out}${err}`), 30_000);
     child.on('exit', (c) => {
       clearTimeout(timer);
-      reject(new Error(`quil web exited (${c}): ${out}${err}`));
+      fail(reject, `quil web exited (${c}): ${out}${err}`);
     });
     child.stdout?.on('data', (b: Buffer) => {
       out += b.toString();

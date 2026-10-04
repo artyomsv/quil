@@ -130,6 +130,8 @@ test('close_tui for the page ends it without a reconnect', async ({ page, quil }
   await ipcSend(quil.home, 'close_tui', { client: id });
   const banner = page.getByRole('status');
   await expect(banner).toHaveText('Closed by an agent');
+  // The client's first retry would come 1 s ±20 % after the close, so by
+  // 1.2 s at the latest; 3 s is well past it.
   await page.waitForTimeout(3_000);
   await expect(banner).toHaveText('Closed by an agent');
   expect(sockets).toBe(0);

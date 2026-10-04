@@ -11,22 +11,28 @@
 
   let { app, paneId, name, spawnError }: Props = $props();
   let host: HTMLDivElement | undefined = $state();
+  // Every workspace_state hands the pane new prop objects with the same
+  // values. The effect reads these deriveds, which change only with the
+  // value, so a state frame does not detach the terminal and rebuild its
+  // WebGL renderer.
+  const id = $derived(paneId);
+  const failed = $derived(spawnError !== '');
 
   // The terminal moves into host while the pane is shown and out again when
   // it is not; a pane with a spawn error shows the error instead.
   $effect(() => {
     const el = host;
-    const id = paneId;
-    if (!el || spawnError) return;
-    untrack(() => app.paneShown(id, el));
+    const pane = id;
+    if (!el || failed) return;
+    untrack(() => app.paneShown(pane, el));
     const ro = new ResizeObserver((entries) => {
       const r = entries[0]?.contentRect;
-      if (r) app.measure(id, r.width, r.height);
+      if (r) app.measure(pane, r.width, r.height);
     });
     ro.observe(el);
     return () => {
       ro.disconnect();
-      untrack(() => app.paneHidden(id));
+      untrack(() => app.paneHidden(pane));
     };
   });
 </script>

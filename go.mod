@@ -7,6 +7,7 @@ require (
 	github.com/charmbracelet/x/ansi v0.11.7
 	github.com/charmbracelet/x/conpty v0.2.0
 	github.com/charmbracelet/x/vt v0.0.0-20260705004817-2cc9a8fe1146
+	github.com/coder/websocket v1.8.15
 	github.com/creack/pty/v2 v2.0.1
 	github.com/google/uuid v1.6.0
 	github.com/modelcontextprotocol/go-sdk v1.6.1

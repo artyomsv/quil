@@ -3,6 +3,12 @@ package tui
 // splitForNewPane preserves ordinary tab insertion. Template tabs replace
 // this temporary tree with their initial layout once the completed frame arrives.
 func splitForNewPane(tab *TabModel, leaves []*PaneModel, pane *PaneModel) {
+	// A tree with no leaves has nothing to split: the pane becomes the root.
+	if tab.Root == nil || len(leaves) == 0 {
+		tab.Root = NewLeaf(pane)
+		tab.invalidateLeaves()
+		return
+	}
 	tab.Root.SplitLeaf(leaves[0].ID, SplitVertical)
 	tab.Root.FillPlaceholder(pane)
 	tab.invalidateLeaves()

@@ -9,6 +9,8 @@ Quil's daemon accepts clients on two transports.
 | Local socket (`QUIL_HOME/quild.sock`) | the TUI, `quil mcp` bridges, scripts, `quil --stdio` for ssh | your OS account: socket mode `0600` (Unix), owner-only ACL (Windows — see [Windows status](#windows-status)) | full |
 | TCP listener (opt-in, loopback only) | a client with a token — another local account, or another machine via `ssh -L` | a token and a mutual proof | the token's level |
 
+The browser client (`quil web`) is a separate entry: a loopback web server in front of the daemon. It asks for a one-time login code that only its own terminal shows, then for a key that stays in the page's own browser storage, because cookies are shared between ports. With `--connect` it is a token client and gets that token's level. A flood of wrong login codes can keep every login place busy and lock the owner out of logging in while it lasts. See [Quil in a browser](web.md).
+
 The listener is off until you set `[listener] tcp` in `config.toml` (see [Configuration](configuration.md#listener)). The local socket needs no setup and works exactly as before; nothing on this page changes it except the tighter file permissions described under [Local socket](#local-socket).
 
 ## Threat model

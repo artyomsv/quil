@@ -147,10 +147,15 @@ func applyConnectFlags(args []string, envToken string) ([]string, error) {
 	return rest, nil
 }
 
-// dialTCP connects, logs in and checks the daemon's signature. On any login
-// failure the conn is closed — nothing more is sent, least of all to a
-// listener that could not prove it is the daemon.
+// dialTCP logs in as this TUI process.
 func dialTCP(ctx context.Context, addr, token string) (*ipc.Client, ipc.HelloRespPayload, error) {
+	return dialTCPWith(ctx, addr, token, helloPayload(helloRoleTUI))
+}
+
+// dialTCPWith connects, logs in with the given hello and checks the daemon's
+// signature. On any login failure the conn is closed — nothing more is sent,
+// least of all to a listener that could not prove it is the daemon.
+func dialTCPWith(ctx context.Context, addr, token string, hello ipc.HelloPayload) (*ipc.Client, ipc.HelloRespPayload, error) {
 	var none ipc.HelloRespPayload
 	client, err := ipc.NewClientWithDialer(ctx, func(c context.Context) (net.Conn, error) {
 		var d net.Dialer
@@ -162,9 +167,9 @@ func dialTCP(ctx context.Context, addr, token string) (*ipc.Client, ipc.HelloRes
 		}
 		return nil, none, err
 	}
-	// helloPayload (hello.go) is the same self-description sendHello sends;
+	// The hello is built by hello.go, like the one sendHello sends;
 	// ClientLogin adds the token id and nonce to it.
-	resp, err := clientauth.ClientLogin(client, token, helloPayload(helloRoleTUI), tcpLoginStep)
+	resp, err := clientauth.ClientLogin(client, token, hello, tcpLoginStep)
 	if err != nil {
 		client.Close()
 		return nil, none, err

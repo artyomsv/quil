@@ -7583,6 +7583,14 @@ func (m *Model) restoreTabLayout(tab *TabModel, tabInfo TabInfo, paneMap map[str
 		tab.Root = DeserializeLayout(serialized, paneModels)
 		if tab.Root != nil {
 			tab.Root.PrunePlaceholders()
+			// A stored tree that names none of the tab's panes prunes to a
+			// lone placeholder: a root with no leaves. The daemon keeps a
+			// tab's layout when its last pane dies and a fresh one replaces
+			// it, so a TUI attaching later receives exactly that. Treat it
+			// as no tree; the loop below rebuilds one from the panes.
+			if len(tab.Root.PaneIDs()) == 0 {
+				tab.Root = nil
+			}
 		}
 		tab.invalidateLeaves()
 	}

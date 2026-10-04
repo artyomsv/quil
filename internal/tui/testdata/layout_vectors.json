@@ -1,0 +1,154 @@
+[
+  {
+    "name": "no tree, one pane",
+    "stored": null,
+    "panes": ["p1"],
+    "template_layout": "",
+    "template_main": "",
+    "want": {"pane_id": "p1"}
+  },
+  {
+    "name": "no tree, three panes stack under the first leaf",
+    "stored": null,
+    "panes": ["p1", "p2", "p3"],
+    "template_layout": "",
+    "template_main": "",
+    "want": {"split": 1, "ratio": 0.5,
+      "left": {"split": 1, "ratio": 0.5, "left": {"pane_id": "p1"}, "right": {"pane_id": "p3"}},
+      "right": {"pane_id": "p2"}}
+  },
+  {
+    "name": "stored side by side kept as is",
+    "stored": {"split": 0, "ratio": 0.6, "left": {"pane_id": "a"}, "right": {"pane_id": "b"}},
+    "panes": ["a", "b"],
+    "template_layout": "",
+    "template_main": "",
+    "want": {"split": 0, "ratio": 0.6, "left": {"pane_id": "a"}, "right": {"pane_id": "b"}}
+  },
+  {
+    "name": "stored leaf for a gone pane is pruned, sibling promoted",
+    "stored": {"split": 0, "ratio": 0.5, "left": {"pane_id": "a"}, "right": {"pane_id": "gone"}},
+    "panes": ["a"],
+    "template_layout": "",
+    "template_main": "",
+    "want": {"pane_id": "a"}
+  },
+  {
+    "name": "pane missing from the stored tree splits the first leaf",
+    "stored": {"split": 0, "ratio": 0.5, "left": {"pane_id": "a"}, "right": {"pane_id": "b"}},
+    "panes": ["a", "b", "c"],
+    "template_layout": "",
+    "template_main": "",
+    "want": {"split": 0, "ratio": 0.5,
+      "left": {"split": 1, "ratio": 0.5, "left": {"pane_id": "a"}, "right": {"pane_id": "c"}},
+      "right": {"pane_id": "b"}}
+  },
+  {
+    "name": "template columns with main",
+    "stored": null,
+    "panes": ["x", "y", "z"],
+    "template_layout": "columns",
+    "template_main": "x",
+    "want": {"split": 0, "ratio": 0.3333333333333333, "left": {"pane_id": "x"},
+      "right": {"split": 0, "ratio": 0.5, "left": {"pane_id": "y"}, "right": {"pane_id": "z"}}}
+  },
+  {
+    "name": "template main-left",
+    "stored": null,
+    "panes": ["x", "y", "z"],
+    "template_layout": "main-left",
+    "template_main": "y",
+    "want": {"split": 0, "ratio": 0.5, "left": {"pane_id": "y"},
+      "right": {"split": 1, "ratio": 0.5, "left": {"pane_id": "x"}, "right": {"pane_id": "z"}}}
+  },
+  {
+    "name": "template keyword without a matching main falls back to the arrival rule",
+    "stored": null,
+    "panes": ["x", "y"],
+    "template_layout": "columns",
+    "template_main": "nope",
+    "want": {"split": 1, "ratio": 0.5, "left": {"pane_id": "x"}, "right": {"pane_id": "y"}}
+  },
+  {
+    "name": "empty pane list",
+    "stored": {"pane_id": "a"},
+    "panes": [],
+    "template_layout": "",
+    "template_main": "",
+    "want": null
+  },
+  {
+    "name": "template grid with an odd count spans the last pane underneath",
+    "stored": null,
+    "panes": ["p1", "p2", "p3", "p4", "p5"],
+    "template_layout": "grid",
+    "template_main": "p1",
+    "want": {"split": 1, "ratio": 0.6666666666666666,
+      "left": {"split": 0, "ratio": 0.5,
+        "left": {"split": 1, "ratio": 0.5, "left": {"pane_id": "p1"}, "right": {"pane_id": "p2"}},
+        "right": {"split": 1, "ratio": 0.5, "left": {"pane_id": "p3"}, "right": {"pane_id": "p4"}}},
+      "right": {"pane_id": "p5"}}
+  },
+  {
+    "name": "template main-top puts the main pane above a row of the rest",
+    "stored": null,
+    "panes": ["x", "y", "z"],
+    "template_layout": "main-top",
+    "template_main": "z",
+    "want": {"split": 1, "ratio": 0.5, "left": {"pane_id": "z"},
+      "right": {"split": 0, "ratio": 0.5, "left": {"pane_id": "x"}, "right": {"pane_id": "y"}}}
+  },
+  {
+    "name": "template keyword that is not special stacks the panes",
+    "stored": null,
+    "panes": ["a", "b", "c"],
+    "template_layout": "stack",
+    "template_main": "a",
+    "want": {"split": 1, "ratio": 0.3333333333333333, "left": {"pane_id": "a"},
+      "right": {"split": 1, "ratio": 0.5, "left": {"pane_id": "b"}, "right": {"pane_id": "c"}}}
+  },
+  {
+    "name": "template with one pane is a leaf",
+    "stored": null,
+    "panes": ["solo"],
+    "template_layout": "columns",
+    "template_main": "solo",
+    "want": {"pane_id": "solo"}
+  },
+  {
+    "name": "nested pruning promotes survivors at every level",
+    "stored": {"split": 0, "ratio": 0.5,
+      "left": {"split": 1, "ratio": 0.5,
+        "left": {"split": 0, "ratio": 0.5, "left": {"pane_id": "a"}, "right": {"pane_id": "b"}},
+        "right": {"pane_id": "c"}},
+      "right": {"pane_id": "d"}},
+    "panes": ["a", "d"],
+    "template_layout": "",
+    "template_main": "",
+    "want": {"split": 0, "ratio": 0.5, "left": {"pane_id": "a"}, "right": {"pane_id": "d"}}
+  },
+  {
+    "name": "stored tree with every pane gone starts over from the panes",
+    "stored": {"split": 0, "ratio": 0.5, "left": {"pane_id": "a"}, "right": {"pane_id": "b"}},
+    "panes": ["c"],
+    "template_layout": "",
+    "template_main": "",
+    "want": {"pane_id": "c"}
+  },
+  {
+    "name": "stored leaf for a gone pane, two new panes stack",
+    "stored": {"pane_id": "a"},
+    "panes": ["c", "d"],
+    "template_layout": "",
+    "template_main": "",
+    "want": {"split": 1, "ratio": 0.5, "left": {"pane_id": "c"}, "right": {"pane_id": "d"}}
+  },
+  {
+    "name": "a stored tree wins over a template keyword",
+    "stored": {"split": 0, "ratio": 0.6, "left": {"pane_id": "a"}, "right": {"pane_id": "b"}},
+    "panes": ["a", "b"],
+    "template_layout": "columns",
+    "template_main": "a",
+    "want": {"split": 0, "ratio": 0.6, "left": {"pane_id": "a"}, "right": {"pane_id": "b"}}
+  }
+]

@@ -38,6 +38,7 @@ Client-daemon model:
 - `internal/winjob/` — decides how a daemon started inside an ssh session's kill-on-close job survives it: the per-user logon task when one is registered and the session is interactive, else a lowered-token breakaway spawn, never an above-Medium token inside any job (an ambiguous job that allows no breakaway lowers the token in place). Also the logon task's name/XML and the `[limited]` (session 0) signal. Logic in neutral files; syscalls only in `_windows.go`, `_other.go` answers "not in a job" elsewhere
 - `internal/daemonspawn/` — the daemon spawn helper shared by `startDaemon` and `quil-activate.exe start-daemon`, so the two cannot drift
 - `internal/clientauth/` — client authentication and rights (phase 4, ADR-34): `qtk_` tokens, the SCRAM-shaped mutual proof, the message class table + `Allows`, the `tokens.json` store, the client side of the login. Imports stdlib, `internal/ipc` and `internal/textsafe` only
+- `internal/webgw/` — the browser client's gateway (`quil web`, ADR-35): a loopback HTTP + WebSocket proxy, one daemon connection per tab, an allow-list of forwardable types, a typed login code plus a port-scoped key, ack-based flow control. Serves the page embedded from `web/`. The daemon is unchanged
 - `internal/tui/` — Bubble Tea model, tabs, panes, layout tree, styles, text selection, notification sidebar
 
 Deep package notes — `internal/transport/`, `internal/pty/`, `internal/ipc/`, `internal/claudehook/`,
@@ -201,6 +202,7 @@ package-specific moved to `.claude/rules/*.md`, each gated by a `paths:` glob so
 | `auto-update.md` | `internal/update/`, `cmd/quil/update_apply.go`, `daemon/update.go`, `tui/update.go` | update check, staging, rename-aside swap + rollback |
 | `projects.md` | `daemon/project.go`, `daemon/gitcache.go`, `daemon/worktree*.go`, `internal/gitinfo/`, `internal/gitworktree/`, `tui/project*.go`, `tui/worktree_*.go`, `sidebar.go`, `router.go`, `dialdest.go`, `attention.go` | projects above tabs, multi-daemon routing, runtime connect/disconnect, the project form, sidebar layout, project groups, git subsystem, worktree creation + close-time removal |
 | `client-auth.md` | `internal/clientauth/`, `ipc/auth.go`, `ipc/acl*.go`, `ipc/token.go`, `daemon/auth*.go`, `audit*.go`, `rights*.go`, `tokens*.go`, `cmd/quil/clients*.go`, `dialtcp*.go` | TCP listener + login, the class table, token store + revoke, read-only rules, socket hardening, `--connect` |
+| `web.md` | `internal/webgw/`, `cmd/quil/web*.go`, `web/` | the allow-list, never pausing the daemon reader, login code + key, leased client ids, the shared vector files, the embedded page |
 | `dev-environment.md` | *(always on)* | production-isolation rule — never touch the running production daemon |
 
 **Adding to this file?** Ask: *does this apply when I open a file in a different package?*
@@ -281,7 +283,8 @@ Project docs are now organized as a navigable tree under `docs/` (with the index
 - `docs/sandbox-panes.md` — Docker sandbox panes: building the image, signing in, what the sandbox does and does not bound
 - `docs/security.md` — tokens, rights levels, the TCP listener, audit log, Windows ACL status
 - `docs/sharing-a-workspace.md` — user guide in simple words: listener set-up, token examples per level, `--connect` locally and through an ssh tunnel, error messages
-- `docs/architecture.md` — 34 ADRs (moved from root `ARCHITECTURE.md`)
+- `docs/web.md` — user guide for `quil web`: start, the login code, ssh access, token mode, size, limits, troubleshooting by banner and close code
+- `docs/architecture.md` — 35 ADRs (moved from root `ARCHITECTURE.md`)
 - `docs/vision.md` — Project vision (moved from root `VISION.md`)
 - `docs/prd.md` — Original v1 PRD, historical reference (moved from root `PRD.md`)
 - `docs/roadmap.md` — Milestone status + planned work (moved from root `ROADMAP.md`)

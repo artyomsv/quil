@@ -21,6 +21,7 @@
 | [tmux comparison](tmux-comparison.md) | The `tmux` preset against tmux's own default prefix table, and how to switch between keymaps |
 | [Configuration](configuration.md) | `~/.quil/config.toml` reference — every section + every key |
 | [Sharing a workspace](sharing-a-workspace.md) | **Let another person, account or machine use your workspace.** Turn the listener on, make tokens, the three levels side by side, connect through an ssh tunnel, what each error means |
+| [Quil in a browser](web.md) | **Use your workspace from a web page.** `quil web`, the login code, ssh access, token mode, limits, what each banner means |
 | [Security](security.md) | Tokens, rights levels, the TCP listener, audit log, Windows ACL status |
 | [MCP](mcp.md) | **Let your AI assistant drive Quil.** Wiring for Claude Desktop / Claude Code / Cursor / VS Code Copilot + all 36 tools documented + redaction model |
 | [Workspace templates](workspace-templates.md) | Create named panes, layouts and starting prompts from a file; edit templates through F1 |

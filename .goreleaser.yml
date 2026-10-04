@@ -2,6 +2,9 @@ version: 2
 
 before:
   hooks:
+    # Build the browser client into internal/webgw/dist, which cmd/quil
+    # embeds. First, so go vet and every build below see the real app.
+    - sh -c "cd web && npm ci --no-audit --no-fund && npm run build"
     # Fetch the bundled ConPTY host (conpty.dll + OpenConsole.exe) that the
     # Windows build embeds via go:embed. The binaries are gitignored, so the
     # release runner fetches them before building. See scripts/fetch-conpty.sh.

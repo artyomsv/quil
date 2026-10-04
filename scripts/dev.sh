@@ -354,6 +354,16 @@ case "${1:-help}" in
       ACTIVATE_STEP="&& go build -ldflags \"\$F -H windowsgui\" -o quil-activate.exe ./cmd/quil-activate"
     fi
 
+    # The browser client is built first and lands in internal/webgw/dist,
+    # which the quil binary embeds. node_modules lives in a named volume, never
+    # on the bind mount: npm installs Linux-native packages, and on a Windows
+    # host the bind mount is NTFS. The old index.html and assets are removed
+    # here because vite keeps emptyOutDir off to spare the committed .keep.
+    rm -rf "$PROJECT_DIR/internal/webgw/dist/assets" "$PROJECT_DIR/internal/webgw/dist/index.html"
+    docker run --rm -v "${PROJECT_DIR}:/src" -v quil-web-node-modules:/src/web/node_modules \
+      -v quil-npm-cache:/root/.npm -w //src/web node:22-bookworm-slim \
+      sh -c "npm ci --no-audit --no-fund && npm run build" || exit 1
+
     # GOOS/GOARCH are exported once rather than prefixed onto each build: seven
     # copies of the same pair is seven chances for one to drift.
     $DOCKER_RUN sh -c "\

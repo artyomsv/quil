@@ -137,23 +137,28 @@ func (g *mouseTailGuard) expireCmd() tea.Cmd {
 }
 
 // deliverHeld delivers keys the mouse-tail guard held where they were typed.
-// While a non-terminal message moved nothing, they replay through Update like
-// any key. If one moved focus during the hold — another client switching
-// tabs, a notification jump — replaying would type them into the new pane, so
-// they go straight to the pane that was focused when the head arrived. Held
-// keys are only ever single printable characters, so their bytes are their
-// text.
+// They always replay through Update, so whatever surface owns the keyboard now
+// — a dialog, a rename, the palette — still gets them first. If a non-terminal
+// message moved focus during the hold (another client switching tabs, a
+// notification jump), replaying alone would type them into the NEW pane, so
+// the replay runs under the typing guard aimed at the pane that was focused
+// when the head arrived: the same redirect, with the same fallback to the
+// current pane when that one is gone, that protects keys typed through a
+// remote tab switch. The guard's own state is put back afterwards, so this
+// borrows it without arming or retiring it for the user's next key.
 func (m Model) deliverHeld(keys []tea.KeyPressMsg) (Model, tea.Cmd) {
 	if len(keys) == 0 {
 		return m, nil
 	}
-	if target := m.mouseTail.focus; m.localFocus() != target {
-		for _, k := range keys {
-			m.enqueueInput(target.pane, []byte(k.Text))
-		}
-		return m, nil
+	target := m.mouseTail.focus
+	if target.pane == "" || m.localFocus() == target {
+		return m.replayKeys(keys)
 	}
-	return m.replayKeys(keys)
+	prevPane, prevAt := m.guardPaneID, m.remoteSwitchAt
+	m.guardPaneID, m.remoteSwitchAt = target.pane, m.clock()
+	m, cmd := m.replayKeys(keys)
+	m.guardPaneID, m.remoteSwitchAt = prevPane, prevAt
+	return m, cmd
 }
 
 // replayKeys delivers keys through the normal Update path. The guard is

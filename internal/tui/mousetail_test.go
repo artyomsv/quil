@@ -107,6 +107,22 @@ func twoPaneModel() (*Model, *TabModel) {
 	return &Model{projects: oneProject(tab), client: &fakeSender{}, inputCh: make(chan paneInput, inputForwardBuffer)}, tab
 }
 
+// focusP2 moves input focus to p2, as a daemon broadcast switching panes would.
+func focusP2(tab *TabModel, m Model) Model {
+	tab.ActivePane = "p2"
+	return m
+}
+
+// paneByID finds a pane in the model's trees.
+func (m Model) paneByID(t *testing.T, id string) *PaneModel {
+	t.Helper()
+	pane, _, _ := m.findPaneAndTab(id)
+	if pane == nil {
+		t.Fatalf("no pane %q", id)
+	}
+	return pane
+}
+
 // drainByPane returns everything queued as "pane:data " entries.
 func drainByPane(m *Model) string {
 	got := ""
@@ -144,13 +160,24 @@ func TestUpdate_DaemonMessageInsideATailDoesNotBreakIt(t *testing.T) {
 // where focus is now.
 func TestUpdate_HeldKeysReachThePaneTheyWereTypedInto(t *testing.T) {
 	t.Parallel()
+	expire := []tea.Msg{mouseTailExpireMsg{gen: 1}}
 	for _, end := range []struct {
 		name string
+		move func(tab *TabModel, m Model) Model // what the daemon message did
 		msgs []tea.Msg
 		want string
 	}{
-		{"expiry", []tea.Msg{mouseTailExpireMsg{gen: 1}}, "p1:4 p1:2 "},
-		{"a breaking key", []tea.Msg{tea.KeyPressMsg{Code: 'x', Text: "x"}}, "p1:4 p1:2 p2:x "},
+		{"expiry", focusP2, expire, "p1:4 p1:2 "},
+		{"a breaking key", focusP2, []tea.Msg{tea.KeyPressMsg{Code: 'x', Text: "x"}}, "p1:4 p1:2 p2:x "},
+		{"typed-into pane closed", func(tab *TabModel, m Model) Model {
+			tab.Root, tab.ActivePane = NewLeaf(m.paneByID(t, "p2")), "p2"
+			return m
+		}, expire, "p2:4 p2:2 "},
+		{"a dialog opened over the panes", func(tab *TabModel, m Model) Model {
+			m = focusP2(tab, m)
+			m.dialog = dialogNotifySettings
+			return m
+		}, expire, ""},
 	} {
 		t.Run(end.name, func(t *testing.T) {
 			t.Parallel()
@@ -160,12 +187,15 @@ func TestUpdate_HeldKeysReachThePaneTheyWereTypedInto(t *testing.T) {
 				m, _ = m.Update(msg)
 			}
 			m, _ = m.Update(daemonMsg{})
-			tab.ActivePane = "p2" // the focus move that message made
+			m = end.move(tab, m.(Model))
 			for _, msg := range end.msgs {
 				m, _ = m.Update(msg)
 			}
 			if got := drainByPane(pm); got != end.want {
 				t.Errorf("delivered = %q, want %q", got, end.want)
+			}
+			if mm := m.(Model); mm.guardPaneID != "" {
+				t.Errorf("delivery left the typing guard armed on %q", mm.guardPaneID)
 			}
 		})
 	}

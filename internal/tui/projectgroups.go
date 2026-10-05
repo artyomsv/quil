@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -26,8 +27,18 @@ const (
 	// accepting input here; a longer name in a hand-edited file is cut on load.
 	maxGroupNameRunes = 32
 	// projectGroupsFileVersion is written so a later format can tell this one
-	// apart. Load does not branch on it yet.
-	projectGroupsFileVersion = 1
+	// apart. Load does not branch on it: version 2 added each group's origin
+	// and hosts, and a version 1 group loads with neither — a legacy group.
+	projectGroupsFileVersion = 2
+	// maxGroupHosts bounds a group's hosts list read from a hand-edited file.
+	maxGroupHosts = 64
+)
+
+// A group's origin: who put the name in the view. "" is a legacy group, from a
+// file written before origins were recorded.
+const (
+	groupOriginUser = "user" // created or renamed by this client's user
+	groupOriginHost = "host" // added by a daemon's list, or a legacy name one claimed
 )
 
 // The feature's flash texts, exact.
@@ -57,10 +68,50 @@ type groupMember struct {
 
 // projectGroup is one named group. Members' order is NOT display order: the
 // sidebar lists a group's projects in m.projects order, like every section.
+//
+// Origin and Hosts are the group's provenance, saved with it so they survive a
+// restart (rebuildGroupsView): Hosts is every shared destination whose list
+// claims the name, Origin who put it in the view.
 type projectGroup struct {
 	Name      string        `json:"name"`
 	Collapsed bool          `json:"collapsed"`
 	Members   []groupMember `json:"members"`
+	Origin    string        `json:"origin,omitempty"`
+	Hosts     []string      `json:"hosts,omitempty"`
+}
+
+// userOwned reports whether the group is the user's: created or renamed here,
+// or a legacy group no daemon's list has claimed. A user-owned group can hold
+// any project; a host's group only the projects of a daemon that lists it.
+func (grp projectGroup) userOwned() bool {
+	return grp.Origin != groupOriginHost
+}
+
+// claim records that dest's list names group i. A legacy group a daemon
+// claims becomes a host group: from here on a daemon's list, not the user,
+// is what keeps it.
+func (g *projectGroups) claim(i int, dest string) {
+	grp := &g.Groups[i]
+	if grp.Origin == "" {
+		grp.Origin = groupOriginHost
+	}
+	if !slices.Contains(grp.Hosts, dest) {
+		grp.Hosts = append(grp.Hosts, dest)
+	}
+}
+
+// dropClaimsNotIn removes dest's claim from every group its list no longer
+// names.
+func (g *projectGroups) dropClaimsNotIn(dest string, list []string) {
+	for i := range g.Groups {
+		grp := &g.Groups[i]
+		if slices.Contains(grp.Hosts, dest) && !containsFold(list, grp.Name) {
+			grp.Hosts = slices.DeleteFunc(grp.Hosts, func(h string) bool { return h == dest })
+			if len(grp.Hosts) == 0 {
+				grp.Hosts = nil
+			}
+		}
+	}
 }
 
 // projectGroups is every group, in display order. A project is in at most one.
@@ -253,6 +304,7 @@ func (g projectGroups) clone() projectGroups {
 	out := projectGroups{Groups: make([]projectGroup, len(g.Groups))}
 	for i, grp := range g.Groups {
 		grp.Members = append([]groupMember(nil), grp.Members...)
+		grp.Hosts = append([]string(nil), grp.Hosts...)
 		out.Groups[i] = grp
 	}
 	return out
@@ -272,6 +324,7 @@ func (g projectGroups) withoutMembersOf(dests map[string]bool) projectGroups {
 			}
 		}
 		grp.Members = kept
+		grp.Hosts = append([]string(nil), grp.Hosts...)
 		out.Groups[i] = grp
 	}
 	return out
@@ -279,7 +332,8 @@ func (g projectGroups) withoutMembersOf(dests map[string]bool) projectGroups {
 
 // sanitizeLoadedGroups holds a loaded file to the same rules the operations
 // enforce: blank and duplicate names dropped (first wins), empty IDs dropped,
-// and a project claimed by an earlier group dropped from a later one.
+// and a project claimed by an earlier group dropped from a later one. An
+// origin it does not know reads as legacy; hosts are de-duplicated and capped.
 func sanitizeLoadedGroups(in projectGroups) projectGroups {
 	var out projectGroups
 	claimed := make(map[groupMember]bool)
@@ -289,6 +343,14 @@ func sanitizeLoadedGroups(in projectGroups) projectGroups {
 			continue
 		}
 		ng := projectGroup{Name: name, Collapsed: grp.Collapsed}
+		if grp.Origin == groupOriginUser || grp.Origin == groupOriginHost {
+			ng.Origin = grp.Origin
+		}
+		for _, h := range grp.Hosts {
+			if len(ng.Hosts) < maxGroupHosts && !slices.Contains(ng.Hosts, h) {
+				ng.Hosts = append(ng.Hosts, h)
+			}
+		}
 		for _, mb := range grp.Members {
 			if mb.ID == "" || claimed[mb] {
 				continue

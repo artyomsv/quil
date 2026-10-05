@@ -55,7 +55,7 @@ func (m *Model) noteSharedData(msg WorkspaceStateMsg) {
 	}
 	// The daemon caps both lists, but a remote host is one the user may not
 	// control: keep the first N, as an honest daemon would have sent.
-	groups := m.capSharedList(msg.Dest, "groups", msg.Groups, ipc.MaxGroupsPerDaemon)
+	groups := canonicalGroupList(m.capSharedList(msg.Dest, "groups", msg.Groups, ipc.MaxGroupsPerDaemon))
 	recent := m.capSharedList(msg.Dest, "recent folders", msg.RecentCWDs, ipc.MaxRecentCWDs)
 	if old, seen := m.daemonGroups[msg.Dest]; seen {
 		for _, name := range old {
@@ -67,6 +67,22 @@ func (m *Model) noteSharedData(msg WorkspaceStateMsg) {
 	m.sharedData[msg.Dest] = true
 	m.daemonGroups[msg.Dest] = append([]string(nil), groups...)
 	m.daemonRecent[msg.Dest] = append([]string(nil), recent...)
+}
+
+// canonicalGroupList is a daemon's group list in the one identity every group
+// lookup uses: each name through normalizeGroupName (what indexOf compares),
+// blanks dropped, and a name equal to an earlier one ignoring case dropped. An
+// honest daemon's names already are canonical (validateGroupName); a host's
+// that are not must not reach the view, the guard or the vanished check as a
+// second spelling of one group.
+func canonicalGroupList(list []string) []string {
+	var out []string
+	for _, s := range list {
+		if n := normalizeGroupName(s); n != "" && !containsFold(out, n) {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // capSharedList cuts a frame's list to limit, logging once per destination
@@ -151,27 +167,36 @@ func (m *Model) destsListingGroup(name string) []string {
 // view lacks are appended in destination order, so the user's order and
 // collapsed state stand.
 //
-// A project's Group only ever JOINS a group the view already holds — listed
-// by a daemon, in the user's file, or from another destination — and never
-// adds one. A daemon keeps every name its projects carry in its own list
-// (SetProjectGroup, GroupOp, ImportShared, and RestoreShared's repair), so
-// an honest host never sends an unlisted name; a host the user may not
-// control would otherwise grow the sidebar (and the file) frame after frame
-// with groups nothing ever lists and so nothing ever deletes. Such a project
-// is shown ungrouped, and its daemon is logged once. "Holds" excludes a name
-// that only a daemon's list put in the view (groupsFromHosts) once no daemon
-// lists it: the view keeps such a name for a frame, and a project joining it
-// there would keep it alive as a member — one more group per frame for a host
-// that lists a new name each frame and files a project under the last one. A
-// host therefore adds at most its capped list.
+// Every name here is in ONE identity: normalizeGroupName, compared ignoring
+// case — what indexOf uses. Daemon lists (canonicalGroupList) and each
+// project's Group (parseWorkspaceState) are canonicalised on intake, so a
+// lookup, a claim, the join rule and the vanished check cannot disagree about
+// which group a spelling names.
 //
-// A group is deleted only when its name DISAPPEARED: a destination that
-// listed it in its previous frame dropped it in this one (vanishedGroups), no
-// destination lists it now, and it has no member left anywhere. So a
-// destination's first frame deletes nothing, a name no daemon ever listed is
-// kept, and an in-flight frame during an optimistic rename cannot take the
-// new name (it was never listed, so it cannot vanish) — while a delete made
-// in another client still shows here.
+// Provenance (projectGroup.Origin/Hosts, saved in the file): every shared
+// destination's list CLAIMS the names it carries, and an authoritative
+// destination's claim on a name it no longer lists is dropped. A group is the
+// user's (userOwned) when created or renamed here, or a legacy group no list
+// has claimed; a daemon claiming a legacy name makes it a host group.
+//
+// A project of an authoritative destination JOINS a group only when its own
+// daemon lists that name in THIS frame, or the group is the user's. Nothing
+// else joins — not a name another host lists, not one a daemon listed before.
+// A daemon keeps every name its projects carry in its own list
+// (SetProjectGroup, GroupOp, ImportShared, and RestoreShared's repair), so an
+// honest host loses nothing; any other project is shown ungrouped, and its
+// daemon is logged once. A host therefore puts at most its capped list in the
+// view, and that holds across restarts because the claims are saved.
+//
+// A group with no member anywhere that no daemon lists now is deleted when it
+// is a host group no destination claims any more — on that host's
+// authoritative frame, even when an earlier launch cached it — or when its
+// name DISAPPEARED: a destination that listed it in its previous frame dropped
+// it in this one (vanishedGroups), which is how a delete made in another
+// client shows here. A user group nobody ever listed is never deleted, and an
+// in-flight frame during an optimistic rename cannot take the new name: the
+// rename made it the user's, and it was never listed, so it cannot vanish.
+// A group that still has members is never deleted.
 //
 // With no shared destination nothing here runs, so a legacy-only setup
 // behaves exactly as before. Saves only when the view — which is the file —
@@ -192,13 +217,18 @@ func (m *Model) rebuildGroupsView() tea.Cmd {
 	m.groups = m.groups.withoutMembersOf(auth)
 	for _, dest := range m.sharedDestsInOrder() {
 		for _, name := range m.daemonGroups[dest] {
-			if m.groups.indexOf(name) < 0 {
-				if _, err := m.groups.addGroup(name); err != nil {
+			g := m.groups.indexOf(name)
+			if g < 0 {
+				var err error
+				if g, err = m.groups.addGroup(name); err != nil {
 					log.Printf("groups: daemon %q listed %q: %v", dest, name, err)
 					continue
 				}
-				m.groupsFromHosts = append(m.groupsFromHosts, name)
 			}
+			m.groups.claim(g, dest)
+		}
+		if auth[dest] {
+			m.groups.dropClaimsNotIn(dest, m.daemonGroups[dest])
 		}
 	}
 	for _, p := range m.projects {
@@ -206,10 +236,7 @@ func (m *Model) rebuildGroupsView() tea.Cmd {
 			continue
 		}
 		g := m.groups.indexOf(p.Group)
-		if g >= 0 && containsFold(m.groupsFromHosts, p.Group) && len(m.destsListingGroup(p.Group)) == 0 {
-			g = -1 // a host's name no daemon lists any more: not the user's
-		}
-		if g < 0 {
+		if g < 0 || !(m.groups.Groups[g].userOwned() || containsFold(m.daemonGroups[p.Dest], p.Group)) {
 			if m.firstSharedCapHit(p.Dest, "unlisted project group") {
 				log.Printf("groups: daemon %q filed project %q under %q, a name it does not list; shown ungrouped", p.Dest, p.ID, p.Group)
 			}
@@ -219,11 +246,13 @@ func (m *Model) rebuildGroupsView() tea.Cmd {
 	}
 	for g := len(m.groups.Groups) - 1; g >= 0; g-- {
 		grp := m.groups.Groups[g]
-		if len(grp.Members) == 0 && containsFold(vanished, grp.Name) && len(m.destsListingGroup(grp.Name)) == 0 {
+		if len(grp.Members) > 0 || len(m.destsListingGroup(grp.Name)) > 0 {
+			continue
+		}
+		if (!grp.userOwned() && len(grp.Hosts) == 0) || containsFold(vanished, grp.Name) {
 			m.groups.deleteGroup(g)
 		}
 	}
-	m.groupsFromHosts = slices.DeleteFunc(m.groupsFromHosts, func(n string) bool { return m.groups.indexOf(n) < 0 })
 	// Both sides through clone, which gives an empty group a nil member list
 	// however it got there, so an unchanged view compares equal.
 	if reflect.DeepEqual(before, m.groups.clone()) {

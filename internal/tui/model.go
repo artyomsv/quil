@@ -1141,10 +1141,6 @@ type Model struct {
 	// destination's previous list (noteSharedData), read once by
 	// rebuildGroupsView — the only evidence a group was deleted elsewhere.
 	vanishedGroups []string
-	// groupsFromHosts: the group names a daemon's list ADDED to the view this
-	// session (rebuildGroupsView). Such a name stays joinable by a project
-	// only while some daemon still lists it; pruned to the view every pass.
-	groupsFromHosts []string
 	// pendingGroupOps correlates an id-bearing set_project_group/group_op with
 	// the host it went to, so a refusal can be flashed naming it.
 	pendingGroupOps map[string]pendingGroupOp
@@ -7005,7 +7001,10 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]str
 		if ok && proj.activeTab >= 0 && proj.activeTab < len(proj.tabs) {
 			fromTab = proj.tabs[proj.activeTab]
 		}
-		proj.Name, proj.RootDir, proj.Bootstrap, proj.Group = info.Name, info.RootDir, info.Bootstrap, info.Group
+		// The group in the one identity every group lookup uses
+		// (rebuildGroupsView): a spelling a daemon did not canonicalise must
+		// not name a second group, or slip past the join rule as one.
+		proj.Name, proj.RootDir, proj.Bootstrap, proj.Group = info.Name, info.RootDir, info.Bootstrap, normalizeGroupName(info.Group)
 		// The daemon answered, so whatever this row was standing in for is over.
 		// This is the ONLY clear point, and it is here rather than in
 		// finishReconnect because it also covers a host brought back through

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 
@@ -177,37 +178,163 @@ func TestUpdate_UnlistedProjectGroups_AddNothingAcrossFrames(t *testing.T) {
 // lists it. A host that lists a new name each frame and files a project under
 // the name it dropped used to keep every dropped name alive as a member's
 // group — one more persistent group per frame, though each list held one.
+// The retained project may spell the dropped name differently — a trailing
+// space, another case, or a name past the 32-rune limit — and it is still the
+// same group: one identity for the lookup and the guard.
 func TestUpdate_RotatingGroupNamesRetainedAFrame_DoNotAccumulate(t *testing.T) {
+	long := strings.Repeat("x", maxGroupNameRunes-2)
+	for _, tc := range []struct {
+		name     string
+		listed   func(i int) string // the name the host lists in frame i
+		retained func(s string) string
+	}{
+		{"exact", func(i int) string { return fmt.Sprintf("g%d", i) }, func(s string) string { return s }},
+		{"trailing space", func(i int) string { return fmt.Sprintf("g%d", i) }, func(s string) string { return s + " " }},
+		{"other case", func(i int) string { return fmt.Sprintf("g%d", i) }, strings.ToUpper},
+		{"past the rune limit", func(i int) string { return fmt.Sprintf("%s%02d", long, i) }, func(s string) string { return s + "-tail" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("QUIL_HOME", t.TempDir())
+			m, _, _ := twoDestModel(t)
+			path := config.ProjectGroupsPath()
+			m.SetProjectGroups(ProjectGroupsState{groups: projectGroups{Groups: []projectGroup{{Name: "Mine"}}}}, path)
+			const frames = 6
+			for i := 0; i < frames; i++ {
+				f := WorkspaceStateMsg{Dest: "", RunID: "r", Rev: uint64(i + 1), SharedData: true, Groups: []string{tc.listed(i)}}
+				f = withGroupedProject(f, fmt.Sprintf("p%d", i), tc.listed(i))
+				if i > 0 {
+					// The previous frame's project, still filed under the name
+					// this frame's list dropped.
+					f = withGroupedProject(f, fmt.Sprintf("p%d", i-1), tc.retained(tc.listed(i-1)))
+				}
+				f.ActiveProject, f.ActiveTab = f.Projects[0].ID, f.Tabs[0].ID
+				m = updateNoWait(t, m, f)
+			}
+			runCmd(m.saveGroupsCmd())
+			want := "Mine," + tc.listed(frames-1)
+			if got := strings.Join(groupNames(m), ","); got != want {
+				t.Fatalf("view = %s, want %s", got, want)
+			}
+			saved, err := loadProjectGroups(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := grpNames(saved); got != want {
+				t.Errorf("saved file = %s, want %s", got, want)
+			}
+			if g := m.groups.groupOf("", fmt.Sprintf("p%d", frames-2)); g >= 0 {
+				t.Errorf("a project under a dropped host name is in group %q, want ungrouped", m.groups.Groups[g].Name)
+			}
+		})
+	}
+}
+
+// groupList is prefix000 .. prefix<n-1>.
+func groupList(prefix string, n int) []string {
+	out := make([]string, n)
+	for i := range out {
+		out[i] = fmt.Sprintf("%s%03d", prefix, i)
+	}
+	return out
+}
+
+// Which names a host's list supplied is saved with the groups, so a restart
+// does not turn them into the user's. A host lists a full capped set, the TUI
+// saves and restarts, and the host then lists a NEW full set while its old
+// projects stay filed under the old names. The old names must not be joinable
+// as user groups: the view and the file hold at most the cap plus the user's
+// own group, launch after launch.
+func TestUpdate_HostGroupsAcrossARestart_DoNotAccumulate(t *testing.T) {
 	t.Setenv("QUIL_HOME", t.TempDir())
-	m, _, _ := twoDestModel(t)
 	path := config.ProjectGroupsPath()
-	m.SetProjectGroups(ProjectGroupsState{groups: projectGroups{Groups: []projectGroup{{Name: "Mine"}}}}, path)
-	const frames = 6
-	for i := 0; i < frames; i++ {
-		f := WorkspaceStateMsg{Dest: "", RunID: "r", Rev: uint64(i + 1), SharedData: true, Groups: []string{fmt.Sprintf("g%d", i)}}
-		f = withGroupedProject(f, fmt.Sprintf("p%d", i), fmt.Sprintf("g%d", i))
-		if i > 0 {
-			// The previous frame's project, still filed under the name this
-			// frame's list dropped.
-			f = withGroupedProject(f, fmt.Sprintf("p%d", i-1), fmt.Sprintf("g%d", i-1))
+	limit := ipc.MaxGroupsPerDaemon
+	launch := func() Model {
+		t.Helper()
+		m, _, _ := twoDestModel(t)
+		st, err := LoadProjectGroups(path)
+		if err != nil {
+			t.Fatal(err)
 		}
-		f.ActiveProject, f.ActiveTab = f.Projects[0].ID, f.Tabs[0].ID
-		m = updateNoWait(t, m, f)
+		m.SetProjectGroups(st, path)
+		return m
 	}
+	// rotate is one host frame listing prefix's names, with prefix's projects
+	// filed under them and keep's projects still filed under keep's names.
+	rotate := func(rev uint64, prefix, keep string) WorkspaceStateMsg {
+		f := manyGroupedProjects("", prefix, limit, groupList(prefix, limit)...)
+		f.Rev = rev
+		if keep != "" {
+			for i, name := range groupList(keep, limit) {
+				f = withGroupedProject(f, fmt.Sprintf("%s-proj-%03d", keep, i), name)
+			}
+		}
+		return f
+	}
+
+	m := launch()
+	m.groups = projectGroups{Groups: []projectGroup{{Name: "Mine", Origin: groupOriginUser}}}
+	m = updateNoWait(t, m, rotate(1, "a", ""))
 	runCmd(m.saveGroupsCmd())
-	want := fmt.Sprintf("Mine,g%d", frames-1)
-	if got := strings.Join(groupNames(m), ","); got != want {
-		t.Fatalf("view = %s, want %s", got, want)
+
+	prev := "a"
+	for n, prefix := range []string{"b", "c", "d"} {
+		m = launch()
+		m = updateNoWait(t, m, rotate(uint64(n+1), prefix, prev))
+		runCmd(m.saveGroupsCmd())
+		if got := len(m.groups.Groups); got > limit+1 {
+			t.Fatalf("launch %d: the view holds %d groups, over the cap %d plus the user's", n+2, got, limit)
+		}
+		saved, err := loadProjectGroups(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := len(saved.Groups); got > limit+1 {
+			t.Fatalf("launch %d: the file holds %d groups, over the cap %d plus the user's", n+2, got, limit)
+		}
+		if saved.indexOf("Mine") < 0 || saved.indexOf(prev+"000") >= 0 || saved.indexOf(prefix+"000") < 0 {
+			t.Fatalf("launch %d: file = %s, want Mine and the %s names, none of %s", n+2, grpNames(saved), prefix, prev)
+		}
+		if g := m.groups.groupOf("", prev+"-proj-000"); g >= 0 {
+			t.Errorf("launch %d: a project under a name its host no longer lists joined %q", n+2, m.groups.Groups[g].Name)
+		}
+		prev = prefix
 	}
-	saved, err := loadProjectGroups(path)
+}
+
+// A file written before groups carried an origin loads with every group. Its
+// groups count as the user's until a daemon's list claims the name: an empty
+// one nobody lists stays, and a project may join it; one a daemon lists is
+// that daemon's from then on, and goes with its name; one with members stays.
+func TestUpdate_OldFormatGroupsFile_KeepsTheUsersGroups(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	path := config.ProjectGroupsPath()
+	raw := `{"version":1,"groups":[
+  {"name":"Mine","collapsed":true,"members":[]},
+  {"name":"Work","collapsed":false,"members":[{"dest":"hostA","id":"proj-x"}]},
+  {"name":"Listed","collapsed":false,"members":[]}
+]}`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := LoadProjectGroups(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := grpNames(saved); got != want {
-		t.Errorf("saved file = %s, want %s", got, want)
+	m, _, _ := twoDestModel(t)
+	m.SetProjectGroups(st, path)
+	if got := strings.Join(groupNames(m), ","); got != "Mine,Work,Listed" {
+		t.Fatalf("loaded groups = %s", got)
 	}
-	if g := m.groups.groupOf("", fmt.Sprintf("p%d", frames-2)); g >= 0 {
-		t.Errorf("a project under a dropped host name is in group %q, want ungrouped", m.groups.Groups[g].Name)
+	m = updateNoWait(t, m, sharedFrame("r", 1, "proj-1", "Mine", "Listed"))
+	m = updateNoWait(t, m, sharedFrame("r", 2, "proj-1", "Mine", "Other"))
+	if got := strings.Join(groupNames(m), ","); got != "Mine,Work,Other" {
+		t.Errorf("groups = %s, want Mine and Work kept, Listed gone with its name", got)
+	}
+	if g := m.groups.indexOf("Mine"); g < 0 || m.groups.groupOf("", "proj-1") != g || !m.groups.Groups[g].Collapsed {
+		t.Errorf("proj-1 not in the user's collapsed Mine: %+v", m.groups.Groups)
+	}
+	if m.groups.groupOf("hostA", "proj-x") < 0 {
+		t.Error("a legacy destination's member was lost")
 	}
 }
 

@@ -55,7 +55,9 @@ headline: Stricter shared workspaces; refused creates now say why
 - **One host can add at most 64 groups to the sidebar.** The cap already applied to the
   group list a host sends, but a project filed under a name the host did not list added
   a group too, and a new set of names in each update kept growing the sidebar and the
-  saved groups file. Now such a project joins a group only when the sidebar already has
-  that name, and a name that came only from a host's list counts only while a host still
-  lists it. If the name is not there, the project is shown ungrouped, and `quil.log`
-  says so once.
+  saved groups file. Now a host's project joins a group only when that host lists the
+  name, or the group is your own. The groups file remembers which host added each group,
+  so this also holds after a restart, and a host's empty group goes away when the host
+  stops listing it. Names that differ only in spaces, case or length past 32 characters
+  are one group. A project that cannot join is shown ungrouped, and `quil.log` says so
+  once.

@@ -397,6 +397,7 @@ func (m Model) commitGroupEdit() (tea.Model, tea.Cmd) {
 		var g int
 		if g, err = m.groups.addGroup(e.input); err == nil {
 			changed = true
+			m.groups.Groups[g].Origin = groupOriginUser
 			if e.projectID != "" {
 				m.groups.assign(g, e.dest, e.projectID)
 				opCmd = m.sendSetProjectGroup(e.dest, e.projectID, m.groups.Groups[g].Name)
@@ -409,6 +410,9 @@ func (m Model) commitGroupEdit() (tea.Model, tea.Cmd) {
 		if g := m.groups.indexOf(e.target); g >= 0 {
 			if err = m.groups.renameGroup(g, e.input); err == nil {
 				changed = true
+				// The user's name now: the daemons do not list it until their
+				// next frame, and a host group nobody claims would go.
+				m.groups.Groups[g].Origin = groupOriginUser
 				opCmd = m.sendGroupOpEverywhere(ipc.GroupOpRename, e.target, m.groups.Groups[g].Name)
 			}
 		}

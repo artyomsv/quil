@@ -95,6 +95,64 @@ func TestUpdate_OversizedSharedFrame_ListsCappedAndLoggedOnce(t *testing.T) {
 	}
 }
 
+// manyGroupedProjects is a shared frame from dest listing groups, with n
+// projects, each filed under its own name prefix%03d.
+func manyGroupedProjects(dest, prefix string, n int, groups ...string) WorkspaceStateMsg {
+	f := WorkspaceStateMsg{Dest: dest, RunID: "r-" + dest, Rev: 1, SharedData: true, Groups: groups}
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("%s-proj-%03d", prefix, i)
+		tab, pane := id+"-tab", id+"-pane"
+		f.Projects = append(f.Projects, ProjectInfo{ID: id, Name: id, Group: fmt.Sprintf("%s%03d", prefix, i), TabIDs: []string{tab}})
+		f.Tabs = append(f.Tabs, TabInfo{ID: tab, Name: "Shell", ProjectID: id, Panes: []string{pane}})
+		f.Panes = append(f.Panes, PaneInfo{ID: pane, TabID: tab, Type: "terminal"})
+	}
+	f.ActiveProject, f.ActiveTab = f.Projects[0].ID, f.Tabs[0].ID
+	return f
+}
+
+// A daemon's list is capped, and so are the names its projects carry: a
+// host listing one group and filing each project under a name of its own
+// adds at most the cap to the sidebar. The rest are shown ungrouped, the cap
+// logs once, and another destination's names are not counted against it.
+func TestUpdate_ProjectGroupNamesOverTheCap_RestShownUngrouped(t *testing.T) {
+	m, _, _ := twoDestModel(t)
+	m = updateWith(t, m, manyGroupedProjects("", "g", ipc.MaxGroupsPerDaemon+10, "Listed"))
+	if got := len(groupNames(m)); got != ipc.MaxGroupsPerDaemon {
+		t.Fatalf("merged view holds %d groups, want the cap %d (Listed + %d project names)", got, ipc.MaxGroupsPerDaemon, ipc.MaxGroupsPerDaemon-1)
+	}
+	last := ipc.MaxGroupsPerDaemon - 2 // the last project name that fits
+	if g := m.groups.groupOf("", fmt.Sprintf("g-proj-%03d", last)); g < 0 || m.groups.Groups[g].Name != fmt.Sprintf("g%03d", last) {
+		t.Errorf("project %d not in its own group (index %d)", last, g)
+	}
+	for i := last + 1; i < ipc.MaxGroupsPerDaemon+10; i++ {
+		if g := m.groups.groupOf("", fmt.Sprintf("g-proj-%03d", i)); g >= 0 {
+			t.Fatalf("project %d over the cap is in group %q, want ungrouped", i, m.groups.Groups[g].Name)
+		}
+	}
+	key := "\x00project group names"
+	if !m.sharedCapLogged[key] {
+		t.Fatalf("cap log keys = %v, want %q", m.sharedCapLogged, key)
+	}
+	logged := len(m.sharedCapLogged)
+	again := manyGroupedProjects("", "g", ipc.MaxGroupsPerDaemon+10, "Listed")
+	again.Rev = 2
+	m = updateWith(t, m, again)
+	if len(m.sharedCapLogged) != logged || len(groupNames(m)) != ipc.MaxGroupsPerDaemon {
+		t.Errorf("second frame: log keys %d (want %d), groups %d", len(m.sharedCapLogged), logged, len(groupNames(m)))
+	}
+
+	remote := manyGroupedProjects("hostA", "r", 3, "Far")
+	m = updateWith(t, m, remote)
+	for i := 0; i < 3; i++ {
+		if g := m.groups.groupOf("hostA", fmt.Sprintf("r-proj-%03d", i)); g < 0 || m.groups.Groups[g].Name != fmt.Sprintf("r%03d", i) {
+			t.Errorf("hostA project %d not in its group (index %d): the local cap reached another destination", i, g)
+		}
+	}
+	if m.sharedCapLogged["hostA\x00project group names"] {
+		t.Error("hostA logged over the cap with 4 names")
+	}
+}
+
 // The file is a CACHE of an authoritative destination's members: an assign
 // made in another client (the frame moves a project's Group) replaces that
 // destination's members in the saved file, and nothing else in it.
@@ -574,12 +632,18 @@ func TestCommitGroupEdit_NewEmptyGroupWithLegacyActive_CreatesOnLocal(t *testing
 	if m.activeDest() != "hostA" {
 		t.Fatalf("active dest = %q, want hostA", m.activeDest())
 	}
-	m.beginGroupEdit(groupEditState{mode: groupEditNew, input: "Fresh"})
-	out, cmd := m.commitGroupEdit()
-	runCmd(cmd)
-	m = out.(Model)
-	if countSent(local, ipc.MsgGroupOp) != 1 || countSent(remote, ipc.MsgGroupOp) != 0 {
-		t.Errorf("group_op sent local=%d remote=%d, want 1/0", countSent(local, ipc.MsgGroupOp), countSent(remote, ipc.MsgGroupOp))
+	// Typed and saved through Update, the path the dialog's Enter takes.
+	m.beginGroupEdit(groupEditState{mode: groupEditNew})
+	m = grpType(m, "Fresh")
+	m = updateWith(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m.dialog != dialogNone {
+		t.Fatal("Enter on a valid name must close the dialog")
+	}
+	if countSent(remote, ipc.MsgGroupOp) != 0 {
+		t.Errorf("group_op sent to the legacy host: %d", countSent(remote, ipc.MsgGroupOp))
+	}
+	if ops := groupOpsSent(t, local); len(ops) != 1 || ops[0].Op != ipc.GroupOpCreate || ops[0].Name != "Fresh" {
+		t.Errorf("local group_ops = %+v, want one create of Fresh", ops)
 	}
 	if m.groups.indexOf("Fresh") < 0 {
 		t.Error("no optimistic local create")

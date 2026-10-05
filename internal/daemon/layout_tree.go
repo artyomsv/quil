@@ -92,6 +92,18 @@ func storeTreeLocked(tab *Tab, tree *layouttree.Node) {
 	}
 	tab.Layout = raw
 	tab.LayoutRev++
+	settleTemplateLocked(tab)
+}
+
+// settleTemplateLocked drops a template tab's layout keyword once a tree is
+// stored. The keyword only says how to build the FIRST tree; kept, a tree
+// later pruned to empty would read as "template pending" again and re-arm
+// MovePane's refusal (and the TUI's and browser's template build) for a
+// tab that was laid out long ago.
+func settleTemplateLocked(tab *Tab) {
+	if len(tab.Layout) > 0 {
+		tab.TemplateLayout, tab.TemplateMain = "", ""
+	}
 }
 
 // pruneTreeLocked removes paneID from tab's stored tree; LayoutRev moves only
@@ -170,6 +182,7 @@ func (sm *SessionManager) revalidateRestoredLayout(tabID string) {
 		return
 	}
 	tab.Layout = sm.validLayoutLocked(tab, tab.Layout)
+	settleTemplateLocked(tab)
 }
 
 // validLayoutLocked is what SetTabLayout stores for a client's tree: the

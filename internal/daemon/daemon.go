@@ -3199,7 +3199,29 @@ func (d *Daemon) finishDetached(res publishResult) {
 
 // overlayKey names an overlay's kind and repository: the tab's one slot is
 // reused only for the same pair.
-func overlayKey(kind, repo string) string { return kind + "\x00" + repo }
+//
+// The repository is normalized first: the TUI and a browser can name one
+// repository in two spellings (a symlink, a trailing separator, or on Windows
+// a different letter case), and two spellings would evict an overlay that
+// should have been reused.
+func overlayKey(kind, repo string) string { return kind + "\x00" + normalizeRepoKey(repo) }
+
+// normalizeRepoKey resolves symlinks (keeping the path as given when that
+// fails) and cleans it. Windows paths are case-insensitive, so they are also
+// case-folded there.
+func normalizeRepoKey(repo string) string {
+	if repo == "" {
+		return ""
+	}
+	if r, err := filepath.EvalSymlinks(repo); err == nil {
+		repo = r
+	}
+	repo = filepath.Clean(repo)
+	if runtime.GOOS == "windows" {
+		repo = strings.ToLower(repo)
+	}
+	return repo
+}
 
 // handleReplacePane is the fire-and-forget entry point: it logs what
 // replacePaneAt reports and returns. Kept so the ordinary replace path behaves
@@ -3690,6 +3712,9 @@ func (d *Daemon) ensureTabNotEmpty(tabID string) {
 func (d *Daemon) handlePaneInput(conn *ipc.Conn, msg *ipc.Message) {
 	var payload ipc.PaneInputPayload
 	if err := msg.DecodePayload(&payload); err != nil {
+		// An id-bearing sender holds a place until this is answered (the web
+		// gateway counts paste chunks), so silence would hold it until resync.
+		d.replyError(conn, msg, ipc.ErrCodeBadPayload, "pane_input is malformed")
 		return
 	}
 	out := d.paneInputOutcome(payload)

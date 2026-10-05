@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -433,10 +434,29 @@ func (d *Daemon) createTabIn(conn *ipc.Conn, req ipc.CreateTabReqPayload, cwd st
 		return answer, start
 	}
 
-	// constructPaneAt, not createPaneAt: tab and pane reach clients as ONE
-	// frame, the discipline handleCreateTab documents.
-	pane, err := d.constructPaneAt(payload, cwd, payload.Type)
+	// buildPane without a broadcast, not createPaneAt: tab and pane reach
+	// clients as ONE frame, the discipline handleCreateTab documents. A strict
+	// caller (split_pane_req's new tab) also claims the resume session
+	// strictly: a session another pane took between the check above and the
+	// publish is refused, never silently started fresh.
+	pane, _, err := d.buildPane(payload, cwd, payload.Type, buildOpts{Slot: paneSlot{TabID: tab.ID}, StrictResume: strictResume})
 	resp := ipc.CreateTabRespPayload{TabID: tab.ID}
+	var taken *errResumeTaken
+	if pane == nil && errors.As(err, &taken) {
+		// buildPane destroyed the pane; the tab is this request's own and now
+		// empty, so it goes too — unless a pane was moved into it meanwhile.
+		projectID, _ := d.session.TabProjectID(tab.ID)
+		if gone, _ := d.session.DestroyTabIfPanes(tab.ID, nil); gone {
+			d.recoverEmptyProject(conn, projectID)
+			resp.TabID = ""
+		} else {
+			d.ensureTabNotEmpty(tab.ID)
+		}
+		resp.Error = err.Error()
+		d.broadcastState()
+		d.requestSnapshot()
+		return resp, nil
+	}
 	if err != nil && pane == nil {
 		resp.Error = err.Error()
 		d.ensureTabNotEmpty(tab.ID)

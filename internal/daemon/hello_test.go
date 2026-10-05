@@ -171,3 +171,14 @@ func drainNoFrameWithID(t *testing.T, client *ipc.Client, id string) {
 		}
 	}
 }
+
+// A malformed id-bearing pane_input is answered: the web gateway holds a
+// paste place per id until the daemon answers it.
+func TestHandleMessage_MalformedPaneInput_GetsBadPayloadError(t *testing.T) {
+	_, client := mcpTestDaemon(t)
+	roundTrip(t, client, ipc.MsgHello, ipc.MsgHelloResp, ipc.HelloPayload{Kind: "script", Proto: 1, PID: os.Getpid()})
+	resp := roundTrip(t, client, ipc.MsgPaneInput, ipc.MsgError, map[string]any{"pane_id": 5})
+	if e := decodeInto[ipc.ErrorPayload](t, resp); e.Code != ipc.ErrCodeBadPayload || e.Type != ipc.MsgPaneInput {
+		t.Errorf("error = %+v, want bad_payload for pane_input", e)
+	}
+}

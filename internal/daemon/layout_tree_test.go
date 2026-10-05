@@ -15,6 +15,12 @@ import (
 // hold, so no stored or broadcast tree references a closed pane (AC-7) and a
 // replace keeps its slot (AC-13).
 
+// CreateOverlayPane is CreatePane for an overlay, test-only: the pane is
+// published already marked treeless, as buildPane publishes one.
+func (sm *SessionManager) CreateOverlayPane(tabID string, cwd string) (*Pane, error) {
+	return sm.createPane(tabID, cwd, true)
+}
+
 func ltLeaf(id string) *layouttree.Node { return &layouttree.Node{PaneID: id} }
 
 func ltSplit(dir layouttree.SplitDir, ratio float64, l, r *layouttree.Node) *layouttree.Node {

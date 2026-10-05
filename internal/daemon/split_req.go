@@ -296,6 +296,14 @@ func (d *Daemon) splitIntoWorktree(payload ipc.CreatePanePayload, cwd string, sl
 				d.failPreparingPane(placeholder.ID, "worktree not created: "+resp.Error)
 				return
 			}
+			// A swap whose new pane failed to start destroyed the placeholder
+			// with it, so no pane is left to show the reason. Same rule as
+			// the replace arm above: told in the sidebar, unless the swap
+			// emptied the tab and its recovery pane already carries it.
+			if resp.Error != "" && !resp.RecoveredTab {
+				log.Printf("split: worktree %s for placeholder %s failed after the swap: %s", branch, placeholder.ID, resp.Error)
+				d.notifyWorktreeFailed(placeholder.ID, tabID, branch, resp.Error)
+			}
 			applyPaneName(d.session.Pane(resp.PaneID), name)
 		}()
 	}
@@ -303,8 +311,11 @@ func (d *Daemon) splitIntoWorktree(payload ipc.CreatePanePayload, cwd string, sl
 }
 
 // splitIntoNewTab is the "new tab" placement: create_tab_req's code, with the
-// strict resume check createTabIn runs before its tab exists (the first
-// pane's own claim is lenient). The check needs the resolved payload — an
+// strict resume check createTabIn runs before its tab exists, and a strict
+// claim at publish: a session another pane took in between is refused and
+// the request's own tab destroyed. A worktree first pane is the exception —
+// it claims leniently at completion, after the answer has gone (see
+// daemon-lifecycle.md). The check needs the resolved payload — an
 // empty cwd is the project root, and a worktree runs in its checkout — which
 // is why it runs inside createTabIn and not here.
 func (d *Daemon) splitIntoNewTab(conn *ipc.Conn, req ipc.SplitPaneReqPayload) (ipc.SplitPaneRespPayload, func()) {
@@ -335,11 +346,5 @@ func (d *Daemon) splitIntoNewTab(conn *ipc.Conn, req ipc.SplitPaneReqPayload) (i
 // publish of this request produced one: a replace still waiting on git, and a
 // new tab, whose first pane takes no place in a tree.
 func (d *Daemon) tabLayoutRev(tabID string) uint64 {
-	_, tabs, _, _, _ := d.session.SnapshotState()
-	for _, t := range tabs {
-		if t.ID == tabID {
-			return t.LayoutRev
-		}
-	}
-	return 0
+	return d.session.TabLayoutRev(tabID)
 }

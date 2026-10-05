@@ -146,6 +146,30 @@ func TestMovePane_TemplatePendingRefused(t *testing.T) {
 	})
 }
 
+// Once a template tab has had a tree, its keyword is spent: a tree later
+// pruned to empty must not read as "template pending" again and refuse moves.
+func TestMovePane_LaidOutTemplatePrunedToEmptyStillMoves(t *testing.T) {
+	sm, a, b, a1, a2, a3, b1 := movePaneFixture(t)
+	sm.tabs[a].TemplateLayout, sm.tabs[a].TemplateMain = "columns", a1
+	if res := sm.SetTabLayout(a, json.RawMessage(`{"pane_id":"`+a1+`"}`), nil); res != layoutStored {
+		t.Fatalf("SetTabLayout = %v", res)
+	}
+	if sm.tabs[a].TemplateLayout != "" || sm.tabs[a].TemplateMain != "" {
+		t.Fatalf("template keyword kept after a tree was stored: %q %q", sm.tabs[a].TemplateLayout, sm.tabs[a].TemplateMain)
+	}
+	for _, id := range []string{a1, a2, a3} {
+		if _, res := sm.MovePane(id, b); res != movePaneMoved {
+			t.Fatalf("move %s out: %v", id, res)
+		}
+	}
+	if len(sm.tabs[a].Layout) != 0 {
+		t.Fatalf("tab a still has a tree: %s", sm.tabs[a].Layout)
+	}
+	if _, res := sm.MovePane(b1, a); res != movePaneMoved {
+		t.Fatalf("move into the emptied tab = %v, want movePaneMoved", res)
+	}
+}
+
 func TestMovePane_LeavesProjectsAndActiveTabAlone(t *testing.T) {
 	sm, _, b, a1, _, _, _ := movePaneFixture(t)
 	activeTab, activeProject := sm.activeTab, sm.activeProject

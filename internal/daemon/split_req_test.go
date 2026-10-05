@@ -978,3 +978,189 @@ func paneWithCWD(d *Daemon, cwd string) bool {
 	}
 	return false
 }
+
+// The SPLIT arm's placeholder is swapped out before the new pane starts, so
+// a spawn that fails after the swap leaves no pane showing the reason. It is
+// told once in the sidebar, on the placeholder the answer named.
+func TestSplitPaneReq_WorktreeSplitSpawnFailureIsTold(t *testing.T) {
+	d, client := mcpTestDaemon(t)
+	_, keep := seedTab(t, d, client)
+	repo := worktreeRepo(t)
+	stubAdd(t, func(_ context.Context, _, path, _ string) error { return os.MkdirAll(path, 0o755) })
+	prevRm := removeWorktreeFn
+	removeWorktreeFn = func(context.Context, string, string, string) error { return nil }
+	t.Cleanup(func() { removeWorktreeFn = prevRm })
+	prev := newSessionFn
+	newSessionFn = func(cols, rows int) apty.Session { return &startFailSession{} }
+	t.Cleanup(func() { newSessionFn = prev })
+
+	resp := split(t, client, ipc.SplitPaneReqPayload{TargetPaneID: keep, Placement: ipc.PlacementRight,
+		Pane: ipc.SplitPaneSpec{CWD: repo, Worktree: &ipc.SplitWorktree{Branch: "feat/s"}}})
+	if !resp.Preparing || resp.PaneID == "" {
+		t.Fatalf("split: %+v", resp)
+	}
+	count := func() int {
+		n := 0
+		for _, e := range d.events.Events() {
+			if e.Type == "worktree_failed" && e.PaneID == resp.PaneID {
+				n++
+			}
+		}
+		return n
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for count() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("a split whose new pane failed after the swap raised no worktree_failed card")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	waitWorktreeSlotFree(t, d)
+	if n := count(); n != 1 {
+		t.Fatalf("worktree_failed cards = %d, want 1", n)
+	}
+}
+
+// Two new-tab creates for one session that both pass the early check race
+// for the claim at publish. The loser is refused, never started fresh, and
+// the tab it made is destroyed with it. resumeClaimMu is held until both
+// have published, so both reach the claim — deterministically.
+func TestSplitPaneReq_NewTabResumeClaimRaceRefusesTheLoser(t *testing.T) {
+	d, sock := overlayServerDaemonWithConfig(t, config.Default())
+	registerShippedPlugins(t, d)
+	prev := transcriptExistsFn
+	transcriptExistsFn = func(string) (bool, bool) { return true, true }
+	t.Cleanup(func() { transcriptExistsFn = prev })
+	proj := d.session.CreateProject("race", t.TempDir())
+	const id = "0f3c2a9e-1b2c-4d5e-8f90-1a2b3c4d5e6f"
+
+	before := map[string]bool{}
+	for _, tab := range d.session.Tabs() {
+		before[tab.ID] = true
+	}
+	newTabsWithPanes := func() int {
+		n := 0
+		for _, tab := range d.session.Tabs() {
+			if !before[tab.ID] && len(d.session.Panes(tab.ID)) > 0 {
+				n++
+			}
+		}
+		return n
+	}
+
+	type result struct {
+		resp ipc.SplitPaneRespPayload
+		err  error
+	}
+	results := make(chan result, 2)
+	send := func(c *ipc.Client, reqID string) {
+		m, err := ipc.NewMessage(ipc.MsgSplitPaneReq, ipc.SplitPaneReqPayload{Placement: ipc.PlacementNewTab,
+			NewTab: &ipc.SplitNewTab{ProjectID: proj.ID},
+			Pane:   ipc.SplitPaneSpec{Type: "claude-code", ResumeSessionID: id, CWD: t.TempDir()}})
+		if err != nil {
+			results <- result{err: err}
+			return
+		}
+		m.ID = reqID
+		if err := c.Send(m); err != nil {
+			results <- result{err: err}
+			return
+		}
+		_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
+		for {
+			r, err := c.Receive()
+			if err != nil {
+				results <- result{err: err}
+				return
+			}
+			if r.Type == ipc.MsgSplitPaneResp && r.ID == reqID {
+				var p ipc.SplitPaneRespPayload
+				err := json.Unmarshal(r.Payload, &p)
+				results <- result{resp: p, err: err}
+				return
+			}
+		}
+	}
+	dial := func() *ipc.Client {
+		c, err := ipc.NewClient(sock)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		t.Cleanup(func() { c.Close() })
+		sendNoID(t, c, ipc.MsgClientHello, ipc.ClientHelloPayload{Role: "bridge", PID: os.Getpid()})
+		return c
+	}
+	c1, c2 := dial(), dial()
+
+	d.resumeClaimMu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			d.resumeClaimMu.Unlock()
+		}
+	}()
+	waitFor := func(n int) {
+		deadline := time.Now().Add(5 * time.Second)
+		for newTabsWithPanes() < n {
+			if time.Now().After(deadline) {
+				t.Fatalf("%d new tabs published, want %d", newTabsWithPanes(), n)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	go send(c1, "race-a")
+	waitFor(1)
+	go send(c2, "race-b")
+	waitFor(2)
+	d.resumeClaimMu.Unlock()
+	locked = false
+
+	var ok, refused int
+	for i := 0; i < 2; i++ {
+		r := <-results
+		if r.err != nil {
+			t.Fatalf("request: %v", r.err)
+		}
+		switch {
+		case r.resp.Error == "" && r.resp.PaneID != "":
+			ok++
+		case strings.Contains(r.resp.Error, "already open") && r.resp.PaneID == "" && r.resp.TabID == "":
+			refused++
+		default:
+			t.Fatalf("unexpected answer: %+v", r.resp)
+		}
+	}
+	if ok != 1 || refused != 1 {
+		t.Fatalf("ok=%d refused=%d, want one of each", ok, refused)
+	}
+	n := 0
+	for _, tab := range d.session.Tabs() {
+		if !before[tab.ID] {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("%d new tabs left, want 1 (the loser's tab must be destroyed)", n)
+	}
+}
+
+// One repository named in two spellings is one overlay slot: a trailing
+// separator, a "." element or a symlink must not evict a reusable overlay.
+func TestOverlayKey_NormalizesTheRepository(t *testing.T) {
+	repo := t.TempDir()
+	want := overlayKey("lazygit", repo)
+	for _, alias := range []string{repo + string(filepath.Separator), filepath.Join(repo, "."), repo + string(filepath.Separator) + "."} {
+		if got := overlayKey("lazygit", alias); got != want {
+			t.Errorf("overlayKey(%q) = %q, want %q", alias, got, want)
+		}
+	}
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(repo, link); err != nil {
+		t.Logf("no symlink on this host: %v", err)
+	} else if got := overlayKey("lazygit", link); got != want {
+		t.Errorf("overlayKey(symlink) = %q, want %q", got, want)
+	}
+	if overlayKey("hunk", repo) == want {
+		t.Error("two kinds share one key")
+	}
+}

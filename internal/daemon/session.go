@@ -429,7 +429,7 @@ type Pane struct {
 	Overlay bool
 	// treeless marks a pane that never belongs in its tab's layout tree (an
 	// overlay). Unlike Overlay it is set BEFORE the pane is published
-	// (CreateOverlayPane) and never changes, so the tree operations read it
+	// (buildPane, daemon.go) and never changes, so the tree operations read it
 	// under sm.mu alone — they must not take PluginMu, which guards Overlay.
 	treeless bool
 	// OverlayHiddenAt is when the TUI last hid this overlay; zero means it is
@@ -889,13 +889,6 @@ func (sm *SessionManager) CreatePane(tabID string, cwd string) (*Pane, error) {
 	return sm.createPane(tabID, cwd, false)
 }
 
-// CreateOverlayPane is CreatePane for an overlay: the pane is published
-// already marked treeless, so no layout write in the window before
-// constructPaneAt sets Overlay can place it in the tab's tree.
-func (sm *SessionManager) CreateOverlayPane(tabID string, cwd string) (*Pane, error) {
-	return sm.createPane(tabID, cwd, true)
-}
-
 func (sm *SessionManager) createPane(tabID, cwd string, treeless bool) (*Pane, error) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -1231,6 +1224,16 @@ func (sm *SessionManager) TabProjectID(id string) (string, bool) {
 	return tab.ProjectID, true
 }
 
+// TabLayoutRev is a tab's stored-tree revision, 0 for an unknown tab.
+func (sm *SessionManager) TabLayoutRev(id string) uint64 {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	if tab, ok := sm.tabs[id]; ok {
+		return tab.LayoutRev
+	}
+	return 0
+}
+
 func (sm *SessionManager) Panes(tabID string) []*Pane {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
@@ -1331,6 +1334,7 @@ func (sm *SessionManager) SetTabLayout(tabID string, layout json.RawMessage, bas
 	}
 	tab.Layout = sm.validLayoutLocked(tab, layout)
 	tab.LayoutRev++
+	settleTemplateLocked(tab)
 	return layoutStored
 }
 

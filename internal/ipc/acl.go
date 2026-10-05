@@ -147,15 +147,28 @@ func foreignHomeEntry(names []string) string {
 	return ""
 }
 
+// QuilHomeDotPrefixes are the prefixes of the dot-named temp files quil
+// writes in QUIL_HOME, which a crash can leave behind. Only these count, not
+// any dot name: a folder QUIL_HOME was pointed at can hold nothing but dot
+// entries (.git, .vscode), and reading those as quil's would rewrite its
+// access list. Exported for the drift test.
+var QuilHomeDotPrefixes = []string{
+	".templates-",         // config.WriteTemplatesSource
+	".quil-staging-",      // remoteinstall's Windows staging folder
+	".quil-update-probe-", // update.InstallWritable
+}
+
 // IsQuilHomeEntry reports whether name, a top-level entry of QUIL_HOME, is
-// one quil writes. Any dot-prefixed name counts: quil's temp files are
-// dot-prefixed (.templates-*, .quil-staging-*) and a crash can leave one,
-// while a folder QUIL_HOME was pointed at always holds non-dot entries too,
-// so detection loses nothing. Exported for the drift test that checks every
-// config path against it.
+// one quil writes. Exported for the drift test that checks every config
+// path against it.
 func IsQuilHomeEntry(name string) bool {
-	if strings.HasPrefix(name, ".") || quilHomeNames[name] {
+	if quilHomeNames[name] {
 		return true
+	}
+	for _, p := range QuilHomeDotPrefixes {
+		if strings.HasPrefix(name, p) {
+			return true
+		}
 	}
 	for _, s := range quilHomeStems {
 		if name == s || strings.HasPrefix(name, s+".") || strings.HasPrefix(name, s+"-") {

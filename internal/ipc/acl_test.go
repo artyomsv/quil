@@ -103,9 +103,8 @@ func TestForeignHomeEntry(t *testing.T) {
 		"sandbox-image.json", "tokens.json", "tokens.json.tmp-1", "audit.log",
 		"audit-20261001-120000.log", "quild-20261001-120000.log", "quil-20261001-120000.log",
 		"web.log", "hook.log", "notify-activate.log", "quild.sock", ".quil-staging-123",
-		// Dot-prefixed temps a crash can leave (config.SaveTemplates), and any
-		// future one.
-		".templates-123", ".anything",
+		// Dot-prefixed temps a crash can leave.
+		".templates-123", ".quil-update-probe-123",
 		"buffers", "plugins", "sessions", "events", "shellinit", "paste", "notes",
 		"notes-conflicts", "mcp-logs", "update", "history", "sandbox", "claudehook",
 		"codexhook", "opencodehook",
@@ -118,7 +117,9 @@ func TestForeignHomeEntry(t *testing.T) {
 	}
 	// A folder QUIL_HOME was pointed at keeps its own files, so it reads
 	// foreign even after quil wrote its own beside them.
-	for _, name := range []string{"Documents", "desktop.ini", "notes.txt", "configuration", "quilt.txt", "workspaces"} {
+	// A dot entry is not quil's by its dot alone: a folder holding only
+	// .git or .vscode must not have its access list rewritten.
+	for _, name := range []string{"Documents", "desktop.ini", "notes.txt", "configuration", "quilt.txt", "workspaces", ".git", ".vscode", ".anything", ".templates"} {
 		if got := foreignHomeEntry(append(append([]string{}, quil...), name)); got != name {
 			t.Errorf("foreignHomeEntry with %q = %q, want %q", name, got, name)
 		}
@@ -147,6 +148,13 @@ func TestCheckQuilHome(t *testing.T) {
 	}
 	if err := checkQuilHome(arbitrary); !errors.Is(err, ErrNotQuilHome) || !strings.Contains(err.Error(), "report.docx") {
 		t.Errorf("arbitrary folder: got %v, want ErrNotQuilHome naming report.docx", err)
+	}
+	dotOnly := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dotOnly, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkQuilHome(dotOnly); !errors.Is(err, ErrNotQuilHome) || !strings.Contains(err.Error(), ".git") {
+		t.Errorf("folder holding only .git: got %v, want ErrNotQuilHome naming .git", err)
 	}
 	if err := checkQuilHome(filepath.Join(empty, "missing")); err == nil || errors.Is(err, ErrNotQuilHome) {
 		t.Errorf("unlistable folder: got %v, want a listing error", err)

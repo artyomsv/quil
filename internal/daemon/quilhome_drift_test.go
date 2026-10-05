@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/artyomsv/quil/internal/config"
@@ -47,5 +48,10 @@ func TestQuilHomeEntriesKnownToProtectDir(t *testing.T) {
 		if name := filepath.Base(p); !ipc.IsQuilHomeEntry(name) {
 			t.Errorf("ipc.IsQuilHomeEntry(%q) = false: add it to quilHomeNames or quilHomeStems in internal/ipc/acl.go", name)
 		}
+	}
+	// The dot-named temps are matched by prefix only, so a renamed pattern
+	// must still be one of them.
+	if name := strings.Replace(config.TemplatesTempPattern, "*", "123", 1); !ipc.IsQuilHomeEntry(name) {
+		t.Errorf("ipc.IsQuilHomeEntry(%q) = false: add its prefix to QuilHomeDotPrefixes in internal/ipc/acl.go", name)
 	}
 }

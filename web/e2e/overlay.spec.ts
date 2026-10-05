@@ -1,8 +1,8 @@
 import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { type Page } from '@playwright/test';
-import { activePane, bufferText, createPane, expect, ipcRequest, keymapLoaded, listPanes, login, type QuilWeb, testWith } from './harness';
+import { type Page, type WebSocketRoute } from '@playwright/test';
+import { activePane, bufferText, createPane, createTab, expect, ipcRequest, ipcSend, keymapLoaded, listPanes, login, type QuilWeb, tabButton, testWith } from './harness';
 
 // A stand-in lazygit first on PATH: it answers the daemon's `lazygit
 // --version` probe, then prints a marker and echoes its input, so the test
@@ -124,4 +124,57 @@ test('Alt+G in a folder of several repositories asks which one', async ({ page, 
   await expect(page.locator('.slot.overlay')).toBeVisible();
   const ov = await overlayId(quil.home);
   expect(await overlayCwd(quil.home, ov)).toBe(path.join(base, 'beta'));
+});
+
+// overlay_visible is a claim per connection, and an overlay nobody claims is
+// evicted after the idle timeout. So the page must withdraw its claim when the
+// overlay leaves the screen with its tab, make it again when the tab comes
+// back, and make it again on a new socket: the daemon dropped the old one's
+// claim with its connection, while the overlay is still on the page.
+test('the overlay claim follows tab switches and survives a reconnect', async ({ page, quil }) => {
+  // Every page-to-gateway text frame, through a route the test can close.
+  const sent: string[] = [];
+  let link: { page: WebSocketRoute; server: WebSocketRoute } | null = null;
+  await page.routeWebSocket(/\/ws$/, (ws) => {
+    const server = ws.connectToServer();
+    link = { page: ws, server };
+    ws.onMessage((m) => {
+      if (typeof m === 'string') sent.push(m);
+      server.send(m);
+    });
+  });
+  const claims = (id: string): boolean[] =>
+    sent
+      .map((f) => JSON.parse(f) as { type?: string; payload?: { pane_id?: string; overlay_visible?: boolean } })
+      .filter((m) => m.type === 'update_pane' && m.payload?.pane_id === id && m.payload.overlay_visible !== undefined)
+      .map((m) => m.payload?.overlay_visible === true);
+
+  const pane = await gitPane(page, quil);
+  const home = (await listPanes(quil.home)).find((p) => p.id === pane)?.tab_id ?? '';
+  await page.keyboard.press('Alt+g');
+  const overlay = page.locator('.slot.overlay');
+  await expect(overlay).toBeVisible();
+  const id = await overlayId(quil.home);
+  await expect.poll(() => claims(id)).toEqual([true]);
+
+  // Away: the overlay left the screen with its tab.
+  await createTab(quil.home, 'elsewhere');
+  await tabButton(page, 'elsewhere').click();
+  await expect(overlay).toHaveCount(0);
+  await expect.poll(() => claims(id)).toEqual([true, false]);
+  // Back: on screen again.
+  await ipcSend(quil.home, 'switch_tab', { tab_id: home });
+  await expect(overlay).toBeVisible();
+  await expect.poll(() => claims(id)).toEqual([true, false, true]);
+
+  // A dropped socket (4002, too slow). With no onClose handler the route
+  // forwards the close to the gateway, which drops its daemon connection and
+  // the claim with it. The page reconnects on its own and claims the overlay
+  // it still shows.
+  const before = claims(id).length;
+  const old = link as { page: WebSocketRoute; server: WebSocketRoute } | null;
+  expect(old).not.toBeNull();
+  await old?.page.close({ code: 4002, reason: 'too slow' });
+  await expect.poll(() => claims(id).slice(before), { timeout: 15_000 }).toEqual([true]);
+  await expect(overlay).toBeVisible();
 });

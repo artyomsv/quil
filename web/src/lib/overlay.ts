@@ -70,3 +70,37 @@ export function overlayRepoChoice(candidates: string[], existing: OverlayInfo | 
 export function overlayVisibleMsg(readOnly: boolean, paneId: string, visible: boolean): Message | null {
   return readOnly ? null : { type: 'update_pane', payload: { pane_id: paneId, overlay_visible: visible } };
 }
+
+// OverlayClaim keeps the daemon's picture of what this socket shows in step
+// with the screen. overlay_visible is a CLAIM per connection, and an overlay
+// no client claims is evicted after the idle timeout, so every path that
+// changes what is on screen must report it (plugins.md): a toggle, a tab or
+// project change (the old tab's overlay leaves the screen and must be
+// withdrawn), and a new socket — the daemon dropped the old one's claims with
+// its connection, so the overlay still on screen is claimed again.
+export class OverlayClaim {
+  private claimed = '';
+
+  // reconcile returns the messages that move the claim to onScreen ('' for
+  // none). A withdrawn overlay that is gone (live false) needs no message:
+  // its claim went with the pane. A read-only page claims nothing.
+  reconcile(onScreen: string, readOnly: boolean, live: (id: string) => boolean): Message[] {
+    if (onScreen === this.claimed) return [];
+    const out: Message[] = [];
+    if (this.claimed !== '' && live(this.claimed)) {
+      const m = overlayVisibleMsg(readOnly, this.claimed, false);
+      if (m) out.push(m);
+    }
+    if (onScreen !== '') {
+      const m = overlayVisibleMsg(readOnly, onScreen, true);
+      if (m) out.push(m);
+    }
+    this.claimed = onScreen;
+    return out;
+  }
+
+  // forget runs when the socket goes: the daemon holds nothing for the next.
+  forget(): void {
+    this.claimed = '';
+  }
+}

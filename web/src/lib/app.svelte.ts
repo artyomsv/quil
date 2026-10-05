@@ -21,7 +21,7 @@ import { keyFor, keyTarget } from './keys/labels';
 import { type Dir, neighbour } from './keys/nav';
 import { type FetchLike, hasSession, postLogin, sessionGone } from './login';
 import { NotificationStore, type NotifyInfo, type PaneEvent, parsePaneEvent } from './notifications';
-import { type OverlayInfo, type OverlayKind, overlayOf, overlayRepoChoice, overlayToggle, overlayVisibleMsg } from './overlay';
+import { OverlayClaim, type OverlayInfo, type OverlayKind, overlayOf, overlayRepoChoice, overlayToggle } from './overlay';
 import { NOT_SENT, PasteFlow } from './paste';
 import type { Message, PaneInfo, PaneSize, SplitPaneReq, WebWelcome, WorkspaceState } from './protocol';
 import { type Outcome, Requests, STILL_WORKING } from './requests';
@@ -208,6 +208,8 @@ export class App {
   // Tabs with an overlay create in flight.
   private readonly overlayBusy = new Set<string>();
   private readonly store = new NotificationStore(null);
+  // What this socket last told the daemon it shows (overlay_visible).
+  private readonly overlayClaim = new OverlayClaim();
   // A notification jump to another tab's pane, until the state showing that
   // tab arrives.
   private pendingJump: PendingJump | null = null;
@@ -487,6 +489,9 @@ export class App {
     const shown: Record<string, string> = {};
     for (const [tab, id] of Object.entries(this.overlayShown)) if (overlayOf(s, tab)?.id === id) shown[tab] = id;
     if (Object.keys(shown).length !== Object.keys(this.overlayShown).length) this.overlayShown = shown;
+    // A tab or project change takes one overlay off the screen and may put
+    // another on; the first state on a new socket claims it again.
+    this.reportOverlay();
     for (const t of s.tabs) this.drag.stateArrived(t.id, t.layout_rev);
     const placed = placedPanes(s).map((p) => p.id);
     // A replaced active pane hands the part to the pane in its slot.
@@ -571,6 +576,8 @@ export class App {
     // again for a mark still set.
     this.unseenAsked.reset();
     this.pendingJump = null;
+    // The daemon drops this socket's overlay claims with its connection.
+    this.overlayClaim.forget();
   }
 
   // closeAsks closes an open rename or close dialog: what it would send can
@@ -1101,10 +1108,21 @@ export class App {
     else delete next[tab];
     this.overlayShown = next;
     this.keys?.cancel();
-    const msg = overlayVisibleMsg(this.readOnly, paneId, v);
-    if (msg) this.conn.send(msg);
+    this.reportOverlay();
     if (v) this.focus(paneId);
     else this.focusActive();
+  }
+
+  // reportOverlay tells the daemon which overlay is on screen now, if that
+  // changed since this socket last said (OverlayClaim). Run after every
+  // toggle, every state (the active tab or project may have moved) and
+  // every attach.
+  private reportOverlay(): void {
+    const s = this.state;
+    if (!s || !this.live) return;
+    const on = this.overlayVisibleFor(s, activeTabOf(s), this.overlayShown)?.id ?? '';
+    const ids = new Set(s.panes.map((p) => p.id));
+    for (const m of this.overlayClaim.reconcile(on, this.readOnly, (id) => ids.has(id))) this.conn.send(m);
   }
 
   // dismissEvent needs a socket that can send: a dismissal while the link is
@@ -1206,8 +1224,11 @@ export class App {
 
   // attached runs once per (re)attach, after the attach's own state is
   // applied (ConnectionEvents.onAttached): it reloads the keymap and filter
-  // (clientLoaded → keysFrom) and rebuilds the notification list.
+  // (clientLoaded → keysFrom), rebuilds the notification list, and claims
+  // the overlay still on screen (the attach's state already did; a no-op
+  // then, kept so the claim never depends on that order).
   private attached(): void {
+    this.reportOverlay();
     void this.refreshClient();
     void this.rebuildNotifications();
   }

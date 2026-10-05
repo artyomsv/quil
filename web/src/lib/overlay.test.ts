@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { MAX_REPO_CHOICES, overlayOf, overlayRepoChoice, overlayToggle, overlayVisibleMsg } from './overlay';
+import { MAX_REPO_CHOICES, OverlayClaim, overlayOf, overlayRepoChoice, overlayToggle, overlayVisibleMsg } from './overlay';
 import type { WorkspaceState } from './protocol';
 
 const state = (panes: WorkspaceState['panes']): WorkspaceState => ({
@@ -88,5 +88,39 @@ describe('overlayRepoChoice', () => {
     const many = Array.from({ length: MAX_REPO_CHOICES + 5 }, (_, i) => `/r${i}`);
     const got = overlayRepoChoice(many, null);
     expect(got.do === 'pick' && got.repos.length).toBe(MAX_REPO_CHOICES);
+  });
+});
+
+describe('OverlayClaim', () => {
+  const vis = (id: string, v: boolean) => ({ type: 'update_pane', payload: { pane_id: id, overlay_visible: v } });
+  const all = () => true;
+
+  it('a tab switch withdraws the old overlay and claims the one now on screen', () => {
+    const c = new OverlayClaim();
+    expect(c.reconcile('o1', false, all)).toEqual([vis('o1', true)]);
+    // Same screen: nothing to say.
+    expect(c.reconcile('o1', false, all)).toEqual([]);
+    // To a tab with no shown overlay: o1 left the screen.
+    expect(c.reconcile('', false, all)).toEqual([vis('o1', false)]);
+    // Back, and on to a tab whose overlay is shown.
+    expect(c.reconcile('o1', false, all)).toEqual([vis('o1', true)]);
+    expect(c.reconcile('o2', false, all)).toEqual([vis('o1', false), vis('o2', true)]);
+  });
+
+  it('a new socket claims the overlay still on screen again', () => {
+    const c = new OverlayClaim();
+    c.reconcile('o1', false, all);
+    // The daemon dropped the claim with the old connection.
+    c.forget();
+    expect(c.reconcile('o1', false, all)).toEqual([vis('o1', true)]);
+  });
+
+  it('a gone overlay is not withdrawn, and a read-only page says nothing', () => {
+    const c = new OverlayClaim();
+    c.reconcile('o1', false, all);
+    expect(c.reconcile('', false, () => false)).toEqual([]);
+    const ro = new OverlayClaim();
+    expect(ro.reconcile('o1', true, all)).toEqual([]);
+    expect(ro.reconcile('', true, all)).toEqual([]);
   });
 });

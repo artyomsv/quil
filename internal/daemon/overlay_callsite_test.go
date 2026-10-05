@@ -73,35 +73,36 @@ func overlayTestDaemon(t *testing.T, cfg config.Config) *Daemon {
 }
 
 // waitCreateWorkersAtCleanup registers a cleanup that waits for d's create
-// workers. Registered AFTER the seam swap, so it runs BEFORE the restore: a
-// worktree worker still spawning its pane once the test body returned read
-// newSessionFn while the cleanup wrote it (a data race in CI). A worker parked
-// past the bound is reported, not waited on forever, so a test that failed
-// with a gate still closed ends instead of hanging the package.
+// workers. Register it AFTER every seam swap a worker reads, so it runs BEFORE
+// those restores (cleanups run last-in first-out): a worktree worker still
+// spawning its pane once the test body returned read newSessionFn while the
+// cleanup wrote it (a data race in CI). The test daemon helpers register one
+// after their own swap; a test that swaps a seam itself afterwards registers
+// another after that swap.
 //
-// The conn handlers are drained first: a split starts its worker only AFTER
-// its answer is sent, so a test can be done while the handler is still about
-// to call goCreateWorker — and an Add from zero racing the Wait is the misuse
-// sync.WaitGroup documents.
+// A worker that starts only after its answer was sent is counted from before
+// that send (holdCreateWorkers), so a test that has the answer never Waits
+// ahead of the Add.
 func waitCreateWorkersAtCleanup(t *testing.T, d *Daemon) {
 	t.Helper()
-	t.Cleanup(func() {
-		// Logged, not failed: a handler parked on something this test never
-		// released is that test's business, and only a create would race.
-		if d.server != nil && !d.server.WaitConns(5*time.Second) {
-			t.Log("a conn handler was still running 5s after the test ended")
-		}
-		done := make(chan struct{})
-		go func() {
-			d.createWG.Wait()
-			close(done)
-		}()
-		select {
-		case <-done:
-		case <-time.After(10 * time.Second):
-			t.Error("a create worker was still running 10s after the test ended")
-		}
-	})
+	t.Cleanup(func() { waitCreateWorkers(t, d) })
+}
+
+// waitCreateWorkers waits for d's create workers to return. A worker parked
+// past the bound is reported, not waited on forever, so a test that failed
+// with a gate still closed ends instead of hanging the package.
+func waitCreateWorkers(t *testing.T, d *Daemon) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		d.createWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Error("a create worker was still running after 10s")
+	}
 }
 
 // overlayServerDaemonWithConfig is overlayServerDaemon with a policy and the

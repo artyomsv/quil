@@ -359,6 +359,7 @@ func TestSplitPaneReq_HeldSpawnDoesNotBlockOtherClients(t *testing.T) {
 		return newLiveFakeSession()
 	}
 	t.Cleanup(func() { newSessionFn = prev })
+	waitCreateWorkersAtCleanup(t, d)
 	defer close(release)
 
 	m, _ := ipc.NewMessage(ipc.MsgSplitPaneReq, ipc.SplitPaneReqPayload{TargetPaneID: first, Placement: ipc.PlacementRight})
@@ -607,6 +608,7 @@ func TestSplitPaneReq_SpawnFailureCarriesTheError(t *testing.T) {
 	prev := newSessionFn
 	newSessionFn = func(cols, rows int) apty.Session { return &startFailSession{} }
 	t.Cleanup(func() { newSessionFn = prev })
+	waitCreateWorkersAtCleanup(t, d)
 
 	resp := split(t, client, ipc.SplitPaneReqPayload{TargetPaneID: first, Placement: ipc.PlacementRight, Pane: ipc.SplitPaneSpec{CWD: t.TempDir()}})
 	if resp.PaneID == "" || resp.Error != "" || !strings.Contains(resp.Notice, "spawn refused by the test") {
@@ -633,6 +635,7 @@ func TestSplitPaneReq_NewTabSpawnFailureIsANotice(t *testing.T) {
 	prev := newSessionFn
 	newSessionFn = func(cols, rows int) apty.Session { return &startFailSession{} }
 	t.Cleanup(func() { newSessionFn = prev })
+	waitCreateWorkersAtCleanup(t, d)
 
 	resp := split(t, client, ipc.SplitPaneReqPayload{Placement: ipc.PlacementNewTab, NewTab: &ipc.SplitNewTab{ProjectID: proj.ID}, Pane: ipc.SplitPaneSpec{}})
 	if resp.PaneID == "" || resp.TabID == "" || resp.Error != "" || !strings.Contains(resp.Notice, "spawn refused by the test") {
@@ -861,6 +864,7 @@ func TestSplitPaneReq_WorktreeReplaceSpawnFailureIsToldOnce(t *testing.T) {
 	prev := newSessionFn
 	newSessionFn = func(cols, rows int) apty.Session { return &startFailSession{} }
 	t.Cleanup(func() { newSessionFn = prev })
+	waitCreateWorkersAtCleanup(t, d)
 	failedFor := func(paneID string) bool {
 		for _, e := range d.events.Events() {
 			if e.Type == "worktree_failed" && e.PaneID == paneID {
@@ -1015,6 +1019,7 @@ func TestSplitPaneReq_WorktreeSplitSpawnFailureIsTold(t *testing.T) {
 	prev := newSessionFn
 	newSessionFn = func(cols, rows int) apty.Session { return &startFailSession{} }
 	t.Cleanup(func() { newSessionFn = prev })
+	waitCreateWorkersAtCleanup(t, d)
 
 	resp := split(t, client, ipc.SplitPaneReqPayload{TargetPaneID: keep, Placement: ipc.PlacementRight,
 		Pane: ipc.SplitPaneSpec{CWD: repo, Worktree: &ipc.SplitWorktree{Branch: "feat/s"}}})

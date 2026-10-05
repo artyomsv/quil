@@ -259,6 +259,7 @@ func TestTemplateIPC_Prompts_QueueInOrderAfterAllPanesExist(t *testing.T) {
 			s.Close()
 		}
 	})
+	waitCreateWorkersAtCleanup(t, d)
 	dir := t.TempDir()
 	resp := templateRequest(t, c, ipc.CreateFromTemplateReqPayload{Template: "prompts", Task: "literal {{panes}}", CWD: dir})
 	if resp.Error != "" || len(resp.PaneIDs) != 2 {
@@ -643,6 +644,7 @@ func TestTemplateIPC_LaterPaneFailsInCheckout_KeepsPanesAndBriefsNobody(t *testi
 			s.Close()
 		}
 	})
+	waitCreateWorkersAtCleanup(t, d)
 
 	created := make(chan string, 1)
 	stubAdd(t, func(_ context.Context, _, path, _ string) error {
@@ -677,9 +679,13 @@ func TestTemplateIPC_LaterPaneFailsInCheckout_KeepsPanesAndBriefsNobody(t *testi
 		t.Fatalf("panes carrying a spawn error = %d, want 1 — the failure must stay visible", failed)
 	}
 
-	// Give delivery every chance to happen before concluding it did not: the
-	// prompts are queued right after the frame this test already waited for.
-	time.Sleep(300 * time.Millisecond)
+	// Concluded only once delivery is decided and done, not after a guessed
+	// delay: the template worker that would queue the prompts has returned,
+	// and every pane's input writer has drained what was queued.
+	waitCreateWorkers(t, d)
+	for _, p := range d.session.AllPanes() {
+		waitUntil(t, "input queue drained", func() bool { return p.inputWritten.Load() >= p.inputEnqueued.Load() })
+	}
 	for i, s := range sessions {
 		if got := s.recorded(); len(got) != 0 {
 			t.Fatalf("pane %d was briefed on an incomplete team: %+v", i, got)

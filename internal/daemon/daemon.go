@@ -2464,6 +2464,9 @@ func (d *Daemon) handleCreateTab(conn *ipc.Conn, msg *ipc.Message) {
 		log.Printf("new tab %s: %v", tab.ID, err)
 	}
 
+	if pane != nil && spec.Worktree != nil {
+		defer d.holdCreateWorkers()()
+	}
 	d.broadcastState()
 	d.requestSnapshot()
 
@@ -2567,6 +2570,27 @@ func firstPaneType(spec ipc.FirstPaneSpec) string {
 	return spec.Type
 }
 
+// goCreateWorker runs f on a goroutine counted by createWG. The Add happens
+// before the goroutine starts, so a Wait that returns has seen every worker
+// started before it.
+func (d *Daemon) goCreateWorker(f func()) {
+	d.createWG.Add(1)
+	go func() {
+		defer d.createWG.Done()
+		f()
+	}()
+}
+
+// holdCreateWorkers counts a create worker that starts only AFTER an answer or
+// a broadcast has left (a split's checkout, a new tab's worktree), and returns
+// the release. Held across the send, a client that has seen it finds the worker
+// already counted — otherwise its Wait could run before the Add, the misuse
+// sync.WaitGroup documents. Release once the worker has been started.
+func (d *Daemon) holdCreateWorkers() func() {
+	d.createWG.Add(1)
+	return d.createWG.Done
+}
+
 // createFirstPaneWorktree swaps a new tab's placeholder terminal for the pane
 // that was actually requested, inside a worktree it creates first.
 //
@@ -2587,17 +2611,6 @@ func firstPaneType(spec ipc.FirstPaneSpec) string {
 // exactly where it is, and the swap arrives through ordinary broadcast
 // reconciliation with no client-side placeholder bookkeeping.
 //
-// goCreateWorker runs f on a goroutine counted by createWG. The Add happens
-// before the goroutine starts, so a Wait that returns has seen every worker
-// started before it.
-func (d *Daemon) goCreateWorker(f func()) {
-	d.createWG.Add(1)
-	go func() {
-		defer d.createWG.Done()
-		f()
-	}()
-}
-
 // On a worker goroutine for the reason handleCreatePane's worktree branch is:
 // this runs on the requesting conn's dispatch goroutine, where a checkout would
 // block every message from that client, input included.

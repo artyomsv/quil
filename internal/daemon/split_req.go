@@ -38,6 +38,9 @@ func (d *Daemon) handleSplitPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 		return
 	}
 	resp, start := d.splitPane(conn, req)
+	if start != nil {
+		defer d.holdCreateWorkers()()
+	}
 	respondTo(conn, msg.ID, ipc.MsgSplitPaneResp, resp)
 	if start != nil {
 		start()

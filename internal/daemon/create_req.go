@@ -300,6 +300,9 @@ func (d *Daemon) handleCreateTabReq(conn *ipc.Conn, msg *ipc.Message) {
 		return
 	}
 	resp, start := d.createTabFromReq(conn, req)
+	if start != nil {
+		defer d.holdCreateWorkers()()
+	}
 	respondTo(conn, msg.ID, ipc.MsgCreateTabResp, resp)
 	if start != nil {
 		start()

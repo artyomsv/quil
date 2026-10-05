@@ -16,6 +16,17 @@ import (
 	"github.com/artyomsv/quil/internal/tui"
 )
 
+// mustNewToken mints a token for a fixture; a mint failure fails the test
+// instead of handing it an empty token.
+func mustNewToken(t *testing.T) string {
+	t.Helper()
+	tok, _, err := clientauth.NewToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tok
+}
+
 func TestParseConnectFlags(t *testing.T) {
 	addr, file, rest, err := parseConnectFlags([]string{"quil", "--connect", "7878", "--token-file", "/t", "x"})
 	if err != nil || addr != "127.0.0.1:7878" || file != "/t" || len(rest) != 2 || rest[1] != "x" {
@@ -38,13 +49,25 @@ func TestParseConnectFlags(t *testing.T) {
 }
 
 func TestLoadConnectToken_TrimsWhitespace(t *testing.T) {
-	tok, _, _ := clientauth.NewToken()
+	tok := mustNewToken(t)
 	path := filepath.Join(t.TempDir(), "tok")
 	if err := os.WriteFile(path, []byte(tok+"\r\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := loadConnectToken(path, ""); err != nil || got != tok {
 		t.Fatalf("got %q %v", got, err)
+	}
+	// ParseToken refuses a token with a newline in it, so the trim is what
+	// keeps the file `echo $TOKEN > file` writes working.
+	if _, err := clientauth.ParseToken(tok + "\n"); err == nil {
+		t.Fatal("ParseToken accepted a trailing newline: this test no longer proves the trim")
+	}
+	lf := filepath.Join(t.TempDir(), "tok-lf")
+	if err := os.WriteFile(lf, []byte(tok+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := loadConnectToken(lf, ""); err != nil || got != tok {
+		t.Fatalf("LF file: got %q %v", got, err)
 	}
 	if got, err := loadConnectToken("", "  "+tok+"\n"); err != nil || got != tok {
 		t.Fatalf("env: got %q %v", got, err)
@@ -60,7 +83,7 @@ func TestLoadConnectToken_TrimsWhitespace(t *testing.T) {
 // A token that fails to parse is still a secret the user meant to type: the
 // error that is printed for it must not echo it back.
 func TestLoadConnectToken_ErrorNeverEchoesTheToken(t *testing.T) {
-	tok, _, _ := clientauth.NewToken()
+	tok := mustNewToken(t)
 	almost := tok + "x" // one character too long: refused, and still secret
 	if _, err := loadConnectToken("", almost); err == nil {
 		t.Fatal("malformed token accepted")
@@ -144,7 +167,7 @@ func TestRemoteRefusal_WordedForConnect(t *testing.T) {
 func TestApplyConnectFlags_ArmsRemoteGuards(t *testing.T) {
 	withConnectState(t)
 	t.Setenv("QUIL_HOME", t.TempDir())
-	tok, _, _ := clientauth.NewToken()
+	tok := mustNewToken(t)
 
 	rest, err := applyConnectFlags([]string{"quil", "--connect", "7878", "clients", "token", "list"}, tok)
 	if err != nil {
@@ -182,7 +205,7 @@ func TestApplyConnectFlags_ArmsRemoteGuards(t *testing.T) {
 
 func TestApplyConnectFlags_RefusesBeforeArming(t *testing.T) {
 	withConnectState(t)
-	tok, _, _ := clientauth.NewToken()
+	tok := mustNewToken(t)
 
 	if _, err := applyConnectFlags([]string{"quil", "--connect", "7878"}, ""); err == nil {
 		t.Fatal("--connect with no token accepted")
@@ -215,7 +238,7 @@ func freePortAddr(t *testing.T) string {
 }
 
 func TestDialTCP_NoListener(t *testing.T) {
-	tok, _, _ := clientauth.NewToken()
+	tok := mustNewToken(t)
 	_, _, err := dialTCP(context.Background(), freePortAddr(t), tok)
 	if !errors.Is(err, errNoListener) {
 		t.Fatalf("err = %v, want errNoListener", err)
@@ -279,8 +302,8 @@ func expectNothingMore(c net.Conn, after string) error {
 
 // A listener that cannot sign gets nothing after the proof.
 func TestDialTCP_UnprovenGetsNothingMore(t *testing.T) {
-	tok, _, _ := clientauth.NewToken()
-	squatter, _, _ := clientauth.NewToken()
+	tok := mustNewToken(t)
+	squatter := mustNewToken(t)
 	addr, done := fakeListener(t, func(c net.Conn) error {
 		if err := challengeThen(c, func(h *ipc.Message, hp ipc.HelloPayload, nonceS string) *ipc.Message {
 			am := clientauth.AuthMessage(hp.TokenID, hp.Nonce, nonceS)
@@ -303,7 +326,7 @@ func TestDialTCP_UnprovenGetsNothingMore(t *testing.T) {
 
 // Every way the login can fail closes the conn — not only the unproven one.
 func TestDialTCP_ClosesOnEveryLoginFailure(t *testing.T) {
-	tok, _, _ := clientauth.NewToken()
+	tok := mustNewToken(t)
 	for _, tc := range []struct {
 		name  string
 		serve func(c net.Conn) error
@@ -372,7 +395,7 @@ func TestDescribeConnectError(t *testing.T) {
 // A refused re-login parks the ladder; a refused CONNECTION (daemon
 // restarting) stays transient.
 func TestRedialTCP_RefusalPermanentConnRefusedNot(t *testing.T) {
-	tok, _, _ := clientauth.NewToken()
+	tok := mustNewToken(t)
 	prevAddr, prevTok := connectAddr, connectToken
 	t.Cleanup(func() { connectAddr, connectToken = prevAddr, prevTok })
 
@@ -419,7 +442,7 @@ func signedLogin(t *testing.T, tok, rights string) string {
 // a token whose level changed while the link was down changes the mode; the
 // runtime dial (New Project dialog) does the same.
 func TestDialTCPDest_HandsTheLoginRightsToTheModel(t *testing.T) {
-	tok, _, _ := clientauth.NewToken()
+	tok := mustNewToken(t)
 	prevAddr, prevTok := connectAddr, connectToken
 	t.Cleanup(func() { connectAddr, connectToken = prevAddr, prevTok })
 	for _, rights := range []string{ipc.RightsReadOnly, ipc.RightsFull} {
@@ -453,7 +476,7 @@ func TestDialTCPDest_HandsTheLoginRightsToTheModel(t *testing.T) {
 // The login hello and the ordinary hello are ONE builder, so the
 // self-description a TCP daemon registers cannot drift from the unix one.
 func TestDialTCP_LoginHelloIsSendHellos(t *testing.T) {
-	tok, _, _ := clientauth.NewToken()
+	tok := mustNewToken(t)
 	seen := make(chan ipc.HelloPayload, 1)
 	addr, _ := fakeListener(t, func(c net.Conn) error {
 		hello, err := ipc.ReadMessage(c)

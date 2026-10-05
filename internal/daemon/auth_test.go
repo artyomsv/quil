@@ -30,6 +30,17 @@ func setLoginVar(t *testing.T, v *time.Duration, d time.Duration) {
 	t.Cleanup(func() { *v = prev })
 }
 
+// mustNewToken mints a token that no store knows; a mint failure fails the
+// test instead of handing it an empty token.
+func mustNewToken(t *testing.T) string {
+	t.Helper()
+	tok, _, err := clientauth.NewToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tok
+}
+
 func TestLogin_FullFlowCarriesRights(t *testing.T) {
 	h := newAuthHarness(t)
 	tok := h.mint(t, "laptop", clientauth.LevelReadOnly, nil)
@@ -52,7 +63,7 @@ func TestLogin_RefusalsArriveBeforeEOF(t *testing.T) {
 	if _, err := h.d.tokens.Revoke("revoked", nil); err != nil {
 		t.Fatal(err)
 	}
-	wrong, _, _ := clientauth.NewToken()
+	wrong := mustNewToken(t)
 	goodID, _ := clientauth.ParseToken(good)
 	wrongWithGoodID := "qtk_" + goodID + wrong[len("qtk_")+8:]
 
@@ -307,7 +318,7 @@ func TestLogin_CorrectTokenAfterFailures(t *testing.T) {
 	h := newAuthHarness(t)
 	tok := h.mint(t, "a", clientauth.LevelFull, nil)
 	id, _ := clientauth.ParseToken(tok)
-	wrong, _, _ := clientauth.NewToken()
+	wrong := mustNewToken(t)
 	wrongSameID := "qtk_" + id + wrong[len("qtk_")+8:]
 	for i := 0; i < 5; i++ {
 		if _, err := clientauth.ClientLogin(h.dialClient(t), wrongSameID, testLoginHello(), 5*time.Second); err == nil {
@@ -449,8 +460,8 @@ func TestListenerConfig_LoopbackOnly(t *testing.T) {
 // No secret in audit.log or quild.log at debug level.
 func TestLogin_NoSecretsInLogs(t *testing.T) {
 	var buf safeBuffer
+	t.Cleanup(logger.Save())
 	logger.Init("debug", &buf)
-	t.Cleanup(func() { logger.Init("info", io.Discard) })
 	// Short enough for the proof-step timeout below, long enough for the
 	// logins that answer at once.
 	setLoginVar(t, &loginStepTimeout, 500*time.Millisecond)
@@ -463,7 +474,7 @@ func TestLogin_NoSecretsInLogs(t *testing.T) {
 
 	// A refused proof: its nonces and the proof itself.
 	id, _ := clientauth.ParseToken(tok)
-	wrong, _, _ := clientauth.NewToken()
+	wrong := mustNewToken(t)
 	c := h.dialRaw(t)
 	refusedC, refusedS, refusedProof := sendHelloAndProof(t, c, "qtk_"+id+wrong[len("qtk_")+8:])
 	expectRefusal(t, c, "token refused", 3*time.Second)
@@ -746,6 +757,35 @@ func TestInitAuth_DroppedEntriesLoggedAsCount(t *testing.T) {
 	}
 }
 
+// A known id whose stored keys do not decode reads as an ordinary refusal on
+// the wire, but the daemon log names the token: without that line an operator
+// whose tokens.json was damaged sees its logins fail with nothing saying why.
+func TestLogin_CorruptVerifierLoggedNotSent(t *testing.T) {
+	var buf safeBuffer
+	t.Cleanup(captureLog(&buf))
+	h := newAuthHarnessWith(t, func(d *Daemon) {
+		path := filepath.Join(config.QuilDir(), "tokens.json")
+		body := `{"version": 1, "tokens": [{"id": "0a1b2c3d", "name": "damaged", "stored_key": "not hex",` +
+			` "server_key": "00", "rights": "full", "created": "2026-01-01T00:00:00Z"}]}`
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		store, err := clientauth.OpenStore(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		d.tokens = store
+	})
+	tok := mustNewToken(t)
+	c := h.dialRaw(t)
+	sendHelloAndProof(t, c, "qtk_0a1b2c3d"+tok[len("qtk_")+8:])
+	// The exact reason: the corruption must not reach the client.
+	expectRefusal(t, c, "token refused", 3*time.Second)
+	if logs := buf.String(); !strings.Contains(logs, "token 0a1b2c3d: corrupt verifier") {
+		t.Fatalf("the daemon log does not name the corrupt token:\n%s", logs)
+	}
+}
+
 // An oversized frame on a conn that already logged in is not a failed login.
 func TestLogin_OversizeAfterLoginIsNotAFailedLogin(t *testing.T) {
 	h := newAuthHarness(t)
@@ -767,9 +807,6 @@ func TestLogin_OversizeAfterLoginIsNotAFailedLogin(t *testing.T) {
 	}
 }
 
-// Stop closes the audit log only after every conn's disconnect callback has
-// run: a TCP conn open at Stop gets its tcp_disconnect line, and a proof
-// check still in its backoff when its conn was closed gets its login_failed.
 // Stop's wait for the conns' disconnect callbacks must outlast a proof check
 // caught at its longest backoff plus the refusal flush that follows it, or
 // that refusal's audit line is written after the audit log closed. Equal to
@@ -780,6 +817,9 @@ func TestConnDrainTimeout_OutlastsBackoffAndFlush(t *testing.T) {
 	}
 }
 
+// Stop closes the audit log only after every conn's disconnect callback has
+// run: a TCP conn open at Stop gets its tcp_disconnect line, and a proof
+// check still in its backoff when its conn was closed gets its login_failed.
 func TestStop_AuditsTheConnsOpenAtStop(t *testing.T) {
 	setLoginVar(t, &loginBackoffBase, 500*time.Millisecond)
 	// The sleep seam says when the proof check has started its backoff, so
@@ -795,7 +835,7 @@ func TestStop_AuditsTheConnsOpenAtStop(t *testing.T) {
 	tok := h.mint(t, "a", clientauth.LevelFull, nil)
 	h.login(t, tok) // logged in, and still open at Stop
 	id, _ := clientauth.ParseToken(tok)
-	wrong, _, _ := clientauth.NewToken()
+	wrong := mustNewToken(t)
 	h.d.auth.failures.Store(1) // the next proof check sleeps 500 ms first
 	c := h.dialRaw(t)
 	sendHelloAndProof(t, c, "qtk_"+id+wrong[len("qtk_")+8:])

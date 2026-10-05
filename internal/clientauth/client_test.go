@@ -123,7 +123,7 @@ func newFake(t *testing.T, token string) *fakeDaemon {
 var testHello = ipc.HelloPayload{Kind: "tui", Proto: ipc.ProtocolVersion, ClientID: "c"}
 
 func TestClientLogin_Succeeds(t *testing.T) {
-	tok, id, _ := NewToken()
+	tok, id := mustNewToken(t)
 	f := newFake(t, tok)
 	resp, err := ClientLogin(f, tok, testHello, time.Second)
 	if err != nil || resp.Rights != ipc.RightsReadOnly || resp.TokenName != "laptop" {
@@ -140,8 +140,8 @@ func TestClientLogin_Succeeds(t *testing.T) {
 // A listener that does not know the keys cannot produce server_sig, and
 // the client sends nothing after its proof.
 func TestClientLogin_WrongServerSigRefused(t *testing.T) {
-	tok, _, _ := NewToken()
-	squatter, _, _ := NewToken()
+	tok, _ := mustNewToken(t)
+	squatter, _ := mustNewToken(t)
 	f := newFake(t, tok)
 	f.signToken = squatter
 	if _, err := ClientLogin(f, tok, testHello, time.Second); !errors.Is(err, ErrServerUnproven) {
@@ -153,7 +153,7 @@ func TestClientLogin_WrongServerSigRefused(t *testing.T) {
 }
 
 func TestClientLogin_MissingServerSigRefused(t *testing.T) {
-	tok, _, _ := NewToken()
+	tok, _ := mustNewToken(t)
 	f := newFake(t, tok)
 	f.omitSig = true
 	if _, err := ClientLogin(f, tok, testHello, time.Second); !errors.Is(err, ErrServerUnproven) {
@@ -162,7 +162,7 @@ func TestClientLogin_MissingServerSigRefused(t *testing.T) {
 }
 
 func TestClientLogin_RefusalsCarryReason(t *testing.T) {
-	tok, _, _ := NewToken()
+	tok, _ := mustNewToken(t)
 	for _, at := range []string{"hello", "proof"} {
 		f := newFake(t, tok)
 		f.refuseAt = at
@@ -173,7 +173,7 @@ func TestClientLogin_RefusalsCarryReason(t *testing.T) {
 		}
 	}
 	// A wrong token is refused by the daemon's verification.
-	other, _, _ := NewToken()
+	other, _ := mustNewToken(t)
 	f := newFake(t, other)
 	var refused *RefusedError
 	if _, err := ClientLogin(f, tok, testHello, time.Second); !errors.As(err, &refused) {
@@ -197,7 +197,7 @@ func TestClientLogin_BadTokenSendsNothing(t *testing.T) {
 // code is something other than "refused" (which must never surface as
 // *RefusedError — that type means specifically a login the daemon refused).
 func TestClientLogin_ChallengeGates(t *testing.T) {
-	tok, _, _ := NewToken()
+	tok, _ := mustNewToken(t)
 	shortNonce := b64.EncodeToString(make([]byte, 31)) // valid base64url, wrong length
 
 	cases := []struct {
@@ -280,7 +280,7 @@ func TestClientLogin_ChallengeGates(t *testing.T) {
 // unexpected %s" before CheckServerSignature ever runs. ESC and a bidi
 // override must not survive into the error text a later task prints.
 func TestClientLogin_MaliciousChallengeTypeSanitized(t *testing.T) {
-	tok, _, _ := NewToken()
+	tok, _ := mustNewToken(t)
 	f := newFake(t, tok)
 	f.challengeType = "weird" + string(rune(0x1b)) + string(rune(0x202e)) + "-type"
 
@@ -299,7 +299,7 @@ func TestClientLogin_MaliciousChallengeTypeSanitized(t *testing.T) {
 // stored in RefusedError.Reason, since a later task puts that text in a park
 // reason as well as an error message.
 func TestClientLogin_MaliciousRefusalReasonSanitized(t *testing.T) {
-	tok, _, _ := NewToken()
+	tok, _ := mustNewToken(t)
 	f := newFake(t, tok)
 	f.refuseAt = "hello"
 	f.refuseReason = "login required" + string(rune(0x1b)) + string(rune(0x202e))
@@ -322,7 +322,7 @@ func TestClientLogin_MaliciousRefusalReasonSanitized(t *testing.T) {
 // wrong server_sig — the caller must still see the squatter warning, not a
 // generic decode failure.
 func TestClientLogin_MalformedHelloRespIsServerUnproven(t *testing.T) {
-	tok, _, _ := NewToken()
+	tok, _ := mustNewToken(t)
 	f := newFake(t, tok)
 	f.malformedHelloResp = true
 
@@ -336,7 +336,7 @@ func TestClientLogin_MalformedHelloRespIsServerUnproven(t *testing.T) {
 // not a success either — it must surface as its own error, never silently
 // become a *RefusedError with an empty Reason.
 func TestClientLogin_MalformedErrorPayloadIsNotRefusal(t *testing.T) {
-	tok, _, _ := NewToken()
+	tok, _ := mustNewToken(t)
 	f := newFake(t, tok)
 	f.malformedErrorAtHello = true
 

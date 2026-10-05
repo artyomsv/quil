@@ -596,7 +596,12 @@ func (d *Daemon) loginProof(conn *ipc.Conn, s *loginSession, msg *ipc.Message) {
 		})
 	if err != nil {
 		// Unknown, wrong and expired all read the same: the reason must not
-		// tell someone without the key which of them it was.
+		// tell someone without the key which of them it was. A corrupt
+		// verifier is the operator's problem, not the client's: the log
+		// names the token, the client still reads only "token refused".
+		if errors.Is(err, clientauth.ErrCorruptVerifier) {
+			log.Printf("warning: login: %v", err)
+		}
 		d.auth.failures.Add(1)
 		d.refuseLogin(conn, msg, s, "token refused", "token refused")
 		return

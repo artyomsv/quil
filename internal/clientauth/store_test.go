@@ -20,6 +20,17 @@ func openTestStore(t *testing.T) (*Store, string) {
 	return s, path
 }
 
+// mustCreate is Create for a fixture: a failed create fails the test instead
+// of handing it a zero Entry whose id matches nothing.
+func mustCreate(t *testing.T, s *Store, name string, rights Level, expires *time.Time) (string, Entry) {
+	t.Helper()
+	tok, e, err := s.Create(name, rights, expires)
+	if err != nil {
+		t.Fatalf("Create(%q): %v", name, err)
+	}
+	return tok, e
+}
+
 func TestStore_CreatePersistsNoSecret(t *testing.T) {
 	s, path := openTestStore(t)
 	tok, e, err := s.Create("laptop", LevelStandard, nil)
@@ -70,7 +81,7 @@ func TestStore_NamesValidatedAndUnique(t *testing.T) {
 
 func TestStore_AdmitVerifiesThenExpiry(t *testing.T) {
 	s, _ := openTestStore(t)
-	tok, e, _ := s.Create("a", LevelReadOnly, nil)
+	tok, e := mustCreate(t, s, "a", LevelReadOnly, nil)
 	am := AuthMessage(e.ID, "nc", "ns")
 	var admitted []string
 	_, _, err := s.Admit(e.ID, time.Now(), func(v Verifier) bool { return VerifyProof(v, am, ClientProof(tok, am)) },
@@ -82,7 +93,7 @@ func TestStore_AdmitVerifiesThenExpiry(t *testing.T) {
 		t.Fatalf("bad proof err = %v", err)
 	}
 	past := time.Now().Add(-time.Hour)
-	tok2, e2, _ := s.Create("old", LevelFull, &past)
+	tok2, e2 := mustCreate(t, s, "old", LevelFull, &past)
 	am2 := AuthMessage(e2.ID, "nc", "ns")
 	if _, _, err := s.Admit(e2.ID, time.Now(), func(v Verifier) bool { return VerifyProof(v, am2, ClientProof(tok2, am2)) },
 		func(Entry) { t.Error("admitted an expired token") }); !errors.Is(err, ErrExpired) {
@@ -126,7 +137,7 @@ func TestStore_RevokeTargetResolution(t *testing.T) {
 	}
 	s.mint = NewToken
 	// A token whose NAME equals another token's id: an exact id wins.
-	_, impostor, _ := s.Create(laptop.ID, LevelStandard, nil)
+	_, impostor := mustCreate(t, s, laptop.ID, LevelStandard, nil)
 	if upper := strings.ToUpper(laptop.ID); upper == laptop.ID {
 		t.Fatalf("fixture id %q has no hex letter: the case-insensitive path cannot run", laptop.ID)
 	}
@@ -149,7 +160,7 @@ func TestStore_RevokeTargetResolution(t *testing.T) {
 
 func TestStore_RevokeWriteFailureKeepsEntry(t *testing.T) {
 	s, _ := openTestStore(t)
-	_, e, _ := s.Create("a", LevelFull, nil)
+	_, e := mustCreate(t, s, "a", LevelFull, nil)
 	s.rename = func(string, string) error { return errors.New("disk full") }
 	if _, err := s.Revoke(e.ID, func(Entry) { t.Error("onRevoked ran although the write failed") }); err == nil {
 		t.Fatal("revoke reported success with an unwritten file")
@@ -162,8 +173,8 @@ func TestStore_RevokeWriteFailureKeepsEntry(t *testing.T) {
 func TestStore_ExpireSweepSkipsNever(t *testing.T) {
 	s, _ := openTestStore(t)
 	soon := time.Now().Add(time.Minute)
-	_, short, _ := s.Create("short", LevelFull, &soon)
-	_, _, _ = s.Create("forever", LevelFull, nil)
+	_, short := mustCreate(t, s, "short", LevelFull, &soon)
+	mustCreate(t, s, "forever", LevelFull, nil)
 	var expired []string
 	s.ExpireSweep(time.Now().Add(2*time.Minute), func(e Entry) { expired = append(expired, e.ID) })
 	if len(expired) != 1 || expired[0] != short.ID {
@@ -173,7 +184,7 @@ func TestStore_ExpireSweepSkipsNever(t *testing.T) {
 
 func TestStore_TouchLastUsedThrottlesPersist(t *testing.T) {
 	s, _ := openTestStore(t)
-	_, e, _ := s.Create("a", LevelFull, nil)
+	_, e := mustCreate(t, s, "a", LevelFull, nil)
 	now := time.Unix(1_800_000_000, 0)
 	if !s.TouchLastUsed(e.ID, now) {
 		t.Fatal("first touch did not ask for a write")
@@ -267,7 +278,7 @@ func TestStore_CallbacksRunUnderTheLock(t *testing.T) {
 		}
 	}
 
-	tok, e, _ := s.Create("a", LevelFull, nil)
+	tok, e := mustCreate(t, s, "a", LevelFull, nil)
 	am := AuthMessage(e.ID, "nc", "ns")
 	admitChecked := false
 	if _, _, err := s.Admit(e.ID, time.Now(), func(v Verifier) bool { return VerifyProof(v, am, ClientProof(tok, am)) },
@@ -281,7 +292,7 @@ func TestStore_CallbacksRunUnderTheLock(t *testing.T) {
 	}
 
 	soon := time.Now().Add(time.Minute)
-	_, short, _ := s.Create("short", LevelFull, &soon)
+	_, short := mustCreate(t, s, "short", LevelFull, &soon)
 	sweepChecked := false
 	s.ExpireSweep(time.Now().Add(2*time.Minute), func(x Entry) {
 		if x.ID != short.ID {
@@ -357,5 +368,100 @@ func TestParseExpiry(t *testing.T) {
 		if (err == nil) != tt.ok || (tt.ok && (days != tt.days || never != tt.never)) {
 			t.Errorf("ParseExpiry(%q) = %d %v %v", tt.in, days, never, err)
 		}
+	}
+}
+
+// A repeated id keeps the FIRST entry. The map used to take the last, so a
+// line appended to the file replaced the token already listed under that id,
+// and nothing counted it.
+func TestOpenStore_DuplicateIDKeepsTheFirst(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tokens.json")
+	raw := `{"version":1,"tokens":[
+		{"id":"0a1b2c3d","name":"first","stored_key":"00","server_key":"00","rights":"read-only","created":"2026-01-01T00:00:00Z"},
+		{"id":"0a1b2c3d","name":"second","stored_key":"00","server_key":"00","rights":"full","created":"2026-01-02T00:00:00Z"}
+	]}`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Dropped(); got != 1 {
+		t.Fatalf("Dropped() = %d, want 1", got)
+	}
+	if got := s.List(); len(got) != 1 || got[0].Name != "first" || got[0].Rights != LevelReadOnly {
+		t.Fatalf("List() = %+v, want only the first entry", got)
+	}
+}
+
+// A known id whose stored keys do not decode is refused, with an error that
+// names the token for the daemon's log. verify still runs, so the answer
+// takes as long as for an unknown id.
+func TestStore_AdmitCorruptVerifierNamesTheToken(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tokens.json")
+	raw := `{"version":1,"tokens":[
+		{"id":"0a1b2c3d","name":"damaged","stored_key":"not hex","server_key":"00","rights":"full","created":"2026-01-01T00:00:00Z"}
+	]}`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	_, _, err = s.Admit("0a1b2c3d", time.Now(), func(v Verifier) bool { called = len(v.StoredKey) == 32; return true },
+		func(Entry) { t.Error("admitted a token with a corrupt verifier") })
+	if !called {
+		t.Fatal("verify was not run against the dummy verifier")
+	}
+	if !errors.Is(err, ErrRefused) || !errors.Is(err, ErrCorruptVerifier) || !strings.Contains(err.Error(), "0a1b2c3d") {
+		t.Fatalf("err = %v, want ErrRefused + ErrCorruptVerifier naming the id", err)
+	}
+}
+
+func TestStore_ExpireSweepNilCallback(t *testing.T) {
+	s, _ := openTestStore(t)
+	past := time.Now().Add(-time.Hour)
+	mustCreate(t, s, "old", LevelFull, &past)
+	s.ExpireSweep(time.Now(), nil) // panicked on the expired entry
+}
+
+// Create keeps its own copy of the expiry: the caller's time.Time is the
+// caller's to reuse.
+func TestStore_CreateCopiesTheExpiry(t *testing.T) {
+	s, _ := openTestStore(t)
+	exp := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	_, e := mustCreate(t, s, "a", LevelFull, &exp)
+	exp = exp.Add(-24 * 365 * time.Hour)
+	if got := s.List()[0].Expires; got == nil || !got.Equal(time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("stored expiry = %v: the caller's change reached the store", got)
+	}
+	if e.Expires == &exp {
+		t.Fatal("the returned entry shares the caller's pointer")
+	}
+}
+
+// writeLocked syncs the parent directory AFTER the rename, since the rename
+// is what the directory sync makes durable. A sync failure does not fail the
+// write: the file is already replaced, and a failed Revoke would put back an
+// entry the disk no longer lists.
+func TestStore_WriteSyncsTheParentAfterRename(t *testing.T) {
+	s, path := openTestStore(t)
+	var calls []string
+	s.rename = func(oldpath, newpath string) error {
+		calls = append(calls, "rename")
+		return os.Rename(oldpath, newpath)
+	}
+	s.syncDir = func(dir string) error {
+		calls = append(calls, "sync "+dir)
+		return errors.New("sync refused")
+	}
+	if _, _, err := s.Create("a", LevelFull, nil); err != nil {
+		t.Fatalf("a failed directory sync failed the write: %v", err)
+	}
+	if want := []string{"rename", "sync " + filepath.Dir(path)}; strings.Join(calls, "|") != strings.Join(want, "|") {
+		t.Fatalf("calls = %q, want %q", calls, want)
 	}
 }

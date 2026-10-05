@@ -745,6 +745,11 @@ func NewServer(socketPath string, handler MessageHandler, onDisconnect func(*Con
 	}
 }
 
+// protectSocketFn is Start's seam to protectSocket: a chmod or ACL that
+// fails cannot be produced on demand on a real socket, and the wiring it
+// tests — Start stops and serves nothing — is the part that matters.
+var protectSocketFn = protectSocket
+
 func (s *Server) Start() error {
 	os.Remove(s.path) // Clean up stale socket
 
@@ -752,7 +757,7 @@ func (s *Server) Start() error {
 	if err != nil {
 		return err
 	}
-	if err := protectSocket(s.path); err != nil {
+	if err := protectSocketFn(s.path); err != nil {
 		ln.Close()
 		return err
 	}

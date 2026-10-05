@@ -62,16 +62,30 @@ func msgConstants(t *testing.T) map[string]string {
 					continue
 				}
 				for i, name := range vs.Names {
-					if !strings.HasPrefix(name.Name, "Msg") || i >= len(vs.Values) {
+					if !strings.HasPrefix(name.Name, "Msg") {
+						continue
+					}
+					// A Msg* constant this parser cannot read (an implicit
+					// value in a const group, a reference to another
+					// constant, a concatenation) used to be skipped
+					// silently — a type declared that way was simply not
+					// swept, so it could go unclassified with every test
+					// green. Refused instead: spell it as a string literal.
+					if i >= len(vs.Values) {
+						t.Errorf("%s: %s has no explicit value; the sweep reads only string literals", path, name.Name)
 						continue
 					}
 					lit, ok := vs.Values[i].(*ast.BasicLit)
 					if !ok || lit.Kind != token.STRING {
+						t.Errorf("%s: %s is not a string literal; the sweep reads only string literals", path, name.Name)
 						continue
 					}
-					if v, err := strconv.Unquote(lit.Value); err == nil {
-						out[name.Name] = v
+					v, err := strconv.Unquote(lit.Value)
+					if err != nil {
+						t.Errorf("%s: %s: unquote %s: %v", path, name.Name, lit.Value, err)
+						continue
 					}
+					out[name.Name] = v
 				}
 			}
 		}

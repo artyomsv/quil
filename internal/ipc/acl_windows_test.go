@@ -32,6 +32,28 @@ func TestCreatePrivateFile_OwnerOnlyDACL(t *testing.T) {
 	}
 }
 
+// CREATE_NEW is the exclusivity the token store's temp file relies on: a
+// path that already exists — a file planted there, or a stale temp — must be
+// refused, never opened and truncated, and must keep its bytes.
+func TestCreatePrivateFile_RefusesAnExistingFile(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "tokens.json.tmp-1")
+	if err := os.WriteFile(p, []byte("planted"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := CreatePrivateFile(p)
+	if err == nil {
+		f.Close()
+		t.Fatal("CreatePrivateFile opened a file that already existed")
+	}
+	got, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "planted" {
+		t.Fatalf("existing file now holds %q, want it untouched", got)
+	}
+}
+
 // Covers token temp files and every rotated audit.log: anything created in a
 // protected directory AFTER ProtectDir inherits owner-only access.
 func TestProtectDir_NewFileInherits(t *testing.T) {

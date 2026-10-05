@@ -81,8 +81,8 @@ func (m *Model) capSharedList(dest, what string, list []string, limit int) []str
 	return list[:limit]
 }
 
-// firstSharedCapHit reports whether dest went over the cap on what for the
-// first time this session, so each cap logs once.
+// firstSharedCapHit reports whether dest broke the limit what for the first
+// time this session, so each limit logs once per destination.
 func (m *Model) firstSharedCapHit(dest, what string) bool {
 	key := dest + "\x00" + what
 	if m.sharedCapLogged[key] {
@@ -92,31 +92,6 @@ func (m *Model) firstSharedCapHit(dest, what string) bool {
 		m.sharedCapLogged = map[string]bool{}
 	}
 	m.sharedCapLogged[key] = true
-	return true
-}
-
-// projectGroupWithinCap reports whether dest may name group through a
-// project's Group. names holds, per destination, the names counted so far
-// this pass, seeded with the daemon's own list. An honest daemon lists every
-// name its projects carry, so those cost nothing; a name it does not list
-// counts against the same cap as its list, so a host the user may not
-// control cannot grow the sidebar through projects[].group.
-func (m *Model) projectGroupWithinCap(names map[string][]string, dest, group string) bool {
-	have, seen := names[dest]
-	if !seen {
-		have = append([]string(nil), m.daemonGroups[dest]...)
-		names[dest] = have
-	}
-	if containsFold(have, group) {
-		return true
-	}
-	if len(have) >= ipc.MaxGroupsPerDaemon {
-		if m.firstSharedCapHit(dest, "project group names") {
-			log.Printf("shared data: daemon %q files projects under more than %d group names; the rest are shown ungrouped", dest, ipc.MaxGroupsPerDaemon)
-		}
-		return false
-	}
-	names[dest] = append(have, group)
 	return true
 }
 
@@ -174,9 +149,17 @@ func (m *Model) destsListingGroup(name string) []string {
 // frame's (each project's own Group); every other destination's members are
 // left exactly as the file holds them. Names any shared daemon lists and the
 // view lacks are appended in destination order, so the user's order and
-// collapsed state stand. A project's Group the daemon does not list counts
-// against that destination's cap (projectGroupWithinCap); past it the
-// project is shown ungrouped.
+// collapsed state stand.
+//
+// A project's Group only ever JOINS a group the view already holds — listed
+// by a daemon, in the user's file, or from another destination — and never
+// adds one. A daemon keeps every name its projects carry in its own list
+// (SetProjectGroup, GroupOp, ImportShared, and RestoreShared's repair), so
+// an honest host never sends an unlisted name; a host the user may not
+// control would otherwise grow the sidebar (and the file) frame after frame
+// with groups nothing ever lists and so nothing ever deletes. Such a project
+// is shown ungrouped, and its daemon is logged once. A host therefore adds
+// at most its capped list, with no state carried between frames.
 //
 // A group is deleted only when its name DISAPPEARED: a destination that
 // listed it in its previous frame dropped it in this one (vanishedGroups), no
@@ -212,21 +195,16 @@ func (m *Model) rebuildGroupsView() tea.Cmd {
 			}
 		}
 	}
-	names := map[string][]string{}
 	for _, p := range m.projects {
 		if p == nil || !auth[p.Dest] || p.Group == "" {
 			continue
 		}
-		if !m.projectGroupWithinCap(names, p.Dest, p.Group) {
-			continue
-		}
 		g := m.groups.indexOf(p.Group)
 		if g < 0 {
-			var err error
-			if g, err = m.groups.addGroup(p.Group); err != nil {
-				log.Printf("groups: daemon %q filed project %q under %q: %v; shown ungrouped", p.Dest, p.ID, p.Group, err)
-				continue
+			if m.firstSharedCapHit(p.Dest, "unlisted project group") {
+				log.Printf("groups: daemon %q filed project %q under %q, a name it does not list; shown ungrouped", p.Dest, p.ID, p.Group)
 			}
+			continue
 		}
 		m.groups.assign(g, p.Dest, p.ID)
 	}

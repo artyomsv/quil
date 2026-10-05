@@ -47,5 +47,8 @@ headline: Stricter shared workspaces; refused creates now say why
   error replies were counted for the whole session, so after a reconnect one more error
   stopped the import.
 - **One host can add at most 64 groups to the sidebar.** The cap already applied to the
-  group list a host sends. It now also applies to the group names on that host's
-  projects. A project past the cap is shown ungrouped, and `quil.log` says so once.
+  group list a host sends, but a project filed under a name the host did not list added
+  a group too, and a new set of names in each update kept growing the sidebar and the
+  saved groups file. Now such a project joins a group only when the sidebar already has
+  that name. If the name is not there, the project is shown ungrouped, and `quil.log`
+  says so once.

@@ -95,74 +95,81 @@ func TestUpdate_OversizedSharedFrame_ListsCappedAndLoggedOnce(t *testing.T) {
 	}
 }
 
-// frameNoListen applies a frame through Update without running its Cmd. A
-// twoDestModel's router yields one link-lost per closed conn and then
-// blocks, so from the third frame on a re-armed listen never returns.
-func frameNoListen(t *testing.T, m Model, msg WorkspaceStateMsg) Model {
-	t.Helper()
-	out, _ := m.Update(msg)
-	got, ok := out.(Model)
-	if !ok {
-		t.Fatalf("Update returned %T, want Model", out)
-	}
-	return got
-}
-
 // manyGroupedProjects is a shared frame from dest listing groups, with n
 // projects, each filed under its own name prefix%03d.
 func manyGroupedProjects(dest, prefix string, n int, groups ...string) WorkspaceStateMsg {
 	f := WorkspaceStateMsg{Dest: dest, RunID: "r-" + dest, Rev: 1, SharedData: true, Groups: groups}
 	for i := 0; i < n; i++ {
-		id := fmt.Sprintf("%s-proj-%03d", prefix, i)
-		tab, pane := id+"-tab", id+"-pane"
-		f.Projects = append(f.Projects, ProjectInfo{ID: id, Name: id, Group: fmt.Sprintf("%s%03d", prefix, i), TabIDs: []string{tab}})
-		f.Tabs = append(f.Tabs, TabInfo{ID: tab, Name: "Shell", ProjectID: id, Panes: []string{pane}})
-		f.Panes = append(f.Panes, PaneInfo{ID: pane, TabID: tab, Type: "terminal"})
+		f = withGroupedProject(f, fmt.Sprintf("%s-proj-%03d", prefix, i), fmt.Sprintf("%s%03d", prefix, i))
 	}
 	f.ActiveProject, f.ActiveTab = f.Projects[0].ID, f.Tabs[0].ID
 	return f
 }
 
-// A daemon's list is capped, and so are the names its projects carry: a
-// host listing one group and filing each project under a name of its own
-// adds at most the cap to the sidebar. The rest are shown ungrouped, the cap
-// logs once, and another destination's names are not counted against it.
-func TestUpdate_ProjectGroupNamesOverTheCap_RestShownUngrouped(t *testing.T) {
+// withGroupedProject adds project id, with one tab and pane, filed under group.
+func withGroupedProject(f WorkspaceStateMsg, id, group string) WorkspaceStateMsg {
+	tab, pane := id+"-tab", id+"-pane"
+	f.Projects = append(f.Projects, ProjectInfo{ID: id, Name: id, Group: group, TabIDs: []string{tab}})
+	f.Tabs = append(f.Tabs, TabInfo{ID: tab, Name: "Shell", ProjectID: id, Panes: []string{pane}})
+	f.Panes = append(f.Panes, PaneInfo{ID: pane, TabID: tab, Type: "terminal"})
+	return f
+}
+
+// A project's Group joins a group the view holds and never adds one. A host
+// that files every project under a name it does not list, a new set each
+// frame, adds nothing to the sidebar or the file; a project under a known
+// name (one the host lists, the user's own, in any case) joins it. The
+// user's empty group stays, and the host is logged once.
+func TestUpdate_UnlistedProjectGroups_AddNothingAcrossFrames(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
 	m, _, _ := twoDestModel(t)
-	m = frameNoListen(t, m, manyGroupedProjects("", "g", ipc.MaxGroupsPerDaemon+10, "Listed"))
-	if got := len(groupNames(m)); got != ipc.MaxGroupsPerDaemon {
-		t.Fatalf("merged view holds %d groups, want the cap %d (Listed + %d project names)", got, ipc.MaxGroupsPerDaemon, ipc.MaxGroupsPerDaemon-1)
+	path := config.ProjectGroupsPath()
+	m.SetProjectGroups(ProjectGroupsState{groups: projectGroups{Groups: []projectGroup{{Name: "Mine"}, {Name: "Kept"}}}}, path)
+	for i, prefix := range []string{"g", "h"} {
+		f := manyGroupedProjects("", prefix, ipc.MaxGroupsPerDaemon+10, "Listed")
+		f.Rev = uint64(i + 1)
+		f = withGroupedProject(withGroupedProject(f, "in-listed", "listed"), "in-mine", "MINE")
+		m = updateNoWait(t, m, f)
 	}
-	last := ipc.MaxGroupsPerDaemon - 2 // the last project name that fits
-	if g := m.groups.groupOf("", fmt.Sprintf("g-proj-%03d", last)); g < 0 || m.groups.Groups[g].Name != fmt.Sprintf("g%03d", last) {
-		t.Errorf("project %d not in its own group (index %d)", last, g)
+	runCmd(m.saveGroupsCmd())
+	const want = "Mine,Kept,Listed"
+	if got := strings.Join(groupNames(m), ","); got != want {
+		t.Fatalf("view = %s, want %s", got, want)
 	}
-	for i := last + 1; i < ipc.MaxGroupsPerDaemon+10; i++ {
-		if g := m.groups.groupOf("", fmt.Sprintf("g-proj-%03d", i)); g >= 0 {
-			t.Fatalf("project %d over the cap is in group %q, want ungrouped", i, m.groups.Groups[g].Name)
+	saved, err := loadProjectGroups(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := grpNames(saved); got != want {
+		t.Errorf("saved file = %s, want %s", got, want)
+	}
+	for id, name := range map[string]string{"in-listed": "Listed", "in-mine": "Mine"} {
+		if g := m.groups.groupOf("", id); g < 0 || m.groups.Groups[g].Name != name {
+			t.Errorf("%s in group %d, want %s", id, g, name)
 		}
 	}
-	key := "\x00project group names"
-	if !m.sharedCapLogged[key] {
-		t.Fatalf("cap log keys = %v, want %q", m.sharedCapLogged, key)
+	if g := m.groups.groupOf("", "h-proj-000"); g >= 0 {
+		t.Errorf("a project under an unlisted name is in group %q, want ungrouped", m.groups.Groups[g].Name)
 	}
-	logged := len(m.sharedCapLogged)
-	again := manyGroupedProjects("", "g", ipc.MaxGroupsPerDaemon+10, "Listed")
-	again.Rev = 2
-	m = frameNoListen(t, m, again)
-	if len(m.sharedCapLogged) != logged || len(groupNames(m)) != ipc.MaxGroupsPerDaemon {
-		t.Errorf("second frame: log keys %d (want %d), groups %d", len(m.sharedCapLogged), logged, len(groupNames(m)))
+	if !m.sharedCapLogged["\x00unlisted project group"] {
+		t.Fatalf("log keys = %v, want the local daemon logged", m.sharedCapLogged)
 	}
 
-	remote := manyGroupedProjects("hostA", "r", 3, "Far")
-	m = frameNoListen(t, m, remote)
-	for i := 0; i < 3; i++ {
-		if g := m.groups.groupOf("hostA", fmt.Sprintf("r-proj-%03d", i)); g < 0 || m.groups.Groups[g].Name != fmt.Sprintf("r%03d", i) {
-			t.Errorf("hostA project %d not in its group (index %d): the local cap reached another destination", i, g)
+	// Another destination: judged on its own list, and the user's name is
+	// free to it too.
+	remote := withGroupedProject(manyGroupedProjects("hostA", "r", 2, "Far"), "far-mine", "Mine")
+	remote.Projects[0].Group = "Far"
+	m = updateNoWait(t, m, remote)
+	for id, name := range map[string]string{"r-proj-000": "Far", "far-mine": "Mine"} {
+		if g := m.groups.groupOf("hostA", id); g < 0 || m.groups.Groups[g].Name != name {
+			t.Errorf("hostA %s in group %d, want %s", id, g, name)
 		}
 	}
-	if m.sharedCapLogged["hostA\x00project group names"] {
-		t.Error("hostA logged over the cap with 4 names")
+	if g := m.groups.groupOf("hostA", "r-proj-001"); g >= 0 {
+		t.Errorf("hostA's unlisted name made group %q", m.groups.Groups[g].Name)
+	}
+	if got := strings.Join(groupNames(m), ","); got != want+",Far" {
+		t.Errorf("view = %s, want %s,Far", got, want)
 	}
 }
 
@@ -646,7 +653,7 @@ func TestCommitGroupEdit_NewEmptyGroupWithLegacyActive_CreatesOnLocal(t *testing
 		t.Fatalf("active dest = %q, want hostA", m.activeDest())
 	}
 	// Typed and saved through Update, the path the dialog's Enter takes. The
-	// send is synchronous in Update, so the Cmd is not run (see frameNoListen).
+	// send is synchronous in Update, so the Cmd is not run (see updateNoWait).
 	m.beginGroupEdit(groupEditState{mode: groupEditNew})
 	m = grpType(m, "Fresh")
 	m, _ = grpKey(m, tea.KeyEnter)

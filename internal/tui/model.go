@@ -1063,7 +1063,8 @@ type Model struct {
 	noteLoadID       string                     // the open editor's in-flight note_get id
 	noteLoadDiscards bool                       // that note_get is a confirmed Ctrl+R reload, the one load allowed to replace edits
 	noteLoadSnapshot string                     // the buffer the user confirmed discarding; edits after it are kept
-	noteLoadSnapRev  uint64                     // the editor's rev at that confirmation; a save answered since moves it
+	noteLoadSnapSave uint64                     // noteSavesTaken at that confirmation; a save answered since moves it
+	noteSavesTaken   uint64                     // accepted saves the open editor took; a client counter, since a daemon restart can reuse a rev
 	noteSaveID       string                     // the open editor's in-flight note_set id; "" once the editor closed
 	quitWaiting      bool                       // app.quit is waiting for pendingNoteSaves (requestQuit)
 

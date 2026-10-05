@@ -266,6 +266,40 @@ func TestUpdate_ConfirmedReload_OverwriteAnsweredFirst_StaleGetIgnored(t *testin
 	}
 }
 
+// The same race after a daemon restart that reused a rev: the editor holds 5,
+// the restored daemon 4. The save conflicts, Ctrl+R is confirmed at rev 5, and
+// the overwrite is answered first — at rev 5 again. The editor's rev did not
+// move, so reading "a save came in since" off it let the rev-4 get discard the
+// text just saved. Saves are counted on the client instead.
+func TestUpdate_ConfirmedReload_OverwriteAtTheSameRevAfterRestart_StaleGetIgnored(t *testing.T) {
+	m, conn := loadedNotesModel(t, "a\n", 5)
+	m = updateWith(t, m, typed("x"))
+	m = updateWith(t, m, ctrl('s'))
+	set := lastSent(t, conn, ipc.MsgNoteSet)
+	m = updateWith(t, m, noteSetRespMsg{dest: "", id: set.ID, resp: ipc.NoteSetRespPayload{PaneID: "tab-proj-1-pane", Conflict: true, CurrentRev: 4}})
+	m = updateWith(t, m, ctrl('r'))
+	m = updateWith(t, m, ctrl('r'))
+	if !m.noteLoadDiscards {
+		t.Fatal("setup: two Ctrl+R did not send a confirmed reload")
+	}
+	id := lastSent(t, conn, ipc.MsgNoteGet).ID
+	m = updateWith(t, m, ctrl('s'))
+	set = lastSent(t, conn, ipc.MsgNoteSet)
+	m = updateWith(t, m, noteSetRespMsg{dest: "", id: set.ID, resp: ipc.NoteSetRespPayload{PaneID: "tab-proj-1-pane", OK: true, Rev: 5}})
+	if ed := m.notesEditor; ed.Rev() != 5 || ed.Dirty() {
+		t.Fatalf("setup: after the overwrite's answer rev=%d dirty=%v", ed.Rev(), ed.Dirty())
+	}
+	m = updateWith(t, m, noteRespMsg{dest: "", id: id, resp: ipc.NoteRespPayload{PaneID: "tab-proj-1-pane", Text: "old\n", Rev: 4}})
+	ed := m.notesEditor
+	if !strings.HasPrefix(ed.Content(), "xa") || ed.Rev() != 5 || ed.Dirty() || ed.Conflict() {
+		t.Errorf("after the stale get's answer: content=%q rev=%d dirty=%v conflict=%v, want the overwrite clean at 5",
+			ed.Content(), ed.Rev(), ed.Dirty(), ed.Conflict())
+	}
+	if m.flashText != "Note reload replaced by a newer save" {
+		t.Errorf("flash = %q, want the reload named as replaced by the save", m.flashText)
+	}
+}
+
 // A reload that cannot be SENT (host unreachable) leaves an already-loaded
 // editor as it was — editable, with its text — never the read-only error
 // editor a failed FIRST load becomes.

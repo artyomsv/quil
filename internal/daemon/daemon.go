@@ -335,7 +335,8 @@ type Daemon struct {
 
 	// preLoginAudit caps audit lines about conns that have not logged in.
 	preLoginAudit auditBudget
-	// homeUnprotected: ProtectDir failed at start, so no TCP listener.
+	// homeUnprotected: ProtectDir failed or refused (ipc.ErrNotQuilHome:
+	// QUIL_HOME holds files quil did not write) at start, so no TCP listener.
 	homeUnprotected bool
 }
 

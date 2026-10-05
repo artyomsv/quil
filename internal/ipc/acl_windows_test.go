@@ -3,10 +3,13 @@
 package ipc
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	"golang.org/x/sys/windows"
 
 	"github.com/artyomsv/quil/internal/winjob"
 )
@@ -70,6 +73,77 @@ func TestProtectDir_NewFileInherits(t *testing.T) {
 	}
 	if foreign := foreignOn(t, dir); len(foreign) != 0 {
 		t.Fatalf("the protected dir itself grants %v", foreign)
+	}
+}
+
+// The read-back must recognise the DACL ProtectDir writes as Windows itself
+// renders it (D:PAI, aliases), or every start rewrites the tree again.
+func TestProtectDir_ReadsBackOwnerOnly(t *testing.T) {
+	dir := t.TempDir()
+	if ok, err := dirOwnerOnly(dir); err != nil || ok {
+		t.Fatalf("an inheriting temp dir: ok=%v err=%v, want false", ok, err)
+	}
+	if err := ProtectDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := dirOwnerOnly(dir); err != nil || !ok {
+		sd, _ := windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+		t.Fatalf("after ProtectDir: ok=%v err=%v, want true; DACL %v", ok, err, sd)
+	}
+}
+
+// An owner-only folder is not written again, and so not re-checked: a file
+// quil did not write does not make ProtectDir fail once the folder is
+// protected.
+func TestProtectDir_SkipsAnOwnerOnlyFolder(t *testing.T) {
+	dir := t.TempDir()
+	if err := ProtectDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "report.docx"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ProtectDir(dir); err != nil {
+		t.Fatalf("second ProtectDir on an owner-only folder: %v", err)
+	}
+}
+
+// A folder holding files quil did not write keeps its access list, and the
+// refusal is ErrNotQuilHome (the daemon then starts no TCP listener).
+func TestProtectDir_LeavesAnArbitraryFolderAlone(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "report.docx"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ProtectDir(dir); !errors.Is(err, ErrNotQuilHome) {
+		t.Fatalf("ProtectDir on an arbitrary folder: %v, want ErrNotQuilHome", err)
+	}
+	after, err := windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.String() != after.String() {
+		t.Fatalf("DACL changed: %s -> %s", before, after)
+	}
+}
+
+// A fresh home already holds what quild wrote before Start: still protected.
+func TestProtectDir_ProtectsAFreshHome(t *testing.T) {
+	dir := t.TempDir()
+	for _, n := range []string{"quild.lock", "quild.pid", "quild.log", "quil.log"} {
+		if err := os.WriteFile(filepath.Join(dir, n), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := ProtectDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if foreign := foreignOn(t, dir); len(foreign) != 0 {
+		t.Fatalf("a fresh home grants %v", foreign)
 	}
 }
 

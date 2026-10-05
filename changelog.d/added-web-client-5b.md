@@ -1,11 +1,7 @@
 ---
-headline: Edit panes, tabs and layout from the browser
+headline: Edit the workspace from the browser: split, close, dialog, keys
 ---
-- **The browser client can now change the workspace.** Pane and tab editing in `quil web` is being added in this release; see `docs/web.md`.
-- **Keys page in F1 → Settings:** pick the key preset (default or tmux) and the tmux prefix, and the new keys work at once. Your own overrides in `bindings.toml` are kept; comments in that file are not.
-- `quil web` accepts the 5b editing, dialog and notification requests; a saved instance is expanded from the gateway machine's own files, never from the page.
-- The browser can split, replace, close, rename, mute, restart and move panes, rename, color and close tabs, and drag split borders. Large pastes wait for the pane instead of being dropped.
-- The browser has the full create-pane dialog: type, saved instances (create, edit, delete), folder, kube context, toggles, worktree, sandbox and resume. Open it from a pane menu (New pane…, Replace…) or the tab bar `+`.
-- **`quil web` keys:** the browser uses your keymap and preset, tmux sequences included. Keys a browser keeps for itself (Ctrl+W, Ctrl+T, Ctrl+N) get a browser key instead, shown in the F1 key list.
-- **`quil web` notifications:** the notification list, with dismiss and jump to pane, the same filter as the TUI, and unread marks on tabs.
-- **`quil web` overlays:** Alt+G and Alt+D open lazygit and hunk over the pane area.
+- **Browser client: editing.** `quil web` can now create, split, replace, close, rename, mute, restart and move panes, create, rename, color and close tabs, and drag split borders. The create-pane dialog has every option of the terminal dialog: type, saved instances, folder, kube context, toggles, worktree, sandbox and resume. Large pastes wait for the pane instead of being dropped.
+- **Browser client: notifications, overlays and keys.** The browser has the notification list, the lazygit and hunk overlays (`Alt+G`, `Alt+D`) and your keymap, including the tmux preset. Keys a browser keeps for itself get a fallback chord, shown in the `F1` key list.
+- **F1 → Settings → Keys** switches the key preset and prefix without a restart. Your own overrides in `bindings.toml` are kept; comments in that file are not.
+- The daemon now keeps every saved layout in step with the panes that exist, so a closed pane can no longer come back from an old layout write.

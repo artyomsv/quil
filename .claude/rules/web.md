@@ -8,7 +8,7 @@ paths:
 
 # Browser client (`quil web`)
 
-User guide: `docs/web.md`. Design: ADR-35 in `docs/architecture.md`. The gateway is a thin proxy: one daemon connection per browser tab, and **no daemon change**. If a task seems to need one, stop and ask.
+User guide: `docs/web.md`. Design: ADR-35 in `docs/architecture.md`. The gateway is a thin proxy: one daemon connection per browser tab. ADR-35 changed no daemon code; 5b (ADR-36) added the daemon-owned layout tree and `split_pane_req` the editing needs, see `.claude/rules/daemon-lifecycle.md`.
 
 ## Invariants
 
@@ -29,3 +29,18 @@ User guide: `docs/web.md`. Design: ADR-35 in `docs/architecture.md`. The gateway
 ## Working here
 
 No local builds, tests or linters: CI runs `go test`, `go vet` and the web job on the pull request. Format Go with gofmt only. Edit TypeScript and Svelte with 2-space indentation and `interface` for object shapes.
+
+## Editing, dialog and keys (5b)
+
+- **The allow-list grew with its UI** (`forwardable`, `internal/webgw/allow.go`): `split_pane_req`, `destroy_tab`, `update_tab`, `destroy_pane_req`, `update_pane`, `update_layout`, `move_pane`, `restart_pane_req`, `dismiss_event`, `get_notifications_req`, and the dialog's lists (`plugin_list_req`, `browse_dir_req`, `git_repos_req`, `kube_ctx_req`, `claude_sessions_req`, `worktree_list_req`, `sandbox_cap_req`, `dirs_exist_req`). Raw `create_pane`, `create_pane_req`, `create_tab` and the fire-and-forget `destroy_pane` stay out. `needsID` (`destroy_tab`, `update_tab`) refuses an id-less request, because their only answer goes to an id-bearing one.
+- **`update_pane` has a field filter** (`updatePaneFields`): `pane_id`, `name`, `muted`, `overlay_visible`, `unseen`. `cwd`, `eager`, `pinned_attention` and `marked_for_deletion` are the TUI's own and are refused.
+- **Paste flow**: an id-bearing `pane_input` is a paste chunk and keeps its id; at most `pasteCap` (2) may be unanswered per socket, the next gets `ErrCodeBusy` (`"busy"`). The page runs one paste at a time with one chunk in flight, treats `busy` and queue-full alike (wait, resend the same chunk), and ends a paste on a reconnect or pane restart with "may be partly delivered", never resending the unanswered chunk (`web/src/lib/paste.ts`). Keystrokes typed meanwhile queue behind the paste in the page. An id-less `pane_input` is a keystroke.
+- **Saved instances are expanded by the gateway** (`prefill`/`instance_fill.go`, `expandInstance`): the page sends the instance by id (`pane.instance_id`), the gate strips any page-supplied `instance_args` and fills them from the machine's own `instances.json` through the catalog's arg template. Daemon rights then apply: standard rights may manage instances (`/api/instances`) but the daemon refuses launching one with raw args (full only).
+- **`/api/client` (GET) and `/api/instances` (POST, PUT, DELETE)** check Host, a method-aware Origin, the key and the session's rights through `apiAuth`; rights are re-read per request, so a revoked token stops writes at once. Read-only and rightless sessions are refused instance writes; denied writes leave the file untouched. One mutex serializes the read-modify-write, a file that does not parse is never replaced, and last writer wins against a TUI.
+- **Attach waits for its own id**: the daemon answers the attach with a `workspace_state` carrying the attach request's id. After a (re)connect the page ignores state frames until that one; an `error` answering the attach id restarts hello/attach (`web/src/lib/connection.ts`).
+- **Keyboard order** (`web/src/lib/keys/`, one capture-phase `keydown` listener): (1) an open dialog, menu or editable field owns the key; (2) the sequence matcher (a completed sequence runs even when a plugin claims its last chord); (3) Early-tier actions; (4) the active plugin's raw keys go to the terminal; (5) Late-tier actions; (6) the rest goes to the terminal. A key that runs an action is consumed. While an overlay shows, keys go to it. Sequences cancel on pane focus change, tab switch, dialog open, window blur and Esc. TUI-only actions (palette, notes, settings) are consumed and show "available in the TUI".
+- **Alt composes text on macOS only**: an Alt-modified ASCII character is text there, so `[ ] { } | @` type on non-US layouts. On Windows and Linux Alt is a modifier and AltGr types text. A chord read from the Option character (not the physical key) is deliberately not used. Cost: an Option+letter that yields ASCII on some layout cannot be bound as `alt+letter` there.
+- **Web fallback chords** live in `internal/keymap/webfallback.toml`, embedded OUTSIDE `presets/` so `PresetNames` never lists it: `pane.close` → `alt+shift+c`, `tab.new` → `alt+shift+t`, `builtin.new_pane` → `alt+shift+o`. An entry applies only while its chord is unbound in the user's resolved keymap; it never takes a chord from a bound action. `ForWeb` builds the page's map and `/api/client` carries it.
+- **A missing `bindings.toml`** means the legacy `[keybindings]` table, for the TUI and for `quil web` alike.
+- **The create dialog hides "resume" while "new branch" is chosen** (a deliberate difference from the TUI: the daemon checks the transcript in the new, empty checkout, so the row could only mislead). The TUI should follow later.
+- **Read-only** gets no editing, dismiss, mute, instance writes or paste. It may show or hide an overlay that already exists, locally, but never creates one.

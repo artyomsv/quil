@@ -326,6 +326,14 @@ Tests: `layout_sync_test.go`. Mutation-checked: the send-on-change gate, the
 rev compare-and-store (daemon side), the adopt condition, the arrival
 "only the requester sends" rule, and the reattach rev reset.
 
+**The daemon now owns the stored tree (ADR-36), so the TUI reconciles instead of assuming.** `replace`, `move` and `destroy` already hold their outcome in the tree when the broadcast arrives (`internal/layouttree`, `daemon/layout_tree.go`), and a browser's `split_pane_req` builds trees the TUI never wrote. Three rules in `layoutsync.go` / `applyWorkspaceState`, each driven through `Update` in tests because the defect lives at the call site:
+
+- **A replace that is already done FILLS the reservation.** A REPLACE reservation whose old id is gone from both the stored tree and the pane set, while the tree holds exactly one id absent from the previous tree, is filled by that id: retire the reservation and `pendingSplit`, set `ActivePane` to the new id, dispose the held replaced pane, clear `worktreeCreates`/`CreatingBranch`. It is never re-seated with `spiralSlot`, which would leave a blank slot and, for a worktree, a spinner until the create timeout restored the old pane.
+- **Moved out.** Adopting a SOURCE tab's pruned tree runs the bookkeeping the old prune loop did: the full-screen (`ExitFocus`) guard, and `adoptMovedPane` for the target. The target tab adopts the daemon's placement (`placeMovedLocked`) and sends nothing.
+- **Closed.** Adopting a pruned tree after this TUI's own close leaves the `closeRequested` entry unconsumed (ids are unique; cleared on reattach); it is not sent again.
+
+A normalized `update_layout` is not an echo: the TUI adopts it and drops a deferred `layoutResend`, so the user repeats the drag. A daemon `error{code:"stale"}` goes only to id-bearing writes, and the TUI sends none. **Accepted race (spec §3.2a/§9):** if a layout write lands while this TUI's own split reservation is armed, a blank slot can show until the pane arrives, and a TUI split still in flight can lose to a daemon-built write on the same tab, landing its pane at the arrival-rule spot instead of the exact split chosen.
+
 ### Typing guard across a remote tab switch
 
 When a broadcast changes THIS client's active tab for the active project,

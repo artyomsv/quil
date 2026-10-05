@@ -8,11 +8,15 @@ In the browser you can:
 
 - watch every project, tab and pane live;
 - scroll back through a pane's history (the page keeps the last 1 000 lines of every pane, even while its tab is hidden);
-- type into a pane;
+- type into a pane, and paste into it;
 - switch tabs and projects;
-- take control of the pane size (see [Size](#size)).
+- take control of the pane size (see [Size](#size));
+- change the workspace (see [Editing](#editing));
+- read and dismiss notifications (see [Notifications](#notifications));
+- open lazygit and hunk over a pane (see [Overlays](#overlays));
+- use your keymap (see [Keys](#keys)).
 
-You cannot yet create panes, close panes, rename things or change settings from the browser. Use the terminal for those.
+The palette, pane notes and settings are not in the browser. Use the terminal for those. The browser tells you when you press a key for one of them.
 
 ## Start it
 
@@ -101,12 +105,66 @@ The page gets the rights of the token:
 
 | Level | In the browser |
 |---|---|
-| `full`, `standard` | Type, switch, resize, take control. |
-| `read-only` | Watch only. The tab bar shows a **read-only** badge. Typing and switching are off. |
+| `full` | Everything above, including overlays and saved instances that carry raw arguments. |
+| `standard` | Everything above, except starting an overlay and starting a saved instance that carries raw arguments. |
+| `read-only` | Watch only. The tab bar shows a **read-only** badge. Typing, pasting, switching and all editing are off. |
 
 A read-only browser **follows the daemon**: it shows each pane at the size the daemon uses, and it never changes that size. Page tabs and the terminal never fight over the size.
 
 Each browser tab logs in on its own with the token.
+
+## Editing
+
+Each pane has a header with a menu. From the menu you can:
+
+- split the pane to the right or below;
+- replace it with another pane (**Replace…**);
+- rename it, mute it, restart it;
+- move it to another tab of the same project (**Move to tab…**);
+- close it. Quil asks first. A pane that runs in a git worktree also asks if you want the worktree removed.
+
+Tabs work the same way. Press `+` in the tab bar to make a new tab. Double-click a tab to rename it. The tab menu sets a color or closes the tab. Drag the border between two panes to change the split.
+
+**New pane…**, **Replace…** and `+` open the create-pane dialog. It has the same fields as the terminal dialog:
+
+- pane type, and saved instances (you can create, edit and delete them);
+- folder, with a folder browser and recent folders;
+- kube context;
+- toggles (for example a permission mode);
+- worktree: an existing worktree, or a new branch;
+- sandbox: image and sign-in;
+- resume: pick an earlier session.
+
+The dialog opens in the project folder. One difference from the terminal: while **new branch** is chosen, the dialog hides **resume**. A new branch starts in an empty checkout, where an old session cannot be found.
+
+Notes:
+
+- A saved instance is read from the files of the machine that runs `quil web`, never from the page. With `standard` rights you can save instances, but you cannot start one that carries raw arguments. That needs `full` rights.
+- A new worktree can take a while. The pane shows a spinner and the real pane takes its place when git is done. If git fails, the pane shows the error and the sidebar gets a **worktree failed** card.
+- With `read-only` rights all of these controls are gone.
+- A closed pane stays closed. The daemon keeps every saved layout in step with the panes that exist.
+- In rare cases a blank slot shows for a moment: another client saves a layout while your terminal is splitting a pane. The pane fills the slot as soon as it arrives.
+
+## Notifications
+
+The notification list is the same as in the terminal, with the same filter. Press `Alt+N` to open it. You can dismiss one notification or all of them. Click one to jump to its pane. Tabs show an unread mark for panes you have not looked at.
+
+## Overlays
+
+`Alt+G` opens lazygit and `Alt+D` opens hunk over the pane area. Each tab has one overlay at a time. Press the key again to hide it. While an overlay shows, your keys go to it. Hiding it in the browser does not hide it in the terminal. A read-only browser can show or hide an overlay that exists, but cannot start one. A standard browser cannot start one either.
+
+## Keys
+
+The browser uses your keymap: your preset (including the tmux preset and its prefix) and your overrides. Press `F1` to see the list of active keys and any conflicts.
+
+- The browser keeps `Ctrl+W`, `Ctrl+T`, `Ctrl+N`, `Ctrl+Tab`, `Ctrl+Shift+T`, `Ctrl+Shift+N` and `Ctrl+Shift+W` for itself. When an action uses one of them, the browser uses another chord. See [Keybindings](keybindings.md#keys-in-the-browser). The F1 list shows which chord works.
+- A key that runs an action does not go to the pane. All other keys go to the pane.
+- Alt composes text on macOS only, so on macOS `Alt+letter` types the text your layout makes. On Windows and Linux, Alt works as a modifier, and AltGr types text.
+- Your keymap is read when the page loads. Change the preset in the terminal (**F1 → Settings → Keys**), then reload the page.
+
+## Paste
+
+A paste goes in one at a time. A big paste waits for the pane to take its parts. If the pane stops reading, the paste waits. If the connection drops or the pane restarts during a paste, the page says the paste may be partly delivered. It never sends the same part twice. Keys you type during a paste go out after it ends.
 
 ## Size
 
@@ -122,7 +180,9 @@ Opening a browser tab does not change the size your terminal uses. If your termi
 ## Limits
 
 - **Very slow client.** If a browser tab cannot keep up, the daemon may drop some live output for it. Quil reconnects the tab and the screen is correct again after the next repaint, as in the terminal client. The banner says **This tab fell behind — reconnecting**.
-- **Keys the browser keeps.** Ctrl+W, Ctrl+T, Ctrl+N and Ctrl+Tab are used by the browser itself. They never reach a pane. Use the terminal for programs that need them.
+- **Keys the browser keeps.** Ctrl+W, Ctrl+T, Ctrl+N and Ctrl+Tab are used by the browser itself. They never reach a pane. Use the terminal for programs that need them. Quil actions on these keys get another chord (see [Keys](#keys)).
+- **`bindings.toml`.** If you have no `bindings.toml`, the browser and the terminal both use the old `[keybindings]` table in `config.toml`.
+- **Two instance writers.** If the terminal and the browser save instances at the same moment, the last save wins.
 - **Browsers.** Chrome, Edge and Firefox are supported. Safari should work but is not tested.
 - **Tabs.** At most 16 browser tabs at once.
 - **Builds without the web page.** `./scripts/dev.sh cross`, `./scripts/dev.sh image` and the Dockerfile build binaries **without** the web page. There, `quil web` prints "This build has no web UI", and the page reads: "This build of quil has no web UI. Install a release build, or build it with ./scripts/dev.sh build." `./scripts/dev.sh build` and release builds include it.

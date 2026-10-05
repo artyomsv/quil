@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { type Page, type WebSocketRoute } from '@playwright/test';
-import { activePane, bufferText, createPane, createTab, expect, ipcRequest, ipcSend, keymapLoaded, listPanes, login, type QuilWeb, tabButton, testWith } from './harness';
+import { activePane, bufferText, createPane, createTab, expect, ipcRequest, ipcSend, keymapLoaded, listPanes, login, type QuilWeb, tabButton, testWith, typeInto } from './harness';
 
 // A stand-in lazygit first on PATH: it answers the daemon's `lazygit
 // --version` probe, then prints a marker and echoes its input, so the test
@@ -177,4 +177,25 @@ test('the overlay claim follows tab switches and survives a reconnect', async ({
   await old?.page.close({ code: 4002, reason: 'too slow' });
   await expect.poll(() => claims(id).slice(before), { timeout: 15_000 }).toEqual([true]);
   await expect(overlay).toBeVisible();
+});
+
+// The daemon follows the shell's directory from its OSC 7 (no TUI attached
+// here, and the page cannot report one): after a cd typed in the browser's
+// own terminal, Alt+G opens on the repository the shell is in now, not on the
+// folder the pane was started in.
+test('Alt+G follows a cd made in the shell', async ({ page, quil }) => {
+  const start = mkdtempSync('/tmp/qw-plain-');
+  const repo = mkdtempSync('/tmp/qw-cd-');
+  expect(spawnSync('git', ['init', '-q', repo]).status).toBe(0);
+  await login(page, quil);
+  await keymapLoaded(page, 'default');
+  const id = await createPane(quil.home, { name: 'mover', cwd: start });
+  await page.locator('.pane', { has: page.locator('.title', { hasText: 'mover' }) }).locator('.term').click();
+  await expect.poll(() => activePane(page)).toBe(id);
+
+  await typeInto(quil.home, id, `cd ${repo}\r`);
+  await expect.poll(() => overlayCwd(quil.home, id), { timeout: 15_000 }).toBe(repo);
+  await page.keyboard.press('Alt+g');
+  await expect(page.locator('.slot.overlay')).toBeVisible();
+  expect(await overlayCwd(quil.home, await overlayId(quil.home))).toBe(repo);
 });

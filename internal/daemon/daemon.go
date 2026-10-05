@@ -4333,6 +4333,7 @@ func (d *Daemon) handleUpdatePane(conn *ipc.Conn, msg *ipc.Message) {
 		pane.Name = truncateField(payload.Name, maxPaneNameField)
 		pane.PluginMu.Unlock()
 	}
+	cwdUnchanged := false
 	if payload.CWD != "" {
 		// Defense-in-depth: skip UNC/device paths (\\host\share, //host/share,
 		// \\?\..., \\.\...) that an attacker could inject via a crafted OSC7
@@ -4340,7 +4341,10 @@ func (d *Daemon) handleUpdatePane(conn *ipc.Conn, msg *ipc.Message) {
 		// prevents these paths from being probed at all; this guard additionally
 		// prevents a UNC value from being persisted into workspace.json and later
 		// handed to os.Stat in spawnRestoredPane.
-		if !strings.HasPrefix(payload.CWD, `\\`) && !strings.HasPrefix(payload.CWD, `//`) {
+		if validReportedCWD(payload.CWD) {
+			pane.PluginMu.Lock()
+			cwdUnchanged = pane.CWD == payload.CWD
+			pane.PluginMu.Unlock()
 			setPaneCWD(pane, payload.CWD)
 		} else {
 			log.Printf("pane %s: rejected UNC CWD %q", pane.ID, payload.CWD)
@@ -4490,6 +4494,16 @@ func (d *Daemon) handleUpdatePane(conn *ipc.Conn, msg *ipc.Message) {
 	// Gated on the quiet fields being PRESENT rather than on the predicate
 	// alone, so a new payload field nobody has listed still broadcasts — the
 	// safe direction updateTouchesBroadcastState promises.
+	//
+	// A TUI still reports every `cd` its emulator saw, but the daemon has
+	// usually stored the same directory already from the same OSC 7
+	// (detectOSC7CWD). A report of ONLY a directory the pane already has
+	// broadcasts nothing: one broadcast per `cd`, not one from the daemon and
+	// one per attached TUI. Any other field keeps the rules below, so a field
+	// added later still broadcasts.
+	if cwdUnchanged && payload == (ipc.UpdatePanePayload{PaneID: payload.PaneID, CWD: payload.CWD}) {
+		return
+	}
 	quiet := payload.OverlayVisible != nil || payload.Unseen != nil
 	if quiet && !updateTouchesBroadcastState(payload) {
 		if payload.Unseen != nil {
@@ -4938,6 +4952,7 @@ func (d *Daemon) flushPaneOutputGeneration(paneID string, data []byte, generatio
 	// bound for a shell that cannot supply a timestamp was inert, and a marker
 	// delayed in the queue or the coalescer was still answered.
 	d.detectHandStart(pane, paneID, data, flushedAt)
+	d.detectOSC7CWD(pane, data)
 	d.detectOSC133Exit(pane, paneID, data)
 	d.applyPluginHandlers(pane, paneID, data)
 }

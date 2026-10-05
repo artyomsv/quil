@@ -4952,7 +4952,7 @@ func (d *Daemon) flushPaneOutputGeneration(paneID string, data []byte, generatio
 	// bound for a shell that cannot supply a timestamp was inert, and a marker
 	// delayed in the queue or the coalescer was still answered.
 	d.detectHandStart(pane, paneID, data, flushedAt)
-	d.detectOSC7CWD(pane, data)
+	d.detectOSC7CWD(pane, data, generation)
 	d.detectOSC133Exit(pane, paneID, data)
 	d.applyPluginHandlers(pane, paneID, data)
 }
@@ -6970,8 +6970,8 @@ func (d *Daemon) emitEvent(e PaneEvent) {
 		return
 	}
 
-	d.events.Push(e)
-	payload := toPaneEventPayload(e)
+	// Broadcast what was queued: an aggregated repeat keeps the old id.
+	payload := toPaneEventPayload(d.events.Push(e))
 	msg, _ := ipc.NewMessage(ipc.MsgPaneEvent, payload)
 	d.broadcast(msg)
 }

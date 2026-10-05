@@ -10,19 +10,58 @@ import (
 func osc7BEL(uri string) string { return "\x1b]7;" + uri + "\x07" }
 func osc7ST(uri string) string  { return "\x1b]7;" + uri + "\x1b\\" }
 
-func TestLastOSC7(t *testing.T) {
-	cases := map[string]struct{ in, want string }{
-		"none":           {"plain output", ""},
-		"BEL":            {"a" + osc7BEL("file://h/one") + "b", "file://h/one"},
-		"ST":             {osc7ST("file://h/two"), "file://h/two"},
-		"last wins":      {osc7BEL("file://h/one") + "x" + osc7ST("file://h/two"), "file://h/two"},
-		"split at end":   {osc7BEL("file://h/one") + "\x1b]7;file://h/tw", "file://h/one"},
-		"bare ESC split": {"\x1b]7;file://h/x\x1b", ""},
+func TestScanOSC7(t *testing.T) {
+	cases := map[string]struct{ in, want, tail string }{
+		"none":           {"plain output", "", ""},
+		"BEL":            {"a" + osc7BEL("file://h/one") + "b", "file://h/one", ""},
+		"ST":             {osc7ST("file://h/two"), "file://h/two", ""},
+		"last wins":      {osc7BEL("file://h/one") + "x" + osc7ST("file://h/two"), "file://h/two", ""},
+		"split at end":   {osc7BEL("file://h/one") + "\x1b]7;file://h/tw", "file://h/one", "\x1b]7;file://h/tw"},
+		"ESC of ST cut":  {"\x1b]7;file://h/x\x1b", "", "\x1b]7;file://h/x\x1b"},
+		"intro cut":      {"$ \x1b]", "", "\x1b]"},
+		"other sequence": {"\x1b[0m done", "", ""},
 	}
 	for name, c := range cases {
-		if got := lastOSC7([]byte(c.in)); got != c.want {
-			t.Errorf("%s: lastOSC7 = %q, want %q", name, got, c.want)
+		got, tail := scanOSC7([]byte(c.in))
+		if got != c.want || string(tail) != c.tail {
+			t.Errorf("%s: scanOSC7 = %q, tail %q; want %q, tail %q", name, got, tail, c.want, c.tail)
 		}
+	}
+}
+
+// The 2 ms coalescer can cut a prompt's OSC 7 anywhere; the halves are joined
+// through the pane's carried tail. A tail never crosses into a new PTY run.
+func TestFlushPaneOutput_OSC7SplitAcrossFlushes(t *testing.T) {
+	d := newTestDaemon(t)
+	tab := d.session.CreateTab("t")
+	pane, err := d.session.CreatePane(tab.ID, "/spawned/here")
+	if err != nil {
+		t.Fatalf("CreatePane: %v", err)
+	}
+	cwdOf := func() string {
+		pane.PluginMu.Lock()
+		defer pane.PluginMu.Unlock()
+		return pane.CWD
+	}
+	full := osc7ST("file://host/work/split")
+	for cut := 1; cut < len(full); cut++ {
+		pane.PluginMu.Lock()
+		pane.CWD = "/spawned/here"
+		pane.PluginMu.Unlock()
+		d.detectOSC7CWD(pane, []byte("out "+full[:cut]), 0)
+		d.detectOSC7CWD(pane, []byte(full[cut:]+"$ "), 0)
+		if got := cwdOf(); got != "/work/split" {
+			t.Fatalf("cut at %d: CWD = %q, want /work/split", cut, got)
+		}
+	}
+	// A run's unfinished tail is dropped at a restart (new generation).
+	pane.PluginMu.Lock()
+	pane.CWD = "/spawned/here"
+	pane.PluginMu.Unlock()
+	d.detectOSC7CWD(pane, []byte("\x1b]7;file://host/old"), 1)
+	d.detectOSC7CWD(pane, []byte("/run\x07"), 2)
+	if got := cwdOf(); got != "/spawned/here" {
+		t.Fatalf("a tail joined across runs: CWD = %q", got)
 	}
 }
 
@@ -82,7 +121,7 @@ func TestDetectOSC7CWD_SkipsSandboxPane(t *testing.T) {
 	pane.PluginMu.Lock()
 	pane.ContainerCWD = "/workspace"
 	pane.PluginMu.Unlock()
-	d.detectOSC7CWD(pane, []byte(osc7BEL("file://box/workspace/sub")))
+	d.detectOSC7CWD(pane, []byte(osc7BEL("file://box/workspace/sub")), 0)
 	pane.PluginMu.Lock()
 	got := pane.CWD
 	pane.PluginMu.Unlock()

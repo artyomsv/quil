@@ -298,6 +298,13 @@ type Pane struct {
 	IdleNotified    bool      // Prevents re-firing for same idle period
 	LastIdleEventAt time.Time // Cooldown: last time a idle event was emitted
 	LastBellEventAt time.Time // Cooldown: last time a bell event was emitted
+	// osc7Tail is the unfinished OSC 7 at the end of the last flush (or a
+	// trailing piece of its introducer), joined to the next flush so a
+	// directory report split by the 2 ms coalescer is not lost; osc7TailGen
+	// is the PTY run it came from, so a restart never joins two runs.
+	// PluginMu-protected, runtime only.
+	osc7Tail    []byte
+	osc7TailGen uint64
 	// LastMCPEventAt is the mcp_control cooldown, keyed BY TITLE. Read and
 	// written under PluginMu, like the two beside it.
 	//

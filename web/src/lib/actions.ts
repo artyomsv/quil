@@ -1,4 +1,6 @@
-import type { SplitPaneReq, WorkspaceState } from './protocol';
+import type { SplitPaneReq, SplitPaneResp, WorkspaceState } from './protocol';
+import type { Outcome } from './requests';
+import { sanitizeRemoteText } from './sanitize';
 
 // The TUI's tab colour palette (internal/tui/model.go tabColors), shown with
 // the colours a terminal draws for those ANSI numbers.
@@ -37,6 +39,26 @@ export function projectRootOf(s: WorkspaceState, tabId: string): string {
 export function cwdForSplit(s: WorkspaceState, paneId: string): string {
   const p = s.panes.find((x) => x.id === paneId);
   return p?.cwd || projectRootOf(s, p?.tab_id ?? s.active_tab);
+}
+
+export interface SplitAnswer {
+  paneId: string;
+  preparing: boolean;
+  // A problem with a pane that exists (its child did not start): shown, but
+  // the create is done — sending it again would make a second pane.
+  notice: string;
+}
+
+// splitAnswer reads an accepted split_pane_resp; null when the daemon
+// refused it and nothing was created (error set).
+export function splitAnswer(out: Outcome): SplitAnswer | null {
+  if (!out.ok) return null;
+  const p = (out.reply?.payload ?? {}) as Partial<SplitPaneResp>;
+  return {
+    paneId: typeof p.pane_id === 'string' ? p.pane_id : '',
+    preparing: p.preparing === true,
+    notice: typeof p.notice === 'string' ? sanitizeRemoteText(p.notice) : '',
+  };
 }
 
 export function quickSplit(s: WorkspaceState, paneId: string, placement: 'right' | 'below'): SplitPaneReq {

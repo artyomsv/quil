@@ -1,4 +1,4 @@
-import { cwdForSplit, nextTabColor, projectRootOf, quickSplit } from './actions';
+import { cwdForSplit, nextTabColor, projectRootOf, quickSplit, splitAnswer } from './actions';
 import { askedTabShown, jumpStep, type PendingJump, pickActive, resolveJump, successorOf, UnseenAsks } from './activepane';
 import { AgentStatePoller } from './agentstate';
 import { attachRefusedBanner, bannerFor, type BannerState, isLoginRequired } from './banner';
@@ -653,14 +653,16 @@ export class App {
 
   // sendSplit sends split_pane_req and makes the answered pane active. A
   // worktree create answers preparing with its placeholder; the final pane
-  // replaces it in a later state.
+  // replaces it in a later state. A pane that exists but did not start is
+  // done, not refused: its notice is shown and the dialog closes.
   async sendSplit(req: SplitPaneReq): Promise<Outcome> {
     const out = await this.act('split_pane_req', req, STILL_WORKING);
-    const id = (out.ok ? (out.reply?.payload as { pane_id?: string } | undefined)?.pane_id : undefined) ?? '';
-    if (id) {
-      this.activePane = id;
-      this.focus(id);
-      if ((out.ok ? (out.reply?.payload as { preparing?: boolean } | undefined)?.preparing : false) === true) this.followFocus = id;
+    const a = splitAnswer(out);
+    if (a?.notice) this.showNotice(a.notice);
+    if (a && a.paneId) {
+      this.activePane = a.paneId;
+      this.focus(a.paneId);
+      if (a.preparing) this.followFocus = a.paneId;
     }
     return out;
   }
@@ -1077,11 +1079,13 @@ export class App {
         overlay_kind: kind,
         pane: { type: kind, cwd: repo },
       });
-      const id = r.ok ? (r.reply?.payload as { pane_id?: string } | undefined)?.pane_id : undefined;
+      const a = splitAnswer(r);
+      const id = a?.paneId ?? '';
       if (!id) {
         this.showNotice(`${kind}: ${r.ok ? 'no pane in the answer' : r.error}`);
         return;
       }
+      if (a?.notice) this.showNotice(`${kind}: ${a.notice}`);
       // The page may have moved on while the daemon worked.
       if (this.activeTabId === tab) this.setOverlayShown(tab, id, true);
     } finally {

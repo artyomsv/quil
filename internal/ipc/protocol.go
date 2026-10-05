@@ -1027,11 +1027,18 @@ type SplitWorktree struct {
 // SplitPaneRespPayload answers split_pane_req. Preparing means a worktree is
 // being checked out: PaneID is the placeholder (or, for a replace, the pane
 // that will be replaced), and the final pane arrives in a broadcast.
+//
+// Error means NOTHING was created: the request may be sent again. Notice is a
+// problem with a pane that DOES exist (its child failed to start, or it began
+// a fresh session instead of the one asked for): the pane is in its slot and
+// shows the reason, so a retry would only make another one — and, for a
+// replace, replace the failed pane in turn.
 type SplitPaneRespPayload struct {
 	PaneID    string `json:"pane_id,omitempty"`
 	TabID     string `json:"tab_id,omitempty"`
 	LayoutRev uint64 `json:"layout_rev"`
 	Preparing bool   `json:"preparing,omitempty"`
+	Notice    string `json:"notice,omitempty"`
 	Error     string `json:"error,omitempty"`
 }
 

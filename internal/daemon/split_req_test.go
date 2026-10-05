@@ -598,7 +598,9 @@ func (s *startFailSession) Start(string, ...string) error {
 }
 
 // A pane whose child cannot start stays in its slot and says why, and the
-// answer carries the same reason.
+// answer carries the same reason as a NOTICE: Error would tell the requester
+// nothing was created, and a retry would make a second pane (or, for a
+// replace, replace the failed one).
 func TestSplitPaneReq_SpawnFailureCarriesTheError(t *testing.T) {
 	d, client := mcpTestDaemon(t)
 	tabID, first := seedTab(t, d, client)
@@ -607,8 +609,8 @@ func TestSplitPaneReq_SpawnFailureCarriesTheError(t *testing.T) {
 	t.Cleanup(func() { newSessionFn = prev })
 
 	resp := split(t, client, ipc.SplitPaneReqPayload{TargetPaneID: first, Placement: ipc.PlacementRight, Pane: ipc.SplitPaneSpec{CWD: t.TempDir()}})
-	if resp.PaneID == "" || !strings.Contains(resp.Error, "spawn refused by the test") {
-		t.Fatalf("resp = %+v, want the pane and its spawn error", resp)
+	if resp.PaneID == "" || resp.Error != "" || !strings.Contains(resp.Notice, "spawn refused by the test") {
+		t.Fatalf("resp = %+v, want the pane, no error and its spawn failure as the notice", resp)
 	}
 	pane := d.session.Pane(resp.PaneID)
 	if pane == nil {
@@ -619,6 +621,25 @@ func TestSplitPaneReq_SpawnFailureCarriesTheError(t *testing.T) {
 	}
 	if tree, _ := tabTree(t, d, tabID); tree == nil || tree.Right == nil || tree.Right.PaneID != resp.PaneID {
 		t.Fatalf("the failed pane lost its slot: %+v", tree)
+	}
+}
+
+// The new-tab arm goes through create_tab_req's code, which answers a first
+// pane that failed to start with its pane id AND the reason in Error; the
+// split answer must move that reason to Notice too.
+func TestSplitPaneReq_NewTabSpawnFailureIsANotice(t *testing.T) {
+	d, client := mcpTestDaemon(t)
+	proj := d.session.CreateProject("web", t.TempDir())
+	prev := newSessionFn
+	newSessionFn = func(cols, rows int) apty.Session { return &startFailSession{} }
+	t.Cleanup(func() { newSessionFn = prev })
+
+	resp := split(t, client, ipc.SplitPaneReqPayload{Placement: ipc.PlacementNewTab, NewTab: &ipc.SplitNewTab{ProjectID: proj.ID}, Pane: ipc.SplitPaneSpec{}})
+	if resp.PaneID == "" || resp.TabID == "" || resp.Error != "" || !strings.Contains(resp.Notice, "spawn refused by the test") {
+		t.Fatalf("resp = %+v, want the tab, the pane, no error and the spawn failure as the notice", resp)
+	}
+	if d.session.Pane(resp.PaneID) == nil {
+		t.Fatal("the pane that failed to start is gone")
 	}
 }
 

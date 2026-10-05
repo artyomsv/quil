@@ -129,9 +129,11 @@ func (d *Daemon) splitPane(conn *ipc.Conn, req ipc.SplitPaneReqPayload) (ipc.Spl
 	// (4) One broadcast and snapshot.
 	d.broadcastState()
 	d.requestSnapshot()
-	resp := ipc.SplitPaneRespPayload{PaneID: pane.ID, TabID: tabID, LayoutRev: built.LayoutRev, Error: spawnErrorOf(pane)}
-	if resp.Error == "" {
-		resp.Error = built.Notice
+	// The pane exists from here on: what went wrong with it is a notice, never
+	// an error, or the requester would read it as refused and create again.
+	resp := ipc.SplitPaneRespPayload{PaneID: pane.ID, TabID: tabID, LayoutRev: built.LayoutRev, Notice: spawnErrorOf(pane)}
+	if resp.Notice == "" {
+		resp.Notice = built.Notice
 	}
 	return resp, nil
 }
@@ -241,7 +243,7 @@ func (d *Daemon) splitOverlay(tabID string, req ipc.SplitPaneReqPayload) ipc.Spl
 	}
 	d.broadcastState()
 	d.requestSnapshot()
-	return ipc.SplitPaneRespPayload{PaneID: pane.ID, TabID: tabID, LayoutRev: built.LayoutRev, Error: spawnErrorOf(pane)}
+	return ipc.SplitPaneRespPayload{PaneID: pane.ID, TabID: tabID, LayoutRev: built.LayoutRev, Notice: spawnErrorOf(pane)}
 }
 
 // splitIntoWorktree is the worktree arm. A split publishes a PTY-less
@@ -338,8 +340,16 @@ func (d *Daemon) splitIntoNewTab(conn *ipc.Conn, req ipc.SplitPaneReqPayload) (i
 	// The sandbox and the resume session are checked inside createTabIn,
 	// before its tab exists.
 	resp, start := d.createTabIn(conn, treq, cwd, picked, true)
-	return ipc.SplitPaneRespPayload{PaneID: resp.PaneID, TabID: resp.TabID, LayoutRev: d.tabLayoutRev(resp.TabID),
-		Preparing: resp.PreparingWorktree != "", Error: resp.Error}, start
+	out := ipc.SplitPaneRespPayload{PaneID: resp.PaneID, TabID: resp.TabID, LayoutRev: d.tabLayoutRev(resp.TabID),
+		Preparing: resp.PreparingWorktree != ""}
+	// create_tab_req answers a first pane that failed to start with its pane
+	// id AND the reason; here the pane id makes it a notice (see the payload).
+	if resp.PaneID != "" {
+		out.Notice = resp.Error
+	} else {
+		out.Error = resp.Error
+	}
+	return out, start
 }
 
 // tabLayoutRev reads a tab's revision under the session lock. Used where no

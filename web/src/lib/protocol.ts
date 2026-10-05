@@ -153,5 +153,7 @@ export interface SplitPaneResp {
   tab_id: string;
   layout_rev: number;
   preparing?: boolean;
+  // The pane exists but has a problem (ipc.SplitPaneRespPayload): not a refusal.
+  notice?: string;
   error?: string;
 }

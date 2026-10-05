@@ -439,17 +439,20 @@ func (d *Daemon) createTabIn(conn *ipc.Conn, req ipc.CreateTabReqPayload, cwd st
 	// caller (split_pane_req's new tab) also claims the resume session
 	// strictly: a session another pane took between the check above and the
 	// publish is refused, never silently started fresh.
-	pane, _, err := d.buildPane(payload, cwd, payload.Type, buildOpts{Slot: paneSlot{TabID: tab.ID}, StrictResume: strictResume})
+	pane, _, err := d.buildPane(payload, cwd, payload.Type, buildOpts{Slot: paneSlot{TabID: tab.ID}, StrictResume: strictResume, KeepLostClaimPane: true})
 	resp := ipc.CreateTabRespPayload{TabID: tab.ID}
 	var taken *errResumeTaken
 	if pane == nil && errors.As(err, &taken) {
-		// buildPane destroyed the pane; the tab is this request's own and now
-		// empty, so it goes too — unless a pane was moved into it meanwhile.
+		// The refused pane is still published (KeepLostClaimPane), and the tab
+		// is this request's own: both go in ONE lock hold, so no broadcast can
+		// carry the tab empty — unless a pane was moved into it meanwhile, when
+		// only the refused pane goes.
 		projectID, _ := d.session.TabProjectID(tab.ID)
-		if gone, _ := d.session.DestroyTabIfPanes(tab.ID, nil); gone {
+		if gone, _ := d.session.DestroyTabIfPanes(tab.ID, []string{taken.pane}); gone {
 			d.recoverEmptyProject(conn, projectID)
 			resp.TabID = ""
 		} else {
+			_ = d.session.DestroyPane(taken.pane)
 			d.ensureTabNotEmpty(tab.ID)
 		}
 		resp.Error = err.Error()

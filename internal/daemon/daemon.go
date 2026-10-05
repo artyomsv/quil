@@ -3072,6 +3072,12 @@ type buildOpts struct {
 	// StrictResume refuses a resume session another pane claimed between
 	// validation and publish, instead of starting a fresh session.
 	StrictResume bool
+	// KeepLostClaimPane leaves the pane of a lost strict claim published and
+	// unbroadcast, for the caller to remove: a new tab removes it WITH the tab
+	// in one lock hold, so no client is ever sent the tab empty (a frame for
+	// the empty tab, then one for no tab — and a concurrent broadcast could
+	// land between a separate pane destroy and tab destroy).
+	KeepLostClaimPane bool
 }
 
 // buildResult is buildPane's report beside the pane: see buildPane.
@@ -3080,8 +3086,9 @@ type buildResult struct {
 	LayoutRev uint64
 }
 
-// errResumeTaken is buildPane's refusal for a lost resume claim.
-type errResumeTaken struct{ holder string }
+// errResumeTaken is buildPane's refusal for a lost resume claim. pane is the
+// refused pane, still published when the caller asked KeepLostClaimPane.
+type errResumeTaken struct{ holder, pane string }
 
 func (e *errResumeTaken) Error() string {
 	return "that Claude session is already open in pane " + e.holder
@@ -3145,6 +3152,9 @@ func (d *Daemon) buildPane(payload ipc.CreatePanePayload, cwd, paneType string, 
 		if holder, ok := d.claimResumeSessionID(pane, payload.ResumeSessionID); !ok && opts.StrictResume {
 			if opts.Slot.ReplaceID == "" {
 				d.cleanupPaneArtifacts(pane.ID)
+				if opts.KeepLostClaimPane {
+					return nil, buildResult{}, &errResumeTaken{holder: holder, pane: pane.ID}
+				}
 				_ = d.session.DestroyPane(pane.ID)
 				// The pane was published, so a broadcast or snapshot may
 				// already carry it: announce that it is gone, or a client
@@ -3207,13 +3217,13 @@ func (d *Daemon) finishDetached(res publishResult) {
 func overlayKey(kind, repo string) string { return kind + "\x00" + normalizeRepoKey(repo) }
 
 // normalizeRepoKey resolves symlinks (keeping the path as given when that
-// fails) and cleans it. Windows paths are case-insensitive, so they are also
-// case-folded there.
+// fails or does not answer in time) and cleans it. Windows paths are
+// case-insensitive, so they are also case-folded there.
 func normalizeRepoKey(repo string) string {
 	if repo == "" {
 		return ""
 	}
-	if r, err := filepath.EvalSymlinks(repo); err == nil {
+	if r, ok := evalSymlinksWithin(repo, repoKeyProbeTimeout); ok {
 		repo = r
 	}
 	repo = filepath.Clean(repo)
@@ -3221,6 +3231,43 @@ func normalizeRepoKey(repo string) string {
 		repo = strings.ToLower(repo)
 	}
 	return repo
+}
+
+// repoKeyProbeTimeout bounds the symlink resolution in normalizeRepoKey. It
+// runs on a create's dispatch goroutine, and a repository on a dead mount
+// would otherwise park it in a syscall. A var so a test can shorten it.
+var repoKeyProbeTimeout = 2 * time.Second
+
+// evalSymlinksPath is the seam the bounded resolution goes through, like
+// statPath: a resolution that never returns cannot be produced on demand.
+var evalSymlinksPath = filepath.EvalSymlinks
+
+// evalSymlinksWithin resolves path's symlinks under the process-wide budget
+// of blocking filesystem calls (claimBlockingFSCall). ok is false when it
+// failed, was refused a slot, or did not answer within d; the caller keeps
+// the path as given.
+func evalSymlinksWithin(path string, d time.Duration) (string, bool) {
+	if d <= 0 || !claimBlockingFSCall() {
+		return "", false
+	}
+	type result struct {
+		path string
+		err  error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		defer releaseBlockingFSCall()
+		r, err := evalSymlinksPath(path)
+		ch <- result{r, err}
+	}()
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case r := <-ch:
+		return r.path, r.err == nil
+	case <-timer.C:
+		return "", false
+	}
 }
 
 // handleReplacePane is the fire-and-forget entry point: it logs what

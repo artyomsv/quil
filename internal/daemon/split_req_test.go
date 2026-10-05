@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -1034,6 +1035,52 @@ func TestSplitPaneReq_NewTabResumeClaimRaceRefusesTheLoser(t *testing.T) {
 	proj := d.session.CreateProject("race", t.TempDir())
 	const id = "0f3c2a9e-1b2c-4d5e-8f90-1a2b3c4d5e6f"
 
+	// An attached client records every workspace_state: the loser's tab must
+	// never reach it as an EMPTY tab (a frame for the empty tab, then one for
+	// no tab, where one frame does).
+	watcher, err := ipc.NewClient(sock)
+	if err != nil {
+		t.Fatalf("dial watcher: %v", err)
+	}
+	t.Cleanup(func() { watcher.Close() })
+	attach, err := ipc.NewMessage(ipc.MsgAttach, ipc.AttachPayload{Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := watcher.Send(attach); err != nil {
+		t.Fatal(err)
+	}
+	var framesMu sync.Mutex
+	var frames []ipc.WorkspaceState
+	attached := make(chan struct{})
+	go func() {
+		first := true
+		for {
+			m, err := watcher.Receive()
+			if err != nil {
+				return
+			}
+			if m.Type != ipc.MsgWorkspaceState {
+				continue
+			}
+			var ws ipc.WorkspaceState
+			if json.Unmarshal(m.Payload, &ws) == nil {
+				framesMu.Lock()
+				frames = append(frames, ws)
+				framesMu.Unlock()
+			}
+			if first {
+				first = false
+				close(attached)
+			}
+		}
+	}()
+	select {
+	case <-attached:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the watcher got no workspace_state after attach")
+	}
+
 	before := map[string]bool{}
 	for _, tab := range d.session.Tabs() {
 		before[tab.ID] = true
@@ -1142,6 +1189,17 @@ func TestSplitPaneReq_NewTabResumeClaimRaceRefusesTheLoser(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("%d new tabs left, want 1 (the loser's tab must be destroyed)", n)
 	}
+	// Both answers are out, and each was sent after its own broadcast.
+	time.Sleep(200 * time.Millisecond)
+	framesMu.Lock()
+	defer framesMu.Unlock()
+	for i, ws := range frames {
+		for _, tab := range ws.Tabs {
+			if !before[tab.ID] && len(tab.Panes) == 0 {
+				t.Fatalf("frame %d carried new tab %s with no panes", i, tab.ID)
+			}
+		}
+	}
 }
 
 // One repository named in two spellings is one overlay slot: a trailing
@@ -1162,5 +1220,34 @@ func TestOverlayKey_NormalizesTheRepository(t *testing.T) {
 	}
 	if overlayKey("hunk", repo) == want {
 		t.Error("two kinds share one key")
+	}
+}
+
+// A symlink resolution that never answers (a repository on a dead mount)
+// must not park the create: the key falls back to the cleaned path as given.
+func TestOverlayKey_HungResolutionFallsBackToTheCleanPath(t *testing.T) {
+	release := make(chan struct{})
+	prevEval, prevTimeout := evalSymlinksPath, repoKeyProbeTimeout
+	evalSymlinksPath = func(string) (string, error) {
+		<-release
+		return "/resolved/elsewhere", nil
+	}
+	repoKeyProbeTimeout = 50 * time.Millisecond
+	t.Cleanup(func() {
+		close(release)
+		evalSymlinksPath, repoKeyProbeTimeout = prevEval, prevTimeout
+	})
+	repo := filepath.Join(t.TempDir(), "repo")
+	start := time.Now()
+	got := normalizeRepoKey(repo + string(filepath.Separator) + ".")
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("normalizeRepoKey waited %v for a hung resolution", elapsed)
+	}
+	want := filepath.Clean(repo)
+	if runtime.GOOS == "windows" {
+		want = strings.ToLower(want)
+	}
+	if got != want {
+		t.Fatalf("normalizeRepoKey = %q, want the cleaned input %q", got, want)
 	}
 }

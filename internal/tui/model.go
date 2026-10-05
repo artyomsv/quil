@@ -748,9 +748,11 @@ type Model struct {
 	// A to machine B's `git worktree add`.
 	createPaneDest string
 	// newTabWorktrees tracks branches asked for by a NEW-TAB create, keyed by
-	// BRANCH because such a create owns no tab id yet — the daemon mints it. It
-	// is the staleness key that lets applyCreatePaneResp report a failed add on
-	// that path without also reporting one belonging to another client.
+	// newTabWorktreeKey (destination + branch) because such a create owns no
+	// tab id yet — the daemon mints it. It is the staleness key that lets
+	// applyCreatePaneResp report a failed add on that path without also
+	// reporting one belonging to another client, or to another daemon that
+	// happens to have a branch of the same name.
 	newTabWorktrees      map[string]bool
 	selectedCategory     int           // selected category index in create pane dialog
 	selectedPlugin       string        // selected plugin name in create pane dialog
@@ -849,7 +851,16 @@ type Model struct {
 	// Cleared on every settling path — success disposes it (the swap really
 	// happened), failure and timeout restore it — so an entry can never outlive
 	// the request that armed it.
-	worktreeReplaced  map[string]*PaneModel
+	worktreeReplaced map[string]*PaneModel
+	// createReqIDs holds, per tab, the request id of an ORDINARY create sent
+	// from the create-pane dialog. The daemon answers such a create only when
+	// it refuses it (an `error` frame naming that id; success is the next
+	// broadcast), so the id is what lets the refusal find the placeholder it
+	// has to unwind. replaceHeld is the pane an ordinary REPLACE detached,
+	// kept until the create settles so a refusal can put it back. Both are
+	// settled by settleOrdinaryCreates once the tab's reservation is gone.
+	createReqIDs      map[string]string
+	replaceHeld       map[string]*PaneModel
 	worktreeCursor    int                // row cursor in the worktree field's expanded list; row 0 = "off"
 	worktreeScroll    int                // scroll offset for the visible window of the expanded worktree list
 	worktreeFilter    string             // type-to-search text narrowing the worktree list; "" = the whole list
@@ -3329,6 +3340,7 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		// runs, then either delete or demote them to logger.Debug.
 		log.Printf("WorkspaceState: %d tabs, %d panes", len(msg.Tabs), len(msg.Panes))
 		newPaneIDs, overlayResizeCmds := m.applyWorkspaceState(msg, msg.Dest)
+		m.settleOrdinaryCreates()
 		m.notePaneInventory(msg.Dest)
 		// The import needs this frame's panes (applied above) and must record
 		// a groups answer from the marker before the merge below reads it.
@@ -3836,6 +3848,10 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 	case noteRespMsg:
 		m.applyNoteResp(msg)
 		return m, m.listenForMessages()
+
+	case createPaneRefusedMsg:
+		m.applyCreatePaneRefused(msg)
+		return m, tea.Batch(m.listenForMessages(), m.flashCmd())
 
 	case noteSetRespMsg:
 		return m, tea.Batch(m.listenForMessages(), m.applyNoteSetResp(msg))
@@ -4623,6 +4639,12 @@ func (m *Model) spinnerTargetPane(id string) *PaneModel {
 			return held
 		}
 	}
+	// The same for an ordinary replace, which a refusal can put back.
+	for _, held := range m.replaceHeld {
+		if held != nil && held.ID == id {
+			return held
+		}
+	}
 	return nil
 }
 
@@ -5044,6 +5066,10 @@ func (m Model) sendCreateTab(spec *ipc.FirstPaneSpec) tea.Cmd {
 			log.Printf("create tab: build message: %v", err)
 			return nil
 		}
+		// The daemon answers an ordinary create_tab only when it refuses the
+		// first pane, and only to an id-bearing request: the id is what makes
+		// that refusal reach the user (createPaneRefusedMsg).
+		msg.ID = fmt.Sprintf("newtab-%d", time.Now().UnixNano())
 		if dest == "" {
 			// No pre-flight check to make: the router resolves this one, and a
 			// drop there is already logged. Reporting "cannot reach" about a
@@ -9092,6 +9118,14 @@ func (m Model) listenForMessages() tea.Cmd {
 			// again rather than holding group sends for the whole session.
 			if msg.ID != "" && e.Type == ipc.MsgSharedImport {
 				return sharedImportErrMsg{dest: msg.Origin, id: msg.ID, text: e.Code + ": " + e.Message}
+			}
+			// A refused ordinary create: the only answer such a create gets.
+			if msg.ID != "" && (e.Type == ipc.MsgCreatePane || e.Type == ipc.MsgCreateTab) {
+				text := e.Message
+				if text == "" {
+					text = "refused (" + e.Code + ")"
+				}
+				return createPaneRefusedMsg{dest: msg.Origin, id: msg.ID, text: text}
 			}
 			return listenContinueMsg{}
 

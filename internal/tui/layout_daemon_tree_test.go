@@ -51,6 +51,9 @@ func disposeAtEnd(t *testing.T, m *Model) {
 				tab.overlayPane.Dispose()
 			}
 		}
+		for _, p := range m.replaceHeld {
+			p.Dispose()
+		}
 	})
 }
 
@@ -82,8 +85,22 @@ func TestDaemonTree_SubstitutedReplaceFillsTheReservation(t *testing.T) {
 	m, _ = lsApply(t, m, lsState(1, lsWire(t, lsSplit(SplitHorizontal, 0.3, lsLeaf("p1"), lsLeaf("p2"))), "p1", "p2"))
 	lsTab(t, &m).ActivePane = "p2"
 	m = armOwnReplace(t, m)
+	held := m.replaceHeld["t1"]
+	if held == nil || held.ID != "p2" {
+		t.Fatal("setup: the replace did not hold p2 for a refusal to put back")
+	}
 
 	m, sent := lsApply(t, m, lsState(2, lsWire(t, lsSplit(SplitHorizontal, 0.3, lsLeaf("p1"), lsLeaf("p-new"))), "p1", "p-new"))
+
+	// The pane landing is what settles the create: the held pane was swapped
+	// out daemon-side, so it is disposed (vt is nilled by closeVT, which also
+	// stops its drain goroutine), and the request id is forgotten.
+	if m.replaceHeld["t1"] != nil || held.vt != nil {
+		t.Error("the replaced pane is still held or was not disposed")
+	}
+	if m.createReqIDs["t1"] != "" {
+		t.Error("the settled create kept its request id")
+	}
 
 	tab := lsTab(t, &m)
 	if got, want := lsTree(t, &m), lsSplit(SplitHorizontal, 0.3, lsLeaf("p1"), lsLeaf("p-new")); !reflect.DeepEqual(got, want) {

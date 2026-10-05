@@ -299,8 +299,8 @@ func (m *Model) applyCreatePaneResp(p ipc.CreatePaneRespPayload, dest string) {
 		// create's only bookkeeping, and deleting it solely on the error path
 		// left one behind for every SUCCESSFUL new-tab worktree create, keyed by
 		// branch name, for the life of the session.
-		if p.Worktree != nil && m.newTabWorktrees[p.Worktree.Branch] {
-			delete(m.newTabWorktrees, p.Worktree.Branch)
+		if key := newTabWorktreeKey(dest, p.Worktree.Branch); m.newTabWorktrees[key] {
+			delete(m.newTabWorktrees, key)
 			if p.Error != "" {
 				m.setFlash("worktree not created: " +
 					truncateCells(sanitizeRemoteText(p.Error), createErrFlashCap))
@@ -368,6 +368,13 @@ func (m *Model) applyCreatePaneResp(p ipc.CreatePaneRespPayload, dest string) {
 	// without shortening anything, and the status bar drops its whole right
 	// half rather than wrapping when a flash outgrows it.
 	m.setFlash("worktree not created: " + truncateCells(sanitizeRemoteText(p.Error), createErrFlashCap))
+}
+
+// newTabWorktreeKey keys newTabWorktrees: the destination the create went to
+// and the branch it asked for. NUL separates them because neither a
+// destination nor a valid branch name can contain one.
+func newTabWorktreeKey(dest, branch string) string {
+	return dest + "\x00" + branch
 }
 
 // createErrFlashCap bounds git's stderr in the status-bar flash. A remote

@@ -2456,7 +2456,7 @@ func (m Model) handleCreatePaneSelect() (tea.Model, tea.Cmd) {
 		// A plugin with form fields is started by INSTANCE, whose arguments go
 		// to the daemon raw — refused for a token without that right. Said
 		// here, before the form is filled in, rather than after it.
-		if len(plugins[m.dialogCursor].Command.FormFields) > 0 && !m.destCanRawArgs(m.createPaneDialogDest()) {
+		if len(plugins[m.dialogCursor].Command.FormFields) > 0 && !m.destCanRawArgs(m.createPaneSendDest()) {
 			return m, m.refuseInstanceCreate()
 		}
 		m.selectedPlugin = plugins[m.dialogCursor].Name
@@ -2545,6 +2545,19 @@ func (m Model) createPaneDialogDest() string {
 	return m.activeDest()
 }
 
+// createPaneSendDest is the destination this dialog's create goes to, for the
+// rights checks and for keying what its answer settles. It differs from
+// createPaneDialogDest only in the startup windows: there the unstamped send
+// reaches the router's sole-conn fallback, which is rightsDest's homeDest —
+// while activeDest answers "", which reads a --connect session as local and
+// full until its first broadcast.
+func (m Model) createPaneSendDest() string {
+	if m.createPaneDest != "" {
+		return m.createPaneDest
+	}
+	return m.rightsDest()
+}
+
 // setupDiscoveryBase is the directory the setup dialog starts looking from.
 //
 // For a SPLIT it is the active pane's OSC 7 CWD: the pane being split is the
@@ -2620,8 +2633,9 @@ func (m *Model) refuseInstanceCreate() tea.Cmd {
 // handleCreatePaneSplit handles the final split direction selection (step 3).
 func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 	// The submit itself refuses too, for an instance reached some other way:
-	// this create is sent id-less, so the daemon's refusal would be silent.
-	if len(m.selectedInstanceArgs) > 0 && !m.destCanRawArgs(m.createPaneDialogDest()) {
+	// the daemon would refuse it as well, but only after a placeholder was
+	// armed (and, for a new tab, with no answer at all).
+	if len(m.selectedInstanceArgs) > 0 && !m.destCanRawArgs(m.createPaneSendDest()) {
 		cmd := m.refuseInstanceCreate()
 		return m, cmd
 	}
@@ -2737,11 +2751,14 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 			// Armed so the daemon's answer can be reported. Keyed by BRANCH, not
 			// by tab: this create has no tab id until the daemon mints one, which
 			// is also why it arms none of the tab-keyed bookkeeping the split
-			// path uses. applyCreatePaneResp consumes it.
+			// path uses. And by the destination it is sent to, because a branch
+			// name is not unique across daemons: another host's answer for its
+			// own same-named branch must not consume or report this one.
+			// applyCreatePaneResp consumes it.
 			if m.newTabWorktrees == nil {
 				m.newTabWorktrees = make(map[string]bool)
 			}
-			m.newTabWorktrees[newBranch] = true
+			m.newTabWorktrees[newTabWorktreeKey(m.createPaneSendDest(), newBranch)] = true
 		}
 		logger.Debug("create tab: submitting cwd=%q type=%s instance=%s branch=%q repo=%q",
 			cwd, pluginName, instanceName, newBranch, newBranchRepo)
@@ -2838,12 +2855,15 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 			tab.invalidateLeaves()
 			if spec == nil {
 				// Ordinary replace: the daemon destroys the old pane the moment
-				// it handles this message, so the model is never rendered again.
-				// Disposing here — not via the reconciliation sweep — keeps the
-				// leaves cache honest: a stale cache was previously what fed the
-				// detached pane into the sweep's existingPanes.
+				// it handles this message — unless it REFUSES the create, which
+				// it does before touching the pane. So the model is held, out
+				// of the tree (which keeps the leaves cache honest: a stale
+				// cache was previously what fed the detached pane into the
+				// sweep's existingPanes), until the create settles: a refusal
+				// puts it back, the broadcast that fills the leaf disposes it
+				// (settleOrdinaryCreates).
 				if old != nil {
-					old.Dispose()
+					m.holdReplacedPane(tab.ID, old)
 				}
 			} else if old != nil {
 				// A worktree replace is ANSWERED, not fire-and-forget, and the
@@ -2888,6 +2908,12 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 			tab.CreatingBranch = newBranch
 		}
 
+		// An ordinary create is answered only when the daemon refuses it; the
+		// id is what that answer names.
+		reqID := ""
+		if spec == nil {
+			reqID = m.armOrdinaryCreate(tab.ID)
+		}
 		send := func() tea.Msg {
 			msg, _ := ipc.NewMessage(ipc.MsgCreatePane, ipc.CreatePanePayload{
 				TabID:           tabID,
@@ -2902,6 +2928,7 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 				Worktree:        spec,
 				Sandbox:         sbox,
 			})
+			msg.ID = reqID
 			m.sendForDest(tabDest, msg)
 			rememberImage(m)
 			return nil
@@ -2965,6 +2992,11 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 		tab.CreatingBranch = newBranch
 	}
 
+	// See the replace arm: the id is what a refusal names.
+	reqID := ""
+	if spec == nil {
+		reqID = m.armOrdinaryCreate(tab.ID)
+	}
 	send := func() tea.Msg {
 		msg, _ := ipc.NewMessage(ipc.MsgCreatePane, ipc.CreatePanePayload{
 			TabID:           tabID,
@@ -2978,6 +3010,7 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 			Worktree:        spec,
 			Sandbox:         sbox,
 		})
+		msg.ID = reqID
 		m.sendForDest(tabDest, msg)
 		rememberImage(m)
 		return nil

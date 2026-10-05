@@ -48,13 +48,14 @@ headline: Stricter shared workspaces; refused creates now say why
   error replies were counted for the whole session, so after a reconnect one more error
   stopped the import.
 - **Windows: the daemon no longer rewrites the access list of a folder that is not Quil's.**
-  If `QUIL_HOME` points at a folder that also holds your own files, the daemon leaves its
-  access list alone, writes a warning to `quild.log`, and does not start the TCP listener.
+  If `QUIL_HOME` points at a folder that also holds your own files (hidden ones such as
+  `.git` included), the daemon leaves its access list alone, writes a warning to `quild.log`, and does not start the TCP listener.
   The daemon also reads the quil folder's access list first, and when it is already
   owner-only, it no longer rewrites the whole folder tree on every start.
 - **One host can add at most 64 groups to the sidebar.** The cap already applied to the
   group list a host sends, but a project filed under a name the host did not list added
   a group too, and a new set of names in each update kept growing the sidebar and the
   saved groups file. Now such a project joins a group only when the sidebar already has
-  that name. If the name is not there, the project is shown ungrouped, and `quil.log`
+  that name, and a name that came only from a host's list counts only while a host still
+  lists it. If the name is not there, the project is shown ungrouped, and `quil.log`
   says so once.

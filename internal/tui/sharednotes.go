@@ -133,8 +133,8 @@ func (m *Model) applyNoteResp(msg noteRespMsg) tea.Cmd {
 	// set) and report as clean a text the daemon no longer holds. A save
 	// answered since the confirmation moved the editor's rev: that text is
 	// the daemon's newer one, not the buffer the user agreed to discard.
-	discards := m.noteLoadDiscards && !ed.SaveInFlight() && ed.Content() == m.noteLoadSnapshot &&
-		ed.Rev() == m.noteLoadSnapRev
+	savedSince := m.noteLoadDiscards && ed.Rev() != m.noteLoadSnapRev
+	discards := m.noteLoadDiscards && !ed.SaveInFlight() && ed.Content() == m.noteLoadSnapshot && !savedSince
 	m.noteLoadID, m.noteLoadDiscards, m.noteLoadSnapshot, m.noteLoadSnapRev = "", false, "", 0
 	if msg.resp.Error != "" {
 		// A reload that fails leaves the loaded text as it was; only a first
@@ -151,7 +151,11 @@ func (m *Model) applyNoteResp(msg noteRespMsg) tea.Cmd {
 	// inside its snapshot debounce restores a LOWER rev, and the user asked
 	// for the daemon's text whatever its number. Every other drop says so.
 	if !ed.Loading() && !discards && msg.resp.Rev < ed.Rev() {
-		m.setFlash("Note reload dropped: older than the editor")
+		if savedSince {
+			m.setFlash("Note reload replaced by a newer save")
+		} else {
+			m.setFlash("Note reload dropped: older than the editor")
+		}
 		return m.flashCmd()
 	}
 	// A silent reload (clean editor, newer frame rev) that finds the user

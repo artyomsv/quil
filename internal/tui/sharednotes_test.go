@@ -261,6 +261,9 @@ func TestUpdate_ConfirmedReload_OverwriteAnsweredFirst_StaleGetIgnored(t *testin
 		t.Errorf("after the stale get's answer: content=%q rev=%d dirty=%v conflict=%v, want the overwrite clean at 3",
 			ed.Content(), ed.Rev(), ed.Dirty(), ed.Conflict())
 	}
+	if m.flashText != "Note reload replaced by a newer save" {
+		t.Errorf("flash = %q, want the reload named as replaced by the save", m.flashText)
+	}
 }
 
 // A reload that cannot be SENT (host unreachable) leaves an already-loaded

@@ -928,7 +928,14 @@ func TestUpdate_ImportSendFails_NextFrameSendsItAgain(t *testing.T) {
 	m, _, _ := importTestModel(t)
 	r := m.client.(*Router)
 	r.Remove("")
+	gen := m.reqGen
 	m = updateNoWait(t, m, sharedFrame("r", 1, "proj-1", ""))
+	// Positive proof the import got as far as the send: maybeImport passed
+	// its guards (it records the local notes kind before building the
+	// request) and sendImport minted the request id.
+	if !loadImportMarker(config.SharedImportPath()).Dests[config.DestFileKey("")].Notes || m.reqGen == gen {
+		t.Fatalf("setup: the import never reached the send (reqGen %d -> %d)", gen, m.reqGen)
+	}
 	if m.importAsked[""] || len(m.pendingImports) != 0 {
 		t.Fatalf("a failed send left the import asked=%v pending=%d", m.importAsked[""], len(m.pendingImports))
 	}
@@ -1011,6 +1018,9 @@ func TestUpdate_ImportNoteReadFails_NotesKindStaysPending(t *testing.T) {
 	}
 	// LoadNotes refuses a symlink: a read error, not "no note".
 	if err := os.Symlink(target, filepath.Join(config.NotesDir(), "pane-bad.md")); err != nil {
+		if runtime.GOOS != "windows" {
+			t.Fatal(err)
+		}
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 	rf := sharedFrame("q", 1, "proj-2", "")

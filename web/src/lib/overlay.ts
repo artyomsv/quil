@@ -18,7 +18,8 @@ export function overlayOf(s: WorkspaceState | null, tabId: string): OverlayInfo 
 
 // OverlayToggle is what Alt+G / Alt+D does in one tab (spec §5.4).
 export type OverlayToggle =
-  | { do: 'show' | 'hide'; id: string }
+  | { do: 'show'; id: string }
+  | { do: 'hide'; id: string }
   // hide names this page's shown overlay of the other tool, hidden first; ''
   // when none is shown.
   | { do: 'create'; hide: string }
@@ -29,7 +30,7 @@ export type OverlayToggle =
 // slot, which only an editable page may.
 export function overlayToggle(cur: OverlayInfo | null, shownId: string | undefined, kind: OverlayKind, canCreate: boolean): OverlayToggle {
   const shown = cur !== null && shownId === cur.id;
-  if (cur && cur.kind === kind) return { do: shown ? 'hide' : 'show', id: cur.id };
+  if (cur && cur.kind === kind) return shown ? { do: 'hide', id: cur.id } : { do: 'show', id: cur.id };
   if (!canCreate) return { do: 'refuse' };
   return { do: 'create', hide: shown && cur ? cur.id : '' };
 }

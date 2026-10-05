@@ -313,6 +313,50 @@ func TestUpdate_ConflictCtrlRTwice_Reloads(t *testing.T) {
 	}
 }
 
+// A daemon that crashed inside its snapshot debounce restores a LOWER note
+// rev than the open editor holds. The user's save then conflicts, and the
+// confirmed Ctrl+R must load the daemon's text even though its rev is older.
+func TestUpdate_ConfirmedReload_LowerRevAfterDaemonRestart_Loads(t *testing.T) {
+	m, conn := loadedNotesModel(t, "a\n", 5)
+	m = updateWith(t, m, typed("x"))
+	m = updateWith(t, m, ctrl('s'))
+	set := lastSent(t, conn, ipc.MsgNoteSet)
+	m = updateWith(t, m, noteSetRespMsg{dest: "", id: set.ID, resp: ipc.NoteSetRespPayload{PaneID: "tab-proj-1-pane", Conflict: true, CurrentRev: 3}})
+	if !m.notesEditor.Conflict() {
+		t.Fatal("setup: the save did not conflict")
+	}
+	m = updateWith(t, m, ctrl('r'))
+	m = updateWith(t, m, ctrl('r'))
+	id := lastSent(t, conn, ipc.MsgNoteGet).ID
+	m = updateWith(t, m, noteRespMsg{dest: "", id: id, resp: ipc.NoteRespPayload{PaneID: "tab-proj-1-pane", Text: "restored\n", Rev: 3}})
+	ed := m.notesEditor
+	if ed.Content() != "restored\n" || ed.Rev() != 3 || ed.Dirty() || ed.Conflict() {
+		t.Errorf("after the confirmed reload: content=%q rev=%d dirty=%v conflict=%v, want the daemon's text clean at 3",
+			ed.Content(), ed.Rev(), ed.Dirty(), ed.Conflict())
+	}
+	if m.flashText != "" {
+		t.Errorf("an applied reload flashed %q", m.flashText)
+	}
+}
+
+// A silent reload whose answer is older than the editor is still dropped,
+// but no longer without a word.
+func TestUpdate_SilentReloadOlderThanEditor_DroppedWithFlash(t *testing.T) {
+	m, conn := loadedNotesModel(t, "a\n", 1)
+	m = updateWith(t, m, noteFrame(2, 4)) // clean → silent reload
+	id := lastSent(t, conn, ipc.MsgNoteGet).ID
+	if m.noteLoadDiscards {
+		t.Fatal("setup: a silent reload counted as a confirmed one")
+	}
+	m = updateWith(t, m, noteRespMsg{dest: "", id: id, resp: ipc.NoteRespPayload{PaneID: "tab-proj-1-pane", Text: "old\n", Rev: 0}})
+	if ed := m.notesEditor; ed.Content() != "a\n" || ed.Rev() != 1 {
+		t.Errorf("an older silent reload was applied: content=%q rev=%d", ed.Content(), ed.Rev())
+	}
+	if m.flashText != "Note reload dropped: older than the editor" {
+		t.Errorf("flash = %q", m.flashText)
+	}
+}
+
 func TestExitNotes_DirtyRemote_SaveOutlivesEditor_ConflictWritesFile(t *testing.T) {
 	m, conn := notesTestModel(t)
 	id := lastSent(t, conn, ipc.MsgNoteGet).ID

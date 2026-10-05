@@ -74,9 +74,9 @@ type pendingImport struct {
 	groupsSnap projectGroups
 }
 
-// maxImportErrors is how many error replies one destination may give this
-// session before its import stops re-sending on each frame; after that only a
-// reconnect or the next launch sends it again.
+// maxImportErrors is how many error replies one destination may give on one
+// connection before its import stops re-sending on each frame; after that only
+// a reconnect or the next launch sends it again.
 const maxImportErrors = 3
 
 var sharedImportTimeout = 8 * time.Second
@@ -244,12 +244,23 @@ func (m *Model) destsHoldingGroupName(name string) []string {
 // a new connection, so the next shared frame from dest sends it again. The
 // daemon side is idempotent — a refusal is an answer, which opens group sends
 // and replays the held ops. The held ops themselves are kept.
+//
+// The error count is per connection too: the new one gets maxImportErrors
+// tries of its own. And the group ops sent on the old connection are dropped
+// from pendingGroupOps — their answers cannot arrive, and the entry would
+// otherwise stay for the life of the process.
 func (m *Model) forgetImportFor(dest string) {
 	for id, p := range m.pendingImports {
 		if p.dest == dest {
 			delete(m.pendingImports, id)
 		}
 	}
+	for id, op := range m.pendingGroupOps {
+		if op.dest == dest {
+			delete(m.pendingGroupOps, id)
+		}
+	}
+	delete(m.importErrors, dest)
 	delete(m.importAsked, dest)
 	delete(m.notesWaiting, dest) // the next frame's maybeImport decides again
 	// The pane ids came from the old connection. Until the new one sends a
@@ -502,7 +513,14 @@ func collectImportNotes(dir string, mine, others map[string]bool, budget int) (o
 			continue
 		}
 		text, err := persist.LoadNotes(dir, id)
-		if err != nil || text == "" {
+		if err != nil {
+			// Like the budget: the kind stays pending, so the next launch
+			// reads it again instead of the marker closing it for good.
+			log.Printf("shared import: note %s unreadable, left for the next launch: %v", id, err)
+			deferred = true
+			continue
+		}
+		if text == "" {
 			continue
 		}
 		if len(text) > ipc.MaxNoteBytes {
@@ -672,10 +690,10 @@ func (m *Model) applySharedImportTimeout(msg sharedImportTimeoutMsg) {
 // applySharedImportErr handles an error reply to this client's import: the
 // daemon refused the request as a whole, so nothing is answered and the
 // marker is untouched. The next shared frame from dest sends it again, until
-// dest has given maxImportErrors error replies this session; then it is not
-// sent again on this connection — a reconnect (forgetImportFor) or the next
-// launch sends it once more — and group sends to dest stay held until its
-// daemon lists a group (settleCappedImport).
+// dest has given maxImportErrors error replies on this connection; then it is
+// not sent again on it — a reconnect (forgetImportFor, which resets the count)
+// or the next launch tries again — and group sends to dest stay held until
+// its daemon lists a group (settleCappedImport).
 func (m *Model) applySharedImportErr(msg sharedImportErrMsg) tea.Cmd {
 	p, ok := m.pendingImports[msg.id]
 	if !ok || p.dest != msg.dest {
@@ -688,6 +706,6 @@ func (m *Model) applySharedImportErr(msg sharedImportErrMsg) tea.Cmd {
 		log.Printf("shared import %q refused (%d/%d): %s; sent again on its next frame", p.dest, n, maxImportErrors, msg.text)
 		return nil
 	}
-	log.Printf("shared import %q refused (%d/%d): %s; not sent again on this connection (a reconnect or the next launch sends it once more)", p.dest, m.importErrors[p.dest], maxImportErrors, msg.text)
+	log.Printf("shared import %q refused (%d/%d): %s; not sent again on this connection (a reconnect or the next launch tries again)", p.dest, m.importErrors[p.dest], maxImportErrors, msg.text)
 	return m.settleCappedImport(p.dest)
 }

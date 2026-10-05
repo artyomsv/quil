@@ -1063,6 +1063,7 @@ type Model struct {
 	noteLoadID       string                     // the open editor's in-flight note_get id
 	noteLoadDiscards bool                       // that note_get is a confirmed Ctrl+R reload, the one load allowed to replace edits
 	noteLoadSnapshot string                     // the buffer the user confirmed discarding; edits after it are kept
+	noteLoadSnapRev  uint64                     // the editor's rev at that confirmation; a save answered since moves it
 	noteSaveID       string                     // the open editor's in-flight note_set id; "" once the editor closed
 	quitWaiting      bool                       // app.quit is waiting for pendingNoteSaves (requestQuit)
 
@@ -1153,7 +1154,7 @@ type Model struct {
 	// sends and makes the frame authoritative; deferredGroupOps = the group
 	// sends held until then, replayed in order on the answer; importNames =
 	// the group names each unanswered daemon will list once they land;
-	// importErrors = error replies per destination this session;
+	// importErrors = error replies per destination on its current connection;
 	// paneInventory = the destinations whose workspace frame was applied on
 	// their CURRENT connection, so their pane ids are known (a lost link or a
 	// reattach forgets it, forgetImportFor); notesWaiting =
@@ -3857,8 +3858,7 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		return m, tea.Batch(m.listenForMessages(), m.applySharedOpResp(msg))
 
 	case noteRespMsg:
-		m.applyNoteResp(msg)
-		return m, m.listenForMessages()
+		return m, tea.Batch(m.listenForMessages(), m.applyNoteResp(msg))
 
 	case createPaneRefusedMsg:
 		m.applyCreatePaneRefused(msg)

@@ -919,3 +919,115 @@ func TestUpdate_RefusedImport_ExistingBackupIsNeverOverwritten(t *testing.T) {
 		t.Errorf("the earlier backup was overwritten: %s", got)
 	}
 }
+
+// I-2: an import whose send fails (no conn for the destination — the
+// --remote shape with no "" entry) is not asked: the next frame sends it.
+// A real Router, because fakeSender never reaches sendForDestStrict's
+// refusal.
+func TestUpdate_ImportSendFails_NextFrameSendsItAgain(t *testing.T) {
+	m, _, _ := importTestModel(t)
+	r := m.client.(*Router)
+	r.Remove("")
+	m = updateNoWait(t, m, sharedFrame("r", 1, "proj-1", ""))
+	if m.importAsked[""] || len(m.pendingImports) != 0 {
+		t.Fatalf("a failed send left the import asked=%v pending=%d", m.importAsked[""], len(m.pendingImports))
+	}
+	back := newFakeConn()
+	close(back.recv)
+	r.Add("", back)
+	m = updateNoWait(t, m, sharedFrame("r", 2, "proj-1", ""))
+	if n := countSent(back, ipc.MsgSharedImport); n != 1 {
+		t.Errorf("shared_import sent %d times after the conn came back, want 1", n)
+	}
+}
+
+// I-1: the error cap is per connection. After a lost link the new
+// connection gets maxImportErrors tries of its own, not one.
+func TestUpdate_ImportErrorCap_ResetsWithTheLink(t *testing.T) {
+	m, _, remote := importTestModel(t)
+	frame := func(run string, rev uint64) WorkspaceStateMsg {
+		f := sharedFrame(run, rev, "proj-2", "")
+		f.Dest = "hostA"
+		return f
+	}
+	rev := uint64(1)
+	m = updateNoWait(t, m, frame("q", rev))
+	for i := 1; i <= maxImportErrors; i++ {
+		_, id := importPayload(t, remote)
+		m = updateNoWait(t, m, sharedImportErrMsg{dest: "hostA", id: id, text: "bad_payload: x"})
+		rev++
+		m = updateNoWait(t, m, frame("q", rev))
+	}
+	capped := countSent(remote, ipc.MsgSharedImport)
+	if capped != maxImportErrors {
+		t.Fatalf("setup: shared_import sent %d times, want %d", capped, maxImportErrors)
+	}
+	out, _ := m.Update(linkLostMsg{dest: "hostA", err: fmt.Errorf("EOF")})
+	m = out.(Model)
+	m = updateNoWait(t, m, frame("q2", 1))
+	if n := countSent(remote, ipc.MsgSharedImport); n != capped+1 {
+		t.Fatalf("after the lost link: shared_import sent %d times, want %d", n, capped+1)
+	}
+	_, id := importPayload(t, remote)
+	m = updateNoWait(t, m, sharedImportErrMsg{dest: "hostA", id: id, text: "bad_payload: x"})
+	m = updateNoWait(t, m, frame("q2", 2))
+	if n := countSent(remote, ipc.MsgSharedImport); n != capped+2 {
+		t.Errorf("one error on the new connection stopped the import: sent %d times, want %d", n, capped+2)
+	}
+}
+
+// G-3: a group op sent on a link that is lost can never be answered; its
+// pendingGroupOps entry goes with the link. Another host's entry stays.
+func TestUpdate_LinkLost_DropsThatHostsPendingGroupOps(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	m, _, _ := twoDestModel(t)
+	runCmdNoWait(m.sendSharedOp("hostA", ipc.MsgGroupOp, ipc.GroupOpPayload{Op: ipc.GroupOpCreate, Name: "Remote"}, "create group"))
+	runCmdNoWait(m.sendSharedOp("", ipc.MsgGroupOp, ipc.GroupOpPayload{Op: ipc.GroupOpCreate, Name: "Local"}, "create group"))
+	if len(m.pendingGroupOps) != 2 {
+		t.Fatalf("setup: %d pending group ops, want 2", len(m.pendingGroupOps))
+	}
+	out, _ := m.Update(linkLostMsg{dest: "hostA", err: fmt.Errorf("EOF")})
+	m = out.(Model)
+	if len(m.pendingGroupOps) != 1 {
+		t.Fatalf("%d pending group ops after the link loss, want 1", len(m.pendingGroupOps))
+	}
+	for _, op := range m.pendingGroupOps {
+		if op.dest != "" {
+			t.Errorf("an op for %q survived its link", op.dest)
+		}
+	}
+}
+
+// N-2: a note that cannot be read is not a note imported. The notes kind
+// stays pending, so the next launch reads it again.
+func TestUpdate_ImportNoteReadFails_NotesKindStaysPending(t *testing.T) {
+	m, _, remote := importTestModel(t)
+	if err := persist.SaveNotes(config.NotesDir(), "pane-good", "kept\n"); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "elsewhere.md")
+	if err := os.WriteFile(target, []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// LoadNotes refuses a symlink: a read error, not "no note".
+	if err := os.Symlink(target, filepath.Join(config.NotesDir(), "pane-bad.md")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	rf := sharedFrame("q", 1, "proj-2", "")
+	rf.Dest = "hostA"
+	for _, id := range []string{"pane-good", "pane-bad"} {
+		rf.Panes = append(rf.Panes, PaneInfo{ID: id, TabID: "tab-proj-2", Type: "terminal"})
+		rf.Tabs[0].Panes = append(rf.Tabs[0].Panes, id)
+	}
+	m = updateNoWait(t, m, sharedFrame("r", 1, "proj-1", "")) // the local pane ids come first
+	m = updateNoWait(t, m, rf)
+	p, id := importPayload(t, remote)
+	if len(p.Notes) != 1 || p.Notes[0].PaneID != "pane-good" {
+		t.Fatalf("notes sent = %+v, want pane-good alone", p.Notes)
+	}
+	all := []string{ipc.ImportKindGroups, ipc.ImportKindRecent, ipc.ImportKindNotes}
+	m = updateNoWait(t, m, sharedImportRespMsg{dest: "hostA", id: id, resp: ipc.SharedImportRespPayload{Answered: all, NotesApplied: 1}})
+	if k := loadImportMarker(config.SharedImportPath()).Dests[config.DestFileKey("hostA")]; !k.Groups || !k.Recent || k.Notes {
+		t.Errorf("marker = %+v, want notes pending after an unreadable note", k)
+	}
+}

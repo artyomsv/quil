@@ -151,6 +151,14 @@ notes follow in a notes-only import once every pane id is known
 destination's NEWEST frame. "Known" means a frame on the CURRENT connection:
 a lost link or a reattach forgets that destination's pane ids
 (`forgetImportFor`), so an old connection's list never opens the wait.
+**A parked host keeps the wait closed, deliberately** (#247 N-3): its last
+known pane list is not used to open it, so while one connected host sits
+parked with no frame on its current connection, every other host's notes
+wait — on a long outage, until the next launch. Speed is the only cost; a
+note sent to the wrong daemon cannot be taken back, and the parked host may
+come back holding the same pane id. A note file `LoadNotes` cannot read keeps
+the notes kind pending in `shared-import.json`, like one the request budget
+left out, so the next launch reads it again.
 
 **Recent folders are recorded from the request, never guessed.**
 `RecordRecentCWD` is called only for a directory the request itself named and

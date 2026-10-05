@@ -91,7 +91,7 @@ func (m *Model) sendNoteGet(dest, paneID string) (id string, cmd tea.Cmd) {
 		return "", nil
 	}
 	msg.ID = "note-" + m.nextReqGen()
-	m.noteLoadID, m.noteLoadDiscards, m.noteLoadSnapshot = msg.ID, false, ""
+	m.noteLoadID, m.noteLoadDiscards, m.noteLoadSnapshot, m.noteLoadSnapRev = msg.ID, false, "", 0
 	if err := m.sendForDestStrict(dest, msg); err != nil {
 		m.noteLoadID = ""
 		if m.notesEditor.Loading() {
@@ -114,38 +114,45 @@ func (m *Model) reloadNote() tea.Cmd {
 	id, cmd := m.sendNoteGet(ed.Dest(), ed.PaneID())
 	m.noteLoadDiscards = id != ""
 	if m.noteLoadDiscards {
-		m.noteLoadSnapshot = ed.Content()
+		m.noteLoadSnapshot, m.noteLoadSnapRev = ed.Content(), ed.Rev()
 	}
 	return cmd
 }
 
-func (m *Model) applyNoteResp(msg noteRespMsg) {
+func (m *Model) applyNoteResp(msg noteRespMsg) tea.Cmd {
 	ed := m.notesEditor
 	// An answer from a daemon other than the editor's is not the answer: ids
 	// are this client's counter, so another host can hold a matching one. It
 	// must not take the load id, or the real answer is dropped after it.
 	if ed == nil || !ed.Remote() || msg.id == "" || msg.id != m.noteLoadID || msg.dest != ed.Dest() {
-		return
+		return nil
 	}
 	// The confirmed reload discards only the buffer the user confirmed on, and
 	// never under a save in flight: that save's answer would then land on the
 	// reloaded buffer (ApplyLoaded clears saveInFlight while noteSaveID stays
-	// set) and report as clean a text the daemon no longer holds.
-	discards := m.noteLoadDiscards && !ed.SaveInFlight() && ed.Content() == m.noteLoadSnapshot
-	m.noteLoadID, m.noteLoadDiscards, m.noteLoadSnapshot = "", false, ""
+	// set) and report as clean a text the daemon no longer holds. A save
+	// answered since the confirmation moved the editor's rev: that text is
+	// the daemon's newer one, not the buffer the user agreed to discard.
+	discards := m.noteLoadDiscards && !ed.SaveInFlight() && ed.Content() == m.noteLoadSnapshot &&
+		ed.Rev() == m.noteLoadSnapRev
+	m.noteLoadID, m.noteLoadDiscards, m.noteLoadSnapshot, m.noteLoadSnapRev = "", false, "", 0
 	if msg.resp.Error != "" {
 		// A reload that fails leaves the loaded text as it was; only a first
 		// load has nothing to show and becomes the read-only error editor.
 		if ed.Loading() {
 			ed.ApplyLoadError(elideEnd(sanitizeRemoteText(msg.resp.Error), noteErrCap))
 		}
-		return
+		return nil
 	}
-	// Revisions only grow, so an answer older than what the editor holds is
-	// stale — an overwrite sent after this get can answer first (each note
-	// request runs on its own daemon worker), and that answer is the newer.
-	if !ed.Loading() && msg.resp.Rev < ed.Rev() {
-		return
+	// Revisions only grow on one daemon run, so an answer older than what the
+	// editor holds is stale — an overwrite sent after this get can answer
+	// first (each note request runs on its own daemon worker), and that answer
+	// is the newer. The confirmed reload is exempt: a daemon that crashed
+	// inside its snapshot debounce restores a LOWER rev, and the user asked
+	// for the daemon's text whatever its number. Every other drop says so.
+	if !ed.Loading() && !discards && msg.resp.Rev < ed.Rev() {
+		m.setFlash("Note reload dropped: older than the editor")
+		return m.flashCmd()
 	}
 	// A silent reload (clean editor, newer frame rev) that finds the user
 	// typing since it was sent must not replace the typing: it is a conflict.
@@ -155,9 +162,10 @@ func (m *Model) applyNoteResp(msg noteRespMsg) {
 	// flight counts as unsaved text too: its buffer is not the daemon's yet.
 	if !ed.Loading() && (ed.Dirty() || ed.SaveInFlight()) && !discards {
 		ed.MarkConflict(msg.resp.Rev)
-		return
+		return nil
 	}
 	ed.ApplyLoaded(sanitizeRemoteNote(msg.resp.Text), msg.resp.Rev)
+	return nil
 }
 
 // sanitizeRemoteNote is the remote-text rule for a note: the
@@ -255,7 +263,7 @@ func (m *Model) flushRemoteNotesInPlace() {
 		m.keepNoteText(ed.Dest(), ed.PaneID(), text, "Note not saved on the daemon")
 	}
 	// The closed editor's answers are settled through pendingNoteSaves alone.
-	m.noteSaveID, m.noteLoadID, m.noteLoadDiscards, m.noteLoadSnapshot = "", "", false, ""
+	m.noteSaveID, m.noteLoadID, m.noteLoadDiscards, m.noteLoadSnapshot, m.noteLoadSnapRev = "", "", false, "", 0
 }
 
 // keepNoteText writes text the daemon will not hold to notes-conflicts and

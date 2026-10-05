@@ -261,7 +261,7 @@ export class Connection {
         this.attachAnswered = true;
         this.events.onMessage(m);
         // After the state is applied: the page rebuilds what a missed
-        // broadcast could have left stale (Task 8: the notification store).
+        // broadcast could have left stale (the notification list).
         this.events.onAttached?.();
         return;
       }

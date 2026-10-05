@@ -14,6 +14,9 @@ export interface QuilTestHook {
   paste(paneId: string, text: string): void;
   // The pane this browser tab treats as active; '' with none.
   activePane(): string;
+  // The preset of the keymap the page dispatches with; '' before
+  // /api/client has answered.
+  keymapPreset(): string;
 }
 
 export function shouldRegisterE2EHook(env: Record<string, unknown>): boolean {

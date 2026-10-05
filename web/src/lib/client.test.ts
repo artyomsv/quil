@@ -40,8 +40,8 @@ describe('client api', () => {
         categories: [],
         instances: {},
         sandbox: { sign_in_default: 'browser', image_default: '' },
-        keymap: undefined,
-        notifications: undefined,
+        keymap: null,
+        notifications: null,
       },
     });
     expect('error' in (await loadClient(fake(200, null).fetchFn, 'k'))).toBe(true);
@@ -49,6 +49,40 @@ describe('client api', () => {
       throw new Error('down');
     };
     expect(await loadClient(thrown, 'k')).toEqual({ error: 'Could not reach the quil web server' });
+  });
+
+  it('reads the keymap and the notification tables, dropping what it cannot use', async () => {
+    const body = {
+      plugins: [],
+      categories: [],
+      keymap: {
+        preset: 'tmux',
+        prefix: 'ctrl+b',
+        timeout_ms: 0,
+        group_order: ['Panes'],
+        actions: [{ id: 'pane.split_h', label: 'Split', group: 'Panes', tier: 'late', keys: ['ctrl+b %', 7] }, { label: 'no id' }],
+        builtins: [{ id: 'help', label: 'Key list', keys: ['f1'] }],
+        conflicts: [],
+      },
+      notifications: {
+        shown: { agent_turn: true, commands: 'no' },
+        hook_groups: { Stop: 'agent_turn' },
+        plain_groups: { bell: 'agent_blocked' },
+        default_group: 'system',
+        work_state_only: ['hook.claude.PostToolUse'],
+      },
+    };
+    const r = await loadClient(fake(200, body).fetchFn, 'k');
+    if (!('info' in r)) throw new Error('refused');
+    expect(r.info.keymap?.actions).toEqual([
+      { id: 'pane.split_h', label: 'Split', group: 'Panes', tier: 'late', keys: ['ctrl+b %'], fallback: undefined, fallback_unavailable: undefined },
+    ]);
+    expect(r.info.keymap?.builtins[0]?.keys).toEqual(['f1']);
+    expect(r.info.notifications?.shown).toEqual({ agent_turn: true });
+    expect(r.info.notifications?.work_state_only).toEqual(['hook.claude.PostToolUse']);
+    const bad = await loadClient(fake(200, { plugins: [], categories: [], keymap: { actions: 'x' }, notifications: 3 }).fetchFn, 'k');
+    expect('info' in bad && bad.info.keymap).toBeNull();
+    expect('info' in bad && bad.info.notifications).toBeNull();
   });
 
   it('maps refusals to words', async () => {

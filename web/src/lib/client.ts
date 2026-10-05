@@ -1,4 +1,6 @@
+import { asWebKeymap, type WebKeymap } from './keys/engine';
 import type { FetchLike } from './login';
+import { asNotifyInfo, type NotifyInfo } from './notifications';
 
 // GET /api/client and the saved-instance writes (internal/webgw/api.go).
 // Every call carries the port-scoped login key in X-Quil-Key; the cookie
@@ -50,8 +52,10 @@ export interface ClientInfo {
   categories: { key: string; label: string }[];
   instances: Record<string, SavedInstance[]>;
   sandbox: { sign_in_default: 'browser' | 'shared' | 'token' | string; image_default: string };
-  keymap?: unknown; // Task 8
-  notifications?: unknown; // Task 8
+  // The keymap as the browser dispatches it, and the notification tables;
+  // null when the server sent none.
+  keymap: WebKeymap | null;
+  notifications: NotifyInfo | null;
 }
 
 export interface InstanceInput {
@@ -109,8 +113,8 @@ function asClientInfo(v: unknown): ClientInfo | null {
       sign_in_default: typeof sandbox.sign_in_default === 'string' ? sandbox.sign_in_default : 'browser',
       image_default: typeof sandbox.image_default === 'string' ? sandbox.image_default : '',
     },
-    keymap: o.keymap,
-    notifications: o.notifications,
+    keymap: asWebKeymap(o.keymap),
+    notifications: asNotifyInfo(o.notifications),
   };
 }
 

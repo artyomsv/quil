@@ -6,3 +6,6 @@ headline: Edit panes, tabs and layout from the browser
 - `quil web` accepts the 5b editing, dialog and notification requests; a saved instance is expanded from the gateway machine's own files, never from the page.
 - The browser can split, replace, close, rename, mute, restart and move panes, rename, color and close tabs, and drag split borders. Large pastes wait for the pane instead of being dropped.
 - The browser has the full create-pane dialog: type, saved instances (create, edit, delete), folder, kube context, toggles, worktree, sandbox and resume. Open it from a pane menu (New pane…, Replace…) or the tab bar `+`.
+- **`quil web` keys:** the browser uses your keymap and preset, tmux sequences included. Keys a browser keeps for itself (Ctrl+W, Ctrl+T, Ctrl+N) get a browser key instead, shown in the F1 key list.
+- **`quil web` notifications:** the notification list, with dismiss and jump to pane, the same filter as the TUI, and unread marks on tabs.
+- **`quil web` overlays:** Alt+G and Alt+D open lazygit and hunk over the pane area.

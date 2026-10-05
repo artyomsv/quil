@@ -38,6 +38,8 @@ const info: ClientInfo = {
   ],
   instances: { ssh: [{ id: 'i1', name: 'box', fields: { name: 'box', host: 'h' } }] },
   sandbox: { sign_in_default: 'shared', image_default: 'img:1' },
+  keymap: null,
+  notifications: null,
 };
 const avail = { terminal: true, 'claude-code': true, ssh: true, k9s: true };
 

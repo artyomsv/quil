@@ -40,7 +40,7 @@
           onclick={() => app.switchTab(tab.id)}
           ondblclick={() => app.startRenameTab(tab.id)}
         >
-          {tab.name || '—'}
+          {tab.name || '—'}{#if tab.unseen}<span class="unread" aria-hidden="true" title="finished while away">•</span>{/if}
         </button>
         {#if app.editable}
           <Menu label="Tab menu" items={menuFor(tab.id)} />
@@ -52,6 +52,16 @@
       <button class="new" aria-label="New tab" title="New tab" onclick={() => app.openCreate('new_tab')}>+</button>
     {/if}
   </div>
+  <button
+    class="notify-toggle"
+    class:open={app.notifyOpen}
+    aria-label="Notifications"
+    aria-pressed={app.notifyOpen}
+    title="Notifications"
+    onclick={() => (app.notifyOpen = !app.notifyOpen)}
+  >
+    🔔{#if app.events.length > 0}<span class="count">{app.events.length}</span>{/if}
+  </button>
   {#if app.readOnly}
     <span class="badge">read-only</span>
   {:else if app.state && !app.isMaster}
@@ -161,6 +171,32 @@
 
   .new:hover {
     color: #e6e8ee;
+  }
+
+  .unread {
+    margin-left: 4px;
+    color: #5cc27a;
+  }
+
+  .notify-toggle {
+    flex: none;
+    align-self: center;
+    padding: 2px 6px;
+    border: 0;
+    border-radius: 4px;
+    background: none;
+    color: #9aa0ad;
+    font: inherit;
+    cursor: pointer;
+  }
+
+  .notify-toggle.open {
+    background: #232733;
+  }
+
+  .count {
+    margin-left: 3px;
+    font-size: 12px;
   }
 
   .badge {

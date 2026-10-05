@@ -104,6 +104,26 @@ describe('sidebarModel', () => {
   it('is empty before any state', () => {
     expect(sidebarModel(null, {})).toEqual([]);
   });
+
+  it('marks a tab unread from its panes, minus panes seen since the state', () => {
+    const s = parseWorkspaceState({
+      active_tab: 't1',
+      tabs: [
+        { id: 't1', name: 'a', panes: ['p1', 'p2'] },
+        { id: 't2', name: 'b', panes: ['p3'] },
+      ],
+      panes: [
+        { id: 'p1', tab_id: 't1', unseen: true },
+        { id: 'p2', tab_id: 't1' },
+        { id: 'p3', tab_id: 't2', unseen: true, overlay: true },
+      ],
+      projects: [],
+    });
+    const items = sidebarModel(s, {}, new Set())[0]!.tabs;
+    expect(items.map((t) => t.unseen)).toEqual([true, false]);
+    expect(sidebarModel(s, {}, new Set(['p1']))[0]!.tabs[0]!.unseen).toBe(false);
+    expect(tabBarModel(s, {}, new Set(['p1']))[0]?.unseen).toBe(false);
+  });
 });
 
 describe('tabBarModel and activeProjectOf', () => {

@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { App } from '../lib/app.svelte';
+  import { sanitizeRemoteText } from '../lib/sanitize';
   import PaneView from './PaneView.svelte';
   import SplitBars from './SplitBars.svelte';
 
@@ -45,6 +46,23 @@
     {/if}
   {/each}
   <SplitBars {app} {area} />
+  {#if app.overlay}
+    <!-- The tab's overlay covers the pane area while this page shows it. -->
+    <div class="slot overlay" style:left="0" style:top="0" style:width="100%" style:height="100%">
+      {#key app.overlay.id}
+        <PaneView
+          {app}
+          paneId={app.overlay.id}
+          name={sanitizeRemoteText(app.overlay.kind)}
+          spawnError=""
+          muted={false}
+          worktreeOwned={false}
+          agent="unknown"
+          overlay
+        />
+      {/key}
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -59,6 +77,11 @@
   .slot {
     position: absolute;
     padding: 1px;
+  }
+
+  .overlay {
+    z-index: 5;
+    background: #000;
   }
 
   .empty {

@@ -17,6 +17,9 @@ export interface TabItem {
   color: string;
   active: boolean;
   dots: PaneDot[];
+  // A pane finished while nobody looked (PaneState.unseen), minus panes seen
+  // since that state.
+  unseen: boolean;
 }
 
 export interface ProjectItem {
@@ -110,20 +113,33 @@ function dotOf(state: string | undefined): AgentDot {
   return state === 'working' || state === 'blocked' || state === 'idle' ? state : 'unknown';
 }
 
-function tabItem(s: WorkspaceState, tab: TabState, panes: Map<string, PaneState>, agents: Record<string, string>): TabItem {
+function tabItem(
+  s: WorkspaceState,
+  tab: TabState,
+  panes: Map<string, PaneState>,
+  agents: Record<string, string>,
+  seen: ReadonlySet<string>,
+): TabItem {
   const dots: PaneDot[] = [];
+  let unseen = false;
   for (const id of tab.panes) {
     const p = panes.get(id);
     if (!p || p.overlay) continue;
     dots.push({ id, name: paneName(p), state: dotOf(agents[id]) });
+    if (p.unseen && !seen.has(id)) unseen = true;
   }
-  return { id: tab.id, name: sanitizeRemoteText(tab.name), color: tab.color, active: tab.id === s.active_tab, dots };
+  return { id: tab.id, name: sanitizeRemoteText(tab.name), color: tab.color, active: tab.id === s.active_tab, dots, unseen };
 }
 
 // sidebarModel lists the projects in the daemon's order, each with its tabs
 // in its own order. A tab whose project is not listed goes under a last
-// group with no id, so it is never hidden.
-export function sidebarModel(s: WorkspaceState | null, agents: Record<string, string>): ProjectItem[] {
+// group with no id, so it is never hidden. seen holds panes whose unseen mark
+// a pane_seen cleared after s arrived.
+export function sidebarModel(
+  s: WorkspaceState | null,
+  agents: Record<string, string>,
+  seen: ReadonlySet<string> = new Set<string>(),
+): ProjectItem[] {
   if (!s) return [];
   const panes = new Map(s.panes.map((p) => [p.id, p]));
   const tabs = new Map(s.tabs.map((t) => [t.id, t]));
@@ -136,19 +152,23 @@ export function sidebarModel(s: WorkspaceState | null, agents: Record<string, st
       const t = tabs.get(id);
       if (!t || placed.has(id)) continue;
       placed.add(id);
-      items.push(tabItem(s, t, panes, agents));
+      items.push(tabItem(s, t, panes, agents, seen));
     }
     out.push({ id: proj.id, name: sanitizeRemoteText(proj.name), active: proj.id === activeProject, tabs: items });
   }
-  const rest = s.tabs.filter((t) => !placed.has(t.id)).map((t) => tabItem(s, t, panes, agents));
+  const rest = s.tabs.filter((t) => !placed.has(t.id)).map((t) => tabItem(s, t, panes, agents, seen));
   if (rest.length > 0) out.push({ id: '', name: 'Other tabs', active: false, tabs: rest });
   return out;
 }
 
 // tabBarModel is the active project's tabs.
-export function tabBarModel(s: WorkspaceState | null, agents: Record<string, string>): TabItem[] {
+export function tabBarModel(
+  s: WorkspaceState | null,
+  agents: Record<string, string>,
+  seen: ReadonlySet<string> = new Set<string>(),
+): TabItem[] {
   const pid = activeProjectOf(s);
-  return sidebarModel(s, agents).find((p) => p.id === pid)?.tabs ?? [];
+  return sidebarModel(s, agents, seen).find((p) => p.id === pid)?.tabs ?? [];
 }
 
 // activeTab is the active tab with its non-overlay panes, and the tree to

@@ -23,6 +23,8 @@ export interface XtermPane extends TermLike {
   // one replaces the previous.
   onFocus(fn: () => void): void;
   focus(): void;
+  // Scrolls the viewport by pages (negative is up).
+  scrollPages(n: number): void;
   // The buffer as text, trailing blank lines removed (the end-to-end hook).
   text(): string;
   // One row of the screen (0 is the top), trailing blanks removed (the
@@ -117,6 +119,9 @@ export function createXtermPane(_paneId: string): XtermPane {
     },
     focus() {
       if (!disposed) term.focus();
+    },
+    scrollPages(n) {
+      if (!disposed) term.scrollPages(n);
     },
     text() {
       if (disposed) return '';

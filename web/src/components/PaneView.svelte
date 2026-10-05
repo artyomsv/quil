@@ -3,6 +3,7 @@
   import type { App } from '../lib/app.svelte';
   import type { MenuItem } from '../lib/menu';
   import type { AgentDot } from '../lib/view';
+  import AgentDotView from './AgentDot.svelte';
   import Confirm from './Confirm.svelte';
   import Menu from './Menu.svelte';
   import Prompt from './Prompt.svelte';
@@ -15,9 +16,11 @@
     muted: boolean;
     worktreeOwned: boolean;
     agent: AgentDot;
+    // A tab's overlay (lazygit, hunk): no pane menu, never the active pane.
+    overlay?: boolean;
   }
 
-  let { app, paneId, name, spawnError, muted, worktreeOwned, agent }: Props = $props();
+  let { app, paneId, name, spawnError, muted, worktreeOwned, agent, overlay = false }: Props = $props();
   // The dialog aims at the active pane, so this pane becomes it first.
   function createFrom(mode: 'pane' | 'replace'): void {
     app.setActivePane(paneId);
@@ -67,12 +70,12 @@
 
 <!-- Focus anywhere in the pane (its terminal, its menu) makes it this tab's
      active pane. -->
-<div class="pane" class:active={app.activePane === paneId} onfocusin={() => app.setActivePane(paneId)}>
+<div class="pane" class:active={overlay || app.activePane === paneId} onfocusin={() => app.setActivePane(paneId)}>
   <div class="title">
-    <span class="dot {agent}" title="Agent: {agent}"></span>
+    <AgentDotView state={agent} title="Agent: {agent}" />
     <span class="name">{name}</span>
     {#if muted}<span class="mark" title="Muted">muted</span>{/if}
-    {#if app.editable}<Menu label="Pane menu" {items} />{/if}
+    {#if app.editable && !overlay}<Menu label="Pane menu" {items} />{/if}
   </div>
   {#if spawnError}
     <p class="error">{spawnError}</p>
@@ -128,27 +131,6 @@
     background: #1b1e26;
     color: #9aa0ad;
     font-size: 12px;
-  }
-
-  /* The agent dot: the same colours as the sidebar's. */
-  .dot {
-    flex: none;
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: #4a4f5c;
-  }
-
-  .dot.working {
-    background: #4f9be8;
-  }
-
-  .dot.blocked {
-    background: #e8a24f;
-  }
-
-  .dot.idle {
-    background: #5cc27a;
   }
 
   .name {

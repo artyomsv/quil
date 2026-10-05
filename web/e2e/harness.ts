@@ -286,6 +286,15 @@ export function activePane(page: Page): Promise<string> {
   return page.evaluate(() => (window as unknown as TestHookWindow).__quilTest?.activePane() ?? '');
 }
 
+// keymapLoaded waits until the page dispatches keys with the named preset:
+// /api/client loads after the attach, so a key pressed right after login
+// can reach the page before its keymap does.
+export async function keymapLoaded(page: Page, preset: string): Promise<void> {
+  await expect
+    .poll(() => page.evaluate(() => (window as unknown as TestHookWindow).__quilTest?.keymapPreset() ?? ''))
+    .toBe(preset);
+}
+
 // paneMenu opens a pane's menu by the pane's title text.
 export async function paneMenu(page: Page, title: string): Promise<void> {
   await page.locator('.pane', { has: page.locator('.title', { hasText: title }) }).getByRole('button', { name: 'Pane menu' }).click();
@@ -303,6 +312,7 @@ interface TestHookWindow {
     clientId(): string;
     paste(paneId: string, text: string): void;
     activePane(): string;
+    keymapPreset(): string;
   };
   __quilCSP?: (v: string) => void;
 }

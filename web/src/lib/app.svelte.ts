@@ -14,7 +14,13 @@ import {
 import { type AttachSizes, type Clock, Connection, type SocketLike } from './connection';
 import type { DialogOpen } from './dialog';
 import { type QuilTestHook, shouldRegisterE2EHook } from './e2ehook';
+import { NATIVE, TUI_ONLY, VIEW_ONLY } from './keys/actions';
+import { isEditable } from './keys/chord';
+import { buildTables, KeyEngine, type WebKeymap } from './keys/engine';
+import { type Dir, neighbour } from './keys/nav';
 import { type FetchLike, hasSession, postLogin, sessionGone } from './login';
+import { NotificationStore, type NotifyInfo, type PaneEvent, parsePaneEvent } from './notifications';
+import { type OverlayInfo, type OverlayKind, overlayOf } from './overlay';
 import { NOT_SENT, PasteFlow } from './paste';
 import type { Message, PaneInfo, PaneSize, SplitPaneReq, WebWelcome, WorkspaceState } from './protocol';
 import { type Outcome, Requests, STILL_WORKING } from './requests';
@@ -113,18 +119,34 @@ export class App {
   // A workspace_state has been applied on the current socket.
   live = $state(false);
   // Ask dialogs live on the App, not in the component, so the pane menu and
-  // a key (Task 8) open the SAME dialog. At most one of each is open.
+  // a key open the SAME dialog. At most one of each is open.
   paneAsk = $state.raw<{ kind: 'rename' | 'close'; paneId: string } | null>(null);
   tabAsk = $state.raw<{ kind: 'rename' | 'close'; tabId: string } | null>(null);
   // GET /api/client: plugin definitions, saved instances, sandbox defaults
-  // (and, Task 8, the keymap). Loaded on every dialog open.
+  // and the keymap. Loaded on every dialog open and every attach.
   client = $state.raw<ClientInfo | null>(null);
   // The open create-pane dialog, if any.
   dialog = $state.raw<DialogOpen | null>(null);
+  // The notification list, the key list, the project sidebar, and
+  // the pending-prefix line.
+  notifyOpen = $state(false);
+  // Bumped by notification.focus; the panel focuses its list.
+  notifyFocus = $state(0);
+  keyListOpen = $state(false);
+  sidebarOpen = $state(true);
+  keyHint = $state('');
+  keymap = $state.raw<WebKeymap | null>(null);
+  events = $state.raw<PaneEvent[]>([]);
+  // Panes a pane_seen cleared since the last state (R-7).
+  seenPanes = $state.raw<ReadonlySet<string>>(new Set());
+  // Per tab: this page shows the tab's overlay. Never another client's.
+  overlayShown = $state.raw<Record<string, boolean>>({});
   activeTabId = $derived(activeTabOf(this.state));
   activeProjectId = $derived(activeProjectOf(this.state));
-  sidebar = $derived(sidebarModel(this.state, this.agentStates));
-  tabBar = $derived(tabBarModel(this.state, this.agentStates));
+  sidebar = $derived(sidebarModel(this.state, this.agentStates, this.seenPanes));
+  tabBar = $derived(tabBarModel(this.state, this.agentStates, this.seenPanes));
+  // The active tab's overlay while this page shows it.
+  overlay = $derived(this.overlayVisibleFor(this.state, this.activeTabId, this.overlayShown));
   placed = $derived(placedPanes(this.state, this.dragPreview, this.agentStates));
   isMaster = $derived(this.welcome !== null && this.state?.size_master === this.welcome.client_id);
   editable = $derived(!this.readOnly && this.live);
@@ -177,6 +199,8 @@ export class App {
   // The preparing placeholder a create was answered with, until the pane
   // that replaces it arrives.
   private followFocus = '';
+  private keys: KeyEngine | null = null;
+  private readonly store = new NotificationStore(null);
 
   constructor() {
     const send = (m: Message): void => this.conn.send(m);
@@ -238,6 +262,7 @@ export class App {
         clientId: () => this.welcome?.client_id ?? '',
         paste: (id, text) => this.paste(id, text),
         activePane: () => this.activePane,
+        keymapPreset: () => this.keymap?.preset ?? '',
       };
       (window as unknown as { __quilTest?: QuilTestHook }).__quilTest = hook;
     }
@@ -246,6 +271,9 @@ export class App {
   // boot shows the workspace when the server still knows this browser's
   // session and the page still holds its key; otherwise the login form.
   async boot(): Promise<void> {
+    // Capture phase: the engine sees a key before xterm's textarea does.
+    document.addEventListener('keydown', this.onKeyDown, true);
+    window.addEventListener('blur', this.onBlur);
     this.watchDisplay();
     this.probed = probeCell();
     const live = await hasSession(this.fetchFn);
@@ -269,6 +297,9 @@ export class App {
   }
 
   stop(): void {
+    document.removeEventListener('keydown', this.onKeyDown, true);
+    window.removeEventListener('blur', this.onBlur);
+    this.keys?.cancel();
     this.conn.stop();
     this.poller.stop();
     if (this.layoutTimer !== undefined) window.clearTimeout(this.layoutTimer);
@@ -379,9 +410,25 @@ export class App {
         if (typeof id === 'string') this.focus(id);
         return;
       }
-      case 'pane_event':
+      case 'pane_event': {
         this.poller.paneEvent();
+        const e = parsePaneEvent(m.payload);
+        if (e && this.store.add(e, this.skipCtx())) this.events = this.store.visible();
         return;
+      }
+      case 'event_dismissed': {
+        const id = (m.payload as { event_id?: unknown } | null)?.event_id;
+        if (typeof id === 'string') {
+          this.store.dismiss(id);
+          this.events = this.store.visible();
+        }
+        return;
+      }
+      case 'pane_seen': {
+        const id = (m.payload as { pane_id?: unknown } | null)?.pane_id;
+        if (typeof id === 'string' && !this.seenPanes.has(id)) this.seenPanes = new Set([...this.seenPanes, id]);
+        return;
+      }
       default:
         // hello_resp, errors, highlight_pane and the rest are not shown.
         return;
@@ -417,6 +464,14 @@ export class App {
     const prev = this.state;
     this.state = s;
     this.live = true;
+    // A pending prefix belongs to the tab it was typed in.
+    if (prev && prev.active_tab !== s.active_tab) this.keys?.cancel();
+    // A newer state carries the daemon's unseen values (R-7).
+    if (this.seenPanes.size > 0) this.seenPanes = new Set();
+    // An overlay that left the state is no longer shown here (spec §7).
+    const shown: Record<string, boolean> = {};
+    for (const [tab, v] of Object.entries(this.overlayShown)) if (v && overlayOf(s, tab)) shown[tab] = true;
+    if (Object.keys(shown).length !== Object.keys(this.overlayShown).length) this.overlayShown = shown;
     for (const t of s.tabs) this.drag.stateArrived(t.id, t.layout_rev);
     const placed = placedPanes(s).map((p) => p.id);
     // A replaced active pane hands the part to the pane in its slot.
@@ -436,9 +491,14 @@ export class App {
     }
     this.clearUnseen();
     this.applyDaemonGrids();
-    // A pane that this state does not place (an overlay, another tab) will
-    // not be shown, so a focus waiting for it is dropped.
-    if (this.focusPending !== '' && !placedPanes(s).some((p) => p.id === this.focusPending)) {
+    // A pane that this state does not place (another tab, an overlay this
+    // page does not show) will not be shown, so a focus waiting for it is
+    // dropped.
+    if (
+      this.focusPending !== '' &&
+      this.focusPending !== this.overlay?.id &&
+      !placedPanes(s).some((p) => p.id === this.focusPending)
+    ) {
       this.focusPending = '';
     }
     this.poller.stateApplied();
@@ -534,6 +594,11 @@ export class App {
   }
 
   setActivePane(paneId: string): void {
+    if (paneId !== this.activePane) this.keys?.cancel();
+    // An overlay takes the keys while it is shown, but it is never the
+    // active pane: splits, closes and the overlay's own repo follow the pane
+    // under it.
+    if (this.state?.panes.some((p) => p.id === paneId && p.overlay)) return;
     this.activePane = paneId;
     this.clearUnseen();
   }
@@ -627,7 +692,7 @@ export class App {
   }
 
   // refreshClient loads GET /api/client into `client`. The dialog calls it
-  // on every open (instances and plugin files may have changed); Task 8 also
+  // on every open (instances and plugin files may have changed), and attached
   // calls it once per attach for the keymap. False after a shown error.
   async refreshClient(): Promise<boolean> {
     const r = await loadClient(this.fetchFn, this.storage.getItem(LOGIN_KEY) ?? '');
@@ -640,9 +705,298 @@ export class App {
     return true;
   }
 
-  // clientLoaded runs after every successful load. Task 8 builds the key
-  // tables and the notification filter from it here.
-  private clientLoaded(_info: ClientInfo): void {}
+  // clientLoaded runs after every successful load: it installs the key
+  // tables and the notification filter.
+  private clientLoaded(info: ClientInfo): void {
+    this.keysFrom(info.keymap, info.notifications);
+  }
+
+  // keysFrom installs the keymap and notification filter /api/client sent.
+  keysFrom(km: WebKeymap | null, notify: NotifyInfo | null): void {
+    this.store.setInfo(notify);
+    this.events = this.store.visible();
+    if (!km) return;
+    this.keymap = km;
+    if (this.keys) this.keys.setKeymap(km);
+    else this.keys = new KeyEngine(buildTables(km), km.timeout_ms, browserClock, () => this.updateKeyHint());
+    this.updateKeyHint();
+  }
+
+  // The line under the tab bar: a dropped sequence's notice, else the
+  // prefix typed so far.
+  private updateKeyHint(): void {
+    const k = this.keys;
+    this.keyHint = !k ? '' : k.hint || (k.pending.length > 0 ? `${k.pending.join(' ')} …` : '');
+  }
+
+  private overlayVisibleFor(s: WorkspaceState | null, tab: string, shown: Record<string, boolean>): OverlayInfo | null {
+    const o = overlayOf(s, tab);
+    return o && shown[tab] ? o : null;
+  }
+
+  // The pane keys go to: the shown overlay, else the active pane.
+  private keyPane(): string {
+    return this.overlay?.id ?? this.activePane;
+  }
+
+  private rawKeysOf(paneId: string): ReadonlySet<string> {
+    const type = this.state?.panes.find((p) => p.id === paneId)?.type || 'terminal';
+    const p = this.client?.plugins.find((x) => x.name === type);
+    return new Set(p?.raw_keys ?? []);
+  }
+
+  // onKeyDown is the page's one key listener, in the capture phase so it
+  // runs before the focused terminal sees the key. A dialog, a menu, the key
+  // list or a form field owns the keyboard while it is open.
+  private readonly onKeyDown = (e: KeyboardEvent): void => {
+    if (this.view !== 'workspace' || !this.keys) return;
+    const modal = this.keyListOpen || document.querySelector('[data-modal]') !== null || isEditable(e.target);
+    const pane = this.keyPane();
+    const d = this.keys.handle(e, { modalOpen: modal, activePaneId: pane, rawKeys: this.rawKeysOf(pane) });
+    this.updateKeyHint();
+    if (d.kind === 'pass') return;
+    if (d.kind === 'action' && NATIVE.has(d.id)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (d.kind === 'action') this.runAction(d.id);
+    else if (d.kind === 'builtin') this.runBuiltin(d.id);
+  };
+
+  private readonly onBlur = (): void => this.keys?.cancel();
+
+  private runBuiltin(id: string): void {
+    if (id === 'help') this.openKeyList();
+    else if (id === 'new_pane') {
+      if (this.readOnly) this.showNotice('read-only connection — that action is disabled');
+      else this.openCreate('pane');
+    }
+  }
+
+  openKeyList(): void {
+    this.keys?.cancel();
+    this.keyListOpen = true;
+  }
+
+  closeKeyList(): void {
+    this.keyListOpen = false;
+    this.focusActive();
+  }
+
+  private focusActive(): void {
+    const id = this.keyPane();
+    if (id) this.focus(id);
+  }
+
+  private runAction(id: string): void {
+    const label = this.keymap?.actions.find((a) => a.id === id)?.label ?? id;
+    if (TUI_ONLY.has(id)) {
+      this.showNotice(`${label}: available in the TUI`);
+      return;
+    }
+    if (this.readOnly && !VIEW_ONLY.has(id)) {
+      this.showNotice('read-only connection — that action is disabled');
+      return;
+    }
+    const pane = this.activePane;
+    const tab = this.activeTabId;
+    const sw = /^tab\.switch_([1-9])$/.exec(id);
+    if (sw) {
+      const t = this.tabBar[Number(sw[1]) - 1];
+      if (t) this.switchTab(t.id);
+      return;
+    }
+    switch (id) {
+      case 'notification.toggle':
+        this.notifyOpen = !this.notifyOpen;
+        return;
+      case 'notification.focus':
+        this.notifyOpen = true;
+        this.notifyFocus++;
+        return;
+      case 'sidebar.toggle':
+        this.sidebarOpen = !this.sidebarOpen;
+        return;
+      case 'system.shortcuts':
+        this.openKeyList();
+        return;
+      case 'client.take_control':
+        this.takeControl();
+        return;
+      case 'pane.toggle_lazygit':
+        void this.toggleOverlay('lazygit');
+        return;
+      case 'pane.toggle_hunk':
+        void this.toggleOverlay('hunk');
+        return;
+      case 'pane.split_h':
+        if (pane) this.splitQuick(pane, 'right');
+        return;
+      case 'pane.split_v':
+        if (pane) this.splitQuick(pane, 'below');
+        return;
+      case 'pane.close':
+        if (pane) this.askClosePane(pane);
+        return;
+      case 'pane.restart':
+        if (pane) this.restartPane(pane);
+        return;
+      case 'pane.rename':
+        if (pane) this.startRenamePane(pane);
+        return;
+      case 'pane.mute':
+        if (pane) this.setMuted(pane, this.state?.panes.find((p) => p.id === pane)?.muted !== true);
+        return;
+      case 'tab.new':
+        this.openCreate('new_tab');
+        return;
+      case 'tab.close':
+        if (tab) this.askCloseTab(tab);
+        return;
+      case 'tab.rename':
+        if (tab) this.startRenameTab(tab);
+        return;
+      case 'tab.cycle_color':
+        if (tab) this.cycleTabColor(tab);
+        return;
+      case 'tab.next':
+        this.switchTabBy(1);
+        return;
+      case 'tab.prev':
+        this.switchTabBy(-1);
+        return;
+      case 'pane.next':
+        this.focusPaneBy(1);
+        return;
+      case 'pane.prev':
+        this.focusPaneBy(-1);
+        return;
+      case 'pane.left':
+      case 'pane.right':
+      case 'pane.up':
+      case 'pane.down':
+        this.focusPaneDir(id.slice(5) as Dir);
+        return;
+      case 'pane.scroll_page_up':
+        this.xterms.get(this.keyPane())?.scrollPages(-1);
+        return;
+      case 'pane.scroll_page_down':
+        this.xterms.get(this.keyPane())?.scrollPages(1);
+        return;
+      default:
+        this.showNotice(`${label}: not available here`);
+    }
+  }
+
+  private switchTabBy(d: number): void {
+    const tabs = this.tabBar;
+    const i = tabs.findIndex((t) => t.active);
+    if (tabs.length < 2 || i < 0) return;
+    this.switchTab(tabs[(i + d + tabs.length) % tabs.length]!.id);
+  }
+
+  // Pane moves focus the pane too, so typing goes where the border shows.
+  private focusPaneBy(d: number): void {
+    const ids = this.placed.map((p) => p.id);
+    if (ids.length < 2) return;
+    const i = ids.indexOf(this.activePane);
+    this.moveTo(ids[(i + d + ids.length) % ids.length]!);
+  }
+
+  private focusPaneDir(dir: Dir): void {
+    const next = neighbour(this.placed, this.activePane, dir);
+    if (next) this.moveTo(next);
+  }
+
+  private moveTo(paneId: string): void {
+    this.setActivePane(paneId);
+    if (!this.overlay) this.focus(paneId);
+  }
+
+  // toggleOverlay is spec §5.4: show this page's overlay of that kind, hide
+  // it, or ask the daemon to reuse or replace the tab's one slot.
+  async toggleOverlay(kind: OverlayKind): Promise<void> {
+    const s = this.state;
+    const tab = this.activeTabId;
+    if (!s || !tab) return;
+    const cur = overlayOf(s, tab);
+    const shown = this.overlayShown[tab] === true;
+    if (cur && cur.kind === kind) {
+      this.setOverlayShown(tab, cur.id, !shown);
+      return;
+    }
+    if (!this.editable) {
+      this.showNotice(this.readOnly ? 'read-only connection — that action is disabled' : 'Not connected — nothing was changed');
+      return;
+    }
+    if (shown && cur) this.setOverlayShown(tab, cur.id, false);
+    const cwd = s.panes.find((p) => p.id === this.activePane)?.cwd ?? '';
+    if (cwd === '') {
+      this.showNotice('no git repo here');
+      return;
+    }
+    // Requests never rejects: every end is an Outcome.
+    const repos = await this.requests.request('git_repos_req', { cwd });
+    const list = repos.ok ? (repos.reply?.payload as { repos?: unknown } | undefined)?.repos : undefined;
+    const repo = Array.isArray(list) && typeof list[0] === 'string' ? list[0] : '';
+    if (repo === '') {
+      this.showNotice(repos.ok ? 'no git repo here' : `${kind}: ${repos.error}`);
+      return;
+    }
+    const r = await this.requests.request('split_pane_req', {
+      tab_id: tab,
+      placement: 'overlay',
+      overlay_kind: kind,
+      pane: { type: kind, cwd: repo },
+    });
+    const id = r.ok ? (r.reply?.payload as { pane_id?: string } | undefined)?.pane_id : undefined;
+    if (!id) {
+      this.showNotice(`${kind}: ${r.ok ? 'no pane in the answer' : r.error}`);
+      return;
+    }
+    // The page may have moved on while the daemon worked.
+    if (this.activeTabId === tab) this.setOverlayShown(tab, id, true);
+  }
+
+  // setOverlayShown shows or hides the tab's overlay on this page, and tells
+  // the daemon (overlay_visible drives its idle reaper, not other clients).
+  private setOverlayShown(tab: string, paneId: string, v: boolean): void {
+    const next = { ...this.overlayShown };
+    if (v) next[tab] = true;
+    else delete next[tab];
+    this.overlayShown = next;
+    this.keys?.cancel();
+    if (!this.readOnly) this.conn.send({ type: 'update_pane', payload: { pane_id: paneId, overlay_visible: v } });
+    if (v) this.focus(paneId);
+    else this.focusActive();
+  }
+
+  dismissEvent(id: string): void {
+    if (this.readOnly) return;
+    this.conn.send({ type: 'dismiss_event', payload: { event_id: id } });
+  }
+
+  jumpToEvent(e: PaneEvent): void {
+    if (e.tab_id && e.tab_id !== this.activeTabId) this.switchTab(e.tab_id);
+    if (!e.pane_id) return;
+    this.setActivePane(e.pane_id);
+    this.focus(e.pane_id);
+  }
+
+  private skipCtx(): { muted: (id: string) => boolean; activePaneId: string } {
+    const panes = new Map((this.state?.panes ?? []).map((p) => [p.id, p]));
+    return { muted: (id: string) => panes.get(id)?.muted === true, activePaneId: this.activePane };
+  }
+
+  // rebuildNotifications runs after every (re)attach: the daemon's queue is
+  // the truth, and dismissals missed while away are not replayed.
+  async rebuildNotifications(): Promise<void> {
+    const r = await this.requests.request('get_notifications_req', {});
+    const raw = r.ok ? (r.reply?.payload as { events?: unknown } | undefined)?.events : undefined;
+    if (!r.ok) return;
+    const list = (Array.isArray(raw) ? raw : []).map(parsePaneEvent).filter((e): e is PaneEvent => e !== null);
+    this.store.rebuild(list, this.skipCtx());
+    this.events = this.store.visible();
+  }
 
   // openDialog opens the create-pane dialog once /api/client has answered;
   // nothing opens on a read-only or not-live page.
@@ -654,7 +1008,7 @@ export class App {
   }
 
   // openCreate opens the dialog for the active tab: a new pane next to the
-  // active pane, a replace of it, or a new tab. Menus and keys (Task 8) use
+  // active pane, a replace of it, or a new tab. Menus and keys use
   // it. The folder starts at the project root (spec §5.2), else the active
   // pane's folder.
   openCreate(mode: DialogOpen['mode']): void {
@@ -697,9 +1051,12 @@ export class App {
   }
 
   // attached runs once per (re)attach, after the attach's own state is
-  // applied (ConnectionEvents.onAttached). Task 8 adds the notification
-  // store's rebuild as its body.
-  private attached(): void {}
+  // applied (ConnectionEvents.onAttached): it reloads the keymap and filter
+  // (clientLoaded → keysFrom) and rebuilds the notification list.
+  private attached(): void {
+    void this.refreshClient();
+    void this.rebuildNotifications();
+  }
 
   private focus(paneId: string): void {
     const x = this.shown.has(paneId) ? this.xterms.get(paneId) : undefined;

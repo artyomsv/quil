@@ -4940,6 +4940,9 @@ func (m Model) openCreatePaneDialogFor(target paneTarget) (tea.Model, tea.Cmd) {
 	m.createPaneStep = 0
 	m.selectedCategory = 0
 	m.createPaneTarget = target
+	// Re-read the saved instances: the web gateway writes the same file, so
+	// the copy read at start can be missing what a browser added.
+	m.instanceStore = LoadInstances(config.InstancesPath())
 	m.createPaneDest = m.pinnableDest()
 	return m, tea.ClearScreen
 }

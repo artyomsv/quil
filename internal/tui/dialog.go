@@ -1394,16 +1394,11 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 		// Handle instance deletion locally (no IPC needed)
 		if kind == "instance" {
-			pluginName := m.selectedPlugin
-			instances := m.instanceStore[pluginName]
-			for i, inst := range instances {
-				if inst.ID == id {
-					m.instanceStore[pluginName] = append(instances[:i], instances[i+1:]...)
-					break
-				}
-			}
-			if err := SaveInstances(config.InstancesPath(), m.instanceStore); err != nil {
-				log.Printf("save instances: %v", err)
+			if !m.deleteInstance(m.selectedPlugin, id) {
+				m.dialog = dialogCreatePane
+				m.createPaneStep = 2
+				m.dialogCursor = 0
+				return m, m.flashCmd()
 			}
 			m.dialog = dialogCreatePane
 			m.createPaneStep = 2
@@ -3258,21 +3253,20 @@ func (m Model) submitInstanceForm(p *plugin.PanePlugin) (tea.Model, tea.Cmd) {
 		Description: desc,
 	}
 
-	// Save to store
-	if m.instanceStore == nil {
-		m.instanceStore = make(InstanceStore)
-	}
-	m.instanceStore[m.selectedPlugin] = append(m.instanceStore[m.selectedPlugin], inst)
-	if err := SaveInstances(config.InstancesPath(), m.instanceStore); err != nil {
-		log.Printf("save instances: %v", err)
-	}
+	// Save to store. A refused save still opens the pane with what the user
+	// typed; only the saved list is left as it was, and the flash says so.
+	saved := m.addInstance(m.selectedPlugin, inst)
 
 	// Build args from template
 	m.selectedInstanceArgs = BuildArgs(p.Command.ArgTemplate, fieldMap)
 	m.selectedInstanceName = name
 
 	// Either show setup dialog (CWD/toggles) or finish choosing.
-	return m, m.enterSetupOrSplit(p)
+	cmd := m.enterSetupOrSplit(p)
+	if !saved {
+		cmd = tea.Batch(cmd, m.flashCmd())
+	}
+	return m, cmd
 }
 
 func (m Model) renderInstanceFormDialog() string {

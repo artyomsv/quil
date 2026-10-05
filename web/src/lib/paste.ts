@@ -66,7 +66,11 @@ export class PasteFlow {
     this.endLost();
   }
 
+  // paneRestarted ends the pane's paste and drops everything still queued for
+  // it: that input was typed for the old process, and an Enter meant for it
+  // must not reach the fresh one. Input for other panes keeps its place.
   paneRestarted(paneId: string): void {
+    for (let i = this.queue.length - 1; i >= 0; i--) if (this.queue[i]?.paneId === paneId) this.queue.splice(i, 1);
     if (this.current?.paneId === paneId) this.endLost();
   }
 

@@ -163,4 +163,18 @@ describe('PasteFlow', () => {
     expect(chunks).toHaveLength(1);
     expect(notices).toEqual(['Paste may be partly delivered']);
   });
+
+  it("a restart drops the pane's input queued behind its paste; other panes keep theirs", async () => {
+    const { flow, chunks, keys, tick } = setup();
+    flow.input('p1', big(INPUT_CHUNK * 3));
+    await tick();
+    // Typed while the paste runs: it waits behind it.
+    flow.input('p1', '\r');
+    flow.input('p2', 'ok');
+    flow.paneRestarted('p1');
+    chunks[0]?.resolve({ ok: true });
+    await tick();
+    // The Enter typed for the old process never reaches the fresh one.
+    expect(keys).toEqual([{ paneId: 'p2', data: 'ok' }]);
+  });
 });

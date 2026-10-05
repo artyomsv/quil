@@ -39,8 +39,9 @@ headline: Stricter shared workspaces; refused creates now say why
 - **A confirmed note reload (Ctrl+R twice) now loads the daemon's text after a daemon crash.**
   A daemon that stopped just after a note save can come back with an older note version
   than the open editor holds, and the reload was dropped without a word. Now it loads.
-  A background reload that is older than the editor is still dropped, and the status bar
-  says so.
+  If you typed after you confirmed, an older reload is still dropped, and the status bar
+  says so. A background reload that is older than the editor is dropped without a word,
+  as before: the editor already holds the newer text.
 - **A note file that cannot be read is offered again on the next launch.** Before, one
   failed read marked the old notes as imported for good.
 - **A reconnect gives the one-time import of old files its full retries again.** Before,

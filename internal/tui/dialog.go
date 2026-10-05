@@ -2803,6 +2803,19 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 	// tab does not share.
 	tabID, tabDest := tab.ID, tab.Dest
 
+	// The dialog pinned its destination at open, and the raw-arguments gate
+	// above checked THAT daemon's rights — while the split and replace below
+	// go to the active tab's. When the active project moved to another daemon
+	// under the open dialog (MCP set_active_pane needs no keystroke), the two
+	// differ: the gate would have checked one machine's token and the form's
+	// paths would land on another. Refused before anything is armed or
+	// detached, like the refusals below.
+	if pinDest, pinned := m.createPanePin(); pinned && pinDest != tabDest {
+		logger.Debug("create pane: REFUSED, dialog pinned to %q but the active tab is on %q", pinDest, tabDest)
+		m.setFlash("pane not created: the project changed while the dialog was open")
+		return m, m.flashCmd()
+	}
+
 	// "submitting", NOT "sending IPC". Three paths below return without ever
 	// sending, so a line claiming the send has happened is a lie the log tells
 	// on exactly the runs somebody is reading the log to explain. It cost a

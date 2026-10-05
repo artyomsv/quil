@@ -133,8 +133,9 @@ func (m *Model) applyNoteResp(msg noteRespMsg) tea.Cmd {
 	// set) and report as clean a text the daemon no longer holds. A save
 	// answered since the confirmation moved the editor's rev: that text is
 	// the daemon's newer one, not the buffer the user agreed to discard.
-	savedSince := m.noteLoadDiscards && ed.Rev() != m.noteLoadSnapRev
-	discards := m.noteLoadDiscards && !ed.SaveInFlight() && ed.Content() == m.noteLoadSnapshot && !savedSince
+	confirmed := m.noteLoadDiscards
+	savedSince := confirmed && ed.Rev() != m.noteLoadSnapRev
+	discards := confirmed && !ed.SaveInFlight() && ed.Content() == m.noteLoadSnapshot && !savedSince
 	m.noteLoadID, m.noteLoadDiscards, m.noteLoadSnapshot, m.noteLoadSnapRev = "", false, "", 0
 	if msg.resp.Error != "" {
 		// A reload that fails leaves the loaded text as it was; only a first
@@ -149,12 +150,17 @@ func (m *Model) applyNoteResp(msg noteRespMsg) tea.Cmd {
 	// first (each note request runs on its own daemon worker), and that answer
 	// is the newer. The confirmed reload is exempt: a daemon that crashed
 	// inside its snapshot debounce restores a LOWER rev, and the user asked
-	// for the daemon's text whatever its number. Every other drop says so.
+	// for the daemon's text whatever its number. A confirmed reload that is
+	// dropped says so, since the user asked for it; a silent one does not —
+	// the editor already holds the newer text, so there is nothing to tell.
 	if !ed.Loading() && !discards && msg.resp.Rev < ed.Rev() {
-		if savedSince {
+		switch {
+		case savedSince:
 			m.setFlash("Note reload replaced by a newer save")
-		} else {
+		case confirmed:
 			m.setFlash("Note reload dropped: older than the editor")
+		default:
+			return nil
 		}
 		return m.flashCmd()
 	}

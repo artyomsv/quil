@@ -342,9 +342,10 @@ func TestUpdate_ConfirmedReload_LowerRevAfterDaemonRestart_Loads(t *testing.T) {
 	}
 }
 
-// A silent reload whose answer is older than the editor is still dropped,
-// but no longer without a word.
-func TestUpdate_SilentReloadOlderThanEditor_DroppedWithFlash(t *testing.T) {
+// A silent reload whose answer is older than the editor is dropped without a
+// word: the editor already holds the newer text (a save the user just made
+// can answer first), so a flash would report a problem that is not there.
+func TestUpdate_SilentReloadOlderThanEditor_DroppedSilently(t *testing.T) {
 	m, conn := loadedNotesModel(t, "a\n", 1)
 	m = updateWith(t, m, noteFrame(2, 4)) // clean → silent reload
 	id := lastSent(t, conn, ipc.MsgNoteGet).ID
@@ -354,6 +355,31 @@ func TestUpdate_SilentReloadOlderThanEditor_DroppedWithFlash(t *testing.T) {
 	m = updateWith(t, m, noteRespMsg{dest: "", id: id, resp: ipc.NoteRespPayload{PaneID: "tab-proj-1-pane", Text: "old\n", Rev: 0}})
 	if ed := m.notesEditor; ed.Content() != "a\n" || ed.Rev() != 1 {
 		t.Errorf("an older silent reload was applied: content=%q rev=%d", ed.Content(), ed.Rev())
+	}
+	if m.flashText != "" {
+		t.Errorf("a silent drop flashed %q", m.flashText)
+	}
+}
+
+// A confirmed reload that cannot discard (the user typed after confirming)
+// and comes back older than the editor is dropped, and says so: the user
+// asked for it.
+func TestUpdate_ConfirmedReloadOlderThanEditor_DroppedWithFlash(t *testing.T) {
+	m, conn := loadedNotesModel(t, "a\n", 5)
+	m = updateWith(t, m, typed("x"))
+	m = updateWith(t, m, ctrl('s'))
+	set := lastSent(t, conn, ipc.MsgNoteSet)
+	m = updateWith(t, m, noteSetRespMsg{dest: "", id: set.ID, resp: ipc.NoteSetRespPayload{PaneID: "tab-proj-1-pane", Conflict: true, CurrentRev: 3}})
+	m = updateWith(t, m, ctrl('r'))
+	m = updateWith(t, m, ctrl('r'))
+	if !m.noteLoadDiscards {
+		t.Fatal("setup: two Ctrl+R did not send a confirmed reload")
+	}
+	id := lastSent(t, conn, ipc.MsgNoteGet).ID
+	m = updateWith(t, m, typed("y"))
+	m = updateWith(t, m, noteRespMsg{dest: "", id: id, resp: ipc.NoteRespPayload{PaneID: "tab-proj-1-pane", Text: "old\n", Rev: 3}})
+	if ed := m.notesEditor; ed.Content() == "old\n" || ed.Rev() != 5 {
+		t.Errorf("the older reload was applied over typing: content=%q rev=%d", ed.Content(), ed.Rev())
 	}
 	if m.flashText != "Note reload dropped: older than the editor" {
 		t.Errorf("flash = %q", m.flashText)

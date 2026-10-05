@@ -1,5 +1,5 @@
 import { cwdForSplit, nextTabColor, projectRootOf, quickSplit } from './actions';
-import { askedTabShown, pickActive, successorOf, unseenToClear } from './activepane';
+import { askedTabShown, jumpStep, type PendingJump, pickActive, resolveJump, successorOf, UnseenAsks } from './activepane';
 import { AgentStatePoller } from './agentstate';
 import { attachRefusedBanner, bannerFor, type BannerState, isLoginRequired } from './banner';
 import {
@@ -21,7 +21,7 @@ import { keyFor, keyTarget } from './keys/labels';
 import { type Dir, neighbour } from './keys/nav';
 import { type FetchLike, hasSession, postLogin, sessionGone } from './login';
 import { NotificationStore, type NotifyInfo, type PaneEvent, parsePaneEvent } from './notifications';
-import { type OverlayInfo, type OverlayKind, overlayOf, overlayToggle, overlayVisibleMsg } from './overlay';
+import { type OverlayInfo, type OverlayKind, overlayOf, overlayRepoChoice, overlayToggle, overlayVisibleMsg } from './overlay';
 import { NOT_SENT, PasteFlow } from './paste';
 import type { Message, PaneInfo, PaneSize, SplitPaneReq, WebWelcome, WorkspaceState } from './protocol';
 import { type Outcome, Requests, STILL_WORKING } from './requests';
@@ -143,6 +143,9 @@ export class App {
   // Per tab: the overlay pane this page shows. Never one this page did not
   // ask for: another client swapping the slot to another tool hides it here.
   overlayShown = $state.raw<Record<string, string>>({});
+  // An open repository picker for an overlay (Alt+G / Alt+D with several
+  // repositories under the active pane's folder).
+  repoPick = $state.raw<{ tab: string; kind: OverlayKind; repos: string[]; hide: string } | null>(null);
   activeTabId = $derived(activeTabOf(this.state));
   activeProjectId = $derived(activeProjectOf(this.state));
   sidebar = $derived(sidebarModel(this.state, this.agentStates, this.seenPanes));
@@ -194,7 +197,7 @@ export class App {
   private readonly pasteFlow: PasteFlow;
   // Panes this tab has asked the daemon to clear the unseen mark of; a pane
   // leaves the set when a state shows its mark gone.
-  private readonly unseenAsked = new Set<string>();
+  private readonly unseenAsked = new UnseenAsks();
   // The last output generation seen per pane: a higher one is a restart.
   private readonly gens = new Map<string, bigint>();
   private noticeTimer: number | undefined;
@@ -205,6 +208,9 @@ export class App {
   // Tabs with an overlay create in flight.
   private readonly overlayBusy = new Set<string>();
   private readonly store = new NotificationStore(null);
+  // A notification jump to another tab's pane, until the state showing that
+  // tab arrives.
+  private pendingJump: PendingJump | null = null;
 
   constructor() {
     const send = (m: Message): void => this.conn.send(m);
@@ -463,6 +469,7 @@ export class App {
       this.shown.delete(id);
       this.laidOut.delete(id);
     }
+    for (const id of [...this.gens.keys()]) if (!live.has(id)) this.gens.delete(id);
     this.terminals.stateApplied(verdict === 'apply-new-run');
     this.fresh = true;
     const prev = this.state;
@@ -490,9 +497,16 @@ export class App {
     // A dialog about a pane or tab this state no longer shows closes.
     if (this.paneAsk && !placed.includes(this.paneAsk.paneId)) this.paneAsk = null;
     if (this.tabAsk && !askedTabShown(s, this.tabAsk.tabId)) this.tabAsk = null;
-    for (const id of [...this.unseenAsked]) {
-      if (!s.panes.find((p) => p.id === id)?.unseen) this.unseenAsked.delete(id);
+    // A repository picker belongs to the tab it was opened in.
+    if (this.repoPick && this.repoPick.tab !== s.active_tab) this.repoPick = null;
+    // A notification jump finishes once the state shows its tab.
+    const jump = resolveJump(this.pendingJump, s, placed);
+    this.pendingJump = jump.keep;
+    if (jump.activate !== '') {
+      this.setActivePane(jump.activate);
+      this.focus(jump.activate);
     }
+    this.unseenAsked.stateApplied(s);
     this.clearUnseen();
     this.applyDaemonGrids();
     // A pane that this state does not place (another tab, an overlay this
@@ -549,6 +563,10 @@ export class App {
     this.pasteFlow.reconnecting();
     this.drag.linkLost();
     this.gens.clear();
+    // Asks the old socket carried get no answer now; the next state asks
+    // again for a mark still set.
+    this.unseenAsked.reset();
+    this.pendingJump = null;
   }
 
   // closeAsks closes an open rename or close dialog: what it would send can
@@ -557,6 +575,19 @@ export class App {
     this.paneAsk = null;
     this.tabAsk = null;
     this.dialog = null;
+    this.repoPick = null;
+  }
+
+  // closePaneAsk and closeTabAsk end a rename or close dialog, by its own
+  // buttons or Escape, and give the keyboard back to the terminal (spec §5.5).
+  closePaneAsk(): void {
+    this.paneAsk = null;
+    this.focusActiveSoon();
+  }
+
+  closeTabAsk(): void {
+    this.tabAsk = null;
+    this.focusActiveSoon();
   }
 
   private onClosed(code: number, reason: string, retrying: boolean): void {
@@ -610,10 +641,10 @@ export class App {
   private clearUnseen(): void {
     const s = this.state;
     if (!s || !this.editable) return;
-    const id = unseenToClear(s, this.activePane, this.unseenAsked);
+    const id = this.unseenAsked.next(s, this.activePane);
     if (!id) return;
-    this.unseenAsked.add(id);
-    void this.requests.request('update_pane', { pane_id: id, unseen: false });
+    // A refused or unanswered ask is forgotten, so the next state asks again.
+    void this.requests.request('update_pane', { pane_id: id, unseen: false }).then((o) => this.unseenAsked.answered(id, o.ok));
   }
 
   // sendSplit sends split_pane_req and makes the answered pane active. A
@@ -812,7 +843,20 @@ export class App {
     this.focusActive();
   }
 
-  private focusActive(): void {
+  // focusActiveSoon is focusActive once the current key event is over. An
+  // Enter that submitted a dialog or picked a menu item still has its
+  // keypress to come, and a terminal focused now would take it as a typed
+  // Enter — running whatever was half typed at the prompt. A dialog or menu
+  // opened meanwhile (a pick that opens a rename) keeps the focus.
+  focusActiveSoon(): void {
+    window.setTimeout(() => {
+      if (document.querySelector('[data-modal]') === null) this.focusActive();
+    }, 0);
+  }
+
+  // focusActive gives the keyboard to the shown overlay, else the active
+  // pane: after a dialog or a menu closes, typing reaches the terminal again.
+  focusActive(): void {
     const id = this.keyPane();
     if (id) this.focus(id);
   }
@@ -960,45 +1004,85 @@ export class App {
       this.showNotice(this.readOnly ? 'read-only connection — that action is disabled' : 'Not connected — nothing was changed');
       return;
     }
-    if (step.hide) this.setOverlayShown(tab, step.hide, false);
+    const existing = step.existing !== '' ? overlayOf(s, tab) : null;
     // No cwd means the pane has not reported one yet. Asking the daemon
     // would have it substitute its OWN default directory, so an overlay
-    // could open on an unrelated repository; the TUI refuses the same way.
+    // could open on an unrelated repository; the TUI treats it as "no
+    // repository" the same way. Decided before anything on screen changes.
     const cwd = s.panes.find((p) => p.id === this.activePane)?.cwd ?? '';
-    if (cwd === '') {
-      this.showNotice('no git repo here');
-      return;
+    let candidates: string[] = [];
+    if (cwd !== '') {
+      this.overlayBusy.add(tab);
+      try {
+        // Requests never rejects: every end is an Outcome.
+        const repos = await this.requests.request('git_repos_req', { cwd });
+        if (!repos.ok) {
+          this.showNotice(`${kind}: ${repos.error}`);
+          return;
+        }
+        const list = (repos.reply?.payload as { repos?: unknown } | undefined)?.repos;
+        candidates = Array.isArray(list) ? list.filter((r): r is string => typeof r === 'string' && r !== '') : [];
+      } finally {
+        this.overlayBusy.delete(tab);
+      }
+      // The page may have moved on while the daemon looked.
+      if (this.activeTabId !== tab) return;
     }
-    this.overlayBusy.add(tab);
-    try {
-      await this.createOverlay(tab, kind, cwd);
-    } finally {
-      this.overlayBusy.delete(tab);
+    const choice = overlayRepoChoice(candidates, existing);
+    switch (choice.do) {
+      case 'show':
+        if (existing) this.setOverlayShown(tab, existing.id, true);
+        return;
+      case 'none':
+        this.showNotice('no git repo here');
+        return;
+      case 'pick':
+        this.keys?.cancel();
+        this.repoPick = { tab, kind, repos: choice.repos, hide: step.hide };
+        return;
+      case 'create':
+        await this.createOverlay(tab, kind, choice.repo, step.hide);
     }
   }
 
-  private async createOverlay(tab: string, kind: OverlayKind, cwd: string): Promise<void> {
-    // Requests never rejects: every end is an Outcome.
-    const repos = await this.requests.request('git_repos_req', { cwd });
-    const list = repos.ok ? (repos.reply?.payload as { repos?: unknown } | undefined)?.repos : undefined;
-    const repo = Array.isArray(list) && typeof list[0] === 'string' ? list[0] : '';
-    if (repo === '') {
-      this.showNotice(repos.ok ? 'no git repo here' : `${kind}: ${repos.error}`);
-      return;
+  // pickRepo runs the picker's choice; closeRepoPick ends the picker.
+  pickRepo(repo: string): void {
+    const p = this.repoPick;
+    this.repoPick = null;
+    if (!p || this.activeTabId !== p.tab || !this.editable) return;
+    void this.createOverlay(p.tab, p.kind, repo, p.hide);
+  }
+
+  closeRepoPick(): void {
+    this.repoPick = null;
+    this.focusActiveSoon();
+  }
+
+  // createOverlay asks for the tab's overlay slot on repo; the daemon reuses
+  // the slot for the same tool and repository and replaces it otherwise.
+  // hide is this page's shown overlay of the other tool, hidden as the
+  // request goes out.
+  private async createOverlay(tab: string, kind: OverlayKind, repo: string, hide: string): Promise<void> {
+    if (this.overlayBusy.has(tab)) return;
+    this.overlayBusy.add(tab);
+    try {
+      if (hide) this.setOverlayShown(tab, hide, false);
+      const r = await this.requests.request('split_pane_req', {
+        tab_id: tab,
+        placement: 'overlay',
+        overlay_kind: kind,
+        pane: { type: kind, cwd: repo },
+      });
+      const id = r.ok ? (r.reply?.payload as { pane_id?: string } | undefined)?.pane_id : undefined;
+      if (!id) {
+        this.showNotice(`${kind}: ${r.ok ? 'no pane in the answer' : r.error}`);
+        return;
+      }
+      // The page may have moved on while the daemon worked.
+      if (this.activeTabId === tab) this.setOverlayShown(tab, id, true);
+    } finally {
+      this.overlayBusy.delete(tab);
     }
-    const r = await this.requests.request('split_pane_req', {
-      tab_id: tab,
-      placement: 'overlay',
-      overlay_kind: kind,
-      pane: { type: kind, cwd: repo },
-    });
-    const id = r.ok ? (r.reply?.payload as { pane_id?: string } | undefined)?.pane_id : undefined;
-    if (!id) {
-      this.showNotice(`${kind}: ${r.ok ? 'no pane in the answer' : r.error}`);
-      return;
-    }
-    // The page may have moved on while the daemon worked.
-    if (this.activeTabId === tab) this.setOverlayShown(tab, id, true);
   }
 
   // setOverlayShown shows or hides the tab's overlay on this page, and tells
@@ -1015,18 +1099,26 @@ export class App {
     else this.focusActive();
   }
 
+  // dismissEvent needs a socket that can send: a dismissal while the link is
+  // down would be lost, and the card would come back with the next list.
   dismissEvent(id: string): void {
-    if (this.readOnly) return;
+    if (!this.editable) return;
     this.conn.send({ type: 'dismiss_event', payload: { event_id: id } });
   }
 
   // jumpToEvent shows the event's tab and makes its pane active; a pane
-  // that is gone (a closed pane's card) leaves the active pane alone.
+  // that is gone (a closed pane's card) leaves the active pane alone. A pane
+  // in another tab is made active once the state showing that tab arrives
+  // (resolveJump in applyState), never before.
   jumpToEvent(e: PaneEvent): void {
-    if (e.tab_id && e.tab_id !== this.activeTabId) this.switchTab(e.tab_id);
-    if (!e.pane_id || !this.state?.panes.some((p) => p.id === e.pane_id)) return;
-    this.setActivePane(e.pane_id);
-    this.focus(e.pane_id);
+    const placed = this.placed.map((p) => p.id);
+    const step = jumpStep(this.state, this.activeTabId, placed, e.tab_id, e.pane_id, this.readOnly);
+    this.pendingJump = step.pending;
+    if (step.switch !== '') this.switchTab(step.switch);
+    if (step.activate !== '') {
+      this.setActivePane(step.activate);
+      this.focus(step.activate);
+    }
   }
 
   private skipCtx(): { muted: (id: string) => boolean; activePaneId: string } {
@@ -1049,7 +1141,12 @@ export class App {
   // nothing opens on a read-only or not-live page.
   async openDialog(open: DialogOpen): Promise<void> {
     this.keys?.cancel();
-    if (!this.editable) return;
+    if (!this.editable) {
+      // The notice every other refused action shows: a key that did nothing
+      // at all reads as a broken key.
+      this.showNotice(this.readOnly ? 'read-only connection — that action is disabled' : 'Not connected — nothing was changed');
+      return;
+    }
     if (!(await this.refreshClient())) return;
     // The page may have lost its link or its rights while the answer came.
     if (this.editable) this.dialog = open;

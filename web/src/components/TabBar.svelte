@@ -43,7 +43,7 @@
           {tab.name || '—'}{#if tab.unseen}<span class="unread" aria-hidden="true" title="finished while away">•</span>{/if}
         </button>
         {#if app.editable}
-          <Menu label="Tab menu" items={menuFor(tab.id)} />
+          <Menu label="Tab menu" items={menuFor(tab.id)} onclose={() => app.focusActiveSoon()} />
           <button class="close" aria-label="Close tab {tab.name || '—'}" title="Close tab" onclick={() => app.askCloseTab(tab.id)}>×</button>
         {/if}
       </span>
@@ -75,10 +75,10 @@
     submitLabel="Rename"
     onsubmit={(v) => {
       const id = app.tabAsk?.tabId ?? '';
-      app.tabAsk = null;
+      app.closeTabAsk();
       app.renameTab(id, v);
     }}
-    oncancel={() => (app.tabAsk = null)}
+    oncancel={() => app.closeTabAsk()}
   />
 {:else if asked?.kind === 'close'}
   <Confirm
@@ -87,10 +87,10 @@
     confirmLabel="Close"
     onconfirm={() => {
       const id = app.tabAsk?.tabId ?? '';
-      app.tabAsk = null;
+      app.closeTabAsk();
       app.closeTab(id);
     }}
-    oncancel={() => (app.tabAsk = null)}
+    oncancel={() => app.closeTabAsk()}
   />
 {/if}
 

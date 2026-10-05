@@ -49,6 +49,7 @@
       }}
       onpointerup={() => app.drag.end()}
       onpointercancel={() => app.drag.cancel()}
+      onlostpointercapture={() => app.drag.cancel()}
     ></div>
   {/each}
 {/if}

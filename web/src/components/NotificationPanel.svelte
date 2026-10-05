@@ -23,7 +23,7 @@
 <aside class="notify" aria-label="Notifications">
   <div class="head">
     <span>Notifications</span>
-    {#if !app.readOnly && app.events.length > 0}
+    {#if app.editable && app.events.length > 0}
       <button class="all" onclick={() => app.dismissEvent('')}>Dismiss all</button>
     {/if}
   </div>
@@ -35,7 +35,7 @@
           <span class="pane">{sanitizeRemoteText(e.pane_name || e.pane_id)}</span>
           {#if e.message}<span class="msg">{sanitizeRemoteText(e.message)}</span>{/if}
         </button>
-        {#if !app.readOnly}
+        {#if app.editable}
           <button class="dismiss" aria-label="Dismiss" title="Dismiss" onclick={() => app.dismissEvent(e.id)}>×</button>
         {/if}
       </li>

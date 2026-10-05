@@ -1,4 +1,5 @@
 import type { Message, WorkspaceState } from './protocol';
+import { sanitizeRemoteText } from './sanitize';
 
 export type OverlayKind = 'lazygit' | 'hunk';
 
@@ -6,6 +7,9 @@ export interface OverlayInfo {
   id: string;
   kind: string;
   cwd: string;
+  // Why the overlay's tool did not start, sanitized for display; '' when it
+  // did. The pane view shows it instead of an empty terminal.
+  spawnError: string;
 }
 
 // overlayOf is the tab's one overlay pane (the daemon keeps one slot per
@@ -13,26 +17,52 @@ export interface OverlayInfo {
 export function overlayOf(s: WorkspaceState | null, tabId: string): OverlayInfo | null {
   if (!s) return null;
   const p = s.panes.find((x) => x.tab_id === tabId && x.overlay === true);
-  return p ? { id: p.id, kind: p.type ?? '', cwd: p.cwd } : null;
+  return p ? { id: p.id, kind: p.type ?? '', cwd: p.cwd, spawnError: sanitizeRemoteText(p.spawn_error ?? '') } : null;
 }
 
 // OverlayToggle is what Alt+G / Alt+D does in one tab (spec §5.4).
 export type OverlayToggle =
   | { do: 'show'; id: string }
   | { do: 'hide'; id: string }
-  // hide names this page's shown overlay of the other tool, hidden first; ''
-  // when none is shown.
-  | { do: 'create'; hide: string }
+  // Ask the daemon which repositories hold the active pane's folder, then
+  // decide with overlayRepoChoice. existing is the tab's overlay of this
+  // kind (shown again when it already targets a candidate); hide is this
+  // page's shown overlay of the OTHER tool, hidden only once a create goes
+  // out. Both '' when there is none.
+  | { do: 'discover'; existing: string; hide: string }
   | { do: 'refuse' };
 
-// overlayToggle decides it: the tab's overlay of that kind is shown or hidden
-// on this page, which needs no rights; anything else asks the daemon for the
-// slot, which only an editable page may.
+// overlayToggle decides it, as the TUI does (internal/tui/overlay.go): a
+// shown overlay of that kind hides. Anything else asks which repository the
+// active pane is in, which an editable page may; a page that may not create
+// still shows the tab's overlay of that kind.
 export function overlayToggle(cur: OverlayInfo | null, shownId: string | undefined, kind: OverlayKind, canCreate: boolean): OverlayToggle {
   const shown = cur !== null && shownId === cur.id;
-  if (cur && cur.kind === kind) return shown ? { do: 'hide', id: cur.id } : { do: 'show', id: cur.id };
-  if (!canCreate) return { do: 'refuse' };
-  return { do: 'create', hide: shown && cur ? cur.id : '' };
+  const same = cur !== null && cur.kind === kind;
+  if (same && shown) return { do: 'hide', id: cur.id };
+  if (!canCreate) return same && cur ? { do: 'show', id: cur.id } : { do: 'refuse' };
+  return { do: 'discover', existing: same && cur ? cur.id : '', hide: shown && !same && cur ? cur.id : '' };
+}
+
+// OverlayRepo is what the repositories found for the active pane decide.
+export type OverlayRepo =
+  | { do: 'show' }
+  | { do: 'none' }
+  | { do: 'pick'; repos: string[] }
+  | { do: 'create'; repo: string };
+
+// MAX_REPO_CHOICES caps the picker, as the TUI's maxRepoCandidates does.
+export const MAX_REPO_CHOICES = 10;
+
+// overlayRepoChoice is the TUI's resolveOverlay steps 3-7: no repository
+// shows the tab's overlay of this kind if there is one; one that already
+// runs on a candidate is shown; otherwise several candidates open a picker
+// and one creates (the daemon replaces the tab's slot).
+export function overlayRepoChoice(candidates: string[], existing: OverlayInfo | null): OverlayRepo {
+  if (candidates.length === 0) return existing ? { do: 'show' } : { do: 'none' };
+  if (existing && candidates.includes(existing.cwd)) return { do: 'show' };
+  if (candidates.length > 1) return { do: 'pick', repos: candidates.slice(0, MAX_REPO_CHOICES) };
+  return { do: 'create', repo: candidates[0]! };
 }
 
 // overlayVisibleMsg tells the daemon this page shows or hides an overlay

@@ -2,6 +2,7 @@
   import { onDestroy, onMount } from 'svelte';
   import type { App } from '../lib/app.svelte';
   import { CreateDialog, type DialogOpen, type DialogView, type ListKind, viewOf } from '../lib/dialog';
+  import { trapFocus } from '../lib/focustrap';
   import type { SplitPaneReq } from '../lib/protocol';
   import { sanitizeRemoteText } from '../lib/sanitize';
   import type { Placement } from '../lib/protocol';
@@ -216,6 +217,7 @@
     aria-label="New pane"
     tabindex="-1"
     bind:this={root}
+    use:trapFocus
     onclick={(e) => e.stopPropagation()}
     onkeydown={(e) => {
       if (e.key === 'Escape') {

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { trapFocus } from '../lib/focustrap';
+
   interface Props {
     title: string;
     body: string;
@@ -22,6 +24,7 @@
     aria-modal="true"
     aria-label={title}
     tabindex="-1"
+    use:trapFocus
     onclick={(e) => e.stopPropagation()}
     onkeydown={(e) => {
       if (e.key === 'Escape') {

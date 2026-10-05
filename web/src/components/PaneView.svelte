@@ -75,7 +75,7 @@
     <AgentDotView state={agent} title="Agent: {agent}" />
     <span class="name">{name}</span>
     {#if muted}<span class="mark" title="Muted">muted</span>{/if}
-    {#if app.editable && !overlay}<Menu label="Pane menu" {items} />{/if}
+    {#if app.editable && !overlay}<Menu label="Pane menu" {items} onclose={() => app.focusActiveSoon()} />{/if}
   </div>
   {#if spawnError}
     <p class="error">{spawnError}</p>
@@ -89,10 +89,10 @@
     value={name}
     submitLabel="Rename"
     onsubmit={(v) => {
-      app.paneAsk = null;
+      app.closePaneAsk();
       app.renamePane(paneId, v);
     }}
-    oncancel={() => (app.paneAsk = null)}
+    oncancel={() => app.closePaneAsk()}
   />
 {:else if ask === 'close'}
   <Confirm
@@ -101,10 +101,10 @@
     confirmLabel="Close"
     checkLabel={worktreeOwned ? 'Also remove its worktree' : undefined}
     onconfirm={(rm) => {
-      app.paneAsk = null;
+      app.closePaneAsk();
       app.closePane(paneId, rm);
     }}
-    oncancel={() => (app.paneAsk = null)}
+    oncancel={() => app.closePaneAsk()}
   />
 {/if}
 

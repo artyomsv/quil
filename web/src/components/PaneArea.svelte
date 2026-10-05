@@ -54,7 +54,7 @@
           {app}
           paneId={app.overlay.id}
           name={sanitizeRemoteText(app.overlay.kind)}
-          spawnError=""
+          spawnError={app.overlay.spawnError}
           muted={false}
           worktreeOwned={false}
           agent="unknown"

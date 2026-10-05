@@ -4,22 +4,37 @@
 </script>
 
 <script lang="ts">
+  import { untrack } from 'svelte';
   import type { MenuItem } from '../lib/menu';
 
   interface Props {
     label: string;
     items: MenuItem[];
+    // Runs after Escape or a pick closes the menu; the page points it at the
+    // active terminal, so typing goes on there (spec §5.5). Without it the
+    // menu button takes the focus back.
+    onclose?: () => void;
+    // A menu with no button, open from the start and gone when it closes:
+    // a picker the page opens itself (the overlay's repository choice).
+    auto?: boolean;
   }
 
-  let { label, items }: Props = $props();
-  let open = $state(false);
+  let { label, items, onclose, auto = false }: Props = $props();
+  let open = $state(untrack(() => auto));
   let opener: HTMLButtonElement | undefined = $state();
   let list: HTMLUListElement | undefined = $state();
   let pos = $state({ top: 0, right: 0 });
 
+  // An auto menu exists only while open, so closing it in any way ends it.
   const shut = (): void => {
+    const was = open;
     open = false;
+    if (auto && was) onclose?.();
   };
+  if (untrack(() => auto)) {
+    if (closeOpen) closeOpen();
+    closeOpen = shut;
+  }
 
   function toggle(e: MouseEvent): void {
     e.stopPropagation();
@@ -36,9 +51,16 @@
     open = true;
   }
 
-  function close(): void {
+  // close is Escape or Tab: the button takes the focus back, or onclose
+  // moves it on.
+  function close(escape: boolean): void {
+    if (auto) {
+      shut();
+      return;
+    }
     shut();
-    opener?.focus();
+    if (escape && onclose) onclose();
+    else opener?.focus();
   }
 
   // The keyboard moves through the items while the menu is open.
@@ -50,7 +72,7 @@
     if (e.key === 'Escape' || e.key === 'Tab') {
       e.stopPropagation();
       if (e.key === 'Escape') e.preventDefault();
-      close();
+      close(e.key === 'Escape');
       return;
     }
     if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
@@ -62,31 +84,38 @@
     buttons[(next + buttons.length) % buttons.length]?.focus();
   }
 
+  // The item runs before the menu reports closing: a pick that opens a
+  // dialog has it in place first, and the dialog then takes the focus.
   function pick(e: MouseEvent, it: MenuItem): void {
     e.stopPropagation();
-    shut();
+    open = false;
     it.run();
+    onclose?.();
   }
 </script>
 
 <svelte:window onclick={shut} />
 <span class="menu">
-  <button
-    class="menu-button"
-    aria-haspopup="menu"
-    aria-expanded={open}
-    aria-label={label}
-    title={label}
-    bind:this={opener}
-    onclick={toggle}>⋯</button
-  >
+  {#if !auto}
+    <button
+      class="menu-button"
+      aria-haspopup="menu"
+      aria-expanded={open}
+      aria-label={label}
+      title={label}
+      bind:this={opener}
+      onclick={toggle}>⋯</button
+    >
+  {/if}
   {#if open}
     <ul
       role="menu"
       tabindex="-1"
+      aria-label={label}
       data-modal
-      style:top="{pos.top}px"
-      style:right="{pos.right}px"
+      class:auto
+      style:top={auto ? undefined : `${pos.top}px`}
+      style:right={auto ? undefined : `${pos.right}px`}
       bind:this={list}
       onkeydown={onKey}
     >
@@ -127,6 +156,13 @@
     background: #1b1e26;
     border: 1px solid #2a2e37;
     min-width: 160px;
+  }
+
+  ul.auto {
+    top: 20%;
+    left: 50%;
+    transform: translateX(-50%);
+    max-width: 90vw;
   }
 
   li button {

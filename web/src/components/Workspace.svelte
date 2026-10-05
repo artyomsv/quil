@@ -1,8 +1,10 @@
 <script lang="ts">
   import type { App } from '../lib/app.svelte';
+  import { sanitizeRemoteText } from '../lib/sanitize';
   import Banner from './Banner.svelte';
   import CreatePaneDialog from './CreatePaneDialog.svelte';
   import KeyList from './KeyList.svelte';
+  import Menu from './Menu.svelte';
   import Notice from './Notice.svelte';
   import NotificationPanel from './NotificationPanel.svelte';
   import PaneArea from './PaneArea.svelte';
@@ -34,6 +36,19 @@
     <!-- Always present, even before the first state: its size is the window
          this tab reports in attach. -->
     <PaneArea {app} />
+    {#if app.repoPick && app.editable}
+      <!-- Several repositories under the active pane's folder: the user picks
+           the one the overlay opens on, as in the TUI. Keyed, so a new pick
+           list starts a new menu. -->
+      {#key app.repoPick}
+        <Menu
+          auto
+          label="Repository for {app.repoPick.kind}"
+          items={app.repoPick.repos.map((r) => ({ label: sanitizeRemoteText(r), run: () => app.pickRepo(r) }))}
+          onclose={() => app.closeRepoPick()}
+        />
+      {/key}
+    {/if}
     {#if app.dialog && app.client && app.editable}
       <!-- Keyed: opening it again (another pane, another mode) starts over. -->
       {#key app.dialog}

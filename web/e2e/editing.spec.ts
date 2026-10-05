@@ -216,3 +216,28 @@ test('Tab and Shift+Tab stay inside a dialog', async ({ page, quil }) => {
   await page.keyboard.press('Escape');
   await expect(dialog).toHaveCount(0);
 });
+
+// A rename submitted with Enter gives the keyboard back to the terminal
+// AFTER the key: the Enter's keypress must not reach the shell and run what
+// was half typed there, and what is typed next joins the same line. Had the
+// stray Enter run "echo HALF…", the rest of the line would be a syntax error
+// ("&& …" alone) and TAIL-7 would never print.
+test('Enter in a rename dialog never reaches the shell', async ({ page, quil }) => {
+  await login(page, quil);
+  await keymapLoaded(page, 'default');
+  const [first] = await listPanes(quil.home);
+  if (!first) throw new Error('no first pane');
+  await page.locator('.pane .term').first().click();
+  await page.keyboard.type('echo HALF-$((1+1))');
+  await page.locator('.pane').first().getByRole('button', { name: 'Pane menu' }).click();
+  await page.getByRole('menuitem', { name: 'Rename…' }).click();
+  await page.getByRole('textbox', { name: 'Rename pane' }).fill('enter-renamed');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('.pane .title', { hasText: 'enter-renamed' })).toBeVisible();
+  await expect.poll(() => activePane(page)).toBe(first.id);
+  await page.keyboard.type(' && echo TAIL-$((2+5))');
+  await page.keyboard.press('Enter');
+  await expect.poll(() => bufferText(page, first.id)).toContain('TAIL-7');
+  const text = await bufferText(page, first.id);
+  expect(text.split('HALF-2').length - 1).toBe(1);
+});

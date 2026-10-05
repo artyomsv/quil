@@ -320,12 +320,16 @@ export class App {
     this.unwatch = undefined;
   }
 
+  // A tab the user picks ends a notification jump still waiting for its own
+  // tab (jumpToEvent sets the jump again after its own switch).
   switchTab(id: string): void {
+    this.pendingJump = null;
     if (this.readOnly || !this.state || id === this.state.active_tab) return;
     this.conn.send({ type: 'switch_tab', payload: { tab_id: id } });
   }
 
   switchProject(id: string): void {
+    this.pendingJump = null;
     if (this.readOnly || !this.state || id === '' || id === activeProjectOf(this.state)) return;
     this.conn.send({ type: 'switch_project', payload: { project_id: id } });
   }
@@ -500,7 +504,7 @@ export class App {
     // A repository picker belongs to the tab it was opened in.
     if (this.repoPick && this.repoPick.tab !== s.active_tab) this.repoPick = null;
     // A notification jump finishes once the state shows its tab.
-    const jump = resolveJump(this.pendingJump, s, placed);
+    const jump = resolveJump(this.pendingJump, s, placed, browserClock.now());
     this.pendingJump = jump.keep;
     if (jump.activate !== '') {
       this.setActivePane(jump.activate);
@@ -1112,9 +1116,10 @@ export class App {
   // (resolveJump in applyState), never before.
   jumpToEvent(e: PaneEvent): void {
     const placed = this.placed.map((p) => p.id);
-    const step = jumpStep(this.state, this.activeTabId, placed, e.tab_id, e.pane_id, this.readOnly);
-    this.pendingJump = step.pending;
+    const step = jumpStep(this.state, this.activeTabId, placed, e.tab_id, e.pane_id, this.readOnly, browserClock.now());
     if (step.switch !== '') this.switchTab(step.switch);
+    // After the switch, which clears any older jump.
+    this.pendingJump = step.pending;
     if (step.activate !== '') {
       this.setActivePane(step.activate);
       this.focus(step.activate);

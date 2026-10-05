@@ -1,11 +1,7 @@
-<script module lang="ts">
-  // At most one menu is open on the page: opening one closes the other.
-  let closeOpen: (() => void) | null = null;
-</script>
-
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import type { MenuItem } from '../lib/menu';
+  import { menuGone, menuOpened } from '../lib/menuopen';
 
   interface Props {
     label: string;
@@ -31,10 +27,8 @@
     open = false;
     if (auto && was) onclose?.();
   };
-  if (untrack(() => auto)) {
-    if (closeOpen) closeOpen();
-    closeOpen = shut;
-  }
+  if (untrack(() => auto)) menuOpened(shut);
+  onDestroy(() => menuGone(shut));
 
   function toggle(e: MouseEvent): void {
     e.stopPropagation();
@@ -42,8 +36,7 @@
       shut();
       return;
     }
-    if (closeOpen && closeOpen !== shut) closeOpen();
-    closeOpen = shut;
+    menuOpened(shut);
     // Fixed to the viewport under the button: the pane area and the tab bar
     // clip what overflows them.
     const r = opener?.getBoundingClientRect();

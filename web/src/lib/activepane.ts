@@ -88,13 +88,18 @@ export class UnseenAsks {
   }
 }
 
+// JUMP_TTL_MS is how long a jump waits for its tab to show.
+export const JUMP_TTL_MS = 5000;
+
 // PendingJump is a notification jump to a pane in another tab, waiting for
 // the state that shows that tab active. from is the tab active when it was
-// asked for.
+// asked for; at is when (a clock in ms), so a switch that never shows up
+// cannot finish the jump much later, when the user has moved on.
 export interface PendingJump {
   from: string;
   tab: string;
   pane: string;
+  at: number;
 }
 
 // JumpStep is what a jump does now: switch is the tab to ask the daemon
@@ -111,13 +116,21 @@ export interface JumpStep {
 // state that shows that tab (resolveJump): the states that arrive before the
 // switch still show the old tab and would undo an early choice. A read-only
 // page switches nothing, so it never jumps to another tab's pane.
-export function jumpStep(s: WorkspaceState | null, activeTab: string, placed: string[], tab: string, pane: string, readOnly: boolean): JumpStep {
+export function jumpStep(
+  s: WorkspaceState | null,
+  activeTab: string,
+  placed: string[],
+  tab: string,
+  pane: string,
+  readOnly: boolean,
+  now: number,
+): JumpStep {
   const none: JumpStep = { switch: '', activate: '', pending: null };
   if (!s) return none;
   if (tab && tab !== activeTab) {
     if (readOnly) return none;
     const live = pane !== '' && s.panes.some((p) => p.id === pane);
-    return { switch: tab, activate: '', pending: live ? { from: activeTab, tab, pane } : null };
+    return { switch: tab, activate: '', pending: live ? { from: activeTab, tab, pane, at: now } : null };
   }
   return { ...none, activate: pane !== '' && placed.includes(pane) ? pane : '' };
 }
@@ -127,8 +140,15 @@ export function jumpStep(s: WorkspaceState | null, activeTab: string, placed: st
 // over). It waits while the old tab is still shown, finishes on the target
 // tab — with its pane only if that state places it — and is dropped when
 // any other tab shows up.
-export function resolveJump(j: PendingJump | null, s: WorkspaceState, placed: string[]): { activate: string; keep: PendingJump | null } {
+export function resolveJump(
+  j: PendingJump | null,
+  s: WorkspaceState,
+  placed: string[],
+  now: number,
+): { activate: string; keep: PendingJump | null } {
   if (!j) return { activate: '', keep: null };
+  // Too old, or the target tab is gone: the jump can no longer finish.
+  if (now - j.at > JUMP_TTL_MS || !s.tabs.some((t) => t.id === j.tab)) return { activate: '', keep: null };
   if (s.active_tab === j.from) return { activate: '', keep: j };
   if (s.active_tab !== j.tab) return { activate: '', keep: null };
   return { activate: placed.includes(j.pane) ? j.pane : '', keep: null };

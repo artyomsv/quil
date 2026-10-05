@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { askedTabShown, jumpStep, pickActive, resolveJump, successorOf, UnseenAsks, unseenToClear } from './activepane';
+import { askedTabShown, JUMP_TTL_MS, jumpStep, pickActive, resolveJump, successorOf, UnseenAsks, unseenToClear } from './activepane';
 import type { WorkspaceState } from './protocol';
 
 const state = (unseen: boolean): WorkspaceState => ({
@@ -95,28 +95,36 @@ describe('jumpStep and resolveJump', () => {
   });
 
   it('activates a placed pane of the active tab at once', () => {
-    expect(jumpStep(two('t1'), 't1', ['a'], 't1', 'a', false)).toEqual({ switch: '', activate: 'a', pending: null });
+    expect(jumpStep(two('t1'), 't1', ['a'], 't1', 'a', false, 0)).toEqual({ switch: '', activate: 'a', pending: null });
     // Not placed (an overlay, or gone): nothing.
-    expect(jumpStep(two('t1'), 't1', ['a'], 't1', 'zz', false)).toEqual({ switch: '', activate: '', pending: null });
+    expect(jumpStep(two('t1'), 't1', ['a'], 't1', 'zz', false, 0)).toEqual({ switch: '', activate: '', pending: null });
   });
 
   it('switches and waits for the target tab before activating its pane', () => {
-    const step = jumpStep(two('t1'), 't1', ['a'], 't2', 'c', false);
-    expect(step).toEqual({ switch: 't2', activate: '', pending: { from: 't1', tab: 't2', pane: 'c' } });
+    const step = jumpStep(two('t1'), 't1', ['a'], 't2', 'c', false, 100);
+    expect(step).toEqual({ switch: 't2', activate: '', pending: { from: 't1', tab: 't2', pane: 'c', at: 100 } });
     // A state from before the switch keeps the jump waiting.
-    const early = resolveJump(step.pending, two('t1'), ['a']);
+    const early = resolveJump(step.pending, two('t1'), ['a'], 200);
     expect(early).toEqual({ activate: '', keep: step.pending });
-    expect(resolveJump(early.keep, two('t2'), ['c'])).toEqual({ activate: 'c', keep: null });
+    expect(resolveJump(early.keep, two('t2'), ['c'], 300)).toEqual({ activate: 'c', keep: null });
   });
 
   it('drops the jump when another tab shows up, or the pane is not placed', () => {
-    const j = { from: 't1', tab: 't2', pane: 'c' };
-    const s3 = { ...two('t3') };
-    expect(resolveJump(j, s3, [])).toEqual({ activate: '', keep: null });
-    expect(resolveJump(j, two('t2'), [])).toEqual({ activate: '', keep: null });
+    const j = { from: 't1', tab: 't2', pane: 'c', at: 0 };
+    expect(resolveJump(j, two('t3'), [], 10)).toEqual({ activate: '', keep: null });
+    expect(resolveJump(j, two('t2'), [], 10)).toEqual({ activate: '', keep: null });
+  });
+
+  it('drops the jump when its tab leaves the state, or after JUMP_TTL_MS', () => {
+    const j = { from: 't1', tab: 't2', pane: 'c', at: 0 };
+    const gone = { ...two('t1'), tabs: two('t1').tabs.filter((t) => t.id !== 't2') };
+    expect(resolveJump(j, gone, ['a'], 10)).toEqual({ activate: '', keep: null });
+    // Still the old tab, but too late: a switch that never came.
+    expect(resolveJump(j, two('t1'), ['a'], JUMP_TTL_MS + 1)).toEqual({ activate: '', keep: null });
+    expect(resolveJump(j, two('t2'), ['c'], JUMP_TTL_MS + 1)).toEqual({ activate: '', keep: null });
   });
 
   it('a read-only page never jumps to another tab', () => {
-    expect(jumpStep(two('t1'), 't1', ['a'], 't2', 'c', true)).toEqual({ switch: '', activate: '', pending: null });
+    expect(jumpStep(two('t1'), 't1', ['a'], 't2', 'c', true, 0)).toEqual({ switch: '', activate: '', pending: null });
   });
 });

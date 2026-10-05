@@ -176,8 +176,8 @@ func (m *Model) destsListingGroup(name string) []string {
 // Provenance (projectGroup.Origin/Hosts, saved in the file): every shared
 // destination's list CLAIMS the names it carries, and an authoritative
 // destination's claim on a name it no longer lists is dropped. A group is the
-// user's (userOwned) when created or renamed here, or a legacy group no list
-// has claimed; a daemon claiming a legacy name makes it a host group.
+// user's (userOwned) when created or renamed here, or a legacy group from a
+// version 1 file; a group a daemon's list added is a host group.
 //
 // A project of an authoritative destination JOINS a group only when its own
 // daemon lists that name in THIS frame, or the group is the user's. Nothing
@@ -224,6 +224,7 @@ func (m *Model) rebuildGroupsView() tea.Cmd {
 					log.Printf("groups: daemon %q listed %q: %v", dest, name, err)
 					continue
 				}
+				m.groups.Groups[g].Origin = groupOriginHost
 			}
 			m.groups.claim(g, dest)
 		}

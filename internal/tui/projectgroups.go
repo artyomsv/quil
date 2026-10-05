@@ -38,7 +38,7 @@ const (
 // file written before origins were recorded.
 const (
 	groupOriginUser = "user" // created or renamed by this client's user
-	groupOriginHost = "host" // added by a daemon's list, or a legacy name one claimed
+	groupOriginHost = "host" // added to the view by a daemon's list
 )
 
 // The feature's flash texts, exact.
@@ -81,20 +81,20 @@ type projectGroup struct {
 }
 
 // userOwned reports whether the group is the user's: created or renamed here,
-// or a legacy group no daemon's list has claimed. A user-owned group can hold
-// any project; a host's group only the projects of a daemon that lists it.
+// or a legacy group. A user-owned group can hold any project; a host's group
+// only the projects of a daemon that lists it.
 func (grp projectGroup) userOwned() bool {
 	return grp.Origin != groupOriginHost
 }
 
-// claim records that dest's list names group i. A legacy group a daemon
-// claims becomes a host group: from here on a daemon's list, not the user,
-// is what keeps it.
+// claim records that dest's list names group i. It never changes the origin:
+// a legacy group stays the user's even when a daemon lists its name, because
+// a version 1 file cannot say who made it, and turning it into a host group
+// would let the daemon's next list delete the user's group (and its order
+// and collapsed state). What a legacy file held is a fixed set; every name a
+// list adds from now on is a host group.
 func (g *projectGroups) claim(i int, dest string) {
 	grp := &g.Groups[i]
-	if grp.Origin == "" {
-		grp.Origin = groupOriginHost
-	}
 	if !slices.Contains(grp.Hosts, dest) {
 		grp.Hosts = append(grp.Hosts, dest)
 	}

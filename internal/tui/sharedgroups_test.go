@@ -301,34 +301,55 @@ func TestUpdate_HostGroupsAcrossARestart_DoNotAccumulate(t *testing.T) {
 	}
 }
 
-// A file written before groups carried an origin loads with every group. Its
-// groups count as the user's until a daemon's list claims the name: an empty
-// one nobody lists stays, and a project may join it; one a daemon lists is
-// that daemon's from then on, and goes with its name; one with members stays.
+// A file written before groups carried an origin loads with every group, and
+// they stay the user's: the old file cannot say who made one, so a daemon
+// listing the name does not make it disposable. An empty one nobody lists
+// stays and a project may join it; one with members stays; one a daemon
+// lists goes only as a user group goes — when a list seen in this session
+// drops the name (a delete made in another client), never merely because a
+// later launch's first frame does not list it.
 func TestUpdate_OldFormatGroupsFile_KeepsTheUsersGroups(t *testing.T) {
 	t.Setenv("QUIL_HOME", t.TempDir())
 	path := config.ProjectGroupsPath()
 	raw := `{"version":1,"groups":[
   {"name":"Mine","collapsed":true,"members":[]},
   {"name":"Work","collapsed":false,"members":[{"dest":"hostA","id":"proj-x"}]},
-  {"name":"Listed","collapsed":false,"members":[]}
+  {"name":"Listed","collapsed":false,"members":[]},
+  {"name":"Shared","collapsed":true,"members":[]}
 ]}`
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	st, err := LoadProjectGroups(path)
-	if err != nil {
-		t.Fatal(err)
+	launch := func() Model {
+		t.Helper()
+		st, err := LoadProjectGroups(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m, _, _ := twoDestModel(t)
+		m.SetProjectGroups(st, path)
+		return m
 	}
-	m, _, _ := twoDestModel(t)
-	m.SetProjectGroups(st, path)
-	if got := strings.Join(groupNames(m), ","); got != "Mine,Work,Listed" {
+	m := launch()
+	if got := strings.Join(groupNames(m), ","); got != "Mine,Work,Listed,Shared" {
 		t.Fatalf("loaded groups = %s", got)
 	}
-	m = updateNoWait(t, m, sharedFrame("r", 1, "proj-1", "Mine", "Listed"))
-	m = updateNoWait(t, m, sharedFrame("r", 2, "proj-1", "Mine", "Other"))
-	if got := strings.Join(groupNames(m), ","); got != "Mine,Work,Other" {
-		t.Errorf("groups = %s, want Mine and Work kept, Listed gone with its name", got)
+	m = updateNoWait(t, m, sharedFrame("r", 1, "proj-1", "Mine", "Listed", "Shared"))
+	m = updateNoWait(t, m, sharedFrame("r", 2, "proj-1", "Mine", "Shared", "Other"))
+	if got := strings.Join(groupNames(m), ","); got != "Mine,Work,Shared,Other" {
+		t.Errorf("groups = %s, want Listed gone with its name, the rest kept", got)
+	}
+	runCmd(m.saveGroupsCmd())
+
+	// A later launch whose first frame no longer lists Shared: a legacy
+	// group the daemon listed is still the user's, with its collapsed state.
+	m = launch()
+	m = updateNoWait(t, m, sharedFrame("r", 1, "proj-1", "Mine", "Other"))
+	if got := strings.Join(groupNames(m), ","); got != "Mine,Work,Shared,Other" {
+		t.Errorf("after a relaunch groups = %s, want the legacy Shared kept", got)
+	}
+	if g := m.groups.indexOf("Shared"); g < 0 || !m.groups.Groups[g].Collapsed {
+		t.Errorf("Shared lost or expanded: %+v", m.groups.Groups)
 	}
 	if g := m.groups.indexOf("Mine"); g < 0 || m.groups.groupOf("", "proj-1") != g || !m.groups.Groups[g].Collapsed {
 		t.Errorf("proj-1 not in the user's collapsed Mine: %+v", m.groups.Groups)

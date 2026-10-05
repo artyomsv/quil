@@ -310,7 +310,18 @@ func TestLogin_AbandonedLoginsFreeSlots(t *testing.T) {
 		c.Close()
 	}
 	waitUntil(t, "abandoned conns reaped", func() bool { return h.d.server.ConnCount() == 0 })
-	h.login(t, tok)
+	// ConnCount counts ACCEPTED conns, so it can read 0 while the listener
+	// is still draining the backlog of the closed dials — and a login
+	// accepted behind MaxPendingTCP of them is refused at the cap. A leaked
+	// slot refuses every attempt, so retrying until one is admitted still
+	// fails on a leak.
+	var err error
+	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		if _, err = clientauth.ClientLogin(h.dialClient(t), tok, testLoginHello(), 5*time.Second); err == nil {
+			return
+		}
+	}
+	t.Fatalf("login after the abandoned conns: %v", err)
 }
 
 func TestLogin_CorrectTokenAfterFailures(t *testing.T) {

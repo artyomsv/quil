@@ -95,6 +95,19 @@ func TestUpdate_OversizedSharedFrame_ListsCappedAndLoggedOnce(t *testing.T) {
 	}
 }
 
+// frameNoListen applies a frame through Update without running its Cmd. A
+// twoDestModel's router yields one link-lost per closed conn and then
+// blocks, so from the third frame on a re-armed listen never returns.
+func frameNoListen(t *testing.T, m Model, msg WorkspaceStateMsg) Model {
+	t.Helper()
+	out, _ := m.Update(msg)
+	got, ok := out.(Model)
+	if !ok {
+		t.Fatalf("Update returned %T, want Model", out)
+	}
+	return got
+}
+
 // manyGroupedProjects is a shared frame from dest listing groups, with n
 // projects, each filed under its own name prefix%03d.
 func manyGroupedProjects(dest, prefix string, n int, groups ...string) WorkspaceStateMsg {
@@ -116,7 +129,7 @@ func manyGroupedProjects(dest, prefix string, n int, groups ...string) Workspace
 // logs once, and another destination's names are not counted against it.
 func TestUpdate_ProjectGroupNamesOverTheCap_RestShownUngrouped(t *testing.T) {
 	m, _, _ := twoDestModel(t)
-	m = updateWith(t, m, manyGroupedProjects("", "g", ipc.MaxGroupsPerDaemon+10, "Listed"))
+	m = frameNoListen(t, m, manyGroupedProjects("", "g", ipc.MaxGroupsPerDaemon+10, "Listed"))
 	if got := len(groupNames(m)); got != ipc.MaxGroupsPerDaemon {
 		t.Fatalf("merged view holds %d groups, want the cap %d (Listed + %d project names)", got, ipc.MaxGroupsPerDaemon, ipc.MaxGroupsPerDaemon-1)
 	}
@@ -136,13 +149,13 @@ func TestUpdate_ProjectGroupNamesOverTheCap_RestShownUngrouped(t *testing.T) {
 	logged := len(m.sharedCapLogged)
 	again := manyGroupedProjects("", "g", ipc.MaxGroupsPerDaemon+10, "Listed")
 	again.Rev = 2
-	m = updateWith(t, m, again)
+	m = frameNoListen(t, m, again)
 	if len(m.sharedCapLogged) != logged || len(groupNames(m)) != ipc.MaxGroupsPerDaemon {
 		t.Errorf("second frame: log keys %d (want %d), groups %d", len(m.sharedCapLogged), logged, len(groupNames(m)))
 	}
 
 	remote := manyGroupedProjects("hostA", "r", 3, "Far")
-	m = updateWith(t, m, remote)
+	m = frameNoListen(t, m, remote)
 	for i := 0; i < 3; i++ {
 		if g := m.groups.groupOf("hostA", fmt.Sprintf("r-proj-%03d", i)); g < 0 || m.groups.Groups[g].Name != fmt.Sprintf("r%03d", i) {
 			t.Errorf("hostA project %d not in its group (index %d): the local cap reached another destination", i, g)
@@ -632,10 +645,11 @@ func TestCommitGroupEdit_NewEmptyGroupWithLegacyActive_CreatesOnLocal(t *testing
 	if m.activeDest() != "hostA" {
 		t.Fatalf("active dest = %q, want hostA", m.activeDest())
 	}
-	// Typed and saved through Update, the path the dialog's Enter takes.
+	// Typed and saved through Update, the path the dialog's Enter takes. The
+	// send is synchronous in Update, so the Cmd is not run (see frameNoListen).
 	m.beginGroupEdit(groupEditState{mode: groupEditNew})
 	m = grpType(m, "Fresh")
-	m = updateWith(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	m, _ = grpKey(m, tea.KeyEnter)
 	if m.dialog != dialogNone {
 		t.Fatal("Enter on a valid name must close the dialog")
 	}

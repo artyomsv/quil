@@ -457,45 +457,47 @@ describe('Connection', () => {
     const s = opened(r);
     s.recv(welcome);
     s.recv({ type: 'hello_resp', id: s.sent[1]!.id, payload: {} });
-    s.recv({ type: 'workspace_state', payload: {} });
+    s.recv({ type: 'workspace_state', id: s.sent[2]!.id, payload: {} });
     expect(r.messages.map((m) => m.type)).toEqual(['hello_resp', 'workspace_state']);
   });
 
-  it('holds back workspace_state until this socket hello is answered', () => {
+  it('holds back workspace_state until this socket attach is answered', () => {
     const r = rig();
     let s = opened(r);
     s.recv({ type: 'workspace_state', payload: { rev: 1 } });
     s.recv(welcome);
     s.recv({ type: 'workspace_state', payload: { rev: 2 } });
     s.recv({ type: 'pane_sizes', payload: { panes: [] } });
-    s.recv({ type: 'hello_resp', id: 'not-ours', payload: {} });
+    s.recv({ type: 'hello_resp', id: s.sent[1]!.id, payload: {} });
+    s.recv({ type: 'workspace_state', id: 'not-ours', payload: { rev: 3 } });
     s.recv({ type: 'workspace_state', payload: { rev: 3 } });
     expect(r.messages.map((m) => m.type)).toEqual(['pane_sizes', 'hello_resp']);
-    s.recv({ type: 'hello_resp', id: s.sent[1]!.id, payload: {} });
-    s.recv({ type: 'workspace_state', payload: { rev: 4 } });
-    expect(r.messages[r.messages.length - 1]).toEqual({ type: 'workspace_state', payload: { rev: 4 } });
+    s.recv({ type: 'workspace_state', id: s.sent[2]!.id, payload: { rev: 4 } });
+    s.recv({ type: 'workspace_state', payload: { rev: 5 } });
+    expect(r.messages.slice(-2).map((m) => m.payload)).toEqual([{ rev: 4 }, { rev: 5 }]);
 
     // A resynced socket re-attaches on the same daemon connection: a state the
-    // daemon queued before the new hello must not be applied.
+    // daemon queued before the new attach must not be applied.
     s.closeWith(4001);
     s = r.sockets[1]!;
     s.open();
     s.recv(welcome);
     const before = r.messages.length;
     s.recv({ type: 'workspace_state', payload: { rev: 5 } });
-    expect(r.messages).toHaveLength(before);
     s.recv({ type: 'hello_resp', id: s.sent[1]!.id, payload: {} });
     s.recv({ type: 'workspace_state', payload: { rev: 6 } });
-    expect(r.messages.slice(before).map((m) => m.payload)).toEqual([{}, { rev: 6 }]);
+    expect(r.messages.slice(before).map((m) => m.type)).toEqual(['hello_resp']);
+    s.recv({ type: 'workspace_state', id: s.sent[2]!.id, payload: { rev: 7 } });
+    expect(r.messages[r.messages.length - 1]).toEqual({ type: 'workspace_state', id: s.sent[2]!.id, payload: { rev: 7 } });
   });
 
-  it('counts an error naming the hello as its answer', () => {
+  it('an error naming the hello does not open the gate', () => {
     const r = rig();
     const s = opened(r);
     s.recv(welcome);
     s.recv({ type: 'error', id: s.sent[1]!.id, payload: { code: 'bad_payload', message: 'x', type: 'hello' } });
     s.recv({ type: 'workspace_state', payload: {} });
-    expect(r.messages.map((m) => m.type)).toEqual(['error', 'workspace_state']);
+    expect(r.messages.map((m) => m.type)).toEqual(['error']);
   });
 
   it('answers a second welcome with a new hello and attach under the new id', () => {
@@ -505,16 +507,17 @@ describe('Connection', () => {
     s.recv({ type: 'hello_resp', id: s.sent[1]!.id, payload: {} });
     s.recv({ type: 'error', id: s.sent[2]!.id, payload: { code: 'refused', message: 'client id in use', type: 'attach' } });
     s.recv({ type: 'web_welcome', payload: { client_id: 'c-2', rights: 'full', version: '1.2.3' } });
-    const [hello, attach] = s.sent.slice(3);
+    const [hello, attach] = s.sent.slice(-2);
     expect(hello!.payload).toMatchObject({ client_id: 'c-2' });
     expect(attach!.payload).toMatchObject({ client_id: 'c-2' });
     expect(r.storage.getItem('quil.web.client_id')).toBe('c-2');
-    // States wait for the answer to the new hello.
+    // States wait for the answer to the new attach.
     const before = r.messages.length;
     s.recv({ type: 'workspace_state', payload: {} });
-    expect(r.messages).toHaveLength(before);
     s.recv({ type: 'hello_resp', id: hello!.id, payload: {} });
     s.recv({ type: 'workspace_state', payload: {} });
+    expect(r.messages.map((m) => m.type).slice(before)).toEqual(['hello_resp']);
+    s.recv({ type: 'workspace_state', id: attach!.id, payload: {} });
     expect(r.messages.map((m) => m.type).slice(before)).toEqual(['hello_resp', 'workspace_state']);
   });
 
@@ -555,5 +558,90 @@ describe('Connection', () => {
     expect(r.sockets).toHaveLength(1);
     expect(r.storage.getItem('quil.web.key')).toBe('k-1');
     expect(r.closed).toEqual([[1008, 'protocol error', false]]);
+  });
+});
+
+// openedConnection is a started, opened and welcomed connection; got collects
+// onMessage. events overrides the defaults.
+function openedConnection(events: Partial<ConnectionEvents> = {}) {
+  const got: Message[] = [];
+  const sock = new FakeSocket();
+  const conn = new Connection(
+    () => sock,
+    new FakeStorage(),
+    new FakeClock(),
+    {
+      onWelcome: () => {},
+      onMessage: (m) => void got.push(m),
+      onOutput: () => {},
+      onReconnecting: () => {},
+      onClosed: () => {},
+      ...events,
+    },
+    () => ({ cols: 80, rows: 24, winCols: 100, winRows: 30 }),
+    () => 0.5,
+  );
+  conn.start();
+  sock.open();
+  sock.recv({ type: 'web_welcome', payload: { client_id: 'c1', rights: 'full', version: '1' } });
+  return { conn, sock, got };
+}
+
+describe('attach id wait (5b)', () => {
+  it("drops every workspace_state until the one carrying this socket's attach id", () => {
+    const { sock, got } = openedConnection();
+    const attach = sock.sent.find((m) => m.type === 'attach');
+    expect(attach?.id).toMatch(/^attach-/);
+    sock.recv({ type: 'workspace_state', payload: { tabs: [] } });
+    sock.recv({ type: 'hello_resp', id: sock.sent.find((m) => m.type === 'hello')?.id, payload: {} });
+    sock.recv({ type: 'workspace_state', payload: { tabs: [] } });
+    expect(got.filter((m) => m.type === 'workspace_state')).toHaveLength(0);
+    sock.recv({ type: 'workspace_state', id: attach?.id, payload: { tabs: [] } });
+    sock.recv({ type: 'workspace_state', payload: { tabs: [] } });
+    expect(got.filter((m) => m.type === 'workspace_state')).toHaveLength(2);
+  });
+
+  it('an error answering the attach restarts hello and attach, once per welcome', () => {
+    const { sock } = openedConnection();
+    const attach = sock.sent.find((m) => m.type === 'attach');
+    const before = sock.sent.length;
+    sock.recv({ type: 'error', id: attach?.id, payload: { code: 'refused', message: 'x', type: 'attach' } });
+    const again = sock.sent.slice(before);
+    expect(again.map((m) => m.type)).toEqual(['hello', 'attach']);
+    expect(again[1]?.payload).toMatchObject({ client_id: 'c1' });
+    // A refusal that repeats waits for the gateway's next welcome.
+    sock.recv({ type: 'error', id: again[1]?.id, payload: { code: 'refused', message: 'x', type: 'attach' } });
+    expect(sock.sent).toHaveLength(before + 2);
+  });
+
+  it('a refusal after the retry is reported once, with its text', () => {
+    const refused: string[] = [];
+    const { sock } = openedConnection({ onAttachRefused: (t) => void refused.push(t) });
+    const first = sock.sent.find((m) => m.type === 'attach');
+    sock.recv({ type: 'error', id: first?.id, payload: { code: 'refused', message: 'no', type: 'attach' } });
+    expect(refused).toEqual([]);
+    const retry = sock.sent[sock.sent.length - 1];
+    sock.recv({ type: 'error', id: retry?.id, payload: { code: 'refused', message: 'still no', type: 'attach' } });
+    expect(refused).toEqual(['still no']);
+  });
+
+  it('onAttached fires once, after the attach answer is delivered', () => {
+    const order: string[] = [];
+    const { sock } = openedConnection({
+      onMessage: (m) => void order.push(m.type),
+      onAttached: () => void order.push('attached'),
+    });
+    const attach = sock.sent.find((m) => m.type === 'attach');
+    sock.recv({ type: 'workspace_state', id: attach?.id, payload: { tabs: [] } });
+    sock.recv({ type: 'workspace_state', id: attach?.id, payload: { tabs: [] } });
+    sock.recv({ type: 'workspace_state', payload: { tabs: [] } });
+    expect(order).toEqual(['workspace_state', 'attached', 'workspace_state', 'workspace_state']);
+  });
+
+  it('trySend reports whether the message went out', () => {
+    const { conn } = openedConnection();
+    expect(conn.trySend({ type: 'state_req', id: 'q' })).toBe(true);
+    conn.stop();
+    expect(conn.trySend({ type: 'state_req', id: 'q' })).toBe(false);
   });
 });

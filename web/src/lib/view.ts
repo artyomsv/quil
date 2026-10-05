@@ -13,8 +13,13 @@ export interface PaneDot {
 export interface TabItem {
   id: string;
   name: string;
+  // The daemon's colour value (TAB_COLORS in actions.ts); '' is the default.
+  color: string;
   active: boolean;
   dots: PaneDot[];
+  // A pane finished while nobody looked (PaneState.unseen), minus panes seen
+  // since that state.
+  unseen: boolean;
 }
 
 export interface ProjectItem {
@@ -29,6 +34,17 @@ export interface PlacedPane {
   name: string;
   rect: Rect;
   spawnError: string;
+  muted: boolean;
+  worktreeOwned: boolean;
+  // The pane's agent state, as the sidebar dots show it.
+  agent: AgentDot;
+}
+
+// A border drag's tree, drawn for its tab in place of the stored one until
+// the daemon confirms or refuses it.
+export interface LayoutPreview {
+  tabId: string;
+  tree: SerializedNode;
 }
 
 const isObject = (v: unknown): v is Record<string, unknown> =>
@@ -61,6 +77,7 @@ export function parseWorkspaceState(p: unknown): WorkspaceState | null {
     tabs: tabs.map((t) => ({
       ...t,
       name: str(t.name),
+      color: str(t.color),
       panes: strings(t.panes),
       project_id: str(t.project_id),
       layout: isObject(t.layout) ? (t.layout as SerializedNode) : undefined,
@@ -71,6 +88,7 @@ export function parseWorkspaceState(p: unknown): WorkspaceState | null {
   if (typeof p.size_master === 'string') out.size_master = p.size_master;
   if (typeof p.rev === 'number') out.rev = p.rev;
   if (typeof p.run_id === 'string') out.run_id = p.run_id;
+  if (Array.isArray(p.recent_cwds)) out.recent_cwds = strings(p.recent_cwds);
   return out;
 }
 
@@ -95,20 +113,33 @@ function dotOf(state: string | undefined): AgentDot {
   return state === 'working' || state === 'blocked' || state === 'idle' ? state : 'unknown';
 }
 
-function tabItem(s: WorkspaceState, tab: TabState, panes: Map<string, PaneState>, agents: Record<string, string>): TabItem {
+function tabItem(
+  s: WorkspaceState,
+  tab: TabState,
+  panes: Map<string, PaneState>,
+  agents: Record<string, string>,
+  seen: ReadonlySet<string>,
+): TabItem {
   const dots: PaneDot[] = [];
+  let unseen = false;
   for (const id of tab.panes) {
     const p = panes.get(id);
     if (!p || p.overlay) continue;
     dots.push({ id, name: paneName(p), state: dotOf(agents[id]) });
+    if (p.unseen && !seen.has(id)) unseen = true;
   }
-  return { id: tab.id, name: sanitizeRemoteText(tab.name), active: tab.id === s.active_tab, dots };
+  return { id: tab.id, name: sanitizeRemoteText(tab.name), color: tab.color, active: tab.id === s.active_tab, dots, unseen };
 }
 
 // sidebarModel lists the projects in the daemon's order, each with its tabs
 // in its own order. A tab whose project is not listed goes under a last
-// group with no id, so it is never hidden.
-export function sidebarModel(s: WorkspaceState | null, agents: Record<string, string>): ProjectItem[] {
+// group with no id, so it is never hidden. seen holds panes whose unseen mark
+// a pane_seen cleared after s arrived.
+export function sidebarModel(
+  s: WorkspaceState | null,
+  agents: Record<string, string>,
+  seen: ReadonlySet<string> = new Set<string>(),
+): ProjectItem[] {
   if (!s) return [];
   const panes = new Map(s.panes.map((p) => [p.id, p]));
   const tabs = new Map(s.tabs.map((t) => [t.id, t]));
@@ -121,39 +152,74 @@ export function sidebarModel(s: WorkspaceState | null, agents: Record<string, st
       const t = tabs.get(id);
       if (!t || placed.has(id)) continue;
       placed.add(id);
-      items.push(tabItem(s, t, panes, agents));
+      items.push(tabItem(s, t, panes, agents, seen));
     }
     out.push({ id: proj.id, name: sanitizeRemoteText(proj.name), active: proj.id === activeProject, tabs: items });
   }
-  const rest = s.tabs.filter((t) => !placed.has(t.id)).map((t) => tabItem(s, t, panes, agents));
+  const rest = s.tabs.filter((t) => !placed.has(t.id)).map((t) => tabItem(s, t, panes, agents, seen));
   if (rest.length > 0) out.push({ id: '', name: 'Other tabs', active: false, tabs: rest });
   return out;
 }
 
 // tabBarModel is the active project's tabs.
-export function tabBarModel(s: WorkspaceState | null, agents: Record<string, string>): TabItem[] {
+export function tabBarModel(
+  s: WorkspaceState | null,
+  agents: Record<string, string>,
+  seen: ReadonlySet<string> = new Set<string>(),
+): TabItem[] {
   const pid = activeProjectOf(s);
-  return sidebarModel(s, agents).find((p) => p.id === pid)?.tabs ?? [];
+  return sidebarModel(s, agents, seen).find((p) => p.id === pid)?.tabs ?? [];
 }
 
-// placedPanes is the active tab's panes where the layout puts them, overlay
-// panes left out.
-export function placedPanes(s: WorkspaceState | null): PlacedPane[] {
-  if (!s) return [];
+// activeTab is the active tab with its non-overlay panes, and the tree to
+// draw for it: preview's tree when preview is for that tab, else the stored
+// tree as displayLayout completes it.
+function activeTab(
+  s: WorkspaceState,
+  preview: LayoutPreview | null | undefined,
+): { panes: Map<string, PaneState>; ids: string[]; tree: SerializedNode | undefined } | null {
   const tab = s.tabs.find((t) => t.id === s.active_tab);
-  if (!tab) return [];
+  if (!tab) return null;
   const panes = new Map(s.panes.map((p) => [p.id, p]));
   const ids = tab.panes.filter((id) => {
     const p = panes.get(id);
     return p !== undefined && !p.overlay;
   });
-  const rects = paneRects(displayLayout(tab.layout, ids, tab.template_layout ?? '', tab.template_main ?? ''));
+  const stored = preview?.tabId === tab.id ? preview.tree : tab.layout;
+  return { panes, ids, tree: displayLayout(stored, ids, tab.template_layout ?? '', tab.template_main ?? '') };
+}
+
+// activeTree is the tree drawn for the active tab (the split bars sit on it).
+export function activeTree(s: WorkspaceState | null, preview?: LayoutPreview | null): SerializedNode | undefined {
+  return s ? activeTab(s, preview)?.tree : undefined;
+}
+
+// placedPanes is the active tab's panes where the layout puts them, overlay
+// panes left out. A preview for the active tab is drawn in place of its
+// stored tree.
+export function placedPanes(
+  s: WorkspaceState | null,
+  preview?: LayoutPreview | null,
+  agents: Record<string, string> = {},
+): PlacedPane[] {
+  if (!s) return [];
+  const at = activeTab(s, preview);
+  if (!at) return [];
+  const rects = paneRects(at.tree);
   const out: PlacedPane[] = [];
-  for (const id of ids) {
+  for (const id of at.ids) {
     const rect = rects.get(id);
-    const p = panes.get(id);
+    const p = at.panes.get(id);
     if (!rect || !p) continue;
-    out.push({ id, name: paneName(p), rect, spawnError: sanitizeRemoteText(p.spawn_error ?? '') });
+    out.push({
+      id,
+      name: paneName(p),
+      rect,
+      spawnError: sanitizeRemoteText(p.spawn_error ?? ''),
+      muted: p.muted === true,
+      worktreeOwned: p.worktree_owned === true,
+      agent: dotOf(agents[id]),
+    });
   }
   return out;
 }

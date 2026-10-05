@@ -61,6 +61,14 @@ type Config struct {
 	Rand    io.Reader            // crypto/rand in production
 	Now     func() time.Time
 	Sleep   func(time.Duration)
+	// PluginsDir and InstancesPath are THIS machine's plugin definitions and
+	// instances.json (spec 5b E7). A page's saved-instance id is expanded from
+	// them; Task 7's /api/client and /api/instances read the same two.
+	PluginsDir    string
+	InstancesPath string
+	// ClientExtras is the config-derived part of /api/client (sandbox
+	// defaults; Task 8 the keymap and notification filter). Nil: none.
+	ClientExtras func() ClientExtras
 }
 
 // sockRef is the WebSocket currently serving a tab: cancel stops its reader
@@ -107,6 +115,12 @@ type Server struct {
 	leases *leases
 	budget *replayBudget
 	mux    *http.ServeMux
+
+	// catalog is this machine's plugin definitions: /api/client lists them
+	// and the saved-instance expansion reads its templates from them.
+	catalog *catalog
+	// instMu serializes the read-modify-write of instances.json.
+	instMu sync.Mutex
 
 	// limits, lease, openWait and grace are fields so tests can shrink them.
 	limits   bridgeLimits
@@ -155,13 +169,17 @@ func New(cfg Config) *Server {
 		tabs:     map[string]*tab{},
 
 		reclaiming: map[string][]*reclaimSlot{},
+		catalog:    newCatalog(cfg.PluginsDir),
 	}
+	s.limits.ExpandInstance = s.expandInstance
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	s.mux = http.NewServeMux()
 	s.mux.Handle("/", StaticHandler())
 	s.mux.HandleFunc("/login", loginHandler(s.auth, cfg.Logf))
 	s.mux.HandleFunc("/session", sessionHandler(s.auth))
 	s.mux.HandleFunc("/ws", s.handleWS)
+	s.mux.HandleFunc("/api/client", s.handleClient)
+	s.mux.HandleFunc("/api/instances", s.handleInstances)
 	return s
 }
 

@@ -52,3 +52,7 @@ internal/config/templates.toml text eol=lf
 # PowerShell scripts go:embed'ed into quil and sent base64-encoded to Windows
 # remotes. LF keeps the encoded size stable and matches the no-CR test.
 internal/remoteinstall/scripts/*.ps1 text eol=lf
+
+# internal/keymap/webfallback.toml is go:embed'ed (quil web's fallback chords).
+# One attribute line per embedded text file, as above.
+internal/keymap/webfallback.toml text eol=lf

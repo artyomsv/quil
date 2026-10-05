@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/artyomsv/quil/internal/hookevents"
+	"github.com/artyomsv/quil/internal/layouttree"
 	"github.com/artyomsv/quil/internal/logger"
 	memreport "github.com/artyomsv/quil/internal/memreport"
 	apty "github.com/artyomsv/quil/internal/pty"
@@ -24,7 +25,7 @@ type Tab struct {
 	Name           string
 	Color          string
 	Panes          []string        // Pane IDs in order
-	Layout         json.RawMessage // Opaque layout tree from TUI
+	Layout         json.RawMessage // Stored layout tree (layouttree JSON); kept consistent with Panes under sm.mu (layout_tree.go)
 	// LayoutRev is bumped on every accepted SetTabLayout. It is the
 	// compare-and-store base a client sends back on its NEXT write
 	// (UpdateLayoutPayload.BaseRev) and the value every client compares its
@@ -35,6 +36,13 @@ type Tab struct {
 	// that is fine, since both start the CAS from the same place.
 	LayoutRev uint64
 	ProjectID string // Project this tab belongs to (see project.go)
+	// overlayID/overlayKey are the tab's ONE overlay slot (spec 5b §3.3):
+	// the overlay pane it holds and the kind+repo it was created for. Under
+	// sm.mu, runtime only — overlays are never persisted. The slot is
+	// decided here rather than from Pane.Overlay so no PluginMu is taken
+	// under sm.mu.
+	overlayID  string
+	overlayKey string
 }
 
 type Pane struct {
@@ -290,6 +298,13 @@ type Pane struct {
 	IdleNotified    bool      // Prevents re-firing for same idle period
 	LastIdleEventAt time.Time // Cooldown: last time a idle event was emitted
 	LastBellEventAt time.Time // Cooldown: last time a bell event was emitted
+	// osc7Tail is the unfinished OSC 7 at the end of the last flush (or a
+	// trailing piece of its introducer), joined to the next flush so a
+	// directory report split by the 2 ms coalescer is not lost; osc7TailGen
+	// is the PTY run it came from, so a restart never joins two runs.
+	// PluginMu-protected, runtime only.
+	osc7Tail    []byte
+	osc7TailGen uint64
 	// LastMCPEventAt is the mcp_control cooldown, keyed BY TITLE. Read and
 	// written under PluginMu, like the two beside it.
 	//
@@ -419,6 +434,11 @@ type Pane struct {
 	// pane is already published to the session maps; concurrent snapshots
 	// may read it). Excluded from disk snapshots.
 	Overlay bool
+	// treeless marks a pane that never belongs in its tab's layout tree (an
+	// overlay). Unlike Overlay it is set BEFORE the pane is published
+	// (buildPane, daemon.go) and never changes, so the tree operations read it
+	// under sm.mu alone — they must not take PluginMu, which guards Overlay.
+	treeless bool
 	// OverlayHiddenAt is when the TUI last hid this overlay; zero means it is
 	// on screen. OverlayShownAt is when it was last shown, and orders the LRU
 	// eviction. Both are PluginMu-protected like Overlay itself.
@@ -873,6 +893,10 @@ func (sm *SessionManager) destroyTabLocked(tab *Tab) []*Pane {
 }
 
 func (sm *SessionManager) CreatePane(tabID string, cwd string) (*Pane, error) {
+	return sm.createPane(tabID, cwd, false)
+}
+
+func (sm *SessionManager) createPane(tabID, cwd string, treeless bool) (*Pane, error) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -889,7 +913,8 @@ func (sm *SessionManager) CreatePane(tabID string, cwd string) (*Pane, error) {
 		OutputBuf: ringbuf.NewRingBuffer(sm.bufSize),
 		// This id has just been invented, so any hook record already filed
 		// under it belongs to a pane that no longer exists. See Pane.freshID.
-		freshID: true,
+		freshID:  true,
+		treeless: treeless,
 	}
 
 	sm.panes[id] = pane
@@ -914,11 +939,24 @@ func (sm *SessionManager) NewPane(cwd string) *Pane {
 // position in the tab's pane list. The old pane's PTY is closed.
 func (sm *SessionManager) ReplacePane(oldPaneID string, newPane *Pane) error {
 	sm.mu.Lock()
+	oldPane, err := sm.replacePaneLocked(oldPaneID, newPane)
+	sm.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	releasePanes([]*Pane{oldPane})
+	return nil
+}
 
+// replacePaneLocked is ReplacePane's swap without the lock and without the
+// close: the new pane takes the old one's place in the tab's pane list and its
+// leaf in the stored tree, and the overlay slot is cleared when the old pane
+// held it. Returns the detached old pane for the caller to release AFTER
+// unlocking. sm.mu held (write).
+func (sm *SessionManager) replacePaneLocked(oldPaneID string, newPane *Pane) (*Pane, error) {
 	oldPane, ok := sm.panes[oldPaneID]
 	if !ok {
-		sm.mu.Unlock()
-		return fmt.Errorf("pane not found: %s", oldPaneID)
+		return nil, fmt.Errorf("pane not found: %s", oldPaneID)
 	}
 
 	// Replace in tab's pane list at the same index
@@ -929,14 +967,123 @@ func (sm *SessionManager) ReplacePane(oldPaneID string, newPane *Pane) error {
 				break
 			}
 		}
+		// The new pane takes the old leaf: position, orientation and ratio
+		// stay (AC-13), in the same hold as the membership swap.
+		substituteTreeLocked(tab, oldPaneID, newPane.ID)
+		if tab.overlayID == oldPaneID {
+			tab.overlayID, tab.overlayKey = "", ""
+		}
 	}
 
+	newPane.tabIDMu.Lock()
 	newPane.TabID = oldPane.TabID
+	newPane.tabIDMu.Unlock()
 	delete(sm.panes, oldPaneID)
 	sm.panes[newPane.ID] = newPane
-	sm.mu.Unlock()
-	releasePanes([]*Pane{oldPane})
-	return nil
+	return oldPane, nil
+}
+
+// paneSlot says where PublishPane puts a pane.
+type paneSlot struct {
+	TabID string
+	// Split inserts the pane into the stored tree next to TargetID, in Dir.
+	// An empty TargetID means the tab's first leaf; a tab with no leaves
+	// gets the pane as its only leaf.
+	Split    bool
+	TargetID string
+	Dir      layouttree.SplitDir
+	// ReplaceID substitutes the pane for this one, in the same slot.
+	ReplaceID string
+	// OverlayKey makes the pane the tab's overlay: kind + repo (overlayKey).
+	OverlayKey string
+}
+
+// publishResult reports what PublishPane did.
+type publishResult struct {
+	// Pane is the pane now in the slot: the new one, or the reused overlay.
+	Pane *Pane
+	// Reused: the tab's overlay already ran this kind on this repo, so the
+	// new pane was NOT published and must not be spawned.
+	Reused bool
+	// Evicted and Replaced are already detached from the session maps; the
+	// caller closes them off-lock (finishDetached).
+	Evicted, Replaced *Pane
+	LayoutRev         uint64
+}
+
+// PublishPane is the one locked step of every pane create (spec 5b §3.3
+// step 2): re-check the slot, publish the pane, and change the stored tree,
+// in ONE sm.mu hold, so a snapshot or broadcast never sees the pane without
+// its place or the place without the pane. p must be unpublished (NewPane).
+// Takes no PluginMu: the overlay decision reads the tab's slot, and the
+// tree operations read Pane.treeless, both guarded by sm.mu alone.
+func (sm *SessionManager) PublishPane(p *Pane, slot paneSlot) (publishResult, error) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	tab, ok := sm.tabs[slot.TabID]
+	if !ok {
+		return publishResult{}, fmt.Errorf("no such tab: %s", slot.TabID)
+	}
+	var res publishResult
+	switch {
+	case slot.OverlayKey != "":
+		if cur, live := sm.panes[tab.overlayID]; live && tab.overlayID != "" {
+			if tab.overlayKey == slot.OverlayKey {
+				return publishResult{Pane: cur, Reused: true, LayoutRev: tab.LayoutRev}, nil
+			}
+			sm.detachPaneLocked(tab, cur)
+			res.Evicted = cur
+		}
+		sm.addPaneLocked(tab, p)
+		tab.overlayID, tab.overlayKey = p.ID, slot.OverlayKey
+	case slot.ReplaceID != "":
+		old, live := sm.panes[slot.ReplaceID]
+		if !live || old.TabID != tab.ID {
+			return publishResult{}, fmt.Errorf("the pane to replace is gone or in another tab")
+		}
+		if _, err := sm.replacePaneLocked(slot.ReplaceID, p); err != nil {
+			return publishResult{}, err
+		}
+		res.Replaced = old
+	case slot.Split:
+		if target := slot.TargetID; target != "" {
+			if t, live := sm.panes[target]; !live || t.TabID != tab.ID {
+				return publishResult{}, fmt.Errorf("the pane to split is gone or in another tab")
+			}
+		}
+		sm.addPaneLocked(tab, p)
+		// target "" = first leaf of the normalized tree (insertPaneLocked).
+		if !sm.insertPaneLocked(tab, p.ID, slot.TargetID, slot.Dir) {
+			sm.detachPaneLocked(tab, p)
+			return publishResult{}, fmt.Errorf("the pane to split is not in the tab's layout")
+		}
+	default:
+		sm.addPaneLocked(tab, p)
+	}
+	res.Pane, res.LayoutRev = p, tab.LayoutRev
+	return res, nil
+}
+
+// addPaneLocked publishes an unpublished pane into tab. sm.mu held.
+func (sm *SessionManager) addPaneLocked(tab *Tab, p *Pane) {
+	p.tabIDMu.Lock()
+	p.TabID = tab.ID
+	p.tabIDMu.Unlock()
+	sm.panes[p.ID] = p
+	tab.Panes = append(tab.Panes, p.ID)
+}
+
+// detachPaneLocked removes a pane from the maps without closing it, and
+// clears the overlay slot when it held it. sm.mu held; the caller releases
+// the pane off-lock. The stored tree is pruned too, which is a no-op for a
+// treeless overlay and for a pane insertPaneLocked refused to place.
+func (sm *SessionManager) detachPaneLocked(tab *Tab, p *Pane) {
+	tab.Panes = removeString(tab.Panes, p.ID)
+	delete(sm.panes, p.ID)
+	pruneTreeLocked(tab, p.ID)
+	if tab.overlayID == p.ID {
+		tab.overlayID, tab.overlayKey = "", ""
+	}
 }
 
 // ErrPaneNotFound is returned by DestroyPane for a pane the session no longer
@@ -961,6 +1108,10 @@ func (sm *SessionManager) DestroyPane(paneID string) error {
 				tab.Panes = append(tab.Panes[:i], tab.Panes[i+1:]...)
 				break
 			}
+		}
+		pruneTreeLocked(tab, paneID)
+		if tab.overlayID == paneID {
+			tab.overlayID, tab.overlayKey = "", ""
 		}
 	}
 
@@ -991,9 +1142,10 @@ const (
 // Pane.TabID follows — under tabIDMu as well as sm.mu, because every reader
 // outside this lock reads it through CurrentTabID. The pane itself (process,
 // output buffer, CWD, session ids, worktree, sandbox) is untouched, and so is
-// everything else: projects, the active tab and project, tabOrder, both
-// Layouts and both TemplateMains. The daemon has no active-pane state, and the
-// layout is the clients' to re-send.
+// everything else but the two layout trees: the source tree loses the pane,
+// the target tree (when it has one) gains it by layouttree.PlaceMoved, each
+// with its own LayoutRev bump; clients adopt both and send nothing (spec 5b
+// §3.2). The daemon has no active-pane state.
 //
 // A template tab that no client has laid out yet is refused on either side:
 // the client builds its tree from Tab.Panes (applyTemplateLayout), so a pane
@@ -1028,9 +1180,16 @@ func (sm *SessionManager) MovePane(paneID, tabID string) (from string, res moveP
 	if src != nil {
 		// Order-preserving, and a copy rather than an in-place shift.
 		src.Panes = removeString(src.Panes, paneID)
+		pruneTreeLocked(src, paneID)
+		if src.overlayID == paneID {
+			src.overlayID, src.overlayKey = "", ""
+		}
 	}
 	if indexOfString(dst.Panes, paneID) < 0 {
 		dst.Panes = append(dst.Panes, paneID)
+	}
+	if !pane.treeless {
+		sm.placeMovedLocked(dst, paneID)
 	}
 	pane.tabIDMu.Lock()
 	pane.TabID = tabID
@@ -1070,6 +1229,16 @@ func (sm *SessionManager) TabProjectID(id string) (string, bool) {
 		return "", false
 	}
 	return tab.ProjectID, true
+}
+
+// TabLayoutRev is a tab's stored-tree revision, 0 for an unknown tab.
+func (sm *SessionManager) TabLayoutRev(id string) uint64 {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	if tab, ok := sm.tabs[id]; ok {
+		return tab.LayoutRev
+	}
+	return 0
 }
 
 func (sm *SessionManager) Panes(tabID string) []*Pane {
@@ -1149,28 +1318,31 @@ func (sm *SessionManager) UpdateTab(tabID, name, color string, clearColor bool) 
 	return true
 }
 
-// SetTabLayout replaces a tab's opaque layout under sm.mu, gated by a
+// SetTabLayout stores a client's tree for a tab under sm.mu, gated by a
 // compare-and-store on baseRev: nil accepts unconditionally (an older client,
 // or one that has not adopted revisions yet), a value equal to the tab's
-// current LayoutRev accepts, and anything else is refused with NO write at
-// all — not to Layout, not to LayoutRev. False also for an unknown tab. An
-// accepted write bumps LayoutRev, which is the new base the caller's NEXT
-// update carries. handleUpdateLayout used to write tab.Layout through the
-// live pointer with no lock, racing SnapshotState's copy — the
-// handleUpdateTab shape #229 fixed.
-func (sm *SessionManager) SetTabLayout(tabID string, layout json.RawMessage, baseRev *uint64) bool {
+// current LayoutRev accepts, and anything else is refused (layoutStale) with
+// NO write at all — not to Layout, not to LayoutRev. An accepted write is
+// validated first (validLayoutLocked): it can never store a dead, foreign,
+// overlay or repeated leaf, and it gains any live pane it lacks. An accepted
+// write bumps LayoutRev, which is the new base the caller's NEXT update
+// carries. handleUpdateLayout used to write tab.Layout through the live
+// pointer with no lock, racing SnapshotState's copy — the handleUpdateTab
+// shape #229 fixed.
+func (sm *SessionManager) SetTabLayout(tabID string, layout json.RawMessage, baseRev *uint64) layoutWrite {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	tab, ok := sm.tabs[tabID]
 	if !ok {
-		return false
+		return layoutNoTab
 	}
 	if baseRev != nil && *baseRev != tab.LayoutRev {
-		return false
+		return layoutStale
 	}
-	tab.Layout = layout
+	tab.Layout = sm.validLayoutLocked(tab, layout)
 	tab.LayoutRev++
-	return true
+	settleTemplateLocked(tab)
+	return layoutStored
 }
 
 func (sm *SessionManager) SwitchTab(tabID string) {

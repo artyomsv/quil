@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -296,13 +297,74 @@ func (d *Daemon) handleCreateTabReq(conn *ipc.Conn, msg *ipc.Message) {
 		respondTo(conn, msg.ID, ipc.MsgCreateTabResp, ipc.CreateTabRespPayload{Error: "malformed payload: " + err.Error()})
 		return
 	}
-	if req.ProjectID != "" && !d.projectExists(req.ProjectID) {
-		respondTo(conn, msg.ID, ipc.MsgCreateTabResp, ipc.CreateTabRespPayload{Error: "no such project: " + req.ProjectID})
-		return
+	resp, start := d.createTabFromReq(conn, req)
+	respondTo(conn, msg.ID, ipc.MsgCreateTabResp, resp)
+	if start != nil {
+		start()
 	}
+}
+
+// createTabFromReq is create_tab_req's work, returning the answer rather than
+// sending it, so split_pane_req's "new tab" placement runs the same code. The
+// returned func (nil when there is none) starts a worktree checkout; the
+// caller runs it AFTER sending the answer, so the requester hears about its
+// placeholder before anything the checkout broadcasts.
+func (d *Daemon) createTabFromReq(conn *ipc.Conn, req ipc.CreateTabReqPayload) (ipc.CreateTabRespPayload, func()) {
+	if req.ProjectID != "" && !d.projectExists(req.ProjectID) {
+		return ipc.CreateTabRespPayload{Error: "no such project: " + req.ProjectID}, nil
+	}
+	cwd, picked := d.newTabCWD(conn, req)
+	return d.createTabIn(conn, req, cwd, picked, false)
+}
+
+// newTabCWD resolves, ONCE, the directory a new tab's first pane opens in: the
+// requested one when it resolves, else the project root. The fallback has to
+// come from the project id rather than from the tab — there is no tab yet —
+// and an empty id means the active project, which is where
+// CreateTabInProject files it. picked says the requested directory was used,
+// which is what the recent-folder list records. Each resolve is a bounded
+// probe on the dispatch goroutine, so the project root is probed only when it
+// is needed.
+func (d *Daemon) newTabCWD(conn *ipc.Conn, req ipc.CreateTabReqPayload) (cwd string, picked bool) {
+	projectID := req.ProjectID
+	if projectID == "" {
+		projectID = d.session.ActiveProject()
+	}
+	requested := ""
+	if req.FirstPane != nil {
+		requested = req.FirstPane.CWD
+	}
+	if requested != "" {
+		if dir := resolveSpawnDirWithin(requested, spawnDirProbeTimeout); dir != "" {
+			return dir, true
+		}
+	}
+	fallback := d.projectCWD(conn, projectID)
+	if requested != "" {
+		log.Printf("spawn cwd: rejecting %q (missing, not a directory, or did not answer in time); using %q", requested, fallback)
+	}
+	return fallback, false
+}
+
+// createTabIn is createTabFromReq after the project check, with the first
+// pane's directory already resolved (newTabCWD), so a caller that needed the
+// directory first does not pay a second filesystem probe for it.
+//
+// strictResume (split_pane_req) refuses, before the tab exists, a resume
+// session that is malformed, has no transcript where the pane will run, or is
+// held by a live pane (checkResumeRequest). create_tab_req keeps its lenient
+// claim: a session it cannot have becomes a fresh one. A strict request
+// records its directory only once it has passed that check.
+func (d *Daemon) createTabIn(conn *ipc.Conn, req ipc.CreateTabReqPayload, cwd string, picked, strictResume bool) (ipc.CreateTabRespPayload, func()) {
 	first := ipc.CreatePaneReqPayload{}
 	if req.FirstPane != nil {
 		first = *req.FirstPane
+	}
+	// Already resolved: an empty CWD makes buildCreatePayload take cwd as
+	// given, without probing it again.
+	first.CWD = ""
+	if picked && !strictResume {
+		d.session.RecordRecentCWD(cwd)
 	}
 	name := req.Name
 	if name == "" {
@@ -314,18 +376,23 @@ func (d *Daemon) handleCreateTabReq(conn *ipc.Conn, msg *ipc.Message) {
 	// conflicting toggle pair or an unresolvable worktree root with a tab
 	// holding a fallback shell nobody asked for, reported through a response
 	// that still carried tab_id and therefore read as success at the tool.
-	//
-	// The fallback CWD is the project root, and it has to be resolved from the
-	// project id rather than from the tab: there is no tab yet. An empty id
-	// means the active project, which is where CreateTabInProject files it.
-	projectID := req.ProjectID
-	if projectID == "" {
-		projectID = d.session.ActiveProject()
-	}
-	payload, cwd, err := d.buildCreatePayload(first, "", d.projectCWD(conn, projectID))
+	payload, cwd, err := d.buildCreatePayload(first, "", cwd)
 	if err != nil {
-		respondTo(conn, msg.ID, ipc.MsgCreateTabResp, ipc.CreateTabRespPayload{Error: err.Error()})
-		return
+		return ipc.CreateTabRespPayload{Error: err.Error()}, nil
+	}
+	// The sandbox too: refused here it costs nothing, while refused at build
+	// time it leaves a tab holding a recovery shell — or, for a worktree, a
+	// placeholder and a whole checkout for a pane that can never start.
+	if err := d.checkSandboxRequest(payload.Type, cwd, payload.Sandbox); err != nil {
+		return ipc.CreateTabRespPayload{Error: err.Error()}, nil
+	}
+	if strictResume {
+		if err := d.checkResumeRequest(payload, cwd); err != nil {
+			return ipc.CreateTabRespPayload{Error: err.Error()}, nil
+		}
+		if picked {
+			d.session.RecordRecentCWD(cwd)
+		}
 	}
 	tab := d.session.CreateTabInProject(req.ProjectID, name)
 	payload.TabID = tab.ID
@@ -342,34 +409,57 @@ func (d *Daemon) handleCreateTabReq(conn *ipc.Conn, msg *ipc.Message) {
 			d.ensureTabNotEmpty(tab.ID)
 			d.broadcastState()
 			d.requestSnapshot()
-			respondTo(conn, msg.ID, ipc.MsgCreateTabResp, ipc.CreateTabRespPayload{TabID: tab.ID, Error: err.Error()})
-			return
+			return ipc.CreateTabRespPayload{TabID: tab.ID, Error: err.Error()}, nil
 		}
 		applyPaneName(pane, first.Name)
 		d.broadcastState()
 		d.requestSnapshot()
-		respondTo(conn, msg.ID, ipc.MsgCreateTabResp, ipc.CreateTabRespPayload{
+		answer := ipc.CreateTabRespPayload{
 			TabID:             tab.ID,
 			PaneID:            pane.ID,
 			PreparingWorktree: payload.Worktree.Branch,
-		})
+		}
 		payload.ReplacePaneID = pane.ID
 		placeholderID := pane.ID
-		go func() {
-			resp := d.worktreeAddAndCreate(payload)
-			if resp.Error != "" && !resp.Swapped {
-				d.failPreparingPane(placeholderID, "worktree not created: "+resp.Error)
-				return
-			}
-			applyPaneName(d.session.Pane(resp.PaneID), first.Name)
-		}()
-		return
+		start := func() {
+			go func() {
+				resp := d.worktreeAddAndCreate(payload)
+				if resp.Error != "" && !resp.Swapped {
+					d.failPreparingPane(placeholderID, "worktree not created: "+resp.Error)
+					return
+				}
+				applyPaneName(d.session.Pane(resp.PaneID), first.Name)
+			}()
+		}
+		return answer, start
 	}
 
-	// constructPaneAt, not createPaneAt: tab and pane reach clients as ONE
-	// frame, the discipline handleCreateTab documents.
-	pane, err := d.constructPaneAt(payload, cwd, payload.Type)
+	// buildPane without a broadcast, not createPaneAt: tab and pane reach
+	// clients as ONE frame, the discipline handleCreateTab documents. A strict
+	// caller (split_pane_req's new tab) also claims the resume session
+	// strictly: a session another pane took between the check above and the
+	// publish is refused, never silently started fresh.
+	pane, _, err := d.buildPane(payload, cwd, payload.Type, buildOpts{Slot: paneSlot{TabID: tab.ID}, StrictResume: strictResume, KeepLostClaimPane: true})
 	resp := ipc.CreateTabRespPayload{TabID: tab.ID}
+	var taken *errResumeTaken
+	if pane == nil && errors.As(err, &taken) {
+		// The refused pane is still published (KeepLostClaimPane), and the tab
+		// is this request's own: both go in ONE lock hold, so no broadcast can
+		// carry the tab empty — unless a pane was moved into it meanwhile, when
+		// only the refused pane goes.
+		projectID, _ := d.session.TabProjectID(tab.ID)
+		if gone, _ := d.session.DestroyTabIfPanes(tab.ID, []string{taken.pane}); gone {
+			d.recoverEmptyProject(conn, projectID)
+			resp.TabID = ""
+		} else {
+			_ = d.session.DestroyPane(taken.pane)
+			d.ensureTabNotEmpty(tab.ID)
+		}
+		resp.Error = err.Error()
+		d.broadcastState()
+		d.requestSnapshot()
+		return resp, nil
+	}
 	if err != nil && pane == nil {
 		resp.Error = err.Error()
 		d.ensureTabNotEmpty(tab.ID)
@@ -380,7 +470,7 @@ func (d *Daemon) handleCreateTabReq(conn *ipc.Conn, msg *ipc.Message) {
 	}
 	d.broadcastState()
 	d.requestSnapshot()
-	respondTo(conn, msg.ID, ipc.MsgCreateTabResp, resp)
+	return resp, nil
 }
 
 // handlePluginCatalogReq answers what create_pane can be asked for, per

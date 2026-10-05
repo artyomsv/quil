@@ -7,6 +7,7 @@ import (
 
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/artyomsv/quil/internal/layouttree"
 )
 
 // TestSetTabLayout_CAS pins the compare-and-store: a matching base (including
@@ -14,12 +15,14 @@ import (
 // base is refused with NO write, to either the layout or the revision.
 func TestSetTabLayout_CAS(t *testing.T) {
 	d := newTestDaemon(t)
-	tab := d.session.CreateTab("layout")
+	tab, id := ltTabWith(t, d, 2)
+	first := ltRaw(t, ltSplit(layouttree.Horizontal, 0.5, ltLeaf(id[0]), ltLeaf(id[1])))
+	second := ltRaw(t, ltSplit(layouttree.Vertical, 0.5, ltLeaf(id[0]), ltLeaf(id[1])))
 
 	// nil base: accepted unconditionally (an older client, or the tab's very
 	// first write, for which nothing has a base to send).
-	if !d.session.SetTabLayout(tab.ID, json.RawMessage(`{"v":0}`), nil) {
-		t.Fatal("nil base should be accepted")
+	if got := d.session.SetTabLayout(tab.ID, first, nil); got != layoutStored {
+		t.Fatalf("nil base = %v, want layoutStored", got)
 	}
 	if got := d.session.Tab(tab.ID).LayoutRev; got != 1 {
 		t.Fatalf("LayoutRev after nil-base write = %d, want 1", got)
@@ -27,8 +30,8 @@ func TestSetTabLayout_CAS(t *testing.T) {
 
 	// Current base: accepted, revision bumps again.
 	cur := uint64(1)
-	if !d.session.SetTabLayout(tab.ID, json.RawMessage(`{"v":1}`), &cur) {
-		t.Fatal("a base matching the current revision should be accepted")
+	if got := d.session.SetTabLayout(tab.ID, second, &cur); got != layoutStored {
+		t.Fatalf("matching base = %v, want layoutStored", got)
 	}
 	if got := d.session.Tab(tab.ID).LayoutRev; got != 2 {
 		t.Fatalf("LayoutRev after matching-base write = %d, want 2", got)
@@ -37,8 +40,8 @@ func TestSetTabLayout_CAS(t *testing.T) {
 	// Stale base: refused. Neither the layout nor the revision moves.
 	beforeLayout := string(d.session.Tab(tab.ID).Layout)
 	stale := uint64(0)
-	if d.session.SetTabLayout(tab.ID, json.RawMessage(`{"v":99}`), &stale) {
-		t.Fatal("a stale base should be refused")
+	if got := d.session.SetTabLayout(tab.ID, first, &stale); got != layoutStale {
+		t.Fatalf("stale base = %v, want layoutStale", got)
 	}
 	after := d.session.Tab(tab.ID)
 	if after.LayoutRev != 2 {
@@ -49,8 +52,8 @@ func TestSetTabLayout_CAS(t *testing.T) {
 	}
 
 	// Unknown tab: refused.
-	if d.session.SetTabLayout("tab-deadbeef", json.RawMessage(`{}`), nil) {
-		t.Error("an unknown tab should be refused")
+	if got := d.session.SetTabLayout("tab-deadbeef", first, nil); got != layoutNoTab {
+		t.Errorf("unknown tab = %v, want layoutNoTab", got)
 	}
 }
 
@@ -63,7 +66,7 @@ func callUpdateLayout(t *testing.T, d *Daemon, tabID string, layout json.RawMess
 	if err != nil {
 		t.Fatalf("NewMessage: %v", err)
 	}
-	d.handleUpdateLayout(msg)
+	d.handleUpdateLayout(nil, msg)
 }
 
 // fakeCoalesceTimer is one time.AfterFunc requestBroadcast armed. Tests fire
@@ -99,11 +102,11 @@ func stubBroadcastTimer(d *Daemon) *[]*fakeCoalesceTimer {
 // pending.
 func TestHandleUpdateLayout_BroadcastsOnAcceptOnly(t *testing.T) {
 	d := newTestDaemon(t)
-	tab := d.session.CreateTab("layout")
+	tab, id := ltTabWith(t, d, 1)
 	timers := stubBroadcastTimer(d)
 
 	// Accepted (nil base): should arm exactly one coalescer window.
-	callUpdateLayout(t, d, tab.ID, json.RawMessage(`{"v":1}`), nil)
+	callUpdateLayout(t, d, tab.ID, ltRaw(t, ltLeaf(id[0])), nil)
 	if len(*timers) != 1 {
 		t.Fatalf("arms after accepted write = %d, want 1", len(*timers))
 	}
@@ -111,7 +114,7 @@ func TestHandleUpdateLayout_BroadcastsOnAcceptOnly(t *testing.T) {
 	// Refused (stale base, current revision is now 1): must not arm a
 	// second window — SetTabLayout never even calls requestBroadcast.
 	stale := uint64(0)
-	callUpdateLayout(t, d, tab.ID, json.RawMessage(`{"v":2}`), &stale)
+	callUpdateLayout(t, d, tab.ID, ltRaw(t, ltLeaf(id[0])), &stale)
 	if len(*timers) != 1 {
 		t.Fatalf("arms after a refused write = %d, want still 1", len(*timers))
 	}
@@ -119,13 +122,13 @@ func TestHandleUpdateLayout_BroadcastsOnAcceptOnly(t *testing.T) {
 	// Fire the pending window by hand, then confirm the layout the ACCEPTED
 	// call wrote is what is live — the refused call above never touched it.
 	(*timers)[0].f()
-	if got := string(d.session.Tab(tab.ID).Layout); got != `{"v":1}` {
-		t.Errorf("live layout = %s, want the accepted write's {\"v\":1}", got)
+	if got := string(d.session.Tab(tab.ID).Layout); got != string(ltRaw(t, ltLeaf(id[0]))) {
+		t.Errorf("live layout = %s, want the accepted write's %s", got, ltRaw(t, ltLeaf(id[0])))
 	}
 
 	// A fresh accepted write after the window closed opens a NEW window.
 	rev := uint64(1)
-	callUpdateLayout(t, d, tab.ID, json.RawMessage(`{"v":3}`), &rev)
+	callUpdateLayout(t, d, tab.ID, ltRaw(t, ltLeaf(id[0])), &rev)
 	if len(*timers) != 2 {
 		t.Fatalf("arms after a post-fire accepted write = %d, want 2", len(*timers))
 	}
@@ -140,11 +143,11 @@ func TestLayoutRev_SurvivesSnapshotRoundTrip(t *testing.T) {
 
 	d := New(config.Default())
 	tab := d.session.CreateTab("layout")
-	if !d.session.SetTabLayout(tab.ID, json.RawMessage(`{"v":1}`), nil) {
+	if d.session.SetTabLayout(tab.ID, json.RawMessage(`{"v":1}`), nil) != layoutStored {
 		t.Fatal("first SetTabLayout should be accepted")
 	}
 	rev := uint64(1)
-	if !d.session.SetTabLayout(tab.ID, json.RawMessage(`{"v":2}`), &rev) {
+	if d.session.SetTabLayout(tab.ID, json.RawMessage(`{"v":2}`), &rev) != layoutStored {
 		t.Fatal("second SetTabLayout should be accepted")
 	}
 	wantRev := d.session.Tab(tab.ID).LayoutRev
@@ -215,7 +218,7 @@ func TestWorkspaceState_TabCarriesLayoutRev(t *testing.T) {
 		t.Errorf("layout_rev = %v, want 0", tb.LayoutRev)
 	}
 
-	if !d.session.SetTabLayout(tab.ID, json.RawMessage(`{"v":1}`), nil) {
+	if d.session.SetTabLayout(tab.ID, json.RawMessage(`{"v":1}`), nil) != layoutStored {
 		t.Fatal("SetTabLayout should be accepted")
 	}
 	tb = findTab(d.buildWorkspaceState())

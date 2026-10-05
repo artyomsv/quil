@@ -145,12 +145,14 @@ func TestRights_StandardPayloadCarriers(t *testing.T) {
 		return m
 	}
 	for name, msg := range map[string]*ipc.Message{
-		"create_pane args":     mk(ipc.MsgCreatePane, ipc.CreatePanePayload{TabID: tab.ID, InstanceArgs: []string{"-c", "id"}}),
-		"create_pane replace":  mk(ipc.MsgCreatePane, ipc.CreatePanePayload{TabID: tab.ID, ReplacePaneID: "x", InstanceArgs: []string{"y"}}),
-		"create_pane overlay":  mk(ipc.MsgCreatePane, ipc.CreatePanePayload{TabID: tab.ID, Overlay: true}),
-		"create_pane_req term": mk(ipc.MsgCreatePaneReq, ipc.CreatePaneReqPayload{TabID: tab.ID, Type: "terminal", InstanceArgs: []string{"-c", "id"}}),
-		"create_tab first":     mk(ipc.MsgCreateTab, ipc.CreateTabPayload{FirstPane: &ipc.FirstPaneSpec{InstanceArgs: []string{"x"}}}),
-		"create_tab_req first": mk(ipc.MsgCreateTabReq, ipc.CreateTabReqPayload{FirstPane: &ipc.CreatePaneReqPayload{InstanceArgs: []string{"x"}}}),
+		"create_pane args":       mk(ipc.MsgCreatePane, ipc.CreatePanePayload{TabID: tab.ID, InstanceArgs: []string{"-c", "id"}}),
+		"create_pane replace":    mk(ipc.MsgCreatePane, ipc.CreatePanePayload{TabID: tab.ID, ReplacePaneID: "x", InstanceArgs: []string{"y"}}),
+		"create_pane overlay":    mk(ipc.MsgCreatePane, ipc.CreatePanePayload{TabID: tab.ID, Overlay: true}),
+		"create_pane_req term":   mk(ipc.MsgCreatePaneReq, ipc.CreatePaneReqPayload{TabID: tab.ID, Type: "terminal", InstanceArgs: []string{"-c", "id"}}),
+		"create_tab first":       mk(ipc.MsgCreateTab, ipc.CreateTabPayload{FirstPane: &ipc.FirstPaneSpec{InstanceArgs: []string{"x"}}}),
+		"create_tab_req first":   mk(ipc.MsgCreateTabReq, ipc.CreateTabReqPayload{FirstPane: &ipc.CreatePaneReqPayload{InstanceArgs: []string{"x"}}}),
+		"split_pane_req args":    mk(ipc.MsgSplitPaneReq, ipc.SplitPaneReqPayload{TabID: tab.ID, Placement: ipc.PlacementRight, Pane: ipc.SplitPaneSpec{InstanceArgs: []string{"-c", "id"}}}),
+		"split_pane_req overlay": mk(ipc.MsgSplitPaneReq, ipc.SplitPaneReqPayload{TabID: tab.ID, Placement: ipc.PlacementOverlay, OverlayKind: "lazygit"}),
 	} {
 		before, beforePanes := len(h.d.session.Tabs()), len(h.d.session.Panes(tab.ID))
 		if !sendAndProbe(t, c, msg) {
@@ -166,6 +168,24 @@ func TestRights_StandardPayloadCarriers(t *testing.T) {
 	// Positive control: the same create without args is allowed.
 	if sendAndProbe(t, c, mk(ipc.MsgCreatePane, ipc.CreatePanePayload{TabID: tab.ID})) {
 		t.Fatal("a plain create_pane was refused for standard")
+	}
+}
+
+// split_pane_req rides TestRights_EveryLevelEveryType through the class table
+// (act); its answer is classed never, which that test skips. Both are pinned
+// here at every level, so neither can drift without a red row.
+func TestRights_SplitPaneTypesAtEveryLevel(t *testing.T) {
+	h := newAuthHarness(t)
+	for _, lvl := range []clientauth.Level{clientauth.LevelReadOnly, clientauth.LevelStandard, clientauth.LevelFull} {
+		c, _ := h.login(t, h.mint(t, "split-"+string(lvl), lvl, nil))
+		req := &ipc.Message{Type: ipc.MsgSplitPaneReq, ID: "split-req-" + string(lvl), Payload: json.RawMessage(`{"placement":"diagonal"}`)}
+		if refused := sendAndProbe(t, c, req); refused != (lvl == clientauth.LevelReadOnly) {
+			t.Errorf("split_pane_req from %s: refused=%v", lvl, refused)
+		}
+		resp := &ipc.Message{Type: ipc.MsgSplitPaneResp, ID: "split-resp-" + string(lvl), Payload: json.RawMessage(`{}`)}
+		if !sendAndProbe(t, c, resp) {
+			t.Errorf("split_pane_resp from %s was accepted", lvl)
+		}
 	}
 }
 

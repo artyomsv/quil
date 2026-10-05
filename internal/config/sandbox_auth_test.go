@@ -78,3 +78,21 @@ func TestResolveAuth_OnlyAnExplicitChoiceSelectsTheToken(t *testing.T) {
 		}
 	}
 }
+
+func TestSandboxConfig_DefaultSignIn(t *testing.T) {
+	cases := []struct {
+		c    SandboxConfig
+		want string
+	}{
+		{SandboxConfig{}, "browser"},
+		{SandboxConfig{SharedClaudeConfig: true}, "shared"},
+		{SandboxConfig{Auth: string(SandboxAuthToken)}, "token"},
+		{SandboxConfig{Auth: string(SandboxAuthToken), SharedClaudeConfig: true}, "token"},
+		{SandboxConfig{Auth: "Token", SharedClaudeConfig: true}, "shared"},
+	}
+	for _, c := range cases {
+		if got := c.c.DefaultSignIn(); got != c.want {
+			t.Errorf("%+v: DefaultSignIn = %q, want %q", c.c, got, c.want)
+		}
+	}
+}

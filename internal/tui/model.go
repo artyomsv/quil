@@ -440,6 +440,9 @@ const (
 	// F1 → Settings → Sandbox: the Ctrl+N sandbox defaults — see
 	// dialog_sandboxsettings.go
 	dialogSandboxSettings
+	// F1 → Settings → Keys: preset and prefix, applied live — see
+	// dialog_keysettings.go
+	dialogKeySettings
 )
 
 // tuiClient is the subset of *ipc.Client the TUI uses on the Model. Defined
@@ -497,6 +500,9 @@ type Model struct {
 	// surfaced in F1 -> Shortcuts.
 	keymap       *keymap.Keymap
 	keyConflicts []keymap.Conflict
+	// bindings is the bindings.toml SetBindings last applied; F1 → Settings →
+	// Keys starts its draft from it.
+	bindings config.Bindings
 	// pendingSeq holds the chords typed so far in a multi-step binding; empty
 	// means the machine is idle. pendingGen is bumped on every state change so
 	// a cancelled sequence's in-flight timeout tick cannot clear a sequence
@@ -509,9 +515,13 @@ type Model struct {
 	// seqTimeout drops a pending sequence after this long. Zero = off, which
 	// is the shipped default and matches tmux.
 	seqTimeout time.Duration
-	version    string
-	sized      bool            // the terminal has reported its geometry at least once
-	attached   map[string]bool // destinations already attached — see attachAllDests
+	// keyDraft is the F1 → Settings → Keys selection not yet saved;
+	// keyStatus is that page's last result line.
+	keyDraft  keyDraft
+	keyStatus string
+	version   string
+	sized     bool            // the terminal has reported its geometry at least once
+	attached  map[string]bool // destinations already attached — see attachAllDests
 	// attachedOnce records every destination this PROCESS has sent an attach
 	// to, and is never cleared (attached is, on disconnect). It is the
 	// AttachPayload.Reattach flag: a destination unreachable at launch gets its
@@ -3019,6 +3029,10 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 			// keypress.
 			m.pasteIntoSandboxSettings(msg.Content)
 			return m, nil
+		} else if m.dialog == dialogKeySettings && !m.dialogEdit {
+			// Outside edit mode the generic arm below misses it, and the paste
+			// would be typed into the hidden pane behind the page.
+			return m, nil
 		} else if m.dialog != dialogNone && m.dialogEdit {
 			m.dialogInput += sanitizeDialogInput(msg.Content)
 			return m, nil
@@ -3475,6 +3489,9 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 			delete(m.mcpHighlights, msg.PaneID)
 		}
 		return m, nil
+
+	case keysSavedMsg:
+		return m.applyKeysSaved(msg)
 
 	case paneEventMsg:
 		// Skip output_idle events for the pane the user is currently looking
@@ -4923,6 +4940,9 @@ func (m Model) openCreatePaneDialogFor(target paneTarget) (tea.Model, tea.Cmd) {
 	m.createPaneStep = 0
 	m.selectedCategory = 0
 	m.createPaneTarget = target
+	// Re-read the saved instances: the web gateway writes the same file, so
+	// the copy read at start can be missing what a browser added.
+	m.instanceStore = LoadInstances(config.InstancesPath())
 	m.createPaneDest = m.pinnableDest()
 	return m, tea.ClearScreen
 }
@@ -7225,6 +7245,16 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 		case exists && !restored:
 			lp = m.syncTabLayout(tab, tabInfo, daemonPaneSet, paneMap, existingPanes, dest)
 			newPaneIDs = append(newPaneIDs, lp.created...)
+			// A pane the daemon already placed here after a move: the same
+			// adoption (and the same bystander exception) the arrival loop
+			// applies to a move it places itself.
+			if tab != m.activeTabModel() {
+				for _, id := range lp.moved {
+					if leaf := tab.Root.FindLeaf(id); leaf != nil {
+						adoptMovedPane(tab, leaf.Pane)
+					}
+				}
+			}
 		}
 
 		// Prune panes the daemon removed.

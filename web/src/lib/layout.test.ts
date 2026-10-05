@@ -13,7 +13,7 @@ interface Vector {
 }
 
 const vectors: Vector[] = JSON.parse(
-  readFileSync(new URL('../../../internal/tui/testdata/layout_vectors.json', import.meta.url), 'utf8'),
+  readFileSync(new URL('../../../internal/layouttree/testdata/layout_vectors.json', import.meta.url), 'utf8'),
 );
 
 describe('displayLayout matches the Go DisplayLayout vectors', () => {

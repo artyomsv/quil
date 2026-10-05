@@ -48,6 +48,9 @@ const (
 // difference is whether the user's commits survive.
 var removeWorktreeKeepBranchFn = gitworktree.RemoveWorktree
 
+// removeOwnedWorktreesFn is the test seam for the close-time removal.
+var removeOwnedWorktreesFn = func(d *Daemon, paths []string) { d.removeOwnedWorktrees(paths) }
+
 // ownedWorktreePaths reports the worktree directories the given panes own, with
 // duplicates collapsed.
 //

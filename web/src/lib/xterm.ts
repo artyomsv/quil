@@ -19,7 +19,12 @@ export interface XtermPane extends TermLike {
   // Pixels per cell at the current font.
   measureCell(): { width: number; height: number };
   onData(fn: (s: string) => void): void;
+  // fn runs when the terminal takes the keyboard focus. One at a time: a new
+  // one replaces the previous.
+  onFocus(fn: () => void): void;
   focus(): void;
+  // Scrolls the viewport by pages (negative is up).
+  scrollPages(n: number): void;
   // The buffer as text, trailing blank lines removed (the end-to-end hook).
   text(): string;
   // One row of the screen (0 is the top), trailing blanks removed (the
@@ -44,6 +49,7 @@ export function createXtermPane(_paneId: string): XtermPane {
   let host: HTMLElement | null = null;
   let webgl: WebglAddon | null = null;
   let dataSub: { dispose(): void } | null = null;
+  let onFocus: (() => void) | null = null;
   let disposed = false;
   return {
     write(data, done) {
@@ -71,6 +77,9 @@ export function createXtermPane(_paneId: string): XtermPane {
         host.style.height = '100%';
         el.appendChild(host);
         term.open(host);
+        // The textarea exists once the terminal is open; it is the element
+        // that holds the keyboard focus.
+        term.textarea?.addEventListener('focus', () => onFocus?.());
       } else if (host.parentElement !== el) {
         el.appendChild(host);
       }
@@ -105,8 +114,14 @@ export function createXtermPane(_paneId: string): XtermPane {
       dataSub?.dispose();
       dataSub = term.onData(fn);
     },
+    onFocus(fn) {
+      onFocus = fn;
+    },
     focus() {
       if (!disposed) term.focus();
+    },
+    scrollPages(n) {
+      if (!disposed) term.scrollPages(n);
     },
     text() {
       if (disposed) return '';

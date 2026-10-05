@@ -131,6 +131,10 @@ type layoutPass struct {
 	oldTree map[string]bool
 	// created: pane ids adoption built a new PaneModel for.
 	created []string
+	// moved: pane ids adoption took from ANOTHER tab's tree — the daemon
+	// placed a pane that moved here (spec 5b §3.2a). The caller runs
+	// adoptMovedPane for them, as the arrival loop does for a move it places.
+	moved []string
 	// reseated: adoption put this client's reservation back into the new
 	// tree. The caller must spare it from this pass's placeholder prune, or
 	// pendingSplit is left pointing at a detached node and the requested pane
@@ -185,7 +189,7 @@ func (m *Model) syncTabLayout(tab *TabModel, ti TabInfo, paneSet map[string]bool
 		tab.adoptNext = false
 		tab.layoutDirty, tab.layoutSent, tab.layoutResend = false, nil, false
 		if stored != nil && !echo && !reflect.DeepEqual(stored, m.layoutForSend(tab)) {
-			lp.created, lp.send, lp.reseated = m.adoptTabLayout(tab, stored, paneSet, paneMap, existingPanes, dest)
+			lp.created, lp.moved, lp.send, lp.reseated = m.adoptTabLayout(tab, stored, paneSet, paneMap, existingPanes, dest)
 			return lp
 		}
 		lp.send = resend
@@ -219,21 +223,42 @@ func (m *Model) syncTabLayout(tab *TabModel, ti TabInfo, paneSet map[string]bool
 // adoptTabLayout replaces tab's tree with the stored one. Pane models are
 // reused by id, so no emulator or scrollback is lost; ids the broadcast no
 // longer lists are dropped, and panes the stored tree lacks are left for the
-// caller's arrival loop to place. Returns the ids it built new models for,
-// whether a pane THIS client closed was still in the stored tree (a user
-// change the requester must store), and whether it re-seated this client's
-// reservation (which the caller must spare from this pass's prune).
-func (m *Model) adoptTabLayout(tab *TabModel, stored *SerializedNode, paneSet map[string]bool, paneMap map[string]*PaneInfo, existingPanes map[string]*PaneModel, dest string) (created []string, send, reseated bool) {
+// caller's arrival loop to place. Returns the ids it built new models for, the
+// ids it took from another tab (a move the daemon placed), whether a pane THIS
+// client closed was still in the stored tree (a user change the requester must
+// store), and whether it re-seated this client's reservation (which the caller
+// must spare from this pass's prune).
+//
+// A 5b daemon applies replace, move and close to the stored tree itself (spec
+// §3.2a), so the tree adopted here can already hold the outcome this client's
+// own bookkeeping is still waiting for: a replace reservation is FILLED rather
+// than re-seated, and a pane that moved out runs the focus guard the prune loop
+// used to run.
+func (m *Model) adoptTabLayout(tab *TabModel, stored *SerializedNode, paneSet map[string]bool, paneMap map[string]*PaneInfo, existingPanes map[string]*PaneModel, dest string) (created, moved []string, send, reseated bool) {
 	// A drag armed on this tab describes a tree that is about to go.
 	if (m.splitDragNode != nil && treeContains(tab.Root, m.splitDragNode)) ||
 		(m.paneDrag.active() && m.paneDrag.srcTabID == tab.ID) {
 		m.clearDragState()
 	}
 
+	prev := map[string]bool{}
+	if tab.Root != nil {
+		prev = tab.Root.PaneIDs()
+	}
+	// Moved out: a pane gone from this tab but still in the broadcast. The
+	// prune loop that used to see it exits focus mode when it was the focused
+	// pane; the adopted tree already lacks it, so the guard runs here.
+	for id := range prev {
+		if _, live := paneMap[id]; live && !paneSet[id] && tab.FocusMode() && tab.ActivePane == id {
+			tab.ExitFocus()
+		}
+	}
+
 	held := m.worktreeReplaced[tab.ID]
+	storedIDs := serializedIDs(stored)
 	panes := make(map[string]*PaneModel, len(paneSet))
 	gone := make([]string, 0)
-	for id := range serializedIDs(stored) {
+	for id := range storedIDs {
 		if !paneSet[id] {
 			// Gone from the daemon but still in the stored tree.
 			if m.takeCloseRequest(dest, id) {
@@ -245,6 +270,9 @@ func (m *Model) adoptTabLayout(tab *TabModel, stored *SerializedNode, paneSet ma
 		}
 		if p, ok := existingPanes[id]; ok {
 			panes[id] = p
+			if !prev[id] {
+				moved = append(moved, id)
+			}
 			continue
 		}
 		if held != nil && held.ID == id {
@@ -259,10 +287,6 @@ func (m *Model) adoptTabLayout(tab *TabModel, stored *SerializedNode, paneSet ma
 		created = append(created, id)
 	}
 
-	// The stored tree names the pane a REPLACE reservation stands in for;
-	// a sentinel keeps that leaf through the prune so the reservation can
-	// take its place.
-	//
 	// Only a reservation still IN the tree being replaced is re-seated; one
 	// whose placeholder is already detached was abandoned, and is dropped.
 	ph := m.pendingSplit[tab.ID]
@@ -271,6 +295,25 @@ func (m *Model) adoptTabLayout(tab *TabModel, stored *SerializedNode, paneSet ma
 		tab.noteReservation("", 0, false)
 		ph = nil
 	}
+
+	// Replace already done: the pane the reservation stands in for is gone
+	// from both the broadcast and the stored tree, and the stored tree holds
+	// exactly one FRESH pane — one no tab here had a model for, which is what
+	// the replacing pane always is — so the daemon substituted it into the old
+	// leaf. A pane that moved in (reused from another tab) never counts, nor
+	// does anything when two fresh panes arrive at once: which one replaced is
+	// then unknowable, and the reservation is re-seated as before. Re-seating
+	// a done replace would leave a blank slot beside it (and, for a worktree, a
+	// spinner until the create timeout restored the old pane).
+	if ph != nil && tab.reserveReplace && tab.reserveSibling != "" &&
+		!paneSet[tab.reserveSibling] && !storedIDs[tab.reserveSibling] && len(created) == 1 {
+		m.fillDaemonReplace(tab, created[0])
+		ph = nil
+	}
+
+	// The stored tree names the pane a REPLACE reservation stands in for;
+	// a sentinel keeps that leaf through the prune so the reservation can
+	// take its place.
 	var sentinel *PaneModel
 	if ph != nil && tab.reserveReplace && tab.reserveSibling != "" && panes[tab.reserveSibling] == nil {
 		sentinel = &PaneModel{ID: tab.reserveSibling}
@@ -295,7 +338,23 @@ func (m *Model) adoptTabLayout(tab *TabModel, stored *SerializedNode, paneSet ma
 		m.reseatReservation(tab, ph, sentinel)
 		reseated = true
 	}
-	return created, send, reseated
+	return created, moved, send, reseated
+}
+
+// fillDaemonReplace retires this client's REPLACE reservation because the
+// daemon's stored tree already holds paneID in the replaced pane's leaf — the
+// same bookkeeping the arrival loop does when a pane fills a reserved leaf
+// (model.go, "Try to fill a pending split placeholder first").
+func (m *Model) fillDaemonReplace(tab *TabModel, paneID string) {
+	delete(m.pendingSplit, tab.ID)
+	tab.noteReservation("", 0, false)
+	delete(m.worktreeCreates, tab.ID)
+	tab.CreatingBranch = ""
+	if held := m.worktreeReplaced[tab.ID]; held != nil {
+		held.Dispose()
+		delete(m.worktreeReplaced, tab.ID)
+	}
+	tab.ActivePane = paneID
 }
 
 // reseatReservation puts this client's pendingSplit placeholder back into an

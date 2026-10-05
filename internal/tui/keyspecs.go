@@ -1,8 +1,6 @@
 package tui
 
 import (
-	"time"
-
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/keymap"
 	"github.com/artyomsv/quil/internal/logger"
@@ -31,7 +29,8 @@ func keySpecsFromConfig(kb config.KeybindingsConfig) map[keymap.ActionID]string 
 // Build handles a malformed spec per-action, so there is no whole-config
 // fallback to do here.
 func buildKeymap(kb config.KeybindingsConfig) (*keymap.Keymap, []keymap.Conflict) {
-	km, conflicts := keymap.BuildLayered(keymap.DefaultLayer(), keySpecsFromConfig(kb))
+	// config.LegacyKeymap, shared with quil web's /api/client.
+	km, conflicts := config.LegacyKeymap(kb)
 	for _, c := range conflicts {
 		logger.Warn("keybindings: %s", c)
 	}
@@ -46,60 +45,15 @@ func buildKeymap(kb config.KeybindingsConfig) (*keymap.Keymap, []keymap.Conflict
 // ~/.quil. cmd/quil/main.go does the load, following the SetRecentCWDs
 // precedent.
 func (m *Model) SetBindings(b config.Bindings) {
-	base := keymap.DefaultLayer()
-
-	var presetLayer map[keymap.ActionID]string
-	prefix := b.Prefix
-	if b.Preset != "" && b.Preset != keymap.DefaultPresetName {
-		p, err := keymap.LoadPreset(b.Preset)
-		if err != nil {
-			// An unknown preset name keeps the defaults rather than leaving the
-			// user with no keymap at all.
-			logger.Warn("keybindings: %v; keeping the default preset", err)
-		} else {
-			presetLayer = p.Bindings
-			// Same default-not-override rule for the timeout. bindings.toml
-			// carries no way to say "0 means I chose off" apart from omitting
-			// it, so a preset's value applies only when the user left it unset.
-			if b.SequenceTimeout == 0 && p.Timeout != "" && p.Timeout != "0" {
-				if d, err := time.ParseDuration(p.Timeout); err == nil {
-					b.SequenceTimeout = d
-				} else {
-					logger.Warn("keybindings: preset %q has an unreadable sequence_timeout %q", p.Name, p.Timeout)
-				}
-			}
-			// The preset's own prefix is the DEFAULT, not an override: a user
-			// who writes only `preset = "tmux"` must get ctrl+b, or every one
-			// of that preset's ${prefix} bindings expands against an empty
-			// prefix and is dropped. Setting prefix in bindings.toml still wins,
-			// which is how `set -g prefix C-a` is expressed.
-			if prefix == "" {
-				prefix = p.Prefix
-			}
-		}
+	m.bindings = b
+	r := keymap.FromSettings(b.Settings())
+	for _, w := range r.Warnings {
+		logger.Warn("keybindings: %s", w)
 	}
-	if warning := keymap.PrefixWarning(prefix); warning != "" {
-		logger.Warn("keybindings: %s", warning)
-	}
-
-	// Expand ${prefix} in each layer SEPARATELY and before any collision
-	// analysis. BuildLayered decides who wins by comparing head chords, and a
-	// literal "${prefix}" is not a chord — expanding after the merge would have
-	// it compare templates and find no collisions at all.
-	var conflicts []keymap.Conflict
-	expand := func(layer map[keymap.ActionID]string) map[keymap.ActionID]string {
-		out, cs := keymap.ExpandPrefix(layer, prefix)
-		conflicts = append(conflicts, cs...)
-		return out
-	}
-
-	km, buildConflicts := keymap.BuildLayered(expand(base), expand(presetLayer), expand(b.Overrides))
-	conflicts = append(conflicts, buildConflicts...)
-
-	m.keymap = km
-	m.keyConflicts = conflicts
-	m.seqTimeout = b.SequenceTimeout
-	for _, c := range conflicts {
+	m.keymap = r.Keymap
+	m.keyConflicts = r.Conflicts
+	m.seqTimeout = r.Timeout
+	for _, c := range r.Conflicts {
 		logger.Warn("keybindings: %s", c)
 	}
 }

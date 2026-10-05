@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { WorkspaceState } from './protocol';
-import { activeProjectOf, parseWorkspaceState, placedPanes, sidebarModel, tabBarModel } from './view';
+import { activeProjectOf, activeTree, parseWorkspaceState, placedPanes, sidebarModel, tabBarModel } from './view';
 
 const ESC = String.fromCodePoint(0x1b);
 const RLO = String.fromCodePoint(0x202e);
@@ -42,6 +42,12 @@ describe('parseWorkspaceState', () => {
     for (const p of [null, undefined, 'x', 3, [], { tabs: {} }, { panes: 'x' }, { projects: 1 }]) {
       expect(parseWorkspaceState(p)).toBeNull();
     }
+  });
+
+  it('keeps the recent folders, strings only', () => {
+    const s = parseWorkspaceState({ active_tab: 't', tabs: [], panes: [], projects: [], recent_cwds: ['/a', 3, '/b'] });
+    expect(s?.recent_cwds).toEqual(['/a', '/b']);
+    expect(parseWorkspaceState({ active_tab: 't', tabs: [], panes: [], projects: [] })?.recent_cwds).toBeUndefined();
   });
 
   it('reads null lists as empty', () => {
@@ -98,6 +104,26 @@ describe('sidebarModel', () => {
   it('is empty before any state', () => {
     expect(sidebarModel(null, {})).toEqual([]);
   });
+
+  it('marks a tab unread from its panes, minus panes seen since the state', () => {
+    const s = parseWorkspaceState({
+      active_tab: 't1',
+      tabs: [
+        { id: 't1', name: 'a', panes: ['p1', 'p2'] },
+        { id: 't2', name: 'b', panes: ['p3'] },
+      ],
+      panes: [
+        { id: 'p1', tab_id: 't1', unseen: true },
+        { id: 'p2', tab_id: 't1' },
+        { id: 'p3', tab_id: 't2', unseen: true, overlay: true },
+      ],
+      projects: [],
+    });
+    const items = sidebarModel(s, {}, new Set())[0]!.tabs;
+    expect(items.map((t) => t.unseen)).toEqual([true, false]);
+    expect(sidebarModel(s, {}, new Set(['p1']))[0]!.tabs[0]!.unseen).toBe(false);
+    expect(tabBarModel(s, {}, new Set(['p1']))[0]?.unseen).toBe(false);
+  });
 });
 
 describe('tabBarModel and activeProjectOf', () => {
@@ -116,6 +142,33 @@ describe('placedPanes', () => {
     expect(got[0]?.rect).toEqual({ x: 0, y: 0, w: 0.25, h: 1 });
     expect(got[1]?.rect).toEqual({ x: 0.25, y: 0, w: 0.75, h: 1 });
     expect(got[1]?.spawnError).toBe('no such file');
+  });
+
+  it('carries the mute and worktree marks', () => {
+    const s = ws();
+    s.panes = s.panes.map((p) => (p.id === 'x2' ? { ...p, muted: true, worktree_owned: true } : p));
+    const got = placedPanes(s);
+    expect(got.map((p) => [p.muted, p.worktreeOwned])).toEqual([
+      [true, true],
+      [false, false],
+    ]);
+  });
+
+  it('gives each placed pane its agent dot, unknown for anything else', () => {
+    expect(placedPanes(ws(), null, { x2: 'blocked', x3: 'weird' }).map((p) => p.agent)).toEqual(['blocked', 'unknown']);
+    expect(placedPanes(ws(), null, { x2: 'working', x3: 'idle' }).map((p) => p.agent)).toEqual(['working', 'idle']);
+    expect(placedPanes(ws()).map((p) => p.agent)).toEqual(['unknown', 'unknown']);
+  });
+
+  it('draws a preview for the active tab in place of its tree; one for another tab changes nothing', () => {
+    const tree = { split: 0, ratio: 0.6, left: { pane_id: 'x2' }, right: { pane_id: 'x3' } };
+    const moved = placedPanes(ws(), { tabId: 't2', tree });
+    expect(moved[0]?.rect.w).toBeCloseTo(0.6);
+    expect(activeTree(ws(), { tabId: 't2', tree })?.ratio).toBe(0.6);
+    const other = placedPanes(ws(), { tabId: 't1', tree });
+    expect(other[0]?.rect).toEqual({ x: 0, y: 0, w: 0.25, h: 1 });
+    expect(activeTree(ws(), null)?.ratio).toBe(0.25);
+    expect(activeTree(null)).toBeUndefined();
   });
 
   it('is empty when the active tab is unknown or has no panes', () => {

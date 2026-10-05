@@ -83,6 +83,11 @@ const (
 	MsgPaneStatusResp     = "pane_status_resp"
 	MsgCreatePaneReq      = "create_pane_req"
 	MsgCreatePaneResp     = "create_pane_resp"
+	// split_pane_req creates a pane AND places it: the daemon builds the
+	// tree (spec 5b §3.3). Answered with split_pane_resp, always, to an
+	// id-bearing request.
+	MsgSplitPaneReq       = "split_pane_req"
+	MsgSplitPaneResp      = "split_pane_resp"
 	MsgRestartPaneReq     = "restart_pane_req"
 	MsgRestartPaneResp    = "restart_pane_resp"
 	MsgScreenshotPaneReq  = "screenshot_pane_req"
@@ -572,6 +577,11 @@ type PaneInputRespPayload struct {
 	Error     string `json:"error,omitempty"`
 }
 
+// PaneInputQueueFull is the pane_input_resp error for a full input queue. The
+// browser's paste flow waits and resends on exactly this text and stops on
+// every other one (web/src/lib/paste.ts, QUEUE_FULL_PREFIX).
+const PaneInputQueueFull = "pane input queue is full — its child has stopped reading stdin"
+
 type PaneOutputPayload struct {
 	PaneID string `json:"pane_id"`
 	Data   []byte `json:"data"`
@@ -925,9 +935,12 @@ type CreatePaneReqPayload struct {
 type CreatePaneRespPayload struct {
 	// InvalidSubdir is worker-local failure classification, never sent over IPC.
 	// Template creation uses it to discard its provisional tab after checkout.
-	InvalidSubdir bool   `json:"-"`
-	PaneID        string `json:"pane_id"`
-	TabID         string `json:"tab_id"`
+	InvalidSubdir bool `json:"-"`
+	// RecoveredTab is worker-local too: a replace whose new pane failed to
+	// start left the tab a recovery pane that carries the reason on screen.
+	RecoveredTab bool   `json:"-"`
+	PaneID       string `json:"pane_id"`
+	TabID        string `json:"tab_id"`
 	// Error explains a create that produced NO pane. Only a create carrying a
 	// WorktreeSpec can fail this way — an ordinary create is synchronous and
 	// its result arrives in the next workspace broadcast, as it always has.
@@ -956,6 +969,77 @@ type CreatePaneRespPayload struct {
 	// was created — the client armed a layout placeholder before the send and
 	// nothing else will unwind it.
 	Worktree *WorktreeSpec `json:"worktree,omitempty"`
+}
+
+// Placements a split_pane_req can ask for.
+const (
+	PlacementRight   = "right"
+	PlacementBelow   = "below"
+	PlacementReplace = "replace"
+	PlacementNewTab  = "new_tab"
+	PlacementOverlay = "overlay"
+)
+
+// SplitPaneReqPayload asks the daemon to create a pane and put it in the
+// tab's tree itself. TargetPaneID names the pane to split or replace; the
+// tab is derived from it and TabID is read only when it is empty (the tab's
+// first leaf) or for an overlay with no target.
+type SplitPaneReqPayload struct {
+	TargetPaneID string        `json:"target_pane_id,omitempty"`
+	TabID        string        `json:"tab_id,omitempty"`
+	Placement    string        `json:"placement"`
+	NewTab       *SplitNewTab  `json:"new_tab,omitempty"`
+	OverlayKind  string        `json:"overlay_kind,omitempty"`
+	Pane         SplitPaneSpec `json:"pane"`
+}
+
+// SplitNewTab names the tab a "new_tab" placement opens.
+type SplitNewTab struct {
+	Name      string `json:"name,omitempty"`
+	ProjectID string `json:"project_id,omitempty"`
+}
+
+// SplitPaneSpec is the create-pane dialog's choices, as NAMES the daemon
+// resolves. InstanceArgs reach the daemon only from the web gateway, which
+// fills them from a saved instance on its own disk; clientauth refuses them
+// from a standard conn as for every other create.
+type SplitPaneSpec struct {
+	Type            string         `json:"type,omitempty"`
+	Name            string         `json:"name,omitempty"`
+	CWD             string         `json:"cwd,omitempty"`
+	Toggles         []string       `json:"toggles,omitempty"`
+	InstanceName    string         `json:"instance_name,omitempty"`
+	InstanceArgs    []string       `json:"instance_args,omitempty"`
+	KubeContext     string         `json:"kube_context,omitempty"`
+	ResumeSessionID string         `json:"resume_session_id,omitempty"`
+	Worktree        *SplitWorktree `json:"worktree,omitempty"`
+	Sandbox         *SandboxSpec   `json:"sandbox,omitempty"`
+}
+
+// SplitWorktree is either a NEW branch (a worktree the daemon creates off the
+// repository containing CWD) or an EXISTING worktree directory to open in.
+// Exactly one is set.
+type SplitWorktree struct {
+	Branch       string `json:"branch,omitempty"`
+	ExistingPath string `json:"existing_path,omitempty"`
+}
+
+// SplitPaneRespPayload answers split_pane_req. Preparing means a worktree is
+// being checked out: PaneID is the placeholder (or, for a replace, the pane
+// that will be replaced), and the final pane arrives in a broadcast.
+//
+// Error means NOTHING was created: the request may be sent again. Notice is a
+// problem with a pane that DOES exist (its child failed to start, or it began
+// a fresh session instead of the one asked for): the pane is in its slot and
+// shows the reason, so a retry would only make another one — and, for a
+// replace, replace the failed pane in turn.
+type SplitPaneRespPayload struct {
+	PaneID    string `json:"pane_id,omitempty"`
+	TabID     string `json:"tab_id,omitempty"`
+	LayoutRev uint64 `json:"layout_rev"`
+	Preparing bool   `json:"preparing,omitempty"`
+	Notice    string `json:"notice,omitempty"`
+	Error     string `json:"error,omitempty"`
 }
 
 // Phase B MCP payloads
@@ -1168,6 +1252,9 @@ type ListTasksRespPayload struct {
 
 type DestroyPaneReqPayload struct {
 	PaneID string `json:"pane_id"`
+	// RemoveWorktree: see DestroyPanePayload.RemoveWorktree. A bool, never a
+	// path, for the same reason.
+	RemoveWorktree bool `json:"remove_worktree,omitempty"`
 }
 
 type DestroyPaneRespPayload struct {
@@ -1250,8 +1337,14 @@ type EventDismissedPayload struct {
 // every client's sidebar clears the same "finished while you were away" mark
 // rather than each one tracking it alone. The sender's own echo is a no-op —
 // its sidebar already cleared the mark locally before reporting it.
+//
+// Rev is the newest workspace_state rev at the moment of the clear: a frame
+// numbered at or below it may have been built before the clear and still
+// carry the mark; one above it carries the daemon's own value. Omitted (0)
+// by a daemon older than the field.
 type PaneSeenPayload struct {
 	PaneID string `json:"pane_id"`
+	Rev    uint64 `json:"rev,omitempty"`
 }
 
 type GetNotificationsRespPayload struct {

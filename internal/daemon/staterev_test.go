@@ -143,3 +143,37 @@ func TestHandleAttach_StateFrame_CarriesRev(t *testing.T) {
 		return
 	}
 }
+
+// spec 5b §3.5: the state frame that answers an attach carries the attach's
+// id, so a page can ignore frames queued before its own attach.
+func TestHandleAttach_StateFrame_EchoesTheAttachID(t *testing.T) {
+	for _, id := range []string{"attach-7", ""} {
+		_, sock := overlayServerDaemonWithConfig(t, config.Default())
+		client, err := ipc.NewClient(sock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { client.Close() })
+		attach, _ := ipc.NewMessage(ipc.MsgAttach, ipc.AttachPayload{Cols: 80, Rows: 24})
+		attach.ID = id
+		if err := client.Send(attach); err != nil {
+			t.Fatal(err)
+		}
+		if err := client.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		for {
+			msg, err := client.Receive()
+			if err != nil {
+				t.Fatalf("receive: %v", err)
+			}
+			if msg.Type != ipc.MsgWorkspaceState {
+				continue
+			}
+			if msg.ID != id {
+				t.Fatalf("attach id %q: state frame id %q", id, msg.ID)
+			}
+			break
+		}
+	}
+}

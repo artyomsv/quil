@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { bannerFor, isLoginRequired } from './banner';
+import { attachRefusedBanner, bannerFor, isLoginRequired } from './banner';
 import { CLOSE_REPLACED_REASON } from './protocol';
 
 describe('bannerFor', () => {
@@ -54,5 +54,13 @@ describe('bannerFor', () => {
     const esc = String.fromCodePoint(0x1b);
     const rlo = String.fromCodePoint(0x202e);
     expect(bannerFor(4004, `bad${esc}[31m${rlo}token`, false)?.text).toBe('Token refused: bad[31mtoken');
+  });
+});
+
+describe('attachRefusedBanner', () => {
+  it('shows the sanitized refusal and stays', () => {
+    const rlo = String.fromCodePoint(0x202e);
+    expect(attachRefusedBanner(`in${rlo} use`)).toEqual({ text: 'The daemon refused this page: in use', retrying: false });
+    expect(attachRefusedBanner('').text).toBe('The daemon refused this page: no reason given');
   });
 });

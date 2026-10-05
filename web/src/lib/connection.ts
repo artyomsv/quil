@@ -40,6 +40,13 @@ export interface ConnectionEvents {
   // refused: the stored key is already cleared and the UI shows the login
   // form. No reconnect follows.
   onClosed(code: number, reason: string, retrying: boolean): void;
+  // onAttached runs once per attach, right after the workspace_state that
+  // answers it has been delivered through onMessage.
+  onAttached?(): void;
+  // onAttachRefused runs when the daemon refused this socket's attach again
+  // after the one retry; text is the daemon's unsanitized message. The next
+  // welcome starts over.
+  onAttachRefused?(text: string): void;
 }
 
 export interface AttachSizes {
@@ -73,10 +80,16 @@ export class Connection {
   private unacked = 0;
   private socketEpoch = 0;
   private ackTimer: unknown = null;
-  // The id of this socket's latest hello, and whether the daemon answered it.
-  // A workspace_state is passed on only after the answer: see onFrame.
-  private helloId = '';
-  private helloAnswered = false;
+  // The id of this socket's latest attach, and whether the daemon answered it
+  // with its workspace_state (that answer carries the id, spec §3.5). States
+  // before it are dropped: see onFrame.
+  private attachId = '';
+  private attachAnswered = false;
+  private lastWelcome: WebWelcome | null = null;
+  // An error answering the attach starts hello and attach again, once per
+  // welcome: a refusal that repeats waits for the gateway's next welcome
+  // instead of looping.
+  private attachRetried = false;
   // Counts start() calls, so a session check from before a new login acts
   // on nothing.
   private starts = 0;
@@ -168,8 +181,8 @@ export class Connection {
     this.socket = s;
     this.socketEpoch++;
     this.opened = false;
-    this.helloId = '';
-    this.helloAnswered = false;
+    this.attachId = '';
+    this.attachAnswered = false;
     s.onopen = () => {
       if (this.socket !== s) return;
       this.opened = true;
@@ -224,29 +237,56 @@ export class Connection {
       return;
     }
     // After a resync the page re-attaches on the same daemon connection, and
-    // a workspace_state the daemon queued for it before the new hello still
+    // a workspace_state the daemon queued for it before the new attach still
     // arrives first. The first state applied after a reconnect resets every
     // terminal, so applying that stale one would let live bytes land before
-    // the replay. The daemon handles one connection's frames in order and
-    // answers hello before it reads the attach, so states are held back until
-    // the answer to this socket's hello (hello_resp, or an error naming it).
-    if (this.helloId !== '' && m.id === this.helloId && (m.type === 'hello_resp' || m.type === 'error')) {
-      this.helloAnswered = true;
+    // the replay. The daemon answers an attach with a workspace_state carrying
+    // the attach's id, so every state before that answer is dropped.
+    if (this.attachId !== '' && m.id === this.attachId) {
+      if (m.type === 'error') {
+        // The daemon refused the attach: start hello and attach again, as
+        // the lease-renew path does.
+        if (this.lastWelcome && !this.attachRetried) {
+          this.attachRetried = true;
+          this.sayHello(this.lastWelcome);
+          return;
+        }
+        // Refused again: states stay dropped until the gateway's next
+        // welcome, so the page says why instead of showing a stale view.
+        const p = (m.payload ?? {}) as { message?: unknown };
+        this.events.onAttachRefused?.(typeof p.message === 'string' ? p.message : '');
+        return;
+      }
+      if (m.type === 'workspace_state' && !this.attachAnswered) {
+        this.attachAnswered = true;
+        this.events.onMessage(m);
+        // After the state is applied: the page rebuilds what a missed
+        // broadcast could have left stale (the notification list).
+        this.events.onAttached?.();
+        return;
+      }
     }
-    if (m.type === 'workspace_state' && !this.helloAnswered) return;
+    if (m.type === 'workspace_state' && !this.attachAnswered) return;
     this.events.onMessage(m);
   }
 
   private onWelcome(w: WebWelcome): void {
+    this.lastWelcome = w;
+    this.attachRetried = false;
+    this.sayHello(w);
+    this.events.onWelcome(w);
+  }
+
+  // sayHello sends hello and attach for w's client id. A second welcome on
+  // one socket (the gateway renewed an id the daemon refused as in use)
+  // starts a new pair, and states wait for the new attach's answer.
+  private sayHello(w: WebWelcome): void {
     this.clientId = w.client_id;
     this.storage.setItem(CLIENT_ID_KEY, w.client_id);
-    // A second welcome on one socket (the gateway renewed an id the daemon
-    // refused as in use) starts a new hello, and states wait for its answer.
-    this.helloId = `hello-${++this.seq}`;
-    this.helloAnswered = false;
+    this.attachAnswered = false;
     this.sendRaw({
       type: 'hello',
-      id: this.helloId,
+      id: `hello-${++this.seq}`,
       payload: {
         kind: 'web',
         proto: 1,
@@ -270,8 +310,8 @@ export class Connection {
       payload.win_cols = sz.winCols;
       payload.win_rows = sz.winRows;
     }
-    this.sendRaw({ type: 'attach', id: `attach-${++this.seq}`, payload });
-    this.events.onWelcome(w);
+    this.attachId = `attach-${++this.seq}`;
+    this.sendRaw({ type: 'attach', id: this.attachId, payload });
   }
 
   private onSocketClosed(code: number, reason: string, wasOpen: boolean): void {
@@ -383,9 +423,15 @@ export class Connection {
     if (bytes > 0) this.sendRaw({ type: 'web_ack', payload: { bytes } });
   }
 
-  private sendRaw(m: Message): void {
-    if (!this.socket || !this.opened) return;
+  // trySend sends m when a socket is open and says whether it did.
+  trySend(m: Message): boolean {
+    if (!this.socket || !this.opened) return false;
     this.socket.send(JSON.stringify(m));
+    return true;
+  }
+
+  private sendRaw(m: Message): void {
+    this.trySend(m);
   }
 
   private cancelTimers(): void {

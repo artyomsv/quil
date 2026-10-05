@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { App } from '../lib/app.svelte';
+  import AgentDot from './AgentDot.svelte';
 
   interface Props {
     app: App;
@@ -24,9 +25,10 @@
           <li>
             <button class="tab" class:active={tab.active} disabled={app.readOnly} onclick={() => app.switchTab(tab.id)}>
               <span class="name">{tab.name || '—'}</span>
+              {#if tab.unseen}<span class="unread" aria-hidden="true" title="finished while away">•</span>{/if}
               <span class="dots">
                 {#each tab.dots as dot (dot.id)}
-                  <span class="dot {dot.state}" title="{dot.name}: {dot.state}"></span>
+                  <AgentDot state={dot.state} title="{dot.name}: {dot.state}" />
                 {/each}
               </span>
             </button>
@@ -98,28 +100,14 @@
     white-space: nowrap;
   }
 
+  .unread {
+    flex: none;
+    color: #5cc27a;
+  }
+
   .dots {
     display: flex;
     gap: 3px;
-  }
-
-  .dot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: #4a4f5c;
-  }
-
-  .dot.working {
-    background: #4f9be8;
-  }
-
-  .dot.blocked {
-    background: #e8a24f;
-  }
-
-  .dot.idle {
-    background: #5cc27a;
   }
 
   .empty {

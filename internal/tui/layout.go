@@ -5,14 +5,17 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+
+	"github.com/artyomsv/quil/internal/layouttree"
 )
 
-// SplitDir determines how child nodes are arranged.
-type SplitDir int
+// SplitDir determines how child nodes are arranged. An alias, so the TUI and
+// the shared layout core (internal/layouttree) speak one type.
+type SplitDir = layouttree.SplitDir
 
 const (
-	SplitHorizontal SplitDir = iota // children side-by-side (left | right)
-	SplitVertical                   // children stacked (top / bottom)
+	SplitHorizontal = layouttree.Horizontal // children side-by-side (left | right)
+	SplitVertical   = layouttree.Vertical   // children stacked (top / bottom)
 )
 
 // Minimum pane dimensions (including border).
@@ -768,13 +771,8 @@ func resizeNodeRects(n *LayoutNode, w, h int) {
 
 // SerializedNode is a JSON-friendly representation of a LayoutNode tree.
 // Leaf nodes have PaneID set; internal nodes have Split, Ratio, Left, Right.
-type SerializedNode struct {
-	PaneID string          `json:"pane_id,omitempty"`
-	Split  *SplitDir       `json:"split,omitempty"`
-	Ratio  float64         `json:"ratio,omitempty"`
-	Left   *SerializedNode `json:"left,omitempty"`
-	Right  *SerializedNode `json:"right,omitempty"`
-}
+// It IS layouttree.Node, the shape the daemon stores and validates.
+type SerializedNode = layouttree.Node
 
 // SerializeLayout converts a LayoutNode tree into a SerializedNode tree.
 func SerializeLayout(n *LayoutNode) *SerializedNode {

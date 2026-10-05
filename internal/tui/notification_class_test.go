@@ -39,6 +39,7 @@ func TestEventGroup_Table(t *testing.T) {
 		{"mcp_control", groupMCP},
 		{"input_blocked", groupSystem},
 		{"worktree_ready", groupSystem},
+		{"worktree_failed", groupSystem},
 		{"command_complete", groupCommands},
 		{"output_idle", groupIdle},
 	}

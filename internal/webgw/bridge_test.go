@@ -588,3 +588,58 @@ func TestClosePage_StalePageLeavesAResyncedBridgeOpen(t *testing.T) {
 	b.closePage(p2.gen, CloseGoingAway, "page closed")
 	waitFor(t, "the current page's close to shut the bridge", d.isClosed)
 }
+
+// A pane_input_resp from the daemon frees the paste place its id held.
+func TestBridge_PasteAnswerFreesThePlace(t *testing.T) {
+	g := newForwardGate("web-p-1", "v", nil)
+	g.helloSeen = true
+	b := &bridge{gate: g, logf: func(string, ...any) {}}
+	g.pastes = map[string]bool{"c1": true, "c2": true}
+	ans, _ := ipc.NewMessage(ipc.MsgPaneInputResp, ipc.PaneInputRespPayload{PaneID: "p", Delivered: true})
+	ans.ID = "c1"
+	b.fromDaemon(ans)
+	if g.pastes["c1"] || !g.pastes["c2"] {
+		t.Fatalf("pastes after the answer: %v", g.pastes)
+	}
+}
+
+// A saved instance is expanded from disk before the gate lock is taken, so
+// the daemon reader's answered() never waits behind the file reads.
+func TestBridge_InstanceExpandsOutsideTheGateLock(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	lim := testLimits()
+	lim.ExpandInstance = func(string, string) (string, []string, error) {
+		close(entered)
+		<-release
+		return "box", []string{"u@h"}, nil
+	}
+	b, d, p := startBridge(t, lim)
+	frame := func(m *ipc.Message) []byte {
+		raw, err := json.Marshal(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+	hello := msg(t, ipc.MsgHello, "h1", ipc.HelloPayload{Kind: "web", Proto: ipc.ProtocolVersion})
+	if err := b.fromPage(p.gen, frame(hello)); err != nil {
+		t.Fatal(err)
+	}
+	split := msg(t, ipc.MsgSplitPaneReq, "s1", map[string]any{"placement": "right", "pane": map[string]any{"type": "ssh", "instance_id": "i1"}})
+	done := make(chan error, 1)
+	go func() { done <- b.fromPage(p.gen, frame(split)) }()
+	<-entered
+	if !b.gateMu.TryLock() {
+		close(release)
+		t.Fatal("the gate lock is held while the instance is read from disk")
+	}
+	b.gateMu.Unlock()
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the split to reach the daemon", func() bool {
+		types := d.sentTypes()
+		return len(types) > 0 && types[len(types)-1] == ipc.MsgSplitPaneReq
+	})
+}

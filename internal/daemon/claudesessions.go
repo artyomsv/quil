@@ -55,12 +55,21 @@ var resumeSessionIDRe = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a
 //     TOCTOU the TUI cannot: its listing is fetched at T0 and committed at T1,
 //     and another pane can claim the session in between.
 func (d *Daemon) applyResumeSessionID(pane *Pane, raw string) {
+	d.claimResumeSessionID(pane, raw)
+}
+
+// claimResumeSessionID is applyResumeSessionID reporting the outcome: ok is
+// false when raw is malformed or another live pane already holds the session
+// (holder names it). The occupancy test and the write are ONE step under
+// resumeClaimMu, and the caller must have published pane first, or its claim
+// is invisible to a racing caller.
+func (d *Daemon) claimResumeSessionID(pane *Pane, raw string) (holder string, ok bool) {
 	if raw == "" {
-		return
+		return "", true
 	}
 	if !resumeSessionIDRe.MatchString(raw) {
 		log.Printf("create pane: ignoring malformed resume_session_id (len=%d); starting a fresh session", len(raw))
-		return
+		return "", false
 	}
 	// The occupancy test and the write it gates are ONE atomic step. Without
 	// the lock, two clients creating panes for the same session on their own
@@ -72,19 +81,20 @@ func (d *Daemon) applyResumeSessionID(pane *Pane, raw string) {
 	d.resumeClaimMu.Lock()
 	defer d.resumeClaimMu.Unlock()
 
-	if holder, busy := d.claimedClaudeSessionIDs()[raw]; busy && holder != pane.ID {
-		log.Printf("create pane: session already claimed by pane %s; starting a fresh session instead", holder)
-		return
+	if h, busy := d.claimedClaudeSessionIDs()[raw]; busy && h != pane.ID {
+		log.Printf("create pane: session already claimed by pane %s; starting a fresh session instead", h)
+		return h, false
 	}
-	// CreatePane may already have published the pane into the session maps, so
-	// a concurrent snapshot goroutine can be reading PluginState — same lock
-	// discipline as the Overlay/Muted writes alongside this call.
+	// The pane is published, so a concurrent snapshot goroutine can be
+	// reading PluginState — same lock discipline as every other post-publish
+	// write.
 	pane.PluginMu.Lock()
 	if pane.PluginState == nil {
 		pane.PluginState = make(map[string]string)
 	}
 	pane.PluginState["resume_session_id"] = raw
 	pane.PluginMu.Unlock()
+	return "", true
 }
 
 // listClaudeSessionsFn is the discovery seam. Package-level var (not a direct

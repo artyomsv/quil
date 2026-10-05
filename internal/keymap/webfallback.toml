@@ -1,0 +1,14 @@
+# quil web fallback chords. NOT a preset: this file lives outside presets/, so
+# PresetNames never lists it and it can never be selected as a keymap.
+#
+# A browser keeps these chords for itself and never delivers them to a page:
+# ctrl+w, ctrl+t, ctrl+n, ctrl+tab, ctrl+shift+t, ctrl+shift+n, ctrl+shift+w.
+# When an action's resolved chord is one of them, the browser uses the chord
+# named here instead — but only while that chord is unbound in the user's
+# resolved keymap. It never takes a chord from a bound action.
+#
+# Keys are action ids, or builtin.<name> for keys the TUI hardcodes.
+[fallbacks]
+"pane.close" = "alt+shift+c"
+"tab.new" = "alt+shift+t"
+"builtin.new_pane" = "alt+shift+o"

@@ -221,6 +221,8 @@ func (d *Daemon) worktreeAddAndCreate(p ipc.CreatePanePayload) ipc.CreatePaneRes
 		resp.Swapped = swapped
 		var subdirErr *worktreeSubdirError
 		resp.InvalidSubdir = errors.As(err, &subdirErr)
+		var recoveredErr *tabRecoveredError
+		resp.RecoveredTab = errors.As(err, &recoveredErr)
 		return resp
 	}
 	// The one success return. A checkout can take minutes on a monorepo, which
@@ -233,6 +235,13 @@ func (d *Daemon) worktreeAddAndCreate(p ipc.CreatePanePayload) ipc.CreatePaneRes
 // Keep subdirectory validation failures distinct from git or process failures:
 // only the former invalidate a template's provisional tab after checkout.
 type worktreeSubdirError struct{ error }
+
+// tabRecoveredError marks a replace whose new pane failed to start AND left the
+// tab a recovery pane carrying the reason (recoverEmptyTab): the failure is
+// already on screen, so a caller must not report it a second time.
+type tabRecoveredError struct{ error }
+
+func (e *tabRecoveredError) Unwrap() error { return e.error }
 
 // createPaneInWorktree builds the pane in the worktree or its requested Subdir.
 //

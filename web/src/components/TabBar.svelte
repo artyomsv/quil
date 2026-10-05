@@ -1,27 +1,98 @@
 <script lang="ts">
+  import { TAB_COLORS, tabColorCss } from '../lib/actions';
   import type { App } from '../lib/app.svelte';
+  import type { MenuItem } from '../lib/menu';
+  import Confirm from './Confirm.svelte';
+  import Menu from './Menu.svelte';
+  import Prompt from './Prompt.svelte';
 
   interface Props {
     app: App;
   }
 
   let { app }: Props = $props();
+
+  function menuFor(id: string): MenuItem[] {
+    return [
+      { label: 'Rename…', run: () => app.startRenameTab(id), key: app.keyFor('tab.rename') },
+      ...TAB_COLORS.map((c) => ({ label: `Colour: ${c.label}`, run: () => app.setTabColor(id, c.value) })),
+      { label: 'Close…', run: () => app.askCloseTab(id), key: app.keyFor('tab.close') },
+    ];
+  }
+
+  // The tab an open rename or close dialog is about, with the name it shows.
+  const asked = $derived.by(() => {
+    const a = app.tabAsk;
+    if (!a || !app.editable) return null;
+    const tab = app.tabBar.find((t) => t.id === a.tabId) ?? app.sidebar.flatMap((p) => p.tabs).find((t) => t.id === a.tabId);
+    return { ...a, name: tab?.name ?? '' };
+  });
 </script>
 
 <header>
   <div class="tabs">
     {#each app.tabBar as tab (tab.id)}
-      <button class="tab" class:active={tab.active} disabled={app.readOnly} onclick={() => app.switchTab(tab.id)}>
-        {tab.name || '—'}
-      </button>
+      <span class="tab-item" class:active={tab.active} style:border-left-color={tabColorCss(tab.color)}>
+        <button
+          class="tab"
+          class:active={tab.active}
+          disabled={app.readOnly}
+          onclick={() => app.switchTab(tab.id)}
+          ondblclick={() => app.startRenameTab(tab.id)}
+        >
+          {tab.name || '—'}{#if tab.unseen}<span class="unread" aria-hidden="true" title="finished while away">•</span>{/if}
+        </button>
+        {#if app.editable}
+          <Menu label="Tab menu" items={menuFor(tab.id)} onclose={() => app.focusActiveSoon()} />
+          <button class="close" aria-label="Close tab {tab.name || '—'}" title="Close tab" onclick={() => app.askCloseTab(tab.id)}>×</button>
+        {/if}
+      </span>
     {/each}
+    {#if app.editable}
+      <button class="new" aria-label="New tab" title="New tab" onclick={() => app.openCreate('new_tab')}>+</button>
+    {/if}
   </div>
+  <button
+    class="notify-toggle"
+    class:open={app.notifyOpen}
+    aria-label="Notifications"
+    aria-pressed={app.notifyOpen}
+    title="Notifications"
+    onclick={() => (app.notifyOpen = !app.notifyOpen)}
+  >
+    🔔{#if app.events.length > 0}<span class="count">{app.events.length}</span>{/if}
+  </button>
   {#if app.readOnly}
     <span class="badge">read-only</span>
   {:else if app.state && !app.isMaster}
     <button class="control" onclick={() => app.takeControl()}>Take control</button>
   {/if}
 </header>
+{#if asked?.kind === 'rename'}
+  <Prompt
+    title="Rename tab"
+    value={asked.name}
+    submitLabel="Rename"
+    onsubmit={(v) => {
+      const id = app.tabAsk?.tabId ?? '';
+      app.closeTabAsk();
+      app.renameTab(id, v);
+    }}
+    oncancel={() => app.closeTabAsk()}
+  />
+{:else if asked?.kind === 'close'}
+  <Confirm
+    title="Close tab"
+    body={`Close ${asked.name || 'this tab'} and every pane in it?`}
+    confirmLabel="Close"
+    onconfirm={() => {
+      const id = app.tabAsk?.tabId ?? '';
+      app.closeTabAsk();
+      app.closeTab(id);
+    }}
+    oncancel={() => app.closeTabAsk()}
+  />
+{/if}
 
 <style>
   header {
@@ -40,12 +111,25 @@
     overflow-x: auto;
   }
 
-  .tab {
+  .tab-item {
     flex: none;
-    max-width: 200px;
+    display: flex;
+    align-items: center;
+    max-width: 260px;
+    border-left: 3px solid transparent;
+    border-right: 1px solid #2a2e37;
+  }
+
+  .tab-item.active {
+    background: #1b1e26;
+  }
+
+  .tab {
+    flex: 1;
+    min-width: 0;
+    align-self: stretch;
     padding: 0 12px;
     border: 0;
-    border-right: 1px solid #2a2e37;
     background: none;
     color: #9aa0ad;
     font: inherit;
@@ -56,12 +140,63 @@
   }
 
   .tab.active {
-    background: #1b1e26;
     color: #e6e8ee;
   }
 
   .tab:disabled {
     cursor: default;
+  }
+
+  .close {
+    flex: none;
+    margin-right: 4px;
+    padding: 0 4px;
+    border: 0;
+    background: none;
+    color: #9aa0ad;
+    font: inherit;
+    cursor: pointer;
+  }
+
+  .new {
+    flex: none;
+    padding: 0 10px;
+    border: 0;
+    background: none;
+    color: #9aa0ad;
+    font: inherit;
+    font-size: 16px;
+    cursor: pointer;
+  }
+
+  .new:hover {
+    color: #e6e8ee;
+  }
+
+  .unread {
+    margin-left: 4px;
+    color: #5cc27a;
+  }
+
+  .notify-toggle {
+    flex: none;
+    align-self: center;
+    padding: 2px 6px;
+    border: 0;
+    border-radius: 4px;
+    background: none;
+    color: #9aa0ad;
+    font: inherit;
+    cursor: pointer;
+  }
+
+  .notify-toggle.open {
+    background: #232733;
+  }
+
+  .count {
+    margin-left: 3px;
+    font-size: 12px;
   }
 
   .badge {

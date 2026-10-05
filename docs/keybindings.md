@@ -417,7 +417,11 @@ Set a whole keymap in one line:
 preset = "tmux"
 ```
 
-**Restart Quil for it to take effect.** `bindings.toml` is read once at startup — there is no in-app preset switcher and no hot reload, so editing the file while Quil is running does nothing until the next launch. `F1` → Shortcuts always lists the keymap that is *currently* live, which is how to confirm a switch actually took.
+**Two ways to switch.** Press `F1` → Settings → Keys, pick the preset (and the prefix, for a preset that uses one) and save. The keys change at once in that terminal. Other terminals pick it up at their next start, and the browser at its next page load. Or edit the file and restart Quil: `bindings.toml` is read at startup, so editing it while Quil runs does nothing until then.
+
+Saving from the Keys page keeps your `[bindings]` overrides. It does not keep comments you wrote in `bindings.toml`. If two terminals save at the same time, the last one wins.
+
+If you have no `bindings.toml`, Quil uses the old `[keybindings]` table in `config.toml`, in the terminal and in `quil web`. `F1` → Shortcuts always lists the keymap that is *currently* live, which is how to confirm a switch actually took.
 
 Switching back is the same line: `preset = "default"`.
 
@@ -475,3 +479,27 @@ Off by default, matching tmux — a pending prefix waits indefinitely. To make i
 ```toml
 sequence_timeout = "500ms"
 ```
+
+## Keys in the browser
+
+`quil web` uses the same keymap as the terminal: your preset, your prefix and your overrides. `F1` in the browser lists the active keys and any conflicts. The keymap is read when the page loads.
+
+A browser keeps some chords for itself and never gives them to a page: `Ctrl+W`, `Ctrl+T`, `Ctrl+N`, `Ctrl+Tab`, `Ctrl+Shift+T`, `Ctrl+Shift+N` and `Ctrl+Shift+W`. When your keymap puts an action on one of them, the browser uses another chord for that action, but only if that chord is free in your keymap. The browser never takes a chord from a bound action. If the other chord is taken too, the action has no key in the browser. Its menu entry still works.
+
+| Action | Browser chord |
+|---|---|
+| Close pane (`pane.close`) | `Alt+Shift+C` |
+| New tab (`tab.new`) | `Alt+Shift+T` |
+| New pane dialog | `Alt+Shift+O` |
+
+Other keys in the browser:
+
+| Key | Action |
+|---|---|
+| `Alt+N` | Notification list |
+| `Alt+G` / `Alt+D` | lazygit / hunk overlay |
+| `F1` | List of active keys |
+
+Some actions exist only in the terminal: the command palette, pane notes and settings. Their keys do nothing in the browser except show "available in the TUI". They never type into a pane.
+
+While an overlay shows, your keys go to it. On macOS, Alt composes text, so `Alt+letter` types what your layout makes. On Windows and Linux, Alt is a modifier and AltGr types text.

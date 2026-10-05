@@ -213,6 +213,8 @@ type settingsField struct {
 	// submenu, matching templateSettings, so settingsSubmenuIndex keeps
 	// finding the Notifications row.
 	sandboxSettings bool
+	// keysSettings opens F1 → Settings → Keys.
+	keysSettings bool
 }
 
 // settingsFields returns the editable Settings rows. Every setter that
@@ -472,6 +474,14 @@ func settingsFields() []settingsField {
 			get:             func(m *Model) string { return "…" },
 			set:             func(m *Model, _ string) {},
 			sandboxSettings: true,
+		},
+		{
+			// Preset and prefix, applied at once. Its own screen because the
+			// conflict lines need room.
+			label:        "Keys",
+			get:          func(m *Model) string { return "…" },
+			set:          func(m *Model, _ string) {},
+			keysSettings: true,
 		},
 		{
 			label: "Max live overlays",
@@ -735,6 +745,8 @@ func (m Model) dispatchDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handleNotifySettingsKey(msg)
 	case dialogSandboxSettings:
 		return m.handleSandboxSettingsKey(msg)
+	case dialogKeySettings:
+		return m.handleKeySettingsKey(msg)
 	case dialogNewTemplate:
 		return m.handleTemplateDialogKey(msg)
 	case dialogShortcuts:
@@ -1047,6 +1059,8 @@ func (m Model) handleSettingsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		switch {
 		case f.templateSettings:
 			return m.openTemplateSettings()
+		case f.keysSettings:
+			return m.openKeySettings()
 		case f.sandboxSettings:
 			m.dialog = dialogSandboxSettings
 			m.dialogCursor = 0
@@ -1380,16 +1394,11 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 		// Handle instance deletion locally (no IPC needed)
 		if kind == "instance" {
-			pluginName := m.selectedPlugin
-			instances := m.instanceStore[pluginName]
-			for i, inst := range instances {
-				if inst.ID == id {
-					m.instanceStore[pluginName] = append(instances[:i], instances[i+1:]...)
-					break
-				}
-			}
-			if err := SaveInstances(config.InstancesPath(), m.instanceStore); err != nil {
-				log.Printf("save instances: %v", err)
+			if !m.deleteInstance(m.selectedPlugin, id) {
+				m.dialog = dialogCreatePane
+				m.createPaneStep = 2
+				m.dialogCursor = 0
+				return m, m.flashCmd()
 			}
 			m.dialog = dialogCreatePane
 			m.createPaneStep = 2
@@ -1505,6 +1514,8 @@ func (m Model) renderDialog() string {
 		content = m.renderNotifySettingsDialog()
 	case dialogSandboxSettings:
 		content = m.renderSandboxSettingsDialog()
+	case dialogKeySettings:
+		content = m.renderKeySettingsDialog()
 	case dialogNewTemplate:
 		content = m.renderTemplateDialog()
 	case dialogShortcuts:
@@ -3242,21 +3253,20 @@ func (m Model) submitInstanceForm(p *plugin.PanePlugin) (tea.Model, tea.Cmd) {
 		Description: desc,
 	}
 
-	// Save to store
-	if m.instanceStore == nil {
-		m.instanceStore = make(InstanceStore)
-	}
-	m.instanceStore[m.selectedPlugin] = append(m.instanceStore[m.selectedPlugin], inst)
-	if err := SaveInstances(config.InstancesPath(), m.instanceStore); err != nil {
-		log.Printf("save instances: %v", err)
-	}
+	// Save to store. A refused save still opens the pane with what the user
+	// typed; only the saved list is left as it was, and the flash says so.
+	saved := m.addInstance(m.selectedPlugin, inst)
 
 	// Build args from template
 	m.selectedInstanceArgs = BuildArgs(p.Command.ArgTemplate, fieldMap)
 	m.selectedInstanceName = name
 
 	// Either show setup dialog (CWD/toggles) or finish choosing.
-	return m, m.enterSetupOrSplit(p)
+	cmd := m.enterSetupOrSplit(p)
+	if !saved {
+		cmd = tea.Batch(cmd, m.flashCmd())
+	}
+	return m, cmd
 }
 
 func (m Model) renderInstanceFormDialog() string {

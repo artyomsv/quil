@@ -54,6 +54,9 @@ type bridgeLimits struct {
 	// Version is the gateway build's version; the forward gate writes it into
 	// every hello the page sends.
 	Version string
+	// ExpandInstance resolves saved instances for split_pane_req; see
+	// forwardGate.expand.
+	ExpandInstance func(pluginType, instanceID string) (string, []string, error)
 }
 
 func defaultBridgeLimits(version string) bridgeLimits {
@@ -158,16 +161,22 @@ type bridge struct {
 }
 
 func newBridge(d DaemonConn, lim bridgeLimits, budget *replayBudget, now func() time.Time, logf func(string, ...any)) *bridge {
-	b := &bridge{d: d, lim: lim, budget: budget, now: now, logf: logf, gate: newForwardGate("", lim.Version)}
+	b := &bridge{d: d, lim: lim, budget: budget, now: now, logf: logf, gate: newForwardGate("", lim.Version, lim.ExpandInstance)}
 	b.cond = sync.NewCond(&b.mu)
 	return b
 }
 
 // setLease names the client id this tab may use and starts a fresh hello
 // requirement: a page that re-attaches after a resync begins with a new hello.
+//
+// The fresh gate also forgets the paste places. Chunks the old page sent can
+// still be in flight on the same daemon conn, and a late answer whose id the
+// new page reuses frees one of its places early. That is bounded: at most
+// pasteCap (2) chunks per resync, and ResyncsPerMin resyncs a minute, so the
+// daemon's per-pane queue never sees more than a few extra chunks.
 func (b *bridge) setLease(id string) {
 	b.gateMu.Lock()
-	b.gate = newForwardGate(id, b.lim.Version)
+	b.gate = newForwardGate(id, b.lim.Version, b.lim.ExpandInstance)
 	b.gateMu.Unlock()
 }
 
@@ -376,6 +385,11 @@ func (b *bridge) fromDaemon(m *ipc.Message) {
 		b.enqueueOutput(p.PaneID, frame, int64(len(p.Data)), p.Ghost)
 		return
 	}
+	if m.ID != "" && (m.Type == ipc.MsgPaneInputResp || m.Type == ipc.MsgError) {
+		b.gateMu.Lock()
+		b.gate.answered(m)
+		b.gateMu.Unlock()
+	}
 	renew := m.Type == ipc.MsgError && b.noteRefusal(m)
 	raw, err := json.Marshal(m)
 	if err != nil {
@@ -533,8 +547,15 @@ func (b *bridge) fromPage(gen uint64, raw []byte) error {
 		}
 		return nil
 	}
+	// A saved instance is expanded from disk before the lock, so the daemon
+	// reader's answered() never waits behind file reads. The expander is the
+	// gate's own, as in forwardGate.check, so the two paths cannot drift.
 	b.gateMu.Lock()
-	fwd, refuse, fatal := b.gate.check(&m)
+	expand := b.gate.expand
+	b.gateMu.Unlock()
+	fill := prefill(expand, &m)
+	b.gateMu.Lock()
+	fwd, refuse, fatal := b.gate.checkFilled(&m, fill)
 	b.gateMu.Unlock()
 	if fatal != nil {
 		b.close(closeProtocolError, "protocol error")

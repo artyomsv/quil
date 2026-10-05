@@ -332,7 +332,7 @@ func (d *Daemon) delegateTask(req ipc.DelegateTaskReqPayload) ipc.DelegateTaskRe
 		// a second close(t.done) panics the daemon.
 		if !t.state.terminal() {
 			t.state = taskFailed
-			t.errText = "pane input queue is full — its child has stopped reading stdin"
+			t.errText = ipc.PaneInputQueueFull
 			t.ended = time.Now()
 			close(t.done)
 		}

@@ -10,6 +10,13 @@ export interface QuilTestHook {
   screenLine(paneId: string, row: number): string;
   // The client id the gateway leased to this tab; '' before the welcome.
   clientId(): string;
+  // Pastes text into the pane through the page's paste flow.
+  paste(paneId: string, text: string): void;
+  // The pane this browser tab treats as active; '' with none.
+  activePane(): string;
+  // The preset of the keymap the page dispatches with; '' before
+  // /api/client has answered.
+  keymapPreset(): string;
 }
 
 export function shouldRegisterE2EHook(env: Record<string, unknown>): boolean {

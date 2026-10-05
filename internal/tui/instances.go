@@ -1,91 +1,67 @@
 package tui
 
 import (
-	"encoding/json"
-	"os"
-	"strings"
+	"log"
+
+	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/instances"
 )
 
-// SavedInstance is a user-created instance of a plugin (e.g., an SSH connection).
-type SavedInstance struct {
-	ID          string            `json:"id"`
-	Name        string            `json:"name"`
-	Fields      map[string]string `json:"fields"`
-	Description string            `json:"description,omitempty"`
-}
+// The store moved to internal/instances so the web gateway reads and writes
+// the same file with the same code.
+type (
+	SavedInstance = instances.Saved
+	InstanceStore = instances.Store
+)
 
-// InstanceStore holds saved instances keyed by plugin name.
-type InstanceStore map[string][]SavedInstance
-
-// LoadInstances reads the instance store from a JSON file.
-// Returns an empty store if the file doesn't exist.
-func LoadInstances(path string) InstanceStore {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return make(InstanceStore)
-	}
-	var store InstanceStore
-	if err := json.Unmarshal(data, &store); err != nil {
-		return make(InstanceStore)
-	}
-	if store == nil {
-		return make(InstanceStore)
-	}
-	return store
-}
-
-// SaveInstances writes the instance store to a JSON file atomically.
-func SaveInstances(path string, store InstanceStore) error {
-	data, err := json.MarshalIndent(store, "", "  ")
-	if err != nil {
-		return err
-	}
-	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0600); err != nil {
-		return err
-	}
-	return os.Rename(tmpPath, path)
-}
-
-// BuildArgs expands {placeholder} tokens in an arg template using field values.
+func LoadInstances(path string) InstanceStore { return instances.LoadOrEmpty(path) }
 func BuildArgs(template []string, fields map[string]string) []string {
-	if len(template) == 0 {
-		return nil
-	}
-	result := make([]string, len(template))
-	for i, arg := range template {
-		expanded := arg
-		for k, v := range fields {
-			expanded = strings.ReplaceAll(expanded, "{"+k+"}", v)
-		}
-		result[i] = expanded
-	}
-	return result
+	return instances.BuildArgs(template, fields)
 }
 
-// DisplayAddr formats a saved instance's fields into a short address string.
-// Tries user@host:port, falls back to showing the first non-name, non-description field.
-func (si SavedInstance) DisplayAddr() string {
-	user := si.Fields["user"]
-	host := si.Fields["host"]
-	port := si.Fields["port"]
+// instancesUnreadableFlash is what an add or delete says when instances.json
+// does not parse: writing the in-memory copy over it would erase it.
+const instancesUnreadableFlash = "instances.json does not parse: instance list not saved"
 
-	if host != "" {
-		addr := host
-		if user != "" {
-			addr = user + "@" + addr
-		}
-		if port != "" && port != "22" {
-			addr += ":" + port
-		}
-		return addr
+// mutateInstances re-reads instances.json, applies fn to the fresh copy and
+// writes it back. The web gateway writes the same file, so saving the copy
+// read at start would erase what a browser added and revive what it deleted.
+// A file that does not parse is refused with a flash and left unchanged; the
+// in-memory list then keeps its last good state.
+func (m *Model) mutateInstances(fn func(InstanceStore)) bool {
+	path := config.InstancesPath()
+	store, err := instances.Load(path)
+	if err != nil {
+		log.Printf("load instances: %v", err)
+		m.setFlash(instancesUnreadableFlash)
+		return false
 	}
+	fn(store)
+	if err := instances.Save(path, store); err != nil {
+		log.Printf("save instances: %v", err)
+		m.setFlash("instances.json not saved")
+		return false
+	}
+	m.instanceStore = store
+	return true
+}
 
-	// Fallback: show first meaningful field value
-	for k, v := range si.Fields {
-		if k != "name" && k != "description" && v != "" {
-			return v
+// addInstance appends inst to plugin's saved instances on disk.
+func (m *Model) addInstance(plugin string, inst SavedInstance) bool {
+	return m.mutateInstances(func(s InstanceStore) {
+		s[plugin] = append(s[plugin], inst)
+	})
+}
+
+// deleteInstance removes plugin's saved instance id on disk.
+func (m *Model) deleteInstance(plugin, id string) bool {
+	return m.mutateInstances(func(s InstanceStore) {
+		list := s[plugin]
+		for i, inst := range list {
+			if inst.ID == id {
+				s[plugin] = append(list[:i:i], list[i+1:]...)
+				break
+			}
 		}
-	}
-	return ""
+	})
 }

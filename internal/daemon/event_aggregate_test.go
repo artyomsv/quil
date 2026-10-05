@@ -3,6 +3,8 @@ package daemon
 import (
 	"testing"
 	"time"
+
+	"github.com/artyomsv/quil/internal/ipc"
 )
 
 // TestEventQueue_Push_AggregatesSameTitleSamePane proves the field-observed
@@ -136,5 +138,41 @@ func TestEventQueue_Push_AggregationMovesToFront(t *testing.T) {
 	}
 	if events[0].Data["count"] != "2" {
 		t.Errorf("aggregated count: got %q, want %q", events[0].Data["count"], "2")
+	}
+}
+
+// The LIVE broadcast of an aggregated repeat must carry the queued id, not the
+// fresh one the emitter minted: clients dedup cards by id, so a fresh id made
+// a second card for the same notification on every repeat.
+func TestEmitEvent_AggregatedRepeatBroadcastsTheQueuedID(t *testing.T) {
+	d, sock := overlayServerDaemon(t)
+	tab := d.session.CreateTab("T")
+	pane, err := d.session.CreatePane(tab.ID, t.TempDir())
+	if err != nil {
+		t.Fatalf("create pane: %v", err)
+	}
+	a := attachClientAs(t, sock, "A", 200, 50)
+	waitUntil(t, "A attached", func() bool { return d.clientCount() == 1 })
+
+	ev := func(id string) PaneEvent {
+		return PaneEvent{ID: id, PaneID: pane.ID, TabID: tab.ID, Type: "bell", Title: "Attention", Severity: "warning", Timestamp: time.Now()}
+	}
+	read := func(what string) ipc.PaneEventPayload {
+		t.Helper()
+		msgs := readUntil(t, a, what, isType(ipc.MsgPaneEvent))
+		var p ipc.PaneEventPayload
+		if err := msgs[len(msgs)-1].DecodePayload(&p); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	d.emitEvent(ev("first-id"))
+	if p := read("the first event"); p.ID != "first-id" {
+		t.Fatalf("first broadcast id = %q, want first-id", p.ID)
+	}
+	d.emitEvent(ev("second-id"))
+	p := read("the repeat")
+	if p.ID != "first-id" || p.Data["count"] != "2" {
+		t.Fatalf("repeat broadcast id=%q count=%q, want first-id ×2 (the queued event)", p.ID, p.Data["count"])
 	}
 }

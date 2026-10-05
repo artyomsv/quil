@@ -2581,11 +2581,13 @@ func (d *Daemon) goCreateWorker(f func()) {
 	}()
 }
 
-// holdCreateWorkers counts a create worker that starts only AFTER an answer or
-// a broadcast has left (a split's checkout, a new tab's worktree), and returns
-// the release. Held across the send, a client that has seen it finds the worker
-// already counted — otherwise its Wait could run before the Add, the misuse
-// sync.WaitGroup documents. Release once the worker has been started.
+// holdCreateWorkers counts a create worker that starts only AFTER the request's
+// broadcast and answer have left (a split's checkout, a new tab's worktree),
+// and returns the release. Taken before the request's work runs — so before
+// its first broadcast — and released once the worker has been started, a
+// client that has seen either finds the worker already counted; otherwise its
+// Wait could run before the Add, the misuse sync.WaitGroup documents. Taking
+// it for a request that starts no worker costs an Add and a Done.
 func (d *Daemon) holdCreateWorkers() func() {
 	d.createWG.Add(1)
 	return d.createWG.Done

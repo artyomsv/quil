@@ -37,10 +37,10 @@ func (d *Daemon) handleSplitPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 		respondTo(conn, msg.ID, ipc.MsgSplitPaneResp, ipc.SplitPaneRespPayload{Error: "malformed payload: " + err.Error()})
 		return
 	}
+	// Held before the work runs: a worktree split broadcasts its placeholder
+	// before it answers, and its worker starts only after the answer.
+	defer d.holdCreateWorkers()()
 	resp, start := d.splitPane(conn, req)
-	if start != nil {
-		defer d.holdCreateWorkers()()
-	}
 	respondTo(conn, msg.ID, ipc.MsgSplitPaneResp, resp)
 	if start != nil {
 		start()

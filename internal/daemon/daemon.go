@@ -100,6 +100,11 @@ type Daemon struct {
 	// hellos records which conns identified themselves as quil processes.
 	hellos      *helloRegistry
 	collectorWG sync.WaitGroup
+	// createWG counts the create workers goCreateWorker starts: the worktree
+	// checkouts and template creations that spawn a pane after the request
+	// has been answered. Nothing in the daemon waits on it. Tests do, before
+	// they restore a package seam (newSessionFn) such a worker still reads.
+	createWG sync.WaitGroup
 
 	// snapGens records, per pane, the OutputBuf generation captured by the
 	// last buffer flush. Equal generation ⇒ identical contents ⇒ the on-disk
@@ -2582,6 +2587,17 @@ func firstPaneType(spec ipc.FirstPaneSpec) string {
 // exactly where it is, and the swap arrives through ordinary broadcast
 // reconciliation with no client-side placeholder bookkeeping.
 //
+// goCreateWorker runs f on a goroutine counted by createWG. The Add happens
+// before the goroutine starts, so a Wait that returns has seen every worker
+// started before it.
+func (d *Daemon) goCreateWorker(f func()) {
+	d.createWG.Add(1)
+	go func() {
+		defer d.createWG.Done()
+		f()
+	}()
+}
+
 // On a worker goroutine for the reason handleCreatePane's worktree branch is:
 // this runs on the requesting conn's dispatch goroutine, where a checkout would
 // block every message from that client, input included.
@@ -2602,7 +2618,7 @@ func (d *Daemon) createFirstPaneWorktree(conn *ipc.Conn, reqID, tabID, placehold
 		// added here too.
 		Sandbox: spec.Sandbox,
 	}
-	go func() {
+	d.goCreateWorker(func() {
 		resp := d.worktreeAddAndCreate(p)
 		// A failure leaves the placeholder exactly where it is, so the reason
 		// goes ON it. The client's own notice is a three-second status-bar flash
@@ -2619,7 +2635,7 @@ func (d *Daemon) createFirstPaneWorktree(conn *ipc.Conn, reqID, tabID, placehold
 			d.failPreparingPane(placeholderID, "worktree not created: "+resp.Error)
 		}
 		respondTo(conn, reqID, ipc.MsgCreatePaneResp, resp)
-	}()
+	})
 }
 
 // failPreparingPane turns a placeholder into the pane that explains itself.
@@ -2937,12 +2953,12 @@ func (d *Daemon) handleCreatePane(conn *ipc.Conn, msg *ipc.Message) {
 	// broadcast would put one client's failure in front of every other client
 	// while giving the requester nothing correlatable to unwind with.
 	if payload.Worktree != nil {
-		go func() {
+		d.goCreateWorker(func() {
 			// On the worker too: recording stats the directory, which can take
 			// up to spawnDirProbeTimeout on a dead mount.
 			d.recordRequestedCWD(payload.CWD)
 			respondTo(conn, msg.ID, ipc.MsgCreatePaneResp, d.worktreeAddAndCreate(payload))
-		}()
+		})
 		return
 	}
 

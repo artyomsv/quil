@@ -78,6 +78,7 @@ func newTestDaemonInDir(t *testing.T, dir string) *Daemon {
 	newSessionFn = func(cols, rows int) apty.Session { return &fakeSession{} }
 	t.Cleanup(func() { newSessionFn = prev })
 	d := New(config.Default())
+	waitCreateWorkersAtCleanup(t, d)
 	registerClaudePlugin(t, d)
 	return d
 }

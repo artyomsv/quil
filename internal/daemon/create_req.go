@@ -83,8 +83,10 @@ func validKubeContext(s string) error {
 // kube context — into the argument list the spawn uses. Every transport sends
 // names; only the daemon turns them into arguments, so a standard-rights
 // token can use the dialog's choices without being allowed raw
-// instance_args. Order is the dialog's: instance args, --context, then each
-// toggle. Unknown names and two names from one group are refused.
+// instance_args. Order: instance args, --context, then each toggle's args in
+// the order the caller named the toggles (resolveToggles walks the names, not
+// the plugin's declarations). Unknown names and two names from one group are
+// refused.
 func (d *Daemon) applyNamedSelections(paneType string, instanceArgs, toggles []string, kubeContext string) ([]string, error) {
 	if len(toggles) == 0 && kubeContext == "" {
 		return instanceArgs, nil
@@ -175,7 +177,7 @@ func (d *Daemon) buildCreatePayload(req ipc.CreatePaneReqPayload, tabID, fallbac
 		return ipc.CreatePanePayload{}, "", fmt.Errorf("instance_args replace %s's own arguments — use toggles for an AI pane (see list_plugins)", paneType)
 	}
 	// The order the dialog uses: the instance's own args, then the kube
-	// context, then each checked toggle in plugin order. Together they REPLACE
+	// context, then each checked toggle in the order named. Together they REPLACE
 	// the plugin's Command.Args in resolveSpawnArgs.
 	instanceArgs, err := d.applyNamedSelections(paneType, req.InstanceArgs, req.Toggles, req.KubeContext)
 	if err != nil {
@@ -269,11 +271,11 @@ func (d *Daemon) handleCreatePaneReq(conn *ipc.Conn, msg *ipc.Message) {
 		// a checkout is seconds on a large repository and this goroutine
 		// carries every message from the requesting client. The bridge waits
 		// with a longer timeout for a worktree create.
-		go func() {
+		d.goCreateWorker(func() {
 			resp := d.worktreeAddAndCreate(payload)
 			applyPaneName(d.session.Pane(resp.PaneID), req.Name)
 			respondTo(conn, msg.ID, ipc.MsgCreatePaneResp, resp)
-		}()
+		})
 		return
 	}
 	resp := d.createPaneFromReq(payload, cwd)
@@ -422,14 +424,14 @@ func (d *Daemon) createTabIn(conn *ipc.Conn, req ipc.CreateTabReqPayload, cwd st
 		payload.ReplacePaneID = pane.ID
 		placeholderID := pane.ID
 		start := func() {
-			go func() {
+			d.goCreateWorker(func() {
 				resp := d.worktreeAddAndCreate(payload)
 				if resp.Error != "" && !resp.Swapped {
 					d.failPreparingPane(placeholderID, "worktree not created: "+resp.Error)
 					return
 				}
 				applyPaneName(d.session.Pane(resp.PaneID), first.Name)
-			}()
+			})
 		}
 		return answer, start
 	}

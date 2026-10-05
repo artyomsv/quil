@@ -395,29 +395,41 @@ func TestOpenStore_DuplicateIDKeepsTheFirst(t *testing.T) {
 	}
 }
 
-// A known id whose stored keys do not decode is refused, with an error that
-// names the token for the daemon's log. verify still runs, so the answer
-// takes as long as for an unknown id.
+// A known id whose stored keys do not decode, or decode to the wrong length,
+// is refused with an error that names the token for the daemon's log. verify
+// still runs, against the dummy, so the answer takes as long as for an
+// unknown id. A wrong-length key used to pass Verifier and read as a plain
+// wrong proof, with nothing logged.
 func TestStore_AdmitCorruptVerifierNamesTheToken(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "tokens.json")
-	raw := `{"version":1,"tokens":[
-		{"id":"0a1b2c3d","name":"damaged","stored_key":"not hex","server_key":"00","rights":"full","created":"2026-01-01T00:00:00Z"}
-	]}`
-	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	s, err := OpenStore(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	called := false
-	_, _, err = s.Admit("0a1b2c3d", time.Now(), func(v Verifier) bool { called = len(v.StoredKey) == 32; return true },
-		func(Entry) { t.Error("admitted a token with a corrupt verifier") })
-	if !called {
-		t.Fatal("verify was not run against the dummy verifier")
-	}
-	if !errors.Is(err, ErrRefused) || !errors.Is(err, ErrCorruptVerifier) || !strings.Contains(err.Error(), "0a1b2c3d") {
-		t.Fatalf("err = %v, want ErrRefused + ErrCorruptVerifier naming the id", err)
+	good := strings.Repeat("ab", 32)
+	for name, keys := range map[string][2]string{
+		"stored key not hex":      {"not hex", good},
+		"server key not hex":      {good, "zz"},
+		"stored key one byte":     {"00", good},
+		"server key short":        {good, strings.Repeat("ab", 31)},
+		"stored key one too many": {good + "ab", good},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "tokens.json")
+			raw := `{"version":1,"tokens":[{"id":"0a1b2c3d","name":"damaged","stored_key":"` + keys[0] +
+				`","server_key":"` + keys[1] + `","rights":"full","created":"2026-01-01T00:00:00Z"}]}`
+			if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			s, err := OpenStore(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			called := false
+			_, _, err = s.Admit("0a1b2c3d", time.Now(), func(v Verifier) bool { called = len(v.StoredKey) == 32; return true },
+				func(Entry) { t.Error("admitted a token with a corrupt verifier") })
+			if !called {
+				t.Fatal("verify was not run against the dummy verifier")
+			}
+			if !errors.Is(err, ErrRefused) || !errors.Is(err, ErrCorruptVerifier) || !strings.Contains(err.Error(), "0a1b2c3d") {
+				t.Fatalf("err = %v, want ErrRefused + ErrCorruptVerifier naming the id", err)
+			}
+		})
 	}
 }
 

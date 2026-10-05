@@ -2,6 +2,7 @@ package clientauth
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -59,12 +60,18 @@ type Entry struct {
 	LastUsed  *time.Time `json:"last_used,omitempty"`
 }
 
-// Verifier decodes the stored keys.
+// Verifier decodes the stored keys. Each must be a SHA-256 sized value: a key
+// that decodes to another length could never verify, so without this check a
+// damaged entry would read as a wrong proof and leave nothing in the log.
 func (e Entry) Verifier() (Verifier, error) {
 	sk, err1 := hex.DecodeString(e.StoredKey)
 	vk, err2 := hex.DecodeString(e.ServerKey)
 	if err := errors.Join(err1, err2); err != nil {
 		return Verifier{}, fmt.Errorf("token %s: corrupt verifier: %w", e.ID, err)
+	}
+	if len(sk) != sha256.Size || len(vk) != sha256.Size {
+		return Verifier{}, fmt.Errorf("token %s: corrupt verifier: keys of %d and %d bytes, want %d",
+			e.ID, len(sk), len(vk), sha256.Size)
 	}
 	return Verifier{StoredKey: sk, ServerKey: vk}, nil
 }
@@ -92,13 +99,15 @@ type Store struct {
 	lastPersist map[string]time.Time
 	now         func() time.Time
 	rename      func(oldpath, newpath string) error
-	// syncDir is syncDir; a test seam that records the parent-directory sync.
+	// syncDir is the package syncDir; a test seam that records the
+	// parent-directory sync.
 	syncDir func(dir string) error
 	// mint is NewToken; a test seam so a fixture can pin a token id.
 	mint func() (token, id string, err error)
 	// dropped is how many entries OpenStore discarded on load (a bad id, an
-	// unknown rights level or a repeated id). Set once at construction, before the Store is
-	// shared with any other goroutine, so reading it later needs no lock.
+	// unknown rights level or a repeated id). Set once at construction,
+	// before the Store is shared with any other goroutine, so reading it
+	// later needs no lock.
 	dropped int
 }
 

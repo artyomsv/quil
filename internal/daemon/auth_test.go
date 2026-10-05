@@ -761,6 +761,7 @@ func TestInitAuth_DroppedEntriesLoggedAsCount(t *testing.T) {
 // the wire, but the daemon log names the token: without that line an operator
 // whose tokens.json was damaged sees its logins fail with nothing saying why.
 func TestLogin_CorruptVerifierLoggedNotSent(t *testing.T) {
+	setLoginVar(t, &loginBackoffBase, time.Millisecond) // the second attempt follows a failure
 	var buf safeBuffer
 	t.Cleanup(captureLog(&buf))
 	h := newAuthHarnessWith(t, func(d *Daemon) {
@@ -777,12 +778,43 @@ func TestLogin_CorruptVerifierLoggedNotSent(t *testing.T) {
 		d.tokens = store
 	})
 	tok := mustNewToken(t)
-	c := h.dialRaw(t)
-	sendHelloAndProof(t, c, "qtk_0a1b2c3d"+tok[len("qtk_")+8:])
-	// The exact reason: the corruption must not reach the client.
-	expectRefusal(t, c, "token refused", 3*time.Second)
-	if logs := buf.String(); !strings.Contains(logs, "token 0a1b2c3d: corrupt verifier") {
-		t.Fatalf("the daemon log does not name the corrupt token:\n%s", logs)
+	// Two attempts inside one window: the second is held back, so a login
+	// loop against the damaged id writes one line, not one per attempt.
+	for i := 0; i < 2; i++ {
+		c := h.dialRaw(t)
+		sendHelloAndProof(t, c, "qtk_0a1b2c3d"+tok[len("qtk_")+8:])
+		// The exact reason: the corruption must not reach the client.
+		expectRefusal(t, c, "token refused", 3*time.Second)
+	}
+	logs := buf.String()
+	if got := strings.Count(logs, "token 0a1b2c3d: corrupt verifier"); got != 1 {
+		t.Fatalf("%d log lines name the corrupt token, want 1:\n%s", got, logs)
+	}
+	if n := h.d.auth.corrupt.flush(); n != 1 {
+		t.Fatalf("held-back count = %d, want 1", n)
+	}
+}
+
+func TestCorruptLog_ReportsTheHeldBackCount(t *testing.T) {
+	var r corruptLog
+	t0 := time.Unix(1000, 0)
+	if ok, n := r.note(t0); !ok || n != 0 {
+		t.Fatalf("first = %v, %d; want logged, 0", ok, n)
+	}
+	for i := 1; i <= 2; i++ {
+		if ok, _ := r.note(t0.Add(time.Duration(i) * time.Second)); ok {
+			t.Fatalf("refusal %d inside the window was logged", i)
+		}
+	}
+	if ok, n := r.note(t0.Add(corruptLogWindow)); !ok || n != 2 {
+		t.Fatalf("after the window = %v, %d; want logged, 2", ok, n)
+	}
+	r.note(t0.Add(corruptLogWindow + time.Second))
+	if n := r.flush(); n != 1 {
+		t.Fatalf("flush = %d, want 1", n)
+	}
+	if n := r.flush(); n != 0 {
+		t.Fatalf("second flush = %d, want 0", n)
 	}
 }
 

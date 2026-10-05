@@ -15,5 +15,6 @@ headline: Shared-workspace sign-in and viewer handling made stricter
   refused past the pending-login limit write one line per minute, not one per connection.
 - **A damaged `tokens.json` entry is named in `quild.log`.** A sign-in with a token whose
   stored keys cannot be read is still refused with "token refused", and the daemon log now
-  says which token is damaged. When two entries in the file have the same id, the first one
-  is kept, and the second one is counted in the "unreadable entries skipped" warning.
+  says which token is damaged, at most once a minute. When two entries in the file have
+  the same id, the first one is kept, and the second one is counted in the "unreadable
+  entries skipped" warning.

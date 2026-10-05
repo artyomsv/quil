@@ -809,6 +809,14 @@ func (m *Model) trackSidebarTabDrag(x, y int) tea.Cmd {
 	if from < 0 || from >= len(tabs) {
 		return nil
 	}
+	// The press never arms this for a read-only destination; this is the
+	// second line, for a drag armed before the rights turned read-only (a
+	// reconnect re-applies them) — the reorder would be dropped by the router
+	// and leave this client's order diverged from its daemon's.
+	if m.destReadOnly(tabs[from].Dest) {
+		m.clearDragState()
+		return m.refuseReadOnly()
+	}
 	start, size := tabGroupSpanIn(rows, row.tabIdx)
 	if size == 0 {
 		return nil

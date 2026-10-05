@@ -2731,6 +2731,13 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 			if span, ok := m.tabSpanAt(x); ok && m.tabDragFromIdx < len(m.curTabs()) {
 				from := m.tabDragFromIdx
 				if to := dragSlot(from, span.index, x, span.start, span.width); to != from {
+					// Same second line as trackSidebarTabDrag: a drag armed
+					// before the rights turned read-only reorders nothing.
+					if m.destReadOnly(m.curTabs()[from].Dest) {
+						m.clearDragState()
+						cmd := m.refuseReadOnly()
+						return m, cmd
+					}
 					tabID := m.curTabs()[from].ID
 					if m.moveTab(from, to) {
 						m.tabDragFromIdx = to

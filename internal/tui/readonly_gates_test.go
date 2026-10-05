@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -175,6 +176,70 @@ func TestReadOnly_SidebarPressArmsNoDrag(t *testing.T) {
 	}
 }
 
+// A tab drag armed while the destination was full, whose rights then turn
+// read-only before the pointer moves: the motion reorders nothing, flashes
+// and ends the drag. Both the sidebar tab drag and the tab-bar drag.
+func TestReadOnly_TabDragDowngradedMidDragReordersNothing(t *testing.T) {
+	for _, where := range []string{"sidebar", "tab bar"} {
+		for _, rights := range []string{ipc.RightsReadOnly, ipc.RightsFull} {
+			t.Run(where+"/"+rights, func(t *testing.T) {
+				readOnly := rights == ipc.RightsReadOnly
+				m, conn := readOnlyModel(t, ipc.RightsFull)
+				p9 := NewPaneModel("pane-9", testRingBufSize)
+				t.Cleanup(p9.Dispose)
+				tab2 := m.projects[0].tabs[1]
+				tab2.Root, tab2.ActivePane = NewLeaf(p9), "pane-9"
+				m.sidebarOpen = true
+				m = roUpdate(t, m, tea.WindowSizeMsg{Width: 172, Height: 48})
+
+				var motion tea.MouseMotionMsg
+				if where == "sidebar" {
+					m = roUpdate(t, m, tea.MouseClickMsg{X: 1, Y: sidebarRowY(t, m, sidebarRowTab), Button: tea.MouseLeft})
+					if !m.sidebarTabDragging {
+						t.Fatal("setup: the sidebar tab drag did not arm")
+					}
+					// The LAST row of tab-2's group: past its middle.
+					ty := -1
+					for y, r := range m.sidebarVisibleRows(m.projectSidebarWidth(), m.sidebarContentHeight()) {
+						if r.inTab && r.tabIdx == 1 {
+							ty = y
+						}
+					}
+					if ty < 0 {
+						t.Fatal("setup: no sidebar row for tab-2")
+					}
+					motion = tea.MouseMotionMsg{X: 1, Y: ty, Button: tea.MouseLeft}
+				} else {
+					spans := m.tabSpans()
+					off := m.projectSidebarWidth()
+					m = roUpdate(t, m, tea.MouseClickMsg{X: off + spans[0].start + 1, Y: 0, Button: tea.MouseLeft})
+					if m.tabDragFromIdx != 0 {
+						t.Fatal("setup: the tab-bar drag did not arm")
+					}
+					motion = tea.MouseMotionMsg{X: off + spans[1].start + spans[1].width - 1, Y: 0, Button: tea.MouseLeft}
+				}
+				m.SetDestRights(roDest, rights)
+				clearSent(conn)
+				m = roUpdate(t, m, motion)
+				if moved := m.curTabs()[0].ID != "tab-1"; moved == readOnly {
+					t.Fatalf("tab moved = %v on rights %q", moved, rights)
+				}
+				if readOnly {
+					if m.flashText != readOnlyFlash {
+						t.Fatalf("flash = %q, want the read-only flash", m.flashText)
+					}
+					if m.sidebarTabDragging || m.tabDragFromIdx >= 0 {
+						t.Fatal("the refused drag is still armed")
+					}
+					if sentType(conn, ipc.MsgReorderTab) {
+						t.Fatal("a refused drag sent a reorder")
+					}
+				}
+			})
+		}
+	}
+}
+
 // finishProjectDrag's own gate: the press never arms a viewer's drag, so this
 // is reached by a drag armed while the destination was full and released
 // after its rights came back read-only (a reconnect re-applies them).
@@ -279,6 +344,17 @@ func TestReadOnly_NewProjectSubmitRefused(t *testing.T) {
 	}
 }
 
+// aboutCursorOn reports whether the About dialog's selected ("> ") row reads
+// label.
+func aboutCursorOn(m Model, label string) bool {
+	for _, line := range strings.Split(m.renderAboutDialog(), "\n") {
+		if strings.HasPrefix(stripANSI(line), "> ") {
+			return strings.Contains(stripANSI(line), label)
+		}
+	}
+	return false
+}
+
 // Keys and an About row that open something only an acting client may use:
 // input history, the restart confirm, F1 → Processes, and take control (bound
 // here; it ships unbound).
@@ -311,7 +387,14 @@ func TestReadOnly_ActingDialogsRefused(t *testing.T) {
 				if m.dialog != dialogAbout {
 					t.Fatal("setup: F1 did not open About")
 				}
-				m.dialogCursor = 3 // Processes: handleAboutKey's case 3
+				// Found by its label, walking the cursor down the rendered
+				// dialog, so a reordered About list moves the test with it.
+				for i := 0; !aboutCursorOn(m, "Processes"); i++ {
+					if i > aboutStopDaemonIndex {
+						t.Fatal("setup: no Processes row in About")
+					}
+					m = roUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
+				}
 				return roUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 			},
 			opened: func(m Model, _ *fakeConn) bool { return m.dialog == dialogProcesses },
@@ -418,6 +501,9 @@ func TestReadOnly_MenuOnlyGatesRefuse(t *testing.T) {
 			next, _ := m.openMoveTabPicker("tab-1")
 			if opened := next.(Model).dialog == dialogProjectPick; opened == readOnly {
 				t.Fatalf("move-tab picker opened = %v on rights %q", opened, rights)
+			}
+			if flashed := next.(Model).flashText == readOnlyFlash; flashed != readOnly {
+				t.Fatalf("move tab: read-only flash = %v (flash %q)", flashed, next.(Model).flashText)
 			}
 
 			next, _ = m.openMovePanePicker("pane-1")

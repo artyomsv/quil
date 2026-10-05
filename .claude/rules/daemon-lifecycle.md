@@ -439,7 +439,9 @@ attached `client` id, or (empty) whichever client typed most recently, falling
 back to the OLDEST attached client when nobody has typed yet. `targetConn`
 does not delegate to `mostRecentlyActiveConn`'s own "nobody typed" answer (the
 newest attached client) because the two callers want different defaults for
-that state. With no attached client at all (a headless daemon), `close_tui`
+that state. The implicit pick skips read-only viewers (and so does
+`mostRecentlyActiveConn`, which `defaultCWD` reads); an explicit id is honoured
+as asked, viewer or not. With no attached non-viewer client (headless, or only viewers), `close_tui`
 sends nothing and logs, and `set_active_pane` still switches the shared active
 tab and broadcasts state — only the unicast focus frame has nobody to reach.
 `list_clients` (`handleListClientsReq` → `listClients`, `clients.go`) reports

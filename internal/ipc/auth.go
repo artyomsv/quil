@@ -49,8 +49,12 @@ func NewTokenAuth(tokenID, tokenName, level string) *AuthState {
 }
 
 // Principal is "local" for any local conn and "token <id>" for a TCP login.
-// Client ids are bound to it.
+// Client ids are bound to it. A nil state is a TCP conn that has not logged
+// in: it is nobody, so "" — never "local".
 func (a *AuthState) Principal() string {
+	if a == nil {
+		return ""
+	}
 	if a.Transport == TransportTCP {
 		return "token " + a.TokenID
 	}

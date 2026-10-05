@@ -2847,10 +2847,6 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 		return m, m.flashCmd()
 	}
 
-	// Both arms below re-arm the tab's reservation, so an earlier ordinary
-	// create in it must stop being unwindable by its refusal.
-	m.retireOrdinaryCreate(tab.ID)
-
 	// Option 2: Replace current pane
 	if m.dialogCursor == 2 {
 		oldPaneID := pane.ID
@@ -2862,7 +2858,14 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 			spec = &ipc.WorktreeSpec{RepoRoot: newBranchRepo, Branch: newBranch}
 		}
 
+		reserved := false
 		if leaf := tab.Root.FindLeaf(oldPaneID); leaf != nil {
+			// This re-arms the tab's reservation, so an earlier ordinary create
+			// in it stops being unwindable by its refusal (retireOrdinaryCreate).
+			// Here, not before the arms: a create that reserves nothing must
+			// leave the earlier one's id and held pane alone.
+			m.retireOrdinaryCreate(tab.ID)
+			reserved = true
 			// Detach immediately either way: the leaf must be reserved so the
 			// arriving pane lands WHERE THE OLD ONE WAS rather than through the
 			// root-insert fallback, and rendering resolves panes via FindLeaf,
@@ -2926,10 +2929,16 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 		}
 
 		// An ordinary create is answered only when the daemon refuses it; the
-		// id is what that answer names.
+		// id is what that answer names. Armed only with a reservation to
+		// unwind; without one the refusal is still flashed, and an earlier
+		// create's id in this tab is not overwritten.
 		reqID := ""
 		if spec == nil {
-			reqID = m.armOrdinaryCreate(tab.ID)
+			if reserved {
+				reqID = m.armOrdinaryCreate(tab.ID)
+			} else {
+				reqID = "create-" + m.nextReqGen()
+			}
 		}
 		send := func() tea.Msg {
 			msg, _ := ipc.NewMessage(ipc.MsgCreatePane, ipc.CreatePanePayload{
@@ -2977,6 +2986,8 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 		m.setFlash("pane not created: the active pane is not in this tab's layout")
 		return m, m.flashCmd()
 	}
+	// The reservation is re-armed below; see the replace arm.
+	m.retireOrdinaryCreate(tab.ID)
 
 	if m.pendingSplit == nil {
 		m.pendingSplit = make(map[string]*LayoutNode)

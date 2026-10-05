@@ -359,3 +359,48 @@ func TestCreateRefused_HeldPaneKeepsItsOutput(t *testing.T) {
 		t.Error("output that arrived while the pane was held was dropped")
 	}
 }
+
+// A create that reserves nothing must not retire an earlier one. With the
+// overlay shown, the active pane is the overlay, which is not in the layout
+// tree: the split is refused (SplitAtPane finds no leaf) and a replace finds
+// no leaf to reserve. Either way the earlier create keeps its id — and, for
+// a replace, its held pane — so its late refusal can still unwind it.
+func TestCreateRefused_UnreservedCreateKeepsTheEarlierOne(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		first, second int // dialog cursor: 0 split, 2 replace
+	}{
+		{"split refused", 0, 0},
+		{"replace without a leaf", 2, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newBranchModel(t)
+			m.client = &fakeSender{}
+			m.selectedPlugin, m.selectedCWD, m.worktreeNewBranch, m.dialogCursor = "terminal", "/repo", "", tc.first
+			out, _ := m.handleCreatePaneSplit()
+			m = out.(Model)
+			tab := m.curTabs()[0]
+			firstID, firstPH, held := m.createReqIDs[tab.ID], m.pendingSplit[tab.ID], m.replaceHeld[tab.ID]
+			if firstID == "" || firstPH == nil {
+				t.Fatal("setup: the first create armed nothing")
+			}
+			if held != nil {
+				t.Cleanup(held.Dispose)
+			}
+
+			ov := NewPaneModel("ov-1", testRingBufSize)
+			t.Cleanup(ov.Dispose)
+			tab.overlayPane, tab.overlayVisible = ov, true
+			m.selectedPlugin, m.selectedCWD, m.dialogCursor = "terminal", "/repo", tc.second
+			out, _ = m.handleCreatePaneSplit()
+			m = out.(Model)
+
+			if m.createReqIDs[tab.ID] != firstID || m.pendingSplit[tab.ID] != firstPH {
+				t.Error("a create that reserved nothing retired the earlier create")
+			}
+			if held != nil && (m.replaceHeld[tab.ID] != held || held.vt == nil) {
+				t.Error("a create that reserved nothing disposed the earlier replace's held pane")
+			}
+		})
+	}
+}

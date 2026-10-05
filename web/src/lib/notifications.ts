@@ -150,8 +150,9 @@ export class NotificationStore {
 
   // rebuild replaces the list with get_notifications_resp's events, which the
   // daemon lists newest first, then replays the live changes that arrived
-  // since beginRebuild. A live event the list already holds at the same or a
-  // newer timestamp is not replayed (the list's copy is as new). False for a
+  // since beginRebuild, in order. A live event the list still holds at the
+  // same or a newer timestamp is not replayed (that copy is as new); one a
+  // replayed dismissal removed is filed again. False for a
   // stale answer: a newer rebuild has begun.
   rebuild(newestFirst: PaneEvent[], ctx: SkipContext, gen = this.gen): boolean {
     if (gen !== this.gen) return false;
@@ -159,13 +160,15 @@ export class NotificationStore {
     this.live = null;
     this.events = [];
     for (let i = newestFirst.length - 1; i >= 0; i--) this.file(newestFirst[i]!, ctx);
-    const listed = new Map(newestFirst.map((e) => [e.id, e.timestamp]));
     for (const op of live) {
       if ('dismiss' in op) {
         this.drop(op.dismiss);
         continue;
       }
-      const t = listed.get(op.add.id);
+      // Compared with the list AS REPLAYED SO FAR, not as it arrived: an
+      // event added after a replayed dismissal postdates it, so it is filed
+      // again even when the daemon's list already held the same copy.
+      const t = this.events.find((e) => e.id === op.add.id)?.timestamp;
       if (t === undefined || op.add.timestamp > t) this.file(op.add, ctx);
     }
     return true;

@@ -84,6 +84,27 @@ describe('NotificationStore', () => {
     expect(s.visible().map((e) => e.title)).toEqual(['b ×2', 'a ×3']);
   });
 
+  it('keeps an event added after a replayed dismiss-all, even when the list holds the same copy', () => {
+    const s = new NotificationStore(info);
+    const gen = s.beginRebuild();
+    // Another client dismissed all, then the daemon emitted 'fresh'; it took
+    // its list after both, so the list holds 'fresh' too.
+    s.dismiss('');
+    s.add(ev('fresh', { timestamp: 7 }), ctx);
+    s.rebuild([ev('fresh', { timestamp: 7 })], ctx, gen);
+    expect(s.visible().map((e) => e.id)).toEqual(['fresh']);
+  });
+
+  it('a single dismissal replays in order: a later copy of another event survives it', () => {
+    const s = new NotificationStore(info);
+    const gen = s.beginRebuild();
+    s.add(ev('a', { timestamp: 2 }), ctx);
+    s.dismiss('a');
+    s.add(ev('b', { timestamp: 3 }), ctx);
+    s.rebuild([ev('b', { timestamp: 3 }), ev('a', { timestamp: 2 })], ctx, gen);
+    expect(s.visible().map((e) => e.id)).toEqual(['b']);
+  });
+
   it('drops a stale answer, and records nothing after an abort', () => {
     const s = new NotificationStore(info);
     const first = s.beginRebuild();

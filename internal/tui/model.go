@@ -1141,6 +1141,10 @@ type Model struct {
 	// destination's previous list (noteSharedData), read once by
 	// rebuildGroupsView — the only evidence a group was deleted elsewhere.
 	vanishedGroups []string
+	// groupsFromHosts: the group names a daemon's list ADDED to the view this
+	// session (rebuildGroupsView). Such a name stays joinable by a project
+	// only while some daemon still lists it; pruned to the view every pass.
+	groupsFromHosts []string
 	// pendingGroupOps correlates an id-bearing set_project_group/group_op with
 	// the host it went to, so a refusal can be flashed naming it.
 	pendingGroupOps map[string]pendingGroupOp

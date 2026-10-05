@@ -173,6 +173,44 @@ func TestUpdate_UnlistedProjectGroups_AddNothingAcrossFrames(t *testing.T) {
 	}
 }
 
+// A name only a host's list put in the view is not the user's once no daemon
+// lists it. A host that lists a new name each frame and files a project under
+// the name it dropped used to keep every dropped name alive as a member's
+// group — one more persistent group per frame, though each list held one.
+func TestUpdate_RotatingGroupNamesRetainedAFrame_DoNotAccumulate(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	m, _, _ := twoDestModel(t)
+	path := config.ProjectGroupsPath()
+	m.SetProjectGroups(ProjectGroupsState{groups: projectGroups{Groups: []projectGroup{{Name: "Mine"}}}}, path)
+	const frames = 6
+	for i := 0; i < frames; i++ {
+		f := WorkspaceStateMsg{Dest: "", RunID: "r", Rev: uint64(i + 1), SharedData: true, Groups: []string{fmt.Sprintf("g%d", i)}}
+		f = withGroupedProject(f, fmt.Sprintf("p%d", i), fmt.Sprintf("g%d", i))
+		if i > 0 {
+			// The previous frame's project, still filed under the name this
+			// frame's list dropped.
+			f = withGroupedProject(f, fmt.Sprintf("p%d", i-1), fmt.Sprintf("g%d", i-1))
+		}
+		f.ActiveProject, f.ActiveTab = f.Projects[0].ID, f.Tabs[0].ID
+		m = updateNoWait(t, m, f)
+	}
+	runCmd(m.saveGroupsCmd())
+	want := fmt.Sprintf("Mine,g%d", frames-1)
+	if got := strings.Join(groupNames(m), ","); got != want {
+		t.Fatalf("view = %s, want %s", got, want)
+	}
+	saved, err := loadProjectGroups(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := grpNames(saved); got != want {
+		t.Errorf("saved file = %s, want %s", got, want)
+	}
+	if g := m.groups.groupOf("", fmt.Sprintf("p%d", frames-2)); g >= 0 {
+		t.Errorf("a project under a dropped host name is in group %q, want ungrouped", m.groups.Groups[g].Name)
+	}
+}
+
 // The file is a CACHE of an authoritative destination's members: an assign
 // made in another client (the frame moves a project's Group) replaces that
 // destination's members in the saved file, and nothing else in it.

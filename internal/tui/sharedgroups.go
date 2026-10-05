@@ -158,8 +158,12 @@ func (m *Model) destsListingGroup(name string) []string {
 // an honest host never sends an unlisted name; a host the user may not
 // control would otherwise grow the sidebar (and the file) frame after frame
 // with groups nothing ever lists and so nothing ever deletes. Such a project
-// is shown ungrouped, and its daemon is logged once. A host therefore adds
-// at most its capped list, with no state carried between frames.
+// is shown ungrouped, and its daemon is logged once. "Holds" excludes a name
+// that only a daemon's list put in the view (groupsFromHosts) once no daemon
+// lists it: the view keeps such a name for a frame, and a project joining it
+// there would keep it alive as a member — one more group per frame for a host
+// that lists a new name each frame and files a project under the last one. A
+// host therefore adds at most its capped list.
 //
 // A group is deleted only when its name DISAPPEARED: a destination that
 // listed it in its previous frame dropped it in this one (vanishedGroups), no
@@ -191,7 +195,9 @@ func (m *Model) rebuildGroupsView() tea.Cmd {
 			if m.groups.indexOf(name) < 0 {
 				if _, err := m.groups.addGroup(name); err != nil {
 					log.Printf("groups: daemon %q listed %q: %v", dest, name, err)
+					continue
 				}
+				m.groupsFromHosts = append(m.groupsFromHosts, name)
 			}
 		}
 	}
@@ -200,6 +206,9 @@ func (m *Model) rebuildGroupsView() tea.Cmd {
 			continue
 		}
 		g := m.groups.indexOf(p.Group)
+		if g >= 0 && containsFold(m.groupsFromHosts, p.Group) && len(m.destsListingGroup(p.Group)) == 0 {
+			g = -1 // a host's name no daemon lists any more: not the user's
+		}
 		if g < 0 {
 			if m.firstSharedCapHit(p.Dest, "unlisted project group") {
 				log.Printf("groups: daemon %q filed project %q under %q, a name it does not list; shown ungrouped", p.Dest, p.ID, p.Group)
@@ -214,6 +223,7 @@ func (m *Model) rebuildGroupsView() tea.Cmd {
 			m.groups.deleteGroup(g)
 		}
 	}
+	m.groupsFromHosts = slices.DeleteFunc(m.groupsFromHosts, func(n string) bool { return m.groups.indexOf(n) < 0 })
 	// Both sides through clone, which gives an empty group a nil member list
 	// however it got there, so an unchanged view compares equal.
 	if reflect.DeepEqual(before, m.groups.clone()) {

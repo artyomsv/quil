@@ -19,14 +19,19 @@
   let dlg: CreateDialog | null = null;
   let view = $state.raw<DialogView | null>(null);
   let sending = false;
+  // Set once the pane was asked for and the dialog is going away.
+  let closed = false;
   let root: HTMLDivElement | undefined = $state();
 
+  // The request goes out once, when the dialog ENTERS its last step: a list
+  // answer that lands afterwards (a slow docker probe) changes nothing.
   function act<T>(f: (d: CreateDialog) => T): T | undefined {
     const d = dlg;
-    if (!d) return undefined;
+    if (!d || closed) return undefined;
+    const was = d.step;
     const r = f(d);
     view = viewOf(d);
-    if (d.step === 'done' && !sending) void finish(d);
+    if (d.step === 'done' && was !== 'done' && !sending) void finish(d);
     return r;
   }
 
@@ -176,6 +181,7 @@
     // A timeout is "still working": the pane comes when it is ready, and
     // the banner says so.
     if (out.ok || (!out.ok && out.code === 'timeout')) {
+      closed = true;
       app.closeDialog();
       return;
     }

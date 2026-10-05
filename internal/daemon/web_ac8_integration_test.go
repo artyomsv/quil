@@ -34,17 +34,6 @@ category = "ai"
 cmd = "cat"
 prompts_cwd = true
 sessions = "claude"
-arg_template = ["--host", "{host}"]
-
-[[command.form_fields]]
-name = "name"
-label = "Name"
-required = true
-
-[[command.form_fields]]
-name = "host"
-label = "Host"
-required = true
 
 [[command.toggles]]
 name = "fast"
@@ -62,6 +51,32 @@ group = "mode"
 name = "verbose"
 label = "Verbose"
 args_when_on = ["--verbose"]
+
+[persistence]
+strategy = "none"
+`
+
+// ac8SSH manages saved instances. Not an "ai" plugin: the daemon refuses
+// instance arguments for one, since they would replace an agent's own.
+const ac8SSH = `
+[plugin]
+name = "ac8-ssh"
+display_name = "AC8 SSH"
+category = "remote"
+
+[command]
+cmd = "cat"
+arg_template = ["--host", "{host}"]
+
+[[command.form_fields]]
+name = "name"
+label = "Name"
+required = true
+
+[[command.form_fields]]
+name = "host"
+label = "Host"
+required = true
 
 [persistence]
 strategy = "none"
@@ -104,7 +119,7 @@ func newAC8(t *testing.T) *ac8 {
 	if _, err := plugin.EnsureDefaultPlugins(plugins); err != nil {
 		t.Fatal(err)
 	}
-	for name, body := range map[string]string{"ac8-agent.toml": ac8Plugin, "ac8-kube.toml": ac8Kube} {
+	for name, body := range map[string]string{"ac8-agent.toml": ac8Plugin, "ac8-ssh.toml": ac8SSH, "ac8-kube.toml": ac8Kube} {
 		if err := os.WriteFile(filepath.Join(plugins, name), []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -114,7 +129,7 @@ func newAC8(t *testing.T) *ac8 {
 	}
 	inst := filepath.Join(h.home, "instances.json")
 	if err := instances.Save(inst, instances.Store{
-		"ac8-agent": {{ID: "inst0001", Name: "box", Fields: map[string]string{"name": "box", "host": "h.example"}}},
+		"ac8-ssh": {{ID: "inst0001", Name: "box", Fields: map[string]string{"name": "box", "host": "h.example"}}},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -234,20 +249,20 @@ func TestAC8_BrowserDialogOptionsReachTheSpawnedPane(t *testing.T) {
 		}
 	})
 	t.Run("saved instance: args from disk, page args stripped", func(t *testing.T) {
-		p, why, ok := a.split(map[string]any{"type": "ac8-agent", "cwd": cwd, "instance_id": "inst0001", "instance_args": []string{"--evil"}})
+		p, why, ok := a.split(map[string]any{"type": "ac8-ssh", "cwd": cwd, "instance_id": "inst0001", "instance_args": []string{"--evil"}})
 		if !ok || why != "" || strings.Join(p.InstanceArgs, " ") != "--host h.example" || p.InstanceName != "box" {
 			t.Fatalf("pane %+v %q", p, why)
 		}
 	})
 	t.Run("page args without an instance never reach the daemon", func(t *testing.T) {
-		p, why, ok := a.split(map[string]any{"type": "ac8-agent", "cwd": cwd, "instance_args": []string{"--evil"}})
+		p, why, ok := a.split(map[string]any{"type": "ac8-ssh", "cwd": cwd, "instance_args": []string{"--evil"}})
 		if !ok || why != "" || len(p.InstanceArgs) != 0 {
 			t.Fatalf("pane %+v %q", p, why)
 		}
 	})
 	t.Run("an unknown instance id is refused, nothing created", func(t *testing.T) {
 		before := a.paneCount()
-		if _, why, ok := a.split(map[string]any{"type": "ac8-agent", "cwd": cwd, "instance_id": "nope"}); ok || why == "" {
+		if _, why, ok := a.split(map[string]any{"type": "ac8-ssh", "cwd": cwd, "instance_id": "nope"}); ok || why == "" {
 			t.Fatalf("not refused: created=%v %q", ok, why)
 		}
 		if after := a.paneCount(); after != before {

@@ -352,6 +352,8 @@ func TestUpdate_SilentReloadOlderThanEditor_DroppedSilently(t *testing.T) {
 	if m.noteLoadDiscards {
 		t.Fatal("setup: a silent reload counted as a confirmed one")
 	}
+	// The fixture's frames leave a flash of their own; only the answer's counts.
+	m.flashText = ""
 	m = updateWith(t, m, noteRespMsg{dest: "", id: id, resp: ipc.NoteRespPayload{PaneID: "tab-proj-1-pane", Text: "old\n", Rev: 0}})
 	if ed := m.notesEditor; ed.Content() != "a\n" || ed.Rev() != 1 {
 		t.Errorf("an older silent reload was applied: content=%q rev=%d", ed.Content(), ed.Rev())

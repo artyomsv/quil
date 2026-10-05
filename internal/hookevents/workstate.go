@@ -100,12 +100,19 @@ const (
 // events: suppressing the queue leaves the live broadcast as the only route by
 // which a client learns the pane is working.
 func IsWorkStateOnly(eventType string) bool {
-	switch eventType {
-	case "hook.claude.PostToolUse", "hook.claude.PreToolUse", "hook.codex.PreToolUse":
-		return true
+	for _, t := range workStateOnlyTypes {
+		if t == eventType {
+			return true
+		}
 	}
 	return false
 }
+
+var workStateOnlyTypes = []string{"hook.claude.PostToolUse", "hook.claude.PreToolUse", "hook.codex.PreToolUse"}
+
+// WorkStateOnlyTypes lists the types IsWorkStateOnly accepts, for quil web,
+// which must skip the same events the TUI does. The slice is a copy.
+func WorkStateOnlyTypes() []string { return append([]string(nil), workStateOnlyTypes...) }
 
 // IsWorkHeartbeat reports whether a start edge came from the agent carrying on
 // by itself rather than from a human acting on the pane.

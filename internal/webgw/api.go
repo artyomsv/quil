@@ -26,7 +26,9 @@ const (
 )
 
 // ClientExtras is what cmd/quil adds to /api/client from the machine's config.
-// Task 8 replaces Keymap and Notifications with typed values.
+// Keymap and Notifications stay `any` because their types live in packages
+// webgw does not import (cmd/quil/web_client.go fills them); ClientInfo copies
+// them into the JSON unchanged.
 type ClientExtras struct {
 	SandboxSignIn string
 	SandboxImage  string

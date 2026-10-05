@@ -614,6 +614,17 @@ describe('attach id wait (5b)', () => {
     expect(sock.sent).toHaveLength(before + 2);
   });
 
+  it('a refusal after the retry is reported once, with its text', () => {
+    const refused: string[] = [];
+    const { sock } = openedConnection({ onAttachRefused: (t) => void refused.push(t) });
+    const first = sock.sent.find((m) => m.type === 'attach');
+    sock.recv({ type: 'error', id: first?.id, payload: { code: 'refused', message: 'no', type: 'attach' } });
+    expect(refused).toEqual([]);
+    const retry = sock.sent[sock.sent.length - 1];
+    sock.recv({ type: 'error', id: retry?.id, payload: { code: 'refused', message: 'still no', type: 'attach' } });
+    expect(refused).toEqual(['still no']);
+  });
+
   it('onAttached fires once, after the attach answer is delivered', () => {
     const order: string[] = [];
     const { sock } = openedConnection({

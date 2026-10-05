@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { INPUT_CHUNK } from './connection';
-import { PasteFlow, QUEUE_FULL_PREFIX, RESEND_MS } from './paste';
-import type { Outcome } from './requests';
+import { NOT_SENT, PARTIAL, PasteFlow, QUEUE_FULL_PREFIX, RESEND_MS } from './paste';
+import { NOT_CONNECTED, type Outcome } from './requests';
 
 interface Call {
   paneId: string;
@@ -120,6 +120,36 @@ describe('PasteFlow', () => {
     expect(chunks).toHaveLength(1);
     expect(keys).toHaveLength(0);
     expect(notices).toEqual(['Paste may be partly delivered']);
+  });
+
+  it('a paste that never left the page says it was not sent', async () => {
+    const { flow, chunks, notices, tick } = setup();
+    flow.input('p1', big(INPUT_CHUNK * 2));
+    await tick();
+    chunks[0]?.resolve({ ok: false, code: 'offline', error: NOT_CONNECTED });
+    await tick();
+    expect(notices).toEqual([NOT_SENT]);
+  });
+
+  it('a reconnect while a refused chunk waits to be resent says it was not sent', async () => {
+    const { flow, chunks, notices, tick } = setup();
+    flow.input('p1', big(INPUT_CHUNK * 2));
+    await tick();
+    chunks[0]?.resolve({ ok: false, code: 'failed', error: QUEUE_FULL_PREFIX });
+    await tick();
+    flow.reconnecting();
+    expect(notices).toEqual([NOT_SENT]);
+  });
+
+  it('once a chunk was queued, losing the link says partly delivered', async () => {
+    const { flow, chunks, notices, tick } = setup();
+    flow.input('p1', big(INPUT_CHUNK * 3));
+    await tick();
+    chunks[0]?.resolve({ ok: true });
+    await tick();
+    chunks[1]?.resolve({ ok: false, code: 'offline', error: NOT_CONNECTED });
+    await tick();
+    expect(notices).toEqual([PARTIAL]);
   });
 
   it('a restart of the pane ends its paste the same way', async () => {

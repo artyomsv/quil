@@ -11,7 +11,10 @@ import {
   layoutIds,
   listPanes,
   login,
+  paneMenu,
+  paste,
   tabButton,
+  stopDaemon,
   tabOf,
   test,
   typeInto,
@@ -112,6 +115,10 @@ test('renaming a pane and a tab, and closing a tab, go through the daemon', asyn
   await page.getByRole('button', { name: 'Rename', exact: true }).click();
   await expect(page.locator('.pane .title', { hasText: 'renamed-pane' })).toBeVisible();
   await expect.poll(async () => (await listPanes(quil.home)).find((p) => p.id === first.id)?.name).toBe('renamed-pane');
+  // The menu found by the new title mutes the pane; the header shows it.
+  await paneMenu(page, 'renamed-pane');
+  await page.getByRole('menuitem', { name: 'Mute', exact: true }).click();
+  await expect(page.locator('.pane .title .mark', { hasText: 'muted' })).toBeVisible();
 
   await createTab(quil.home, 'second');
   await expect(tabButton(page, 'second')).toBeVisible();
@@ -123,6 +130,21 @@ test('renaming a pane and a tab, and closing a tab, go through the daemon', asyn
   await page.getByRole('button', { name: 'Close tab third' }).click();
   await page.getByRole('button', { name: 'Close', exact: true }).click();
   await expect(tabButton(page, 'third')).toHaveCount(0);
+});
+
+test('a lost daemon closes an open dialog, hides the controls, and a paste says it was not sent', async ({ page, quil }) => {
+  await login(page, quil);
+  const [first] = await listPanes(quil.home);
+  if (!first) throw new Error('no first pane');
+  await page.locator('.pane').first().getByRole('button', { name: 'Pane menu' }).click();
+  await page.getByRole('menuitem', { name: 'Close…' }).click();
+  await expect(page.getByRole('dialog', { name: 'Close pane' })).toBeVisible();
+  // quil web starts the daemon once; with it gone the page stays offline.
+  stopDaemon(quil.home);
+  await expect(page.getByRole('dialog', { name: 'Close pane' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Pane menu' })).toHaveCount(0);
+  await paste(page, first.id, 'echo never-sent\r');
+  await expect(page.locator('.notice')).toHaveText(/Paste was not sent/);
 });
 
 test('AC-11: a paste over 64 MiB arrives complete and in order through a full queue', async ({ page, quil }) => {

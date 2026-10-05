@@ -5,6 +5,8 @@ import { sanitizeRemoteText } from './sanitize';
 export const REQUEST_TIMEOUT_MS = 10_000;
 // A create can wait on a stalled docker probe and still succeed later.
 export const STILL_WORKING = 'Still working — the pane appears when it is ready';
+// The error of a request that never left the page: no socket was open.
+export const NOT_CONNECTED = 'not connected';
 
 export interface RequestOpts {
   timeoutMs?: number;
@@ -51,7 +53,7 @@ export class Requests {
     const id = `req-${++this.seq}`;
     return new Promise((resolve) => {
       if (!this.send({ type, id, payload })) {
-        resolve({ ok: false, code: 'offline', error: 'not connected' });
+        resolve({ ok: false, code: 'offline', error: NOT_CONNECTED });
         return;
       }
       const quiet = opts.quietMs !== undefined;

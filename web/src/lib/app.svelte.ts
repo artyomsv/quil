@@ -1,11 +1,11 @@
 import { nextTabColor, quickSplit } from './actions';
-import { pickActive, unseenToClear } from './activepane';
+import { askedTabShown, pickActive, unseenToClear } from './activepane';
 import { AgentStatePoller } from './agentstate';
-import { bannerFor, type BannerState, isLoginRequired } from './banner';
+import { attachRefusedBanner, bannerFor, type BannerState, isLoginRequired } from './banner';
 import { type AttachSizes, type Clock, Connection, type SocketLike } from './connection';
 import { type QuilTestHook, shouldRegisterE2EHook } from './e2ehook';
 import { type FetchLike, hasSession, postLogin, sessionGone } from './login';
-import { PasteFlow } from './paste';
+import { NOT_SENT, PasteFlow } from './paste';
 import type { Message, PaneInfo, PaneSize, SplitPaneReq, WebWelcome, WorkspaceState } from './protocol';
 import { type Outcome, Requests, STILL_WORKING } from './requests';
 import { cellFromProbe, DaemonSizes, fitFontSize, gridFor, isFollower, Sizer, windowCells } from './sizing';
@@ -110,7 +110,7 @@ export class App {
   activeProjectId = $derived(activeProjectOf(this.state));
   sidebar = $derived(sidebarModel(this.state, this.agentStates));
   tabBar = $derived(tabBarModel(this.state, this.agentStates));
-  placed = $derived(placedPanes(this.state, this.dragPreview));
+  placed = $derived(placedPanes(this.state, this.dragPreview, this.agentStates));
   isMaster = $derived(this.welcome !== null && this.state?.size_master === this.welcome.client_id);
   editable = $derived(!this.readOnly && this.live);
   readonly requests: Requests;
@@ -192,6 +192,9 @@ export class App {
         onReconnecting: () => this.resetLink(),
         onClosed: (code, reason, retrying) => this.onClosed(code, reason, retrying),
         onAttached: () => this.attached(),
+        onAttachRefused: (text) => {
+          this.banner = attachRefusedBanner(text);
+        },
       },
       () => this.attachSizes(),
       Math.random,
@@ -319,6 +322,7 @@ export class App {
   private onWelcome(w: WebWelcome): void {
     this.welcome = w;
     this.readOnly = w.rights === 'read-only';
+    if (this.readOnly) this.closeAsks();
     this.banner = null;
     this.fresh = false;
     for (const id of this.shown.keys()) {
@@ -395,7 +399,11 @@ export class App {
     this.state = s;
     this.live = true;
     for (const t of s.tabs) this.drag.stateArrived(t.id, t.layout_rev);
-    this.activePane = pickActive(this.activePane, placedPanes(s).map((p) => p.id));
+    const placed = placedPanes(s).map((p) => p.id);
+    this.activePane = pickActive(this.activePane, placed);
+    // A dialog about a pane or tab this state no longer shows closes.
+    if (this.paneAsk && !placed.includes(this.paneAsk.paneId)) this.paneAsk = null;
+    if (this.tabAsk && !askedTabShown(s, this.tabAsk.tabId)) this.tabAsk = null;
     for (const id of [...this.unseenAsked]) {
       if (!s.panes.find((p) => p.id === id)?.unseen) this.unseenAsked.delete(id);
     }
@@ -445,10 +453,18 @@ export class App {
   // the next socket's first state.
   private linkLost(): void {
     this.live = false;
+    this.closeAsks();
     this.requests.reconnecting();
     this.pasteFlow.reconnecting();
     this.drag.linkLost();
     this.gens.clear();
+  }
+
+  // closeAsks closes an open rename or close dialog: what it would send can
+  // no longer go out (no live state, or no rights).
+  private closeAsks(): void {
+    this.paneAsk = null;
+    this.tabAsk = null;
   }
 
   private onClosed(code: number, reason: string, retrying: boolean): void {
@@ -479,7 +495,11 @@ export class App {
 
   // act sends an id-bearing request and shows the refusal; no optimistic UI.
   private async act(type: string, payload: unknown, timeoutText?: string): Promise<Outcome> {
-    if (!this.editable) return { ok: false, code: 'offline', error: 'not available' };
+    if (!this.editable) {
+      const error = this.readOnly ? 'This page is read-only' : 'Not connected — nothing was changed';
+      this.showNotice(error);
+      return { ok: false, code: 'offline', error };
+    }
     const out = await this.requests.request(type, payload, { timeoutText });
     if (!out.ok) this.showNotice(out.error);
     return out;
@@ -552,6 +572,7 @@ export class App {
 
   paste(paneId: string, text: string): void {
     if (this.editable) this.pasteFlow.input(paneId, text);
+    else this.showNotice(this.readOnly ? 'This page is read-only' : `${NOT_SENT}: not connected`);
   }
 
   askClosePane(paneId: string): void {

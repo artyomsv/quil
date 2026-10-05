@@ -128,6 +128,12 @@ describe('placedPanes', () => {
     ]);
   });
 
+  it('gives each placed pane its agent dot, unknown for anything else', () => {
+    expect(placedPanes(ws(), null, { x2: 'blocked', x3: 'weird' }).map((p) => p.agent)).toEqual(['blocked', 'unknown']);
+    expect(placedPanes(ws(), null, { x2: 'working', x3: 'idle' }).map((p) => p.agent)).toEqual(['working', 'idle']);
+    expect(placedPanes(ws()).map((p) => p.agent)).toEqual(['unknown', 'unknown']);
+  });
+
   it('draws a preview for the active tab in place of its tree; one for another tab changes nothing', () => {
     const tree = { split: 0, ratio: 0.6, left: { pane_id: 'x2' }, right: { pane_id: 'x3' } };
     const moved = placedPanes(ws(), { tabId: 't2', tree });

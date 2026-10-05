@@ -34,6 +34,7 @@
         spawnError={p.spawnError}
         muted={p.muted}
         worktreeOwned={p.worktreeOwned}
+        agent={p.agent}
       />
     </div>
   {:else}

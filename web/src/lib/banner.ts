@@ -44,3 +44,11 @@ export function bannerFor(code: number, reason: string, retrying: boolean): Bann
         : { text: `Connection closed${why ? `: ${why}` : ''}`, retrying: false };
   }
 }
+
+// attachRefusedBanner is the banner for a daemon that refused this page's
+// attach twice: the page shows no workspace until the gateway welcomes it
+// again. The text is the daemon's own words, sanitized.
+export function attachRefusedBanner(text: string): BannerState {
+  const why = sanitizeRemoteText(text);
+  return { text: `The daemon refused this page: ${why || 'no reason given'}`, retrying: false };
+}

@@ -43,6 +43,10 @@ export interface ConnectionEvents {
   // onAttached runs once per attach, right after the workspace_state that
   // answers it has been delivered through onMessage.
   onAttached?(): void;
+  // onAttachRefused runs when the daemon refused this socket's attach again
+  // after the one retry; text is the daemon's unsanitized message. The next
+  // welcome starts over.
+  onAttachRefused?(text: string): void;
 }
 
 export interface AttachSizes {
@@ -245,7 +249,12 @@ export class Connection {
         if (this.lastWelcome && !this.attachRetried) {
           this.attachRetried = true;
           this.sayHello(this.lastWelcome);
+          return;
         }
+        // Refused again: states stay dropped until the gateway's next
+        // welcome, so the page says why instead of showing a stale view.
+        const p = (m.payload ?? {}) as { message?: unknown };
+        this.events.onAttachRefused?.(typeof p.message === 'string' ? p.message : '');
         return;
       }
       if (m.type === 'workspace_state' && !this.attachAnswered) {

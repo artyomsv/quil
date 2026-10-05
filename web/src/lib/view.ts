@@ -33,6 +33,8 @@ export interface PlacedPane {
   spawnError: string;
   muted: boolean;
   worktreeOwned: boolean;
+  // The pane's agent state, as the sidebar dots show it.
+  agent: AgentDot;
 }
 
 // A border drag's tree, drawn for its tab in place of the stored one until
@@ -174,7 +176,11 @@ export function activeTree(s: WorkspaceState | null, preview?: LayoutPreview | n
 // placedPanes is the active tab's panes where the layout puts them, overlay
 // panes left out. A preview for the active tab is drawn in place of its
 // stored tree.
-export function placedPanes(s: WorkspaceState | null, preview?: LayoutPreview | null): PlacedPane[] {
+export function placedPanes(
+  s: WorkspaceState | null,
+  preview?: LayoutPreview | null,
+  agents: Record<string, string> = {},
+): PlacedPane[] {
   if (!s) return [];
   const at = activeTab(s, preview);
   if (!at) return [];
@@ -191,6 +197,7 @@ export function placedPanes(s: WorkspaceState | null, preview?: LayoutPreview | 
       spawnError: sanitizeRemoteText(p.spawn_error ?? ''),
       muted: p.muted === true,
       worktreeOwned: p.worktree_owned === true,
+      agent: dotOf(agents[id]),
     });
   }
   return out;

@@ -2,6 +2,7 @@
   import { untrack } from 'svelte';
   import type { App } from '../lib/app.svelte';
   import type { MenuItem } from '../lib/menu';
+  import type { AgentDot } from '../lib/view';
   import Confirm from './Confirm.svelte';
   import Menu from './Menu.svelte';
   import Prompt from './Prompt.svelte';
@@ -13,9 +14,10 @@
     spawnError: string;
     muted: boolean;
     worktreeOwned: boolean;
+    agent: AgentDot;
   }
 
-  let { app, paneId, name, spawnError, muted, worktreeOwned }: Props = $props();
+  let { app, paneId, name, spawnError, muted, worktreeOwned, agent }: Props = $props();
   const items: MenuItem[] = $derived([
     { label: 'Split right', run: () => app.splitQuick(paneId, 'right') },
     { label: 'Split below', run: () => app.splitQuick(paneId, 'below') },
@@ -27,7 +29,8 @@
       .map((t) => ({ label: `Move to ${t.name || '—'}`, run: () => app.movePane(paneId, t.id) })),
     { label: 'Close…', run: () => app.askClosePane(paneId) },
   ]);
-  const ask = $derived(app.paneAsk?.paneId === paneId ? app.paneAsk.kind : null);
+  // A dialog renders only while it could still send: live and not read-only.
+  const ask = $derived(app.editable && app.paneAsk?.paneId === paneId ? app.paneAsk.kind : null);
   let host: HTMLDivElement | undefined = $state();
   // Every workspace_state hands the pane new prop objects with the same
   // values. The effect reads these deriveds, which change only with the
@@ -59,6 +62,7 @@
      active pane. -->
 <div class="pane" class:active={app.activePane === paneId} onfocusin={() => app.setActivePane(paneId)}>
   <div class="title">
+    <span class="dot {agent}" title="Agent: {agent}"></span>
     <span class="name">{name}</span>
     {#if muted}<span class="mark" title="Muted">muted</span>{/if}
     {#if app.editable}<Menu label="Pane menu" {items} />{/if}
@@ -117,6 +121,27 @@
     background: #1b1e26;
     color: #9aa0ad;
     font-size: 12px;
+  }
+
+  /* The agent dot: the same colours as the sidebar's. */
+  .dot {
+    flex: none;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #4a4f5c;
+  }
+
+  .dot.working {
+    background: #4f9be8;
+  }
+
+  .dot.blocked {
+    background: #e8a24f;
+  }
+
+  .dot.idle {
+    background: #5cc27a;
   }
 
   .name {

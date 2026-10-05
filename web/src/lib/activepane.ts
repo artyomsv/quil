@@ -17,3 +17,9 @@ export function unseenToClear(s: WorkspaceState, active: string, asked: Set<stri
   const p = s.panes.find((x) => x.id === active);
   return p?.unseen ? active : null;
 }
+
+// askedTabShown says whether a tab a rename or close dialog is about still
+// exists; a dialog about a closed tab closes.
+export function askedTabShown(s: WorkspaceState, tabId: string): boolean {
+  return s.tabs.some((t) => t.id === tabId);
+}

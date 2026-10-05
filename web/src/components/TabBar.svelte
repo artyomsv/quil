@@ -23,7 +23,7 @@
   // The tab an open rename or close dialog is about, with the name it shows.
   const asked = $derived.by(() => {
     const a = app.tabAsk;
-    if (!a) return null;
+    if (!a || !app.editable) return null;
     const tab = app.tabBar.find((t) => t.id === a.tabId) ?? app.sidebar.flatMap((p) => p.tabs).find((t) => t.id === a.tabId);
     return { ...a, name: tab?.name ?? '' };
   });

@@ -1,12 +1,14 @@
 import { bytesToBase64, utf8Bytes } from './base64';
 import { INPUT_CHUNK } from './connection';
-import type { Outcome } from './requests';
+import { NOT_CONNECTED, type Outcome } from './requests';
 
 // The daemon's refusal text for a full pane input queue
 // (ipc.PaneInputQueueFull; keep the two equal).
 export const QUEUE_FULL_PREFIX = 'pane input queue is full';
 export const RESEND_MS = 250;
 export const PARTIAL = 'Paste may be partly delivered';
+// A paste that ended before any chunk left the page.
+export const NOT_SENT = 'Paste was not sent';
 
 export interface PasteIO {
   // One id-bearing pane_input; resolves on its pane_input_resp.
@@ -15,6 +17,13 @@ export interface PasteIO {
   sendKeys(paneId: string, data: string): void;
   notice(text: string): void;
   sleep(ms: number): Promise<void>;
+}
+
+interface Current {
+  paneId: string;
+  ended: boolean;
+  delivered: boolean;
+  inFlight: boolean;
 }
 
 interface Job {
@@ -32,7 +41,9 @@ interface Job {
 export class PasteFlow {
   private readonly queue: Job[] = [];
   private running = false;
-  private current: { paneId: string; ended: boolean } | null = null;
+  // The running paste: delivered once a chunk was answered as queued,
+  // inFlight while a sent chunk waits for its answer (it may have arrived).
+  private current: Current | null = null;
 
   constructor(private readonly io: PasteIO) {}
 
@@ -52,11 +63,18 @@ export class PasteFlow {
   // reconnecting ends a running paste and drops what waited behind it.
   reconnecting(): void {
     this.queue.length = 0;
-    this.end(PARTIAL);
+    this.endLost();
   }
 
   paneRestarted(paneId: string): void {
-    if (this.current?.paneId === paneId) this.end(PARTIAL);
+    if (this.current?.paneId === paneId) this.endLost();
+  }
+
+  // endLost ends a paste whose remaining chunks cannot go out. It says the
+  // paste may be partly delivered only when some of it may have arrived.
+  private endLost(): void {
+    const c = this.current;
+    if (c) this.end(c.delivered || c.inFlight ? PARTIAL : NOT_SENT);
   }
 
   private end(text: string): void {
@@ -83,16 +101,24 @@ export class PasteFlow {
   }
 
   private async run(job: Job & { paste: Uint8Array }): Promise<void> {
-    const cur = { paneId: job.paneId, ended: false };
+    const cur: Current = { paneId: job.paneId, ended: false, delivered: false, inFlight: false };
     this.current = cur;
     const bytes = job.paste;
     let off = 0;
     while (off < bytes.length) {
+      cur.inFlight = true;
       const out = await this.io.sendChunk(job.paneId, bytesToBase64(bytes.subarray(off, off + INPUT_CHUNK)));
+      // A chunk that never left the page cannot have arrived.
+      cur.inFlight = false;
       if (cur.ended) return;
       if (out.ok) {
+        cur.delivered = true;
         off += INPUT_CHUNK;
         continue;
+      }
+      if (out.code === 'offline' && out.error === NOT_CONNECTED) {
+        this.end(cur.delivered ? PARTIAL : NOT_SENT);
+        return;
       }
       if (out.code === 'busy' || out.error.startsWith(QUEUE_FULL_PREFIX)) {
         await this.io.sleep(RESEND_MS);

@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/artyomsv/quil/internal/clientauth"
 	"github.com/artyomsv/quil/internal/ipc"
 )
 

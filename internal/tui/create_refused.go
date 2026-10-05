@@ -67,6 +67,39 @@ func (m *Model) heldReplacedPane(id string) *PaneModel {
 	return nil
 }
 
+// replaceHeldIn is the pane a replace in tabID detached and still holds —
+// worktree or ordinary — or nil.
+func (m *Model) replaceHeldIn(tabID string) *PaneModel {
+	if held := m.worktreeReplaced[tabID]; held != nil {
+		return held
+	}
+	return m.replaceHeld[tabID]
+}
+
+// takeOrdinaryHeld is the arrival loop's answer to a broadcast that still
+// lists the pane an ordinary replace in tab holds: the broadcast left before
+// the daemon read the create (or the create never arrives). The pane is live,
+// so the HELD model goes back — a fresh one would show it with its output
+// gone, and settling would then dispose the held one, leaving a later refusal
+// nothing to restore. It returns to its reserved leaf when that leaf is still
+// in the tree, and the create is retired: its leaf is taken, so a refusal has
+// nothing to unwind and a success lands where an arrival lands. When the leaf
+// is gone it returns the model for the caller to place as an arrival.
+func (m *Model) takeOrdinaryHeld(tab *TabModel) (held *PaneModel, placed bool) {
+	held = m.replaceHeld[tab.ID]
+	delete(m.replaceHeld, tab.ID)
+	delete(m.createReqIDs, tab.ID)
+	ph := m.pendingSplit[tab.ID]
+	if ph == nil || ph.Pane != nil || !treeContains(tab.Root, ph) {
+		return held, false
+	}
+	delete(m.pendingSplit, tab.ID)
+	tab.noteReservation("", 0, false)
+	ph.fill(held)
+	tab.invalidateLeaves()
+	return held, true
+}
+
 // applyCreatePaneRefused flashes the daemon's reason and unwinds the create it
 // names: the split placeholder is pruned, a replaced pane goes back into its
 // leaf. Keep it to that — the daemon created nothing, so there is nothing else

@@ -2893,8 +2893,9 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 				// of the tree (which keeps the leaves cache honest: a stale
 				// cache was previously what fed the detached pane into the
 				// sweep's existingPanes), until the create settles: a refusal
-				// puts it back, the broadcast that fills the leaf disposes it
-				// (settleOrdinaryCreates).
+				// puts it back, and so does a broadcast that still lists it
+				// (takeOrdinaryHeld); the broadcast that fills the leaf
+				// disposes it (settleOrdinaryCreates).
 				if old != nil {
 					m.holdReplacedPane(tab.ID, old)
 				}

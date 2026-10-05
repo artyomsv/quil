@@ -7400,6 +7400,24 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 			migrated := ok && !lp.oldTree[paneID]
 			fresh := !ok
 			info := paneMap[paneID]
+
+			// The pane an ORDINARY replace detached, still listed: unlike the
+			// worktree one above it goes back now (takeOrdinaryHeld says why),
+			// since nothing but a refusal would ever answer this create, and a
+			// create lost on the way must not leave a live pane hidden. When
+			// its leaf is gone it is placed below as an arrival, never as a
+			// fresh model and never into a reservation.
+			if held := m.replaceHeld[tab.ID]; !ok && held != nil && held.ID == paneID {
+				var placed bool
+				if pane, placed = m.takeOrdinaryHeld(tab); placed {
+					if info != nil {
+						syncPaneMeta(pane, info, m.pluginWideCanvas(info.Type), m.pluginMinNativeCols(info.Type), m.pluginRestoresViaSession(info.Type), m.isFollower(dest))
+					}
+					tab.ActivePane = pane.ID
+					continue
+				}
+				ok, fresh = true, false
+			}
 			if !ok {
 				pane = NewPaneModel(paneID, m.replayBufSize())
 				pane.resumeStart = time.Now()

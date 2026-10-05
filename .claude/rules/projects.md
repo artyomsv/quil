@@ -1133,8 +1133,17 @@ Daemon: `worktreeAddAndCreate` creates the worktree FIRST and only then calls
 report failure instead of logging it), so every failure path returns before the
 pane being replaced is touched. Client: a worktree replace holds the detached
 pane in `Model.worktreeReplaced` instead of disposing it. An ordinary replace
-still disposes at send time, because there the daemon destroys the pane the
-moment it handles the message and there is nothing to go back to.
+holds it too, in `Model.replaceHeld` (`holdReplacedPane`), because the daemon
+can REFUSE the create before touching the pane: the refusal
+(`applyCreatePaneRefused`) puts the same model back into its leaf. A broadcast
+that still lists the held pane (it left before the daemon read the create, or
+the create was lost) also puts the HELD model back and retires the create
+(`takeOrdinaryHeld`) — never a fresh model, which would show the live pane
+blank and leave the refusal nothing to restore; adoption skips the held id
+like the worktree one, and `layoutForSend` writes either reservation under
+the held id. The held model is disposed when the create settles
+(`settleOrdinaryCreates`: the leaf filled by the replacing pane, or the
+reservation pruned) or another create re-arms the tab (`retireOrdinaryCreate`).
 
 **The SUCCESS dispose lives in `rebuildTabs`, not in `applyCreatePaneResp`, and
 putting it in the handler was a leak on every successful replace.** The daemon

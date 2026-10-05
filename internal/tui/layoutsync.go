@@ -57,13 +57,14 @@ func (m *Model) markLayoutChanged(dest string, tab *TabModel) tea.Cmd {
 
 // layoutForSend is the tab's tree as it may be stored: no placeholders, since
 // a reservation is this client's runtime state and means nothing to another.
-// The one exception is a worktree REPLACE, whose placeholder stands in for a
-// pane that is still live on the daemon — it is written under that pane's id,
-// so another client adopting the tree keeps the pane where it is.
+// The one exception is a REPLACE (worktree or ordinary), whose placeholder
+// stands in for a pane that is still live on the daemon — it is written under
+// that pane's id, so another client adopting the tree keeps the pane where it
+// is.
 func (m *Model) layoutForSend(tab *TabModel) *SerializedNode {
 	var keep *LayoutNode
 	var keepID string
-	if held := m.worktreeReplaced[tab.ID]; held != nil {
+	if held := m.replaceHeldIn(tab.ID); held != nil {
 		keep, keepID = m.pendingSplit[tab.ID], held.ID
 	}
 	return serializeForSend(tab.Root, keep, keepID)
@@ -254,7 +255,7 @@ func (m *Model) adoptTabLayout(tab *TabModel, stored *SerializedNode, paneSet ma
 		}
 	}
 
-	held := m.worktreeReplaced[tab.ID]
+	held := m.replaceHeldIn(tab.ID)
 	storedIDs := serializedIDs(stored)
 	panes := make(map[string]*PaneModel, len(paneSet))
 	gone := make([]string, 0)
@@ -276,7 +277,7 @@ func (m *Model) adoptTabLayout(tab *TabModel, stored *SerializedNode, paneSet ma
 			continue
 		}
 		if held != nil && held.ID == id {
-			continue // the worktree replace's pane: its leaf is the reservation
+			continue // the replace's held pane: its leaf is the reservation
 		}
 		p := NewPaneModel(id, m.replayBufSize())
 		p.resumeStart = time.Now()

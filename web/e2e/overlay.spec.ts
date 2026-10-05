@@ -5,16 +5,14 @@ import { bufferText, expect, ipcRequest, keymapLoaded, listPanes, login, testWit
 
 // A stand-in lazygit first on PATH: it answers the daemon's `lazygit
 // --version` probe, then prints a marker and echoes its input, so the test
-// sees what reaches the overlay's PTY. The first pane opens in a fresh git
-// repo, which git_repos_req names as the overlay's repo.
+// sees what reaches the overlay's PTY. The daemon opens the first pane in
+// QUIL_HOME; each test makes that a git repo, which git_repos_req then names
+// as the overlay's repo.
 const bin = mkdtempSync('/tmp/qw-bin-');
 const lazygit = path.join(bin, 'lazygit');
 writeFileSync(lazygit, '#!/bin/sh\ncase "$1" in --version) echo "version=0.0.0-fake"; exit 0;; esac\necho FAKE-LAZYGIT\nexec cat\n');
 chmodSync(lazygit, 0o755);
-const repo = mkdtempSync('/tmp/qw-repo-');
-spawnSync('git', ['init', '-q', repo]);
-
-const test = testWith({ path: bin, cwd: repo });
+const test = testWith({ path: bin });
 
 async function overlayId(home: string): Promise<string> {
   let id = '';
@@ -28,6 +26,7 @@ async function overlayId(home: string): Promise<string> {
 }
 
 test('Alt+G shows lazygit over the panes, takes the keys, and hides again', async ({ page, quil }) => {
+  expect(spawnSync('git', ['init', '-q', quil.home]).status).toBe(0);
   await login(page, quil);
   await keymapLoaded(page, 'default');
   await page.locator('.pane .term').first().click();
@@ -52,6 +51,7 @@ test('Alt+G shows lazygit over the panes, takes the keys, and hides again', asyn
 });
 
 test('an overlay that leaves the state leaves the page', async ({ page, quil }) => {
+  expect(spawnSync('git', ['init', '-q', quil.home]).status).toBe(0);
   await login(page, quil);
   await keymapLoaded(page, 'default');
   await page.locator('.pane .term').first().click();

@@ -961,11 +961,8 @@ export class App {
       return;
     }
     if (shown && cur) this.setOverlayShown(tab, cur.id, false);
+    // An empty cwd is the daemon's own default directory (git_repos_req).
     const cwd = s.panes.find((p) => p.id === this.activePane)?.cwd ?? '';
-    if (cwd === '') {
-      this.showNotice('no git repo here');
-      return;
-    }
     this.overlayBusy.add(tab);
     try {
       await this.createOverlay(tab, kind, cwd);

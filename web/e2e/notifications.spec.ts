@@ -41,10 +41,11 @@ test('clicking a notification makes its pane active', async ({ page, quil }) => 
   await expect(page.locator('.pane')).toHaveCount(2);
   await page.locator('.pane').filter({ hasNotText: 'target' }).locator('.term').click();
   await expect.poll(() => activePane(page)).not.toBe(target);
-  // A standalone BEL in the output is the daemon's "Attention" event.
-  await typeInto(quil.home, target, String.raw`printf '\a'` + '\r');
+  // Input from an agent connection is the daemon's "MCP agent typed here"
+  // event for that pane.
+  await typeInto(quil.home, target, 'true\r');
   await page.keyboard.press('Alt+n');
-  const card = page.locator('.notify .card', { hasText: 'Attention' });
+  const card = page.locator('.notify .card', { hasText: 'MCP agent typed here' });
   await expect(card).toBeVisible();
   await card.getByRole('button').first().click();
   await expect.poll(() => activePane(page)).toBe(target);

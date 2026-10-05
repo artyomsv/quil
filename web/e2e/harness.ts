@@ -27,12 +27,10 @@ export interface Message {
 // daemon itself. It resolves once the URL and the login code are printed.
 // plugins (file name → TOML) are written to the home's plugins directory
 // first, since quil web and the daemon load plugin definitions at start.
-// path is put first on PATH and cwd is quil web's directory; the daemon it
-// starts inherits both, so cwd is where the first pane opens.
+// path is put first on PATH; the daemon quil web starts inherits it.
 export interface QuilWebOpts {
   plugins?: Record<string, string>;
   path?: string;
-  cwd?: string;
 }
 
 export async function startQuilWeb(opts: QuilWebOpts = {}): Promise<QuilWeb> {
@@ -41,9 +39,9 @@ export async function startQuilWeb(opts: QuilWebOpts = {}): Promise<QuilWeb> {
     mkdirSync(path.join(home, 'plugins'), { recursive: true });
     for (const [file, body] of Object.entries(opts.plugins)) writeFileSync(path.join(home, 'plugins', file), body);
   }
-  const env = { ...process.env, QUIL_HOME: home };
+  const env: NodeJS.ProcessEnv = { ...process.env, QUIL_HOME: home };
   if (opts.path) env.PATH = `${opts.path}${path.delimiter}${process.env.PATH ?? ''}`;
-  const child = spawn(QUIL, ['web', '--no-open', '--port', '0'], { cwd: opts.cwd ?? ROOT, env, stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = spawn(QUIL, ['web', '--no-open', '--port', '0'], { cwd: ROOT, env, stdio: ['pipe', 'pipe', 'pipe'] });
   let out = '';
   let err = '';
   child.stderr?.on('data', (b: Buffer) => {

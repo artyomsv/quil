@@ -103,6 +103,9 @@ func TestForeignHomeEntry(t *testing.T) {
 		"sandbox-image.json", "tokens.json", "tokens.json.tmp-1", "audit.log",
 		"audit-20261001-120000.log", "quild-20261001-120000.log", "quil-20261001-120000.log",
 		"web.log", "hook.log", "notify-activate.log", "quild.sock", ".quil-staging-123",
+		// Dot-prefixed temps a crash can leave (config.SaveTemplates), and any
+		// future one.
+		".templates-123", ".anything",
 		"buffers", "plugins", "sessions", "events", "shellinit", "paste", "notes",
 		"notes-conflicts", "mcp-logs", "update", "history", "sandbox", "claudehook",
 		"codexhook", "opencodehook",

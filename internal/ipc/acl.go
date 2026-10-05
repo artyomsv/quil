@@ -120,7 +120,7 @@ var quilHomeNames = map[string]bool{
 // the extension, a .tmp or .bak beside it, a rotated log and a
 // per-destination copy (recent-cwds-<key>.json).
 var quilHomeStems = []string{
-	".quil-staging", "OpenConsole", "audit", "bindings", "config", "conpty",
+	"OpenConsole", "audit", "bindings", "config", "conpty",
 	"hook", "instances", "notify-activate", "project-groups", "quil", "quild",
 	"recent-cwds", "remote-projects", "sandbox-image", "shared-import",
 	"templates", "tokens", "web", "window", "workspace",
@@ -140,15 +140,21 @@ var quilHomeStems = []string{
 // the TCP listener, and quild.log names the entry.
 func foreignHomeEntry(names []string) string {
 	for _, n := range names {
-		if !quilHomeEntry(n) {
+		if !IsQuilHomeEntry(n) {
 			return n
 		}
 	}
 	return ""
 }
 
-func quilHomeEntry(name string) bool {
-	if quilHomeNames[name] {
+// IsQuilHomeEntry reports whether name, a top-level entry of QUIL_HOME, is
+// one quil writes. Any dot-prefixed name counts: quil's temp files are
+// dot-prefixed (.templates-*, .quil-staging-*) and a crash can leave one,
+// while a folder QUIL_HOME was pointed at always holds non-dot entries too,
+// so detection loses nothing. Exported for the drift test that checks every
+// config path against it.
+func IsQuilHomeEntry(name string) bool {
+	if strings.HasPrefix(name, ".") || quilHomeNames[name] {
 		return true
 	}
 	for _, s := range quilHomeStems {
@@ -172,7 +178,7 @@ func checkQuilHome(dir string) error {
 		names[i] = e.Name()
 	}
 	if n := foreignHomeEntry(names); n != "" {
-		return fmt.Errorf("%w: %s holds %q, which quil did not write, so its access list was left unchanged; point QUIL_HOME at a folder of its own", ErrNotQuilHome, dir, n)
+		return fmt.Errorf("%w: %s holds %q, which quil did not write, so its access list was left unchanged; move or remove %q from %s, or point QUIL_HOME at a folder of its own", ErrNotQuilHome, dir, n, n, dir)
 	}
 	return nil
 }

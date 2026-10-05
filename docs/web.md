@@ -120,7 +120,7 @@ Each pane has a header with a menu. From the menu you can:
 - split the pane to the right or below;
 - replace it with another pane (**Replace…**);
 - rename it, mute it, restart it;
-- move it to another tab of the same project (**Move to tab…**);
+- move it to another tab of the same project (one **Move to <tab name>** entry for each other tab);
 - close it. Quil asks first. A pane that runs in a git worktree also asks if you want the worktree removed.
 
 Tabs work the same way. Press `+` in the tab bar to make a new tab. Double-click a tab to rename it. The tab menu sets a color or closes the tab. Drag the border between two panes to change the split.
@@ -140,7 +140,7 @@ The dialog opens in the project folder. One difference from the terminal: while 
 Notes:
 
 - A saved instance is read from the files of the machine that runs `quil web`, never from the page. With `standard` rights you can save instances, but you cannot start one that carries raw arguments. That needs `full` rights.
-- A new worktree can take a while. The pane shows a spinner and the real pane takes its place when git is done. If git fails, the pane shows the error and the sidebar gets a **worktree failed** card.
+- A new worktree can take a while. The pane shows a spinner and the real pane takes its place when git is done. If git fails, the pane shows the error and the notification list gets a **worktree failed** card (a System event, so it shows unless you hide that group).
 - With `read-only` rights all of these controls are gone.
 - A closed pane stays closed. The daemon keeps every saved layout in step with the panes that exist.
 - In rare cases a blank slot shows for a moment: another client saves a layout while your terminal is splitting a pane. The pane fills the slot as soon as it arrives.

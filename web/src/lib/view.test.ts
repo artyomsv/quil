@@ -44,6 +44,12 @@ describe('parseWorkspaceState', () => {
     }
   });
 
+  it('keeps the recent folders, strings only', () => {
+    const s = parseWorkspaceState({ active_tab: 't', tabs: [], panes: [], projects: [], recent_cwds: ['/a', 3, '/b'] });
+    expect(s?.recent_cwds).toEqual(['/a', '/b']);
+    expect(parseWorkspaceState({ active_tab: 't', tabs: [], panes: [], projects: [] })?.recent_cwds).toBeUndefined();
+  });
+
   it('reads null lists as empty', () => {
     const s = parseWorkspaceState({ active_tab: 't', tabs: null, panes: null, projects: null });
     expect(s).toEqual({ active_tab: 't', active_project: '', tabs: [], panes: [], projects: [] });

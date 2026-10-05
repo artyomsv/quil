@@ -179,6 +179,20 @@ func (c SandboxConfig) ResolveAuth() (mode SandboxAuthMode, unrecognised string)
 	}
 }
 
+// DefaultSignIn is the sandbox sign-in choice this config selects: "token"
+// whenever ResolveAuth says token (a token pane does not share), else "shared"
+// or "browser". The TUI dialog, its F1 page and the web dialog all pre-select
+// it, so the three cannot disagree.
+func (c SandboxConfig) DefaultSignIn() string {
+	if mode, _ := c.ResolveAuth(); mode == SandboxAuthToken {
+		return "token"
+	}
+	if c.SharedClaudeConfig {
+		return "shared"
+	}
+	return "browser"
+}
+
 // Destination names one remote daemon to attach at launch.
 type Destination struct {
 	// Name labels the host in launch diagnostics. Optional; Dest is used when

@@ -48,6 +48,9 @@
         {/if}
       </span>
     {/each}
+    {#if app.editable}
+      <button class="new" aria-label="New tab" title="New tab" onclick={() => app.openCreate('new_tab')}>+</button>
+    {/if}
   </div>
   {#if app.readOnly}
     <span class="badge">read-only</span>
@@ -143,6 +146,21 @@
     color: #9aa0ad;
     font: inherit;
     cursor: pointer;
+  }
+
+  .new {
+    flex: none;
+    padding: 0 10px;
+    border: 0;
+    background: none;
+    color: #9aa0ad;
+    font: inherit;
+    font-size: 16px;
+    cursor: pointer;
+  }
+
+  .new:hover {
+    color: #e6e8ee;
   }
 
   .badge {

@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { App } from '../lib/app.svelte';
   import Banner from './Banner.svelte';
+  import CreatePaneDialog from './CreatePaneDialog.svelte';
   import Notice from './Notice.svelte';
   import PaneArea from './PaneArea.svelte';
   import Sidebar from './Sidebar.svelte';
@@ -26,6 +27,12 @@
     <!-- Always present, even before the first state: its size is the window
          this tab reports in attach. -->
     <PaneArea {app} />
+    {#if app.dialog && app.client && app.editable}
+      <!-- Keyed: opening it again (another pane, another mode) starts over. -->
+      {#key app.dialog}
+        <CreatePaneDialog {app} />
+      {/key}
+    {/if}
   </div>
 </div>
 

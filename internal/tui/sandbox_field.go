@@ -260,19 +260,9 @@ func sandboxSignInFields(choice string) (auth, claudeConfig string) {
 	return string(config.SandboxAuthBrowser), config.SandboxClaudeConfigOwn
 }
 
-// defaultSandboxSignIn is the choice a config selects. Token wins whatever
-// shared_claude_config says, because ResolveAuth decides the mode and a token
-// pane does not share; browser + shared is Shared. The F1 → Settings →
-// Sandbox page reads the same function, so the two cannot disagree.
-func defaultSandboxSignIn(c config.SandboxConfig) string {
-	if mode, _ := c.ResolveAuth(); mode == config.SandboxAuthToken {
-		return "token"
-	}
-	if c.SharedClaudeConfig {
-		return "shared"
-	}
-	return "browser"
-}
+// defaultSandboxSignIn is the choice a config selects (config.DefaultSignIn).
+// The F1 → Settings → Sandbox page and the web dialog read the same method.
+func defaultSandboxSignIn(c config.SandboxConfig) string { return c.DefaultSignIn() }
 
 // showSandboxAuthField reports whether the setup dialog offers the sign-in row.
 //

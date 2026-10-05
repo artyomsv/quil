@@ -18,9 +18,16 @@
   }
 
   let { app, paneId, name, spawnError, muted, worktreeOwned, agent }: Props = $props();
+  // The dialog aims at the active pane, so this pane becomes it first.
+  function createFrom(mode: 'pane' | 'replace'): void {
+    app.setActivePane(paneId);
+    app.openCreate(mode);
+  }
   const items: MenuItem[] = $derived([
     { label: 'Split right', run: () => app.splitQuick(paneId, 'right') },
     { label: 'Split below', run: () => app.splitQuick(paneId, 'below') },
+    { label: 'New pane…', run: () => createFrom('pane') },
+    { label: 'Replace…', run: () => createFrom('replace') },
     { label: 'Rename…', run: () => app.startRenamePane(paneId) },
     { label: muted ? 'Unmute' : 'Mute', run: () => app.setMuted(paneId, !muted) },
     { label: 'Restart', run: () => app.restartPane(paneId) },

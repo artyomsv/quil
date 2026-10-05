@@ -85,6 +85,7 @@ export function parseWorkspaceState(p: unknown): WorkspaceState | null {
   if (typeof p.size_master === 'string') out.size_master = p.size_master;
   if (typeof p.rev === 'number') out.rev = p.rev;
   if (typeof p.run_id === 'string') out.run_id = p.run_id;
+  if (Array.isArray(p.recent_cwds)) out.recent_cwds = strings(p.recent_cwds);
   return out;
 }
 

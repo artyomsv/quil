@@ -26,7 +26,7 @@ func TestServer_ExpandInstance_ReadsBothFilesFromDisk(t *testing.T) {
 	if err := instances.Save(inst, instances.Store{"x-ssh": {{ID: "i1", Name: "box", Fields: map[string]string{"user": "u", "host": "h"}}}}); err != nil {
 		t.Fatal(err)
 	}
-	s := &Server{cfg: Config{PluginsDir: plugins, InstancesPath: inst}}
+	s := New(Config{PluginsDir: plugins, InstancesPath: inst, Version: "test"})
 	name, args, err := s.expandInstance("x-ssh", "i1")
 	if err != nil || name != "box" || !reflect.DeepEqual(args, []string{"u@h"}) {
 		t.Fatalf("expand: %q %v %v", name, args, err)
@@ -36,5 +36,48 @@ func TestServer_ExpandInstance_ReadsBothFilesFromDisk(t *testing.T) {
 	}
 	if _, _, err := s.expandInstance("not-a-plugin", "i1"); err == nil {
 		t.Fatal("unknown plugin expanded")
+	}
+}
+
+// The expander reads plugin definitions through the catalog, the same source
+// /api/client lists: a plugin added after start is seen by both (fingerprint
+// reload), and a plugin with no form fields — which the dialog never offers
+// instances for — is never expanded.
+func TestServer_ExpandInstance_UsesTheCatalog(t *testing.T) {
+	dir := t.TempDir()
+	plugins := filepath.Join(dir, "plugins")
+	if err := os.MkdirAll(plugins, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	inst := filepath.Join(dir, "instances.json")
+	if err := instances.Save(inst, instances.Store{
+		"late-ssh": {{ID: "i1", Name: "box", Fields: map[string]string{"host": "h"}}},
+		"no-form":  {{ID: "i2", Name: "x", Fields: map[string]string{"host": "h"}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s := New(Config{PluginsDir: plugins, InstancesPath: inst, Version: "test"})
+	if _, _, err := s.expandInstance("late-ssh", "i1"); err == nil {
+		t.Fatal("expanded a plugin that does not exist yet")
+	}
+	late := "[plugin]\nname = \"late-ssh\"\ndisplay_name = \"L\"\ncategory = \"remote\"\n\n[command]\ncmd = \"ssh\"\narg_template = [\"{host}\"]\n\n[[command.form_fields]]\nname = \"host\"\nlabel = \"Host\"\n"
+	noForm := "[plugin]\nname = \"no-form\"\ndisplay_name = \"N\"\ncategory = \"tools\"\n\n[command]\ncmd = \"true\"\narg_template = [\"{host}\"]\n"
+	for name, body := range map[string]string{"late-ssh.toml": late, "no-form.toml": noForm} {
+		if err := os.WriteFile(filepath.Join(plugins, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, args, err := s.expandInstance("late-ssh", "i1"); err != nil || len(args) != 1 || args[0] != "h" {
+		t.Fatalf("late plugin: %v %v", args, err)
+	}
+	if _, _, err := s.expandInstance("no-form", "i2"); err == nil {
+		t.Fatal("expanded a plugin that manages no instances")
+	}
+	// The gate holds the same expander: the bridge's limits name it.
+	if s.limits.ExpandInstance == nil {
+		t.Fatal("the gate has no expander")
+	}
+	if _, args, err := s.limits.ExpandInstance("late-ssh", "i1"); err != nil || len(args) != 1 {
+		t.Fatalf("gate expander: %v %v", args, err)
 	}
 }

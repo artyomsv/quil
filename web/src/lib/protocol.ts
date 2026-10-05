@@ -77,6 +77,8 @@ export interface WorkspaceState {
   size_master?: string;
   rev?: number;
   run_id?: string;
+  // The daemon's recent folders, most recent first (the dialog's Recent row).
+  recent_cwds?: string[];
 }
 
 export interface PaneInfo {

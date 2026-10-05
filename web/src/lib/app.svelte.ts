@@ -1,8 +1,18 @@
-import { nextTabColor, quickSplit } from './actions';
+import { cwdForSplit, nextTabColor, projectRootOf, quickSplit } from './actions';
 import { askedTabShown, pickActive, unseenToClear } from './activepane';
 import { AgentStatePoller } from './agentstate';
 import { attachRefusedBanner, bannerFor, type BannerState, isLoginRequired } from './banner';
+import {
+  type ClientInfo,
+  createInstance,
+  deleteInstance,
+  type InstanceInput,
+  loadClient,
+  updateInstance,
+  type WriteResult,
+} from './client';
 import { type AttachSizes, type Clock, Connection, type SocketLike } from './connection';
+import type { DialogOpen } from './dialog';
 import { type QuilTestHook, shouldRegisterE2EHook } from './e2ehook';
 import { type FetchLike, hasSession, postLogin, sessionGone } from './login';
 import { NOT_SENT, PasteFlow } from './paste';
@@ -106,6 +116,11 @@ export class App {
   // a key (Task 8) open the SAME dialog. At most one of each is open.
   paneAsk = $state.raw<{ kind: 'rename' | 'close'; paneId: string } | null>(null);
   tabAsk = $state.raw<{ kind: 'rename' | 'close'; tabId: string } | null>(null);
+  // GET /api/client: plugin definitions, saved instances, sandbox defaults
+  // (and, Task 8, the keymap). Loaded on every dialog open.
+  client = $state.raw<ClientInfo | null>(null);
+  // The open create-pane dialog, if any.
+  dialog = $state.raw<DialogOpen | null>(null);
   activeTabId = $derived(activeTabOf(this.state));
   activeProjectId = $derived(activeProjectOf(this.state));
   sidebar = $derived(sidebarModel(this.state, this.agentStates));
@@ -465,6 +480,7 @@ export class App {
   private closeAsks(): void {
     this.paneAsk = null;
     this.tabAsk = null;
+    this.dialog = null;
   }
 
   private onClosed(code: number, reason: string, retrying: boolean): void {
@@ -595,6 +611,76 @@ export class App {
   // "none"), as the TUI's tab-color key does.
   cycleTabColor(tabId: string): void {
     this.setTabColor(tabId, nextTabColor(this.state?.tabs.find((t) => t.id === tabId)?.color ?? ''));
+  }
+
+  // refreshClient loads GET /api/client into `client`. The dialog calls it
+  // on every open (instances and plugin files may have changed); Task 8 also
+  // calls it once per attach for the keymap. False after a shown error.
+  async refreshClient(): Promise<boolean> {
+    const r = await loadClient(this.fetchFn, this.storage.getItem(LOGIN_KEY) ?? '');
+    if ('error' in r) {
+      this.showNotice(r.error);
+      return false;
+    }
+    this.client = r.info;
+    this.clientLoaded(r.info);
+    return true;
+  }
+
+  // clientLoaded runs after every successful load. Task 8 builds the key
+  // tables and the notification filter from it here.
+  private clientLoaded(_info: ClientInfo): void {}
+
+  // openDialog opens the create-pane dialog once /api/client has answered;
+  // nothing opens on a read-only or not-live page.
+  async openDialog(open: DialogOpen): Promise<void> {
+    if (!this.editable) return;
+    if (!(await this.refreshClient())) return;
+    // The page may have lost its link or its rights while the answer came.
+    if (this.editable) this.dialog = open;
+  }
+
+  // openCreate opens the dialog for the active tab: a new pane next to the
+  // active pane, a replace of it, or a new tab. Menus and keys (Task 8) use
+  // it. The folder starts at the project root (spec §5.2), else the active
+  // pane's folder.
+  openCreate(mode: DialogOpen['mode']): void {
+    const s = this.state;
+    if (!s) return;
+    const target = mode === 'new_tab' ? '' : this.activePane;
+    void this.openDialog({
+      mode,
+      targetPaneId: target,
+      tabId: s.active_tab,
+      projectId: this.activeProjectId,
+      defaultCwd: projectRootOf(s, s.active_tab) || (this.activePane ? cwdForSplit(s, this.activePane) : ''),
+    });
+  }
+
+  closeDialog(): void {
+    this.dialog = null;
+    if (this.activePane) this.focus(this.activePane);
+  }
+
+  // daemonList runs one dialog RPC (plugin_list_req, browse_dir_req,
+  // git_repos_req, kube_ctx_req, claude_sessions_req, worktree_list_req,
+  // sandbox_cap_req, dirs_exist_req) through Requests.
+  daemonList(type: string, payload: unknown): Promise<Outcome> {
+    return this.requests.request(type, payload);
+  }
+
+  // instancesApi writes this machine's instances.json through quil web.
+  instancesApi(): {
+    create: (i: InstanceInput) => Promise<WriteResult>;
+    update: (i: InstanceInput) => Promise<WriteResult>;
+    remove: (plugin: string, id: string) => Promise<WriteResult>;
+  } {
+    const key = this.storage.getItem(LOGIN_KEY) ?? '';
+    return {
+      create: (i) => createInstance(this.fetchFn, key, i),
+      update: (i) => updateInstance(this.fetchFn, key, i),
+      remove: (plugin, id) => deleteInstance(this.fetchFn, key, plugin, id),
+    };
   }
 
   // attached runs once per (re)attach, after the attach's own state is

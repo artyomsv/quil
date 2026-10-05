@@ -548,9 +548,12 @@ func (b *bridge) fromPage(gen uint64, raw []byte) error {
 		return nil
 	}
 	// A saved instance is expanded from disk before the lock, so the daemon
-	// reader's answered() never waits behind file reads. b.lim.ExpandInstance
-	// is what every gate of this bridge holds as expand.
-	fill := prefill(b.lim.ExpandInstance, &m)
+	// reader's answered() never waits behind file reads. The expander is the
+	// gate's own, as in forwardGate.check, so the two paths cannot drift.
+	b.gateMu.Lock()
+	expand := b.gate.expand
+	b.gateMu.Unlock()
+	fill := prefill(expand, &m)
 	b.gateMu.Lock()
 	fwd, refuse, fatal := b.gate.checkFilled(&m, fill)
 	b.gateMu.Unlock()

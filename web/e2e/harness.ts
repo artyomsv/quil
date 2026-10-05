@@ -1,5 +1,5 @@
 import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import { expect, type Page, test as base } from '@playwright/test';
@@ -25,8 +25,14 @@ export interface Message {
 // startQuilWeb runs `quil web` against a fresh, short QUIL_HOME (a unix
 // socket path over about 108 bytes does not bind). quil web starts the
 // daemon itself. It resolves once the URL and the login code are printed.
-export async function startQuilWeb(): Promise<QuilWeb> {
+// plugins (file name → TOML) are written to the home's plugins directory
+// first, since quil web and the daemon load plugin definitions at start.
+export async function startQuilWeb(opts: { plugins?: Record<string, string> } = {}): Promise<QuilWeb> {
   const home = mkdtempSync('/tmp/qw-');
+  if (opts.plugins) {
+    mkdirSync(path.join(home, 'plugins'), { recursive: true });
+    for (const [file, body] of Object.entries(opts.plugins)) writeFileSync(path.join(home, 'plugins', file), body);
+  }
   const env = { ...process.env, QUIL_HOME: home };
   const child = spawn(QUIL, ['web', '--no-open', '--port', '0'], { cwd: ROOT, env, stdio: ['pipe', 'pipe', 'pipe'] });
   let out = '';
@@ -337,33 +343,48 @@ export function tabButton(page: Page, name: string) {
   return page.locator('header').getByRole('button', { name, exact: true });
 }
 
+// cspPage is the page fixture of every test: it fails the test on any
+// Content Security Policy violation the page reports.
+async function cspPage({ page }: { page: Page }, use: (p: Page) => Promise<void>): Promise<void> {
+  const violations: string[] = [];
+  await page.exposeFunction('__quilCSP', (v: string) => {
+    violations.push(v);
+  });
+  await page.addInitScript(() => {
+    document.addEventListener('securitypolicyviolation', (e) => {
+      (window as unknown as TestHookWindow).__quilCSP?.(`${e.violatedDirective} ${e.blockedURI}`);
+    });
+  });
+  page.on('console', (m) => {
+    if (/Content Security Policy/i.test(m.text())) violations.push(m.text());
+  });
+  await use(page);
+  expect(violations, 'CSP violations').toEqual([]);
+}
+
+// withQuil is a test whose quil web starts with plugins in its home.
+function withQuil(plugins?: Record<string, string>) {
+  return base.extend<{ quil: QuilWeb }>({
+    quil: async ({}, use) => {
+      const q = await startQuilWeb({ plugins });
+      try {
+        await use(q);
+      } finally {
+        await q.stop();
+      }
+    },
+    page: cspPage,
+  });
+}
+
 // test gives every test its own quil web and daemon, and fails a test on any
 // Content Security Policy violation the page reports.
-export const test = base.extend<{ quil: QuilWeb }>({
-  quil: async ({}, use) => {
-    const q = await startQuilWeb();
-    try {
-      await use(q);
-    } finally {
-      await q.stop();
-    }
-  },
-  page: async ({ page }, use) => {
-    const violations: string[] = [];
-    await page.exposeFunction('__quilCSP', (v: string) => {
-      violations.push(v);
-    });
-    await page.addInitScript(() => {
-      document.addEventListener('securitypolicyviolation', (e) => {
-        (window as unknown as TestHookWindow).__quilCSP?.(`${e.violatedDirective} ${e.blockedURI}`);
-      });
-    });
-    page.on('console', (m) => {
-      if (/Content Security Policy/i.test(m.text())) violations.push(m.text());
-    });
-    await use(page);
-    expect(violations, 'CSP violations').toEqual([]);
-  },
-});
+export const test = withQuil();
+
+// testWithPlugins is test with these plugin files (name → TOML) in place
+// before quil web and its daemon start.
+export function testWithPlugins(plugins: Record<string, string>) {
+  return withQuil(plugins);
+}
 
 export { expect };

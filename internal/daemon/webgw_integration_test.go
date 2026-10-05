@@ -78,12 +78,23 @@ func tokenWebDial(h *authHarness, token string) webgw.Dialer {
 // newWebRigWith serves a gateway with dial, and logs in.
 func newWebRigWith(t *testing.T, dial webgw.Dialer) *webRig {
 	t.Helper()
-	srv := webgw.New(webgw.Config{
-		Dial:    dial,
-		Version: "test",
-		Logf:    func(string, ...any) {},
-		Sleep:   func(time.Duration) {},
-	})
+	return newWebRigConfig(t, webgw.Config{Dial: dial})
+}
+
+// newWebRigConfig serves a gateway built from cfg (Version, Logf and Sleep
+// filled in when unset), and logs in.
+func newWebRigConfig(t *testing.T, cfg webgw.Config) *webRig {
+	t.Helper()
+	if cfg.Version == "" {
+		cfg.Version = "test"
+	}
+	if cfg.Logf == nil {
+		cfg.Logf = func(string, ...any) {}
+	}
+	if cfg.Sleep == nil {
+		cfg.Sleep = func(time.Duration) {}
+	}
+	srv := webgw.New(cfg)
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 	t.Cleanup(func() {

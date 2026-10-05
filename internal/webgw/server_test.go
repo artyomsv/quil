@@ -52,6 +52,8 @@ type wsHarness struct {
 	ids      []string
 	dialErr  error
 	dialHook func(ctx context.Context) error
+	// rights is what dial reports from the daemon login; "" means "full".
+	rights string
 }
 
 func newWSHarness(t *testing.T, tune func(*Server)) *wsHarness {
@@ -90,7 +92,11 @@ func (h *wsHarness) dial(ctx context.Context, id string) (DaemonConn, string, er
 	d := newFakeDaemon()
 	h.daemons = append(h.daemons, d)
 	h.ids = append(h.ids, id)
-	return d, "full", nil
+	rights := h.rights
+	if rights == "" {
+		rights = "full"
+	}
+	return d, rights, nil
 }
 
 func (h *wsHarness) daemon(i int) *fakeDaemon {

@@ -189,6 +189,7 @@ func runWeb(args []string) {
 		// expands them from its own (spec 5b E7).
 		PluginsDir:    config.PluginsDir(),
 		InstancesPath: config.InstancesPath(),
+		ClientExtras:  webClientExtras(cfg, connectMode()),
 	})
 	ln, err := net.Listen("tcp", flags.Listen)
 	if err != nil {

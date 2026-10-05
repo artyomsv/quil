@@ -1159,13 +1159,18 @@ export class App {
 
   // rebuildNotifications runs after every (re)attach: the daemon's queue is
   // the truth, and dismissals missed while away are not replayed.
+  // Live events and dismissals that arrive while the list is on its way are
+  // replayed over it (NotificationStore.beginRebuild).
   async rebuildNotifications(): Promise<void> {
+    const gen = this.store.beginRebuild();
     const r = await this.requests.request('get_notifications_req', {});
     const raw = r.ok ? (r.reply?.payload as { events?: unknown } | undefined)?.events : undefined;
-    if (!r.ok) return;
+    if (!r.ok) {
+      this.store.abortRebuild(gen);
+      return;
+    }
     const list = (Array.isArray(raw) ? raw : []).map(parsePaneEvent).filter((e): e is PaneEvent => e !== null);
-    this.store.rebuild(list, this.skipCtx());
-    this.events = this.store.visible();
+    if (this.store.rebuild(list, this.skipCtx(), gen)) this.events = this.store.visible();
   }
 
   // openDialog opens the create-pane dialog once /api/client has answered;

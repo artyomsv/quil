@@ -96,10 +96,30 @@ export function groupOf(type: string, info: NotifyInfo): string {
 // NotificationStore is the sidebar's list, newest first, keyed by event id:
 // the daemon aggregates a repeat (pane, title) under the old id with a higher
 // count, so a known id replaces its entry and moves to the top.
+//
+// A rebuild races the live feed: the daemon takes its list, and an event or a
+// dismissal can reach the page after that but before the list does. So every
+// live change from beginRebuild on is recorded and replayed over the list.
 export class NotificationStore {
   private events: PaneEvent[] = [];
+  private gen = 0;
+  // Live changes since beginRebuild, in arrival order; null when no rebuild
+  // is waiting for its list.
+  private live: ({ add: PaneEvent } | { dismiss: string })[] | null = null;
 
   constructor(private info: NotifyInfo | null) {}
+
+  // beginRebuild runs as get_notifications_req goes out; its number goes to
+  // rebuild or abortRebuild. A newer begin makes an older answer stale.
+  beginRebuild(): number {
+    this.live = [];
+    return ++this.gen;
+  }
+
+  // abortRebuild ends a rebuild whose request failed.
+  abortRebuild(gen: number): void {
+    if (gen === this.gen) this.live = null;
+  }
 
   // setInfo installs the tables; events that arrived before them and that
   // the TUI would have skipped are dropped now.
@@ -115,6 +135,11 @@ export class NotificationStore {
   // add files a live event; false when a skip rule dropped it (the TUI's
   // paneEventMsg arm in internal/tui/model.go).
   add(e: PaneEvent, ctx: SkipContext): boolean {
+    this.live?.push({ add: e });
+    return this.file(e, ctx);
+  }
+
+  private file(e: PaneEvent, ctx: SkipContext): boolean {
     if (this.skipped(e, ctx)) return false;
     const i = this.events.findIndex((x) => x.id === e.id);
     if (i >= 0) this.events.splice(i, 1);
@@ -124,14 +149,35 @@ export class NotificationStore {
   }
 
   // rebuild replaces the list with get_notifications_resp's events, which the
-  // daemon lists newest first.
-  rebuild(newestFirst: PaneEvent[], ctx: SkipContext): void {
+  // daemon lists newest first, then replays the live changes that arrived
+  // since beginRebuild. A live event the list already holds at the same or a
+  // newer timestamp is not replayed (the list's copy is as new). False for a
+  // stale answer: a newer rebuild has begun.
+  rebuild(newestFirst: PaneEvent[], ctx: SkipContext, gen = this.gen): boolean {
+    if (gen !== this.gen) return false;
+    const live = this.live ?? [];
+    this.live = null;
     this.events = [];
-    for (let i = newestFirst.length - 1; i >= 0; i--) this.add(newestFirst[i]!, ctx);
+    for (let i = newestFirst.length - 1; i >= 0; i--) this.file(newestFirst[i]!, ctx);
+    const listed = new Map(newestFirst.map((e) => [e.id, e.timestamp]));
+    for (const op of live) {
+      if ('dismiss' in op) {
+        this.drop(op.dismiss);
+        continue;
+      }
+      const t = listed.get(op.add.id);
+      if (t === undefined || op.add.timestamp > t) this.file(op.add, ctx);
+    }
+    return true;
   }
 
   // dismiss drops one event, or every event for an empty id (dismiss all).
   dismiss(id: string): void {
+    this.live?.push({ dismiss: id });
+    this.drop(id);
+  }
+
+  private drop(id: string): void {
     this.events = id === '' ? [] : this.events.filter((e) => e.id !== id);
   }
 

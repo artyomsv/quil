@@ -63,6 +63,40 @@ describe('NotificationStore', () => {
     expect(s.visible().map((e) => e.id)).toEqual(['new', 'old']);
   });
 
+  it('keeps a live event that arrived after the daemon took the list', () => {
+    const s = new NotificationStore(info);
+    const gen = s.beginRebuild();
+    // The daemon took its list (old), then emitted 'fresh', which reached the
+    // page before the list did.
+    s.add(ev('fresh', { timestamp: 5 }), ctx);
+    expect(s.rebuild([ev('old')], ctx, gen)).toBe(true);
+    expect(s.visible().map((e) => e.id)).toEqual(['fresh', 'old']);
+  });
+
+  it('replays live dismissals and newer copies, but not an older copy of a listed event', () => {
+    const s = new NotificationStore(info);
+    const gen = s.beginRebuild();
+    s.add(ev('a', { timestamp: 1, title: 'a old' }), ctx);
+    s.add(ev('b', { timestamp: 9, title: 'b ×2' }), ctx);
+    s.dismiss('c');
+    const list = [ev('c', { timestamp: 3 }), ev('b', { timestamp: 2, title: 'b' }), ev('a', { timestamp: 4, title: 'a ×3' })];
+    s.rebuild(list, ctx, gen);
+    expect(s.visible().map((e) => e.title)).toEqual(['b ×2', 'a ×3']);
+  });
+
+  it('drops a stale answer, and records nothing after an abort', () => {
+    const s = new NotificationStore(info);
+    const first = s.beginRebuild();
+    const second = s.beginRebuild();
+    expect(s.rebuild([ev('stale')], ctx, first)).toBe(false);
+    expect(s.size()).toBe(0);
+    s.abortRebuild(second);
+    s.add(ev('x'), ctx);
+    s.rebuild([ev('y')], ctx);
+    // No rebuild was waiting, so 'x' is not replayed over the list.
+    expect(s.visible().map((e) => e.id)).toEqual(['y']);
+  });
+
   it('dismisses one or all', () => {
     const s = new NotificationStore(info);
     s.add(ev('a'), ctx);

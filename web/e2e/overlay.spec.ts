@@ -1,18 +1,32 @@
 import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { bufferText, expect, ipcRequest, keymapLoaded, listPanes, login, testWith } from './harness';
+import { type Page } from '@playwright/test';
+import { activePane, bufferText, createPane, expect, ipcRequest, keymapLoaded, listPanes, login, type QuilWeb, testWith } from './harness';
 
 // A stand-in lazygit first on PATH: it answers the daemon's `lazygit
 // --version` probe, then prints a marker and echoes its input, so the test
-// sees what reaches the overlay's PTY. The daemon opens the first pane in
-// QUIL_HOME; each test makes that a git repo, which git_repos_req then names
-// as the overlay's repo.
+// sees what reaches the overlay's PTY. Each test opens a pane with an
+// explicit cwd in a fresh git repo and makes it active, so the overlay's repo
+// never comes from the daemon's own default directory.
 const bin = mkdtempSync('/tmp/qw-bin-');
 const lazygit = path.join(bin, 'lazygit');
 writeFileSync(lazygit, '#!/bin/sh\ncase "$1" in --version) echo "version=0.0.0-fake"; exit 0;; esac\necho FAKE-LAZYGIT\nexec cat\n');
 chmodSync(lazygit, 0o755);
 const test = testWith({ path: bin });
+
+// gitPane logs in, opens a pane in a new git repo and makes it the active
+// pane, with the keyboard in its terminal.
+async function gitPane(page: Page, quil: QuilWeb): Promise<string> {
+  const repo = mkdtempSync('/tmp/qw-git-');
+  expect(spawnSync('git', ['init', '-q', repo]).status).toBe(0);
+  await login(page, quil);
+  await keymapLoaded(page, 'default');
+  const id = await createPane(quil.home, { name: 'gitpane', cwd: repo });
+  await page.locator('.pane', { has: page.locator('.title', { hasText: 'gitpane' }) }).locator('.term').click();
+  await expect.poll(() => activePane(page)).toBe(id);
+  return id;
+}
 
 async function overlayId(home: string): Promise<string> {
   let id = '';
@@ -26,10 +40,7 @@ async function overlayId(home: string): Promise<string> {
 }
 
 test('Alt+G shows lazygit over the panes, takes the keys, and hides again', async ({ page, quil }) => {
-  expect(spawnSync('git', ['init', '-q', quil.home]).status).toBe(0);
-  await login(page, quil);
-  await keymapLoaded(page, 'default');
-  await page.locator('.pane .term').first().click();
+  await gitPane(page, quil);
   await page.keyboard.press('Alt+g');
   const overlay = page.locator('.slot.overlay');
   await expect(overlay).toBeVisible();
@@ -51,15 +62,12 @@ test('Alt+G shows lazygit over the panes, takes the keys, and hides again', asyn
 });
 
 test('an overlay that leaves the state leaves the page', async ({ page, quil }) => {
-  expect(spawnSync('git', ['init', '-q', quil.home]).status).toBe(0);
-  await login(page, quil);
-  await keymapLoaded(page, 'default');
-  await page.locator('.pane .term').first().click();
+  await gitPane(page, quil);
   await page.keyboard.press('Alt+g');
   const overlay = page.locator('.slot.overlay');
   await expect(overlay).toBeVisible();
   const id = await overlayId(quil.home);
   await ipcRequest(quil.home, 'destroy_pane_req', { pane_id: id });
   await expect(overlay).toHaveCount(0);
-  await expect(page.locator('.pane')).toHaveCount(1);
+  await expect(page.locator('.pane')).toHaveCount(2);
 });

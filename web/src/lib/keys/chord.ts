@@ -17,7 +17,16 @@ export interface KeyEventLike {
   // getModifierState('AltGraph'): AltGr is held. Windows reports it as
   // ctrl+alt too, so the flag is what tells a typed '@' from a chord.
   altGraph?: boolean;
+  // The page runs on macOS, where Option composes characters (IS_MAC).
+  mac?: boolean;
 }
+
+// IS_MAC is read once: Option composes characters on macOS only.
+export const IS_MAC: boolean = (() => {
+  if (typeof navigator === 'undefined') return false;
+  const n = navigator as Navigator & { userAgentData?: { platform?: string } };
+  return /mac/i.test(n.userAgentData?.platform ?? n.platform ?? '');
+})();
 
 const NAMED: Record<string, string> = {
   ArrowLeft: 'left',
@@ -66,15 +75,20 @@ export function chordOf(e: KeyEventLike): string | null {
   const named = NAMED[e.key] ?? (/^F([1-9]|1[0-9]|2[0-4])$/.test(e.key) ? e.key.toLowerCase() : undefined);
   if (named) return mods(e, true) + named;
   const single = [...e.key].length === 1;
-  // AltGr types a character (Swiss AltGr+2 is '@'): text, never a chord.
-  if (e.altGraph && single) return e.key;
   const letter = /^Key([A-Z])$/.exec(e.code);
   const digit = /^Digit([0-9])$/.exec(e.code);
   const own = letter ? letter[1]!.toLowerCase() : digit ? digit[1]! : '';
-  // Option alone on a Mac layout types a character (German Option+5 is '[').
-  // An ASCII character other than the key's own letter or digit is that
-  // text; a non-ASCII one (US Option+H is '˙') is still the chord alt+h.
-  if (own && e.altKey && !e.ctrlKey && !e.metaKey && single && /^[\x21-\x7e]$/.test(e.key) && e.key.toLowerCase() !== own) {
+  // The key gives its own letter or digit: a chord, whatever is held.
+  const ownChar = own !== '' && e.key.toLowerCase() === own;
+  // AltGr types a character (Swiss AltGr+2 is '@'): text, never a chord.
+  // Chrome can report AltGraph for a left Ctrl+Alt, so a key that gives its
+  // own letter stays the ctrl+alt chord.
+  if (e.altGraph && single && !ownChar) return e.key;
+  // Option alone on macOS types a character (German Option+5 is '['): an
+  // ASCII character other than the key's own is that text; a non-ASCII one
+  // (US Option+H is '˙') is still the chord alt+h. Elsewhere Alt does not
+  // compose: AZERTY Alt+1 reports '&' and is alt+1.
+  if (e.mac && own && e.altKey && !e.ctrlKey && !e.metaKey && single && /^[\x21-\x7e]$/.test(e.key) && !ownChar) {
     return e.key;
   }
   if (own && (e.ctrlKey || e.altKey || e.metaKey)) return mods(e, true) + own;

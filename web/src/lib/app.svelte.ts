@@ -15,13 +15,13 @@ import { type AttachSizes, type Clock, Connection, type SocketLike } from './con
 import type { DialogOpen } from './dialog';
 import { type QuilTestHook, shouldRegisterE2EHook } from './e2ehook';
 import { NATIVE, TUI_ONLY, VIEW_ONLY } from './keys/actions';
-import { isEditable } from './keys/chord';
+import { IS_MAC, isEditable } from './keys/chord';
 import { buildTables, KeyEngine, type WebKeymap } from './keys/engine';
 import { keyFor, keyTarget } from './keys/labels';
 import { type Dir, neighbour } from './keys/nav';
 import { type FetchLike, hasSession, postLogin, sessionGone } from './login';
 import { NotificationStore, type NotifyInfo, type PaneEvent, parsePaneEvent } from './notifications';
-import { type OverlayInfo, type OverlayKind, overlayOf } from './overlay';
+import { type OverlayInfo, type OverlayKind, overlayOf, overlayToggle, overlayVisibleMsg } from './overlay';
 import { NOT_SENT, PasteFlow } from './paste';
 import type { Message, PaneInfo, PaneSize, SplitPaneReq, WebWelcome, WorkspaceState } from './protocol';
 import { type Outcome, Requests, STILL_WORKING } from './requests';
@@ -775,6 +775,7 @@ export class App {
       metaKey: e.metaKey,
       isComposing: e.isComposing,
       altGraph: e.getModifierState('AltGraph'),
+      mac: IS_MAC,
     };
     const d = this.keys.handle(ev, {
       modalOpen: modal,
@@ -950,19 +951,24 @@ export class App {
     // One create per tab at a time: a second Alt+G while the daemon works
     // would ask for the slot twice.
     if (this.overlayBusy.has(tab)) return;
-    const cur = overlayOf(s, tab);
-    const shown = cur !== null && this.overlayShown[tab] === cur.id;
-    if (cur && cur.kind === kind) {
-      this.setOverlayShown(tab, cur.id, !shown);
+    const step = overlayToggle(overlayOf(s, tab), this.overlayShown[tab], kind, this.editable);
+    if (step.do === 'show' || step.do === 'hide') {
+      this.setOverlayShown(tab, step.id, step.do === 'show');
       return;
     }
-    if (!this.editable) {
+    if (step.do === 'refuse') {
       this.showNotice(this.readOnly ? 'read-only connection — that action is disabled' : 'Not connected — nothing was changed');
       return;
     }
-    if (shown && cur) this.setOverlayShown(tab, cur.id, false);
-    // An empty cwd is the daemon's own default directory (git_repos_req).
+    if (step.hide) this.setOverlayShown(tab, step.hide, false);
+    // No cwd means the pane has not reported one yet. Asking the daemon
+    // would have it substitute its OWN default directory, so an overlay
+    // could open on an unrelated repository; the TUI refuses the same way.
     const cwd = s.panes.find((p) => p.id === this.activePane)?.cwd ?? '';
+    if (cwd === '') {
+      this.showNotice('no git repo here');
+      return;
+    }
     this.overlayBusy.add(tab);
     try {
       await this.createOverlay(tab, kind, cwd);
@@ -1003,7 +1009,8 @@ export class App {
     else delete next[tab];
     this.overlayShown = next;
     this.keys?.cancel();
-    if (!this.readOnly) this.conn.send({ type: 'update_pane', payload: { pane_id: paneId, overlay_visible: v } });
+    const msg = overlayVisibleMsg(this.readOnly, paneId, v);
+    if (msg) this.conn.send(msg);
     if (v) this.focus(paneId);
     else this.focusActive();
   }

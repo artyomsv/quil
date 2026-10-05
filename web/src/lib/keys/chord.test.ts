@@ -24,9 +24,18 @@ describe('chordOf', () => {
   it('gives an AltGr character as text, not ctrl+alt (Swiss AltGr+2)', () => {
     expect(chordOf({ ...ev('@', 'Digit2', { ctrlKey: true, altKey: true }), altGraph: true })).toBe('@');
   });
-  it('gives an ASCII Option character other than the key as text (German Mac Option+5)', () => {
-    expect(chordOf(ev('[', 'Digit5', { altKey: true }))).toBe('[');
-    expect(chordOf(ev('@', 'KeyL', { altKey: true }))).toBe('@');
+  it('keeps ctrl+alt on a key that gives its own letter, even with AltGraph reported', () => {
+    expect(chordOf({ ...ev('a', 'KeyA', { ctrlKey: true, altKey: true }), altGraph: true })).toBe('ctrl+alt+a');
+  });
+  it('gives an ASCII Option character other than the key as text on macOS (German Mac Option+5)', () => {
+    expect(chordOf({ ...ev('[', 'Digit5', { altKey: true }), mac: true })).toBe('[');
+    expect(chordOf({ ...ev('@', 'KeyL', { altKey: true }), mac: true })).toBe('@');
+  });
+  it('never composes with Alt off macOS', () => {
+    // AZERTY Windows Alt+1 reports '&'.
+    expect(chordOf(ev('&', 'Digit1', { altKey: true }))).toBe('alt+1');
+    // US Alt+Shift+1 on Windows reports '!'.
+    expect(chordOf(ev('!', 'Digit1', { altKey: true, shiftKey: true }))).toBe('alt+shift+1');
   });
   it('still reads alt with the key own letter or digit as a chord', () => {
     expect(chordOf(ev('h', 'KeyH', { altKey: true }))).toBe('alt+h');

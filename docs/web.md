@@ -151,7 +151,7 @@ The notification list is the same as in the terminal, with the same filter. Pres
 
 ## Overlays
 
-`Alt+G` opens lazygit and `Alt+D` opens hunk over the pane area. Each tab has one overlay at a time. Press the key again to hide it. While an overlay shows, your keys go to it. Hiding it in the browser does not hide it in the terminal. A read-only browser can show or hide an overlay that exists, but cannot start one. A standard browser cannot start one either.
+`Alt+G` opens lazygit and `Alt+D` opens hunk over the pane area. Each tab has one overlay at a time. Press the key again to hide it. If the pane's folder holds several git repositories, a list asks which one, as in the terminal. If the tab's overlay was opened on another repository, the key opens a new one on this pane's repository. While an overlay shows, your keys go to it. Hiding it in the browser does not hide it in the terminal. A read-only browser can show or hide an overlay that exists, but cannot start one. A standard browser cannot start one either.
 
 ## Keys
 
@@ -182,7 +182,7 @@ Opening a browser tab does not change the size your terminal uses. If your termi
 - **Very slow client.** If a browser tab cannot keep up, the daemon may drop some live output for it. Quil reconnects the tab and the screen is correct again after the next repaint, as in the terminal client. The banner says **This tab fell behind — reconnecting**.
 - **Keys the browser keeps.** Ctrl+W, Ctrl+T, Ctrl+N and Ctrl+Tab are used by the browser itself. They never reach a pane. Use the terminal for programs that need them. Quil actions on these keys get another chord (see [Keys](#keys)).
 - **`bindings.toml`.** If you have no `bindings.toml`, the browser and the terminal both use the old `[keybindings]` table in `config.toml`.
-- **Two instance writers.** If the terminal and the browser save instances at the same moment, the last save wins.
+- **Two instance writers.** The terminal and the browser each read the instance file again before they change it, so neither erases what the other saved. Only two saves at the same instant can still lose one. If the file does not parse, both refuse to change it.
 - **Browsers.** Chrome, Edge and Firefox are supported. Safari should work but is not tested.
 - **Tabs.** At most 16 browser tabs at once.
 - **Builds without the web page.** `./scripts/dev.sh cross`, `./scripts/dev.sh image` and the Dockerfile build binaries **without** the web page. There, `quil web` prints "This build has no web UI", and the page reads: "This build of quil has no web UI. Install a release build, or build it with ./scripts/dev.sh build." `./scripts/dev.sh build` and release builds include it.

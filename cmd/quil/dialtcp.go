@@ -207,10 +207,14 @@ func tcpVersionErr(res handshakeResult, addr string) error {
 	if res.ClientSkipped || res.Matched {
 		return nil
 	}
-	reported := res.DaemonVersion
-	if reported == "" {
-		reported = "unknown"
+	// No version at all is a reply that never came (or could not be read),
+	// not a version that differs: calling it a mismatch sends the user off
+	// to upgrade a daemon that may already run this version.
+	if res.DaemonVersion == "" {
+		return fmt.Errorf("no version reply from the daemon at %s — it may be busy or too old to answer; this TUI runs %s",
+			addr, versionpkg.Current())
 	}
+	reported := res.DaemonVersion
 	// The version string is the daemon's own text and ends up on a terminal.
 	return fmt.Errorf("version mismatch: this TUI runs %s, the daemon at %s runs %s — upgrade one of them so both run the same version",
 		versionpkg.Current(), addr, transport.SanitizeForTerminalMessage(reported))

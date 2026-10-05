@@ -231,7 +231,7 @@ func (c *Conn) MarkAuthenticated(a *AuthState) bool {
 	c.releasePendingSlot()
 	// The first Info line for a TCP conn: until now it was anyone on
 	// loopback, logged at Debug only (see acceptTCP).
-	logger.Info("ipc: tcp client logged in")
+	logger.Info("ipc: tcp client logged in: peer=%s token=%s", peerLabel(c.raw), a.TokenID)
 	return true
 }
 

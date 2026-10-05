@@ -175,6 +175,11 @@ func TestStartTCP_UnauthenticatedConnsLogNoInfo(t *testing.T) {
 	if got := strings.Count(buf.String(), "tcp client logged in"); got != 1 {
 		t.Fatalf("%d login lines, want 1", got)
 	}
+	// The line names who logged in: the peer and the token, or two logins
+	// from one host read the same in quild.log.
+	if out := buf.String(); !strings.Contains(out, "token=0a1b2c3d") || !strings.Contains(out, "peer=tcp:127.0.0.1:") {
+		t.Fatalf("the login line names neither peer nor token:\n%s", out)
+	}
 }
 
 func TestRefusalLog_ReportsSuppressedCount(t *testing.T) {

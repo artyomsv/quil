@@ -510,6 +510,20 @@ func TestRedialTCP_VersionMismatch(t *testing.T) {
 	}
 }
 
+// A version reply that never came is not a mismatch: the error says no reply
+// arrived, and only a reported version is called a mismatch.
+func TestTCPVersionErr_NoReplyIsNotAMismatch(t *testing.T) {
+	asReleaseBuild(t, "1.80.0")
+	err := tcpVersionErr(handshakeResult{DaemonUnknown: true}, "127.0.0.1:7000")
+	if err == nil || strings.Contains(err.Error(), "mismatch") || !strings.Contains(err.Error(), "no version reply") {
+		t.Fatalf("err = %v, want \"no version reply\" and no mismatch claim", err)
+	}
+	err = tcpVersionErr(handshakeResult{DaemonVersion: "1.53.0", Cmp: 1}, "127.0.0.1:7000")
+	if err == nil || !strings.Contains(err.Error(), "version mismatch") || !strings.Contains(err.Error(), "1.53.0") {
+		t.Fatalf("err = %v, want a version mismatch naming 1.53.0", err)
+	}
+}
+
 // signedLogin is a listener that completes the login for tok and grants rights.
 func signedLogin(t *testing.T, tok, rights string) string {
 	t.Helper()

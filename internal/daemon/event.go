@@ -60,7 +60,12 @@ func newEventQueue(max int) *eventQueue {
 //
 // Aggregation only applies when PaneID is non-empty so daemon-level events
 // (without a pane source) never collapse together.
-func (q *eventQueue) Push(e PaneEvent) {
+//
+// It returns the event as QUEUED — after aggregation, with the old ID and the
+// bumped count — and that is what must be broadcast. The caller's copy still
+// carries the fresh ID, and a client that dedups by ID (the TUI sidebar, the
+// browser's list) would show it as a second card.
+func (q *eventQueue) Push(e PaneEvent) PaneEvent {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -104,6 +109,7 @@ func (q *eventQueue) Push(e PaneEvent) {
 		}
 	}
 	q.watchers = remaining
+	return e
 }
 
 // Dismiss removes an event by ID.

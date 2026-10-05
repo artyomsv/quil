@@ -43,6 +43,7 @@
     entries?: { name: string; is_dir: boolean }[];
     roots?: string[];
     truncated?: boolean;
+    roots_truncated?: boolean;
   }
 
   const listing = $derived((view.lists.folders.reply?.payload ?? null) as Listing | null);
@@ -72,15 +73,21 @@
     />
   </label>
 
-  {#if repos.length > 0}
+  {#if view.plugin?.discover === 'git'}
     <div class="group">
       <span class="caption">Repositories</span>
+      {#if view.lists.repos.status === 'scanning'}
+        <span class="caption">scanning…</span>
+      {:else if view.lists.repos.status === 'failed'}
+        <span class="failed">failed: {sanitizeRemoteText(view.lists.repos.error ?? '')}</span>
+        <button class="chip" onclick={() => onretry('repos')}>Retry</button>
+      {:else if view.lists.repos.status === 'empty'}
+        <span class="caption">no git repositories here</span>
+      {/if}
       {#each repos as r (r)}
         <button class="chip" onclick={() => onfolder(r)}>{sanitizeRemoteText(r)}</button>
       {/each}
     </div>
-  {:else if view.plugin?.discover === 'git' && view.lists.repos.status === 'scanning'}
-    <span class="caption">Looking for repositories…</span>
   {/if}
 
   {#if recent.length > 0}
@@ -96,7 +103,7 @@
     {#if view.lists.folders.status === 'scanning'}
       <span class="caption">scanning…</span>
     {:else if view.lists.folders.status === 'failed'}
-      <span class="failed">failed: {view.lists.folders.error}</span>
+      <span class="failed">failed: {sanitizeRemoteText(view.lists.folders.error ?? '')}</span>
       <button class="chip" onclick={() => onretry('folders')}>Retry</button>
     {:else if listing}
       {#if listing.parent}
@@ -113,6 +120,9 @@
       {/if}
       {#if listing.truncated}
         <span class="caption">(list cut short)</span>
+      {/if}
+      {#if listing.roots_truncated}
+        <span class="caption">(some drives did not answer)</span>
       {/if}
     {/if}
   </div>

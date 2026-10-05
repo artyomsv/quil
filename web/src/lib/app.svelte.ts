@@ -1,5 +1,5 @@
 import { cwdForSplit, nextTabColor, projectRootOf, quickSplit } from './actions';
-import { askedTabShown, pickActive, unseenToClear } from './activepane';
+import { askedTabShown, pickActive, successorOf, unseenToClear } from './activepane';
 import { AgentStatePoller } from './agentstate';
 import { attachRefusedBanner, bannerFor, type BannerState, isLoginRequired } from './banner';
 import {
@@ -174,6 +174,9 @@ export class App {
   // The last output generation seen per pane: a higher one is a restart.
   private readonly gens = new Map<string, bigint>();
   private noticeTimer: number | undefined;
+  // The preparing placeholder a create was answered with, until the pane
+  // that replaces it arrives.
+  private followFocus = '';
 
   constructor() {
     const send = (m: Message): void => this.conn.send(m);
@@ -411,11 +414,20 @@ export class App {
     }
     this.terminals.stateApplied(verdict === 'apply-new-run');
     this.fresh = true;
+    const prev = this.state;
     this.state = s;
     this.live = true;
     for (const t of s.tabs) this.drag.stateArrived(t.id, t.layout_rev);
     const placed = placedPanes(s).map((p) => p.id);
-    this.activePane = pickActive(this.activePane, placed);
+    // A replaced active pane hands the part to the pane in its slot.
+    this.activePane = pickActive(successorOf(prev, s, this.activePane) || this.activePane, placed);
+    // A preparing worktree's placeholder was focused at the create; the pane
+    // that replaces it takes the focus.
+    if (this.followFocus !== '') {
+      const next = successorOf(prev, s, this.followFocus);
+      if (next !== '') this.focus(next);
+      if (next !== '' || !s.panes.some((p) => p.id === this.followFocus)) this.followFocus = '';
+    }
     // A dialog about a pane or tab this state no longer shows closes.
     if (this.paneAsk && !placed.includes(this.paneAsk.paneId)) this.paneAsk = null;
     if (this.tabAsk && !askedTabShown(s, this.tabAsk.tabId)) this.tabAsk = null;
@@ -544,6 +556,7 @@ export class App {
     if (id) {
       this.activePane = id;
       this.focus(id);
+      if ((out.ok ? (out.reply?.payload as { preparing?: boolean } | undefined)?.preparing : false) === true) this.followFocus = id;
     }
     return out;
   }

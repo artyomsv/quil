@@ -74,7 +74,12 @@ func newCatalog(dir string) *catalog {
 	return c
 }
 
-// fingerprint names every *.toml with its size and modification time.
+// fingerprint names every *.toml with its size and modification time. Its
+// limit: an edit that keeps a file's size and lands within the filesystem's
+// mtime resolution of the previous write (coarse on some filesystems), or a
+// tool that restores the old mtime, is not seen until the next change. A
+// plugin edit is rare and a later one is seen; hashing every file on every
+// /api/client was not worth it.
 func (c *catalog) fingerprint() string {
 	if c.dir == "" {
 		return ""
@@ -162,16 +167,17 @@ func (c *catalog) argTemplate(name string) ([]string, bool) {
 	return append([]string(nil), p.Command.ArgTemplate...), true
 }
 
-// formFieldNames is the set of field keys an instance of name may carry; nil
-// for an unknown plugin or one that manages no instances.
-func (c *catalog) formFieldNames(name string) map[string]bool {
+// formFields maps each field key an instance of name may carry to whether
+// the form requires it; nil for an unknown plugin or one that manages no
+// instances.
+func (c *catalog) formFields(name string) map[string]bool {
 	p := c.registry().Get(name)
 	if p == nil || len(p.Command.FormFields) == 0 {
 		return nil
 	}
 	out := map[string]bool{}
 	for _, f := range p.Command.FormFields {
-		out[f.Name] = true
+		out[f.Name] = f.Required
 	}
 	return out
 }

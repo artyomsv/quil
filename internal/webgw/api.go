@@ -7,6 +7,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/artyomsv/quil/internal/instances"
@@ -145,15 +146,20 @@ type instanceBody struct {
 var errBadInstance = errors.New("bad instance")
 
 // validInstance accepts only a plugin that manages instances, field keys from
-// its form, and bounded valid UTF-8 values.
+// its form with every required one filled, and bounded valid UTF-8 values.
 func (s *Server) validInstance(b instanceBody) error {
-	allowed := s.catalog.formFieldNames(b.Plugin)
+	allowed := s.catalog.formFields(b.Plugin)
 	if len(allowed) == 0 || b.Name == "" || len(b.Name) > instNameMax || !utf8.ValidString(b.Name) ||
 		len(b.Description) > instValueMax || !utf8.ValidString(b.Description) || len(b.Fields) > instFieldsMax {
 		return errBadInstance
 	}
 	for k, v := range b.Fields {
-		if !allowed[k] || len(v) > instValueMax || !utf8.ValidString(v) {
+		if _, ok := allowed[k]; !ok || len(v) > instValueMax || !utf8.ValidString(v) {
+			return errBadInstance
+		}
+	}
+	for k, required := range allowed {
+		if required && strings.TrimSpace(b.Fields[k]) == "" {
 			return errBadInstance
 		}
 	}

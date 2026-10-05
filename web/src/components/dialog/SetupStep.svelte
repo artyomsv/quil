@@ -21,16 +21,8 @@
   // Not a path: every listed worktree is an absolute path.
   const NEW_BRANCH = 'new-branch';
   let reason = $state('');
-  // The worktree row's "New branch…" was picked; the branch name is typed
-  // next to it. A folder change clears it with the rest of the row.
-  let newMode = $state(false);
-  let lastCwd = '';
-  $effect(() => {
-    if (view.cwd !== lastCwd) {
-      lastCwd = view.cwd;
-      newMode = false;
-    }
-  });
+  // The branch field's own message, set on Enter (Continue checks again).
+  let branchMsg = $state('');
 
   interface KubeList {
     contexts?: { name: string; namespace?: string; current?: boolean }[];
@@ -48,21 +40,12 @@
   const wt = $derived((view.lists.worktrees.reply?.payload as WorktreeList | undefined) ?? {});
   const worktrees = $derived((wt.worktrees ?? []).filter((w) => !w.bare && !w.prunable));
   const sessions = $derived((view.lists.sessions.reply?.payload as SessionList | undefined)?.sessions ?? []);
-  const worktreeChoice = $derived(newMode || view.newBranch !== '' ? NEW_BRANCH : view.existingWorktree);
+  const worktreeChoice = $derived(view.newBranchMode ? NEW_BRANCH : view.existingWorktree);
 
   function pickWorktree(v: string): void {
-    if (v === NEW_BRANCH) {
-      newMode = true;
-      act((d) => {
-        d.existingWorktree = '';
-      });
-    } else {
-      newMode = false;
-      act((d) => {
-        d.existingWorktree = v;
-        d.newBranch = '';
-      });
-    }
+    branchMsg = '';
+    if (v === NEW_BRANCH) act((d) => d.chooseNewBranch());
+    else act((d) => d.chooseWorktree(v));
     onworktree();
   }
 
@@ -113,7 +96,7 @@
       {#if view.lists.worktrees.status === 'scanning'}
         <span class="caption">Worktrees: scanning…</span>
       {:else if view.lists.worktrees.status === 'failed'}
-        <span class="failed">Worktrees: failed: {view.lists.worktrees.error}</span>
+        <span class="failed">Worktrees: failed: {sanitizeRemoteText(view.lists.worktrees.error ?? '')}</span>
         <button class="chip" onclick={() => onretry('worktrees')}>Retry</button>
       {:else if wt.repo}
         <label class="name">
@@ -134,9 +117,21 @@
               value={view.newBranch}
               autocomplete="off"
               spellcheck="false"
-              oninput={(e) => act((d) => (d.newBranch = e.currentTarget.value))}
+              oninput={(e) => {
+                branchMsg = '';
+                act((d) => (d.newBranch = e.currentTarget.value));
+              }}
+              onkeydown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  branchMsg = view.newBranchError;
+                }
+              }}
             />
           </label>
+          {#if branchMsg}
+            <span class="failed" role="alert">{branchMsg}</span>
+          {/if}
         {/if}
       {:else if view.lists.worktrees.status !== 'idle'}
         <span class="caption">Worktree: not a git repository</span>
@@ -163,8 +158,17 @@
         </label>
       {/if}
     </div>
-  {:else if view.plugin?.prompts_cwd && view.lists.sandbox.status === 'failed'}
-    <span class="caption">Sandbox unavailable: {view.lists.sandbox.error}</span>
+  {:else if view.plugin?.prompts_cwd}
+    <div class="row">
+      {#if view.lists.sandbox.status === 'scanning'}
+        <span class="caption">Sandbox: checking Docker…</span>
+      {:else if view.lists.sandbox.status === 'failed'}
+        <span class="caption">Sandbox unavailable: <span class="failed">{sanitizeRemoteText(view.lists.sandbox.error ?? '')}</span></span>
+        <button class="chip" onclick={() => onretry('sandbox')}>Retry</button>
+      {:else if view.lists.sandbox.status === 'ready'}
+        <span class="caption">Sandbox: Docker is not available on this machine</span>
+      {/if}
+    </div>
   {/if}
 
   {#if view.showSignIn}
@@ -204,7 +208,7 @@
   {/if}
 
   {#if reason || view.error}
-    <p class="error" role="alert">{reason || view.error}</p>
+    <p class="error" role="alert">{sanitizeRemoteText(reason || view.error)}</p>
   {/if}
   <div class="buttons">
     <button class="primary" onclick={cont}>Continue</button>
@@ -217,7 +221,7 @@
   {:else if view.lists[kind].status === 'empty'}
     <span class="caption">{none}</span>
   {:else if view.lists[kind].status === 'failed'}
-    <span class="failed">failed: {view.lists[kind].error}</span>
+    <span class="failed">failed: {sanitizeRemoteText(view.lists[kind].error ?? '')}</span>
     <button class="chip" onclick={() => onretry(kind)}>Retry</button>
   {/if}
 {/snippet}

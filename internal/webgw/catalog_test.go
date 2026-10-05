@@ -91,6 +91,9 @@ func TestCatalog_ListsBuiltinsAndTOMLWithoutCommands(t *testing.T) {
 	if len(got.RawKeys) != 1 || got.RawKeys[0] != "shift+tab" {
 		t.Fatalf("raw keys = %v", got.RawKeys)
 	}
+	if f := c.formFields("e2e-ssh"); !f["name"] || !f["host"] || f["user"] || f["port"] {
+		t.Fatalf("required fields = %v", f)
+	}
 	if args, ok := c.argTemplate("e2e-ssh"); !ok || len(args) != 3 {
 		t.Fatalf("arg template = %v %v", args, ok)
 	}
@@ -108,7 +111,7 @@ func TestCatalog_NoInstancesWithoutFormFields(t *testing.T) {
 	if _, ok := c.argTemplate("terminal"); ok {
 		t.Fatal("terminal manages no instances")
 	}
-	if c.formFieldNames("terminal") != nil || c.formFieldNames("nope") != nil {
+	if c.formFields("terminal") != nil || c.formFields("nope") != nil {
 		t.Fatal("field names for a plugin without a form")
 	}
 }

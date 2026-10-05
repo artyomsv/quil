@@ -56,7 +56,10 @@
     }
     await onrefresh();
     if (!editing && r.instance) {
-      onpick(r.instance.id);
+      // Without full rights the instance is saved but not started.
+      const id = r.instance.id;
+      if (view.canLaunch) onpick(id);
+      else act((d) => d.instanceSaved(id));
       return;
     }
     act((d) => d.instancesChanged(d.info));
@@ -75,6 +78,9 @@
 </script>
 
 {#if view.step === 'instances'}
+  {#if !view.canLaunch}
+    <p class="note">This login may save instances; starting one needs full rights.</p>
+  {/if}
   <div class="list">
     {#if view.canSave}
       <button class="row" onclick={() => act((d) => d.newInstance())}>+ New instance</button>
@@ -208,6 +214,12 @@
   .primary:disabled {
     cursor: default;
     opacity: 0.5;
+  }
+
+  .note {
+    margin: 0 0 8px;
+    color: #7d8392;
+    font-size: 12px;
   }
 
   .error {

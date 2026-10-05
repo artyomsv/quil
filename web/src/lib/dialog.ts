@@ -1,16 +1,21 @@
 import type { ClientInfo, PluginDef, SavedInstance } from './client';
 import type { Message, PaneSpec, Placement, SplitPaneReq } from './protocol';
 import type { Outcome } from './requests';
+import { sanitizeRemoteText } from './sanitize';
 
 // CreateDialog is the browser's create-pane dialog as a pure state machine,
 // mirroring internal/tui/dialog.go: category → plugin (greyed per daemon) →
 // saved instances / their form → setup fields in the TUI's order (folder,
 // kube context, toggles, worktree, sandbox, sign-in, resume) → placement.
 // It sends nothing itself: the view runs each daemon list through Requests
-// and files the answer here, and sends the request `submit` builds.
+// and files the answer here, and sends the request takeRequest hands out.
+//
+// One deliberate difference from the TUI: the resume row is hidden while a
+// new branch is chosen. The daemon looks for the transcript in the new
+// checkout, which does not exist yet, so no listed session could be resumed.
 
 export type Step = 'category' | 'plugin' | 'instances' | 'form' | 'setup' | 'placement' | 'done';
-export type ListKind = 'folders' | 'repos' | 'kube' | 'sessions' | 'worktrees' | 'sandbox';
+export type ListKind = 'plugins' | 'folders' | 'repos' | 'kube' | 'sessions' | 'worktrees' | 'sandbox';
 
 export interface ListState {
   status: 'idle' | 'scanning' | 'ready' | 'empty' | 'failed';
@@ -45,6 +50,7 @@ export const SIGN_IN_CHOICES: { value: string; label: string; detail: string }[]
 // The answer field that holds each list's items; an answer without any is
 // 'empty', never a failure.
 const ITEMS: Record<Exclude<ListKind, 'sandbox'>, string> = {
+  plugins: 'plugins',
   folders: 'entries',
   repos: 'repos',
   kube: 'contexts',
@@ -54,6 +60,45 @@ const ITEMS: Record<Exclude<ListKind, 'sandbox'>, string> = {
 
 export const NEED_IMAGE = 'Enter a container image, or turn the sandbox off';
 export const NEED_FULL_RIGHTS = 'Saved instances start with their own arguments, which need full rights';
+export const NEED_BRANCH = 'Enter a branch name';
+
+// Mirrors internal/gitworktree validate.go: branchRejected, maxBranchLen and
+// the Windows device names, checked on every platform there too.
+const BRANCH_REJECTED = ' ~^:?*[\\\x7f';
+const MAX_BRANCH_LEN = 255;
+const WINDOWS_RESERVED = new Set([
+  'con', 'prn', 'aux', 'nul',
+  'com1', 'com2', 'com3', 'com4', 'com5', 'com6', 'com7', 'com8', 'com9',
+  'lpt1', 'lpt2', 'lpt3', 'lpt4', 'lpt5', 'lpt6', 'lpt7', 'lpt8', 'lpt9',
+]);
+
+// validateBranch is gitworktree.ValidateBranch, same order and same words,
+// so the dialog refuses what the daemon would refuse, beside the field.
+// '' when the name can be used.
+export function validateBranch(name: string): string {
+  if (name.trim() === '') return 'branch name is empty';
+  if (name.startsWith('-')) return 'branch name may not start with "-" — it would read as a flag';
+  if (name.startsWith('/') || name.endsWith('/')) return 'branch name may not start or end with "/"';
+  if (name.includes('//')) return 'branch name may not contain "//"';
+  if (name.includes('..')) return 'branch name may not contain ".."';
+  if (name.includes('@{')) return 'branch name may not contain "@{"';
+  if (name === '@') return 'branch name may not be "@"';
+  if (name.endsWith('.')) return 'branch name may not end with "."';
+  if (new TextEncoder().encode(name).length > MAX_BRANCH_LEN) return `branch name is longer than ${MAX_BRANCH_LEN} characters`;
+  for (const part of name.split('/')) {
+    if (part.startsWith('.')) return 'no part of a branch name may start with "."';
+    if (part.endsWith('.lock')) return 'no part of a branch name may end in ".lock"';
+    const dot = part.indexOf('.');
+    if (WINDOWS_RESERVED.has((dot >= 0 ? part.slice(0, dot) : part).toLowerCase())) {
+      return `"${part}" is a reserved device name on Windows`;
+    }
+  }
+  for (const ch of name) {
+    const c = ch.codePointAt(0) ?? 0;
+    if (c < 0x20 || BRANCH_REJECTED.includes(ch)) return `branch name may not contain ${JSON.stringify(ch)}`;
+  }
+  return '';
+}
 
 // enforceGroups is internal/tui/dialog.go enforceToggleGroups: winner >= 0
 // turns off the other members of its group; -1 keeps the LAST checked member
@@ -80,6 +125,26 @@ function needsSetup(p: PluginDef | null): boolean {
   return !!p && (!!p.prompts_cwd || (p.toggles?.length ?? 0) > 0 || p.discover === 'kube' || !!p.sessions);
 }
 
+function hasForm(p: PluginDef | null | undefined): boolean {
+  return (p?.form_fields?.length ?? 0) > 0;
+}
+
+// availableFrom builds the availability map from a plugin_list_req answer.
+// A daemon that did not answer (too old for the request) keeps every plugin
+// offered — the TUI's rule: a wrong offer fails loudly at spawn, a wrong
+// grey-out hides a working tool silently.
+export function availableFrom(info: ClientInfo, out: Outcome): Record<string, boolean> {
+  const listed = out.ok ? (out.reply?.payload as { plugins?: { name?: unknown; available?: unknown }[] } | undefined)?.plugins : undefined;
+  if (!Array.isArray(listed) || listed.length === 0) {
+    return Object.fromEntries(info.plugins.map((p) => [p.name, true]));
+  }
+  const avail: Record<string, boolean> = {};
+  for (const p of listed) {
+    if (typeof p.name === 'string') avail[p.name] = p.available === true;
+  }
+  return avail;
+}
+
 export class CreateDialog {
   step: Step = 'category';
   category = '';
@@ -96,6 +161,8 @@ export class CreateDialog {
   // it. Shown in the worktree row only; the daemon resolves the repository
   // from cwd itself (R-A), so it is never sent.
   worktreeRoot = '';
+  // "New branch…" is chosen in the worktree row; newBranch is its name.
+  newBranchMode = false;
   newBranch = '';
   sandboxOn = false;
   sandboxImage: string;
@@ -105,7 +172,12 @@ export class CreateDialog {
   // another folder is dropped at submit.
   listedSessionsFor = '';
   request: SplitPaneReq | null = null;
+  // Availability per plugin on THIS daemon (plugin_list_req); a plugin the
+  // daemon did not list is unavailable there (spec §5.2, the TUI's rule).
+  // Every plugin is offered until the daemon answers, and when it cannot.
+  available: Record<string, boolean>;
   lists: Record<ListKind, ListState> = {
+    plugins: { status: 'idle' },
     folders: { status: 'idle' },
     repos: { status: 'idle' },
     kube: { status: 'idle' },
@@ -115,18 +187,29 @@ export class CreateDialog {
   };
   // One number per list: an answer to an older request than the newest is
   // dropped (the user moved on while it was in flight).
-  private readonly tokens: Record<ListKind, number> = { folders: 0, repos: 0, kube: 0, sessions: 0, worktrees: 0, sandbox: 0 };
+  private readonly tokens: Record<ListKind, number> = {
+    plugins: 0,
+    folders: 0,
+    repos: 0,
+    kube: 0,
+    sessions: 0,
+    worktrees: 0,
+    sandbox: 0,
+  };
+  // The request was handed out (takeRequest); it is handed out once.
+  private taken = false;
 
   constructor(
     public info: ClientInfo,
-    // Availability per plugin on THIS daemon (plugin_list_req); a plugin the
-    // daemon did not list is unavailable there (spec §5.2, the TUI's rule).
-    readonly available: Record<string, boolean>,
+    // null: the daemon has not answered plugin_list_req yet (listed('plugins')
+    // files it); every plugin is offered meanwhile.
+    available: Record<string, boolean> | null,
     readonly open: DialogOpen,
   ) {
     this.cwd = open.defaultCwd;
     this.sandboxImage = info.sandbox.image_default;
     this.signIn = SIGN_IN[info.sandbox.sign_in_default] ? info.sandbox.sign_in_default : 'browser';
+    this.available = available ?? availableFrom(info, { ok: false, code: 'idle', error: '' });
   }
 
   // categories in the gateway's order (the TUI's), only those with a plugin;
@@ -156,8 +239,14 @@ export class CreateDialog {
     return this.open.mode === 'replace' ? ['replace'] : ['right', 'below', 'replace'];
   }
 
+  // Standard rights may save instances (spec §4.2); starting one, which
+  // carries its raw arguments, is full-only at the daemon.
   get canSaveInstances(): boolean {
     return this.info.rights === 'full' || this.info.rights === 'standard';
+  }
+
+  get canLaunchInstances(): boolean {
+    return this.info.rights === 'full';
   }
 
   get needsSetup(): boolean {
@@ -188,15 +277,32 @@ export class CreateDialog {
     return this.showSandbox && this.sandboxOn && !!this.plugin?.uses_claude_auth;
   }
 
-  // A resume list is scoped to the folder the pane runs in. A new branch
-  // runs in a checkout that does not exist yet, so it has no sessions.
+  // A resume list is scoped to the folder the pane runs in; see the note at
+  // the top about a new branch.
   get showSession(): boolean {
-    return !!this.plugin?.sessions && !this.sandboxOn && this.newBranch === '';
+    return !!this.plugin?.sessions && !this.sandboxOn && !this.newBranchMode;
   }
 
   // The folder the pane will run in: an existing worktree, else the folder.
   get spawnDir(): string {
     return this.existingWorktree || this.cwd;
+  }
+
+  // The branches the worktree listing reported (a new branch must not be one).
+  get branches(): string[] {
+    const b = (this.lists.worktrees.reply?.payload as { branches?: unknown } | undefined)?.branches;
+    return Array.isArray(b) ? b.filter((x): x is string => typeof x === 'string') : [];
+  }
+
+  // newBranchError is the TUI's validateNewBranch: '' when the name can be
+  // used, else the words to show beside the field. Run on Enter in the field
+  // and again on Continue, so neither route lets a bad name through.
+  get newBranchError(): string {
+    if (this.newBranch.trim() === '') return NEED_BRANCH;
+    const bad = validateBranch(this.newBranch);
+    if (bad !== '') return bad;
+    if (this.branches.includes(this.newBranch)) return `branch ${sanitizeRemoteText(this.newBranch)} already exists`;
+    return '';
   }
 
   pickCategory(key: string): void {
@@ -208,28 +314,33 @@ export class CreateDialog {
   pickPlugin(name: string): boolean {
     const p = this.info.plugins.find((x) => x.name === name);
     if (!p || !this.available[name]) return false;
-    // The daemon refuses instance arguments from a standard login; say so
-    // before the user fills a form for nothing (spec §4.2).
-    if ((p.form_fields?.length ?? 0) > 0 && this.info.rights !== 'full') {
+    if (hasForm(p) && !this.canSaveInstances && !this.canLaunchInstances) {
       this.error = NEED_FULL_RIGHTS;
       return false;
     }
     this.error = '';
     this.plugin = p;
     this.instanceId = '';
-    if ((p.form_fields?.length ?? 0) > 0) {
+    if (hasForm(p)) {
       this.editing = '';
-      this.step = (this.info.instances[name]?.length ?? 0) > 0 ? 'instances' : 'form';
+      this.step = (this.info.instances[name]?.length ?? 0) > 0 || !this.canSaveInstances ? 'instances' : 'form';
       return true;
     }
     this.enterSetupOrSplit();
     return true;
   }
 
-  pickInstance(id: string): void {
+  // pickInstance starts the pane with a saved instance; a login without full
+  // rights is told so here rather than refused by the daemon after the send.
+  pickInstance(id: string): boolean {
+    if (!this.canLaunchInstances) {
+      this.error = NEED_FULL_RIGHTS;
+      return false;
+    }
     this.instanceId = id;
     this.error = '';
     this.enterSetupOrSplit();
+    return true;
   }
 
   // newInstance and editInstance open the form.
@@ -246,9 +357,15 @@ export class CreateDialog {
   }
 
   // instanceSaved is called after the form's POST /api/instances answered:
-  // a new instance goes on to setup, as in the TUI.
+  // a new instance goes on to setup, as in the TUI — or, without the rights
+  // to start it, back to the list, saying why.
   instanceSaved(id: string): void {
-    this.pickInstance(id);
+    if (this.canLaunchInstances) {
+      this.pickInstance(id);
+      return;
+    }
+    this.instancesChanged(this.info);
+    this.error = `Saved. ${NEED_FULL_RIGHTS}`;
   }
 
   // instancesChanged takes a fresh instance list (after an edit or delete)
@@ -257,7 +374,8 @@ export class CreateDialog {
     this.info = info;
     const name = this.plugin?.name ?? '';
     this.editing = '';
-    this.step = (info.instances[name]?.length ?? 0) > 0 ? 'instances' : 'form';
+    this.error = '';
+    this.step = (info.instances[name]?.length ?? 0) > 0 || !this.canSaveInstances ? 'instances' : 'form';
   }
 
   private enterSetupOrSplit(): void {
@@ -284,15 +402,33 @@ export class CreateDialog {
     if (cwd === this.cwd) return;
     this.cwd = cwd;
     this.existingWorktree = '';
+    this.newBranchMode = false;
     this.newBranch = '';
     this.worktreeRoot = '';
     this.resumeId = '';
+  }
+
+  // chooseWorktree picks the worktree row: '' (none — this folder), a listed
+  // worktree's path, or (chooseNewBranch) a new branch.
+  chooseWorktree(path: string): void {
+    this.existingWorktree = path;
+    this.newBranchMode = false;
+    this.newBranch = '';
+  }
+
+  chooseNewBranch(): void {
+    this.existingWorktree = '';
+    this.newBranchMode = true;
   }
 
   // continueSetup returns '' or the reason the setup cannot be submitted.
   continueSetup(): string {
     if (this.sandboxOn && this.sandboxImage.trim() === '') return NEED_IMAGE;
     if (this.showFolder && this.cwd.trim() === '') return 'Choose a folder';
+    if (this.newBranchMode) {
+      const bad = this.newBranchError;
+      if (bad !== '') return bad;
+    }
     if (this.resumeId !== '' && this.listedSessionsFor !== this.spawnDir) this.resumeId = '';
     this.advance();
     return '';
@@ -301,27 +437,41 @@ export class CreateDialog {
   private advance(): void {
     this.error = '';
     if (this.open.mode === 'new_tab') {
-      this.request = this.build('new_tab');
-      this.step = 'done';
+      this.done(this.build('new_tab'));
       return;
     }
     this.step = 'placement';
   }
 
-  submit(placement: Placement): SplitPaneReq | null {
-    if (this.step !== 'placement' && this.step !== 'done') return null;
-    if (this.step === 'placement' && !this.placements.includes(placement)) return null;
-    this.request = this.build(placement);
+  private done(req: SplitPaneReq): void {
+    this.request = req;
+    this.taken = false;
     this.step = 'done';
+  }
+
+  submit(placement: Placement): SplitPaneReq | null {
+    if (this.step !== 'placement') return null;
+    if (!this.placements.includes(placement)) return null;
+    this.done(this.build(placement));
+    return this.request;
+  }
+
+  // takeRequest hands out the finished request exactly once: whatever the
+  // view does afterwards (a list answer landing late, a second click), the
+  // same create never goes out twice.
+  takeRequest(): SplitPaneReq | null {
+    if (this.step !== 'done' || this.taken || !this.request) return null;
+    this.taken = true;
     return this.request;
   }
 
   // refused takes the dialog back to the step the request was made from, to
   // show why and let the user change it.
   refused(error: string): void {
-    this.error = error;
+    this.error = sanitizeRemoteText(error);
     this.request = null;
-    this.step = this.open.mode === 'new_tab' ? (this.needsSetup ? 'setup' : 'plugin') : 'placement';
+    this.taken = false;
+    this.step = this.open.mode === 'new_tab' ? (this.needsSetup ? 'setup' : hasForm(this.plugin) ? 'instances' : 'plugin') : 'placement';
   }
 
   private build(placement: Placement): SplitPaneReq {
@@ -333,9 +483,9 @@ export class CreateDialog {
     if (p.discover === 'kube' && this.kubeContext) pane.kube_context = this.kubeContext;
     // R-A: a new branch is {branch} — the daemon resolves the repository from
     // cwd; an existing worktree is {existing_path} (and the cwd, which the
-    // page always sends).
+    // page always sends). continueSetup has checked the branch name.
     if (this.existingWorktree) pane.worktree = { existing_path: this.existingWorktree };
-    else if (this.newBranch) pane.worktree = { branch: this.newBranch.trim() };
+    else if (this.newBranchMode) pane.worktree = { branch: this.newBranch };
     if (this.sandboxOn) pane.sandbox = { image: this.sandboxImage.trim(), ...(SIGN_IN[this.signIn] ?? SIGN_IN.browser) };
     if (this.showSession && this.resumeId) pane.resume_session_id = this.resumeId;
     if (placement === 'new_tab') {
@@ -360,10 +510,10 @@ export class CreateDialog {
         this.step = (this.info.instances[this.plugin?.name ?? '']?.length ?? 0) > 0 ? 'instances' : 'plugin';
         return true;
       case 'setup':
-        this.step = (this.plugin?.form_fields?.length ?? 0) > 0 ? 'instances' : 'plugin';
+        this.step = hasForm(this.plugin) ? 'instances' : 'plugin';
         return true;
       case 'placement':
-        this.step = this.needsSetup ? 'setup' : (this.plugin?.form_fields?.length ?? 0) > 0 ? 'instances' : 'plugin';
+        this.step = this.needsSetup ? 'setup' : hasForm(this.plugin) ? 'instances' : 'plugin';
         return true;
       default:
         return false;
@@ -380,11 +530,13 @@ export class CreateDialog {
   // listed files one daemon list's answer. A single-flight refusal or any
   // failure offers a retry; an answer with nothing in it is 'empty', never
   // shown as a failure (and vice versa). An answer to an older request than
-  // the newest of its kind is dropped.
+  // the newest of its kind is dropped. Error text comes from a daemon the
+  // user may not control, so it is kept sanitized.
   listed(kind: ListKind, out: Outcome, token?: number): void {
     if (token !== undefined && token !== this.tokens[kind]) return;
+    if (kind === 'plugins') this.available = availableFrom(this.info, out);
     if (!out.ok) {
-      this.lists[kind] = { status: 'failed', error: out.error, retry: true };
+      this.lists[kind] = { status: 'failed', error: sanitizeRemoteText(out.error), retry: true };
       return;
     }
     const p = (out.reply?.payload ?? {}) as Record<string, unknown>;
@@ -401,22 +553,6 @@ export class CreateDialog {
   }
 }
 
-// availableFrom builds the availability map from a plugin_list_req answer.
-// A daemon that did not answer (too old for the request) keeps every plugin
-// offered — the TUI's rule: a wrong offer fails loudly at spawn, a wrong
-// grey-out hides a working tool silently.
-export function availableFrom(info: ClientInfo, out: Outcome): Record<string, boolean> {
-  const listed = out.ok ? (out.reply?.payload as { plugins?: { name?: unknown; available?: unknown }[] } | undefined)?.plugins : undefined;
-  if (!Array.isArray(listed) || listed.length === 0) {
-    return Object.fromEntries(info.plugins.map((p) => [p.name, true]));
-  }
-  const avail: Record<string, boolean> = {};
-  for (const p of listed) {
-    if (typeof p.name === 'string') avail[p.name] = p.available === true;
-  }
-  return avail;
-}
-
 // DialogView is a plain copy of everything the view draws: the class is not
 // reactive, so the component takes a fresh view after every change.
 export interface DialogView {
@@ -430,12 +566,15 @@ export interface DialogView {
   instances: SavedInstance[];
   editing: string;
   canSave: boolean;
+  canLaunch: boolean;
   error: string;
   cwd: string;
   toggles: boolean[];
   kubeContext: string;
   existingWorktree: string;
+  newBranchMode: boolean;
   newBranch: string;
+  newBranchError: string;
   worktreeRoot: string;
   sandboxOn: boolean;
   sandboxImage: string;
@@ -463,12 +602,15 @@ export function viewOf(d: CreateDialog): DialogView {
     instances: d.plugin ? [...(d.info.instances[d.plugin.name] ?? [])] : [],
     editing: d.editing,
     canSave: d.canSaveInstances,
+    canLaunch: d.canLaunchInstances,
     error: d.error,
     cwd: d.cwd,
     toggles: [...d.toggles],
     kubeContext: d.kubeContext,
     existingWorktree: d.existingWorktree,
+    newBranchMode: d.newBranchMode,
     newBranch: d.newBranch,
+    newBranchError: d.newBranchMode ? d.newBranchError : '',
     worktreeRoot: d.worktreeRoot,
     sandboxOn: d.sandboxOn,
     sandboxImage: d.sandboxImage,

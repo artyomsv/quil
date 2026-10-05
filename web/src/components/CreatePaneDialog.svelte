@@ -1,7 +1,9 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import type { App } from '../lib/app.svelte';
-  import { availableFrom, CreateDialog, type DialogView, type ListKind, viewOf } from '../lib/dialog';
+  import { CreateDialog, type DialogOpen, type DialogView, type ListKind, viewOf } from '../lib/dialog';
+  import type { SplitPaneReq } from '../lib/protocol';
+  import { sanitizeRemoteText } from '../lib/sanitize';
   import type { Placement } from '../lib/protocol';
   import InstanceStep from './dialog/InstanceStep.svelte';
   import PlacementStep from './dialog/PlacementStep.svelte';
@@ -18,21 +20,32 @@
   // act(), which takes a fresh view of it for the template.
   let dlg: CreateDialog | null = null;
   let view = $state.raw<DialogView | null>(null);
-  let sending = false;
-  // Set once the pane was asked for and the dialog is going away.
+  // The dialog this component was opened for, and whether it has gone: an
+  // answer that lands after it closed must not touch a NEWER dialog.
+  let opened: DialogOpen | null = null;
   let closed = false;
   let root: HTMLDivElement | undefined = $state();
 
-  // The request goes out once, when the dialog ENTERS its last step: a list
-  // answer that lands afterwards (a slow docker probe) changes nothing.
+  onDestroy(() => {
+    closed = true;
+  });
+
+  // act changes the machine and takes a fresh view. The machine hands its
+  // finished request out once (takeRequest), so nothing that runs later — a
+  // list answer that lands after the submit — can send it again.
   function act<T>(f: (d: CreateDialog) => T): T | undefined {
     const d = dlg;
     if (!d || closed) return undefined;
-    const was = d.step;
     const r = f(d);
     view = viewOf(d);
-    if (d.step === 'done' && was !== 'done' && !sending) void finish(d);
+    const req = d.takeRequest();
+    if (req) void finish(req);
     return r;
+  }
+
+  // close closes this dialog, never one opened after it.
+  function close(): void {
+    if (!closed && app.dialog === opened) app.closeDialog();
   }
 
   const TITLES: Record<string, string> = {
@@ -48,15 +61,13 @@
 
   onMount(() => {
     const info = app.client;
-    const open = app.dialog;
-    if (!info || !open) return;
-    void (async () => {
-      // Availability is this daemon's answer (spec §5.2); a daemon too old to
-      // answer keeps every plugin offered.
-      const out = await app.daemonList('plugin_list_req', {});
-      dlg = new CreateDialog(info, availableFrom(info, out), open);
-      view = viewOf(dlg);
-    })();
+    opened = app.dialog;
+    if (!info || !opened) return;
+    dlg = new CreateDialog(info, null, opened);
+    view = viewOf(dlg);
+    // Availability is this daemon's answer (spec §5.2); a daemon too old to
+    // answer keeps every plugin offered.
+    void ask('plugins', 'plugin_list_req', {});
   });
 
   $effect(() => {
@@ -127,6 +138,9 @@
     const d = dlg;
     if (!d) return;
     switch (kind) {
+      case 'plugins':
+        void ask('plugins', 'plugin_list_req', {});
+        return;
       case 'folders':
         void browse(d.cwd);
         return;
@@ -138,6 +152,12 @@
         return;
       case 'sessions':
         sessionsList();
+        return;
+      case 'repos':
+        if (d.plugin?.discover === 'git') void ask('repos', 'git_repos_req', { cwd: d.cwd });
+        return;
+      case 'worktrees':
+        void ask('worktrees', 'worktree_list_req', { path: d.cwd });
         return;
       default:
         folderLists();
@@ -156,7 +176,7 @@
 
   function back(): void {
     const went = act((d) => d.back());
-    if (!went) app.closeDialog();
+    if (!went) close();
   }
 
   function submit(p: Placement): void {
@@ -172,24 +192,23 @@
     return true;
   }
 
-  async function finish(d: CreateDialog): Promise<void> {
-    const req = d.request;
-    if (!req) return;
-    sending = true;
+  // finish sends the request. sendSplit makes the answered pane active and
+  // focuses it (a preparing worktree's placeholder is followed by the pane
+  // that replaces it), so closing only has to put the dialog away.
+  async function finish(req: SplitPaneReq): Promise<void> {
     const out = await app.sendSplit(req);
-    sending = false;
     // A timeout is "still working": the pane comes when it is ready, and
     // the banner says so.
     if (out.ok || (!out.ok && out.code === 'timeout')) {
+      close();
       closed = true;
-      app.closeDialog();
       return;
     }
     act((x) => x.refused(out.error));
   }
 </script>
 
-<div class="backdrop" data-modal role="presentation" onclick={() => app.closeDialog()}>
+<div class="backdrop" data-modal role="presentation" onclick={close}>
   <div
     class="dialog"
     role="dialog"
@@ -216,7 +235,7 @@
         {/each}
       </div>
     {:else if view.step === 'plugin'}
-      <PluginStep {view} onpick={pickPlugin} />
+      <PluginStep {view} onpick={pickPlugin} onretry={retry} />
     {:else if view.step === 'instances' || view.step === 'form'}
       <InstanceStep {app} {view} {act} onpick={pickInstance} onrefresh={refreshInstances} />
     {:else if view.step === 'setup'}
@@ -235,7 +254,7 @@
       <p class="muted">Creating the pane…</p>
     {/if}
     {#if view && view.step !== 'setup' && view.error}
-      <p class="error" role="alert">{view.error}</p>
+      <p class="error" role="alert">{sanitizeRemoteText(view.error)}</p>
     {/if}
     <div class="buttons">
       <button onclick={back}>{view && view.step !== 'category' && view.step !== 'done' ? 'Back' : 'Cancel'}</button>

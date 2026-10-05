@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/artyomsv/quil/internal/instances"
 )
@@ -73,11 +74,20 @@ func TestServer_ExpandInstance_UsesTheCatalog(t *testing.T) {
 	if _, _, err := s.expandInstance("no-form", "i2"); err == nil {
 		t.Fatal("expanded a plugin that manages no instances")
 	}
-	// The gate holds the same expander: the bridge's limits name it.
-	if s.limits.ExpandInstance == nil {
+	// A tab's gate holds the same expander: a bridge built from the server's
+	// limits expands through the catalog too, on both of its paths.
+	b := newBridge(newFakeDaemon(), s.limits, s.budget, time.Now, func(string, ...any) {})
+	b.setLease("web-x-1")
+	b.gateMu.Lock()
+	expand := b.gate.expand
+	b.gateMu.Unlock()
+	if expand == nil {
 		t.Fatal("the gate has no expander")
 	}
-	if _, args, err := s.limits.ExpandInstance("late-ssh", "i1"); err != nil || len(args) != 1 {
+	if _, args, err := expand("late-ssh", "i1"); err != nil || len(args) != 1 || args[0] != "h" {
 		t.Fatalf("gate expander: %v %v", args, err)
+	}
+	if _, _, err := expand("no-form", "i2"); err == nil {
+		t.Fatal("the gate expanded a plugin that manages no instances")
 	}
 }

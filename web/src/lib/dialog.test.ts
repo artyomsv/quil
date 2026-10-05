@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ClientInfo } from './client';
-import { availableFrom, CreateDialog, enforceGroups, NEED_FULL_RIGHTS, viewOf } from './dialog';
+import { availableFrom, CreateDialog, enforceGroups, NEED_BRANCH, NEED_FULL_RIGHTS, validateBranch, viewOf } from './dialog';
 
 const info: ClientInfo = {
   rights: 'full',
@@ -113,8 +113,9 @@ describe('CreateDialog', () => {
     expect(d.continueSetup()).toBe('Enter a container image, or turn the sandbox off');
     d.sandboxImage = 'img:2';
     expect(d.continueSetup()).toBe('');
-    expect(d.submit('right')?.pane.sandbox).toEqual({ image: 'img:2', auth: 'browser', claude_config: 'shared' });
-    expect(d.submit('right')?.pane.resume_session_id).toBeUndefined();
+    const pane = d.submit('right')?.pane;
+    expect(pane?.sandbox).toEqual({ image: 'img:2', auth: 'browser', claude_config: 'shared' });
+    expect(pane?.resume_session_id).toBeUndefined();
   });
 
   it('the sandbox row needs an available engine; sign-in only for a Claude plugin', () => {
@@ -160,10 +161,11 @@ describe('CreateDialog', () => {
     d.pickCategory('ai');
     d.pickPlugin('claude-code');
     d.existingWorktree = '/repo-wt';
+    d.chooseNewBranch();
     d.newBranch = 'x';
     d.resumeId = 'r';
     d.folderChanged('/other');
-    expect([d.cwd, d.existingWorktree, d.newBranch, d.resumeId]).toEqual(['/other', '', '', '']);
+    expect([d.cwd, d.existingWorktree, d.newBranchMode, d.newBranch, d.resumeId]).toEqual(['/other', '', false, '', '']);
   });
 
   it('worktree: an existing one is {existing_path}; a new branch is {branch} (R-A)', () => {
@@ -172,8 +174,10 @@ describe('CreateDialog', () => {
     a.pickPlugin('claude-code');
     a.cwd = '/repo';
     a.worktreeRoot = '/repo';
-    a.existingWorktree = '/repo-wt';
+    a.chooseNewBranch();
     a.newBranch = 'ignored';
+    a.chooseWorktree('/repo-wt');
+    expect(a.newBranchMode).toBe(false);
     a.continueSetup();
     expect(a.submit('right')?.pane).toEqual(expect.objectContaining({ cwd: '/repo-wt', worktree: { existing_path: '/repo-wt' } }));
     const b = open();
@@ -181,6 +185,7 @@ describe('CreateDialog', () => {
     b.pickPlugin('claude-code');
     b.cwd = '/repo/sub';
     b.worktreeRoot = '/repo';
+    b.chooseNewBranch();
     b.newBranch = 'feat-x';
     expect(b.showSession).toBe(false);
     b.continueSetup();
@@ -189,7 +194,94 @@ describe('CreateDialog', () => {
     expect(pane?.worktree).not.toHaveProperty('repo_root');
   });
 
-  it('instances: a saved one sends only its id; standard rights are refused before the form', () => {
+  it('new branch: a blank or invalid name is refused, never sent as the main checkout', () => {
+    const d = open();
+    d.pickCategory('ai');
+    d.pickPlugin('claude-code');
+    d.listed('worktrees', {
+      ok: true,
+      reply: { type: 'worktree_list_resp', payload: { path: '/repo', repo: true, root: '/repo', worktrees: [{ path: '/repo' }], branches: ['main'] } },
+    });
+    d.chooseNewBranch();
+    const cases: [string, string][] = [
+      ['', NEED_BRANCH],
+      ['   ', NEED_BRANCH],
+      ['-x', 'branch name may not start with "-" — it would read as a flag'],
+      ['a b', 'branch name may not contain " "'],
+      ['feat/.x', 'no part of a branch name may start with "."'],
+      ['x.lock', 'no part of a branch name may end in ".lock"'],
+      ['nul.txt', '"nul.txt" is a reserved device name on Windows'],
+      ['a..b', 'branch name may not contain ".."'],
+      ['main', 'branch main already exists'],
+    ];
+    for (const [name, want] of cases) {
+      d.newBranch = name;
+      expect(d.continueSetup(), name).toBe(want);
+      expect(d.step).toBe('setup');
+      expect(d.request).toBeNull();
+    }
+    d.newBranch = 'feat/x';
+    expect(d.continueSetup()).toBe('');
+    expect(d.submit('right')?.pane.worktree).toEqual({ branch: 'feat/x' });
+  });
+
+  it('validateBranch matches gitworktree.ValidateBranch', () => {
+    expect(validateBranch('feat/x')).toBe('');
+    expect(validateBranch('x.')).toBe('branch name may not end with "."');
+    expect(validateBranch('@')).toBe('branch name may not be "@"');
+    expect(validateBranch('a@{b')).toBe('branch name may not contain "@{"');
+    expect(validateBranch('/a')).toBe('branch name may not start or end with "/"');
+    expect(validateBranch('a//b')).toBe('branch name may not contain "//"');
+    expect(validateBranch('a:b')).toBe('branch name may not contain ":"');
+    expect(validateBranch('x'.repeat(256))).toBe('branch name is longer than 255 characters');
+  });
+
+  it('the request is handed out once, a late list answer included', () => {
+    const d = open();
+    d.pickCategory('terminal');
+    d.pickPlugin('terminal');
+    expect(d.takeRequest()).toBeNull();
+    const req = d.submit('right');
+    expect(d.takeRequest()).toEqual(req);
+    expect(d.takeRequest()).toBeNull();
+    const n = d.scanning('sandbox');
+    d.listed('sandbox', { ok: true, reply: { type: 'sandbox_cap_resp', payload: { available: true } } }, n);
+    expect(d.takeRequest()).toBeNull();
+    expect(d.submit('below')).toBeNull();
+    // A refusal goes back a step; the next submit is a new request.
+    d.refused('no');
+    const again = d.submit('below');
+    expect(again?.placement).toBe('below');
+    expect(d.takeRequest()).toEqual(again);
+    expect(d.takeRequest()).toBeNull();
+  });
+
+  it('daemon error text is kept without bidi or control characters', () => {
+    const RLO = String.fromCodePoint(0x202e);
+    const CSI = String.fromCodePoint(0x9b);
+    const d = open();
+    d.listed('folders', { ok: false, code: 'failed', error: 'no' + RLO + 'pe' + CSI + 'x' });
+    expect(d.lists.folders.error).toBe('nopex');
+    d.pickCategory('terminal');
+    d.pickPlugin('terminal');
+    d.submit('right');
+    d.refused('bad' + RLO);
+    expect(d.error).toBe('bad');
+  });
+
+  it('plugin availability: the daemon answer is filed; a failure offers every plugin with a retry', () => {
+    const d = new CreateDialog(info, null, { mode: 'pane', targetPaneId: 'p1', tabId: 't1', projectId: 'pr1', defaultCwd: '/' });
+    expect(d.available.k9s).toBe(true);
+    const n = d.scanning('plugins');
+    d.listed('plugins', { ok: true, reply: { type: 'plugin_list_resp', payload: { plugins: [{ name: 'terminal', available: true }] } } }, n);
+    expect(d.available).toEqual({ terminal: true });
+    expect(d.lists.plugins.status).toBe('ready');
+    d.listed('plugins', { ok: false, code: 'timeout', error: 'No answer' }, d.scanning('plugins'));
+    expect(d.available.k9s).toBe(true);
+    expect(d.lists.plugins).toMatchObject({ status: 'failed', retry: true });
+  });
+
+  it('instances: a saved one sends only its id; standard rights may save but not start one', () => {
     const d = open();
     d.pickCategory('remote');
     d.pickPlugin('ssh');
@@ -205,9 +297,18 @@ describe('CreateDialog', () => {
       defaultCwd: '/',
     });
     s.pickCategory('remote');
-    expect(s.pickPlugin('ssh')).toBe(false);
-    expect(s.error).toContain('full rights');
+    // Standard may save instances (spec §4.2) but not start one.
+    expect(s.pickPlugin('ssh')).toBe(true);
+    expect(s.step).toBe('instances');
+    expect(s.pickInstance('i1')).toBe(false);
     expect(s.error).toBe(NEED_FULL_RIGHTS);
+    expect(s.step).toBe('instances');
+    s.instanceSaved('n2');
+    expect([s.step, s.error]).toEqual(['instances', 'Saved. ' + NEED_FULL_RIGHTS]);
+    expect(s.request).toBeNull();
+    const none = new CreateDialog({ ...info, rights: '' }, avail, { mode: 'pane', targetPaneId: 'p1', tabId: 't1', projectId: 'pr1', defaultCwd: '/' });
+    none.pickCategory('remote');
+    expect(none.pickPlugin('ssh')).toBe(false);
   });
 
   it('instances: no saved one opens the form; a save goes on; a change returns to the list', () => {

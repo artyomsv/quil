@@ -98,6 +98,9 @@ func TestAPI_Checks(t *testing.T) {
 		{"post with a foreign origin", http.MethodPost, func(r *http.Request) { r.Header.Set("Origin", "http://evil.test") }, 403},
 		{"post as a form", http.MethodPost, func(r *http.Request) { r.Header.Set("Content-Type", "text/plain") }, 415},
 		{"post without key", http.MethodPost, func(r *http.Request) { r.Header.Del(APIKeyHeader) }, 401},
+		// The exact Origin does not excuse a cross-site fetch: both are checked.
+		{"post with this origin but cross-site fetch metadata", http.MethodPost, func(r *http.Request) { r.Header.Set("Sec-Fetch-Site", "cross-site") }, 403},
+		{"post same-site", http.MethodPost, func(r *http.Request) { r.Header.Set("Sec-Fetch-Site", "same-site") }, 403},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -192,7 +195,7 @@ func TestAPI_InstancesCreateEditDelete(t *testing.T) {
 		t.Fatalf("edit not stored: %+v", st)
 	}
 	if got := h.api(http.MethodPut, "/api/instances", s, map[string]any{
-		"plugin": "e2e-ssh", "id": "nope", "name": "x", "fields": map[string]string{"host": "h"},
+		"plugin": "e2e-ssh", "id": "nope", "name": "x", "fields": map[string]string{"name": "x", "host": "h"},
 	}, nil).StatusCode; got != http.StatusNotFound {
 		t.Fatalf("edit of an unknown id: %d, want 404", got)
 	}
@@ -234,12 +237,14 @@ func TestAPI_InstancesRefusals(t *testing.T) {
 	}
 	h2.liveTab(s2)
 	for name, b := range map[string]any{
-		"unknown plugin":  map[string]any{"plugin": "nope", "name": "x", "fields": map[string]string{}},
-		"plugin w/o form": map[string]any{"plugin": "terminal", "name": "x", "fields": map[string]string{}},
-		"unknown field":   map[string]any{"plugin": "e2e-ssh", "name": "x", "fields": map[string]string{"evil": "1"}},
-		"long value":      map[string]any{"plugin": "e2e-ssh", "name": "x", "fields": map[string]string{"host": strings.Repeat("h", 2000)}},
-		"no name":         map[string]any{"plugin": "e2e-ssh", "name": "", "fields": map[string]string{"host": "h"}},
-		"edit without id": map[string]any{"plugin": "e2e-ssh", "name": "x", "fields": map[string]string{"host": "h"}, "put": true},
+		"unknown plugin":   map[string]any{"plugin": "nope", "name": "x", "fields": map[string]string{}},
+		"plugin w/o form":  map[string]any{"plugin": "terminal", "name": "x", "fields": map[string]string{}},
+		"unknown field":    map[string]any{"plugin": "e2e-ssh", "name": "x", "fields": map[string]string{"evil": "1"}},
+		"long value":       map[string]any{"plugin": "e2e-ssh", "name": "x", "fields": map[string]string{"host": strings.Repeat("h", 2000)}},
+		"no name":          map[string]any{"plugin": "e2e-ssh", "name": "", "fields": map[string]string{"host": "h"}},
+		"required missing": map[string]any{"plugin": "e2e-ssh", "name": "x", "fields": map[string]string{"name": "x"}},
+		"required blank":   map[string]any{"plugin": "e2e-ssh", "name": "x", "fields": map[string]string{"name": "x", "host": "  "}},
+		"edit without id":  map[string]any{"plugin": "e2e-ssh", "name": "x", "fields": map[string]string{"host": "h"}, "put": true},
 	} {
 		method := http.MethodPost
 		if m, ok := b.(map[string]any); ok && m["put"] == true {

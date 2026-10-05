@@ -80,8 +80,10 @@ func (d *Daemon) handleCloseTUI(conn *ipc.Conn, msg *ipc.Message) {
 	if target == nil {
 		if payload.Client != "" {
 			log.Printf("close_tui: no attached client %q; dropping", payload.Client)
+		} else if d.clientCount() > 0 {
+			log.Printf("close_tui: only read-only viewers are attached; nothing to close")
 		} else {
-			log.Printf("close_tui: no attached client other than viewers; nothing to close")
+			log.Printf("close_tui: no attached client; nothing to close")
 		}
 		return
 	}

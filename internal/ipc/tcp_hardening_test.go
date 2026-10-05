@@ -2,7 +2,6 @@ package ipc
 
 import (
 	"bytes"
-	"io"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -95,13 +94,21 @@ func (l *lockedBuffer) String() string {
 	return l.b.String()
 }
 
-// A peer that opens conns in a loop past the pending cap gets one quild.log
-// line per minute, not one per conn.
-func TestStartTCP_RefusalLogLimited(t *testing.T) {
-	var buf lockedBuffer
-	logger.Init("debug", &buf)
-	t.Cleanup(func() { logger.Init("info", io.Discard) })
-	h := newTCPHarness(t)
+// captureLogs sends the logger to a buffer at level and puts the previous
+// logger back when the test ends. Not for a t.Parallel test: the logger is
+// process-wide.
+func captureLogs(t *testing.T, level string) *lockedBuffer {
+	t.Helper()
+	buf := new(lockedBuffer)
+	t.Cleanup(logger.Save())
+	logger.Init(level, buf)
+	return buf
+}
+
+// refuseThree fills the pending cap and has three more conns refused at
+// accept: one logged line, two held back.
+func refuseThree(t *testing.T, h *tcpHarness) {
+	t.Helper()
 	for i := 0; i < MaxPendingTCP; i++ {
 		h.dial(t)
 	}
@@ -113,8 +120,60 @@ func TestStartTCP_RefusalLogLimited(t *testing.T) {
 	if rej := h.waitRejected(t, refused); len(rej) != refused {
 		t.Fatalf("rejected = %v, want %d", rej, refused)
 	}
+}
+
+// A peer that opens conns in a loop past the pending cap gets one quild.log
+// line per minute, not one per conn.
+func TestStartTCP_RefusalLogLimited(t *testing.T) {
+	buf := captureLogs(t, "debug")
+	h := newTCPHarness(t)
+	refuseThree(t, h)
 	if n := strings.Count(buf.String(), "tcp conn refused at accept"); n != 1 {
-		t.Fatalf("%d refusal lines for %d refused conns in a minute, want 1", n, refused)
+		t.Fatalf("%d refusal lines for 3 refused conns in a minute, want 1", n)
+	}
+}
+
+// The count held back is logged when the listener closes, so the end of a
+// flood is not lost.
+func TestStartTCP_RefusalCountFlushedAtClose(t *testing.T) {
+	buf := captureLogs(t, "info")
+	h := newTCPHarness(t)
+	refuseThree(t, h)
+	h.s.Stop()
+	deadline := time.Now().Add(3 * time.Second)
+	for !strings.Contains(buf.String(), "2 refusals at accept were not logged") {
+		if time.Now().After(deadline) {
+			t.Fatalf("no flush line after Stop; log:\n%s", buf.String())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// A loopback connect/close loop stays under the pending cap, so the refusal
+// limit never runs. Such conns never logged in and must write no Info line
+// (connect or disconnect); a login is logged at Info.
+func TestStartTCP_UnauthenticatedConnsLogNoInfo(t *testing.T) {
+	buf := captureLogs(t, "info")
+	h := newTCPHarness(t)
+	const n = 5
+	for i := 0; i < n; i++ {
+		h.dial(t).Close()
+	}
+	h.waitAccepted(t, n)
+	if !h.s.WaitConns(3 * time.Second) {
+		t.Fatal("the closed conns' handlers did not return")
+	}
+	if out := buf.String(); strings.Contains(out, "client connected") || strings.Contains(out, "client disconnected") {
+		t.Fatalf("Info lines for %d conns that never logged in:\n%s", n, out)
+	}
+
+	h.dial(t)
+	c := h.waitAccepted(t, n+1)
+	if !c.MarkAuthenticated(NewTokenAuth("0a1b2c3d", "t", RightsFull)) {
+		t.Fatal("login refused")
+	}
+	if got := strings.Count(buf.String(), "tcp client logged in"); got != 1 {
+		t.Fatalf("%d login lines, want 1", got)
 	}
 }
 

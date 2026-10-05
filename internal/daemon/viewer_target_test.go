@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -53,6 +54,27 @@ func TestCloseTUI_ImplicitSkipsViewer(t *testing.T) {
 	if n := countType(readFor(owner, 500*time.Millisecond), ipc.MsgCloseTUI); n != 1 {
 		t.Fatalf("owner got close_tui %d times, want 1 (the viewer is not an implicit target)", n)
 	}
+	if n := countType(readFor(viewer, 200*time.Millisecond), ipc.MsgCloseTUI); n != 0 {
+		t.Fatalf("viewer got close_tui %d times, want 0", n)
+	}
+}
+
+// With only viewers attached, the implicit close_tui is dropped, and the log
+// says so rather than claiming nobody is attached.
+func TestCloseTUI_OnlyViewersLogsDistinctly(t *testing.T) {
+	var buf safeBuffer
+	t.Cleanup(captureLog(&buf))
+	h := newAuthHarness(t)
+	h.d.session.CreateTab("T")
+	viewer, _ := h.login(t, h.mint(t, "viewer", clientauth.LevelReadOnly, nil))
+	attachOn(t, viewer, "viewer")
+	waitUntil(t, "viewer attached", func() bool { return h.d.clientCount() == 1 })
+
+	sendClientMsg(t, h.local(t), ipc.MsgCloseTUI, nil)
+
+	waitUntil(t, "the only-viewers log line", func() bool {
+		return strings.Contains(buf.String(), "close_tui: only read-only viewers are attached")
+	})
 	if n := countType(readFor(viewer, 200*time.Millisecond), ipc.MsgCloseTUI); n != 0 {
 		t.Fatalf("viewer got close_tui %d times, want 0", n)
 	}

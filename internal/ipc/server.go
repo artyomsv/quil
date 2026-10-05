@@ -229,7 +229,16 @@ func (c *Conn) MarkAuthenticated(a *AuthState) bool {
 		return false
 	}
 	c.releasePendingSlot()
+	// The first Info line for a TCP conn: until now it was anyone on
+	// loopback, logged at Debug only (see acceptTCP).
+	logger.Info("ipc: tcp client logged in")
 	return true
+}
+
+// preLogin reports a TCP conn that has not logged in: anyone on loopback.
+// Its log lines are Debug, so a connect loop cannot rotate quild.log.
+func (c *Conn) preLogin() bool {
+	return c.transport == TransportTCP && c.auth.Load() == nil
 }
 
 func (c *Conn) releasePendingSlot() {
@@ -553,7 +562,13 @@ func (c *Conn) write(frame []byte) bool {
 		if errors.Is(err, os.ErrDeadlineExceeded) && n > 0 {
 			continue // draining, just slower than one window — not wedged
 		}
-		logger.Warn("ipc: write failed, retiring conn (peer=%s undelivered=%dB): %v",
+		// A pre-login TCP peer can close before its refusal is written, in
+		// a loop: Debug for it, like its connect and disconnect lines.
+		logf := logger.Warn
+		if c.preLogin() {
+			logf = logger.Debug
+		}
+		logf("ipc: write failed, retiring conn (peer=%s undelivered=%dB): %v",
 			peerLabel(c.raw), len(frame), err)
 		// SYNCHRONOUS, never handed to another goroutine: closed must be true
 		// before sendLoop exits. Retiring asynchronously leaves a window where
@@ -844,8 +859,23 @@ func (r *refusalLog) note(now time.Time) (ok bool, suppressed int) {
 	return true, suppressed
 }
 
+// flush logs the refusals held back since the last line, so the end of a
+// flood is not lost when the accept loop exits.
+func (r *refusalLog) flush() {
+	if r.suppressed > 0 {
+		logger.Warn("ipc: tcp listener closed: %d refusals at accept were not logged", r.suppressed)
+		r.suppressed = 0
+	}
+}
+
+// acceptTCP logs a new conn, and later its disconnect, at Debug while it has
+// not logged in: anyone on loopback can open and close conns in a loop, under
+// the pending cap, and two Info lines each would rotate quild.log's real
+// diagnostics away. audit.log records them with its own cap; the login is the
+// first Info line (MarkAuthenticated).
 func (s *Server) acceptTCP(ln net.Listener, hooks TCPHooks) {
 	var refusals refusalLog
+	defer refusals.flush()
 	for {
 		raw, err := ln.Accept()
 		if err != nil {
@@ -877,7 +907,7 @@ func (s *Server) acceptTCP(ln net.Listener, hooks TCPHooks) {
 		s.conns = append(s.conns, conn)
 		count := len(s.conns)
 		s.mu.Unlock()
-		logger.Info("ipc: tcp client connected (total=%d)", count)
+		logger.Debug("ipc: tcp client connected (total=%d)", count)
 		// Counted BEFORE the hook: the conn is already in s.conns, so a Stop
 		// landing while the hook runs closes it, and WaitConns must not report
 		// "every handler returned" for a conn whose handler — and disconnect
@@ -1044,7 +1074,11 @@ func (s *Server) handleConn(conn *Conn) {
 		s.mu.Lock()
 		count := len(s.conns)
 		s.mu.Unlock()
-		logger.Info("ipc: client disconnected (remaining=%d)", count)
+		if conn.preLogin() {
+			logger.Debug("ipc: tcp client disconnected before login (remaining=%d)", count)
+		} else {
+			logger.Info("ipc: client disconnected (remaining=%d)", count)
+		}
 		if s.onDisconnect != nil {
 			s.onDisconnect(conn)
 		}

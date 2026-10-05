@@ -3254,10 +3254,12 @@ func evalSymlinksWithin(path string, d time.Duration) (string, bool) {
 		path string
 		err  error
 	}
+	// Read on the caller's goroutine: the worker may outlive the call.
+	eval := evalSymlinksPath
 	ch := make(chan result, 1)
 	go func() {
 		defer releaseBlockingFSCall()
-		r, err := evalSymlinksPath(path)
+		r, err := eval(path)
 		ch <- result{r, err}
 	}()
 	timer := time.NewTimer(d)

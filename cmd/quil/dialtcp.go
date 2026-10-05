@@ -308,9 +308,18 @@ func redialTCPDest(dest string) tui.RedialFunc {
 		// under a running client; refusing would end a session whose panes are
 		// healthy, so it is logged loudly instead — an unhandled message type
 		// fails silently, and this line is how that gets found afterwards.
-		if verr := tcpVersionErr(versionHandshakeWithin(client, remoteGateTimeout), addr); verr != nil {
+		//
+		// Only a version the daemon REPORTED parks the destination. No reply
+		// (a busy daemon, a probe that timed out) is transient, as it is for
+		// --remote: the next rung asks again.
+		res := versionHandshakeWithin(client, remoteGateTimeout)
+		if verr := tcpVersionErr(res, addr); verr != nil {
 			if old == nil {
 				client.Close()
+				if res.DaemonVersion == "" {
+					log.Printf("connect %s: re-login not gated, will retry: %v", addr, verr)
+					return nil, verr
+				}
 				log.Printf("connect %s: re-login refused: %v", addr, verr)
 				return nil, fmt.Errorf("%v: %w", verr, tui.ErrLinkPermanent)
 			}

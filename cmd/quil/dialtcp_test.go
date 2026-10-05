@@ -436,7 +436,8 @@ func TestRedialTCP_RefusalPermanentConnRefusedNot(t *testing.T) {
 }
 
 // versionedLogin is signedLogin whose daemon then answers the version probe
-// with version.
+// with version — or, when version is "", reads the probe and closes the
+// connection without a reply.
 func versionedLogin(t *testing.T, tok, version string) string {
 	t.Helper()
 	addr, _ := fakeListener(t, func(c net.Conn) error {
@@ -455,6 +456,9 @@ func versionedLogin(t *testing.T, tok, version string) string {
 		}
 		if req.Type != ipc.MsgVersionReq {
 			return errors.New("the client sent " + req.Type + ", want version_req")
+		}
+		if version == "" {
+			return nil
 		}
 		resp, _ := ipc.NewMessage(ipc.MsgVersionResp, ipc.VersionRespPayload{Version: version})
 		resp.ID = req.ID
@@ -507,6 +511,25 @@ func TestRedialTCP_VersionMismatch(t *testing.T) {
 				t.Errorf("the mismatch was not logged:\n%s", logged.String())
 			}
 		})
+	}
+}
+
+// A first re-login whose version probe gets NO reply (a busy daemon, a probe
+// that timed out) is transient: parking it would leave a destination that can
+// recover parked for the session. Only a reported version is permanent.
+func TestRedialTCP_NoVersionReplyIsTransient(t *testing.T) {
+	asReleaseBuild(t, "1.80.0")
+	tok := mustNewToken(t)
+	prevAddr, prevTok := connectAddr, connectToken
+	t.Cleanup(func() { connectAddr, connectToken = prevAddr, prevTok })
+
+	connectAddr, connectToken = versionedLogin(t, tok, ""), tok
+	c, err := redialTCPDest(tcpDestPrefix + connectAddr)(nil)
+	if c != nil {
+		t.Errorf("a conn came back with no version reply: %v", c)
+	}
+	if err == nil || errors.Is(err, tui.ErrLinkPermanent) || !strings.Contains(err.Error(), "no version reply") {
+		t.Fatalf("err = %v, want a transient \"no version reply\"", err)
 	}
 }
 

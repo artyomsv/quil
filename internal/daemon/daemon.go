@@ -4451,9 +4451,17 @@ func (d *Daemon) handleUpdatePane(conn *ipc.Conn, msg *ipc.Message) {
 		// false — has to reach them too, or looking at the pane in one TUI
 		// leaves it marked in a second one. Sent before the quiet-field
 		// return below, which this field is one of.
+		//
+		// Rev is the newest state number handed out at this point, read
+		// AFTER the write: a state built before the write (and therefore
+		// still carrying unseen:true) has a rev at most this one, yet can be
+		// queued behind this frame, since a builder releases stateMu before
+		// it broadcasts. A client keeps the clear until a frame numbered
+		// above Rev arrives, so that stale frame cannot bring the mark back.
 		if wasUnseen && !*payload.Unseen {
 			if seen, err := ipc.NewMessage(ipc.MsgPaneSeen, ipc.PaneSeenPayload{
 				PaneID: pane.ID,
+				Rev:    d.currentStateRev(),
 			}); err == nil {
 				d.broadcast(seen)
 			}
@@ -5034,6 +5042,13 @@ func (d *Daemon) broadcast(msg *ipc.Message) {
 	if d.server != nil {
 		d.server.Broadcast(msg)
 	}
+}
+
+// currentStateRev is the rev of the newest state built so far (0 for none).
+func (d *Daemon) currentStateRev() uint64 {
+	d.stateMu.Lock()
+	defer d.stateMu.Unlock()
+	return d.stateRev
 }
 
 func (d *Daemon) broadcastState() {

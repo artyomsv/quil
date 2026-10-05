@@ -619,6 +619,10 @@ func TestPaneSeen_OnlyOnTrueToFalse(t *testing.T) {
 	}
 
 	setUnseen(true)
+	// A state built BEFORE the clear: it carries the mark, and a builder
+	// broadcasts after releasing stateMu, so it can reach a client after the
+	// pane_seen. Its rev must not be above the one the pane_seen carries.
+	stale := d.buildWorkspaceState()
 	msgs := sendUnseen(false)
 	if got := countType(msgs, ipc.MsgPaneSeen); got != 1 {
 		t.Fatalf("true->false sent pane_seen %d times, want 1: %v", got, msgs)
@@ -633,6 +637,20 @@ func TestPaneSeen_OnlyOnTrueToFalse(t *testing.T) {
 		}
 		if p.PaneID != pane.ID {
 			t.Errorf("PaneSeenPayload.PaneID = %q, want %q", p.PaneID, pane.ID)
+		}
+		if p.Rev == 0 || stale.Rev > p.Rev {
+			t.Errorf("PaneSeenPayload.Rev = %d, want >= %d (the state built before the clear)", p.Rev, stale.Rev)
+		}
+		// A state built after the clear is numbered above it and no longer
+		// carries the mark.
+		fresh := d.buildWorkspaceState()
+		if fresh.Rev <= p.Rev {
+			t.Errorf("a state built after the clear has rev %d, want > %d", fresh.Rev, p.Rev)
+		}
+		for _, ps := range fresh.Panes {
+			if ps.ID == pane.ID && ps.Unseen {
+				t.Error("a state built after the clear still carries the mark")
+			}
 		}
 	}
 }

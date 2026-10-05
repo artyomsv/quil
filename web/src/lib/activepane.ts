@@ -153,3 +153,45 @@ export function resolveJump(
   if (s.active_tab !== j.tab) return { activate: '', keep: null };
   return { activate: placed.includes(j.pane) ? j.pane : '', keep: null };
 }
+
+// SeenMarks is the set of panes a pane_seen cleared, which the views draw as
+// read whatever a state says (R-7). A clear holds until a state numbered
+// ABOVE the rev the pane_seen carries: a state built before the clear still
+// carries the mark and can arrive after it, while a later one carries the
+// daemon's own value. A pane_seen with no rev (an older daemon) holds until
+// the next state, and a new daemon run or a new socket ends every clear.
+export class SeenMarks {
+  private readonly until = new Map<string, number>();
+
+  // seen files a pane_seen; false when nothing changed.
+  seen(id: string, rev: number | undefined): boolean {
+    const r = rev ?? -1;
+    const had = this.until.get(id);
+    if (had !== undefined && had >= r) return false;
+    this.until.set(id, r);
+    return had === undefined;
+  }
+
+  // stateApplied ends every clear this state settles; false when none ended.
+  // rev is the state's number (undefined from a daemon that sends none).
+  stateApplied(rev: number | undefined, newRun: boolean): boolean {
+    let changed = false;
+    for (const [id, r] of [...this.until]) {
+      if (newRun || rev === undefined || rev > r) {
+        this.until.delete(id);
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  reset(): boolean {
+    const had = this.until.size > 0;
+    this.until.clear();
+    return had;
+  }
+
+  ids(): ReadonlySet<string> {
+    return new Set(this.until.keys());
+  }
+}

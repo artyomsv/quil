@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { askedTabShown, JUMP_TTL_MS, jumpStep, pickActive, resolveJump, successorOf, UnseenAsks, unseenToClear } from './activepane';
+import { askedTabShown, JUMP_TTL_MS, jumpStep, pickActive, resolveJump, SeenMarks, successorOf, UnseenAsks, unseenToClear } from './activepane';
 import type { WorkspaceState } from './protocol';
 
 const state = (unseen: boolean): WorkspaceState => ({
@@ -126,5 +126,41 @@ describe('jumpStep and resolveJump', () => {
 
   it('a read-only page never jumps to another tab', () => {
     expect(jumpStep(two('t1'), 't1', ['a'], 't2', 'c', true, 0)).toEqual({ switch: '', activate: '', pending: null });
+  });
+});
+
+describe('SeenMarks', () => {
+  it('a state built before the clear does not bring the mark back; a later one settles it', () => {
+    const m = new SeenMarks();
+    // pane_seen says: the newest state at the clear was rev 7.
+    expect(m.seen('a', 7)).toBe(true);
+    expect([...m.ids()]).toEqual(['a']);
+    // Rev 7 was built before the clear and still says unseen:true.
+    expect(m.stateApplied(7, false)).toBe(false);
+    expect(m.ids().has('a')).toBe(true);
+    // Rev 8 was built after it and carries the daemon's own value.
+    expect(m.stateApplied(8, false)).toBe(true);
+    expect(m.ids().size).toBe(0);
+  });
+
+  it('a pane_seen without a rev, a new run and a reset end the clear at once', () => {
+    const m = new SeenMarks();
+    m.seen('a', undefined);
+    expect(m.stateApplied(1, false)).toBe(true);
+    m.seen('b', 50);
+    expect(m.stateApplied(3, true)).toBe(true);
+    m.seen('c', 5);
+    expect(m.stateApplied(undefined, false)).toBe(true);
+    m.seen('d', 5);
+    expect(m.reset()).toBe(true);
+    expect(m.ids().size).toBe(0);
+  });
+
+  it('a second pane_seen for the same pane changes nothing it draws, but moves the bound up', () => {
+    const m = new SeenMarks();
+    m.seen('a', 3);
+    expect(m.seen('a', 9)).toBe(false);
+    expect(m.stateApplied(5, false)).toBe(false);
+    expect(m.stateApplied(10, false)).toBe(true);
   });
 });

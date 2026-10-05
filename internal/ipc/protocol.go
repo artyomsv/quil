@@ -1337,8 +1337,14 @@ type EventDismissedPayload struct {
 // every client's sidebar clears the same "finished while you were away" mark
 // rather than each one tracking it alone. The sender's own echo is a no-op —
 // its sidebar already cleared the mark locally before reporting it.
+//
+// Rev is the newest workspace_state rev at the moment of the clear: a frame
+// numbered at or below it may have been built before the clear and still
+// carry the mark; one above it carries the daemon's own value. Omitted (0)
+// by a daemon older than the field.
 type PaneSeenPayload struct {
 	PaneID string `json:"pane_id"`
+	Rev    uint64 `json:"rev,omitempty"`
 }
 
 type GetNotificationsRespPayload struct {

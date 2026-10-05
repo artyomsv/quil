@@ -1,5 +1,5 @@
 import { cwdForSplit, nextTabColor, projectRootOf, quickSplit, splitAnswer } from './actions';
-import { askedTabShown, jumpStep, type PendingJump, pickActive, resolveJump, successorOf, UnseenAsks } from './activepane';
+import { askedTabShown, jumpStep, type PendingJump, pickActive, resolveJump, SeenMarks, successorOf, UnseenAsks } from './activepane';
 import { AgentStatePoller } from './agentstate';
 import { attachRefusedBanner, bannerFor, type BannerState, isLoginRequired } from './banner';
 import {
@@ -138,8 +138,9 @@ export class App {
   keyHint = $state('');
   keymap = $state.raw<WebKeymap | null>(null);
   events = $state.raw<PaneEvent[]>([]);
-  // Panes a pane_seen cleared since the last state (R-7).
+  // Panes a pane_seen cleared that no later state has settled (R-7).
   seenPanes = $state.raw<ReadonlySet<string>>(new Set());
+  private readonly seenMarks = new SeenMarks();
   // Per tab: the overlay pane this page shows. Never one this page did not
   // ask for: another client swapping the slot to another tool hides it here.
   overlayShown = $state.raw<Record<string, string>>({});
@@ -441,8 +442,10 @@ export class App {
         return;
       }
       case 'pane_seen': {
-        const id = (m.payload as { pane_id?: unknown } | null)?.pane_id;
-        if (typeof id === 'string' && !this.seenPanes.has(id)) this.seenPanes = new Set([...this.seenPanes, id]);
+        const p = m.payload as { pane_id?: unknown; rev?: unknown } | null;
+        const id = p?.pane_id;
+        if (typeof id !== 'string') return;
+        if (this.seenMarks.seen(id, typeof p?.rev === 'number' ? p.rev : undefined)) this.seenPanes = this.seenMarks.ids();
         return;
       }
       default:
@@ -483,8 +486,9 @@ export class App {
     this.live = true;
     // A pending prefix belongs to the tab it was typed in.
     if (prev && prev.active_tab !== s.active_tab) this.keys?.cancel();
-    // A newer state carries the daemon's unseen values (R-7).
-    if (this.seenPanes.size > 0) this.seenPanes = new Set();
+    // A state built after a clear carries the daemon's unseen value (R-7);
+    // one built before it may still carry the mark (SeenMarks).
+    if (this.seenMarks.stateApplied(s.rev, verdict === 'apply-new-run')) this.seenPanes = this.seenMarks.ids();
     // An overlay that left the state is no longer shown here (spec §7).
     const shown: Record<string, string> = {};
     for (const [tab, id] of Object.entries(this.overlayShown)) if (overlayOf(s, tab)?.id === id) shown[tab] = id;

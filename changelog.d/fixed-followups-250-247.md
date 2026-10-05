@@ -46,3 +46,6 @@ headline: Stricter shared workspaces; refused creates now say why
 - **A reconnect gives the one-time import of old files its full retries again.** Before,
   error replies were counted for the whole session, so after a reconnect one more error
   stopped the import.
+- **One host can add at most 64 groups to the sidebar.** The cap already applied to the
+  group list a host sends. It now also applies to the group names on that host's
+  projects. A project past the cap is shown ungrouped, and `quil.log` says so once.

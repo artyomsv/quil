@@ -1,9 +1,12 @@
 package webgw
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -89,5 +92,36 @@ func TestServer_ExpandInstance_UsesTheCatalog(t *testing.T) {
 	}
 	if _, _, err := expand("no-form", "i2"); err == nil {
 		t.Fatal("the gate expanded a plugin that manages no instances")
+	}
+}
+
+// An unreadable instances.json is refused in fixed text: the os error names
+// an absolute path on the gateway's machine, which goes to web.log only.
+func TestServer_ExpandInstance_UnreadableFileNamesNoPath(t *testing.T) {
+	dir := t.TempDir()
+	plugins := filepath.Join(dir, "plugins")
+	if err := os.MkdirAll(plugins, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	toml := "[plugin]\nname = \"x-ssh\"\ndisplay_name = \"X\"\ncategory = \"remote\"\n\n[command]\ncmd = \"ssh\"\narg_template = [\"{host}\"]\n\n[[command.form_fields]]\nname = \"host\"\nlabel = \"Host\"\n"
+	if err := os.WriteFile(filepath.Join(plugins, "x-ssh.toml"), []byte(toml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	inst := filepath.Join(dir, "instances.json")
+	if err := os.WriteFile(inst, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var logged []string
+	s := New(Config{PluginsDir: plugins, InstancesPath: inst, Version: "test",
+		Logf: func(f string, a ...any) { logged = append(logged, fmt.Sprintf(f, a...)) }})
+	_, _, err := s.expandInstance("x-ssh", "i1")
+	if !errors.Is(err, errInstancesUnreadable) {
+		t.Fatalf("err = %v, want errInstancesUnreadable", err)
+	}
+	if strings.Contains(err.Error(), dir) || strings.Contains(err.Error(), "instances.json") {
+		t.Fatalf("refusal text names a path: %q", err)
+	}
+	if len(logged) == 0 {
+		t.Fatal("the cause was not logged")
 	}
 }

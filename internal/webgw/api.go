@@ -126,11 +126,15 @@ func (s *Server) handleClient(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.ClientExtras != nil {
 		ex = s.cfg.ClientExtras()
 	}
+	inst, err := s.loadInstances()
+	if err != nil {
+		inst = instances.Store{}
+	}
 	writeJSON(w, http.StatusOK, ClientInfo{
 		Rights:        s.sessionRights(session),
 		Plugins:       s.catalog.plugins(),
 		Categories:    categories(),
-		Instances:     instances.LoadOrEmpty(s.cfg.InstancesPath),
+		Instances:     inst,
 		Sandbox:       SandboxDefaults{SignInDefault: ex.SandboxSignIn, ImageDefault: ex.SandboxImage},
 		Keymap:        ex.Keymap,
 		Notifications: ex.Notifications,
@@ -168,12 +172,25 @@ func (s *Server) validInstance(b instanceBody) error {
 	return nil
 }
 
-func newInstanceID(r io.Reader) (string, error) {
-	b := make([]byte, 4)
-	if _, err := io.ReadFull(r, b); err != nil {
-		return "", err
+// newInstanceID draws 32 random bits until the id is not already used by any
+// plugin in store: an id selects what a submit expands, so two instances
+// sharing one would launch whichever is listed first.
+func newInstanceID(r io.Reader, store instances.Store) (string, error) {
+	used := map[string]bool{}
+	for _, list := range store {
+		for _, si := range list {
+			used[si.ID] = true
+		}
 	}
-	return hex.EncodeToString(b), nil
+	b := make([]byte, 4)
+	for {
+		if _, err := io.ReadFull(r, b); err != nil {
+			return "", err
+		}
+		if id := hex.EncodeToString(b); !used[id] {
+			return id, nil
+		}
+	}
 }
 
 // handleInstances is POST (create), PUT (edit) and DELETE (?plugin=&id=) on
@@ -238,7 +255,7 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodPost:
-		id, err := newInstanceID(s.cfg.Rand)
+		id, err := newInstanceID(s.cfg.Rand, store)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			return

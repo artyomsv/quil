@@ -361,3 +361,20 @@ func TestAPI_MalformedFileIsNeverOverwritten(t *testing.T) {
 		t.Fatalf("instances = %+v", ci.Instances)
 	}
 }
+
+// A new id is drawn again while it collides with any saved instance's id,
+// whichever plugin holds it: an id selects what a submit expands.
+func TestNewInstanceID_RedrawsOnCollision(t *testing.T) {
+	store := instances.Store{
+		"ssh":    {{ID: "00000001"}},
+		"stripe": {{ID: "00000002"}},
+	}
+	r := bytes.NewReader([]byte{0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3})
+	id, err := newInstanceID(r, store)
+	if err != nil || id != "00000003" {
+		t.Fatalf("id = %q %v, want 00000003", id, err)
+	}
+	if _, err := newInstanceID(bytes.NewReader([]byte{0, 0, 0, 1}), store); err == nil {
+		t.Fatal("an exhausted source must be an error, not a reused id")
+	}
+}

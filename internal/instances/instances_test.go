@@ -1,9 +1,12 @@
 package instances
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"testing"
 )
 
@@ -66,5 +69,86 @@ func TestExpand(t *testing.T) {
 	}
 	if _, _, err := Expand(s, tmpl, "stripe", "i1"); err == nil {
 		t.Fatal("another plugin's instance was used")
+	}
+}
+
+// A value is never expanded again, whatever the map order: "{host}" typed
+// into the user field stays literal.
+func TestBuildArgs_ValueIsNotReExpanded(t *testing.T) {
+	fields := map[string]string{"user": "{host}", "host": "h", "a": "{b}", "b": "x"}
+	for i := 0; i < 50; i++ {
+		got := BuildArgs([]string{"{user}@{host}", "{a}{b}", "{none}", "{", "{{b}"}, fields)
+		want := []string{"{host}@h", "{b}x", "{none}", "{", "{x"}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("BuildArgs = %q, want %q", got, want)
+		}
+	}
+}
+
+// The TUI and the gateway are two processes saving one file. Each save must
+// use its own temp file, and none may be left behind.
+func TestSave_ConcurrentSavesAndReadsLeaveNoTemp(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "instances.json")
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(2)
+		go func(i int) {
+			defer wg.Done()
+			for j := 0; j < 20; j++ {
+				// A Windows rename can still lose to a reader twice in a row;
+				// the property under test is the temp files, not the error.
+				_ = Save(p, Store{"ssh": {{ID: fmt.Sprintf("%d-%d", i, j)}}})
+			}
+		}(i)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 20; j++ {
+				_, _ = Load(p)
+			}
+		}()
+	}
+	wg.Wait()
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range ents {
+		if e.Name() != "instances.json" {
+			t.Errorf("left behind: %s", e.Name())
+		}
+	}
+	if _, err := Load(p); err != nil {
+		t.Fatalf("final file does not parse: %v", err)
+	}
+}
+
+// A failed first rename (a Windows reader holding the file) is retried once.
+func TestSave_RetriesTheRenameOnce(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "instances.json")
+	calls := 0
+	orig := renameFn
+	renameFn = func(a, b string) error {
+		calls++
+		if calls == 1 {
+			return errors.New("sharing violation")
+		}
+		return orig(a, b)
+	}
+	t.Cleanup(func() { renameFn = orig })
+	if err := Save(p, Store{"ssh": {{ID: "a"}}}); err != nil {
+		t.Fatalf("Save after one failed rename: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("rename calls = %d, want 2", calls)
+	}
+
+	renameFn = func(string, string) error { return errors.New("always") }
+	if err := Save(p, Store{}); err == nil {
+		t.Fatal("Save reported success with every rename failing")
+	}
+	ents, _ := os.ReadDir(filepath.Dir(p))
+	if len(ents) != 1 {
+		t.Fatalf("a failed save left %d entries, want only instances.json", len(ents))
 	}
 }

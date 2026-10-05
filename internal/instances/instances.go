@@ -11,7 +11,9 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Saved is a user-created instance of a plugin (e.g., an SSH connection).
@@ -56,17 +58,47 @@ func LoadOrEmpty(path string) Store {
 }
 
 // Save writes the store atomically (temp file + rename), mode 0600.
+//
+// The temp file has a unique name: the TUI and the web gateway are separate
+// processes writing this one file, and a shared "path.tmp" let one truncate
+// the other's half-written copy before its rename. On Windows a rename fails
+// while another process holds the target open for reading, so it is retried
+// once after a short pause; the temp file is removed on every failure.
 func Save(path string, s Store) error {
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0600); err != nil {
+	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmpPath, path)
+	tmpPath := f.Name()
+	_, werr := f.Write(data)
+	cerr := f.Close()
+	if werr == nil {
+		werr = cerr
+	}
+	if werr == nil {
+		werr = os.Chmod(tmpPath, 0o600)
+	}
+	if werr == nil {
+		if werr = renameFn(tmpPath, path); werr != nil {
+			time.Sleep(renameRetryDelay)
+			werr = renameFn(tmpPath, path)
+		}
+	}
+	if werr != nil {
+		os.Remove(tmpPath)
+		return werr
+	}
+	return nil
 }
+
+// renameFn is os.Rename; a test replaces it to make the first attempt fail.
+var renameFn = os.Rename
+
+const renameRetryDelay = 50 * time.Millisecond
 
 // Expand finds plugin's saved instance with id and expands it through the
 // plugin's arg template. An unknown id is an error: a plugin started without
@@ -87,13 +119,42 @@ func BuildArgs(template []string, fields map[string]string) []string {
 	}
 	result := make([]string, len(template))
 	for i, arg := range template {
-		expanded := arg
-		for k, v := range fields {
-			expanded = strings.ReplaceAll(expanded, "{"+k+"}", v)
-		}
-		result[i] = expanded
+		result[i] = expandArg(arg, fields)
 	}
 	return result
+}
+
+// expandArg replaces each {name} token of arg in ONE pass over arg. A value is
+// never expanded again: replacing field by field over a map let a value that
+// contains "{other}" be substituted or not depending on map order. A token
+// with no field stays as written.
+func expandArg(arg string, fields map[string]string) string {
+	var b strings.Builder
+	for i := 0; i < len(arg); {
+		if arg[i] != '{' {
+			b.WriteByte(arg[i])
+			i++
+			continue
+		}
+		end := strings.IndexByte(arg[i+1:], '}')
+		if end < 0 {
+			b.WriteString(arg[i:])
+			break
+		}
+		key := arg[i+1 : i+1+end]
+		if strings.IndexByte(key, '{') >= 0 {
+			b.WriteByte('{')
+			i++
+			continue
+		}
+		if v, ok := fields[key]; ok {
+			b.WriteString(v)
+		} else {
+			b.WriteString(arg[i : i+2+end])
+		}
+		i += 2 + end
+	}
+	return b.String()
 }
 
 // DisplayAddr formats a saved instance's fields into a short address string.

@@ -66,8 +66,14 @@ func TestWebClientInfo_UnreadableBindingsFallsBackToConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	w := webKeymap(config.Default())
-	if len(w.Conflicts) == 0 || !strings.Contains(w.Conflicts[0], "unreadable") {
+	if len(w.Conflicts) == 0 || w.Conflicts[0] != bindingsUnreadableNotice {
 		t.Errorf("conflicts = %v, want the unreadable notice first", w.Conflicts)
+	}
+	// The page is told in fixed text: no path of this machine reaches it.
+	for _, c := range w.Conflicts {
+		if strings.Contains(c, config.QuilDir()) || strings.Contains(c, "bindings.toml:") {
+			t.Errorf("conflict names a path: %q", c)
+		}
 	}
 }
 

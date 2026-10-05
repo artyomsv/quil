@@ -1,6 +1,8 @@
 package main
 
 import (
+	"log"
+
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/hookevents"
 	"github.com/artyomsv/quil/internal/keymap"
@@ -44,6 +46,10 @@ type webNotifyInfo struct {
 	WorkStateOnly []string          `json:"work_state_only"`
 }
 
+// bindingsUnreadableNotice is the conflict line the page shows for a
+// bindings.toml that does not read.
+const bindingsUnreadableNotice = "bindings.toml is unreadable; using config.toml"
+
 // webKeymap resolves the keymap with the decision cmd/quil/main.go makes for
 // the TUI (config.ActiveBindings): bindings.toml when it exists and reads,
 // else the legacy [keybindings] table. Read per request, so a preset
@@ -56,8 +62,12 @@ func webKeymap(cfg config.Config) keymap.WebKeymap {
 	}
 	km, conflicts := config.LegacyKeymap(cfg.Keybindings)
 	w := keymap.ForWeb(keymap.Resolved{Keymap: km, Conflicts: conflicts, Preset: keymap.DefaultPresetName})
+	// The page gets fixed text: the error names an absolute path on this
+	// machine, which a browser on another one has no use for. The detail goes
+	// to web.log.
 	if err != nil {
-		w.Conflicts = append([]string{"bindings.toml is unreadable; using config.toml: " + err.Error()}, w.Conflicts...)
+		log.Printf("bindings.toml unreadable: %v", err)
+		w.Conflicts = append([]string{bindingsUnreadableNotice}, w.Conflicts...)
 	}
 	return w
 }

@@ -364,3 +364,16 @@ func TestCheckForward_DropsLoginFieldsAndAttachCWD(t *testing.T) {
 		t.Fatalf("forwarded attach %+v id %q, want %+v", a, fwd.ID, want)
 	}
 }
+
+// A malformed paste chunk is refused before it holds a place: an older daemon
+// drops it unanswered, and the place would be held until resync.
+func TestCheckForward_MalformedPasteChunkHoldsNoPlace(t *testing.T) {
+	g := &forwardGate{leasedID: "web-p-1", helloSeen: true}
+	fwd, refuse, fatal := g.check(msg(t, ipc.MsgPaneInput, "bad-1", map[string]any{"pane_id": 5}))
+	if fwd != nil || refuse == nil || refuse.ID != "bad-1" || fatal != nil {
+		t.Fatalf("malformed chunk: fwd=%v refuse=%v fatal=%v", fwd, refuse, fatal)
+	}
+	if len(g.pastes) != 0 {
+		t.Fatalf("a refused chunk holds a place: %v", g.pastes)
+	}
+}

@@ -195,6 +195,13 @@ func (g *forwardGate) checkFilled(m *ipc.Message, fill *instanceFill) (fwd, refu
 		if m.ID == "" {
 			return m, nil, nil
 		}
+		// Refused here, before it holds a place: a daemon older than this
+		// gateway drops a payload it cannot decode without an answer, and the
+		// place would then be held until resync.
+		var in ipc.PaneInputPayload
+		if err := json.Unmarshal(m.Payload, &in); err != nil {
+			return nil, refusal(m, "pane_input is malformed"), nil
+		}
 		// A repeated id would hold no new place, so it could go past the
 		// cap; it is busy until its first copy is answered.
 		if len(g.pastes) >= pasteCap || g.pastes[m.ID] {

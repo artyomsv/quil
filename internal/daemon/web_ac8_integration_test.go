@@ -196,8 +196,9 @@ func (a *ac8) splitRaw(req map[string]any) (ipc.SplitPaneRespPayload, string) {
 }
 
 // split places a pane right of the target and returns its state as the
-// daemon broadcasts it, the answer's error (a spawn error rides along with a
-// created pane), and whether a pane was created.
+// daemon broadcasts it, the answer's reason (a refusal's error, or for a
+// created pane its notice, which carries a spawn error), and whether a pane
+// was created.
 func (a *ac8) split(pane map[string]any) (ipc.PaneState, string, bool) {
 	a.t.Helper()
 	resp, refused := a.splitRaw(map[string]any{"target_pane_id": a.pane, "placement": "right", "pane": pane})
@@ -207,7 +208,10 @@ func (a *ac8) split(pane map[string]any) (ipc.PaneState, string, bool) {
 	if resp.PaneID == "" {
 		return ipc.PaneState{}, resp.Error, false
 	}
-	return a.state(resp.PaneID), resp.Error, true
+	if resp.Error != "" {
+		a.t.Fatalf("pane %s created with error %q: a created pane's problem is a notice, or the page reads it as refused", resp.PaneID, resp.Error)
+	}
+	return a.state(resp.PaneID), resp.Notice, true
 }
 
 func (a *ac8) state(id string) ipc.PaneState {

@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { App } from '../lib/app.svelte';
+  import { TUI_ONLY } from '../lib/keys/actions';
   import { sanitizeRemoteText } from '../lib/sanitize';
 
   interface Props {
@@ -59,6 +60,7 @@
           <span class="key">{sanitizeRemoteText(a.keys.join(' / ')) || '—'}</span>
           <span>{sanitizeRemoteText(a.label)}</span>
           {#if a.fallback}<span class="note">browser key</span>{/if}
+          {#if TUI_ONLY.has(a.id)}<span class="note">TUI only</span>{/if}
           {#if a.fallback_unavailable}<span class="note warn">web fallback unavailable</span>{/if}
         </div>
       {/each}

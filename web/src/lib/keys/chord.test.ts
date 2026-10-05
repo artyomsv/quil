@@ -18,8 +18,20 @@ describe('chordOf', () => {
   it('keeps shift as a modifier when ctrl or alt is held', () => {
     expect(chordOf(ev('H', 'KeyH', { altKey: true, shiftKey: true }))).toBe('alt+shift+h');
   });
-  it('reads the letter from the code, not the macOS Option character', () => {
+  it('reads the letter from the code for a non-ASCII Option character (US Option+H)', () => {
     expect(chordOf(ev('˙', 'KeyH', { altKey: true }))).toBe('alt+h');
+  });
+  it('gives an AltGr character as text, not ctrl+alt (Swiss AltGr+2)', () => {
+    expect(chordOf({ ...ev('@', 'Digit2', { ctrlKey: true, altKey: true }), altGraph: true })).toBe('@');
+  });
+  it('gives an ASCII Option character other than the key as text (German Mac Option+5)', () => {
+    expect(chordOf(ev('[', 'Digit5', { altKey: true }))).toBe('[');
+    expect(chordOf(ev('@', 'KeyL', { altKey: true }))).toBe('@');
+  });
+  it('still reads alt with the key own letter or digit as a chord', () => {
+    expect(chordOf(ev('h', 'KeyH', { altKey: true }))).toBe('alt+h');
+    expect(chordOf(ev('5', 'Digit5', { altKey: true }))).toBe('alt+5');
+    expect(chordOf(ev('[', 'BracketLeft', { altKey: true }))).toBe('alt+[');
   });
   it('names alt digits by their code', () => {
     expect(chordOf(ev('1', 'Digit1', { altKey: true }))).toBe('alt+1');

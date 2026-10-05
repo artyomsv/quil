@@ -36,8 +36,17 @@ export const TUI_ONLY = new Set([
 // own paste event reaches the terminal (the paste flow takes it there).
 export const NATIVE = new Set(['pane.paste']);
 
-// Actions a read-only tab may still run: they change only this page.
+// Actions that still run while an overlay is shown and owns the keys (the
+// TUI's handleOverlayKey): both toggles, since with one slot the other
+// tool's key is how you swap, and the page's own panels. alt+1..9 switch
+// tabs too; the engine checks those itself.
+export const OVERLAY_ACTIONS = new Set(['pane.toggle_lazygit', 'pane.toggle_hunk', 'notification.toggle', 'notification.focus', 'sidebar.toggle']);
+
+// Actions a read-only tab may still run: they change only this page. The
+// overlay toggles only show or hide an overlay that already exists.
 export const VIEW_ONLY = new Set([
+  'pane.toggle_lazygit',
+  'pane.toggle_hunk',
   'notification.toggle',
   'notification.focus',
   'sidebar.toggle',

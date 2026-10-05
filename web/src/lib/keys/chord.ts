@@ -14,6 +14,9 @@ export interface KeyEventLike {
   shiftKey: boolean;
   metaKey: boolean;
   isComposing?: boolean;
+  // getModifierState('AltGraph'): AltGr is held. Windows reports it as
+  // ctrl+alt too, so the flag is what tells a typed '@' from a chord.
+  altGraph?: boolean;
 }
 
 const NAMED: Record<string, string> = {
@@ -62,13 +65,20 @@ export function chordOf(e: KeyEventLike): string | null {
   if (NOT_A_KEY.has(e.key) || e.key === '') return null;
   const named = NAMED[e.key] ?? (/^F([1-9]|1[0-9]|2[0-4])$/.test(e.key) ? e.key.toLowerCase() : undefined);
   if (named) return mods(e, true) + named;
-  if (e.ctrlKey || e.altKey || e.metaKey) {
-    const letter = /^Key([A-Z])$/.exec(e.code);
-    if (letter) return mods(e, true) + letter[1]!.toLowerCase();
-    const digit = /^Digit([0-9])$/.exec(e.code);
-    if (digit) return mods(e, true) + digit[1]!;
+  const single = [...e.key].length === 1;
+  // AltGr types a character (Swiss AltGr+2 is '@'): text, never a chord.
+  if (e.altGraph && single) return e.key;
+  const letter = /^Key([A-Z])$/.exec(e.code);
+  const digit = /^Digit([0-9])$/.exec(e.code);
+  const own = letter ? letter[1]!.toLowerCase() : digit ? digit[1]! : '';
+  // Option alone on a Mac layout types a character (German Option+5 is '[').
+  // An ASCII character other than the key's own letter or digit is that
+  // text; a non-ASCII one (US Option+H is '˙') is still the chord alt+h.
+  if (own && e.altKey && !e.ctrlKey && !e.metaKey && single && /^[\x21-\x7e]$/.test(e.key) && e.key.toLowerCase() !== own) {
+    return e.key;
   }
-  if ([...e.key].length !== 1) return null;
+  if (own && (e.ctrlKey || e.altKey || e.metaKey)) return mods(e, true) + own;
+  if (!single) return null;
   // A symbol or a plain letter carries shift in the character itself.
   return mods(e, false) + e.key;
 }

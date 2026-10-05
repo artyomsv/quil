@@ -27,14 +27,23 @@ export interface Message {
 // daemon itself. It resolves once the URL and the login code are printed.
 // plugins (file name → TOML) are written to the home's plugins directory
 // first, since quil web and the daemon load plugin definitions at start.
-export async function startQuilWeb(opts: { plugins?: Record<string, string> } = {}): Promise<QuilWeb> {
+// path is put first on PATH and cwd is quil web's directory; the daemon it
+// starts inherits both, so cwd is where the first pane opens.
+export interface QuilWebOpts {
+  plugins?: Record<string, string>;
+  path?: string;
+  cwd?: string;
+}
+
+export async function startQuilWeb(opts: QuilWebOpts = {}): Promise<QuilWeb> {
   const home = mkdtempSync('/tmp/qw-');
   if (opts.plugins) {
     mkdirSync(path.join(home, 'plugins'), { recursive: true });
     for (const [file, body] of Object.entries(opts.plugins)) writeFileSync(path.join(home, 'plugins', file), body);
   }
   const env = { ...process.env, QUIL_HOME: home };
-  const child = spawn(QUIL, ['web', '--no-open', '--port', '0'], { cwd: ROOT, env, stdio: ['pipe', 'pipe', 'pipe'] });
+  if (opts.path) env.PATH = `${opts.path}${path.delimiter}${process.env.PATH ?? ''}`;
+  const child = spawn(QUIL, ['web', '--no-open', '--port', '0'], { cwd: opts.cwd ?? ROOT, env, stdio: ['pipe', 'pipe', 'pipe'] });
   let out = '';
   let err = '';
   child.stderr?.on('data', (b: Buffer) => {
@@ -214,6 +223,7 @@ export interface PaneListing {
   id: string;
   tab_id: string;
   name: string;
+  type?: string;
 }
 
 export async function listPanes(home: string): Promise<PaneListing[]> {
@@ -373,10 +383,10 @@ async function cspPage({ page }: { page: Page }, use: (p: Page) => Promise<void>
 }
 
 // withQuil is a test whose quil web starts with plugins in its home.
-function withQuil(plugins?: Record<string, string>) {
+function withQuil(opts: QuilWebOpts = {}) {
   return base.extend<{ quil: QuilWeb }>({
     quil: async ({}, use) => {
-      const q = await startQuilWeb({ plugins });
+      const q = await startQuilWeb(opts);
       try {
         await use(q);
       } finally {
@@ -394,7 +404,12 @@ export const test = withQuil();
 // testWithPlugins is test with these plugin files (name → TOML) in place
 // before quil web and its daemon start.
 export function testWithPlugins(plugins: Record<string, string>) {
-  return withQuil(plugins);
+  return withQuil({ plugins });
+}
+
+// testWith is test with the quil web options above.
+export function testWith(opts: QuilWebOpts) {
+  return withQuil(opts);
 }
 
 export { expect };

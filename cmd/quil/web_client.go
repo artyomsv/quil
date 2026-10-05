@@ -44,18 +44,22 @@ type webNotifyInfo struct {
 	WorkStateOnly []string          `json:"work_state_only"`
 }
 
-// webKeymap resolves the keymap the way cmd/quil/main.go does for the TUI:
-// bindings.toml when it reads, else the legacy [keybindings] table. Read per
-// request, so a preset switched in F1 reaches the page at its next load.
+// webKeymap resolves the keymap with the decision cmd/quil/main.go makes for
+// the TUI (config.ActiveBindings): bindings.toml when it exists and reads,
+// else the legacy [keybindings] table. Read per request, so a preset
+// switched in F1 reaches the page at its next load. quil web never migrates
+// the table itself: writing the user's keymap file is the TUI's job.
 func webKeymap(cfg config.Config) keymap.WebKeymap {
-	b, err := config.LoadBindings()
-	if err != nil {
-		km, conflicts := keymap.BuildLayered(keymap.DefaultLayer(), config.KeySpecsFromConfig(cfg.Keybindings))
-		w := keymap.ForWeb(keymap.Resolved{Keymap: km, Conflicts: conflicts, Preset: keymap.DefaultPresetName})
-		w.Conflicts = append([]string{"bindings.toml is unreadable; using config.toml: " + err.Error()}, w.Conflicts...)
-		return w
+	b, legacy, err := config.ActiveBindings()
+	if !legacy {
+		return keymap.ForWeb(keymap.FromSettings(b.Settings()))
 	}
-	return keymap.ForWeb(keymap.FromSettings(b.Settings()))
+	km, conflicts := config.LegacyKeymap(cfg.Keybindings)
+	w := keymap.ForWeb(keymap.Resolved{Keymap: km, Conflicts: conflicts, Preset: keymap.DefaultPresetName})
+	if err != nil {
+		w.Conflicts = append([]string{"bindings.toml is unreadable; using config.toml: " + err.Error()}, w.Conflicts...)
+	}
+	return w
 }
 
 func webNotify(cfg config.Config) webNotifyInfo {

@@ -61,6 +61,11 @@ func TestWebFallbacks_TableIsSound(t *testing.T) {
 			t.Errorf("%s: %q does not parse: %v", id, chord, err)
 			continue
 		}
+		// The page compares chords as strings, so the table must hold the
+		// canonical spelling Chord.String prints.
+		if c.String() != chord {
+			t.Errorf("%s: %q is not canonical; write %q", id, chord, c.String())
+		}
 		if reserved[c.String()] {
 			t.Errorf("%s falls back to %q, which the browser also keeps", id, chord)
 		}
@@ -174,5 +179,28 @@ func TestForWeb_HiddenActionsAndShape(t *testing.T) {
 		if !strings.Contains(string(data), field) {
 			t.Errorf("JSON lacks %s", field)
 		}
+	}
+}
+
+// shift+left is a text-selection key handleKey checks between the tiers, so a
+// late action bound to it never fires in the TUI.
+func TestForWeb_LateChordOnASelectionKeyHasNoKey(t *testing.T) {
+	w := ForWeb(FromSettings(Settings{Overrides: map[ActionID]string{"pane.restart": "shift+left"}}))
+	if r := webAction(t, w, "pane.restart"); len(r.Keys) != 0 {
+		t.Errorf("pane.restart keys = %v, want none: text selection wins shift+left", r.Keys)
+	}
+}
+
+// A sequence with a browser-reserved step can never be typed in a page.
+func TestForWeb_SequenceThroughAReservedChord(t *testing.T) {
+	w := ForWeb(FromSettings(Settings{Overrides: map[ActionID]string{
+		"pane.split_h": "ctrl+w x",
+		"pane.close":   "ctrl+b ctrl+w",
+	}}))
+	if s := webAction(t, w, "pane.split_h"); len(s.Keys) != 0 || !s.FallbackUnavailable {
+		t.Errorf("pane.split_h = %+v, want no key and fallback_unavailable", s)
+	}
+	if c := webAction(t, w, "pane.close"); !slices.Equal(c.Keys, []string{"alt+shift+c"}) || c.Fallback != "alt+shift+c" {
+		t.Errorf("pane.close = %+v, want the fallback in place of the sequence", c)
 	}
 }

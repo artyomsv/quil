@@ -1,4 +1,5 @@
 import type { Clock } from '../connection';
+import { OVERLAY_ACTIONS } from './actions';
 import { chordOf, type KeyEventLike } from './chord';
 
 export type Tier = 'early' | 'late';
@@ -113,7 +114,13 @@ export interface KeyContext {
   activePaneId: string;
   // That pane's plugin raw keys, as canonical chords.
   rawKeys: ReadonlySet<string>;
+  // An overlay (lazygit, hunk) is shown and owns the keys, as in the TUI's
+  // handleOverlayKey: only OVERLAY_ACTIONS and alt+1..9 run; everything
+  // else, Esc included, goes to the overlay, and no sequence arms.
+  overlay?: boolean;
 }
+
+const ALT_DIGIT = /^alt\+([1-9])$/;
 
 export type KeyDecision = { kind: 'pass' } | { kind: 'consume' } | { kind: 'action'; id: string } | { kind: 'builtin'; id: string };
 
@@ -167,6 +174,16 @@ export class KeyEngine {
     if (this.hint !== '') {
       this.hint = '';
       this.onChange();
+    }
+    if (ctx.overlay) {
+      this.cancel();
+      const id = this.tables.early.get(c) ?? this.tables.late.get(c);
+      if (id && OVERLAY_ACTIONS.has(id)) return { kind: 'action', id };
+      // The TUI switches tabs on the literal alt+1..9 here, whatever the
+      // keymap binds them to.
+      const n = ALT_DIGIT.exec(c);
+      if (n) return { kind: 'action', id: `tab.switch_${n[1]}` };
+      return PASS;
     }
     if (this.pending.length > 0 && ctx.activePaneId !== this.pendingPane) this.cancel();
     if (c === 'esc' && this.pending.length > 0) {

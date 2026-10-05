@@ -95,3 +95,32 @@ func TestWebClientExtras_CarryKeymapAndNotifications(t *testing.T) {
 		}
 	}
 }
+
+// With no bindings.toml (a headless host, or a migration that could not
+// write) the browser applies the legacy [keybindings] table, as the TUI does.
+func TestWebClientInfo_NoBindingsFileUsesTheConfigTable(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	cfg := config.Default()
+	cfg.Keybindings.Quit = "ctrl+alt+q"
+	w := webKeymap(cfg)
+	found := false
+	for _, a := range w.Actions {
+		if a.ID == "app.quit" {
+			found = true
+			if !slices.Equal(a.Keys, []string{"ctrl+alt+q"}) {
+				t.Errorf("app.quit = %v, want the config override", a.Keys)
+			}
+		}
+	}
+	if !found {
+		t.Error("app.quit missing")
+	}
+	for _, c := range w.Conflicts {
+		if strings.Contains(c, "unreadable") {
+			t.Errorf("a missing file is not an unreadable one: %q", c)
+		}
+	}
+	if _, err := os.Stat(config.BindingsPath()); !os.IsNotExist(err) {
+		t.Errorf("quil web wrote bindings.toml (stat err %v); only the TUI migrates", err)
+	}
+}

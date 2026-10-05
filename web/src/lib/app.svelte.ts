@@ -17,6 +17,7 @@ import { type QuilTestHook, shouldRegisterE2EHook } from './e2ehook';
 import { NATIVE, TUI_ONLY, VIEW_ONLY } from './keys/actions';
 import { isEditable } from './keys/chord';
 import { buildTables, KeyEngine, type WebKeymap } from './keys/engine';
+import { keyFor, keyTarget } from './keys/labels';
 import { type Dir, neighbour } from './keys/nav';
 import { type FetchLike, hasSession, postLogin, sessionGone } from './login';
 import { NotificationStore, type NotifyInfo, type PaneEvent, parsePaneEvent } from './notifications';
@@ -139,8 +140,9 @@ export class App {
   events = $state.raw<PaneEvent[]>([]);
   // Panes a pane_seen cleared since the last state (R-7).
   seenPanes = $state.raw<ReadonlySet<string>>(new Set());
-  // Per tab: this page shows the tab's overlay. Never another client's.
-  overlayShown = $state.raw<Record<string, boolean>>({});
+  // Per tab: the overlay pane this page shows. Never one this page did not
+  // ask for: another client swapping the slot to another tool hides it here.
+  overlayShown = $state.raw<Record<string, string>>({});
   activeTabId = $derived(activeTabOf(this.state));
   activeProjectId = $derived(activeProjectOf(this.state));
   sidebar = $derived(sidebarModel(this.state, this.agentStates, this.seenPanes));
@@ -200,6 +202,8 @@ export class App {
   // that replaces it arrives.
   private followFocus = '';
   private keys: KeyEngine | null = null;
+  // Tabs with an overlay create in flight.
+  private readonly overlayBusy = new Set<string>();
   private readonly store = new NotificationStore(null);
 
   constructor() {
@@ -469,8 +473,8 @@ export class App {
     // A newer state carries the daemon's unseen values (R-7).
     if (this.seenPanes.size > 0) this.seenPanes = new Set();
     // An overlay that left the state is no longer shown here (spec §7).
-    const shown: Record<string, boolean> = {};
-    for (const [tab, v] of Object.entries(this.overlayShown)) if (v && overlayOf(s, tab)) shown[tab] = true;
+    const shown: Record<string, string> = {};
+    for (const [tab, id] of Object.entries(this.overlayShown)) if (overlayOf(s, tab)?.id === id) shown[tab] = id;
     if (Object.keys(shown).length !== Object.keys(this.overlayShown).length) this.overlayShown = shown;
     for (const t of s.tabs) this.drag.stateArrived(t.id, t.layout_rev);
     const placed = placedPanes(s).map((p) => p.id);
@@ -669,19 +673,24 @@ export class App {
     else this.showNotice(this.readOnly ? 'This page is read-only' : `${NOT_SENT}: not connected`);
   }
 
+  // A dialog opening drops a pending prefix, as openKeyList does.
   askClosePane(paneId: string): void {
+    this.keys?.cancel();
     if (this.editable) this.paneAsk = { kind: 'close', paneId };
   }
 
   startRenamePane(paneId: string): void {
+    this.keys?.cancel();
     if (this.editable) this.paneAsk = { kind: 'rename', paneId };
   }
 
   askCloseTab(tabId: string): void {
+    this.keys?.cancel();
     if (this.editable) this.tabAsk = { kind: 'close', tabId };
   }
 
   startRenameTab(tabId: string): void {
+    this.keys?.cancel();
     if (this.editable) this.tabAsk = { kind: 'rename', tabId };
   }
 
@@ -729,14 +738,19 @@ export class App {
     this.keyHint = !k ? '' : k.hint || (k.pending.length > 0 ? `${k.pending.join(' ')} …` : '');
   }
 
-  private overlayVisibleFor(s: WorkspaceState | null, tab: string, shown: Record<string, boolean>): OverlayInfo | null {
+  private overlayVisibleFor(s: WorkspaceState | null, tab: string, shown: Record<string, string>): OverlayInfo | null {
     const o = overlayOf(s, tab);
-    return o && shown[tab] ? o : null;
+    return o && shown[tab] === o.id ? o : null;
   }
 
   // The pane keys go to: the shown overlay, else the active pane.
   private keyPane(): string {
-    return this.overlay?.id ?? this.activePane;
+    return keyTarget(this.overlay?.id, this.activePane).pane;
+  }
+
+  // keyFor is the key that runs an action in this browser, for menus.
+  keyFor(id: string): string {
+    return keyFor(this.keymap, id);
   }
 
   private rawKeysOf(paneId: string): ReadonlySet<string> {
@@ -751,8 +765,23 @@ export class App {
   private readonly onKeyDown = (e: KeyboardEvent): void => {
     if (this.view !== 'workspace' || !this.keys) return;
     const modal = this.keyListOpen || document.querySelector('[data-modal]') !== null || isEditable(e.target);
-    const pane = this.keyPane();
-    const d = this.keys.handle(e, { modalOpen: modal, activePaneId: pane, rawKeys: this.rawKeysOf(pane) });
+    const target = keyTarget(this.overlay?.id, this.activePane);
+    const ev = {
+      key: e.key,
+      code: e.code,
+      ctrlKey: e.ctrlKey,
+      altKey: e.altKey,
+      shiftKey: e.shiftKey,
+      metaKey: e.metaKey,
+      isComposing: e.isComposing,
+      altGraph: e.getModifierState('AltGraph'),
+    };
+    const d = this.keys.handle(ev, {
+      modalOpen: modal,
+      activePaneId: target.pane,
+      rawKeys: this.rawKeysOf(target.pane),
+      overlay: target.overlay,
+    });
     this.updateKeyHint();
     if (d.kind === 'pass') return;
     if (d.kind === 'action' && NATIVE.has(d.id)) return;
@@ -918,8 +947,11 @@ export class App {
     const s = this.state;
     const tab = this.activeTabId;
     if (!s || !tab) return;
+    // One create per tab at a time: a second Alt+G while the daemon works
+    // would ask for the slot twice.
+    if (this.overlayBusy.has(tab)) return;
     const cur = overlayOf(s, tab);
-    const shown = this.overlayShown[tab] === true;
+    const shown = cur !== null && this.overlayShown[tab] === cur.id;
     if (cur && cur.kind === kind) {
       this.setOverlayShown(tab, cur.id, !shown);
       return;
@@ -934,6 +966,15 @@ export class App {
       this.showNotice('no git repo here');
       return;
     }
+    this.overlayBusy.add(tab);
+    try {
+      await this.createOverlay(tab, kind, cwd);
+    } finally {
+      this.overlayBusy.delete(tab);
+    }
+  }
+
+  private async createOverlay(tab: string, kind: OverlayKind, cwd: string): Promise<void> {
     // Requests never rejects: every end is an Outcome.
     const repos = await this.requests.request('git_repos_req', { cwd });
     const list = repos.ok ? (repos.reply?.payload as { repos?: unknown } | undefined)?.repos : undefined;
@@ -961,7 +1002,7 @@ export class App {
   // the daemon (overlay_visible drives its idle reaper, not other clients).
   private setOverlayShown(tab: string, paneId: string, v: boolean): void {
     const next = { ...this.overlayShown };
-    if (v) next[tab] = true;
+    if (v) next[tab] = paneId;
     else delete next[tab];
     this.overlayShown = next;
     this.keys?.cancel();
@@ -975,9 +1016,11 @@ export class App {
     this.conn.send({ type: 'dismiss_event', payload: { event_id: id } });
   }
 
+  // jumpToEvent shows the event's tab and makes its pane active; a pane
+  // that is gone (a closed pane's card) leaves the active pane alone.
   jumpToEvent(e: PaneEvent): void {
     if (e.tab_id && e.tab_id !== this.activeTabId) this.switchTab(e.tab_id);
-    if (!e.pane_id) return;
+    if (!e.pane_id || !this.state?.panes.some((p) => p.id === e.pane_id)) return;
     this.setActivePane(e.pane_id);
     this.focus(e.pane_id);
   }
@@ -1001,6 +1044,7 @@ export class App {
   // openDialog opens the create-pane dialog once /api/client has answered;
   // nothing opens on a read-only or not-live page.
   async openDialog(open: DialogOpen): Promise<void> {
+    this.keys?.cancel();
     if (!this.editable) return;
     if (!(await this.refreshClient())) return;
     // The page may have lost its link or its rights while the answer came.

@@ -92,7 +92,9 @@
     >
       {#each items as it, i (i)}
         <li role="none">
-          <button role="menuitem" disabled={it.disabled} onclick={(e) => pick(e, it)}>{it.label}</button>
+          <button role="menuitem" disabled={it.disabled} onclick={(e) => pick(e, it)}
+            >{it.label}{#if it.key}<span class="key" aria-hidden="true">{it.key}</span>{/if}</button
+          >
         </li>
       {/each}
     </ul>
@@ -144,6 +146,14 @@
   li button:focus-visible {
     background: #2a2e37;
     outline: none;
+  }
+
+  .key {
+    float: right;
+    margin-left: 24px;
+    color: #9aa0ad;
+    font-family: monospace;
+    font-size: 12px;
   }
 
   li button:disabled {

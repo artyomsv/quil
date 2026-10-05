@@ -190,6 +190,27 @@ describe('KeyEngine', () => {
     expect(e.handle(k('H', 'KeyH', { altKey: true, shiftKey: true }), ctx())).toEqual({ kind: 'action', id: 'pane.split_h' });
   });
 
+  it('gives a shown overlay every key but its toggles, the panels and alt+1..9', () => {
+    const { e } = rig();
+    const ov = ctx({ overlay: true, activePaneId: 'o1' });
+    expect(e.handle(k('g', 'KeyG', { altKey: true }), ov)).toEqual({ kind: 'action', id: 'pane.toggle_lazygit' });
+    expect(e.handle(k('n', 'KeyN', { altKey: true }), ov)).toEqual({ kind: 'action', id: 'notification.toggle' });
+    expect(e.handle(k('3', 'Digit3', { altKey: true }), ov)).toEqual({ kind: 'action', id: 'tab.switch_3' });
+    expect(e.handle(k('r', 'KeyR', { altKey: true }), ov)).toEqual({ kind: 'pass' });
+    expect(e.handle(k('F1', 'F1'), ov)).toEqual({ kind: 'pass' });
+    expect(e.handle(k('Escape', 'Escape'), ov)).toEqual({ kind: 'pass' });
+  });
+
+  it('keeps the sequence machine inert under an overlay', () => {
+    const { e } = rig();
+    expect(e.handle(ctrlB, ctx({ overlay: true }))).toEqual({ kind: 'pass' });
+    expect(e.pending).toEqual([]);
+    e.handle(ctrlB, ctx());
+    expect(e.pending).toEqual(['ctrl+b']);
+    expect(e.handle(k('%', 'Digit5', { shiftKey: true }), ctx({ overlay: true }))).toEqual({ kind: 'pass' });
+    expect(e.pending).toEqual([]);
+  });
+
   it('passes a composing key untouched', () => {
     const { e } = rig();
     e.handle(ctrlB, ctx());

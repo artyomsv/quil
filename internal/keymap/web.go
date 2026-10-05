@@ -3,6 +3,7 @@ package keymap
 import (
 	_ "embed"
 	"fmt"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 )
@@ -92,6 +93,11 @@ func (k *Keymap) winning(a Action) []string {
 			if _, early := k.MatchTier(TierEarly, s); early {
 				continue
 			}
+			// handleKey checks the text-selection keys between the tiers,
+			// so a late action on one never fires.
+			if hk, hard := hardcodedKeys[s]; hard && hk.pos == betweenTiers {
+				continue
+			}
 		}
 		out = append(out, s)
 	}
@@ -123,17 +129,22 @@ func (k *Keymap) chordFreeOfActions(chord string) bool {
 	return kind == MatchNone
 }
 
+// isReserved reports whether the browser can never deliver key: a reserved
+// chord, or a sequence with one as any step (the page never sees that step).
 func isReserved(key string) bool {
-	for _, r := range BrowserReserved {
-		if c, err := ParseChord(r); err == nil && c.String() == key {
-			return true
+	for _, step := range strings.Split(key, " ") {
+		for _, r := range BrowserReserved {
+			if c, err := ParseChord(r); err == nil && c.String() == step {
+				return true
+			}
 		}
 	}
 	return false
 }
 
-// swap removes browser-reserved single chords from keys and, when one was
-// removed, adds the table's fallback if it is free and not handed out yet.
+// swap removes the bindings the browser cannot deliver from keys and, when
+// one was removed, adds the table's fallback if it is free and not handed
+// out yet.
 func (k *Keymap) swap(tableKey string, keys []string, used map[string]bool) (out []string, fallback string, unavailable bool) {
 	out = []string{}
 	hit := false

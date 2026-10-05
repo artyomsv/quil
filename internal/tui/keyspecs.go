@@ -29,7 +29,8 @@ func keySpecsFromConfig(kb config.KeybindingsConfig) map[keymap.ActionID]string 
 // Build handles a malformed spec per-action, so there is no whole-config
 // fallback to do here.
 func buildKeymap(kb config.KeybindingsConfig) (*keymap.Keymap, []keymap.Conflict) {
-	km, conflicts := keymap.BuildLayered(keymap.DefaultLayer(), keySpecsFromConfig(kb))
+	// config.LegacyKeymap, shared with quil web's /api/client.
+	km, conflicts := config.LegacyKeymap(kb)
 	for _, c := range conflicts {
 		logger.Warn("keybindings: %s", c)
 	}

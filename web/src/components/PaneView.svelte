@@ -27,17 +27,17 @@
     app.openCreate(mode);
   }
   const items: MenuItem[] = $derived([
-    { label: 'Split right', run: () => app.splitQuick(paneId, 'right') },
-    { label: 'Split below', run: () => app.splitQuick(paneId, 'below') },
-    { label: 'New pane…', run: () => createFrom('pane') },
+    { label: 'Split right', run: () => app.splitQuick(paneId, 'right'), key: app.keyFor('pane.split_h') },
+    { label: 'Split below', run: () => app.splitQuick(paneId, 'below'), key: app.keyFor('pane.split_v') },
+    { label: 'New pane…', run: () => createFrom('pane'), key: app.keyFor('builtin.new_pane') },
     { label: 'Replace…', run: () => createFrom('replace') },
-    { label: 'Rename…', run: () => app.startRenamePane(paneId) },
-    { label: muted ? 'Unmute' : 'Mute', run: () => app.setMuted(paneId, !muted) },
-    { label: 'Restart', run: () => app.restartPane(paneId) },
+    { label: 'Rename…', run: () => app.startRenamePane(paneId), key: app.keyFor('pane.rename') },
+    { label: muted ? 'Unmute' : 'Mute', run: () => app.setMuted(paneId, !muted), key: app.keyFor('pane.mute') },
+    { label: 'Restart', run: () => app.restartPane(paneId), key: app.keyFor('pane.restart') },
     ...app.tabBar
       .filter((t) => !t.active)
       .map((t) => ({ label: `Move to ${t.name || '—'}`, run: () => app.movePane(paneId, t.id) })),
-    { label: 'Close…', run: () => app.askClosePane(paneId) },
+    { label: 'Close…', run: () => app.askClosePane(paneId), key: app.keyFor('pane.close') },
   ]);
   // A dialog renders only while it could still send: live and not read-only.
   const ask = $derived(app.editable && app.paneAsk?.paneId === paneId ? app.paneAsk.kind : null);

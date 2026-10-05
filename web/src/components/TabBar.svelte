@@ -14,9 +14,9 @@
 
   function menuFor(id: string): MenuItem[] {
     return [
-      { label: 'Rename…', run: () => app.startRenameTab(id) },
+      { label: 'Rename…', run: () => app.startRenameTab(id), key: app.keyFor('tab.rename') },
       ...TAB_COLORS.map((c) => ({ label: `Colour: ${c.label}`, run: () => app.setTabColor(id, c.value) })),
-      { label: 'Close…', run: () => app.askCloseTab(id) },
+      { label: 'Close…', run: () => app.askCloseTab(id), key: app.keyFor('tab.close') },
     ];
   }
 

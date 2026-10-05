@@ -747,6 +747,10 @@ type Model struct {
 	// different one hands, at worst, a WorktreeSpec.RepoRoot describing machine
 	// A to machine B's `git worktree add`.
 	createPaneDest string
+	// createPanePinned says createPaneDest was pinned at open. Without it ""
+	// is ambiguous: the LOCAL daemon (pinned) or a startup window (not pinned,
+	// the router picks). Read both through createPanePin.
+	createPanePinned bool
 	// newTabWorktrees tracks branches asked for by a NEW-TAB create, keyed by
 	// newTabWorktreeKey (destination + branch) because such a create owns no
 	// tab id yet — the daemon mints it. It is the staleness key that lets
@@ -4634,18 +4638,7 @@ func (m *Model) spinnerTargetPane(id string) *PaneModel {
 	// stronger fix: the chain keeps running, so the spinner is already correct
 	// the moment the pane is re-attached, and nil goes back to meaning what it
 	// says — this pane is gone for good.
-	for _, held := range m.worktreeReplaced {
-		if held != nil && held.ID == id {
-			return held
-		}
-	}
-	// The same for an ordinary replace, which a refusal can put back.
-	for _, held := range m.replaceHeld {
-		if held != nil && held.ID == id {
-			return held
-		}
-	}
-	return nil
+	return m.heldReplacedPane(id)
 }
 
 // sidebarTick schedules the next relative-timestamp refresh for the
@@ -4965,14 +4958,15 @@ func (m Model) openCreatePaneDialogFor(target paneTarget) (tea.Model, tea.Cmd) {
 	// Re-read the saved instances: the web gateway writes the same file, so
 	// the copy read at start can be missing what a browser added.
 	m.instanceStore = LoadInstances(config.InstancesPath())
-	m.createPaneDest = m.pinnableDest()
+	m.createPaneDest, m.createPanePinned = m.pinnableDest()
 	return m, tea.ClearScreen
 }
 
-// pinnableDest is the destination a dialog opened NOW should submit to, or ""
-// meaning "not known yet — let the router resolve it at send time".
+// pinnableDest is the destination a dialog opened NOW should submit to, with
+// ok = true, or ok = false meaning "not known yet — let the router resolve it
+// at send time". ok is what tells a pinned local daemon ("") from no pin.
 //
-// The empty answer is not a fallback, it is the two documented startup windows,
+// No pin is not a fallback, it is the two documented startup windows,
 // and it must not be confused with `activeDest() == ""`:
 //
 //   - m.cur() == nil is the pre-first-broadcast window every session passes
@@ -4987,11 +4981,11 @@ func (m Model) openCreatePaneDialogFor(target paneTarget) (tea.Model, tea.Cmd) {
 // In both, Router.Send's sole-conn fallback is the thing that delivers — and
 // that fallback is gated on the message being UNSTAMPED, so the send must skip
 // the stamp entirely rather than stamp a best guess. See sendCreateTab.
-func (m Model) pinnableDest() string {
+func (m Model) pinnableDest() (dest string, ok bool) {
 	if m.cur() == nil || m.onlyOfflineProjects() {
-		return ""
+		return "", false
 	}
-	return m.activeDest()
+	return m.activeDest(), true
 }
 
 // handleNewTab opens the create-pane dialog to choose the new tab's first pane.
@@ -5030,15 +5024,22 @@ func (m Model) handleNewTab() (tea.Model, tea.Cmd) {
 // Router.Send drops an unroutable message and returns nil, so the loose form
 // cannot tell the user their tab was never created.
 //
-// An EMPTY destination is deliberately sent UNSTAMPED, and that asymmetry is
-// load-bearing rather than a shortcut. Empty means one of the two startup
+// An UNPINNED destination is deliberately sent UNSTAMPED, and that asymmetry is
+// load-bearing rather than a shortcut. Unpinned means one of the two startup
 // windows pinnableDest documents, where the router must pick the destination
 // itself — and its sole-conn fallback is gated on `!stamped`, so stamping ""
 // (which stampDest maps to destLocal) makes that fallback unreachable and the
 // send is dropped against a "" conn that, under --remote, never existed. Both
 // windows regressed exactly that way when this function stamped unconditionally.
-func (m Model) sendCreateTab(spec *ipc.FirstPaneSpec) tea.Cmd {
-	dest := m.createPaneDest
+// A PINNED "" is the local daemon and is stamped like any other pin: unstamped,
+// it went to whichever project was active by the time the user submitted.
+//
+// reqID is the request id the create_tab carries: the daemon answers an
+// ordinary one only when it refuses the first pane, and only to an id-bearing
+// request (createPaneRefusedMsg). Nothing is armed under it — a new tab holds
+// no placeholder to unwind.
+func (m Model) sendCreateTab(spec *ipc.FirstPaneSpec, reqID string) tea.Cmd {
+	dest, pinned := m.createPanePin()
 	// Typing guard (spec §8.1): this client is about to become the reason its
 	// active project's ActiveTab changes, so the landing broadcast must not
 	// read as another client's switch. There is no tab id to record yet — the
@@ -5066,11 +5067,8 @@ func (m Model) sendCreateTab(spec *ipc.FirstPaneSpec) tea.Cmd {
 			log.Printf("create tab: build message: %v", err)
 			return nil
 		}
-		// The daemon answers an ordinary create_tab only when it refuses the
-		// first pane, and only to an id-bearing request: the id is what makes
-		// that refusal reach the user (createPaneRefusedMsg).
-		msg.ID = fmt.Sprintf("newtab-%d", time.Now().UnixNano())
-		if dest == "" {
+		msg.ID = reqID
+		if !pinned {
 			// No pre-flight check to make: the router resolves this one, and a
 			// drop there is already logged. Reporting "cannot reach" about a
 			// destination nobody named is the bug this branch exists to avoid.
@@ -6685,6 +6683,15 @@ func (m *Model) handlePaneOutput(msg PaneOutputMsg) (tea.Cmd, bool) {
 			}
 			return tea.Batch(cmds...), changedView
 		}
+	}
+	// A pane a REPLACE detached is out of the tree but still live on the
+	// daemon until the create settles, and may be put back: its output is kept
+	// so a restored pane shows no gap. Not on screen, so nothing redraws.
+	if held := m.heldReplacedPane(msg.PaneID); held != nil {
+		if held.acceptOutputGeneration(msg.Generation) {
+			held.AppendOutput(msg.Data)
+		}
+		return nil, false
 	}
 	// Unknown pane: nothing was touched, so nothing changed.
 	return nil, false
@@ -9336,6 +9343,8 @@ func (m *Model) splitPane(dir SplitDir) tea.Cmd {
 	if placeholder == nil {
 		return nil
 	}
+	// This re-arms the tab's reservation (see retireOrdinaryCreate).
+	m.retireOrdinaryCreate(tab.ID)
 
 	// Track the placeholder so applyWorkspaceState can fill it.
 	if m.pendingSplit == nil {

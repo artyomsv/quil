@@ -2529,20 +2529,30 @@ func (m Model) handleCreatePaneSelect() (tea.Model, tea.Cmd) {
 // against: the one whose disk it browsed, whose plugins it offers, and where
 // the pane is about to be spawned.
 //
-// createPaneDest when the dialog pinned one. It is deliberately NOT used when
-// empty: "" there means one of the startup windows (see pinnableDest), where
-// the router picks the destination and the client cannot know which — falling
-// back to the active dest is the same guess Router.Send makes.
+// createPaneDest when the dialog pinned one (createPanePin — "" can be a pin,
+// the local daemon). Not pinned means one of the startup windows (see
+// pinnableDest), where the router picks the destination and the client cannot
+// know which — falling back to the active dest is the same guess Router.Send
+// makes.
 //
 // Two callers, and the answer has to be the same for both. A committed
 // directory is filed under it (filing under "" would put the entry in the
 // unscoped list, which is the LOCAL daemon's), and plugin availability is
 // resolved against it (see pluginAvailableFor).
 func (m Model) createPaneDialogDest() string {
-	if m.createPaneDest != "" {
-		return m.createPaneDest
+	if dest, pinned := m.createPanePin(); pinned {
+		return dest
 	}
 	return m.activeDest()
+}
+
+// createPanePin is the destination the dialog pinned at open, and whether it
+// pinned one. "" with pinned true is the LOCAL daemon — in a session with a
+// remote too, the active project can move there while the dialog is open, and
+// reading "" as "not pinned" would aim the gate, the send and the worktree key
+// at the remote. A non-empty dest is a pin whoever set it.
+func (m Model) createPanePin() (string, bool) {
+	return m.createPaneDest, m.createPanePinned || m.createPaneDest != ""
 }
 
 // createPaneSendDest is the destination this dialog's create goes to, for the
@@ -2552,8 +2562,8 @@ func (m Model) createPaneDialogDest() string {
 // while activeDest answers "", which reads a --connect session as local and
 // full until its first broadcast.
 func (m Model) createPaneSendDest() string {
-	if m.createPaneDest != "" {
-		return m.createPaneDest
+	if dest, pinned := m.createPanePin(); pinned {
+		return dest
 	}
 	return m.rightsDest()
 }
@@ -2763,7 +2773,9 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 		logger.Debug("create tab: submitting cwd=%q type=%s instance=%s branch=%q repo=%q",
 			cwd, pluginName, instanceName, newBranch, newBranchRepo)
 		rememberImage(m)
-		return m, m.sendCreateTab(&ipc.FirstPaneSpec{
+		// Named like the split path's ids; not armed (see sendCreateTab).
+		reqID := "create-" + m.nextReqGen()
+		cmd := m.sendCreateTab(&ipc.FirstPaneSpec{
 			Type:            pluginName,
 			CWD:             cwd,
 			InstanceName:    instanceName,
@@ -2773,7 +2785,8 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 			ResumeSessionID: resumeSessionID,
 			Worktree:        spec,
 			Sandbox:         sbox,
-		})
+		}, reqID)
+		return m, cmd
 	}
 
 	tab := m.activeTabModel()
@@ -2833,6 +2846,10 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 		m.setFlash("still creating the worktree for " + truncateCells(sanitizeRemoteText(inflight), createErrFlashCap) + " — wait for it to finish")
 		return m, m.flashCmd()
 	}
+
+	// Both arms below re-arm the tab's reservation, so an earlier ordinary
+	// create in it must stop being unwindable by its refusal.
+	m.retireOrdinaryCreate(tab.ID)
 
 	// Option 2: Replace current pane
 	if m.dialogCursor == 2 {

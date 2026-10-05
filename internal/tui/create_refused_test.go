@@ -233,3 +233,129 @@ func TestNewTabWorktree_KeyedByDestination(t *testing.T) {
 		t.Fatalf("hostA's answer: flash %q, still armed %v", m.flashText, m.newTabWorktrees[keyA])
 	}
 }
+
+// mixedSession is a local project (active, full) beside a project on roDest
+// whose token is standard — the shape where "" is a real destination.
+func mixedSession(t *testing.T) (Model, *fakeConn) {
+	t.Helper()
+	m, _ := rawArgsModel(t, ipc.RightsStandard)
+	local := newFakeConn()
+	t.Cleanup(func() { close(local.recv) })
+	remote := newFakeConn()
+	t.Cleanup(func() { close(remote.recv) })
+	m.client = NewRouter(map[string]Client{"": local, roDest: remote})
+	m.SetDestRights(roDest, ipc.RightsStandard)
+	pane := NewPaneModel("pane-local", testRingBufSize)
+	t.Cleanup(pane.Dispose)
+	tab := NewTabModel("tab-local", "Local")
+	tab.Root = NewLeaf(pane)
+	tab.ActivePane = pane.ID
+	m.projects = append(m.projects, &ProjectModel{ID: "proj-local", Name: "Local", tabs: []*TabModel{tab}})
+	m.activeProject = len(m.projects) - 1
+	return m, local
+}
+
+// A dialog opened on the LOCAL project pins "" — and "" used to read as "not
+// pinned". After the active project moved to a remote, the raw-arguments gate
+// read the remote's (standard) rights, and a new-tab worktree create was
+// armed under the remote's key while the send went elsewhere, so its failure
+// was never reported. The pin now holds for the gate, the key and the send.
+func TestCreatePane_LocalPinSurvivesAMoveToARemote(t *testing.T) {
+	m, local := mixedSession(t)
+	m = roUpdate(t, m, tea.KeyPressMsg{Code: 'n', Mod: tea.ModCtrl})
+	if m.dialog != dialogCreatePane {
+		t.Fatalf("setup: Ctrl+N left dialog = %v", m.dialog)
+	}
+	if dest, pinned := m.createPanePin(); dest != "" || !pinned {
+		t.Fatalf("pin = (%q, %v), want the local daemon pinned", dest, pinned)
+	}
+	m.activeProject = 0 // MCP set_active_pane moves to the remote project
+
+	cats := m.createPaneCategories()
+	for i, c := range cats {
+		if c.key == "remote" {
+			m.dialogCursor = i
+			m = roUpdate(t, m, enterKey)
+			for j, p := range c.plugins {
+				if p.Name == "remotex" {
+					m.dialogCursor = j
+				}
+			}
+		}
+	}
+	m = roUpdate(t, m, enterKey)
+	if m.dialog != dialogInstanceForm || m.flashText == noRawArgsFlash {
+		t.Fatalf("the local dialog read the remote's rights: dialog %v, flash %q", m.dialog, m.flashText)
+	}
+
+	m.dialog, m.createPaneStep = dialogCreatePane, 3
+	m.createPaneTarget = paneTargetNewTab
+	m.selectedPlugin, m.selectedInstanceName, m.selectedInstanceArgs = "terminal", "", nil
+	m.worktreeNewBranch = "feat/x"
+	m.worktrees = worktreeState{loaded: true, repo: true, root: "/repo"}
+	m = roUpdate(t, m, enterKey)
+	if !sentType(local, ipc.MsgCreateTab) {
+		t.Fatal("the create_tab did not go to the local daemon the dialog was opened on")
+	}
+	if !m.newTabWorktrees[newTabWorktreeKey("", "feat/x")] {
+		t.Fatalf("the worktree create was armed under %v, not the local key", m.newTabWorktrees)
+	}
+	updated, _ := m.Update(createPaneRespMsg{Dest: "", Resp: ipc.CreatePaneRespPayload{
+		TabID: "tab-minted", Error: "fatal: boom",
+		Worktree: &ipc.WorktreeSpec{RepoRoot: "/repo", Branch: "feat/x"},
+	}})
+	m = updated.(Model)
+	if !strings.Contains(m.flashText, "boom") {
+		t.Errorf("the local failure was not reported: flash %q", m.flashText)
+	}
+}
+
+// A worktree create re-arms the tab's reservation over an ordinary create
+// still waiting for its answer. A late refusal of the ORDINARY create must not
+// unwind the worktree create's placeholder.
+func TestCreateRefused_LateRefusalSparesALaterWorktreeCreate(t *testing.T) {
+	m := newBranchModel(t)
+	m.client = &fakeSender{}
+	m.selectedPlugin, m.selectedCWD, m.worktreeNewBranch, m.dialogCursor = "terminal", "/repo", "", 0
+	out, _ := m.handleCreatePaneSplit()
+	m = out.(Model)
+	tab := m.curTabs()[0]
+	ordinaryID := m.createReqIDs[tab.ID]
+	if ordinaryID == "" {
+		t.Fatal("setup: the ordinary create armed no id")
+	}
+
+	m.selectedPlugin, m.selectedCWD, m.worktreeNewBranch, m.dialogCursor = "terminal", "/repo", "feat/x", 0
+	m.worktrees = worktreeState{loaded: true, repo: true, root: "/repo"}
+	out, _ = m.handleCreatePaneSplit()
+	m = out.(Model)
+	worktreePH := m.pendingSplit[tab.ID]
+	if worktreePH == nil || m.worktreeCreates[tab.ID] != "feat/x" {
+		t.Fatal("setup: the worktree create armed no placeholder")
+	}
+	if m.createReqIDs[tab.ID] != "" {
+		t.Error("the ordinary create's id survived the worktree create that re-armed the tab")
+	}
+
+	updated, _ := m.Update(createPaneRefusedMsg{dest: tab.Dest, id: ordinaryID, text: "unknown toggle"})
+	m = updated.(Model)
+	if m.pendingSplit[tab.ID] != worktreePH || !treeContains(tab.Root, worktreePH) || m.worktreeCreates[tab.ID] != "feat/x" {
+		t.Error("the ordinary create's late refusal unwound the worktree create")
+	}
+}
+
+// A pane held by a replace is still live on the daemon; output it produces
+// while held is kept, so the pane a refusal puts back has no gap.
+func TestCreateRefused_HeldPaneKeepsItsOutput(t *testing.T) {
+	m, conn := rawArgsModel(t, ipc.RightsFull)
+	old := m.projects[0].tabs[0].Root.Pane
+	m, sent := submitOrdinaryCreate(t, m, conn, 2)
+	m = roUpdate(t, m, PaneOutputMsg{PaneID: old.ID, Data: []byte("while-held")})
+	m = refusalArrives(t, m, sent, roDest, "unknown toggle")
+	if m.projects[0].tabs[0].Root.Pane != old {
+		t.Fatal("setup: the pane was not put back")
+	}
+	if !strings.Contains(string(old.rawBuf.Bytes()), "while-held") {
+		t.Error("output that arrived while the pane was held was dropped")
+	}
+}

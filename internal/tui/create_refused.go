@@ -38,6 +38,35 @@ func (m *Model) holdReplacedPane(tabID string, p *PaneModel) {
 	m.replaceHeld[tabID] = p
 }
 
+// retireOrdinaryCreate forgets tabID's ordinary create before another create
+// re-arms the tab's reservation: the new one overwrites pendingSplit, so a late
+// refusal of the earlier create would otherwise unwind the NEW placeholder (a
+// worktree create's included). A pane that create still held cannot be put
+// back any more — its leaf is no longer reserved — so it is disposed.
+func (m *Model) retireOrdinaryCreate(tabID string) {
+	delete(m.createReqIDs, tabID)
+	if held := m.replaceHeld[tabID]; held != nil {
+		held.Dispose()
+		delete(m.replaceHeld, tabID)
+	}
+}
+
+// heldReplacedPane is the pane a replace detached and still holds — worktree or
+// ordinary — or nil. Both are live on the daemon while held.
+func (m *Model) heldReplacedPane(id string) *PaneModel {
+	for _, held := range m.worktreeReplaced {
+		if held != nil && held.ID == id {
+			return held
+		}
+	}
+	for _, held := range m.replaceHeld {
+		if held != nil && held.ID == id {
+			return held
+		}
+	}
+	return nil
+}
+
 // applyCreatePaneRefused flashes the daemon's reason and unwinds the create it
 // names: the split placeholder is pruned, a replaced pane goes back into its
 // leaf. Keep it to that — the daemon created nothing, so there is nothing else

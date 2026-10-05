@@ -253,7 +253,9 @@ func TestCreatePaneReq_KubeContextOrder(t *testing.T) {
 
 // The exact argv the selections become, in the order the dialog always
 // built it: the instance's own args, then --context <ctx>, then each toggle's
-// ArgsWhenOn in the order the plugin declares them (not the order named).
+// ArgsWhenOn in the order the caller named them (resolveToggles walks the
+// names, not the plugin's declarations; this case names them in both orders
+// at once).
 func TestApplyNamedSelections_ExactOrder(t *testing.T) {
 	t.Setenv("QUIL_HOME", t.TempDir())
 	d := New(config.Default())

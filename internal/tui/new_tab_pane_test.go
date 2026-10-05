@@ -280,8 +280,10 @@ func TestNewTab_DiscoveryBaseIsTheProjectRootNotTheActivePane(t *testing.T) {
 
 // createPaneTarget must be reset where the dialog OPENS, not on each close
 // path: the step-0 escape, the instance-delete detour into the confirm dialog
-// and handleCreatePaneSplit's three early refusals all leave without reaching
-// its teardown block. A target that outlived one of those would make the next
+// and handleCreatePaneSplit's first refusal (the instance one) leave without
+// reaching its teardown block, and the teardown does not reset the target, so
+// its other refusals and every create keep it too. A target that outlived one
+// of those would make the next
 // plain Ctrl+N create a TAB instead of splitting the current one.
 func TestOpenCreatePaneDialog_ResetsAStaleNewTabTarget(t *testing.T) {
 	m := newTabModel(t)

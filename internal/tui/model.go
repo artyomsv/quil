@@ -4939,8 +4939,10 @@ func (m Model) openCreatePaneDialog() (tea.Model, tea.Cmd) {
 //
 // createPaneTarget is reset HERE rather than on each close path, and that is
 // load-bearing: the step-0 escape, the instance-delete detour into the confirm
-// dialog, and handleCreatePaneSplit's three early refusals all leave the dialog
-// without reaching its teardown block. A target that outlived any one of those
+// dialog, and handleCreatePaneSplit's first refusal (the instance one) all
+// leave the dialog without reaching its teardown block, and that teardown does
+// not reset the target either — so its four refusals and every create leave it
+// as it was. A target that outlived any one of those
 // would make the next plain Ctrl+N create a TAB instead of a split — the fourth
 // recurrence of the stale-dialog-state class this file already documents three
 // of, and the reason this is a parameter rather than a field somebody sets

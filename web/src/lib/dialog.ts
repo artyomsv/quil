@@ -319,6 +319,18 @@ export class CreateDialog {
       return false;
     }
     this.error = '';
+    // Setup choices belong to the plugin they were made for: a worktree,
+    // sandbox, kube context or session picked for one plugin and abandoned
+    // with Back must not ride along with the next. The folder stays.
+    if (this.plugin?.name !== p.name) {
+      this.toggles = [];
+      this.kubeContext = '';
+      this.existingWorktree = '';
+      this.newBranchMode = false;
+      this.newBranch = '';
+      this.sandboxOn = false;
+      this.resumeId = '';
+    }
     this.plugin = p;
     this.instanceId = '';
     if (hasForm(p)) {
@@ -483,10 +495,11 @@ export class CreateDialog {
     if (p.discover === 'kube' && this.kubeContext) pane.kube_context = this.kubeContext;
     // R-A: a new branch is {branch} — the daemon resolves the repository from
     // cwd; an existing worktree is {existing_path} (and the cwd, which the
-    // page always sends). continueSetup has checked the branch name.
-    if (this.existingWorktree) pane.worktree = { existing_path: this.existingWorktree };
-    else if (this.newBranchMode) pane.worktree = { branch: this.newBranch };
-    if (this.sandboxOn) pane.sandbox = { image: this.sandboxImage.trim(), ...(SIGN_IN[this.signIn] ?? SIGN_IN.browser) };
+    // page always sends). continueSetup has checked the branch name. Only a
+    // plugin whose setup shows these rows sends them.
+    if (this.showWorktree && this.existingWorktree) pane.worktree = { existing_path: this.existingWorktree };
+    else if (this.showWorktree && this.newBranchMode) pane.worktree = { branch: this.newBranch };
+    if (p.prompts_cwd && this.sandboxOn) pane.sandbox = { image: this.sandboxImage.trim(), ...(SIGN_IN[this.signIn] ?? SIGN_IN.browser) };
     if (this.showSession && this.resumeId) pane.resume_session_id = this.resumeId;
     if (placement === 'new_tab') {
       return { tab_id: this.open.tabId, placement, new_tab: { name: '', project_id: this.open.projectId }, pane };

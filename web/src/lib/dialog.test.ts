@@ -57,6 +57,37 @@ describe('CreateDialog', () => {
     expect(d.submit('below')).toEqual({ target_pane_id: 'p1', placement: 'below', pane: { type: 'terminal', cwd: '/repo' } });
   });
 
+  it('setup choices abandoned with Back do not ride along with a plugin that has no setup', () => {
+    const d = open();
+    d.pickCategory('ai');
+    d.pickPlugin('claude-code');
+    expect(d.step).toBe('setup');
+    d.chooseNewBranch();
+    d.sandboxOn = true;
+    d.kubeContext = 'prod';
+    d.back();
+    d.back();
+    d.pickCategory('terminal');
+    d.pickPlugin('terminal');
+    expect(d.step).toBe('placement');
+    // A blank branch from the abandoned setup would be refused as an empty
+    // worktree choice; a sandbox would start a terminal in a container.
+    expect(d.submit('right')).toEqual({ target_pane_id: 'p1', placement: 'right', pane: { type: 'terminal', cwd: '/repo' } });
+  });
+
+  it('an existing worktree picked for one plugin is dropped for another', () => {
+    const d = open();
+    d.pickCategory('ai');
+    d.pickPlugin('claude-code');
+    d.chooseWorktree('/wt/feature');
+    d.back();
+    d.back();
+    d.pickCategory('tools');
+    d.pickPlugin('k9s');
+    d.continueSetup();
+    expect(d.submit('below')?.pane).toEqual({ type: 'k9s', cwd: '/repo' });
+  });
+
   it('lists categories in the gateway order, only those with a plugin', () => {
     const d = new CreateDialog({ ...info, plugins: info.plugins.filter((p) => p.category !== 'tools') }, avail, {
       mode: 'pane',

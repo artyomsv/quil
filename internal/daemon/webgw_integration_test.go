@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -456,8 +455,8 @@ func TestWeb_TabCloseReleasesMaster(t *testing.T) {
 
 func TestWeb_SlowPageDoesNotOverflowTheDaemon(t *testing.T) {
 	var logs safeBuffer
+	t.Cleanup(logger.Save())
 	logger.Init("warn", &logs)
-	t.Cleanup(func() { logger.Init("info", io.Discard) })
 
 	h := webHarness(t)
 	r := newWebRig(t, h)

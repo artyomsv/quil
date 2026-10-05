@@ -2,7 +2,6 @@ package tui
 
 import (
 	"bytes"
-	"io"
 	"math"
 	"runtime/metrics"
 	"strings"
@@ -15,18 +14,15 @@ import (
 // captureLoggedLine runs fn with the package logger pointed at a buffer and
 // returns what was written.
 //
-// The logger has no getter for its current sink, so this cannot restore what
-// was there before. What it can do is restore the LEVEL to something equivalent
-// to the pre-test state: before any Init, `logAt` returns on a nil handler and
-// never formats anything, so the closest available equivalent is a level that
-// filters Info out before the Sprintf. Leaving it at "info" would silently
-// change every later test in the package into one that formats every
-// `logger.Info` argument it reaches.
+// logger.Save puts back exactly what was there before, including the nil
+// handler of a package that never called Init: a hard-coded level would
+// silently change every later test in the package into one that formats
+// every `logger.Info` argument it reaches.
 func captureLoggedLine(t *testing.T, fn func()) string {
 	t.Helper()
 	var buf bytes.Buffer
+	t.Cleanup(logger.Save())
 	logger.Init("info", &buf)
-	t.Cleanup(func() { logger.Init("error", io.Discard) })
 	fn()
 	return buf.String()
 }

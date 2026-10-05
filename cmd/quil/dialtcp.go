@@ -197,7 +197,13 @@ func describeConnectError(addr string, err error) string {
 // restarts, spawns or installs a daemon — the daemon is on the far side of a
 // port, and nothing here can manage it.
 func gateTCPVersion(client *ipc.Client, addr string) error {
-	res := versionHandshakeWithin(client, remoteGateTimeout)
+	return tcpVersionErr(versionHandshakeWithin(client, remoteGateTimeout), addr)
+}
+
+// tcpVersionErr is gateTCPVersion's verdict on a handshake already made: nil
+// when the versions match (or this build does not compare), else the error
+// that names both.
+func tcpVersionErr(res handshakeResult, addr string) error {
 	if res.ClientSkipped || res.Matched {
 		return nil
 	}
@@ -290,6 +296,21 @@ func redialTCPDest(dest string) tui.RedialFunc {
 				return nil, fmt.Errorf("%s: %w", describeConnectError(addr, err), tui.ErrLinkPermanent)
 			}
 			return nil, err
+		}
+		// The version gate, with --remote's rule for when a mismatch refuses
+		// (verifyRemoteLinkGated): only for a destination that never attached
+		// (old == nil), whose versions nothing has compared yet. A mid-session
+		// reconnect that finds another version means the daemon was upgraded
+		// under a running client; refusing would end a session whose panes are
+		// healthy, so it is logged loudly instead — an unhandled message type
+		// fails silently, and this line is how that gets found afterwards.
+		if verr := tcpVersionErr(versionHandshakeWithin(client, remoteGateTimeout), addr); verr != nil {
+			if old == nil {
+				client.Close()
+				log.Printf("connect %s: re-login refused: %v", addr, verr)
+				return nil, fmt.Errorf("%v: %w", verr, tui.ErrLinkPermanent)
+			}
+			log.Printf("connect %s: WARNING logged in again, but %v — restart the TUI to re-gate", addr, verr)
 		}
 		sendClientHello(client, helloRoleTUI)
 		// Every login answers with the token's CURRENT level — it can have

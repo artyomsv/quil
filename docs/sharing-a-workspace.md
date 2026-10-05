@@ -158,9 +158,9 @@ You can make as many tokens as you want, also with the same level. Make one per 
 quil clients token list
 ```
 ```
-ID        NAME           RIGHTS     CREATED           EXPIRES           LAST USED
-c07905b4  office-screen  read-only  2026-10-02 12:29  never             2026-10-02 14:03
-719b0977  bob            standard   2026-10-02 12:29  2026-10-09 11:29  -
+ID        NAME           RIGHTS     CREATED           EXPIRES           EXPIRED  LAST USED
+c07905b4  office-screen  read-only  2026-10-02 12:29  never             no       2026-10-02 14:03
+719b0977  bob            standard   2026-10-02 12:29  2026-10-09 11:29  no       -
 ```
 
 ```bash
@@ -168,7 +168,7 @@ quil clients token revoke bob        # by name
 quil clients token revoke 719b0977   # or by id
 ```
 
-Revoke takes effect at once. Every client that uses the token is disconnected and sees `token refused (wrong, expired or revoked)`. An expired token is cut off within one minute, and it stays in the list until you revoke it.
+Revoke takes effect at once. Every client that uses the token is disconnected and sees `token refused (wrong, expired or revoked)`. An expired token is cut off within one minute. It stays in the list, with `yes` in the EXPIRED column, until you revoke it.
 
 ## Connect
 

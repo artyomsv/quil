@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -141,8 +143,10 @@ func TestRemoteRefusal_WordedForConnect(t *testing.T) {
 	withConnectState(t)
 	remoteDest, connectAddr = tcpDestPrefix+"127.0.0.1:7878", "127.0.0.1:7878"
 	for name, msg := range map[string]string{
-		"status": remoteRefusal("status", true),
-		"mcp":    mcpRemoteRefusal(),
+		"status":        remoteRefusal("status", true),
+		"mcp":           mcpRemoteRefusal(),
+		"sandbox login": sandboxLoginRefusal(),
+		"remote setup":  remoteSetupRefusal(),
 	} {
 		if !strings.Contains(msg, "--connect") || strings.Contains(msg, "--remote") ||
 			strings.Contains(msg, "ssh ") || strings.Contains(msg, tcpDestPrefix) {
@@ -159,6 +163,14 @@ func TestRemoteRefusal_WordedForConnect(t *testing.T) {
 	}
 	if msg := mcpRemoteRefusal(); !strings.Contains(msg, "--remote gpu01") {
 		t.Errorf("mcp under --remote: %q", msg)
+	}
+	for name, msg := range map[string]string{
+		"sandbox login": sandboxLoginRefusal(),
+		"remote setup":  remoteSetupRefusal(),
+	} {
+		if !strings.Contains(msg, "--remote") || !strings.Contains(msg, "gpu01") || strings.Contains(msg, "--connect") {
+			t.Errorf("%s under --remote: %q", name, msg)
+		}
 	}
 }
 
@@ -420,6 +432,81 @@ func TestRedialTCP_RefusalPermanentConnRefusedNot(t *testing.T) {
 	}
 	if _, err := redialTCPDest(tcpDestPrefix + "127.0.0.1:1")(nil); !errors.Is(err, tui.ErrLinkPermanent) {
 		t.Fatalf("no token for that address: err = %v, want ErrLinkPermanent", err)
+	}
+}
+
+// versionedLogin is signedLogin whose daemon then answers the version probe
+// with version.
+func versionedLogin(t *testing.T, tok, version string) string {
+	t.Helper()
+	addr, _ := fakeListener(t, func(c net.Conn) error {
+		if err := challengeThen(c, func(h *ipc.Message, hp ipc.HelloPayload, nonceS string) *ipc.Message {
+			am := clientauth.AuthMessage(hp.TokenID, hp.Nonce, nonceS)
+			m, _ := ipc.NewMessage(ipc.MsgHelloResp, ipc.HelloRespPayload{Rights: ipc.RightsFull, TokenName: "t",
+				ServerSig: clientauth.ServerSignature(clientauth.DeriveVerifier(tok), am)})
+			m.ID = h.ID
+			return m
+		}); err != nil {
+			return err
+		}
+		req, err := ipc.ReadMessage(c)
+		if err != nil {
+			return err
+		}
+		if req.Type != ipc.MsgVersionReq {
+			return errors.New("the client sent " + req.Type + ", want version_req")
+		}
+		resp, _ := ipc.NewMessage(ipc.MsgVersionResp, ipc.VersionRespPayload{Version: version})
+		resp.ID = req.ID
+		return ipc.WriteMessage(c, resp)
+	})
+	return addr
+}
+
+// A re-login that finds another daemon version: a destination that never
+// attached parks with the reason, as the launch gate would refuse it; a
+// mid-session reconnect keeps its link (--remote's rule, verifyRemoteLinkGated)
+// — and both say so in the log, which they did not.
+func TestRedialTCP_VersionMismatch(t *testing.T) {
+	asReleaseBuild(t, "1.80.0")
+	tok := mustNewToken(t)
+	prevAddr, prevTok := connectAddr, connectToken
+	t.Cleanup(func() { connectAddr, connectToken = prevAddr, prevTok })
+	var logged bytes.Buffer
+	prevLog := log.Writer()
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(prevLog) })
+
+	for _, tc := range []struct {
+		name      string
+		old       tui.Client
+		permanent bool
+	}{
+		{"never attached", nil, true},
+		{"mid-session", &stubClient{}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logged.Reset()
+			connectAddr, connectToken = versionedLogin(t, tok, "1.53.0"), tok
+			c, err := redialTCPDest(tcpDestPrefix + connectAddr)(tc.old)
+			if tc.permanent {
+				if !errors.Is(err, tui.ErrLinkPermanent) || !strings.Contains(err.Error(), "1.53.0") {
+					t.Fatalf("err = %v, want a permanent version mismatch naming the daemon's version", err)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("mid-session reconnect refused: %v — that ends a session whose panes are healthy", err)
+				}
+				if li, ok := c.(*tui.LoggedIn); ok {
+					if ic, ok := li.Client.(*ipc.Client); ok {
+						ic.Close()
+					}
+				}
+			}
+			if !strings.Contains(logged.String(), "1.53.0") {
+				t.Errorf("the mismatch was not logged:\n%s", logged.String())
+			}
+		})
 	}
 }
 

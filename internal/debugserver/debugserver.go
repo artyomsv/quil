@@ -96,7 +96,7 @@ func LoopbackAddr(name, why, v string) (string, bool, error) {
 	}
 	if !isLoopbackHost(host) {
 		return "", false, fmt.Errorf(
-			"%s=%q would bind %q, which is not loopback; %s, so only 127.0.0.1, ::1 or localhost are accepted",
+			"%s=%q names %q, which is not loopback; %s, so only 127.0.0.1, ::1 or localhost are accepted",
 			name, v, host, why)
 	}
 	// Resolve "localhost" HERE rather than letting net.Listen do it. It is the

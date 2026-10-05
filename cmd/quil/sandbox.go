@@ -31,6 +31,19 @@ func handleSandbox() {
 	}
 }
 
+// sandboxLoginRefusal names the flag the session was started with, like
+// remoteRefusal: under --connect the target is a TCP address, not a host.
+func sandboxLoginRefusal() string {
+	if connectMode() {
+		return fmt.Sprintf("quil sandbox login: not available with --connect (target: %s)\n"+
+			"The token belongs in the environment of the daemon that runs the containers,\n"+
+			"so run this on the machine whose daemon listens on %s.\n", connectAddr, connectAddr)
+	}
+	return fmt.Sprintf("quil sandbox login: not available with --remote (target: %s)\n"+
+		"The token belongs in the environment of the daemon that runs the containers,\n"+
+		"so run this on that host.\n", remoteDest)
+}
+
 // runSandboxLogin walks the whole token setup: no environment variable to set,
 // no `setx`, no config edit, no daemon restart, and no token to copy by hand.
 //
@@ -42,9 +55,7 @@ func handleSandbox() {
 // keeps a copy.
 func runSandboxLogin() {
 	if remoteMode() {
-		fmt.Fprintf(os.Stderr, "quil sandbox login: not available with --remote (target: %s)\n"+
-			"The token belongs in the environment of the daemon that runs the containers,\n"+
-			"so run this on that host.\n", remoteDest)
+		fmt.Fprint(os.Stderr, sandboxLoginRefusal())
 		os.Exit(1)
 	}
 

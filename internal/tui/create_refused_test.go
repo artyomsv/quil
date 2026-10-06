@@ -3,6 +3,7 @@ package tui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -140,6 +141,36 @@ func TestCreateRefused_NewTabFlashes(t *testing.T) {
 
 	if !strings.Contains(m.flashText, "unknown toggle") {
 		t.Errorf("flash = %q, want the daemon's reason", m.flashText)
+	}
+}
+
+// The refusal was set as the flash but never DRAWN: with the daemon's real
+// reason the right side no longer fit the bar, and the fit dropped all of it,
+// flash included. The user saw no message at all, twice (manual test, PR #256).
+// The dialog's own session scan answers around the refusal, as it did then.
+func TestCreateRefused_LongReasonIsVisibleInTheStatusBar(t *testing.T) {
+	m, conn := rawArgsModel(t, ipc.RightsFull)
+	m, sent := submitOrdinaryCreate(t, m, conn, 0)
+	m = roUpdate(t, m, sessionScanTimeoutMsg{cwd: "/repo"})
+	m = refusalArrives(t, m, sent, roDest, `unknown toggle "driftx" for plugin claude-code (see list_plugins)`)
+	m = roUpdate(t, m, sessionScanTimeoutMsg{cwd: "/repo"})
+	// This binary's flashDuration is 10 ms (main_test.go); what is asserted
+	// here is the layout, not the expiry.
+	m.flashUntil = time.Now().Add(time.Minute)
+
+	for _, width := range []int{172, 100, 60} {
+		m.width = width
+		bar := m.renderStatusBar()
+		if !strings.Contains(bar, "pane not created") {
+			t.Errorf("width %d: status bar %q does not show the refusal", width, bar)
+		}
+		if strings.Contains(bar, "\n") {
+			t.Errorf("width %d: status bar wrapped to two rows", width)
+		}
+	}
+	m.width = 172
+	if bar := m.renderStatusBar(); !strings.Contains(bar, "driftx") {
+		t.Errorf("status bar %q cut the reason at a width it fits in", bar)
 	}
 }
 

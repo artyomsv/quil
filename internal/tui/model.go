@@ -8522,12 +8522,23 @@ func (m Model) renderStatusBar() string {
 	if count := m.notifications.Count(); count > 0 && !m.notifications.visible {
 		right = fmt.Sprintf("[%d events] ", count) + right
 	}
-	if m.flashText != "" && time.Now().Before(m.flashUntil) {
+	flashOn := m.flashText != "" && time.Now().Before(m.flashUntil)
+	if flashOn {
 		right = m.flashText + " | " + right
 	}
 
 	// Fit within width: left takes priority
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right) - 2 // 2 for padding
+	if gap < 2 && flashOn && m.width > 2 {
+		// Except over a flash. It is the one answer some actions get ("pane
+		// not created: <reason>"), and a long one used to drop the WHOLE right
+		// side, flash included, so a refused create said nothing at all. The
+		// hints are always there; the flash goes first, the left gets the rest.
+		right = truncateToWidth(m.flashText, m.width-2)
+		left = truncateToWidth(left, m.width-2-lipgloss.Width(right)-2)
+		gap = max(m.width-lipgloss.Width(left)-lipgloss.Width(right)-2, 0)
+		return statusBarStyle.Width(m.width).Render(left + strings.Repeat(" ", gap) + right)
+	}
 	if gap < 2 {
 		// Not enough room for hints. The left is CUT to the bar as well:
 		// .Width WRAPS an over-wide line, and a status bar two rows tall

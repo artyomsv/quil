@@ -61,3 +61,6 @@ headline: Stricter shared workspaces; refused creates now say why
   stops listing it. Names that differ only in spaces, case or length past 32 characters
   are one group. A project that cannot join is shown ungrouped, and `quil.log` says so
   once.
+- **A long status-bar message is now shown, not hidden.** When a message did not fit
+  beside the key hints, the status bar dropped the hints and the message together, so a
+  refused create said nothing. Now the message comes first and the hints make room.

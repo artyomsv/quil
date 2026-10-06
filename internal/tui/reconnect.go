@@ -314,6 +314,29 @@ func (m Model) linkOf(dest string) reconnectState {
 	return reconnectState{}
 }
 
+// linkDownReason says why a request for dest cannot be sent now — its link is
+// down, with the ladder climbing or parked — naming the host and the last
+// failure, or "" when the link is up.
+//
+// The create paths refuse on it BEFORE they arm anything. Their send cannot
+// say it failed: a parked link keeps its dead conn in the router, so the send
+// errors into a closure nobody reads, and a split's placeholder then waited
+// for an answer that could never come (a revoked token, PR #256 manual test).
+func (m Model) linkDownReason(dest string) string {
+	ls := m.linkOf(dest)
+	if !ls.active {
+		return ""
+	}
+	why := "reconnecting"
+	if ls.parked {
+		why = "reconnecting stopped"
+	}
+	if ls.lastErr != nil {
+		why = firstErrLine(ls.lastErr.Error())
+	}
+	return hostLabel(dest) + " is disconnected — " + truncateCells(sanitizeRemoteText(why), createErrFlashCap)
+}
+
 // linkHost names the daemon a message about dest is about.
 //
 // The destination IS the ssh host. It used to fall back to a session-wide

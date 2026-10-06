@@ -3865,6 +3865,11 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		m.applyCreatePaneRefused(msg)
 		return m, tea.Batch(m.listenForMessages(), m.flashCmd())
 
+	case createPaneSendFailedMsg:
+		// A send result, not an IPC response: no re-arm.
+		m.applyCreatePaneRefused(createPaneRefusedMsg(msg))
+		return m, m.flashCmd()
+
 	case noteSetRespMsg:
 		return m, tea.Batch(m.listenForMessages(), m.applyNoteSetResp(msg))
 
@@ -4959,6 +4964,14 @@ func (m Model) openCreatePaneDialogFor(target paneTarget) (tea.Model, tea.Cmd) {
 	if m.destReadOnly(m.rightsDest()) {
 		cmd := m.refuseReadOnly()
 		return m, cmd
+	}
+	// A parked or reconnecting host gets no form to fill in: its create could
+	// not leave. Viewing its cached panes stays allowed.
+	if dest, pinned := m.pinnableDest(); pinned {
+		if why := m.linkDownReason(dest); why != "" {
+			m.setFlash(createNotDone(target) + why)
+			return m, m.flashCmd()
+		}
 	}
 	m.dialog = dialogCreatePane
 	m.dialogCursor = 0

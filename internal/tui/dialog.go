@@ -2746,6 +2746,15 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 	// that will not exist until the daemon answers. Nothing is detached and no
 	// leaf is reserved, so there is nothing to unwind and nothing to time out:
 	// the tab arrives whole on the next broadcast.
+	//
+	// A link that went down while the dialog was open is refused here, after
+	// the teardown and before anything is armed: the send cannot report its
+	// own failure in time to unwind a placeholder (see linkDownReason).
+	if why := m.linkDownReason(m.createPaneSendDest()); why != "" {
+		logger.Debug("create: REFUSED, %s", why)
+		m.setFlash(createNotDone(target) + why)
+		return m, m.flashCmd()
+	}
 	if target == paneTargetNewTab {
 		var spec *ipc.WorktreeSpec
 		if newBranch != "" {
@@ -2969,7 +2978,9 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 				Sandbox:         sbox,
 			})
 			msg.ID = reqID
-			m.sendForDest(tabDest, msg)
+			if err := m.sendForDest(tabDest, msg); err != nil {
+				return createSendFailed(tabDest, reqID, err)
+			}
 			rememberImage(m)
 			return nil
 		}
@@ -3053,7 +3064,9 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 			Sandbox:         sbox,
 		})
 		msg.ID = reqID
-		m.sendForDest(tabDest, msg)
+		if err := m.sendForDest(tabDest, msg); err != nil {
+			return createSendFailed(tabDest, reqID, err)
+		}
 		rememberImage(m)
 		return nil
 	}

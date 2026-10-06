@@ -1,5 +1,11 @@
 package tui
 
+import (
+	"log"
+
+	tea "charm.land/bubbletea/v2"
+)
+
 // createPaneRefusedMsg is the daemon refusing an ordinary create_pane or
 // create_tab this client sent with an id: an `error` frame naming the request.
 // It is the only answer such a create gets — success is the next broadcast —
@@ -10,6 +16,28 @@ type createPaneRefusedMsg struct {
 	dest string // Message.Origin: the daemon that refused
 	id   string
 	text string // the daemon's reason, unsanitized
+}
+
+// createPaneSendFailedMsg is a create_pane whose send failed: the router's conn
+// for its destination is dead. It unwinds like a refusal, but it is a send
+// result rather than an IPC response, so its Update arm does not re-arm the
+// listen loop.
+type createPaneSendFailedMsg createPaneRefusedMsg
+
+// createSendFailed is what a create_pane send closure returns when the send
+// failed. Before it, the error was dropped and a split's placeholder waited
+// for an answer the daemon never got.
+func createSendFailed(dest, id string, err error) tea.Msg {
+	log.Printf("create pane: send to %s: %v", hostLabel(dest), err)
+	return createPaneSendFailedMsg{dest: dest, id: id, text: "cannot reach " + hostLabel(dest)}
+}
+
+// createNotDone is the prefix of a flash that says a create was refused.
+func createNotDone(target paneTarget) string {
+	if target == paneTargetNewTab {
+		return "new tab not created: "
+	}
+	return "pane not created: "
 }
 
 // armOrdinaryCreate records the id an ordinary dialog create is sent with, so

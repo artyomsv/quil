@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -433,5 +435,129 @@ func TestCreateRefused_UnreservedCreateKeepsTheEarlierOne(t *testing.T) {
 				t.Error("a create that reserved nothing disposed the earlier replace's held pane")
 			}
 		})
+	}
+}
+
+// parkRevoked drops roDest's link and parks its ladder the way a revoked
+// token does: the link is lost, and the re-login is refused for good.
+func parkRevoked(t *testing.T, m Model) Model {
+	t.Helper()
+	m.SetRedialFunc(roDest, func(Client) (Client, error) { return nil, errors.New("unused") })
+	m = roUpdate(t, m, linkLostMsg{dest: roDest, err: errLinkLost})
+	link := m.linkOf(roDest)
+	m = roUpdate(t, m, redialResultMsg{gen: link.gen, dest: roDest,
+		err: fmt.Errorf("token refused (wrong, expired or revoked): %w", ErrLinkPermanent)})
+	if !m.linkOf(roDest).parked {
+		t.Fatal("setup: the refused re-login did not park the link")
+	}
+	return m
+}
+
+// A host whose token was revoked stays on screen, parked. Ctrl+N there opened
+// the form, and its create was sent into the dead conn and never answered
+// (manual test, PR #256). The opener now refuses and names the host and why.
+func TestCreateRefused_ParkedHostRefusesTheDialog(t *testing.T) {
+	m, conn := rawArgsModel(t, ipc.RightsFull)
+	m = parkRevoked(t, m)
+	clearSent(conn)
+
+	m = roUpdate(t, m, tea.KeyPressMsg{Code: 'n', Mod: tea.ModCtrl})
+
+	if m.dialog != dialogNone {
+		t.Fatalf("Ctrl+N on a parked host opened dialog %v", m.dialog)
+	}
+	if !strings.Contains(m.flashText, roDest) || !strings.Contains(m.flashText, "token refused") {
+		t.Errorf("flash = %q, want the host and the reason", m.flashText)
+	}
+	if n := countSent(conn, ipc.MsgCreatePane); n != 0 {
+		t.Errorf("%d create_pane sent to a parked host", n)
+	}
+}
+
+// The dialog stays open across a link loss (it may hold the user's input), so
+// the submit refuses too — before it arms a placeholder that nothing answers.
+func TestCreateRefused_ParkedHostRefusesTheSubmit(t *testing.T) {
+	m, conn := rawArgsModel(t, ipc.RightsFull)
+	m.dialog, m.createPaneStep, m.dialogCursor = dialogCreatePane, 3, 0
+	m.createPaneDest = roDest
+	m.selectedPlugin = "terminal"
+	m = parkRevoked(t, m)
+	clearSent(conn)
+
+	m = roUpdate(t, m, enterKey)
+
+	tab := m.projects[0].tabs[0]
+	if n := countSent(conn, ipc.MsgCreatePane); n != 0 {
+		t.Errorf("%d create_pane sent to a parked host", n)
+	}
+	if n := countPlaceholders(tab.Root); n != 0 || m.pendingSplit[tab.ID] != nil || m.createReqIDs[tab.ID] != "" {
+		t.Errorf("the refused create armed a reservation (placeholders %d)", n)
+	}
+	if m.dialog != dialogNone {
+		t.Errorf("the dialog stayed open over the flash (dialog %v)", m.dialog)
+	}
+	if !strings.Contains(m.flashText, "pane not created: "+roDest) {
+		t.Errorf("flash = %q, want the refusal naming the host", m.flashText)
+	}
+}
+
+// failingConn is a conn whose sends fail, as a dead one's do.
+type failingConn struct{ *fakeConn }
+
+func (failingConn) Send(*ipc.Message) error { return ipc.ErrConnClosed }
+
+// A create whose send failed returned nil from its closure, so its split
+// placeholder waited for an answer that the daemon never got. The failure now
+// comes back as a message and unwinds it like a refusal.
+func TestCreateRefused_FailedSendUnwindsThePlaceholder(t *testing.T) {
+	m, _ := rawArgsModel(t, ipc.RightsFull)
+	r := NewRouter(map[string]Client{roDest: failingConn{newFakeConn()}})
+	r.SetActiveDest(roDest)
+	m.client = r
+	m.dialog, m.createPaneStep, m.dialogCursor = dialogCreatePane, 3, 0
+	m.createPaneDest = roDest
+	m.selectedPlugin = "terminal"
+
+	next, cmd := m.Update(enterKey)
+	m = next.(Model)
+	tab := m.projects[0].tabs[0]
+	if countPlaceholders(tab.Root) != 1 {
+		t.Fatal("setup: the split armed no placeholder")
+	}
+	var failed tea.Msg
+	var collect func(tea.Cmd)
+	collect = func(c tea.Cmd) {
+		if c == nil {
+			return
+		}
+		done := make(chan tea.Msg, 1)
+		go func() { done <- c() }()
+		var got tea.Msg
+		select {
+		case got = <-done:
+		case <-time.After(time.Second):
+			return // a timer or a listener: not the send
+		}
+		switch msg := got.(type) {
+		case tea.BatchMsg:
+			for _, sub := range msg {
+				collect(sub)
+			}
+		case createPaneSendFailedMsg:
+			failed = msg
+		}
+	}
+	collect(cmd)
+	if failed == nil {
+		t.Fatal("the failed send reported nothing")
+	}
+	m = roUpdate(t, m, failed)
+
+	tab = m.projects[0].tabs[0]
+	if n := countPlaceholders(tab.Root); n != 0 || m.pendingSplit[tab.ID] != nil {
+		t.Errorf("the placeholder survived the failed send (%d)", n)
+	}
+	if !strings.Contains(m.flashText, "pane not created: cannot reach "+roDest) {
+		t.Errorf("flash = %q, want the failed send reported", m.flashText)
 	}
 }

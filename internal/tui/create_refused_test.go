@@ -501,17 +501,12 @@ func TestCreateRefused_ParkedHostRefusesTheSubmit(t *testing.T) {
 	}
 }
 
-// failingConn is a conn whose sends fail, as a dead one's do.
-type failingConn struct{ *fakeConn }
-
-func (failingConn) Send(*ipc.Message) error { return ipc.ErrConnClosed }
-
 // A create whose send failed returned nil from its closure, so its split
 // placeholder waited for an answer that the daemon never got. The failure now
 // comes back as a message and unwinds it like a refusal.
 func TestCreateRefused_FailedSendUnwindsThePlaceholder(t *testing.T) {
 	m, _ := rawArgsModel(t, ipc.RightsFull)
-	r := NewRouter(map[string]Client{roDest: failingConn{newFakeConn()}})
+	r := NewRouter(map[string]Client{roDest: &failingConn{fakeConn: newFakeConn()}}) // project_merge_test.go
 	r.SetActiveDest(roDest)
 	m.client = r
 	m.dialog, m.createPaneStep, m.dialogCursor = dialogCreatePane, 3, 0

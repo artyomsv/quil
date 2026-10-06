@@ -93,6 +93,13 @@ func (m *Model) handleToggleOverlay(pluginName string) tea.Cmd {
 	if !m.destCanRawArgs(tab.Dest) && !tab.overlayRuns(pluginName) {
 		return m.refuseNoRawArgs()
 	}
+	// The same for a host whose link is down: the repo scan and the create
+	// would go into a dead conn. Showing an overlay the tab already runs is
+	// local and stays allowed.
+	if why := m.linkDownReason(tab.Dest); why != "" && !tab.overlayRuns(pluginName) {
+		m.setFlash(pluginName + " not opened: " + why)
+		return m.flashCmd()
+	}
 
 	// Step 2: resolve candidates from the active NORMAL pane's CWD.
 	// ActivePaneModel returns the overlay when one is visible — which is
@@ -433,6 +440,12 @@ func (m *Model) createOverlay(tab *TabModel, repo, pluginName string) tea.Cmd {
 	// without raw-argument rights, and this send carries no id to answer.
 	if !m.destCanRawArgs(tab.Dest) {
 		return m.refuseNoRawArgs()
+	}
+	// And before the slot is touched: a create to a host whose link is down
+	// cannot leave, and pendingOverlayShow would wait for it for good.
+	if why := m.linkDownReason(tab.Dest); why != "" {
+		m.setFlash(pluginName + " not opened: " + why)
+		return m.flashCmd()
 	}
 
 	var cmds []tea.Cmd

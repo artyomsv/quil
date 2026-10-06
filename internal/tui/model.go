@@ -9380,6 +9380,12 @@ func (m *Model) splitPane(dir SplitDir) tea.Cmd {
 	if pane == nil {
 		return nil
 	}
+	// Before the placeholder too: on a host whose link is down the create
+	// cannot leave, and the empty leaf would wait for good (see linkDownReason).
+	if why := m.linkDownReason(tab.Dest); why != "" {
+		m.setFlash(createNotDone(paneTargetSplit) + why)
+		return m.flashCmd()
+	}
 
 	// The same in-flight refusal handleCreatePaneSplit makes, and it belongs
 	// here for one MORE reason than it does there. pendingSplit is keyed by
@@ -9412,12 +9418,18 @@ func (m *Model) splitPane(dir SplitDir) tea.Cmd {
 	// this is what the pane will be rather than a guess about it.
 	placeholder.phType = "terminal"
 
+	// Armed like the dialog's ordinary create, so a refusal or a failed send
+	// can find this placeholder and unwind it.
+	reqID := m.armOrdinaryCreate(tab.ID)
 	tabID, dest := tab.ID, tab.Dest
 	return func() tea.Msg {
 		msg, _ := ipc.NewMessage(ipc.MsgCreatePane, ipc.CreatePanePayload{
 			TabID: tabID,
 		})
-		m.sendForDest(dest, msg)
+		msg.ID = reqID
+		if err := m.sendForDestStrict(dest, msg); err != nil {
+			return createSendFailed(dest, reqID, err)
+		}
 		return nil
 	}
 }

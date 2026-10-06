@@ -65,10 +65,10 @@ headline: Stricter shared workspaces; refused creates now say why
   beside the key hints, the status bar dropped the hints and the message together, so a
   refused create said nothing. Now the message comes first and the hints make room.
 - **A host that is disconnected now refuses new panes at once.** When a host's link is
-  down (for example, its token was revoked), Ctrl+N and Ctrl+T on its projects show
-  "pane not created: <host> is disconnected — <reason>" in the status bar. Before, the
-  form opened and the new pane waited for an answer that never came. You can still look
-  at the host's panes.
+  down (for example, its token was revoked), Ctrl+N, Ctrl+T and the split keys on its
+  projects show "pane not created: <host> is disconnected — <reason>" in the status bar,
+  and the lazygit and hunk overlays say they were not opened. Before, the new pane waited
+  for an answer that never came. You can still look at the host's panes.
 - **You can no longer disconnect the host a window was started on.** With `--connect`
   or `--remote`, "Disconnect host…" on that host's projects is greyed out, and the
   palette says why. Before, it removed every project and left the window on

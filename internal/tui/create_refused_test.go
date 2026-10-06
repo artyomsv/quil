@@ -174,6 +174,14 @@ func TestCreateRefused_LongReasonIsVisibleInTheStatusBar(t *testing.T) {
 	if bar := m.renderStatusBar(); !strings.Contains(bar, "driftx") {
 		t.Errorf("status bar %q cut the reason at a width it fits in", bar)
 	}
+
+	// Control: with no flash, a narrow bar still keeps the left side alone,
+	// cut to one row.
+	m.flashText, m.width = "", 60
+	bar := m.renderStatusBar()
+	if strings.Contains(bar, "\n") || strings.Contains(bar, "F1 help") || !strings.Contains(bar, "panes:") {
+		t.Errorf("no flash, width 60: status bar %q, want the left side alone on one row", bar)
+	}
 }
 
 // Before the first broadcast there is no project, so the dialog pins no
@@ -519,6 +527,23 @@ func TestCreateRefused_FailedSendUnwindsThePlaceholder(t *testing.T) {
 	if countPlaceholders(tab.Root) != 1 {
 		t.Fatal("setup: the split armed no placeholder")
 	}
+	m = roUpdate(t, m, sendFailure(t, cmd))
+
+	tab = m.projects[0].tabs[0]
+	if n := countPlaceholders(tab.Root); n != 0 || m.pendingSplit[tab.ID] != nil {
+		t.Errorf("the placeholder survived the failed send (%d)", n)
+	}
+	if !strings.Contains(m.flashText, "pane not created: cannot reach "+roDest) {
+		t.Errorf("flash = %q, want the failed send reported", m.flashText)
+	}
+}
+
+// sendFailure runs cmd, batches included, and returns the
+// createPaneSendFailedMsg one of its commands produced; it fails the test
+// when none did. A command that does not return within a second is a timer or
+// a listener, not the send.
+func sendFailure(t *testing.T, cmd tea.Cmd) tea.Msg {
+	t.Helper()
 	var failed tea.Msg
 	var collect func(tea.Cmd)
 	collect = func(c tea.Cmd) {
@@ -531,7 +556,7 @@ func TestCreateRefused_FailedSendUnwindsThePlaceholder(t *testing.T) {
 		select {
 		case got = <-done:
 		case <-time.After(time.Second):
-			return // a timer or a listener: not the send
+			return
 		}
 		switch msg := got.(type) {
 		case tea.BatchMsg:
@@ -546,13 +571,109 @@ func TestCreateRefused_FailedSendUnwindsThePlaceholder(t *testing.T) {
 	if failed == nil {
 		t.Fatal("the failed send reported nothing")
 	}
-	m = roUpdate(t, m, failed)
+	return failed
+}
+
+var splitKey = tea.KeyPressMsg{Code: 'h', Mod: tea.ModAlt | tea.ModShift}
+
+// The split key arms a placeholder like the dialog does, and on a parked host
+// its create went into the dead conn and the placeholder waited for good.
+func TestCreateRefused_ParkedHostRefusesTheSplitKey(t *testing.T) {
+	m, conn := rawArgsModel(t, ipc.RightsFull)
+	m = parkRevoked(t, m)
+	clearSent(conn)
+
+	m = roUpdate(t, m, splitKey)
+
+	tab := m.projects[0].tabs[0]
+	if n := countSent(conn, ipc.MsgCreatePane); n != 0 {
+		t.Errorf("%d create_pane sent to a parked host", n)
+	}
+	if n := countPlaceholders(tab.Root); n != 0 || m.pendingSplit[tab.ID] != nil {
+		t.Errorf("the refused split armed a placeholder (%d)", n)
+	}
+	if !strings.Contains(m.flashText, "pane not created: "+roDest) {
+		t.Errorf("flash = %q, want the refusal naming the host", m.flashText)
+	}
+}
+
+// The split key's send could fail with nothing to say so; it now unwinds its
+// placeholder like the dialog's.
+func TestCreateRefused_SplitKeyFailedSendUnwinds(t *testing.T) {
+	m, _ := rawArgsModel(t, ipc.RightsFull)
+	r := NewRouter(map[string]Client{roDest: &failingConn{fakeConn: newFakeConn()}})
+	r.SetActiveDest(roDest)
+	m.client = r
+
+	next, cmd := m.Update(splitKey)
+	m = next.(Model)
+	tab := m.projects[0].tabs[0]
+	if countPlaceholders(tab.Root) != 1 {
+		t.Fatal("setup: the split key armed no placeholder")
+	}
+	m = roUpdate(t, m, sendFailure(t, cmd))
 
 	tab = m.projects[0].tabs[0]
 	if n := countPlaceholders(tab.Root); n != 0 || m.pendingSplit[tab.ID] != nil {
 		t.Errorf("the placeholder survived the failed send (%d)", n)
 	}
-	if !strings.Contains(m.flashText, "pane not created: cannot reach "+roDest) {
-		t.Errorf("flash = %q, want the failed send reported", m.flashText)
+}
+
+// Router.Send drops a message for a destination it has no conn for and
+// returns nil. The dialog's create now uses the strict send, so that drop is
+// reported and the placeholder unwound instead of left waiting.
+func TestCreateRefused_MissingConnIsReported(t *testing.T) {
+	m, _ := rawArgsModel(t, ipc.RightsFull)
+	other := newFakeConn()
+	r := NewRouter(map[string]Client{"": other})
+	r.SetActiveDest(roDest)
+	m.client = r
+	m.dialog, m.createPaneStep, m.dialogCursor = dialogCreatePane, 3, 0
+	m.createPaneDest = roDest
+	m.selectedPlugin = "terminal"
+
+	next, cmd := m.Update(enterKey)
+	m = next.(Model)
+	m = roUpdate(t, m, sendFailure(t, cmd))
+
+	tab := m.projects[0].tabs[0]
+	if n := countPlaceholders(tab.Root); n != 0 || m.pendingSplit[tab.ID] != nil {
+		t.Errorf("the placeholder survived the dropped send (%d)", n)
+	}
+	if n := countSent(other, ipc.MsgCreatePane); n != 0 {
+		t.Errorf("the create went to another daemon (%d)", n)
+	}
+}
+
+// An overlay on a parked host is refused at the key, before the repo scan,
+// and at createOverlay, before the shared slot is touched.
+func TestCreateRefused_ParkedHostRefusesAnOverlay(t *testing.T) {
+	m, conn := rawArgsModel(t, ipc.RightsFull)
+	m = parkRevoked(t, m)
+	clearSent(conn)
+
+	m = roUpdate(t, m, tea.KeyPressMsg{Code: 'g', Mod: tea.ModAlt})
+	if n := countSent(conn, ipc.MsgGitReposReq) + countSent(conn, ipc.MsgCreatePane); n != 0 {
+		t.Errorf("%d requests sent to a parked host", n)
+	}
+	if !strings.Contains(m.flashText, roDest) {
+		t.Errorf("key: flash = %q, want the host named", m.flashText)
+	}
+
+	tab := m.projects[0].tabs[0]
+	old := NewPaneModel("ov-1", testRingBufSize)
+	t.Cleanup(old.Dispose)
+	old.Type = "hunk"
+	tab.overlayPane = old
+	m.flashText = ""
+	runCmdNoWait(m.createOverlay(tab, "/repo", "lazygit"))
+	if tab.overlayPane != old || m.pendingOverlayShow[tab.ID] {
+		t.Error("createOverlay touched the slot for a parked host")
+	}
+	if n := countSent(conn, ipc.MsgCreatePane) + countSent(conn, ipc.MsgDestroyPane); n != 0 {
+		t.Errorf("createOverlay sent %d messages to a parked host", n)
+	}
+	if !strings.Contains(m.flashText, roDest) {
+		t.Errorf("createOverlay: flash = %q, want the host named", m.flashText)
 	}
 }

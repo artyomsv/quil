@@ -519,7 +519,9 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 		},
 		paletteCommand{
 			action: palActRemoveProject, arg: removeArg,
-			enabled:  active != nil && (remote || m.projectActionable(active)),
+			// The start host's Disconnect is greyed like the context menu's
+			// (canDisconnect): the window would be left with no daemon.
+			enabled:  active != nil && ((remote && m.canDisconnect(active.Dest)) || (!remote && m.projectActionable(active))),
 			label:    removeLabel,
 			detail:   m.keymap.Display("project.destroy"),
 			keywords: []string{"project", "destroy", "delete", "remove", "disconnect", "host"},

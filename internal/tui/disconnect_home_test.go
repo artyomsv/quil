@@ -73,6 +73,27 @@ func TestDisconnectHost_ViewerDisconnectsASecondHost(t *testing.T) {
 	}
 }
 
+// The palette greys its Disconnect row for the start host, like the menu, and
+// keeps it for any other host.
+func TestDisconnectHost_PaletteGreysTheStartHost(t *testing.T) {
+	for _, home := range []string{roDest, ""} {
+		m := viewerMenuModel(t, home)
+		found := false
+		for _, c := range m.buildPaletteCommands() {
+			if c.action != palActRemoveProject {
+				continue
+			}
+			found = true
+			if want := home == ""; c.enabled != want {
+				t.Errorf("home %q: palette %q enabled = %v, want %v", home, c.label, c.enabled, want)
+			}
+		}
+		if !found {
+			t.Errorf("home %q: no Disconnect row in the palette", home)
+		}
+	}
+}
+
 // The palette's "remove project" reaches the same confirm by another way. On
 // the start host it says why it did nothing rather than opening the confirm.
 func TestDisconnectHost_StartHostConfirmFlashes(t *testing.T) {

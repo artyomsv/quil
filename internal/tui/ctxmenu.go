@@ -578,6 +578,16 @@ func (m *Model) openProjectCtxMenu(p *ProjectModel, anchorX, anchorY int) {
 	if m.destReadOnly(p.Dest) {
 		greyReadOnlyItems(s.items)
 	}
+	// The host this client was started against (--connect, --remote) holds
+	// the session: disconnecting it left a window with no daemon at all,
+	// showing "Connecting to quild…" forever. Ctrl+Q is the way out there.
+	if !m.canDisconnect(p.Dest) {
+		for i := range s.items {
+			if s.items[i].id == ctxActDisconnectHost {
+				s.items[i].enabled = false
+			}
+		}
+	}
 	s.cursor = firstEnabled(s.items)
 	w, h := s.boxSize()
 	if w > m.width || h > m.height-2 {

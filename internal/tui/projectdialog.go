@@ -1294,6 +1294,18 @@ func splitSSHDest(dest string) (user, host string) {
 // undo is retyping an ssh destination rather than pressing a key.
 const confirmKindDisconnectHost = "disconnect-host"
 
+// noDisconnectHomeFlash is what Disconnect says on the host this client was
+// started against.
+const noDisconnectHomeFlash = "this window was started on that host — it cannot be disconnected (ctrl+q quits)"
+
+// canDisconnect reports whether dest may be disconnected: any host but the
+// local daemon and the one this client was started against (Model.homeDest).
+// Either holds the session; without it nothing is left to show. It is a
+// client-local action, so the destination's rights do not matter.
+func (m Model) canDisconnect(dest string) bool {
+	return dest != "" && dest != m.homeDest
+}
+
 // confirmDisconnectHost opens the confirm for a remote project's host. Keyed
 // by the DEST, not the project: disconnecting takes every project on that
 // machine, so the one that happened to be right-clicked is not the target.
@@ -1301,6 +1313,10 @@ func (m *Model) confirmDisconnectHost(projectID string) tea.Cmd {
 	p := m.projectByID(projectID)
 	if p == nil || p.Dest == "" {
 		return nil
+	}
+	if !m.canDisconnect(p.Dest) {
+		m.setFlash(noDisconnectHomeFlash)
+		return m.flashCmd()
 	}
 	m.dialog = dialogConfirm
 	m.confirmKind = confirmKindDisconnectHost

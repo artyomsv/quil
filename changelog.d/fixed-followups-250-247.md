@@ -69,3 +69,8 @@ headline: Stricter shared workspaces; refused creates now say why
   "pane not created: <host> is disconnected — <reason>" in the status bar. Before, the
   form opened and the new pane waited for an answer that never came. You can still look
   at the host's panes.
+- **You can no longer disconnect the host a window was started on.** With `--connect`
+  or `--remote`, "Disconnect host…" on that host's projects is greyed out, and the
+  palette says why. Before, it removed every project and left the window on
+  "Connecting to quild…" for good. Other hosts still disconnect, also from a
+  read-only connection.

@@ -241,9 +241,13 @@ func (m *Model) installDest(dest string) tea.Cmd {
 // deliver for a destination the Model has already forgotten; the reconnect
 // dialer goes with it, because canReconnect is `redialFns[dest] != nil` and a
 // leftover one would have the ladder redial a host the user just dismissed.
-func (m *Model) disconnectDest(dest string) {
-	if dest == "" {
-		return // the local daemon is not disconnectable; its panes died with it
+//
+// It reports false, and does nothing, for a host canDisconnect refuses.
+func (m *Model) disconnectDest(dest string) bool {
+	if !m.canDisconnect(dest) {
+		// The local daemon, or the host this client was started against:
+		// either holds the session, and dropping it leaves nothing to show.
+		return false
 	}
 	// Note saves pending there can no longer be answered: the open editor's
 	// text stays dirty, a closed editor's goes to notes-conflicts now rather
@@ -331,6 +335,7 @@ func (m *Model) disconnectDest(dest string) {
 		m.closeClientFn(conn)
 	}
 	m.forgetDestination(dest)
+	return true
 }
 
 // forgetDestination drops the host from [[destinations]] so it is not dialled

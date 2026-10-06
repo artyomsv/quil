@@ -1360,7 +1360,10 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			// confirmID carries the DEST here, not a project id: disconnecting
 			// takes every project on that machine, so the one that happened to
 			// be right-clicked is not the target.
-			m.disconnectDest(id)
+			if !m.disconnectDest(id) {
+				m.setFlash(noDisconnectHomeFlash)
+				return m, tea.Batch(tea.ClearScreen, m.flashCmd())
+			}
 			log.Printf("disconnected host %q", id)
 			return m, tea.ClearScreen
 		}

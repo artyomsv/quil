@@ -32,9 +32,9 @@ type pendingGroupOp struct {
 
 // groupRename is one group rename this client sent, from the commit until
 // every daemon it went to has settled it. The DAEMON settles it, never a
-// guess: its refusal, its accept (whose alias lasts until its next frame,
-// see renameAccepted), or — when the answer was lost with the link — the
-// first frame it sends afterwards.
+// guess: its refusal, its accept (whose alias lasts until its list shows
+// the rename, see renameAccepted), or — when the answer was lost with the
+// link — the first frame it sends afterwards.
 //
 // The view shows the new name from the commit on, on the same group, so its
 // order and collapsed state stay. Its origin is not touched. Until a daemon
@@ -59,17 +59,21 @@ const (
 	renameWaiting   renameState = iota // the answer can still arrive
 	renameLost                         // it cannot; the daemon's next frame decides
 	renameFrameSeen                    // that frame arrived (noteSharedData)
-	// renameAccepted: the daemon said OK, but answers before its coalesced
-	// broadcast, so its list and its projects still carry the old name. The
-	// alias stays until a frame from THAT daemon arrives (renameAcceptedSeen):
-	// another host's frame in between would otherwise re-add the old name
-	// and delete the renamed group, losing its place and collapsed state.
+	// renameAccepted: the daemon said OK, but it answers before its
+	// coalesced broadcast, and a snapshot it built BEFORE the rename can
+	// still be broadcast after the OK (buildWorkspaceState releases its lock
+	// before sending — the pane_seen revision-barrier comment in
+	// internal/daemon/daemon.go). So the alias is retired by CONTENT, not by
+	// the next frame: only once that daemon's list shows the rename
+	// (settleRenamesFromFrames). Until then another host's frame, or the
+	// daemon's own stale one, would re-add the old name and delete the
+	// renamed group, losing its place and collapsed state.
 	renameAccepted
-	renameAcceptedSeen
 )
 
 // acceptGroupRename records dest's OK. The rename is accepted (never put
-// back); dest's alias is retired by its next frame (settleRenamesFromFrames).
+// back); dest's alias is retired once its list shows the rename
+// (settleRenamesFromFrames).
 func (m *Model) acceptGroupRename(r *groupRename, dest string) {
 	if r == nil {
 		return
@@ -179,15 +183,24 @@ func (m *Model) settleGroupRename(r *groupRename, dest string, accepted bool) te
 }
 
 // settleRenamesFromFrames settles every rename that a daemon's latest list
-// already answers: the new name listed is an accept, and so is any frame
-// after the daemon's OK (its alias retires); after a lost answer, the old
-// name listed is a refusal, and neither name leaves the view as it is.
+// already answers. The new name listed is an accept: the daemon refuses a
+// rename onto a name it holds (groupOp in internal/daemon/shared.go), so no
+// snapshot from before the rename can list it. After the daemon's OK, a list
+// with NEITHER name retires the alias too — the group was renamed and then
+// deleted, and only a pre-rename snapshot still lists the old name, which
+// keeps it. After a lost answer, the old name listed is a refusal, and
+// neither name leaves the view as it is.
+//
+// The new name alone decides, even when the old one is listed beside it:
+// that can only be a group created under the old name AFTER the rename, and
+// keeping the alias then would file its projects under the new name.
 func (m *Model) settleRenamesFromFrames() {
 	for _, r := range slices.Clone(m.groupRenames) {
 		for d, st := range r.dests {
 			list := m.daemonGroups[d]
 			switch {
-			case containsFold(list, r.newName), st == renameAcceptedSeen:
+			case containsFold(list, r.newName),
+				st == renameAccepted && !containsFold(list, r.oldName):
 				m.settleGroupRename(r, d, true)
 			case st != renameFrameSeen:
 			case containsFold(list, r.oldName):
@@ -275,15 +288,11 @@ func (m *Model) noteSharedData(msg WorkspaceStateMsg) {
 	}
 	m.sharedData[msg.Dest] = true
 	m.daemonGroups[msg.Dest] = append([]string(nil), groups...)
-	// A rename whose answer was lost is decided by this frame, and an
-	// accepted one's alias retired by it: it was sent after the daemon read
-	// the rename, if the daemon ever did.
+	// A rename whose answer was lost is decided by this frame: it was sent
+	// after the daemon read the rename, if the daemon ever did.
 	for _, r := range m.groupRenames {
-		switch st, in := r.dests[msg.Dest]; {
-		case in && st == renameLost:
+		if st, in := r.dests[msg.Dest]; in && st == renameLost {
 			r.dests[msg.Dest] = renameFrameSeen
-		case in && st == renameAccepted:
-			r.dests[msg.Dest] = renameAcceptedSeen
 		}
 	}
 	m.daemonRecent[msg.Dest] = append([]string(nil), recent...)

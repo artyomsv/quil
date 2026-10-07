@@ -85,12 +85,16 @@ func TestGroupRename_Accepted(t *testing.T) {
 
 	m = updateNoWait(t, m, sharedOpRespMsg{dest: "", id: id, resp: ipc.OpRespPayload{OK: true}})
 	check("after the OK")
+	// The renamed host broadcasts a snapshot it built BEFORE the rename,
+	// after its OK: the alias must survive it.
+	m = updateNoWait(t, m, sharedFrame("r", 3, "proj-1", "Infra", "X", "Infra", "Y"))
+	check("after the same host's pre-rename frame")
 	m = updateNoWait(t, m, hostFrame("q", 2, "")) // another host, before the renamed one's frame
 	check("after an unrelated host's frame")
 	if len(m.groupRenames) != 1 {
 		t.Errorf("%d renames pending before the renamed host's frame, want its alias kept", len(m.groupRenames))
 	}
-	m = updateNoWait(t, m, sharedFrame("r", 3, "proj-1", "Ops", "X", "Ops", "Y"))
+	m = updateNoWait(t, m, sharedFrame("r", 4, "proj-1", "Ops", "X", "Ops", "Y"))
 	check("after the renamed host's frame")
 	if o := originOf(t, m, "Ops"); o != groupOriginHost {
 		t.Errorf("origin %q after the accept, want host", o)

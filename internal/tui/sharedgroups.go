@@ -32,8 +32,9 @@ type pendingGroupOp struct {
 
 // groupRename is one group rename this client sent, from the commit until
 // every daemon it went to has settled it. The DAEMON settles it, never a
-// guess: its accept, its refusal, or — when the answer was lost with the
-// link — the first frame it sends afterwards.
+// guess: its refusal, its accept (whose alias lasts until its next frame,
+// see renameAccepted), or — when the answer was lost with the link — the
+// first frame it sends afterwards.
 //
 // The view shows the new name from the commit on, on the same group, so its
 // order and collapsed state stay. Its origin is not touched. Until a daemon
@@ -58,7 +59,26 @@ const (
 	renameWaiting   renameState = iota // the answer can still arrive
 	renameLost                         // it cannot; the daemon's next frame decides
 	renameFrameSeen                    // that frame arrived (noteSharedData)
+	// renameAccepted: the daemon said OK, but answers before its coalesced
+	// broadcast, so its list and its projects still carry the old name. The
+	// alias stays until a frame from THAT daemon arrives (renameAcceptedSeen):
+	// another host's frame in between would otherwise re-add the old name
+	// and delete the renamed group, losing its place and collapsed state.
+	renameAccepted
+	renameAcceptedSeen
 )
+
+// acceptGroupRename records dest's OK. The rename is accepted (never put
+// back); dest's alias is retired by its next frame (settleRenamesFromFrames).
+func (m *Model) acceptGroupRename(r *groupRename, dest string) {
+	if r == nil {
+		return
+	}
+	if _, in := r.dests[dest]; in {
+		r.dests[dest] = renameAccepted
+		r.accepted = true
+	}
+}
 
 // trackGroupRename records a rename about to go to every daemon the fan-out
 // reaches (sendGroupOpEverywhere's targets) and returns it. With none, the
@@ -159,15 +179,15 @@ func (m *Model) settleGroupRename(r *groupRename, dest string, accepted bool) te
 }
 
 // settleRenamesFromFrames settles every rename that a daemon's latest list
-// already answers: the new name listed is an accept; after a lost answer,
-// the old name listed is a refusal, and neither name leaves the view as it
-// is.
+// already answers: the new name listed is an accept, and so is any frame
+// after the daemon's OK (its alias retires); after a lost answer, the old
+// name listed is a refusal, and neither name leaves the view as it is.
 func (m *Model) settleRenamesFromFrames() {
 	for _, r := range slices.Clone(m.groupRenames) {
 		for d, st := range r.dests {
 			list := m.daemonGroups[d]
 			switch {
-			case containsFold(list, r.newName):
+			case containsFold(list, r.newName), st == renameAcceptedSeen:
 				m.settleGroupRename(r, d, true)
 			case st != renameFrameSeen:
 			case containsFold(list, r.oldName):
@@ -255,11 +275,15 @@ func (m *Model) noteSharedData(msg WorkspaceStateMsg) {
 	}
 	m.sharedData[msg.Dest] = true
 	m.daemonGroups[msg.Dest] = append([]string(nil), groups...)
-	// A rename whose answer was lost is decided by this frame: it was sent
-	// after the daemon read the rename, if the daemon ever did.
+	// A rename whose answer was lost is decided by this frame, and an
+	// accepted one's alias retired by it: it was sent after the daemon read
+	// the rename, if the daemon ever did.
 	for _, r := range m.groupRenames {
-		if st, in := r.dests[msg.Dest]; in && st == renameLost {
+		switch st, in := r.dests[msg.Dest]; {
+		case in && st == renameLost:
 			r.dests[msg.Dest] = renameFrameSeen
+		case in && st == renameAccepted:
+			r.dests[msg.Dest] = renameAcceptedSeen
 		}
 	}
 	m.daemonRecent[msg.Dest] = append([]string(nil), recent...)
@@ -647,10 +671,11 @@ func (m *Model) applySharedOpResp(msg sharedOpRespMsg) tea.Cmd {
 		return nil
 	}
 	delete(m.pendingGroupOps, msg.id)
-	settle := m.settleGroupRename(op.rename, op.dest, msg.resp.OK)
 	if msg.resp.OK {
-		return settle
+		m.acceptGroupRename(op.rename, op.dest)
+		return nil
 	}
+	settle := m.settleGroupRename(op.rename, op.dest, false)
 	// Filed against the destination the request went to (pendingGroupOps),
 	// never the answer's own Origin: the id is what this client minted.
 	reason := elideEnd(sanitizeRemoteText(msg.resp.Error), sharedOpErrCap)

@@ -55,32 +55,45 @@ func hostFrame(runID string, rev uint64, group string, groups ...string) Workspa
 // An accepted rename of a host's group keeps the group the host's: the
 // origin is never turned into the user's. A frame sent before the daemon
 // applied it (still listing the old name) neither drops the new name nor
-// adds the old one back.
+// adds the old one back — and neither does ANOTHER host's frame arriving
+// between the daemon's OK and its own next frame: the OK is answered
+// before the daemon's coalesced broadcast, so its list still says Infra.
 func TestGroupRename_Accepted(t *testing.T) {
-	m, conn := connectedTestModelCapturingSends(t)
+	m, local, _ := twoDestModel(t)
 	m = updateNoWait(t, m, sharedFrame("r", 1, "proj-1", "Infra", "X", "Infra", "Y"))
+	m = updateNoWait(t, m, hostFrame("q", 1, ""))
 	m.groups.Groups[1].Collapsed = true
+	check := func(step string) {
+		t.Helper()
+		wantGroups(t, m, step, "X", "Ops", "Y")
+		if g := m.groups.indexOf("Ops"); g == 1 && !m.groups.Groups[1].Collapsed {
+			t.Errorf("%s: Ops lost its collapsed state", step)
+		}
+		if g := m.groups.groupOf("", "proj-1"); g != 1 {
+			t.Errorf("%s: proj-1 in group %d, want Ops", step, g)
+		}
+	}
 
 	m = renameThroughDialog(t, m, "Infra", "Ops")
-	id := lastGroupOpID(t, conn)
-	wantGroups(t, m, "after the commit", "X", "Ops", "Y")
+	id := lastGroupOpID(t, local)
+	check("after the commit")
 	if o := originOf(t, m, "Ops"); o != groupOriginHost {
 		t.Errorf("origin %q while the daemon answers, want host", o)
 	}
 	m = updateNoWait(t, m, sharedFrame("r", 2, "proj-1", "Infra", "X", "Infra", "Y")) // in flight
-	wantGroups(t, m, "after an in-flight frame", "X", "Ops", "Y")
-	if m.groups.groupOf("", "proj-1") != 1 {
-		t.Errorf("proj-1 in group %d after the in-flight frame, want Ops", m.groups.groupOf("", "proj-1"))
-	}
+	check("after an in-flight frame")
 
 	m = updateNoWait(t, m, sharedOpRespMsg{dest: "", id: id, resp: ipc.OpRespPayload{OK: true}})
+	check("after the OK")
+	m = updateNoWait(t, m, hostFrame("q", 2, "")) // another host, before the renamed one's frame
+	check("after an unrelated host's frame")
+	if len(m.groupRenames) != 1 {
+		t.Errorf("%d renames pending before the renamed host's frame, want its alias kept", len(m.groupRenames))
+	}
 	m = updateNoWait(t, m, sharedFrame("r", 3, "proj-1", "Ops", "X", "Ops", "Y"))
-	wantGroups(t, m, "after the accept", "X", "Ops", "Y")
+	check("after the renamed host's frame")
 	if o := originOf(t, m, "Ops"); o != groupOriginHost {
 		t.Errorf("origin %q after the accept, want host", o)
-	}
-	if !m.groups.Groups[1].Collapsed {
-		t.Error("the renamed group lost its collapsed state")
 	}
 	if len(m.groupRenames) != 0 {
 		t.Errorf("%d renames still unsettled", len(m.groupRenames))
@@ -187,6 +200,13 @@ func TestGroupRename_DeferredThenAnswered(t *testing.T) {
 			if other := map[bool]string{true: "Infra", false: "Platform"}[tc.ok]; m.groups.indexOf(other) >= 0 {
 				t.Errorf("groups = %v, %s should be gone", groupNames(m), other)
 			}
+			if tc.ok {
+				// An accept's alias lasts until the daemon's own frame.
+				m = updateNoWait(t, m, sharedFrame("r", 2, "proj-1", "Platform", "Platform"))
+				if m.groups.indexOf("Platform") < 0 {
+					t.Errorf("after the daemon's frame: groups = %v, want Platform", groupNames(m))
+				}
+			}
 			if len(m.groupRenames) != 0 {
 				t.Errorf("%d renames still unsettled", len(m.groupRenames))
 			}
@@ -252,9 +272,11 @@ func TestGroupRename_AnswerMatchedByRequestID(t *testing.T) {
 	m = renameThroughDialog(t, m, "Infra", "Ops")
 	id1 := lastGroupOpID(t, conn)
 	m = updateNoWait(t, m, sharedOpRespMsg{dest: "", id: id1, resp: ok})
+	m = updateNoWait(t, m, sharedFrame("r", 2, "proj-1", "", "Ops")) // settles the first
 	m = renameThroughDialog(t, m, "Ops", "Infra")
 	id2 := lastGroupOpID(t, conn)
 	m = updateNoWait(t, m, sharedOpRespMsg{dest: "", id: id2, resp: ok})
+	m = updateNoWait(t, m, sharedFrame("r", 3, "proj-1", "", "Infra"))
 	m = renameThroughDialog(t, m, "Infra", "Ops")
 	id3 := lastGroupOpID(t, conn)
 	if id1 == id3 || id2 == id3 {
@@ -315,6 +337,11 @@ func TestGroupRename_DisconnectAfterTheOtherHostAccepted(t *testing.T) {
 
 	if m.groups.indexOf("Ops") < 0 {
 		t.Errorf("groups = %v, want the accepted Ops", groupNames(m))
+	}
+	// The accepting host's alias lasts until its own frame.
+	m = updateNoWait(t, m, sharedFrame("r", 2, "proj-1", "", "Ops"))
+	if m.groups.indexOf("Ops") < 0 {
+		t.Errorf("after the accepting host's frame: groups = %v, want Ops", groupNames(m))
 	}
 	if len(m.groupRenames) != 0 {
 		t.Errorf("%d renames still pending after the host left", len(m.groupRenames))

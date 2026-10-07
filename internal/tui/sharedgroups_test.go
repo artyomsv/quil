@@ -627,10 +627,10 @@ func commitRename(t *testing.T, m Model, from, to string) Model {
 	return out.(Model)
 }
 
-// A second rename made while the first is unanswered is refused (one rename
-// per group in flight). Once the first is accepted — before the daemon's
-// frame lists B — the op for B goes to the daemon the first went to.
-func TestCommitGroupEdit_RenameTwiceBeforeTheFrame_SendsBoth(t *testing.T) {
+// A second rename made while the first is unsettled is refused (one rename
+// per group in flight): an OK alone does not settle it, the daemon's next
+// frame does. Then the op for B goes to the daemon the first went to.
+func TestCommitGroupEdit_SecondRenameWaitsForTheFirstToSettle(t *testing.T) {
 	m, conn := connectedTestModelCapturingSends(t)
 	m = updateWith(t, m, sharedFrame("r", 1, "proj-1", "A", "A"))
 	m = commitRename(t, m, "A", "B")
@@ -643,6 +643,11 @@ func TestCommitGroupEdit_RenameTwiceBeforeTheFrame_SendsBoth(t *testing.T) {
 		t.Errorf("flash = %q", m.flashText)
 	}
 	m = updateWith(t, m, sharedOpRespMsg{dest: "", id: first, resp: ipc.OpRespPayload{OK: true}})
+	m = commitRename(t, m, "B", "C")
+	if ops := groupOpsSent(t, conn); len(ops) != 1 {
+		t.Fatalf("group_ops = %+v, want the second rename refused until the daemon's frame", ops)
+	}
+	m = updateWith(t, m, sharedFrame("r", 2, "proj-1", "B", "B"))
 	m = commitRename(t, m, "B", "C")
 	ops := groupOpsSent(t, conn)
 	if len(ops) != 2 || ops[0].Name != "A" || ops[0].NewName != "B" || ops[1].Name != "B" || ops[1].NewName != "C" {

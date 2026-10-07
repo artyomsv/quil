@@ -25,23 +25,152 @@ import (
 type pendingGroupOp struct {
 	dest string
 	what string
-	// rename is set on each op of one rename's fan-out (sendGroupRename).
+	// rename is the rename this op carries, when it is one (groupRenameFor).
 	rename *groupRename
 }
 
-// groupRename is one rename sent to the daemons that list the group. The
-// view shows the new name at once, as the user's (so a frame still in flight
-// cannot take it), and settles when every op is answered: an accepted rename
-// gets the group's own origin back, so a host's group stays the host's; a
-// rename no daemon accepted — refused, not sent, or lost with the link —
-// puts the old name back. Before, the new name was the user's for good, and
-// a rename the host refused stayed in the view and the file forever.
+// groupRename is one group rename this client sent, from the commit until
+// every daemon it went to has settled it. The DAEMON settles it, never a
+// guess: its accept, its refusal, or — when the answer was lost with the
+// link — the first frame it sends afterwards.
+//
+// The view shows the new name from the commit on, on the same group, so its
+// order and collapsed state stay. Its origin is not touched. Until a daemon
+// settles, rebuildGroupsView reads that daemon's list and its projects'
+// groups with the old name replaced by the new (aliasedGroupLists): a frame
+// sent before the daemon applied the rename must not drop the new name or
+// add the old one back.
+//
+// A rename held behind a groups import (deferGroupOp) keeps its entry: the
+// replayed op finds it again by its payload (groupRenameFor).
 type groupRename struct {
 	oldName, newName string
-	origin           string // the group's origin before the rename
-	left             int    // ops sent and not answered yet
-	accepted         bool
-	deferred         bool // an op waits for the import answer: settled as before
+	dests            map[string]renameState
+	accepted         bool // a daemon took it: never put the old name back
+}
+
+type renameState int
+
+const (
+	renameWaiting   renameState = iota // the answer can still arrive
+	renameLost                         // it cannot; the daemon's next frame decides
+	renameFrameSeen                    // that frame arrived (noteSharedData)
+)
+
+// trackGroupRename records a rename about to go to every daemon the fan-out
+// reaches (sendGroupOpEverywhere's targets). With none, the name is this
+// client's alone and there is nothing to settle.
+func (m *Model) trackGroupRename(oldName, newName string) {
+	r := &groupRename{oldName: oldName, newName: newName, dests: map[string]renameState{}}
+	for _, d := range m.groupOpTargets(oldName) {
+		if m.sharedData[d] && m.destConnected(d) {
+			r.dests[d] = renameWaiting
+		}
+	}
+	if len(r.dests) > 0 {
+		m.groupRenames = append(m.groupRenames, r)
+	}
+}
+
+// groupRenameFor is the rename an op to dest carries, or nil.
+func (m *Model) groupRenameFor(dest string, payload any) *groupRename {
+	op, ok := payload.(ipc.GroupOpPayload)
+	if !ok || op.Op != ipc.GroupOpRename {
+		return nil
+	}
+	for _, r := range m.groupRenames {
+		if _, in := r.dests[dest]; in && strings.EqualFold(r.oldName, op.Name) && strings.EqualFold(r.newName, op.NewName) {
+			return r
+		}
+	}
+	return nil
+}
+
+// settleGroupRename records dest's outcome. When it was the last daemon and
+// none accepted, the same group gets its old name back.
+func (m *Model) settleGroupRename(r *groupRename, dest string, accepted bool) tea.Cmd {
+	if r == nil {
+		return nil
+	}
+	if _, in := r.dests[dest]; !in {
+		return nil
+	}
+	delete(r.dests, dest)
+	r.accepted = r.accepted || accepted
+	if len(r.dests) > 0 {
+		return nil
+	}
+	m.groupRenames = slices.DeleteFunc(m.groupRenames, func(x *groupRename) bool { return x == r })
+	if r.accepted {
+		return nil
+	}
+	g := m.groups.indexOf(r.newName)
+	if g < 0 {
+		return nil // renamed again or deleted since: that edit stands
+	}
+	if err := m.groups.renameGroup(g, r.oldName); err != nil {
+		log.Printf("groups: rename %q -> %q refused, and %q cannot be put back: %v", r.oldName, r.newName, r.oldName, err)
+		return nil
+	}
+	return m.saveGroupsCmd()
+}
+
+// settleRenamesFromFrames settles every rename that a daemon's latest list
+// already answers: the new name listed is an accept; after a lost answer,
+// the old name listed is a refusal, and neither name leaves the view as it
+// is.
+func (m *Model) settleRenamesFromFrames() {
+	for _, r := range slices.Clone(m.groupRenames) {
+		for d, st := range r.dests {
+			list := m.daemonGroups[d]
+			switch {
+			case containsFold(list, r.newName):
+				m.settleGroupRename(r, d, true)
+			case st != renameFrameSeen:
+			case containsFold(list, r.oldName):
+				m.settleGroupRename(r, d, false)
+			default:
+				m.settleGroupRename(r, d, true)
+			}
+		}
+	}
+}
+
+// aliasedGroupLists is every shared destination's list as rebuildGroupsView
+// reads it: each unsettled rename sent there replaces its old name with the
+// new one, in the order the renames were made.
+func (m *Model) aliasedGroupLists() map[string][]string {
+	out := make(map[string][]string, len(m.daemonGroups))
+	for d, list := range m.daemonGroups {
+		out[d] = list
+	}
+	for _, r := range m.groupRenames {
+		for d := range r.dests {
+			list := out[d]
+			if !containsFold(list, r.oldName) || containsFold(list, r.newName) {
+				continue
+			}
+			list = slices.Clone(list)
+			for i, n := range list {
+				if strings.EqualFold(n, r.oldName) {
+					list[i] = r.newName
+				}
+			}
+			out[d] = list
+		}
+	}
+	return out
+}
+
+// aliasedGroup is a project's group as rebuildGroupsView reads it: through
+// every unsettled rename sent to its daemon.
+func (m *Model) aliasedGroup(dest, group string) string {
+	for _, r := range m.groupRenames {
+		if _, in := r.dests[dest]; in && strings.EqualFold(group, r.oldName) {
+			group = r.newName
+		}
+	}
+	return group
 }
 
 // sharedOpRespMsg is a project_op_resp/group_op_resp for an id this client
@@ -83,6 +212,13 @@ func (m *Model) noteSharedData(msg WorkspaceStateMsg) {
 	}
 	m.sharedData[msg.Dest] = true
 	m.daemonGroups[msg.Dest] = append([]string(nil), groups...)
+	// A rename whose answer was lost is decided by this frame: it was sent
+	// after the daemon read the rename, if the daemon ever did.
+	for _, r := range m.groupRenames {
+		if st, in := r.dests[msg.Dest]; in && st == renameLost {
+			r.dests[msg.Dest] = renameFrameSeen
+		}
+	}
 	m.daemonRecent[msg.Dest] = append([]string(nil), recent...)
 }
 
@@ -193,8 +329,9 @@ func (m *Model) destsListingGroup(name string) []string {
 // Provenance (projectGroup.Origin/Hosts, saved in the file): every shared
 // destination's list CLAIMS the names it carries, and an authoritative
 // destination's claim on a name it no longer lists is dropped. A group is the
-// user's (userOwned) when created or renamed here, or a legacy group from a
-// version 1 file; a group a daemon's list added is a host group.
+// user's (userOwned) when created here, or a legacy group from a version 1
+// file; a group a daemon's list added is a host group. A rename keeps the
+// origin: a host's group renamed here is still the host's.
 //
 // A project of an authoritative destination JOINS a group only when its own
 // daemon lists that name in THIS frame, or the group is the user's. Nothing
@@ -211,8 +348,9 @@ func (m *Model) destsListingGroup(name string) []string {
 // name DISAPPEARED: a destination that listed it in its previous frame dropped
 // it in this one (vanishedGroups), which is how a delete made in another
 // client shows here. A user group nobody ever listed is never deleted, and an
-// in-flight frame during an optimistic rename cannot take the new name: the
-// rename made it the user's, and it was never listed, so it cannot vanish.
+// in-flight frame during a rename cannot take the new name: until the daemon
+// settles the rename, its list is read with the new name in place of the old
+// (aliasedGroupLists, groupRename).
 // A group that still has members is never deleted.
 //
 // With no shared destination nothing here runs, so a legacy-only setup
@@ -225,6 +363,9 @@ func (m *Model) rebuildGroupsView() tea.Cmd {
 		return nil
 	}
 	before := m.groups.clone()
+	// After the snapshot, so a rename a frame refused is saved with the rest.
+	m.settleRenamesFromFrames()
+	lists := m.aliasedGroupLists()
 	auth := map[string]bool{}
 	for d := range m.sharedData {
 		if m.frameAuthoritativeFor(d) {
@@ -233,7 +374,7 @@ func (m *Model) rebuildGroupsView() tea.Cmd {
 	}
 	m.groups = m.groups.withoutMembersOf(auth)
 	for _, dest := range m.sharedDestsInOrder() {
-		for _, name := range m.daemonGroups[dest] {
+		for _, name := range lists[dest] {
 			g := m.groups.indexOf(name)
 			if g < 0 {
 				var err error
@@ -246,15 +387,16 @@ func (m *Model) rebuildGroupsView() tea.Cmd {
 			m.groups.claim(g, dest)
 		}
 		if auth[dest] {
-			m.groups.dropClaimsNotIn(dest, m.daemonGroups[dest])
+			m.groups.dropClaimsNotIn(dest, lists[dest])
 		}
 	}
 	for _, p := range m.projects {
 		if p == nil || !auth[p.Dest] || p.Group == "" {
 			continue
 		}
-		g := m.groups.indexOf(p.Group)
-		if g < 0 || !(m.groups.Groups[g].userOwned() || containsFold(m.daemonGroups[p.Dest], p.Group)) {
+		group := m.aliasedGroup(p.Dest, p.Group)
+		g := m.groups.indexOf(group)
+		if g < 0 || !(m.groups.Groups[g].userOwned() || containsFold(lists[p.Dest], group)) {
 			if m.firstSharedCapHit(p.Dest, "unlisted project group") {
 				log.Printf("groups: daemon %q filed project %q under %q, a name it does not list; shown ungrouped", p.Dest, p.ID, p.Group)
 			}
@@ -289,20 +431,11 @@ const sharedOpErrCap = 80
 // Clear-attention precedent): a one-shot the user asked for, never a bulk
 // iterator. Returns a flash Cmd when the destination is unreachable.
 func (m *Model) sendSharedOp(dest, msgType string, payload any, what string) tea.Cmd {
-	return m.sendSharedOpFor(dest, msgType, payload, what, nil)
-}
-
-// sendSharedOpFor is sendSharedOp for one op of a rename's fan-out: the op
-// is counted on rn while it waits for its answer.
-func (m *Model) sendSharedOpFor(dest, msgType string, payload any, what string, rn *groupRename) tea.Cmd {
 	if !m.groupSendsOpen(dest) {
 		// Before the groups import is answered a send could reach the daemon
 		// first and make it refuse the import (sharedimport.go). The change
 		// is in the file already; the send waits for the answer.
 		m.deferGroupOp(dest, msgType, payload, what)
-		if rn != nil {
-			rn.deferred = true
-		}
 		return nil
 	}
 	msg, err := ipc.NewMessage(msgType, payload)
@@ -314,96 +447,15 @@ func (m *Model) sendSharedOpFor(dest, msgType string, payload any, what string, 
 	if m.pendingGroupOps == nil {
 		m.pendingGroupOps = map[string]pendingGroupOp{}
 	}
+	rn := m.groupRenameFor(dest, payload)
 	m.pendingGroupOps[msg.ID] = pendingGroupOp{dest: dest, what: what, rename: rn}
 	if err := m.sendForDestStrict(dest, msg); err != nil {
 		delete(m.pendingGroupOps, msg.ID)
 		m.setErrorFlash(fmt.Sprintf("%s: %s not sent — %v", hostLabel(dest), what, err))
-		return m.flashCmd()
-	}
-	if rn != nil {
-		rn.left++
+		// Not sent is an answer: that daemon has the old name.
+		return tea.Batch(m.settleGroupRename(rn, dest, false), m.flashCmd())
 	}
 	return nil
-}
-
-// sendGroupRename sends a rename of group name to newName to every daemon
-// that lists it (sendGroupOpEverywhere's fan-out) and settles rn when no op
-// is left to wait for. The view already shows newName.
-func (m *Model) sendGroupRename(name, newName string, rn *groupRename) tea.Cmd {
-	var cmds []tea.Cmd
-	targets := 0
-	for _, dest := range m.groupOpTargets(name) {
-		if !m.destConnected(dest) || !m.sharedData[dest] {
-			continue
-		}
-		targets++
-		m.recordGroupNameSent(dest, ipc.GroupOpRename, name, newName)
-		cmds = append(cmds, m.sendSharedOpFor(dest, ipc.MsgGroupOp,
-			ipc.GroupOpPayload{Op: ipc.GroupOpRename, Name: name, NewName: newName}, ipc.GroupOpRename+" group", rn))
-	}
-	// No daemon to ask: the name is this client's alone, and the user's.
-	// Every op failed to send: nothing will answer, so it is settled now.
-	if targets > 0 && rn.left == 0 && !rn.deferred {
-		cmds = append(cmds, m.settleGroupRename(rn))
-	}
-	return tea.Batch(cmds...)
-}
-
-// settleGroupRename runs once rn has no op left in flight (see groupRename).
-// A deferred op is settled as renames always were: the name stays the user's.
-func (m *Model) settleGroupRename(rn *groupRename) tea.Cmd {
-	if rn.deferred {
-		return nil
-	}
-	g := m.groups.indexOf(rn.newName)
-	if g < 0 {
-		return nil // renamed again or deleted meanwhile: that edit stands
-	}
-	if rn.accepted {
-		if m.groups.Groups[g].Origin == rn.origin {
-			return nil
-		}
-		m.groups.Groups[g].Origin = rn.origin
-		return m.saveGroupsCmd()
-	}
-	// A frame that arrived meanwhile still listed the old name, and the merge
-	// added it back as a group of its own. That one goes; the renamed group,
-	// with the user's order and collapsed state, takes its members and claims.
-	if h := m.groups.indexOf(rn.oldName); h >= 0 && h != g {
-		for _, mb := range slices.Clone(m.groups.Groups[h].Members) {
-			m.groups.assign(g, mb.Dest, mb.ID)
-		}
-		for _, d := range m.groups.Groups[h].Hosts {
-			m.groups.claim(g, d)
-		}
-		m.groups.deleteGroup(h)
-		if h < g {
-			g--
-		}
-	}
-	if err := m.groups.renameGroup(g, rn.oldName); err != nil {
-		log.Printf("groups: rename %q -> %q not accepted, and %q cannot be put back: %v", rn.oldName, rn.newName, rn.oldName, err)
-		return nil
-	}
-	m.groups.Groups[g].Origin = rn.origin
-	return m.saveGroupsCmd()
-}
-
-// answerGroupRename counts one answer (or a lost one) for op's rename and
-// settles it when it was the last.
-func (m *Model) answerGroupRename(op pendingGroupOp, ok bool) tea.Cmd {
-	rn := op.rename
-	if rn == nil {
-		return nil
-	}
-	rn.left--
-	if ok {
-		rn.accepted = true
-	}
-	if rn.left > 0 {
-		return nil
-	}
-	return m.settleGroupRename(rn)
 }
 
 // sendSetProjectGroup files (or ungroups, group "") a project on its own
@@ -537,7 +589,8 @@ func (m *Model) sendGroupOpEverywhere(op, name, newName string) tea.Cmd {
 }
 
 // applySharedOpResp flashes a refusal naming the host. The optimistic local
-// change is undone by that daemon's next frame, not here.
+// change is undone by that daemon's next frame, not here — except a rename,
+// which the answer settles (settleGroupRename).
 func (m *Model) applySharedOpResp(msg sharedOpRespMsg) tea.Cmd {
 	// An answer from a daemon other than the one asked is not the answer: ids
 	// are this client's counter, and one host must not settle another's op.
@@ -546,7 +599,7 @@ func (m *Model) applySharedOpResp(msg sharedOpRespMsg) tea.Cmd {
 		return nil
 	}
 	delete(m.pendingGroupOps, msg.id)
-	settle := m.answerGroupRename(op, msg.resp.OK)
+	settle := m.settleGroupRename(op.rename, op.dest, msg.resp.OK)
 	if msg.resp.OK {
 		return settle
 	}

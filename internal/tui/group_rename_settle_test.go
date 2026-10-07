@@ -37,84 +37,168 @@ func originOf(t *testing.T, m Model, name string) string {
 	return m.groups.Groups[g].Origin
 }
 
-// An accepted rename of a host's group gives it back the host origin: the
-// new name is the host's group, not one the user owns forever.
-func TestGroupRename_AcceptedKeepsTheHostOrigin(t *testing.T) {
-	m, conn := connectedTestModelCapturingSends(t)
-	m = updateWith(t, m, sharedFrame("r", 1, "proj-1", "", "Infra"))
-	if o := originOf(t, m, "Infra"); o != groupOriginHost {
-		t.Fatalf("setup: Infra origin %q, want host", o)
-	}
-
-	m = renameThroughDialog(t, m, "Infra", "Ops")
-	id := lastGroupOpID(t, conn)
-	if o := originOf(t, m, "Ops"); o != groupOriginUser {
-		t.Errorf("while the daemon answers: origin %q, want user (an in-flight frame must not take it)", o)
-	}
-
-	m = updateWith(t, m, sharedOpRespMsg{dest: "", id: id, resp: ipc.OpRespPayload{OK: true}})
-	if o := originOf(t, m, "Ops"); o != groupOriginHost {
-		t.Errorf("after the daemon accepted: origin %q, want host", o)
-	}
-	m = updateWith(t, m, sharedFrame("r", 2, "proj-1", "", "Ops"))
-	if got := groupNames(m); len(got) != 1 || got[0] != "Ops" {
-		t.Errorf("groups = %v, want Ops alone", got)
+func wantGroups(t *testing.T, m Model, step string, want ...string) {
+	t.Helper()
+	if got := groupNames(m); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("%s: groups = %v, want %v", step, got, want)
 	}
 }
 
-// A refused rename puts the old name back as it was, with the refusal
-// flashed. Before, the new name stayed as the user's and was never cleaned
-// up: the next frame added the host's old name beside it.
-func TestGroupRename_RefusedPutsTheOldNameBack(t *testing.T) {
+// hostFrame is a shared frame from hostA: proj-2 filed under group, and the
+// host's list.
+func hostFrame(runID string, rev uint64, group string, groups ...string) WorkspaceStateMsg {
+	f := sharedFrame(runID, rev, "proj-2", group, groups...)
+	f.Dest = "hostA"
+	return f
+}
+
+// An accepted rename of a host's group keeps the group the host's: the
+// origin is never turned into the user's. A frame sent before the daemon
+// applied it (still listing the old name) neither drops the new name nor
+// adds the old one back.
+func TestGroupRename_Accepted(t *testing.T) {
 	m, conn := connectedTestModelCapturingSends(t)
-	m = updateWith(t, m, sharedFrame("r", 1, "proj-1", "", "Infra"))
+	m = updateWith(t, m, sharedFrame("r", 1, "proj-1", "Infra", "X", "Infra", "Y"))
+	m.groups.Groups[1].Collapsed = true
+
+	m = renameThroughDialog(t, m, "Infra", "Ops")
+	id := lastGroupOpID(t, conn)
+	wantGroups(t, m, "after the commit", "X", "Ops", "Y")
+	if o := originOf(t, m, "Ops"); o != groupOriginHost {
+		t.Errorf("origin %q while the daemon answers, want host", o)
+	}
+	m = updateWith(t, m, sharedFrame("r", 2, "proj-1", "Infra", "X", "Infra", "Y")) // in flight
+	wantGroups(t, m, "after an in-flight frame", "X", "Ops", "Y")
+	if m.groups.groupOf("", "proj-1") != 1 {
+		t.Errorf("proj-1 in group %d after the in-flight frame, want Ops", m.groups.groupOf("", "proj-1"))
+	}
+
+	m = updateWith(t, m, sharedOpRespMsg{dest: "", id: id, resp: ipc.OpRespPayload{OK: true}})
+	m = updateWith(t, m, sharedFrame("r", 3, "proj-1", "Ops", "X", "Ops", "Y"))
+	wantGroups(t, m, "after the accept", "X", "Ops", "Y")
+	if o := originOf(t, m, "Ops"); o != groupOriginHost {
+		t.Errorf("origin %q after the accept, want host", o)
+	}
+	if !m.groups.Groups[1].Collapsed {
+		t.Error("the renamed group lost its collapsed state")
+	}
+	if len(m.groupRenames) != 0 {
+		t.Errorf("%d renames still unsettled", len(m.groupRenames))
+	}
+}
+
+// A refused rename puts the old name back on the same group, with the
+// refusal flashed. Before, the new name was the user's for good and the
+// next frame added the host's old name beside it.
+func TestGroupRename_Refused(t *testing.T) {
+	m, conn := connectedTestModelCapturingSends(t)
+	m = updateWith(t, m, sharedFrame("r", 1, "proj-1", "", "X", "Infra"))
+	m.groups.Groups[1].Collapsed = true
 	m = renameThroughDialog(t, m, "Infra", "Ops")
 	id := lastGroupOpID(t, conn)
 
 	m = updateWith(t, m, sharedOpRespMsg{dest: "", id: id, resp: ipc.OpRespPayload{OK: false, Error: "rename: taken"}})
 
-	if got := groupNames(m); len(got) != 1 || got[0] != "Infra" {
-		t.Errorf("groups = %v, want Infra back", got)
-	}
-	if o := originOf(t, m, "Infra"); o != groupOriginHost {
-		t.Errorf("origin %q, want host as before", o)
+	wantGroups(t, m, "after the refusal", "X", "Infra")
+	if !m.groups.Groups[1].Collapsed || originOf(t, m, "Infra") != groupOriginHost {
+		t.Errorf("Infra came back as %+v, want the same group (collapsed, host)", m.groups.Groups[1])
 	}
 	if !strings.Contains(m.flashText, "refused") || !strings.Contains(m.flashText, "rename: taken") {
 		t.Errorf("flash = %q, want the refusal", m.flashText)
 	}
-	m = updateWith(t, m, sharedFrame("r", 2, "proj-1", "", "Infra"))
-	if got := groupNames(m); len(got) != 1 || got[0] != "Infra" {
-		t.Errorf("after the next frame: groups = %v, want Infra alone", got)
+	m = updateWith(t, m, sharedFrame("r", 2, "proj-1", "", "X", "Infra"))
+	wantGroups(t, m, "after the next frame", "X", "Infra")
+}
+
+// The daemon applied the rename, but its answer was lost with the link.
+// That is not a refusal: nothing changes locally, and the first frame after
+// the reattach — listing the new name — settles it on the same group, which
+// keeps its place and collapsed state.
+func TestGroupRename_LostReplyThenReattachWithTheNewName(t *testing.T) {
+	m, _, remote := twoDestModel(t)
+	m = updateWith(t, m, hostFrame("q", 1, "Infra", "X", "Infra", "Y"))
+	m.groups.Groups[1].Collapsed = true
+	m = renameThroughDialog(t, m, "Infra", "Ops")
+	if countSent(remote, ipc.MsgGroupOp) != 1 {
+		t.Fatal("setup: the rename was not sent to hostA")
+	}
+
+	out, _ := m.Update(linkLostMsg{dest: "hostA", err: errLinkLost})
+	m = out.(Model)
+	wantGroups(t, m, "after the link loss", "X", "Ops", "Y")
+
+	m = updateWith(t, m, hostFrame("q2", 1, "Ops", "X", "Ops", "Y")) // the new connection
+	wantGroups(t, m, "after the reattach", "X", "Ops", "Y")
+	if !m.groups.Groups[1].Collapsed {
+		t.Error("the renamed group lost its collapsed state: deleted and added again")
+	}
+	if m.groups.groupOf("hostA", "proj-2") != 1 {
+		t.Errorf("proj-2 in group %d, want Ops", m.groups.groupOf("hostA", "proj-2"))
+	}
+	if len(m.groupRenames) != 0 {
+		t.Errorf("%d renames still unsettled", len(m.groupRenames))
 	}
 }
 
-// A frame that still lists the old name can arrive before the refusal; the
-// merge then adds the old name back as a second group. The refusal folds
-// them into one again, with the old name.
-func TestGroupRename_RefusedAfterAnInFlightFrameLeavesOneGroup(t *testing.T) {
-	m, conn := connectedTestModelCapturingSends(t)
-	m = updateWith(t, m, sharedFrame("r", 1, "proj-1", "Infra", "Infra"))
+// The same lost answer when the daemon never applied it: the first frame
+// after the reattach still lists the old name, and the same group gets it
+// back.
+func TestGroupRename_LostReplyThenReattachWithTheOldName(t *testing.T) {
+	m, _, _ := twoDestModel(t)
+	m = updateWith(t, m, hostFrame("q", 1, "Infra", "X", "Infra", "Y"))
+	m.groups.Groups[1].Collapsed = true
 	m = renameThroughDialog(t, m, "Infra", "Ops")
-	id := lastGroupOpID(t, conn)
-	m = updateWith(t, m, sharedFrame("r", 2, "proj-1", "Infra", "Infra")) // in flight
+	out, _ := m.Update(linkLostMsg{dest: "hostA", err: errLinkLost})
+	m = out.(Model)
 
-	m = updateWith(t, m, sharedOpRespMsg{dest: "", id: id, resp: ipc.OpRespPayload{OK: false, Error: "rename: taken"}})
+	m = updateWith(t, m, hostFrame("q2", 1, "Infra", "X", "Infra", "Y"))
 
-	if got := groupNames(m); len(got) != 1 || got[0] != "Infra" {
-		t.Fatalf("groups = %v, want Infra alone", got)
+	wantGroups(t, m, "after the reattach", "X", "Infra", "Y")
+	if !m.groups.Groups[1].Collapsed {
+		t.Error("Infra lost its collapsed state")
 	}
-	if m.groups.groupOf("", "proj-1") != 0 {
-		t.Errorf("proj-1 in group %d, want Infra", m.groups.groupOf("", "proj-1"))
+}
+
+// A rename made before the groups import is answered is held, and keeps its
+// bookkeeping when it is replayed: the daemon's answer to the replayed op
+// settles it.
+func TestGroupRename_DeferredThenAnswered(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ok   bool
+		want string
+	}{{"accepted", true, "Platform"}, {"refused", false, "Infra"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, local, _ := importTestModel(t)
+			m = updateNoWait(t, m, sharedFrame("r", 1, "proj-1", ""))
+			_, importID := importPayload(t, local)
+			m = renameThroughDialog(t, m, "Infra", "Platform")
+			if n := countSent(local, ipc.MsgGroupOp); n != 0 {
+				t.Fatalf("setup: group_op sent %d times before the import answer", n)
+			}
+			m = updateNoWait(t, m, sharedImportRespMsg{dest: "", id: importID, resp: ipc.SharedImportRespPayload{Answered: []string{ipc.ImportKindGroups}}})
+			id := lastGroupOpID(t, local)
+
+			m = updateWith(t, m, sharedOpRespMsg{dest: "", id: id, resp: ipc.OpRespPayload{OK: tc.ok, Error: "rename: taken"}})
+
+			if m.groups.indexOf(tc.want) < 0 {
+				t.Errorf("groups = %v, want %s", groupNames(m), tc.want)
+			}
+			if other := map[bool]string{true: "Infra", false: "Platform"}[tc.ok]; m.groups.indexOf(other) >= 0 {
+				t.Errorf("groups = %v, %s should be gone", groupNames(m), other)
+			}
+			if len(m.groupRenames) != 0 {
+				t.Errorf("%d renames still unsettled", len(m.groupRenames))
+			}
+		})
 	}
 }
 
 // A rename while a daemon listing the group has its link down is refused
 // before anything changes: no op is sent, and the old name stays.
-func TestGroupRename_LinkDownRefusedBeforeAnyChange(t *testing.T) {
+func TestGroupRename_LinkDownAtSend(t *testing.T) {
 	m, _, remote := twoDestModel(t)
-	rf := sharedFrame("q", 1, "proj-2", "", "Infra")
-	rf.Dest = "hostA"
-	m = updateWith(t, m, rf)
+	m = updateWith(t, m, hostFrame("q", 1, "", "Infra"))
 	out, _ := m.Update(linkLostMsg{dest: "hostA", err: errLinkLost})
 	m = out.(Model)
 	if m.linkDownReason("hostA") == "" {
@@ -124,36 +208,14 @@ func TestGroupRename_LinkDownRefusedBeforeAnyChange(t *testing.T) {
 
 	m = renameThroughDialog(t, m, "Infra", "Ops")
 
-	if got := groupNames(m); len(got) != 1 || got[0] != "Infra" {
-		t.Errorf("groups = %v, want Infra unchanged", got)
-	}
+	wantGroups(t, m, "after the refused rename", "Infra")
 	if n := countSent(remote, ipc.MsgGroupOp) - sentBefore; n != 0 {
 		t.Errorf("%d group_op sent into the down link", n)
 	}
 	if !strings.Contains(m.flashText, "group not renamed") || !strings.Contains(m.flashText, "is disconnected") {
 		t.Errorf("flash = %q, want the refusal naming the link", m.flashText)
 	}
-}
-
-// A rename whose answer is lost with the link was accepted by no daemon this
-// client knows of: the old name comes back.
-func TestGroupRename_AnswerLostWithTheLinkPutsTheOldNameBack(t *testing.T) {
-	m, _, remote := twoDestModel(t)
-	rf := sharedFrame("q", 1, "proj-2", "", "Infra")
-	rf.Dest = "hostA"
-	m = updateWith(t, m, rf)
-	m = renameThroughDialog(t, m, "Infra", "Ops")
-	if countSent(remote, ipc.MsgGroupOp) != 1 {
-		t.Fatal("setup: the rename was not sent to hostA")
-	}
-
-	out, _ := m.Update(linkLostMsg{dest: "hostA", err: errLinkLost})
-	m = out.(Model)
-
-	if got := groupNames(m); len(got) != 1 || got[0] != "Infra" {
-		t.Errorf("groups = %v, want Infra back", got)
-	}
-	if o := originOf(t, m, "Infra"); o != groupOriginHost {
-		t.Errorf("origin %q, want host as before", o)
+	if len(m.groupRenames) != 0 {
+		t.Errorf("a refused rename left %d unsettled entries", len(m.groupRenames))
 	}
 }

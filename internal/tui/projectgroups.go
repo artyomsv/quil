@@ -37,7 +37,7 @@ const (
 // A group's origin: who put the name in the view. "" is a legacy group, from a
 // file written before origins were recorded.
 const (
-	groupOriginUser = "user" // created or renamed by this client's user
+	groupOriginUser = "user" // created by this client's user
 	groupOriginHost = "host" // added to the view by a daemon's list
 )
 
@@ -80,8 +80,8 @@ type projectGroup struct {
 	Hosts     []string      `json:"hosts,omitempty"`
 }
 
-// userOwned reports whether the group is the user's: created or renamed here,
-// or a legacy group. A user-owned group can hold any project; a host's group
+// userOwned reports whether the group is the user's: created here, or a
+// legacy group. A rename keeps the origin. A user-owned group can hold any project; a host's group
 // only the projects of a daemon that lists it.
 func (grp projectGroup) userOwned() bool {
 	return grp.Origin != groupOriginHost

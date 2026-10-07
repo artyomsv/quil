@@ -1144,6 +1144,9 @@ type Model struct {
 	// pendingGroupOps correlates an id-bearing set_project_group/group_op with
 	// the host it went to, so a refusal can be flashed naming it.
 	pendingGroupOps map[string]pendingGroupOp
+	// groupRenames: this client's group renames that a daemon has not
+	// settled yet (sharedgroups.go, groupRename).
+	groupRenames []*groupRename
 	// groupNamesSent: per destination, the group names this client's own
 	// create/rename sends put there (recordGroupNameSent) — the targets of a
 	// follow-up rename or delete made before that daemon's next frame.
@@ -2159,8 +2162,7 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		}
 		// An import in flight on the dead link can never be answered; the
 		// first shared frame after the reattach sends it again.
-		// A group rename waiting on that link is settled as not accepted.
-		groupsSave := m.forgetImportFor(msg.dest)
+		m.forgetImportFor(msg.dest)
 		// The listen loop stopped when it returned this message, and with a
 		// router that loop is the ONLY reader of every other daemon's messages —
 		// leaving it unarmed parks a healthy daemon's output behind a dead one's
@@ -2186,10 +2188,10 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 				m.linkHost(msg.dest), msg.err)
 			m.handleLinkLost(msg.dest, msg.err)
 			m.linkFor(msg.dest).parked = true
-			return m, tea.Batch(relisten, groupsSave)
+			return m, relisten
 		}
 		mdl, cmd := m.beginReconnect(msg.dest, msg.err)
-		return mdl, tea.Batch(relisten, cmd, groupsSave)
+		return mdl, tea.Batch(relisten, cmd)
 
 	case redialTickMsg:
 		// msg.attempt is checked, not just carried. It makes a second concurrent

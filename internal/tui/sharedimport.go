@@ -188,6 +188,10 @@ func (m *Model) deferGroupOp(dest, msgType string, payload any, what string) {
 	}
 	if len(ops) >= maxDeferredGroupOps {
 		log.Printf("groups: %s for %q DROPPED — %d changes already wait for the import answer; the daemon's next frame will undo it", what, dest, len(ops))
+		// A dropped rename is decided by that frame too.
+		if r := m.groupRenameFor(dest, payload); r != nil {
+			r.dests[dest] = renameLost
+		}
 		return
 	}
 	m.deferredGroupOps[dest] = append(ops, deferredGroupOp{msgType: msgType, payload: payload, what: what})
@@ -249,21 +253,22 @@ func (m *Model) destsHoldingGroupName(name string) []string {
 // tries of its own. And the group ops sent on the old connection are dropped
 // from pendingGroupOps — their answers cannot arrive, and the entry would
 // otherwise stay for the life of the process.
-//
-// A rename waiting on one of those answers counts it as not accepted: when
-// no daemon accepted it, the old name is put back. It returns the save of
-// the groups file when that changed the view.
-func (m *Model) forgetImportFor(dest string) tea.Cmd {
+func (m *Model) forgetImportFor(dest string) {
 	for id, p := range m.pendingImports {
 		if p.dest == dest {
 			delete(m.pendingImports, id)
 		}
 	}
-	var settled []tea.Cmd
 	for id, op := range m.pendingGroupOps {
 		if op.dest == dest {
 			delete(m.pendingGroupOps, id)
-			settled = append(settled, m.answerGroupRename(op, false))
+			// A rename's answer is lost, not refused: the daemon may have
+			// applied it. Its first frame on the new connection decides.
+			if op.rename != nil {
+				if _, in := op.rename.dests[dest]; in {
+					op.rename.dests[dest] = renameLost
+				}
+			}
 		}
 	}
 	delete(m.importErrors, dest)
@@ -272,7 +277,6 @@ func (m *Model) forgetImportFor(dest string) tea.Cmd {
 	// The pane ids came from the old connection. Until the new one sends a
 	// frame, another destination's notes wait for this one again.
 	delete(m.paneInventory, dest)
-	return tea.Batch(settled...)
 }
 
 // paneIDsByDest is every connected destination's live pane ids, from

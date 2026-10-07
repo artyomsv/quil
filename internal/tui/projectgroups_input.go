@@ -418,17 +418,14 @@ func (m Model) commitGroupEdit() (tea.Model, tea.Cmd) {
 	case groupEditRename:
 		// A group deleted while the editor was open has nothing to rename.
 		if g := m.groups.indexOf(e.target); g >= 0 {
-			origin := m.groups.Groups[g].Origin
 			if err = m.groups.renameGroup(g, e.input); err == nil {
 				changed = true
-				// The user's name while the daemons answer: they do not list
-				// it until their next frame, and a host group nobody claims
-				// would go. sendGroupRename settles it: the group's own origin
-				// back once a daemon accepts, the old name back when none does.
-				m.groups.Groups[g].Origin = groupOriginUser
+				// The origin is not touched: the daemons that list the group
+				// settle the rename (groupRename), and until then their
+				// frames are read with the new name in place of the old.
 				newName := m.groups.Groups[g].Name
-				opCmd = m.sendGroupRename(e.target, newName,
-					&groupRename{oldName: e.target, newName: newName, origin: origin})
+				m.trackGroupRename(e.target, newName)
+				opCmd = m.sendGroupOpEverywhere(ipc.GroupOpRename, e.target, newName)
 			}
 		}
 	}

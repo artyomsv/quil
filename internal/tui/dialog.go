@@ -1370,9 +1370,7 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				return m, tea.Batch(tea.ClearScreen, m.flashCmd())
 			}
 			log.Printf("disconnected host %q", id)
-			// A group rename that host never answered may have been put
-			// back (forgetImportFor); the file follows the view.
-			return m, tea.Batch(tea.ClearScreen, m.saveGroupsCmd())
+			return m, tea.ClearScreen
 		}
 
 		if kind == confirmKindDestroyProject {

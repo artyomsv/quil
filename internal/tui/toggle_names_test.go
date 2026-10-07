@@ -148,13 +148,13 @@ func TestNewTabWorktree_ToggleRefusalUnwinds(t *testing.T) {
 	runCmd(cmd)
 	got := out.(Model)
 	p := decodeCreateTab(t, f)
-	if p.FirstPane == nil || p.FirstPane.Worktree == nil || !got.newTabWorktrees["feat/x"] {
+	if p.FirstPane == nil || p.FirstPane.Worktree == nil || !got.newTabWorktrees[newTabWorktreeKey("", "feat/x")] {
 		t.Fatalf("first pane = %+v armed=%v", p.FirstPane, got.newTabWorktrees)
 	}
 
 	updated, _ := got.Update(refusalFor("", p.FirstPane.Worktree))
 	after := updated.(Model)
-	if after.newTabWorktrees["feat/x"] {
+	if after.newTabWorktrees[newTabWorktreeKey("", "feat/x")] {
 		t.Error("the branch entry was not consumed")
 	}
 	if !strings.Contains(after.flashText, "unknown toggle") {

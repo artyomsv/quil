@@ -96,6 +96,70 @@ func TestTokenList_NeverPrintsSecrets(t *testing.T) {
 	}
 }
 
+// An expired token stays listed until it is revoked, so the list says which
+// ones are dead — by the daemon's rule, expired AT the expiry instant.
+func TestTokenList_ExpiredColumn(t *testing.T) {
+	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	prev := clientsNow
+	clientsNow = func() time.Time { return now }
+	t.Cleanup(func() { clientsNow = prev })
+	stubTokenRequest(t, func(string, any) (*ipc.Message, error) {
+		return reply(t, ipc.MsgTokenListResp, ipc.TokenListRespPayload{Tokens: []ipc.TokenInfo{
+			{ID: "aaaaaaaa", Name: "past", Rights: "standard", Created: "2026-01-01T00:00:00Z", Expires: "2026-10-01T00:00:00Z"},
+			{ID: "bbbbbbbb", Name: "at-now", Rights: "standard", Created: "2026-01-01T00:00:00Z", Expires: "2026-10-05T12:00:00Z"},
+			{ID: "cccccccc", Name: "future", Rights: "standard", Created: "2026-01-01T00:00:00Z", Expires: "2026-12-01T00:00:00Z"},
+			{ID: "dddddddd", Name: "forever", Rights: "standard", Created: "2026-01-01T00:00:00Z"},
+		}}), nil
+	})
+	var out, errOut bytes.Buffer
+	if code := runTokenList(nil, &out, &errOut); code != 0 {
+		t.Fatalf("exit %d: %s", code, errOut.String())
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 5 {
+		t.Fatalf("list output:\n%s", out.String())
+	}
+	header := strings.Fields(lines[0])
+	col := -1
+	for i, h := range header {
+		if h == "EXPIRED" {
+			col = i
+		}
+	}
+	if col < 0 {
+		t.Fatalf("no EXPIRED column: %q", lines[0])
+	}
+	// Every column before EXPIRED is one field wide except the two
+	// "date time" ones (CREATED, EXPIRES) — and "never" for no expiry.
+	want := map[string]string{"past": "yes", "at-now": "yes", "future": "no", "forever": "no"}
+	for _, line := range lines[1:] {
+		f := strings.Fields(line)
+		name := f[1]
+		shift := 2 // CREATED and EXPIRES each print a date and a time
+		if name == "forever" {
+			shift = 1 // EXPIRES prints "never"
+		}
+		if got := f[col+shift]; got != want[name] {
+			t.Errorf("%s: EXPIRED = %q, want %q\n%s", name, got, want[name], out.String())
+		}
+	}
+}
+
+func TestExpiredText(t *testing.T) {
+	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	for in, want := range map[string]string{
+		"":                     "no",
+		"2026-10-05T11:59:59Z": "yes",
+		"2026-10-05T12:00:00Z": "yes",
+		"2026-10-05T12:00:01Z": "no",
+		"not a time":           "?",
+	} {
+		if got := expiredText(in, now); got != want {
+			t.Errorf("expiredText(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 // The REAL sendTokenRequest and ReceiveByID against a listener that accepts,
 // reads, and never answers — what an older daemon does for an unknown type on
 // a conn that never said hello. Only the dial (tokenDialFn) and the timeout

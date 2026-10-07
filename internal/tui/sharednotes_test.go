@@ -261,6 +261,43 @@ func TestUpdate_ConfirmedReload_OverwriteAnsweredFirst_StaleGetIgnored(t *testin
 		t.Errorf("after the stale get's answer: content=%q rev=%d dirty=%v conflict=%v, want the overwrite clean at 3",
 			ed.Content(), ed.Rev(), ed.Dirty(), ed.Conflict())
 	}
+	if m.flashText != "Note reload replaced by a newer save" {
+		t.Errorf("flash = %q, want the reload named as replaced by the save", m.flashText)
+	}
+}
+
+// The same race after a daemon restart that reused a rev: the editor holds 5,
+// the restored daemon 4. The save conflicts, Ctrl+R is confirmed at rev 5, and
+// the overwrite is answered first — at rev 5 again. The editor's rev did not
+// move, so reading "a save came in since" off it let the rev-4 get discard the
+// text just saved. Saves are counted on the client instead.
+func TestUpdate_ConfirmedReload_OverwriteAtTheSameRevAfterRestart_StaleGetIgnored(t *testing.T) {
+	m, conn := loadedNotesModel(t, "a\n", 5)
+	m = updateWith(t, m, typed("x"))
+	m = updateWith(t, m, ctrl('s'))
+	set := lastSent(t, conn, ipc.MsgNoteSet)
+	m = updateWith(t, m, noteSetRespMsg{dest: "", id: set.ID, resp: ipc.NoteSetRespPayload{PaneID: "tab-proj-1-pane", Conflict: true, CurrentRev: 4}})
+	m = updateWith(t, m, ctrl('r'))
+	m = updateWith(t, m, ctrl('r'))
+	if !m.noteLoadDiscards {
+		t.Fatal("setup: two Ctrl+R did not send a confirmed reload")
+	}
+	id := lastSent(t, conn, ipc.MsgNoteGet).ID
+	m = updateWith(t, m, ctrl('s'))
+	set = lastSent(t, conn, ipc.MsgNoteSet)
+	m = updateWith(t, m, noteSetRespMsg{dest: "", id: set.ID, resp: ipc.NoteSetRespPayload{PaneID: "tab-proj-1-pane", OK: true, Rev: 5}})
+	if ed := m.notesEditor; ed.Rev() != 5 || ed.Dirty() {
+		t.Fatalf("setup: after the overwrite's answer rev=%d dirty=%v", ed.Rev(), ed.Dirty())
+	}
+	m = updateWith(t, m, noteRespMsg{dest: "", id: id, resp: ipc.NoteRespPayload{PaneID: "tab-proj-1-pane", Text: "old\n", Rev: 4}})
+	ed := m.notesEditor
+	if !strings.HasPrefix(ed.Content(), "xa") || ed.Rev() != 5 || ed.Dirty() || ed.Conflict() {
+		t.Errorf("after the stale get's answer: content=%q rev=%d dirty=%v conflict=%v, want the overwrite clean at 5",
+			ed.Content(), ed.Rev(), ed.Dirty(), ed.Conflict())
+	}
+	if m.flashText != "Note reload replaced by a newer save" {
+		t.Errorf("flash = %q, want the reload named as replaced by the save", m.flashText)
+	}
 }
 
 // A reload that cannot be SENT (host unreachable) leaves an already-loaded
@@ -310,6 +347,78 @@ func TestUpdate_ConflictCtrlRTwice_Reloads(t *testing.T) {
 	m = updateWith(t, m, noteRespMsg{dest: "", id: id, resp: ipc.NoteRespPayload{PaneID: "tab-proj-1-pane", Text: "b\n", Rev: 2}})
 	if m.notesEditor.Conflict() || m.notesEditor.Dirty() || m.notesEditor.Content() != "b\n" {
 		t.Errorf("after the confirmed reload: conflict=%v dirty=%v content=%q", m.notesEditor.Conflict(), m.notesEditor.Dirty(), m.notesEditor.Content())
+	}
+}
+
+// A daemon that crashed inside its snapshot debounce restores a LOWER note
+// rev than the open editor holds. The user's save then conflicts, and the
+// confirmed Ctrl+R must load the daemon's text even though its rev is older.
+func TestUpdate_ConfirmedReload_LowerRevAfterDaemonRestart_Loads(t *testing.T) {
+	m, conn := loadedNotesModel(t, "a\n", 5)
+	m = updateWith(t, m, typed("x"))
+	m = updateWith(t, m, ctrl('s'))
+	set := lastSent(t, conn, ipc.MsgNoteSet)
+	m = updateWith(t, m, noteSetRespMsg{dest: "", id: set.ID, resp: ipc.NoteSetRespPayload{PaneID: "tab-proj-1-pane", Conflict: true, CurrentRev: 3}})
+	if !m.notesEditor.Conflict() {
+		t.Fatal("setup: the save did not conflict")
+	}
+	m = updateWith(t, m, ctrl('r'))
+	m = updateWith(t, m, ctrl('r'))
+	id := lastSent(t, conn, ipc.MsgNoteGet).ID
+	m = updateWith(t, m, noteRespMsg{dest: "", id: id, resp: ipc.NoteRespPayload{PaneID: "tab-proj-1-pane", Text: "restored\n", Rev: 3}})
+	ed := m.notesEditor
+	if ed.Content() != "restored\n" || ed.Rev() != 3 || ed.Dirty() || ed.Conflict() {
+		t.Errorf("after the confirmed reload: content=%q rev=%d dirty=%v conflict=%v, want the daemon's text clean at 3",
+			ed.Content(), ed.Rev(), ed.Dirty(), ed.Conflict())
+	}
+	if m.flashText != "" {
+		t.Errorf("an applied reload flashed %q", m.flashText)
+	}
+}
+
+// A silent reload whose answer is older than the editor is dropped without a
+// word: the editor already holds the newer text (a save the user just made
+// can answer first), so a flash would report a problem that is not there.
+func TestUpdate_SilentReloadOlderThanEditor_DroppedSilently(t *testing.T) {
+	m, conn := loadedNotesModel(t, "a\n", 1)
+	m = updateWith(t, m, noteFrame(2, 4)) // clean → silent reload
+	id := lastSent(t, conn, ipc.MsgNoteGet).ID
+	if m.noteLoadDiscards {
+		t.Fatal("setup: a silent reload counted as a confirmed one")
+	}
+	// The fixture's frames leave a flash of their own; only the answer's counts.
+	m.flashText = ""
+	m = updateWith(t, m, noteRespMsg{dest: "", id: id, resp: ipc.NoteRespPayload{PaneID: "tab-proj-1-pane", Text: "old\n", Rev: 0}})
+	if ed := m.notesEditor; ed.Content() != "a\n" || ed.Rev() != 1 {
+		t.Errorf("an older silent reload was applied: content=%q rev=%d", ed.Content(), ed.Rev())
+	}
+	if m.flashText != "" {
+		t.Errorf("a silent drop flashed %q", m.flashText)
+	}
+}
+
+// A confirmed reload that cannot discard (the user typed after confirming)
+// and comes back older than the editor is dropped, and says so: the user
+// asked for it.
+func TestUpdate_ConfirmedReloadOlderThanEditor_DroppedWithFlash(t *testing.T) {
+	m, conn := loadedNotesModel(t, "a\n", 5)
+	m = updateWith(t, m, typed("x"))
+	m = updateWith(t, m, ctrl('s'))
+	set := lastSent(t, conn, ipc.MsgNoteSet)
+	m = updateWith(t, m, noteSetRespMsg{dest: "", id: set.ID, resp: ipc.NoteSetRespPayload{PaneID: "tab-proj-1-pane", Conflict: true, CurrentRev: 3}})
+	m = updateWith(t, m, ctrl('r'))
+	m = updateWith(t, m, ctrl('r'))
+	if !m.noteLoadDiscards {
+		t.Fatal("setup: two Ctrl+R did not send a confirmed reload")
+	}
+	id := lastSent(t, conn, ipc.MsgNoteGet).ID
+	m = updateWith(t, m, typed("y"))
+	m = updateWith(t, m, noteRespMsg{dest: "", id: id, resp: ipc.NoteRespPayload{PaneID: "tab-proj-1-pane", Text: "old\n", Rev: 3}})
+	if ed := m.notesEditor; ed.Content() == "old\n" || ed.Rev() != 5 {
+		t.Errorf("the older reload was applied over typing: content=%q rev=%d", ed.Content(), ed.Rev())
+	}
+	if m.flashText != "Note reload dropped: older than the editor" {
+		t.Errorf("flash = %q", m.flashText)
 	}
 }
 

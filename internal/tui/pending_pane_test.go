@@ -70,7 +70,7 @@ func TestSplit_PlaceholderNamesThePaneTypeWhenThereIsNoWorktree(t *testing.T) {
 }
 
 // The replace variant is the one that matters most: the pane it stands in for
-// is disposed at send time, so on a single-pane tab the whole tab is the
+// leaves the tree at send time, so on a single-pane tab the whole tab is the
 // placeholder.
 func TestReplace_PlaceholderNamesThePaneTypeWhenThereIsNoWorktree(t *testing.T) {
 	_, tab := armedCreate(t, "ssh", "", 2)

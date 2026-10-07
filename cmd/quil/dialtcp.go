@@ -197,14 +197,24 @@ func describeConnectError(addr string, err error) string {
 // restarts, spawns or installs a daemon — the daemon is on the far side of a
 // port, and nothing here can manage it.
 func gateTCPVersion(client *ipc.Client, addr string) error {
-	res := versionHandshakeWithin(client, remoteGateTimeout)
+	return tcpVersionErr(versionHandshakeWithin(client, remoteGateTimeout), addr)
+}
+
+// tcpVersionErr is gateTCPVersion's verdict on a handshake already made: nil
+// when the versions match (or this build does not compare), else the error
+// that names both.
+func tcpVersionErr(res handshakeResult, addr string) error {
 	if res.ClientSkipped || res.Matched {
 		return nil
 	}
-	reported := res.DaemonVersion
-	if reported == "" {
-		reported = "unknown"
+	// No version at all is a reply that never came (or could not be read),
+	// not a version that differs: calling it a mismatch sends the user off
+	// to upgrade a daemon that may already run this version.
+	if res.DaemonVersion == "" {
+		return fmt.Errorf("no version reply from the daemon at %s — it may be busy or too old to answer; this TUI runs %s",
+			addr, versionpkg.Current())
 	}
+	reported := res.DaemonVersion
 	// The version string is the daemon's own text and ends up on a terminal.
 	return fmt.Errorf("version mismatch: this TUI runs %s, the daemon at %s runs %s — upgrade one of them so both run the same version",
 		versionpkg.Current(), addr, transport.SanitizeForTerminalMessage(reported))
@@ -290,6 +300,30 @@ func redialTCPDest(dest string) tui.RedialFunc {
 				return nil, fmt.Errorf("%s: %w", describeConnectError(addr, err), tui.ErrLinkPermanent)
 			}
 			return nil, err
+		}
+		// The version gate, with --remote's rule for when a mismatch refuses
+		// (verifyRemoteLinkGated): only for a destination that never attached
+		// (old == nil), whose versions nothing has compared yet. A mid-session
+		// reconnect that finds another version means the daemon was upgraded
+		// under a running client; refusing would end a session whose panes are
+		// healthy, so it is logged loudly instead — an unhandled message type
+		// fails silently, and this line is how that gets found afterwards.
+		//
+		// Only a version the daemon REPORTED parks the destination. No reply
+		// (a busy daemon, a probe that timed out) is transient, as it is for
+		// --remote: the next rung asks again.
+		res := versionHandshakeWithin(client, remoteGateTimeout)
+		if verr := tcpVersionErr(res, addr); verr != nil {
+			if old == nil {
+				client.Close()
+				if res.DaemonVersion == "" {
+					log.Printf("connect %s: re-login not gated, will retry: %v", addr, verr)
+					return nil, verr
+				}
+				log.Printf("connect %s: re-login refused: %v", addr, verr)
+				return nil, fmt.Errorf("%v: %w", verr, tui.ErrLinkPermanent)
+			}
+			log.Printf("connect %s: WARNING logged in again, but %v — restart the TUI to re-gate", addr, verr)
 		}
 		sendClientHello(client, helloRoleTUI)
 		// Every login answers with the token's CURRENT level — it can have

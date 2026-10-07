@@ -76,14 +76,29 @@ func ParseToken(token string) (string, error) {
 		return "", ErrBadToken
 	}
 	id, secret, ok := strings.Cut(rest, "_")
-	if !ok || !ValidID(id) {
-		return "", ErrBadToken
-	}
-	raw, err := b64.DecodeString(secret)
-	if err != nil || len(raw) != secretBytes {
+	if !ok || !ValidID(id) || !canonicalB64(secret, secretBytes) {
 		return "", ErrBadToken
 	}
 	return id, nil
+}
+
+// canonicalB64 reports whether s is THE unpadded base64url encoding of
+// exactly n bytes. Decoding alone is not enough: the decoder skips CR and LF
+// anywhere in its input, and without Strict it accepts non-zero trailing
+// bits, so several strings decode to the same bytes. A token is an HMAC key
+// and a nonce is signed AS A STRING, so only one spelling may pass.
+func canonicalB64(s string, n int) bool {
+	if len(s) != b64.EncodedLen(n) {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
+			return false
+		}
+	}
+	raw, err := b64.Strict().DecodeString(s)
+	return err == nil && len(raw) == n
 }
 
 // ValidID reports whether id is 8 lowercase hex digits.

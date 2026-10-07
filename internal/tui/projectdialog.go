@@ -237,8 +237,8 @@ func (m *Model) submitNewProject(name, rootDir string) tea.Cmd {
 	}
 	// Create, adopt and fold all change that host's projects, which a
 	// read-only connection cannot do. Said in the form, where the user is.
-	if m.destReadOnly(m.projectFormDest) {
-		m.setFormError(readOnlyFlash)
+	if why := m.destRefusal(m.projectFormDest); why != "" {
+		m.setFormError(why)
 		return nil
 	}
 	// A daemon with no project support accepts this message and does nothing
@@ -488,6 +488,11 @@ func (m *Model) sendUpdateProject(id, name, rootDir string, adoptBootstrap bool)
 	// the wrong one still takes its tabs. Excluding the project itself keeps a
 	// rename that only changes the root directory working.
 	dest := m.destOfProject(id)
+	// Said in the form, like the read-only refusal of a create.
+	if why := m.linkDownReason(dest); why != "" {
+		m.setFormError(why)
+		return nil
+	}
 	if existing := m.projectNamedOnDest(name, dest, id); existing != nil {
 		m.setFormError(sanitizeRemoteText(name) + " already exists on " +
 			sanitizeRemoteText(hostLabel(dest)))
@@ -568,8 +573,8 @@ func (m Model) beginProjectRename(id string) (tea.Model, tea.Cmd) {
 	if p == nil {
 		return m, nil
 	}
-	if m.destReadOnly(p.Dest) {
-		cmd := m.refuseReadOnly()
+	if m.destRefusal(p.Dest) != "" {
+		cmd := m.refuseDest(p.Dest)
 		return m, cmd
 	}
 	m.dialog = dialogProjectRename
@@ -1294,6 +1299,18 @@ func splitSSHDest(dest string) (user, host string) {
 // undo is retyping an ssh destination rather than pressing a key.
 const confirmKindDisconnectHost = "disconnect-host"
 
+// noDisconnectHomeFlash is what Disconnect says on the host this client was
+// started against.
+const noDisconnectHomeFlash = "this window was started on that host — it cannot be disconnected (ctrl+q quits)"
+
+// canDisconnect reports whether dest may be disconnected: any host but the
+// local daemon and the one this client was started against (Model.homeDest).
+// Either holds the session; without it nothing is left to show. It is a
+// client-local action, so the destination's rights do not matter.
+func (m Model) canDisconnect(dest string) bool {
+	return dest != "" && dest != m.homeDest
+}
+
 // confirmDisconnectHost opens the confirm for a remote project's host. Keyed
 // by the DEST, not the project: disconnecting takes every project on that
 // machine, so the one that happened to be right-clicked is not the target.
@@ -1301,6 +1318,10 @@ func (m *Model) confirmDisconnectHost(projectID string) tea.Cmd {
 	p := m.projectByID(projectID)
 	if p == nil || p.Dest == "" {
 		return nil
+	}
+	if !m.canDisconnect(p.Dest) {
+		m.setErrorFlash(noDisconnectHomeFlash)
+		return m.flashCmd()
 	}
 	m.dialog = dialogConfirm
 	m.confirmKind = confirmKindDisconnectHost

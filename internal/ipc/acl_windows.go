@@ -37,13 +37,43 @@ func applySDDL(path, sddl string) error {
 }
 
 // ProtectDir gives dir the inheritable owner-only DACL BEFORE anything
-// sensitive is created in it.
+// sensitive is created in it. A DACL that already reads back owner-only is
+// left alone: rewriting it re-propagates to every inheriting file and folder
+// in the tree on every start. A folder holding files quil did not write is
+// refused with ErrNotQuilHome and left alone too (checkQuilHome).
 func ProtectDir(dir string) error {
 	sid, err := winjob.CurrentUserSID()
 	if err != nil {
 		return err
 	}
+	if ok, err := dirOwnerOnly(dir); err == nil && ok {
+		return nil
+	}
+	if err := checkQuilHome(dir); err != nil {
+		return err
+	}
 	return applySDDL(dir, ownerOnlySDDL(sid, true))
+}
+
+// dirOwnerOnly reads dir's DACL back and reports whether it is already the
+// one ProtectDir writes (ownerOnlyDACL).
+func dirOwnerOnly(dir string) (bool, error) {
+	sd, err := windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return false, err
+	}
+	if dacl, _, err := sd.DACL(); err != nil || dacl == nil {
+		return false, nil
+	}
+	own, err := ownSIDs()
+	if err != nil {
+		return false, err
+	}
+	user, err := userSID()
+	if err != nil {
+		return false, err
+	}
+	return ownerOnlyDACL(sd.String(), own, user), nil
 }
 
 // ProtectFile gives an existing file the owner-only DACL directly, so it
@@ -126,6 +156,27 @@ func foreignAllowOn(path string) ([]string, error) {
 // S-1-5-18, LA for an RID-500 account), so comparing strings would report
 // the owner as foreign. A SID string that does not parse is foreign.
 func ownSIDs() (func(string) bool, error) {
+	user, err := currentUserSID()
+	if err != nil {
+		return nil, err
+	}
+	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		return nil, fmt.Errorf("local system sid: %w", err)
+	}
+	return sidMatcher(user, system), nil
+}
+
+// userSID is ownSIDs without LocalSystem: it matches this account only.
+func userSID() (func(string) bool, error) {
+	user, err := currentUserSID()
+	if err != nil {
+		return nil, err
+	}
+	return sidMatcher(user), nil
+}
+
+func currentUserSID() (*windows.SID, error) {
 	s, err := winjob.CurrentUserSID()
 	if err != nil {
 		return nil, err
@@ -134,17 +185,24 @@ func ownSIDs() (func(string) bool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse user sid %q: %w", s, err)
 	}
-	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
-	if err != nil {
-		return nil, fmt.Errorf("local system sid: %w", err)
-	}
+	return user, nil
+}
+
+// sidMatcher compares by SID value; a SID string that does not parse
+// matches nothing.
+func sidMatcher(sids ...*windows.SID) func(string) bool {
 	return func(sid string) bool {
 		x, err := windows.StringToSid(sid)
 		if err != nil {
 			return false
 		}
-		return x.Equals(user) || x.Equals(system)
-	}, nil
+		for _, s := range sids {
+			if x.Equals(s) {
+				return true
+			}
+		}
+		return false
+	}
 }
 
 func listenUnixPrivate(path string) (net.Listener, error) { return net.Listen("unix", path) }

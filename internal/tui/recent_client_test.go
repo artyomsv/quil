@@ -49,9 +49,14 @@ func TestRequestExistingDirs_CarriesGenerationOnTheWire(t *testing.T) {
 // unpinned dialog (a startup window) stays unstamped for the router's
 // sole-conn fallback.
 func TestRequestExistingDirs_StampedForThePinnedDestination(t *testing.T) {
-	for _, tc := range []struct{ pinned, want string }{{"hostA", "hostA"}, {"", ""}} {
+	// A pinned LOCAL daemon ("" with the pin flag) is stamped too, with the
+	// router's local sentinel — unstamped it would follow the active project.
+	for _, tc := range []struct {
+		pinned, want string
+		local        bool
+	}{{"hostA", "hostA", false}, {"", "", false}, {"", destLocal, true}} {
 		m := recentClientModel(t)
-		m.createPaneDest = tc.pinned
+		m.createPaneDest, m.createPanePinned = tc.pinned, tc.local
 		runCmd(m.requestExistingDirs([]string{"/a"}))
 		sent := m.client.(*fakeSender).sent
 		if len(sent) == 0 {

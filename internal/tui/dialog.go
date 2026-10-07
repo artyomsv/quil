@@ -914,8 +914,8 @@ func (m Model) handleAboutKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.dialog = dialogPlugins
 			m.dialogCursor = 0
 		case 3:
-			if m.destReadOnly(m.rightsDest()) {
-				cmd := m.refuseReadOnly()
+			if m.destRefusal(m.rightsDest()) != "" {
+				cmd := m.refuseDest(m.rightsDest())
 				return m, cmd
 			}
 			m = m.openProcessesDialog()
@@ -1317,6 +1317,11 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// daemon's MsgRestartPaneResp.
 		if kind == confirmKindRestartPane {
 			m.dialog = dialogNone
+			// The link can go down while the confirm is open.
+			if dest := m.destOfPane(id); m.destRefusal(dest) != "" {
+				cmd := m.refuseDest(dest)
+				return m, cmd
+			}
 			if m.client != nil {
 				req, reqErr := ipc.NewMessage(ipc.MsgRestartPaneReq, ipc.RestartPaneReqPayload{PaneID: id})
 				if reqErr != nil {
@@ -1360,9 +1365,14 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			// confirmID carries the DEST here, not a project id: disconnecting
 			// takes every project on that machine, so the one that happened to
 			// be right-clicked is not the target.
-			m.disconnectDest(id)
+			if !m.disconnectDest(id) {
+				m.setErrorFlash(noDisconnectHomeFlash)
+				return m, tea.Batch(tea.ClearScreen, m.flashCmd())
+			}
 			log.Printf("disconnected host %q", id)
-			return m, tea.ClearScreen
+			// A group rename that host never settled may have been put back
+			// (leaveGroupRenames); the file follows the view.
+			return m, tea.Batch(tea.ClearScreen, m.saveGroupsCmd())
 		}
 
 		if kind == confirmKindDestroyProject {
@@ -1371,6 +1381,10 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				if !m.projectActionable(m.projectByID(id)) {
 					log.Printf("destroy project %s: refused, its host is offline", id)
 					return m, nil
+				}
+				if dest := m.destOfProject(id); m.destRefusal(dest) != "" {
+					cmd := m.refuseDest(dest)
+					return m, cmd
 				}
 				req, reqErr := ipc.NewMessage(ipc.MsgDestroyProject, ipc.DestroyProjectPayload{ProjectID: id})
 				if reqErr != nil {
@@ -1420,6 +1434,13 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.closeRequested[closeKey(dest, id)] = true
 		case "tab":
 			dest = m.destOfTab(id)
+		}
+		// The link can go down while the confirm is open: the destroy would
+		// go into the dead conn and the pane or tab would stay.
+		if m.destRefusal(dest) != "" {
+			delete(m.closeRequested, closeKey(dest, id))
+			cmd := m.refuseDest(dest)
+			return m, cmd
 		}
 		return m, func() tea.Msg {
 			switch kind {
@@ -2456,7 +2477,7 @@ func (m Model) handleCreatePaneSelect() (tea.Model, tea.Cmd) {
 		// A plugin with form fields is started by INSTANCE, whose arguments go
 		// to the daemon raw — refused for a token without that right. Said
 		// here, before the form is filled in, rather than after it.
-		if len(plugins[m.dialogCursor].Command.FormFields) > 0 && !m.destCanRawArgs(m.createPaneDialogDest()) {
+		if len(plugins[m.dialogCursor].Command.FormFields) > 0 && !m.destCanRawArgs(m.createPaneSendDest()) {
 			return m, m.refuseInstanceCreate()
 		}
 		m.selectedPlugin = plugins[m.dialogCursor].Name
@@ -2529,20 +2550,43 @@ func (m Model) handleCreatePaneSelect() (tea.Model, tea.Cmd) {
 // against: the one whose disk it browsed, whose plugins it offers, and where
 // the pane is about to be spawned.
 //
-// createPaneDest when the dialog pinned one. It is deliberately NOT used when
-// empty: "" there means one of the startup windows (see pinnableDest), where
-// the router picks the destination and the client cannot know which — falling
-// back to the active dest is the same guess Router.Send makes.
+// createPaneDest when the dialog pinned one (createPanePin — "" can be a pin,
+// the local daemon). Not pinned means one of the startup windows (see
+// pinnableDest), where the router picks the destination and the client cannot
+// know which — falling back to the active dest is the same guess Router.Send
+// makes.
 //
 // Two callers, and the answer has to be the same for both. A committed
 // directory is filed under it (filing under "" would put the entry in the
 // unscoped list, which is the LOCAL daemon's), and plugin availability is
 // resolved against it (see pluginAvailableFor).
 func (m Model) createPaneDialogDest() string {
-	if m.createPaneDest != "" {
-		return m.createPaneDest
+	if dest, pinned := m.createPanePin(); pinned {
+		return dest
 	}
 	return m.activeDest()
+}
+
+// createPanePin is the destination the dialog pinned at open, and whether it
+// pinned one. "" with pinned true is the LOCAL daemon — in a session with a
+// remote too, the active project can move there while the dialog is open, and
+// reading "" as "not pinned" would aim the gate, the send and the worktree key
+// at the remote. A non-empty dest is a pin whoever set it.
+func (m Model) createPanePin() (string, bool) {
+	return m.createPaneDest, m.createPanePinned || m.createPaneDest != ""
+}
+
+// createPaneSendDest is the destination this dialog's create goes to, for the
+// rights checks and for keying what its answer settles. It differs from
+// createPaneDialogDest only in the startup windows: there the unstamped send
+// reaches the router's sole-conn fallback, which is rightsDest's homeDest —
+// while activeDest answers "", which reads a --connect session as local and
+// full until its first broadcast.
+func (m Model) createPaneSendDest() string {
+	if dest, pinned := m.createPanePin(); pinned {
+		return dest
+	}
+	return m.rightsDest()
 }
 
 // setupDiscoveryBase is the directory the setup dialog starts looking from.
@@ -2620,8 +2664,9 @@ func (m *Model) refuseInstanceCreate() tea.Cmd {
 // handleCreatePaneSplit handles the final split direction selection (step 3).
 func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 	// The submit itself refuses too, for an instance reached some other way:
-	// this create is sent id-less, so the daemon's refusal would be silent.
-	if len(m.selectedInstanceArgs) > 0 && !m.destCanRawArgs(m.createPaneDialogDest()) {
+	// the daemon would refuse it as well, but only after a placeholder was
+	// armed (and, for a new tab, with no answer at all).
+	if len(m.selectedInstanceArgs) > 0 && !m.destCanRawArgs(m.createPaneSendDest()) {
 		cmd := m.refuseInstanceCreate()
 		return m, cmd
 	}
@@ -2722,6 +2767,15 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 	// that will not exist until the daemon answers. Nothing is detached and no
 	// leaf is reserved, so there is nothing to unwind and nothing to time out:
 	// the tab arrives whole on the next broadcast.
+	//
+	// A link that went down while the dialog was open is refused here, after
+	// the teardown and before anything is armed: the send cannot report its
+	// own failure in time to unwind a placeholder (see linkDownReason).
+	if why := m.linkDownReason(m.createPaneSendDest()); why != "" {
+		logger.Debug("create: REFUSED, %s", why)
+		m.setErrorFlash(createNotDone(target) + why)
+		return m, m.flashCmd()
+	}
 	if target == paneTargetNewTab {
 		var spec *ipc.WorktreeSpec
 		if newBranch != "" {
@@ -2730,23 +2784,28 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 				// reason: falling back to the browsed directory is the nested-
 				// worktree bug.
 				logger.Debug("create tab: REFUSED, branch %q has no known repository root", newBranch)
-				m.setFlash("worktree not created: the repository root is not known yet")
+				m.setErrorFlash("worktree not created: the repository root is not known yet")
 				return m, m.flashCmd()
 			}
 			spec = &ipc.WorktreeSpec{RepoRoot: newBranchRepo, Branch: newBranch}
 			// Armed so the daemon's answer can be reported. Keyed by BRANCH, not
 			// by tab: this create has no tab id until the daemon mints one, which
 			// is also why it arms none of the tab-keyed bookkeeping the split
-			// path uses. applyCreatePaneResp consumes it.
+			// path uses. And by the destination it is sent to, because a branch
+			// name is not unique across daemons: another host's answer for its
+			// own same-named branch must not consume or report this one.
+			// applyCreatePaneResp consumes it.
 			if m.newTabWorktrees == nil {
 				m.newTabWorktrees = make(map[string]bool)
 			}
-			m.newTabWorktrees[newBranch] = true
+			m.newTabWorktrees[newTabWorktreeKey(m.createPaneSendDest(), newBranch)] = true
 		}
 		logger.Debug("create tab: submitting cwd=%q type=%s instance=%s branch=%q repo=%q",
 			cwd, pluginName, instanceName, newBranch, newBranchRepo)
 		rememberImage(m)
-		return m, m.sendCreateTab(&ipc.FirstPaneSpec{
+		// Named like the split path's ids; not armed (see sendCreateTab).
+		reqID := "create-" + m.nextReqGen()
+		cmd := m.sendCreateTab(&ipc.FirstPaneSpec{
 			Type:            pluginName,
 			CWD:             cwd,
 			InstanceName:    instanceName,
@@ -2756,7 +2815,8 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 			ResumeSessionID: resumeSessionID,
 			Worktree:        spec,
 			Sandbox:         sbox,
-		})
+		}, reqID)
+		return m, cmd
 	}
 
 	tab := m.activeTabModel()
@@ -2772,6 +2832,19 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 	// dest is the routing answer — not the active project's, which a background
 	// tab does not share.
 	tabID, tabDest := tab.ID, tab.Dest
+
+	// The dialog pinned its destination at open, and the raw-arguments gate
+	// above checked THAT daemon's rights — while the split and replace below
+	// go to the active tab's. When the active project moved to another daemon
+	// under the open dialog (MCP set_active_pane needs no keystroke), the two
+	// differ: the gate would have checked one machine's token and the form's
+	// paths would land on another. Refused before anything is armed or
+	// detached, like the refusals below.
+	if pinDest, pinned := m.createPanePin(); pinned && pinDest != tabDest {
+		logger.Debug("create pane: REFUSED, dialog pinned to %q but the active tab is on %q", pinDest, tabDest)
+		m.setErrorFlash("pane not created: the project changed while the dialog was open")
+		return m, m.flashCmd()
+	}
 
 	// "submitting", NOT "sending IPC". Three paths below return without ever
 	// sending, so a line claiming the send has happened is a lie the log tells
@@ -2794,7 +2867,7 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 		// fallback is exactly the nested-worktree bug.
 		logger.Debug("create pane: REFUSED, branch %q has no known repository root (worktrees loaded=%v pending=%v repo=%v path=%q)",
 			newBranch, m.worktrees.loaded, m.worktrees.pending, m.worktrees.repo, m.worktrees.path)
-		m.setFlash("worktree not created: the repository root is not known yet")
+		m.setErrorFlash("worktree not created: the repository root is not known yet")
 		return m, m.flashCmd()
 	}
 
@@ -2813,7 +2886,7 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 	// once the first replace detaches its pane.
 	if inflight := m.worktreeCreates[tab.ID]; inflight != "" {
 		logger.Debug("create pane: REFUSED, tab %s already has a worktree create in flight (branch %q)", tab.ID, inflight)
-		m.setFlash("still creating the worktree for " + truncateCells(sanitizeRemoteText(inflight), createErrFlashCap) + " — wait for it to finish")
+		m.setErrorFlash("still creating the worktree for " + truncateCells(sanitizeRemoteText(inflight), createErrFlashCap) + " — wait for it to finish")
 		return m, m.flashCmd()
 	}
 
@@ -2828,7 +2901,14 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 			spec = &ipc.WorktreeSpec{RepoRoot: newBranchRepo, Branch: newBranch}
 		}
 
+		reserved := false
 		if leaf := tab.Root.FindLeaf(oldPaneID); leaf != nil {
+			// This re-arms the tab's reservation, so an earlier ordinary create
+			// in it stops being unwindable by its refusal (retireOrdinaryCreate).
+			// Here, not before the arms: a create that reserves nothing must
+			// leave the earlier one's id and held pane alone.
+			m.retireOrdinaryCreate(tab.ID)
+			reserved = true
 			// Detach immediately either way: the leaf must be reserved so the
 			// arriving pane lands WHERE THE OLD ONE WAS rather than through the
 			// root-insert fallback, and rendering resolves panes via FindLeaf,
@@ -2838,12 +2918,16 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 			tab.invalidateLeaves()
 			if spec == nil {
 				// Ordinary replace: the daemon destroys the old pane the moment
-				// it handles this message, so the model is never rendered again.
-				// Disposing here — not via the reconciliation sweep — keeps the
-				// leaves cache honest: a stale cache was previously what fed the
-				// detached pane into the sweep's existingPanes.
+				// it handles this message — unless it REFUSES the create, which
+				// it does before touching the pane. So the model is held, out
+				// of the tree (which keeps the leaves cache honest: a stale
+				// cache was previously what fed the detached pane into the
+				// sweep's existingPanes), until the create settles: a refusal
+				// puts it back, and so does a broadcast that still lists it
+				// (takeOrdinaryHeld); the broadcast that fills the leaf
+				// disposes it (settleOrdinaryCreates).
 				if old != nil {
-					old.Dispose()
+					m.holdReplacedPane(tab.ID, old)
 				}
 			} else if old != nil {
 				// A worktree replace is ANSWERED, not fire-and-forget, and the
@@ -2888,6 +2972,18 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 			tab.CreatingBranch = newBranch
 		}
 
+		// An ordinary create is answered only when the daemon refuses it; the
+		// id is what that answer names. Armed only with a reservation to
+		// unwind; without one the refusal is still flashed, and an earlier
+		// create's id in this tab is not overwritten.
+		reqID := ""
+		if spec == nil {
+			if reserved {
+				reqID = m.armOrdinaryCreate(tab.ID)
+			} else {
+				reqID = "create-" + m.nextReqGen()
+			}
+		}
 		send := func() tea.Msg {
 			msg, _ := ipc.NewMessage(ipc.MsgCreatePane, ipc.CreatePanePayload{
 				TabID:           tabID,
@@ -2902,7 +2998,10 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 				Worktree:        spec,
 				Sandbox:         sbox,
 			})
-			m.sendForDest(tabDest, msg)
+			msg.ID = reqID
+			if err := m.sendForDestStrict(tabDest, msg); err != nil {
+				return createSendFailed(tabDest, tabID, reqID, spec != nil, err)
+			}
 			rememberImage(m)
 			return nil
 		}
@@ -2930,9 +3029,11 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 		// having been created somewhere they cannot see. It means the active
 		// pane is not in its own tab's layout tree, so say so.
 		logger.Debug("create pane: REFUSED, SplitAtPane found no leaf for pane %s in tab %s", pane.ID, tabID)
-		m.setFlash("pane not created: the active pane is not in this tab's layout")
+		m.setErrorFlash("pane not created: the active pane is not in this tab's layout")
 		return m, m.flashCmd()
 	}
+	// The reservation is re-armed below; see the replace arm.
+	m.retireOrdinaryCreate(tab.ID)
 
 	if m.pendingSplit == nil {
 		m.pendingSplit = make(map[string]*LayoutNode)
@@ -2965,6 +3066,11 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 		tab.CreatingBranch = newBranch
 	}
 
+	// See the replace arm: the id is what a refusal names.
+	reqID := ""
+	if spec == nil {
+		reqID = m.armOrdinaryCreate(tab.ID)
+	}
 	send := func() tea.Msg {
 		msg, _ := ipc.NewMessage(ipc.MsgCreatePane, ipc.CreatePanePayload{
 			TabID:           tabID,
@@ -2978,7 +3084,10 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 			Worktree:        spec,
 			Sandbox:         sbox,
 		})
-		m.sendForDest(tabDest, msg)
+		msg.ID = reqID
+		if err := m.sendForDestStrict(tabDest, msg); err != nil {
+			return createSendFailed(tabDest, tabID, reqID, spec != nil, err)
+		}
 		rememberImage(m)
 		return nil
 	}
@@ -4163,7 +4272,7 @@ func (m *Model) applyGitReposPickListError() tea.Cmd {
 	// this function states the "empty pick list" guarantee itself rather than
 	// relying on that reset never changing.
 	m.repoCandidates = nil
-	m.setFlash("repo scan failed")
+	m.setErrorFlash("repo scan failed")
 	return tea.Batch(m.flashCmd(), m.fallbackToRecentOrBrowser())
 }
 
@@ -4655,6 +4764,12 @@ func (m Model) moveSetupCursor(p *plugin.PanePlugin, delta int) (tea.Model, tea.
 	n := m.setupFieldCount(p)
 	if n <= 0 {
 		return m, nil
+	}
+	// Leaving the worktree field with a new branch name checks it, so a name
+	// that was never Entered shows its error too. The unfocused row keeps
+	// drawing it (renderSetupWorktreeField) while the name is invalid.
+	if kind, _ := m.setupFieldKind(p, m.setupFieldCursor); kind == "worktree" && m.worktreeNewBranch != "" {
+		m.worktreeErr = m.worktrees.validateNewBranch(m.worktreeNewBranch)
 	}
 	m.setupFieldCursor = ((m.setupFieldCursor+delta)%n + n) % n
 	// Sequenced deliberately rather than inlined into the return: the call has
@@ -5175,7 +5290,14 @@ func (m Model) submitSetupDialog(p *plugin.PanePlugin) (tea.Model, tea.Cmd) {
 		// last point before the pane is created.
 		if m.worktreeNewBranch != "" {
 			if msg := m.worktrees.validateNewBranch(m.worktreeNewBranch); msg != "" {
+				// Back to the name, with the field open and the reason
+				// under it: the submit used to store the message and return,
+				// so Enter did nothing and said nothing (manual retest, PR
+				// #256). The sandbox refusal below moves the cursor the
+				// same way.
 				m.worktreeErr = msg
+				m.setupFieldCursor = m.setupFieldIndex(p, "worktree")
+				m.worktreeNaming = true
 				return m, nil
 			}
 		}
@@ -5380,6 +5502,14 @@ func (m Model) renderSetupWorktreeField(focused bool) string {
 			summary = sanitizeRemoteText(worktreeLabel(m.worktrees.list, m.selectedWorktree))
 		}
 		b.WriteString(dialogNormal.Render(label + "    " + truncateToWidth(summary, m.setupTextWidth()-lipgloss.Width(label)-4)))
+		// An invalid name keeps its error in view after focus moves on, on
+		// the row under it, as the open name field draws it. Two rows are
+		// still fewer than the focused field takes, so moving focus away
+		// cannot grow the dialog.
+		if m.worktreeErr != "" && m.worktreeNewBranch != "" {
+			b.WriteString("\n")
+			b.WriteString(dialogErrorStyle.Render("    " + truncateToWidth(m.worktreeErr, m.setupTextWidth()-setupRowIndent)))
+		}
 		return b.String()
 	}
 

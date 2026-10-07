@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -15,6 +17,17 @@ import (
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/tui"
 )
+
+// mustNewToken mints a token for a fixture; a mint failure fails the test
+// instead of handing it an empty token.
+func mustNewToken(t *testing.T) string {
+	t.Helper()
+	tok, _, err := clientauth.NewToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tok
+}
 
 func TestParseConnectFlags(t *testing.T) {
 	addr, file, rest, err := parseConnectFlags([]string{"quil", "--connect", "7878", "--token-file", "/t", "x"})
@@ -38,13 +51,25 @@ func TestParseConnectFlags(t *testing.T) {
 }
 
 func TestLoadConnectToken_TrimsWhitespace(t *testing.T) {
-	tok, _, _ := clientauth.NewToken()
+	tok := mustNewToken(t)
 	path := filepath.Join(t.TempDir(), "tok")
 	if err := os.WriteFile(path, []byte(tok+"\r\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := loadConnectToken(path, ""); err != nil || got != tok {
 		t.Fatalf("got %q %v", got, err)
+	}
+	// ParseToken refuses a token with a newline in it, so the trim is what
+	// keeps the file `echo $TOKEN > file` writes working.
+	if _, err := clientauth.ParseToken(tok + "\n"); err == nil {
+		t.Fatal("ParseToken accepted a trailing newline: this test no longer proves the trim")
+	}
+	lf := filepath.Join(t.TempDir(), "tok-lf")
+	if err := os.WriteFile(lf, []byte(tok+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := loadConnectToken(lf, ""); err != nil || got != tok {
+		t.Fatalf("LF file: got %q %v", got, err)
 	}
 	if got, err := loadConnectToken("", "  "+tok+"\n"); err != nil || got != tok {
 		t.Fatalf("env: got %q %v", got, err)
@@ -60,7 +85,7 @@ func TestLoadConnectToken_TrimsWhitespace(t *testing.T) {
 // A token that fails to parse is still a secret the user meant to type: the
 // error that is printed for it must not echo it back.
 func TestLoadConnectToken_ErrorNeverEchoesTheToken(t *testing.T) {
-	tok, _, _ := clientauth.NewToken()
+	tok := mustNewToken(t)
 	almost := tok + "x" // one character too long: refused, and still secret
 	if _, err := loadConnectToken("", almost); err == nil {
 		t.Fatal("malformed token accepted")
@@ -118,8 +143,10 @@ func TestRemoteRefusal_WordedForConnect(t *testing.T) {
 	withConnectState(t)
 	remoteDest, connectAddr = tcpDestPrefix+"127.0.0.1:7878", "127.0.0.1:7878"
 	for name, msg := range map[string]string{
-		"status": remoteRefusal("status", true),
-		"mcp":    mcpRemoteRefusal(),
+		"status":        remoteRefusal("status", true),
+		"mcp":           mcpRemoteRefusal(),
+		"sandbox login": sandboxLoginRefusal(),
+		"remote setup":  remoteSetupRefusal(),
 	} {
 		if !strings.Contains(msg, "--connect") || strings.Contains(msg, "--remote") ||
 			strings.Contains(msg, "ssh ") || strings.Contains(msg, tcpDestPrefix) {
@@ -137,6 +164,14 @@ func TestRemoteRefusal_WordedForConnect(t *testing.T) {
 	if msg := mcpRemoteRefusal(); !strings.Contains(msg, "--remote gpu01") {
 		t.Errorf("mcp under --remote: %q", msg)
 	}
+	for name, msg := range map[string]string{
+		"sandbox login": sandboxLoginRefusal(),
+		"remote setup":  remoteSetupRefusal(),
+	} {
+		if !strings.Contains(msg, "--remote") || !strings.Contains(msg, "gpu01") || strings.Contains(msg, "--connect") {
+			t.Errorf("%s under --remote: %q", name, msg)
+		}
+	}
 }
 
 // --connect must arm every --remote guard: `quil clients` and `quil daemon`
@@ -144,7 +179,7 @@ func TestRemoteRefusal_WordedForConnect(t *testing.T) {
 func TestApplyConnectFlags_ArmsRemoteGuards(t *testing.T) {
 	withConnectState(t)
 	t.Setenv("QUIL_HOME", t.TempDir())
-	tok, _, _ := clientauth.NewToken()
+	tok := mustNewToken(t)
 
 	rest, err := applyConnectFlags([]string{"quil", "--connect", "7878", "clients", "token", "list"}, tok)
 	if err != nil {
@@ -182,7 +217,7 @@ func TestApplyConnectFlags_ArmsRemoteGuards(t *testing.T) {
 
 func TestApplyConnectFlags_RefusesBeforeArming(t *testing.T) {
 	withConnectState(t)
-	tok, _, _ := clientauth.NewToken()
+	tok := mustNewToken(t)
 
 	if _, err := applyConnectFlags([]string{"quil", "--connect", "7878"}, ""); err == nil {
 		t.Fatal("--connect with no token accepted")
@@ -215,7 +250,7 @@ func freePortAddr(t *testing.T) string {
 }
 
 func TestDialTCP_NoListener(t *testing.T) {
-	tok, _, _ := clientauth.NewToken()
+	tok := mustNewToken(t)
 	_, _, err := dialTCP(context.Background(), freePortAddr(t), tok)
 	if !errors.Is(err, errNoListener) {
 		t.Fatalf("err = %v, want errNoListener", err)
@@ -279,8 +314,8 @@ func expectNothingMore(c net.Conn, after string) error {
 
 // A listener that cannot sign gets nothing after the proof.
 func TestDialTCP_UnprovenGetsNothingMore(t *testing.T) {
-	tok, _, _ := clientauth.NewToken()
-	squatter, _, _ := clientauth.NewToken()
+	tok := mustNewToken(t)
+	squatter := mustNewToken(t)
 	addr, done := fakeListener(t, func(c net.Conn) error {
 		if err := challengeThen(c, func(h *ipc.Message, hp ipc.HelloPayload, nonceS string) *ipc.Message {
 			am := clientauth.AuthMessage(hp.TokenID, hp.Nonce, nonceS)
@@ -303,7 +338,7 @@ func TestDialTCP_UnprovenGetsNothingMore(t *testing.T) {
 
 // Every way the login can fail closes the conn — not only the unproven one.
 func TestDialTCP_ClosesOnEveryLoginFailure(t *testing.T) {
-	tok, _, _ := clientauth.NewToken()
+	tok := mustNewToken(t)
 	for _, tc := range []struct {
 		name  string
 		serve func(c net.Conn) error
@@ -372,7 +407,7 @@ func TestDescribeConnectError(t *testing.T) {
 // A refused re-login parks the ladder; a refused CONNECTION (daemon
 // restarting) stays transient.
 func TestRedialTCP_RefusalPermanentConnRefusedNot(t *testing.T) {
-	tok, _, _ := clientauth.NewToken()
+	tok := mustNewToken(t)
 	prevAddr, prevTok := connectAddr, connectToken
 	t.Cleanup(func() { connectAddr, connectToken = prevAddr, prevTok })
 
@@ -400,6 +435,118 @@ func TestRedialTCP_RefusalPermanentConnRefusedNot(t *testing.T) {
 	}
 }
 
+// versionedLogin is signedLogin whose daemon then answers the version probe
+// with version — or, when version is "", reads the probe and closes the
+// connection without a reply.
+func versionedLogin(t *testing.T, tok, version string) string {
+	t.Helper()
+	addr, _ := fakeListener(t, func(c net.Conn) error {
+		if err := challengeThen(c, func(h *ipc.Message, hp ipc.HelloPayload, nonceS string) *ipc.Message {
+			am := clientauth.AuthMessage(hp.TokenID, hp.Nonce, nonceS)
+			m, _ := ipc.NewMessage(ipc.MsgHelloResp, ipc.HelloRespPayload{Rights: ipc.RightsFull, TokenName: "t",
+				ServerSig: clientauth.ServerSignature(clientauth.DeriveVerifier(tok), am)})
+			m.ID = h.ID
+			return m
+		}); err != nil {
+			return err
+		}
+		req, err := ipc.ReadMessage(c)
+		if err != nil {
+			return err
+		}
+		if req.Type != ipc.MsgVersionReq {
+			return errors.New("the client sent " + req.Type + ", want version_req")
+		}
+		if version == "" {
+			return nil
+		}
+		resp, _ := ipc.NewMessage(ipc.MsgVersionResp, ipc.VersionRespPayload{Version: version})
+		resp.ID = req.ID
+		return ipc.WriteMessage(c, resp)
+	})
+	return addr
+}
+
+// A re-login that finds another daemon version: a destination that never
+// attached parks with the reason, as the launch gate would refuse it; a
+// mid-session reconnect keeps its link (--remote's rule, verifyRemoteLinkGated)
+// — and both say so in the log, which they did not.
+func TestRedialTCP_VersionMismatch(t *testing.T) {
+	asReleaseBuild(t, "1.80.0")
+	tok := mustNewToken(t)
+	prevAddr, prevTok := connectAddr, connectToken
+	t.Cleanup(func() { connectAddr, connectToken = prevAddr, prevTok })
+	var logged bytes.Buffer
+	prevLog := log.Writer()
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(prevLog) })
+
+	for _, tc := range []struct {
+		name      string
+		old       tui.Client
+		permanent bool
+	}{
+		{"never attached", nil, true},
+		{"mid-session", &stubClient{}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logged.Reset()
+			connectAddr, connectToken = versionedLogin(t, tok, "1.53.0"), tok
+			c, err := redialTCPDest(tcpDestPrefix + connectAddr)(tc.old)
+			if tc.permanent {
+				if !errors.Is(err, tui.ErrLinkPermanent) || !strings.Contains(err.Error(), "1.53.0") {
+					t.Fatalf("err = %v, want a permanent version mismatch naming the daemon's version", err)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("mid-session reconnect refused: %v — that ends a session whose panes are healthy", err)
+				}
+				if li, ok := c.(*tui.LoggedIn); ok {
+					if ic, ok := li.Client.(*ipc.Client); ok {
+						ic.Close()
+					}
+				}
+			}
+			if !strings.Contains(logged.String(), "1.53.0") {
+				t.Errorf("the mismatch was not logged:\n%s", logged.String())
+			}
+		})
+	}
+}
+
+// A first re-login whose version probe gets NO reply (a busy daemon, a probe
+// that timed out) is transient: parking it would leave a destination that can
+// recover parked for the session. Only a reported version is permanent.
+func TestRedialTCP_NoVersionReplyIsTransient(t *testing.T) {
+	asReleaseBuild(t, "1.80.0")
+	tok := mustNewToken(t)
+	prevAddr, prevTok := connectAddr, connectToken
+	t.Cleanup(func() { connectAddr, connectToken = prevAddr, prevTok })
+
+	connectAddr, connectToken = versionedLogin(t, tok, ""), tok
+	c, err := redialTCPDest(tcpDestPrefix + connectAddr)(nil)
+	if c != nil {
+		t.Errorf("a conn came back with no version reply: %v", c)
+	}
+	if err == nil || errors.Is(err, tui.ErrLinkPermanent) || !strings.Contains(err.Error(), "no version reply") {
+		t.Fatalf("err = %v, want a transient \"no version reply\"", err)
+	}
+}
+
+// A version reply that never came is not a mismatch: the error says no reply
+// arrived, and only a reported version is called a mismatch.
+func TestTCPVersionErr_NoReplyIsNotAMismatch(t *testing.T) {
+	asReleaseBuild(t, "1.80.0")
+	err := tcpVersionErr(handshakeResult{DaemonUnknown: true}, "127.0.0.1:7000")
+	if err == nil || strings.Contains(err.Error(), "mismatch") || !strings.Contains(err.Error(), "no version reply") {
+		t.Fatalf("err = %v, want \"no version reply\" and no mismatch claim", err)
+	}
+	err = tcpVersionErr(handshakeResult{DaemonVersion: "1.53.0", Cmp: 1}, "127.0.0.1:7000")
+	if err == nil || !strings.Contains(err.Error(), "version mismatch") || !strings.Contains(err.Error(), "1.53.0") {
+		t.Fatalf("err = %v, want a version mismatch naming 1.53.0", err)
+	}
+}
+
 // signedLogin is a listener that completes the login for tok and grants rights.
 func signedLogin(t *testing.T, tok, rights string) string {
 	t.Helper()
@@ -419,7 +566,7 @@ func signedLogin(t *testing.T, tok, rights string) string {
 // a token whose level changed while the link was down changes the mode; the
 // runtime dial (New Project dialog) does the same.
 func TestDialTCPDest_HandsTheLoginRightsToTheModel(t *testing.T) {
-	tok, _, _ := clientauth.NewToken()
+	tok := mustNewToken(t)
 	prevAddr, prevTok := connectAddr, connectToken
 	t.Cleanup(func() { connectAddr, connectToken = prevAddr, prevTok })
 	for _, rights := range []string{ipc.RightsReadOnly, ipc.RightsFull} {
@@ -453,7 +600,7 @@ func TestDialTCPDest_HandsTheLoginRightsToTheModel(t *testing.T) {
 // The login hello and the ordinary hello are ONE builder, so the
 // self-description a TCP daemon registers cannot drift from the unix one.
 func TestDialTCP_LoginHelloIsSendHellos(t *testing.T) {
-	tok, _, _ := clientauth.NewToken()
+	tok := mustNewToken(t)
 	seen := make(chan ipc.HelloPayload, 1)
 	addr, _ := fakeListener(t, func(c net.Conn) error {
 		hello, err := ipc.ReadMessage(c)

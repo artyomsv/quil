@@ -63,6 +63,24 @@ func Init(levelStr string, w io.Writer) {
 	log.SetOutput(bridge)
 }
 
+// Save records the current configuration and returns a func that puts it
+// back. A test that calls Init to capture output restores with it, so the
+// next test sees the logger it had before rather than a hard-coded one.
+func Save() (restore func()) {
+	mu.RLock()
+	prevSL, prevDefault := sl, slog.Default()
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	mu.RUnlock()
+	return func() {
+		mu.Lock()
+		defer mu.Unlock()
+		sl = prevSL
+		slog.SetDefault(prevDefault)
+		log.SetFlags(prevFlags)
+		log.SetOutput(prevOut)
+	}
+}
+
 // ParseLevel converts a string to a slog.Level. Unknown values yield
 // slog.LevelInfo. Exported so tests and config validation can reuse it.
 func ParseLevel(s string) slog.Level {

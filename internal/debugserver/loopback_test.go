@@ -37,11 +37,12 @@ func TestLoopbackAddr(t *testing.T) {
 	}
 }
 
-// Extracting LoopbackAddr must leave every QUIL_PPROF message byte-identical:
-// these strings are what a user greps for.
+// Every QUIL_PPROF message is pinned: these strings are what a user greps for.
+// The non-loopback one says "names", not "would bind", because --connect
+// shares it and dials the address rather than binding it.
 func TestAddr_PprofMessageUnchanged(t *testing.T) {
 	for in, want := range map[string]string{
-		"0.0.0.0:6060": `QUIL_PPROF="0.0.0.0:6060" would bind "0.0.0.0", which is not loopback; ` +
+		"0.0.0.0:6060": `QUIL_PPROF="0.0.0.0:6060" names "0.0.0.0", which is not loopback; ` +
 			`profiles expose argv and goroutine state, so only 127.0.0.1, ::1 or localhost are accepted`,
 		"127.0.0.1": `QUIL_PPROF port "127.0.0.1" is not a number ` +
 			`(a value with no colon is treated as a port; use host:port)`,

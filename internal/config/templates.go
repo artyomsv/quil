@@ -91,6 +91,10 @@ type Templates struct {
 
 func TemplatesPath() string { return filepath.Join(QuilDir(), "templates.toml") }
 
+// TemplatesTempPattern is the os.CreateTemp pattern of the temp file
+// WriteTemplatesSource writes beside templates.toml.
+const TemplatesTempPattern = ".templates-*"
+
 // DefaultTemplates returns the embedded templates. It PANICS on an invalid
 // embed rather than returning a zero value, because the failure would
 // otherwise surface much later as "unknown template" with nothing naming the
@@ -280,7 +284,7 @@ func WriteTemplatesSource(source string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".templates-*")
+	tmp, err := os.CreateTemp(filepath.Dir(path), TemplatesTempPattern)
 	if err != nil {
 		return err
 	}

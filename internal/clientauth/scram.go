@@ -61,10 +61,11 @@ func NewNonce() (string, error) {
 	return b64.EncodeToString(b), nil
 }
 
-// ValidNonce reports whether n decodes to exactly NonceBytes.
+// ValidNonce reports whether n is the canonical encoding of exactly
+// NonceBytes: AuthMessage signs the string that crossed the wire, so a second
+// spelling of the same bytes must not pass.
 func ValidNonce(n string) bool {
-	raw, err := b64.DecodeString(n)
-	return err == nil && len(raw) == NonceBytes
+	return canonicalB64(n, NonceBytes)
 }
 
 // ClientProof is ClientKey XOR HMAC(StoredKey, AuthMessage), base64url.

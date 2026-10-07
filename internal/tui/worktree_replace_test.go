@@ -174,9 +174,12 @@ func TestReplace_SuccessDisposesTheOldPane(t *testing.T) {
 	}
 }
 
-// An ordinary replace (no worktree) must keep its old behaviour exactly:
-// disposed at send time, no give-up tick, no held model.
-func TestReplace_WithoutAWorktreeStillDisposesImmediately(t *testing.T) {
+// An ordinary replace (no worktree) arms none of the worktree bookkeeping: no
+// give-up tick, nothing in worktreeReplaced (whose pane every broadcast skips).
+// Its old pane is held apart, alive, only so a refusal can put it back; the
+// broadcast that fills the leaf disposes it
+// (TestDaemonTree_SubstitutedReplaceFillsTheReservation).
+func TestReplace_WithoutAWorktreeHoldsOnlyUntilSettled(t *testing.T) {
 	m := newBranchModel(t)
 	m.client = &fakeSender{}
 	m.selectedPlugin = "terminal"
@@ -193,18 +196,18 @@ func TestReplace_WithoutAWorktreeStillDisposesImmediately(t *testing.T) {
 	got := updated.(Model)
 
 	if got.worktreeReplaced[tab.ID] != nil {
-		t.Error("an ordinary replace held its old pane — the daemon destroys it immediately, so there is nothing to restore")
+		t.Error("an ordinary replace held its old pane as a worktree replace — every broadcast would skip it")
 	}
 	if got.worktreeCreates[tab.ID] != "" {
 		t.Error("an ordinary replace armed the worktree bookkeeping")
 	}
-	// The DISPOSE itself, not just the bookkeeping around it. Asserting only
-	// the two maps above left this test green with old.Dispose() deleted — the
-	// name promised the dispose and nothing checked it. p.vt is nilled by
-	// closeVT, which is also what stops the drain goroutine.
-	if old.vt != nil {
-		t.Error("an ordinary replace did not Dispose() the pane it detached — its emulator and drain goroutine leak")
+	if got.replaceHeld[tab.ID] != old || old.vt == nil {
+		t.Error("an ordinary replace did not keep its old pane alive for a refusal to put back")
 	}
+	if got.createReqIDs[tab.ID] == "" {
+		t.Error("the replace armed no request id — a refusal could not find it")
+	}
+	t.Cleanup(old.Dispose)
 }
 
 // A placeholder used to render as the empty string: IsLeaf() is `Pane != nil`,

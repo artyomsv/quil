@@ -747,10 +747,16 @@ type Model struct {
 	// different one hands, at worst, a WorktreeSpec.RepoRoot describing machine
 	// A to machine B's `git worktree add`.
 	createPaneDest string
+	// createPanePinned says createPaneDest was pinned at open. Without it ""
+	// is ambiguous: the LOCAL daemon (pinned) or a startup window (not pinned,
+	// the router picks). Read both through createPanePin.
+	createPanePinned bool
 	// newTabWorktrees tracks branches asked for by a NEW-TAB create, keyed by
-	// BRANCH because such a create owns no tab id yet — the daemon mints it. It
-	// is the staleness key that lets applyCreatePaneResp report a failed add on
-	// that path without also reporting one belonging to another client.
+	// newTabWorktreeKey (destination + branch) because such a create owns no
+	// tab id yet — the daemon mints it. It is the staleness key that lets
+	// applyCreatePaneResp report a failed add on that path without also
+	// reporting one belonging to another client, or to another daemon that
+	// happens to have a branch of the same name.
 	newTabWorktrees      map[string]bool
 	selectedCategory     int           // selected category index in create pane dialog
 	selectedPlugin       string        // selected plugin name in create pane dialog
@@ -849,7 +855,16 @@ type Model struct {
 	// Cleared on every settling path — success disposes it (the swap really
 	// happened), failure and timeout restore it — so an entry can never outlive
 	// the request that armed it.
-	worktreeReplaced  map[string]*PaneModel
+	worktreeReplaced map[string]*PaneModel
+	// createReqIDs holds, per tab, the request id of an ORDINARY create sent
+	// from the create-pane dialog. The daemon answers such a create only when
+	// it refuses it (an `error` frame naming that id; success is the next
+	// broadcast), so the id is what lets the refusal find the placeholder it
+	// has to unwind. replaceHeld is the pane an ordinary REPLACE detached,
+	// kept until the create settles so a refusal can put it back. Both are
+	// settled by settleOrdinaryCreates once the tab's reservation is gone.
+	createReqIDs      map[string]string
+	replaceHeld       map[string]*PaneModel
 	worktreeCursor    int                // row cursor in the worktree field's expanded list; row 0 = "off"
 	worktreeScroll    int                // scroll offset for the visible window of the expanded worktree list
 	worktreeFilter    string             // type-to-search text narrowing the worktree list; "" = the whole list
@@ -1048,6 +1063,8 @@ type Model struct {
 	noteLoadID       string                     // the open editor's in-flight note_get id
 	noteLoadDiscards bool                       // that note_get is a confirmed Ctrl+R reload, the one load allowed to replace edits
 	noteLoadSnapshot string                     // the buffer the user confirmed discarding; edits after it are kept
+	noteLoadSnapSave uint64                     // noteSavesTaken at that confirmation; a save answered since moves it
+	noteSavesTaken   uint64                     // accepted saves the open editor took; a client counter, since a daemon restart can reuse a rev
 	noteSaveID       string                     // the open editor's in-flight note_set id; "" once the editor closed
 	quitWaiting      bool                       // app.quit is waiting for pendingNoteSaves (requestQuit)
 
@@ -1127,6 +1144,9 @@ type Model struct {
 	// pendingGroupOps correlates an id-bearing set_project_group/group_op with
 	// the host it went to, so a refusal can be flashed naming it.
 	pendingGroupOps map[string]pendingGroupOp
+	// groupRenames: this client's group renames that a daemon has not
+	// settled yet (sharedgroups.go, groupRename).
+	groupRenames []*groupRename
 	// groupNamesSent: per destination, the group names this client's own
 	// create/rename sends put there (recordGroupNameSent) — the targets of a
 	// follow-up rename or delete made before that daemon's next frame.
@@ -1138,7 +1158,7 @@ type Model struct {
 	// sends and makes the frame authoritative; deferredGroupOps = the group
 	// sends held until then, replayed in order on the answer; importNames =
 	// the group names each unanswered daemon will list once they land;
-	// importErrors = error replies per destination this session;
+	// importErrors = error replies per destination on its current connection;
 	// paneInventory = the destinations whose workspace frame was applied on
 	// their CURRENT connection, so their pane ids are known (a lost link or a
 	// reattach forgets it, forgetImportFor); notesWaiting =
@@ -1280,6 +1300,9 @@ type Model struct {
 	// and the status-bar renderer checks flashUntil on every frame.
 	flashText  string
 	flashUntil time.Time
+	// flashErr marks the live flash as a refusal or failure (setErrorFlash):
+	// it lasts longer, and a routine setFlash does not replace it.
+	flashErr bool
 
 	// paneCountByDest is each destination's pane count from its last broadcast.
 	// Summed by setDestPaneCount into the workspace size the adaptive scrollback
@@ -1477,7 +1500,30 @@ func (m Model) destReadOnly(dest string) bool { return m.destRights[dest] == ipc
 
 // refuseReadOnly flashes why an action did nothing.
 func (m *Model) refuseReadOnly() tea.Cmd {
-	m.setFlash(readOnlyFlash)
+	m.setErrorFlash(readOnlyFlash)
+	return m.flashCmd()
+}
+
+// destRefusal is why an action that changes dest's workspace cannot run
+// now: a read-only token, or a link that is down (linkDownReason). "" when
+// it can. It is the ONE gate the workspace actions share — the context menus
+// grey their rows on it, and the executors refuse on it.
+//
+// The link half exists because a parked link keeps its dead conn in the
+// router: a rename, a mute, an attention mark or a group move sent there
+// went nowhere, and the local copy showed a change no daemon ever made
+// (manual retest, PR #256). Navigation, focus, scrolling and copying are
+// this client's own and never ask.
+func (m Model) destRefusal(dest string) string {
+	if m.destReadOnly(dest) {
+		return readOnlyFlash
+	}
+	return m.linkDownReason(dest)
+}
+
+// refuseDest flashes destRefusal(dest).
+func (m *Model) refuseDest(dest string) tea.Cmd {
+	m.setErrorFlash(m.destRefusal(dest))
 	return m.flashCmd()
 }
 
@@ -1495,7 +1541,7 @@ func (m Model) destCanAdmin(dest string) bool {
 
 // refuseNoAdmin flashes why a daemon-wide action did nothing.
 func (m *Model) refuseNoAdmin() tea.Cmd {
-	m.setFlash(noAdminFlash)
+	m.setErrorFlash(noAdminFlash)
 	return m.flashCmd()
 }
 
@@ -1515,7 +1561,7 @@ func (m Model) destCanRawArgs(dest string) bool {
 
 // refuseNoRawArgs flashes why an overlay or an instance did not start.
 func (m *Model) refuseNoRawArgs() tea.Cmd {
-	m.setFlash(noRawArgsFlash)
+	m.setErrorFlash(noRawArgsFlash)
 	return m.flashCmd()
 }
 
@@ -2379,13 +2425,13 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 					// daemon's, and a viewer cannot change them.
 					switch kind {
 					case sidebarRowProject:
-						if idx >= 0 && idx < len(m.projects) && !m.destReadOnly(m.projects[idx].Dest) {
+						if idx >= 0 && idx < len(m.projects) && m.destRefusal(m.projects[idx].Dest) == "" {
 							m.projectDragging = true
 							m.projectDragKey = groupMember{Dest: m.projects[idx].Dest, ID: m.projects[idx].ID}
 							m.projectDragPressY = msg.Y
 						}
 					case sidebarRowTab:
-						if !m.destReadOnly(m.rightsDest()) {
+						if m.destRefusal(m.rightsDest()) == "" {
 							m.sidebarTabDragging = true
 							m.sidebarTabDragIdx = idx
 						}
@@ -2537,7 +2583,7 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 				m.clearDragState()
 				if idx := m.hitTestTab(msg.X); idx >= 0 {
 					// A viewer's tab order is the daemon's: no reorder drag.
-					if !m.destReadOnly(m.rightsDest()) {
+					if m.destRefusal(m.rightsDest()) == "" {
 						m.tabDragFromIdx = idx
 					}
 					// Checked BEFORE switchTab moves the active tab: manual
@@ -2611,9 +2657,9 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 					// A viewer shows the daemon's split ratios: the press is
 					// refused rather than arming a drag whose layout write
 					// would be dropped, leaving this tree diverged for good.
-					if m.destReadOnly(m.rightsDest()) {
+					if m.destRefusal(m.rightsDest()) != "" {
 						m.clearDragState()
-						cmd := m.refuseReadOnly()
+						cmd := m.refuseDest(m.rightsDest())
 						return m, cmd
 					}
 					m.clearDragState()
@@ -2716,6 +2762,13 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 			if span, ok := m.tabSpanAt(x); ok && m.tabDragFromIdx < len(m.curTabs()) {
 				from := m.tabDragFromIdx
 				if to := dragSlot(from, span.index, x, span.start, span.width); to != from {
+					// Same second line as trackSidebarTabDrag: a drag armed
+					// before the rights turned read-only reorders nothing.
+					if m.destRefusal(m.curTabs()[from].Dest) != "" {
+						m.clearDragState()
+						cmd := m.refuseDest(m.curTabs()[from].Dest)
+						return m, cmd
+					}
 					tabID := m.curTabs()[from].ID
 					if m.moveTab(from, to) {
 						m.tabDragFromIdx = to
@@ -3145,14 +3198,18 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 
 	case projectGroupsSaveFailedMsg:
 		// A local save result, not an IPC response: no listenForMessages here.
-		m.setFlash(groupSaveFailedFlash)
+		m.setErrorFlash(groupSaveFailedFlash)
 		return m, m.flashCmd()
 
 	case flashExpireMsg:
 		// Clear flash only if it hasn't been refreshed by a newer setFlash call.
-		if !time.Now().Before(m.flashUntil) {
-			m.flashText = ""
+		// A flash that is still live waits out its own remainder: flashCmd
+		// ticks after flashDuration, and an error flash lasts longer.
+		if left := m.flashUntil.Sub(m.clock()); left > 0 {
+			return m, tea.Tick(left, func(time.Time) tea.Msg { return flashExpireMsg{} })
 		}
+		m.flashText = ""
+		m.flashErr = false
 		return m, nil
 
 	case spinnerTickMsg:
@@ -3329,6 +3386,7 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		// runs, then either delete or demote them to logger.Debug.
 		log.Printf("WorkspaceState: %d tabs, %d panes", len(msg.Tabs), len(msg.Panes))
 		newPaneIDs, overlayResizeCmds := m.applyWorkspaceState(msg, msg.Dest)
+		m.settleOrdinaryCreates()
 		m.notePaneInventory(msg.Dest)
 		// The import needs this frame's panes (applied above) and must record
 		// a groups answer from the marker before the merge below reads it.
@@ -3683,19 +3741,19 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		// no re-arm (the listen loop was never involved). Router.Send would have
 		// dropped this silently and returned nil, which is why the send is
 		// strict: a tab the user asked for and did not get has to say so.
-		m.setFlash("cannot reach " + hostLabel(msg.dest) + " — new tab not created")
+		m.setErrorFlash("cannot reach " + hostLabel(msg.dest) + " — new tab not created")
 		return m, m.flashCmd()
 
 	case moveTabFailedMsg:
 		// Same shape as createTabFailedMsg: a send result, not an IPC response,
 		// so no re-arm.
-		m.setFlash("cannot reach " + hostLabel(msg.dest) + " — tab not moved")
+		m.setErrorFlash("cannot reach " + hostLabel(msg.dest) + " — tab not moved")
 		return m, m.flashCmd()
 
 	case movePaneFailedMsg:
 		// Same shape as moveTabFailedMsg: a send result, not an IPC response,
 		// so no re-arm.
-		m.setFlash("cannot reach " + hostLabel(msg.dest) + " — pane not moved")
+		m.setErrorFlash("cannot reach " + hostLabel(msg.dest) + " — pane not moved")
 		return m, m.flashCmd()
 
 	case worktreeTimeoutMsg:
@@ -3834,8 +3892,16 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		return m, tea.Batch(m.listenForMessages(), m.applySharedOpResp(msg))
 
 	case noteRespMsg:
-		m.applyNoteResp(msg)
-		return m, m.listenForMessages()
+		return m, tea.Batch(m.listenForMessages(), m.applyNoteResp(msg))
+
+	case createPaneRefusedMsg:
+		m.applyCreatePaneRefused(msg)
+		return m, tea.Batch(m.listenForMessages(), m.flashCmd())
+
+	case createPaneSendFailedMsg:
+		// A send result, not an IPC response: no re-arm.
+		m.applyCreatePaneSendFailed(msg)
+		return m, m.flashCmd()
 
 	case noteSetRespMsg:
 		return m, tea.Batch(m.listenForMessages(), m.applyNoteSetResp(msg))
@@ -4618,12 +4684,7 @@ func (m *Model) spinnerTargetPane(id string) *PaneModel {
 	// stronger fix: the chain keeps running, so the spinner is already correct
 	// the moment the pane is re-attached, and nil goes back to meaning what it
 	// says — this pane is gone for good.
-	for _, held := range m.worktreeReplaced {
-		if held != nil && held.ID == id {
-			return held
-		}
-	}
-	return nil
+	return m.heldReplacedPane(id)
 }
 
 // sidebarTick schedules the next relative-timestamp refresh for the
@@ -4710,8 +4771,8 @@ func (m Model) toggleNotesMode() (tea.Model, tea.Cmd) {
 func (m Model) openClosePaneConfirm() (tea.Model, tea.Cmd) {
 	// Two statements: Go does not order the operand m against the call in
 	// `return m, m.refuseReadOnly()`, so the flash could miss the copy.
-	if m.destReadOnly(m.rightsDest()) {
-		cmd := m.refuseReadOnly()
+	if m.destRefusal(m.rightsDest()) != "" {
+		cmd := m.refuseDest(m.rightsDest())
 		return m, cmd
 	}
 	if tab := m.activeTabModel(); tab != nil {
@@ -4736,8 +4797,8 @@ func (m Model) openClosePaneConfirm() (tea.Model, tea.Cmd) {
 // openRestartPaneConfirm opens the restart confirm dialog for the active
 // pane. Extracted from the kb.RestartPane case; shared with the context menu.
 func (m Model) openRestartPaneConfirm() (tea.Model, tea.Cmd) {
-	if m.destReadOnly(m.rightsDest()) {
-		cmd := m.refuseReadOnly()
+	if m.destRefusal(m.rightsDest()) != "" {
+		cmd := m.refuseDest(m.rightsDest())
 		return m, cmd
 	}
 	if tab := m.activeTabModel(); tab != nil {
@@ -4762,8 +4823,8 @@ func (m Model) openRestartPaneConfirm() (tea.Model, tea.Cmd) {
 // beginPaneRename enters inline pane-rename mode for the active pane.
 // Extracted from the kb.RenamePane case; shared with the context menu.
 func (m Model) beginPaneRename() (tea.Model, tea.Cmd) {
-	if m.destReadOnly(m.rightsDest()) {
-		cmd := m.refuseReadOnly()
+	if m.destRefusal(m.rightsDest()) != "" {
+		cmd := m.refuseDest(m.rightsDest())
 		return m, cmd
 	}
 	if tab := m.activeTabModel(); tab != nil {
@@ -4832,8 +4893,8 @@ func (m Model) openHistoryForActivePane() (tea.Model, tea.Cmd) {
 	// Input history is disclosure beyond the workspace, which only an acting
 	// client may ask for; the request would be dropped and the dialog would
 	// wait on an answer that never comes.
-	if m.destReadOnly(m.rightsDest()) {
-		cmd := m.refuseReadOnly()
+	if m.destRefusal(m.rightsDest()) != "" {
+		cmd := m.refuseDest(m.rightsDest())
 		return m, cmd
 	}
 	tab := m.activeTabModel()
@@ -4860,8 +4921,8 @@ func (m Model) openHistoryForActivePane() (tea.Model, tea.Cmd) {
 // openCloseTabConfirm opens the close-tab confirm for the active tab. Extracted
 // from the kb.CloseTab case; shared with the command palette.
 func (m Model) openCloseTabConfirm() (tea.Model, tea.Cmd) {
-	if m.destReadOnly(m.rightsDest()) {
-		cmd := m.refuseReadOnly()
+	if m.destRefusal(m.rightsDest()) != "" {
+		cmd := m.refuseDest(m.rightsDest())
 		return m, cmd
 	}
 	if tab := m.activeTabModel(); tab != nil {
@@ -4883,8 +4944,8 @@ func (m Model) openCloseTabConfirm() (tea.Model, tea.Cmd) {
 // beginTabRename enters inline tab-rename mode for the active tab. Extracted
 // from the kb.RenameTab case; shared with the command palette.
 func (m Model) beginTabRename() (tea.Model, tea.Cmd) {
-	if m.destReadOnly(m.rightsDest()) {
-		cmd := m.refuseReadOnly()
+	if m.destRefusal(m.rightsDest()) != "" {
+		cmd := m.refuseDest(m.rightsDest())
 		return m, cmd
 	}
 	if tab := m.activeTabModel(); tab != nil {
@@ -4924,8 +4985,10 @@ func (m Model) openCreatePaneDialog() (tea.Model, tea.Cmd) {
 //
 // createPaneTarget is reset HERE rather than on each close path, and that is
 // load-bearing: the step-0 escape, the instance-delete detour into the confirm
-// dialog, and handleCreatePaneSplit's three early refusals all leave the dialog
-// without reaching its teardown block. A target that outlived any one of those
+// dialog, and handleCreatePaneSplit's first refusal (the instance one) all
+// leave the dialog without reaching its teardown block, and that teardown does
+// not reset the target either — so its four refusals and every create leave it
+// as it was. A target that outlived any one of those
 // would make the next plain Ctrl+N create a TAB instead of a split — the fourth
 // recurrence of the stale-dialog-state class this file already documents three
 // of, and the reason this is a parameter rather than a field somebody sets
@@ -4935,6 +4998,14 @@ func (m Model) openCreatePaneDialogFor(target paneTarget) (tea.Model, tea.Cmd) {
 		cmd := m.refuseReadOnly()
 		return m, cmd
 	}
+	// A parked or reconnecting host gets no form to fill in: its create could
+	// not leave. Viewing its cached panes stays allowed.
+	if dest, pinned := m.pinnableDest(); pinned {
+		if why := m.linkDownReason(dest); why != "" {
+			m.setErrorFlash(createNotDone(target) + why)
+			return m, m.flashCmd()
+		}
+	}
 	m.dialog = dialogCreatePane
 	m.dialogCursor = 0
 	m.createPaneStep = 0
@@ -4943,14 +5014,15 @@ func (m Model) openCreatePaneDialogFor(target paneTarget) (tea.Model, tea.Cmd) {
 	// Re-read the saved instances: the web gateway writes the same file, so
 	// the copy read at start can be missing what a browser added.
 	m.instanceStore = LoadInstances(config.InstancesPath())
-	m.createPaneDest = m.pinnableDest()
+	m.createPaneDest, m.createPanePinned = m.pinnableDest()
 	return m, tea.ClearScreen
 }
 
-// pinnableDest is the destination a dialog opened NOW should submit to, or ""
-// meaning "not known yet — let the router resolve it at send time".
+// pinnableDest is the destination a dialog opened NOW should submit to, with
+// ok = true, or ok = false meaning "not known yet — let the router resolve it
+// at send time". ok is what tells a pinned local daemon ("") from no pin.
 //
-// The empty answer is not a fallback, it is the two documented startup windows,
+// No pin is not a fallback, it is the two documented startup windows,
 // and it must not be confused with `activeDest() == ""`:
 //
 //   - m.cur() == nil is the pre-first-broadcast window every session passes
@@ -4965,11 +5037,11 @@ func (m Model) openCreatePaneDialogFor(target paneTarget) (tea.Model, tea.Cmd) {
 // In both, Router.Send's sole-conn fallback is the thing that delivers — and
 // that fallback is gated on the message being UNSTAMPED, so the send must skip
 // the stamp entirely rather than stamp a best guess. See sendCreateTab.
-func (m Model) pinnableDest() string {
+func (m Model) pinnableDest() (dest string, ok bool) {
 	if m.cur() == nil || m.onlyOfflineProjects() {
-		return ""
+		return "", false
 	}
-	return m.activeDest()
+	return m.activeDest(), true
 }
 
 // handleNewTab opens the create-pane dialog to choose the new tab's first pane.
@@ -4989,7 +5061,7 @@ func (m Model) pinnableDest() string {
 // some OTHER destination while the local daemon is fine.
 func (m Model) handleNewTab() (tea.Model, tea.Cmd) {
 	if p := m.cur(); p != nil && !m.projectActionable(p) && !m.onlyOfflineProjects() {
-		m.setFlash("cannot reach " + hostLabel(p.Dest) + " — new tab not created")
+		m.setErrorFlash("cannot reach " + hostLabel(p.Dest) + " — new tab not created")
 		return m, m.flashCmd()
 	}
 	return m.openCreatePaneDialogFor(paneTargetNewTab)
@@ -5008,15 +5080,22 @@ func (m Model) handleNewTab() (tea.Model, tea.Cmd) {
 // Router.Send drops an unroutable message and returns nil, so the loose form
 // cannot tell the user their tab was never created.
 //
-// An EMPTY destination is deliberately sent UNSTAMPED, and that asymmetry is
-// load-bearing rather than a shortcut. Empty means one of the two startup
+// An UNPINNED destination is deliberately sent UNSTAMPED, and that asymmetry is
+// load-bearing rather than a shortcut. Unpinned means one of the two startup
 // windows pinnableDest documents, where the router must pick the destination
 // itself — and its sole-conn fallback is gated on `!stamped`, so stamping ""
 // (which stampDest maps to destLocal) makes that fallback unreachable and the
 // send is dropped against a "" conn that, under --remote, never existed. Both
 // windows regressed exactly that way when this function stamped unconditionally.
-func (m Model) sendCreateTab(spec *ipc.FirstPaneSpec) tea.Cmd {
-	dest := m.createPaneDest
+// A PINNED "" is the local daemon and is stamped like any other pin: unstamped,
+// it went to whichever project was active by the time the user submitted.
+//
+// reqID is the request id the create_tab carries: the daemon answers an
+// ordinary one only when it refuses the first pane, and only to an id-bearing
+// request (createPaneRefusedMsg). Nothing is armed under it — a new tab holds
+// no placeholder to unwind.
+func (m Model) sendCreateTab(spec *ipc.FirstPaneSpec, reqID string) tea.Cmd {
+	dest, pinned := m.createPanePin()
 	// Typing guard (spec §8.1): this client is about to become the reason its
 	// active project's ActiveTab changes, so the landing broadcast must not
 	// read as another client's switch. There is no tab id to record yet — the
@@ -5044,7 +5123,8 @@ func (m Model) sendCreateTab(spec *ipc.FirstPaneSpec) tea.Cmd {
 			log.Printf("create tab: build message: %v", err)
 			return nil
 		}
-		if dest == "" {
+		msg.ID = reqID
+		if !pinned {
 			// No pre-flight check to make: the router resolves this one, and a
 			// drop there is already logged. Reporting "cannot reach" about a
 			// destination nobody named is the bug this branch exists to avoid.
@@ -6425,6 +6505,11 @@ func (m Model) handleRenameKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		name := strings.TrimSpace(m.renameInput)
 		if name != "" {
 			if tab := m.activeTabModel(); tab != nil {
+				// The link can go down while the name is typed; the local
+				// name would show a rename no daemon made.
+				if m.destRefusal(tab.Dest) != "" {
+					return m, tea.Batch(tea.ClearScreen, m.refuseDest(tab.Dest))
+				}
 				tab.Name = name
 				return m, tea.Batch(tea.ClearScreen, m.updateTab(tab.ID, name, tab.Color))
 			}
@@ -6467,6 +6552,10 @@ func (m Model) handlePaneRenameKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if name != "" {
 			if tab := m.activeTabModel(); tab != nil {
 				if pane := tab.ActivePaneModel(); pane != nil {
+					// See the tab rename: refused, not renamed locally.
+					if m.destRefusal(tab.Dest) != "" {
+						return m, m.refuseDest(tab.Dest)
+					}
 					pane.Name = name
 					return m, m.updatePane(pane.ID, name)
 				}
@@ -6659,6 +6748,15 @@ func (m *Model) handlePaneOutput(msg PaneOutputMsg) (tea.Cmd, bool) {
 			}
 			return tea.Batch(cmds...), changedView
 		}
+	}
+	// A pane a REPLACE detached is out of the tree but still live on the
+	// daemon until the create settles, and may be put back: its output is kept
+	// so a restored pane shows no gap. Not on screen, so nothing redraws.
+	if held := m.heldReplacedPane(msg.PaneID); held != nil {
+		if held.acceptOutputGeneration(msg.Generation) {
+			held.AppendOutput(msg.Data)
+		}
+		return nil, false
 	}
 	// Unknown pane: nothing was touched, so nothing changed.
 	return nil, false
@@ -6958,7 +7056,10 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]str
 		if ok && proj.activeTab >= 0 && proj.activeTab < len(proj.tabs) {
 			fromTab = proj.tabs[proj.activeTab]
 		}
-		proj.Name, proj.RootDir, proj.Bootstrap, proj.Group = info.Name, info.RootDir, info.Bootstrap, info.Group
+		// The group in the one identity every group lookup uses
+		// (rebuildGroupsView): a spelling a daemon did not canonicalise must
+		// not name a second group, or slip past the join rule as one.
+		proj.Name, proj.RootDir, proj.Bootstrap, proj.Group = info.Name, info.RootDir, info.Bootstrap, normalizeGroupName(info.Group)
 		// The daemon answered, so whatever this row was standing in for is over.
 		// This is the ONLY clear point, and it is here rather than in
 		// finishReconnect because it also covers a host brought back through
@@ -7358,6 +7459,24 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 			migrated := ok && !lp.oldTree[paneID]
 			fresh := !ok
 			info := paneMap[paneID]
+
+			// The pane an ORDINARY replace detached, still listed: unlike the
+			// worktree one above it goes back now (takeOrdinaryHeld says why),
+			// since nothing but a refusal would ever answer this create, and a
+			// create lost on the way must not leave a live pane hidden. When
+			// its leaf is gone it is placed below as an arrival, never as a
+			// fresh model and never into a reservation.
+			if held := m.replaceHeld[tab.ID]; !ok && held != nil && held.ID == paneID {
+				var placed bool
+				if pane, placed = m.takeOrdinaryHeld(tab); placed {
+					if info != nil {
+						syncPaneMeta(pane, info, m.pluginWideCanvas(info.Type), m.pluginMinNativeCols(info.Type), m.pluginRestoresViaSession(info.Type), m.isFollower(dest))
+					}
+					tab.ActivePane = pane.ID
+					continue
+				}
+				ok, fresh = true, false
+			}
 			if !ok {
 				pane = NewPaneModel(paneID, m.replayBufSize())
 				pane.resumeStart = time.Now()
@@ -8335,6 +8454,53 @@ func (m Model) renderTOMLEditorFullScreen() string {
 	return b.String()
 }
 
+// joinBadge puts badge in front of the badges in rest, as renderStatusBar
+// prepends them to its right side.
+func joinBadge(badge, rest string) string {
+	if rest == "" {
+		return badge
+	}
+	return badge + " " + rest
+}
+
+// flashMinCells is the width a flash keeps beside the badges when the status
+// bar overflows (or the whole flash, when it is shorter).
+const flashMinCells = 24
+
+// fitFlash is the status bar's right side when a flash does not fit beside the
+// hints: the flash, then the [remote host] badge (remoteHost "" = none), then
+// the fixed badges, in avail cells.
+//
+// The badges stay and the FLASH is cut: a bar without [dev] or [remote …]
+// reads exactly like one on the production daemon or this laptop, which is
+// what makes a wrong-host action silent (dev-environment.md rule 7). But the
+// flash keeps flashMinCells, or a long host name would leave nothing of it;
+// the host is shortened first, and the short fixed badges never are.
+func fitFlash(flash, remoteHost, fixedBadges string, avail int) string {
+	badgesW := lipgloss.Width(fixedBadges)
+	if fixedBadges != "" {
+		badgesW++ // the space before them
+	}
+	remote := ""
+	if remoteHost != "" {
+		const frame = len("[remote ") + len("]") + 1 // and the space after the flash
+		hostRoom := avail - min(lipgloss.Width(flash), flashMinCells) - badgesW - frame
+		remote = "[remote " + truncateToWidth(remoteHost, max(hostRoom, 1)) + "]"
+	}
+	badges := joinBadge(remote, fixedBadges)
+	if remote == "" {
+		badges = fixedBadges
+	}
+	if badges == "" {
+		return truncateToWidth(flash, avail)
+	}
+	room := avail - lipgloss.Width(badges) - 1
+	if room <= 0 {
+		return truncateToWidth(badges, avail)
+	}
+	return truncateToWidth(flash, room) + " " + badges
+}
+
 func (m Model) renderStatusBar() string {
 	// Left side: pane info
 	left := "quil"
@@ -8420,14 +8586,23 @@ func (m Model) renderStatusBar() string {
 			right = seg + " | " + right
 		}
 	}
+	// fixedBadges collects the short badges that say HOW this client acts
+	// ([read-only], [limited], [dev]) in the order they render, and
+	// remoteHost the host of the [remote …] badge that says WHERE. Both
+	// survive a flash that crowds out the rest of the right side; see
+	// fitFlash.
+	var fixedBadges, remoteHost string
 	if m.devMode {
 		right = "[dev] " + right
+		fixedBadges = "[dev]"
 	}
 	if m.daemonLimited[m.activeDest()] {
 		right = "[limited] " + right
+		fixedBadges = joinBadge("[limited]", fixedBadges)
 	}
 	if m.destReadOnly(m.rightsDest()) {
 		right = "[read-only] " + right
+		fixedBadges = joinBadge("[read-only]", fixedBadges)
 	}
 	// Multi-client sync (§4.3): the role marker sits beside [dev], in the same
 	// style, because it says something about how THIS process relates to the
@@ -8453,17 +8628,30 @@ func (m Model) renderStatusBar() string {
 	// local daemon" for "", so testing its output for emptiness would put a
 	// "[remote …]" badge on every local session.
 	if dest := m.activeDest(); dest != "" {
-		right = "[remote " + m.linkHost(dest) + "] " + right
+		remoteHost = m.linkHost(dest)
+		right = "[remote " + remoteHost + "] " + right
 	}
 	if count := m.notifications.Count(); count > 0 && !m.notifications.visible {
 		right = fmt.Sprintf("[%d events] ", count) + right
 	}
-	if m.flashText != "" && time.Now().Before(m.flashUntil) {
+	flashOn := m.flashText != "" && m.clock().Before(m.flashUntil)
+	if flashOn {
 		right = m.flashText + " | " + right
 	}
 
 	// Fit within width: left takes priority
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right) - 2 // 2 for padding
+	if gap < 2 && flashOn && m.width > 2 {
+		// Except over a flash. It is the one answer some actions get ("pane
+		// not created: <reason>"), and a long one used to drop the WHOLE right
+		// side, flash included, so a refused create said nothing at all. The
+		// hints are always there; the flash goes first, the left gets the rest.
+		//
+		right = fitFlash(m.flashText, remoteHost, fixedBadges, m.width-2)
+		left = truncateToWidth(left, m.width-2-lipgloss.Width(right)-2)
+		gap = max(m.width-lipgloss.Width(left)-lipgloss.Width(right)-2, 0)
+		return statusBarStyle.Width(m.width).Render(left + strings.Repeat(" ", gap) + right)
+	}
 	if gap < 2 {
 		// Not enough room for hints. The left is CUT to the bar as well:
 		// .Width WRAPS an over-wide line, and a status bar two rows tall
@@ -8502,9 +8690,46 @@ func (m Model) flashCmd() tea.Cmd {
 
 // setFlash shows a transient message in the status bar for flashDuration.
 // The 1 s sizePollTick is a backstop; flashCmd provides a crisp expiry timer.
+//
+// A routine message does NOT replace a live error flash: a background
+// message (another client's tab switch, an update check, a notes save) used
+// to take the bar from a refusal the user had not finished reading.
 func (m *Model) setFlash(text string) {
+	if m.errorFlashLive() {
+		return
+	}
 	m.flashText = text
-	m.flashUntil = time.Now().Add(flashDuration)
+	m.flashErr = false
+	m.flashUntil = m.clock().Add(flashDuration)
+}
+
+// setErrorFlash shows a refusal or a failure: the one answer the action
+// gets, often with a daemon's reason in it. It replaces any flash, lasts at
+// least twice flashDuration and longer for a long text (errorFlashTTL), and
+// no routine setFlash replaces it while it lasts. Three seconds, measured
+// from the Update that set it, was too short to read a refused create's
+// reason (manual retest, PR #256).
+func (m *Model) setErrorFlash(text string) {
+	m.flashText = text
+	m.flashErr = true
+	m.flashUntil = m.clock().Add(errorFlashTTL(text))
+}
+
+// errorFlashTTL is how long an error flash stays: twice flashDuration, plus
+// one flashDuration per 100 cells of text, at most five flashDurations
+// (6 s to 15 s in production). Scaled from flashDuration so the test
+// binary's short value shortens it too.
+func errorFlashTTL(text string) time.Duration {
+	d := 2*flashDuration + time.Duration(lipgloss.Width(text))*flashDuration/100
+	if limit := 5 * flashDuration; d > limit {
+		return limit
+	}
+	return d
+}
+
+// errorFlashLive reports whether an error flash is on screen.
+func (m Model) errorFlashLive() bool {
+	return m.flashErr && m.flashText != "" && m.clock().Before(m.flashUntil)
 }
 
 // nextReqGen returns a fresh instance id for a one-shot request whose content
@@ -9093,6 +9318,14 @@ func (m Model) listenForMessages() tea.Cmd {
 			if msg.ID != "" && e.Type == ipc.MsgSharedImport {
 				return sharedImportErrMsg{dest: msg.Origin, id: msg.ID, text: e.Code + ": " + e.Message}
 			}
+			// A refused ordinary create: the only answer such a create gets.
+			if msg.ID != "" && (e.Type == ipc.MsgCreatePane || e.Type == ipc.MsgCreateTab) {
+				text := e.Message
+				if text == "" {
+					text = "refused (" + e.Code + ")"
+				}
+				return createPaneRefusedMsg{dest: msg.Origin, id: msg.ID, text: text}
+			}
 			return listenContinueMsg{}
 
 		case ipc.MsgProjectOpResp, ipc.MsgGroupOpResp:
@@ -9284,6 +9517,12 @@ func (m *Model) splitPane(dir SplitDir) tea.Cmd {
 	if pane == nil {
 		return nil
 	}
+	// Before the placeholder too: on a host whose link is down the create
+	// cannot leave, and the empty leaf would wait for good (see linkDownReason).
+	if why := m.linkDownReason(tab.Dest); why != "" {
+		m.setErrorFlash(createNotDone(paneTargetSplit) + why)
+		return m.flashCmd()
+	}
 
 	// The same in-flight refusal handleCreatePaneSplit makes, and it belongs
 	// here for one MORE reason than it does there. pendingSplit is keyed by
@@ -9293,7 +9532,7 @@ func (m *Model) splitPane(dir SplitDir) tea.Cmd {
 	// tab holds at most one — so the split's own placeholder would render
 	// "Creating worktree <branch>" while having no worktree at all.
 	if inflight := m.worktreeCreates[tab.ID]; inflight != "" {
-		m.setFlash("still creating the worktree for " + truncateCells(sanitizeRemoteText(inflight), createErrFlashCap) + " — wait for it to finish")
+		m.setErrorFlash("still creating the worktree for " + truncateCells(sanitizeRemoteText(inflight), createErrFlashCap) + " — wait for it to finish")
 		return m.flashCmd()
 	}
 
@@ -9302,6 +9541,8 @@ func (m *Model) splitPane(dir SplitDir) tea.Cmd {
 	if placeholder == nil {
 		return nil
 	}
+	// This re-arms the tab's reservation (see retireOrdinaryCreate).
+	m.retireOrdinaryCreate(tab.ID)
 
 	// Track the placeholder so applyWorkspaceState can fill it.
 	if m.pendingSplit == nil {
@@ -9314,12 +9555,18 @@ func (m *Model) splitPane(dir SplitDir) tea.Cmd {
 	// this is what the pane will be rather than a guess about it.
 	placeholder.phType = "terminal"
 
+	// Armed like the dialog's ordinary create, so a refusal or a failed send
+	// can find this placeholder and unwind it.
+	reqID := m.armOrdinaryCreate(tab.ID)
 	tabID, dest := tab.ID, tab.Dest
 	return func() tea.Msg {
 		msg, _ := ipc.NewMessage(ipc.MsgCreatePane, ipc.CreatePanePayload{
 			TabID: tabID,
 		})
-		m.sendForDest(dest, msg)
+		msg.ID = reqID
+		if err := m.sendForDestStrict(dest, msg); err != nil {
+			return createSendFailed(dest, tabID, reqID, false, err)
+		}
 		return nil
 	}
 }
@@ -9422,8 +9669,8 @@ func (m *Model) cycleTabColor() tea.Cmd {
 	}
 	// Before the optimistic local write below: a viewer's colour would be
 	// one the daemon never hears of.
-	if m.destReadOnly(tab.Dest) {
-		return m.refuseReadOnly()
+	if m.destRefusal(tab.Dest) != "" {
+		return m.refuseDest(tab.Dest)
 	}
 
 	// Find current color index and cycle to next
@@ -10564,8 +10811,8 @@ func (m Model) clientGeometryCmd() tea.Cmd {
 // broadcast is what tells it whether the request took.
 // takeControl is the key and palette entry point: a viewer cannot be master.
 func (m *Model) takeControl() tea.Cmd {
-	if m.destReadOnly(m.rightsDest()) {
-		return m.refuseReadOnly()
+	if m.destRefusal(m.rightsDest()) != "" {
+		return m.refuseDest(m.rightsDest())
 	}
 	return m.sendTakeControl(m.activeDest())
 }
@@ -10679,8 +10926,8 @@ func (m *Model) toggleActivePaneMute() tea.Cmd {
 	if tab == nil {
 		return nil
 	}
-	if m.destReadOnly(tab.Dest) {
-		return m.refuseReadOnly()
+	if m.destRefusal(tab.Dest) != "" {
+		return m.refuseDest(tab.Dest)
 	}
 	pane := tab.ActivePaneModel()
 	if pane == nil {
@@ -10786,8 +11033,8 @@ func (m *Model) toggleActivePaneEager() tea.Cmd {
 	if tab == nil {
 		return nil
 	}
-	if m.destReadOnly(tab.Dest) {
-		return m.refuseReadOnly()
+	if m.destRefusal(tab.Dest) != "" {
+		return m.refuseDest(tab.Dest)
 	}
 	pane := tab.ActivePaneModel()
 	if pane == nil {

@@ -221,12 +221,24 @@ func (c *Conn) Transport() string {
 
 // MarkAuthenticated completes a TCP login: it opens broadcasts to the conn
 // and lifts the pre-login frame cap. Set once; a second call is refused.
+//
+// Only a TCP conn can log in. A zero Conn (transport "") has no auth state
+// stored yet and would otherwise accept one.
 func (c *Conn) MarkAuthenticated(a *AuthState) bool {
-	if a == nil || !c.auth.CompareAndSwap(nil, a) {
+	if a == nil || c.transport != TransportTCP || !c.auth.CompareAndSwap(nil, a) {
 		return false
 	}
 	c.releasePendingSlot()
+	// The first Info line for a TCP conn: until now it was anyone on
+	// loopback, logged at Debug only (see acceptTCP).
+	logger.Info("ipc: tcp client logged in: peer=%s token=%s", peerLabel(c.raw), a.TokenID)
 	return true
+}
+
+// preLogin reports a TCP conn that has not logged in: anyone on loopback.
+// Its log lines are Debug, so a connect loop cannot rotate quild.log.
+func (c *Conn) preLogin() bool {
+	return c.transport == TransportTCP && c.auth.Load() == nil
 }
 
 func (c *Conn) releasePendingSlot() {
@@ -550,7 +562,13 @@ func (c *Conn) write(frame []byte) bool {
 		if errors.Is(err, os.ErrDeadlineExceeded) && n > 0 {
 			continue // draining, just slower than one window — not wedged
 		}
-		logger.Warn("ipc: write failed, retiring conn (peer=%s undelivered=%dB): %v",
+		// A pre-login TCP peer can close before its refusal is written, in
+		// a loop: Debug for it, like its connect and disconnect lines.
+		logf := logger.Warn
+		if c.preLogin() {
+			logf = logger.Debug
+		}
+		logf("ipc: write failed, retiring conn (peer=%s undelivered=%dB): %v",
 			peerLabel(c.raw), len(frame), err)
 		// SYNCHRONOUS, never handed to another goroutine: closed must be true
 		// before sendLoop exits. Retiring asynchronously leaves a window where
@@ -727,6 +745,11 @@ func NewServer(socketPath string, handler MessageHandler, onDisconnect func(*Con
 	}
 }
 
+// protectSocketFn is Start's seam to protectSocket: a chmod or ACL that
+// fails cannot be produced on demand on a real socket, and the wiring it
+// tests — Start stops and serves nothing — is the part that matters.
+var protectSocketFn = protectSocket
+
 func (s *Server) Start() error {
 	os.Remove(s.path) // Clean up stale socket
 
@@ -734,7 +757,7 @@ func (s *Server) Start() error {
 	if err != nil {
 		return err
 	}
-	if err := protectSocket(s.path); err != nil {
+	if err := protectSocketFn(s.path); err != nil {
 		ln.Close()
 		return err
 	}
@@ -772,7 +795,30 @@ func (s *Server) Stop() error {
 // StartTCP opens the loopback TCP listener. The address must already be
 // validated (debugserver.LoopbackAddr); a bind that is not loopback is closed
 // and refused anyway, so no caller can widen it by accident.
+//
+// The host must be a loopback IP LITERAL, checked before anything binds: a
+// name would hand the bind-address choice to the resolver. A second call, or
+// a call after Stop, is refused. s.mu is held across the bind, so two calls
+// cannot both pass the check, and Stop either runs first (refused here) or
+// finds the listener to close.
 func (s *Server) StartTCP(addr string, hooks TCPHooks) (net.Addr, error) {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, fmt.Errorf("refusing TCP listener address %q: %w", addr, err)
+	}
+	if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+		return nil, fmt.Errorf("refusing a non-loopback TCP listener address %q: the host must be a loopback IP", addr)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	select {
+	case <-s.done:
+		return nil, errors.New("refusing a TCP listener: the server is stopped")
+	default:
+	}
+	if s.tcpListener != nil {
+		return nil, fmt.Errorf("refusing a second TCP listener: already listening on %s", s.tcpListener.Addr())
+	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, err
@@ -781,9 +827,7 @@ func (s *Server) StartTCP(addr string, hooks TCPHooks) (net.Addr, error) {
 		ln.Close()
 		return nil, fmt.Errorf("refusing a non-loopback TCP listener on %s", ln.Addr())
 	}
-	s.mu.Lock()
 	s.tcpListener, s.tcpHooks = ln, hooks
-	s.mu.Unlock()
 	go s.acceptTCP(ln, hooks)
 	return ln.Addr(), nil
 }
@@ -798,7 +842,45 @@ func (s *Server) TCPAddr() net.Addr {
 	return s.tcpListener.Addr()
 }
 
+// refusalLogWindow limits the quild.log line for a conn refused at accept to
+// one per minute: a peer that opens conns in a loop would otherwise write a
+// line per conn. The audit line has its own cap (the daemon's auditBudget).
+const refusalLogWindow = time.Minute
+
+// refusalLog is that limit. Only the accept goroutine uses it.
+type refusalLog struct {
+	last       time.Time
+	suppressed int
+}
+
+// note reports whether a refusal at now may be logged, and how many were not
+// logged since the last line.
+func (r *refusalLog) note(now time.Time) (ok bool, suppressed int) {
+	if !r.last.IsZero() && now.Sub(r.last) < refusalLogWindow {
+		r.suppressed++
+		return false, 0
+	}
+	suppressed, r.last, r.suppressed = r.suppressed, now, 0
+	return true, suppressed
+}
+
+// flush logs the refusals held back since the last line, so the end of a
+// flood is not lost when the accept loop exits.
+func (r *refusalLog) flush() {
+	if r.suppressed > 0 {
+		logger.Warn("ipc: tcp listener closed: %d refusals at accept were not logged", r.suppressed)
+		r.suppressed = 0
+	}
+}
+
+// acceptTCP logs a new conn, and later its disconnect, at Debug while it has
+// not logged in: anyone on loopback can open and close conns in a loop, under
+// the pending cap, and two Info lines each would rotate quild.log's real
+// diagnostics away. audit.log records them with its own cap; the login is the
+// first Info line (MarkAuthenticated).
 func (s *Server) acceptTCP(ln net.Listener, hooks TCPHooks) {
+	var refusals refusalLog
+	defer refusals.flush()
 	for {
 		raw, err := ln.Accept()
 		if err != nil {
@@ -816,7 +898,9 @@ func (s *Server) acceptTCP(ln net.Listener, hooks TCPHooks) {
 		// Closed at accept, before any read and with no frame.
 		if s.pendingTCP.Load() >= MaxPendingTCP {
 			raw.Close()
-			logger.Warn("ipc: tcp conn refused at accept: %d logins already pending", MaxPendingTCP)
+			if ok, n := refusals.note(time.Now()); ok {
+				logger.Warn("ipc: tcp conn refused at accept: %d logins already pending (%d earlier refusals not logged)", MaxPendingTCP, n)
+			}
 			if hooks.Rejected != nil {
 				hooks.Rejected(RejectTooMany, nil)
 			}
@@ -828,7 +912,7 @@ func (s *Server) acceptTCP(ln net.Listener, hooks TCPHooks) {
 		s.conns = append(s.conns, conn)
 		count := len(s.conns)
 		s.mu.Unlock()
-		logger.Info("ipc: tcp client connected (total=%d)", count)
+		logger.Debug("ipc: tcp client connected (total=%d)", count)
 		// Counted BEFORE the hook: the conn is already in s.conns, so a Stop
 		// landing while the hook runs closes it, and WaitConns must not report
 		// "every handler returned" for a conn whose handler — and disconnect
@@ -995,7 +1079,11 @@ func (s *Server) handleConn(conn *Conn) {
 		s.mu.Lock()
 		count := len(s.conns)
 		s.mu.Unlock()
-		logger.Info("ipc: client disconnected (remaining=%d)", count)
+		if conn.preLogin() {
+			logger.Debug("ipc: tcp client disconnected before login (remaining=%d)", count)
+		} else {
+			logger.Info("ipc: client disconnected (remaining=%d)", count)
+		}
 		if s.onDisconnect != nil {
 			s.onDisconnect(conn)
 		}

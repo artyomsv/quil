@@ -280,8 +280,10 @@ func TestNewTab_DiscoveryBaseIsTheProjectRootNotTheActivePane(t *testing.T) {
 
 // createPaneTarget must be reset where the dialog OPENS, not on each close
 // path: the step-0 escape, the instance-delete detour into the confirm dialog
-// and handleCreatePaneSplit's three early refusals all leave without reaching
-// its teardown block. A target that outlived one of those would make the next
+// and handleCreatePaneSplit's first refusal (the instance one) leave without
+// reaching its teardown block, and the teardown does not reset the target, so
+// its other refusals and every create keep it too. A target that outlived one
+// of those would make the next
 // plain Ctrl+N create a TAB instead of splitting the current one.
 func TestOpenCreatePaneDialog_ResetsAStaleNewTabTarget(t *testing.T) {
 	m := newTabModel(t)
@@ -354,6 +356,62 @@ func TestNewTab_SubmitTargetsTheDialogsOwnDestination(t *testing.T) {
 	decodeCreateTab(t, f)
 	if got := f.sent[len(f.sent)-1].Origin; got != "user@buildhost" {
 		t.Errorf("create_tab routed to %q, want the dialog's own destination", got)
+	}
+}
+
+// A split or replace goes to the ACTIVE tab's daemon, while the dialog's gates
+// checked the one it pinned at open. When the active project moved to another
+// daemon under the open dialog, the submit is refused before it detaches or
+// reserves anything; when the two agree (here a pinned LOCAL daemon, "" with
+// the pin flag), it is sent as before.
+func TestCreatePaneSplit_RefusedWhenTheActiveTabLeftThePinnedDest(t *testing.T) {
+	for _, cursor := range []int{0, 2} {
+		for _, moved := range []bool{true, false} {
+			name := map[int]string{0: "split", 2: "replace"}[cursor] + map[bool]string{true: "/moved", false: "/same"}[moved]
+			t.Run(name, func(t *testing.T) {
+				m := newBranchModel(t)
+				t.Setenv("QUIL_HOME", t.TempDir())
+				f := &fakeSender{}
+				m.client = f
+				m.worktreeNewBranch = ""
+				m.selectedPlugin = "terminal"
+				m.selectedCWD = "/repo"
+				m.dialogCursor = cursor
+				tab := m.activeTabModel()
+				if tab == nil || tab.Dest != "" {
+					t.Fatal("setup: the fixture's active tab is not on the local daemon")
+				}
+				paneID := tab.ActivePaneModel().ID
+				if moved {
+					m.createPaneDest = "user@buildhost"
+				} else {
+					m.createPaneDest, m.createPanePinned = "", true
+				}
+
+				out, cmd := m.handleCreatePaneSplit()
+				got := out.(Model)
+				if !moved {
+					runCmd(cmd)
+					if !strings.Contains(strings.Join(sentMsgTypes(f), ","), ipc.MsgCreatePane) {
+						t.Fatalf("a create on the pinned daemon was not sent: %v", sentMsgTypes(f))
+					}
+					return
+				}
+				if !strings.Contains(got.flashText, "project changed") {
+					t.Errorf("flash = %q, want the moved-project refusal", got.flashText)
+				}
+				if len(f.sent) != 0 {
+					t.Errorf("sent %v to a daemon the dialog was not opened against", sentMsgTypes(f))
+				}
+				gt := got.tabByID(tab.ID)
+				if gt == nil || gt.Root.FindLeaf(paneID) == nil || gt.Root.FindLeaf(paneID).Pane == nil {
+					t.Error("the refused replace detached the active pane")
+				}
+				if countPlaceholders(gt.Root) != 0 || got.pendingSplit[tab.ID] != nil {
+					t.Error("the refused create armed a placeholder")
+				}
+			})
+		}
 	}
 }
 

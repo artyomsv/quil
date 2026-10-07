@@ -201,6 +201,48 @@ func TestNoRawArgs_OverlayRowsGreyed(t *testing.T) {
 	}
 }
 
+// canOpenOverlay's other branch: a standard token whose tab already runs the
+// lazygit overlay may show it, so the lazygit rows are live while the hunk
+// rows — which would create an overlay — stay grey. Without the overlayRuns
+// branch both rows are grey, as TestNoRawArgs_OverlayRowsGreyed shows for a
+// tab with no overlay.
+func TestNoRawArgs_RunningOverlayKeepsItsRowsLive(t *testing.T) {
+	m, _ := rawArgsModel(t, ipc.RightsStandard)
+	ov := NewPaneModel("ov-1", testRingBufSize)
+	t.Cleanup(ov.Dispose)
+	ov.Type, ov.CWD = overlayPluginLazygit, "/repo"
+	tab := m.projects[0].tabs[0]
+	tab.overlayPane, tab.overlayVisible = ov, false
+
+	m = roUpdate(t, m, tea.KeyPressMsg{Code: 'p', Mod: tea.ModAlt | tea.ModShift})
+	if m.dialog != dialogCommandPalette {
+		t.Fatal("setup: the palette did not open")
+	}
+	found := 0
+	for _, c := range m.paletteDisplay() {
+		switch c.action {
+		case palActLazygit:
+			found++
+			if !c.enabled {
+				t.Errorf("palette %q is grey with that overlay running", c.label)
+			}
+		case palActHunk:
+			found++
+			if c.enabled {
+				t.Errorf("palette %q is live; it would create an overlay", c.label)
+			}
+		}
+	}
+	if found != 2 {
+		t.Fatalf("setup: %d overlay palette rows, want 2", found)
+	}
+	m = roUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
+
+	m = roUpdate(t, m, tea.KeyPressMsg{Code: 'a', Mod: tea.ModAlt})
+	assertCtxRows(t, m.ctxMenu.items, true, ctxActLazygit)
+	assertCtxRows(t, m.ctxMenu.items, false, ctxActHunk)
+}
+
 // openCreatePaneOn opens Ctrl+N and walks to the named plugin of category
 // key, pressing Enter on it.
 func openCreatePaneOn(t *testing.T, m Model, category, name string) Model {

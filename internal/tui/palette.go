@@ -519,7 +519,9 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 		},
 		paletteCommand{
 			action: palActRemoveProject, arg: removeArg,
-			enabled:  active != nil && (remote || m.projectActionable(active)),
+			// The start host's Disconnect is greyed like the context menu's
+			// (canDisconnect): the window would be left with no daemon.
+			enabled:  active != nil && ((remote && m.canDisconnect(active.Dest)) || (!remote && m.projectActionable(active))),
 			label:    removeLabel,
 			detail:   m.keymap.Display("project.destroy"),
 			keywords: []string{"project", "destroy", "delete", "remove", "disconnect", "host"},
@@ -644,7 +646,7 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 		})
 	}
 
-	if m.destReadOnly(m.rightsDest()) {
+	if m.destRefusal(m.rightsDest()) != "" {
 		greyReadOnlyPalette(cmds)
 	}
 	return cmds
@@ -1275,8 +1277,8 @@ func (m Model) executePaletteCommand(c paletteCommand) (tea.Model, tea.Cmd) {
 		return m, tea.ClearScreen
 	case palActProcesses:
 		// The report it asks for is act-class; a viewer would wait on nothing.
-		if m.destReadOnly(m.rightsDest()) {
-			cmd := m.refuseReadOnly()
+		if m.destRefusal(m.rightsDest()) != "" {
+			cmd := m.refuseDest(m.rightsDest())
 			return m, cmd
 		}
 		m = m.openProcessesDialog()

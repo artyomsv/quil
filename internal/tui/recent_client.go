@@ -76,7 +76,7 @@ func (m *Model) requestExistingDirs(paths []string) tea.Cmd {
 	// sends to whichever project is active when the Cmd runs. An unpinned
 	// dialog (a startup window, see pinnableDest) stays unstamped so the
 	// router's sole-conn fallback can still deliver it.
-	if dest := m.createPaneDest; dest != "" {
+	if dest, pinned := m.createPanePin(); pinned {
 		stampDest(msg, dest)
 	}
 	return tea.Batch(

@@ -2,12 +2,14 @@ package clientauth
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -25,6 +27,10 @@ var (
 	ErrNotFound  = errors.New("no such token")
 	ErrNameTaken = errors.New("a token with that name exists")
 	ErrBadName   = errors.New("invalid token name")
+	// ErrCorruptVerifier is wrapped, with ErrRefused, in Admit's answer for a
+	// known id whose stored keys do not decode. The client is told only
+	// "refused"; the daemon logs the whole error, id included.
+	ErrCorruptVerifier = errors.New("corrupt verifier")
 )
 
 const (
@@ -54,12 +60,18 @@ type Entry struct {
 	LastUsed  *time.Time `json:"last_used,omitempty"`
 }
 
-// Verifier decodes the stored keys.
+// Verifier decodes the stored keys. Each must be a SHA-256 sized value: a key
+// that decodes to another length could never verify, so without this check a
+// damaged entry would read as a wrong proof and leave nothing in the log.
 func (e Entry) Verifier() (Verifier, error) {
 	sk, err1 := hex.DecodeString(e.StoredKey)
 	vk, err2 := hex.DecodeString(e.ServerKey)
 	if err := errors.Join(err1, err2); err != nil {
 		return Verifier{}, fmt.Errorf("token %s: corrupt verifier: %w", e.ID, err)
+	}
+	if len(sk) != sha256.Size || len(vk) != sha256.Size {
+		return Verifier{}, fmt.Errorf("token %s: corrupt verifier: keys of %d and %d bytes, want %d",
+			e.ID, len(sk), len(vk), sha256.Size)
 	}
 	return Verifier{StoredKey: sk, ServerKey: vk}, nil
 }
@@ -87,11 +99,15 @@ type Store struct {
 	lastPersist map[string]time.Time
 	now         func() time.Time
 	rename      func(oldpath, newpath string) error
+	// syncDir is the package syncDir; a test seam that records the
+	// parent-directory sync.
+	syncDir func(dir string) error
 	// mint is NewToken; a test seam so a fixture can pin a token id.
 	mint func() (token, id string, err error)
-	// dropped is how many entries OpenStore discarded on load (a bad id or an
-	// unknown rights level). Set once at construction, before the Store is
-	// shared with any other goroutine, so reading it later needs no lock.
+	// dropped is how many entries OpenStore discarded on load (a bad id, an
+	// unknown rights level or a repeated id). Set once at construction,
+	// before the Store is shared with any other goroutine, so reading it
+	// later needs no lock.
 	dropped int
 }
 
@@ -103,7 +119,9 @@ func (s *Store) Dropped() int { return s.dropped }
 // OpenStore loads path; a missing file is an empty store. The path is a
 // parameter (the internal/keymap pattern), so tests never touch QUIL_HOME.
 // An entry with an invalid id or an unrecognized rights level is dropped
-// rather than kept half-understood; a file whose version is newer than this
+// rather than kept half-understood. A repeated id keeps its FIRST entry and
+// drops the rest: letting the last one win would hand an id to whichever
+// line a hand edit appended. A file whose version is newer than this
 // build supports is refused outright rather than silently reread as v1 and
 // possibly rewritten with fields this build does not know about.
 func OpenStore(path string) (*Store, error) {
@@ -118,6 +136,7 @@ func OpenStore(path string) (*Store, error) {
 		lastPersist: map[string]time.Time{},
 		now:         time.Now,
 		rename:      os.Rename,
+		syncDir:     syncDir,
 		mint:        NewToken,
 	}
 	data, err := os.ReadFile(path)
@@ -150,6 +169,10 @@ func OpenStore(path string) (*Store, error) {
 			continue
 		}
 		if _, err := ParseLevel(string(e.Rights)); err != nil {
+			s.dropped++
+			continue
+		}
+		if _, dup := s.entries[e.ID]; dup {
 			s.dropped++
 			continue
 		}
@@ -238,8 +261,15 @@ func (s *Store) Create(name string, rights Level, expires *time.Time) (string, E
 		return "", Entry{}, errors.New("could not mint a unique token id")
 	}
 	v := DeriveVerifier(token)
+	// A copy: the entry must not share the caller's time.Time, which the
+	// caller may reuse or change after Create returns.
+	var exp *time.Time
+	if expires != nil {
+		t := *expires
+		exp = &t
+	}
 	e := &Entry{
-		ID: id, Name: name, Rights: rights, Created: s.now().UTC(), Expires: expires,
+		ID: id, Name: name, Rights: rights, Created: s.now().UTC(), Expires: exp,
 		StoredKey: hex.EncodeToString(v.StoredKey), ServerKey: hex.EncodeToString(v.ServerKey),
 	}
 	s.entries[id] = e
@@ -304,14 +334,19 @@ func (s *Store) Admit(id string, now time.Time, verify func(Verifier) bool, admi
 	defer s.mu.Unlock()
 	e, known := s.entries[id]
 	v := s.dummy
+	corrupt := false
 	if known {
 		var err error
 		if v, err = e.Verifier(); err != nil {
-			v = s.dummy
-			known = false
+			v, corrupt = s.dummy, true
 		}
 	}
+	// The proof is checked even for a corrupt entry, so it answers in the
+	// same time as an unknown id.
 	proven := verify(v)
+	if corrupt {
+		return Entry{}, Verifier{}, fmt.Errorf("%w: token %s: %w", ErrRefused, id, ErrCorruptVerifier)
+	}
 	if !known || !proven {
 		return Entry{}, Verifier{}, ErrRefused
 	}
@@ -325,11 +360,15 @@ func (s *Store) Admit(id string, now time.Time, verify func(Verifier) bool, admi
 }
 
 // ExpireSweep calls onExpired for every expired entry, under the lock. An
-// entry without an expiry is skipped. Expired entries stay listed. onExpired
+// entry without an expiry is skipped. Expired entries stay listed. A nil
+// onExpired makes it a no-op, like the other callbacks. onExpired
 // runs while the store's lock is held and must not call back into the Store
 // (Admit, Revoke, TouchLastUsed, …) — sync.Mutex is not reentrant, so such a
 // call would deadlock.
 func (s *Store) ExpireSweep(now time.Time, onExpired func(Entry)) {
+	if onExpired == nil {
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, e := range s.entries {
@@ -378,7 +417,8 @@ func (s *Store) sortedLocked() []Entry {
 	return out
 }
 
-// writeLocked writes temp + rename. The temp file is created PRIVATE (0600;
+// writeLocked writes temp + rename, then syncs the parent directory so the
+// rename itself survives a crash. The temp file is created PRIVATE (0600;
 // on Windows with the owner-only descriptor in CreateFile).
 func (s *Store) writeLocked() error {
 	data, err := json.MarshalIndent(storeFile{Version: storeVersion, Tokens: s.sortedLocked()}, "", "  ")
@@ -405,5 +445,8 @@ func (s *Store) writeLocked() error {
 		os.Remove(tmp)
 		return fmt.Errorf("replace %s: %w", s.path, err)
 	}
+	// Best effort, deliberately: the new file is already in place, so an
+	// error here would make Revoke restore an entry the disk no longer has.
+	_ = s.syncDir(filepath.Dir(s.path))
 	return nil
 }

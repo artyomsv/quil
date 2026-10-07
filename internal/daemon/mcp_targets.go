@@ -27,6 +27,11 @@ import (
 // function has its own logic rather than delegating, because the two
 // callers want different defaults for the same "nobody has typed" state.
 // With no client attached at all, nil.
+//
+// The implicit pick skips read-only viewers: a viewer is not the window an
+// agent means by "the TUI", and closing or focusing it would act on someone
+// who only watches. An explicit id is honoured as asked, viewer or not. With
+// only viewers attached, the implicit target is nil.
 func (d *Daemon) targetConn(clientID string) *ipc.Conn {
 	if clientID != "" {
 		d.clients.mu.Lock()
@@ -39,15 +44,18 @@ func (d *Daemon) targetConn(clientID string) *ipc.Conn {
 	}
 	d.clients.mu.Lock()
 	defer d.clients.mu.Unlock()
-	recs := d.clients.sortedRecordsLocked()
-	if len(recs) == 0 {
-		return nil
-	}
-	best := recs[0] // oldest attached — the default while nobody has input
-	for _, rec := range recs[1:] {
-		if rec.lastInputAt.After(best.lastInputAt) {
+	// The oldest attached is the default while nobody has input.
+	var best *clientRecord
+	for _, rec := range d.clients.sortedRecordsLocked() {
+		if rec.readOnly {
+			continue
+		}
+		if best == nil || rec.lastInputAt.After(best.lastInputAt) {
 			best = rec
 		}
+	}
+	if best == nil {
+		return nil
 	}
 	return best.conn
 }
@@ -72,6 +80,8 @@ func (d *Daemon) handleCloseTUI(conn *ipc.Conn, msg *ipc.Message) {
 	if target == nil {
 		if payload.Client != "" {
 			log.Printf("close_tui: no attached client %q; dropping", payload.Client)
+		} else if d.clientCount() > 0 {
+			log.Printf("close_tui: only read-only viewers are attached; nothing to close")
 		} else {
 			log.Printf("close_tui: no attached client; nothing to close")
 		}

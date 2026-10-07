@@ -230,8 +230,10 @@ func TestProjectGroups_SaveLoadRoundTrip(t *testing.T) {
 	t.Setenv("QUIL_HOME", filepath.Join(t.TempDir(), "qh"))
 	path := config.ProjectGroupsPath()
 	want := projectGroups{Groups: []projectGroup{
-		{Name: "Work", Collapsed: true, Members: []groupMember{{Dest: "", ID: "p1"}, {Dest: "user@gpu01", ID: "p2"}}},
-		{Name: "构建"},
+		{Name: "Work", Collapsed: true, Members: []groupMember{{Dest: "", ID: "p1"}, {Dest: "user@gpu01", ID: "p2"}},
+			Origin: groupOriginHost, Hosts: []string{"", "user@gpu01"}},
+		{Name: "构建", Origin: groupOriginUser},
+		{Name: "Legacy"},
 	}}
 	if err := saveProjectGroups(path, want); err != nil {
 		t.Fatalf("save: %v", err)

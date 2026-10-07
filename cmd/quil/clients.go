@@ -133,10 +133,11 @@ func runTokenList(_ []string, out, errOut io.Writer) int {
 		return 0
 	}
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tNAME\tRIGHTS\tCREATED\tEXPIRES\tLAST USED")
+	fmt.Fprintln(tw, "ID\tNAME\tRIGHTS\tCREATED\tEXPIRES\tEXPIRED\tLAST USED")
+	now := clientsNow()
 	for _, tk := range p.Tokens {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", tk.ID, tk.Name, tk.Rights,
-			shortTime(tk.Created), orNever(shortTime(tk.Expires)), orDash(shortTime(tk.LastUsed)))
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", tk.ID, tk.Name, tk.Rights,
+			shortTime(tk.Created), orNever(shortTime(tk.Expires)), expiredText(tk.Expires, now), orDash(shortTime(tk.LastUsed)))
 	}
 	tw.Flush()
 	return 0
@@ -225,6 +226,27 @@ func shortTime(s string) string {
 		return s
 	}
 	return t.Local().Format("2006-01-02 15:04")
+}
+
+// clientsNow is time.Now; the seam the EXPIRED column's test sets.
+var clientsNow = time.Now
+
+// expiredText answers the EXPIRED column. An expired token is refused at login
+// but stays listed until it is revoked, so the list says which ones are dead.
+// Same rule as the daemon's (clientauth.Entry.ExpiredAt): expired AT the
+// expiry instant. A time this client cannot read is not claimed either way.
+func expiredText(expires string, now time.Time) string {
+	if expires == "" {
+		return "no"
+	}
+	t, err := time.Parse(time.RFC3339, expires)
+	if err != nil {
+		return "?"
+	}
+	if !now.Before(t) {
+		return "yes"
+	}
+	return "no"
 }
 
 func orNever(s string) string {

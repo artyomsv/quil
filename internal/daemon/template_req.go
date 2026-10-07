@@ -196,7 +196,7 @@ func (d *Daemon) handleCreateFromTemplateReq(conn *ipc.Conn, msg *ipc.Message) {
 		return
 	}
 	// Directory and repository probes belong off the client's dispatch loop.
-	go func() {
+	d.goCreateWorker(func() {
 		plan, err := d.validateTemplateCreation(req)
 		if err != nil {
 			respondTo(conn, msg.ID, ipc.MsgCreateFromTemplateResp, ipc.CreateFromTemplateRespPayload{Error: err.Error()})
@@ -271,7 +271,7 @@ func (d *Daemon) handleCreateFromTemplateReq(conn *ipc.Conn, msg *ipc.Message) {
 		root := pane.WorktreePath
 		pane.PluginMu.Unlock()
 		d.completeTemplateCreation(plan, tab.ID, pane, root)
-	}()
+	})
 }
 
 func applyTemplatePane(pane *Pane, spec config.TemplatePane) {

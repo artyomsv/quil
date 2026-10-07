@@ -100,6 +100,11 @@ type Daemon struct {
 	// hellos records which conns identified themselves as quil processes.
 	hellos      *helloRegistry
 	collectorWG sync.WaitGroup
+	// createWG counts the create workers goCreateWorker starts: the worktree
+	// checkouts and template creations that spawn a pane after the request
+	// has been answered. Nothing in the daemon waits on it. Tests do, before
+	// they restore a package seam (newSessionFn) such a worker still reads.
+	createWG sync.WaitGroup
 
 	// snapGens records, per pane, the OutputBuf generation captured by the
 	// last buffer flush. Equal generation ⇒ identical contents ⇒ the on-disk
@@ -330,7 +335,8 @@ type Daemon struct {
 
 	// preLoginAudit caps audit lines about conns that have not logged in.
 	preLoginAudit auditBudget
-	// homeUnprotected: ProtectDir failed at start, so no TCP listener.
+	// homeUnprotected: ProtectDir failed or refused (ipc.ErrNotQuilHome:
+	// QUIL_HOME holds files quil did not write) at start, so no TCP listener.
 	homeUnprotected bool
 }
 
@@ -2459,6 +2465,9 @@ func (d *Daemon) handleCreateTab(conn *ipc.Conn, msg *ipc.Message) {
 		log.Printf("new tab %s: %v", tab.ID, err)
 	}
 
+	if pane != nil && spec.Worktree != nil {
+		defer d.holdCreateWorkers()()
+	}
 	d.broadcastState()
 	d.requestSnapshot()
 
@@ -2562,6 +2571,29 @@ func firstPaneType(spec ipc.FirstPaneSpec) string {
 	return spec.Type
 }
 
+// goCreateWorker runs f on a goroutine counted by createWG. The Add happens
+// before the goroutine starts, so a Wait that returns has seen every worker
+// started before it.
+func (d *Daemon) goCreateWorker(f func()) {
+	d.createWG.Add(1)
+	go func() {
+		defer d.createWG.Done()
+		f()
+	}()
+}
+
+// holdCreateWorkers counts a create worker that starts only AFTER the request's
+// broadcast and answer have left (a split's checkout, a new tab's worktree),
+// and returns the release. Taken before the request's work runs — so before
+// its first broadcast — and released once the worker has been started, a
+// client that has seen either finds the worker already counted; otherwise its
+// Wait could run before the Add, the misuse sync.WaitGroup documents. Taking
+// it for a request that starts no worker costs an Add and a Done.
+func (d *Daemon) holdCreateWorkers() func() {
+	d.createWG.Add(1)
+	return d.createWG.Done
+}
+
 // createFirstPaneWorktree swaps a new tab's placeholder terminal for the pane
 // that was actually requested, inside a worktree it creates first.
 //
@@ -2602,7 +2634,7 @@ func (d *Daemon) createFirstPaneWorktree(conn *ipc.Conn, reqID, tabID, placehold
 		// added here too.
 		Sandbox: spec.Sandbox,
 	}
-	go func() {
+	d.goCreateWorker(func() {
 		resp := d.worktreeAddAndCreate(p)
 		// A failure leaves the placeholder exactly where it is, so the reason
 		// goes ON it. The client's own notice is a three-second status-bar flash
@@ -2619,7 +2651,7 @@ func (d *Daemon) createFirstPaneWorktree(conn *ipc.Conn, reqID, tabID, placehold
 			d.failPreparingPane(placeholderID, "worktree not created: "+resp.Error)
 		}
 		respondTo(conn, reqID, ipc.MsgCreatePaneResp, resp)
-	}()
+	})
 }
 
 // failPreparingPane turns a placeholder into the pane that explains itself.
@@ -2937,12 +2969,12 @@ func (d *Daemon) handleCreatePane(conn *ipc.Conn, msg *ipc.Message) {
 	// broadcast would put one client's failure in front of every other client
 	// while giving the requester nothing correlatable to unwind with.
 	if payload.Worktree != nil {
-		go func() {
+		d.goCreateWorker(func() {
 			// On the worker too: recording stats the directory, which can take
 			// up to spawnDirProbeTimeout on a dead mount.
 			d.recordRequestedCWD(payload.CWD)
 			respondTo(conn, msg.ID, ipc.MsgCreatePaneResp, d.worktreeAddAndCreate(payload))
-		}()
+		})
 		return
 	}
 

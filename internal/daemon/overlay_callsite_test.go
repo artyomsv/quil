@@ -67,7 +67,42 @@ func overlayTestDaemon(t *testing.T, cfg config.Config) *Daemon {
 			s.Close() // release the exit watchers still parked on WaitExit
 		}
 	})
-	return New(cfg)
+	d := New(cfg)
+	waitCreateWorkersAtCleanup(t, d)
+	return d
+}
+
+// waitCreateWorkersAtCleanup registers a cleanup that waits for d's create
+// workers. Register it AFTER every seam swap a worker reads, so it runs BEFORE
+// those restores (cleanups run last-in first-out): a worktree worker still
+// spawning its pane once the test body returned read newSessionFn while the
+// cleanup wrote it (a data race in CI). The test daemon helpers register one
+// after their own swap; a test that swaps a seam itself afterwards registers
+// another after that swap.
+//
+// A worker that starts only after its answer was sent is counted from before
+// that send (holdCreateWorkers), so a test that has the answer never Waits
+// ahead of the Add.
+func waitCreateWorkersAtCleanup(t *testing.T, d *Daemon) {
+	t.Helper()
+	t.Cleanup(func() { waitCreateWorkers(t, d) })
+}
+
+// waitCreateWorkers waits for d's create workers to return. A worker parked
+// past the bound is reported, not waited on forever, so a test that failed
+// with a gate still closed ends instead of hanging the package.
+func waitCreateWorkers(t *testing.T, d *Daemon) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		d.createWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Error("a create worker was still running after 10s")
+	}
 }
 
 // overlayServerDaemonWithConfig is overlayServerDaemon with a policy and the

@@ -5,6 +5,20 @@ import (
 	"testing"
 )
 
+// katSecret is katToken's secret half.
+const katSecret = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+
+// mustNewToken is NewToken for a fixture: a mint failure fails the test
+// instead of handing it an empty token.
+func mustNewToken(t *testing.T) (token, id string) {
+	t.Helper()
+	token, id, err := NewToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return token, id
+}
+
 func TestParseToken(t *testing.T) {
 	allUnderscore := "qtk_0a1b2c3d_" + strings.Repeat("_", 42) + "8" // 32 x 0xff, base64url
 	tests := []struct {
@@ -19,6 +33,16 @@ func TestParseToken(t *testing.T) {
 		{"short secret", "qtk_0a1b2c3d_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHg", "", false},
 		{"not base64", "qtk_0a1b2c3d_" + strings.Repeat("*", 43), "", false},
 		{"empty", "", "", false},
+		{"no separator", "qtk_0a1b2c3d" + katSecret, "", false},
+		{"non-hex id", "qtk_0a1b2c3g_" + katSecret, "", false},
+		{"44-character secret", katToken + "A", "", false},
+		// The decoder skips CR and LF, so without the exact-length check this
+		// 44-byte string decoded to the same 32 bytes as the known token.
+		{"newline inside secret", "qtk_0a1b2c3d_" + katSecret[:20] + "\n" + katSecret[20:], "", false},
+		{"trailing newline", katToken + "\n", "", false},
+		// The last character carries 4 data bits and 2 padding bits; '9'
+		// sets a padding bit, a second spelling of the same 32 bytes.
+		{"non-canonical trailing bits", katToken[:len(katToken)-1] + "9", "", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -35,7 +59,7 @@ func TestNewToken_RoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, _, _ := NewToken()
+	b, _ := mustNewToken(t)
 	if a == b {
 		t.Fatal("two tokens are equal")
 	}

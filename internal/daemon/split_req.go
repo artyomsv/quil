@@ -37,6 +37,9 @@ func (d *Daemon) handleSplitPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 		respondTo(conn, msg.ID, ipc.MsgSplitPaneResp, ipc.SplitPaneRespPayload{Error: "malformed payload: " + err.Error()})
 		return
 	}
+	// Held before the work runs: a worktree split broadcasts its placeholder
+	// before it answers, and its worker starts only after the answer.
+	defer d.holdCreateWorkers()()
 	resp, start := d.splitPane(conn, req)
 	respondTo(conn, msg.ID, ipc.MsgSplitPaneResp, resp)
 	if start != nil {
@@ -259,7 +262,7 @@ func (d *Daemon) splitIntoWorktree(payload ipc.CreatePanePayload, cwd string, sl
 		target := slot.ReplaceID
 		payload.ReplacePaneID = target
 		start := func() {
-			go func() {
+			d.goCreateWorker(func() {
 				resp := d.worktreeAddAndCreate(payload)
 				if resp.Error != "" {
 					log.Printf("split replace: worktree %s for pane %s not created: %s", branch, target, resp.Error)
@@ -275,7 +278,7 @@ func (d *Daemon) splitIntoWorktree(payload ipc.CreatePanePayload, cwd string, sl
 					d.notifyWorktreeFailed(target, tabID, branch, resp.Error)
 				}
 				applyPaneName(d.session.Pane(resp.PaneID), name)
-			}()
+			})
 		}
 		return ipc.SplitPaneRespPayload{PaneID: target, TabID: tabID, LayoutRev: d.tabLayoutRev(tabID), Preparing: true}, start
 	}
@@ -292,7 +295,7 @@ func (d *Daemon) splitIntoWorktree(payload ipc.CreatePanePayload, cwd string, sl
 	d.requestSnapshot()
 	payload.ReplacePaneID = placeholder.ID
 	start := func() {
-		go func() {
+		d.goCreateWorker(func() {
 			resp := d.worktreeAddAndCreate(payload)
 			if resp.Error != "" && !resp.Swapped {
 				d.failPreparingPane(placeholder.ID, "worktree not created: "+resp.Error)
@@ -307,7 +310,7 @@ func (d *Daemon) splitIntoWorktree(payload ipc.CreatePanePayload, cwd string, sl
 				d.notifyWorktreeFailed(placeholder.ID, tabID, branch, resp.Error)
 			}
 			applyPaneName(d.session.Pane(resp.PaneID), name)
-		}()
+		})
 	}
 	return ipc.SplitPaneRespPayload{PaneID: placeholder.ID, TabID: tabID, LayoutRev: res.LayoutRev, Preparing: true}, start
 }

@@ -854,6 +854,15 @@ func reportRemoteQuilExited(dest string) {
 		"  Its own message is above. The ssh connection itself worked.\n\n", dest)
 }
 
+// remoteSetupRefusal names the flag the session was started with, like
+// remoteRefusal.
+func remoteSetupRefusal() string {
+	if connectMode() {
+		return fmt.Sprintf("quil remote setup: cannot be combined with --connect (%s)\n", connectAddr)
+	}
+	return fmt.Sprintf("quil remote setup: cannot be combined with --remote (%s)\n", remoteDest)
+}
+
 // handleRemote dispatches `quil remote <subcommand>`.
 func handleRemote() {
 	args := os.Args[2:]
@@ -865,7 +874,7 @@ func handleRemote() {
 	// `quil --remote X remote setup Y` names two different hosts in one
 	// command and cannot mean anything coherent.
 	if remoteMode() {
-		fmt.Fprintf(os.Stderr, "quil remote setup: cannot be combined with --remote (%s)\n", remoteDest)
+		fmt.Fprint(os.Stderr, remoteSetupRefusal())
 		os.Exit(1)
 	}
 

@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -96,6 +97,89 @@ func TestHandleMessage_GroupOp_RefusesStrippedRunes(t *testing.T) {
 	}
 	if got := groupsOf(t, d); len(got) != 0 {
 		t.Errorf("a refused name was stored: %v", got)
+	}
+}
+
+// unsafeGroupNames is one name per class validateGroupName refuses, each
+// built from its code point so this file never carries the raw rune.
+func unsafeGroupNames() map[string]string {
+	return map[string]string{
+		"control":  "a" + string(rune(0x01)) + "b",
+		"escape":   "a" + string(rune(0x1b)) + "[31mb",
+		"C1 CSI":   "a" + string(rune(0x9b)) + "b",
+		"bidi":     "a" + string(rune(0x202e)) + "b",
+		"too long": strings.Repeat("a", ipc.MaxGroupNameRunes+1),
+	}
+}
+
+func TestHandleMessage_SetProjectGroup_RefusesUnsafeNames(t *testing.T) {
+	for class, name := range unsafeGroupNames() {
+		t.Run(class, func(t *testing.T) {
+			d, client := mcpTestDaemon(t)
+			p := d.session.CreateProject("api", t.TempDir())
+			resp := roundTrip(t, client, ipc.MsgSetProjectGroup, ipc.MsgProjectOpResp, ipc.SetProjectGroupPayload{ProjectID: p.ID, Group: name})
+			if op := decodeInto[ipc.OpRespPayload](t, resp); op.OK || op.Error == "" {
+				t.Errorf("name %q: want a refusal with a reason, got %+v", name, op)
+			}
+			if got := groupsOf(t, d); len(got) != 0 {
+				t.Errorf("a refused name was stored: %q", got)
+			}
+			for _, ps := range d.buildWorkspaceState().Projects {
+				if ps.ID == p.ID && ps.Group != "" {
+					t.Errorf("project filed under a refused name: %q", ps.Group)
+				}
+			}
+		})
+	}
+}
+
+func TestHandleMessage_GroupOpRename_RefusesUnsafeNewNames(t *testing.T) {
+	for class, name := range unsafeGroupNames() {
+		t.Run(class, func(t *testing.T) {
+			d, client := mcpTestDaemon(t)
+			p := d.session.CreateProject("api", t.TempDir())
+			roundTrip(t, client, ipc.MsgSetProjectGroup, ipc.MsgProjectOpResp, ipc.SetProjectGroupPayload{ProjectID: p.ID, Group: "a"})
+			resp := roundTrip(t, client, ipc.MsgGroupOp, ipc.MsgGroupOpResp, ipc.GroupOpPayload{Op: ipc.GroupOpRename, Name: "a", NewName: name})
+			if op := decodeInto[ipc.OpRespPayload](t, resp); op.OK || op.Error == "" {
+				t.Errorf("new name %q: want a refusal with a reason, got %+v", name, op)
+			}
+			if got := groupsOf(t, d); len(got) != 1 || got[0] != "a" {
+				t.Errorf("groups = %q, want [a] unchanged", got)
+			}
+			for _, ps := range d.buildWorkspaceState().Projects {
+				if ps.ID == p.ID && ps.Group != "a" {
+					t.Errorf("project group = %q, want a unchanged", ps.Group)
+				}
+			}
+		})
+	}
+}
+
+// The import skips a bad name rather than refusing the whole import: the
+// safe name and its member still land.
+func TestHandleMessage_SharedImport_SkipsUnsafeNames(t *testing.T) {
+	for class, name := range unsafeGroupNames() {
+		t.Run(class, func(t *testing.T) {
+			d, client, _, _ := notesTestDaemon(t)
+			bad := d.session.CreateProject("bad", t.TempDir())
+			good := d.session.CreateProject("good", t.TempDir())
+			resp := decodeInto[ipc.SharedImportRespPayload](t, roundTrip(t, client, ipc.MsgSharedImport, ipc.MsgSharedImportResp, ipc.SharedImportPayload{
+				Kinds:  []string{ipc.ImportKindGroups},
+				Groups: []ipc.SharedImportGroup{{Name: name, ProjectIDs: []string{bad.ID}}, {Name: "Ok", ProjectIDs: []string{good.ID}}},
+			}))
+			if !resp.GroupsApplied {
+				t.Fatalf("resp = %+v, want the groups import applied", resp)
+			}
+			if got := groupsOf(t, d); len(got) != 1 || got[0] != "Ok" {
+				t.Errorf("groups = %q, want [Ok] (the unsafe name skipped)", got)
+			}
+			for _, ps := range d.buildWorkspaceState().Projects {
+				want := map[string]string{bad.ID: "", good.ID: "Ok"}[ps.ID]
+				if (ps.ID == bad.ID || ps.ID == good.ID) && ps.Group != want {
+					t.Errorf("project %s group = %q, want %q", ps.ID, ps.Group, want)
+				}
+			}
+		})
 	}
 }
 

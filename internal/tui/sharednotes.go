@@ -91,14 +91,14 @@ func (m *Model) sendNoteGet(dest, paneID string) (id string, cmd tea.Cmd) {
 		return "", nil
 	}
 	msg.ID = "note-" + m.nextReqGen()
-	m.noteLoadID, m.noteLoadDiscards, m.noteLoadSnapshot = msg.ID, false, ""
+	m.noteLoadID, m.noteLoadDiscards, m.noteLoadSnapshot, m.noteLoadSnapSave = msg.ID, false, "", 0
 	if err := m.sendForDestStrict(dest, msg); err != nil {
 		m.noteLoadID = ""
 		if m.notesEditor.Loading() {
 			m.notesEditor.ApplyLoadError(err.Error())
 			return "", nil
 		}
-		m.setFlash("Note not reloaded: " + err.Error())
+		m.setErrorFlash("Note not reloaded: " + err.Error())
 		return "", m.flashCmd()
 	}
 	id = msg.ID
@@ -114,38 +114,57 @@ func (m *Model) reloadNote() tea.Cmd {
 	id, cmd := m.sendNoteGet(ed.Dest(), ed.PaneID())
 	m.noteLoadDiscards = id != ""
 	if m.noteLoadDiscards {
-		m.noteLoadSnapshot = ed.Content()
+		m.noteLoadSnapshot, m.noteLoadSnapSave = ed.Content(), m.noteSavesTaken
 	}
 	return cmd
 }
 
-func (m *Model) applyNoteResp(msg noteRespMsg) {
+func (m *Model) applyNoteResp(msg noteRespMsg) tea.Cmd {
 	ed := m.notesEditor
 	// An answer from a daemon other than the editor's is not the answer: ids
 	// are this client's counter, so another host can hold a matching one. It
 	// must not take the load id, or the real answer is dropped after it.
 	if ed == nil || !ed.Remote() || msg.id == "" || msg.id != m.noteLoadID || msg.dest != ed.Dest() {
-		return
+		return nil
 	}
 	// The confirmed reload discards only the buffer the user confirmed on, and
 	// never under a save in flight: that save's answer would then land on the
 	// reloaded buffer (ApplyLoaded clears saveInFlight while noteSaveID stays
-	// set) and report as clean a text the daemon no longer holds.
-	discards := m.noteLoadDiscards && !ed.SaveInFlight() && ed.Content() == m.noteLoadSnapshot
-	m.noteLoadID, m.noteLoadDiscards, m.noteLoadSnapshot = "", false, ""
+	// set) and report as clean a text the daemon no longer holds. A save
+	// answered since the confirmation made the buffer the daemon's newer
+	// text, not the one the user agreed to discard. That is counted on this
+	// client, not read off the editor's rev: a restarted daemon can hand the
+	// save the very rev the editor held at the confirmation.
+	confirmed := m.noteLoadDiscards
+	savedSince := confirmed && m.noteSavesTaken != m.noteLoadSnapSave
+	discards := confirmed && !ed.SaveInFlight() && ed.Content() == m.noteLoadSnapshot && !savedSince
+	m.noteLoadID, m.noteLoadDiscards, m.noteLoadSnapshot, m.noteLoadSnapSave = "", false, "", 0
 	if msg.resp.Error != "" {
 		// A reload that fails leaves the loaded text as it was; only a first
 		// load has nothing to show and becomes the read-only error editor.
 		if ed.Loading() {
 			ed.ApplyLoadError(elideEnd(sanitizeRemoteText(msg.resp.Error), noteErrCap))
 		}
-		return
+		return nil
 	}
-	// Revisions only grow, so an answer older than what the editor holds is
-	// stale — an overwrite sent after this get can answer first (each note
-	// request runs on its own daemon worker), and that answer is the newer.
-	if !ed.Loading() && msg.resp.Rev < ed.Rev() {
-		return
+	// Revisions only grow on one daemon run, so an answer older than what the
+	// editor holds is stale — an overwrite sent after this get can answer
+	// first (each note request runs on its own daemon worker), and that answer
+	// is the newer. The confirmed reload is exempt: a daemon that crashed
+	// inside its snapshot debounce restores a LOWER rev, and the user asked
+	// for the daemon's text whatever its number. A confirmed reload that is
+	// dropped says so, since the user asked for it; a silent one does not —
+	// the editor already holds the newer text, so there is nothing to tell.
+	if !ed.Loading() && !discards && msg.resp.Rev < ed.Rev() {
+		switch {
+		case savedSince:
+			m.setFlash("Note reload replaced by a newer save")
+		case confirmed:
+			m.setFlash("Note reload dropped: older than the editor")
+		default:
+			return nil
+		}
+		return m.flashCmd()
 	}
 	// A silent reload (clean editor, newer frame rev) that finds the user
 	// typing since it was sent must not replace the typing: it is a conflict.
@@ -155,9 +174,10 @@ func (m *Model) applyNoteResp(msg noteRespMsg) {
 	// flight counts as unsaved text too: its buffer is not the daemon's yet.
 	if !ed.Loading() && (ed.Dirty() || ed.SaveInFlight()) && !discards {
 		ed.MarkConflict(msg.resp.Rev)
-		return
+		return nil
 	}
 	ed.ApplyLoaded(sanitizeRemoteNote(msg.resp.Text), msg.resp.Rev)
+	return nil
 }
 
 // sanitizeRemoteNote is the remote-text rule for a note: the
@@ -255,7 +275,7 @@ func (m *Model) flushRemoteNotesInPlace() {
 		m.keepNoteText(ed.Dest(), ed.PaneID(), text, "Note not saved on the daemon")
 	}
 	// The closed editor's answers are settled through pendingNoteSaves alone.
-	m.noteSaveID, m.noteLoadID, m.noteLoadDiscards, m.noteLoadSnapshot = "", "", false, ""
+	m.noteSaveID, m.noteLoadID, m.noteLoadDiscards, m.noteLoadSnapshot, m.noteLoadSnapSave = "", "", false, "", 0
 }
 
 // keepNoteText writes text the daemon will not hold to notes-conflicts and
@@ -264,11 +284,11 @@ func (m *Model) keepNoteText(dest, paneID, text, reason string) {
 	path, err := writeNotesConflict(dest, paneID, text)
 	if err != nil {
 		log.Printf("notes: %s: text for %s could not be kept: %v", reason, paneID, err)
-		m.setFlash(reason + " and could not be kept — see quil.log")
+		m.setErrorFlash(reason + " and could not be kept — see quil.log")
 		return
 	}
 	log.Printf("notes: %s: text for %s kept in %s", reason, paneID, path)
-	m.setFlash(reason + " — your text is in notes-conflicts")
+	m.setErrorFlash(reason + " — your text is in notes-conflicts")
 }
 
 // applyNoteSetResp settles a pending save. With the editor that sent it still
@@ -288,6 +308,9 @@ func (m *Model) applyNoteSetResp(msg noteSetRespMsg) tea.Cmd {
 		resp := msg.resp
 		resp.Error = elideEnd(sanitizeRemoteText(resp.Error), noteErrCap)
 		ed.ApplySaveResult(resp)
+		if resp.OK {
+			m.noteSavesTaken++
+		}
 	} else if !msg.resp.OK {
 		reason := "Note changed elsewhere"
 		if !msg.resp.Conflict {

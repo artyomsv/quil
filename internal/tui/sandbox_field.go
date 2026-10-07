@@ -75,8 +75,14 @@ func (m Model) renderSetupSandboxField(focused bool) string {
 // Derived from setupFieldKind rather than recomputed, so it cannot drift from
 // the walk the renderer and the key handler use.
 func (m Model) setupSandboxFieldIndex(p *plugin.PanePlugin) int {
+	return m.setupFieldIndex(p, "sandbox")
+}
+
+// setupFieldIndex is the cursor index of the first row of kind, or the
+// unchanged cursor when no such row is shown.
+func (m Model) setupFieldIndex(p *plugin.PanePlugin, kind string) int {
 	for i := 0; i < m.setupFieldCount(p); i++ {
-		if k, _ := m.setupFieldKind(p, i); k == "sandbox" {
+		if k, _ := m.setupFieldKind(p, i); k == kind {
 			return i
 		}
 	}

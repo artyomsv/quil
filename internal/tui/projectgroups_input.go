@@ -3,7 +3,6 @@ package tui
 import (
 	"errors"
 	"strings"
-	"time"
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
@@ -78,8 +77,8 @@ func (m *Model) finishProjectDrag(x, y int) tea.Cmd {
 	p := m.projects[idx]
 	// The press never arms a drag for a read-only destination's project; this
 	// is the second line, ahead of any membership change.
-	if m.destReadOnly(p.Dest) {
-		return m.refuseReadOnly()
+	if m.destRefusal(p.Dest) != "" {
+		return m.refuseDest(p.Dest)
 	}
 	// The same rule the drop-target highlight was painted from, applied to the
 	// release row — so the green row is exactly what the release does.
@@ -153,7 +152,7 @@ func (m *Model) openProjectGroupList() tea.Cmd {
 	w, h := s.boxSize()
 	if w > m.width || h > m.height-2 {
 		m.closeCtxMenu()
-		m.setFlash(groupListTooTallFlash)
+		m.setErrorFlash(groupListTooTallFlash)
 		return m.flashCmd()
 	}
 	s.x, s.y = ctxMenuPos(m.ctxMenu.x-1, m.ctxMenu.y-1, w, h, m.width, m.height)
@@ -166,8 +165,8 @@ func (m *Model) openProjectGroupList() tea.Cmd {
 // or not at all.
 func (m *Model) moveProjectToGroup(dest, id, name string) tea.Cmd {
 	// A read-only destination's project groups are its daemon's.
-	if m.destReadOnly(dest) {
-		return m.refuseReadOnly()
+	if m.destRefusal(dest) != "" {
+		return m.refuseDest(dest)
 	}
 	g := m.groups.indexOf(name)
 	if g < 0 || !m.groups.assign(g, dest, id) {
@@ -178,8 +177,8 @@ func (m *Model) moveProjectToGroup(dest, id, name string) tea.Cmd {
 
 // ungroupProject takes (dest, id) out of its group.
 func (m *Model) ungroupProject(dest, id string) tea.Cmd {
-	if m.destReadOnly(dest) {
-		return m.refuseReadOnly()
+	if m.destRefusal(dest) != "" {
+		return m.refuseDest(dest)
 	}
 	if !m.groups.unassign(dest, id) {
 		return nil
@@ -389,6 +388,25 @@ func (m Model) commitGroupEdit() (tea.Model, tea.Cmd) {
 		cmd := m.refuseReadOnly()
 		return m, cmd
 	}
+	// A rename goes to every daemon that lists the group. One whose link is
+	// down cannot take it, so nothing is renamed, here or anywhere.
+	if e.mode == groupEditRename {
+		// One rename per group at a time: the answers are matched by
+		// request id, and a second rename before the first settles could
+		// only race it (A→B, B→A, A→B).
+		if r := m.pendingRenameOf(e.target); r != nil {
+			m.closeGroupNameDialog()
+			m.setErrorFlash(m.renameWaitingFlash(r))
+			return m, m.flashCmd()
+		}
+		for _, d := range m.groupOpTargets(e.target) {
+			if why := m.linkDownReason(d); why != "" {
+				m.closeGroupNameDialog()
+				m.setErrorFlash("group not renamed: " + why)
+				return m, m.flashCmd()
+			}
+		}
+	}
 	changed := false
 	var err error
 	var opCmd tea.Cmd
@@ -397,6 +415,7 @@ func (m Model) commitGroupEdit() (tea.Model, tea.Cmd) {
 		var g int
 		if g, err = m.groups.addGroup(e.input); err == nil {
 			changed = true
+			m.groups.Groups[g].Origin = groupOriginUser
 			if e.projectID != "" {
 				m.groups.assign(g, e.dest, e.projectID)
 				opCmd = m.sendSetProjectGroup(e.dest, e.projectID, m.groups.Groups[g].Name)
@@ -409,12 +428,18 @@ func (m Model) commitGroupEdit() (tea.Model, tea.Cmd) {
 		if g := m.groups.indexOf(e.target); g >= 0 {
 			if err = m.groups.renameGroup(g, e.input); err == nil {
 				changed = true
-				opCmd = m.sendGroupOpEverywhere(ipc.GroupOpRename, e.target, m.groups.Groups[g].Name)
+				// The origin is not touched: the daemons that list the group
+				// settle the rename (groupRename), and until then their
+				// frames are read with the new name in place of the old.
+				newName := m.groups.Groups[g].Name
+				if r := m.trackGroupRename(e.target, newName); r != nil {
+					opCmd = m.sendGroupRename(r)
+				}
 			}
 		}
 	}
 	if err != nil {
-		m.setFlash(groupNameFlash(err))
+		m.setErrorFlash(groupNameFlash(err))
 		return m, m.flashCmd()
 	}
 	m.closeGroupNameDialog()
@@ -438,7 +463,7 @@ func groupNameFlash(err error) string {
 // status bar that carries every other flash is not on screen.
 func (m Model) groupNameRefusal() string {
 	if (m.flashText == groupNameEmptyFlash || m.flashText == groupNameTakenFlash) &&
-		time.Now().Before(m.flashUntil) {
+		m.clock().Before(m.flashUntil) {
 		return m.flashText
 	}
 	return ""

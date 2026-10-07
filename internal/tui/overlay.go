@@ -93,6 +93,13 @@ func (m *Model) handleToggleOverlay(pluginName string) tea.Cmd {
 	if !m.destCanRawArgs(tab.Dest) && !tab.overlayRuns(pluginName) {
 		return m.refuseNoRawArgs()
 	}
+	// The same for a host whose link is down: the repo scan and the create
+	// would go into a dead conn. Showing an overlay the tab already runs is
+	// local and stays allowed.
+	if why := m.linkDownReason(tab.Dest); why != "" && !tab.overlayRuns(pluginName) {
+		m.setErrorFlash(pluginName + " not opened: " + why)
+		return m.flashCmd()
+	}
 
 	// Step 2: resolve candidates from the active NORMAL pane's CWD.
 	// ActivePaneModel returns the overlay when one is visible — which is
@@ -141,7 +148,7 @@ func (m *Model) resolveOverlay(tab *TabModel, candidates []string, pluginName st
 		if tab.overlayRuns(pluginName) {
 			return m.showOverlay(tab)
 		}
-		m.setFlash("no git repo here")
+		m.setErrorFlash("no git repo here")
 		return m.flashCmd()
 	}
 
@@ -168,7 +175,7 @@ func (m *Model) resolveOverlay(tab *TabModel, candidates []string, pluginName st
 	// Asked of the TAB's daemon, which is where the overlay pane is created
 	// (createOverlay's tabDest) and is reachable from a background project.
 	if !m.pluginAvailableFor(tab.Dest, pluginName) {
-		m.setFlash(pluginName + " not installed")
+		m.setErrorFlash(pluginName + " not installed")
 		return m.flashCmd()
 	}
 
@@ -426,13 +433,19 @@ func (m *Model) createOverlay(tab *TabModel, repo, pluginName string) tea.Cmd {
 	// Defense-in-depth: re-check availability so any direct caller is safe.
 	// The tab's daemon, for the same reason tabDest below is.
 	if !m.pluginAvailableFor(tab.Dest, pluginName) {
-		m.setFlash(pluginName + " not installed")
+		m.setErrorFlash(pluginName + " not installed")
 		return m.flashCmd()
 	}
 	// Defense-in-depth too: the daemon refuses an overlay create from a token
 	// without raw-argument rights, and this send carries no id to answer.
 	if !m.destCanRawArgs(tab.Dest) {
 		return m.refuseNoRawArgs()
+	}
+	// And before the slot is touched: a create to a host whose link is down
+	// cannot leave, and pendingOverlayShow would wait for it for good.
+	if why := m.linkDownReason(tab.Dest); why != "" {
+		m.setErrorFlash(pluginName + " not opened: " + why)
+		return m.flashCmd()
 	}
 
 	var cmds []tea.Cmd

@@ -88,11 +88,11 @@ func (m *Model) applyTabArrangement(tab *TabModel, newRoot *LayoutNode, active *
 	}
 	// A viewer's trees are the daemon's: its layout write would be dropped,
 	// and the tree it kept would be marked dirty and never converge.
-	if m.destReadOnly(tab.Dest) {
-		return m.refuseReadOnly()
+	if m.destRefusal(tab.Dest) != "" {
+		return m.refuseDest(tab.Dest)
 	}
 	if m.tabLayoutBusy(tab) {
-		m.setFlash(tabBusyFlash)
+		m.setErrorFlash(tabBusyFlash)
 		return m.flashCmd()
 	}
 	if len(tab.Leaves()) < 2 {
@@ -100,7 +100,7 @@ func (m *Model) applyTabArrangement(tab *TabModel, newRoot *LayoutNode, active *
 	}
 	w, h := m.paneAreaWidth(), m.height-chromeHeight
 	if !fitsMinSize(newRoot, w, h) {
-		m.setFlash(layoutTooSmallFlash)
+		m.setErrorFlash(layoutTooSmallFlash)
 		return m.flashCmd()
 	}
 	for _, p := range tab.Leaves() {

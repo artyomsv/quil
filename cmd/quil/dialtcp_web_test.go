@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/artyomsv/quil/internal/clientauth"
 	"github.com/artyomsv/quil/internal/ipc"
 )
 
@@ -28,7 +27,7 @@ func TestWebHelloPayload_KindAndClientID(t *testing.T) {
 
 // dialTCPWith puts the hello it was given on the wire, not the TUI's.
 func TestDialTCPWith_SendsTheGivenHello(t *testing.T) {
-	tok, _, _ := clientauth.NewToken()
+	tok := mustNewToken(t)
 	seen := make(chan ipc.HelloPayload, 1)
 	addr, _ := fakeListener(t, func(c net.Conn) error {
 		hello, err := ipc.ReadMessage(c)

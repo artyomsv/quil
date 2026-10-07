@@ -54,6 +54,11 @@ const (
 // naming its id (list_clients shows ids).
 var errClientIDInUse = errors.New("client id in use")
 
+// errClientIDReserved refuses a client id that starts with
+// reservedMasterPrefix. A state frame names a reserved master slot with that
+// marker, so a client wearing it would read itself as the master.
+var errClientIDReserved = errors.New("client id reserved")
+
 // clientRecord is one attached client. The registry is keyed by conn, and a
 // conn that never sent MsgAttach (an MCP bridge) has no record.
 type clientRecord struct {
@@ -556,6 +561,11 @@ func (d *Daemon) attachClient(conn *ipc.Conn, attach ipc.AttachPayload) (clientC
 	if conn == nil {
 		return clientChange{}, nil
 	}
+	// Checked on the RAW id: the client compares the state frame's master
+	// with the id it sent, not with the cut one the registry keeps.
+	if strings.HasPrefix(attach.ClientID, reservedMasterPrefix) {
+		return clientChange{}, errClientIDReserved
+	}
 	auth := conn.Auth()
 	principal, readOnly := ipc.PrincipalLocal, false
 	if auth != nil {
@@ -771,12 +781,17 @@ func (d *Daemon) followerConns(except *ipc.Conn) []*ipc.Conn {
 
 // mostRecentlyActiveConn returns the attached client with the latest input.
 // When nobody has typed yet, it is the most recently attached client. nil when
-// no client is attached.
+// no client is attached. Read-only viewers are skipped: a viewer never acts,
+// and its cwd is dropped at attach, so it would only hide the cwd of the
+// client that does (defaultCWD).
 func (d *Daemon) mostRecentlyActiveConn() *ipc.Conn {
 	d.clients.mu.Lock()
 	defer d.clients.mu.Unlock()
 	var best *clientRecord
 	for _, rec := range d.clients.sortedRecordsLocked() {
+		if rec.readOnly {
+			continue
+		}
 		if best == nil || !rec.lastInputAt.Before(best.lastInputAt) {
 			best = rec
 		}

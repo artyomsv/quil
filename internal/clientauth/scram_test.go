@@ -2,6 +2,7 @@ package clientauth
 
 import (
 	"encoding/hex"
+	"strings"
 	"testing"
 )
 
@@ -52,12 +53,18 @@ func TestServerSignature_KnownAnswer(t *testing.T) {
 	if !CheckServerSignature(katToken, katAuthMessage(), katSig) {
 		t.Error("client rejects the daemon's correct signature")
 	}
-	other, _, _ := NewToken()
+	other, _ := mustNewToken(t)
 	if CheckServerSignature(other, katAuthMessage(), katSig) {
 		t.Error("a signature for another token verified")
 	}
 	if CheckServerSignature(katToken, katAuthMessage(), "") {
 		t.Error("a MISSING signature verified")
+	}
+	if CheckServerSignature(katToken, katAuthMessage(), katSig[:len(katSig)-3]) {
+		t.Error("a truncated signature verified")
+	}
+	if CheckServerSignature(katToken, katAuthMessage(), katSig+"AAAA") {
+		t.Error("an over-long signature verified")
 	}
 }
 
@@ -86,7 +93,7 @@ func TestVerifyProof_RefusesGarbageAndWrongToken(t *testing.T) {
 			t.Errorf("garbage proof %q verified", p)
 		}
 	}
-	other, _, _ := NewToken()
+	other, _ := mustNewToken(t)
 	if VerifyProof(v, katAuthMessage(), ClientProof(other, katAuthMessage())) {
 		t.Error("another token's proof verified")
 	}
@@ -97,7 +104,14 @@ func TestNonce_ShapeChecked(t *testing.T) {
 	if err != nil || !ValidNonce(n) {
 		t.Fatalf("NewNonce = %q, %v", n, err)
 	}
-	for _, bad := range []string{"", "abc", katNonceC + "A"} {
+	for _, bad := range []string{
+		"", "abc", katNonceC + "A",
+		// The decoder skips CR and LF: both decoded to katNonceC's 32 bytes.
+		katNonceC + "\n", katNonceC[:10] + "\r\n" + katNonceC[10:],
+		// 'F' sets a padding bit that 'E' leaves clear: same bytes, second spelling.
+		katNonceC[:len(katNonceC)-1] + "F",
+		strings.Repeat("*", len(katNonceC)),
+	} {
 		if ValidNonce(bad) {
 			t.Errorf("ValidNonce(%q) = true", bad)
 		}

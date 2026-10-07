@@ -131,6 +131,8 @@ type authService struct {
 	expiredSeen map[string]bool
 
 	failures atomic.Int64
+	// corrupt limits the corrupt-verifier warning in quild.log.
+	corrupt corruptLog
 	// Copied from the package vars by initAuth; a zero field (an authService
 	// built bare, as TestBackoff_Curve does) reads its default.
 	stepTimeout time.Duration
@@ -163,6 +165,43 @@ type authService struct {
 	// beforeRefusalFlush is a test seam between a refusal's send and its
 	// flush. Atomic: the login timer's goroutine reads it.
 	beforeRefusalFlush atomic.Pointer[func()]
+}
+
+// corruptLogWindow limits the quild.log line for a login refused on a corrupt
+// verifier to one per minute: anyone on loopback can name the damaged token's
+// id in a loop, and a line per attempt would rotate quild.log's real
+// diagnostics away. The same shape as the ipc accept-refusal limit.
+const corruptLogWindow = time.Minute
+
+// corruptLog is that limit. Proof checks run on many conns' goroutines, so
+// it has its own lock.
+type corruptLog struct {
+	mu   sync.Mutex
+	last time.Time
+	held int
+}
+
+// note reports whether a refusal at now may be logged, and how many were
+// held back since the last line.
+func (r *corruptLog) note(now time.Time) (ok bool, held int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.last.IsZero() && now.Sub(r.last) < corruptLogWindow {
+		r.held++
+		return false, 0
+	}
+	held, r.last, r.held = r.held, now, 0
+	return true, held
+}
+
+// flush returns, and clears, the count held back since the last line, so the
+// end of a flood is not lost at shutdown.
+func (r *corruptLog) flush() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := r.held
+	r.held = 0
+	return n
 }
 
 // step is the login step timeout.
@@ -352,6 +391,9 @@ func (d *Daemon) closeAuth() {
 	d.auth.closeMu.Unlock()
 	d.auth.closeWG.Wait()
 	d.flushPreLoginAudit(time.Now(), true)
+	if n := d.auth.corrupt.flush(); n > 0 {
+		log.Printf("warning: login: %d corrupt-verifier refusals were not logged", n)
+	}
 	d.auth.closePersist()
 	if err := d.audit.Close(); err != nil {
 		log.Printf("audit: close: %v", err)
@@ -596,7 +638,16 @@ func (d *Daemon) loginProof(conn *ipc.Conn, s *loginSession, msg *ipc.Message) {
 		})
 	if err != nil {
 		// Unknown, wrong and expired all read the same: the reason must not
-		// tell someone without the key which of them it was.
+		// tell someone without the key which of them it was. A corrupt
+		// verifier is the operator's problem, not the client's: the log
+		// names the token, the client still reads only "token refused".
+		if errors.Is(err, clientauth.ErrCorruptVerifier) {
+			if ok, held := d.auth.corrupt.note(time.Now()); ok && held > 0 {
+				log.Printf("warning: login: %v (%d earlier corrupt-verifier refusals not logged)", err, held)
+			} else if ok {
+				log.Printf("warning: login: %v", err)
+			}
+		}
 		d.auth.failures.Add(1)
 		d.refuseLogin(conn, msg, s, "token refused", "token refused")
 		return

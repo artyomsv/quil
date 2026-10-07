@@ -51,6 +51,9 @@ func disposeAtEnd(t *testing.T, m *Model) {
 				tab.overlayPane.Dispose()
 			}
 		}
+		for _, p := range m.replaceHeld {
+			p.Dispose()
+		}
 	})
 }
 
@@ -82,8 +85,22 @@ func TestDaemonTree_SubstitutedReplaceFillsTheReservation(t *testing.T) {
 	m, _ = lsApply(t, m, lsState(1, lsWire(t, lsSplit(SplitHorizontal, 0.3, lsLeaf("p1"), lsLeaf("p2"))), "p1", "p2"))
 	lsTab(t, &m).ActivePane = "p2"
 	m = armOwnReplace(t, m)
+	held := m.replaceHeld["t1"]
+	if held == nil || held.ID != "p2" {
+		t.Fatal("setup: the replace did not hold p2 for a refusal to put back")
+	}
 
 	m, sent := lsApply(t, m, lsState(2, lsWire(t, lsSplit(SplitHorizontal, 0.3, lsLeaf("p1"), lsLeaf("p-new"))), "p1", "p-new"))
+
+	// The pane landing is what settles the create: the held pane was swapped
+	// out daemon-side, so it is disposed (vt is nilled by closeVT, which also
+	// stops its drain goroutine), and the request id is forgotten.
+	if m.replaceHeld["t1"] != nil || held.vt != nil {
+		t.Error("the replaced pane is still held or was not disposed")
+	}
+	if m.createReqIDs["t1"] != "" {
+		t.Error("the settled create kept its request id")
+	}
 
 	tab := lsTab(t, &m)
 	if got, want := lsTree(t, &m), lsSplit(SplitHorizontal, 0.3, lsLeaf("p1"), lsLeaf("p-new")); !reflect.DeepEqual(got, want) {
@@ -100,6 +117,58 @@ func TestDaemonTree_SubstitutedReplaceFillsTheReservation(t *testing.T) {
 	}
 	if len(sent) != 0 {
 		t.Errorf("sent %d update_layout frames, want 0 — the daemon already stored it", len(sent))
+	}
+}
+
+// A broadcast that left before the daemon read this client's ordinary replace
+// still lists the held pane. It used to build a FRESH model for that live pane
+// — blank, its output gone — into the reserved leaf, and settling then disposed
+// the held one, so the refusal that followed had nothing to put back. The held
+// model goes back instead, with or without a tree to adopt.
+func TestDaemonTree_UnrelatedBroadcastKeepsTheHeldReplacedPane(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		rev  uint64
+		tree *SerializedNode
+	}{
+		// Same revision: the arrival loop places the listed pane.
+		{"same revision", 1, lsSplit(SplitHorizontal, 0.3, lsLeaf("p1"), lsLeaf("p2"))},
+		// Another client's border drag: the tree is adopted first.
+		{"adopted tree", 2, lsSplit(SplitHorizontal, 0.6, lsLeaf("p1"), lsLeaf("p2"))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newLayoutSyncModel(t)
+			disposeAtEnd(t, &m)
+			m, _ = lsApply(t, m, lsState(1, lsWire(t, lsSplit(SplitHorizontal, 0.3, lsLeaf("p1"), lsLeaf("p2"))), "p1", "p2"))
+			lsTab(t, &m).ActivePane = "p2"
+			m = armOwnReplace(t, m)
+			held, reqID := m.replaceHeld["t1"], m.createReqIDs["t1"]
+			if held == nil || held.ID != "p2" || reqID == "" {
+				t.Fatal("setup: the replace did not hold p2 under a request id")
+			}
+
+			m, _ = lsApply(t, m, lsState(tc.rev, lsWire(t, tc.tree), "p1", "p2"))
+
+			tab := lsTab(t, &m)
+			if leaf := tab.Root.FindLeaf("p2"); leaf == nil || leaf.Pane != held {
+				t.Fatal("p2 is not the held model — the live pane was rebuilt blank")
+			}
+			if held.vt == nil {
+				t.Fatal("the held model was disposed while its pane is still live")
+			}
+			if tab.Root.HasPlaceholder() || m.pendingSplit["t1"] != nil || m.replaceHeld["t1"] != nil {
+				t.Error("the replace is still armed after its pane went back")
+			}
+			if got, want := lsTree(t, &m), tc.tree; !reflect.DeepEqual(got, want) {
+				t.Errorf("tree = %s, want %s", layoutString(got), layoutString(want))
+			}
+
+			updated, _ := m.Update(createPaneRefusedMsg{dest: tab.Dest, id: reqID, text: "unknown toggle"})
+			m = updated.(Model)
+			if leaf := lsTab(t, &m).Root.FindLeaf("p2"); leaf == nil || leaf.Pane != held || held.vt == nil {
+				t.Error("the refusal lost the pane the broadcast put back")
+			}
+		})
 	}
 }
 

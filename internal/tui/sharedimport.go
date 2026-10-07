@@ -74,9 +74,9 @@ type pendingImport struct {
 	groupsSnap projectGroups
 }
 
-// maxImportErrors is how many error replies one destination may give this
-// session before its import stops re-sending on each frame; after that only a
-// reconnect or the next launch sends it again.
+// maxImportErrors is how many error replies one destination may give on one
+// connection before its import stops re-sending on each frame; after that only
+// a reconnect or the next launch sends it again.
 const maxImportErrors = 3
 
 var sharedImportTimeout = 8 * time.Second
@@ -94,6 +94,7 @@ type deferredGroupOp struct {
 	msgType string
 	payload any
 	what    string
+	rename  *groupRename // the rename this op is part of, carried to the replay
 }
 
 // SetSharedImportMarker turns the import on; a Model that never had this
@@ -171,7 +172,7 @@ func (m *Model) groupSendsOpen(dest string) bool {
 // deferGroupOp holds one group send for dest until its groups answer. A
 // later set_project_group for the same project replaces the earlier one and
 // moves to the end, so the replay keeps the order against group creates.
-func (m *Model) deferGroupOp(dest, msgType string, payload any, what string) {
+func (m *Model) deferGroupOp(dest, msgType string, payload any, what string, rn *groupRename) {
 	if m.deferredGroupOps == nil {
 		m.deferredGroupOps = map[string][]deferredGroupOp{}
 	}
@@ -188,9 +189,15 @@ func (m *Model) deferGroupOp(dest, msgType string, payload any, what string) {
 	}
 	if len(ops) >= maxDeferredGroupOps {
 		log.Printf("groups: %s for %q DROPPED — %d changes already wait for the import answer; the daemon's next frame will undo it", what, dest, len(ops))
+		// A dropped rename is decided by that frame too.
+		if rn != nil {
+			if _, in := rn.dests[dest]; in {
+				rn.dests[dest] = renameLost
+			}
+		}
 		return
 	}
-	m.deferredGroupOps[dest] = append(ops, deferredGroupOp{msgType: msgType, payload: payload, what: what})
+	m.deferredGroupOps[dest] = append(ops, deferredGroupOp{msgType: msgType, payload: payload, what: what, rename: rn})
 	if op, ok := payload.(ipc.GroupOpPayload); ok {
 		m.noteHeldGroupName(dest, op)
 	}
@@ -244,12 +251,32 @@ func (m *Model) destsHoldingGroupName(name string) []string {
 // a new connection, so the next shared frame from dest sends it again. The
 // daemon side is idempotent — a refusal is an answer, which opens group sends
 // and replays the held ops. The held ops themselves are kept.
+//
+// The error count is per connection too: the new one gets maxImportErrors
+// tries of its own. And the group ops sent on the old connection are dropped
+// from pendingGroupOps — their answers cannot arrive, and the entry would
+// otherwise stay for the life of the process.
 func (m *Model) forgetImportFor(dest string) {
 	for id, p := range m.pendingImports {
 		if p.dest == dest {
 			delete(m.pendingImports, id)
 		}
 	}
+	for id, op := range m.pendingGroupOps {
+		if op.dest == dest {
+			delete(m.pendingGroupOps, id)
+			// A rename's answer is lost, not refused: the daemon may have
+			// applied it. Its first frame on the new connection decides.
+			if op.rename != nil {
+				if _, in := op.rename.dests[dest]; in {
+					op.rename.dests[dest] = renameLost
+				}
+			}
+		}
+	}
+	// So is an OK whose confirming frame never came on that connection.
+	m.acceptedRenamesLost(dest)
+	delete(m.importErrors, dest)
 	delete(m.importAsked, dest)
 	delete(m.notesWaiting, dest) // the next frame's maybeImport decides again
 	// The pane ids came from the old connection. Until the new one sends a
@@ -502,7 +529,14 @@ func collectImportNotes(dir string, mine, others map[string]bool, budget int) (o
 			continue
 		}
 		text, err := persist.LoadNotes(dir, id)
-		if err != nil || text == "" {
+		if err != nil {
+			// Like the budget: the kind stays pending, so the next launch
+			// reads it again instead of the marker closing it for good.
+			log.Printf("shared import: note %s unreadable, left for the next launch: %v", id, err)
+			deferred = true
+			continue
+		}
+		if text == "" {
 			continue
 		}
 		if len(text) > ipc.MaxNoteBytes {
@@ -640,7 +674,7 @@ func (m *Model) openGroupSends(dest string) tea.Cmd {
 	delete(m.importNames, dest)
 	var cmds []tea.Cmd
 	for _, op := range held {
-		cmds = append(cmds, m.sendSharedOp(dest, op.msgType, op.payload, op.what))
+		cmds = append(cmds, m.sendSharedOpWith(dest, op.msgType, op.payload, op.what, op.rename))
 	}
 	return tea.Batch(cmds...)
 }
@@ -672,10 +706,10 @@ func (m *Model) applySharedImportTimeout(msg sharedImportTimeoutMsg) {
 // applySharedImportErr handles an error reply to this client's import: the
 // daemon refused the request as a whole, so nothing is answered and the
 // marker is untouched. The next shared frame from dest sends it again, until
-// dest has given maxImportErrors error replies this session; then it is not
-// sent again on this connection — a reconnect (forgetImportFor) or the next
-// launch sends it once more — and group sends to dest stay held until its
-// daemon lists a group (settleCappedImport).
+// dest has given maxImportErrors error replies on this connection; then it is
+// not sent again on it — a reconnect (forgetImportFor, which resets the count)
+// or the next launch tries again — and group sends to dest stay held until
+// its daemon lists a group (settleCappedImport).
 func (m *Model) applySharedImportErr(msg sharedImportErrMsg) tea.Cmd {
 	p, ok := m.pendingImports[msg.id]
 	if !ok || p.dest != msg.dest {
@@ -688,6 +722,6 @@ func (m *Model) applySharedImportErr(msg sharedImportErrMsg) tea.Cmd {
 		log.Printf("shared import %q refused (%d/%d): %s; sent again on its next frame", p.dest, n, maxImportErrors, msg.text)
 		return nil
 	}
-	log.Printf("shared import %q refused (%d/%d): %s; not sent again on this connection (a reconnect or the next launch sends it once more)", p.dest, m.importErrors[p.dest], maxImportErrors, msg.text)
+	log.Printf("shared import %q refused (%d/%d): %s; not sent again on this connection (a reconnect or the next launch tries again)", p.dest, m.importErrors[p.dest], maxImportErrors, msg.text)
 	return m.settleCappedImport(p.dest)
 }

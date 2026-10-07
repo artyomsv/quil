@@ -55,6 +55,20 @@ func (f *fakeDaemon) Close() error {
 	return nil
 }
 
+// feed queues m unless the bridge already closed the fake, which closes in:
+// a test that keeps sending past the frame that makes the bridge close must
+// use this, or its next send panics on the closed channel. Under f.mu, so it
+// cannot interleave with Close; in is buffered, so the send never blocks.
+func (f *fakeDaemon) feed(m *ipc.Message) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.closed {
+		return false
+	}
+	f.in <- m
+	return true
+}
+
 func (f *fakeDaemon) sentTypes() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -247,8 +261,11 @@ func TestBridge_ReplayOverTheTabCapClosesTooSlow(t *testing.T) {
 	lim.ReplayTabMax = 20
 	p := &fakePage{block: make(chan struct{})} // the page reads nothing: replay accumulates
 	_, d := startBridgeAt(t, lim, time.Now, p)
+	// The bridge closes partway through, so stop feeding once it has.
 	for i := 0; i < 5; i++ {
-		d.in <- outputMsg(t, "p1", []byte("0123456789"), true, 0)
+		if !d.feed(outputMsg(t, "p1", []byte("0123456789"), true, 0)) {
+			break
+		}
 	}
 	waitFor(t, "close 4002", func() bool { return p.closeCode() == CloseTooSlow })
 	close(p.block)

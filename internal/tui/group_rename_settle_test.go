@@ -320,3 +320,41 @@ func TestGroupRename_DisconnectAfterTheOtherHostAccepted(t *testing.T) {
 		t.Errorf("%d renames still pending after the host left", len(m.groupRenames))
 	}
 }
+
+// A rename held behind hostA's groups import is put back when the user
+// disconnects hostA. Its op was still queued, so re-adding hostA and
+// finishing the import sent the abandoned rename after all. Disconnect now
+// drops every op held for that host.
+func TestGroupRename_HeldRenameNotReplayedAfterDisconnect(t *testing.T) {
+	m, _, remote := importTestModel(t)
+	m = updateNoWait(t, m, hostFrame("q", 1, ""))
+	if !m.importAsked["hostA"] {
+		t.Fatal("setup: no import asked for hostA")
+	}
+	m.groups.Groups[0].Collapsed = true // Infra
+	m = renameThroughDialog(t, m, "Infra", "Platform")
+	if n := countSent(remote, ipc.MsgGroupOp); n != 0 {
+		t.Fatalf("setup: group_op sent %d times before the import answer", n)
+	}
+	if len(m.deferredGroupOps["hostA"]) != 1 {
+		t.Fatalf("setup: %d ops held for hostA, want the rename", len(m.deferredGroupOps["hostA"]))
+	}
+
+	m = confirmDisconnect(t, m, "hostA")
+	wantGroups(t, m, "after the disconnect", "Infra", "Empty")
+
+	again := newFakeConn()
+	close(again.recv)
+	m.adoptDest("hostA", again)
+	m = updateNoWait(t, m, hostFrame("q2", 1, ""))
+	_, id := importPayload(t, again)
+	m = updateNoWait(t, m, sharedImportRespMsg{dest: "hostA", id: id, resp: ipc.SharedImportRespPayload{Answered: []string{ipc.ImportKindGroups}}})
+
+	if n := countSent(again, ipc.MsgGroupOp); n != 0 {
+		t.Errorf("%d group_op sent after the host was re-added: the abandoned rename replayed", n)
+	}
+	wantGroups(t, m, "after the import", "Infra", "Empty")
+	if !m.groups.Groups[0].Collapsed {
+		t.Error("Infra lost its collapsed state")
+	}
+}

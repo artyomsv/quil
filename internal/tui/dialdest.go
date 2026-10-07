@@ -259,6 +259,13 @@ func (m *Model) disconnectDest(dest string) bool {
 	// And its part of every pending group rename: no frame from it will come
 	// to decide one. The groups save is the caller's (handleConfirmKey).
 	m.leaveGroupRenames(dest)
+	// And every group op held behind its import. forgetImportFor keeps them
+	// for a LOST link, which redials and replays them; a host the user left
+	// has nothing to replay to, and re-adding it later would send ops this
+	// client has already settled — a rename put back above would be applied
+	// after all.
+	delete(m.deferredGroupOps, dest)
+	delete(m.importNames, dest)
 	delete(m.groupNamesSent, dest)
 	var conn Client
 	if r, ok := m.client.(*Router); ok {

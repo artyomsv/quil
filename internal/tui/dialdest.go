@@ -255,7 +255,8 @@ func (m *Model) disconnectDest(dest string) bool {
 	m.settleNoteSavesFor(dest, "host disconnected")
 	// Its in-flight import can no longer be answered either; re-adding the
 	// host in this session sends it again on the first shared frame.
-	m.forgetImportFor(dest) // also forgets its pane ids
+	// The groups save it may return is the caller's (handleConfirmKey).
+	_ = m.forgetImportFor(dest) // also forgets its pane ids
 	delete(m.groupNamesSent, dest)
 	var conn Client
 	if r, ok := m.client.(*Router); ok {

@@ -92,3 +92,8 @@ headline: Stricter shared workspaces; refused creates now say why
   error now stays under the field after you move on, and Continue takes you back to
   the name field with the reason, instead of doing nothing. Nothing is created until
   the name is valid.
+- **A group rename that no host accepts is undone.** When a host refuses a group
+  rename, or its link drops before it answers, the sidebar puts the old name back and
+  the status bar says why. A rename while that host is disconnected is refused at once.
+  Before, the new name stayed in the sidebar and the groups file for good, beside the
+  host's old one.

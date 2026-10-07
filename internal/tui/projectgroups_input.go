@@ -388,6 +388,17 @@ func (m Model) commitGroupEdit() (tea.Model, tea.Cmd) {
 		cmd := m.refuseReadOnly()
 		return m, cmd
 	}
+	// A rename goes to every daemon that lists the group. One whose link is
+	// down cannot take it, so nothing is renamed, here or anywhere.
+	if e.mode == groupEditRename {
+		for _, d := range m.groupOpTargets(e.target) {
+			if why := m.linkDownReason(d); why != "" {
+				m.closeGroupNameDialog()
+				m.setErrorFlash("group not renamed: " + why)
+				return m, m.flashCmd()
+			}
+		}
+	}
 	changed := false
 	var err error
 	var opCmd tea.Cmd
@@ -407,12 +418,17 @@ func (m Model) commitGroupEdit() (tea.Model, tea.Cmd) {
 	case groupEditRename:
 		// A group deleted while the editor was open has nothing to rename.
 		if g := m.groups.indexOf(e.target); g >= 0 {
+			origin := m.groups.Groups[g].Origin
 			if err = m.groups.renameGroup(g, e.input); err == nil {
 				changed = true
-				// The user's name now: the daemons do not list it until their
-				// next frame, and a host group nobody claims would go.
+				// The user's name while the daemons answer: they do not list
+				// it until their next frame, and a host group nobody claims
+				// would go. sendGroupRename settles it: the group's own origin
+				// back once a daemon accepts, the old name back when none does.
 				m.groups.Groups[g].Origin = groupOriginUser
-				opCmd = m.sendGroupOpEverywhere(ipc.GroupOpRename, e.target, m.groups.Groups[g].Name)
+				newName := m.groups.Groups[g].Name
+				opCmd = m.sendGroupRename(e.target, newName,
+					&groupRename{oldName: e.target, newName: newName, origin: origin})
 			}
 		}
 	}

@@ -50,7 +50,11 @@ type pendingGroupOp struct {
 type groupRename struct {
 	oldName, newName string
 	dests            map[string]renameState
-	accepted         bool // a daemon took it: never put the old name back
+	// accepted: a daemon settled it as taken — its list showed the rename,
+	// or it left this client after its OK. Never put the old name back then.
+	// An OK alone is only the destination's renameAccepted state: a link
+	// lost before the list confirms it turns it back into renameLost.
+	accepted bool
 }
 
 type renameState int
@@ -67,20 +71,35 @@ const (
 	// the next frame: only once that daemon's list shows the rename
 	// (settleRenamesFromFrames). Until then another host's frame, or the
 	// daemon's own stale one, would re-add the old name and delete the
-	// renamed group, losing its place and collapsed state.
+	// renamed group, losing its place and collapsed state. This holds for
+	// the OK's own connection only; a lost link turns it into renameLost.
 	renameAccepted
 )
 
-// acceptGroupRename records dest's OK. The rename is accepted (never put
-// back); dest's alias is retired once its list shows the rename
+// acceptGroupRename records dest's OK. dest's alias is retired, and the
+// rename settled as accepted, once its list shows the rename
 // (settleRenamesFromFrames).
+//
+// The OK guards only frames on the connection it came on. When that link is
+// lost first (acceptedRenamesLost), the daemon's truth may have moved on — a
+// crash restoring a pre-rename snapshot, another client renaming back — so
+// the first frame on the new connection decides, as for a lost reply.
 func (m *Model) acceptGroupRename(r *groupRename, dest string) {
 	if r == nil {
 		return
 	}
 	if _, in := r.dests[dest]; in {
 		r.dests[dest] = renameAccepted
-		r.accepted = true
+	}
+}
+
+// acceptedRenamesLost turns dest's unconfirmed OKs into lost answers when
+// its link goes (forgetImportFor).
+func (m *Model) acceptedRenamesLost(dest string) {
+	for _, r := range m.groupRenames {
+		if st, in := r.dests[dest]; in && st == renameAccepted {
+			r.dests[dest] = renameLost
+		}
 	}
 }
 
@@ -143,12 +162,14 @@ func (m *Model) sendGroupRename(r *groupRename) tea.Cmd {
 
 // leaveGroupRenames settles dest's part of every pending rename when the
 // host leaves this client (disconnectDest): no frame from it can come to
-// decide, so it counts as not accepted, and a rename with no host left
-// resolves from the answers it has.
+// decide, so its answer stands as it is — its OK as an accept, anything
+// else as not accepted — and a rename with no host left resolves from the
+// answers it has. Runs before forgetImportFor, which would turn the OK into
+// a lost answer.
 func (m *Model) leaveGroupRenames(dest string) tea.Cmd {
 	var cmds []tea.Cmd
 	for _, r := range slices.Clone(m.groupRenames) {
-		cmds = append(cmds, m.settleGroupRename(r, dest, false))
+		cmds = append(cmds, m.settleGroupRename(r, dest, r.dests[dest] == renameAccepted))
 	}
 	return tea.Batch(cmds...)
 }

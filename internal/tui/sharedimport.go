@@ -274,6 +274,8 @@ func (m *Model) forgetImportFor(dest string) {
 			}
 		}
 	}
+	// So is an OK whose confirming frame never came on that connection.
+	m.acceptedRenamesLost(dest)
 	delete(m.importErrors, dest)
 	delete(m.importAsked, dest)
 	delete(m.notesWaiting, dest) // the next frame's maybeImport decides again

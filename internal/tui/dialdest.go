@@ -253,12 +253,13 @@ func (m *Model) disconnectDest(dest string) bool {
 	// text stays dirty, a closed editor's goes to notes-conflicts now rather
 	// than at quit.
 	m.settleNoteSavesFor(dest, "host disconnected")
+	// Its part of every pending group rename: no frame from it will come to
+	// decide one. Before forgetImportFor, which would turn its OK into a lost
+	// answer. The groups save is the caller's (handleConfirmKey).
+	m.leaveGroupRenames(dest)
 	// Its in-flight import can no longer be answered either; re-adding the
 	// host in this session sends it again on the first shared frame.
 	m.forgetImportFor(dest) // also forgets its pane ids
-	// And its part of every pending group rename: no frame from it will come
-	// to decide one. The groups save is the caller's (handleConfirmKey).
-	m.leaveGroupRenames(dest)
 	// And every group op held behind its import. forgetImportFor keeps them
 	// for a LOST link, which redials and replays them; a host the user left
 	// has nothing to replay to, and re-adding it later would send ops this

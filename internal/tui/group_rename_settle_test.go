@@ -389,3 +389,76 @@ func TestGroupRename_HeldRenameNotReplayedAfterDisconnect(t *testing.T) {
 		t.Error("Infra lost its collapsed state")
 	}
 }
+
+// reconnectHostA drops hostA's link and completes the redial onto a fresh
+// conn, as the reconnect ladder does.
+func reconnectHostA(t *testing.T, m Model) (Model, *fakeConn) {
+	t.Helper()
+	fresh := newFakeConn()
+	close(fresh.recv)
+	m.SetRedialFunc("hostA", func(Client) (Client, error) { return fresh, nil })
+	out, _ := m.Update(linkLostMsg{dest: "hostA", err: errLinkLost})
+	m = out.(Model)
+	m = updateNoWait(t, m, redialResultMsg{gen: m.linkOf("hostA").gen, dest: "hostA", client: fresh})
+	if why := m.linkDownReason("hostA"); why != "" {
+		t.Fatalf("setup: hostA is still down after the redial: %s", why)
+	}
+	return m, fresh
+}
+
+// hostA accepted Infra→Ops, but its link dropped before a frame confirmed
+// it. The OK guards only frames on that connection: the first frame on the
+// new one decides. Listing the old name (a crash restored a pre-rename
+// snapshot, or another client renamed back) puts it back on the same group,
+// and the group can be renamed again. Before, the alias stayed for good:
+// the view kept Ops and every later rename was refused as still waiting.
+func TestGroupRename_AcceptedThenReconnectWithTheOldName(t *testing.T) {
+	m, _, remote := twoDestModel(t)
+	m = updateNoWait(t, m, hostFrame("q", 1, "Infra", "X", "Infra", "Y"))
+	m.groups.Groups[1].Collapsed = true
+	m = renameThroughDialog(t, m, "Infra", "Ops")
+	m = updateNoWait(t, m, sharedOpRespMsg{dest: "hostA", id: lastGroupOpID(t, remote), resp: ipc.OpRespPayload{OK: true}})
+
+	m, fresh := reconnectHostA(t, m)
+	m = updateNoWait(t, m, hostFrame("q2", 1, "Infra", "X", "Infra", "Y"))
+
+	wantGroups(t, m, "after the reconnect frame", "X", "Infra", "Y")
+	if !m.groups.Groups[1].Collapsed {
+		t.Error("Infra came back as another group: the collapsed state is gone")
+	}
+	if g := m.groups.groupOf("hostA", "proj-2"); g != 1 {
+		t.Errorf("proj-2 in group %d, want Infra", g)
+	}
+	if len(m.groupRenames) != 0 {
+		t.Fatalf("%d renames still pending", len(m.groupRenames))
+	}
+
+	m = renameThroughDialog(t, m, "Infra", "Ops")
+	if n := countSent(fresh, ipc.MsgGroupOp); n != 1 {
+		t.Errorf("a new rename sent %d group_op (flash %q), want 1", n, m.flashText)
+	}
+}
+
+// The same reconnect when the daemon kept the rename: its first frame lists
+// Ops, and the group stays as it is.
+func TestGroupRename_AcceptedThenReconnectWithTheNewName(t *testing.T) {
+	m, _, remote := twoDestModel(t)
+	m = updateNoWait(t, m, hostFrame("q", 1, "Infra", "X", "Infra", "Y"))
+	m.groups.Groups[1].Collapsed = true
+	m = renameThroughDialog(t, m, "Infra", "Ops")
+	m = updateNoWait(t, m, sharedOpRespMsg{dest: "hostA", id: lastGroupOpID(t, remote), resp: ipc.OpRespPayload{OK: true}})
+
+	m, _ = reconnectHostA(t, m)
+	m = updateNoWait(t, m, hostFrame("q2", 1, "Ops", "X", "Ops", "Y"))
+
+	wantGroups(t, m, "after the reconnect frame", "X", "Ops", "Y")
+	if !m.groups.Groups[1].Collapsed {
+		t.Error("Ops lost its collapsed state")
+	}
+	if g := m.groups.groupOf("hostA", "proj-2"); g != 1 {
+		t.Errorf("proj-2 in group %d, want Ops", g)
+	}
+	if len(m.groupRenames) != 0 {
+		t.Errorf("%d renames still pending", len(m.groupRenames))
+	}
+}

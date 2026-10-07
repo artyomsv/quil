@@ -3867,7 +3867,7 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 
 	case createPaneSendFailedMsg:
 		// A send result, not an IPC response: no re-arm.
-		m.applyCreatePaneRefused(createPaneRefusedMsg(msg))
+		m.applyCreatePaneSendFailed(msg)
 		return m, m.flashCmd()
 
 	case noteSetRespMsg:
@@ -8412,6 +8412,15 @@ func (m Model) renderTOMLEditorFullScreen() string {
 	return b.String()
 }
 
+// joinBadge puts badge in front of the badges in rest, as renderStatusBar
+// prepends them to its right side.
+func joinBadge(badge, rest string) string {
+	if rest == "" {
+		return badge
+	}
+	return badge + " " + rest
+}
+
 func (m Model) renderStatusBar() string {
 	// Left side: pane info
 	left := "quil"
@@ -8497,14 +8506,22 @@ func (m Model) renderStatusBar() string {
 			right = seg + " | " + right
 		}
 	}
+	// safety collects the badges that say WHERE and HOW this client acts
+	// ([remote …], [read-only], [limited], [dev]) in the order they render.
+	// They survive a flash that crowds out the rest of the right side; see
+	// the fit below.
+	var safety string
 	if m.devMode {
 		right = "[dev] " + right
+		safety = "[dev]"
 	}
 	if m.daemonLimited[m.activeDest()] {
 		right = "[limited] " + right
+		safety = joinBadge("[limited]", safety)
 	}
 	if m.destReadOnly(m.rightsDest()) {
 		right = "[read-only] " + right
+		safety = joinBadge("[read-only]", safety)
 	}
 	// Multi-client sync (§4.3): the role marker sits beside [dev], in the same
 	// style, because it says something about how THIS process relates to the
@@ -8530,7 +8547,9 @@ func (m Model) renderStatusBar() string {
 	// local daemon" for "", so testing its output for emptiness would put a
 	// "[remote …]" badge on every local session.
 	if dest := m.activeDest(); dest != "" {
-		right = "[remote " + m.linkHost(dest) + "] " + right
+		badge := "[remote " + m.linkHost(dest) + "]"
+		right = badge + " " + right
+		safety = joinBadge(badge, safety)
 	}
 	if count := m.notifications.Count(); count > 0 && !m.notifications.visible {
 		right = fmt.Sprintf("[%d events] ", count) + right
@@ -8547,7 +8566,19 @@ func (m Model) renderStatusBar() string {
 		// not created: <reason>"), and a long one used to drop the WHOLE right
 		// side, flash included, so a refused create said nothing at all. The
 		// hints are always there; the flash goes first, the left gets the rest.
+		//
+		// The safety badges stay beside it and the FLASH is cut instead: a
+		// status bar without [dev] or [remote …] reads exactly like one on the
+		// production daemon or this laptop, which is what makes a wrong-host
+		// action silent (dev-environment.md rule 7).
 		right = truncateToWidth(m.flashText, m.width-2)
+		if safety != "" {
+			if room := m.width - 2 - lipgloss.Width(safety) - 1; room > 0 {
+				right = truncateToWidth(m.flashText, room) + " " + safety
+			} else {
+				right = truncateToWidth(safety, m.width-2)
+			}
+		}
 		left = truncateToWidth(left, m.width-2-lipgloss.Width(right)-2)
 		gap = max(m.width-lipgloss.Width(left)-lipgloss.Width(right)-2, 0)
 		return statusBarStyle.Width(m.width).Render(left + strings.Repeat(" ", gap) + right)
@@ -9428,7 +9459,7 @@ func (m *Model) splitPane(dir SplitDir) tea.Cmd {
 		})
 		msg.ID = reqID
 		if err := m.sendForDestStrict(dest, msg); err != nil {
-			return createSendFailed(dest, reqID, err)
+			return createSendFailed(dest, tabID, reqID, false, err)
 		}
 		return nil
 	}

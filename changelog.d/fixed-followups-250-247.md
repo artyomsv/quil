@@ -64,6 +64,8 @@ headline: Stricter shared workspaces; refused creates now say why
 - **A long status-bar message is now shown, not hidden.** When a message did not fit
   beside the key hints, the status bar dropped the hints and the message together, so a
   refused create said nothing. Now the message comes first and the hints make room.
+  The `[dev]`, `[remote …]`, `[read-only]` and `[limited]` markers stay beside it; the
+  message is cut short instead.
 - **A host that is disconnected now refuses new panes at once.** When a host's link is
   down (for example, its token was revoked), Ctrl+N, Ctrl+T and the split keys on its
   projects show "pane not created: <host> is disconnected — <reason>" in the status bar,

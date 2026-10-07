@@ -2982,7 +2982,7 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 			})
 			msg.ID = reqID
 			if err := m.sendForDestStrict(tabDest, msg); err != nil {
-				return createSendFailed(tabDest, reqID, err)
+				return createSendFailed(tabDest, tabID, reqID, spec != nil, err)
 			}
 			rememberImage(m)
 			return nil
@@ -3068,7 +3068,7 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 		})
 		msg.ID = reqID
 		if err := m.sendForDestStrict(tabDest, msg); err != nil {
-			return createSendFailed(tabDest, reqID, err)
+			return createSendFailed(tabDest, tabID, reqID, spec != nil, err)
 		}
 		rememberImage(m)
 		return nil

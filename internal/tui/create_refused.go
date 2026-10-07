@@ -19,17 +19,36 @@ type createPaneRefusedMsg struct {
 }
 
 // createPaneSendFailedMsg is a create_pane whose send failed: the router's conn
-// for its destination is dead. It unwinds like a refusal, but it is a send
-// result rather than an IPC response, so its Update arm does not re-arm the
-// listen loop.
-type createPaneSendFailedMsg createPaneRefusedMsg
+// for its destination is dead, or there is none. It is a send result rather
+// than an IPC response, so its Update arm does not re-arm the listen loop.
+//
+// An ordinary create unwinds like a refusal, through its id. A worktree create
+// carries no id — its bookkeeping is keyed by tab — so it unwinds the way a
+// worktree failure does (unwindWorktreeCreate); otherwise its placeholder and
+// held pane waited out the whole worktree timeout.
+type createPaneSendFailedMsg struct {
+	dest     string
+	id       string // the ordinary create's request id; "" for a worktree create
+	tabID    string
+	worktree bool
+	text     string
+}
 
 // createSendFailed is what a create_pane send closure returns when the send
 // failed. Before it, the error was dropped and a split's placeholder waited
 // for an answer the daemon never got.
-func createSendFailed(dest, id string, err error) tea.Msg {
+func createSendFailed(dest, tabID, id string, worktree bool, err error) tea.Msg {
 	log.Printf("create pane: send to %s: %v", hostLabel(dest), err)
-	return createPaneSendFailedMsg{dest: dest, id: id, text: "cannot reach " + hostLabel(dest)}
+	return createPaneSendFailedMsg{dest: dest, id: id, tabID: tabID, worktree: worktree, text: "cannot reach " + hostLabel(dest)}
+}
+
+// applyCreatePaneSendFailed unwinds a create whose send failed and flashes it.
+func (m *Model) applyCreatePaneSendFailed(msg createPaneSendFailedMsg) {
+	if msg.worktree {
+		m.unwindWorktreeCreate(msg.tabID, msg.text)
+		return
+	}
+	m.applyCreatePaneRefused(createPaneRefusedMsg{dest: msg.dest, id: msg.id, text: msg.text})
 }
 
 // createNotDone is the prefix of a flash that says a create was refused.

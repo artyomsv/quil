@@ -597,6 +597,75 @@ func TestCreateRefused_ParkedHostRefusesTheSplitKey(t *testing.T) {
 	}
 }
 
+// A worktree create carries no request id — its bookkeeping is keyed by tab —
+// so a failed send handled as an ordinary refusal unwound nothing: the
+// placeholder (or the held replaced pane) waited out the whole worktree
+// timeout. It now unwinds the way a failed worktree add does.
+func TestCreateRefused_WorktreeFailedSendUnwinds(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		cursor int
+	}{{"split", 0}, {"replace", 2}} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _ := rawArgsModel(t, ipc.RightsFull)
+			r := NewRouter(map[string]Client{roDest: &failingConn{fakeConn: newFakeConn()}})
+			r.SetActiveDest(roDest)
+			m.client = r
+			m.dialog, m.createPaneStep, m.dialogCursor = dialogCreatePane, 3, tc.cursor
+			m.createPaneDest = roDest
+			m.selectedPlugin = "terminal"
+			m.worktreeNewBranch = "feat/x"
+			m.worktrees = worktreeState{loaded: true, repo: true, root: "/repo"}
+
+			next, cmd := m.Update(enterKey)
+			m = next.(Model)
+			tab := m.projects[0].tabs[0]
+			if m.worktreeCreates[tab.ID] == "" {
+				t.Fatal("setup: no worktree create was armed")
+			}
+			m = roUpdate(t, m, sendFailure(t, cmd))
+
+			tab = m.projects[0].tabs[0]
+			if m.worktreeCreates[tab.ID] != "" || m.worktreeReplaced[tab.ID] != nil || tab.CreatingBranch != "" {
+				t.Errorf("the worktree create is still armed: creates=%q held=%v branch=%q",
+					m.worktreeCreates[tab.ID], m.worktreeReplaced[tab.ID] != nil, tab.CreatingBranch)
+			}
+			if n := countPlaceholders(tab.Root); n != 0 || m.pendingSplit[tab.ID] != nil {
+				t.Errorf("the placeholder survived the failed send (%d)", n)
+			}
+			if tab.Root == nil || tab.Root.FindLeaf("pane-1") == nil {
+				t.Error("the pane that was split or replaced is not back in the tab")
+			}
+			if !strings.Contains(m.flashText, "worktree not created: cannot reach "+roDest) {
+				t.Errorf("flash = %q, want the failed send reported", m.flashText)
+			}
+		})
+	}
+}
+
+// A long flash crowded every badge off the status bar, [dev] and [remote …]
+// included, so a dev client read like production and a remote host like this
+// machine. The flash is cut instead.
+func TestCreateRefused_LongFlashKeepsTheSafetyBadges(t *testing.T) {
+	m, _ := rawArgsModel(t, ipc.RightsFull)
+	m.devMode = true
+	m.setFlash(`pane not created: unknown toggle "driftx" for plugin claude-code (see list_plugins)`)
+	m.flashUntil = time.Now().Add(time.Minute) // this binary's flashDuration is 10 ms
+
+	for _, width := range []int{100, 60} {
+		m.width = width
+		bar := m.renderStatusBar()
+		for _, want := range []string{"[dev]", "[remote ", "pane not created"} {
+			if !strings.Contains(bar, want) {
+				t.Errorf("width %d: status bar %q lacks %q", width, bar, want)
+			}
+		}
+		if strings.Contains(bar, "\n") {
+			t.Errorf("width %d: status bar wrapped to two rows", width)
+		}
+	}
+}
+
 // The split key's send could fail with nothing to say so; it now unwinds its
 // placeholder like the dialog's.
 func TestCreateRefused_SplitKeyFailedSendUnwinds(t *testing.T) {

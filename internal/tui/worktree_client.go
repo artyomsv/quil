@@ -414,6 +414,13 @@ func (m *Model) settleReplacedPane(tabID string, tab *TabModel, restore bool) {
 // applyCreatePaneTimeout unwinds a create that never answered, so a wedged or
 // restarted daemon cannot leave the tab holding a placeholder forever.
 func (m *Model) applyCreatePaneTimeout(tabID string) {
+	m.unwindWorktreeCreate(tabID, "timed out waiting for the worktree to be created")
+}
+
+// unwindWorktreeCreate retires tabID's worktree create that will never be
+// answered — it timed out, or its send failed — and flashes why. The
+// placeholder goes and a replaced pane is put back: nothing proved a swap.
+func (m *Model) unwindWorktreeCreate(tabID, reason string) {
 	if m.worktreeCreates[tabID] == "" {
 		return // already settled by a response
 	}
@@ -434,5 +441,5 @@ func (m *Model) applyCreatePaneTimeout(tabID string) {
 		tab.invalidateLeaves()
 	}
 	delete(m.pendingSplit, tabID)
-	m.setFlash("worktree not created: timed out waiting for the worktree to be created")
+	m.setFlash("worktree not created: " + reason)
 }

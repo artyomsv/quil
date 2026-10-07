@@ -8,6 +8,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/artyomsv/quil/internal/ipc"
 )
@@ -663,6 +664,62 @@ func TestCreateRefused_LongFlashKeepsTheSafetyBadges(t *testing.T) {
 		if strings.Contains(bar, "\n") {
 			t.Errorf("width %d: status bar wrapped to two rows", width)
 		}
+	}
+}
+
+// A long host label filled the bar on its own once the badges were kept, and
+// the flash was cut to nothing. The host is shortened first, the fixed badges
+// never, and the flash keeps flashMinCells while the bar can hold them all.
+func TestCreateRefused_LongHostLabelKeepsTheFlash(t *testing.T) {
+	m, _ := rawArgsModel(t, ipc.RightsFull)
+	long := "deploy-user@build-host-0123456789.eu-central.cluster.example.internal"
+	m.projects[0].Dest = long
+	for _, tab := range m.projects[0].tabs {
+		tab.Dest = long
+	}
+	m.devMode = true
+	m.setFlash(`pane not created: unknown toggle "driftx" for plugin claude-code (see list_plugins)`)
+	m.flashUntil = time.Now().Add(time.Minute) // this binary's flashDuration is 10 ms
+
+	for _, tc := range []struct {
+		width    int
+		minFlash string // the flash's start that has to be visible
+	}{
+		{60, "pane not created: unkno"}, // flashMinCells, the host shortened
+		{40, "pane not created"},        // the frame cannot hold 24; most of it stays
+	} {
+		m.width = tc.width
+		bar := m.renderStatusBar()
+		for _, want := range []string{tc.minFlash, "[remote ", "[dev]"} {
+			if !strings.Contains(bar, want) {
+				t.Errorf("width %d: status bar %q lacks %q", tc.width, bar, want)
+			}
+		}
+		if strings.Contains(bar, long) {
+			t.Errorf("width %d: the host label was not shortened: %q", tc.width, bar)
+		}
+		if strings.Contains(bar, "\n") {
+			t.Errorf("width %d: status bar wrapped to two rows", tc.width)
+		}
+	}
+}
+
+// fitFlash's arithmetic, at the boundary the status-bar test cannot pin
+// exactly: the flash keeps flashMinCells, the host takes the rest.
+func TestFitFlash_FlashKeepsItsMinimum(t *testing.T) {
+	flash := strings.Repeat("f", 80)
+	got := fitFlash(flash, strings.Repeat("h", 80), "[dev]", 58)
+	if w := lipgloss.Width(got); w != 58 {
+		t.Errorf("fitFlash width = %d, want 58: %q", w, got)
+	}
+	if !strings.HasPrefix(got, strings.Repeat("f", flashMinCells-1)+"…") {
+		t.Errorf("fitFlash = %q, want the flash's first %d cells", got, flashMinCells)
+	}
+	if !strings.HasSuffix(got, "…] [dev]") {
+		t.Errorf("fitFlash = %q, want the host shortened and [dev] whole", got)
+	}
+	if got := fitFlash("short", "host", "[dev]", 58); got != "short [remote host] [dev]" {
+		t.Errorf("fitFlash with room = %q", got)
 	}
 }
 

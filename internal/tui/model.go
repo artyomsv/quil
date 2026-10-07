@@ -8421,6 +8421,44 @@ func joinBadge(badge, rest string) string {
 	return badge + " " + rest
 }
 
+// flashMinCells is the width a flash keeps beside the badges when the status
+// bar overflows (or the whole flash, when it is shorter).
+const flashMinCells = 24
+
+// fitFlash is the status bar's right side when a flash does not fit beside the
+// hints: the flash, then the [remote host] badge (remoteHost "" = none), then
+// the fixed badges, in avail cells.
+//
+// The badges stay and the FLASH is cut: a bar without [dev] or [remote …]
+// reads exactly like one on the production daemon or this laptop, which is
+// what makes a wrong-host action silent (dev-environment.md rule 7). But the
+// flash keeps flashMinCells, or a long host name would leave nothing of it;
+// the host is shortened first, and the short fixed badges never are.
+func fitFlash(flash, remoteHost, fixedBadges string, avail int) string {
+	badgesW := lipgloss.Width(fixedBadges)
+	if fixedBadges != "" {
+		badgesW++ // the space before them
+	}
+	remote := ""
+	if remoteHost != "" {
+		const frame = len("[remote ") + len("]") + 1 // and the space after the flash
+		hostRoom := avail - min(lipgloss.Width(flash), flashMinCells) - badgesW - frame
+		remote = "[remote " + truncateToWidth(remoteHost, max(hostRoom, 1)) + "]"
+	}
+	badges := joinBadge(remote, fixedBadges)
+	if remote == "" {
+		badges = fixedBadges
+	}
+	if badges == "" {
+		return truncateToWidth(flash, avail)
+	}
+	room := avail - lipgloss.Width(badges) - 1
+	if room <= 0 {
+		return truncateToWidth(badges, avail)
+	}
+	return truncateToWidth(flash, room) + " " + badges
+}
+
 func (m Model) renderStatusBar() string {
 	// Left side: pane info
 	left := "quil"
@@ -8506,22 +8544,23 @@ func (m Model) renderStatusBar() string {
 			right = seg + " | " + right
 		}
 	}
-	// safety collects the badges that say WHERE and HOW this client acts
-	// ([remote …], [read-only], [limited], [dev]) in the order they render.
-	// They survive a flash that crowds out the rest of the right side; see
-	// the fit below.
-	var safety string
+	// fixedBadges collects the short badges that say HOW this client acts
+	// ([read-only], [limited], [dev]) in the order they render, and
+	// remoteHost the host of the [remote …] badge that says WHERE. Both
+	// survive a flash that crowds out the rest of the right side; see
+	// fitFlash.
+	var fixedBadges, remoteHost string
 	if m.devMode {
 		right = "[dev] " + right
-		safety = "[dev]"
+		fixedBadges = "[dev]"
 	}
 	if m.daemonLimited[m.activeDest()] {
 		right = "[limited] " + right
-		safety = joinBadge("[limited]", safety)
+		fixedBadges = joinBadge("[limited]", fixedBadges)
 	}
 	if m.destReadOnly(m.rightsDest()) {
 		right = "[read-only] " + right
-		safety = joinBadge("[read-only]", safety)
+		fixedBadges = joinBadge("[read-only]", fixedBadges)
 	}
 	// Multi-client sync (§4.3): the role marker sits beside [dev], in the same
 	// style, because it says something about how THIS process relates to the
@@ -8547,9 +8586,8 @@ func (m Model) renderStatusBar() string {
 	// local daemon" for "", so testing its output for emptiness would put a
 	// "[remote …]" badge on every local session.
 	if dest := m.activeDest(); dest != "" {
-		badge := "[remote " + m.linkHost(dest) + "]"
-		right = badge + " " + right
-		safety = joinBadge(badge, safety)
+		remoteHost = m.linkHost(dest)
+		right = "[remote " + remoteHost + "] " + right
 	}
 	if count := m.notifications.Count(); count > 0 && !m.notifications.visible {
 		right = fmt.Sprintf("[%d events] ", count) + right
@@ -8567,18 +8605,7 @@ func (m Model) renderStatusBar() string {
 		// side, flash included, so a refused create said nothing at all. The
 		// hints are always there; the flash goes first, the left gets the rest.
 		//
-		// The safety badges stay beside it and the FLASH is cut instead: a
-		// status bar without [dev] or [remote …] reads exactly like one on the
-		// production daemon or this laptop, which is what makes a wrong-host
-		// action silent (dev-environment.md rule 7).
-		right = truncateToWidth(m.flashText, m.width-2)
-		if safety != "" {
-			if room := m.width - 2 - lipgloss.Width(safety) - 1; room > 0 {
-				right = truncateToWidth(m.flashText, room) + " " + safety
-			} else {
-				right = truncateToWidth(safety, m.width-2)
-			}
-		}
+		right = fitFlash(m.flashText, remoteHost, fixedBadges, m.width-2)
 		left = truncateToWidth(left, m.width-2-lipgloss.Width(right)-2)
 		gap = max(m.width-lipgloss.Width(left)-lipgloss.Width(right)-2, 0)
 		return statusBarStyle.Width(m.width).Render(left + strings.Repeat(" ", gap) + right)

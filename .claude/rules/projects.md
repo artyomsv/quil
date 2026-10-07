@@ -577,8 +577,13 @@ evening. Hence: the placeholder is named `(no projects)` rather than `Default`
 (which is also what a real daemon calls its bootstrap project, making the two
 indistinguishable), rename and destroy are greyed on it, and a create aimed at
 such a host is refused in the form rather than closing on a project that never
-appears. Disconnect stays enabled — it is entirely client-side and is what the
-user actually wants there.
+appears. Disconnect stays enabled for an ADDITIONAL host — it is entirely
+client-side and is what the user actually wants there. The STARTING host
+(`Model.homeDest`, the `--connect`/`--remote` target) is the exception:
+`canDisconnect` refuses it, so the context menu and the palette grey the row
+and `confirmDisconnectHost` flashes instead of opening the confirm. It stays
+until the window quits — disconnecting it removed the only conn and every
+project, and the window sat on "Connecting to quild…" for good.
 
 ## The project form
 

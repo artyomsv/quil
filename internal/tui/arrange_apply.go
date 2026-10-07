@@ -88,8 +88,8 @@ func (m *Model) applyTabArrangement(tab *TabModel, newRoot *LayoutNode, active *
 	}
 	// A viewer's trees are the daemon's: its layout write would be dropped,
 	// and the tree it kept would be marked dirty and never converge.
-	if m.destReadOnly(tab.Dest) {
-		return m.refuseReadOnly()
+	if m.destRefusal(tab.Dest) != "" {
+		return m.refuseDest(tab.Dest)
 	}
 	if m.tabLayoutBusy(tab) {
 		m.setErrorFlash(tabBusyFlash)

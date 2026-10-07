@@ -646,7 +646,7 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 		})
 	}
 
-	if m.destReadOnly(m.rightsDest()) {
+	if m.destRefusal(m.rightsDest()) != "" {
 		greyReadOnlyPalette(cmds)
 	}
 	return cmds
@@ -1277,8 +1277,8 @@ func (m Model) executePaletteCommand(c paletteCommand) (tea.Model, tea.Cmd) {
 		return m, tea.ClearScreen
 	case palActProcesses:
 		// The report it asks for is act-class; a viewer would wait on nothing.
-		if m.destReadOnly(m.rightsDest()) {
-			cmd := m.refuseReadOnly()
+		if m.destRefusal(m.rightsDest()) != "" {
+			cmd := m.refuseDest(m.rightsDest())
 			return m, cmd
 		}
 		m = m.openProcessesDialog()

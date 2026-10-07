@@ -237,8 +237,8 @@ func (m *Model) submitNewProject(name, rootDir string) tea.Cmd {
 	}
 	// Create, adopt and fold all change that host's projects, which a
 	// read-only connection cannot do. Said in the form, where the user is.
-	if m.destReadOnly(m.projectFormDest) {
-		m.setFormError(readOnlyFlash)
+	if why := m.destRefusal(m.projectFormDest); why != "" {
+		m.setFormError(why)
 		return nil
 	}
 	// A daemon with no project support accepts this message and does nothing
@@ -488,6 +488,11 @@ func (m *Model) sendUpdateProject(id, name, rootDir string, adoptBootstrap bool)
 	// the wrong one still takes its tabs. Excluding the project itself keeps a
 	// rename that only changes the root directory working.
 	dest := m.destOfProject(id)
+	// Said in the form, like the read-only refusal of a create.
+	if why := m.linkDownReason(dest); why != "" {
+		m.setFormError(why)
+		return nil
+	}
 	if existing := m.projectNamedOnDest(name, dest, id); existing != nil {
 		m.setFormError(sanitizeRemoteText(name) + " already exists on " +
 			sanitizeRemoteText(hostLabel(dest)))
@@ -568,8 +573,8 @@ func (m Model) beginProjectRename(id string) (tea.Model, tea.Cmd) {
 	if p == nil {
 		return m, nil
 	}
-	if m.destReadOnly(p.Dest) {
-		cmd := m.refuseReadOnly()
+	if m.destRefusal(p.Dest) != "" {
+		cmd := m.refuseDest(p.Dest)
 		return m, cmd
 	}
 	m.dialog = dialogProjectRename

@@ -77,8 +77,8 @@ func (m *Model) finishProjectDrag(x, y int) tea.Cmd {
 	p := m.projects[idx]
 	// The press never arms a drag for a read-only destination's project; this
 	// is the second line, ahead of any membership change.
-	if m.destReadOnly(p.Dest) {
-		return m.refuseReadOnly()
+	if m.destRefusal(p.Dest) != "" {
+		return m.refuseDest(p.Dest)
 	}
 	// The same rule the drop-target highlight was painted from, applied to the
 	// release row — so the green row is exactly what the release does.
@@ -165,8 +165,8 @@ func (m *Model) openProjectGroupList() tea.Cmd {
 // or not at all.
 func (m *Model) moveProjectToGroup(dest, id, name string) tea.Cmd {
 	// A read-only destination's project groups are its daemon's.
-	if m.destReadOnly(dest) {
-		return m.refuseReadOnly()
+	if m.destRefusal(dest) != "" {
+		return m.refuseDest(dest)
 	}
 	g := m.groups.indexOf(name)
 	if g < 0 || !m.groups.assign(g, dest, id) {
@@ -177,8 +177,8 @@ func (m *Model) moveProjectToGroup(dest, id, name string) tea.Cmd {
 
 // ungroupProject takes (dest, id) out of its group.
 func (m *Model) ungroupProject(dest, id string) tea.Cmd {
-	if m.destReadOnly(dest) {
-		return m.refuseReadOnly()
+	if m.destRefusal(dest) != "" {
+		return m.refuseDest(dest)
 	}
 	if !m.groups.unassign(dest, id) {
 		return nil

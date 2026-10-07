@@ -77,9 +77,9 @@ const (
 
 // readOnlyGreyedItems are the context-menu rows that change the workspace, or
 // ask the daemon for something only an acting client may — greyed on a
-// read-only destination, and refused by the executors as well. Focus mode and
-// notes stay (local view; a shared note opens view-only), as does Disconnect
-// host (client-side only).
+// read-only destination or one whose link is down (Model.destRefusal), and
+// refused by the executors as well. Focus mode and notes stay (local view; a
+// shared note opens view-only), as does Disconnect host (client-side only).
 var readOnlyGreyedItems = map[ctxMenuAction]bool{
 	ctxActRename: true, ctxActClose: true, ctxActRenameTab: true,
 	ctxActRenameProject: true, ctxActDestroyProject: true,
@@ -480,7 +480,7 @@ func (m *Model) openCtxMenu(pane *PaneModel, anchorX, anchorY int) {
 	}
 	// Greyed before firstEnabled, so the cursor never starts on a dead row.
 	// The pane menu always targets a pane of the active tab.
-	if m.destReadOnly(m.rightsDest()) {
+	if m.destRefusal(m.rightsDest()) != "" {
 		greyReadOnlyItems(s.items)
 	}
 	s.cursor = firstEnabled(s.items)
@@ -575,7 +575,7 @@ func (m *Model) openProjectCtxMenu(p *ProjectModel, anchorX, anchorY int) {
 		cursor:      -1,
 		items:       buildProjectCtxMenuItems(p.Dest != "", !m.projectActionable(p)),
 	}
-	if m.destReadOnly(p.Dest) {
+	if m.destRefusal(p.Dest) != "" {
 		greyReadOnlyItems(s.items)
 	}
 	// The host this client was started against (--connect, --remote) holds
@@ -769,7 +769,7 @@ func (m *Model) openTabCtxMenu(tab *TabModel, anchorX, anchorY int) {
 		cursor: -1,
 		items:  m.buildTabCtxMenuItems(tab),
 	}
-	if m.destReadOnly(tab.Dest) {
+	if m.destRefusal(tab.Dest) != "" {
 		greyReadOnlyItems(s.items)
 	}
 	s.cursor = firstEnabled(s.items)
@@ -881,9 +881,9 @@ func (m Model) executeTabCtxMenuItem(tabID string, item ctxMenuItem) (tea.Model,
 	tab := proj.tabs[idx]
 	// The rows are greyed for a viewer already; this is the second line, for
 	// a row a re-populated list enabled after the menu opened.
-	if readOnlyGreyedItems[item.id] && m.destReadOnly(tab.Dest) {
+	if readOnlyGreyedItems[item.id] && m.destRefusal(tab.Dest) != "" {
 		m.closeCtxMenu()
-		cmd := m.refuseReadOnly()
+		cmd := m.refuseDest(tab.Dest)
 		return m, cmd
 	}
 	switch item.id {
@@ -1006,9 +1006,9 @@ func (m Model) executeCtxMenuItem(item ctxMenuItem) (tea.Model, tea.Cmd) {
 		dest := m.ctxMenu.projectDest
 		// Greyed for a read-only destination's project already; refused here
 		// too, for a row a re-populated list enabled after the menu opened.
-		if item.enabled && readOnlyGreyedItems[item.id] && m.destReadOnly(dest) {
+		if item.enabled && readOnlyGreyedItems[item.id] && m.destRefusal(dest) != "" {
 			m.closeCtxMenu()
-			cmd := m.refuseReadOnly()
+			cmd := m.refuseDest(dest)
 			return m, cmd
 		}
 		// Move to group… re-populates the menu in place, so it is the one row
@@ -1097,8 +1097,8 @@ func (m Model) executeCtxMenuItem(item ctxMenuItem) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	// Greyed for a viewer already; refused here too, before the focus sync.
-	if readOnlyGreyedItems[item.id] && m.destReadOnly(proj.Dest) {
-		cmd := m.refuseReadOnly()
+	if readOnlyGreyedItems[item.id] && m.destRefusal(proj.Dest) != "" {
+		cmd := m.refuseDest(proj.Dest)
 		return m, cmd
 	}
 	// Sync the Active bool alongside ActivePane — mirrors the mouse-release

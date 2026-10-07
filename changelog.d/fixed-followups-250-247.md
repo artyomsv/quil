@@ -80,3 +80,10 @@ headline: Stricter shared workspaces; refused creates now say why
   stays at least 6 seconds, longer for a long message (up to 15 seconds). A routine
   message, such as an update check or another window's tab switch, no longer replaces
   it before then. A newer error still does.
+- **A disconnected host now refuses every change, not only new panes.** While a host's
+  link is down, the pane, tab and project menus grey out what needs that host: rename,
+  close, restart, mute, attention and deletion marks, moves, tab colours and group
+  changes. The keys and the palette refuse the same actions and say
+  "<host> is disconnected — <reason>". Before, these changes were sent into the dead
+  link and lost, while the window showed them as done. Looking around, focus, scrolling
+  and copying still work.

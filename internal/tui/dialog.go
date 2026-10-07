@@ -914,8 +914,8 @@ func (m Model) handleAboutKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.dialog = dialogPlugins
 			m.dialogCursor = 0
 		case 3:
-			if m.destReadOnly(m.rightsDest()) {
-				cmd := m.refuseReadOnly()
+			if m.destRefusal(m.rightsDest()) != "" {
+				cmd := m.refuseDest(m.rightsDest())
 				return m, cmd
 			}
 			m = m.openProcessesDialog()
@@ -1317,6 +1317,11 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// daemon's MsgRestartPaneResp.
 		if kind == confirmKindRestartPane {
 			m.dialog = dialogNone
+			// The link can go down while the confirm is open.
+			if dest := m.destOfPane(id); m.destRefusal(dest) != "" {
+				cmd := m.refuseDest(dest)
+				return m, cmd
+			}
 			if m.client != nil {
 				req, reqErr := ipc.NewMessage(ipc.MsgRestartPaneReq, ipc.RestartPaneReqPayload{PaneID: id})
 				if reqErr != nil {
@@ -1375,6 +1380,10 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 					log.Printf("destroy project %s: refused, its host is offline", id)
 					return m, nil
 				}
+				if dest := m.destOfProject(id); m.destRefusal(dest) != "" {
+					cmd := m.refuseDest(dest)
+					return m, cmd
+				}
 				req, reqErr := ipc.NewMessage(ipc.MsgDestroyProject, ipc.DestroyProjectPayload{ProjectID: id})
 				if reqErr != nil {
 					log.Printf("destroy project %s: marshal: %v", id, reqErr)
@@ -1423,6 +1432,13 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.closeRequested[closeKey(dest, id)] = true
 		case "tab":
 			dest = m.destOfTab(id)
+		}
+		// The link can go down while the confirm is open: the destroy would
+		// go into the dead conn and the pane or tab would stay.
+		if m.destRefusal(dest) != "" {
+			delete(m.closeRequested, closeKey(dest, id))
+			cmd := m.refuseDest(dest)
+			return m, cmd
 		}
 		return m, func() tea.Msg {
 			switch kind {

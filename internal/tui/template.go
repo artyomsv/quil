@@ -50,8 +50,8 @@ func templateEditorRows(height int) int {
 }
 
 func (m Model) openNewTemplate() (tea.Model, tea.Cmd) {
-	if m.destReadOnly(m.rightsDest()) {
-		cmd := m.refuseReadOnly()
+	if m.destRefusal(m.rightsDest()) != "" {
+		cmd := m.refuseDest(m.rightsDest())
 		return m, cmd
 	}
 	f := templateDialogState{dest: m.activeDest()}

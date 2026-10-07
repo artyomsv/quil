@@ -474,8 +474,8 @@ func (m *Model) moveActiveTab(delta int) tea.Cmd {
 		return nil
 	}
 	// A viewer's tab order is the daemon's.
-	if m.destReadOnly(tabs[from].Dest) {
-		return m.refuseReadOnly()
+	if m.destRefusal(tabs[from].Dest) != "" {
+		return m.refuseDest(tabs[from].Dest)
 	}
 	tabID := tabs[from].ID
 	if !m.moveTab(from, to) {
@@ -651,8 +651,8 @@ func (m *Model) moveProjectWithinSection(p *ProjectModel, toPos int) (tea.Cmd, b
 		return nil, false
 	}
 	// A read-only destination's project order is its daemon's.
-	if m.destReadOnly(p.Dest) {
-		return m.refuseReadOnly(), false
+	if m.destRefusal(p.Dest) != "" {
+		return m.refuseDest(p.Dest), false
 	}
 	section := m.sectionOf(from)
 	if toPos < 0 || toPos >= len(section) {
@@ -813,9 +813,9 @@ func (m *Model) trackSidebarTabDrag(x, y int) tea.Cmd {
 	// second line, for a drag armed before the rights turned read-only (a
 	// reconnect re-applies them) — the reorder would be dropped by the router
 	// and leave this client's order diverged from its daemon's.
-	if m.destReadOnly(tabs[from].Dest) {
+	if m.destRefusal(tabs[from].Dest) != "" {
 		m.clearDragState()
-		return m.refuseReadOnly()
+		return m.refuseDest(tabs[from].Dest)
 	}
 	start, size := tabGroupSpanIn(rows, row.tabIdx)
 	if size == 0 {

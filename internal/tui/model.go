@@ -1501,6 +1501,29 @@ func (m *Model) refuseReadOnly() tea.Cmd {
 	return m.flashCmd()
 }
 
+// destRefusal is why an action that changes dest's workspace cannot run
+// now: a read-only token, or a link that is down (linkDownReason). "" when
+// it can. It is the ONE gate the workspace actions share — the context menus
+// grey their rows on it, and the executors refuse on it.
+//
+// The link half exists because a parked link keeps its dead conn in the
+// router: a rename, a mute, an attention mark or a group move sent there
+// went nowhere, and the local copy showed a change no daemon ever made
+// (manual retest, PR #256). Navigation, focus, scrolling and copying are
+// this client's own and never ask.
+func (m Model) destRefusal(dest string) string {
+	if m.destReadOnly(dest) {
+		return readOnlyFlash
+	}
+	return m.linkDownReason(dest)
+}
+
+// refuseDest flashes destRefusal(dest).
+func (m *Model) refuseDest(dest string) tea.Cmd {
+	m.setErrorFlash(m.destRefusal(dest))
+	return m.flashCmd()
+}
+
 // noAdminFlash is what a daemon-wide action says on a connection whose token
 // is not full: read-only and standard tokens both lack it.
 const noAdminFlash = "this connection's token lacks full rights — that action is disabled"
@@ -2399,13 +2422,13 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 					// daemon's, and a viewer cannot change them.
 					switch kind {
 					case sidebarRowProject:
-						if idx >= 0 && idx < len(m.projects) && !m.destReadOnly(m.projects[idx].Dest) {
+						if idx >= 0 && idx < len(m.projects) && m.destRefusal(m.projects[idx].Dest) == "" {
 							m.projectDragging = true
 							m.projectDragKey = groupMember{Dest: m.projects[idx].Dest, ID: m.projects[idx].ID}
 							m.projectDragPressY = msg.Y
 						}
 					case sidebarRowTab:
-						if !m.destReadOnly(m.rightsDest()) {
+						if m.destRefusal(m.rightsDest()) == "" {
 							m.sidebarTabDragging = true
 							m.sidebarTabDragIdx = idx
 						}
@@ -2557,7 +2580,7 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 				m.clearDragState()
 				if idx := m.hitTestTab(msg.X); idx >= 0 {
 					// A viewer's tab order is the daemon's: no reorder drag.
-					if !m.destReadOnly(m.rightsDest()) {
+					if m.destRefusal(m.rightsDest()) == "" {
 						m.tabDragFromIdx = idx
 					}
 					// Checked BEFORE switchTab moves the active tab: manual
@@ -2631,9 +2654,9 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 					// A viewer shows the daemon's split ratios: the press is
 					// refused rather than arming a drag whose layout write
 					// would be dropped, leaving this tree diverged for good.
-					if m.destReadOnly(m.rightsDest()) {
+					if m.destRefusal(m.rightsDest()) != "" {
 						m.clearDragState()
-						cmd := m.refuseReadOnly()
+						cmd := m.refuseDest(m.rightsDest())
 						return m, cmd
 					}
 					m.clearDragState()
@@ -2738,9 +2761,9 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 				if to := dragSlot(from, span.index, x, span.start, span.width); to != from {
 					// Same second line as trackSidebarTabDrag: a drag armed
 					// before the rights turned read-only reorders nothing.
-					if m.destReadOnly(m.curTabs()[from].Dest) {
+					if m.destRefusal(m.curTabs()[from].Dest) != "" {
 						m.clearDragState()
-						cmd := m.refuseReadOnly()
+						cmd := m.refuseDest(m.curTabs()[from].Dest)
 						return m, cmd
 					}
 					tabID := m.curTabs()[from].ID
@@ -4745,8 +4768,8 @@ func (m Model) toggleNotesMode() (tea.Model, tea.Cmd) {
 func (m Model) openClosePaneConfirm() (tea.Model, tea.Cmd) {
 	// Two statements: Go does not order the operand m against the call in
 	// `return m, m.refuseReadOnly()`, so the flash could miss the copy.
-	if m.destReadOnly(m.rightsDest()) {
-		cmd := m.refuseReadOnly()
+	if m.destRefusal(m.rightsDest()) != "" {
+		cmd := m.refuseDest(m.rightsDest())
 		return m, cmd
 	}
 	if tab := m.activeTabModel(); tab != nil {
@@ -4771,8 +4794,8 @@ func (m Model) openClosePaneConfirm() (tea.Model, tea.Cmd) {
 // openRestartPaneConfirm opens the restart confirm dialog for the active
 // pane. Extracted from the kb.RestartPane case; shared with the context menu.
 func (m Model) openRestartPaneConfirm() (tea.Model, tea.Cmd) {
-	if m.destReadOnly(m.rightsDest()) {
-		cmd := m.refuseReadOnly()
+	if m.destRefusal(m.rightsDest()) != "" {
+		cmd := m.refuseDest(m.rightsDest())
 		return m, cmd
 	}
 	if tab := m.activeTabModel(); tab != nil {
@@ -4797,8 +4820,8 @@ func (m Model) openRestartPaneConfirm() (tea.Model, tea.Cmd) {
 // beginPaneRename enters inline pane-rename mode for the active pane.
 // Extracted from the kb.RenamePane case; shared with the context menu.
 func (m Model) beginPaneRename() (tea.Model, tea.Cmd) {
-	if m.destReadOnly(m.rightsDest()) {
-		cmd := m.refuseReadOnly()
+	if m.destRefusal(m.rightsDest()) != "" {
+		cmd := m.refuseDest(m.rightsDest())
 		return m, cmd
 	}
 	if tab := m.activeTabModel(); tab != nil {
@@ -4867,8 +4890,8 @@ func (m Model) openHistoryForActivePane() (tea.Model, tea.Cmd) {
 	// Input history is disclosure beyond the workspace, which only an acting
 	// client may ask for; the request would be dropped and the dialog would
 	// wait on an answer that never comes.
-	if m.destReadOnly(m.rightsDest()) {
-		cmd := m.refuseReadOnly()
+	if m.destRefusal(m.rightsDest()) != "" {
+		cmd := m.refuseDest(m.rightsDest())
 		return m, cmd
 	}
 	tab := m.activeTabModel()
@@ -4895,8 +4918,8 @@ func (m Model) openHistoryForActivePane() (tea.Model, tea.Cmd) {
 // openCloseTabConfirm opens the close-tab confirm for the active tab. Extracted
 // from the kb.CloseTab case; shared with the command palette.
 func (m Model) openCloseTabConfirm() (tea.Model, tea.Cmd) {
-	if m.destReadOnly(m.rightsDest()) {
-		cmd := m.refuseReadOnly()
+	if m.destRefusal(m.rightsDest()) != "" {
+		cmd := m.refuseDest(m.rightsDest())
 		return m, cmd
 	}
 	if tab := m.activeTabModel(); tab != nil {
@@ -4918,8 +4941,8 @@ func (m Model) openCloseTabConfirm() (tea.Model, tea.Cmd) {
 // beginTabRename enters inline tab-rename mode for the active tab. Extracted
 // from the kb.RenameTab case; shared with the command palette.
 func (m Model) beginTabRename() (tea.Model, tea.Cmd) {
-	if m.destReadOnly(m.rightsDest()) {
-		cmd := m.refuseReadOnly()
+	if m.destRefusal(m.rightsDest()) != "" {
+		cmd := m.refuseDest(m.rightsDest())
 		return m, cmd
 	}
 	if tab := m.activeTabModel(); tab != nil {
@@ -6479,6 +6502,11 @@ func (m Model) handleRenameKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		name := strings.TrimSpace(m.renameInput)
 		if name != "" {
 			if tab := m.activeTabModel(); tab != nil {
+				// The link can go down while the name is typed; the local
+				// name would show a rename no daemon made.
+				if m.destRefusal(tab.Dest) != "" {
+					return m, tea.Batch(tea.ClearScreen, m.refuseDest(tab.Dest))
+				}
 				tab.Name = name
 				return m, tea.Batch(tea.ClearScreen, m.updateTab(tab.ID, name, tab.Color))
 			}
@@ -6521,6 +6549,10 @@ func (m Model) handlePaneRenameKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if name != "" {
 			if tab := m.activeTabModel(); tab != nil {
 				if pane := tab.ActivePaneModel(); pane != nil {
+					// See the tab rename: refused, not renamed locally.
+					if m.destRefusal(tab.Dest) != "" {
+						return m, m.refuseDest(tab.Dest)
+					}
 					pane.Name = name
 					return m, m.updatePane(pane.ID, name)
 				}
@@ -9631,8 +9663,8 @@ func (m *Model) cycleTabColor() tea.Cmd {
 	}
 	// Before the optimistic local write below: a viewer's colour would be
 	// one the daemon never hears of.
-	if m.destReadOnly(tab.Dest) {
-		return m.refuseReadOnly()
+	if m.destRefusal(tab.Dest) != "" {
+		return m.refuseDest(tab.Dest)
 	}
 
 	// Find current color index and cycle to next
@@ -10773,8 +10805,8 @@ func (m Model) clientGeometryCmd() tea.Cmd {
 // broadcast is what tells it whether the request took.
 // takeControl is the key and palette entry point: a viewer cannot be master.
 func (m *Model) takeControl() tea.Cmd {
-	if m.destReadOnly(m.rightsDest()) {
-		return m.refuseReadOnly()
+	if m.destRefusal(m.rightsDest()) != "" {
+		return m.refuseDest(m.rightsDest())
 	}
 	return m.sendTakeControl(m.activeDest())
 }
@@ -10888,8 +10920,8 @@ func (m *Model) toggleActivePaneMute() tea.Cmd {
 	if tab == nil {
 		return nil
 	}
-	if m.destReadOnly(tab.Dest) {
-		return m.refuseReadOnly()
+	if m.destRefusal(tab.Dest) != "" {
+		return m.refuseDest(tab.Dest)
 	}
 	pane := tab.ActivePaneModel()
 	if pane == nil {
@@ -10995,8 +11027,8 @@ func (m *Model) toggleActivePaneEager() tea.Cmd {
 	if tab == nil {
 		return nil
 	}
-	if m.destReadOnly(tab.Dest) {
-		return m.refuseReadOnly()
+	if m.destRefusal(tab.Dest) != "" {
+		return m.refuseDest(tab.Dest)
 	}
 	pane := tab.ActivePaneModel()
 	if pane == nil {

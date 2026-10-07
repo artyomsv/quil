@@ -8718,7 +8718,10 @@ func (m *Model) setErrorFlash(text string) {
 // binary's short value shortens it too.
 func errorFlashTTL(text string) time.Duration {
 	d := 2*flashDuration + time.Duration(lipgloss.Width(text))*flashDuration/100
-	return min(d, 5*flashDuration)
+	if limit := 5 * flashDuration; d > limit {
+		return limit
+	}
+	return d
 }
 
 // errorFlashLive reports whether an error flash is on screen.

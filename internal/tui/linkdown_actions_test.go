@@ -52,23 +52,32 @@ func TestLinkDown_MenusGreyDaemonActions(t *testing.T) {
 	assertCtxRows(t, m.ctxMenu.items, true, ctxActDisconnectHost)
 }
 
-// A menu opened while the link was up keeps its rows; the executor refuses
-// a row chosen after the link went down, and nothing is sent.
-func TestLinkDown_MenuOpenedBeforeTheParkRefuses(t *testing.T) {
+// The greyed rows are inert, and the keys for the same actions refuse with
+// the reason. Nothing reaches the parked link. (A menu that was open when the
+// link dropped is closed by the loss itself; see handleLinkLost.)
+func TestLinkDown_RowsAndKeysSendNothing(t *testing.T) {
+	m, conn := rawArgsModel(t, ipc.RightsFull)
+	m = parkRevoked(t, m)
+	clearSent(conn)
+
 	for _, act := range []ctxMenuAction{ctxActAttention, ctxActMute, ctxActMarkDeletion} {
-		m, conn := rawArgsModel(t, ipc.RightsFull)
 		m = roUpdate(t, m, tea.KeyPressMsg{Code: 'a', Mod: tea.ModAlt})
 		m.ctxMenu.cursor = ctxItemIndex(t, m.ctxMenu.items, act)
-		m = parkRevoked(t, m)
-		clearSent(conn)
-
 		m = roUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
-
-		if n := countSent(conn, ipc.MsgUpdatePane); n != 0 {
-			t.Errorf("row %d: %d update_pane sent into the parked link", act, n)
+		if m.ctxMenu.open() {
+			m = roUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
 		}
-		assertLinkDownFlash(t, m, "menu row")
 	}
+	if n := countSent(conn, ipc.MsgUpdatePane); n != 0 {
+		t.Errorf("%d update_pane sent from greyed menu rows", n)
+	}
+
+	// Alt+M, the mute key.
+	m = roUpdate(t, m, tea.KeyPressMsg{Code: 'm', Mod: tea.ModAlt})
+	if n := countSent(conn, ipc.MsgUpdatePane); n != 0 {
+		t.Errorf("%d update_pane sent by the mute key", n)
+	}
+	assertLinkDownFlash(t, m, "mute key")
 }
 
 // Alt+F2 on a parked host opens no rename; a rename typed while the link was
@@ -108,36 +117,37 @@ func TestLinkDown_RenameRefused(t *testing.T) {
 	assertLinkDownFlash(t, m, "Alt+F2")
 }
 
-// The sidebar's "Move to group…" moved a parked host's project locally and
-// sent the change into the dead conn. The list opened before the park, so
-// its row is still enabled: the move itself refuses.
-func TestLinkDown_GroupMoveRefused(t *testing.T) {
-	m, _ := rawArgsModel(t, ipc.RightsFull)
-	m.groups = projectGroups{Groups: []projectGroup{
-		{Name: "G", Members: []groupMember{{Dest: roDest, ID: "proj-1"}}},
-		{Name: "H"},
-	}}
+// Dragging a parked host's project onto a group header in the sidebar moved
+// it locally and sent the change into the dead conn. The press no longer arms
+// the drag, so the release changes nothing and sends nothing.
+func TestLinkDown_SidebarGroupDragRefused(t *testing.T) {
+	m, conn := rawArgsModel(t, ipc.RightsFull)
+	m.groups = projectGroups{Groups: []projectGroup{{Name: "H"}}}
 	m.sidebarOpen = true
 	m = roUpdate(t, m, tea.WindowSizeMsg{Width: 172, Height: 48})
+	m = parkRevoked(t, m)
+	clearSent(conn)
 
-	m = roUpdate(t, m, tea.MouseClickMsg{X: 1, Y: sidebarRowY(t, m, sidebarRowProject), Button: tea.MouseRight})
-	m.ctxMenu.cursor = ctxItemIndex(t, m.ctxMenu.items, ctxActGroupList)
-	m = roUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
-	found := false
-	for i, it := range m.ctxMenu.items {
-		if it.id == ctxActSetGroup && it.groupName == "H" {
-			m.ctxMenu.cursor, found = i, true
+	hy := -1
+	for y, r := range m.sidebarVisibleRows(m.projectSidebarWidth(), m.sidebarContentHeight()) {
+		if r.kind == sidebarRowGroup && r.inGroup && r.group == 0 {
+			hy = y
 		}
 	}
-	if !found {
-		t.Fatal("setup: the group list did not open")
+	if hy < 0 {
+		t.Fatal("setup: no header row for group H")
 	}
-	m = parkRevoked(t, m)
+	py := sidebarRowY(t, m, sidebarRowProject)
+	m = roUpdate(t, m,
+		tea.MouseClickMsg{X: 1, Y: py, Button: tea.MouseLeft},
+		tea.MouseMotionMsg{X: 1, Y: hy, Button: tea.MouseLeft},
+		tea.MouseReleaseMsg{X: 1, Y: hy, Button: tea.MouseLeft},
+	)
 
-	m = roUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
-
-	if g := m.groups.groupOf(roDest, "proj-1"); g != 0 {
-		t.Errorf("the parked host's project moved to group %d, want it left in G", g)
+	if g := m.groups.groupOf(roDest, "proj-1"); g >= 0 {
+		t.Errorf("the parked host's project joined group %d", g)
 	}
-	assertLinkDownFlash(t, m, "group move")
+	if n := countSent(conn, ipc.MsgSetProjectGroup); n != 0 {
+		t.Errorf("%d set_project_group sent into the parked link", n)
+	}
 }

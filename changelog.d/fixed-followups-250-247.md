@@ -87,3 +87,8 @@ headline: Stricter shared workspaces; refused creates now say why
   "<host> is disconnected — <reason>". Before, these changes were sent into the dead
   link and lost, while the window showed them as done. Looking around, focus, scrolling
   and copying still work.
+- **An invalid worktree branch name keeps its error in view.** In the new-pane dialog,
+  a name such as `bad..name` showed its error only while you typed in the field. The
+  error now stays under the field after you move on, and Continue takes you back to
+  the name field with the reason, instead of doing nothing. Nothing is created until
+  the name is valid.

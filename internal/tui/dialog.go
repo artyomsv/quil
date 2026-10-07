@@ -4763,6 +4763,12 @@ func (m Model) moveSetupCursor(p *plugin.PanePlugin, delta int) (tea.Model, tea.
 	if n <= 0 {
 		return m, nil
 	}
+	// Leaving the worktree field with a new branch name checks it, so a name
+	// that was never Entered shows its error too. The unfocused row keeps
+	// drawing it (renderSetupWorktreeField) while the name is invalid.
+	if kind, _ := m.setupFieldKind(p, m.setupFieldCursor); kind == "worktree" && m.worktreeNewBranch != "" {
+		m.worktreeErr = m.worktrees.validateNewBranch(m.worktreeNewBranch)
+	}
 	m.setupFieldCursor = ((m.setupFieldCursor+delta)%n + n) % n
 	// Sequenced deliberately rather than inlined into the return: the call has
 	// a pointer receiver and mutates the same `m` being returned, and Go does
@@ -5282,7 +5288,14 @@ func (m Model) submitSetupDialog(p *plugin.PanePlugin) (tea.Model, tea.Cmd) {
 		// last point before the pane is created.
 		if m.worktreeNewBranch != "" {
 			if msg := m.worktrees.validateNewBranch(m.worktreeNewBranch); msg != "" {
+				// Back to the name, with the field open and the reason
+				// under it: the submit used to store the message and return,
+				// so Enter did nothing and said nothing (manual retest, PR
+				// #256). The sandbox refusal below moves the cursor the
+				// same way.
 				m.worktreeErr = msg
+				m.setupFieldCursor = m.setupFieldIndex(p, "worktree")
+				m.worktreeNaming = true
 				return m, nil
 			}
 		}
@@ -5487,6 +5500,14 @@ func (m Model) renderSetupWorktreeField(focused bool) string {
 			summary = sanitizeRemoteText(worktreeLabel(m.worktrees.list, m.selectedWorktree))
 		}
 		b.WriteString(dialogNormal.Render(label + "    " + truncateToWidth(summary, m.setupTextWidth()-lipgloss.Width(label)-4)))
+		// An invalid name keeps its error in view after focus moves on, on
+		// the row under it, as the open name field draws it. Two rows are
+		// still fewer than the focused field takes, so moving focus away
+		// cannot grow the dialog.
+		if m.worktreeErr != "" && m.worktreeNewBranch != "" {
+			b.WriteString("\n")
+			b.WriteString(dialogErrorStyle.Render("    " + truncateToWidth(m.worktreeErr, m.setupTextWidth()-setupRowIndent)))
+		}
 		return b.String()
 	}
 

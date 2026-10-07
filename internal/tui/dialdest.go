@@ -256,6 +256,9 @@ func (m *Model) disconnectDest(dest string) bool {
 	// Its in-flight import can no longer be answered either; re-adding the
 	// host in this session sends it again on the first shared frame.
 	m.forgetImportFor(dest) // also forgets its pane ids
+	// And its part of every pending group rename: no frame from it will come
+	// to decide one. The groups save is the caller's (handleConfirmKey).
+	m.leaveGroupRenames(dest)
 	delete(m.groupNamesSent, dest)
 	var conn Client
 	if r, ok := m.client.(*Router); ok {

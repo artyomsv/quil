@@ -25,7 +25,8 @@ import (
 type pendingGroupOp struct {
 	dest string
 	what string
-	// rename is the rename this op carries, when it is one (groupRenameFor).
+	// rename is the rename this op's request id belongs to, when it is one
+	// (sendSharedOpWith). Answers are matched by that id, never by names.
 	rename *groupRename
 }
 
@@ -42,7 +43,9 @@ type pendingGroupOp struct {
 // add the old one back.
 //
 // A rename held behind a groups import (deferGroupOp) keeps its entry: the
-// replayed op finds it again by its payload (groupRenameFor).
+// held op carries it, and the replayed op's request id is filed with it. A
+// host that leaves this client (disconnectDest) settles its part at once
+// (leaveGroupRenames); a host whose link is lost decides by its next frame.
 type groupRename struct {
 	oldName, newName string
 	dests            map[string]renameState
@@ -58,32 +61,72 @@ const (
 )
 
 // trackGroupRename records a rename about to go to every daemon the fan-out
-// reaches (sendGroupOpEverywhere's targets). With none, the name is this
-// client's alone and there is nothing to settle.
-func (m *Model) trackGroupRename(oldName, newName string) {
+// reaches (sendGroupOpEverywhere's targets) and returns it. With none, the
+// name is this client's alone and there is nothing to send or settle: nil.
+func (m *Model) trackGroupRename(oldName, newName string) *groupRename {
 	r := &groupRename{oldName: oldName, newName: newName, dests: map[string]renameState{}}
 	for _, d := range m.groupOpTargets(oldName) {
 		if m.sharedData[d] && m.destConnected(d) {
 			r.dests[d] = renameWaiting
 		}
 	}
-	if len(r.dests) > 0 {
-		m.groupRenames = append(m.groupRenames, r)
-	}
-}
-
-// groupRenameFor is the rename an op to dest carries, or nil.
-func (m *Model) groupRenameFor(dest string, payload any) *groupRename {
-	op, ok := payload.(ipc.GroupOpPayload)
-	if !ok || op.Op != ipc.GroupOpRename {
+	if len(r.dests) == 0 {
 		return nil
 	}
+	m.groupRenames = append(m.groupRenames, r)
+	return r
+}
+
+// pendingRenameOf is the unsettled rename that gave group name its current
+// name, or nil. One group has at most one: a second rename is refused until
+// the first settles (commitGroupEdit), so an answer can only be for the one
+// request its id names.
+func (m *Model) pendingRenameOf(name string) *groupRename {
 	for _, r := range m.groupRenames {
-		if _, in := r.dests[dest]; in && strings.EqualFold(r.oldName, op.Name) && strings.EqualFold(r.newName, op.NewName) {
+		if strings.EqualFold(r.newName, name) {
 			return r
 		}
 	}
 	return nil
+}
+
+// renameWaitingFlash names the hosts a pending rename still waits for.
+func (m *Model) renameWaitingFlash(r *groupRename) string {
+	var hosts []string
+	for _, d := range m.sharedDestsInOrder() {
+		if _, in := r.dests[d]; in {
+			hosts = append(hosts, hostLabel(d))
+		}
+	}
+	return "rename still waiting for " + strings.Join(hosts, ", ")
+}
+
+// sendGroupRename sends r to each daemon it tracks. Each op gets its own
+// request id (sendSharedOpWith), which alone matches its answer to r — a
+// held op carries r into the replay (deferredGroupOp.rename).
+func (m *Model) sendGroupRename(r *groupRename) tea.Cmd {
+	var cmds []tea.Cmd
+	for _, d := range m.sharedDestsInOrder() {
+		if _, in := r.dests[d]; !in {
+			continue
+		}
+		m.recordGroupNameSent(d, ipc.GroupOpRename, r.oldName, r.newName)
+		cmds = append(cmds, m.sendSharedOpWith(d, ipc.MsgGroupOp,
+			ipc.GroupOpPayload{Op: ipc.GroupOpRename, Name: r.oldName, NewName: r.newName}, ipc.GroupOpRename+" group", r))
+	}
+	return tea.Batch(cmds...)
+}
+
+// leaveGroupRenames settles dest's part of every pending rename when the
+// host leaves this client (disconnectDest): no frame from it can come to
+// decide, so it counts as not accepted, and a rename with no host left
+// resolves from the answers it has.
+func (m *Model) leaveGroupRenames(dest string) tea.Cmd {
+	var cmds []tea.Cmd
+	for _, r := range slices.Clone(m.groupRenames) {
+		cmds = append(cmds, m.settleGroupRename(r, dest, false))
+	}
+	return tea.Batch(cmds...)
 }
 
 // settleGroupRename records dest's outcome. When it was the last daemon and
@@ -431,11 +474,17 @@ const sharedOpErrCap = 80
 // Clear-attention precedent): a one-shot the user asked for, never a bulk
 // iterator. Returns a flash Cmd when the destination is unreachable.
 func (m *Model) sendSharedOp(dest, msgType string, payload any, what string) tea.Cmd {
+	return m.sendSharedOpWith(dest, msgType, payload, what, nil)
+}
+
+// sendSharedOpWith is sendSharedOp for one op of rename rn (nil for any
+// other op): the op's request id is filed with rn, so its answer settles rn.
+func (m *Model) sendSharedOpWith(dest, msgType string, payload any, what string, rn *groupRename) tea.Cmd {
 	if !m.groupSendsOpen(dest) {
 		// Before the groups import is answered a send could reach the daemon
 		// first and make it refuse the import (sharedimport.go). The change
 		// is in the file already; the send waits for the answer.
-		m.deferGroupOp(dest, msgType, payload, what)
+		m.deferGroupOp(dest, msgType, payload, what, rn)
 		return nil
 	}
 	msg, err := ipc.NewMessage(msgType, payload)
@@ -447,7 +496,6 @@ func (m *Model) sendSharedOp(dest, msgType string, payload any, what string) tea
 	if m.pendingGroupOps == nil {
 		m.pendingGroupOps = map[string]pendingGroupOp{}
 	}
-	rn := m.groupRenameFor(dest, payload)
 	m.pendingGroupOps[msg.ID] = pendingGroupOp{dest: dest, what: what, rename: rn}
 	if err := m.sendForDestStrict(dest, msg); err != nil {
 		delete(m.pendingGroupOps, msg.ID)

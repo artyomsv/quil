@@ -391,6 +391,14 @@ func (m Model) commitGroupEdit() (tea.Model, tea.Cmd) {
 	// A rename goes to every daemon that lists the group. One whose link is
 	// down cannot take it, so nothing is renamed, here or anywhere.
 	if e.mode == groupEditRename {
+		// One rename per group at a time: the answers are matched by
+		// request id, and a second rename before the first settles could
+		// only race it (A→B, B→A, A→B).
+		if r := m.pendingRenameOf(e.target); r != nil {
+			m.closeGroupNameDialog()
+			m.setErrorFlash(m.renameWaitingFlash(r))
+			return m, m.flashCmd()
+		}
 		for _, d := range m.groupOpTargets(e.target) {
 			if why := m.linkDownReason(d); why != "" {
 				m.closeGroupNameDialog()
@@ -424,8 +432,9 @@ func (m Model) commitGroupEdit() (tea.Model, tea.Cmd) {
 				// settle the rename (groupRename), and until then their
 				// frames are read with the new name in place of the old.
 				newName := m.groups.Groups[g].Name
-				m.trackGroupRename(e.target, newName)
-				opCmd = m.sendGroupOpEverywhere(ipc.GroupOpRename, e.target, newName)
+				if r := m.trackGroupRename(e.target, newName); r != nil {
+					opCmd = m.sendGroupRename(r)
+				}
 			}
 		}
 	}

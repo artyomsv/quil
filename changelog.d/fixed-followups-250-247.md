@@ -95,6 +95,8 @@ headline: Stricter shared workspaces; refused creates now say why
 - **A group rename that the host refuses is undone.** The sidebar puts the old name
   back on the same group and the status bar says why. When the link drops before the
   host answers, the host's next update decides, and the group keeps its place and its
-  collapsed state either way. A rename while that host is disconnected is refused at
-  once. Before, the new name stayed in the sidebar and the groups file for good,
+  collapsed state either way. If you disconnect the host before it answers, the
+  answers already received decide at once. A rename while that host is disconnected
+  is refused at once, and so is a second rename of a group whose first rename is still
+  waiting for a host. Before, the new name stayed in the sidebar and the groups file for good,
   beside the host's old one.

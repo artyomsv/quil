@@ -219,3 +219,104 @@ func TestGroupRename_LinkDownAtSend(t *testing.T) {
 		t.Errorf("a refused rename left %d unsettled entries", len(m.groupRenames))
 	}
 }
+
+// One rename per group in flight: renaming it back (A→B, B→A) before the
+// first answer is refused, naming the host it waits for, and sends nothing.
+func TestGroupRename_SecondRenameWhilePendingRefused(t *testing.T) {
+	m, conn := connectedTestModelCapturingSends(t)
+	m = updateNoWait(t, m, sharedFrame("r", 1, "proj-1", "", "Infra"))
+	m = renameThroughDialog(t, m, "Infra", "Ops")
+
+	m = renameThroughDialog(t, m, "Ops", "Infra")
+
+	if n := countSent(conn, ipc.MsgGroupOp); n != 1 {
+		t.Errorf("%d group_op sent, want the first rename alone", n)
+	}
+	wantGroups(t, m, "after the refused second rename", "Ops")
+	if !strings.Contains(m.flashText, "rename still waiting for "+hostLabel("")) {
+		t.Errorf("flash = %q, want the host the rename waits for", m.flashText)
+	}
+	if m.dialog != dialogNone {
+		t.Errorf("the rename dialog stayed open (dialog %v)", m.dialog)
+	}
+}
+
+// Answers are matched by request id. Renames whose names repeat (Infra→Ops,
+// Ops→Infra, Infra→Ops, one after another) each own their id: a stale
+// answer to the first, arriving while the third waits, settles nothing.
+func TestGroupRename_AnswerMatchedByRequestID(t *testing.T) {
+	m, conn := connectedTestModelCapturingSends(t)
+	m = updateNoWait(t, m, sharedFrame("r", 1, "proj-1", "", "Infra"))
+	ok := ipc.OpRespPayload{OK: true}
+
+	m = renameThroughDialog(t, m, "Infra", "Ops")
+	id1 := lastGroupOpID(t, conn)
+	m = updateNoWait(t, m, sharedOpRespMsg{dest: "", id: id1, resp: ok})
+	m = renameThroughDialog(t, m, "Ops", "Infra")
+	id2 := lastGroupOpID(t, conn)
+	m = updateNoWait(t, m, sharedOpRespMsg{dest: "", id: id2, resp: ok})
+	m = renameThroughDialog(t, m, "Infra", "Ops")
+	id3 := lastGroupOpID(t, conn)
+	if id1 == id3 || id2 == id3 {
+		t.Fatalf("request ids repeat: %s %s %s", id1, id2, id3)
+	}
+
+	m = updateNoWait(t, m, sharedOpRespMsg{dest: "", id: id1, resp: ipc.OpRespPayload{OK: false, Error: "stale"}})
+	wantGroups(t, m, "after a stale answer to the first rename", "Ops")
+	if len(m.groupRenames) != 1 {
+		t.Fatalf("%d renames pending, want the third", len(m.groupRenames))
+	}
+
+	m = updateNoWait(t, m, sharedOpRespMsg{dest: "", id: id3, resp: ipc.OpRespPayload{OK: false, Error: "rename: taken"}})
+	wantGroups(t, m, "after the third is refused", "Infra")
+	if len(m.groupRenames) != 0 {
+		t.Errorf("%d renames still pending", len(m.groupRenames))
+	}
+}
+
+// Disconnecting the only host a rename waits for settles it at once: no
+// frame from that host can come, nothing accepted it, so the old name is
+// back on the same group.
+func TestGroupRename_DisconnectOfTheOnlyPendingHostReverts(t *testing.T) {
+	m, _, remote := twoDestModel(t)
+	m = updateNoWait(t, m, hostFrame("q", 1, "", "X", "Infra"))
+	m.groups.Groups[1].Collapsed = true
+	m = renameThroughDialog(t, m, "Infra", "Ops")
+	if countSent(remote, ipc.MsgGroupOp) != 1 {
+		t.Fatal("setup: the rename was not sent to hostA")
+	}
+
+	m = confirmDisconnect(t, m, "hostA")
+
+	if m.groups.indexOf("Ops") >= 0 || m.groups.indexOf("Infra") < 0 {
+		t.Errorf("groups = %v, want Infra back", groupNames(m))
+	}
+	if g := m.groups.indexOf("Infra"); g >= 0 && !m.groups.Groups[g].Collapsed {
+		t.Error("Infra came back as another group: the collapsed state is gone")
+	}
+	if len(m.groupRenames) != 0 {
+		t.Errorf("%d renames still pending after the host left", len(m.groupRenames))
+	}
+}
+
+// Of two hosts, one accepted and the other is disconnected before it
+// answers: the rename stands.
+func TestGroupRename_DisconnectAfterTheOtherHostAccepted(t *testing.T) {
+	m, local, remote := twoDestModel(t)
+	m = updateNoWait(t, m, sharedFrame("r", 1, "proj-1", "", "Infra"))
+	m = updateNoWait(t, m, hostFrame("q", 1, "", "Infra"))
+	m = renameThroughDialog(t, m, "Infra", "Ops")
+	if countSent(local, ipc.MsgGroupOp) != 1 || countSent(remote, ipc.MsgGroupOp) != 1 {
+		t.Fatal("setup: the rename did not reach both hosts")
+	}
+	m = updateNoWait(t, m, sharedOpRespMsg{dest: "", id: lastGroupOpID(t, local), resp: ipc.OpRespPayload{OK: true}})
+
+	m = confirmDisconnect(t, m, "hostA")
+
+	if m.groups.indexOf("Ops") < 0 {
+		t.Errorf("groups = %v, want the accepted Ops", groupNames(m))
+	}
+	if len(m.groupRenames) != 0 {
+		t.Errorf("%d renames still pending after the host left", len(m.groupRenames))
+	}
+}

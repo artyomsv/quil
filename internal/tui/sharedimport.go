@@ -94,6 +94,7 @@ type deferredGroupOp struct {
 	msgType string
 	payload any
 	what    string
+	rename  *groupRename // the rename this op is part of, carried to the replay
 }
 
 // SetSharedImportMarker turns the import on; a Model that never had this
@@ -171,7 +172,7 @@ func (m *Model) groupSendsOpen(dest string) bool {
 // deferGroupOp holds one group send for dest until its groups answer. A
 // later set_project_group for the same project replaces the earlier one and
 // moves to the end, so the replay keeps the order against group creates.
-func (m *Model) deferGroupOp(dest, msgType string, payload any, what string) {
+func (m *Model) deferGroupOp(dest, msgType string, payload any, what string, rn *groupRename) {
 	if m.deferredGroupOps == nil {
 		m.deferredGroupOps = map[string][]deferredGroupOp{}
 	}
@@ -189,12 +190,14 @@ func (m *Model) deferGroupOp(dest, msgType string, payload any, what string) {
 	if len(ops) >= maxDeferredGroupOps {
 		log.Printf("groups: %s for %q DROPPED — %d changes already wait for the import answer; the daemon's next frame will undo it", what, dest, len(ops))
 		// A dropped rename is decided by that frame too.
-		if r := m.groupRenameFor(dest, payload); r != nil {
-			r.dests[dest] = renameLost
+		if rn != nil {
+			if _, in := rn.dests[dest]; in {
+				rn.dests[dest] = renameLost
+			}
 		}
 		return
 	}
-	m.deferredGroupOps[dest] = append(ops, deferredGroupOp{msgType: msgType, payload: payload, what: what})
+	m.deferredGroupOps[dest] = append(ops, deferredGroupOp{msgType: msgType, payload: payload, what: what, rename: rn})
 	if op, ok := payload.(ipc.GroupOpPayload); ok {
 		m.noteHeldGroupName(dest, op)
 	}
@@ -669,7 +672,7 @@ func (m *Model) openGroupSends(dest string) tea.Cmd {
 	delete(m.importNames, dest)
 	var cmds []tea.Cmd
 	for _, op := range held {
-		cmds = append(cmds, m.sendSharedOp(dest, op.msgType, op.payload, op.what))
+		cmds = append(cmds, m.sendSharedOpWith(dest, op.msgType, op.payload, op.what, op.rename))
 	}
 	return tea.Batch(cmds...)
 }

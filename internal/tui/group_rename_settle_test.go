@@ -15,7 +15,7 @@ func renameThroughDialog(t *testing.T, m Model, from, to string) Model {
 	t.Helper()
 	m.initKeymap()
 	m.beginGroupEdit(groupEditState{mode: groupEditRename, target: from, input: to})
-	return updateWith(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	return updateNoWait(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 }
 
 // lastGroupOpID is the id of the last group_op sent on conn.
@@ -58,7 +58,7 @@ func hostFrame(runID string, rev uint64, group string, groups ...string) Workspa
 // adds the old one back.
 func TestGroupRename_Accepted(t *testing.T) {
 	m, conn := connectedTestModelCapturingSends(t)
-	m = updateWith(t, m, sharedFrame("r", 1, "proj-1", "Infra", "X", "Infra", "Y"))
+	m = updateNoWait(t, m, sharedFrame("r", 1, "proj-1", "Infra", "X", "Infra", "Y"))
 	m.groups.Groups[1].Collapsed = true
 
 	m = renameThroughDialog(t, m, "Infra", "Ops")
@@ -67,14 +67,14 @@ func TestGroupRename_Accepted(t *testing.T) {
 	if o := originOf(t, m, "Ops"); o != groupOriginHost {
 		t.Errorf("origin %q while the daemon answers, want host", o)
 	}
-	m = updateWith(t, m, sharedFrame("r", 2, "proj-1", "Infra", "X", "Infra", "Y")) // in flight
+	m = updateNoWait(t, m, sharedFrame("r", 2, "proj-1", "Infra", "X", "Infra", "Y")) // in flight
 	wantGroups(t, m, "after an in-flight frame", "X", "Ops", "Y")
 	if m.groups.groupOf("", "proj-1") != 1 {
 		t.Errorf("proj-1 in group %d after the in-flight frame, want Ops", m.groups.groupOf("", "proj-1"))
 	}
 
-	m = updateWith(t, m, sharedOpRespMsg{dest: "", id: id, resp: ipc.OpRespPayload{OK: true}})
-	m = updateWith(t, m, sharedFrame("r", 3, "proj-1", "Ops", "X", "Ops", "Y"))
+	m = updateNoWait(t, m, sharedOpRespMsg{dest: "", id: id, resp: ipc.OpRespPayload{OK: true}})
+	m = updateNoWait(t, m, sharedFrame("r", 3, "proj-1", "Ops", "X", "Ops", "Y"))
 	wantGroups(t, m, "after the accept", "X", "Ops", "Y")
 	if o := originOf(t, m, "Ops"); o != groupOriginHost {
 		t.Errorf("origin %q after the accept, want host", o)
@@ -92,12 +92,12 @@ func TestGroupRename_Accepted(t *testing.T) {
 // next frame added the host's old name beside it.
 func TestGroupRename_Refused(t *testing.T) {
 	m, conn := connectedTestModelCapturingSends(t)
-	m = updateWith(t, m, sharedFrame("r", 1, "proj-1", "", "X", "Infra"))
+	m = updateNoWait(t, m, sharedFrame("r", 1, "proj-1", "", "X", "Infra"))
 	m.groups.Groups[1].Collapsed = true
 	m = renameThroughDialog(t, m, "Infra", "Ops")
 	id := lastGroupOpID(t, conn)
 
-	m = updateWith(t, m, sharedOpRespMsg{dest: "", id: id, resp: ipc.OpRespPayload{OK: false, Error: "rename: taken"}})
+	m = updateNoWait(t, m, sharedOpRespMsg{dest: "", id: id, resp: ipc.OpRespPayload{OK: false, Error: "rename: taken"}})
 
 	wantGroups(t, m, "after the refusal", "X", "Infra")
 	if !m.groups.Groups[1].Collapsed || originOf(t, m, "Infra") != groupOriginHost {
@@ -106,7 +106,7 @@ func TestGroupRename_Refused(t *testing.T) {
 	if !strings.Contains(m.flashText, "refused") || !strings.Contains(m.flashText, "rename: taken") {
 		t.Errorf("flash = %q, want the refusal", m.flashText)
 	}
-	m = updateWith(t, m, sharedFrame("r", 2, "proj-1", "", "X", "Infra"))
+	m = updateNoWait(t, m, sharedFrame("r", 2, "proj-1", "", "X", "Infra"))
 	wantGroups(t, m, "after the next frame", "X", "Infra")
 }
 
@@ -116,7 +116,7 @@ func TestGroupRename_Refused(t *testing.T) {
 // keeps its place and collapsed state.
 func TestGroupRename_LostReplyThenReattachWithTheNewName(t *testing.T) {
 	m, _, remote := twoDestModel(t)
-	m = updateWith(t, m, hostFrame("q", 1, "Infra", "X", "Infra", "Y"))
+	m = updateNoWait(t, m, hostFrame("q", 1, "Infra", "X", "Infra", "Y"))
 	m.groups.Groups[1].Collapsed = true
 	m = renameThroughDialog(t, m, "Infra", "Ops")
 	if countSent(remote, ipc.MsgGroupOp) != 1 {
@@ -127,7 +127,7 @@ func TestGroupRename_LostReplyThenReattachWithTheNewName(t *testing.T) {
 	m = out.(Model)
 	wantGroups(t, m, "after the link loss", "X", "Ops", "Y")
 
-	m = updateWith(t, m, hostFrame("q2", 1, "Ops", "X", "Ops", "Y")) // the new connection
+	m = updateNoWait(t, m, hostFrame("q2", 1, "Ops", "X", "Ops", "Y")) // the new connection
 	wantGroups(t, m, "after the reattach", "X", "Ops", "Y")
 	if !m.groups.Groups[1].Collapsed {
 		t.Error("the renamed group lost its collapsed state: deleted and added again")
@@ -145,13 +145,13 @@ func TestGroupRename_LostReplyThenReattachWithTheNewName(t *testing.T) {
 // back.
 func TestGroupRename_LostReplyThenReattachWithTheOldName(t *testing.T) {
 	m, _, _ := twoDestModel(t)
-	m = updateWith(t, m, hostFrame("q", 1, "Infra", "X", "Infra", "Y"))
+	m = updateNoWait(t, m, hostFrame("q", 1, "Infra", "X", "Infra", "Y"))
 	m.groups.Groups[1].Collapsed = true
 	m = renameThroughDialog(t, m, "Infra", "Ops")
 	out, _ := m.Update(linkLostMsg{dest: "hostA", err: errLinkLost})
 	m = out.(Model)
 
-	m = updateWith(t, m, hostFrame("q2", 1, "Infra", "X", "Infra", "Y"))
+	m = updateNoWait(t, m, hostFrame("q2", 1, "Infra", "X", "Infra", "Y"))
 
 	wantGroups(t, m, "after the reattach", "X", "Infra", "Y")
 	if !m.groups.Groups[1].Collapsed {
@@ -179,7 +179,7 @@ func TestGroupRename_DeferredThenAnswered(t *testing.T) {
 			m = updateNoWait(t, m, sharedImportRespMsg{dest: "", id: importID, resp: ipc.SharedImportRespPayload{Answered: []string{ipc.ImportKindGroups}}})
 			id := lastGroupOpID(t, local)
 
-			m = updateWith(t, m, sharedOpRespMsg{dest: "", id: id, resp: ipc.OpRespPayload{OK: tc.ok, Error: "rename: taken"}})
+			m = updateNoWait(t, m, sharedOpRespMsg{dest: "", id: id, resp: ipc.OpRespPayload{OK: tc.ok, Error: "rename: taken"}})
 
 			if m.groups.indexOf(tc.want) < 0 {
 				t.Errorf("groups = %v, want %s", groupNames(m), tc.want)
@@ -198,7 +198,7 @@ func TestGroupRename_DeferredThenAnswered(t *testing.T) {
 // before anything changes: no op is sent, and the old name stays.
 func TestGroupRename_LinkDownAtSend(t *testing.T) {
 	m, _, remote := twoDestModel(t)
-	m = updateWith(t, m, hostFrame("q", 1, "", "Infra"))
+	m = updateNoWait(t, m, hostFrame("q", 1, "", "Infra"))
 	out, _ := m.Update(linkLostMsg{dest: "hostA", err: errLinkLost})
 	m = out.(Model)
 	if m.linkDownReason("hostA") == "" {

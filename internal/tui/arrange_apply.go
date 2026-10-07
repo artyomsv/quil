@@ -92,7 +92,7 @@ func (m *Model) applyTabArrangement(tab *TabModel, newRoot *LayoutNode, active *
 		return m.refuseReadOnly()
 	}
 	if m.tabLayoutBusy(tab) {
-		m.setFlash(tabBusyFlash)
+		m.setErrorFlash(tabBusyFlash)
 		return m.flashCmd()
 	}
 	if len(tab.Leaves()) < 2 {
@@ -100,7 +100,7 @@ func (m *Model) applyTabArrangement(tab *TabModel, newRoot *LayoutNode, active *
 	}
 	w, h := m.paneAreaWidth(), m.height-chromeHeight
 	if !fitsMinSize(newRoot, w, h) {
-		m.setFlash(layoutTooSmallFlash)
+		m.setErrorFlash(layoutTooSmallFlash)
 		return m.flashCmd()
 	}
 	for _, p := range tab.Leaves() {

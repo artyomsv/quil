@@ -1297,6 +1297,9 @@ type Model struct {
 	// and the status-bar renderer checks flashUntil on every frame.
 	flashText  string
 	flashUntil time.Time
+	// flashErr marks the live flash as a refusal or failure (setErrorFlash):
+	// it lasts longer, and a routine setFlash does not replace it.
+	flashErr bool
 
 	// paneCountByDest is each destination's pane count from its last broadcast.
 	// Summed by setDestPaneCount into the workspace size the adaptive scrollback
@@ -1494,7 +1497,7 @@ func (m Model) destReadOnly(dest string) bool { return m.destRights[dest] == ipc
 
 // refuseReadOnly flashes why an action did nothing.
 func (m *Model) refuseReadOnly() tea.Cmd {
-	m.setFlash(readOnlyFlash)
+	m.setErrorFlash(readOnlyFlash)
 	return m.flashCmd()
 }
 
@@ -1512,7 +1515,7 @@ func (m Model) destCanAdmin(dest string) bool {
 
 // refuseNoAdmin flashes why a daemon-wide action did nothing.
 func (m *Model) refuseNoAdmin() tea.Cmd {
-	m.setFlash(noAdminFlash)
+	m.setErrorFlash(noAdminFlash)
 	return m.flashCmd()
 }
 
@@ -1532,7 +1535,7 @@ func (m Model) destCanRawArgs(dest string) bool {
 
 // refuseNoRawArgs flashes why an overlay or an instance did not start.
 func (m *Model) refuseNoRawArgs() tea.Cmd {
-	m.setFlash(noRawArgsFlash)
+	m.setErrorFlash(noRawArgsFlash)
 	return m.flashCmd()
 }
 
@@ -3169,14 +3172,18 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 
 	case projectGroupsSaveFailedMsg:
 		// A local save result, not an IPC response: no listenForMessages here.
-		m.setFlash(groupSaveFailedFlash)
+		m.setErrorFlash(groupSaveFailedFlash)
 		return m, m.flashCmd()
 
 	case flashExpireMsg:
 		// Clear flash only if it hasn't been refreshed by a newer setFlash call.
-		if !time.Now().Before(m.flashUntil) {
-			m.flashText = ""
+		// A flash that is still live waits out its own remainder: flashCmd
+		// ticks after flashDuration, and an error flash lasts longer.
+		if left := m.flashUntil.Sub(m.clock()); left > 0 {
+			return m, tea.Tick(left, func(time.Time) tea.Msg { return flashExpireMsg{} })
 		}
+		m.flashText = ""
+		m.flashErr = false
 		return m, nil
 
 	case spinnerTickMsg:
@@ -3708,19 +3715,19 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		// no re-arm (the listen loop was never involved). Router.Send would have
 		// dropped this silently and returned nil, which is why the send is
 		// strict: a tab the user asked for and did not get has to say so.
-		m.setFlash("cannot reach " + hostLabel(msg.dest) + " — new tab not created")
+		m.setErrorFlash("cannot reach " + hostLabel(msg.dest) + " — new tab not created")
 		return m, m.flashCmd()
 
 	case moveTabFailedMsg:
 		// Same shape as createTabFailedMsg: a send result, not an IPC response,
 		// so no re-arm.
-		m.setFlash("cannot reach " + hostLabel(msg.dest) + " — tab not moved")
+		m.setErrorFlash("cannot reach " + hostLabel(msg.dest) + " — tab not moved")
 		return m, m.flashCmd()
 
 	case movePaneFailedMsg:
 		// Same shape as moveTabFailedMsg: a send result, not an IPC response,
 		// so no re-arm.
-		m.setFlash("cannot reach " + hostLabel(msg.dest) + " — pane not moved")
+		m.setErrorFlash("cannot reach " + hostLabel(msg.dest) + " — pane not moved")
 		return m, m.flashCmd()
 
 	case worktreeTimeoutMsg:
@@ -4969,7 +4976,7 @@ func (m Model) openCreatePaneDialogFor(target paneTarget) (tea.Model, tea.Cmd) {
 	// not leave. Viewing its cached panes stays allowed.
 	if dest, pinned := m.pinnableDest(); pinned {
 		if why := m.linkDownReason(dest); why != "" {
-			m.setFlash(createNotDone(target) + why)
+			m.setErrorFlash(createNotDone(target) + why)
 			return m, m.flashCmd()
 		}
 	}
@@ -5028,7 +5035,7 @@ func (m Model) pinnableDest() (dest string, ok bool) {
 // some OTHER destination while the local daemon is fine.
 func (m Model) handleNewTab() (tea.Model, tea.Cmd) {
 	if p := m.cur(); p != nil && !m.projectActionable(p) && !m.onlyOfflineProjects() {
-		m.setFlash("cannot reach " + hostLabel(p.Dest) + " — new tab not created")
+		m.setErrorFlash("cannot reach " + hostLabel(p.Dest) + " — new tab not created")
 		return m, m.flashCmd()
 	}
 	return m.openCreatePaneDialogFor(paneTargetNewTab)
@@ -8592,7 +8599,7 @@ func (m Model) renderStatusBar() string {
 	if count := m.notifications.Count(); count > 0 && !m.notifications.visible {
 		right = fmt.Sprintf("[%d events] ", count) + right
 	}
-	flashOn := m.flashText != "" && time.Now().Before(m.flashUntil)
+	flashOn := m.flashText != "" && m.clock().Before(m.flashUntil)
 	if flashOn {
 		right = m.flashText + " | " + right
 	}
@@ -8648,9 +8655,43 @@ func (m Model) flashCmd() tea.Cmd {
 
 // setFlash shows a transient message in the status bar for flashDuration.
 // The 1 s sizePollTick is a backstop; flashCmd provides a crisp expiry timer.
+//
+// A routine message does NOT replace a live error flash: a background
+// message (another client's tab switch, an update check, a notes save) used
+// to take the bar from a refusal the user had not finished reading.
 func (m *Model) setFlash(text string) {
+	if m.errorFlashLive() {
+		return
+	}
 	m.flashText = text
-	m.flashUntil = time.Now().Add(flashDuration)
+	m.flashErr = false
+	m.flashUntil = m.clock().Add(flashDuration)
+}
+
+// setErrorFlash shows a refusal or a failure: the one answer the action
+// gets, often with a daemon's reason in it. It replaces any flash, lasts at
+// least twice flashDuration and longer for a long text (errorFlashTTL), and
+// no routine setFlash replaces it while it lasts. Three seconds, measured
+// from the Update that set it, was too short to read a refused create's
+// reason (manual retest, PR #256).
+func (m *Model) setErrorFlash(text string) {
+	m.flashText = text
+	m.flashErr = true
+	m.flashUntil = m.clock().Add(errorFlashTTL(text))
+}
+
+// errorFlashTTL is how long an error flash stays: twice flashDuration, plus
+// one flashDuration per 100 cells of text, at most five flashDurations
+// (6 s to 15 s in production). Scaled from flashDuration so the test
+// binary's short value shortens it too.
+func errorFlashTTL(text string) time.Duration {
+	d := 2*flashDuration + time.Duration(lipgloss.Width(text))*flashDuration/100
+	return min(d, 5*flashDuration)
+}
+
+// errorFlashLive reports whether an error flash is on screen.
+func (m Model) errorFlashLive() bool {
+	return m.flashErr && m.flashText != "" && m.clock().Before(m.flashUntil)
 }
 
 // nextReqGen returns a fresh instance id for a one-shot request whose content
@@ -9441,7 +9482,7 @@ func (m *Model) splitPane(dir SplitDir) tea.Cmd {
 	// Before the placeholder too: on a host whose link is down the create
 	// cannot leave, and the empty leaf would wait for good (see linkDownReason).
 	if why := m.linkDownReason(tab.Dest); why != "" {
-		m.setFlash(createNotDone(paneTargetSplit) + why)
+		m.setErrorFlash(createNotDone(paneTargetSplit) + why)
 		return m.flashCmd()
 	}
 
@@ -9453,7 +9494,7 @@ func (m *Model) splitPane(dir SplitDir) tea.Cmd {
 	// tab holds at most one — so the split's own placeholder would render
 	// "Creating worktree <branch>" while having no worktree at all.
 	if inflight := m.worktreeCreates[tab.ID]; inflight != "" {
-		m.setFlash("still creating the worktree for " + truncateCells(sanitizeRemoteText(inflight), createErrFlashCap) + " — wait for it to finish")
+		m.setErrorFlash("still creating the worktree for " + truncateCells(sanitizeRemoteText(inflight), createErrFlashCap) + " — wait for it to finish")
 		return m.flashCmd()
 	}
 

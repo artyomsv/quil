@@ -157,7 +157,7 @@ func (m *Model) takeOrdinaryHeld(tab *TabModel) (held *PaneModel, placed bool) {
 // ids on it, so the refusal is still news to this user. The unwind needs the
 // id to match a tab this client armed, on the daemon that refused.
 func (m *Model) applyCreatePaneRefused(msg createPaneRefusedMsg) {
-	m.setFlash("pane not created: " + truncateCells(sanitizeRemoteText(msg.text), createErrFlashCap))
+	m.setErrorFlash("pane not created: " + truncateCells(sanitizeRemoteText(msg.text), createErrFlashCap))
 	for tabID, id := range m.createReqIDs {
 		if id != msg.id {
 			continue

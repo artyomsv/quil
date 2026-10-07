@@ -161,7 +161,7 @@ func (m *Model) applyGitRepos(resp ipc.GitReposRespPayload, gen string) tea.Cmd 
 		if purpose == repoScanPickList {
 			return m.applyGitReposPickListError()
 		}
-		m.setFlash("repo scan failed")
+		m.setErrorFlash("repo scan failed")
 		return m.flashCmd()
 	}
 
@@ -202,6 +202,6 @@ func (m *Model) applyGitScanTimeout(cwd, gen string) tea.Cmd {
 		return nil
 	}
 	m.repoScan = repoScanState{}
-	m.setFlash("repo scan timed out")
+	m.setErrorFlash("repo scan timed out")
 	return m.flashCmd()
 }

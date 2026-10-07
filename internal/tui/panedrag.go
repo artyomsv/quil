@@ -118,7 +118,7 @@ func (m *Model) beginPaneDrag(x, y int) tea.Cmd {
 		return nil
 	}
 	if m.tabLayoutBusy(tab) {
-		m.setFlash(tabBusyFlash)
+		m.setErrorFlash(tabBusyFlash)
 		return m.flashCmd()
 	}
 	// Both drops change the workspace (a move, or a rearranged tree), and a

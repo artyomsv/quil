@@ -14,7 +14,7 @@ func (m Model) openTemplateSettings() (tea.Model, tea.Cmd) {
 	if errors.Is(err, os.ErrNotExist) {
 		data = []byte(config.DefaultTemplatesText())
 	} else if err != nil {
-		m.setFlash("Cannot read templates: " + err.Error())
+		m.setErrorFlash("Cannot read templates: " + err.Error())
 		return m, m.flashCmd()
 	}
 	m.tomlEditor = NewTextEditor(string(data), path, m.width, max(2, m.height-2))

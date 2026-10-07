@@ -76,3 +76,7 @@ headline: Stricter shared workspaces; refused creates now say why
   palette says why. Before, it removed every project and left the window on
   "Connecting to quild…" for good. Other hosts still disconnect, also from a
   read-only connection.
+- **An error in the status bar now stays long enough to read.** A refusal or a failure
+  stays at least 6 seconds, longer for a long message (up to 15 seconds). A routine
+  message, such as an update check or another window's tab switch, no longer replaces
+  it before then. A newer error still does.

@@ -302,7 +302,7 @@ func (m *Model) applyCreatePaneResp(p ipc.CreatePaneRespPayload, dest string) {
 		if key := newTabWorktreeKey(dest, p.Worktree.Branch); m.newTabWorktrees[key] {
 			delete(m.newTabWorktrees, key)
 			if p.Error != "" {
-				m.setFlash("worktree not created: " +
+				m.setErrorFlash("worktree not created: " +
 					truncateCells(sanitizeRemoteText(p.Error), createErrFlashCap))
 			}
 		}
@@ -367,7 +367,7 @@ func (m *Model) applyCreatePaneResp(p ipc.CreatePaneRespPayload, dest string) {
 	// sanitizing and both are needed: sanitizeRemoteText removes escapes
 	// without shortening anything, and the status bar drops its whole right
 	// half rather than wrapping when a flash outgrows it.
-	m.setFlash("worktree not created: " + truncateCells(sanitizeRemoteText(p.Error), createErrFlashCap))
+	m.setErrorFlash("worktree not created: " + truncateCells(sanitizeRemoteText(p.Error), createErrFlashCap))
 }
 
 // newTabWorktreeKey keys newTabWorktrees: the destination the create went to
@@ -441,5 +441,5 @@ func (m *Model) unwindWorktreeCreate(tabID, reason string) {
 		tab.invalidateLeaves()
 	}
 	delete(m.pendingSplit, tabID)
-	m.setFlash("worktree not created: " + reason)
+	m.setErrorFlash("worktree not created: " + reason)
 }

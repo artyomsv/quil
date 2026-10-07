@@ -94,7 +94,7 @@ func (m Model) handleUpdateAction() (tea.Model, tea.Cmd) {
 	}
 	m.dialog = dialogNone
 	if !version.UpdatesEnabled() {
-		m.setFlash("updates are disabled in dev builds")
+		m.setErrorFlash("updates are disabled in dev builds")
 		return m, tea.Batch(tea.ClearScreen, m.flashCmd())
 	}
 	// BEFORE the pendingApplyVer reset below, and that ordering is the whole
@@ -130,7 +130,7 @@ func (m Model) handleUpdateAction() (tea.Model, tea.Cmd) {
 		// (the startup notice refuses on the same grounds). It matters more
 		// now that a successful stage continues straight into the apply
 		// confirm: the confirm would name a version this machine never staged.
-		m.setFlash("updates apply to this machine — switch to a local project first")
+		m.setErrorFlash("updates apply to this machine — switch to a local project first")
 		return m, tea.Batch(tea.ClearScreen, m.flashCmd())
 	}
 	if !updateAvailable(info, m.version) {
@@ -145,7 +145,7 @@ func (m Model) handleUpdateAction() (tea.Model, tea.Cmd) {
 		return m, tea.Batch(tea.ClearScreen, m.flashCmd())
 	}
 	if !info.InstallWritable {
-		m.setFlash("v" + info.LatestVersion + " available — install dir not writable, see " + info.ReleaseURL)
+		m.setErrorFlash("v" + info.LatestVersion + " available — install dir not writable, see " + info.ReleaseURL)
 		return m, tea.Batch(tea.ClearScreen, m.flashCmd())
 	}
 	if info.StagedVersion == info.LatestVersion {
@@ -275,7 +275,7 @@ func (m Model) applyStageUpdateResp(resp ipc.StageUpdateRespPayload) (Model, tea
 		// this rather than a confirm contradicting its own detail line.
 		m.setFlash("quil is up to date (v" + m.version + ")")
 	default:
-		m.setFlash("update failed: " + sanitizeRemoteText(resp.Error))
+		m.setErrorFlash("update failed: " + sanitizeRemoteText(resp.Error))
 	}
 	return m, m.flashCmd()
 }

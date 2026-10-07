@@ -1361,7 +1361,7 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			// takes every project on that machine, so the one that happened to
 			// be right-clicked is not the target.
 			if !m.disconnectDest(id) {
-				m.setFlash(noDisconnectHomeFlash)
+				m.setErrorFlash(noDisconnectHomeFlash)
 				return m, tea.Batch(tea.ClearScreen, m.flashCmd())
 			}
 			log.Printf("disconnected host %q", id)
@@ -2755,7 +2755,7 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 	// own failure in time to unwind a placeholder (see linkDownReason).
 	if why := m.linkDownReason(m.createPaneSendDest()); why != "" {
 		logger.Debug("create: REFUSED, %s", why)
-		m.setFlash(createNotDone(target) + why)
+		m.setErrorFlash(createNotDone(target) + why)
 		return m, m.flashCmd()
 	}
 	if target == paneTargetNewTab {
@@ -2766,7 +2766,7 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 				// reason: falling back to the browsed directory is the nested-
 				// worktree bug.
 				logger.Debug("create tab: REFUSED, branch %q has no known repository root", newBranch)
-				m.setFlash("worktree not created: the repository root is not known yet")
+				m.setErrorFlash("worktree not created: the repository root is not known yet")
 				return m, m.flashCmd()
 			}
 			spec = &ipc.WorktreeSpec{RepoRoot: newBranchRepo, Branch: newBranch}
@@ -2824,7 +2824,7 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 	// detached, like the refusals below.
 	if pinDest, pinned := m.createPanePin(); pinned && pinDest != tabDest {
 		logger.Debug("create pane: REFUSED, dialog pinned to %q but the active tab is on %q", pinDest, tabDest)
-		m.setFlash("pane not created: the project changed while the dialog was open")
+		m.setErrorFlash("pane not created: the project changed while the dialog was open")
 		return m, m.flashCmd()
 	}
 
@@ -2849,7 +2849,7 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 		// fallback is exactly the nested-worktree bug.
 		logger.Debug("create pane: REFUSED, branch %q has no known repository root (worktrees loaded=%v pending=%v repo=%v path=%q)",
 			newBranch, m.worktrees.loaded, m.worktrees.pending, m.worktrees.repo, m.worktrees.path)
-		m.setFlash("worktree not created: the repository root is not known yet")
+		m.setErrorFlash("worktree not created: the repository root is not known yet")
 		return m, m.flashCmd()
 	}
 
@@ -2868,7 +2868,7 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 	// once the first replace detaches its pane.
 	if inflight := m.worktreeCreates[tab.ID]; inflight != "" {
 		logger.Debug("create pane: REFUSED, tab %s already has a worktree create in flight (branch %q)", tab.ID, inflight)
-		m.setFlash("still creating the worktree for " + truncateCells(sanitizeRemoteText(inflight), createErrFlashCap) + " — wait for it to finish")
+		m.setErrorFlash("still creating the worktree for " + truncateCells(sanitizeRemoteText(inflight), createErrFlashCap) + " — wait for it to finish")
 		return m, m.flashCmd()
 	}
 
@@ -3011,7 +3011,7 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 		// having been created somewhere they cannot see. It means the active
 		// pane is not in its own tab's layout tree, so say so.
 		logger.Debug("create pane: REFUSED, SplitAtPane found no leaf for pane %s in tab %s", pane.ID, tabID)
-		m.setFlash("pane not created: the active pane is not in this tab's layout")
+		m.setErrorFlash("pane not created: the active pane is not in this tab's layout")
 		return m, m.flashCmd()
 	}
 	// The reservation is re-armed below; see the replace arm.
@@ -4254,7 +4254,7 @@ func (m *Model) applyGitReposPickListError() tea.Cmd {
 	// this function states the "empty pick list" guarantee itself rather than
 	// relying on that reset never changing.
 	m.repoCandidates = nil
-	m.setFlash("repo scan failed")
+	m.setErrorFlash("repo scan failed")
 	return tea.Batch(m.flashCmd(), m.fallbackToRecentOrBrowser())
 }
 

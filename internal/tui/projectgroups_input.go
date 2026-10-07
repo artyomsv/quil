@@ -3,7 +3,6 @@ package tui
 import (
 	"errors"
 	"strings"
-	"time"
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
@@ -153,7 +152,7 @@ func (m *Model) openProjectGroupList() tea.Cmd {
 	w, h := s.boxSize()
 	if w > m.width || h > m.height-2 {
 		m.closeCtxMenu()
-		m.setFlash(groupListTooTallFlash)
+		m.setErrorFlash(groupListTooTallFlash)
 		return m.flashCmd()
 	}
 	s.x, s.y = ctxMenuPos(m.ctxMenu.x-1, m.ctxMenu.y-1, w, h, m.width, m.height)
@@ -418,7 +417,7 @@ func (m Model) commitGroupEdit() (tea.Model, tea.Cmd) {
 		}
 	}
 	if err != nil {
-		m.setFlash(groupNameFlash(err))
+		m.setErrorFlash(groupNameFlash(err))
 		return m, m.flashCmd()
 	}
 	m.closeGroupNameDialog()
@@ -442,7 +441,7 @@ func groupNameFlash(err error) string {
 // status bar that carries every other flash is not on screen.
 func (m Model) groupNameRefusal() string {
 	if (m.flashText == groupNameEmptyFlash || m.flashText == groupNameTakenFlash) &&
-		time.Now().Before(m.flashUntil) {
+		m.clock().Before(m.flashUntil) {
 		return m.flashText
 	}
 	return ""

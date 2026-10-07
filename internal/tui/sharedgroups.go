@@ -291,7 +291,7 @@ func (m *Model) sendSharedOp(dest, msgType string, payload any, what string) tea
 	m.pendingGroupOps[msg.ID] = pendingGroupOp{dest: dest, what: what}
 	if err := m.sendForDestStrict(dest, msg); err != nil {
 		delete(m.pendingGroupOps, msg.ID)
-		m.setFlash(fmt.Sprintf("%s: %s not sent — %v", hostLabel(dest), what, err))
+		m.setErrorFlash(fmt.Sprintf("%s: %s not sent — %v", hostLabel(dest), what, err))
 		return m.flashCmd()
 	}
 	return nil
@@ -443,7 +443,7 @@ func (m *Model) applySharedOpResp(msg sharedOpRespMsg) tea.Cmd {
 	// Filed against the destination the request went to (pendingGroupOps),
 	// never the answer's own Origin: the id is what this client minted.
 	reason := elideEnd(sanitizeRemoteText(msg.resp.Error), sharedOpErrCap)
-	m.setFlash(fmt.Sprintf("%s: %s refused — %s", hostLabel(op.dest), op.what, reason))
+	m.setErrorFlash(fmt.Sprintf("%s: %s refused — %s", hostLabel(op.dest), op.what, reason))
 	return m.flashCmd()
 }
 

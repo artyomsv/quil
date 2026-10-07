@@ -98,7 +98,7 @@ func (m *Model) sendNoteGet(dest, paneID string) (id string, cmd tea.Cmd) {
 			m.notesEditor.ApplyLoadError(err.Error())
 			return "", nil
 		}
-		m.setFlash("Note not reloaded: " + err.Error())
+		m.setErrorFlash("Note not reloaded: " + err.Error())
 		return "", m.flashCmd()
 	}
 	id = msg.ID
@@ -284,11 +284,11 @@ func (m *Model) keepNoteText(dest, paneID, text, reason string) {
 	path, err := writeNotesConflict(dest, paneID, text)
 	if err != nil {
 		log.Printf("notes: %s: text for %s could not be kept: %v", reason, paneID, err)
-		m.setFlash(reason + " and could not be kept — see quil.log")
+		m.setErrorFlash(reason + " and could not be kept — see quil.log")
 		return
 	}
 	log.Printf("notes: %s: text for %s kept in %s", reason, paneID, path)
-	m.setFlash(reason + " — your text is in notes-conflicts")
+	m.setErrorFlash(reason + " — your text is in notes-conflicts")
 }
 
 // applyNoteSetResp settles a pending save. With the editor that sent it still

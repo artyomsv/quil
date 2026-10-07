@@ -1315,7 +1315,7 @@ func (m *Model) confirmDisconnectHost(projectID string) tea.Cmd {
 		return nil
 	}
 	if !m.canDisconnect(p.Dest) {
-		m.setFlash(noDisconnectHomeFlash)
+		m.setErrorFlash(noDisconnectHomeFlash)
 		return m.flashCmd()
 	}
 	m.dialog = dialogConfirm

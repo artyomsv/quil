@@ -33,13 +33,13 @@ func (m *Model) mutateInstances(fn func(InstanceStore)) bool {
 	store, err := instances.Load(path)
 	if err != nil {
 		log.Printf("load instances: %v", err)
-		m.setFlash(instancesUnreadableFlash)
+		m.setErrorFlash(instancesUnreadableFlash)
 		return false
 	}
 	fn(store)
 	if err := instances.Save(path, store); err != nil {
 		log.Printf("save instances: %v", err)
-		m.setFlash("instances.json not saved")
+		m.setErrorFlash("instances.json not saved")
 		return false
 	}
 	m.instanceStore = store

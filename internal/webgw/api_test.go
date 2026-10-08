@@ -162,6 +162,7 @@ func TestAPI_ClientCarriesTemplatesConnectAndHistory(t *testing.T) {
 	h.s.cfg.ClientExtras = func() ClientExtras {
 		return ClientExtras{Templates: []TemplateDef{{Name: "pair", Description: "two"}}, TemplatesError: "bad", Connect: true}
 	}
+	writePlugin(t, h.s.cfg.PluginsDir, "e2e-hist.toml", "[plugin]\nname = \"e2e-hist\"\ndisplay_name = \"E2E Hist\"\ncategory = \"ai\"\n\n[command]\ncmd = \"cat\"\nrecord_history = true\n")
 	s := h.login()
 	h.liveTab(s)
 	resp := h.api(http.MethodGet, "/api/client", s, nil, nil)
@@ -172,8 +173,11 @@ func TestAPI_ClientCarriesTemplatesConnectAndHistory(t *testing.T) {
 	if len(ci.Templates) != 1 || ci.Templates[0] != (TemplateDef{Name: "pair", Description: "two"}) || !ci.Connect || ci.TemplatesError != "bad" {
 		t.Fatalf("templates %+v err %q connect %v", ci.Templates, ci.TemplatesError, ci.Connect)
 	}
-	if d := findDef(ci.Plugins, "claude-code"); d == nil || !d.RecordHistory {
-		t.Fatalf("claude-code record_history: %+v", d)
+	if d := findDef(ci.Plugins, "e2e-hist"); d == nil || !d.RecordHistory {
+		t.Fatalf("e2e-hist record_history: %+v", d)
+	}
+	if d := findDef(ci.Plugins, "e2e-ssh"); d == nil || d.RecordHistory {
+		t.Fatalf("e2e-ssh record_history: %+v", d)
 	}
 	if d := findDef(ci.Plugins, "terminal"); d == nil || d.RecordHistory {
 		t.Fatalf("terminal record_history: %+v", d)

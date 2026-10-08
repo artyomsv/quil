@@ -57,6 +57,17 @@ func TestCheckForward_RefusesUnlistedTypes(t *testing.T) {
 	}
 }
 
+func TestCheckForward_5cPaletteSearch(t *testing.T) {
+	g := &forwardGate{leasedID: "web-p-1", helloSeen: true}
+	fwd, refuse, fatal := g.check(msg(t, ipc.MsgPaneSearchReq, "s1", ipc.PaneSearchReqPayload{Query: "x"}))
+	if fwd == nil || refuse != nil || fatal != nil {
+		t.Fatalf("pane_search_req: fwd=%v refuse=%v fatal=%v", fwd, refuse, fatal)
+	}
+	if fwd.ID != "s1" {
+		t.Fatalf("pane_search_req lost its id: %q", fwd.ID)
+	}
+}
+
 func TestCheckForward_AttachMustCarryTheLeasedID(t *testing.T) {
 	g := &forwardGate{leasedID: "web-p-1", helloSeen: true}
 	if _, refuse, _ := g.check(msg(t, ipc.MsgAttach, "a1", ipc.AttachPayload{ClientID: "web-p-9"})); refuse == nil {

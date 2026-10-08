@@ -22,6 +22,7 @@ import { type Dir, neighbour } from './keys/nav';
 import { type FetchLike, hasSession, postLogin, sessionGone } from './login';
 import { NotificationStore, type NotifyInfo, type PaneEvent, parsePaneEvent } from './notifications';
 import { OverlayClaim, type OverlayInfo, type OverlayKind, overlayOf, overlayRepoChoice, overlayToggle } from './overlay';
+import { buildPalette, type PaletteRow } from './palette';
 import { type Panel, panelTargetGone } from './panels';
 import { NOT_SENT, PasteFlow } from './paste';
 import type { Message, PaneInfo, PaneSize, SplitPaneReq, WebWelcome, WorkspaceState } from './protocol';
@@ -894,6 +895,62 @@ export class App {
     return refusal(this.rights, c, this.live);
   }
 
+  // paletteExtraRows are the rows later screens add to the palette's Tabs,
+  // Projects, Pane and System sections, in that order.
+  paletteExtraRows(): PaletteRow[][] {
+    return [[], [], [], []];
+  }
+
+  paletteRows(): PaletteRow[] {
+    const s = this.state;
+    if (!s) return [];
+    return buildPalette({
+      state: s,
+      activeProject: this.activeProjectId,
+      activePane: this.activePane,
+      keyFor: (id) => this.keyFor(id),
+      refusal: (c) => this.refusalFor(c),
+      extra: this.paletteExtraRows(),
+    });
+  }
+
+  // runPaletteRow runs a chosen row through the same handler as its key.
+  runPaletteRow(r: PaletteRow): void {
+    if (!r.run || r.disabled) return;
+    this.panel = null;
+    const run = r.run;
+    if ('action' in run) {
+      if (run.action === 'builtin.new_pane') this.runBuiltin('new_pane');
+      else this.runAction(run.action);
+    } else if ('goPane' in run) this.goToPane(run.goPane);
+    else if ('switchTab' in run) this.switchTab(run.switchTab);
+    else if ('switchProject' in run) this.switchProject(run.switchProject);
+    else this.openPanel(run.panel);
+    if (this.panel === null) this.focusActiveSoon();
+  }
+
+  // goToPane shows the pane's tab and makes the pane active, through the
+  // notification jump's path: a pane in another tab is activated once the
+  // state showing that tab arrives (resolveJump in applyState).
+  goToPane(paneId: string): void {
+    const p = this.state?.panes.find((x) => x.id === paneId);
+    if (!p) return;
+    const placed = this.placed.map((x) => x.id);
+    const step = jumpStep(this.state, this.activeTabId, placed, p.tab_id, paneId, this.readOnly, browserClock.now());
+    if (step.switch !== '') this.switchTab(step.switch);
+    // After the switch, which clears any older jump.
+    this.pendingJump = step.pending;
+    if (step.activate !== '') {
+      this.setActivePane(step.activate);
+      this.focus(step.activate);
+    }
+  }
+
+  // searchPanes is the palette's search in pane output (view class).
+  searchPanes(q: string): Promise<Outcome> {
+    return this.requests.request('pane_search_req', { query: q }, { timeoutMs: 3000, timeoutText: 'search timed out' });
+  }
+
   // focusActiveSoon is focusActive once the current key event is over. An
   // Enter that submitted a dialog or picked a menu item still has its
   // keypress to come, and a terminal focused now would take it as a typed
@@ -943,6 +1000,12 @@ export class App {
         return;
       case 'system.shortcuts':
         this.openKeyList();
+        return;
+      case 'app.command_palette':
+        this.openPanel({ kind: 'palette' });
+        return;
+      case 'project.picker':
+        this.openPanel({ kind: 'projects' });
         return;
       case 'client.take_control':
         this.takeControl();

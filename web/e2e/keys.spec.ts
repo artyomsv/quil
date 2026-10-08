@@ -57,7 +57,7 @@ test('a TUI-only key is consumed with a notice', async ({ page, quil }) => {
   await login(page, quil);
   await keymapLoaded(page, 'default');
   await page.locator('.pane .term').first().click();
-  await page.keyboard.press('Alt+Shift+P'); // command palette
+  await page.keyboard.press('Alt+Shift+L'); // force redraw
   await expect(page.getByText('available in the TUI')).toBeVisible();
 });
 

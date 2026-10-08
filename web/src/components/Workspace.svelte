@@ -8,7 +8,9 @@
   import Menu from './Menu.svelte';
   import Notice from './Notice.svelte';
   import NotificationPanel from './NotificationPanel.svelte';
+  import Palette from './Palette.svelte';
   import PaneArea from './PaneArea.svelte';
+  import ProjectPicker from './ProjectPicker.svelte';
   import Sidebar from './Sidebar.svelte';
   import TabBar from './TabBar.svelte';
 
@@ -52,6 +54,12 @@
     {/if}
     {#if app.panel?.kind === 'help'}
       <HelpMenu {app} />
+    {/if}
+    {#if app.panel?.kind === 'palette'}
+      <Palette {app} />
+    {/if}
+    {#if app.panel?.kind === 'projects'}
+      <ProjectPicker {app} />
     {/if}
     {#if app.dialog && app.client && app.editable}
       <!-- Keyed: opening it again (another pane, another mode) starts over. -->

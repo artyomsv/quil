@@ -54,6 +54,8 @@ var forwardable = map[string]bool{
 	ipc.MsgPluginListReq: true, ipc.MsgBrowseDirReq: true, ipc.MsgGitReposReq: true,
 	ipc.MsgKubeCtxReq: true, ipc.MsgClaudeSessionsReq: true, ipc.MsgWorktreeListReq: true,
 	ipc.MsgSandboxCapReq: true, ipc.MsgDirsExistReq: true,
+	// 5c: the command palette's search in pane output.
+	ipc.MsgPaneSearchReq: true,
 }
 
 // idless types are sent without an ID whatever the page set: the daemon

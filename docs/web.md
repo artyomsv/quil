@@ -14,9 +14,10 @@ In the browser you can:
 - change the workspace (see [Editing](#editing));
 - read and dismiss notifications (see [Notifications](#notifications));
 - open lazygit and hunk over a pane (see [Overlays](#overlays));
-- use your keymap (see [Keys](#keys)).
+- use your keymap (see [Keys](#keys));
+- use the command palette, pane notes, input history, projects and groups, templates, and the F1 pages (see [Palette, notes and more](#palette-notes-and-more)).
 
-The palette, pane notes and settings are not in the browser. Use the terminal for those. The browser tells you when you press a key for one of them.
+These stay in the terminal: stopping the daemon, the settings pages, the plugin and template file editors, the log viewers, and adding an ssh host. The browser tells you when you press a key for one of them.
 
 ## Start it
 
@@ -145,6 +146,24 @@ Notes:
 - A closed pane stays closed. The daemon keeps every saved layout in step with the panes that exist.
 - In rare cases a blank slot shows for a moment: another client saves a layout while your terminal is splitting a pane. The pane fills the slot as soon as it arrives.
 
+## Palette, notes and more
+
+- **Command palette** (`Alt+Shift+P`). Type to filter the commands: go to a pane, tabs, projects, pane actions and system pages. The palette ranks the rows as the terminal does. What you type is also searched in the output of every pane; the matches show at the end of the list. A row that you cannot use now is grey and says why.
+- **Notes** (`Alt+E`, the pane menu or the palette). The note belongs to the pane and is shared with every terminal and browser. It is saved when you press `Ctrl+S`, when you close the editor, and 30 seconds after your last change.
+  - If someone else saved the note first, a bar shows three choices: **Load theirs** (your text is lost; click twice), **Keep mine**, and **Copy my text** (to the clipboard).
+  - The editor does not close while your text is not saved. If the pane closes, or the connection drops, your text stays in the editor. **Discard and close** drops it, after a second click.
+  - With `read-only` rights you can read a note, but not change it.
+- **Input history** (`Alt+Shift+I`, the pane menu or the palette). A list of what was typed into an AI pane. Open an entry to read it and copy it. It does not type into the pane. A pane type that records no history says so.
+- **Projects and groups** (`Alt+Shift+N`, the sidebar menus, the palette). Make, rename and remove projects; make, rename and delete groups; move a project into or out of a group. A new project on a fresh daemon takes the place of its first, unnamed project. With `--connect`, a host keeps one project: rename it, or fold projects in the terminal. The folder field takes a path on the daemon's machine; the list offers recent folders.
+- **Move a tab** to another project: the tab menu, **Move to project…**.
+- **New tab from a template**: the palette, **New from template**. The list comes from `templates.toml` on the machine that runs `quil web`; the daemon reads the template itself.
+- **Session details**: in the create-pane dialog, **Details** beside an earlier Claude session.
+- **F1** opens a menu:
+  - **Shortcuts**: the active keys and any conflicts.
+  - **Processes**: the processes of every pane, every 5 seconds. With `full` rights you can kill a process below the pane's own program.
+  - **Plugins**: the plugins this daemon found. With `full` rights, **Reload** reads the plugin files again.
+  - **Update**: the daemon's version and a newer release, if the daemon reported one. With `full` rights, **Download** stages it on the daemon's machine. The next terminal started on that machine applies it; the browser cannot.
+
 ## Notifications
 
 The notification list is the same as in the terminal, with the same filter. Press `Alt+N` to open it. You can dismiss one notification or all of them. Click one to jump to its pane. Tabs show an unread mark for panes you have not looked at.
@@ -155,9 +174,9 @@ The notification list is the same as in the terminal, with the same filter. Pres
 
 ## Keys
 
-The browser uses your keymap: your preset (including the tmux preset and its prefix) and your overrides. Press `F1` to see the list of active keys and any conflicts.
+The browser uses your keymap: your preset (including the tmux preset and its prefix) and your overrides. Press `F1` and pick **Shortcuts** to see the list of active keys and any conflicts.
 
-- The browser keeps `Ctrl+W`, `Ctrl+T`, `Ctrl+N`, `Ctrl+Tab`, `Ctrl+Shift+T`, `Ctrl+Shift+N` and `Ctrl+Shift+W` for itself. When an action uses one of them, the browser uses another chord. See [Keybindings](keybindings.md#keys-in-the-browser). The F1 list shows which chord works.
+- The browser keeps `Ctrl+W`, `Ctrl+T`, `Ctrl+N`, `Ctrl+Tab`, `Ctrl+Shift+T`, `Ctrl+Shift+N` and `Ctrl+Shift+W` for itself. When an action uses one of them, the browser uses another chord. See [Keybindings](keybindings.md#keys-in-the-browser). F1 → **Shortcuts** shows which chord works.
 - A key that runs an action does not go to the pane. All other keys go to the pane.
 - Alt composes text on macOS only, so on macOS `Alt+letter` types the text your layout makes. On Windows and Linux, Alt works as a modifier, and AltGr types text.
 - Your keymap is read when the page loads. Change the preset in the terminal (**F1 → Settings → Keys**), then reload the page.

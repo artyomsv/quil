@@ -25,9 +25,10 @@ import { OverlayClaim, type OverlayInfo, type OverlayKind, overlayOf, overlayRep
 import { HISTORY_TIMEOUT_MS } from './history';
 import { NOTE_LOAD_TIMEOUT_MS, type NoteIO, NoteSession } from './notes';
 import { buildPalette, type PaletteRow } from './palette';
+import { GroupRenames, newProjectPlan } from './projects';
 import { type Panel, panelTargetGone } from './panels';
 import { NOT_SENT, PasteFlow } from './paste';
-import type { Message, PaneInfo, PaneSize, SplitPaneReq, WebWelcome, WorkspaceState } from './protocol';
+import type { CreateProjectResp, Message, PaneInfo, PaneSize, SplitPaneReq, WebWelcome, WorkspaceState } from './protocol';
 import { type Outcome, Requests, STILL_WORKING } from './requests';
 import { type MsgClass, refusal, type Rights, rightsOf } from './rights';
 import { cellFromProbe, DaemonSizes, fitFontSize, gridFor, isFollower, Sizer, windowCells } from './sizing';
@@ -49,6 +50,8 @@ import { BASE_FONT, createXtermPane, FONT_FAMILY, type XtermPane } from './xterm
 // How often, and how many times, layout retries measuring a cell from a drawn
 // terminal. The budget starts over on every zoom change or return to view.
 const CELL_RETRY_MS = 100;
+// The sidebar's collapsed group names, a JSON list in local storage.
+const COLLAPSED_KEY = 'quil.groups.collapsed';
 const CELL_RETRIES = 20;
 const PROBE_CHARS = 32;
 
@@ -180,6 +183,12 @@ export class App {
     ),
   );
   private readonly fetchFn: FetchLike = (url, init) => window.fetch(url, init);
+  // The sidebar's collapsed groups, per browser (a view choice, as in the
+  // TUI, where it is per client).
+  collapsedGroups = $state.raw<ReadonlySet<string>>(this.loadCollapsed());
+  // One group rename in flight per group; groupBusy mirrors it for the UI.
+  readonly groupRenames = new GroupRenames();
+  groupBusy = $state.raw<ReadonlySet<string>>(new Set());
   private readonly conn: Connection;
   private readonly terminals: TerminalStore;
   private readonly sizer: Sizer;
@@ -228,6 +237,7 @@ export class App {
   private pendingJump: PendingJump | null = null;
 
   constructor() {
+    this.groupRenames.onChange = () => (this.groupBusy = this.groupRenames.inFlight);
     const send = (m: Message): void => this.conn.send(m);
     this.terminals = new TerminalStore(
       (id) => {
@@ -935,7 +945,40 @@ export class App {
         disabled: this.refusalFor('act') || noPane,
       },
     ];
-    return [[], [], pane, []];
+    const act = this.refusalFor('act');
+    const projectCount = this.state?.projects.length ?? 0;
+    const tabs: PaletteRow[] = [
+      {
+        label: 'Move tab to project…',
+        keywords: ['tab', 'move', 'project'],
+        run: { panel: { kind: 'move_tab', tabId: this.activeTabId } },
+        disabled: act || (this.activeTabId === '' ? 'no active tab' : projectCount < 2 ? 'no other project' : ''),
+      },
+    ];
+    const noProject = this.activeProjectId === '' ? 'no active project' : '';
+    const projects: PaletteRow[] = [
+      {
+        label: 'New project',
+        detail: this.keyFor('project.new'),
+        keywords: ['project', 'create', 'new'],
+        run: { action: 'project.new' },
+        disabled: act,
+      },
+      {
+        label: 'Rename project',
+        keywords: ['project', 'rename'],
+        run: { panel: { kind: 'project_rename', projectId: this.activeProjectId } },
+        disabled: act || noProject,
+      },
+      {
+        label: 'Remove project…',
+        detail: this.keyFor('project.destroy'),
+        keywords: ['project', 'remove', 'delete', 'close'],
+        run: { action: 'project.destroy' },
+        disabled: act || noProject,
+      },
+    ];
+    return [tabs, projects, pane, []];
   }
 
   // openNotes opens the pane's note. Reading is a view; the editor is
@@ -962,6 +1005,77 @@ export class App {
     };
     this.notes = n;
     n.load();
+  }
+
+  private loadCollapsed(): ReadonlySet<string> {
+    try {
+      const v: unknown = JSON.parse(this.storage.getItem(COLLAPSED_KEY) ?? '[]');
+      return new Set(Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
+    } catch {
+      return new Set();
+    }
+  }
+
+  toggleGroup(name: string): void {
+    const next = new Set(this.collapsedGroups);
+    if (next.has(name)) next.delete(name);
+    else next.add(name);
+    this.collapsedGroups = next;
+    this.storage.setItem(COLLAPSED_KEY, JSON.stringify([...next]));
+  }
+
+  // newProject follows the TUI's rules (lib/projects.ts): adopt the lone
+  // bootstrap project, refuse a second project on a --connect host or a name
+  // already taken, else create one and switch to it.
+  async newProject(name: string, rootDir: string): Promise<Outcome> {
+    const s = this.state;
+    if (!s) return { ok: false, code: 'offline', error: 'not connected' };
+    const plan = newProjectPlan(s, this.client?.connect === true, name);
+    if (plan.kind === 'refuse') {
+      this.showNotice(plan.text);
+      return { ok: false, code: 'refused', error: plan.text };
+    }
+    if (plan.kind === 'adopt') {
+      // An empty folder keeps the adopted project's own root: update_project
+      // has no unchanged-value guard, so "" would erase it (projectdialog.go).
+      const own = s.projects.find((p) => p.id === plan.projectId)?.root_dir ?? '';
+      return this.act('update_project', { project_id: plan.projectId, name, root_dir: rootDir.trim() || own, adopt_bootstrap: true });
+    }
+    const out = await this.act('create_project_req', { name, root_dir: rootDir.trim() });
+    const id = (out.reply?.payload as CreateProjectResp | undefined)?.project_id;
+    if (out.ok && id) this.switchProject(id);
+    return out;
+  }
+
+  renameProject(id: string, name: string): void {
+    const p = this.state?.projects.find((x) => x.id === id);
+    if (p) void this.act('update_project', { project_id: id, name, root_dir: p.root_dir });
+  }
+
+  removeProject(id: string): void {
+    void this.act('destroy_project', { project_id: id });
+  }
+
+  async groupOp(op: 'create' | 'rename' | 'delete', name: string, newName?: string): Promise<Outcome> {
+    if (op === 'rename' && !this.groupRenames.start(name)) {
+      this.showNotice('A rename of this group is still waiting for the daemon');
+      return { ok: false, code: 'busy', error: 'busy' };
+    }
+    try {
+      return await this.act('group_op', newName === undefined ? { op, name } : { op, name, new_name: newName });
+    } finally {
+      if (op === 'rename') this.groupRenames.end(name);
+    }
+  }
+
+  // fileProject puts a project in a group ('' = out of every group); the
+  // daemon creates a group name it does not have yet.
+  fileProject(projectId: string, group: string): void {
+    void this.act('set_project_group', { project_id: projectId, group });
+  }
+
+  moveTab(tabId: string, projectId: string): void {
+    void this.act('move_tab', { tab_id: tabId, project_id: projectId });
   }
 
   // openHistory opens the input-history dialog for a pane.
@@ -1107,6 +1221,12 @@ export class App {
         return;
       case 'pane.command_history':
         if (pane) this.openHistory(pane);
+        return;
+      case 'project.new':
+        this.openPanel({ kind: 'project_new' });
+        return;
+      case 'project.destroy':
+        if (this.activeProjectId) this.openPanel({ kind: 'project_remove', projectId: this.activeProjectId });
         return;
       case 'pane.notes_toggle':
         if (pane) {

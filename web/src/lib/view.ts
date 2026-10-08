@@ -27,6 +27,28 @@ export interface ProjectItem {
   name: string;
   active: boolean;
   tabs: TabItem[];
+  // The group the daemon files the project under; '' = ungrouped.
+  group: string;
+}
+
+export interface SidebarSection {
+  group: string;
+  projects: ProjectItem[];
+}
+
+// sidebarSections groups the sidebar as the TUI does: the daemon's named
+// groups in its order, then the ungrouped projects. A project filed under a
+// name the daemon does not list is shown ungrouped.
+export function sidebarSections(items: ProjectItem[], groups: string[]): SidebarSection[] {
+  const out: SidebarSection[] = groups.map((g) => ({ group: g, projects: [] }));
+  const rest: ProjectItem[] = [];
+  for (const it of items) {
+    const sec = it.group ? out.find((s) => s.group === it.group) : undefined;
+    if (sec) sec.projects.push(it);
+    else rest.push(it);
+  }
+  if (rest.length > 0) out.push({ group: '', projects: rest });
+  return out;
 }
 
 export interface PlacedPane {
@@ -176,10 +198,10 @@ export function sidebarModel(
       placed.add(id);
       items.push(tabItem(s, t, panes, agents, seen));
     }
-    out.push({ id: proj.id, name: sanitizeRemoteText(proj.name), active: proj.id === activeProject, tabs: items });
+    out.push({ id: proj.id, name: sanitizeRemoteText(proj.name), active: proj.id === activeProject, tabs: items, group: proj.group ?? '' });
   }
   const rest = s.tabs.filter((t) => !placed.has(t.id)).map((t) => tabItem(s, t, panes, agents, seen));
-  if (rest.length > 0) out.push({ id: '', name: 'Other tabs', active: false, tabs: rest });
+  if (rest.length > 0) out.push({ id: '', name: 'Other tabs', active: false, tabs: rest, group: '' });
   return out;
 }
 

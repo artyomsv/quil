@@ -1,25 +1,50 @@
 <script lang="ts">
   import type { App } from '../lib/app.svelte';
+  import { type ProjectItem, sidebarSections } from '../lib/view';
   import AgentDot from './AgentDot.svelte';
+  import GroupHeader from './GroupHeader.svelte';
+  import ProjectMenu from './ProjectMenu.svelte';
 
   interface Props {
     app: App;
   }
 
   let { app }: Props = $props();
+  // The daemon's groups first, then the ungrouped projects (and the
+  // "Other tabs" bucket), as the TUI's sidebar shows them.
+  const sections = $derived(sidebarSections(app.sidebar, app.state?.groups ?? []));
 </script>
 
 <nav>
-  {#each app.sidebar as project (project.id)}
+  {#each sections as sec (sec.group)}
+    <div class:group={sec.group !== ''}>
+      {#if sec.group !== ''}
+        <GroupHeader {app} name={sec.group} collapsed={app.collapsedGroups.has(sec.group)} ontoggle={() => app.toggleGroup(sec.group)} />
+      {/if}
+      {#if sec.group === '' || !app.collapsedGroups.has(sec.group)}
+        {#each sec.projects as project (project.id)}
+          {@render projectBlock(project)}
+        {/each}
+      {/if}
+    </div>
+  {:else}
+    <p class="empty">—</p>
+  {/each}
+</nav>
+
+{#snippet projectBlock(project: ProjectItem)}
     <section>
-      <button
-        class="project"
-        class:active={project.active}
-        disabled={app.readOnly || project.id === ''}
-        onclick={() => app.switchProject(project.id)}
-      >
-        {project.name || '—'}
-      </button>
+      <div class="row">
+        <button
+          class="project"
+          class:active={project.active}
+          disabled={app.readOnly || project.id === ''}
+          onclick={() => app.switchProject(project.id)}
+        >
+          {project.name || '—'}
+        </button>
+        {#if app.editable && project.id !== ''}<ProjectMenu {app} projectId={project.id} group={project.group} />{/if}
+      </div>
       <ul>
         {#each project.tabs as tab (tab.id)}
           <li>
@@ -36,10 +61,7 @@
         {/each}
       </ul>
     </section>
-  {:else}
-    <p class="empty">—</p>
-  {/each}
-</nav>
+{/snippet}
 
 <style>
   nav {
@@ -76,6 +98,12 @@
 
   .project.active {
     color: #e6e8ee;
+  }
+
+  .row {
+    display: flex;
+    align-items: center;
+    padding-right: 4px;
   }
 
   ul {

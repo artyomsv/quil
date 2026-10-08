@@ -12,6 +12,7 @@
   import NotificationPanel from './NotificationPanel.svelte';
   import Palette from './Palette.svelte';
   import PaneArea from './PaneArea.svelte';
+  import ProjectDialogs from './ProjectDialogs.svelte';
   import ProjectPicker from './ProjectPicker.svelte';
   import SessionDetail from './SessionDetail.svelte';
   import Sidebar from './Sidebar.svelte';
@@ -79,6 +80,13 @@
     {#if app.panel?.kind === 'session'}
       {#key app.panel}
         <SessionDetail {app} cwd={app.panel.cwd} sessionId={app.panel.sessionId} />
+      {/key}
+    {/if}
+    {#if app.editable}
+      <!-- Project, group and move-tab dialogs: they only send, so they show
+           only while the page may edit. Keyed: each opening starts over. -->
+      {#key app.panel}
+        <ProjectDialogs {app} />
       {/key}
     {/if}
     {#if app.dialog && app.client && app.editable}

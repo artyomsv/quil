@@ -105,6 +105,52 @@ func TestCheckForward_5cHistoryAndSession(t *testing.T) {
 	}
 }
 
+func TestCheckForward_5cProjects(t *testing.T) {
+	g := &forwardGate{leasedID: "web-p-1", helloSeen: true}
+	// Forwarded with their id, every unknown field dropped.
+	for _, m := range []*ipc.Message{
+		msg(t, ipc.MsgCreateProjectReq, "c1", map[string]any{"name": "n", "root_dir": "/r", "host": "evil"}),
+		msg(t, ipc.MsgUpdateProject, "c2", map[string]any{"project_id": "p", "name": "n", "root_dir": "/r", "adopt_bootstrap": true, "x": 1}),
+		msg(t, ipc.MsgDestroyProject, "c3", map[string]any{"project_id": "p", "x": 1}),
+		msg(t, ipc.MsgGroupOp, "c4", map[string]any{"op": "create", "name": "g", "x": 1}),
+		msg(t, ipc.MsgSetProjectGroup, "c5", map[string]any{"project_id": "p", "group": "g", "x": 1}),
+		msg(t, ipc.MsgMoveTab, "c6", map[string]any{"tab_id": "t", "project_id": "p", "x": 1}),
+	} {
+		fwd, refuse, _ := g.check(m)
+		if fwd == nil || refuse != nil {
+			t.Fatalf("%s refused: %v", m.Type, refuse)
+		}
+		if fwd.ID != m.ID {
+			t.Fatalf("%s lost its id", m.Type)
+		}
+		var out map[string]any
+		if err := json.Unmarshal(fwd.Payload, &out); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := out["host"]; ok {
+			t.Fatalf("%s kept an unknown field: %v", m.Type, out)
+		}
+		if _, ok := out["x"]; ok {
+			t.Fatalf("%s kept an unknown field: %v", m.Type, out)
+		}
+		if m.Type == ipc.MsgUpdateProject && out["adopt_bootstrap"] != true {
+			t.Fatalf("update_project dropped adopt_bootstrap: %v", out)
+		}
+	}
+	// These answer only an id-bearing request: an id-less one is refused.
+	for _, typ := range []string{ipc.MsgUpdateProject, ipc.MsgDestroyProject, ipc.MsgGroupOp, ipc.MsgSetProjectGroup, ipc.MsgMoveTab} {
+		if fwd, refuse, _ := g.check(msg(t, typ, "", struct{}{})); fwd != nil || refuse == nil {
+			t.Fatalf("%s without an id was forwarded", typ)
+		}
+	}
+	// Never forwarded.
+	for _, typ := range []string{ipc.MsgCreateProject, ipc.MsgMergeProjects, ipc.MsgSharedImport, ipc.MsgShutdown} {
+		if fwd, refuse, _ := g.check(msg(t, typ, "z", struct{}{})); fwd != nil || refuse == nil {
+			t.Fatalf("%s was forwarded", typ)
+		}
+	}
+}
+
 func TestCheckForward_AttachMustCarryTheLeasedID(t *testing.T) {
 	g := &forwardGate{leasedID: "web-p-1", helloSeen: true}
 	if _, refuse, _ := g.check(msg(t, ipc.MsgAttach, "a1", ipc.AttachPayload{ClientID: "web-p-9"})); refuse == nil {

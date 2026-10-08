@@ -8,8 +8,6 @@ export const TUI_ONLY = new Set([
   'pane.toggle_eager',
   'pane.toggle_wrap',
   'pane.focus_toggle',
-  'project.new',
-  'project.destroy',
   'project.next',
   'project.prev',
   'project.toggle',

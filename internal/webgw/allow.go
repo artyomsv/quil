@@ -60,6 +60,11 @@ var forwardable = map[string]bool{
 	ipc.MsgNoteGet: true, ipc.MsgNoteSet: true,
 	// 5c: input history and Claude session details.
 	ipc.MsgPaneHistoryReq: true, ipc.MsgPaneHistoryEntryReq: true, ipc.MsgClaudeSessionDetailReq: true,
+	// 5c: projects, groups, moving a tab (each re-encoded). The id-less
+	// create_project and merge_projects stay out: the first is never
+	// answered, the second (folding projects) is the TUI's alone.
+	ipc.MsgCreateProjectReq: true, ipc.MsgUpdateProject: true, ipc.MsgDestroyProject: true,
+	ipc.MsgGroupOp: true, ipc.MsgSetProjectGroup: true, ipc.MsgMoveTab: true,
 }
 
 // idless types are sent without an ID whatever the page set: the daemon
@@ -70,7 +75,12 @@ var idless = map[string]bool{ipc.MsgResizePanes: true, ipc.MsgClientGeometry: tr
 
 // needsID are the types whose only answer is to an id-bearing request; the
 // page must be able to end its wait on the answer (spec 5b §5.1).
-var needsID = map[string]bool{ipc.MsgDestroyTab: true, ipc.MsgUpdateTab: true}
+var needsID = map[string]bool{
+	ipc.MsgDestroyTab: true, ipc.MsgUpdateTab: true,
+	// 5c: these answer only an id-bearing request too.
+	ipc.MsgUpdateProject: true, ipc.MsgDestroyProject: true, ipc.MsgGroupOp: true,
+	ipc.MsgSetProjectGroup: true, ipc.MsgMoveTab: true,
+}
 
 // updatePaneFields are the update_pane fields the page may set. The others
 // (cwd, eager, pinned_attention, marked_for_deletion) are the TUI's own
@@ -252,6 +262,18 @@ func (g *forwardGate) checkFilled(m *ipc.Message, fill *instanceFill) (fwd, refu
 		return ownSplit(m, fill)
 	case ipc.MsgNoteSet:
 		return reencode[ipc.NoteSetPayload](m)
+	case ipc.MsgCreateProjectReq:
+		return reencode[ipc.CreateProjectReqPayload](m)
+	case ipc.MsgUpdateProject:
+		return reencode[ipc.UpdateProjectPayload](m)
+	case ipc.MsgDestroyProject:
+		return reencode[ipc.DestroyProjectPayload](m)
+	case ipc.MsgGroupOp:
+		return reencode[ipc.GroupOpPayload](m)
+	case ipc.MsgSetProjectGroup:
+		return reencode[ipc.SetProjectGroupPayload](m)
+	case ipc.MsgMoveTab:
+		return reencode[ipc.MoveTabPayload](m)
 	}
 	if idless[m.Type] {
 		c := *m

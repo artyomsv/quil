@@ -3,13 +3,22 @@
   import { sanitizeRemoteText } from '../lib/sanitize';
   import Banner from './Banner.svelte';
   import CreatePaneDialog from './CreatePaneDialog.svelte';
+  import HelpMenu from './HelpMenu.svelte';
+  import HistoryDialog from './HistoryDialog.svelte';
   import KeyList from './KeyList.svelte';
+  import MachinePages from './MachinePages.svelte';
   import Menu from './Menu.svelte';
+  import NotesEditor from './NotesEditor.svelte';
   import Notice from './Notice.svelte';
   import NotificationPanel from './NotificationPanel.svelte';
+  import Palette from './Palette.svelte';
   import PaneArea from './PaneArea.svelte';
+  import ProjectDialogs from './ProjectDialogs.svelte';
+  import ProjectPicker from './ProjectPicker.svelte';
+  import SessionDetail from './SessionDetail.svelte';
   import Sidebar from './Sidebar.svelte';
   import TabBar from './TabBar.svelte';
+  import TemplateDialog from './TemplateDialog.svelte';
 
   interface Props {
     app: App;
@@ -47,6 +56,43 @@
           items={app.repoPick.repos.map((r) => ({ label: sanitizeRemoteText(r), run: () => app.pickRepo(r) }))}
           onclose={() => app.closeRepoPick()}
         />
+      {/key}
+    {/if}
+    {#if app.panel?.kind === 'help'}
+      <HelpMenu {app} />
+    {/if}
+    {#if app.notes}
+      <!-- Outside the editable gate: a read-only page may read notes, and
+           the editor survives a lost link with its text. -->
+      {#key app.notes}
+        <NotesEditor {app} n={app.notes} />
+      {/key}
+    {/if}
+    {#if app.panel?.kind === 'palette'}
+      <Palette {app} />
+    {/if}
+    {#if app.panel?.kind === 'projects'}
+      <ProjectPicker {app} />
+    {/if}
+    {#if app.panel?.kind === 'history'}
+      {#key app.panel}
+        <HistoryDialog {app} paneId={app.panel.paneId} paneType={app.panel.paneType} />
+      {/key}
+    {/if}
+    {#if app.panel?.kind === 'session'}
+      {#key app.panel}
+        <SessionDetail {app} cwd={app.panel.cwd} sessionId={app.panel.sessionId} />
+      {/key}
+    {/if}
+    <MachinePages {app} />
+    {#if app.panel?.kind === 'template' && app.client && app.editable}
+      <TemplateDialog {app} />
+    {/if}
+    {#if app.editable}
+      <!-- Project, group and move-tab dialogs: they only send, so they show
+           only while the page may edit. Keyed: each opening starts over. -->
+      {#key app.panel}
+        <ProjectDialogs {app} />
       {/key}
     {/if}
     {#if app.dialog && app.client && app.editable}

@@ -1,7 +1,9 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -13,6 +15,7 @@ import (
 	"time"
 
 	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/artyomsv/quil/internal/sandbox"
 )
 
 // Every *_req type the protocol defines must answer an unreadable payload
@@ -30,6 +33,15 @@ func TestHandleMessage_EveryReqType_AnswersABadPayload(t *testing.T) {
 	// hello.go by name, so template.go's own *_req types were never covered).
 	requireReqType(t, types, ipc.MsgVersionReq)
 	requireReqType(t, types, ipc.MsgCreateFromTemplateReq)
+	// sandbox_cap_req answers from a Docker probe whose own timeout is longer
+	// than the 5 s this test waits: on a slow CI runner the real probe made
+	// the sub-test fail at random. The answer is what is under test, not
+	// Docker, so the probe answers at once.
+	prev := sandboxProbeFn
+	sandboxProbeFn = func(context.Context) (sandbox.Info, error) {
+		return sandbox.Info{}, errors.New("docker not probed in this test")
+	}
+	t.Cleanup(func() { sandboxProbeFn = prev })
 	_, client := mcpTestDaemon(t)
 	roundTrip(t, client, ipc.MsgHello, ipc.MsgHelloResp, ipc.HelloPayload{Kind: "script", Proto: 1, PID: os.Getpid()})
 	for _, typ := range types {

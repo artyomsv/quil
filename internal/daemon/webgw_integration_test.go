@@ -127,7 +127,7 @@ func newWebRigConfig(t *testing.T, cfg webgw.Config) *webRig {
 	}
 	r.key = out.Key
 	for _, c := range resp.Cookies() {
-		if c.Name == webgw.SessionCookie {
+		if c.Name == webgw.SessionCookieFor(r.host) {
 			r.cookie = c.Value
 		}
 	}
@@ -164,7 +164,7 @@ func (r *webRig) openAs(t *testing.T, hint string) *webTab {
 	defer cancel()
 	hdr := http.Header{}
 	hdr.Set("Origin", "http://"+r.host)
-	hdr.Set("Cookie", webgw.SessionCookie+"="+r.cookie)
+	hdr.Set("Cookie", webgw.SessionCookieFor(r.host)+"="+r.cookie)
 	c, _, err := websocket.Dial(ctx, "ws://"+r.host+"/ws", &websocket.DialOptions{HTTPHeader: hdr})
 	if err != nil {
 		t.Fatalf("web socket: %v", err)

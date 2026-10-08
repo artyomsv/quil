@@ -175,6 +175,39 @@ func loginRequest(method, origin, body string) *http.Request {
 	return req
 }
 
+// Two quil web servers on one machine: the browser sends both ports the
+// host's cookies, so each names its session cookie after its own port, and
+// a login on one never replaces the other's cookie.
+func TestSessionCookieName_IsPerPort(t *testing.T) {
+	req := func(host string) *http.Request {
+		r := httptest.NewRequest(http.MethodGet, "/session", nil)
+		r.Host = host
+		return r
+	}
+	if got := sessionCookieName(req("127.0.0.1:7880")); got != SessionCookie+"_7880" {
+		t.Fatalf("name = %q", got)
+	}
+	if sessionCookieName(req("127.0.0.1:7880")) == sessionCookieName(req("127.0.0.1:7881")) {
+		t.Fatal("two ports share one cookie name")
+	}
+	if got := sessionCookieName(req("localhost")); got != SessionCookie {
+		t.Fatalf("no port: %q", got)
+	}
+	if got := sessionCookieName(req("127.0.0.1:7x")); got != SessionCookie {
+		t.Fatalf("odd port: %q", got)
+	}
+	// A cookie of the other port's name is not this port's session.
+	r := req("127.0.0.1:7880")
+	r.Header.Set("Cookie", SessionCookie+"_7881=abc")
+	if sessionOf(r) != "" {
+		t.Fatal("the other port's cookie was read")
+	}
+	r.Header.Set("Cookie", SessionCookie+"_7881=abc; "+SessionCookie+"_7880=mine")
+	if sessionOf(r) != "mine" {
+		t.Fatalf("sessionOf = %q, want this port's", sessionOf(r))
+	}
+}
+
 func TestLoginHandler(t *testing.T) {
 	a, _ := testAuth()
 	code, _ := a.NewCode()
@@ -235,12 +268,12 @@ func TestLoginHandler(t *testing.T) {
 		t.Fatalf("body %q: %v", rec.Body.String(), err)
 	}
 	cookie := rec.Header().Get("Set-Cookie")
-	if !strings.Contains(cookie, SessionCookie+"=") || !strings.Contains(cookie, "HttpOnly") ||
+	if !strings.Contains(cookie, SessionCookie+"_7880=") || !strings.Contains(cookie, "HttpOnly") ||
 		!strings.Contains(cookie, "SameSite=Strict") || !strings.Contains(cookie, "Path=/") ||
 		strings.Contains(cookie, "Secure") {
 		t.Fatalf("cookie: %q", cookie)
 	}
-	sessionID := strings.TrimPrefix(strings.SplitN(cookie, ";", 2)[0], SessionCookie+"=")
+	sessionID := strings.TrimPrefix(strings.SplitN(cookie, ";", 2)[0], SessionCookie+"_7880=")
 	if !a.KeyValid(sessionID, got.Key) {
 		t.Fatal("the returned key does not match the cookie's session")
 	}

@@ -27,6 +27,34 @@ export interface ProjectItem {
   name: string;
   active: boolean;
   tabs: TabItem[];
+  // The group the daemon files the project under; '' = ungrouped.
+  group: string;
+}
+
+export interface SidebarSection {
+  group: string;
+  projects: ProjectItem[];
+}
+
+// sidebarSections groups the sidebar as the TUI does (sidebar.go): the
+// ungrouped projects first, then the daemon's named groups in its order. A
+// project filed under a name the daemon does not list is shown ungrouped.
+export function sidebarSections(items: ProjectItem[], groups: string[]): SidebarSection[] {
+  const named: SidebarSection[] = groups.map((g) => ({ group: g, projects: [] }));
+  const rest: ProjectItem[] = [];
+  for (const it of items) {
+    const sec = it.group ? named.find((s) => s.group === it.group) : undefined;
+    if (sec) sec.projects.push(it);
+    else rest.push(it);
+  }
+  return rest.length > 0 ? [{ group: '', projects: rest }, ...named] : named;
+}
+
+// groupMembersShown is what a group shows: every member, or — collapsed —
+// only the active project, so the project in use never disappears (the
+// TUI's rule).
+export function groupMembersShown(sec: SidebarSection, collapsed: boolean): ProjectItem[] {
+  return collapsed ? sec.projects.filter((p) => p.active) : sec.projects;
 }
 
 export interface PlacedPane {
@@ -82,13 +110,35 @@ export function parseWorkspaceState(p: unknown): WorkspaceState | null {
       project_id: str(t.project_id),
       layout: isObject(t.layout) ? (t.layout as SerializedNode) : undefined,
     })),
-    panes: panes.map((x) => ({ ...x, tab_id: str(x.tab_id), cwd: str(x.cwd) })),
-    projects: projects.map((x) => ({ ...x, name: str(x.name), tab_ids: strings(x.tab_ids), active_tab: str(x.active_tab) })),
+    panes: panes.map((x) => ({
+      ...x,
+      tab_id: str(x.tab_id),
+      cwd: str(x.cwd),
+      note_rev: typeof x.note_rev === 'number' ? x.note_rev : undefined,
+    })),
+    projects: projects.map((x) => ({
+      ...x,
+      name: str(x.name),
+      tab_ids: strings(x.tab_ids),
+      active_tab: str(x.active_tab),
+      group: typeof x.group === 'string' ? x.group : undefined,
+      bootstrap: x.bootstrap === true ? true : undefined,
+    })),
   };
   if (typeof p.size_master === 'string') out.size_master = p.size_master;
   if (typeof p.rev === 'number') out.rev = p.rev;
   if (typeof p.run_id === 'string') out.run_id = p.run_id;
   if (Array.isArray(p.recent_cwds)) out.recent_cwds = strings(p.recent_cwds);
+  if (Array.isArray(p.groups)) out.groups = strings(p.groups);
+  if (isObject(p.update) && typeof p.update.latest_version === 'string') {
+    const u = p.update;
+    out.update = {
+      latest_version: u.latest_version as string,
+      release_url: str(u.release_url),
+      staged_version: str(u.staged_version),
+      install_writable: u.install_writable === true,
+    };
+  }
   return out;
 }
 
@@ -154,10 +204,10 @@ export function sidebarModel(
       placed.add(id);
       items.push(tabItem(s, t, panes, agents, seen));
     }
-    out.push({ id: proj.id, name: sanitizeRemoteText(proj.name), active: proj.id === activeProject, tabs: items });
+    out.push({ id: proj.id, name: sanitizeRemoteText(proj.name), active: proj.id === activeProject, tabs: items, group: proj.group ?? '' });
   }
   const rest = s.tabs.filter((t) => !placed.has(t.id)).map((t) => tabItem(s, t, panes, agents, seen));
-  if (rest.length > 0) out.push({ id: '', name: 'Other tabs', active: false, tabs: rest });
+  if (rest.length > 0) out.push({ id: '', name: 'Other tabs', active: false, tabs: rest, group: '' });
   return out;
 }
 

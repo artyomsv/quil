@@ -103,6 +103,9 @@ type reservation struct {
 type clientChange struct {
 	master bool // the published master id changed (publishedMasterLocked)
 	count  bool // the number of attached clients changed
+	// others are the clients attached besides this one at the change, for
+	// an attach only: the ones its notice goes to.
+	others []*ipc.Conn
 }
 
 func (c clientChange) any() bool { return c.master || c.count }
@@ -438,7 +441,15 @@ func (r *clientRegistry) attach(conn *ipc.Conn, id string, cols, rows int, cwd s
 	// Compared across the whole attach, not just the election: admitting or
 	// replacing a shadowed record changes the published id by itself.
 	r.electSlotLocked()
-	return clientChange{master: r.publishedMasterLocked() != masterBefore, count: len(r.byConn) != before}, nil
+	change := clientChange{master: r.publishedMasterLocked() != masterBefore, count: len(r.byConn) != before}
+	// The clients this attach tells, listed under the same lock as the
+	// registration: a client that registers after it is not one of them.
+	for _, other := range r.sortedRecordsLocked() {
+		if other.conn != conn {
+			change.others = append(change.others, other.conn)
+		}
+	}
+	return change, nil
 }
 
 // lose drops conn after a LOST link: the conn closed with no MsgDetach. A
@@ -651,14 +662,24 @@ func (d *Daemon) shuttingDown() bool {
 // cause names the event that called it ("attach", "detach", "lost link"),
 // for the log line.
 func (d *Daemon) sendStateToOtherClients(except *ipc.Conn, cause string) {
+	d.sendStateToConns(d.otherClientConns(except), cause)
+}
+
+// otherClientConns lists every attached client's conn except the one given.
+func (d *Daemon) otherClientConns(except *ipc.Conn) []*ipc.Conn {
 	d.clients.mu.Lock()
+	defer d.clients.mu.Unlock()
 	var conns []*ipc.Conn
 	for _, rec := range d.clients.sortedRecordsLocked() {
 		if rec.conn != except {
 			conns = append(conns, rec.conn)
 		}
 	}
-	d.clients.mu.Unlock()
+	return conns
+}
+
+// sendStateToConns sends one fresh workspace state to the conns given.
+func (d *Daemon) sendStateToConns(conns []*ipc.Conn, cause string) {
 	if len(conns) == 0 {
 		return
 	}

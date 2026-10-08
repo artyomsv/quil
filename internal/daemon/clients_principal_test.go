@@ -8,6 +8,32 @@ import (
 	"github.com/artyomsv/quil/internal/ipc"
 )
 
+// An attach names the clients it tells under the registry's own lock: the
+// ones attached at its registration, never one that registers after it.
+func TestClients_AttachListsTheOthersAtRegistration(t *testing.T) {
+	h := newClientsHarness(t, testGrace)
+	r := &h.d.clients
+	a, b := new(ipc.Conn), new(ipc.Conn)
+	first, err := r.attach(a, "A", 200, 50, "", false, ipc.PrincipalLocal, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.others) != 0 {
+		t.Fatalf("the first attach lists %d others, want none", len(first.others))
+	}
+	second, err := r.attach(b, "B", 100, 30, "", false, ipc.PrincipalLocal, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.others) != 1 || second.others[0] != a {
+		t.Fatalf("the second attach lists %v, want only A's conn", second.others)
+	}
+	// The first attach's list was fixed when it registered: B is not on it.
+	if len(first.others) != 0 {
+		t.Fatal("the first attach's list grew after the fact")
+	}
+}
+
 func TestClients_ReadOnlyNeverEligible(t *testing.T) {
 	h := newClientsHarness(t, testGrace)
 	r := &h.d.clients

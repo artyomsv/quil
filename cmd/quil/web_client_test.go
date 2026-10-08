@@ -130,3 +130,43 @@ func TestWebClientInfo_NoBindingsFileUsesTheConfigTable(t *testing.T) {
 		t.Errorf("quil web wrote bindings.toml (stat err %v); only the TUI migrates", err)
 	}
 }
+
+// The templates the page lists come from the TUI's file: the embedded
+// defaults when it is absent, the file's own when it reads, and a fixed
+// error (no local path) when it does not.
+func TestWebClientExtras_Templates(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("QUIL_HOME", home)
+	ex := webClientExtras(config.Default(), false)()
+	if ex.TemplatesError != "" || len(ex.Templates) != len(config.DefaultTemplates().Templates) || len(ex.Templates) == 0 {
+		t.Fatalf("defaults: %+v err %q", ex.Templates, ex.TemplatesError)
+	}
+	src := "[[templates]]\nname = \"solo\"\ndescription = \"one\"\n[[templates.panes]]\ntype = \"terminal\"\n"
+	if err := os.WriteFile(config.TemplatesPath(), []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ex = webClientExtras(config.Default(), false)()
+	if len(ex.Templates) != 1 || ex.Templates[0].Name != "solo" || ex.Templates[0].Description != "one" || ex.TemplatesError != "" {
+		t.Fatalf("file: %+v err %q", ex.Templates, ex.TemplatesError)
+	}
+	if err := os.WriteFile(config.TemplatesPath(), []byte("[[templates]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ex = webClientExtras(config.Default(), false)()
+	if len(ex.Templates) != 0 || ex.TemplatesError == "" {
+		t.Fatalf("broken: %+v err %q", ex.Templates, ex.TemplatesError)
+	}
+	if strings.Contains(ex.TemplatesError, home) {
+		t.Fatalf("the error names a path on this machine: %q", ex.TemplatesError)
+	}
+}
+
+func TestWebClientExtras_Connect(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	if webClientExtras(config.Default(), false)().Connect {
+		t.Fatal("local reported as connect")
+	}
+	if !webClientExtras(config.Default(), true)().Connect {
+		t.Fatal("connect not reported")
+	}
+}

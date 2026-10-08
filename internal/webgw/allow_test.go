@@ -45,7 +45,7 @@ func TestCheckForward_FirstMustBeWebHelloWithLeasedID(t *testing.T) {
 
 func TestCheckForward_RefusesUnlistedTypes(t *testing.T) {
 	g := &forwardGate{leasedID: "web-p-1", helloSeen: true}
-	for _, typ := range []string{"token_create_req", ipc.MsgShutdown, "create_pane", "destroy_pane", "create_pane_req", "create_tab", "reload_plugins", "kill_process_req", "subscribe", "overlay_policy", MsgWebWelcome, "invented_type"} {
+	for _, typ := range []string{"token_create_req", ipc.MsgShutdown, "create_pane", "destroy_pane", "create_pane_req", "create_tab", ipc.MsgCreateProject, ipc.MsgMergeProjects, ipc.MsgSharedImport, "subscribe", "overlay_policy", MsgWebWelcome, "invented_type"} {
 		fwd, refuse, fatal := g.check(msg(t, typ, "r1", struct{}{}))
 		if fwd != nil || fatal != nil || refuse == nil {
 			t.Fatalf("%s: fwd=%v refuse=%v fatal=%v", typ, fwd, refuse, fatal)
@@ -53,6 +53,150 @@ func TestCheckForward_RefusesUnlistedTypes(t *testing.T) {
 		var p ipc.ErrorPayload
 		if err := json.Unmarshal(refuse.Payload, &p); err != nil || p.Code != ipc.ErrCodeRefused || refuse.ID != "r1" {
 			t.Fatalf("%s: refusal %+v id %q", typ, p, refuse.ID)
+		}
+	}
+}
+
+func TestCheckForward_5cPaletteSearch(t *testing.T) {
+	g := &forwardGate{leasedID: "web-p-1", helloSeen: true}
+	fwd, refuse, fatal := g.check(msg(t, ipc.MsgPaneSearchReq, "s1", ipc.PaneSearchReqPayload{Query: "x"}))
+	if fwd == nil || refuse != nil || fatal != nil {
+		t.Fatalf("pane_search_req: fwd=%v refuse=%v fatal=%v", fwd, refuse, fatal)
+	}
+	if fwd.ID != "s1" {
+		t.Fatalf("pane_search_req lost its id: %q", fwd.ID)
+	}
+}
+
+func TestCheckForward_5cNotes(t *testing.T) {
+	g := &forwardGate{leasedID: "web-p-1", helloSeen: true}
+	if fwd, refuse, _ := g.check(msg(t, ipc.MsgNoteGet, "n1", ipc.NoteGetPayload{PaneID: "p"})); fwd == nil || refuse != nil {
+		t.Fatalf("note_get refused: %v", refuse)
+	}
+	in := msg(t, ipc.MsgNoteSet, "n2", map[string]any{"pane_id": "p", "text": "x\n", "base_rev": 3, "extra": true})
+	fwd, refuse, _ := g.check(in)
+	if fwd == nil || refuse != nil {
+		t.Fatalf("note_set refused: %v", refuse)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(fwd.Payload, &out); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := out["extra"]; ok || out["text"] != "x\n" || out["base_rev"] != float64(3) || out["pane_id"] != "p" || fwd.ID != "n2" {
+		t.Fatalf("note_set re-encode: %v id %q", out, fwd.ID)
+	}
+	// A negative base cannot decode into the daemon's uint64: refused here.
+	bad := msg(t, ipc.MsgNoteSet, "n3", map[string]any{"pane_id": "p", "text": "x", "base_rev": -1})
+	if fwd, refuse, _ := g.check(bad); fwd != nil || refuse == nil {
+		t.Fatalf("negative base_rev forwarded: %v", fwd)
+	}
+}
+
+func TestCheckForward_5cHistoryAndSession(t *testing.T) {
+	g := &forwardGate{leasedID: "web-p-1", helloSeen: true}
+	for _, m := range []*ipc.Message{
+		msg(t, ipc.MsgPaneHistoryReq, "h1", ipc.PaneHistoryReqPayload{PaneID: "p"}),
+		msg(t, ipc.MsgPaneHistoryEntryReq, "h2", ipc.PaneHistoryEntryReqPayload{PaneID: "p", TsMs: 1}),
+		msg(t, ipc.MsgClaudeSessionDetailReq, "h3", ipc.ClaudeSessionDetailReqPayload{CWD: "/", SessionID: "s"}),
+	} {
+		if fwd, refuse, _ := g.check(m); fwd == nil || refuse != nil {
+			t.Fatalf("%s refused: %v", m.Type, refuse)
+		}
+	}
+}
+
+func TestCheckForward_5cProjects(t *testing.T) {
+	g := &forwardGate{leasedID: "web-p-1", helloSeen: true}
+	// Forwarded with their id, every unknown field dropped.
+	for _, m := range []*ipc.Message{
+		msg(t, ipc.MsgCreateProjectReq, "c1", map[string]any{"name": "n", "root_dir": "/r", "host": "evil"}),
+		msg(t, ipc.MsgUpdateProject, "c2", map[string]any{"project_id": "p", "name": "n", "root_dir": "/r", "adopt_bootstrap": true, "x": 1}),
+		msg(t, ipc.MsgDestroyProject, "c3", map[string]any{"project_id": "p", "x": 1}),
+		msg(t, ipc.MsgGroupOp, "c4", map[string]any{"op": "create", "name": "g", "x": 1}),
+		msg(t, ipc.MsgSetProjectGroup, "c5", map[string]any{"project_id": "p", "group": "g", "x": 1}),
+		msg(t, ipc.MsgMoveTab, "c6", map[string]any{"tab_id": "t", "project_id": "p", "x": 1}),
+	} {
+		fwd, refuse, _ := g.check(m)
+		if fwd == nil || refuse != nil {
+			t.Fatalf("%s refused: %v", m.Type, refuse)
+		}
+		if fwd.ID != m.ID {
+			t.Fatalf("%s lost its id", m.Type)
+		}
+		var out map[string]any
+		if err := json.Unmarshal(fwd.Payload, &out); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := out["host"]; ok {
+			t.Fatalf("%s kept an unknown field: %v", m.Type, out)
+		}
+		if _, ok := out["x"]; ok {
+			t.Fatalf("%s kept an unknown field: %v", m.Type, out)
+		}
+		if m.Type == ipc.MsgUpdateProject && out["adopt_bootstrap"] != true {
+			t.Fatalf("update_project dropped adopt_bootstrap: %v", out)
+		}
+	}
+	// These answer only an id-bearing request: an id-less one is refused.
+	for _, typ := range []string{ipc.MsgUpdateProject, ipc.MsgDestroyProject, ipc.MsgGroupOp, ipc.MsgSetProjectGroup, ipc.MsgMoveTab} {
+		if fwd, refuse, _ := g.check(msg(t, typ, "", struct{}{})); fwd != nil || refuse == nil {
+			t.Fatalf("%s without an id was forwarded", typ)
+		}
+	}
+	// Never forwarded.
+	for _, typ := range []string{ipc.MsgCreateProject, ipc.MsgMergeProjects, ipc.MsgSharedImport, ipc.MsgShutdown} {
+		if fwd, refuse, _ := g.check(msg(t, typ, "z", struct{}{})); fwd != nil || refuse == nil {
+			t.Fatalf("%s was forwarded", typ)
+		}
+	}
+}
+
+func TestCheckForward_5cTemplate(t *testing.T) {
+	g := &forwardGate{leasedID: "web-p-1", helloSeen: true}
+	fwd, refuse, _ := g.check(msg(t, ipc.MsgCreateFromTemplateReq, "t1", map[string]any{"template": "pair", "task": "x", "cwd": "/r", "branch": "b", "project_id": "p", "panes": []any{"evil"}}))
+	if fwd == nil || refuse != nil {
+		t.Fatalf("refused: %v", refuse)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(fwd.Payload, &out); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := out["panes"]; ok || out["template"] != "pair" || out["task"] != "x" || out["cwd"] != "/r" || out["branch"] != "b" || out["project_id"] != "p" || fwd.ID != "t1" {
+		t.Fatalf("re-encode: %v id %q", out, fwd.ID)
+	}
+}
+
+func TestCheckForward_5cMachinePages(t *testing.T) {
+	g := &forwardGate{leasedID: "web-p-1", helloSeen: true}
+	fwd, refuse, _ := g.check(msg(t, ipc.MsgResourceReportReq, "r1", map[string]any{"with_trees": true, "x": 1}))
+	if fwd == nil || refuse != nil {
+		t.Fatalf("resource_report_req refused: %v", refuse)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(fwd.Payload, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out["with_trees"] != true || out["x"] != nil {
+		t.Fatalf("resource_report_req re-encode: %v", out)
+	}
+	kill, refuse, _ := g.check(msg(t, ipc.MsgKillProcessReq, "k1", map[string]any{"pane_id": "p", "pid": 2, "start_ms": 3, "signal": "KILL"}))
+	if kill == nil || refuse != nil {
+		t.Fatalf("kill_process_req refused: %v", refuse)
+	}
+	out = nil
+	if err := json.Unmarshal(kill.Payload, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out["signal"] != nil || out["pid"] != float64(2) || out["start_ms"] != float64(3) {
+		t.Fatalf("kill_process_req re-encode: %v", out)
+	}
+	for _, m := range []*ipc.Message{
+		msg(t, ipc.MsgReloadPlugins, "", struct{}{}),
+		msg(t, ipc.MsgUpdateCheckReq, "", struct{}{}),
+		msg(t, ipc.MsgStageUpdateReq, "s1", struct{}{}),
+	} {
+		if fwd, refuse, _ := g.check(m); fwd == nil || refuse != nil {
+			t.Fatalf("%s refused: %v", m.Type, refuse)
 		}
 	}
 }

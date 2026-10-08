@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { WorkspaceState } from './protocol';
-import { activeProjectOf, activeTree, parseWorkspaceState, placedPanes, sidebarModel, tabBarModel } from './view';
+import { activeProjectOf, activeTree, parseWorkspaceState, placedPanes, sidebarModel, sidebarSections, groupMembersShown, tabBarModel } from './view';
 
 const ESC = String.fromCodePoint(0x1b);
 const RLO = String.fromCodePoint(0x202e);
@@ -177,5 +177,39 @@ describe('placedPanes', () => {
     expect(placedPanes(s)).toEqual([]);
     s.active_tab = 'nope';
     expect(placedPanes(s)).toEqual([]);
+  });
+});
+
+describe('sidebarSections', () => {
+  const item = (id: string, group: string) => ({ id, name: id, active: false, tabs: [], group });
+  it('lists the ungrouped first, then named groups in daemon order, as the TUI does', () => {
+    const got = sidebarSections([item('a', ''), item('b', 'ops'), item('c', 'dev')], ['dev', 'ops']);
+    expect(got.map((s) => [s.group, s.projects.map((p) => p.id)])).toEqual([
+      ['', ['a']],
+      ['dev', ['c']],
+      ['ops', ['b']],
+    ]);
+  });
+  it('a collapsed group still shows its active project', () => {
+    const sec = { group: 'ops', projects: [item('a', 'ops'), { ...item('b', 'ops'), active: true }] };
+    expect(groupMembersShown(sec, false).map((p) => p.id)).toEqual(['a', 'b']);
+    expect(groupMembersShown(sec, true).map((p) => p.id)).toEqual(['b']);
+  });
+  it('shows a project filed under an unlisted group as ungrouped', () => {
+    const got = sidebarSections([item('a', 'ghost')], []);
+    expect(got).toEqual([{ group: '', projects: [item('a', 'ghost')] }]);
+  });
+  it('keeps an empty listed group', () => {
+    expect(sidebarSections([], ['empty'])).toEqual([{ group: 'empty', projects: [] }]);
+  });
+  it('carries the project group from the state', () => {
+    const s = parseWorkspaceState({
+      active_tab: 't1',
+      tabs: [{ id: 't1', name: 'a', panes: [], project_id: 'p1' }],
+      panes: [],
+      projects: [{ id: 'p1', name: 'one', tab_ids: ['t1'], group: 'ops' }],
+      groups: ['ops'],
+    });
+    expect(sidebarModel(s, {})[0]?.group).toBe('ops');
   });
 });

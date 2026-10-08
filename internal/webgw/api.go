@@ -34,6 +34,19 @@ type ClientExtras struct {
 	SandboxImage  string
 	Keymap        any
 	Notifications any
+	// Templates and TemplatesError are read on the gateway machine, as the
+	// TUI reads them; Connect is true under quil web --connect.
+	Templates      []TemplateDef
+	TemplatesError string
+	Connect        bool
+}
+
+// TemplateDef is one workspace template as the browser lists it: the name
+// create_from_template_req carries and a line to show. The daemon reads the
+// template itself; the page never sends its content.
+type TemplateDef struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
 }
 
 // SandboxDefaults pre-fills the dialog's sandbox rows.
@@ -51,6 +64,18 @@ type ClientInfo struct {
 	Sandbox       SandboxDefaults              `json:"sandbox"`
 	Keymap        any                          `json:"keymap"`
 	Notifications any                          `json:"notifications"`
+	// Templates is never null; TemplatesError says why the file did not read.
+	Templates      []TemplateDef `json:"templates"`
+	TemplatesError string        `json:"templates_error,omitempty"`
+	Connect        bool          `json:"connect"`
+}
+
+// nonNilTemplates keeps "templates" a JSON list, never null.
+func nonNilTemplates(t []TemplateDef) []TemplateDef {
+	if t == nil {
+		return []TemplateDef{}
+	}
+	return t
 }
 
 // apiAuth runs the checks every /api route shares (Host was checked by
@@ -131,13 +156,16 @@ func (s *Server) handleClient(w http.ResponseWriter, r *http.Request) {
 		inst = instances.Store{}
 	}
 	writeJSON(w, http.StatusOK, ClientInfo{
-		Rights:        s.sessionRights(session),
-		Plugins:       s.catalog.plugins(),
-		Categories:    categories(),
-		Instances:     inst,
-		Sandbox:       SandboxDefaults{SignInDefault: ex.SandboxSignIn, ImageDefault: ex.SandboxImage},
-		Keymap:        ex.Keymap,
-		Notifications: ex.Notifications,
+		Rights:         s.sessionRights(session),
+		Plugins:        s.catalog.plugins(),
+		Categories:     categories(),
+		Instances:      inst,
+		Sandbox:        SandboxDefaults{SignInDefault: ex.SandboxSignIn, ImageDefault: ex.SandboxImage},
+		Keymap:         ex.Keymap,
+		Notifications:  ex.Notifications,
+		Templates:      nonNilTemplates(ex.Templates),
+		TemplatesError: ex.TemplatesError,
+		Connect:        ex.Connect,
 	})
 }
 

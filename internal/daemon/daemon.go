@@ -306,6 +306,12 @@ type Daemon struct {
 	broadcastTimerStop func() bool
 	broadcastAfterFn   func(time.Duration, func()) (stop func() bool)
 
+	// attachNotifyHook, when set (tests only), runs in handleAttach just
+	// before the other clients are told of the attach: a test holds it there
+	// to let a second client attach in that gap. Atomic: a test sets it while
+	// the server runs.
+	attachNotifyHook atomic.Pointer[func()]
+
 	// holds keeps each attaching conn's live pane output while its replay is
 	// sent, keyed by conn (outputhold.go). holdMu is a leaf guarding it;
 	// holdGate orders a flush's hold append and broadcast against a conn's
@@ -2010,7 +2016,18 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 		return
 	}
 	if change.any() {
-		defer d.sendStateToOtherClients(conn, "attach")
+		// The OTHER clients are the ones attached at registration, listed
+		// under the registry's lock (change.others). A client that attaches
+		// while this handler still runs gets its own attach state, built
+		// after this registration; listing the others any later gave that
+		// client a second frame with nothing new in it.
+		others := change.others
+		defer func() {
+			if hook := d.attachNotifyHook.Load(); hook != nil {
+				(*hook)()
+			}
+			d.sendStateToConns(others, "attach")
+		}()
 	}
 
 	// Hold this conn off live pane output until its replay is sent, BEFORE

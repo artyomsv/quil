@@ -35,6 +35,15 @@ export interface PluginDef {
   toggles?: ToggleDef[];
   raw_keys?: string[];
   uses_claude_auth?: boolean;
+  // The plugin records input history (Command.RecordHistory).
+  record_history?: boolean;
+}
+
+// TemplateDef is a workspace template as the page lists it; the daemon reads
+// its content itself.
+export interface TemplateDef {
+  name: string;
+  description?: string;
 }
 
 export interface SavedInstance {
@@ -56,6 +65,12 @@ export interface ClientInfo {
   // null when the server sent none.
   keymap: WebKeymap | null;
   notifications: NotifyInfo | null;
+  // The templates the TUI's dialog offers, read on the gateway machine, and
+  // why that file did not read ('' = it did).
+  templates: TemplateDef[];
+  templates_error: string;
+  // The gateway dials a remote daemon (quil web --connect).
+  connect: boolean;
 }
 
 export interface InstanceInput {
@@ -115,6 +130,13 @@ function asClientInfo(v: unknown): ClientInfo | null {
     },
     keymap: asWebKeymap(o.keymap),
     notifications: asNotifyInfo(o.notifications),
+    templates: Array.isArray(o.templates)
+      ? (o.templates as unknown[]).filter(
+          (t): t is TemplateDef => typeof t === 'object' && t !== null && typeof (t as TemplateDef).name === 'string',
+        )
+      : [],
+    templates_error: typeof o.templates_error === 'string' ? o.templates_error : '',
+    connect: o.connect === true,
   };
 }
 

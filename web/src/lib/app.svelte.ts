@@ -22,9 +22,29 @@ import { type Dir, neighbour } from './keys/nav';
 import { type FetchLike, hasSession, postLogin, sessionGone } from './login';
 import { NotificationStore, type NotifyInfo, type PaneEvent, parsePaneEvent } from './notifications';
 import { OverlayClaim, type OverlayInfo, type OverlayKind, overlayOf, overlayRepoChoice, overlayToggle } from './overlay';
+import { HISTORY_TIMEOUT_MS } from './history';
+import { NOTE_LOAD_TIMEOUT_MS, type NoteIO, NoteSession } from './notes';
+import { buildPalette, type PaletteRow } from './palette';
+import { folderFromBrowse, GroupRenames, newProjectPlan } from './projects';
+import { type Panel, panelTargetGone, stillShown } from './panels';
+import { REPORT_TIMEOUT_MS } from './processes';
 import { NOT_SENT, PasteFlow } from './paste';
-import type { Message, PaneInfo, PaneSize, SplitPaneReq, WebWelcome, WorkspaceState } from './protocol';
+import type {
+  CreateFromTemplateReq,
+  CreateFromTemplateResp,
+  CreateProjectResp,
+  Message,
+  PaneInfo,
+  PaneSize,
+  SplitPaneReq,
+  VersionResp,
+  WebWelcome,
+  WorkspaceState,
+} from './protocol';
+import { sanitizeRemoteText } from './sanitize';
+import { TEMPLATE_TOO_OLD, templateGate } from './template';
 import { type Outcome, Requests, STILL_WORKING } from './requests';
+import { type MsgClass, refusal, type Rights, rightsOf } from './rights';
 import { cellFromProbe, DaemonSizes, fitFontSize, gridFor, isFollower, Sizer, windowCells } from './sizing';
 import { SplitDrag } from './splitbars';
 import { StateRev } from './staterev';
@@ -44,6 +64,10 @@ import { BASE_FONT, createXtermPane, FONT_FAMILY, type XtermPane } from './xterm
 // How often, and how many times, layout retries measuring a cell from a drawn
 // terminal. The budget starts over on every zoom change or return to view.
 const CELL_RETRY_MS = 100;
+// The sidebar's collapsed group names, a JSON list in local storage.
+const COLLAPSED_KEY = 'quil.groups.collapsed';
+// The sidebar's collapsed project ids, the same way.
+const PROJECTS_COLLAPSED_KEY = 'quil.projects.collapsed';
 const CELL_RETRIES = 20;
 const PROBE_CHARS = 32;
 
@@ -134,6 +158,19 @@ export class App {
   // Bumped by notification.focus; the panel focuses its list.
   notifyFocus = $state(0);
   keyListOpen = $state(false);
+  // The one 5c dialog open (palette, F1 menu, history, project forms, …).
+  panel = $state.raw<Panel | null>(null);
+  rights = $derived<Rights>(rightsOf(this.welcome));
+  // The open notes editor. Not a Panel: it survives a lost link (spec §6).
+  // notesTick is bumped on every change of the session's plain fields.
+  notes = $state.raw<NoteSession | null>(null);
+  // From version_req at each attach: the gated requests the daemon handles
+  // (null = not asked or no answer) and its version ('' = unknown).
+  daemonRequests = $state.raw<string[] | null>(null);
+  daemonVersion = $state('');
+  // A stage_update_req is out (one at a time).
+  stageBusy = $state(false);
+  notesTick = $state(0);
   sidebarOpen = $state(true);
   keyHint = $state('');
   keymap = $state.raw<WebKeymap | null>(null);
@@ -168,6 +205,14 @@ export class App {
     ),
   );
   private readonly fetchFn: FetchLike = (url, init) => window.fetch(url, init);
+  // The sidebar's collapsed groups, per browser (a view choice, as in the
+  // TUI, where it is per client).
+  collapsedGroups = $state.raw<ReadonlySet<string>>(this.loadCollapsed(COLLAPSED_KEY));
+  // The projects whose tab list is hidden in the sidebar, per browser too.
+  collapsedProjects = $state.raw<ReadonlySet<string>>(this.loadCollapsed(PROJECTS_COLLAPSED_KEY));
+  // One group rename in flight per group; groupBusy mirrors it for the UI.
+  readonly groupRenames = new GroupRenames();
+  groupBusy = $state.raw<ReadonlySet<string>>(new Set());
   private readonly conn: Connection;
   private readonly terminals: TerminalStore;
   private readonly sizer: Sizer;
@@ -216,6 +261,7 @@ export class App {
   private pendingJump: PendingJump | null = null;
 
   constructor() {
+    this.groupRenames.onChange = () => (this.groupBusy = this.groupRenames.inFlight);
     const send = (m: Message): void => this.conn.send(m);
     this.terminals = new TerminalStore(
       (id) => {
@@ -389,6 +435,8 @@ export class App {
     this.welcome = w;
     this.readOnly = w.rights === 'read-only';
     if (this.readOnly) this.closeAsks();
+    // An open note follows the rights the new socket holds.
+    this.notes?.setViewOnly(this.readOnly);
     this.banner = null;
     this.fresh = false;
     for (const id of this.shown.keys()) {
@@ -512,6 +560,23 @@ export class App {
     if (this.tabAsk && !askedTabShown(s, this.tabAsk.tabId)) this.tabAsk = null;
     // A repository picker belongs to the tab it was opened in.
     if (this.repoPick && this.repoPick.tab !== s.active_tab) this.repoPick = null;
+    // A 5c dialog about a pane, tab, project or group this state no longer
+    // holds closes, with a notice (spec §6).
+    if (this.panel && panelTargetGone(this.panel, s)) {
+      this.panel = null;
+      this.showNotice('Closed: what it was about is gone');
+    }
+    // The open note follows its pane's note_rev; a closed pane keeps the
+    // editor open with its text (spec §4.2).
+    if (this.notes) {
+      const n = this.notes;
+      const p = s.panes.find((x) => x.id === n.paneId);
+      if (!p) n.paneClosed();
+      else {
+        n.linkBack();
+        n.frameRev(p.note_rev);
+      }
+    }
     // A notification jump finishes once the state shows its tab.
     const jump = resolveJump(this.pendingJump, s, placed, browserClock.now());
     this.pendingJump = jump.keep;
@@ -572,6 +637,9 @@ export class App {
   private linkLost(): void {
     this.live = false;
     this.closeAsks();
+    // Before the requests fail: the editor marks its own save abandoned
+    // rather than reading "connection lost" as a refusal.
+    this.notes?.linkLost();
     this.requests.reconnecting();
     this.pasteFlow.reconnecting();
     this.drag.linkLost();
@@ -591,6 +659,8 @@ export class App {
     this.tabAsk = null;
     this.dialog = null;
     this.repoPick = null;
+    // Every 5c Panel closes too; the notes editor is not a Panel (spec §6).
+    this.panel = null;
   }
 
   // closePaneAsk and closeTabAsk end a rename or close dialog, by its own
@@ -843,7 +913,7 @@ export class App {
   private readonly onBlur = (): void => this.keys?.cancel();
 
   private runBuiltin(id: string): void {
-    if (id === 'help') this.openKeyList();
+    if (id === 'help') this.openPanel({ kind: 'help' });
     else if (id === 'new_pane') {
       if (this.readOnly) this.showNotice('read-only connection — that action is disabled');
       else this.openCreate('pane');
@@ -858,6 +928,358 @@ export class App {
   closeKeyList(): void {
     this.keyListOpen = false;
     this.focusActive();
+  }
+
+  // openPanel shows one 5c dialog; a pending key prefix is dropped first.
+  openPanel(p: Panel): void {
+    this.keys?.cancel();
+    this.panel = p;
+    // The template form lists /api/client's templates: read them again.
+    if (p.kind === 'template') void this.refreshClient();
+  }
+
+  // closePanelIf closes the panel only while p is still the one shown: a
+  // request answered after its form was cancelled and another opened must
+  // not close the newer one.
+  closePanelIf(p: Panel | null): void {
+    if (stillShown(p, this.panel)) this.closePanel();
+  }
+
+  closePanel(): void {
+    this.panel = null;
+    this.focusActiveSoon();
+  }
+
+  // fire sends a message the daemon never answers.
+  fire(type: string, payload: unknown): void {
+    if (!this.requests.fire(type, payload)) this.showNotice('Not connected — nothing was sent');
+  }
+
+  // refusalFor is why a control of class c is greyed now, '' when it may run.
+  refusalFor(c: MsgClass): string {
+    return refusal(this.rights, c, this.live);
+  }
+
+  // paletteExtraRows are the rows later screens add to the palette's Tabs,
+  // Projects, Pane and System sections, in that order.
+  paletteExtraRows(): PaletteRow[][] {
+    const noPane = this.activePane === '' ? 'no active pane' : '';
+    const pane: PaletteRow[] = [
+      {
+        label: 'Toggle notes',
+        detail: this.keyFor('pane.notes_toggle'),
+        keywords: ['note', 'notes', 'editor'],
+        run: { action: 'pane.notes_toggle' },
+        disabled: noPane,
+      },
+      {
+        label: 'Input history',
+        detail: this.keyFor('pane.command_history'),
+        keywords: ['history', 'prompts', 'input'],
+        run: { action: 'pane.command_history' },
+        disabled: this.refusalFor('act') || noPane,
+      },
+    ];
+    const act = this.refusalFor('act');
+    const projectCount = this.state?.projects.length ?? 0;
+    const tabs: PaletteRow[] = [
+      {
+        label: 'New from template',
+        keywords: ['template', 'workspace', 'agents'],
+        run: { panel: { kind: 'template' } },
+        disabled:
+          act ||
+          templateGate(this.daemonRequests) ||
+          (this.client?.templates_error ?? '') ||
+          ((this.client?.templates.length ?? 0) === 0 ? 'no templates' : ''),
+      },
+      {
+        label: 'Move tab to project…',
+        keywords: ['tab', 'move', 'project'],
+        run: { panel: { kind: 'move_tab', tabId: this.activeTabId } },
+        disabled: act || (this.activeTabId === '' ? 'no active tab' : projectCount < 2 ? 'no other project' : ''),
+      },
+    ];
+    const noProject = this.activeProjectId === '' ? 'no active project' : '';
+    const projects: PaletteRow[] = [
+      {
+        label: 'New project',
+        detail: this.keyFor('project.new'),
+        keywords: ['project', 'create', 'new'],
+        run: { action: 'project.new' },
+        disabled: act,
+      },
+      {
+        label: 'Rename project',
+        keywords: ['project', 'rename'],
+        run: { panel: { kind: 'project_rename', projectId: this.activeProjectId } },
+        disabled: act || noProject,
+      },
+      {
+        label: 'Remove project…',
+        detail: this.keyFor('project.destroy'),
+        keywords: ['project', 'remove', 'delete', 'close'],
+        run: { action: 'project.destroy' },
+        disabled: act || noProject,
+      },
+    ];
+    const system: PaletteRow[] = [
+      {
+        label: 'Processes',
+        keywords: ['process', 'processes', 'memory', 'mem', 'ram', 'cpu', 'kill'],
+        run: { panel: { kind: 'processes' } },
+        disabled: act,
+      },
+      { label: 'Plugins', keywords: ['plugin', 'plugins', 'reload'], run: { panel: { kind: 'plugins' } } },
+      { label: 'Update', keywords: ['update', 'version', 'upgrade'], run: { panel: { kind: 'update' } } },
+    ];
+    return [tabs, projects, pane, system];
+  }
+
+  // resourceReport asks for the process trees (the Processes page; the
+  // daemon's collector runs only while these keep coming).
+  resourceReport(): Promise<Outcome> {
+    return this.requests.request('resource_report_req', { with_trees: true }, { timeoutMs: REPORT_TIMEOUT_MS });
+  }
+
+  killProcess(paneId: string, pid: number, startMs: number): Promise<Outcome> {
+    return this.act('kill_process_req', { pane_id: paneId, pid, start_ms: startMs });
+  }
+
+  // reloadPlugins: reload_plugins has no answer; the plugin_list_req sent
+  // after it on the same socket is answered after the reload ran (one
+  // connection's messages run in order).
+  reloadPlugins(): Promise<Outcome> {
+    this.fire('reload_plugins', {});
+    return this.requests.request('plugin_list_req', {});
+  }
+
+  // stageUpdate downloads a release on the daemon's machine, one at a time;
+  // the daemon may take minutes (updateCheckTimeout is 10 min).
+  async stageUpdate(): Promise<Outcome> {
+    if (this.stageBusy) return { ok: false, code: 'busy', error: 'a download is already running' };
+    this.stageBusy = true;
+    try {
+      return await this.requests.request('stage_update_req', {}, { timeoutMs: 600_000 });
+    } finally {
+      this.stageBusy = false;
+    }
+  }
+
+  // openNotes opens the pane's note. Reading is a view; the editor is
+  // read-only below standard rights (spec §4.2). One editor at a time.
+  openNotes(paneId: string): void {
+    this.keys?.cancel();
+    if (this.notes && this.notes.paneId === paneId) return;
+    if (this.notes) {
+      if (this.notes.close() === 'wait') {
+        this.showNotice('Close the open note first — it has unsaved text');
+        return;
+      }
+      this.notes = null;
+    }
+    const io: NoteIO = {
+      get: (id) => this.requests.request('note_get', { pane_id: id }, { timeoutMs: NOTE_LOAD_TIMEOUT_MS }),
+      set: (id, text, base) => this.requests.request('note_set', { pane_id: id, text, base_rev: base }),
+    };
+    const n = new NoteSession(paneId, io, browserClock, this.rights === 'read-only');
+    n.onChange = () => this.notesTick++;
+    n.onClosed = () => {
+      if (this.notes === n) this.notes = null;
+      this.focusActiveSoon();
+    };
+    this.notes = n;
+    n.load();
+  }
+
+  private loadCollapsed(key: string): ReadonlySet<string> {
+    try {
+      const v: unknown = JSON.parse(this.storage.getItem(key) ?? '[]');
+      return new Set(Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
+    } catch {
+      return new Set();
+    }
+  }
+
+  private flip(set: ReadonlySet<string>, name: string, key: string): ReadonlySet<string> {
+    const next = new Set(set);
+    if (next.has(name)) next.delete(name);
+    else next.add(name);
+    this.storage.setItem(key, JSON.stringify([...next]));
+    return next;
+  }
+
+  toggleGroup(name: string): void {
+    this.collapsedGroups = this.flip(this.collapsedGroups, name, COLLAPSED_KEY);
+  }
+
+  // toggleProject shows or hides a project's tabs in the sidebar.
+  toggleProject(id: string): void {
+    this.collapsedProjects = this.flip(this.collapsedProjects, id, PROJECTS_COLLAPSED_KEY);
+  }
+
+  // newProject follows the TUI's rules (lib/projects.ts): adopt the lone
+  // bootstrap project, refuse a second project on a --connect host or a name
+  // already taken, else create one and switch to it.
+  async newProject(name: string, rootDir: string, stillOpen: () => boolean = () => true): Promise<Outcome> {
+    const s = this.state;
+    if (!s) return { ok: false, code: 'offline', error: 'not connected' };
+    const plan = newProjectPlan(s, this.client?.connect === true, name);
+    if (plan.kind === 'refuse') {
+      this.showNotice(plan.text);
+      return { ok: false, code: 'refused', error: plan.text };
+    }
+    // A typed folder is resolved by the daemon first (~, relative paths,
+    // existence): neither update_project nor create_project_req checks it.
+    const folder = await this.resolveFolder(rootDir);
+    if ('error' in folder) {
+      this.showNotice(`Folder: ${folder.error}`);
+      return { ok: false, code: 'refused', error: folder.error };
+    }
+    // A form cancelled while the daemon checked the folder sends nothing.
+    if (!stillOpen()) return { ok: false, code: 'cancelled', error: 'cancelled' };
+    if (plan.kind === 'adopt') {
+      // An empty folder keeps the adopted project's own root: update_project
+      // has no unchanged-value guard, so "" would erase it (projectdialog.go).
+      const own = s.projects.find((p) => p.id === plan.projectId)?.root_dir ?? '';
+      return this.act('update_project', { project_id: plan.projectId, name, root_dir: folder.dir || own, adopt_bootstrap: true });
+    }
+    const out = await this.act('create_project_req', { name, root_dir: folder.dir });
+    const id = (out.reply?.payload as CreateProjectResp | undefined)?.project_id;
+    if (out.ok && id) this.switchProject(id);
+    return out;
+  }
+
+  // resolveFolder checks a typed folder on the daemon's machine
+  // (browse_dir_req): '' stays '' (the daemon's default), anything else
+  // becomes the absolute folder the daemon resolved, or an error the form
+  // keeps open on (the caller shows it).
+  async resolveFolder(input: string): Promise<{ dir: string } | { error: string }> {
+    const t = input.trim();
+    if (t === '') return { dir: '' };
+    return folderFromBrowse(await this.requests.request('browse_dir_req', { path: t }));
+  }
+
+  // renameProject waits for the daemon's answer (spec §4.4); the form closes
+  // only on its OK.
+  renameProject(id: string, name: string): Promise<Outcome> {
+    const p = this.state?.projects.find((x) => x.id === id);
+    if (!p) return Promise.resolve({ ok: false, code: 'gone', error: 'That project is gone' });
+    return this.act('update_project', { project_id: id, name, root_dir: p.root_dir });
+  }
+
+  removeProject(id: string): void {
+    void this.act('destroy_project', { project_id: id });
+  }
+
+  async groupOp(op: 'create' | 'rename' | 'delete', name: string, newName?: string): Promise<Outcome> {
+    if (op === 'rename' && !this.groupRenames.start(name)) {
+      this.showNotice('A rename of this group is still waiting for the daemon');
+      return { ok: false, code: 'busy', error: 'busy' };
+    }
+    try {
+      return await this.act('group_op', newName === undefined ? { op, name } : { op, name, new_name: newName });
+    } finally {
+      if (op === 'rename') this.groupRenames.end(name);
+    }
+  }
+
+  // fileProject puts a project in a group ('' = out of every group); the
+  // daemon creates a group name it does not have yet.
+  fileProject(projectId: string, group: string): void {
+    void this.act('set_project_group', { project_id: projectId, group });
+  }
+
+  moveTab(tabId: string, projectId: string): void {
+    void this.act('move_tab', { tab_id: tabId, project_id: projectId });
+  }
+
+  // openHistory opens the input-history dialog for a pane.
+  openHistory(paneId: string): void {
+    const p = this.state?.panes.find((x) => x.id === paneId);
+    if (!p) return;
+    this.openPanel({ kind: 'history', paneId, paneType: p.type || 'terminal' });
+  }
+
+  historyList(paneId: string): Promise<Outcome> {
+    return this.requests.request('pane_history_req', { pane_id: paneId }, { timeoutMs: HISTORY_TIMEOUT_MS });
+  }
+
+  historyEntry(paneId: string, tsMs: number): Promise<Outcome> {
+    return this.requests.request('pane_history_entry_req', { pane_id: paneId, ts_ms: tsMs }, { timeoutMs: HISTORY_TIMEOUT_MS });
+  }
+
+  sessionDetail(cwd: string, sessionId: string): Promise<Outcome> {
+    return this.requests.request('claude_session_detail_req', { cwd, session_id: sessionId });
+  }
+
+  // closeNotes is the editor's Close / Escape: it closes now when nothing is
+  // at risk, else after the save (or stays, offering the choices).
+  closeNotes(): void {
+    const n = this.notes;
+    if (!n) return;
+    if (n.close() === 'closed') {
+      this.notes = null;
+      this.focusActiveSoon();
+    }
+  }
+
+  // discardNotes closes the editor dropping its text (the confirmed
+  // "Discard and close").
+  discardNotes(): void {
+    this.notes?.stop();
+    this.notes = null;
+    this.focusActiveSoon();
+  }
+
+  paletteRows(): PaletteRow[] {
+    const s = this.state;
+    if (!s) return [];
+    return buildPalette({
+      state: s,
+      activeProject: this.activeProjectId,
+      activePane: this.activePane,
+      keyFor: (id) => this.keyFor(id),
+      refusal: (c) => this.refusalFor(c),
+      extra: this.paletteExtraRows(),
+    });
+  }
+
+  // runPaletteRow runs a chosen row through the same handler as its key.
+  runPaletteRow(r: PaletteRow): void {
+    if (!r.run || r.disabled) return;
+    this.panel = null;
+    const run = r.run;
+    if ('action' in run) {
+      if (run.action === 'builtin.new_pane') this.runBuiltin('new_pane');
+      else this.runAction(run.action);
+    } else if ('goPane' in run) this.goToPane(run.goPane);
+    else if ('switchTab' in run) this.switchTab(run.switchTab);
+    else if ('switchProject' in run) this.switchProject(run.switchProject);
+    else this.openPanel(run.panel);
+    if (this.panel === null) this.focusActiveSoon();
+  }
+
+  // goToPane shows the pane's tab and makes the pane active, through the
+  // notification jump's path: a pane in another tab is activated once the
+  // state showing that tab arrives (resolveJump in applyState).
+  goToPane(paneId: string): void {
+    const p = this.state?.panes.find((x) => x.id === paneId);
+    if (!p) return;
+    const placed = this.placed.map((x) => x.id);
+    const step = jumpStep(this.state, this.activeTabId, placed, p.tab_id, paneId, this.readOnly, browserClock.now());
+    if (step.switch !== '') this.switchTab(step.switch);
+    // After the switch, which clears any older jump.
+    this.pendingJump = step.pending;
+    if (step.activate !== '') {
+      this.setActivePane(step.activate);
+      this.focus(step.activate);
+    }
+  }
+
+  // searchPanes is the palette's search in pane output (view class).
+  searchPanes(q: string): Promise<Outcome> {
+    return this.requests.request('pane_search_req', { query: q }, { timeoutMs: 3000, timeoutText: 'search timed out' });
   }
 
   // focusActiveSoon is focusActive once the current key event is over. An
@@ -909,6 +1331,30 @@ export class App {
         return;
       case 'system.shortcuts':
         this.openKeyList();
+        return;
+      case 'app.command_palette':
+        this.openPanel({ kind: 'palette' });
+        // The template rows read /api/client: a template added or a broken
+        // templates.toml repaired in the TUI shows at the next open.
+        void this.refreshClient();
+        return;
+      case 'pane.command_history':
+        if (pane) this.openHistory(pane);
+        return;
+      case 'project.new':
+        this.openPanel({ kind: 'project_new' });
+        return;
+      case 'project.destroy':
+        if (this.activeProjectId) this.openPanel({ kind: 'project_remove', projectId: this.activeProjectId });
+        return;
+      case 'pane.notes_toggle':
+        if (pane) {
+          if (this.notes?.paneId === pane) this.closeNotes();
+          else this.openNotes(pane);
+        }
+        return;
+      case 'project.picker':
+        this.openPanel({ kind: 'projects' });
         return;
       case 'client.take_control':
         this.takeControl();
@@ -1240,6 +1686,29 @@ export class App {
     this.reportOverlay();
     void this.refreshClient();
     void this.rebuildNotifications();
+    void this.askVersion();
+  }
+
+  // askVersion learns, once per attach, the daemon's version and the gated
+  // requests it handles (templates, the Update page).
+  private async askVersion(): Promise<void> {
+    const o = await this.requests.request('version_req', {});
+    const p = (o.reply?.payload ?? null) as VersionResp | null;
+    this.daemonRequests = o.ok && p ? (p.requests ?? []) : null;
+    this.daemonVersion = o.ok && p ? sanitizeRemoteText(p.version) : '';
+  }
+
+  async createFromTemplate(req: CreateFromTemplateReq): Promise<Outcome> {
+    // The form shows the error itself, so no notice as well (act's).
+    if (!this.editable) return { ok: false, code: 'offline', error: this.readOnly ? 'This page is read-only' : 'Not connected — nothing was changed' };
+    const out = await this.requests.request('create_from_template_req', req, { timeoutText: TEMPLATE_TOO_OLD });
+    const p = out.reply?.payload as CreateFromTemplateResp | undefined;
+    const first = p?.pane_ids?.[0];
+    if (out.ok && first) {
+      if (p?.preparing_worktree) this.followFocus = first;
+      this.goToPane(first);
+    }
+    return out;
   }
 
   private focus(paneId: string): void {

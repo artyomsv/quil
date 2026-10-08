@@ -1,19 +1,13 @@
-// Actions with no browser form in 5b. Their chords are still consumed, with a
+// Actions with no browser form yet (5c). Their chords are still consumed, with a
 // notice, so they never type into a pane by surprise (spec §5.5).
 export const TUI_ONLY = new Set([
   'app.quit',
   'app.redraw',
-  'app.command_palette',
-  'pane.notes_toggle',
-  'pane.command_history',
   'pane.quick_actions',
   'pane.go_back',
   'pane.toggle_eager',
   'pane.toggle_wrap',
   'pane.focus_toggle',
-  'project.new',
-  'project.destroy',
-  'project.picker',
   'project.next',
   'project.prev',
   'project.toggle',
@@ -45,6 +39,9 @@ export const OVERLAY_ACTIONS = new Set(['pane.toggle_lazygit', 'pane.toggle_hunk
 // Actions a read-only tab may still run: they change only this page. The
 // overlay toggles only show or hide an overlay that already exists.
 export const VIEW_ONLY = new Set([
+  'app.command_palette',
+  'project.picker',
+  'pane.notes_toggle',
   'pane.toggle_lazygit',
   'pane.toggle_hunk',
   'notification.toggle',

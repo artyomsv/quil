@@ -135,6 +135,33 @@ func TestClientDispatch_AttachMasterChangeReachesOthersOnly(t *testing.T) {
 	}
 }
 
+// The clients an attach tells are the ones attached when it registered. A
+// second client that attaches while the first attach still runs gets only
+// its own attach state, never the first attach's notice too. The hook holds
+// the first attach in exactly that gap, so the old order (listing the other
+// clients when the deferred send ran) fails every time instead of now and
+// then.
+func TestClientDispatch_AttachNoticeSkipsALaterAttach(t *testing.T) {
+	d, sock, _ := resizeAuthorityDaemon(t)
+	hook := func() {
+		deadline := time.Now().Add(2 * time.Second)
+		for d.clientCount() < 2 && time.Now().Before(deadline) {
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	d.attachNotifyHook.Store(&hook)
+	t.Cleanup(func() { d.attachNotifyHook.Store(nil) })
+
+	first := attachClientAs(t, sock, "first", 200, 50)
+	readUntil(t, first, "first's attach state", isType(ipc.MsgWorkspaceState))
+	second := attachClientAs(t, sock, "second", 100, 30)
+	if n := countType(readFor(second, 500*time.Millisecond), ipc.MsgWorkspaceState); n != 1 {
+		t.Errorf("the later client received %d workspace_state frames, want only its own 1", n)
+	}
+	// The first client still hears of the second (its attach is a change).
+	readUntil(t, first, "a state counting two clients", stateWith(2))
+}
+
 // stateWith matches a workspace_state carrying this attached count.
 func stateWith(clients int) func(*ipc.Message) bool {
 	return func(m *ipc.Message) bool {

@@ -43,7 +43,7 @@ func (h *wsHarness) api(method, path string, s session, body any, mut func(*http
 		rdr = bytes.NewReader(nil)
 	}
 	req, _ := http.NewRequest(method, h.ts.URL+path, rdr)
-	req.Header.Set("Cookie", SessionCookie+"="+s.cookie)
+	req.Header.Set("Cookie", h.cookieName()+"="+s.cookie)
 	req.Header.Set(APIKeyHeader, s.key)
 	if method != http.MethodGet {
 		req.Header.Set("Origin", h.origin())
@@ -152,6 +152,53 @@ func TestAPI_ClientReturnsCatalogInstancesAndRights(t *testing.T) {
 	}
 	if resp.Header.Get("Cache-Control") != "no-store" {
 		t.Fatal("api answers must not be cached")
+	}
+}
+
+// The 5c facts pass through: the templates list, the connect flag, and each
+// plugin's record_history from the registry.
+func TestAPI_ClientCarriesTemplatesConnectAndHistory(t *testing.T) {
+	h, _ := newAPIHarness(t, "full")
+	h.s.cfg.ClientExtras = func() ClientExtras {
+		return ClientExtras{Templates: []TemplateDef{{Name: "pair", Description: "two"}}, TemplatesError: "bad", Connect: true}
+	}
+	writePlugin(t, h.s.cfg.PluginsDir, "e2e-hist.toml", "[plugin]\nname = \"e2e-hist\"\ndisplay_name = \"E2E Hist\"\ncategory = \"ai\"\n\n[command]\ncmd = \"cat\"\nrecord_history = true\n")
+	s := h.login()
+	h.liveTab(s)
+	resp := h.api(http.MethodGet, "/api/client", s, nil, nil)
+	var ci ClientInfo
+	if err := json.NewDecoder(resp.Body).Decode(&ci); err != nil {
+		t.Fatal(err)
+	}
+	if len(ci.Templates) != 1 || ci.Templates[0] != (TemplateDef{Name: "pair", Description: "two"}) || !ci.Connect || ci.TemplatesError != "bad" {
+		t.Fatalf("templates %+v err %q connect %v", ci.Templates, ci.TemplatesError, ci.Connect)
+	}
+	if d := findDef(ci.Plugins, "e2e-hist"); d == nil || !d.RecordHistory {
+		t.Fatalf("e2e-hist record_history: %+v", d)
+	}
+	if d := findDef(ci.Plugins, "e2e-ssh"); d == nil || d.RecordHistory {
+		t.Fatalf("e2e-ssh record_history: %+v", d)
+	}
+	if d := findDef(ci.Plugins, "terminal"); d == nil || d.RecordHistory {
+		t.Fatalf("terminal record_history: %+v", d)
+	}
+}
+
+// A gateway with no templates still sends a JSON list, never null.
+func TestAPI_ClientTemplatesNeverNull(t *testing.T) {
+	h, _ := newAPIHarness(t, "full")
+	s := h.login()
+	h.liveTab(s)
+	resp := h.api(http.MethodGet, "/api/client", s, nil, nil)
+	var raw map[string]json.RawMessage
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		t.Fatal(err)
+	}
+	if string(raw["templates"]) != "[]" {
+		t.Fatalf("templates = %s, want []", raw["templates"])
+	}
+	if string(raw["connect"]) != "false" {
+		t.Fatalf("connect = %s, want false", raw["connect"])
 	}
 }
 
@@ -312,7 +359,7 @@ func TestAPI_InstanceWritesAreSerialized(t *testing.T) {
 			defer wg.Done()
 			b, _ := json.Marshal(sshBody("n"))
 			req, _ := http.NewRequest(http.MethodPost, h.ts.URL+"/api/instances", bytes.NewReader(b))
-			req.Header.Set("Cookie", SessionCookie+"="+s.cookie)
+			req.Header.Set("Cookie", h.cookieName()+"="+s.cookie)
 			req.Header.Set(APIKeyHeader, s.key)
 			req.Header.Set("Origin", h.origin())
 			req.Header.Set("Content-Type", "application/json")

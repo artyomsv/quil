@@ -16,6 +16,9 @@
     return [
       { label: 'Rename…', run: () => app.startRenameTab(id), key: app.keyFor('tab.rename') },
       ...TAB_COLORS.map((c) => ({ label: `Colour: ${c.label}`, run: () => app.setTabColor(id, c.value) })),
+      ...((app.state?.projects.length ?? 0) > 1
+        ? [{ label: 'Move to project…', run: () => app.openPanel({ kind: 'move_tab', tabId: id }) }]
+        : []),
       { label: 'Close…', run: () => app.askCloseTab(id), key: app.keyFor('tab.close') },
     ];
   }

@@ -35,10 +35,10 @@ type WebAckPayload struct {
 
 // forwardable is everything the browser client may send to the daemon. In
 // the default mode each tab is a local client with full rights, so this list
-// is the page's whole power: token management, shutdown, process kill, the
-// raw create types (create_pane, create_pane_req, create_tab) and the
-// fire-and-forget destroy_pane are absent on purpose. Add a type only with
-// the UI that uses it (spec 5b §4.1).
+// is the page's whole power: token management, shutdown, the raw create
+// types (create_pane, create_pane_req, create_tab, create_project), folding
+// projects (merge_projects) and the fire-and-forget destroy_pane are absent
+// on purpose. Add a type only with the UI that uses it (spec 5b §4.1).
 var forwardable = map[string]bool{
 	ipc.MsgHello: true, ipc.MsgAttach: true, ipc.MsgDetach: true, ipc.MsgStateReq: true,
 	ipc.MsgPaneInput: true, ipc.MsgResizePanes: true, ipc.MsgClientGeometry: true,
@@ -54,6 +54,23 @@ var forwardable = map[string]bool{
 	ipc.MsgPluginListReq: true, ipc.MsgBrowseDirReq: true, ipc.MsgGitReposReq: true,
 	ipc.MsgKubeCtxReq: true, ipc.MsgClaudeSessionsReq: true, ipc.MsgWorktreeListReq: true,
 	ipc.MsgSandboxCapReq: true, ipc.MsgDirsExistReq: true,
+	// 5c: the command palette's search in pane output.
+	ipc.MsgPaneSearchReq: true,
+	// 5c: pane notes (note_set is re-encoded).
+	ipc.MsgNoteGet: true, ipc.MsgNoteSet: true,
+	// 5c: input history and Claude session details.
+	ipc.MsgPaneHistoryReq: true, ipc.MsgPaneHistoryEntryReq: true, ipc.MsgClaudeSessionDetailReq: true,
+	// 5c: projects, groups, moving a tab (each re-encoded). The id-less
+	// create_project and merge_projects stay out: the first is never
+	// answered, the second (folding projects) is the TUI's alone.
+	ipc.MsgCreateProjectReq: true, ipc.MsgUpdateProject: true, ipc.MsgDestroyProject: true,
+	ipc.MsgGroupOp: true, ipc.MsgSetProjectGroup: true, ipc.MsgMoveTab: true,
+	// 5c: new tab from a template (by name; the daemon reads the template).
+	ipc.MsgCreateFromTemplateReq: true,
+	// 5c: the machine pages. Their classes are act and admin: the daemon's
+	// rights table decides, the page only greys what it would refuse.
+	ipc.MsgResourceReportReq: true, ipc.MsgKillProcessReq: true, ipc.MsgReloadPlugins: true,
+	ipc.MsgUpdateCheckReq: true, ipc.MsgStageUpdateReq: true,
 }
 
 // idless types are sent without an ID whatever the page set: the daemon
@@ -64,7 +81,12 @@ var idless = map[string]bool{ipc.MsgResizePanes: true, ipc.MsgClientGeometry: tr
 
 // needsID are the types whose only answer is to an id-bearing request; the
 // page must be able to end its wait on the answer (spec 5b §5.1).
-var needsID = map[string]bool{ipc.MsgDestroyTab: true, ipc.MsgUpdateTab: true}
+var needsID = map[string]bool{
+	ipc.MsgDestroyTab: true, ipc.MsgUpdateTab: true,
+	// 5c: these answer only an id-bearing request too.
+	ipc.MsgUpdateProject: true, ipc.MsgDestroyProject: true, ipc.MsgGroupOp: true,
+	ipc.MsgSetProjectGroup: true, ipc.MsgMoveTab: true,
+}
 
 // updatePaneFields are the update_pane fields the page may set. The others
 // (cwd, eager, pinned_attention, marked_for_deletion) are the TUI's own
@@ -123,6 +145,21 @@ func (g *forwardGate) ownHello(m *ipc.Message, h ipc.HelloPayload) (*ipc.Message
 func ownAttach(m *ipc.Message, a ipc.AttachPayload) (*ipc.Message, error) {
 	a.CWD = ""
 	return withPayload(m, a)
+}
+
+// reencode forwards m with its payload decoded into T and encoded again, so
+// only T's fields reach the daemon: a field the page added on its own is
+// dropped, never passed through. A payload T cannot decode is refused.
+func reencode[T any](m *ipc.Message) (fwd, refuse *ipc.Message, fatal error) {
+	var p T
+	if err := json.Unmarshal(m.Payload, &p); err != nil {
+		return nil, refusal(m, m.Type+" is malformed"), nil
+	}
+	c, err := withPayload(m, p)
+	if err != nil {
+		return nil, refusal(m, m.Type+" is malformed"), nil
+	}
+	return c, nil, nil
 }
 
 func withPayload(m *ipc.Message, payload any) (*ipc.Message, error) {
@@ -229,6 +266,26 @@ func (g *forwardGate) checkFilled(m *ipc.Message, fill *instanceFill) (fwd, refu
 		}
 	case ipc.MsgSplitPaneReq:
 		return ownSplit(m, fill)
+	case ipc.MsgNoteSet:
+		return reencode[ipc.NoteSetPayload](m)
+	case ipc.MsgCreateProjectReq:
+		return reencode[ipc.CreateProjectReqPayload](m)
+	case ipc.MsgUpdateProject:
+		return reencode[ipc.UpdateProjectPayload](m)
+	case ipc.MsgDestroyProject:
+		return reencode[ipc.DestroyProjectPayload](m)
+	case ipc.MsgGroupOp:
+		return reencode[ipc.GroupOpPayload](m)
+	case ipc.MsgSetProjectGroup:
+		return reencode[ipc.SetProjectGroupPayload](m)
+	case ipc.MsgMoveTab:
+		return reencode[ipc.MoveTabPayload](m)
+	case ipc.MsgCreateFromTemplateReq:
+		return reencode[ipc.CreateFromTemplateReqPayload](m)
+	case ipc.MsgResourceReportReq:
+		return reencode[ipc.ResourceReportReqPayload](m)
+	case ipc.MsgKillProcessReq:
+		return reencode[ipc.KillProcessReqPayload](m)
 	}
 	if idless[m.Type] {
 		c := *m

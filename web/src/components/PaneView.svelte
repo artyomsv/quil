@@ -32,6 +32,8 @@
     { label: 'New pane…', run: () => createFrom('pane'), key: app.keyFor('builtin.new_pane') },
     { label: 'Replace…', run: () => createFrom('replace') },
     { label: 'Rename…', run: () => app.startRenamePane(paneId), key: app.keyFor('pane.rename') },
+    { label: 'Notes…', run: () => app.openNotes(paneId), key: app.keyFor('pane.notes_toggle') },
+    { label: 'Input history…', run: () => app.openHistory(paneId), key: app.keyFor('pane.command_history') },
     { label: muted ? 'Unmute' : 'Mute', run: () => app.setMuted(paneId, !muted), key: app.keyFor('pane.mute') },
     { label: 'Restart', run: () => app.restartPane(paneId), key: app.keyFor('pane.restart') },
     ...app.tabBar

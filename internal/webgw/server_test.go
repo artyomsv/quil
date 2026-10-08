@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -107,6 +108,12 @@ func (h *wsHarness) daemon(i int) *fakeDaemon {
 
 func (h *wsHarness) origin() string { return "http://" + h.host }
 
+// cookieName is the session cookie of this harness's port (sessionCookieName).
+func (h *wsHarness) cookieName() string {
+	_, port, _ := net.SplitHostPort(h.host)
+	return SessionCookie + "_" + port
+}
+
 type session struct {
 	cookie string
 	key    string
@@ -138,7 +145,7 @@ func (h *wsHarness) login() session {
 		h.t.Fatal(err)
 	}
 	for _, c := range resp.Cookies() {
-		if c.Name == SessionCookie {
+		if c.Name == h.cookieName() {
 			return session{cookie: c.Value, key: out.Key, code: code}
 		}
 	}
@@ -152,7 +159,7 @@ func (h *wsHarness) header(cookie, origin string) http.Header {
 		hdr.Set("Origin", origin)
 	}
 	if cookie != "" {
-		hdr.Set("Cookie", SessionCookie+"="+cookie)
+		hdr.Set("Cookie", h.cookieName()+"="+cookie)
 	}
 	return hdr
 }
@@ -251,7 +258,7 @@ func TestSession_AnswersByCookie(t *testing.T) {
 			req.Host = host
 		}
 		if cookie != "" {
-			req.Header.Set("Cookie", SessionCookie+"="+cookie)
+			req.Header.Set("Cookie", h.cookieName()+"="+cookie)
 		}
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {

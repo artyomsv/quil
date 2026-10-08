@@ -26,6 +26,8 @@ type PluginDef struct {
 	Toggles        []ToggleDef `json:"toggles,omitempty"`
 	RawKeys        []string    `json:"raw_keys,omitempty"`
 	UsesClaudeAuth bool        `json:"uses_claude_auth,omitempty"`
+	// RecordHistory: the plugin records input history (the history dialog).
+	RecordHistory bool `json:"record_history,omitempty"`
 }
 
 // FieldDef is one field of a plugin's saved-instance form.
@@ -137,6 +139,7 @@ func (c *catalog) plugins() []PluginDef {
 			Description: p.Description, Homepage: p.Homepage,
 			PromptsCWD: p.Command.PromptsCWD, Discover: p.Command.Discover, Sessions: p.Command.Sessions,
 			RawKeys: append([]string(nil), p.Command.RawKeys...), UsesClaudeAuth: p.UsesClaudeAuth(),
+			RecordHistory: p.Command.RecordHistory,
 		}
 		for _, f := range p.Command.FormFields {
 			d.FormFields = append(d.FormFields, FieldDef{Name: f.Name, Label: f.Label, Required: f.Required, Default: f.Default})

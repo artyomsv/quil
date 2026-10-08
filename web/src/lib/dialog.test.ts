@@ -40,6 +40,9 @@ const info: ClientInfo = {
   sandbox: { sign_in_default: 'shared', image_default: 'img:1' },
   keymap: null,
   notifications: null,
+  templates: [],
+  templates_error: '',
+  connect: false,
 };
 const avail = { terminal: true, 'claude-code': true, ssh: true, k9s: true };
 

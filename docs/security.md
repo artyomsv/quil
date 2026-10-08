@@ -11,6 +11,8 @@ Quil's daemon accepts clients on two transports.
 
 The browser client (`quil web`) is a separate entry: a loopback web server in front of the daemon. It asks for a one-time login code that only its own terminal shows, then for a key that stays in the page's own browser storage, because cookies are shared between ports. With `--connect` it is a token client and gets that token's level. A flood of wrong login codes can keep every login place busy and lock the owner out of logging in while it lasts. See [Quil in a browser](web.md).
 
+The gateway passes on only the message types its pages use: the workspace and editing types, the create-pane dialog's lists, and — since step 5c — the palette's output search, notes, input history, project and group changes, templates, Claude session details, the process report and kill, plugin reload, and the update check and download. It drops page-added fields from the types that carry them. It never passes `shutdown`, token management, `create_project` (never answered), `merge_projects` (folding projects is the terminal's) or `shared_import`. The daemon's class table still decides every type: the gateway is an extra layer, and the page greys what the daemon would refuse. `reload_plugins` and `update_check_req` have no answer, so a refused one shows no error in the page — the page offers them only with `full` rights.
+
 The listener is off until you set `[listener] tcp` in `config.toml` (see [Configuration](configuration.md#listener)). The local socket needs no setup and works exactly as before; nothing on this page changes it except the tighter file permissions described under [Local socket](#local-socket).
 
 ## Threat model

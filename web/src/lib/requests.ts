@@ -70,6 +70,17 @@ export class Requests {
     });
   }
 
+  // fire sends a request the daemon never answers (reload_plugins,
+  // update_check_req): no id, nothing pending, so no false timeout.
+  fire(type: string, payload: unknown): boolean {
+    return this.send({ type, payload });
+  }
+
+  // size is the number of requests still waiting for an answer.
+  get size(): number {
+    return this.pending.size;
+  }
+
   // answer ends the request m answers; false when m is not one of ours.
   answer(m: Message): boolean {
     if (!m.id) return false;

@@ -149,8 +149,12 @@ func (a *authStore) KeyValid(session, key string) bool {
 // second quil web on the same machine replaced this one's cookie when its
 // page logged in, and this page's next /api call was refused ("Log in
 // again"). The port is in the name only when it is all digits.
-func sessionCookieName(r *http.Request) string {
-	_, port, err := net.SplitHostPort(r.Host)
+func sessionCookieName(r *http.Request) string { return SessionCookieFor(r.Host) }
+
+// SessionCookieFor is the session cookie name of the gateway serving host
+// ("127.0.0.1:7880" → "quil_web_session_7880").
+func SessionCookieFor(host string) string {
+	_, port, err := net.SplitHostPort(host)
 	if err != nil || port == "" {
 		return SessionCookie
 	}

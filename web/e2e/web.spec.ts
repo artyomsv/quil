@@ -148,7 +148,9 @@ test('a missing cookie or a foreign origin is refused', async ({ page, quil }) =
 
   await login(page, quil);
   const cookie = (await page.context().cookies()).map((c) => `${c.name}=${c.value}`).join('; ');
-  expect(cookie).toContain('quil_web_session=');
+  // The session cookie is named after the gateway's port (two quil web
+  // servers on one machine must not replace each other's).
+  expect(cookie).toContain(`quil_web_session_${new URL(quil.url).port}=`);
   expect(await rawGet(ws, { ...upgradeHeaders, Origin: 'http://evil.example', Cookie: cookie })).toBe(403);
 
   const login403 = await page.request.post(`${origin}/login`, {

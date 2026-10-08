@@ -33,6 +33,8 @@
     worktrees?: { path: string; branch?: string; main?: boolean; bare?: boolean; prunable?: boolean; detached?: boolean }[];
   }
   interface SessionList {
+    // The folder the daemon listed (claude_sessions_resp echoes it).
+    cwd?: string;
     sessions?: { id: string; title?: string; modified_ms?: number; in_use_pane_id?: string }[];
   }
 
@@ -40,6 +42,7 @@
   const wt = $derived((view.lists.worktrees.reply?.payload as WorktreeList | undefined) ?? {});
   const worktrees = $derived((wt.worktrees ?? []).filter((w) => !w.bare && !w.prunable));
   const sessions = $derived((view.lists.sessions.reply?.payload as SessionList | undefined)?.sessions ?? []);
+  const sessionsCwd = $derived((view.lists.sessions.reply?.payload as SessionList | undefined)?.cwd ?? view.cwd);
   const worktreeChoice = $derived(view.newBranchMode ? NEW_BRANCH : view.existingWorktree);
 
   function pickWorktree(v: string): void {
@@ -201,6 +204,16 @@
           />
           <span class="title">{sanitizeRemoteText(s.title || s.id)}</span>
           <span class="caption">{when(s.modified_ms)}{s.in_use_pane_id ? ' · in use' : ''}</span>
+          <button
+            type="button"
+            class="details"
+            onclick={(e) => {
+              // Inside the radio's label: a click here must not pick the session.
+              e.preventDefault();
+              e.stopPropagation();
+              app.openPanel({ kind: 'session', cwd: sessionsCwd, sessionId: s.id });
+            }}>Details</button
+          >
         </label>
       {/each}
       {@render status('sessions', 'no earlier sessions for this folder')}
@@ -272,6 +285,17 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .details {
+    margin-left: auto;
+    padding: 0 6px;
+    border: 1px solid #3a3f4b;
+    background: none;
+    color: inherit;
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
   }
 
   input[type='text'],

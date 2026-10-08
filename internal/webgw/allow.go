@@ -58,6 +58,8 @@ var forwardable = map[string]bool{
 	ipc.MsgPaneSearchReq: true,
 	// 5c: pane notes (note_set is re-encoded).
 	ipc.MsgNoteGet: true, ipc.MsgNoteSet: true,
+	// 5c: input history and Claude session details.
+	ipc.MsgPaneHistoryReq: true, ipc.MsgPaneHistoryEntryReq: true, ipc.MsgClaudeSessionDetailReq: true,
 }
 
 // idless types are sent without an ID whatever the page set: the daemon

@@ -92,6 +92,19 @@ func TestCheckForward_5cNotes(t *testing.T) {
 	}
 }
 
+func TestCheckForward_5cHistoryAndSession(t *testing.T) {
+	g := &forwardGate{leasedID: "web-p-1", helloSeen: true}
+	for _, m := range []*ipc.Message{
+		msg(t, ipc.MsgPaneHistoryReq, "h1", ipc.PaneHistoryReqPayload{PaneID: "p"}),
+		msg(t, ipc.MsgPaneHistoryEntryReq, "h2", ipc.PaneHistoryEntryReqPayload{PaneID: "p", TsMs: 1}),
+		msg(t, ipc.MsgClaudeSessionDetailReq, "h3", ipc.ClaudeSessionDetailReqPayload{CWD: "/", SessionID: "s"}),
+	} {
+		if fwd, refuse, _ := g.check(m); fwd == nil || refuse != nil {
+			t.Fatalf("%s refused: %v", m.Type, refuse)
+		}
+	}
+}
+
 func TestCheckForward_AttachMustCarryTheLeasedID(t *testing.T) {
 	g := &forwardGate{leasedID: "web-p-1", helloSeen: true}
 	if _, refuse, _ := g.check(msg(t, ipc.MsgAttach, "a1", ipc.AttachPayload{ClientID: "web-p-9"})); refuse == nil {

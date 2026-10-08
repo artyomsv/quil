@@ -4,6 +4,7 @@
   import Banner from './Banner.svelte';
   import CreatePaneDialog from './CreatePaneDialog.svelte';
   import HelpMenu from './HelpMenu.svelte';
+  import HistoryDialog from './HistoryDialog.svelte';
   import KeyList from './KeyList.svelte';
   import Menu from './Menu.svelte';
   import NotesEditor from './NotesEditor.svelte';
@@ -12,6 +13,7 @@
   import Palette from './Palette.svelte';
   import PaneArea from './PaneArea.svelte';
   import ProjectPicker from './ProjectPicker.svelte';
+  import SessionDetail from './SessionDetail.svelte';
   import Sidebar from './Sidebar.svelte';
   import TabBar from './TabBar.svelte';
 
@@ -68,6 +70,16 @@
     {/if}
     {#if app.panel?.kind === 'projects'}
       <ProjectPicker {app} />
+    {/if}
+    {#if app.panel?.kind === 'history'}
+      {#key app.panel}
+        <HistoryDialog {app} paneId={app.panel.paneId} paneType={app.panel.paneType} />
+      {/key}
+    {/if}
+    {#if app.panel?.kind === 'session'}
+      {#key app.panel}
+        <SessionDetail {app} cwd={app.panel.cwd} sessionId={app.panel.sessionId} />
+      {/key}
     {/if}
     {#if app.dialog && app.client && app.editable}
       <!-- Keyed: opening it again (another pane, another mode) starts over. -->

@@ -3,7 +3,6 @@
 export const TUI_ONLY = new Set([
   'app.quit',
   'app.redraw',
-  'pane.command_history',
   'pane.quick_actions',
   'pane.go_back',
   'pane.toggle_eager',

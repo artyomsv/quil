@@ -22,6 +22,7 @@ import { type Dir, neighbour } from './keys/nav';
 import { type FetchLike, hasSession, postLogin, sessionGone } from './login';
 import { NotificationStore, type NotifyInfo, type PaneEvent, parsePaneEvent } from './notifications';
 import { OverlayClaim, type OverlayInfo, type OverlayKind, overlayOf, overlayRepoChoice, overlayToggle } from './overlay';
+import { HISTORY_TIMEOUT_MS } from './history';
 import { NOTE_LOAD_TIMEOUT_MS, type NoteIO, NoteSession } from './notes';
 import { buildPalette, type PaletteRow } from './palette';
 import { type Panel, panelTargetGone } from './panels';
@@ -926,6 +927,13 @@ export class App {
         run: { action: 'pane.notes_toggle' },
         disabled: noPane,
       },
+      {
+        label: 'Input history',
+        detail: this.keyFor('pane.command_history'),
+        keywords: ['history', 'prompts', 'input'],
+        run: { action: 'pane.command_history' },
+        disabled: this.refusalFor('act') || noPane,
+      },
     ];
     return [[], [], pane, []];
   }
@@ -954,6 +962,25 @@ export class App {
     };
     this.notes = n;
     n.load();
+  }
+
+  // openHistory opens the input-history dialog for a pane.
+  openHistory(paneId: string): void {
+    const p = this.state?.panes.find((x) => x.id === paneId);
+    if (!p) return;
+    this.openPanel({ kind: 'history', paneId, paneType: p.type || 'terminal' });
+  }
+
+  historyList(paneId: string): Promise<Outcome> {
+    return this.requests.request('pane_history_req', { pane_id: paneId }, { timeoutMs: HISTORY_TIMEOUT_MS });
+  }
+
+  historyEntry(paneId: string, tsMs: number): Promise<Outcome> {
+    return this.requests.request('pane_history_entry_req', { pane_id: paneId, ts_ms: tsMs }, { timeoutMs: HISTORY_TIMEOUT_MS });
+  }
+
+  sessionDetail(cwd: string, sessionId: string): Promise<Outcome> {
+    return this.requests.request('claude_session_detail_req', { cwd, session_id: sessionId });
   }
 
   // closeNotes is the editor's Close / Escape: it closes now when nothing is
@@ -1077,6 +1104,9 @@ export class App {
         return;
       case 'app.command_palette':
         this.openPanel({ kind: 'palette' });
+        return;
+      case 'pane.command_history':
+        if (pane) this.openHistory(pane);
         return;
       case 'pane.notes_toggle':
         if (pane) {

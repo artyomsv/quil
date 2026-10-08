@@ -2,6 +2,7 @@
   import { untrack } from 'svelte';
   import type { App } from '../lib/app.svelte';
   import { trapFocus } from '../lib/focustrap';
+  import { stillShown } from '../lib/panels';
   import { sanitizeRemoteText } from '../lib/sanitize';
 
   interface Props {
@@ -30,7 +31,9 @@
     const n = name.trim();
     if (n === '' || busy) return;
     busy = true;
-    const out = projectId ? await app.renameProject(projectId, n) : await app.newProject(n, root);
+    const out = projectId
+      ? await app.renameProject(projectId, n)
+      : await app.newProject(n, root, () => stillShown(mine, app.panel));
     busy = false;
     if (out.ok) app.closePanelIf(mine);
   }

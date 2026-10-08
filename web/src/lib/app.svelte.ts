@@ -1108,7 +1108,7 @@ export class App {
   // newProject follows the TUI's rules (lib/projects.ts): adopt the lone
   // bootstrap project, refuse a second project on a --connect host or a name
   // already taken, else create one and switch to it.
-  async newProject(name: string, rootDir: string): Promise<Outcome> {
+  async newProject(name: string, rootDir: string, stillOpen: () => boolean = () => true): Promise<Outcome> {
     const s = this.state;
     if (!s) return { ok: false, code: 'offline', error: 'not connected' };
     const plan = newProjectPlan(s, this.client?.connect === true, name);
@@ -1123,6 +1123,8 @@ export class App {
       this.showNotice(`Folder: ${folder.error}`);
       return { ok: false, code: 'refused', error: folder.error };
     }
+    // A form cancelled while the daemon checked the folder sends nothing.
+    if (!stillOpen()) return { ok: false, code: 'cancelled', error: 'cancelled' };
     if (plan.kind === 'adopt') {
       // An empty folder keeps the adopted project's own root: update_project
       // has no unchanged-value guard, so "" would erase it (projectdialog.go).

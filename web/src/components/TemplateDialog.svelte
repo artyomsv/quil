@@ -2,7 +2,9 @@
   import { untrack } from 'svelte';
   import type { App } from '../lib/app.svelte';
   import { trapFocus } from '../lib/focustrap';
+  import { stillShown } from '../lib/panels';
   import { sanitizeRemoteText } from '../lib/sanitize';
+  import { submitTemplate } from '../lib/template';
 
   interface Props {
     app: App;
@@ -29,24 +31,16 @@
     if (template === '' || busy) return;
     busy = true;
     err = '';
-    // The daemon resolves the typed directory (~ included) before the create.
-    const folder = await app.resolveFolder(cwd);
-    if ('error' in folder) {
-      busy = false;
-      err = folder.error;
-      return;
-    }
-    const out = await app.createFromTemplate({
-      template,
-      task: task.trim() || undefined,
-      cwd: folder.dir || undefined,
-      branch: branch.trim() || undefined,
-      project_id: app.activeProjectId || undefined,
+    // The target project and the values are taken now, before the daemon
+    // resolves the typed directory (lib/template.ts submitTemplate).
+    const r = await submitTemplate({ template, task, cwd, branch }, app.activeProjectId, {
+      resolveFolder: (c) => app.resolveFolder(c),
+      create: (req) => app.createFromTemplate(req),
+      stillOpen: () => stillShown(mine, app.panel),
     });
     busy = false;
-    const p = out.reply?.payload as { error?: string } | undefined;
-    if (out.ok && !p?.error) app.closePanelIf(mine);
-    else err = sanitizeRemoteText(p?.error || (out.ok ? '' : out.error));
+    if ('ok' in r) app.closePanelIf(mine);
+    else if ('error' in r) err = sanitizeRemoteText(r.error);
   }
 
   function onKey(e: KeyboardEvent): void {

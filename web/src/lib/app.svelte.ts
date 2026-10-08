@@ -431,6 +431,8 @@ export class App {
     this.welcome = w;
     this.readOnly = w.rights === 'read-only';
     if (this.readOnly) this.closeAsks();
+    // An open note follows the rights the new socket holds.
+    this.notes?.setViewOnly(this.readOnly);
     this.banner = null;
     this.fresh = false;
     for (const id of this.shown.keys()) {
@@ -1117,9 +1119,12 @@ export class App {
     return out;
   }
 
-  renameProject(id: string, name: string): void {
+  // renameProject waits for the daemon's answer (spec §4.4); the form closes
+  // only on its OK.
+  renameProject(id: string, name: string): Promise<Outcome> {
     const p = this.state?.projects.find((x) => x.id === id);
-    if (p) void this.act('update_project', { project_id: id, name, root_dir: p.root_dir });
+    if (!p) return Promise.resolve({ ok: false, code: 'gone', error: 'That project is gone' });
+    return this.act('update_project', { project_id: id, name, root_dir: p.root_dir });
   }
 
   removeProject(id: string): void {
@@ -1650,7 +1655,9 @@ export class App {
   }
 
   async createFromTemplate(req: CreateFromTemplateReq): Promise<Outcome> {
-    const out = await this.act('create_from_template_req', req, TEMPLATE_TOO_OLD);
+    // The form shows the error itself, so no notice as well (act's).
+    if (!this.editable) return { ok: false, code: 'offline', error: this.readOnly ? 'This page is read-only' : 'Not connected — nothing was changed' };
+    const out = await this.requests.request('create_from_template_req', req, { timeoutText: TEMPLATE_TOO_OLD });
     const p = out.reply?.payload as CreateFromTemplateResp | undefined;
     const first = p?.pane_ids?.[0];
     if (out.ok && first) {

@@ -20,7 +20,12 @@
     },
     // Viewing processes is an act-class request (the daemon's table); kill
     // inside the page needs full rights.
-    { label: 'Processes', run: () => app.openPanel({ kind: 'processes' }), disabled: app.refusalFor('act') !== '' },
+    {
+      label: 'Processes',
+      run: () => app.openPanel({ kind: 'processes' }),
+      disabled: app.refusalFor('act') !== '',
+      reason: app.refusalFor('act'),
+    },
     { label: 'Plugins', run: () => app.openPanel({ kind: 'plugins' }) },
     { label: 'Update', run: () => app.openPanel({ kind: 'update' }) },
   ]);

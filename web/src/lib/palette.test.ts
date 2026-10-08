@@ -137,7 +137,15 @@ describe('buildPalette', () => {
     expect(rows.find((r) => r.label === 'Close pane…')?.disabled).toBe('read-only connection');
     expect(rows.find((r) => r.label === 'New tab')?.disabled).toBe('read-only connection');
     expect(rows.find((r) => r.label === 'Keyboard shortcuts')?.disabled ?? '').toBe('');
-    expect(rows.filter((r) => r.run && 'goPane' in r.run).every((r) => !r.disabled)).toBe(true);
+    // A pane of the shown tab is only focused; one elsewhere needs a switch.
+    const go = rows.filter((r) => r.run && 'goPane' in r.run).map((r) => [r.label, r.disabled ?? '']);
+    expect(go).toEqual([
+      ['1.1 · claude-code · agent', ''],
+      ['1.2 · terminal', ''],
+      ['1.1 · terminal · Ops', 'read-only connection'],
+    ]);
+    expect(rows.find((r) => r.label === 'Switch to 1:main')?.disabled).toBe('read-only connection');
+    expect(rows.find((r) => r.label === 'Switch to Ops')?.disabled).toBe('read-only connection');
   });
   it('greys pane rows when no pane is active', () => {
     const rows = buildPalette(ctx({ activePane: '' }));

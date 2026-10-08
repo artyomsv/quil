@@ -134,6 +134,9 @@ export function buildPalette(c: PaletteCtx): PaletteRow[] {
           label: paneLabel(i, j, type, p.name ?? '', projName),
           keywords: ['go to', 'goto', 'pane', 'focus', p.name ?? '', base(p.cwd), type, proj.name],
           run: { goPane: p.id },
+          // Showing another tab is a switch_tab (act class); this tab's panes
+          // are only focused here.
+          disabled: t.id === s.active_tab ? '' : c.refusal('act'),
         });
         j++;
       }
@@ -149,6 +152,7 @@ export function buildPalette(c: PaletteCtx): PaletteRow[] {
         label: `Switch to ${i + 1}:${sanitizeRemoteText(t.name)}`,
         keywords: ['tab', 'go to', 'goto', 'switch'],
         run: { switchTab: t.id },
+        disabled: c.refusal('act'),
       });
     }
   });
@@ -168,6 +172,7 @@ export function buildPalette(c: PaletteCtx): PaletteRow[] {
       label: `Switch to ${sanitizeRemoteText(p.name)}`,
       keywords: ['project', 'switch', 'go to', 'goto', p.name],
       run: { switchProject: p.id },
+      disabled: c.refusal('act'),
     });
   }
   rows.push(...(c.extra[1] ?? []));

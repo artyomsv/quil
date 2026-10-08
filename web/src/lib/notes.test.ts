@@ -211,6 +211,15 @@ describe('NoteSession save', () => {
     n.save();
     expect(sets()).toEqual([]);
   });
+  it('a too-large note holds and can be discarded on close', async () => {
+    const { n, sets } = await loaded('x\n', 1);
+    n.edit('y'.repeat(MAX_NOTE_BYTES + 1));
+    expect(n.close()).toBe('wait');
+    expect(n.hold).toBe(true);
+    expect(n.closing).toBe(true);
+    expect(n.saveError).toBe('too large');
+    expect(sets()).toEqual([]);
+  });
   it('allows shrinking a note that was already above the cap', async () => {
     const big = 'z'.repeat(MAX_NOTE_BYTES + 10);
     const { n, sets } = await loaded(big, 1);
@@ -359,6 +368,27 @@ describe('NoteSession link and close', () => {
     n.linkBack();
     clock.advance(NOTES_DEBOUNCE_MS);
     expect(calls.at(-1)).toEqual({ kind: 'set', text: 'b\n', base: 3 });
+  });
+  it('a close that waited on the link saves at once when it is back', async () => {
+    const { n, calls, answer } = await loaded();
+    let closed = false;
+    n.onClosed = () => (closed = true);
+    n.edit('b');
+    n.linkLost();
+    expect(n.close()).toBe('wait');
+    n.linkBack();
+    expect(calls.at(-1)).toEqual({ kind: 'set', text: 'b\n', base: 3 });
+    await answer(saved(4));
+    expect(closed).toBe(true);
+  });
+  it('sends nothing once the session became read-only', async () => {
+    const { n, clock, sets } = await loaded();
+    n.edit('b');
+    n.setViewOnly(true);
+    clock.advance(NOTES_DEBOUNCE_MS * 2);
+    n.save();
+    expect(sets()).toEqual([]);
+    expect(n.text).toBe('b');
   });
   it('a first load lost with the link is sent again when it is back', async () => {
     const h = harness();

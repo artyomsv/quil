@@ -84,9 +84,7 @@
         <SessionDetail {app} cwd={app.panel.cwd} sessionId={app.panel.sessionId} />
       {/key}
     {/if}
-    {#key app.panel}
-      <MachinePages {app} />
-    {/key}
+    <MachinePages {app} />
     {#if app.panel?.kind === 'template' && app.client && app.editable}
       <TemplateDialog {app} />
     {/if}

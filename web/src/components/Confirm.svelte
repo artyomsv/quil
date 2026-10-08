@@ -8,9 +8,11 @@
     checkLabel?: string;
     onconfirm: (checked: boolean) => void;
     oncancel: () => void;
+    // The confirmed action is running: the confirm button is off.
+    busy?: boolean;
   }
 
-  let { title, body, confirmLabel, checkLabel, onconfirm, oncancel }: Props = $props();
+  let { title, body, confirmLabel, checkLabel, onconfirm, oncancel, busy = false }: Props = $props();
   let checked = $state(false);
   let ok: HTMLButtonElement | undefined = $state();
   // The confirm button holds the focus, so Enter confirms.
@@ -40,7 +42,7 @@
     {/if}
     <div class="buttons">
       <button onclick={oncancel}>Cancel</button>
-      <button bind:this={ok} class="primary" onclick={() => onconfirm(checked)}>{confirmLabel}</button>
+      <button bind:this={ok} class="primary" disabled={busy} onclick={() => onconfirm(checked)}>{confirmLabel}</button>
     </div>
   </div>
 </div>

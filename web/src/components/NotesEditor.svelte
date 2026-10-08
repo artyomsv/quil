@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import type { App } from '../lib/app.svelte';
   import { copyText } from '../lib/clipboard';
   import { trapFocus } from '../lib/focustrap';
@@ -51,8 +52,12 @@
               : 'Saved',
   );
 
+  // The text gets the focus once, when the note has loaded: a boolean
+  // derived does not re-fire on the other ticks, so a button the user moved
+  // to keeps the focus.
+  const loading = $derived(v.loading);
   $effect(() => {
-    if (!v.loading) area?.focus();
+    if (!loading) untrack(() => area?.focus());
   });
 
   function onBeforeUnload(e: BeforeUnloadEvent): void {
@@ -125,7 +130,7 @@
       {/if}
       {#if copyMsg}<span>{copyMsg}</span>{/if}
       <span class="buttons">
-        {#if v.closing && (v.conflict || v.hold || v.paneGone || v.linkDown)}
+        {#if v.closing && !v.saving && (v.conflict || v.hold || v.paneGone || v.linkDown || v.saveError !== '')}
           <button type="button" onclick={discard}>{discardArmed ? 'Click again to discard' : 'Discard and close'}</button>
         {/if}
         <button type="button" onclick={() => app.closeNotes()}>Close</button>

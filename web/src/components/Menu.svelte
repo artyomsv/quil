@@ -114,7 +114,7 @@
     >
       {#each items as it, i (i)}
         <li role="none">
-          <button role="menuitem" disabled={it.disabled} onclick={(e) => pick(e, it)}
+          <button role="menuitem" disabled={it.disabled} title={it.disabled ? it.reason : undefined} onclick={(e) => pick(e, it)}
             >{it.label}{#if it.key}<span class="key" aria-hidden="true">{it.key}</span>{/if}</button
           >
         </li>

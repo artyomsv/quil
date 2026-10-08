@@ -17,6 +17,7 @@
         label: `${p.active ? '• ' : ''}${p.name || '—'}`,
         run: () => app.switchProject(p.id),
         disabled: app.readOnly || p.active,
+        reason: p.active ? 'the shown project' : 'read-only connection',
       })),
   );
 

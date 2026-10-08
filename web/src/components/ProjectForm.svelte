@@ -27,13 +27,8 @@
     e.preventDefault();
     const n = name.trim();
     if (n === '' || busy) return;
-    if (projectId) {
-      app.renameProject(projectId, n);
-      app.closePanel();
-      return;
-    }
     busy = true;
-    const out = await app.newProject(n, root);
+    const out = projectId ? await app.renameProject(projectId, n) : await app.newProject(n, root);
     busy = false;
     if (out.ok) app.closePanel();
   }

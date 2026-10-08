@@ -13,7 +13,12 @@
 
   let { app, name, collapsed, ontoggle }: Props = $props();
   const items: MenuItem[] = $derived([
-    { label: 'Rename…', run: () => app.openPanel({ kind: 'group_rename', name }), disabled: app.groupBusy.has(name) },
+    {
+      label: 'Rename…',
+      run: () => app.openPanel({ kind: 'group_rename', name }),
+      disabled: app.groupBusy.has(name),
+      reason: 'a rename of this group is still waiting for the daemon',
+    },
     { label: 'Delete…', run: () => app.openPanel({ kind: 'group_delete', name }) },
   ]);
 </script>

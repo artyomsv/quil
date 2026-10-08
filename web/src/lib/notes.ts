@@ -65,7 +65,7 @@ export class NoteSession {
     readonly paneId: string,
     private readonly io: NoteIO,
     private readonly clock: Clock,
-    readonly viewOnly: boolean,
+    public viewOnly: boolean,
   ) {}
 
   load(): void {
@@ -99,7 +99,11 @@ export class NoteSession {
     }
     if (this.conflict && !overwrite) return;
     if (this.tooLarge()) {
+      // The daemon would refuse it: a refusal like any other, so autosave
+      // holds until the next edit and a closing editor offers Discard.
       this.saveError = 'too large';
+      this.hold = true;
+      this.clearAutosave();
       this.onChange();
       return;
     }
@@ -163,6 +167,18 @@ export class NoteSession {
     if (!this.linkDown) return;
     this.linkDown = false;
     if (this.loading) this.sendGet(false);
+    // A close that waited on the link saves at once and closes on its OK.
+    else if (this.dirty && this.closing && !this.conflict && !this.hold) this.save();
+    else if (this.dirty) this.armAutosave();
+    this.onChange();
+  }
+
+  // setViewOnly follows a rights change across a reconnect: a session that
+  // became read-only keeps its text but sends nothing more.
+  setViewOnly(v: boolean): void {
+    if (v === this.viewOnly) return;
+    this.viewOnly = v;
+    if (v) this.clearAutosave();
     else if (this.dirty) this.armAutosave();
     this.onChange();
   }

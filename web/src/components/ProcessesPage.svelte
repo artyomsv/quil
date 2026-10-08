@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, onMount } from 'svelte';
+  import { onDestroy, onMount, untrack } from 'svelte';
   import type { App } from '../lib/app.svelte';
   import { trapFocus } from '../lib/focustrap';
   import { flatten, Poller, type ProcRow } from '../lib/processes';
@@ -48,6 +48,13 @@
   onDestroy(() => {
     document.removeEventListener('visibilitychange', onVis);
     poller.stop();
+  });
+
+  // Back from the kill confirm (which sat on top): the list takes the
+  // keyboard again, so Escape closes it.
+  const shown = $derived(app.panel?.kind === 'processes');
+  $effect(() => {
+    if (shown) untrack(() => box?.focus());
   });
 
   const mb = (b: number): string => `${(b / 1048576).toFixed(1)} MB`;

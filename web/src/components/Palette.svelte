@@ -36,16 +36,18 @@
   // a pane the page cannot label is skipped, as in the TUI.
   const hitRows = $derived.by((): PaletteRow[] => {
     void tick;
-    const labels = new Map<string, string>();
-    for (const r of all) if (r.run && 'goPane' in r.run) labels.set(r.run.goPane, r.label);
+    const go = new Map<string, PaletteRow>();
+    for (const r of all) if (r.run && 'goPane' in r.run) go.set(r.run.goPane, r);
     return search.hits.flatMap((h) => {
-      const label = labels.get(h.pane_id);
-      if (!label) return [];
+      const row = go.get(h.pane_id);
+      if (!row) return [];
       return [
         {
-          label,
+          label: row.label,
           detail: `${h.matches}×${h.truncated ? ' capped' : ''}`,
           run: { goPane: h.pane_id },
+          // The same rights as the pane's own row.
+          disabled: row.disabled,
           excerpt: sanitizeRemoteText(h.excerpt),
         },
       ];
@@ -57,6 +59,9 @@
   // The cursor starts on the first row that can run, and again after each
   // keystroke; arriving hits and state frames never move it.
   let cursor = $state(untrack(() => Math.max(0, rows.findIndex(selectable))));
+  // A state frame can remove or grey the row under the cursor: the shown
+  // cursor then moves to the first row that can run.
+  const cur = $derived(selectable(rows[cursor]) ? cursor : Math.max(0, rows.findIndex(selectable)));
 
   $effect(() => field?.focus());
   $effect(() => {
@@ -70,7 +75,7 @@
 
   function move(d: number): void {
     if (rows.length === 0) return;
-    let i = cursor;
+    let i = cur;
     for (let n = 0; n < rows.length; n++) {
       i = (i + d + rows.length) % rows.length;
       if (selectable(rows[i])) {
@@ -99,7 +104,7 @@
       for (let k = 0; k < 10; k++) move(-1);
     } else if (e.key === 'Enter') {
       e.preventDefault();
-      const r = rows[cursor];
+      const r = rows[cur];
       if (r && selectable(r)) app.runPaletteRow(r);
     }
   }
@@ -136,9 +141,9 @@
               type="button"
               role="option"
               tabindex="-1"
-              aria-selected={i === cursor}
+              aria-selected={i === cur}
               aria-disabled={!!r.disabled}
-              class:cur={i === cursor}
+              class:cur={i === cur}
               class:hit={!!r.excerpt}
               class:off={!!r.disabled}
               title={r.disabled || undefined}

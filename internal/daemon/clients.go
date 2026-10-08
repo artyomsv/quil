@@ -651,14 +651,24 @@ func (d *Daemon) shuttingDown() bool {
 // cause names the event that called it ("attach", "detach", "lost link"),
 // for the log line.
 func (d *Daemon) sendStateToOtherClients(except *ipc.Conn, cause string) {
+	d.sendStateToConns(d.otherClientConns(except), cause)
+}
+
+// otherClientConns lists every attached client's conn except the one given.
+func (d *Daemon) otherClientConns(except *ipc.Conn) []*ipc.Conn {
 	d.clients.mu.Lock()
+	defer d.clients.mu.Unlock()
 	var conns []*ipc.Conn
 	for _, rec := range d.clients.sortedRecordsLocked() {
 		if rec.conn != except {
 			conns = append(conns, rec.conn)
 		}
 	}
-	d.clients.mu.Unlock()
+	return conns
+}
+
+// sendStateToConns sends one fresh workspace state to the conns given.
+func (d *Daemon) sendStateToConns(conns []*ipc.Conn, cause string) {
 	if len(conns) == 0 {
 		return
 	}

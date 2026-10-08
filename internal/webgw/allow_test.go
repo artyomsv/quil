@@ -151,6 +151,21 @@ func TestCheckForward_5cProjects(t *testing.T) {
 	}
 }
 
+func TestCheckForward_5cTemplate(t *testing.T) {
+	g := &forwardGate{leasedID: "web-p-1", helloSeen: true}
+	fwd, refuse, _ := g.check(msg(t, ipc.MsgCreateFromTemplateReq, "t1", map[string]any{"template": "pair", "task": "x", "cwd": "/r", "branch": "b", "project_id": "p", "panes": []any{"evil"}}))
+	if fwd == nil || refuse != nil {
+		t.Fatalf("refused: %v", refuse)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(fwd.Payload, &out); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := out["panes"]; ok || out["template"] != "pair" || out["task"] != "x" || out["cwd"] != "/r" || out["branch"] != "b" || out["project_id"] != "p" || fwd.ID != "t1" {
+		t.Fatalf("re-encode: %v id %q", out, fwd.ID)
+	}
+}
+
 func TestCheckForward_AttachMustCarryTheLeasedID(t *testing.T) {
 	g := &forwardGate{leasedID: "web-p-1", helloSeen: true}
 	if _, refuse, _ := g.check(msg(t, ipc.MsgAttach, "a1", ipc.AttachPayload{ClientID: "web-p-9"})); refuse == nil {

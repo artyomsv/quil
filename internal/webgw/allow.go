@@ -65,6 +65,8 @@ var forwardable = map[string]bool{
 	// answered, the second (folding projects) is the TUI's alone.
 	ipc.MsgCreateProjectReq: true, ipc.MsgUpdateProject: true, ipc.MsgDestroyProject: true,
 	ipc.MsgGroupOp: true, ipc.MsgSetProjectGroup: true, ipc.MsgMoveTab: true,
+	// 5c: new tab from a template (by name; the daemon reads the template).
+	ipc.MsgCreateFromTemplateReq: true,
 }
 
 // idless types are sent without an ID whatever the page set: the daemon
@@ -274,6 +276,8 @@ func (g *forwardGate) checkFilled(m *ipc.Message, fill *instanceFill) (fwd, refu
 		return reencode[ipc.SetProjectGroupPayload](m)
 	case ipc.MsgMoveTab:
 		return reencode[ipc.MoveTabPayload](m)
+	case ipc.MsgCreateFromTemplateReq:
+		return reencode[ipc.CreateFromTemplateReqPayload](m)
 	}
 	if idless[m.Type] {
 		c := *m

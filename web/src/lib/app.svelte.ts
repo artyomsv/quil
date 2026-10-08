@@ -28,7 +28,20 @@ import { buildPalette, type PaletteRow } from './palette';
 import { GroupRenames, newProjectPlan } from './projects';
 import { type Panel, panelTargetGone } from './panels';
 import { NOT_SENT, PasteFlow } from './paste';
-import type { CreateProjectResp, Message, PaneInfo, PaneSize, SplitPaneReq, WebWelcome, WorkspaceState } from './protocol';
+import type {
+  CreateFromTemplateReq,
+  CreateFromTemplateResp,
+  CreateProjectResp,
+  Message,
+  PaneInfo,
+  PaneSize,
+  SplitPaneReq,
+  VersionResp,
+  WebWelcome,
+  WorkspaceState,
+} from './protocol';
+import { sanitizeRemoteText } from './sanitize';
+import { TEMPLATE_TOO_OLD, templateGate } from './template';
 import { type Outcome, Requests, STILL_WORKING } from './requests';
 import { type MsgClass, refusal, type Rights, rightsOf } from './rights';
 import { cellFromProbe, DaemonSizes, fitFontSize, gridFor, isFollower, Sizer, windowCells } from './sizing';
@@ -148,6 +161,10 @@ export class App {
   // The open notes editor. Not a Panel: it survives a lost link (spec §6).
   // notesTick is bumped on every change of the session's plain fields.
   notes = $state.raw<NoteSession | null>(null);
+  // From version_req at each attach: the gated requests the daemon handles
+  // (null = not asked or no answer) and its version ('' = unknown).
+  daemonRequests = $state.raw<string[] | null>(null);
+  daemonVersion = $state('');
   notesTick = $state(0);
   sidebarOpen = $state(true);
   keyHint = $state('');
@@ -949,6 +966,16 @@ export class App {
     const projectCount = this.state?.projects.length ?? 0;
     const tabs: PaletteRow[] = [
       {
+        label: 'New from template',
+        keywords: ['template', 'workspace', 'agents'],
+        run: { panel: { kind: 'template' } },
+        disabled:
+          act ||
+          templateGate(this.daemonRequests) ||
+          (this.client?.templates_error ?? '') ||
+          ((this.client?.templates.length ?? 0) === 0 ? 'no templates' : ''),
+      },
+      {
         label: 'Move tab to project…',
         keywords: ['tab', 'move', 'project'],
         run: { panel: { kind: 'move_tab', tabId: this.activeTabId } },
@@ -1567,6 +1594,27 @@ export class App {
     this.reportOverlay();
     void this.refreshClient();
     void this.rebuildNotifications();
+    void this.askVersion();
+  }
+
+  // askVersion learns, once per attach, the daemon's version and the gated
+  // requests it handles (templates, the Update page).
+  private async askVersion(): Promise<void> {
+    const o = await this.requests.request('version_req', {});
+    const p = (o.reply?.payload ?? null) as VersionResp | null;
+    this.daemonRequests = o.ok && p ? (p.requests ?? []) : null;
+    this.daemonVersion = o.ok && p ? sanitizeRemoteText(p.version) : '';
+  }
+
+  async createFromTemplate(req: CreateFromTemplateReq): Promise<Outcome> {
+    const out = await this.act('create_from_template_req', req, TEMPLATE_TOO_OLD);
+    const p = out.reply?.payload as CreateFromTemplateResp | undefined;
+    const first = p?.pane_ids?.[0];
+    if (out.ok && first) {
+      if (p?.preparing_worktree) this.followFocus = first;
+      this.goToPane(first);
+    }
+    return out;
   }
 
   private focus(paneId: string): void {

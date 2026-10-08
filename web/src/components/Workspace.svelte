@@ -17,6 +17,7 @@
   import SessionDetail from './SessionDetail.svelte';
   import Sidebar from './Sidebar.svelte';
   import TabBar from './TabBar.svelte';
+  import TemplateDialog from './TemplateDialog.svelte';
 
   interface Props {
     app: App;
@@ -81,6 +82,9 @@
       {#key app.panel}
         <SessionDetail {app} cwd={app.panel.cwd} sessionId={app.panel.sessionId} />
       {/key}
+    {/if}
+    {#if app.panel?.kind === 'template' && app.client && app.editable}
+      <TemplateDialog {app} />
     {/if}
     {#if app.editable}
       <!-- Project, group and move-tab dialogs: they only send, so they show

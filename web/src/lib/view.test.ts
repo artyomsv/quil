@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { WorkspaceState } from './protocol';
-import { activeProjectOf, activeTree, parseWorkspaceState, placedPanes, sidebarModel, sidebarSections, tabBarModel } from './view';
+import { activeProjectOf, activeTree, parseWorkspaceState, placedPanes, sidebarModel, sidebarSections, groupMembersShown, tabBarModel } from './view';
 
 const ESC = String.fromCodePoint(0x1b);
 const RLO = String.fromCodePoint(0x202e);
@@ -182,13 +182,18 @@ describe('placedPanes', () => {
 
 describe('sidebarSections', () => {
   const item = (id: string, group: string) => ({ id, name: id, active: false, tabs: [], group });
-  it('lists named groups in daemon order, then the ungrouped', () => {
+  it('lists the ungrouped first, then named groups in daemon order, as the TUI does', () => {
     const got = sidebarSections([item('a', ''), item('b', 'ops'), item('c', 'dev')], ['dev', 'ops']);
     expect(got.map((s) => [s.group, s.projects.map((p) => p.id)])).toEqual([
+      ['', ['a']],
       ['dev', ['c']],
       ['ops', ['b']],
-      ['', ['a']],
     ]);
+  });
+  it('a collapsed group still shows its active project', () => {
+    const sec = { group: 'ops', projects: [item('a', 'ops'), { ...item('b', 'ops'), active: true }] };
+    expect(groupMembersShown(sec, false).map((p) => p.id)).toEqual(['a', 'b']);
+    expect(groupMembersShown(sec, true).map((p) => p.id)).toEqual(['b']);
   });
   it('shows a project filed under an unlisted group as ungrouped', () => {
     const got = sidebarSections([item('a', 'ghost')], []);

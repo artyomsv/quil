@@ -27,9 +27,13 @@
     () => app.resourceReport(),
     () => document.hidden,
   );
+  // A pane is named by its tab and its own name: the type alone ("terminal")
+  // does not say which of many shells a process runs in.
   const label = (id: string): string => {
     const p = app.state?.panes.find((x) => x.id === id);
-    return p ? paneName(p) : id;
+    if (!p) return id;
+    const tab = app.state?.tabs.find((t) => t.id === p.tab_id)?.name ?? '';
+    return tab ? `${sanitizeRemoteText(tab)} · ${paneName(p)}` : paneName(p);
   };
   poller.onReport = (r) => {
     err = '';

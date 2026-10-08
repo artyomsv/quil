@@ -36,19 +36,25 @@ export interface SidebarSection {
   projects: ProjectItem[];
 }
 
-// sidebarSections groups the sidebar as the TUI does: the daemon's named
-// groups in its order, then the ungrouped projects. A project filed under a
-// name the daemon does not list is shown ungrouped.
+// sidebarSections groups the sidebar as the TUI does (sidebar.go): the
+// ungrouped projects first, then the daemon's named groups in its order. A
+// project filed under a name the daemon does not list is shown ungrouped.
 export function sidebarSections(items: ProjectItem[], groups: string[]): SidebarSection[] {
-  const out: SidebarSection[] = groups.map((g) => ({ group: g, projects: [] }));
+  const named: SidebarSection[] = groups.map((g) => ({ group: g, projects: [] }));
   const rest: ProjectItem[] = [];
   for (const it of items) {
-    const sec = it.group ? out.find((s) => s.group === it.group) : undefined;
+    const sec = it.group ? named.find((s) => s.group === it.group) : undefined;
     if (sec) sec.projects.push(it);
     else rest.push(it);
   }
-  if (rest.length > 0) out.push({ group: '', projects: rest });
-  return out;
+  return rest.length > 0 ? [{ group: '', projects: rest }, ...named] : named;
+}
+
+// groupMembersShown is what a group shows: every member, or — collapsed —
+// only the active project, so the project in use never disappears (the
+// TUI's rule).
+export function groupMembersShown(sec: SidebarSection, collapsed: boolean): ProjectItem[] {
+  return collapsed ? sec.projects.filter((p) => p.active) : sec.projects;
 }
 
 export interface PlacedPane {

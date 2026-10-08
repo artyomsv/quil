@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"mime"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -143,8 +144,26 @@ func (a *authStore) KeyValid(session, key string) bool {
 	return ok && subtle.ConstantTimeCompare([]byte(key), []byte(want)) == 1
 }
 
+// sessionCookieName is the session cookie of the gateway on r's port.
+// Browsers send a host's cookies to every port of it, so with one name a
+// second quil web on the same machine replaced this one's cookie when its
+// page logged in, and this page's next /api call was refused ("Log in
+// again"). The port is in the name only when it is all digits.
+func sessionCookieName(r *http.Request) string {
+	_, port, err := net.SplitHostPort(r.Host)
+	if err != nil || port == "" {
+		return SessionCookie
+	}
+	for _, c := range port {
+		if c < '0' || c > '9' {
+			return SessionCookie
+		}
+	}
+	return SessionCookie + "_" + port
+}
+
 func sessionOf(r *http.Request) string {
-	c, err := r.Cookie(SessionCookie)
+	c, err := r.Cookie(sessionCookieName(r))
 	if err != nil {
 		return ""
 	}
@@ -214,7 +233,7 @@ func loginHandler(a *authStore, logf func(string, ...any)) http.HandlerFunc {
 			return
 		}
 		logf("login ok")
-		http.SetCookie(w, &http.Cookie{Name: SessionCookie, Value: session, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode})
+		http.SetCookie(w, &http.Cookie{Name: sessionCookieName(r), Value: session, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode})
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(struct {
 			Key string `json:"key"`

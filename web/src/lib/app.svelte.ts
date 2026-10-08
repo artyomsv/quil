@@ -66,6 +66,8 @@ import { BASE_FONT, createXtermPane, FONT_FAMILY, type XtermPane } from './xterm
 const CELL_RETRY_MS = 100;
 // The sidebar's collapsed group names, a JSON list in local storage.
 const COLLAPSED_KEY = 'quil.groups.collapsed';
+// The sidebar's collapsed project ids, the same way.
+const PROJECTS_COLLAPSED_KEY = 'quil.projects.collapsed';
 const CELL_RETRIES = 20;
 const PROBE_CHARS = 32;
 
@@ -205,7 +207,9 @@ export class App {
   private readonly fetchFn: FetchLike = (url, init) => window.fetch(url, init);
   // The sidebar's collapsed groups, per browser (a view choice, as in the
   // TUI, where it is per client).
-  collapsedGroups = $state.raw<ReadonlySet<string>>(this.loadCollapsed());
+  collapsedGroups = $state.raw<ReadonlySet<string>>(this.loadCollapsed(COLLAPSED_KEY));
+  // The projects whose tab list is hidden in the sidebar, per browser too.
+  collapsedProjects = $state.raw<ReadonlySet<string>>(this.loadCollapsed(PROJECTS_COLLAPSED_KEY));
   // One group rename in flight per group; groupBusy mirrors it for the UI.
   readonly groupRenames = new GroupRenames();
   groupBusy = $state.raw<ReadonlySet<string>>(new Set());
@@ -1088,21 +1092,30 @@ export class App {
     n.load();
   }
 
-  private loadCollapsed(): ReadonlySet<string> {
+  private loadCollapsed(key: string): ReadonlySet<string> {
     try {
-      const v: unknown = JSON.parse(this.storage.getItem(COLLAPSED_KEY) ?? '[]');
+      const v: unknown = JSON.parse(this.storage.getItem(key) ?? '[]');
       return new Set(Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
     } catch {
       return new Set();
     }
   }
 
-  toggleGroup(name: string): void {
-    const next = new Set(this.collapsedGroups);
+  private flip(set: ReadonlySet<string>, name: string, key: string): ReadonlySet<string> {
+    const next = new Set(set);
     if (next.has(name)) next.delete(name);
     else next.add(name);
-    this.collapsedGroups = next;
-    this.storage.setItem(COLLAPSED_KEY, JSON.stringify([...next]));
+    this.storage.setItem(key, JSON.stringify([...next]));
+    return next;
+  }
+
+  toggleGroup(name: string): void {
+    this.collapsedGroups = this.flip(this.collapsedGroups, name, COLLAPSED_KEY);
+  }
+
+  // toggleProject shows or hides a project's tabs in the sidebar.
+  toggleProject(id: string): void {
+    this.collapsedProjects = this.flip(this.collapsedProjects, id, PROJECTS_COLLAPSED_KEY);
   }
 
   // newProject follows the TUI's rules (lib/projects.ts): adopt the lone

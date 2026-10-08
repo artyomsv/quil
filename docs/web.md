@@ -155,6 +155,7 @@ Notes:
   - With `read-only` rights you can read a note, but not change it.
 - **Input history** (`Alt+Shift+I`, the pane menu or the palette). A list of what was typed into an AI pane. Open an entry to read it and copy it. It does not type into the pane. A pane type that records no history says so.
 - **Projects and groups** (`Alt+Shift+N`, the sidebar menus, the palette). Make, rename and remove projects; make, rename and delete groups; move a project into or out of a group. A new project on a fresh daemon takes the place of its first, unnamed project. With `--connect`, a host keeps one project: rename it, or fold projects in the terminal. The folder field takes a path on the daemon's machine; the list offers recent folders.
+- **The sidebar** lists the projects without a group first, then each group as a framed block: its header (`▾ name (N)`) and its projects indented behind a line. Click a group header to collapse it; a collapsed group still shows the project you are in. The `▾` beside a project hides or shows its tabs. Both choices are kept per browser.
 - **Move a tab** to another project: the tab menu, **Move to project…**.
 - **New tab from a template**: the palette, **New from template**. The list comes from `templates.toml` on the machine that runs `quil web`; the daemon reads the template itself.
 - **Session details**: in the create-pane dialog, **Details** beside an earlier Claude session.

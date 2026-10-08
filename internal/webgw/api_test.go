@@ -43,7 +43,7 @@ func (h *wsHarness) api(method, path string, s session, body any, mut func(*http
 		rdr = bytes.NewReader(nil)
 	}
 	req, _ := http.NewRequest(method, h.ts.URL+path, rdr)
-	req.Header.Set("Cookie", SessionCookie+"="+s.cookie)
+	req.Header.Set("Cookie", h.cookieName()+"="+s.cookie)
 	req.Header.Set(APIKeyHeader, s.key)
 	if method != http.MethodGet {
 		req.Header.Set("Origin", h.origin())
@@ -359,7 +359,7 @@ func TestAPI_InstanceWritesAreSerialized(t *testing.T) {
 			defer wg.Done()
 			b, _ := json.Marshal(sshBody("n"))
 			req, _ := http.NewRequest(http.MethodPost, h.ts.URL+"/api/instances", bytes.NewReader(b))
-			req.Header.Set("Cookie", SessionCookie+"="+s.cookie)
+			req.Header.Set("Cookie", h.cookieName()+"="+s.cookie)
 			req.Header.Set(APIKeyHeader, s.key)
 			req.Header.Set("Origin", h.origin())
 			req.Header.Set("Content-Type", "application/json")

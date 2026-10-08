@@ -45,7 +45,7 @@ func TestCheckForward_FirstMustBeWebHelloWithLeasedID(t *testing.T) {
 
 func TestCheckForward_RefusesUnlistedTypes(t *testing.T) {
 	g := &forwardGate{leasedID: "web-p-1", helloSeen: true}
-	for _, typ := range []string{"token_create_req", ipc.MsgShutdown, "create_pane", "destroy_pane", "create_pane_req", "create_tab", "reload_plugins", "kill_process_req", "subscribe", "overlay_policy", MsgWebWelcome, "invented_type"} {
+	for _, typ := range []string{"token_create_req", ipc.MsgShutdown, "create_pane", "destroy_pane", "create_pane_req", "create_tab", ipc.MsgCreateProject, ipc.MsgMergeProjects, ipc.MsgSharedImport, "subscribe", "overlay_policy", MsgWebWelcome, "invented_type"} {
 		fwd, refuse, fatal := g.check(msg(t, typ, "r1", struct{}{}))
 		if fwd != nil || fatal != nil || refuse == nil {
 			t.Fatalf("%s: fwd=%v refuse=%v fatal=%v", typ, fwd, refuse, fatal)
@@ -163,6 +163,41 @@ func TestCheckForward_5cTemplate(t *testing.T) {
 	}
 	if _, ok := out["panes"]; ok || out["template"] != "pair" || out["task"] != "x" || out["cwd"] != "/r" || out["branch"] != "b" || out["project_id"] != "p" || fwd.ID != "t1" {
 		t.Fatalf("re-encode: %v id %q", out, fwd.ID)
+	}
+}
+
+func TestCheckForward_5cMachinePages(t *testing.T) {
+	g := &forwardGate{leasedID: "web-p-1", helloSeen: true}
+	fwd, refuse, _ := g.check(msg(t, ipc.MsgResourceReportReq, "r1", map[string]any{"with_trees": true, "x": 1}))
+	if fwd == nil || refuse != nil {
+		t.Fatalf("resource_report_req refused: %v", refuse)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(fwd.Payload, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out["with_trees"] != true || out["x"] != nil {
+		t.Fatalf("resource_report_req re-encode: %v", out)
+	}
+	kill, refuse, _ := g.check(msg(t, ipc.MsgKillProcessReq, "k1", map[string]any{"pane_id": "p", "pid": 2, "start_ms": 3, "signal": "KILL"}))
+	if kill == nil || refuse != nil {
+		t.Fatalf("kill_process_req refused: %v", refuse)
+	}
+	out = nil
+	if err := json.Unmarshal(kill.Payload, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out["signal"] != nil || out["pid"] != float64(2) || out["start_ms"] != float64(3) {
+		t.Fatalf("kill_process_req re-encode: %v", out)
+	}
+	for _, m := range []*ipc.Message{
+		msg(t, ipc.MsgReloadPlugins, "", struct{}{}),
+		msg(t, ipc.MsgUpdateCheckReq, "", struct{}{}),
+		msg(t, ipc.MsgStageUpdateReq, "s1", struct{}{}),
+	} {
+		if fwd, refuse, _ := g.check(m); fwd == nil || refuse != nil {
+			t.Fatalf("%s refused: %v", m.Type, refuse)
+		}
 	}
 }
 

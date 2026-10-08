@@ -35,10 +35,10 @@ type WebAckPayload struct {
 
 // forwardable is everything the browser client may send to the daemon. In
 // the default mode each tab is a local client with full rights, so this list
-// is the page's whole power: token management, shutdown, process kill, the
-// raw create types (create_pane, create_pane_req, create_tab) and the
-// fire-and-forget destroy_pane are absent on purpose. Add a type only with
-// the UI that uses it (spec 5b §4.1).
+// is the page's whole power: token management, shutdown, the raw create
+// types (create_pane, create_pane_req, create_tab, create_project), folding
+// projects (merge_projects) and the fire-and-forget destroy_pane are absent
+// on purpose. Add a type only with the UI that uses it (spec 5b §4.1).
 var forwardable = map[string]bool{
 	ipc.MsgHello: true, ipc.MsgAttach: true, ipc.MsgDetach: true, ipc.MsgStateReq: true,
 	ipc.MsgPaneInput: true, ipc.MsgResizePanes: true, ipc.MsgClientGeometry: true,
@@ -67,6 +67,10 @@ var forwardable = map[string]bool{
 	ipc.MsgGroupOp: true, ipc.MsgSetProjectGroup: true, ipc.MsgMoveTab: true,
 	// 5c: new tab from a template (by name; the daemon reads the template).
 	ipc.MsgCreateFromTemplateReq: true,
+	// 5c: the machine pages. Their classes are act and admin: the daemon's
+	// rights table decides, the page only greys what it would refuse.
+	ipc.MsgResourceReportReq: true, ipc.MsgKillProcessReq: true, ipc.MsgReloadPlugins: true,
+	ipc.MsgUpdateCheckReq: true, ipc.MsgStageUpdateReq: true,
 }
 
 // idless types are sent without an ID whatever the page set: the daemon
@@ -278,6 +282,10 @@ func (g *forwardGate) checkFilled(m *ipc.Message, fill *instanceFill) (fwd, refu
 		return reencode[ipc.MoveTabPayload](m)
 	case ipc.MsgCreateFromTemplateReq:
 		return reencode[ipc.CreateFromTemplateReqPayload](m)
+	case ipc.MsgResourceReportReq:
+		return reencode[ipc.ResourceReportReqPayload](m)
+	case ipc.MsgKillProcessReq:
+		return reencode[ipc.KillProcessReqPayload](m)
 	}
 	if idless[m.Type] {
 		c := *m

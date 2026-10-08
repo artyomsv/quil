@@ -27,6 +27,7 @@ import { NOTE_LOAD_TIMEOUT_MS, type NoteIO, NoteSession } from './notes';
 import { buildPalette, type PaletteRow } from './palette';
 import { GroupRenames, newProjectPlan } from './projects';
 import { type Panel, panelTargetGone } from './panels';
+import { REPORT_TIMEOUT_MS } from './processes';
 import { NOT_SENT, PasteFlow } from './paste';
 import type {
   CreateFromTemplateReq,
@@ -165,6 +166,8 @@ export class App {
   // (null = not asked or no answer) and its version ('' = unknown).
   daemonRequests = $state.raw<string[] | null>(null);
   daemonVersion = $state('');
+  // A stage_update_req is out (one at a time).
+  stageBusy = $state(false);
   notesTick = $state(0);
   sidebarOpen = $state(true);
   keyHint = $state('');
@@ -1005,7 +1008,47 @@ export class App {
         disabled: act || noProject,
       },
     ];
-    return [tabs, projects, pane, []];
+    const system: PaletteRow[] = [
+      {
+        label: 'Processes',
+        keywords: ['process', 'processes', 'memory', 'mem', 'ram', 'cpu', 'kill'],
+        run: { panel: { kind: 'processes' } },
+        disabled: act,
+      },
+      { label: 'Plugins', keywords: ['plugin', 'plugins', 'reload'], run: { panel: { kind: 'plugins' } } },
+      { label: 'Update', keywords: ['update', 'version', 'upgrade'], run: { panel: { kind: 'update' } } },
+    ];
+    return [tabs, projects, pane, system];
+  }
+
+  // resourceReport asks for the process trees (the Processes page; the
+  // daemon's collector runs only while these keep coming).
+  resourceReport(): Promise<Outcome> {
+    return this.requests.request('resource_report_req', { with_trees: true }, { timeoutMs: REPORT_TIMEOUT_MS });
+  }
+
+  killProcess(paneId: string, pid: number, startMs: number): Promise<Outcome> {
+    return this.act('kill_process_req', { pane_id: paneId, pid, start_ms: startMs });
+  }
+
+  // reloadPlugins: reload_plugins has no answer; the plugin_list_req sent
+  // after it on the same socket is answered after the reload ran (one
+  // connection's messages run in order).
+  reloadPlugins(): Promise<Outcome> {
+    this.fire('reload_plugins', {});
+    return this.requests.request('plugin_list_req', {});
+  }
+
+  // stageUpdate downloads a release on the daemon's machine, one at a time;
+  // the daemon may take minutes (updateCheckTimeout is 10 min).
+  async stageUpdate(): Promise<Outcome> {
+    if (this.stageBusy) return { ok: false, code: 'busy', error: 'a download is already running' };
+    this.stageBusy = true;
+    try {
+      return await this.requests.request('stage_update_req', {}, { timeoutMs: 600_000 });
+    } finally {
+      this.stageBusy = false;
+    }
   }
 
   // openNotes opens the pane's note. Reading is a view; the editor is

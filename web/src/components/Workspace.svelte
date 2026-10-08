@@ -6,6 +6,7 @@
   import HelpMenu from './HelpMenu.svelte';
   import HistoryDialog from './HistoryDialog.svelte';
   import KeyList from './KeyList.svelte';
+  import MachinePages from './MachinePages.svelte';
   import Menu from './Menu.svelte';
   import NotesEditor from './NotesEditor.svelte';
   import Notice from './Notice.svelte';
@@ -83,6 +84,9 @@
         <SessionDetail {app} cwd={app.panel.cwd} sessionId={app.panel.sessionId} />
       {/key}
     {/if}
+    {#key app.panel}
+      <MachinePages {app} />
+    {/key}
     {#if app.panel?.kind === 'template' && app.client && app.editable}
       <TemplateDialog {app} />
     {/if}

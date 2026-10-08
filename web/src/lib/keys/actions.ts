@@ -3,7 +3,6 @@
 export const TUI_ONLY = new Set([
   'app.quit',
   'app.redraw',
-  'pane.notes_toggle',
   'pane.command_history',
   'pane.quick_actions',
   'pane.go_back',
@@ -45,6 +44,7 @@ export const OVERLAY_ACTIONS = new Set(['pane.toggle_lazygit', 'pane.toggle_hunk
 export const VIEW_ONLY = new Set([
   'app.command_palette',
   'project.picker',
+  'pane.notes_toggle',
   'pane.toggle_lazygit',
   'pane.toggle_hunk',
   'notification.toggle',

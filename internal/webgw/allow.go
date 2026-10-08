@@ -56,6 +56,8 @@ var forwardable = map[string]bool{
 	ipc.MsgSandboxCapReq: true, ipc.MsgDirsExistReq: true,
 	// 5c: the command palette's search in pane output.
 	ipc.MsgPaneSearchReq: true,
+	// 5c: pane notes (note_set is re-encoded).
+	ipc.MsgNoteGet: true, ipc.MsgNoteSet: true,
 }
 
 // idless types are sent without an ID whatever the page set: the daemon
@@ -125,6 +127,21 @@ func (g *forwardGate) ownHello(m *ipc.Message, h ipc.HelloPayload) (*ipc.Message
 func ownAttach(m *ipc.Message, a ipc.AttachPayload) (*ipc.Message, error) {
 	a.CWD = ""
 	return withPayload(m, a)
+}
+
+// reencode forwards m with its payload decoded into T and encoded again, so
+// only T's fields reach the daemon: a field the page added on its own is
+// dropped, never passed through. A payload T cannot decode is refused.
+func reencode[T any](m *ipc.Message) (fwd, refuse *ipc.Message, fatal error) {
+	var p T
+	if err := json.Unmarshal(m.Payload, &p); err != nil {
+		return nil, refusal(m, m.Type+" is malformed"), nil
+	}
+	c, err := withPayload(m, p)
+	if err != nil {
+		return nil, refusal(m, m.Type+" is malformed"), nil
+	}
+	return c, nil, nil
 }
 
 func withPayload(m *ipc.Message, payload any) (*ipc.Message, error) {
@@ -231,6 +248,8 @@ func (g *forwardGate) checkFilled(m *ipc.Message, fill *instanceFill) (fwd, refu
 		}
 	case ipc.MsgSplitPaneReq:
 		return ownSplit(m, fill)
+	case ipc.MsgNoteSet:
+		return reencode[ipc.NoteSetPayload](m)
 	}
 	if idless[m.Type] {
 		c := *m

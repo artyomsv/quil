@@ -68,6 +68,30 @@ func TestCheckForward_5cPaletteSearch(t *testing.T) {
 	}
 }
 
+func TestCheckForward_5cNotes(t *testing.T) {
+	g := &forwardGate{leasedID: "web-p-1", helloSeen: true}
+	if fwd, refuse, _ := g.check(msg(t, ipc.MsgNoteGet, "n1", ipc.NoteGetPayload{PaneID: "p"})); fwd == nil || refuse != nil {
+		t.Fatalf("note_get refused: %v", refuse)
+	}
+	in := msg(t, ipc.MsgNoteSet, "n2", map[string]any{"pane_id": "p", "text": "x\n", "base_rev": 3, "extra": true})
+	fwd, refuse, _ := g.check(in)
+	if fwd == nil || refuse != nil {
+		t.Fatalf("note_set refused: %v", refuse)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(fwd.Payload, &out); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := out["extra"]; ok || out["text"] != "x\n" || out["base_rev"] != float64(3) || out["pane_id"] != "p" || fwd.ID != "n2" {
+		t.Fatalf("note_set re-encode: %v id %q", out, fwd.ID)
+	}
+	// A negative base cannot decode into the daemon's uint64: refused here.
+	bad := msg(t, ipc.MsgNoteSet, "n3", map[string]any{"pane_id": "p", "text": "x", "base_rev": -1})
+	if fwd, refuse, _ := g.check(bad); fwd != nil || refuse == nil {
+		t.Fatalf("negative base_rev forwarded: %v", fwd)
+	}
+}
+
 func TestCheckForward_AttachMustCarryTheLeasedID(t *testing.T) {
 	g := &forwardGate{leasedID: "web-p-1", helloSeen: true}
 	if _, refuse, _ := g.check(msg(t, ipc.MsgAttach, "a1", ipc.AttachPayload{ClientID: "web-p-9"})); refuse == nil {

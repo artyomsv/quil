@@ -22,6 +22,7 @@ import { type Dir, neighbour } from './keys/nav';
 import { type FetchLike, hasSession, postLogin, sessionGone } from './login';
 import { NotificationStore, type NotifyInfo, type PaneEvent, parsePaneEvent } from './notifications';
 import { OverlayClaim, type OverlayInfo, type OverlayKind, overlayOf, overlayRepoChoice, overlayToggle } from './overlay';
+import { NOTE_LOAD_TIMEOUT_MS, type NoteIO, NoteSession } from './notes';
 import { buildPalette, type PaletteRow } from './palette';
 import { type Panel, panelTargetGone } from './panels';
 import { NOT_SENT, PasteFlow } from './paste';
@@ -140,6 +141,10 @@ export class App {
   // The one 5c dialog open (palette, F1 menu, history, project forms, …).
   panel = $state.raw<Panel | null>(null);
   rights = $derived<Rights>(rightsOf(this.welcome));
+  // The open notes editor. Not a Panel: it survives a lost link (spec §6).
+  // notesTick is bumped on every change of the session's plain fields.
+  notes = $state.raw<NoteSession | null>(null);
+  notesTick = $state(0);
   sidebarOpen = $state(true);
   keyHint = $state('');
   keymap = $state.raw<WebKeymap | null>(null);
@@ -524,6 +529,17 @@ export class App {
       this.panel = null;
       this.showNotice('Closed: what it was about is gone');
     }
+    // The open note follows its pane's note_rev; a closed pane keeps the
+    // editor open with its text (spec §4.2).
+    if (this.notes) {
+      const n = this.notes;
+      const p = s.panes.find((x) => x.id === n.paneId);
+      if (!p) n.paneClosed();
+      else {
+        n.linkBack();
+        n.frameRev(p.note_rev);
+      }
+    }
     // A notification jump finishes once the state shows its tab.
     const jump = resolveJump(this.pendingJump, s, placed, browserClock.now());
     this.pendingJump = jump.keep;
@@ -584,6 +600,9 @@ export class App {
   private linkLost(): void {
     this.live = false;
     this.closeAsks();
+    // Before the requests fail: the editor marks its own save abandoned
+    // rather than reading "connection lost" as a refusal.
+    this.notes?.linkLost();
     this.requests.reconnecting();
     this.pasteFlow.reconnecting();
     this.drag.linkLost();
@@ -898,7 +917,62 @@ export class App {
   // paletteExtraRows are the rows later screens add to the palette's Tabs,
   // Projects, Pane and System sections, in that order.
   paletteExtraRows(): PaletteRow[][] {
-    return [[], [], [], []];
+    const noPane = this.activePane === '' ? 'no active pane' : '';
+    const pane: PaletteRow[] = [
+      {
+        label: 'Toggle notes',
+        detail: this.keyFor('pane.notes_toggle'),
+        keywords: ['note', 'notes', 'editor'],
+        run: { action: 'pane.notes_toggle' },
+        disabled: noPane,
+      },
+    ];
+    return [[], [], pane, []];
+  }
+
+  // openNotes opens the pane's note. Reading is a view; the editor is
+  // read-only below standard rights (spec §4.2). One editor at a time.
+  openNotes(paneId: string): void {
+    this.keys?.cancel();
+    if (this.notes && this.notes.paneId === paneId) return;
+    if (this.notes) {
+      if (this.notes.close() === 'wait') {
+        this.showNotice('Close the open note first — it has unsaved text');
+        return;
+      }
+      this.notes = null;
+    }
+    const io: NoteIO = {
+      get: (id) => this.requests.request('note_get', { pane_id: id }, { timeoutMs: NOTE_LOAD_TIMEOUT_MS }),
+      set: (id, text, base) => this.requests.request('note_set', { pane_id: id, text, base_rev: base }),
+    };
+    const n = new NoteSession(paneId, io, browserClock, this.rights === 'read-only');
+    n.onChange = () => this.notesTick++;
+    n.onClosed = () => {
+      if (this.notes === n) this.notes = null;
+      this.focusActiveSoon();
+    };
+    this.notes = n;
+    n.load();
+  }
+
+  // closeNotes is the editor's Close / Escape: it closes now when nothing is
+  // at risk, else after the save (or stays, offering the choices).
+  closeNotes(): void {
+    const n = this.notes;
+    if (!n) return;
+    if (n.close() === 'closed') {
+      this.notes = null;
+      this.focusActiveSoon();
+    }
+  }
+
+  // discardNotes closes the editor dropping its text (the confirmed
+  // "Discard and close").
+  discardNotes(): void {
+    this.notes?.stop();
+    this.notes = null;
+    this.focusActiveSoon();
   }
 
   paletteRows(): PaletteRow[] {
@@ -1003,6 +1077,12 @@ export class App {
         return;
       case 'app.command_palette':
         this.openPanel({ kind: 'palette' });
+        return;
+      case 'pane.notes_toggle':
+        if (pane) {
+          if (this.notes?.paneId === pane) this.closeNotes();
+          else this.openNotes(pane);
+        }
         return;
       case 'project.picker':
         this.openPanel({ kind: 'projects' });

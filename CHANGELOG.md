@@ -11,6 +11,19 @@ version section here and deletes them.
 
 ## [Unreleased]
 
+## [1.88.0] - 2026-10-08
+
+### Added
+- **Browser client (`quil web`), step 5c.** The browser now has:
+  - the command palette (`Alt+Shift+P`) with search in pane output, and a project list (`Alt+P`);
+  - pane notes (`Alt+E`), shared with every TUI, with the same save and conflict rules; a conflict offers "Copy my text", and the editor never closes with unsaved text;
+  - input history (`Alt+Shift+I`) as a read-only viewer with Copy;
+  - new, rename and remove project, project groups, and moving a tab to another project;
+  - new tab from a template;
+  - Claude session details in the create dialog;
+  - an F1 menu with Shortcuts, Processes (view; kill with full rights), Plugins (reload with full rights) and Update (download with full rights).
+- Stopping the daemon, the settings pages, the plugin and template file editors and the log viewers stay in the TUI.
+
 ## [1.87.1] - 2026-10-07
 
 ### Fixed

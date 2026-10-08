@@ -3,6 +3,7 @@
   import { sanitizeRemoteText } from '../lib/sanitize';
   import Banner from './Banner.svelte';
   import CreatePaneDialog from './CreatePaneDialog.svelte';
+  import HelpMenu from './HelpMenu.svelte';
   import KeyList from './KeyList.svelte';
   import Menu from './Menu.svelte';
   import Notice from './Notice.svelte';
@@ -48,6 +49,9 @@
           onclose={() => app.closeRepoPick()}
         />
       {/key}
+    {/if}
+    {#if app.panel?.kind === 'help'}
+      <HelpMenu {app} />
     {/if}
     {#if app.dialog && app.client && app.editable}
       <!-- Keyed: opening it again (another pane, another mode) starts over. -->

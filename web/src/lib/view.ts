@@ -82,13 +82,35 @@ export function parseWorkspaceState(p: unknown): WorkspaceState | null {
       project_id: str(t.project_id),
       layout: isObject(t.layout) ? (t.layout as SerializedNode) : undefined,
     })),
-    panes: panes.map((x) => ({ ...x, tab_id: str(x.tab_id), cwd: str(x.cwd) })),
-    projects: projects.map((x) => ({ ...x, name: str(x.name), tab_ids: strings(x.tab_ids), active_tab: str(x.active_tab) })),
+    panes: panes.map((x) => ({
+      ...x,
+      tab_id: str(x.tab_id),
+      cwd: str(x.cwd),
+      note_rev: typeof x.note_rev === 'number' ? x.note_rev : undefined,
+    })),
+    projects: projects.map((x) => ({
+      ...x,
+      name: str(x.name),
+      tab_ids: strings(x.tab_ids),
+      active_tab: str(x.active_tab),
+      group: typeof x.group === 'string' ? x.group : undefined,
+      bootstrap: x.bootstrap === true ? true : undefined,
+    })),
   };
   if (typeof p.size_master === 'string') out.size_master = p.size_master;
   if (typeof p.rev === 'number') out.rev = p.rev;
   if (typeof p.run_id === 'string') out.run_id = p.run_id;
   if (Array.isArray(p.recent_cwds)) out.recent_cwds = strings(p.recent_cwds);
+  if (Array.isArray(p.groups)) out.groups = strings(p.groups);
+  if (isObject(p.update) && typeof p.update.latest_version === 'string') {
+    const u = p.update;
+    out.update = {
+      latest_version: u.latest_version as string,
+      release_url: str(u.release_url),
+      staged_version: str(u.staged_version),
+      install_writable: u.install_writable === true,
+    };
+  }
   return out;
 }
 

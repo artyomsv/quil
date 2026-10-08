@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { sanitizeRemoteText } from './sanitize';
+import { sanitizeBlock, sanitizeRemoteText } from './sanitize';
 
 describe('sanitizeRemoteText', () => {
   it('drops escapes, C1 and bidi overrides, keeps printable text', () => {
@@ -13,5 +13,22 @@ describe('sanitizeRemoteText', () => {
     expect(sanitizeRemoteText(`x${isolate}y`)).toBe('xy');
     expect(sanitizeRemoteText('tab\there')).toBe('tab here');
     expect(sanitizeRemoteText('Grüße 名前 🚀')).toBe('Grüße 名前 🚀');
+  });
+});
+
+describe('sanitizeBlock', () => {
+  it('keeps line breaks and tabs', () => {
+    expect(sanitizeBlock('a\nb\tc')).toBe('a\nb\tc');
+  });
+  it('drops the controls the one-line rule drops', () => {
+    const esc = String.fromCharCode(0x1b);
+    const bel = String.fromCharCode(0x07);
+    const csi = String.fromCharCode(0x9b);
+    const rlo = String.fromCharCode(0x202e);
+    const cr = String.fromCharCode(0x0d);
+    expect(sanitizeBlock(`x${esc}[31my${bel}${csi}z${rlo}w${cr}`)).toBe('x[31myzw');
+  });
+  it('keeps printable non-ASCII', () => {
+    expect(sanitizeBlock('Grüße 名前 🚀')).toBe('Grüße 名前 🚀');
   });
 });

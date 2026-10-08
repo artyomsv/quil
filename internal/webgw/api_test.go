@@ -155,6 +155,49 @@ func TestAPI_ClientReturnsCatalogInstancesAndRights(t *testing.T) {
 	}
 }
 
+// The 5c facts pass through: the templates list, the connect flag, and each
+// plugin's record_history from the registry.
+func TestAPI_ClientCarriesTemplatesConnectAndHistory(t *testing.T) {
+	h, _ := newAPIHarness(t, "full")
+	h.s.cfg.ClientExtras = func() ClientExtras {
+		return ClientExtras{Templates: []TemplateDef{{Name: "pair", Description: "two"}}, TemplatesError: "bad", Connect: true}
+	}
+	s := h.login()
+	h.liveTab(s)
+	resp := h.api(http.MethodGet, "/api/client", s, nil, nil)
+	var ci ClientInfo
+	if err := json.NewDecoder(resp.Body).Decode(&ci); err != nil {
+		t.Fatal(err)
+	}
+	if len(ci.Templates) != 1 || ci.Templates[0] != (TemplateDef{Name: "pair", Description: "two"}) || !ci.Connect || ci.TemplatesError != "bad" {
+		t.Fatalf("templates %+v err %q connect %v", ci.Templates, ci.TemplatesError, ci.Connect)
+	}
+	if d := findDef(ci.Plugins, "claude-code"); d == nil || !d.RecordHistory {
+		t.Fatalf("claude-code record_history: %+v", d)
+	}
+	if d := findDef(ci.Plugins, "terminal"); d == nil || d.RecordHistory {
+		t.Fatalf("terminal record_history: %+v", d)
+	}
+}
+
+// A gateway with no templates still sends a JSON list, never null.
+func TestAPI_ClientTemplatesNeverNull(t *testing.T) {
+	h, _ := newAPIHarness(t, "full")
+	s := h.login()
+	h.liveTab(s)
+	resp := h.api(http.MethodGet, "/api/client", s, nil, nil)
+	var raw map[string]json.RawMessage
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		t.Fatal(err)
+	}
+	if string(raw["templates"]) != "[]" {
+		t.Fatalf("templates = %s, want []", raw["templates"])
+	}
+	if string(raw["connect"]) != "false" {
+		t.Fatalf("connect = %s, want false", raw["connect"])
+	}
+}
+
 // With no tab open the session holds no daemon rights; the client info says
 // so ("") rather than inventing a level.
 func TestAPI_ClientWithoutATabHasNoRights(t *testing.T) {

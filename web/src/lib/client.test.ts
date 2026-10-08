@@ -42,6 +42,9 @@ describe('client api', () => {
         sandbox: { sign_in_default: 'browser', image_default: '' },
         keymap: null,
         notifications: null,
+        templates: [],
+        templates_error: '',
+        connect: false,
       },
     });
     expect('error' in (await loadClient(fake(200, null).fetchFn, 'k'))).toBe(true);
@@ -113,6 +116,28 @@ describe('client api', () => {
     expect(await deleteInstance(d.fetchFn, 'k', 'ssh', 'i/x')).toEqual({});
     expect(d.calls[0]?.url).toBe('/api/instances?plugin=ssh&id=i%2Fx');
     expect(d.calls[0]?.init.method).toBe('DELETE');
+  });
+
+  it('reads templates, templates_error, connect and record_history', async () => {
+    const body = {
+      rights: 'full',
+      plugins: [{ name: 'claude-code', display_name: 'Claude', category: 'ai', record_history: true }],
+      categories: [],
+      templates: [{ name: 'pair', description: 'two agents' }, { description: 'nameless' }],
+      templates_error: '',
+      connect: true,
+    };
+    const r = await loadClient(fake(200, body).fetchFn, 'k');
+    if (!('info' in r)) throw new Error(r.error);
+    expect(r.info.templates).toEqual([{ name: 'pair', description: 'two agents' }]);
+    expect(r.info.connect).toBe(true);
+    expect(r.info.plugins[0]?.record_history).toBe(true);
+  });
+
+  it('carries a templates error', async () => {
+    const r = await loadClient(fake(200, { plugins: [], categories: [], templates: [], templates_error: 'bad' }).fetchFn, 'k');
+    if (!('info' in r)) throw new Error(r.error);
+    expect(r.info.templates_error).toBe('bad');
   });
 
   it('displayAddr matches the TUI', () => {

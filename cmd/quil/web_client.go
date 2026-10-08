@@ -28,13 +28,37 @@ func webClientExtras(cfg config.Config, connect bool) func() webgw.ClientExtras 
 				img = remembered
 			}
 		}
+		tpls, terr := webTemplates()
 		return webgw.ClientExtras{
-			SandboxSignIn: cfg.Sandbox.DefaultSignIn(),
-			SandboxImage:  img,
-			Keymap:        webKeymap(cfg),
-			Notifications: webNotify(cfg),
+			SandboxSignIn:  cfg.Sandbox.DefaultSignIn(),
+			SandboxImage:   img,
+			Keymap:         webKeymap(cfg),
+			Notifications:  webNotify(cfg),
+			Templates:      tpls,
+			TemplatesError: terr,
+			Connect:        connect,
 		}
 	}
+}
+
+// webTemplatesError is the page's text for a templates.toml that does not
+// read; the detail (it can name an absolute path) goes to web.log.
+const webTemplatesError = "templates.toml does not read; fix it in the TUI (F1 → Settings → Templates)"
+
+// webTemplates lists the templates the TUI's dialog offers, from the same
+// file (the embedded defaults when it is absent). Read per request: a
+// template saved in the TUI meanwhile is offered at the next open.
+func webTemplates() ([]webgw.TemplateDef, string) {
+	t, err := config.LoadTemplates()
+	if err != nil {
+		log.Printf("templates.toml: %v", err)
+		return nil, webTemplatesError
+	}
+	out := make([]webgw.TemplateDef, 0, len(t.Templates))
+	for _, tpl := range t.Templates {
+		out = append(out, webgw.TemplateDef{Name: tpl.Name, Description: tpl.Description})
+	}
+	return out, ""
 }
 
 // webNotifyInfo is what the page needs to file pane events as the TUI does.

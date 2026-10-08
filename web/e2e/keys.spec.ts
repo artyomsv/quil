@@ -39,11 +39,12 @@ test('a preset switched on disk applies at the next page load', async ({ page, q
   await expect(page.locator('.pane')).toHaveCount(2);
 });
 
-test('F1 lists the keys and Esc returns to the terminal', async ({ page, quil }) => {
+test('F1 → Shortcuts lists the keys and Esc returns to the terminal', async ({ page, quil }) => {
   await login(page, quil);
   await keymapLoaded(page, 'default');
   await page.locator('.pane .term').first().click();
   await page.keyboard.press('F1');
+  await page.getByRole('menuitem', { name: 'Shortcuts' }).click();
   const keys = page.getByRole('dialog', { name: 'Keys' });
   await expect(keys).toBeVisible();
   // pane.close's default Ctrl+W is the browser's; the list shows its stand-in.

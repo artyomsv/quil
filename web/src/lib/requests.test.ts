@@ -111,3 +111,16 @@ describe('Requests', () => {
     expect(await p).toMatchObject({ error: 'badname' });
   });
 });
+
+describe('fire', () => {
+  it('sends without an id and leaves no pending request', () => {
+    const { r, sent } = setup();
+    expect(r.fire('reload_plugins', {})).toBe(true);
+    expect(sent).toEqual([{ type: 'reload_plugins', payload: {} }]);
+    expect(r.size).toBe(0);
+  });
+  it('reports a send that never left', () => {
+    const { r } = setup(false);
+    expect(r.fire('update_check_req', {})).toBe(false);
+  });
+});

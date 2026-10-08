@@ -22,9 +22,11 @@ import { type Dir, neighbour } from './keys/nav';
 import { type FetchLike, hasSession, postLogin, sessionGone } from './login';
 import { NotificationStore, type NotifyInfo, type PaneEvent, parsePaneEvent } from './notifications';
 import { OverlayClaim, type OverlayInfo, type OverlayKind, overlayOf, overlayRepoChoice, overlayToggle } from './overlay';
+import { type Panel, panelTargetGone } from './panels';
 import { NOT_SENT, PasteFlow } from './paste';
 import type { Message, PaneInfo, PaneSize, SplitPaneReq, WebWelcome, WorkspaceState } from './protocol';
 import { type Outcome, Requests, STILL_WORKING } from './requests';
+import { type MsgClass, refusal, type Rights, rightsOf } from './rights';
 import { cellFromProbe, DaemonSizes, fitFontSize, gridFor, isFollower, Sizer, windowCells } from './sizing';
 import { SplitDrag } from './splitbars';
 import { StateRev } from './staterev';
@@ -134,6 +136,9 @@ export class App {
   // Bumped by notification.focus; the panel focuses its list.
   notifyFocus = $state(0);
   keyListOpen = $state(false);
+  // The one 5c dialog open (palette, F1 menu, history, project forms, …).
+  panel = $state.raw<Panel | null>(null);
+  rights = $derived<Rights>(rightsOf(this.welcome));
   sidebarOpen = $state(true);
   keyHint = $state('');
   keymap = $state.raw<WebKeymap | null>(null);
@@ -512,6 +517,12 @@ export class App {
     if (this.tabAsk && !askedTabShown(s, this.tabAsk.tabId)) this.tabAsk = null;
     // A repository picker belongs to the tab it was opened in.
     if (this.repoPick && this.repoPick.tab !== s.active_tab) this.repoPick = null;
+    // A 5c dialog about a pane, tab, project or group this state no longer
+    // holds closes, with a notice (spec §6).
+    if (this.panel && panelTargetGone(this.panel, s)) {
+      this.panel = null;
+      this.showNotice('Closed: what it was about is gone');
+    }
     // A notification jump finishes once the state shows its tab.
     const jump = resolveJump(this.pendingJump, s, placed, browserClock.now());
     this.pendingJump = jump.keep;
@@ -591,6 +602,8 @@ export class App {
     this.tabAsk = null;
     this.dialog = null;
     this.repoPick = null;
+    // Every 5c Panel closes too; the notes editor is not a Panel (spec §6).
+    this.panel = null;
   }
 
   // closePaneAsk and closeTabAsk end a rename or close dialog, by its own
@@ -843,7 +856,7 @@ export class App {
   private readonly onBlur = (): void => this.keys?.cancel();
 
   private runBuiltin(id: string): void {
-    if (id === 'help') this.openKeyList();
+    if (id === 'help') this.openPanel({ kind: 'help' });
     else if (id === 'new_pane') {
       if (this.readOnly) this.showNotice('read-only connection — that action is disabled');
       else this.openCreate('pane');
@@ -858,6 +871,27 @@ export class App {
   closeKeyList(): void {
     this.keyListOpen = false;
     this.focusActive();
+  }
+
+  // openPanel shows one 5c dialog; a pending key prefix is dropped first.
+  openPanel(p: Panel): void {
+    this.keys?.cancel();
+    this.panel = p;
+  }
+
+  closePanel(): void {
+    this.panel = null;
+    this.focusActiveSoon();
+  }
+
+  // fire sends a message the daemon never answers.
+  fire(type: string, payload: unknown): void {
+    if (!this.requests.fire(type, payload)) this.showNotice('Not connected — nothing was sent');
+  }
+
+  // refusalFor is why a control of class c is greyed now, '' when it may run.
+  refusalFor(c: MsgClass): string {
+    return refusal(this.rights, c, this.live);
   }
 
   // focusActiveSoon is focusActive once the current key event is over. An

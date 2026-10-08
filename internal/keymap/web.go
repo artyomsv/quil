@@ -37,7 +37,7 @@ func WebFallbacks() map[string]string {
 // webBuiltins are the keys handleKey checks after both tiers (hardcodedKeys,
 // afterBothTiers) that the browser serves too.
 var webBuiltins = []struct{ id, label, chord string }{
-	{"help", "Key list", "f1"},
+	{"help", "Help menu", "f1"},
 	{"new_pane", "New pane", "ctrl+n"},
 }
 

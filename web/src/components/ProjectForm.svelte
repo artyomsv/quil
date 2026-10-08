@@ -16,6 +16,8 @@
   let root = $state(untrack(() => existing?.root_dir ?? ''));
   let busy = $state(false);
   let field: HTMLInputElement | undefined = $state();
+  // The panel this form belongs to: a late answer closes only it.
+  const mine = untrack(() => app.panel);
   const title = $derived(projectId ? 'Rename project' : 'New project');
 
   $effect(() => {
@@ -30,7 +32,7 @@
     busy = true;
     const out = projectId ? await app.renameProject(projectId, n) : await app.newProject(n, root);
     busy = false;
-    if (out.ok) app.closePanel();
+    if (out.ok) app.closePanelIf(mine);
   }
 
   function onKey(e: KeyboardEvent): void {

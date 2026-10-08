@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { CONNECT_ONE_PROJECT, GroupRenames, groupNameError, MAX_GROUP_RUNES, newProjectPlan } from './projects';
+import { CONNECT_ONE_PROJECT, folderFromBrowse, GroupRenames, groupNameError, MAX_GROUP_RUNES, newProjectPlan } from './projects';
 import type { ProjectState, WorkspaceState } from './protocol';
+import type { Outcome } from './requests';
 
 const proj = (id: string, over: Partial<ProjectState> = {}): ProjectState => ({
   id,
@@ -29,6 +30,25 @@ describe('newProjectPlan', () => {
     ['refuses a name taken on the daemon, any case', [proj('a', { name: ' New ' })], false, { kind: 'refuse', text: 'new already exists on that host' }],
   ] as const)('%s', (_n, projects, connect, want) => {
     expect(newProjectPlan(st([...projects]), connect, 'new')).toEqual(want);
+  });
+});
+
+describe('folderFromBrowse', () => {
+  const answer = (payload: unknown, ok = true): Outcome =>
+    ok
+      ? { ok: true, reply: { type: 'browse_dir_resp', payload } }
+      : { ok: false, code: 'failed', error: 'not done', reply: { type: 'browse_dir_resp', payload } };
+  it('sends the folder the daemon resolved, ~ expanded', () => {
+    expect(folderFromBrowse(answer({ path: '~/repo', resolved: '/home/u/repo' }))).toEqual({ dir: '/home/u/repo' });
+  });
+  it('keeps the daemon error for a missing folder', () => {
+    expect(folderFromBrowse(answer({ path: '/nope', resolved: '/nope', error: 'open /nope: no such file or directory' }, false))).toEqual({
+      error: 'open /nope: no such file or directory',
+    });
+  });
+  it('refuses when nothing came back', () => {
+    expect(folderFromBrowse({ ok: false, code: 'timeout', error: 'No answer from the daemon' })).toEqual({ error: 'No answer from the daemon' });
+    expect('error' in folderFromBrowse(answer({ path: 'x' }))).toBe(true);
   });
 });
 

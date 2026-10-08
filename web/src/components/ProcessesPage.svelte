@@ -110,7 +110,8 @@
       <h3>Quil processes</h3>
       <table>
         <tbody>
-          {#each quil as q (q.pid)}
+          <!-- Not keyed: two browser tabs of one gateway share its PID and role. -->
+          {#each quil as q}
             <tr>
               <td>{sanitizeRemoteText(q.role)}</td>
               <td>{sanitizeRemoteText(q.exe_name)}</td>

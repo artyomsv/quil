@@ -2016,12 +2016,12 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 		return
 	}
 	if change.any() {
-		// The OTHER clients are the ones attached NOW, at registration. A
-		// client that attaches while this handler still runs gets its own
-		// attach state, built after this registration; listing the others
-		// only when the deferred send runs gave that client a second frame
-		// with nothing new in it.
-		others := d.otherClientConns(conn)
+		// The OTHER clients are the ones attached at registration, listed
+		// under the registry's lock (change.others). A client that attaches
+		// while this handler still runs gets its own attach state, built
+		// after this registration; listing the others any later gave that
+		// client a second frame with nothing new in it.
+		others := change.others
 		defer func() {
 			if hook := d.attachNotifyHook.Load(); hook != nil {
 				(*hook)()

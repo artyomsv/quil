@@ -115,6 +115,11 @@
         <span>This pane was closed.</span>
         <button type="button" onclick={copy}>Copy my text</button>
       </div>
+    {:else if v.viewOnly && v.dirty}
+      <div class="bar" role="alert">
+        <span>This connection became read-only; your changes cannot be saved here.</span>
+        <button type="button" onclick={copy}>Copy my text</button>
+      </div>
     {/if}
     <textarea
       bind:this={area}
@@ -130,7 +135,7 @@
       {/if}
       {#if copyMsg}<span>{copyMsg}</span>{/if}
       <span class="buttons">
-        {#if v.closing && !v.saving && (v.conflict || v.hold || v.paneGone || v.linkDown || v.saveError !== '')}
+        {#if v.closing && !v.saving && (v.conflict || v.hold || v.paneGone || v.linkDown || v.viewOnly || v.saveError !== '')}
           <button type="button" onclick={discard}>{discardArmed ? 'Click again to discard' : 'Discard and close'}</button>
         {/if}
         <button type="button" onclick={() => app.closeNotes()}>Close</button>

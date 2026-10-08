@@ -32,6 +32,30 @@ test('a second project is created beside the first', async ({ page, quil }) => {
   expect((await projectNames(quil.home)).sort()).toEqual(['one', 'two']);
 });
 
+async function projectRoots(home: string): Promise<string[]> {
+  const r = await ipcRequest(home, 'list_projects_req', {});
+  return ((r.payload as { projects?: { root_dir: string }[] }).projects ?? []).map((p) => p.root_dir);
+}
+
+test('the daemon resolves a typed folder; a missing one keeps the form open', async ({ page, quil }) => {
+  await login(page, quil);
+  await keymapLoaded(page, 'default');
+  await page.locator('.pane .term').first().click();
+  await page.keyboard.press('Alt+Shift+N');
+  const form = page.getByRole('dialog', { name: 'New project' });
+  await form.getByLabel('Name').fill('lost');
+  await form.getByLabel(/Folder/).fill('/no/such/folder/5c');
+  await form.getByRole('button', { name: 'Create' }).click();
+  await expect(page.getByText(/^Folder:/)).toBeVisible();
+  await expect(form).toBeVisible();
+  await form.getByLabel(/Folder/).fill('~');
+  await form.getByRole('button', { name: 'Create' }).click();
+  await expect(form).toHaveCount(0);
+  const roots = await projectRoots(quil.home);
+  expect(roots.length).toBe(1);
+  expect(roots[0]?.startsWith('/')).toBe(true);
+});
+
 test('a project filed in a new group shows under it', async ({ page, quil }) => {
   await login(page, quil);
   await keymapLoaded(page, 'default');

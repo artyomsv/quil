@@ -1,4 +1,5 @@
 import type { WorkspaceState } from './protocol';
+import type { Outcome } from './requests';
 import { sanitizeRemoteText } from './sanitize';
 
 export const MAX_GROUP_RUNES = 32;
@@ -23,6 +24,18 @@ export function newProjectPlan(s: WorkspaceState, connect: boolean, name: string
     return { kind: 'refuse', text: `${sanitizeRemoteText(name.trim())} already exists on that host` };
   }
   return { kind: 'create' };
+}
+
+// folderFromBrowse reads a browse_dir_req answer as a folder check: the
+// daemon expanded ~, made the path absolute and listed it, so its Resolved
+// is the folder to send; an error (missing, not a folder, no answer) keeps
+// the form open with that reason.
+export function folderFromBrowse(o: Outcome): { dir: string } | { error: string } {
+  const p = (o.reply?.payload ?? null) as { resolved?: string; error?: string } | null;
+  if (p?.error) return { error: sanitizeRemoteText(p.error) };
+  if (!o.ok) return { error: o.error };
+  if (!p?.resolved) return { error: 'the daemon did not resolve the folder' };
+  return { dir: p.resolved };
 }
 
 // groupNameError is why a group name cannot be sent ('' = it can): blank,

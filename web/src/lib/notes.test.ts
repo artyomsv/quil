@@ -220,6 +220,17 @@ describe('NoteSession save', () => {
     expect(n.saveError).toBe('too large');
     expect(sets()).toEqual([]);
   });
+  it('measures growth against the last saved size, not the largest one', async () => {
+    const big = 'z'.repeat(MAX_NOTE_BYTES + 10);
+    const { n, answer } = await loaded(big, 1);
+    n.edit(big.slice(0, MAX_NOTE_BYTES + 5));
+    n.save();
+    await answer(saved(2));
+    // The stored note is now MAX+6 bytes (with its newline): growing back to
+    // MAX+8 is above the cap AND larger than it — the daemon refuses that.
+    n.edit(big.slice(0, MAX_NOTE_BYTES + 8));
+    expect(n.tooLarge()).toBe(true);
+  });
   it('allows shrinking a note that was already above the cap', async () => {
     const big = 'z'.repeat(MAX_NOTE_BYTES + 10);
     const { n, sets } = await loaded(big, 1);
@@ -251,6 +262,29 @@ describe('NoteSession live changes (reconcileNoteRev, applyNoteResp)', () => {
     n.frameRev(5);
     n.frameRev(6);
     expect(gets().length).toBe(2);
+  });
+  it('reads again when the pending read answers older than a later frame', async () => {
+    const { n, gets, answer } = await loaded('a\n', 3);
+    n.frameRev(5);
+    n.frameRev(6);
+    expect(gets().length).toBe(2);
+    await answer(got('five\n', 5));
+    // rev 6 was named while the read was out: it is read now.
+    expect(gets().length).toBe(3);
+    await answer(got('six\n', 6));
+    expect(n.text).toBe('six\n');
+    expect(n.rev).toBe(6);
+  });
+  it('reads a frame that came during its own save once the save is answered', async () => {
+    const { n, gets, answer } = await loaded('a\n', 3);
+    n.edit('b');
+    n.save();
+    n.frameRev(9);
+    expect(n.conflict).toBe(false);
+    await answer(saved(4));
+    expect(gets().length).toBe(2);
+    await answer(got('theirs\n', 9));
+    expect(n.text).toBe('theirs\n');
   });
   it('marks a conflict when dirty', async () => {
     const { n, gets } = await loaded('a\n', 3);
@@ -380,6 +414,15 @@ describe('NoteSession link and close', () => {
     expect(calls.at(-1)).toEqual({ kind: 'set', text: 'b\n', base: 3 });
     await answer(saved(4));
     expect(closed).toBe(true);
+  });
+  it('a session that turned read-only keeps its unsaved text on close', async () => {
+    const { n, sets } = await loaded();
+    n.edit('b');
+    n.setViewOnly(true);
+    expect(n.close()).toBe('wait');
+    expect(n.closing).toBe(true);
+    expect(n.text).toBe('b');
+    expect(sets()).toEqual([]);
   });
   it('sends nothing once the session became read-only', async () => {
     const { n, clock, sets } = await loaded();

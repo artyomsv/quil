@@ -12,6 +12,27 @@ test('F1 → Processes lists the pane process', async ({ page, quil }) => {
   await expect(box).toHaveCount(0);
 });
 
+test('Processes shows both tabs of one gateway (same PID) and refreshes', async ({ page, quil }) => {
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  await login(page, quil);
+  await keymapLoaded(page, 'default');
+  const other = await page.context().newPage();
+  await other.goto(quil.url);
+  await expect(other.locator('.pane').first()).toBeVisible();
+  await page.locator('.pane .term').first().click();
+  await page.keyboard.press('F1');
+  await page.getByRole('menuitem', { name: 'Processes' }).click();
+  const box = page.getByRole('dialog', { name: 'Processes' });
+  const quilRows = box.locator('h3 + table tbody tr');
+  await expect.poll(() => quilRows.count(), { timeout: 15_000 }).toBeGreaterThanOrEqual(2);
+  // The next poll (5 s) re-renders the same rows without an error.
+  await page.waitForTimeout(6_000);
+  expect(await quilRows.count()).toBeGreaterThanOrEqual(2);
+  expect(errors).toEqual([]);
+  await other.close();
+});
+
 test('F1 → Plugins lists the daemon plugins', async ({ page, quil }) => {
   await login(page, quil);
   await keymapLoaded(page, 'default');

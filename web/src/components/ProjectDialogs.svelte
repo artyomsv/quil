@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import type { App } from '../lib/app.svelte';
   import { groupNameError } from '../lib/projects';
   import { sanitizeRemoteText } from '../lib/sanitize';
@@ -13,6 +14,9 @@
 
   let { app }: Props = $props();
   const p = $derived(app.panel);
+  // The panel this mount shows: an answer that comes after a cancel closes
+  // only it, never a newer one.
+  const mine = untrack(() => app.panel);
   const groups = $derived(app.state?.groups ?? []);
 
   // removeBody names what a project's removal takes with it.
@@ -86,7 +90,7 @@
         return;
       }
       const o = await app.groupOp('rename', name, v.trim());
-      if (o.ok) app.closePanel();
+      if (o.ok) app.closePanelIf(mine);
     }}
     oncancel={() => app.closePanel()}
   />
@@ -98,7 +102,7 @@
     confirmLabel="Delete"
     onconfirm={async () => {
       await app.groupOp('delete', name);
-      app.closePanel();
+      app.closePanelIf(mine);
     }}
     oncancel={() => app.closePanel()}
   />

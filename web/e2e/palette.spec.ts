@@ -14,6 +14,20 @@ test('the palette switches tab by name', async ({ page, quil }) => {
   await expect(tabButton(page, 'zebra')).toHaveClass(/active/);
 });
 
+test('the selected row stays in view when the keys move past the edge', async ({ page, quil }) => {
+  await login(page, quil);
+  await keymapLoaded(page, 'default');
+  await page.setViewportSize({ width: 1000, height: 400 });
+  await page.locator('.pane .term').first().click();
+  await page.keyboard.press('Alt+Shift+P');
+  const box = page.getByRole('dialog', { name: 'Command palette' });
+  // Up from the first row wraps to the last one, below the list's fold.
+  await page.keyboard.press('ArrowUp');
+  await expect(box.locator('button.cur')).toBeInViewport();
+  await page.keyboard.press('PageUp');
+  await expect(box.locator('button.cur')).toBeInViewport();
+});
+
 test('content search finds text echoed in a pane', async ({ page, quil }) => {
   await login(page, quil);
   await keymapLoaded(page, 'default');

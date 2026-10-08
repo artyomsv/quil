@@ -12,6 +12,7 @@
   let { app }: Props = $props();
   let query = $state('');
   let field: HTMLInputElement | undefined = $state();
+  let list: HTMLUListElement | undefined = $state();
   // Bumped by the search on every change of its plain fields.
   let tick = $state(0);
   const clock = {
@@ -64,6 +65,12 @@
   const cur = $derived(selectable(rows[cursor]) ? cursor : Math.max(0, rows.findIndex(selectable)));
 
   $effect(() => field?.focus());
+  // The selected row stays in view: the keys move the cursor, never the
+  // focus, and their own scrolling is prevented.
+  $effect(() => {
+    const i = cur;
+    untrack(() => list?.querySelector<HTMLElement>(`[data-i="${i}"]`)?.scrollIntoView({ block: 'nearest' }));
+  });
   $effect(() => {
     search.query(query);
   });
@@ -131,7 +138,7 @@
       aria-label="Command"
       placeholder="Type a command or search pane output"
     />
-    <ul id="palette-list" role="listbox" aria-label="Commands">
+    <ul id="palette-list" role="listbox" aria-label="Commands" bind:this={list}>
       {#each rows as r, i (i)}
         {#if r.header}
           <li class="header" role="presentation">{r.label}</li>
@@ -141,6 +148,7 @@
               type="button"
               role="option"
               tabindex="-1"
+              data-i={i}
               aria-selected={i === cur}
               aria-disabled={!!r.disabled}
               class:cur={i === cur}

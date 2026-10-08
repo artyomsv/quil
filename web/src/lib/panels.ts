@@ -21,6 +21,13 @@ export type Panel =
   | { kind: 'plugins' }
   | { kind: 'update' };
 
+// stillShown is whether the panel a form opened with is still the one shown.
+// Panels are compared by identity: reopening the same kind makes a new
+// object, so an answer to a cancelled form never closes its successor.
+export function stillShown(mine: Panel | null, current: Panel | null): boolean {
+  return mine !== null && mine === current;
+}
+
 // panelTargetGone reports a panel whose pane, tab, project or group the new
 // state no longer holds: it closes rather than send for a dead id.
 export function panelTargetGone(p: Panel, s: WorkspaceState): boolean {

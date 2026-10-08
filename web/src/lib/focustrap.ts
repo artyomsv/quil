@@ -21,8 +21,12 @@ export function trapIndex(count: number, at: number, back: boolean): number | nu
 // document in the capture phase, so a Tab pressed while the focus is
 // already outside (in a terminal) is pulled back in too.
 export function trapFocus(node: HTMLElement): { destroy(): void } {
+  traps.push(node);
   const onKey = (e: KeyboardEvent): void => {
     if (e.key !== 'Tab' || e.ctrlKey || e.altKey || e.metaKey) return;
+    // A dialog covered by another one (a confirm over its list, session
+    // details over the create dialog) leaves Tab to the one on top.
+    if (traps.top() !== node) return;
     const list = Array.from(node.querySelectorAll<HTMLElement>(FOCUSABLE));
     const active = document.activeElement as HTMLElement | null;
     const at = active ? list.indexOf(active) : -1;
@@ -36,5 +40,28 @@ export function trapFocus(node: HTMLElement): { destroy(): void } {
     list[next]?.focus();
   };
   document.addEventListener('keydown', onKey, true);
-  return { destroy: () => document.removeEventListener('keydown', onKey, true) };
+  return {
+    destroy: () => {
+      document.removeEventListener('keydown', onKey, true);
+      traps.remove(node);
+    },
+  };
 }
+
+// TrapStack orders the open modals: the last one mounted is on top. A
+// removed one leaves the order of the others as it was.
+export class TrapStack<T> {
+  private readonly items: T[] = [];
+  push(x: T): void {
+    this.items.push(x);
+  }
+  remove(x: T): void {
+    const i = this.items.lastIndexOf(x);
+    if (i >= 0) this.items.splice(i, 1);
+  }
+  top(): T | undefined {
+    return this.items[this.items.length - 1];
+  }
+}
+
+const traps = new TrapStack<HTMLElement>();

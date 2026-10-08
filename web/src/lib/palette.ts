@@ -220,13 +220,14 @@ export class PaneSearch {
   ) {}
 
   query(q: string): void {
+    const changed = q !== this.current;
     this.current = q;
     if (this.debounce !== null) this.clock.clearTimeout(this.debounce);
     this.debounce = null;
-    if (q.trim() === '') {
-      this.reset();
-      return;
-    }
+    // The old query's hits, status and cap go at once, as the TUI's
+    // afterPaletteQueryChange clears them: they are not this query's.
+    if (changed || q.trim() === '') this.reset();
+    if (q.trim() === '') return;
     this.debounce = this.clock.setTimeout(() => {
       this.debounce = null;
       this.issue(q);

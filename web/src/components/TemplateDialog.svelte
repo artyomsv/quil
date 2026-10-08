@@ -17,6 +17,8 @@
   let cwd = $state('');
   let branch = $state('');
   let busy = $state(false);
+  // The panel this form belongs to: a late answer closes only it.
+  const mine = untrack(() => app.panel);
   let err = $state('');
   let first: HTMLSelectElement | undefined = $state();
 
@@ -27,16 +29,23 @@
     if (template === '' || busy) return;
     busy = true;
     err = '';
+    // The daemon resolves the typed directory (~ included) before the create.
+    const folder = await app.resolveFolder(cwd);
+    if ('error' in folder) {
+      busy = false;
+      err = folder.error;
+      return;
+    }
     const out = await app.createFromTemplate({
       template,
       task: task.trim() || undefined,
-      cwd: cwd.trim() || undefined,
+      cwd: folder.dir || undefined,
       branch: branch.trim() || undefined,
       project_id: app.activeProjectId || undefined,
     });
     busy = false;
     const p = out.reply?.payload as { error?: string } | undefined;
-    if (out.ok && !p?.error) app.closePanel();
+    if (out.ok && !p?.error) app.closePanelIf(mine);
     else err = sanitizeRemoteText(p?.error || (out.ok ? '' : out.error));
   }
 

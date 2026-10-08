@@ -25,8 +25,8 @@ import { OverlayClaim, type OverlayInfo, type OverlayKind, overlayOf, overlayRep
 import { HISTORY_TIMEOUT_MS } from './history';
 import { NOTE_LOAD_TIMEOUT_MS, type NoteIO, NoteSession } from './notes';
 import { buildPalette, type PaletteRow } from './palette';
-import { GroupRenames, newProjectPlan } from './projects';
-import { type Panel, panelTargetGone } from './panels';
+import { folderFromBrowse, GroupRenames, newProjectPlan } from './projects';
+import { type Panel, panelTargetGone, stillShown } from './panels';
 import { REPORT_TIMEOUT_MS } from './processes';
 import { NOT_SENT, PasteFlow } from './paste';
 import type {
@@ -930,6 +930,15 @@ export class App {
   openPanel(p: Panel): void {
     this.keys?.cancel();
     this.panel = p;
+    // The template form lists /api/client's templates: read them again.
+    if (p.kind === 'template') void this.refreshClient();
+  }
+
+  // closePanelIf closes the panel only while p is still the one shown: a
+  // request answered after its form was cancelled and another opened must
+  // not close the newer one.
+  closePanelIf(p: Panel | null): void {
+    if (stillShown(p, this.panel)) this.closePanel();
   }
 
   closePanel(): void {
@@ -1107,16 +1116,33 @@ export class App {
       this.showNotice(plan.text);
       return { ok: false, code: 'refused', error: plan.text };
     }
+    // A typed folder is resolved by the daemon first (~, relative paths,
+    // existence): neither update_project nor create_project_req checks it.
+    const folder = await this.resolveFolder(rootDir);
+    if ('error' in folder) {
+      this.showNotice(`Folder: ${folder.error}`);
+      return { ok: false, code: 'refused', error: folder.error };
+    }
     if (plan.kind === 'adopt') {
       // An empty folder keeps the adopted project's own root: update_project
       // has no unchanged-value guard, so "" would erase it (projectdialog.go).
       const own = s.projects.find((p) => p.id === plan.projectId)?.root_dir ?? '';
-      return this.act('update_project', { project_id: plan.projectId, name, root_dir: rootDir.trim() || own, adopt_bootstrap: true });
+      return this.act('update_project', { project_id: plan.projectId, name, root_dir: folder.dir || own, adopt_bootstrap: true });
     }
-    const out = await this.act('create_project_req', { name, root_dir: rootDir.trim() });
+    const out = await this.act('create_project_req', { name, root_dir: folder.dir });
     const id = (out.reply?.payload as CreateProjectResp | undefined)?.project_id;
     if (out.ok && id) this.switchProject(id);
     return out;
+  }
+
+  // resolveFolder checks a typed folder on the daemon's machine
+  // (browse_dir_req): '' stays '' (the daemon's default), anything else
+  // becomes the absolute folder the daemon resolved, or an error the form
+  // keeps open on (the caller shows it).
+  async resolveFolder(input: string): Promise<{ dir: string } | { error: string }> {
+    const t = input.trim();
+    if (t === '') return { dir: '' };
+    return folderFromBrowse(await this.requests.request('browse_dir_req', { path: t }));
   }
 
   // renameProject waits for the daemon's answer (spec §4.4); the form closes
@@ -1293,6 +1319,9 @@ export class App {
         return;
       case 'app.command_palette':
         this.openPanel({ kind: 'palette' });
+        // The template rows read /api/client: a template added or a broken
+        // templates.toml repaired in the TUI shows at the next open.
+        void this.refreshClient();
         return;
       case 'pane.command_history':
         if (pane) this.openHistory(pane);

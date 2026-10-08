@@ -230,6 +230,23 @@ describe('PaneSearch', () => {
     clock.advance(SEARCH_TIMEOUT_MS);
     expect(s.status).toBe('timed_out');
   });
+  it('drops the old hits as soon as the query changes, and after a failure', async () => {
+    let fail = false;
+    const { clock, s } = setup((q) =>
+      fail ? { ok: false, code: 'refused', error: 'no' } : reply(q, [{ pane_id: 'a', matches: 1, excerpt: 'x' }]),
+    );
+    s.query('one');
+    clock.advance(150);
+    await flush();
+    expect(s.hits.length).toBe(1);
+    fail = true;
+    s.query('two');
+    expect(s.hits).toEqual([]);
+    clock.advance(150);
+    await flush();
+    expect(s.hits).toEqual([]);
+    expect(s.status).toBe('failed');
+  });
   it('clears the hits when the query is emptied', async () => {
     const { clock, s } = setup((q) => reply(q, [{ pane_id: 'a', matches: 1, excerpt: 'x' }]));
     s.query('q');

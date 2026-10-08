@@ -51,6 +51,8 @@ export class NoteSession {
   private loadSeq = 0;
   // A note_get is out and unanswered: one at a time per editor.
   private getPending = false;
+  // The newest rev a frame named while a read or a save was out (chase()).
+  private wantRev = 0;
   private loadTimer: unknown = null;
   private saveTimer: unknown = null;
   // The confirmed reload ("Load theirs" twice): the buffer the user agreed
@@ -137,18 +139,39 @@ export class NoteSession {
   // frameRev applies a state frame's note_rev (reconcileNoteRev): a higher
   // rev reloads a clean editor silently and marks a dirty one conflicted.
   frameRev(rev: number | undefined): void {
-    if (rev === undefined || this.loading || this.saving || this.linkDown || rev <= this.rev) return;
+    if (rev === undefined || this.loading || this.linkDown || rev <= this.rev) return;
+    // Kept even while a read or a save is out: its answer can be older than
+    // this frame (the daemon sends a note answer after releasing the note,
+    // so another client's save and broadcast can overtake it). chase() acts
+    // on it once that answer is in.
+    if (rev > this.wantRev) this.wantRev = rev;
+    if (this.saving) return;
     if (this.dirty) {
       this.markConflict(rev);
       this.onChange();
       return;
     }
     if (this.getPending) return;
+    this.wantRev = 0;
     this.sendGet(false);
+  }
+
+  // chase acts on a newer rev a frame named while a read or save was out:
+  // read it again when clean, mark the conflict when dirty. Each frame's rev
+  // is acted on once, so a daemon answering an older rev cannot loop it.
+  private chase(): void {
+    const want = this.wantRev;
+    this.wantRev = 0;
+    if (want <= this.rev || this.loading || this.linkDown || this.saving || this.getPending || this.stopped) return;
+    if (this.dirty) this.markConflict(want);
+    else this.sendGet(false);
   }
 
   linkLost(): void {
     this.linkDown = true;
+    // The next socket's frames name the revs again (the daemon may have
+    // restarted with lower ones).
+    this.wantRev = 0;
     // AbandonSave: no verdict will come; the text stays dirty and goes again
     // from the same base once the link is back.
     if (this.saving) {
@@ -193,14 +216,17 @@ export class NoteSession {
   // close is the editor's Close/Escape: 'closed' when nothing is at risk,
   // else 'wait' (a save goes out and the editor closes on its OK).
   close(): 'closed' | 'wait' {
-    if (this.viewOnly || this.loading || this.loadError !== '' || !this.dirty) {
+    // Unsaved text decides, not the right to save it: a session that turned
+    // read-only after an edit keeps its text until a copy or a confirmed
+    // discard (AC-18).
+    if (this.loading || this.loadError !== '' || !this.dirty) {
       this.stop();
       return 'closed';
     }
     this.closing = true;
-    // A closed pane's note cannot be saved: its text goes only by a
-    // confirmed discard (or a copy first) — AC-18.
-    if (!this.paneGone && !this.conflict && !this.hold && !this.saving) this.save();
+    // A closed pane's note, or a read-only session's, cannot be saved: its
+    // text goes only by a confirmed discard (or a copy first).
+    if (!this.viewOnly && !this.paneGone && !this.conflict && !this.hold && !this.saving) this.save();
     this.onChange();
     return 'wait';
   }
@@ -230,6 +256,12 @@ export class NoteSession {
 
   private getAnswered(seq: number, confirmed: boolean, o: Outcome): void {
     if (this.stopped || seq !== this.loadSeq) return;
+    this.applyGet(confirmed, o);
+    this.chase();
+    this.onChange();
+  }
+
+  private applyGet(confirmed: boolean, o: Outcome): void {
     this.getPending = false;
     this.clearLoadTimer();
     const snapshot = this.discardSnapshot;
@@ -275,6 +307,14 @@ export class NoteSession {
 
   private saveAnswered(o: Outcome): void {
     if (this.stopped || !this.saving) return;
+    this.applySave(o);
+    if (!this.stopped) {
+      this.chase();
+      this.onChange();
+    }
+  }
+
+  private applySave(o: Outcome): void {
     this.saving = false;
     const p = (o.reply?.payload ?? null) as NoteSetResp | null;
     if (o.ok && p?.ok) {
@@ -285,7 +325,9 @@ export class NoteSession {
       this.loadArmed = false;
       this.saveError = '';
       this.hold = false;
-      this.loadedBytes = Math.max(this.loadedBytes, noteBytes(saveText(this.inFlightText)));
+      // The daemon checks growth against the file it holds now: the size of
+      // this save, not the largest size seen.
+      this.loadedBytes = noteBytes(saveText(this.inFlightText));
     } else if (p?.conflict) {
       this.markConflict(p.current_rev ?? 0);
     } else if (p) {

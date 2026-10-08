@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { type Panel, panelTargetGone } from './panels';
+import { type Panel, panelTargetGone, stillShown } from './panels';
 import type { WorkspaceState } from './protocol';
 
 const s: WorkspaceState = {
@@ -36,5 +36,17 @@ describe('panelTargetGone', () => {
   it('reads a state without groups as no groups', () => {
     const bare: WorkspaceState = { ...s, groups: undefined };
     expect(panelTargetGone({ kind: 'group_rename', name: 'g1' }, bare)).toBe(true);
+  });
+});
+
+describe('stillShown', () => {
+  it('closes only the panel a late answer belongs to', () => {
+    const old: Panel = { kind: 'project_new' };
+    const reopened: Panel = { kind: 'project_new' };
+    expect(stillShown(old, old)).toBe(true);
+    // Cancelled, then the same kind opened again: a new object.
+    expect(stillShown(old, reopened)).toBe(false);
+    expect(stillShown(old, null)).toBe(false);
+    expect(stillShown(null, null)).toBe(false);
   });
 });

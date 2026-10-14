@@ -7,38 +7,23 @@ import (
 	"github.com/artyomsv/quil/internal/hookevents"
 	"github.com/artyomsv/quil/internal/keymap"
 	"github.com/artyomsv/quil/internal/notifyclass"
-	"github.com/artyomsv/quil/internal/tui"
 	"github.com/artyomsv/quil/internal/webgw"
 )
 
-// webClientExtras is the config-derived part of GET /api/client. The config
-// is the one quil web loaded at start; the remembered sandbox image and the
-// keymap are read per request, so an image the TUI saved meanwhile pre-fills
-// the next dialog and a preset switched in F1 reaches the next page load.
+// webClientExtras is the config-derived part of GET /api/client. config.toml
+// is read per request (webFiles.ClientExtras), as are the remembered sandbox
+// image and the keymap, so a setting saved in the browser, an image the TUI
+// saved meanwhile and a preset switched in F1 all reach the next page load.
 //
 // With --connect the remembered image belongs to the LOCAL daemon's dialog
 // (config.SandboxImagePath("") is the local destination's file), not to the
 // host the browser creates panes on, so only the config default is offered.
 // The browser never writes that file (Task 6/7 rulings).
+//
+// Kept for the tests: runWeb shares one webFiles between the extras and the
+// Files routes, so both take the same locks.
 func webClientExtras(cfg config.Config, connect bool) func() webgw.ClientExtras {
-	return func() webgw.ClientExtras {
-		img := cfg.Sandbox.DefaultImage
-		if !connect {
-			if remembered := tui.LoadSandboxImage(config.SandboxImagePath("")); remembered != "" {
-				img = remembered
-			}
-		}
-		tpls, terr := webTemplates()
-		return webgw.ClientExtras{
-			SandboxSignIn:  cfg.Sandbox.DefaultSignIn(),
-			SandboxImage:   img,
-			Keymap:         webKeymap(cfg),
-			Notifications:  webNotify(cfg),
-			Templates:      tpls,
-			TemplatesError: terr,
-			Connect:        connect,
-		}
-	}
+	return newWebFiles(cfg, connect).ClientExtras
 }
 
 // webTemplatesError is the page's text for a templates.toml that does not

@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"log"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"sort"
@@ -79,6 +80,14 @@ var disclaimerTips = []struct {
 		"All keybindings are configurable",
 		"Press F1 for help and shortcuts",
 	}},
+}
+
+// RandomDisclaimerTip returns one tip, for the browser's beta notice. The
+// TUI keeps its own index (disclaimerTipIdx) so its dialog shows one tip for
+// its whole life.
+func RandomDisclaimerTip() (title string, items []string) {
+	t := disclaimerTips[rand.Intn(len(disclaimerTips))]
+	return t.title, append([]string(nil), t.items...)
 }
 
 // dialogBoxChrome is what dialogBorder costs every content line: the two
@@ -3604,7 +3613,7 @@ func (m Model) handleTOMLEditorKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // log files. Opened from F1 → "View ... log". Esc returns to the F1 About menu.
 // The tail reader and its byte cap live in internal/logtail (logtail.MaxBytes).
 
-// openLogViewer reads the file at path (last maxLogViewBytes bytes) and opens
+// openLogViewer reads the file at path (last logtail.MaxBytes bytes) and opens
 // the read-only TextEditor in dialogLogViewer mode. label is shown in the file
 // path field so the user sees what they're looking at.
 // logViewerViewport returns the viewport dimensions used by every log-viewer

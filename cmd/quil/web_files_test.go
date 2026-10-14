@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/logtail"
 	"github.com/artyomsv/quil/internal/plugin"
 	"github.com/artyomsv/quil/internal/webgw"
 )
@@ -338,6 +340,118 @@ func TestWebFiles_Logs(t *testing.T) {
 	}
 	if _, err := f.LogTail("audit"); status(err) != 404 {
 		t.Fatalf("audit: %v", err)
+	}
+}
+
+// The MCP log joins the mcp-logs folder: no folder or no file is Missing;
+// a log past MaxBytes reports Truncated and keeps only the tail.
+func TestWebFiles_LogsMCPAndTruncated(t *testing.T) {
+	f := home(t)
+	if lt, err := f.LogTail("mcp"); err != nil || !lt.Missing {
+		t.Fatalf("no folder: %+v %v", lt, err)
+	}
+	dir := config.MCPLogDir(config.Default().MCP)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if lt, err := f.LogTail("mcp"); err != nil || !lt.Missing {
+		t.Fatalf("empty folder: %+v %v", lt, err)
+	}
+	writeRaw(t, filepath.Join(dir, "pane-1.log"), "mcp line\n")
+	lt, err := f.LogTail("mcp")
+	if err != nil || lt.Missing || lt.Truncated || !strings.Contains(lt.Text, "mcp line") {
+		t.Fatalf("mcp: %+v %v", lt, err)
+	}
+	writeRaw(t, filepath.Join(config.QuilDir(), "quild.log"), "first\n"+strings.Repeat("x", logtail.MaxBytes)+"\n")
+	lt, err = f.LogTail("daemon")
+	if err != nil || !lt.Truncated || !strings.HasPrefix(lt.Text, logtail.TruncatedMarker) || strings.Contains(lt.Text, "first") {
+		t.Fatalf("daemon: truncated=%v size=%d err=%v", lt.Truncated, lt.Size, err)
+	}
+}
+
+// ResolveMigration refuses a bad name, a file that is not stale, a choice it
+// does not know and TOML that does not parse; "mine" with a high enough
+// schema_version is written as LF.
+func TestWebFiles_MigrationRefusalsAndMine(t *testing.T) {
+	f := home(t)
+	if _, err := f.ResolveMigration("A/b", "default", ""); status(err) != 400 {
+		t.Fatalf("bad name: %v", err)
+	}
+	if _, err := f.ResolveMigration("claude-code", "default", ""); status(err) != 404 {
+		t.Fatalf("not stale: %v", err)
+	}
+	if _, err := plugin.EnsureDefaultPlugins(config.PluginsDir()); err != nil {
+		t.Fatal(err)
+	}
+	cc := filepath.Join(config.PluginsDir(), "claude-code.toml")
+	old := "[plugin]\nname = \"claude-code\"\n"
+	writeRaw(t, cc, old)
+	if _, err := f.ResolveMigration("claude-code", "merge", ""); status(err) != 422 {
+		t.Fatalf("bad choice: %v", err)
+	}
+	if _, err := f.ResolveMigration("claude-code", "mine", "[plugin\nname="); status(err) != 422 {
+		t.Fatalf("bad toml: %v", err)
+	}
+	if b, _ := os.ReadFile(cc); string(b) != old {
+		t.Fatal("a refused choice reached the disk")
+	}
+	list, err := f.Migration()
+	if err != nil || len(list) != 1 {
+		t.Fatalf("stale list: %+v %v", list, err)
+	}
+	mine := fmt.Sprintf("[plugin]\r\nname = \"claude-code\"\r\nschema_version = %d\r\n", list[0].NeedVersion)
+	left, err := f.ResolveMigration("claude-code", "mine", mine)
+	if err != nil || len(left) != 0 {
+		t.Fatalf("mine: %+v %v", left, err)
+	}
+	if b, _ := os.ReadFile(cc); strings.Contains(string(b), "\r") || !strings.Contains(string(b), "schema_version") {
+		t.Fatalf("mine was not written as LF: %q", b)
+	}
+}
+
+// A config.toml that does not parse never blocks the client extras: the copy
+// loaded at start serves them, and the parse failure is noted once.
+func TestWebFiles_ExtrasFallBackOnBrokenConfig(t *testing.T) {
+	f := home(t)
+	f.launch.UI.ShowDisclaimer = false
+	writeRaw(t, config.ConfigPath(), "[ui\nbroken")
+	for i := 0; i < 2; i++ {
+		if ex := f.ClientExtras(); ex.ShowDisclaimer {
+			t.Fatal("a broken config.toml did not fall back to the launch copy")
+		}
+	}
+	if !f.warned.Load() {
+		t.Fatal("the parse failure was not noted")
+	}
+}
+
+func TestWebFiles_FloatSettingRoundTrips(t *testing.T) {
+	f := home(t)
+	v, err := f.SetSetting("ui.unfocused_dim", json.RawMessage(`0.5`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range v.Rows {
+		if r.Key == "ui.unfocused_dim" && r.Value != 0.5 {
+			t.Fatalf("value %v (%T)", r.Value, r.Value)
+		}
+	}
+	if _, err := f.SetSetting("ui.unfocused_dim", json.RawMessage(`"half"`)); status(err) != 422 {
+		t.Fatalf("text for a number: %v", err)
+	}
+}
+
+// An unknown target kind is 404; templates.toml that is a folder is refused.
+func TestWebFiles_UnknownKindAndFolderTarget(t *testing.T) {
+	f := home(t)
+	if _, err := f.ReadText(webgw.FileTarget{Kind: "notes"}); status(err) != 404 {
+		t.Fatalf("unknown kind: %v", err)
+	}
+	if err := os.Mkdir(config.TemplatesPath(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.ReadText(webgw.FileTarget{Kind: webgw.TargetTemplates}); status(err) != 400 {
+		t.Fatalf("folder: %v", err)
 	}
 }
 

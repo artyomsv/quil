@@ -5,8 +5,6 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-
-	"github.com/artyomsv/quil/internal/config"
 )
 
 // F1 → Settings → Sandbox: the Ctrl+N dialog's sandbox defaults.
@@ -27,16 +25,7 @@ const (
 // produce auth = "token" + shared_claude_config = true — the pair under which
 // an MCP-created token pane and a browser pane share one directory and keep
 // re-opening each other's sign-in.
-func (m *Model) setSandboxSignInDefault(choice string) {
-	auth, claudeConfig := sandboxSignInFields(choice)
-	shared := claudeConfig == config.SandboxClaudeConfigShared
-	if m.cfg.Sandbox.Auth == auth && m.cfg.Sandbox.SharedClaudeConfig == shared {
-		return
-	}
-	m.cfg.Sandbox.Auth = auth
-	m.cfg.Sandbox.SharedClaudeConfig = shared
-	m.configChanged = true
-}
+func (m *Model) setSandboxSignInDefault(choice string) { m.applySetting("sandbox.sign_in", choice) }
 
 // pasteIntoSandboxSettings takes a paste while the page is open. Only the
 // image field accepts text, and only while it is being edited; a paste
@@ -62,13 +51,9 @@ func (m Model) handleSandboxSettingsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd
 			m.dialogEdit = false
 			m.dialogInput = ""
 		case "enter":
-			// Trimmed and bounded like the Ctrl+N field. An empty value is
-			// legal here: it means "no default image".
-			v := strings.TrimSpace(m.dialogInput)
-			if v != m.cfg.Sandbox.DefaultImage && len([]rune(v)) <= sandboxImageMax {
-				m.cfg.Sandbox.DefaultImage = v
-				m.configChanged = true
-			}
+			// Trimmed and bounded by the shared row, like the Ctrl+N field.
+			// An empty value is legal here: it means "no default image".
+			m.applySetting("sandbox.default_image", m.dialogInput)
 			m.dialogEdit = false
 			m.dialogInput = ""
 		case "backspace":

@@ -425,3 +425,24 @@ func TestNewInstanceID_RedrawsOnCollision(t *testing.T) {
 		t.Fatal("an exhausted source must be an error, not a reused id")
 	}
 }
+
+func TestAPI_ClientCarriesWhatsNewDisclaimerAndTip(t *testing.T) {
+	h := newWSHarness(t, func(s *Server) {
+		s.cfg.ClientExtras = func() ClientExtras {
+			return ClientExtras{
+				WhatsNew:       &WhatsNew{Version: "1.89.0", Date: "2026-10-20", Items: []WhatsNewItem{{Kind: "added", Text: "x"}}},
+				ShowDisclaimer: true,
+				Tip:            &Tip{Title: "T", Items: []string{"a"}},
+			}
+		}
+	})
+	s := h.login()
+	h.liveTab(s)
+	var ci ClientInfo
+	if err := json.NewDecoder(h.api(http.MethodGet, "/api/client", s, nil, nil).Body).Decode(&ci); err != nil {
+		t.Fatal(err)
+	}
+	if ci.WhatsNew == nil || ci.WhatsNew.Version != "1.89.0" || !ci.ShowDisclaimer || ci.Tip == nil || ci.Tip.Title != "T" {
+		t.Fatalf("client info %+v", ci)
+	}
+}

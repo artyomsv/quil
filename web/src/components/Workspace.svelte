@@ -2,12 +2,15 @@
   import type { App } from '../lib/app.svelte';
   import { sanitizeRemoteText } from '../lib/sanitize';
   import Banner from './Banner.svelte';
+  import BetaNotice from './BetaNotice.svelte';
   import CreatePaneDialog from './CreatePaneDialog.svelte';
+  import FileEditor from './FileEditor.svelte';
   import HelpMenu from './HelpMenu.svelte';
   import HistoryDialog from './HistoryDialog.svelte';
   import KeyList from './KeyList.svelte';
   import MachinePages from './MachinePages.svelte';
   import Menu from './Menu.svelte';
+  import MigrationView from './MigrationView.svelte';
   import NotesEditor from './NotesEditor.svelte';
   import Notice from './Notice.svelte';
   import NotificationPanel from './NotificationPanel.svelte';
@@ -68,6 +71,17 @@
         <NotesEditor {app} n={app.notes} />
       {/key}
     {/if}
+    {#if app.editor}
+      <!-- Outside the editable gate: it survives a lost link with its text. -->
+      {#key app.editor}
+        <FileEditor {app} e={app.editor} />
+      {/key}
+    {/if}
+    {#if app.migration}
+      {#key app.migration}
+        <MigrationView {app} m={app.migration} />
+      {/key}
+    {/if}
     {#if app.panel?.kind === 'palette'}
       <Palette {app} />
     {/if}
@@ -100,6 +114,9 @@
       {#key app.dialog}
         <CreatePaneDialog {app} />
       {/key}
+    {/if}
+    {#if app.betaOpen && app.client}
+      <BetaNotice {app} />
     {/if}
   </div>
   {#if app.notifyOpen}

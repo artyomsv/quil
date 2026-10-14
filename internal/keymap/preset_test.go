@@ -172,3 +172,12 @@ func TestPreset_TmuxRenameIsTheCommaKey(t *testing.T) {
 		t.Errorf("second chord = %q, want the comma key", got)
 	}
 }
+
+func TestPresetUsesPrefix(t *testing.T) {
+	if PresetUsesPrefix("") || PresetUsesPrefix(DefaultPresetName) || PresetUsesPrefix("no-such-preset") {
+		t.Fatal("default, empty and unknown presets write no prefix")
+	}
+	if !PresetUsesPrefix("tmux") {
+		t.Fatal("tmux writes ${prefix}")
+	}
+}

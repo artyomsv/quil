@@ -676,6 +676,8 @@ func launchTUI() {
 	// each pane's emulator when it is created, so a pane built before this call
 	// would keep the default for its whole life.
 	tui.SetScrollbackLines(cfg.UI.ScrollbackLines)
+	// The exit save compares against this exact value (saveExitConfig).
+	launchCfg := config.Clone(cfg)
 	model := tui.NewModel(router, cfg, version, reg, stalePlugins, whatsNew)
 	// Hello (sendClientHello, above) and attach must name this process
 	// identically, or the daemon's process dialog and its attached-client
@@ -1005,19 +1007,13 @@ func launchTUI() {
 		m.CloseClient()
 		saveWindowSize(m)
 		if m.ConfigChanged() {
-			// Read-modify-write, preserving the one section the Model does not
-			// own. A remote install records [remote.hosts.<dest>] behind the
-			// TUI's back, so writing the Model's launch-time copy whole would
-			// erase the binary path that makes the next attach work — and this
-			// runs on EVERY exit once any setting has been touched.
-			if err := config.Mutate(config.ConfigPath(), func(c *config.Config) {
-				remote := c.Remote
-				*c = m.Config()
-				c.Remote = remote
-			}); err != nil {
+			// Only the leaves this TUI changed, onto a fresh read: the browser
+			// or another TUI may have saved meanwhile, and a remote install
+			// records [remote.hosts.<dest>] behind the TUI's back.
+			if err := saveExitConfig(config.ConfigPath(), launchCfg, m.Config()); err != nil {
 				log.Printf("save config: %v", err)
 			} else {
-				log.Print("config saved (disclaimer preference updated)")
+				log.Print("config saved (settings this TUI changed)")
 			}
 		}
 

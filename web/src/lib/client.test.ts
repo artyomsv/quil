@@ -45,6 +45,9 @@ describe('client api', () => {
         templates: [],
         templates_error: '',
         connect: false,
+        whats_new: null,
+        show_disclaimer: false,
+        tip: null,
       },
     });
     expect('error' in (await loadClient(fake(200, null).fetchFn, 'k'))).toBe(true);

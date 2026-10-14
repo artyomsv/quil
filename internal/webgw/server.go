@@ -69,6 +69,9 @@ type Config struct {
 	// ClientExtras is the config-derived part of /api/client (sandbox
 	// defaults; Task 8 the keymap and notification filter). Nil: none.
 	ClientExtras func() ClientExtras
+	// Files is this machine's settings, templates, plugin and log files
+	// (spec 5d). Nil: the 5d routes answer 404.
+	Files Files
 }
 
 // sockRef is the WebSocket currently serving a tab: cancel stops its reader
@@ -180,6 +183,12 @@ func New(cfg Config) *Server {
 	s.mux.HandleFunc("/ws", s.handleWS)
 	s.mux.HandleFunc("/api/client", s.handleClient)
 	s.mux.HandleFunc("/api/instances", s.handleInstances)
+	s.mux.HandleFunc("/api/settings", s.handleSettings)
+	s.mux.HandleFunc("/api/files/templates", s.handleTemplatesFile)
+	s.mux.HandleFunc("/api/files/plugins/", s.handlePluginFile)
+	s.mux.HandleFunc("/api/migration", s.handleMigrationList)
+	s.mux.HandleFunc("/api/migration/", s.handleMigrationResolve)
+	s.mux.HandleFunc("/api/logs/", s.handleLogs)
 	return s
 }
 

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/artyomsv/quil/internal/atomicfile"
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/notify"
@@ -49,9 +50,12 @@ func TestQuilHomeEntriesKnownToProtectDir(t *testing.T) {
 			t.Errorf("ipc.IsQuilHomeEntry(%q) = false: add it to quilHomeNames or quilHomeStems in internal/ipc/acl.go", name)
 		}
 	}
-	// The dot-named temps are matched by prefix only, so a renamed pattern
-	// must still be one of them.
-	if name := strings.Replace(config.TemplatesTempPattern, "*", "123", 1); !ipc.IsQuilHomeEntry(name) {
-		t.Errorf("ipc.IsQuilHomeEntry(%q) = false: add its prefix to QuilHomeDotPrefixes in internal/ipc/acl.go", name)
+	// atomicfile names its temp "<base>.<digits>.tmp"; every file it writes
+	// at the top of QUIL_HOME must still read as quil's.
+	for _, base := range []string{"config.toml", "bindings.toml", "templates.toml", "instances.json"} {
+		name := base + strings.Replace(atomicfile.TempPattern, "*", "123", 1)
+		if !ipc.IsQuilHomeEntry(name) {
+			t.Errorf("ipc.IsQuilHomeEntry(%q) = false: atomicfile.TempPattern no longer keeps the stem", name)
+		}
 	}
 }

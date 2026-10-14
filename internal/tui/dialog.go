@@ -1,10 +1,9 @@
 package tui
 
 import (
-	"bytes"
 	"fmt"
-	"io"
 	"log"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"sort"
@@ -21,6 +20,7 @@ import (
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/keymap"
 	"github.com/artyomsv/quil/internal/logger"
+	"github.com/artyomsv/quil/internal/logtail"
 	"github.com/artyomsv/quil/internal/plugin"
 )
 
@@ -80,6 +80,14 @@ var disclaimerTips = []struct {
 		"All keybindings are configurable",
 		"Press F1 for help and shortcuts",
 	}},
+}
+
+// RandomDisclaimerTip returns one tip, for the browser's beta notice. The
+// TUI keeps its own index (disclaimerTipIdx) so its dialog shows one tip for
+// its whole life.
+func RandomDisclaimerTip() (title string, items []string) {
+	t := disclaimerTips[rand.Intn(len(disclaimerTips))]
+	return t.title, append([]string(nil), t.items...)
 }
 
 // dialogBoxChrome is what dialogBorder costs every content line: the two
@@ -228,31 +236,20 @@ func settingsFields() []settingsField {
 		{
 			label: "Snapshot interval",
 			get:   func(m *Model) string { return m.cfg.Daemon.SnapshotInterval },
-			set: func(m *Model, v string) {
-				if d, err := time.ParseDuration(v); err == nil && d > 0 && m.cfg.Daemon.SnapshotInterval != v {
-					m.cfg.Daemon.SnapshotInterval = v
-					m.configChanged = true
-				}
-			},
+			set:   func(m *Model, v string) { m.applySetting("daemon.snapshot_interval", v) },
 		},
 		{
 			label: "Ghost dimmed",
 			get:   func(m *Model) string { return boolStr(m.cfg.GhostBuffer.Dimmed) },
 			set: func(m *Model, _ string) {
-				m.cfg.GhostBuffer.Dimmed = !m.cfg.GhostBuffer.Dimmed
-				m.configChanged = true
+				m.applySetting("ghost_buffer.dimmed", strconv.FormatBool(!m.cfg.GhostBuffer.Dimmed))
 			},
 			isBool: true,
 		},
 		{
 			label: "Ghost buffer lines",
 			get:   func(m *Model) string { return strconv.Itoa(m.cfg.GhostBuffer.MaxLines) },
-			set: func(m *Model, v string) {
-				if n, err := strconv.Atoi(v); err == nil && n > 0 && m.cfg.GhostBuffer.MaxLines != n {
-					m.cfg.GhostBuffer.MaxLines = n
-					m.configChanged = true
-				}
-			},
+			set:   func(m *Model, v string) { m.applySetting("ghost_buffer.max_lines", v) },
 		},
 		{
 			label: "Scrollback lines",
@@ -268,39 +265,19 @@ func settingsFields() []settingsField {
 				// mean the opposite of what the user typed. Clamps the top end
 				// for the same reason SetScrollbackLines does — the setting
 				// whose purpose is reducing memory must not be able to exhaust
-				// it through a typo.
-				n, err := strconv.Atoi(v)
-				if err != nil || n <= 0 {
-					return
-				}
-				if n > maxScrollbackLines {
-					n = maxScrollbackLines
-				}
-				if m.cfg.UI.ScrollbackLines != n {
-					m.cfg.UI.ScrollbackLines = n
-					m.configChanged = true
-				}
+				// it through a typo. Both rules live in the shared row.
+				m.applySetting("ui.scrollback_lines", v)
 			},
 		},
 		{
 			label: "Mouse scroll lines",
 			get:   func(m *Model) string { return strconv.Itoa(m.cfg.UI.MouseScrollLines) },
-			set: func(m *Model, v string) {
-				if n, err := strconv.Atoi(v); err == nil && n > 0 && m.cfg.UI.MouseScrollLines != n {
-					m.cfg.UI.MouseScrollLines = n
-					m.configChanged = true
-				}
-			},
+			set:   func(m *Model, v string) { m.applySetting("ui.mouse_scroll_lines", v) },
 		},
 		{
 			label: "Page scroll lines",
 			get:   func(m *Model) string { return strconv.Itoa(m.cfg.UI.PageScrollLines) },
-			set: func(m *Model, v string) {
-				if n, err := strconv.Atoi(v); err == nil && n >= 0 && m.cfg.UI.PageScrollLines != n {
-					m.cfg.UI.PageScrollLines = n
-					m.configChanged = true
-				}
-			},
+			set:   func(m *Model, v string) { m.applySetting("ui.page_scroll_lines", v) },
 		},
 		{
 			// The one Settings row that applies LIVE. The comment on
@@ -321,10 +298,10 @@ func settingsFields() []settingsField {
 				// dialog must never show a number the layout is not using.
 				//
 				// Bounded by the SAME limits the edge drag enforces —
-				// minSidebarWidth below, and sidebarWidth's own
-				// total-minTermWidth clamp above — so the two entry points
-				// cannot disagree about what is settable.
-				if err != nil || n < minSidebarWidth || n == m.cfg.UI.SidebarWidth {
+				// minSidebarWidth below (the shared row checks it), and
+				// sidebarWidth's own total-minTermWidth clamp above — so the
+				// two entry points cannot disagree about what is settable.
+				if err != nil {
 					return
 				}
 				// Bounded against the CAP only, and measured at a width the
@@ -349,9 +326,9 @@ func settingsFields() []settingsField {
 				if n > usable-minTermWidth {
 					return
 				}
-				m.cfg.UI.SidebarWidth = n
-				m.sidebarWidth = n
-				m.configChanged = true
+				if m.applySetting("ui.sidebar_width", v) {
+					m.sidebarWidth = m.cfg.UI.SidebarWidth
+				}
 			},
 			relayout: true,
 		},
@@ -403,22 +380,17 @@ func settingsFields() []settingsField {
 				// level" and not a second switch.
 				//
 				// The unchanged-check compares FORMATTED values, not raw
-				// ones. `get` renders the CLAMPED, rounded level while the
-				// stored field may hold neither: with a hand-edited
-				// `unfocused_dim = 1.5` the row displays "0.90", and a raw
-				// compare made Enter-Enter — inspecting the row and accepting
-				// what it already showed — store 0.9 and flag the config
-				// dirty. config.Save writes the whole file, so merely looking
-				// at this row rewrote config.toml and any comments in it.
-				// Every other row in this table is immune because its get/set
-				// round-trip is exact; this is the only one where they are
-				// not.
-				n, ok := parseDimLevel(v)
-				if !ok || formatDimLevel(n) == formatDimLevel(m.cfg.UI.UnfocusedDimLevel()) {
-					return
-				}
-				m.cfg.UI.UnfocusedDim = n
-				m.configChanged = true
+				// ones (applySetting compares Get values). `get` renders the
+				// CLAMPED, rounded level while the stored field may hold
+				// neither: with a hand-edited `unfocused_dim = 1.5` the row
+				// displays "0.90", and a raw compare made Enter-Enter —
+				// inspecting the row and accepting what it already showed —
+				// store 0.9 and flag the config dirty. config.Save writes the
+				// whole file, so merely looking at this row rewrote
+				// config.toml and any comments in it. Every other row in this
+				// table is immune because its get/set round-trip is exact;
+				// this is the only one where they are not.
+				m.applySetting("ui.unfocused_dim", v)
 			},
 		},
 		{
@@ -434,12 +406,7 @@ func settingsFields() []settingsField {
 				// Refused rather than clamped, like Sidebar width: a stored
 				// value the daemon would not honour must never be displayed.
 				// 0 is legal and means "never evict".
-				n, err := strconv.Atoi(v)
-				if err != nil || n < 0 || n == m.cfg.Overlay.IdleTimeoutMinutes {
-					return
-				}
-				m.cfg.Overlay.IdleTimeoutMinutes = n
-				m.configChanged = true
+				m.applySetting("overlay.idle_timeout_minutes", v)
 			},
 		},
 		{
@@ -486,54 +453,32 @@ func settingsFields() []settingsField {
 		{
 			label: "Max live overlays",
 			get:   func(m *Model) string { return strconv.Itoa(m.cfg.Overlay.MaxLive) },
-			set: func(m *Model, v string) {
-				// 0 is legal and means "no cap".
-				n, err := strconv.Atoi(v)
-				if err != nil || n < 0 || n == m.cfg.Overlay.MaxLive {
-					return
-				}
-				m.cfg.Overlay.MaxLive = n
-				m.configChanged = true
-			},
+			// 0 is legal and means "no cap".
+			set: func(m *Model, v string) { m.applySetting("overlay.max_live", v) },
 		},
 		{
 			label: "Log level",
 			get:   func(m *Model) string { return m.cfg.Logging.Level },
-			set: func(m *Model, v string) {
-				switch v {
-				case "debug", "info", "warn", "error":
-					if m.cfg.Logging.Level != v {
-						m.cfg.Logging.Level = v
-						m.configChanged = true
-					}
-				}
-			},
+			set:   func(m *Model, v string) { m.applySetting("logging.level", v) },
 		},
 		{
 			label: "Show disclaimer",
 			get:   func(m *Model) string { return boolStr(m.cfg.UI.ShowDisclaimer) },
 			set: func(m *Model, _ string) {
-				m.cfg.UI.ShowDisclaimer = !m.cfg.UI.ShowDisclaimer
-				m.configChanged = true
+				m.applySetting("ui.show_disclaimer", strconv.FormatBool(!m.cfg.UI.ShowDisclaimer))
 			},
 			isBool: true,
 		},
 		{
-			label: "Update check",
-			get:   func(m *Model) string { return boolStr(m.cfg.Update.Check) },
-			set: func(m *Model, _ string) {
-				m.cfg.Update.Check = !m.cfg.Update.Check
-				m.configChanged = true
-			},
+			label:  "Update check",
+			get:    func(m *Model) string { return boolStr(m.cfg.Update.Check) },
+			set:    func(m *Model, _ string) { m.applySetting("update.check", strconv.FormatBool(!m.cfg.Update.Check)) },
 			isBool: true,
 		},
 		{
-			label: "Update auto-download",
-			get:   func(m *Model) string { return boolStr(m.cfg.Update.Auto) },
-			set: func(m *Model, _ string) {
-				m.cfg.Update.Auto = !m.cfg.Update.Auto
-				m.configChanged = true
-			},
+			label:  "Update auto-download",
+			get:    func(m *Model) string { return boolStr(m.cfg.Update.Auto) },
+			set:    func(m *Model, _ string) { m.applySetting("update.auto", strconv.FormatBool(!m.cfg.Update.Auto)) },
 			isBool: true,
 		},
 		{label: "Templates", get: func(m *Model) string { return "…" }, set: func(m *Model, _ string) {}, templateSettings: true},
@@ -3666,12 +3611,9 @@ func (m Model) handleTOMLEditorKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 //
 // Reuses TextEditor in ReadOnly + HighlightPlain mode to show client/daemon/MCP
 // log files. Opened from F1 → "View ... log". Esc returns to the F1 About menu.
+// The tail reader and its byte cap live in internal/logtail (logtail.MaxBytes).
 
-// maxLogViewBytes caps how much of a log file we read into memory. Logs can
-// grow unbounded; we tail the last N KB so the editor stays responsive.
-const maxLogViewBytes = 256 * 1024
-
-// openLogViewer reads the file at path (last maxLogViewBytes bytes) and opens
+// openLogViewer reads the file at path (last logtail.MaxBytes bytes) and opens
 // the read-only TextEditor in dialogLogViewer mode. label is shown in the file
 // path field so the user sees what they're looking at.
 // logViewerViewport returns the viewport dimensions used by every log-viewer
@@ -3745,7 +3687,7 @@ func (m Model) openReadonlyText(label, content string) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) openLogViewer(label, path string) (tea.Model, tea.Cmd) {
-	content, err := readLogTail(path, maxLogViewBytes)
+	content, err := logtail.Tail(path, logtail.MaxBytes)
 	if err != nil {
 		// Show the error inline in an empty editor so the user knows
 		// what went wrong (file missing, permission denied, etc.).
@@ -3764,126 +3706,21 @@ func (m Model) openLogViewer(label, path string) (tea.Model, tea.Cmd) {
 func (m Model) openMCPLogsViewer() (tea.Model, tea.Cmd) {
 	m.logViewerReturn = dialogAbout
 	dir := config.MCPLogDir(m.cfg.MCP)
-	entries, err := os.ReadDir(dir)
+	// The listing, the newest-first order and the per-file share live in
+	// internal/logtail, which the browser's Logs page reads with too.
+	text, files, err := logtail.JoinDir(dir, logtail.MaxBytes)
 	if err != nil {
 		return m.openLogViewer("MCP logs", filepath.Join(dir, "(unavailable)"))
 	}
-
-	type logFile struct {
-		name string
-		mod  time.Time
-		size int64
-	}
-	var files []logFile
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		if !strings.HasSuffix(e.Name(), ".log") {
-			continue
-		}
-		info, ierr := e.Info()
-		if ierr != nil {
-			continue
-		}
-		files = append(files, logFile{name: e.Name(), mod: info.ModTime(), size: info.Size()})
-	}
-	// Most recently modified first.
-	sort.Slice(files, func(i, j int) bool {
-		return files[i].mod.After(files[j].mod)
-	})
-
-	if len(files) == 0 {
+	if files == 0 {
 		empty := fmt.Sprintf("# MCP logs\n# %s\n#\n# No MCP interactions logged yet.\n", dir)
 		m.tomlEditor = m.newLogViewerEditor(empty, dir)
 		m.dialog = dialogLogViewer
 		return m, tea.ClearScreen
 	}
-
-	// Build aggregated content. Cap each file to a reasonable share of
-	// maxLogViewBytes so one huge file doesn't squeeze out the others.
-	perFile := maxLogViewBytes / len(files)
-	if perFile < 4*1024 {
-		perFile = 4 * 1024
-	}
-	var b strings.Builder
-	for _, f := range files {
-		b.WriteString(fmt.Sprintf("\n========== %s  (%s, %d bytes) ==========\n\n",
-			f.name, f.mod.Format("2006-01-02 15:04:05"), f.size))
-		full := filepath.Join(dir, f.name)
-		tail, terr := readLogTail(full, perFile)
-		if terr != nil {
-			b.WriteString(fmt.Sprintf("(read error: %v)\n", terr))
-			continue
-		}
-		b.WriteString(tail)
-		if !strings.HasSuffix(tail, "\n") {
-			b.WriteByte('\n')
-		}
-	}
-
-	m.tomlEditor = m.newLogViewerEditor(b.String(), dir)
+	m.tomlEditor = m.newLogViewerEditor(text, dir)
 	m.dialog = dialogLogViewer
 	return m, tea.ClearScreen
-}
-
-// readLogTail reads up to maxBytes from the END of the given file. If the
-// file is shorter than maxBytes the whole file is returned. Always reads from
-// the start of a line (skipping any partial first line) so the result is
-// well-formed.
-//
-// Symlinks are rejected: an Lstat is performed first and any non-regular
-// file (symlink, device, named pipe, etc.) is refused. This prevents the log
-// viewer from being redirected to read arbitrary files via a swapped link
-// inside ~/.quil/. Same hardening pattern as internal/persist/notes.go.
-func readLogTail(path string, maxBytes int) (string, error) {
-	li, err := os.Lstat(path)
-	if err != nil {
-		return "", err
-	}
-	if !li.Mode().IsRegular() {
-		return "", fmt.Errorf("refusing to read non-regular file %q (mode=%v)", path, li.Mode())
-	}
-
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-
-	// Re-stat through the open handle to defeat a TOCTOU swap between Lstat
-	// and Open. If the inode changed we refuse the read.
-	stat, err := f.Stat()
-	if err != nil {
-		return "", err
-	}
-	if !stat.Mode().IsRegular() {
-		return "", fmt.Errorf("refusing to read non-regular file %q after open", path)
-	}
-	size := stat.Size()
-	if size <= int64(maxBytes) {
-		data, rerr := io.ReadAll(f)
-		if rerr != nil {
-			return "", rerr
-		}
-		return string(data), nil
-	}
-
-	// Seek to (size - maxBytes), read to end, then drop everything before
-	// the first newline so we don't show a partial line.
-	if _, err := f.Seek(size-int64(maxBytes), io.SeekStart); err != nil {
-		return "", err
-	}
-	buf := make([]byte, maxBytes)
-	n, err := f.Read(buf)
-	if err != nil {
-		return "", err
-	}
-	buf = buf[:n]
-	if i := bytes.IndexByte(buf, '\n'); i >= 0 && i+1 < len(buf) {
-		buf = buf[i+1:]
-	}
-	return "[... older lines truncated ...]\n" + string(buf), nil
 }
 
 // handleLogViewerKey routes editor keys to the read-only TextEditor for

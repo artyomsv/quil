@@ -15,9 +15,10 @@ In the browser you can:
 - read and dismiss notifications (see [Notifications](#notifications));
 - open lazygit and hunk over a pane (see [Overlays](#overlays));
 - use your keymap (see [Keys](#keys));
-- use the command palette, pane notes, input history, projects and groups, templates, and the F1 pages (see [Palette, notes and more](#palette-notes-and-more)).
+- use the command palette, pane notes, input history, projects and groups, templates, and the F1 pages (see [Palette, notes and more](#palette-notes-and-more));
+- change settings, edit templates and plugin files, update old plugin files, read the logs (see [Settings and files](#settings-and-files)).
 
-These stay in the terminal: stopping the daemon, the settings pages, the plugin and template file editors, the log viewers, and adding an ssh host. The browser tells you when you press a key for one of them.
+These stay in the terminal: stopping the daemon and adding an ssh host. The browser tells you when you press a key for one of them.
 
 ## Start it
 
@@ -164,6 +165,26 @@ Notes:
   - **Processes**: the processes of every pane, every 5 seconds. With `full` rights you can kill a process below the pane's own program.
   - **Plugins**: the plugins this daemon found. With `full` rights, **Reload** reads the plugin files again.
   - **Update**: the daemon's version and a newer release, if the daemon reported one. With `full` rights, **Download** stages it on the daemon's machine. The next terminal started on that machine applies it; the browser cannot.
+
+## Settings and files
+
+These pages read and write the files of the machine where `quil web` runs: its `config.toml`, `bindings.toml`, `templates.toml`, the plugin files and the logs. With `--connect`, they are still that machine's files, not the daemon's; every page says so.
+
+Every write, and every log, needs a `full` token. With a `standard` token you can see the settings values, but not change them. With `read-only` the pages say "needs full rights".
+
+- **Settings** (F1 → Settings, or the palette). Four tabs: **General**, **Notifications**, **Sandbox** and **Keys**. Each change is saved at once. Beside each row you see when it applies: **applies now**, or **next start of the TUI and daemon**. A refused value shows the reason beside the row, and the row shows the stored value again.
+  - Saving rewrites `config.toml` (and the Keys tab rewrites `bindings.toml`). Comments in those files are not kept.
+  - Keys, notifications and sandbox defaults apply to this page without a reload. A terminal that is open applies them at its next start.
+  - A terminal that is open and changes a different setting does not undo yours: at exit it writes only the settings it changed itself.
+- **Templates** (Settings → General → **Templates…**, or the palette, **Edit templates**) and **plugin files** (F1 → Plugins → **Edit**). A plain text editor. `Ctrl+S` or **Save** writes the file. A file that does not pass its check is not written; the error names the line.
+  - If the file changed on disk after you opened it, a bar says **Changed on disk**: **Reload** takes the file on disk (your text is lost), **Overwrite** writes yours.
+  - A file over 256 KiB cannot be opened in the browser; use the TUI.
+  - The editor keeps your text if the connection drops; it is read-only until the link is back. **Close** with unsaved text asks you to click again.
+  - **Restore default** fills the templates editor with the shipped file. Nothing is written until you save.
+- **Plugin update**. When a plugin file is older than the default that ships with Quil, F1 and the Plugins page show "N plugin files need an update". The page keeps working. The update view shows your file on the left and the new default on the right: raise `schema_version` in your file and **Save mine**, or **Use default**.
+- **Logs** (F1 → Logs). The **Client**, **Daemon**, **MCP** and **Web** logs of this machine, the last 256 KiB of each. **Refresh** reads again; **Copy** copies the text.
+- **What's New** (F1 → What's New). The highlights of the newest release in the `quil web` build. It never opens by itself.
+- **The beta notice** shows once per browser tab while `ui.show_disclaimer` is on. **OK** hides it for this tab; **Don't show again** turns the setting off (full rights).
 
 ## Notifications
 

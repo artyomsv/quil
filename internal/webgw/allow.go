@@ -71,6 +71,9 @@ var forwardable = map[string]bool{
 	// rights table decides, the page only greys what it would refuse.
 	ipc.MsgResourceReportReq: true, ipc.MsgKillProcessReq: true, ipc.MsgReloadPlugins: true,
 	ipc.MsgUpdateCheckReq: true, ipc.MsgStageUpdateReq: true,
+	// 5d: the Settings page pushes the overlay rows to a running daemon
+	// (local mode only; re-encoded, admin-class at the daemon).
+	ipc.MsgOverlayPolicy: true,
 }
 
 // idless types are sent without an ID whatever the page set: the daemon
@@ -286,6 +289,8 @@ func (g *forwardGate) checkFilled(m *ipc.Message, fill *instanceFill) (fwd, refu
 		return reencode[ipc.ResourceReportReqPayload](m)
 	case ipc.MsgKillProcessReq:
 		return reencode[ipc.KillProcessReqPayload](m)
+	case ipc.MsgOverlayPolicy:
+		return reencode[ipc.OverlayPolicyPayload](m)
 	}
 	if idless[m.Type] {
 		c := *m

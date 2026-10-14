@@ -11,6 +11,11 @@
   // The TUI's About menu, reduced to what the browser serves (spec §2). Each
   // later screen adds its row here.
   const items: MenuItem[] = $derived([
+    // Plugin files below their default's schema_version (spec 5d §4.4): a
+    // notice, never a blocking dialog.
+    ...(app.staleCount > 0
+      ? [{ label: `${app.staleCount} plugin file${app.staleCount === 1 ? ' needs' : 's need'} an update`, run: () => void app.openMigration() }]
+      : []),
     {
       label: 'Shortcuts',
       run: () => {
@@ -18,6 +23,15 @@
         app.openKeyList();
       },
     },
+    { label: 'Settings', run: () => app.openPanel({ kind: 'settings' }) },
+    // Logs carry paths and command lines: full rights (spec 5d D2).
+    {
+      label: 'Logs',
+      run: () => app.openPanel({ kind: 'logs' }),
+      disabled: app.refusalFor('admin') !== '',
+      reason: app.refusalFor('admin'),
+    },
+    { label: "What's New", run: () => app.openPanel({ kind: 'whats_new' }) },
     // Viewing processes is an act-class request (the daemon's table); kill
     // inside the page needs full rights.
     {

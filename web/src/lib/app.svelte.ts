@@ -2,6 +2,7 @@ import { cwdForSplit, nextTabColor, projectRootOf, quickSplit, splitAnswer } fro
 import { askedTabShown, jumpStep, type PendingJump, pickActive, resolveJump, SeenMarks, successorOf, UnseenAsks } from './activepane';
 import { AgentStatePoller } from './agentstate';
 import { attachRefusedBanner, bannerFor, type BannerState, isLoginRequired } from './banner';
+import { BETA_SEEN_KEY, shouldShowBeta } from './beta';
 import {
   type ClientInfo,
   createInstance,
@@ -14,6 +15,8 @@ import {
 import { type AttachSizes, type Clock, Connection, type SocketLike } from './connection';
 import type { DialogOpen } from './dialog';
 import { type QuilTestHook, shouldRegisterE2EHook } from './e2ehook';
+import { EditorSession } from './editor';
+import { type FilesApi, filesApi, type FileTarget, type SettingsView } from './files';
 import { NATIVE, TUI_ONLY, VIEW_ONLY } from './keys/actions';
 import { IS_MAC, isEditable } from './keys/chord';
 import { buildTables, KeyEngine, type WebKeymap } from './keys/engine';
@@ -23,6 +26,7 @@ import { type FetchLike, hasSession, postLogin, sessionGone } from './login';
 import { NotificationStore, type NotifyInfo, type PaneEvent, parsePaneEvent } from './notifications';
 import { OverlayClaim, type OverlayInfo, type OverlayKind, overlayOf, overlayRepoChoice, overlayToggle } from './overlay';
 import { HISTORY_TIMEOUT_MS } from './history';
+import { MigrationFlow } from './migration';
 import { NOTE_LOAD_TIMEOUT_MS, type NoteIO, NoteSession } from './notes';
 import { buildPalette, type PaletteRow } from './palette';
 import { folderFromBrowse, GroupRenames, newProjectPlan } from './projects';
@@ -42,6 +46,7 @@ import type {
   WorkspaceState,
 } from './protocol';
 import { sanitizeRemoteText } from './sanitize';
+import { OVERLAY_KEYS, overlayPolicy, refreshesClient } from './settings';
 import { TEMPLATE_TOO_OLD, templateGate } from './template';
 import { type Outcome, Requests, STILL_WORKING } from './requests';
 import { type MsgClass, refusal, type Rights, rightsOf } from './rights';
@@ -171,6 +176,19 @@ export class App {
   // A stage_update_req is out (one at a time).
   stageBusy = $state(false);
   notesTick = $state(0);
+  // The open templates or plugin editor. Not a Panel: it survives a lost
+  // link with its text (spec 5d §4.0), like the notes editor.
+  editor = $state.raw<EditorSession | null>(null);
+  editorTick = $state(0);
+  // Plugin files on this machine below their default's schema_version (spec
+  // 5d §4.4): the count drives the F1 and Plugins notices; the flow is the
+  // open split view (not a Panel: it holds editable text).
+  staleCount = $state(0);
+  migration = $state.raw<MigrationFlow | null>(null);
+  migrationTick = $state(0);
+  // The beta notice (spec 5d §4.7): decided once, at the first /api/client.
+  betaOpen = $state(false);
+  private betaDecided = false;
   sidebarOpen = $state(true);
   keyHint = $state('');
   keymap = $state.raw<WebKeymap | null>(null);
@@ -333,6 +351,7 @@ export class App {
     // Capture phase: the engine sees a key before xterm's textarea does.
     document.addEventListener('keydown', this.onKeyDown, true);
     window.addEventListener('blur', this.onBlur);
+    window.addEventListener('beforeunload', this.onBeforeUnload);
     this.watchDisplay();
     this.probed = probeCell();
     const live = await hasSession(this.fetchFn);
@@ -358,6 +377,7 @@ export class App {
   stop(): void {
     document.removeEventListener('keydown', this.onKeyDown, true);
     window.removeEventListener('blur', this.onBlur);
+    window.removeEventListener('beforeunload', this.onBeforeUnload);
     this.keys?.cancel();
     this.conn.stop();
     this.poller.stop();
@@ -640,6 +660,8 @@ export class App {
     // Before the requests fail: the editor marks its own save abandoned
     // rather than reading "connection lost" as a refusal.
     this.notes?.linkLost();
+    this.editor?.linkLost();
+    this.migration?.linkLost();
     this.requests.reconnecting();
     this.pasteFlow.reconnecting();
     this.drag.linkLost();
@@ -836,6 +858,33 @@ export class App {
   // tables and the notification filter.
   private clientLoaded(info: ClientInfo): void {
     this.keysFrom(info.keymap, info.notifications);
+    if (!this.betaDecided) {
+      this.betaDecided = true;
+      let seen: string | null = null;
+      try {
+        seen = window.sessionStorage.getItem(BETA_SEEN_KEY);
+      } catch {
+        seen = null;
+      }
+      this.betaOpen = shouldShowBeta(info.show_disclaimer, seen);
+    }
+  }
+
+  // dismissBeta is OK (this tab only) or "Don't show again" (the config).
+  dismissBeta(forever: boolean): void {
+    this.betaOpen = false;
+    try {
+      window.sessionStorage.setItem(BETA_SEEN_KEY, '1');
+    } catch {
+      // storage unavailable: the notice stays hidden for this page's life
+    }
+    if (forever) {
+      void this.filesApi()
+        .setSetting('ui.show_disclaimer', false)
+        .then((r) => {
+          if (!r.ok) this.showNotice(`Not saved: ${r.error}`);
+        });
+    }
   }
 
   // keysFrom installs the keymap and notification filter /api/client sent.
@@ -1030,8 +1079,22 @@ export class App {
         run: { panel: { kind: 'processes' } },
         disabled: act,
       },
+      { label: 'Settings', keywords: ['settings', 'config', 'options', 'preferences'], run: { panel: { kind: 'settings' } } },
+      {
+        label: 'Edit templates',
+        keywords: ['template', 'templates', 'edit'],
+        run: { editFile: { target: { kind: 'templates' }, title: 'Templates' } },
+        disabled: this.refusalFor('admin'),
+      },
       { label: 'Plugins', keywords: ['plugin', 'plugins', 'reload'], run: { panel: { kind: 'plugins' } } },
       { label: 'Update', keywords: ['update', 'version', 'upgrade'], run: { panel: { kind: 'update' } } },
+      {
+        label: 'View client log',
+        keywords: ['log', 'logs', 'client', 'daemon', 'mcp', 'web'],
+        run: { panel: { kind: 'logs' } },
+        disabled: this.refusalFor('admin'),
+      },
+      { label: "What's New", keywords: ['whats', 'new', 'changelog', 'release'], run: { panel: { kind: 'whats_new' } } },
     ];
     return [tabs, projects, pane, system];
   }
@@ -1256,6 +1319,7 @@ export class App {
     } else if ('goPane' in run) this.goToPane(run.goPane);
     else if ('switchTab' in run) this.switchTab(run.switchTab);
     else if ('switchProject' in run) this.switchProject(run.switchProject);
+    else if ('editFile' in run) this.openFileEditor(run.editFile.target, run.editFile.title);
     else this.openPanel(run.panel);
     if (this.panel === null) this.focusActiveSoon();
   }
@@ -1677,6 +1741,105 @@ export class App {
     };
   }
 
+  // filesApi reads and writes this machine's quil files through quil web.
+  filesApi(): FilesApi {
+    return filesApi(this.fetchFn, this.storage.getItem(LOGIN_KEY) ?? '');
+  }
+
+  // afterSettingSaved runs after an accepted PATCH: the overlay rows are
+  // pushed to a local daemon (never under --connect, spec 5d §5.4), and a
+  // save /api/client reflects reloads it (keymap, filter, sandbox defaults).
+  afterSettingSaved(key: string, view: SettingsView): void {
+    if (OVERLAY_KEYS.has(key) && this.client && !this.client.connect) this.fire('overlay_policy', overlayPolicy(view.rows));
+    if (refreshesClient(key)) void this.refreshClient();
+  }
+
+  // openFileEditor opens one file of this machine; one editor at a time.
+  openFileEditor(target: FileTarget, title: string): void {
+    this.keys?.cancel();
+    if (this.editor) {
+      if (this.editor.close() === 'ask') {
+        this.showNotice('Close the open editor first — it has unsaved text');
+        return;
+      }
+      this.editor = null;
+    }
+    this.panel = null;
+    // filesApi() per request, never captured: the editor outlives a session,
+    // and a new login stores a new key.
+    const e = new EditorSession(
+      target,
+      title,
+      { read: () => this.filesApi().readFile(target), write: (t, b, f) => this.filesApi().writeFile(target, t, b, f) },
+      this.rights !== 'full',
+    );
+    e.onChange = () => this.editorTick++;
+    e.onSaved = () => this.afterFileSaved(target);
+    this.editor = e;
+    void e.load();
+  }
+
+  closeEditor(): void {
+    this.editor = null;
+    this.focusActiveSoon();
+  }
+
+  // afterFileSaved: a templates save refreshes the "New tab from template"
+  // list; a plugin save refreshes the catalog and, in local mode only,
+  // reloads the daemon's plugins (spec 5d §4.3).
+  private afterFileSaved(t: FileTarget): void {
+    void this.refreshClient();
+    if (t.kind === 'plugin' && this.client && !this.client.connect && this.refusalFor('admin') === '') void this.reloadPlugins();
+  }
+
+  // unsavedText: an editor would lose text if the page went away.
+  unsavedText(): boolean {
+    return (this.editor?.dirty ?? false) || this.notes?.dirty === true || (this.migration?.dirty ?? false);
+  }
+
+  // loadStale counts the plugin files that need an update, full rights
+  // only (the route refuses anything else).
+  private async loadStale(): Promise<void> {
+    if (this.refusalFor('admin') !== '') {
+      this.staleCount = 0;
+      return;
+    }
+    const r = await this.filesApi().migration();
+    this.staleCount = r.ok ? r.value.files.length : 0;
+  }
+
+  // openMigration opens the split view on a fresh list from the gateway.
+  async openMigration(): Promise<void> {
+    this.keys?.cancel();
+    const r = await this.filesApi().migration();
+    if (!r.ok) {
+      this.showNotice(r.error);
+      return;
+    }
+    this.panel = null;
+    // filesApi() per request (see openFileEditor).
+    const m = new MigrationFlow(r.value.files, { resolve: (n, c, t, h) => this.filesApi().resolve(n, c, t, h) }, this.rights !== 'full');
+    m.onChange = () => {
+      this.migrationTick++;
+      this.staleCount = m.files.length;
+    };
+    m.onDone = () => {
+      void this.refreshClient();
+      if (this.client && !this.client.connect) void this.reloadPlugins();
+    };
+    this.migration = m;
+  }
+
+  closeMigration(): void {
+    this.migration = null;
+    this.focusActiveSoon();
+  }
+
+  private readonly onBeforeUnload = (e: BeforeUnloadEvent): void => {
+    if (!this.unsavedText()) return;
+    e.preventDefault();
+  };
+
   // attached runs once per (re)attach, after the attach's own state is
   // applied (ConnectionEvents.onAttached): it reloads the keymap and filter
   // (clientLoaded → keysFrom), rebuilds the notification list, and claims
@@ -1684,6 +1847,10 @@ export class App {
   // then, kept so the claim never depends on that order).
   private attached(): void {
     this.reportOverlay();
+    this.editor?.linkBack();
+    this.editor?.setViewOnly(this.rights !== 'full');
+    this.migration?.linkBack();
+    void this.loadStale();
     void this.refreshClient();
     void this.rebuildNotifications();
     void this.askVersion();

@@ -21,7 +21,7 @@ import (
 
 // sandboxImageMax bounds what the field will hold. Docker's own reference limit
 // is 255; anything longer is a paste accident.
-const sandboxImageMax = 255
+const sandboxImageMax = config.SandboxImageMax
 
 // renderSetupSandboxField draws the row.
 func (m Model) renderSetupSandboxField(focused bool) string {
@@ -257,13 +257,7 @@ var sandboxAuthChoices = []struct{ choice, label, detail string }{
 // the shared directory, so that directory only ever serves browser panes and
 // its sign-in mode stamp cannot flip back and forth between the two.
 func sandboxSignInFields(choice string) (auth, claudeConfig string) {
-	switch choice {
-	case "shared":
-		return string(config.SandboxAuthBrowser), config.SandboxClaudeConfigShared
-	case "token":
-		return string(config.SandboxAuthToken), config.SandboxClaudeConfigOwn
-	}
-	return string(config.SandboxAuthBrowser), config.SandboxClaudeConfigOwn
+	return config.SandboxSignInFields(choice)
 }
 
 // defaultSandboxSignIn is the choice a config selects (config.DefaultSignIn).

@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/artyomsv/quil/internal/atomicfile"
 )
 
 // A workspace template describes ONE TAB: a list of panes, how they are laid
@@ -90,10 +92,6 @@ type Templates struct {
 }
 
 func TemplatesPath() string { return filepath.Join(QuilDir(), "templates.toml") }
-
-// TemplatesTempPattern is the os.CreateTemp pattern of the temp file
-// WriteTemplatesSource writes beside templates.toml.
-const TemplatesTempPattern = ".templates-*"
 
 // DefaultTemplates returns the embedded templates. It PANICS on an invalid
 // embed rather than returning a zero value, because the failure would
@@ -269,34 +267,33 @@ func WriteTemplates(t Templates) error {
 	return WriteTemplatesSource(b.String())
 }
 
-// WriteTemplatesSource validates the complete file before an atomic write,
-// preserving comments and prompt formatting from the TOML editor.
-func WriteTemplatesSource(source string) error {
+// CheckTemplatesSource returns source with CRLF line ends made LF, or the
+// first reason it would not load (a TOML error names its line and column).
+// The browser's templates editor checks with it before it writes.
+func CheckTemplatesSource(source string) (string, error) {
 	source = strings.ReplaceAll(source, "\r\n", "\n")
 	var templates Templates
 	if err := toml.Unmarshal([]byte(source), &templates); err != nil {
-		return fmt.Errorf("parse templates: %w", err)
+		return "", fmt.Errorf("parse templates: %w", err)
 	}
 	if err := templates.Validate(); err != nil {
+		return "", err
+	}
+	return source, nil
+}
+
+// WriteTemplatesSource validates the complete file before an atomic write,
+// preserving comments and prompt formatting from the TOML editor.
+func WriteTemplatesSource(source string) error {
+	source, err := CheckTemplatesSource(source)
+	if err != nil {
 		return err
 	}
 	path := TemplatesPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), TemplatesTempPattern)
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	if _, err = tmp.WriteString(source); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err = tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), path)
+	return atomicfile.Write(path, []byte(source))
 }
 
 // TemplatePlaceholders are the only substitutions a prompt may use.

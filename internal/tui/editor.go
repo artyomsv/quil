@@ -3,7 +3,6 @@ package tui
 import (
 	"fmt"
 	"log"
-	"os"
 	"path/filepath"
 	"strings"
 	"unicode/utf8"
@@ -12,6 +11,7 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/artyomsv/quil/internal/atomicfile"
 	"github.com/artyomsv/quil/internal/clipboard"
 	"github.com/artyomsv/quil/internal/config"
 )
@@ -810,12 +810,10 @@ func (e *TextEditor) Save() error {
 		return fmt.Errorf("path outside plugins directory")
 	}
 
-	tmpPath := e.FilePath + ".tmp"
-	if err := os.WriteFile(tmpPath, []byte(content), 0600); err != nil {
+	// Through internal/atomicfile: a unique temp name, because the browser's
+	// plugin editor can save the same file from another process.
+	if err := atomicfile.Write(e.FilePath, []byte(content)); err != nil {
 		return fmt.Errorf("write: %w", err)
-	}
-	if err := os.Rename(tmpPath, e.FilePath); err != nil {
-		return fmt.Errorf("rename: %w", err)
 	}
 
 	e.Dirty = false

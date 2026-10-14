@@ -3,9 +3,12 @@
   import type { KillProcessResp } from '../lib/protocol';
   import { sanitizeRemoteText } from '../lib/sanitize';
   import Confirm from './Confirm.svelte';
+  import LogsPanel from './LogsPanel.svelte';
   import PluginsPage from './PluginsPage.svelte';
   import ProcessesPage from './ProcessesPage.svelte';
+  import SettingsPanel from './SettingsPanel.svelte';
   import UpdatePage from './UpdatePage.svelte';
+  import WhatsNewPanel from './WhatsNewPanel.svelte';
 
   interface Props {
     app: App;
@@ -38,6 +41,12 @@
   <PluginsPage {app} />
 {:else if p?.kind === 'update'}
   <UpdatePage {app} />
+{:else if p?.kind === 'settings'}
+  <SettingsPanel {app} />
+{:else if p?.kind === 'logs'}
+  <LogsPanel {app} />
+{:else if p?.kind === 'whats_new'}
+  <WhatsNewPanel {app} />
 {:else if p?.kind === 'kill'}
   {@const k = p}
   <Confirm

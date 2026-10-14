@@ -50,13 +50,7 @@ type keysSavedMsg struct {
 
 // presetUsesPrefix reports whether a preset writes ${prefix}: only then does
 // the prefix row mean anything.
-func presetUsesPrefix(name string) bool {
-	if name == "" || name == keymap.DefaultPresetName {
-		return false
-	}
-	p, err := keymap.LoadPreset(name)
-	return err == nil && p.Prefix != ""
-}
+func presetUsesPrefix(name string) bool { return keymap.PresetUsesPrefix(name) }
 
 func (m Model) openKeySettings() (tea.Model, tea.Cmd) {
 	// The draft starts from what is LIVE: an unknown preset name in the file
@@ -124,7 +118,7 @@ func (m Model) applyKeysSaved(msg keysSavedMsg) (tea.Model, tea.Cmd) {
 	m.keyDraft.overrides = msg.b.Overrides
 	m.keyDraft.timeout = msg.b.SequenceTimeout
 	m.keyDraft.prefix = msg.b.Prefix
-	m.keyStatus = "saved and applied — other TUIs at their next start, the browser at its next load"
+	m.keyStatus = "saved and applied — other TUIs at their next start, an open browser page at its next settings save or reload"
 	return m, nil
 }
 

@@ -20,6 +20,7 @@ import (
 	"github.com/artyomsv/quil/internal/debugserver"
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/logger"
+	"github.com/artyomsv/quil/internal/plugin"
 	"github.com/artyomsv/quil/internal/transport"
 	"github.com/artyomsv/quil/internal/webgw"
 )
@@ -183,13 +184,22 @@ func runWeb(args []string) {
 		dial = localWebDialer(sock)
 	}
 
+	// As the TUI does at start: create missing default plugins. Stale ones
+	// are offered on the Plugins page (GET /api/migration re-checks).
+	if _, err := plugin.EnsureDefaultPlugins(config.PluginsDir()); err != nil {
+		log.Printf("ensure default plugins: %v", err)
+	}
+	files := newWebFiles(cfg, connectMode())
 	srv := webgw.New(webgw.Config{
 		Dial: dial, Version: version, Logf: log.Printf, Rand: rand.Reader, Now: time.Now, Sleep: time.Sleep,
 		// Saved instances are expanded from THIS machine's files, as the TUI
 		// expands them from its own (spec 5b E7).
 		PluginsDir:    config.PluginsDir(),
 		InstancesPath: config.InstancesPath(),
-		ClientExtras:  webClientExtras(cfg, connectMode()),
+		ClientExtras:  files.ClientExtras,
+		// The settings, templates, plugin and log files of this machine
+		// (spec 5d): one object, so the extras and the routes share its locks.
+		Files: files,
 	})
 	ln, err := net.Listen("tcp", flags.Listen)
 	if err != nil {

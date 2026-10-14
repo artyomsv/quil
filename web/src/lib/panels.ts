@@ -19,7 +19,10 @@ export type Panel =
   | { kind: 'processes' }
   | { kind: 'kill'; paneId: string; pid: number; startMs: number; name: string }
   | { kind: 'plugins' }
-  | { kind: 'update' };
+  | { kind: 'update' }
+  | { kind: 'settings' }
+  | { kind: 'logs' }
+  | { kind: 'whats_new' };
 
 // stillShown is whether the panel a form opened with is still the one shown.
 // Panels are compared by identity: reopening the same kind makes a new

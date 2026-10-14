@@ -6,20 +6,29 @@ export interface MigrationIO {
 
 export const CHANGED_ELSEWHERE = 'Changed on disk: the file was reloaded and your text is kept. Save again to replace it.';
 
+// An Orphan is a draft whose file left the stale list before it was saved:
+// another client updated that file. The flow cannot save it (the file is no
+// longer stale), so it stays readable until the user discards it.
+export interface Orphan {
+  name: string;
+  text: string;
+}
+
 // MigrationFlow is the split view of spec 5d §4.4: the user's file on the
 // left (editable), the new default on the right. Every answer carries the
 // files still stale, and that list — not a local count — drives the view.
 // An edited left side is a draft kept per file, so Next and Previous never
-// drop it; dirty is "some draft exists". A draft keeps the hash of the text
-// it started from: a refreshed list after another file's save carries new
-// hashes, and sending one of those with an old draft would overwrite a save
-// made elsewhere without the 409 that exists to show it.
+// drop it; dirty is "some draft or orphan exists". A draft keeps the hash of
+// the text it started from: a refreshed list after another file's save
+// carries new hashes, and sending one of those with an old draft would
+// overwrite a save made elsewhere without the 409 that exists to show it.
 export class MigrationFlow {
   idx = 0;
   mine = '';
   error = '';
   busy = false;
   linkDown = false;
+  orphans: Orphan[] = [];
   onChange: () => void = () => {};
   onDone: () => void = () => {};
   private drafts: Record<string, { text: string; hash: string }> = {};
@@ -33,7 +42,7 @@ export class MigrationFlow {
   }
 
   get dirty(): boolean {
-    return Object.keys(this.drafts).length > 0;
+    return Object.keys(this.drafts).length > 0 || this.orphans.length > 0;
   }
 
   current(): StaleFile | null {
@@ -82,9 +91,11 @@ export class MigrationFlow {
     this.onChange();
   }
 
+  // move changes the file shown. Never while a save is in flight: its answer
+  // (a 409 above all) belongs to the file that was shown when it was sent.
   private move(i: number): void {
     const f = this.files[i];
-    if (!f || i === this.idx) return;
+    if (!f || i === this.idx || this.busy) return;
     this.idx = i;
     this.show();
     this.error = '';
@@ -122,8 +133,16 @@ export class MigrationFlow {
       this.onChange();
       return;
     }
+    // The saved file's draft is done with. A draft for a file the fresh list
+    // no longer names was overtaken by another client: it becomes an orphan.
     const { [cur.name]: _saved, ...rest } = this.drafts;
-    this.drafts = rest;
+    const still = new Set(r.value.files.map((f) => f.name));
+    const kept: typeof rest = {};
+    for (const [name, d] of Object.entries(rest)) {
+      if (still.has(name)) kept[name] = d;
+      else this.orphans = [...this.orphans, { name, text: d.text }];
+    }
+    this.drafts = kept;
     this.files = r.value.files;
     this.idx = Math.min(this.idx, Math.max(0, this.files.length - 1));
     this.show();

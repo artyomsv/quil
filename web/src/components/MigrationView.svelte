@@ -29,6 +29,7 @@
       readOnly: m.readOnly(),
       done: m.done(),
       dirty: m.dirty,
+      orphans: m.orphans,
     };
   });
 
@@ -63,7 +64,14 @@
     {#if v.done}
       <h2>Plugin update</h2>
       <p>Every plugin file is up to date.</p>
-      <div class="buttons"><button type="button" onclick={() => app.closeMigration()}>Close</button></div>
+      {#each v.orphans as o (o.name)}
+        <p class="note">
+          Another client updated <code>{sanitizeRemoteText(o.name)}</code> first. Your unsaved text for it was not used; copy
+          what you need before you close.
+        </p>
+        <textarea class="orphan" spellcheck="false" readonly value={o.text} aria-label={`Unsaved text for ${o.name}`}></textarea>
+      {/each}
+      <div class="buttons"><button type="button" onclick={close}>{discardArmed ? 'Discard and close' : 'Close'}</button></div>
     {:else if v.cur}
       <h2>Plugin update: {sanitizeRemoteText(v.cur.name)} ({v.idx + 1} of {v.total})</h2>
       <p class="note">
@@ -88,8 +96,8 @@
       </div>
       {#if v.error}<p class="err" role="alert">{sanitizeRemoteText(v.error)}</p>{/if}
       <div class="buttons">
-        <button type="button" disabled={v.idx === 0} onclick={() => m.prev()}>Previous</button>
-        <button type="button" disabled={v.idx >= v.total - 1} onclick={() => m.next()}>Next</button>
+        <button type="button" disabled={v.busy || v.idx === 0} onclick={() => m.prev()}>Previous</button>
+        <button type="button" disabled={v.busy || v.idx >= v.total - 1} onclick={() => m.next()}>Next</button>
         <button type="button" disabled={v.readOnly} onclick={() => void m.useDefault()}>Use default</button>
         <button type="button" disabled={v.readOnly} onclick={() => void m.saveMine()}>Save mine</button>
         <button type="button" onclick={close}>{discardArmed ? 'Discard and close' : 'Close'}</button>
@@ -141,6 +149,9 @@
     color: inherit;
     border: 1px solid #2a2e37;
     white-space: pre;
+  }
+  textarea.orphan {
+    height: 20vh;
   }
   .note {
     color: #9aa0ad;

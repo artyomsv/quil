@@ -7,14 +7,33 @@ const sf = (name: string): StaleFile => ({ name, mine: `mine-${name}`, hash: `h-
 function harness(files: StaleFile[]) {
   const calls: { name: string; choice: string; text: string; baseHash: string }[] = [];
   let answer: Api<{ files: StaleFile[] }> = { ok: true, value: { files: [] } };
+  let hold: Promise<void> = Promise.resolve();
   const io: MigrationIO = {
     resolve: async (name, choice, text, baseHash) => {
       calls.push({ name, choice, text, baseHash });
+      await hold;
       return answer;
     },
   };
-  return { f: new MigrationFlow(files, io, false), calls, set: (a: Api<{ files: StaleFile[] }>) => (answer = a) };
+  return {
+    f: new MigrationFlow(files, io, false),
+    calls,
+    set: (a: Api<{ files: StaleFile[] }>) => (answer = a),
+    // holdResolves parks every resolve until the returned release is called.
+    holdResolves: (): (() => void) => {
+      let release = (): void => {};
+      hold = new Promise<void>((r) => (release = r));
+      return release;
+    },
+  };
 }
+
+const conflict = (text: string, hash: string): Api<{ files: StaleFile[] }> => ({
+  ok: false,
+  status: 409,
+  error: 'changed on disk',
+  current: { text, hash, exists: true },
+});
 
 describe('MigrationFlow', () => {
   it('moves next and previous, editing the left side only', () => {
@@ -68,7 +87,7 @@ describe('MigrationFlow', () => {
   it('reloads a file changed elsewhere, keeps the draft, and saves with the new hash', async () => {
     const h = harness([sf('a')]);
     h.f.edit('draft');
-    h.set({ ok: false, status: 409, error: 'changed on disk', current: { text: 'theirs', hash: 'h9', exists: true } });
+    h.set(conflict('theirs', 'h9'));
     await h.f.saveMine();
     expect(h.f.error).toBe(CHANGED_ELSEWHERE);
     expect(h.f.current()).toMatchObject({ mine: 'theirs', hash: 'h9' });
@@ -88,7 +107,7 @@ describe('MigrationFlow', () => {
     await h.f.useDefault();
     expect(h.f.current()?.name).toBe('b');
     expect(h.f.mine).toBe('draft-b');
-    h.set({ ok: false, status: 409, error: 'changed on disk', current: { text: 'theirs-b', hash: 'h-b2', exists: true } });
+    h.set(conflict('theirs-b', 'h-b2'));
     await h.f.saveMine();
     expect(h.calls[1]?.baseHash).toBe('h-b'); // the hash the draft started from, never the refreshed one
     expect(h.f.error).toBe(CHANGED_ELSEWHERE);
@@ -97,9 +116,38 @@ describe('MigrationFlow', () => {
     expect(h.calls[2]).toEqual({ name: 'b', choice: 'mine', text: 'draft-b', baseHash: 'h-b2' });
   });
 
+  it('keeps a draft whose file another client updated first, as an orphan, until discarded', async () => {
+    const h = harness([sf('a'), sf('b')]);
+    h.f.next();
+    h.f.edit('draft-b');
+    h.f.prev();
+    h.set({ ok: true, value: { files: [] } }); // b is no longer stale: someone else updated it
+    await h.f.useDefault();
+    expect(h.f.done()).toBe(true);
+    expect(h.f.dirty).toBe(true);
+    expect(h.f.orphans).toEqual([{ name: 'b', text: 'draft-b' }]);
+  });
+
+  it('refuses to move while a save is in flight, so a 409 lands on the file it was sent for', async () => {
+    const h = harness([sf('a'), sf('b')]);
+    h.f.edit('draft-a');
+    const release = h.holdResolves();
+    h.set(conflict('theirs-a', 'h-a2'));
+    const saving = h.f.saveMine();
+    h.f.next();
+    expect(h.f.current()?.name).toBe('a');
+    release();
+    await saving;
+    expect(h.f.current()?.name).toBe('a');
+    expect(h.f.error).toBe(CHANGED_ELSEWHERE);
+    expect(h.f.mine).toBe('draft-a');
+    h.f.next(); // allowed again once the answer is in
+    expect(h.f.current()?.name).toBe('b');
+  });
+
   it('shows the reloaded text when there was no draft', async () => {
     const h = harness([sf('a')]);
-    h.set({ ok: false, status: 409, error: 'changed on disk', current: { text: 'theirs', hash: 'h9', exists: true } });
+    h.set(conflict('theirs', 'h9'));
     await h.f.useDefault();
     expect(h.f.mine).toBe('theirs');
     expect(h.f.dirty).toBe(false);

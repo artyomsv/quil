@@ -1,9 +1,7 @@
 package tui
 
 import (
-	"bytes"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -21,6 +19,7 @@ import (
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/keymap"
 	"github.com/artyomsv/quil/internal/logger"
+	"github.com/artyomsv/quil/internal/logtail"
 	"github.com/artyomsv/quil/internal/plugin"
 )
 
@@ -3603,10 +3602,7 @@ func (m Model) handleTOMLEditorKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 //
 // Reuses TextEditor in ReadOnly + HighlightPlain mode to show client/daemon/MCP
 // log files. Opened from F1 → "View ... log". Esc returns to the F1 About menu.
-
-// maxLogViewBytes caps how much of a log file we read into memory. Logs can
-// grow unbounded; we tail the last N KB so the editor stays responsive.
-const maxLogViewBytes = 256 * 1024
+// The tail reader and its byte cap live in internal/logtail (logtail.MaxBytes).
 
 // openLogViewer reads the file at path (last maxLogViewBytes bytes) and opens
 // the read-only TextEditor in dialogLogViewer mode. label is shown in the file
@@ -3682,7 +3678,7 @@ func (m Model) openReadonlyText(label, content string) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) openLogViewer(label, path string) (tea.Model, tea.Cmd) {
-	content, err := readLogTail(path, maxLogViewBytes)
+	content, err := logtail.Tail(path, logtail.MaxBytes)
 	if err != nil {
 		// Show the error inline in an empty editor so the user knows
 		// what went wrong (file missing, permission denied, etc.).
@@ -3701,126 +3697,21 @@ func (m Model) openLogViewer(label, path string) (tea.Model, tea.Cmd) {
 func (m Model) openMCPLogsViewer() (tea.Model, tea.Cmd) {
 	m.logViewerReturn = dialogAbout
 	dir := config.MCPLogDir(m.cfg.MCP)
-	entries, err := os.ReadDir(dir)
+	// The listing, the newest-first order and the per-file share live in
+	// internal/logtail, which the browser's Logs page reads with too.
+	text, files, err := logtail.JoinDir(dir, logtail.MaxBytes)
 	if err != nil {
 		return m.openLogViewer("MCP logs", filepath.Join(dir, "(unavailable)"))
 	}
-
-	type logFile struct {
-		name string
-		mod  time.Time
-		size int64
-	}
-	var files []logFile
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		if !strings.HasSuffix(e.Name(), ".log") {
-			continue
-		}
-		info, ierr := e.Info()
-		if ierr != nil {
-			continue
-		}
-		files = append(files, logFile{name: e.Name(), mod: info.ModTime(), size: info.Size()})
-	}
-	// Most recently modified first.
-	sort.Slice(files, func(i, j int) bool {
-		return files[i].mod.After(files[j].mod)
-	})
-
-	if len(files) == 0 {
+	if files == 0 {
 		empty := fmt.Sprintf("# MCP logs\n# %s\n#\n# No MCP interactions logged yet.\n", dir)
 		m.tomlEditor = m.newLogViewerEditor(empty, dir)
 		m.dialog = dialogLogViewer
 		return m, tea.ClearScreen
 	}
-
-	// Build aggregated content. Cap each file to a reasonable share of
-	// maxLogViewBytes so one huge file doesn't squeeze out the others.
-	perFile := maxLogViewBytes / len(files)
-	if perFile < 4*1024 {
-		perFile = 4 * 1024
-	}
-	var b strings.Builder
-	for _, f := range files {
-		b.WriteString(fmt.Sprintf("\n========== %s  (%s, %d bytes) ==========\n\n",
-			f.name, f.mod.Format("2006-01-02 15:04:05"), f.size))
-		full := filepath.Join(dir, f.name)
-		tail, terr := readLogTail(full, perFile)
-		if terr != nil {
-			b.WriteString(fmt.Sprintf("(read error: %v)\n", terr))
-			continue
-		}
-		b.WriteString(tail)
-		if !strings.HasSuffix(tail, "\n") {
-			b.WriteByte('\n')
-		}
-	}
-
-	m.tomlEditor = m.newLogViewerEditor(b.String(), dir)
+	m.tomlEditor = m.newLogViewerEditor(text, dir)
 	m.dialog = dialogLogViewer
 	return m, tea.ClearScreen
-}
-
-// readLogTail reads up to maxBytes from the END of the given file. If the
-// file is shorter than maxBytes the whole file is returned. Always reads from
-// the start of a line (skipping any partial first line) so the result is
-// well-formed.
-//
-// Symlinks are rejected: an Lstat is performed first and any non-regular
-// file (symlink, device, named pipe, etc.) is refused. This prevents the log
-// viewer from being redirected to read arbitrary files via a swapped link
-// inside ~/.quil/. Same hardening pattern as internal/persist/notes.go.
-func readLogTail(path string, maxBytes int) (string, error) {
-	li, err := os.Lstat(path)
-	if err != nil {
-		return "", err
-	}
-	if !li.Mode().IsRegular() {
-		return "", fmt.Errorf("refusing to read non-regular file %q (mode=%v)", path, li.Mode())
-	}
-
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-
-	// Re-stat through the open handle to defeat a TOCTOU swap between Lstat
-	// and Open. If the inode changed we refuse the read.
-	stat, err := f.Stat()
-	if err != nil {
-		return "", err
-	}
-	if !stat.Mode().IsRegular() {
-		return "", fmt.Errorf("refusing to read non-regular file %q after open", path)
-	}
-	size := stat.Size()
-	if size <= int64(maxBytes) {
-		data, rerr := io.ReadAll(f)
-		if rerr != nil {
-			return "", rerr
-		}
-		return string(data), nil
-	}
-
-	// Seek to (size - maxBytes), read to end, then drop everything before
-	// the first newline so we don't show a partial line.
-	if _, err := f.Seek(size-int64(maxBytes), io.SeekStart); err != nil {
-		return "", err
-	}
-	buf := make([]byte, maxBytes)
-	n, err := f.Read(buf)
-	if err != nil {
-		return "", err
-	}
-	buf = buf[:n]
-	if i := bytes.IndexByte(buf, '\n'); i >= 0 && i+1 < len(buf) {
-		buf = buf[i+1:]
-	}
-	return "[... older lines truncated ...]\n" + string(buf), nil
 }
 
 // handleLogViewerKey routes editor keys to the read-only TextEditor for

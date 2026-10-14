@@ -8,67 +8,6 @@ import (
 	"testing"
 )
 
-func TestReadLogTail_ShortFile_ReturnsAll(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "small.log")
-	content := "line1\nline2\nline3\n"
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	got, err := readLogTail(path, 1024)
-	if err != nil {
-		t.Fatalf("readLogTail: %v", err)
-	}
-	if got != content {
-		t.Errorf("got %q, want %q", got, content)
-	}
-}
-
-func TestReadLogTail_LargeFile_TailsLastBytes(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "big.log")
-
-	// Build a 4 KB file with line markers — line 0..1023, each line 4 chars.
-	var b strings.Builder
-	for i := 0; i < 1024; i++ {
-		b.WriteString("X\nY\n")
-	}
-	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-
-	got, err := readLogTail(path, 256)
-	if err != nil {
-		t.Fatalf("readLogTail: %v", err)
-	}
-
-	// Should be capped to ~256 bytes plus the truncation marker, and start
-	// with the truncation header (or at least be much shorter than the full
-	// file).
-	if len(got) > 512 {
-		t.Errorf("got %d bytes, expected <=512 (256 cap + marker)", len(got))
-	}
-	if !strings.Contains(got, "older lines truncated") {
-		t.Errorf("expected truncation marker, got: %q", got[:min(80, len(got))])
-	}
-	// Tail should start cleanly at a line boundary (no partial first line
-	// before the next \n).
-	body := strings.TrimPrefix(got, "[... older lines truncated ...]\n")
-	if strings.HasPrefix(body, "Y") || strings.HasPrefix(body, "X") {
-		// Both X and Y are valid line starts. Just confirm there's no
-		// junk before the first newline.
-	} else if !strings.HasPrefix(body, "X\n") && !strings.HasPrefix(body, "Y\n") {
-		t.Errorf("expected tail to start at a clean line boundary, got: %q", body[:min(40, len(body))])
-	}
-}
-
-func TestReadLogTail_MissingFile_ReturnsError(t *testing.T) {
-	_, err := readLogTail("/nonexistent/path/that/does/not/exist.log", 1024)
-	if err == nil {
-		t.Fatal("expected error for missing file")
-	}
-}
-
 func TestReadOnlyEditor_SuppressesEdits(t *testing.T) {
 	editor := NewTextEditor("hello\nworld\n", "/tmp/log.txt", 80, 10)
 	editor.ReadOnly = true

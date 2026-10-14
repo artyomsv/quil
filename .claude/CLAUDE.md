@@ -22,7 +22,7 @@ Client-daemon model:
 
 - `cmd/quil/` — TUI client (Bubble Tea)
 - `cmd/quild/` — Background daemon
-- `internal/config/` — TOML configuration (`Load` reads, `Save` writes atomically via `.tmp` + rename). `UIConfig.ShowDisclaimer` controls startup beta dialog
+- `internal/config/` — TOML configuration (`Load` reads, `Save` writes atomically through `internal/atomicfile`: a unique `<base>.*.tmp` + rename). `UIConfig.ShowDisclaimer` controls startup beta dialog. `settings.go` is the one settings table the TUI dialogs and the browser's Settings page both store through; `merge.go` (`MergeChanged`) is the TUI's exit save
 - `internal/daemon/` — Session manager, message routing, event queue (`event.go` — bounded, mutex-protected, watcher pub/sub for MCP)
 - `internal/persist/` — Atomic workspace/buffer persistence (JSON snapshots, binary ghost buffers)
 - `internal/atomicfile/` — the one safe write for every file quil rewrites (config, bindings, templates, instances, plugin files): a unique `<base>.*.tmp` temp + rename + one retry. The temp name keeps the target's stem so `ipc.IsQuilHomeEntry` accepts a crash leftover

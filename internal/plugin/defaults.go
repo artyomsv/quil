@@ -74,6 +74,12 @@ func StaleDefaults(dir string) ([]StalePlugin, error) {
 			continue // the default has no version: nothing to upgrade to
 		}
 		dest := filepath.Join(dir, e.Name())
+		// A link is never read through: the browser serves this list, and a
+		// link named like a default could carry any file's text.
+		if li, err := os.Lstat(dest); err == nil && !li.Mode().IsRegular() {
+			log.Printf("warning: plugin %s is not a regular file; skipped", dest)
+			continue
+		}
 		userData, err := os.ReadFile(dest)
 		if err != nil {
 			if !os.IsNotExist(err) {

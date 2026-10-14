@@ -387,3 +387,19 @@ func TestStaleDefaults_MatchesEnsureAndCarriesTheNeededVersion(t *testing.T) {
 		t.Fatalf("NeedVersion = %d", a[0].NeedVersion)
 	}
 }
+
+// A link named like a default is never read through (AC-6).
+func TestStaleDefaults_SkipsALink(t *testing.T) {
+	dir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "old.toml")
+	if err := os.WriteFile(outside, []byte("[plugin]\nname = \"claude-code\"\nschema_version = 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "claude-code.toml")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	stale, err := StaleDefaults(dir)
+	if err != nil || len(stale) != 0 {
+		t.Fatalf("a link was listed as stale: %v %v", stale, err)
+	}
+}

@@ -22,3 +22,14 @@ func TestApplySetting_RefusedAndUnchangedAreNotChanges(t *testing.T) {
 		t.Fatal("an unknown key reported a change")
 	}
 }
+
+// The sign-in row reads "token" for the forbidden token + shared pair, so a
+// Get compare would skip the repair; the stored value decides instead.
+func TestApplySetting_SignInRepairsTokenPlusShared(t *testing.T) {
+	m := Model{cfg: config.Default()}
+	m.cfg.Sandbox.Auth = string(config.SandboxAuthToken)
+	m.cfg.Sandbox.SharedClaudeConfig = true
+	if !m.applySetting("sandbox.sign_in", "token") || !m.configChanged || m.cfg.Sandbox.SharedClaudeConfig {
+		t.Fatalf("token over token+shared: changed=%v cfg=%+v", m.configChanged, m.cfg.Sandbox)
+	}
+}

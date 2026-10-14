@@ -35,13 +35,15 @@ func TestSave_ConcurrentSavesLeaveAWholeFile(t *testing.T) {
 	}
 }
 
-func TestWriteBindings_LeavesAPlantedTempLinkAlone(t *testing.T) {
+// A bindings.toml that is a link is replaced by a regular file, never written
+// through (spec 5d §3.2a).
+func TestWriteBindings_ReplacesALinkAtTheTarget(t *testing.T) {
 	t.Setenv("QUIL_HOME", t.TempDir())
 	victim := filepath.Join(t.TempDir(), "victim")
 	if err := os.WriteFile(victim, []byte("keep"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(victim, config.BindingsPath()+".tmp"); err != nil {
+	if err := os.Symlink(victim, config.BindingsPath()); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 	if err := config.WriteBindings(config.Bindings{Preset: "default"}); err != nil {
@@ -49,6 +51,9 @@ func TestWriteBindings_LeavesAPlantedTempLinkAlone(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(victim); string(b) != "keep" {
 		t.Fatalf("victim = %q", b)
+	}
+	if li, err := os.Lstat(config.BindingsPath()); err != nil || !li.Mode().IsRegular() {
+		t.Fatalf("bindings.toml is not a regular file: %v %v", li, err)
 	}
 	if _, err := config.LoadBindings(); err != nil {
 		t.Fatal(err)

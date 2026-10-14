@@ -324,10 +324,14 @@ func hashOf(data []byte) string {
 	return hex.EncodeToString(h[:])
 }
 
+// utf8BOM is U+FEFF, built from its code point: an escape in the source has
+// been mangled by tooling before, and a raw BOM is invisible to a reader.
+var utf8BOM = string(rune(0xFEFF))
+
 // normalize drops a leading BOM and changes line ends as the TUI does: every
 // \r for a plugin file (editor.go:113), CRLF only for templates (templates.go:275).
 func normalize(text string, isPlugin bool) string {
-	text = strings.TrimPrefix(text, "Feff")
+	text = strings.TrimPrefix(text, utf8BOM)
 	if isPlugin {
 		return strings.ReplaceAll(text, "\r", "")
 	}
@@ -372,7 +376,15 @@ func (f *webFiles) WriteText(t webgw.FileTarget, text, baseHash string, force bo
 		return webgw.TextFile{}, err
 	}
 	data, err := readRaw(path)
-	if err != nil && !errors.Is(err, webgw.ErrTooLarge) {
+	if errors.Is(err, webgw.ErrTooLarge) {
+		// A file the page could never have loaded: only an explicit
+		// Overwrite may replace it, and no "current" text can describe it.
+		if !force {
+			return webgw.TextFile{}, webgw.ErrTooLarge
+		}
+		data, err = nil, nil
+	}
+	if err != nil {
 		return webgw.TextFile{}, err
 	}
 	if !force && hashOf(data) != baseHash {
@@ -492,7 +504,8 @@ func (f *webFiles) LogTail(name string) (webgw.LogText, error) {
 		if err != nil {
 			return webgw.LogText{}, err
 		}
-		return webgw.LogText{Text: text, Size: int64(len(text))}, nil
+		// Each file is cut to its share: the marker says so for any of them.
+		return webgw.LogText{Text: text, Size: int64(len(text)), Truncated: strings.Contains(text, logtail.TruncatedMarker)}, nil
 	}
 	file := map[string]string{"client": "quil.log", "daemon": "quild.log", "web": "web.log"}[name]
 	if file == "" {

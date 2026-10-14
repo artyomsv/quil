@@ -71,9 +71,10 @@ export class MigrationFlow {
   }
 
   private move(i: number): void {
-    if (i < 0 || i >= this.files.length || i === this.idx) return;
+    const f = this.files[i];
+    if (!f || i === this.idx) return;
     this.idx = i;
-    this.mine = this.files[i].mine;
+    this.mine = f.mine;
     this.dirty = false;
     this.error = '';
     this.onChange();

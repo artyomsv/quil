@@ -35,6 +35,9 @@ func status(err error) int {
 
 func sum(b []byte) string { h := sha256.Sum256(b); return hex.EncodeToString(h[:]) }
 
+// bom is U+FEFF from its code point, never an escape (see utf8BOM).
+var bom = string(rune(0xFEFF))
+
 func writeRaw(t *testing.T, p string, b string) {
 	t.Helper()
 	if err := os.WriteFile(p, []byte(b), 0o600); err != nil {
@@ -162,11 +165,11 @@ func TestWebFiles_TemplatesReadMissingGivesTheDefault(t *testing.T) {
 // and is written back as LF without BOM.
 func TestWebFiles_TemplatesCRLFAndBOM(t *testing.T) {
 	f := home(t)
-	src := "Feff" + strings.ReplaceAll(config.DefaultTemplatesText(), "\n", "\r\n")
+	src := bom + strings.ReplaceAll(config.DefaultTemplatesText(), "\n", "\r\n")
 	writeRaw(t, config.TemplatesPath(), src)
 	tg := webgw.FileTarget{Kind: webgw.TargetTemplates}
 	tf, err := f.ReadText(tg)
-	if err != nil || tf.Hash != sum([]byte(src)) || strings.Contains(tf.Text, "\r") || strings.HasPrefix(tf.Text, "Feff") {
+	if err != nil || tf.Hash != sum([]byte(src)) || strings.Contains(tf.Text, "\r") || strings.HasPrefix(tf.Text, bom) {
 		t.Fatalf("read %v", err)
 	}
 	out, err := f.WriteText(tg, tf.Text, tf.Hash, false)
@@ -174,7 +177,7 @@ func TestWebFiles_TemplatesCRLFAndBOM(t *testing.T) {
 		t.Fatalf("unchanged save: %v", err)
 	}
 	b, _ := os.ReadFile(config.TemplatesPath())
-	if strings.Contains(string(b), "\r") || strings.HasPrefix(string(b), "Feff") || out.Hash != sum(b) {
+	if strings.Contains(string(b), "\r") || strings.HasPrefix(string(b), bom) || out.Hash != sum(b) {
 		t.Fatal("not written back as LF without BOM")
 	}
 }
@@ -204,7 +207,7 @@ func TestWebFiles_EmptyTemplatesRefused(t *testing.T) {
 	tg := webgw.FileTarget{Kind: webgw.TargetTemplates}
 	writeRaw(t, config.TemplatesPath(), config.DefaultTemplatesText())
 	tf, _ := f.ReadText(tg)
-	for _, text := range []string{"", "Feff", "[[templates]\nname="} {
+	for _, text := range []string{"", bom, "[[templates]\nname="} {
 		if _, err := f.WriteText(tg, text, tf.Hash, false); status(err) != 422 {
 			t.Errorf("%q: %v", text, err)
 		}
@@ -219,6 +222,27 @@ func TestWebFiles_TooLargeIsNotRead(t *testing.T) {
 	writeRaw(t, config.TemplatesPath(), strings.Repeat("#", webgw.FileTextMax+1))
 	if _, err := f.ReadText(webgw.FileTarget{Kind: webgw.TargetTemplates}); status(err) != 413 {
 		t.Fatalf("err %v", err)
+	}
+}
+
+// A file the page could never have loaded is never replaced by an ordinary
+// save (AC-4); only Overwrite may replace it.
+func TestWebFiles_TooLargeIsNeverOverwrittenWithoutForce(t *testing.T) {
+	f := home(t)
+	big := strings.Repeat("#", webgw.FileTextMax+1)
+	writeRaw(t, config.TemplatesPath(), big)
+	tg := webgw.FileTarget{Kind: webgw.TargetTemplates}
+	if _, err := f.WriteText(tg, config.DefaultTemplatesText(), "", false); status(err) != 413 {
+		t.Fatalf("save over a too-large file: %v", err)
+	}
+	if b, _ := os.ReadFile(config.TemplatesPath()); string(b) != big {
+		t.Fatal("the too-large file was replaced without force")
+	}
+	if _, err := f.WriteText(tg, config.DefaultTemplatesText(), "", true); err != nil {
+		t.Fatalf("force: %v", err)
+	}
+	if b, _ := os.ReadFile(config.TemplatesPath()); string(b) != config.DefaultTemplatesText() {
+		t.Fatal("force did not replace the file")
 	}
 }
 

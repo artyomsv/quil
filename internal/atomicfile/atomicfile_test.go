@@ -99,16 +99,16 @@ func TestWrite_TempNameKeepsTheTargetStem(t *testing.T) {
 	}
 }
 
-// A link planted at the old fixed temp name is neither followed nor a reason
-// to fail (os.CreateTemp creates its own name with O_EXCL).
-func TestWrite_IgnoresAPlantedTempLink(t *testing.T) {
+// A link AT THE TARGET is replaced by a regular file, never written through:
+// the rename replaces the directory entry, and the temp is never a link.
+func TestWrite_ReplacesALinkAtTheTarget(t *testing.T) {
 	dir := t.TempDir()
 	victim := filepath.Join(t.TempDir(), "victim")
 	if err := os.WriteFile(victim, []byte("keep"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	p := filepath.Join(dir, "bindings.toml")
-	if err := os.Symlink(victim, p+".tmp"); err != nil {
+	if err := os.Symlink(victim, p); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 	if err := Write(p, []byte("new")); err != nil {
@@ -116,6 +116,10 @@ func TestWrite_IgnoresAPlantedTempLink(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(victim); string(b) != "keep" {
 		t.Fatalf("the link was followed: victim = %q", b)
+	}
+	li, err := os.Lstat(p)
+	if err != nil || !li.Mode().IsRegular() {
+		t.Fatalf("target is not a regular file: %v %v", li, err)
 	}
 	if b, _ := os.ReadFile(p); string(b) != "new" {
 		t.Fatalf("target = %q", b)

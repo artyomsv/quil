@@ -1,4 +1,5 @@
 import type { Clock } from './connection';
+import type { FileTarget } from './files';
 import type { Panel } from './panels';
 import type { PaneSearchHit, PaneSearchResp, WorkspaceState } from './protocol';
 import type { Outcome } from './requests';
@@ -13,7 +14,9 @@ export type PaletteRun =
   | { goPane: string }
   | { switchTab: string }
   | { switchProject: string }
-  | { panel: Panel };
+  | { panel: Panel }
+  // 5d: open a file of this machine in the editor.
+  | { editFile: { target: FileTarget; title: string } };
 
 export interface PaletteRow {
   header?: boolean;

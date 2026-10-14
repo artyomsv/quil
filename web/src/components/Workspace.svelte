@@ -3,6 +3,7 @@
   import { sanitizeRemoteText } from '../lib/sanitize';
   import Banner from './Banner.svelte';
   import CreatePaneDialog from './CreatePaneDialog.svelte';
+  import FileEditor from './FileEditor.svelte';
   import HelpMenu from './HelpMenu.svelte';
   import HistoryDialog from './HistoryDialog.svelte';
   import KeyList from './KeyList.svelte';
@@ -66,6 +67,12 @@
            the editor survives a lost link with its text. -->
       {#key app.notes}
         <NotesEditor {app} n={app.notes} />
+      {/key}
+    {/if}
+    {#if app.editor}
+      <!-- Outside the editable gate: it survives a lost link with its text. -->
+      {#key app.editor}
+        <FileEditor {app} e={app.editor} />
       {/key}
     {/if}
     {#if app.panel?.kind === 'palette'}

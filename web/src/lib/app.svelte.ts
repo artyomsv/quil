@@ -14,6 +14,7 @@ import {
 import { type AttachSizes, type Clock, Connection, type SocketLike } from './connection';
 import type { DialogOpen } from './dialog';
 import { type QuilTestHook, shouldRegisterE2EHook } from './e2ehook';
+import { EditorSession } from './editor';
 import { type FilesApi, filesApi, type FileTarget, type SettingsView } from './files';
 import { NATIVE, TUI_ONLY, VIEW_ONLY } from './keys/actions';
 import { IS_MAC, isEditable } from './keys/chord';
@@ -173,6 +174,10 @@ export class App {
   // A stage_update_req is out (one at a time).
   stageBusy = $state(false);
   notesTick = $state(0);
+  // The open templates or plugin editor. Not a Panel: it survives a lost
+  // link with its text (spec 5d §4.0), like the notes editor.
+  editor = $state.raw<EditorSession | null>(null);
+  editorTick = $state(0);
   sidebarOpen = $state(true);
   keyHint = $state('');
   keymap = $state.raw<WebKeymap | null>(null);
@@ -335,6 +340,7 @@ export class App {
     // Capture phase: the engine sees a key before xterm's textarea does.
     document.addEventListener('keydown', this.onKeyDown, true);
     window.addEventListener('blur', this.onBlur);
+    window.addEventListener('beforeunload', this.onBeforeUnload);
     this.watchDisplay();
     this.probed = probeCell();
     const live = await hasSession(this.fetchFn);
@@ -360,6 +366,7 @@ export class App {
   stop(): void {
     document.removeEventListener('keydown', this.onKeyDown, true);
     window.removeEventListener('blur', this.onBlur);
+    window.removeEventListener('beforeunload', this.onBeforeUnload);
     this.keys?.cancel();
     this.conn.stop();
     this.poller.stop();
@@ -642,6 +649,7 @@ export class App {
     // Before the requests fail: the editor marks its own save abandoned
     // rather than reading "connection lost" as a refusal.
     this.notes?.linkLost();
+    this.editor?.linkLost();
     this.requests.reconnecting();
     this.pasteFlow.reconnecting();
     this.drag.linkLost();
@@ -1033,6 +1041,12 @@ export class App {
         disabled: act,
       },
       { label: 'Settings', keywords: ['settings', 'config', 'options', 'preferences'], run: { panel: { kind: 'settings' } } },
+      {
+        label: 'Edit templates',
+        keywords: ['template', 'templates', 'edit'],
+        run: { editFile: { target: { kind: 'templates' }, title: 'Templates' } },
+        disabled: this.refusalFor('admin'),
+      },
       { label: 'Plugins', keywords: ['plugin', 'plugins', 'reload'], run: { panel: { kind: 'plugins' } } },
       { label: 'Update', keywords: ['update', 'version', 'upgrade'], run: { panel: { kind: 'update' } } },
     ];
@@ -1259,6 +1273,7 @@ export class App {
     } else if ('goPane' in run) this.goToPane(run.goPane);
     else if ('switchTab' in run) this.switchTab(run.switchTab);
     else if ('switchProject' in run) this.switchProject(run.switchProject);
+    else if ('editFile' in run) this.openFileEditor(run.editFile.target, run.editFile.title);
     else this.openPanel(run.panel);
     if (this.panel === null) this.focusActiveSoon();
   }
@@ -1693,10 +1708,52 @@ export class App {
     if (refreshesClient(key)) void this.refreshClient();
   }
 
-  // openFileEditor opens the templates or a plugin file in the editor (Task
-  // 7 fills it in; this stub keeps the Settings page's Templates button
-  // type-checked until then).
-  openFileEditor(_t: FileTarget, _title: string): void {}
+  // openFileEditor opens one file of this machine; one editor at a time.
+  openFileEditor(target: FileTarget, title: string): void {
+    this.keys?.cancel();
+    if (this.editor) {
+      if (this.editor.close() === 'ask') {
+        this.showNotice('Close the open editor first — it has unsaved text');
+        return;
+      }
+      this.editor = null;
+    }
+    this.panel = null;
+    const api = this.filesApi();
+    const e = new EditorSession(
+      target,
+      title,
+      { read: () => api.readFile(target), write: (t, b, f) => api.writeFile(target, t, b, f) },
+      this.rights !== 'full',
+    );
+    e.onChange = () => this.editorTick++;
+    e.onSaved = () => this.afterFileSaved(target);
+    this.editor = e;
+    void e.load();
+  }
+
+  closeEditor(): void {
+    this.editor = null;
+    this.focusActiveSoon();
+  }
+
+  // afterFileSaved: a templates save refreshes the "New tab from template"
+  // list; a plugin save refreshes the catalog and, in local mode only,
+  // reloads the daemon's plugins (spec 5d §4.3).
+  private afterFileSaved(t: FileTarget): void {
+    void this.refreshClient();
+    if (t.kind === 'plugin' && this.client && !this.client.connect && this.refusalFor('admin') === '') void this.reloadPlugins();
+  }
+
+  // unsavedText: an editor would lose text if the page went away.
+  unsavedText(): boolean {
+    return (this.editor?.dirty ?? false) || this.notes?.dirty === true;
+  }
+
+  private readonly onBeforeUnload = (e: BeforeUnloadEvent): void => {
+    if (!this.unsavedText()) return;
+    e.preventDefault();
+  };
 
   // attached runs once per (re)attach, after the attach's own state is
   // applied (ConnectionEvents.onAttached): it reloads the keymap and filter
@@ -1705,6 +1762,8 @@ export class App {
   // then, kept so the claim never depends on that order).
   private attached(): void {
     this.reportOverlay();
+    this.editor?.linkBack();
+    this.editor?.setViewOnly(this.rights !== 'full');
     void this.refreshClient();
     void this.rebuildNotifications();
     void this.askVersion();

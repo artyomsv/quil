@@ -16,6 +16,24 @@
   let busy = $state(false);
   let box: HTMLDivElement | undefined = $state();
   const why = $derived(app.refusalFor('admin'));
+  // The plugins whose file exists on THIS machine (where quil web runs): a
+  // GET per listed plugin, full rights only. A 404 or 400 hides the button
+  // instead of failing on click (spec 5d §4.3).
+  let editable = $state.raw<ReadonlySet<string>>(new Set());
+
+  async function probe(names: string[]): Promise<void> {
+    if (app.refusalFor('admin') !== '') return;
+    const api = app.filesApi();
+    const ok = new Set<string>();
+    await Promise.all(
+      names
+        .filter((n) => n !== 'terminal' && /^[a-z0-9_-]{1,64}$/.test(n))
+        .map(async (n) => {
+          if ((await api.readFile({ kind: 'plugin', name: n })).ok) ok.add(n);
+        }),
+    );
+    editable = ok;
+  }
 
   function take(o: Outcome): void {
     const p = (o.reply?.payload ?? null) as { plugins?: PluginAvail[] } | null;
@@ -25,6 +43,7 @@
     }
     err = '';
     list = [...(p.plugins ?? [])].sort((a, b) => a.name.localeCompare(b.name));
+    void probe(list.map((x) => x.name));
   }
 
   async function reload(): Promise<void> {
@@ -67,10 +86,13 @@
           <span>{sanitizeRemoteText(p.name)}</span><span class:off={!p.available}
             >{p.available ? 'available' : 'not found on this daemon'}</span
           >
+          {#if editable.has(p.name)}
+            <button type="button" onclick={() => app.openFileEditor({ kind: 'plugin', name: p.name }, `Plugin: ${p.name}`)}>Edit</button>
+          {/if}
         </li>
       {/each}
     </ul>
-    <p class="note">Plugin files are edited in the TUI (F1 → Plugins).</p>
+    <p class="note">Edit opens the plugin file on this machine (where quil web runs).</p>
     <div class="buttons">
       {#if why}<span class="why">{why}</span>{/if}
       <button type="button" disabled={why !== '' || busy} title={why || 'Read the plugin files again'} onclick={reload}

@@ -257,3 +257,17 @@ describe('PaneSearch', () => {
     expect(s.status).toBe('');
   });
 });
+
+describe('5d rows', () => {
+  it('keeps an editFile row through the build and a search', () => {
+    const row: PaletteRow = {
+      label: 'Edit templates',
+      keywords: ['template', 'edit'],
+      run: { editFile: { target: { kind: 'templates' }, title: 'Templates' } },
+    };
+    const rows = buildPalette(ctx({ extra: [[], [], [], [row]] }));
+    const found = rows.find((r) => r.run && 'editFile' in r.run);
+    expect(found?.label).toBe('Edit templates');
+    expect(filterPalette('edit templ', rows).some((r) => r.run && 'editFile' in r.run)).toBe(true);
+  });
+});

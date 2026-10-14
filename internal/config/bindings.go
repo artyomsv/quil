@@ -149,10 +149,11 @@ func encodeBindings(b Bindings) ([]byte, error) {
 // MigrateBindings creates bindings.toml from a legacy [keybindings] table on
 // first launch. Reports whether it wrote anything.
 //
-// TUI-ONLY. Keybindings are read exclusively by internal/tui and this package;
-// the daemon and the MCP bridge never touch them. The quick_actions comment in
-// config.go documents why that matters: a startup write from every process that
-// loads config would race the same file.
+// Called from the TUI's start and from quil web's first keys WRITE (never
+// from a read: a headless host keeps its legacy table until someone changes
+// the keys). The daemon and the MCP bridge never touch keybindings. The
+// quick_actions comment in config.go documents why that matters: a startup
+// write from every process that loads config would race the same file.
 //
 // cfg must be the Config that Load already returned, so the in-memory legacy
 // patches — notably the quick_actions ctrl+a -> alt+a rewrite — have already

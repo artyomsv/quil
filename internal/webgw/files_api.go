@@ -204,8 +204,9 @@ func (s *Server) handleMigrationResolve(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var b struct {
-		Choice string `json:"choice"`
-		Text   string `json:"text"`
+		Choice   string `json:"choice"`
+		Text     string `json:"text"`
+		BaseHash string `json:"base_hash"`
 	}
 	if !decodeBody(w, r, fileBodyMax, &b) {
 		return
@@ -214,7 +215,7 @@ func (s *Server) handleMigrationResolve(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "too large"})
 		return
 	}
-	files, err := s.cfg.Files.ResolveMigration(name, b.Choice, b.Text)
+	files, err := s.cfg.Files.ResolveMigration(name, b.Choice, b.Text, b.BaseHash)
 	if err != nil {
 		s.fileErr(w, err)
 		return

@@ -38,9 +38,13 @@ export interface TextFile {
   default?: string;
 }
 
+// StaleFile: hash is the gateway's hash of the file's raw bytes, echoed as
+// base_hash on resolve, so a save elsewhere while the view is open answers
+// 409 with the current text instead of being overwritten.
 export interface StaleFile {
   name: string;
   mine: string;
+  hash: string;
   default: string;
   need_version: number;
 }
@@ -122,7 +126,7 @@ export interface FilesApi {
   readFile(t: FileTarget): Promise<Api<TextFile>>;
   writeFile(t: FileTarget, text: string, baseHash: string, force: boolean): Promise<Api<TextFile>>;
   migration(): Promise<Api<{ files: StaleFile[] }>>;
-  resolve(name: string, choice: 'default' | 'mine', text: string): Promise<Api<{ files: StaleFile[] }>>;
+  resolve(name: string, choice: 'default' | 'mine', text: string, baseHash: string): Promise<Api<{ files: StaleFile[] }>>;
   log(name: LogName): Promise<Api<LogText>>;
 }
 
@@ -133,7 +137,8 @@ export function filesApi(fetchFn: FetchLike, key: string): FilesApi {
     readFile: (t) => api(fetchFn, key, 'GET', fileUrl(t)),
     writeFile: (t, text, baseHash, force) => api(fetchFn, key, 'PUT', fileUrl(t), { text, base_hash: baseHash, force }),
     migration: () => api(fetchFn, key, 'GET', '/api/migration'),
-    resolve: (name, choice, text) => api(fetchFn, key, 'POST', `/api/migration/${encodeURIComponent(name)}`, { choice, text }),
+    resolve: (name, choice, text, baseHash) =>
+      api(fetchFn, key, 'POST', `/api/migration/${encodeURIComponent(name)}`, { choice, text, base_hash: baseHash }),
     log: (name) => api(fetchFn, key, 'GET', `/api/logs/${name}`),
   };
 }

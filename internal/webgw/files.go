@@ -15,7 +15,10 @@ type Files interface {
 	ReadText(t FileTarget) (TextFile, error)
 	WriteText(t FileTarget, text, baseHash string, force bool) (TextFile, error)
 	Migration() ([]StaleFile, error)
-	ResolveMigration(name, choice, text string) ([]StaleFile, error)
+	// ResolveMigration writes the default or the user's text over the stale
+	// file name, when baseHash is still the hash of the file's raw bytes
+	// (Conflict with the file's current text otherwise).
+	ResolveMigration(name, choice, text, baseHash string) ([]StaleFile, error)
 	LogTail(name string) (LogText, error)
 }
 
@@ -74,9 +77,14 @@ type TextFile struct {
 	Default string `json:"default,omitempty"`
 }
 
+// StaleFile is one plugin file behind the shipped default. Hash is the
+// SHA-256 of the file's raw bytes, like TextFile.Hash: the page echoes it as
+// base_hash so a save elsewhere while the view is open is never overwritten
+// unseen.
 type StaleFile struct {
 	Name        string `json:"name"`
 	Mine        string `json:"mine"`
+	Hash        string `json:"hash"`
 	Default     string `json:"default"`
 	NeedVersion int    `json:"need_version"`
 }

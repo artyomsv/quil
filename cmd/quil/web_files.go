@@ -167,6 +167,16 @@ func (f *webFiles) setKey(key string, raw json.RawMessage) (webgw.SettingsView, 
 	}
 	f.settingsMu.Lock()
 	defer f.settingsMu.Unlock()
+	// With no bindings.toml the keymap in force is the legacy [keybindings]
+	// table of config.toml (ActiveBindings). The first keys write adopts its
+	// customizations as the TUI's first launch does (MigrateBindings is a
+	// no-op once the file exists), or that write would replace them with the
+	// preset's defaults for good. An unreadable config.toml is refused: a
+	// migration from it would be pure defaults.
+	cfg, lerr := config.Load(config.ConfigPath())
+	if _, err := config.MigrateBindings(cfg, lerr); err != nil {
+		return webgw.SettingsView{}, webgw.ErrSettingsUnparsable
+	}
 	b, err := config.LoadBindings()
 	if err != nil {
 		return webgw.SettingsView{}, webgw.ErrSettingsUnparsable
@@ -421,6 +431,7 @@ func staleFiles(list []plugin.StalePlugin) []webgw.StaleFile {
 		out = append(out, webgw.StaleFile{
 			Name:        strings.TrimSuffix(filepath.Base(sp.FilePath), ".toml"),
 			Mine:        normalize(string(sp.UserData), true),
+			Hash:        hashOf(sp.UserData),
 			Default:     string(sp.DefaultData),
 			NeedVersion: sp.NeedVersion,
 		})
@@ -441,9 +452,16 @@ func (f *webFiles) Migration() ([]webgw.StaleFile, error) {
 // ResolveMigration writes the default, or the user's text when its TOML
 // parses and its schema_version reaches the default's (the TUI rule,
 // internal/tui/migration.go:132-156). It answers the files still stale.
-func (f *webFiles) ResolveMigration(name, choice, text string) ([]webgw.StaleFile, error) {
+//
+// baseHash is the hash the view opened with: a file saved elsewhere since
+// (still stale, so still listed) is a Conflict carrying its current text, the
+// same answer WriteText gives, and never overwritten by the older view.
+func (f *webFiles) ResolveMigration(name, choice, text, baseHash string) ([]webgw.StaleFile, error) {
 	if !webgw.PluginNameOK(name) {
 		return nil, webgw.ErrBadName
+	}
+	if choice != "default" && choice != "mine" {
+		return nil, webgw.Invalid("choice must be default or mine")
 	}
 	f.filesMu.Lock()
 	defer f.filesMu.Unlock()
@@ -464,11 +482,14 @@ func (f *webFiles) ResolveMigration(name, choice, text string) ([]webgw.StaleFil
 	if li, err := os.Lstat(sp.FilePath); err != nil || !li.Mode().IsRegular() {
 		return nil, webgw.ErrBadName
 	}
+	if hashOf(sp.UserData) != baseHash {
+		return nil, webgw.Conflict(f.textFile(sp.UserData, true))
+	}
 	var data []byte
 	switch choice {
 	case "default":
 		data = sp.DefaultData
-	case "mine":
+	default: // mine
 		text = normalize(text, true)
 		var probe map[string]any
 		if err := toml.Unmarshal([]byte(text), &probe); err != nil {
@@ -478,8 +499,6 @@ func (f *webFiles) ResolveMigration(name, choice, text string) ([]webgw.StaleFil
 			return nil, webgw.Invalid(fmt.Sprintf("schema_version must be >= %d (currently %d)", sp.NeedVersion, have))
 		}
 		data = []byte(text)
-	default:
-		return nil, webgw.Invalid("choice must be default or mine")
 	}
 	if err := atomicfile.Write(sp.FilePath, data); err != nil {
 		return nil, err

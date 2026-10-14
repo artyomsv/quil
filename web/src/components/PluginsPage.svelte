@@ -82,7 +82,7 @@
     {#if list === null && !err}<p>Loading…</p>{/if}
     {#if app.staleCount > 0}
       <p class="notice">
-        {app.staleCount} plugin file{app.staleCount === 1 ? '' : 's'} need an update.
+        {app.staleCount} plugin file{app.staleCount === 1 ? ' needs' : 's need'} an update.
         <button type="button" onclick={() => void app.openMigration()}>Update…</button>
       </p>
     {/if}

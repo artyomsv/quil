@@ -1765,11 +1765,12 @@ export class App {
       this.editor = null;
     }
     this.panel = null;
-    const api = this.filesApi();
+    // filesApi() per request, never captured: the editor outlives a session,
+    // and a new login stores a new key.
     const e = new EditorSession(
       target,
       title,
-      { read: () => api.readFile(target), write: (t, b, f) => api.writeFile(target, t, b, f) },
+      { read: () => this.filesApi().readFile(target), write: (t, b, f) => this.filesApi().writeFile(target, t, b, f) },
       this.rights !== 'full',
     );
     e.onChange = () => this.editorTick++;
@@ -1810,14 +1811,14 @@ export class App {
   // openMigration opens the split view on a fresh list from the gateway.
   async openMigration(): Promise<void> {
     this.keys?.cancel();
-    const api = this.filesApi();
-    const r = await api.migration();
+    const r = await this.filesApi().migration();
     if (!r.ok) {
       this.showNotice(r.error);
       return;
     }
     this.panel = null;
-    const m = new MigrationFlow(r.value.files, { resolve: (n, c, t) => api.resolve(n, c, t) }, this.rights !== 'full');
+    // filesApi() per request (see openFileEditor).
+    const m = new MigrationFlow(r.value.files, { resolve: (n, c, t, h) => this.filesApi().resolve(n, c, t, h) }, this.rights !== 'full');
     m.onChange = () => {
       this.migrationTick++;
       this.staleCount = m.files.length;

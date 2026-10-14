@@ -21,8 +21,17 @@ import (
 //
 // A leaf set and then restored by the TUI compares equal to launch, so the
 // fresh value wins: the TUI did not change it in total.
+//
+// Sandbox.Auth and Sandbox.SharedClaudeConfig are ONE choice: the sign-in
+// row writes both, and token + shared is the pair it exists to never write.
+// A change to either carries both, or the browser's "token" under this TUI's
+// "shared" (which leaves Auth at launch) lands as exactly that pair.
 func MergeChanged(fresh *Config, launch, current Config) {
 	mergeValue(reflect.ValueOf(fresh).Elem(), reflect.ValueOf(launch), reflect.ValueOf(current))
+	if launch.Sandbox.Auth != current.Sandbox.Auth || launch.Sandbox.SharedClaudeConfig != current.Sandbox.SharedClaudeConfig {
+		fresh.Sandbox.Auth = current.Sandbox.Auth
+		fresh.Sandbox.SharedClaudeConfig = current.Sandbox.SharedClaudeConfig
+	}
 }
 
 func mergeValue(dst, launch, cur reflect.Value) {

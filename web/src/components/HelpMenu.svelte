@@ -14,7 +14,7 @@
     // Plugin files below their default's schema_version (spec 5d §4.4): a
     // notice, never a blocking dialog.
     ...(app.staleCount > 0
-      ? [{ label: `${app.staleCount} plugin file${app.staleCount === 1 ? '' : 's'} need an update`, run: () => void app.openMigration() }]
+      ? [{ label: `${app.staleCount} plugin file${app.staleCount === 1 ? ' needs' : 's need'} an update`, run: () => void app.openMigration() }]
       : []),
     {
       label: 'Shortcuts',

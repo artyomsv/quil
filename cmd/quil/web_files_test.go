@@ -139,6 +139,39 @@ func TestWebFiles_KeysPresetAndPrefix(t *testing.T) {
 	}
 }
 
+// With no bindings.toml yet, the legacy [keybindings] table is the keymap in
+// force: the first keys write adopts its customizations as the TUI's first
+// launch does, and an unreadable config.toml refuses the write instead of
+// replacing them with defaults.
+func TestWebFiles_FirstKeysWriteKeepsLegacyOverrides(t *testing.T) {
+	f := home(t)
+	cfg := config.Default()
+	cfg.Keybindings.Quit = "ctrl+alt+q"
+	if err := config.Save(config.ConfigPath(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	v, err := f.SetSetting("keys.preset", json.RawMessage(`"tmux"`))
+	if err != nil || v.Keys.Preset != "tmux" {
+		t.Fatalf("%+v %v", v.Keys, err)
+	}
+	b, err := config.LoadBindings()
+	if err != nil || b.Preset != "tmux" || b.Overrides["app.quit"] != "ctrl+alt+q" {
+		t.Fatalf("the legacy override was dropped: %+v %v", b, err)
+	}
+	if len(b.Overrides) != 1 {
+		t.Fatalf("an untouched default became an override: %v", b.Overrides)
+	}
+
+	f2 := home(t)
+	writeRaw(t, config.ConfigPath(), "[keybindings\nbroken")
+	if _, err := f2.SetSetting("keys.preset", json.RawMessage(`"tmux"`)); status(err) != 409 {
+		t.Fatalf("unreadable config.toml: %v", err)
+	}
+	if _, err := os.Stat(config.BindingsPath()); !os.IsNotExist(err) {
+		t.Fatal("bindings.toml was written from an unreadable config.toml")
+	}
+}
+
 // Review Focus 5.
 func TestWebFiles_KeysRefusedOnUnparsableBindings(t *testing.T) {
 	f := home(t)
@@ -307,15 +340,47 @@ func TestWebFiles_Migration(t *testing.T) {
 	cc := filepath.Join(config.PluginsDir(), "claude-code.toml")
 	writeRaw(t, cc, "[plugin]\nname = \"claude-code\"\n")
 	list, err := f.Migration()
-	if err != nil || len(list) != 1 || list[0].Name != "claude-code" || list[0].NeedVersion == 0 {
+	if err != nil || len(list) != 1 || list[0].Name != "claude-code" || list[0].NeedVersion == 0 || list[0].Hash != sum([]byte("[plugin]\nname = \"claude-code\"\n")) {
 		t.Fatalf("%+v %v", list, err)
 	}
-	if _, err := f.ResolveMigration("claude-code", "mine", "[plugin]\nname = \"claude-code\"\nschema_version = 0\n"); status(err) != 422 {
+	if _, err := f.ResolveMigration("claude-code", "mine", "[plugin]\nname = \"claude-code\"\nschema_version = 0\n", list[0].Hash); status(err) != 422 {
 		t.Fatalf("lower version accepted: %v", err)
 	}
-	left, err := f.ResolveMigration("claude-code", "default", "")
+	left, err := f.ResolveMigration("claude-code", "default", "", list[0].Hash)
 	if err != nil || len(left) != 0 {
 		t.Fatalf("default: %+v %v", left, err)
+	}
+}
+
+// A stale file saved elsewhere while the update view is open is never
+// overwritten by that view: the answer is the 409 with the file's current
+// text, and the hash it carries makes the next attempt succeed.
+func TestWebFiles_MigrationRefusesAFileChangedMeanwhile(t *testing.T) {
+	f := home(t)
+	if _, err := plugin.EnsureDefaultPlugins(config.PluginsDir()); err != nil {
+		t.Fatal(err)
+	}
+	cc := filepath.Join(config.PluginsDir(), "claude-code.toml")
+	writeRaw(t, cc, "[plugin]\nname = \"claude-code\"\n")
+	list, err := f.Migration()
+	if err != nil || len(list) != 1 {
+		t.Fatalf("%+v %v", list, err)
+	}
+	theirs := "[plugin]\nname = \"claude-code\"\n# saved elsewhere, still stale\n"
+	writeRaw(t, cc, theirs)
+	for _, choice := range []string{"default", "mine"} {
+		_, err := f.ResolveMigration("claude-code", choice, "[plugin]\nname = \"claude-code\"\nschema_version = 99\n", list[0].Hash)
+		var fe *webgw.FileError
+		if !errors.As(err, &fe) || fe.Status != 409 || fe.Current == nil || fe.Current.Text != theirs || fe.Current.Hash != sum([]byte(theirs)) {
+			t.Fatalf("%s over a changed file: %v", choice, err)
+		}
+	}
+	if b, _ := os.ReadFile(cc); string(b) != theirs {
+		t.Fatal("the other save was overwritten")
+	}
+	left, err := f.ResolveMigration("claude-code", "default", "", sum([]byte(theirs)))
+	if err != nil || len(left) != 0 {
+		t.Fatalf("with the current hash: %+v %v", left, err)
 	}
 }
 
@@ -374,10 +439,10 @@ func TestWebFiles_LogsMCPAndTruncated(t *testing.T) {
 // schema_version is written as LF.
 func TestWebFiles_MigrationRefusalsAndMine(t *testing.T) {
 	f := home(t)
-	if _, err := f.ResolveMigration("A/b", "default", ""); status(err) != 400 {
+	if _, err := f.ResolveMigration("A/b", "default", "", ""); status(err) != 400 {
 		t.Fatalf("bad name: %v", err)
 	}
-	if _, err := f.ResolveMigration("claude-code", "default", ""); status(err) != 404 {
+	if _, err := f.ResolveMigration("claude-code", "default", "", ""); status(err) != 404 {
 		t.Fatalf("not stale: %v", err)
 	}
 	if _, err := plugin.EnsureDefaultPlugins(config.PluginsDir()); err != nil {
@@ -386,21 +451,22 @@ func TestWebFiles_MigrationRefusalsAndMine(t *testing.T) {
 	cc := filepath.Join(config.PluginsDir(), "claude-code.toml")
 	old := "[plugin]\nname = \"claude-code\"\n"
 	writeRaw(t, cc, old)
-	if _, err := f.ResolveMigration("claude-code", "merge", ""); status(err) != 422 {
+	hash := sum([]byte(old))
+	if _, err := f.ResolveMigration("claude-code", "merge", "", hash); status(err) != 422 {
 		t.Fatalf("bad choice: %v", err)
 	}
-	if _, err := f.ResolveMigration("claude-code", "mine", "[plugin\nname="); status(err) != 422 {
+	if _, err := f.ResolveMigration("claude-code", "mine", "[plugin\nname=", hash); status(err) != 422 {
 		t.Fatalf("bad toml: %v", err)
 	}
 	if b, _ := os.ReadFile(cc); string(b) != old {
 		t.Fatal("a refused choice reached the disk")
 	}
 	list, err := f.Migration()
-	if err != nil || len(list) != 1 {
+	if err != nil || len(list) != 1 || list[0].Hash != hash {
 		t.Fatalf("stale list: %+v %v", list, err)
 	}
 	mine := fmt.Sprintf("[plugin]\r\nname = \"claude-code\"\r\nschema_version = %d\r\n", list[0].NeedVersion)
-	left, err := f.ResolveMigration("claude-code", "mine", mine)
+	left, err := f.ResolveMigration("claude-code", "mine", mine, hash)
 	if err != nil || len(left) != 0 {
 		t.Fatalf("mine: %+v %v", left, err)
 	}

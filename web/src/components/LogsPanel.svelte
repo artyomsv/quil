@@ -4,7 +4,7 @@
   import { copyText } from '../lib/clipboard';
   import type { LogName } from '../lib/files';
   import { trapFocus } from '../lib/focustrap';
-  import { LOG_TABS, logBody } from '../lib/logs';
+  import { LOG_TABS, latestOnly, logBody } from '../lib/logs';
 
   interface Props {
     app: App;
@@ -19,6 +19,10 @@
   const why = $derived(app.refusalFor('admin'));
   const tabs = $derived(LOG_TABS(app.client?.connect ?? false));
 
+  // Only the newest request's answer is shown: a tab clicked while another
+  // log was still loading would otherwise show that log under its own name.
+  const latest = latestOnly<ReturnType<typeof logBody>>();
+
   // load shows one log, scrolled to its end (the interesting part).
   async function load(name: LogName): Promise<void> {
     tab = name;
@@ -28,7 +32,9 @@
       return;
     }
     body = null;
-    body = logBody(await app.filesApi().log(name));
+    const b = await latest(app.filesApi().log(name).then(logBody));
+    if (b === null) return;
+    body = b;
     await tick();
     if (pre) pre.scrollTop = pre.scrollHeight;
   }

@@ -27,7 +27,35 @@ test('Settings: a value persists across a reload; a bad one shows its error', as
   await f2.press('Enter');
   await expect(page.getByRole('dialog', { name: 'Settings' }).getByText('must be a whole number above 0')).toBeVisible();
   await expect(f2).toHaveValue('4321');
+  // Refused on the page, before any request: the stored value comes back too.
+  await f2.fill('abc');
+  await f2.press('Enter');
+  await expect(page.getByRole('dialog', { name: 'Settings' }).getByText('must be a whole number', { exact: true })).toBeVisible();
+  await expect(f2).toHaveValue('4321');
 });
+
+const staleClaude = '[plugin]\nname = "claude-code"\ndisplay_name = "Claude Code"\ncategory = "tools"\n\n[command]\ncmd = "sh"\n';
+
+testWithPlugins({ 'claude-code.toml': staleClaude })(
+  'Plugin update: Escape closes it at once; Save mine with the version raised clears the notice',
+  async ({ page, quil }) => {
+    await login(page, quil);
+    await keymapLoaded(page, 'default');
+    const item = '1 plugin file needs an update';
+    await openF1(page, item);
+    const box = page.getByRole('dialog', { name: 'Plugin update' });
+    await expect(box).toBeVisible();
+    await page.keyboard.press('Escape'); // the dialog holds focus from the start
+    await expect(box).toBeHidden();
+    await openF1(page, item);
+    const need = /schema_version (\d+)/.exec(await box.locator('.note').first().innerText())?.[1];
+    expect(need).toBeTruthy();
+    await box.getByLabel('Your file').fill(staleClaude.replace('name = "claude-code"\n', `name = "claude-code"\nschema_version = ${need}\n`));
+    await box.getByRole('button', { name: 'Save mine' }).click();
+    await expect(box.getByText('Every plugin file is up to date.')).toBeVisible();
+    expect(readFileSync(path.join(quil.home, 'plugins', 'claude-code.toml'), 'utf8')).toContain(`schema_version = ${need}`);
+  },
+);
 
 test('Templates: a valid save reaches the template list; an invalid one is refused', async ({ page, quil }) => {
   await login(page, quil);

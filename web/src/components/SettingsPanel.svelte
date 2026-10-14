@@ -44,8 +44,10 @@
     if (why) return;
     const v = parseInput(row.kind, raw);
     if (v === null) {
+      // The row shows the stored value again, like a server refusal.
       rowErr = { ...rowErr, [row.key]: row.kind === 'int' ? 'must be a whole number' : 'must be a number' };
-      draft = { ...draft, [row.key]: '' };
+      const { [row.key]: _bad, ...restDraft } = draft;
+      draft = restDraft;
       return;
     }
     busy = row.key;

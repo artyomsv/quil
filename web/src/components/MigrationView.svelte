@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import type { App } from '../lib/app.svelte';
   import { trapFocus } from '../lib/focustrap';
   import type { MigrationFlow } from '../lib/migration';
@@ -11,6 +12,10 @@
 
   let { app, m }: Props = $props();
   let discardArmed = $state(false);
+  let box: HTMLDivElement | undefined = $state();
+  // Opening removes the menu that held focus: the dialog takes it, so
+  // Escape reaches onKey at once (as the other pages do).
+  onMount(() => box?.focus());
   // The flow's plain fields, read again on every migrationTick.
   const v = $derived.by(() => {
     void app.migrationTick;
@@ -50,6 +55,7 @@
     aria-modal="true"
     aria-label="Plugin update"
     tabindex="-1"
+    bind:this={box}
     use:trapFocus
     onclick={(e) => e.stopPropagation()}
     onkeydown={onKey}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { KIND_LABELS, LOG_TABS, logBody } from './logs';
+import { KIND_LABELS, LOG_TABS, latestOnly, logBody } from './logs';
 
 // Built from code points: a raw bidi override or ESC in the source would be
 // invisible to a reader.
@@ -25,6 +25,17 @@ describe('logs', () => {
   it('says when there is no log yet, and passes refusals through', () => {
     expect(logBody({ ok: true, value: { text: '', truncated: false, size: 0, mtime: '', missing: true } }).note).toBe('No log file yet.');
     expect(logBody({ ok: false, status: 403, error: 'needs full rights' }).note).toBe('needs full rights');
+  });
+
+  it('latestOnly drops the answer of a request a later one superseded', async () => {
+    const latest = latestOnly<string>();
+    let finishMCP: (v: string) => void = () => {};
+    const mcp = latest(new Promise<string>((r) => (finishMCP = r)));
+    const web = latest(Promise.resolve('web text'));
+    expect(await web).toBe('web text');
+    finishMCP('mcp text'); // the older request answers after the newer one
+    expect(await mcp).toBeNull();
+    expect(await latest(Promise.resolve('again'))).toBe('again');
   });
 
   it('labels change kinds', () => {

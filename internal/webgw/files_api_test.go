@@ -43,8 +43,8 @@ func (f *fakeFiles) WriteText(t FileTarget, text, base string, force bool) (Text
 	return TextFile{Text: text, Hash: "h2"}, f.err
 }
 func (f *fakeFiles) Migration() ([]StaleFile, error) { f.rec("migration"); return nil, f.err }
-func (f *fakeFiles) ResolveMigration(name, choice, text string) ([]StaleFile, error) {
-	f.rec("resolve " + name + " " + choice)
+func (f *fakeFiles) ResolveMigration(name, choice, text, baseHash string) ([]StaleFile, error) {
+	f.rec("resolve " + name + " " + choice + " " + baseHash)
 	return []StaleFile{}, f.err
 }
 func (f *fakeFiles) LogTail(name string) (LogText, error) {
@@ -71,7 +71,7 @@ var fileRoutes = []struct {
 	{http.MethodGet, "/api/files/plugins/ssh", nil, false},
 	{http.MethodPut, "/api/files/plugins/ssh", map[string]any{"text": "x", "base_hash": "h", "force": false}, false},
 	{http.MethodGet, "/api/migration", nil, false},
-	{http.MethodPost, "/api/migration/ssh", map[string]any{"choice": "default"}, false},
+	{http.MethodPost, "/api/migration/ssh", map[string]any{"choice": "default", "base_hash": "h7"}, false},
 	{http.MethodGet, "/api/logs/web", nil, false},
 }
 

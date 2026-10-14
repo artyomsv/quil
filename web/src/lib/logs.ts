@@ -17,6 +17,18 @@ export function logBody(r: Api<LogText>): { text: string; note: string; truncate
   return { text: sanitizeBlock(r.value.text), note: '', truncated: r.value.truncated };
 }
 
+// latestOnly answers each awaited value only while no later call has been
+// made: a tab clicked before the last one's log arrived must not show that
+// log under the new tab's name. A superseded answer is null.
+export function latestOnly<T>(): (p: Promise<T>) => Promise<T | null> {
+  let gen = 0;
+  return async (p) => {
+    const mine = ++gen;
+    const v = await p;
+    return mine === gen ? v : null;
+  };
+}
+
 export const KIND_LABELS: Record<string, string> = {
   added: 'Added',
   changed: 'Changed',

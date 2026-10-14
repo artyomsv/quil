@@ -73,13 +73,22 @@ export class EditorSession {
       return;
     }
     const base = force && this.conflict ? this.conflict.hash : this.hash;
+    const sent = this.text;
     this.saving = true;
     this.saveError = '';
     this.onChange();
-    const r = await this.io.write(this.text, base, force);
+    const r = await this.io.write(sent, base, force);
     this.saving = false;
     if (r.ok) {
+      // Typing goes on during the save: text typed meanwhile stays, unsaved,
+      // under the new hash; only the text that was sent takes the server's
+      // normalized form.
+      const newer = this.text === sent ? null : this.text;
       this.take(r.value);
+      if (newer !== null) {
+        this.text = newer;
+        this.dirty = true;
+      }
       this.conflict = null;
       this.onSaved();
     } else if (r.status === 409 && r.current) {

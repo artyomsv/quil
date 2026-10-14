@@ -6,10 +6,12 @@ function harness(viewOnly = false) {
   const writes: { text: string; base: string; force: boolean }[] = [];
   let readAnswer: Api<TextFile> = { ok: true, value: { text: 'a', hash: 'h1', exists: true } };
   let writeAnswer: Api<TextFile> = { ok: true, value: { text: 'b', hash: 'h2', exists: true } };
+  let hold: Promise<void> = Promise.resolve();
   const io: EditorIO = {
     read: async () => readAnswer,
     write: async (text, base, force) => {
       writes.push({ text, base, force });
+      await hold;
       return writeAnswer;
     },
   };
@@ -19,6 +21,12 @@ function harness(viewOnly = false) {
     writes,
     setRead: (a: Api<TextFile>) => (readAnswer = a),
     setWrite: (a: Api<TextFile>) => (writeAnswer = a),
+    // holdWrites parks every write until the returned release is called.
+    holdWrites: (): (() => void) => {
+      let release = (): void => {};
+      hold = new Promise<void>((r) => (release = r));
+      return release;
+    },
   };
 }
 
@@ -34,6 +42,23 @@ describe('EditorSession', () => {
     expect(writes).toEqual([{ text: 'b', base: 'h1', force: false }]);
     expect(e.dirty).toBe(false);
     expect(e.hash).toBe('h2');
+  });
+
+  it('keeps text typed during a save, unsaved, under the new hash', async () => {
+    const h = harness();
+    await h.e.load();
+    h.e.edit('b');
+    const release = h.holdWrites();
+    const saving = h.e.save();
+    h.e.edit('bc'); // typed while the save is in flight
+    release();
+    await saving;
+    expect(h.writes).toEqual([{ text: 'b', base: 'h1', force: false }]);
+    expect(h.e.hash).toBe('h2');
+    expect(h.e.text).toBe('bc');
+    expect(h.e.dirty).toBe(true);
+    await h.e.save();
+    expect(h.writes.at(-1)).toEqual({ text: 'bc', base: 'h2', force: false });
   });
 
   it('shows a conflict, then Overwrite forces and Reload takes theirs', async () => {

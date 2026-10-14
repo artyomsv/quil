@@ -44,6 +44,22 @@ func TestMergeChanged_ToggleBackKeepsFresh(t *testing.T) {
 	}
 }
 
+// The sign-in row writes Auth and SharedClaudeConfig as one choice, so the
+// exit save carries them as one leaf: the browser's "token" plus this TUI's
+// "shared" must not land as the forbidden token + shared pair.
+func TestMergeChanged_SignInFieldsMoveTogether(t *testing.T) {
+	launch := config.Default()
+	launch.Sandbox.Auth = string(config.SandboxAuthBrowser) // browser sign-in, own directory
+	current := config.Clone(launch)
+	current.Sandbox.SharedClaudeConfig = true // the TUI chose "shared": Auth stays browser
+	fresh := config.Clone(launch)
+	fresh.Sandbox.Auth = string(config.SandboxAuthToken) // the browser chose "token" meanwhile
+	config.MergeChanged(&fresh, launch, current)
+	if got := fresh.Sandbox.DefaultSignIn(); got != "shared" {
+		t.Fatalf("sign-in = %q (auth=%q shared=%v): the pair split", got, fresh.Sandbox.Auth, fresh.Sandbox.SharedClaudeConfig)
+	}
+}
+
 func TestMergeChanged_UntouchedRemoteSurvives(t *testing.T) {
 	launch := config.Default()
 	current := config.Clone(launch)

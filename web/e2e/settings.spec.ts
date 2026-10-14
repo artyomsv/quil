@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import type { Page } from '@playwright/test';
 import { expect, keymapLoaded, login, test, testWithPlugins } from './harness';
@@ -34,7 +34,10 @@ test('Settings: a value persists across a reload; a bad one shows its error', as
   await expect(f2).toHaveValue('4321');
 });
 
-const staleClaude = '[plugin]\nname = "claude-code"\ndisplay_name = "Claude Code"\ncategory = "tools"\n\n[command]\ncmd = "sh"\n';
+// stalePlugin is a valid plugin file with no schema_version: behind every
+// shipped default that has one.
+const stalePlugin = (name: string): string => `[plugin]\nname = "${name}"\ndisplay_name = "${name}"\ncategory = "tools"\n\n[command]\ncmd = "sh"\n`;
+const staleClaude = stalePlugin('claude-code');
 
 testWithPlugins({ 'claude-code.toml': staleClaude })(
   'Plugin update: Escape closes it at once; Save mine with the version raised clears the notice',
@@ -54,6 +57,33 @@ testWithPlugins({ 'claude-code.toml': staleClaude })(
     await box.getByRole('button', { name: 'Save mine' }).click();
     await expect(box.getByText('Every plugin file is up to date.')).toBeVisible();
     expect(readFileSync(path.join(quil.home, 'plugins', 'claude-code.toml'), 'utf8')).toContain(`schema_version = ${need}`);
+  },
+);
+
+// Three stale files, listed claude-code, codex, hunk. A draft for codex is
+// kept, visible and copyable, after another client updates codex first and
+// while hunk still waits.
+testWithPlugins({ 'claude-code.toml': staleClaude, 'codex.toml': stalePlugin('codex'), 'hunk.toml': stalePlugin('hunk') })(
+  'Plugin update: a draft another client overtook stays readable while other files remain',
+  async ({ page, quil }) => {
+    await login(page, quil);
+    await keymapLoaded(page, 'default');
+    await openF1(page, '3 plugin files need an update');
+    const box = page.getByRole('dialog', { name: 'Plugin update' });
+    await expect(box.getByRole('heading', { name: /claude-code \(1 of 3\)/ })).toBeVisible();
+    await box.getByRole('button', { name: 'Next' }).click();
+    await expect(box.getByRole('heading', { name: /codex \(2 of 3\)/ })).toBeVisible();
+    await box.getByLabel('Your file').fill(`${stalePlugin('codex')}# my codex draft\n`);
+    await box.getByRole('button', { name: 'Previous' }).click();
+    await expect(box.getByRole('heading', { name: /claude-code \(1 of 3\)/ })).toBeVisible();
+    // Another client updates codex past the shipped version: it leaves the stale list.
+    writeFileSync(path.join(quil.home, 'plugins', 'codex.toml'), stalePlugin('codex').replace('name = "codex"\n', 'name = "codex"\nschema_version = 99\n'));
+    await box.getByRole('button', { name: 'Use default' }).click();
+    await expect(box.getByRole('heading', { name: /hunk \(1 of 1\)/ })).toBeVisible();
+    await expect(box.getByLabel('Unsaved text for codex')).toHaveValue(/# my codex draft/);
+    // Close asks first: the draft is unsaved text.
+    await box.getByRole('button', { name: 'Close' }).click();
+    await expect(box.getByRole('button', { name: 'Discard and close' })).toBeVisible();
   },
 );
 

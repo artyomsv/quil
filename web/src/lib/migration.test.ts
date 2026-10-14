@@ -128,6 +128,19 @@ describe('MigrationFlow', () => {
     expect(h.f.orphans).toEqual([{ name: 'b', text: 'draft-b' }]);
   });
 
+  it('keeps the orphan while another file still waits', async () => {
+    const h = harness([sf('a'), sf('b'), sf('c')]);
+    h.f.next();
+    h.f.edit('draft-b');
+    h.f.prev();
+    h.set({ ok: true, value: { files: [sf('c')] } }); // b updated elsewhere; c still stale
+    await h.f.useDefault();
+    expect(h.f.done()).toBe(false);
+    expect(h.f.current()?.name).toBe('c');
+    expect(h.f.orphans).toEqual([{ name: 'b', text: 'draft-b' }]);
+    expect(h.f.dirty).toBe(true);
+  });
+
   it('refuses to move while a save is in flight, so a 409 lands on the file it was sent for', async () => {
     const h = harness([sf('a'), sf('b')]);
     h.f.edit('draft-a');

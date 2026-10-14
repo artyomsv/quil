@@ -61,16 +61,18 @@
     onclick={(e) => e.stopPropagation()}
     onkeydown={onKey}
   >
+    <!-- Kept drafts show whatever else remains: recovering one must never
+         depend on a save of an unrelated file. -->
+    {#each v.orphans as o (o.name)}
+      <p class="note">
+        Another client updated <code>{sanitizeRemoteText(o.name)}</code> first. Your unsaved text for it was not used; copy
+        what you need before you close.
+      </p>
+      <textarea class="orphan" spellcheck="false" readonly value={o.text} aria-label={`Unsaved text for ${o.name}`}></textarea>
+    {/each}
     {#if v.done}
       <h2>Plugin update</h2>
       <p>Every plugin file is up to date.</p>
-      {#each v.orphans as o (o.name)}
-        <p class="note">
-          Another client updated <code>{sanitizeRemoteText(o.name)}</code> first. Your unsaved text for it was not used; copy
-          what you need before you close.
-        </p>
-        <textarea class="orphan" spellcheck="false" readonly value={o.text} aria-label={`Unsaved text for ${o.name}`}></textarea>
-      {/each}
       <div class="buttons"><button type="button" onclick={close}>{discardArmed ? 'Discard and close' : 'Close'}</button></div>
     {:else if v.cur}
       <h2>Plugin update: {sanitizeRemoteText(v.cur.name)} ({v.idx + 1} of {v.total})</h2>

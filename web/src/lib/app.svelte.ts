@@ -2,6 +2,7 @@ import { cwdForSplit, nextTabColor, projectRootOf, quickSplit, splitAnswer } fro
 import { askedTabShown, jumpStep, type PendingJump, pickActive, resolveJump, SeenMarks, successorOf, UnseenAsks } from './activepane';
 import { AgentStatePoller } from './agentstate';
 import { attachRefusedBanner, bannerFor, type BannerState, isLoginRequired } from './banner';
+import { BETA_SEEN_KEY, shouldShowBeta } from './beta';
 import {
   type ClientInfo,
   createInstance,
@@ -185,6 +186,9 @@ export class App {
   staleCount = $state(0);
   migration = $state.raw<MigrationFlow | null>(null);
   migrationTick = $state(0);
+  // The beta notice (spec 5d §4.7): decided once, at the first /api/client.
+  betaOpen = $state(false);
+  private betaDecided = false;
   sidebarOpen = $state(true);
   keyHint = $state('');
   keymap = $state.raw<WebKeymap | null>(null);
@@ -854,6 +858,33 @@ export class App {
   // tables and the notification filter.
   private clientLoaded(info: ClientInfo): void {
     this.keysFrom(info.keymap, info.notifications);
+    if (!this.betaDecided) {
+      this.betaDecided = true;
+      let seen: string | null = null;
+      try {
+        seen = window.sessionStorage.getItem(BETA_SEEN_KEY);
+      } catch {
+        seen = null;
+      }
+      this.betaOpen = shouldShowBeta(info.show_disclaimer, seen);
+    }
+  }
+
+  // dismissBeta is OK (this tab only) or "Don't show again" (the config).
+  dismissBeta(forever: boolean): void {
+    this.betaOpen = false;
+    try {
+      window.sessionStorage.setItem(BETA_SEEN_KEY, '1');
+    } catch {
+      // storage unavailable: the notice stays hidden for this page's life
+    }
+    if (forever) {
+      void this.filesApi()
+        .setSetting('ui.show_disclaimer', false)
+        .then((r) => {
+          if (!r.ok) this.showNotice(`Not saved: ${r.error}`);
+        });
+    }
   }
 
   // keysFrom installs the keymap and notification filter /api/client sent.
@@ -1057,6 +1088,13 @@ export class App {
       },
       { label: 'Plugins', keywords: ['plugin', 'plugins', 'reload'], run: { panel: { kind: 'plugins' } } },
       { label: 'Update', keywords: ['update', 'version', 'upgrade'], run: { panel: { kind: 'update' } } },
+      {
+        label: 'View client log',
+        keywords: ['log', 'logs', 'client', 'daemon', 'mcp', 'web'],
+        run: { panel: { kind: 'logs' } },
+        disabled: this.refusalFor('admin'),
+      },
+      { label: "What's New", keywords: ['whats', 'new', 'changelog', 'release'], run: { panel: { kind: 'whats_new' } } },
     ];
     return [tabs, projects, pane, system];
   }

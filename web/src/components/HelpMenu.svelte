@@ -24,6 +24,14 @@
       },
     },
     { label: 'Settings', run: () => app.openPanel({ kind: 'settings' }) },
+    // Logs carry paths and command lines: full rights (spec 5d D2).
+    {
+      label: 'Logs',
+      run: () => app.openPanel({ kind: 'logs' }),
+      disabled: app.refusalFor('admin') !== '',
+      reason: app.refusalFor('admin'),
+    },
+    { label: "What's New", run: () => app.openPanel({ kind: 'whats_new' }) },
     // Viewing processes is an act-class request (the daemon's table); kill
     // inside the page needs full rights.
     {

@@ -2,6 +2,7 @@
   import type { App } from '../lib/app.svelte';
   import { sanitizeRemoteText } from '../lib/sanitize';
   import Banner from './Banner.svelte';
+  import BetaNotice from './BetaNotice.svelte';
   import CreatePaneDialog from './CreatePaneDialog.svelte';
   import FileEditor from './FileEditor.svelte';
   import HelpMenu from './HelpMenu.svelte';
@@ -113,6 +114,9 @@
       {#key app.dialog}
         <CreatePaneDialog {app} />
       {/key}
+    {/if}
+    {#if app.betaOpen && app.client}
+      <BetaNotice {app} />
     {/if}
   </div>
   {#if app.notifyOpen}

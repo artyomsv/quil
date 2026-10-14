@@ -142,7 +142,7 @@
                     }}
                   />
                 {/if}
-                {#if rowErr[row.key]}<span class="err">{sanitizeRemoteText(rowErr[row.key])}</span>{/if}
+                {#if rowErr[row.key]}<span class="err">{sanitizeRemoteText(rowErr[row.key] ?? '')}</span>{/if}
               </td>
               <td class="applies">{appliesLabel(row, connect)}</td>
             </tr>

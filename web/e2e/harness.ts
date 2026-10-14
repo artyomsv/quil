@@ -350,10 +350,13 @@ export async function clientId(page: Page): Promise<string> {
 // a pane. It returns the client id the gateway leased to the page.
 // login types the code and waits for the first pane. A fresh QUIL_HOME has
 // show_disclaimer on, so the beta notice (5d) would cover every test's first
-// click: it is pre-dismissed for this tab unless keepBeta asks for it.
+// click: it is pre-dismissed unless keepBeta asks for it. The script goes on
+// the CONTEXT, not the page: sessionStorage is per tab, and a test that opens
+// a second tab of the same login (notes.spec.ts) would otherwise get the
+// notice there, where its backdrop swallows every click.
 export async function login(page: Page, q: QuilWeb, opts: { keepBeta?: boolean } = {}): Promise<string> {
   if (!opts.keepBeta) {
-    await page.addInitScript(() => {
+    await page.context().addInitScript(() => {
       try {
         sessionStorage.setItem('quil.beta_seen', '1');
       } catch {

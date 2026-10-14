@@ -51,7 +51,8 @@ test('Templates: a valid save reaches the template list; an invalid one is refus
   await page.keyboard.press('Alt+Shift+P');
   await page.keyboard.type('New from template');
   await page.keyboard.press('Enter');
-  await expect(page.getByText('e2e-one')).toBeVisible();
+  // An <option> inside a <select> is never "visible" to Playwright: check it exists.
+  await expect(page.locator('option', { hasText: 'e2e-one' })).toHaveCount(1);
 });
 
 const tool = '[plugin]\nname = "e2e-tool"\ndisplay_name = "E2E Tool"\ncategory = "tools"\n\n[command]\ncmd = "sh"\n';

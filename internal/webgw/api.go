@@ -39,6 +39,30 @@ type ClientExtras struct {
 	Templates      []TemplateDef
 	TemplatesError string
 	Connect        bool
+	// WhatsNew, ShowDisclaimer and Tip feed the browser's What's New panel
+	// and beta notice (spec 5d §4.6, §4.7). Nil WhatsNew: no record.
+	WhatsNew       *WhatsNew
+	ShowDisclaimer bool
+	Tip            *Tip
+}
+
+// WhatsNew is the newest release's highlights in the gateway binary
+// (changelog.Latest); the page shows it on request only (spec 5d D7).
+type WhatsNew struct {
+	Version string         `json:"version"`
+	Date    string         `json:"date"`
+	Items   []WhatsNewItem `json:"items"`
+}
+
+type WhatsNewItem struct {
+	Kind string `json:"kind"`
+	Text string `json:"text"`
+}
+
+// Tip is one of the TUI's disclaimer tips.
+type Tip struct {
+	Title string   `json:"title"`
+	Items []string `json:"items"`
 }
 
 // TemplateDef is one workspace template as the browser lists it: the name
@@ -68,6 +92,9 @@ type ClientInfo struct {
 	Templates      []TemplateDef `json:"templates"`
 	TemplatesError string        `json:"templates_error,omitempty"`
 	Connect        bool          `json:"connect"`
+	WhatsNew       *WhatsNew     `json:"whats_new"`
+	ShowDisclaimer bool          `json:"show_disclaimer"`
+	Tip            *Tip          `json:"tip"`
 }
 
 // nonNilTemplates keeps "templates" a JSON list, never null.
@@ -166,6 +193,9 @@ func (s *Server) handleClient(w http.ResponseWriter, r *http.Request) {
 		Templates:      nonNilTemplates(ex.Templates),
 		TemplatesError: ex.TemplatesError,
 		Connect:        ex.Connect,
+		WhatsNew:       ex.WhatsNew,
+		ShowDisclaimer: ex.ShowDisclaimer,
+		Tip:            ex.Tip,
 	})
 }
 

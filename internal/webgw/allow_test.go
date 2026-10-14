@@ -45,7 +45,7 @@ func TestCheckForward_FirstMustBeWebHelloWithLeasedID(t *testing.T) {
 
 func TestCheckForward_RefusesUnlistedTypes(t *testing.T) {
 	g := &forwardGate{leasedID: "web-p-1", helloSeen: true}
-	for _, typ := range []string{"token_create_req", ipc.MsgShutdown, "create_pane", "destroy_pane", "create_pane_req", "create_tab", ipc.MsgCreateProject, ipc.MsgMergeProjects, ipc.MsgSharedImport, "subscribe", "overlay_policy", MsgWebWelcome, "invented_type"} {
+	for _, typ := range []string{"token_create_req", ipc.MsgShutdown, "create_pane", "destroy_pane", "create_pane_req", "create_tab", ipc.MsgCreateProject, ipc.MsgMergeProjects, ipc.MsgSharedImport, "subscribe", MsgWebWelcome, "invented_type"} {
 		fwd, refuse, fatal := g.check(msg(t, typ, "r1", struct{}{}))
 		if fwd != nil || fatal != nil || refuse == nil {
 			t.Fatalf("%s: fwd=%v refuse=%v fatal=%v", typ, fwd, refuse, fatal)
@@ -519,5 +519,20 @@ func TestCheckForward_MalformedPasteChunkHoldsNoPlace(t *testing.T) {
 	}
 	if len(g.pastes) != 0 {
 		t.Fatalf("a refused chunk holds a place: %v", g.pastes)
+	}
+}
+
+func TestCheckForward_OverlayPolicyIsReencoded(t *testing.T) {
+	g := &forwardGate{leasedID: "web-p-1", helloSeen: true}
+	fwd, refuse, _ := g.check(msg(t, ipc.MsgOverlayPolicy, "", map[string]any{"idle_timeout_minutes": 7, "max_live": 3, "x": 1}))
+	if fwd == nil || refuse != nil {
+		t.Fatalf("overlay_policy refused: %v", refuse)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(fwd.Payload, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out["x"] != nil || out["idle_timeout_minutes"] != float64(7) || out["max_live"] != float64(3) {
+		t.Fatalf("overlay_policy re-encode: %v", out)
 	}
 }

@@ -25,6 +25,8 @@ Client-daemon model:
 - `internal/config/` — TOML configuration (`Load` reads, `Save` writes atomically via `.tmp` + rename). `UIConfig.ShowDisclaimer` controls startup beta dialog
 - `internal/daemon/` — Session manager, message routing, event queue (`event.go` — bounded, mutex-protected, watcher pub/sub for MCP)
 - `internal/persist/` — Atomic workspace/buffer persistence (JSON snapshots, binary ghost buffers)
+- `internal/atomicfile/` — the one safe write for every file quil rewrites (config, bindings, templates, instances, plugin files): a unique `<base>.*.tmp` temp + rename + one retry. The temp name keeps the target's stem so `ipc.IsQuilHomeEntry` accepts a crash leftover
+- `internal/logtail/` — reads the end of a log file (`Tail`, link-refusing) and joins the MCP logs (`JoinDir`); the TUI log viewer and the browser's Logs page share it
 - `internal/shellinit/` — Automatic OSC 7 + OSC 133 shell integration (embedded init scripts, `//go:embed`)
 - `internal/plugin/` — Pane plugin system (registry, built-ins, TOML loading, scraper)
 - `internal/gitworktree/` — git worktree listing, creation + removal, and the on-demand `git status` count the close dialog warns with (the repository WRITES; kept apart from the read-only `gitinfo`, which a ticker runs)

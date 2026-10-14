@@ -348,7 +348,19 @@ export async function clientId(page: Page): Promise<string> {
 
 // login opens the page, types the code, and waits for the workspace to show
 // a pane. It returns the client id the gateway leased to the page.
-export async function login(page: Page, q: QuilWeb): Promise<string> {
+// login types the code and waits for the first pane. A fresh QUIL_HOME has
+// show_disclaimer on, so the beta notice (5d) would cover every test's first
+// click: it is pre-dismissed for this tab unless keepBeta asks for it.
+export async function login(page: Page, q: QuilWeb, opts: { keepBeta?: boolean } = {}): Promise<string> {
+  if (!opts.keepBeta) {
+    await page.addInitScript(() => {
+      try {
+        sessionStorage.setItem('quil.beta_seen', '1');
+      } catch {
+        // storage unavailable: the notice shows and the test clicks past it
+      }
+    });
+  }
   await page.goto(q.url);
   await page.locator('#code').fill(q.code);
   await page.getByRole('button', { name: 'Log in' }).click();

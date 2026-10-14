@@ -9,6 +9,7 @@
   import KeyList from './KeyList.svelte';
   import MachinePages from './MachinePages.svelte';
   import Menu from './Menu.svelte';
+  import MigrationView from './MigrationView.svelte';
   import NotesEditor from './NotesEditor.svelte';
   import Notice from './Notice.svelte';
   import NotificationPanel from './NotificationPanel.svelte';
@@ -73,6 +74,11 @@
       <!-- Outside the editable gate: it survives a lost link with its text. -->
       {#key app.editor}
         <FileEditor {app} e={app.editor} />
+      {/key}
+    {/if}
+    {#if app.migration}
+      {#key app.migration}
+        <MigrationView {app} m={app.migration} />
       {/key}
     {/if}
     {#if app.panel?.kind === 'palette'}

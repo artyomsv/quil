@@ -25,6 +25,7 @@ import { type FetchLike, hasSession, postLogin, sessionGone } from './login';
 import { NotificationStore, type NotifyInfo, type PaneEvent, parsePaneEvent } from './notifications';
 import { OverlayClaim, type OverlayInfo, type OverlayKind, overlayOf, overlayRepoChoice, overlayToggle } from './overlay';
 import { HISTORY_TIMEOUT_MS } from './history';
+import { MigrationFlow } from './migration';
 import { NOTE_LOAD_TIMEOUT_MS, type NoteIO, NoteSession } from './notes';
 import { buildPalette, type PaletteRow } from './palette';
 import { folderFromBrowse, GroupRenames, newProjectPlan } from './projects';
@@ -178,6 +179,12 @@ export class App {
   // link with its text (spec 5d §4.0), like the notes editor.
   editor = $state.raw<EditorSession | null>(null);
   editorTick = $state(0);
+  // Plugin files on this machine below their default's schema_version (spec
+  // 5d §4.4): the count drives the F1 and Plugins notices; the flow is the
+  // open split view (not a Panel: it holds editable text).
+  staleCount = $state(0);
+  migration = $state.raw<MigrationFlow | null>(null);
+  migrationTick = $state(0);
   sidebarOpen = $state(true);
   keyHint = $state('');
   keymap = $state.raw<WebKeymap | null>(null);
@@ -650,6 +657,7 @@ export class App {
     // rather than reading "connection lost" as a refusal.
     this.notes?.linkLost();
     this.editor?.linkLost();
+    this.migration?.linkLost();
     this.requests.reconnecting();
     this.pasteFlow.reconnecting();
     this.drag.linkLost();
@@ -1747,7 +1755,45 @@ export class App {
 
   // unsavedText: an editor would lose text if the page went away.
   unsavedText(): boolean {
-    return (this.editor?.dirty ?? false) || this.notes?.dirty === true;
+    return (this.editor?.dirty ?? false) || this.notes?.dirty === true || (this.migration?.dirty ?? false);
+  }
+
+  // loadStale counts the plugin files that need an update, full rights
+  // only (the route refuses anything else).
+  private async loadStale(): Promise<void> {
+    if (this.refusalFor('admin') !== '') {
+      this.staleCount = 0;
+      return;
+    }
+    const r = await this.filesApi().migration();
+    this.staleCount = r.ok ? r.value.files.length : 0;
+  }
+
+  // openMigration opens the split view on a fresh list from the gateway.
+  async openMigration(): Promise<void> {
+    this.keys?.cancel();
+    const api = this.filesApi();
+    const r = await api.migration();
+    if (!r.ok) {
+      this.showNotice(r.error);
+      return;
+    }
+    this.panel = null;
+    const m = new MigrationFlow(r.value.files, { resolve: (n, c, t) => api.resolve(n, c, t) }, this.rights !== 'full');
+    m.onChange = () => {
+      this.migrationTick++;
+      this.staleCount = m.files.length;
+    };
+    m.onDone = () => {
+      void this.refreshClient();
+      if (this.client && !this.client.connect) void this.reloadPlugins();
+    };
+    this.migration = m;
+  }
+
+  closeMigration(): void {
+    this.migration = null;
+    this.focusActiveSoon();
   }
 
   private readonly onBeforeUnload = (e: BeforeUnloadEvent): void => {
@@ -1764,6 +1810,8 @@ export class App {
     this.reportOverlay();
     this.editor?.linkBack();
     this.editor?.setViewOnly(this.rights !== 'full');
+    this.migration?.linkBack();
+    void this.loadStale();
     void this.refreshClient();
     void this.rebuildNotifications();
     void this.askVersion();

@@ -80,6 +80,12 @@
     <h2>Plugins on this daemon</h2>
     {#if err}<p class="err">{sanitizeRemoteText(err)}</p>{/if}
     {#if list === null && !err}<p>Loading…</p>{/if}
+    {#if app.staleCount > 0}
+      <p class="notice">
+        {app.staleCount} plugin file{app.staleCount === 1 ? '' : 's'} need an update.
+        <button type="button" onclick={() => void app.openMigration()}>Update…</button>
+      </p>
+    {/if}
     <ul>
       {#each list ?? [] as p (p.name)}
         <li>
@@ -149,6 +155,10 @@
 
   .err {
     color: #e5a0a0;
+  }
+
+  .notice {
+    color: #e5c07b;
   }
 
   .buttons {

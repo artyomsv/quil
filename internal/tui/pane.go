@@ -18,6 +18,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/vt"
 
+	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ringbuf"
 )
 
@@ -434,7 +435,7 @@ const defaultScrollbackLines = 10000
 // count, so a stray zero turns a tuning knob into an out-of-memory on startup —
 // on the one setting whose entire purpose is memory pressure. The ceiling sits
 // far above any plausible use (100x the default) so it can only catch a typo.
-const maxScrollbackLines = 1000000
+const maxScrollbackLines = config.MaxScrollbackLines
 
 // targetTotalScrollbackLines is the workspace-wide line budget the adaptive
 // depth spends when ui.scrollback_lines is unset.

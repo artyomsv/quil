@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strconv"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -30,24 +31,21 @@ type notifyToggle struct {
 // states. The toast toggles apply live for free, since raiseAttentionToast
 // reads m.cfg on every edge.
 func notifySettingsRows() []notifyToggle {
-	// applyGroups re-projects the config onto the live filter. Factored out so
-	// a group added later cannot be wired up without it.
-	applyGroups := func(m *Model) {
-		m.notifications.SetGroups(groupFilterFrom(m.cfg.Notification.Events))
-		m.configChanged = true
-	}
 	// group builds one event-group row. The accessor returns a POINTER into
 	// the config so one closure serves every group; m.cfg is a value field on
-	// Model, so &m.cfg.Notification.Events is addressable through *Model.
-	group := func(label, hint string, read func(*config.EventGroupsConfig) *bool) notifyToggle {
+	// Model, so &m.cfg.Notification.Events is addressable through *Model. The
+	// store goes through the shared row (key), so the browser's page applies
+	// the same check; the filter is re-projected live here, where the
+	// notification center is.
+	group := func(label, hint, key string, read func(*config.EventGroupsConfig) *bool) notifyToggle {
 		return notifyToggle{
 			label: label,
 			hint:  hint,
 			get:   func(m *Model) string { return boolStr(*read(&m.cfg.Notification.Events)) },
 			set: func(m *Model) {
-				p := read(&m.cfg.Notification.Events)
-				*p = !*p
-				applyGroups(m)
+				if m.applySetting(key, strconv.FormatBool(!*read(&m.cfg.Notification.Events))) {
+					m.notifications.SetGroups(groupFilterFrom(m.cfg.Notification.Events))
+				}
 			},
 		}
 	}
@@ -68,8 +66,7 @@ func notifySettingsRows() []notifyToggle {
 			hint:  "needs notify setup",
 			get:   func(m *Model) string { return m.desktopState().label() },
 			set: func(m *Model) {
-				m.cfg.Notification.Desktop.Enabled = !m.cfg.Notification.Desktop.Enabled
-				m.configChanged = true
+				m.applySetting("notification.desktop.enabled", strconv.FormatBool(!m.cfg.Notification.Desktop.Enabled))
 			},
 		},
 		{
@@ -77,8 +74,7 @@ func notifySettingsRows() []notifyToggle {
 			hint:  "waiting on you",
 			get:   func(m *Model) string { return boolStr(m.cfg.Notification.Desktop.Blocked) },
 			set: func(m *Model) {
-				m.cfg.Notification.Desktop.Blocked = !m.cfg.Notification.Desktop.Blocked
-				m.configChanged = true
+				m.applySetting("notification.desktop.blocked", strconv.FormatBool(!m.cfg.Notification.Desktop.Blocked))
 			},
 		},
 		{
@@ -86,30 +82,29 @@ func notifySettingsRows() []notifyToggle {
 			hint:  "finished while away",
 			get:   func(m *Model) string { return boolStr(m.cfg.Notification.Desktop.Done) },
 			set: func(m *Model) {
-				m.cfg.Notification.Desktop.Done = !m.cfg.Notification.Desktop.Done
-				m.configChanged = true
+				m.applySetting("notification.desktop.done", strconv.FormatBool(!m.cfg.Notification.Desktop.Done))
 			},
 		},
 		{label: "Sidebar events", heading: true},
-		group("Agent turns", "start + reply ready",
+		group("Agent turns", "start + reply ready", "notification.events.agent_turn",
 			func(c *config.EventGroupsConfig) *bool { return &c.AgentTurn }),
-		group("Agent blocked", "permission prompts",
+		group("Agent blocked", "permission prompts", "notification.events.agent_blocked",
 			func(c *config.EventGroupsConfig) *bool { return &c.AgentBlocked }),
-		group("Agent subagents", "subagent start/stop",
+		group("Agent subagents", "subagent start/stop", "notification.events.agent_subagent",
 			func(c *config.EventGroupsConfig) *bool { return &c.AgentSubagent }),
-		group("Agent session", "end, compaction",
+		group("Agent session", "end, compaction", "notification.events.agent_session",
 			func(c *config.EventGroupsConfig) *bool { return &c.AgentSession }),
-		group("Process", "exited / failed",
+		group("Process", "exited / failed", "notification.events.process",
 			func(c *config.EventGroupsConfig) *bool { return &c.Process }),
-		group("Pane", "closed, pinned, marked",
+		group("Pane", "closed, pinned, marked", "notification.events.pane",
 			func(c *config.EventGroupsConfig) *bool { return &c.Pane }),
-		group("MCP", "agent drove a pane",
+		group("MCP", "agent drove a pane", "notification.events.mcp",
 			func(c *config.EventGroupsConfig) *bool { return &c.MCP }),
-		group("System", "blocked, worktree",
+		group("System", "blocked, worktree", "notification.events.system",
 			func(c *config.EventGroupsConfig) *bool { return &c.System }),
-		group("Commands", "every shell command",
+		group("Commands", "every shell command", "notification.events.commands",
 			func(c *config.EventGroupsConfig) *bool { return &c.Commands }),
-		group("Idle", "output idle",
+		group("Idle", "output idle", "notification.events.idle",
 			func(c *config.EventGroupsConfig) *bool { return &c.Idle }),
 	}
 }

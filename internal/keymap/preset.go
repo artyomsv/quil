@@ -95,3 +95,14 @@ func PresetNames() []string {
 
 // containsPrefixVar reports whether a spec still holds an unexpanded ${prefix}.
 func containsPrefixVar(spec string) bool { return strings.Contains(spec, prefixVar) }
+
+// PresetUsesPrefix reports whether a preset writes ${prefix}: only then does a
+// prefix mean anything. Moved here from the TUI so the browser's Keys page and
+// the TUI's apply the same rule.
+func PresetUsesPrefix(name string) bool {
+	if name == "" || name == DefaultPresetName {
+		return false
+	}
+	p, err := LoadPreset(name)
+	return err == nil && p.Prefix != ""
+}

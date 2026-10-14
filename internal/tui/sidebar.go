@@ -6,6 +6,8 @@ import (
 
 	"charm.land/lipgloss/v2"
 	"github.com/rivo/uniseg"
+
+	"github.com/artyomsv/quil/internal/config"
 )
 
 // minWidthForSidebar auto-collapses the project sidebar rather than
@@ -19,7 +21,7 @@ const (
 	// stays grabbable, so a user who drags too far can drag back. Zero is
 	// deliberately unreachable by drag: collapsing is what the toggle is for,
 	// and a sidebar dragged to nothing leaves no edge to grab it back by.
-	minSidebarWidth = 12
+	minSidebarWidth = config.MinSidebarWidth
 	// minPaneLabelCells is the floor a pane's own name keeps in its row, so a
 	// long blocked-reason cannot crowd out the thing that identifies which
 	// pane the row is about. Eight cells is enough for the id suffix quil

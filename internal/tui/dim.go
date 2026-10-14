@@ -394,13 +394,13 @@ func dimExtended(lead int, fields []string, p dimPalette) (consumed int, out str
 // Two decimals because that is the resolution the level is worth setting at:
 // MaxUnfocusedDim is 0.9, and a third digit changes nothing a human can see
 // against a blended background.
-func formatDimLevel(level float64) string {
-	return strconv.FormatFloat(level, 'f', dimLevelDecimals, 64)
-}
+//
+// Lives in config so the browser's Settings page applies the same rule.
+func formatDimLevel(level float64) string { return config.FormatDimLevel(level) }
 
 // dimLevelDecimals is the display resolution of a dim level, and — through
 // minDimLevel — the resolution of the whole settable domain.
-const dimLevelDecimals = 2
+const dimLevelDecimals = config.DimLevelDecimals
 
 // minDimLevel is the smallest level parseDimLevel accepts. It is not a
 // judgement about what is VISIBLE; it is the smallest value formatDimLevel can
@@ -416,8 +416,9 @@ const dimLevelDecimals = 2
 // happily, and the row could then never commit the value it was displaying:
 // typing back the "0.00" it shows parses to 0 and is refused.
 //
-// Tied to dimLevelDecimals so the two cannot drift.
-var minDimLevel = math.Pow(10, -dimLevelDecimals)
+// Tied to dimLevelDecimals so the two cannot drift. Lives in config so the
+// browser's Settings page applies the same rule.
+var minDimLevel = config.MinUnfocusedDim
 
 // parseDimLevel accepts a typed dim level, reporting ok only for a value the
 // renderer would honour verbatim.
@@ -438,13 +439,9 @@ var minDimLevel = math.Pow(10, -dimLevelDecimals)
 // display is worse than one it refuses. It subsumes the `<= 0` case (and
 // -Inf), but a value below the floor is a different mistake from a negative
 // one, so both bounds are still named.
-func parseDimLevel(s string) (float64, bool) {
-	n, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
-	if err != nil || math.IsNaN(n) || n <= 0 || n < minDimLevel || n > config.MaxUnfocusedDim {
-		return 0, false
-	}
-	return n, true
-}
+//
+// Lives in config so the browser's Settings page applies the same rule.
+func parseDimLevel(s string) (float64, bool) { return config.ParseDimLevel(s) }
 
 // toggleUnfocusedDim flips the dim between off and on, acting on the STATE the
 // user can see rather than on the enabled flag alone.
@@ -458,16 +455,7 @@ func parseDimLevel(s string) (float64, bool) {
 // Switching off leaves the level alone. That is the entire reason the switch
 // is a separate config key; see UIConfig.UnfocusedDimEnabled.
 func (m *Model) toggleUnfocusedDim() {
-	if m.cfg.UI.UnfocusedDimAmount() > 0 {
-		m.cfg.UI.UnfocusedDimEnabled = false
-		m.configChanged = true
-		return
-	}
-	m.cfg.UI.UnfocusedDimEnabled = true
-	if m.cfg.UI.UnfocusedDimLevel() <= 0 {
-		m.cfg.UI.UnfocusedDim = config.DefaultUnfocusedDim
-	}
-	m.configChanged = true
+	m.applySetting("ui.unfocused_dim_enabled", strconv.FormatBool(m.cfg.UI.UnfocusedDimAmount() <= 0))
 }
 
 // dimLevelPreset is one palette-offered dim level.

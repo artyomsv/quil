@@ -228,31 +228,20 @@ func settingsFields() []settingsField {
 		{
 			label: "Snapshot interval",
 			get:   func(m *Model) string { return m.cfg.Daemon.SnapshotInterval },
-			set: func(m *Model, v string) {
-				if d, err := time.ParseDuration(v); err == nil && d > 0 && m.cfg.Daemon.SnapshotInterval != v {
-					m.cfg.Daemon.SnapshotInterval = v
-					m.configChanged = true
-				}
-			},
+			set:   func(m *Model, v string) { m.applySetting("daemon.snapshot_interval", v) },
 		},
 		{
 			label: "Ghost dimmed",
 			get:   func(m *Model) string { return boolStr(m.cfg.GhostBuffer.Dimmed) },
 			set: func(m *Model, _ string) {
-				m.cfg.GhostBuffer.Dimmed = !m.cfg.GhostBuffer.Dimmed
-				m.configChanged = true
+				m.applySetting("ghost_buffer.dimmed", strconv.FormatBool(!m.cfg.GhostBuffer.Dimmed))
 			},
 			isBool: true,
 		},
 		{
 			label: "Ghost buffer lines",
 			get:   func(m *Model) string { return strconv.Itoa(m.cfg.GhostBuffer.MaxLines) },
-			set: func(m *Model, v string) {
-				if n, err := strconv.Atoi(v); err == nil && n > 0 && m.cfg.GhostBuffer.MaxLines != n {
-					m.cfg.GhostBuffer.MaxLines = n
-					m.configChanged = true
-				}
-			},
+			set:   func(m *Model, v string) { m.applySetting("ghost_buffer.max_lines", v) },
 		},
 		{
 			label: "Scrollback lines",
@@ -268,39 +257,19 @@ func settingsFields() []settingsField {
 				// mean the opposite of what the user typed. Clamps the top end
 				// for the same reason SetScrollbackLines does — the setting
 				// whose purpose is reducing memory must not be able to exhaust
-				// it through a typo.
-				n, err := strconv.Atoi(v)
-				if err != nil || n <= 0 {
-					return
-				}
-				if n > maxScrollbackLines {
-					n = maxScrollbackLines
-				}
-				if m.cfg.UI.ScrollbackLines != n {
-					m.cfg.UI.ScrollbackLines = n
-					m.configChanged = true
-				}
+				// it through a typo. Both rules live in the shared row.
+				m.applySetting("ui.scrollback_lines", v)
 			},
 		},
 		{
 			label: "Mouse scroll lines",
 			get:   func(m *Model) string { return strconv.Itoa(m.cfg.UI.MouseScrollLines) },
-			set: func(m *Model, v string) {
-				if n, err := strconv.Atoi(v); err == nil && n > 0 && m.cfg.UI.MouseScrollLines != n {
-					m.cfg.UI.MouseScrollLines = n
-					m.configChanged = true
-				}
-			},
+			set:   func(m *Model, v string) { m.applySetting("ui.mouse_scroll_lines", v) },
 		},
 		{
 			label: "Page scroll lines",
 			get:   func(m *Model) string { return strconv.Itoa(m.cfg.UI.PageScrollLines) },
-			set: func(m *Model, v string) {
-				if n, err := strconv.Atoi(v); err == nil && n >= 0 && m.cfg.UI.PageScrollLines != n {
-					m.cfg.UI.PageScrollLines = n
-					m.configChanged = true
-				}
-			},
+			set:   func(m *Model, v string) { m.applySetting("ui.page_scroll_lines", v) },
 		},
 		{
 			// The one Settings row that applies LIVE. The comment on
@@ -321,10 +290,10 @@ func settingsFields() []settingsField {
 				// dialog must never show a number the layout is not using.
 				//
 				// Bounded by the SAME limits the edge drag enforces —
-				// minSidebarWidth below, and sidebarWidth's own
-				// total-minTermWidth clamp above — so the two entry points
-				// cannot disagree about what is settable.
-				if err != nil || n < minSidebarWidth || n == m.cfg.UI.SidebarWidth {
+				// minSidebarWidth below (the shared row checks it), and
+				// sidebarWidth's own total-minTermWidth clamp above — so the
+				// two entry points cannot disagree about what is settable.
+				if err != nil {
 					return
 				}
 				// Bounded against the CAP only, and measured at a width the
@@ -349,9 +318,9 @@ func settingsFields() []settingsField {
 				if n > usable-minTermWidth {
 					return
 				}
-				m.cfg.UI.SidebarWidth = n
-				m.sidebarWidth = n
-				m.configChanged = true
+				if m.applySetting("ui.sidebar_width", v) {
+					m.sidebarWidth = m.cfg.UI.SidebarWidth
+				}
 			},
 			relayout: true,
 		},
@@ -403,22 +372,17 @@ func settingsFields() []settingsField {
 				// level" and not a second switch.
 				//
 				// The unchanged-check compares FORMATTED values, not raw
-				// ones. `get` renders the CLAMPED, rounded level while the
-				// stored field may hold neither: with a hand-edited
-				// `unfocused_dim = 1.5` the row displays "0.90", and a raw
-				// compare made Enter-Enter — inspecting the row and accepting
-				// what it already showed — store 0.9 and flag the config
-				// dirty. config.Save writes the whole file, so merely looking
-				// at this row rewrote config.toml and any comments in it.
-				// Every other row in this table is immune because its get/set
-				// round-trip is exact; this is the only one where they are
-				// not.
-				n, ok := parseDimLevel(v)
-				if !ok || formatDimLevel(n) == formatDimLevel(m.cfg.UI.UnfocusedDimLevel()) {
-					return
-				}
-				m.cfg.UI.UnfocusedDim = n
-				m.configChanged = true
+				// ones (applySetting compares Get values). `get` renders the
+				// CLAMPED, rounded level while the stored field may hold
+				// neither: with a hand-edited `unfocused_dim = 1.5` the row
+				// displays "0.90", and a raw compare made Enter-Enter —
+				// inspecting the row and accepting what it already showed —
+				// store 0.9 and flag the config dirty. config.Save writes the
+				// whole file, so merely looking at this row rewrote
+				// config.toml and any comments in it. Every other row in this
+				// table is immune because its get/set round-trip is exact;
+				// this is the only one where they are not.
+				m.applySetting("ui.unfocused_dim", v)
 			},
 		},
 		{
@@ -434,12 +398,7 @@ func settingsFields() []settingsField {
 				// Refused rather than clamped, like Sidebar width: a stored
 				// value the daemon would not honour must never be displayed.
 				// 0 is legal and means "never evict".
-				n, err := strconv.Atoi(v)
-				if err != nil || n < 0 || n == m.cfg.Overlay.IdleTimeoutMinutes {
-					return
-				}
-				m.cfg.Overlay.IdleTimeoutMinutes = n
-				m.configChanged = true
+				m.applySetting("overlay.idle_timeout_minutes", v)
 			},
 		},
 		{
@@ -486,54 +445,32 @@ func settingsFields() []settingsField {
 		{
 			label: "Max live overlays",
 			get:   func(m *Model) string { return strconv.Itoa(m.cfg.Overlay.MaxLive) },
-			set: func(m *Model, v string) {
-				// 0 is legal and means "no cap".
-				n, err := strconv.Atoi(v)
-				if err != nil || n < 0 || n == m.cfg.Overlay.MaxLive {
-					return
-				}
-				m.cfg.Overlay.MaxLive = n
-				m.configChanged = true
-			},
+			// 0 is legal and means "no cap".
+			set: func(m *Model, v string) { m.applySetting("overlay.max_live", v) },
 		},
 		{
 			label: "Log level",
 			get:   func(m *Model) string { return m.cfg.Logging.Level },
-			set: func(m *Model, v string) {
-				switch v {
-				case "debug", "info", "warn", "error":
-					if m.cfg.Logging.Level != v {
-						m.cfg.Logging.Level = v
-						m.configChanged = true
-					}
-				}
-			},
+			set:   func(m *Model, v string) { m.applySetting("logging.level", v) },
 		},
 		{
 			label: "Show disclaimer",
 			get:   func(m *Model) string { return boolStr(m.cfg.UI.ShowDisclaimer) },
 			set: func(m *Model, _ string) {
-				m.cfg.UI.ShowDisclaimer = !m.cfg.UI.ShowDisclaimer
-				m.configChanged = true
+				m.applySetting("ui.show_disclaimer", strconv.FormatBool(!m.cfg.UI.ShowDisclaimer))
 			},
 			isBool: true,
 		},
 		{
-			label: "Update check",
-			get:   func(m *Model) string { return boolStr(m.cfg.Update.Check) },
-			set: func(m *Model, _ string) {
-				m.cfg.Update.Check = !m.cfg.Update.Check
-				m.configChanged = true
-			},
+			label:  "Update check",
+			get:    func(m *Model) string { return boolStr(m.cfg.Update.Check) },
+			set:    func(m *Model, _ string) { m.applySetting("update.check", strconv.FormatBool(!m.cfg.Update.Check)) },
 			isBool: true,
 		},
 		{
-			label: "Update auto-download",
-			get:   func(m *Model) string { return boolStr(m.cfg.Update.Auto) },
-			set: func(m *Model, _ string) {
-				m.cfg.Update.Auto = !m.cfg.Update.Auto
-				m.configChanged = true
-			},
+			label:  "Update auto-download",
+			get:    func(m *Model) string { return boolStr(m.cfg.Update.Auto) },
+			set:    func(m *Model, _ string) { m.applySetting("update.auto", strconv.FormatBool(!m.cfg.Update.Auto)) },
 			isBool: true,
 		},
 		{label: "Templates", get: func(m *Model) string { return "…" }, set: func(m *Model, _ string) {}, templateSettings: true},

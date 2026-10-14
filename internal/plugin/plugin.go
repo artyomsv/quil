@@ -9,6 +9,7 @@ type StalePlugin struct {
 	FilePath    string // absolute path to the user's TOML file
 	UserData    []byte // current content of the user's file
 	DefaultData []byte // embedded default content (newer schema)
+	NeedVersion int    // the default's schema_version, the lowest a saved file may carry
 }
 
 // PanePlugin defines a pane type with its command, persistence strategy,

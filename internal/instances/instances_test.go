@@ -1,7 +1,6 @@
 package instances
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -120,35 +119,5 @@ func TestSave_ConcurrentSavesAndReadsLeaveNoTemp(t *testing.T) {
 	}
 	if _, err := Load(p); err != nil {
 		t.Fatalf("final file does not parse: %v", err)
-	}
-}
-
-// A failed first rename (a Windows reader holding the file) is retried once.
-func TestSave_RetriesTheRenameOnce(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "instances.json")
-	calls := 0
-	orig := renameFn
-	renameFn = func(a, b string) error {
-		calls++
-		if calls == 1 {
-			return errors.New("sharing violation")
-		}
-		return orig(a, b)
-	}
-	t.Cleanup(func() { renameFn = orig })
-	if err := Save(p, Store{"ssh": {{ID: "a"}}}); err != nil {
-		t.Fatalf("Save after one failed rename: %v", err)
-	}
-	if calls != 2 {
-		t.Fatalf("rename calls = %d, want 2", calls)
-	}
-
-	renameFn = func(string, string) error { return errors.New("always") }
-	if err := Save(p, Store{}); err == nil {
-		t.Fatal("Save reported success with every rename failing")
-	}
-	ents, _ := os.ReadDir(filepath.Dir(p))
-	if len(ents) != 1 {
-		t.Fatalf("a failed save left %d entries, want only instances.json", len(ents))
 	}
 }

@@ -350,3 +350,40 @@ func TestEnsureDefaultPlugins_CodexShape(t *testing.T) {
 		t.Error("want a --search toggle")
 	}
 }
+
+// GET /api/migration re-checks with this: it must never create a file.
+func TestStaleDefaults_NeverWrites(t *testing.T) {
+	dir := t.TempDir()
+	stale, err := StaleDefaults(dir)
+	if err != nil || len(stale) != 0 {
+		t.Fatalf("empty dir: %v %v", stale, err)
+	}
+	if ents, _ := os.ReadDir(dir); len(ents) != 0 {
+		t.Fatalf("StaleDefaults created %d files", len(ents))
+	}
+}
+
+func TestStaleDefaults_MatchesEnsureAndCarriesTheNeededVersion(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := EnsureDefaultPlugins(dir); err != nil {
+		t.Fatal(err)
+	}
+	cc := filepath.Join(dir, "claude-code.toml")
+	if err := os.WriteFile(cc, []byte("[plugin]\nname = \"claude-code\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a, err := StaleDefaults(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := EnsureDefaultPlugins(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(a) != 1 || len(b) != 1 || a[0].FilePath != b[0].FilePath {
+		t.Fatalf("StaleDefaults %v, Ensure %v", a, b)
+	}
+	if a[0].NeedVersion == 0 || a[0].NeedVersion != ParseSchemaVersion(a[0].DefaultData) {
+		t.Fatalf("NeedVersion = %d", a[0].NeedVersion)
+	}
+}

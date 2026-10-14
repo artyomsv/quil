@@ -3,13 +3,13 @@ package tui
 import (
 	"fmt"
 	"log"
-	"os"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/BurntSushi/toml"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/artyomsv/quil/internal/atomicfile"
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/plugin"
 )
@@ -148,8 +148,8 @@ func (m Model) saveMigrationAndAdvance() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Write to disk.
-	if err := os.WriteFile(sp.FilePath, []byte(content), 0600); err != nil {
+	// Write to disk (atomic: the browser can save the same file).
+	if err := atomicfile.Write(sp.FilePath, []byte(content)); err != nil {
 		m.migrationError = fmt.Sprintf("Write failed: %v", err)
 		return m, nil
 	}

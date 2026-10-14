@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"github.com/artyomsv/quil/internal/atomicfile"
 	"github.com/artyomsv/quil/internal/keymap"
 )
 
@@ -92,28 +93,11 @@ func WriteBindings(b Bindings) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return fmt.Errorf("create quil dir: %w", err)
 	}
-	// O_EXCL on the temp file, not os.WriteFile. O_CREATE|O_TRUNC follows a
-	// symlink, so a pre-planted bindings.toml.tmp would redirect this write to
-	// any path the user can reach. Removing first keeps a crashed earlier write
-	// from wedging every later one.
-	tmp := path + ".tmp"
-	os.Remove(tmp)
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-	if err != nil {
-		return fmt.Errorf("create bindings temp: %w", err)
-	}
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		os.Remove(tmp)
+	// Through internal/atomicfile: a temp with a unique name, created with
+	// O_EXCL (os.CreateTemp), so a pre-planted bindings.toml.tmp link is never
+	// followed, and two processes saving at once never share a temp.
+	if err := atomicfile.Write(path, data); err != nil {
 		return fmt.Errorf("write bindings: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		os.Remove(tmp)
-		return fmt.Errorf("close bindings temp: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
-		return fmt.Errorf("rename bindings: %w", err)
 	}
 	return nil
 }

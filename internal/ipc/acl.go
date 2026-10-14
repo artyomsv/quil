@@ -153,7 +153,7 @@ func foreignHomeEntry(names []string) string {
 // entries (.git, .vscode), and reading those as quil's would rewrite its
 // access list. Exported for the drift test.
 var QuilHomeDotPrefixes = []string{
-	".templates-",         // config.WriteTemplatesSource
+	".templates-",         // config.WriteTemplatesSource before v1.89: a crash leftover may remain
 	".quil-staging-",      // remoteinstall's Windows staging folder
 	".quil-update-probe-", // update.InstallWritable
 }

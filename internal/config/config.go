@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/artyomsv/quil/internal/atomicfile"
 )
 
 type Config struct {
@@ -892,13 +894,10 @@ func Save(path string, cfg Config) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
-	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, buf.Bytes(), 0600); err != nil {
+	// Through internal/atomicfile: a unique temp name, because the TUI and
+	// quil web are two processes that both save this file.
+	if err := atomicfile.Write(path, buf.Bytes()); err != nil {
 		return fmt.Errorf("write config: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("rename config: %w", err)
 	}
 	return nil
 }

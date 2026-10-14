@@ -78,6 +78,25 @@ describe('MigrationFlow', () => {
     expect(h.calls[1]).toEqual({ name: 'a', choice: 'mine', text: 'draft', baseHash: 'h9' });
   });
 
+  it("a draft keeps the hash it started from across another file's save", async () => {
+    const h = harness([sf('a'), sf('b')]);
+    h.f.next();
+    h.f.edit('draft-b');
+    h.f.prev();
+    // a is resolved; b was saved elsewhere meanwhile, so the fresh list carries its new hash.
+    h.set({ ok: true, value: { files: [{ ...sf('b'), mine: 'theirs-b', hash: 'h-b2' }] } });
+    await h.f.useDefault();
+    expect(h.f.current()?.name).toBe('b');
+    expect(h.f.mine).toBe('draft-b');
+    h.set({ ok: false, status: 409, error: 'changed on disk', current: { text: 'theirs-b', hash: 'h-b2', exists: true } });
+    await h.f.saveMine();
+    expect(h.calls[1]?.baseHash).toBe('h-b'); // the hash the draft started from, never the refreshed one
+    expect(h.f.error).toBe(CHANGED_ELSEWHERE);
+    h.set({ ok: true, value: { files: [] } });
+    await h.f.saveMine();
+    expect(h.calls[2]).toEqual({ name: 'b', choice: 'mine', text: 'draft-b', baseHash: 'h-b2' });
+  });
+
   it('shows the reloaded text when there was no draft', async () => {
     const h = harness([sf('a')]);
     h.set({ ok: false, status: 409, error: 'changed on disk', current: { text: 'theirs', hash: 'h9', exists: true } });

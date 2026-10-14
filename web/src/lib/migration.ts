@@ -10,7 +10,10 @@ export const CHANGED_ELSEWHERE = 'Changed on disk: the file was reloaded and you
 // left (editable), the new default on the right. Every answer carries the
 // files still stale, and that list — not a local count — drives the view.
 // An edited left side is a draft kept per file, so Next and Previous never
-// drop it; dirty is "some draft exists".
+// drop it; dirty is "some draft exists". A draft keeps the hash of the text
+// it started from: a refreshed list after another file's save carries new
+// hashes, and sending one of those with an old draft would overwrite a save
+// made elsewhere without the 409 that exists to show it.
 export class MigrationFlow {
   idx = 0;
   mine = '';
@@ -19,7 +22,7 @@ export class MigrationFlow {
   linkDown = false;
   onChange: () => void = () => {};
   onDone: () => void = () => {};
-  private drafts: Record<string, string> = {};
+  private drafts: Record<string, { text: string; hash: string }> = {};
 
   constructor(
     public files: StaleFile[],
@@ -49,7 +52,7 @@ export class MigrationFlow {
     const cur = this.current();
     if (!cur || this.readOnly()) return;
     this.mine = t;
-    this.drafts = { ...this.drafts, [cur.name]: t };
+    this.drafts = { ...this.drafts, [cur.name]: { text: t, hash: this.drafts[cur.name]?.hash ?? cur.hash } };
     this.onChange();
   }
 
@@ -91,7 +94,7 @@ export class MigrationFlow {
   // show puts the current file's draft, or its text on disk, on the left.
   private show(): void {
     const cur = this.current();
-    this.mine = cur ? (this.drafts[cur.name] ?? cur.mine) : '';
+    this.mine = cur ? (this.drafts[cur.name]?.text ?? cur.mine) : '';
   }
 
   private async resolve(choice: 'default' | 'mine'): Promise<void> {
@@ -100,14 +103,17 @@ export class MigrationFlow {
     this.busy = true;
     this.error = '';
     this.onChange();
-    const r = await this.io.resolve(cur.name, choice, choice === 'mine' ? this.mine : '', cur.hash);
+    const draft = this.drafts[cur.name];
+    const r = await this.io.resolve(cur.name, choice, choice === 'mine' ? this.mine : '', draft?.hash ?? cur.hash);
     this.busy = false;
     if (!r.ok) {
       if (r.status === 409 && r.current) {
         // Another save landed meanwhile: the list entry takes the file as it
-        // is now, the draft stays, and the next save carries the new hash.
+        // is now, the draft stays, and the next save — the user has been told
+        // — carries the new hash.
         const now = r.current;
         this.files = this.files.map((f) => (f.name === cur.name ? { ...f, mine: now.text, hash: now.hash } : f));
+        if (draft) this.drafts = { ...this.drafts, [cur.name]: { text: draft.text, hash: now.hash } };
         this.show();
         this.error = CHANGED_ELSEWHERE;
       } else {

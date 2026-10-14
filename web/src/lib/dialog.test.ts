@@ -43,6 +43,9 @@ const info: ClientInfo = {
   templates: [],
   templates_error: '',
   connect: false,
+  whats_new: null,
+  show_disclaimer: false,
+  tip: null,
 };
 const avail = { terminal: true, 'claude-code': true, ssh: true, k9s: true };
 

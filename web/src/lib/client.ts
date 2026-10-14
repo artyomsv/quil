@@ -71,6 +71,11 @@ export interface ClientInfo {
   templates_error: string;
   // The gateway dials a remote daemon (quil web --connect).
   connect: boolean;
+  // The newest release's highlights in the gateway binary (null: none), the
+  // config's show_disclaimer, and one TUI tip for the beta notice.
+  whats_new: { version: string; date: string; items: { kind: string; text: string }[] } | null;
+  show_disclaimer: boolean;
+  tip: { title: string; items: string[] } | null;
 }
 
 export interface InstanceInput {
@@ -137,6 +142,12 @@ function asClientInfo(v: unknown): ClientInfo | null {
       : [],
     templates_error: typeof o.templates_error === 'string' ? o.templates_error : '',
     connect: o.connect === true,
+    whats_new:
+      typeof o.whats_new === 'object' && o.whats_new !== null && Array.isArray((o.whats_new as { items?: unknown }).items)
+        ? (o.whats_new as ClientInfo['whats_new'])
+        : null,
+    show_disclaimer: o.show_disclaimer === true,
+    tip: typeof o.tip === 'object' && o.tip !== null && Array.isArray((o.tip as { items?: unknown }).items) ? (o.tip as ClientInfo['tip']) : null,
   };
 }
 

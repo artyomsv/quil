@@ -18,6 +18,7 @@
         app.openKeyList();
       },
     },
+    { label: 'Settings', run: () => app.openPanel({ kind: 'settings' }) },
     // Viewing processes is an act-class request (the daemon's table); kill
     // inside the page needs full rights.
     {

@@ -14,6 +14,7 @@ import {
 import { type AttachSizes, type Clock, Connection, type SocketLike } from './connection';
 import type { DialogOpen } from './dialog';
 import { type QuilTestHook, shouldRegisterE2EHook } from './e2ehook';
+import { type FilesApi, filesApi, type FileTarget, type SettingsView } from './files';
 import { NATIVE, TUI_ONLY, VIEW_ONLY } from './keys/actions';
 import { IS_MAC, isEditable } from './keys/chord';
 import { buildTables, KeyEngine, type WebKeymap } from './keys/engine';
@@ -42,6 +43,7 @@ import type {
   WorkspaceState,
 } from './protocol';
 import { sanitizeRemoteText } from './sanitize';
+import { OVERLAY_KEYS, overlayPolicy, refreshesClient } from './settings';
 import { TEMPLATE_TOO_OLD, templateGate } from './template';
 import { type Outcome, Requests, STILL_WORKING } from './requests';
 import { type MsgClass, refusal, type Rights, rightsOf } from './rights';
@@ -1030,6 +1032,7 @@ export class App {
         run: { panel: { kind: 'processes' } },
         disabled: act,
       },
+      { label: 'Settings', keywords: ['settings', 'config', 'options', 'preferences'], run: { panel: { kind: 'settings' } } },
       { label: 'Plugins', keywords: ['plugin', 'plugins', 'reload'], run: { panel: { kind: 'plugins' } } },
       { label: 'Update', keywords: ['update', 'version', 'upgrade'], run: { panel: { kind: 'update' } } },
     ];
@@ -1676,6 +1679,24 @@ export class App {
       remove: (plugin, id) => deleteInstance(this.fetchFn, key, plugin, id),
     };
   }
+
+  // filesApi reads and writes this machine's quil files through quil web.
+  filesApi(): FilesApi {
+    return filesApi(this.fetchFn, this.storage.getItem(LOGIN_KEY) ?? '');
+  }
+
+  // afterSettingSaved runs after an accepted PATCH: the overlay rows are
+  // pushed to a local daemon (never under --connect, spec 5d §5.4), and a
+  // save /api/client reflects reloads it (keymap, filter, sandbox defaults).
+  afterSettingSaved(key: string, view: SettingsView): void {
+    if (OVERLAY_KEYS.has(key) && this.client && !this.client.connect) this.fire('overlay_policy', overlayPolicy(view.rows));
+    if (refreshesClient(key)) void this.refreshClient();
+  }
+
+  // openFileEditor opens the templates or a plugin file in the editor (Task
+  // 7 fills it in; this stub keeps the Settings page's Templates button
+  // type-checked until then).
+  openFileEditor(_t: FileTarget, _title: string): void {}
 
   // attached runs once per (re)attach, after the attach's own state is
   // applied (ConnectionEvents.onAttached): it reloads the keymap and filter

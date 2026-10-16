@@ -108,3 +108,44 @@ func TestSandboxTrust_WorktreeApprovesTheMainCheckout(t *testing.T) {
 		t.Errorf("the main checkout's profile was not approved: %v", err)
 	}
 }
+
+// The command lists the set-up steps that will run inside the sandbox, and
+// approves nothing when the profile cannot be found, read or pinned.
+func TestSandboxTrust_ListsStepsAndRefusesBrokenProfiles(t *testing.T) {
+	repo, home := trustRepo(t), t.TempDir()
+	profile := "[sbx]\nenv_file = \"sbxenv.yaml\"\nprepare_host = [\"sh\", \"prep.sh\"]\npost_create = [[\"bash\", \"-c\", \"make deps\"]]\n"
+	if err := os.WriteFile(filepath.Join(repo, sbx.ProfileFile), []byte(profile), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := sandboxTrust(repo, true, strings.NewReader(""), &out, home); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "inside the sandbox after a create (1): bash -c make deps") {
+		t.Errorf("the set-up step is not listed:\n%s", out.String())
+	}
+
+	broken := map[string]func(dir string) error{
+		"no profile": func(string) error { return nil },
+		"bad profile": func(dir string) error {
+			return os.WriteFile(filepath.Join(dir, sbx.ProfileFile), []byte("[sbx\n"), 0o644)
+		},
+		"missing env file": func(dir string) error {
+			return os.WriteFile(filepath.Join(dir, sbx.ProfileFile), []byte("[sbx]\nenv_file = \"gone.yaml\"\n"), 0o644)
+		},
+	}
+	for name, setup := range broken {
+		t.Run(name, func(t *testing.T) {
+			dir, home := t.TempDir(), t.TempDir()
+			if err := setup(dir); err != nil {
+				t.Fatal(err)
+			}
+			if err := sandboxTrust(dir, true, strings.NewReader(""), &bytes.Buffer{}, home); err == nil {
+				t.Error("approved")
+			}
+			if _, err := os.Stat(sbx.TrustStorePath(home)); err == nil {
+				t.Error("a store was written for a refused profile")
+			}
+		})
+	}
+}

@@ -607,9 +607,10 @@ func TestSpawnPane_SbxLogRedactsEnvironmentValues(t *testing.T) {
 	prevEnv := p.Command.Env
 	p.Command.Env = append(slices.Clone(prevEnv), "TEST_SECRET=CANARY-sentinel-value")
 	t.Cleanup(func() { p.Command.Env = prevEnv })
-	var logged strings.Builder
+	// Locked: the pane's output goroutine keeps logging while the test reads.
+	logged := &lockedBuffer{}
 	prevOut := log.Writer()
-	log.SetOutput(&logged)
+	log.SetOutput(logged)
 	t.Cleanup(func() { log.SetOutput(prevOut) })
 
 	s := spawnAndCollect(t, d, pane)
@@ -621,5 +622,146 @@ func TestSpawnPane_SbxLogRedactsEnvironmentValues(t *testing.T) {
 	}
 	if strings.Contains(logged.String(), "CANARY-sentinel-value") {
 		t.Error("the log carries an environment value")
+	}
+}
+
+// lockedBuffer is a log sink safe to read while other goroutines write.
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+// sbx not usable on this machine: the pane is told why and does not start,
+// and never falls back to the host.
+func TestSpawnPane_SbxUnavailableFailsThePane(t *testing.T) {
+	d, pane, r := sbxFixture(t, true)
+	d.sbxCap.probeFn = func(context.Context) ipc.SandboxCapRespPayload {
+		return ipc.SandboxCapRespPayload{SbxError: "sbx not usable: daemon is not running"}
+	}
+	if s := spawnAndCollect(t, d, pane); s != nil {
+		t.Fatalf("a pane started without a usable sbx: %q", s.startCmd)
+	}
+	pane.PluginMu.Lock()
+	msg := pane.SpawnError
+	pane.PluginMu.Unlock()
+	if !strings.Contains(msg, "daemon is not running") {
+		t.Errorf("SpawnError = %q, want sbx's reason", msg)
+	}
+	if r.ran("/fake/sbx", "env", "create") {
+		t.Error("a create ran although sbx is not usable")
+	}
+}
+
+// A pane whose sandbox another pane is already preparing joins that
+// preparation and is told so; it does not start a second one.
+func TestSpawnPane_SbxJoinsAPreparationInProgress(t *testing.T) {
+	d, pane, _ := sbxFixture(t, true)
+	if !d.sbxPrep.begin("my-app", sbxWaiter{paneID: "owner"}) {
+		t.Fatal("could not take the claim")
+	}
+	if err := d.spawnPane(pane, &fakeSession{}, false); err != nil {
+		t.Fatal(err)
+	}
+	waiting := d.sbxPrep.next("my-app")
+	if len(waiting) != 2 || waiting[1].paneID != pane.ID {
+		t.Fatalf("waiters = %+v, want the owner and this pane", waiting)
+	}
+	if d.sbxPrep.next("my-app") != nil {
+		t.Fatal("the claim was not released")
+	}
+	if out := string(pane.OutputBuf.Bytes()); !strings.Contains(out, "which another pane is preparing") {
+		t.Errorf("the pane was not told it is waiting: %q", out)
+	}
+}
+
+// A spawn that fails after the preparation leaves its reason on the pane.
+func TestRespawnSbxPane_FailureIsRecordedOnThePane(t *testing.T) {
+	d, pane, _ := sbxFixture(t, true)
+	prevSpawn := sbxSpawnFn
+	sbxSpawnFn = func(*Daemon, *Pane, func(apty.Session) apty.Session) error {
+		return errors.New("exec format error")
+	}
+	t.Cleanup(func() { sbxSpawnFn = prevSpawn })
+	d.respawnSbxPane(sbxWaiter{paneID: pane.ID})
+	pane.PluginMu.Lock()
+	msg := pane.SpawnError
+	pane.PluginMu.Unlock()
+	if msg != "exec format error" {
+		t.Errorf("SpawnError = %q", msg)
+	}
+}
+
+// Nothing is spawned once the daemon is stopping, or for a pane closed while
+// its sandbox was prepared.
+func TestRespawnSbxPane_NotDuringShutdownOrForAClosedPane(t *testing.T) {
+	d, pane, _ := sbxFixture(t, true)
+	spawned := 0
+	prevSpawn := sbxSpawnFn
+	sbxSpawnFn = func(*Daemon, *Pane, func(apty.Session) apty.Session) error {
+		spawned++
+		return nil
+	}
+	t.Cleanup(func() { sbxSpawnFn = prevSpawn })
+	d.respawnSbxPane(sbxWaiter{paneID: "gone"})
+	if d.sbxWaiterCurrent(sbxWaiter{paneID: "gone"}) {
+		t.Error("a closed pane counted as waiting")
+	}
+	d.shutdown = make(chan struct{})
+	close(d.shutdown)
+	d.respawnSbxPane(sbxWaiter{paneID: pane.ID})
+	if spawned != 0 {
+		t.Errorf("spawned %d times", spawned)
+	}
+}
+
+// The pane's own instance arguments reach the agent inside the sandbox, as
+// they would on the host.
+func TestSpawnPane_SbxPassesInstanceArgs(t *testing.T) {
+	d, pane, _ := sbxFixture(t, true)
+	pane.InstanceArgs = []string{"--model", "opus"}
+	s := spawnAndCollect(t, d, pane)
+	if s == nil {
+		t.Fatal("never started")
+	}
+	n := len(s.startArgs)
+	if n < 2 || s.startArgs[n-2] != "--model" || s.startArgs[n-1] != "opus" {
+		t.Errorf("args = %v, want the instance args last", s.startArgs)
+	}
+}
+
+// failRunner fails every call with output, as an sbx that is installed but
+// not working does.
+type failRunner struct{ out string }
+
+func (f failRunner) Run(_ context.Context, _ string, w io.Writer, _ ...string) error {
+	io.WriteString(w, f.out)
+	return errors.New("exit status 1")
+}
+
+// A failed probe is reported in one short line, so the dialog can show it.
+func TestProbeSbx_ReportsAShortReason(t *testing.T) {
+	prevRunner, prevBin := sbxRunner, sbxBinaryFn
+	t.Cleanup(func() { sbxRunner, sbxBinaryFn = prevRunner, prevBin })
+	sbxBinaryFn = func() (string, error) { return "/fake/sbx", nil }
+	sbxRunner = failRunner{out: strings.Repeat("x", 500)}
+	got := probeSbx(context.Background())
+	if got.SbxAvailable || !strings.HasPrefix(got.SbxError, "sbx not usable: ") || len(got.SbxError) > 260 {
+		t.Errorf("probe = %+v", got)
+	}
+	sbxBinaryFn = func() (string, error) { return "", errors.New("sbx is not installed") }
+	if got := probeSbx(context.Background()); got.SbxAvailable || got.SbxError != "sbx is not installed" {
+		t.Errorf("probe without sbx = %+v", got)
 	}
 }

@@ -8,6 +8,8 @@ import (
 
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/artyomsv/quil/internal/plugin"
+	"github.com/artyomsv/quil/internal/sbx"
 )
 
 // A destination with sbx alone still offers the row, on the sbx backend.
@@ -83,5 +85,25 @@ func TestSandboxRow_ArrowsSwitchOnlyWhenBothAreOffered(t *testing.T) {
 	out := m.renderSetupSandboxField(true)
 	if !strings.Contains(out, "←/→ sbx") {
 		t.Errorf("the row does not name the other backend:\n%s", out)
+	}
+}
+
+// With sbx selected the row names sbx, offers Docker as the other backend,
+// points at the profile instead of an image field, and shows a refusal.
+func TestSandboxRow_SbxRendersTheProfileNotAnImage(t *testing.T) {
+	m := Model{pluginRegistry: plugin.NewRegistry()}
+	m.sandboxOn = true
+	m.sandboxDialogDocker = true
+	m.sandboxDialogSbx = true
+	m.sandboxBackend = config.SandboxBackendSbx
+	m.sandboxErr = "no profile here"
+	out := m.renderSetupSandboxField(true)
+	for _, want := range []string{"Run in an sbx sandbox", "←/→ Docker", sbx.ProfileFile, "no profile here"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("row does not contain %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "image") {
+		t.Errorf("an sbx row shows an image field:\n%s", out)
 	}
 }

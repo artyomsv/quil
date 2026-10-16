@@ -742,8 +742,11 @@ the file up to the profile directory, and every kit entry): hashing the link
 text let an agent change the target with the digest unchanged (PR #260 review).
 **`prepare_host` may name ONE project file, its script** (`fileArgs`, any
 spelling — an absolute path into the repository was once exempt and ran
-unpinned); only an absolute argv[0] outside the profile directory is a system
-command. A second file is refused because the copy cannot tell an input from
+unpinned). An absolute prepare_host argv[0] outside the profile directory is
+REFUSED, not trusted as a system program: the worktrees folder beside the
+repository is shared with the agent, so a direct script there would run
+unpinned. A bare name goes through PATH (Go refuses a cwd lookup). post_create
+keeps the exemption — its argv[0] names a program inside the VM. A second file is refused because the copy cannot tell an input from
 an output (`cp a b` wrote into the copy and lost the result).
 
 **Nothing approved is read from the repository again.** `sbx.Approve` returns
@@ -762,7 +765,13 @@ file's folder when a path is named, so `rewriteEnv` expands both tokens to the
 original folder and makes relative `workspace`/`additionalWorkspaces` paths
 absolute; kits keep their relative layout under one common root. Any other
 relative path lands in the copy — a broken create, never a wider cage. An env
-file with `lifecycle:` is refused (`errLifecycle`): Quil's `--force` approves
+file with `lifecycle:` is refused (`errLifecycle`) — checked by `envKitDirs`, which the
+pin and the copy share; `parseEnv` reads a `yaml.Node`, accepts a kit as a
+bare string or a `source` mapping, and FAILS CLOSED on anything else (a typed
+decode once failed on a string kit and skipped the lifecycle check). A relative
+workspace path still holding `${{ … }}` after the folder tokens is refused at
+approval: it may expand to an absolute path, and anchoring it would mount
+another folder: Quil's `--force` approves
 sbx's host commands, and the scripts they call are not pinned. A host script
 must not find siblings through `$0`.
 

@@ -116,6 +116,18 @@ func PinnedFiles(p Profile) ([]string, error) {
 	// argument it cannot tell apart from the script — an input, or an output
 	// the step writes — would either run unchecked or be written into the
 	// copy and lost.
+	//
+	// An absolute COMMAND outside the profile's directory is refused: Quil
+	// cannot tell a system program from a script in a folder the agent can
+	// write — the worktrees folder next to the repository is shared with the
+	// sandbox. A bare name ("sh") is looked up on PATH, never in the project.
+	if len(p.PrepareHost) > 0 {
+		cmd := p.PrepareHost[0]
+		if filepath.IsAbs(cmd) && !ancestorOrSelf(p.Dir, filepath.Clean(cmd)) {
+			return nil, fmt.Errorf("prepare_host command %s is an absolute path outside %s; name a program "+
+				"on PATH (\"sh\") or a script in the project", cmd, p.Dir)
+		}
+	}
 	host, err := p.fileArgs(p.PrepareHost)
 	if err != nil {
 		return nil, fmt.Errorf("prepare_host: %w", err)
@@ -158,8 +170,8 @@ type fileArg struct {
 // fileArgs returns the arguments of argv that name an existing file, absolute
 // or relative to the profile's directory — however a script is spelt, it is
 // still the repository's file. The one exception is an absolute COMMAND
-// (argv[0]) outside the profile's directory: that is a system program
-// (/bin/bash), and a system path may run through a link (/bin -> usr/bin).
+// (argv[0]) outside the profile's directory, which a post_create step uses to
+// name a program inside the sandbox; PinnedFiles refuses one in prepare_host.
 //
 // A link is refused: on the file itself always, and on the folders between it
 // and the profile's directory when the file is under it.
@@ -193,33 +205,39 @@ func (p Profile) fileArgs(argv []string) ([]fileArg, error) {
 	return out, nil
 }
 
-// localKitDirs reads the kit sources the environment file names and returns
-// the local ones as absolute paths. It refuses an environment file with host
-// lifecycle commands (errLifecycle).
-//
-// Only the `kits: [{source: ...}]` shape is read. An environment file this
-// does not understand still has its own bytes pinned; only its kits would be
-// missed, which is why the docs ask for kits under the environment file's
-// directory with a "./" prefix — the form sbx itself requires.
+// localKitDirs reads the environment file and returns its local kits as
+// absolute paths (envKitDirs).
 func localKitDirs(envFile string) ([]string, error) {
 	raw, err := os.ReadFile(envFile)
 	if err != nil {
 		return nil, fmt.Errorf("env_file: %w", err)
 	}
-	doc, ok := parseEnv(raw)
-	if !ok {
-		return nil, nil
+	return envKitDirs(raw, envFile)
+}
+
+// envKitDirs returns the local kits an environment file's bytes name, as
+// absolute paths. It refuses a file with host lifecycle commands
+// (errLifecycle) and a file it cannot interpret: the pin and the copy both
+// come from here, so neither can miss a kit the other sees.
+func envKitDirs(raw []byte, envFile string) ([]string, error) {
+	doc, err := parseEnv(raw)
+	if err != nil {
+		return nil, fmt.Errorf("env_file %s: %w", envFile, err)
 	}
-	if !doc.Lifecycle.IsZero() {
+	if doc.lifecycle {
 		return nil, fmt.Errorf("env_file %s: %w", envFile, errLifecycle)
 	}
 	base := filepath.Dir(envFile)
+	// Refused at approval, not first at the create: the copy sbx gets must be
+	// writable from these bytes.
+	if _, err := rewriteEnv(raw, base); err != nil {
+		return nil, fmt.Errorf("env_file %s: %w", envFile, err)
+	}
 	var out []string
-	for _, k := range doc.Kits {
-		if !IsLocalKitSource(k.Source) {
-			continue
+	for _, src := range doc.kitSources {
+		if IsLocalKitSource(src) {
+			out = append(out, filepath.Join(base, filepath.FromSlash(src)))
 		}
-		out = append(out, filepath.Join(base, filepath.FromSlash(k.Source)))
 	}
 	return out, nil
 }

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -31,21 +32,61 @@ var tokenRe = regexp.MustCompile(`\$\{\{\s*env\.(fileDir|projectDir)\s*\}\}`)
 
 // envDoc is the part of an environment file Quil reads.
 type envDoc struct {
-	Kits []struct {
-		Source string `yaml:"source"`
-	} `yaml:"kits"`
-	Lifecycle yaml.Node `yaml:"lifecycle"`
+	// kitSources is every kit's source, in either form sbx accepts: a bare
+	// string, or a mapping with `source`.
+	kitSources []string
+	// lifecycle is true when the file declares host lifecycle commands.
+	lifecycle bool
 }
 
-// parseEnv reads what Quil needs from an environment file's bytes. An
-// environment file it cannot parse is not an error here: its bytes are pinned
-// anyway, and sbx reports the syntax error itself.
-func parseEnv(raw []byte) (envDoc, bool) {
-	var doc envDoc
-	if err := yaml.Unmarshal(raw, &doc); err != nil {
-		return envDoc{}, false
+// parseEnv reads what Quil needs from an environment file's bytes. It fails
+// CLOSED: a document it cannot interpret is an error, never "no kits" — a kit
+// missed here is a kit neither pinned nor copied.
+func parseEnv(raw []byte) (envDoc, error) {
+	var root yaml.Node
+	if err := yaml.Unmarshal(raw, &root); err != nil {
+		return envDoc{}, err
 	}
-	return doc, true
+	if len(root.Content) != 1 || root.Content[0].Kind != yaml.MappingNode {
+		return envDoc{}, errors.New("not a YAML mapping")
+	}
+	var doc envDoc
+	m := root.Content[0]
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		key, val := m.Content[i].Value, m.Content[i+1]
+		switch key {
+		case "lifecycle":
+			doc.lifecycle = true
+		case "kits":
+			if val.Kind != yaml.SequenceNode {
+				return envDoc{}, errors.New("kits: not a list")
+			}
+			for _, item := range val.Content {
+				src, ok := kitSource(item)
+				if !ok {
+					return envDoc{}, fmt.Errorf("kits: an entry at line %d has no source Quil can read", item.Line)
+				}
+				doc.kitSources = append(doc.kitSources, src)
+			}
+		}
+	}
+	return doc, nil
+}
+
+// kitSource is a kit entry's source: the string itself, or a mapping's
+// `source`.
+func kitSource(n *yaml.Node) (string, bool) {
+	switch n.Kind {
+	case yaml.ScalarNode:
+		return n.Value, n.Value != ""
+	case yaml.MappingNode:
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			if n.Content[i].Value == "source" && n.Content[i+1].Kind == yaml.ScalarNode {
+				return n.Content[i+1].Value, n.Content[i+1].Value != ""
+			}
+		}
+	}
+	return "", false
 }
 
 // errLifecycle refuses an environment file with host lifecycle commands. Quil
@@ -84,13 +125,9 @@ func (a Approved) stageEnvFile() (string, error) {
 		return "", fmt.Errorf("env_file %s is not in the approval", a.EnvFile)
 	}
 	envDir := filepath.Dir(a.EnvFile)
-	var kits []string
-	if doc, ok := parseEnv(env.body); ok {
-		for _, k := range doc.Kits {
-			if IsLocalKitSource(k.Source) {
-				kits = append(kits, filepath.Join(envDir, filepath.FromSlash(k.Source)))
-			}
-		}
+	kits, err := envKitDirs(env.body, a.EnvFile)
+	if err != nil {
+		return "", err
 	}
 	// One root above the file and every kit, so "../" sources keep working.
 	base := envDir
@@ -154,11 +191,15 @@ func rewriteEnv(raw []byte, envDir string) ([]byte, error) {
 		for i := 0; i+1 < len(m.Content); i += 2 {
 			switch m.Content[i].Value {
 			case "workspace":
-				absolutize(m.Content[i+1], envDir)
+				if err := absolutize(m.Content[i+1], envDir); err != nil {
+					return nil, err
+				}
 			case "additionalWorkspaces":
 				if seq := m.Content[i+1]; seq.Kind == yaml.SequenceNode {
 					for _, item := range seq.Content {
-						absolutize(item, envDir)
+						if err := absolutize(item, envDir); err != nil {
+							return nil, err
+						}
 					}
 				}
 			}
@@ -178,18 +219,26 @@ func expand(n *yaml.Node, envDir string) {
 }
 
 // absolutize makes a workspace path absolute: a plain string, or the `path`
-// of a mapping.
-func absolutize(n *yaml.Node, envDir string) {
+// of a mapping. A relative path that still holds an expression is refused:
+// what it expands to — perhaps an absolute path — decides whether it may be
+// anchored to the original folder, and only sbx knows that.
+func absolutize(n *yaml.Node, envDir string) error {
 	switch n.Kind {
 	case yaml.ScalarNode:
-		if n.Value != "" && !filepath.IsAbs(n.Value) {
-			n.Value = filepath.Join(envDir, filepath.FromSlash(n.Value))
+		if n.Value == "" || filepath.IsAbs(n.Value) {
+			return nil
 		}
+		if strings.Contains(n.Value, "${{") {
+			return fmt.Errorf("workspace path %q starts with an expression Quil cannot resolve; "+
+				"write it as an absolute path or start it with ${{ env.fileDir }}", n.Value)
+		}
+		n.Value = filepath.Join(envDir, filepath.FromSlash(n.Value))
 	case yaml.MappingNode:
 		for i := 0; i+1 < len(n.Content); i += 2 {
 			if n.Content[i].Value == "path" {
-				absolutize(n.Content[i+1], envDir)
+				return absolutize(n.Content[i+1], envDir)
 			}
 		}
 	}
+	return nil
 }

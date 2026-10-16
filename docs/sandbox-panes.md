@@ -587,8 +587,8 @@ It shows what will run on the host and every file the approval covers:
 
 - the profile itself;
 - the environment file;
-- every file in each **local** kit the environment file names (`kits:` entries
-  whose `source` starts with `./` or `../`);
+- every file in each **local** kit the environment file names (a `kits:` entry,
+  written as a string or with `source:`, that starts with `./` or `../`);
 - `post_create_env_file`;
 - each `prepare_host` / `post_create` argument that names a file (relative or
   absolute).
@@ -606,8 +606,10 @@ Rules for the covered files:
   approve a link: the agent could change the file it points to. A profile with
   a link is refused; replace the link with the file itself.
 - **`prepare_host` names one project file: its script.** Write it as a relative
-  or an absolute path; both are covered. A command such as `/bin/sh` is not a
-  project file. A second project file (`["cp", "a.env", "b.env"]`) is refused:
+  or an absolute path; both are covered. Name the program by its name
+  (`sh`, found on `PATH`): an absolute command outside the profile's folder
+  (`/bin/sh`) is refused, because Quil cannot tell it from a script in a folder
+  the agent can write. A second project file (`["cp", "a.env", "b.env"]`) is refused:
   put that step inside the script.
 - **The host step runs a copy.** Quil runs `prepare_host` with a private copy of
   the script you approved, not the file in the project, so a change after the
@@ -619,9 +621,12 @@ Rules for the covered files:
   `post_create_env_file`, in `$QUIL_HOME/sandbox/sbx-env/<name>/`, so a change
   in the project during the create does not count. In the copy, Quil writes the
   real folder in place of `${{ env.fileDir }}` and `${{ env.projectDir }}`, and
-  makes a relative `workspace` or `additionalWorkspaces` path absolute. Any
-  other relative path in the environment file would point into the copy: use
-  absolute paths there.
+  makes a relative `workspace` or `additionalWorkspaces` path absolute. A
+  workspace path that starts with another expression (`${{ env.args.x }}`) is
+  refused: write it as an absolute path. Any other relative path in the
+  environment file would point into the copy: use absolute paths there. An
+  environment file Quil cannot read (bad YAML, a kit with no source) is
+  refused.
 - **No `lifecycle:` commands.** sbx runs them on your machine, and Quil cannot
   cover the scripts they call. An environment file with a `lifecycle:` block is
   refused; use `prepare_host` instead. Commands that a `secrets:` entry runs are

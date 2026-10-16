@@ -598,6 +598,22 @@ with a `./` path, so the approval covers them. `--yes` skips the question.
 The approval is kept in `$QUIL_HOME/sandbox/sbx-trust.json`, on the machine
 whose daemon runs the sandbox.
 
+Rules for the covered files:
+
+- **No symbolic links.** A covered file, a folder on its way from the profile's
+  folder, and every file in a kit must be real files and folders. Quil cannot
+  approve a link: the agent could change the file it points to. A profile with
+  a link is refused; replace the link with the file itself.
+- **The host step runs a copy.** Quil runs `prepare_host` with a private copy of
+  the script you approved, not the file in the project, so a change after the
+  check cannot run on your machine. The script runs in the profile's folder.
+  It must find other files by paths relative to that folder, not through its
+  own path (`$(dirname "$0")` points at the copy).
+- **The environment file is checked again** just before `sbx env create`. If it
+  or a kit changed since the pane started, the create stops.
+- In a worktree, `quil sandbox trust` approves the main checkout's profile, the
+  one that worktree's panes use.
+
 ### Using it
 
 In the `Ctrl+N` dialog, turn on the sandbox row with `Space`. When the host
@@ -665,6 +681,10 @@ so Quil shares that folder too. You do not change your environment file.
   is shared, not each worktree.
 - Quil shares the folder only when it exists and is a real folder, not a
   symbolic link.
+- Quil shares only the worktrees folder of a repository **inside the profile's
+  folder**. A worktree counts only when the main repository lists it in its
+  own `.git/worktrees/`, so `.git` files written in the project cannot make
+  Quil share another repository.
 - If the mount fails, a pane in a worktree does not start and shows sbx's
   error. A pane in the main checkout starts anyway, with a note.
 

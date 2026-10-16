@@ -21,10 +21,13 @@ func repoLayout(t *testing.T, relative bool) (main, wt string) {
 	adminDir := filepath.Join(main, ".git", "worktrees", "feat-x")
 	writeFile(t, filepath.Join(main, ".git", "HEAD"), "ref: refs/heads/main\n")
 	writeFile(t, filepath.Join(adminDir, "commondir"), "../..\n")
-	gitdir := adminDir
+	gitdir, back := adminDir, filepath.Join(wt, ".git")
 	if relative {
 		gitdir = filepath.Join("..", "..", "app", ".git", "worktrees", "feat-x")
+		back, _ = filepath.Rel(adminDir, back)
 	}
+	// git's own back pointer: the main repository lists the worktree.
+	writeFile(t, filepath.Join(adminDir, "gitdir"), back+"\n")
 	writeFile(t, filepath.Join(wt, ".git"), "gitdir: "+gitdir+"\n")
 	if err := os.MkdirAll(filepath.Join(wt, "src", "deep"), 0o755); err != nil {
 		t.Fatal(err)
@@ -69,6 +72,32 @@ func TestFindCheckout_SubmoduleIsItsOwnMain(t *testing.T) {
 	if !ok || !reflect.DeepEqual(got, want) {
 		t.Errorf("FindCheckout = %+v, %v; want %+v", got, ok, want)
 	}
+}
+
+// Pointer files inside a checkout are writable by whatever runs there, so they
+// must not be able to name another repository as their main checkout.
+func TestFindCheckout_ForgedPointersAreNotALinkedWorktree(t *testing.T) {
+	t.Run("own admin dir naming another repository", func(t *testing.T) {
+		main, _ := repoLayout(t, false)
+		other := filepath.Join(filepath.Dir(main), "other")
+		writeFile(t, filepath.Join(other, ".git", "HEAD"), "ref: refs/heads/main\n")
+		evil := filepath.Join(main, "src", "evil")
+		admin := filepath.Join(main, "src", "fake-admin")
+		writeFile(t, filepath.Join(admin, "commondir"), filepath.Join(other, ".git")+"\n")
+		writeFile(t, filepath.Join(admin, "gitdir"), filepath.Join(evil, ".git")+"\n")
+		writeFile(t, filepath.Join(evil, ".git"), "gitdir: "+admin+"\n")
+		if co, ok := FindCheckout(evil); ok && co.Linked {
+			t.Errorf("FindCheckout accepted a forged worktree: %+v", co)
+		}
+	})
+	t.Run("pointing at another worktree's real admin dir", func(t *testing.T) {
+		main, wt := repoLayout(t, false)
+		evil := filepath.Join(wt, "src", "evil")
+		writeFile(t, filepath.Join(evil, ".git"), "gitdir: "+filepath.Join(main, ".git", "worktrees", "feat-x")+"\n")
+		if co, ok := FindCheckout(evil); ok && co.Linked {
+			t.Errorf("FindCheckout accepted a worktree the main repository does not list: %+v", co)
+		}
+	})
 }
 
 func TestFindCheckout_NotARepository(t *testing.T) {
@@ -124,5 +153,19 @@ func TestStopArgs_TagIsAnArgumentNotScript(t *testing.T) {
 	}
 	if StopArgs("app", "pane-1-", true)[7] != "prefix" {
 		t.Error("prefix mode not passed")
+	}
+}
+
+// A worktree uses its main checkout's profile, and its own copy only when the
+// main checkout has none.
+func TestFindProfileFor_WorktreeUsesTheMainCheckout(t *testing.T) {
+	main, wt := repoLayout(t, false)
+	writeFile(t, filepath.Join(wt, ProfileFile), "[sbx]\nenv_file = \"x.yaml\"\n")
+	if got, err := FindProfileFor(wt); err != nil || got != filepath.Join(wt, ProfileFile) {
+		t.Errorf("no main profile: FindProfileFor = %q, %v; want the worktree's own", got, err)
+	}
+	writeFile(t, filepath.Join(main, ProfileFile), "[sbx]\nenv_file = \"x.yaml\"\n")
+	if got, err := FindProfileFor(filepath.Join(wt, "src")); err != nil || got != filepath.Join(main, ProfileFile) {
+		t.Errorf("FindProfileFor = %q, %v; want the main checkout's", got, err)
 	}
 }

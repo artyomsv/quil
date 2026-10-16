@@ -7,7 +7,9 @@ headline: Sandbox panes can run in a Docker Sandboxes microVM
   project's own sbx environment file; a `.quil-sandbox.toml` in the project names
   it, plus an optional host step before the sandbox is created and optional
   set-up steps inside it afterwards. Quil uses a profile only after you approve it
-  with `quil sandbox trust`, and refuses again if any covered file changes. Pick
+  with `quil sandbox trust`, and refuses again if any covered file changes; the
+  approval refuses symbolic links, and the host step runs a private copy of the
+  approved script, so a change made after the check cannot run on your machine. Pick
   it with `←`/`→` on the `Ctrl+N` sandbox row, `[sandbox] backend = "sbx"`, or
   MCP `create_pane` with `sandbox_backend = "sbx"`. A repository and all its
   worktrees share one sandbox: Quil adds the repository's worktrees folder to the

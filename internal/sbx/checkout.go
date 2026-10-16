@@ -74,7 +74,41 @@ func linkedCheckout(root string) (Checkout, bool) {
 	if filepath.Base(common) != ".git" {
 		return Checkout{}, false // a bare repository has no main checkout
 	}
+	if !knownToMain(root, gitDir, common) {
+		return Checkout{}, false
+	}
 	return Checkout{Root: root, Main: filepath.Dir(common), Linked: true}, true
+}
+
+// knownToMain reports whether the main repository itself lists root as one
+// of its worktrees: the per-checkout git dir sits in the main repository's
+// `worktrees` folder, and its `gitdir` file points back at root's `.git`.
+//
+// The pointer files in root are writable by whatever runs in root, so they
+// alone cannot name the main checkout — a forged pair would let a pane claim
+// any repository as its own (and the daemon shares that repository's
+// worktrees folder with the sandbox). The back pointer lives in the main
+// repository, which the forger would have to be able to write already.
+func knownToMain(root, gitDir, common string) bool {
+	if !sameFile(filepath.Dir(gitDir), filepath.Join(common, "worktrees")) {
+		return false
+	}
+	back, ok := readPointer(filepath.Join(gitDir, "gitdir"), "")
+	if !ok {
+		return false
+	}
+	return sameFile(against(gitDir, back), filepath.Join(root, ".git"))
+}
+
+// sameFile reports whether two paths name one existing file, whatever links
+// or spellings lead to it.
+func sameFile(a, b string) bool {
+	sa, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	sb, err := os.Stat(b)
+	return err == nil && os.SameFile(sa, sb)
 }
 
 // readPointer reads a one-line file and strips prefix from it.

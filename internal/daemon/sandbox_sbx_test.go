@@ -17,6 +17,7 @@ import (
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/gitworktree"
 	"github.com/artyomsv/quil/internal/ipc"
+	apty "github.com/artyomsv/quil/internal/pty"
 	"github.com/artyomsv/quil/internal/sbx"
 )
 
@@ -189,9 +190,9 @@ func TestSpawnPane_SbxPreparesThenExecs(t *testing.T) {
 
 	respawned := make(chan *fakeSession, 1)
 	prevSpawn := sbxSpawnFn
-	sbxSpawnFn = func(d *Daemon, p *Pane) error {
+	sbxSpawnFn = func(d *Daemon, p *Pane, wrap func(apty.Session) apty.Session) error {
 		s := &fakeSession{}
-		err := d.spawnPane(p, s, false)
+		err := d.spawnPane(p, wrap(s), false)
 		respawned <- s
 		return err
 	}
@@ -246,8 +247,8 @@ func TestSpawnPane_SbxReusesAnExistingSandbox(t *testing.T) {
 
 	done := make(chan struct{}, 1)
 	prevSpawn := sbxSpawnFn
-	sbxSpawnFn = func(d *Daemon, p *Pane) error {
-		err := d.spawnPane(p, &fakeSession{}, false)
+	sbxSpawnFn = func(d *Daemon, p *Pane, wrap func(apty.Session) apty.Session) error {
+		err := d.spawnPane(p, wrap(&fakeSession{}), false)
 		done <- struct{}{}
 		return err
 	}
@@ -266,23 +267,102 @@ func TestSpawnPane_SbxReusesAnExistingSandbox(t *testing.T) {
 	}
 }
 
-// Two panes on one profile share one preparation.
+// Two panes on one profile share one preparation, and the claim is held until
+// no pane is left waiting.
 func TestSbxPrepare_SingleFlightPerName(t *testing.T) {
 	var s sbxPrepare
-	if !s.begin("a", "p1") {
+	w := func(id string, gen uint64) sbxWaiter { return sbxWaiter{paneID: id, gen: gen} }
+	if !s.begin("a", w("p1", 0)) {
 		t.Fatal("first caller not owner")
 	}
-	if s.begin("a", "p2") || s.begin("a", "p2") || s.begin("a", "p1") {
+	if s.begin("a", w("p2", 0)) || s.begin("a", w("p2", 0)) || s.begin("a", w("p1", 3)) {
 		t.Error("a second caller became owner")
 	}
-	if !s.begin("b", "p3") {
+	if !s.begin("b", w("p3", 0)) {
 		t.Error("another sandbox name was blocked")
 	}
-	if got := s.end("a"); !reflect.DeepEqual(got, []string{"p1", "p2"}) {
-		t.Errorf("end = %v, want each pane once, owner first", got)
+	if got := s.next("a"); !reflect.DeepEqual(got, []sbxWaiter{w("p1", 3), w("p2", 0)}) {
+		t.Errorf("next = %v, want each pane once, owner first, with its newest ask", got)
 	}
-	if !s.begin("a", "p4") {
+	// Still claimed while those panes are being started: a restart joins.
+	if s.begin("a", w("p1", 4)) {
+		t.Error("a pane restarted during the start became a second owner")
+	}
+	if got := s.next("a"); !reflect.DeepEqual(got, []sbxWaiter{w("p1", 4)}) {
+		t.Errorf("next = %v, want the pane that joined", got)
+	}
+	if s.next("a") != nil {
+		t.Error("next returned panes when none was waiting")
+	}
+	if !s.begin("a", w("p4", 0)) {
 		t.Error("the claim was not released")
+	}
+}
+
+// A pane started since it asked — a restart that raced the preparation — is
+// not started a second time.
+func TestRespawnSbxPane_SkipsAPaneStartedSinceItAsked(t *testing.T) {
+	d, pane, _ := sbxFixture(t, true)
+	calls := 0
+	prevSpawn := sbxSpawnFn
+	sbxSpawnFn = func(*Daemon, *Pane, func(apty.Session) apty.Session) error {
+		calls++
+		return nil
+	}
+	t.Cleanup(func() { sbxSpawnFn = prevSpawn })
+
+	pane.PluginMu.Lock()
+	pane.ptyGen = 2
+	pane.PluginMu.Unlock()
+	d.respawnSbxPane(sbxWaiter{paneID: pane.ID, gen: 1})
+	if calls != 0 {
+		t.Fatal("a pane that already has a newer PTY was spawned again")
+	}
+	d.respawnSbxPane(sbxWaiter{paneID: pane.ID, gen: 2})
+	if calls != 1 {
+		t.Errorf("spawned %d times, want 1", calls)
+	}
+}
+
+// Only the preparation's respawn starts the agent. A plain spawn — a restart —
+// stands down and joins, even right after a respawn was asked for.
+func TestSpawnPane_SbxPlainSpawnNeverStartsTheAgent(t *testing.T) {
+	d, pane, _ := sbxFixture(t, true)
+	prevSpawn := sbxSpawnFn
+	sbxSpawnFn = func(*Daemon, *Pane, func(apty.Session) apty.Session) error { return nil }
+	t.Cleanup(func() { sbxSpawnFn = prevSpawn })
+	s := &fakeSession{}
+	if err := d.spawnPane(pane, s, false); err != nil {
+		t.Fatal(err)
+	}
+	d.sbxPrep.wait() // before the seam is restored
+	if s.startCmd != "" {
+		t.Errorf("a plain spawn started %q", s.startCmd)
+	}
+}
+
+// A repository the approved profile does not cover is never shared, whatever
+// a pane's git files say.
+func TestMountSbxWorktrees_OnlyRepositoriesUnderTheProfile(t *testing.T) {
+	d, pane, r := sbxFixture(t, true)
+	prof, err := loadSbxProfile(pane.CWD)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := filepath.Join(t.TempDir(), "other")
+	for _, dir := range []string{filepath.Join(other, ".git"), gitworktree.WorktreesDir(other)} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pane.PluginMu.Lock()
+	pane.CWD = other
+	pane.PluginMu.Unlock()
+	if failed := d.mountSbxWorktrees(context.Background(), prof, []string{pane.ID}); len(failed) != 0 {
+		t.Errorf("failed = %v", failed)
+	}
+	if r.ran("/fake/sbx", "mount") {
+		t.Errorf("shared a repository outside the profile; calls = %v", r.calls)
 	}
 }
 
@@ -307,6 +387,7 @@ func gitLayout(t *testing.T, repo string) string {
 	}
 	files := map[string]string{
 		filepath.Join(admin, "commondir"):   "../..\n",
+		filepath.Join(admin, "gitdir"):      filepath.Join(wt, ".git") + "\n",
 		filepath.Join(wt, ".git"):           "gitdir: " + admin + "\n",
 		filepath.Join(wt, sbx.ProfileFile):  "[sbx]\nenv_file = \"sbxenv.yaml\"\nname = \"other\"\n",
 		filepath.Join(wt, "sbxenv.yaml"):    "schemaVersion: \"1\"\n",
@@ -326,9 +407,9 @@ func spawnAndCollect(t *testing.T, d *Daemon, pane *Pane) *fakeSession {
 	t.Helper()
 	respawned := make(chan *fakeSession, 1)
 	prevSpawn := sbxSpawnFn
-	sbxSpawnFn = func(d *Daemon, p *Pane) error {
+	sbxSpawnFn = func(d *Daemon, p *Pane, wrap func(apty.Session) apty.Session) error {
 		s := &fakeSession{}
-		err := d.spawnPane(p, s, false)
+		err := d.spawnPane(p, wrap(s), false)
 		respawned <- s
 		return err
 	}

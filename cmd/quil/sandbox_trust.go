@@ -56,7 +56,9 @@ func parseTrustArgs(args []string) (dir string, yes bool, err error) {
 
 // sandboxTrust is the testable body: find, load, list, confirm, record.
 func sandboxTrust(dir string, yes bool, in io.Reader, out io.Writer, quilDir string) error {
-	path, err := sbx.FindProfile(dir)
+	// The daemon's own lookup, so a worktree approves its main checkout's
+	// profile — the one its panes are checked against.
+	path, err := sbx.FindProfileFor(dir)
 	if err != nil {
 		return err
 	}

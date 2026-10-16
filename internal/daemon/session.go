@@ -211,10 +211,6 @@ type Pane struct {
 	// sandbox/ prefix so a daemon too old to know sbx refuses rather than
 	// spawning the agent on the host.
 	SandboxBackend string
-	// sbxReady is set by the sbx preparation goroutine right before it
-	// respawns the pane, and consumed by the next spawn: the sandbox exists,
-	// so that spawn starts `sbx exec` instead of preparing again. Runtime only.
-	sbxReady bool
 	// ContainerCWD is the directory the agent ran in INSIDE the container.
 	// PERSISTED, PluginMu-protected.
 	//

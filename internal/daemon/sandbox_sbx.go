@@ -60,7 +60,7 @@ var (
 	// sbxSpawnFn is nil by default and resolved at call time, for the reason
 	// signInSpawnFn is: a closure over spawnPane here is an initialisation
 	// cycle, because spawnPane reaches this file.
-	sbxSpawnFn func(*Daemon, *Pane) error
+	sbxSpawnFn func(d *Daemon, p *Pane, wrap func(apty.Session) apty.Session) error
 )
 
 // applySbxSpec records an sbx create. Everything else about the cage comes from
@@ -79,41 +79,28 @@ func applySbxSpec(pane *Pane, spec *ipc.SandboxSpec) error {
 	return nil
 }
 
-// findSbxProfile names the profile for a pane directory. A pane in a linked
-// worktree uses its MAIN checkout's profile: the worktree then runs in the
-// same sandbox as the main checkout (one VM, one sign-in, one approval), and
-// a branch that edits its own copy cannot point its panes at another cage.
-// The worktree's own copy is used only when the main checkout has none.
-func findSbxProfile(cwd string) (string, error) {
-	if co, ok := sbx.FindCheckout(cwd); ok && co.Linked {
-		if path, err := sbx.FindProfile(co.Main); err == nil {
-			return path, nil
-		} else if !errors.Is(err, sbx.ErrNoProfile) {
-			return "", err
-		}
-	}
-	return sbx.FindProfile(cwd)
-}
-
-// loadSbxProfile finds the profile for a pane directory, loads it, and refuses
-// it unless the user approved exactly these files.
-func loadSbxProfile(cwd string) (sbx.Profile, error) {
-	path, err := findSbxProfile(cwd)
+// loadSbxProfile finds the profile for a pane directory (sbx.FindProfileFor),
+// loads it, and refuses it unless the user approved exactly these files. The
+// answer carries the bytes the approval was checked on, so the preparation
+// runs what was approved even if the repository changes meanwhile.
+func loadSbxProfile(cwd string) (sbx.Approved, error) {
+	path, err := sbx.FindProfileFor(cwd)
 	if err != nil {
 		if errors.Is(err, sbx.ErrNoProfile) {
-			return sbx.Profile{}, fmt.Errorf("sbx sandbox: no %s at or above %s — add one that names your "+
+			return sbx.Approved{}, fmt.Errorf("sbx sandbox: no %s at or above %s — add one that names your "+
 				"sbx environment file (see docs/sandbox-panes.md)", sbx.ProfileFile, cwd)
 		}
-		return sbx.Profile{}, fmt.Errorf("sbx sandbox: %w", err)
+		return sbx.Approved{}, fmt.Errorf("sbx sandbox: %w", err)
 	}
 	prof, err := sbx.LoadProfile(path)
 	if err != nil {
-		return sbx.Profile{}, fmt.Errorf("sbx sandbox: %w", err)
+		return sbx.Approved{}, fmt.Errorf("sbx sandbox: %w", err)
 	}
-	if err := sbx.CheckTrust(sbx.TrustStorePath(config.QuilDir()), prof); err != nil {
-		return sbx.Profile{}, fmt.Errorf("sbx sandbox: %w", err)
+	approved, err := sbx.Approve(sbx.TrustStorePath(config.QuilDir()), prof)
+	if err != nil {
+		return sbx.Approved{}, fmt.Errorf("sbx sandbox: %w", err)
 	}
-	return prof, nil
+	return approved, nil
 }
 
 // startSbxPane is spawnPane's sbx branch. It reports whether it STARTED the
@@ -122,9 +109,15 @@ func loadSbxProfile(cwd string) (sbx.Profile, error) {
 // gets back the session to install: ptySession wrapped so that closing it
 // also stops the agent inside the sandbox.
 func (d *Daemon) startSbxPane(pane *Pane, ptySession apty.Session, p *plugin.PanePlugin) (apty.Session, bool, error) {
+	// Only the preparation's own respawn may start the agent, and it says so
+	// on the session it passes, never on the pane: a flag on the pane could
+	// be taken by a restart racing the respawn, leaving two spawns running.
+	rs, ready := ptySession.(*sbxReadySession)
+	if ready {
+		ptySession = rs.Session
+	}
 	pane.PluginMu.Lock()
-	ready := pane.sbxReady
-	pane.sbxReady = false
+	gen := pane.ptyGen
 	cwd := pane.CWD
 	args := append([]string{}, p.Command.Args...)
 	if len(pane.InstanceArgs) > 0 {
@@ -140,7 +133,7 @@ func (d *Daemon) startSbxPane(pane *Pane, ptySession apty.Session, p *plugin.Pan
 		return nil, false, err
 	}
 	if !ready {
-		d.beginSbxPrepare(pane.ID, prof)
+		d.beginSbxPrepare(sbxWaiter{paneID: pane.ID, gen: gen}, prof)
 		return nil, false, nil
 	}
 
@@ -241,58 +234,83 @@ func (d *Daemon) stopSbxLeftovers(ctx context.Context, name string, panes []stri
 
 // sbxPrepare is the per-sandbox single-flight. Keyed by sandbox NAME, because
 // that is the resource: two panes on one profile must share one create.
+//
+// The claim is held until the LAST pane is started, not only until the
+// sandbox exists: a pane restarted while the others are still being mounted
+// or started joins the running preparation instead of starting a second one,
+// which would spawn the same pane twice.
 type sbxPrepare struct {
 	mu sync.Mutex
-	// panes holds, per sandbox name in preparation, the owner first and then
-	// every pane that asked meanwhile. A pane is recorded once — Alt+R on a
-	// waiting pane re-enters here, and a second entry would spawn it twice.
-	panes map[string][]string
+	// panes holds, per sandbox name in preparation, the panes waiting to be
+	// started, the owner first. A pane is recorded once — Alt+R on a waiting
+	// pane re-enters here, and a second entry would spawn it twice.
+	panes map[string][]sbxWaiter
 	// inFlight lets a test wait for the goroutine; shutdown does not.
 	inFlight sync.WaitGroup
 }
 
-func (s *sbxPrepare) begin(name, paneID string) (owner bool) {
+// sbxWaiter is a pane waiting for its sandbox, with the PTY generation it had
+// when it asked. A pane that got a new PTY since then was started by someone
+// else, and is not started again.
+type sbxWaiter struct {
+	paneID string
+	gen    uint64
+}
+
+func (s *sbxPrepare) begin(name string, w sbxWaiter) (owner bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.panes == nil {
-		s.panes = map[string][]string{}
+		s.panes = map[string][]sbxWaiter{}
 	}
-	if list, ok := s.panes[name]; ok {
-		if !slices.Contains(list, paneID) {
-			s.panes[name] = append(list, paneID)
+	list, ok := s.panes[name]
+	if !ok {
+		s.panes[name] = []sbxWaiter{w}
+		return true
+	}
+	for i := range list {
+		if list[i].paneID == w.paneID {
+			list[i].gen = w.gen // the newer ask is the one to answer
+			return false
 		}
-		return false
 	}
-	s.panes[name] = []string{paneID}
-	return true
+	s.panes[name] = append(list, w)
+	return false
 }
 
-func (s *sbxPrepare) end(name string) []string {
+// next takes the panes waiting on name. When none is waiting it releases the
+// claim and returns nil; the caller loops until then.
+func (s *sbxPrepare) next(name string) []sbxWaiter {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	list := s.panes[name]
-	delete(s.panes, name)
+	if len(list) == 0 {
+		delete(s.panes, name)
+		return nil
+	}
+	s.panes[name] = []sbxWaiter{}
 	return list
 }
 
 func (s *sbxPrepare) wait() { s.inFlight.Wait() }
 
 // beginSbxPrepare starts (or joins) the preparation of the pane's sandbox.
-func (d *Daemon) beginSbxPrepare(paneID string, prof sbx.Profile) {
-	if !d.sbxPrep.begin(prof.Name, paneID) {
-		d.announce(paneID, fmt.Sprintf("Waiting for sbx sandbox %s, which another pane is preparing…\r\n", prof.Name))
+func (d *Daemon) beginSbxPrepare(w sbxWaiter, prof sbx.Approved) {
+	if !d.sbxPrep.begin(prof.Name, w) {
+		d.announce(w.paneID, fmt.Sprintf("Waiting for sbx sandbox %s, which another pane is preparing…\r\n", prof.Name))
 		return
 	}
-	d.announce(paneID, fmt.Sprintf("Preparing sbx sandbox %s (profile %s)…\r\n", prof.Name, prof.Path))
+	d.announce(w.paneID, fmt.Sprintf("Preparing sbx sandbox %s (profile %s)…\r\n", prof.Name, prof.Path))
 	d.sbxPrep.inFlight.Add(1)
 	go func() {
 		defer d.sbxPrep.inFlight.Done()
-		d.runSbxPrepare(paneID, prof)
+		d.runSbxPrepare(w.paneID, prof)
 	}()
 }
 
-// runSbxPrepare makes the sandbox exist, then spawns every pane that waited.
-func (d *Daemon) runSbxPrepare(ownerID string, prof sbx.Profile) {
+// runSbxPrepare makes the sandbox exist, then starts every pane that waited —
+// including any that asked while the others were being started.
+func (d *Daemon) runSbxPrepare(ownerID string, prof sbx.Approved) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if d.shutdown != nil {
@@ -306,26 +324,45 @@ func (d *Daemon) runSbxPrepare(ownerID string, prof sbx.Profile) {
 	}
 
 	err := d.ensureSbxSandbox(ctx, ownerID, prof)
-	panes := d.sbxPrep.end(prof.Name)
 	if err != nil {
 		log.Printf("sbx: sandbox %s: %v", prof.Name, err)
-		for _, id := range panes {
-			d.failSbxPrepare(id, err)
-		}
-		return
 	}
-	failed := d.mountSbxWorktrees(ctx, prof.Name, panes)
-	var starting []string
-	for _, id := range panes {
-		if err := failed[id]; err != nil {
-			d.failSbxPrepare(id, err)
+	for {
+		waiters := d.sbxPrep.next(prof.Name)
+		if waiters == nil {
+			return
+		}
+		if err != nil {
+			for _, w := range waiters {
+				d.failSbxPrepare(w.paneID, err)
+			}
 			continue
 		}
-		starting = append(starting, id)
+		d.startSbxWaiters(ctx, prof, waiters)
 	}
-	d.stopSbxLeftovers(ctx, prof.Name, starting)
-	for _, id := range starting {
-		d.respawnSbxPane(id)
+}
+
+// startSbxWaiters shares the panes' worktrees folders, stops what earlier
+// spawns of them left running, and starts them.
+func (d *Daemon) startSbxWaiters(ctx context.Context, prof sbx.Approved, waiters []sbxWaiter) {
+	ids := make([]string, len(waiters))
+	for i, w := range waiters {
+		ids[i] = w.paneID
+	}
+	failed := d.mountSbxWorktrees(ctx, prof, ids)
+	var starting []sbxWaiter
+	var startingIDs []string
+	for _, w := range waiters {
+		if err := failed[w.paneID]; err != nil {
+			d.failSbxPrepare(w.paneID, err)
+			continue
+		}
+		starting = append(starting, w)
+		startingIDs = append(startingIDs, w.paneID)
+	}
+	d.stopSbxLeftovers(ctx, prof.Name, startingIDs)
+	for _, w := range starting {
+		d.respawnSbxPane(w)
 	}
 }
 
@@ -345,10 +382,15 @@ func (d *Daemon) failSbxPrepare(paneID string, err error) {
 // before every spawn: the first pane in a new worktrees folder adds it, and
 // panes already running in the sandbox are not disturbed.
 //
+// Only a repository the approved profile covers is shared: its main checkout
+// must be the profile's directory or below it. With FindCheckout requiring
+// the main repository to list a linked worktree itself, a pane cannot widen
+// the cage to another repository by writing git pointer files.
+//
 // It returns the panes that cannot start. A mount failure stops only the
 // panes whose directory is INSIDE that folder — they cannot work without it;
 // a pane in the main checkout is told and starts anyway.
-func (d *Daemon) mountSbxWorktrees(ctx context.Context, name string, panes []string) map[string]error {
+func (d *Daemon) mountSbxWorktrees(ctx context.Context, prof sbx.Approved, panes []string) map[string]error {
 	need := map[string][]string{} // folder → panes in that repository
 	inside := map[string]bool{}   // pane → its directory is in the folder
 	var order []string
@@ -361,7 +403,7 @@ func (d *Daemon) mountSbxWorktrees(ctx context.Context, name string, panes []str
 		cwd := pane.CWD
 		pane.PluginMu.Unlock()
 		co, ok := sbx.FindCheckout(cwd)
-		if !ok {
+		if !ok || !pathWithin(prof.Dir, co.Main) {
 			continue
 		}
 		dir := gitworktree.WorktreesDir(co.Main)
@@ -386,12 +428,12 @@ func (d *Daemon) mountSbxWorktrees(ctx context.Context, name string, panes []str
 	c := sbx.Client{Bin: bin, Runner: sbxRunner}
 	failed := map[string]error{}
 	for _, dir := range order {
-		err := c.Mount(ctx, name, dir)
+		err := c.Mount(ctx, prof.Name, dir)
 		if err == nil {
-			log.Printf("sbx: sandbox %s: shared %s", name, dir)
+			log.Printf("sbx: sandbox %s: shared %s", prof.Name, dir)
 			continue
 		}
-		log.Printf("sbx: sandbox %s: %v", name, err)
+		log.Printf("sbx: sandbox %s: %v", prof.Name, err)
 		for _, id := range need[dir] {
 			if inside[id] {
 				failed[id] = fmt.Errorf("could not share the worktrees folder with the sandbox: %w", err)
@@ -405,7 +447,7 @@ func (d *Daemon) mountSbxWorktrees(ctx context.Context, name string, panes []str
 
 // ensureSbxSandbox checks sbx can run here and makes the sandbox exist,
 // writing progress into the owner pane.
-func (d *Daemon) ensureSbxSandbox(ctx context.Context, ownerID string, prof sbx.Profile) error {
+func (d *Daemon) ensureSbxSandbox(ctx context.Context, ownerID string, prof sbx.Approved) error {
 	if answer := d.sbxCapGet(ctx); !answer.SbxAvailable {
 		if answer.SbxError == "" {
 			return errors.New("sbx check did not finish")
@@ -421,29 +463,41 @@ func (d *Daemon) ensureSbxSandbox(ctx context.Context, ownerID string, prof sbx.
 	return err
 }
 
+// sbxReadySession marks the session the preparation's respawn passes to
+// spawnPane: the sandbox exists, so this spawn starts `sbx exec` instead of
+// preparing again. startSbxPane unwraps it.
+type sbxReadySession struct{ apty.Session }
+
 // respawnSbxPane starts the child for a pane whose sandbox is now ready.
-func (d *Daemon) respawnSbxPane(paneID string) {
+func (d *Daemon) respawnSbxPane(w sbxWaiter) {
 	if d.stopping() {
-		log.Printf("sbx: pane %s: sandbox ready during shutdown; not spawning", paneID)
+		log.Printf("sbx: pane %s: sandbox ready during shutdown; not spawning", w.paneID)
 		return
 	}
-	pane := d.session.Pane(paneID)
+	pane := d.session.Pane(w.paneID)
 	if pane == nil {
 		return // closed while the sandbox was prepared
 	}
 	pane.PluginMu.Lock()
-	pane.sbxReady = true
+	gen := pane.ptyGen
 	cols, rows := pane.Cols, pane.Rows
 	pane.PluginMu.Unlock()
+	if gen != w.gen {
+		// Started since it asked — a restart that raced this preparation.
+		log.Printf("sbx: pane %s: already started; not spawning again", w.paneID)
+		return
+	}
 
+	wrap := func(s apty.Session) apty.Session { return &sbxReadySession{Session: s} }
 	spawn := sbxSpawnFn
 	if spawn == nil {
-		spawn = func(d *Daemon, p *Pane) error { return d.spawnPane(p, newSessionFn(cols, rows), false) }
+		spawn = func(d *Daemon, p *Pane, wrap func(apty.Session) apty.Session) error {
+			return d.spawnPane(p, wrap(newSessionFn(cols, rows)), false)
+		}
 	}
-	if err := spawn(d, pane); err != nil {
-		log.Printf("sbx: pane %s: spawn after preparation: %v", paneID, err)
+	if err := spawn(d, pane, wrap); err != nil {
+		log.Printf("sbx: pane %s: spawn after preparation: %v", w.paneID, err)
 		pane.PluginMu.Lock()
-		pane.sbxReady = false
 		pane.SpawnError = err.Error()
 		pane.PluginMu.Unlock()
 	}

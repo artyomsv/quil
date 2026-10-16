@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -54,14 +55,23 @@ func TrustStorePath(quilDir string) string {
 //
 // A missing environment file is an error: a digest that silently left it out
 // would be a pin that does not pin the cage.
+//
+// A symbolic link is an error too — on a pinned file, on any directory
+// between it and the profile's directory, or inside a kit. A link
+// cannot be pinned by its text (an agent changes the file it points to and
+// the digest still matches), and pinning what it points to would pin a file
+// outside the repository that nobody reviewed with the profile.
 func PinnedFiles(p Profile) ([]string, error) {
 	set := map[string]bool{}
 	add := func(path string) error {
+		if err := refuseLinks(p.Dir, path); err != nil {
+			return err
+		}
 		st, err := os.Lstat(path)
 		if err != nil {
 			return err
 		}
-		if st.Mode().IsRegular() || st.Mode()&fs.ModeSymlink != 0 {
+		if st.Mode().IsRegular() {
 			set[filepath.Clean(path)] = true
 		}
 		return nil
@@ -78,6 +88,9 @@ func PinnedFiles(p Profile) ([]string, error) {
 		return nil, err
 	}
 	for _, dir := range kits {
+		if err := refuseLinks(p.Dir, dir); err != nil {
+			return nil, fmt.Errorf("kit %s: %w", dir, err)
+		}
 		err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
@@ -102,12 +115,18 @@ func PinnedFiles(p Profile) ([]string, error) {
 	argvs := append([][]string{p.PrepareHost}, p.PostCreate...)
 	for _, argv := range argvs {
 		for _, a := range argv {
-			if a == "" || strings.HasPrefix(a, "-") {
+			// An absolute argument is a system command (/bin/bash), not one
+			// of the profile's own scripts, and a system path may well run
+			// through a link (/bin -> usr/bin).
+			if a == "" || strings.HasPrefix(a, "-") || filepath.IsAbs(a) {
 				continue
 			}
 			cand := p.resolve(a)
-			if st, err := os.Stat(cand); err == nil && st.Mode().IsRegular() {
-				set[filepath.Clean(cand)] = true
+			if _, err := os.Lstat(cand); err != nil {
+				continue // not a file: a command name, a flag value, a word
+			}
+			if err := add(cand); err != nil {
+				return nil, fmt.Errorf("argument %s: %w", a, err)
 			}
 		}
 	}
@@ -159,54 +178,189 @@ func IsLocalKitSource(s string) bool {
 	return strings.HasPrefix(s, "./") || strings.HasPrefix(s, "../")
 }
 
-// Digest hashes the pinned files: each file's path and content (a symlink's
-// TARGET, never what it points at, so a link swapped to another file
-// changes the digest).
+// Digest hashes the pinned files: each file's path and content.
 func Digest(p Profile) (string, []string, error) {
-	files, err := PinnedFiles(p)
-	if err != nil {
-		return "", nil, err
-	}
-	h := sha256.New()
-	var total int64
-	for _, f := range files {
-		fh, n, err := hashFile(f)
-		if err != nil {
-			return "", nil, err
-		}
-		total += n
-		if total > maxPinnedBytes {
-			return "", nil, fmt.Errorf("pinned files exceed %d MiB; refusing to pin", maxPinnedBytes>>20)
-		}
-		fmt.Fprintf(h, "%s\x00%s\n", filepath.ToSlash(f), fh)
-	}
-	return "sha256:" + hex.EncodeToString(h.Sum(nil)), files, nil
+	files, _, digest, err := readPinned(p)
+	return digest, files, err
 }
 
-func hashFile(path string) (string, int64, error) {
-	st, err := os.Lstat(path)
+// readPinned reads every pinned file ONCE and hashes the bytes it read, so
+// a caller holding the contents holds exactly what the digest describes.
+func readPinned(p Profile) ([]string, map[string][]byte, string, error) {
+	files, err := PinnedFiles(p)
 	if err != nil {
-		return "", 0, err
+		return nil, nil, "", err
 	}
 	h := sha256.New()
-	if st.Mode()&fs.ModeSymlink != 0 {
-		target, err := os.Readlink(path)
+	contents := make(map[string][]byte, len(files))
+	var total int64
+	for _, f := range files {
+		body, err := readRegular(f, maxPinnedBytes-total)
 		if err != nil {
-			return "", 0, err
+			return nil, nil, "", err
 		}
-		h.Write([]byte("symlink:" + target))
-		return hex.EncodeToString(h.Sum(nil)), int64(len(target)), nil
+		total += int64(len(body))
+		sum := sha256.Sum256(body)
+		fmt.Fprintf(h, "%s\x00%s\n", filepath.ToSlash(f), hex.EncodeToString(sum[:]))
+		contents[f] = body
+	}
+	return files, contents, "sha256:" + hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// readRegular reads a regular file, at most limit bytes. It refuses a file
+// that turned into something else between the check and the open — a link
+// swapped in at that moment would otherwise be followed.
+func readRegular(path string, limit int64) ([]byte, error) {
+	st, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !st.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", path)
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return "", 0, err
+		return nil, err
 	}
 	defer f.Close()
-	n, err := io.Copy(h, io.LimitReader(f, maxPinnedBytes+1))
-	if err != nil {
-		return "", 0, err
+	if fst, err := f.Stat(); err != nil || !os.SameFile(st, fst) {
+		return nil, fmt.Errorf("%s changed while it was read", path)
 	}
-	return hex.EncodeToString(h.Sum(nil)), n, nil
+	body, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > limit {
+		return nil, fmt.Errorf("pinned files exceed %d MiB; refusing to pin", maxPinnedBytes>>20)
+	}
+	return body, nil
+}
+
+// refuseLinks reports an error when path, or any directory between it and
+// base, is a symbolic link. Directories at and above base are the user's own
+// layout and are not checked.
+func refuseLinks(base, path string) error {
+	for p := filepath.Clean(path); !ancestorOrSelf(p, base); {
+		st, err := os.Lstat(p)
+		if err != nil {
+			return err
+		}
+		if st.Mode()&fs.ModeSymlink != 0 {
+			return fmt.Errorf("%s is a symbolic link; a sandbox profile's files must be real files "+
+				"(replace the link with the file it points to)", p)
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			return nil
+		}
+		p = parent
+	}
+	return nil
+}
+
+// ancestorOrSelf reports whether dir is of or one of its parents.
+func ancestorOrSelf(dir, of string) bool {
+	rel, err := filepath.Rel(dir, of)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// Approved is a profile whose pinned files matched the user's approval,
+// together with the bytes that were read when they matched.
+//
+// The repository stays writable after the check, and preparing a sandbox
+// takes seconds before the host step runs. So the host step never runs a
+// script from the repository: it runs a private copy of the approved bytes
+// (hostArgv). What sbx itself reads — the environment file and its kits — is
+// checked once more right before the create (recheck); sbx reads those by
+// path, and a kit's relative sources mean they cannot be moved to a copy.
+type Approved struct {
+	Profile
+	digest string
+	files  map[string][]byte
+}
+
+// Approve checks the profile against the approval store and returns it with
+// the bytes it was checked on. It returns an *ErrUntrusted when the profile
+// was never approved or changed since, and any other error when the files
+// cannot be read.
+func Approve(storePath string, p Profile) (Approved, error) {
+	_, contents, digest, err := readPinned(p)
+	if err != nil {
+		return Approved{}, err
+	}
+	m, err := loadTrust(storePath)
+	if err != nil {
+		return Approved{}, err
+	}
+	e, ok := m[trustKey(p.Path)]
+	switch {
+	case !ok:
+		return Approved{}, &ErrUntrusted{ProfilePath: p.Path}
+	case e.Digest != digest:
+		return Approved{}, &ErrUntrusted{ProfilePath: p.Path, Changed: true}
+	}
+	return Approved{Profile: p, digest: digest, files: contents}, nil
+}
+
+// recheck reads the pinned files again and refuses when they no longer match
+// what was approved.
+func (a Approved) recheck() error {
+	digest, _, err := Digest(a.Profile)
+	if err != nil {
+		return err
+	}
+	if digest != a.digest {
+		return &ErrUntrusted{ProfilePath: a.Path, Changed: true}
+	}
+	return nil
+}
+
+// hostArgv is the host step's argv with every approved script replaced by a
+// private copy of its approved bytes, in a new directory only this user can
+// read. The caller runs it and then calls cleanup.
+//
+// The copy is why a host script must not find other files through its own
+// path ("$(dirname "$0")"): it runs in the profile's directory, so it uses
+// paths relative to that.
+func (a Approved) hostArgv() (argv []string, cleanup func(), err error) {
+	argv = append([]string(nil), a.PrepareHost...)
+	var tmp string
+	cleanup = func() {
+		if tmp != "" {
+			_ = os.RemoveAll(tmp)
+		}
+	}
+	for i, arg := range argv {
+		if arg == "" || strings.HasPrefix(arg, "-") || filepath.IsAbs(arg) {
+			continue
+		}
+		cand := filepath.Clean(a.resolve(arg))
+		body, pinned := a.files[cand]
+		if !pinned {
+			if st, err := os.Lstat(cand); err == nil && !st.IsDir() {
+				cleanup()
+				return nil, nil, fmt.Errorf("prepare_host argument %s names a file the approval does not cover; "+
+					"run: quil sandbox trust %s", arg, a.Dir)
+			}
+			continue
+		}
+		if tmp == "" {
+			if tmp, err = os.MkdirTemp("", "quil-sbx-host-"); err != nil {
+				return nil, nil, err
+			}
+		}
+		dst := filepath.Join(tmp, strconv.Itoa(i), filepath.Base(cand))
+		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+			cleanup()
+			return nil, nil, err
+		}
+		if err := os.WriteFile(dst, body, 0o700); err != nil {
+			cleanup()
+			return nil, nil, err
+		}
+		argv[i] = dst
+	}
+	return argv, cleanup, nil
 }
 
 // trustEntry is one approved profile.
@@ -250,22 +404,8 @@ func loadTrust(storePath string) (map[string]trustEntry, error) {
 // one, an *ErrUntrusted when it is not, and any other error when the files
 // cannot be read.
 func CheckTrust(storePath string, p Profile) error {
-	digest, _, err := Digest(p)
-	if err != nil {
-		return err
-	}
-	m, err := loadTrust(storePath)
-	if err != nil {
-		return err
-	}
-	e, ok := m[trustKey(p.Path)]
-	switch {
-	case !ok:
-		return &ErrUntrusted{ProfilePath: p.Path}
-	case e.Digest != digest:
-		return &ErrUntrusted{ProfilePath: p.Path, Changed: true}
-	}
-	return nil
+	_, err := Approve(storePath, p)
+	return err
 }
 
 // Trust records the profile's current digest as approved and returns the

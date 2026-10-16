@@ -332,14 +332,29 @@ func (f *fakeRunner) called(prefix ...string) bool {
 
 const lsHeader = "SANDBOX   AGENT   STATUS   PORTS   WORKSPACE\n"
 
-func loadFixture(t *testing.T) Profile {
+func loadFixture(t *testing.T) Approved {
 	t.Helper()
 	dir := fixture(t, fullProfile)
 	p, err := LoadProfile(filepath.Join(dir, ProfileFile))
 	if err != nil {
 		t.Fatal(err)
 	}
-	return p
+	return approve(t, p)
+}
+
+// approve records the profile as trusted in a fresh store and returns it
+// approved, the way the daemon gets it.
+func approve(t *testing.T, p Profile) Approved {
+	t.Helper()
+	store := filepath.Join(t.TempDir(), "sbx-trust.json")
+	if _, err := Trust(store, p); err != nil {
+		t.Fatal(err)
+	}
+	a, err := Approve(store, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a
 }
 
 func TestEnsure_ReusesAnExistingSandboxWithoutRunningAnything(t *testing.T) {
@@ -358,9 +373,14 @@ func TestEnsure_ReusesAnExistingSandboxWithoutRunningAnything(t *testing.T) {
 
 func TestEnsure_CreatesInOrder(t *testing.T) {
 	p := loadFixture(t)
+	var ranScript string
 	f := &fakeRunner{answers: func(argv []string) (string, error) {
 		if argv[0] == "sbx" && argv[1] == "ls" {
 			return lsHeader, nil
+		}
+		if argv[0] == "sh" {
+			body, _ := os.ReadFile(argv[1])
+			ranScript = string(body)
 		}
 		return "", nil
 	}}
@@ -371,15 +391,154 @@ func TestEnsure_CreatesInOrder(t *testing.T) {
 	}
 	var seq []string
 	for _, c := range f.calls {
+		if c[0] == "sh" {
+			seq = append(seq, "sh "+filepath.Base(c[1]))
+			continue
+		}
 		seq = append(seq, strings.Join(c[:2], " "))
 	}
-	want := []string{"sbx ls", "sbx policy", "sh sandbox/prepare-host.sh", "sbx env", "sbx env", "sbx exec"}
+	want := []string{"sbx ls", "sbx policy", "sh prepare-host.sh", "sbx env", "sbx env", "sbx exec"}
 	if !reflect.DeepEqual(seq, want) {
 		t.Errorf("order = %v, want %v", seq, want)
 	}
 	// The host step runs in the profile's own directory.
 	if f.dirs[2] != p.Dir {
 		t.Errorf("prepare_host ran in %q, want %q", f.dirs[2], p.Dir)
+	}
+	// ... from a private copy of the approved script, never the repository's.
+	if f.calls[2][1] == filepath.Join(p.Dir, "sandbox", "prepare-host.sh") || ranScript != "#!/bin/sh\necho prep\n" {
+		t.Errorf("host step ran %q with %q, want a copy of the approved script", f.calls[2][1], ranScript)
+	}
+	if _, err := os.Stat(f.calls[2][1]); !os.IsNotExist(err) {
+		t.Errorf("the private copy %s was left behind", f.calls[2][1])
+	}
+}
+
+// The repository stays writable after the approval is checked. A host script
+// changed in that window must not run: the approved bytes run instead. An
+// environment file changed in that window refuses the create.
+func TestEnsure_RunsWhatWasApprovedNotWhatIsOnDiskNow(t *testing.T) {
+	t.Run("host script swapped", func(t *testing.T) {
+		p := loadFixture(t)
+		writeFile(t, filepath.Join(p.Dir, "sandbox", "prepare-host.sh"), "#!/bin/sh\nrm -rf ~\n")
+		var ranScript string
+		f := &fakeRunner{answers: func(argv []string) (string, error) {
+			if argv[0] == "sh" {
+				body, _ := os.ReadFile(argv[1])
+				ranScript = string(body)
+			}
+			if argv[1] == "ls" {
+				return lsHeader, nil
+			}
+			return "", nil
+		}}
+		_, err := Client{Bin: "sbx", Runner: f}.Ensure(context.Background(), p, io.Discard)
+		if ranScript != "#!/bin/sh\necho prep\n" {
+			t.Fatalf("host step ran %q, want the approved script", ranScript)
+		}
+		// The swap is still a change to an approved file, so the create stops.
+		var ut *ErrUntrusted
+		if !errors.As(err, &ut) || f.called("sbx", "env", "create") {
+			t.Errorf("err = %v, want a refusal before the create", err)
+		}
+	})
+	t.Run("env file changed", func(t *testing.T) {
+		p := loadFixture(t)
+		writeFile(t, p.EnvFile, envYAML+"network:\n  allow: [\"*\"]\n")
+		f := &fakeRunner{answers: func(argv []string) (string, error) {
+			if argv[1] == "ls" {
+				return lsHeader, nil
+			}
+			return "", nil
+		}}
+		_, err := Client{Bin: "sbx", Runner: f}.Ensure(context.Background(), p, io.Discard)
+		var ut *ErrUntrusted
+		if !errors.As(err, &ut) || f.called("sbx", "env", "create") {
+			t.Errorf("err = %v, want a refusal before the create", err)
+		}
+	})
+	t.Run("a script that was not there at approval", func(t *testing.T) {
+		dir := fixture(t, "[sbx]\nenv_file = \"sandbox/sbxenv.yaml\"\nprepare_host = [\"sh\", \"late.sh\"]\n")
+		p, err := LoadProfile(filepath.Join(dir, ProfileFile))
+		if err != nil {
+			t.Fatal(err)
+		}
+		a := approve(t, p)
+		writeFile(t, filepath.Join(dir, "late.sh"), "#!/bin/sh\necho late\n")
+		f := &fakeRunner{answers: func(argv []string) (string, error) {
+			if argv[1] == "ls" {
+				return lsHeader, nil
+			}
+			return "", nil
+		}}
+		_, err = Client{Bin: "sbx", Runner: f}.Ensure(context.Background(), a, io.Discard)
+		if err == nil || f.called("sh") {
+			t.Errorf("err = %v, calls = %v; an unapproved script must not run", err, f.calls)
+		}
+	})
+}
+
+// A link cannot be pinned: an agent would change what it points to and the
+// approval would still match. Every place a link can hide is refused.
+func TestPinnedFiles_RefusesSymlinks(t *testing.T) {
+	outside := filepath.Join(t.TempDir(), "evil.sh")
+	writeFile(t, outside, "#!/bin/sh\necho evil\n")
+	tests := []struct {
+		name string
+		link func(t *testing.T, dir string)
+	}{
+		{"host script", func(t *testing.T, dir string) {
+			replaceWithLink(t, outside, filepath.Join(dir, "sandbox", "prepare-host.sh"))
+		}},
+		{"env file", func(t *testing.T, dir string) {
+			moved := filepath.Join(t.TempDir(), "sbxenv.yaml")
+			writeFile(t, moved, envYAML)
+			replaceWithLink(t, moved, filepath.Join(dir, "sandbox", "sbxenv.yaml"))
+		}},
+		{"file inside a kit", func(t *testing.T, dir string) {
+			replaceWithLink(t, outside, filepath.Join(dir, "sandbox", "kits", "networking", "spec.yaml"))
+		}},
+		{"kit directory", func(t *testing.T, dir string) {
+			moved := t.TempDir()
+			writeFile(t, filepath.Join(moved, "spec.yaml"), "kind: mixin\n")
+			replaceWithLink(t, moved, filepath.Join(dir, "sandbox", "kits", "networking"))
+		}},
+		{"directory above a pinned file", func(t *testing.T, dir string) {
+			moved := t.TempDir()
+			src := filepath.Join(dir, "sandbox")
+			for _, rel := range []string{"sbxenv.yaml", "prepare-host.sh", "setup.env", filepath.Join("kits", "networking", "spec.yaml")} {
+				body, _ := os.ReadFile(filepath.Join(src, rel))
+				writeFile(t, filepath.Join(moved, rel), string(body))
+			}
+			replaceWithLink(t, moved, src)
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := fixture(t, fullProfile)
+			tt.link(t, dir)
+			p, err := LoadProfile(filepath.Join(dir, ProfileFile))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := PinnedFiles(p); err == nil || !strings.Contains(err.Error(), "symbolic link") {
+				t.Errorf("err = %v, want a refusal naming the link", err)
+			}
+			if _, err := Trust(filepath.Join(t.TempDir(), "s.json"), p); err == nil {
+				t.Error("a profile with a link was approved")
+			}
+		})
+	}
+}
+
+// replaceWithLink removes path and puts a symbolic link to target there.
+func replaceWithLink(t *testing.T, target, path string) {
+	t.Helper()
+	if err := os.RemoveAll(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Skipf("cannot create a symbolic link here: %v", err)
 	}
 }
 

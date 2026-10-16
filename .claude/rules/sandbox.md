@@ -737,12 +737,29 @@ post-create env file, script arguments that are files) differs from the one
 included — a profile edited after approval must not point a pane at another
 sandbox. Never soften this into "run anyway".
 
+**A symbolic link in the pin is REFUSED, never hashed** (`refuseLinks`, from
+the file up to the profile directory, and every kit entry): hashing the link
+text let an agent change the target with the digest unchanged (PR #260 review).
+Absolute script arguments are system commands and are not pinned (`/bin` is a
+link on many Linux hosts). **The check returns the BYTES it approved**
+(`sbx.Approve` → `sbx.Approved`, read once by `readPinned`), because the
+repository stays writable for the seconds before the host step: `Ensure` runs
+`prepare_host` from a private 0700 copy of the approved script (`hostArgv`) and
+`recheck`s the digest right before `sbx env create`, which reads the env file
+and kits by path (relative kit sources cannot move to a copy). A host script
+therefore must not find siblings through `$0`.
+
 **The create is minutes, so it is off the dispatch goroutine**, shaped like the
 sign-in: `startSbxPane` stands down (nil error), `beginSbxPrepare` single-flights
 per sandbox NAME, the goroutine runs `sbx.Client.Ensure` with output written into
-the owner pane, then sets the runtime-only `Pane.sbxReady` and respawns every
-waiter. An existing sandbox is reused untouched; closing a pane never removes
-one.
+the owner pane, then respawns every waiter. **The claim is held until the LAST
+waiter is started** (`sbxPrepare.next` loops until nobody is waiting): released
+after the create, a restart during the mount/stop/respawn started a second
+preparation and two agents. Only the respawn may start the agent, and it says
+so on the SESSION (`sbxReadySession`), not on the pane — a pane flag could be
+taken by a racing restart. Each waiter carries the pane's `ptyGen` from when it
+asked; `respawnSbxPane` skips a pane whose generation moved (started since).
+An existing sandbox is reused untouched; closing a pane never removes one.
 
 **The agent runs through `sbx exec -it -w <cwd> <name> <cmd> <args>`**, never
 `sbx run`: exec runs the pane's own plugin command and lets panes share one
@@ -752,13 +769,19 @@ would exit 129 on restart); `resolveSpawnArgs` is not called for an sbx pane.
 path has run against a live sbx 0.48 on macOS.
 
 **Worktrees: one sandbox per REPOSITORY, the worktrees folder mounted live.**
-`findSbxProfile` sends a pane in a linked worktree to its MAIN checkout's
-profile (`sbx.FindCheckout` — file reads only, no git process, because
+`sbx.FindProfileFor` (shared with `quil sandbox trust`, so the user approves
+the profile the daemon checks) sends a pane in a linked worktree to its MAIN
+checkout's profile (`sbx.FindCheckout` — file reads only, no git process, because
 `startSbxPane` runs on the dispatch goroutine), so a branch editing its own copy
 cannot repoint its panes, and the worktree shares the main checkout's VM and
 sign-in. After `Ensure`, `mountSbxWorktrees` runs `sbx mount <name>
 gitworktree.WorktreesDir(main)` for every waiting pane whose folder exists and
-is a REAL directory (a symlink would widen the cage to wherever it points). The
+is a REAL directory (a symlink would widen the cage to wherever it points)
+and whose main checkout is the profile directory or below it. `FindCheckout`
+accepts a linked worktree only when the MAIN repository lists it (the admin
+dir sits in `<main>/.git/worktrees` and its `gitdir` points back) — the pointer
+files in the worktree are agent-writable, and forged ones made Quil mount
+another repository's worktrees folder. The
 FOLDER, not each worktree, so a worktree made later is visible with no step.
 Measured on sbx 0.48: the mount applies to the running VM in ~0.2 s, a process
 already running inside keeps running, a repeat is a no-op success, and a

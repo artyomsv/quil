@@ -75,3 +75,36 @@ func TestParseTrustArgs(t *testing.T) {
 		t.Error("unknown flag accepted")
 	}
 }
+
+// Run inside a linked worktree, the command approves the main checkout's
+// profile — the one the daemon checks the worktree's panes against.
+func TestSandboxTrust_WorktreeApprovesTheMainCheckout(t *testing.T) {
+	repo, home := trustRepo(t), t.TempDir()
+	admin := filepath.Join(repo, ".git", "worktrees", "feat-x")
+	wt := filepath.Join(t.TempDir(), "feat-x")
+	for path, body := range map[string]string{
+		filepath.Join(repo, ".git", "HEAD"): "ref: refs/heads/main\n",
+		filepath.Join(admin, "commondir"):   "../..\n",
+		filepath.Join(admin, "gitdir"):      filepath.Join(wt, ".git") + "\n",
+		filepath.Join(wt, ".git"):           "gitdir: " + admin + "\n",
+		filepath.Join(wt, sbx.ProfileFile):  "[sbx]\nenv_file = \"sbxenv.yaml\"\nname = \"other\"\n",
+		filepath.Join(wt, "sbxenv.yaml"):    "schemaVersion: \"1\"\n",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := sandboxTrust(wt, true, strings.NewReader(""), &bytes.Buffer{}, home); err != nil {
+		t.Fatal(err)
+	}
+	mainProf, err := sbx.LoadProfile(filepath.Join(repo, sbx.ProfileFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sbx.CheckTrust(sbx.TrustStorePath(home), mainProf); err != nil {
+		t.Errorf("the main checkout's profile was not approved: %v", err)
+	}
+}

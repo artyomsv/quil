@@ -26,7 +26,7 @@ import (
 // ProfileFile is the profile's file name. Looked up from the pane's working
 // directory upwards, so a pane opened in a subdirectory finds the same file.
 // A pane in a linked worktree looks it up from the MAIN checkout first (see
-// FindCheckout and the daemon's findSbxProfile).
+// FindProfileFor).
 const ProfileFile = ".quil-sandbox.toml"
 
 // ErrNoProfile reports that no profile file exists at or above a directory.
@@ -97,6 +97,25 @@ func FindProfile(start string) (string, error) {
 		}
 		dir = parent
 	}
+}
+
+// FindProfileFor names the profile for a pane directory. A directory in a
+// linked worktree uses its MAIN checkout's profile: the worktree then runs in
+// the same sandbox as the main checkout (one VM, one sign-in, one approval),
+// and a branch that edits its own copy cannot point its panes at another
+// cage. The worktree's own copy is used only when the main checkout has none.
+//
+// The daemon and `quil sandbox trust` both call this, so the profile a user
+// approves is the one a pane is checked against.
+func FindProfileFor(dir string) (string, error) {
+	if co, ok := FindCheckout(dir); ok && co.Linked {
+		if path, err := FindProfile(co.Main); err == nil {
+			return path, nil
+		} else if !errors.Is(err, ErrNoProfile) {
+			return "", err
+		}
+	}
+	return FindProfile(dir)
 }
 
 // LoadProfile parses and validates a profile file.

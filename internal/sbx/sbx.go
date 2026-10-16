@@ -291,7 +291,8 @@ func (c Client) Mount(ctx context.Context, name, dir string) error {
 //
 // Progress and every step's own output go to w, so the pane shows what ran
 // and, on a failure, why.
-func (c Client) Ensure(ctx context.Context, p Profile, w io.Writer) (bool, error) {
+func (c Client) Ensure(ctx context.Context, a Approved, w io.Writer) (bool, error) {
+	p := a.Profile
 	exists, err := c.Exists(ctx, p.Name)
 	if err != nil {
 		return false, err
@@ -308,14 +309,26 @@ func (c Client) Ensure(ctx context.Context, p Profile, w io.Writer) (bool, error
 	}
 
 	if len(p.PrepareHost) > 0 {
+		// The approved bytes, never the repository's file: it may have
+		// changed since the approval was checked (see Approved).
+		argv, cleanup, err := a.hostArgv()
+		if err != nil {
+			return false, err
+		}
 		fmt.Fprintf(w, "Running the host step: %s\n", strings.Join(p.PrepareHost, " "))
 		var hostOut bytes.Buffer
 		sctx, cancel := context.WithTimeout(ctx, prepareHostTimeout)
-		err := c.Runner.Run(sctx, p.Dir, io.MultiWriter(w, &hostOut), p.PrepareHost...)
+		err = c.Runner.Run(sctx, p.Dir, io.MultiWriter(w, &hostOut), argv...)
 		cancel()
+		cleanup()
 		if err != nil {
 			return false, fmt.Errorf("prepare_host failed: %w%s — the sandbox was not created", err, errorLine(hostOut.String()))
 		}
+	}
+	// sbx reads the environment file and its kits by path, so they cannot be
+	// handed over as a copy; check them once more right before it does.
+	if err := a.recheck(); err != nil {
+		return false, err
 	}
 
 	help, _ := c.output(ctx, "env", "create", "--help")

@@ -494,3 +494,237 @@ delete the line naming the missing directory. If it is the only line, delete the
 file.
 
 More sandbox symptoms: [Troubleshooting](troubleshooting.md#sandbox-panes).
+
+---
+
+## The sbx backend (Docker Sandboxes)
+
+> **Status: not yet run end to end.** The code path is covered by unit tests
+> with a fake `sbx`. No live run against a real `sbx` install has been done yet.
+> `sbx` is young and its flags change between releases; check
+> <https://docs.docker.com/ai/sandboxes/> if a command below is refused.
+
+The Docker backend above runs the agent in a plain container. Quil builds that
+cage itself, and it has no network limit. The **sbx backend** runs the agent in
+a [Docker Sandboxes](https://docs.docker.com/ai/sandboxes/) microVM instead:
+
+- each sandbox has its own kernel and its own Docker engine;
+- only the workspaces you declare are shared with the host;
+- outbound traffic goes through a host proxy with a **default-deny allowlist**.
+
+Quil does not decide any of that. Your project declares it in an sbx
+**environment file** and its **kits**, and Quil only points at them. Nothing
+about your organisation's hosts, certificates or tools belongs in Quil.
+
+### Install sbx (once per machine)
+
+| Host | Install | Needs |
+|---|---|---|
+| macOS | `brew install docker/tap/sbx` | macOS 14+, Apple silicon |
+| Windows | `winget install Docker.sbx` | Windows 11 x64, "Windows Hypervisor Platform" turned on |
+| Linux | see the Docker Sandboxes docs | Ubuntu 24.04+, KVM, your user in the `kvm` group |
+
+Then, once:
+
+```sh
+sbx login                    # sign in to Docker
+sbx policy init balanced     # sbx refuses every create until a global policy exists
+```
+
+Quil checks both. When one is missing, the pane says which command to run.
+
+### The profile: `.quil-sandbox.toml`
+
+Put this file in your project. Quil looks for it in the pane's directory and
+then in each parent directory, so a pane opened in a subdirectory finds it too.
+Relative paths in it are relative to the file itself.
+
+```toml
+[sbx]
+# Required. The sbx environment file (`sbx env create <file>`).
+env_file = "sandbox/sbxenv.yaml"
+
+# Optional. The sandbox name. Default: "quil-" + the folder name.
+# Lower-case letters, digits, ".", "_" and "-".
+name = "my-app"
+
+# Optional. Runs ON THE HOST, in this folder, before the sandbox is created.
+# A list of arguments, not a shell line: Quil runs no shell for you, so pick
+# the interpreter yourself ("sh", "bash", "pwsh", ...). If it fails, the
+# sandbox is not created and its output is shown in the pane.
+prepare_host = ["sh", "sandbox/prepare-host.sh"]
+
+# Optional. Each step runs INSIDE the sandbox (`sbx exec`) right after it is
+# created.
+post_create = [
+  ["bash", "-c", "echo set-up done"],
+]
+
+# Optional. Passed to every post_create step as `sbx exec --env-file`.
+post_create_env_file = "sandbox/setup.env"
+```
+
+**`sbx exec` does not get the environment file's `env:` block.** That block is
+only for the agent's own session. So a `post_create` step does not see those
+variables. Put the ones it needs in `post_create_env_file` (plain `KEY=value`
+lines), or move the step into a kit's `setup.install`.
+
+A key Quil does not know is an error, so a typo cannot quietly drop a step.
+
+### Approve the profile: `quil sandbox trust`
+
+The profile is in your repository, and the agent can write to your repository.
+Without a check, an agent could change the host script and have Quil run it on
+your machine, or widen its own cage through the environment file.
+
+So Quil uses a profile only after you approve it:
+
+```sh
+quil sandbox trust            # in the project folder (or: quil sandbox trust <dir>)
+```
+
+It shows what will run on the host and every file the approval covers:
+
+- the profile itself;
+- the environment file;
+- every file in each **local** kit the environment file names (`kits:` entries
+  whose `source` starts with `./` or `../`);
+- `post_create_env_file`;
+- each `prepare_host` / `post_create` argument that names a file in the project.
+
+If **any** of these files changes, new sbx panes refuse to start until you run
+`quil sandbox trust` again. Keep your kits under the environment file's folder
+with a `./` path, so the approval covers them. `--yes` skips the question.
+The approval is kept in `$QUIL_HOME/sandbox/sbx-trust.json`, on the machine
+whose daemon runs the sandbox.
+
+### Using it
+
+In the `Ctrl+N` dialog, turn on the sandbox row with `Space`. When the host
+has both Docker and sbx, `←`/`→` on that row switches between them. An sbx
+pane has no image field and no sign-in row: both belong to your profile.
+
+`[sandbox] backend = "sbx"` in `config.toml` makes sbx the row's default.
+
+From MCP: `create_pane` with `sandbox_backend = "sbx"` and no `sandbox_image`.
+`list_plugins` reports `sbx_available`.
+
+### What happens when a pane opens
+
+1. Quil finds the profile and checks the approval. No profile or no approval:
+   the pane shows why and does not start. **It never falls back to the host.**
+2. If a sandbox with the profile's `name` exists, Quil uses it as it is: no
+   host step, no create, no set-up step.
+3. If not, Quil runs `prepare_host`, then
+   `sbx env create <env_file> --name <name>` with the flag that applies the plan without asking (`--force` on sbx 0.48, `--auto-approve` on 0.47; Quil reads which from `sbx env create --help`), then each
+   `post_create` step. All output is shown in the pane.
+4. If your project has a worktrees folder (below), Quil shares it with the
+   sandbox: `sbx mount <name> <folder>`.
+5. The pane runs its agent with
+   `sbx exec -it -w <pane folder> <name> <agent command>`.
+
+Quil uses `sbx exec`, not `sbx run`, because `exec` runs the pane's own agent
+command with the pane's own options, and several panes can share one sandbox.
+This means the environment file must mount your project at the **same path** as
+on the host (the sbx convention). On a Windows host Quil leaves out `-w`, and
+the agent starts in the sandbox's main workspace.
+
+**Closing a pane stops its agent inside the sandbox.** Ending the
+`sbx exec` process on your machine does not end the program it started inside
+the VM, so Quil starts each agent with a tag (`QUIL_SBX_PANE`) and, when the
+pane closes, restarts or is replaced, stops only the processes with that tag.
+Each start gets a new tag, so a restart never stops the new agent. If the
+daemon was killed and could not do this, the pane stops its old agents the
+next time it starts.
+
+**Closing a pane does not remove the sandbox.** Many panes can use it, and it
+keeps what the set-up steps installed. To build it again (for example after you
+changed the kits):
+
+```sh
+sbx rm --force my-app
+```
+
+The next sbx pane then creates it again.
+
+### Worktrees
+
+Quil puts every worktree of a repository in one folder next to it:
+`<repo>-worktrees/<branch>`. Your environment file shares only the repository,
+so Quil shares that folder too. You do not change your environment file.
+
+- **One sandbox for the repository and all its worktrees.** A pane in a
+  worktree uses the profile of the main checkout, so it runs in the same
+  sandbox, with the same sign-in and the same approval. (A worktree's own copy
+  of the profile is used only when the main checkout has none.)
+- **Before each pane starts**, Quil runs `sbx mount <name> <repo>-worktrees`.
+  sbx adds the folder to the running sandbox. It does not restart it, and the
+  panes already running in it keep running. sbx keeps the folder after a stop
+  and start, and a repeated mount does nothing.
+- **A worktree you make later is visible at once**, because the whole folder
+  is shared, not each worktree.
+- Quil shares the folder only when it exists and is a real folder, not a
+  symbolic link.
+- If the mount fails, a pane in a worktree does not start and shows sbx's
+  error. A pane in the main checkout starts anyway, with a note.
+
+Git works in a worktree inside the sandbox because the worktree points to the
+main checkout's `.git`, which your environment file already shares.
+
+### What an sbx pane does not have (yet)
+
+- **No notifications, work spinner, input history or session resume.** Those
+  need Quil's hook program inside the cage, and the cage's mounts belong to
+  your environment file. The agent starts a fresh session on every spawn.
+
+### Example: a minimal environment file and kit
+
+Generic example. Allow only Anthropic's hosts, plus a tunnel to a database on
+the host at `localhost:5432`.
+
+`sandbox/sbxenv.yaml`:
+
+```yaml
+schemaVersion: "1"
+agent: claude
+workspace: /home/me/projects/my-app      # mounted at the same path inside
+kits:
+  - source: ./kits/networking            # local kits need ./ or ../
+env:
+  APP_ENV: sandbox
+```
+
+`sandbox/kits/networking/spec.yaml`:
+
+```yaml
+schemaVersion: "2"
+kind: mixin
+name: example-networking
+version: "1.0.0"
+permissions:
+  network:
+    allow:
+      - api.anthropic.com
+      - platform.claude.com      # Claude Code sign-in refresh
+      - console.anthropic.com    # older Claude Code sign-in refresh
+      - localhost:5432           # the tunnel below
+setup:
+  install:
+    - description: "Install socat"
+      user: root
+      command: |
+        apt-get update -qq && apt-get install -y --no-install-recommends socat
+  startup:
+    - command: [sh, -c, "nohup socat TCP-LISTEN:5432,bind=127.0.0.1,reuseaddr,fork TCP:host.docker.internal:5432 >/dev/null 2>&1 &"]
+```
+
+Files under a kit's `files/home/...` are copied into `/home/agent/...` in the
+sandbox.
+
+Common sbx errors and their fix:
+
+| Message | Fix |
+|---|---|
+| `Not authenticated to Docker` | `sbx login` |
+| `global network policy has not been initialized` | `sbx policy init balanced` |
+| `resolve kits: ... invalid reference` | start the kit path with `./` or `../` |

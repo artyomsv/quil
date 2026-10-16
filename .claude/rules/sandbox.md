@@ -2,6 +2,7 @@
 description: Docker sandbox panes — the mount set as a security boundary, the per-pane object store and its ordered teardown, the sign-in flows, and refusals that never soften.
 paths:
   - internal/sandbox/**
+  - internal/sbx/**
   - internal/daemon/sandbox*.go
   - internal/tui/sandbox*.go
   - internal/claudetoken/**
@@ -718,3 +719,65 @@ in panes that have no use for it.
 
 `CODEX_HOME` is set for every sandbox pane regardless of type, so a codex run by
 hand inside a claude container does not fall back to a home nothing mounts.
+
+## The sbx backend is a different shape, and its boundary is the TRUST PIN
+
+`internal/sbx` + `internal/daemon/sandbox_sbx.go`. `SandboxSpec.Backend = "sbx"`
+→ `Pane.SandboxBackend` (persisted as `sandbox_backend`, with the same
+`sandbox/` type prefix, so an older daemon refuses rather than spawning on the
+host). An sbx pane has NO `SandboxImage`, so every docker-only path (mount set,
+object store, teardown, harvest, shutdown kill) skips it by construction.
+
+**Quil builds no cage here.** The cage is the sbx environment file and kits the
+project's `.quil-sandbox.toml` names. Because that file lives in the repository
+the agent can write, `loadSbxProfile` refuses a profile whose digest
+(`sbx.Digest`: profile, env file, every file under each LOCAL kit, the
+post-create env file, script arguments that are files) differs from the one
+`quil sandbox trust` recorded. Checked on EVERY spawn, the ready respawn
+included — a profile edited after approval must not point a pane at another
+sandbox. Never soften this into "run anyway".
+
+**The create is minutes, so it is off the dispatch goroutine**, shaped like the
+sign-in: `startSbxPane` stands down (nil error), `beginSbxPrepare` single-flights
+per sandbox NAME, the goroutine runs `sbx.Client.Ensure` with output written into
+the owner pane, then sets the runtime-only `Pane.sbxReady` and respawns every
+waiter. An existing sandbox is reused untouched; closing a pane never removes
+one.
+
+**The agent runs through `sbx exec -it -w <cwd> <name> <cmd> <args>`**, never
+`sbx run`: exec runs the pane's own plugin command and lets panes share one
+sandbox. No hooks, no `--settings`, no `--session-id` (a resume it cannot do
+would exit 129 on restart); `resolveSpawnArgs` is not called for an sbx pane.
+`-w` is omitted on a Windows host. Since 2026-10-16 the create, reuse and exec
+path has run against a live sbx 0.48 on macOS.
+
+**Worktrees: one sandbox per REPOSITORY, the worktrees folder mounted live.**
+`findSbxProfile` sends a pane in a linked worktree to its MAIN checkout's
+profile (`sbx.FindCheckout` — file reads only, no git process, because
+`startSbxPane` runs on the dispatch goroutine), so a branch editing its own copy
+cannot repoint its panes, and the worktree shares the main checkout's VM and
+sign-in. After `Ensure`, `mountSbxWorktrees` runs `sbx mount <name>
+gitworktree.WorktreesDir(main)` for every waiting pane whose folder exists and
+is a REAL directory (a symlink would widen the cage to wherever it points). The
+FOLDER, not each worktree, so a worktree made later is visible with no step.
+Measured on sbx 0.48: the mount applies to the running VM in ~0.2 s, a process
+already running inside keeps running, a repeat is a no-op success, and a
+worktree added afterwards is visible with `git status` working. It runs on
+every spawn because every spawn goes through the prepare goroutine. A failed
+mount fails only panes INSIDE the folder; a main-checkout pane starts with a
+note. `sbx ls` does not list a mount added this way — do not try to detect it
+there; rely on the idempotent repeat.
+
+**Ending the host `sbx exec` does NOT end the agent inside the VM** (measured:
+a closed pane's claude ran for a day). Every exec carries `-e
+QUIL_SBX_PANE=<pane id>-<random>` (`sbx.NewTag`, PER SPAWN — a restart closes
+the old PTY on a goroutine while the new spawn runs, so a pane-wide tag would
+let the old stop kill the new agent). `startSbxPane` returns the PTY wrapped
+in `sbxSession`, whose `Close` (once) runs `stopSbxTagAsync`: `sbx exec <name>
+sh -c stopScript sh <tag> exact`, which scans `/proc/*/environ`, TERMs, waits
+2 s, KILLs. The tag is an ARGUMENT, never script text. Close is the one funnel
+for destroy, replace, restart and daemon Stop (which then waits
+`sbxStopWait`). A killed daemon never runs Close, so `runSbxPrepare` runs a
+PREFIX stop (`<pane id>-`) for each pane before respawning it; the new tag is
+minted after, so it cannot match. Measured on sbx 0.48: 0.46 s per stop, exact
+and prefix both touch only their own processes.

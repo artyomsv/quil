@@ -9,6 +9,7 @@ import (
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/plugin"
+	"github.com/artyomsv/quil/internal/sbx"
 )
 
 // The create dialog's sandbox row.
@@ -36,12 +37,38 @@ func (m Model) renderSetupSandboxField(focused bool) string {
 		style = dialogSelected
 	}
 
+	label := " Run in a Docker container"
+	if m.sandboxBackendIsSbx() {
+		label = " Run in an sbx sandbox"
+	}
 	var b strings.Builder
-	b.WriteString(prefix + style.Render(box+" Run in a Docker container") + "\n")
+	b.WriteString(prefix + style.Render(box+label))
+	// The other backend is named only when the destination offers it, so a
+	// host with docker alone draws exactly the row it always did.
+	if m.sandboxOn && m.sandboxDialogDocker && m.sandboxDialogSbx {
+		other := "sbx"
+		if m.sandboxBackendIsSbx() {
+			other = "Docker"
+		}
+		b.WriteString(dialogSubtle.Render("  ←/→ " + other))
+	}
+	b.WriteString("\n")
 
 	if !m.sandboxOn {
 		if focused {
 			b.WriteString("    " + dialogSubtle.Render("space to enable — the agent is confined to this checkout"))
+		}
+		return b.String()
+	}
+
+	if m.sandboxBackendIsSbx() {
+		// No image: the cage is the project's .quil-sandbox.toml, which the
+		// daemon finds from the pane's directory and refuses unless approved.
+		line := "cage: " + sbx.ProfileFile + " in this project (approve: quil sandbox trust)"
+		b.WriteString("    " + dialogSubtle.Render(truncateToWidth(line, m.setupTextWidth()-setupRowIndent)))
+		if m.sandboxErr != "" {
+			b.WriteString("\n    " + dialogErrorStyle.Render(
+				truncateToWidth(m.sandboxErr, m.setupTextWidth()-setupRowIndent)))
 		}
 		return b.String()
 	}
@@ -115,14 +142,27 @@ func (m *Model) editSandboxRow(msg tea.KeyPressMsg) bool {
 			m.sandboxImage = m.sandboxImageDefault(m.createPaneDialogDest())
 		}
 		return true
+	case "left", "right":
+		// Switches the backend, and only when the destination offers both:
+		// otherwise the arrows are not the row's to take.
+		if !m.sandboxOn || !m.sandboxDialogDocker || !m.sandboxDialogSbx {
+			return false
+		}
+		if m.sandboxBackendIsSbx() {
+			m.sandboxBackend = config.SandboxBackendDocker
+		} else {
+			m.sandboxBackend = config.SandboxBackendSbx
+		}
+		return true
 	case "backspace":
-		if m.sandboxOn && m.sandboxImage != "" {
+		if m.sandboxOn && !m.sandboxBackendIsSbx() && m.sandboxImage != "" {
 			r := []rune(m.sandboxImage)
 			m.sandboxImage = string(r[:len(r)-1])
 		}
 		return m.sandboxOn
 	}
-	if !m.sandboxOn {
+	// An sbx row has no text field: typing is not the row's to take.
+	if !m.sandboxOn || m.sandboxBackendIsSbx() {
 		return false
 	}
 	// isPrintableText is the same gate the command palette uses, so a control
@@ -142,7 +182,7 @@ func (m *Model) editSandboxRow(msg tea.KeyPressMsg) bool {
 // honestly pick — it publishes none, and guessing one would run the user's
 // agent in a container they never chose.
 func (m Model) sandboxSubmitError() string {
-	if !m.sandboxOn {
+	if !m.sandboxOn || m.sandboxBackendIsSbx() {
 		return ""
 	}
 	if strings.TrimSpace(m.sandboxImage) == "" {
@@ -165,6 +205,11 @@ func (m Model) sandboxSubmitError() string {
 func (m Model) sandboxSpec() *ipc.SandboxSpec {
 	if !m.sandboxOn {
 		return nil
+	}
+	if m.sandboxBackendIsSbx() {
+		// Backend only. The daemon refuses an sbx spec carrying an image or a
+		// sign-in mode: everything about that cage is the approved profile's.
+		return &ipc.SandboxSpec{Backend: config.SandboxBackendSbx}
 	}
 	image := strings.TrimSpace(m.sandboxImage)
 	if image == "" {
@@ -196,8 +241,24 @@ func (m *Model) resetSandboxField(dest string) {
 	// asynchronously and re-probed on a timer, so reading it live would add
 	// or remove a row under a cursor the key handler is already holding an
 	// index into.
-	m.sandboxDialogAvail = m.sandboxAvailableFor(dest)
+	m.sandboxDialogDocker = m.sandboxAvailableFor(dest)
+	m.sandboxDialogSbx = m.sbxAvailableFor(dest)
+	m.sandboxDialogAvail = m.sandboxDialogDocker || m.sandboxDialogSbx
 	m.sandboxDialogReason = m.sandboxUnavailableReason(dest)
+	// The configured backend, unless this destination cannot run it and can
+	// run the other one.
+	m.sandboxBackend = m.cfg.Sandbox.ResolveBackend()
+	switch {
+	case m.sandboxBackend == config.SandboxBackendSbx && !m.sandboxDialogSbx && m.sandboxDialogDocker:
+		m.sandboxBackend = config.SandboxBackendDocker
+	case m.sandboxBackend == config.SandboxBackendDocker && !m.sandboxDialogDocker && m.sandboxDialogSbx:
+		m.sandboxBackend = config.SandboxBackendSbx
+	}
+}
+
+// sandboxBackendIsSbx reports whether the row currently targets sbx.
+func (m Model) sandboxBackendIsSbx() bool {
+	return m.sandboxBackend == config.SandboxBackendSbx
 }
 
 // renderSetupSandboxUnavailable draws the one-line explanation that replaces
@@ -281,7 +342,8 @@ func (m Model) showSandboxAuthField(p *plugin.PanePlugin) bool {
 	// ~/.codex credentials and opencode its own again, so the choice would
 	// describe an agent the user did not pick — and the daemon ignores it for
 	// them anyway.
-	return m.showSandboxField(p) && m.sandboxOn && p.UsesClaudeAuth()
+	// Not for sbx: how that agent signs in is the profile's business.
+	return m.showSandboxField(p) && m.sandboxOn && !m.sandboxBackendIsSbx() && p.UsesClaudeAuth()
 }
 
 // effectiveSandboxSignIn is the choice the row DISPLAYS: the user's pick, or

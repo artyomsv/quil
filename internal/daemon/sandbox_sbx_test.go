@@ -1,0 +1,461 @@
+package daemon
+
+import (
+	"context"
+	"errors"
+	"io"
+	"os"
+	"path/filepath"
+	"reflect"
+	"runtime"
+	"slices"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/gitworktree"
+	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/artyomsv/quil/internal/sbx"
+)
+
+func TestApplySandboxSpec_Sbx(t *testing.T) {
+	tests := []struct {
+		name        string
+		spec        ipc.SandboxSpec
+		wantErr     bool
+		wantBackend string
+		wantImage   string
+	}{
+		{"sbx alone", ipc.SandboxSpec{Backend: "sbx"}, false, "sbx", ""},
+		{"sbx with an image", ipc.SandboxSpec{Backend: "sbx", Image: "img:1"}, true, "", ""},
+		{"sbx with a sign-in mode", ipc.SandboxSpec{Backend: "sbx", Auth: "token"}, true, "", ""},
+		{"unknown backend", ipc.SandboxSpec{Backend: "vm", Image: "img:1"}, true, "", ""},
+		{"docker spelled out", ipc.SandboxSpec{Backend: "docker", Image: "img:1"}, false, "", "img:1"},
+		{"docker by default", ipc.SandboxSpec{Image: "img:1"}, false, "", "img:1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pane := &Pane{ID: "p1"}
+			err := applySandboxSpec(pane, &tt.spec)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
+			}
+			if pane.SandboxBackend != tt.wantBackend || pane.SandboxImage != tt.wantImage {
+				t.Errorf("backend=%q image=%q, want %q %q", pane.SandboxBackend, pane.SandboxImage,
+					tt.wantBackend, tt.wantImage)
+			}
+		})
+	}
+}
+
+// An sbx create on a daemon configured for the token flow + shared directory
+// must not be given a Claude config choice: that cage is the profile's.
+func TestApplySandboxSpecFor_SbxGetsNoSignInSettlement(t *testing.T) {
+	d := &Daemon{cfg: tokenFlowConfig()}
+	d.cfg.Sandbox.SharedClaudeConfig = true
+	pane := &Pane{ID: "p1"}
+	if err := d.applySandboxSpecFor(pane, &ipc.SandboxSpec{Backend: "sbx"}); err != nil {
+		t.Fatal(err)
+	}
+	if pane.SandboxClaudeConfig != "" || pane.SandboxAuth != "" {
+		t.Errorf("an sbx pane got sign-in state: auth=%q config=%q", pane.SandboxAuth, pane.SandboxClaudeConfig)
+	}
+}
+
+// scriptRunner answers sbx calls and records them.
+type scriptRunner struct {
+	mu       sync.Mutex
+	calls    [][]string
+	exists   bool
+	mountErr error
+}
+
+func (r *scriptRunner) Run(_ context.Context, _ string, w io.Writer, argv ...string) error {
+	r.mu.Lock()
+	r.calls = append(r.calls, append([]string(nil), argv...))
+	exists, mountErr := r.exists, r.mountErr
+	r.mu.Unlock()
+	if len(argv) > 1 {
+		switch argv[1] {
+		case "version":
+			io.WriteString(w, "sbx version 0.43.0\n")
+		case "ls":
+			io.WriteString(w, "SANDBOX   AGENT   STATUS   PORTS   WORKSPACE\n")
+			if exists {
+				io.WriteString(w, "my-app    claude  running          /work\n")
+			}
+		case "mount":
+			return mountErr
+		}
+	}
+	return nil
+}
+
+func (r *scriptRunner) ran(prefix ...string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, c := range r.calls {
+		if len(c) >= len(prefix) && reflect.DeepEqual(c[:len(prefix)], prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// sbxFixture builds a daemon, a claude-code sbx pane in a project with a
+// profile, and the seams. trust says whether the profile is approved.
+func sbxFixture(t *testing.T, trust bool) (*Daemon, *Pane, *scriptRunner) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("QUIL_HOME", home)
+
+	repo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, sbx.ProfileFile),
+		[]byte("[sbx]\nenv_file = \"sbxenv.yaml\"\nname = \"my-app\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "sbxenv.yaml"), []byte("schemaVersion: \"1\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if trust {
+		prof, err := sbx.LoadProfile(filepath.Join(repo, sbx.ProfileFile))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := sbx.Trust(sbx.TrustStorePath(home), prof); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	r := &scriptRunner{}
+	prevRunner, prevBin := sbxRunner, sbxBinaryFn
+	sbxRunner = r
+	sbxBinaryFn = func() (string, error) { return "/fake/sbx", nil }
+
+	d := &Daemon{session: NewSessionManager(1024), events: newEventQueue(50), cfg: config.Default()}
+	withClaudePlugin(t, d)
+	// Registered last so it runs first: the preparation goroutine reads the
+	// seams, so they are restored only once it has finished.
+	t.Cleanup(func() {
+		d.sbxPrep.wait()
+		sbxRunner, sbxBinaryFn = prevRunner, prevBin
+	})
+
+	// Registered with the session manager: the preparation goroutine looks the
+	// pane up again by id before it respawns it.
+	tab := d.session.CreateTab("t")
+	pane, err := d.session.CreatePane(tab.ID, repo)
+	if err != nil {
+		t.Fatalf("CreatePane: %v", err)
+	}
+	pane.Type = "claude-code"
+	pane.SandboxBackend = config.SandboxBackendSbx
+	return d, pane, r
+}
+
+// The refusal that must never soften: no profile means no cage, and the pane
+// must not run the agent on the host instead.
+func TestSpawnPane_SbxWithoutAProfileRefuses(t *testing.T) {
+	d, pane, _ := sbxFixture(t, false)
+	pane.CWD = t.TempDir()
+	s := &fakeSession{}
+	err := d.spawnPane(pane, s, false)
+	if err == nil || !strings.Contains(err.Error(), sbx.ProfileFile) {
+		t.Fatalf("err = %v, want a refusal naming %s", err, sbx.ProfileFile)
+	}
+	if s.startCmd != "" {
+		t.Errorf("a child was started (%s) for a pane with no cage", s.startCmd)
+	}
+}
+
+func TestSpawnPane_SbxUntrustedProfileRefuses(t *testing.T) {
+	d, pane, r := sbxFixture(t, false)
+	s := &fakeSession{}
+	err := d.spawnPane(pane, s, false)
+	if err == nil || !strings.Contains(err.Error(), "quil sandbox trust") {
+		t.Fatalf("err = %v, want a refusal naming the approval command", err)
+	}
+	if s.startCmd != "" || len(r.calls) != 0 {
+		t.Errorf("an unapproved profile reached sbx: cmd=%q calls=%v", s.startCmd, r.calls)
+	}
+}
+
+// The whole path: stand down, create the sandbox on a goroutine, then spawn
+// the pane's own command through `sbx exec`.
+func TestSpawnPane_SbxPreparesThenExecs(t *testing.T) {
+	d, pane, r := sbxFixture(t, true)
+
+	respawned := make(chan *fakeSession, 1)
+	prevSpawn := sbxSpawnFn
+	sbxSpawnFn = func(d *Daemon, p *Pane) error {
+		s := &fakeSession{}
+		err := d.spawnPane(p, s, false)
+		respawned <- s
+		return err
+	}
+	t.Cleanup(func() { sbxSpawnFn = prevSpawn })
+
+	first := &fakeSession{}
+	if err := d.spawnPane(pane, first, false); err != nil {
+		t.Fatalf("spawnPane = %v; standing down while the sandbox is prepared is not a failure", err)
+	}
+	if first.startCmd != "" {
+		t.Fatalf("the first spawn started %q before the sandbox existed", first.startCmd)
+	}
+
+	var s *fakeSession
+	select {
+	case s = <-respawned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the pane was never respawned after the sandbox was prepared")
+	}
+	if !r.ran("/fake/sbx", "env", "create") {
+		t.Errorf("the sandbox was not created; calls = %v", r.calls)
+	}
+	if s.startCmd != "/fake/sbx" {
+		t.Errorf("started %q, want the sbx CLI", s.startCmd)
+	}
+	wd := pane.CWD
+	if runtime.GOOS == "windows" {
+		wd = ""
+	}
+	p := d.registry.Get("claude-code")
+	tag := spawnTag(t, s.startArgs)
+	if !strings.HasPrefix(tag, pane.ID+"-") {
+		t.Errorf("tag %q does not start with the pane id", tag)
+	}
+	want := sbx.ExecArgs("my-app", wd, append(slices.Clone(p.Command.Env), sbx.TagEnv+"="+tag), p.Command.Cmd, nil)
+	// The plugin's own start arguments are not Quil's to pass into the cage
+	// beyond what the plugin declares, so compare only the fixed prefix.
+	if len(s.startArgs) < len(want) || !reflect.DeepEqual(s.startArgs[:len(want)], want) {
+		t.Errorf("args = %v, want prefix %v", s.startArgs, want)
+	}
+	for _, a := range s.startArgs {
+		if a == "--settings" || a == "--session-id" {
+			t.Errorf("an sbx pane was handed %s, which names a host path or a session it cannot resume", a)
+		}
+	}
+}
+
+// An existing sandbox is reused: no create, no host step.
+func TestSpawnPane_SbxReusesAnExistingSandbox(t *testing.T) {
+	d, pane, r := sbxFixture(t, true)
+	r.exists = true
+
+	done := make(chan struct{}, 1)
+	prevSpawn := sbxSpawnFn
+	sbxSpawnFn = func(d *Daemon, p *Pane) error {
+		err := d.spawnPane(p, &fakeSession{}, false)
+		done <- struct{}{}
+		return err
+	}
+	t.Cleanup(func() { sbxSpawnFn = prevSpawn })
+
+	if err := d.spawnPane(pane, &fakeSession{}, false); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("never respawned")
+	}
+	if r.ran("/fake/sbx", "env", "create") {
+		t.Error("an existing sandbox was created again")
+	}
+}
+
+// Two panes on one profile share one preparation.
+func TestSbxPrepare_SingleFlightPerName(t *testing.T) {
+	var s sbxPrepare
+	if !s.begin("a", "p1") {
+		t.Fatal("first caller not owner")
+	}
+	if s.begin("a", "p2") || s.begin("a", "p2") || s.begin("a", "p1") {
+		t.Error("a second caller became owner")
+	}
+	if !s.begin("b", "p3") {
+		t.Error("another sandbox name was blocked")
+	}
+	if got := s.end("a"); !reflect.DeepEqual(got, []string{"p1", "p2"}) {
+		t.Errorf("end = %v, want each pane once, owner first", got)
+	}
+	if !s.begin("a", "p4") {
+		t.Error("the claim was not released")
+	}
+}
+
+func TestCRLF(t *testing.T) {
+	if got := crlf("a\nb\r\nc"); got != "a\r\nb\r\nc" {
+		t.Errorf("crlf = %q", got)
+	}
+}
+
+// gitLayout makes repo a main checkout with one linked worktree in Quil's
+// worktrees folder, laid out the way git writes them, and returns the
+// worktree. The worktree's own profile names ANOTHER sandbox: a worktree
+// pane must use the main checkout's.
+func gitLayout(t *testing.T, repo string) string {
+	t.Helper()
+	admin := filepath.Join(repo, ".git", "worktrees", "feat-x")
+	wt := filepath.Join(gitworktree.WorktreesDir(repo), "feat-x")
+	for _, dir := range []string{admin, wt} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	files := map[string]string{
+		filepath.Join(admin, "commondir"):   "../..\n",
+		filepath.Join(wt, ".git"):           "gitdir: " + admin + "\n",
+		filepath.Join(wt, sbx.ProfileFile):  "[sbx]\nenv_file = \"sbxenv.yaml\"\nname = \"other\"\n",
+		filepath.Join(wt, "sbxenv.yaml"):    "schemaVersion: \"1\"\n",
+		filepath.Join(repo, ".git", "HEAD"): "ref: refs/heads/main\n",
+	}
+	for path, body := range files {
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return wt
+}
+
+// spawnAndCollect runs the first spawn of an sbx pane and returns the session
+// of the respawn, or nil when the pane was not respawned.
+func spawnAndCollect(t *testing.T, d *Daemon, pane *Pane) *fakeSession {
+	t.Helper()
+	respawned := make(chan *fakeSession, 1)
+	prevSpawn := sbxSpawnFn
+	sbxSpawnFn = func(d *Daemon, p *Pane) error {
+		s := &fakeSession{}
+		err := d.spawnPane(p, s, false)
+		respawned <- s
+		return err
+	}
+	t.Cleanup(func() { sbxSpawnFn = prevSpawn })
+	if err := d.spawnPane(pane, &fakeSession{}, false); err != nil {
+		t.Fatalf("spawnPane = %v", err)
+	}
+	d.sbxPrep.wait()
+	select {
+	case s := <-respawned:
+		return s
+	default:
+		return nil
+	}
+}
+
+func TestSpawnPane_SbxWorktreeUsesTheMainSandboxAndSharesTheFolder(t *testing.T) {
+	d, pane, r := sbxFixture(t, true)
+	repo := pane.CWD
+	pane.CWD = gitLayout(t, repo)
+
+	s := spawnAndCollect(t, d, pane)
+	if s == nil {
+		t.Fatal("the worktree pane was never started")
+	}
+	if !r.ran("/fake/sbx", "mount", "my-app", gitworktree.WorktreesDir(repo)) {
+		t.Errorf("the worktrees folder was not shared; calls = %v", r.calls)
+	}
+	if !slices.Contains(s.startArgs, "my-app") || slices.Contains(s.startArgs, "other") {
+		t.Errorf("args = %v, want the main checkout's sandbox my-app", s.startArgs)
+	}
+}
+
+func TestSpawnPane_SbxMountFailureStopsOnlyAWorktreePane(t *testing.T) {
+	t.Run("worktree pane fails", func(t *testing.T) {
+		d, pane, r := sbxFixture(t, true)
+		r.mountErr = errors.New("exit status 1")
+		pane.CWD = gitLayout(t, pane.CWD)
+		if s := spawnAndCollect(t, d, pane); s != nil {
+			t.Fatal("a worktree pane started in a sandbox that cannot see its folder")
+		}
+		pane.PluginMu.Lock()
+		msg := pane.SpawnError
+		pane.PluginMu.Unlock()
+		if !strings.Contains(msg, "worktrees folder") {
+			t.Errorf("SpawnError = %q, want the mount failure", msg)
+		}
+	})
+	t.Run("main checkout pane starts", func(t *testing.T) {
+		d, pane, r := sbxFixture(t, true)
+		r.mountErr = errors.New("exit status 1")
+		gitLayout(t, pane.CWD)
+		if s := spawnAndCollect(t, d, pane); s == nil {
+			t.Fatal("a main checkout pane was stopped by a worktrees mount failure")
+		}
+	})
+}
+
+// No worktrees folder yet: nothing to share, and no sbx mount call.
+func TestSpawnPane_SbxNoWorktreesFolderMountsNothing(t *testing.T) {
+	d, pane, r := sbxFixture(t, true)
+	if err := os.MkdirAll(filepath.Join(pane.CWD, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if s := spawnAndCollect(t, d, pane); s == nil {
+		t.Fatal("never started")
+	}
+	if r.ran("/fake/sbx", "mount") {
+		t.Errorf("mounted a folder that does not exist; calls = %v", r.calls)
+	}
+}
+
+// spawnTag returns the QUIL_SBX_PANE value an sbx exec argv carries.
+func spawnTag(t *testing.T, argv []string) string {
+	t.Helper()
+	for i := 0; i+1 < len(argv); i++ {
+		if argv[i] == "-e" && strings.HasPrefix(argv[i+1], sbx.TagEnv+"=") {
+			return strings.TrimPrefix(argv[i+1], sbx.TagEnv+"=")
+		}
+	}
+	t.Fatalf("no %s in %v", sbx.TagEnv, argv)
+	return ""
+}
+
+// Closing an sbx pane's PTY stops its agent inside the sandbox — exactly this
+// spawn's tag, never the whole pane's, so a restart's new agent survives.
+func TestSbxSession_CloseStopsThisSpawnsAgent(t *testing.T) {
+	d, pane, r := sbxFixture(t, true)
+	s := spawnAndCollect(t, d, pane)
+	if s == nil {
+		t.Fatal("never started")
+	}
+	tag := spawnTag(t, s.startArgs)
+	pane.PluginMu.Lock()
+	installed := pane.PTY
+	pane.PluginMu.Unlock()
+	if installed == nil {
+		t.Fatal("no PTY installed")
+	}
+	installed.Close()
+	installed.Close() // a second Close must not stop twice
+	d.sbxStops.Wait()
+
+	stop := append([]string{"/fake/sbx"}, sbx.StopArgs("my-app", tag, false)...)
+	n := 0
+	r.mu.Lock()
+	for _, c := range r.calls {
+		if reflect.DeepEqual(c, stop) {
+			n++
+		}
+	}
+	r.mu.Unlock()
+	if n != 1 {
+		t.Errorf("exact stop ran %d times, want 1; calls = %v", n, r.calls)
+	}
+}
+
+// Before a pane starts, the agents of its earlier spawns are stopped — what a
+// crashed daemon left behind — and only then is the new agent started.
+func TestSpawnPane_SbxStopsLeftoversBeforeStarting(t *testing.T) {
+	d, pane, r := sbxFixture(t, true)
+	if s := spawnAndCollect(t, d, pane); s == nil {
+		t.Fatal("never started")
+	}
+	// spawnAndCollect's respawn runs after the prepare goroutine's calls, so
+	// a recorded prefix stop ran before the new agent started.
+	if !r.ran(append([]string{"/fake/sbx"}, sbx.StopArgs("my-app", pane.ID+"-", true)...)...) {
+		t.Errorf("leftovers were not stopped; calls = %v", r.calls)
+	}
+}

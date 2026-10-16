@@ -504,8 +504,10 @@ func (d *Daemon) handlePluginCatalogReq(conn *ipc.Conn, msg *ipc.Message) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	sandboxOK, _ := d.sandboxAvailable(ctx)
+	sbxOK, _ := d.sbxAvailable(ctx)
 	respondTo(conn, msg.ID, ipc.MsgPluginCatalogResp, ipc.PluginCatalogRespPayload{
 		Plugins:          entries,
 		SandboxAvailable: sandboxOK,
+		SbxAvailable:     sbxOK,
 	})
 }

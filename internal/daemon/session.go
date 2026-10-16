@@ -204,6 +204,17 @@ type Pane struct {
 	// the resume path maps the transcript through it, so a pane restored under
 	// the other directory would look for its session where it is not.
 	SandboxClaudeConfig string
+	// SandboxBackend is "sbx" for a pane that runs inside a Docker Sandboxes
+	// microVM, empty for the docker backend. PERSISTED, PluginMu-protected,
+	// written once at creation. An sbx pane has no SandboxImage; this field
+	// alone makes it sandboxed, and the persisted type carries the same
+	// sandbox/ prefix so a daemon too old to know sbx refuses rather than
+	// spawning the agent on the host.
+	SandboxBackend string
+	// sbxReady is set by the sbx preparation goroutine right before it
+	// respawns the pane, and consumed by the next spawn: the sandbox exists,
+	// so that spawn starts `sbx exec` instead of preparing again. Runtime only.
+	sbxReady bool
 	// ContainerCWD is the directory the agent ran in INSIDE the container.
 	// PERSISTED, PluginMu-protected.
 	//

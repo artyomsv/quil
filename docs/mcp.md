@@ -1,3 +1,4 @@
+| `sandbox_backend` | `docker` (default) or `sbx`. `sbx` runs the pane in the Docker Sandboxes microVM that the `.quil-sandbox.toml` at or above `cwd` declares; send it with NO `sandbox_image`, `sandbox_auth` or `sandbox_claude_config` (refused otherwise). The profile must be approved on the daemon host with `quil sandbox trust`, or the pane is refused. Only when `list_plugins` reports `sbx_available`. An older daemon refuses an sbx create rather than running it on the host. See [Sandbox panes](sandbox-panes.md#the-sbx-backend-docker-sandboxes). | daemon |
 # MCP Server — Make Quil the AI's Eyes and Hands
 
 Quil ships with a built-in [Model Context Protocol](https://modelcontextprotocol.io/) server that lets AI assistants (Claude Desktop, Claude Code, Cursor, VS Code Copilot, any MCP-capable client) read pane output, send commands, watch for events, and orchestrate your terminal workspace.
@@ -153,7 +154,7 @@ Start here. Other tools need pane IDs and tab IDs as inputs.
 | `list_tabs` | `project_id`, `host` (both optional) | JSON array of all tabs: `{id, name, project_id, pane_count, active, host}` |
 | `list_projects` | `host` (optional) | JSON array of projects: `{id, name, root_dir, active, bootstrap, tab_ids, active_tab, host}` |
 | `list_hosts` | — | The remote daemons this bridge reaches (`[[destinations]]` of the machine running `quil mcp`) with `connected` and any dial error |
-| `list_plugins` | `host` (optional) | Every plugin with `available`, `prompts_cwd`, `sessions` and its `toggles[]` `{name, label, group, default}`, plus `sandbox_available`. Call before `create_pane` with an AI type |
+| `list_plugins` | `host` (optional) | Every plugin with `available`, `prompts_cwd`, `sessions` and its `toggles[]` `{name, label, group, default}`, plus `sandbox_available` (Docker) and `sbx_available` (Docker Sandboxes). Call before `create_pane` with an AI type |
 | `list_sessions` | `cwd` (required), `host` | The Claude Code sessions recorded for a directory: `{id, title, modified_ms, in_use_pane_id}` |
 
 **`agent_state`** is the daemon's own replay of an AI pane's hook events: `working`, `blocked` (with `blocked_reason` naming the tool a permission prompt waits on), or `idle`. **Empty means unknown, not idle** — a terminal pane, or an AI pane whose hooks never loaded. **`self`** marks the pane the bridge is running inside (the daemon sets `QUIL_PANE_ID` on every AI pane's child, and the bridge is that child's child), so an orchestrator can tell itself apart from its workers.
@@ -199,7 +200,7 @@ TUI's terminal state before it displays the replacement child's output.
 
 | Tool | Input | Returns | Notes |
 |---|---|---|---|
-| `create_pane` | `tab_id` (optional, default = active), `cwd`, `type` (default `terminal`; also `claude-code`, `opencode`, `codex`, `ssh`, `stripe`), `name`, `toggles[]`, `resume_session_id`, `worktree_branch`, `sandbox_image`, `sandbox_auth`, `sandbox_claude_config`, `host` | JSON: `{pane_id, tab_id, host, error?}` | Spawns a new pane with the same options the Ctrl+N dialog collects — see below. An ERROR (no pane) names the refusal; `error` WITH a `pane_id` means the pane exists but its process failed to start. |
+| `create_pane` | `tab_id` (optional, default = active), `cwd`, `type` (default `terminal`; also `claude-code`, `opencode`, `codex`, `ssh`, `stripe`), `name`, `toggles[]`, `resume_session_id`, `worktree_branch`, `sandbox_image`, `sandbox_auth`, `sandbox_claude_config`, `sandbox_backend`, `host` | JSON: `{pane_id, tab_id, host, error?}` | Spawns a new pane with the same options the Ctrl+N dialog collects — see below. An ERROR (no pane) names the refusal; `error` WITH a `pane_id` means the pane exists but its process failed to start. |
 | `rename_pane` | `pane_id`, `name` | `{ok}` | What Alt+F2 does. |
 | `restart_pane` | `pane_id` (required) | JSON: `{success, message}` | Kills + respawns with the same plugin, CWD, and instance config. Useful for stuck or crashed panes. AI clients should confirm with the user before calling. |
 | `destroy_pane` | `pane_id` (required) | "Destroyed pane <id>" or "Failed to destroy" | If it was the last pane in a tab, a replacement terminal pane is auto-created. AI clients should confirm before calling. |

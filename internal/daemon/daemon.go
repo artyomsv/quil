@@ -262,6 +262,17 @@ type Daemon struct {
 	// one person's attention, not a per-pane resource.
 	sandboxSignIn sandboxSignIn
 
+	// sbxCap caches the answer to "can this machine run an sbx sandbox",
+	// with the same single-flight and TTL as sandboxCap but its own probe.
+	sbxCap     sandboxCap
+	sbxCapOnce sync.Once
+	// sbxPrep serialises the creation of each named sbx sandbox: two panes
+	// opened together on one profile must not both run `sbx env create`.
+	sbxPrep sbxPrepare
+	// sbxStops counts the in-flight stops of closed sbx panes' agents, so
+	// Stop can give them a moment before the daemon exits.
+	sbxStops sync.WaitGroup
+
 	// resumeClaimMu serializes the claim of a Claude session by a new pane.
 	// The occupancy test and the write that acts on it must be one atomic
 	// step: handleCreatePane runs on the requesting conn's dispatch
@@ -702,6 +713,9 @@ func (d *Daemon) Stop() {
 				}
 			}
 		}
+		// Closing an sbx pane's PTY starts a stop of its agent inside the
+		// VM; ending the host process alone leaves it running.
+		d.waitSbxStops(sbxStopWait)
 	})
 }
 
@@ -1094,6 +1108,7 @@ func (d *Daemon) restoreWorkspace() error {
 				sandboxImage, _ := paneData["sandbox_image"].(string)
 				sandboxAuth, _ := paneData["sandbox_auth"].(string)
 				sandboxClaudeConfig, _ := paneData["sandbox_claude_config"].(string)
+				sandboxBackend, _ := paneData["sandbox_backend"].(string)
 				containerCWD, _ := paneData["container_cwd"].(string)
 				// note_rev absent (a pre-3b snapshot) with a note file present
 				// means the local TUI kept a note for this daemon's own pane:
@@ -1147,6 +1162,7 @@ func (d *Daemon) restoreWorkspace() error {
 					// [sandbox] shared_claude_config — the behaviour those
 					// panes had before the choice existed.
 					SandboxClaudeConfig: sandboxClaudeConfig,
+					SandboxBackend:      sandboxBackend, // absent (docker, or older than sbx) → docker
 					ContainerCWD:        containerCWD,
 					// Absent on pre-pin snapshots → false, which is the only
 					// safe default: inventing a mark the user never set would
@@ -5339,6 +5355,13 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 				paneData.SandboxClaudeConfig = &claudeConfig
 				paneData.Type = sandboxPaneType(pane.Type)
 			}
+			// An sbx pane has no image, so the block above does not see it. The
+			// type prefix is what makes an older daemon refuse it rather than
+			// start the agent on the host.
+			if pane.SandboxBackend != "" {
+				paneData.SandboxBackend = pane.SandboxBackend
+				paneData.Type = sandboxPaneType(pane.Type)
+			}
 			if pane.ContainerCWD != "" {
 				paneData.ContainerCWD = pane.ContainerCWD
 			}
@@ -6465,6 +6488,7 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	typ := pane.Type
 	quilMCP := pane.QuilMCP
 	sandboxImage := pane.SandboxImage
+	sbxBackend := pane.SandboxBackend == config.SandboxBackendSbx
 	pane.PluginMu.Unlock()
 
 	// A sandboxed pane's persisted type carries a prefix, so the plugin it
@@ -6474,7 +6498,7 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	// but visible, where an un-sandboxed agent on the host is wrong and
 	// silent.
 	typ, sandboxed := splitSandboxType(typ)
-	sandboxed = sandboxed || sandboxImage != ""
+	sandboxed = sandboxed || sandboxImage != "" || sbxBackend
 
 	p := d.registry.Get(typ)
 	if quilMCP && (sandboxed || p == nil || !p.Available || !mcpSupported(typ)) {
@@ -6507,7 +6531,16 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 		}
 	}
 
-	if !eligible {
+	// An sbx pane is started by its own path: the cage is the sbx sandbox the
+	// project profile declares, so none of the hook, session or container
+	// preparation below applies to it. See sandbox_sbx.go.
+	if sbxBackend {
+		session, started, err := d.startSbxPane(pane, ptySession, p)
+		if err != nil || !started {
+			return err
+		}
+		ptySession = session
+	} else if !eligible {
 		cmd := p.Command.Cmd
 
 		// Generate a session UUID for fresh preassign_id panes before computing

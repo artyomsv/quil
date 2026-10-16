@@ -466,6 +466,16 @@ type SandboxSpec struct {
 	// old to know the field ignores it and uses its own directory, which costs
 	// a sign-in and never isolation.
 	ClaudeConfig string `json:"claude_config,omitempty"`
+
+	// Backend picks the sandbox: "" or "docker" runs Image with `docker run`;
+	// "sbx" runs the pane inside a Docker Sandboxes microVM declared by the
+	// .quil-sandbox.toml found at or above the pane's directory. An sbx spec
+	// carries NO image and no sign-in fields — the cage comes from the
+	// profile the user approved, never from the wire.
+	//
+	// A daemon that predates the field reads an sbx spec as a docker spec
+	// with an empty image and refuses it, so an older daemon fails closed.
+	Backend string `json:"backend,omitempty"`
 }
 
 // WorktreeSpec asks the daemon to create a linked worktree for a new pane.
@@ -1179,6 +1189,10 @@ type PluginCatalogRespPayload struct {
 	// all (docker present), so an agent does not offer an image to a host
 	// that will refuse it.
 	SandboxAvailable bool `json:"sandbox_available"`
+	// SbxAvailable reports whether the sbx backend can run here (sbx CLI
+	// present and answering). Independent of SandboxAvailable: a host can
+	// have either, both or neither.
+	SbxAvailable bool `json:"sbx_available"`
 }
 
 // DelegateTaskReqPayload hands a prompt to ToPane and records a task the
@@ -1866,6 +1880,13 @@ type SandboxCapRespPayload struct {
 	// through sanitizeRemoteText like every other daemon-supplied string: on
 	// a remote daemon this is text from a machine the user may not control.
 	Error string `json:"error,omitempty"`
+
+	// SbxAvailable, SbxVersion and SbxError describe the sbx backend on the
+	// same machine. Probed separately: Docker Desktop and the sbx CLI are
+	// independent installs.
+	SbxAvailable bool   `json:"sbx_available,omitempty"`
+	SbxVersion   string `json:"sbx_version,omitempty"`
+	SbxError     string `json:"sbx_error,omitempty"`
 }
 
 // GitReposReqPayload asks the daemon which git repositories are near CWD —

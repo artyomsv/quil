@@ -55,6 +55,17 @@ func applySandboxSpec(pane *Pane, spec *ipc.SandboxSpec) error {
 	if spec == nil {
 		return nil
 	}
+	switch spec.Backend {
+	case "", config.SandboxBackendDocker:
+	case config.SandboxBackendSbx:
+		return applySbxSpec(pane, spec)
+	default:
+		// Refused, never guessed: an unknown backend is a pane the user asked
+		// to isolate in a way this build cannot, and the only fallback left
+		// would be the host.
+		log.Printf("pane %s: refusing unknown sandbox backend of length %d", pane.ID, len(spec.Backend))
+		return fmt.Errorf("unknown sandbox backend")
+	}
 	if !sandbox.ImageOK(spec.Image) {
 		// Logged by LENGTH, never by value: the daemon log is rendered by the
 		// F1 viewer, which does not pass through a VT emulator, so a hostile

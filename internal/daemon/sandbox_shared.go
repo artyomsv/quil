@@ -64,7 +64,9 @@ func (d *Daemon) applySandboxSpecFor(pane *Pane, spec *ipc.SandboxSpec) error {
 	if err := applySandboxSpec(pane, spec); err != nil {
 		return err
 	}
-	if spec == nil {
+	// An sbx pane carries no Claude sign-in choice: the cage, including how
+	// the agent signs in, is the profile's business.
+	if spec == nil || spec.Backend == config.SandboxBackendSbx {
 		return nil
 	}
 	pane.PluginMu.Lock()

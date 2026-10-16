@@ -662,7 +662,7 @@ func TestEnsure_CreateFailureCarriesTheSbxErrorLine(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "workspace path is not shared") {
 		t.Fatalf("err = %v, want sbx's own error line", err)
 	}
-	if !f.called("sbx", "env", "create", p.EnvFile, "--name", p.Name, "--force") {
+	if !f.called("sbx", "env", "create", filepath.Join(p.stageDir, "sbxenv.yaml"), "--name", p.Name, "--force") {
 		t.Errorf("create did not use the flag the help named; calls = %v", f.calls)
 	}
 }

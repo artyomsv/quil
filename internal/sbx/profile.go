@@ -129,8 +129,17 @@ func LoadProfile(path string) (Profile, error) {
 	if err != nil {
 		return Profile{}, err
 	}
+	raw, err := os.ReadFile(abs)
+	if err != nil {
+		return Profile{}, err
+	}
+	return parseProfile(abs, raw)
+}
+
+// parseProfile parses a profile from its bytes; abs is its absolute path.
+func parseProfile(abs string, raw []byte) (Profile, error) {
 	var fp fileProfile
-	md, err := toml.DecodeFile(abs, &fp)
+	md, err := toml.Decode(string(raw), &fp)
 	if err != nil {
 		return Profile{}, fmt.Errorf("%s: %w", abs, err)
 	}

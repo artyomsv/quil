@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -538,5 +539,87 @@ func TestSpawnPane_SbxStopsLeftoversBeforeStarting(t *testing.T) {
 	// a recorded prefix stop ran before the new agent started.
 	if !r.ran(append([]string{"/fake/sbx"}, sbx.StopArgs("my-app", pane.ID+"-", true)...)...) {
 		t.Errorf("leftovers were not stopped; calls = %v", r.calls)
+	}
+}
+
+// A link above the main checkout keeps a path lexically inside the profile
+// while sbx would mount wherever it leads. Containment is decided on real
+// paths.
+func TestMountSbxWorktrees_LinkAboveTheCheckoutIsNotFollowed(t *testing.T) {
+	d, pane, r := sbxFixture(t, true)
+	prof, err := loadSbxProfile(pane.CWD)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	other := filepath.Join(outside, "other")
+	for _, dir := range []string{filepath.Join(other, ".git"), gitworktree.WorktreesDir(other)} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(prof.Dir, "link")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("cannot create a symbolic link here: %v", err)
+	}
+	pane.PluginMu.Lock()
+	pane.CWD = filepath.Join(link, "other")
+	pane.PluginMu.Unlock()
+	d.mountSbxWorktrees(context.Background(), prof, []string{pane.ID})
+	if r.ran("/fake/sbx", "mount") {
+		t.Errorf("followed a link out of the profile; calls = %v", r.calls)
+	}
+}
+
+// A pane started since it asked is dropped before the leftover stop, which
+// would otherwise kill the agent that start made.
+func TestStartSbxWaiters_StaleWaiterIsNotStopped(t *testing.T) {
+	d, pane, r := sbxFixture(t, true)
+	prof, err := loadSbxProfile(pane.CWD)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spawned := 0
+	prevSpawn := sbxSpawnFn
+	sbxSpawnFn = func(*Daemon, *Pane, func(apty.Session) apty.Session) error {
+		spawned++
+		return nil
+	}
+	t.Cleanup(func() { sbxSpawnFn = prevSpawn })
+	pane.PluginMu.Lock()
+	pane.ptyGen = 5
+	pane.PluginMu.Unlock()
+
+	d.startSbxWaiters(context.Background(), prof, []sbxWaiter{{paneID: pane.ID, gen: 4}})
+	if r.ran("/fake/sbx", "exec") || spawned != 0 {
+		t.Errorf("a stale waiter was stopped or spawned; calls = %v, spawned = %d", r.calls, spawned)
+	}
+	d.startSbxWaiters(context.Background(), prof, []sbxWaiter{{paneID: pane.ID, gen: 5}})
+	if !r.ran(append([]string{"/fake/sbx"}, sbx.StopArgs("my-app", pane.ID+"-", true)...)...) || spawned != 1 {
+		t.Errorf("a current waiter was not stopped then spawned; calls = %v, spawned = %d", r.calls, spawned)
+	}
+}
+
+// The spawn log line never carries an environment value.
+func TestSpawnPane_SbxLogRedactsEnvironmentValues(t *testing.T) {
+	d, pane, _ := sbxFixture(t, true)
+	p := d.registry.Get("claude-code")
+	prevEnv := p.Command.Env
+	p.Command.Env = append(slices.Clone(prevEnv), "TEST_SECRET=CANARY-sentinel-value")
+	t.Cleanup(func() { p.Command.Env = prevEnv })
+	var logged strings.Builder
+	prevOut := log.Writer()
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(prevOut) })
+
+	s := spawnAndCollect(t, d, pane)
+	if s == nil {
+		t.Fatal("never started")
+	}
+	if !slices.Contains(s.startArgs, "TEST_SECRET=CANARY-sentinel-value") {
+		t.Errorf("the spawn lost the value itself: %v", s.startArgs)
+	}
+	if strings.Contains(logged.String(), "CANARY-sentinel-value") {
+		t.Error("the log carries an environment value")
 	}
 }

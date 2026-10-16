@@ -262,6 +262,23 @@ func ExecArgs(name, workdir string, env []string, cmd string, args []string) []s
 	return append(out, args...)
 }
 
+// RedactEnv returns argv with the value of every `-e KEY=VALUE` replaced, for
+// logging: a plugin's environment can carry a key or a token, and the log is
+// kept and shown in the log viewer.
+func RedactEnv(argv []string) []string {
+	out := append([]string(nil), argv...)
+	for i := 0; i+1 < len(out); i++ {
+		if out[i] != "-e" {
+			continue
+		}
+		if k, _, ok := strings.Cut(out[i+1], "="); ok {
+			out[i+1] = k + "=<redacted>"
+		}
+		i++
+	}
+	return out
+}
+
 // MountArgs is `sbx mount <name> <dir>`: dir bind-mounted into the sandbox at
 // the same path.
 func MountArgs(name, dir string) []string {
@@ -325,9 +342,16 @@ func (c Client) Ensure(ctx context.Context, a Approved, w io.Writer) (bool, erro
 			return false, fmt.Errorf("prepare_host failed: %w%s — the sandbox was not created", err, errorLine(hostOut.String()))
 		}
 	}
-	// sbx reads the environment file and its kits by path, so they cannot be
-	// handed over as a copy; check them once more right before it does.
+	// The host step must not change an approved file; a change here means it
+	// did, or someone else did meanwhile.
 	if err := a.recheck(); err != nil {
+		return false, err
+	}
+	// sbx gets private copies of the approved environment file, kits and
+	// post-create env file: it reads them by path, and the repository is
+	// still writable while it does.
+	staged, err := a.stageEnv()
+	if err != nil {
 		return false, err
 	}
 
@@ -337,7 +361,7 @@ func (c Client) Ensure(ctx context.Context, a Approved, w io.Writer) (bool, erro
 	fmt.Fprintf(w, "Creating sbx sandbox %s from %s…\n", p.Name, p.EnvFile)
 	var out bytes.Buffer
 	cctx, cancel := context.WithTimeout(ctx, createTimeout)
-	err = c.run(cctx, p.Dir, io.MultiWriter(w, &out), CreateArgs(p, approve)...)
+	err = c.run(cctx, p.Dir, io.MultiWriter(w, &out), CreateArgs(staged, approve)...)
 	cancel()
 	if err != nil {
 		if hint := Hint(out.String()); hint != "" {
@@ -351,7 +375,7 @@ func (c Client) Ensure(ctx context.Context, a Approved, w io.Writer) (bool, erro
 	for i, step := range p.PostCreate {
 		fmt.Fprintf(w, "Running set-up step %d inside the sandbox: %s\n", i+1, strings.Join(step, " "))
 		pctx, cancel := context.WithTimeout(ctx, postCreateTimeout)
-		err := c.run(pctx, p.Dir, w, PostCreateArgs(p, step)...)
+		err := c.run(pctx, p.Dir, w, PostCreateArgs(staged, step)...)
 		cancel()
 		if err != nil {
 			return true, fmt.Errorf("post_create step %d failed: %w — the sandbox exists but is not fully set up; "+

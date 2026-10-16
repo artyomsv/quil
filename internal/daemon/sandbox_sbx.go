@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -156,7 +157,7 @@ func (d *Daemon) startSbxPane(pane *Pane, ptySession apty.Session, p *plugin.Pan
 	env := append(slices.Clone(p.Command.Env), sbx.TagEnv+"="+tag)
 	argv := sbx.ExecArgs(prof.Name, workdir, env, p.Command.Cmd, args)
 	ptySession.SetCWD(cwd)
-	log.Printf("spawn: pane %s sbx sandbox=%s cmd=%s args=%v cwd=%s", pane.ID, prof.Name, bin, argv, cwd)
+	log.Printf("spawn: pane %s sbx sandbox=%s cmd=%s args=%v cwd=%s", pane.ID, prof.Name, bin, sbx.RedactEnv(argv), cwd)
 	if err := ptySession.Start(bin, argv...); err != nil {
 		return ptySession, true, err
 	}
@@ -345,6 +346,9 @@ func (d *Daemon) runSbxPrepare(ownerID string, prof sbx.Approved) {
 // startSbxWaiters shares the panes' worktrees folders, stops what earlier
 // spawns of them left running, and starts them.
 func (d *Daemon) startSbxWaiters(ctx context.Context, prof sbx.Approved, waiters []sbxWaiter) {
+	// A pane started since it asked is dropped HERE, before the leftover
+	// stop: its prefix stop would kill the agent that start just made.
+	waiters = slices.DeleteFunc(waiters, func(w sbxWaiter) bool { return !d.sbxWaiterCurrent(w) })
 	ids := make([]string, len(waiters))
 	for i, w := range waiters {
 		ids[i] = w.paneID
@@ -403,10 +407,21 @@ func (d *Daemon) mountSbxWorktrees(ctx context.Context, prof sbx.Approved, panes
 		cwd := pane.CWD
 		pane.PluginMu.Unlock()
 		co, ok := sbx.FindCheckout(cwd)
-		if !ok || !pathWithin(prof.Dir, co.Main) {
+		if !ok {
 			continue
 		}
-		dir := gitworktree.WorktreesDir(co.Main)
+		// Compared and mounted as REAL paths: a link anywhere above the main
+		// checkout (/w/app/link -> /elsewhere) keeps a path lexically inside
+		// the profile while sbx mounts wherever it leads.
+		realMain, err1 := filepath.EvalSymlinks(co.Main)
+		realProf, err2 := filepath.EvalSymlinks(prof.Dir)
+		if err1 != nil || err2 != nil || !pathWithin(realProf, realMain) {
+			continue
+		}
+		if real, err := filepath.EvalSymlinks(cwd); err == nil {
+			cwd = real
+		}
+		dir := gitworktree.WorktreesDir(realMain)
 		// A real folder only. A symlink here would let one link widen the
 		// cage to wherever it points, which nobody approved.
 		if st, err := os.Lstat(dir); err != nil || !st.IsDir() {
@@ -468,7 +483,24 @@ func (d *Daemon) ensureSbxSandbox(ctx context.Context, ownerID string, prof sbx.
 // preparing again. startSbxPane unwraps it.
 type sbxReadySession struct{ apty.Session }
 
-// respawnSbxPane starts the child for a pane whose sandbox is now ready.
+// sbxWaiterCurrent reports whether a waiting pane still exists and has had no
+// new PTY since it asked.
+func (d *Daemon) sbxWaiterCurrent(w sbxWaiter) bool {
+	pane := d.session.Pane(w.paneID)
+	if pane == nil {
+		return false
+	}
+	pane.PluginMu.Lock()
+	defer pane.PluginMu.Unlock()
+	if pane.ptyGen != w.gen {
+		log.Printf("sbx: pane %s: already started; not starting it again", w.paneID)
+		return false
+	}
+	return true
+}
+
+// respawnSbxPane starts the child for a pane whose sandbox is now ready. It
+// checks the waiter again: the leftover stop ran in between.
 func (d *Daemon) respawnSbxPane(w sbxWaiter) {
 	if d.stopping() {
 		log.Printf("sbx: pane %s: sandbox ready during shutdown; not spawning", w.paneID)

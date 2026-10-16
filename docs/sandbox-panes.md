@@ -590,7 +590,8 @@ It shows what will run on the host and every file the approval covers:
 - every file in each **local** kit the environment file names (`kits:` entries
   whose `source` starts with `./` or `../`);
 - `post_create_env_file`;
-- each `prepare_host` / `post_create` argument that names a file in the project.
+- each `prepare_host` / `post_create` argument that names a file (relative or
+  absolute).
 
 If **any** of these files changes, new sbx panes refuse to start until you run
 `quil sandbox trust` again. Keep your kits under the environment file's folder
@@ -604,13 +605,27 @@ Rules for the covered files:
   folder, and every file in a kit must be real files and folders. Quil cannot
   approve a link: the agent could change the file it points to. A profile with
   a link is refused; replace the link with the file itself.
+- **`prepare_host` names one project file: its script.** Write it as a relative
+  or an absolute path; both are covered. A command such as `/bin/sh` is not a
+  project file. A second project file (`["cp", "a.env", "b.env"]`) is refused:
+  put that step inside the script.
 - **The host step runs a copy.** Quil runs `prepare_host` with a private copy of
   the script you approved, not the file in the project, so a change after the
   check cannot run on your machine. The script runs in the profile's folder.
   It must find other files by paths relative to that folder, not through its
   own path (`$(dirname "$0")` points at the copy).
-- **The environment file is checked again** just before `sbx env create`. If it
-  or a kit changed since the pane started, the create stops.
+- **sbx creates the sandbox from a copy.** Quil gives `sbx env create` a private
+  copy of the approved environment file, its local kits and
+  `post_create_env_file`, in `$QUIL_HOME/sandbox/sbx-env/<name>/`, so a change
+  in the project during the create does not count. In the copy, Quil writes the
+  real folder in place of `${{ env.fileDir }}` and `${{ env.projectDir }}`, and
+  makes a relative `workspace` or `additionalWorkspaces` path absolute. Any
+  other relative path in the environment file would point into the copy: use
+  absolute paths there.
+- **No `lifecycle:` commands.** sbx runs them on your machine, and Quil cannot
+  cover the scripts they call. An environment file with a `lifecycle:` block is
+  refused; use `prepare_host` instead. Commands that a `secrets:` entry runs are
+  covered as text only: keep their helper programs outside the project.
 - In a worktree, `quil sandbox trust` approves the main checkout's profile, the
   one that worktree's panes use.
 
@@ -684,7 +699,8 @@ so Quil shares that folder too. You do not change your environment file.
 - Quil shares only the worktrees folder of a repository **inside the profile's
   folder**. A worktree counts only when the main repository lists it in its
   own `.git/worktrees/`, so `.git` files written in the project cannot make
-  Quil share another repository.
+  Quil share another repository. Quil compares real paths, after
+  following every link, and shares the real folder.
 - If the mount fails, a pane in a worktree does not start and shows sbx's
   error. A pane in the main checkout starts anyway, with a note.
 

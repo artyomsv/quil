@@ -10,12 +10,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
-
-	"gopkg.in/yaml.v3"
 )
 
 // The trust pin.
@@ -51,7 +49,8 @@ func TrustStorePath(quilDir string) string {
 // LOCAL kit the environment file names (sources starting "./" or "../" —
 // anything else is a registry reference sbx pulls itself); the post-create
 // env file; and every prepare_host / post_create argument that names an
-// existing file relative to the profile directory (the scripts).
+// existing file, absolute or relative to the profile directory (the scripts;
+// see fileArgs).
 //
 // A missing environment file is an error: a digest that silently left it out
 // would be a pin that does not pin the cage.
@@ -112,22 +111,33 @@ func PinnedFiles(p Profile) ([]string, error) {
 			return nil, fmt.Errorf("post_create_env_file: %w", err)
 		}
 	}
-	argvs := append([][]string{p.PrepareHost}, p.PostCreate...)
-	for _, argv := range argvs {
-		for _, a := range argv {
-			// An absolute argument is a system command (/bin/bash), not one
-			// of the profile's own scripts, and a system path may well run
-			// through a link (/bin -> usr/bin).
-			if a == "" || strings.HasPrefix(a, "-") || filepath.IsAbs(a) {
-				continue
-			}
-			cand := p.resolve(a)
-			if _, err := os.Lstat(cand); err != nil {
-				continue // not a file: a command name, a flag value, a word
-			}
-			if err := add(cand); err != nil {
-				return nil, fmt.Errorf("argument %s: %w", a, err)
-			}
+	// The host step may name ONE project file: its script. Quil runs a copy
+	// of the approved bytes in its place (see Approved.hostArgv), and an
+	// argument it cannot tell apart from the script — an input, or an output
+	// the step writes — would either run unchecked or be written into the
+	// copy and lost.
+	host, err := p.fileArgs(p.PrepareHost)
+	if err != nil {
+		return nil, fmt.Errorf("prepare_host: %w", err)
+	}
+	if len(host) > 1 {
+		names := make([]string, len(host))
+		for i, f := range host {
+			names[i] = p.PrepareHost[f.index]
+		}
+		return nil, fmt.Errorf("prepare_host names %d project files (%s); it may name only its script — "+
+			"put the other steps inside the script", len(host), strings.Join(names, ", "))
+	}
+	for _, f := range host {
+		set[f.path] = true
+	}
+	for i, step := range p.PostCreate {
+		files, err := p.fileArgs(step)
+		if err != nil {
+			return nil, fmt.Errorf("post_create[%d]: %w", i, err)
+		}
+		for _, f := range files {
+			set[f.path] = true
 		}
 	}
 
@@ -139,8 +149,53 @@ func PinnedFiles(p Profile) ([]string, error) {
 	return out, nil
 }
 
+// fileArg is an argv element that names an existing file.
+type fileArg struct {
+	index int
+	path  string
+}
+
+// fileArgs returns the arguments of argv that name an existing file, absolute
+// or relative to the profile's directory — however a script is spelt, it is
+// still the repository's file. The one exception is an absolute COMMAND
+// (argv[0]) outside the profile's directory: that is a system program
+// (/bin/bash), and a system path may run through a link (/bin -> usr/bin).
+//
+// A link is refused: on the file itself always, and on the folders between it
+// and the profile's directory when the file is under it.
+func (p Profile) fileArgs(argv []string) ([]fileArg, error) {
+	var out []fileArg
+	for i, a := range argv {
+		if a == "" || strings.HasPrefix(a, "-") {
+			continue
+		}
+		cand := filepath.Clean(p.resolve(a))
+		if i == 0 && filepath.IsAbs(a) && !ancestorOrSelf(p.Dir, cand) {
+			continue
+		}
+		st, err := os.Lstat(cand)
+		if err != nil || st.IsDir() {
+			continue // not a file: a command name, a flag value, a word
+		}
+		if st.Mode()&fs.ModeSymlink != 0 {
+			return nil, fmt.Errorf("argument %s: %s is a symbolic link; a sandbox profile's files must be "+
+				"real files (replace the link with the file it points to)", a, cand)
+		}
+		if !filepath.IsAbs(a) || ancestorOrSelf(p.Dir, cand) {
+			if err := refuseLinks(p.Dir, cand); err != nil {
+				return nil, fmt.Errorf("argument %s: %w", a, err)
+			}
+		}
+		if st.Mode().IsRegular() {
+			out = append(out, fileArg{index: i, path: cand})
+		}
+	}
+	return out, nil
+}
+
 // localKitDirs reads the kit sources the environment file names and returns
-// the local ones as absolute paths.
+// the local ones as absolute paths. It refuses an environment file with host
+// lifecycle commands (errLifecycle).
 //
 // Only the `kits: [{source: ...}]` shape is read. An environment file this
 // does not understand still has its own bytes pinned; only its kits would be
@@ -151,14 +206,12 @@ func localKitDirs(envFile string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("env_file: %w", err)
 	}
-	var doc struct {
-		Kits []struct {
-			Source string `yaml:"source"`
-		} `yaml:"kits"`
-	}
-	if err := yaml.Unmarshal(raw, &doc); err != nil {
-		// Pinned as bytes anyway; sbx will report the syntax error itself.
+	doc, ok := parseEnv(raw)
+	if !ok {
 		return nil, nil
+	}
+	if !doc.Lifecycle.IsZero() {
+		return nil, fmt.Errorf("env_file %s: %w", envFile, errLifecycle)
 	}
 	base := filepath.Dir(envFile)
 	var out []string
@@ -171,11 +224,11 @@ func localKitDirs(envFile string) ([]string, error) {
 	return out, nil
 }
 
-// IsLocalKitSource reports whether sbx treats a kit source as a local path.
-// sbx reads anything else — including a bare "mixins/x" — as a registry
-// image reference.
+// IsLocalKitSource reports whether sbx treats a kit source as a local path:
+// "./…", "../…", "." or "..". sbx reads anything else — including a bare
+// "mixins/x" — as a registry image reference.
 func IsLocalKitSource(s string) bool {
-	return strings.HasPrefix(s, "./") || strings.HasPrefix(s, "../")
+	return s == "." || s == ".." || strings.HasPrefix(s, "./") || strings.HasPrefix(s, "../")
 }
 
 // Digest hashes the pinned files: each file's path and content.
@@ -184,25 +237,32 @@ func Digest(p Profile) (string, []string, error) {
 	return digest, files, err
 }
 
+// pinnedFile is one pinned file as it was read: its bytes and its mode (a kit
+// may install an executable).
+type pinnedFile struct {
+	body []byte
+	mode fs.FileMode
+}
+
 // readPinned reads every pinned file ONCE and hashes the bytes it read, so
 // a caller holding the contents holds exactly what the digest describes.
-func readPinned(p Profile) ([]string, map[string][]byte, string, error) {
+func readPinned(p Profile) ([]string, map[string]pinnedFile, string, error) {
 	files, err := PinnedFiles(p)
 	if err != nil {
 		return nil, nil, "", err
 	}
 	h := sha256.New()
-	contents := make(map[string][]byte, len(files))
+	contents := make(map[string]pinnedFile, len(files))
 	var total int64
 	for _, f := range files {
-		body, err := readRegular(f, maxPinnedBytes-total)
+		pf, err := readRegular(f, maxPinnedBytes-total)
 		if err != nil {
 			return nil, nil, "", err
 		}
-		total += int64(len(body))
-		sum := sha256.Sum256(body)
+		total += int64(len(pf.body))
+		sum := sha256.Sum256(pf.body)
 		fmt.Fprintf(h, "%s\x00%s\n", filepath.ToSlash(f), hex.EncodeToString(sum[:]))
-		contents[f] = body
+		contents[f] = pf
 	}
 	return files, contents, "sha256:" + hex.EncodeToString(h.Sum(nil)), nil
 }
@@ -210,30 +270,30 @@ func readPinned(p Profile) ([]string, map[string][]byte, string, error) {
 // readRegular reads a regular file, at most limit bytes. It refuses a file
 // that turned into something else between the check and the open — a link
 // swapped in at that moment would otherwise be followed.
-func readRegular(path string, limit int64) ([]byte, error) {
+func readRegular(path string, limit int64) (pinnedFile, error) {
 	st, err := os.Lstat(path)
 	if err != nil {
-		return nil, err
+		return pinnedFile{}, err
 	}
 	if !st.Mode().IsRegular() {
-		return nil, fmt.Errorf("%s is not a regular file", path)
+		return pinnedFile{}, fmt.Errorf("%s is not a regular file", path)
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return pinnedFile{}, err
 	}
 	defer f.Close()
 	if fst, err := f.Stat(); err != nil || !os.SameFile(st, fst) {
-		return nil, fmt.Errorf("%s changed while it was read", path)
+		return pinnedFile{}, fmt.Errorf("%s changed while it was read", path)
 	}
 	body, err := io.ReadAll(io.LimitReader(f, limit+1))
 	if err != nil {
-		return nil, err
+		return pinnedFile{}, err
 	}
 	if int64(len(body)) > limit {
-		return nil, fmt.Errorf("pinned files exceed %d MiB; refusing to pin", maxPinnedBytes>>20)
+		return pinnedFile{}, fmt.Errorf("pinned files exceed %d MiB; refusing to pin", maxPinnedBytes>>20)
 	}
-	return body, nil
+	return pinnedFile{body: body, mode: st.Mode()}, nil
 }
 
 // refuseLinks reports an error when path, or any directory between it and
@@ -268,21 +328,29 @@ func ancestorOrSelf(dir, of string) bool {
 // together with the bytes that were read when they matched.
 //
 // The repository stays writable after the check, and preparing a sandbox
-// takes seconds before the host step runs. So the host step never runs a
-// script from the repository: it runs a private copy of the approved bytes
-// (hostArgv). What sbx itself reads — the environment file and its kits — is
-// checked once more right before the create (recheck); sbx reads those by
-// path, and a kit's relative sources mean they cannot be moved to a copy.
+// takes seconds. So nothing approved is read from the repository again: the
+// profile is parsed from the approved bytes, the host step runs a private
+// copy of its approved script (hostArgv), and sbx creates the sandbox from a
+// private copy of the approved environment file and kits (stageEnv).
 type Approved struct {
 	Profile
 	digest string
-	files  map[string][]byte
+	files  map[string]pinnedFile
+	// stageDir is where stageEnv writes the environment copy, beside the
+	// approval store: sbx keeps the file it was created from mounted, so the
+	// copy must outlive the create.
+	stageDir string
 }
 
 // Approve checks the profile against the approval store and returns it with
 // the bytes it was checked on. It returns an *ErrUntrusted when the profile
 // was never approved or changed since, and any other error when the files
 // cannot be read.
+//
+// The returned profile is parsed from the SAME bytes the digest covers. p was
+// parsed from an earlier read, and a writer that changed the profile for that
+// read and restored it for this one would otherwise get an unapproved command
+// run under an approved digest.
 func Approve(storePath string, p Profile) (Approved, error) {
 	_, contents, digest, err := readPinned(p)
 	if err != nil {
@@ -299,11 +367,23 @@ func Approve(storePath string, p Profile) (Approved, error) {
 	case e.Digest != digest:
 		return Approved{}, &ErrUntrusted{ProfilePath: p.Path, Changed: true}
 	}
-	return Approved{Profile: p, digest: digest, files: contents}, nil
+	approved, err := parseProfile(p.Path, contents[p.Path].body)
+	if err != nil {
+		return Approved{}, err
+	}
+	if !reflect.DeepEqual(approved, p) {
+		return Approved{}, &ErrUntrusted{ProfilePath: p.Path, Changed: true}
+	}
+	return Approved{
+		Profile:  approved,
+		digest:   digest,
+		files:    contents,
+		stageDir: filepath.Join(filepath.Dir(storePath), "sbx-env", approved.Name),
+	}, nil
 }
 
 // recheck reads the pinned files again and refuses when they no longer match
-// what was approved.
+// what was approved. The host step must not change them.
 func (a Approved) recheck() error {
 	digest, _, err := Digest(a.Profile)
 	if err != nil {
@@ -315,51 +395,38 @@ func (a Approved) recheck() error {
 	return nil
 }
 
-// hostArgv is the host step's argv with every approved script replaced by a
-// private copy of its approved bytes, in a new directory only this user can
-// read. The caller runs it and then calls cleanup.
+// hostArgv is the host step's argv with its script replaced by a private copy
+// of the approved bytes, in a new directory only this user can read. The
+// caller runs it and then calls cleanup.
 //
 // The copy is why a host script must not find other files through its own
 // path ("$(dirname "$0")"): it runs in the profile's directory, so it uses
 // paths relative to that.
 func (a Approved) hostArgv() (argv []string, cleanup func(), err error) {
 	argv = append([]string(nil), a.PrepareHost...)
-	var tmp string
-	cleanup = func() {
-		if tmp != "" {
-			_ = os.RemoveAll(tmp)
-		}
+	cleanup = func() {}
+	files, err := a.fileArgs(argv)
+	if err != nil {
+		return nil, nil, err
 	}
-	for i, arg := range argv {
-		if arg == "" || strings.HasPrefix(arg, "-") || filepath.IsAbs(arg) {
-			continue
-		}
-		cand := filepath.Clean(a.resolve(arg))
-		body, pinned := a.files[cand]
-		if !pinned {
-			if st, err := os.Lstat(cand); err == nil && !st.IsDir() {
-				cleanup()
-				return nil, nil, fmt.Errorf("prepare_host argument %s names a file the approval does not cover; "+
-					"run: quil sandbox trust %s", arg, a.Dir)
-			}
-			continue
-		}
-		if tmp == "" {
-			if tmp, err = os.MkdirTemp("", "quil-sbx-host-"); err != nil {
-				return nil, nil, err
-			}
-		}
-		dst := filepath.Join(tmp, strconv.Itoa(i), filepath.Base(cand))
-		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
-			cleanup()
-			return nil, nil, err
-		}
-		if err := os.WriteFile(dst, body, 0o700); err != nil {
-			cleanup()
-			return nil, nil, err
-		}
-		argv[i] = dst
+	if len(files) == 0 {
+		return argv, cleanup, nil
 	}
+	script, pinned := a.files[files[0].path]
+	if len(files) > 1 || !pinned {
+		return nil, nil, fmt.Errorf("prepare_host names a file the approval does not cover; run: quil sandbox trust %s", a.Dir)
+	}
+	tmp, err := os.MkdirTemp("", "quil-sbx-host-")
+	if err != nil {
+		return nil, nil, err
+	}
+	cleanup = func() { _ = os.RemoveAll(tmp) }
+	dst := filepath.Join(tmp, filepath.Base(files[0].path))
+	if err := os.WriteFile(dst, script.body, 0o700); err != nil {
+		cleanup()
+		return nil, nil, err
+	}
+	argv[files[0].index] = dst
 	return argv, cleanup, nil
 }
 

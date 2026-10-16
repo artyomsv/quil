@@ -25,7 +25,10 @@ func TestExecRunner_RunsInDirAndCapturesBothStreams(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	real, _ := filepath.EvalSymlinks(dir)
+	real, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !strings.Contains(out.String(), real) || !strings.Contains(out.String(), "to-stderr") {
 		t.Errorf("output = %q, want the directory and stderr", out.String())
 	}

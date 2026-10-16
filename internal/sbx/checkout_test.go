@@ -24,7 +24,11 @@ func repoLayout(t *testing.T, relative bool) (main, wt string) {
 	gitdir, back := adminDir, filepath.Join(wt, ".git")
 	if relative {
 		gitdir = filepath.Join("..", "..", "app", ".git", "worktrees", "feat-x")
-		back, _ = filepath.Rel(adminDir, back)
+		rel, err := filepath.Rel(adminDir, back)
+		if err != nil {
+			t.Fatal(err)
+		}
+		back = rel
 	}
 	// git's own back pointer: the main repository lists the worktree.
 	writeFile(t, filepath.Join(adminDir, "gitdir"), back+"\n")

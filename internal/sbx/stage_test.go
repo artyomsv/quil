@@ -48,12 +48,16 @@ func TestHostScript_AbsolutePathIsPinnedAndCopied(t *testing.T) {
 	var ran string
 	f := &fakeRunner{answers: func(argv []string) (string, error) {
 		if argv[0] == "sh" {
-			body, _ := os.ReadFile(argv[1])
-			ran = string(body)
+			ran = readFile(t, argv[1])
 		}
 		return lsThenOK(argv)
 	}}
-	_, _ = Client{Bin: "sbx", Runner: f}.Ensure(context.Background(), a, io.Discard)
+	// The swap is a change to an approved file, so the recheck after the host
+	// step refuses the create; what matters here is what the host step ran.
+	var ut *ErrUntrusted
+	if _, err := (Client{Bin: "sbx", Runner: f}).Ensure(context.Background(), a, io.Discard); !errors.As(err, &ut) {
+		t.Errorf("err = %v, want the recheck to refuse", err)
+	}
 	if ran != "#!/bin/sh\necho prep\n" {
 		t.Errorf("host step ran %q, want the approved script", ran)
 	}
@@ -109,7 +113,7 @@ func TestApprove_RefusesAProfileParsedFromOtherBytes(t *testing.T) {
 	tampered.PrepareHost = []string{"sh", "sandbox/prepare-host.sh", "--run-something-else"}
 	if d1, _, err1 := Digest(p); err1 != nil {
 		t.Fatal(err1)
-	} else if d2, _, _ := Digest(tampered); d1 != d2 {
+	} else if d2, _, err2 := Digest(tampered); err2 != nil || d1 != d2 {
 		t.Fatalf("the test needs one digest for both profiles: %s != %s", d1, d2)
 	}
 	var ut *ErrUntrusted
@@ -137,10 +141,8 @@ func TestEnsure_CreatesFromTheApprovedCopy(t *testing.T) {
 			writeFile(t, p.EnvFile, envYAML+"network:\n  allow: [\"*\"]\n")
 			writeFile(t, filepath.Join(p.Dir, "sandbox", "kits", "networking", "spec.yaml"), "kind: open\n")
 		case argv[0] == "sbx" && argv[1] == "env" && argv[2] == "create":
-			body, _ := os.ReadFile(argv[3])
-			created = string(body)
-			k, _ := os.ReadFile(filepath.Join(filepath.Dir(argv[3]), "kits", "networking", "spec.yaml"))
-			kit = string(k)
+			created = readFile(t, argv[3])
+			kit = readFile(t, filepath.Join(filepath.Dir(argv[3]), "kits", "networking", "spec.yaml"))
 		}
 		return lsThenOK(argv)
 	}}
@@ -235,12 +237,15 @@ func TestHostScript_RemovedScriptStillRunsTheApprovedCopy(t *testing.T) {
 	f := &fakeRunner{answers: func(argv []string) (string, error) {
 		if argv[0] == "sh" {
 			arg = argv[1]
-			body, _ := os.ReadFile(argv[1])
-			ran = string(body)
+			ran = readFile(t, argv[1])
 		}
 		return lsThenOK(argv)
 	}}
-	_, _ = Client{Bin: "sbx", Runner: f}.Ensure(context.Background(), p, io.Discard)
+	// The script is gone, so the recheck after the host step fails the create;
+	// what matters here is what the host step ran.
+	if _, err := (Client{Bin: "sbx", Runner: f}).Ensure(context.Background(), p, io.Discard); err == nil {
+		t.Error("the create went ahead with an approved script missing")
+	}
 	if arg == "sandbox/prepare-host.sh" || arg == script || ran != "#!/bin/sh\necho prep\n" {
 		t.Errorf("host step ran %q (%q), want the approved copy", arg, ran)
 	}

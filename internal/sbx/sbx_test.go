@@ -24,6 +24,16 @@ func writeFile(t *testing.T, path, body string) {
 	}
 }
 
+// readFile returns path's content and fails the test when it cannot be read.
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(body)
+}
+
 const envYAML = `schemaVersion: "1"
 agent: claude
 workspace: /work/app
@@ -214,9 +224,9 @@ func TestTrust_RefusesUntilApprovedAndAfterAnyChange(t *testing.T) {
 	} {
 		t.Run(rel, func(t *testing.T) {
 			path := filepath.Join(dir, filepath.FromSlash(rel))
-			orig, _ := os.ReadFile(path)
-			writeFile(t, path, string(orig)+"\n# changed\n")
-			defer writeFile(t, path, string(orig))
+			orig := readFile(t, path)
+			writeFile(t, path, orig+"\n# changed\n")
+			defer writeFile(t, path, orig)
 			p2, err := LoadProfile(filepath.Join(dir, ProfileFile))
 			if err != nil {
 				t.Fatal(err)
@@ -379,8 +389,7 @@ func TestEnsure_CreatesInOrder(t *testing.T) {
 			return lsHeader, nil
 		}
 		if argv[0] == "sh" {
-			body, _ := os.ReadFile(argv[1])
-			ranScript = string(body)
+			ranScript = readFile(t, argv[1])
 		}
 		return "", nil
 	}}
@@ -424,8 +433,7 @@ func TestEnsure_RunsWhatWasApprovedNotWhatIsOnDiskNow(t *testing.T) {
 		var ranScript string
 		f := &fakeRunner{answers: func(argv []string) (string, error) {
 			if argv[0] == "sh" {
-				body, _ := os.ReadFile(argv[1])
-				ranScript = string(body)
+				ranScript = readFile(t, argv[1])
 			}
 			if argv[1] == "ls" {
 				return lsHeader, nil
@@ -507,8 +515,7 @@ func TestPinnedFiles_RefusesSymlinks(t *testing.T) {
 			moved := t.TempDir()
 			src := filepath.Join(dir, "sandbox")
 			for _, rel := range []string{"sbxenv.yaml", "prepare-host.sh", "setup.env", filepath.Join("kits", "networking", "spec.yaml")} {
-				body, _ := os.ReadFile(filepath.Join(src, rel))
-				writeFile(t, filepath.Join(moved, rel), string(body))
+				writeFile(t, filepath.Join(moved, rel), readFile(t, filepath.Join(src, rel)))
 			}
 			replaceWithLink(t, moved, src)
 		}},

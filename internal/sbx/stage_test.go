@@ -322,3 +322,28 @@ func loadFixtureFrom(t *testing.T, dir string) Approved {
 	}
 	return approve(t, p)
 }
+
+// sbx decodes the environment file with YAML merges and aliases applied, and
+// Quil reads it as written, so a declaration reached only through one would
+// be effective in sbx yet unseen by the approval. Both are refused.
+func TestEnv_MergeKeysAndAliasesAreRefused(t *testing.T) {
+	tests := map[string]string{
+		"merged lifecycle": "schemaVersion: \"1\"\nworkspace: /work/app\n<<:\n  lifecycle:\n    initialize:\n      - command: /work/app/helper.sh\n",
+		"merged kits":      "schemaVersion: \"1\"\nworkspace: /work/app\n<<:\n  kits:\n    - ./kits/networking\n",
+		"merged workspace": "schemaVersion: \"1\"\n<<:\n  workspace: data\n",
+		"alias":            "schemaVersion: \"1\"\nx: &ws data\nworkspace: *ws\n",
+	}
+	for name, env := range tests {
+		t.Run(name, func(t *testing.T) {
+			dir := fixture(t, fullProfile)
+			writeFile(t, filepath.Join(dir, "sandbox", "sbxenv.yaml"), env)
+			p, err := LoadProfile(filepath.Join(dir, ProfileFile))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := PinnedFiles(p); err == nil || !strings.Contains(err.Error(), "not supported") {
+				t.Errorf("err = %v, want the merge/alias refusal", err)
+			}
+		})
+	}
+}

@@ -625,8 +625,8 @@ Rules for the covered files:
   workspace path that starts with another expression (`${{ env.args.x }}`) is
   refused: write it as an absolute path. Any other relative path in the
   environment file would point into the copy: use absolute paths there. An
-  environment file Quil cannot read (bad YAML, a kit with no source) is
-  refused.
+  environment file Quil cannot read (bad YAML, a kit with no source, a YAML
+  merge key `<<` or an alias `*name`) is refused.
 - **No `lifecycle:` commands.** sbx runs them on your machine, and Quil cannot
   cover the scripts they call. An environment file with a `lifecycle:` block is
   refused; use `prepare_host` instead. Commands that a `secrets:` entry runs are

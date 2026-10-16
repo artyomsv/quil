@@ -50,6 +50,9 @@ func parseEnv(raw []byte) (envDoc, error) {
 	if len(root.Content) != 1 || root.Content[0].Kind != yaml.MappingNode {
 		return envDoc{}, errors.New("not a YAML mapping")
 	}
+	if err := refuseIndirection(&root); err != nil {
+		return envDoc{}, err
+	}
 	var doc envDoc
 	m := root.Content[0]
 	for i := 0; i+1 < len(m.Content); i += 2 {
@@ -71,6 +74,30 @@ func parseEnv(raw []byte) (envDoc, error) {
 		}
 	}
 	return doc, nil
+}
+
+// refuseIndirection refuses YAML merge keys (`<<:`) and aliases (`*name`)
+// anywhere in the document. Quil reads the document as written, while sbx
+// decodes it with merges and aliases applied — so a lifecycle block or a kit
+// reached only through one would be invisible to the approval and the copy,
+// yet effective in sbx.
+func refuseIndirection(n *yaml.Node) error {
+	if n.Kind == yaml.AliasNode {
+		return fmt.Errorf("line %d: YAML aliases are not supported in an environment file Quil approves", n.Line)
+	}
+	if n.Kind == yaml.MappingNode {
+		for i := 0; i < len(n.Content); i += 2 {
+			if k := n.Content[i]; k.Value == "<<" || k.Tag == "!!merge" {
+				return fmt.Errorf("line %d: YAML merge keys (<<) are not supported in an environment file Quil approves", k.Line)
+			}
+		}
+	}
+	for _, c := range n.Content {
+		if err := refuseIndirection(c); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // kitSource is a kit entry's source: the string itself, or a mapping's

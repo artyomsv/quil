@@ -765,14 +765,17 @@ file's folder when a path is named, so `rewriteEnv` expands both tokens to the
 original folder and makes relative `workspace`/`additionalWorkspaces` paths
 absolute; kits keep their relative layout under one common root. Any other
 relative path lands in the copy — a broken create, never a wider cage. An env
-file with `lifecycle:` is refused (`errLifecycle`) — checked by `envKitDirs`, which the
-pin and the copy share; `parseEnv` reads a `yaml.Node`, accepts a kit as a
-bare string or a `source` mapping, and FAILS CLOSED on anything else (a typed
-decode once failed on a string kit and skipped the lifecycle check). A relative
-workspace path still holding `${{ … }}` after the folder tokens is refused at
-approval: it may expand to an absolute path, and anchoring it would mount
-another folder: Quil's `--force` approves
-sbx's host commands, and the scripts they call are not pinned. A host script
+file with `lifecycle:` is refused (`errLifecycle`): Quil's `--force` approves
+sbx's host commands, and the scripts they call are not pinned. It is checked by
+`envKitDirs`, which the pin and the copy share; `parseEnv` reads a
+`yaml.Node`, accepts a kit as a bare string or a `source` mapping, and FAILS
+CLOSED on anything else (a typed decode once failed on a string kit and
+skipped the lifecycle check). YAML merge keys (`<<`) and aliases are refused
+(`refuseIndirection`): Quil reads the document as written while sbx decodes it
+with them applied, so a root `<<:` hid a lifecycle block. A relative workspace
+path still holding `${{ … }}` after the folder tokens is refused at approval:
+it may expand to an absolute path, and anchoring it would mount another
+folder. A host script
 must not find siblings through `$0`.
 
 **The create is minutes, so it is off the dispatch goroutine**, shaped like the

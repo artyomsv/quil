@@ -751,7 +751,9 @@ an output (`cp a b` wrote into the copy and lost the result).
 THOSE BYTES (`parseProfile`), refused unless equal to the caller's parse — the
 earlier parse could come from a changed file restored before the digest read.
 `Ensure` runs `prepare_host` from a private 0700 copy of the script
-(`hostArgv`), `recheck`s (the host step must not change a pinned file), then
+(`hostArgv`), the script chosen from the APPROVED snapshot rather than
+the disk (a script removed after approval was skipped, its repository path
+passed on, and a file put back in time ran), `recheck`s (the host step must not change a pinned file), then
 `stageEnv` writes the env file, local kits and post-create env file to
 `$QUIL_HOME/sandbox/sbx-env/<name>/` (persistent: sbx keeps the env file
 mounted) and creates from that. Measured on sbx 0.48: relative paths,

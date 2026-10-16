@@ -214,3 +214,27 @@ func TestRedactEnv(t *testing.T) {
 		t.Errorf("RedactEnv = %q, want %q", got, want)
 	}
 }
+
+// The script is chosen from the approved snapshot: removing it after the
+// approval (to put a changed one back before the command opens it) must not
+// make the host step fall back to the repository's path.
+func TestHostScript_RemovedScriptStillRunsTheApprovedCopy(t *testing.T) {
+	p := loadFixture(t)
+	script := filepath.Join(p.Dir, "sandbox", "prepare-host.sh")
+	if err := os.Remove(script); err != nil {
+		t.Fatal(err)
+	}
+	var arg, ran string
+	f := &fakeRunner{answers: func(argv []string) (string, error) {
+		if argv[0] == "sh" {
+			arg = argv[1]
+			body, _ := os.ReadFile(argv[1])
+			ran = string(body)
+		}
+		return lsThenOK(argv)
+	}}
+	_, _ = Client{Bin: "sbx", Runner: f}.Ensure(context.Background(), p, io.Discard)
+	if arg == "sandbox/prepare-host.sh" || arg == script || ran != "#!/bin/sh\necho prep\n" {
+		t.Errorf("host step ran %q (%q), want the approved copy", arg, ran)
+	}
+}

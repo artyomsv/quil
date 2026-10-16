@@ -405,28 +405,51 @@ func (a Approved) recheck() error {
 func (a Approved) hostArgv() (argv []string, cleanup func(), err error) {
 	argv = append([]string(nil), a.PrepareHost...)
 	cleanup = func() {}
+	// The script is chosen from the APPROVED snapshot, never from what is on
+	// disk now: a script removed after approval would otherwise be skipped
+	// here, its original path passed on, and a file put back before the
+	// command opens it run on the host.
+	script := -1
+	for i, arg := range argv {
+		if arg == "" || strings.HasPrefix(arg, "-") {
+			continue
+		}
+		cand := filepath.Clean(a.resolve(arg))
+		if i == 0 && filepath.IsAbs(arg) && !ancestorOrSelf(a.Dir, cand) {
+			continue
+		}
+		if _, ok := a.files[cand]; ok {
+			if script >= 0 {
+				return nil, nil, fmt.Errorf("prepare_host names more than one project file; run: quil sandbox trust %s", a.Dir)
+			}
+			script = i
+		}
+	}
+	// Any OTHER argument that names a file now appeared after approval.
 	files, err := a.fileArgs(argv)
 	if err != nil {
 		return nil, nil, err
 	}
-	if len(files) == 0 {
+	for _, f := range files {
+		if f.index != script {
+			return nil, nil, fmt.Errorf("prepare_host names a file the approval does not cover; run: quil sandbox trust %s", a.Dir)
+		}
+	}
+	if script < 0 {
 		return argv, cleanup, nil
 	}
-	script, pinned := a.files[files[0].path]
-	if len(files) > 1 || !pinned {
-		return nil, nil, fmt.Errorf("prepare_host names a file the approval does not cover; run: quil sandbox trust %s", a.Dir)
-	}
+	path := filepath.Clean(a.resolve(argv[script]))
 	tmp, err := os.MkdirTemp("", "quil-sbx-host-")
 	if err != nil {
 		return nil, nil, err
 	}
 	cleanup = func() { _ = os.RemoveAll(tmp) }
-	dst := filepath.Join(tmp, filepath.Base(files[0].path))
-	if err := os.WriteFile(dst, script.body, 0o700); err != nil {
+	dst := filepath.Join(tmp, filepath.Base(path))
+	if err := os.WriteFile(dst, a.files[path].body, 0o700); err != nil {
 		cleanup()
 		return nil, nil, err
 	}
-	argv[files[0].index] = dst
+	argv[script] = dst
 	return argv, cleanup, nil
 }
 

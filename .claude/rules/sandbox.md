@@ -837,16 +837,26 @@ pane into the profile's sandbox). The preparation is keyed `attach:<name>`
 two never share a waiter list with different checks. `findSbxSandbox` reads
 `sbx ls --json` (`sbx.ListSandboxes`/`ParseListJSON`, measured on 0.48: a bare
 list, workspaces as `path` or `path:ro`, primary first) and refuses a missing
-name; `checkSbxAttach` refuses a pane folder not inside a WRITABLE workspace,
-compared as real paths (`Listed.Covers`) — without it `-w` would start the
-agent outside what the user opened. Measured on 0.48: `sbx exec` starts a
+name; `checkSbxAttach` refuses a pane folder not in a WRITABLE workspace —
+without it `-w` would start the agent outside what the user opened.
+`Listed.Covers` compares real paths and lets the MOST SPECIFIC workspace
+decide (a `:ro` folder inside a writable one stays read-only; at one path
+read-only wins). Because `sbx ls` omits folders added with `sbx mount` (see
+the worktrees note above), a "no" from `Covers` is not final:
+`sbx.WritableInside` runs `sbx exec <name> sh -c 'test -d "$1" && test -w
+"$1"' sh <dir>` (the folder an ARGUMENT, a marker line as the answer;
+`test -w` is access(W_OK), so it reports EROFS on a read-only mount). A
+folder the agent made inside the VM also passes — that cannot widen the
+cage, the pane still runs in that sandbox. Measured on 0.48: `sbx exec` starts a
 stopped sandbox itself, so attach needs no start step. The leftover prefix
 stop still runs: it matches only this pane's own tag. The create dialog's
 list rides the capability answer (`SandboxCapRespPayload.SbxSandboxes`, a
-fresh `sbx ls --json` per request, writable folders only — no new message
-type, so the rights table and web allow-list are unchanged); the TUI filters
-it by TEXT against the browsed folder (`folderHolds`, either separator, since
-the daemon may be another OS) and the daemon checks again at spawn. Quil and
+fresh `sbx ls --json` per request, writable and read-only folders — no new
+message type, so the rights table and web allow-list are unchanged); the TUI
+ORDERS it by TEXT against the browsed folder (`sbxListsFolder` /
+`folderHolds`, most specific wins, either separator, since the daemon may be
+another OS): listed fits first, the rest after them and still selectable,
+since only the spawn-time probe knows about `sbx mount` folders. Quil and
 the owning tool know nothing of each other: the only shared facts are the
 sandbox name and sbx's own listing.
 

@@ -423,7 +423,7 @@ func (d *Daemon) startSbxWaiters(ctx context.Context, t sbxTarget, listed sbx.Li
 	if t.attach {
 		// Never a mount: the sandbox belongs to another tool, and Quil does
 		// not widen a cage it did not build.
-		failed = d.checkSbxAttach(listed, ids)
+		failed = d.checkSbxAttach(ctx, listed, ids)
 	} else {
 		failed = d.mountSbxWorktrees(ctx, t.prof, ids)
 	}
@@ -465,11 +465,14 @@ func (d *Daemon) findSbxSandbox(ctx context.Context, name string) (sbx.Listed, e
 	return sbx.FindListed(list, name)
 }
 
-// checkSbxAttach returns the panes whose folder the sandbox does not mount
-// writable. `sbx exec -w` would otherwise start the agent somewhere the user
-// did not open the pane, or fail inside the VM with a less useful message.
-func (d *Daemon) checkSbxAttach(listed sbx.Listed, panes []string) map[string]error {
+// checkSbxAttach returns the panes whose folder is not a writable folder of
+// the sandbox. `sbx exec -w` would otherwise start the agent somewhere the
+// user did not open the pane, or fail inside the VM with a less useful
+// message. `sbx ls` is asked first; when it says no, the sandbox itself is
+// asked, because `sbx ls` does not list a folder added with `sbx mount`.
+func (d *Daemon) checkSbxAttach(ctx context.Context, listed sbx.Listed, panes []string) map[string]error {
 	failed := map[string]error{}
+	var c *sbx.Client
 	for _, id := range panes {
 		pane := d.session.Pane(id)
 		if pane == nil {
@@ -478,8 +481,26 @@ func (d *Daemon) checkSbxAttach(listed sbx.Listed, panes []string) map[string]er
 		pane.PluginMu.Lock()
 		cwd := pane.CWD
 		pane.PluginMu.Unlock()
-		if err := sbx.CheckAttach(listed, cwd); err != nil {
-			failed[id] = err
+		lsErr := sbx.CheckAttach(listed, cwd)
+		if lsErr == nil {
+			continue
+		}
+		if c == nil {
+			bin, err := sbxBinaryFn()
+			if err != nil {
+				failed[id] = lsErr
+				continue
+			}
+			c = &sbx.Client{Bin: bin, Runner: sbxRunner}
+		}
+		ok, err := c.WritableInside(ctx, listed.Name, cwd)
+		switch {
+		case err != nil:
+			failed[id] = fmt.Errorf("%w (and the check inside the sandbox failed: %v)", lsErr, err)
+		case !ok:
+			failed[id] = lsErr
+		default:
+			log.Printf("sbx: sandbox %s: pane %s: its folder is writable inside the sandbox, though sbx ls does not list it", listed.Name, id)
 		}
 	}
 	return failed
@@ -725,7 +746,7 @@ func (d *Daemon) sbxCapGet(ctx context.Context) ipc.SandboxCapRespPayload {
 }
 
 // listSbxSandboxes is the create dialog's attach list: every existing sandbox
-// with the folders it mounts writable. Read fresh, never cached, since
+// with the folders `sbx ls` lists for it. Read fresh, never cached, since
 // another tool creates and removes them; a failure is logged and offers
 // nothing, which only hides the attach choice.
 func listSbxSandboxes(ctx context.Context) []ipc.SbxSandbox {
@@ -742,7 +763,9 @@ func listSbxSandboxes(ctx context.Context) []ipc.SbxSandbox {
 	for _, l := range list {
 		s := ipc.SbxSandbox{Name: l.Name, Status: l.Status}
 		for _, w := range l.Workspaces {
-			if !w.ReadOnly {
+			if w.ReadOnly {
+				s.ReadOnlyFolders = append(s.ReadOnlyFolders, w.Path)
+			} else {
 				s.Folders = append(s.Folders, w.Path)
 			}
 		}

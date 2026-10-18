@@ -74,12 +74,14 @@ type scriptRunner struct {
 	mountErr error
 	// lsJSON is the answer to `sbx ls --json`.
 	lsJSON string
+	// writable is the in-sandbox folder probe's answer.
+	writable bool
 }
 
 func (r *scriptRunner) Run(_ context.Context, _ string, w io.Writer, argv ...string) error {
 	r.mu.Lock()
 	r.calls = append(r.calls, append([]string(nil), argv...))
-	exists, mountErr, lsJSON := r.exists, r.mountErr, r.lsJSON
+	exists, mountErr, lsJSON, writable := r.exists, r.mountErr, r.lsJSON, r.writable
 	r.mu.Unlock()
 	if len(argv) > 1 {
 		switch argv[1] {
@@ -96,6 +98,10 @@ func (r *scriptRunner) Run(_ context.Context, _ string, w io.Writer, argv ...str
 			}
 		case "mount":
 			return mountErr
+		case "exec":
+			if writable && slices.ContainsFunc(argv, func(a string) bool { return strings.Contains(a, "QUIL_SBX_WRITABLE") }) {
+				io.WriteString(w, "QUIL_SBX_WRITABLE\n")
+			}
 		}
 	}
 	return nil

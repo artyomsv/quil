@@ -133,7 +133,10 @@ func TestSpawnPane_SbxAttachRefusals(t *testing.T) {
 		wantErr string
 	}{
 		{"missing sandbox", func(string) string { return "[]\n" }, "no such sbx sandbox"},
-		{"folder outside the sandbox", func(string) string { return lsJSON(t, "team-box", t.TempDir()) }, "is not inside"},
+		{"folder outside the sandbox", func(string) string { return lsJSON(t, "team-box", t.TempDir()) }, "is not in a writable folder"},
+		{"read-only folder inside a writable one", func(cwd string) string {
+			return lsJSON(t, "team-box", filepath.Dir(cwd), cwd+":ro")
+		}, "is not in a writable folder"},
 		{"folder mounted read-only", func(cwd string) string { return lsJSON(t, "team-box", cwd+":ro") }, "mounts no writable folder"},
 		{"answer that is not JSON", func(string) string { return "Error: something broke\n" }, "no JSON"},
 	}
@@ -152,8 +155,8 @@ func TestSpawnPane_SbxAttachRefusals(t *testing.T) {
 			if !strings.Contains(spawnErr, tt.wantErr) {
 				t.Errorf("SpawnError = %q, want it to contain %q", spawnErr, tt.wantErr)
 			}
-			if r.ran("/fake/sbx", "env", "create") || r.ran("/fake/sbx", "exec") {
-				t.Errorf("a refused attach reached create or exec; calls = %v", r.calls)
+			if r.ran("/fake/sbx", "env", "create") || r.ran("/fake/sbx", "exec", "-it") {
+				t.Errorf("a refused attach reached create or the agent's exec; calls = %v", r.calls)
 			}
 		})
 	}
@@ -220,8 +223,9 @@ func TestSnapshot_SbxNameSurvivesTheRoundTrip(t *testing.T) {
 	}
 }
 
-// The dialog's list carries only the folders a pane may run in.
-func TestListSbxSandboxes_OnlyWritableFolders(t *testing.T) {
+// The dialog's list carries both kinds of folder, apart: the most specific
+// one decides, so the dialog needs the read-only ones too.
+func TestListSbxSandboxes_SplitsWritableAndReadOnlyFolders(t *testing.T) {
 	r := &scriptRunner{lsJSON: lsJSON(t, "team-box", "/w/ticket", "/w/app/.git:ro")}
 	prevRunner, prevBin := sbxRunner, sbxBinaryFn
 	sbxRunner = r
@@ -229,8 +233,32 @@ func TestListSbxSandboxes_OnlyWritableFolders(t *testing.T) {
 	t.Cleanup(func() { sbxRunner, sbxBinaryFn = prevRunner, prevBin })
 
 	got := listSbxSandboxes(context.Background())
-	want := []ipc.SbxSandbox{{Name: "team-box", Status: "stopped", Folders: []string{"/w/ticket"}}}
+	want := []ipc.SbxSandbox{{Name: "team-box", Status: "stopped", Folders: []string{"/w/ticket"},
+		ReadOnlyFolders: []string{"/w/app/.git"}}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("listSbxSandboxes = %+v, want %+v", got, want)
+	}
+}
+
+// `sbx ls` does not list a folder another tool added with `sbx mount`, so a
+// folder it does not list is checked inside the sandbox before refusing —
+// with the folder as an argument, never as script text.
+func TestSpawnPane_SbxAttachAsksTheSandboxForAnUnlistedFolder(t *testing.T) {
+	d, pane, r := sbxFixture(t, false)
+	pane.SandboxName = "team-box"
+	r.lsJSON = lsJSON(t, "team-box", t.TempDir())
+	r.writable = true
+
+	s := attachRun(t, d, pane)
+	if s == nil {
+		t.Fatalf("a folder the sandbox reports writable was refused: %q; calls = %v", pane.SpawnError, r.calls)
+	}
+	if !r.ran(append([]string{"/fake/sbx"}, sbx.WritableArgs("team-box", pane.CWD)...)...) {
+		t.Errorf("the sandbox was not asked about the folder; calls = %v", r.calls)
+	}
+	for _, step := range [][]string{{"/fake/sbx", "env", "create"}, {"/fake/sbx", "mount"}} {
+		if r.ran(step...) {
+			t.Errorf("attach ran %v; calls = %v", step, r.calls)
+		}
 	}
 }

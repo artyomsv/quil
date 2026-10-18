@@ -123,12 +123,14 @@ func attachModel() Model {
 	return m
 }
 
-// Only sandboxes that mount the folder are offered, and never a name sbx
-// would read as a flag.
-func TestSandboxRow_AttachOffersOnlyTheSandboxesThatMountTheFolder(t *testing.T) {
+// Sandboxes whose listed folders hold the folder come first; the others are
+// still offered, after them, because `sbx ls` does not list a folder added
+// with `sbx mount`. A name sbx would read as a flag is never offered.
+func TestSandboxRow_AttachOffersTheFittingSandboxesFirst(t *testing.T) {
 	m := attachModel()
 	got := m.sandboxChoices()
-	want := []sandboxChoice{{backend: "docker"}, {backend: "sbx"}, {backend: "sbx", name: "ticket-1"}}
+	want := []sandboxChoice{{backend: "docker"}, {backend: "sbx"},
+		{backend: "sbx", name: "ticket-1"}, {backend: "sbx", name: "ticket-2"}}
 	if len(got) != len(want) {
 		t.Fatalf("choices = %+v, want %+v", got, want)
 	}
@@ -137,14 +139,13 @@ func TestSandboxRow_AttachOffersOnlyTheSandboxesThatMountTheFolder(t *testing.T)
 			t.Errorf("choice %d = %+v, want %+v", i, got[i], want[i])
 		}
 	}
-	// No folder chosen yet: every usable sandbox is offered.
-	m.cwdBrowseDir = ""
-	if n := len(m.sbxAttachChoices()); n != 2 {
-		t.Errorf("with no folder, %d sandboxes offered, want 2", n)
+	m.cwdBrowseDir = "/w/ticket-2/app"
+	if c := m.sbxAttachChoices(); len(c) != 2 || c[0].Name != "ticket-2" {
+		t.Errorf("choices for ticket-2's folder = %+v, want ticket-2 first", c)
 	}
 }
 
-// → walks Docker, the profile, then the sandbox; the spec carries its name.
+// → walks Docker, the profile, then the sandboxes; the spec carries the name.
 func TestSandboxRow_ArrowsReachAnExistingSandbox(t *testing.T) {
 	m := attachModel()
 	m.sandboxBackend = config.SandboxBackendDocker
@@ -161,7 +162,7 @@ func TestSandboxRow_ArrowsReachAnExistingSandbox(t *testing.T) {
 		t.Fatalf("spec = %+v", spec)
 	}
 	out := m.renderSetupSandboxField(true)
-	for _, w := range []string{"attach: existing sandbox ticket-1 (stopped)", "←/→ Docker"} {
+	for _, w := range []string{"attach: ticket-1 (stopped), not changed", "←/→ sbx ticket-2"} {
 		if !strings.Contains(out, w) {
 			t.Errorf("row does not contain %q:\n%s", w, out)
 		}
@@ -171,16 +172,21 @@ func TestSandboxRow_ArrowsReachAnExistingSandbox(t *testing.T) {
 	}
 }
 
-// A sandbox picked before the folder changed is refused at submit, with the
-// way out named.
-func TestSandboxSubmitError_AttachAfterTheFolderMoved(t *testing.T) {
+// A sandbox whose listed folders do not hold the folder may still be
+// submitted — the daemon asks the sandbox itself — and the row says so. One
+// sbx no longer lists is refused, with the way out named.
+func TestSandboxSubmitError_AttachChecks(t *testing.T) {
 	m := attachModel()
 	m.sandboxBackend, m.sandboxSbxName = config.SandboxBackendSbx, "ticket-1"
-	if msg := m.sandboxSubmitError(); msg != "" {
-		t.Fatalf("a covered folder refused: %q", msg)
-	}
 	m.cwdBrowseDir = "/w/ticket-2"
-	if msg := m.sandboxSubmitError(); !strings.Contains(msg, "does not mount this folder") {
+	if msg := m.sandboxSubmitError(); msg != "" {
+		t.Errorf("an unlisted folder was refused: %q", msg)
+	}
+	if out := m.renderSetupSandboxField(false); !strings.Contains(out, "attach: ticket-1 (stopped), folder checked at start") {
+		t.Errorf("the row does not say the folder is checked at start:\n%s", out)
+	}
+	m.applySandboxCap("", ipc.SandboxCapRespPayload{Available: true, SbxAvailable: true})
+	if msg := m.sandboxSubmitError(); !strings.Contains(msg, "not listed by sbx") {
 		t.Errorf("submit error = %q", msg)
 	}
 	// The cycle restarts from the first choice rather than losing its place.
@@ -218,13 +224,35 @@ func TestFolderHolds(t *testing.T) {
 	}
 }
 
-// With sbx alone, a sandbox that stopped mounting the folder leaves one
-// choice — and the arrows must still reach it, or the dialog is stuck.
+// The most specific listed folder decides, as the daemon's check does.
+func TestSbxListsFolder_MostSpecificWins(t *testing.T) {
+	s := ipc.SbxSandbox{Folders: []string{"/w/app", "/w/ref/notes"}, ReadOnlyFolders: []string{"/w/app/reference", "/w/ref"}}
+	for dir, want := range map[string]bool{
+		"/w/app":             true,
+		"/w/app/src":         true,
+		"/w/app/reference":   false, // read-only inside a writable folder
+		"/w/app/reference/x": false,
+		"/w/ref":             false,
+		"/w/ref/notes/today": true, // writable inside a read-only folder
+		"/w/other":           false,
+		"":                   true, // no folder chosen yet
+	} {
+		if got := sbxListsFolder(s, dir); got != want {
+			t.Errorf("sbxListsFolder(%q) = %v, want %v", dir, got, want)
+		}
+	}
+	if sbxListsFolder(ipc.SbxSandbox{Folders: []string{"/w"}, ReadOnlyFolders: []string{"/w"}}, "/w") {
+		t.Error("one path listed both ways counted as writable")
+	}
+}
+
+// With sbx alone, a sandbox sbx stopped listing leaves one choice — and the
+// arrows must still reach it, or the dialog is stuck.
 func TestSandboxRow_SbxOnlyRecoversFromAStaleSandbox(t *testing.T) {
 	m := attachModel()
 	m.sandboxDialogDocker = false
 	m.sandboxBackend, m.sandboxSbxName = config.SandboxBackendSbx, "ticket-1"
-	m.cwdBrowseDir = "/w/elsewhere"
+	m.applySandboxCap("", ipc.SandboxCapRespPayload{SbxAvailable: true})
 	if !m.handleSandboxFieldKey(tea.KeyPressMsg{Code: tea.KeyRight}) {
 		t.Fatal("→ was not taken on a stale sandbox choice")
 	}

@@ -1,12 +1,14 @@
 package sbx
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Attaching to a sandbox Quil did not create.
@@ -124,21 +126,34 @@ func parseWorkspace(s string) Workspace {
 	return Workspace{Path: s}
 }
 
-// Covers reports whether dir is inside one of the sandbox's WRITABLE
-// workspaces. Both sides are compared as real paths where they resolve: a
-// link inside a workspace can lead anywhere, and the agent then runs where it
-// leads.
+// Covers reports whether dir is inside a WRITABLE workspace, as `sbx ls`
+// lists them. The most specific workspace holding dir decides, because a
+// read-only folder can be mounted inside a writable one (and the reverse);
+// at one path, read-only wins. Both sides are compared as real paths where
+// they resolve: a link inside a workspace can lead anywhere, and the agent
+// then runs where it leads.
+//
+// `sbx ls` does not list a folder added later with `sbx mount`, so false is
+// not the last word: see WritableInside.
 func (l Listed) Covers(dir string) bool {
 	d := realOrClean(dir)
+	best, writable := -1, false
 	for _, w := range l.Workspaces {
-		if w.ReadOnly || !filepath.IsAbs(w.Path) {
+		if !filepath.IsAbs(w.Path) {
 			continue
 		}
-		if ancestorOrSelf(realOrClean(w.Path), d) {
-			return true
+		p := realOrClean(w.Path)
+		if !ancestorOrSelf(p, d) {
+			continue
+		}
+		switch {
+		case len(p) > best:
+			best, writable = len(p), !w.ReadOnly
+		case len(p) == best && w.ReadOnly:
+			writable = false
 		}
 	}
-	return false
+	return writable
 }
 
 func realOrClean(p string) string {
@@ -177,5 +192,47 @@ func CheckAttach(l Listed, dir string) error {
 	if len(rw) == 0 {
 		return fmt.Errorf("sbx sandbox %s mounts no writable folder", l.Name)
 	}
-	return fmt.Errorf("%s is not inside sbx sandbox %s, which mounts %s", dir, l.Name, strings.Join(rw, ", "))
+	return fmt.Errorf("%s is not in a writable folder of sbx sandbox %s, which mounts %s", dir, l.Name, strings.Join(rw, ", "))
+}
+
+// attachProbeTimeout bounds WritableInside. It may start a stopped sandbox
+// first, which takes seconds, so it is longer than a read-only probe.
+const attachProbeTimeout = 60 * time.Second
+
+// writableMarker is what the probe prints when the folder is writable; any
+// other output (a notice that sbx started the sandbox) is ignored.
+const writableMarker = "QUIL_SBX_WRITABLE"
+
+// probeScript tests the folder passed as $1. The folder is an ARGUMENT,
+// never script text. `test -w` is access(W_OK), which also fails on a
+// read-only mount, so it answers for the effective mount, not the mode bits.
+const probeScript = `if [ -d "$1" ] && [ -w "$1" ]; then echo ` + writableMarker + `; fi`
+
+// WritableArgs is the probe's argv.
+func WritableArgs(name, dir string) []string {
+	return []string{"exec", name, "sh", "-c", probeScript, "sh", dir}
+}
+
+// WritableInside asks the sandbox itself whether dir is a writable folder in
+// it. This is the fallback when Covers says no: `sbx ls` does not list a
+// folder another tool added with `sbx mount`, and only the VM knows its
+// effective mounts. It changes nothing; `sbx exec` starts a stopped sandbox,
+// which the pane's own exec would do next anyway.
+//
+// A folder the agent made inside the VM at that path also answers yes. That
+// cannot widen the cage — the pane still runs in this sandbox — it only
+// means the pane works in the VM's own copy of the folder.
+func (c Client) WritableInside(ctx context.Context, name, dir string) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, attachProbeTimeout)
+	defer cancel()
+	var buf bytes.Buffer
+	if err := c.run(ctx, "", &buf, WritableArgs(name, dir)...); err != nil {
+		return false, fmt.Errorf("sbx exec: %w%s", err, tail(buf.String()))
+	}
+	for _, l := range strings.Split(buf.String(), "\n") {
+		if strings.TrimSpace(l) == writableMarker {
+			return true, nil
+		}
+	}
+	return false, nil
 }

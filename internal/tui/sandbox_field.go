@@ -64,8 +64,12 @@ func (m Model) renderSetupSandboxField(focused bool) string {
 		// or an existing sandbox another tool owns, which Quil only enters.
 		line := "cage: " + sbx.ProfileFile + " in this project (approve: quil sandbox trust)"
 		if m.sandboxSbxName != "" {
-			line = "attach: existing sandbox " + m.sandboxSbxName + m.sbxStatusSuffix(m.sandboxSbxName) +
-				" (Quil does not change it)"
+			line = "attach: " + m.sandboxSbxName + m.sbxStatusSuffix(m.sandboxSbxName) +
+				", not changed"
+			if !m.sbxAttachFits(m.sandboxSbxName) {
+				line = "attach: " + m.sandboxSbxName + m.sbxStatusSuffix(m.sandboxSbxName) +
+					", folder checked at start"
+			}
 		}
 		b.WriteString("    " + dialogSubtle.Render(truncateToWidth(line, m.setupTextWidth()-setupRowIndent)))
 		if m.sandboxErr != "" {
@@ -190,10 +194,11 @@ func (m Model) sandboxSubmitError() string {
 		return ""
 	}
 	if m.sandboxBackendIsSbx() {
-		// The folder can change after the sandbox was picked. The daemon
-		// checks again at spawn; this says it before a pane is made.
+		// The sandbox can be removed while the dialog is open. Whether it
+		// holds the folder is the daemon's to check at spawn: `sbx ls` does
+		// not list every mount.
 		if m.sandboxSbxName != "" && !m.sbxAttachOffered(m.sandboxSbxName) {
-			return "Sandbox " + m.sandboxSbxName + " does not mount this folder; pick another with ←/→"
+			return "Sandbox " + m.sandboxSbxName + " is not listed by sbx any more; pick another with ←/→"
 		}
 		return ""
 	}
@@ -507,8 +512,10 @@ func (m Model) nextSandboxChoice(step int) (sandboxChoice, bool) {
 	return choices[(cur+step+len(choices))%len(choices)], true
 }
 
-// sbxAttachChoices are the existing sandboxes the daemon listed that mount
-// the dialog's folder writable — all of them while no folder is chosen yet.
+// sbxAttachChoices are the existing sandboxes the daemon listed: first the
+// ones whose listed folders hold the dialog's folder writable, then the
+// rest. The rest stay offered because `sbx ls` does not list a folder added
+// later with `sbx mount` — the daemon asks the sandbox itself at spawn.
 // Read live rather than pinned: the list fills in when the dialog's own
 // capability request is answered, and it changes no row count. Display
 // only; the daemon checks the name and the folder again at spawn. A name
@@ -516,21 +523,51 @@ func (m Model) nextSandboxChoice(step int) (sandboxChoice, bool) {
 // machine.
 func (m Model) sbxAttachChoices() []ipc.SbxSandbox {
 	dir := m.setupSpawnDir()
-	var out []ipc.SbxSandbox
+	var fits, rest []ipc.SbxSandbox
 	for _, s := range m.destSandbox[m.createPaneDialogDest()].SbxSandboxes {
 		if !sbx.ValidName(s.Name) {
 			continue
 		}
-		if dir == "" || slices.ContainsFunc(s.Folders, func(f string) bool { return folderHolds(f, dir) }) {
-			out = append(out, s)
+		if sbxListsFolder(s, dir) {
+			fits = append(fits, s)
+		} else {
+			rest = append(rest, s)
 		}
 	}
-	return out
+	return append(fits, rest...)
+}
+
+// sbxListsFolder reports whether the sandbox's listed folders hold dir
+// writable — every sandbox while no folder is chosen. The most specific
+// folder decides, as in sbx.Listed.Covers; at one path, read-only wins.
+func sbxListsFolder(s ipc.SbxSandbox, dir string) bool {
+	if dir == "" {
+		return true
+	}
+	best, writable := -1, false
+	for _, f := range s.Folders {
+		if folderHolds(f, dir) && len(f) > best {
+			best, writable = len(f), true
+		}
+	}
+	for _, f := range s.ReadOnlyFolders {
+		if folderHolds(f, dir) && len(f) >= best {
+			best, writable = len(f), false
+		}
+	}
+	return writable
 }
 
 // sbxAttachOffered reports whether name is still one of the attach choices.
 func (m Model) sbxAttachOffered(name string) bool {
 	return slices.ContainsFunc(m.sbxAttachChoices(), func(s ipc.SbxSandbox) bool { return s.Name == name })
+}
+
+// sbxAttachFits reports whether sbx lists the dialog's folder for name.
+func (m Model) sbxAttachFits(name string) bool {
+	dir := m.setupSpawnDir()
+	return slices.ContainsFunc(m.destSandbox[m.createPaneDialogDest()].SbxSandboxes,
+		func(s ipc.SbxSandbox) bool { return s.Name == name && sbxListsFolder(s, dir) })
 }
 
 // sbxStatusSuffix is " (running)" and the like, for the attach line.

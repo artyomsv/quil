@@ -133,3 +133,71 @@ func TestFindListedAndCheckAttach(t *testing.T) {
 		t.Errorf("CheckAttach(read-only only) = %v", err)
 	}
 }
+
+// A read-only folder inside a writable one is not writable, and a writable
+// folder inside a read-only one is: the most specific folder decides.
+func TestCovers_MostSpecificFolderDecides(t *testing.T) {
+	root := t.TempDir()
+	mk := func(rel string) string {
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	app, ref, ro, notes := mk("app"), mk("app/reference"), mk("ro"), mk("ro/notes")
+	l := Listed{Workspaces: []Workspace{
+		{Path: app}, {Path: ref, ReadOnly: true}, {Path: ro, ReadOnly: true}, {Path: notes},
+	}}
+	for dir, want := range map[string]bool{
+		app:                        true,
+		ref:                        false,
+		filepath.Join(ref, "deep"): false,
+		ro:                         false,
+		notes:                      true,
+	} {
+		if got := l.Covers(dir); got != want {
+			t.Errorf("Covers(%q) = %v, want %v", dir, got, want)
+		}
+	}
+	both := Listed{Workspaces: []Workspace{{Path: app}, {Path: app, ReadOnly: true}}}
+	if both.Covers(app) {
+		t.Error("one folder listed both ways counted as writable")
+	}
+}
+
+// The probe asks the sandbox, passes the folder as an argument, and reads
+// only its own marker line.
+func TestWritableInside(t *testing.T) {
+	const dir = "/w/ticket'; rm -rf / #"
+	for _, tc := range []struct {
+		name string
+		out  string
+		err  error
+		want bool
+	}{
+		{"writable, after a start notice", "✓ sandbox started\nQUIL_SBX_WRITABLE\n", nil, true},
+		{"not writable", "", nil, false},
+		{"marker inside other text", "echo QUIL_SBX_WRITABLE\n", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeRunner{answers: func([]string) (string, error) { return tc.out, tc.err }}
+			got, err := Client{Bin: "sbx", Runner: f}.WritableInside(context.Background(), "team-box", dir)
+			if err != nil || got != tc.want {
+				t.Errorf("WritableInside = %v, %v; want %v", got, err, tc.want)
+			}
+			if !f.called(append([]string{"sbx"}, WritableArgs("team-box", dir)...)...) {
+				t.Errorf("calls = %v", f.calls)
+			}
+		})
+	}
+	args := WritableArgs("team-box", dir)
+	if args[len(args)-1] != dir || strings.Contains(args[4], dir) {
+		t.Errorf("the folder is not a separate argument: %q", args)
+	}
+	f := &fakeRunner{answers: func([]string) (string, error) { return "no such sandbox\n", fmt.Errorf("exit status 1") }}
+	if _, err := (Client{Bin: "sbx", Runner: f}).WritableInside(context.Background(), "team-box", "/w"); err == nil ||
+		!strings.Contains(err.Error(), "no such sandbox") {
+		t.Errorf("err = %v, want sbx's own line", err)
+	}
+}

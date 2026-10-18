@@ -720,10 +720,11 @@ Sometimes another tool creates and removes your sandboxes, for example one
 sandbox per task. Quil can run panes in such a sandbox without a profile.
 
 **How to use it.** In the `Ctrl+N` dialog, pick the pane folder first. Then turn
-on the sandbox row and press `←`/`→` until the row says
-`attach: existing sandbox <name>`. Quil offers only the sandboxes that mount the
-pane folder with write access. It gets this list from `sbx ls --json` each time
-the dialog opens.
+on the sandbox row and press `←`/`→` until the row says `attach: <name>`. Quil
+gets the list from `sbx ls --json` each time the dialog opens. The sandboxes
+that sbx lists with the pane folder come first. The others come after them,
+marked `folder checked at start`, because `sbx ls` does not show a folder that
+was added later with `sbx mount`.
 
 From MCP: `create_pane` with `sandbox_backend = "sbx"` and
 `sandbox_sbx_name = "<name>"`.
@@ -732,10 +733,13 @@ From MCP: `create_pane` with `sandbox_backend = "sbx"` and
 
 1. Runs `sbx ls --json`. If no sandbox has that name, the pane does not start.
    Quil never creates it, so create it with the tool that owns it.
-2. Checks that the pane folder is inside one of the sandbox's writable folders.
-   It compares real paths, after it follows every link. If the folder is
-   outside, the pane does not start.
-3. Starts the agent with `sbx exec -it -w <pane folder> <name> <agent command>`.
+2. Checks that the pane folder is in a writable folder of the sandbox. The most
+   specific folder decides: a read-only folder inside a writable one stays
+   read-only. Quil compares real paths, after it follows every link.
+3. If `sbx ls` does not show the folder as writable, Quil asks the sandbox
+   itself: it runs a short `test -d` and `test -w` on the folder inside the
+   sandbox. If that also says no, the pane does not start.
+4. Starts the agent with `sbx exec -it -w <pane folder> <name> <agent command>`.
    If the sandbox is stopped, `sbx exec` starts it.
 
 **What Quil does not do:** it needs no profile and no `quil sandbox trust`. It

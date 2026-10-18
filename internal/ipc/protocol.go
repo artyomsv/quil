@@ -1907,9 +1907,12 @@ type SandboxCapRespPayload struct {
 type SbxSandbox struct {
 	Name   string `json:"name"`
 	Status string `json:"status,omitempty"`
-	// Folders are the workspaces the sandbox mounts writable, as the
-	// daemon's filesystem spells them.
-	Folders []string `json:"folders,omitempty"`
+	// Folders and ReadOnlyFolders are the workspaces `sbx ls` lists, as the
+	// daemon's filesystem spells them. Both are sent, because the most
+	// specific folder decides: a read-only folder can sit inside a writable
+	// one. A folder added later with `sbx mount` is in neither list.
+	Folders         []string `json:"folders,omitempty"`
+	ReadOnlyFolders []string `json:"read_only_folders,omitempty"`
 }
 
 // GitReposReqPayload asks the daemon which git repositories are near CWD —

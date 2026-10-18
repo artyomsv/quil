@@ -542,6 +542,11 @@ shared_claude_config = false
 # after that the dialog remembers the last image used on that host. Ships empty
 # and has no built-in fallback — Quil publishes no image.
 default_image = ""
+
+# The backend the dialog's sandbox row starts on: "docker" (default) or "sbx"
+# (a Docker Sandboxes microVM declared by the project's .quil-sandbox.toml).
+# See docs/sandbox-panes.md, "The sbx backend".
+backend = "docker"
 ```
 
 ## Workspace templates (`templates.toml`)

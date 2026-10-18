@@ -17,7 +17,7 @@ const oauthTokenVar = "CLAUDE_CODE_OAUTH_TOKEN"
 
 func handleSandbox() {
 	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "usage: quil sandbox [login|status]")
+		fmt.Fprintln(os.Stderr, "usage: quil sandbox [login|status|trust [dir] [--yes]]")
 		os.Exit(1)
 	}
 	switch os.Args[2] {
@@ -25,6 +25,8 @@ func handleSandbox() {
 		runSandboxLogin()
 	case "status":
 		runSandboxStatus()
+	case "trust":
+		runSandboxTrust(os.Args[3:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown sandbox command: %s\n", os.Args[2])
 		os.Exit(1)

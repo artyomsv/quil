@@ -339,3 +339,16 @@ func TestCreatePaneInput_CarriesTheClaudeConfigChoice(t *testing.T) {
 		t.Error("the field is not version-checked with the other dialog options")
 	}
 }
+
+// An existing sandbox's name reaches the create payload beside the sbx
+// backend, and counts as a dialog option for the daemon-version check.
+func TestCreatePaneInput_CarriesTheSbxSandboxName(t *testing.T) {
+	in := createPaneInput{SandboxBackend: "sbx", SandboxSbxName: "team-box"}
+	req := in.toReq("t1")
+	if req.Sandbox == nil || req.Sandbox.Backend != "sbx" || req.Sandbox.Name != "team-box" || req.Sandbox.Image != "" {
+		t.Errorf("Sandbox = %+v, want sbx team-box", req.Sandbox)
+	}
+	if !(createPaneInput{SandboxSbxName: "team-box"}).usesDialogOptions() {
+		t.Error("the field is not version-checked with the other dialog options")
+	}
+}

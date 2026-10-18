@@ -503,9 +503,18 @@ func (d *Daemon) handlePluginCatalogReq(conn *ipc.Conn, msg *ipc.Message) {
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
+	// The two probes are independent and share one deadline, so they run
+	// together: a hung docker engine must not use up sbx's whole wait.
+	sbxDone := make(chan bool, 1)
+	go func() {
+		ok, _ := d.sbxAvailable(ctx)
+		sbxDone <- ok
+	}()
 	sandboxOK, _ := d.sandboxAvailable(ctx)
+	sbxOK := <-sbxDone
 	respondTo(conn, msg.ID, ipc.MsgPluginCatalogResp, ipc.PluginCatalogRespPayload{
 		Plugins:          entries,
 		SandboxAvailable: sandboxOK,
+		SbxAvailable:     sbxOK,
 	})
 }

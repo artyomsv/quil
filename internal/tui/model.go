@@ -725,6 +725,18 @@ type Model struct {
 	// sandboxOn and sandboxImage are the create dialog's own row state.
 	sandboxOn    bool
 	sandboxImage string
+	// sandboxBackend is the row's backend: config.SandboxBackendDocker or
+	// config.SandboxBackendSbx. Set when the dialog opens; ←/→ on the row
+	// switches it when the destination offers both.
+	sandboxBackend string
+	// sandboxDialogDocker and sandboxDialogSbx pin WHICH backends the
+	// destination offered when the dialog opened; sandboxDialogAvail is
+	// their OR.
+	sandboxDialogDocker bool
+	sandboxDialogSbx    bool
+	// sandboxSbxName is the EXISTING sbx sandbox the row attaches to, picked
+	// with ←/→ from the ones the daemon listed; "" uses the project profile.
+	sandboxSbxName string
 	// sandboxImages remembers the last image per destination (nil functions
 	// = no memory; see SetSandboxImageStore).
 	sandboxImages sandboxImageStore

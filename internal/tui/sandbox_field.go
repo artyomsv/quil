@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"slices"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -9,6 +10,7 @@ import (
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/plugin"
+	"github.com/artyomsv/quil/internal/sbx"
 )
 
 // The create dialog's sandbox row.
@@ -36,12 +38,43 @@ func (m Model) renderSetupSandboxField(focused bool) string {
 		style = dialogSelected
 	}
 
+	label := " Run in a Docker container"
+	if m.sandboxBackendIsSbx() {
+		label = " Run in an sbx sandbox"
+	}
 	var b strings.Builder
-	b.WriteString(prefix + style.Render(box+" Run in a Docker container") + "\n")
+	b.WriteString(prefix + style.Render(box+label))
+	// The next choice is named only when there is one, so a host with docker
+	// alone draws exactly the row it always did.
+	if next, ok := m.nextSandboxChoice(1); m.sandboxOn && ok {
+		b.WriteString(dialogSubtle.Render("  ←/→ " + truncateToWidth(next.label(), 24)))
+	}
+	b.WriteString("\n")
 
 	if !m.sandboxOn {
 		if focused {
 			b.WriteString("    " + dialogSubtle.Render("space to enable — the agent is confined to this checkout"))
+		}
+		return b.String()
+	}
+
+	if m.sandboxBackendIsSbx() {
+		// No image: the cage is the project's .quil-sandbox.toml, which the
+		// daemon finds from the pane's directory and refuses unless approved —
+		// or an existing sandbox another tool owns, which Quil only enters.
+		line := "cage: " + sbx.ProfileFile + " in this project (approve: quil sandbox trust)"
+		if m.sandboxSbxName != "" {
+			line = "attach: " + m.sandboxSbxName + m.sbxStatusSuffix(m.sandboxSbxName) +
+				", not changed"
+			if !m.sbxAttachFits(m.sandboxSbxName) {
+				line = "attach: " + m.sandboxSbxName + m.sbxStatusSuffix(m.sandboxSbxName) +
+					", folder checked at start"
+			}
+		}
+		b.WriteString("    " + dialogSubtle.Render(truncateToWidth(line, m.setupTextWidth()-setupRowIndent)))
+		if m.sandboxErr != "" {
+			b.WriteString("\n    " + dialogErrorStyle.Render(
+				truncateToWidth(m.sandboxErr, m.setupTextWidth()-setupRowIndent)))
 		}
 		return b.String()
 	}
@@ -115,14 +148,29 @@ func (m *Model) editSandboxRow(msg tea.KeyPressMsg) bool {
 			m.sandboxImage = m.sandboxImageDefault(m.createPaneDialogDest())
 		}
 		return true
+	case "left", "right":
+		// Steps through the choices — Docker, the sbx profile, each existing
+		// sandbox — and only when there is more than one: otherwise the
+		// arrows are not the row's to take.
+		step := 1
+		if msg.String() == "left" {
+			step = -1
+		}
+		next, ok := m.nextSandboxChoice(step)
+		if !m.sandboxOn || !ok {
+			return false
+		}
+		m.sandboxBackend, m.sandboxSbxName = next.backend, next.name
+		return true
 	case "backspace":
-		if m.sandboxOn && m.sandboxImage != "" {
+		if m.sandboxOn && !m.sandboxBackendIsSbx() && m.sandboxImage != "" {
 			r := []rune(m.sandboxImage)
 			m.sandboxImage = string(r[:len(r)-1])
 		}
 		return m.sandboxOn
 	}
-	if !m.sandboxOn {
+	// An sbx row has no text field: typing is not the row's to take.
+	if !m.sandboxOn || m.sandboxBackendIsSbx() {
 		return false
 	}
 	// isPrintableText is the same gate the command palette uses, so a control
@@ -145,6 +193,15 @@ func (m Model) sandboxSubmitError() string {
 	if !m.sandboxOn {
 		return ""
 	}
+	if m.sandboxBackendIsSbx() {
+		// The sandbox can be removed while the dialog is open. Whether it
+		// holds the folder is the daemon's to check at spawn: `sbx ls` does
+		// not list every mount.
+		if m.sandboxSbxName != "" && !m.sbxAttachOffered(m.sandboxSbxName) {
+			return "Sandbox " + m.sandboxSbxName + " is not listed by sbx any more; pick another with ←/→"
+		}
+		return ""
+	}
 	if strings.TrimSpace(m.sandboxImage) == "" {
 		return "Enter a container image, or turn the sandbox off"
 	}
@@ -165,6 +222,12 @@ func (m Model) sandboxSubmitError() string {
 func (m Model) sandboxSpec() *ipc.SandboxSpec {
 	if !m.sandboxOn {
 		return nil
+	}
+	if m.sandboxBackendIsSbx() {
+		// Backend and, attaching, the sandbox name. The daemon refuses an sbx
+		// spec carrying an image or a sign-in mode: everything about that
+		// cage is the approved profile's, or the existing sandbox's.
+		return &ipc.SandboxSpec{Backend: config.SandboxBackendSbx, Name: m.sandboxSbxName}
 	}
 	image := strings.TrimSpace(m.sandboxImage)
 	if image == "" {
@@ -192,12 +255,31 @@ func (m *Model) resetSandboxField(dest string) {
 	// govern the next one, which may be opened for the opposite reason.
 	m.sandboxSignIn = ""
 	m.sandboxErr = ""
+	// The profile, never a remembered sandbox: an existing sandbox is picked
+	// for one pane, on purpose, each time.
+	m.sandboxSbxName = ""
 	// Pin the capability answer for the life of the dialog. It is fetched
 	// asynchronously and re-probed on a timer, so reading it live would add
 	// or remove a row under a cursor the key handler is already holding an
 	// index into.
-	m.sandboxDialogAvail = m.sandboxAvailableFor(dest)
+	m.sandboxDialogDocker = m.sandboxAvailableFor(dest)
+	m.sandboxDialogSbx = m.sbxAvailableFor(dest)
+	m.sandboxDialogAvail = m.sandboxDialogDocker || m.sandboxDialogSbx
 	m.sandboxDialogReason = m.sandboxUnavailableReason(dest)
+	// The configured backend, unless this destination cannot run it and can
+	// run the other one.
+	m.sandboxBackend = m.cfg.Sandbox.ResolveBackend()
+	switch {
+	case m.sandboxBackend == config.SandboxBackendSbx && !m.sandboxDialogSbx && m.sandboxDialogDocker:
+		m.sandboxBackend = config.SandboxBackendDocker
+	case m.sandboxBackend == config.SandboxBackendDocker && !m.sandboxDialogDocker && m.sandboxDialogSbx:
+		m.sandboxBackend = config.SandboxBackendSbx
+	}
+}
+
+// sandboxBackendIsSbx reports whether the row currently targets sbx.
+func (m Model) sandboxBackendIsSbx() bool {
+	return m.sandboxBackend == config.SandboxBackendSbx
 }
 
 // renderSetupSandboxUnavailable draws the one-line explanation that replaces
@@ -275,7 +357,8 @@ func (m Model) showSandboxAuthField(p *plugin.PanePlugin) bool {
 	// ~/.codex credentials and opencode its own again, so the choice would
 	// describe an agent the user did not pick — and the daemon ignores it for
 	// them anyway.
-	return m.showSandboxField(p) && m.sandboxOn && p.UsesClaudeAuth()
+	// Not for sbx: how that agent signs in is the profile's business.
+	return m.showSandboxField(p) && m.sandboxOn && !m.sandboxBackendIsSbx() && p.UsesClaudeAuth()
 }
 
 // effectiveSandboxSignIn is the choice the row DISPLAYS: the user's pick, or
@@ -366,4 +449,138 @@ func stepSandboxChoice(cur string, delta int) string {
 	}
 	n := len(sandboxAuthChoices)
 	return sandboxAuthChoices[((idx+delta)%n+n)%n].choice
+}
+
+// sandboxChoice is one stop of the row's ←/→ cycle.
+type sandboxChoice struct {
+	backend string
+	name    string // an existing sbx sandbox; "" for docker and the profile
+}
+
+func (c sandboxChoice) label() string {
+	switch {
+	case c.backend != config.SandboxBackendSbx:
+		return "Docker"
+	case c.name == "":
+		return "sbx"
+	default:
+		return "sbx " + c.name
+	}
+}
+
+// sandboxChoices is the cycle, in order: Docker, the sbx profile, then each
+// existing sandbox that mounts the dialog's folder.
+func (m Model) sandboxChoices() []sandboxChoice {
+	var out []sandboxChoice
+	if m.sandboxDialogDocker {
+		out = append(out, sandboxChoice{backend: config.SandboxBackendDocker})
+	}
+	if m.sandboxDialogSbx {
+		out = append(out, sandboxChoice{backend: config.SandboxBackendSbx})
+		for _, s := range m.sbxAttachChoices() {
+			out = append(out, sandboxChoice{backend: config.SandboxBackendSbx, name: s.Name})
+		}
+	}
+	return out
+}
+
+// nextSandboxChoice is the choice step places away from the current one,
+// wrapping, and false when there is nothing else to pick. A current choice
+// that is no longer offered (the folder changed) steps to the first one —
+// checked before the count, or a host with one choice left could never leave
+// a sandbox that stopped mounting the folder.
+func (m Model) nextSandboxChoice(step int) (sandboxChoice, bool) {
+	choices := m.sandboxChoices()
+	cur := -1
+	for i, c := range choices {
+		if c.backend == m.sandboxBackend && c.name == m.sandboxSbxName {
+			cur = i
+		}
+	}
+	if cur < 0 && len(choices) > 0 {
+		return choices[0], true
+	}
+	if len(choices) < 2 {
+		return sandboxChoice{}, false
+	}
+	return choices[(cur+step+len(choices))%len(choices)], true
+}
+
+// sbxAttachChoices are the existing sandboxes the daemon listed: first the
+// ones whose listed folders hold the dialog's folder writable, then the
+// rest. The rest stay offered because `sbx ls` does not list a folder added
+// later with `sbx mount` — the daemon asks the sandbox itself at spawn.
+// Read live rather than pinned: the list fills in when the dialog's own
+// capability request is answered, and it changes no row count. Display
+// only; the daemon checks the name and the folder again at spawn. A name
+// sbx could read as a flag is never offered: it is text from the daemon's
+// machine.
+func (m Model) sbxAttachChoices() []ipc.SbxSandbox {
+	dir := m.setupSpawnDir()
+	var fits, rest []ipc.SbxSandbox
+	for _, s := range m.destSandbox[m.createPaneDialogDest()].SbxSandboxes {
+		if !sbx.ValidName(s.Name) {
+			continue
+		}
+		if sbxListsFolder(s, dir) {
+			fits = append(fits, s)
+		} else {
+			rest = append(rest, s)
+		}
+	}
+	return append(fits, rest...)
+}
+
+// sbxListsFolder reports whether the sandbox's listed folders hold dir
+// writable — every sandbox while no folder is chosen. The most specific
+// folder decides, as in sbx.Listed.Covers; at one path, read-only wins.
+func sbxListsFolder(s ipc.SbxSandbox, dir string) bool {
+	if dir == "" {
+		return true
+	}
+	best, writable := -1, false
+	for _, f := range s.Folders {
+		if folderHolds(f, dir) && len(f) > best {
+			best, writable = len(f), true
+		}
+	}
+	for _, f := range s.ReadOnlyFolders {
+		if folderHolds(f, dir) && len(f) >= best {
+			best, writable = len(f), false
+		}
+	}
+	return writable
+}
+
+// sbxAttachOffered reports whether name is still one of the attach choices.
+func (m Model) sbxAttachOffered(name string) bool {
+	return slices.ContainsFunc(m.sbxAttachChoices(), func(s ipc.SbxSandbox) bool { return s.Name == name })
+}
+
+// sbxAttachFits reports whether sbx lists the dialog's folder for name.
+func (m Model) sbxAttachFits(name string) bool {
+	dir := m.setupSpawnDir()
+	return slices.ContainsFunc(m.destSandbox[m.createPaneDialogDest()].SbxSandboxes,
+		func(s ipc.SbxSandbox) bool { return s.Name == name && sbxListsFolder(s, dir) })
+}
+
+// sbxStatusSuffix is " (running)" and the like, for the attach line.
+func (m Model) sbxStatusSuffix(name string) string {
+	for _, s := range m.destSandbox[m.createPaneDialogDest()].SbxSandboxes {
+		if s.Name == name && s.Status != "" {
+			return " (" + sanitizeRemoteText(s.Status) + ")"
+		}
+	}
+	return ""
+}
+
+// folderHolds reports whether dir is folder or below it, by text: both are
+// the daemon's spellings, which may be another OS's, so neither is resolved
+// here. Either separator ends a folder name.
+func folderHolds(folder, dir string) bool {
+	f := strings.TrimRight(folder, `/\`)
+	if f == "" {
+		return false
+	}
+	return dir == f || strings.HasPrefix(dir, f+"/") || strings.HasPrefix(dir, f+`\`)
 }

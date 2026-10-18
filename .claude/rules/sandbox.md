@@ -2,6 +2,7 @@
 description: Docker sandbox panes — the mount set as a security boundary, the per-pane object store and its ordered teardown, the sign-in flows, and refusals that never soften.
 paths:
   - internal/sandbox/**
+  - internal/sbx/**
   - internal/daemon/sandbox*.go
   - internal/tui/sandbox*.go
   - internal/claudetoken/**
@@ -718,3 +719,160 @@ in panes that have no use for it.
 
 `CODEX_HOME` is set for every sandbox pane regardless of type, so a codex run by
 hand inside a claude container does not fall back to a home nothing mounts.
+
+## The sbx backend is a different shape, and its boundary is the TRUST PIN
+
+`internal/sbx` + `internal/daemon/sandbox_sbx.go`. `SandboxSpec.Backend = "sbx"`
+→ `Pane.SandboxBackend` (persisted as `sandbox_backend`, with the same
+`sandbox/` type prefix, so an older daemon refuses rather than spawning on the
+host). An sbx pane has NO `SandboxImage`, so every docker-only path (mount set,
+object store, teardown, harvest, shutdown kill) skips it by construction.
+
+**Quil builds no cage here.** The cage is the sbx environment file and kits the
+project's `.quil-sandbox.toml` names. Because that file lives in the repository
+the agent can write, `loadSbxProfile` refuses a profile whose digest
+(`sbx.Digest`: profile, env file, every file under each LOCAL kit, the
+post-create env file, script arguments that are files) differs from the one
+`quil sandbox trust` recorded. Checked on EVERY spawn, the ready respawn
+included — a profile edited after approval must not point a pane at another
+sandbox. Never soften this into "run anyway".
+
+**A symbolic link in the pin is REFUSED, never hashed** (`refuseLinks`, from
+the file up to the profile directory, and every kit entry): hashing the link
+text let an agent change the target with the digest unchanged (PR #260 review).
+**`prepare_host` may name ONE project file, its script** (`fileArgs`, any
+spelling — an absolute path into the repository was once exempt and ran
+unpinned). An absolute prepare_host argv[0] outside the profile directory is
+REFUSED, not trusted as a system program: the worktrees folder beside the
+repository is shared with the agent, so a direct script there would run
+unpinned. A bare name goes through PATH (Go refuses a cwd lookup). post_create
+keeps the exemption — its argv[0] names a program inside the VM. A second file is refused because the copy cannot tell an input from
+an output (`cp a b` wrote into the copy and lost the result).
+
+**Nothing approved is read from the repository again.** `sbx.Approve` returns
+`sbx.Approved`: the bytes `readPinned` read once, and the Profile PARSED FROM
+THOSE BYTES (`parseProfile`), refused unless equal to the caller's parse — the
+earlier parse could come from a changed file restored before the digest read.
+`Ensure` runs `prepare_host` from a private 0700 copy of the script
+(`hostArgv`), the script chosen from the APPROVED snapshot rather than
+the disk (a script removed after approval was skipped, its repository path
+passed on, and a file put back in time ran), `recheck`s (the host step must not change a pinned file), then
+`stageEnv` writes the env file, local kits and post-create env file to
+`$QUIL_HOME/sandbox/sbx-env/<name>/` (persistent: sbx keeps the env file
+mounted) and creates from that. Measured on sbx 0.48: relative paths,
+`${{ env.fileDir }}` and `${{ env.projectDir }}` all resolve to the env
+file's folder when a path is named, so `rewriteEnv` expands both tokens to the
+original folder and makes relative `workspace`/`additionalWorkspaces` paths
+absolute; kits keep their relative layout under one common root. Any other
+relative path lands in the copy — a broken create, never a wider cage. An env
+file with `lifecycle:` is refused (`errLifecycle`): Quil's `--force` approves
+sbx's host commands, and the scripts they call are not pinned. It is checked by
+`envKitDirs`, which the pin and the copy share; `parseEnv` reads a
+`yaml.Node`, accepts a kit as a bare string or a `source` mapping, and FAILS
+CLOSED on anything else (a typed decode once failed on a string kit and
+skipped the lifecycle check). YAML merge keys (`<<`) and aliases are refused
+(`refuseIndirection`): Quil reads the document as written while sbx decodes it
+with them applied, so a root `<<:` hid a lifecycle block. A relative workspace
+path still holding `${{ … }}` after the folder tokens is refused at approval:
+it may expand to an absolute path, and anchoring it would mount another
+folder. A host script
+must not find siblings through `$0`.
+
+**The create is minutes, so it is off the dispatch goroutine**, shaped like the
+sign-in: `startSbxPane` stands down (nil error), `beginSbxPrepare` single-flights
+per sandbox NAME, the goroutine runs `sbx.Client.Ensure` with output written into
+the owner pane, then respawns every waiter. **The claim is held until the LAST
+waiter is started** (`sbxPrepare.next` loops until nobody is waiting): released
+after the create, a restart during the mount/stop/respawn started a second
+preparation and two agents. Only the respawn may start the agent, and it says
+so on the SESSION (`sbxReadySession`), not on the pane — a pane flag could be
+taken by a racing restart. Each waiter carries the pane's `ptyGen` from when it
+asked; a pane whose generation moved (started since) is dropped at the START
+of `startSbxWaiters`, before the leftover prefix stop — dropped only at the
+respawn, the stop killed the agent the earlier batch had just started.
+An existing sandbox is reused untouched; closing a pane never removes one.
+
+**The agent runs through `sbx exec -it -w <cwd> <name> <cmd> <args>`**, never
+`sbx run`: exec runs the pane's own plugin command and lets panes share one
+sandbox. No hooks, no `--settings`, no `--session-id` (a resume it cannot do
+would exit 129 on restart); `resolveSpawnArgs` is not called for an sbx pane.
+The spawn log line passes argv through `sbx.RedactEnv`: plugin env rides
+`-e KEY=VALUE`. `-w` is omitted on a Windows host. Since 2026-10-16 the create, reuse and exec
+path has run against a live sbx 0.48 on macOS.
+
+**Worktrees: one sandbox per REPOSITORY, the worktrees folder mounted live.**
+`sbx.FindProfileFor` (shared with `quil sandbox trust`, so the user approves
+the profile the daemon checks) sends a pane in a linked worktree to its MAIN
+checkout's profile (`sbx.FindCheckout` — file reads only, no git process, because
+`startSbxPane` runs on the dispatch goroutine), so a branch editing its own copy
+cannot repoint its panes, and the worktree shares the main checkout's VM and
+sign-in. After `Ensure`, `mountSbxWorktrees` runs `sbx mount <name>
+gitworktree.WorktreesDir(main)` for every waiting pane whose folder exists and
+is a REAL directory (a symlink would widen the cage to wherever it points)
+and whose main checkout is the profile directory or below it, compared as
+REAL paths (`EvalSymlinks`) and mounted as the real folder: a link above the
+checkout kept the path lexically inside. `FindCheckout`
+accepts a linked worktree only when the MAIN repository lists it (the admin
+dir sits in `<main>/.git/worktrees` and its `gitdir` points back) — the pointer
+files in the worktree are agent-writable, and forged ones made Quil mount
+another repository's worktrees folder. The
+FOLDER, not each worktree, so a worktree made later is visible with no step.
+Measured on sbx 0.48: the mount applies to the running VM in ~0.2 s, a process
+already running inside keeps running, a repeat is a no-op success, and a
+worktree added afterwards is visible with `git status` working. It runs on
+every spawn because every spawn goes through the prepare goroutine. A failed
+mount fails only panes INSIDE the folder; a main-checkout pane starts with a
+note. `sbx ls` does not list a mount added this way — do not try to detect it
+there; rely on the idempotent repeat.
+
+**Attach mode: a sandbox another tool owns.** `SandboxSpec.Name` →
+`Pane.SandboxName` (persisted `sandbox_name`, validated by `sbx.ValidName` at
+`applySbxSpec`; a docker spec with a name is refused). `sbxTargetFor` picks the
+mode: a name means NO profile, NO trust pin, NO create, NO `sbx mount`, NO
+`sbx rm` — the user picked the sandbox in the dialog, so nothing from the
+repository decides anything, and Quil never widens a cage it did not build.
+An invalid persisted name is REFUSED, never dropped (dropping would move the
+pane into the profile's sandbox). The preparation is keyed `attach:<name>`
+(`sbxTarget.key`), apart from a profile preparation of the same name, so the
+two never share a waiter list with different checks. `findSbxSandbox` reads
+`sbx ls --json` (`sbx.ListSandboxes`/`ParseListJSON`, measured on 0.48: a bare
+list, workspaces as `path` or `path:ro`, primary first) and refuses a missing
+name; `checkSbxAttach` refuses a pane folder not in a WRITABLE workspace —
+without it `-w` would start the agent outside what the user opened.
+`Listed.Covers` compares real paths and lets the MOST SPECIFIC workspace
+decide (a `:ro` folder inside a writable one stays read-only; at one path
+read-only wins). Because `sbx ls` omits folders added with `sbx mount` (see
+the worktrees note above), a "no" from `Covers` is not final:
+`sbx.WritableInside` runs `sbx exec <name> sh -c 'test -d "$1" && test -w
+"$1"' sh <dir>` (the folder an ARGUMENT, a marker line as the answer;
+`test -w` is access(W_OK), so it reports EROFS on a read-only mount). A
+folder the agent made inside the VM also passes — that cannot widen the
+cage, the pane still runs in that sandbox. On a Windows host the probe is skipped
+(`sbxHostOSFn`, the same seam as the exec's `-w`): a Windows path names nothing
+in the VM, and without `-w` the agent starts in the main workspace anyway, so
+the pane starts with a note. Measured on 0.48: `sbx exec` starts a
+stopped sandbox itself, so attach needs no start step. The leftover prefix
+stop still runs: it matches only this pane's own tag. The create dialog's
+list rides the capability answer (`SandboxCapRespPayload.SbxSandboxes`, a
+fresh `sbx ls --json` per request, writable and read-only folders — no new
+message type, so the rights table and web allow-list are unchanged); the TUI
+ORDERS it by TEXT against the browsed folder (`sbxListsFolder` /
+`folderHolds`, most specific wins, either separator, since the daemon may be
+another OS): listed fits first, the rest after them and still selectable,
+since only the spawn-time probe knows about `sbx mount` folders. Quil and
+the owning tool know nothing of each other: the only shared facts are the
+sandbox name and sbx's own listing.
+
+**Ending the host `sbx exec` does NOT end the agent inside the VM** (measured:
+a closed pane's claude ran for a day). Every exec carries `-e
+QUIL_SBX_PANE=<pane id>-<random>` (`sbx.NewTag`, PER SPAWN — a restart closes
+the old PTY on a goroutine while the new spawn runs, so a pane-wide tag would
+let the old stop kill the new agent). `startSbxPane` returns the PTY wrapped
+in `sbxSession`, whose `Close` (once) runs `stopSbxTagAsync`: `sbx exec <name>
+sh -c stopScript sh <tag> exact`, which scans `/proc/*/environ`, TERMs, waits
+2 s, KILLs. The tag is an ARGUMENT, never script text. Close is the one funnel
+for destroy, replace, restart and daemon Stop (which then waits
+`sbxStopWait`). A killed daemon never runs Close, so `runSbxPrepare` runs a
+PREFIX stop (`<pane id>-`) for each pane before respawning it; the new tag is
+minted after, so it cannot match. Measured on sbx 0.48: 0.46 s per stop, exact
+and prefix both touch only their own processes.

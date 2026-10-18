@@ -54,6 +54,12 @@ func (m Model) sandboxAvailableFor(dest string) bool {
 	return m.destSandbox[dest].Available
 }
 
+// sbxAvailableFor reports whether the sbx backend can run on the daemon
+// behind dest. Silence is unavailable, as for docker.
+func (m Model) sbxAvailableFor(dest string) bool {
+	return m.destSandbox[dest].SbxAvailable
+}
+
 // sandboxUnavailableReason is what to tell the user when the row is absent.
 // Empty when the destination simply has not answered yet.
 func (m Model) sandboxUnavailableReason(dest string) string {

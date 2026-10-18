@@ -141,7 +141,12 @@ func isReservedName(part string) bool {
 // Callers must run ValidateBranch first — this function assumes the name
 // cannot escape, and does not re-check.
 func DerivePath(repoRoot, branch string) string {
-	parent := filepath.Dir(repoRoot)
-	name := filepath.Base(repoRoot) + worktreesSuffix
-	return filepath.Join(parent, name, strings.ReplaceAll(branch, "/", "-"))
+	return filepath.Join(WorktreesDir(repoRoot), strings.ReplaceAll(branch, "/", "-"))
+}
+
+// WorktreesDir is the one folder every worktree DerivePath makes for
+// repoRoot lives in: <parent>/<repo><worktreesSuffix>. The sbx backend shares
+// it with the sandbox, so a worktree made later is already visible inside.
+func WorktreesDir(repoRoot string) string {
+	return filepath.Join(filepath.Dir(repoRoot), filepath.Base(repoRoot)+worktreesSuffix)
 }

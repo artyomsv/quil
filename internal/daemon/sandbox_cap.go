@@ -34,6 +34,10 @@ const sandboxCapTTL = 30 * time.Second
 // would make the dialog's own two asks — one at attach, one at open — fail
 // each other exactly when they overlap.
 type sandboxCap struct {
+	// probeFn answers one probe. Nil is the docker probe; the sbx backend
+	// sets its own.
+	probeFn func(context.Context) ipc.SandboxCapRespPayload
+
 	mu       sync.Mutex
 	answer   ipc.SandboxCapRespPayload
 	fetched  time.Time
@@ -105,7 +109,11 @@ func (c *sandboxCap) probe(done chan struct{}) {
 		c.mu.Unlock()
 		close(done)
 	}()
-	answer = probeSandbox(context.Background())
+	probe := c.probeFn
+	if probe == nil {
+		probe = probeSandbox
+	}
+	answer = probe(context.Background())
 }
 
 // probeSandbox asks the engine what it is and turns that into a wire answer.
@@ -169,6 +177,15 @@ func (d *Daemon) handleSandboxCapReq(conn *ipc.Conn, msg *ipc.Message, release f
 		if answer.Error == errSandboxCapCanceled {
 			release()
 			return
+		}
+		// The sbx half, probed by its own cache. A canceled sbx wait (the conn
+		// went away) simply leaves the sbx fields empty.
+		sbxAnswer := d.sbxCapGet(ctx)
+		answer.SbxAvailable = sbxAnswer.SbxAvailable
+		answer.SbxVersion = sbxAnswer.SbxVersion
+		answer.SbxError = sbxAnswer.SbxError
+		if answer.SbxAvailable {
+			answer.SbxSandboxes = listSbxSandboxes(ctx)
 		}
 		if answer.Error != "" {
 			log.Printf("sandbox: capability probe: %s", answer.Error)

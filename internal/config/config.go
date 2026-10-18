@@ -129,6 +129,28 @@ type SandboxConfig struct {
 	// products or services", while a user-supplied image means Quil
 	// pre-installs nothing and that section never applies.
 	DefaultImage string `toml:"default_image"`
+
+	// Backend is the sandbox backend the setup dialog pre-selects: "docker"
+	// (the default, an image Quil runs with `docker run`) or "sbx" (a Docker
+	// Sandboxes microVM declared by the project's .quil-sandbox.toml). Read it
+	// through ResolveBackend. Only a default: each pane records its own choice.
+	Backend string `toml:"backend"`
+}
+
+// The sandbox backends a pane can name. "" on the wire and on disk means
+// docker, which is what every pane created before sbx existed carries.
+const (
+	SandboxBackendDocker = "docker"
+	SandboxBackendSbx    = "sbx"
+)
+
+// ResolveBackend maps the configured Backend onto a known backend. Anything but
+// the exact string "sbx" is docker, the long-standing behaviour.
+func (c SandboxConfig) ResolveBackend() string {
+	if c.Backend == SandboxBackendSbx {
+		return SandboxBackendSbx
+	}
+	return SandboxBackendDocker
 }
 
 // SandboxAuthMode is the sign-in path the daemon acts on, after the configured

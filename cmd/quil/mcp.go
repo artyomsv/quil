@@ -263,7 +263,7 @@ const mcpInstructions = "Quil is a terminal multiplexer with projects, tabs and 
 	"reports done / failed / timeout from the target's own state. Then either wait_task (blocking), watch_notifications for task_done, " +
 	"or carry on — with notify (default) a '[quil task ...]' line is typed into your pane when the task ends. get_task returns the last output.\n" +
 	"- create_pane / create_tab: call list_plugins first for the toggle names an AI plugin accepts (permission mode, chrome, search); " +
-	"list_sessions for a Claude session to resume. worktree_branch opens the pane in a fresh git worktree; sandbox_image runs it in Docker.\n" +
+	"list_sessions for a Claude session to resume. worktree_branch opens the pane in a fresh git worktree; sandbox_image runs it in Docker; sandbox_backend=sbx runs it in the project's Docker Sandboxes microVM, or with sandbox_sbx_name in an existing one.\n" +
 	"- Projects: list_projects, create_project, update_project, switch_project, destroy_project; tabs: create_tab, rename_tab, destroy_tab.\n" +
 	"- Hosts: list_hosts shows the remote daemons this bridge reaches. Ids you discovered route to their host automatically; " +
 	"pass host explicitly to create things on a remote. delegate_task with notify only works when requester and target share a host.\n" +

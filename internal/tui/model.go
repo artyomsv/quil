@@ -328,10 +328,19 @@ type pasteRefreshMsg struct{}
 // interleave for a visible freeze of the whole input stream on the image path.
 // The pane binding above is the half that actually matters, because delivering
 // to the wrong pane is silent while a mis-ordered paste is not.
+//
+// passthrough is set when the clipboard gave Quil nothing to paste — no text
+// and no image it could read. Update then sends the raw Ctrl+V byte instead
+// (pasteKeyByte), so the app in the pane can run its OWN paste: Claude Code
+// reads an image off the clipboard itself on Ctrl+V (#261).
 type clipboardPastedMsg struct {
-	text   string
-	paneID string
+	text        string
+	paneID      string
+	passthrough bool
 }
+
+// pasteKeyByte is Ctrl+V as a terminal sends it (SYN, 0x16).
+const pasteKeyByte = "\x16"
 
 // sidebarTickMsg triggers a periodic sidebar re-render to update relative timestamps.
 type sidebarTickMsg struct{}
@@ -3134,6 +3143,10 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 
 	case clipboardPastedMsg:
 		if m.templatePaste(msg.text) {
+			return m, nil
+		}
+		if msg.passthrough {
+			m.sendPasteKeyToPaneID(msg.paneID)
 			return m, nil
 		}
 		// The clipboard read happened on a tea.Cmd goroutine; the ENQUEUE
@@ -10099,8 +10112,10 @@ func (m Model) pasteClipboard() tea.Cmd {
 			}
 		}
 		if text == "" {
-			logger.Debug("pasteClipboard: nothing to paste, returning")
-			return nil
+			// Nothing Quil can paste. Hand the key to the app instead of
+			// swallowing it — see clipboardPastedMsg.passthrough.
+			logger.Debug("pasteClipboard: nothing to paste, passing Ctrl+V through to pane %s", paneID)
+			return clipboardPastedMsg{paneID: paneID, passthrough: true}
 		}
 		// Hand the text back to Update rather than writing to the pane here.
 		// Resolving the pane, wrapping the payload and enqueueing all read
@@ -10117,9 +10132,11 @@ func (m Model) pasteClipboard() tea.Cmd {
 // fails — the caller falls back to its existing text-paste path.
 //
 // This is the proxy that works around the broken claude-code clipboard image
-// reader on Windows (anthropics/claude-code#32791): Quil grabs the image from
-// the OS clipboard itself, drops it in a known location, and types the path
-// into the PTY. Any AI tool with file-reading tools can then pick it up.
+// reader on Windows (anthropics/claude-code#32791), and on macOS/Linux the
+// fact that Quil takes Ctrl+V before the pane's app sees it (#261): Quil
+// grabs the image from the OS clipboard itself, drops it in a known location,
+// and types the path into the PTY. Any AI tool with file-reading tools can
+// then pick it up.
 func (m Model) tryPasteClipboardImage() (string, bool) {
 	pngBytes, err := clipboardReadImage()
 	if err != nil {
@@ -10609,6 +10626,22 @@ func (m Model) sendClipboardToPaneID(paneID, text string) {
 	pane := m.guardedInputPane(bound)
 	pane.answerBlockedByInput()
 	m.enqueueKeyInput(pane.ID, pastePayload(pane, text))
+}
+
+// sendPasteKeyToPaneID forwards a raw Ctrl+V to the pane bound at paste time,
+// for a paste Quil had nothing to deliver. It is a keystroke, not pasted text,
+// so it is never wrapped in bracketed-paste markers.
+func (m Model) sendPasteKeyToPaneID(paneID string) {
+	if paneID == "" {
+		return
+	}
+	bound, _, _ := m.findPaneAndTab(paneID)
+	if bound == nil {
+		return
+	}
+	pane := m.guardedInputPane(bound)
+	pane.answerBlockedByInput()
+	m.enqueueKeyInput(pane.ID, []byte(pasteKeyByte))
 }
 
 func keyToBytes(keyMsg tea.KeyPressMsg) []byte {

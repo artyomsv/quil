@@ -237,7 +237,7 @@ intercepts (`Alt+G`, `Alt+M`, `Alt+N`, `Alt+E`, …); rebind `pane.quick_actions
 | `Ctrl+Alt+V` | Paste alias — useful when Windows Terminal eats `Ctrl+V` |
 | `F8` | Paste alias — **recommended on Windows** because Windows Terminal never delivers `Ctrl+V` to the TUI |
 
-If the clipboard has no text but contains an image, Quil decodes the DIB, saves a PNG under `~/.quil/paste/`, and types the absolute path into the active pane. See [Image paste](features.md#image-paste-from-clipboard).
+If the clipboard has no text but contains an image, Quil saves a PNG under `~/.quil/paste/` and types the absolute path into the active pane (Windows, macOS, and Linux with `xclip`). If it has neither, the key reaches the pane as a raw `Ctrl+V`. See [Image paste](features.md#image-paste-from-clipboard).
 
 ## Text selection
 

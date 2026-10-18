@@ -108,10 +108,7 @@ func TestSpawnPane_SbxAttachExecsInTheExistingSandbox(t *testing.T) {
 			t.Errorf("attach ran %v, which changes a sandbox Quil does not own; calls = %v", step, r.calls)
 		}
 	}
-	wd := pane.CWD
-	if runtime.GOOS == "windows" {
-		wd = ""
-	}
+	wd := pane.CWD // the fixture pins a non-Windows host
 	p := d.registry.Get("claude-code")
 	tag := spawnTag(t, s.startArgs)
 	want := sbx.ExecArgs("team-box", wd, append(append([]string{}, p.Command.Env...), sbx.TagEnv+"="+tag), p.Command.Cmd, nil)
@@ -269,9 +266,9 @@ func TestSpawnPane_SbxAttachAsksTheSandboxForAnUnlistedFolder(t *testing.T) {
 // in the sandbox's main workspace, and the pane says so.
 func TestSpawnPane_SbxAttachOnWindowsSkipsTheProbe(t *testing.T) {
 	d, pane, r := sbxFixture(t, false)
-	prevOS := sbxHostOS
-	sbxHostOS = "windows"
-	t.Cleanup(func() { sbxHostOS = prevOS })
+	prevOS := sbxHostOSFn
+	sbxHostOSFn = func() string { return "windows" }
+	t.Cleanup(func() { sbxHostOSFn = prevOS })
 	pane.SandboxName = "team-box"
 	r.lsJSON = lsJSON(t, "team-box", t.TempDir())
 

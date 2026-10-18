@@ -848,7 +848,7 @@ the worktrees note above), a "no" from `Covers` is not final:
 `test -w` is access(W_OK), so it reports EROFS on a read-only mount). A
 folder the agent made inside the VM also passes — that cannot widen the
 cage, the pane still runs in that sandbox. On a Windows host the probe is skipped
-(`sbxHostOS`, the same seam as the exec's `-w`): a Windows path names nothing
+(`sbxHostOSFn`, the same seam as the exec's `-w`): a Windows path names nothing
 in the VM, and without `-w` the agent starts in the main workspace anyway, so
 the pane starts with a note. Measured on 0.48: `sbx exec` starts a
 stopped sandbox itself, so attach needs no start step. The leftover prefix

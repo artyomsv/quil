@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -144,9 +143,12 @@ func sbxFixture(t *testing.T, trust bool) (*Daemon, *Pane, *scriptRunner) {
 	}
 
 	r := &scriptRunner{}
-	prevRunner, prevBin := sbxRunner, sbxBinaryFn
+	prevRunner, prevBin, prevOS := sbxRunner, sbxBinaryFn, sbxHostOSFn
 	sbxRunner = r
 	sbxBinaryFn = func() (string, error) { return "/fake/sbx", nil }
+	// Pinned, so a test of the -w argument and the folder probe asserts the
+	// same contract on every host; the Windows branch has its own test.
+	sbxHostOSFn = func() string { return "linux" }
 
 	d := &Daemon{session: NewSessionManager(1024), events: newEventQueue(50), cfg: config.Default()}
 	withClaudePlugin(t, d)
@@ -154,7 +156,7 @@ func sbxFixture(t *testing.T, trust bool) (*Daemon, *Pane, *scriptRunner) {
 	// seams, so they are restored only once it has finished.
 	t.Cleanup(func() {
 		d.sbxPrep.wait()
-		sbxRunner, sbxBinaryFn = prevRunner, prevBin
+		sbxRunner, sbxBinaryFn, sbxHostOSFn = prevRunner, prevBin, prevOS
 	})
 
 	// Registered with the session manager: the preparation goroutine looks the
@@ -231,10 +233,7 @@ func TestSpawnPane_SbxPreparesThenExecs(t *testing.T) {
 	if s.startCmd != "/fake/sbx" {
 		t.Errorf("started %q, want the sbx CLI", s.startCmd)
 	}
-	wd := pane.CWD
-	if runtime.GOOS == "windows" {
-		wd = ""
-	}
+	wd := pane.CWD // the fixture pins a non-Windows host
 	p := d.registry.Get("claude-code")
 	tag := spawnTag(t, s.startArgs)
 	if !strings.HasPrefix(tag, pane.ID+"-") {

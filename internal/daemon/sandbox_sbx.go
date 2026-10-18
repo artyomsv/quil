@@ -64,9 +64,9 @@ import (
 var (
 	sbxBinaryFn = func() (string, error) { return sbx.Binary(runtime.GOOS) }
 	sbxRunner   = sbx.Runner(sbx.ExecRunner{})
-	// sbxHostOS is the daemon's OS, for the two places a host path cannot
+	// sbxHostOSFn is the daemon's OS, for the two places a host path cannot
 	// be handed to the Linux VM: the exec's -w and the attach folder probe.
-	sbxHostOS = runtime.GOOS
+	sbxHostOSFn = func() string { return runtime.GOOS }
 	// sbxSpawnFn is nil by default and resolved at call time, for the reason
 	// signInSpawnFn is: a closure over spawnPane here is an initialisation
 	// cycle, because spawnPane reaches this file.
@@ -204,7 +204,7 @@ func (d *Daemon) startSbxPane(pane *Pane, ptySession apty.Session, p *plugin.Pan
 	// whose paths mean nothing inside the Linux VM; sbx then starts in the
 	// sandbox's primary workspace.
 	workdir := cwd
-	if sbxHostOS == "windows" {
+	if sbxHostOSFn() == "windows" {
 		workdir = ""
 	}
 	// A fresh tag per spawn: closing this session stops exactly the
@@ -488,7 +488,7 @@ func (d *Daemon) checkSbxAttach(ctx context.Context, listed sbx.Listed, panes []
 		if lsErr == nil {
 			continue
 		}
-		if sbxHostOS == "windows" {
+		if sbxHostOSFn() == "windows" {
 			// A Windows path means nothing inside the Linux VM, so the probe
 			// cannot ask about it — and it does not need to: the exec runs
 			// without -w there, so the agent starts in the sandbox's main

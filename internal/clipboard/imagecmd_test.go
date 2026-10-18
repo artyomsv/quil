@@ -56,6 +56,32 @@ func TestCheckPNG(t *testing.T) {
 	}
 }
 
+func TestClipboardText(t *testing.T) {
+	t.Parallel()
+	// A real PNG's first 16 bytes: signature, then the IHDR chunk length.
+	png := append(append([]byte{}, pngMagic...), 0, 0, 0, 0x0d, 'I', 'H', 'D', 'R')
+	tests := []struct {
+		name string
+		out  []byte
+		want string
+	}{
+		{"plain text", []byte("hello"), "hello"},
+		{"one trailing newline trimmed", []byte("hello\n\n"), "hello\n"},
+		{"utf-8 text", []byte("grüße ✳\n"), "grüße ✳"},
+		{"png bytes from a plain xclip read", png, ""},
+		{"any NUL is binary", []byte("ab\x00cd"), ""},
+		{"empty", nil, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := clipboardText(tt.out); got != tt.want {
+				t.Errorf("clipboardText(%q) = %q, want %q", tt.out, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestIsNoImageStderr(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

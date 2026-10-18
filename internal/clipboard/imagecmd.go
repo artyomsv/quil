@@ -67,6 +67,18 @@ func checkPNG(b []byte) ([]byte, error) {
 	return b, nil
 }
 
+// clipboardText turns a text helper's output into paste text. Output holding a
+// NUL byte is binary, not text: xclip answers a plain `-o` with the PNG bytes
+// when the clipboard holds only image/png, and typing those into a pane would
+// skip the image path entirely. Every PNG has a NUL at byte 8 (the IHDR
+// length), so this catches every image xclip can hand back.
+func clipboardText(out []byte) string {
+	if bytes.IndexByte(out, 0) >= 0 {
+		return ""
+	}
+	return strings.TrimSuffix(string(out), "\n")
+}
+
 // isNoImageStderr reports whether a failed reader's stderr means "the
 // clipboard holds no image" rather than a real failure. osascript says -1700;
 // xclip says the image/png target is not available.

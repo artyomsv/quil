@@ -85,7 +85,7 @@ func read() (string, error) {
 	}
 	cmd.Wait()
 
-	return strings.TrimSuffix(string(out), "\n"), nil
+	return clipboardText(out), nil
 }
 
 func write(text string) error {
@@ -101,6 +101,15 @@ func write(text string) error {
 // it, so a wedged helper must not hold the paste forever.
 const imageReadTimeout = 10 * time.Second
 
+// helperWaitDelay is how long Wait gives a killed helper's pipes to close. A
+// grandchild that inherited stdout (a shell's forked child) would otherwise
+// keep the read open after the helper itself is gone.
+const helperWaitDelay = time.Second
+
+// maxHelperStderr caps what a helper may write to stderr; only the "no image"
+// message and an error's first line are ever read from it.
+const maxHelperStderr = 64 * 1024
+
 // readImage returns the clipboard image as PNG bytes (#261).
 //
 // macOS: `osascript -e 'the clipboard as «class PNGf»'` — ships with the OS,
@@ -112,57 +121,69 @@ const imageReadTimeout = 10 * time.Second
 // for a target type, so an xsel-only host reports ErrNoImage.
 func readImage() ([]byte, error) {
 	clipToolOnce.Do(detectClipTool)
-	var name string
-	var args []string
 	switch {
 	case clipToolPath == "darwin":
-		name, args = "osascript", []string{"-e", "the clipboard as «class PNGf»"}
+		// Two hex digits per byte, plus the literal's framing.
+		out, err := runImageHelper(imageReadTimeout, 2*maxImageSize+64,
+			"osascript", "-e", "the clipboard as «class PNGf»")
+		if err != nil {
+			return nil, err
+		}
+		return decodeAppleScriptPNG(out)
 	case strings.HasSuffix(clipToolPath, "xclip"):
-		name, args = clipToolPath, []string{"-selection", "clipboard", "-t", "image/png", "-o"}
+		out, err := runImageHelper(imageReadTimeout, maxImageSize,
+			clipToolPath, "-selection", "clipboard", "-t", "image/png", "-o")
+		if err != nil {
+			return nil, err
+		}
+		return checkPNG(out)
 	default:
 		return nil, ErrNoImage
 	}
+}
 
-	ctx, cancel := context.WithTimeout(context.Background(), imageReadTimeout)
+// cappedBuffer collects a helper's output up to limit bytes. Past the limit it
+// cancels the helper's context, so an oversized image ends the helper at once
+// instead of leaving it blocked on a full pipe until the timeout.
+type cappedBuffer struct {
+	buf    bytes.Buffer
+	limit  int
+	over   bool
+	cancel context.CancelFunc
+}
+
+func (c *cappedBuffer) Write(p []byte) (int, error) {
+	if c.buf.Len()+len(p) > c.limit {
+		c.over = true
+		c.cancel()
+		return 0, errImageTooLarge
+	}
+	return c.buf.Write(p)
+}
+
+// runImageHelper runs one clipboard helper and returns its stdout. It is
+// bounded three ways: timeout, limit bytes of stdout, and helperWaitDelay for
+// the pipes after a kill. A failed run whose stderr says "no image"
+// (isNoImageStderr) is ErrNoImage; any other failure is an error.
+func runImageHelper(timeout time.Duration, limit int, name string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, name, args...)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, fmt.Errorf("clipboard image stdout pipe: %w", err)
-	}
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("clipboard image start: %w", err)
-	}
-	// osascript prints two hex digits per byte, plus the literal's framing.
-	limit := int64(maxImageSize + 1)
-	if clipToolPath == "darwin" {
-		limit = 2*maxImageSize + 64
-	}
-	out, readErr := io.ReadAll(io.LimitReader(stdout, limit))
-	if int64(len(out)) >= limit {
-		// Stop the helper now: it is blocked writing the rest into a pipe
-		// nobody reads, and Wait would otherwise sit out the whole timeout.
-		_ = cmd.Process.Kill() // best effort; Wait below reaps it either way
-		_ = cmd.Wait()
+	stdout := &cappedBuffer{limit: limit, cancel: cancel}
+	stderr := &cappedBuffer{limit: maxHelperStderr, cancel: cancel}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	cmd.WaitDelay = helperWaitDelay
+	err := cmd.Run()
+	switch {
+	case stdout.over:
 		return nil, errImageTooLarge
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		return nil, fmt.Errorf("clipboard image: %s timed out after %s", name, timeout)
+	case err != nil && isNoImageStderr(stderr.buf.String()):
+		return nil, ErrNoImage
+	case err != nil:
+		return nil, fmt.Errorf("clipboard image: %s: %w: %s", name, err, strings.TrimSpace(stderr.buf.String()))
 	}
-	waitErr := cmd.Wait()
-	if readErr != nil {
-		return nil, fmt.Errorf("clipboard image read: %w", readErr)
-	}
-	if waitErr != nil {
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return nil, fmt.Errorf("clipboard image: %s timed out after %s", name, imageReadTimeout)
-		}
-		if isNoImageStderr(stderr.String()) {
-			return nil, ErrNoImage
-		}
-		return nil, fmt.Errorf("clipboard image: %s: %w: %s", name, waitErr, strings.TrimSpace(stderr.String()))
-	}
-	if clipToolPath == "darwin" {
-		return decodeAppleScriptPNG(out)
-	}
-	return checkPNG(out)
+	return stdout.buf.Bytes(), nil
 }

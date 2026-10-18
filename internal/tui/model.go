@@ -4807,15 +4807,25 @@ func (m Model) openClosePaneConfirm() (tea.Model, tea.Cmd) {
 	return m, tea.ClearScreen
 }
 
+// lastPaneNotice is the close confirm's line for a tab's only pane. It must fit
+// the 30 cells the box leaves at minTermWidth (TestConfirmDialog_LastPaneFitsTheSmallestTerminal).
+const lastPaneNotice = "Last pane: the tab closes too."
+
 // paneIsTabsLast reports whether paneID is the only pane in its tab's tree,
 // so closing it closes the tab too (#262). Overlays are not leaves and do not
 // count, matching the daemon, which ignores them when it decides.
+//
+// A tab in flight answers false: the daemon keeps a tab that a worktree add is
+// still filling (closeTabIfEmpty refills it instead), and promising a close
+// there would be wrong. tabInFlight is the client's view of that — its own
+// create or replace, or a preparing leaf another client's add put there.
 func (m *Model) paneIsTabsLast(paneID string) bool {
 	_, proj, idx := m.findPaneAndTab(paneID)
 	if proj == nil || idx < 0 || idx >= len(proj.tabs) {
 		return false
 	}
-	return len(proj.tabs[idx].Leaves()) == 1
+	tab := proj.tabs[idx]
+	return len(tab.Leaves()) == 1 && !m.tabInFlight(tab)
 }
 
 // openRestartPaneConfirm opens the restart confirm dialog for the active

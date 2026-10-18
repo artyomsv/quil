@@ -2021,11 +2021,13 @@ func (m Model) renderConfirmDialog() string {
 		// Ctrl+W used to refill the tab with a shell instead, and this is the
 		// place the user is being asked. Read at render, not at open: a
 		// broadcast can add or remove a sibling while the dialog is open.
-		// One newline, not two: the box is not clipped by height, and the extra
-		// row is the one a short terminal does not have.
+		// One newline, not two, and 30 cells: at minTermWidth x minTermHeight
+		// the box leaves exactly 30 cells beside the indent and one spare row,
+		// and lipgloss.Place clips neither a wrapped line nor an extra row.
 		if m.confirmKind == "pane" && m.paneIsTabsLast(m.confirmID) {
 			b.WriteString("\n")
-			b.WriteString("  " + dialogSubtle.Render("It is the tab's only pane: the tab closes too."))
+			notice := truncateToWidth(lastPaneNotice, dialogInnerWidth(m.width, dialogWidth)-confirmRowIndent)
+			b.WriteString("  " + dialogSubtle.Render(notice))
 		}
 		if rows := m.renderConfirmWorktrees(); rows != "" {
 			b.WriteString("\n\n")

@@ -487,20 +487,22 @@ func (m Model) sandboxChoices() []sandboxChoice {
 
 // nextSandboxChoice is the choice step places away from the current one,
 // wrapping, and false when there is nothing else to pick. A current choice
-// that is no longer offered (the folder changed) steps from the start.
+// that is no longer offered (the folder changed) steps to the first one —
+// checked before the count, or a host with one choice left could never leave
+// a sandbox that stopped mounting the folder.
 func (m Model) nextSandboxChoice(step int) (sandboxChoice, bool) {
 	choices := m.sandboxChoices()
-	if len(choices) < 2 {
-		return sandboxChoice{}, false
-	}
 	cur := -1
 	for i, c := range choices {
 		if c.backend == m.sandboxBackend && c.name == m.sandboxSbxName {
 			cur = i
 		}
 	}
-	if cur < 0 {
+	if cur < 0 && len(choices) > 0 {
 		return choices[0], true
+	}
+	if len(choices) < 2 {
+		return sandboxChoice{}, false
 	}
 	return choices[(cur+step+len(choices))%len(choices)], true
 }

@@ -217,3 +217,25 @@ func TestFolderHolds(t *testing.T) {
 		}
 	}
 }
+
+// With sbx alone, a sandbox that stopped mounting the folder leaves one
+// choice — and the arrows must still reach it, or the dialog is stuck.
+func TestSandboxRow_SbxOnlyRecoversFromAStaleSandbox(t *testing.T) {
+	m := attachModel()
+	m.sandboxDialogDocker = false
+	m.sandboxBackend, m.sandboxSbxName = config.SandboxBackendSbx, "ticket-1"
+	m.cwdBrowseDir = "/w/elsewhere"
+	if !m.handleSandboxFieldKey(tea.KeyPressMsg{Code: tea.KeyRight}) {
+		t.Fatal("→ was not taken on a stale sandbox choice")
+	}
+	if m.sandboxSbxName != "" || !m.sandboxBackendIsSbx() {
+		t.Errorf("backend=%q name=%q, want the sbx profile", m.sandboxBackend, m.sandboxSbxName)
+	}
+	if msg := m.sandboxSubmitError(); msg != "" {
+		t.Errorf("submit still refused: %q", msg)
+	}
+	// Back on the only choice, the arrows are not the row's to take.
+	if m.handleSandboxFieldKey(tea.KeyPressMsg{Code: tea.KeyRight}) {
+		t.Error("→ was taken with one choice")
+	}
+}

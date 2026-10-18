@@ -739,6 +739,9 @@ From MCP: `create_pane` with `sandbox_backend = "sbx"` and
 3. If `sbx ls` does not show the folder as writable, Quil asks the sandbox
    itself: it runs a short `test -d` and `test -w` on the folder inside the
    sandbox. If that also says no, the pane does not start.
+   On a Windows host Quil skips this step, because a Windows path means
+   nothing inside the sandbox. The pane starts with a note, and the agent
+   starts in the sandbox's main workspace, as every sbx pane on Windows does.
 4. Starts the agent with `sbx exec -it -w <pane folder> <name> <agent command>`.
    If the sandbox is stopped, `sbx exec` starts it.
 

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -260,5 +261,28 @@ func TestSpawnPane_SbxAttachAsksTheSandboxForAnUnlistedFolder(t *testing.T) {
 		if r.ran(step...) {
 			t.Errorf("attach ran %v; calls = %v", step, r.calls)
 		}
+	}
+}
+
+// On a Windows host the folder probe is never run: a Windows path means
+// nothing inside the Linux VM. The exec has no -w there, so the agent starts
+// in the sandbox's main workspace, and the pane says so.
+func TestSpawnPane_SbxAttachOnWindowsSkipsTheProbe(t *testing.T) {
+	d, pane, r := sbxFixture(t, false)
+	prevOS := sbxHostOS
+	sbxHostOS = "windows"
+	t.Cleanup(func() { sbxHostOS = prevOS })
+	pane.SandboxName = "team-box"
+	r.lsJSON = lsJSON(t, "team-box", t.TempDir())
+
+	s := attachRun(t, d, pane)
+	if s == nil {
+		t.Fatalf("the pane was refused: %q; calls = %v", pane.SpawnError, r.calls)
+	}
+	if r.ran(append([]string{"/fake/sbx"}, sbx.WritableArgs("team-box", pane.CWD)...)...) {
+		t.Errorf("the probe ran with a host path on Windows; calls = %v", r.calls)
+	}
+	if slices.Contains(s.startArgs, "-w") {
+		t.Errorf("the exec passed -w on Windows: %v", s.startArgs)
 	}
 }

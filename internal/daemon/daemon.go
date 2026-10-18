@@ -3495,22 +3495,20 @@ func (d *Daemon) handleDestroyPane(msg *ipc.Message) {
 
 	d.session.DestroyPane(payload.PaneID)
 
-	// Auto-create replacement if the last NORMAL pane in the tab was
-	// destroyed. Overlay panes don't count — a tab holding only a hidden
-	// lazygit overlay would otherwise render an empty layout. Remaining
-	// overlays are destroyed along with the tab's last normal pane.
-	if tabID != "" {
-		d.ensureTabNotEmpty(tabID)
-	}
+	// Closing the last NORMAL pane closes the tab (#262). Overlay panes don't
+	// count — a tab holding only a hidden lazygit overlay would otherwise
+	// render an empty layout — and go down with the tab.
+	d.closeTabIfEmpty(nil, tabID)
 
 	d.broadcastState()
 	d.requestSnapshot()
 
-	// LAST, and after ensureTabNotEmpty: its replacement shell spawns in
-	// d.defaultCWD(), never in the closing pane's directory, so the two cannot
-	// race for the worktree — but a hidden overlay pane in the same tab CAN be
-	// sitting in it, and ensureTabNotEmpty is what destroys those. Removing
-	// before it ran would find the overlay still live and keep the worktree.
+	// LAST, and after closeTabIfEmpty: a replacement Shell tab (when the tab
+	// was its project's last) spawns in the project's directory, never in the
+	// closing pane's, so the two cannot race for the worktree — but a hidden
+	// overlay pane in the same tab CAN be sitting in it, and closeTabIfEmpty is
+	// what destroys those. Removing before it ran would find the overlay still
+	// live and keep the worktree.
 	//
 	// The container comes down FIRST, and in the same goroutine, because it
 	// holds the worktree as a bind mount and removeOwnedWorktrees gives up
@@ -3557,8 +3555,8 @@ func (d *Daemon) teardownAfterDestroy(paneID string, worktrees []string) {
 // repair.
 //
 // Deliberately NOT ensureTabNotEmpty: that spawns a working shell in the
-// daemon's default directory, which is the right recovery when a pane the user
-// closed leaves a tab empty, and the wrong one here — the user asked for a
+// daemon's default directory, which is a safety net for a tab nobody asked to
+// close, and the wrong recovery here — the user asked for a
 // specific pane, it failed, and a shell that appears instead with no
 // explanation is the silent substitution this whole feature exists to remove.
 func (d *Daemon) recoverEmptyTab(tabID, reason string) bool {
@@ -3723,11 +3721,47 @@ func (d *Daemon) tabPreparingWorktree(tabID string) bool {
 	return false
 }
 
+// closeTabIfEmpty closes tabID once a CLOSE has taken its last normal pane
+// (#262). It used to refill the tab with a fresh shell (ensureTabNotEmpty),
+// which made Ctrl+W on a lone pane look broken: the pane went and a shell took
+// its place, every time, and only Alt+W got rid of the tab. A close now ends
+// the tab exactly as a move of its last pane does (dissolveEmptyTab). A
+// project left with no tab still gets its replacement Shell tab from
+// recoverEmptyProject, so the window is never left blank.
+//
+// conn may be nil (handleDestroyPane has none); recoverEmptyProject then roots
+// the Shell at the project's directory or the daemon default. A no-op for an
+// empty or unknown tab, and for one that still holds a normal pane.
+func (d *Daemon) closeTabIfEmpty(conn *ipc.Conn, tabID string) {
+	if tabID == "" {
+		return
+	}
+	// A worktree add aimed at this tab will put its pane here when the
+	// checkout settles; the requesting client's placeholder is waiting for it.
+	// Dissolving would fail that create, so keep the old refill there.
+	if d.worktreeAddingIn(tabID) {
+		d.ensureTabNotEmpty(tabID)
+		return
+	}
+	// Read BEFORE dissolving: DestroyTab de-registers the tab from its
+	// project, after which nothing can say which project just lost it.
+	projectID, _ := d.session.TabProjectID(tabID)
+	if !d.dissolveEmptyTab(tabID) {
+		return
+	}
+	d.recoverEmptyProject(conn, projectID)
+	// The tab the user lands on can be a lazily restored one; spawn it, as
+	// handleMovePane does after its own dissolve. Idempotent.
+	if a, ok := d.session.ProjectActiveTab(projectID); ok && a != "" {
+		d.ensureTabSpawned(a)
+	}
+	d.ensureTabSpawned(d.session.ActiveTabID())
+}
+
 // dissolveEmptyTab destroys tabID when it holds no NORMAL pane, which is the
-// state a move of its last pane leaves behind. It is deliberately NOT
-// ensureTabNotEmpty: that refills the tab with a shell, which is right after a
-// CLOSE and wrong after a MOVE. The user took the pane somewhere; a fresh shell
-// appearing in its place is a pane they never asked for. Overlays left in the
+// state a move or a close of its last pane leaves behind. It is deliberately
+// NOT ensureTabNotEmpty: that refills the tab with a shell, a pane the user
+// never asked for — they took the pane somewhere, or closed it. Overlays left in the
 // tab are cleaned up (cleanupPaneArtifacts) exactly as ensureTabNotEmpty
 // cleans its orphans, then go down with the tab (DestroyTabIfPanes releases
 // PTYs off the lock). The destroy is conditional on the pane list read here, so
@@ -3759,14 +3793,14 @@ func (d *Daemon) dissolveEmptyTab(tabID string) bool {
 func (d *Daemon) dissolveTabHolding(tabID string, overlays []string) bool {
 	destroyed, err := d.session.DestroyTabIfPanes(tabID, overlays)
 	if err != nil {
-		log.Printf("move pane: dissolve tab %s: %v", tabID, err)
+		log.Printf("dissolve tab %s: %v", tabID, err)
 		return false
 	}
 	if !destroyed {
-		log.Printf("move pane: tab %s gained a pane before it could dissolve; kept", tabID)
+		log.Printf("dissolve tab: %s gained a pane before it could dissolve; kept", tabID)
 		return false
 	}
-	log.Printf("tab dissolved: %s (its last pane moved away)", tabID)
+	log.Printf("tab dissolved: %s (no normal pane left)", tabID)
 	// After the destroy, as handleDestroyTab orders it.
 	for _, id := range overlays {
 		log.Printf("pane destroy: orphaned overlay %s (tab=%s)", id, tabID)
@@ -8092,10 +8126,10 @@ func (d *Daemon) handleDestroyPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 	}
 	d.notifyPaneDestroyed(pane, closedBy)
 
-	// Auto-create replacement if the last normal pane in the tab was
-	// destroyed. Delegates to ensureTabNotEmpty (shared with handleDestroyPane)
-	// so overlay-pane accounting and auto-recovery are identical on both paths.
-	d.ensureTabNotEmpty(tabID)
+	// Closing the last normal pane closes the tab. Delegates to closeTabIfEmpty
+	// (shared with handleDestroyPane) so overlay-pane accounting and recovery
+	// are identical on both paths.
+	d.closeTabIfEmpty(conn, tabID)
 
 	d.broadcastState()
 	d.requestSnapshot()

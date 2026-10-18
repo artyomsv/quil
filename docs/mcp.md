@@ -202,7 +202,7 @@ TUI's terminal state before it displays the replacement child's output.
 | `create_pane` | `tab_id` (optional, default = active), `cwd`, `type` (default `terminal`; also `claude-code`, `opencode`, `codex`, `ssh`, `stripe`), `name`, `toggles[]`, `resume_session_id`, `worktree_branch`, `sandbox_image`, `sandbox_auth`, `sandbox_claude_config`, `host` | JSON: `{pane_id, tab_id, host, error?}` | Spawns a new pane with the same options the Ctrl+N dialog collects — see below. An ERROR (no pane) names the refusal; `error` WITH a `pane_id` means the pane exists but its process failed to start. |
 | `rename_pane` | `pane_id`, `name` | `{ok}` | What Alt+F2 does. |
 | `restart_pane` | `pane_id` (required) | JSON: `{success, message}` | Kills + respawns with the same plugin, CWD, and instance config. Useful for stuck or crashed panes. AI clients should confirm with the user before calling. |
-| `destroy_pane` | `pane_id` (required) | "Destroyed pane <id>" or "Failed to destroy" | If it was the last pane in a tab, a replacement terminal pane is auto-created. AI clients should confirm before calling. |
+| `destroy_pane` | `pane_id` (required) | "Destroyed pane <id>" or "Failed to destroy" | If it was the last pane in a tab, the tab closes too, and if that was the project's last tab a shell tab is auto-created. AI clients should confirm before calling. |
 
 **`create_pane` options, and where each one goes:**
 

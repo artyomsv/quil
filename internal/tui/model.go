@@ -4807,6 +4807,17 @@ func (m Model) openClosePaneConfirm() (tea.Model, tea.Cmd) {
 	return m, tea.ClearScreen
 }
 
+// paneIsTabsLast reports whether paneID is the only pane in its tab's tree,
+// so closing it closes the tab too (#262). Overlays are not leaves and do not
+// count, matching the daemon, which ignores them when it decides.
+func (m *Model) paneIsTabsLast(paneID string) bool {
+	_, proj, idx := m.findPaneAndTab(paneID)
+	if proj == nil || idx < 0 || idx >= len(proj.tabs) {
+		return false
+	}
+	return len(proj.tabs[idx].Leaves()) == 1
+}
+
 // openRestartPaneConfirm opens the restart confirm dialog for the active
 // pane. Extracted from the kb.RestartPane case; shared with the context menu.
 func (m Model) openRestartPaneConfirm() (tea.Model, tea.Cmd) {

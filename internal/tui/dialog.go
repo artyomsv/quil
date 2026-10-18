@@ -2017,6 +2017,16 @@ func (m Model) renderConfirmDialog() string {
 	default:
 		label := fmt.Sprintf("Close %s %q?", m.confirmKind, m.confirmName)
 		b.WriteString("  " + dialogNormal.Render(label))
+		// The daemon closes a tab with its last pane (#262). Said here because
+		// Ctrl+W used to refill the tab with a shell instead, and this is the
+		// place the user is being asked. Read at render, not at open: a
+		// broadcast can add or remove a sibling while the dialog is open.
+		// One newline, not two: the box is not clipped by height, and the extra
+		// row is the one a short terminal does not have.
+		if m.confirmKind == "pane" && m.paneIsTabsLast(m.confirmID) {
+			b.WriteString("\n")
+			b.WriteString("  " + dialogSubtle.Render("It is the tab's only pane: the tab closes too."))
+		}
 		if rows := m.renderConfirmWorktrees(); rows != "" {
 			b.WriteString("\n\n")
 			b.WriteString(rows)

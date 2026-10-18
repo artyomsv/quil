@@ -28,8 +28,8 @@ func stubFailingSpawn(t *testing.T) {
 // A replace whose SPAWN fails after the swap must not leave the tab empty.
 //
 // replacePaneAt destroys the new pane and reports swapped=true, and nothing on
-// that path calls ensureTabNotEmpty — its only callers are the destroy and exit
-// paths. For an ordinary split-replace that is harmless, because the tab keeps
+// that path calls ensureTabNotEmpty or closeTabIfEmpty — their callers are the
+// destroy and exit paths. For an ordinary split-replace that is harmless, because the tab keeps
 // its other panes. The new-tab worktree flow is the ONE shape where the replaced
 // pane is the tab's only pane, so the empty tab is guaranteed — against
 // handleCreateTab's own "the tab must never be pane-less" invariant, and

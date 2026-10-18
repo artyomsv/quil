@@ -630,7 +630,7 @@ func registerDestroyPaneTool(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogger) {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "destroy_pane",
-		Description: "Destroy a pane and close its process. If it's the last pane in a tab, a new terminal pane is auto-created.",
+		Description: "Destroy a pane and close its process. If it's the last pane in a tab, the tab closes too; if that was the project's last tab, a shell tab is auto-created.",
 	}, func(_ context.Context, _ *mcp.CallToolRequest, input Input) (*mcp.CallToolResult, any, error) {
 		bridge, _, err := r.bridgeFor(input.Host, input.PaneID)
 		if err != nil {

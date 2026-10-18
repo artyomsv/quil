@@ -476,6 +476,13 @@ type SandboxSpec struct {
 	// A daemon that predates the field reads an sbx spec as a docker spec
 	// with an empty image and refuses it, so an older daemon fails closed.
 	Backend string `json:"backend,omitempty"`
+
+	// Name, with Backend "sbx", ATTACHES the pane to an existing sbx sandbox
+	// that another tool created and owns: no profile, no approval, and Quil
+	// never creates, changes or removes it. Empty uses the profile. The
+	// daemon refuses a name sbx does not list, and a pane folder the
+	// sandbox does not mount writable.
+	Name string `json:"name,omitempty"`
 }
 
 // WorktreeSpec asks the daemon to create a linked worktree for a new pane.
@@ -1887,6 +1894,22 @@ type SandboxCapRespPayload struct {
 	SbxAvailable bool   `json:"sbx_available,omitempty"`
 	SbxVersion   string `json:"sbx_version,omitempty"`
 	SbxError     string `json:"sbx_error,omitempty"`
+	// SbxSandboxes lists the sandboxes that already exist on that machine,
+	// for the create dialog's attach choice: name, status and the folders
+	// each one mounts WRITABLE. Read fresh on every request (one `sbx ls
+	// --json`), never cached with the probe, because another tool creates and
+	// removes them. Display only: the daemon checks the chosen name and the
+	// pane's folder again at spawn.
+	SbxSandboxes []SbxSandbox `json:"sbx_sandboxes,omitempty"`
+}
+
+// SbxSandbox is one existing sbx sandbox, as the create dialog offers it.
+type SbxSandbox struct {
+	Name   string `json:"name"`
+	Status string `json:"status,omitempty"`
+	// Folders are the workspaces the sandbox mounts writable, as the
+	// daemon's filesystem spells them.
+	Folders []string `json:"folders,omitempty"`
 }
 
 // GitReposReqPayload asks the daemon which git repositories are near CWD —

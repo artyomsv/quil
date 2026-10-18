@@ -53,6 +53,12 @@ import (
 // Closing a pane never removes the sandbox: it is named, shared by every pane
 // that names it, and holds whatever the set-up steps installed. Recreating it
 // is `sbx rm --force <name>`; the next pane then creates it again.
+//
+// Attach mode skips steps 1 and 2: a pane with a SandboxName runs in an
+// existing sandbox another tool created and owns. Quil checks that sbx lists
+// it and that the pane folder is inside a folder it mounts writable, then
+// goes straight to step 3. It never creates, mounts into or removes that
+// sandbox.
 
 // Seams so the call-site tests need no sbx installed.
 var (
@@ -65,19 +71,64 @@ var (
 )
 
 // applySbxSpec records an sbx create. Everything else about the cage comes from
-// the profile, so the spec may carry nothing else — an image or a sign-in
-// mode next to backend "sbx" is a confused client, refused rather than
-// half-applied.
+// the profile or from the existing sandbox, so the spec may carry nothing
+// else — an image or a sign-in mode next to backend "sbx" is a confused
+// client, refused rather than half-applied.
+//
+// A Name attaches to an existing sandbox. It reaches sbx argv as a
+// positional, so a name sbx could read as a flag is refused here, at the
+// boundary, rather than at the spawn.
 func applySbxSpec(pane *Pane, spec *ipc.SandboxSpec) error {
 	if spec.Image != "" || spec.Auth != "" || spec.ClaudeConfig != "" {
 		log.Printf("pane %s: refusing an sbx sandbox spec that also names a docker image or sign-in mode", pane.ID)
 		return fmt.Errorf("an sbx sandbox takes no image or sign-in fields")
 	}
+	if spec.Name != "" && !sbx.ValidName(spec.Name) {
+		log.Printf("pane %s: refusing an sbx sandbox name of length %d", pane.ID, len(spec.Name))
+		return fmt.Errorf("invalid sbx sandbox name")
+	}
 	pane.PluginMu.Lock()
 	pane.SandboxBackend = config.SandboxBackendSbx
 	pane.SandboxImage = ""
+	pane.SandboxName = spec.Name
 	pane.PluginMu.Unlock()
 	return nil
+}
+
+// sbxTarget is the sandbox one pane spawn runs in: a profile's, which Quil
+// creates when it is missing, or an existing one the pane attaches to, which
+// Quil only checks.
+type sbxTarget struct {
+	name   string
+	attach bool
+	prof   sbx.Approved // profile mode only
+}
+
+// key is the preparation's single-flight key. Attach and profile panes on
+// one name never share a preparation: each runs its own checks, and a
+// profile preparation may create the sandbox an attach check would refuse.
+func (t sbxTarget) key() string {
+	if t.attach {
+		return "attach:" + t.name
+	}
+	return t.name
+}
+
+// sbxTargetFor resolves the pane's target. A name that is not valid any more
+// (a hand-edited snapshot) is refused, never dropped: dropping it would move
+// the pane into the profile's sandbox, a cage the user did not pick.
+func sbxTargetFor(name, cwd string) (sbxTarget, error) {
+	if name != "" {
+		if !sbx.ValidName(name) {
+			return sbxTarget{}, errors.New("sbx sandbox: the pane names an invalid sandbox")
+		}
+		return sbxTarget{name: name, attach: true}, nil
+	}
+	prof, err := loadSbxProfile(cwd)
+	if err != nil {
+		return sbxTarget{}, err
+	}
+	return sbxTarget{name: prof.Name, prof: prof}, nil
 }
 
 // loadSbxProfile finds the profile for a pane directory (sbx.FindProfileFor),
@@ -120,6 +171,7 @@ func (d *Daemon) startSbxPane(pane *Pane, ptySession apty.Session, p *plugin.Pan
 	pane.PluginMu.Lock()
 	gen := pane.ptyGen
 	cwd := pane.CWD
+	name := pane.SandboxName
 	args := append([]string{}, p.Command.Args...)
 	if len(pane.InstanceArgs) > 0 {
 		args = append([]string{}, pane.InstanceArgs...)
@@ -128,13 +180,14 @@ func (d *Daemon) startSbxPane(pane *Pane, ptySession apty.Session, p *plugin.Pan
 
 	// Checked on EVERY spawn, the ready respawn included: the profile names
 	// the sandbox, and a profile edited after approval must not be able to
-	// point a pane at a different cage.
-	prof, err := loadSbxProfile(cwd)
+	// point a pane at a different cage. An attached pane names its sandbox
+	// itself, and the preparation has just checked it.
+	t, err := sbxTargetFor(name, cwd)
 	if err != nil {
 		return nil, false, err
 	}
 	if !ready {
-		d.beginSbxPrepare(sbxWaiter{paneID: pane.ID, gen: gen}, prof)
+		d.beginSbxPrepare(sbxWaiter{paneID: pane.ID, gen: gen}, t)
 		return nil, false, nil
 	}
 
@@ -155,13 +208,13 @@ func (d *Daemon) startSbxPane(pane *Pane, ptySession apty.Session, p *plugin.Pan
 	// processes carrying it (see sbx.TagEnv).
 	tag := sbx.NewTag(pane.ID)
 	env := append(slices.Clone(p.Command.Env), sbx.TagEnv+"="+tag)
-	argv := sbx.ExecArgs(prof.Name, workdir, env, p.Command.Cmd, args)
+	argv := sbx.ExecArgs(t.name, workdir, env, p.Command.Cmd, args)
 	ptySession.SetCWD(cwd)
-	log.Printf("spawn: pane %s sbx sandbox=%s cmd=%s args=%v cwd=%s", pane.ID, prof.Name, bin, sbx.RedactEnv(argv), cwd)
+	log.Printf("spawn: pane %s sbx sandbox=%s cmd=%s args=%v cwd=%s", pane.ID, t.name, bin, sbx.RedactEnv(argv), cwd)
 	if err := ptySession.Start(bin, argv...); err != nil {
 		return ptySession, true, err
 	}
-	return &sbxSession{Session: ptySession, stop: func() { d.stopSbxTagAsync(prof.Name, tag) }}, true, nil
+	return &sbxSession{Session: ptySession, stop: func() { d.stopSbxTagAsync(t.name, tag) }}, true, nil
 }
 
 // sbxSession is an sbx pane's PTY. Ending the host `sbx exec` does not end
@@ -233,8 +286,9 @@ func (d *Daemon) stopSbxLeftovers(ctx context.Context, name string, panes []stri
 	}
 }
 
-// sbxPrepare is the per-sandbox single-flight. Keyed by sandbox NAME, because
-// that is the resource: two panes on one profile must share one create.
+// sbxPrepare is the per-sandbox single-flight. Keyed by sandbox NAME
+// (sbxTarget.key), because that is the resource: two panes on one profile
+// must share one create.
 //
 // The claim is held until the LAST pane is started, not only until the
 // sandbox exists: a pane restarted while the others are still being mounted
@@ -296,22 +350,27 @@ func (s *sbxPrepare) next(name string) []sbxWaiter {
 func (s *sbxPrepare) wait() { s.inFlight.Wait() }
 
 // beginSbxPrepare starts (or joins) the preparation of the pane's sandbox.
-func (d *Daemon) beginSbxPrepare(w sbxWaiter, prof sbx.Approved) {
-	if !d.sbxPrep.begin(prof.Name, w) {
-		d.announce(w.paneID, fmt.Sprintf("Waiting for sbx sandbox %s, which another pane is preparing…\r\n", prof.Name))
+func (d *Daemon) beginSbxPrepare(w sbxWaiter, t sbxTarget) {
+	if !d.sbxPrep.begin(t.key(), w) {
+		d.announce(w.paneID, fmt.Sprintf("Waiting for sbx sandbox %s, which another pane is preparing…\r\n", t.name))
 		return
 	}
-	d.announce(w.paneID, fmt.Sprintf("Preparing sbx sandbox %s (profile %s)…\r\n", prof.Name, prof.Path))
+	if t.attach {
+		d.announce(w.paneID, fmt.Sprintf("Attaching to the existing sbx sandbox %s…\r\n", t.name))
+	} else {
+		d.announce(w.paneID, fmt.Sprintf("Preparing sbx sandbox %s (profile %s)…\r\n", t.name, t.prof.Path))
+	}
 	d.sbxPrep.inFlight.Add(1)
 	go func() {
 		defer d.sbxPrep.inFlight.Done()
-		d.runSbxPrepare(w.paneID, prof)
+		d.runSbxPrepare(w.paneID, t)
 	}()
 }
 
-// runSbxPrepare makes the sandbox exist, then starts every pane that waited —
-// including any that asked while the others were being started.
-func (d *Daemon) runSbxPrepare(ownerID string, prof sbx.Approved) {
+// runSbxPrepare makes the sandbox exist (or, attaching, checks that it
+// does), then starts every pane that waited — including any that asked while
+// the others were being started.
+func (d *Daemon) runSbxPrepare(ownerID string, t sbxTarget) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if d.shutdown != nil {
@@ -324,12 +383,18 @@ func (d *Daemon) runSbxPrepare(ownerID string, prof sbx.Approved) {
 		}()
 	}
 
-	err := d.ensureSbxSandbox(ctx, ownerID, prof)
+	var listed sbx.Listed
+	var err error
+	if t.attach {
+		listed, err = d.findSbxSandbox(ctx, t.name)
+	} else {
+		err = d.ensureSbxSandbox(ctx, ownerID, t.prof)
+	}
 	if err != nil {
-		log.Printf("sbx: sandbox %s: %v", prof.Name, err)
+		log.Printf("sbx: sandbox %s: %v", t.name, err)
 	}
 	for {
-		waiters := d.sbxPrep.next(prof.Name)
+		waiters := d.sbxPrep.next(t.key())
 		if waiters == nil {
 			return
 		}
@@ -339,13 +404,14 @@ func (d *Daemon) runSbxPrepare(ownerID string, prof sbx.Approved) {
 			}
 			continue
 		}
-		d.startSbxWaiters(ctx, prof, waiters)
+		d.startSbxWaiters(ctx, t, listed, waiters)
 	}
 }
 
-// startSbxWaiters shares the panes' worktrees folders, stops what earlier
-// spawns of them left running, and starts them.
-func (d *Daemon) startSbxWaiters(ctx context.Context, prof sbx.Approved, waiters []sbxWaiter) {
+// startSbxWaiters shares the panes' worktrees folders (profile mode) or
+// checks each pane's folder is one the sandbox mounts (attach mode), stops
+// what earlier spawns of them left running, and starts them.
+func (d *Daemon) startSbxWaiters(ctx context.Context, t sbxTarget, listed sbx.Listed, waiters []sbxWaiter) {
 	// A pane started since it asked is dropped HERE, before the leftover
 	// stop: its prefix stop would kill the agent that start just made.
 	waiters = slices.DeleteFunc(waiters, func(w sbxWaiter) bool { return !d.sbxWaiterCurrent(w) })
@@ -353,7 +419,14 @@ func (d *Daemon) startSbxWaiters(ctx context.Context, prof sbx.Approved, waiters
 	for i, w := range waiters {
 		ids[i] = w.paneID
 	}
-	failed := d.mountSbxWorktrees(ctx, prof, ids)
+	var failed map[string]error
+	if t.attach {
+		// Never a mount: the sandbox belongs to another tool, and Quil does
+		// not widen a cage it did not build.
+		failed = d.checkSbxAttach(listed, ids)
+	} else {
+		failed = d.mountSbxWorktrees(ctx, t.prof, ids)
+	}
 	var starting []sbxWaiter
 	var startingIDs []string
 	for _, w := range waiters {
@@ -364,10 +437,52 @@ func (d *Daemon) startSbxWaiters(ctx context.Context, prof sbx.Approved, waiters
 		starting = append(starting, w)
 		startingIDs = append(startingIDs, w.paneID)
 	}
-	d.stopSbxLeftovers(ctx, prof.Name, startingIDs)
+	// Safe in a sandbox Quil does not own: the stop matches only processes
+	// carrying this pane's own tag.
+	d.stopSbxLeftovers(ctx, t.name, startingIDs)
 	for _, w := range starting {
 		d.respawnSbxPane(w)
 	}
+}
+
+// findSbxSandbox checks sbx can run here and that the named sandbox exists.
+// Nothing is created: a missing sandbox is the owning tool's to make.
+func (d *Daemon) findSbxSandbox(ctx context.Context, name string) (sbx.Listed, error) {
+	if answer := d.sbxCapGet(ctx); !answer.SbxAvailable {
+		if answer.SbxError == "" {
+			return sbx.Listed{}, errors.New("sbx check did not finish")
+		}
+		return sbx.Listed{}, errors.New(answer.SbxError)
+	}
+	bin, err := sbxBinaryFn()
+	if err != nil {
+		return sbx.Listed{}, err
+	}
+	list, err := sbx.Client{Bin: bin, Runner: sbxRunner}.ListSandboxes(ctx)
+	if err != nil {
+		return sbx.Listed{}, err
+	}
+	return sbx.FindListed(list, name)
+}
+
+// checkSbxAttach returns the panes whose folder the sandbox does not mount
+// writable. `sbx exec -w` would otherwise start the agent somewhere the user
+// did not open the pane, or fail inside the VM with a less useful message.
+func (d *Daemon) checkSbxAttach(listed sbx.Listed, panes []string) map[string]error {
+	failed := map[string]error{}
+	for _, id := range panes {
+		pane := d.session.Pane(id)
+		if pane == nil {
+			continue
+		}
+		pane.PluginMu.Lock()
+		cwd := pane.CWD
+		pane.PluginMu.Unlock()
+		if err := sbx.CheckAttach(listed, cwd); err != nil {
+			failed[id] = err
+		}
+	}
+	return failed
 }
 
 func (d *Daemon) failSbxPrepare(paneID string, err error) {
@@ -607,4 +722,31 @@ func (d *Daemon) sbxCapGet(ctx context.Context) ipc.SandboxCapRespPayload {
 		}
 	})
 	return d.sbxCap.get(ctx)
+}
+
+// listSbxSandboxes is the create dialog's attach list: every existing sandbox
+// with the folders it mounts writable. Read fresh, never cached, since
+// another tool creates and removes them; a failure is logged and offers
+// nothing, which only hides the attach choice.
+func listSbxSandboxes(ctx context.Context) []ipc.SbxSandbox {
+	bin, err := sbxBinaryFn()
+	if err != nil {
+		return nil
+	}
+	list, err := sbx.Client{Bin: bin, Runner: sbxRunner}.ListSandboxes(ctx)
+	if err != nil {
+		log.Printf("sbx: listing sandboxes: %v", err)
+		return nil
+	}
+	out := make([]ipc.SbxSandbox, 0, len(list))
+	for _, l := range list {
+		s := ipc.SbxSandbox{Name: l.Name, Status: l.Status}
+		for _, w := range l.Workspaces {
+			if !w.ReadOnly {
+				s.Folders = append(s.Folders, w.Path)
+			}
+		}
+		out = append(out, s)
+	}
+	return out
 }

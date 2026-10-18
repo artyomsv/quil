@@ -184,6 +184,9 @@ func (d *Daemon) handleSandboxCapReq(conn *ipc.Conn, msg *ipc.Message, release f
 		answer.SbxAvailable = sbxAnswer.SbxAvailable
 		answer.SbxVersion = sbxAnswer.SbxVersion
 		answer.SbxError = sbxAnswer.SbxError
+		if answer.SbxAvailable {
+			answer.SbxSandboxes = listSbxSandboxes(ctx)
+		}
 		if answer.Error != "" {
 			log.Printf("sandbox: capability probe: %s", answer.Error)
 		}

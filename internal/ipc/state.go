@@ -93,8 +93,10 @@ type PaneState struct {
 	SandboxAuth *string `json:"sandbox_auth,omitempty"`
 	// SandboxClaudeConfig is present (possibly "") whenever SandboxImage is set.
 	// SandboxBackend (below) is "sbx" for a Docker Sandboxes pane, absent for docker.
-	SandboxClaudeConfig *string  `json:"sandbox_claude_config,omitempty"`
-	SandboxBackend      string   `json:"sandbox_backend,omitempty"`
+	SandboxClaudeConfig *string `json:"sandbox_claude_config,omitempty"`
+	SandboxBackend      string  `json:"sandbox_backend,omitempty"`
+	// SandboxName is the existing sbx sandbox an attached pane runs in.
+	SandboxName         string   `json:"sandbox_name,omitempty"`
 	ContainerCWD        string   `json:"container_cwd,omitempty"`
 	WorktreeInterrupted bool     `json:"worktree_interrupted,omitempty"`
 	InstanceName        string   `json:"instance_name,omitempty"`

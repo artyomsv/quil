@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"slices"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -43,14 +44,10 @@ func (m Model) renderSetupSandboxField(focused bool) string {
 	}
 	var b strings.Builder
 	b.WriteString(prefix + style.Render(box+label))
-	// The other backend is named only when the destination offers it, so a
-	// host with docker alone draws exactly the row it always did.
-	if m.sandboxOn && m.sandboxDialogDocker && m.sandboxDialogSbx {
-		other := "sbx"
-		if m.sandboxBackendIsSbx() {
-			other = "Docker"
-		}
-		b.WriteString(dialogSubtle.Render("  ←/→ " + other))
+	// The next choice is named only when there is one, so a host with docker
+	// alone draws exactly the row it always did.
+	if next, ok := m.nextSandboxChoice(1); m.sandboxOn && ok {
+		b.WriteString(dialogSubtle.Render("  ←/→ " + truncateToWidth(next.label(), 24)))
 	}
 	b.WriteString("\n")
 
@@ -63,8 +60,13 @@ func (m Model) renderSetupSandboxField(focused bool) string {
 
 	if m.sandboxBackendIsSbx() {
 		// No image: the cage is the project's .quil-sandbox.toml, which the
-		// daemon finds from the pane's directory and refuses unless approved.
+		// daemon finds from the pane's directory and refuses unless approved —
+		// or an existing sandbox another tool owns, which Quil only enters.
 		line := "cage: " + sbx.ProfileFile + " in this project (approve: quil sandbox trust)"
+		if m.sandboxSbxName != "" {
+			line = "attach: existing sandbox " + m.sandboxSbxName + m.sbxStatusSuffix(m.sandboxSbxName) +
+				" (Quil does not change it)"
+		}
 		b.WriteString("    " + dialogSubtle.Render(truncateToWidth(line, m.setupTextWidth()-setupRowIndent)))
 		if m.sandboxErr != "" {
 			b.WriteString("\n    " + dialogErrorStyle.Render(
@@ -143,16 +145,18 @@ func (m *Model) editSandboxRow(msg tea.KeyPressMsg) bool {
 		}
 		return true
 	case "left", "right":
-		// Switches the backend, and only when the destination offers both:
-		// otherwise the arrows are not the row's to take.
-		if !m.sandboxOn || !m.sandboxDialogDocker || !m.sandboxDialogSbx {
+		// Steps through the choices — Docker, the sbx profile, each existing
+		// sandbox — and only when there is more than one: otherwise the
+		// arrows are not the row's to take.
+		step := 1
+		if msg.String() == "left" {
+			step = -1
+		}
+		next, ok := m.nextSandboxChoice(step)
+		if !m.sandboxOn || !ok {
 			return false
 		}
-		if m.sandboxBackendIsSbx() {
-			m.sandboxBackend = config.SandboxBackendDocker
-		} else {
-			m.sandboxBackend = config.SandboxBackendSbx
-		}
+		m.sandboxBackend, m.sandboxSbxName = next.backend, next.name
 		return true
 	case "backspace":
 		if m.sandboxOn && !m.sandboxBackendIsSbx() && m.sandboxImage != "" {
@@ -182,7 +186,15 @@ func (m *Model) editSandboxRow(msg tea.KeyPressMsg) bool {
 // honestly pick — it publishes none, and guessing one would run the user's
 // agent in a container they never chose.
 func (m Model) sandboxSubmitError() string {
-	if !m.sandboxOn || m.sandboxBackendIsSbx() {
+	if !m.sandboxOn {
+		return ""
+	}
+	if m.sandboxBackendIsSbx() {
+		// The folder can change after the sandbox was picked. The daemon
+		// checks again at spawn; this says it before a pane is made.
+		if m.sandboxSbxName != "" && !m.sbxAttachOffered(m.sandboxSbxName) {
+			return "Sandbox " + m.sandboxSbxName + " does not mount this folder; pick another with ←/→"
+		}
 		return ""
 	}
 	if strings.TrimSpace(m.sandboxImage) == "" {
@@ -207,9 +219,10 @@ func (m Model) sandboxSpec() *ipc.SandboxSpec {
 		return nil
 	}
 	if m.sandboxBackendIsSbx() {
-		// Backend only. The daemon refuses an sbx spec carrying an image or a
-		// sign-in mode: everything about that cage is the approved profile's.
-		return &ipc.SandboxSpec{Backend: config.SandboxBackendSbx}
+		// Backend and, attaching, the sandbox name. The daemon refuses an sbx
+		// spec carrying an image or a sign-in mode: everything about that
+		// cage is the approved profile's, or the existing sandbox's.
+		return &ipc.SandboxSpec{Backend: config.SandboxBackendSbx, Name: m.sandboxSbxName}
 	}
 	image := strings.TrimSpace(m.sandboxImage)
 	if image == "" {
@@ -237,6 +250,9 @@ func (m *Model) resetSandboxField(dest string) {
 	// govern the next one, which may be opened for the opposite reason.
 	m.sandboxSignIn = ""
 	m.sandboxErr = ""
+	// The profile, never a remembered sandbox: an existing sandbox is picked
+	// for one pane, on purpose, each time.
+	m.sandboxSbxName = ""
 	// Pin the capability answer for the life of the dialog. It is fetched
 	// asynchronously and re-probed on a timer, so reading it live would add
 	// or remove a row under a cursor the key handler is already holding an
@@ -434,4 +450,104 @@ func stepSandboxChoice(cur string, delta int) string {
 	}
 	n := len(sandboxAuthChoices)
 	return sandboxAuthChoices[((idx+delta)%n+n)%n].choice
+}
+
+// sandboxChoice is one stop of the row's ←/→ cycle.
+type sandboxChoice struct {
+	backend string
+	name    string // an existing sbx sandbox; "" for docker and the profile
+}
+
+func (c sandboxChoice) label() string {
+	switch {
+	case c.backend != config.SandboxBackendSbx:
+		return "Docker"
+	case c.name == "":
+		return "sbx"
+	default:
+		return "sbx " + c.name
+	}
+}
+
+// sandboxChoices is the cycle, in order: Docker, the sbx profile, then each
+// existing sandbox that mounts the dialog's folder.
+func (m Model) sandboxChoices() []sandboxChoice {
+	var out []sandboxChoice
+	if m.sandboxDialogDocker {
+		out = append(out, sandboxChoice{backend: config.SandboxBackendDocker})
+	}
+	if m.sandboxDialogSbx {
+		out = append(out, sandboxChoice{backend: config.SandboxBackendSbx})
+		for _, s := range m.sbxAttachChoices() {
+			out = append(out, sandboxChoice{backend: config.SandboxBackendSbx, name: s.Name})
+		}
+	}
+	return out
+}
+
+// nextSandboxChoice is the choice step places away from the current one,
+// wrapping, and false when there is nothing else to pick. A current choice
+// that is no longer offered (the folder changed) steps from the start.
+func (m Model) nextSandboxChoice(step int) (sandboxChoice, bool) {
+	choices := m.sandboxChoices()
+	if len(choices) < 2 {
+		return sandboxChoice{}, false
+	}
+	cur := -1
+	for i, c := range choices {
+		if c.backend == m.sandboxBackend && c.name == m.sandboxSbxName {
+			cur = i
+		}
+	}
+	if cur < 0 {
+		return choices[0], true
+	}
+	return choices[(cur+step+len(choices))%len(choices)], true
+}
+
+// sbxAttachChoices are the existing sandboxes the daemon listed that mount
+// the dialog's folder writable — all of them while no folder is chosen yet.
+// Read live rather than pinned: the list fills in when the dialog's own
+// capability request is answered, and it changes no row count. Display
+// only; the daemon checks the name and the folder again at spawn. A name
+// sbx could read as a flag is never offered: it is text from the daemon's
+// machine.
+func (m Model) sbxAttachChoices() []ipc.SbxSandbox {
+	dir := m.setupSpawnDir()
+	var out []ipc.SbxSandbox
+	for _, s := range m.destSandbox[m.createPaneDialogDest()].SbxSandboxes {
+		if !sbx.ValidName(s.Name) {
+			continue
+		}
+		if dir == "" || slices.ContainsFunc(s.Folders, func(f string) bool { return folderHolds(f, dir) }) {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// sbxAttachOffered reports whether name is still one of the attach choices.
+func (m Model) sbxAttachOffered(name string) bool {
+	return slices.ContainsFunc(m.sbxAttachChoices(), func(s ipc.SbxSandbox) bool { return s.Name == name })
+}
+
+// sbxStatusSuffix is " (running)" and the like, for the attach line.
+func (m Model) sbxStatusSuffix(name string) string {
+	for _, s := range m.destSandbox[m.createPaneDialogDest()].SbxSandboxes {
+		if s.Name == name && s.Status != "" {
+			return " (" + sanitizeRemoteText(s.Status) + ")"
+		}
+	}
+	return ""
+}
+
+// folderHolds reports whether dir is folder or below it, by text: both are
+// the daemon's spellings, which may be another OS's, so neither is resolved
+// here. Either separator ends a folder name.
+func folderHolds(folder, dir string) bool {
+	f := strings.TrimRight(folder, `/\`)
+	if f == "" {
+		return false
+	}
+	return dir == f || strings.HasPrefix(dir, f+"/") || strings.HasPrefix(dir, f+`\`)
 }

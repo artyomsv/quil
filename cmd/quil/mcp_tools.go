@@ -298,6 +298,7 @@ type createPaneInput struct {
 	SandboxAuth         string   `json:"sandbox_auth,omitempty" jsonschema:"sandbox sign-in mode for claude-code: token or browser (empty = config default)"`
 	SandboxClaudeConfig string   `json:"sandbox_claude_config,omitempty" jsonschema:"claude-code sandbox config directory: own (sign in per pane) or shared (one directory for every shared pane: sign in once, but those panes share hooks, MCP servers and history); empty = daemon config default"`
 	SandboxBackend      string   `json:"sandbox_backend,omitempty" jsonschema:"sandbox backend: docker (default; needs sandbox_image) or sbx (a Docker Sandboxes microVM from the .quil-sandbox.toml at or above cwd, approved with quil sandbox trust; takes no image or sign-in fields; requires sbx_available from list_plugins)"`
+	SandboxSbxName      string   `json:"sandbox_sbx_name,omitempty" jsonschema:"with sandbox_backend=sbx: attach to this EXISTING sbx sandbox (one another tool created; see sbx ls) instead of using the profile. Quil never creates, changes or removes it, and refuses a cwd the sandbox does not mount writable"`
 	InstanceName        string   `json:"instance_name,omitempty" jsonschema:"saved instance name for plugins with instances (ssh, stripe)"`
 	InstanceArgs        []string `json:"instance_args,omitempty" jsonschema:"instance arguments for plugins with instances (ssh, stripe); they REPLACE the plugin's own args and are REFUSED for AI panes — use toggles there"`
 }
@@ -307,7 +308,7 @@ type createPaneInput struct {
 func (in createPaneInput) usesDialogOptions() bool {
 	return in.Name != "" || len(in.Toggles) > 0 || in.ResumeSessionID != "" ||
 		in.WorktreeBranch != "" || in.SandboxImage != "" || in.SandboxAuth != "" ||
-		in.SandboxClaudeConfig != "" || in.SandboxBackend != ""
+		in.SandboxClaudeConfig != "" || in.SandboxBackend != "" || in.SandboxSbxName != ""
 }
 
 // requireCreateFields refuses a create whose fields this daemon would ignore.
@@ -350,12 +351,12 @@ func (in createPaneInput) toReq(tabID string) ipc.CreatePaneReqPayload {
 		ResumeSessionID: in.ResumeSessionID,
 		WorktreeBranch:  in.WorktreeBranch,
 	}
-	if in.SandboxImage != "" || in.SandboxBackend != "" {
+	if in.SandboxImage != "" || in.SandboxBackend != "" || in.SandboxSbxName != "" {
 		// Sent as given: the daemon refuses an sbx spec that also names an
 		// image or a sign-in mode, and an unknown backend, rather than
 		// guessing which one was meant.
 		req.Sandbox = &ipc.SandboxSpec{Image: in.SandboxImage, Auth: in.SandboxAuth,
-			ClaudeConfig: in.SandboxClaudeConfig, Backend: in.SandboxBackend}
+			ClaudeConfig: in.SandboxClaudeConfig, Backend: in.SandboxBackend, Name: in.SandboxSbxName}
 	}
 	return req
 }

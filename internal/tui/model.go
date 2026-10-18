@@ -725,6 +725,9 @@ type Model struct {
 	// their OR.
 	sandboxDialogDocker bool
 	sandboxDialogSbx    bool
+	// sandboxSbxName is the EXISTING sbx sandbox the row attaches to, picked
+	// with ←/→ from the ones the daemon listed; "" uses the project profile.
+	sandboxSbxName string
 	// sandboxImages remembers the last image per destination (nil functions
 	// = no memory; see SetSandboxImageStore).
 	sandboxImages sandboxImageStore

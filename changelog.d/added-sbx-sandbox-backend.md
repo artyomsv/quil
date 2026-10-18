@@ -15,4 +15,8 @@ headline: Sandbox panes can run in a Docker Sandboxes microVM
   MCP `create_pane` with `sandbox_backend = "sbx"`. A repository and all its
   worktrees share one sandbox: Quil adds the repository's worktrees folder to the
   running sandbox with `sbx mount`, so a new worktree is visible at once without
-  a restart. sbx panes have no notifications or session resume yet.
+  a restart. A pane can also attach to an existing sandbox that another tool
+  created and owns: pick it with `←`/`→` (only sandboxes that mount the pane
+  folder are offered) or send `sandbox_sbx_name` from MCP. Quil then needs no
+  profile, and never creates, changes or removes that sandbox. sbx panes have no
+  notifications or session resume yet.

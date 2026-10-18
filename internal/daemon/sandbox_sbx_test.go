@@ -72,18 +72,24 @@ type scriptRunner struct {
 	calls    [][]string
 	exists   bool
 	mountErr error
+	// lsJSON is the answer to `sbx ls --json`.
+	lsJSON string
 }
 
 func (r *scriptRunner) Run(_ context.Context, _ string, w io.Writer, argv ...string) error {
 	r.mu.Lock()
 	r.calls = append(r.calls, append([]string(nil), argv...))
-	exists, mountErr := r.exists, r.mountErr
+	exists, mountErr, lsJSON := r.exists, r.mountErr, r.lsJSON
 	r.mu.Unlock()
 	if len(argv) > 1 {
 		switch argv[1] {
 		case "version":
 			io.WriteString(w, "sbx version 0.43.0\n")
 		case "ls":
+			if slices.Contains(argv, "--json") {
+				io.WriteString(w, lsJSON)
+				return nil
+			}
 			io.WriteString(w, "SANDBOX   AGENT   STATUS   PORTS   WORKSPACE\n")
 			if exists {
 				io.WriteString(w, "my-app    claude  running          /work\n")
@@ -590,11 +596,11 @@ func TestStartSbxWaiters_StaleWaiterIsNotStopped(t *testing.T) {
 	pane.ptyGen = 5
 	pane.PluginMu.Unlock()
 
-	d.startSbxWaiters(context.Background(), prof, []sbxWaiter{{paneID: pane.ID, gen: 4}})
+	d.startSbxWaiters(context.Background(), sbxTarget{name: prof.Name, prof: prof}, sbx.Listed{}, []sbxWaiter{{paneID: pane.ID, gen: 4}})
 	if r.ran("/fake/sbx", "exec") || spawned != 0 {
 		t.Errorf("a stale waiter was stopped or spawned; calls = %v, spawned = %d", r.calls, spawned)
 	}
-	d.startSbxWaiters(context.Background(), prof, []sbxWaiter{{paneID: pane.ID, gen: 5}})
+	d.startSbxWaiters(context.Background(), sbxTarget{name: prof.Name, prof: prof}, sbx.Listed{}, []sbxWaiter{{paneID: pane.ID, gen: 5}})
 	if !r.ran(append([]string{"/fake/sbx"}, sbx.StopArgs("my-app", pane.ID+"-", true)...)...) || spawned != 1 {
 		t.Errorf("a current waiter was not stopped then spawned; calls = %v, spawned = %d", r.calls, spawned)
 	}

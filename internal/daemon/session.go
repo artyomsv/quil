@@ -211,6 +211,11 @@ type Pane struct {
 	// sandbox/ prefix so a daemon too old to know sbx refuses rather than
 	// spawning the agent on the host.
 	SandboxBackend string
+	// SandboxName is, for an sbx pane, the EXISTING sandbox it attaches to —
+	// one another tool created and owns. Empty means the profile names the
+	// sandbox. PERSISTED, PluginMu-protected, written once at creation, so a
+	// restart and a restore go back to the same sandbox.
+	SandboxName string
 	// ContainerCWD is the directory the agent ran in INSIDE the container.
 	// PERSISTED, PluginMu-protected.
 	//

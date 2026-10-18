@@ -639,6 +639,8 @@ Rules for the covered files:
 In the `Ctrl+N` dialog, turn on the sandbox row with `Space`. When the host
 has both Docker and sbx, `←`/`→` on that row switches between them. An sbx
 pane has no image field and no sign-in row: both belong to your profile.
+`←`/`→` also reaches the existing sandboxes that mount the pane folder (see
+[Attach to a sandbox another tool owns](#attach-to-a-sandbox-another-tool-owns)).
 
 `[sandbox] backend = "sbx"` in `config.toml` makes sbx the row's default.
 
@@ -711,6 +713,44 @@ so Quil shares that folder too. You do not change your environment file.
 
 Git works in a worktree inside the sandbox because the worktree points to the
 main checkout's `.git`, which your environment file already shares.
+
+### Attach to a sandbox another tool owns
+
+Sometimes another tool creates and removes your sandboxes, for example one
+sandbox per task. Quil can run panes in such a sandbox without a profile.
+
+**How to use it.** In the `Ctrl+N` dialog, pick the pane folder first. Then turn
+on the sandbox row and press `←`/`→` until the row says
+`attach: existing sandbox <name>`. Quil offers only the sandboxes that mount the
+pane folder with write access. It gets this list from `sbx ls --json` each time
+the dialog opens.
+
+From MCP: `create_pane` with `sandbox_backend = "sbx"` and
+`sandbox_sbx_name = "<name>"`.
+
+**What Quil does:**
+
+1. Runs `sbx ls --json`. If no sandbox has that name, the pane does not start.
+   Quil never creates it, so create it with the tool that owns it.
+2. Checks that the pane folder is inside one of the sandbox's writable folders.
+   It compares real paths, after it follows every link. If the folder is
+   outside, the pane does not start.
+3. Starts the agent with `sbx exec -it -w <pane folder> <name> <agent command>`.
+   If the sandbox is stopped, `sbx exec` starts it.
+
+**What Quil does not do:** it needs no profile and no `quil sandbox trust`. It
+runs no host step and no set-up step. It does not `sbx mount` anything, does
+not change the sandbox, and does not remove it. Closing the pane stops only that
+pane's own agent. The pane keeps the sandbox name, so a restart and a restored
+workspace go back to the same sandbox.
+
+**The repository cannot choose the sandbox.** You pick it in the dialog, and
+the name is saved with the pane. No file in the project can send the pane to a
+different sandbox.
+
+**Sign-in belongs to the sandbox.** The agent uses whatever login is inside the
+sandbox. If the tool that owns the sandbox keeps the login up to date, that
+tool's own connect step does it, not Quil.
 
 ### What an sbx pane does not have (yet)
 

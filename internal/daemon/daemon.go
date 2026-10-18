@@ -1109,6 +1109,7 @@ func (d *Daemon) restoreWorkspace() error {
 				sandboxAuth, _ := paneData["sandbox_auth"].(string)
 				sandboxClaudeConfig, _ := paneData["sandbox_claude_config"].(string)
 				sandboxBackend, _ := paneData["sandbox_backend"].(string)
+				sandboxName, _ := paneData["sandbox_name"].(string)
 				containerCWD, _ := paneData["container_cwd"].(string)
 				// note_rev absent (a pre-3b snapshot) with a note file present
 				// means the local TUI kept a note for this daemon's own pane:
@@ -1163,7 +1164,11 @@ func (d *Daemon) restoreWorkspace() error {
 					// panes had before the choice existed.
 					SandboxClaudeConfig: sandboxClaudeConfig,
 					SandboxBackend:      sandboxBackend, // absent (docker, or older than sbx) → docker
-					ContainerCWD:        containerCWD,
+					// Absent → empty, the profile mode. Not validated here: the
+					// spawn refuses a bad name, which keeps the pane visible
+					// rather than moving it to another cage.
+					SandboxName:  sandboxName,
+					ContainerCWD: containerCWD,
 					// Absent on pre-pin snapshots → false, which is the only
 					// safe default: inventing a mark the user never set would
 					// put a "look here" on a pane with nothing to look at, and
@@ -5360,6 +5365,7 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			// start the agent on the host.
 			if pane.SandboxBackend != "" {
 				paneData.SandboxBackend = pane.SandboxBackend
+				paneData.SandboxName = pane.SandboxName
 				paneData.Type = sandboxPaneType(pane.Type)
 			}
 			if pane.ContainerCWD != "" {

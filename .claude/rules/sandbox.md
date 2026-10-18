@@ -825,6 +825,31 @@ mount fails only panes INSIDE the folder; a main-checkout pane starts with a
 note. `sbx ls` does not list a mount added this way — do not try to detect it
 there; rely on the idempotent repeat.
 
+**Attach mode: a sandbox another tool owns.** `SandboxSpec.Name` →
+`Pane.SandboxName` (persisted `sandbox_name`, validated by `sbx.ValidName` at
+`applySbxSpec`; a docker spec with a name is refused). `sbxTargetFor` picks the
+mode: a name means NO profile, NO trust pin, NO create, NO `sbx mount`, NO
+`sbx rm` — the user picked the sandbox in the dialog, so nothing from the
+repository decides anything, and Quil never widens a cage it did not build.
+An invalid persisted name is REFUSED, never dropped (dropping would move the
+pane into the profile's sandbox). The preparation is keyed `attach:<name>`
+(`sbxTarget.key`), apart from a profile preparation of the same name, so the
+two never share a waiter list with different checks. `findSbxSandbox` reads
+`sbx ls --json` (`sbx.ListSandboxes`/`ParseListJSON`, measured on 0.48: a bare
+list, workspaces as `path` or `path:ro`, primary first) and refuses a missing
+name; `checkSbxAttach` refuses a pane folder not inside a WRITABLE workspace,
+compared as real paths (`Listed.Covers`) — without it `-w` would start the
+agent outside what the user opened. Measured on 0.48: `sbx exec` starts a
+stopped sandbox itself, so attach needs no start step. The leftover prefix
+stop still runs: it matches only this pane's own tag. The create dialog's
+list rides the capability answer (`SandboxCapRespPayload.SbxSandboxes`, a
+fresh `sbx ls --json` per request, writable folders only — no new message
+type, so the rights table and web allow-list are unchanged); the TUI filters
+it by TEXT against the browsed folder (`folderHolds`, either separator, since
+the daemon may be another OS) and the daemon checks again at spawn. Quil and
+the owning tool know nothing of each other: the only shared facts are the
+sandbox name and sbx's own listing.
+
 **Ending the host `sbx exec` does NOT end the agent inside the VM** (measured:
 a closed pane's claude ran for a day). Every exec carries `-e
 QUIL_SBX_PANE=<pane id>-<random>` (`sbx.NewTag`, PER SPAWN — a restart closes

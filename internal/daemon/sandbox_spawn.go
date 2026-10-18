@@ -57,6 +57,11 @@ func applySandboxSpec(pane *Pane, spec *ipc.SandboxSpec) error {
 	}
 	switch spec.Backend {
 	case "", config.SandboxBackendDocker:
+		if spec.Name != "" {
+			// A sandbox name belongs to sbx; next to docker it is a confused
+			// client, refused rather than half-applied.
+			return fmt.Errorf("a docker sandbox takes no sandbox name")
+		}
 	case config.SandboxBackendSbx:
 		return applySbxSpec(pane, spec)
 	default:

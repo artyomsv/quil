@@ -135,6 +135,7 @@ var standardFieldAudit = map[string]map[string]fieldAudit{
 		"sandbox.auth":          {"allow", "any image the owner's Docker can reach, inside the sandbox mount boundary"},
 		"sandbox.claude_config": {"allow", "own or shared, validated daemon-side; a standard conn can already open a host shell that reaches the shared directory"},
 		"sandbox.backend":       {"allow", "sbx runs only a profile the owner approved with quil sandbox trust; a standard conn can already open a host shell"},
+		"sandbox.name":          {"allow", "attaches only to a sandbox sbx already lists, in a folder it mounts writable; a standard conn can already open a host shell"},
 		"toggles":               {"allow", "names, resolved by resolveToggles; unknown or conflicting names are refused"},
 		"kube_context":          {"allow", "one value after --context, validated against discover = \"kube\""},
 	},
@@ -151,6 +152,7 @@ var standardFieldAudit = map[string]map[string]fieldAudit{
 		"sandbox.auth":          {"allow", "any image the owner's Docker can reach, inside the sandbox mount boundary"},
 		"sandbox.claude_config": {"allow", "own or shared, validated daemon-side; a standard conn can already open a host shell that reaches the shared directory"},
 		"sandbox.backend":       {"allow", "sbx runs only a profile the owner approved with quil sandbox trust; a standard conn can already open a host shell"},
+		"sandbox.name":          {"allow", "attaches only to a sandbox sbx already lists, in a folder it mounts writable; a standard conn can already open a host shell"},
 		"toggles":               {"allow", "names, resolved by resolveToggles; unknown or conflicting names are refused"},
 		"kube_context":          {"allow", "one value after --context, validated against discover = \"kube\""},
 	},
@@ -168,6 +170,7 @@ var standardFieldAudit = map[string]map[string]fieldAudit{
 		"sandbox.auth":          {"allow", "any image the owner's Docker can reach, inside the sandbox mount boundary"},
 		"sandbox.claude_config": {"allow", "own or shared, validated daemon-side; a standard conn can already open a host shell that reaches the shared directory"},
 		"sandbox.backend":       {"allow", "sbx runs only a profile the owner approved with quil sandbox trust; a standard conn can already open a host shell"},
+		"sandbox.name":          {"allow", "attaches only to a sandbox sbx already lists, in a folder it mounts writable; a standard conn can already open a host shell"},
 		"kube_context":          {"allow", "one value after --context, validated against discover = \"kube\""},
 	},
 	"SplitPaneReqPayload": {
@@ -191,6 +194,7 @@ var standardFieldAudit = map[string]map[string]fieldAudit{
 		"pane.sandbox.auth":           {"allow", "any image the owner's Docker can reach, inside the sandbox mount boundary"},
 		"pane.sandbox.claude_config":  {"allow", "own or shared, validated daemon-side; a standard conn can already open a host shell that reaches the shared directory"},
 		"pane.sandbox.backend":        {"allow", "sbx runs only a profile the owner approved with quil sandbox trust; a standard conn can already open a host shell"},
+		"pane.sandbox.name":           {"allow", "attaches only to a sandbox sbx already lists, in a folder it mounts writable; a standard conn can already open a host shell"},
 	},
 }
 

@@ -2,11 +2,13 @@ package tui
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/artyomsv/quil/internal/clipboard"
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
 )
@@ -116,6 +118,54 @@ func TestUpdate_PasteMsgEmptyContent_FallsBackToImagePaste(t *testing.T) {
 	}
 	if !strings.HasPrefix(data, "\x1b[200~") || !strings.HasSuffix(data, "\x1b[201~") {
 		t.Errorf("pasted data %q is not wrapped in bracketed paste sequences", data)
+	}
+}
+
+// TestPasteNothingToPaste_PassesCtrlVThrough guards #261: a clipboard with no
+// text and no image Quil can read must hand the app a raw Ctrl+V, never
+// swallow the key. Claude Code reads a clipboard image itself on Ctrl+V. The
+// byte must arrive bare even when the app has paste mode on — it is a key,
+// not pasted text.
+func TestPasteNothingToPaste_PassesCtrlVThrough(t *testing.T) {
+	origText, origImg := clipboardReadText, clipboardReadImage
+	t.Cleanup(func() { clipboardReadText, clipboardReadImage = origText, origImg })
+	clipboardReadText = func() (string, error) { return "", nil }
+
+	for _, tc := range []struct {
+		name   string
+		imgErr error
+	}{
+		{"no image", clipboard.ErrNoImage},
+		{"image read failed", errors.New("osascript: boom")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clipboardReadImage = func() ([]byte, error) { return nil, tc.imgErr }
+
+			fake := &fakeSender{}
+			m := pasteTestModel(fake)
+			m.curTabs()[0].ActivePaneModel().AppendOutput([]byte("\x1b[?2004h"))
+
+			_, cmd := m.Update(tea.PasteMsg{Content: ""})
+			if cmd == nil {
+				t.Fatal("empty PasteMsg returned a nil command")
+			}
+			msg := cmd()
+			pasted, ok := msg.(clipboardPastedMsg)
+			if !ok {
+				t.Fatalf("cmd returned %T, want clipboardPastedMsg", msg)
+			}
+			if !pasted.passthrough || pasted.paneID != "p1" {
+				t.Fatalf("msg = %+v, want passthrough to p1", pasted)
+			}
+			m.Update(msg)
+
+			if len(fake.sent) != 1 {
+				t.Fatalf("want 1 IPC send (the Ctrl+V byte), got %d", len(fake.sent))
+			}
+			if got := string(paneInputData(t, fake.sent[0])); got != pasteKeyByte {
+				t.Errorf("sent %q, want a bare %q", got, pasteKeyByte)
+			}
+		})
 	}
 }
 

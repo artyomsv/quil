@@ -291,15 +291,22 @@ Platform-native clipboard: Win32 `GetClipboardData` / `SetClipboardData` on Wind
 
 ### Image paste from clipboard
 
-Press any paste key on a screenshot. If the clipboard has no text but contains an image (e.g., from `Win+Shift+S`, Snipping Tool, `Cmd+Shift+4`), Quil:
+Press any paste key on a screenshot. If the clipboard has no text but contains an image, Quil:
 
-1. Reads the clipboard image data (Win32 `CF_DIBV5` / `CF_DIB`, decodes 24bpp BI_RGB + 32bpp BI_BITFIELDS)
+1. Reads the clipboard image:
+   - **Windows** — Win32 `CF_DIBV5` / `CF_DIB` (decodes 24bpp BI_RGB + 32bpp BI_BITFIELDS). Sources: `Win+Shift+S`, Snipping Tool.
+   - **macOS** — `osascript` (ships with macOS; a TIFF clipboard is converted to PNG). Sources: `Cmd+Ctrl+Shift+4`, or copy an image from any app. Plain `Cmd+Shift+4` saves a file and puts nothing on the clipboard.
+   - **Linux** — `xclip -selection clipboard -t image/png -o`. Needs `xclip`; with only `xsel` installed, image paste is not available.
 2. Saves it as `~/.quil/paste/quil-paste-<timestamp>-<rand>.png` with `0o600` permissions
 3. Types the absolute path into the active pane
 
 AI tools like Claude Code then read the file via their normal file-reading tools — sidesteps the upstream Claude Code Windows clipboard bug ([anthropics/claude-code#32791](https://github.com/anthropics/claude-code/issues/32791)).
 
-Three paste keys: `Ctrl+V`, `Ctrl+Alt+V`, and `F8`. **`F8` is the recommended Windows trigger** because Windows Terminal captures `Ctrl+V` for its own paste action before the TUI sees it.
+If the clipboard holds neither text nor an image Quil can read, the paste key is passed to the app in the pane as a raw `Ctrl+V`, so the app can run its own paste. In a plain shell, that `Ctrl+V` starts readline's "insert the next key literally".
+
+The typed path is a path on the machine that runs the TUI. A pane on a remote host (`--remote`) or in a Docker sandbox cannot read it.
+
+Three paste keys: `Ctrl+V`, `Ctrl+Alt+V`, and `F8`. **`F8` is the recommended Windows trigger** because Windows Terminal captures `Ctrl+V` for its own paste action before the TUI sees it. On macOS, `Cmd+V` belongs to the terminal app and pastes text only — use `Ctrl+V` for images.
 
 ### Input history (AI panes)
 

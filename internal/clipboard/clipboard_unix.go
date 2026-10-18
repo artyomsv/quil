@@ -3,12 +3,16 @@
 package clipboard
 
 import (
+	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 )
 
 // maxClipboardSize limits clipboard reads to prevent excessive memory allocation.
@@ -93,11 +97,72 @@ func write(text string) error {
 	return cmd.Run()
 }
 
-// readImage is not yet implemented on Unix — Quil's primary need for the
-// image-paste proxy is Windows (claude-code's upstream bug). macOS could
-// read via `pbpaste -Prefer png` or `osascript` reading NSPasteboard; Linux
-// via `xclip -selection clipboard -t image/png -o`. For now this is a stub
-// that always reports "no image" so the caller falls back to text paste.
+// imageReadTimeout bounds one clipboard image read. The pasting key waits on
+// it, so a wedged helper must not hold the paste forever.
+const imageReadTimeout = 10 * time.Second
+
+// readImage returns the clipboard image as PNG bytes (#261).
+//
+// macOS: `osascript -e 'the clipboard as «class PNGf»'` — ships with the OS,
+// and AppleScript converts a TIFF-only clipboard to PNG itself. It prints a
+// «data PNGf…» hex literal, decoded by decodeAppleScriptPNG. pbpaste cannot
+// help: it only ever returns text.
+//
+// Linux: `xclip -selection clipboard -t image/png -o`. xsel has no way to ask
+// for a target type, so an xsel-only host reports ErrNoImage.
 func readImage() ([]byte, error) {
-	return nil, ErrNoImage
+	clipToolOnce.Do(detectClipTool)
+	var name string
+	var args []string
+	switch {
+	case clipToolPath == "darwin":
+		name, args = "osascript", []string{"-e", "the clipboard as «class PNGf»"}
+	case strings.HasSuffix(clipToolPath, "xclip"):
+		name, args = clipToolPath, []string{"-selection", "clipboard", "-t", "image/png", "-o"}
+	default:
+		return nil, ErrNoImage
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), imageReadTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("clipboard image stdout pipe: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("clipboard image start: %w", err)
+	}
+	// osascript prints two hex digits per byte, plus the literal's framing.
+	limit := int64(maxImageSize + 1)
+	if clipToolPath == "darwin" {
+		limit = 2*maxImageSize + 64
+	}
+	out, readErr := io.ReadAll(io.LimitReader(stdout, limit))
+	if int64(len(out)) >= limit {
+		// Stop the helper now: it is blocked writing the rest into a pipe
+		// nobody reads, and Wait would otherwise sit out the whole timeout.
+		_ = cmd.Process.Kill() // best effort; Wait below reaps it either way
+		_ = cmd.Wait()
+		return nil, errImageTooLarge
+	}
+	waitErr := cmd.Wait()
+	if readErr != nil {
+		return nil, fmt.Errorf("clipboard image read: %w", readErr)
+	}
+	if waitErr != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return nil, fmt.Errorf("clipboard image: %s timed out after %s", name, imageReadTimeout)
+		}
+		if isNoImageStderr(stderr.String()) {
+			return nil, ErrNoImage
+		}
+		return nil, fmt.Errorf("clipboard image: %s: %w: %s", name, waitErr, strings.TrimSpace(stderr.String()))
+	}
+	if clipToolPath == "darwin" {
+		return decodeAppleScriptPNG(out)
+	}
+	return checkPNG(out)
 }

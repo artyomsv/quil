@@ -20,14 +20,16 @@ func Write(text string) error {
 
 // ReadImage returns the current clipboard image encoded as PNG bytes. If the
 // clipboard does not contain an image in a supported format, it returns
-// ErrNoImage. On platforms where image clipboard is not implemented, it
+// ErrNoImage. Where no image reader is available (Linux without xclip), it
 // also returns ErrNoImage.
 //
-// This exists primarily to work around the Windows-specific upstream bug in
-// claude-code where its own clipboard image reader fails to see images that
-// are verifiably present on the clipboard (see anthropics/claude-code#32791).
+// Windows reads CF_DIBV5/CF_DIB, macOS runs osascript, Linux runs xclip. It
+// began as a workaround for the Windows-specific upstream bug in claude-code
+// where its own clipboard image reader fails to see images that are
+// verifiably present on the clipboard (see anthropics/claude-code#32791).
 // Quil reads the image itself, saves a temp file, and pastes the path so any
-// PTY tool can pick it up via its file-reading tools.
+// PTY tool can pick it up via its file-reading tools. On macOS and Linux it
+// is needed because Quil takes Ctrl+V before the app in the pane sees it.
 func ReadImage() ([]byte, error) {
 	return readImage()
 }

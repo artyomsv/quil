@@ -44,9 +44,9 @@ Extracted verbatim from `.claude/CLAUDE.md`. Loaded only when the files above ar
 
 **The kube case IS `!focused`-gated** even though case order makes it redundant — `renderRow` closes over `focused`, so without the explicit guard a future reorder would silently mark the focused row with nothing failing (`TestRenderSetup_KubeFocused_NoIdleMark` is the reorder canary); kube needs no value indirection because row 0 ("Default context") is itself a real choice, so `kubeCursor` IS the committed value. Collapsing the field to a one-line summary (the `renderSetupSessionField` pattern) is deliberately NOT used here — that works only because the session picker is the LAST field, and collapsing the FIRST field moves every row below it on each Tab (`TestRenderSetup_PickFocusChange_HeightStable` pins the invariant). Instance form rendered from plugin `FormFields`. TOML editor renders full-screen (bypasses dialog box). `dialogLogViewer` reuses the same full-screen `TextEditor` but with `ReadOnly=true` and `HighlightPlain` so users can scroll/copy log content without overwriting it. `Alt+Up`/`Alt+Down` jump the cursor by `cfg.UI.LogViewerPageLines` lines (default 40). `openLogViewer(label, path)` and `openMCPLogsViewer()` build the read-only buffer; `readLogTail` caps each file at 256 KB and trims to a clean line boundary. Confirm dialog used for pane/tab close (Ctrl+W / Alt+W) and instance deletion
 
-### Beta disclaimer
+### Welcome dialog (`dialogDisclaimer`)
 
-`dialogDisclaimer` shown on startup when `ui.show_disclaimer = true` (default). Random tip from `disclaimerTips` slice. Two buttons: OK (close) and "Don't show again" (sets `cfg.UI.ShowDisclaimer = false`, persisted via `config.Save()` on TUI exit). `configChanged` flag on Model signals `main.go` to write config
+`dialogDisclaimer` shown on startup when `ui.show_disclaimer = true` (default). Title is `Welcome to Quil v<version>`; the "early beta" paragraph was removed in 2026-10 and the identifier kept so the config key and tests need no rename. Random tip from `disclaimerTips` slice. Two buttons: OK (close) and "Don't show again" (sets `cfg.UI.ShowDisclaimer = false`, persisted via `config.Save()` on TUI exit). `configChanged` flag on Model signals `main.go` to write config
 
 ## Command palette
 

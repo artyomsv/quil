@@ -19,9 +19,8 @@
 <!-- No Escape on purpose: a page-load notice with two explicit answers, as
      the TUI's dialog needs a key too. -->
 <div class="backdrop" data-modal role="presentation">
-  <div class="box" role="dialog" aria-modal="true" aria-label="Beta notice" tabindex="-1" bind:this={box} use:trapFocus>
-    <h2>Quil is in beta</h2>
-    <p>Expect rough edges. Your workspace is saved by the daemon; report problems on GitHub.</p>
+  <div class="box" role="dialog" aria-modal="true" aria-label="Welcome notice" tabindex="-1" bind:this={box} use:trapFocus>
+    <h2>Welcome to Quil</h2>
     {#if tip}
       <h3>{sanitizeRemoteText(tip.title)}</h3>
       <ul>
@@ -29,10 +28,10 @@
       </ul>
     {/if}
     <div class="buttons">
-      <button type="button" disabled={why !== ''} title={why || 'Stop showing this notice'} onclick={() => app.dismissBeta(true)}
+      <button type="button" disabled={why !== ''} title={why || 'Stop showing this notice'} onclick={() => app.dismissWelcome(true)}
         >Don't show again</button
       >
-      <button type="button" onclick={() => app.dismissBeta(false)}>OK</button>
+      <button type="button" onclick={() => app.dismissWelcome(false)}>OK</button>
     </div>
   </div>
 </div>

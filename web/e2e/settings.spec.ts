@@ -158,9 +158,9 @@ test('Keys: switching the preset changes the keymap without a reload', async ({ 
   await keymapLoaded(page, 'tmux');
 });
 
-test('the beta notice shows on a fresh home and OK hides it', async ({ page, quil }) => {
-  await login(page, quil, { keepBeta: true });
-  const n = page.getByRole('dialog', { name: 'Beta notice' });
+test('the welcome notice shows on a fresh home and OK hides it', async ({ page, quil }) => {
+  await login(page, quil, { keepWelcome: true });
+  const n = page.getByRole('dialog', { name: 'Welcome notice' });
   await expect(n).toBeVisible();
   await n.getByRole('button', { name: 'OK' }).click();
   await expect(n).toHaveCount(0);

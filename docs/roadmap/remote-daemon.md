@@ -1,6 +1,6 @@
 # Remote Daemon Attach — `quil --remote`
 
-> **Status: Phases 1 and 2 shipped, Phase 3 partly shipped. BETA.** Usable for
+> **Status: Phases 1 and 2 shipped, Phase 3 partly shipped.** Usable for
 > real work with the limits below. Phase 2's reconnect shipped in v1.45.0 and was
 > hardened in v1.45.1; it is partially verified against a real link — see the
 > manual-check table. Phase 3 has landed every picker that reads a filesystem or
@@ -99,7 +99,7 @@ Three caveats worth knowing:
 
 ---
 
-## Phase 1 — shipped (BETA)
+## Phase 1 — shipped
 
 - `quil --remote <dest>` attaches over SSH; the remote daemon starts on demand.
 - `quil remote setup <dest>` installs or upgrades Quil on the far side. The

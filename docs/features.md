@@ -131,7 +131,7 @@ Codex (OpenAI's coding agent CLI) mints a new session id on `/new` and reports i
 
 ### AI session resume
 
-Each AI pane gets a UUID at creation time. On restart Quil runs `claude --resume <session-id>` (or `opencode --session <id>`, or `codex resume <id>`) automatically. Works for any AI tool that exposes a session id — Claude Code (production), OpenCode (beta), Codex, more to come. Tools without a session id can fall back to regex-scraping the last visible state or replaying a stored command.
+Each AI pane gets a UUID at creation time. On restart Quil runs `claude --resume <session-id>` (or `opencode --session <id>`, or `codex resume <id>`) automatically. Works for any AI tool that exposes a session id — Claude Code, OpenCode, Codex, more to come. Tools without a session id can fall back to regex-scraping the last visible state or replaying a stored command.
 
 ### Wide canvas (no-resize AI panes)
 
@@ -340,7 +340,7 @@ Panes aren't just shells. Press `Ctrl+N` to create a typed pane from 11 built-in
 | **Terminal** | Built-in shell | Restore working directory |
 | **Terminal (keeps content on squeeze)** | Built-in shell | Restore working directory; window-sized canvas, so a pane squeeze never cuts content |
 | **Claude Code** | AI Assistant | UUID-based session resume + `SessionStart` hook for rotations |
-| **OpenCode** *(beta)* | AI Assistant | JS plugin records `session.*` events; restore via `--session <id>` |
+| **OpenCode** | AI Assistant | JS plugin records `session.*` events; restore via `--session <id>` |
 | **Codex** | AI Assistant | Claude-compatible hooks registered through a trusted `-c hooks=…` override; restore via `resume <id>` |
 | **lazygit** | Tools | Re-run same command — also a per-tab `Alt+G` overlay |
 | **hunk** | Tools | Re-run same command — also a per-tab `Alt+D` overlay, sharing lazygit's slot |
@@ -857,7 +857,7 @@ install that predates the feature.
 
 ### Remote daemon over SSH
 
-> **BETA.** Phases 1, 2, and most of 3 of [Remote Daemon Attach](roadmap/remote-daemon.md). Usable for real work, with the limits at the end of this section — chiefly that plugin *definitions* still come from your local machine, and that `quil status` and the update controls are blocked in remote mode rather than targeting the wrong host.
+> Phases 1, 2, and most of 3 of [Remote Daemon Attach](roadmap/remote-daemon.md). The limits are at the end of this section — chiefly that plugin *definitions* still come from your local machine, and that `quil status` and the update controls are blocked in remote mode rather than targeting the wrong host.
 
 `quil --remote gpu01` attaches the TUI to a daemon running on another machine. The panes, tabs, and AI sessions live on that host and keep running there when you close the laptop — the TUI is only a viewer.
 
@@ -967,7 +967,7 @@ Commands that manage a daemon's lifecycle refuse under `--remote` instead of sil
 
 Two setup requirements are worth stating, because both fail in confusing ways. **`quil` must be on the remote's non-interactive `PATH`** — `ssh host quil --stdio` runs a non-interactive shell, which on Debian/Ubuntu returns from `~/.bashrc` before any `PATH` line, so `~/.local/bin` is usually invisible; install to `/usr/local/bin` and check with `ssh <host> command -v quil`. And **`ssh <host> quil --stdio` must print nothing** — its stdout *is* the IPC channel, so a shell banner or MOTD on stdout corrupts the first frame. That command is the fastest way to tell a transport problem from a Quil problem.
 
-#### Current limits (beta)
+#### Current limits
 
 Phase 1 is the transport, Phase 2 is reconnect, Phase 3 moves the filesystem
 dialogs to the server. These are known and scoped, not bugs:

@@ -81,7 +81,7 @@ export const features: Feature[] = [
     category: "ai",
     detail: [
       "Each AI pane gets a UUID at creation time. On restart Quil runs `claude --resume <session-id>` automatically.",
-      "Works for any AI tool that exposes a session ID — Claude Code (production), OpenCode (beta) and Codex today, more to come.",
+      "Works for any AI tool that exposes a session ID — Claude Code, OpenCode and Codex today, more to come.",
       "For tools without a session ID, plugins can fall back to regex scraping the last state or replaying a command.",
     ],
   },
@@ -264,7 +264,7 @@ export const features: Feature[] = [
       "Terminals are not all the same. Quil understands pane types and gives each one context-aware behaviour — including a per-spawn setup dialog with directory browser and runtime checkboxes.",
     category: "interaction",
     detail: [
-      "Twelve built-in pane types: Terminal, Terminal (keeps content on squeeze), Claude Code, OpenCode (beta), Codex, SSH, Stripe, lazygit, hunk, yazi, k9s, lazysql.",
+      "Twelve built-in pane types: Terminal, Terminal (keeps content on squeeze), Claude Code, OpenCode, Codex, SSH, Stripe, lazygit, hunk, yazi, k9s, lazysql.",
       "Each type has its own resume strategy, error handler, and status line.",
       "Pane setup dialog (opt-in via plugin TOML): a directory browser pre-filled with the active pane's CWD plus one checkbox per declared `[[command.toggles]]` entry. claude-code uses both — picks up the project's `.claude/` context automatically and offers a `Dangerously skip permissions` toggle for unattended runs.",
       "The directory step remembers where you've been: the last five folders you actually opened a pane in are offered as a one-keystroke quick pick (deleted ones filtered out), and for git-aware pane types the repositories discovered near the active pane take priority. Browse… always drops to the full picker.",
@@ -575,7 +575,6 @@ export const features: Feature[] = [
     slug: "remote-daemon-ssh",
     icon: "key-round",
     title: "Remote daemon over SSH",
-    badge: "beta",
     blurb:
       "`quil --remote gpu01` puts the panes on another machine. They keep running when the laptop sleeps — the TUI is only a viewer.",
     category: "persistence",
@@ -590,7 +589,7 @@ export const features: Feature[] = [
       "Dialogs that browse a filesystem read the server's disk, not yours. The working-directory picker, `~`, relative paths, drive and root listings, and git-repository discovery all ask the daemon — before that, `Alt+G` could report no repository in a directory where the agent in that very pane answered `git status` with the branch name. Names and paths coming back from a host you may not control are stripped of terminal escapes and of the invisible characters that reverse text direction, so a folder name cannot scramble the dialog or read as something other than what it is.",
       "Kube contexts, plugin availability and the recent-directories list follow the same rule: they describe the server. The recent list is kept per host, and whether a remembered directory still exists is asked of the daemon — checking it locally dropped every server path, so the list rendered empty, which is indistinguishable from a feature nobody had used.",
       "Full-screen tools run on the remote the same as locally. `k9s`, `lazysql` and `lazygit` open against the server's clusters, databases and repositories — an SSH connection carries no terminal type, and without one those tools exit within milliseconds, which reads as a pane that crashed rather than a missing variable. Panes that keep no scrollback, such as OpenCode, are asked to repaint when you reattach instead of showing an empty rectangle in front of a process that never stopped running.",
-      "Beta limits: plugin definitions still come from your local machine, the daemon checks which tools are installed only at startup and on plugin reload (so a tool installed on the server mid-session stays greyed until then), and the remote must be Linux or macOS — a running Windows executable cannot be replaced in place, which makes the upgrade half of provisioning impossible there.",
+      "Known limits: plugin definitions still come from your local machine, the daemon checks which tools are installed only at startup and on plugin reload (so a tool installed on the server mid-session stays greyed until then), and the remote must be Linux or macOS — a running Windows executable cannot be replaced in place, which makes the upgrade half of provisioning impossible there.",
     ],
   },
 
@@ -599,7 +598,6 @@ export const features: Feature[] = [
     image: "https://cdn.stukans.com/quil/screenshots/projects_2_with_remote-800.webp",
     icon: "key-round",
     title: "Several machines in one window",
-    badge: "beta",
     blurb:
       "A project belongs to the daemon that holds its files — so projects from your laptop and from a build host sit side by side in the same sidebar, in one TUI process.",
     category: "persistence",
@@ -613,7 +611,7 @@ export const features: Feature[] = [
       "The fold leaves the surviving project's root directory alone. The dialog fills that field in by itself as soon as the directory listing arrives, so it usually holds wherever the daemon happens to start rather than anywhere you chose — writing that over a root you had picked would be a change nobody asked for. Rename moves one, and it opens with the project's own root already in the field.",
       "The host is remembered under `[[destinations]]` and attached at every launch. Disconnect it from the sidebar's right-click menu and it stops nothing on the far end — the remote daemon keeps every pane alive, and reconnecting restores the same workspace. That is worth knowing before you read a missing row as a deletion: the projects come back on the next connect.",
       "Each destination carries its own reconnect state: its own backoff ladder, its own amber banner naming the host and what ssh actually said. One daemon dying no longer ends the session — the others stay live and interactive.",
-      "Beta limits worth knowing before you rely on it: a destination unreachable at *launch* never starts a reconnect ladder (no connection means no reader, so nothing reports a loss — relaunch to pick it up), background destinations dial non-interactively so a first-time host key must be accepted once with `ssh <dest>` or `quil remote setup <dest>` first, plugin availability is a single registry fed by whichever daemon answered last, and the recent-directories list is one per client rather than one per host.",
+      "Limits worth knowing before you rely on it: a destination unreachable at *launch* never starts a reconnect ladder (no connection means no reader, so nothing reports a loss — relaunch to pick it up), background destinations dial non-interactively so a first-time host key must be accepted once with `ssh <dest>` or `quil remote setup <dest>` first, plugin availability is a single registry fed by whichever daemon answered last, and the recent-directories list is one per client rather than one per host.",
     ],
   },
 

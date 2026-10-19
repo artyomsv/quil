@@ -27,7 +27,7 @@ Optional but recommended:
 quil
 ```
 
-The first launch shows a beta disclaimer with a tip. Press **Enter** to continue, or press **→ Enter** on `Don't show again` to skip it next time.
+The first launch shows a welcome dialog with a tip. Press **Enter** to continue, or press **→ Enter** on `Don't show again` to skip it next time.
 
 The TUI auto-starts the daemon (`quild --background`) if it isn't running. You'll land in a single tab named `Shell` with a single terminal pane in your current directory.
 
@@ -50,7 +50,7 @@ You can navigate panes with `Alt+Arrow` (spatial — left/right/up/down focus th
 Press `Ctrl+N`. The plugin picker opens with categories:
 
 - **Terminal** — system shell, plus a variant that keeps its content when the pane is squeezed
-- **AI Assistant** — Claude Code, OpenCode (beta), Codex
+- **AI Assistant** — Claude Code, OpenCode, Codex
 - **Remote** — SSH (POC)
 - **Tools** — lazygit, hunk, yazi, k9s, lazysql, Stripe (POC)
 

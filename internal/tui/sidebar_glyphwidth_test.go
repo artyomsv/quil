@@ -53,6 +53,10 @@ func TestSidebarGlyphs_OneCellAndNotEmojiCapable(t *testing.T) {
 		// The drop-target arrow leads a header or the PROJECTS heading and is
 		// budgeted as one cell.
 		"glyphDropTarget": glyphDropTarget,
+		// The sandbox marks ride the pane row as a reserved suffix and the
+		// pane border as a fixed segment, each budgeted as one cell.
+		"glyphSandboxDocker": glyphSandboxDocker,
+		"glyphSandboxSbx":    glyphSandboxSbx,
 	}
 	// The WORKING state animates (workingGlyph), so it is a SET of glyphs where
 	// the others are one — and the row arithmetic budgets whichever frame is

@@ -34,6 +34,7 @@ Quil exposes **36 MCP tools**: agents can manage [projects and tabs](mcp.md#proj
   - [Pane setup dialog](#pane-setup-dialog)
   - [Spawn a pane in a worktree](#spawn-a-pane-in-a-worktree)
   - [Run an AI pane in a Docker sandbox](#run-an-ai-pane-in-a-docker-sandbox)
+  - [Run an AI pane in a Docker Sandboxes microVM (sbx)](#run-an-ai-pane-in-a-docker-sandboxes-microvm-sbx)
   - [Resume a past session at pane creation](#resume-a-past-session-at-pane-creation)
   - [Custom plugins via TOML](#custom-plugins-via-toml)
   - [Lazygit integration](#lazygit-integration)
@@ -394,6 +395,18 @@ The main checkout never appears as a row: it's the directory the field above alr
 **You supply the image; Quil publishes none and pulls none.** `scripts/sandbox-image.sh` builds one locally and then *verifies* it provides a non-root user, the agent binary and `git` — rather than reporting success from a clean build log. `--with codex,opencode` adds the other agents. There is deliberately no default registry name: the official-looking `anthropics/claude-code` on Docker Hub is a security researcher's honeypot containing no Claude Code at all.
 
 Closing the pane removes its container. Full guide, including the prerequisites, both auth flows and a walk through the image recipe: [Sandbox panes](sandbox-panes.md).
+
+### Run an AI pane in a Docker Sandboxes microVM (sbx)
+
+A second sandbox backend. With the [`sbx`](https://docs.docker.com/ai/sandboxes/) CLI installed, `←`/`→` on the same sandbox row switches to **sbx**. The pane then runs its agent inside a microVM with its own kernel, and its outbound traffic goes through a default-deny allowlist. `[sandbox] backend = "sbx"` makes sbx the default; MCP `create_pane` takes `sandbox_backend = "sbx"`.
+
+**Your project declares the cage, not Quil.** A `.quil-sandbox.toml` in the project names your sbx environment file, the sandbox name, an optional host step before the sandbox is created, and optional set-up steps inside it afterwards. Quil uses the profile only after you approve it with `quil sandbox trust`, and refuses again if any covered file changes. sbx creates the sandbox from private copies of the approved files, so a change made after the check cannot reach your machine or the cage.
+
+**One sandbox per repository.** Every pane of the repository, worktrees included, shares the sandbox. Quil adds the repository's worktrees folder to the running sandbox with `sbx mount`, so a new worktree is visible at once.
+
+**Attach to a sandbox another tool owns.** When another tool creates and removes sandboxes (for example one per task), `←`/`→` also reaches every existing sandbox, the ones that mount the pane folder first. Quil then needs no profile, and never creates, changes or removes that sandbox; it checks that the pane folder is a writable folder of the sandbox and runs the agent there. MCP: `sandbox_sbx_name`.
+
+**Not yet:** sbx panes have no notifications, working spinner, input history or session resume, because Quil's hook program is not inside the cage. Full guide: [The sbx backend](sandbox-panes.md#the-sbx-backend-docker-sandboxes).
 
 ### Resume a past session at pane creation
 

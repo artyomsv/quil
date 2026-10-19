@@ -538,6 +538,14 @@ the agent's filesystem reach stops at that checkout.
   official-looking `anthropics/claude-code` on Docker Hub is a security
   researcher's honeypot containing no Claude Code
 
+- **A second backend: Docker Sandboxes (`sbx`)** ([ADR-37](architecture.md#adr-37-docker-sandboxes-sbx-backend--the-trust-pin-as-the-boundary)) —
+  the agent runs in a microVM with its own kernel and a default-deny network
+  allowlist, declared by the project's own sbx environment file. A
+  `.quil-sandbox.toml` names it; Quil uses it only after `quil sandbox trust`
+  and creates the sandbox from private copies of the approved files. A pane can
+  also attach to an existing sandbox another tool owns. No hooks inside that
+  cage yet, so no notifications or session resume
+
 **Known limits, documented rather than worked around:** egress is not bounded (a
 default-deny firewall needs `NET_ADMIN`, which Quil does not grant); bind-mount
 IO on Docker Desktop is ~20× slower and inotify does not cross it on Windows, so
@@ -874,8 +882,9 @@ is a major surface and cuts against Quil's TUI/Windows-native focus.
 19. **Remote phone access** — expose the dashboard over a Tailscale/Cloudflare
     tunnel with QR + passphrase pairing and Web Push (AoE). Builds on #18.
 20. ~~**Container sandboxing**~~ — **shipped**, see
-    [M19: Sandbox Panes](#m19-sandbox-panes--adr-31-guide) above. Docker only;
-    Podman is untested. Auth is per-pane rather than a shared volume: Claude
+    [M19: Sandbox Panes](#m19-sandbox-panes--adr-31-guide) above. Docker, and Docker
+    Sandboxes (`sbx`) microVMs with a default-deny network allowlist; Podman
+    is untested. Auth is per-pane rather than a shared volume: Claude
     Code forwards a token by name or signs in in-container (your choice per
     pane), Codex has its credential copied in, OpenCode signs in per container.
     A shared Claude config directory is available (`shared_claude_config`) but

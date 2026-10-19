@@ -1105,6 +1105,28 @@ Out of scope for this phase, deliberately: MCP tools for groups or notes, authen
 
 **Consequences:** the TUI gains reconciliation rules for a tree it did not write (`.claude/rules/tui-rendering.md`, "Layout sync between clients"): a replace that is already done fills the reservation, a moved-out pane runs the moved-out bookkeeping, and an adopted prune after its own close sends nothing. One race is accepted: a TUI split in flight can lose to a daemon-built write on the same tab. The TUI's pane is then at the arrival-rule spot, not where the user chose, and a blank slot can show briefly while a write lands during the TUI's own armed reservation. An unversioned write from an old client still works but can no longer bring back a closed pane. `constructPaneAt` is now a sequence of steps that other callers still use. The browser gateway adds the matching types to its allow-list; see ADR-35 and `.claude/rules/web.md`.
 
+## ADR-37: Docker Sandboxes (`sbx`) Backend — the Trust Pin as the Boundary
+
+**Context:** ADR-31's container bounds the filesystem but not egress, and Quil builds that cage itself. Docker Sandboxes (`sbx`) runs an agent in a microVM with its own kernel and a default-deny network allowlist, declared by an sbx environment file and its kits. Those files live in the project, which the agent can write, and Quil must stay generic — no organisation's hosts, certificates or tools belong in it.
+
+**Decision:** a second backend (`SandboxSpec.Backend = "sbx"`) in which Quil builds no cage. The project's `.quil-sandbox.toml` names the environment file, the sandbox name, an optional host step and optional set-up steps. The boundary is the user's **approval** of exactly those bytes, not a mount set.
+
+**Implementation:**
+
+- `internal/sbx/` — profile, trust pin, argv builders and the create lifecycle; every sbx call goes through `Runner`, so nothing needs sbx to test. Daemon glue in `internal/daemon/sandbox_sbx.go`.
+- **The trust pin.** `quil sandbox trust` records a digest of the profile, the environment file, every file of each local kit, the post-create env file and script arguments that are files (`$QUIL_HOME/sandbox/sbx-trust.json`). Every spawn checks it. A symbolic link anywhere in the pinned set, YAML merge keys and aliases, a `lifecycle:` block and more than one project file in the host step are refused.
+- **Nothing approved is read from the repository again.** The approved bytes are read once: the host step runs a private copy of its script, and sbx creates the sandbox from a staged copy of the environment file and kits in `$QUIL_HOME/sandbox/sbx-env/<name>/`, with the folder tokens and relative workspace paths spelled out.
+- **One sandbox per repository.** A worktree uses its main checkout's profile; the repository's worktrees folder is added to the running sandbox with `sbx mount`, only when the main repository lists the worktree itself.
+- **The agent runs through `sbx exec -it -w <cwd>`**, not `sbx run`, so several panes share one sandbox, each with its own plugin command. Each spawn carries a tag, and closing the pane stops the processes with that tag inside the VM.
+- **Attach mode.** A pane can name an existing sandbox another tool owns (`SandboxSpec.Name`). Then there is no profile, no approval, no create, no mount and no removal; the user picked the sandbox, so nothing from the repository decides. The daemon refuses a name `sbx ls --json` does not list and a pane folder that is not writable in the sandbox (the most specific listed folder decides; `sbx ls` omits `sbx mount` folders, so the sandbox itself is asked before refusing).
+
+**Consequences:**
+
+- No hooks inside the cage yet, so sbx panes have no notifications, working spinner, input history or session resume, and every spawn starts a fresh session.
+- The environment file must mount the project at the same path as on the host; on a Windows host `-w` is omitted and the agent starts in the main workspace.
+- Changing the cage means `sbx rm --force <name>`; an existing sandbox is reused as it is.
+- Full guide: [The sbx backend](sandbox-panes.md#the-sbx-backend-docker-sandboxes); the invariants live in `.claude/rules/sandbox.md`.
+
 ## Storage Layout
 
 ```
@@ -1157,6 +1179,8 @@ Out of scope for this phase, deliberately: MCP tools for groups or notes, authen
 ├── codexhook/                     # Codex hook log
 │   └── hook.log
 ├── sandbox/                       # Docker sandbox panes (ADR-31)
+│   ├── sbx-trust.json             # sbx profile approvals (ADR-37)
+│   ├── sbx-env/<name>/            # Approved sbx environment copy sbx creates from
 │   ├── empty/                     # Read-only shadow directory for pinned mounts
 │   ├── empty-file                 # Read-only shadow file for pinned mounts
 │   ├── overlays/<pane-id>/        # Never mounted into the container

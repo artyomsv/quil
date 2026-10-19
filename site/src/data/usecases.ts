@@ -110,12 +110,14 @@ export const useCases: UseCase[] = [
     body: [
       "Tick `Run in a Docker container` in an agent's setup dialog. The pane runs in its own container that mounts the checkout, with the repository's history, hooks and config read-only, no `--privileged` and no added capabilities.",
       "Quil publishes no image: you build it once on your machine with `scripts/sandbox-image.sh`. Closing the pane removes the container; the commits it made stay in your repository.",
+      "Want a default-deny network too? With Docker's sbx CLI, `←`/`→` on the same row runs the agent in a Docker Sandboxes microVM your project declares, or in an existing sandbox another tool owns.",
     ],
     keys: [["Run in a Docker container", "setup dialog"], ["scripts/sandbox-image.sh", "build the image"]],
     read: [
       { label: "Using it", href: `${GH}docs/sandbox-panes.md#using-it` },
       { label: "Building the image", href: `${GH}docs/sandbox-panes.md#building-the-image` },
       { label: "What the sandbox does and does not bound", href: `${GH}docs/sandbox-panes.md#what-the-sandbox-does-and-does-not-bound` },
+      { label: "The sbx backend (microVM)", href: `${GH}docs/sandbox-panes.md#the-sbx-backend-docker-sandboxes` },
     ],
   },
   {

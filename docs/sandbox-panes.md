@@ -499,9 +499,10 @@ More sandbox symptoms: [Troubleshooting](troubleshooting.md#sandbox-panes).
 
 ## The sbx backend (Docker Sandboxes)
 
-> **Status: not yet run end to end.** The code path is covered by unit tests
-> with a fake `sbx`. No live run against a real `sbx` install has been done yet.
-> `sbx` is young and its flags change between releases; check
+> **Status.** Creating, reusing and entering a sandbox, and sharing the
+> worktrees folder, were run against a real `sbx` 0.48 on macOS. Attaching to
+> an existing sandbox and every Windows path are covered by unit tests with a
+> fake `sbx` only. `sbx` is young and its flags change between releases; check
 > <https://docs.docker.com/ai/sandboxes/> if a command below is refused.
 
 The Docker backend above runs the agent in a plain container. Quil builds that

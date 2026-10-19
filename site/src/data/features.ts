@@ -216,6 +216,24 @@ export const features: Feature[] = [
     ],
   },
 
+  {
+    slug: "sbx-sandbox-panes",
+    icon: "box",
+    title: "Run an agent in a Docker Sandboxes microVM",
+    blurb:
+      "A second sandbox backend: the agent runs in an sbx microVM with its own kernel and a default-deny network allowlist, declared by your project and approved by you.",
+    category: "ai",
+    badge: "beta",
+    detail: [
+      "With Docker's sbx CLI installed, ←/→ on the pane setup dialog's sandbox row switches from Docker to sbx. `[sandbox] backend = \"sbx\"` makes it the default; MCP create_pane takes `sandbox_backend = \"sbx\"`.",
+      "Quil builds no cage here. Your project's sbx environment file and kits declare it, and a `.quil-sandbox.toml` names the file, the sandbox name, an optional host step and optional set-up steps inside the sandbox.",
+      "Quil uses a profile only after you approve it with `quil sandbox trust`, and refuses again if any covered file changes. Symbolic links are refused, and the host step and the create run from private copies of the approved files, so a change made after the check cannot reach your machine or the cage.",
+      "One sandbox per repository: worktrees share it, and Quil adds the worktrees folder to the running sandbox with `sbx mount`, so a new worktree is visible at once.",
+      "Attach to a sandbox another tool owns: ←/→ also reaches the existing sandboxes, the ones that mount the pane folder first. Quil then needs no profile, and never creates, changes or removes that sandbox.",
+      "Not yet: no notifications, working spinner, input history or session resume in an sbx pane, because Quil's hook program is not inside the cage.",
+    ],
+  },
+
   // --- Interaction ---------------------------------------------------
   {
     slug: "projects",

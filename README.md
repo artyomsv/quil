@@ -222,6 +222,14 @@ Prerequisites, both Claude sign-in flows, the image recipe line by line, and the
 limits that are *not* bounded (egress, branch pointers, submodules):
 [docs/sandbox-panes.md](docs/sandbox-panes.md).
 
+**Or a microVM.** With Docker's [`sbx`](https://docs.docker.com/ai/sandboxes/)
+CLI installed, `←`/`→` on the same row picks the **sbx** backend instead: the
+agent runs in a Docker Sandboxes microVM with its own kernel and a default-deny
+network allowlist. Your project's sbx environment file declares that cage, and a
+`.quil-sandbox.toml` you approve with `quil sandbox trust` points Quil at it.
+A pane can also attach to an existing sandbox that another tool created.
+[The sbx backend](docs/sandbox-panes.md#the-sbx-backend-docker-sandboxes).
+
 ## Set the whole tab up at once
 
 Some work needs four panes, not one — an agent that plans, an agent that writes
@@ -312,9 +320,9 @@ Define your own pane types in TOML — see the [plugin reference](docs/plugin-re
 | **Workspace templates** | [workspace-templates.md](docs/workspace-templates.md) |
 | **MCP (AI integration)** | [mcp.md](docs/mcp.md) |
 | **Custom plugins** | [plugin-reference.md](docs/plugin-reference.md) |
-| **Sandbox panes (Docker)** | [sandbox-panes.md](docs/sandbox-panes.md) |
+| **Sandbox panes (Docker, sbx)** | [sandbox-panes.md](docs/sandbox-panes.md) |
 | **Troubleshooting** | [troubleshooting.md](docs/troubleshooting.md) |
-| **Architecture (34 ADRs)** | [architecture.md](docs/architecture.md) |
+| **Architecture (37 ADRs)** | [architecture.md](docs/architecture.md) |
 | **Roadmap** | [roadmap.md](docs/roadmap.md) |
 | **Why Quil exists** | [vision.md](docs/vision.md) |
 | **v1 requirements (historical)** | [prd.md](docs/prd.md) |

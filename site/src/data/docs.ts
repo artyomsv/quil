@@ -44,7 +44,7 @@ export const manual: ManualEntry[] = [
     heading: "Give an agent skipped permissions inside a Docker container that only sees its checkout.",
     steps: ["Build the image once: `scripts/sandbox-image.sh`.", "Tick `Run in a Docker container` in the agent's setup dialog.", "Closing the pane removes the container. Its commits stay in your repository."],
     keys: [["scripts/sandbox-image.sh", ""], ["--with codex,opencode", "more agents"]],
-    read: [X("Using it", "using-it"), X("Building the image", "building-the-image"), X("What the sandbox does and does not bound", "what-the-sandbox-does-and-does-not-bound")] },
+    read: [X("Using it", "using-it"), X("Building the image", "building-the-image"), X("What the sandbox does and does not bound", "what-the-sandbox-does-and-does-not-bound"), X("The sbx backend (microVM)", "the-sbx-backend-docker-sandboxes")] },
   { id: "too-much", tour: true, persona: "TOO MUCH GOING ON",
     heading: "See which agent needs you, and find any text in any pane.",
     steps: ["Read the sidebar: ▲ waiting on you, ⠹ working, ✓ finished while you were away.", "Jump to the agent that has waited longest: `Alt+Shift+A`.", "Search actions, tabs, projects and every pane's scrollback: `Alt+Shift+P`. Enter goes to the pane."],

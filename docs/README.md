@@ -31,14 +31,14 @@
 | Doc | What's in it |
 |---|---|
 | [Plugin reference](plugin-reference.md) | Author your own pane types in TOML — every field, every strategy, every example |
-| [Sandbox panes](sandbox-panes.md) | Run an AI pane inside a Docker container — prerequisites, building the image, the sign-in flow for each agent, what the sandbox does and does not bound |
+| [Sandbox panes](sandbox-panes.md) | Run an AI pane inside a Docker container or a Docker Sandboxes (sbx) microVM — prerequisites, building the image, the sign-in flow for each agent, the sbx profile and its approval, attaching to an existing sbx sandbox, what each sandbox does and does not bound |
 | [Windows remotes over SSH](remote-windows.md) | Set up a Windows PC as a `quil --remote` target — OpenSSH Server, keys, the default shell, `quil remote setup`, the logon task, and what `[limited]` means |
 
 ## Project
 
 | Doc | What's in it |
 |---|---|
-| [Architecture](architecture.md) | All 34 ADRs — client-daemon split, IPC protocol, PTY cross-platform, persistence model, plugin system, SSH transport, projects + router, worktree panes, keymap registry, docker sandbox, protocol base, shared data, client authentication |
+| [Architecture](architecture.md) | All 37 ADRs — client-daemon split, IPC protocol, PTY cross-platform, persistence model, plugin system, SSH transport, projects + router, worktree panes, keymap registry, docker sandbox, protocol base, shared data, client authentication, browser client, daemon-owned layout trees, sbx sandbox |
 | [Vision](vision.md) | The project's why — what problem Quil solves and how |
 | [Product requirements](prd.md) | Original PRD (historical reference) |
 | [Roadmap](roadmap.md) | Milestone summary + planned work — see also [roadmap/](roadmap/) for per-feature PRDs |

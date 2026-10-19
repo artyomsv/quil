@@ -191,6 +191,84 @@ func TestToggleYazi_SupersedesAPendingGitScan(t *testing.T) {
 	}
 }
 
+// TestToggleYazi_ShowingARunningYaziSupersedesAPendingGitScan: the same race
+// as above, but yazi is already running for this folder, so the key answers
+// locally (no folder check). The local answer must still end the git request,
+// or its late answer replaces yazi with lazygit.
+func TestToggleYazi_ShowingARunningYaziSupersedesAPendingGitScan(t *testing.T) {
+	t.Parallel()
+	repo := gitRepoDir(t)
+	m, fake, tab := overlayTestModel(t, repo)
+	ov := yaziOverlay(tab, repo, false)
+
+	runCmd(m.handleToggleLazygit())
+	oldGen := m.repoScan.gen
+	runCmd(m.handleToggleYazi())
+	if !tab.overlayVisible || tab.overlayPane != ov {
+		t.Fatal("setup: the running yazi was not shown")
+	}
+
+	fake.sent = nil
+	runCmd(m.applyGitRepos(ipc.GitReposRespPayload{CWD: repo, Repos: []string{repo}}, oldGen))
+	runCmd(m.applyGitScanTimeout(repo, oldGen))
+
+	if got := sentTypesFiltered(fake, ipc.MsgCreatePane, ipc.MsgDestroyPane); len(got) != 0 {
+		t.Errorf("the superseded git scan replaced the running yazi: %v", debugSentTypes(fake))
+	}
+	if tab.overlayPane != ov || !tab.overlayVisible {
+		t.Error("yazi is no longer the visible overlay")
+	}
+}
+
+// TestToggleYazi_HidingSupersedesAPendingGitScan: yazi on screen, Alt+G
+// starts discovery, then Alt+Shift+F hides yazi. Hiding is the user's last
+// word, so the late git answer must not open lazygit.
+func TestToggleYazi_HidingSupersedesAPendingGitScan(t *testing.T) {
+	t.Parallel()
+	repo := gitRepoDir(t)
+	m, fake, tab := overlayTestModel(t, repo)
+	yaziOverlay(tab, repo, true)
+
+	runCmd(m.handleToggleLazygit())
+	oldGen := m.repoScan.gen
+	runCmd(m.handleToggleYazi())
+	if tab.overlayVisible {
+		t.Fatal("setup: the yazi key did not hide yazi")
+	}
+
+	fake.sent = nil
+	runCmd(m.applyGitRepos(ipc.GitReposRespPayload{CWD: repo, Repos: []string{repo}}, oldGen))
+
+	if got := sentTypesFiltered(fake, ipc.MsgCreatePane, ipc.MsgDestroyPane); len(got) != 0 {
+		t.Errorf("the superseded git scan acted after the hide: %v", debugSentTypes(fake))
+	}
+}
+
+// TestToggleYazi_PressedTwiceWhileChecking_WaitsForTheFirstAnswer: the daemon
+// runs one folder check at a time and refuses a second. A repeated key while
+// the first is in flight must not send another — that refusal would replace
+// the request whose answer is still coming, and nothing would open.
+func TestToggleYazi_PressedTwiceWhileChecking_WaitsForTheFirstAnswer(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	m, fake, _ := overlayTestModel(t, dir)
+
+	runCmd(m.handleToggleYazi())
+	firstGen := m.repoScan.gen
+	runCmd(m.handleToggleYazi())
+
+	if got := sentTypesFiltered(fake, ipc.MsgDirsExistReq); len(got) != 1 {
+		t.Fatalf("want one folder check, got %v", debugSentTypes(fake))
+	}
+	if m.repoScan.gen != firstGen {
+		t.Fatal("the second press replaced the pending request")
+	}
+	answerDirCheck(t, m, fake, true)
+	if p := createdPane(t, fake); p.Type != overlayPluginYazi {
+		t.Errorf("created %q, want yazi", p.Type)
+	}
+}
+
 // TestDirsExistAnswer_RecentListStillGetsItsOwn: the overlay check and the
 // setup dialog's recent list share the response type. A recent-list answer
 // must not be taken for the overlay's.

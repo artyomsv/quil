@@ -88,3 +88,29 @@ func (m *Model) applyOverlayDir(resp ipc.DirsExistRespPayload) tea.Cmd {
 	}
 	return m.resolveOverlay(tab, []string{cwd}, plugin)
 }
+
+// overlayRequestPending reports whether an overlay request for exactly this
+// tab, folder and tool is still waiting on the daemon.
+func (m *Model) overlayRequestPending(tabID, cwd, plugin string) bool {
+	s := m.repoScan
+	if s.gen == "" || (s.purpose != repoScanOverlay && s.purpose != repoScanOverlayDir) {
+		return false
+	}
+	return s.tabID == tabID && s.cwd == cwd && s.plugin == plugin
+}
+
+// dropPendingOverlayScan forgets an overlay request still waiting on the
+// daemon — a git discovery or a yazi folder check — so its answer and its
+// timeout are both dropped by the gen check when they arrive. The setup
+// dialog's pick-list scan shares the slot and is left alone: no overlay key
+// can be pressed while that dialog owns the keyboard.
+//
+// gen, not purpose, says whether anything is in flight: repoScanOverlay is
+// the zero value, so an idle slot also reads as an overlay purpose.
+func (m *Model) dropPendingOverlayScan() {
+	s := m.repoScan
+	if s.gen == "" || (s.purpose != repoScanOverlay && s.purpose != repoScanOverlayDir) {
+		return
+	}
+	m.repoScan = repoScanState{}
+}

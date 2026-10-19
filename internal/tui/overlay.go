@@ -97,6 +97,9 @@ func (m *Model) handleToggleOverlay(pluginName string) tea.Cmd {
 
 	// Step 1: this plugin's overlay is visible → hide.
 	if tab.overlayVisible && tab.overlayRuns(pluginName) {
+		// An accepted key ends any overlay request still in flight: its late
+		// answer would otherwise re-open a tool the user has moved past.
+		m.dropPendingOverlayScan()
 		tab.overlayVisible = false
 		return tea.Batch(tea.ClearScreen, m.overlayVisibilityCmd(tab, false))
 	}
@@ -127,6 +130,18 @@ func (m *Model) handleToggleOverlay(pluginName string) tea.Cmd {
 	if normalPane != nil {
 		cwd = normalPane.CWD
 	}
+	// The same request already in flight: wait for its answer. Sending it
+	// again would only be refused — each daemon lookup is single-flight — and
+	// that refusal would replace the request whose answer is still coming.
+	if m.overlayRequestPending(tab.ID, cwd, pluginName) {
+		return nil
+	}
+	// Any OTHER overlay request still in flight is superseded by this key,
+	// whatever happens next: show, flash, or a new request. Without this a
+	// path that answers locally (an overlay already open for this folder)
+	// left the old request live, and its late answer replaced the tool the
+	// user had just chosen.
+	m.dropPendingOverlayScan()
 	// No CWD means the pane has not reported one yet (no OSC 7, or a pane that
 	// never had a shell). Asking the daemon would have it substitute its OWN
 	// default and answer about a directory the user is not in — so an overlay

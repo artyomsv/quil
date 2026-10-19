@@ -39,6 +39,7 @@ Quil exposes **36 MCP tools**: agents can manage [projects and tabs](mcp.md#proj
   - [Custom plugins via TOML](#custom-plugins-via-toml)
   - [Lazygit integration](#lazygit-integration)
   - [Hunk integration](#hunk-integration)
+  - [Yazi integration](#yazi-integration)
   - [k9s integration](#k9s-integration)
   - [lazysql integration](#lazysql-integration)
 - [Observability](#observability)
@@ -244,11 +245,11 @@ The default is `Alt+Shift+P` because `Ctrl+Shift+P` (the VS Code key) is interce
 
 ### Pane context menu
 
-Right-click a pane (with no text selection active — a selection still copies, unchanged) or press `Alt+A` (`quick_actions`, active pane) to open a popup with 13 actions: Input history, Enter/Exit focus mode, Open notes, Open lazygit, Open hunk, Rename pane, Move to tab…, Mute/Unmute notifications, Mark/Unmark for deletion, Mark/Unmark attention, Clear attention, Restart pane… (confirm), Close pane… (confirm). The menu shows the target pane's name as a header, and the target pane gets a blue highlight border while the menu is open. Hovering the mouse highlights the row under the cursor; `↑`/`↓`/`k`/`j` also navigate (disabled rows are skipped), `Enter` or a click executes, `Esc` or a click outside closes, and right-clicking another pane re-targets the menu. Action groups (view actions / pane settings / destructive) are separated by a blank line, keeping Restart/Close visually isolated (the menu falls back to a compact layout on short terminals).
+Right-click a pane (with no text selection active — a selection still copies, unchanged) or press `Alt+A` (`quick_actions`, active pane) to open a popup with 14 actions: Input history, Enter/Exit focus mode, Open notes, Open lazygit, Open hunk, Open yazi, Rename pane, Move to tab…, Mute/Unmute notifications, Mark/Unmark for deletion, Mark/Unmark attention, Clear attention, Restart pane… (confirm), Close pane… (confirm). The menu shows the target pane's name as a header, and the target pane gets a blue highlight border while the menu is open. Hovering the mouse highlights the row under the cursor; `↑`/`↓`/`k`/`j` also navigate (disabled rows are skipped), `Enter` or a click executes, `Esc` or a click outside closes, and right-clicking another pane re-targets the menu. Action groups (view actions / pane settings / destructive) are separated by a blank line, keeping Restart/Close visually isolated (the menu falls back to a compact layout on short terminals).
 
 **Move to tab…** sends the pane, still running, to any other tab on the same machine — its process, output history and CWD are untouched. It lists every other tab as "project / tab" in a small picker; picking one moves the pane there and splits the last pane in that tab to make room, alternating direction — a lone pane is split side by side, the right-hand one of a side-by-side pair top and bottom, and so on — so moved panes spiral in instead of forming thin columns. You stay on the tab you were on, and a tab left with no panes by the move is closed. The row is greyed rather than hidden when there is nowhere to move to (a single-tab workspace, or the pane or its tab mid worktree checkout).
 
-Five rows grey out when unavailable: **Input history** unless the pane's plugin sets `record_history` (Claude Code), **Open lazygit** and **Open hunk** when their binaries aren't installed (each gated on its own), **Move to tab…** when there is nowhere to move the pane to, and **Clear attention** when the pane carries no mark to clear.
+Six rows grey out when unavailable: **Input history** unless the pane's plugin sets `record_history` (Claude Code), **Open lazygit**, **Open hunk** and **Open yazi** when their binaries aren't installed (each gated on its own), **Move to tab…** when there is nowhere to move the pane to, and **Clear attention** when the pane carries no mark to clear.
 
 **Mark attention** pins a purple `◆` on the pane — deliberately not the green of the automatic "work finished, unseen" mark, because only one of the two clears itself. The pin survives focusing the pane and goes away only via **Unmark attention** or **Clear attention**.
 
@@ -341,6 +342,7 @@ Panes aren't just shells. Press `Ctrl+N` to create a typed pane from 11 built-in
 | **Codex** | AI Assistant | Claude-compatible hooks registered through a trusted `-c hooks=…` override; restore via `resume <id>` |
 | **lazygit** | Tools | Re-run same command — also a per-tab `Alt+G` overlay |
 | **hunk** | Tools | Re-run same command — also a per-tab `Alt+D` overlay, sharing lazygit's slot |
+| **yazi** | Tools | Re-run same command — also a per-tab `Alt+Shift+F` overlay on the pane's directory |
 | **k9s** | Tools | Re-run same command; kube context picked from your kubeconfig |
 | **lazysql** | Tools | Re-run same command; connections stay in lazysql's own manager |
 | **SSH** *(POC)* | Remote | Re-run same command |
@@ -472,6 +474,36 @@ installed.
 
 Hunk takes no repository flag — it reviews whatever repository its working
 directory sits in — so the directory the pane spawns in is what scopes it.
+
+### Yazi integration
+
+[yazi](https://github.com/sxyazi/yazi) is a fast terminal file manager.
+
+- **Yazi plugin** (Ctrl+N → Tools → Yazi): opens yazi as a regular pane. The
+  directory step is the plain folder browser, not the git-repo list — a file
+  manager is useful in any folder. Only offered when the `yazi` binary is
+  installed; otherwise it is shown greyed with a link to the project.
+- **Overlay (Alt+Shift+F)**: toggles a full-tab yazi on the active pane's own
+  directory. No git repository is needed. The lifecycle is the same as the
+  lazygit overlay: hidden yazi keeps running, so showing it again keeps your
+  place, tabs and selection. Press the key again in the same folder and you get
+  the same yazi back; press it after the pane moved to another folder and a new
+  yazi opens there. Quit yazi (`q`) and the overlay pane is destroyed.
+- It shares the tab's single overlay slot with lazygit and hunk, so the three
+  keys swap tools rather than stack them.
+
+yazi's own settings stay in `~/.config/yazi/` (`yazi.toml`, `keymap.toml`,
+`theme.toml`). Two limits:
+
+- **No image previews.** yazi asks the terminal which features it supports
+  (DA1/DSR queries). Quil's panes never answer terminal queries, because a
+  reply would become input to the pane. So yazi finds no image protocol and
+  shows text previews only. It can also wait a few seconds for the answer, or
+  print a "terminal response timeout" warning (see yazi's FAQ); both are
+  harmless.
+- **Windows needs `file(1)`** for MIME detection. Git for Windows ships one: set
+  the user environment variable
+  `YAZI_FILE_ONE=C:\Program Files\Git\usr\bin\file.exe`.
 
 ### k9s integration
 

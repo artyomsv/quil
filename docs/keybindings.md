@@ -131,6 +131,7 @@ The active tab is prefixed with `* ` in the tab bar so it's visible even when [t
 | `Alt+Shift+W` | Toggle the active AI pane's preview between left-edge crop (default) and soft-wrap. Only affects `wide_canvas` panes rendered smaller than the window. |
 | `Alt+G` | Toggle lazygit overlay (git repo from active pane's directory) |
 | `Alt+D` | Toggle hunk overlay — diff review for the same repo. Shares the tab's single overlay slot with lazygit, so pressing it while lazygit is on screen swaps tools. Mnemonic: **d**iff. Not `Alt+H`, because plain `Alt+H` is deliberately left unbound so it reaches the running program (see the passthrough note below) and because vim-style layouts rebind it to pane-left — set `"pane.toggle_hunk" = "alt+h"` in `~/.quil/bindings.toml` if you prefer it there. |
+| `Alt+Shift+F` | Toggle yazi overlay — a file manager on the active pane's own directory (no git repository needed). Shares the same overlay slot, so it swaps with lazygit or hunk. Mnemonic: **f**iles. Not plain `Alt+F`: that is readline forward-word and reaches the shell. |
 | `Alt+Shift+L` | Force a full screen redraw — clears rendering artifacts (scrambled/misplaced characters) without restarting. Mnemonic: `Ctrl+L` redraws a shell. |
 | `Alt+Shift+I` | Open the active pane's input history — one row per prompt you submitted, newest first. `↑/↓` navigate, `PgUp/PgDn/Home/End` jump, `Enter` opens the full text in a soft-wrapped read-only viewer (drag or `Ctrl+A` to select, right-click or `Enter` to copy), `Esc` closes. Only AI panes whose plugin sets `record_history` (Claude Code) capture history; other pane types show an empty state. |
 | `Alt+A` | Open the pane context menu for the active pane (`quick_actions`). Same menu as right-click — see [Mouse: pane context menu](#mouse-pane-context-menu) below. |
@@ -498,6 +499,7 @@ Other keys in the browser:
 |---|---|
 | `Alt+N` | Notification list |
 | `Alt+G` / `Alt+D` | lazygit / hunk overlay |
+| `Alt+Shift+F` | yazi overlay — terminal only for now; in the browser it shows "available in the TUI" |
 | `F1` | List of active keys |
 
 Some actions exist only in the terminal: the command palette, pane notes and settings. Their keys do nothing in the browser except show "available in the TUI". They never type into a pane.

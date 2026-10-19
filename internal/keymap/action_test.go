@@ -41,6 +41,9 @@ func TestActions_TierSplitMatchesLegacySwitches(t *testing.T) {
 	// share one slot per tab, so splitting them across the seam would let a
 	// plugin's raw_keys claim one of the pair and not the other.
 	//
+	// pane.toggle_yazi is the third overlay toggle and joins the other two in
+	// the early switch for the same reason.
+	//
 	// client.take_control has no pre-rewrite position either — it is a
 	// multi-client-sync action with no legacy handleKey switch at all. It is
 	// early tier by design (see its registry comment in action.go): a chord
@@ -50,7 +53,7 @@ func TestActions_TierSplitMatchesLegacySwitches(t *testing.T) {
 		"notification.toggle": true, "notification.focus": true,
 		"sidebar.toggle": true, "pane.go_back": true, "pane.mute": true,
 		"pane.toggle_eager": true, "pane.toggle_wrap": true,
-		"pane.toggle_lazygit": true, "pane.toggle_hunk": true,
+		"pane.toggle_lazygit": true, "pane.toggle_hunk": true, "pane.toggle_yazi": true,
 		"pane.command_history": true,
 		"pane.quick_actions":   true, "project.new": true,
 		"project.destroy": true, "project.picker": true,
@@ -59,8 +62,8 @@ func TestActions_TierSplitMatchesLegacySwitches(t *testing.T) {
 		"project.move_up": true, "project.move_down": true,
 		"client.take_control": true,
 	}
-	if len(early) != 21 {
-		t.Fatalf("expected-early table has %d entries, want 21", len(early))
+	if len(early) != 22 {
+		t.Fatalf("expected-early table has %d entries, want 22", len(early))
 	}
 	for _, a := range Actions() {
 		want := TierLate

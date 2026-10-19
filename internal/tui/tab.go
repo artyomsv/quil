@@ -46,12 +46,17 @@ type TabModel struct {
 	// over, and the box the user stared at throughout said nothing at all.
 	CreatingBranch string
 
-	// overlayPane is the tab's overlay tool — lazygit or hunk, one at a time
-	// (never part of the layout tree). overlayVisible controls rendering; the
-	// pane's PTY keeps running while hidden so re-show is instant with UI
+	// overlayPane is the tab's overlay tool — lazygit, hunk or yazi, one at a
+	// time (never part of the layout tree). overlayVisible controls rendering;
+	// the pane's PTY keeps running while hidden so re-show is instant with UI
 	// state intact.
 	overlayPane    *PaneModel
 	overlayVisible bool
+
+	// overlayAskedCWD is the directory THIS client asked the current overlay
+	// to open in, before the daemon resolved it (createOverlay). Empty for an
+	// overlay this client did not create. See overlayOpenedFor.
+	overlayAskedCWD string
 
 	// leavesCache memoizes Root.Leaves(); nil = invalid. The tab bar alone
 	// walks every tab's tree twice per render without it.
@@ -140,6 +145,17 @@ func (t *TabModel) invalidateLeaves() { t.leavesCache = nil }
 // so this matches whatever is actually running, not what the client asked for.
 func (t *TabModel) overlayRuns(pluginName string) bool {
 	return t.overlayPane != nil && t.overlayPane.Type == pluginName
+}
+
+// overlayOpenedFor reports whether the tab's overlay was opened for dir: the
+// daemon's resolved directory, or the one this client asked for. Both count,
+// because the daemon follows symlinks before it spawns, so a pane reporting a
+// path under a symlink would otherwise never match the overlay opened for it.
+func (t *TabModel) overlayOpenedFor(dir string) bool {
+	if t.overlayPane == nil || dir == "" {
+		return false
+	}
+	return dir == t.overlayPane.CWD || dir == t.overlayAskedCWD
 }
 
 // ActivePaneModel returns the currently active pane, or nil.

@@ -291,7 +291,7 @@ changing any of these.
 
 ## `[overlay]`
 
-Bounds the overlay pane — the Alt+G lazygit and Alt+D hunk views share one slot per tab. Pressing the same key again (or switching away and back) only *hides* it — the process keeps running; only quitting the tool itself (`q`) or one of these two limits reclaims it.
+Bounds the overlay pane — the Alt+G lazygit, Alt+D hunk and Alt+Shift+F yazi views share one slot per tab. Pressing the same key again (or switching away and back) only *hides* it — the process keeps running; only quitting the tool itself (`q`) or one of these two limits reclaims it.
 
 | Key | Type | Default | What it does |
 |---|---|---|---|
@@ -429,6 +429,7 @@ A bad line never costs you the rest of your keymap: only the affected action fal
 | `notes_toggle` | `alt+e` | Open / close the per-pane notes editor |
 | `toggle_lazygit` | `alt+g` | Toggle lazygit overlay for the git repo resolved from the active pane's current directory. Only shown when the `lazygit` binary is installed. |
 | `toggle_hunk` | `alt+d` | Toggle hunk (diff review) overlay for the same repo. Shares the tab's single overlay slot with lazygit — pressing this while lazygit is up swaps the tools rather than stacking them. Only shown when the `hunk` binary is installed. `alt+d` rather than the more obvious `alt+h` because plain `Alt+H` is deliberately left unbound so it reaches the running program, and because vim-style setups rebind it to pane-left; set `toggle_hunk = "alt+h"` if you want it anyway. |
+| *(no field)* | `alt+shift+f` | Toggle the yazi (file manager) overlay on the active pane's directory. Same shared slot. It arrived after `bindings.toml`, so it has no `[keybindings]` field: rebind it with `"pane.toggle_yazi" = "…"` in `~/.quil/bindings.toml`. |
 | `toggle_wrap` | `alt+shift+w` | Switch the active AI pane's preview between left-edge crop (default) and soft-wrap. Only meaningful for `wide_canvas` panes rendered smaller than the window; per-pane, not persisted. |
 | `redraw` | `alt+shift+l` | Force a full screen repaint — clears rendering artifacts (scrambled or misplaced characters) without restarting the TUI |
 | `new_project` | `alt+shift+n` | Open the create-project dialog |

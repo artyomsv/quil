@@ -43,6 +43,11 @@ var registry = []Action{
 	// the more obvious alt+h — plain Alt+H is deliberately left unbound so it
 	// reaches the running program, and vim-style layouts rebind it to pane-left.
 	{ID: "pane.toggle_hunk", Label: "Toggle hunk (diff review) overlay for current repo", Group: "Panes", Tier: TierEarly, Order: 850, Default: "alt+d"},
+	// The third overlay tool, beside the other two so it shares their tier: a
+	// plugin's raw_keys claim must not take one toggle of the shared slot and
+	// leave the rest. alt+shift+f ("files"), not alt+f: plain Alt+F is readline
+	// forward-word, which keyToBytes forwards as ESC-f for Option-as-Meta users.
+	{ID: "pane.toggle_yazi", Label: "Toggle yazi (file manager) overlay for current directory", Group: "Panes", Tier: TierEarly, Order: 870, Default: "alt+shift+f"},
 	{ID: "pane.command_history", Label: "Open pane input history", Group: "Panes", Tier: TierEarly, Order: 900, Default: "alt+shift+i"},
 	{ID: "pane.quick_actions", Label: "Pane context menu (also mouse right-click)", Group: "Panes", Tier: TierEarly, Order: 1000, Default: "alt+a"},
 	{ID: "project.new", Label: "New project", Group: "Projects", Tier: TierEarly, Order: 1100, Default: "alt+shift+n"},

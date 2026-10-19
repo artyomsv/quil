@@ -159,6 +159,22 @@ export const plugins: PluginEntry[] = [
     ],
   },
   {
+    slug: "yazi",
+    name: "yazi",
+    kind: "built-in",
+    description:
+      "A fast terminal file manager backed by [yazi](https://github.com/sxyazi/yazi). Open it as an ordinary pane from Ctrl+N → Tools, or toggle it full-tab with Alt+Shift+F on the active pane's own directory — any folder, no git repository needed. Offered only when the yazi binary is found on PATH.",
+    spawnExample:
+      '# yazi.toml — relevant fields\n[plugin]\nname = "yazi"\nschema_version = 1\nhomepage = "https://github.com/sxyazi/yazi"\n\n[command]\ncmd = "yazi"\ndetect = "yazi --version"\nprompts_cwd = true        # plain folder browser; yazi opens its working directory\n\n[persistence]\nstrategy = "rerun"\nghost_buffer = false',
+    features: [
+      "Alt+Shift+F toggles a per-tab yazi on the active pane's directory; press it again to hide, and the process keeps running, so your place, tabs and selection are still there next time.",
+      "Same folder, same yazi: the overlay is reused while the pane stays in the folder it was opened for, and replaced when the pane has moved on.",
+      "Shares the tab's one overlay slot with lazygit (Alt+G) and hunk (Alt+D) — the keys swap tools rather than stacking them.",
+      "Text previews only: Quil's panes never answer terminal queries, so yazi finds no image protocol.",
+      "Binary-gated: greyed out in Ctrl+N with a link to the project when yazi is not installed.",
+    ],
+  },
+  {
     slug: "k9s",
     name: "k9s",
     kind: "built-in",

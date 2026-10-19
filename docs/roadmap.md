@@ -46,6 +46,7 @@ run (user copies override them):
 | **Stripe** | POC | `rerun` — re-listen with same webhook URL | M4 |
 | **lazygit** | Tool | `rerun` — plus per-tab `Alt+G` overlay | v1.22.0 |
 | **hunk** | Tool | `rerun` — plus per-tab `Alt+D` overlay, sharing lazygit's slot | v1.57.0 |
+| **yazi** | Tool | `rerun` — plus per-tab `Alt+Shift+F` overlay on the pane's directory | unreleased |
 | **k9s** | Tool | `rerun` — kube-context pick via `discover = "kube"` | v1.27.0 |
 | **lazysql** | Tool | `rerun` — connections stay in lazysql's manager | v1.28.0 |
 

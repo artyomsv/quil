@@ -264,7 +264,7 @@ export const features: Feature[] = [
       "Terminals are not all the same. Quil understands pane types and gives each one context-aware behaviour — including a per-spawn setup dialog with directory browser and runtime checkboxes.",
     category: "interaction",
     detail: [
-      "Eleven built-in pane types: Terminal, Terminal (keeps content on squeeze), Claude Code, OpenCode (beta), Codex, SSH, Stripe, lazygit, hunk, k9s, lazysql.",
+      "Twelve built-in pane types: Terminal, Terminal (keeps content on squeeze), Claude Code, OpenCode (beta), Codex, SSH, Stripe, lazygit, hunk, yazi, k9s, lazysql.",
       "Each type has its own resume strategy, error handler, and status line.",
       "Pane setup dialog (opt-in via plugin TOML): a directory browser pre-filled with the active pane's CWD plus one checkbox per declared `[[command.toggles]]` entry. claude-code uses both — picks up the project's `.claude/` context automatically and offers a `Dangerously skip permissions` toggle for unattended runs.",
       "The directory step remembers where you've been: the last five folders you actually opened a pane in are offered as a one-keystroke quick pick (deleted ones filtered out), and for git-aware pane types the repositories discovered near the active pane take priority. Browse… always drops to the full picker.",
@@ -352,8 +352,8 @@ export const features: Feature[] = [
     category: "interaction",
     detail: [
       "Right-click a pane (or press Alt+A for the active pane) to open a popup targeting the pane under the cursor — its border lights up so there's never doubt which pane the actions will hit, and the menu header shows the pane's name.",
-      "Thirteen actions in three groups: view (input history, enter/exit focus mode, notes, lazygit, hunk), pane settings (rename, move to tab, mute notifications, mark for deletion, mark attention, clear attention), and destructive (restart, close — both keep their confirmation dialogs).",
-      "Hover highlights the row under the mouse; arrow keys / j / k navigate; unavailable actions grey out (input history without an AI pane, lazygit or hunk without the binary installed, move to tab with nowhere to move to).",
+      "Fourteen actions in three groups: view (input history, enter/exit focus mode, notes, lazygit, hunk, yazi), pane settings (rename, move to tab, mute notifications, mark for deletion, mark attention, clear attention), and destructive (restart, close — both keep their confirmation dialogs).",
+      "Hover highlights the row under the mouse; arrow keys / j / k navigate; unavailable actions grey out (input history without an AI pane, lazygit, hunk or yazi without the binary installed, move to tab with nowhere to move to).",
       "Mark attention pins a purple border and ◆ that survive focusing the pane — a manual \"don't let me forget this one\" flag, cleared only by unmarking.",
       "Right-click with a text selection active still copies it — the menu only opens on a plain right-click.",
     ],

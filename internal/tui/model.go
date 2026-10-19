@@ -5541,9 +5541,10 @@ func (m Model) stepSequence(msg tea.KeyPressMsg, key string) (Model, keymap.Acti
 // as a hard-coded case in the caller (not driven by kb.NextPane, which is
 // now unbound by default since spatial navigation moved to Alt+Arrow).
 //
-// Note: ToggleLazygit (Alt+G) and ToggleHunk (Alt+H) are deliberately NOT in
-// this list — notes mode binds the editor to a pane, and popping a full-screen
-// overlay over it mid-edit conflicts with the notes layout. Both fall through
+// Note: the overlay toggles (lazygit Alt+G, hunk Alt+D, yazi Alt+Shift+F) are
+// deliberately NOT in this list — notes mode binds the editor to a pane, and
+// popping a full-screen overlay over it mid-edit conflicts with the notes
+// layout. All of them fall through
 // to the editor harmlessly as plain text input.
 func (m Model) notesKeyExempt(key string) bool {
 	if key == "" {
@@ -6119,6 +6120,9 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	case "pane.toggle_hunk":
 		cmd := m.handleToggleHunk()
+		return m, cmd
+	case "pane.toggle_yazi":
+		cmd := m.handleToggleYazi()
 		return m, cmd
 	case "pane.command_history":
 		return m.openHistoryForActivePane()
@@ -7864,6 +7868,7 @@ func (m *Model) reconcileOverlayPane(
 			visCmd := m.overlayVisibilityCmd(tab, false)
 			tab.overlayPane = nil
 			tab.overlayVisible = false
+			tab.overlayAskedCWD = ""
 			return newPaneIDs, false, visCmd
 		}
 	case tab.overlayPane == nil || tab.overlayPane.ID != overlayInfo.ID:
@@ -7891,6 +7896,12 @@ func (m *Model) reconcileOverlayPane(
 		}
 		syncPaneMeta(pane, overlayInfo, m.pluginWideCanvas(overlayInfo.Type), m.pluginMinNativeCols(overlayInfo.Type), m.pluginRestoresViaSession(overlayInfo.Type), m.isFollower(tab.Dest))
 		tab.overlayPane = pane
+		// The directory createOverlay remembered describes the overlay THIS
+		// client asked for; one it did not ask for (another client's, or an
+		// adopted one on reattach) has only the daemon's own CWD to match.
+		if !m.pendingOverlayShow[tab.ID] {
+			tab.overlayAskedCWD = ""
+		}
 		// Show the overlay immediately when this TUI's Alt+G triggered its
 		// creation (pendingOverlayShow entry). On plain reattach, default hidden.
 		if m.pendingOverlayShow[tab.ID] {

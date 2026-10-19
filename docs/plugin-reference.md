@@ -10,7 +10,7 @@ Plugins define how panes are spawned, persisted, and restored. Each plugin is a 
 |------|---------|
 | **File location** | `~/.quil/plugins/*.toml` (or `$QUIL_HOME/plugins/`) |
 | **Loading** | On daemon startup; hot reload via F1 → Plugins → Reload |
-| **Defaults** | Built-in TOML plugins (claude-code, opencode, codex, ssh, stripe, lazygit, hunk, k9s, lazysql) are written on first run and never overwritten — your edits are preserved across upgrades |
+| **Defaults** | Built-in TOML plugins (claude-code, opencode, codex, ssh, stripe, lazygit, hunk, yazi, k9s, lazysql) are written on first run and never overwritten — your edits are preserved across upgrades |
 | **Built-in** | The `terminal` plugin is defined in Go (not TOML) because it requires runtime shell detection |
 
 ## Quick Start

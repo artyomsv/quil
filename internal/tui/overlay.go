@@ -9,24 +9,36 @@ import (
 	"github.com/artyomsv/quil/internal/logger"
 )
 
-// Plugins that can own a tab's overlay slot. Both are full-tab git tools
-// resolved from the active pane's repository; they differ only in which binary
-// runs and how the repo reaches it.
+// Plugins that can own a tab's overlay slot. lazygit and hunk are full-tab git
+// tools resolved from the active pane's repository; they differ only in which
+// binary runs and how the repo reaches it. yazi is a file manager and is scoped
+// to the active pane's DIRECTORY, git or not (overlayScopedToRepo).
 //
-// Adding a third? overlayInstanceArgs below switches on the NAME, so a new tool
-// silently inherits the nil-args branch — correct only if it, like hunk, is
-// scoped by its working directory rather than by a repo flag. Check there, and
-// give it a keybinding that is not a documented PTY passthrough (see the
-// PaneLeft comment in internal/config/config.go).
+// Adding a fourth? overlayInstanceArgs below switches on the NAME, so a new tool
+// silently inherits the nil-args branch — correct only if it, like hunk and
+// yazi, is scoped by its working directory rather than by a repo flag. Check
+// there, decide whether overlayScopedToRepo applies, and give it a keybinding
+// that is not a documented PTY passthrough (see the PaneLeft comment in
+// internal/config/config.go).
 const (
 	overlayPluginLazygit = "lazygit"
 	overlayPluginHunk    = "hunk"
+	overlayPluginYazi    = "yazi"
 )
 
-// handleToggleLazygit (Alt+G) and handleToggleHunk (Alt+H) are the two keys
-// bound to the shared overlay state machine.
+// handleToggleLazygit (Alt+G), handleToggleHunk (Alt+D) and handleToggleYazi
+// (Alt+Shift+F) are the keys bound to the shared overlay state machine.
 func (m *Model) handleToggleLazygit() tea.Cmd { return m.handleToggleOverlay(overlayPluginLazygit) }
 func (m *Model) handleToggleHunk() tea.Cmd    { return m.handleToggleOverlay(overlayPluginHunk) }
+func (m *Model) handleToggleYazi() tea.Cmd    { return m.handleToggleOverlay(overlayPluginYazi) }
+
+// overlayScopedToRepo reports whether pluginName's overlay opens on a git
+// repository found near the active pane (lazygit, hunk) rather than on the
+// pane's own directory (yazi). A file manager is useful in any folder, and
+// asking git discovery first would answer "no git repo here" for most of them.
+func overlayScopedToRepo(pluginName string) bool {
+	return pluginName != overlayPluginYazi
+}
 
 // canOpenOverlay reports whether the menu and palette rows for pluginName's
 // overlay can do anything on dest's active tab: a token without raw-argument
@@ -51,7 +63,8 @@ func (m *Model) canOpenOverlay(dest, pluginName string) bool {
 //     over a visible lazygit is a request to swap tools, not to hide one.
 //  2. Overlay hidden/absent/another tool's → ask the daemon which repos are
 //     near activeNormalPane.CWD (requestGitRepos); resumes at step 3 in
-//     resolveOverlay once the answer lands.
+//     resolveOverlay once the answer lands. A directory-scoped tool (yazi)
+//     skips the round trip: its one candidate is that CWD itself.
 //  3. No candidates: if an overlay for THIS plugin exists → show it anyway;
 //     else flash "no git repo here".
 //  4. Any candidate == existing overlay's repo AND that overlay runs this
@@ -120,6 +133,13 @@ func (m *Model) handleToggleOverlay(pluginName string) tea.Cmd {
 	if cwd == "" {
 		return m.resolveOverlay(tab, nil, pluginName)
 	}
+	// A directory-scoped tool needs no discovery: the pane's own directory is
+	// the single candidate. It is not checked here either — the daemon
+	// validates every create CWD (resolveRequestedCWD), on the machine that
+	// holds it, which a stat in this process could not do for a remote host.
+	if !overlayScopedToRepo(pluginName) {
+		return m.resolveOverlay(tab, []string{cwd}, pluginName)
+	}
 	// Asked of the DAEMON, never resolved here. Running gitdiscover in this
 	// process stats the machine drawing the UI, so against a remote host Alt+G
 	// reported "no git repo here" for a directory that is a repository on the
@@ -148,7 +168,11 @@ func (m *Model) resolveOverlay(tab *TabModel, candidates []string, pluginName st
 		if tab.overlayRuns(pluginName) {
 			return m.showOverlay(tab)
 		}
-		m.setErrorFlash("no git repo here")
+		if overlayScopedToRepo(pluginName) {
+			m.setErrorFlash("no git repo here")
+		} else {
+			m.setErrorFlash(pluginName + " not opened: this pane has not reported its directory")
+		}
 		return m.flashCmd()
 	}
 
@@ -157,7 +181,7 @@ func (m *Model) resolveOverlay(tab *TabModel, candidates []string, pluginName st
 	// right repo running the WRONG tool has to be replaced, not shown.
 	if tab.overlayRuns(pluginName) {
 		for _, c := range candidates {
-			if c == tab.overlayPane.CWD {
+			if tab.overlayOpenedFor(c) {
 				return m.showOverlay(tab)
 			}
 		}
@@ -415,7 +439,8 @@ func (m *Model) overlayPolicyCmd() tea.Cmd {
 // return is load-bearing rather than merely unnecessary: the daemon's
 // resolveSpawnArgs REPLACES a plugin's base args with InstanceArgs whenever a
 // pane has any, and hunk's `diff` subcommand lives in those base args. Any
-// non-nil value here would spawn a help screen.
+// non-nil value here would spawn a help screen. Yazi opens its working
+// directory when given no entry, so it needs nothing here either.
 func overlayInstanceArgs(pluginName, repo string) []string {
 	if pluginName == overlayPluginLazygit {
 		return []string{"--path", repo}
@@ -491,6 +516,12 @@ func (m *Model) createOverlay(tab *TabModel, repo, pluginName string) tea.Cmd {
 	// self-heals; a second Alt+G shows the new overlay). Tab-keyed is the
 	// pragmatic v1 choice because the daemon mints the new pane ID.
 	m.pendingOverlayShow[tab.ID] = true
+	// Remembered for step 4's match: the daemon stores the resolved path
+	// (resolveRequestedCWD follows symlinks), while the candidate the next
+	// keypress compares is the pane's reported one. For yazi those differ
+	// whenever the folder sits under a symlink (macOS /tmp is /private/tmp),
+	// and every keypress would then restart yazi and lose its state.
+	tab.overlayAskedCWD = repo
 
 	tabID := tab.ID
 	// The destroy and the create leave in ONE Cmd, destroy first — never as two
@@ -586,8 +617,9 @@ func (m *Model) overlayResizeCmd(tab *TabModel) tea.Cmd {
 // handleOverlayKey routes keys while the overlay is visible.
 //
 // Allow-list:
-//   - ToggleLazygit (alt+g)  → hide, or swap to lazygit if hunk is showing
-//   - ToggleHunk (alt+h)     → hide, or swap to hunk if lazygit is showing
+//   - ToggleLazygit (alt+g)  → hide, or swap to lazygit if another tool is showing
+//   - ToggleHunk (alt+d)     → hide, or swap to hunk if another tool is showing
+//   - ToggleYazi (alt+shift+f) → hide, or swap to yazi if another tool is showing
 //   - Quit (ctrl+q / ctrl+c) → pass through to normal quit handler
 //   - Redraw (alt+shift+l)   → mirror the existing Redraw case exactly
 //   - alt+1..9               → switchTab (overlay survives, per-tab state)
@@ -595,8 +627,8 @@ func (m *Model) overlayResizeCmd(tab *TabModel) tea.Cmd {
 //     (ActivePaneModel returns the overlay pane when visible, so the bytes
 //     reach the overlay tool's PTY).
 //
-// BOTH toggles are on the list, not just the one that owns the visible
-// overlay: with a single slot, the other tool's key is how you swap, and a key
+// EVERY toggle is on the list, not just the one that owns the visible
+// overlay: with a single slot, another tool's key is how you swap, and a key
 // left off this list is delivered to the running tool as input instead.
 //
 // Esc MUST reach the overlay tool (not intercepted here), so it falls through
@@ -612,6 +644,9 @@ func (m *Model) handleOverlayKey(msg tea.KeyPressMsg, tab *TabModel) tea.Cmd {
 	}
 	if m.isAction(key, "pane.toggle_hunk") {
 		return m.handleToggleHunk()
+	}
+	if m.isAction(key, "pane.toggle_yazi") {
+		return m.handleToggleYazi()
 	}
 
 	// Quit.

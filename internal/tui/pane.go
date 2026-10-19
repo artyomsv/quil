@@ -1422,29 +1422,36 @@ func buildTopBorderCut(width int, cwd, name string, color color.Color, ghost, re
 		return style.Render(b.TopLeft + b.TopRight)
 	}
 
-	// Right label: pane name or spinner (only if it fits with padding).
-	rightLabel := ""
-	rightLen := 0
-	if name != "" && len([]rune(name))+4 <= innerW {
-		rightLabel = " " + name + " "
-		rightLen = len([]rune(rightLabel))
-	}
-
 	// Optional working spinner — a fixed leading segment drawn before the CWD.
 	// Reserved width is excluded from the CWD truncation budget so the spinner
 	// itself is never cut off (the CWD truncates from its left with "…tail").
+	// The sandbox mark joins the same segment, after the spinner; it is one of
+	// the sandbox glyphs: one rune, one cell (sandbox_mark.go).
+	//
+	// The segment is sized FIRST because everything after it budgets against
+	// it: admitting the name before it existed let a working sandbox pane
+	// near its minimum width paint a border wider than the pane, which shifts
+	// the sibling joined beside it. Each part needs its 2 cells plus 1 for the
+	// trailing space; on a pane too narrow for that, the mark goes before the
+	// spinner.
 	spin := ""
 	spinLen := 0
-	if working {
+	if working && 2+1 <= innerW {
 		spin = " " + workingGlyph(workFrame)
 		spinLen = 2 // leading space + single-width braille glyph
 	}
-	// The sandbox mark joins the same fixed segment, after the spinner, so it
-	// is never cut by the CWD truncation either. mark is one of the sandbox
-	// glyphs: one rune, one cell (sandbox_mark.go).
-	if mark != "" {
+	if mark != "" && spinLen+2+1 <= innerW {
 		spin += " " + mark
 		spinLen += 2
+	}
+
+	// Right label: pane name or spinner, only if it fits with padding beside
+	// the fixed segment.
+	rightLabel := ""
+	rightLen := 0
+	if name != "" && len([]rune(name))+4+spinLen <= innerW {
+		rightLabel = " " + name + " "
+		rightLen = len([]rune(rightLabel))
 	}
 
 	// Left label: CWD, truncated with ellipsis if needed.
@@ -1494,6 +1501,12 @@ func buildTopBorderCut(width int, cwd, name string, color color.Color, ghost, re
 			leftDash := centerPos - leftLen
 			if leftDash < 1 {
 				leftDash = 1
+			}
+			// A long right label pulls the true centre left of where the
+			// left dashes would put it; cap them so the row still sums to
+			// innerW (the guard above leaves at least 2 here).
+			if leftDash > dashes-focusLen {
+				leftDash = dashes - focusLen
 			}
 			rightDash := dashes - focusLen - leftDash
 			if rightDash < 0 {

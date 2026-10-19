@@ -91,6 +91,42 @@ func TestBuildTopBorder_ShowsTheSandboxMark(t *testing.T) {
 	}
 }
 
+// TestBuildTopBorder_NeverWiderThanThePane sweeps every pane width from the
+// layout minimum up, against every combination of the fixed segment (spinner,
+// sandbox mark) and the labels that compete with it. A border wider than its
+// pane pushes the sibling joined beside it out of its rect — the PR #265
+// review case was width 20, a 14-rune name, CWD /tmp, working, sandboxed: 22.
+func TestBuildTopBorder_NeverWiderThanThePane(t *testing.T) {
+	t.Parallel()
+	c := lipgloss.Color("238")
+	names := []string{"", "sh", "bash", "abcdefghijklmn", strings.Repeat("n", 40)}
+	cwds := []string{"", "/tmp", strings.Repeat("/long", 20)}
+	for width := minPaneW; width <= 40; width++ {
+		for _, name := range names {
+			for _, cwd := range cwds {
+				for _, working := range []bool{false, true} {
+					for _, mark := range []string{"", glyphSandboxDocker} {
+						for _, focus := range []bool{false, true} {
+							border := buildTopBorderCut(width, cwd, name, c,
+								false, false, false, focus, 0, working, 0, false, false, mark)
+							if got := lipgloss.Width(border); got != width {
+								t.Fatalf("width %d, name %q, cwd %q, working %v, mark %q, focus %v: border is %d cells",
+									width, name, cwd, working, mark, focus, got)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	// At the review's width the marks still win over the name.
+	got := ansi.Strip(buildTopBorderCut(20, "/tmp", "abcdefghijklmn", c,
+		false, false, false, false, 0, true, 0, false, false, glyphSandboxDocker))
+	if !strings.Contains(got, glyphSandboxDocker) || !strings.Contains(got, workingGlyph(0)) {
+		t.Errorf("narrow border %q dropped the spinner or the sandbox mark", got)
+	}
+}
+
 // TestPaneView_DrawsTheSandboxMark drives the real render path, so a call
 // site that stops passing the kind fails here.
 func TestPaneView_DrawsTheSandboxMark(t *testing.T) {

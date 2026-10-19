@@ -53,8 +53,8 @@ func TestCtxMenuBoxSize(t *testing.T) {
 	}
 
 	s.spaced = false
-	if _, h = s.boxSize(); h != 7 { // title + separator (2) + 3 items + borders (2)
-		t.Errorf("compact h = %d, want 7", h)
+	if _, h = s.boxSize(); h != 6 { // title (1, no separator) + 3 items + borders (2)
+		t.Errorf("compact h = %d, want 6", h)
 	}
 
 	// A long title widens the box only up to ctxMenuTitleCap.
@@ -95,6 +95,27 @@ func TestCtxMenuHitRow(t *testing.T) {
 				t.Errorf("%s: got (%d,%v), want (%d,%v)", tc.name, row, inside, tc.row, tc.inside)
 			}
 		})
+	}
+}
+
+// TestCtxMenuHitRow_Compact: the compact layout has no separator under the
+// title, so items start one row higher — and the hit test must agree with
+// the render about it.
+func TestCtxMenuHitRow_Compact(t *testing.T) {
+	t.Parallel()
+	// Compact box at (10,5), h=6: y=5 top border, y=6 title, items at
+	// y=7/8/9 (no group gap), y=10 bottom border.
+	s := ctxMenuState{paneID: "p", x: 10, y: 5, items: testItems()}
+	for py, want := range map[int]int{6: -1, 7: 0, 8: 1, 9: 2, 10: -1} {
+		if row, inside := ctxMenuHitRow(s, 12, py); row != want || !inside {
+			t.Errorf("y=%d: got (%d,%v), want (%d,true)", py, row, inside, want)
+		}
+	}
+	lines := strings.Split(ansi.Strip(renderCtxMenu(s)), "\n")
+	for i, it := range s.items {
+		if !strings.Contains(lines[s.itemScreenY(i)-s.y], it.label) {
+			t.Errorf("item %d %q is not drawn on the row the hit test maps to it", i, it.label)
+		}
 	}
 }
 

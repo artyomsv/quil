@@ -304,23 +304,35 @@ func (s ctxMenuState) gapsBefore(i int) int {
 	return n
 }
 
-// contentRows is the number of rows between the borders: header (title +
-// blank separator) plus the item block — spaced layout adds one blank row
-// per gapAfter group boundary.
+// headerRows is the title row plus, in the spaced layout, the blank separator
+// under it. The compact layout drops the separator too: compact exists for a
+// short terminal, and that one row is what keeps the pane menu opening on a
+// 19-row terminal now that it has fourteen items.
+func (s ctxMenuState) headerRows() int {
+	if s.spaced {
+		return 2
+	}
+	return 1
+}
+
+// contentRows is the number of rows between the borders: the header (see
+// headerRows) plus the item block — spaced layout adds one blank row per
+// gapAfter group boundary.
 func (s ctxMenuState) contentRows() int {
-	return 2 + len(s.items) + s.gapsBefore(len(s.items))
+	return s.headerRows() + len(s.items) + s.gapsBefore(len(s.items))
 }
 
 // itemContentRow maps an item index to its content row (0-based, first row
-// under the top border). Rows 0/1 are the title and separator.
+// under the top border). The first headerRows rows are the title and, when
+// spaced, the separator.
 func (s ctxMenuState) itemContentRow(i int) int {
-	return 2 + i + s.gapsBefore(i)
+	return s.headerRows() + i + s.gapsBefore(i)
 }
 
 // itemAtContentRow is the inverse of itemContentRow: -1 for the header rows
 // and the inert group-separator rows.
 func (s ctxMenuState) itemAtContentRow(r int) int {
-	if r < 2 {
+	if r < s.headerRows() {
 		return -1
 	}
 	for i := range s.items {
@@ -418,8 +430,8 @@ func nextEnabled(items []ctxMenuItem, cur, dir int) int {
 }
 
 // renderCtxMenu draws the menu box: a title row (target pane's display
-// name), a blank separator, then the items — with a blank spacer between
-// adjacent items in the spaced layout. Every content line is padded to
+// name), a blank separator (spaced layout only), then the items — with a
+// blank spacer at group boundaries when spaced. Every content line is padded to
 // exactly innerWidth so the border renders a straight right edge and
 // boxSize's geometry matches the output cell-for-cell (itemContentRow /
 // itemAtContentRow depend on this row order).
@@ -440,10 +452,10 @@ func renderCtxMenu(s ctxMenuState) string {
 	if lipgloss.Width(title) > innerW-2 {
 		title = ansi.Truncate(title, innerW-3, "…")
 	}
-	rows = append(rows,
-		ctxMenuTitleStyle.Render(" "+title+strings.Repeat(" ", innerW-lipgloss.Width(title)-2)+" "),
-		blank,
-	)
+	rows = append(rows, ctxMenuTitleStyle.Render(" "+title+strings.Repeat(" ", innerW-lipgloss.Width(title)-2)+" "))
+	if s.spaced {
+		rows = append(rows, blank)
+	}
 	for i, it := range s.items {
 		if s.spaced && i > 0 && s.items[i-1].gapAfter {
 			rows = append(rows, blank)

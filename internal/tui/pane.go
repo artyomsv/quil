@@ -108,8 +108,11 @@ type PaneModel struct {
 	// by Quil, so the close dialog may offer to delete it. WorktreePath is the
 	// directory that was created — the close dialog prices THAT, never CWD,
 	// which drifts with every `cd` the shell makes. See PaneInfo.
+	// SandboxKind is sandboxKindDocker / sandboxKindSbx, "" for a host pane,
+	// drawn as sandboxGlyph on the border and the sidebar row.
 	WorktreeOwned      bool
 	WorktreePath       string
+	SandboxKind        string
 	GitUpstream        bool
 	GitAhead           int
 	GitBehind          int
@@ -252,6 +255,7 @@ type paneRenderKey struct {
 	liveOutputSeen                 bool
 	spinnerFrame, workFrame        int
 	name, cwd                      string
+	sandboxKind                    string
 	paneType, sessionID            string
 	wideCanvas, previewWrap        bool
 	follower                       bool // previewMode and the cut markers read it
@@ -292,6 +296,7 @@ func (p *PaneModel) renderKey() paneRenderKey {
 		workFrame:          p.workFrame,
 		name:               p.Name,
 		cwd:                p.CWD,
+		sandboxKind:        p.SandboxKind,
 		paneType:           p.Type,
 		sessionID:          p.SessionID,
 		wideCanvas:         p.WideCanvas,
@@ -1364,7 +1369,7 @@ func (p *PaneModel) View() string {
 	cutCols := p.follower && p.vt.Width() > innerW
 	topLine := buildTopBorderCut(p.Width, p.CWD, rightLabel, borderColor, p.ghost, p.resuming,
 		p.preparing || p.PreparingWorktree != "", p.focusMode, p.spinnerFrame, p.working, p.workFrame,
-		cutRows, cutCols)
+		cutRows, cutCols, sandboxGlyph(p.SandboxKind))
 
 	out := topLine + "\n" + body
 	p.cachedKey, p.cachedView, p.hasCache = key, out, true
@@ -1372,7 +1377,7 @@ func (p *PaneModel) View() string {
 }
 
 func buildTopBorder(width int, cwd, name string, color color.Color, ghost, resuming, preparing, focus bool, spinnerFrame int, working bool, workFrame int) string {
-	return buildTopBorderCut(width, cwd, name, color, ghost, resuming, preparing, focus, spinnerFrame, working, workFrame, false, false)
+	return buildTopBorderCut(width, cwd, name, color, ghost, resuming, preparing, focus, spinnerFrame, working, workFrame, false, false, "")
 }
 
 // followerCutMark replaces a top-border corner to say the box cut part of a
@@ -1385,7 +1390,7 @@ const followerCutMark = "…"
 // are hidden — the view is bottom-anchored), cutCols in place of the
 // top-right corner, the right border's cell on the title row (columns right
 // of the box are hidden — the view is cropped at the left edge).
-func buildTopBorderCut(width int, cwd, name string, color color.Color, ghost, resuming, preparing, focus bool, spinnerFrame int, working bool, workFrame int, cutRows, cutCols bool) string {
+func buildTopBorderCut(width int, cwd, name string, color color.Color, ghost, resuming, preparing, focus bool, spinnerFrame int, working bool, workFrame int, cutRows, cutCols bool, mark string) string {
 	if ghost {
 		if name == "" {
 			name = "restored"
@@ -1434,6 +1439,13 @@ func buildTopBorderCut(width int, cwd, name string, color color.Color, ghost, re
 		spin = " " + workingGlyph(workFrame)
 		spinLen = 2 // leading space + single-width braille glyph
 	}
+	// The sandbox mark joins the same fixed segment, after the spinner, so it
+	// is never cut by the CWD truncation either. mark is one of the sandbox
+	// glyphs: one rune, one cell (sandbox_mark.go).
+	if mark != "" {
+		spin += " " + mark
+		spinLen += 2
+	}
 
 	// Left label: CWD, truncated with ellipsis if needed.
 	leftLabel := ""
@@ -1456,8 +1468,9 @@ func buildTopBorderCut(width int, cwd, name string, color color.Color, ghost, re
 			leftLabel = " …" + string(cwdRunes[len(cwdRunes)-maxCwd:]) + " "
 			leftLen = len([]rune(leftLabel))
 		}
-	} else if working {
-		// No CWD but working: still show the spinner with a trailing space.
+	} else if spinLen > 0 {
+		// No CWD but a spinner or sandbox mark: still show it, with a
+		// trailing space.
 		leftLabel = " "
 		leftLen = 1
 	}

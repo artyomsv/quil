@@ -29,6 +29,9 @@ const (
 	ctxActMarkDeletion
 	ctxActRestart
 	ctxActClose
+	// ctxActCopyPath copies the pane's worktree directory (or, outside a
+	// Quil-made worktree, its current directory) to the system clipboard.
+	ctxActCopyPath
 	// Project-row actions (Task 13) — only ever set on a menu opened via
 	// openProjectCtxMenu, never mixed into buildCtxMenuItems' pane rows.
 	ctxActRenameProject
@@ -235,13 +238,17 @@ func (m *Model) buildCtxMenuItems(pane *PaneModel) []ctxMenuItem {
 	if tab := m.activeTabModel(); tab != nil && tab.FocusMode() {
 		focusLabel = "Exit focus mode"
 	}
+	copyLabel, copyPath := paneCopyPath(pane)
 	// Group boundaries (gapAfter): view actions | pane settings | destructive.
 	return []ctxMenuItem{
 		{id: ctxActHistory, label: "Input history", enabled: historyOK},
 		{id: ctxActFocus, label: focusLabel, enabled: true},
 		{id: ctxActNotes, label: "Open notes", enabled: true},
 		{id: ctxActLazygit, label: "Open lazygit", enabled: lazygitOK},
-		{id: ctxActHunk, label: "Open hunk", enabled: hunkOK, gapAfter: true},
+		{id: ctxActHunk, label: "Open hunk", enabled: hunkOK},
+		// Local only — it writes this machine's clipboard and sends nothing,
+		// so it is not in readOnlyGreyedItems.
+		{id: ctxActCopyPath, label: copyLabel, enabled: copyPath != "", gapAfter: true},
 		{id: ctxActRename, label: "Rename pane", enabled: true},
 		// Moving deletes nothing, so it stays above the destructive separator
 		// with the rest of the pane-settings group — and there is
@@ -1113,6 +1120,8 @@ func (m Model) executeCtxMenuItem(item ctxMenuItem) (tea.Model, tea.Cmd) {
 	pane.Active = true
 
 	switch item.id {
+	case ctxActCopyPath:
+		return m, m.copyPanePath(pane)
 	case ctxActHistory:
 		return m.openHistoryForActivePane()
 	case ctxActFocus:

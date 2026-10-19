@@ -184,7 +184,7 @@ kube contexts, which tools are installed, and the recent-directories list all
 ask the daemon. Before that, `Alt+G` could report no repository in a directory
 where the agent *in that very pane* answered `git status` with the branch name.
 
-Beta, and honest about it: plugin *definitions* still come from your local
+Known limits: plugin *definitions* still come from your local
 machine, the daemon detects installed tools only at startup and on plugin
 reload, `quil status` and the update controls refuse rather than retargeting,
 and remotes must be Linux or macOS. Details and the roadmap are in

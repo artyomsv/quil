@@ -67,7 +67,6 @@ export const plugins: PluginEntry[] = [
     slug: "opencode",
     name: "OpenCode",
     kind: "built-in",
-    beta: true,
     description:
       "An AI session pane that runs [opencode](https://opencode.ai), the second production AI integration alongside Claude Code. A setup dialog asks for the working directory; sessions resume across daemon restarts to the exact conversation (not just the most recent in CWD) via a small JS plugin Quil registers through opencode's plugin runtime. The user's own opencode plugins, agents, and modes remain active — Quil's plugin is additive.",
     spawnExample:

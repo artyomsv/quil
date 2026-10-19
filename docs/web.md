@@ -184,7 +184,7 @@ Every write, and every log, needs a `full` token. With a `standard` token you ca
 - **Plugin update**. When a plugin file is older than the default that ships with Quil, F1 and the Plugins page show "N plugin files need an update". The page keeps working. The update view shows your file on the left and the new default on the right: raise `schema_version` in your file and **Save mine**, or **Use default**.
 - **Logs** (F1 → Logs). The **Client**, **Daemon**, **MCP** and **Web** logs of this machine, the last 256 KiB of each. **Refresh** reads again; **Copy** copies the text.
 - **What's New** (F1 → What's New). The highlights of the newest release in the `quil web` build. It never opens by itself.
-- **The beta notice** shows once per browser tab while `ui.show_disclaimer` is on. **OK** hides it for this tab; **Don't show again** turns the setting off (full rights).
+- **The welcome notice** shows once per browser tab while `ui.show_disclaimer` is on. **OK** hides it for this tab; **Don't show again** turns the setting off (full rights).
 
 ## Notifications
 

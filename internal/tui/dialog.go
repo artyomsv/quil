@@ -1611,20 +1611,8 @@ func (m Model) renderDisclaimerDialog() string {
 	w := disclaimerWidth
 
 	// Title
-	title := dialogTitle.Render("Quil v" + m.version + " -- Early Beta")
+	title := dialogTitle.Render("Welcome to Quil v" + m.version)
 	b.WriteString(lipgloss.PlaceHorizontal(w, lipgloss.Center, title))
-	b.WriteString("\n\n")
-
-	// Beta notice
-	b.WriteString(dialogSubtle.Render("  This software is in early beta. Some features may"))
-	b.WriteByte('\n')
-	b.WriteString(dialogSubtle.Render("  not work as expected. Linux and macOS support has"))
-	b.WriteByte('\n')
-	b.WriteString(dialogSubtle.Render("  not been fully tested yet."))
-	b.WriteString("\n\n")
-
-	// Separator
-	b.WriteString(dialogSubtle.Render("  " + strings.Repeat("-", w-4)))
 	b.WriteString("\n\n")
 
 	// Random tip

@@ -40,7 +40,7 @@ type ClientExtras struct {
 	TemplatesError string
 	Connect        bool
 	// WhatsNew, ShowDisclaimer and Tip feed the browser's What's New panel
-	// and beta notice (spec 5d §4.6, §4.7). Nil WhatsNew: no record.
+	// and welcome notice (spec 5d §4.6, §4.7). Nil WhatsNew: no record.
 	WhatsNew       *WhatsNew
 	ShowDisclaimer bool
 	Tip            *Tip

@@ -72,7 +72,7 @@ export interface ClientInfo {
   // The gateway dials a remote daemon (quil web --connect).
   connect: boolean;
   // The newest release's highlights in the gateway binary (null: none), the
-  // config's show_disclaimer, and one TUI tip for the beta notice.
+  // config's show_disclaimer, and one TUI tip for the welcome notice.
   whats_new: { version: string; date: string; items: { kind: string; text: string }[] } | null;
   show_disclaimer: boolean;
   tip: { title: string; items: string[] } | null;

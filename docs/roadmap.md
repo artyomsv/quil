@@ -567,11 +567,11 @@ file watchers need polling; repositories with submodules are unsupported.
 
 ## In Progress
 
-### Remote Daemon Attach — [PRD](roadmap/remote-daemon.md) · **BETA**
+### Remote Daemon Attach — [PRD](roadmap/remote-daemon.md)
 
 > `quil --remote gpu01` — the panes run on another machine and keep running when the laptop sleeps.
 
-**Phase 1 shipped (beta).** SSH transport with no port opened on the remote host: Quil runs `ssh -T <host> "quil --stdio"` and speaks its normal IPC protocol over that one channel, so bastions, Tailscale/WireGuard, and public-internet hosts all work with no extra setup. The destination is passed to `ssh` verbatim, so `~/.ssh/config` applies unchanged. New `internal/transport` package behind an `ipc.DialFunc` seam (`Local` + `SSH` backends), shaped so a TLS backend can be added later. Every local-daemon lifecycle command refuses under `--remote` rather than acting on the wrong machine, and the status bar carries `[remote <host>]`.
+**Phase 1 shipped.** SSH transport with no port opened on the remote host: Quil runs `ssh -T <host> "quil --stdio"` and speaks its normal IPC protocol over that one channel, so bastions, Tailscale/WireGuard, and public-internet hosts all work with no extra setup. The destination is passed to `ssh` verbatim, so `~/.ssh/config` applies unchanged. New `internal/transport` package behind an `ipc.DialFunc` seam (`Local` + `SSH` backends), shaped so a TLS backend can be added later. Every local-daemon lifecycle command refuses under `--remote` rather than acting on the wrong machine, and the status bar carries `[remote <host>]`.
 
 **Phase 2 shipped (v1.45.0), hardened (v1.45.1).** A dropped link is a pause, not an ending: banner on the top row naming the host and what `ssh` said, input frozen rather than queued, redial backing off 500 ms → 30 s with jitter, and every pane's emulator reset before the replay so scrollback is restored rather than doubled. An attempt only counts as restored once the far side answers — `ssh` reports success the moment its own binary starts, long before it has resolved or authenticated the host. v1.45.1 stops retrying on failures that cannot fix themselves (rejected key, changed host key), since every retry is a full login and an overnight loop can get the laptop banned by the server's brute-force protection; `r` resumes. Verification against a real link is **partial** — two of eight manual checks — so treat the behaviour as shipped but not fully proven.
 
@@ -859,7 +859,7 @@ review the diff.
 Where AoE is pulling away for the mobile/remote crowd. Sequenced last because each
 is a major surface and cuts against Quil's TUI/Windows-native focus.
 
-17. ~~**Remote SSH thin-client attach**~~ — **Phases 1 and 2 shipped (beta),
+17. ~~**Remote SSH thin-client attach**~~ — **Phases 1 and 2 shipped,
     Phase 3 shipped except two items**, see
     [Remote Daemon Attach](roadmap/remote-daemon.md) under *In Progress*.
     `quil --remote host` works today, survives a dropped link, and resolves

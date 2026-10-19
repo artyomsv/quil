@@ -2,7 +2,7 @@ import { cwdForSplit, nextTabColor, projectRootOf, quickSplit, splitAnswer } fro
 import { askedTabShown, jumpStep, type PendingJump, pickActive, resolveJump, SeenMarks, successorOf, UnseenAsks } from './activepane';
 import { AgentStatePoller } from './agentstate';
 import { attachRefusedBanner, bannerFor, type BannerState, isLoginRequired } from './banner';
-import { BETA_SEEN_KEY, shouldShowBeta } from './beta';
+import { WELCOME_SEEN_KEY, shouldShowWelcome } from './welcome';
 import {
   type ClientInfo,
   createInstance,
@@ -186,9 +186,9 @@ export class App {
   staleCount = $state(0);
   migration = $state.raw<MigrationFlow | null>(null);
   migrationTick = $state(0);
-  // The beta notice (spec 5d §4.7): decided once, at the first /api/client.
-  betaOpen = $state(false);
-  private betaDecided = false;
+  // The welcome notice (spec 5d §4.7): decided once, at the first /api/client.
+  welcomeOpen = $state(false);
+  private welcomeDecided = false;
   sidebarOpen = $state(true);
   keyHint = $state('');
   keymap = $state.raw<WebKeymap | null>(null);
@@ -858,23 +858,23 @@ export class App {
   // tables and the notification filter.
   private clientLoaded(info: ClientInfo): void {
     this.keysFrom(info.keymap, info.notifications);
-    if (!this.betaDecided) {
-      this.betaDecided = true;
+    if (!this.welcomeDecided) {
+      this.welcomeDecided = true;
       let seen: string | null = null;
       try {
-        seen = window.sessionStorage.getItem(BETA_SEEN_KEY);
+        seen = window.sessionStorage.getItem(WELCOME_SEEN_KEY);
       } catch {
         seen = null;
       }
-      this.betaOpen = shouldShowBeta(info.show_disclaimer, seen);
+      this.welcomeOpen = shouldShowWelcome(info.show_disclaimer, seen);
     }
   }
 
-  // dismissBeta is OK (this tab only) or "Don't show again" (the config).
-  dismissBeta(forever: boolean): void {
-    this.betaOpen = false;
+  // dismissWelcome is OK (this tab only) or "Don't show again" (the config).
+  dismissWelcome(forever: boolean): void {
+    this.welcomeOpen = false;
     try {
-      window.sessionStorage.setItem(BETA_SEEN_KEY, '1');
+      window.sessionStorage.setItem(WELCOME_SEEN_KEY, '1');
     } catch {
       // storage unavailable: the notice stays hidden for this page's life
     }

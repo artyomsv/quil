@@ -3020,11 +3020,21 @@ func (d *Daemon) handleCreatePane(conn *ipc.Conn, msg *ipc.Message) {
 	// An overlay (lazygit/hunk toggle) names its host tab's repo root, not a
 	// folder the user or agent picked, and only a picked folder belongs on the
 	// recent list — recording this one too would push the same repo root to
-	// the front every time Alt+G runs. resolveRequestedCWD (no recording) is
-	// used for it instead.
+	// the front every time Alt+G runs. Neither overlay branch below records.
+	//
+	// An overlay's folder is also never substituted. The tool exists to show
+	// THAT folder (a repository, or a directory for yazi), so opening it in
+	// the fallback directory answers a question nobody asked. The TUI checks
+	// the folder first; this covers one deleted between that check and here.
 	var cwd string
-	if payload.Overlay {
-		cwd = d.resolveRequestedCWD(payload.CWD, d.defaultCWD(conn))
+	if payload.Overlay && payload.CWD != "" {
+		cwd = resolveSpawnDirWithin(payload.CWD, spawnDirProbeTimeout)
+		if cwd == "" {
+			log.Printf("create pane: overlay %s refused: cwd %q is missing, not a directory, or did not answer in time", payload.Type, payload.CWD)
+			return
+		}
+	} else if payload.Overlay {
+		cwd = d.defaultCWD(conn)
 	} else {
 		cwd = d.resolveRequestedCWDRecording(payload.CWD, d.defaultCWD(conn))
 	}

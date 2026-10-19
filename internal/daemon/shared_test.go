@@ -368,6 +368,32 @@ func TestHandleMessage_CreatePane_OverlayDoesNotRecordItsRepoRoot(t *testing.T) 
 	}
 }
 
+// TestHandleMessage_CreatePane_OverlayWithMissingFolderIsRefused: an overlay
+// shows ONE folder, so a CWD the daemon cannot use must create nothing rather
+// than open the tool in the fallback directory. A plain pane keeps the
+// fallback; that half is the control.
+func TestHandleMessage_CreatePane_OverlayWithMissingFolderIsRefused(t *testing.T) {
+	d, client := mcpTestDaemon(t)
+	gone := t.TempDir() + "/gone"
+	tab := d.session.CreateTab("t")
+	sendNoID(t, client, ipc.MsgCreatePane, ipc.CreatePanePayload{
+		TabID:   tab.ID,
+		CWD:     gone,
+		Type:    "terminal",
+		Overlay: true,
+	})
+	roundTrip(t, client, ipc.MsgVersionReq, ipc.MsgVersionResp, struct{}{}) // ordered: the create ran
+	if n := len(d.session.Panes(tab.ID)); n != 0 {
+		t.Fatalf("overlay create with a missing folder made %d pane(s), want 0", n)
+	}
+
+	sendNoID(t, client, ipc.MsgCreatePane, ipc.CreatePanePayload{TabID: tab.ID, CWD: gone, Type: "terminal"})
+	roundTrip(t, client, ipc.MsgVersionReq, ipc.MsgVersionResp, struct{}{})
+	if n := len(d.session.Panes(tab.ID)); n != 1 {
+		t.Errorf("a plain pane with a missing folder made %d pane(s), want 1 (it falls back)", n)
+	}
+}
+
 func TestHandleMessage_CreateTab_RecordsFirstPaneCWD(t *testing.T) {
 	d, client := mcpTestDaemon(t)
 	dir := t.TempDir()

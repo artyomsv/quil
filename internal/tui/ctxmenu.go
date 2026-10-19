@@ -150,7 +150,11 @@ type ctxMenuState struct {
 	// openCtxMenu falls back to the compact layout (no separators) when
 	// the spaced box is taller than the content area.
 	spaced bool
-	items  []ctxMenuItem
+	// tight drops the blank row under the title too. Set only by the pane
+	// menu, as a last fallback after compact: its rows grew with the overlay
+	// tools, and a terminal that fit the compact box before must still open it.
+	tight bool
+	items []ctxMenuItem
 }
 
 func (s ctxMenuState) open() bool {
@@ -286,6 +290,14 @@ func (s ctxMenuState) innerWidth() int {
 	return w + 2
 }
 
+// headerRows is the title plus, unless tight, the blank row under it.
+func (s ctxMenuState) headerRows() int {
+	if s.tight {
+		return 1
+	}
+	return 2
+}
+
 // gapsBefore counts the group-separator rows above item i in the spaced
 // layout (0 in compact).
 func (s ctxMenuState) gapsBefore(i int) int {
@@ -305,19 +317,20 @@ func (s ctxMenuState) gapsBefore(i int) int {
 // blank separator) plus the item block — spaced layout adds one blank row
 // per gapAfter group boundary.
 func (s ctxMenuState) contentRows() int {
-	return 2 + len(s.items) + s.gapsBefore(len(s.items))
+	return s.headerRows() + len(s.items) + s.gapsBefore(len(s.items))
 }
 
 // itemContentRow maps an item index to its content row (0-based, first row
-// under the top border). Rows 0/1 are the title and separator.
+// under the top border). Rows 0/1 are the title and separator (row 0 only
+// when tight).
 func (s ctxMenuState) itemContentRow(i int) int {
-	return 2 + i + s.gapsBefore(i)
+	return s.headerRows() + i + s.gapsBefore(i)
 }
 
 // itemAtContentRow is the inverse of itemContentRow: -1 for the header rows
 // and the inert group-separator rows.
 func (s ctxMenuState) itemAtContentRow(r int) int {
-	if r < 2 {
+	if r < s.headerRows() {
 		return -1
 	}
 	for i := range s.items {
@@ -437,10 +450,10 @@ func renderCtxMenu(s ctxMenuState) string {
 	if lipgloss.Width(title) > innerW-2 {
 		title = ansi.Truncate(title, innerW-3, "…")
 	}
-	rows = append(rows,
-		ctxMenuTitleStyle.Render(" "+title+strings.Repeat(" ", innerW-lipgloss.Width(title)-2)+" "),
-		blank,
-	)
+	rows = append(rows, ctxMenuTitleStyle.Render(" "+title+strings.Repeat(" ", innerW-lipgloss.Width(title)-2)+" "))
+	if !s.tight {
+		rows = append(rows, blank)
+	}
 	for i, it := range s.items {
 		if s.spaced && i > 0 && s.items[i-1].gapAfter {
 			rows = append(rows, blank)
@@ -493,6 +506,11 @@ func (m *Model) openCtxMenu(pane *PaneModel, anchorX, anchorY int) {
 	// targets); fall back to compact when the content area is too short.
 	if h > m.height-2 {
 		s.spaced = false
+		w, h = s.boxSize()
+	}
+	// Last resort: drop the blank row under the title as well.
+	if h > m.height-2 {
+		s.tight = true
 		w, h = s.boxSize()
 	}
 	// Bail before any state mutation when even the compact box cannot fit

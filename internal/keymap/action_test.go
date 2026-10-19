@@ -4,8 +4,8 @@ import "testing"
 
 func TestActions_RegistryIntegrity(t *testing.T) {
 	acts := Actions()
-	if len(acts) != 67 {
-		t.Fatalf("registry has %d actions, want 67 (42 config-backed + 12 promoted from the reserved-key switch + 4 reorder + 6 tab layout + 2 project groups + 1 multi-client sync)", len(acts))
+	if len(acts) != 68 {
+		t.Fatalf("registry has %d actions, want 68 (42 config-backed + 12 promoted from the reserved-key switch + 4 reorder + 6 tab layout + 2 project groups + 1 multi-client sync + 1 yazi overlay)", len(acts))
 	}
 	seen := make(map[ActionID]bool, len(acts))
 	orders := make(map[int]ActionID, len(acts))

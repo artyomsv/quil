@@ -186,7 +186,8 @@ func TestBuildCtxMenuItems_LabelsAndGates(t *testing.T) {
 
 func TestRenderCtxMenu_Dimensions(t *testing.T) {
 	t.Parallel()
-	for _, spaced := range []bool{true, false} {
+	for _, layout := range []struct{ spaced, tight bool }{{true, false}, {false, false}, {false, true}} {
+		spaced := layout.spaced
 		// Overlong title exercises the render-time truncation: the box must
 		// keep its cell-exact geometry regardless of the title's raw length.
 		s := ctxMenuState{
@@ -194,6 +195,7 @@ func TestRenderCtxMenu_Dimensions(t *testing.T) {
 			title:  strings.Repeat("t", ctxMenuTitleCap+10),
 			cursor: 1,
 			spaced: spaced,
+			tight:  layout.tight,
 			items:  testItems(),
 		}
 		out := renderCtxMenu(s)

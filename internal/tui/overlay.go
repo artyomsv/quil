@@ -64,7 +64,9 @@ func (m *Model) canOpenOverlay(dest, pluginName string) bool {
 //  2. Overlay hidden/absent/another tool's → ask the daemon which repos are
 //     near activeNormalPane.CWD (requestGitRepos); resumes at step 3 in
 //     resolveOverlay once the answer lands. A directory-scoped tool (yazi)
-//     skips the round trip: its one candidate is that CWD itself.
+//     has one candidate, that CWD itself: it asks only whether the folder
+//     still exists (requestOverlayDir), unless its overlay is already open
+//     for it.
 //  3. No candidates: if an overlay for THIS plugin exists → show it anyway;
 //     else flash "no git repo here".
 //  4. Any candidate == existing overlay's repo AND that overlay runs this
@@ -134,11 +136,15 @@ func (m *Model) handleToggleOverlay(pluginName string) tea.Cmd {
 		return m.resolveOverlay(tab, nil, pluginName)
 	}
 	// A directory-scoped tool needs no discovery: the pane's own directory is
-	// the single candidate. It is not checked here either — the daemon
-	// validates every create CWD (resolveRequestedCWD), on the machine that
-	// holds it, which a stat in this process could not do for a remote host.
+	// the single candidate. An overlay already open for it is shown at once —
+	// it is running, so there is nothing to check. Anything else asks the
+	// daemon whether the folder still exists first (requestOverlayDir), since
+	// the create path would silently fall back to another directory.
 	if !overlayScopedToRepo(pluginName) {
-		return m.resolveOverlay(tab, []string{cwd}, pluginName)
+		if tab.overlayRuns(pluginName) && tab.overlayOpenedFor(cwd) {
+			return m.showOverlay(tab)
+		}
+		return m.requestOverlayDir(tab.Dest, cwd, tab.ID, pluginName)
 	}
 	// Asked of the DAEMON, never resolved here. Running gitdiscover in this
 	// process stats the machine drawing the UI, so against a remote host Alt+G
@@ -520,8 +526,13 @@ func (m *Model) createOverlay(tab *TabModel, repo, pluginName string) tea.Cmd {
 	// (resolveRequestedCWD follows symlinks), while the candidate the next
 	// keypress compares is the pane's reported one. For yazi those differ
 	// whenever the folder sits under a symlink (macOS /tmp is /private/tmp),
-	// and every keypress would then restart yazi and lose its state.
-	tab.overlayAskedCWD = repo
+	// and every keypress would then restart yazi and lose its state. Held
+	// until the overlay arrives (reconcileOverlayPane), so a create the daemon
+	// refuses never leaves the folder attached to some other overlay.
+	if m.pendingOverlayAsk == nil {
+		m.pendingOverlayAsk = make(map[string]overlayAsk)
+	}
+	m.pendingOverlayAsk[tab.ID] = overlayAsk{plugin: pluginName, cwd: repo}
 
 	tabID := tab.ID
 	// The destroy and the create leave in ONE Cmd, destroy first — never as two

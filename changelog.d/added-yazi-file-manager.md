@@ -12,7 +12,9 @@ headline: yazi file manager as a pane and an Alt+Shift+F overlay
   tools. Offered only when the `yazi` binary is installed, and shown greyed with
   a link to the project otherwise. Also in the pane menu (**Open yazi**) and the
   command palette. New action `pane.toggle_yazi`, default `alt+shift+f` (not
-  `alt+f`, which is readline forward-word); rebind it in `bindings.toml`. Image
+  `alt+f`, which is readline forward-word), plus `alt+F` for macOS Terminal.app;
+  rebind it in `bindings.toml`. A folder that no longer exists is refused with a
+  message instead of opening yazi somewhere else, and the old overlay stays. Image
   previews do not work inside Quil, because its panes do not answer terminal
   queries; yazi falls back to text previews. The browser client does not have
   the overlay yet.

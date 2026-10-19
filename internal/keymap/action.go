@@ -47,7 +47,10 @@ var registry = []Action{
 	// plugin's raw_keys claim must not take one toggle of the shared slot and
 	// leave the rest. alt+shift+f ("files"), not alt+f: plain Alt+F is readline
 	// forward-word, which keyToBytes forwards as ESC-f for Option-as-Meta users.
-	{ID: "pane.toggle_yazi", Label: "Toggle yazi (file manager) overlay for current directory", Group: "Panes", Tier: TierEarly, Order: 870, Default: "alt+shift+f"},
+	// alt+F is the same key on macOS Terminal.app with Option as Meta: its
+	// legacy ESC-prefix encoding reports Option+Shift+F as {Code:'F', ModAlt}
+	// with no ModShift (see ParseChord), so alt+shift+f alone never fires there.
+	{ID: "pane.toggle_yazi", Label: "Toggle yazi (file manager) overlay for current directory", Group: "Panes", Tier: TierEarly, Order: 870, Default: "alt+shift+f,alt+F"},
 	{ID: "pane.command_history", Label: "Open pane input history", Group: "Panes", Tier: TierEarly, Order: 900, Default: "alt+shift+i"},
 	{ID: "pane.quick_actions", Label: "Pane context menu (also mouse right-click)", Group: "Panes", Tier: TierEarly, Order: 1000, Default: "alt+a"},
 	{ID: "project.new", Label: "New project", Group: "Projects", Tier: TierEarly, Order: 1100, Default: "alt+shift+n"},

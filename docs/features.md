@@ -488,7 +488,10 @@ directory sits in — so the directory the pane spawns in is what scopes it.
   lazygit overlay: hidden yazi keeps running, so showing it again keeps your
   place, tabs and selection. Press the key again in the same folder and you get
   the same yazi back; press it after the pane moved to another folder and a new
-  yazi opens there. Quit yazi (`q`) and the overlay pane is destroyed.
+  yazi opens there. If the pane's folder no longer exists, nothing opens and
+  the old overlay stays. Quit yazi (`q`) and the overlay pane is destroyed.
+  On macOS Terminal.app the key also works as Option+Shift+F (sent as
+  `Alt+F`); plain Option+F and Option+Right still move by word in the shell.
 - It shares the tab's single overlay slot with lazygit and hunk, so the three
   keys swap tools rather than stack them.
 

@@ -997,6 +997,7 @@ func syncPaneMeta(pane *PaneModel, info *PaneInfo, wideCanvas bool, minNativeCol
 	// must stop being offered for deletion, and the absent key is what says so.
 	pane.WorktreeOwned = info.WorktreeOwned
 	pane.WorktreePath = info.WorktreePath
+	pane.SandboxKind = info.SandboxKind
 	pane.GitUpstream = info.GitUpstream
 	pane.GitAhead = info.GitAhead
 	pane.GitBehind = info.GitBehind

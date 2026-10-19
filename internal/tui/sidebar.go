@@ -1584,6 +1584,13 @@ func paneRowHL(pane *PaneModel, focused bool, w int, hl rowHighlight) string {
 	if pane.markedForDeletion && glyph != glyphDeletion {
 		delSuffix = " " + glyphDeletion
 	}
+	// The sandbox mark is a fact about where the pane runs, not a state, so
+	// it is a suffix of its own: reserved like the two marks above, painted
+	// in its own colour, never outranked.
+	sbxSuffix := ""
+	if g := sandboxGlyph(pane.SandboxKind); g != "" {
+		sbxSuffix = " " + g
+	}
 
 	label := pane.Name
 	if label == "" {
@@ -1596,7 +1603,7 @@ func paneRowHL(pane *PaneModel, focused bool, w int, hl rowHighlight) string {
 		marker = "▸ "
 	}
 	prefix := marker + glyph + " "
-	avail := w - lipgloss.Width(prefix) - lipgloss.Width(pinSuffix) - lipgloss.Width(delSuffix)
+	avail := w - lipgloss.Width(prefix) - lipgloss.Width(pinSuffix) - lipgloss.Width(delSuffix) - lipgloss.Width(sbxSuffix)
 	if avail < 1 {
 		avail = 1
 	}
@@ -1639,12 +1646,14 @@ func paneRowHL(pane *PaneModel, focused bool, w int, hl rowHighlight) string {
 			{" " + label + suffix, hl.text(style)},
 			{pinSuffix, sidebarPinnedStyle},
 			{delSuffix, sidebarDeletionStyle},
+			{sbxSuffix, sidebarSandboxStyle},
 		}, w, hl)
 	}
 	return renderStyledSegments([]styledSegment{
 		{prefix + label + suffix, style},
 		{pinSuffix, sidebarPinnedStyle},
 		{delSuffix, sidebarDeletionStyle},
+		{sbxSuffix, sidebarSandboxStyle},
 	}, w)
 }
 

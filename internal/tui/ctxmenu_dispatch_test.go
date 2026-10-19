@@ -721,7 +721,7 @@ func TestCtxMenu_TitleShowsPaneDisplayName(t *testing.T) {
 func TestCtxMenu_CompactFallbackOnShortTerminal(t *testing.T) {
 	t.Parallel()
 	m := newSplitDragTestModel(t)
-	m.height = 20 // content area 18: spaced box (20) can't fit, compact (18) can
+	m.height = 20 // content area 18: spaced box (21) can't fit, compact (18) can
 	updated, _ := m.Update(tea.MouseClickMsg{X: 20, Y: 10, Button: tea.MouseRight})
 	got := updated.(Model)
 	if !got.ctxMenu.open() {
@@ -740,8 +740,9 @@ func TestCtxMenu_CompactFallbackOnShortTerminal(t *testing.T) {
 
 // TestCtxMenu_TightFallbackKeepsA19RowTerminal: the pane menu grew a row with
 // the yazi overlay, so its compact box (18) no longer fits a 19-row terminal
-// (17 content rows) that opened it before. Dropping the blank row under the
-// title keeps it opening there instead of silently doing nothing.
+// (17 content rows) that opened it before. Dropping the title row (the target
+// pane keeps its highlight border) keeps it opening there instead of silently
+// doing nothing.
 func TestCtxMenu_TightFallbackKeepsA19RowTerminal(t *testing.T) {
 	t.Parallel()
 	m := newSplitDragTestModel(t)
@@ -757,16 +758,16 @@ func TestCtxMenu_TightFallbackKeepsA19RowTerminal(t *testing.T) {
 	if _, h := got.ctxMenu.boxSize(); h > m.height-2 {
 		t.Errorf("tight box h=%d exceeds content area %d", h, m.height-2)
 	}
-	// The first item now sits directly under the title, and the hit map
-	// must agree with the render.
-	if r := got.ctxMenu.itemContentRow(0); r != 1 {
-		t.Errorf("itemContentRow(0) = %d, want 1", r)
+	// The first item is now the first content row, and the hit map must
+	// agree with the render.
+	if r := got.ctxMenu.itemContentRow(0); r != 0 {
+		t.Errorf("itemContentRow(0) = %d, want 0", r)
 	}
-	if i := got.ctxMenu.itemAtContentRow(1); i != 0 {
-		t.Errorf("itemAtContentRow(1) = %d, want 0", i)
+	if i := got.ctxMenu.itemAtContentRow(0); i != 0 {
+		t.Errorf("itemAtContentRow(0) = %d, want 0", i)
 	}
-	if i := got.ctxMenu.itemAtContentRow(0); i != -1 {
-		t.Errorf("itemAtContentRow(0) = %d, want -1 (the title)", i)
+	if strings.Contains(renderCtxMenu(got.ctxMenu), got.ctxMenu.title) {
+		t.Error("the tight layout still draws the title row")
 	}
 }
 

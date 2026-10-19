@@ -205,6 +205,9 @@ type PaneInfo struct {
 	// Empty for a pane restored from a snapshot older than the field, which is
 	// what makes such a pane un-offerable on both sides.
 	WorktreePath string
+	// SandboxKind is sandboxKindDocker, sandboxKindSbx or "" (not sandboxed),
+	// derived from the daemon's sandbox_image / sandbox_backend.
+	SandboxKind string
 	// Model/ContextTokens are daemon-authoritative (extracted from hook event
 	// data at turn boundaries): the model id and context-window token count of
 	// the pane's last completed AI turn. Empty/zero for non-AI panes.
@@ -3780,6 +3783,15 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		// Same shape as moveTabFailedMsg: a send result, not an IPC response,
 		// so no re-arm.
 		m.setErrorFlash("cannot reach " + hostLabel(msg.dest) + " — pane not moved")
+		return m, m.flashCmd()
+
+	case pathCopiedMsg:
+		// A clipboard write result, not an IPC response, so no re-arm.
+		if msg.err != nil {
+			m.setErrorFlash("could not copy path: " + msg.err.Error())
+		} else {
+			m.setFlash("Copied " + msg.path)
+		}
 		return m, m.flashCmd()
 
 	case worktreeTimeoutMsg:
@@ -9543,6 +9555,7 @@ func parseWorkspaceState(ws ipc.WorkspaceState) WorkspaceStateMsg {
 			GitWorktreeName:   p.GitWorktreeName,
 			WorktreeOwned:     p.WorktreeOwned,
 			WorktreePath:      p.WorktreePath,
+			SandboxKind:       sandboxKindOf(p.SandboxImage, p.SandboxBackend),
 			GitUpstream:       p.GitUpstream,
 			GitStale:          p.GitStale,
 			SizeSeq:           p.SizeSeq,

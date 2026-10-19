@@ -30,6 +30,9 @@ const (
 	ctxActMarkDeletion
 	ctxActRestart
 	ctxActClose
+	// ctxActCopyPath copies the pane's worktree directory (or, outside a
+	// Quil-made worktree, its current directory) to the system clipboard.
+	ctxActCopyPath
 	// Project-row actions (Task 13) — only ever set on a menu opened via
 	// openProjectCtxMenu, never mixed into buildCtxMenuItems' pane rows.
 	ctxActRenameProject
@@ -150,9 +153,10 @@ type ctxMenuState struct {
 	// openCtxMenu falls back to the compact layout (no separators) when
 	// the spaced box is taller than the content area.
 	spaced bool
-	// tight drops the blank row under the title too. Set only by the pane
-	// menu, as a last fallback after compact: its rows grew with the overlay
-	// tools, and a terminal that fit the compact box before must still open it.
+	// tight drops the title row as well (see headerRows). Set only by the
+	// pane menu, as a last fallback after compact: its rows grew with the
+	// overlay tools, and a terminal that fit the compact box before must
+	// still open it.
 	tight bool
 	items []ctxMenuItem
 }
@@ -242,6 +246,7 @@ func (m *Model) buildCtxMenuItems(pane *PaneModel) []ctxMenuItem {
 	if tab := m.activeTabModel(); tab != nil && tab.FocusMode() {
 		focusLabel = "Exit focus mode"
 	}
+	copyLabel, copyPath := paneCopyPath(pane)
 	// Group boundaries (gapAfter): view actions | pane settings | destructive.
 	return []ctxMenuItem{
 		{id: ctxActHistory, label: "Input history", enabled: historyOK},
@@ -249,7 +254,10 @@ func (m *Model) buildCtxMenuItems(pane *PaneModel) []ctxMenuItem {
 		{id: ctxActNotes, label: "Open notes", enabled: true},
 		{id: ctxActLazygit, label: "Open lazygit", enabled: lazygitOK},
 		{id: ctxActHunk, label: "Open hunk", enabled: hunkOK},
-		{id: ctxActYazi, label: "Open yazi", enabled: yaziOK, gapAfter: true},
+		{id: ctxActYazi, label: "Open yazi", enabled: yaziOK},
+		// Local only — it writes this machine's clipboard and sends nothing,
+		// so it is not in readOnlyGreyedItems.
+		{id: ctxActCopyPath, label: copyLabel, enabled: copyPath != "", gapAfter: true},
 		{id: ctxActRename, label: "Rename pane", enabled: true},
 		// Moving deletes nothing, so it stays above the destructive separator
 		// with the rest of the pane-settings group — and there is
@@ -290,14 +298,6 @@ func (s ctxMenuState) innerWidth() int {
 	return w + 2
 }
 
-// headerRows is the title plus, unless tight, the blank row under it.
-func (s ctxMenuState) headerRows() int {
-	if s.tight {
-		return 1
-	}
-	return 2
-}
-
 // gapsBefore counts the group-separator rows above item i in the spaced
 // layout (0 in compact).
 func (s ctxMenuState) gapsBefore(i int) int {
@@ -313,16 +313,34 @@ func (s ctxMenuState) gapsBefore(i int) int {
 	return n
 }
 
-// contentRows is the number of rows between the borders: header (title +
-// blank separator) plus the item block — spaced layout adds one blank row
-// per gapAfter group boundary.
+// headerRows is the title row plus, in the spaced layout, the blank separator
+// under it. The compact layout drops the separator too: compact exists for a
+// short terminal, and that one row is what keeps the pane menu opening on a
+// 19-row terminal. The tight layout (pane menu only, the last fallback)
+// drops the title row as well: the overlay tools grew the pane menu past what
+// compact fits there, and the target pane keeps its highlight border, so the
+// title is the one row the menu can spare.
+func (s ctxMenuState) headerRows() int {
+	switch {
+	case s.spaced:
+		return 2
+	case s.tight:
+		return 0
+	default:
+		return 1
+	}
+}
+
+// contentRows is the number of rows between the borders: the header (see
+// headerRows) plus the item block — spaced layout adds one blank row per
+// gapAfter group boundary.
 func (s ctxMenuState) contentRows() int {
 	return s.headerRows() + len(s.items) + s.gapsBefore(len(s.items))
 }
 
 // itemContentRow maps an item index to its content row (0-based, first row
-// under the top border). Rows 0/1 are the title and separator (row 0 only
-// when tight).
+// under the top border). The first headerRows rows are the title and, when
+// spaced, the separator.
 func (s ctxMenuState) itemContentRow(i int) int {
 	return s.headerRows() + i + s.gapsBefore(i)
 }
@@ -428,8 +446,8 @@ func nextEnabled(items []ctxMenuItem, cur, dir int) int {
 }
 
 // renderCtxMenu draws the menu box: a title row (target pane's display
-// name), a blank separator, then the items — with a blank spacer between
-// adjacent items in the spaced layout. Every content line is padded to
+// name), a blank separator (spaced layout only), then the items — with a
+// blank spacer at group boundaries when spaced. Every content line is padded to
 // exactly innerWidth so the border renders a straight right edge and
 // boxSize's geometry matches the output cell-for-cell (itemContentRow /
 // itemAtContentRow depend on this row order).
@@ -450,8 +468,10 @@ func renderCtxMenu(s ctxMenuState) string {
 	if lipgloss.Width(title) > innerW-2 {
 		title = ansi.Truncate(title, innerW-3, "…")
 	}
-	rows = append(rows, ctxMenuTitleStyle.Render(" "+title+strings.Repeat(" ", innerW-lipgloss.Width(title)-2)+" "))
 	if !s.tight {
+		rows = append(rows, ctxMenuTitleStyle.Render(" "+title+strings.Repeat(" ", innerW-lipgloss.Width(title)-2)+" "))
+	}
+	if s.spaced {
 		rows = append(rows, blank)
 	}
 	for i, it := range s.items {
@@ -508,7 +528,7 @@ func (m *Model) openCtxMenu(pane *PaneModel, anchorX, anchorY int) {
 		s.spaced = false
 		w, h = s.boxSize()
 	}
-	// Last resort: drop the blank row under the title as well.
+	// Last resort: drop the title row too (the target keeps its highlight).
 	if h > m.height-2 {
 		s.tight = true
 		w, h = s.boxSize()
@@ -1135,6 +1155,8 @@ func (m Model) executeCtxMenuItem(item ctxMenuItem) (tea.Model, tea.Cmd) {
 	pane.Active = true
 
 	switch item.id {
+	case ctxActCopyPath:
+		return m, m.copyPanePath(pane)
 	case ctxActHistory:
 		return m.openHistoryForActivePane()
 	case ctxActFocus:

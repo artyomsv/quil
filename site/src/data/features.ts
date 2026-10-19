@@ -352,7 +352,7 @@ export const features: Feature[] = [
     category: "interaction",
     detail: [
       "Right-click a pane (or press Alt+A for the active pane) to open a popup targeting the pane under the cursor — its border lights up so there's never doubt which pane the actions will hit, and the menu header shows the pane's name.",
-      "Fourteen actions in three groups: view (input history, enter/exit focus mode, notes, lazygit, hunk, yazi), pane settings (rename, move to tab, mute notifications, mark for deletion, mark attention, clear attention), and destructive (restart, close — both keep their confirmation dialogs).",
+      "Fifteen actions in three groups: view (input history, enter/exit focus mode, notes, lazygit, hunk, yazi, copy worktree path), pane settings (rename, move to tab, mute notifications, mark for deletion, mark attention, clear attention), and destructive (restart, close — both keep their confirmation dialogs).",
       "Hover highlights the row under the mouse; arrow keys / j / k navigate; unavailable actions grey out (input history without an AI pane, lazygit, hunk or yazi without the binary installed, move to tab with nowhere to move to).",
       "Mark attention pins a purple border and ◆ that survive focusing the pane — a manual \"don't let me forget this one\" flag, cleared only by unmarking.",
       "Right-click with a text selection active still copies it — the menu only opens on a plain right-click.",

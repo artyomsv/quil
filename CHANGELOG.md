@@ -11,6 +11,17 @@ version section here and deletes them.
 
 ## [Unreleased]
 
+## [1.91.0] - 2026-10-19
+
+### Added
+- **Copy a pane's folder from its context menu.** Right-click a pane, or its row
+  in the sidebar, and choose **Copy worktree path** to put the worktree folder
+  Quil created for it on the clipboard — ready for `cd`. A pane with no worktree
+  offers **Copy directory path** for its current folder instead.
+- **You can see at a glance which panes run in a sandbox.** A pane in a Docker
+  container shows `▣` and a pane in a Docker Sandboxes (sbx) microVM shows `⧉`,
+  next to the path on its top border and at the end of its row in the sidebar.
+
 ## [1.90.0] - 2026-10-18
 
 ### Added

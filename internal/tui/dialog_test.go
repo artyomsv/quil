@@ -639,3 +639,23 @@ func TestSettingsFields_ScrollbackLinesRow(t *testing.T) {
 		t.Errorf("accepted %d, above the %d cap", m.cfg.UI.ScrollbackLines, maxScrollbackLines)
 	}
 }
+
+// TestRenderDisclaimerDialog_WelcomeNotBeta pins the startup dialog's
+// wording: it greets with the version and a tip, and no longer calls Quil an
+// early beta or says Linux and macOS are untested.
+func TestRenderDisclaimerDialog_WelcomeNotBeta(t *testing.T) {
+	t.Parallel()
+	m := Model{cfg: config.Default(), version: "1.2.3"}
+	got := stripANSI(m.renderDisclaimerDialog())
+	if !strings.Contains(got, "Welcome to Quil v1.2.3") {
+		t.Errorf("startup dialog missing the welcome title:\n%s", got)
+	}
+	if !strings.Contains(got, "Tip: ") {
+		t.Errorf("startup dialog missing the tip:\n%s", got)
+	}
+	for _, stale := range []string{"beta", "Beta", "not been fully tested"} {
+		if strings.Contains(got, stale) {
+			t.Errorf("startup dialog still says %q:\n%s", stale, got)
+		}
+	}
+}

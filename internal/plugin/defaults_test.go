@@ -288,6 +288,45 @@ func TestDefaultHunk_ResolvesRepoFromTheWorkingDirectory(t *testing.T) {
 	}
 }
 
+// TestDefaultYazi_OpensItsWorkingDirectory pins the shape the Alt+Shift+F
+// overlay depends on. The overlay sends no InstanceArgs and passes the folder
+// as the spawn CWD only, so yazi must have no base args to replace and no
+// toggles that would add some. prompts_cwd is what lets Ctrl+N pick the folder,
+// and discover stays empty: a file manager is useful outside a git repository,
+// and the git list would hide every other folder behind "Browse…".
+func TestDefaultYazi_OpensItsWorkingDirectory(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := EnsureDefaultPlugins(dir); err != nil {
+		t.Fatalf("EnsureDefaultPlugins: %v", err)
+	}
+	r := NewRegistry()
+	if err := r.LoadFromDir(dir); err != nil {
+		t.Fatalf("LoadFromDir: %v", err)
+	}
+	p := r.Get("yazi")
+	if p == nil {
+		t.Fatal("yazi plugin missing from the embedded defaults")
+	}
+	if p.Command.Cmd != "yazi" {
+		t.Errorf("Cmd = %q, want yazi", p.Command.Cmd)
+	}
+	if p.Category != "tools" {
+		t.Errorf("Category = %q, want tools", p.Category)
+	}
+	if len(p.Command.Args) != 0 || len(p.Command.Toggles) != 0 {
+		t.Errorf("Args = %v, Toggles = %v; yazi is scoped by its spawn CWD alone", p.Command.Args, p.Command.Toggles)
+	}
+	if !p.Command.PromptsCWD {
+		t.Error("PromptsCWD = false; the CWD step is what decides where yazi opens")
+	}
+	if p.Command.Discover != "" {
+		t.Errorf("Discover = %q, want empty (plain directory browser)", p.Command.Discover)
+	}
+	if p.Persistence.Strategy != "rerun" || p.Persistence.GhostBuffer {
+		t.Errorf("Persistence = %q ghost=%v, want rerun with no ghost buffer", p.Persistence.Strategy, p.Persistence.GhostBuffer)
+	}
+}
+
 // TestEnsureDefaultPlugins_CodexShape pins the shipped codex plugin: the
 // session_scrape strategy opts it into the restore branch's resume expansion,
 // the EMPTY resume_args is what makes "no recorded session" a fresh start

@@ -300,6 +300,7 @@ Typed panes ship for the tools developers run all day. Each opens from `Ctrl+N`;
 | **Codex** | AI coding session ([codex](https://github.com/openai/codex)) with per-pane session resume and hook-driven notifications, work state and input history. |
 | **lazygit** | Git TUI ([lazygit](https://github.com/jesseduffield/lazygit)) for the repo near the pane — also a per-tab `Alt+G` overlay. |
 | **hunk** | Review-first diff viewer ([hunk](https://github.com/modem-dev/hunk)) for reading what an agent just wrote — also a per-tab `Alt+D` overlay, sharing lazygit's slot. |
+| **yazi** | Terminal file manager ([yazi](https://github.com/sxyazi/yazi)) for any folder, git or not — also a per-tab `Alt+Shift+F` overlay on the active pane's directory, sharing the same slot. |
 | **k9s** | Kubernetes cluster TUI ([k9s](https://github.com/derailed/k9s)) with a context picker sourced from your kubeconfig. |
 | **lazysql** | Database TUI ([lazysql](https://github.com/jorgerojas26/lazysql)) for MySQL, PostgreSQL, SQLite, and MSSQL. |
 | **SSH** | Persistent SSH session that re-runs the same command (host, port, forwards) on restart. |

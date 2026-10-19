@@ -52,7 +52,7 @@ Press `Ctrl+N`. The plugin picker opens with categories:
 - **Terminal** — system shell, plus a variant that keeps its content when the pane is squeezed
 - **AI Assistant** — Claude Code, OpenCode (beta), Codex
 - **Remote** — SSH (POC)
-- **Tools** — lazygit, hunk, k9s, lazysql, Stripe (POC)
+- **Tools** — lazygit, hunk, yazi, k9s, lazysql, Stripe (POC)
 
 A tool whose binary is not on your `PATH` is listed greyed out with a link to its project, rather than hidden.
 

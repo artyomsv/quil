@@ -47,8 +47,9 @@ var gitScanTimeout = 8 * time.Second
 type repoScanPurpose int
 
 const (
-	repoScanOverlay  repoScanPurpose = iota // Alt+G — resolveLazygitOverlay
-	repoScanPickList                        // setup dialog's git pick list
+	repoScanOverlay    repoScanPurpose = iota // Alt+G — resolveLazygitOverlay
+	repoScanPickList                          // setup dialog's git pick list
+	repoScanOverlayDir                        // yazi: does the pane's folder exist (dirs_exist_req)
 )
 
 // repoScanState tracks an in-flight git-discovery request.
@@ -201,7 +202,12 @@ func (m *Model) applyGitScanTimeout(cwd, gen string) tea.Cmd {
 	if m.repoScan.cwd != cwd || m.repoScan.gen != gen {
 		return nil
 	}
+	purpose, plugin := m.repoScan.purpose, m.repoScan.plugin
 	m.repoScan = repoScanState{}
+	if purpose == repoScanOverlayDir {
+		m.setErrorFlash(plugin + " not opened: folder check timed out")
+		return m.flashCmd()
+	}
 	m.setErrorFlash("repo scan timed out")
 	return m.flashCmd()
 }

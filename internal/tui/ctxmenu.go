@@ -22,6 +22,7 @@ const (
 	ctxActNotes
 	ctxActLazygit
 	ctxActHunk
+	ctxActYazi
 	ctxActRename
 	ctxActMute
 	ctxActAttention
@@ -53,7 +54,7 @@ const (
 	// ctxActMovePane opens the tab picker (openMovePanePicker) for the target
 	// pane. Unlike ctxActMoveTab, buildCtxMenuItems GREYS this row rather
 	// than hiding it — the pane menu's own convention already used by other
-	// gated rows (history, lazygit and hunk in the view-actions group; Clear
+	// gated rows (history, lazygit, hunk and yazi in the view-actions group; Clear
 	// attention in the pane-settings group beside this one).
 	ctxActMovePane
 	// ctxActTabLayoutList re-populates the OPEN tab menu in place with one row
@@ -86,7 +87,7 @@ const (
 var readOnlyGreyedItems = map[ctxMenuAction]bool{
 	ctxActRename: true, ctxActClose: true, ctxActRenameTab: true,
 	ctxActRenameProject: true, ctxActDestroyProject: true,
-	ctxActHistory: true, ctxActLazygit: true, ctxActHunk: true, ctxActMute: true,
+	ctxActHistory: true, ctxActLazygit: true, ctxActHunk: true, ctxActYazi: true, ctxActMute: true,
 	ctxActAttention: true, ctxActClearAttention: true, ctxActMarkDeletion: true,
 	ctxActRestart: true, ctxActMovePane: true,
 	ctxActTabColorList: true, ctxActSetTabColor: true, ctxActTabLayoutList: true,
@@ -152,7 +153,12 @@ type ctxMenuState struct {
 	// openCtxMenu falls back to the compact layout (no separators) when
 	// the spaced box is taller than the content area.
 	spaced bool
-	items  []ctxMenuItem
+	// tight drops the title row as well (see headerRows). Set only by the
+	// pane menu, as a last fallback after compact: its rows grew with the
+	// overlay tools, and a terminal that fit the compact box before must
+	// still open it.
+	tight bool
+	items []ctxMenuItem
 }
 
 func (s ctxMenuState) open() bool {
@@ -181,6 +187,7 @@ func (m *Model) buildCtxMenuItems(pane *PaneModel) []ctxMenuItem {
 	historyOK := false
 	lazygitOK := false
 	hunkOK := false
+	yaziOK := false
 	if m.pluginRegistry != nil {
 		if p := m.pluginRegistry.Get(pane.Type); p != nil {
 			historyOK = p.Command.RecordHistory
@@ -191,6 +198,7 @@ func (m *Model) buildCtxMenuItems(pane *PaneModel) []ctxMenuItem {
 		dest := m.activeDest()
 		lazygitOK = m.pluginAvailableFor(dest, overlayPluginLazygit) && m.canOpenOverlay(dest, overlayPluginLazygit)
 		hunkOK = m.pluginAvailableFor(dest, overlayPluginHunk) && m.canOpenOverlay(dest, overlayPluginHunk)
+		yaziOK = m.pluginAvailableFor(dest, overlayPluginYazi) && m.canOpenOverlay(dest, overlayPluginYazi)
 	}
 	muteLabel := "Mute notifications"
 	if pane.Muted {
@@ -246,6 +254,7 @@ func (m *Model) buildCtxMenuItems(pane *PaneModel) []ctxMenuItem {
 		{id: ctxActNotes, label: "Open notes", enabled: true},
 		{id: ctxActLazygit, label: "Open lazygit", enabled: lazygitOK},
 		{id: ctxActHunk, label: "Open hunk", enabled: hunkOK},
+		{id: ctxActYazi, label: "Open yazi", enabled: yaziOK},
 		// Local only — it writes this machine's clipboard and sends nothing,
 		// so it is not in readOnlyGreyedItems.
 		{id: ctxActCopyPath, label: copyLabel, enabled: copyPath != "", gapAfter: true},
@@ -307,12 +316,19 @@ func (s ctxMenuState) gapsBefore(i int) int {
 // headerRows is the title row plus, in the spaced layout, the blank separator
 // under it. The compact layout drops the separator too: compact exists for a
 // short terminal, and that one row is what keeps the pane menu opening on a
-// 19-row terminal now that it has fourteen items.
+// 19-row terminal. The tight layout (pane menu only, the last fallback)
+// drops the title row as well: the overlay tools grew the pane menu past what
+// compact fits there, and the target pane keeps its highlight border, so the
+// title is the one row the menu can spare.
 func (s ctxMenuState) headerRows() int {
-	if s.spaced {
+	switch {
+	case s.spaced:
 		return 2
+	case s.tight:
+		return 0
+	default:
+		return 1
 	}
-	return 1
 }
 
 // contentRows is the number of rows between the borders: the header (see
@@ -452,7 +468,9 @@ func renderCtxMenu(s ctxMenuState) string {
 	if lipgloss.Width(title) > innerW-2 {
 		title = ansi.Truncate(title, innerW-3, "…")
 	}
-	rows = append(rows, ctxMenuTitleStyle.Render(" "+title+strings.Repeat(" ", innerW-lipgloss.Width(title)-2)+" "))
+	if !s.tight {
+		rows = append(rows, ctxMenuTitleStyle.Render(" "+title+strings.Repeat(" ", innerW-lipgloss.Width(title)-2)+" "))
+	}
 	if s.spaced {
 		rows = append(rows, blank)
 	}
@@ -508,6 +526,11 @@ func (m *Model) openCtxMenu(pane *PaneModel, anchorX, anchorY int) {
 	// targets); fall back to compact when the content area is too short.
 	if h > m.height-2 {
 		s.spaced = false
+		w, h = s.boxSize()
+	}
+	// Last resort: drop the title row too (the target keeps its highlight).
+	if h > m.height-2 {
+		s.tight = true
 		w, h = s.boxSize()
 	}
 	// Bail before any state mutation when even the compact box cannot fit
@@ -1145,6 +1168,9 @@ func (m Model) executeCtxMenuItem(item ctxMenuItem) (tea.Model, tea.Cmd) {
 		return m, cmd
 	case ctxActHunk:
 		cmd := m.handleToggleHunk()
+		return m, cmd
+	case ctxActYazi:
+		cmd := m.handleToggleYazi()
 		return m, cmd
 	case ctxActRename:
 		return m.beginPaneRename()

@@ -658,6 +658,7 @@ type Model struct {
 	resizeSeq          int
 	pendingSplit       map[string]*LayoutNode // tabID → placeholder node awaiting pane from daemon
 	pendingOverlayShow map[string]bool        // tabID → show overlay on its first arrival; set by the Alt+G overlay sender (wired in a follow-up commit); reads/deletes are nil-map-safe
+	pendingOverlayAsk  map[string]overlayAsk  // tabID → the tool + folder createOverlay asked for; becomes tab.overlayAskedCWD only when that overlay arrives
 	dialog             dialogScreen           // active dialog screen
 	dialogCursor       int                    // highlighted item in dialog
 	shortcutsCursor    int                    // scroll position in the Shortcuts list
@@ -3811,7 +3812,14 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 	case recentDirsMsg:
 		// MUST re-arm the listen loop, like every other IPC response branch —
 		// omitting it kills IPC for the session, a bug this package has shipped.
-		cmd := m.applyExistingDirs(msg.Resp, msg.Gen)
+		// The same response type answers the overlay folder check; the
+		// generation says which request this is.
+		var cmd tea.Cmd
+		if m.isOverlayDirAnswer(msg.Gen) {
+			cmd = m.applyOverlayDir(msg.Resp)
+		} else {
+			cmd = m.applyExistingDirs(msg.Resp, msg.Gen)
+		}
 		return m, tea.Batch(cmd, m.listenForMessages())
 
 	case recentScanTimeoutMsg:
@@ -5553,9 +5561,10 @@ func (m Model) stepSequence(msg tea.KeyPressMsg, key string) (Model, keymap.Acti
 // as a hard-coded case in the caller (not driven by kb.NextPane, which is
 // now unbound by default since spatial navigation moved to Alt+Arrow).
 //
-// Note: ToggleLazygit (Alt+G) and ToggleHunk (Alt+H) are deliberately NOT in
-// this list — notes mode binds the editor to a pane, and popping a full-screen
-// overlay over it mid-edit conflicts with the notes layout. Both fall through
+// Note: the overlay toggles (lazygit Alt+G, hunk Alt+D, yazi Alt+Shift+F) are
+// deliberately NOT in this list — notes mode binds the editor to a pane, and
+// popping a full-screen overlay over it mid-edit conflicts with the notes
+// layout. All of them fall through
 // to the editor harmlessly as plain text input.
 func (m Model) notesKeyExempt(key string) bool {
 	if key == "" {
@@ -6131,6 +6140,9 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	case "pane.toggle_hunk":
 		cmd := m.handleToggleHunk()
+		return m, cmd
+	case "pane.toggle_yazi":
+		cmd := m.handleToggleYazi()
 		return m, cmd
 	case "pane.command_history":
 		return m.openHistoryForActivePane()
@@ -7876,6 +7888,7 @@ func (m *Model) reconcileOverlayPane(
 			visCmd := m.overlayVisibilityCmd(tab, false)
 			tab.overlayPane = nil
 			tab.overlayVisible = false
+			tab.overlayAskedCWD = ""
 			return newPaneIDs, false, visCmd
 		}
 	case tab.overlayPane == nil || tab.overlayPane.ID != overlayInfo.ID:
@@ -7903,6 +7916,17 @@ func (m *Model) reconcileOverlayPane(
 		}
 		syncPaneMeta(pane, overlayInfo, m.pluginWideCanvas(overlayInfo.Type), m.pluginMinNativeCols(overlayInfo.Type), m.pluginRestoresViaSession(overlayInfo.Type), m.isFollower(tab.Dest))
 		tab.overlayPane = pane
+		// The directory createOverlay asked for is attached only to the overlay it
+		// asked for: this client's own create, of the same tool. One it did not
+		// ask for (another client's, or one adopted on reattach) has only the
+		// daemon's own CWD to match.
+		tab.overlayAskedCWD = ""
+		if m.pendingOverlayShow[tab.ID] {
+			if ask := m.pendingOverlayAsk[tab.ID]; ask.plugin == overlayInfo.Type {
+				tab.overlayAskedCWD = ask.cwd
+			}
+			delete(m.pendingOverlayAsk, tab.ID)
+		}
 		// Show the overlay immediately when this TUI's Alt+G triggered its
 		// creation (pendingOverlayShow entry). On plain reattach, default hidden.
 		if m.pendingOverlayShow[tab.ID] {

@@ -59,6 +59,7 @@ const (
 	palActHistory
 	palActLazygit
 	palActHunk
+	palActYazi
 	palActRestartPane
 	palActClosePane
 	palActNewTab
@@ -137,7 +138,7 @@ var readOnlyGreyedPalette = map[paletteAction]bool{
 	palActRenamePane: true, palActClosePane: true,
 	palActCycleTabColor: true, palActMoveTabLeft: true, palActMoveTabRight: true, palActTabLayout: true,
 	palActMoveProjectUp: true, palActMoveProjectDown: true, palActMute: true, palActEager: true,
-	palActHistory: true, palActLazygit: true, palActHunk: true, palActRestartPane: true,
+	palActHistory: true, palActLazygit: true, palActHunk: true, palActYazi: true, palActRestartPane: true,
 	palActProcesses: true, palActTakeControl: true,
 }
 
@@ -331,7 +332,7 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 	header := func(label string) { cmds = append(cmds, paletteCommand{header: true, label: label}) }
 
 	// Per-active-pane gates + toggle labels.
-	historyOK, lazygitOK, hunkOK := false, false, false
+	historyOK, lazygitOK, hunkOK, yaziOK := false, false, false, false
 	muteLabel, eagerLabel := "Mute notifications", "Enable eager restore"
 	if tab := m.activeTabModel(); tab != nil {
 		if p := tab.ActivePaneModel(); p != nil {
@@ -355,6 +356,7 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 		dest := m.activeDest()
 		lazygitOK = m.pluginAvailableFor(dest, overlayPluginLazygit) && m.canOpenOverlay(dest, overlayPluginLazygit)
 		hunkOK = m.pluginAvailableFor(dest, overlayPluginHunk) && m.canOpenOverlay(dest, overlayPluginHunk)
+		yaziOK = m.pluginAvailableFor(dest, overlayPluginYazi) && m.canOpenOverlay(dest, overlayPluginYazi)
 	}
 
 	// --- Go to pane: navigation leads — jumping to a pane is the most common
@@ -580,6 +582,7 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 		paletteCommand{action: palActHistory, enabled: historyOK, label: "Input history", detail: m.keymap.Display("pane.command_history"), keywords: []string{"history", "prompts"}},
 		paletteCommand{action: palActLazygit, enabled: lazygitOK, label: "Open lazygit", detail: m.keymap.Display("pane.toggle_lazygit"), keywords: []string{"git", "lazygit"}},
 		paletteCommand{action: palActHunk, enabled: hunkOK, label: "Open hunk", detail: m.keymap.Display("pane.toggle_hunk"), keywords: []string{"git", "hunk", "diff", "review"}},
+		paletteCommand{action: palActYazi, enabled: yaziOK, label: "Open yazi", detail: m.keymap.Display("pane.toggle_yazi"), keywords: []string{"yazi", "files", "file manager", "explorer", "browse"}},
 		paletteCommand{action: palActNewPane, enabled: true, label: "New pane…", detail: "ctrl+n", keywords: []string{"create", "plugin", "claude", "terminal"}},
 		paletteCommand{action: palActRestartPane, enabled: true, label: "Restart pane…", detail: m.keymap.Display("pane.restart"), keywords: []string{"restart", "respawn"}},
 		paletteCommand{action: palActClosePane, enabled: true, label: "Close pane…", detail: m.keymap.Display("pane.close"), keywords: []string{"close", "kill"}},
@@ -1216,6 +1219,9 @@ func (m Model) executePaletteCommand(c paletteCommand) (tea.Model, tea.Cmd) {
 		return m, cmd
 	case palActHunk:
 		cmd := m.handleToggleHunk()
+		return m, cmd
+	case palActYazi:
+		cmd := m.handleToggleYazi()
 		return m, cmd
 	case palActRestartPane:
 		return m.openRestartPaneConfirm()

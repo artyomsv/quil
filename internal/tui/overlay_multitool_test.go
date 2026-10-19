@@ -31,6 +31,7 @@ func registryWithOverlayTools(t *testing.T) *plugin.Registry {
 	files := map[string]string{
 		"lazygit.toml": "[plugin]\nname = \"lazygit\"\n\n[command]\ncmd = \"lazygit\"\nprompts_cwd = true\ndiscover = \"git\"\n",
 		"hunk.toml":    "[plugin]\nname = \"hunk\"\n\n[command]\ncmd = \"hunk\"\nargs = [\"diff\"]\nprompts_cwd = true\ndiscover = \"git\"\n",
+		"yazi.toml":    "[plugin]\nname = \"yazi\"\n\n[command]\ncmd = \"yazi\"\nprompts_cwd = true\n",
 	}
 	for name, content := range files {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {

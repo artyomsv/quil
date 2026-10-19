@@ -1,0 +1,35 @@
+# yazi — terminal file manager
+# Edit this file to customize the plugin. Delete it to restore defaults.
+
+[plugin]
+name = "yazi"
+display_name = "Yazi"
+category = "tools"
+description = "Terminal file manager for the current directory"
+homepage = "https://github.com/sxyazi/yazi"
+schema_version = 1
+
+[command]
+cmd = "yazi"
+# path = "/path/to/yazi"  # uncomment to override PATH lookup
+detect = "yazi --version"
+# No base args: `yazi` with no entry opens its working directory, so the CWD
+# step below is what decides where it starts. Keep it that way — InstanceArgs
+# REPLACE base args at spawn (resolveSpawnArgs), and the Alt+Shift+F overlay
+# sends none, relying on the spawn CWD alone. yazi's own config lives in
+# ~/.config/yazi/ (yazi.toml, keymap.toml, theme.toml); that is where per-user
+# options belong.
+#
+# On Windows yazi needs `file(1)` to detect MIME types. Git for Windows ships
+# one; point yazi at it once with the user environment variable
+# YAZI_FILE_ONE = "C:\Program Files\Git\usr\bin\file.exe".
+prompts_cwd = true
+# Plain directory browser for the CWD step, not the git-repo list: a file
+# manager is useful in any folder, not only in a repository.
+
+[persistence]
+# Re-run yazi in the saved CWD on daemon restart. It rereads the directory from
+# scratch; its tabs and selection do not survive, exactly as when you quit it.
+strategy = "rerun"
+# Full-screen TUI — replaying stale frames on reconnect is useless.
+ghost_buffer = false

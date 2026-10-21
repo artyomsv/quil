@@ -11,6 +11,15 @@ version section here and deletes them.
 
 ## [Unreleased]
 
+## [1.92.1] - 2026-10-21
+
+### Changed
+- **The startup dialog is a welcome, not a beta warning.** The TUI dialog shows the version and a tip; the browser notice shows a tip. The "early beta" paragraph and the "Linux and macOS support has not been fully tested yet" line are gone. `ui.show_disclaimer` keeps its name and still controls the dialog.
+- **Remote daemon over SSH, several machines in one window, and the OpenCode pane are no longer marked beta** in the README, the docs and on quil.cc. Their known limits are still listed, under that name.
+
+### Fixed
+- **After an in-place update, the mouse wheel scrolled the terminal instead of the pane** (macOS Terminal.app, #268). On macOS and Linux the new quil now replaces the old process instead of running beside it as a child, so one quil owns the terminal, exactly as on a fresh launch. Windows keeps the old relaunch, because it has no way to replace a running process.
+
 ## [1.92.0] - 2026-10-19
 
 ### Added

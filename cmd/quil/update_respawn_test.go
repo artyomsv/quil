@@ -1,7 +1,9 @@
 package main
 
 import (
+	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -55,4 +57,66 @@ func TestReleaseHeapBeforePark_ReturnsMemoryToTheOS(t *testing.T) {
 			"not handed back, so the parked wrapper's RSS would not shrink",
 			afterAlloc.HeapReleased, afterRelease.HeapReleased)
 	}
+}
+
+// #268: after an in-session update the new TUI must REPLACE this process, not
+// run beside it as a child. Driven through respawnSelf so a regression to the
+// wrapper shape (exec never attempted) fails here, not only on a Mac.
+func TestRespawnSelf_ExecsInPlace_NoChildSpawned(t *testing.T) {
+	var gotExe string
+	var gotArgs, gotEnv []string
+	calls := 0
+	orig := execSelfFn
+	execSelfFn = func(exe string, args, env []string) error {
+		calls++
+		gotExe, gotArgs, gotEnv = exe, args, env
+		return nil // a real successful exec never returns
+	}
+	t.Cleanup(func() { execSelfFn = orig })
+
+	// A path that cannot run: if respawnSelf fell through to the child spawn
+	// despite the exec succeeding, Start would fail and print to stderr, but
+	// the call count below is what pins it.
+	const exe = "/nonexistent/quil-268"
+	if !respawnSelf(exe) {
+		t.Fatal("respawnSelf returned false; the swap is done, so it must always return true")
+	}
+	if calls != 1 {
+		t.Fatalf("execSelfFn called %d times, want 1", calls)
+	}
+	if gotExe != exe {
+		t.Errorf("exec path = %q, want %q", gotExe, exe)
+	}
+	if !reflect.DeepEqual(gotArgs, respawnArgs()) {
+		t.Errorf("exec args = %q, want %q", gotArgs, respawnArgs())
+	}
+	if n := countRestartFlag(gotEnv); n != 1 {
+		t.Errorf("exec env carries QUIL_UPDATE_RESTART %d times, want 1", n)
+	}
+}
+
+func TestRespawnEnv_ReplacesInheritedRestartFlag(t *testing.T) {
+	for _, inherited := range []string{"1", "0", ""} {
+		t.Run("inherited="+inherited, func(t *testing.T) {
+			t.Setenv("QUIL_UPDATE_RESTART", inherited)
+			env := respawnEnv()
+			if n := countRestartFlag(env); n != 1 {
+				t.Fatalf("QUIL_UPDATE_RESTART appears %d times, want 1: a second "+
+					"update in one session would pass duplicates to execve", n)
+			}
+			if last := env[len(env)-1]; last != "QUIL_UPDATE_RESTART=1" {
+				t.Errorf("last entry = %q, want QUIL_UPDATE_RESTART=1", last)
+			}
+		})
+	}
+}
+
+func countRestartFlag(env []string) int {
+	n := 0
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "QUIL_UPDATE_RESTART=") {
+			n++
+		}
+	}
+	return n
 }

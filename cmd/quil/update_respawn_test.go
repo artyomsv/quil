@@ -1,6 +1,9 @@
 package main
 
 import (
+	"errors"
+	"io"
+	"os"
 	"reflect"
 	"runtime"
 	"strings"
@@ -74,12 +77,17 @@ func TestRespawnSelf_ExecsInPlace_NoChildSpawned(t *testing.T) {
 	}
 	t.Cleanup(func() { execSelfFn = orig })
 
-	// A path that cannot run: if respawnSelf fell through to the child spawn
-	// despite the exec succeeding, Start would fail and print to stderr, but
-	// the call count below is what pins it.
+	// A path that cannot run, so a fall-through to the child spawn after a
+	// successful exec makes Start fail — and that failure is the only thing
+	// respawnSelf prints. Empty stderr is what proves no child was attempted.
 	const exe = "/nonexistent/quil-268"
-	if !respawnSelf(exe) {
+	var ok bool
+	stderr := captureStderr(t, func() { ok = respawnSelf(exe) })
+	if !ok {
 		t.Fatal("respawnSelf returned false; the swap is done, so it must always return true")
+	}
+	if stderr != "" {
+		t.Errorf("a child launch was attempted after a successful exec: stderr %q", stderr)
 	}
 	if calls != 1 {
 		t.Fatalf("execSelfFn called %d times, want 1", calls)
@@ -93,6 +101,47 @@ func TestRespawnSelf_ExecsInPlace_NoChildSpawned(t *testing.T) {
 	if n := countRestartFlag(gotEnv); n != 1 {
 		t.Errorf("exec env carries QUIL_UPDATE_RESTART %d times, want 1", n)
 	}
+}
+
+// A failed exec must not strand the user: respawnSelf falls back to the child
+// relaunch and still returns true, because the binaries are already swapped.
+func TestRespawnSelf_ExecFails_FallsBackToChildLaunch(t *testing.T) {
+	orig := execSelfFn
+	execSelfFn = func(string, []string, []string) error { return errors.New("exec refused") }
+	t.Cleanup(func() { execSelfFn = orig })
+
+	var ok bool
+	stderr := captureStderr(t, func() { ok = respawnSelf("/nonexistent/quil-268") })
+	if !ok {
+		t.Fatal("respawnSelf returned false after a failed exec; it must always return true")
+	}
+	// The missing binary makes the fallback's Start fail, which is how this
+	// test sees that the fallback ran at all.
+	if !strings.Contains(stderr, "relaunch failed") {
+		t.Errorf("fallback child launch was not attempted: stderr %q", stderr)
+	}
+}
+
+// captureStderr runs fn with os.Stderr pointed at a pipe and returns what it
+// wrote.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	orig := os.Stderr
+	os.Stderr = w
+	defer func() { os.Stderr = orig }()
+	fn()
+	if err := w.Close(); err != nil {
+		t.Fatalf("close pipe: %v", err)
+	}
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read pipe: %v", err)
+	}
+	return string(out)
 }
 
 func TestRespawnEnv_ReplacesInheritedRestartFlag(t *testing.T) {

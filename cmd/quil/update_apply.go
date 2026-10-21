@@ -502,23 +502,56 @@ func respawnArgs() []string {
 	return append([]string{"--remote", remoteDest}, args...)
 }
 
+// execSelfFn is execSelf (respawn_unix.go / respawn_windows.go), a var so a
+// test can observe the exec without replacing the test binary.
+var execSelfFn = execSelf
+
+// respawnEnv is this process's environment plus QUIL_UPDATE_RESTART=1, with
+// any inherited copy dropped first. A second update in one session runs in a
+// process that already carries the variable, and execve passes duplicates
+// through verbatim — which copy a reader sees would then depend on its libc.
+func respawnEnv() []string {
+	env := make([]string, 0, len(os.Environ())+1)
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "QUIL_UPDATE_RESTART=") {
+			env = append(env, kv)
+		}
+	}
+	return append(env, "QUIL_UPDATE_RESTART=1")
+}
+
 // respawnSelf runs the freshly-installed quil at exe (the same path
 // maybeApplyStagedUpdate resolved BEFORE the swap — see the comment there;
 // re-resolving via os.Executable() here would return the just-renamed-aside
 // ".old" binary on Linux) with the original args and QUIL_UPDATE_RESTART=1
-// (the version gate reads it to skip the second restart prompt). This
-// process stays as a thin wrapper waiting for the child — exiting
-// immediately would hand the terminal back to the shell while the child TUI
-// still owns it. Always returns true: the swap is already done, so even on
-// spawn failure the caller must not fall through to running the
-// (renamed-away) old binary's launch path — the user just relaunches
-// manually.
+// (the version gate reads it to skip the second restart prompt).
+//
+// On Unix this process is REPLACED by the new binary (execSelf), so only one
+// quil ever owns the terminal — see respawn_unix.go for the bug the old
+// child-plus-wrapper shape caused there (#268). Windows has no exec, and an
+// exec that fails falls back to the same shape: this process stays as a thin
+// wrapper waiting for the child — exiting immediately would hand the terminal
+// back to the shell while the child TUI still owns it.
+//
+// Always returns true: the swap is already done, so even on spawn failure the
+// caller must not fall through to running the (renamed-away) old binary's
+// launch path — the user just relaunches manually.
 func respawnSelf(exe string) bool {
-	cmd := exec.Command(exe, respawnArgs()...)
+	args, env := respawnArgs(), respawnEnv()
+	err := execSelfFn(exe, args, env)
+	if err == nil {
+		// Only a test double returns here: a real exec that succeeds never
+		// comes back.
+		return true
+	}
+	if !errors.Is(err, errors.ErrUnsupported) {
+		log.Printf("update: exec %s failed: %v — relaunching as a child instead", exe, err)
+	}
+	cmd := exec.Command(exe, args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.Env = append(os.Environ(), "QUIL_UPDATE_RESTART=1")
+	cmd.Env = env
 	if err := cmd.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "update applied but relaunch failed: %v — run quil again\n", err)
 		return true

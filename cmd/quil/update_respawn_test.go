@@ -1,7 +1,10 @@
 package main
 
 import (
+	"errors"
+	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -55,4 +58,90 @@ func TestReleaseHeapBeforePark_ReturnsMemoryToTheOS(t *testing.T) {
 			"not handed back, so the parked wrapper's RSS would not shrink",
 			afterAlloc.HeapReleased, afterRelease.HeapReleased)
 	}
+}
+
+// #268: after an in-session update the new TUI must REPLACE this process, not
+// run beside it as a child. Driven through respawnSelf so a regression to the
+// wrapper shape (exec never attempted) fails here, not only on a Mac.
+func TestRespawnSelf_ExecsInPlace_NoChildSpawned(t *testing.T) {
+	var gotExe string
+	var gotArgs, gotEnv []string
+	calls := 0
+	orig := execSelfFn
+	execSelfFn = func(exe string, args, env []string) error {
+		calls++
+		gotExe, gotArgs, gotEnv = exe, args, env
+		return nil // a real successful exec never returns
+	}
+	t.Cleanup(func() { execSelfFn = orig })
+
+	// A path that cannot run, so a fall-through to the child spawn after a
+	// successful exec makes Start fail — and that failure is the only thing
+	// respawnSelf prints. Empty stderr is what proves no child was attempted.
+	const exe = "/nonexistent/quil-268"
+	var ok bool
+	stderr := captureStderr(t, func() { ok = respawnSelf(exe) })
+	if !ok {
+		t.Fatal("respawnSelf returned false; the swap is done, so it must always return true")
+	}
+	if stderr != "" {
+		t.Errorf("a child launch was attempted after a successful exec: stderr %q", stderr)
+	}
+	if calls != 1 {
+		t.Fatalf("execSelfFn called %d times, want 1", calls)
+	}
+	if gotExe != exe {
+		t.Errorf("exec path = %q, want %q", gotExe, exe)
+	}
+	if !reflect.DeepEqual(gotArgs, respawnArgs()) {
+		t.Errorf("exec args = %q, want %q", gotArgs, respawnArgs())
+	}
+	if n := countRestartFlag(gotEnv); n != 1 {
+		t.Errorf("exec env carries QUIL_UPDATE_RESTART %d times, want 1", n)
+	}
+}
+
+// A failed exec must not strand the user: respawnSelf falls back to the child
+// relaunch and still returns true, because the binaries are already swapped.
+func TestRespawnSelf_ExecFails_FallsBackToChildLaunch(t *testing.T) {
+	orig := execSelfFn
+	execSelfFn = func(string, []string, []string) error { return errors.New("exec refused") }
+	t.Cleanup(func() { execSelfFn = orig })
+
+	var ok bool
+	stderr := captureStderr(t, func() { ok = respawnSelf("/nonexistent/quil-268") })
+	if !ok {
+		t.Fatal("respawnSelf returned false after a failed exec; it must always return true")
+	}
+	// The missing binary makes the fallback's Start fail, which is how this
+	// test sees that the fallback ran at all.
+	if !strings.Contains(stderr, "relaunch failed") {
+		t.Errorf("fallback child launch was not attempted: stderr %q", stderr)
+	}
+}
+
+func TestRespawnEnv_ReplacesInheritedRestartFlag(t *testing.T) {
+	for _, inherited := range []string{"1", "0", ""} {
+		t.Run("inherited="+inherited, func(t *testing.T) {
+			t.Setenv("QUIL_UPDATE_RESTART", inherited)
+			env := respawnEnv()
+			if n := countRestartFlag(env); n != 1 {
+				t.Fatalf("QUIL_UPDATE_RESTART appears %d times, want 1: a second "+
+					"update in one session would pass duplicates to execve", n)
+			}
+			if last := env[len(env)-1]; last != "QUIL_UPDATE_RESTART=1" {
+				t.Errorf("last entry = %q, want QUIL_UPDATE_RESTART=1", last)
+			}
+		})
+	}
+}
+
+func countRestartFlag(env []string) int {
+	n := 0
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "QUIL_UPDATE_RESTART=") {
+			n++
+		}
+	}
+	return n
 }

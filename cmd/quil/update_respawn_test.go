@@ -2,8 +2,6 @@ package main
 
 import (
 	"errors"
-	"io"
-	"os"
 	"reflect"
 	"runtime"
 	"strings"
@@ -120,28 +118,6 @@ func TestRespawnSelf_ExecFails_FallsBackToChildLaunch(t *testing.T) {
 	if !strings.Contains(stderr, "relaunch failed") {
 		t.Errorf("fallback child launch was not attempted: stderr %q", stderr)
 	}
-}
-
-// captureStderr runs fn with os.Stderr pointed at a pipe and returns what it
-// wrote.
-func captureStderr(t *testing.T, fn func()) string {
-	t.Helper()
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("pipe: %v", err)
-	}
-	orig := os.Stderr
-	os.Stderr = w
-	defer func() { os.Stderr = orig }()
-	fn()
-	if err := w.Close(); err != nil {
-		t.Fatalf("close pipe: %v", err)
-	}
-	out, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatalf("read pipe: %v", err)
-	}
-	return string(out)
 }
 
 func TestRespawnEnv_ReplacesInheritedRestartFlag(t *testing.T) {

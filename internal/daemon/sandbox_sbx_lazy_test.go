@@ -19,6 +19,13 @@ import (
 // lazy spawn of an sbx pane returns with a LIVE server — broadcastState
 // returns early on a nil one, which is why no earlier test reached the lock.
 func TestEnsurePaneSpawned_SbxPaneWithALiveServerDoesNotDeadlock(t *testing.T) {
+	// Overridden BEFORE the fixture, whose cleanup waits for the preparation
+	// goroutine: cleanups run last-in first-out, and that goroutine reads
+	// the seam when it respawns the pane.
+	prevSession := newSessionFn
+	newSessionFn = func(cols, rows int) apty.Session { return &fakeSession{} }
+	t.Cleanup(func() { newSessionFn = prevSession })
+
 	d, pane, r := sbxFixture(t, false)
 	pane.SandboxName = "team-box"
 	r.lsJSON = lsJSON(t, "team-box", pane.CWD)
@@ -28,9 +35,6 @@ func TestEnsurePaneSpawned_SbxPaneWithALiveServerDoesNotDeadlock(t *testing.T) {
 	d.gitCache = newGitCache()
 	d.server = ipc.NewServer(filepath.Join(t.TempDir(), "s.sock"), d.handleMessage, d.onClientDisconnect)
 
-	prevSession := newSessionFn
-	newSessionFn = func(cols, rows int) apty.Session { return &fakeSession{} }
-	t.Cleanup(func() { newSessionFn = prevSession })
 	pane.Pending.Store(true)
 
 	done := make(chan struct{})

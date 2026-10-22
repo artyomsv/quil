@@ -483,7 +483,16 @@ type Pane struct {
 	// Pending is true between restore and first spawn for a deferred pane: the
 	// model + ghost buffer exist but no PTY has been created yet. Runtime-only,
 	// never persisted. Cleared by ensurePaneSpawned.
-	Pending bool
+	//
+	// Atomic, NOT spawnMu-guarded, so that a reader never waits on a spawn in
+	// progress: spawnMu is held across the whole lazy spawn, and a spawn can
+	// announce itself (broadcastState) from inside that hold — an sbx pane
+	// standing down while its sandbox is prepared, a sandbox pane starting
+	// the sign-in. The state builder reading Pending under spawnMu was that
+	// announce waiting on its own caller, with stateMu held, so every later
+	// broadcast on the daemon (attach, new tab, new pane) waited behind it
+	// (2026-10-22, v1.93.0). spawnMu still serializes the spawn DECISION.
+	Pending atomic.Bool
 	// spawnMu serializes the lazy-spawn idempotency guard in ensurePaneSpawned.
 	// It is deliberately SEPARATE from PluginMu: spawnPane locks PluginMu
 	// synchronously on the calling goroutine (preassign_id + PluginState init),

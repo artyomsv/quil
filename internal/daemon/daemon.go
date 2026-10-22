@@ -482,9 +482,9 @@ func (d *Daemon) Start() error {
 	}
 
 	// Respawn panes for the restored workspace BEFORE the IPC server starts
-	// listening. respawnPanes writes pane.Pending (unlocked) and the lazy-spawn
-	// path (ensureTabSpawned → ensurePaneSpawned, reachable from a client's
-	// MsgSwitchTab) reads/writes it under spawnMu. Doing all spawn/defer
+	// listening. respawnPanes sets pane.Pending and the lazy-spawn path
+	// (ensureTabSpawned → ensurePaneSpawned, reachable from a client's
+	// MsgSwitchTab) decides on it under spawnMu. Doing all spawn/defer
 	// decisions before any client can connect makes those writes happen-before
 	// every possible concurrent reader — eliminating the data race and the logic
 	// gap where a tab switched-to before its Pending flag was set wouldn't spawn.
@@ -1343,7 +1343,7 @@ func (d *Daemon) respawnPanes() {
 			if tab.ID == active || pane.Eager {
 				d.spawnRestoredPane(pane)
 			} else {
-				pane.Pending = true
+				pane.Pending.Store(true)
 				log.Printf("respawn: deferring pane %s (type=%s, tab=%s)", pane.ID, pane.Type, tab.ID)
 			}
 		}
@@ -1474,11 +1474,11 @@ func (d *Daemon) spawnRestoredPane(pane *Pane) {
 func (d *Daemon) ensurePaneSpawned(pane *Pane) {
 	pane.spawnMu.Lock()
 	defer pane.spawnMu.Unlock()
-	if pane.PTY != nil || !pane.Pending {
+	if pane.PTY != nil || !pane.Pending.Load() {
 		return
 	}
 	d.spawnRestoredPane(pane)
-	pane.Pending = false
+	pane.Pending.Store(false)
 }
 
 // ensureTabSpawned spawns every deferred pane in a tab (handles splits).
@@ -5203,13 +5203,18 @@ func (d *Daemon) broadcastState() {
 // hand out a rev whose number disagrees with which content it describes.
 //
 // The rule this depends on: NEVER call buildWorkspaceState or broadcastState
-// while holding sm.mu, a pane's PluginMu or spawnMu, gitCache's lock,
-// clients.mu, or the update-info lock — this function takes every one of
-// them (through SnapshotView, masterID, clientCount, currentUpdateInfo), so
-// a caller already holding one would self-deadlock. One known pre-existing
-// path violates this — lazy restore's spawnPane, on the sandbox sign-in
-// announce, calls broadcastState while still holding the pane's own
-// spawnMu — and is tracked separately rather than fixed here.
+// while holding sm.mu, a pane's PluginMu, gitCache's lock, clients.mu, or the
+// update-info lock — this function takes every one of them (through
+// SnapshotView, masterID, clientCount, currentUpdateInfo), so a caller already
+// holding one would self-deadlock. A pane's spawnMu is deliberately NOT on
+// that list any more: the lazy spawn (ensurePaneSpawned) holds it across the
+// whole spawn, and a spawn announces itself from inside that hold — an sbx
+// pane standing down while its sandbox is prepared (beginSbxPrepare), a
+// sandbox pane starting the sign-in. While Pending was read here under
+// spawnMu, that announce waited on its own caller with stateMu held, and
+// every later broadcast on the daemon — attach, new tab, new pane — waited
+// behind it: a project switch onto a deferred sbx pane froze the whole
+// daemon (2026-10-22, v1.93.0). Pending is an atomic now, read with no lock.
 func (d *Daemon) buildWorkspaceState() ipc.WorkspaceState {
 	d.stateMu.Lock()
 	defer d.stateMu.Unlock()
@@ -5471,19 +5476,16 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			if includeOverlays && snapSizeSeq > 0 {
 				paneData.SizeSeq = snapSizeSeq
 			}
-			// Pending (deferred, not yet lazy-spawned) is spawnMu-guarded —
-			// read it the same way list_panes does. The TUI uses it to show the
-			// restore indicator on deferred panes and to re-arm the indicator
-			// when the pane actually spawns (Pending→running on tab switch).
-			// Broadcast-only: Pending is runtime state, never persisted to disk
-			// (gated on includeOverlays, like overlay panes).
-			if includeOverlays {
-				pane.spawnMu.Lock()
-				pending := pane.Pending
-				pane.spawnMu.Unlock()
-				if pending {
-					paneData.Pending = true
-				}
+			// Pending (deferred, not yet lazy-spawned) is an atomic, read the same
+			// way list_panes does — never under spawnMu, which is held across the
+			// whole lazy spawn: a spawn that announces itself from inside that
+			// hold would wait here on its own caller (see Pane.Pending). The TUI
+			// uses it to show the restore indicator on deferred panes and to
+			// re-arm the indicator when the pane actually spawns (Pending→running
+			// on tab switch). Broadcast-only: Pending is runtime state, never
+			// persisted to disk (gated on includeOverlays, like overlay panes).
+			if includeOverlays && pane.Pending.Load() {
+				paneData.Pending = true
 			}
 			// Broadcast-only restore-checklist hints (runtime, never persisted):
 			// the tracked session id and the ghost-buffer line count the TUI
@@ -7644,9 +7646,8 @@ func withExcerpt(e PaneEvent, excerpt string) PaneEvent {
 // deferred (Pending) pane has no PTY yet and must report Running=false +
 // Pending=true so an MCP client can see it exists without booting it.
 //
-// Locking: ExitCode and PTY are PluginMu-guarded; Pending is spawnMu-guarded.
-// We read each under its own lock in separate critical sections — never both
-// at once — so there's no lock-ordering hazard. This is a best-effort snapshot:
+// Locking: ExitCode and PTY are PluginMu-guarded; Pending is an atomic.
+// This is a best-effort snapshot:
 // a pane could in principle flip Pending→spawned between the two reads, but the
 // list is informational and the worst case is a momentarily stale flag.
 func (d *Daemon) buildPaneInfos() []ipc.PaneInfo {
@@ -7668,9 +7669,7 @@ func (d *Daemon) buildPaneInfos() []ipc.PaneInfo {
 			if typ == "" {
 				typ = "terminal"
 			}
-			pane.spawnMu.Lock()
-			pending := pane.Pending
-			pane.spawnMu.Unlock()
+			pending := pane.Pending.Load()
 			state, reason, lastIdle := paneWorkState(pane)
 			panes = append(panes, ipc.PaneInfo{
 				ID:           pane.ID,
@@ -7761,8 +7760,7 @@ func (d *Daemon) handleReadPaneOutputReq(conn *ipc.Conn, msg *ipc.Message) {
 
 // buildPaneStatus returns the status payload for a single pane without
 // spawning it. It mirrors the locking discipline of buildPaneInfos: PluginMu
-// guards Type/CWD/PTY/ExitCode; spawnMu guards Pending. Both critical
-// sections are kept separate (no lock-ordering hazard).
+// guards Type/CWD/PTY/ExitCode; Pending is an atomic.
 func (d *Daemon) buildPaneStatus(pane *Pane) ipc.PaneStatusRespPayload {
 	pane.PluginMu.Lock()
 	typ := pane.Type
@@ -7774,9 +7772,7 @@ func (d *Daemon) buildPaneStatus(pane *Pane) ipc.PaneStatusRespPayload {
 	if typ == "" {
 		typ = "terminal"
 	}
-	pane.spawnMu.Lock()
-	pending := pane.Pending
-	pane.spawnMu.Unlock()
+	pending := pane.Pending.Load()
 	state, reason, lastIdle := paneWorkState(pane)
 	// TabProjectID, not Tab(id).ProjectID: see handleDestroyTab's comment —
 	// the latter reads the field unlocked off the live *Tab pointer.

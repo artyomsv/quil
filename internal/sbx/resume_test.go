@@ -26,7 +26,7 @@ func TestHasTranscript_AsksTheSandboxWithTheIDAsAnArgument(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := &fakeRunner{answers: func([]string) (string, error) { return tc.out, nil }}
-			got, err := (Client{Bin: "sbx", Runner: f}).HasTranscript(context.Background(), "cf-x-1", testSessionID)
+			got, err := (Client{Bin: "sbx", Runner: f}).HasTranscript(context.Background(), "cf-x-1", "", nil, testSessionID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -41,13 +41,35 @@ func TestHasTranscript_AsksTheSandboxWithTheIDAsAnArgument(t *testing.T) {
 	}
 }
 
+// The probe runs where and how the agent will: the pane's folder and the
+// plugin's environment ride along, so a CLAUDE_CONFIG_DIR the plugin sets
+// (even a relative one) is the folder searched.
+func TestHasTranscript_RunsWithTheAgentsFolderAndEnvironment(t *testing.T) {
+	f := &fakeRunner{answers: func([]string) (string, error) { return "QUIL_SBX_TRANSCRIPT\n", nil }}
+	env := []string{"CLAUDE_CONFIG_DIR=.claude-cfg", "FOO=bar"}
+	got, err := (Client{Bin: "sbx", Runner: f}).HasTranscript(context.Background(), "cf-x-1", "/w/ticket", env, testSessionID)
+	if err != nil || !got {
+		t.Fatalf("HasTranscript = %v, %v", got, err)
+	}
+	want := [][]string{{"sbx", "exec", "-w", "/w/ticket", "-e", "CLAUDE_CONFIG_DIR=.claude-cfg", "-e", "FOO=bar",
+		"cf-x-1", "sh", "-c", transcriptScript, "sh", testSessionID}}
+	if !reflect.DeepEqual(f.calls, want) {
+		t.Errorf("calls =\n%v\nwant\n%v", f.calls, want)
+	}
+	// And it is the same prefix the agent's own exec gets.
+	exec := ExecArgs("cf-x-1", "/w/ticket", env, "claude", nil)
+	if !reflect.DeepEqual(exec[2:len(exec)-2], f.calls[0][2:len(f.calls[0])-6]) {
+		t.Errorf("probe %v and exec %v disagree on -w/-e", f.calls[0], exec)
+	}
+}
+
 // A failed exec is an error, never "no transcript": the caller would start a
 // fresh session under an id that may already hold one.
 func TestHasTranscript_FailedExecIsAnError(t *testing.T) {
 	f := &fakeRunner{answers: func([]string) (string, error) {
 		return "ERROR: sandbox not found", errors.New("exit status 1")
 	}}
-	_, err := (Client{Bin: "sbx", Runner: f}).HasTranscript(context.Background(), "cf-x-1", testSessionID)
+	_, err := (Client{Bin: "sbx", Runner: f}).HasTranscript(context.Background(), "cf-x-1", "", nil, testSessionID)
 	if err == nil || !strings.Contains(err.Error(), "sandbox not found") {
 		t.Errorf("err = %v", err)
 	}
@@ -65,7 +87,7 @@ func TestHasTranscript_RefusesUnsafeNamesAndIDs(t *testing.T) {
 		{"ok", "*"},
 		{"ok", testSessionID + "\n"},
 	} {
-		if _, err := c.HasTranscript(context.Background(), tc.name, tc.id); err == nil {
+		if _, err := c.HasTranscript(context.Background(), tc.name, "", nil, tc.id); err == nil {
 			t.Errorf("HasTranscript(%q, %q) was accepted", tc.name, tc.id)
 		}
 	}

@@ -34,9 +34,21 @@ const transcriptMarker = "QUIL_SBX_TRANSCRIPT"
 // metacharacters of the id's own.
 const transcriptScript = `d="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"; for f in "$d"/projects/*/"$1".jsonl; do if [ -f "$f" ]; then echo ` + transcriptMarker + `; break; fi; done`
 
-// TranscriptArgs is the probe's argv.
-func TranscriptArgs(name, id string) []string {
-	return []string{"exec", name, "sh", "-c", transcriptScript, "sh", id}
+// TranscriptArgs is the probe's argv. It runs with the SAME working
+// directory and environment the agent will get (ExecArgs), because the
+// plugin's environment may name claude's config directory
+// (CLAUDE_CONFIG_DIR, possibly relative): probing claude's default folder
+// then would miss a transcript the agent itself will find, and the start
+// would be refused (PR #272 review, M-1).
+func TranscriptArgs(name, workdir string, env []string, id string) []string {
+	out := []string{"exec"}
+	if workdir != "" {
+		out = append(out, "-w", workdir)
+	}
+	for _, e := range env {
+		out = append(out, "-e", e)
+	}
+	return append(out, name, "sh", "-c", transcriptScript, "sh", id)
 }
 
 // sessionIDRe is a claude session id: a UUID, as claude prints and accepts
@@ -49,9 +61,10 @@ var sessionIDRe = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]
 func ValidSessionID(id string) bool { return sessionIDRe.MatchString(id) }
 
 // HasTranscript asks the sandbox whether the session id has a transcript in
-// claude's project folders. It changes nothing; `sbx exec` starts a stopped
-// sandbox, which the pane's own exec would do next anyway.
-func (c Client) HasTranscript(ctx context.Context, name, id string) (bool, error) {
+// claude's project folders, as the agent started in workdir with env would
+// see them. It changes nothing; `sbx exec` starts a stopped sandbox, which
+// the pane's own exec would do next anyway.
+func (c Client) HasTranscript(ctx context.Context, name, workdir string, env []string, id string) (bool, error) {
 	if !ValidName(name) {
 		return false, errors.New("invalid sandbox name")
 	}
@@ -61,7 +74,7 @@ func (c Client) HasTranscript(ctx context.Context, name, id string) (bool, error
 	ctx, cancel := context.WithTimeout(ctx, attachProbeTimeout)
 	defer cancel()
 	var buf bytes.Buffer
-	if err := c.run(ctx, "", &buf, TranscriptArgs(name, id)...); err != nil {
+	if err := c.run(ctx, "", &buf, TranscriptArgs(name, workdir, env, id)...); err != nil {
 		return false, fmt.Errorf("sbx exec: %w%s", err, tail(buf.String()))
 	}
 	for _, l := range strings.Split(buf.String(), "\n") {

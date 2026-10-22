@@ -79,13 +79,15 @@ type scriptRunner struct {
 	// that probe instead.
 	transcript bool
 	probeErr   error
+	// probeGate, when set, holds the session probe until it is closed.
+	probeGate chan struct{}
 }
 
 func (r *scriptRunner) Run(_ context.Context, _ string, w io.Writer, argv ...string) error {
 	r.mu.Lock()
 	r.calls = append(r.calls, append([]string(nil), argv...))
 	exists, mountErr, lsJSON, writable := r.exists, r.mountErr, r.lsJSON, r.writable
-	transcript, probeErr := r.transcript, r.probeErr
+	transcript, probeErr, probeGate := r.transcript, r.probeErr, r.probeGate
 	r.mu.Unlock()
 	if len(argv) > 1 {
 		switch argv[1] {
@@ -107,6 +109,9 @@ func (r *scriptRunner) Run(_ context.Context, _ string, w io.Writer, argv ...str
 				io.WriteString(w, "QUIL_SBX_WRITABLE\n")
 			}
 			if slices.ContainsFunc(argv, func(a string) bool { return strings.Contains(a, "QUIL_SBX_TRANSCRIPT") }) {
+				if probeGate != nil {
+					<-probeGate
+				}
 				if probeErr != nil {
 					return probeErr
 				}

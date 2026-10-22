@@ -210,9 +210,16 @@ func (d *Daemon) startSbxPane(pane *Pane, ptySession apty.Session, p *plugin.Pan
 	// The pane's claude session: minted at the first start, resumed after
 	// it when the VM still holds its transcript (sandbox_sbx_resume.go).
 	// Asked here, on the preparation goroutine, because it is a VM round
-	// trip; the stop above has already started a stopped sandbox.
-	sessionArgs, err := d.sbxSessionArgs(context.Background(), pane, p, sbx.Client{Bin: bin, Runner: sbxRunner}, t.name)
+	// trip, with the folder and environment the agent itself gets, so the
+	// probe looks where the agent will. The pane is then checked again:
+	// it may have been closed while the VM answered.
+	ctx, cancel := d.sbxPrepareContext()
+	defer cancel()
+	sessionArgs, err := d.sbxSessionArgs(ctx, pane, p, sbx.Client{Bin: bin, Runner: sbxRunner}, t.name, workdir, p.Command.Env, args)
 	if err != nil {
+		return nil, false, fmt.Errorf("sbx sandbox: %w", err)
+	}
+	if err := d.sbxSpawnStillWanted(pane, gen); err != nil {
 		return nil, false, fmt.Errorf("sbx sandbox: %w", err)
 	}
 	args = append(args, sessionArgs...)

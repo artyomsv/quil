@@ -37,9 +37,12 @@ import (
 // docs/sandbox-panes.md.
 
 // sbxSessionArgs returns the arguments that give or give back the pane its
-// claude session, or nil for a plugin that does not use claude sessions. It
-// runs on the preparation goroutine — the probe is a VM round trip — and
-// never under PluginMu.
+// claude session, or nil for a plugin that does not use claude sessions.
+// args is the argument list the agent WILL run with (the pane's instance
+// arguments, else the plugin's own); workdir and env are the folder and
+// environment of that exec, which the probe shares. It runs on the
+// preparation goroutine — the probe is a VM round trip — and never under
+// PluginMu.
 //
 // A fresh pane gets a new id and the plugin's start arguments, with no
 // probe: an id minted this instant cannot have a transcript. A pane that
@@ -48,8 +51,14 @@ import (
 // not a fresh start: guessing would either refuse the start (129) or
 // silently abandon the conversation, and the exec that follows would most
 // likely fail the same way.
-func (d *Daemon) sbxSessionArgs(ctx context.Context, pane *Pane, p *plugin.PanePlugin, c sbx.Client, name string) ([]string, error) {
+func (d *Daemon) sbxSessionArgs(ctx context.Context, pane *Pane, p *plugin.PanePlugin, c sbx.Client, name, workdir string, env, args []string) ([]string, error) {
 	if !p.UsesClaudeSessions() || p.Persistence.Strategy != "preassign_id" {
+		return nil, nil
+	}
+	// The EFFECTIVE arguments decide, not only the instance ones: a plugin
+	// whose own args carry `--resume`/`--continue` would otherwise get a
+	// second session selector, which claude refuses (PR #272 review, M-2).
+	if instanceArgsNameSession(handStartBase(p.Command.Cmd), args) {
 		return nil, nil
 	}
 	pane.PluginMu.Lock()
@@ -58,13 +67,7 @@ func (d *Daemon) sbxSessionArgs(ctx context.Context, pane *Pane, p *plugin.PaneP
 	}
 	id := pane.PluginState["session_id"]
 	resumeID := pane.PluginState["resume_session_id"]
-	typed := instanceArgsNameSession(handStartBase(p.Command.Cmd), pane.InstanceArgs)
 	pane.PluginMu.Unlock()
-	if typed {
-		// The pane's own arguments name a session; a second one would be
-		// refused by claude outright (see resolveSpawnArgs).
-		return nil, nil
-	}
 
 	// A persisted id Quil did not write — a hand-edited snapshot — is
 	// dropped, never handed to the VM.
@@ -82,7 +85,7 @@ func (d *Daemon) sbxSessionArgs(ctx context.Context, pane *Pane, p *plugin.PaneP
 		return d.sbxFreshSession(pane, p, "first start"), nil
 	}
 
-	found, err := c.HasTranscript(ctx, name, id)
+	found, err := c.HasTranscript(ctx, name, workdir, env, id)
 	if err != nil {
 		return nil, fmt.Errorf("could not check the pane's claude session in sandbox %s: %w", name, err)
 	}
@@ -122,4 +125,43 @@ func sbxRecordSession(pane *Pane, id string) {
 	}
 	pane.PluginState["session_id"] = id
 	delete(pane.PluginState, "transcript_path")
+}
+
+// sbxSpawnStillWanted re-asks, after the session probe, the questions
+// respawnSbxPane asked before it: is the daemon still running, does the pane
+// still exist, and has nothing started it meanwhile. The probe can wait tens
+// of seconds (it may start a stopped sandbox), and a pane closed in that
+// window has already been torn down with no PTY to close — starting the
+// agent then would leave it running in the VM with nothing owning it (PR
+// #272 review, M-3). gen is the pane's PTY generation when the spawn began.
+func (d *Daemon) sbxSpawnStillWanted(pane *Pane, gen uint64) error {
+	if d.stopping() {
+		return fmt.Errorf("the daemon is shutting down")
+	}
+	if d.session.Pane(pane.ID) != pane {
+		return fmt.Errorf("the pane was closed while its claude session was checked")
+	}
+	pane.PluginMu.Lock()
+	cur := pane.ptyGen
+	pane.PluginMu.Unlock()
+	if cur != gen {
+		return fmt.Errorf("the pane was restarted while its claude session was checked")
+	}
+	return nil
+}
+
+// sbxPrepareContext is a context that ends with the daemon, for the VM round
+// trips a spawn makes outside the preparation goroutine's own context.
+func (d *Daemon) sbxPrepareContext() (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
+	if d.shutdown != nil {
+		go func() {
+			select {
+			case <-d.shutdown:
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+	}
+	return ctx, cancel
 }

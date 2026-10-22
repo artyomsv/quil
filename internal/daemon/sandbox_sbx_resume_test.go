@@ -2,9 +2,13 @@ package daemon
 
 import (
 	"errors"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
+	apty "github.com/artyomsv/quil/internal/pty"
 	"github.com/artyomsv/quil/internal/sbx"
 )
 
@@ -33,8 +37,128 @@ func sessionArgsOf(t *testing.T, d *Daemon, s *fakeSession) []string {
 	return nil
 }
 
+// probeCalls returns the session probes the sandbox was asked, in full.
+func (r *scriptRunner) probeCalls() [][]string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	script := sbx.TranscriptArgs("x", "", nil, sbxSessionA)[4]
+	var out [][]string
+	for _, c := range r.calls {
+		if len(c) > 2 && c[1] == "exec" && slices.Contains(c, script) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 func (r *scriptRunner) probed(id string) bool {
-	return r.ran("/fake/sbx", "exec", "team-box", "sh", "-c", sbx.TranscriptArgs("team-box", id)[4], "sh", id)
+	for _, c := range r.probeCalls() {
+		if c[len(c)-1] == id {
+			return true
+		}
+	}
+	return false
+}
+
+// The probe looks where the agent will: it runs in the pane's folder with
+// the plugin's environment, so a CLAUDE_CONFIG_DIR the plugin sets is the
+// folder searched — probing claude's default folder would miss the
+// transcript and the restart would be refused.
+func TestSpawnPane_SbxProbeSharesTheAgentsFolderAndEnvironment(t *testing.T) {
+	d, pane, r := sbxResumeFixture(t)
+	p := d.registry.Get("claude-code")
+	p.Command.Env = append(slices.Clone(p.Command.Env), "CLAUDE_CONFIG_DIR=.claude-cfg")
+	pane.PluginState = map[string]string{"session_id": sbxSessionA}
+	r.transcript = true
+	s := attachRun(t, d, pane)
+	if s == nil {
+		t.Fatalf("the pane was not started; error = %q", pane.SpawnError)
+	}
+	probes := r.probeCalls()
+	if len(probes) != 1 {
+		t.Fatalf("probes = %v, want one", probes)
+	}
+	want := append([]string{"/fake/sbx"}, sbx.TranscriptArgs("team-box", pane.CWD, p.Command.Env, sbxSessionA)...)
+	if !reflect.DeepEqual(probes[0], want) {
+		t.Errorf("probe =\n%v\nwant\n%v", probes[0], want)
+	}
+	// The exec that follows carries the same folder and environment (plus
+	// the per-spawn tag).
+	if !slices.Contains(s.startArgs, "CLAUDE_CONFIG_DIR=.claude-cfg") || slices.Index(s.startArgs, "-w") < 0 {
+		t.Errorf("exec args = %v, want the plugin env and -w", s.startArgs)
+	}
+}
+
+// A plugin whose OWN arguments already name a session (`--continue`, a
+// configured `--resume`) gets no second selector, exactly as instance
+// arguments naming one do.
+func TestSpawnPane_SbxPluginDefaultSessionSelectorGetsNoSecondOne(t *testing.T) {
+	d, pane, r := sbxResumeFixture(t)
+	p := d.registry.Get("claude-code")
+	p.Command.Args = append(slices.Clone(p.Command.Args), "--continue")
+	s := attachRun(t, d, pane)
+	if s == nil {
+		t.Fatalf("the pane was not started; error = %q", pane.SpawnError)
+	}
+	if got := sessionArgsOf(t, d, s); !reflect.DeepEqual(got, []string{"--continue"}) {
+		t.Errorf("args after the command = %v, want only the plugin's own [--continue]", got)
+	}
+	if len(r.probeCalls()) != 0 || pane.PluginState["session_id"] != "" {
+		t.Errorf("a plugin-selected session was probed or recorded: probes=%v session_id=%q", r.probeCalls(), pane.PluginState["session_id"])
+	}
+}
+
+// A pane closed while the VM is still answering the probe is not started:
+// its teardown found no PTY to close, so an agent started now would run in
+// the VM with nothing owning it.
+func TestSpawnPane_SbxPaneClosedDuringTheProbeIsNotStarted(t *testing.T) {
+	d, pane, r := sbxResumeFixture(t)
+	pane.PluginState = map[string]string{"session_id": sbxSessionA}
+	r.transcript = true
+	gate := make(chan struct{})
+	r.probeGate = gate
+
+	respawned := make(chan *fakeSession, 1)
+	prevSpawn := sbxSpawnFn
+	sbxSpawnFn = func(d *Daemon, p *Pane, wrap func(apty.Session) apty.Session) error {
+		s := &fakeSession{}
+		err := d.spawnPane(p, wrap(s), false)
+		respawned <- s
+		return err
+	}
+	t.Cleanup(func() { sbxSpawnFn = prevSpawn })
+	if err := d.spawnPane(pane, &fakeSession{}, false); err != nil {
+		t.Fatalf("spawnPane = %v", err)
+	}
+	// Wait until the probe is in flight, then close the pane under it.
+	deadline := time.Now().Add(5 * time.Second)
+	for len(r.probeCalls()) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("the probe never ran; calls = %v", r.calls)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := d.session.DestroyPane(pane.ID); err != nil {
+		t.Fatal(err)
+	}
+	close(gate)
+	d.sbxPrep.wait()
+
+	var s *fakeSession
+	select {
+	case s = <-respawned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the respawn never finished")
+	}
+	if s.startCmd != "" {
+		t.Fatalf("the agent was started (%s %v) for a pane closed during the probe", s.startCmd, s.startArgs)
+	}
+	pane.PluginMu.Lock()
+	pty := pane.PTY
+	pane.PluginMu.Unlock()
+	if pty != nil {
+		t.Error("a PTY was installed on the closed pane")
+	}
 }
 
 // A first start mints the session id, keeps it on the pane (so the host

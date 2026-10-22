@@ -803,10 +803,21 @@ in `workspace.json` — the host keeps the id, the VM keeps the transcript)
 and passes the plugin's `start_args` (`--session-id <id>`). Every later
 start — Alt+R, a daemon restart, a restored workspace — asks the VM whether
 `<id>.jsonl` exists under claude's config dir (`sbx.Client.HasTranscript`:
-`sbx exec <name> sh -c <script> sh <id>`, the id an ARGUMENT, a marker line
-the answer, `CLAUDE_CONFIG_DIR` honoured, `~/.claude` the default) and
-passes `--resume <id>` when it does, `--session-id <id>` again when it does
-not. **Neither argument may be the default**: claude refuses `--resume` for
+`sbx exec [-w <cwd>] [-e <plugin env>…] <name> sh -c <script> sh <id>`, the
+id an ARGUMENT, a marker line the answer, `CLAUDE_CONFIG_DIR` honoured,
+`~/.claude` the default) and passes `--resume <id>` when it does,
+`--session-id <id>` again when it does not. **The probe runs with the
+agent's own folder and plugin environment** — a plugin env naming
+`CLAUDE_CONFIG_DIR` (even relative) would otherwise make the probe look in
+the default folder, miss, and have the restart refused (PR #272 review,
+M-1). **The guard against a second session selector reads the EFFECTIVE
+args** (instance args, else the plugin's own): a plugin whose `args` carry
+`--continue` gets no `--session-id` (M-2). **After the probe the pane is
+re-checked** (`sbxSpawnStillWanted`: daemon not stopping, pane still
+registered, `ptyGen` unchanged) before `Start`: the probe can wait tens of
+seconds, and a pane closed meanwhile was torn down with no PTY to close, so
+an agent started then would run in the VM with nothing owning it (M-3). The
+probe's context ends with the daemon (`sbxPrepareContext`). **Neither argument may be the default**: claude refuses `--resume` for
 an id it never persisted (a restart on the trust screen) and `--session-id`
 for one it did (exit 129), which is why the earlier "never pass a session id"
 rule existed. A failed probe FAILS the start with the reason on the pane —

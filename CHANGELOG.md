@@ -11,6 +11,17 @@ version section here and deletes them.
 
 ## [Unreleased]
 
+## [1.92.2] - 2026-10-22
+
+### Fixed
+- **Attaching a pane to an existing sbx sandbox picks a folder the sandbox
+  holds.** The create dialog kept the folder you had browsed to, so a pane
+  opened in a parent folder (the repository root, say) was refused at start
+  with "is not in a writable folder of sbx sandbox". When ←/→ lands on a
+  sandbox that does not list the current folder, the dialog now moves the
+  folder to that sandbox's main workspace. You can still browse elsewhere
+  before pressing Continue; Quil checks the folder again at start.
+
 ## [1.92.1] - 2026-10-21
 
 ### Changed

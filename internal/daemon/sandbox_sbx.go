@@ -43,12 +43,12 @@ import (
 // and several panes can share one sandbox, one process each, which is Quil's
 // pane model.
 //
-// What an sbx pane does NOT get, deliberately, in this first version: Quil's
-// hook integration (notifications, session-id tracking, resume). Those depend
-// on a hook binary and a spool directory mounted into the cage, and the mounts
-// belong to the user's environment file, not to Quil. An sbx pane therefore
-// starts the agent fresh on every spawn and never passes a session id it could
-// not later resume.
+// What an sbx pane does NOT get, deliberately: Quil's hook integration
+// (notifications, work state, session-id tracking of /clear and /resume).
+// Those depend on a hook binary and a spool directory mounted into the cage,
+// and the mounts belong to the user's environment file, not to Quil. The
+// claude session itself IS kept — its id on the host, its transcript in the
+// VM — so a restart resumes the conversation; see sandbox_sbx_resume.go.
 //
 // Closing a pane never removes the sandbox: it is named, shared by every pane
 // that names it, and holds whatever the set-up steps installed. Recreating it
@@ -207,6 +207,22 @@ func (d *Daemon) startSbxPane(pane *Pane, ptySession apty.Session, p *plugin.Pan
 	if sbxHostOSFn() == "windows" {
 		workdir = ""
 	}
+	// The pane's claude session: minted at the first start, resumed after
+	// it when the VM still holds its transcript (sandbox_sbx_resume.go).
+	// Asked here, on the preparation goroutine, because it is a VM round
+	// trip, with the folder and environment the agent itself gets, so the
+	// probe looks where the agent will. The pane is then checked again:
+	// it may have been closed while the VM answered.
+	ctx, cancel := d.sbxPrepareContext()
+	defer cancel()
+	sessionArgs, err := d.sbxSessionArgs(ctx, pane, p, sbx.Client{Bin: bin, Runner: sbxRunner}, t.name, workdir, p.Command.Env, args)
+	if err != nil {
+		return nil, false, fmt.Errorf("sbx sandbox: %w", err)
+	}
+	if err := d.sbxSpawnStillWanted(pane, gen); err != nil {
+		return nil, false, fmt.Errorf("sbx sandbox: %w", err)
+	}
+	args = append(args, sessionArgs...)
 	// A fresh tag per spawn: closing this session stops exactly the
 	// processes carrying it (see sbx.TagEnv).
 	tag := sbx.NewTag(pane.ID)

@@ -258,10 +258,13 @@ func TestSpawnPane_SbxPreparesThenExecs(t *testing.T) {
 	if len(s.startArgs) < len(want) || !reflect.DeepEqual(s.startArgs[:len(want)], want) {
 		t.Errorf("args = %v, want prefix %v", s.startArgs, want)
 	}
-	for _, a := range s.startArgs {
-		if a == "--settings" || a == "--session-id" {
-			t.Errorf("an sbx pane was handed %s, which names a host path or a session it cannot resume", a)
-		}
+	if slices.Contains(s.startArgs, "--settings") {
+		t.Errorf("an sbx pane was handed --settings, which names a host path: %v", s.startArgs)
+	}
+	// The session id is Quil's own, kept on the pane so a restart can resume
+	// it (sandbox_sbx_resume.go); a profile pane gets one like an attached one.
+	if i := slices.Index(s.startArgs, "--session-id"); i < 0 || i+1 >= len(s.startArgs) || s.startArgs[i+1] != pane.PluginState["session_id"] {
+		t.Errorf("args = %v, want --session-id %q", s.startArgs, pane.PluginState["session_id"])
 	}
 }
 

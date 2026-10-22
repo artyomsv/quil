@@ -876,3 +876,19 @@ for destroy, replace, restart and daemon Stop (which then waits
 PREFIX stop (`<pane id>-`) for each pane before respawning it; the new tag is
 minted after, so it cannot match. Measured on sbx 0.48: 0.46 s per stop, exact
 and prefix both touch only their own processes.
+
+**A pasted image reaches an sbx pane through the daemon** (`paste_image_req`,
+`internal/daemon/paste_image.go`, `internal/sbx/paste.go`, TUI side
+`internal/tui/paste_image.go`). The ordinary paste saves a PNG on the TUI's
+machine and types its host path, which names nothing in the VM. For a pane
+whose `SandboxKind` is sbx the TUI sends the bytes instead (the TUI may be on
+another machine), the daemon `sbx cp`s them to `/tmp/quil-paste/<name>` in the
+sandbox the RUNNING session names (`sbxSession.name` — never re-derived from a
+profile), then runs `chmod` as root: measured on 0.48, `sbx cp` leaves a
+root-owned copy with the source's mode, and the agent (uid 1000) is refused a
+0600 file. One image, one sandbox — mounting the paste folder was rejected
+because every sandbox would see every screenshot. Daemon-wide single-flight
+(`pasteCopying`); size and PNG magic are refused before the slot. The TUI
+types only a path of the exact shape `sbx.PasteDir` + `ValidPasteName`, since
+the answer can come from another machine and is typed into a PTY. Docker
+sandbox panes still get the host path (`techdebt/3-2-docker-sandbox-pane-image-paste.md`).

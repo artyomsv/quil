@@ -894,6 +894,7 @@ type Model struct {
 	worktreeScroll    int                // scroll offset for the visible window of the expanded worktree list
 	worktreeFilter    string             // type-to-search text narrowing the worktree list; "" = the whole list
 	reqGen            int                // monotonic instance id source for repoScan/browse/worktrees; see nextReqGen
+	pasteImageReqs    map[string]string  // paste_image_req id → pane id awaiting the path; see paste_image.go
 	sessionScanCWD    string             // directory sessionRows belong to
 	sessionState      sessionScanState   // request lifecycle for the session field
 	sessionError      string             // daemon-reported error (sessionScanFailed)
@@ -3172,6 +3173,22 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		m.sendClipboardToPaneID(msg.paneID, msg.text)
 		// Schedule re-render after PTY echo arrives to update cursor position
 		return m, tea.Tick(100*time.Millisecond, func(_ time.Time) tea.Msg { return pasteRefreshMsg{} })
+
+	case sandboxImagePasteMsg:
+		return m, m.startSandboxImagePaste(msg.paneID, msg.png)
+
+	case pasteImageRespMsg:
+		cmd := m.applyPasteImageResp(msg)
+		if msg.local {
+			return m, cmd
+		}
+		// An IPC response: MUST re-arm the listen loop.
+		return m, tea.Batch(m.listenForMessages(), cmd)
+
+	case pasteImageTimeoutMsg:
+		// A local timer: does NOT re-arm the listen loop.
+		m.applyPasteImageTimeout(msg.gen)
+		return m, nil
 
 	case pasteRefreshMsg:
 		return m, nil // triggers re-render with updated VT emulator cursor
@@ -9291,6 +9308,14 @@ func (m Model) listenForMessages() tea.Cmd {
 			}
 			return createPaneRespMsg{Resp: resp, Dest: msg.Origin}
 
+		case ipc.MsgPasteImageResp:
+			var resp ipc.PasteImageRespPayload
+			if err := msg.DecodePayload(&resp); err != nil {
+				log.Printf("paste image resp: decode: %v", err)
+				return listenContinueMsg{}
+			}
+			return pasteImageRespMsg{Resp: resp, Gen: msg.ID}
+
 		case ipc.MsgDirsExistResp:
 			var payload ipc.DirsExistRespPayload
 			if err := msg.DecodePayload(&payload); err != nil {
@@ -10162,6 +10187,9 @@ func (m Model) pasteClipboard() tea.Cmd {
 		return nil
 	}
 	paneID := pane.ID
+	// Read here, with the pane: an sbx pane gets its image through the daemon
+	// (paste_image.go), because a path on this machine names nothing in the VM.
+	inSbx := pane.SandboxKind == sandboxKindSbx
 	return func() tea.Msg {
 		logger.Debug("pasteClipboard: invoked")
 		// Try text first. If text is non-empty, paste it as-is. Otherwise
@@ -10172,6 +10200,16 @@ func (m Model) pasteClipboard() tea.Cmd {
 		// can pick it up via its file-reading tools.
 		text, textErr := clipboardReadText() // text-only error is non-fatal — fall through
 		logger.Debug("pasteClipboard: clipboard.Read() text_len=%d err=%v", len(text), textErr)
+		if text == "" && inSbx {
+			png, err := clipboardReadImage()
+			if err == nil && len(png) > 0 {
+				return sandboxImagePasteMsg{paneID: paneID, png: png}
+			}
+			if err != nil && !errors.Is(err, clipboard.ErrNoImage) {
+				log.Printf("clipboard image: read failed: %v", err)
+			}
+			return clipboardPastedMsg{paneID: paneID, passthrough: true}
+		}
 		if text == "" {
 			logger.Debug("pasteClipboard: text empty, attempting image fallback")
 			if path, ok := m.tryPasteClipboardImage(); ok {

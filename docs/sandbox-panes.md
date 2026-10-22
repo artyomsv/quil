@@ -760,6 +760,18 @@ different sandbox.
 sandbox. If the tool that owns the sandbox keeps the login up to date, that
 tool's own connect step does it, not Quil.
 
+### Pasting a screenshot
+
+Paste an image (Ctrl+V, Ctrl+Alt+V or F8) into an sbx pane as into any other
+pane. Quil copies the image into the pane's sandbox, as
+`/tmp/quil-paste/quil-paste-<time>-<random>.png`, and types that path. The agent
+reads it there. Only that one image goes into that one sandbox; nothing is
+saved on your machine for it.
+
+The copy makes the file readable by every user inside the VM (`sbx cp` leaves
+it owned by root). It needs the agent to be running; a paste into an exited
+pane says so in the status bar.
+
 ### What an sbx pane does not have (yet)
 
 - **No notifications, work spinner, input history or session resume.** Those

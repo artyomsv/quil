@@ -230,6 +230,11 @@ const (
 	MsgSandboxCapReq  = "sandbox_cap_req"
 	MsgSandboxCapResp = "sandbox_cap_resp"
 
+	// Pasted image into a sandbox pane (TUI → daemon, answered by ID). See
+	// PasteImageReqPayload.
+	MsgPasteImageReq  = "paste_image_req"
+	MsgPasteImageResp = "paste_image_resp"
+
 	// Auto-update (TUI ⇄ daemon)
 	MsgStageUpdateReq  = "stage_update_req"  // TUI → daemon (empty payload)
 	MsgStageUpdateResp = "stage_update_resp" // daemon → TUI (unicast)

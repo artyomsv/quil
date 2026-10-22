@@ -52,6 +52,8 @@ var classes = map[string]Class{
 	ipc.MsgBrowseDirReq: ClassAct, ipc.MsgDirsExistReq: ClassAct, ipc.MsgGitReposReq: ClassAct,
 	ipc.MsgKubeCtxReq: ClassAct, ipc.MsgWorktreeListReq: ClassAct, ipc.MsgWorktreeStatusReq: ClassAct,
 	ipc.MsgClaudeSessionsReq: ClassAct, ipc.MsgClaudeSessionDetailReq: ClassAct,
+	// act — writes into the pane's sandbox
+	ipc.MsgPasteImageReq: ClassAct,
 	ipc.MsgPaneHistoryReq: ClassAct, ipc.MsgPaneHistoryEntryReq: ClassAct, ipc.MsgResourceReportReq: ClassAct,
 
 	// admin
@@ -73,7 +75,7 @@ var neverAccepted = map[string]bool{
 	ipc.MsgKillProcessResp: true, ipc.MsgPaneHistoryResp: true, ipc.MsgPaneHistoryEntryResp: true,
 	ipc.MsgPaneSearchResp: true, ipc.MsgClaudeSessionsResp: true, ipc.MsgClaudeSessionDetailResp: true,
 	ipc.MsgBrowseDirResp: true, ipc.MsgGitReposResp: true, ipc.MsgWorktreeListResp: true,
-	ipc.MsgWorktreeStatusResp: true, ipc.MsgDirsExistResp: true, ipc.MsgSandboxCapResp: true,
+	ipc.MsgWorktreeStatusResp: true, ipc.MsgDirsExistResp: true, ipc.MsgSandboxCapResp: true, ipc.MsgPasteImageResp: true,
 	ipc.MsgStageUpdateResp: true, ipc.MsgKubeCtxResp: true, ipc.MsgPluginListResp: true,
 	ipc.MsgListProjectsResp: true, ipc.MsgCreateProjectResp: true, ipc.MsgProjectOpResp: true,
 	ipc.MsgTabOpResp: true, ipc.MsgPaneOpResp: true, ipc.MsgCreateTabResp: true,

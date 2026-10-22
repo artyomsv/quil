@@ -133,25 +133,26 @@ func TestRespawnPanes_DefersNonActiveNonEager(t *testing.T) {
 
 	d.respawnPanes()
 
-	if p := d.session.Pane("pane-0000000a"); p.PTY == nil || p.Pending {
+	if p := d.session.Pane("pane-0000000a"); p.PTY == nil || p.Pending.Load() {
 		t.Errorf("active-tab pane should be spawned, not pending")
 	}
-	if p := d.session.Pane("pane-0000000e"); p.PTY == nil || p.Pending {
+	if p := d.session.Pane("pane-0000000e"); p.PTY == nil || p.Pending.Load() {
 		t.Errorf("eager pane should be spawned")
 	}
-	if p := d.session.Pane("pane-0000000b"); p.PTY != nil || !p.Pending {
+	if p := d.session.Pane("pane-0000000b"); p.PTY != nil || !p.Pending.Load() {
 		t.Errorf("non-active non-eager pane should be pending, not spawned")
 	}
 }
 
 func TestEnsurePaneSpawned_IsIdempotent(t *testing.T) {
 	d := newTestDaemon(t)
-	pane := &Pane{ID: "pane-0000000c", TabID: "tab-0000000c", Type: "terminal", Pending: true}
+	pane := &Pane{ID: "pane-0000000c", TabID: "tab-0000000c", Type: "terminal"}
+	pane.Pending.Store(true)
 	d.session.RestoreTab(&Tab{ID: "tab-0000000c", Name: "C", Panes: []string{"pane-0000000c"}}, []*Pane{pane})
 
 	d.ensurePaneSpawned(pane)
 	first := pane.PTY
-	if first == nil || pane.Pending {
+	if first == nil || pane.Pending.Load() {
 		t.Fatalf("first ensure should spawn and clear Pending")
 	}
 	d.ensurePaneSpawned(pane)
@@ -183,7 +184,8 @@ func TestEnsurePaneSpawned_ConcurrentSpawnsOnce(t *testing.T) {
 	t.Cleanup(func() { newSessionFn = prev })
 
 	d := New(config.Default())
-	pane := &Pane{ID: "pane-0000000d", TabID: "tab-0000000d", Type: "terminal", Pending: true}
+	pane := &Pane{ID: "pane-0000000d", TabID: "tab-0000000d", Type: "terminal"}
+	pane.Pending.Store(true)
 	d.session.RestoreTab(&Tab{ID: "tab-0000000d", Name: "D", Panes: []string{"pane-0000000d"}}, []*Pane{pane})
 
 	const n = 16
@@ -210,10 +212,7 @@ func TestEnsurePaneSpawned_ConcurrentSpawnsOnce(t *testing.T) {
 	if gotPTY == nil {
 		t.Errorf("pane should be spawned (PTY non-nil) after concurrent ensure")
 	}
-	pane.spawnMu.Lock()
-	pending := pane.Pending
-	pane.spawnMu.Unlock()
-	if pending {
+	if pane.Pending.Load() {
 		t.Errorf("Pending should be cleared after spawn")
 	}
 }
@@ -237,9 +236,10 @@ func TestEnsurePaneSpawned_ConcurrentWithSnapshot_NoRace(t *testing.T) {
 
 	pane := &Pane{
 		ID: "pane-00000011", TabID: "tab-00000011", Type: "terminal",
-		CWD: missingCWD, Pending: true,
+		CWD: missingCWD,
 		OutputBuf: ringbuf.NewRingBuffer(d.session.bufSize),
 	}
+	pane.Pending.Store(true)
 	d.session.RestoreTab(
 		&Tab{ID: "tab-00000011", Name: "R", Panes: []string{"pane-00000011"}},
 		[]*Pane{pane},
@@ -274,9 +274,7 @@ func TestEnsurePaneSpawned_ConcurrentWithSnapshot_NoRace(t *testing.T) {
 	go func() {
 		defer writerWG.Done()
 		for i := 0; i < 500; i++ {
-			pane.spawnMu.Lock()
-			pane.Pending = true
-			pane.spawnMu.Unlock()
+			pane.Pending.Store(true)
 			pane.PluginMu.Lock()
 			pane.PTY = nil
 			pane.CWD = missingCWD
@@ -300,10 +298,7 @@ func TestEnsurePaneSpawned_ConcurrentWithSnapshot_NoRace(t *testing.T) {
 	if gotType != "terminal" {
 		t.Errorf("Type unexpectedly changed: got %q want %q", gotType, "terminal")
 	}
-	pane.spawnMu.Lock()
-	pending := pane.Pending
-	pane.spawnMu.Unlock()
-	if pending {
+	if pane.Pending.Load() {
 		t.Errorf("Pending should be cleared after lazy spawn")
 	}
 }
@@ -321,9 +316,10 @@ func TestSnapshot_PreservesDeferredPaneGhost(t *testing.T) {
 	}
 
 	pane := &Pane{
-		ID: "pane-0000000f", TabID: "tab-0000000f", Type: "terminal", Pending: true,
+		ID: "pane-0000000f", TabID: "tab-0000000f", Type: "terminal",
 		OutputBuf: ringbuf.NewRingBuffer(d.session.bufSize),
 	}
+	pane.Pending.Store(true)
 	pane.OutputBuf.Write(ghost) // restore pre-fills OutputBuf from the ghost — replicate that
 	d.session.RestoreTab(&Tab{ID: "tab-0000000f", Name: "F", Panes: []string{"pane-0000000f"}}, []*Pane{pane})
 
@@ -355,9 +351,10 @@ func TestSnapshot_PreservesEmptyDeferredPaneGhost(t *testing.T) {
 	// (len==0 guard); the on-disk ghost must SURVIVE because the pane is still
 	// an active pane id and CleanBuffers must not delete it.
 	pane := &Pane{
-		ID: "pane-00000010", TabID: "tab-00000010", Type: "terminal", Pending: true,
+		ID: "pane-00000010", TabID: "tab-00000010", Type: "terminal",
 		OutputBuf: ringbuf.NewRingBuffer(d.session.bufSize),
 	}
+	pane.Pending.Store(true)
 	d.session.RestoreTab(&Tab{ID: "tab-00000010", Name: "G", Panes: []string{"pane-00000010"}}, []*Pane{pane})
 
 	d.snapshot()
@@ -373,9 +370,9 @@ func TestSnapshot_PreservesEmptyDeferredPaneGhost(t *testing.T) {
 
 func TestListPanes_DeferredPaneReportsNotRunning(t *testing.T) {
 	d := newTestDaemon(t)
-	d.session.RestoreTab(&Tab{ID: "tab-0000000f", Name: "F", Panes: []string{"pane-0000000f"}}, []*Pane{
-		{ID: "pane-0000000f", TabID: "tab-0000000f", Type: "terminal", Pending: true},
-	})
+	deferred := &Pane{ID: "pane-0000000f", TabID: "tab-0000000f", Type: "terminal"}
+	deferred.Pending.Store(true)
+	d.session.RestoreTab(&Tab{ID: "tab-0000000f", Name: "F", Panes: []string{"pane-0000000f"}}, []*Pane{deferred})
 	infos := d.buildPaneInfos()
 	var found bool
 	for _, pi := range infos {
@@ -473,11 +470,11 @@ func TestRestoreWorkspace_EagerRoundTrip(t *testing.T) {
 func TestPaneStatus_DeferredPaneReportsNotRunning(t *testing.T) {
 	d := newTestDaemon(t)
 	pane := &Pane{
-		ID:      "pane-00000022",
-		TabID:   "tab-00000022",
-		Type:    "terminal",
-		Pending: true,
+		ID:    "pane-00000022",
+		TabID: "tab-00000022",
+		Type:  "terminal",
 	}
+	pane.Pending.Store(true)
 	d.session.RestoreTab(
 		&Tab{ID: "tab-00000022", Name: "S", Panes: []string{"pane-00000022"}},
 		[]*Pane{pane},

@@ -389,7 +389,8 @@ func TestHandleSwitchProjectSpawnsTheIncomingProjectsTab(t *testing.T) {
 	// The shape a lazy restore leaves behind: everything outside the active
 	// tab is deferred.
 	paneA.Type, paneB.Type = "terminal", "terminal"
-	paneA.Pending, paneB.Pending = true, true
+	paneA.Pending.Store(true)
+	paneB.Pending.Store(true)
 
 	if _, ok := d.session.SwitchProject(a.ID); !ok {
 		t.Fatal("SwitchProject(a) = false")
@@ -402,7 +403,7 @@ func TestHandleSwitchProjectSpawnsTheIncomingProjectsTab(t *testing.T) {
 	msg, _ := ipc.NewMessage(ipc.MsgSwitchProject, ipc.SwitchProjectPayload{ProjectID: b.ID})
 	d.handleMessage(nil, msg)
 
-	if paneB.PTY == nil || paneB.Pending {
+	if paneB.PTY == nil || paneB.Pending.Load() {
 		t.Error("switching project left the incoming tab's panes unspawned — the user " +
 			"lands on a restore indicator with no process behind it")
 	}

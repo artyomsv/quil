@@ -364,7 +364,7 @@ func TestHandleMoveTab_SpawnsTheSourceSuccessorWhenTheActiveTabMovesOut(t *testi
 	// The shape a lazy restore leaves behind: everything outside the active
 	// tab is deferred.
 	successorPane.Type = "terminal"
-	successorPane.Pending = true
+	successorPane.Pending.Store(true)
 
 	d.session.SwitchProject(src.ID)
 	d.session.SwitchTab(movingTab.ID)
@@ -388,7 +388,7 @@ func TestHandleMoveTab_SpawnsTheSourceSuccessorWhenTheActiveTabMovesOut(t *testi
 		t.Fatalf("ActiveTabID() = %q after the move, want the promoted successor %q",
 			got, successorTab.ID)
 	}
-	if successorPane.PTY == nil || successorPane.Pending {
+	if successorPane.PTY == nil || successorPane.Pending.Load() {
 		t.Error("moving the active tab out left its promoted successor unspawned — the " +
 			"user lands on a restore indicator with no process behind it")
 	}
@@ -421,7 +421,7 @@ func TestHandleMoveTab_SpawnsTheSourceSuccessorForAnotherClientsProject(t *testi
 	// The shape a lazy restore leaves behind: everything outside the GLOBAL
 	// active tab is deferred — and T is not it, dst's own tab is.
 	tPane.Type = "terminal"
-	tPane.Pending = true
+	tPane.Pending.Store(true)
 
 	// Client B's action: switch the daemon GLOBALLY to the destination
 	// project, which has nothing to do with client A's own source-project
@@ -451,7 +451,7 @@ func TestHandleMoveTab_SpawnsTheSourceSuccessorForAnotherClientsProject(t *testi
 	if srcActive, ok := d.session.ProjectActiveTab(src.ID); !ok || srcActive != tTab.ID {
 		t.Fatalf("src.ActiveTab after the move = %q, want the promoted successor %q", srcActive, tTab.ID)
 	}
-	if tPane.PTY == nil || tPane.Pending {
+	if tPane.PTY == nil || tPane.Pending.Load() {
 		t.Error("moving S out of a project that was never the GLOBAL active one left T " +
 			"unspawned — client A's own project view shows a restore indicator with no " +
 			"process behind it")

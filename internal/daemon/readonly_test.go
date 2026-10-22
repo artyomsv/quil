@@ -98,9 +98,7 @@ func deferredPane(t *testing.T, h *authHarness, restored string) (*Pane, *atomic
 	pane.PluginMu.Lock()
 	pane.Type = "terminal"
 	pane.PluginMu.Unlock()
-	pane.spawnMu.Lock()
-	pane.Pending = true
-	pane.spawnMu.Unlock()
+	pane.Pending.Store(true)
 	if restored != "" {
 		pane.OutputBuf.Write([]byte(restored))
 	}

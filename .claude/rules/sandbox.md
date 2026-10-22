@@ -473,6 +473,12 @@ client drops it. That is why the first version of the sign-in left a black
 rectangle after the browser step, with the message sitting unread in the
 daemon's buffer.
 
+That announce runs INSIDE the lazy spawn too — `ensurePaneSpawned` holds the
+pane's `spawnMu` across it — so nothing the state builder takes may be
+`spawnMu`: `Pane.Pending` is an atomic for exactly that reason (2026-10-22,
+v1.93.0: a project switch onto a deferred sbx pane froze every broadcast on
+the daemon). See `daemon-lifecycle.md`'s "Workspace restore".
+
 **`respawnAfterSignIn` refuses to spawn once the daemon is stopping.** The
 flight is an untracked goroutine holding a five-minute budget on a human in a
 browser, so a stop can land while it waits; spawning after that point starts

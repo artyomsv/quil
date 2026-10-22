@@ -238,16 +238,14 @@ func (d *Daemon) oldWorkspaceStateMap(activeTab string, tabs []*Tab, panesByTab 
 			if includeOverlays && snapSizeSeq > 0 {
 				paneData["size_seq"] = snapSizeSeq
 			}
-			// Pending (deferred, not yet lazy-spawned) is spawnMu-guarded —
+			// Pending (deferred, not yet lazy-spawned) is an atomic —
 			// read it the same way list_panes does. The TUI uses it to show the
 			// restore indicator on deferred panes and to re-arm the indicator
 			// when the pane actually spawns (Pending→running on tab switch).
 			// Broadcast-only: Pending is runtime state, never persisted to disk
 			// (gated on includeOverlays, like overlay panes).
 			if includeOverlays {
-				pane.spawnMu.Lock()
-				pending := pane.Pending
-				pane.spawnMu.Unlock()
+				pending := pane.Pending.Load()
 				if pending {
 					paneData["pending"] = true
 				}

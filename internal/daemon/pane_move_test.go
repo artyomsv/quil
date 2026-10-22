@@ -497,7 +497,7 @@ func TestHandleMovePane_SpawnsPendingPaneInTheTargetSelection(t *testing.T) {
 	dstTab := d.session.CreateTabInProject(dst.ID, "dst") // dst's ActiveTab
 	moveTestPane(t, d, srcTab.ID)
 	pending := moveTestPane(t, d, srcTab.ID)
-	pending.Pending = true
+	pending.Pending.Store(true)
 	moveTestPane(t, d, dstTab.ID)
 
 	d.session.SwitchProject(src.ID)
@@ -513,7 +513,7 @@ func TestHandleMovePane_SpawnsPendingPaneInTheTargetSelection(t *testing.T) {
 	if pending.CurrentTabID() != dstTab.ID {
 		t.Fatalf("the pane did not move")
 	}
-	if pending.Pending || pending.PTY == nil {
+	if pending.Pending.Load() || pending.PTY == nil {
 		t.Error("a Pending pane moved into its project's active tab was left unspawned")
 	}
 }

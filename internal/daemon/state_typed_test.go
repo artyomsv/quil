@@ -112,8 +112,8 @@ func richStateDaemon(t *testing.T) *Daemon {
 		TabID:             "tab-00000001",
 		CWD:               t.TempDir(),
 		PreparingWorktree: "feat/prep-branch",
-		Pending:           true,
 	}
+	preparing.Pending.Store(true)
 
 	overlay := &Pane{
 		ID:      "pane-00000004",

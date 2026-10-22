@@ -469,6 +469,16 @@ once. `conn` is nil for every restore/recovery caller, which starts at step 2
 resolves through steps 2–3, keeping today's behaviour of opening in a TUI's
 directory rather than the daemon's frozen one.
 
+**A split follows the pane it is split from first** (`splitSourceCWD`, 2026-10-22):
+the TUI's `create_pane` carries `FromPaneID`, and when it picks no folder (a
+plugin with no setup step — terminal, k9s, lazysql) the new pane opens in THAT
+pane's live `Pane.CWD`, tmux's rule. The folder is validated like any
+client-supplied one and NOT recorded as recent (the user picked nothing); when
+it is gone, or is a container path a sandbox pane reported, the fallback is
+`projectCWD` — the project root, as a new tab gets — and only then the chain
+above. A pane in another tab, or an unknown id, is ignored. MCP and the
+browser send no `FromPaneID` and keep the chain above unchanged.
+
 ### A per-pane broadcast is a queue-pressure decision, not a detail
 
 Two rules the overlay retention work had to learn, both instances of the

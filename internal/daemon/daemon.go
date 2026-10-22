@@ -3042,6 +3042,13 @@ func (d *Daemon) handleCreatePane(conn *ipc.Conn, msg *ipc.Message) {
 		}
 	} else if payload.Overlay {
 		cwd = d.defaultCWD(conn)
+	} else if src := d.splitSourceCWD(payload); src != "" {
+		// The folder of the pane split from, not one the user picked, so it
+		// is never recorded as recent. A folder that is gone, or a container
+		// path a sandbox pane reported, falls back to the project root — as
+		// a new tab does — and only then to the client's own directory.
+		projectID, _ := d.session.TabProjectID(payload.TabID)
+		cwd = d.resolveRequestedCWD(src, d.projectCWD(conn, projectID))
 	} else {
 		cwd = d.resolveRequestedCWDRecording(payload.CWD, d.defaultCWD(conn))
 	}
@@ -8545,4 +8552,24 @@ func stripSessionArgs(agent string, args []string) []string {
 		}
 	}
 	return out
+}
+
+// splitSourceCWD is the folder a split opens in when the request names the
+// pane it was split from and picks no folder of its own: that pane's live
+// directory (tmux's rule — a new pane starts where the one you split from
+// is). "" when the request picked a folder, is an overlay, names no pane, or
+// names one that is gone or in another tab; the caller then falls back as it
+// always did. The folder is validated by the caller like any client-supplied
+// one, so a sandbox pane's container path falls through rather than failing.
+func (d *Daemon) splitSourceCWD(payload ipc.CreatePanePayload) string {
+	if payload.CWD != "" || payload.Overlay || payload.FromPaneID == "" {
+		return ""
+	}
+	pane := d.session.Pane(payload.FromPaneID)
+	if pane == nil || pane.CurrentTabID() != payload.TabID {
+		return ""
+	}
+	pane.PluginMu.Lock()
+	defer pane.PluginMu.Unlock()
+	return pane.CWD
 }

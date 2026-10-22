@@ -2932,6 +2932,7 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 		send := func() tea.Msg {
 			msg, _ := ipc.NewMessage(ipc.MsgCreatePane, ipc.CreatePanePayload{
 				TabID:           tabID,
+				FromPaneID:      pane.ID,
 				CWD:             cwd,
 				Type:            pluginName,
 				InstanceName:    instanceName,
@@ -3019,6 +3020,7 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 	send := func() tea.Msg {
 		msg, _ := ipc.NewMessage(ipc.MsgCreatePane, ipc.CreatePanePayload{
 			TabID:           tabID,
+			FromPaneID:      pane.ID,
 			CWD:             cwd,
 			Type:            pluginName,
 			InstanceName:    instanceName,

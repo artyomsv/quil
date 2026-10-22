@@ -362,6 +362,8 @@ Plugins that opt in via `prompts_cwd = true` or `[[command.toggles]]` get a setu
 
 The shipped `claude-code` plugin uses both: it asks for the working directory (preserving project-specific `.claude/` context that Claude Code ties to the directory) and offers radio-button toggles for permission mode (`--dangerously-skip-permissions` vs `--enable-auto-mode` vs neither).
 
+Plugins without a setup step (Terminal, k9s, lazysql) open where the pane you split from is — the shell's live directory, as in tmux. A new tab opens in the project root instead.
+
 ### Spawn a pane in a worktree
 
 Any plugin that asks for a directory (`prompts_cwd = true`) also gets a **Worktree** field in the setup dialog, scoped to whichever directory you've picked above it. It lists the git worktrees belonging to that directory's repository; picking one spawns the pane there instead of in the directory field's own checkout. This is how an agent, a shell, and lazygit end up parked in the same worktree — and how the sidebar's git row (see [Projects](#projects)) shows that pane's real branch instead of repeating the main checkout's for every pane in the tab.

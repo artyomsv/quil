@@ -3852,6 +3852,18 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 	m.kubeTruncated = false
 	m.resetSessionSelection()
 
+	// Reset the sandbox row HERE — on the way IN, never on a close path, and
+	// BEFORE the no-setup branch below. Three dialog exits skip the teardown,
+	// and a flag surviving one of them would put the next plain create in a
+	// container. The no-setup branch is the fourth: it never shows the row,
+	// but handleCreatePaneSplit still reads it, so a terminal picked after an
+	// sbx pane rode into that pane's sandbox (CB-14185, 2026-10-22 — "is not
+	// in a writable folder of sbx sandbox" on a plain shell tab). This is
+	// also where the row's visibility answer is PINNED, so a capability
+	// response landing mid-dialog cannot add or remove a field under a live
+	// cursor.
+	m.resetSandboxField(m.createPaneDialogDest())
+
 	// The sandbox row is not listed here on purpose: it is gated on
 	// PromptsCWD, which is already the first term, so a plugin that can show
 	// it always needs the dialog anyway.
@@ -3860,13 +3872,6 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 	if !needsSetup {
 		return m.advanceFromPluginChoice()
 	}
-
-	// Reset the sandbox row HERE — on the way IN, never on a close path. Three
-	// dialog exits skip the teardown, and a flag surviving one of them would
-	// put the next plain create in a container. This is also where the row's
-	// visibility answer is PINNED, so a capability response landing mid-dialog
-	// cannot add or remove a field under a live cursor.
-	m.resetSandboxField(m.createPaneDialogDest())
 
 	// The browser's pre-fill now costs a round trip, so the dialog opens first
 	// and fills in when the daemon answers.

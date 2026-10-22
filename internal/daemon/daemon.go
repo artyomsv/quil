@@ -184,6 +184,11 @@ type Daemon struct {
 	// goroutines until the daemon is starved.
 	sessionScanning atomic.Bool
 
+	// pasteCopying is the single-flight guard for paste_image_req: each copy
+	// holds an image of up to ipc.MaxPasteImageBytes and two sbx calls, so
+	// an unguarded handler would let a looping client stack them.
+	pasteCopying atomic.Bool
+
 	// sessionDetailReading is the single-flight guard for the per-session deep
 	// read (MsgClaudeSessionDetailReq). Separate from sessionScanning on
 	// purpose: sharing one slot would make opening the info panel fail
@@ -1851,6 +1856,8 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		d.handleWorktreeStatusReq(conn, msg)
 	case ipc.MsgSandboxCapReq:
 		d.handleSandboxCapReq(conn, msg, release)
+	case ipc.MsgPasteImageReq:
+		d.handlePasteImageReq(conn, msg)
 	case ipc.MsgKubeCtxReq:
 		d.handleKubeCtxReq(conn, msg)
 	case ipc.MsgPluginListReq:

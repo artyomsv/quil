@@ -217,7 +217,7 @@ func (d *Daemon) startSbxPane(pane *Pane, ptySession apty.Session, p *plugin.Pan
 	if err := ptySession.Start(bin, argv...); err != nil {
 		return ptySession, true, err
 	}
-	return &sbxSession{Session: ptySession, stop: func() { d.stopSbxTagAsync(t.name, tag) }}, true, nil
+	return &sbxSession{Session: ptySession, name: t.name, stop: func() { d.stopSbxTagAsync(t.name, tag) }}, true, nil
 }
 
 // sbxSession is an sbx pane's PTY. Ending the host `sbx exec` does not end
@@ -226,6 +226,7 @@ func (d *Daemon) startSbxPane(pane *Pane, ptySession apty.Session, p *plugin.Pan
 // replace, restart, daemon stop — goes through Close.
 type sbxSession struct {
 	apty.Session
+	name string // the sandbox the agent runs in
 	once sync.Once
 	stop func()
 }

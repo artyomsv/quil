@@ -318,3 +318,44 @@ func TestFollowSbxAttachFolder_FillsAnEmptyFolder(t *testing.T) {
 		t.Errorf("dir = %q, want /w/ticket-2", m.cwdBrowseDir)
 	}
 }
+
+// → through the real dialog key path visits every sandbox once. Moving the
+// folder reorders the fits-first list, so without a pinned order the cycle
+// stepped back to the sandbox just left and never reached the third.
+func TestSandboxRow_ArrowsVisitEverySandboxWhileTheFolderFollows(t *testing.T) {
+	m := sandboxKeyModel(t)
+	m.applySandboxCap("", ipc.SandboxCapRespPayload{Available: true, SbxAvailable: true, SbxSandboxes: []ipc.SbxSandbox{
+		{Name: "a", Folders: []string{"/w/a"}},
+		{Name: "b", Folders: []string{"/w/b"}},
+		{Name: "c", Folders: []string{"/w/c"}},
+	}})
+	m.resetSandboxField("")
+	m.sandboxOn = true
+	m.sandboxBackend = config.SandboxBackendDocker
+
+	var got []string
+	for i := 0; i < 5; i++ {
+		upd, _ := m.handleCreatePaneSetupKey(tea.KeyPressMsg{Code: tea.KeyRight})
+		m = upd.(Model)
+		got = append(got, sandboxChoice{backend: m.sandboxBackend, name: m.sandboxSbxName}.label()+"@"+m.cwdBrowseDir)
+	}
+	want := []string{"sbx@/repo", "sbx a@/w/a", "sbx b@/w/b", "sbx c@/w/c", "Docker@/w/c"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("cycle = %v\nwant    %v", got, want)
+	}
+}
+
+// The listing on screen belongs to the folder just left, so moving clears it:
+// Enter on a stale row would join that name onto the new path.
+func TestFollowSbxAttachFolder_ClearsTheOldListing(t *testing.T) {
+	m := attachModel()
+	m.cwdBrowseDir = "/w"
+	m.cwdBrowseEntries = []string{"..", "ticket-1", "ticket-2"}
+	m.cwdBrowseParent = "/"
+	m.cwdBrowseCursor = 2
+	m.sandboxBackend, m.sandboxSbxName = config.SandboxBackendSbx, "ticket-2"
+	m.followSbxAttachFolder()
+	if m.cwdBrowseDir != "/w/ticket-2" || m.cwdBrowseEntries != nil || m.cwdBrowseParent != "" || m.cwdBrowseCursor != 0 {
+		t.Errorf("dir=%q entries=%v parent=%q cursor=%d", m.cwdBrowseDir, m.cwdBrowseEntries, m.cwdBrowseParent, m.cwdBrowseCursor)
+	}
+}

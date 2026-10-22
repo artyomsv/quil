@@ -258,6 +258,7 @@ func (m *Model) resetSandboxField(dest string) {
 	// The profile, never a remembered sandbox: an existing sandbox is picked
 	// for one pane, on purpose, each time.
 	m.sandboxSbxName = ""
+	m.sbxOrderDir, m.sbxOrderPinned = "", false
 	// Pin the capability answer for the life of the dialog. It is fetched
 	// asynchronously and re-probed on a timer, so reading it live would add
 	// or remove a row under a cursor the key handler is already holding an
@@ -517,6 +518,9 @@ func (m Model) nextSandboxChoice(step int) (sandboxChoice, bool) {
 // machine.
 func (m Model) sbxAttachChoices() []ipc.SbxSandbox {
 	dir := m.setupSpawnDir()
+	if m.sbxOrderPinned {
+		dir = m.sbxOrderDir
+	}
 	var fits, rest []ipc.SbxSandbox
 	for _, s := range m.destSandbox[m.createPaneDialogDest()].SbxSandboxes {
 		if !sbx.ValidName(s.Name) {
@@ -583,10 +587,20 @@ func (m *Model) followSbxAttachFolder() tea.Cmd {
 	if target == "" {
 		return nil
 	}
+	// The cycle keeps the order it had before the first move, or the next
+	// arrow would step back to the sandbox just left.
+	if !m.sbxOrderPinned {
+		m.sbxOrderDir, m.sbxOrderPinned = m.setupSpawnDir(), true
+	}
 	// The pick lists name folders the sandbox does not hold; the browser
 	// shows the one it does.
 	m.repoCandidates, m.recentCandidates = nil, nil
 	m.onSetupCWDChanged(target)
+	// The old listing belongs to the folder just left: Enter on one of its
+	// rows would join that name onto the new path. Cleared, not kept, so a
+	// browse that fails shows an empty listing rather than a wrong one.
+	m.cwdBrowseEntries, m.cwdBrowseParent = nil, ""
+	m.cwdBrowseCursor, m.cwdBrowseScroll = 0, 0
 	return m.browseTo(target, "", "")
 }
 

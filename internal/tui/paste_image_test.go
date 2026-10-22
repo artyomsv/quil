@@ -50,7 +50,7 @@ func TestSbxImagePaste_SendsTheImageAndTypesTheAnsweredPath(t *testing.T) {
 		t.Fatalf("request = %+v, err %v", req, err)
 	}
 
-	path := "/tmp/quil-paste/quil-paste-20261022-120000-0011223344556677.png"
+	path := "/tmp/quil-paste-20261022-120000-0011223344556677/image.png"
 	next, _ = m.Update(pasteImageRespMsg{Gen: fake.sent[0].ID, Resp: ipc.PasteImageRespPayload{PaneID: "p1", Path: path}})
 	m = next.(Model)
 	if len(fake.sent) != 2 || fake.sent[1].Type != ipc.MsgPaneInput {
@@ -69,10 +69,10 @@ func TestSbxImagePaste_SendsTheImageAndTypesTheAnsweredPath(t *testing.T) {
 func TestSbxImagePaste_RefusesAnUnexpectedPath(t *testing.T) {
 	for _, p := range []string{
 		"/etc/passwd",
-		"/tmp/quil-paste/../x.png",
-		"/tmp/quil-paste/a b.png",
-		"/tmp/quil-paste/x.png\rrm -rf ~\r",
-		"/tmp/quil-paste/sub/x.png",
+		"/tmp/quil-paste/x.png",
+		"/tmp/quil-paste-../image.png",
+		"/tmp/quil-paste-20261022-120000-0011223344556677/image.png\rrm -rf ~\r",
+		"/tmp/quil-paste-20261022-120000-0011223344556677/sub/image.png",
 	} {
 		fake := &fakeSender{}
 		m := sbxPasteModel(t, fake)
@@ -103,7 +103,7 @@ func TestSbxImagePaste_ErrorsAndLateAnswers(t *testing.T) {
 
 	next, _ = m.Update(pasteImageTimeoutMsg{gen: "2"})
 	m = next.(Model)
-	next, _ = m.Update(pasteImageRespMsg{Gen: "2", Resp: ipc.PasteImageRespPayload{Path: "/tmp/quil-paste/a.png"}})
+	next, _ = m.Update(pasteImageRespMsg{Gen: "2", Resp: ipc.PasteImageRespPayload{Path: "/tmp/quil-paste-20261022-120000-0011223344556677/image.png"}})
 	m = next.(Model)
 	if len(fake.sent) != 0 {
 		t.Errorf("a late answer was typed: %+v", fake.sent)

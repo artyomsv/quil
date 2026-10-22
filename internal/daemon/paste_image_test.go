@@ -65,7 +65,7 @@ func TestPasteImage_CopiesIntoThePanesSandbox(t *testing.T) {
 	if resp.Error != "" {
 		t.Fatalf("error = %q", resp.Error)
 	}
-	if !strings.HasPrefix(resp.Path, sbx.PasteDir+"/quil-paste-") || !strings.HasSuffix(resp.Path, ".png") {
+	if !sbx.ValidPastePath(resp.Path) {
 		t.Errorf("path = %q", resp.Path)
 	}
 	if !bytes.Equal(r.copied, testPNG) {

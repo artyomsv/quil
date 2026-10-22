@@ -882,13 +882,19 @@ and prefix both touch only their own processes.
 `internal/tui/paste_image.go`). The ordinary paste saves a PNG on the TUI's
 machine and types its host path, which names nothing in the VM. For a pane
 whose `SandboxKind` is sbx the TUI sends the bytes instead (the TUI may be on
-another machine), the daemon `sbx cp`s them to `/tmp/quil-paste/<name>` in the
+another machine), the daemon `sbx cp`s them to `/tmp/quil-paste-<time>-<hex>/image.png` in the
 sandbox the RUNNING session names (`sbxSession.name` — never re-derived from a
 profile), then runs `chmod` as root: measured on 0.48, `sbx cp` leaves a
 root-owned copy with the source's mode, and the agent (uid 1000) is refused a
-0600 file. One image, one sandbox — mounting the paste folder was rejected
+0600 file. The folder is NEW per paste, directly under `/tmp`, with an unguessable name:
+the chmod runs as root inside a VM the agent controls, and a fixed folder
+(`/tmp/quil-paste`) could be made — or replaced by a link — by the agent before
+the first paste, pointing the root chmod anywhere (PR #271 review). Root owns
+the new folder and `/tmp` is sticky, so the agent cannot swap it afterwards.
+The answered path is typed with `enqueueInput`, NOT through the typing guard:
+the image exists only in the asking pane's sandbox. One image, one sandbox — mounting the paste folder was rejected
 because every sandbox would see every screenshot. Daemon-wide single-flight
 (`pasteCopying`); size and PNG magic are refused before the slot. The TUI
-types only a path of the exact shape `sbx.PasteDir` + `ValidPasteName`, since
+types only a path `sbx.ValidPastePath` accepts, since
 the answer can come from another machine and is typed into a PTY. Docker
 sandbox panes still get the host path (`techdebt/3-2-docker-sandbox-pane-image-paste.md`).

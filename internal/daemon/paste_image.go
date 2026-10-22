@@ -83,7 +83,7 @@ func (d *Daemon) copyPasteImage(ctx context.Context, req ipc.PasteImageReqPayloa
 	if err != nil {
 		return "", err
 	}
-	base, err := pasteImageName(time.Now())
+	id, err := pasteImageID(time.Now())
 	if err != nil {
 		return "", err
 	}
@@ -102,7 +102,7 @@ func (d *Daemon) copyPasteImage(ctx context.Context, req ipc.PasteImageReqPayloa
 	if werr != nil {
 		return "", fmt.Errorf("temp file: %w", werr)
 	}
-	return sbx.Client{Bin: bin, Runner: sbxRunner}.CopyIn(ctx, name, src, base)
+	return sbx.Client{Bin: bin, Runner: sbxRunner}.CopyIn(ctx, name, src, id)
 }
 
 // checkPasteImage refuses an image of the wrong size or format.
@@ -136,12 +136,13 @@ func (d *Daemon) sbxSandboxOfPane(paneID string) (string, error) {
 	return s.name, nil
 }
 
-// pasteImageName is the file name inside the VM: a timestamp for the reader,
-// and a random suffix so two pastes in one second cannot collide.
-func pasteImageName(now time.Time) (string, error) {
+// pasteImageID names the paste folder in the VM: a timestamp for the reader,
+// and 64 random bits, which are what make the name unguessable to the agent
+// (see internal/sbx/paste.go).
+func pasteImageID(now time.Time) (string, error) {
 	suffix := make([]byte, 8)
 	if _, err := crand.Read(suffix); err != nil {
 		return "", fmt.Errorf("random name: %w", err)
 	}
-	return fmt.Sprintf("quil-paste-%s-%s.png", now.Format("20060102-150405"), hex.EncodeToString(suffix)), nil
+	return fmt.Sprintf("%s-%s", now.Format("20060102-150405"), hex.EncodeToString(suffix)), nil
 }

@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path"
 	"strings"
 	"time"
 )
@@ -23,9 +22,21 @@ import (
 // keeps the source's mode and leaves root as the owner of the file and the
 // folders. The agent runs as an ordinary user and is refused a 0600 file, so
 // the copy is followed by a chmod run as root.
+//
+// That chmod runs as root on a path inside a VM the agent controls, so the
+// path must be one the agent cannot have prepared or swap out. Every paste
+// therefore gets a NEW folder directly under /tmp with an unguessable name:
+// the agent cannot create it first (it does not know the name), and cannot
+// rename or replace it after `sbx cp` made it (root owns it, and /tmp is
+// sticky). A fixed /tmp/quil-paste folder would not do — the agent could make
+// it, or a link by that name, before the first paste, and point the root
+// chmod anywhere.
 
-// PasteDir is the folder inside the VM pasted images are copied to.
-const PasteDir = "/tmp/quil-paste"
+// PastePrefix starts the name of every paste folder in the VM's /tmp.
+const PastePrefix = "/tmp/quil-paste-"
+
+// PasteFile is the image's name inside its paste folder.
+const PasteFile = "image.png"
 
 // pasteTimeout bounds the copy and the chmod together. A stopped sandbox is
 // started by neither, but a running one can still be slow to answer.
@@ -45,16 +56,21 @@ func ReadableArgs(name, dir, file string) []string {
 	return []string{"exec", "-u", "root", name, "sh", "-c", pasteScript, "sh", dir, file}
 }
 
-// ValidPasteName reports whether base can name a file in PasteDir: one plain
-// path element, no hidden file, nothing a shell or sbx's "name:path" spelling
-// could read as more than a file name.
-func ValidPasteName(base string) bool {
-	if base == "" || len(base) > 128 || strings.HasPrefix(base, ".") {
+// PastePath is the image's path in the VM for a paste folder id.
+func PastePath(id string) string {
+	return PastePrefix + id + "/" + PasteFile
+}
+
+// ValidPasteID reports whether id can complete a paste folder's name: 16 to
+// 64 characters from a set no shell, path or sbx "name:path" spelling reads
+// as anything but a name.
+func ValidPasteID(id string) bool {
+	if len(id) < 16 || len(id) > 64 {
 		return false
 	}
-	for _, r := range base {
+	for _, r := range id {
 		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-':
 		default:
 			return false
 		}
@@ -62,16 +78,27 @@ func ValidPasteName(base string) bool {
 	return true
 }
 
-// CopyIn copies the host file src into the sandbox as PasteDir/base and
-// returns its path inside the VM.
-func (c Client) CopyIn(ctx context.Context, name, src, base string) (string, error) {
+// ValidPastePath reports whether p is exactly PastePath of a valid id.
+func ValidPastePath(p string) bool {
+	rest, ok := strings.CutPrefix(p, PastePrefix)
+	if !ok {
+		return false
+	}
+	id, ok := strings.CutSuffix(rest, "/"+PasteFile)
+	return ok && ValidPasteID(id)
+}
+
+// CopyIn copies the host file src into the sandbox as PastePath(id) and
+// returns that path. id must be unguessable — see the comment above.
+func (c Client) CopyIn(ctx context.Context, name, src, id string) (string, error) {
 	if !ValidName(name) {
 		return "", errors.New("sbx: invalid sandbox name")
 	}
-	if !ValidPasteName(base) {
-		return "", errors.New("sbx: invalid file name for a pasted image")
+	if !ValidPasteID(id) {
+		return "", errors.New("sbx: invalid folder name for a pasted image")
 	}
-	dst := path.Join(PasteDir, base)
+	dir := PastePrefix + id
+	dst := PastePath(id)
 	ctx, cancel := context.WithTimeout(ctx, pasteTimeout)
 	defer cancel()
 	var buf bytes.Buffer
@@ -79,7 +106,7 @@ func (c Client) CopyIn(ctx context.Context, name, src, base string) (string, err
 		return "", fmt.Errorf("sbx: copying the image into %s: %w%s", name, err, errorLine(buf.String()))
 	}
 	buf.Reset()
-	if err := c.run(ctx, "", &buf, ReadableArgs(name, PasteDir, dst)...); err != nil {
+	if err := c.run(ctx, "", &buf, ReadableArgs(name, dir, dst)...); err != nil {
 		return "", fmt.Errorf("sbx: making the image readable in %s: %w%s", name, err, errorLine(buf.String()))
 	}
 	return dst, nil

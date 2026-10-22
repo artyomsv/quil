@@ -51,9 +51,7 @@ var classes = map[string]Class{
 	// act — disclosure beyond the workspace
 	ipc.MsgBrowseDirReq: ClassAct, ipc.MsgDirsExistReq: ClassAct, ipc.MsgGitReposReq: ClassAct,
 	ipc.MsgKubeCtxReq: ClassAct, ipc.MsgWorktreeListReq: ClassAct, ipc.MsgWorktreeStatusReq: ClassAct,
-	ipc.MsgClaudeSessionsReq: ClassAct, ipc.MsgClaudeSessionDetailReq: ClassAct,
-	// act — writes into the pane's sandbox
-	ipc.MsgPasteImageReq: ClassAct,
+	ipc.MsgClaudeSessionsReq: ClassAct, ipc.MsgClaudeSessionDetailReq: ClassAct, ipc.MsgPasteImageReq: ClassAct,
 	ipc.MsgPaneHistoryReq: ClassAct, ipc.MsgPaneHistoryEntryReq: ClassAct, ipc.MsgResourceReportReq: ClassAct,
 
 	// admin

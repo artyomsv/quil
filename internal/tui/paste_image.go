@@ -2,7 +2,6 @@ package tui
 
 import (
 	"log"
-	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -96,12 +95,20 @@ func (m *Model) applyPasteImageResp(msg pasteImageRespMsg) tea.Cmd {
 	}
 	// The daemon may be another machine, and this text is typed into a PTY:
 	// only a path of the one shape it produces is accepted.
-	if !validSandboxPastePath(msg.Resp.Path) {
+	if !sbx.ValidPastePath(msg.Resp.Path) {
 		log.Printf("paste image: refusing the answered path %q", msg.Resp.Path)
 		m.setErrorFlash("Image not pasted: the daemon answered an unexpected path")
 		return nil
 	}
-	m.sendClipboardToPaneID(paneID, msg.Resp.Path)
+	// Straight to the pane that asked, never through the typing guard: the
+	// image exists only in THAT pane's sandbox, so a remote tab switch while
+	// it was copying must not redirect the path to another pane.
+	pane, _, _ := m.findPaneAndTab(paneID)
+	if pane == nil {
+		return nil
+	}
+	pane.answerBlockedByInput()
+	m.enqueueInput(paneID, pastePayload(pane, msg.Resp.Path))
 	return tea.Tick(100*time.Millisecond, func(time.Time) tea.Msg { return pasteRefreshMsg{} })
 }
 
@@ -112,11 +119,4 @@ func (m *Model) applyPasteImageTimeout(gen string) {
 	}
 	delete(m.pasteImageReqs, gen)
 	m.setErrorFlash("Image not pasted: the sandbox did not answer in time")
-}
-
-// validSandboxPastePath reports whether p is a file directly in sbx.PasteDir
-// with a name sbx.ValidPasteName accepts.
-func validSandboxPastePath(p string) bool {
-	base, ok := strings.CutPrefix(p, sbx.PasteDir+"/")
-	return ok && sbx.ValidPasteName(base)
 }

@@ -359,3 +359,44 @@ func TestFollowSbxAttachFolder_ClearsTheOldListing(t *testing.T) {
 		t.Errorf("dir=%q entries=%v parent=%q cursor=%d", m.cwdBrowseDir, m.cwdBrowseEntries, m.cwdBrowseParent, m.cwdBrowseCursor)
 	}
 }
+
+// Picking a sandbox owns the folder: a recent-folder check or a git pick-list
+// scan still in flight from the dialog's opening must not put its own folder
+// back when it finally answers — or, timed out, restart the browser — while
+// the sandbox stays picked. Driven through the key handler, then the late
+// answers in the order a slow remote host delivers them.
+func TestSandboxRow_LateDiscoveryCannotUndoTheSandboxFolder(t *testing.T) {
+	m := sandboxKeyModel(t)
+	m.applySandboxCap("", ipc.SandboxCapRespPayload{Available: true, SbxAvailable: true, SbxSandboxes: []ipc.SbxSandbox{
+		{Name: "a", Folders: []string{"/w/a"}},
+	}})
+	m.resetSandboxField("")
+	m.sandboxOn = true
+	m.sandboxBackend = config.SandboxBackendDocker
+	m.recentScan = recentScanState{gen: "recent-1", asked: []string{"/old"}}
+	m.repoScan = repoScanState{cwd: "/repo", purpose: repoScanPickList, gen: "repo-1"}
+
+	for i := 0; i < 2; i++ { // Docker → sbx profile → sandbox a
+		upd, _ := m.handleCreatePaneSetupKey(tea.KeyPressMsg{Code: tea.KeyRight})
+		m = upd.(Model)
+	}
+	if m.sandboxSbxName != "a" || m.cwdBrowseDir != "/w/a" {
+		t.Fatalf("name=%q dir=%q, want sandbox a at /w/a", m.sandboxSbxName, m.cwdBrowseDir)
+	}
+	m.applyBrowseResponse(ipc.BrowseDirRespPayload{Path: "/w/a", Resolved: "/w/a", Parent: "/w",
+		Entries: []ipc.BrowseEntry{{Name: "src", IsDir: true}}}, m.browse.gen)
+
+	m.applyExistingDirs(ipc.DirsExistRespPayload{Paths: []string{"/old"}}, "recent-1")
+	m.applyExistingDirsTimeout("recent-1")
+	m.applyGitRepos(ipc.GitReposRespPayload{CWD: "/repo", Repos: []string{"/repo/x"}}, "repo-1")
+
+	if m.cwdBrowseDir != "/w/a" || m.sandboxSbxName != "a" {
+		t.Errorf("dir=%q name=%q after the late answers, want /w/a and a", m.cwdBrowseDir, m.sandboxSbxName)
+	}
+	if m.recentCandidates != nil || m.repoCandidates != nil {
+		t.Errorf("a late answer refilled a pick list: recent=%v repo=%v", m.recentCandidates, m.repoCandidates)
+	}
+	if len(m.cwdBrowseEntries) == 0 || m.cwdBrowseEntries[len(m.cwdBrowseEntries)-1] != "src" {
+		t.Errorf("the sandbox folder's listing was replaced: %v", m.cwdBrowseEntries)
+	}
+}

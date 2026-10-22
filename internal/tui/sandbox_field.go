@@ -595,6 +595,13 @@ func (m *Model) followSbxAttachFolder() tea.Cmd {
 	// The pick lists name folders the sandbox does not hold; the browser
 	// shows the one it does.
 	m.repoCandidates, m.recentCandidates = nil, nil
+	// And the scans that would fill them again are retired: a late answer to
+	// either would otherwise commit its own folder over this one (or, timed
+	// out, restart the browser elsewhere) while the sandbox stays picked.
+	m.recentScan = recentScanState{}
+	if m.repoScan.purpose == repoScanPickList {
+		m.repoScan = repoScanState{}
+	}
 	m.onSetupCWDChanged(target)
 	// The old listing belongs to the folder just left: Enter on one of its
 	// rows would join that name onto the new path. Cleared, not kept, so a

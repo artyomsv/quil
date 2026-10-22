@@ -267,3 +267,136 @@ func TestSandboxRow_SbxOnlyRecoversFromAStaleSandbox(t *testing.T) {
 		t.Error("→ was taken with one choice")
 	}
 }
+
+// Picking a sandbox whose listed folders do not hold the dialog's folder
+// moves the folder to the sandbox's primary workspace, so the pane is not
+// refused at spawn for a folder the sandbox never mounted.
+func TestFollowSbxAttachFolder_MovesToThePrimaryWorkspace(t *testing.T) {
+	m := attachModel()
+	m.applySandboxCap("", ipc.SandboxCapRespPayload{Available: true, SbxAvailable: true, SbxSandboxes: []ipc.SbxSandbox{
+		{Name: "ticket-1", Folders: []string{"/w/ticket-1", "/home/.m2"}, ReadOnlyFolders: []string{"/w/repo/.git"}},
+		{Name: "ticket-2", Folders: []string{"/w/ticket-2"}},
+	}})
+	m.cwdBrowseDir = "/w"
+	m.recentCandidates = []string{"/w"}
+	m.selectedWorktree = "/w/other-tree"
+	m.sandboxBackend, m.sandboxSbxName = config.SandboxBackendSbx, "ticket-1"
+	if cmd := m.followSbxAttachFolder(); cmd == nil {
+		t.Fatal("no browse was requested for the new folder")
+	}
+	if m.cwdBrowseDir != "/w/ticket-1" || m.selectedWorktree != "" || m.recentCandidates != nil {
+		t.Errorf("dir=%q worktree=%q recent=%v, want /w/ticket-1 and both cleared",
+			m.cwdBrowseDir, m.selectedWorktree, m.recentCandidates)
+	}
+	if !m.sbxAttachFits("ticket-1") {
+		t.Error("the moved folder does not fit the sandbox")
+	}
+}
+
+// A folder the sandbox already holds is left alone, and so is everything
+// when no sandbox is picked.
+func TestFollowSbxAttachFolder_KeepsAFittingFolder(t *testing.T) {
+	m := attachModel() // folder /w/ticket-1/app
+	m.sandboxBackend, m.sandboxSbxName = config.SandboxBackendSbx, "ticket-1"
+	if cmd := m.followSbxAttachFolder(); cmd != nil || m.cwdBrowseDir != "/w/ticket-1/app" {
+		t.Errorf("a fitting folder was moved to %q", m.cwdBrowseDir)
+	}
+	m.sandboxSbxName = ""
+	m.cwdBrowseDir = "/elsewhere"
+	if cmd := m.followSbxAttachFolder(); cmd != nil || m.cwdBrowseDir != "/elsewhere" {
+		t.Errorf("the profile choice moved the folder to %q", m.cwdBrowseDir)
+	}
+}
+
+// With no folder chosen yet the daemon would pick its own default, which the
+// sandbox may not hold, so the folder is set too.
+func TestFollowSbxAttachFolder_FillsAnEmptyFolder(t *testing.T) {
+	m := attachModel()
+	m.cwdBrowseDir = ""
+	m.sandboxBackend, m.sandboxSbxName = config.SandboxBackendSbx, "ticket-2"
+	if cmd := m.followSbxAttachFolder(); cmd == nil || m.cwdBrowseDir != "/w/ticket-2" {
+		t.Errorf("dir = %q, want /w/ticket-2", m.cwdBrowseDir)
+	}
+}
+
+// → through the real dialog key path visits every sandbox once. Moving the
+// folder reorders the fits-first list, so without a pinned order the cycle
+// stepped back to the sandbox just left and never reached the third.
+func TestSandboxRow_ArrowsVisitEverySandboxWhileTheFolderFollows(t *testing.T) {
+	m := sandboxKeyModel(t)
+	m.applySandboxCap("", ipc.SandboxCapRespPayload{Available: true, SbxAvailable: true, SbxSandboxes: []ipc.SbxSandbox{
+		{Name: "a", Folders: []string{"/w/a"}},
+		{Name: "b", Folders: []string{"/w/b"}},
+		{Name: "c", Folders: []string{"/w/c"}},
+	}})
+	m.resetSandboxField("")
+	m.sandboxOn = true
+	m.sandboxBackend = config.SandboxBackendDocker
+
+	var got []string
+	for i := 0; i < 5; i++ {
+		upd, _ := m.handleCreatePaneSetupKey(tea.KeyPressMsg{Code: tea.KeyRight})
+		m = upd.(Model)
+		got = append(got, sandboxChoice{backend: m.sandboxBackend, name: m.sandboxSbxName}.label()+"@"+m.cwdBrowseDir)
+	}
+	want := []string{"sbx@/repo", "sbx a@/w/a", "sbx b@/w/b", "sbx c@/w/c", "Docker@/w/c"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("cycle = %v\nwant    %v", got, want)
+	}
+}
+
+// The listing on screen belongs to the folder just left, so moving clears it:
+// Enter on a stale row would join that name onto the new path.
+func TestFollowSbxAttachFolder_ClearsTheOldListing(t *testing.T) {
+	m := attachModel()
+	m.cwdBrowseDir = "/w"
+	m.cwdBrowseEntries = []string{"..", "ticket-1", "ticket-2"}
+	m.cwdBrowseParent = "/"
+	m.cwdBrowseCursor = 2
+	m.sandboxBackend, m.sandboxSbxName = config.SandboxBackendSbx, "ticket-2"
+	m.followSbxAttachFolder()
+	if m.cwdBrowseDir != "/w/ticket-2" || m.cwdBrowseEntries != nil || m.cwdBrowseParent != "" || m.cwdBrowseCursor != 0 {
+		t.Errorf("dir=%q entries=%v parent=%q cursor=%d", m.cwdBrowseDir, m.cwdBrowseEntries, m.cwdBrowseParent, m.cwdBrowseCursor)
+	}
+}
+
+// Picking a sandbox owns the folder: a recent-folder check or a git pick-list
+// scan still in flight from the dialog's opening must not put its own folder
+// back when it finally answers — or, timed out, restart the browser — while
+// the sandbox stays picked. Driven through the key handler, then the late
+// answers in the order a slow remote host delivers them.
+func TestSandboxRow_LateDiscoveryCannotUndoTheSandboxFolder(t *testing.T) {
+	m := sandboxKeyModel(t)
+	m.applySandboxCap("", ipc.SandboxCapRespPayload{Available: true, SbxAvailable: true, SbxSandboxes: []ipc.SbxSandbox{
+		{Name: "a", Folders: []string{"/w/a"}},
+	}})
+	m.resetSandboxField("")
+	m.sandboxOn = true
+	m.sandboxBackend = config.SandboxBackendDocker
+	m.recentScan = recentScanState{gen: "recent-1", asked: []string{"/old"}}
+	m.repoScan = repoScanState{cwd: "/repo", purpose: repoScanPickList, gen: "repo-1"}
+
+	for i := 0; i < 2; i++ { // Docker → sbx profile → sandbox a
+		upd, _ := m.handleCreatePaneSetupKey(tea.KeyPressMsg{Code: tea.KeyRight})
+		m = upd.(Model)
+	}
+	if m.sandboxSbxName != "a" || m.cwdBrowseDir != "/w/a" {
+		t.Fatalf("name=%q dir=%q, want sandbox a at /w/a", m.sandboxSbxName, m.cwdBrowseDir)
+	}
+	m.applyBrowseResponse(ipc.BrowseDirRespPayload{Path: "/w/a", Resolved: "/w/a", Parent: "/w",
+		Entries: []ipc.BrowseEntry{{Name: "src", IsDir: true}}}, m.browse.gen)
+
+	m.applyExistingDirs(ipc.DirsExistRespPayload{Paths: []string{"/old"}}, "recent-1")
+	m.applyExistingDirsTimeout("recent-1")
+	m.applyGitRepos(ipc.GitReposRespPayload{CWD: "/repo", Repos: []string{"/repo/x"}}, "repo-1")
+
+	if m.cwdBrowseDir != "/w/a" || m.sandboxSbxName != "a" {
+		t.Errorf("dir=%q name=%q after the late answers, want /w/a and a", m.cwdBrowseDir, m.sandboxSbxName)
+	}
+	if m.recentCandidates != nil || m.repoCandidates != nil {
+		t.Errorf("a late answer refilled a pick list: recent=%v repo=%v", m.recentCandidates, m.repoCandidates)
+	}
+	if len(m.cwdBrowseEntries) == 0 || m.cwdBrowseEntries[len(m.cwdBrowseEntries)-1] != "src" {
+		t.Errorf("the sandbox folder's listing was replaced: %v", m.cwdBrowseEntries)
+	}
+}

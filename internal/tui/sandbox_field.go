@@ -258,6 +258,7 @@ func (m *Model) resetSandboxField(dest string) {
 	// The profile, never a remembered sandbox: an existing sandbox is picked
 	// for one pane, on purpose, each time.
 	m.sandboxSbxName = ""
+	m.sbxOrderDir, m.sbxOrderPinned = "", false
 	// Pin the capability answer for the life of the dialog. It is fetched
 	// asynchronously and re-probed on a timer, so reading it live would add
 	// or remove a row under a cursor the key handler is already holding an
@@ -517,6 +518,9 @@ func (m Model) nextSandboxChoice(step int) (sandboxChoice, bool) {
 // machine.
 func (m Model) sbxAttachChoices() []ipc.SbxSandbox {
 	dir := m.setupSpawnDir()
+	if m.sbxOrderPinned {
+		dir = m.sbxOrderDir
+	}
 	var fits, rest []ipc.SbxSandbox
 	for _, s := range m.destSandbox[m.createPaneDialogDest()].SbxSandboxes {
 		if !sbx.ValidName(s.Name) {
@@ -562,6 +566,65 @@ func (m Model) sbxAttachFits(name string) bool {
 	dir := m.setupSpawnDir()
 	return slices.ContainsFunc(m.destSandbox[m.createPaneDialogDest()].SbxSandboxes,
 		func(s ipc.SbxSandbox) bool { return s.Name == name && sbxListsFolder(s, dir) })
+}
+
+// followSbxAttachFolder moves the dialog's folder to the picked sandbox's
+// primary workspace when sbx lists none of its writable folders as holding
+// the current one. Without it the user had to know to browse there first, and
+// the miss surfaced only at spawn, as a refused pane. Called after ←/→ lands
+// on a sandbox, never on submit: a folder added with `sbx mount` is not in the
+// listing, so the user can browse back and the daemon's probe has the last
+// word.
+func (m *Model) followSbxAttachFolder() tea.Cmd {
+	name := m.sandboxSbxName
+	if !m.sandboxOn || name == "" {
+		return nil
+	}
+	if dir := m.setupSpawnDir(); dir != "" && m.sbxAttachFits(name) {
+		return nil
+	}
+	target := m.sbxPrimaryFolder(name)
+	if target == "" {
+		return nil
+	}
+	// The cycle keeps the order it had before the first move, or the next
+	// arrow would step back to the sandbox just left.
+	if !m.sbxOrderPinned {
+		m.sbxOrderDir, m.sbxOrderPinned = m.setupSpawnDir(), true
+	}
+	// The pick lists name folders the sandbox does not hold; the browser
+	// shows the one it does.
+	m.repoCandidates, m.recentCandidates = nil, nil
+	// And the scans that would fill them again are retired: a late answer to
+	// either would otherwise commit its own folder over this one (or, timed
+	// out, restart the browser elsewhere) while the sandbox stays picked.
+	m.recentScan = recentScanState{}
+	if m.repoScan.purpose == repoScanPickList {
+		m.repoScan = repoScanState{}
+	}
+	m.onSetupCWDChanged(target)
+	// The old listing belongs to the folder just left: Enter on one of its
+	// rows would join that name onto the new path. Cleared, not kept, so a
+	// browse that fails shows an empty listing rather than a wrong one.
+	m.cwdBrowseEntries, m.cwdBrowseParent = nil, ""
+	m.cwdBrowseCursor, m.cwdBrowseScroll = 0, 0
+	return m.browseTo(target, "", "")
+}
+
+// sbxPrimaryFolder is the first writable folder sbx lists for name — the
+// sandbox's primary workspace, which `sbx ls` puts first — or "".
+func (m Model) sbxPrimaryFolder(name string) string {
+	for _, s := range m.destSandbox[m.createPaneDialogDest()].SbxSandboxes {
+		if s.Name != name {
+			continue
+		}
+		for _, f := range s.Folders {
+			if f != "" {
+				return f
+			}
+		}
+	}
+	return ""
 }
 
 // sbxStatusSuffix is " (running)" and the like, for the attach line.

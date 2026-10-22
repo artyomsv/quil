@@ -741,6 +741,12 @@ type Model struct {
 	// sandboxSbxName is the EXISTING sbx sandbox the row attaches to, picked
 	// with ←/→ from the ones the daemon listed; "" uses the project profile.
 	sandboxSbxName string
+	// sbxOrderDir is the folder the attach choices are ordered against once
+	// followSbxAttachFolder has moved the dialog's folder (sbxOrderPinned).
+	// Ordering against the LIVE folder would reorder the cycle on every
+	// arrow, and two sandboxes would swap places forever.
+	sbxOrderDir    string
+	sbxOrderPinned bool
 	// sandboxImages remembers the last image per destination (nil functions
 	// = no memory; see SetSandboxImageStore).
 	sandboxImages sandboxImageStore

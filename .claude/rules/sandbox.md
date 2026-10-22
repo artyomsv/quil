@@ -859,7 +859,12 @@ message type, so the rights table and web allow-list are unchanged); the TUI
 ORDERS it by TEXT against the browsed folder (`sbxListsFolder` /
 `folderHolds`, most specific wins, either separator, since the daemon may be
 another OS): listed fits first, the rest after them and still selectable,
-since only the spawn-time probe knows about `sbx mount` folders. Quil and
+since only the spawn-time probe knows about `sbx mount` folders. When ←/→ lands on a sandbox whose listing does not hold the
+browsed folder (or no folder is chosen), the dialog moves the folder to its
+first writable workspace (`followSbxAttachFolder`) — a pane opened in the
+repository root above a ticket worktree was otherwise refused at spawn. Only
+the arrows do it, never submit, so a `sbx mount` folder can still be browsed
+back to. Quil and
 the owning tool know nothing of each other: the only shared facts are the
 sandbox name and sbx's own listing.
 

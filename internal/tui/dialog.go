@@ -4562,6 +4562,9 @@ func (m Model) handleCreatePaneSetupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd
 		// deliberately does NOT consume Tab or Enter, so navigation and
 		// submit always reach the branches below.
 		if m.handleSandboxFieldKey(msg) {
+			if key == "left" || key == "right" {
+				return m, m.followSbxAttachFolder()
+			}
 			return m, nil
 		}
 		switch key {

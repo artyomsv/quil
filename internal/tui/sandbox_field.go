@@ -564,6 +564,48 @@ func (m Model) sbxAttachFits(name string) bool {
 		func(s ipc.SbxSandbox) bool { return s.Name == name && sbxListsFolder(s, dir) })
 }
 
+// followSbxAttachFolder moves the dialog's folder to the picked sandbox's
+// primary workspace when sbx lists none of its writable folders as holding
+// the current one. Without it the user had to know to browse there first, and
+// the miss surfaced only at spawn, as a refused pane. Called after ←/→ lands
+// on a sandbox, never on submit: a folder added with `sbx mount` is not in the
+// listing, so the user can browse back and the daemon's probe has the last
+// word.
+func (m *Model) followSbxAttachFolder() tea.Cmd {
+	name := m.sandboxSbxName
+	if !m.sandboxOn || name == "" {
+		return nil
+	}
+	if dir := m.setupSpawnDir(); dir != "" && m.sbxAttachFits(name) {
+		return nil
+	}
+	target := m.sbxPrimaryFolder(name)
+	if target == "" {
+		return nil
+	}
+	// The pick lists name folders the sandbox does not hold; the browser
+	// shows the one it does.
+	m.repoCandidates, m.recentCandidates = nil, nil
+	m.onSetupCWDChanged(target)
+	return m.browseTo(target, "", "")
+}
+
+// sbxPrimaryFolder is the first writable folder sbx lists for name — the
+// sandbox's primary workspace, which `sbx ls` puts first — or "".
+func (m Model) sbxPrimaryFolder(name string) string {
+	for _, s := range m.destSandbox[m.createPaneDialogDest()].SbxSandboxes {
+		if s.Name != name {
+			continue
+		}
+		for _, f := range s.Folders {
+			if f != "" {
+				return f
+			}
+		}
+	}
+	return ""
+}
+
 // sbxStatusSuffix is " (running)" and the like, for the attach line.
 func (m Model) sbxStatusSuffix(name string) string {
 	for _, s := range m.destSandbox[m.createPaneDialogDest()].SbxSandboxes {

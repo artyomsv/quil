@@ -267,3 +267,54 @@ func TestSandboxRow_SbxOnlyRecoversFromAStaleSandbox(t *testing.T) {
 		t.Error("→ was taken with one choice")
 	}
 }
+
+// Picking a sandbox whose listed folders do not hold the dialog's folder
+// moves the folder to the sandbox's primary workspace, so the pane is not
+// refused at spawn for a folder the sandbox never mounted.
+func TestFollowSbxAttachFolder_MovesToThePrimaryWorkspace(t *testing.T) {
+	m := attachModel()
+	m.applySandboxCap("", ipc.SandboxCapRespPayload{Available: true, SbxAvailable: true, SbxSandboxes: []ipc.SbxSandbox{
+		{Name: "ticket-1", Folders: []string{"/w/ticket-1", "/home/.m2"}, ReadOnlyFolders: []string{"/w/repo/.git"}},
+		{Name: "ticket-2", Folders: []string{"/w/ticket-2"}},
+	}})
+	m.cwdBrowseDir = "/w"
+	m.recentCandidates = []string{"/w"}
+	m.selectedWorktree = "/w/other-tree"
+	m.sandboxBackend, m.sandboxSbxName = config.SandboxBackendSbx, "ticket-1"
+	if cmd := m.followSbxAttachFolder(); cmd == nil {
+		t.Fatal("no browse was requested for the new folder")
+	}
+	if m.cwdBrowseDir != "/w/ticket-1" || m.selectedWorktree != "" || m.recentCandidates != nil {
+		t.Errorf("dir=%q worktree=%q recent=%v, want /w/ticket-1 and both cleared",
+			m.cwdBrowseDir, m.selectedWorktree, m.recentCandidates)
+	}
+	if !m.sbxAttachFits("ticket-1") {
+		t.Error("the moved folder does not fit the sandbox")
+	}
+}
+
+// A folder the sandbox already holds is left alone, and so is everything
+// when no sandbox is picked.
+func TestFollowSbxAttachFolder_KeepsAFittingFolder(t *testing.T) {
+	m := attachModel() // folder /w/ticket-1/app
+	m.sandboxBackend, m.sandboxSbxName = config.SandboxBackendSbx, "ticket-1"
+	if cmd := m.followSbxAttachFolder(); cmd != nil || m.cwdBrowseDir != "/w/ticket-1/app" {
+		t.Errorf("a fitting folder was moved to %q", m.cwdBrowseDir)
+	}
+	m.sandboxSbxName = ""
+	m.cwdBrowseDir = "/elsewhere"
+	if cmd := m.followSbxAttachFolder(); cmd != nil || m.cwdBrowseDir != "/elsewhere" {
+		t.Errorf("the profile choice moved the folder to %q", m.cwdBrowseDir)
+	}
+}
+
+// With no folder chosen yet the daemon would pick its own default, which the
+// sandbox may not hold, so the folder is set too.
+func TestFollowSbxAttachFolder_FillsAnEmptyFolder(t *testing.T) {
+	m := attachModel()
+	m.cwdBrowseDir = ""
+	m.sandboxBackend, m.sandboxSbxName = config.SandboxBackendSbx, "ticket-2"
+	if cmd := m.followSbxAttachFolder(); cmd == nil || m.cwdBrowseDir != "/w/ticket-2" {
+		t.Errorf("dir = %q, want /w/ticket-2", m.cwdBrowseDir)
+	}
+}

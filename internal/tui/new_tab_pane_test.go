@@ -6,6 +6,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/plugin"
 )
@@ -609,5 +610,53 @@ func TestNewTab_UnreachableProjectRefusesBeforeTheDialogOpens(t *testing.T) {
 	// from a broken one — the reason this path flashes at all.
 	if got.flashText == "" {
 		t.Error("the refusal said nothing; Ctrl+T must name the host it cannot reach")
+	}
+}
+
+// A plugin with no setup dialog (terminal) never shows the sandbox row, yet
+// the submit reads it. The row is reset on the way IN, before the no-setup
+// branch, so a choice made for the PREVIOUS pane — an sbx sandbox attached
+// for a claude pane — cannot ride onto a plain shell tab (CB-14185,
+// 2026-10-22: "is not in a writable folder of sbx sandbox" on a new tab).
+func TestNewTab_NoSetupPluginDoesNotInheritTheLastSandboxChoice(t *testing.T) {
+	m := newTabModel(t)
+	f := m.client.(*fakeSender)
+	m.createPaneTarget = paneTargetNewTab
+	m.dialog = dialogCreatePane
+	m.selectedPlugin = "terminal"
+	// What the last dialog left behind: an sbx attach for an earlier pane.
+	m.sandboxOn = true
+	m.sandboxBackend, m.sandboxSbxName = config.SandboxBackendSbx, "cf-cryptobrok-14185"
+
+	runCmd(m.enterSetupOrSplit(nil))
+
+	p := decodeCreateTab(t, f)
+	if p.FirstPane == nil {
+		t.Fatal("the create carried no first-pane spec")
+	}
+	if p.FirstPane.Sandbox != nil {
+		t.Errorf("a terminal tab was sent sandbox %+v, want none", *p.FirstPane.Sandbox)
+	}
+	if m.sandboxOn || m.sandboxSbxName != "" {
+		t.Errorf("the stale choice survived: on=%v name=%q", m.sandboxOn, m.sandboxSbxName)
+	}
+}
+
+// The same leak on the split path: the placement step would submit the stale
+// row next.
+func TestSplit_NoSetupPluginDoesNotInheritTheLastSandboxChoice(t *testing.T) {
+	m := newTabModel(t)
+	m.createPaneTarget = paneTargetSplit
+	m.selectedPlugin = "terminal"
+	m.sandboxOn = true
+	m.sandboxBackend, m.sandboxSbxName = config.SandboxBackendSbx, "cf-cryptobrok-14185"
+
+	runCmd(m.enterSetupOrSplit(nil))
+
+	if m.createPaneStep != 3 {
+		t.Fatalf("createPaneStep = %d, want the placement step", m.createPaneStep)
+	}
+	if spec := m.sandboxSpec(); spec != nil {
+		t.Errorf("the placement step would submit sandbox %+v, want none", *spec)
 	}
 }

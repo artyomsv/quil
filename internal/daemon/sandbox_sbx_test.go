@@ -75,12 +75,17 @@ type scriptRunner struct {
 	lsJSON string
 	// writable is the in-sandbox folder probe's answer.
 	writable bool
+	// transcript is the in-sandbox session probe's answer; probeErr fails
+	// that probe instead.
+	transcript bool
+	probeErr   error
 }
 
 func (r *scriptRunner) Run(_ context.Context, _ string, w io.Writer, argv ...string) error {
 	r.mu.Lock()
 	r.calls = append(r.calls, append([]string(nil), argv...))
 	exists, mountErr, lsJSON, writable := r.exists, r.mountErr, r.lsJSON, r.writable
+	transcript, probeErr := r.transcript, r.probeErr
 	r.mu.Unlock()
 	if len(argv) > 1 {
 		switch argv[1] {
@@ -100,6 +105,14 @@ func (r *scriptRunner) Run(_ context.Context, _ string, w io.Writer, argv ...str
 		case "exec":
 			if writable && slices.ContainsFunc(argv, func(a string) bool { return strings.Contains(a, "QUIL_SBX_WRITABLE") }) {
 				io.WriteString(w, "QUIL_SBX_WRITABLE\n")
+			}
+			if slices.ContainsFunc(argv, func(a string) bool { return strings.Contains(a, "QUIL_SBX_TRANSCRIPT") }) {
+				if probeErr != nil {
+					return probeErr
+				}
+				if transcript {
+					io.WriteString(w, "QUIL_SBX_TRANSCRIPT\n")
+				}
 			}
 		}
 	}
@@ -746,9 +759,15 @@ func TestSpawnPane_SbxPassesInstanceArgs(t *testing.T) {
 	if s == nil {
 		t.Fatal("never started")
 	}
-	n := len(s.startArgs)
-	if n < 2 || s.startArgs[n-2] != "--model" || s.startArgs[n-1] != "opus" {
-		t.Errorf("args = %v, want the instance args last", s.startArgs)
+	// After the agent command, and ahead of the session arguments Quil
+	// appends (sandbox_sbx_resume.go), as resolveSpawnArgs orders them on
+	// the host.
+	cmd := d.registry.Get("claude-code").Command.Cmd
+	ci := slices.Index(s.startArgs, cmd)
+	mi := slices.Index(s.startArgs, "--model")
+	si := slices.Index(s.startArgs, "--session-id")
+	if ci < 0 || mi < ci || mi+1 >= len(s.startArgs) || s.startArgs[mi+1] != "opus" || si < mi {
+		t.Errorf("args = %v, want the instance args after %s and before the session args", s.startArgs, cmd)
 	}
 }
 

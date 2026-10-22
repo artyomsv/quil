@@ -773,11 +773,35 @@ makes the file readable by every user inside the VM (`sbx cp` leaves it owned
 by root). It needs the agent to be running; a paste into an exited
 pane says so in the status bar.
 
+### Restarts keep the conversation
+
+A Claude pane in an sbx sandbox keeps its session. At the first start Quil
+gives Claude a session id and keeps that id with the pane on your machine.
+At every later start — `Alt+R`, a daemon restart, a restored workspace — Quil
+asks the sandbox whether that session has a transcript, and resumes it when
+it does (`claude --resume <id>`). When the sandbox has no transcript for it
+(the agent never got past its first screen, or the sandbox was made again
+without its sessions), the pane starts under the same id again.
+
+The transcript stays in the sandbox, in Claude's own folder
+(`~/.claude/projects`). sbx keeps that folder on a volume of its own, so it
+survives `sbx stop` and a restart of the sandbox. It is removed with the
+sandbox (`sbx rm`). If another tool owns the sandbox and makes it again, it
+is up to that tool to carry the sessions over; Quil's id still matches, so
+the conversation comes back when the file does.
+
+If the check inside the sandbox fails, the pane does not start and shows the
+reason. Fix it and restart the pane (`Alt+R`).
+
+**What Quil cannot see:** a `/clear` or `/resume` inside Claude starts a new
+session, and without Quil's hook in the sandbox the pane does not learn the
+new id. A restart after that reopens the conversation from before.
+
 ### What an sbx pane does not have (yet)
 
-- **No notifications, work spinner, input history or session resume.** Those
-  need Quil's hook program inside the cage, and the cage's mounts belong to
-  your environment file. The agent starts a fresh session on every spawn.
+- **No notifications, work spinner or input history, and no tracking of
+  `/clear`.** Those need Quil's hook program inside the cage, and the cage's
+  mounts belong to your environment file.
 
 ### Example: a minimal environment file and kit
 

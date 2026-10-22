@@ -794,8 +794,38 @@ An existing sandbox is reused untouched; closing a pane never removes one.
 
 **The agent runs through `sbx exec -it -w <cwd> <name> <cmd> <args>`**, never
 `sbx run`: exec runs the pane's own plugin command and lets panes share one
-sandbox. No hooks, no `--settings`, no `--session-id` (a resume it cannot do
-would exit 129 on restart); `resolveSpawnArgs` is not called for an sbx pane.
+sandbox. No hooks, no `--settings`; `resolveSpawnArgs` is not called for an sbx pane.
+
+**The claude session of an sbx pane is kept by Quil, not by a hook**
+(`internal/daemon/sandbox_sbx_resume.go`, `internal/sbx/resume.go`). A
+first start mints a session id into `PluginState["session_id"]` (persisted
+in `workspace.json` — the host keeps the id, the VM keeps the transcript)
+and passes the plugin's `start_args` (`--session-id <id>`). Every later
+start — Alt+R, a daemon restart, a restored workspace — asks the VM whether
+`<id>.jsonl` exists under claude's config dir (`sbx.Client.HasTranscript`:
+`sbx exec <name> sh -c <script> sh <id>`, the id an ARGUMENT, a marker line
+the answer, `CLAUDE_CONFIG_DIR` honoured, `~/.claude` the default) and
+passes `--resume <id>` when it does, `--session-id <id>` again when it does
+not. **Neither argument may be the default**: claude refuses `--resume` for
+an id it never persisted (a restart on the trust screen) and `--session-id`
+for one it did (exit 129), which is why the earlier "never pass a session id"
+rule existed. A failed probe FAILS the start with the reason on the pane —
+never a guess. The resume goes through `claimResumeSession`, so two panes
+cannot run one conversation; a held session gives the pane a fresh id.
+`resume_session_id` (an MCP create) is adopted as the pane's own id and
+probed like a restart. A persisted id that is not a UUID is replaced, never
+handed to the VM. `transcript_path` is deleted on an sbx pane: nothing on
+the host names the VM's file. It runs in `startSbxPane`'s ready branch, on
+the preparation goroutine, because it is a VM round trip. **Blind spot**: a
+`/clear` or `/resume` inside the agent rotates the session and no hook
+reports it, so a restart reopens the conversation from before the rotation.
+Where the transcript lives is the sandbox's business: sbx keeps
+`~/.claude/projects` on a per-sandbox volume (measured on 0.48: it survives
+`sbx stop`/start and dies with `sbx rm`); the tool that owns the sandbox
+decides whether it survives a recreate. Mounting a host folder as
+`CLAUDE_CONFIG_DIR` for every sandbox was considered and rejected with the
+owning tool (cf-manager): several sandboxes would write one `.claude.json`
+and settings would bleed between tickets.
 The spawn log line passes argv through `sbx.RedactEnv`: plugin env rides
 `-e KEY=VALUE`. `-w` is omitted on a Windows host. Since 2026-10-16 the create, reuse and exec
 path has run against a live sbx 0.48 on macOS.

@@ -121,3 +121,31 @@ func TestImagePaste_HostPaneStillSavesLocally(t *testing.T) {
 		t.Fatalf("host pane paste produced %T, want clipboardPastedMsg", msg)
 	}
 }
+
+// An image over the wire limit is refused before anything is sent.
+func TestSbxImagePaste_RefusesAnOversizedImage(t *testing.T) {
+	fake := &fakeSender{}
+	m := sbxPasteModel(t, fake)
+	if cmd := m.startSandboxImagePaste("p1", make([]byte, ipc.MaxPasteImageBytes+1)); cmd != nil {
+		t.Error("an oversized image produced a send")
+	}
+	if len(fake.sent) != 0 || len(m.pasteImageReqs) != 0 || !strings.Contains(m.flashText, "too large") {
+		t.Errorf("sent=%d pending=%v flash=%q", len(fake.sent), m.pasteImageReqs, m.flashText)
+	}
+}
+
+// A send that fails on this side is reported, and — being no IPC response —
+// does not re-arm the listen loop (a second listener would double-read).
+func TestSbxImagePaste_LocalSendFailure(t *testing.T) {
+	fake := &fakeSender{}
+	m := sbxPasteModel(t, fake)
+	m.pasteImageReqs = map[string]string{"9": "p1"}
+	next, cmd := m.Update(pasteImageRespMsg{Gen: "9", local: true, Resp: ipc.PasteImageRespPayload{Error: "link lost"}})
+	m = next.(Model)
+	if cmd != nil {
+		t.Error("a local failure returned a command; it must not re-arm the listen loop")
+	}
+	if !strings.Contains(m.flashText, "link lost") || len(m.pasteImageReqs) != 0 {
+		t.Errorf("flash=%q pending=%v", m.flashText, m.pasteImageReqs)
+	}
+}

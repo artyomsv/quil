@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
@@ -121,5 +122,47 @@ func TestPasteImage_Refusals(t *testing.T) {
 				t.Errorf("sbx was called: %v", r.calls)
 			}
 		})
+	}
+}
+
+// The handler answers bad requests at once, holding no slot, and copies a good
+// one on a worker that releases the slot when done. A nil conn drops the
+// answers, which is all a socket-less test can do with them.
+func TestHandlePasteImageReq_SlotAndWorker(t *testing.T) {
+	d, pane, r := pasteDaemon(t)
+	mk := func(p ipc.PasteImageReqPayload) *ipc.Message {
+		m, err := ipc.NewMessage(ipc.MsgPasteImageReq, p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m.ID = "1"
+		return m
+	}
+
+	d.handlePasteImageReq(nil, &ipc.Message{Type: ipc.MsgPasteImageReq, ID: "1", Payload: []byte(`{"png":7}`)})
+	d.handlePasteImageReq(nil, mk(ipc.PasteImageReqPayload{PaneID: pane.ID, PNG: []byte("GIF89a")}))
+	if d.pasteCopying.Load() {
+		t.Fatal("a refused request holds the slot")
+	}
+
+	d.pasteCopying.Store(true)
+	d.handlePasteImageReq(nil, mk(ipc.PasteImageReqPayload{PaneID: pane.ID, PNG: testPNG}))
+	r.mu.Lock()
+	busyCalls := len(r.calls)
+	r.mu.Unlock()
+	if busyCalls != 0 {
+		t.Fatal("a request ran while another held the slot")
+	}
+	d.pasteCopying.Store(false)
+
+	d.handlePasteImageReq(nil, mk(ipc.PasteImageReqPayload{PaneID: pane.ID, PNG: testPNG}))
+	deadline := time.Now().Add(5 * time.Second)
+	for d.pasteCopying.Load() && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if d.pasteCopying.Load() || len(r.calls) != 2 {
+		t.Errorf("slot held=%v, sbx calls=%d, want released and 2", d.pasteCopying.Load(), len(r.calls))
 	}
 }

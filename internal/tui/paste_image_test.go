@@ -126,7 +126,7 @@ func TestImagePaste_HostPaneStillSavesLocally(t *testing.T) {
 func TestSbxImagePaste_RefusesAnOversizedImage(t *testing.T) {
 	fake := &fakeSender{}
 	m := sbxPasteModel(t, fake)
-	if cmd := m.startSandboxImagePaste("p1", make([]byte, ipc.MaxPasteImageBytes+1)); cmd != nil {
+	if cmd := m.startSandboxImagePaste("p1", "", make([]byte, ipc.MaxPasteImageBytes+1)); cmd != nil {
 		t.Error("an oversized image produced a send")
 	}
 	if len(fake.sent) != 0 || len(m.pasteImageReqs) != 0 || !strings.Contains(m.flashText, "too large") {
@@ -147,5 +147,95 @@ func TestSbxImagePaste_LocalSendFailure(t *testing.T) {
 	}
 	if !strings.Contains(m.flashText, "link lost") || len(m.pasteImageReqs) != 0 {
 		t.Errorf("flash=%q pending=%v", m.flashText, m.pasteImageReqs)
+	}
+}
+
+// twoHostPasteModel is a workspace on two connected hosts, with the sbx pane
+// on the LOCAL one. Returns the model and the two hosts' connections.
+func twoHostPasteModel() (Model, *fakeConn, *fakeConn) {
+	local, gpu := newFakeConn(), newFakeConn()
+	r := NewRouter(map[string]Client{"": local, "gpu01": gpu})
+	m := Model{
+		client: r,
+		projects: []*ProjectModel{
+			{ID: "proj-local", Dest: "", tabs: []*TabModel{tabWithPane("tab-1", "pane-local")}},
+			{ID: "proj-gpu", Dest: "gpu01", tabs: []*TabModel{tabWithPane("tab-9", "pane-gpu")}},
+		},
+	}
+	m.projects[0].tabs[0].ActivePaneModel().SandboxKind = sandboxKindSbx
+	m.syncActiveDest()
+	return m, local, gpu
+}
+
+// runSend runs the send half of startSandboxImagePaste's command, never its
+// timeout tick.
+func runSend(cmd tea.Cmd) {
+	if cmd == nil {
+		return
+	}
+	if batch, ok := cmd().(tea.BatchMsg); ok && len(batch) > 0 && batch[0] != nil {
+		batch[0]()
+	}
+}
+
+// The screenshot is bound to the host its pane was on when the user asked to
+// paste. If that pane is gone by the time the clipboard read returns — closed,
+// or its host disconnected — and another host is active, the image goes
+// NOWHERE: destOfPane's active-host fallback must never carry it. Driven
+// through Update, with the clipboard result delivered after the pane left.
+func TestSbxImagePaste_PaneGoneBeforeTheReadReturns_SendsToNoHost(t *testing.T) {
+	m, local, gpu := twoHostPasteModel()
+	delayed := sandboxImagePasteMsg{paneID: "pane-local", dest: "", png: []byte("\x89PNG\r\n\x1a\nIMG")}
+
+	// The pane closes and the user moves to the remote host meanwhile.
+	m.projects[0].tabs = nil
+	m.activeProject = 1
+	m.syncActiveDest()
+
+	next, cmd := m.Update(delayed)
+	m = next.(Model)
+	runSend(cmd)
+
+	if local.sentCount() != 0 || gpu.sentCount() != 0 {
+		t.Fatalf("local=%d gpu=%d sends — an image whose pane is gone must reach no host",
+			local.sentCount(), gpu.sentCount())
+	}
+	if len(m.pasteImageReqs) != 0 || !strings.Contains(m.flashText, "gone") {
+		t.Errorf("pending=%v flash=%q", m.pasteImageReqs, m.flashText)
+	}
+}
+
+// The same pane on a DIFFERENT host than it was bound to (a reconnect handed
+// the id to another daemon) is refused too: the bound host is the only one
+// the image may reach.
+func TestSbxImagePaste_PaneOnAnotherHost_SendsToNoHost(t *testing.T) {
+	m, local, gpu := twoHostPasteModel()
+	next, cmd := m.Update(sandboxImagePasteMsg{paneID: "pane-local", dest: "gpu01", png: []byte("\x89PNG\r\n\x1a\nIMG")})
+	m = next.(Model)
+	runSend(cmd)
+	if local.sentCount() != 0 || gpu.sentCount() != 0 {
+		t.Fatalf("local=%d gpu=%d sends, want none", local.sentCount(), gpu.sentCount())
+	}
+	if len(m.pasteImageReqs) != 0 {
+		t.Errorf("pending=%v", m.pasteImageReqs)
+	}
+}
+
+// A pane still on its bound host gets its image there, and only there, even
+// while the OTHER host's project is the active one.
+func TestSbxImagePaste_GoesToTheBoundHostNotTheActiveOne(t *testing.T) {
+	m, local, gpu := twoHostPasteModel()
+	m.activeProject = 1
+	m.syncActiveDest()
+
+	next, cmd := m.Update(sandboxImagePasteMsg{paneID: "pane-local", dest: "", png: []byte("\x89PNG\r\n\x1a\nIMG")})
+	m = next.(Model)
+	runSend(cmd)
+
+	if local.sentCount() != 1 || gpu.sentCount() != 0 {
+		t.Fatalf("local=%d gpu=%d sends, want the image on local only", local.sentCount(), gpu.sentCount())
+	}
+	if len(m.pasteImageReqs) != 1 {
+		t.Errorf("pending=%v, want one request", m.pasteImageReqs)
 	}
 }

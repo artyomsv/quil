@@ -3175,7 +3175,7 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		return m, tea.Tick(100*time.Millisecond, func(_ time.Time) tea.Msg { return pasteRefreshMsg{} })
 
 	case sandboxImagePasteMsg:
-		return m, m.startSandboxImagePaste(msg.paneID, msg.png)
+		return m, m.startSandboxImagePaste(msg.paneID, msg.dest, msg.png)
 
 	case pasteImageRespMsg:
 		cmd := m.applyPasteImageResp(msg)
@@ -10190,6 +10190,8 @@ func (m Model) pasteClipboard() tea.Cmd {
 	// Read here, with the pane: an sbx pane gets its image through the daemon
 	// (paste_image.go), because a path on this machine names nothing in the VM.
 	inSbx := pane.SandboxKind == sandboxKindSbx
+	// The host too, and here rather than later: see sandboxImagePasteMsg.dest.
+	paneDest := m.destOfPane(paneID)
 	return func() tea.Msg {
 		logger.Debug("pasteClipboard: invoked")
 		// Try text first. If text is non-empty, paste it as-is. Otherwise
@@ -10203,7 +10205,7 @@ func (m Model) pasteClipboard() tea.Cmd {
 		if text == "" && inSbx {
 			png, err := clipboardReadImage()
 			if err == nil && len(png) > 0 {
-				return sandboxImagePasteMsg{paneID: paneID, png: png}
+				return sandboxImagePasteMsg{paneID: paneID, dest: paneDest, png: png}
 			}
 			if err != nil && !errors.Is(err, clipboard.ErrNoImage) {
 				log.Printf("clipboard image: read failed: %v", err)

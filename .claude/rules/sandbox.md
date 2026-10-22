@@ -892,7 +892,12 @@ the chmod runs as root inside a VM the agent controls, and a fixed folder
 the first paste, pointing the root chmod anywhere (PR #271 review). Root owns
 the new folder and `/tmp` is sticky, so the agent cannot swap it afterwards.
 The answered path is typed with `enqueueInput`, NOT through the typing guard:
-the image exists only in the asking pane's sandbox. One image, one sandbox — mounting the paste folder was rejected
+the image exists only in the asking pane's sandbox. **The upload is bound to the
+host the pane was on when the user pressed paste** (`sandboxImagePasteMsg.dest`,
+resolved on the Update goroutine BEFORE the clipboard read): `startSandboxImagePaste`
+refuses when the pane is gone or on another host, and never calls `destOfPane`,
+whose missing-pane fallback is the ACTIVE host — a screenshot would otherwise
+follow the user to a machine they never aimed it at (PR #271 review, H-1). One image, one sandbox — mounting the paste folder was rejected
 because every sandbox would see every screenshot. Daemon-wide single-flight
 (`pasteCopying`); size and PNG magic are refused before the slot. The TUI
 types only a path `sbx.ValidPastePath` accepts, since

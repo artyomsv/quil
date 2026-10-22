@@ -23,9 +23,12 @@ import (
 const pasteImageTimeout = 45 * time.Second
 
 // sandboxImagePasteMsg carries an image read on the paste Cmd's goroutine to
-// Update, which owns the request bookkeeping.
+// Update, which owns the request bookkeeping. dest is the host the pane was
+// on when the user asked to paste, resolved on the Update goroutine BEFORE
+// the clipboard read: the image may only ever go to that host.
 type sandboxImagePasteMsg struct {
 	paneID string
+	dest   string
 	png    []byte
 }
 
@@ -42,14 +45,25 @@ type pasteImageRespMsg struct {
 // listenForMessages either.
 type pasteImageTimeoutMsg struct{ gen string }
 
-// startSandboxImagePaste sends the image for paneID and records the request.
-func (m *Model) startSandboxImagePaste(paneID string, png []byte) tea.Cmd {
+// startSandboxImagePaste sends the image for paneID to dest and records the
+// request.
+//
+// The pane must still exist, on the host it was bound to: a screenshot is
+// the one upload here, and the clipboard read between the keypress and this
+// call is long enough for the pane to close and another host to become
+// active. destOfPane is deliberately NOT used — its fallback for a missing
+// pane is the ACTIVE host, which would send the image to a machine the user
+// never aimed it at.
+func (m *Model) startSandboxImagePaste(paneID, dest string, png []byte) tea.Cmd {
 	if len(png) > ipc.MaxPasteImageBytes {
 		m.setErrorFlash("Image too large to paste into the sandbox")
 		return nil
 	}
-	// Resolved here, on the Update goroutine — see enqueueInput.
-	dest := m.destOfPane(paneID)
+	pane, proj, _ := m.findPaneAndTab(paneID)
+	if pane == nil || proj == nil || proj.Dest != dest {
+		m.setErrorFlash("Image not pasted: the pane is gone")
+		return nil
+	}
 	if r, routed := m.client.(*Router); routed && r.Conn(dest) == nil {
 		m.setErrorFlash("Image not pasted: the pane's host is not connected")
 		return nil

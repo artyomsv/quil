@@ -140,13 +140,22 @@ func TestLockFileHelper(t *testing.T) {
 	if path == "" {
 		return
 	}
-	if _, err := LockFile(path); err != nil {
+	release, err := LockFile(path)
+	if err != nil {
 		fmt.Println("error:", err)
 		os.Exit(2)
 	}
+	// Kept reachable for the helper's whole life: the release closure holds
+	// the *os.File, and an unreachable one is finalized by the GC — which
+	// closes the descriptor and with it drops the lock the parent is
+	// counting on.
+	helperLockRelease = release
 	fmt.Println("locked")
 	select {}
 }
+
+// helperLockRelease pins TestLockFileHelper's lock against the GC.
+var helperLockRelease func()
 
 // TestLockFile_ExcludesAnotherProcess: the point of the OS lock. A second
 // process holding the lock makes LockFile answer ErrLockHeld — no pid to

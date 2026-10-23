@@ -279,12 +279,13 @@ func (d *Daemon) offerUpdate(pane *Pane, paneID string, src updateOfferSource, o
 	// resolution is in flight for this run — no second resolver for it. The
 	// in-flight mark is cleared when the goroutine commits or drops.
 	pane.PluginMu.Lock()
-	skip := superseded() || pane.pluginOffering[key]
+	inFlight, marked := pane.pluginOffering[key]
+	skip := superseded() || (marked && inFlight == run)
 	if !skip {
 		if pane.pluginOffering == nil {
-			pane.pluginOffering = make(map[string]bool)
+			pane.pluginOffering = make(map[string]uint64)
 		}
-		pane.pluginOffering[key] = true
+		pane.pluginOffering[key] = run
 	}
 	pane.PluginMu.Unlock()
 	if skip {
@@ -308,10 +309,13 @@ func (d *Daemon) offerUpdate(pane *Pane, paneID string, src updateOfferSource, o
 			manager = m.Name
 		}
 		// Commit: still this run, still unsent — then it is sent and recorded.
-		// (A run change already dropped the in-flight map; deleting from the
-		// new run's map is a no-op for a key it never had.)
+		// The in-flight mark goes only when it is still THIS run's: the new
+		// run may have marked the same version after a restart, and that mark
+		// is its resolver's, not ours.
 		pane.PluginMu.Lock()
-		delete(pane.pluginOffering, key)
+		if marked, ok := pane.pluginOffering[key]; ok && marked == run {
+			delete(pane.pluginOffering, key)
+		}
 		if superseded() {
 			pane.PluginMu.Unlock()
 			return

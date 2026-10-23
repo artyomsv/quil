@@ -366,11 +366,14 @@ type Pane struct {
 	pluginLineGen  uint64
 	pluginSent     map[string]bool
 	pluginOffered  string
-	// pluginOffering is the offers of this run whose binary resolution is
-	// still in flight (offerUpdate), so a second notice for the same version
-	// starts no second resolver; the authoritative dedupe is pluginSent at
-	// delivery. Same lock, same reset.
-	pluginOffering map[string]bool
+	// pluginOffering is the offers whose binary resolution is still in flight
+	// (offerUpdate), version key → the PTY generation that started it, so a
+	// second notice for the same version in the same run starts no second
+	// resolver, and a resolution for an OLD run clears only its own mark —
+	// never the new run's for the same version. The authoritative dedupe is
+	// pluginSent at delivery. Same lock; reset with the run and at the PTY
+	// boundary (spawnPane).
+	pluginOffering map[string]uint64
 	// LastMCPEventAt is the mcp_control cooldown, keyed BY TITLE. Read and
 	// written under PluginMu, like the two beside it.
 	//

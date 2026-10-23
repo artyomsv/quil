@@ -851,19 +851,30 @@ action = "dialog"
 A simple tool with default args, a form for URL override, a login dialog with a **Log in** button, and an in-place update. This is the shipped `stripe.toml`.
 
 ```toml
+# Stripe — Webhook listener
+# Edit this file to customize the plugin. Delete it to restore defaults.
+
 [plugin]
 name = "stripe"
 display_name = "Stripe"
 category = "tools"
 description = "Stripe webhook listener"
 homepage = "https://github.com/stripe/stripe-cli"
+# v1: added `homepage` (shown greyed in Ctrl+N when the binary is missing).
+# v2: the login dialog gained a "Log in" button ([[error_handlers.fixes]]) and
+#     the pane offers to update an outdated Stripe CLI ([update]), and
+#     `stripe listen` passes --all-snapshot (required since CLI 2026-09).
 schema_version = 2
 
 [command]
 cmd = "stripe"
-args = ["listen"]
+# path = "E:/Tools/stripe/stripe.exe"  # uncomment to override PATH lookup
+# --all-snapshot forwards every snapshot event, which is what `stripe listen`
+# did without a filter before the CLI's September 2026 releases made one
+# required. Swap it for --all-thin or --events a,b to narrow it.
+args = ["listen", "--all-snapshot"]
 detect = "stripe --version"
-arg_template = ["listen", "--forward-to", "{url}"]
+arg_template = ["listen", "--all-snapshot", "--forward-to", "{url}"]
 
 [[command.form_fields]]
 name = "name"
@@ -887,23 +898,50 @@ dialog_width = 75
 strategy = "rerun"
 ghost_buffer = true
 
+# `stripe login` keys expire after 90 days; `stripe listen` then exits with
+# `FATAL ... Expired API Key provided ... "code": "api_key_expired"`.
 [[error_handlers]]
 pattern = 'api_key_expired|Expired API Key|not logged in|login required'
 title = "Stripe login expired"
 message = "Stripe keys from 'stripe login' last 90 days. Log in again to continue."
 action = "dialog"
 
+  # A button on the dialog above. Runs in this pane in place of `stripe listen`;
+  # when it exits 0 the pane starts `stripe listen` again.
   [[error_handlers.fixes]]
   name = "login"
   label = "Log in"
   run = ["stripe", "login"]
   then = "restart"
 
+# A pane created before --all-snapshot was in the arguments above, on a CLI
+# from September 2026 or later, which refuses to listen without a filter.
+[[error_handlers]]
+pattern = 'must specify events to forward'
+title = "Stripe needs an event filter"
+message = """
+This Stripe CLI requires --all-snapshot, --all-thin or --events.
+Close this pane and open a new Stripe pane:
+new panes pass --all-snapshot (all events, as before)."""
+action = "dialog"
+
+# The reverse: --all-snapshot on a CLI older than September 2026.
+[[error_handlers]]
+pattern = 'unknown flag: --all-snapshot'
+title = "Stripe CLI is too old"
+message = """
+This Stripe CLI does not know --all-snapshot.
+Update the Stripe CLI (the Update button appears when it reports a newer version)."""
+action = "dialog"
+
+# How Quil learns the binary is outdated and how it replaces it. The notice is
+# matched on complete output lines; capture group 1 is the offered version.
 [update]
 notice = 'newer version of the Stripe CLI is available, please update to: v?(\d+\.\d+\.\d+)'
 github = "stripe/stripe-cli"
 binary = "stripe"
 
+# Release asset per platform ({version} is the offered version, no "v").
 [update.assets]
 windows_amd64 = "stripe_{version}_windows_x86_64.zip"
 darwin_amd64 = "stripe_{version}_mac-os_x86_64.tar.gz"
@@ -911,11 +949,15 @@ darwin_arm64 = "stripe_{version}_mac-os_arm64.tar.gz"
 linux_amd64 = "stripe_{version}_linux_x86_64.tar.gz"
 linux_arm64 = "stripe_{version}_linux_arm64.tar.gz"
 
+# The checksums file per OS, from the same release.
 [update.checksums]
 windows = "stripe-windows-checksums.txt"
 darwin = "stripe-mac-checksums.txt"
 linux = "stripe-linux-checksums.txt"
 
+# A binary owned by one of these package managers (match = regex on its
+# symlink-resolved path) is updated with that manager's own command, never
+# overwritten by a download.
 [[update.managers]]
 name = "brew"
 match = '/Cellar/|/homebrew/|/linuxbrew/'

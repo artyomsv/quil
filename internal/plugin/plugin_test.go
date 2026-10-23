@@ -430,6 +430,24 @@ func TestDefaultStripe_HasLoginFixAndUpdate(t *testing.T) {
 		t.Fatal("stripe plugin not loaded from the embedded default")
 	}
 
+	// Since the CLI's September 2026 releases `stripe listen` refuses to
+	// start without an event filter; --all-snapshot is the old "everything".
+	if !slices.Contains(stripe.Command.Args, "--all-snapshot") {
+		t.Errorf("args = %q, want --all-snapshot", stripe.Command.Args)
+	}
+	if !slices.Contains(stripe.Command.ArgTemplate, "--all-snapshot") {
+		t.Errorf("arg_template = %q, want --all-snapshot", stripe.Command.ArgTemplate)
+	}
+	for line, title := range map[string]string{
+		"must specify events to forward using --events, --all-snapshot, or --all-thin": "Stripe needs an event filter",
+		"Error: unknown flag: --all-snapshot":                                            "Stripe CLI is too old",
+	} {
+		got := MatchErrors(stripe, line)
+		if len(got) != 1 || got[0].Title != title {
+			t.Errorf("MatchErrors(%q) = %d handlers, want one titled %q", line, len(got), title)
+		}
+	}
+
 	// The broadened handler matches the real FATAL line, and carries the
 	// login fix.
 	line := `FATAL Expired API Key provided: sk_test_***. "code": "api_key_expired"`

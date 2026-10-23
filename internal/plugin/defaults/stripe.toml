@@ -9,15 +9,19 @@ description = "Stripe webhook listener"
 homepage = "https://github.com/stripe/stripe-cli"
 # v1: added `homepage` (shown greyed in Ctrl+N when the binary is missing).
 # v2: the login dialog gained a "Log in" button ([[error_handlers.fixes]]) and
-#     the pane offers to update an outdated Stripe CLI ([update]).
+#     the pane offers to update an outdated Stripe CLI ([update]), and
+#     `stripe listen` passes --all-snapshot (required since CLI 2026-09).
 schema_version = 2
 
 [command]
 cmd = "stripe"
 # path = "E:/Tools/stripe/stripe.exe"  # uncomment to override PATH lookup
-args = ["listen"]
+# --all-snapshot forwards every snapshot event, which is what `stripe listen`
+# did without a filter before the CLI's September 2026 releases made one
+# required. Swap it for --all-thin or --events a,b to narrow it.
+args = ["listen", "--all-snapshot"]
 detect = "stripe --version"
-arg_template = ["listen", "--forward-to", "{url}"]
+arg_template = ["listen", "--all-snapshot", "--forward-to", "{url}"]
 
 [[command.form_fields]]
 name = "name"
@@ -56,6 +60,26 @@ action = "dialog"
   label = "Log in"
   run = ["stripe", "login"]
   then = "restart"
+
+# A pane created before --all-snapshot was in the arguments above, on a CLI
+# from September 2026 or later, which refuses to listen without a filter.
+[[error_handlers]]
+pattern = 'must specify events to forward'
+title = "Stripe needs an event filter"
+message = """
+This Stripe CLI requires --all-snapshot, --all-thin or --events.
+Close this pane and open a new Stripe pane:
+new panes pass --all-snapshot (all events, as before)."""
+action = "dialog"
+
+# The reverse: --all-snapshot on a CLI older than September 2026.
+[[error_handlers]]
+pattern = 'unknown flag: --all-snapshot'
+title = "Stripe CLI is too old"
+message = """
+This Stripe CLI does not know --all-snapshot.
+Update the Stripe CLI (the Update button appears when it reports a newer version)."""
+action = "dialog"
 
 # How Quil learns the binary is outdated and how it replaces it. The notice is
 # matched on complete output lines; capture group 1 is the offered version.

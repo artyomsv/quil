@@ -19,6 +19,9 @@ headline: Tool error dialogs now offer the fix, and an Update button
 - **Stripe is the first plugin wired up.** Its login dialog now also fires on an expired
   key (`api_key_expired`), carries a **Log in** button that runs `stripe login` in the pane
   and resumes `stripe listen`, and the pane offers to update the Stripe CLI when it reports
-  one. `stripe.toml`'s schema version moved to 2, so **every install sees the plugin
+  one. `stripe listen` now passes `--all-snapshot`, which Stripe CLI releases since
+  September 2026 require (it forwards every event, as before); a pane started without it
+  explains the missing filter, and an older CLI that does not know the flag points at
+  Update. `stripe.toml`'s schema version moved to 2, so **every install sees the plugin
   migration dialog once** on first start after this upgrade: press `A` to take the new
   default, or merge your own edits and press Enter.

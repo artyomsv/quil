@@ -756,6 +756,33 @@ func (m Model) renderPluginErrorDialog() string {
 // --remote came off another host.
 func writePluginLines(b *strings.Builder, style lipgloss.Style, text string) {
 	for _, line := range strings.Split(text, "\n") {
-		b.WriteString(pluginDialogIndent + style.Render(truncateToWidth(sanitizeRemoteText(line), pluginDialogLineWidth)) + "\n")
+		for _, row := range wrapPluginLine(sanitizeRemoteText(line), pluginDialogLineWidth) {
+			b.WriteString(pluginDialogIndent + style.Render(row) + "\n")
+		}
 	}
+}
+
+// wrapPluginLine breaks one message line at spaces into rows of at most w
+// cells, so a plugin author's sentence is read whole rather than cut at the
+// dialog edge. A single word wider than w is cut, as before.
+func wrapPluginLine(line string, w int) []string {
+	words := strings.Fields(line)
+	if len(words) == 0 {
+		return []string{""}
+	}
+	var rows []string
+	cur := ""
+	for _, word := range words {
+		word = truncateToWidth(word, w)
+		switch {
+		case cur == "":
+			cur = word
+		case lipgloss.Width(cur)+1+lipgloss.Width(word) <= w:
+			cur += " " + word
+		default:
+			rows = append(rows, cur)
+			cur = word
+		}
+	}
+	return append(rows, cur)
 }

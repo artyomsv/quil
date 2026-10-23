@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -384,6 +385,26 @@ func TestPluginDialog_RenderFitsTheDialogWidth(t *testing.T) {
 	}
 	if len(rows) < 8 {
 		t.Errorf("only %d rows — the eight buttons did not wrap:\n%s", len(rows), out)
+	}
+	// The long message is wrapped, not cut: every word of it is on screen.
+	if n := strings.Count(out, "explanation"); n != 12 {
+		t.Errorf("message shows %d of 12 sentences — it was cut, not wrapped:\n%s", n, out)
+	}
+}
+
+func TestWrapPluginLine(t *testing.T) {
+	t.Parallel()
+	got := wrapPluginLine("Stripe keys from 'stripe login' last 90 days. Log in again to continue.", 52)
+	want := []string{"Stripe keys from 'stripe login' last 90 days. Log in", "again to continue."}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("wrapPluginLine = %q, want %q", got, want)
+	}
+	if got := wrapPluginLine("", 52); !reflect.DeepEqual(got, []string{""}) {
+		t.Errorf("empty line = %q, want one empty row (keeps blank lines)", got)
+	}
+	long := strings.Repeat("x", 80)
+	if got := wrapPluginLine(long, 52); len(got) != 1 || lipgloss.Width(got[0]) > 52 {
+		t.Errorf("an over-wide word = %q, want one row cut to 52 cells", got)
 	}
 }
 

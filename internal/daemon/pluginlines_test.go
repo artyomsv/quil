@@ -490,7 +490,7 @@ func TestApplyPluginHandlers_UpdateManagerNamed(t *testing.T) {
 // Resolving the path is filesystem work under the blocking-FS budget, off
 // the flush goroutine: a resolver that never answers (a PATH entry on a dead
 // mount) costs one permit, not the dialog — the frame still leaves, without
-// a target, once pluginTargetTimeout has passed.
+// a target, once the daemon's target timeout has passed.
 func TestApplyPluginHandlers_UpdateTargetTimesOut(t *testing.T) {
 	d := newTestDaemon(t)
 	registerFixmePlugin(t, d, "")
@@ -498,19 +498,20 @@ func TestApplyPluginHandlers_UpdateTargetTimesOut(t *testing.T) {
 	c := dialBroadcastReader(t, d)
 
 	parked := newParkedLookup()
-	prevFn, prevTimeout := resolvePluginBinaryFn, pluginTargetTimeout
+	prevFn := resolvePluginBinaryFn
 	resolvePluginBinaryFn = func(_, _ string) string {
 		parked.park()
 		return "/late/stripe"
 	}
-	pluginTargetTimeout = 50 * time.Millisecond
+	// This daemon's own configuration, not a package variable.
+	d.pluginUpdate.targetTimeout = 50 * time.Millisecond
 	t.Cleanup(func() {
-		parked.restore(t, func() { resolvePluginBinaryFn, pluginTargetTimeout = prevFn, prevTimeout })
+		parked.restore(t, func() { resolvePluginBinaryFn = prevFn })
 	})
 
 	started := time.Now()
 	d.applyPluginHandlers(pane, pane.ID, []byte(fixmeNotice+"\r\n"), 1)
-	if spent := time.Since(started); spent > prevTimeout {
+	if spent := time.Since(started); spent > defaultPluginTargetTimeout {
 		t.Fatalf("the flush waited %v on the resolver", spent)
 	}
 	got := readPluginErrors(t, c, 1)
@@ -591,7 +592,7 @@ func TestApplyPluginHandlers_SkippedWhileFixRuns(t *testing.T) {
 	if toml == fixmePluginTOML {
 		t.Fatal("fixme TOML lost its [persistence] block")
 	}
-	registerFixmeTOML(t, d, toml, fakeBinary(t, "stripe.cmd"))
+	registerFixmeTOML(t, d, toml, fakeBinary(t, "stripe.exe"))
 	pane := newFixmePane(t, d)
 	sessions := installFixSessions(t)
 	if err := d.spawnPane(pane, newSessionFn(80, 24), false); err != nil {
@@ -656,9 +657,9 @@ offer_update = true
 
 // latestReleaseServer is a GitHub API stand-in answering the fixme repo's
 // /releases/latest with status and tag, counting the hits, and installed as
-// latestReleaseBaseURL for the test. The counter is atomic: httptest's
-// goroutines write it, the test reads it.
-func latestReleaseServer(t *testing.T, status int, tag string) *atomic.Int32 {
+// d's release endpoint (its own configuration, no package variable). The
+// counter is atomic: httptest's goroutines write it, the test reads it.
+func latestReleaseServer(t *testing.T, d *Daemon, status int, tag string) *atomic.Int32 {
 	t.Helper()
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -674,9 +675,7 @@ func latestReleaseServer(t *testing.T, status int, tag string) *atomic.Int32 {
 		}
 	}))
 	t.Cleanup(srv.Close)
-	prev := latestReleaseBaseURL
-	latestReleaseBaseURL = srv.URL
-	t.Cleanup(func() { latestReleaseBaseURL = prev })
+	d.pluginUpdate.releaseBaseURL = srv.URL
 	return &hits
 }
 
@@ -685,14 +684,14 @@ func latestReleaseServer(t *testing.T, status int, tag string) *atomic.Int32 {
 // the update frame, which the pane's Update request is then accepted for.
 // One lookup per run however often the line repeats.
 func TestApplyPluginHandlers_OfferUpdateFromLatestRelease(t *testing.T) {
-	quild := fakeBinary(t, "quild.cmd")
+	quild := fakeBinary(t, "quild.exe")
 	origExe := quildExeFn
 	quildExeFn = func() (string, error) { return quild, nil }
 	t.Cleanup(func() { quildExeFn = origExe })
-	hits := latestReleaseServer(t, http.StatusOK, "v1.55.1")
 
 	d := newTestDaemon(t)
-	registerFixmeTOML(t, d, offerUpdateTOML(t), fakeBinary(t, "stripe.cmd"))
+	hits := latestReleaseServer(t, d, http.StatusOK, "v1.55.1")
+	registerFixmeTOML(t, d, offerUpdateTOML(t), fakeBinary(t, "stripe.exe"))
 	pane := newFixmePane(t, d)
 	sessions := installFixSessions(t)
 	if err := d.spawnPane(pane, newSessionFn(80, 24), false); err != nil {
@@ -756,12 +755,63 @@ func TestApplyPluginHandlers_OfferUpdateFromLatestRelease(t *testing.T) {
 	}
 }
 
+// An offer whose binary resolution is still running when the pane restarts
+// and offers a version for its NEW run is dropped at delivery: the run
+// check, the dedupe and the pluginOffered record are committed in one
+// PluginMu span once the path is resolved, never before, so a slow old
+// resolution can neither broadcast over the newer dialog nor leave
+// pluginOffered naming the old run's version.
+func TestOfferUpdate_SlowResolutionSupersededByNewRun(t *testing.T) {
+	d := newTestDaemon(t)
+	registerFixmePlugin(t, d, "")
+	pane := newFixmePane(t, d)
+	c := dialBroadcastReader(t, d)
+
+	// The first resolution parks; every later one answers at once.
+	parked := newParkedLookup()
+	var calls atomic.Int32
+	prevFn := resolvePluginBinaryFn
+	resolvePluginBinaryFn = func(_, _ string) string {
+		if calls.Add(1) == 1 {
+			parked.park()
+			return "/old/run/stripe"
+		}
+		return "/new/run/stripe"
+	}
+	t.Cleanup(func() {
+		parked.restore(t, func() { resolvePluginBinaryFn = prevFn })
+	})
+
+	// Run 1 offers 1.55.1 and its resolution parks. Run 2 (a restart) offers
+	// 1.56.0, which resolves and is delivered.
+	d.applyPluginHandlers(pane, pane.ID, []byte(fixmeNotice+"\r\n"), 1)
+	newer := strings.Replace(fixmeNotice, "1.55.1", "1.56.0", 1)
+	d.applyPluginHandlers(pane, pane.ID, []byte(newer+"\r\n"), 2)
+	got := readPluginErrors(t, c, 1)
+	if got[0].Update == nil || got[0].Update.Offered != "1.56.0" || got[0].Update.Target != "/new/run/stripe" {
+		t.Fatalf("frame = %+v, want the new run's 1.56.0 offer", got[0])
+	}
+
+	// The old resolution comes back: nothing more is broadcast and the record
+	// is the new run's.
+	parked.release <- struct{}{}
+	if late := pluginErrorsWithin(t, c, 300*time.Millisecond); len(late) != 0 {
+		t.Fatalf("the superseded offer was broadcast: %+v", late)
+	}
+	pane.PluginMu.Lock()
+	offered, oldSent := pane.pluginOffered, pane.pluginSent["u:1.55.1"]
+	pane.PluginMu.Unlock()
+	if offered != "1.56.0" || oldSent {
+		t.Fatalf("offered=%q oldSent=%v: the superseded completion was recorded", offered, oldSent)
+	}
+}
+
 // A GitHub answer that lands after the pane restarted is dropped: the run
 // check, the dedupe and the pluginOffered record are one PluginMu span, so
 // the old run's version is never written into the new run.
 func TestOfferUpdate_StaleRunDropped(t *testing.T) {
 	d := newTestDaemon(t)
-	p := registerFixmeTOML(t, d, offerUpdateTOML(t), fakeBinary(t, "stripe.cmd"))
+	p := registerFixmeTOML(t, d, offerUpdateTOML(t), fakeBinary(t, "stripe.exe"))
 	pane := newFixmePane(t, d)
 	c := dialBroadcastReader(t, d)
 
@@ -792,9 +842,9 @@ func TestApplyPluginHandlers_OfferUpdateFailureOrDeclinedOffersNothing(t *testin
 		{"declined", http.StatusOK, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			hits := latestReleaseServer(t, tc.status, "v1.55.1")
 			d := newTestDaemon(t)
-			registerFixmeTOML(t, d, offerUpdateTOML(t), fakeBinary(t, "stripe.cmd"))
+			hits := latestReleaseServer(t, d, tc.status, "v1.55.1")
+			registerFixmeTOML(t, d, offerUpdateTOML(t), fakeBinary(t, "stripe.exe"))
 			pane := newFixmePane(t, d)
 			if tc.decline {
 				if err := d.pluginUpdateSkips().Skip("fixme", "1.55.1"); err != nil {

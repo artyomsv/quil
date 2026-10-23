@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -521,6 +522,93 @@ func TestRun_MissingTagFailsNoLatestFallback(t *testing.T) {
 	}
 	if got := readFile(t, target); got != "old-bytes" {
 		t.Errorf("target = %q, want untouched", got)
+	}
+}
+
+// TestRun_ConcurrentUpdatersSerialize: two updaters of one target — two
+// panes on one tool pressing Update — take turns on the per-target lock
+// rather than restoring and rolling back over each other's swap. Both
+// succeed and the target ends whole, with the lock and the copy's .new gone.
+// Goroutines stand in for the two processes: the lock is an O_EXCL file, so
+// it is as exclusive within one process as across two.
+func TestRun_ConcurrentUpdatersSerialize(t *testing.T) {
+	target := installedTool(t, []byte("old-bytes"))
+	archive := buildArchive(t, map[string][]byte{"stripe-dir/" + binName("stripe"): []byte("new-bytes")})
+	gh := newGitHub(t, map[string][]byte{assetName(): archive, testSums: sumsFor(archive, assetName())})
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	outs := make([]bytes.Buffer, 2)
+	for i := range errs {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = Run(context.Background(), options(target, gh), &outs[i])
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("updater %d: %v\n%s", i, err, outs[i].String())
+		}
+	}
+	if got := readFile(t, target); got != "new-bytes" {
+		t.Errorf("target = %q after two updaters, want new bytes", got)
+	}
+	for _, leftover := range []string{target + ".new", target + updateLockSuffix} {
+		if _, err := os.Stat(leftover); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s left behind: %v", filepath.Base(leftover), err)
+		}
+	}
+	if names := dirEntries(t, target); len(names) != 2 {
+		t.Errorf("target dir holds %v, want only the binary and its backup", names)
+	}
+}
+
+// TestRun_UnwritableDirRefusedBeforeLock: an unwritable install directory is
+// refused at once with the writability message. The lock lives in that
+// directory, so taken first it would fail to be created — and a waiter
+// reading that as "held" would print the waiting line and spend the whole
+// wait on a holder that does not exist.
+func TestRun_UnwritableDirRefusedBeforeLock(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory mode bits do not deny creation on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root is not denied by directory mode bits")
+	}
+	dir := filepath.Join(t.TempDir(), "ro")
+	if err := os.Mkdir(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, binName("stripe"))
+	if err := os.WriteFile(target, []byte("old-bytes"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0755) })
+	if f, err := os.Create(filepath.Join(dir, "probe")); err == nil {
+		f.Close()
+		t.Skip("the filesystem lets a 0500 directory take files")
+	}
+	gh := newGitHub(t, nil)
+
+	var out bytes.Buffer
+	started := time.Now()
+	err := Run(context.Background(), options(target, gh), &out)
+	if err == nil || !strings.Contains(err.Error(), "not writable") {
+		t.Fatalf("err = %v, want the not-writable refusal\n%s", err, out.String())
+	}
+	if strings.Contains(out.String(), "waiting for another update") {
+		t.Errorf("the refusal waited on a lock:\n%s", out.String())
+	}
+	if spent := time.Since(started); spent > 2*time.Second {
+		t.Errorf("the refusal took %v", spent)
+	}
+	if gh.hits.Load() != 0 {
+		t.Errorf("GitHub was contacted %d times before the refusal", gh.hits.Load())
 	}
 }
 

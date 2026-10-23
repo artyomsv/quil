@@ -253,6 +253,11 @@ func (d *Daemon) returnToShellOnCleanExit(pane *Pane, code int) bool {
 	if code != 0 {
 		return false
 	}
+	// The fix check and the restart are one lifecycleMu span, like every
+	// other child-replacing transition (session.go): startFix's reservation
+	// cannot land between the check below and the restart. Released before
+	// the broadcast.
+	pane.lifecycleMu.Lock()
 	pane.PluginMu.Lock()
 	// A plugin fix armed on this pane (startFix's marker set, its restart not
 	// yet run — pluginfix.go) owns the next spawn: the restart below would
@@ -262,6 +267,7 @@ func (d *Daemon) returnToShellOnCleanExit(pane *Pane, code int) bool {
 	// the agent itself converts back.
 	if pane.FixLabel != "" || len(pane.fixArgv) > 0 {
 		pane.PluginMu.Unlock()
+		pane.lifecycleMu.Unlock()
 		return false
 	}
 	prev := pane.ConvertedFromTerminal
@@ -279,16 +285,17 @@ func (d *Daemon) returnToShellOnCleanExit(pane *Pane, code int) bool {
 		delete(pane.PluginState, "transcript_path")
 	}
 	pane.PluginMu.Unlock()
-	if prev != "" {
-		// The records are the other half of that state and outlive the pane
-		// object; a stale one is read back by the next spawn's ownsRecord.
-		retirePaneSessionRecords(pane.ID)
-	}
 	if prev == "" {
+		pane.lifecycleMu.Unlock()
 		return false
 	}
+	// The records are the other half of that state and outlive the pane
+	// object; a stale one is read back by the next spawn's ownsRecord.
+	retirePaneSessionRecords(pane.ID)
 	log.Printf("pane %s: agent exited cleanly, returning to %s", pane.ID, prev)
-	if !d.restartPaneInPlace(pane) {
+	restarted := d.restartPaneInPlace(pane)
+	pane.lifecycleMu.Unlock()
+	if !restarted {
 		return false
 	}
 	d.broadcastState()

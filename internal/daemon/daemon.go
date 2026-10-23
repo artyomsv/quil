@@ -73,8 +73,11 @@ type Daemon struct {
 	updateSkips     *updateSkips
 	updateSkipsOnce sync.Once
 	// latestTags caches offer_update's GitHub answers (pluginlines.go); the
-	// zero value is ready.
-	latestTags latestTagCache
+	// zero value is ready. pluginUpdate is that machinery's configuration —
+	// endpoint and timeouts — set by New; a hand-built daemon's zero value
+	// reads as the defaults (pluginUpdateCfg).
+	latestTags   latestTagCache
+	pluginUpdate pluginUpdateConfig
 	// parkedWaits counts the live parked wait_task goroutines, so a test can
 	// see them end when their conn closes.
 	parkedWaits atomic.Int32
@@ -394,6 +397,7 @@ func New(cfg config.Config) *Daemon {
 		snapGens:   make(map[string]uint64),
 		runID:      uuid.NewString(),
 	}
+	d.pluginUpdate = defaultPluginUpdateConfig()
 	d.limited = inServiceSessionFn()
 	if d.limited {
 		log.Printf("daemon: running in session 0 (limited: no saved credentials, windows opened by panes are invisible)")
@@ -8024,6 +8028,12 @@ func (d *Daemon) restartPaneInPlace(pane *Pane) bool {
 	return success
 }
 
+// restartGuardPassedFn, when set, runs in handleRestartPaneReq after its
+// guards and before the restart, with the pane's lifecycleMu held. Nil in
+// production; a test parks a restart there to prove a fix request on another
+// connection waits for it rather than slipping in between.
+var restartGuardPassedFn func(pane *Pane)
+
 func (d *Daemon) handleRestartPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 	var req ipc.RestartPaneReqPayload
 	if err := msg.DecodePayload(&req); err != nil {
@@ -8052,11 +8062,19 @@ func (d *Daemon) handleRestartPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 	// Keyed on PreparingWorktree and never on SpawnError: the pane a FAILED add
 	// leaves behind must still restart, because Alt+R is exactly what its error
 	// screen offers.
+	//
+	// The guards and the restart are ONE lifecycleMu span: read outside it,
+	// a restart on one connection could see no fix, a fix request on another
+	// could reserve the pane and spawn its child, and the restart would then
+	// close that child and start the normal command with the login or the
+	// swap half done — the very thing the refusal below exists to prevent.
+	pane.lifecycleMu.Lock()
 	pane.PluginMu.Lock()
 	preparing := pane.PreparingWorktree
 	fixing := pane.FixLabel
 	pane.PluginMu.Unlock()
 	if preparing != "" {
+		pane.lifecycleMu.Unlock()
 		log.Printf("restart pane %s: refused, still creating worktree %s", pane.ID, preparing)
 		// Success stays false — the pane is unchanged, and the "creating
 		// worktree" block it is already showing IS the answer to why nothing
@@ -8070,11 +8088,16 @@ func (d *Daemon) handleRestartPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 	// "running fix" marker is the answer to why nothing happened. The fix's
 	// own exit is what restarts the pane (onFixExit).
 	if fixing != "" {
+		pane.lifecycleMu.Unlock()
 		log.Printf("restart pane %s: refused, running fix %q", pane.ID, fixing)
 		respondTo(conn, msg.ID, ipc.MsgRestartPaneResp, ipc.RestartPaneRespPayload{PaneID: req.PaneID})
 		return
 	}
+	if restartGuardPassedFn != nil {
+		restartGuardPassedFn(pane)
+	}
 	success := d.restartPaneInPlace(pane)
+	pane.lifecycleMu.Unlock()
 
 	// AFTER the outcome is known, and only on success.
 	//

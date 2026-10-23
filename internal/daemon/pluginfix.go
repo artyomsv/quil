@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -64,7 +65,7 @@ func (d *Daemon) handlePluginFixReq(conn *ipc.Conn, msg *ipc.Message) {
 	if then == "" {
 		then = plugin.FixThenRestart
 	}
-	argv, err := resolvedFixArgv(p, fix.Run)
+	argv, err := d.resolvedFixArgv(p, fix.Run)
 	if err != nil {
 		refuseFix(conn, msg, ipc.MsgPluginFixResp, err.Error())
 		return
@@ -121,17 +122,74 @@ func pluginOfferedVersion(pane *Pane, raw string) (string, error) {
 // names, so startFixChild spawns without a lookup of its own — the lookup is
 // a PATH walk, which must neither run unbounded on the dispatch goroutine
 // nor fail only after the pane was stopped. A program that cannot be found
-// in time is a refusal with the pane untouched.
-func resolvedFixArgv(p *plugin.PanePlugin, run []string) ([]string, error) {
+// in time is a refusal with the pane untouched. The result is the argv that
+// RUNS: a Windows batch shim is wrapped in its interpreter here
+// (fixLaunchArgv), so the logged argv and the spawned one are the same.
+func (d *Daemon) resolvedFixArgv(p *plugin.PanePlugin, run []string) ([]string, error) {
 	if len(run) == 0 {
 		return nil, errors.New("fix names no command")
 	}
-	cmd := fixCommandWithin(p, run[0], pluginTargetTimeout)
+	cmd := fixCommandWithin(p, run[0], d.pluginUpdateCfg().targetTimeout)
 	if cmd == "" {
 		return nil, fmt.Errorf("could not locate %s", run[0])
 	}
 	argv := append([]string{cmd}, run[1:]...)
-	return argv, nil
+	return fixLaunchArgv(argv, runtime.GOOS, os.Getenv)
+}
+
+// cmdScriptMeta are the characters neither the script path nor an argument
+// may carry into a .cmd/.bat launch: cmd.exe re-parses the command line it
+// is handed, so the shell metacharacters (& | < > ^ and the % of variable
+// expansion) would be interpreted rather than passed, and a quote or a
+// newline would end the token or the command. cmdScriptArgUnsafe adds
+// whitespace for the ARGUMENTS: an argument with a space would be quoted by
+// the spawn, and a second quoted token after the quoted script path trips
+// cmd's leading-quote stripping and breaks the path itself (a path with
+// spaces is the one quoted token cmd keeps). Both come from the daemon's own
+// plugin file or its own resolution, so a refusal here is a plugin bug named
+// clearly, never a user's input swallowed.
+const (
+	cmdScriptMeta      = "&|<>^%\"\r\n"
+	cmdScriptArgUnsafe = cmdScriptMeta + "\t "
+)
+
+// fixLaunchArgv rewrites argv for the OS it will run on. On windows a
+// resolved argv[0] that is a batch script (.cmd/.bat — Scoop's shims are
+// generated .cmd files) cannot be started by CreateProcess, which the PTY's
+// Spawn calls without an interpreter; it becomes
+// [%ComSpec%, /d, /c, script, args...] (/d skips AutoRun, /c runs and exits),
+// with %ComSpec% from env, falling back to %SystemRoot%\System32\cmd.exe;
+// with neither set the launch is refused rather than left to a PATH search
+// for cmd.exe. Any other argv, and every argv elsewhere, is returned as it
+// is. Platform-neutral — goos and env are parameters — so the Linux CI
+// exercises the windows decisions.
+func fixLaunchArgv(argv []string, goos string, env func(string) string) ([]string, error) {
+	if goos != "windows" || len(argv) == 0 {
+		return argv, nil
+	}
+	switch strings.ToLower(filepath.Ext(argv[0])) {
+	case ".cmd", ".bat":
+	default:
+		return argv, nil
+	}
+	script := filepath.Base(argv[0])
+	if strings.ContainsAny(argv[0], cmdScriptMeta) {
+		return nil, fmt.Errorf("batch script path %q cannot be launched: cmd.exe would re-parse it", argv[0])
+	}
+	for _, a := range argv[1:] {
+		if strings.ContainsAny(a, cmdScriptArgUnsafe) {
+			return nil, fmt.Errorf("fix argument %q cannot be passed to the batch script %s: cmd.exe would re-parse it", a, script)
+		}
+	}
+	interp := env("ComSpec")
+	if interp == "" {
+		root := env("SystemRoot")
+		if root == "" {
+			return nil, fmt.Errorf("cannot locate cmd.exe to run the batch script %s: neither ComSpec nor SystemRoot is set", script)
+		}
+		interp = filepath.Join(root, "System32", "cmd.exe")
+	}
+	return append([]string{interp, "/d", "/c"}, argv...), nil
 }
 
 func (d *Daemon) handlePluginUpdateReq(conn *ipc.Conn, msg *ipc.Message) {
@@ -161,7 +219,7 @@ func (d *Daemon) handlePluginUpdateReq(conn *ipc.Conn, msg *ipc.Message) {
 	// BOUNDED: it is a PATH walk and a symlink resolution on this conn's
 	// dispatch goroutine, and a PATH entry on a dead mount must cost this
 	// request, not every message after it (pluginBinaryTargetWithin).
-	binPath := pluginBinaryTargetWithin(p.Command.Path, p.Command.Cmd, pluginTargetTimeout, resolvePluginBinaryFn)
+	binPath := pluginBinaryTargetWithin(p.Command.Path, p.Command.Cmd, d.pluginUpdateCfg().targetTimeout, resolvePluginBinaryFn)
 	if binPath == "" {
 		refuseFix(conn, msg, ipc.MsgPluginUpdateResp, fmt.Sprintf("could not locate the %s binary", p.DisplayName))
 		return
@@ -171,7 +229,7 @@ func (d *Daemon) handlePluginUpdateReq(conn *ipc.Conn, msg *ipc.Message) {
 		refuseFix(conn, msg, ipc.MsgPluginUpdateResp, err.Error())
 		return
 	}
-	argv, err := resolvedFixArgv(p, run)
+	argv, err := d.resolvedFixArgv(p, run)
 	if err != nil {
 		refuseFix(conn, msg, ipc.MsgPluginUpdateResp, err.Error())
 		return
@@ -231,6 +289,11 @@ func (d *Daemon) startFix(pane *Pane, argv []string, label, then string) error {
 	if len(argv) == 0 {
 		return errors.New("fix names no command")
 	}
+	// The reservation and the restart are one lifecycleMu span, the same span
+	// handleRestartPaneReq holds across its guard and its restart: a restart
+	// cannot slip between the marker being set and the fix child spawning,
+	// nor read "no fix" just before this reserves one (Pane.lifecycleMu).
+	pane.lifecycleMu.Lock()
 	// A deferred pane is spawned FIRST, while nothing is armed. restartPaneInPlace
 	// does the same call, but by then the argv is set, and the lazy spawn
 	// would consume it: the fix would run as the pane's first child and the
@@ -240,10 +303,12 @@ func (d *Daemon) startFix(pane *Pane, argv []string, label, then string) error {
 	pane.PluginMu.Lock()
 	if branch := pane.PreparingWorktree; branch != "" {
 		pane.PluginMu.Unlock()
+		pane.lifecycleMu.Unlock()
 		return fmt.Errorf("pane is still creating worktree %s", branch)
 	}
 	if running := pane.FixLabel; running != "" {
 		pane.PluginMu.Unlock()
+		pane.lifecycleMu.Unlock()
 		return fmt.Errorf("a fix is already running in this pane: %s", running)
 	}
 	pane.FixLabel = label
@@ -252,10 +317,14 @@ func (d *Daemon) startFix(pane *Pane, argv []string, label, then string) error {
 	pane.PluginMu.Unlock()
 
 	log.Printf("pane %s: running fix %q: %v", pane.ID, label, argv)
-	if !d.restartPaneInPlace(pane) {
+	started := d.restartPaneInPlace(pane)
+	if !started {
 		pane.PluginMu.Lock()
 		pane.FixLabel, pane.fixArgv, pane.fixThen = "", nil, ""
 		pane.PluginMu.Unlock()
+	}
+	pane.lifecycleMu.Unlock()
+	if !started {
 		d.broadcastState()
 		return errors.New("the fix could not be started (see quild.log)")
 	}
@@ -353,10 +422,16 @@ func sameTool(a, b string) bool {
 // — the normal child can exit between startFix's marker span and the
 // restart that follows it, and that exit is the pane's, card and all.
 func (d *Daemon) onFixExit(pane *Pane, code int, generation uint64) bool {
+	// Under lifecycleMu from the marker check to the restart: a restart
+	// request arriving between the marker clearing and the restart below
+	// would otherwise restart the pane too (Pane.lifecycleMu). Released
+	// before any broadcast.
+	pane.lifecycleMu.Lock()
 	pane.PluginMu.Lock()
 	label, then := pane.FixLabel, pane.fixThen
 	if label == "" || generation == 0 || generation != pane.fixGen {
 		pane.PluginMu.Unlock()
+		pane.lifecycleMu.Unlock()
 		return false
 	}
 	pane.FixLabel, pane.fixThen = "", ""
@@ -366,10 +441,12 @@ func (d *Daemon) onFixExit(pane *Pane, code int, generation uint64) bool {
 		if !d.restartPaneInPlace(pane) {
 			log.Printf("pane %s: restart after fix %q failed", pane.ID, label)
 		}
+		pane.lifecycleMu.Unlock()
 		d.broadcastState()
 		d.requestSnapshot()
 		return true
 	}
+	pane.lifecycleMu.Unlock()
 	line := "fix finished — Alt+R restarts"
 	if code != 0 {
 		line = fmt.Sprintf("fix failed (exit %d) — Alt+R restarts", code)

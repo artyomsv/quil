@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
-	"strconv"
 	"strings"
 	"time"
 
@@ -307,81 +306,36 @@ const (
 // name — so P2 can unlink the backup P1 is mid-swap on, and if P1's copy then
 // fails, its rollback finds nothing and NO binary is left at the target path.
 // The racing parties are separate processes, so the exclusion has to live on
-// disk rather than in a mutex.
+// disk rather than in a mutex. The lock itself is binswap.AcquireLock — the
+// pid-recording O_EXCL file, abandoned-lock takeover and own-lock-only
+// release — shared with `quild plugin-update`, which locks each tool it
+// swaps the same way.
 func acquireApplyLock(dir string) (release func(), ok bool) {
-	noop := func() {}
 	if err := os.MkdirAll(dir, 0700); err != nil {
-		return noop, false
+		return func() {}, false
 	}
-	path := filepath.Join(dir, applyLockName)
-	self := strconv.Itoa(os.Getpid())
-	// Two attempts: the second exists only to claim a lock found abandoned on
-	// the first. If another process wins that race, O_EXCL fails again and we
-	// back off rather than looping.
-	for attempt := 0; attempt < 2; attempt++ {
-		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-		if err == nil {
-			fmt.Fprintln(f, self)
-			f.Close()
-			// Release only OUR lock. If this swap somehow outran the staleness
-			// window, another process may already hold the path, and removing
-			// it by name would hand a third process a lock while the second is
-			// mid-swap — precisely the interleaving this exists to prevent.
-			return func() {
-				if data, rErr := os.ReadFile(path); rErr == nil &&
-					strings.TrimSpace(string(data)) == self {
-					os.Remove(path)
-				}
-			}, true
-		}
-		if !applyLockAbandoned(path) {
-			return noop, false
-		}
-		os.Remove(path)
-	}
-	return noop, false
+	return binswap.AcquireLock(filepath.Join(dir, applyLockName), applyLockStale)
 }
 
-// applyLockAbandoned reports whether the lock at path can be taken over.
-//
-// The recorded pid makes this mostly a fact rather than a guess: a lock whose
-// holder is gone is reclaimable immediately, without waiting out the age
-// window. The age cap stays as the backstop for the two cases liveness cannot
-// answer — an unparseable/legacy lock file, and a pid since recycled by an
-// unrelated long-running process, which would otherwise read as "held"
-// forever. A live holder older than the cap is therefore still treated as
-// abandoned; the swap it guards is two file copies, so it cannot legitimately
-// run that long, and the ownership check in release() keeps the takeover safe
-// if it somehow does.
+// applyLockAbandoned reports whether the lock at path can be taken over: a
+// holder that is gone, or a lock older than applyLockStale (the backstop for
+// a pid since recycled — the swap it guards is two file copies and cannot
+// legitimately run that long).
 func applyLockAbandoned(path string) bool {
-	info, err := os.Stat(path)
-	if err != nil {
-		return false // cannot judge it — leave it alone
-	}
-	if data, rErr := os.ReadFile(path); rErr == nil {
-		if pid, pErr := strconv.Atoi(strings.TrimSpace(string(data))); pErr == nil && pid > 0 {
-			if alive, _ := processProbe(pid); !alive {
-				return true
-			}
-		}
-	}
-	return time.Since(info.ModTime()) > applyLockStale
+	return binswap.LockAbandoned(path, applyLockStale)
 }
 
 // applyInProgress reports whether another process holds a live apply lock.
+// It fails CLOSED on anything but "no lock": if the lock cannot even be
+// stat'd, we cannot prove no swap is running, and the cost of skipping a
+// cleanup sweep is a few leftover files.
 func applyInProgress(dir string) bool {
-	path := filepath.Join(dir, applyLockName)
-	if _, err := os.Stat(path); err != nil {
-		// Fail CLOSED on anything but "no lock": if the lock cannot even be
-		// stat'd, we cannot prove no swap is running, and the cost of
-		// skipping a cleanup sweep is a few leftover files.
-		return !errors.Is(err, fs.ErrNotExist)
-	}
-	return !applyLockAbandoned(path)
+	return binswap.LockHeld(filepath.Join(dir, applyLockName), applyLockStale)
 }
 
 // The rename-aside swap itself (freeBackupPath, SwapOne, RemoveBackups,
-// CopyFile) lives in internal/binswap since `quild plugin-update` shares it.
+// CopyFile) and the lock live in internal/binswap since `quild
+// plugin-update` shares them.
 
 // sameDir reports whether two files live in the same directory, comparing by
 // identity rather than by string. exec.LookPath can hand back a different

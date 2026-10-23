@@ -199,6 +199,16 @@ type Pane struct {
 	fixArgv  []string
 	fixThen  string
 	fixGen   uint64
+	// lifecycleMu serialises the pane's child-replacing transitions — a
+	// restart request, a fix's reservation plus the restart that starts it,
+	// the restart after a fix exits, the hand-start conversions — so a
+	// restart cannot read "no fix running" and then replace the fix child a
+	// request on another connection started in between. LOCK ORDER:
+	// lifecycleMu outermost, then spawnMu (inside restartPaneInPlace →
+	// ensurePaneSpawned), then PluginMu. Never take it while holding sm.mu or
+	// PluginMu, never hold it across a broadcast, and a PTY close under it is
+	// fine only because restartPaneInPlace closes asynchronously.
+	lifecycleMu sync.Mutex
 	// SandboxImage names the container image a sandbox pane runs in, and its
 	// non-emptiness IS the "this pane is sandboxed" flag. PERSISTED,
 	// PluginMu-protected, written once at creation.
@@ -356,6 +366,11 @@ type Pane struct {
 	pluginLineGen  uint64
 	pluginSent     map[string]bool
 	pluginOffered  string
+	// pluginOffering is the offers of this run whose binary resolution is
+	// still in flight (offerUpdate), so a second notice for the same version
+	// starts no second resolver; the authoritative dedupe is pluginSent at
+	// delivery. Same lock, same reset.
+	pluginOffering map[string]bool
 	// LastMCPEventAt is the mcp_control cooldown, keyed BY TITLE. Read and
 	// written under PluginMu, like the two beside it.
 	//

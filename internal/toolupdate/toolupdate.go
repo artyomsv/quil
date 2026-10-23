@@ -84,6 +84,30 @@ func Run(ctx context.Context, o Options, out io.Writer) error {
 		return fmt.Errorf("installed by a package manager Quil does not know (%s); update it with that manager", target)
 	}
 
+	// The writability refusal comes BEFORE the lock: the lock is a file in
+	// this directory, and asking for it first would turn "not writable" into
+	// a create error (or, worse, a wait for a holder that is not there).
+	dir := filepath.Dir(target)
+	if !dirWritable(dir) {
+		return fmt.Errorf("target directory not writable: %s", dir)
+	}
+
+	// One updater per target at a time, across processes: two panes on one
+	// tool can each start this subcommand, and RestoreMissing, RemoveBackups
+	// and SwapOne share "<target>.old" and "<target>.new" — the second would
+	// restore the "missing" target from the first's backup mid-swap and the
+	// loser would roll its backup over the winner's install. Taken before
+	// anything beside the target is read or touched, held through the swap,
+	// released on every path. A second updater waits for the first, bounded;
+	// any failure other than a live holder is reported at once.
+	release, err := binswap.WaitLock(ctx, target+updateLockSuffix, updateLockStale, updateLockWait, func() {
+		step("→ waiting for another update of %s…", filepath.Base(target))
+	})
+	if err != nil {
+		return fmt.Errorf("lock %s: %w", target, err)
+	}
+	defer release()
+
 	// A run killed between its rename-aside and its copy leaves the target
 	// path empty and the binary in the backup slot; the next run puts it
 	// back before anything else looks for it, or the user is told "no such
@@ -99,10 +123,6 @@ func Run(ctx context.Context, o Options, out io.Writer) error {
 	}
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("target is not a regular file: %s", target)
-	}
-	dir := filepath.Dir(target)
-	if !dirWritable(dir) {
-		return fmt.Errorf("target directory not writable: %s", dir)
 	}
 
 	step("→ clearing earlier backups and staging leftovers of %s", filepath.Base(target))
@@ -188,6 +208,20 @@ func (o Options) validate() error {
 // the staging dir and the writability probe — so sweepStaging can tell its
 // own leftovers from the user's files by name alone.
 const stagingPrefix = ".quil-update-"
+
+const (
+	// updateLockSuffix names the per-target lock beside it ("stripe.lock"):
+	// keyed by the target's own name, and outside stagingPrefix so the age
+	// sweep never takes a live lock.
+	updateLockSuffix = ".lock"
+	// updateLockWait bounds how long a second updater waits for the first.
+	updateLockWait = 5 * time.Minute
+	// updateLockStale is when a lock with a live-looking pid counts as
+	// abandoned anyway (the backstop for a recycled pid): a run is bounded
+	// by downloadTimeout plus two detects and a swap, so twice the download
+	// is a run that is not there.
+	updateLockStale = 2 * downloadTimeout
+)
 
 // dirWritable asks the filesystem the question the swap is about to ask —
 // create a file in dir — rather than reading permission bits, which say

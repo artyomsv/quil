@@ -133,7 +133,10 @@ func (f *fixSessions) waitFor(t *testing.T, n int) *fixSession {
 }
 
 // fakeBinary writes an executable file called name that a PATH-style lookup
-// of its absolute path accepts.
+// of its absolute path accepts. Callers name it ".exe": that is executable
+// by extension on Windows and by mode bit elsewhere, and — unlike ".cmd" —
+// is not a batch script, which fixLaunchArgv would wrap in cmd.exe on a
+// Windows host and so change every argv the fix tests assert on.
 func fakeBinary(t *testing.T, name string) string {
 	t.Helper()
 	bin := filepath.Join(t.TempDir(), name)
@@ -149,7 +152,7 @@ func fakeBinary(t *testing.T, name string) string {
 func fixHarness(t *testing.T) (*Daemon, *Pane, *fixSessions, *ipc.Client) {
 	t.Helper()
 	d := newTestDaemon(t)
-	registerFixmePlugin(t, d, fakeBinary(t, "stripe.cmd"))
+	registerFixmePlugin(t, d, fakeBinary(t, "stripe.exe"))
 	pane := newFixmePane(t, d)
 	sessions := installFixSessions(t)
 	if err := d.spawnPane(pane, newSessionFn(80, 24), false); err != nil {
@@ -194,8 +197,8 @@ func startLoginFix(t *testing.T, pane *Pane, sessions *fixSessions, c *ipc.Clien
 	fix := sessions.waitFor(t, n)
 	// The plugin's own path override, not a PATH walk: the fix names the
 	// plugin's tool.
-	if cmd, args, _ := fix.argv(); !strings.HasSuffix(cmd, "stripe.cmd") || !reflect.DeepEqual(args, []string{"login"}) {
-		t.Fatalf("fix child = %s %q, want <path>/stripe.cmd [login]", cmd, args)
+	if cmd, args, _ := fix.argv(); !strings.HasSuffix(cmd, "stripe.exe") || !reflect.DeepEqual(args, []string{"login"}) {
+		t.Fatalf("fix child = %s %q, want <path>/stripe.exe [login]", cmd, args)
 	}
 	if got := fixLabelOf(pane); got != "Log in" {
 		t.Fatalf("FixLabel = %q while the fix runs, want \"Log in\"", got)
@@ -342,19 +345,20 @@ func TestPluginFixReq_LookupTimesOutRefused(t *testing.T) {
 		t.Fatalf("reload: %v", err)
 	}
 	parked := newParkedLookup()
-	prevLook, prevTimeout := lookPathFn, pluginTargetTimeout
+	prevLook := lookPathFn
 	lookPathFn = func(string) (string, error) {
 		parked.park()
 		return "/late/other-tool", nil
 	}
-	pluginTargetTimeout = 50 * time.Millisecond
+	// This daemon's own configuration, not a package variable.
+	d.pluginUpdate.targetTimeout = 50 * time.Millisecond
 	t.Cleanup(func() {
-		parked.restore(t, func() { lookPathFn, pluginTargetTimeout = prevLook, prevTimeout })
+		parked.restore(t, func() { lookPathFn = prevLook })
 	})
 
 	started := time.Now()
 	resp, _ := fixRequest(t, c, ipc.MsgPluginFixReq, "slow", ipc.PluginFixReqPayload{PaneID: pane.ID, Fix: "login"})
-	if spent := time.Since(started); spent > prevTimeout {
+	if spent := time.Since(started); spent > defaultPluginTargetTimeout {
 		t.Fatalf("the request waited %v on the lookup", spent)
 	}
 	if resp.OK || !strings.Contains(resp.Error, "could not locate") {
@@ -362,6 +366,118 @@ func TestPluginFixReq_LookupTimesOutRefused(t *testing.T) {
 	}
 	if n := sessions.count(); n != 1 {
 		t.Fatalf("%d sessions, want 1", n)
+	}
+}
+
+// A Windows batch shim (Scoop's scoop.cmd) cannot be started by
+// CreateProcess, which the PTY's Spawn calls without an interpreter, so the
+// fix argv is wrapped in cmd.exe; everything else, and everything off
+// windows, runs as resolved. An argument cmd.exe would re-parse is refused.
+func TestFixLaunchArgv(t *testing.T) {
+	env := func(vars map[string]string) func(string) string {
+		return func(k string) string { return vars[k] }
+	}
+	comspec := env(map[string]string{"ComSpec": `C:\Windows\system32\cmd.exe`, "SystemRoot": `C:\Windows`})
+	for _, tc := range []struct {
+		name string
+		argv []string
+		goos string
+		env  func(string) string
+		want []string
+		err  string
+	}{
+		{"linux passes through", []string{"/usr/bin/scoop.cmd", "update"}, "linux", comspec, []string{"/usr/bin/scoop.cmd", "update"}, ""},
+		{"windows exe passes through", []string{`C:\tools\stripe.exe`, "login"}, "windows", comspec, []string{`C:\tools\stripe.exe`, "login"}, ""},
+		{"windows cmd wrapped", []string{`C:\Users\me\scoop\shims\scoop.cmd`, "update", "stripe"}, "windows", comspec,
+			[]string{`C:\Windows\system32\cmd.exe`, "/d", "/c", `C:\Users\me\scoop\shims\scoop.cmd`, "update", "stripe"}, ""},
+		{"windows BAT wrapped", []string{`C:\tools\fix.BAT`}, "windows", comspec, []string{`C:\Windows\system32\cmd.exe`, "/d", "/c", `C:\tools\fix.BAT`}, ""},
+		{"no ComSpec falls back to SystemRoot", []string{`C:\t\fix.cmd`}, "windows", env(map[string]string{"SystemRoot": `C:\Windows`}),
+			[]string{filepath.Join(`C:\Windows`, "System32", "cmd.exe"), "/d", "/c", `C:\t\fix.cmd`}, ""},
+		{"no env at all refused", []string{`C:\t\fix.cmd`}, "windows", env(nil), nil, "cannot locate cmd.exe"},
+		{"path with spaces wrapped", []string{`C:\Program Files\t\fix.cmd`, "x"}, "windows", comspec,
+			[]string{`C:\Windows\system32\cmd.exe`, "/d", "/c", `C:\Program Files\t\fix.cmd`, "x"}, ""},
+		{"path with metacharacter refused", []string{`C:\t&u\fix.cmd`}, "windows", comspec, nil, "re-parse"},
+		{"metacharacter refused", []string{`C:\t\fix.cmd`, "a&b"}, "windows", comspec, nil, "re-parse"},
+		{"percent refused", []string{`C:\t\fix.cmd`, "%PATH%"}, "windows", comspec, nil, "re-parse"},
+		{"quote refused", []string{`C:\t\fix.cmd`, `say "hi"`}, "windows", comspec, nil, "re-parse"},
+		{"whitespace refused", []string{`C:\t\fix.cmd`, "two words"}, "windows", comspec, nil, "re-parse"},
+		{"newline refused", []string{`C:\t\fix.cmd`, "a\nb"}, "windows", comspec, nil, "re-parse"},
+		{"metacharacter fine for an exe", []string{`C:\t\fix.exe`, "a&b"}, "windows", comspec, []string{`C:\t\fix.exe`, "a&b"}, ""},
+	} {
+		got, err := fixLaunchArgv(tc.argv, tc.goos, tc.env)
+		if tc.err != "" {
+			if err == nil || !strings.Contains(err.Error(), tc.err) {
+				t.Errorf("%s: err = %v, want one mentioning %q", tc.name, err, tc.err)
+			}
+			continue
+		}
+		if err != nil || !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s: argv = %q, %v; want %q", tc.name, got, err, tc.want)
+		}
+	}
+}
+
+// A restart and a fix request on two connections cannot interleave: the
+// restart's guard and its restart are one lifecycleMu span, so a fix that
+// arrives while the restart is between the two waits, then starts, and its
+// child is the one left running — never replaced by a restart that read "no
+// fix" a moment earlier.
+func TestRestartPaneReq_SerializedWithFix(t *testing.T) {
+	d, pane, sessions, c := fixHarness(t)
+	c2 := quietReader(t, d)
+
+	entered := make(chan struct{}, 1)
+	resume := make(chan struct{})
+	prev := restartGuardPassedFn
+	restartGuardPassedFn = func(p *Pane) {
+		if p.ID == pane.ID {
+			entered <- struct{}{}
+			<-resume
+		}
+	}
+	t.Cleanup(func() { restartGuardPassedFn = prev })
+
+	// The restart passes its guard and parks, holding the pane's lifecycle.
+	sendWithID(t, c, ipc.MsgRestartPaneReq, "r-park", ipc.RestartPaneReqPayload{PaneID: pane.ID})
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the restart never reached its guard")
+	}
+	// The fix on another connection must wait for it.
+	sendWithID(t, c2, ipc.MsgPluginFixReq, "f-wait", ipc.PluginFixReqPayload{PaneID: pane.ID, Fix: "login"})
+	time.Sleep(200 * time.Millisecond)
+	if got := fixLabelOf(pane); got != "" {
+		t.Fatalf("FixLabel = %q while a restart held the pane: the fix slipped in", got)
+	}
+	if n := sessions.count(); n != 1 {
+		t.Fatalf("%d sessions while the restart was parked, want 1", n)
+	}
+
+	close(resume)
+	got := readUntilID(t, c, ipc.MsgRestartPaneResp, "r-park", 3*time.Second)
+	var rresp ipc.RestartPaneRespPayload
+	if err := got[len(got)-1].DecodePayload(&rresp); err != nil || !rresp.Success {
+		t.Fatalf("restart resp = %+v, %v; want success", rresp, err)
+	}
+	got = readUntilID(t, c2, ipc.MsgPluginFixResp, "f-wait", 3*time.Second)
+	var fresp ipc.PluginFixRespPayload
+	if err := got[len(got)-1].DecodePayload(&fresp); err != nil || !fresp.OK {
+		t.Fatalf("fix resp = %+v, %v; want OK after the restart", fresp, err)
+	}
+	// Restart first (the normal command), then the fix — and the fix child
+	// is the one running now.
+	if _, args, _ := sessions.waitFor(t, 2).argv(); !reflect.DeepEqual(args, []string{"listen"}) {
+		t.Fatalf("second child ran %q, want the restart's [listen]", args)
+	}
+	if _, args, _ := sessions.waitFor(t, 3).argv(); !reflect.DeepEqual(args, []string{"login"}) {
+		t.Fatalf("third child ran %q, want the fix's [login]", args)
+	}
+	if n := sessions.count(); n != 3 {
+		t.Fatalf("%d sessions, want 3: nothing may replace the fix child", n)
+	}
+	if got := fixLabelOf(pane); got != "Log in" {
+		t.Fatalf("FixLabel = %q, want the fix running", got)
 	}
 }
 
@@ -519,7 +635,7 @@ func TestFixArmed_ShellReturnStandsAside(t *testing.T) {
 // fix with the normal command and leave the marker on forever.
 func TestPluginFixReq_PendingPaneRunsFixOnce(t *testing.T) {
 	d := newTestDaemon(t)
-	registerFixmePlugin(t, d, fakeBinary(t, "stripe.cmd"))
+	registerFixmePlugin(t, d, fakeBinary(t, "stripe.exe"))
 	tab := d.session.CreateTab("t")
 	pane, err := d.session.CreatePane(tab.ID, t.TempDir())
 	if err != nil {
@@ -801,13 +917,13 @@ func registerFixmeUpdatePlugin(t *testing.T, d *Daemon, bin string) {
 // The manual path: the pane's child becomes this daemon's own quild running
 // plugin-update against the resolved binary, with the OFFERED version's tag.
 func TestPluginUpdateReq_ManualRunsQuild(t *testing.T) {
-	quild := fakeBinary(t, "quild.cmd")
+	quild := fakeBinary(t, "quild.exe")
 	origExe := quildExeFn
 	quildExeFn = func() (string, error) { return quild, nil }
 	t.Cleanup(func() { quildExeFn = origExe })
 
 	d := newTestDaemon(t)
-	bin := fakeBinary(t, "stripe.cmd")
+	bin := fakeBinary(t, "stripe.exe")
 	registerFixmeUpdatePlugin(t, d, bin)
 	pane := newFixmePane(t, d)
 	sessions := installFixSessions(t)

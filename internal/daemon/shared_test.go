@@ -447,3 +447,113 @@ func TestHandleMessage_CreatePane_WorktreeRecordsBrowsedDirNotWorktree(t *testin
 		}
 	}
 }
+
+// A split that picks no folder opens where the pane it was split from is —
+// tmux's rule — and that folder is not recorded as one the user picked.
+func TestHandleMessage_CreatePane_SplitOpensInTheSourcePanesFolder(t *testing.T) {
+	d, client := mcpTestDaemon(t)
+	tab := d.session.CreateTab("t")
+	src := t.TempDir()
+	sendNoID(t, client, ipc.MsgCreatePane, ipc.CreatePanePayload{TabID: tab.ID, CWD: src, Type: "terminal"})
+	roundTrip(t, client, ipc.MsgVersionReq, ipc.MsgVersionResp, struct{}{}) // ordered on one conn: the create ran
+	panes := d.session.Panes(tab.ID)
+	if len(panes) != 1 {
+		t.Fatalf("panes = %d, want the source pane alone", len(panes))
+	}
+	srcPane := panes[0]
+	// The shell has since cd'd: the LIVE folder is what the split follows,
+	// and the one the user picked at creation is the only one recorded.
+	live := t.TempDir()
+	srcPane.PluginMu.Lock()
+	srcPane.CWD = live
+	srcPane.PluginMu.Unlock()
+
+	sendNoID(t, client, ipc.MsgCreatePane, ipc.CreatePanePayload{TabID: tab.ID, FromPaneID: srcPane.ID, Type: "terminal"})
+	roundTrip(t, client, ipc.MsgVersionReq, ipc.MsgVersionResp, struct{}{})
+	panes = d.session.Panes(tab.ID)
+	if len(panes) != 2 {
+		t.Fatalf("panes = %d, want the split too", len(panes))
+	}
+	var split *Pane
+	for _, p := range panes {
+		if p.ID != srcPane.ID {
+			split = p
+		}
+	}
+	split.PluginMu.Lock()
+	got := split.CWD
+	split.PluginMu.Unlock()
+	if !samePath(got, live) {
+		t.Errorf("the split opened in %q, want the source pane's live folder %q", got, live)
+	}
+	if _, recent := d.session.SharedSnapshot(); len(recent) != 1 || !samePath(recent[0], src) {
+		t.Errorf("recent = %v, want only the folder the user picked for the source pane", recent)
+	}
+}
+
+// A sandbox pane's folder is a path inside its cage. One that also exists on
+// the host (/tmp) must not be mistaken for a host folder, so a split from a
+// sandbox pane opens in the project root instead (PR #275 review, M-1).
+func TestHandleMessage_CreatePane_SplitFromASandboxPaneOpensInTheProjectRoot(t *testing.T) {
+	d, client := mcpTestDaemon(t)
+	root := t.TempDir()
+	proj := d.session.CreateProject("p", root)
+	tab := d.session.CreateTabInProject(proj.ID, "t")
+	inCage := t.TempDir() // exists on the host too, and is not the root
+	sendNoID(t, client, ipc.MsgCreatePane, ipc.CreatePanePayload{TabID: tab.ID, CWD: inCage, Type: "terminal"})
+	roundTrip(t, client, ipc.MsgVersionReq, ipc.MsgVersionResp, struct{}{})
+	panes := d.session.Panes(tab.ID)
+	if len(panes) != 1 {
+		t.Fatalf("panes = %d, want one", len(panes))
+	}
+	srcPane := panes[0]
+	srcPane.PluginMu.Lock()
+	srcPane.SandboxBackend = "sbx"
+	srcPane.PluginMu.Unlock()
+
+	sendNoID(t, client, ipc.MsgCreatePane, ipc.CreatePanePayload{TabID: tab.ID, FromPaneID: srcPane.ID, Type: "terminal"})
+	roundTrip(t, client, ipc.MsgVersionReq, ipc.MsgVersionResp, struct{}{})
+	panes = d.session.Panes(tab.ID)
+	if len(panes) != 2 {
+		t.Fatalf("panes = %d, want the split too", len(panes))
+	}
+	for _, p := range panes {
+		if p.ID == srcPane.ID {
+			continue
+		}
+		p.PluginMu.Lock()
+		got := p.CWD
+		p.PluginMu.Unlock()
+		if !samePath(got, root) {
+			t.Errorf("the split from a sandbox pane opened in %q, want the project root %q", got, root)
+		}
+	}
+}
+
+// A source pane in ANOTHER tab is not followed: the request names a tab, and
+// a pane outside it is a confused client, so the old default stands.
+func TestHandleMessage_CreatePane_SourcePaneInAnotherTabIsIgnored(t *testing.T) {
+	d, client := mcpTestDaemon(t)
+	other := d.session.CreateTab("other")
+	src := t.TempDir()
+	sendNoID(t, client, ipc.MsgCreatePane, ipc.CreatePanePayload{TabID: other.ID, CWD: src, Type: "terminal"})
+	roundTrip(t, client, ipc.MsgVersionReq, ipc.MsgVersionResp, struct{}{})
+	otherPanes := d.session.Panes(other.ID)
+	if len(otherPanes) != 1 {
+		t.Fatalf("panes = %d, want one", len(otherPanes))
+	}
+
+	tab := d.session.CreateTab("t")
+	sendNoID(t, client, ipc.MsgCreatePane, ipc.CreatePanePayload{TabID: tab.ID, FromPaneID: otherPanes[0].ID, Type: "terminal"})
+	roundTrip(t, client, ipc.MsgVersionReq, ipc.MsgVersionResp, struct{}{})
+	panes := d.session.Panes(tab.ID)
+	if len(panes) != 1 {
+		t.Fatalf("panes = %d, want one", len(panes))
+	}
+	panes[0].PluginMu.Lock()
+	got := panes[0].CWD
+	panes[0].PluginMu.Unlock()
+	if samePath(got, src) {
+		t.Errorf("the split followed a pane in another tab into %q", got)
+	}
+}

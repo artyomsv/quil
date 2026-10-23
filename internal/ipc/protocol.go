@@ -370,6 +370,14 @@ type CreatePanePayload struct {
 	InstanceName  string   `json:"instance_name,omitempty"`
 	InstanceArgs  []string `json:"instance_args,omitempty"`
 	ReplacePaneID string   `json:"replace_pane_id,omitempty"`
+	// FromPaneID names the pane this one is split from (or replaces). When
+	// CWD is empty the daemon opens the new pane in THAT pane's current
+	// directory — tmux's rule: a new pane starts where the one you split
+	// from is — falling back to the project root, then the client's own
+	// directory. A folder reached this way is never recorded as one the
+	// user picked. Ignored when CWD is set; an older daemon ignores the
+	// field and keeps the client-directory default.
+	FromPaneID string `json:"from_pane_id,omitempty"`
 	// Overlay marks the pane as a TUI overlay (lazygit toggle view): it
 	// never enters the layout tree, is muted at creation, and is excluded
 	// from disk snapshots (ephemeral — gone on daemon restart).

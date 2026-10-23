@@ -461,6 +461,12 @@ func TestHandleMessage_CreatePane_SplitOpensInTheSourcePanesFolder(t *testing.T)
 		t.Fatalf("panes = %d, want the source pane alone", len(panes))
 	}
 	srcPane := panes[0]
+	// The shell has since cd'd: the LIVE folder is what the split follows,
+	// and the one the user picked at creation is the only one recorded.
+	live := t.TempDir()
+	srcPane.PluginMu.Lock()
+	srcPane.CWD = live
+	srcPane.PluginMu.Unlock()
 
 	sendNoID(t, client, ipc.MsgCreatePane, ipc.CreatePanePayload{TabID: tab.ID, FromPaneID: srcPane.ID, Type: "terminal"})
 	roundTrip(t, client, ipc.MsgVersionReq, ipc.MsgVersionResp, struct{}{})
@@ -477,11 +483,50 @@ func TestHandleMessage_CreatePane_SplitOpensInTheSourcePanesFolder(t *testing.T)
 	split.PluginMu.Lock()
 	got := split.CWD
 	split.PluginMu.Unlock()
-	if !samePath(got, src) {
-		t.Errorf("the split opened in %q, want the source pane's folder %q", got, src)
+	if !samePath(got, live) {
+		t.Errorf("the split opened in %q, want the source pane's live folder %q", got, live)
 	}
 	if _, recent := d.session.SharedSnapshot(); len(recent) != 1 || !samePath(recent[0], src) {
 		t.Errorf("recent = %v, want only the folder the user picked for the source pane", recent)
+	}
+}
+
+// A sandbox pane's folder is a path inside its cage. One that also exists on
+// the host (/tmp) must not be mistaken for a host folder, so a split from a
+// sandbox pane opens in the project root instead (PR #275 review, M-1).
+func TestHandleMessage_CreatePane_SplitFromASandboxPaneOpensInTheProjectRoot(t *testing.T) {
+	d, client := mcpTestDaemon(t)
+	root := t.TempDir()
+	proj := d.session.CreateProject("p", root)
+	tab := d.session.CreateTabInProject(proj.ID, "t")
+	inCage := t.TempDir() // exists on the host too, and is not the root
+	sendNoID(t, client, ipc.MsgCreatePane, ipc.CreatePanePayload{TabID: tab.ID, CWD: inCage, Type: "terminal"})
+	roundTrip(t, client, ipc.MsgVersionReq, ipc.MsgVersionResp, struct{}{})
+	panes := d.session.Panes(tab.ID)
+	if len(panes) != 1 {
+		t.Fatalf("panes = %d, want one", len(panes))
+	}
+	srcPane := panes[0]
+	srcPane.PluginMu.Lock()
+	srcPane.SandboxBackend = "sbx"
+	srcPane.PluginMu.Unlock()
+
+	sendNoID(t, client, ipc.MsgCreatePane, ipc.CreatePanePayload{TabID: tab.ID, FromPaneID: srcPane.ID, Type: "terminal"})
+	roundTrip(t, client, ipc.MsgVersionReq, ipc.MsgVersionResp, struct{}{})
+	panes = d.session.Panes(tab.ID)
+	if len(panes) != 2 {
+		t.Fatalf("panes = %d, want the split too", len(panes))
+	}
+	for _, p := range panes {
+		if p.ID == srcPane.ID {
+			continue
+		}
+		p.PluginMu.Lock()
+		got := p.CWD
+		p.PluginMu.Unlock()
+		if !samePath(got, root) {
+			t.Errorf("the split from a sandbox pane opened in %q, want the project root %q", got, root)
+		}
 	}
 }
 

@@ -126,6 +126,7 @@ var standardFieldAudit = map[string]map[string]fieldAudit{
 		"instance_name":         {"allow", "a display label; never executed"},
 		"instance_args":         {"refuse", "REPLACES Command.Args: any program, any argv, no shell, no screen trail"},
 		"replace_pane_id":       {"allow", "destroying a pane is act (destroy_pane is allowed); combined with instance_args the row above refuses it"},
+		"from_pane_id":          {"allow", "names a pane whose directory the new one opens in; validated like cwd, and a shell in the pane can cd anywhere anyway"},
 		"overlay":               {"refuse", "overlay panes (lazygit/hunk) are full-only"},
 		"resume_session_id":     {"allow", "validated daemon-side (applyResumeSessionID): an id, not an argument"},
 		"worktree.repo_root":    {"allow", "git worktree add on a repo the client names — no more than typing it into a shell grants"},

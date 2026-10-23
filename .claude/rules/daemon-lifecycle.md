@@ -474,7 +474,8 @@ the TUI's `create_pane` carries `FromPaneID`, and when it picks no folder (a
 plugin with no setup step — terminal, k9s, lazysql) the new pane opens in THAT
 pane's live `Pane.CWD`, tmux's rule. The folder is validated like any
 client-supplied one and NOT recorded as recent (the user picked nothing); when
-it is gone, or is a container path a sandbox pane reported, the fallback is
+it is gone, or the source is a SANDBOX pane (its CWD is a path inside the cage,
+which may also exist on the host — `/tmp` — so it is never consulted), the fallback is
 `projectCWD` — the project root, as a new tab gets — and only then the chain
 above. A pane in another tab, or an unknown id, is ignored. MCP and the
 browser send no `FromPaneID` and keep the chain above unchanged.

@@ -3042,11 +3042,11 @@ func (d *Daemon) handleCreatePane(conn *ipc.Conn, msg *ipc.Message) {
 		}
 	} else if payload.Overlay {
 		cwd = d.defaultCWD(conn)
-	} else if src := d.splitSourceCWD(payload); src != "" {
+	} else if src, fromPane := d.splitSourceCWD(payload); fromPane {
 		// The folder of the pane split from, not one the user picked, so it
-		// is never recorded as recent. A folder that is gone, or a container
-		// path a sandbox pane reported, falls back to the project root — as
-		// a new tab does — and only then to the client's own directory.
+		// is never recorded as recent. A folder that is gone, or a sandbox
+		// pane (src is "" for one), falls back to the project root — as a
+		// new tab does — and only then to the client's own directory.
 		projectID, _ := d.session.TabProjectID(payload.TabID)
 		cwd = d.resolveRequestedCWD(src, d.projectCWD(conn, projectID))
 	} else {
@@ -8557,19 +8557,29 @@ func stripSessionArgs(agent string, args []string) []string {
 // splitSourceCWD is the folder a split opens in when the request names the
 // pane it was split from and picks no folder of its own: that pane's live
 // directory (tmux's rule — a new pane starts where the one you split from
-// is). "" when the request picked a folder, is an overlay, names no pane, or
-// names one that is gone or in another tab; the caller then falls back as it
-// always did. The folder is validated by the caller like any client-supplied
-// one, so a sandbox pane's container path falls through rather than failing.
-func (d *Daemon) splitSourceCWD(payload ipc.CreatePanePayload) string {
+// is). fromPane is false when the request picked a folder, is an overlay,
+// names no pane, or names one that is gone or in another tab; the caller
+// then falls back as it always did.
+//
+// A SANDBOX pane answers fromPane with no folder. Its CWD is the directory
+// the agent reported from inside the cage, which the TUI relays through
+// update_pane for every pane: a container path that also exists on the host
+// (/tmp) would pass the caller's host-existence check and open the new host
+// pane somewhere unrelated (PR #275 review, M-1). The caller's fallback for
+// an empty folder is the project root, the right answer for a pane whose
+// cage is rooted there.
+func (d *Daemon) splitSourceCWD(payload ipc.CreatePanePayload) (cwd string, fromPane bool) {
 	if payload.CWD != "" || payload.Overlay || payload.FromPaneID == "" {
-		return ""
+		return "", false
 	}
 	pane := d.session.Pane(payload.FromPaneID)
 	if pane == nil || pane.CurrentTabID() != payload.TabID {
-		return ""
+		return "", false
 	}
 	pane.PluginMu.Lock()
 	defer pane.PluginMu.Unlock()
-	return pane.CWD
+	if pane.SandboxImage != "" || pane.SandboxBackend != "" {
+		return "", true
+	}
+	return pane.CWD, true
 }

@@ -459,6 +459,11 @@ func (m *Model) dropPluginDialogsFor(dest string) tea.Cmd {
 			closed = true
 		}
 	}
+	// The boot bookkeeping of its panes goes too: a pane the Model still
+	// holds for dest, or one already gone with it. A host added again starts
+	// from a snapshot, like a reattach.
+	m.pruneFixBootFor(func(id string) bool { return m.findPane(id) == nil || m.destOfPane(id) == dest })
+	delete(m.fixBootSeeded, dest)
 	if closed {
 		return tea.ClearScreen
 	}
@@ -543,17 +548,20 @@ func (m Model) activatePluginButton(d *pluginDialog, b pluginButton) (tea.Model,
 	}
 	switch b.kind {
 	case pluginButtonFix:
-		if cmd := m.refusePluginSend(d, m.sendPluginFixReq(d, b.fix.Name, "")); cmd != nil {
+		id, err := m.sendPluginFixReq(d, b.fix.Name, "")
+		if cmd := m.refusePluginSend(d, err); cmd != nil {
 			return m, cmd
 		}
+		boot := m.notePluginBootReq(id, d.paneID, "Running "+b.label+"…")
 		m.closePluginDialog()
 		m.setFlash("starting " + b.label + "…")
-		return m, m.flashCmd()
+		return m, tea.Batch(boot, m.flashCmd())
 	case pluginButtonUpdate:
 		d.confirming = true
 		return m, nil
 	case pluginButtonNotNow:
-		if cmd := m.refusePluginSend(d, m.sendPluginFixReq(d, ipc.PluginFixNotNow, d.update.Offered)); cmd != nil {
+		_, err := m.sendPluginFixReq(d, ipc.PluginFixNotNow, d.update.Offered)
+		if cmd := m.refusePluginSend(d, err); cmd != nil {
 			return m, cmd
 		}
 		m.closePluginDialog()
@@ -577,6 +585,7 @@ func (m *Model) refusePluginSend(d *pluginDialog, err error) tea.Cmd {
 
 // sendPluginUpdate is the y of the Replace step.
 func (m Model) sendPluginUpdate(d *pluginDialog) (tea.Model, tea.Cmd) {
+	offered := sanitizeRemoteText(d.update.Offered)
 	req, err := ipc.NewMessage(ipc.MsgPluginUpdateReq, ipc.PluginUpdateReqPayload{
 		PaneID: d.paneID, Version: d.update.Offered,
 	})
@@ -587,22 +596,24 @@ func (m Model) sendPluginUpdate(d *pluginDialog) (tea.Model, tea.Cmd) {
 	if cmd := m.refusePluginSend(d, err); cmd != nil {
 		return m, cmd
 	}
+	boot := m.notePluginBootReq(req.ID, d.paneID, "Running Update to "+offered+"…")
 	m.closePluginDialog()
-	m.setFlash("updating " + sanitizeRemoteText(d.plugin) + " to " + sanitizeRemoteText(d.update.Offered) + "…")
-	return m, m.flashCmd()
+	m.setFlash("updating " + sanitizeRemoteText(d.plugin) + " to " + offered + "…")
+	return m, tea.Batch(boot, m.flashCmd())
 }
 
 // sendPluginFixReq sends one plugin_fix_req for the dialog's pane. ID-bearing
-// so the refusal, if any, comes back as plugin_fix_resp rather than silence.
-func (m *Model) sendPluginFixReq(d *pluginDialog, fix, version string) error {
+// so the refusal, if any, comes back as plugin_fix_resp rather than silence;
+// the id is returned so the boot mark can be keyed by it.
+func (m *Model) sendPluginFixReq(d *pluginDialog, fix, version string) (string, error) {
 	req, err := ipc.NewMessage(ipc.MsgPluginFixReq, ipc.PluginFixReqPayload{
 		PaneID: d.paneID, Fix: fix, Version: version,
 	})
 	if err != nil {
-		return err
+		return "", err
 	}
 	req.ID = "pfix-" + m.nextReqGen()
-	return m.sendPluginRequest(d, req)
+	return req.ID, m.sendPluginRequest(d, req)
 }
 
 // sendPluginRequest sends to the daemon the frame came from — a dialog for a
@@ -627,15 +638,22 @@ func (m *Model) sendPluginRequest(d *pluginDialog, req *ipc.Message) error {
 // plugin_update_req (Update says which). The dialog closed when the request
 // left, so a refusal lands in the status bar, where it can be seen.
 type pluginFixRespMsg struct {
+	ID     string
 	Resp   ipc.PluginFixRespPayload
 	Update bool
 }
 
-// applyPluginFixResp surfaces a refusal; a success needs nothing — the pane's
-// FixLabel arrives on the next broadcast and the pane border says so.
+// applyPluginFixResp surfaces a refusal and takes down the boot mark the
+// request put up; a success needs nothing — the pane's FixLabel arrives on
+// the next broadcast and the pane border says so.
 func (m *Model) applyPluginFixResp(msg pluginFixRespMsg) tea.Cmd {
+	paneID, marked := m.pluginBootReqs[msg.ID]
+	delete(m.pluginBootReqs, msg.ID)
 	if msg.Resp.OK {
 		return nil
+	}
+	if marked {
+		m.clearPaneBoot(paneID)
 	}
 	what := "fix"
 	if msg.Update {
@@ -647,6 +665,194 @@ func (m *Model) applyPluginFixResp(msg pluginFixRespMsg) tea.Cmd {
 	}
 	m.setErrorFlash(what + " not started: " + reason)
 	return m.flashCmd()
+}
+
+// --- boot indicator: a fix starting, and the restart after it ---
+//
+// Both are blank-screen gaps the owner measured live: from the button press
+// until the fix child's first byte (a GitHub lookup, `stripe login` starting),
+// and from the fix's clean exit until the restarted command paints. The pane
+// reuses the boot indicator a freshly created pane shows (`preparing`, the
+// spinner chain, restoreSettled's clear-on-content), with its own words.
+
+// markPaneBoot puts the boot indicator on a pane with label, waiting for the
+// run's first output before the blank-screen rule may settle it: generation
+// runGen when the broadcast named it, the next one after the current when it
+// did not (a press, which precedes the spawn). Returns the spinner chain's
+// first tick when none is running for the pane.
+//
+// The daemon spawns the child and only THEN broadcasts, and the child's
+// first flush is 2 ms behind the spawn, so a broadcast edge can land after
+// the run it describes has already painted. Marking then would wait for a
+// generation that never comes — a working pane with "Starting Stripe…" on
+// its border for the length of the safety cap. So a run that has reached
+// this client (outputGeneration >= runGen) is not marked, and a mark already
+// up for it is settled instead. A mark already up (the press's, or the fix's
+// when its restart follows) is not re-armed from scratch: it takes the new
+// words and, when the broadcast names a run that has not arrived, waits for
+// exactly that one — the fix's own output must not settle the restart's
+// mark — while an edge from an older daemon (no RunGen) leaves its wait as
+// it is.
+func (m *Model) markPaneBoot(paneID, label string, runGen uint64) tea.Cmd {
+	pane := m.findPane(paneID)
+	if pane == nil {
+		return nil
+	}
+	if runGen != 0 && pane.outputGeneration >= runGen {
+		m.settlePaneBoot(pane)
+		return nil
+	}
+	if pane.bootLabel != "" && pane.preparing {
+		pane.bootLabel = label
+		if runGen != 0 {
+			pane.bootAwaitRun = true
+			pane.bootAwaitGen = runGen
+		}
+		return nil
+	}
+	pane.bootOwnsPreparing = !pane.preparing
+	pane.preparing = true
+	pane.bootLabel = label
+	pane.bootAwaitRun = true
+	pane.bootAwaitGen = runGen
+	pane.resumeStart = time.Now()
+	if pane.spinnerTickRunning {
+		return nil
+	}
+	pane.spinnerTickRunning = true
+	return tea.Tick(100*time.Millisecond, func(time.Time) tea.Msg {
+		return spinnerTickMsg{paneID: paneID, frame: 1}
+	})
+}
+
+// settlePaneBoot takes a markPaneBoot mark down — only what the mark set:
+// `preparing` goes only when the mark raised it, never a fresh pane's own.
+// A running spinner chain ends itself on its next tick.
+func (m *Model) settlePaneBoot(pane *PaneModel) {
+	if pane.bootLabel == "" {
+		return
+	}
+	if pane.bootOwnsPreparing {
+		pane.preparing = false
+	}
+	pane.clearBootLabel()
+}
+
+// clearPaneBoot is settlePaneBoot by pane id.
+func (m *Model) clearPaneBoot(paneID string) {
+	if pane := m.findPane(paneID); pane != nil {
+		m.settlePaneBoot(pane)
+	}
+}
+
+// pruneFixBootFor forgets the boot bookkeeping of panes that are gone:
+// fixBootSeen (last FixLabel seen) and pluginBootReqs (request id → pane).
+// gone says whether a pane id no longer exists for the caller's purpose.
+func (m *Model) pruneFixBootFor(gone func(paneID string) bool) {
+	for id := range m.fixBootSeen {
+		if gone(id) {
+			delete(m.fixBootSeen, id)
+		}
+	}
+	for req, id := range m.pluginBootReqs {
+		if gone(id) {
+			delete(m.pluginBootReqs, req)
+		}
+	}
+}
+
+// notePluginBootReq marks the pane for a request this client just sent and
+// remembers the request id, so the daemon's refusal (plugin_fix_resp /
+// plugin_update_resp with OK false) can take the mark down again.
+func (m *Model) notePluginBootReq(reqID, paneID, label string) tea.Cmd {
+	if m.pluginBootReqs == nil {
+		m.pluginBootReqs = make(map[string]string)
+	}
+	m.pluginBootReqs[reqID] = paneID
+	return m.markPaneBoot(paneID, label, 0)
+}
+
+// reconcileFixBoot runs on every workspace_state: a pane whose FixLabel turns
+// non-empty is marked "Running <label>…" (every client, from the daemon's
+// own label); one whose FixLabel turns empty while the pane still runs is
+// marked "Starting <plugin>…" for the restart; one whose fix ended with the
+// child exited (Exited — no restart, the daemon wrote "fix failed") or whose
+// restart failed to spawn (SpawnError) loses the mark so its output stays
+// the last word. fixBootSeen holds the labels seen last, so only the edges
+// act; RunGen tells markPaneBoot whether the run has already arrived. Panes
+// the broadcast no longer lists, and that no other destination holds, drop
+// their bookkeeping.
+//
+// The FIRST state from a destination — at attach, and again after a reattach
+// (armReattachReset clears fixBootSeeded) — is a snapshot, not an edge: it
+// only seeds fixBootSeen, and a mark still up on one of its panes is settled,
+// because a fix that started or ended while this client was not connected
+// has no gap left to cover and its run may have painted before the outage.
+func (m *Model) reconcileFixBoot(msg WorkspaceStateMsg) tea.Cmd {
+	var cmds []tea.Cmd
+	seeded := m.fixBootSeeded[msg.Dest]
+	if !seeded {
+		if m.fixBootSeeded == nil {
+			m.fixBootSeeded = make(map[string]bool)
+		}
+		m.fixBootSeeded[msg.Dest] = true
+	}
+	listed := make(map[string]bool, len(msg.Panes))
+	for _, info := range msg.Panes {
+		listed[info.ID] = true
+		prev, had := m.fixBootSeen[info.ID]
+		if !seeded {
+			switch {
+			case info.FixLabel != "":
+				if m.fixBootSeen == nil {
+					m.fixBootSeen = make(map[string]string)
+				}
+				m.fixBootSeen[info.ID] = info.FixLabel
+			case had:
+				delete(m.fixBootSeen, info.ID)
+			}
+			if pane := m.findPane(info.ID); pane != nil {
+				m.settlePaneBoot(pane)
+			}
+			continue
+		}
+		switch {
+		case info.FixLabel != "":
+			if info.FixLabel == prev {
+				continue
+			}
+			if m.fixBootSeen == nil {
+				m.fixBootSeen = make(map[string]string)
+			}
+			m.fixBootSeen[info.ID] = info.FixLabel
+			cmds = append(cmds, m.markPaneBoot(info.ID, "Running "+sanitizeRemoteText(info.FixLabel)+"…", info.RunGen))
+		case had:
+			delete(m.fixBootSeen, info.ID)
+			if info.Exited || info.SpawnError != "" {
+				m.clearPaneBoot(info.ID)
+				continue
+			}
+			cmds = append(cmds, m.markPaneBoot(info.ID, "Starting "+m.pluginDisplayName(info.Type)+"…", info.RunGen))
+		}
+	}
+	if len(m.fixBootSeen) > 0 || len(m.pluginBootReqs) > 0 {
+		m.pruneFixBootFor(func(id string) bool { return !listed[id] && m.findPane(id) == nil })
+	}
+	return tea.Batch(cmds...)
+}
+
+// pluginDisplayName is the plugin's display name for a pane type, the type
+// itself when the registry does not know it.
+func (m *Model) pluginDisplayName(paneType string) string {
+	if m.pluginRegistry != nil {
+		if p := m.pluginRegistry.Get(paneType); p != nil && p.DisplayName != "" {
+			return p.DisplayName
+		}
+	}
+	if paneType == "" {
+		return "pane"
+	}
+	return paneType
 }
 
 // --- rendering ---

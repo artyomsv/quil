@@ -100,11 +100,27 @@ type PaneModel struct {
 	// in a new tab so the tab is never pane-less, which is why it must not look
 	// like an ordinary blank terminal.
 	PreparingWorktree string
+	// bootLabel replaces the boot indicator's fixed text while `preparing` is
+	// a mark markPaneBoot set: "Running Log in…" for a fix starting, "Starting
+	// Stripe…" for the restart after one. bootAwaitRun keeps that mark from
+	// settling on the OLD child's screen: it is cleared when the first output
+	// of the run it waits for arrives (acceptOutputGeneration) — generation
+	// bootAwaitGen when the daemon named it (PaneState.RunGen), any newer one
+	// when it did not — and only then does the ordinary blank-screen rule
+	// apply. The safety cap still bounds both. bootOwnsPreparing says the mark
+	// set `preparing` itself, so clearing it never ends a fresh pane's boot.
+	bootLabel         string
+	bootAwaitRun      bool
+	bootAwaitGen      uint64
+	bootOwnsPreparing bool
 	// FixLabel names the plugin fix running in this pane (daemon-authoritative,
 	// runtime-only). Shown on the top border in the name's slot, the way the
 	// preparing label is, so every client sees why the pane's usual command
 	// is not what is running.
-	FixLabel        string
+	FixLabel string
+	// Exited says the child has exited and nothing replaced it
+	// (daemon-authoritative, runtime-only; see PaneInfo.Exited).
+	Exited          bool
 	GitBranch       string
 	GitDetached     bool
 	GitWorktree     bool
@@ -250,7 +266,7 @@ type paneRenderKey struct {
 	ghost, resuming, preparing     bool
 	pending                        bool
 	preparingWorktree, spawnError  string
-	fixLabel                       string
+	fixLabel, bootLabel            string
 	mcpHighlight, muted, focusMode bool
 	splitDragHighlight             bool
 	ctxTargetHighlight             bool
@@ -289,6 +305,7 @@ func (p *PaneModel) renderKey() paneRenderKey {
 		preparingWorktree:  p.PreparingWorktree,
 		spawnError:         p.SpawnError,
 		fixLabel:           p.FixLabel,
+		bootLabel:          p.bootLabel,
 		mcpHighlight:       p.mcpHighlight,
 		splitDragHighlight: p.splitDragHighlight,
 		ctxTargetHighlight: p.ctxTargetHighlight,
@@ -654,6 +671,15 @@ func (p *PaneModel) acceptOutputGeneration(generation uint64) bool {
 		p.ghost = false
 		p.reattachReset = false
 	}
+	// The new run a boot mark was waiting for: from here the indicator
+	// follows the screen, and the minimum display counts from this run's
+	// first byte rather than from the mark. The reset above does not touch
+	// `preparing` or the label, so the mark survives into the blank screen
+	// it exists to cover.
+	if p.bootAwaitRun && generation != p.outputGeneration && generation >= p.bootAwaitGen {
+		p.bootAwaitRun = false
+		p.resumeStart = time.Now()
+	}
 	p.outputGeneration = generation
 	return true
 }
@@ -944,7 +970,20 @@ func (p *PaneModel) restoreSettled() bool {
 	if time.Since(p.resumeStart) >= restoreSafetyCap {
 		return true
 	}
+	// A boot mark set ahead of a new run (a fix, the restart after it) must
+	// not settle on the previous child's screen, which is anything but blank:
+	// the run it waits for begins with the VT reset in acceptOutputGeneration,
+	// which clears this. The cap above still ends a run that never comes.
+	if p.bootAwaitRun {
+		return false
+	}
 	return !p.screenBlank() && time.Since(p.resumeStart) >= restoreMinDisplay
+}
+
+// clearBootLabel ends a markPaneBoot mark's own text and its wait for a new
+// run; the callers clear `preparing` beside it.
+func (p *PaneModel) clearBootLabel() {
+	p.bootLabel, p.bootAwaitRun, p.bootAwaitGen, p.bootOwnsPreparing = "", false, 0, false
 }
 
 // screenBlank reports whether the live VT screen has no visible content: every
@@ -1130,6 +1169,11 @@ func (p *PaneModel) restoreSteps() []restoreStep {
 // animated spinner. Falls back to a compact single line when the pane is too
 // short or narrow for the checklist. Border stays purple (handled in View).
 func (p *PaneModel) renderRestoreIndicator(innerW, innerH int) string {
+	// A mark with its own words is one line, not a restore checklist: a fix
+	// starting, or the restart after it, has no session to list.
+	if p.bootLabel != "" {
+		return p.renderRestoreIndicatorCompact(innerW, innerH)
+	}
 	steps := p.restoreSteps()
 	rows := make([]string, len(steps))
 	widest := 0
@@ -1241,6 +1285,9 @@ func (p *PaneModel) renderRestoreIndicatorCompact(innerW, innerH int) string {
 	label := "Rebuilding session"
 	if p.preparing {
 		label = "Building new pane"
+	}
+	if p.bootLabel != "" {
+		label = p.bootLabel
 	}
 	block := restoreAccentStyle.Render(glyph + "  " + label)
 	if ctx := p.restoreContext(); ctx != "" {
@@ -1373,6 +1420,15 @@ func (p *PaneModel) View() string {
 	if p.FixLabel != "" {
 		rightLabel = fixBorderLabel(sanitizeRemoteText(p.FixLabel), p.Width, p.working)
 	}
+	// A boot mark with its own words (markPaneBoot) takes the spinner slot
+	// itself: buildTopBorderCut knows one fixed "preparing..." and this is
+	// the same slot, same spinner, other text. The fix label above yields to
+	// it for the gap it covers and is back once the mark settles.
+	preparingLabel := p.preparing || p.PreparingWorktree != ""
+	if p.preparing && p.bootLabel != "" {
+		rightLabel = spinnerFrames[p.spinnerFrame%len(spinnerFrames)] + " " + p.bootLabel
+		preparingLabel = p.PreparingWorktree != ""
+	}
 	// The worktree wait reuses the `preparing` label slot rather than adding a
 	// third: "preparing..." is what it is, and the branch is already in the
 	// pane body, where there is room to elide it honestly.
@@ -1382,7 +1438,7 @@ func (p *PaneModel) View() string {
 	cutRows := p.follower && p.vt.Height() > innerH
 	cutCols := p.follower && p.vt.Width() > innerW
 	topLine := buildTopBorderCut(p.Width, p.CWD, rightLabel, borderColor, p.ghost, p.resuming,
-		p.preparing || p.PreparingWorktree != "", p.focusMode, p.spinnerFrame, p.working, p.workFrame,
+		preparingLabel, p.focusMode, p.spinnerFrame, p.working, p.workFrame,
 		cutRows, cutCols, sandboxGlyph(p.SandboxKind))
 
 	out := topLine + "\n" + body

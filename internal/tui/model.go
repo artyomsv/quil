@@ -183,7 +183,12 @@ type PaneInfo struct {
 	// FixLabel is the label of the plugin fix running in the pane, empty
 	// otherwise. Daemon-authoritative and runtime-only like the two above: a
 	// daemon that dies mid-fix restores the pane with no stale label.
-	FixLabel    string
+	FixLabel string
+	// Exited says the pane's child exited and nothing replaced it: a fix
+	// that failed, as opposed to one whose restart is starting. RunGen is
+	// that child's output generation (0 from an older daemon).
+	Exited      bool
+	RunGen      uint64
 	GitBranch   string
 	GitDetached bool
 	GitWorktree bool
@@ -805,6 +810,9 @@ type Model struct {
 	selectedPlugin       string        // selected plugin name in create pane dialog
 	pluginDialogs        map[string]*pluginDialog
 	pluginDialogOpen     string        // pane id of the plugin dialog on screen; the map holds held + open ones (pluginfix.go)
+	pluginBootReqs       map[string]string
+	fixBootSeen          map[string]string
+	fixBootSeeded        map[string]bool
 	instanceStore        InstanceStore // saved plugin instances (loaded from instances.json)
 	instanceFormValues   []string      // form field values (indexed by FormField position)
 	instanceFormCursor   int           // active field in instance form
@@ -3319,6 +3327,7 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		// Chain stopped: settled, or no longer resuming/preparing.
 		pane.resuming = false
 		pane.preparing = false
+		pane.clearBootLabel()
 		pane.spinnerTickRunning = false
 		return m, nil
 
@@ -3550,6 +3559,9 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 			// A fix started by any client closes the pane's plugin dialog on
 			// this one, and a pane that vanished takes its held dialog with it.
 			m.reconcilePluginDialogs(msg),
+			// The boot indicator for a fix starting and for the restart after
+			// it, from the same FixLabel edges (pluginfix.go).
+			m.reconcileFixBoot(msg),
 			m.listenForMessages(),
 			m.sendDiffedResizes(m.diffResizes(msg)),
 			groupsCmd,
@@ -6761,6 +6773,7 @@ func (m *Model) handlePaneOutput(msg PaneOutputMsg) (tea.Cmd, bool) {
 			if tab.overlayPane.restoreSettles() {
 				tab.overlayPane.preparing = false
 				tab.overlayPane.resuming = false
+				tab.overlayPane.clearBootLabel()
 				// Same treatment as the layout branch's settle below, for the
 				// same reason: once per pane, and the state a future indicator
 				// would draw. Returning bare visibility here would leave the
@@ -6847,6 +6860,7 @@ func (m *Model) handlePaneOutput(msg PaneOutputMsg) (tea.Cmd, bool) {
 			if leaf.Pane.restoreSettles() {
 				leaf.Pane.resuming = false
 				leaf.Pane.preparing = false
+				leaf.Pane.clearBootLabel()
 				// Renders only inside the pane today (see buildTopBorder), so
 				// this is conservatism rather than necessity: it fires once per
 				// pane and is what a tab-bar or sidebar pending indicator would
@@ -9225,7 +9239,7 @@ func (m Model) listenForMessages() tea.Cmd {
 				log.Printf("decode %s: %v", msg.Type, err)
 				return listenContinueMsg{}
 			}
-			return pluginFixRespMsg{Resp: payload, Update: msg.Type == ipc.MsgPluginUpdateResp}
+			return pluginFixRespMsg{ID: msg.ID, Resp: payload, Update: msg.Type == ipc.MsgPluginUpdateResp}
 
 		case ipc.MsgSetActivePane:
 			var payload ipc.SetActivePanePayload
@@ -9635,6 +9649,8 @@ func parseWorkspaceState(ws ipc.WorkspaceState) WorkspaceStateMsg {
 			// Bounded for the same reason: it is sanitized on every frame of
 			// the pane border while the fix runs.
 			FixLabel:          truncateBytes(p.FixLabel, fixLabelCap),
+			Exited:            p.Exited,
+			RunGen:            p.RunGen,
 			GitBranch:         p.GitBranch,
 			GitDetached:       p.GitDetached,
 			GitWorktree:       p.GitWorktree,

@@ -5499,8 +5499,11 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			// Same: captured under the lock that protects it, written to
 			// paneData only on the broadcast side.
 			preparingWorktree := pane.PreparingWorktree
-			// And the same again for the fix the pane is running.
+			// And the same again for the fix the pane is running, and for
+			// whether the child has exited (ExitCode is PluginMu-guarded).
 			fixLabel := pane.FixLabel
+			exited := pane.ExitCode != nil
+			runGen := pane.ptyGen
 			// Captured here rather than read below: this runs on the snapshot
 			// goroutine while handleResizePane writes them from a conn dispatch
 			// goroutine.
@@ -5576,6 +5579,17 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 				if fixLabel != "" {
 					paneData.FixLabel = fixLabel
 				}
+				// Whether the child has exited with nothing in its place,
+				// runtime-only: a client that sees a fix end needs to know
+				// whether a restart is coming (boot indicator) or the fix's
+				// output is the pane's last word.
+				if exited {
+					paneData.Exited = true
+				}
+				// The current child's generation, runtime-only: it lets a
+				// client decide whether the child's first output is still to
+				// come (show the boot indicator) or has already landed.
+				paneData.RunGen = runGen
 				// Model/context usage of the last completed AI turn is
 				// runtime-only (broadcast, never persisted): a stale token
 				// count from a previous daemon run would be wrong until the

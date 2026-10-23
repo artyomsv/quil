@@ -990,6 +990,7 @@ func syncPaneMeta(pane *PaneModel, info *PaneInfo, wideCanvas bool, minNativeCol
 	pane.PreparingWorktree = info.PreparingWorktree
 	// Unconditional: the absent key is what says the fix has ended.
 	pane.FixLabel = info.FixLabel
+	pane.Exited = info.Exited
 	pane.GitBranch = info.GitBranch
 	pane.GitDetached = info.GitDetached
 	pane.GitWorktree = info.GitWorktree

@@ -122,6 +122,14 @@ type PaneState struct {
 	SpawnError        string `json:"spawn_error,omitempty"`
 	PreparingWorktree string `json:"preparing_worktree,omitempty"`
 	FixLabel          string `json:"fix_label,omitempty"`
+	// Exited says the pane's child has exited and nothing replaced it. A
+	// client uses it to tell a fix that failed (its output stays) from one
+	// whose restart is starting (boot indicator). Runtime-only.
+	Exited bool `json:"exited,omitempty"`
+	// RunGen is the generation of the pane's current child — the number its
+	// pane_output frames carry (PaneOutputPayload.Generation) — so a client
+	// can tell whether that child's output has reached it yet. Runtime-only.
+	RunGen uint64 `json:"run_gen,omitempty"`
 	Model             string `json:"model,omitempty"`
 	// ContextTokens is present (possibly 0) whenever Model is set.
 	ContextTokens   *int64 `json:"context_tokens,omitempty"`

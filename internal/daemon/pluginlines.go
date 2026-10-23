@@ -2,9 +2,12 @@ package daemon
 
 import (
 	"bytes"
+	"context"
 	"fmt"
+	"log"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -13,6 +16,7 @@ import (
 
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/plugin"
+	"github.com/artyomsv/quil/internal/update"
 )
 
 // The error handlers match every flushed chunk, ANSI-stripped, as they
@@ -182,7 +186,8 @@ func pluginFixRunning(pane *Pane) bool {
 // matchPluginHandlers raises a plugin_error for every dialog handler the
 // chunk matches, once per run each. One chunk can carry two things to act
 // on, and each gets its own frame so an older TUI (which shows the last one
-// alone) still shows something true.
+// alone) still shows something true. A handler with offer_update also
+// starts the latest-release lookup (offerLatestRelease), once per run.
 func (d *Daemon) matchPluginHandlers(pane *Pane, paneID string, p *plugin.PanePlugin, chunk string) {
 	for _, eh := range plugin.MatchErrors(p, chunk) {
 		if eh.Action != "dialog" {
@@ -202,65 +207,201 @@ func (d *Daemon) matchPluginHandlers(pane *Pane, paneID string, p *plugin.PanePl
 			Plugin:  p.Name,
 			Fixes:   fixes,
 		})
+		if eh.OfferUpdate && p.Update != nil && p.Update.GitHub != "" {
+			d.offerLatestRelease(pane, paneID, p)
+		}
+	}
+}
+
+// updateOfferSource is what offerUpdate needs from the plugin, copied on
+// the flush goroutine: the goroutines that finish an offer must never hold
+// the plugin pointer — DetectAvailability and a plugin reload write
+// Command.Cmd while the registry's pointer is out (the RD-029 escape), and
+// a read off the flush goroutine would race them.
+type updateOfferSource struct {
+	name, displayName string
+	binPath, binCmd   string
+	managers          []plugin.UpdateManager
+}
+
+func newUpdateOfferSource(p *plugin.PanePlugin) updateOfferSource {
+	return updateOfferSource{
+		name: p.Name, displayName: p.DisplayName,
+		binPath: p.Command.Path, binCmd: p.Command.Cmd,
+		managers: p.Update.Managers,
 	}
 }
 
 // matchUpdateNotice raises the update dialog when line is the plugin's
-// [update] notice for a version this run has not raised yet and the user has
-// not declined. The offered version is recorded on the pane
-// (Pane.pluginOffered) as the frame leaves: it is the only version the
-// daemon accepts back from a client's Update or Not now for this pane.
-func (d *Daemon) matchUpdateNotice(pane *Pane, paneID string, p *plugin.PanePlugin, line string) {
-	offered, ok := plugin.MatchUpdateNotice(p, line)
-	if !ok || !pluginSentOnce(pane, "u:"+offered) {
-		return
+// [update] notice (offerUpdate). generation is the run the line came from.
+func (d *Daemon) matchUpdateNotice(pane *Pane, paneID string, p *plugin.PanePlugin, line string, generation uint64) {
+	if offered, ok := plugin.MatchUpdateNotice(p, line); ok {
+		d.offerUpdate(pane, paneID, newUpdateOfferSource(p), offered, generation)
 	}
+}
+
+// offerUpdate raises the update dialog for offered — a version the tool
+// printed in its notice, or the latest release GitHub named — unless the
+// pane has left run (a restart since the offer was found), the run has
+// raised it already, or the user declined it. The offered version is
+// recorded on the pane (Pane.pluginOffered) as the frame leaves: it is the
+// only version the daemon accepts back from a client's Update or Not now
+// for this pane. The run check, the dedupe and the record happen under ONE
+// PluginMu span, or a restart between them would write the old run's
+// version into the new one. run 0 (the PTY-less onPaneExit path) means the
+// current run. Safe off the flush goroutine: src is a copy.
+func (d *Daemon) offerUpdate(pane *Pane, paneID string, src updateOfferSource, offered string, run uint64) {
 	// Not now is kept daemon-side so every client agrees and it survives a
-	// restart; checked after the run's dedupe so a suppressed notice costs
-	// the lookup once per run, not once per line.
-	if d.pluginUpdateSkips().Suppressed(p.Name, offered) {
+	// restart. Read first, outside PluginMu: the store loads from disk on its
+	// first use and must not do so under the pane's lock.
+	if d.pluginUpdateSkips().Suppressed(src.name, offered) {
 		return
 	}
 	pane.PluginMu.Lock()
+	if run != 0 && pane.pluginLineGen != run {
+		pane.PluginMu.Unlock()
+		return
+	}
+	key := "u:" + offered
+	if pane.pluginSent[key] {
+		pane.PluginMu.Unlock()
+		return
+	}
+	if pane.pluginSent == nil {
+		pane.pluginSent = make(map[string]bool)
+	}
+	pane.pluginSent[key] = true
 	installed := pane.PluginState["version"]
 	pane.pluginOffered = offered
 	pane.PluginMu.Unlock()
-	message := fmt.Sprintf("%s %s is available.", p.DisplayName, offered)
+	message := fmt.Sprintf("%s %s is available.", src.displayName, offered)
 	if installed != "" {
-		message = fmt.Sprintf("%s %s is available; %s is installed.", p.DisplayName, offered, installed)
+		message = fmt.Sprintf("%s %s is available; %s is installed.", src.displayName, offered, installed)
 	}
 	payload := ipc.PluginErrorPayload{
 		PaneID:  paneID,
-		Title:   "Update available: " + p.DisplayName,
+		Title:   "Update available: " + src.displayName,
 		Message: message,
-		Plugin:  p.Name,
+		Plugin:  src.name,
 		Update:  &ipc.PluginUpdateInfo{Installed: installed, Offered: offered},
 	}
 	// The binary's path is a PATH walk and a symlink resolution: filesystem
 	// calls, which never run on the output-flush goroutine — a PATH entry on
 	// a dead mount would stall this pane's output. The frame leaves from a
 	// goroutine once the path is known, or without it when it is not. The
-	// goroutine gets COPIES of the two strings and the managers slice, never
-	// the plugin pointer: DetectAvailability and a plugin reload write
-	// Command.Cmd while the registry's pointer is out (the RD-029 escape),
-	// and a read off this goroutine would race them. The resolver and the
-	// timeout are read HERE too, on the calling goroutine, so a test that
-	// swaps them is ordered with every read (the goroutine would race the
-	// test's restore).
-	binPath, binCmd := p.Command.Path, p.Command.Cmd
-	managers := p.Update.Managers
+	// resolver and the timeout are read HERE, on the calling goroutine, so a
+	// test that swaps them is ordered with every read (the goroutine would
+	// race the test's restore).
 	resolve, timeout := resolvePluginBinaryFn, pluginTargetTimeout
 	go func() {
-		target := pluginBinaryTargetWithin(binPath, binCmd, timeout, resolve)
+		target := pluginBinaryTargetWithin(src.binPath, src.binCmd, timeout, resolve)
 		payload.Update.Target = target
 		// The manager that owns the binary, by the same match the update's
 		// argv is chosen with (updateArgv), so the dialog's question names
 		// what will really happen: "Update with brew?" rather than "Replace
 		// <path>?" for a file a download would never touch.
-		if m := matchUpdateManager(managers, target); m != nil {
+		if m := matchUpdateManager(src.managers, target); m != nil {
 			payload.Update.Manager = m.Name
 		}
 		d.sendPluginError(pane, payload)
+	}()
+}
+
+// latestReleaseTimeout bounds one GitHub latest-release lookup for an
+// offer_update handler. The user is reading the handler's dialog meanwhile;
+// an answer later than this would arrive as an update frame merging into a
+// dialog they have long closed.
+const latestReleaseTimeout = 10 * time.Second
+
+// latestReleaseBaseURL is the GitHub API host the lookup asks; "" is
+// update.DefaultBaseURL. A var so a test points it at httptest.
+var latestReleaseBaseURL = ""
+
+// latestReleaseCacheTTL is how long one repository's latest version answers
+// every pane's lookup. The unauthenticated GitHub API allows 60 requests an
+// hour per address, shared with Quil's own update check; a pane that
+// restarts in a loop on the too-old error would spend them all on one
+// answer. Only successes are cached — a failure is retried on the next run.
+const latestReleaseCacheTTL = 10 * time.Minute
+
+// latestTagCache is the per-repository cache of GitHub latest versions
+// (latestReleaseCacheTTL). The zero value is ready.
+type latestTagCache struct {
+	mu      sync.Mutex
+	entries map[string]latestTagEntry
+}
+
+type latestTagEntry struct {
+	version string
+	at      time.Time
+}
+
+// get returns the cached version for repo when it is younger than the TTL.
+func (c *latestTagCache) get(repo string, now time.Time) (string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.entries[repo]
+	if !ok || now.Sub(e.at) >= latestReleaseCacheTTL {
+		return "", false
+	}
+	return e.version, true
+}
+
+func (c *latestTagCache) put(repo, version string, now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.entries == nil {
+		c.entries = make(map[string]latestTagEntry)
+	}
+	c.entries[repo] = latestTagEntry{version: version, at: now}
+}
+
+// offerLatestRelease asks GitHub for the latest release of the plugin's
+// [update] repository and offers its version (offerUpdate), for a handler
+// with offer_update: the tool is too old to print its own notice — a Stripe
+// CLI that fails on a flag newer CLIs require exits before it says a newer
+// version exists — so the "too old" dialog would have no Update button for
+// exactly the users who need it. ONE lookup per pane and run (the "gh:"
+// dedupe key; the handler's own key already gives once per handler), served
+// from the per-repository cache when it can be, else on a goroutine bounded
+// by latestReleaseTimeout. A failed lookup is logged and offers nothing: the
+// handler's Close-only dialog stays. An answer that arrives after the run
+// ended is dropped by offerUpdate's run check — the dialog it would merge
+// into describes a child that is gone.
+func (d *Daemon) offerLatestRelease(pane *Pane, paneID string, p *plugin.PanePlugin) {
+	if !pluginSentOnce(pane, "gh:latest") {
+		return
+	}
+	pane.PluginMu.Lock()
+	run := pane.pluginLineGen
+	pane.PluginMu.Unlock()
+	// Everything the goroutine needs, copied here: the plugin pointer stays
+	// behind (see updateOfferSource) and the seam is read on this goroutine
+	// so a test's restore of it is ordered after the read.
+	src := newUpdateOfferSource(p)
+	repo, baseURL := p.Update.GitHub, latestReleaseBaseURL
+	if version, ok := d.latestTags.get(repo, time.Now()); ok {
+		d.offerUpdate(pane, paneID, src, version, run)
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), latestReleaseTimeout)
+		defer cancel()
+		checker := &update.Checker{Repo: repo, BaseURL: baseURL}
+		rel, err := checker.Latest(ctx)
+		if err != nil {
+			log.Printf("pane %s: %s latest release lookup failed, no update offered: %v", paneID, src.name, err)
+			return
+		}
+		// The tag becomes a release TAG and an asset NAME on the update argv
+		// (updateArgv): the same shape check a client's version gets.
+		version, err := pluginVersionArg(rel.TagName)
+		if err != nil {
+			log.Printf("pane %s: %s latest release tag %q unusable, no update offered: %v", paneID, src.name, rel.TagName, err)
+			return
+		}
+		d.latestTags.put(repo, version, time.Now())
+		d.offerUpdate(pane, paneID, src, version, run)
 	}()
 }
 
@@ -280,7 +421,7 @@ func (d *Daemon) flushPluginTail(pane *Pane, generation uint64) {
 	if line == "" || pluginFixRunning(pane) {
 		return
 	}
-	d.matchUpdateNotice(pane, pane.ID, p, line)
+	d.matchUpdateNotice(pane, pane.ID, p, line, generation)
 }
 
 // sendPluginError puts one card for the dialog in the notification sidebar

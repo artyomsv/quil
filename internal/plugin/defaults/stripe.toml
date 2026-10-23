@@ -72,14 +72,16 @@ Close this pane and open a new Stripe pane:
 new panes pass --all-snapshot (all events, as before)."""
 action = "dialog"
 
-# The reverse: --all-snapshot on a CLI older than September 2026.
+# The reverse: --all-snapshot on a CLI older than September 2026. Such a CLI
+# fails on the flag before it prints its own "newer version available" line,
+# so offer_update asks GitHub for the latest release and puts the Update
+# button on this dialog.
 [[error_handlers]]
 pattern = 'unknown flag: --all-snapshot'
 title = "Stripe CLI is too old"
-message = """
-This Stripe CLI does not know --all-snapshot.
-Update the Stripe CLI (the Update button appears when it reports a newer version)."""
+message = "This Stripe CLI does not know --all-snapshot, which newer Stripe CLIs require. Update installs the latest one."
 action = "dialog"
+offer_update = true
 
 # How Quil learns the binary is outdated and how it replaces it. The notice is
 # matched on complete output lines; capture group 1 is the offered version.

@@ -72,6 +72,9 @@ type Daemon struct {
 	// on first use through pluginUpdateSkips like tasks.
 	updateSkips     *updateSkips
 	updateSkipsOnce sync.Once
+	// latestTags caches offer_update's GitHub answers (pluginlines.go); the
+	// zero value is ready.
+	latestTags latestTagCache
 	// parkedWaits counts the live parked wait_task goroutines, so a test can
 	// see them end when their conn closes.
 	parkedWaits atomic.Int32
@@ -459,6 +462,9 @@ func (d *Daemon) Start() error {
 	}
 
 	d.seedUpdateInfoFromState()
+	// Read the Not-now file here, once, so the first update notice does not
+	// do it on a pane's output path.
+	d.pluginUpdateSkips()
 
 	// Hook event ingest plumbing: spool reader + ingester (rate limit +
 	// coalesce) feeding emitHookEvent. Init truncates stale spool files so
@@ -5202,7 +5208,7 @@ func (d *Daemon) applyPluginHandlers(pane *Pane, paneID string, data []byte, gen
 		return
 	}
 	for _, line := range d.pluginLines(pane, data, generation) {
-		d.matchUpdateNotice(pane, paneID, p, line)
+		d.matchUpdateNotice(pane, paneID, p, line, generation)
 	}
 }
 

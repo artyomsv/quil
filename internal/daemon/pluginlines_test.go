@@ -1,10 +1,13 @@
 package daemon
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -624,6 +627,197 @@ func TestApplyPluginHandlers_SkippedWhileFixRuns(t *testing.T) {
 	}
 	if v := scrapedVersion(); v != "1.31.1" {
 		t.Fatalf("version = %q after the fix, want 1.31.1 scraped from the normal run", v)
+	}
+}
+
+// tooOldLine is what a Stripe CLI older than --all-snapshot prints and exits
+// on — before any "newer version available" notice.
+const tooOldLine = "Error: unknown flag: --all-snapshot\r\n"
+
+// offerUpdateTOML is fixmeUpdateTOML (a full [update] table for this
+// platform) plus a fix-less dialog handler with offer_update.
+func offerUpdateTOML(t *testing.T) string {
+	t.Helper()
+	const anchor = "[[error_handlers]]\npattern = 'quietly noted'"
+	handler := `[[error_handlers]]
+pattern = 'unknown flag: --all-snapshot'
+title = "Too old"
+message = "Update installs the latest one."
+action = "dialog"
+offer_update = true
+
+`
+	toml := strings.Replace(fixmeUpdateTOML(), anchor, handler+anchor, 1)
+	if toml == fixmeUpdateTOML() {
+		t.Fatal("fixme TOML lost its log-only handler anchor")
+	}
+	return toml
+}
+
+// latestReleaseServer is a GitHub API stand-in answering the fixme repo's
+// /releases/latest with status and tag, counting the hits, and installed as
+// latestReleaseBaseURL for the test. The counter is atomic: httptest's
+// goroutines write it, the test reads it.
+func latestReleaseServer(t *testing.T, status int, tag string) *atomic.Int32 {
+	t.Helper()
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/stripe/stripe-cli/releases/latest" {
+			t.Errorf("unexpected GitHub request %s", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		hits.Add(1)
+		w.WriteHeader(status)
+		if status == http.StatusOK {
+			w.Write([]byte(`{"tag_name":"` + tag + `","html_url":"x","assets":[]}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	prev := latestReleaseBaseURL
+	latestReleaseBaseURL = srv.URL
+	t.Cleanup(func() { latestReleaseBaseURL = prev })
+	return &hits
+}
+
+// An offer_update handler on a tool too old to print its own notice: the
+// handler's frame goes out at once and GitHub's latest release follows as
+// the update frame, which the pane's Update request is then accepted for.
+// One lookup per run however often the line repeats.
+func TestApplyPluginHandlers_OfferUpdateFromLatestRelease(t *testing.T) {
+	quild := fakeBinary(t, "quild.cmd")
+	origExe := quildExeFn
+	quildExeFn = func() (string, error) { return quild, nil }
+	t.Cleanup(func() { quildExeFn = origExe })
+	hits := latestReleaseServer(t, http.StatusOK, "v1.55.1")
+
+	d := newTestDaemon(t)
+	registerFixmeTOML(t, d, offerUpdateTOML(t), fakeBinary(t, "stripe.cmd"))
+	pane := newFixmePane(t, d)
+	sessions := installFixSessions(t)
+	if err := d.spawnPane(pane, newSessionFn(80, 24), false); err != nil {
+		t.Fatalf("initial spawn: %v", err)
+	}
+	sessions.waitFor(t, 1)
+	c := dialBroadcastReader(t, d)
+	quiet := quietReader(t, d)
+
+	d.applyPluginHandlers(pane, pane.ID, []byte(tooOldLine), currentGen(pane))
+	got := readPluginErrors(t, c, 2)
+	var handler, offer *ipc.PluginErrorPayload
+	for i := range got {
+		if got[i].Update != nil {
+			offer = &got[i]
+		} else {
+			handler = &got[i]
+		}
+	}
+	if handler == nil || handler.Title != "Too old" || len(handler.Fixes) != 0 {
+		t.Fatalf("frames = %+v, want the fix-less Too old handler", got)
+	}
+	if offer == nil || offer.Update.Offered != "1.55.1" || offer.Update.Installed != "" || offer.Title != "Update available: Fix Me" {
+		t.Fatalf("frames = %+v, want the latest release offered with no installed version", got)
+	}
+
+	// The same line again in the same run: no second lookup, no more frames.
+	d.applyPluginHandlers(pane, pane.ID, []byte(tooOldLine), currentGen(pane))
+	if all := pluginErrorsWithin(t, quiet, 300*time.Millisecond); len(all) != 2 {
+		t.Fatalf("the quiet reader saw %d frames across both flushes, want 2: %+v", len(all), all)
+	}
+	if n := hits.Load(); n != 1 {
+		t.Fatalf("GitHub asked %d times in one run, want 1", n)
+	}
+
+	// A NEW run (the pane restarted on the error, as a too-old CLI does in a
+	// loop) is offered again — from the cache, not from GitHub: the
+	// unauthenticated budget is 60 an hour, shared with Quil's own check.
+	d.applyPluginHandlers(pane, pane.ID, []byte(tooOldLine), currentGen(pane)+1)
+	again := readPluginErrors(t, c, 2)
+	if again[0].Update == nil && again[1].Update == nil {
+		t.Fatalf("new run frames = %+v, want the update offered again", again)
+	}
+	if n := hits.Load(); n != 1 {
+		t.Fatalf("GitHub asked %d times across two runs within %v, want 1 (cached)", n, latestReleaseCacheTTL)
+	}
+	// An entry past the TTL is asked for again.
+	d.latestTags.put("stripe/stripe-cli", "1.55.1", time.Now().Add(-latestReleaseCacheTTL))
+	if _, ok := d.latestTags.get("stripe/stripe-cli", time.Now()); ok {
+		t.Fatal("a cache entry as old as the TTL was served")
+	}
+
+	// The offered version is the one the pane's Update is accepted for: the
+	// cached offer above recorded it for the pane's current run.
+	resp, _ := fixRequest(t, c, ipc.MsgPluginUpdateReq, "up-gh", ipc.PluginUpdateReqPayload{PaneID: pane.ID, Version: "1.55.1"})
+	if !resp.OK {
+		t.Fatalf("update to the latest release refused: %q", resp.Error)
+	}
+	if _, args, _ := sessions.waitFor(t, 2).argv(); !containsPair(args, "--tag", "v1.55.1") {
+		t.Fatalf("update child argv %q lacks --tag v1.55.1", args)
+	}
+}
+
+// A GitHub answer that lands after the pane restarted is dropped: the run
+// check, the dedupe and the pluginOffered record are one PluginMu span, so
+// the old run's version is never written into the new run.
+func TestOfferUpdate_StaleRunDropped(t *testing.T) {
+	d := newTestDaemon(t)
+	p := registerFixmeTOML(t, d, offerUpdateTOML(t), fakeBinary(t, "stripe.cmd"))
+	pane := newFixmePane(t, d)
+	c := dialBroadcastReader(t, d)
+
+	resetPluginRun(pane, 1)
+	// The lookup for run 1 answers after run 2 began.
+	resetPluginRun(pane, 2)
+	d.offerUpdate(pane, pane.ID, newUpdateOfferSource(p), "1.55.1", 1)
+	if got := pluginErrorsWithin(t, c, 300*time.Millisecond); len(got) != 0 {
+		t.Fatalf("a stale run's offer was sent: %+v", got)
+	}
+	pane.PluginMu.Lock()
+	offered, sent := pane.pluginOffered, pane.pluginSent["u:1.55.1"]
+	pane.PluginMu.Unlock()
+	if offered != "" || sent {
+		t.Fatalf("offered=%q sent=%v: a stale run's offer was recorded into the new run", offered, sent)
+	}
+}
+
+// A lookup that fails, or a latest release the user declined, leaves the
+// handler's dialog as it is: Close only, no update frame.
+func TestApplyPluginHandlers_OfferUpdateFailureOrDeclinedOffersNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		status  int
+		decline bool
+	}{
+		{"github 500", http.StatusInternalServerError, false},
+		{"declined", http.StatusOK, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hits := latestReleaseServer(t, tc.status, "v1.55.1")
+			d := newTestDaemon(t)
+			registerFixmeTOML(t, d, offerUpdateTOML(t), fakeBinary(t, "stripe.cmd"))
+			pane := newFixmePane(t, d)
+			if tc.decline {
+				if err := d.pluginUpdateSkips().Skip("fixme", "1.55.1"); err != nil {
+					t.Fatalf("Skip: %v", err)
+				}
+			}
+			c := dialBroadcastReader(t, d)
+
+			d.applyPluginHandlers(pane, pane.ID, []byte(tooOldLine), 1)
+			all := pluginErrorsWithin(t, c, 500*time.Millisecond)
+			if len(all) != 1 || all[0].Update != nil || all[0].Title != "Too old" {
+				t.Fatalf("frames = %+v, want the handler frame alone", all)
+			}
+			if n := hits.Load(); n != 1 {
+				t.Fatalf("GitHub asked %d times, want 1", n)
+			}
+			pane.PluginMu.Lock()
+			offered := pane.pluginOffered
+			pane.PluginMu.Unlock()
+			if offered != "" {
+				t.Fatalf("pluginOffered = %q with nothing offered", offered)
+			}
+		})
 	}
 }
 

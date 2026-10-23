@@ -315,6 +315,48 @@ binary = "stripe"
 `, "assets")
 }
 
+// offer_update promises the [update] table's button on the handler's dialog;
+// without the table the dialog could not keep it, so the load is refused —
+// and with it the flag is carried through.
+func TestLoadOfferUpdate_NeedsUpdateTable(t *testing.T) {
+	handler := `
+[[error_handlers]]
+pattern = 'unknown flag: --all-snapshot'
+title = "Too old"
+message = "Update installs the latest one."
+action = "dialog"
+offer_update = true
+`
+	assertRefused(t, fixesPluginHead+handler, "offer_update")
+	// A managers-only [update] names no repository to ask for the latest
+	// release, so it cannot keep the promise either.
+	assertRefused(t, fixesPluginHead+handler+`
+[update]
+notice = 'please update to: v?(\d+\.\d+\.\d+)'
+
+[[update.managers]]
+name = "brew"
+match = '/Cellar/'
+run = ["brew", "upgrade", "stripe"]
+`, "offer_update")
+
+	p, err := loadPluginTOML(writePluginTOML(t, fixesPluginHead+handler+stripeUpdateTable))
+	if err != nil {
+		t.Fatalf("offer_update with [update] refused: %v", err)
+	}
+	if len(p.ErrorHandlers) != 1 || !p.ErrorHandlers[0].OfferUpdate {
+		t.Fatalf("handlers = %+v, want one with OfferUpdate", p.ErrorHandlers)
+	}
+	// Absent, the flag is false: a plain handler offers nothing extra.
+	p, err = loadPluginTOML(writePluginTOML(t, fixesPluginHead+strings.Replace(handler, "offer_update = true\n", "", 1)+stripeUpdateTable))
+	if err != nil {
+		t.Fatalf("plain handler refused: %v", err)
+	}
+	if p.ErrorHandlers[0].OfferUpdate {
+		t.Fatal("OfferUpdate defaulted to true")
+	}
+}
+
 // Managers alone are a complete [update]: a tool that is only ever installed
 // through a package manager has no download to describe.
 func TestLoadUpdate_ManagersOnlyIsComplete(t *testing.T) {

@@ -380,11 +380,12 @@ type tomlPlugin struct {
 		Env         []string `toml:"env"`
 	} `toml:"instances"`
 	ErrorHandlers []struct {
-		Pattern string    `toml:"pattern"`
-		Title   string    `toml:"title"`
-		Message string    `toml:"message"`
-		Action  string    `toml:"action"`
-		Fixes   []tomlFix `toml:"fixes"`
+		Pattern     string    `toml:"pattern"`
+		Title       string    `toml:"title"`
+		Message     string    `toml:"message"`
+		Action      string    `toml:"action"`
+		Fixes       []tomlFix `toml:"fixes"`
+		OfferUpdate bool      `toml:"offer_update"`
 	} `toml:"error_handlers"`
 	NotificationHandlers []struct {
 		Pattern  string `toml:"pattern"`
@@ -565,11 +566,12 @@ func loadPluginTOML(path string) (*PanePlugin, error) {
 			return nil, err
 		}
 		p.ErrorHandlers = append(p.ErrorHandlers, ErrorHandler{
-			Pattern: eh.Pattern,
-			Title:   eh.Title,
-			Message: eh.Message,
-			Action:  action,
-			Fixes:   fixes,
+			Pattern:     eh.Pattern,
+			Title:       eh.Title,
+			Message:     eh.Message,
+			Action:      action,
+			Fixes:       fixes,
+			OfferUpdate: eh.OfferUpdate,
 		})
 	}
 
@@ -579,6 +581,17 @@ func loadPluginTOML(path string) (*PanePlugin, error) {
 		return nil, err
 	}
 	p.Update = update
+	// offer_update promises the [update] table's button with the LATEST
+	// GitHub release; without the table, or with a managers-only one that
+	// names no repository to ask, the dialog could not keep it, so the load
+	// fails like a fix without a command would.
+	if update == nil || update.GitHub == "" {
+		for _, eh := range p.ErrorHandlers {
+			if eh.OfferUpdate {
+				return nil, fmt.Errorf("plugin %q: error handler %q sets offer_update but the plugin has no [update] table with github", tp.Plugin.Name, eh.Title)
+			}
+		}
+	}
 
 	// Convert notification handlers
 	//

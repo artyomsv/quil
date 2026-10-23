@@ -439,6 +439,7 @@ action = "dialog"
 | `message` | string | No | `""` | Body text of the error dialog. Supports `{host}`, `{user}`, `{port}` placeholder expansion from the pane's instance args. Use TOML multi-line strings (`"""..."""`) for longer messages. |
 | `action` | string | No | `"log"` | What to do when the pattern matches. |
 | `fixes` | array of tables | No | — | Buttons on the dialog that run a command in the pane. See [Fix actions](#fix-actions--error_handlersfixes). |
+| `offer_update` | bool | No | `false` | Put the `[update]` table's **Update** button on this dialog too, offering the tool's **latest GitHub release** (looked up when the handler fires, once per run of the tool). For a tool too old to print its own update notice — a Stripe CLI that fails on a flag newer CLIs require exits before it says a newer version exists. Requires `[update]` with `github`; setting it without fails plugin load. When the lookup fails, the dialog shows without the button. |
 
 ### Actions
 
@@ -925,14 +926,16 @@ Close this pane and open a new Stripe pane:
 new panes pass --all-snapshot (all events, as before)."""
 action = "dialog"
 
-# The reverse: --all-snapshot on a CLI older than September 2026.
+# The reverse: --all-snapshot on a CLI older than September 2026. Such a CLI
+# fails on the flag before it prints its own "newer version available" line,
+# so offer_update asks GitHub for the latest release and puts the Update
+# button on this dialog.
 [[error_handlers]]
 pattern = 'unknown flag: --all-snapshot'
 title = "Stripe CLI is too old"
-message = """
-This Stripe CLI does not know --all-snapshot.
-Update the Stripe CLI (the Update button appears when it reports a newer version)."""
+message = "This Stripe CLI does not know --all-snapshot, which newer Stripe CLIs require. Update installs the latest one."
 action = "dialog"
+offer_update = true
 
 # How Quil learns the binary is outdated and how it replaces it. The notice is
 # matched on complete output lines; capture group 1 is the offered version.

@@ -185,12 +185,18 @@ type DisplayConfig struct {
 
 // ErrorHandler matches PTY output patterns and triggers help dialogs.
 type ErrorHandler struct {
-	Pattern  string
-	Title    string
-	Message  string
-	Action   string // "dialog" | "log"
-	Fixes    []Fix  // buttons on the dialog; each runs in the pane
-	compiled *regexp.Regexp
+	Pattern string
+	Title   string
+	Message string
+	Action  string // "dialog" | "log"
+	Fixes   []Fix  // buttons on the dialog; each runs in the pane
+	// OfferUpdate makes the handler's dialog carry the [update] table's
+	// Update button with the tool's LATEST release, looked up on GitHub when
+	// the handler fires — for a tool too old to print its own update notice
+	// (a Stripe CLI that fails on a flag newer CLIs require exits before it
+	// says a newer version exists). Load-time refused without [update].
+	OfferUpdate bool
+	compiled    *regexp.Regexp
 }
 
 // Fix is one [[error_handlers.fixes]] entry: a button on the handler's dialog

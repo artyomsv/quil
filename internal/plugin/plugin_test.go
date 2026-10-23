@@ -445,6 +445,13 @@ func TestDefaultStripe_HasLoginFixAndUpdate(t *testing.T) {
 		got := MatchErrors(stripe, line)
 		if len(got) != 1 || got[0].Title != title {
 			t.Errorf("MatchErrors(%q) = %d handlers, want one titled %q", line, len(got), title)
+			continue
+		}
+		// A CLI too old for the flag exits before it prints its own update
+		// notice, so that dialog offers the latest release itself; the
+		// filter dialog is about a pane's arguments, not the binary.
+		if want := title == "Stripe CLI is too old"; got[0].OfferUpdate != want {
+			t.Errorf("%q handler OfferUpdate = %v, want %v", title, got[0].OfferUpdate, want)
 		}
 	}
 

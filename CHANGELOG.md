@@ -11,6 +11,11 @@ version section here and deletes them.
 
 ## [Unreleased]
 
+## [1.94.0] - 2026-10-23
+
+### Changed
+- A pane created with Ctrl+N and no folder of its own (Terminal, k9s, lazysql) now opens in the live directory of the pane you split from, as in tmux. It used to open in the folder quil was started from. If that folder is gone, or the pane is a sandbox, the project root is used.
+
 ## [1.93.2] - 2026-10-22
 
 ### Fixed

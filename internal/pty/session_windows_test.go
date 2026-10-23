@@ -3,7 +3,9 @@
 package pty
 
 import (
+	"bytes"
 	"testing"
+	"time"
 )
 
 // TestWinSession_SetCWD_StoresField verifies SetCWD writes the dir into
@@ -123,5 +125,44 @@ func TestWinSession_WaitExit_IdempotentAfterHandleClose(t *testing.T) {
 	}
 	if code := s.WaitExit(); code != 3 {
 		t.Errorf("second WaitExit = %d, want 3 (cached) — handle-zeroing broke the cache", code)
+	}
+}
+
+// TestWinSession_ReadEndsAfterChildExit: ConPTY keeps the console and its
+// output pipe open after the last client leaves, so without the exit
+// watcher a Read never returns and the daemon never learns that the child
+// exited. The child's last output must still arrive before the end.
+//
+// Runs only on a Windows host, like the test above.
+func TestWinSession_ReadEndsAfterChildExit(t *testing.T) {
+	s := New()
+	if err := s.Start("cmd.exe", "/c", "echo", "quil-exit-probe"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer s.Close()
+
+	var out []byte
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		buf := make([]byte, 4096)
+		for {
+			n, err := s.Read(buf)
+			out = append(out, buf[:n]...)
+			if err != nil {
+				return
+			}
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("Read did not end after the child exited")
+	}
+	if !bytes.Contains(out, []byte("quil-exit-probe")) {
+		t.Errorf("output before the end = %q, want it to contain the child's echo", out)
+	}
+	if code := s.WaitExit(); code != 0 {
+		t.Errorf("WaitExit = %d, want 0", code)
 	}
 }

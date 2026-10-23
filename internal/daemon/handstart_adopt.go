@@ -254,6 +254,16 @@ func (d *Daemon) returnToShellOnCleanExit(pane *Pane, code int) bool {
 		return false
 	}
 	pane.PluginMu.Lock()
+	// A plugin fix armed on this pane (startFix's marker set, its restart not
+	// yet run — pluginfix.go) owns the next spawn: the restart below would
+	// consume the fix argv, and startFix's own restart would then replace the
+	// fix with the normal command while still answering OK. Leave the pane to
+	// the fix; the conversion is still recorded and the next clean exit of
+	// the agent itself converts back.
+	if pane.FixLabel != "" || len(pane.fixArgv) > 0 {
+		pane.PluginMu.Unlock()
+		return false
+	}
 	prev := pane.ConvertedFromTerminal
 	if prev != "" {
 		pane.Type = prev

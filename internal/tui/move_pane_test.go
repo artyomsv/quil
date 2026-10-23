@@ -442,28 +442,28 @@ func TestTabPicker_ClosesWhenThePaneVanishes(t *testing.T) {
 // TestTabPicker_VanishCloseDoesNotDismissAReplacingDialog follows
 // TestMoveTabPicker_VanishCloseDoesNotDismissAReplacingDialog: tabPick.paneID
 // is cleared only by closeTabPicker, so a dialog that REPLACES the open
-// picker without going through it (PluginErrorMsg sets m.dialog directly and
-// never touches m.tabPick) leaves it stale. An ungated vanish-close would
-// then dismiss that OTHER dialog on the next broadcast, mistaking it for the
-// picker it no longer is.
+// picker without going through it leaves it stale. An ungated vanish-close
+// would then dismiss that OTHER dialog on the next broadcast, mistaking it
+// for the picker it no longer is.
+//
+// PluginErrorMsg was the replacing dialog when this was written; it is now
+// HELD behind an open dialog (pluginfix.go), so the replacement is made by
+// hand here — the guard is on the vanish-close, and that is what the test
+// drives.
 func TestTabPicker_VanishCloseDoesNotDismissAReplacingDialog(t *testing.T) {
 	t.Parallel()
 	m := newMovePaneTestModel(t)
 	m.client = newFakeConn()
-	got := openMovePanePickerViaMenu(t, m, "p2", 90, 10)
+	next := openMovePanePickerViaMenu(t, m, "p2", 90, 10)
 
-	updated, _ := got.Update(PluginErrorMsg{Title: "boom", Message: "it broke"})
-	next := updated.(Model)
-	if next.dialog != dialogPluginError {
-		t.Fatalf("setup: PluginErrorMsg did not open the plugin-error dialog: dialog=%v", next.dialog)
-	}
+	next.dialog = dialogPluginError
 	if next.tabPick.paneID == "" {
-		t.Fatal("setup: PluginErrorMsg must not clear the stale tabPick — that IS the hazard under test")
+		t.Fatal("setup: the stale tabPick must survive the replacement — that IS the hazard under test")
 	}
 
 	// The vanish-close's own trigger — p2 leaves its source tab — while a
 	// DIFFERENT dialog is on screen.
-	updated, _ = next.Update(WorkspaceStateMsg{
+	updated, _ := next.Update(WorkspaceStateMsg{
 		Dest: "",
 		Projects: []ProjectInfo{
 			{ID: "proj-source", Name: "source", TabIDs: []string{"tab-src-1", "tab-src-2"}, ActiveTab: "tab-src-1"},

@@ -62,6 +62,13 @@ func compilePatterns(p *PanePlugin) {
 			log.Printf("plugin %q: invalid idle pattern %q: %v", p.Name, p.IdleHandlers[i].Pattern, err)
 		}
 	}
+	// loadPluginTOML already refused a TOML whose [update] does not compile;
+	// this arm covers a plugin built in Go.
+	if p.Update != nil {
+		if err := p.Update.Compile(); err != nil {
+			log.Printf("plugin %q: %v", p.Name, err)
+		}
+	}
 }
 
 // Get returns a plugin by name, or nil if not found.
@@ -373,10 +380,11 @@ type tomlPlugin struct {
 		Env         []string `toml:"env"`
 	} `toml:"instances"`
 	ErrorHandlers []struct {
-		Pattern string `toml:"pattern"`
-		Title   string `toml:"title"`
-		Message string `toml:"message"`
-		Action  string `toml:"action"`
+		Pattern string    `toml:"pattern"`
+		Title   string    `toml:"title"`
+		Message string    `toml:"message"`
+		Action  string    `toml:"action"`
+		Fixes   []tomlFix `toml:"fixes"`
 	} `toml:"error_handlers"`
 	NotificationHandlers []struct {
 		Pattern  string `toml:"pattern"`
@@ -388,6 +396,29 @@ type tomlPlugin struct {
 		Title    string `toml:"title"`
 		Severity string `toml:"severity"`
 	} `toml:"idle_handlers"`
+	Update *tomlUpdate `toml:"update"` // pointer to detect absent (no update offer at all)
+}
+
+// tomlFix is one [[error_handlers.fixes]] entry on disk.
+type tomlFix struct {
+	Name  string   `toml:"name"`
+	Label string   `toml:"label"`
+	Run   []string `toml:"run"`
+	Then  string   `toml:"then"`
+}
+
+// tomlUpdate is the [update] table on disk.
+type tomlUpdate struct {
+	Notice    string            `toml:"notice"`
+	GitHub    string            `toml:"github"`
+	Binary    string            `toml:"binary"`
+	Assets    map[string]string `toml:"assets"`
+	Checksums map[string]string `toml:"checksums"`
+	Managers  []struct {
+		Name  string   `toml:"name"`
+		Match string   `toml:"match"`
+		Run   []string `toml:"run"`
+	} `toml:"managers"`
 }
 
 func loadPluginTOML(path string) (*PanePlugin, error) {
@@ -517,7 +548,9 @@ func loadPluginTOML(path string) (*PanePlugin, error) {
 		})
 	}
 
-	// Convert error handlers
+	// Convert error handlers. Fix names are checked across ALL handlers: a
+	// client names a fix without naming its handler.
+	fixNames := make(map[string]struct{})
 	for _, eh := range tp.ErrorHandlers {
 		action := eh.Action
 		switch action {
@@ -527,13 +560,25 @@ func loadPluginTOML(path string) (*PanePlugin, error) {
 			log.Printf("plugin %q: unknown error handler action %q, defaulting to log", tp.Plugin.Name, action)
 			action = "log"
 		}
+		fixes, err := convertFixes(tp.Plugin.Name, eh.Fixes, fixNames)
+		if err != nil {
+			return nil, err
+		}
 		p.ErrorHandlers = append(p.ErrorHandlers, ErrorHandler{
 			Pattern: eh.Pattern,
 			Title:   eh.Title,
 			Message: eh.Message,
 			Action:  action,
+			Fixes:   fixes,
 		})
 	}
+
+	// Convert the [update] table
+	update, err := convertUpdate(tp.Plugin.Name, tp.Update)
+	if err != nil {
+		return nil, err
+	}
+	p.Update = update
 
 	// Convert notification handlers
 	//
@@ -562,6 +607,128 @@ func loadPluginTOML(path string) (*PanePlugin, error) {
 	}
 
 	return p, nil
+}
+
+// convertFixes validates one handler's [[error_handlers.fixes]] list. seen is
+// shared across the plugin's handlers so a name means one argv for the whole
+// plugin. Every refusal fails the plugin load rather than dropping the fix:
+// a dialog missing the button it promised is the "no way to act on it" state
+// fixes exist to remove, and an unknown name is refused later too.
+func convertFixes(pluginName string, raw []tomlFix, seen map[string]struct{}) ([]Fix, error) {
+	var out []Fix
+	for _, f := range raw {
+		if f.Name == "" {
+			return nil, fmt.Errorf("plugin %q: every fix needs a name", pluginName)
+		}
+		if f.Name == FixNameUpdate {
+			return nil, fmt.Errorf("plugin %q: fix name %q is reserved for the [update] table", pluginName, f.Name)
+		}
+		if _, dup := seen[f.Name]; dup {
+			return nil, fmt.Errorf("plugin %q: duplicate fix name %q", pluginName, f.Name)
+		}
+		seen[f.Name] = struct{}{}
+		if len(f.Run) == 0 || f.Run[0] == "" {
+			return nil, fmt.Errorf("plugin %q: fix %q: run must name a command", pluginName, f.Name)
+		}
+		then := f.Then
+		switch then {
+		case "":
+			then = FixThenRestart
+		case FixThenRestart, FixThenStay:
+			// valid
+		default:
+			return nil, fmt.Errorf("plugin %q: fix %q: unknown then %q (want %q or %q)",
+				pluginName, f.Name, then, FixThenRestart, FixThenStay)
+		}
+		label := f.Label
+		if label == "" {
+			label = f.Name
+		}
+		out = append(out, Fix{
+			Name:  f.Name,
+			Label: label,
+			Run:   append([]string{}, f.Run...),
+			Then:  then,
+		})
+	}
+	return out, nil
+}
+
+// convertUpdate validates the [update] table. A nil table is no table: the
+// plugin never offers an update. The notice is required and must compile with
+// a capture group (UpdateSpec.Compile). The manual-download fields are
+// all-or-nothing: github, binary, assets and checksums together describe one
+// download, and a table naming only some of them would pass load and fail at
+// the moment the user pressed Update.
+func convertUpdate(pluginName string, raw *tomlUpdate) (*UpdateSpec, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	if raw.Notice == "" {
+		return nil, fmt.Errorf("plugin %q: [update] needs a notice pattern", pluginName)
+	}
+	u := &UpdateSpec{
+		Notice:    raw.Notice,
+		GitHub:    raw.GitHub,
+		Binary:    raw.Binary,
+		Assets:    copyStringMap(raw.Assets),
+		Checksums: copyStringMap(raw.Checksums),
+	}
+	manual := u.GitHub != "" || u.Binary != "" || len(u.Assets) > 0 || len(u.Checksums) > 0
+	if manual {
+		var missing string
+		switch {
+		case u.GitHub == "":
+			missing = "github"
+		case u.Binary == "":
+			missing = "binary"
+		case len(u.Assets) == 0:
+			missing = "assets"
+		case len(u.Checksums) == 0:
+			missing = "checksums"
+		}
+		if missing != "" {
+			return nil, fmt.Errorf("plugin %q: [update] needs %s for the download path (github, binary, assets and checksums go together)", pluginName, missing)
+		}
+	}
+	seen := make(map[string]struct{}, len(raw.Managers))
+	for _, m := range raw.Managers {
+		if m.Name == "" {
+			return nil, fmt.Errorf("plugin %q: every update manager needs a name", pluginName)
+		}
+		if _, dup := seen[m.Name]; dup {
+			return nil, fmt.Errorf("plugin %q: duplicate update manager %q", pluginName, m.Name)
+		}
+		seen[m.Name] = struct{}{}
+		if m.Match == "" {
+			return nil, fmt.Errorf("plugin %q: update manager %q needs a match pattern", pluginName, m.Name)
+		}
+		if len(m.Run) == 0 || m.Run[0] == "" {
+			return nil, fmt.Errorf("plugin %q: update manager %q: run must name a command", pluginName, m.Name)
+		}
+		u.Managers = append(u.Managers, UpdateManager{
+			Name:  m.Name,
+			Match: m.Match,
+			Run:   append([]string{}, m.Run...),
+		})
+	}
+	if err := u.Compile(); err != nil {
+		return nil, fmt.Errorf("plugin %q: %w", pluginName, err)
+	}
+	return u, nil
+}
+
+// copyStringMap returns a defensive copy, nil for an empty input so an absent
+// table and an empty one read the same.
+func copyStringMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 // validateSeverity normalizes a plugin TOML severity field. Empty becomes

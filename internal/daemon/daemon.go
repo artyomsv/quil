@@ -68,6 +68,10 @@ type Daemon struct {
 	// tasksRegistry so the hand-built daemons in tests need no setup.
 	tasks     *taskRegistry
 	tasksOnce sync.Once
+	// updateSkips is the plugin update Not-now store (updateskip.go), loaded
+	// on first use through pluginUpdateSkips like tasks.
+	updateSkips     *updateSkips
+	updateSkipsOnce sync.Once
 	// parkedWaits counts the live parked wait_task goroutines, so a test can
 	// see them end when their conn closes.
 	parkedWaits atomic.Int32
@@ -1871,6 +1875,12 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		d.handleSplitPaneReq(conn, msg)
 	case ipc.MsgRestartPaneReq:
 		d.handleRestartPaneReq(conn, msg)
+	// A plugin dialog's buttons: a fix by NAME, an update by offered VERSION.
+	// The daemon resolves what runs (pluginfix.go).
+	case ipc.MsgPluginFixReq:
+		d.handlePluginFixReq(conn, msg)
+	case ipc.MsgPluginUpdateReq:
+		d.handlePluginUpdateReq(conn, msg)
 	case ipc.MsgScreenshotPaneReq:
 		d.handleScreenshotPaneReq(conn, msg)
 	case ipc.MsgSwitchTabReq:
@@ -4872,6 +4882,21 @@ func (d *Daemon) onPaneExitGeneration(pane *Pane, code int, generation uint64) {
 	pane.PluginMu.Unlock()
 	log.Printf("pane %s: process exited with code %d", pane.ID, code)
 
+	// The run's unfinished last line gets its one notice match now: a tool
+	// that prints "please update to v1.55.1" and exits without a newline
+	// would otherwise never be matched (pluginlines.go). Before the fix
+	// branch, which sees the marker still set and so matches nothing for a
+	// fix child's own tail.
+	d.flushPluginTail(pane, generation)
+
+	// A fix's exit is the fix's outcome, not the pane's: no exit card, no
+	// task failed, and a zero exit starts the pane's normal command again
+	// (pluginfix.go). Ahead of the conversion branch below for the same
+	// reason that one is ahead of the card.
+	if d.onFixExit(pane, code, generation) {
+		return
+	}
+
 	// A pane that was converted from a terminal goes back to being one when its
 	// agent exits normally, so the shell -> agent -> /exit -> shell loop does
 	// not end every cycle on a dead pane. It takes the exit card with it: the
@@ -5075,7 +5100,7 @@ func (d *Daemon) flushPaneOutputGeneration(paneID string, data []byte, generatio
 	d.detectHandStart(pane, paneID, data, flushedAt)
 	d.detectOSC7CWD(pane, data, generation)
 	d.detectOSC133Exit(pane, paneID, data)
-	d.applyPluginHandlers(pane, paneID, data)
+	d.applyPluginHandlers(pane, paneID, data, generation)
 }
 
 // detectBellEvent checks for standalone bell characters (not OSC terminators).
@@ -5142,9 +5167,14 @@ func (d *Daemon) detectOSC133Exit(pane *Pane, paneID string, data []byte) {
 	}, paneOutputExcerpt(pane, 5)))
 }
 
-// applyPluginHandlers runs scraping, error matching for non-terminal plugins.
-func (d *Daemon) applyPluginHandlers(pane *Pane, paneID string, data []byte) {
-	if pane.Type == "" || pane.Type == "terminal" {
+// applyPluginHandlers runs scraping and the error handlers on the raw chunk
+// (ANSI-stripped for the handlers), then the [update] notice on its complete
+// lines (pluginlines.go), for non-terminal plugins. Nothing is scraped or
+// matched while a plugin fix runs in the pane: its output is the fix's, not
+// the tool's — a login banner must not overwrite the tool's scraped state
+// any more than it may open a dialog.
+func (d *Daemon) applyPluginHandlers(pane *Pane, paneID string, data []byte, generation uint64) {
+	if pane.Type == "" || pane.Type == "terminal" || pluginFixRunning(pane) {
 		return
 	}
 	p := d.registry.Get(pane.Type)
@@ -5159,14 +5189,20 @@ func (d *Daemon) applyPluginHandlers(pane *Pane, paneID string, data []byte) {
 		}
 		pane.PluginMu.Unlock()
 	}
-	if eh := plugin.MatchError(p, data); eh != nil && eh.Action == "dialog" {
-		message := plugin.ExpandMessage(eh.Message, pane.InstanceArgs)
-		errMsg, _ := ipc.NewMessage(ipc.MsgPluginError, ipc.PluginErrorPayload{
-			PaneID:  paneID,
-			Title:   eh.Title,
-			Message: message,
-		})
-		d.broadcast(errMsg)
+	if p == nil || (len(p.ErrorHandlers) == 0 && p.Update == nil) {
+		return
+	}
+	// The run reset first, so the handlers' dedupe set is per run whether or
+	// not the plugin has a notice to carry a tail for.
+	resetPluginRun(pane, generation)
+	if len(p.ErrorHandlers) > 0 {
+		d.matchPluginHandlers(pane, paneID, p, string(stripPluginText(data)))
+	}
+	if p.Update == nil {
+		return
+	}
+	for _, line := range d.pluginLines(pane, data, generation) {
+		d.matchUpdateNotice(pane, paneID, p, line)
 	}
 }
 
@@ -5457,6 +5493,8 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			// Same: captured under the lock that protects it, written to
 			// paneData only on the broadcast side.
 			preparingWorktree := pane.PreparingWorktree
+			// And the same again for the fix the pane is running.
+			fixLabel := pane.FixLabel
 			// Captured here rather than read below: this runs on the snapshot
 			// goroutine while handleResizePane writes them from a conn dispatch
 			// goroutine.
@@ -5525,6 +5563,12 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 				// whole of a monorepo-sized checkout.
 				if preparingWorktree != "" {
 					paneData.PreparingWorktree = preparingWorktree
+				}
+				// The plugin fix the pane is running, runtime-only like the
+				// two above: a restored pane runs its normal command, so a
+				// persisted label would describe a child that is not there.
+				if fixLabel != "" {
+					paneData.FixLabel = fixLabel
 				}
 				// Model/context usage of the last completed AI turn is
 				// runtime-only (broadcast, never persisted): a stale token
@@ -6561,6 +6605,20 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	// screen advertises, and a flag left set would have the pane refuse again
 	// on the next lazy spawn — after the user had already retried it.
 	pane.WorktreeInterrupted = false
+	// A fix's argv is consumed HERE, whichever caller spawns, so it runs for
+	// exactly one child and the next spawn — Alt+R, a restore, the restart
+	// after the fix itself — is the pane's normal command (Pane.fixArgv).
+	fixArgv := pane.fixArgv
+	pane.fixArgv = nil
+	// A child started WITHOUT a fix argv is the normal command, so the marker
+	// must not outlive the fix child it described: the fix's own exit clears
+	// it, but a spawn that reaches here by any other route — a lazy spawn
+	// that raced the marker, an Alt+R on a pane whose fix exit was never
+	// seen — would otherwise leave "running fix" on a pane running nothing
+	// of the kind, with restart refused for good.
+	if len(fixArgv) == 0 {
+		pane.FixLabel, pane.fixThen = "", ""
+	}
 	typ := pane.Type
 	quilMCP := pane.QuilMCP
 	sandboxImage := pane.SandboxImage
@@ -6591,7 +6649,7 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	hasInstanceArgs := len(pane.InstanceArgs) != 0
 	pane.PluginMu.Unlock()
 	// Plugin-specific environment, history and arguments require the cold setup.
-	eligible := !restoring && typ == "terminal" && !sandboxed && p.Command.ShellIntegration &&
+	eligible := len(fixArgv) == 0 && !restoring && typ == "terminal" && !sandboxed && p.Command.ShellIntegration &&
 		d.shellPool.servesShell(p.Command.Cmd) && len(p.Command.Env) == 0 && !p.Command.RecordHistory && !hasInstanceArgs
 	if eligible {
 		if claimed, ok := d.shellPool.TryClaim(cwd, cols, rows); ok {
@@ -6607,10 +6665,21 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 		}
 	}
 
-	// An sbx pane is started by its own path: the cage is the sbx sandbox the
-	// project profile declares, so none of the hook, session or container
-	// preparation below applies to it. See sandbox_sbx.go.
-	if sbxBackend {
+	// A fix runs the argv the plugin file named, in the pane's directory,
+	// with none of the preparation below: no shell integration, no hook
+	// settings, no MCP, no container. It comes before the sandbox arms
+	// because a fix is refused for a sandbox pane at the request
+	// (pluginFixTarget) — its binary is inside the container — so a fix
+	// argv on one would be a daemon bug, and running it on the host is the
+	// worse way to find out.
+	if len(fixArgv) > 0 {
+		if err := d.startFixChild(pane, ptySession, p, cwd, fixArgv); err != nil {
+			return err
+		}
+	} else if sbxBackend {
+		// An sbx pane is started by its own path: the cage is the sbx sandbox
+		// the project profile declares, so none of the hook, session or
+		// container preparation below applies to it. See sandbox_sbx.go.
 		session, started, err := d.startSbxPane(pane, ptySession, p)
 		if err != nil || !started {
 			return err
@@ -7001,6 +7070,11 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	pane.redrawSeq = 0
 	pane.ptyGen++
 	generation := pane.ptyGen
+	// The fix child's run, in the same span as the number it is: onFixExit
+	// claims only this generation's exit (see Pane.fixGen).
+	if len(fixArgv) > 0 {
+		pane.fixGen = generation
+	}
 	pane.PluginMu.Unlock()
 	go d.streamPTYOutput(pane.ID, ptySession, generation)
 	return nil
@@ -7960,12 +8034,23 @@ func (d *Daemon) handleRestartPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 	// screen offers.
 	pane.PluginMu.Lock()
 	preparing := pane.PreparingWorktree
+	fixing := pane.FixLabel
 	pane.PluginMu.Unlock()
 	if preparing != "" {
 		log.Printf("restart pane %s: refused, still creating worktree %s", pane.ID, preparing)
 		// Success stays false — the pane is unchanged, and the "creating
 		// worktree" block it is already showing IS the answer to why nothing
 		// happened.
+		respondTo(conn, msg.ID, ipc.MsgRestartPaneResp, ipc.RestartPaneRespPayload{PaneID: req.PaneID})
+		return
+	}
+	// Same refusal for a plugin fix running in the pane (Pane.FixLabel): a
+	// restart over it would start the normal command with the fix half done
+	// — a login prompt abandoned, a binary half swapped — and the pane's
+	// "running fix" marker is the answer to why nothing happened. The fix's
+	// own exit is what restarts the pane (onFixExit).
+	if fixing != "" {
+		log.Printf("restart pane %s: refused, running fix %q", pane.ID, fixing)
 		respondTo(conn, msg.ID, ipc.MsgRestartPaneResp, ipc.RestartPaneRespPayload{PaneID: req.PaneID})
 		return
 	}

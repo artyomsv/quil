@@ -3752,34 +3752,7 @@ func (m Model) handleLogViewerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// --- Plugin error dialog ---
-
-func (m Model) handlePluginErrorKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "esc", "enter":
-		m.dialog = dialogNone
-		return m, nil
-	}
-	return m, nil
-}
-
-func (m Model) renderPluginErrorDialog() string {
-	var b strings.Builder
-
-	b.WriteString(dialogTitle.Render(m.pluginErrorTitle))
-	b.WriteString("\n\n")
-
-	// Render multi-line message
-	lines := strings.Split(m.pluginErrorMessage, "\n")
-	for _, line := range lines {
-		b.WriteString("  " + dialogNormal.Render(line) + "\n")
-	}
-
-	b.WriteByte('\n')
-	b.WriteString(dialogSubtle.Render("Enter/Esc dismiss"))
-
-	return b.String()
-}
+// --- Plugin error dialog: pluginfix.go (handlePluginErrorKey, renderPluginErrorDialog) ---
 
 // --- Pane setup dialog (CWD prompt + runtime toggles) ---
 //

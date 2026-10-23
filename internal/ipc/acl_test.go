@@ -126,6 +126,22 @@ func TestForeignHomeEntry(t *testing.T) {
 	}
 }
 
+// The daemon's Not-now store (plugin-update-skips.json) is a top-level file
+// written through atomicfile, so the name, its temp and a .bak beside it
+// must all read as quil's or ProtectDir refuses the home.
+func TestIsQuilHomeEntry_PluginUpdateSkips(t *testing.T) {
+	for _, name := range []string{
+		"plugin-update-skips.json", "plugin-update-skips.json.123.tmp", "plugin-update-skips.json.bak",
+	} {
+		if !IsQuilHomeEntry(name) {
+			t.Errorf("IsQuilHomeEntry(%q) = false", name)
+		}
+	}
+	if IsQuilHomeEntry("plugin-update-skipsx.json") {
+		t.Error("a different stem read as quil's")
+	}
+}
+
 func TestCheckQuilHome(t *testing.T) {
 	empty := t.TempDir()
 	if err := checkQuilHome(empty); err != nil {

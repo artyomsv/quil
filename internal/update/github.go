@@ -7,6 +7,7 @@ package update
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,11 +18,9 @@ import (
 // DefaultBaseURL is the GitHub API host; tests override Checker.BaseURL.
 const DefaultBaseURL = "https://api.github.com"
 
-// latestReleasePath is the repo-specific /releases/latest endpoint.
-const latestReleasePath = "/repos/artyomsv/quil/releases/latest"
-
-// tagReleasePath is the by-tag endpoint; the tag is appended.
-const tagReleasePath = "/repos/artyomsv/quil/releases/tags/"
+// DefaultRepo is Quil's own "owner/name"; an empty Checker.Repo means this
+// one, so every existing call site keeps checking Quil's releases.
+const DefaultRepo = "artyomsv/quil"
 
 // requestTimeout bounds every update HTTP request. No retry — callers run
 // on a daily ticker, so the next tick is the retry.
@@ -51,9 +50,15 @@ func (r *Release) Version() string {
 	return strings.TrimPrefix(r.TagName, "v")
 }
 
+// ErrReleaseNotFound: Release was asked for a tag the repo does not have
+// (GitHub answered 404). Typed so a caller can name the tag rather than
+// parse a status line.
+var ErrReleaseNotFound = errors.New("release not found")
+
 // Checker fetches the latest published release.
 type Checker struct {
 	BaseURL string       // DefaultBaseURL when empty; tests point it at httptest
+	Repo    string       // "owner/name"; DefaultRepo when empty
 	Client  *http.Client // nil → 10 s-timeout default
 }
 
@@ -62,6 +67,23 @@ func (c *Checker) httpClient() *http.Client {
 		return c.Client
 	}
 	return &http.Client{Timeout: requestTimeout}
+}
+
+// repoPath returns "/repos/<owner>/<name>" for the checker's repo, refusing
+// anything that is not exactly two plain path segments. A plugin TOML is
+// where a non-default repo comes from, and the string becomes part of the
+// URL — the same reasoning as the tag check in Release.
+func (c *Checker) repoPath() (string, error) {
+	repo := c.Repo
+	if repo == "" {
+		repo = DefaultRepo
+	}
+	owner, name, ok := strings.Cut(repo, "/")
+	if !ok || owner == "" || name == "" || strings.ContainsAny(repo, `\?#% `) ||
+		strings.Contains(name, "/") || owner == "." || owner == ".." || name == "." || name == ".." {
+		return "", fmt.Errorf("invalid release repo %q (want owner/name)", repo)
+	}
+	return "/repos/" + repo, nil
 }
 
 // Latest fetches the newest published release. One GET, no retry.
@@ -81,7 +103,11 @@ func (c *Checker) Release(ctx context.Context, tag string) (*Release, error) {
 		base = DefaultBaseURL
 	}
 
-	path := latestReleasePath
+	repo, err := c.repoPath()
+	if err != nil {
+		return nil, err
+	}
+	path := repo + "/releases/latest"
 	if tag != "" {
 		if !strings.HasPrefix(tag, "v") {
 			tag = "v" + tag
@@ -93,7 +119,7 @@ func (c *Checker) Release(ctx context.Context, tag string) (*Release, error) {
 		if strings.ContainsAny(tag, "/\\?#%") || strings.Contains(tag, "..") {
 			return nil, fmt.Errorf("invalid release tag %q", tag)
 		}
-		path = tagReleasePath + tag
+		path = repo + "/releases/tags/" + tag
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+path, nil)
@@ -106,6 +132,12 @@ func (c *Checker) Release(ctx context.Context, tag string) (*Release, error) {
 		return nil, fmt.Errorf("fetch latest release: %w", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound && tag != "" {
+		// Only the by-tag path: a 404 there means THIS tag does not exist,
+		// which `quild plugin-update` must report as such and never answer
+		// by falling back to latest. The latest path keeps its text.
+		return nil, fmt.Errorf("%w: tag %s", ErrReleaseNotFound, tag)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("latest release: unexpected status %s", resp.Status)
 	}
@@ -135,19 +167,26 @@ func AssetName(version, goos, goarch string) string {
 // verified and is not staged.
 func FindAssets(rel *Release, goos, goarch string) (archive, checksums *Asset, err error) {
 	want := AssetName(rel.Version(), goos, goarch)
-	for i := range rel.Assets {
-		switch rel.Assets[i].Name {
-		case want:
-			archive = &rel.Assets[i]
-		case "checksums.txt":
-			checksums = &rel.Assets[i]
-		}
-	}
-	if archive == nil {
+	if archive = findAsset(rel, want); archive == nil {
 		return nil, nil, fmt.Errorf("release %s has no asset %q", rel.TagName, want)
 	}
-	if checksums == nil {
-		return nil, nil, fmt.Errorf("release %s has no checksums.txt", rel.TagName)
+	if checksums = findAsset(rel, ChecksumsName); checksums == nil {
+		return nil, nil, fmt.Errorf("release %s has no %s", rel.TagName, ChecksumsName)
 	}
 	return archive, checksums, nil
+}
+
+// ChecksumsName is the one combined checksums file Quil's own release ships.
+// Other projects name theirs differently (one per OS, say), which is why
+// FetchVerified takes the name as a parameter.
+const ChecksumsName = "checksums.txt"
+
+// findAsset returns the release asset with exactly this name, or nil.
+func findAsset(rel *Release, name string) *Asset {
+	for i := range rel.Assets {
+		if rel.Assets[i].Name == name {
+			return &rel.Assets[i]
+		}
+	}
+	return nil
 }

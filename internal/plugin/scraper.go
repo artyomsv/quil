@@ -27,24 +27,49 @@ func ScrapeOutput(p *PanePlugin, data []byte) map[string]string {
 	return result
 }
 
-// MatchError checks PTY output against a plugin's error handlers.
-// Returns the first matching handler, or nil if none match.
-func MatchError(p *PanePlugin, data []byte) *ErrorHandler {
+// MatchErrors returns every error handler whose pattern matches text — one
+// ANSI-stripped output chunk as the daemon flushed it, newline-terminated or
+// not — in file order. Nil when none match. One chunk can carry two things
+// to act on — a login that expired and a binary that is outdated — and
+// returning only the first would drop the second handler's buttons on the
+// floor.
+func MatchErrors(p *PanePlugin, text string) []*ErrorHandler {
 	if p == nil || len(p.ErrorHandlers) == 0 {
 		return nil
 	}
 
+	var matched []*ErrorHandler
 	for i := range p.ErrorHandlers {
 		eh := &p.ErrorHandlers[i]
 		re := eh.Compiled()
 		if re == nil {
 			continue
 		}
-		if re.Match(data) {
-			return eh
+		if re.MatchString(text) {
+			matched = append(matched, eh)
 		}
 	}
-	return nil
+	return matched
+}
+
+// MatchUpdateNotice checks one complete, ANSI-stripped output line against
+// the plugin's [update] notice and returns the offered version (capture
+// group 1). ok is false for a plugin with no [update] table, a notice that
+// did not compile, no match, or an empty capture — an empty version is one
+// the dialog cannot name and the updater cannot fetch.
+func MatchUpdateNotice(p *PanePlugin, line string) (version string, ok bool) {
+	if p == nil || p.Update == nil {
+		return "", false
+	}
+	re := p.Update.NoticeRe()
+	if re == nil {
+		return "", false
+	}
+	m := re.FindStringSubmatch(line)
+	if len(m) < 2 || m[1] == "" {
+		return "", false
+	}
+	return m[1], true
 }
 
 // Deprecated: MatchNotification is no longer called from the daemon.

@@ -31,7 +31,7 @@ var daemonToClient = []string{
 	ipc.MsgHelloResp, ipc.MsgTokenCreateResp, ipc.MsgTokenListResp, ipc.MsgTokenRevokeResp,
 	ipc.MsgError, ipc.MsgWorkspaceState, ipc.MsgPaneOutput, ipc.MsgPaneEvent, ipc.MsgPaneSizes,
 	ipc.MsgPluginError, ipc.MsgLinkLost, ipc.MsgHighlightPane, ipc.MsgEventDismissed, ipc.MsgPaneSeen,
-	ipc.MsgAuthChallenge,
+	ipc.MsgAuthChallenge, ipc.MsgPluginFixResp, ipc.MsgPluginUpdateResp,
 }
 
 // msgConstants reads every Msg* string constant declared in internal/ipc's

@@ -441,6 +441,8 @@ Beats `--resume` inside the pane on two counts: you see richer rows (real titles
 
 Create your own pane types as TOML files in `~/.quil/plugins/` without recompiling. Hot reload happens on save. Plugins define commands, error handlers, idle handlers, persistence strategies, runtime toggles, and pre-configured instances.
 
+- **Error dialogs with fix buttons, and in-place tool updates.** A plugin's error dialog can carry fix actions (`[[error_handlers.fixes]]`): press the button and the fix runs in that same pane, then the pane's normal command starts again. A plugin can also declare how its binary is updated (`[update]`); when the tool prints its own "newer version available" line, Quil offers **Update** (through the package manager that owns the binary, else a checksum-verified download from the exact GitHub release, swapped in with a backup) and **Not now**. Stripe ships with both: an expired `stripe login` key offers **Log in**, and an outdated Stripe CLI offers to update itself.
+
 See the full [plugin reference](plugin-reference.md) for every field.
 
 ### Lazygit integration

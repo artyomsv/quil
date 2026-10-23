@@ -48,6 +48,9 @@ var classes = map[string]Class{
 	ipc.MsgDismissEvent: ClassAct, ipc.MsgDelegateTaskReq: ClassAct, ipc.MsgSetProjectGroup: ClassAct,
 	ipc.MsgGroupOp: ClassAct, ipc.MsgNoteSet: ClassAct, ipc.MsgSharedImport: ClassAct,
 	ipc.MsgCreateFromTemplateReq: ClassAct,
+	// act — a plugin's own fix (and Not now) runs in the pane, like typing.
+	// The update is admin below: it replaces an executable on the host.
+	ipc.MsgPluginFixReq: ClassAct,
 	// act — disclosure beyond the workspace
 	ipc.MsgBrowseDirReq: ClassAct, ipc.MsgDirsExistReq: ClassAct, ipc.MsgGitReposReq: ClassAct,
 	ipc.MsgKubeCtxReq: ClassAct, ipc.MsgWorktreeListReq: ClassAct, ipc.MsgWorktreeStatusReq: ClassAct,
@@ -57,6 +60,7 @@ var classes = map[string]Class{
 	// admin
 	ipc.MsgShutdown: ClassAdmin, ipc.MsgReloadPlugins: ClassAdmin, ipc.MsgOverlayPolicy: ClassAdmin,
 	ipc.MsgKillProcessReq: ClassAdmin, ipc.MsgStageUpdateReq: ClassAdmin, ipc.MsgUpdateCheckReq: ClassAdmin,
+	ipc.MsgPluginUpdateReq: ClassAdmin,
 
 	// local
 	ipc.MsgTokenCreateReq: ClassLocal, ipc.MsgTokenListReq: ClassLocal, ipc.MsgTokenRevokeReq: ClassLocal,
@@ -85,6 +89,7 @@ var neverAccepted = map[string]bool{
 	ipc.MsgError: true, ipc.MsgWorkspaceState: true, ipc.MsgPaneOutput: true, ipc.MsgPaneEvent: true,
 	ipc.MsgPaneSizes: true, ipc.MsgPluginError: true, ipc.MsgLinkLost: true, ipc.MsgHighlightPane: true,
 	ipc.MsgEventDismissed: true, ipc.MsgPaneSeen: true, ipc.MsgAuthChallenge: true,
+	ipc.MsgPluginFixResp: true, ipc.MsgPluginUpdateResp: true,
 	// auth_proof is client→daemon, but only the login code (daemon/auth.go)
 	// reads it. On a logged-in conn it is refused like any outbound type.
 	ipc.MsgAuthProof: true,

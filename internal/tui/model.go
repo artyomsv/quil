@@ -180,9 +180,13 @@ type PaneInfo struct {
 	// runtime-only, like SpawnError beside it — and mutually exclusive with it,
 	// since the daemon clears one as it writes the other.
 	PreparingWorktree string
-	GitBranch         string
-	GitDetached       bool
-	GitWorktree       bool
+	// FixLabel is the label of the plugin fix running in the pane, empty
+	// otherwise. Daemon-authoritative and runtime-only like the two above: a
+	// daemon that dies mid-fix restores the pane with no stale label.
+	FixLabel    string
+	GitBranch   string
+	GitDetached bool
+	GitWorktree bool
 	// GitWorktreeName names the linked worktree the pane's CWD is in. Derived
 	// daemon-side: path separators belong to the machine holding the disk, so
 	// a Windows daemon's path split by a Linux client's filepath.Base returns
@@ -264,11 +268,19 @@ type resizeTickMsg struct {
 	seq int
 }
 
-// PluginErrorMsg is received when the daemon detects a plugin error pattern.
+// PluginErrorMsg is received when the daemon detects a plugin error pattern,
+// or the plugin's update notice. Dest is the destination it arrived on
+// (msg.Origin; empty for the local daemon), so the dialog's replies go back
+// to the daemon that owns the pane. Fixes and Update are absent from an
+// older daemon, which gives today's text-only dialog (pluginfix.go).
 type PluginErrorMsg struct {
 	PaneID  string
+	Dest    string
 	Title   string
 	Message string
+	Plugin  string
+	Fixes   []ipc.PluginFixInfo
+	Update  *ipc.PluginUpdateInfo
 }
 
 // setActivePaneMsg is sent when MCP requests focus on a specific pane.
@@ -791,8 +803,8 @@ type Model struct {
 	newTabWorktrees      map[string]bool
 	selectedCategory     int           // selected category index in create pane dialog
 	selectedPlugin       string        // selected plugin name in create pane dialog
-	pluginErrorTitle     string        // title for plugin error dialog
-	pluginErrorMessage   string        // message for plugin error dialog
+	pluginDialogs        map[string]*pluginDialog
+	pluginDialogOpen     string        // pane id of the plugin dialog on screen; the map holds held + open ones (pluginfix.go)
 	instanceStore        InstanceStore // saved plugin instances (loaded from instances.json)
 	instanceFormValues   []string      // form field values (indexed by FormField position)
 	instanceFormCursor   int           // active field in instance form
@@ -1791,8 +1803,23 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 	// on that rarer branch. The common case — the anchor already empty, or
 	// already naming the still-active tab — costs one string compare and
 	// nothing else.
+	//
+	// The held plugin dialogs (pluginfix.go) share the choke point for the
+	// same reason: a dialog closing, a tab or project switch, a broadcast
+	// that moved the active tab — each makes a held dialog eligible, and each
+	// is a site a future path forgets. openHeldPluginDialog costs one map
+	// length when nothing is held.
 	defer func() {
-		if mm, ok := retModel.(Model); ok && mm.normalizeTabScrollAnchor() {
+		mm, ok := retModel.(Model)
+		if !ok {
+			return
+		}
+		changed := mm.normalizeTabScrollAnchor()
+		if mm.openHeldPluginDialog() {
+			changed = true
+			retCmd = tea.Batch(retCmd, tea.ClearScreen)
+		}
+		if changed {
 			retModel = mm
 		}
 	}()
@@ -2206,6 +2233,10 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		if m.isRouter() {
 			relisten = m.listenForMessages()
 		}
+		// Its plugin dialogs go with its panes: a reconnect's daemon does not
+		// resend them (its per-run dedupe stands), and one left held would send
+		// to a conn that no longer exists.
+		relisten = tea.Batch(relisten, m.dropPluginDialogsFor(msg.dest))
 		if !m.canReconnect(msg.dest) {
 			// Quitting is right for a session whose ONLY daemon just died: its
 			// panes died with it and there is nothing left to show. It is wrong
@@ -3404,10 +3435,16 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		return m, tea.Batch(tea.ClearScreen, m.dialDest(msg.dest))
 
 	case PluginErrorMsg:
-		m.dialog = dialogPluginError
-		m.pluginErrorTitle = msg.Title
-		m.pluginErrorMessage = msg.Message
-		return m, tea.Batch(tea.ClearScreen, m.listenForMessages())
+		// Filed, never opened here: it used to replace whatever dialog was
+		// open (the hazard move_pane_test.go documents) and it describes a
+		// pane that may not be on screen. Update's choke point opens it when
+		// both are right, and merges a second frame for the same pane.
+		m.notePluginDialog(msg)
+		return m, m.listenForMessages()
+
+	case pluginFixRespMsg:
+		cmd := m.applyPluginFixResp(msg)
+		return m, tea.Batch(cmd, m.listenForMessages())
 
 	case WorkspaceStateMsg:
 		// Refuse state from a destination the Model has forgotten. Router.Remove
@@ -3510,6 +3547,9 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		cmds := []tea.Cmd{
 			templateFocusCmd,
 			pickerVanishCmd,
+			// A fix started by any client closes the pane's plugin dialog on
+			// this one, and a pane that vanished takes its held dialog with it.
+			m.reconcilePluginDialogs(msg),
 			m.listenForMessages(),
 			m.sendDiffedResizes(m.diffResizes(msg)),
 			groupsCmd,
@@ -9171,9 +9211,21 @@ func (m Model) listenForMessages() tea.Cmd {
 			msg.DecodePayload(&payload)
 			return PluginErrorMsg{
 				PaneID:  payload.PaneID,
+				Dest:    msg.Origin,
 				Title:   payload.Title,
 				Message: payload.Message,
+				Plugin:  payload.Plugin,
+				Fixes:   payload.Fixes,
+				Update:  payload.Update,
 			}
+
+		case ipc.MsgPluginFixResp, ipc.MsgPluginUpdateResp:
+			var payload ipc.PluginFixRespPayload
+			if err := msg.DecodePayload(&payload); err != nil {
+				log.Printf("decode %s: %v", msg.Type, err)
+				return listenContinueMsg{}
+			}
+			return pluginFixRespMsg{Resp: payload, Update: msg.Type == ipc.MsgPluginUpdateResp}
 
 		case ipc.MsgSetActivePane:
 			var payload ipc.SetActivePanePayload
@@ -9580,6 +9632,9 @@ func parseWorkspaceState(ws ipc.WorkspaceState) WorkspaceStateMsg {
 			// otherwise cost hundreds of MB/s of transient garbage on the
 			// single Update goroutine. boundBranch("") is a no-op.
 			PreparingWorktree: boundBranch(p.PreparingWorktree),
+			// Bounded for the same reason: it is sanitized on every frame of
+			// the pane border while the fix runs.
+			FixLabel:          truncateBytes(p.FixLabel, fixLabelCap),
 			GitBranch:         p.GitBranch,
 			GitDetached:       p.GitDetached,
 			GitWorktree:       p.GitWorktree,

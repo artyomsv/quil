@@ -64,6 +64,19 @@ const (
 	// Plugin (Daemon -> Client)
 	MsgPluginError = "plugin_error"
 
+	// Plugin fix actions (Client -> Daemon -> Client): the buttons on a
+	// plugin_error dialog. A fix is asked for by NAME and an update by the
+	// offered VERSION; the daemon resolves what runs from its own plugin
+	// file, the way toggles are resolved, so no IPC client can run a
+	// command of its choosing under a plugin's name. Two request types
+	// because they are two rights classes — a handler fix (and Not now)
+	// runs in the pane like typing, an update replaces an executable on the
+	// daemon host — and the class table holds one class per type.
+	MsgPluginFixReq     = "plugin_fix_req"
+	MsgPluginFixResp    = "plugin_fix_resp"
+	MsgPluginUpdateReq  = "plugin_update_req"
+	MsgPluginUpdateResp = "plugin_update_resp"
+
 	// Plugin management (Client -> Daemon)
 	MsgReloadPlugins = "reload_plugins"
 
@@ -832,10 +845,74 @@ type UpdateLayoutPayload struct {
 	BaseRev *uint64 `json:"base_rev,omitempty"`
 }
 
+// PluginErrorPayload is one plugin dialog: an error handler that matched the
+// pane's output, or the tool's own update notice. The fields after Message
+// were added for fix actions and are every one omitempty, so an older TUI
+// keeps showing the text-only dialog it always did.
 type PluginErrorPayload struct {
 	PaneID  string `json:"pane_id"`
 	Title   string `json:"title"`
 	Message string `json:"message"`
+	// Plugin is the pane's plugin name, which the fix and update requests
+	// do not carry: the daemon reads pane.Type itself.
+	Plugin string `json:"plugin,omitempty"`
+	// Fixes are the handler's buttons. Labels only — a client asks for a fix
+	// by NAME and the daemon resolves what runs from its own plugin file.
+	Fixes []PluginFixInfo `json:"fixes,omitempty"`
+	// Update is set when the line was the plugin's [update] notice.
+	Update *PluginUpdateInfo `json:"update,omitempty"`
+}
+
+// PluginFixInfo is one fix button on a plugin_error dialog.
+type PluginFixInfo struct {
+	Name  string `json:"name"`
+	Label string `json:"label"`
+}
+
+// PluginUpdateInfo says which version the tool offered and which binary an
+// update would replace. Installed is empty unless the plugin scrapes a
+// `version` value; Target is the symlink-resolved path the daemon found the
+// binary at (empty when it could not), for the "Replace <path>? y/n" step.
+// Manager names the [[update.managers]] entry that owns Target, when one
+// matches it — the update then runs that manager's command rather than a
+// download, and the dialog asks "Update with <manager>? y/n" instead.
+type PluginUpdateInfo struct {
+	Installed string `json:"installed,omitempty"`
+	Offered   string `json:"offered"`
+	Target    string `json:"target,omitempty"`
+	Manager   string `json:"manager,omitempty"`
+}
+
+// PluginFixNotNow is the plugin_fix_req Fix that declines an update notice.
+// Version is the offered version; the daemon records it so no client sees
+// the dialog for that version (or an older one) again.
+const PluginFixNotNow = "not_now"
+
+// PluginFixReqPayload asks the daemon to run one of the pane's plugin's
+// handler fixes in the pane, by name — or, with Fix = PluginFixNotNow, to
+// record that Version was declined. It carries neither an argv nor the
+// plugin name: the daemon reads pane.Type and its own plugin file.
+type PluginFixReqPayload struct {
+	PaneID  string `json:"pane_id"`
+	Fix     string `json:"fix"`
+	Version string `json:"version,omitempty"`
+}
+
+// PluginUpdateReqPayload asks the daemon to update the pane's plugin binary
+// to Version — the version the dialog offered, never "latest", so the dialog
+// cannot say one version and install another.
+type PluginUpdateReqPayload struct {
+	PaneID  string `json:"pane_id"`
+	Version string `json:"version"`
+}
+
+// PluginFixRespPayload answers plugin_fix_req (as plugin_fix_resp) and
+// plugin_update_req (as plugin_update_resp). OK means the fix's child is
+// running in the pane; Error says why nothing was started, in words the
+// dialog shows as they are.
+type PluginFixRespPayload struct {
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
 }
 
 // OverlayPolicyPayload carries the overlay retention settings. Both fields use

@@ -988,6 +988,8 @@ func syncPaneMeta(pane *PaneModel, info *PaneInfo, wideCanvas bool, minNativeCol
 	// failure path the daemon clears the field as it writes the SpawnError — a
 	// guarded copy would leave a finished checkout spinning forever.
 	pane.PreparingWorktree = info.PreparingWorktree
+	// Unconditional: the absent key is what says the fix has ended.
+	pane.FixLabel = info.FixLabel
 	pane.GitBranch = info.GitBranch
 	pane.GitDetached = info.GitDetached
 	pane.GitWorktree = info.GitWorktree

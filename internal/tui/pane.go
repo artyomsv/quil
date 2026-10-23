@@ -100,10 +100,15 @@ type PaneModel struct {
 	// in a new tab so the tab is never pane-less, which is why it must not look
 	// like an ordinary blank terminal.
 	PreparingWorktree string
-	GitBranch         string
-	GitDetached       bool
-	GitWorktree       bool
-	GitWorktreeName   string
+	// FixLabel names the plugin fix running in this pane (daemon-authoritative,
+	// runtime-only). Shown on the top border in the name's slot, the way the
+	// preparing label is, so every client sees why the pane's usual command
+	// is not what is running.
+	FixLabel        string
+	GitBranch       string
+	GitDetached     bool
+	GitWorktree     bool
+	GitWorktreeName string
 	// WorktreeOwned is daemon-authoritative: this pane's worktree was created
 	// by Quil, so the close dialog may offer to delete it. WorktreePath is the
 	// directory that was created — the close dialog prices THAT, never CWD,
@@ -245,6 +250,7 @@ type paneRenderKey struct {
 	ghost, resuming, preparing     bool
 	pending                        bool
 	preparingWorktree, spawnError  string
+	fixLabel                       string
 	mcpHighlight, muted, focusMode bool
 	splitDragHighlight             bool
 	ctxTargetHighlight             bool
@@ -282,6 +288,7 @@ func (p *PaneModel) renderKey() paneRenderKey {
 		// rendered, and Alt+R clears it with no output to bump contentGen.
 		preparingWorktree:  p.PreparingWorktree,
 		spawnError:         p.SpawnError,
+		fixLabel:           p.FixLabel,
 		mcpHighlight:       p.mcpHighlight,
 		splitDragHighlight: p.splitDragHighlight,
 		ctxTargetHighlight: p.ctxTargetHighlight,
@@ -1359,6 +1366,13 @@ func (p *PaneModel) View() string {
 			rightLabel = "[muted] " + rightLabel
 		}
 	}
+	// A running plugin fix takes the name's slot: the pane is not running its
+	// usual command, and the label says what it runs instead — and how to
+	// stop it, since Alt+R is refused meanwhile. Sanitized here because the
+	// label came from a plugin file on the daemon's host.
+	if p.FixLabel != "" {
+		rightLabel = fixBorderLabel(sanitizeRemoteText(p.FixLabel), p.Width, p.working)
+	}
 	// The worktree wait reuses the `preparing` label slot rather than adding a
 	// third: "preparing..." is what it is, and the branch is already in the
 	// pane body, where there is room to elide it honestly.
@@ -1374,6 +1388,29 @@ func (p *PaneModel) View() string {
 	out := topLine + "\n" + body
 	p.cachedKey, p.cachedView, p.hasCache = key, out, true
 	return out
+}
+
+// fixBorderLabel is the top border's "running fix: <label> (Ctrl+C stops)"
+// marker, clamped to the pane's width: buildTopBorderCut drops a right label
+// that does not fit beside its padding outright, and the one thing this
+// label must never do is vanish while a fix holds the pane. The stop hint
+// goes first, then the label is cut, so a narrow pane still says a fix runs.
+func fixBorderLabel(label string, width int, working bool) string {
+	const prefix, hint = "running fix: ", " (Ctrl+C stops)"
+	// buildTopBorderCut admits a right label of up to innerW-4 runes, innerW
+	// being width-2, less the working spinner's two cells; it counts runes,
+	// so this does too.
+	budget := width - 6
+	if working {
+		budget -= 2
+	}
+	if budget <= 0 {
+		return ""
+	}
+	if full := prefix + label + hint; len([]rune(full)) <= budget {
+		return full
+	}
+	return truncateToWidth(prefix+label, budget)
 }
 
 func buildTopBorder(width int, cwd, name string, color color.Color, ghost, resuming, preparing, focus bool, spinnerFrame int, working bool, workFrame int) string {

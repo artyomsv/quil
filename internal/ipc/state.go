@@ -121,6 +121,7 @@ type PaneState struct {
 	BracketedPaste    bool   `json:"bracketed_paste,omitempty"`
 	SpawnError        string `json:"spawn_error,omitempty"`
 	PreparingWorktree string `json:"preparing_worktree,omitempty"`
+	FixLabel          string `json:"fix_label,omitempty"`
 	Model             string `json:"model,omitempty"`
 	// ContextTokens is present (possibly 0) whenever Model is set.
 	ContextTokens   *int64 `json:"context_tokens,omitempty"`

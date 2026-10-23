@@ -31,7 +31,7 @@ func TestQuilHomeEntriesKnownToProtectDir(t *testing.T) {
 		config.RecentCWDsPath(""), config.RecentCWDsPath("user@host"),
 		config.SandboxImagePath(""), config.SandboxImagePath("user@host"),
 		config.RemoteProjectsPath(""), config.RemoteProjectsPath("user@host"),
-		config.MCPLogDir(config.MCPConfig{}),
+		config.MCPLogDir(config.MCPConfig{}), updateSkipsPath(),
 		filepath.Join(home, auditFile), filepath.Join(home, "tokens.json"),
 		filepath.Join(home, "quild.log"), filepath.Join(home, "quil.log"),
 		filepath.Join(home, "quild.stderr.log"), filepath.Join(home, "quild.lock"),

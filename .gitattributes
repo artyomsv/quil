@@ -56,3 +56,9 @@ internal/remoteinstall/scripts/*.ps1 text eol=lf
 # internal/keymap/webfallback.toml is go:embed'ed (quil web's fallback chords).
 # One attribute line per embedded text file, as above.
 internal/keymap/webfallback.toml text eol=lf
+
+# internal/plugin/defaults/*.toml are go:embed'ed and written to
+# ~/.quil/plugins/ on first run, and the migration dialog shows the embedded
+# text beside the user's copy. TOML tolerates CRLF, so this is consistency
+# with the other embedded files rather than a parser failure.
+internal/plugin/defaults/*.toml text eol=lf

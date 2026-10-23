@@ -1,10 +1,12 @@
 package binswap
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -105,20 +107,108 @@ func TestAcquireLock_StaleLockTakenOver(t *testing.T) {
 	release()
 }
 
+// TestLockFile_ExcludesWithinProcess: two LockFile calls in one process are
+// two open file descriptions (flock) or two handles (LockFileEx), and they
+// exclude each other — the second gets ErrLockHeld until the first releases.
+// The file itself stays after release; nothing unlinks a lock.
+func TestLockFile_ExcludesWithinProcess(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tool.lock")
+	release, err := LockFile(path)
+	if err != nil {
+		t.Fatalf("first LockFile: %v", err)
+	}
+	if _, err := LockFile(path); !errors.Is(err, ErrLockHeld) {
+		t.Fatalf("second LockFile in the same process = %v, want ErrLockHeld", err)
+	}
+	release()
+	release2, err := LockFile(path)
+	if err != nil {
+		t.Fatalf("LockFile after release: %v", err)
+	}
+	release2()
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("the lock file was removed on release: %v", err)
+	}
+}
+
+// TestLockFileHelper is the second PROCESS of
+// TestLockFile_ExcludesAnotherProcess: re-executed with the lock path in the
+// environment, it takes the lock, says so on stdout and parks until killed.
+// Without the variable it is nothing.
+func TestLockFileHelper(t *testing.T) {
+	path := os.Getenv("QUIL_BINSWAP_LOCK_PATH")
+	if path == "" {
+		return
+	}
+	if _, err := LockFile(path); err != nil {
+		fmt.Println("error:", err)
+		os.Exit(2)
+	}
+	fmt.Println("locked")
+	select {}
+}
+
+// TestLockFile_ExcludesAnotherProcess: the point of the OS lock. A second
+// process holding the lock makes LockFile answer ErrLockHeld — no pid to
+// judge, no file to steal — and the kernel drops the lock when that process
+// dies, so the survivor acquires it with no reclaim step.
+func TestLockFile_ExcludesAnotherProcess(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tool.lock")
+	helper := exec.Command(os.Args[0], "-test.run=^TestLockFileHelper$")
+	helper.Env = append(os.Environ(), "QUIL_BINSWAP_LOCK_PATH="+path)
+	stdout, err := helper.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := helper.Start(); err != nil {
+		t.Fatalf("start helper: %v", err)
+	}
+	t.Cleanup(func() {
+		helper.Process.Kill()
+		helper.Wait()
+	})
+	lines := make(chan string, 1)
+	go func() {
+		line, _ := bufio.NewReader(stdout).ReadString('\n')
+		lines <- strings.TrimSpace(line)
+	}()
+	select {
+	case line := <-lines:
+		if line != "locked" {
+			t.Fatalf("helper said %q, want locked", line)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("the helper process never took the lock")
+	}
+
+	if _, err := LockFile(path); !errors.Is(err, ErrLockHeld) {
+		t.Fatalf("LockFile while another process holds it = %v, want ErrLockHeld", err)
+	}
+	if err := helper.Process.Kill(); err != nil {
+		t.Fatalf("kill helper: %v", err)
+	}
+	helper.Wait()
+	release, err := LockFile(path)
+	if err != nil {
+		t.Fatalf("LockFile after the holder died = %v, want it free", err)
+	}
+	release()
+}
+
 // TestWaitLock_WaitsForTheHolder: a second updater waits for the first and
 // then proceeds; the wait is announced once and bounded.
 func TestWaitLock_WaitsForTheHolder(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tool.lock")
-	release, ok := AcquireLock(path, testStale)
-	if !ok {
-		t.Fatal("acquire failed")
+	release, err := LockFile(path)
+	if err != nil {
+		t.Fatalf("LockFile: %v", err)
 	}
 
 	var waits int
 	var mu sync.Mutex
 	done := make(chan error, 1)
 	go func() {
-		rel, err := WaitLock(context.Background(), path, testStale, 5*time.Second, func() {
+		rel, err := WaitLock(context.Background(), path, 5*time.Second, func() {
 			mu.Lock()
 			waits++
 			mu.Unlock()
@@ -146,30 +236,36 @@ func TestWaitLock_WaitsForTheHolder(t *testing.T) {
 
 	// Bounded: a holder that never lets go is an error naming the path, and
 	// a cancelled context ends the wait at once.
-	release, _ = AcquireLock(path, testStale)
+	release, err = LockFile(path)
+	if err != nil {
+		t.Fatalf("LockFile: %v", err)
+	}
 	defer release()
-	if _, err := WaitLock(context.Background(), path, testStale, 2*lockPollInterval, nil); err == nil || !strings.Contains(err.Error(), path) {
+	if _, err := WaitLock(context.Background(), path, 2*lockPollInterval, nil); err == nil || !strings.Contains(err.Error(), path) {
 		t.Errorf("WaitLock past maxWait = %v, want an error naming the lock", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := WaitLock(ctx, path, testStale, time.Minute, nil); !errors.Is(err, context.Canceled) {
+	if _, err := WaitLock(ctx, path, time.Minute, nil); !errors.Is(err, context.Canceled) {
 		t.Errorf("WaitLock with a cancelled ctx = %v, want context.Canceled", err)
 	}
 }
 
-// TestTryLock_UnwritableDirFailsFast: a directory the lock cannot be created
-// in is an error at once, never "held" — O_EXCL fails with EACCES, no file
-// exists for LockAbandoned to judge, and a waiter polling that would report
-// a holder that is not there after the whole wait.
-func TestTryLock_UnwritableDirFailsFast(t *testing.T) {
+// TestLockFile_UnwritableDirFailsFast: a directory the lock cannot be created
+// in is an error at once, never "held", and WaitLock does not wait on it (a
+// waiter polling an EACCES would report a holder that is not there after the
+// whole wait). TryLock, the pid-file lock, answers the same way.
+func TestLockFile_UnwritableDirFailsFast(t *testing.T) {
 	dir := unwritableDir(t)
 	path := filepath.Join(dir, "tool.lock")
+	if _, err := LockFile(path); err == nil || errors.Is(err, ErrLockHeld) {
+		t.Fatalf("LockFile in an unwritable dir = %v, want the create error, not held", err)
+	}
 	if _, err := TryLock(path, testStale); err == nil || errors.Is(err, ErrLockHeld) {
 		t.Fatalf("TryLock in an unwritable dir = %v, want the create error, not held", err)
 	}
 	started := time.Now()
-	_, err := WaitLock(context.Background(), path, testStale, time.Minute, func() { t.Error("WaitLock waited on an unwritable dir") })
+	_, err := WaitLock(context.Background(), path, time.Minute, func() { t.Error("WaitLock waited on an unwritable dir") })
 	if err == nil || errors.Is(err, ErrLockHeld) {
 		t.Fatalf("WaitLock = %v, want the create error", err)
 	}

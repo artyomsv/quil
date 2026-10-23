@@ -3,7 +3,8 @@
 // (legal even while a process runs it — NT locks the image by open handle,
 // not by path), the new file is copied into place, and a failed copy renames
 // the backup back. Shared by `quil`'s self-update (cmd/quil/update_apply.go)
-// and `quild plugin-update`, so the two cannot drift. Stdlib-only.
+// and `quild plugin-update`, so the two cannot drift. Stdlib plus
+// golang.org/x/sys/windows, for the OS file lock and the process probe.
 package binswap
 
 import (

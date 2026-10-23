@@ -96,11 +96,15 @@ func Run(ctx context.Context, o Options, out io.Writer) error {
 	// tool can each start this subcommand, and RestoreMissing, RemoveBackups
 	// and SwapOne share "<target>.old" and "<target>.new" — the second would
 	// restore the "missing" target from the first's backup mid-swap and the
-	// loser would roll its backup over the winner's install. Taken before
-	// anything beside the target is read or touched, held through the swap,
-	// released on every path. A second updater waits for the first, bounded;
-	// any failure other than a live holder is reported at once.
-	release, err := binswap.WaitLock(ctx, target+updateLockSuffix, updateLockStale, updateLockWait, func() {
+	// loser would roll its backup over the winner's install. An OS lock
+	// (binswap.LockFile) on "<target>.lock": the kernel owns it, drops it
+	// with the holder's process, and the file is never unlinked — it stays
+	// beside the target, empty, and the sweeps below never match its name.
+	// Taken before anything beside the target is read or touched, held
+	// through the swap, released on every path. A second updater waits for
+	// the first, bounded; any failure other than a live holder is reported at
+	// once.
+	release, err := binswap.WaitLock(ctx, target+updateLockSuffix, updateLockWait, func() {
 		step("→ waiting for another update of %s…", filepath.Base(target))
 	})
 	if err != nil {
@@ -211,16 +215,12 @@ const stagingPrefix = ".quil-update-"
 
 const (
 	// updateLockSuffix names the per-target lock beside it ("stripe.lock"):
-	// keyed by the target's own name, and outside stagingPrefix so the age
-	// sweep never takes a live lock.
+	// keyed by the target's own name, outside stagingPrefix and never
+	// ".old*", so neither sweep ever removes it — and it is never unlinked
+	// by the lock code either (binswap.LockFile).
 	updateLockSuffix = ".lock"
 	// updateLockWait bounds how long a second updater waits for the first.
 	updateLockWait = 5 * time.Minute
-	// updateLockStale is when a lock with a live-looking pid counts as
-	// abandoned anyway (the backstop for a recycled pid): a run is bounded
-	// by downloadTimeout plus two detects and a swap, so twice the download
-	// is a run that is not there.
-	updateLockStale = 2 * downloadTimeout
 )
 
 // dirWritable asks the filesystem the question the swap is about to ask —

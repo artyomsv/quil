@@ -11,17 +11,17 @@ import (
 	"time"
 )
 
-// A cross-process lock for one swap target: a file created O_EXCL holding
-// the holder's pid. Two updaters of one executable — Quil's own pair from two
-// `quil` processes starting together, or two panes each running `quild
-// plugin-update` for the same tool — share "<target>.old" and
-// "<target>.new": one can rename the live file aside while the other
-// restores the "missing" target from that very backup, and whichever
-// finishes second rolls its backup over the other's success. The racing
-// parties are separate processes, so the exclusion lives on disk; O_EXCL is
-// exclusive within one process too.
+// The pid-file lock Quil's own apply uses (cmd/quil/update_apply.go): a
+// file created O_EXCL holding the holder's pid, with an abandoned-lock
+// takeover. Two `quil` processes starting together both pass verification
+// and both swap, and each one's cleanup sweep deletes backups by name, so
+// the exclusion lives on disk. The takeover's judge-then-unlink is NOT
+// exclusive between two reclaimers, which is why the plugin updater's
+// per-target lock is the OS lock in flock.go instead (LockFile, WaitLock);
+// this one is kept as it was for the apply path, out of that change's scope.
 
-// ErrLockHeld is TryLock's answer when a live holder has the lock.
+// ErrLockHeld is TryLock's and LockFile's answer when another holder has
+// the lock.
 var ErrLockHeld = errors.New("lock held by another process")
 
 // AcquireLock takes the lock at path, returning a release func and whether
@@ -127,16 +127,17 @@ func LockHeld(path string, stale time.Duration) bool {
 // lockPollInterval is how often WaitLock retries a held lock.
 const lockPollInterval = 250 * time.Millisecond
 
-// WaitLock is TryLock that waits, up to maxWait or ctx's end, for a live
-// holder to finish. Only ErrLockHeld is waited on; any other failure (an
-// unwritable directory) is returned at once. onWait runs once, the first
-// time it has to wait, so the caller can say so. The error names the path
-// when the wait ran out.
-func WaitLock(ctx context.Context, path string, stale, maxWait time.Duration, onWait func()) (release func(), err error) {
+// WaitLock is LockFile (the OS lock) that waits, up to maxWait or ctx's
+// end, for the holder to finish. Only ErrLockHeld is waited on; any other
+// failure (an unwritable directory) is returned at once. onWait runs once,
+// the first time it has to wait, so the caller can say so. The error names
+// the path when the wait ran out. There is no staleness to judge: a dead
+// holder's lock is already gone.
+func WaitLock(ctx context.Context, path string, maxWait time.Duration, onWait func()) (release func(), err error) {
 	deadline := time.Now().Add(maxWait)
 	waited := false
 	for {
-		release, err := TryLock(path, stale)
+		release, err := LockFile(path)
 		if err == nil {
 			return release, nil
 		}

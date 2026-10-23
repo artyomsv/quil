@@ -242,20 +242,22 @@ func (d *Daemon) matchUpdateNotice(pane *Pane, paneID string, p *plugin.PanePlug
 
 // offerUpdate raises the update dialog for offered — a version the tool
 // printed in its notice, or the latest release GitHub named — unless the
-// pane has left run (a restart since the offer was found), the run has
-// raised it already, or the user declined it. The offered version is
-// recorded on the pane (Pane.pluginOffered) as the frame leaves: it is the
-// only version the daemon accepts back from a client's Update or Not now
-// for this pane.
+// pane has left run (a restart since the offer was found), a fix is armed
+// or running, the run has raised it already, or the user declined it. run is
+// the PTY generation (Pane.ptyGen) the offer was found in. The offered
+// version is recorded on the pane (Pane.pluginOffered) as the frame leaves:
+// it is the only version the daemon accepts back from a client's Update or
+// Not now for this pane.
 //
 // The run check, the dedupe and the record are committed AT DELIVERY, in one
 // PluginMu span after the binary's path is resolved, never before the
 // resolution starts: resolving can take up to the target timeout, and in
-// that window the pane can restart and offer a version for its new run — a
-// stale completion committed up front would then broadcast over the newer
-// dialog and leave pluginOffered naming the wrong run's version. The check
-// before the goroutine is only a cheap skip. run 0 (the PTY-less onPaneExit
-// path) means the current run. Safe off the flush goroutine: src is a copy.
+// that window the pane can restart — silently, or into a fix whose output
+// is never matched — and offer a version for its new run; a stale
+// completion committed up front would then broadcast over the newer dialog
+// and leave pluginOffered naming the wrong run's version. The check before
+// the goroutine is only a cheap skip. run 0 (the PTY-less onPaneExit path)
+// means the current run. Safe off the flush goroutine: src is a copy.
 func (d *Daemon) offerUpdate(pane *Pane, paneID string, src updateOfferSource, offered string, run uint64) {
 	// Not now is kept daemon-side so every client agrees and it survives a
 	// restart. Read first, outside PluginMu: the store loads from disk on its
@@ -265,9 +267,13 @@ func (d *Daemon) offerUpdate(pane *Pane, paneID string, src updateOfferSource, o
 	}
 	key := "u:" + offered
 	// superseded reports, under PluginMu, whether this offer is no longer the
-	// pane's: its run is over or the version was raised already.
+	// pane's: the INSTALLED PTY is a later child than run (pane.ptyGen — not
+	// pluginLineGen, which moves only when the replacement prints plugin
+	// output, so a silent restart would leave it behind), a fix is armed or
+	// running (its own output is never matched, so a dialog for it would be
+	// one nothing can act on), or the version was raised already.
 	superseded := func() bool {
-		return (run != 0 && pane.pluginLineGen != run) || pane.pluginSent[key]
+		return (run != 0 && pane.ptyGen != run) || pane.FixLabel != "" || len(pane.fixArgv) > 0 || pane.pluginSent[key]
 	}
 	// The cheap pre-check: superseded already, or the same version's
 	// resolution is in flight for this run — no second resolver for it. The
@@ -434,8 +440,11 @@ func (d *Daemon) offerLatestRelease(pane *Pane, paneID string, p *plugin.PanePlu
 	if !pluginSentOnce(pane, "gh:latest") {
 		return
 	}
+	// The installed PTY's generation, which offerUpdate validates the
+	// answer against at delivery (a restart bumps it whether or not the
+	// replacement prints anything).
 	pane.PluginMu.Lock()
-	run := pane.pluginLineGen
+	run := pane.ptyGen
 	pane.PluginMu.Unlock()
 	// Everything the goroutine needs, copied here: the plugin pointer stays
 	// behind (see updateOfferSource) and the configuration is read on this

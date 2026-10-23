@@ -7099,6 +7099,11 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	if len(fixArgv) > 0 {
 		pane.fixGen = generation
 	}
+	// Update offers whose binary resolution is still in flight belong to
+	// the child this replaces: forgotten here, at the PTY boundary, so the
+	// new child's own offer is not read as "already in flight", and their
+	// delivery drops on the generation it then sees (offerUpdate).
+	pane.pluginOffering = nil
 	pane.PluginMu.Unlock()
 	go d.streamPTYOutput(pane.ID, ptySession, generation)
 	return nil

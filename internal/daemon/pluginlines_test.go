@@ -134,7 +134,10 @@ func currentGen(pane *Pane) uint64 {
 	return pane.ptyGen
 }
 
-// newFixmePane creates a pane of type fixme in a fresh tab.
+// newFixmePane creates a pane of type fixme in a fresh tab. It has no PTY;
+// its generation is set to 1, the run the tests flush as, because an update
+// offer is validated against the INSTALLED generation (pane.ptyGen) at
+// delivery and a pane at generation 0 would drop every offer made for run 1.
 func newFixmePane(t *testing.T, d *Daemon) *Pane {
 	t.Helper()
 	tab := d.session.CreateTab("t")
@@ -144,6 +147,7 @@ func newFixmePane(t *testing.T, d *Daemon) *Pane {
 	}
 	pane.PluginMu.Lock()
 	pane.Type = "fixme"
+	pane.ptyGen = 1
 	pane.PluginMu.Unlock()
 	return pane
 }
@@ -768,23 +772,16 @@ func TestOfferUpdate_SlowResolutionSupersededByNewRun(t *testing.T) {
 	c := dialBroadcastReader(t, d)
 
 	// The first resolution parks; every later one answers at once.
-	parked := newParkedLookup()
-	var calls atomic.Int32
-	prevFn := resolvePluginBinaryFn
-	resolvePluginBinaryFn = func(_, _ string) string {
-		if calls.Add(1) == 1 {
-			parked.park()
-			return "/old/run/stripe"
-		}
-		return "/new/run/stripe"
-	}
-	t.Cleanup(func() {
-		parked.restore(t, func() { resolvePluginBinaryFn = prevFn })
-	})
+	parked, entered := parkFirstResolution(t, "/old/run/stripe", "/new/run/stripe")
 
-	// Run 1 offers 1.55.1 and its resolution parks. Run 2 (a restart) offers
-	// 1.56.0, which resolves and is delivered.
+	// Run 1 offers 1.55.1 and its resolution parks — waited for, since the
+	// resolver runs on its own goroutine and run 2's could otherwise be the
+	// first to arrive. Run 2 (a restart) offers 1.56.0, which resolves and
+	// is delivered.
+	setPTYGen(pane, 1)
 	d.applyPluginHandlers(pane, pane.ID, []byte(fixmeNotice+"\r\n"), 1)
+	waitEntered(t, entered)
+	setPTYGen(pane, 2)
 	newer := strings.Replace(fixmeNotice, "1.55.1", "1.56.0", 1)
 	d.applyPluginHandlers(pane, pane.ID, []byte(newer+"\r\n"), 2)
 	got := readPluginErrors(t, c, 1)
@@ -806,6 +803,106 @@ func TestOfferUpdate_SlowResolutionSupersededByNewRun(t *testing.T) {
 	}
 }
 
+// parkFirstResolution installs a resolver whose FIRST call signals entered
+// and then parks until the returned parkedLookup is released, answering
+// first; every later call answers rest at once. Restored at cleanup.
+func parkFirstResolution(t *testing.T, first, rest string) (*parkedLookup, chan struct{}) {
+	t.Helper()
+	parked := newParkedLookup()
+	entered := make(chan struct{}, 1)
+	var calls atomic.Int32
+	prevFn := resolvePluginBinaryFn
+	resolvePluginBinaryFn = func(_, _ string) string {
+		if calls.Add(1) == 1 {
+			entered <- struct{}{}
+			parked.park()
+			return first
+		}
+		return rest
+	}
+	t.Cleanup(func() {
+		parked.restore(t, func() { resolvePluginBinaryFn = prevFn })
+	})
+	return parked, entered
+}
+
+func waitEntered(t *testing.T, entered chan struct{}) {
+	t.Helper()
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the first resolution never started")
+	}
+}
+
+// setPTYGen stands in for a spawn on a pane that has no PTY: the installed
+// generation offerUpdate validates against.
+func setPTYGen(pane *Pane, gen uint64) {
+	pane.PluginMu.Lock()
+	pane.ptyGen = gen
+	pane.PluginMu.Unlock()
+}
+
+// assertNothingOffered reads quiet for d and checks that no update frame
+// arrived and the pane records no offer and no sent version.
+func assertNothingOffered(t *testing.T, quiet *ipc.Client, pane *Pane, version string) {
+	t.Helper()
+	if late := pluginErrorsWithin(t, quiet, 300*time.Millisecond); len(late) != 0 {
+		t.Fatalf("a superseded offer was broadcast: %+v", late)
+	}
+	pane.PluginMu.Lock()
+	offered, sent := pane.pluginOffered, pane.pluginSent["u:"+version]
+	pane.PluginMu.Unlock()
+	if offered != "" || sent {
+		t.Fatalf("offered=%q sent=%v: the superseded completion was recorded", offered, sent)
+	}
+}
+
+// A resolution still in flight when the pane is REALLY restarted — through
+// restart_pane_req, with a replacement that prints nothing, so the output
+// generation never moves — is dropped at delivery on the installed PTY
+// generation; the in-flight mark went at the PTY boundary.
+func TestOfferUpdate_SlowResolutionDroppedBySilentRestart(t *testing.T) {
+	d, pane, sessions, c := fixHarness(t)
+	quiet := quietReader(t, d)
+	parked, entered := parkFirstResolution(t, "/old/stripe", "/new/stripe")
+
+	d.applyPluginHandlers(pane, pane.ID, []byte(fixmeNotice+"\r\n"), currentGen(pane))
+	waitEntered(t, entered)
+	sendWithID(t, c, ipc.MsgRestartPaneReq, "r-silent", ipc.RestartPaneReqPayload{PaneID: pane.ID})
+	got := readUntilID(t, c, ipc.MsgRestartPaneResp, "r-silent", 3*time.Second)
+	var resp ipc.RestartPaneRespPayload
+	if err := got[len(got)-1].DecodePayload(&resp); err != nil || !resp.Success {
+		t.Fatalf("restart resp = %+v, %v", resp, err)
+	}
+	sessions.waitFor(t, 2)
+	pane.PluginMu.Lock()
+	inFlight := len(pane.pluginOffering)
+	pane.PluginMu.Unlock()
+	if inFlight != 0 {
+		t.Fatalf("%d offers still marked in flight after the PTY was replaced", inFlight)
+	}
+
+	parked.release <- struct{}{}
+	assertNothingOffered(t, quiet, pane, "1.55.1")
+}
+
+// Same window, closed by a fix starting instead: the fix child's run is
+// never matched, so an offer resolved for the child it replaced must not
+// open a dialog over the fix the broadcast just dismissed it for.
+func TestOfferUpdate_SlowResolutionDroppedByFixStart(t *testing.T) {
+	d, pane, sessions, c := fixHarness(t)
+	quiet := quietReader(t, d)
+	parked, entered := parkFirstResolution(t, "/old/stripe", "/new/stripe")
+
+	d.applyPluginHandlers(pane, pane.ID, []byte(fixmeNotice+"\r\n"), currentGen(pane))
+	waitEntered(t, entered)
+	startLoginFix(t, pane, sessions, c, 2)
+
+	parked.release <- struct{}{}
+	assertNothingOffered(t, quiet, pane, "1.55.1")
+}
+
 // A GitHub answer that lands after the pane restarted is dropped: the run
 // check, the dedupe and the pluginOffered record are one PluginMu span, so
 // the old run's version is never written into the new run.
@@ -815,9 +912,8 @@ func TestOfferUpdate_StaleRunDropped(t *testing.T) {
 	pane := newFixmePane(t, d)
 	c := dialBroadcastReader(t, d)
 
-	resetPluginRun(pane, 1)
-	// The lookup for run 1 answers after run 2 began.
-	resetPluginRun(pane, 2)
+	// The lookup for run 1 answers after run 2's child was installed.
+	setPTYGen(pane, 2)
 	d.offerUpdate(pane, pane.ID, newUpdateOfferSource(p), "1.55.1", 1)
 	if got := pluginErrorsWithin(t, c, 300*time.Millisecond); len(got) != 0 {
 		t.Fatalf("a stale run's offer was sent: %+v", got)

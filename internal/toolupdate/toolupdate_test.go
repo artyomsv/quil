@@ -304,8 +304,10 @@ func TestRun_SuccessSwapsAndPrints(t *testing.T) {
 			t.Errorf("target mode %v is not executable", fi.Mode())
 		}
 	}
-	if names := dirEntries(t, target); len(names) != 2 {
-		t.Errorf("target dir holds %v, want only the binary and its backup (stale and own staging dirs removed)", names)
+	// Three entries: the binary, its backup, and the per-target lock file,
+	// which the OS lock leaves in place by design (never unlinked).
+	if names := dirEntries(t, target); len(names) != 3 {
+		t.Errorf("target dir holds %v, want the binary, its backup and the lock file (stale and own staging dirs removed)", names)
 	}
 	if gh.latestHits.Load() != 0 {
 		t.Errorf("/releases/latest was requested %d times; the update must fetch by tag only", gh.latestHits.Load())
@@ -465,8 +467,10 @@ func TestRun_ChecksumMismatchLeavesTarget(t *testing.T) {
 	if got := readFile(t, target); got != "old-bytes" {
 		t.Errorf("target = %q after a refused download, want untouched", got)
 	}
-	if names := dirEntries(t, target); len(names) != 1 {
-		t.Errorf("target dir holds %v, want only the untouched binary (no backup, no staging leftovers)", names)
+	// The binary and the lock file (left in place by design): no backup, no
+	// staging leftovers.
+	if names := dirEntries(t, target); len(names) != 2 {
+		t.Errorf("target dir holds %v, want only the untouched binary and the lock file (no backup, no staging leftovers)", names)
 	}
 	if strings.Contains(out.String(), "✓ checksum ok") || strings.Contains(out.String(), "replacing") {
 		t.Errorf("output claims progress past the refusal:\n%s", out.String())
@@ -555,13 +559,13 @@ func TestRun_ConcurrentUpdatersSerialize(t *testing.T) {
 	if got := readFile(t, target); got != "new-bytes" {
 		t.Errorf("target = %q after two updaters, want new bytes", got)
 	}
-	for _, leftover := range []string{target + ".new", target + updateLockSuffix} {
-		if _, err := os.Stat(leftover); !errors.Is(err, os.ErrNotExist) {
-			t.Errorf("%s left behind: %v", filepath.Base(leftover), err)
-		}
+	if _, err := os.Stat(target + ".new"); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf(".new left behind: %v", err)
 	}
-	if names := dirEntries(t, target); len(names) != 2 {
-		t.Errorf("target dir holds %v, want only the binary and its backup", names)
+	// The lock file stays (an OS lock, never unlinked); with it the dir holds
+	// the binary and its backup and nothing else.
+	if names := dirEntries(t, target); len(names) != 3 {
+		t.Errorf("target dir holds %v, want the binary, its backup and the lock file", names)
 	}
 }
 

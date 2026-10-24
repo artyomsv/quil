@@ -281,6 +281,9 @@ func (m *Model) disconnectDest(dest string) bool {
 	// leftover read-only entry would gate a destination that no longer exists.
 	delete(m.destRights, dest)
 	delete(m.followProject, dest)
+	// Its plugin dialogs, held or open: their panes leave the screen with
+	// the host, and a reply would have no conn to go to.
+	m.dropPluginDialogsFor(dest)
 	if r, ok := m.client.(*Router); ok {
 		r.ForgetDestRights(dest)
 	}

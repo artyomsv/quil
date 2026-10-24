@@ -1,6 +1,6 @@
 //go:build windows
 
-package main
+package binswap
 
 import (
 	"os"
@@ -21,7 +21,7 @@ import (
 // the handle denies DELETE — which is all freeBackupPath needs to observe.
 // The proxy is strictly stricter than production, not identical: a mapped
 // image denies DELETE but PERMITS rename (that is the whole premise of
-// swapOne renaming the running binary aside), whereas an open handle without
+// SwapOne renaming the running binary aside), whereas an open handle without
 // FILE_SHARE_DELETE denies both. The gap does not weaken the test, because
 // nothing ever renames INTO an occupied slot.
 func TestSwapOne_BackupPinnedByOpenHandle(t *testing.T) {
@@ -45,9 +45,9 @@ func TestSwapOne_BackupPinnedByOpenHandle(t *testing.T) {
 		t.Skip("open handle no longer blocks delete on this platform — premise gone")
 	}
 
-	backupPath, err := swapOne(target, staged)
+	backupPath, err := SwapOne(target, staged)
 	if err != nil {
-		t.Fatalf("swapOne with a pinned backup = %v, want a fallback backup path", err)
+		t.Fatalf("SwapOne with a pinned backup = %v, want a fallback backup path", err)
 	}
 	if backupPath != target+".old.1" {
 		t.Errorf("backup path = %q, want %q", backupPath, target+".old.1")

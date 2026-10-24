@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -105,6 +106,12 @@ func stageLinuxQuild(ctx context.Context, ver, arch, dst string) error {
 	checker := &update.Checker{}
 	rel, err := checker.Release(ctx, "v"+ver)
 	if err != nil {
+		if errors.Is(err, update.ErrReleaseNotFound) {
+			// The typed 404 names the tag alone; a dev build's version, or
+			// a release pulled after the fact, is better reported with the
+			// repository it was looked for in.
+			return fmt.Errorf("release v%s not found in %s: %w", ver, update.DefaultRepo, err)
+		}
 		return fmt.Errorf("locate release v%s: %w", ver, err)
 	}
 	root := filepath.Dir(dst)

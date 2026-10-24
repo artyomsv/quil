@@ -1,6 +1,9 @@
 package plugin
 
-import "regexp"
+import (
+	"fmt"
+	"regexp"
+)
 
 // StalePlugin holds data for a plugin whose on-disk schema_version is lower
 // than the embedded default. The TUI uses this to show a migration dialog.
@@ -27,7 +30,8 @@ type PanePlugin struct {
 	ErrorHandlers        []ErrorHandler
 	NotificationHandlers []NotificationHandler
 	IdleHandlers         []IdleHandler
-	Available            bool // set at startup by running detect cmd
+	Update               *UpdateSpec // nil when the TOML has no [update] table
+	Available            bool        // set at startup by running detect cmd
 }
 
 // CommandConfig describes how to launch the plugin's process.
@@ -181,11 +185,136 @@ type DisplayConfig struct {
 
 // ErrorHandler matches PTY output patterns and triggers help dialogs.
 type ErrorHandler struct {
-	Pattern  string
-	Title    string
-	Message  string
-	Action   string // "dialog" | "log"
+	Pattern string
+	Title   string
+	Message string
+	Action  string // "dialog" | "log"
+	Fixes   []Fix  // buttons on the dialog; each runs in the pane
+	// OfferUpdate makes the handler's dialog carry the [update] table's
+	// Update button with the tool's LATEST release, looked up on GitHub when
+	// the handler fires — for a tool too old to print its own update notice
+	// (a Stripe CLI that fails on a flag newer CLIs require exits before it
+	// says a newer version exists). Load-time refused without [update].
+	OfferUpdate bool
+	compiled    *regexp.Regexp
+}
+
+// Fix is one [[error_handlers.fixes]] entry: a button on the handler's dialog
+// that runs Run in the pane in place of the pane's normal command, once.
+//
+// Only Name and Label ever leave the daemon. A client asks for a fix by NAME
+// and the daemon looks Run up in its OWN plugin definition, the way toggles
+// are resolved — a free-form argv on the wire would let any IPC client run any
+// program under the plugin's name. Names are therefore unique per PLUGIN, not
+// per handler, and FixNameUpdate is reserved for the [update] table's button.
+type Fix struct {
+	Name  string
+	Label string
+	Run   []string // argv; Run[0] is resolved like [command] cmd
+	Then  string   // FixThenRestart (default) or FixThenStay: what a zero exit leads to
+}
+
+// FixNameUpdate is the reserved fix name for the [update] table's own button.
+// A handler fix carrying it fails plugin load, so the two can never collide
+// in the dialog or in a plugin_fix_req.
+const FixNameUpdate = "update"
+
+// Values of Fix.Then.
+const (
+	FixThenRestart = "restart" // start the pane's normal command again
+	FixThenStay    = "stay"    // leave the pane on the fix's output
+)
+
+// UpdateManager is one [[update.managers]] entry: a package manager that owns
+// the binary when Match (a regex) matches its symlink-resolved path. Run is
+// the manager's own upgrade argv, run in the pane as an ordinary fix.
+type UpdateManager struct {
+	Name     string
+	Match    string
+	Run      []string
 	compiled *regexp.Regexp
+}
+
+// Compile pre-compiles the match pattern. Must be called before concurrent use.
+func (um *UpdateManager) Compile() error {
+	re, err := regexp.Compile(um.Match)
+	if err != nil {
+		return err
+	}
+	um.compiled = re
+	return nil
+}
+
+// Compiled returns the compiled regex, or nil if compilation failed.
+func (um *UpdateManager) Compiled() *regexp.Regexp {
+	return um.compiled
+}
+
+// UpdateSpec is the [update] table: how Quil learns the tool is outdated and
+// how it replaces the binary.
+//
+// Notice is matched against complete, ANSI-stripped output lines, apart from
+// the error handlers; capture group 1 is the offered version. Managers are
+// tried first on the resolved binary path; with no match the manual path
+// downloads the release asset named by Assets for this platform from the
+// GitHub repo, checks it against the Checksums file and swaps Binary in place.
+type UpdateSpec struct {
+	Notice    string
+	GitHub    string            // "owner/repo"
+	Binary    string            // file name inside the asset (".exe" appended on Windows)
+	Assets    map[string]string // "goos_goarch" → asset name, "{version}" expanded
+	Checksums map[string]string // goos → checksums file name in the release
+	Managers  []UpdateManager
+	notice    *regexp.Regexp
+}
+
+// Compile pre-compiles the notice and every manager match. Must be called
+// before concurrent use.
+//
+// Unlike the handler Compile methods this one also REFUSES a notice with no
+// capture group: group 1 is the offered version, and a notice without one
+// would match forever while the dialog could not say which version it
+// installs.
+func (u *UpdateSpec) Compile() error {
+	re, err := regexp.Compile(u.Notice)
+	if err != nil {
+		return fmt.Errorf("invalid update notice %q: %w", u.Notice, err)
+	}
+	if re.NumSubexp() < 1 {
+		return fmt.Errorf("update notice %q has no capture group for the version", u.Notice)
+	}
+	u.notice = re
+	for i := range u.Managers {
+		if err := u.Managers[i].Compile(); err != nil {
+			return fmt.Errorf("update manager %q: invalid match %q: %w", u.Managers[i].Name, u.Managers[i].Match, err)
+		}
+	}
+	return nil
+}
+
+// NoticeRe returns the compiled notice regex, or nil if compilation failed.
+func (u *UpdateSpec) NoticeRe() *regexp.Regexp {
+	return u.notice
+}
+
+// FindFix returns the handler fix named name, searching every handler of the
+// plugin — a plugin_fix_req carries the name alone, and load-time validation
+// keeps it unique across handlers. Nil-receiver safe, like UsesClaudeSessions:
+// the daemon resolves through Registry.Get, which returns nil for a plugin
+// that failed to load, and "no such fix" is the right answer there.
+func (p *PanePlugin) FindFix(name string) (*Fix, bool) {
+	if p == nil {
+		return nil, false
+	}
+	for i := range p.ErrorHandlers {
+		fixes := p.ErrorHandlers[i].Fixes
+		for j := range fixes {
+			if fixes[j].Name == name {
+				return &fixes[j], true
+			}
+		}
+	}
+	return nil, false
 }
 
 // Compile pre-compiles the regex pattern. Must be called before concurrent use.

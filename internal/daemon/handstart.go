@@ -557,7 +557,25 @@ func (d *Daemon) convertAtLaunch(pane *Pane, target *plugin.PanePlugin, m handSt
 				". They are kept for this pane and reapplied when it restarts.")
 	}
 
-	if !d.restartPaneInPlace(pane) {
+	// Every child-replacing restart holds the pane's lifecycleMu (session.go)
+	// so a fix reservation on another connection cannot interleave with it.
+	// Inside the span the fix state is read once more: a fix armed on this
+	// pane owns the next spawn (returnToShellOnCleanExit's rule), and the
+	// restart below would consume its argv. Defensive — a fix needs a
+	// plugin with fixes, which no shell pane runs — but the span is the
+	// one place the check cannot be stale.
+	pane.lifecycleMu.Lock()
+	pane.PluginMu.Lock()
+	fixArmed := pane.FixLabel != "" || len(pane.fixArgv) > 0
+	pane.PluginMu.Unlock()
+	if fixArmed {
+		pane.lifecycleMu.Unlock()
+		log.Printf("pane %s: conversion left to the fix armed on the pane", pane.ID)
+		return false
+	}
+	restarted := d.restartPaneInPlace(pane)
+	pane.lifecycleMu.Unlock()
+	if !restarted {
 		// The pane is left as the agent type with its SpawnError showing, which
 		// is the same state a failed Ctrl+N reaches and the same thing Alt+R
 		// retries. Reverting to a terminal here would hide why it failed.

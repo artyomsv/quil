@@ -34,6 +34,15 @@ type winSession struct {
 	cwd      string
 	waitOnce sync.Once
 	exitCode int
+	// closeOnce guards cpty.Close: the exit watcher and a restart or destroy
+	// can both close, and the inbox backend's Close is not idempotent.
+	closeOnce sync.Once
+}
+
+// consoleCloser is the bundled backend's way to end the console without
+// closing the pipe end Read uses; the inbox backend has no such method.
+type consoleCloser interface {
+	CloseConsole()
 }
 
 func New() Session {
@@ -92,7 +101,28 @@ func (s *winSession) Start(cmd string, args ...string) error {
 	}
 	s.pid = pid
 	s.handle = windows.Handle(handle)
+	go s.closeConsoleOnExit()
 	return nil
+}
+
+// closeConsoleOnExit ends the pseudo console once the child exits. ConPTY
+// keeps the console, and so the output pipe, open after its last client
+// leaves, so without this a Read never returns and the daemon never sees
+// the exit: no "Process exited" card, no restart after a plugin fix, no
+// overlay clean-up. Windows Terminal does the same: it waits on the process
+// handle, then closes the console. Output the child wrote before it exited
+// is not lost: the host flushes it before it goes, and Read drains it.
+func (s *winSession) closeConsoleOnExit() {
+	s.WaitExit()
+	if cc, ok := s.cpty.(consoleCloser); ok {
+		cc.CloseConsole()
+		return
+	}
+	s.closeConPTY()
+}
+
+func (s *winSession) closeConPTY() {
+	s.closeOnce.Do(func() { s.cpty.Close() })
 }
 
 func (s *winSession) Read(buf []byte) (int, error) {
@@ -118,7 +148,7 @@ func (s *winSession) Resize(rows, cols uint16) error {
 
 func (s *winSession) Close() error {
 	if s.cpty != nil {
-		s.cpty.Close()
+		s.closeConPTY()
 	}
 	return nil
 }

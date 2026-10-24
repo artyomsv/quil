@@ -349,13 +349,12 @@ func TestMatchError(t *testing.T) {
 	}
 	compilePatterns(p)
 
-	data := []byte("ssh: connect to host: Permission denied (publickey)")
-	eh := MatchError(p, data)
-	if eh == nil {
+	matched := MatchErrors(p, "ssh: connect to host: Permission denied (publickey)")
+	if len(matched) == 0 {
 		t.Fatal("expected error handler match")
 	}
-	if eh.Title != "SSH Authentication Failed" {
-		t.Errorf("expected title 'SSH Authentication Failed', got %q", eh.Title)
+	if matched[0].Title != "SSH Authentication Failed" {
+		t.Errorf("expected title 'SSH Authentication Failed', got %q", matched[0].Title)
 	}
 }
 
@@ -410,6 +409,134 @@ func TestDefaultPluginTOMLFiles(t *testing.T) {
 	}
 	if stripe.Persistence.Strategy != "rerun" {
 		t.Errorf("expected strategy 'rerun', got %q", stripe.Persistence.Strategy)
+	}
+}
+
+// The embedded stripe default is the first plugin configured with fix
+// actions and an [update] table. Loaded the way the daemon loads it, so a
+// typo in the TOML (an inline table with a newline, a missing checksums
+// entry) fails here rather than at the user's first expired key.
+func TestDefaultStripe_HasLoginFixAndUpdate(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := EnsureDefaultPlugins(dir); err != nil {
+		t.Fatal(err)
+	}
+	r := NewRegistry()
+	if err := r.LoadFromDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	stripe := r.Get("stripe")
+	if stripe == nil {
+		t.Fatal("stripe plugin not loaded from the embedded default")
+	}
+
+	// Since the CLI's September 2026 releases `stripe listen` refuses to
+	// start without an event filter; --all-snapshot is the old "everything".
+	if !slices.Contains(stripe.Command.Args, "--all-snapshot") {
+		t.Errorf("args = %q, want --all-snapshot", stripe.Command.Args)
+	}
+	if !slices.Contains(stripe.Command.ArgTemplate, "--all-snapshot") {
+		t.Errorf("arg_template = %q, want --all-snapshot", stripe.Command.ArgTemplate)
+	}
+	for line, title := range map[string]string{
+		"must specify events to forward using --events, --all-snapshot, or --all-thin": "Stripe needs an event filter",
+		"Error: unknown flag: --all-snapshot":                                            "Stripe CLI is too old",
+	} {
+		got := MatchErrors(stripe, line)
+		if len(got) != 1 || got[0].Title != title {
+			t.Errorf("MatchErrors(%q) = %d handlers, want one titled %q", line, len(got), title)
+			continue
+		}
+		// A CLI too old for the flag exits before it prints its own update
+		// notice, so that dialog offers the latest release itself; the
+		// filter dialog is about a pane's arguments, not the binary.
+		if want := title == "Stripe CLI is too old"; got[0].OfferUpdate != want {
+			t.Errorf("%q handler OfferUpdate = %v, want %v", title, got[0].OfferUpdate, want)
+		}
+	}
+
+	// The broadened handler matches the real FATAL line, and carries the
+	// login fix.
+	line := `FATAL Expired API Key provided: sk_test_***. "code": "api_key_expired"`
+	matched := MatchErrors(stripe, line)
+	if len(matched) != 1 {
+		t.Fatalf("MatchErrors(%q) = %d handlers, want 1", line, len(matched))
+	}
+	if matched[0].Title != "Stripe login expired" {
+		t.Errorf("handler title = %q, want Stripe login expired", matched[0].Title)
+	}
+	if MatchErrors(stripe, "Error: not logged in") == nil {
+		t.Error("the pre-v2 'not logged in' pattern no longer matches")
+	}
+	fix, ok := stripe.FindFix("login")
+	if !ok {
+		t.Fatal("stripe has no fix named login")
+	}
+	if fix.Label != "Log in" || !slices.Equal(fix.Run, []string{"stripe", "login"}) || fix.Then != FixThenRestart {
+		t.Errorf("login fix = %+v, want label Log in, run [stripe login], then restart", *fix)
+	}
+	if len(matched[0].Fixes) != 1 || &matched[0].Fixes[0] != fix {
+		t.Error("the login fix is not on the handler that matched the expired-key line")
+	}
+
+	// The [update] table: every manual-download field, one asset per
+	// platform the daemon can run on, one checksums file per OS, and the
+	// three managers in file order.
+	u := stripe.Update
+	if u == nil {
+		t.Fatal("stripe has no [update] table")
+	}
+	if u.GitHub != "stripe/stripe-cli" || u.Binary != "stripe" {
+		t.Errorf("GitHub/Binary = %q/%q, want stripe/stripe-cli and stripe", u.GitHub, u.Binary)
+	}
+	wantAssets := map[string]string{
+		"windows_amd64": "stripe_{version}_windows_x86_64.zip",
+		"darwin_amd64":  "stripe_{version}_mac-os_x86_64.tar.gz",
+		"darwin_arm64":  "stripe_{version}_mac-os_arm64.tar.gz",
+		"linux_amd64":   "stripe_{version}_linux_x86_64.tar.gz",
+		"linux_arm64":   "stripe_{version}_linux_arm64.tar.gz",
+	}
+	if len(u.Assets) != len(wantAssets) {
+		t.Errorf("Assets = %v, want %d entries", u.Assets, len(wantAssets))
+	}
+	for platform, want := range wantAssets {
+		if got := u.Assets[platform]; got != want {
+			t.Errorf("Assets[%s] = %q, want %q", platform, got, want)
+		}
+	}
+	wantChecksums := map[string]string{
+		"windows": "stripe-windows-checksums.txt",
+		"darwin":  "stripe-mac-checksums.txt",
+		"linux":   "stripe-linux-checksums.txt",
+	}
+	if len(u.Checksums) != len(wantChecksums) {
+		t.Errorf("Checksums = %v, want %d entries", u.Checksums, len(wantChecksums))
+	}
+	for goos, want := range wantChecksums {
+		if got := u.Checksums[goos]; got != want {
+			t.Errorf("Checksums[%s] = %q, want %q", goos, got, want)
+		}
+	}
+	var managers []string
+	for _, m := range u.Managers {
+		managers = append(managers, m.Name)
+		if m.Compiled() == nil {
+			t.Errorf("manager %s: match did not compile", m.Name)
+		}
+	}
+	if !slices.Equal(managers, []string{"brew", "scoop", "winget"}) {
+		t.Errorf("Managers = %v, want [brew scoop winget]", managers)
+	}
+
+	// The notice matches the line stripe listen really prints (v1.31.1,
+	// 2026-10-23) and captures the version without its "v".
+	notice := "A newer version of the Stripe CLI is available, please update to: v1.55.1"
+	v, ok := MatchUpdateNotice(stripe, notice)
+	if !ok || v != "1.55.1" {
+		t.Errorf("MatchUpdateNotice(%q) = %q, %v; want 1.55.1, true", notice, v, ok)
+	}
+	if v, ok := MatchUpdateNotice(stripe, "Ready! You are using Stripe API Version [2024-06-20]"); ok {
+		t.Errorf("notice matched the ready line with %q", v)
 	}
 }
 
@@ -484,10 +611,8 @@ func TestMatchErrorNoMatch(t *testing.T) {
 		},
 	}
 	compilePatterns(p)
-	data := []byte("Connected to server successfully")
-	eh := MatchError(p, data)
-	if eh != nil {
-		t.Errorf("expected no match, got %q", eh.Title)
+	if matched := MatchErrors(p, "Connected to server successfully"); matched != nil {
+		t.Errorf("expected no match, got %q", matched[0].Title)
 	}
 }
 

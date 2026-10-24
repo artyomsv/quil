@@ -991,6 +991,14 @@ func (m *Model) armReattachReset(dest string) {
 	// under a new run_id, and a kept mark would compare a fresh rev 1 against
 	// the old run's high-water mark and drop it as stale.
 	m.forgetStateMark(dest)
+	// And the fix boot marks' seed: the first state after a reattach is a
+	// SNAPSHOT, not an edge. A fix that started or ended during the outage
+	// would otherwise read as one and put a mark on a pane whose run (RunGen)
+	// already painted before the outage — with outputGeneration zeroed above,
+	// the mark waits for a generation that never comes. Requests this client
+	// sent there went out on the old connection and cannot be answered.
+	delete(m.fixBootSeeded, dest)
+	m.pruneFixBootFor(func(id string) bool { return m.destOfPane(id) == dest })
 	// Selection is Model-level and anchors to row/column coordinates that any
 	// replay invalidates. Dropped now rather than armed: there is no per-pane
 	// chunk to hang it off, and a selection surviving an outage is worth nothing.

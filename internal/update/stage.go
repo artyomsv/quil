@@ -28,6 +28,21 @@ const maxArchiveSize = 200 << 20
 // manifestName is the atomic "staging complete" marker inside a staged dir.
 const manifestName = "manifest.json"
 
+// The refusals FetchVerified makes, as sentinels so a caller can tell "this
+// release has nothing for my platform" from "the download was corrupted"
+// without parsing the message.
+var (
+	// ErrNoAsset: the release carries no asset (archive or checksums file)
+	// with the requested name.
+	ErrNoAsset = errors.New("release has no such asset")
+	// ErrNoChecksum: the checksums file was fetched but has no line for the
+	// archive.
+	ErrNoChecksum = errors.New("checksums file has no entry for the asset")
+	// ErrChecksumMismatch: the archive downloaded, and its sha256 is not the
+	// one the checksums file promises.
+	ErrChecksumMismatch = errors.New("checksum mismatch")
+)
+
 // BinaryNames returns the REQUIRED executable names inside the release archive
 // for a platform. An archive missing any of them is not a usable release.
 func BinaryNames(goos string) []string {
@@ -114,44 +129,18 @@ func (s *Stager) Stage(ctx context.Context, rel *Release) error {
 		return err
 	}
 
-	archive, sums, err := FindAssets(rel, s.GOOS, s.GOARCH)
+	// Both assets must exist before any I/O — FetchVerified checks the same,
+	// but FindAssets' error names the platform archive it looked for.
+	archive, _, err := FindAssets(rel, s.GOOS, s.GOARCH)
 	if err != nil {
 		return err
 	}
 
-	if err := os.MkdirAll(s.Root, 0700); err != nil {
-		return fmt.Errorf("create update dir: %w", err)
-	}
-
-	// Download the archive to a temp file, hashing as we write.
-	tmp, err := os.CreateTemp(s.Root, "download-*")
+	tmpPath, err := FetchVerified(ctx, s.httpClient(), rel, archive.Name, ChecksumsName, s.Root)
 	if err != nil {
-		return fmt.Errorf("create download temp: %w", err)
+		return err
 	}
-	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
-
-	gotSum, err := s.downloadHashed(ctx, archive.DownloadURL, tmp)
-	closeErr := tmp.Close()
-	if err != nil {
-		return fmt.Errorf("download %s: %w", archive.Name, err)
-	}
-	if closeErr != nil {
-		return fmt.Errorf("close download temp: %w", closeErr)
-	}
-
-	// Fetch checksums.txt and compare before touching the archive content.
-	wantSums, err := s.fetchChecksums(ctx, sums.DownloadURL)
-	if err != nil {
-		return fmt.Errorf("fetch checksums: %w", err)
-	}
-	want, ok := wantSums[archive.Name]
-	if !ok {
-		return fmt.Errorf("checksums.txt has no entry for %s", archive.Name)
-	}
-	if !strings.EqualFold(want, gotSum) {
-		return fmt.Errorf("checksum mismatch for %s: got %s, want %s", archive.Name, gotSum, want)
-	}
 
 	// Extract into the staging dir. Remove partial leftovers from a
 	// previous crashed attempt at the same version first.
@@ -184,14 +173,82 @@ func (s *Stager) Stage(ctx context.Context, rel *Release) error {
 	return nil
 }
 
+// FetchVerified downloads the release asset named assetName into a temp file
+// under dstDir and verifies its sha256 against the line for it in the
+// release's checksumsName asset, BEFORE anything reads the archive content.
+// It returns the archive path; the caller removes it when done. A nil client
+// gets the Stager's 5 min default.
+//
+// Any failure leaves nothing behind. The refusals are typed: ErrNoAsset
+// (either asset missing from the release), ErrNoChecksum (no line for the
+// archive) and ErrChecksumMismatch — each wrapped with the names involved.
+//
+// Both names are parameters because Quil's own release is not the only
+// layout: a plugin's upstream ships one checksums file per OS and names its
+// archives by its own template, and only the caller knows either.
+func FetchVerified(ctx context.Context, client *http.Client, rel *Release, assetName, checksumsName, dstDir string) (string, error) {
+	archive := findAsset(rel, assetName)
+	if archive == nil {
+		return "", fmt.Errorf("release %s: %w: %s", rel.TagName, ErrNoAsset, assetName)
+	}
+	sums := findAsset(rel, checksumsName)
+	if sums == nil {
+		return "", fmt.Errorf("release %s: %w: %s", rel.TagName, ErrNoAsset, checksumsName)
+	}
+	if client == nil {
+		client = (&Stager{}).httpClient()
+	}
+
+	if err := os.MkdirAll(dstDir, 0700); err != nil {
+		return "", fmt.Errorf("create update dir: %w", err)
+	}
+
+	// Download the archive to a temp file, hashing as we write.
+	tmp, err := os.CreateTemp(dstDir, "download-*")
+	if err != nil {
+		return "", fmt.Errorf("create download temp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	keep := false
+	defer func() {
+		if !keep {
+			os.Remove(tmpPath)
+		}
+	}()
+
+	gotSum, err := downloadHashed(ctx, client, archive.DownloadURL, tmp)
+	closeErr := tmp.Close()
+	if err != nil {
+		return "", fmt.Errorf("download %s: %w", archive.Name, err)
+	}
+	if closeErr != nil {
+		return "", fmt.Errorf("close download temp: %w", closeErr)
+	}
+
+	// Fetch the checksums file and compare before touching the archive content.
+	wantSums, err := fetchChecksums(ctx, client, sums.DownloadURL)
+	if err != nil {
+		return "", fmt.Errorf("fetch %s: %w", sums.Name, err)
+	}
+	want, ok := wantSums[archive.Name]
+	if !ok {
+		return "", fmt.Errorf("%s: %w: %s", sums.Name, ErrNoChecksum, archive.Name)
+	}
+	if !strings.EqualFold(want, gotSum) {
+		return "", fmt.Errorf("%w for %s: got %s, want %s", ErrChecksumMismatch, archive.Name, gotSum, want)
+	}
+	keep = true
+	return tmpPath, nil
+}
+
 // downloadHashed streams url into dst, returning the sha256 hex of the
 // bytes written.
-func (s *Stager) downloadHashed(ctx context.Context, url string, dst io.Writer) (string, error) {
+func downloadHashed(ctx context.Context, client *http.Client, url string, dst io.Writer) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", err
 	}
-	resp, err := s.httpClient().Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -206,13 +263,15 @@ func (s *Stager) downloadHashed(ctx context.Context, url string, dst io.Writer) 
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// fetchChecksums downloads and parses checksums.txt ("<hex>  <name>" lines).
-func (s *Stager) fetchChecksums(ctx context.Context, url string) (map[string]string, error) {
+// fetchChecksums downloads and parses a checksums file ("<hex>  <name>"
+// lines, the sha256sum format; a leading "*" on the name, sha256sum's
+// binary-mode marker, is dropped).
+func fetchChecksums(ctx context.Context, client *http.Client, url string) (map[string]string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := s.httpClient().Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -225,7 +284,7 @@ func (s *Stager) fetchChecksums(ctx context.Context, url string) (map[string]str
 	for sc.Scan() {
 		fields := strings.Fields(sc.Text())
 		if len(fields) == 2 {
-			sums[fields[1]] = fields[0]
+			sums[strings.TrimPrefix(fields[1], "*")] = fields[0]
 		}
 	}
 	if err := sc.Err(); err != nil {
@@ -239,10 +298,15 @@ func (s *Stager) fetchChecksums(ctx context.Context, url string) (map[string]str
 // always one of our own constants — never derived from the archive entry —
 // so the path written to disk cannot be influenced by a hostile entry name
 // (breaks the CodeQL go/zipslip taint chain at the source).
-func matchBinary(names []string, entryName string) string {
+//
+// fold compares case-insensitively, for windows archives: the filesystem the
+// binary lands on treats "Tool.EXE" and "tool.exe" as one name, and an
+// upstream's packaging may spell it either way. The name WRITTEN is still
+// ours.
+func matchBinary(names []string, entryName string, fold bool) string {
 	base := filepath.Base(entryName)
 	for _, n := range names {
-		if base == n {
+		if base == n || (fold && strings.EqualFold(base, n)) {
 			return n
 		}
 	}
@@ -257,7 +321,56 @@ func matchBinary(names []string, entryName string) string {
 func extractBinaries(archivePath, dir, goos string) (map[string]string, error) {
 	names := BinaryNames(goos)
 	wanted := append(append([]string{}, names...), OptionalBinaryNames(goos)...)
+	files, err := extractNamed(archivePath, dir, goos, wanted)
+	if err != nil {
+		return nil, err
+	}
+
+	// Named rather than counted. files now also holds whatever OPTIONAL entries
+	// the archive happened to carry, so a length compare would pass an archive
+	// with the helper and no quild — the split-pair case the count was there to
+	// catch in the first place.
+	for _, name := range names {
+		if _, ok := files[name]; !ok {
+			return nil, fmt.Errorf("archive missing required binary %s", name)
+		}
+	}
+	return files, nil
+}
+
+// ExtractBinary pulls ONE executable out of a release archive into dstDir
+// and returns its path. binaryName is the bare name ("stripe"); ".exe" is
+// appended for windows unless already present. The entry is matched by base
+// name wherever it sits in the archive, and written under dstDir at that
+// constant name — extractNamed's zip-slip immunity, unchanged.
+//
+// This is the plugin-update path (`quild plugin-update`): one binary, no
+// manifest, no tiers. Quil's own stage keeps extractBinaries above.
+func ExtractBinary(archivePath, binaryName, goos, dstDir string) (string, error) {
+	if binaryName == "" || binaryName != filepath.Base(binaryName) {
+		return "", fmt.Errorf("binary name %q is not a bare file name", binaryName)
+	}
+	name := binaryName
+	if goos == "windows" && !strings.HasSuffix(strings.ToLower(name), ".exe") {
+		name += ".exe"
+	}
+	files, err := extractNamed(archivePath, dstDir, goos, []string{name})
+	if err != nil {
+		return "", err
+	}
+	if _, ok := files[name]; !ok {
+		return "", fmt.Errorf("archive has no %s", name)
+	}
+	return filepath.Join(dstDir, name), nil
+}
+
+// extractNamed writes every archive entry whose BASE name is one of wanted
+// to dir under that name, and returns name → sha256 for the ones it found.
+// Archive paths are never used for anything but the base-name match, so a
+// hostile "../../x" entry can only ever land as dir/x.
+func extractNamed(archivePath, dir, goos string, wanted []string) (map[string]string, error) {
 	files := make(map[string]string)
+	fold := goos == "windows"
 
 	writeOne := func(base string, r io.Reader) error {
 		out, err := os.OpenFile(filepath.Join(dir, base), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
@@ -283,7 +396,7 @@ func extractBinaries(archivePath, dir, goos string) (map[string]string, error) {
 		}
 		defer zr.Close()
 		for _, f := range zr.File {
-			name := matchBinary(wanted, f.Name)
+			name := matchBinary(wanted, f.Name, fold)
 			if name == "" {
 				continue
 			}
@@ -317,23 +430,13 @@ func extractBinaries(archivePath, dir, goos string) (map[string]string, error) {
 			if err != nil {
 				return nil, err
 			}
-			name := matchBinary(wanted, hdr.Name)
+			name := matchBinary(wanted, hdr.Name, fold)
 			if hdr.Typeflag != tar.TypeReg || name == "" {
 				continue
 			}
 			if err := writeOne(name, tr); err != nil {
 				return nil, err
 			}
-		}
-	}
-
-	// Named rather than counted. files now also holds whatever OPTIONAL entries
-	// the archive happened to carry, so a length compare would pass an archive
-	// with the helper and no quild — the split-pair case the count was there to
-	// catch in the first place.
-	for _, name := range names {
-		if _, ok := files[name]; !ok {
-			return nil, fmt.Errorf("archive missing required binary %s", name)
 		}
 	}
 	return files, nil

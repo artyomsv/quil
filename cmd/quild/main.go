@@ -60,6 +60,13 @@ func main() {
 		runCodexHook()
 		return
 	}
+	// `quild plugin-update`: replaces a plugin's binary as a pane's child
+	// (see cmd/quild/pluginupdate.go). Same placement rule as the hooks —
+	// it reads no QUIL_HOME, so the dev-mode blocks below must not run
+	// first and re-point a dev daemon's child at a directory it never uses.
+	if len(os.Args) > 1 && os.Args[1] == "plugin-update" {
+		os.Exit(runPluginUpdate(os.Args[2:]))
+	}
 
 	// Build-time dev mode: auto-set QUIL_HOME before everything except the
 	// claude-hook fast path above (which must honor the spawning daemon's dir).

@@ -119,6 +119,84 @@ func TestChecker_Release_RejectsUnsafeTags(t *testing.T) {
 	}
 }
 
+// TestChecker_RepoOverridesPath: a plugin's upstream is any GitHub repo, and
+// both endpoints follow it.
+func TestChecker_RepoOverridesPath(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Write([]byte(`{"tag_name":"v0.0.9"}`))
+	}))
+	defer srv.Close()
+
+	c := &Checker{BaseURL: srv.URL, Repo: "example-owner/example-tool"}
+	if _, err := c.Latest(context.Background()); err != nil {
+		t.Fatalf("Latest: %v", err)
+	}
+	if want := "/repos/example-owner/example-tool/releases/latest"; gotPath != want {
+		t.Errorf("Latest requested %q, want %q", gotPath, want)
+	}
+	if _, err := c.Release(context.Background(), "0.0.9"); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	if want := "/repos/example-owner/example-tool/releases/tags/v0.0.9"; gotPath != want {
+		t.Errorf("Release requested %q, want %q", gotPath, want)
+	}
+}
+
+// TestChecker_EmptyRepoIsQuil: every existing call site builds a Checker
+// without Repo, and must keep reaching Quil's own releases.
+func TestChecker_EmptyRepoIsQuil(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Write([]byte(`{"tag_name":"v0.0.9"}`))
+	}))
+	defer srv.Close()
+
+	if _, err := (&Checker{BaseURL: srv.URL}).Latest(context.Background()); err != nil {
+		t.Fatalf("Latest: %v", err)
+	}
+	if want := "/repos/" + DefaultRepo + "/releases/latest"; gotPath != want || DefaultRepo != "artyomsv/quil" {
+		t.Errorf("requested %q (DefaultRepo %q), want %q", gotPath, DefaultRepo, want)
+	}
+}
+
+// The repo becomes two URL path segments; like the tag, anything else is
+// refused before a request is built.
+func TestChecker_Release_RejectsUnsafeRepos(t *testing.T) {
+	var requested []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requested = append(requested, r.URL.Path)
+		w.Write([]byte(`{"tag_name":"v1.0.0"}`))
+	}))
+	defer srv.Close()
+
+	for _, repo := range []string{
+		"no-slash",
+		"owner/",
+		"/name",
+		"owner/name/extra",
+		"../name",
+		"owner/..",
+		"owner/name?x=1",
+		"owner/name#frag",
+		"owner/na%2fme",
+		`owner\name`,
+		"owner name/tool",
+	} {
+		t.Run(repo, func(t *testing.T) {
+			c := &Checker{BaseURL: srv.URL, Repo: repo}
+			if _, err := c.Latest(context.Background()); err == nil {
+				t.Errorf("Latest with Repo=%q error = nil, want rejection", repo)
+			}
+		})
+	}
+	if len(requested) != 0 {
+		t.Errorf("a rejected repo still reached the network: %v", requested)
+	}
+}
+
 func TestChecker_Release_ByTag(t *testing.T) {
 	tests := []struct {
 		name, tag, wantPath string

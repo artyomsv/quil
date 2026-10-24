@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"log"
 	"os"
@@ -12,10 +11,10 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
-	"strconv"
 	"strings"
 	"time"
 
+	"github.com/artyomsv/quil/internal/binswap"
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/update"
 	versionpkg "github.com/artyomsv/quil/internal/version"
@@ -136,14 +135,14 @@ func swapPair(quilTarget, quildTarget, stagedDir string, man *update.Manifest, g
 	names := update.BinaryNames(goos)
 	quilName, quildName := names[0], names[1]
 
-	quilBackup, err := swapOne(quilTarget, filepath.Join(stagedDir, quilName))
+	quilBackup, err := binswap.SwapOne(quilTarget, filepath.Join(stagedDir, quilName))
 	if err != nil {
 		return err
 	}
-	if _, err := swapOne(quildTarget, filepath.Join(stagedDir, quildName)); err != nil {
+	if _, err := binswap.SwapOne(quildTarget, filepath.Join(stagedDir, quildName)); err != nil {
 		// Roll the first swap back so quil/quild stay version-matched, from
-		// the path swapOne actually used — it is not always "<target>.old"
-		// (see freeBackupPath). os.Rename replaces an existing destination
+		// the path SwapOne actually used — it is not always "<target>.old"
+		// (see binswap.freeBackupPath). os.Rename replaces an existing destination
 		// on both Windows and POSIX, so quilTarget (holding the
 		// just-installed, non-running new binary) doesn't need removing
 		// first — an unchecked Remove here would leave NO quil binary on
@@ -252,23 +251,25 @@ func installOptional(quilTarget, stagedDir string, man *update.Manifest, goos st
 			// Nothing to displace. This is the ordinary case for an install
 			// that has only ever been upgraded, which is how the helper came
 			// to be missing in the first place.
-			if cpErr := copyFile(staged, target); cpErr != nil {
-				// Remove the partial file. copyFile opens O_CREATE|O_TRUNC
-				// BEFORE io.Copy, so a failure mid-transfer (disk full, an AV
-				// denial) leaves a SHORT — usually zero-byte — executable
-				// behind, and this branch has no backup to rename back the way
-				// swapOne does.
+			if cpErr := binswap.CopyFile(staged, target); cpErr != nil {
+				// Make sure no partial file stands at the target. CopyFile
+				// writes "<target>.new" and renames it into place only once
+				// the copy is complete, so a failure mid-transfer (disk full,
+				// an AV denial) now leaves nothing at this path — and this
+				// Remove is the guard that keeps it so should that ever
+				// change, because this branch has no backup to rename back
+				// the way SwapOne does.
 				//
-				// Leaving it is worse than never having tried, which is what
-				// makes this a correctness fix rather than tidiness. The stated
-				// cost of a failed helper install is one console flash, because
-				// `notify setup` falls back to `quil.exe activate` when it finds
-				// no helper — but activatecmd.go admits any non-directory, so a
-				// zero-byte file is accepted as the real thing and registered as
-				// the quil:// handler. Every later toast click then fails inside
-				// CreateProcess with no UI at all: a DEAD handler instead of a
-				// working fallback, in precisely the failure this path exists to
-				// survive.
+				// Leaving a short file would be worse than never having
+				// tried. The stated cost of a failed helper install is one
+				// console flash, because `notify setup` falls back to
+				// `quil.exe activate` when it finds no helper — but
+				// activatecmd.go admits any non-directory, so a zero-byte
+				// file is accepted as the real thing and registered as the
+				// quil:// handler. Every later toast click then fails inside
+				// CreateProcess with no UI at all: a DEAD handler instead of
+				// a working fallback, in precisely the failure this path
+				// exists to survive.
 				if rmErr := os.Remove(target); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
 					cpErr = fmt.Errorf("%w (and removing the partial file failed: %v)", cpErr, rmErr)
 				}
@@ -276,11 +277,11 @@ func installOptional(quilTarget, stagedDir string, man *update.Manifest, goos st
 			}
 			continue
 		}
-		// A REPLACEMENT goes through swapOne rather than a bare copy: NT
+		// A REPLACEMENT goes through SwapOne rather than a bare copy: NT
 		// refuses to overwrite an executable while a process still runs it as
 		// its image, and a toast clicked a second ago is exactly that. The
 		// rename-aside sidesteps it; cleanupAppliedUpdate sweeps the backup.
-		if _, err := swapOne(target, staged); err != nil {
+		if _, err := binswap.SwapOne(target, staged); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -305,133 +306,36 @@ const (
 // name — so P2 can unlink the backup P1 is mid-swap on, and if P1's copy then
 // fails, its rollback finds nothing and NO binary is left at the target path.
 // The racing parties are separate processes, so the exclusion has to live on
-// disk rather than in a mutex.
+// disk rather than in a mutex. The lock itself is binswap.AcquireLock — the
+// pid-recording O_EXCL file, abandoned-lock takeover and own-lock-only
+// release — shared with `quild plugin-update`, which locks each tool it
+// swaps the same way.
 func acquireApplyLock(dir string) (release func(), ok bool) {
-	noop := func() {}
 	if err := os.MkdirAll(dir, 0700); err != nil {
-		return noop, false
+		return func() {}, false
 	}
-	path := filepath.Join(dir, applyLockName)
-	self := strconv.Itoa(os.Getpid())
-	// Two attempts: the second exists only to claim a lock found abandoned on
-	// the first. If another process wins that race, O_EXCL fails again and we
-	// back off rather than looping.
-	for attempt := 0; attempt < 2; attempt++ {
-		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-		if err == nil {
-			fmt.Fprintln(f, self)
-			f.Close()
-			// Release only OUR lock. If this swap somehow outran the staleness
-			// window, another process may already hold the path, and removing
-			// it by name would hand a third process a lock while the second is
-			// mid-swap — precisely the interleaving this exists to prevent.
-			return func() {
-				if data, rErr := os.ReadFile(path); rErr == nil &&
-					strings.TrimSpace(string(data)) == self {
-					os.Remove(path)
-				}
-			}, true
-		}
-		if !applyLockAbandoned(path) {
-			return noop, false
-		}
-		os.Remove(path)
-	}
-	return noop, false
+	return binswap.AcquireLock(filepath.Join(dir, applyLockName), applyLockStale)
 }
 
-// applyLockAbandoned reports whether the lock at path can be taken over.
-//
-// The recorded pid makes this mostly a fact rather than a guess: a lock whose
-// holder is gone is reclaimable immediately, without waiting out the age
-// window. The age cap stays as the backstop for the two cases liveness cannot
-// answer — an unparseable/legacy lock file, and a pid since recycled by an
-// unrelated long-running process, which would otherwise read as "held"
-// forever. A live holder older than the cap is therefore still treated as
-// abandoned; the swap it guards is two file copies, so it cannot legitimately
-// run that long, and the ownership check in release() keeps the takeover safe
-// if it somehow does.
+// applyLockAbandoned reports whether the lock at path can be taken over: a
+// holder that is gone, or a lock older than applyLockStale (the backstop for
+// a pid since recycled — the swap it guards is two file copies and cannot
+// legitimately run that long).
 func applyLockAbandoned(path string) bool {
-	info, err := os.Stat(path)
-	if err != nil {
-		return false // cannot judge it — leave it alone
-	}
-	if data, rErr := os.ReadFile(path); rErr == nil {
-		if pid, pErr := strconv.Atoi(strings.TrimSpace(string(data))); pErr == nil && pid > 0 {
-			if alive, _ := processProbe(pid); !alive {
-				return true
-			}
-		}
-	}
-	return time.Since(info.ModTime()) > applyLockStale
+	return binswap.LockAbandoned(path, applyLockStale)
 }
 
 // applyInProgress reports whether another process holds a live apply lock.
+// It fails CLOSED on anything but "no lock": if the lock cannot even be
+// stat'd, we cannot prove no swap is running, and the cost of skipping a
+// cleanup sweep is a few leftover files.
 func applyInProgress(dir string) bool {
-	path := filepath.Join(dir, applyLockName)
-	if _, err := os.Stat(path); err != nil {
-		// Fail CLOSED on anything but "no lock": if the lock cannot even be
-		// stat'd, we cannot prove no swap is running, and the cost of
-		// skipping a cleanup sweep is a few leftover files.
-		return !errors.Is(err, fs.ErrNotExist)
-	}
-	return !applyLockAbandoned(path)
+	return binswap.LockHeld(filepath.Join(dir, applyLockName), applyLockStale)
 }
 
-// maxBackupSlots bounds the ".old.N" search in freeBackupPath. Reaching it
-// means N surviving processes each pin a distinct backup — a real problem
-// worth reporting rather than probing forever.
-const maxBackupSlots = 20
-
-// freeBackupPath returns a path that can receive target's backup, clearing a
-// stale backup left by an earlier update when it can. The canonical
-// "<target>.old" is preferred and recycled whenever it is deletable.
-//
-// When it is NOT deletable, fall back to "<target>.old.1", ".2", … On Windows
-// a backup is unremovable whenever some process still runs it as its image:
-// an earlier update renamed a live quild aside, and that daemon kept running
-// from the renamed file. NT refuses DELETE on a mapped image, which fails
-// os.Remove AND the rename-replace that follows (MOVEFILE_REPLACE_EXISTING
-// must delete the destination first) — both with "Access is denied". Without
-// a fallback, one such leftover wedges EVERY future update permanently, since
-// nothing ever clears it. Third-party handles (antivirus, indexers) pin files
-// the same way, so this is not specific to orphaned daemons.
-func freeBackupPath(target string) (string, error) {
-	for i := 0; i <= maxBackupSlots; i++ {
-		path := target + ".old"
-		if i > 0 {
-			path = fmt.Sprintf("%s.%d", path, i)
-		}
-		os.Remove(path) // best-effort: a pinned backup survives this
-		if _, err := os.Lstat(path); errors.Is(err, fs.ErrNotExist) {
-			return path, nil
-		}
-	}
-	return "", fmt.Errorf("no free backup slot for %s (%s.old and .1-.%d are all occupied and undeletable)",
-		target, target, maxBackupSlots)
-}
-
-// swapOne backs the target up (renaming a running executable is legal on
-// Windows — NT locks the image by open handle, not path) and copies the
-// staged binary into place. Returns the backup path actually used so the
-// caller can roll back; it is usually "<target>.old" but see freeBackupPath.
-// On failure the backup is renamed back.
-func swapOne(target, staged string) (string, error) {
-	backup, err := freeBackupPath(target)
-	if err != nil {
-		return "", fmt.Errorf("back up %s: %w", target, err)
-	}
-	if err := os.Rename(target, backup); err != nil {
-		return "", fmt.Errorf("back up %s: %w", target, err)
-	}
-	if err := copyFile(staged, target); err != nil {
-		if rbErr := os.Rename(backup, target); rbErr != nil {
-			return "", fmt.Errorf("install %s: %w (AND rollback failed: %v — restore %s manually)", target, err, rbErr, backup)
-		}
-		return "", fmt.Errorf("install %s: %w", target, err)
-	}
-	return backup, nil
-}
+// The rename-aside swap itself (freeBackupPath, SwapOne, RemoveBackups,
+// CopyFile) and the lock live in internal/binswap since `quild
+// plugin-update` shares them.
 
 // sameDir reports whether two files live in the same directory, comparing by
 // identity rather than by string. exec.LookPath can hand back a different
@@ -448,36 +352,6 @@ func sameDir(a, b string) bool {
 		return false
 	}
 	return os.SameFile(fa, fb)
-}
-
-// removeBackups deletes every backup swapOne may have left for target — the
-// canonical "<target>.old" plus any ".old.N" fallbacks. Best-effort and
-// gap-tolerant (slot 1 can outlive slot 2): a backup still pinned by a
-// surviving process stays, and a later launch retries. Built by construction
-// rather than filepath.Glob so an install path containing glob metacharacters
-// ("[", "*") still matches its own backups.
-func removeBackups(target string) {
-	os.Remove(target + ".old")
-	for i := 1; i <= maxBackupSlots; i++ {
-		os.Remove(fmt.Sprintf("%s.old.%d", target, i))
-	}
-}
-
-func copyFile(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
-	if err != nil {
-		return err
-	}
-	_, cpErr := io.Copy(out, in)
-	if closeErr := out.Close(); cpErr == nil {
-		cpErr = closeErr
-	}
-	return cpErr
 }
 
 // respawnArgs rebuilds the child's argv for an update respawn.
@@ -610,14 +484,14 @@ func cleanupAppliedUpdate() {
 	if exeErr != nil {
 		return
 	}
-	removeBackups(exe)
+	binswap.RemoveBackups(exe)
 	sweepOptionalBackups(exe, runtime.GOOS)
 	// Only sweep the daemon's backups when it sits next to us.
 	// findDaemonBinaryForUpgrade falls through to a PATH lookup, and deleting
 	// "<path>.old[.N]" in a directory this install does not own is not ours to
 	// do — the more so now that the sweep covers the numbered slots too.
 	if quild := findDaemonBinaryForUpgrade(); filepath.IsAbs(quild) && sameDir(quild, exe) {
-		removeBackups(quild)
+		binswap.RemoveBackups(quild)
 	}
 }
 
@@ -640,7 +514,7 @@ func cleanupAppliedUpdate() {
 func sweepOptionalBackups(exe, goos string) {
 	dir := filepath.Dir(exe)
 	for _, name := range update.OptionalBinaryNames(goos) {
-		removeBackups(filepath.Join(dir, name))
+		binswap.RemoveBackups(filepath.Join(dir, name))
 	}
 }
 

@@ -31,7 +31,7 @@ var daemonToClient = []string{
 	ipc.MsgHelloResp, ipc.MsgTokenCreateResp, ipc.MsgTokenListResp, ipc.MsgTokenRevokeResp,
 	ipc.MsgError, ipc.MsgWorkspaceState, ipc.MsgPaneOutput, ipc.MsgPaneEvent, ipc.MsgPaneSizes,
 	ipc.MsgPluginError, ipc.MsgLinkLost, ipc.MsgHighlightPane, ipc.MsgEventDismissed, ipc.MsgPaneSeen,
-	ipc.MsgAuthChallenge,
+	ipc.MsgAuthChallenge, ipc.MsgPluginFixResp, ipc.MsgPluginUpdateResp,
 }
 
 // msgConstants reads every Msg* string constant declared in internal/ipc's
@@ -200,6 +200,7 @@ var wantClassTable = map[string]Class{
 	ipc.MsgNoteSet:               ClassAct,
 	ipc.MsgSharedImport:          ClassAct,
 	ipc.MsgCreateFromTemplateReq: ClassAct,
+	ipc.MsgPluginFixReq:          ClassAct,
 	// act: disclosure beyond the workspace.
 	ipc.MsgBrowseDirReq:           ClassAct,
 	ipc.MsgDirsExistReq:           ClassAct,
@@ -215,12 +216,13 @@ var wantClassTable = map[string]Class{
 	ipc.MsgResourceReportReq:      ClassAct,
 
 	// admin: full only. Daemon lifecycle and daemon-wide settings.
-	ipc.MsgShutdown:       ClassAdmin,
-	ipc.MsgReloadPlugins:  ClassAdmin,
-	ipc.MsgOverlayPolicy:  ClassAdmin,
-	ipc.MsgKillProcessReq: ClassAdmin,
-	ipc.MsgStageUpdateReq: ClassAdmin,
-	ipc.MsgUpdateCheckReq: ClassAdmin,
+	ipc.MsgShutdown:        ClassAdmin,
+	ipc.MsgReloadPlugins:   ClassAdmin,
+	ipc.MsgOverlayPolicy:   ClassAdmin,
+	ipc.MsgKillProcessReq:  ClassAdmin,
+	ipc.MsgStageUpdateReq:  ClassAdmin,
+	ipc.MsgPluginUpdateReq: ClassAdmin,
+	ipc.MsgUpdateCheckReq:  ClassAdmin,
 
 	// local: the local socket only, whatever the level.
 	ipc.MsgTokenCreateReq: ClassLocal,
@@ -294,6 +296,8 @@ var wantClassTable = map[string]Class{
 	ipc.MsgPaneSeen:                ClassNever,
 	ipc.MsgAuthChallenge:           ClassNever,
 	ipc.MsgAuthProof:               ClassNever,
+	ipc.MsgPluginFixResp:           ClassNever,
+	ipc.MsgPluginUpdateResp:        ClassNever,
 }
 
 func TestClassTable_MatchesSpec(t *testing.T) {

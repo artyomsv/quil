@@ -33,8 +33,10 @@ func TestAllows_ClassTable(t *testing.T) {
 		{ipc.MsgSwitchTab, false, true, true, true},
 		{ipc.MsgBrowseDirReq, false, true, true, true},
 		{ipc.MsgPaneHistoryReq, false, true, true, true},
+		{ipc.MsgPluginFixReq, false, true, true, true},
 		{ipc.MsgShutdown, false, false, true, true},
 		{ipc.MsgKillProcessReq, false, false, true, true},
+		{ipc.MsgPluginUpdateReq, false, false, true, true},
 		{ipc.MsgTokenCreateReq, false, false, false, true},
 		{ipc.MsgWorkspaceState, false, false, false, false},
 		{ipc.MsgAuthProof, false, false, false, false},
@@ -51,6 +53,42 @@ func TestAllows_ClassTable(t *testing.T) {
 					tt.ro, tt.std, tt.full, tt.loc)
 			}
 		})
+	}
+}
+
+// A handler fix runs in the pane, like typing: standard rights. Not now
+// rides the same type on purpose — a standard-token user must be able to
+// dismiss the dialog they can see.
+func TestRights_PluginFixIsAct(t *testing.T) {
+	if c := ClassOf(ipc.MsgPluginFixReq); c != ClassAct {
+		t.Fatalf("plugin_fix_req class = %d, want ClassAct", c)
+	}
+	m := msgOf(t, ipc.MsgPluginFixReq, ipc.PluginFixReqPayload{PaneID: "p", Fix: ipc.PluginFixNotNow, Version: "1.55.1"})
+	if ok, _ := Allows(LevelStandard, "tcp", m); !ok {
+		t.Fatal("standard refused plugin_fix_req")
+	}
+	if ok, _ := Allows(LevelReadOnly, "tcp", m); ok {
+		t.Fatal("read-only allowed plugin_fix_req")
+	}
+	if c := ClassOf(ipc.MsgPluginFixResp); c != ClassNever {
+		t.Fatalf("plugin_fix_resp class = %d, want ClassNever", c)
+	}
+}
+
+// An update replaces an executable on the daemon host: full rights only.
+func TestRights_PluginUpdateIsAdmin(t *testing.T) {
+	if c := ClassOf(ipc.MsgPluginUpdateReq); c != ClassAdmin {
+		t.Fatalf("plugin_update_req class = %d, want ClassAdmin", c)
+	}
+	m := msgOf(t, ipc.MsgPluginUpdateReq, ipc.PluginUpdateReqPayload{PaneID: "p", Version: "1.55.1"})
+	if ok, _ := Allows(LevelStandard, "tcp", m); ok {
+		t.Fatal("standard allowed plugin_update_req")
+	}
+	if ok, _ := Allows(LevelFull, "tcp", m); !ok {
+		t.Fatal("full refused plugin_update_req")
+	}
+	if c := ClassOf(ipc.MsgPluginUpdateResp); c != ClassNever {
+		t.Fatalf("plugin_update_resp class = %d, want ClassNever", c)
 	}
 }
 

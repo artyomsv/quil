@@ -45,7 +45,9 @@ func TestCheckForward_FirstMustBeWebHelloWithLeasedID(t *testing.T) {
 
 func TestCheckForward_RefusesUnlistedTypes(t *testing.T) {
 	g := &forwardGate{leasedID: "web-p-1", helloSeen: true}
-	for _, typ := range []string{"token_create_req", ipc.MsgShutdown, "create_pane", "destroy_pane", "create_pane_req", "create_tab", ipc.MsgCreateProject, ipc.MsgMergeProjects, ipc.MsgSharedImport, "subscribe", MsgWebWelcome, "invented_type"} {
+	// plugin_fix_req and plugin_update_req stay out: the browser has no
+	// plugin_error dialog, and an update replaces an executable on the host.
+	for _, typ := range []string{"token_create_req", ipc.MsgShutdown, "create_pane", "destroy_pane", "create_pane_req", "create_tab", ipc.MsgCreateProject, ipc.MsgMergeProjects, ipc.MsgSharedImport, "subscribe", MsgWebWelcome, "invented_type", ipc.MsgPluginFixReq, ipc.MsgPluginUpdateReq} {
 		fwd, refuse, fatal := g.check(msg(t, typ, "r1", struct{}{}))
 		if fwd != nil || fatal != nil || refuse == nil {
 			t.Fatalf("%s: fwd=%v refuse=%v fatal=%v", typ, fwd, refuse, fatal)

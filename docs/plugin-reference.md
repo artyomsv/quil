@@ -411,7 +411,7 @@ env = ["SSH_AUTH_SOCK=/run/ssh-agent.sock"]
 
 ## Error Handlers — `[[error_handlers]]`
 
-Match PTY output against regex patterns to show help dialogs or log errors.
+Match the tool's output against regex patterns to show help dialogs or log errors. Patterns are tested against **each chunk of output** as the tool writes it (ANSI escape codes stripped), so a full-screen tool that redraws its error with cursor moves and no newline, or a tool that prints its last line and exits, still matches. Every handler that matches fires, in file order, and each handler's dialog is raised **once per run** of the tool however often the text repeats (the `[update]` notice below is the one pattern matched on complete lines instead).
 
 ```toml
 [[error_handlers]]
@@ -434,10 +434,12 @@ action = "dialog"
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `pattern` | string | **Yes** | — | Go regex matched against PTY output. Use `\|` alternation for multiple patterns. Use raw TOML strings (`'...'`) to avoid double-escaping. |
+| `pattern` | string | **Yes** | — | Go regex matched against each output chunk (ANSI stripped). Use `\|` alternation for multiple patterns. Use raw TOML strings (`'...'`) to avoid double-escaping. |
 | `title` | string | No | `""` | Title shown in the error dialog. |
 | `message` | string | No | `""` | Body text of the error dialog. Supports `{host}`, `{user}`, `{port}` placeholder expansion from the pane's instance args. Use TOML multi-line strings (`"""..."""`) for longer messages. |
 | `action` | string | No | `"log"` | What to do when the pattern matches. |
+| `fixes` | array of tables | No | — | Buttons on the dialog that run a command in the pane. See [Fix actions](#fix-actions--error_handlersfixes). |
+| `offer_update` | bool | No | `false` | Put the `[update]` table's **Update** button on this dialog too, offering the tool's **latest GitHub release** (looked up when the handler fires, once per run of the tool). For a tool too old to print its own update notice — a Stripe CLI that fails on a flag newer CLIs require exits before it says a newer version exists. Requires `[update]` with `github`; setting it without fails plugin load. When the lookup fails, the dialog shows without the button. |
 
 ### Actions
 
@@ -448,6 +450,39 @@ action = "dialog"
 
 Invalid action values are logged as a warning and treated as `"log"`.
 
+### Fix actions — `[[error_handlers.fixes]]`
+
+A handler with `action = "dialog"` can carry **fix actions**: one button per entry. Pressing a button runs `run` **in the same pane**, in place of the pane's normal command, for exactly one run. You watch it happen in the pane; when it exits with status 0 and `then = "restart"`, the pane starts its normal command again. A non-zero exit leaves the pane on the fix's output with a one-line `fix failed (exit N)` status, and `Alt+R` restarts the pane as usual.
+
+```toml
+[[error_handlers]]
+pattern = 'api_key_expired|Expired API Key|not logged in|login required'
+title = "Stripe login expired"
+message = "Stripe keys from 'stripe login' last 90 days. Log in again to continue."
+action = "dialog"
+
+  [[error_handlers.fixes]]
+  name = "login"
+  label = "Log in"
+  run = ["stripe", "login"]
+  then = "restart"
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `name` | string | **Yes** | — | Identifier a client sends to ask for this fix. Unique across **all** of the plugin's handlers. `update` is reserved for the `[update]` table's own button and fails plugin load. |
+| `label` | string | No | `name` | Button text. Its first free letter becomes the button's shortcut key. |
+| `run` | array of strings | **Yes** | — | The command to run, as argv. The first element is resolved like `[command] cmd` (`path` override → `PATH` → search). |
+| `then` | string | No | `"restart"` | After a zero exit: `"restart"` starts the pane's normal command again; `"stay"` leaves the pane on the fix's output. |
+
+A few things to know:
+
+- **The client never sends a command.** It sends the fix's `name`; the daemon looks the command up in its own copy of the plugin file, the same way runtime toggles are resolved. A name the file does not have is refused, and the dialog closes with the reason in the status bar.
+- **Enter never runs a fix.** The dialog opens on its own, while you may be typing at the pane, so focus starts on **Close**. A fix needs the arrow keys and Enter, or its letter — and letters are ignored for the first moment after the dialog opens.
+- **One fix at a time.** While a fix runs, the pane shows `running fix: <label>` and `Alt+R` is refused for that pane. Nothing is persisted: a daemon that restarts mid-fix brings the pane back with its normal command.
+- **Not available** in a sandbox pane (its binary is inside the container) or an overlay pane.
+- With `--remote` or `[[destinations]]`, the fix runs where the pane runs: on the daemon's host.
+
 ### Message Placeholders
 
 Error messages support these placeholders, extracted from the pane's instance args:
@@ -457,6 +492,83 @@ Error messages support these placeholders, extracted from the pane's instance ar
 | `{host}` | Hostname from `user@host` pattern in args | `example.com` |
 | `{user}` | Username from `user@host` pattern in args | `admin` |
 | `{port}` | Port from `-p <port>` flag or `host:port` in args | `2222` |
+
+---
+
+## Updating the Tool — `[update]`
+
+Declare how Quil learns that the tool's binary is outdated and how it replaces it. When the tool prints its own "a newer version is available" line, Quil opens a dialog — **Update available: Stripe** / `Stripe 1.55.1 is available; 1.31.1 is installed.` (the installed version appears when the plugin scrapes a `version` value) — with **Update** and **Not now**. Nothing is checked on a timer and nothing is ever updated without a key press.
+
+```toml
+[update]
+notice = 'newer version of the Stripe CLI is available, please update to: v?(\d+\.\d+\.\d+)'
+github = "stripe/stripe-cli"
+binary = "stripe"
+
+[update.assets]
+windows_amd64 = "stripe_{version}_windows_x86_64.zip"
+darwin_amd64 = "stripe_{version}_mac-os_x86_64.tar.gz"
+darwin_arm64 = "stripe_{version}_mac-os_arm64.tar.gz"
+linux_amd64 = "stripe_{version}_linux_x86_64.tar.gz"
+linux_arm64 = "stripe_{version}_linux_arm64.tar.gz"
+
+[update.checksums]
+windows = "stripe-windows-checksums.txt"
+darwin = "stripe-mac-checksums.txt"
+linux = "stripe-linux-checksums.txt"
+
+[[update.managers]]
+name = "brew"
+match = '/Cellar/|/homebrew/|/linuxbrew/'
+run = ["brew", "upgrade", "stripe/stripe-cli/stripe"]
+
+[[update.managers]]
+name = "scoop"
+match = '(?i)\\scoop\\'
+run = ["scoop", "update", "stripe"]
+
+[[update.managers]]
+name = "winget"
+match = '(?i)\\Microsoft\\WinGet\\(Packages|Links)\\'
+run = ["winget", "upgrade", "--id", "Stripe.StripeCli"]
+```
+
+Write `assets` and `checksums` as the sub-tables shown. A multi-line inline table (`assets = { ... }` spread over several lines) is TOML 1.1 and is rejected.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `notice` | string | **Yes** | — | Go regex matched against each **complete output line** (a line split across two writes is joined first, and the last unfinished line is matched when the tool exits), independently of the error handlers. **Capture group 1 is the offered version**; a notice without a capture group fails plugin load. |
+| `github` | string | With `binary`, `assets`, `checksums` | — | GitHub repository (`owner/name`) whose release carries the download. |
+| `binary` | string | With `github` | — | File name of the binary inside the release archive (`.exe` is appended on Windows). |
+| `assets` | table | With `github` | — | Release asset per platform, keyed `<goos>_<goarch>` (`windows_amd64`, `darwin_arm64`, `linux_amd64`, …). `{version}` expands to the offered version without its `v`. |
+| `checksums` | table | With `github` | — | Checksums file per OS, keyed `windows`, `darwin`, `linux`. A SHA-256 list in the usual `<hash>  <file>` form, from the same release. |
+
+`github`, `binary`, `assets` and `checksums` describe one download and are **all-or-nothing**: naming some of them fails plugin load. A plugin whose tool is only ever installed through a package manager may give `notice` and `managers` alone.
+
+### Package managers — `[[update.managers]]`
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `name` | string | **Yes** | — | Unique label, shown in the daemon log. |
+| `match` | string | **Yes** | — | Go regex tested against the binary's **symlink-resolved** path. |
+| `run` | array of strings | **Yes** | — | The manager's own upgrade command, as argv. |
+
+### How Update runs
+
+1. The daemon resolves the path of the binary the pane runs and follows symlinks.
+2. The first manager whose `match` hits that path owns the binary: its `run` is executed in the pane, exactly like a fix action. A brew-, scoop- or winget-owned file is never overwritten by a download — overwriting a managed file desynchronises the manager's own records.
+3. With no match, the manual path runs in the pane: download the asset for this platform from the release tagged `v<offered>` (never "latest", so the dialog never says one version and installs another), find its line in the checksums file, verify the SHA-256, extract `binary`, rename the installed file aside as a backup and move the new one in. A failed swap renames the backup back. The pane prints each step and the tool's version before and after (via `[command] detect`).
+
+The manual path **refuses**, with a clear message in the pane and nothing replaced:
+
+- a binary in a **system location** — `/usr/bin`, `/usr/sbin`, `/usr/lib*`, `/usr/libexec`, `/bin`, `/sbin`, `/snap`, `/nix`, `%ProgramFiles%`, `%ProgramFiles(x86)%`, `%WINDIR%`, any `WindowsApps` folder. These belong to a package manager Quil does not know (apt, dnf, pacman, snap, nix, an MSI, the Store); update them with that manager. `/usr/local/bin` and `/opt` are **not** refused: they are where a manual tarball install lands;
+- no asset for this platform, no checksums entry for the asset, a checksum mismatch, or a target directory that is not writable.
+
+**Update needs a full-access token.** It replaces an executable on the daemon's host, so the button is greyed with the reason for a client without admin rights. **Not now** works for everyone, records the declined version daemon-side (so every client agrees and it survives a restart), and holds until the tool reports a version newer than the one declined. The Update button also asks once more — `Replace <path>? y/n`, or `Update with <manager>? y/n` when a package manager owns the binary — and takes only `y`. Both buttons act only on the version the dialog offered: the daemon accepts an Update or a Not now for that version alone. In an overlay pane (lazygit's slot) the buttons are greyed — a fix there would have no pane to come back to.
+
+While a fix or an update runs, the pane's top border reads `running fix: <label> (Ctrl+C stops)`; Ctrl+C ends the child like any other, and `Alt+R` then restarts the pane.
+
+**What the checksum does and does not prove.** The SHA-256 check proves the download arrived intact and is the file the release page lists. It does not prove who published it: the `github` repository in a plugin file is trusted the way `cmd` is. Whoever can edit a plugin TOML already chooses which program the pane runs, which is the same power as choosing where its binary comes from — on a remote host, the plugin file belongs to that host.
 
 ---
 
@@ -536,6 +648,10 @@ These rules are enforced when loading a TOML plugin file:
 | `strategy` must be a valid value | Plugin file skipped with error log |
 | Invalid regex in `pattern` | Pattern skipped with warning log; plugin still loads |
 | Invalid `action` value | Defaults to `"log"` with warning log |
+| A fix without `name` or `run`, a duplicate fix `name`, the reserved name `update`, or an unknown `then` | Plugin file skipped with error log |
+| `[update]` without `notice`, a `notice` that does not compile or has no capture group | Plugin file skipped with error log |
+| `[update]` naming some but not all of `github`, `binary`, `assets`, `checksums` | Plugin file skipped with error log |
+| A manager without `name`, `match` or `run`, a duplicate manager `name`, or a `match` that does not compile | Plugin file skipped with error log |
 | Missing `display_name` | Defaults to `name` |
 | Missing `category` | Defaults to `"tools"` |
 | Missing `ghost_buffer` | Defaults to `true` |
@@ -733,20 +849,33 @@ action = "dialog"
 
 ### Example 4: Webhook Listener
 
-A simple tool with default args, a form for URL override, and auth error handling.
+A simple tool with default args, a form for URL override, a login dialog with a **Log in** button, and an in-place update. This is the shipped `stripe.toml`.
 
 ```toml
+# Stripe — Webhook listener
+# Edit this file to customize the plugin. Delete it to restore defaults.
+
 [plugin]
 name = "stripe"
 display_name = "Stripe"
 category = "tools"
 description = "Stripe webhook listener"
+homepage = "https://github.com/stripe/stripe-cli"
+# v1: added `homepage` (shown greyed in Ctrl+N when the binary is missing).
+# v2: the login dialog gained a "Log in" button ([[error_handlers.fixes]]) and
+#     the pane offers to update an outdated Stripe CLI ([update]), and
+#     `stripe listen` passes --all-snapshot (required since CLI 2026-09).
+schema_version = 2
 
 [command]
 cmd = "stripe"
-args = ["listen"]
+# path = "E:/Tools/stripe/stripe.exe"  # uncomment to override PATH lookup
+# --all-snapshot forwards every snapshot event, which is what `stripe listen`
+# did without a filter before the CLI's September 2026 releases made one
+# required. Swap it for --all-thin or --events a,b to narrow it.
+args = ["listen", "--all-snapshot"]
 detect = "stripe --version"
-arg_template = ["listen", "--forward-to", "{url}"]
+arg_template = ["listen", "--all-snapshot", "--forward-to", "{url}"]
 
 [[command.form_fields]]
 name = "name"
@@ -763,15 +892,89 @@ default = "http://localhost:8080/webhook"
 name = "description"
 label = "Description"
 
+[display]
+dialog_width = 75
+
 [persistence]
 strategy = "rerun"
 ghost_buffer = true
 
+# `stripe login` keys expire after 90 days; `stripe listen` then exits with
+# `FATAL ... Expired API Key provided ... "code": "api_key_expired"`.
 [[error_handlers]]
-pattern = "not logged in|login required"
-title = "Stripe Authentication Required"
-message = "Run 'stripe login' in a terminal pane first."
+pattern = 'api_key_expired|Expired API Key|not logged in|login required'
+title = "Stripe login expired"
+message = "Stripe keys from 'stripe login' last 90 days. Log in again to continue."
 action = "dialog"
+
+  # A button on the dialog above. Runs in this pane in place of `stripe listen`;
+  # when it exits 0 the pane starts `stripe listen` again.
+  [[error_handlers.fixes]]
+  name = "login"
+  label = "Log in"
+  run = ["stripe", "login"]
+  then = "restart"
+
+# A pane created before --all-snapshot was in the arguments above, on a CLI
+# from September 2026 or later, which refuses to listen without a filter.
+[[error_handlers]]
+pattern = 'must specify events to forward'
+title = "Stripe needs an event filter"
+message = """
+This Stripe CLI requires --all-snapshot, --all-thin or --events.
+Close this pane and open a new Stripe pane:
+new panes pass --all-snapshot (all events, as before)."""
+action = "dialog"
+
+# The reverse: --all-snapshot on a CLI older than September 2026. Such a CLI
+# fails on the flag before it prints its own "newer version available" line,
+# so offer_update asks GitHub for the latest release and puts the Update
+# button on this dialog.
+[[error_handlers]]
+pattern = 'unknown flag: --all-snapshot'
+title = "Stripe CLI is too old"
+message = "This Stripe CLI does not know --all-snapshot, which newer Stripe CLIs require. Update installs the latest one."
+action = "dialog"
+offer_update = true
+
+# How Quil learns the binary is outdated and how it replaces it. The notice is
+# matched on complete output lines; capture group 1 is the offered version.
+[update]
+notice = 'newer version of the Stripe CLI is available, please update to: v?(\d+\.\d+\.\d+)'
+github = "stripe/stripe-cli"
+binary = "stripe"
+
+# Release asset per platform ({version} is the offered version, no "v").
+[update.assets]
+windows_amd64 = "stripe_{version}_windows_x86_64.zip"
+darwin_amd64 = "stripe_{version}_mac-os_x86_64.tar.gz"
+darwin_arm64 = "stripe_{version}_mac-os_arm64.tar.gz"
+linux_amd64 = "stripe_{version}_linux_x86_64.tar.gz"
+linux_arm64 = "stripe_{version}_linux_arm64.tar.gz"
+
+# The checksums file per OS, from the same release.
+[update.checksums]
+windows = "stripe-windows-checksums.txt"
+darwin = "stripe-mac-checksums.txt"
+linux = "stripe-linux-checksums.txt"
+
+# A binary owned by one of these package managers (match = regex on its
+# symlink-resolved path) is updated with that manager's own command, never
+# overwritten by a download.
+[[update.managers]]
+name = "brew"
+match = '/Cellar/|/homebrew/|/linuxbrew/'
+run = ["brew", "upgrade", "stripe/stripe-cli/stripe"]
+
+[[update.managers]]
+name = "scoop"
+match = '(?i)\\scoop\\'
+run = ["scoop", "update", "stripe"]
+
+[[update.managers]]
+name = "winget"
+match = '(?i)\\Microsoft\\WinGet\\(Packages|Links)\\'
+run = ["winget", "upgrade", "--id", "Stripe.StripeCli"]
 ```
 
 ---

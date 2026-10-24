@@ -21,6 +21,7 @@ type ConPty struct {
 	outPipeWrite, outPipeRead windows.Handle
 	attrList                  *windows.ProcThreadAttributeListContainer
 	size                      windows.Coord
+	consoleOnce               sync.Once
 	closeOnce                 sync.Once
 }
 
@@ -120,17 +121,27 @@ func (p *ConPty) Fd() uintptr {
 	return uintptr(*p.hpc)
 }
 
+// CloseConsole ends the pseudo console and closes this process's copy of
+// the PTY ends of the pipes, but keeps the master ends open. The console
+// host then flushes what it still holds and exits, so a Read drains the
+// rest of the output and returns an error instead of blocking forever.
+// Close calls it first; a second call is a no-op.
+func (p *ConPty) CloseConsole() {
+	p.consoleOnce.Do(func() {
+		_ = windows.CloseHandle(p.inPipeRead)
+		_ = windows.CloseHandle(p.outPipeWrite)
+		bundledClosePseudoConsole(*p.hpc)
+	})
+}
+
 // Close closes the ConPty device.
 func (p *ConPty) Close() error {
 	var err error
 	p.closeOnce.Do(func() {
-		// Ensure that we have the PTY-end of the pipes closed.
-		_ = windows.CloseHandle(p.inPipeRead)
-		_ = windows.CloseHandle(p.outPipeWrite)
+		p.CloseConsole()
 		if p.attrList != nil {
 			p.attrList.Delete()
 		}
-		bundledClosePseudoConsole(*p.hpc)
 		err = errors.Join(
 			windows.CloseHandle(p.inPipeWrite),
 			windows.CloseHandle(p.outPipeRead),

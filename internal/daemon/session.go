@@ -177,6 +177,38 @@ type Pane struct {
 	// it into a refusal with the reason on screen. Cleared by spawnPane like
 	// SpawnError, so Alt+R gets the user an ordinary shell.
 	WorktreeInterrupted bool
+	// FixLabel names the plugin fix — a handler's button, or an update of the
+	// plugin's binary — the pane's CURRENT child is, run in place of the
+	// pane's normal command (pluginfix.go). While it is set the pane shows
+	// "running fix: <label>" and restart_pane_req is refused, as it is for
+	// PreparingWorktree: a restart over a half-done login or a half-swapped
+	// binary would clear nothing. fixArgv is that child's argv, held for
+	// exactly ONE spawn: startFix sets it and spawnPane consumes it, both
+	// under PluginMu, so whatever triggers the spawn after the fix runs the
+	// normal command again (the persisted InstanceArgs are never touched).
+	// fixThen says what a zero exit leads to (plugin.FixThenRestart or
+	// FixThenStay). All three are runtime-only and never persisted — a daemon
+	// that dies mid-fix restores the pane through its ordinary strategy with
+	// no stale marker — and FixLabel is broadcast in the same includeOverlays
+	// block as SpawnError. PluginMu-protected.
+	// fixGen is the ptyGen of the child the fix argv was spawned as, set in
+	// the span that bumps ptyGen: onFixExit claims an exit as the fix's only
+	// when the exiting generation IS that one, so the normal child's exit
+	// landing between startFix's marker and its restart is not taken for it.
+	FixLabel string
+	fixArgv  []string
+	fixThen  string
+	fixGen   uint64
+	// lifecycleMu serialises the pane's child-replacing transitions — a
+	// restart request, a fix's reservation plus the restart that starts it,
+	// the restart after a fix exits, the hand-start conversions — so a
+	// restart cannot read "no fix running" and then replace the fix child a
+	// request on another connection started in between. LOCK ORDER:
+	// lifecycleMu outermost, then spawnMu (inside restartPaneInPlace →
+	// ensurePaneSpawned), then PluginMu. Never take it while holding sm.mu or
+	// PluginMu, never hold it across a broadcast, and a PTY close under it is
+	// fine only because restartPaneInPlace closes asynchronously.
+	lifecycleMu sync.Mutex
 	// SandboxImage names the container image a sandbox pane runs in, and its
 	// non-emptiness IS the "this pane is sandboxed" flag. PERSISTED,
 	// PluginMu-protected, written once at creation.
@@ -317,6 +349,31 @@ type Pane struct {
 	// PluginMu-protected, runtime only.
 	osc7Tail    []byte
 	osc7TailGen uint64
+	// pluginLineTail is the unfinished last line of the previous flush, joined
+	// to the next one so the [update] notice matches COMPLETE lines
+	// (pluginlines.go; the error handlers match every chunk) — a version
+	// split by the 2 ms coalescer read as "1.5" otherwise. pluginLineGen is
+	// its PTY run, like osc7TailGen. pluginSent is what this run already
+	// raised a dialog for (a handler, an offered version), so a tool that
+	// prints the same error every second does not put a frame per second on
+	// every client's must-deliver queue. pluginOffered is the version the
+	// last update dialog for this pane offered, the only one a client's
+	// Update or Not now is accepted for (pluginOfferedVersion) — without it
+	// any act-class client could decline "999.0.0" and hide every future
+	// notice. All three go when the run changes (resetPluginRun). All under
+	// PluginMu, runtime only.
+	pluginLineTail []byte
+	pluginLineGen  uint64
+	pluginSent     map[string]bool
+	pluginOffered  string
+	// pluginOffering is the offers whose binary resolution is still in flight
+	// (offerUpdate), version key → the PTY generation that started it, so a
+	// second notice for the same version in the same run starts no second
+	// resolver, and a resolution for an OLD run clears only its own mark —
+	// never the new run's for the same version. The authoritative dedupe is
+	// pluginSent at delivery. Same lock; reset with the run and at the PTY
+	// boundary (spawnPane).
+	pluginOffering map[string]uint64
 	// LastMCPEventAt is the mcp_control cooldown, keyed BY TITLE. Read and
 	// written under PluginMu, like the two beside it.
 	//

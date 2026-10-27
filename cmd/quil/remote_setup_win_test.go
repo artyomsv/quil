@@ -190,11 +190,13 @@ func TestRunRemoteSetup_WindowsPowerShellShell_Installs(t *testing.T) {
 	}
 }
 
-// An upgrade stops the old daemon first, with the command quoted for cmd.
+// An upgrade stops the old daemon with the command quoted for cmd — AFTER the
+// archive is copied and extracted, and before finalize swaps the files.
 func TestRunRemoteSetup_WindowsUpgrade_StopsDaemonWithHostQuoting(t *testing.T) {
 	resetRemoteSetupState(t)
 	newHealSpy(t)
-	steps := append([]runStep{{prefix: `"` + winQuil + `" daemon stop`}}, winInstallSteps()...)
+	install := winInstallSteps()
+	steps := []runStep{install[0], install[1], {prefix: `"` + winQuil + `" daemon stop`}, install[2]}
 	r := &stepRunner{t: t, steps: append(steps, runStep{prefix: `"` + winQuil + `" daemon install-logon`})}
 	setupRunnerFn = func(string) remoteinstall.Runner { return r }
 
@@ -209,14 +211,12 @@ func TestRunRemoteSetup_WindowsUpgrade_StopsDaemonWithHostQuoting(t *testing.T) 
 	}
 }
 
-// The control: a POSIX host keeps its single `sh -c` install, runs no logon
-// task, and records no shell.
-func TestRunRemoteSetup_POSIX_NoLogonTaskAndNoShell(t *testing.T) {
-	resetRemoteSetupState(t)
-	spy := newHealSpy(t)
-	r := &stepRunner{t: t, steps: []runStep{{prefix: "sh -c "}}}
-	setupRunnerFn = func(string) remoteinstall.Runner { return r }
+// posixStaged is remote-stage.sh's success output for a /home/a install.
+const posixStaged = "__quil_staged__\n/home/a/.local/bin/.quil-staging-AbC123xyz0\n"
 
+// posixFromDir writes a minimal amd64 ELF quil and quild for --from-dir.
+func posixFromDir(t *testing.T) string {
+	t.Helper()
 	dir := t.TempDir()
 	elf := make([]byte, 0x40)
 	copy(elf, "\x7fELF")
@@ -226,16 +226,97 @@ func TestRunRemoteSetup_POSIX_NoLogonTaskAndNoShell(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	return dir
+}
+
+// The control: a POSIX host installs in two `sh -c` steps (stage, commit),
+// runs no logon task, and records no shell.
+func TestRunRemoteSetup_POSIX_NoLogonTaskAndNoShell(t *testing.T) {
+	resetRemoteSetupState(t)
+	spy := newHealSpy(t)
+	r := &stepRunner{t: t, steps: []runStep{{prefix: "sh -c ", out: posixStaged}, {prefix: "sh -c "}}}
+	setupRunnerFn = func(string) remoteinstall.Runner { return r }
+
 	probe := remoteinstall.Probe{Home: "/home/a", Platform: remoteinstall.Platform{GOOS: "linux", GOARCH: "amd64"}}
 	var out bytes.Buffer
-	if err := runRemoteSetup("gpu01", setupOptions{FromDir: dir, Yes: true, Out: &out, probe: &probe}); err != nil {
+	if err := runRemoteSetup("gpu01", setupOptions{FromDir: posixFromDir(t), Yes: true, Out: &out, probe: &probe}); err != nil {
 		t.Fatalf("runRemoteSetup: %v\n%s", err, out.String())
 	}
-	if len(r.ran) != 1 {
-		t.Errorf("ran %d remote commands, want exactly the install: %q", len(r.ran), r.ran)
+	if len(r.ran) != 2 {
+		t.Errorf("ran %d remote commands, want exactly stage and commit: %q", len(r.ran), r.ran)
 	}
 	if spy.recorded["gpu01"] != "/home/a/.local/bin/quil" || spy.shells["gpu01"] != remoteinstall.ShellPOSIX {
 		t.Errorf("recorded %q shell %q", spy.recorded["gpu01"], spy.shells["gpu01"])
+	}
+}
+
+const posixQuil = "/home/a/.local/bin/quil"
+
+// posixUpgradeProbe is a Linux host that already runs quil from ~/.local/bin.
+func posixUpgradeProbe() remoteinstall.Probe {
+	return remoteinstall.Probe{
+		Home: "/home/a", Platform: remoteinstall.Platform{GOOS: "linux", GOARCH: "amd64"},
+		ExistingPath: posixQuil, ExistingDirWritable: true,
+	}
+}
+
+// An upgrade copies first, stops the daemon second and swaps last, so the
+// daemon is stopped only once the new files are already on the host.
+func TestRunRemoteSetup_POSIXUpgrade_StagesBeforeStoppingTheDaemon(t *testing.T) {
+	resetRemoteSetupState(t)
+	newHealSpy(t)
+	r := &stepRunner{t: t, steps: []runStep{
+		{prefix: "sh -c ", out: posixStaged},
+		{prefix: "'" + posixQuil + "' daemon stop", out: "daemon stopped"},
+		{prefix: "sh -c "},
+	}}
+	setupRunnerFn = func(string) remoteinstall.Runner { return r }
+
+	probe := posixUpgradeProbe()
+	var out bytes.Buffer
+	if err := runRemoteSetup("gpu01", setupOptions{FromDir: posixFromDir(t), Yes: true, Out: &out, probe: &probe}); err != nil {
+		t.Fatalf("runRemoteSetup: %v\n%s", err, out.String())
+	}
+	if len(r.ran) != 3 {
+		t.Fatalf("ran %q, want stage, stop, commit", r.ran)
+	}
+	// The commit must name the directory the stage reported, or it would
+	// swap nothing.
+	if !strings.Contains(r.ran[2], ".quil-staging-AbC123xyz0") {
+		t.Errorf("commit does not name the staged directory: %.200q", r.ran[2])
+	}
+}
+
+// The failure this ordering exists for: the copy fails (here, the measured
+// "Disk quota exceeded"), and the daemon must still be running — its panes
+// untouched — because nothing was installed.
+func TestRunRemoteSetup_POSIXUpgrade_FailedCopyNeverStopsTheDaemon(t *testing.T) {
+	resetRemoteSetupState(t)
+	spy := newHealSpy(t)
+	r := &stepRunner{t: t, steps: []runStep{
+		{prefix: "sh -c ", code: 1, out: "cat: write error: Disk quota exceeded"},
+	}}
+	setupRunnerFn = func(string) remoteinstall.Runner { return r }
+
+	probe := posixUpgradeProbe()
+	var out bytes.Buffer
+	err := runRemoteSetup("gpu01", setupOptions{FromDir: posixFromDir(t), Yes: true, Out: &out, probe: &probe})
+	if err == nil {
+		t.Fatal("a failed copy reported success")
+	}
+	if !strings.Contains(err.Error(), "Disk quota exceeded") {
+		t.Errorf("error %q drops the host's reason", err)
+	}
+	for _, c := range r.ran {
+		if strings.Contains(c, "daemon stop") {
+			t.Errorf("stopped the daemon although nothing was installed: %q", r.ran)
+		}
+	}
+	if strings.Contains(out.String(), "Stopping the remote daemon") {
+		t.Errorf("narrated a stop after a failed copy:\n%s", out.String())
+	}
+	if len(spy.recorded) != 0 {
+		t.Errorf("recorded a path for a failed install: %v", spy.recorded)
 	}
 }
 

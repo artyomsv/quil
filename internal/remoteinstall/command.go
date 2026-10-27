@@ -11,17 +11,28 @@ const probeCommand = "sh -s"
 // directory would silently become $0 and the script would read the hash as $1.
 const scriptArg0 = "quil-install"
 
-// InstallCommand assembles the remote command for an install.
+// StageCommand assembles the remote command that receives and unpacks the
+// archive (remote-stage.sh).
 //
-// The install script CANNOT travel on stdin — the archive is there — so it is
-// passed as an argument to `sh -c` instead. ssh joins its command arguments
-// with spaces and applies no quoting of its own, so the whole string is
-// assembled and escaped here rather than left to ssh.
-func InstallCommand(t Target, src Source) string {
-	return "sh -c " + ShellSingleQuote(installScript) +
+// The script CANNOT travel on stdin — the archive is there — so it is passed
+// as an argument to `sh -c` instead. ssh joins its command arguments with
+// spaces and applies no quoting of its own, so the whole string is assembled
+// and escaped here rather than left to ssh.
+func StageCommand(t Target, src Source) string {
+	return "sh -c " + ShellSingleQuote(stageScript) +
 		" " + scriptArg0 +
 		" " + ShellSingleQuote(t.Dir) +
 		" " + ShellSingleQuote(src.SHA256)
+}
+
+// CommitCommand assembles the remote command that moves staged binaries into
+// place (remote-commit.sh). Same quoting as StageCommand; the staging path is
+// remote-reported, which is why Stage checks its shape before it gets here.
+func CommitCommand(t Target, staging string) string {
+	return "sh -c " + ShellSingleQuote(commitScript) +
+		" " + scriptArg0 +
+		" " + ShellSingleQuote(t.Dir) +
+		" " + ShellSingleQuote(staging)
 }
 
 // DaemonStopCommand asks an existing remote quil to stop its daemon before its

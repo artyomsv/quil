@@ -178,7 +178,14 @@ func (m Model) finishDestUpgrade(msg destInstalledMsg) (tea.Model, tea.Cmd) {
 		// way on a retry it did not ask for, and this dialog opens by itself.
 		// The command is named instead, which is the affordance the pane area
 		// already carries for every other unrepairable offline state.
-		p.Offline.Detail = "upgrade failed — run: quil remote setup " + msg.dest
+		//
+		// The REASON leads, because the pane renders one line and cuts its
+		// right end. It used to say only the command, so a full /tmp on the
+		// host ("Disk quota exceeded") was visible nowhere but quil.log, and
+		// running the named command failed the same way. The value is the
+		// error's text: sanitized and capped at render like every Detail.
+		p.Offline.Detail = "upgrade failed: " + firstErrLine(msg.err.Error()) +
+			" — run: quil remote setup " + msg.dest
 		log.Printf("remote upgrade %s: %v", msg.dest, msg.err)
 		return m, nil
 	}

@@ -105,6 +105,9 @@ func (r *scriptRunner) Run(_ context.Context, _ string, w io.Writer, argv ...str
 		case "mount":
 			return mountErr
 		case "exec":
+			if len(argv) > 3 && argv[len(argv)-2] == "uname" {
+				io.WriteString(w, "aarch64\n")
+			}
 			if writable && slices.ContainsFunc(argv, func(a string) bool { return strings.Contains(a, "QUIL_SBX_WRITABLE") }) {
 				io.WriteString(w, "QUIL_SBX_WRITABLE\n")
 			}

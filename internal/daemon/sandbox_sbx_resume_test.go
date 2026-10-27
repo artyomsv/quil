@@ -13,6 +13,7 @@ import (
 )
 
 const sbxSessionA = "2db05609-f1d5-4576-b5b2-ff114519726b"
+const sbxSessionB = "7c1e0d6a-5b24-4f1e-9a3c-2d8f4b6e1a90"
 
 // sbxResumeFixture is sbxFixture in attach mode, which needs no approval
 // and runs the shortest path to the exec.

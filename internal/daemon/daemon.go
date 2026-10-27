@@ -284,6 +284,9 @@ type Daemon struct {
 	// sbxPrep serialises the creation of each named sbx sandbox: two panes
 	// opened together on one profile must not both run `sbx env create`.
 	sbxPrep sbxPrepare
+	// sbxHookState records which sbx panes run claude with hooks and in
+	// which shared tree (sandbox_sbx_hooks.go). Runtime only.
+	sbxHookState sbxHookState
 	// sbxStops counts the in-flight stops of closed sbx panes' agents, so
 	// Stop can give them a moment before the daemon exits.
 	sbxStops sync.WaitGroup
@@ -3512,6 +3515,7 @@ func (d *Daemon) cleanupPaneArtifacts(paneID string) {
 	if d.hookIngester != nil {
 		d.hookIngester.Cancel(paneID)
 	}
+	d.forgetSbxHooks(paneID)
 	for _, name := range paneSessionRecordNames(paneID) {
 		p := filepath.Join(config.SessionsDir(), name)
 		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {

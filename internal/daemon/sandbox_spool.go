@@ -196,4 +196,6 @@ func (d *Daemon) forwardSandboxSpools() {
 			log.Printf("sandbox: pane %s: event spool hit the %d-byte per-pass cap", paneID, sandboxForwardCap)
 		}
 	}
+	// An sbx pane's hooks write into the tree shared with its sandbox.
+	d.forwardSbxHookFiles()
 }

@@ -800,7 +800,39 @@ An existing sandbox is reused untouched; closing a pane never removes one.
 
 **The agent runs through `sbx exec -it -w <cwd> <name> <cmd> <args>`**, never
 `sbx run`: exec runs the pane's own plugin command and lets panes share one
-sandbox. No hooks, no `--settings`; `resolveSpawnArgs` is not called for an sbx pane.
+sandbox. `resolveSpawnArgs` is not called for an sbx pane; its claude hooks are
+registered by `startSbxPane` itself (below).
+
+**Claude hooks in an sbx sandbox** (`internal/daemon/sandbox_sbx_hooks.go`,
+`internal/sbx/hooks.go`, 2026-10-27). The preparation goroutine
+(`startSbxWaiters` → `prepareSbxHooks`, claude panes only) asks the VM its
+architecture (`sbx exec <name> uname -m` — which also STARTS a stopped sandbox,
+and `sbx mount` answers 409 for a stopped one, measured on 0.48), fetches the
+Linux hook binary for it (`ensureLinuxQuild`, the docker path's fetch, so a dev
+build needs `QUIL_SANDBOX_QUILD`), and shares two folders of Quil's OWN at
+their host paths: `/sandbox/sbx/<sandbox>/` read-write (one tree per
+SANDBOX with `sessions/`, `events/`, `history/`) and the hook binary's folder
+read-only (`sbx mount <name> <dir>:<dir>:ro`, `MountReadOnly`). The attach-mode
+rule "never a mount" still holds for the USER's folders; a quil-owned tree
+widens nothing. `startSbxPane` then runs `claudeHookSpawnPrep` with
+`hookPaths{HostDir: tree, RefDir: tree, ExePath: quild}` — host and reference
+paths are the same because sbx mirrors paths — so `--settings
+<tree>/sessions/<pane>.settings.json` leads argv and `QUIL_HOOK_HOME=<tree>`
+rides the exec env. **The tree is never deleted and must not be**: sbx restores
+a saved mount after stop/start and REFUSES TO START a sandbox whose saved mount
+has no host folder (`sbx umount` is the user's remedy, documented in
+`docs/sandbox-panes.md`). The hook's output comes back through
+`forwardSbxHookFiles` on the spool tick (`forwardSandboxSpools`): event and
+history lines through the docker path's `spoolForwarder` (os.Root over the
+tree, whole lines, capped, offsets keyed `<pane>` and `<pane>/history`), and the
+session record (`<pane>.id`, `<pane>.transcript`) copied into
+`/sessions/` when it changed (`syncSbxFile`, os.Root, 4 KiB cap) —
+so `readHookSessionFn` and every other consumer read what they always read.
+Hooks are a DEGRADED mode here, unlike docker: the session is kept by the probe
+below, so a pane that gets no hooks (dev build, Windows host, refused mount)
+starts hookless and is told on screen. The VM maps the host uid onto its agent
+user (measured: a 0755 host dir owned by uid 501 reads as 1000:1000 inside), so
+the 0700 tree is writable there. Codex/opencode in sbx: still hookless.
 
 **The claude session of an sbx pane is kept by Quil, not by a hook**
 (`internal/daemon/sandbox_sbx_resume.go`, `internal/sbx/resume.go`). A
@@ -833,9 +865,12 @@ cannot run one conversation; a held session gives the pane a fresh id.
 probed like a restart. A persisted id that is not a UUID is replaced, never
 handed to the VM. `transcript_path` is deleted on an sbx pane: nothing on
 the host names the VM's file. It runs in `startSbxPane`'s ready branch, on
-the preparation goroutine, because it is a VM round trip. **Blind spot**: a
-`/clear` or `/resume` inside the agent rotates the session and no hook
-reports it, so a restart reopens the conversation from before the rotation.
+the preparation goroutine, because it is a VM round trip. **A `/clear` or
+`/resume` inside the agent rotates the session; with hooks the synced record
+names the new id and `sbxSessionArgs` follows it** (gated, as on the host, on
+the pane having had a session — a record under a new pane's id is a leftover),
+so a restart reopens the rotated conversation. Hookless, the pane keeps the
+id it started with and a restart reopens the conversation from before.
 Where the transcript lives is the sandbox's business: sbx keeps
 `~/.claude/projects` on a per-sandbox volume (measured on 0.48: it survives
 `sbx stop`/start and dies with `sbx rm`); the tool that owns the sandbox

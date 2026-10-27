@@ -75,6 +75,17 @@ func (d *Daemon) sbxSessionArgs(ctx context.Context, pane *Pane, p *plugin.PaneP
 		log.Printf("sbx: pane %s: ignoring a malformed session id (len=%d)", pane.ID, len(id))
 		id = ""
 	}
+	// With hooks (sandbox_sbx_hooks.go) the VM's claude reports the session
+	// it is in, and a /clear or /resume inside it rotated that id away from
+	// the one recorded here. The hook record wins — gated, as on the host, on
+	// the pane having had a session: a record under a brand-new pane's id is
+	// a leftover of a destroyed pane that drew the same id.
+	if id != "" {
+		if rec, err := readHookSessionFn(pane.ID); err == nil && sbx.ValidSessionID(rec.ID) && rec.ID != id {
+			log.Printf("sbx: pane %s: the hook recorded session %q (was %q); following it", pane.ID, rec.ID, id)
+			id = rec.ID
+		}
+	}
 	if id == "" && resumeID != "" && sbx.ValidSessionID(resumeID) {
 		// Created to resume a session: that id is the pane's session from
 		// the first instant, as on the host. Whether the VM holds its

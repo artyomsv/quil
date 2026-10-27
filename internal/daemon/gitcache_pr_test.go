@@ -428,7 +428,7 @@ func TestPRProbe_SweptAndRecreatedEntryIgnoresTheOldCompletion(t *testing.T) {
 	c.refresh(context.Background(), nil)               // sweep: entry gone
 	rel.install(f)
 	c.refresh(context.Background(), []string{"/repo"}) // new entry, new probe
-	waitUntil(t, func() bool { return f.count() == 2 })
+	waitUntil(t, "the second probe to start", func() bool { return f.count() == 2 })
 
 	rel.release(0) // the OLD completion
 	f.waitDone(t)  // ...has now been applied or discarded
@@ -558,7 +558,7 @@ func TestPRProbe_ShutdownCancelsTheProbeContext(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	c.refresh(ctx, []string{"/repo"})
-	waitUntil(t, func() bool { return f.count() == 2 })
+	waitUntil(t, "the parked probe to start", func() bool { return f.count() == 2 })
 
 	cancel()
 	c.prWG.Wait()
@@ -643,16 +643,4 @@ func TestPRProbe_AvailabilityIsCheckedOncePerInterval(t *testing.T) {
 	if n != 2 {
 		t.Fatalf("prAvailableFn called %d times after the interval elapsed, want 2", n)
 	}
-}
-
-func waitUntil(t *testing.T, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatal("condition not met within 2s")
 }

@@ -1005,4 +1005,5 @@ func syncPaneMeta(pane *PaneModel, info *PaneInfo, wideCanvas bool, minNativeCol
 	pane.GitAhead = info.GitAhead
 	pane.GitBehind = info.GitBehind
 	pane.GitStale = info.GitStale
+	pane.GitChildRepos = info.GitChildRepos
 }

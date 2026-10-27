@@ -131,13 +131,17 @@ type PaneModel struct {
 	// which drifts with every `cd` the shell makes. See PaneInfo.
 	// SandboxKind is sandboxKindDocker / sandboxKindSbx, "" for a host pane,
 	// drawn as sandboxGlyph on the border and the sidebar row.
-	WorktreeOwned      bool
-	WorktreePath       string
-	SandboxKind        string
-	GitUpstream        bool
-	GitAhead           int
-	GitBehind          int
-	GitStale           bool
+	WorktreeOwned bool
+	WorktreePath  string
+	SandboxKind   string
+	GitUpstream   bool
+	GitAhead      int
+	GitBehind     int
+	GitStale      bool
+	// GitChildRepos: the folder is not a checkout but holds this many as
+	// direct children, which the git fields above summarise. With no branch
+	// (the children disagree) the row shows the count.
+	GitChildRepos      int
 	Model              string         // model id of the last completed AI turn (daemon-authoritative; status bar)
 	ContextTokens      int64          // context-window tokens of the last completed AI turn (daemon-authoritative; status bar)
 	resumeStart        time.Time      // when resuming/preparing started (minimum display duration)

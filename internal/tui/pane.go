@@ -141,7 +141,13 @@ type PaneModel struct {
 	// GitChildRepos: the folder is not a checkout but holds this many as
 	// direct children, which the git fields above summarise. With no branch
 	// (the children disagree) the row shows the count.
-	GitChildRepos      int
+	GitChildRepos int
+	// PRNumber/PRStatus/PRStale: the branch's pull request as the daemon's gh
+	// probe last saw it (daemon-authoritative, runtime-only; see PaneInfo).
+	// 0 means none known; the pane then has no PR row.
+	PRNumber           int
+	PRStatus           string
+	PRStale            bool
 	Model              string         // model id of the last completed AI turn (daemon-authoritative; status bar)
 	ContextTokens      int64          // context-window tokens of the last completed AI turn (daemon-authoritative; status bar)
 	resumeStart        time.Time      // when resuming/preparing started (minimum display duration)

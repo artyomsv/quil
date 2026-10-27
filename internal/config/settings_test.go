@@ -38,6 +38,8 @@ func TestSettings_AcceptAndRefuse(t *testing.T) {
 		{"daemon.snapshot_interval", "45s", true, "45s"},
 		{"daemon.snapshot_interval", "0s", false, ""},
 		{"daemon.snapshot_interval", "soon", false, ""},
+		{"daemon.pr_status", "false", true, "false"},
+		{"daemon.pr_status", "maybe", false, ""},
 		{"ghost_buffer.dimmed", "false", true, "false"},
 		{"ghost_buffer.max_lines", "500", true, "500"},
 		{"ghost_buffer.max_lines", "0", false, ""},
@@ -98,6 +100,21 @@ func TestSettings_AcceptAndRefuse(t *testing.T) {
 
 // The dim switch reports STATE (toggleUnfocusedDim's rule): a legacy level 0
 // reads off, and switching on supplies the default level.
+// pr_status defaults ON and is absent from every config.toml written before it
+// existed; Load starts from Default(), so an old file keeps the chip.
+func TestSettings_PRStatusDefaultsOn(t *testing.T) {
+	if !config.Default().Daemon.PRStatus {
+		t.Fatal("Default().Daemon.PRStatus = false, want true")
+	}
+	s, ok := config.LookupSetting("daemon.pr_status")
+	if !ok {
+		t.Fatal("daemon.pr_status is not in the settings table")
+	}
+	if got := s.Get(config.Default()); got != "true" {
+		t.Fatalf("row shows %q for the default, want true", got)
+	}
+}
+
 func TestSettings_DimSwitchActsOnState(t *testing.T) {
 	s, _ := config.LookupSetting("ui.unfocused_dim_enabled")
 	cfg := config.Default()

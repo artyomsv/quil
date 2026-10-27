@@ -146,4 +146,13 @@ type PaneState struct {
 	// holds checkouts as direct children: how many the other git_* fields
 	// summarise. With GitBranch empty it is the only thing to render.
 	GitChildRepos int `json:"git_child_repos,omitempty"`
+	// PRNumber is the pull request of the pane's current branch, 0 when none
+	// is known. PRStatus (a closed set: merged, closed, attention, running,
+	// approved, draft, open) and PRStale are present only beside a non-zero
+	// PRNumber — "the number you see may be old", never "I could not ask".
+	// Runtime-only like the git fields; separate from GitStale because the
+	// branch can be fresh while GitHub did not answer.
+	PRNumber int    `json:"pr_number,omitempty"`
+	PRStatus string `json:"pr_status,omitempty"`
+	PRStale  bool   `json:"pr_stale,omitempty"`
 }

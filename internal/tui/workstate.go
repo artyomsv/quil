@@ -1006,4 +1006,9 @@ func syncPaneMeta(pane *PaneModel, info *PaneInfo, wideCanvas bool, minNativeCol
 	pane.GitBehind = info.GitBehind
 	pane.GitStale = info.GitStale
 	pane.GitChildRepos = info.GitChildRepos
+	// Unconditional: the absent key is what removes a PR row that no longer
+	// applies — a NoPR answer, a branch change, the feature turned off.
+	pane.PRNumber = info.PRNumber
+	pane.PRStatus = info.PRStatus
+	pane.PRStale = info.PRStale
 }

@@ -181,6 +181,7 @@ func TestSidebarPanesHover_ShadedRowsAreExactlyTheStripWidth(t *testing.T) {
 	pane.Name = "构建构建构建构建构建"
 	pane.working, pane.pinnedAttention = true, true
 	pane.GitBranch, pane.GitWorktree, pane.GitUpstream, pane.GitAhead = "feat/构建-long-branch", true, true, 12
+	pane.PRNumber, pane.PRStatus, pane.PRStale = 123456, "attention", true
 	for _, w := range []int{1, 2, 3, 4, 5, 8, 12, 22, 40} {
 		for _, hl := range []rowHighlight{rowHighlightHover, rowHighlightPaneHover} {
 			for _, focused := range []bool{false, true} {
@@ -190,6 +191,9 @@ func TestSidebarPanesHover_ShadedRowsAreExactlyTheStripWidth(t *testing.T) {
 			}
 			if n := lipgloss.Width(gitRowHL(pane, w, hl)); n != w {
 				t.Errorf("w=%d hl=%d: git row is %d cells", w, hl, n)
+			}
+			if n := lipgloss.Width(prRowHL(pane, w, hl)); n != w {
+				t.Errorf("w=%d hl=%d: PR row is %d cells", w, hl, n)
 			}
 			if n := lipgloss.Width(sidebarTabHeadingHL("构建构建构建", 11, true, "#ff0000", w, hl)); n != w {
 				t.Errorf("w=%d hl=%d: tab heading is %d cells", w, hl, n)

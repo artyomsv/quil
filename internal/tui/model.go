@@ -205,6 +205,12 @@ type PaneInfo struct {
 	// summarise, for a pane whose folder is not a checkout itself; 0 when
 	// the folder is one. With GitBranch empty it is what the row shows.
 	GitChildRepos int
+	// PRNumber/PRStatus/PRStale are the branch's pull request as the daemon's
+	// gh probe last saw it; 0 means none known. Status is a closed set the
+	// row maps to a color, anything unknown rendering as open.
+	PRNumber int
+	PRStatus string
+	PRStale  bool
 	// WorktreeOwned marks a pane this daemon created a linked worktree for.
 	// GitWorktree beside it says only that the CWD is IN one, which a pane the
 	// user made by hand also satisfies — the close dialog offers deletion on
@@ -810,10 +816,10 @@ type Model struct {
 	// reporting one belonging to another client, or to another daemon that
 	// happens to have a branch of the same name.
 	newTabWorktrees      map[string]bool
-	selectedCategory     int           // selected category index in create pane dialog
-	selectedPlugin       string        // selected plugin name in create pane dialog
+	selectedCategory     int    // selected category index in create pane dialog
+	selectedPlugin       string // selected plugin name in create pane dialog
 	pluginDialogs        map[string]*pluginDialog
-	pluginDialogOpen     string        // pane id of the plugin dialog on screen; the map holds held + open ones (pluginfix.go)
+	pluginDialogOpen     string // pane id of the plugin dialog on screen; the map holds held + open ones (pluginfix.go)
 	pluginBootReqs       map[string]string
 	fixBootSeen          map[string]string
 	fixBootSeeded        map[string]bool
@@ -9665,6 +9671,9 @@ func parseWorkspaceState(ws ipc.WorkspaceState) WorkspaceStateMsg {
 			GitUpstream:     p.GitUpstream,
 			GitStale:        p.GitStale,
 			GitChildRepos:   p.GitChildRepos,
+			PRNumber:        p.PRNumber,
+			PRStatus:        p.PRStatus,
+			PRStale:         p.PRStale,
 			SizeSeq:         p.SizeSeq,
 		}
 		if p.ContextTokens != nil {

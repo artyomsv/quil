@@ -220,3 +220,36 @@ func TestGitCache_SweepsChildrenWithTheirParent(t *testing.T) {
 			len(c.byDir), len(c.cwdChildren))
 	}
 }
+
+// The broadcast reads lookupBoth (git state plus the pull request), so a
+// folder of child checkouts must answer there too — git state combined, no
+// pull request for the folder.
+func TestGitCache_LookupBothReportsChildrenToo(t *testing.T) {
+	f := &fakeGitProbes{
+		dirs: map[string][2]string{},
+		children: map[string][]gitinfo.ChildRepo{
+			"/w/T-1": {
+				{Dir: "/w/T-1/api", GitDir: "/api/.git/worktrees/T-1", CommonDir: "/api/.git"},
+				{Dir: "/w/T-1/web", GitDir: "/web/.git/worktrees/T-1", CommonDir: "/web/.git"},
+			},
+		},
+		infos: map[string]gitinfo.Info{
+			"/w/T-1/api": {Branch: "T-1/feature", LinkedWorktree: true, WorktreeName: "T-1"},
+			"/w/T-1/web": {Branch: "T-1/feature", LinkedWorktree: true, WorktreeName: "T-1"},
+		},
+	}
+	installFakeGit(t, f)
+	c := newGitCache()
+	c.refresh(context.Background(), []string{"/w/T-1"})
+
+	info, ok, stale, _, prKnown, _ := c.lookupBoth("/w/T-1")
+	if !ok || stale {
+		t.Fatalf("lookupBoth ok=%v stale=%v for a folder of child checkouts", ok, stale)
+	}
+	if want := (gitinfo.Info{Branch: "T-1/feature", LinkedWorktree: true, WorktreeName: "T-1", ChildRepos: 2}); info != want {
+		t.Errorf("lookupBoth = %+v\nwant       %+v", info, want)
+	}
+	if prKnown {
+		t.Error("a pull request was reported for a folder that is not a checkout")
+	}
+}

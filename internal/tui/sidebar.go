@@ -2,6 +2,8 @@ package tui
 
 import (
 	"fmt"
+	"sort"
+	"strconv"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -381,6 +383,16 @@ func (m *Model) sidebarRows(w int) ([]sidebarRow, int) {
 			// group for a tab drag, hence inTab.
 			if git := gitRowHL(pane, w, paneHL); git != "" {
 				rows = append(rows, sidebarRow{text: git, tabIdx: ti, inTab: true, gitOf: pane.ID})
+			}
+			// The pull request gets a row of its own under the branch, for
+			// the same reason the branch is not a pane-row suffix: a chip at
+			// the end of the git row stole the width a long branch needs,
+			// and a row has room for the status as a WORD beside the number.
+			// Only panes with a PR pay the row. Same shape as the git row —
+			// no kind, no ordinal, part of the tab's group, shaded with the
+			// pane on hover (gitOf).
+			if pr := prRowHL(pane, w, paneHL); pr != "" {
+				rows = append(rows, sidebarRow{text: pr, tabIdx: ti, inTab: true, gitOf: pane.ID})
 			}
 		}
 	}
@@ -1052,6 +1064,22 @@ var (
 	sidebarDeletionStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("160"))
 	sidebarGitStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 	sidebarGitStaleStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Italic(true)
+	// sidebarPRStyles color the pull request row under the git row by status
+	// name. The names are the daemon's closed set (internal/prinfo); anything
+	// else renders as open, so a newer daemon cannot blank an older client's
+	// row or paint it a color it never chose. 214 is the blocked ▲ and says
+	// the same thing here ("needs you"); 160 is the deletion mark's terminal
+	// red, and a closed PR is terminal too; 75 is a light blue no other
+	// sidebar state uses; 34 is a green apart from 28 (unseen).
+	sidebarPRStyles = map[string]lipgloss.Style{
+		"merged":    lipgloss.NewStyle().Foreground(lipgloss.Color("75")),
+		"closed":    lipgloss.NewStyle().Foreground(lipgloss.Color("160")),
+		"attention": lipgloss.NewStyle().Foreground(lipgloss.Color("214")),
+		"running":   lipgloss.NewStyle().Foreground(lipgloss.Color("245")),
+		"approved":  lipgloss.NewStyle().Foreground(lipgloss.Color("34")),
+		"draft":     lipgloss.NewStyle().Foreground(lipgloss.Color("240")),
+		"open":      lipgloss.NewStyle().Foreground(lipgloss.Color("245")),
+	}
 	// Link health, paired to its glyphs by linkGlyphStyles — see there for why
 	// these come from outside the pane-state palette above.
 	sidebarLinkParkedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
@@ -1232,6 +1260,17 @@ func childReposLabel(n int) string {
 
 // gitRowHL is gitRow with a row highlight: one style for the whole line, so
 // the highlight is that style, text darkened, on hl's background.
+//
+// The suffix is BUDGETED, not truncated. truncateCells keeps the LEFT of a
+// string and cuts the RIGHT, so a suffix cut by width lost its LAST element
+// first and could cut a count in the middle of its digits. Every suffix
+// element is therefore admitted whole or omitted whole, in a PRIORITY order
+// the visual order does not follow: the stale mark first (it qualifies
+// everything else on the row), the worktree marker, then `↑N` and `↓N`.
+// Elements that do not fit are skipped, not stopped at, so a short `↓3` can
+// still land after a long worktree name did not. The pull request is NOT on
+// this row — it has its own, prRowHL, because a chip here stole the width a
+// long branch needs.
 func gitRowHL(pane *PaneModel, w int, hl rowHighlight) string {
 	name := pane.GitBranch
 	if name == "" && pane.GitDetached {
@@ -1249,52 +1288,133 @@ func gitRowHL(pane *PaneModel, w int, hl rowHighlight) string {
 	}
 	name = sanitizeRemoteText(name)
 
-	prefix := "  ⎇ "
-	var suffix string
-	if pane.GitWorktree {
-		// Sanitized HERE, before the width math below measures it: the name
-		// comes from a daemon the user may not control under --remote, and
-		// lipgloss measures an escape as zero cells, so a truncation is not a
-		// sanitiser. `name` is already sanitized above, so the comparison is
-		// between two sanitized values.
-		wtName := sanitizeRemoteText(pane.GitWorktreeName)
-		if worktreeNameIsRedundant(wtName, name) {
-			suffix += " wt"
-		} else {
-			suffix += " " + wtName
-		}
-	}
-	if pane.GitUpstream {
-		if pane.GitAhead > 0 {
-			suffix += fmt.Sprintf(" ↑%d", pane.GitAhead)
-		}
-		if pane.GitBehind > 0 {
-			suffix += fmt.Sprintf(" ↓%d", pane.GitBehind)
-		}
-	}
-	if pane.GitStale {
-		suffix += " ~"
-	}
-
+	const prefix = "  ⎇ "
+	// Step 1: the branch keeps its floor; the rest is the suffix budget.
 	avail := w - lipgloss.Width(prefix)
 	if avail < 1 {
 		avail = 1
 	}
-	nameW := avail - lipgloss.Width(suffix)
-	if nameW < minGitBranchCells {
-		nameW = minGitBranchCells
+	nameMin := min(lipgloss.Width(name), minGitBranchCells)
+	budget := avail - nameMin
+
+	// Step 2: admit suffix elements in priority order. order is the visual
+	// position: worktree, ↑, ↓, git stale.
+	type suffixElem struct {
+		text  string
+		order int
 	}
-	if nameW > avail {
-		nameW = avail
+	var candidates []suffixElem
+	if pane.GitStale {
+		candidates = append(candidates, suffixElem{" ~", 3})
 	}
-	name = elideMiddle(name, nameW)
-	suffix = truncateCells(suffix, avail-lipgloss.Width(name))
+	if pane.GitWorktree {
+		// Sanitized HERE, before the width math measures it: the name comes
+		// from a daemon the user may not control under --remote, and lipgloss
+		// measures an escape as zero cells, so a truncation is not a
+		// sanitiser. `name` is already sanitized above, so the comparison is
+		// between two sanitized values.
+		wtName := sanitizeRemoteText(pane.GitWorktreeName)
+		if worktreeNameIsRedundant(wtName, name) {
+			candidates = append(candidates, suffixElem{" wt", 0})
+		} else {
+			candidates = append(candidates, suffixElem{" " + wtName, 0})
+		}
+	}
+	if pane.GitUpstream {
+		if pane.GitAhead > 0 {
+			candidates = append(candidates, suffixElem{fmt.Sprintf(" ↑%d", pane.GitAhead), 1})
+		}
+		if pane.GitBehind > 0 {
+			candidates = append(candidates, suffixElem{fmt.Sprintf(" ↓%d", pane.GitBehind), 2})
+		}
+	}
+	admitted := make([]suffixElem, 0, len(candidates))
+	for _, c := range candidates {
+		cw := lipgloss.Width(c.text)
+		if cw > budget {
+			continue
+		}
+		budget -= cw
+		admitted = append(admitted, c)
+	}
+
+	// Step 3: render in visual order; the branch takes every cell left.
+	sort.SliceStable(admitted, func(i, j int) bool { return admitted[i].order < admitted[j].order })
+	var suffix strings.Builder
+	for _, a := range admitted {
+		suffix.WriteString(a.text)
+	}
+	name = elideMiddle(name, avail-lipgloss.Width(suffix.String()))
 
 	style := sidebarGitStyle
 	if pane.GitStale {
 		style = sidebarGitStaleStyle
 	}
-	return hl.line(style).Render(padOrTrunc(prefix+name+suffix, w))
+	return hl.line(style).Render(padOrTrunc(prefix+name+suffix.String(), w))
+}
+
+// prRow renders a pane's pull request beneath its git row: the number and
+// the status as a word, in the status color, like `    #278 approved`. Empty
+// when no PR is known. A trailing ` ~` says the daemon's last gh run did not
+// answer and the number may be old — the same mark the git row uses for a
+// branch that could not be re-probed. An unknown status name renders as open,
+// word and color both: a newer daemon must not blank an older client's row
+// or paint it a color it never chose.
+//
+// The indent lines the `#` up with the branch text (after `  ⎇ `). The number
+// and the stale marker are RESERVED wherever they fit, and the status word
+// is what gives way: the marker is the only sign that the status is cached,
+// and a row in its normal status color with the marker cut off showed an old
+// approval as current for the whole retry backoff. Below the width of the
+// number itself the row is cut like any other.
+func prRow(pane *PaneModel, w int) string {
+	return prRowHL(pane, w, rowHighlightNone)
+}
+
+// prRowHL is prRow with a row highlight: one style for the whole line, so
+// the highlight is that style, text darkened, on hl's background.
+func prRowHL(pane *PaneModel, w int, hl rowHighlight) string {
+	if pane.PRNumber <= 0 {
+		return ""
+	}
+	const indent = "    "
+	status := prStatusName(pane.PRStatus)
+	num := "#" + strconv.Itoa(pane.PRNumber)
+	marker := ""
+	if pane.PRStale {
+		marker = " ~"
+	}
+	avail := w - lipgloss.Width(indent)
+	if avail < 1 {
+		avail = 1
+	}
+	nw, mw := lipgloss.Width(num), lipgloss.Width(marker)
+	var text string
+	switch {
+	case nw+mw <= avail:
+		// Number and marker whole; the word takes what is left.
+		text = num + truncateCells(" "+status, avail-nw-mw) + marker
+	case nw <= avail:
+		// Room for the number only: the word, then the marker, give way.
+		text = num + truncateCells(" "+status, avail-nw)
+	default:
+		text = truncateCells(num, avail)
+	}
+	return hl.line(prRowStyle(status)).Render(padOrTrunc(indent+text, w))
+}
+
+// prStatusName maps a wire status to the closed set the row knows; anything
+// else is open.
+func prStatusName(status string) string {
+	if _, ok := sidebarPRStyles[status]; ok {
+		return status
+	}
+	return "open"
+}
+
+// prRowStyle maps a status NAME to its color; an unknown name is open.
+func prRowStyle(status string) lipgloss.Style {
+	return sidebarPRStyles[prStatusName(status)]
 }
 
 func sidebarHeading(title string, w int) string {

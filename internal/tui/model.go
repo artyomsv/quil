@@ -201,6 +201,12 @@ type PaneInfo struct {
 	GitAhead        int
 	GitBehind       int
 	GitStale        bool
+	// PRNumber/PRStatus/PRStale are the branch's pull request as the daemon's
+	// gh probe last saw it; 0 means none known. Status is a closed set the
+	// row maps to a color, anything unknown rendering as open.
+	PRNumber int
+	PRStatus string
+	PRStale  bool
 	// WorktreeOwned marks a pane this daemon created a linked worktree for.
 	// GitWorktree beside it says only that the CWD is IN one, which a pane the
 	// user made by hand also satisfies — the close dialog offers deletion on
@@ -9648,19 +9654,22 @@ func parseWorkspaceState(ws ipc.WorkspaceState) WorkspaceStateMsg {
 			PreparingWorktree: boundBranch(p.PreparingWorktree),
 			// Bounded for the same reason: it is sanitized on every frame of
 			// the pane border while the fix runs.
-			FixLabel:          truncateBytes(p.FixLabel, fixLabelCap),
-			Exited:            p.Exited,
-			RunGen:            p.RunGen,
-			GitBranch:         p.GitBranch,
-			GitDetached:       p.GitDetached,
-			GitWorktree:       p.GitWorktree,
-			GitWorktreeName:   p.GitWorktreeName,
-			WorktreeOwned:     p.WorktreeOwned,
-			WorktreePath:      p.WorktreePath,
-			SandboxKind:       sandboxKindOf(p.SandboxImage, p.SandboxBackend),
-			GitUpstream:       p.GitUpstream,
-			GitStale:          p.GitStale,
-			SizeSeq:           p.SizeSeq,
+			FixLabel:        truncateBytes(p.FixLabel, fixLabelCap),
+			Exited:          p.Exited,
+			RunGen:          p.RunGen,
+			GitBranch:       p.GitBranch,
+			GitDetached:     p.GitDetached,
+			GitWorktree:     p.GitWorktree,
+			GitWorktreeName: p.GitWorktreeName,
+			WorktreeOwned:   p.WorktreeOwned,
+			WorktreePath:    p.WorktreePath,
+			SandboxKind:     sandboxKindOf(p.SandboxImage, p.SandboxBackend),
+			GitUpstream:     p.GitUpstream,
+			GitStale:        p.GitStale,
+			PRNumber:        p.PRNumber,
+			PRStatus:        p.PRStatus,
+			PRStale:         p.PRStale,
+			SizeSeq:         p.SizeSeq,
 		}
 		if p.ContextTokens != nil {
 			pi.ContextTokens = *p.ContextTokens

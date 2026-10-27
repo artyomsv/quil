@@ -36,6 +36,7 @@ The file is created with `0600` permissions on first save and only your user can
 snapshot_interval = "30s"
 auto_start = true
 warm_shell_pool_size = 1
+pr_status = true
 
 [ghost_buffer]
 max_lines = 500
@@ -152,6 +153,7 @@ sidebar_toggle = "alt+shift+s"  # collapse/expand the PROJECT sidebar (not the n
 | `auto_start` | bool | `true` | The TUI auto-starts `quild --background` when it can't find an existing daemon. Set `false` if you manage `quild` yourself (systemd, launchd, etc.) — the TUI will error instead of auto-spawning. |
 | `warm_shell_pool_size` | int | `1` | Number of pre-spawned shells kept in a pool for faster Ctrl+N; capped at `8`, and `0` or negative values disable pooling. |
 | `master_grace_minutes` | int | `3` | With two or more Quil windows attached to this daemon (see [Multi-client sync](features.md#multi-client-sync)), how long the size master's slot is kept after its *connection* drops (not a normal quit) before another attached window takes over. Clamped to `0`–`60`; `0` means no grace — the next window is elected immediately. Only matters while another window is still attached; a lone window relaunching always takes over at once. |
+| `pr_status` | bool | `true` | Show each pane's pull request number and status at the end of its sidebar git row (see [Project sidebar](features.md#project-sidebar)). The daemon runs `gh pr view` for the pane's branch once when the branch changes and then every 2 minutes, backing off to every 30 minutes while GitHub does not answer. Needs `gh` installed and logged in on the machine the daemon runs on; without it the row simply shows no chip. `false`: `gh` is never run. Read at daemon start. |
 
 ## `[ghost_buffer]`
 

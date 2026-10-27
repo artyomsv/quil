@@ -142,4 +142,13 @@ type PaneState struct {
 	GitAhead  *int `json:"git_ahead,omitempty"`
 	GitBehind *int `json:"git_behind,omitempty"`
 	GitStale  bool `json:"git_stale,omitempty"`
+	// PRNumber is the pull request of the pane's current branch, 0 when none
+	// is known. PRStatus (a closed set: merged, closed, attention, running,
+	// approved, draft, open) and PRStale are present only beside a non-zero
+	// PRNumber — "the number you see may be old", never "I could not ask".
+	// Runtime-only like the git fields; separate from GitStale because the
+	// branch can be fresh while GitHub did not answer.
+	PRNumber int    `json:"pr_number,omitempty"`
+	PRStatus string `json:"pr_status,omitempty"`
+	PRStale  bool   `json:"pr_stale,omitempty"`
 }

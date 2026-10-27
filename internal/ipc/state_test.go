@@ -43,6 +43,27 @@ func TestPaneState_PointerZeroes_ArePresent(t *testing.T) {
 	}
 }
 
+// The PR keys ride only beside a number: a status or a stale mark with no
+// number is a daemon bug, and the omitempty tags are what keep it off the
+// wire rather than a conditional the builder could forget.
+func TestPaneState_PRFields_OmittedWhenNoNumber(t *testing.T) {
+	got := keysOf(t, PaneState{ID: "p", TabID: "t"})
+	for _, k := range []string{"pr_number", "pr_status", "pr_stale"} {
+		if _, ok := got[k]; ok {
+			t.Errorf("%q present on a pane with no PR", k)
+		}
+	}
+	with := keysOf(t, PaneState{ID: "p", TabID: "t", PRNumber: 277, PRStatus: "approved", PRStale: true})
+	for _, k := range []string{"pr_number", "pr_status", "pr_stale"} {
+		if _, ok := with[k]; !ok {
+			t.Errorf("%q missing with a number set", k)
+		}
+	}
+	if n, _ := with["pr_number"].(float64); n != 277 {
+		t.Errorf("pr_number = %v, want 277", with["pr_number"])
+	}
+}
+
 func TestTabState_LayoutRevZero_IsPresent(t *testing.T) {
 	got := keysOf(t, TabState{ID: "t", Panes: []string{}})
 	for _, k := range []string{"id", "name", "color", "panes", "project_id", "layout_rev"} {

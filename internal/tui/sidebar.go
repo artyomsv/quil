@@ -2,6 +2,8 @@ package tui
 
 import (
 	"fmt"
+	"sort"
+	"strconv"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -1052,6 +1054,22 @@ var (
 	sidebarDeletionStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("160"))
 	sidebarGitStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 	sidebarGitStaleStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Italic(true)
+	// sidebarPRStyles color the pull request chip on the git row by status
+	// name. The names are the daemon's closed set (internal/prinfo); anything
+	// else renders as open, so a newer daemon cannot blank an older client's
+	// chip or paint it a color it never chose. 214 is the blocked ▲ and says
+	// the same thing here ("needs you"); 160 is the deletion mark's terminal
+	// red, and a closed PR is terminal too; 75 is a light blue no other
+	// sidebar state uses; 34 is a green apart from 28 (unseen).
+	sidebarPRStyles = map[string]lipgloss.Style{
+		"merged":    lipgloss.NewStyle().Foreground(lipgloss.Color("75")),
+		"closed":    lipgloss.NewStyle().Foreground(lipgloss.Color("160")),
+		"attention": lipgloss.NewStyle().Foreground(lipgloss.Color("214")),
+		"running":   lipgloss.NewStyle().Foreground(lipgloss.Color("245")),
+		"approved":  lipgloss.NewStyle().Foreground(lipgloss.Color("34")),
+		"draft":     lipgloss.NewStyle().Foreground(lipgloss.Color("240")),
+		"open":      lipgloss.NewStyle().Foreground(lipgloss.Color("245")),
+	}
 	// Link health, paired to its glyphs by linkGlyphStyles — see there for why
 	// these come from outside the pane-state palette above.
 	sidebarLinkParkedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
@@ -1223,6 +1241,16 @@ func gitRow(pane *PaneModel, w int) string {
 
 // gitRowHL is gitRow with a row highlight: one style for the whole line, so
 // the highlight is that style, text darkened, on hl's background.
+//
+// The suffix is BUDGETED, not truncated. truncateCells keeps the LEFT of a
+// string and cuts the RIGHT, so a chip appended to the suffix was the first
+// thing cut, and at the default width ` wt ↑2 #277` rendered `#27` — a
+// different pull request. Every suffix element is therefore admitted whole or
+// omitted whole, in a PRIORITY order the visual order does not follow: the
+// chip first (it is the reason this row changed), the git stale mark, the
+// worktree marker, then `↑N` and `↓N` — detail about a branch whose PR the
+// owner is looking for. Elements that do not fit are skipped, not stopped at,
+// so a short `↓3` can still land after a long worktree name did not.
 func gitRowHL(pane *PaneModel, w int, hl rowHighlight) string {
 	name := pane.GitBranch
 	if name == "" && pane.GitDetached {
@@ -1233,52 +1261,130 @@ func gitRowHL(pane *PaneModel, w int, hl rowHighlight) string {
 	}
 	name = sanitizeRemoteText(name)
 
-	prefix := "  ⎇ "
-	var suffix string
-	if pane.GitWorktree {
-		// Sanitized HERE, before the width math below measures it: the name
-		// comes from a daemon the user may not control under --remote, and
-		// lipgloss measures an escape as zero cells, so a truncation is not a
-		// sanitiser. `name` is already sanitized above, so the comparison is
-		// between two sanitized values.
-		wtName := sanitizeRemoteText(pane.GitWorktreeName)
-		if worktreeNameIsRedundant(wtName, name) {
-			suffix += " wt"
-		} else {
-			suffix += " " + wtName
-		}
-	}
-	if pane.GitUpstream {
-		if pane.GitAhead > 0 {
-			suffix += fmt.Sprintf(" ↑%d", pane.GitAhead)
-		}
-		if pane.GitBehind > 0 {
-			suffix += fmt.Sprintf(" ↓%d", pane.GitBehind)
-		}
-	}
-	if pane.GitStale {
-		suffix += " ~"
-	}
-
+	const prefix = "  ⎇ "
+	// Step 1: the branch keeps its floor; the rest is the suffix budget.
 	avail := w - lipgloss.Width(prefix)
 	if avail < 1 {
 		avail = 1
 	}
-	nameW := avail - lipgloss.Width(suffix)
-	if nameW < minGitBranchCells {
-		nameW = minGitBranchCells
+	nameMin := min(lipgloss.Width(name), minGitBranchCells)
+	budget := avail - nameMin
+
+	// Step 2: admit suffix elements in priority order. order is the visual
+	// position: worktree, ↑, ↓, chip, git stale.
+	type suffixElem struct {
+		text  string
+		order int
 	}
-	if nameW > avail {
-		nameW = avail
+	var candidates []suffixElem
+	chip := prChip(pane)
+	if chip != "" {
+		candidates = append(candidates, suffixElem{" " + chip, 3})
 	}
-	name = elideMiddle(name, nameW)
-	suffix = truncateCells(suffix, avail-lipgloss.Width(name))
+	if pane.GitStale {
+		candidates = append(candidates, suffixElem{" ~", 4})
+	}
+	if pane.GitWorktree {
+		// Sanitized HERE, before the width math measures it: the name comes
+		// from a daemon the user may not control under --remote, and lipgloss
+		// measures an escape as zero cells, so a truncation is not a
+		// sanitiser. `name` is already sanitized above, so the comparison is
+		// between two sanitized values.
+		wtName := sanitizeRemoteText(pane.GitWorktreeName)
+		if worktreeNameIsRedundant(wtName, name) {
+			candidates = append(candidates, suffixElem{" wt", 0})
+		} else {
+			candidates = append(candidates, suffixElem{" " + wtName, 0})
+		}
+	}
+	if pane.GitUpstream {
+		if pane.GitAhead > 0 {
+			candidates = append(candidates, suffixElem{fmt.Sprintf(" ↑%d", pane.GitAhead), 1})
+		}
+		if pane.GitBehind > 0 {
+			candidates = append(candidates, suffixElem{fmt.Sprintf(" ↓%d", pane.GitBehind), 2})
+		}
+	}
+	admitted := make([]suffixElem, 0, len(candidates))
+	chipShown := false
+	for _, c := range candidates {
+		cw := lipgloss.Width(c.text)
+		if cw > budget {
+			continue
+		}
+		budget -= cw
+		admitted = append(admitted, c)
+		if c.order == 3 {
+			chipShown = true
+		}
+	}
+
+	// Step 3: render in visual order; the branch takes every cell left.
+	sort.SliceStable(admitted, func(i, j int) bool { return admitted[i].order < admitted[j].order })
+	var before, after strings.Builder // suffix text left and right of the chip
+	for _, a := range admitted {
+		switch {
+		case a.order < 3:
+			before.WriteString(a.text)
+		case a.order > 3:
+			after.WriteString(a.text)
+		}
+	}
+	suffixW := lipgloss.Width(before.String()) + lipgloss.Width(after.String())
+	if chipShown {
+		suffixW += 1 + lipgloss.Width(chip)
+	}
+	name = elideMiddle(name, avail-suffixW)
 
 	style := sidebarGitStyle
 	if pane.GitStale {
 		style = sidebarGitStaleStyle
 	}
-	return hl.line(style).Render(padOrTrunc(prefix+name+suffix, w))
+	left := prefix + name + before.String()
+	if !chipShown {
+		return hl.line(style).Render(padOrTrunc(left+after.String(), w))
+	}
+	if hl != rowHighlightNone {
+		// A highlighted row is ONE style (rowHighlight.line): the chip gives
+		// up its color while the pointer is on the row, like every other
+		// sidebar segment.
+		return hl.line(style).Render(padOrTrunc(left+" "+chip+after.String(), w))
+	}
+	// Pad on PLAIN text, then color the chip alone — a second Render inside
+	// one styled string closes the outer color at the first inner segment.
+	pad := w - lipgloss.Width(left) - 1 - lipgloss.Width(chip) - lipgloss.Width(after.String())
+	tail := after.String()
+	if pad > 0 {
+		tail += strings.Repeat(" ", pad)
+	}
+	return style.Render(left+" ") + prChipStyle(pane.PRStatus).Render(chip) + style.Render(tail)
+}
+
+// prChip is the pull request token for a pane's git row: "" when no PR is
+// known, else `#N` plus ONE optional indicator cell — `…` while a check is
+// still running, `~` when the daemon's last gh run did not answer. Stale wins:
+// a stale "running" says "it was running when GitHub last answered", which is
+// what the `~` already says.
+func prChip(p *PaneModel) string {
+	if p.PRNumber <= 0 {
+		return ""
+	}
+	tok := "#" + strconv.Itoa(p.PRNumber)
+	switch {
+	case p.PRStale:
+		tok += "~"
+	case p.PRStatus == "running":
+		tok += "…"
+	}
+	return tok
+}
+
+// prChipStyle maps a status NAME to its color; an unknown name is open.
+func prChipStyle(status string) lipgloss.Style {
+	if s, ok := sidebarPRStyles[status]; ok {
+		return s
+	}
+	return sidebarPRStyles["open"]
 }
 
 func sidebarHeading(title string, w int) string {

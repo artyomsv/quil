@@ -690,6 +690,8 @@ The PANES section scrolls when there are more panes than rows: the wheel moves i
 
 A worktree named after its branch — `feat-x` for `feat/x`, the usual convention — is shown as a plain `wt` marker instead, since repeating the branch would cost most of the row. You see the name when it differs from the branch, which is exactly when it tells you something: an agent working in `wt-1` on branch `feat/refactor-sidebar`. Naming the worktree costs no extra git call — git already stores a linked checkout's metadata under that name.
 
+The git row ends with the branch's **pull request**, like `#277`, colored by where it stands: grey while open, dim while a draft, grey with `…` while CI is still running, green when approved, orange when it needs you (a red check, changes requested, or a merge conflict), red when closed without merging, light blue when merged. Quil asks `gh pr view` for the pane's branch when the branch changes and then every two minutes, so a freshly opened PR shows up within that; with no `gh`, no login, a non-GitHub remote or no PR for the branch, the row looks as it always did. When the row is tight the `↑N`/`↓N` counts and the worktree marker give way before the chip, and the chip is never cut in the middle of its digits — it is whole or absent. A `~` inside the chip (`#277~`) means GitHub did not answer the last time quil asked and the number may be old; the row's own trailing `~` still means the branch itself is stale. Turn it off with `[daemon] pr_status = false` or in F1 → Settings.
+
 | Key | Action |
 |---|---|
 | `Alt+Shift+S` | Toggle the sidebar |

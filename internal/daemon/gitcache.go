@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/artyomsv/quil/internal/gitinfo"
+	"github.com/artyomsv/quil/internal/prinfo"
 )
 
 // Git state rides the workspace broadcast in the pane payload — no new
@@ -35,7 +36,50 @@ const (
 	// repository (git init, or a clone finishing), and re-probing every tick
 	// costs exactly as much as probing a real one.
 	gitNegativeTTL = 60 * time.Second
+
+	// prRefreshInterval is how often a checkout's pull request is re-asked
+	// about while gh keeps answering. It is a network call to GitHub, so it
+	// must never ride the 5 s git tick; a branch change re-asks at once.
+	prRefreshInterval = 2 * time.Minute
+
+	// prProbeTimeout bounds one gh run. Longer than the git probe's because
+	// the answer crosses a network, and run OFF the tick goroutine so this
+	// budget can never stall the branch refresh.
+	prProbeTimeout = 10 * time.Second
+
+	// prBackoffCap is the longest wait between two gh runs that keep
+	// failing — a remote that is not GitHub, a gh that is not logged in.
+	prBackoffCap = 30 * time.Minute
+
+	// maxPRProbePermits is the PR probe's own ceiling on the blocking-call
+	// pool, leaving a RESERVE it can never consume. PR probes are the pool's
+	// only concurrent holders — every referenced checkout fires one at daemon
+	// start — and each holds its permit for the full timeout while GitHub is
+	// unreachable (VPN off, DNS hang). Claimed against the whole pool, eight
+	// checkouts on an offline laptop refused the git probe (every row `~`),
+	// the browse and discover dialogs, a worktree add and a plugin fix for
+	// 10 s at a time: the same priority inversion browse_roots.go's
+	// maxRootProbePermits exists for. The speculative network call yields;
+	// the user's own request gets the reserve.
+	maxPRProbePermits = maxBlockingFSCalls / 2
 )
+
+// prBackoff is the wait before the next gh run after `failures` consecutive
+// Unknown results: 2, 4, 8, 16, 30 min. Zero or fewer failures is the plain
+// interval.
+func prBackoff(failures int) time.Duration {
+	if failures <= 0 {
+		return prRefreshInterval
+	}
+	d := prRefreshInterval
+	for i := 0; i < failures; i++ {
+		d *= 2
+		if d >= prBackoffCap {
+			return prBackoffCap
+		}
+	}
+	return d
+}
 
 // gitEntry is one checkout's cached state.
 type gitEntry struct {
@@ -61,6 +105,26 @@ type gitEntry struct {
 	// branch as current. A pane whose lookup times out renders its last known
 	// value marked stale, never a guess.
 	stale bool
+
+	// Pull request state for the checkout's CURRENT branch, bound to a
+	// branch generation: prGen counts every observed branch change
+	// (detachment included), and a probe's result is accepted only when the
+	// generation it was launched for is still current. Branch A's number is
+	// never shown beside branch B, however late A's answer lands.
+	pr      prinfo.Info
+	prKnown bool // an Answer of the current generation is held
+	prStale bool // the last run did not answer; pr is the previous Answer
+	// prAt is the last completion (any result) or the generation reset.
+	// Zero means "ask at once".
+	prAt     time.Time
+	prBranch string // the branch prGen was minted for
+	prGen    uint64
+	// prInFlightGen is the generation of the probe currently running, 0 when
+	// none. Stored as a generation rather than a bool so an obsolete
+	// completion can tell whether the flag it sees is its own.
+	prInFlightGen uint64
+	// prFailures counts consecutive Unknown results and drives prBackoff.
+	prFailures int
 }
 
 // gitCache maps a pane CWD to its checkout, and a checkout to its state.
@@ -79,7 +143,28 @@ type gitCache struct {
 	byDir    map[string]*gitEntry // per-checkout git dir → state
 	cwdToDir map[string]string    // pane CWD → per-checkout git dir ("" = not a repo)
 	cwdAt    map[string]time.Time // when that CWD was last resolved
+
+	// prEnabled gates the pull request probe ([daemon] pr_status). Off, no
+	// gh is ever run and no PR state is ever written.
+	prEnabled bool
+	// onPRChange is called — OUTSIDE c.mu — when a probe completion changed
+	// what a client would be told. The daemon supplies broadcastState; tests
+	// supply a counter.
+	onPRChange func()
+	// prWG counts in-flight probe goroutines so tests (and nothing else) can
+	// wait for completions to land.
+	prWG sync.WaitGroup
+	// prAvailable caches prAvailableFn's answer for prRefreshInterval from
+	// prAvailAt: without it a missing gh cost an exec.LookPath per checkout
+	// per 5 s tick forever (Windows: PATH entries × PATHEXT stats).
+	prAvailable bool
+	prAvailAt   time.Time
 }
+
+// prCompletionHook runs at the very end of runPRProbe, after the result was
+// applied or discarded and the lock released. A no-op in production; tests
+// use it to wait for a completion to have LANDED rather than sleep and hope.
+var prCompletionHook = func() {}
 
 func newGitCache() *gitCache {
 	return &gitCache{
@@ -87,6 +172,74 @@ func newGitCache() *gitCache {
 		cwdToDir: make(map[string]string),
 		cwdAt:    make(map[string]time.Time),
 	}
+}
+
+// prProbeFn and prAvailableFn are the seams the PR probe runs through, so
+// tests exercise the cache's decisions — the two triggers, the gates, the
+// generation rules, the backoff — without gh, a login or a network.
+var (
+	prProbeFn     = prinfo.Probe
+	prAvailableFn = prinfo.Available
+)
+
+// lookupPR returns a CWD's pull request for the broadcast: the Info, whether
+// an Answer is held at all, and whether the last run failed to refresh it.
+// Never probes and never blocks, like lookup.
+func (c *gitCache) lookupPR(cwd string) (prinfo.Info, bool, bool) {
+	if cwd == "" {
+		return prinfo.Info{}, false, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	dir, known := c.cwdToDir[cwd]
+	if !known || dir == "" {
+		return prinfo.Info{}, false, false
+	}
+	e := c.byDir[dir]
+	if e == nil || !e.repo {
+		return prinfo.Info{}, false, false
+	}
+	return e.pr, e.prKnown, e.prStale
+}
+
+// lookupBoth is lookup and lookupPR under ONE lock hold, for the broadcast:
+// read separately, a branch change landing between the two pairs branch B
+// with A's pull request in one frame — the thing the generation exists to
+// prevent. Never probes and never blocks.
+func (c *gitCache) lookupBoth(cwd string) (info gitinfo.Info, ok, stale bool, pr prinfo.Info, prKnown, prStale bool) {
+	if cwd == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	dir, known := c.cwdToDir[cwd]
+	if !known || dir == "" {
+		return
+	}
+	e := c.byDir[dir]
+	if e == nil || !e.repo {
+		return
+	}
+	return e.info, true, e.stale, e.pr, e.prKnown, e.prStale
+}
+
+// notePRBranch records the checkout's current branch on the PR side. Called
+// with c.mu held. A changed branch is a new GENERATION: the old number is
+// cleared at once — stale or not, it describes another branch — and the new
+// branch is asked about immediately. An in-flight probe is not cancelled (it
+// holds a permit it will release itself); its result fails the generation
+// check in runPRProbe. Clearing the in-flight marker is what lets the new
+// branch be asked at once rather than after the obsolete probe's full
+// timeout. Same branch: nothing changes.
+func (e *gitEntry) notePRBranch(branch string) {
+	if branch == e.prBranch {
+		return
+	}
+	e.prBranch = branch
+	e.prGen++
+	e.pr, e.prKnown, e.prStale = prinfo.Info{}, false, false
+	e.prFailures, e.prAt = 0, time.Time{}
+	e.prInFlightGen = 0
 }
 
 // lookup returns a CWD's cached state for the broadcast. Never probes and
@@ -217,11 +370,170 @@ func (c *gitCache) refresh(ctx context.Context, cwds []string) {
 			e.stale = true
 		} else {
 			e.info, e.repo, e.at, e.headMtime, e.stale = info, true, now, head, false
+			// The PR generation moves in THIS critical section, not in
+			// prTick after the loop: the loop probes checkouts serially, so
+			// with a later checkout slow to answer a broadcast could read
+			// branch B beside A's still-known PR for seconds.
+			e.notePRBranch(info.Branch)
 		}
 		c.mu.Unlock()
 	}
 
+	c.prTick(ctx, now, c.referencedDirs(cwds))
 	c.sweep(cwds)
+}
+
+// prTick starts a pull request probe for every referenced checkout that is
+// due. It is evaluated on EVERY tick, independently of whether the git probe
+// above ran: that probe skips a checkout whose HEAD mtime is unchanged, which
+// is the steady state, so a PR check placed "after the git probe" would never
+// fire on its 2-minute cadence. It reads e.info.Branch as it stands — a stale
+// git entry still holds the last branch seen, which is the right branch to
+// ask about.
+//
+// The probe itself runs on its own goroutine (runPRProbe). refresh is one
+// goroutine probing checkouts serially, and a 10 s gh timeout inline would
+// stall the 5 s branch refresh of every checkout behind an unreachable
+// GitHub — N checkouts, up to N×10 s per tick.
+func (c *gitCache) prTick(ctx context.Context, now time.Time, dirs []string) {
+	c.mu.Lock()
+	enabled := c.prEnabled
+	c.mu.Unlock()
+	if !enabled || len(dirs) == 0 {
+		return
+	}
+	available := c.ghAvailable(now)
+	for _, dir := range dirs {
+		c.mu.Lock()
+		e := c.byDir[dir]
+		if e == nil {
+			c.mu.Unlock()
+			continue
+		}
+		branch := e.info.Branch
+		// Normally a no-op: refresh already moved the generation where it
+		// published the branch. It still catches the placeholder entry
+		// (resolved, not yet probed) and keeps the invariant local.
+		e.notePRBranch(branch)
+		due := e.prAt.IsZero() || now.Sub(e.prAt) >= prBackoff(e.prFailures)
+		if branch == "" || e.prInFlightGen != 0 || !due {
+			c.mu.Unlock()
+			continue
+		}
+		gen, probeDir := e.prGen, e.probeDir
+		c.mu.Unlock()
+
+		if !available {
+			// No gh on PATH: nothing known, nothing stale, no permit spent.
+			// The user without gh sees today's row, not a `~`.
+			continue
+		}
+		if !claimBlockingFSCallUpTo(maxPRProbePermits) {
+			c.markPRStale(dir)
+			continue
+		}
+		c.mu.Lock()
+		if c.byDir[dir] != e || e.prGen != gen {
+			// Swept or moved on while the permit was claimed.
+			c.mu.Unlock()
+			releaseBlockingFSCall()
+			continue
+		}
+		e.prInFlightGen = gen
+		c.mu.Unlock()
+		c.prWG.Add(1)
+		go c.runPRProbe(ctx, dir, e, gen, branch, probeDir)
+	}
+}
+
+// runPRProbe runs one gh probe and applies its result under the generation
+// rules: the result is accepted only when c.byDir[dir] is still the SAME
+// entry and its generation is the one this probe was launched for. Otherwise
+// it is discarded entirely — it may not write pr, may not touch prAt or
+// prFailures (the new branch's retry clock), and may not clear an in-flight
+// marker that is not its own.
+//
+// c.mu is released BEFORE onPRChange runs: the callback reaches lookup (via
+// gitFingerprint), which takes the same non-reentrant mutex.
+func (c *gitCache) runPRProbe(ctx context.Context, dir string, e *gitEntry, gen uint64, branch, probeDir string) {
+	// First deferred, so it runs LAST: after the permit is back and prWG is
+	// decremented, on the discard path as well as the apply path.
+	defer prCompletionHook()
+	defer c.prWG.Done()
+	defer releaseBlockingFSCall()
+	pctx, cancel := context.WithTimeout(ctx, prProbeTimeout)
+	defer cancel()
+	info, res := prProbeFn(pctx, probeDir, branch)
+
+	c.mu.Lock()
+	if c.byDir[dir] != e || e.prGen != gen {
+		if c.byDir[dir] == e && e.prInFlightGen == gen {
+			e.prInFlightGen = 0
+		}
+		c.mu.Unlock()
+		return
+	}
+	before := prTuple{e.pr, e.prKnown, e.prStale}
+	switch res {
+	case prinfo.Answer:
+		e.pr, e.prKnown, e.prStale, e.prFailures = info, true, false, 0
+	case prinfo.NoPR:
+		e.pr, e.prKnown, e.prStale, e.prFailures = prinfo.Info{}, false, false, 0
+	default:
+		// Only a held Answer can be stale: with nothing known there is
+		// nothing to mark, and the row stays exactly as today.
+		e.prStale = e.prKnown
+		e.prFailures++
+	}
+	e.prAt = time.Now()
+	e.prInFlightGen = 0
+	changed := before != prTuple{e.pr, e.prKnown, e.prStale}
+	c.mu.Unlock()
+
+	// A probe cancelled by shutdown returns Unknown and can flip a held
+	// value stale; nobody is left to broadcast that to.
+	if changed && ctx.Err() == nil && c.onPRChange != nil {
+		c.onPRChange()
+	}
+}
+
+// ghAvailable answers prAvailableFn, re-asked at most once per
+// prRefreshInterval. Called with c.mu NOT held.
+func (c *gitCache) ghAvailable(now time.Time) bool {
+	c.mu.Lock()
+	fresh := !c.prAvailAt.IsZero() && now.Sub(c.prAvailAt) < prRefreshInterval
+	avail := c.prAvailable
+	c.mu.Unlock()
+	if fresh {
+		return avail
+	}
+	avail = prAvailableFn()
+	c.mu.Lock()
+	c.prAvailable, c.prAvailAt = avail, now
+	c.mu.Unlock()
+	return avail
+}
+
+// prTuple is what a client is told about a checkout's pull request; a
+// completion that leaves it unchanged broadcasts nothing.
+type prTuple struct {
+	info  prinfo.Info
+	known bool
+	stale bool
+}
+
+// markPRStale records a refused permit: a held Answer is marked stale, and the
+// clock is zeroed so the next tick tries again rather than waiting out the
+// interval behind a pool that was momentarily full.
+func (c *gitCache) markPRStale(dir string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if e := c.byDir[dir]; e != nil {
+		if e.prKnown {
+			e.prStale = true
+		}
+		e.prAt = time.Time{}
+	}
 }
 
 // sweep drops entries for CWDs no live pane is in any more.
@@ -378,13 +690,14 @@ func (d *Daemon) paneCWDs() []string {
 func (d *Daemon) gitFingerprint() string {
 	var b strings.Builder
 	for _, cwd := range d.paneCWDs() {
-		info, ok, stale := d.gitCache.lookup(cwd)
+		info, ok, stale, pr, prKnown, prStale := d.gitCache.lookupBoth(cwd)
 		if !ok {
 			continue
 		}
-		fmt.Fprintf(&b, "%s\x00%s\x00%t\x00%t\x00%d\x00%d\x00%t\x00%t\n",
+		fmt.Fprintf(&b, "%s\x00%s\x00%t\x00%t\x00%d\x00%d\x00%t\x00%t\x00%d\x00%s\x00%t\x00%t\n",
 			cwd, info.Branch, info.Detached, info.LinkedWorktree,
-			info.Ahead, info.Behind, info.HasUpstream, stale)
+			info.Ahead, info.Behind, info.HasUpstream, stale,
+			pr.Number, pr.Status, prKnown, prStale)
 	}
 	return b.String()
 }

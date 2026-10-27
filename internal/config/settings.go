@@ -169,6 +169,8 @@ func Settings() []Setting {
 				return nil
 			},
 		},
+		// Read by the daemon at start: it gates whether gh is ever run.
+		boolRow("daemon.pr_status", g, "Show pull request status", AppliesNextStart, func(c *Config) *bool { return &c.Daemon.PRStatus }),
 		boolRow("ghost_buffer.dimmed", g, "Ghost dimmed", AppliesNextStart, func(c *Config) *bool { return &c.GhostBuffer.Dimmed }),
 		intRow("ghost_buffer.max_lines", g, "Ghost buffer lines", AppliesNextStart, 1, "must be a whole number above 0",
 			func(c *Config) *int { return &c.GhostBuffer.MaxLines }),

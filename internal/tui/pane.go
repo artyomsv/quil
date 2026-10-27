@@ -131,13 +131,19 @@ type PaneModel struct {
 	// which drifts with every `cd` the shell makes. See PaneInfo.
 	// SandboxKind is sandboxKindDocker / sandboxKindSbx, "" for a host pane,
 	// drawn as sandboxGlyph on the border and the sidebar row.
-	WorktreeOwned      bool
-	WorktreePath       string
-	SandboxKind        string
-	GitUpstream        bool
-	GitAhead           int
-	GitBehind          int
-	GitStale           bool
+	WorktreeOwned bool
+	WorktreePath  string
+	SandboxKind   string
+	GitUpstream   bool
+	GitAhead      int
+	GitBehind     int
+	GitStale      bool
+	// PRNumber/PRStatus/PRStale: the branch's pull request as the daemon's gh
+	// probe last saw it (daemon-authoritative, runtime-only; see PaneInfo).
+	// 0 means none known; the pane then has no PR row.
+	PRNumber           int
+	PRStatus           string
+	PRStale            bool
 	Model              string         // model id of the last completed AI turn (daemon-authoritative; status bar)
 	ContextTokens      int64          // context-window tokens of the last completed AI turn (daemon-authoritative; status bar)
 	resumeStart        time.Time      // when resuming/preparing started (minimum display duration)

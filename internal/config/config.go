@@ -460,6 +460,10 @@ type DaemonConfig struct {
 	// its slot while another client is attached. Read it through MasterGrace,
 	// which clamps it.
 	MasterGraceMinutes int `toml:"master_grace_minutes"`
+	// PRStatus lets the daemon run `gh pr view` for each pane's branch so the
+	// sidebar can show the pull request number and status. Off, gh is never
+	// run. Read at daemon start.
+	PRStatus bool `toml:"pr_status"`
 }
 
 // MaxMasterGraceMinutes bounds master_grace_minutes. A longer grace would
@@ -718,6 +722,7 @@ func Default() Config {
 			AutoStart:          true,
 			WarmShellPoolSize:  1,
 			MasterGraceMinutes: 3,
+			PRStatus:           true,
 		},
 		GhostBuffer: GhostBufferConfig{
 			MaxLines: 500,

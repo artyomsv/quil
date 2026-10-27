@@ -415,6 +415,10 @@ func New(cfg config.Config) *Daemon {
 	d.clients.afterFn = realAfterFunc
 	d.clients.grace = cfg.Daemon.MasterGrace()
 	d.clients.onChange = d.broadcastState
+	// The PR probe's completion runs on its own goroutine, so it asks for its
+	// own broadcast rather than riding the git tick's fingerprint check.
+	d.gitCache.prEnabled = cfg.Daemon.PRStatus
+	d.gitCache.onPRChange = d.broadcastState
 	d.broadcastAfterFn = realAfterFunc
 	d.startedAt = time.Now()
 	// Clamped like a pushed policy: config.toml is hand-edited, so it can carry
@@ -5614,7 +5618,10 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 				// from a previous daemon run describes a checkout nobody has
 				// re-probed. lookup() never probes, so this cannot slow a
 				// broadcast down whatever the filesystem is doing.
-				if info, ok, stale := d.gitCache.lookup(cwd); ok {
+				// One lock hold for the branch AND its pull request, so a
+				// branch change cannot land between the two reads and pair
+				// branch B with A's PR in one frame.
+				if info, ok, stale, pr, prKnown, prStale := d.gitCache.lookupBoth(cwd); ok {
 					if info.Branch != "" {
 						paneData.GitBranch = info.Branch
 					}
@@ -5641,6 +5648,14 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 					}
 					if stale {
 						paneData.GitStale = true
+					}
+					// The pull request rides beside the branch, and only
+					// when one is KNOWN: an Unknown with nothing held sends
+					// none of the three keys, so the row is exactly today's.
+					if prKnown {
+						paneData.PRNumber = pr.Number
+						paneData.PRStatus = string(pr.Status)
+						paneData.PRStale = prStale
 					}
 				}
 			}

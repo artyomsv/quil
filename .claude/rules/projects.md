@@ -4,6 +4,7 @@ paths:
   - "**/internal/daemon/project.go"
   - "**/internal/daemon/gitcache.go"
   - "**/internal/gitinfo/**"
+  - "**/internal/prinfo/**"
   - "**/internal/gitworktree/**"
   - "**/internal/daemon/worktree.go"
   - "**/internal/daemon/worktree_add.go"
@@ -1018,6 +1019,66 @@ is there is nothing to compare against.
 console-less parent gets a brand new console allocated — a real window. A probe
 per checkout every few seconds is a stream of them. `hideWindow` is a no-op on
 Unix; the build tags keep the difference in one pair of files.
+
+**PR probe (`internal/prinfo`, `gitcache.go`'s `prTick`/`runPRProbe`).** A
+pane whose branch has a pull request gets a row under its git row (`#278
+approved`, colored by one of seven status names), and the number comes from
+`gh pr view <branch> --json …` run by the daemon — git does not know PR
+numbers. Six rules, each a review
+finding or a measured hazard: (1) **triggers are evaluated on every tick,
+independently of the HEAD-mtime skip** — that skip is the steady state, so a
+probe placed "after the git probe" would never fire its 2-minute cadence; a
+branch change asks at once. (2) **The gh run is ASYNCHRONOUS** (one goroutine
+per in-flight probe, `prWG` for tests): `refresh` probes checkouts serially
+and a 10 s gh timeout inline would stall the 5 s branch refresh of every
+checkout behind an unreachable GitHub. The permit is claimed by the tick
+against a CEILING of half the pool (`claimBlockingFSCallUpTo(maxPRProbePermits)`)
+and released by the goroutine: PR probes are the pool's only concurrent
+holders — every checkout fires one at daemon start — and each holds its permit
+for the full timeout while GitHub is unreachable, so a whole-pool claim refused
+the git probe, the dialogs and worktree operations for 10 s at a time on an
+offline laptop (the `browse_roots.go` reserve pattern). gh's availability is
+cached for one interval (`ghAvailable`), not re-stat'd per checkout per tick;
+the timeout derives from the watcher's shutdown context, and a completion
+after shutdown asks for no broadcast. (3) **Every value is bound to a branch
+GENERATION** (`prGen`, `prInFlightGen`): a branch change clears the PR state
+and bumps the generation IN THE SAME `c.mu` SECTION that publishes the new
+branch (`notePRBranch`, called where `refresh` writes `e.info`) — the loop
+probes checkouts serially, so moving it in `prTick` after the loop left a
+seconds-wide window in which a broadcast read branch B beside A's PR; and the
+broadcast reads branch and PR under ONE hold (`lookupBoth`), never `lookup`
+then `lookupPR`. A completion is applied only when
+`c.byDir[dir]` is still the same `*gitEntry` AND its generation is the one the
+probe was launched for, else discarded entirely (it may not touch `prAt`,
+`prFailures`, or an in-flight marker that is not its own). Branch A's number
+is never shown beside branch B however late A's answer lands. Single-flight
+is per GENERATION: a branch change zeroes the in-flight marker so the new
+branch is asked at once rather than after the obsolete probe's full timeout.
+(4) **The branch is passed to gh as an argv ARGUMENT** — argument-free `gh pr
+view` asks about whatever branch the checkout is on when gh runs, which with
+an async probe can differ from the branch the daemon recorded. (5)
+**Backoff on Unknown**: 2, 4, 8, 16, 30 min (`prBackoff`), reset by an Answer,
+a NoPR, a branch change or a restart — a non-GitHub remote or a gh that is not
+logged in would otherwise spawn gh every 2 minutes for the daemon's life. gh
+absent from PATH costs no permit and marks nothing. (6) **`onPRChange` runs
+OUTSIDE `c.mu`** and the completion decides "visible change" itself by
+comparing the entry's tuple before/after its write — `gitFingerprint` takes
+the same mutex through `lookup`. On the wire `pr_status`/`pr_stale` ride only
+beside a non-zero `pr_number` ("the number may be old", never "I could not
+ask"); the TUI copies all three unconditionally in `parseWorkspaceState` and
+`syncPaneMeta`, so an absent key clears the row. **The PR is a ROW of its
+own under the git row (`prRowHL`, `    #278 approved`), not a suffix on it**:
+it shipped as a chip at the end of the git row first, and on a long branch
+the chip stole the width the branch needs (owner, 2026-10-27). The row holds
+the number and the status as a WORD in the status color; the number survives
+whole wherever it fits and the word gives way first; a trailing ` ~` is the
+git row's stale mark. It is appended right after the git row in `sidebarRows`
+with the same shape (no kind, no ordinal, `inTab`, `gitOf` so the pane hover
+shades it), and only a pane with a PR pays the row. `gitRowHL` still BUDGETS
+its suffix (`~`, `wt`, `↑N`, `↓N`, each whole or omitted) because
+`truncateCells` cuts the RIGHT end. Gate: `[daemon] pr_status` (default on),
+read at start. Tests: `internal/prinfo/prinfo_test.go`, `gitcache_pr_test.go`,
+`state_pr_test.go`, `pr_path_test.go`, `prrow_test.go`.
 
 ## Creating worktrees (stage B)
 

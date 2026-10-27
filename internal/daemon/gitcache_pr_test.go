@@ -674,3 +674,71 @@ func TestPRProbe_AvailabilityIsCheckedOncePerInterval(t *testing.T) {
 		t.Fatalf("prAvailableFn called %d times after the interval elapsed, want 2", n)
 	}
 }
+
+// The generation moves in the SAME critical section that publishes the new
+// branch. refresh probes checkouts serially and prTick runs after the whole
+// loop, so with a second checkout slow to answer there was a window — seconds
+// wide — in which a broadcast read branch B beside A's still-known PR. That
+// is the one thing the design promises never happens.
+func TestPRProbe_BranchChangeClearsThePRInTheSameLockAsTheBranch(t *testing.T) {
+	c, g := prFixture(t, "A")
+	g.dirs["/repo2"] = [2]string{"/repo2/.git", "/repo2/.git"}
+	g.infos["/repo2"] = gitinfo.Info{Branch: "x"}
+	f := &fakePR{answers: map[string]prinfo.Info{"A": {Number: 277}, "x": {Number: 1}}}
+	installFakePR(t, c, f, true)
+	cwds := []string{"/repo", "/repo2"}
+	c.refresh(context.Background(), cwds)
+	c.prWG.Wait()
+	if _, known, _ := c.lookupPR("/repo"); !known {
+		t.Fatal("setup: A's PR not known")
+	}
+
+	// Checkout 1 moves to B; checkout 2's git probe parks until released, so
+	// refresh is caught between publishing B and reaching prTick.
+	moveBranch(t, c, g, "B")
+	block := make(chan struct{})
+	inner := gitProbeFn
+	gitProbeFn = func(ctx context.Context, dir string) (gitinfo.Info, bool) {
+		if dir == "/repo2" {
+			<-block
+		}
+		return inner(ctx, dir)
+	}
+	t.Cleanup(func() { gitProbeFn = inner })
+	done := make(chan struct{})
+	go func() {
+		c.refresh(context.Background(), cwds)
+		close(done)
+	}()
+	waitUntil(t, "branch B to be published", func() bool {
+		info, ok, _ := c.lookup("/repo")
+		return ok && info.Branch == "B"
+	})
+	info, _, _, pr, known, _ := c.lookupBoth("/repo")
+	if info.Branch == "B" && known {
+		t.Fatalf("branch B published with A's PR #%d still known", pr.Number)
+	}
+	close(block)
+	<-done
+	c.prWG.Wait()
+}
+
+// One lock for both halves: a broadcast must never pair one checkout's branch
+// with the PR of its previous one because the two reads were separate.
+func TestLookupBoth_AgreesWithTheSeparateLookups(t *testing.T) {
+	c, _ := prFixture(t, "A")
+	f := &fakePR{answers: map[string]prinfo.Info{"A": {Number: 277, Status: prinfo.StatusOpen}}}
+	installFakePR(t, c, f, true)
+	c.refresh(context.Background(), []string{"/repo"})
+	c.prWG.Wait()
+	info, ok, stale, pr, known, prStale := c.lookupBoth("/repo")
+	i2, ok2, stale2 := c.lookup("/repo")
+	p2, known2, prStale2 := c.lookupPR("/repo")
+	if info != i2 || ok != ok2 || stale != stale2 || pr != p2 || known != known2 || prStale != prStale2 {
+		t.Fatalf("lookupBoth = %+v %v %v %+v %v %v; separate = %+v %v %v %+v %v %v",
+			info, ok, stale, pr, known, prStale, i2, ok2, stale2, p2, known2, prStale2)
+	}
+	if _, ok, _, _, _, _ := c.lookupBoth("/nowhere"); ok {
+		t.Fatal("lookupBoth answered for an unknown CWD")
+	}
+}

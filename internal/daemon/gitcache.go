@@ -202,6 +202,46 @@ func (c *gitCache) lookupPR(cwd string) (prinfo.Info, bool, bool) {
 	return e.pr, e.prKnown, e.prStale
 }
 
+// lookupBoth is lookup and lookupPR under ONE lock hold, for the broadcast:
+// read separately, a branch change landing between the two pairs branch B
+// with A's pull request in one frame — the thing the generation exists to
+// prevent. Never probes and never blocks.
+func (c *gitCache) lookupBoth(cwd string) (info gitinfo.Info, ok, stale bool, pr prinfo.Info, prKnown, prStale bool) {
+	if cwd == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	dir, known := c.cwdToDir[cwd]
+	if !known || dir == "" {
+		return
+	}
+	e := c.byDir[dir]
+	if e == nil || !e.repo {
+		return
+	}
+	return e.info, true, e.stale, e.pr, e.prKnown, e.prStale
+}
+
+// notePRBranch records the checkout's current branch on the PR side. Called
+// with c.mu held. A changed branch is a new GENERATION: the old number is
+// cleared at once — stale or not, it describes another branch — and the new
+// branch is asked about immediately. An in-flight probe is not cancelled (it
+// holds a permit it will release itself); its result fails the generation
+// check in runPRProbe. Clearing the in-flight marker is what lets the new
+// branch be asked at once rather than after the obsolete probe's full
+// timeout. Same branch: nothing changes.
+func (e *gitEntry) notePRBranch(branch string) {
+	if branch == e.prBranch {
+		return
+	}
+	e.prBranch = branch
+	e.prGen++
+	e.pr, e.prKnown, e.prStale = prinfo.Info{}, false, false
+	e.prFailures, e.prAt = 0, time.Time{}
+	e.prInFlightGen = 0
+}
+
 // lookup returns a CWD's cached state for the broadcast. Never probes and
 // never blocks — the broadcast path must not wait on a filesystem.
 func (c *gitCache) lookup(cwd string) (gitinfo.Info, bool, bool) {
@@ -330,6 +370,11 @@ func (c *gitCache) refresh(ctx context.Context, cwds []string) {
 			e.stale = true
 		} else {
 			e.info, e.repo, e.at, e.headMtime, e.stale = info, true, now, head, false
+			// The PR generation moves in THIS critical section, not in
+			// prTick after the loop: the loop probes checkouts serially, so
+			// with a later checkout slow to answer a broadcast could read
+			// branch B beside A's still-known PR for seconds.
+			e.notePRBranch(info.Branch)
 		}
 		c.mu.Unlock()
 	}
@@ -366,20 +411,10 @@ func (c *gitCache) prTick(ctx context.Context, now time.Time, dirs []string) {
 			continue
 		}
 		branch := e.info.Branch
-		if branch != e.prBranch {
-			// The branch moved: a new generation. The old number is cleared
-			// at once — stale or not, it describes another branch — and the
-			// new branch is asked about immediately. An in-flight probe is
-			// not cancelled (it holds a permit it will release itself); its
-			// result fails the generation check below. Clearing the
-			// in-flight marker is what lets the new branch be asked at once
-			// rather than after the obsolete probe's full timeout.
-			e.prBranch = branch
-			e.prGen++
-			e.pr, e.prKnown, e.prStale = prinfo.Info{}, false, false
-			e.prFailures, e.prAt = 0, time.Time{}
-			e.prInFlightGen = 0
-		}
+		// Normally a no-op: refresh already moved the generation where it
+		// published the branch. It still catches the placeholder entry
+		// (resolved, not yet probed) and keeps the invariant local.
+		e.notePRBranch(branch)
 		due := e.prAt.IsZero() || now.Sub(e.prAt) >= prBackoff(e.prFailures)
 		if branch == "" || e.prInFlightGen != 0 || !due {
 			c.mu.Unlock()
@@ -655,11 +690,10 @@ func (d *Daemon) paneCWDs() []string {
 func (d *Daemon) gitFingerprint() string {
 	var b strings.Builder
 	for _, cwd := range d.paneCWDs() {
-		info, ok, stale := d.gitCache.lookup(cwd)
+		info, ok, stale, pr, prKnown, prStale := d.gitCache.lookupBoth(cwd)
 		if !ok {
 			continue
 		}
-		pr, prKnown, prStale := d.gitCache.lookupPR(cwd)
 		fmt.Fprintf(&b, "%s\x00%s\x00%t\x00%t\x00%d\x00%d\x00%t\x00%t\x00%d\x00%s\x00%t\x00%t\n",
 			cwd, info.Branch, info.Detached, info.LinkedWorktree,
 			info.Ahead, info.Behind, info.HasUpstream, stale,

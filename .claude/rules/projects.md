@@ -1041,7 +1041,12 @@ cached for one interval (`ghAvailable`), not re-stat'd per checkout per tick;
 the timeout derives from the watcher's shutdown context, and a completion
 after shutdown asks for no broadcast. (3) **Every value is bound to a branch
 GENERATION** (`prGen`, `prInFlightGen`): a branch change clears the PR state
-at once and bumps the generation; a completion is applied only when
+and bumps the generation IN THE SAME `c.mu` SECTION that publishes the new
+branch (`notePRBranch`, called where `refresh` writes `e.info`) — the loop
+probes checkouts serially, so moving it in `prTick` after the loop left a
+seconds-wide window in which a broadcast read branch B beside A's PR; and the
+broadcast reads branch and PR under ONE hold (`lookupBoth`), never `lookup`
+then `lookupPR`. A completion is applied only when
 `c.byDir[dir]` is still the same `*gitEntry` AND its generation is the one the
 probe was launched for, else discarded entirely (it may not touch `prAt`,
 `prFailures`, or an in-flight marker that is not its own). Branch A's number

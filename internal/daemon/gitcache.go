@@ -125,6 +125,13 @@ type gitEntry struct {
 	prInFlightGen uint64
 	// prFailures counts consecutive Unknown results and drives prBackoff.
 	prFailures int
+	// forge is the checkout's remote host class, read ONCE per entry
+	// (forgeKnown) with one git call: gh is never run for a remote known not
+	// to be GitHub, where every call failed and the backoff was spent on
+	// nothing. A remote URL does not change with the branch, so a generation
+	// change does not re-read it; a swept-and-recreated entry does.
+	forge      prinfo.Forge
+	forgeKnown bool
 }
 
 // gitCache maps a pane CWD to its checkout, and a checkout to its state.
@@ -191,6 +198,7 @@ func newGitCache() *gitCache {
 var (
 	prProbeFn     = prinfo.Probe
 	prAvailableFn = prinfo.Available
+	prForgeFn     = prinfo.RemoteForge
 )
 
 // lookupPR returns a CWD's pull request for the broadcast: the Info, whether
@@ -515,6 +523,9 @@ func (c *gitCache) prTick(ctx context.Context, now time.Time, dirs []string) {
 			// The user without gh sees today's row, not a `~`.
 			continue
 		}
+		if !c.forgeKnownFor(ctx, dir, e, probeDir) {
+			continue // no permit this tick, or a remote gh cannot answer for
+		}
 		if !claimBlockingFSCallUpTo(maxPRProbePermits) {
 			c.markPRStale(dir)
 			continue
@@ -582,6 +593,34 @@ func (c *gitCache) runPRProbe(ctx context.Context, dir string, e *gitEntry, gen 
 	if changed && ctx.Err() == nil && c.onPRChange != nil {
 		c.onPRChange()
 	}
+}
+
+// forgeKnownFor reports whether gh may be asked about this checkout at all,
+// reading the remote once per entry. Called with c.mu NOT held. Returns
+// false when the remote is a forge gh cannot answer for (nothing is ever
+// probed, nothing is marked), or when the read could not get a permit this
+// tick (it is a git call like any other; the next tick tries again — the
+// gate is never skipped, so gh never runs unchecked).
+func (c *gitCache) forgeKnownFor(ctx context.Context, dir string, e *gitEntry, probeDir string) bool {
+	c.mu.Lock()
+	known, forge := e.forgeKnown, e.forge
+	c.mu.Unlock()
+	if known {
+		return forge != prinfo.ForgeOther
+	}
+	if !claimBlockingFSCallUpTo(maxPRProbePermits) {
+		return false
+	}
+	fctx, cancel := context.WithTimeout(ctx, gitProbeTimeout)
+	forge = prForgeFn(fctx, probeDir)
+	cancel()
+	releaseBlockingFSCall()
+	c.mu.Lock()
+	if c.byDir[dir] == e {
+		e.forge, e.forgeKnown = forge, true
+	}
+	c.mu.Unlock()
+	return forge != prinfo.ForgeOther
 }
 
 // ghAvailable answers prAvailableFn, re-asked at most once per

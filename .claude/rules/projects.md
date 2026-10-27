@@ -1087,9 +1087,19 @@ branch is asked at once rather than after the obsolete probe's full timeout.
 view` asks about whatever branch the checkout is on when gh runs, which with
 an async probe can differ from the branch the daemon recorded. (5)
 **Backoff on Unknown**: 2, 4, 8, 16, 30 min (`prBackoff`), reset by an Answer,
-a NoPR, a branch change or a restart — a non-GitHub remote or a gh that is not
-logged in would otherwise spawn gh every 2 minutes for the daemon's life. gh
-absent from PATH costs no permit and marks nothing. (6) **`onPRChange` runs
+a NoPR, a branch change or a restart — a gh that is not logged in would
+otherwise spawn gh every 2 minutes for the daemon's life. gh absent from PATH
+costs no permit and marks nothing. **A remote known not to be GitHub is never
+asked at all** (`forgeKnownFor` → `prinfo.RemoteForge`, one `git config
+--get-regexp` per entry under the same permit ceiling, `origin` preferred):
+GitLab, Bitbucket, Codeberg, Azure DevOps, Gitea, sourcehut, or no remote, are
+`ForgeOther` and get no probe, no row and no stale mark; a host the classifier
+cannot place (`ForgeUnknown` — a GitHub Enterprise under a name without
+"github" in it looks like any git server) is asked, and gh's answer settles
+it. The read is gated on a permit like every git call and is never skipped —
+a refused permit waits for the next tick rather than letting gh run
+unchecked. Adding GitLab (`glab mr view --output json`) later is an adapter
+behind the same `prinfo.Probe` seam keyed on the forge. (6) **`onPRChange` runs
 OUTSIDE `c.mu`** and the completion decides "visible change" itself by
 comparing the entry's tuple before/after its write — `gitFingerprint` takes
 the same mutex through `lookup`. On the wire `pr_status`/`pr_stale` ride only

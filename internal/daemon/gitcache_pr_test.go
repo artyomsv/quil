@@ -35,24 +35,37 @@ type fakePR struct {
 	// holds a permit the next test needs and reads package seams the cleanup
 	// is restoring (a data race CI caught on 2026-10-27).
 	abort chan struct{}
+	// forge is what prForgeFn answers for every dir (default: GitHub, so the
+	// tests above this seam's own need no remote); forgeCalls counts them.
+	forge      prinfo.Forge
+	forgeCalls int
 }
 
 type prCall struct{ dir, branch string }
 
-// installFakePR swaps the three PR seams for the fake. The cleanup order is
+// installFakePR swaps the PR seams for the fake. The cleanup order is
 // load-bearing: abort parked probes, WAIT for every probe goroutine of c to
 // finish, and only then restore the seams — restoring first races a
 // goroutine still reading them.
 func installFakePR(t *testing.T, c *gitCache, f *fakePR, available bool) {
 	t.Helper()
-	origProbe, origAvail, origHook := prProbeFn, prAvailableFn, prCompletionHook
+	origProbe, origAvail, origHook, origForge := prProbeFn, prAvailableFn, prCompletionHook, prForgeFn
 	f.done = make(chan struct{}, 64)
 	f.abort = make(chan struct{})
+	if f.forge == prinfo.ForgeUnknown {
+		f.forge = prinfo.ForgeGitHub
+	}
 	t.Cleanup(func() {
 		close(f.abort)
 		c.prWG.Wait()
-		prProbeFn, prAvailableFn, prCompletionHook = origProbe, origAvail, origHook
+		prProbeFn, prAvailableFn, prCompletionHook, prForgeFn = origProbe, origAvail, origHook, origForge
 	})
+	prForgeFn = func(_ context.Context, _ string) prinfo.Forge {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.forgeCalls++
+		return f.forge
+	}
 	prCompletionHook = func() { f.done <- struct{}{} }
 	prAvailableFn = func() bool {
 		f.mu.Lock()
@@ -740,5 +753,82 @@ func TestLookupBoth_AgreesWithTheSeparateLookups(t *testing.T) {
 	}
 	if _, ok, _, _, _, _ := c.lookupBoth("/nowhere"); ok {
 		t.Fatal("lookupBoth answered for an unknown CWD")
+	}
+}
+
+// --- forge gate ---
+
+// gh is never run for a checkout whose remote is known not to be GitHub: on
+// a GitLab or Bitbucket repository every call failed and the checkout spent
+// its backoff on nothing. The remote is read ONCE per entry.
+func TestPRProbe_KnownOtherForgeNeverRunsGh(t *testing.T) {
+	c, _ := prFixture(t, "main")
+	f := &fakePR{forge: prinfo.ForgeOther, answers: map[string]prinfo.Info{"main": {Number: 1}}}
+	installFakePR(t, c, f, true)
+	for i := 0; i < 3; i++ {
+		c.setPRAt("/repo/.git", time.Time{})
+		c.refresh(context.Background(), []string{"/repo"})
+		c.prWG.Wait()
+	}
+	if n := f.count(); n != 0 {
+		t.Fatalf("%d gh probes for a non-GitHub remote, want 0", n)
+	}
+	f.mu.Lock()
+	forgeCalls := f.forgeCalls
+	f.mu.Unlock()
+	if forgeCalls != 1 {
+		t.Fatalf("remote read %d times over three ticks, want once per entry", forgeCalls)
+	}
+	if _, known, stale := c.lookupPR("/repo"); known || stale {
+		t.Fatal("a non-GitHub checkout must show no PR row and no stale mark")
+	}
+}
+
+// An unknown host may be a GitHub Enterprise under its own name: gh is asked
+// and its answer settles it, exactly as before the gate existed.
+func TestPRProbe_UnknownForgeStillAsksGh(t *testing.T) {
+	c, _ := prFixture(t, "main")
+	f := &fakePR{answers: map[string]prinfo.Info{"main": {Number: 42}}}
+	installFakePR(t, c, f, true)
+	f.mu.Lock()
+	f.forge = prinfo.ForgeUnknown // after install: the zero value is the fake's "GitHub" default
+	f.mu.Unlock()
+	c.refresh(context.Background(), []string{"/repo"})
+	c.prWG.Wait()
+	if info, known, _ := c.lookupPR("/repo"); !known || info.Number != 42 {
+		t.Fatalf("unknown host: lookupPR = %+v known=%v, want gh asked and 42 shown", info, known)
+	}
+}
+
+// The remote read is a git call and takes a permit like every other; with
+// the PR ceiling full it waits for the next tick rather than skipping the
+// gate (and so never running gh unchecked).
+func TestPRProbe_ForgeReadWaitsForAPermit(t *testing.T) {
+	c, _ := prFixture(t, "main")
+	f := &fakePR{forge: prinfo.ForgeOther}
+	installFakePR(t, c, f, true)
+	for i := int64(0); i < maxPRProbePermits; i++ {
+		if !claimBlockingFSCall() {
+			t.Fatal("could not fill the pool to the PR ceiling")
+		}
+	}
+	c.refresh(context.Background(), []string{"/repo"})
+	c.prWG.Wait()
+	f.mu.Lock()
+	n := f.forgeCalls
+	f.mu.Unlock()
+	if n != 0 || f.count() != 0 {
+		t.Fatalf("forge read %d times, gh %d times with the pool at the ceiling; want 0 and 0", n, f.count())
+	}
+	for i := int64(0); i < maxPRProbePermits; i++ {
+		releaseBlockingFSCall()
+	}
+	c.refresh(context.Background(), []string{"/repo"})
+	c.prWG.Wait()
+	f.mu.Lock()
+	n = f.forgeCalls
+	f.mu.Unlock()
+	if n != 1 || f.count() != 0 {
+		t.Fatalf("after the pool drained: forge read %d times, gh %d times; want 1 and 0", n, f.count())
 	}
 }

@@ -141,6 +141,105 @@ func Probe(ctx context.Context, dir, branch string) (Info, Result) {
 	return Info{Number: v.Number, Status: Derive(v)}, Answer
 }
 
+// Forge is what a checkout's remote host is, as far as this package cares:
+// whether gh can answer for it at all.
+type Forge int
+
+const (
+	// ForgeUnknown is a host this package cannot place — a self-hosted
+	// GitHub Enterprise under a name without "github" in it looks exactly
+	// like any other git server. gh is asked; its answer settles it.
+	ForgeUnknown Forge = iota
+	// ForgeGitHub is github.com or a host named for GitHub.
+	ForgeGitHub
+	// ForgeOther is a host known NOT to be GitHub (GitLab, Bitbucket,
+	// Codeberg, Azure DevOps, sourcehut, Gitea), or no remote at all. gh is
+	// never run for it: every call would fail, and a merge request is not a
+	// pull request this package knows how to read.
+	ForgeOther
+)
+
+// runGit is the seam for the one git call this package makes (RemoteForge).
+// Same shape as gitinfo's: raw stdout, stderr discarded.
+var runGit = func(ctx context.Context, dir string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	hideWindow(cmd)
+	cmd.WaitDelay = ghWaitDelay
+	out, err := cmd.Output()
+	return string(out), err
+}
+
+// RemoteForge classifies the checkout's remote with one git call, preferring
+// `origin` (what gh itself resolves against) and otherwise the first remote
+// listed. No remote, or no answer, is ForgeOther: gh has nothing to ask.
+func RemoteForge(ctx context.Context, dir string) Forge {
+	out, err := runGit(ctx, dir, "config", "--get-regexp", `^remote\..*\.url$`)
+	if err != nil {
+		return ForgeOther
+	}
+	first := ""
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		if fields[0] == "remote.origin.url" {
+			return ForgeOf(fields[1])
+		}
+		if first == "" {
+			first = fields[1]
+		}
+	}
+	if first == "" {
+		return ForgeOther
+	}
+	return ForgeOf(first)
+}
+
+// ForgeOf classifies one remote URL by its host: https, ssh:// and the scp
+// form (git@host:path) are all read; a local path has no host and is
+// Unknown. The host compare ignores case and a port.
+func ForgeOf(url string) Forge {
+	host := strings.ToLower(remoteHost(url))
+	if host == "" {
+		return ForgeUnknown
+	}
+	switch {
+	case host == "github.com", strings.Contains(host, "github"):
+		return ForgeGitHub
+	case strings.Contains(host, "gitlab"), strings.Contains(host, "bitbucket"),
+		strings.Contains(host, "gitea"), strings.Contains(host, "codeberg"),
+		strings.HasSuffix(host, "dev.azure.com"), strings.HasSuffix(host, "visualstudio.com"),
+		host == "git.sr.ht":
+		return ForgeOther
+	}
+	return ForgeUnknown
+}
+
+// remoteHost pulls the host out of a remote URL, or "" when it has none.
+func remoteHost(url string) string {
+	rest := url
+	if i := strings.Index(rest, "://"); i >= 0 {
+		rest = rest[i+3:]
+	} else if i := strings.Index(rest, ":"); i >= 0 && !strings.Contains(rest[:i], "/") {
+		// scp form: [user@]host:path — the colon comes before any slash.
+		rest = rest[:i]
+	} else {
+		return "" // a local path
+	}
+	if i := strings.Index(rest, "/"); i >= 0 {
+		rest = rest[:i]
+	}
+	if i := strings.LastIndex(rest, "@"); i >= 0 {
+		rest = rest[i+1:]
+	}
+	if i := strings.Index(rest, ":"); i >= 0 {
+		rest = rest[:i] // port
+	}
+	return rest
+}
+
 func allDigits(s string) bool {
 	for _, r := range s {
 		if r < '0' || r > '9' {

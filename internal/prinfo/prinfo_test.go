@@ -138,6 +138,75 @@ func TestProbe_AllDigitBranchNeverRunsGh(t *testing.T) {
 	}
 }
 
+func TestForgeOf(t *testing.T) {
+	cases := []struct {
+		url  string
+		want Forge
+	}{
+		{"https://github.com/artyomsv/quil.git", ForgeGitHub},
+		{"git@github.com:artyomsv/quil.git", ForgeGitHub},
+		{"ssh://git@github.com/artyomsv/quil.git", ForgeGitHub},
+		{"https://github.corp.example/org/repo", ForgeGitHub}, // GitHub Enterprise, named
+		{"https://gitlab.com/group/repo.git", ForgeOther},
+		{"git@gitlab.example.org:group/repo.git", ForgeOther},
+		{"https://bitbucket.org/team/repo.git", ForgeOther},
+		{"git@bitbucket.org:team/repo.git", ForgeOther},
+		{"https://codeberg.org/user/repo", ForgeOther},
+		{"https://dev.azure.com/org/project/_git/repo", ForgeOther},
+		{"git@ssh.dev.azure.com:v3/org/project/repo", ForgeOther},
+		{"https://org.visualstudio.com/project/_git/repo", ForgeOther},
+		{"https://git.sr.ht/~user/repo", ForgeOther},
+		{"https://gitea.example.com/user/repo.git", ForgeOther},
+		{"https://git.example.com/user/repo.git", ForgeUnknown}, // could be GHE under another name: ask gh
+		{"ssh://user@GitHub.COM:22/x/y", ForgeGitHub},            // host compare ignores case and port
+		{"/srv/git/repo.git", ForgeUnknown},
+		{"", ForgeUnknown},
+	}
+	for _, tc := range cases {
+		if got := ForgeOf(tc.url); got != tc.want {
+			t.Errorf("ForgeOf(%q) = %v, want %v", tc.url, got, tc.want)
+		}
+	}
+}
+
+// RemoteForge reads the remotes with ONE git call, prefers origin, and never
+// runs gh. No remote at all is Other: gh has nothing to ask.
+func TestRemoteForge(t *testing.T) {
+	const argRemotes = "config --get-regexp ^remote\\..*\\.url$"
+	cases := []struct {
+		name   string
+		stdout string
+		fail   bool
+		want   Forge
+	}{
+		{"origin github", "remote.origin.url git@github.com:a/b.git\n", false, ForgeGitHub},
+		{"origin preferred over an earlier gitlab remote", "remote.upstream.url https://gitlab.com/a/b.git\nremote.origin.url https://github.com/a/b.git\n", false, ForgeGitHub},
+		{"no origin: first remote", "remote.fork.url https://bitbucket.org/a/b.git\n", false, ForgeOther},
+		{"no remotes (git exits 1)", "", true, ForgeOther},
+		{"unknown host asks gh", "remote.origin.url https://git.example.com/a/b.git\n", false, ForgeUnknown},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			orig := runGit
+			t.Cleanup(func() { runGit = orig })
+			var calls []string
+			runGit = func(_ context.Context, _ string, args ...string) (string, error) {
+				calls = append(calls, strings.Join(args, " "))
+				if tc.fail {
+					return "", errors.New("exit status 1")
+				}
+				return tc.stdout, nil
+			}
+			if got := RemoteForge(context.Background(), "/repo"); got != tc.want {
+				t.Errorf("RemoteForge = %v, want %v", got, tc.want)
+			}
+			if len(calls) != 1 || calls[0] != argRemotes {
+				t.Errorf("git argv = %v, want exactly one %q", calls, argRemotes)
+			}
+		})
+	}
+}
+
 // The statuses on the wire are a closed set the TUI matches by name; the
 // spelling IS the contract.
 func TestStatusNames(t *testing.T) {

@@ -12,6 +12,12 @@
 > fallback) rather than screen heuristics alone.
 > **Ghostty added 2026-09-10** in its own section — not a rival, but the emulator
 > Quil is drawn into, and the origin of the one credible future rival.
+> **herdr re-verified again 2026-10-27** (see the October addendum). Six weeks moved
+> a lot in both directions: herdr took back Windows toast-with-click-to-pane, which
+> had been Quil's alone, and added sound, remote clipboard images and in-pane Kitty
+> graphics; Quil shipped a first-party browser client, remote Windows hosts and a
+> second sandbox backend. The structural finding matters more than any row — see
+> "Breadth is not the gap; the ecosystem is" below.
 > Feeds the [competitive-gap section of the roadmap](roadmap.md#planned--competitive-gaps-herdr-aoe).
 
 The classic-multiplexer comparisons (tmux, zellij, WezTerm, screen, Ghostty) live
@@ -37,16 +43,17 @@ architectural bet.
 | Multiplexer substrate | Own daemon + own PTY | Own server + own PTY (vendors libghostty-vt) | **Wraps tmux** (hard dependency) |
 | VT emulation | `charmbracelet/x/vt` | Vendored libghostty-vt (Ghostty engine) | `vt100` crate over `tmux pipe-pane` |
 | Client/server | daemon + TUI client | server + thin client(s) | tmux + TUI + optional HTTP daemon |
-| **Windows** | ✅ **Native** (bundled ConPTY/OpenConsole) | ✅ Native, **GA** (ConPTY) as of 2026-09-10 — no terminal attach, no live handoff, no clipboard image bridge | ❌ **WSL2 only** |
+| **Windows** | ✅ **Native** (bundled ConPTY/OpenConsole); remote Windows hosts since v1.81 | ✅ Native, **GA** (ConPTY) — no terminal attach, no live handoff, no Kitty graphics under WT, plugins in preview; remote Windows hosts supported | ❌ **WSL2 only** |
 | Agent-drives-it API | **MCP server** (36 tools, native protocol) | Socket API + full CLI + agent skill | HTTP REST API (130 routes) + CLI |
-| Web/browser UI | ❌ TUI only | ❌ (responsive TUI) | ✅ **React PWA dashboard** |
-| Container sandbox | ✅ **Docker** (per-pane, user-supplied image) | ❌ | ✅ Docker/Podman/Apple |
+| Web/browser UI | ✅ **`quil web`** (v1.86–v1.89; loopback, login code + port-scoped key, pane/tab editing, overlays) | ❌ first-party — but **~10 community clients**, incl. a phone PWA with web push | ✅ **React PWA dashboard** |
+| Container sandbox | ✅ **Docker** per-pane + **`sbx` microVM** backend (v1.90) | ❌ none at all | ✅ Docker/Podman/Apple |
 | Remote phone access | ❌ | via SSH TUI | ✅ Tunnel + PWA + Web Push |
 | Git worktree-per-session | ✅ | ✅ | ✅ (+ multi-repo) |
-| AI agents supported | **3** deep + tools | **24+** detected, one-command integrations for 18 | **~13** terminal, 7 ACP |
+| AI agents supported | **3** deep + tools | **27** (23 recognised + 4 self-reporting) | **~13** terminal, 7 ACP |
 | Several machines in one client window | ✅ (v1.47, per-host reconnect) | ✅ (sidebar machine switch, per-host fault isolation) | ❌ |
 | Scale | ~30–40k Go | ~170k Rust | ~292k Rust + large web app |
-| License / backing | Apache-2.0, product | Apache-2.0 (was AGPL-3.0 + commercial until 2026-07-22), solo + sponsors | MIT, Mozilla.ai community |
+| License / backing | Apache-2.0, product | Apache-2.0 (was AGPL-3.0 + commercial until 2026-07-22). **Y Combinator (Aug 2026) + $6M seed led by Bessemer (Sep 2026)**, hiring; still pre-1.0 at v0.9.5 | MIT, Mozilla.ai community |
+| Traction (2026-10-27) | — | 44.6k stars, 1.64M installs, 1,789 community plugins | — |
 
 **On herdr's licensing, because the reversal is the interesting part:** it
 shipped in March 2026 dual-licensed AGPL-3.0-or-later plus a commercial licence
@@ -105,13 +112,15 @@ Legend: ✅ full · 🟡 partial/different · ❌ absent · ❓ not re-verified
 | Survives full host reboot | ✅ | ✅ (tmux) | ✅ |
 | Named sessions (separate server namespaces) | ✅ | 🟡 (profiles) | ❌ |
 | Remote attach over SSH (thin client) | ✅ | 🟡 (SSH+web) | ✅ (v1.44; several hosts at once since v1.47) |
+| A **Windows** box as a remote host target | ✅ | ❌ | ✅ (v1.81, over the built-in OpenSSH server; `quil remote setup` installs and upgrades it) |
 | Several machines live in one client at once | ✅ (each keeps its own server; only the selected one streams pane screens, the rest keep reporting workspace + agent state; a lost host does not drop the others) | ❌ | ✅ (v1.47; per-project host tag, per-host reconnect state) |
 | Approval-gated auto-install on a bare remote | ✅ | ❌ | ✅ (`internal/remoteinstall`) |
 | Clipboard-image bridged into remote session | ✅ | ✅ (web) | ❌ |
 | Live server handoff (upgrade without killing panes) | ✅ | 🟡 (detached workers) | ❌ |
-| Web dashboard (browser terminal) | ❌ | ✅ (PWA) | ❌ |
-| Remote phone access (tunnel + QR/passphrase) | ❌ | ✅ | ❌ |
-| Web Push / mobile notifications | ❌ | ✅ (VAPID) | ❌ |
+| Web dashboard (browser terminal) | ❌ first-party; **~10 community clients** | ✅ (PWA) | ✅ **`quil web`** (v1.86–v1.89) |
+| Browser client ships with authentication | — (several community ones bind a port with **none**, per their own READMEs) | ✅ | ✅ (one-time login code + port-scoped key, loopback only) |
+| Remote phone access (tunnel + QR/passphrase) | ❌ (a community PWA does it) | ✅ | ❌ |
+| Web Push / mobile notifications | ❌ (a community PWA does it) | ✅ (VAPID) | ❌ |
 
 ### Agent awareness
 
@@ -125,9 +134,11 @@ Legend: ✅ full · 🟡 partial/different · ❌ absent · ❓ not re-verified
 | Brand-new agent addable without a new binary | ❌ (process detection is compiled in) | ❓ | ✅ (a plugin TOML defines the spawn command and its idle handlers; no Go change) |
 | Detection debugger (`agent explain`) | ✅ | ❌ | ❌ |
 | Model/context-token status display | 🟡 | ✅ | ✅ |
-| AI agents with detection | 24+ | ~13 | **3** |
-| One-command agent integration installer | ✅ (`herdr integration install <agent>`, 18 agents) | ✅ | ❌ |
+| AI agents with detection | **27** (23 recognised + 4 self-reporting) | ~13 | **3** |
+| Agents that report state with **nothing installed** | ✅ (4: Command Code, Crush, Muse Code, Prime Agent) | ❌ | ❌ |
+| One-command agent integration installer | ✅ (`herdr integration install <agent>`) | ✅ | ❌ |
 | Native agent session restore | ✅ (most of its integrations) | ✅ (Claude+) | ✅ (claude, opencode, codex) |
+| **Agent self-reports its own resume command** | ✅ (0.9.2 — the agent tells herdr how to come back, so herdr needs no per-agent strategy) | ❌ | ❌ (Quil carries five hard-coded strategies: `cwd_only`, `rerun`, `preassign_id`, `session_scrape`, `none`) |
 | Session fork | ❌ | ✅ | ❌ |
 | Session import from disk | ❌ | ✅ (Claude) | ❌ |
 
@@ -171,8 +182,10 @@ Legend: ✅ full · 🟡 partial/different · ❌ absent · ❓ not re-verified
 | Feature | herdr | aoe | Quil |
 |---|:---:|:---:|:---:|
 | Themes (multiple, light/dark auto) | ✅ (18) | ✅ (8) | 🟡 minimal |
-| Sound notifications | ✅ | ✅ | ❌ |
-| OS/terminal desktop notifications | ✅ | ✅ (push) | 🟡 Windows toasts + click-to-route; no macOS/Linux |
+| Sound notifications | ✅ (MP3, separate done/request files, per-agent mute) | ✅ | ❌ |
+| OS/terminal desktop notifications | ✅ (OS, or handed to the outer terminal so it works over SSH) | ✅ (push) | 🟡 Windows toasts + click-to-route; no macOS/Linux |
+| Windows toast that jumps to the pane on click | ✅ **as of 0.9.4 — this was Quil's alone until then** | ❌ | ✅ (`quil://` + the windowless `quil-activate.exe`) |
+| Images rendered inside a pane | ✅ (native Kitty graphics since 0.9.2; not under Windows Terminal) | 🟡 (web) | ❌ |
 | In-TUI notification center | 🟡 | ✅ | ✅ |
 | Repo config + lifecycle hooks | 🟡 | ✅ | ❌ |
 | Profiles (per-project workspaces) | 🟡 | ✅ | 🟡 (projects, v1.47 — a project scopes tabs and a root directory, not a saved profile) |
@@ -262,6 +275,81 @@ port and needs no vendor in the path); the second half is A9.
 
 ---
 
+## Addendum — the 2026-10-27 herdr re-read
+
+Six weeks after the September pass. Both projects shipped hard; the rows above are
+updated in place, and this section records the movement and what it means.
+
+### What herdr added (v0.9.2 → v0.9.5)
+
+Three of these take back ground Quil held:
+
+- **Windows toast that jumps to its pane on click** (0.9.4). This was Quil's
+  alone. It is parity now.
+- **MP3 sound**, with separate done/request files and per-agent muting. Quil
+  still has none, on any platform. Top-20 #14 is now the oldest unclosed cheap win.
+- **Clipboard images and image files into a remote session.** Quil's is still
+  local-only, tracked at remote-daemon Phase 3.
+
+The rest are new rather than competitive:
+
+- **Native Kitty graphics** (0.9.2) — it *deleted* its own bespoke graphics API
+  in favour of the standard. Worth noting as a pattern: herdr keeps choosing the
+  shared contract over its own surface.
+- **Agents self-report their resume command**, so herdr needs no per-agent resume
+  strategy. Quil carries five hard-coded ones. This is the cheaper architecture.
+- `herdr machine status` / `machine reconnect`, `herdr plugin update`, multiple
+  prefix keys, a Go To list over every agent and terminal, 48 layout snapshots
+  for recovery.
+- **Codex moved *off* turn hooks back to screen detection** (0.9.5). A useful
+  datum for Quil's own hook-heavy design: the authoritative-hook approach is
+  fragile enough that its author backed one agent out of it.
+
+### Where herdr is heading
+
+Y Combinator in August, a **$6M seed led by Bessemer** in September, now hiring —
+and still deliberately pre-1.0 at v0.9.5. The stated next step is **Herdr Cloud**:
+connecting your own machines without SSH setup, waitlist open, not shipped. Its
+June essay ("Coding agents are becoming runtimes") argues the category needs shared
+contracts for project instructions, lifecycle state, hooks and terminal runtimes —
+read together with deleting its graphics API in favour of Kitty's, the strategy is
+legible: **be the standard, not the product.**
+
+### Breadth is not the gap; the ecosystem is
+
+The September pass framed herdr's lead as agent breadth and called the fix
+"ship more manifests". That reading was too small. In six weeks herdr went from
+1,022 to 1,789 community plugins, and a search for a herdr web client returns
+**about ten independent implementations**, one a phone PWA with web push — a
+surface Quil spent four releases (v1.86–v1.89) building itself, and which aoe is
+still credited with as a differentiator.
+
+herdr did not build any of them. Its socket API did.
+
+The causal chain is worth stating plainly, because it is not a feature Quil can
+copy in a sprint: an open, documented, *unauthenticated-by-design* local control
+surface means anyone can extend herdr without asking. Quil's equivalent surface
+is MCP, which is strictly better for the AI-operator case and strictly worse for
+this one — an MCP server invites *assistants*, not contributors. The three items
+most responsible are already on the borrow list as A6 (event subscription), A9
+(topic-indexed marketplace) and top-20 #7 (a shell CLI); what the October data
+adds is that they are **one bet, not three**, and that the bet is about who
+builds Quil's surfaces.
+
+The counter-case is real and should be weighed, not waved away. Quil's two
+clearest leads — sandboxing and an authenticated browser client — are precisely
+the things a loose ecosystem does *not* produce: nobody's weekend project ships a
+mount-set security boundary, and the community web clients demonstrably skipped
+the login page. Depth is a coherent strategy. The decision is not "open up or
+lose", it is whether Quil wants contributors at all, and that is the owner's call.
+
+### Still true, and still the moats
+
+MCP as a first-party protocol, container sandboxing, pane notes, memory
+reporting, no telemetry and no account. None of these moved.
+
+---
+
 ## The Ghostty axis — the emulator underneath, and Superlogical
 
 > Captured 2026-09-10. Ghostty's newest release is **1.3.1 (2026-03-13)**; 1.4.0
@@ -327,22 +415,35 @@ jobs, and Quil is not an emulator.
 
 ## Where Quil already leads (defend these)
 
-- **Native Windows maturity — but this moat narrowed in 2026-09.** Quil is still
-  the most polished of the three on Windows: bundled ConPTY + OpenConsole for
-  Win10, DIB→PNG clipboard image-paste proxy, window-size persistence, conhost
-  grid fixups, ConPTY ghost-window guards. aoe is still **WSL2-only**. herdr,
-  however, no longer says *beta* — it calls native Windows generally available.
-  What is left of the wedge is a specific exclusion list rather than a maturity
-  gap: on herdr there is no direct terminal attach, no live server handoff, and
-  no clipboard image bridge in local native panes. Marketing copy that leans on
-  "herdr is beta on Windows" is now false and must be replaced with those three
-  exclusions.
-  **Do not claim Windows-as-a-remote-host as a Quil advantage.** herdr excludes
-  it, but so does Quil — `docs/roadmap/remote-daemon.md` states plainly that
-  Windows remotes are unsupported (no `uname`, no `sh`, and a running Windows
-  executable cannot be replaced in place). It is a shared limitation of the
-  category, not a wedge, and it was written into the site copy once during the
-  2026-09-10 pass before being caught.
+- **Native Windows — a narrow wedge now, and shrinking.** Quil is still the most
+  polished of the three on Windows: bundled ConPTY + OpenConsole for Win10,
+  DIB→PNG clipboard image-paste proxy, window-size persistence, conhost grid
+  fixups, ConPTY ghost-window guards. aoe is still **WSL2-only**. herdr no longer
+  says *beta* — it calls native Windows generally available — so what is left is
+  an exclusion list, not a maturity gap: no direct terminal attach, no live
+  server handoff, no Kitty graphics under Windows Terminal, plugins in preview,
+  and fewer agents covered by its integration installer than on Unix.
+  Two corrections from earlier passes, both now settled:
+  "herdr is beta on Windows" went false in September and must never be
+  reprinted; and **Windows-as-a-remote-host flipped twice** — it was a shared
+  limitation in September (the note here said so, correctly at the time), and as
+  of 2026-10 **both** tools support it, Quil since v1.81 over the built-in
+  OpenSSH server. So it is parity, never a wedge in either direction.
+  Going the other way, herdr now carries clipboard images into a *remote*
+  session and Quil does not; that gap is real and still open.
+- **Container-sandboxed agents — the clearest lead, and uncontested.** An AI pane
+  can run in its own Docker container or an `sbx` microVM, with the mount set as
+  the whole boundary. herdr has **no sandboxing at all**: an agent it starts has
+  the same reach as the user's shell. Given how much of this category's pitch is
+  "run many agents unattended", this is the most defensible difference on the
+  list and the least likely to be closed quickly.
+- **A browser client that ships with a login page.** `quil web` serves the same
+  workspace on loopback behind a one-time login code and a port-scoped key.
+  herdr has no first-party web client — and the ~10 community ones that filled
+  the gap are uneven on exactly this point, several binding a port with no
+  authentication and saying so in their own READMEs. The lead is not "we have a
+  web UI and they don't"; it is that ours is one artifact with one security
+  story.
 - **First-class MCP server.** Quil exposes 36 MCP tools that Claude Desktop /
   Cursor / VS Code consume *natively*, including projects, remote hosts and
   pane-to-pane task delegation. The competitors built bespoke socket/HTTP

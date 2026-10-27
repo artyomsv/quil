@@ -1346,8 +1346,11 @@ func gitRowHL(pane *PaneModel, w int, hl rowHighlight) string {
 // or paint it a color it never chose.
 //
 // The indent lines the `#` up with the branch text (after `  ⎇ `). The number
-// is kept whole wherever the row is at least wide enough for it; the status
-// word gives way first. Below that the row is cut like any other.
+// and the stale marker are RESERVED wherever they fit, and the status word
+// is what gives way: the marker is the only sign that the status is cached,
+// and a row in its normal status color with the marker cut off showed an old
+// approval as current for the whole retry backoff. Below the width of the
+// number itself the row is cut like any other.
 func prRow(pane *PaneModel, w int) string {
 	return prRowHL(pane, w, rowHighlightNone)
 }
@@ -1361,18 +1364,24 @@ func prRowHL(pane *PaneModel, w int, hl rowHighlight) string {
 	const indent = "    "
 	status := prStatusName(pane.PRStatus)
 	num := "#" + strconv.Itoa(pane.PRNumber)
-	suffix := " " + status
+	marker := ""
 	if pane.PRStale {
-		suffix += " ~"
+		marker = " ~"
 	}
 	avail := w - lipgloss.Width(indent)
 	if avail < 1 {
 		avail = 1
 	}
+	nw, mw := lipgloss.Width(num), lipgloss.Width(marker)
 	var text string
-	if nw := lipgloss.Width(num); nw <= avail {
-		text = num + truncateCells(suffix, avail-nw)
-	} else {
+	switch {
+	case nw+mw <= avail:
+		// Number and marker whole; the word takes what is left.
+		text = num + truncateCells(" "+status, avail-nw-mw) + marker
+	case nw <= avail:
+		// Room for the number only: the word, then the marker, give way.
+		text = num + truncateCells(" "+status, avail-nw)
+	default:
 		text = truncateCells(num, avail)
 	}
 	return hl.line(prRowStyle(status)).Render(padOrTrunc(indent+text, w))

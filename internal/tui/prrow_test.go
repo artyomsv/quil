@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
@@ -67,6 +68,48 @@ func TestPRRow_WidthAndNumberFirst(t *testing.T) {
 		if n := lipgloss.Width(prRow(&pane, w)); n != w {
 			t.Errorf("w=%d: row is %d cells", w, n)
 		}
+	}
+}
+
+// PRStale is the ONLY sign that the status is cached — a row in its normal
+// status color with the marker cut off shows an old approval as current for
+// the whole retry backoff. The marker is reserved beside the number; the
+// status word is what gives way. Stale and fresh rows must differ wherever
+// the number and the marker both fit.
+func TestPRRow_StaleMarkerSurvivesTruncation(t *testing.T) {
+	cases := []struct {
+		name   string
+		number int
+		status string
+	}{
+		{"short number, long word", 278, "approved"},
+		{"long number, long word", 123456, "attention"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stale := PaneModel{PRNumber: tc.number, PRStatus: tc.status, PRStale: true}
+			fresh := PaneModel{PRNumber: tc.number, PRStatus: tc.status}
+			num := "#" + strconv.Itoa(tc.number)
+			for w := minSidebarWidth; w <= 40; w++ {
+				s := strings.TrimRight(stripANSI(prRow(&stale, w)), " ")
+				f := strings.TrimRight(stripANSI(prRow(&fresh, w)), " ")
+				markerFits := lipgloss.Width(num)+lipgloss.Width(" ~") <= w-4
+				if markerFits && !strings.HasSuffix(s, " ~") {
+					t.Errorf("w=%d: stale row %q lost its marker although %q fits", w, s, num+" ~")
+				}
+				if markerFits && s == f {
+					t.Errorf("w=%d: stale and fresh rows are identical: %q", w, s)
+				}
+				if !strings.Contains(s, num) {
+					t.Errorf("w=%d: stale row %q cut the number", w, s)
+				}
+			}
+		})
+	}
+	// The documented example: width 18, #278 approved, stale.
+	p := PaneModel{PRNumber: 278, PRStatus: "approved", PRStale: true}
+	if got := strings.TrimRight(stripANSI(prRow(&p, 18)), " "); got != "    #278 approve ~" {
+		t.Fatalf("w=18 stale row = %q, want the word cut and the marker kept", got)
 	}
 }
 

@@ -434,9 +434,7 @@ func TestPrepareSbxHooks_PaneIsUnpublishedUntilItsBaselineIsCommitted(t *testing
 // grew it cannot make the next restart read all of it, and the newest
 // delivered entries are the ones that matter for resuming.
 func TestHistoryBaseline_ReadsABoundedTailOfTheCopy(t *testing.T) {
-	prev := sbxHistoryDstTail
-	sbxHistoryDstTail = 48 // two short entries, cut inside a third
-	t.Cleanup(func() { sbxHistoryDstTail = prev })
+	const tail = 48 // two short entries, cut inside a third
 	dir := t.TempDir()
 	src := filepath.Join(dir, "src.jsonl")
 	dst := filepath.Join(dir, "dst.jsonl")
@@ -457,7 +455,7 @@ func TestHistoryBaseline_ReadsABoundedTailOfTheCopy(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	off, err := historyBaseline(root, "src.jsonl", dst)
+	off, err := historyBaselineWithin(root, "src.jsonl", dst, tail)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -468,7 +466,23 @@ func TestHistoryBaseline_ReadsABoundedTailOfTheCopy(t *testing.T) {
 	if err := os.WriteFile(dst, []byte(strings.Join(lines[:10], "\n")+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if off, err := historyBaseline(root, "src.jsonl", dst); err != nil || off != 0 {
+	if off, err := historyBaselineWithin(root, "src.jsonl", dst, tail); err != nil || off != 0 {
 		t.Errorf("offset = %d, %v; want 0 when the copy's tail holds none of the source", off, err)
+	}
+	// The discriminating case: the only source entry the copy holds sits in
+	// the copy's HEAD, outside the tail. A read of the whole copy would
+	// resume past it; the bounded read never sees it and resumes from 0.
+	if err := os.WriteFile(dst, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src, []byte(lines[0]+"\n"+`{"ts_ms":51}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if off, err := historyBaselineWithin(root, "src.jsonl", dst, tail); err != nil || off != 0 {
+		t.Errorf("offset = %d, %v; want 0: entry 1 is in the copy only outside its tail, so the whole copy was read", off, err)
+	}
+	// The control: a tail covering the whole copy does see entry 1.
+	if off, err := historyBaselineWithin(root, "src.jsonl", dst, 1<<20); err != nil || off != int64(len(lines[0])+1) {
+		t.Errorf("offset = %d, %v; want past entry 1 with a tail that covers the whole copy", off, err)
 	}
 }

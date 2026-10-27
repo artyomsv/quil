@@ -330,6 +330,12 @@ const sbxHistoryScanMax = 64 << 20
 // matched by the entry timestamp the hook writes (ts_ms). 0 when the copy
 // holds none of them. Reads the source through root: it is agent-written.
 func historyBaseline(root *os.Root, srcRel, dstPath string) (int64, error) {
+	return historyBaselineWithin(root, srcRel, dstPath, sbxHistoryDstTail)
+}
+
+// historyBaselineWithin is historyBaseline with the copy's tail bound as a
+// parameter: production passes the constant, a test passes a small one.
+func historyBaselineWithin(root *os.Root, srcRel, dstPath string, dstTail int64) (int64, error) {
 	src, err := root.Open(srcRel)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -345,7 +351,7 @@ func historyBaseline(root *os.Root, srcRel, dstPath string) (int64, error) {
 	if len(body) > sbxHistoryScanMax {
 		return 0, fmt.Errorf("%s is larger than %d bytes", srcRel, sbxHistoryScanMax)
 	}
-	delivered, err := deliveredHistoryTS(dstPath)
+	delivered, err := deliveredHistoryTS(dstPath, dstTail)
 	if err != nil {
 		return 0, err
 	}
@@ -384,12 +390,12 @@ func historyEntryTS(line []byte) (int64, bool) {
 // tick and Compact runs only when history is asked for — so reading it whole
 // would let a sandbox grow it without bound and have the next restart
 // allocate all of it (PR #279 review, security M-1). 16 MiB holds more than
-// Compact keeps (200 entries of at most 64 KiB). A variable for the tests.
-var sbxHistoryDstTail int64 = 16 << 20
+// Compact keeps (200 entries of at most 64 KiB).
+const sbxHistoryDstTail int64 = 16 << 20
 
-// deliveredHistoryTS is the set of ts_ms in the tail of the daemon's history
-// copy. A missing copy is an empty set.
-func deliveredHistoryTS(dstPath string) (map[int64]bool, error) {
+// deliveredHistoryTS is the set of ts_ms in the last tail bytes of the
+// daemon's history copy. A missing copy is an empty set.
+func deliveredHistoryTS(dstPath string, tail int64) (map[int64]bool, error) {
 	delivered := map[int64]bool{}
 	f, err := os.Open(dstPath)
 	if err != nil {
@@ -403,18 +409,18 @@ func deliveredHistoryTS(dstPath string) (map[int64]bool, error) {
 	if err != nil {
 		return nil, err
 	}
-	start := info.Size() - sbxHistoryDstTail
+	start := info.Size() - tail
 	if start < 0 {
 		start = 0
 	}
 	if _, err := f.Seek(start, io.SeekStart); err != nil {
 		return nil, err
 	}
-	tail, err := io.ReadAll(io.LimitReader(f, sbxHistoryDstTail))
+	body, err := io.ReadAll(io.LimitReader(f, tail))
 	if err != nil {
 		return nil, err
 	}
-	lines := bytes.Split(tail, []byte("\n"))
+	lines := bytes.Split(body, []byte("\n"))
 	if start > 0 && len(lines) > 0 {
 		lines = lines[1:] // the cut landed inside this line
 	}

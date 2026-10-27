@@ -410,6 +410,14 @@ func TestRemoveBackups_KeepsBackupWithoutTarget(t *testing.T) {
 	missing := filepath.Join(dir, "gone")
 	os.WriteFile(missing+".old", []byte("only-copy"), 0755)
 	os.WriteFile(missing+".old.1", []byte("only-copy-1"), 0755)
+	// RestoreMissing restores the NEWEST backup. The two writes above land
+	// within one mtime tick on a coarse filesystem and in order on a fine one
+	// (CI's ext4 saw ".old.1" newer and restored it), so the age is set
+	// explicitly: the canonical slot is the newest here.
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(missing+".old.1", old, old); err != nil {
+		t.Fatal(err)
+	}
 	RemoveBackups(missing)
 	for _, p := range []string{missing + ".old", missing + ".old.1"} {
 		if _, err := os.Stat(p); err != nil {
@@ -427,13 +435,13 @@ func TestRemoveBackups_KeepsBackupWithoutTarget(t *testing.T) {
 		t.Errorf("backup swept while a directory stands at the target path: %v", err)
 	}
 
-	// RestoreMissing is the repair: it moves the canonical backup back and
+	// RestoreMissing is the repair: it moves the newest backup back and
 	// leaves a present target alone.
 	if restored, err := RestoreMissing(missing); err != nil || !restored {
 		t.Fatalf("RestoreMissing = %v, %v; want restored", restored, err)
 	}
 	if got, _ := os.ReadFile(missing); string(got) != "only-copy" {
-		t.Errorf("restored target = %q, want only-copy from the canonical slot", got)
+		t.Errorf("restored target = %q, want only-copy from the newest slot", got)
 	}
 	if restored, err := RestoreMissing(missing); err != nil || restored {
 		t.Errorf("RestoreMissing on a present target = %v, %v; want nothing done", restored, err)

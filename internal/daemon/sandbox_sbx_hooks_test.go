@@ -5,8 +5,10 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/artyomsv/quil/internal/claudehook"
 	"github.com/artyomsv/quil/internal/config"
@@ -345,5 +347,128 @@ func TestPrepareSbxHooks_BaselinesBeforePublishing(t *testing.T) {
 	d.forwardSbxHookFiles()
 	if got, err := os.ReadFile(filepath.Join(home, "events", pane.ID+".jsonl")); err == nil && len(got) > 0 {
 		t.Errorf("a retained event was replayed: %q", got)
+	}
+}
+
+// A pane prepared again (Alt+R) is still registered, so the watcher can
+// forward it WHILE its baseline runs. Observation and commit are one hold:
+// a forward that arrives between them waits, and an entry the watcher
+// delivers is never delivered twice by a rewound offset.
+func TestBaselineSbxHookOffsets_ReseedOfALivePaneDoesNotRewind(t *testing.T) {
+	d, pane, _ := sbxResumeFixture(t)
+	home := config.QuilDir()
+	tree := sbxHookTree(home, "team-box")
+	if err := os.MkdirAll(filepath.Join(tree, "history"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, "history"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	a, b := `{"ts_ms":1,"text":"A"}`+"\n", `{"ts_ms":2,"text":"B"}`+"\n"
+	src := filepath.Join(tree, "history", pane.ID+".jsonl")
+	dst := filepath.Join(home, "history", pane.ID+".jsonl")
+	if err := os.WriteFile(src, []byte(a+b), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dst, []byte(a), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d.sbxHookState.panes = map[string]sbxHooks{pane.ID: {tree: tree}} // registered already
+	d.spoolFwd = newSpoolForwarder()
+	d.spoolFwd.setOffsetForTest(pane.ID+"/history", int64(len(a)))
+
+	// The watcher ticks at the worst moment: after the baseline observed
+	// end(A), before it committed. It must WAIT for the commit — a forward
+	// that ran here would deliver B and then be rewound to end(A).
+	forwarded := make(chan struct{})
+	prev := sbxBaselineObservedFn
+	sbxBaselineObservedFn = func(string) {
+		go func() {
+			d.forwardSbxHookFiles()
+			close(forwarded)
+		}()
+		select {
+		case <-forwarded:
+			t.Error("the watcher forwarded between the baseline's observation and its commit")
+		case <-time.After(150 * time.Millisecond):
+		}
+	}
+	t.Cleanup(func() { sbxBaselineObservedFn = prev })
+
+	d.baselineSbxHookOffsets(tree, pane.ID)
+	<-forwarded
+	d.forwardSbxHookFiles() // the next tick
+
+	if got, _ := os.ReadFile(dst); string(got) != a+b {
+		t.Errorf("history = %q, want A then B exactly once", got)
+	}
+}
+
+// The first publication: the pane is not visible to the watcher until its
+// offsets are committed.
+func TestPrepareSbxHooks_PaneIsUnpublishedUntilItsBaselineIsCommitted(t *testing.T) {
+	d, pane, r := sbxResumeFixture(t)
+	fakeLinuxQuild(t)
+	d.spoolFwd = newSpoolForwarder()
+	seen := false
+	prev := sbxBaselineObservedFn
+	sbxBaselineObservedFn = func(id string) {
+		seen = true
+		if _, published := d.sbxHooksFor(id); published {
+			t.Error("the pane was published to the watcher before its baseline was committed")
+		}
+	}
+	t.Cleanup(func() { sbxBaselineObservedFn = prev })
+	if !d.prepareSbxHooks(context.Background(), sbx.Client{Bin: "/fake/sbx", Runner: r}, "team-box", []string{pane.ID}) {
+		t.Fatal("hooks were not prepared")
+	}
+	if !seen {
+		t.Fatal("the baseline never ran")
+	}
+	if _, published := d.sbxHooksFor(pane.ID); !published {
+		t.Error("the pane was not published after its baseline")
+	}
+}
+
+// The daemon's own history copy is read by its TAIL, bounded: a sandbox that
+// grew it cannot make the next restart read all of it, and the newest
+// delivered entries are the ones that matter for resuming.
+func TestHistoryBaseline_ReadsABoundedTailOfTheCopy(t *testing.T) {
+	prev := sbxHistoryDstTail
+	sbxHistoryDstTail = 48 // two short entries, cut inside a third
+	t.Cleanup(func() { sbxHistoryDstTail = prev })
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src.jsonl")
+	dst := filepath.Join(dir, "dst.jsonl")
+	var lines []string
+	for i := 1; i <= 50; i++ {
+		lines = append(lines, `{"ts_ms":`+strconv.Itoa(i)+`}`)
+	}
+	// The copy holds entries 1..50; the source holds 49, 50 and a pending 51.
+	if err := os.WriteFile(dst, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srcBody := lines[48] + "\n" + lines[49] + "\n" + `{"ts_ms":51}` + "\n"
+	if err := os.WriteFile(src, []byte(srcBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	off, err := historyBaseline(root, "src.jsonl", dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := int64(len(lines[48]) + 1 + len(lines[49]) + 1); off != want {
+		t.Errorf("offset = %d, want %d (past the last delivered entry, 50)", off, want)
+	}
+	// And a copy whose tail holds none of the source's entries resumes from 0.
+	if err := os.WriteFile(dst, []byte(strings.Join(lines[:10], "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if off, err := historyBaseline(root, "src.jsonl", dst); err != nil || off != 0 {
+		t.Errorf("offset = %d, %v; want 0 when the copy's tail holds none of the source", off, err)
 	}
 }

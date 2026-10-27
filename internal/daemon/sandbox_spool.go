@@ -207,14 +207,27 @@ func (d *Daemon) forwardSandboxSpools() {
 	d.forwardSbxHookFiles()
 }
 
-// setOffset records where forwarding of one source starts. A tree that
-// outlives the daemon (an sbx hook tree) is seen by a fresh forwarder with no
-// offsets, and forwarding from zero would replay every event the previous
-// daemon already delivered — the no-replay invariant above.
-func (f *spoolForwarder) setOffset(key string, off int64) {
+// reseed runs fn with forwarding paused and hands it set, which records
+// where forwarding of one source starts. Observation and commit happen
+// under the SAME hold: a baseline that reads a file, then takes the lock
+// only to store the answer, can be overtaken by a forward that advanced past
+// what it saw, and storing the older number forwards that stretch twice. A
+// tree that outlives the daemon (an sbx hook tree) is seen by a fresh
+// forwarder with no offsets, and forwarding from zero would replay every
+// event the previous daemon already delivered — the no-replay invariant
+// above (PR #279 review, M-2).
+func (f *spoolForwarder) reseed(fn func(set func(key string, off int64))) {
 	f.pass.Lock()
 	defer f.pass.Unlock()
-	f.mu.Lock()
-	f.offsets[key] = off
-	f.mu.Unlock()
+	fn(func(key string, off int64) {
+		f.mu.Lock()
+		f.offsets[key] = off
+		f.mu.Unlock()
+	})
+}
+
+// setOffsetForTest seeds one offset without a baseline, for tests that stand
+// a pane at a known position.
+func (f *spoolForwarder) setOffsetForTest(key string, off int64) {
+	f.reseed(func(set func(string, int64)) { set(key, off) })
 }

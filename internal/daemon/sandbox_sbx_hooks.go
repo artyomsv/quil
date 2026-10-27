@@ -296,18 +296,29 @@ func (d *Daemon) baselineSbxHookOffsets(tree, paneID string) {
 		return
 	}
 	defer root.Close()
-	var size int64
-	if info, err := root.Stat("events/" + paneID + ".jsonl"); err == nil && info.Mode().IsRegular() {
-		size = info.Size()
-	}
-	d.spoolFwd.setOffset(paneID, size)
-	off, err := historyBaseline(root, "history/"+paneID+".jsonl", panehistory.Path(config.QuilDir(), paneID))
-	if err != nil {
-		log.Printf("sbx: pane %s: history baseline: %v; resuming from the start", paneID, err)
-		off = 0
-	}
-	d.spoolFwd.setOffset(paneID+"/history", off)
+	// Observed and committed under one hold: a pane prepared again (Alt+R)
+	// is still registered, and a forward between the two would advance
+	// past what was observed, to be rewound by the commit.
+	d.spoolFwd.reseed(func(set func(string, int64)) {
+		var size int64
+		if info, err := root.Stat("events/" + paneID + ".jsonl"); err == nil && info.Mode().IsRegular() {
+			size = info.Size()
+		}
+		off, err := historyBaseline(root, "history/"+paneID+".jsonl", panehistory.Path(config.QuilDir(), paneID))
+		if err != nil {
+			log.Printf("sbx: pane %s: history baseline: %v; resuming from the start", paneID, err)
+			off = 0
+		}
+		sbxBaselineObservedFn(paneID)
+		set(paneID, size)
+		set(paneID+"/history", off)
+	})
 }
+
+// sbxBaselineObservedFn is called between a baseline's observation and its
+// commit, with forwarding paused. A no-op in production; tests use it to
+// stand at exactly that point.
+var sbxBaselineObservedFn = func(paneID string) {}
 
 // sbxHistoryScanMax bounds how much of a source history file the baseline
 // reads. A pane's history is prompts; a file past this is not one, and the
@@ -334,14 +345,8 @@ func historyBaseline(root *os.Root, srcRel, dstPath string) (int64, error) {
 	if len(body) > sbxHistoryScanMax {
 		return 0, fmt.Errorf("%s is larger than %d bytes", srcRel, sbxHistoryScanMax)
 	}
-	delivered := map[int64]bool{}
-	if dst, err := os.ReadFile(dstPath); err == nil {
-		for _, line := range bytes.Split(dst, []byte("\n")) {
-			if ts, ok := historyEntryTS(line); ok {
-				delivered[ts] = true
-			}
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
+	delivered, err := deliveredHistoryTS(dstPath)
+	if err != nil {
 		return 0, err
 	}
 	var off, pos int64
@@ -371,4 +376,52 @@ func historyEntryTS(line []byte) (int64, bool) {
 		return 0, false
 	}
 	return e.TS, true
+}
+
+// sbxHistoryDstTail bounds how much of the daemon's own history copy the
+// baseline reads: its TAIL, where the newest delivered entries are. The copy
+// is sandbox-written content too — the forwarder appends up to a megabyte a
+// tick and Compact runs only when history is asked for — so reading it whole
+// would let a sandbox grow it without bound and have the next restart
+// allocate all of it (PR #279 review, security M-1). 16 MiB holds more than
+// Compact keeps (200 entries of at most 64 KiB). A variable for the tests.
+var sbxHistoryDstTail int64 = 16 << 20
+
+// deliveredHistoryTS is the set of ts_ms in the tail of the daemon's history
+// copy. A missing copy is an empty set.
+func deliveredHistoryTS(dstPath string) (map[int64]bool, error) {
+	delivered := map[int64]bool{}
+	f, err := os.Open(dstPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return delivered, nil
+		}
+		return nil, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	start := info.Size() - sbxHistoryDstTail
+	if start < 0 {
+		start = 0
+	}
+	if _, err := f.Seek(start, io.SeekStart); err != nil {
+		return nil, err
+	}
+	tail, err := io.ReadAll(io.LimitReader(f, sbxHistoryDstTail))
+	if err != nil {
+		return nil, err
+	}
+	lines := bytes.Split(tail, []byte("\n"))
+	if start > 0 && len(lines) > 0 {
+		lines = lines[1:] // the cut landed inside this line
+	}
+	for _, line := range lines {
+		if ts, ok := historyEntryTS(line); ok {
+			delivered[ts] = true
+		}
+	}
+	return delivered, nil
 }

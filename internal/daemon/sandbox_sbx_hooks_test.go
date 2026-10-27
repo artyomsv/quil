@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"slices"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/artyomsv/quil/internal/claudehook"
 	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/sbx"
 )
 
 // fakeLinuxQuild stands in for the fetched hook binary: a file the daemon
@@ -234,7 +236,7 @@ func TestBaselineSbxHookOffsets_NoReplayAfterARestart(t *testing.T) {
 	if err := os.WriteFile(events, []byte(`{"event":"old"}`+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(history, []byte(`{"text":"old"}`+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(history, []byte(`{"ts_ms":1,"text":"old"}`+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	d.sbxHookState.panes = map[string]sbxHooks{pane.ID: {tree: tree}}
@@ -242,12 +244,11 @@ func TestBaselineSbxHookOffsets_NoReplayAfterARestart(t *testing.T) {
 	d.forwardSbxHookFiles() // the previous daemon delivered these
 
 	// The daemon restarts: a fresh forwarder, and Spool.Init cleared the
-	// spool. The preparation baselines the pane before the agent starts.
+	// spool (the history copy persists). The preparation baselines the pane
+	// before the agent starts.
 	d.spoolFwd = newSpoolForwarder()
-	for _, p := range []string{filepath.Join(home, "events", pane.ID+".jsonl"), filepath.Join(home, "history", pane.ID+".jsonl")} {
-		if err := os.Remove(p); err != nil {
-			t.Fatal(err)
-		}
+	if err := os.Remove(filepath.Join(home, "events", pane.ID+".jsonl")); err != nil {
+		t.Fatal(err)
 	}
 	d.baselineSbxHookOffsets(tree, pane.ID)
 	appendTo := func(p, line string) {
@@ -262,13 +263,87 @@ func TestBaselineSbxHookOffsets_NoReplayAfterARestart(t *testing.T) {
 		}
 	}
 	appendTo(events, `{"event":"new"}`+"\n")
-	appendTo(history, `{"text":"new"}`+"\n")
+	appendTo(history, `{"ts_ms":3,"text":"new"}`+"\n")
 	d.forwardSbxHookFiles()
 
 	if got, _ := os.ReadFile(filepath.Join(home, "events", pane.ID+".jsonl")); string(got) != `{"event":"new"}`+"\n" {
 		t.Errorf("events after the restart = %q, want only the new line", got)
 	}
-	if got, _ := os.ReadFile(filepath.Join(home, "history", pane.ID+".jsonl")); string(got) != `{"text":"new"}`+"\n" {
-		t.Errorf("history after the restart = %q, want only the new line", got)
+	if got, _ := os.ReadFile(filepath.Join(home, "history", pane.ID+".jsonl")); string(got) != `{"ts_ms":1,"text":"old"}`+"\n"+`{"ts_ms":3,"text":"new"}`+"\n" {
+		t.Errorf("history after the restart = %q, want the delivered line once and the new one", got)
+	}
+}
+
+// History is user data and the source's length is not a receipt: an entry
+// the hook appended after the last tick and before a crash is still pending.
+// After the restart the pending entry is delivered, the delivered one is not
+// delivered twice, and a new one follows — each exactly once.
+func TestBaselineSbxHookOffsets_HistoryResumesFromDeliveredEntries(t *testing.T) {
+	d, pane, _ := sbxResumeFixture(t)
+	home := config.QuilDir()
+	tree := sbxHookTree(home, "team-box")
+	if err := os.MkdirAll(filepath.Join(tree, "history"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, "history"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	a, b, c := `{"ts_ms":1,"text":"A"}`+"\n", `{"ts_ms":2,"text":"B"}`+"\n", `{"ts_ms":3,"text":"C"}`+"\n"
+	src := filepath.Join(tree, "history", pane.ID+".jsonl")
+	dst := filepath.Join(home, "history", pane.ID+".jsonl")
+	if err := os.WriteFile(src, []byte(a+b), 0o600); err != nil { // B never reached the host
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dst, []byte(a), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d.sbxHookState.panes = map[string]sbxHooks{pane.ID: {tree: tree}}
+	d.spoolFwd = newSpoolForwarder()
+	d.baselineSbxHookOffsets(tree, pane.ID)
+	f, err := os.OpenFile(src, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(c); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	d.forwardSbxHookFiles()
+
+	if got, _ := os.ReadFile(dst); string(got) != a+b+c {
+		t.Errorf("history = %q, want A, B and C once each", got)
+	}
+}
+
+// The preparation seeds a pane's offsets BEFORE it publishes the pane to the
+// watcher, so a tick that lands between the two cannot forward a retained
+// file from zero.
+func TestPrepareSbxHooks_BaselinesBeforePublishing(t *testing.T) {
+	d, pane, r := sbxResumeFixture(t)
+	fakeLinuxQuild(t)
+	home := config.QuilDir()
+	tree := sbxHookTree(home, "team-box")
+	if err := os.MkdirAll(filepath.Join(tree, "events"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := `{"event":"old"}` + "\n"
+	if err := os.WriteFile(filepath.Join(tree, "events", pane.ID+".jsonl"), []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d.spoolFwd = newSpoolForwarder()
+	ok := d.prepareSbxHooks(context.Background(), sbx.Client{Bin: "/fake/sbx", Runner: r}, "team-box", []string{pane.ID})
+	if !ok {
+		t.Fatal("hooks were not prepared")
+	}
+	d.spoolFwd.mu.Lock()
+	off := d.spoolFwd.offsets[pane.ID]
+	d.spoolFwd.mu.Unlock()
+	if off != int64(len(old)) {
+		t.Errorf("events offset at publish = %d, want %d (the retained file's end)", off, len(old))
+	}
+	d.forwardSbxHookFiles()
+	if got, err := os.ReadFile(filepath.Join(home, "events", pane.ID+".jsonl")); err == nil && len(got) > 0 {
+		t.Errorf("a retained event was replayed: %q", got)
 	}
 }

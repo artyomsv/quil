@@ -1,7 +1,9 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +14,7 @@ import (
 
 	"github.com/artyomsv/quil/internal/atomicfile"
 	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/panehistory"
 	"github.com/artyomsv/quil/internal/sbx"
 )
 
@@ -93,6 +96,12 @@ func (d *Daemon) prepareSbxHooks(ctx context.Context, c sbx.Client, name string,
 		}
 		return false
 	}
+	// Offsets BEFORE the pane is published: the watcher forwards every
+	// published pane on its tick, and a pane it saw before its baseline
+	// would have its retained file forwarded from zero (M-2).
+	for _, id := range panes {
+		d.baselineSbxHookOffsets(h.tree, id)
+	}
 	d.sbxHookState.mu.Lock()
 	if d.sbxHookState.panes == nil {
 		d.sbxHookState.panes = map[string]sbxHooks{}
@@ -101,9 +110,6 @@ func (d *Daemon) prepareSbxHooks(ctx context.Context, c sbx.Client, name string,
 		d.sbxHookState.panes[id] = h
 	}
 	d.sbxHookState.mu.Unlock()
-	for _, id := range panes {
-		d.baselineSbxHookOffsets(h.tree, id)
-	}
 	return true
 }
 
@@ -267,13 +273,20 @@ func (d *Daemon) sbxPanesWantingHooks(ids []string) []string {
 	return out
 }
 
-// baselineSbxHookOffsets starts forwarding at the END of what the tree already
-// holds for a pane. The tree outlives the daemon, so after a restart the
-// events and history files still carry everything the previous daemon
-// delivered; a forwarder starting at zero would replay all of it into a spool
-// Spool.Init just cleared (PR #279 review, M-2). It runs before the agent is
-// started, so nothing written from here on is skipped. The session record is
-// not an append log and is synced by content, so it needs no baseline.
+// baselineSbxHookOffsets decides where forwarding of a pane's files starts.
+// The tree outlives the daemon, so after a restart the files still carry
+// everything the previous daemon delivered, and a forwarder starting at zero
+// would replay all of it into a spool Spool.Init just cleared (PR #279
+// review, M-2). It runs BEFORE the pane is published to the watcher and
+// before the agent starts, so nothing written from here on is skipped.
+//
+// Events start at the END of the file: they are ephemeral, and an event the
+// previous daemon never delivered is one nobody waits for. History is user
+// data, and its length is not an acknowledgement — the hook can append a
+// prompt after the last tick and before a crash — so it resumes after the
+// LAST source entry the daemon's own copy already holds (M-4): everything
+// after that is pending and forwarded, nothing before it is forwarded twice.
+// The session record is synced by content and needs no baseline.
 func (d *Daemon) baselineSbxHookOffsets(tree, paneID string) {
 	if d.spoolFwd == nil {
 		return
@@ -283,14 +296,79 @@ func (d *Daemon) baselineSbxHookOffsets(tree, paneID string) {
 		return
 	}
 	defer root.Close()
-	for _, src := range []struct{ rel, key string }{
-		{"events/" + paneID + ".jsonl", paneID},
-		{"history/" + paneID + ".jsonl", paneID + "/history"},
-	} {
-		var size int64
-		if info, err := root.Stat(src.rel); err == nil && info.Mode().IsRegular() {
-			size = info.Size()
-		}
-		d.spoolFwd.setOffset(src.key, size)
+	var size int64
+	if info, err := root.Stat("events/" + paneID + ".jsonl"); err == nil && info.Mode().IsRegular() {
+		size = info.Size()
 	}
+	d.spoolFwd.setOffset(paneID, size)
+	off, err := historyBaseline(root, "history/"+paneID+".jsonl", panehistory.Path(config.QuilDir(), paneID))
+	if err != nil {
+		log.Printf("sbx: pane %s: history baseline: %v; resuming from the start", paneID, err)
+		off = 0
+	}
+	d.spoolFwd.setOffset(paneID+"/history", off)
+}
+
+// sbxHistoryScanMax bounds how much of a source history file the baseline
+// reads. A pane's history is prompts; a file past this is not one, and the
+// baseline then forwards from the start, which Compact on the copy bounds.
+const sbxHistoryScanMax = 64 << 20
+
+// historyBaseline is the byte offset in the source history (srcRel under
+// root) just past the last entry the daemon's copy (dstPath) already holds,
+// matched by the entry timestamp the hook writes (ts_ms). 0 when the copy
+// holds none of them. Reads the source through root: it is agent-written.
+func historyBaseline(root *os.Root, srcRel, dstPath string) (int64, error) {
+	src, err := root.Open(srcRel)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	defer src.Close()
+	body, err := io.ReadAll(io.LimitReader(src, sbxHistoryScanMax+1))
+	if err != nil {
+		return 0, err
+	}
+	if len(body) > sbxHistoryScanMax {
+		return 0, fmt.Errorf("%s is larger than %d bytes", srcRel, sbxHistoryScanMax)
+	}
+	delivered := map[int64]bool{}
+	if dst, err := os.ReadFile(dstPath); err == nil {
+		for _, line := range bytes.Split(dst, []byte("\n")) {
+			if ts, ok := historyEntryTS(line); ok {
+				delivered[ts] = true
+			}
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return 0, err
+	}
+	var off, pos int64
+	for _, line := range bytes.SplitAfter(body, []byte("\n")) {
+		pos += int64(len(line))
+		if !bytes.HasSuffix(line, []byte("\n")) {
+			break // a partial trailing line is still being written
+		}
+		if ts, ok := historyEntryTS(line); ok && delivered[ts] {
+			off = pos
+		}
+	}
+	return off, nil
+}
+
+// historyEntryTS is the ts_ms of one history line, the key the hook gives
+// every entry. Anything else — blank, malformed, no timestamp — is false.
+func historyEntryTS(line []byte) (int64, bool) {
+	line = bytes.TrimSpace(line)
+	if len(line) == 0 {
+		return 0, false
+	}
+	var e struct {
+		TS int64 `json:"ts_ms"`
+	}
+	if err := json.Unmarshal(line, &e); err != nil || e.TS == 0 {
+		return 0, false
+	}
+	return e.TS, true
 }

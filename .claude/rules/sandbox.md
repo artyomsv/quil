@@ -824,7 +824,14 @@ has no host folder (`sbx umount` is the user's remedy, documented in
 `docs/sandbox-panes.md`). The hook's output comes back through
 `forwardSbxHookFiles` on the spool tick (`forwardSandboxSpools`): event and
 history lines through the docker path's `spoolForwarder` (os.Root over the
-tree, whole lines, capped, offsets keyed `<pane>` and `<pane>/history`), and the
+tree, whole lines, capped, offsets keyed `<pane>` and `<pane>/history`) — **the
+tree outlives the daemon, so `prepareSbxHooks` baselines a pane's offsets BEFORE
+publishing it to the watcher** (`baselineSbxHookOffsets`: events at the file's
+end, since an undelivered event is one nobody waits for; history after the last
+source entry whose `ts_ms` the daemon's own copy holds, since a prompt appended
+between the last tick and a crash is user data still pending), and a whole
+forward is serialised with a baseline (`spoolForwarder.pass`) so in-flight
+progress cannot overwrite a seeded offset (review M-2/M-4) — and the
 session record (`<pane>.id`, `<pane>.transcript`) copied into
 `/sessions/` when it changed (`syncSbxFile`, os.Root, 4 KiB cap) —
 so `readHookSessionFn` and every other consumer read what they always read.

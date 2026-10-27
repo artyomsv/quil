@@ -51,6 +51,11 @@ const sandboxForwardCap = 1 << 20 // 1 MiB
 type spoolForwarder struct {
 	mu      sync.Mutex
 	offsets map[string]int64
+	// pass serialises one whole forward with a baseline (setOffset): a
+	// forward reads its offset at the start and writes its progress at the
+	// end, so a baseline landing in between would be overwritten by older
+	// progress and the gap forwarded twice (PR #279 review, M-2).
+	pass sync.Mutex
 }
 
 func newSpoolForwarder() *spoolForwarder {
@@ -76,6 +81,8 @@ func (f *spoolForwarder) forget(paneID string) {
 // HOST when the daemon follows it — so an unrooted open would read whatever
 // the agent pointed the spool at and forward it into the notification sidebar.
 func (f *spoolForwarder) forward(rootDir, srcRel, dstPath, paneID string) (int64, error) {
+	f.pass.Lock()
+	defer f.pass.Unlock()
 	root, err := os.OpenRoot(rootDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -205,6 +212,8 @@ func (d *Daemon) forwardSandboxSpools() {
 // offsets, and forwarding from zero would replay every event the previous
 // daemon already delivered — the no-replay invariant above.
 func (f *spoolForwarder) setOffset(key string, off int64) {
+	f.pass.Lock()
+	defer f.pass.Unlock()
 	f.mu.Lock()
 	f.offsets[key] = off
 	f.mu.Unlock()

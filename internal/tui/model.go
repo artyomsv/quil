@@ -201,6 +201,10 @@ type PaneInfo struct {
 	GitAhead        int
 	GitBehind       int
 	GitStale        bool
+	// GitChildRepos is how many direct child checkouts the git fields
+	// summarise, for a pane whose folder is not a checkout itself; 0 when
+	// the folder is one. With GitBranch empty it is what the row shows.
+	GitChildRepos int
 	// WorktreeOwned marks a pane this daemon created a linked worktree for.
 	// GitWorktree beside it says only that the CWD is IN one, which a pane the
 	// user made by hand also satisfies — the close dialog offers deletion on
@@ -9648,19 +9652,20 @@ func parseWorkspaceState(ws ipc.WorkspaceState) WorkspaceStateMsg {
 			PreparingWorktree: boundBranch(p.PreparingWorktree),
 			// Bounded for the same reason: it is sanitized on every frame of
 			// the pane border while the fix runs.
-			FixLabel:          truncateBytes(p.FixLabel, fixLabelCap),
-			Exited:            p.Exited,
-			RunGen:            p.RunGen,
-			GitBranch:         p.GitBranch,
-			GitDetached:       p.GitDetached,
-			GitWorktree:       p.GitWorktree,
-			GitWorktreeName:   p.GitWorktreeName,
-			WorktreeOwned:     p.WorktreeOwned,
-			WorktreePath:      p.WorktreePath,
-			SandboxKind:       sandboxKindOf(p.SandboxImage, p.SandboxBackend),
-			GitUpstream:       p.GitUpstream,
-			GitStale:          p.GitStale,
-			SizeSeq:           p.SizeSeq,
+			FixLabel:        truncateBytes(p.FixLabel, fixLabelCap),
+			Exited:          p.Exited,
+			RunGen:          p.RunGen,
+			GitBranch:       p.GitBranch,
+			GitDetached:     p.GitDetached,
+			GitWorktree:     p.GitWorktree,
+			GitWorktreeName: p.GitWorktreeName,
+			WorktreeOwned:   p.WorktreeOwned,
+			WorktreePath:    p.WorktreePath,
+			SandboxKind:     sandboxKindOf(p.SandboxImage, p.SandboxBackend),
+			GitUpstream:     p.GitUpstream,
+			GitStale:        p.GitStale,
+			GitChildRepos:   p.GitChildRepos,
+			SizeSeq:         p.SizeSeq,
 		}
 		if p.ContextTokens != nil {
 			pi.ContextTokens = *p.ContextTokens

@@ -690,6 +690,8 @@ The PANES section scrolls when there are more panes than rows: the wheel moves i
 
 A worktree named after its branch — `feat-x` for `feat/x`, the usual convention — is shown as a plain `wt` marker instead, since repeating the branch would cost most of the row. You see the name when it differs from the branch, which is exactly when it tells you something: an agent working in `wt-1` on branch `feat/refactor-sidebar`. Naming the worktree costs no extra git call — git already stores a linked checkout's metadata under that name.
 
+A pane in a folder that is not a checkout but holds checkouts as direct subfolders — a ticket's worktrees of several repositories side by side — gets a row too. When every child is on the same branch the row shows that branch, with `↑N`/`↓N` summed across them and the worktree marker when all of them are worktrees; when they disagree it shows `N repos` instead. Hidden subfolders and links are skipped, a folder with more than 16 subfolders is left alone (that is a projects directory, not a group of checkouts), and each child costs exactly what a pane's own checkout does — nothing while nothing has changed.
+
 | Key | Action |
 |---|---|
 | `Alt+Shift+S` | Toggle the sidebar |

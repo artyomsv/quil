@@ -5642,6 +5642,12 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 					if stale {
 						paneData.GitStale = true
 					}
+					// Set only for a folder that is not a checkout but holds
+					// some (gitinfo.Combine); an older client ignores the key
+					// and still gets the shared branch above.
+					if info.ChildRepos > 0 {
+						paneData.GitChildRepos = info.ChildRepos
+					}
 				}
 			}
 			paneData.CWD = cwd

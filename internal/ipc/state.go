@@ -130,7 +130,7 @@ type PaneState struct {
 	// pane_output frames carry (PaneOutputPayload.Generation) — so a client
 	// can tell whether that child's output has reached it yet. Runtime-only.
 	RunGen uint64 `json:"run_gen,omitempty"`
-	Model             string `json:"model,omitempty"`
+	Model  string `json:"model,omitempty"`
 	// ContextTokens is present (possibly 0) whenever Model is set.
 	ContextTokens   *int64 `json:"context_tokens,omitempty"`
 	GitBranch       string `json:"git_branch,omitempty"`
@@ -142,4 +142,8 @@ type PaneState struct {
 	GitAhead  *int `json:"git_ahead,omitempty"`
 	GitBehind *int `json:"git_behind,omitempty"`
 	GitStale  bool `json:"git_stale,omitempty"`
+	// GitChildRepos is set when the pane's folder is not a checkout but
+	// holds checkouts as direct children: how many the other git_* fields
+	// summarise. With GitBranch empty it is the only thing to render.
+	GitChildRepos int `json:"git_child_repos,omitempty"`
 }

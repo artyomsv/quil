@@ -1249,6 +1249,15 @@ func gitRow(pane *PaneModel, w int) string {
 	return gitRowHL(pane, w, rowHighlightNone)
 }
 
+// childReposLabel is the branch-slot text for a folder of child checkouts
+// that share no branch.
+func childReposLabel(n int) string {
+	if n == 1 {
+		return "1 repo"
+	}
+	return fmt.Sprintf("%d repos", n)
+}
+
 // gitRowHL is gitRow with a row highlight: one style for the whole line, so
 // the highlight is that style, text darkened, on hl's background.
 //
@@ -1266,6 +1275,13 @@ func gitRowHL(pane *PaneModel, w int, hl rowHighlight) string {
 	name := pane.GitBranch
 	if name == "" && pane.GitDetached {
 		name = "detached"
+	}
+	if name == "" && pane.GitChildRepos > 0 {
+		// A folder that is not a checkout but holds some, on branches that
+		// disagree (one on the same branch is reported as that branch, so
+		// "1 repo" is only the tick before its probe lands). The count is
+		// the honest summary; naming whichever child came first is not.
+		name = childReposLabel(pane.GitChildRepos)
 	}
 	if name == "" && !pane.GitWorktree {
 		return ""

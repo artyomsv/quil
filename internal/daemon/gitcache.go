@@ -138,11 +138,21 @@ type gitEntry struct {
 // worktrees share a common dir while sitting on different branches, so a
 // common-dir key would report every worktree as being on whichever branch was
 // probed first. See gitinfo.Dirs.
+//
+// A CWD that is not a checkout but holds checkouts as DIRECT children — a
+// folder grouping one ticket's worktrees — resolves to "" in cwdToDir like any
+// non-repository and lists its children's per-checkout dirs in cwdChildren.
+// Each child is an ordinary byDir entry probed in its own directory, so it
+// shares everything a pane's own checkout gets: the HEAD-mtime skip, the
+// per-checkout dedupe (a pane open INSIDE a child and the pane in the parent
+// cost one probe between them), the stale marking. lookup folds the children
+// through gitinfo.Combine, which is pure, so it stays off the filesystem.
 type gitCache struct {
-	mu       sync.Mutex
-	byDir    map[string]*gitEntry // per-checkout git dir → state
-	cwdToDir map[string]string    // pane CWD → per-checkout git dir ("" = not a repo)
-	cwdAt    map[string]time.Time // when that CWD was last resolved
+	mu          sync.Mutex
+	byDir       map[string]*gitEntry // per-checkout git dir → state
+	cwdToDir    map[string]string    // pane CWD → per-checkout git dir ("" = not a repo)
+	cwdAt       map[string]time.Time // when that CWD was last resolved
+	cwdChildren map[string][]string  // non-repo CWD → its child checkouts' git dirs
 
 	// prEnabled gates the pull request probe ([daemon] pr_status). Off, no
 	// gh is ever run and no PR state is ever written.
@@ -168,9 +178,10 @@ var prCompletionHook = func() {}
 
 func newGitCache() *gitCache {
 	return &gitCache{
-		byDir:    make(map[string]*gitEntry),
-		cwdToDir: make(map[string]string),
-		cwdAt:    make(map[string]time.Time),
+		byDir:       make(map[string]*gitEntry),
+		cwdToDir:    make(map[string]string),
+		cwdAt:       make(map[string]time.Time),
+		cwdChildren: make(map[string][]string),
 	}
 }
 
@@ -213,7 +224,14 @@ func (c *gitCache) lookupBoth(cwd string) (info gitinfo.Info, ok, stale bool, pr
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	dir, known := c.cwdToDir[cwd]
-	if !known || dir == "" {
+	if !known {
+		return
+	}
+	if dir == "" {
+		// A folder of child checkouts: its git state is their combination,
+		// as lookup answers. A pull request belongs to one branch of one
+		// checkout, so none is reported for the folder.
+		info, ok, stale = c.lookupChildrenLocked(cwd)
 		return
 	}
 	e := c.byDir[dir]
@@ -251,14 +269,41 @@ func (c *gitCache) lookup(cwd string) (gitinfo.Info, bool, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	dir, known := c.cwdToDir[cwd]
-	if !known || dir == "" {
+	if !known {
 		return gitinfo.Info{}, false, false
+	}
+	if dir == "" {
+		return c.lookupChildrenLocked(cwd)
 	}
 	e := c.byDir[dir]
 	if e == nil || !e.repo {
 		return gitinfo.Info{}, false, false
 	}
 	return e.info, true, e.stale
+}
+
+// lookupChildrenLocked answers for a non-repository CWD from its children's
+// entries. Stale when ANY child is: the row claims one thing about the whole
+// folder, and it cannot be current while a part of it is not.
+func (c *gitCache) lookupChildrenLocked(cwd string) (gitinfo.Info, bool, bool) {
+	dirs := c.cwdChildren[cwd]
+	if len(dirs) == 0 {
+		return gitinfo.Info{}, false, false
+	}
+	infos := make([]gitinfo.Info, 0, len(dirs))
+	stale := false
+	for _, dir := range dirs {
+		e := c.byDir[dir]
+		if e == nil || !e.repo {
+			continue
+		}
+		infos = append(infos, e.info)
+		stale = stale || e.stale
+	}
+	if len(infos) == 0 {
+		return gitinfo.Info{}, false, false
+	}
+	return gitinfo.Combine(infos), true, stale
 }
 
 // gitProbeFn is the seam the refresh runs its probe through, so tests exercise
@@ -268,6 +313,9 @@ var gitProbeFn = gitinfo.Probe
 
 // gitDirsFn is the matching seam for the CWD→checkout resolution.
 var gitDirsFn = gitinfo.Dirs
+
+// gitChildrenFn is the seam for the one-level walk under a non-repository.
+var gitChildrenFn = gitinfo.ListChildRepos
 
 // refreshGitInfo brings the cache up to date for the given pane CWDs. Called
 // on a ticker from the daemon's own goroutine, never from a broadcast.
@@ -301,33 +349,31 @@ func (c *gitCache) refresh(ctx context.Context, cwds []string) {
 			continue // pool exhausted; try again next tick
 		}
 		gitDir, commonDir, ok := gitDirsFn(ctx, cwd)
+		var children []gitinfo.ChildRepo
+		if !ok {
+			// Not a checkout: look one level down, under the same permit
+			// and one shared deadline for the whole walk. Bounded by
+			// gitinfo.MaxChildDirs on the far side and by gitProbeTimeout
+			// here, and repeated only when the negative answer expires —
+			// the cadence a plain non-repository already re-resolves at,
+			// which is also what lets a clone finishing under the folder
+			// show up.
+			childCtx, cancel := context.WithTimeout(ctx, gitProbeTimeout)
+			children = gitChildrenFn(childCtx, cwd)
+			cancel()
+		}
 		releaseBlockingFSCall()
 
 		c.mu.Lock()
 		c.cwdAt[cwd] = now
 		if !ok {
 			c.cwdToDir[cwd] = ""
+			c.setChildrenLocked(cwd, children)
 			c.mu.Unlock()
 			continue
 		}
 		c.cwdToDir[cwd] = gitDir
-		if _, seen := c.byDir[gitDir]; !seen {
-			c.byDir[gitDir] = &gitEntry{
-				info: gitinfo.Info{
-					LinkedWorktree: gitDir != commonDir,
-					// Named here as well as in gitinfo.Probe, and neither is
-					// redundant: this entry is what lookup() answers with
-					// between resolving the CWD and the first probe landing —
-					// the tick right after a pane is created in a worktree,
-					// i.e. exactly when the user is looking at the row. Probe
-					// covers every tick after that, because it replaces this
-					// whole struct.
-					WorktreeName: worktreeName(gitDir, commonDir),
-				},
-				repo:     true,
-				probeDir: cwd,
-			}
-		}
+		c.ensureEntryLocked(gitDir, commonDir, cwd)
 		c.mu.Unlock()
 	}
 
@@ -381,6 +427,47 @@ func (c *gitCache) refresh(ctx context.Context, cwds []string) {
 
 	c.prTick(ctx, now, c.referencedDirs(cwds))
 	c.sweep(cwds)
+}
+
+// ensureEntryLocked registers a checkout the first time a CWD — or a child
+// walk — resolves to it, probed in probeDir. An existing entry is left alone:
+// the second CWD into one checkout is the dedupe this cache exists for.
+func (c *gitCache) ensureEntryLocked(gitDir, commonDir, probeDir string) {
+	if _, seen := c.byDir[gitDir]; seen {
+		return
+	}
+	c.byDir[gitDir] = &gitEntry{
+		info: gitinfo.Info{
+			LinkedWorktree: gitDir != commonDir,
+			// Named here as well as in gitinfo.Probe, and neither is
+			// redundant: this entry is what lookup() answers with
+			// between resolving the CWD and the first probe landing —
+			// the tick right after a pane is created in a worktree,
+			// i.e. exactly when the user is looking at the row. Probe
+			// covers every tick after that, because it replaces this
+			// whole struct.
+			WorktreeName: worktreeName(gitDir, commonDir),
+		},
+		repo:     true,
+		probeDir: probeDir,
+	}
+}
+
+// setChildrenLocked records a non-repository CWD's child checkouts, replacing
+// whatever the previous resolution found (a child cloned or removed since),
+// and registers each child as its own entry probed in its own directory —
+// never in the parent, where git resolves nothing.
+func (c *gitCache) setChildrenLocked(cwd string, children []gitinfo.ChildRepo) {
+	if len(children) == 0 {
+		delete(c.cwdChildren, cwd)
+		return
+	}
+	dirs := make([]string, 0, len(children))
+	for _, ch := range children {
+		c.ensureEntryLocked(ch.GitDir, ch.CommonDir, ch.Dir)
+		dirs = append(dirs, ch.GitDir)
+	}
+	c.cwdChildren[cwd] = dirs
 }
 
 // prTick starts a pull request probe for every referenced checkout that is
@@ -562,10 +649,14 @@ func (c *gitCache) sweep(cwds []string) {
 		if !live[cwd] {
 			delete(c.cwdToDir, cwd)
 			delete(c.cwdAt, cwd)
+			delete(c.cwdChildren, cwd)
 			continue
 		}
 		if dir != "" {
 			keptDirs[dir] = true
+		}
+		for _, child := range c.cwdChildren[cwd] {
+			keptDirs[child] = true
 		}
 	}
 	for dir := range c.byDir {
@@ -575,20 +666,29 @@ func (c *gitCache) sweep(cwds []string) {
 	}
 }
 
-// referencedDirs lists the distinct checkouts the given CWDs resolve to, so a
-// checkout whose last pane closed stops being probed.
+// referencedDirs lists the distinct checkouts the given CWDs resolve to —
+// directly, or as the children of a non-repository folder — so a checkout
+// whose last pane closed stops being probed.
 func (c *gitCache) referencedDirs(cwds []string) []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	seen := make(map[string]bool, len(cwds))
 	out := make([]string, 0, len(cwds))
-	for _, cwd := range cwds {
-		dir := c.cwdToDir[cwd]
+	add := func(dir string) {
 		if dir == "" || seen[dir] {
-			continue
+			return
 		}
 		seen[dir] = true
 		out = append(out, dir)
+	}
+	for _, cwd := range cwds {
+		if dir := c.cwdToDir[cwd]; dir != "" {
+			add(dir)
+			continue
+		}
+		for _, child := range c.cwdChildren[cwd] {
+			add(child)
+		}
 	}
 	return out
 }
@@ -694,9 +794,9 @@ func (d *Daemon) gitFingerprint() string {
 		if !ok {
 			continue
 		}
-		fmt.Fprintf(&b, "%s\x00%s\x00%t\x00%t\x00%d\x00%d\x00%t\x00%t\x00%d\x00%s\x00%t\x00%t\n",
-			cwd, info.Branch, info.Detached, info.LinkedWorktree,
-			info.Ahead, info.Behind, info.HasUpstream, stale,
+		fmt.Fprintf(&b, "%s\x00%s\x00%t\x00%t\x00%s\x00%d\x00%d\x00%t\x00%t\x00%d\x00%d\x00%s\x00%t\x00%t\n",
+			cwd, info.Branch, info.Detached, info.LinkedWorktree, info.WorktreeName,
+			info.Ahead, info.Behind, info.HasUpstream, stale, info.ChildRepos,
 			pr.Number, pr.Status, prKnown, prStale)
 	}
 	return b.String()

@@ -19,15 +19,26 @@ type fakeGitProbes struct {
 	// infos maps a probe dir to its state. A missing entry means the probe
 	// did not answer.
 	infos map[string]gitinfo.Info
+	// children maps a NON-repository CWD to the child checkouts the one-level
+	// walk would find under it. A missing entry means none.
+	children map[string][]gitinfo.ChildRepo
 
 	dirCalls   []string
 	probeCalls []string
+	childCalls []string
 }
 
 func installFakeGit(t *testing.T, f *fakeGitProbes) {
 	t.Helper()
-	origDirs, origProbe := gitDirsFn, gitProbeFn
-	t.Cleanup(func() { gitDirsFn, gitProbeFn = origDirs, origProbe })
+	origDirs, origProbe, origChildren := gitDirsFn, gitProbeFn, gitChildrenFn
+	t.Cleanup(func() { gitDirsFn, gitProbeFn, gitChildrenFn = origDirs, origProbe, origChildren })
+
+	gitChildrenFn = func(_ context.Context, dir string) []gitinfo.ChildRepo {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.childCalls = append(f.childCalls, dir)
+		return f.children[dir]
+	}
 
 	gitDirsFn = func(_ context.Context, dir string) (string, string, bool) {
 		f.mu.Lock()

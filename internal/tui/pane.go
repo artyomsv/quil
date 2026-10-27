@@ -138,6 +138,10 @@ type PaneModel struct {
 	GitAhead      int
 	GitBehind     int
 	GitStale      bool
+	// GitChildRepos: the folder is not a checkout but holds this many as
+	// direct children, which the git fields above summarise. With no branch
+	// (the children disagree) the row shows the count.
+	GitChildRepos int
 	// PRNumber/PRStatus/PRStale: the branch's pull request as the daemon's gh
 	// probe last saw it (daemon-authoritative, runtime-only; see PaneInfo).
 	// 0 means none known; the pane then has no PR row.

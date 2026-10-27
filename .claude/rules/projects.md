@@ -1014,6 +1014,35 @@ keeps its last value and marks it STALE rather than blanking or guessing. No
 upstream renders NO counts — `↑0↓0` claims a checkout is in sync when the truth
 is there is nothing to compare against.
 
+**A folder that is not a checkout but holds checkouts one level down reports
+them** (`gitinfo.ListChildRepos` + `gitinfo.Combine`, `internal/gitinfo/children.go`;
+wired in `gitcache.refresh`'s resolve step, `cwdChildren`). The case: a
+ticket folder whose children are linked worktrees of several repositories,
+all on one branch — nothing was shown, because the pane's own directory is
+not a repository. When `Dirs` says not-a-repo, the refresh walks the DIRECT
+child directories (hidden entries and symlinks skipped, one `rev-parse` each,
+under the same permit and one `gitProbeTimeout` deadline) and records each
+child as an ordinary `byDir` entry probed in ITS OWN directory — so a child
+shares the HEAD-mtime skip, the stale marking and the per-checkout dedupe with
+a pane open inside it, and `lookup` stays non-probing: it folds the children's
+cached entries through `Combine`, which is pure. The walk repeats only when
+the negative answer expires (`gitNegativeTTL`), the cadence a plain
+non-repository already re-resolves at — which is also how a clone finishing
+under the folder appears. `gitinfo.MaxChildDirs` (16) is a REFUSAL
+threshold, not a prefix cap: a folder with more visible subdirectories is not
+walked at all, because a prefix of `~/Projects` reported as "3 repos" is a
+wrong answer with the confidence of a right one, and the git launches recur
+every TTL. Combine rules: branch (and detached) only when EVERY child agrees,
+else neither and only `ChildRepos` (the count, `git_child_repos` on the wire,
+omitempty — an older client ignores it and still gets the shared branch) for
+the TUI to render as `N repos`; worktree flag when all are, name when all
+share it; ahead/behind SUMMED over children with an upstream (a maximum would
+hide a second repository's commits behind the first's); stale when ANY child
+is. `Info.Empty` counts `ChildRepos` so a disagreeing folder is still worth a
+row. Tests: `internal/gitinfo/children_test.go` (a real-git sibling test
+beside the stubs), `internal/daemon/gitcache_children_test.go`,
+`internal/tui/gitchildrepos_test.go`.
+
 **Windows: every exec needs `CREATE_NO_WINDOW`.** The daemon runs
 `DETACHED_PROCESS`, so it owns no console, and a child started from a
 console-less parent gets a brand new console allocated — a real window. A probe

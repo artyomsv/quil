@@ -227,6 +227,21 @@ func (d *Daemon) startSbxPane(pane *Pane, ptySession apty.Session, p *plugin.Pan
 	// processes carrying it (see sbx.TagEnv).
 	tag := sbx.NewTag(pane.ID)
 	env := append(slices.Clone(p.Command.Env), sbx.TagEnv+"="+tag)
+	// Hooks, when the preparation could share them: the settings file is
+	// written into the shared tree and named by the same path, which is
+	// where claude reads it inside the VM (the sbx convention). First in
+	// argv, as on the host.
+	if h, ok := d.sbxHooksFor(pane.ID); ok && p.UsesClaudeSessions() {
+		hp := hookPaths{HostDir: h.tree, RefDir: h.tree, ExePath: h.quild}
+		settingsArgs, hookEnv := claudeHookSpawnPrep(hp, pane.ID, d.cfg.Notification.Hooks.Claude, args)
+		args = append(settingsArgs, args...)
+		env = append(env, hookEnv...)
+		// The input-history gate the ordinary spawn adds (spawnPane): the hook
+		// records a prompt only when it sees this (PR #279 review, M-1).
+		if p.Command.RecordHistory {
+			env = append(env, "QUIL_RECORD_HISTORY=1")
+		}
+	}
 	argv := sbx.ExecArgs(t.name, workdir, env, p.Command.Cmd, args)
 	ptySession.SetCWD(cwd)
 	log.Printf("spawn: pane %s sbx sandbox=%s cmd=%s args=%v cwd=%s", pane.ID, t.name, bin, sbx.RedactEnv(argv), cwd)
@@ -456,6 +471,13 @@ func (d *Daemon) startSbxWaiters(ctx context.Context, t sbxTarget, listed sbx.Li
 		}
 		starting = append(starting, w)
 		startingIDs = append(startingIDs, w.paneID)
+	}
+	// Claude hooks: the shared tree and the hook binary, for the claude
+	// panes about to start (sandbox_sbx_hooks.go). Never a failure.
+	if want := d.sbxPanesWantingHooks(startingIDs); len(want) > 0 {
+		if bin, err := sbxBinaryFn(); err == nil {
+			d.prepareSbxHooks(ctx, sbx.Client{Bin: bin, Runner: sbxRunner}, t.name, want)
+		}
 	}
 	// Safe in a sandbox Quil does not own: the stop matches only processes
 	// carrying this pane's own tag.

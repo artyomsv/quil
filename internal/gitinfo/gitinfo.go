@@ -55,11 +55,18 @@ type Info struct {
 	HasUpstream bool
 	Ahead       int
 	Behind      int
+
+	// ChildRepos is set only on an Info built by Combine: the number of
+	// direct child repositories it summarises, for a pane whose folder is
+	// not a checkout but holds some. Zero for a checkout probed directly.
+	// When the children disagree on a branch it is the only field a client
+	// has left to render.
+	ChildRepos int
 }
 
 // Empty reports whether the probe found nothing worth rendering.
 func (i Info) Empty() bool {
-	return i.Branch == "" && !i.Detached && !i.LinkedWorktree
+	return i.Branch == "" && !i.Detached && !i.LinkedWorktree && i.ChildRepos == 0
 }
 
 // runGit is the seam every command goes through, so tests never need a real

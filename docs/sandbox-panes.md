@@ -793,15 +793,40 @@ the conversation comes back when the file does.
 If the check inside the sandbox fails, the pane does not start and shows the
 reason. Fix it and restart the pane (`Alt+R`).
 
-**What Quil cannot see:** a `/clear` or `/resume` inside Claude starts a new
-session, and without Quil's hook in the sandbox the pane does not learn the
-new id. A restart after that reopens the conversation from before.
+A `/clear` or `/resume` inside Claude starts a new session. With hooks (next
+section) Quil learns the new id and a restart reopens that conversation.
+
+### Hooks inside the sandbox
+
+The work spinner, the notifications, the input history and the `/clear`
+tracking all come from Claude hooks: Claude runs a small Quil program on each
+event, and it writes a line into a file Quil reads. To make that work inside
+an sbx sandbox, Quil shares two folders of its own with the sandbox, at the
+same paths (the sbx convention):
+
+- `~/.quil/sandbox/sbx/<sandbox>/`, read-write. One per sandbox. The hook
+  writes its event, history and session files here.
+- `~/.quil/sandbox/bin/<version>/`, read-only. The Linux build of `quild`,
+  downloaded once per version from the GitHub release of the version you run.
+
+Both are added with `sbx mount` when the first Claude pane in that sandbox
+starts, and sbx keeps them across `sbx stop` and start. Nothing of YOURS is
+mounted or changed.
+
+**Do not delete `~/.quil/sandbox/sbx/<sandbox>/` while the sandbox exists.**
+sbx refuses to start a sandbox whose saved mount has no host folder. If you
+did, run `sbx umount <sandbox> ~/.quil/sandbox/sbx/<sandbox>` and start it
+again.
+
+When hooks cannot be set up (no release build to download, a Windows host,
+a mount sbx refused) the pane still starts, without them, and says so.
+Claude only: a codex or opencode pane in an sbx sandbox has no hooks yet.
 
 ### What an sbx pane does not have (yet)
 
-- **No notifications, work spinner or input history, and no tracking of
-  `/clear`.** Those need Quil's hook program inside the cage, and the cage's
-  mounts belong to your environment file.
+- **Hooks for codex and opencode.** Only Claude registers hooks in an sbx
+  sandbox today.
+- **Hooks on a Windows host.** A Windows path is not a path inside the VM.
 
 ### Example: a minimal environment file and kit
 

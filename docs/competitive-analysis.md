@@ -46,7 +46,7 @@ architectural bet.
 | **Windows** | ✅ **Native** (bundled ConPTY/OpenConsole); remote Windows hosts since v1.81 | ✅ Native, **GA** (ConPTY) — no terminal attach, no live handoff, no Kitty graphics under WT, plugins in preview; remote Windows hosts supported | ❌ **WSL2 only** |
 | Agent-drives-it API | **MCP server** (36 tools, native protocol) | Socket API + full CLI + agent skill | HTTP REST API (130 routes) + CLI |
 | Web/browser UI | ✅ **`quil web`** (v1.86–v1.89; loopback, login code + port-scoped key, pane/tab editing, overlays) | ❌ first-party — but **~10 community clients**, incl. a phone PWA with web push | ✅ **React PWA dashboard** |
-| Container sandbox | ✅ **Docker** per-pane + **`sbx` microVM** backend (v1.90) | ❌ none at all | ✅ Docker/Podman/Apple |
+| Container sandbox | ✅ **Docker** per-pane (mount set as boundary, read-only `.git` overlays) + **`sbx` microVM** backend (v1.90; default-deny network, no Git overlays) | ❌ none at all | ✅ Docker/Podman/Apple |
 | Remote phone access | ❌ | via SSH TUI | ✅ Tunnel + PWA + Web Push |
 | Git worktree-per-session | ✅ | ✅ | ✅ (+ multi-repo) |
 | AI agents supported | **3** deep + tools | **27** (23 recognised + 4 self-reporting) | **~13** terminal, 7 ACP |
@@ -75,11 +75,14 @@ treating a copyleft-plus-commercial split as the answer to the same worry.
 multiplexer, single binary, socket API, native-Windows ambition) but far ahead on
 agent breadth, plugins, and remote. aoe leans on tmux and pours its energy into a
 web/mobile dashboard, an ACP "structured view", and container sandboxing across
-three runtimes — Quil now has Docker sandbox panes of its own, but the browser
-and phone surfaces remain missing. Both competitors are considerably larger and
-support many more agents. Quil's real moats are **native Windows maturity**, being
-a **first-class MCP server**, and two unique niceties (**pane notes**,
-**memory reporting**).
+three runtimes — Quil now has sandbox panes of its own and, since v1.86, its own
+browser client; what remains missing against aoe is the **phone** surface (PWA +
+Web Push) and the **diff-review** surface. Both competitors are considerably
+larger and support many more agents. Quil's real moats are being a
+**first-class MCP server**, **container-sandboxed agents** (which herdr lacks
+entirely), a **browser client that ships with authentication**, and two unique
+niceties (**pane notes**, **memory reporting**). Native Windows is still an
+advantage but a narrow one — see the leads section for what is actually left.
 
 ---
 
@@ -222,7 +225,7 @@ current to-do list.
 | 6 | Plugin marketplace (GitHub-topic index) | herdr, aoe | Discover + `install owner/repo`. Already partially planned. | M | ★★ | community-plugins |
 | 7 | General shell CLI to script the multiplexer | herdr, aoe | `quil pane split`, `quil tab create` from any script. MCP serves AI; humans/scripts have nothing. | M | ★★ | new |
 | 8 | ~~Remote SSH thin-client attach (`--remote`)~~ **SHIPPED (v1.44)** | herdr | Local client of a remote server. Since v1.47 one client holds the local daemon and any number of remote ones at once, which is more than the gap asked for. The clipboard-image half of this gap did **not** ship: the paste proxy writes the PNG to the client's own disk and types that path into the PTY, so in remote mode it names a file the server cannot read. | M | ★★ | session-sharing |
-| 9 | Web dashboard (browser terminal) | aoe | Real terminal + diffs in the browser, installable PWA. The largest surface Quil is missing. | L | ★★★ | new |
+| 9 | ~~Web dashboard (browser terminal)~~ **SHIPPED (v1.86–v1.89)** | aoe | Was "the largest surface Quil is missing". `quil web` now serves the same workspace on loopback behind a one-time login code, with pane/tab editing, split-border drag, the notification list and the overlays. The two halves that did **not** ship are the **diff-review** surface (still #4) and an **installable PWA** reaching a phone (still #10). | L | ★★★ | new |
 | 10 | Remote phone access (tunnel + QR/passphrase + push) | aoe | Check on agents from a phone via Tailscale/Cloudflare with two-factor pairing. | L | ★★ | session-sharing |
 | ~~11~~ | ~~Container sandboxing (Docker/Podman) + shared auth volumes~~ **SHIPPED** | aoe | Docker only; Podman untested. Per-pane container, user-supplied image, the mount set as the boundary. Auth is per-pane rather than a shared volume — a shared Claude config directory is available but off by default, because it merges every sandbox pane into one trust domain. | L | ★★ | [sandbox-panes](sandbox-panes.md) |
 | 12 | ~~Multi-repo workspaces~~ **SHIPPED (v1.47)** | aoe | One session/branch spanning several repos. Quil's projects each own a root directory and their own tabs — and a project can belong to a different machine, which aoe's workspaces do not span. | M | ★★ | workspace-files |
@@ -432,8 +435,13 @@ jobs, and Quil is not an emulator.
   Going the other way, herdr now carries clipboard images into a *remote*
   session and Quil does not; that gap is real and still open.
 - **Container-sandboxed agents — the clearest lead, and uncontested.** An AI pane
-  can run in its own Docker container or an `sbx` microVM, with the mount set as
-  the whole boundary. herdr has **no sandboxing at all**: an agent it starts has
+  can run in its own Docker container, where the mount set *is* the boundary
+  (no `--privileged`, no `--cap-add`, no `--network`, `.git` internals pinned
+  read-only), or in an `sbx` microVM declared by an approved
+  `.quil-sandbox.toml`, which bounds the network default-deny and honours the
+  profile's read-only mounts but adds **no** Git overlays — and changes no
+  mounts at all when it attaches to a sandbox another tool owns. Keep those two
+  apart when quoting this: they are not the same guarantee. herdr has **no sandboxing at all**: an agent it starts has
   the same reach as the user's shell. Given how much of this category's pitch is
   "run many agents unattended", this is the most defensible difference on the
   list and the least likely to be closed quickly.
@@ -476,10 +484,10 @@ Closing the most impactful gaps, roughly in ROI order:
 4. **Sound, and desktop notifications beyond Windows** (#14, #15) — small effort,
    immediately felt. Windows toasts shipped; macOS and Linux did not, and neither
    did sound on any platform.
-5. **Web/mobile access** (#9, #10) — the largest builds; likely a deliberate
-   "not now" given Quil's TUI/Windows-native focus, but this is where aoe is
-   pulling away for the mobile crowd. Terminal-side remote attach (#8) is no
-   longer part of this cluster — it shipped in v1.44 — and neither is
-   sandboxing (#11), which shipped as Docker sandbox panes.
+5. **Mobile access** (#10) — the browser half of this cluster (#9) shipped in
+   v1.86–v1.89, so what is left is specifically the phone: a tunnel, pairing and
+   Web Push, which is where aoe is still pulling away. Terminal-side remote
+   attach (#8) left this cluster in v1.44 and sandboxing (#11) in the Docker
+   sandbox-pane work, so the cluster is now one item, not four.
 </content>
 </invoke>

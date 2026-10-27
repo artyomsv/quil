@@ -306,3 +306,24 @@ func TestListChildRepos_RealGit_SiblingsOnOneBranch(t *testing.T) {
 		t.Errorf("Combine = %+v, want branch ticket/one over 2 repos", got)
 	}
 }
+
+// A deadline that runs out INSIDE the last child's probe has no next
+// iteration to notice it: the answer is still the whole list or nothing.
+func TestListChildRepos_DeadlineSpentInTheLastProbeAnswersNothing(t *testing.T) {
+	root := t.TempDir()
+	mkdirs(t, root, "a", "b")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	orig := runGit
+	t.Cleanup(func() { runGit = orig })
+	runGit = func(_ context.Context, dir string, _ ...string) (string, error) {
+		if filepath.Base(dir) == "b" {
+			cancel() // the shared deadline passes while b is being probed
+			return "", errors.New("signal: killed")
+		}
+		return ".git\n.git\n", nil
+	}
+	if got := ListChildRepos(ctx, root); got != nil {
+		t.Errorf("ListChildRepos = %+v after the deadline passed in the last probe, want nil", got)
+	}
+}

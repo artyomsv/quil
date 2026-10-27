@@ -101,6 +101,9 @@ func (d *Daemon) prepareSbxHooks(ctx context.Context, c sbx.Client, name string,
 		d.sbxHookState.panes[id] = h
 	}
 	d.sbxHookState.mu.Unlock()
+	for _, id := range panes {
+		d.baselineSbxHookOffsets(h.tree, id)
+	}
 	return true
 }
 
@@ -262,4 +265,32 @@ func (d *Daemon) sbxPanesWantingHooks(ids []string) []string {
 		}
 	}
 	return out
+}
+
+// baselineSbxHookOffsets starts forwarding at the END of what the tree already
+// holds for a pane. The tree outlives the daemon, so after a restart the
+// events and history files still carry everything the previous daemon
+// delivered; a forwarder starting at zero would replay all of it into a spool
+// Spool.Init just cleared (PR #279 review, M-2). It runs before the agent is
+// started, so nothing written from here on is skipped. The session record is
+// not an append log and is synced by content, so it needs no baseline.
+func (d *Daemon) baselineSbxHookOffsets(tree, paneID string) {
+	if d.spoolFwd == nil {
+		return
+	}
+	root, err := os.OpenRoot(tree)
+	if err != nil {
+		return
+	}
+	defer root.Close()
+	for _, src := range []struct{ rel, key string }{
+		{"events/" + paneID + ".jsonl", paneID},
+		{"history/" + paneID + ".jsonl", paneID + "/history"},
+	} {
+		var size int64
+		if info, err := root.Stat(src.rel); err == nil && info.Mode().IsRegular() {
+			size = info.Size()
+		}
+		d.spoolFwd.setOffset(src.key, size)
+	}
 }

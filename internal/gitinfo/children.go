@@ -75,6 +75,13 @@ func ListChildRepos(ctx context.Context, dir string) []ChildRepo {
 		}
 		child := filepath.Join(dir, name)
 		gitDir, commonDir, ok := Dirs(ctx, child)
+		if ctx.Err() != nil {
+			// Checked AFTER the probe as well: a deadline spent inside the
+			// last child's probe has no next iteration to notice it, and
+			// the list so far is the same partial answer (PR #279 review,
+			// M-3).
+			return nil
+		}
 		if !ok {
 			continue
 		}

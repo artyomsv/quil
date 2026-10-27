@@ -197,3 +197,78 @@ func TestSpawnPane_SbxRestartFollowsTheHookRecordedSession(t *testing.T) {
 		t.Errorf("session_id = %q, want the hook's %q", pane.PluginState["session_id"], sbxSessionB)
 	}
 }
+
+// The input-history gate follows the plugin, as on the host: the hook records
+// a prompt only when the exec carries it.
+func TestSpawnPane_SbxHistoryOptInFollowsThePlugin(t *testing.T) {
+	for name, on := range map[string]bool{"recording": true, "not recording": false} {
+		t.Run(name, func(t *testing.T) {
+			d, pane, _ := sbxResumeFixture(t)
+			fakeLinuxQuild(t)
+			d.registry.Get("claude-code").Command.RecordHistory = on
+			s := attachRun(t, d, pane)
+			if s == nil {
+				t.Fatalf("the pane was not started; error = %q", pane.SpawnError)
+			}
+			if got := slices.Contains(s.startArgs, "QUIL_RECORD_HISTORY=1"); got != on {
+				t.Errorf("QUIL_RECORD_HISTORY=1 present = %v, want %v: %v", got, on, s.startArgs)
+			}
+		})
+	}
+}
+
+// A tree that outlives the daemon is not replayed: a fresh forwarder starts
+// at the end of what the tree already holds, and only lines appended after
+// that reach the daemon's own folders.
+func TestBaselineSbxHookOffsets_NoReplayAfterARestart(t *testing.T) {
+	d, pane, _ := sbxResumeFixture(t)
+	home := config.QuilDir()
+	tree := sbxHookTree(home, "team-box")
+	for _, dir := range []string{"events", "history"} {
+		if err := os.MkdirAll(filepath.Join(tree, dir), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	events := filepath.Join(tree, "events", pane.ID+".jsonl")
+	history := filepath.Join(tree, "history", pane.ID+".jsonl")
+	if err := os.WriteFile(events, []byte(`{"event":"old"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(history, []byte(`{"text":"old"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d.sbxHookState.panes = map[string]sbxHooks{pane.ID: {tree: tree}}
+	d.spoolFwd = newSpoolForwarder()
+	d.forwardSbxHookFiles() // the previous daemon delivered these
+
+	// The daemon restarts: a fresh forwarder, and Spool.Init cleared the
+	// spool. The preparation baselines the pane before the agent starts.
+	d.spoolFwd = newSpoolForwarder()
+	for _, p := range []string{filepath.Join(home, "events", pane.ID+".jsonl"), filepath.Join(home, "history", pane.ID+".jsonl")} {
+		if err := os.Remove(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d.baselineSbxHookOffsets(tree, pane.ID)
+	appendTo := func(p, line string) {
+		t.Helper()
+		f, err := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		if _, err := f.WriteString(line); err != nil {
+			t.Fatal(err)
+		}
+	}
+	appendTo(events, `{"event":"new"}`+"\n")
+	appendTo(history, `{"text":"new"}`+"\n")
+	d.forwardSbxHookFiles()
+
+	if got, _ := os.ReadFile(filepath.Join(home, "events", pane.ID+".jsonl")); string(got) != `{"event":"new"}`+"\n" {
+		t.Errorf("events after the restart = %q, want only the new line", got)
+	}
+	if got, _ := os.ReadFile(filepath.Join(home, "history", pane.ID+".jsonl")); string(got) != `{"text":"new"}`+"\n" {
+		t.Errorf("history after the restart = %q, want only the new line", got)
+	}
+}

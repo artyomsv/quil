@@ -236,6 +236,11 @@ func (d *Daemon) startSbxPane(pane *Pane, ptySession apty.Session, p *plugin.Pan
 		settingsArgs, hookEnv := claudeHookSpawnPrep(hp, pane.ID, d.cfg.Notification.Hooks.Claude, args)
 		args = append(settingsArgs, args...)
 		env = append(env, hookEnv...)
+		// The input-history gate the ordinary spawn adds (spawnPane): the hook
+		// records a prompt only when it sees this (PR #279 review, M-1).
+		if p.Command.RecordHistory {
+			env = append(env, "QUIL_RECORD_HISTORY=1")
+		}
 	}
 	argv := sbx.ExecArgs(t.name, workdir, env, p.Command.Cmd, args)
 	ptySession.SetCWD(cwd)

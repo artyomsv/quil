@@ -199,3 +199,13 @@ func (d *Daemon) forwardSandboxSpools() {
 	// An sbx pane's hooks write into the tree shared with its sandbox.
 	d.forwardSbxHookFiles()
 }
+
+// setOffset records where forwarding of one source starts. A tree that
+// outlives the daemon (an sbx hook tree) is seen by a fresh forwarder with no
+// offsets, and forwarding from zero would replay every event the previous
+// daemon already delivered — the no-replay invariant above.
+func (f *spoolForwarder) setOffset(key string, off int64) {
+	f.mu.Lock()
+	f.offsets[key] = off
+	f.mu.Unlock()
+}

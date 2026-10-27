@@ -30,15 +30,29 @@ type fakePR struct {
 	// applied or discarded), so a test can wait for a completion to have
 	// landed rather than sleep and hope.
 	done chan struct{}
+	// abort is closed by the test's cleanup so a probe a FAILED test left
+	// parked returns instead of outliving the test — a leaked goroutine
+	// holds a permit the next test needs and reads package seams the cleanup
+	// is restoring (a data race CI caught on 2026-10-27).
+	abort chan struct{}
 }
 
 type prCall struct{ dir, branch string }
 
-func installFakePR(t *testing.T, f *fakePR, available bool) {
+// installFakePR swaps the three PR seams for the fake. The cleanup order is
+// load-bearing: abort parked probes, WAIT for every probe goroutine of c to
+// finish, and only then restore the seams — restoring first races a
+// goroutine still reading them.
+func installFakePR(t *testing.T, c *gitCache, f *fakePR, available bool) {
 	t.Helper()
 	origProbe, origAvail, origHook := prProbeFn, prAvailableFn, prCompletionHook
-	t.Cleanup(func() { prProbeFn, prAvailableFn, prCompletionHook = origProbe, origAvail, origHook })
 	f.done = make(chan struct{}, 64)
+	f.abort = make(chan struct{})
+	t.Cleanup(func() {
+		close(f.abort)
+		c.prWG.Wait()
+		prProbeFn, prAvailableFn, prCompletionHook = origProbe, origAvail, origHook
+	})
 	prCompletionHook = func() { f.done <- struct{}{} }
 	prAvailableFn = func() bool {
 		f.mu.Lock()
@@ -56,6 +70,8 @@ func installFakePR(t *testing.T, f *fakePR, available bool) {
 			select {
 			case <-rel:
 			case <-ctx.Done():
+				return prinfo.Info{}, prinfo.Unknown
+			case <-f.abort:
 				return prinfo.Info{}, prinfo.Unknown
 			}
 		}
@@ -120,16 +136,20 @@ func (c *gitCache) entry(t *testing.T, dir string) *gitEntry {
 	return e
 }
 
+// setPRAt moves a checkout's PR clock; a checkout not resolved yet (no
+// refresh has run) has no clock to move and is left alone.
 func (c *gitCache) setPRAt(dir string, at time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.byDir[dir].prAt = at
+	if e := c.byDir[dir]; e != nil {
+		e.prAt = at
+	}
 }
 
 func TestPRProbe_RunsOnceOnFirstSightOfABranch(t *testing.T) {
 	c, _ := prFixture(t, "main")
 	f := &fakePR{answers: map[string]prinfo.Info{"main": {Number: 277, Status: prinfo.StatusApproved}}}
-	installFakePR(t, f, true)
+	installFakePR(t, c, f, true)
 
 	c.refresh(context.Background(), []string{"/repo"})
 	c.prWG.Wait()
@@ -146,7 +166,7 @@ func TestPRProbe_RunsOnceOnFirstSightOfABranch(t *testing.T) {
 func TestPRProbe_NotBeforeIntervalElapses(t *testing.T) {
 	c, _ := prFixture(t, "main")
 	f := &fakePR{answers: map[string]prinfo.Info{"main": {Number: 1}}}
-	installFakePR(t, f, true)
+	installFakePR(t, c, f, true)
 
 	c.refresh(context.Background(), []string{"/repo"})
 	c.prWG.Wait()
@@ -166,7 +186,7 @@ func TestPRProbe_NotBeforeIntervalElapses(t *testing.T) {
 func TestPRProbe_BranchChangeAsksAtOnceAndClearsTheOldNumber(t *testing.T) {
 	c, g := prFixture(t, "A")
 	f := &fakePR{answers: map[string]prinfo.Info{"A": {Number: 277}, "B": {Number: 300}}}
-	installFakePR(t, f, true)
+	installFakePR(t, c, f, true)
 	c.refresh(context.Background(), []string{"/repo"})
 	c.prWG.Wait()
 
@@ -181,7 +201,10 @@ func TestPRProbe_BranchChangeAsksAtOnceAndClearsTheOldNumber(t *testing.T) {
 	if _, known, _ := c.lookupPR("/repo"); known {
 		t.Fatal("A's number still shown beside branch B before B answered")
 	}
-	if got := f.branches(); len(got) != 2 || got[1] != "B" {
+	// The probe is recorded when its goroutine starts, not when refresh
+	// launches it.
+	waitUntil(t, "B's probe to start", func() bool { return f.count() == 2 })
+	if got := f.branches(); got[1] != "B" {
 		t.Fatalf("probes = %v, want A then B at once", got)
 	}
 	close(rel)
@@ -196,7 +219,7 @@ func TestPRProbe_Gates(t *testing.T) {
 		c, _ := prFixture(t, "main")
 		c.prEnabled = false
 		f := &fakePR{}
-		installFakePR(t, f, true)
+		installFakePR(t, c, f, true)
 		c.refresh(context.Background(), []string{"/repo"})
 		c.prWG.Wait()
 		if f.count() != 0 {
@@ -206,7 +229,7 @@ func TestPRProbe_Gates(t *testing.T) {
 	t.Run("gh not installed", func(t *testing.T) {
 		c, _ := prFixture(t, "main")
 		f := &fakePR{}
-		installFakePR(t, f, false)
+		installFakePR(t, c, f, false)
 		c.refresh(context.Background(), []string{"/repo"})
 		c.prWG.Wait()
 		if f.count() != 0 {
@@ -219,7 +242,7 @@ func TestPRProbe_Gates(t *testing.T) {
 	t.Run("detached head", func(t *testing.T) {
 		c, _ := prFixture(t, "")
 		f := &fakePR{}
-		installFakePR(t, f, true)
+		installFakePR(t, c, f, true)
 		c.refresh(context.Background(), []string{"/repo"})
 		c.prWG.Wait()
 		if f.count() != 0 {
@@ -229,8 +252,9 @@ func TestPRProbe_Gates(t *testing.T) {
 	t.Run("single flight", func(t *testing.T) {
 		c, _ := prFixture(t, "main")
 		f := &fakePR{release: make(chan struct{}), answers: map[string]prinfo.Info{"main": {Number: 1}}}
-		installFakePR(t, f, true)
+		installFakePR(t, c, f, true)
 		c.refresh(context.Background(), []string{"/repo"})
+		waitUntil(t, "the first probe to start", func() bool { return f.count() == 1 })
 		c.refresh(context.Background(), []string{"/repo"})
 		if n := f.count(); n != 1 {
 			t.Fatalf("%d probes with one in flight, want 1", n)
@@ -243,7 +267,7 @@ func TestPRProbe_Gates(t *testing.T) {
 func TestPRProbe_NoPermitMarksStaleAndRetriesNextTick(t *testing.T) {
 	c, _ := prFixture(t, "main")
 	f := &fakePR{answers: map[string]prinfo.Info{"main": {Number: 277}}}
-	installFakePR(t, f, true)
+	installFakePR(t, c, f, true)
 	c.refresh(context.Background(), []string{"/repo"})
 	c.prWG.Wait()
 
@@ -311,14 +335,17 @@ func (p *perCallRelease) release(i int) {
 func TestPRProbe_LateAnswerForOldBranchIsDiscarded(t *testing.T) {
 	c, g := prFixture(t, "A")
 	f := &fakePR{answers: map[string]prinfo.Info{"A": {Number: 277}, "B": {Number: 300}}}
-	installFakePR(t, f, true)
+	installFakePR(t, c, f, true)
 	rel := &perCallRelease{}
 
 	rel.install(f)
 	c.refresh(context.Background(), []string{"/repo"}) // A in flight
+	// A must have read ITS release channel before the next install swaps it.
+	waitUntil(t, "A's probe to start", func() bool { return f.count() == 1 })
 	moveBranch(t, c, g, "B")
 	rel.install(f)
 	c.refresh(context.Background(), []string{"/repo"}) // B in flight, gen 2
+	waitUntil(t, "B's probe to start", func() bool { return f.count() == 2 })
 
 	rel.release(0) // A's late answer
 	f.waitDone(t)  // ...has now been applied or discarded
@@ -342,7 +369,7 @@ func TestPRProbe_LateAnswerForOldBranchIsDiscarded(t *testing.T) {
 func TestPRProbe_UnknownKeepsOnlyACurrentGenerationAnswer(t *testing.T) {
 	c, g := prFixture(t, "A")
 	f := &fakePR{answers: map[string]prinfo.Info{"A": {Number: 277}}, results: map[string]prinfo.Result{}}
-	installFakePR(t, f, true)
+	installFakePR(t, c, f, true)
 	c.refresh(context.Background(), []string{"/repo"})
 	c.prWG.Wait()
 
@@ -370,8 +397,9 @@ func TestPRProbe_UnknownKeepsOnlyACurrentGenerationAnswer(t *testing.T) {
 func TestPRProbe_DetachmentDuringRequestClearsAndDiscards(t *testing.T) {
 	c, g := prFixture(t, "A")
 	f := &fakePR{answers: map[string]prinfo.Info{"A": {Number: 277}}, release: make(chan struct{})}
-	installFakePR(t, f, true)
+	installFakePR(t, c, f, true)
 	c.refresh(context.Background(), []string{"/repo"}) // A in flight
+	waitUntil(t, "A's probe to start", func() bool { return f.count() == 1 })
 
 	moveBranch(t, c, g, "")
 	c.refresh(context.Background(), []string{"/repo"})
@@ -391,7 +419,7 @@ func TestPRProbe_DetachmentDuringRequestClearsAndDiscards(t *testing.T) {
 func TestPRProbe_AtoBtoAIsANewGeneration(t *testing.T) {
 	c, g := prFixture(t, "A")
 	f := &fakePR{answers: map[string]prinfo.Info{"A": {Number: 277}, "B": {Number: 300}}}
-	installFakePR(t, f, true)
+	installFakePR(t, c, f, true)
 	c.refresh(context.Background(), []string{"/repo"})
 	c.prWG.Wait()
 	moveBranch(t, c, g, "B")
@@ -407,7 +435,8 @@ func TestPRProbe_AtoBtoAIsANewGeneration(t *testing.T) {
 	if _, known, _ := c.lookupPR("/repo"); known {
 		t.Fatal("back on A, gen 1's number was reused before gen 3 answered")
 	}
-	if got := f.branches(); len(got) != 3 || got[2] != "A" {
+	waitUntil(t, "gen 3's probe to start", func() bool { return f.count() == 3 })
+	if got := f.branches(); got[2] != "A" {
 		t.Fatalf("probes = %v, want A, B, A", got)
 	}
 	close(rel)
@@ -420,12 +449,13 @@ func TestPRProbe_AtoBtoAIsANewGeneration(t *testing.T) {
 func TestPRProbe_SweptAndRecreatedEntryIgnoresTheOldCompletion(t *testing.T) {
 	c, _ := prFixture(t, "A")
 	f := &fakePR{answers: map[string]prinfo.Info{"A": {Number: 277}}}
-	installFakePR(t, f, true)
+	installFakePR(t, c, f, true)
 	rel := &perCallRelease{}
 
 	rel.install(f)
 	c.refresh(context.Background(), []string{"/repo"}) // old probe in flight
-	c.refresh(context.Background(), nil)               // sweep: entry gone
+	waitUntil(t, "the old probe to start", func() bool { return f.count() == 1 })
+	c.refresh(context.Background(), nil) // sweep: entry gone
 	rel.install(f)
 	c.refresh(context.Background(), []string{"/repo"}) // new entry, new probe
 	waitUntil(t, "the second probe to start", func() bool { return f.count() == 2 })
@@ -463,7 +493,7 @@ func TestPRBackoff_Ladder(t *testing.T) {
 func TestPRProbe_ConsecutiveUnknownsBackOffAndAnAnswerResets(t *testing.T) {
 	c, _ := prFixture(t, "A")
 	f := &fakePR{answers: map[string]prinfo.Info{"A": {Number: 277}}, results: map[string]prinfo.Result{"A": prinfo.Unknown}}
-	installFakePR(t, f, true)
+	installFakePR(t, c, f, true)
 	for i := 0; i < 3; i++ {
 		c.setPRAt("/repo/.git", time.Time{})
 		c.refresh(context.Background(), []string{"/repo"})
@@ -503,7 +533,7 @@ func TestPRProbe_ConsecutiveUnknownsBackOffAndAnAnswerResets(t *testing.T) {
 func TestPRProbe_OnChangeFiresOnlyWhenTheTupleMoves(t *testing.T) {
 	c, _ := prFixture(t, "A")
 	f := &fakePR{answers: map[string]prinfo.Info{"A": {Number: 277}}, results: map[string]prinfo.Result{}}
-	installFakePR(t, f, true)
+	installFakePR(t, c, f, true)
 	var mu sync.Mutex
 	fired := 0
 	c.onPRChange = func() {
@@ -540,7 +570,7 @@ func TestPRProbe_OnChangeFiresOnlyWhenTheTupleMoves(t *testing.T) {
 func TestPRProbe_ShutdownCancelsTheProbeContext(t *testing.T) {
 	c, _ := prFixture(t, "A")
 	f := &fakePR{answers: map[string]prinfo.Info{"A": {Number: 277}}}
-	installFakePR(t, f, true)
+	installFakePR(t, c, f, true)
 	// A completion after shutdown must not ask the daemon for a broadcast.
 	var mu sync.Mutex
 	fired := 0
@@ -592,7 +622,7 @@ func TestPRProbe_NeverTakesTheLastPermits(t *testing.T) {
 	}
 	c, _ := prFixture(t, "main")
 	f := &fakePR{answers: map[string]prinfo.Info{"main": {Number: 277}}}
-	installFakePR(t, f, true)
+	installFakePR(t, c, f, true)
 
 	for i := int64(0); i < maxPRProbePermits; i++ {
 		if !claimBlockingFSCall() {
@@ -622,7 +652,7 @@ func TestPRProbe_NeverTakesTheLastPermits(t *testing.T) {
 func TestPRProbe_AvailabilityIsCheckedOncePerInterval(t *testing.T) {
 	c, _ := prFixture(t, "main")
 	f := &fakePR{}
-	installFakePR(t, f, false)
+	installFakePR(t, c, f, false)
 	for i := 0; i < 5; i++ {
 		c.refresh(context.Background(), []string{"/repo"})
 	}

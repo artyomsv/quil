@@ -1020,10 +1020,11 @@ console-less parent gets a brand new console allocated — a real window. A prob
 per checkout every few seconds is a stream of them. `hideWindow` is a no-op on
 Unix; the build tags keep the difference in one pair of files.
 
-**PR probe (`internal/prinfo`, `gitcache.go`'s `prTick`/`runPRProbe`).** The
-git row ends with the branch's pull request chip (`#277`, colored by one of
-seven status names), and the number comes from `gh pr view <branch> --json …`
-run by the daemon — git does not know PR numbers. Six rules, each a review
+**PR probe (`internal/prinfo`, `gitcache.go`'s `prTick`/`runPRProbe`).** A
+pane whose branch has a pull request gets a row under its git row (`#278
+approved`, colored by one of seven status names), and the number comes from
+`gh pr view <branch> --json …` run by the daemon — git does not know PR
+numbers. Six rules, each a review
 finding or a measured hazard: (1) **triggers are evaluated on every tick,
 independently of the HEAD-mtime skip** — that skip is the steady state, so a
 probe placed "after the git probe" would never fire its 2-minute cadence; a
@@ -1065,12 +1066,19 @@ comparing the entry's tuple before/after its write — `gitFingerprint` takes
 the same mutex through `lookup`. On the wire `pr_status`/`pr_stale` ride only
 beside a non-zero `pr_number` ("the number may be old", never "I could not
 ask"); the TUI copies all three unconditionally in `parseWorkspaceState` and
-`syncPaneMeta`, so an absent key clears the chip. `gitRowHL` BUDGETS the
-suffix (chip first, then `~`, `wt`, `↑N`, `↓N`, each whole or omitted) because
-`truncateCells` cuts the RIGHT end and an appended chip rendered `#27` for PR
-277 at the default width. Gate: `[daemon] pr_status` (default on), read at
-start. Tests: `internal/prinfo/prinfo_test.go`, `gitcache_pr_test.go`,
-`state_pr_test.go`, `pr_path_test.go`, `gitrow_pr_test.go`.
+`syncPaneMeta`, so an absent key clears the row. **The PR is a ROW of its
+own under the git row (`prRowHL`, `    #278 approved`), not a suffix on it**:
+it shipped as a chip at the end of the git row first, and on a long branch
+the chip stole the width the branch needs (owner, 2026-10-27). The row holds
+the number and the status as a WORD in the status color; the number survives
+whole wherever it fits and the word gives way first; a trailing ` ~` is the
+git row's stale mark. It is appended right after the git row in `sidebarRows`
+with the same shape (no kind, no ordinal, `inTab`, `gitOf` so the pane hover
+shades it), and only a pane with a PR pays the row. `gitRowHL` still BUDGETS
+its suffix (`~`, `wt`, `↑N`, `↓N`, each whole or omitted) because
+`truncateCells` cuts the RIGHT end. Gate: `[daemon] pr_status` (default on),
+read at start. Tests: `internal/prinfo/prinfo_test.go`, `gitcache_pr_test.go`,
+`state_pr_test.go`, `pr_path_test.go`, `prrow_test.go`.
 
 ## Creating worktrees (stage B)
 

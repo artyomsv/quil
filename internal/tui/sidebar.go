@@ -384,6 +384,16 @@ func (m *Model) sidebarRows(w int) ([]sidebarRow, int) {
 			if git := gitRowHL(pane, w, paneHL); git != "" {
 				rows = append(rows, sidebarRow{text: git, tabIdx: ti, inTab: true, gitOf: pane.ID})
 			}
+			// The pull request gets a row of its own under the branch, for
+			// the same reason the branch is not a pane-row suffix: a chip at
+			// the end of the git row stole the width a long branch needs,
+			// and a row has room for the status as a WORD beside the number.
+			// Only panes with a PR pay the row. Same shape as the git row —
+			// no kind, no ordinal, part of the tab's group, shaded with the
+			// pane on hover (gitOf).
+			if pr := prRowHL(pane, w, paneHL); pr != "" {
+				rows = append(rows, sidebarRow{text: pr, tabIdx: ti, inTab: true, gitOf: pane.ID})
+			}
 		}
 	}
 	return rows, panesStart
@@ -1054,10 +1064,10 @@ var (
 	sidebarDeletionStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("160"))
 	sidebarGitStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 	sidebarGitStaleStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Italic(true)
-	// sidebarPRStyles color the pull request chip on the git row by status
+	// sidebarPRStyles color the pull request row under the git row by status
 	// name. The names are the daemon's closed set (internal/prinfo); anything
 	// else renders as open, so a newer daemon cannot blank an older client's
-	// chip or paint it a color it never chose. 214 is the blocked ▲ and says
+	// row or paint it a color it never chose. 214 is the blocked ▲ and says
 	// the same thing here ("needs you"); 160 is the deletion mark's terminal
 	// red, and a closed PR is terminal too; 75 is a light blue no other
 	// sidebar state uses; 34 is a green apart from 28 (unseen).
@@ -1243,14 +1253,15 @@ func gitRow(pane *PaneModel, w int) string {
 // the highlight is that style, text darkened, on hl's background.
 //
 // The suffix is BUDGETED, not truncated. truncateCells keeps the LEFT of a
-// string and cuts the RIGHT, so a chip appended to the suffix was the first
-// thing cut, and at the default width ` wt ↑2 #277` rendered `#27` — a
-// different pull request. Every suffix element is therefore admitted whole or
-// omitted whole, in a PRIORITY order the visual order does not follow: the
-// chip first (it is the reason this row changed), the git stale mark, the
-// worktree marker, then `↑N` and `↓N` — detail about a branch whose PR the
-// owner is looking for. Elements that do not fit are skipped, not stopped at,
-// so a short `↓3` can still land after a long worktree name did not.
+// string and cuts the RIGHT, so a suffix cut by width lost its LAST element
+// first and could cut a count in the middle of its digits. Every suffix
+// element is therefore admitted whole or omitted whole, in a PRIORITY order
+// the visual order does not follow: the stale mark first (it qualifies
+// everything else on the row), the worktree marker, then `↑N` and `↓N`.
+// Elements that do not fit are skipped, not stopped at, so a short `↓3` can
+// still land after a long worktree name did not. The pull request is NOT on
+// this row — it has its own, prRowHL, because a chip here stole the width a
+// long branch needs.
 func gitRowHL(pane *PaneModel, w int, hl rowHighlight) string {
 	name := pane.GitBranch
 	if name == "" && pane.GitDetached {
@@ -1271,18 +1282,14 @@ func gitRowHL(pane *PaneModel, w int, hl rowHighlight) string {
 	budget := avail - nameMin
 
 	// Step 2: admit suffix elements in priority order. order is the visual
-	// position: worktree, ↑, ↓, chip, git stale.
+	// position: worktree, ↑, ↓, git stale.
 	type suffixElem struct {
 		text  string
 		order int
 	}
 	var candidates []suffixElem
-	chip := prChip(pane)
-	if chip != "" {
-		candidates = append(candidates, suffixElem{" " + chip, 3})
-	}
 	if pane.GitStale {
-		candidates = append(candidates, suffixElem{" ~", 4})
+		candidates = append(candidates, suffixElem{" ~", 3})
 	}
 	if pane.GitWorktree {
 		// Sanitized HERE, before the width math measures it: the name comes
@@ -1306,7 +1313,6 @@ func gitRowHL(pane *PaneModel, w int, hl rowHighlight) string {
 		}
 	}
 	admitted := make([]suffixElem, 0, len(candidates))
-	chipShown := false
 	for _, c := range candidates {
 		cw := lipgloss.Width(c.text)
 		if cw > budget {
@@ -1314,77 +1320,76 @@ func gitRowHL(pane *PaneModel, w int, hl rowHighlight) string {
 		}
 		budget -= cw
 		admitted = append(admitted, c)
-		if c.order == 3 {
-			chipShown = true
-		}
 	}
 
 	// Step 3: render in visual order; the branch takes every cell left.
 	sort.SliceStable(admitted, func(i, j int) bool { return admitted[i].order < admitted[j].order })
-	var before, after strings.Builder // suffix text left and right of the chip
+	var suffix strings.Builder
 	for _, a := range admitted {
-		switch {
-		case a.order < 3:
-			before.WriteString(a.text)
-		case a.order > 3:
-			after.WriteString(a.text)
-		}
+		suffix.WriteString(a.text)
 	}
-	suffixW := lipgloss.Width(before.String()) + lipgloss.Width(after.String())
-	if chipShown {
-		suffixW += 1 + lipgloss.Width(chip)
-	}
-	name = elideMiddle(name, avail-suffixW)
+	name = elideMiddle(name, avail-lipgloss.Width(suffix.String()))
 
 	style := sidebarGitStyle
 	if pane.GitStale {
 		style = sidebarGitStaleStyle
 	}
-	left := prefix + name + before.String()
-	if !chipShown {
-		return hl.line(style).Render(padOrTrunc(left+after.String(), w))
-	}
-	if hl != rowHighlightNone {
-		// A highlighted row is ONE style (rowHighlight.line): the chip gives
-		// up its color while the pointer is on the row, like every other
-		// sidebar segment.
-		return hl.line(style).Render(padOrTrunc(left+" "+chip+after.String(), w))
-	}
-	// Pad on PLAIN text, then color the chip alone — a second Render inside
-	// one styled string closes the outer color at the first inner segment.
-	pad := w - lipgloss.Width(left) - 1 - lipgloss.Width(chip) - lipgloss.Width(after.String())
-	tail := after.String()
-	if pad > 0 {
-		tail += strings.Repeat(" ", pad)
-	}
-	return style.Render(left+" ") + prChipStyle(pane.PRStatus).Render(chip) + style.Render(tail)
+	return hl.line(style).Render(padOrTrunc(prefix+name+suffix.String(), w))
 }
 
-// prChip is the pull request token for a pane's git row: "" when no PR is
-// known, else `#N` plus ONE optional indicator cell — `…` while a check is
-// still running, `~` when the daemon's last gh run did not answer. Stale wins:
-// a stale "running" says "it was running when GitHub last answered", which is
-// what the `~` already says.
-func prChip(p *PaneModel) string {
-	if p.PRNumber <= 0 {
+// prRow renders a pane's pull request beneath its git row: the number and
+// the status as a word, in the status color, like `    #278 approved`. Empty
+// when no PR is known. A trailing ` ~` says the daemon's last gh run did not
+// answer and the number may be old — the same mark the git row uses for a
+// branch that could not be re-probed. An unknown status name renders as open,
+// word and color both: a newer daemon must not blank an older client's row
+// or paint it a color it never chose.
+//
+// The indent lines the `#` up with the branch text (after `  ⎇ `). The number
+// is kept whole wherever the row is at least wide enough for it; the status
+// word gives way first. Below that the row is cut like any other.
+func prRow(pane *PaneModel, w int) string {
+	return prRowHL(pane, w, rowHighlightNone)
+}
+
+// prRowHL is prRow with a row highlight: one style for the whole line, so
+// the highlight is that style, text darkened, on hl's background.
+func prRowHL(pane *PaneModel, w int, hl rowHighlight) string {
+	if pane.PRNumber <= 0 {
 		return ""
 	}
-	tok := "#" + strconv.Itoa(p.PRNumber)
-	switch {
-	case p.PRStale:
-		tok += "~"
-	case p.PRStatus == "running":
-		tok += "…"
+	const indent = "    "
+	status := prStatusName(pane.PRStatus)
+	num := "#" + strconv.Itoa(pane.PRNumber)
+	suffix := " " + status
+	if pane.PRStale {
+		suffix += " ~"
 	}
-	return tok
+	avail := w - lipgloss.Width(indent)
+	if avail < 1 {
+		avail = 1
+	}
+	var text string
+	if nw := lipgloss.Width(num); nw <= avail {
+		text = num + truncateCells(suffix, avail-nw)
+	} else {
+		text = truncateCells(num, avail)
+	}
+	return hl.line(prRowStyle(status)).Render(padOrTrunc(indent+text, w))
 }
 
-// prChipStyle maps a status NAME to its color; an unknown name is open.
-func prChipStyle(status string) lipgloss.Style {
-	if s, ok := sidebarPRStyles[status]; ok {
-		return s
+// prStatusName maps a wire status to the closed set the row knows; anything
+// else is open.
+func prStatusName(status string) string {
+	if _, ok := sidebarPRStyles[status]; ok {
+		return status
 	}
-	return sidebarPRStyles["open"]
+	return "open"
+}
+
+// prRowStyle maps a status NAME to its color; an unknown name is open.
+func prRowStyle(status string) lipgloss.Style {
+	return sidebarPRStyles[prStatusName(status)]
 }
 
 func sidebarHeading(title string, w int) string {

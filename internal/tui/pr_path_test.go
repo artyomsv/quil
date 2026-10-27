@@ -46,7 +46,7 @@ func TestSyncPaneMeta_CopiesAndClearsThePRFields(t *testing.T) {
 	if pane.PRNumber != 277 || pane.PRStatus != "running" || !pane.PRStale {
 		t.Fatalf("PaneModel PR fields = %d %q stale=%v after a frame carrying them", pane.PRNumber, pane.PRStatus, pane.PRStale)
 	}
-	// Unconditional: the absent key is what clears a chip whose PR no
+	// Unconditional: the absent key is what removes a PR row that no
 	// longer applies (a NoPR answer, a branch change, the feature turned off).
 	syncPaneMeta(pane, &PaneInfo{ID: "p1"}, false, 0, false, false)
 	if pane.PRNumber != 0 || pane.PRStatus != "" || pane.PRStale {
@@ -69,23 +69,23 @@ func TestPRChip_AppearsFromAFrameAndLeavesWhenTheKeysDo(t *testing.T) {
 	if pane == nil {
 		t.Fatal("pane p1 not built from the frame")
 	}
-	if row := gitRow(pane, defaultSidebarWidth); !strings.Contains(row, "#277~") {
-		t.Fatalf("git row %q lacks the stale chip #277~ after a frame carrying it", row)
+	if row := stripANSI(prRow(pane, defaultSidebarWidth)); !strings.Contains(row, "#277 approved ~") {
+		t.Fatalf("PR row %q lacks the stale \"#277 approved ~\" after a frame carrying it", row)
 	}
 
 	m.applyWorkspaceState(prFrame(t, map[string]any{"git_branch": "feat/x"}), "")
 	pane = m.findPane("p1")
-	if row := gitRow(pane, defaultSidebarWidth); strings.Contains(row, "#") {
-		t.Fatalf("git row %q still shows a chip after a frame without the PR keys", row)
+	if row := prRow(pane, defaultSidebarWidth); row != "" {
+		t.Fatalf("PR row %q still shown after a frame without the PR keys", row)
 	}
 
 	m.applyWorkspaceState(prFrame(t, map[string]any{"git_branch": "feat/x", "pr_number": 9, "pr_status": "no-such-status"}), "")
 	pane = m.findPane("p1")
-	row := gitRow(pane, defaultSidebarWidth)
-	if !strings.Contains(row, "#9") {
-		t.Fatalf("git row %q dropped a chip whose status name is unknown; it must render as open", row)
+	row := prRow(pane, defaultSidebarWidth)
+	if !strings.Contains(stripANSI(row), "#9 open") {
+		t.Fatalf("PR row %q: an unknown status name must render as open", stripANSI(row))
 	}
-	if want := prChipStyle("open").Render("#9"); !strings.Contains(row, want) && styleSGR(t, prChipStyle("open")) != "" {
-		t.Fatalf("git row %q renders an unknown status in something other than open's style", row)
+	if sgr := styleSGR(t, prRowStyle("open")); sgr != "" && !strings.Contains(row, sgr) {
+		t.Fatalf("PR row %q renders an unknown status in something other than open's style", row)
 	}
 }

@@ -173,6 +173,9 @@ const sbxSessionRecordMax = 4096
 // its transcript sidecar) into sessions/. Every read goes through os.Root
 // over the tree.
 func (d *Daemon) forwardSbxHookFiles() {
+	if d.spoolFwd == nil {
+		return // before Start
+	}
 	quilDir := config.QuilDir()
 	for _, dir := range []string{"events", "history", "sessions"} {
 		if err := os.MkdirAll(filepath.Join(quilDir, dir), 0o700); err != nil {

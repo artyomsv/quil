@@ -58,7 +58,9 @@ func TestSpawnPane_SbxClaudeGetsHooks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the settings file was not written: %v", err)
 	}
-	if !strings.Contains(string(body), claudehook.HookCommand(quild)) {
+	// JSON-escaped in the file, so the path and the subcommand are checked,
+	// not the exact shell spelling.
+	if !strings.Contains(string(body), quild) || !strings.Contains(string(body), "claude-hook") {
 		t.Errorf("settings do not name the hook binary at its shared path:\n%s", body)
 	}
 	for _, want := range []string{"QUIL_HOOK_HOME=" + tree, "QUIL_PANE_ID=" + pane.ID} {
@@ -122,6 +124,7 @@ func TestForwardSbxHookFiles_MovesEventsHistoryAndTheSessionRecord(t *testing.T)
 		}
 	}
 	d.sbxHookState.panes = map[string]sbxHooks{pane.ID: {tree: tree}}
+	d.spoolFwd = newSpoolForwarder() // set by Start, which the fixture skips
 	write := func(rel, body string) {
 		t.Helper()
 		if err := os.WriteFile(filepath.Join(tree, rel), []byte(body), 0o600); err != nil {

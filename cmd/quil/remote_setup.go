@@ -245,20 +245,35 @@ func runRemoteSetup(dest string, opts setupOptions) error {
 		return err
 	}
 
-	// Stop the existing daemon before replacing its binary. Ordered before the
-	// push so the new quild is not left racing an old daemon that still owns
-	// every pane PTY.
+	// Copy and unpack FIRST, then stop, then swap. Every likely failure — a
+	// full disk or quota, a dropped link, a corrupted transfer — is in the
+	// copy, and the order used to be stop-then-copy: a failed upgrade stopped
+	// the daemon and killed what its panes were running for nothing (see
+	// remoteinstall.Stage). Now a failure here returns with the host exactly
+	// as it was.
+	fmt.Fprintf(opts.out(), "Copying quil to %s…\n", target.Dir)
+	staged, err := remoteinstall.Stage(ctx, runner, probe.Shell, target, src)
+	if err != nil {
+		return err
+	}
+
+	// Stop the existing daemon before the swap, so the new quild is not left
+	// racing an old daemon that still owns every pane PTY. Nothing starts the
+	// new one here; the next dial does.
 	var stopWarning string
 	if upgrade {
 		fmt.Fprintf(opts.out(), "Stopping the remote daemon…\n")
 		stopWarning, err = remoteinstall.StopRemoteDaemon(ctx, runner, probe.Shell, probe.ExistingPath)
 		if err != nil {
+			// The staging dir is left for the next install's stage step to
+			// clear; a second ssh call to remove it would fail the same way
+			// the stop just did.
 			return err
 		}
 	}
 
 	fmt.Fprintf(opts.out(), "Installing to %s…\n", target.Dir)
-	if err := remoteinstall.Push(ctx, runner, probe.Shell, target, src); err != nil {
+	if err := remoteinstall.Commit(ctx, runner, staged); err != nil {
 		return err
 	}
 

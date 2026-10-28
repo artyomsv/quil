@@ -498,6 +498,11 @@ func TestUpgradePrompt_FailedUpgradeReportsInsteadOfHanging(t *testing.T) {
 	if !strings.Contains(p.Offline.Detail, "quil remote setup") {
 		t.Errorf("a failed upgrade names no way out: %q", p.Offline.Detail)
 	}
+	// The reason must reach the screen, and lead the line: the pane renders
+	// one line and cuts its right end. It used to live only in quil.log.
+	if !strings.HasPrefix(p.Offline.Detail, "upgrade failed: scp: permission denied") {
+		t.Errorf("a failed upgrade hides its reason: %q", p.Offline.Detail)
+	}
 	if p.Offline.Kind.laddered() {
 		t.Error("a failed upgrade entered the reconnect ladder; the binary is still wrong")
 	}

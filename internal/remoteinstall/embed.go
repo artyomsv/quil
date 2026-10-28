@@ -10,14 +10,22 @@ import _ "embed"
 //go:embed scripts/remote-probe.sh
 var probeScript string
 
-// installScript installs quil from a release archive arriving on stdin.
+// stageScript receives a release archive on stdin, checks it, and unpacks it
+// into a staging directory inside the install directory, touching nothing the
+// host runs.
 //
 // Delivered as an ARGUMENT to `sh -c`, not on stdin — the archive is there.
 // That is why this one has to be quoted into the command string while the probe
-// does not; see InstallCommand.
+// does not; see StageCommand.
 //
-//go:embed scripts/remote-install.sh
-var installScript string
+//go:embed scripts/remote-stage.sh
+var stageScript string
+
+// commitScript moves the staged binaries into place. It runs after the old
+// daemon has been stopped; see Stage for why the two are separate.
+//
+//go:embed scripts/remote-commit.sh
+var commitScript string
 
 // windowsProbeScript reports a Windows remote's platform and any existing
 // install, run via EncodePowerShell rather than sent as-is: a Windows default

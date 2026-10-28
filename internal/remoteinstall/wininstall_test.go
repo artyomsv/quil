@@ -287,7 +287,17 @@ func winPrepareOut(dir string) string {
 	return "__quil_prepare__\r\n" + stagingFor(dir) + "\r\n" + tarPath + "\r\n"
 }
 
-func TestPushWindows_ThreeStepsInOrder(t *testing.T) {
+// stageAndCommit runs a whole install with nothing in between, which is what
+// these tests need: the daemon stop between the two steps is runRemoteSetup's.
+func stageAndCommit(r Runner, shell string, t Target, src Source) error {
+	s, err := Stage(context.Background(), r, shell, t, src)
+	if err != nil {
+		return err
+	}
+	return Commit(context.Background(), r, s)
+}
+
+func TestStageWindows_ThreeStepsInOrder(t *testing.T) {
 	tgt := Target{OS: "windows", Dir: `C:\Users\Jürgen Müller\AppData\Local\Programs\quil`}
 	staging := stagingFor(tgt.Dir)
 	r := &seqRunner{t: t, steps: []step{
@@ -296,8 +306,8 @@ func TestPushWindows_ThreeStepsInOrder(t *testing.T) {
 		{prefix: powershellPrefix, stdout: "__quil_install__\r\n" + tgt.Dir + `\quil.exe` + "\r\n"},
 	}}
 	src := winSource()
-	if err := Push(context.Background(), r, ShellCmd, tgt, src); err != nil {
-		t.Fatalf("Push: %v", err)
+	if err := stageAndCommit(r, ShellCmd, tgt, src); err != nil {
+		t.Fatalf("stageAndCommit: %v", err)
 	}
 	if len(r.ran) != 3 {
 		t.Fatalf("ran %d commands, want 3", len(r.ran))
@@ -317,12 +327,12 @@ func TestPushWindows_ThreeStepsInOrder(t *testing.T) {
 	}
 }
 
-func TestPushWindows_PrepareFails_StopsBeforeCopy(t *testing.T) {
+func TestStageWindows_PrepareFails_StopsBeforeCopy(t *testing.T) {
 	tgt := Target{OS: "windows", Dir: `C:\q`}
 	r := &seqRunner{t: t, steps: []step{
 		{prefix: powershellPrefix, code: 4, stderr: "this Windows has no tar.exe; Windows 10 version 1803 or later is required"},
 	}}
-	err := Push(context.Background(), r, ShellCmd, tgt, winSource())
+	err := stageAndCommit(r, ShellCmd, tgt, winSource())
 	if err == nil || !strings.Contains(err.Error(), "prepare") || !strings.Contains(err.Error(), "no tar.exe") {
 		t.Errorf("err = %v", err)
 	}
@@ -332,18 +342,18 @@ func TestPushWindows_PrepareFails_StopsBeforeCopy(t *testing.T) {
 
 	// Exit 0 with a report that does not parse stops just the same.
 	r = &seqRunner{t: t, steps: []step{{prefix: powershellPrefix, stdout: "__quil_prepare__\nC:\\elsewhere\n" + tarPath + "\n"}}}
-	if err := Push(context.Background(), r, ShellCmd, tgt, winSource()); err == nil || len(r.ran) != 1 {
+	if err := stageAndCommit(r, ShellCmd, tgt, winSource()); err == nil || len(r.ran) != 1 {
 		t.Errorf("unparseable prepare: err %v, ran %d", err, len(r.ran))
 	}
 }
 
-func TestPushWindows_CopyFails_StopsBeforeFinalize(t *testing.T) {
+func TestStageWindows_CopyFails_StopsBeforeFinalize(t *testing.T) {
 	tgt := Target{OS: "windows", Dir: `C:\q`}
 	r := &seqRunner{t: t, steps: []step{
 		{prefix: powershellPrefix, stdout: winPrepareOut(tgt.Dir)},
 		{prefix: `"` + tarPath + `"`, code: 1, stderr: "tar.exe: Error opening archive: Unrecognized archive format"},
 	}}
-	err := Push(context.Background(), r, ShellCmd, tgt, winSource())
+	err := stageAndCommit(r, ShellCmd, tgt, winSource())
 	if err == nil || !strings.Contains(err.Error(), "copy the archive into") || !strings.Contains(err.Error(), "Unrecognized") {
 		t.Errorf("err = %v", err)
 	}
@@ -352,14 +362,14 @@ func TestPushWindows_CopyFails_StopsBeforeFinalize(t *testing.T) {
 	}
 }
 
-func TestPushWindows_ChecksumFailure_Reported(t *testing.T) {
+func TestStageWindows_ChecksumFailure_Reported(t *testing.T) {
 	tgt := Target{OS: "windows", Dir: `C:\q`}
 	r := &seqRunner{t: t, steps: []step{
 		{prefix: powershellPrefix, stdout: winPrepareOut(tgt.Dir)},
 		{prefix: `"` + tarPath + `"`},
 		{prefix: powershellPrefix, code: 3, stderr: "checksum mismatch: quil.exe"},
 	}}
-	err := Push(context.Background(), r, ShellCmd, tgt, winSource())
+	err := stageAndCommit(r, ShellCmd, tgt, winSource())
 	if err == nil || !strings.Contains(err.Error(), "checksum mismatch: quil.exe") || !strings.Contains(err.Error(), `install into C:\q`) {
 		t.Errorf("err = %v", err)
 	}

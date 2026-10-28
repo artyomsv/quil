@@ -164,68 +164,138 @@ func StopRemoteDaemon(ctx context.Context, r Runner, shell, binaryPath string) (
 	return detail, nil
 }
 
-// Push streams the archive into the remote install script. shell is the
-// host's default ssh shell (Probe.Shell); only the Windows install quotes a
-// command for it, since a POSIX host always runs the installer under `sh -c`.
-func Push(ctx context.Context, r Runner, shell string, t Target, src Source) error {
-	if t.OS == "windows" {
-		return pushWindows(ctx, r, shell, t, src)
-	}
-	stdout := &capWriter{limit: maxRemoteOutput}
-	stderr := &capWriter{limit: maxRemoteOutput}
-	code, err := r.Run(ctx, InstallCommand(t, src), bytes.NewReader(src.Archive), stdout, stderr)
-	if err != nil {
-		return fmt.Errorf("run remote installer: %w", err)
-	}
-	if code != 0 {
-		detail := firstLine(stderr.String())
-		if detail == "" {
-			detail = firstLine(stdout.String())
-		}
-		if detail == "" {
-			detail = fmt.Sprintf("installer exited %d with no output", code)
-		}
-		return fmt.Errorf("install into %s failed: %s", t.Dir, detail)
-	}
-	return nil
+// Staged is an archive that has reached the host and been unpacked into a
+// staging directory inside the install directory, but not installed.
+//
+// Opaque on purpose: the only thing a caller can do with one is hand it to
+// Commit, so the staging path the host reported cannot be used for anything
+// else.
+type Staged struct {
+	target  Target
+	src     Source // the Windows finalize step re-verifies every file's hash
+	staging string
 }
 
-// pushWindows installs on a Windows host in the three steps wincommand.go
-// describes: prepare, extract with the host's tar.exe, finalize.
-func pushWindows(ctx context.Context, r Runner, shell string, t Target, src Source) error {
+// Stage sends the archive to the host and unpacks it next to the install,
+// changing nothing the host runs. shell is the host's default ssh shell
+// (Probe.Shell); only the Windows steps quote a command for it, since a POSIX
+// host always runs the scripts under `sh -c`.
+//
+// The install is split in two because the remote daemon must be stopped in
+// between, and the order used to be stop, then write. Every likely failure is
+// in the WRITE — a full disk or quota, a dropped link, a corrupted transfer —
+// so a failed upgrade stopped the daemon, killed what its panes were running,
+// and then installed nothing. Measured: a host whose /tmp hit its per-user
+// quota had its daemon stopped three times by three retries, each ending in
+// "Disk quota exceeded". Staging first moves all of those failures to before
+// the stop, where they cost nothing.
+func Stage(ctx context.Context, r Runner, shell string, t Target, src Source) (Staged, error) {
+	if t.OS == "windows" {
+		return stageWindows(ctx, r, shell, t, src)
+	}
+	out, err := runStep(ctx, r, StageCommand(t, src), bytes.NewReader(src.Archive), "copy the archive into "+t.Dir)
+	if err != nil {
+		return Staged{}, err
+	}
+	staging, err := parseStageOutput(t, out)
+	if err != nil {
+		return Staged{}, fmt.Errorf("copy the archive into %s: %w", t.Dir, err)
+	}
+	return Staged{target: t, src: src, staging: staging}, nil
+}
+
+// Commit moves what Stage unpacked into place. Each binary is a rename within
+// one filesystem, so this is the step least able to fail — which is why it is
+// the one that runs after the daemon is stopped.
+func Commit(ctx context.Context, r Runner, s Staged) error {
+	if s.staging == "" {
+		return fmt.Errorf("nothing was staged for %s", s.target.Dir)
+	}
+	if s.target.OS == "windows" {
+		finalize, err := WindowsFinalizeCommand(s.target, s.staging, s.src)
+		if err != nil {
+			return err
+		}
+		_, err = runStep(ctx, r, finalize, nil, "install into "+s.target.Dir)
+		return err
+	}
+	_, err := runStep(ctx, r, CommitCommand(s.target, s.staging), nil, "install into "+s.target.Dir)
+	return err
+}
+
+// stageSentinel precedes the staging path in remote-stage.sh's output.
+const stageSentinel = "__quil_staged__"
+
+// posixStagingPrefix is the staging dir's name before mktemp's random suffix.
+// The same prefix the Windows install uses, so one name means one thing.
+const posixStagingPrefix = ".quil-staging-"
+
+// parseStageOutput returns the staging directory remote-stage.sh reported.
+//
+// The path is remote-reported and becomes an argument to a command that ends
+// in `rm -rf`, so it is checked rather than trusted: exactly t.Dir + "/" +
+// ".quil-staging-" + mktemp's alphanumeric suffix. The LAST sentinel wins, as
+// in the probe, so text an rc file prints first cannot shift the answer, and a
+// forged block printed before ours is overridden by ours.
+func parseStageOutput(t Target, out string) (string, error) {
+	lines := strings.Split(out, "\n")
+	start := -1
+	for i, l := range lines {
+		if strings.TrimSpace(l) == stageSentinel {
+			start = i + 1
+		}
+	}
+	if start < 0 || start >= len(lines) {
+		return "", fmt.Errorf("the host did not report a staging directory")
+	}
+	staging := strings.TrimRight(lines[start], "\r")
+	prefix := t.Dir + "/" + posixStagingPrefix
+	suffix, ok := strings.CutPrefix(staging, prefix)
+	if !ok || len(suffix) < 6 || !isAlnum(suffix) {
+		return "", fmt.Errorf("staging directory %q is not %s<random>", firstLine(staging), prefix)
+	}
+	return staging, nil
+}
+
+func isAlnum(s string) bool {
+	for _, c := range s {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9') {
+			return false
+		}
+	}
+	return true
+}
+
+// stageWindows runs the first two of the three steps wincommand.go describes:
+// prepare, then extract with the host's tar.exe. finalize is Commit's.
+func stageWindows(ctx context.Context, r Runner, shell string, t Target, src Source) (Staged, error) {
 	prepare, err := WindowsPrepareCommand(t)
 	if err != nil {
-		return err
+		return Staged{}, err
 	}
 	// Build the finalize command's hash table BEFORE anything runs, so a
 	// Source it would refuse cannot leave a staging dir behind on the host.
 	if _, err := hashTable(src.FileSHA256); err != nil {
-		return err
+		return Staged{}, err
 	}
 
 	out, err := runStep(ctx, r, prepare, nil, "prepare "+t.Dir)
 	if err != nil {
-		return err
+		return Staged{}, err
 	}
 	staging, tar, err := ParsePrepareOutput(t, out)
 	if err != nil {
-		return fmt.Errorf("prepare %s: %w", t.Dir, err)
+		return Staged{}, fmt.Errorf("prepare %s: %w", t.Dir, err)
 	}
 
 	extract, err := WindowsExtractCommand(shell, tar, staging)
 	if err != nil {
-		return err
+		return Staged{}, err
 	}
 	if _, err := runStep(ctx, r, extract, bytes.NewReader(src.Archive), "copy the archive into "+staging); err != nil {
-		return err
+		return Staged{}, err
 	}
-
-	finalize, err := WindowsFinalizeCommand(t, staging, src)
-	if err != nil {
-		return err
-	}
-	_, err = runStep(ctx, r, finalize, nil, "install into "+t.Dir)
-	return err
+	return Staged{target: t, src: src, staging: staging}, nil
 }
 
 // runStep runs one remote command and turns a non-zero exit into

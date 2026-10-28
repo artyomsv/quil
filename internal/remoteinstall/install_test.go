@@ -78,22 +78,111 @@ func TestRunProbe_RunnerErrorIsWrapped(t *testing.T) {
 	}
 }
 
-func TestInstallCommand_QuotesEveryInterpolatedValue(t *testing.T) {
-	cmd := InstallCommand(Target{Dir: "/home/o'brien/.local/bin"}, Source{SHA256: "abc123"})
-
-	if !strings.HasPrefix(cmd, "sh -c '") {
-		t.Errorf("script is not passed to sh -c: %q", cmd[:min(60, len(cmd))])
+func TestStageAndCommitCommands_QuoteEveryInterpolatedValue(t *testing.T) {
+	tgt := Target{Dir: "/home/o'brien/.local/bin"}
+	for name, cmd := range map[string]string{
+		"stage":  StageCommand(tgt, Source{SHA256: "abc123"}),
+		"commit": CommitCommand(tgt, "/home/o'brien/.local/bin/.quil-staging-abc123"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if !strings.HasPrefix(cmd, "sh -c '") {
+				t.Errorf("script is not passed to sh -c: %q", cmd[:min(60, len(cmd))])
+			}
+			if !strings.Contains(cmd, `'\''brien`) {
+				t.Error("target directory was not single-quote escaped")
+			}
+			// $0 must sit between the script and the arguments, or the target
+			// directory becomes $0 and the script reads its second argument as $1.
+			if !strings.Contains(cmd, " "+scriptArg0+" ") {
+				t.Errorf("missing $0 placeholder between script and arguments: %q", cmd)
+			}
+		})
 	}
-	if !strings.Contains(cmd, `'\''brien`) {
-		t.Error("target directory was not single-quote escaped")
-	}
-	if !strings.Contains(cmd, "'abc123'") {
+	if !strings.Contains(StageCommand(tgt, Source{SHA256: "abc123"}), "'abc123'") {
 		t.Error("hash was not quoted")
 	}
-	// $0 must sit between the script and the arguments, or the target
-	// directory becomes $0 and the script reads the hash as $1.
-	if !strings.Contains(cmd, " "+scriptArg0+" ") {
-		t.Errorf("missing $0 placeholder between script and arguments: %q", cmd)
+}
+
+// stagedOut is remote-stage.sh's success output for /opt/bin.
+const stagedOut = "__quil_staged__\n/opt/bin/.quil-staging-AbC123xyz0\n"
+
+// stageRunner answers the stage step with stagedOut and any later step with 0.
+type stageRunner struct {
+	fakeRunner
+}
+
+func (s *stageRunner) Run(ctx context.Context, command string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
+	if len(s.gotCommands) == 0 {
+		s.stdout = stagedOut
+	} else {
+		s.stdout = ""
+	}
+	return s.fakeRunner.Run(ctx, command, stdin, stdout, stderr)
+}
+
+func TestStage_SendsArchiveOnStdinAndCommitUsesTheStagedDir(t *testing.T) {
+	r := &stageRunner{}
+	src := Source{Archive: []byte("ARCHIVE-BYTES"), SHA256: "deadbeef"}
+	s, err := Stage(context.Background(), r, ShellPOSIX, Target{Dir: "/opt/bin"}, src)
+	if err != nil {
+		t.Fatalf("Stage error = %v", err)
+	}
+	if string(r.gotStdin) != "ARCHIVE-BYTES" {
+		t.Errorf("stdin = %q, want the archive bytes", r.gotStdin)
+	}
+	if err := Commit(context.Background(), r, s); err != nil {
+		t.Fatalf("Commit error = %v", err)
+	}
+	if len(r.gotCommands) != 2 {
+		t.Fatalf("ran %d commands, want stage and commit", len(r.gotCommands))
+	}
+	if !strings.Contains(r.gotCommands[1], "'/opt/bin/.quil-staging-AbC123xyz0'") {
+		t.Errorf("commit does not name the staged directory: %.200q", r.gotCommands[1])
+	}
+}
+
+// Commit runs a script ending in `rm -rf` on the path the stage step reported,
+// so that path is remote-controlled input and must be exactly the staging
+// shape: anything else is refused before a commit can be built from it.
+func TestParseStageOutput_AcceptsOnlyAStagingDirUnderTheTarget(t *testing.T) {
+	tgt := Target{Dir: "/opt/bin"}
+	good := "/opt/bin/.quil-staging-AbC123xyz0"
+	if got, err := parseStageOutput(tgt, "rc noise\n__quil_staged__\n"+good+"\n"); err != nil || got != good {
+		t.Errorf("parseStageOutput = %q, %v; want %q", got, err, good)
+	}
+	// CRLF from a chatty shell is tolerated, as in the probe.
+	if got, err := parseStageOutput(tgt, "__quil_staged__\r\n"+good+"\r\n"); err != nil || got != good {
+		t.Errorf("CRLF: parseStageOutput = %q, %v", got, err)
+	}
+	bad := map[string]string{
+		"no sentinel":       good + "\n",
+		"sentinel, no path": "__quil_staged__\n",
+		"outside target":    "__quil_staged__\n/tmp/.quil-staging-AbC123xyz0\n",
+		"the target itself": "__quil_staged__\n/opt/bin\n",
+		"traversal":         "__quil_staged__\n/opt/bin/.quil-staging-AbC/../../etc\n",
+		"short suffix":      "__quil_staged__\n/opt/bin/.quil-staging-ab\n",
+		"empty suffix":      "__quil_staged__\n/opt/bin/.quil-staging-\n",
+		"space in suffix":   "__quil_staged__\n/opt/bin/.quil-staging-AbC12 3\n",
+		"forged last":       "__quil_staged__\n" + good + "\n__quil_staged__\n/etc/.quil-staging-AbC123\n",
+	}
+	for name, out := range bad {
+		t.Run(name, func(t *testing.T) {
+			if got, err := parseStageOutput(tgt, out); err == nil {
+				t.Errorf("accepted %q", got)
+			}
+		})
+	}
+}
+
+// Nothing staged means nothing to commit — a zero Staged must never become a
+// command that renames from an empty path.
+func TestCommit_RefusesAZeroStaged(t *testing.T) {
+	r := &fakeRunner{}
+	if err := Commit(context.Background(), r, Staged{}); err == nil {
+		t.Error("Commit accepted a zero Staged")
+	}
+	if len(r.gotCommands) != 0 {
+		t.Errorf("ran %q for nothing staged", r.gotCommands)
 	}
 }
 
@@ -110,21 +199,10 @@ func TestDaemonStopCommand_QuotesThePath(t *testing.T) {
 	}
 }
 
-func TestPush_SendsArchiveOnStdin(t *testing.T) {
-	r := &fakeRunner{}
-	src := Source{Archive: []byte("ARCHIVE-BYTES"), SHA256: "deadbeef"}
-	if err := Push(context.Background(), r, ShellPOSIX, Target{Dir: "/opt/bin"}, src); err != nil {
-		t.Fatalf("Push error = %v", err)
-	}
-	if string(r.gotStdin) != "ARCHIVE-BYTES" {
-		t.Errorf("stdin = %q, want the archive bytes", r.gotStdin)
-	}
-}
-
-func TestPush_ReportsRemoteFailure(t *testing.T) {
-	// Exit 2 is the install script's checksum-mismatch status.
+func TestStage_ReportsRemoteFailure(t *testing.T) {
+	// Exit 2 is the stage script's checksum-mismatch status.
 	r := &fakeRunner{exitCode: 2, stderr: "quil-install: archive checksum mismatch (transfer corrupted)"}
-	err := Push(context.Background(), r, ShellPOSIX, Target{Dir: "/opt/bin"}, Source{SHA256: "x"})
+	_, err := Stage(context.Background(), r, ShellPOSIX, Target{Dir: "/opt/bin"}, Source{SHA256: "x"})
 	if err == nil {
 		t.Fatal("error = nil, want error")
 	}
@@ -135,9 +213,9 @@ func TestPush_ReportsRemoteFailure(t *testing.T) {
 
 // Remote output reaches the operator's terminal, so it must not be able to
 // carry escape sequences or unbounded text into an error line.
-func TestPush_SanitizesAndBoundsRemoteOutput(t *testing.T) {
+func TestStage_SanitizesAndBoundsRemoteOutput(t *testing.T) {
 	r := &fakeRunner{exitCode: 1, stderr: "\x1b]52;c;cGF3bmVk\x07evil\x1b[2J" + strings.Repeat("A", 5000)}
-	err := Push(context.Background(), r, ShellPOSIX, Target{Dir: "/opt/bin"}, Source{})
+	_, err := Stage(context.Background(), r, ShellPOSIX, Target{Dir: "/opt/bin"}, Source{})
 	if err == nil {
 		t.Fatal("error = nil, want error")
 	}
@@ -150,9 +228,9 @@ func TestPush_SanitizesAndBoundsRemoteOutput(t *testing.T) {
 	}
 }
 
-func TestPush_SilentNonZeroExitStillExplains(t *testing.T) {
+func TestStage_SilentNonZeroExitStillExplains(t *testing.T) {
 	r := &fakeRunner{exitCode: 3}
-	err := Push(context.Background(), r, ShellPOSIX, Target{Dir: "/opt/bin"}, Source{})
+	_, err := Stage(context.Background(), r, ShellPOSIX, Target{Dir: "/opt/bin"}, Source{})
 	if err == nil || !strings.Contains(err.Error(), "3") {
 		t.Errorf("error = %v, want it to name the exit status", err)
 	}

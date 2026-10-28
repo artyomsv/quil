@@ -159,7 +159,7 @@ func TestForgeOf(t *testing.T) {
 		{"https://git.sr.ht/~user/repo", ForgeOther},
 		{"https://gitea.example.com/user/repo.git", ForgeOther},
 		{"https://git.example.com/user/repo.git", ForgeUnknown}, // could be GHE under another name: ask gh
-		{"ssh://user@GitHub.COM:22/x/y", ForgeGitHub},            // host compare ignores case and port
+		{"ssh://user@GitHub.COM:22/x/y", ForgeGitHub},           // host compare ignores case and port
 		{"/srv/git/repo.git", ForgeUnknown},
 		{"", ForgeUnknown},
 	}

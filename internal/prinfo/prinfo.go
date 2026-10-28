@@ -25,6 +25,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os/exec"
 	"strings"
 	"time"
@@ -159,6 +160,26 @@ const (
 	ForgeOther
 )
 
+// errNoMatch is git config's "no key matched" (exit status 1), which for the
+// remote read means "this checkout has no remote" — an answer, not a failure.
+var errNoMatch = errors.New("git config: no matching key")
+
+// classifyGitErr maps git config's exit status 1 to errNoMatch and leaves
+// every other error (2 or more: an unreadable config; or no exit status at
+// all: the process could not start, the context expired) as the failure it
+// is. Read through the ExitCode method rather than the concrete
+// *exec.ExitError so tests need no real process.
+func classifyGitErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	var exit interface{ ExitCode() int }
+	if errors.As(err, &exit) && exit.ExitCode() == 1 {
+		return errNoMatch
+	}
+	return err
+}
+
 // runGit is the seam for the one git call this package makes (RemoteForge).
 // Same shape as gitinfo's: raw stdout, stderr discarded.
 var runGit = func(ctx context.Context, dir string, args ...string) (string, error) {
@@ -167,34 +188,43 @@ var runGit = func(ctx context.Context, dir string, args ...string) (string, erro
 	hideWindow(cmd)
 	cmd.WaitDelay = ghWaitDelay
 	out, err := cmd.Output()
-	return string(out), err
+	return string(out), classifyGitErr(err)
 }
 
-// RemoteForge classifies the checkout's remote with one git call, preferring
-// `origin` (what gh itself resolves against) and otherwise the first remote
-// listed. No remote, or no answer, is ForgeOther: gh has nothing to ask.
-func RemoteForge(ctx context.Context, dir string) Forge {
+// RemoteForge classifies the checkout's remotes with one git call and answers
+// for the SET, the way gh picks a repository: gh filters the remotes to the
+// hosts it supports and does not simply take origin, so a GitLab origin
+// beside a GitHub upstream is a checkout gh can answer for. Any GitHub remote
+// → ForgeGitHub; else any host this package cannot place → ForgeUnknown
+// (ask); else — every remote known unsupported, or no remote at all →
+// ForgeOther.
+//
+// ok is false when the read FAILED (a timeout, an unreadable config, git not
+// starting): that is no answer, and the caller must retry rather than cache
+// it, or a transient failure on the first tick becomes a permanent "not
+// GitHub" for the life of the cache entry.
+func RemoteForge(ctx context.Context, dir string) (forge Forge, ok bool) {
 	out, err := runGit(ctx, dir, "config", "--get-regexp", `^remote\..*\.url$`)
 	if err != nil {
-		return ForgeOther
+		if errors.Is(err, errNoMatch) {
+			return ForgeOther, true
+		}
+		return ForgeUnknown, false
 	}
-	first := ""
+	best := ForgeOther
 	for _, line := range strings.Split(out, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 2 {
 			continue
 		}
-		if fields[0] == "remote.origin.url" {
-			return ForgeOf(fields[1])
-		}
-		if first == "" {
-			first = fields[1]
+		switch ForgeOf(fields[1]) {
+		case ForgeGitHub:
+			return ForgeGitHub, true
+		case ForgeUnknown:
+			best = ForgeUnknown
 		}
 	}
-	if first == "" {
-		return ForgeOther
-	}
-	return ForgeOf(first)
+	return best, true
 }
 
 // ForgeOf classifies one remote URL by its host: https, ssh:// and the scp

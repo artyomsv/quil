@@ -36,8 +36,10 @@ type fakePR struct {
 	// is restoring (a data race CI caught on 2026-10-27).
 	abort chan struct{}
 	// forge is what prForgeFn answers for every dir (default: GitHub, so the
-	// tests above this seam's own need no remote); forgeCalls counts them.
+	// tests above this seam's own need no remote); forgeFail makes the read
+	// FAIL (ok=false) instead; forgeCalls counts the reads.
 	forge      prinfo.Forge
+	forgeFail  bool
 	forgeCalls int
 }
 
@@ -60,11 +62,11 @@ func installFakePR(t *testing.T, c *gitCache, f *fakePR, available bool) {
 		c.prWG.Wait()
 		prProbeFn, prAvailableFn, prCompletionHook, prForgeFn = origProbe, origAvail, origHook, origForge
 	})
-	prForgeFn = func(_ context.Context, _ string) prinfo.Forge {
+	prForgeFn = func(_ context.Context, _ string) (prinfo.Forge, bool) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		f.forgeCalls++
-		return f.forge
+		return f.forge, !f.forgeFail
 	}
 	prCompletionHook = func() { f.done <- struct{}{} }
 	prAvailableFn = func() bool {
@@ -830,5 +832,88 @@ func TestPRProbe_ForgeReadWaitsForAPermit(t *testing.T) {
 	f.mu.Unlock()
 	if n != 1 || f.count() != 0 {
 		t.Fatalf("after the pool drained: forge read %d times, gh %d times; want 1 and 0", n, f.count())
+	}
+}
+
+// A remote read that FAILS (a timeout on the first tick, git not starting)
+// is no answer: nothing is cached, gh is not run unchecked, and the next
+// tick reads again. Cached as "not GitHub" it cost the checkout its PR row
+// for the life of the entry.
+func TestPRProbe_FailedForgeReadIsRetriedNextTick(t *testing.T) {
+	c, _ := prFixture(t, "main")
+	f := &fakePR{forgeFail: true, answers: map[string]prinfo.Info{"main": {Number: 7}}}
+	installFakePR(t, c, f, true)
+	c.refresh(context.Background(), []string{"/repo"})
+	c.prWG.Wait()
+	if f.count() != 0 {
+		t.Fatal("gh ran although the remote read failed")
+	}
+	f.mu.Lock()
+	f.forgeFail = false
+	f.mu.Unlock()
+	c.refresh(context.Background(), []string{"/repo"})
+	c.prWG.Wait()
+	f.mu.Lock()
+	reads := f.forgeCalls
+	f.mu.Unlock()
+	if reads != 2 {
+		t.Fatalf("remote read %d times, want 2 (the failure retried)", reads)
+	}
+	if info, known, _ := c.lookupPR("/repo"); !known || info.Number != 7 {
+		t.Fatalf("after the retry succeeded: %+v known=%v, want 7", info, known)
+	}
+}
+
+// The classification is re-read on a bounded interval, independently of
+// branch changes: a pane opened before its repository had a remote, or a
+// remote moved to another forge, must be followed eventually — in both
+// directions.
+func TestPRProbe_ForgeIsReReadAfterTheInterval(t *testing.T) {
+	c, _ := prFixture(t, "main")
+	f := &fakePR{forge: prinfo.ForgeOther, answers: map[string]prinfo.Info{"main": {Number: 7}}}
+	installFakePR(t, c, f, true)
+	c.refresh(context.Background(), []string{"/repo"})
+	c.prWG.Wait()
+	if f.count() != 0 {
+		t.Fatal("setup: gh ran for a non-GitHub remote")
+	}
+
+	// A GitHub origin is added. Within the interval nothing changes...
+	f.mu.Lock()
+	f.forge = prinfo.ForgeGitHub
+	f.mu.Unlock()
+	c.refresh(context.Background(), []string{"/repo"})
+	c.prWG.Wait()
+	if f.count() != 0 {
+		t.Fatal("the classification was re-read inside its interval")
+	}
+	// ...and once it elapses the gate follows the remote.
+	e := c.entry(t, "/repo/.git")
+	c.mu.Lock()
+	e.forgeAt = time.Now().Add(-forgeRefreshInterval - time.Second)
+	c.mu.Unlock()
+	c.refresh(context.Background(), []string{"/repo"})
+	c.prWG.Wait()
+	if info, known, _ := c.lookupPR("/repo"); !known || info.Number != 7 {
+		t.Fatalf("after the remote became GitHub: %+v known=%v, want 7", info, known)
+	}
+
+	// The reverse: the remote moves to GitLab. gh stops, and the stale PR
+	// row is cleared rather than kept forever.
+	f.mu.Lock()
+	f.forge = prinfo.ForgeOther
+	f.mu.Unlock()
+	c.mu.Lock()
+	e.forgeAt = time.Now().Add(-forgeRefreshInterval - time.Second)
+	c.mu.Unlock()
+	c.setPRAt("/repo/.git", time.Time{})
+	before := f.count()
+	c.refresh(context.Background(), []string{"/repo"})
+	c.prWG.Wait()
+	if f.count() != before {
+		t.Fatal("gh ran after the remote moved off GitHub")
+	}
+	if _, known, _ := c.lookupPR("/repo"); known {
+		t.Fatal("a PR row survived the remote moving off GitHub")
 	}
 }

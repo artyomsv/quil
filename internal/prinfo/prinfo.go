@@ -25,6 +25,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os/exec"
 	"strings"
 	"time"
@@ -139,6 +140,134 @@ func Probe(ctx context.Context, dir, branch string) (Info, Result) {
 		return Info{}, Unknown
 	}
 	return Info{Number: v.Number, Status: Derive(v)}, Answer
+}
+
+// Forge is what a checkout's remote host is, as far as this package cares:
+// whether gh can answer for it at all.
+type Forge int
+
+const (
+	// ForgeUnknown is a host this package cannot place — a self-hosted
+	// GitHub Enterprise under a name without "github" in it looks exactly
+	// like any other git server. gh is asked; its answer settles it.
+	ForgeUnknown Forge = iota
+	// ForgeGitHub is github.com or a host named for GitHub.
+	ForgeGitHub
+	// ForgeOther is a host known NOT to be GitHub (GitLab, Bitbucket,
+	// Codeberg, Azure DevOps, sourcehut, Gitea), or no remote at all. gh is
+	// never run for it: every call would fail, and a merge request is not a
+	// pull request this package knows how to read.
+	ForgeOther
+)
+
+// errNoMatch is git config's "no key matched" (exit status 1), which for the
+// remote read means "this checkout has no remote" — an answer, not a failure.
+var errNoMatch = errors.New("git config: no matching key")
+
+// classifyGitErr maps git config's exit status 1 to errNoMatch and leaves
+// every other error (2 or more: an unreadable config; or no exit status at
+// all: the process could not start, the context expired) as the failure it
+// is. Read through the ExitCode method rather than the concrete
+// *exec.ExitError so tests need no real process.
+func classifyGitErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	var exit interface{ ExitCode() int }
+	if errors.As(err, &exit) && exit.ExitCode() == 1 {
+		return errNoMatch
+	}
+	return err
+}
+
+// runGit is the seam for the one git call this package makes (RemoteForge).
+// Same shape as gitinfo's: raw stdout, stderr discarded.
+var runGit = func(ctx context.Context, dir string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	hideWindow(cmd)
+	cmd.WaitDelay = ghWaitDelay
+	out, err := cmd.Output()
+	return string(out), classifyGitErr(err)
+}
+
+// RemoteForge classifies the checkout's remotes with one git call and answers
+// for the SET, the way gh picks a repository: gh filters the remotes to the
+// hosts it supports and does not simply take origin, so a GitLab origin
+// beside a GitHub upstream is a checkout gh can answer for. Any GitHub remote
+// → ForgeGitHub; else any host this package cannot place → ForgeUnknown
+// (ask); else — every remote known unsupported, or no remote at all →
+// ForgeOther.
+//
+// ok is false when the read FAILED (a timeout, an unreadable config, git not
+// starting): that is no answer, and the caller must retry rather than cache
+// it, or a transient failure on the first tick becomes a permanent "not
+// GitHub" for the life of the cache entry.
+func RemoteForge(ctx context.Context, dir string) (forge Forge, ok bool) {
+	out, err := runGit(ctx, dir, "config", "--get-regexp", `^remote\..*\.url$`)
+	if err != nil {
+		if errors.Is(err, errNoMatch) {
+			return ForgeOther, true
+		}
+		return ForgeUnknown, false
+	}
+	best := ForgeOther
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		switch ForgeOf(fields[1]) {
+		case ForgeGitHub:
+			return ForgeGitHub, true
+		case ForgeUnknown:
+			best = ForgeUnknown
+		}
+	}
+	return best, true
+}
+
+// ForgeOf classifies one remote URL by its host: https, ssh:// and the scp
+// form (git@host:path) are all read; a local path has no host and is
+// Unknown. The host compare ignores case and a port.
+func ForgeOf(url string) Forge {
+	host := strings.ToLower(remoteHost(url))
+	if host == "" {
+		return ForgeUnknown
+	}
+	switch {
+	case host == "github.com", strings.Contains(host, "github"):
+		return ForgeGitHub
+	case strings.Contains(host, "gitlab"), strings.Contains(host, "bitbucket"),
+		strings.Contains(host, "gitea"), strings.Contains(host, "codeberg"),
+		strings.HasSuffix(host, "dev.azure.com"), strings.HasSuffix(host, "visualstudio.com"),
+		host == "git.sr.ht":
+		return ForgeOther
+	}
+	return ForgeUnknown
+}
+
+// remoteHost pulls the host out of a remote URL, or "" when it has none.
+func remoteHost(url string) string {
+	rest := url
+	if i := strings.Index(rest, "://"); i >= 0 {
+		rest = rest[i+3:]
+	} else if i := strings.Index(rest, ":"); i >= 0 && !strings.Contains(rest[:i], "/") {
+		// scp form: [user@]host:path — the colon comes before any slash.
+		rest = rest[:i]
+	} else {
+		return "" // a local path
+	}
+	if i := strings.Index(rest, "/"); i >= 0 {
+		rest = rest[:i]
+	}
+	if i := strings.LastIndex(rest, "@"); i >= 0 {
+		rest = rest[i+1:]
+	}
+	if i := strings.Index(rest, ":"); i >= 0 {
+		rest = rest[:i] // port
+	}
+	return rest
 }
 
 func allDigits(s string) bool {

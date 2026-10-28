@@ -62,6 +62,12 @@ const (
 	// maxRootProbePermits exists for. The speculative network call yields;
 	// the user's own request gets the reserve.
 	maxPRProbePermits = maxBlockingFSCalls / 2
+
+	// forgeRefreshInterval bounds how long a checkout's remote classification
+	// is trusted. Remotes change — a pane opened before `git remote add`, a
+	// repository moved to another forge — and neither a branch change nor the
+	// PR cadence says so, so the one git call is simply repeated this often.
+	forgeRefreshInterval = 10 * time.Minute
 )
 
 // prBackoff is the wait before the next gh run after `failures` consecutive
@@ -125,6 +131,16 @@ type gitEntry struct {
 	prInFlightGen uint64
 	// prFailures counts consecutive Unknown results and drives prBackoff.
 	prFailures int
+	// forge is the checkout's remote host class, read with one git call and
+	// trusted for forgeRefreshInterval from forgeAt (forgeKnown): gh is never
+	// run for a remote known not to be GitHub, where every call failed and
+	// the backoff was spent on nothing. A failed read stores nothing and is
+	// retried next tick. A generation change does not re-read it — a remote
+	// does not change with the branch — the interval and a swept-and-
+	// recreated entry do.
+	forge      prinfo.Forge
+	forgeKnown bool
+	forgeAt    time.Time
 }
 
 // gitCache maps a pane CWD to its checkout, and a checkout to its state.
@@ -191,6 +207,7 @@ func newGitCache() *gitCache {
 var (
 	prProbeFn     = prinfo.Probe
 	prAvailableFn = prinfo.Available
+	prForgeFn     = prinfo.RemoteForge
 )
 
 // lookupPR returns a CWD's pull request for the broadcast: the Info, whether
@@ -515,6 +532,9 @@ func (c *gitCache) prTick(ctx context.Context, now time.Time, dirs []string) {
 			// The user without gh sees today's row, not a `~`.
 			continue
 		}
+		if !c.forgeKnownFor(ctx, now, dir, e, probeDir) {
+			continue // no permit or no answer this tick, or a remote gh cannot answer for
+		}
 		if !claimBlockingFSCallUpTo(maxPRProbePermits) {
 			c.markPRStale(dir)
 			continue
@@ -582,6 +602,46 @@ func (c *gitCache) runPRProbe(ctx context.Context, dir string, e *gitEntry, gen 
 	if changed && ctx.Err() == nil && c.onPRChange != nil {
 		c.onPRChange()
 	}
+}
+
+// forgeKnownFor reports whether gh may be asked about this checkout at all,
+// reading the remote when the entry has no classification or the one it has
+// is older than forgeRefreshInterval. Called with c.mu NOT held. Returns
+// false when the remote is a forge gh cannot answer for (nothing is probed,
+// nothing is marked — and a PR row a previous classification left behind is
+// cleared), when the read FAILED (no answer: nothing cached, retried next
+// tick), or when the read could not get a permit this tick (it is a git call
+// like any other). In every false case the gate is never skipped, so gh
+// never runs unchecked.
+func (c *gitCache) forgeKnownFor(ctx context.Context, now time.Time, dir string, e *gitEntry, probeDir string) bool {
+	c.mu.Lock()
+	fresh := e.forgeKnown && now.Sub(e.forgeAt) < forgeRefreshInterval
+	forge := e.forge
+	c.mu.Unlock()
+	if fresh {
+		return forge != prinfo.ForgeOther
+	}
+	if !claimBlockingFSCallUpTo(maxPRProbePermits) {
+		return false
+	}
+	fctx, cancel := context.WithTimeout(ctx, gitProbeTimeout)
+	forge, ok := prForgeFn(fctx, probeDir)
+	cancel()
+	releaseBlockingFSCall()
+	if !ok {
+		return false
+	}
+	c.mu.Lock()
+	if c.byDir[dir] == e {
+		e.forge, e.forgeKnown, e.forgeAt = forge, true, now
+		if forge == prinfo.ForgeOther {
+			// The remote moved off GitHub (or never was): whatever gh last
+			// said about this checkout no longer describes its remote.
+			e.pr, e.prKnown, e.prStale = prinfo.Info{}, false, false
+		}
+	}
+	c.mu.Unlock()
+	return forge != prinfo.ForgeOther
 }
 
 // ghAvailable answers prAvailableFn, re-asked at most once per

@@ -1087,9 +1087,29 @@ branch is asked at once rather than after the obsolete probe's full timeout.
 view` asks about whatever branch the checkout is on when gh runs, which with
 an async probe can differ from the branch the daemon recorded. (5)
 **Backoff on Unknown**: 2, 4, 8, 16, 30 min (`prBackoff`), reset by an Answer,
-a NoPR, a branch change or a restart — a non-GitHub remote or a gh that is not
-logged in would otherwise spawn gh every 2 minutes for the daemon's life. gh
-absent from PATH costs no permit and marks nothing. (6) **`onPRChange` runs
+a NoPR, a branch change or a restart — a gh that is not logged in would
+otherwise spawn gh every 2 minutes for the daemon's life. gh absent from PATH
+costs no permit and marks nothing. **A checkout with no GitHub remote is never
+asked at all** (`forgeKnownFor` → `prinfo.RemoteForge`, one `git config
+--get-regexp` under the same permit ceiling). The answer is for the SET of
+remotes, the way gh picks a repository — gh filters remotes to the hosts it
+supports and does not take `origin` (PR #282 review, reproduced with a GitLab
+origin beside a GitHub upstream): any GitHub remote → `ForgeGitHub`, probed;
+else any host the classifier cannot place → `ForgeUnknown` (a GitHub
+Enterprise under a name without "github" in it looks like any git server),
+asked, gh's answer settles it; else — GitLab, Bitbucket, Codeberg, Azure
+DevOps, Gitea, sourcehut only, or no remote — `ForgeOther`, no probe, no row,
+no stale mark. Three guards from that review: a read that FAILED (`ok ==
+false`: a timeout, an unreadable config, git exit ≥ 2 — exit 1 is "no key
+matched", i.e. no remote, mapped to `errNoMatch`) caches nothing and is
+retried next tick, never stored as "not GitHub"; the classification is
+re-read every `forgeRefreshInterval` (10 min), independent of branch changes,
+so a pane opened before `git remote add`, or a remote moved to another forge,
+is followed in both directions, and a flip to Other clears the PR row it
+leaves behind; the read is gated on a permit like every git call and is never
+skipped — a refused permit waits for the next tick rather than letting gh run
+unchecked. Adding GitLab (`glab mr view --output json`) later is an adapter
+behind the same `prinfo.Probe` seam keyed on the forge. (6) **`onPRChange` runs
 OUTSIDE `c.mu`** and the completion decides "visible change" itself by
 comparing the entry's tuple before/after its write — `gitFingerprint` takes
 the same mutex through `lookup`. On the wire `pr_status`/`pr_stale` ride only

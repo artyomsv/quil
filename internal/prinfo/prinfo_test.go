@@ -3,6 +3,7 @@ package prinfo
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -135,6 +136,109 @@ func TestProbe_AllDigitBranchNeverRunsGh(t *testing.T) {
 	calls := fakeGh(t, nil)
 	if _, res := Probe(context.Background(), "/repo", "1234"); res != Unknown || len(*calls) != 0 {
 		t.Fatalf("all-digit branch: res=%v calls=%v, want Unknown and no gh run", res, *calls)
+	}
+}
+
+func TestForgeOf(t *testing.T) {
+	cases := []struct {
+		url  string
+		want Forge
+	}{
+		{"https://github.com/artyomsv/quil.git", ForgeGitHub},
+		{"git@github.com:artyomsv/quil.git", ForgeGitHub},
+		{"ssh://git@github.com/artyomsv/quil.git", ForgeGitHub},
+		{"https://github.corp.example/org/repo", ForgeGitHub}, // GitHub Enterprise, named
+		{"https://gitlab.com/group/repo.git", ForgeOther},
+		{"git@gitlab.example.org:group/repo.git", ForgeOther},
+		{"https://bitbucket.org/team/repo.git", ForgeOther},
+		{"git@bitbucket.org:team/repo.git", ForgeOther},
+		{"https://codeberg.org/user/repo", ForgeOther},
+		{"https://dev.azure.com/org/project/_git/repo", ForgeOther},
+		{"git@ssh.dev.azure.com:v3/org/project/repo", ForgeOther},
+		{"https://org.visualstudio.com/project/_git/repo", ForgeOther},
+		{"https://git.sr.ht/~user/repo", ForgeOther},
+		{"https://gitea.example.com/user/repo.git", ForgeOther},
+		{"https://git.example.com/user/repo.git", ForgeUnknown}, // could be GHE under another name: ask gh
+		{"ssh://user@GitHub.COM:22/x/y", ForgeGitHub},           // host compare ignores case and port
+		{"/srv/git/repo.git", ForgeUnknown},
+		{"", ForgeUnknown},
+	}
+	for _, tc := range cases {
+		if got := ForgeOf(tc.url); got != tc.want {
+			t.Errorf("ForgeOf(%q) = %v, want %v", tc.url, got, tc.want)
+		}
+	}
+}
+
+// RemoteForge reads EVERY remote with one git call and answers for the set,
+// the way gh itself picks a repository: any GitHub remote means gh can
+// answer (a GitLab origin beside a GitHub upstream is the reviewed case —
+// gh filters the remotes to the hosts it supports, it does not take
+// origin), a host it cannot place means ask, and only a set with no usable
+// remote — or no remote at all — is Other. A read that FAILED is not an
+// answer: ok is false and the caller retries, so a timeout on the first
+// tick cannot become a permanent "not GitHub".
+func TestRemoteForge(t *testing.T) {
+	const argRemotes = "config --get-regexp ^remote\\..*\\.url$"
+	cases := []struct {
+		name   string
+		stdout string
+		err    error
+		want   Forge
+		wantOK bool
+	}{
+		{"origin github", "remote.origin.url git@github.com:a/b.git\n", nil, ForgeGitHub, true},
+		{"gitlab origin, github upstream: gh can still answer", "remote.origin.url https://gitlab.com/a/b.git\nremote.upstream.url https://github.com/a/b.git\n", nil, ForgeGitHub, true},
+		{"only bitbucket", "remote.fork.url https://bitbucket.org/a/b.git\n", nil, ForgeOther, true},
+		{"gitlab plus an unplaceable host: ask", "remote.origin.url https://gitlab.com/a/b.git\nremote.mirror.url https://git.example.com/a/b.git\n", nil, ForgeUnknown, true},
+		{"no remotes (git: no match)", "", errNoMatch, ForgeOther, true},
+		{"empty output is no remotes too", "", nil, ForgeOther, true},
+		{"unknown host asks gh", "remote.origin.url https://git.example.com/a/b.git\n", nil, ForgeUnknown, true},
+		{"a failed read is no answer", "", errors.New("context deadline exceeded"), ForgeUnknown, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			orig := runGit
+			t.Cleanup(func() { runGit = orig })
+			var calls []string
+			runGit = func(_ context.Context, _ string, args ...string) (string, error) {
+				calls = append(calls, strings.Join(args, " "))
+				return tc.stdout, tc.err
+			}
+			got, ok := RemoteForge(context.Background(), "/repo")
+			if got != tc.want || ok != tc.wantOK {
+				t.Errorf("RemoteForge = %v, %v; want %v, %v", got, ok, tc.want, tc.wantOK)
+			}
+			if len(calls) != 1 || calls[0] != argRemotes {
+				t.Errorf("git argv = %v, want exactly one %q", calls, argRemotes)
+			}
+		})
+	}
+}
+
+// fakeExit stands in for *exec.ExitError: classifyGitErr reads the exit code
+// through the ExitCode method both share, so no real process is needed.
+type fakeExit int
+
+func (e fakeExit) Error() string { return "exit status " + strconv.Itoa(int(e)) }
+func (e fakeExit) ExitCode() int { return int(e) }
+
+func exitErr(code int) error { return fakeExit(code) }
+
+// git config exits 1 for "no key matched" and 2 or more for a real error;
+// the production seam maps only the first to errNoMatch.
+func TestClassifyGitErr(t *testing.T) {
+	if err := classifyGitErr(nil); err != nil {
+		t.Fatalf("nil → %v", err)
+	}
+	if err := classifyGitErr(errors.New("plain")); errors.Is(err, errNoMatch) {
+		t.Fatal("a non-exit error read as no-match")
+	}
+	if err := classifyGitErr(exitErr(1)); !errors.Is(err, errNoMatch) {
+		t.Fatalf("exit 1 → %v, want errNoMatch", err)
+	}
+	if err := classifyGitErr(exitErr(2)); errors.Is(err, errNoMatch) {
+		t.Fatal("exit 2 read as no-match")
 	}
 }
 

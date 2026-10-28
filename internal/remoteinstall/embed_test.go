@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The scripts are go:embed'ed and executed by a POSIX shell. A CRLF checkout on
@@ -422,11 +423,20 @@ func TestStageScript_LeavesTheInstalledBinariesAlone(t *testing.T) {
 
 // An interrupted install leaves a full copy of the binaries behind; the next
 // stage clears it rather than letting copies pile up in the install directory.
-func TestStageScript_ClearsStaleStagingDirs(t *testing.T) {
+// Only an ABANDONED one, though: a young staging dir may be another client's
+// upgrade in flight, and is kept.
+func TestStageScript_ClearsOnlyAbandonedStagingDirs(t *testing.T) {
 	posixShell(t)
 	dir := t.TempDir()
 	stale := filepath.Join(dir, ".quil-staging-OLD123")
-	if err := os.MkdirAll(stale, 0o755); err != nil {
+	young := filepath.Join(dir, ".quil-staging-NEW123")
+	for _, d := range []string{stale, young} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(stale, old, old); err != nil {
 		t.Fatal(err)
 	}
 	archive, hash := buildArchive(t, map[string]string{"quil": "Q", "quild": "D"})
@@ -434,7 +444,50 @@ func TestStageScript_ClearsStaleStagingDirs(t *testing.T) {
 		t.Fatalf("stage exited %d: %s", code, out)
 	}
 	if _, err := os.Stat(stale); err == nil {
-		t.Error("a stale staging dir survived the next stage")
+		t.Error("an abandoned staging dir survived the next stage")
+	}
+	if _, err := os.Stat(young); err != nil {
+		t.Errorf("a young staging dir, possibly another upgrade in flight, was removed: %v", err)
+	}
+}
+
+// Two clients upgrading one host: A has staged and is stopping the daemon
+// when B's stage starts and fails. A's commit must still find its files —
+// otherwise A stopped the daemon for nothing, which is the failure staging
+// exists to prevent.
+func TestStageScript_ASecondStageDoesNotBreakAnUpgradeInFlight(t *testing.T) {
+	posixShell(t)
+	dir := t.TempDir()
+	archive, hash := buildArchive(t, map[string]string{"quil": "A-quil", "quild": "A-quild"})
+
+	codeA, stagingA, out := runStage(t, dir, archive, hash)
+	if codeA != 0 {
+		t.Fatalf("stage A exited %d: %s", codeA, out)
+	}
+	if codeB, _, outB := runStage(t, dir, archive, strings.Repeat("0", 64)); codeB == 0 {
+		t.Fatalf("stage B with a bad hash succeeded: %s", outB)
+	}
+	code, stdout, stderr := runScript(t, commitScript, nil, nil, dir, stagingA)
+	if code != 0 {
+		t.Fatalf("commit A failed after stage B ran: %d %s%s", code, stdout, stderr)
+	}
+	if got, _ := os.ReadFile(filepath.Join(dir, "quil")); string(got) != "A-quil" {
+		t.Errorf("quil = %q, want A's", got)
+	}
+}
+
+// The install directory came from the probe and may contain "..": that is a
+// legal name, not a traversal, and the whole install must go through. The
+// commit used to refuse it — after the daemon had been stopped.
+func TestInstallScript_AcceptsATargetWithConsecutiveDots(t *testing.T) {
+	posixShell(t)
+	dir := filepath.Join(t.TempDir(), "quil..backup", "bin")
+	archive, hash := buildArchive(t, map[string]string{"quil": "Q", "quild": "D"})
+	if code, out := runInstall(t, dir, archive, hash); code != 0 {
+		t.Fatalf("install into %s exited %d: %s", dir, code, out)
+	}
+	if got, _ := os.ReadFile(filepath.Join(dir, "quil")); string(got) != "Q" {
+		t.Errorf("quil = %q, want the new binary", got)
 	}
 }
 
@@ -457,26 +510,49 @@ func TestStageScript_RefusesAnArchiveMissingABinary(t *testing.T) {
 // The commit's last command is `rm -rf` on its second argument, so the script
 // refuses anything but a staging dir directly under the target, even though
 // the caller already checked the shape.
+//
+// Every bad path is a directory that HOLDS quil and quild, so the guard is the
+// only thing that can refuse it: the later "staged binaries are missing" check
+// would otherwise pass, and without the guard the commit would move the files
+// and delete the directory.
 func TestCommitScript_RefusesAPathOutsideTheTarget(t *testing.T) {
 	posixShell(t)
-	dir := t.TempDir()
-	victim := t.TempDir()
-	if err := os.WriteFile(filepath.Join(victim, "keep"), []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	for _, bad := range []string{
-		victim,
-		dir,
-		filepath.ToSlash(dir) + "/.quil-staging-",
-		filepath.ToSlash(dir) + "/.quil-staging-a/../..",
-		filepath.ToSlash(dir) + "/.quil-staging-a/sub",
-	} {
-		if code, _, _ := runScript(t, commitScript, nil, nil, filepath.ToSlash(dir), bad); code == 0 {
-			t.Errorf("commit accepted %q", bad)
+	base := t.TempDir()
+	dir := filepath.Join(base, "bin")
+	victim := filepath.Join(base, "victim")
+	nested := filepath.Join(dir, ".quil-staging-a", "sub")
+	populated := []string{dir, victim, nested, filepath.Join(dir, ".quil-staging-a")}
+	for _, d := range populated {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for _, n := range []string{"quil", "quild", "keep"} {
+			if err := os.WriteFile(filepath.Join(d, n), []byte(n), 0o755); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
-	if _, err := os.Stat(filepath.Join(victim, "keep")); err != nil {
-		t.Errorf("commit deleted outside the target: %v", err)
+
+	for name, bad := range map[string]string{
+		"outside the target": victim,
+		"the target itself":  dir,
+		"empty suffix":       dir + "/.quil-staging-",
+		"traversal":          dir + "/.quil-staging-a/../../victim",
+		"nested":             nested,
+	} {
+		t.Run(name, func(t *testing.T) {
+			code, _, stderr := runScript(t, commitScript, nil, nil, dir, bad)
+			if code != 2 || !strings.Contains(stderr, "is not a staging directory") {
+				t.Errorf("commit of %q: exit %d %q, want the guard's refusal", bad, code, stderr)
+			}
+		})
+	}
+	for _, d := range populated {
+		for _, n := range []string{"quil", "quild", "keep"} {
+			if _, err := os.Stat(filepath.Join(d, n)); err != nil {
+				t.Errorf("commit touched %s: %v", filepath.Join(d, n), err)
+			}
+		}
 	}
 }
 

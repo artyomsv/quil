@@ -8,8 +8,10 @@ if (-not (Test-Path -LiteralPath $tar -PathType Leaf)) {
 }
 # CreateDirectory, not New-Item -Path: -Path treats [ and ] as wildcards.
 [IO.Directory]::CreateDirectory($dir) | Out-Null
-# Staging dirs a failed or interrupted install left behind.
-Get-ChildItem -LiteralPath $dir -Directory -Filter '.quil-staging-*' | ForEach-Object { try { Remove-Item -LiteralPath $_.FullName -Recurse -Force } catch {} }
+# Staging dirs a failed or interrupted install left behind. Only those
+# untouched for over an hour: a younger one may be another client's upgrade
+# between its extract and its finalize (see remote-stage.sh).
+Get-ChildItem -LiteralPath $dir -Directory -Filter '.quil-staging-*' | Where-Object { $_.LastWriteTime -lt (Get-Date).AddHours(-1) } | ForEach-Object { try { Remove-Item -LiteralPath $_.FullName -Recurse -Force } catch {} }
 $st = Join-Path $dir ('.quil-staging-' + [guid]::NewGuid().ToString('N'))
 [IO.Directory]::CreateDirectory($st) | Out-Null
 Write-Output '__quil_prepare__'

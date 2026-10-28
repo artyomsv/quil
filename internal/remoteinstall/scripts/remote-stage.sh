@@ -33,11 +33,17 @@ mkdir -p "$DIR"
 # Staging dirs a failed or interrupted install left behind. Each holds a full
 # copy of the binaries, so leaving them would slowly fill the very directory
 # this script needs room in.
-for old in "$DIR"/.quil-staging-*; do
-  if [ -d "$old" ]; then
-    rm -rf "$old"
-  fi
-done
+#
+# Only dirs untouched for over an hour are ABANDONED. A younger one may belong
+# to another client's upgrade that has staged and is stopping the daemon right
+# now; removing it makes that upgrade's commit fail after its stop — the exact
+# failure the staging exists to prevent. One whole setup is bounded at 10
+# minutes (remoteSetupTimeout), so an hour cannot catch a live one. A dir's
+# mtime is its last entry change, which for a finished stage is the moment the
+# archive was removed. -mmin and -maxdepth are not POSIX but GNU, busybox and
+# BSD find all have them, and the probe already relies on -maxdepth.
+find "$DIR" -maxdepth 1 -type d -name '.quil-staging-*' -mmin +60 \
+  -exec rm -rf {} + 2>/dev/null || true
 
 ST=$(mktemp -d "$DIR/.quil-staging-XXXXXXXXXX")
 # Removed on every failure. Disarmed (ST=) only once the stage is complete,

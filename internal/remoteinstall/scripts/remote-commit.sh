@@ -19,16 +19,22 @@ ST=$2
 
 # The caller checks the shape too; this is the last line of defence against a
 # path that would make the rm below reach outside the install directory.
+# Exactly "$DIR/.quil-staging-" plus an alphanumeric suffix, the shape
+# parseStageOutput accepts. Only the SUFFIX is inspected: "$DIR" itself was
+# accepted by the probe and may legitimately contain "..", as in
+# /opt/quil..backup/bin — a pattern over the whole path refused that, after the
+# daemon had already been stopped.
+refuse() {
+  echo "quil-install: $ST is not a staging directory under $DIR" >&2
+  exit 2
+}
 case $ST in
-  "$DIR"/.quil-staging-*/* | *..*)
-    echo "quil-install: $ST is not a staging directory under $DIR" >&2
-    exit 2
-    ;;
-  "$DIR"/.quil-staging-?*) ;;
-  *)
-    echo "quil-install: $ST is not a staging directory under $DIR" >&2
-    exit 2
-    ;;
+  "$DIR"/.quil-staging-*) ;;
+  *) refuse ;;
+esac
+SUFFIX=${ST#"$DIR"/.quil-staging-}
+case $SUFFIX in
+  '' | *[!A-Za-z0-9]*) refuse ;;
 esac
 
 if [ ! -f "$ST/quil" ] || [ ! -f "$ST/quild" ]; then

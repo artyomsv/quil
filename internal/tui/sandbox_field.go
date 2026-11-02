@@ -47,18 +47,22 @@ func (m Model) renderSetupSandboxField(focused bool) string {
 	// NEXT choice ("←/→ sbx ticket-2") while the picked one sat on the line
 	// below, and a glance read the hint as the selection — beside a folder
 	// that belonged to the other sandbox.
+	hint := m.sandboxPositionHint()
 	if m.sandboxOn && m.sandboxBackendIsSbx() && m.sandboxSbxName != "" {
-		label += ": " + truncateToWidth(m.sandboxSbxName, sbxNameMaxWidth)
+		// The name gets what the text area leaves after the rest of the row,
+		// so the row never wraps. Too narrow for a useful name, the hint goes
+		// first: the name is the point of the row.
+		fixed := lipgloss.Width(prefix + box + label + ": ")
+		budget := min(sbxNameMaxWidth, m.setupTextWidth()-fixed-lipgloss.Width(hint))
+		if budget < sbxNameMinWidth {
+			hint = ""
+			budget = min(sbxNameMaxWidth, m.setupTextWidth()-fixed)
+		}
+		label += ": " + truncateToWidth(m.sandboxSbxName, budget)
 	}
 	var b strings.Builder
 	b.WriteString(prefix + style.Render(box+label))
-	// Only the position is shown, never another choice's name. A host with
-	// docker alone has nothing to cycle and draws the row it always did.
-	if pos, n := m.sandboxChoicePosition(); m.sandboxOn && n > 1 {
-		hint := "  ←/→"
-		if pos > 0 {
-			hint += " " + strconv.Itoa(pos) + "/" + strconv.Itoa(n)
-		}
+	if hint != "" {
 		b.WriteString(dialogSubtle.Render(hint))
 	}
 	b.WriteString("\n")
@@ -499,9 +503,32 @@ func (m Model) sandboxChoices() []sandboxChoice {
 	return out
 }
 
-// sbxNameMaxWidth bounds the picked sandbox's name on the row, so the
-// position hint after it stays on the line.
-const sbxNameMaxWidth = 32
+// sbxNameMaxWidth caps the picked sandbox's name on the row; the dialog's
+// text width can cut it shorter. Below sbxNameMinWidth the position hint is
+// dropped to give the name room.
+const (
+	sbxNameMaxWidth = 32
+	sbxNameMinWidth = 8
+)
+
+// sandboxPositionHint is the row's "  ←/→ 3/5", or "" when the arrows do
+// nothing. Only the position is shown, never another choice's name. A pick
+// no longer offered shows a bare "  ←/→" whenever any choice exists, since
+// an arrow then moves to the first one — even when that is the only one.
+// A host with docker alone has nothing to cycle and draws the row it
+// always did.
+func (m Model) sandboxPositionHint() string {
+	pos, n := m.sandboxChoicePosition()
+	switch {
+	case !m.sandboxOn:
+		return ""
+	case pos == 0 && n > 0:
+		return "  ←/→"
+	case n > 1:
+		return "  ←/→ " + strconv.Itoa(pos) + "/" + strconv.Itoa(n)
+	}
+	return ""
+}
 
 // sandboxChoicePosition is the picked choice's 1-based place in the cycle and
 // the cycle's length. The place is 0 when the pick is no longer offered (the

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
@@ -407,5 +408,57 @@ func TestSandboxRow_LateDiscoveryCannotUndoTheSandboxFolder(t *testing.T) {
 	}
 	if len(m.cwdBrowseEntries) == 0 || m.cwdBrowseEntries[len(m.cwdBrowseEntries)-1] != "src" {
 		t.Errorf("the sandbox folder's listing was replaced: %v", m.cwdBrowseEntries)
+	}
+}
+
+// The picked name is cut to what the dialog's text area leaves, so the row
+// never wraps: at the standard width the hint stays, and too narrow for a
+// useful name the hint goes and the name keeps the room.
+func TestSandboxRow_PickedNameFitsTheTextArea(t *testing.T) {
+	long := "cf-cryptobrok-14280-a-long-ticket" // 33 cells, over the cap
+	for _, tc := range []struct {
+		name     string
+		termW    int
+		wantHint bool
+	}{
+		{"standard width", 120, true},
+		{"narrow terminal", 52, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := attachModel()
+			m.applySandboxCap("", ipc.SandboxCapRespPayload{Available: true, SbxAvailable: true, SbxSandboxes: []ipc.SbxSandbox{
+				{Name: long, Status: "running", Folders: []string{"/w/ticket-1"}},
+			}})
+			m.width = tc.termW
+			m.sandboxBackend, m.sandboxSbxName = config.SandboxBackendSbx, long
+			first, _, _ := strings.Cut(m.renderSetupSandboxField(true), "\n")
+			if w := lipgloss.Width(first); w > m.setupTextWidth() {
+				t.Errorf("row is %d cells, text area is %d:\n%q", w, m.setupTextWidth(), first)
+			}
+			if !strings.Contains(first, "cf-cryptobrok") {
+				t.Errorf("row does not name the picked sandbox:\n%q", first)
+			}
+			if got := strings.Contains(first, "←/→"); got != tc.wantHint {
+				t.Errorf("hint shown = %v, want %v:\n%q", got, tc.wantHint, first)
+			}
+		})
+	}
+}
+
+// A pick that is no longer offered keeps a bare ←/→ even when only one
+// choice is left: the arrow still moves to it, and nothing else says so.
+func TestSandboxRow_StalePickKeepsTheArrowHint(t *testing.T) {
+	var m Model
+	m.sandboxOn = true
+	m.sandboxDialogSbx = true
+	m.sandboxBackend, m.sandboxSbxName = config.SandboxBackendSbx, "gone"
+	if got := m.sandboxPositionHint(); got != "  ←/→" {
+		t.Errorf("hint = %q, want a bare arrow hint", got)
+	}
+	if !m.handleSandboxFieldKey(tea.KeyPressMsg{Code: tea.KeyRight}) || m.sandboxSbxName != "" {
+		t.Errorf("→ did not move to the profile: name=%q", m.sandboxSbxName)
+	}
+	if got := m.sandboxPositionHint(); got != "" {
+		t.Errorf("hint with one choice picked = %q, want none", got)
 	}
 }

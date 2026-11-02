@@ -2,6 +2,7 @@ package tui
 
 import (
 	"slices"
+	"strconv"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -42,12 +43,23 @@ func (m Model) renderSetupSandboxField(focused bool) string {
 	if m.sandboxBackendIsSbx() {
 		label = " Run in an sbx sandbox"
 	}
+	// The PICKED sandbox is named on the row itself. The hint used to name the
+	// NEXT choice ("←/→ sbx ticket-2") while the picked one sat on the line
+	// below, and a glance read the hint as the selection — beside a folder
+	// that belonged to the other sandbox.
+	if m.sandboxOn && m.sandboxBackendIsSbx() && m.sandboxSbxName != "" {
+		label += ": " + truncateToWidth(m.sandboxSbxName, sbxNameMaxWidth)
+	}
 	var b strings.Builder
 	b.WriteString(prefix + style.Render(box+label))
-	// The next choice is named only when there is one, so a host with docker
-	// alone draws exactly the row it always did.
-	if next, ok := m.nextSandboxChoice(1); m.sandboxOn && ok {
-		b.WriteString(dialogSubtle.Render("  ←/→ " + truncateToWidth(next.label(), 24)))
+	// Only the position is shown, never another choice's name. A host with
+	// docker alone has nothing to cycle and draws the row it always did.
+	if pos, n := m.sandboxChoicePosition(); m.sandboxOn && n > 1 {
+		hint := "  ←/→"
+		if pos > 0 {
+			hint += " " + strconv.Itoa(pos) + "/" + strconv.Itoa(n)
+		}
+		b.WriteString(dialogSubtle.Render(hint))
 	}
 	b.WriteString("\n")
 
@@ -64,11 +76,13 @@ func (m Model) renderSetupSandboxField(focused bool) string {
 		// or an existing sandbox another tool owns, which Quil only enters.
 		line := "cage: " + sbx.ProfileFile + " in this project (approve: quil sandbox trust)"
 		if m.sandboxSbxName != "" {
-			line = "attach: " + m.sandboxSbxName + m.sbxStatusSuffix(m.sandboxSbxName) +
-				", not changed"
+			// The name is on the row above; this line says what attaching means.
+			line = "attached, not changed"
 			if !m.sbxAttachFits(m.sandboxSbxName) {
-				line = "attach: " + m.sandboxSbxName + m.sbxStatusSuffix(m.sandboxSbxName) +
-					", folder checked at start"
+				line = "attached, folder checked at start"
+			}
+			if status := m.sbxStatus(m.sandboxSbxName); status != "" {
+				line = status + " · " + line
 			}
 		}
 		b.WriteString("    " + dialogSubtle.Render(truncateToWidth(line, m.setupTextWidth()-setupRowIndent)))
@@ -485,6 +499,23 @@ func (m Model) sandboxChoices() []sandboxChoice {
 	return out
 }
 
+// sbxNameMaxWidth bounds the picked sandbox's name on the row, so the
+// position hint after it stays on the line.
+const sbxNameMaxWidth = 32
+
+// sandboxChoicePosition is the picked choice's 1-based place in the cycle and
+// the cycle's length. The place is 0 when the pick is no longer offered (the
+// folder or the listing changed) — the next arrow then starts from the first.
+func (m Model) sandboxChoicePosition() (pos, n int) {
+	choices := m.sandboxChoices()
+	for i, c := range choices {
+		if c.backend == m.sandboxBackend && c.name == m.sandboxSbxName {
+			return i + 1, len(choices)
+		}
+	}
+	return 0, len(choices)
+}
+
 // nextSandboxChoice is the choice step places away from the current one,
 // wrapping, and false when there is nothing else to pick. A current choice
 // that is no longer offered (the folder changed) steps to the first one —
@@ -627,11 +658,11 @@ func (m Model) sbxPrimaryFolder(name string) string {
 	return ""
 }
 
-// sbxStatusSuffix is " (running)" and the like, for the attach line.
-func (m Model) sbxStatusSuffix(name string) string {
+// sbxStatus is "running" and the like, for the attach line, or "".
+func (m Model) sbxStatus(name string) string {
 	for _, s := range m.destSandbox[m.createPaneDialogDest()].SbxSandboxes {
 		if s.Name == name && s.Status != "" {
-			return " (" + sanitizeRemoteText(s.Status) + ")"
+			return sanitizeRemoteText(s.Status)
 		}
 	}
 	return ""

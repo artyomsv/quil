@@ -721,11 +721,13 @@ Sometimes another tool creates and removes your sandboxes, for example one
 sandbox per task. Quil can run panes in such a sandbox without a profile.
 
 **How to use it.** In the `Ctrl+N` dialog, pick the pane folder first. Then turn
-on the sandbox row and press `←`/`→` until the row says `attach: <name>`. Quil
-gets the list from `sbx ls --json` each time the dialog opens. The sandboxes
-that sbx lists with the pane folder come first. The others come after them,
-marked `folder checked at start`, because `sbx ls` does not show a folder that
-was added later with `sbx mount`.
+on the sandbox row and press `←`/`→` until the row says
+`Run in an sbx sandbox: <name>`. The row always names the sandbox you picked.
+`←/→ 3/5` after it is only your place in the list. Quil gets the list from
+`sbx ls --json` each time the dialog opens. The sandboxes that sbx lists with
+the pane folder come first. The others come after them, marked
+`folder checked at start`, because `sbx ls` does not show a folder that was
+added later with `sbx mount`.
 
 From MCP: `create_pane` with `sandbox_backend = "sbx"` and
 `sandbox_sbx_name = "<name>"`.

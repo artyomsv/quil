@@ -7,6 +7,7 @@ When things go sideways, this is the first place to look.
 - [The daemon won't start](#the-daemon-wont-start)
 - [Quil hangs, or tabs don't reopen after a restart](#quil-hangs-or-tabs-dont-reopen-after-a-restart)
 - [macOS: `zsh: killed quil` after upgrading](#macos-zsh-killed-quil-after-upgrading)
+- [macOS Terminal.app: the mouse does nothing in Quil](#macos-terminalapp-the-mouse-does-nothing-in-quil)
 - [The TUI shows a blank screen](#the-tui-shows-a-blank-screen)
 - [Version mismatch — daemon won't accept the TUI](#version-mismatch--daemon-wont-accept-the-tui)
 - [A `--remote` session ends without saying why](#a---remote-session-ends-without-saying-why)
@@ -74,6 +75,14 @@ rm -f ~/.local/bin/quil ~/.local/bin/quild
 ```
 
 then reinstall.
+
+## macOS Terminal.app: the mouse does nothing in Quil
+
+Symptoms: the mouse wheel scrolls the Terminal.app window, not the pane. Clicks on Quil tabs and panes do nothing.
+
+**Cause.** Terminal.app has a setting, *View → Allow Mouse Reporting*. When it is off, Terminal.app keeps every mouse event and Quil never gets one. The shortcut `Cmd-R` turns it on and off, so it is easy to turn off by accident.
+
+**Fix.** Press `Cmd-R` again, or select *View → Allow Mouse Reporting*. Quil does not need a restart.
 
 ## The TUI shows a blank screen
 

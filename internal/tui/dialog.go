@@ -1474,7 +1474,7 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 					// that name is one this dialog showed.
 					DeleteBranch:       deleteBranch,
 					DeleteRemoteBranch: deleteRemote,
-					ConfirmedBranches:  confirmedBranches,
+					Confirmations:      confirmedBranches,
 				})
 				m.sendForDest(dest, req)
 			case "tab":
@@ -1483,7 +1483,7 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 					RemoveWorktree:     removeWorktree,
 					DeleteBranch:       deleteBranch,
 					DeleteRemoteBranch: deleteRemote,
-					ConfirmedBranches:  confirmedBranches,
+					Confirmations:      confirmedBranches,
 				})
 				m.sendForDest(dest, req)
 			}
@@ -2189,10 +2189,7 @@ func (m Model) renderConfirmWorktrees() string {
 	// the terminal and pushes the footer — and the Enter it documents — off
 	// screen. The cap is a DISPLAY bound only; the header counts every worktree
 	// and the toggle still covers all of them.
-	shown := m.confirmWorktrees
-	if len(shown) > confirmWorktreeMaxRows {
-		shown = shown[:confirmWorktreeMaxRows]
-	}
+	shown := m.confirmWorktrees[:m.confirmRowCap()]
 	for _, w := range shown {
 		b.WriteString("\n")
 		// With several worktrees only the FOCUSED one is drawn in full; the

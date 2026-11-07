@@ -2799,7 +2799,7 @@ func (d *Daemon) handleDestroyTab(conn *ipc.Conn, msg *ipc.Message) {
 	var branches branchDeleteOpts
 	if payload.RemoveWorktree {
 		worktrees = ownedWorktreePaths(panes)
-		branches = branchOpts(payload.DeleteBranch, payload.DeleteRemoteBranch, payload.ConfirmedBranches, panes)
+		branches = branchOpts(payload.DeleteBranch, payload.DeleteRemoteBranch, payload.Confirmations, panes)
 	}
 	d.session.DestroyTab(payload.TabID)
 	for _, p := range panes {
@@ -3585,7 +3585,7 @@ func (d *Daemon) handleDestroyPane(msg *ipc.Message) {
 		// worktree it owned.
 		if payload.RemoveWorktree {
 			worktrees = ownedWorktreePaths([]*Pane{pane})
-			branches = branchOpts(payload.DeleteBranch, payload.DeleteRemoteBranch, payload.ConfirmedBranches, []*Pane{pane})
+			branches = branchOpts(payload.DeleteBranch, payload.DeleteRemoteBranch, payload.Confirmations, []*Pane{pane})
 		}
 		// Same window, same reason: the card needs the pane's name, which is
 		// gone once DestroyPane runs.
@@ -7480,6 +7480,10 @@ func (d *Daemon) emitHookEvent(p hookevents.Payload) {
 	switch hookevents.ClassifyWorkEvent(eventType) {
 	case hookevents.WorkEventStop, hookevents.WorkEventStopFinal:
 		d.agentWT.turnEnded(p.PaneID)
+	case hookevents.WorkEventStart:
+		// Before the agent acts: take the baseline of its repository now,
+		// or the first worktree it makes there reads as pre-existing.
+		d.agentWT.seed(p.PaneID)
 	}
 }
 

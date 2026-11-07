@@ -82,7 +82,7 @@ func TestAgentWTDialog_DetailReusesCloseRowsAndRemoteNeedsY(t *testing.T) {
 	if !decodeSent(t, fake, ipc.MsgAgentWorktreeActReq, &req) {
 		t.Fatal("y sent no act request")
 	}
-	if req.ID != "a" || !req.RemoveWorktree || !req.DeleteRemoteBranch || req.ConfirmedBranch != "feat/a" {
+	if req.ID != "a" || !req.RemoveWorktree || !req.DeleteRemoteBranch || req.Confirmation.Branch != "feat/a" || req.Confirmation.Remote != "origin" {
 		t.Errorf("request = %+v", req)
 	}
 	if m.dialog != dialogAgentWorktrees {

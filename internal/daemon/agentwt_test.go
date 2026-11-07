@@ -58,7 +58,7 @@ func newTestAgentWT(t *testing.T, repo *fakeRepo, panes map[string]agentWTPane) 
 func probeFor(pane, dir string) hookevents.Payload {
 	return hookevents.Payload{PaneID: pane, Source: "claude", SessionID: "s1", CWD: dir,
 		HookEvent: hookevents.EventWorktreeProbe,
-		Data:      map[string]string{hookevents.DataProbeTrigger: hookevents.ProbeShell, hookevents.DataProbeCommand: "git worktree add"}}
+		Data:      map[string]string{hookevents.DataProbeTrigger: hookevents.ProbeShell}}
 }
 
 var agentPanes = map[string]agentWTPane{"pane-a": {Name: "claude", CWD: "/repo"}}
@@ -143,7 +143,7 @@ func TestAgentWT_OwnWorktreeIsNotRecorded(t *testing.T) {
 	s, _ := newTestAgentWT(t, repo, agentPanes)
 	s.probe(probeFor("pane-a", "/repo"))
 
-	s.noteOwnWorktree("/w/quil-made", "feat/quil")
+	s.noteOwnWorktree("/repo", "/w/quil-made", "feat/quil")
 	repo.worktrees = []gitworktree.Worktree{{Path: "/w/quil-made", Branch: "feat/quil"}}
 	repo.branches = []string{"master", "feat/quil"}
 	s.turnEnded("pane-a")

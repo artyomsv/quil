@@ -242,7 +242,7 @@ func (m Model) agentWTBranchEntry() bool {
 }
 
 // sendAgentWTAct sends the confirm's choice and returns to the list.
-func (m Model) sendAgentWTAct(removeWorktree, local, remote bool, confirmed []string) (tea.Model, tea.Cmd) {
+func (m Model) sendAgentWTAct(removeWorktree, local, remote bool, confirmed []ipc.BranchConfirmation) (tea.Model, tea.Cmd) {
 	e := m.agentWT.entry
 	m.dialog = dialogAgentWorktrees
 	req := ipc.AgentWorktreeActReqPayload{ID: e.ID, DeleteBranch: local, DeleteRemoteBranch: remote}
@@ -250,7 +250,7 @@ func (m Model) sendAgentWTAct(removeWorktree, local, remote bool, confirmed []st
 		req.RemoveWorktree = removeWorktree
 	}
 	if len(confirmed) > 0 {
-		req.ConfirmedBranch = confirmed[0]
+		req.Confirmation = confirmed[0]
 	}
 	if !req.RemoveWorktree && !local && !remote {
 		m.agentWT.notice = "Nothing was ticked."

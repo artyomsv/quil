@@ -14,14 +14,10 @@ import "regexp"
 // name, and would drop the first of two probes in one tick).
 const EventWorktreeProbe = "WorktreeProbe"
 
-// Data keys a probe carries.
-const (
-	// DataProbeTrigger says what kind of command fired the probe.
-	DataProbeTrigger = "trigger"
-	// DataProbeCommand is the command text, for display only (capped at
-	// MaxDataValueBytes like every data value, and never part of a key).
-	DataProbeCommand = "command"
-)
+// DataProbeTrigger is the one data key a probe carries: what kind of command
+// fired it. The command text itself is never sent — a shell command can
+// carry a credential, and the compare needs only the directory.
+const DataProbeTrigger = "trigger"
 
 // Probe triggers.
 const (

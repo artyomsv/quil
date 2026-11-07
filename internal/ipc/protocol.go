@@ -567,14 +567,26 @@ type DestroyPanePayload struct {
 	// remote it is pushed to. Bools, like RemoveWorktree: the daemon reads the
 	// branch from git itself. Both need RemoveWorktree.
 	//
-	// ConfirmedBranches is CHECK-ONLY: the branch names the dialog showed. A
-	// branch is deleted only when the name the daemon read is in this list, so
-	// a worktree switched to another branch after the dialog opened keeps it.
-	// A remote delete also needs the daemon's worktree_policy on, and a
-	// full-rights conn (clientauth carriers).
-	DeleteBranch       bool     `json:"delete_branch,omitempty"`
-	DeleteRemoteBranch bool     `json:"delete_remote_branch,omitempty"`
-	ConfirmedBranches  []string `json:"confirmed_branches,omitempty"`
+	// Confirmations is CHECK-ONLY: per worktree, the branch and the remote
+	// target the dialog showed. The daemon deletes what it reads from git
+	// itself, and only when it matches the confirmation for THAT worktree — so
+	// a worktree switched to another branch, or a branch whose upstream moved,
+	// keeps it, and one row cannot confirm another's. A remote delete also
+	// needs the daemon's worktree_policy on, and a full-rights conn
+	// (clientauth carriers).
+	DeleteBranch       bool                 `json:"delete_branch,omitempty"`
+	DeleteRemoteBranch bool                 `json:"delete_remote_branch,omitempty"`
+	Confirmations      []BranchConfirmation `json:"confirmations,omitempty"`
+}
+
+// BranchConfirmation is what a dialog showed for one worktree's branch. Every
+// field is compared with what the daemon reads from git; none is acted on.
+// WorktreePath is "" for a branch with no worktree (agent cleanup).
+type BranchConfirmation struct {
+	WorktreePath string `json:"worktree_path,omitempty"`
+	Branch       string `json:"branch"`
+	Remote       string `json:"remote,omitempty"`
+	RemoteBranch string `json:"remote_branch,omitempty"`
 }
 
 type ResizePanePayload struct {
@@ -722,9 +734,9 @@ type DestroyTabPayload struct {
 	// list of paths.
 	RemoveWorktree bool `json:"remove_worktree,omitempty"`
 	// Branch deletes: see DestroyPanePayload.
-	DeleteBranch       bool     `json:"delete_branch,omitempty"`
-	DeleteRemoteBranch bool     `json:"delete_remote_branch,omitempty"`
-	ConfirmedBranches  []string `json:"confirmed_branches,omitempty"`
+	DeleteBranch       bool                 `json:"delete_branch,omitempty"`
+	DeleteRemoteBranch bool                 `json:"delete_remote_branch,omitempty"`
+	Confirmations      []BranchConfirmation `json:"confirmations,omitempty"`
 }
 
 type SwitchTabPayload struct {

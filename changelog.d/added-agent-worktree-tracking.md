@@ -7,6 +7,6 @@ headline: Quil notes worktrees that appear while agents run
   `git worktree add` in the shell and Claude's own worktree tool. Quil then
   compares the repository's worktrees and branches with what it saw before,
   and also does that once at the end of every agent turn. Each new one is
-  recorded with the pane it appeared in and the command that ran. Worktrees
-  Quil made itself are not recorded. The record is the base for a cleanup view
-  in the next release.
+  recorded with the pane it appeared in. The command text is never stored,
+  because it can hold a password or a token. Worktrees Quil made itself are
+  not recorded. The cleanup view lists the record.

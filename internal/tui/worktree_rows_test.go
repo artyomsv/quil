@@ -161,7 +161,7 @@ func TestCloseConfirm_EnterDoesNotAcceptWithRemoteArmed(t *testing.T) {
 		t.Fatal("y sent no destroy_pane")
 	}
 	if !p.RemoveWorktree || !p.DeleteRemoteBranch || p.DeleteBranch ||
-		len(p.ConfirmedBranches) != 1 || p.ConfirmedBranches[0] != "feat/a" {
+		len(p.Confirmations) != 1 || p.Confirmations[0].Branch != "feat/a" || p.Confirmations[0].Remote != "origin" || p.Confirmations[0].WorktreePath != "/w/feat-a" {
 		t.Errorf("payload = %+v, want worktree + remote delete of feat/a only", p)
 	}
 }
@@ -242,5 +242,85 @@ func TestCloseConfirm_FitsTerminal(t *testing.T) {
 				t.Errorf("box is %d rows in a %d-row terminal:\n%s", box, height, stripANSI(m.renderConfirmDialog()))
 			}
 		})
+	}
+}
+
+// A greyed row's reason can be git's own error text: it is sanitised.
+func TestCloseConfirm_BranchReasonIsSanitized(t *testing.T) {
+	m := openLoadedConfirm(t, 1, "")
+	w := &m.confirmWorktrees[0]
+	w.branchDeletable, w.branchReason = false, "could not read the branch: \x1b]52;c;aGk=\x07boom"
+
+	out := m.renderConfirmDialog()
+	if strings.Contains(out, "\x1b]52") {
+		t.Errorf("the branch reason reached the screen raw: %q", out)
+	}
+}
+
+// Two worktrees: each confirmation names ITS worktree, so one row's branch
+// cannot confirm the other's on the daemon.
+func TestCloseConfirm_ConfirmationsArePerWorktree(t *testing.T) {
+	m := modelWithPanes(worktreePane("pane-a", "/w/feat-a", "feat/a"), worktreePane("pane-b", "/w/feat-b", "feat/b"))
+	m.cfg = config.Default()
+	m = applyModel(m.openCloseTabConfirm())
+	for i, b := range []string{"feat/a", "feat/b"} {
+		w := &m.confirmWorktrees[i]
+		w.loaded, w.branch, w.branchDeletable = true, b, true
+	}
+	m = confirmPress(m, " ")
+	m = confirmPress(m, "down")
+	m = confirmPress(m, " ")
+
+	_, _, got := m.confirmBranchSelection()
+	if len(got) != 2 || got[0].WorktreePath != m.confirmWorktrees[0].path || got[0].Branch != "feat/a" ||
+		got[1].WorktreePath != m.confirmWorktrees[1].path || got[1].Branch != "feat/b" {
+		t.Errorf("confirmations = %+v, want one per worktree, tied to its path", got)
+	}
+}
+
+// A pane whose shell left its worktree shows another checkout's PR: that PR
+// is not claimed for the worktree being deleted.
+func TestCollectConfirmWorktrees_NoPRWhenShellLeftTheWorktree(t *testing.T) {
+	p := worktreePane("pane-a", "/w/feat-b", "feat/b")
+	p.WorktreePath = "/w/feat-a"
+	p.PRNumber, p.PRStatus = 7, "open"
+
+	got := collectConfirmWorktrees([]*PaneModel{p})
+
+	if len(got) != 1 || got[0].prOpen || got[0].prNumber != 0 {
+		t.Errorf("row = %+v, want no PR claimed for a pane that left its worktree", got)
+	}
+}
+
+// Six worktrees, every row armed and every warning on: the box still fits a
+// 24-row terminal, because the worktree list gives way.
+func TestCloseConfirm_SixWorktreesFitTerminal(t *testing.T) {
+	var panes []*PaneModel
+	for i := 0; i < 6; i++ {
+		panes = append(panes, worktreePane(fmt.Sprintf("pane-%d", i), fmt.Sprintf("/w/feat-%d", i), fmt.Sprintf("feat/%d", i)))
+	}
+	panes[0].PRNumber, panes[0].PRStatus = 12, "open"
+	m := modelWithPanes(panes...)
+	m.cfg = config.Default()
+	m.cfg.Worktree.RemoteBranchDelete = true
+	m.width, m.height = 100, 24
+	m = applyModel(m.openCloseTabConfirm())
+	for i := range m.confirmWorktrees {
+		w := &m.confirmWorktrees[i]
+		w.loaded, w.changes = true, 30
+		for j := 0; j < 30; j++ {
+			w.files = append(w.files, ipc.WorktreeFile{Code: " M", Path: fmt.Sprintf("f%02d", j)})
+		}
+		w.branch, w.branchDeletable, w.unmerged = fmt.Sprintf("feat/%d", i), true, 3
+		w.remote, w.remoteBranch = "origin", w.branch
+	}
+	m.confirmRemoveWorktree, m.confirmDeleteBranch, m.confirmDeleteRemote = true, true, true
+
+	out := m.renderConfirmDialog()
+	if box := strings.Count(out, "\n") + 1 + dialogVChrome; box > m.height {
+		t.Errorf("box is %d rows in a %d-row terminal:\n%s", box, m.height, stripANSI(out))
+	}
+	if !strings.Contains(stripANSI(out), "Esc") {
+		t.Error("the footer is not drawn")
 	}
 }

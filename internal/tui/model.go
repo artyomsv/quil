@@ -726,6 +726,10 @@ type Model struct {
 	// probe copy sets it (confirmFileRows), to measure the rest of the box.
 	confirmFileRowsFixed int
 	confirmFileRowsSet   bool
+	// confirmRowCapFixed pins how many worktree rows one render draws; only
+	// a probe copy sets it (confirmRowCap).
+	confirmRowCapFixed int
+	confirmRowCapSet   bool
 	// agentWT is the Worktrees… view (agentwt_dialog.go).
 	agentWT        agentWTView
 	upgradeQueue   []upgradePrompt  // hosts waiting to be ASKED about provisioning; see enqueueUpgradePrompt

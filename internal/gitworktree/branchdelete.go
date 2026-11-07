@@ -39,14 +39,19 @@ func DeleteRemoteBranch(ctx context.Context, repo, remote, branch string) error 
 		return fmt.Errorf("no remote branch to delete")
 	}
 	args := RemotePushArgs(remote, branch)
+	env := remotePushEnvFor(ctx, repo, os.Environ())
 	cmd := exec.CommandContext(ctx, gitBinary, args...)
 	cmd.Dir = repo
-	cmd.Env = RemotePushEnv(os.Environ())
+	cmd.Env = env
 	hideWindow(cmd)
 	cmd.WaitDelay = gitWaitDelay
-	out, err := cmd.CombinedOutput()
+	// Bounded like runGit's buffers: a remote or a hook can print without
+	// end, and the push may run for the whole timeout.
+	out := &boundedBuffer{max: maxPushOutput}
+	cmd.Stdout, cmd.Stderr = out, out
+	err := cmd.Run()
 	if err != nil {
-		msg := strings.TrimSpace(string(out))
+		msg := strings.TrimSpace(out.String())
 		if len(msg) > 400 {
 			msg = msg[:400]
 		}
@@ -56,6 +61,21 @@ func DeleteRemoteBranch(ctx context.Context, repo, remote, branch string) error 
 		return fmt.Errorf("git push %s :%s: %w: %s", remote, branch, err, msg)
 	}
 	return nil
+}
+
+// maxPushOutput bounds what a remote push may leave in memory.
+const maxPushOutput = 16 << 10
+
+// remotePushEnvFor is RemotePushEnv for one repository: when the repository
+// configures core.sshCommand (a key file, a jump host), GIT_SSH_COMMAND would
+// outrank it and break a push that works by hand, so the BatchMode command is
+// not added. Without a terminal or an askpass program ssh cannot prompt then
+// either.
+func remotePushEnvFor(ctx context.Context, repo string, base []string) []string {
+	if out, err := runGit(ctx, repo, "config", "--get", "core.sshCommand"); err == nil && strings.TrimSpace(out) != "" {
+		return RemotePushEnv(append(append([]string{}, base...), "GIT_SSH_COMMAND="+strings.TrimSpace(out)))
+	}
+	return RemotePushEnv(base)
 }
 
 // RemotePushArgs is the argv DeleteRemoteBranch runs, exported for its test.

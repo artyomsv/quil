@@ -131,3 +131,42 @@ func TestWorktreeStatusResponse_FactsOnlyForFirstSixPaths(t *testing.T) {
 		t.Errorf("row 8 = %+v, want a change count and a not-checked reason", last)
 	}
 }
+
+// With no default branch the branch is not offered: fail closed.
+func TestWorktreeStatusResponse_UnknownDefaultIsNotDeletable(t *testing.T) {
+	stubWorktreeStatus(t, func(string) (int, error) { return 0, nil })
+	stubBranchFacts(t, func(string) (gitworktree.BranchFacts, error) {
+		return gitworktree.BranchFacts{Branch: "feat"}, nil
+	})
+
+	st := worktreeStatusResponse(ipc.WorktreeStatusReqPayload{Paths: []string{"/w/feat"}}).Statuses[0]
+
+	if st.BranchDeletable || st.BranchReason == "" {
+		t.Errorf("status = %+v, want not deletable with a reason", st)
+	}
+}
+
+// Slow branch checks never hold back the file counts: past the budget they
+// are skipped with a reason, and every count is there.
+func TestWorktreeStatusResponse_FactsBudgetKeepsFileCounts(t *testing.T) {
+	prev := branchFactsBudget
+	branchFactsBudget = 0
+	t.Cleanup(func() { branchFactsBudget = prev })
+	stubWorktreeStatus(t, func(string) (int, error) { return 3, nil })
+	asked := 0
+	stubBranchFacts(t, func(string) (gitworktree.BranchFacts, error) {
+		asked++
+		return gitworktree.BranchFacts{Branch: "feat"}, nil
+	})
+
+	got := worktreeStatusResponse(ipc.WorktreeStatusReqPayload{Paths: []string{"/w/a", "/w/b"}})
+
+	if asked != 0 {
+		t.Errorf("facts read %d times past the budget", asked)
+	}
+	for _, st := range got.Statuses {
+		if st.Changes != 3 || st.BranchReason == "" {
+			t.Errorf("status = %+v, want the count and a not-checked reason", st)
+		}
+	}
+}

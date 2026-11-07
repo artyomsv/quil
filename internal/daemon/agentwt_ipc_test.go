@@ -135,7 +135,7 @@ func TestAgentWTAct_RemoteRefusedWhenPolicyOff(t *testing.T) {
 		return []gitworktree.Branch{{Name: "master"}, {Name: "feat/plain"}}, false, nil
 	}
 	branchFactsForFn = func(_ context.Context, _, b, _ string) (gitworktree.BranchFacts, error) {
-		return gitworktree.BranchFacts{Branch: b, Remote: "origin", RemoteBranch: b}, nil
+		return gitworktree.BranchFacts{Branch: b, DefaultRef: "refs/heads/master", Remote: "origin", RemoteBranch: b}, nil
 	}
 	defaultBranchRefFn = func(context.Context, string) string { return "refs/heads/master" }
 	pushed := 0
@@ -144,7 +144,7 @@ func TestAgentWTAct_RemoteRefusedWhenPolicyOff(t *testing.T) {
 		branchListFn, branchFactsForFn, defaultBranchRefFn, deleteRemoteBranchFn = prevList, prevFor, prevDef, prevRemote
 	})
 
-	d.agentWorktreeAct(ipc.AgentWorktreeActReqPayload{ID: "e-br", DeleteRemoteBranch: true, ConfirmedBranch: "feat/plain"})
+	d.agentWorktreeAct(ipc.AgentWorktreeActReqPayload{ID: "e-br", DeleteRemoteBranch: true, Confirmation: ipc.BranchConfirmation{Branch: "feat/plain", Remote: "origin", RemoteBranch: "feat/plain"}})
 
 	if pushed != 0 {
 		t.Errorf("pushed %d remote deletes with the policy off", pushed)

@@ -182,8 +182,8 @@ func worktreeStatusResponse(req ipc.WorktreeStatusReqPayload) ipc.WorktreeStatus
 	// The default branch is resolved ONCE per repository per request: a tab
 	// holding several worktrees of one repository would otherwise pay up to
 	// six git spawns per worktree for the same answer.
-	defaults := map[string]string{}
-	for i, path := range req.Paths {
+	start := time.Now()
+	for _, path := range req.Paths {
 		st := ipc.WorktreeStatus{Path: path}
 		rep, err := worktreeStatusFn(ctx, path)
 		if err != nil {
@@ -198,15 +198,35 @@ func worktreeStatusResponse(req ipc.WorktreeStatusReqPayload) ipc.WorktreeStatus
 				st.Files = append(st.Files, ipc.WorktreeFile{Code: f.Code, Path: f.Path})
 			}
 		}
-		if i < maxBranchFactsPaths {
-			fillBranchFacts(ctx, path, defaults, &st)
-		} else {
-			st.BranchReason = "not checked (too many worktrees)"
-		}
 		out.Statuses = append(out.Statuses, st)
+	}
+
+	// The branch half runs AFTER every file count, on a budget that ends
+	// before the dialog gives up waiting (worktreeStatusTimeout client side,
+	// 6 s): slow branch checks must never cost the user the file counts they
+	// were waiting for. A worktree whose facts did not fit says so.
+	factsCtx, cancelFacts := context.WithDeadline(ctx, start.Add(branchFactsBudget))
+	defer cancelFacts()
+	// The default branch is resolved ONCE per repository per request.
+	defaults := map[string]string{}
+	for i := range out.Statuses {
+		st := &out.Statuses[i]
+		switch {
+		case i >= maxBranchFactsPaths:
+			st.BranchReason = "not checked (too many worktrees)"
+		case factsCtx.Err() != nil:
+			st.BranchReason = "not checked (out of time)"
+		default:
+			fillBranchFacts(factsCtx, st.Path, defaults, st)
+		}
 	}
 	return out
 }
+
+// branchFactsBudget is how long one status request may spend, counted from
+// its start, before the branch half stops: inside the close dialog's 6 s wait,
+// so the file counts always arrive. A var so a test can shorten it.
+var branchFactsBudget = 4 * time.Second
 
 // maxBranchFactsPaths bounds how many worktrees of one request get branch
 // facts. It matches the close dialog's own row cap (confirmWorktreeMaxRows):
@@ -255,6 +275,10 @@ func applyBranchFacts(st *ipc.WorktreeStatus, f gitworktree.BranchFacts, err err
 		st.BranchReason = "detached HEAD, no branch"
 	case f.IsDefault:
 		st.BranchReason = "default branch"
+	case f.DefaultRef == "":
+		// Without a default branch nothing can say which commits exist only
+		// on this one, nor guard the default itself: fail closed.
+		st.BranchReason = "no default branch found, so unmerged commits cannot be counted"
 	default:
 		st.BranchDeletable = true
 	}

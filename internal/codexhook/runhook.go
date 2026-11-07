@@ -249,9 +249,9 @@ func worktreeProbe(env HookEnv, in codexStdin, nowMs int64) error {
 		return nil
 	}
 	return spoolEventCWD(env, nowMs, hookevents.EventWorktreeProbe, in.SessionID, in.CWD,
+		// The command text is not spooled: it can carry a credential.
 		"Worktree command", hookevents.SeverityInfo, map[string]string{
 			hookevents.DataProbeTrigger: hookevents.ProbeShell,
-			hookevents.DataProbeCommand: truncate(ti.Command, hookevents.MaxDataValueBytes),
 		})
 }
 

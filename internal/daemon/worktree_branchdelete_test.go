@@ -25,6 +25,11 @@ func stubBranchDelete(t *testing.T, facts gitworktree.BranchFacts, remoteFn func
 		{Path: "/w/feat-a", Branch: facts.Branch},
 	}, nil)
 	stubRemoveWorktree(t, nil)
+	if facts.DefaultRef == "" {
+		// A known default branch, as in nearly every repository; the unknown
+		// case has its own test.
+		facts.DefaultRef = "refs/heads/master"
+	}
 	rec := &branchStubs{}
 	prevFacts, prevDef, prevLocal, prevRemote := branchFactsFn, defaultBranchRefFn, deleteLocalBranchFn, deleteRemoteBranchFn
 	branchFactsFn = func(context.Context, string, string, string) (gitworktree.BranchFacts, error) { return facts, nil }
@@ -48,9 +53,16 @@ func stubBranchDelete(t *testing.T, facts gitworktree.BranchFacts, remoteFn func
 
 var testBranchOwner = paneRef{ID: "pane-0000000a", TabID: "tab-0000000a", Name: "claude"}
 
-func optsFor(local, remote bool, confirmed ...string) branchDeleteOpts {
-	return branchDeleteOpts{Local: local, Remote: remote, Confirmed: confirmed,
-		Owners: map[string]paneRef{"/w/feat-a": testBranchOwner}}
+// optsFor confirms branch for /w/feat-a, and — when remoteName is given —
+// the remote target remoteName/branch.
+func optsFor(local, remote bool, branch string, remoteName ...string) branchDeleteOpts {
+	c := ipc.BranchConfirmation{WorktreePath: "/w/feat-a", Branch: branch}
+	if len(remoteName) > 0 {
+		c.Remote, c.RemoteBranch = remoteName[0], branch
+	}
+	return branchDeleteOpts{Local: local, Remote: remote,
+		Confirmed: confirmations([]ipc.BranchConfirmation{c}),
+		Owners:    map[string]paneRef{"/w/feat-a": testBranchOwner}}
 }
 
 // eventsOfType returns the queued events of one type.
@@ -93,7 +105,7 @@ func TestRemoveOwnedWorktrees_NeverDeletesDefaultBranch(t *testing.T) {
 	d.remoteBranchDelete.Store(true)
 	rec := stubBranchDelete(t, gitworktree.BranchFacts{Branch: "master", IsDefault: true, Remote: "origin", RemoteBranch: "master"}, nil)
 
-	d.removeOwnedWorktreesWith([]string{"/w/feat-a"}, optsFor(true, true, "master"))
+	d.removeOwnedWorktreesWith([]string{"/w/feat-a"}, optsFor(true, true, "master", "origin"))
 
 	if len(rec.local) != 0 || len(rec.remote) != 0 {
 		t.Errorf("deleted the default branch: local %v remote %v", rec.local, rec.remote)
@@ -106,7 +118,7 @@ func TestRemoveOwnedWorktrees_RemoteRefusedWhenPolicyOff(t *testing.T) {
 	d := newTestDaemon(t)
 	rec := stubBranchDelete(t, gitworktree.BranchFacts{Branch: "feat/a", Remote: "origin", RemoteBranch: "feat/a"}, nil)
 
-	d.removeOwnedWorktreesWith([]string{"/w/feat-a"}, optsFor(false, true, "feat/a"))
+	d.removeOwnedWorktreesWith([]string{"/w/feat-a"}, optsFor(false, true, "feat/a", "origin"))
 
 	if len(rec.remote) != 0 {
 		t.Fatalf("pushed %v with the policy off", rec.remote)
@@ -123,7 +135,7 @@ func TestRemoveOwnedWorktrees_RemoteDeletedWhenPolicyOn(t *testing.T) {
 	d.remoteBranchDelete.Store(true)
 	rec := stubBranchDelete(t, gitworktree.BranchFacts{Branch: "feat/a", Remote: "fork", RemoteBranch: "feat/a"}, nil)
 
-	d.removeOwnedWorktreesWith([]string{"/w/feat-a"}, optsFor(false, true, "feat/a"))
+	d.removeOwnedWorktreesWith([]string{"/w/feat-a"}, optsFor(false, true, "feat/a", "fork"))
 
 	if len(rec.remote) != 1 || rec.remote[0] != "fork/feat/a" {
 		t.Fatalf("remote deletes = %v, want [fork/feat/a]", rec.remote)
@@ -148,7 +160,7 @@ func TestRemoveOwnedWorktrees_RemoteTimesOut(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		d.removeOwnedWorktreesWith([]string{"/w/feat-a"}, optsFor(false, true, "feat/a"))
+		d.removeOwnedWorktreesWith([]string{"/w/feat-a"}, optsFor(false, true, "feat/a", "origin"))
 		close(done)
 	}()
 	select {
@@ -194,7 +206,7 @@ func TestHandleDestroyTab_PassesBranchOpts(t *testing.T) {
 	t.Cleanup(func() { removeOwnedWorktreesFn = prev })
 
 	msg, err := ipc.NewMessage(ipc.MsgDestroyTab, ipc.DestroyTabPayload{
-		TabID: tab.ID, RemoveWorktree: true, DeleteBranch: true, ConfirmedBranches: []string{"feat/a"},
+		TabID: tab.ID, RemoveWorktree: true, DeleteBranch: true, Confirmations: []ipc.BranchConfirmation{{WorktreePath: "/w/feat-a", Branch: "feat/a"}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -203,10 +215,76 @@ func TestHandleDestroyTab_PassesBranchOpts(t *testing.T) {
 
 	select {
 	case opt := <-got:
-		if !opt.Local || opt.Remote || !opt.confirmed("feat/a") || opt.Owners["/w/feat-a"].ID != pane.ID {
+		if !opt.Local || opt.Remote || !opt.localConfirmed("/w/feat-a", gitworktree.BranchFacts{Branch: "feat/a"}) || opt.Owners["/w/feat-a"].ID != pane.ID {
 			t.Errorf("opts = %+v, want local, confirmed feat/a, testBranchOwner %s", opt, pane.ID)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("tab close never reached the removal seam")
+	}
+}
+
+// The upstream moved to another remote branch after the dialog opened: the
+// push would delete a target nobody confirmed. Kept.
+//
+// Fails if the remote delete checks only the local branch name.
+func TestRemoveOwnedWorktrees_RemoteTargetChangedIsKept(t *testing.T) {
+	d := newTestDaemon(t)
+	d.remoteBranchDelete.Store(true)
+	rec := stubBranchDelete(t, gitworktree.BranchFacts{Branch: "feat/a", Remote: "fork", RemoteBranch: "release"}, nil)
+
+	d.removeOwnedWorktreesWith([]string{"/w/feat-a"}, optsFor(false, true, "feat/a", "origin"))
+
+	if len(rec.remote) != 0 {
+		t.Errorf("pushed %v to a target the dialog never showed", rec.remote)
+	}
+}
+
+// One row cannot confirm another: a confirmation is filed under its own
+// worktree, so feat/b shown for another worktree does not cover this one.
+func TestRemoveOwnedWorktrees_OtherRowDoesNotConfirm(t *testing.T) {
+	d := newTestDaemon(t)
+	rec := stubBranchDelete(t, gitworktree.BranchFacts{Branch: "feat/b"}, nil)
+	opt := branchDeleteOpts{Local: true,
+		Confirmed: confirmations([]ipc.BranchConfirmation{{WorktreePath: "/w/other", Branch: "feat/b"}}),
+		Owners:    map[string]paneRef{"/w/feat-a": testBranchOwner}}
+
+	d.removeOwnedWorktreesWith([]string{"/w/feat-a"}, opt)
+
+	if len(rec.local) != 0 {
+		t.Errorf("deleted %v on another row's confirmation", rec.local)
+	}
+}
+
+// With no default branch, nothing can count unmerged commits or guard the
+// default: no branch is deleted.
+func TestRemoveOwnedWorktrees_UnknownDefaultKeepsBranch(t *testing.T) {
+	d := newTestDaemon(t)
+	rec := stubBranchDelete(t, gitworktree.BranchFacts{Branch: "feat/a"}, nil)
+	prev := branchFactsFn
+	branchFactsFn = func(context.Context, string, string, string) (gitworktree.BranchFacts, error) {
+		return gitworktree.BranchFacts{Branch: "feat/a"}, nil // DefaultRef unknown
+	}
+	t.Cleanup(func() { branchFactsFn = prev })
+
+	d.removeOwnedWorktreesWith([]string{"/w/feat-a"}, optsFor(true, false, "feat/a"))
+
+	if len(rec.local) != 0 {
+		t.Errorf("deleted %v with the default branch unknown", rec.local)
+	}
+}
+
+// A remote target equal to the default branch is never pushed to.
+func TestRemoveOwnedWorktrees_RemoteDefaultNeverDeleted(t *testing.T) {
+	d := newTestDaemon(t)
+	d.remoteBranchDelete.Store(true)
+	rec := stubBranchDelete(t, gitworktree.BranchFacts{Branch: "feat/a", Remote: "origin", RemoteBranch: "master"}, nil)
+	opt := branchDeleteOpts{Remote: true,
+		Confirmed: confirmations([]ipc.BranchConfirmation{{WorktreePath: "/w/feat-a", Branch: "feat/a", Remote: "origin", RemoteBranch: "master"}}),
+		Owners:    map[string]paneRef{"/w/feat-a": testBranchOwner}}
+
+	d.removeOwnedWorktreesWith([]string{"/w/feat-a"}, opt)
+
+	if len(rec.remote) != 0 {
+		t.Errorf("pushed a delete of the remote default branch: %v", rec.remote)
 	}
 }

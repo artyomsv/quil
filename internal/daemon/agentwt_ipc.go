@@ -33,7 +33,7 @@ func (d *Daemon) agentWorktreesResponse() ipc.AgentWorktreesRespPayload {
 			ID: e.ID, Kind: e.Kind, Repo: e.Repo, Path: e.Path, Branch: e.Branch,
 			FirstSeen: e.FirstSeen.UnixMilli(), Gone: e.Gone,
 			PaneID: e.PaneID, PaneName: e.PaneName, PaneLive: e.PaneID != "" && d.session.Pane(e.PaneID) != nil,
-			Source: e.Source, Trigger: e.Trigger, Command: e.Command,
+			Source: e.Source, Trigger: e.Trigger,
 		}
 		if e.Kind == agentWTKindWorktree && !e.Gone && e.Path != "" {
 			info.InUseBy = d.paneInWorktree(e.Path)
@@ -143,11 +143,13 @@ func (d *Daemon) agentWorktreeAct(req ipc.AgentWorktreeActReqPayload) ipc.AgentW
 		return out
 	}
 	owner := paneRef{ID: e.PaneID, Name: e.PaneName}
+	// The confirmation is filed under the ENTRY's own path: the client's copy
+	// of a path is never trusted to say which worktree it is about.
+	c := req.Confirmation
+	c.WorktreePath = e.Path
 	opt := branchDeleteOpts{Local: req.DeleteBranch, Remote: req.DeleteRemoteBranch,
-		Owners: map[string]paneRef{e.Path: owner}}
-	if req.ConfirmedBranch != "" {
-		opt.Confirmed = []string{req.ConfirmedBranch}
-	}
+		Owners:    map[string]paneRef{e.Path: owner},
+		Confirmed: confirmations([]ipc.BranchConfirmation{c})}
 
 	switch e.Kind {
 	case agentWTKindWorktree:
@@ -186,7 +188,7 @@ func (d *Daemon) agentWorktreeAct(req ipc.AgentWorktreeActReqPayload) ipc.AgentW
 			out.Error = "a branch entry takes only the branch deletes"
 			return out
 		}
-		if req.ConfirmedBranch != e.Branch {
+		if req.Confirmation.Branch != e.Branch {
 			out.Error = "the branch shown is not the recorded one"
 			return out
 		}
@@ -196,7 +198,7 @@ func (d *Daemon) agentWorktreeAct(req ipc.AgentWorktreeActReqPayload) ipc.AgentW
 			return out
 		}
 		log.Printf("agent worktrees: deleting branch %s (entry %s)", e.Branch, e.ID)
-		d.deleteBranches(e.Repo, f, opt, owner)
+		d.deleteBranches(e.Repo, e.Path, f, opt, owner)
 	default:
 		out.Error = "unknown entry kind"
 		return out
@@ -235,6 +237,9 @@ func (d *Daemon) checkAgentBranch(e AgentWTEntry) (gitworktree.BranchFacts, erro
 	}
 	if f.IsDefault {
 		return f, errors.New("it is the default branch")
+	}
+	if f.DefaultRef == "" {
+		return f, errors.New("no default branch found, so unmerged commits cannot be counted")
 	}
 	return f, nil
 }

@@ -47,7 +47,8 @@ type AgentWTEntry struct {
 	Source    string    `json:"source,omitempty"`
 	SessionID string    `json:"session_id,omitempty"`
 	Trigger   string    `json:"trigger,omitempty"`
-	Command   string    `json:"command,omitempty"`
+	// No command text is kept: a shell command can carry a credential
+	// (an inline token, an authenticated URL), and the compare needs none.
 }
 
 // Entry kinds.
@@ -83,7 +84,7 @@ type agentWTFile struct {
 
 // agentWTAttr is who a compare attributes new entries to.
 type agentWTAttr struct {
-	PaneID, PaneName, Source, SessionID, Trigger, Command string
+	PaneID, PaneName, Source, SessionID, Trigger string
 }
 
 // agentWTPane is what the store needs to know about a pane.
@@ -102,14 +103,25 @@ type agentWTStore struct {
 	touched  map[string]map[string]bool
 	lastAttr map[string]agentWTAttr
 	// own are paths and branches this daemon created itself: they join the
-	// baseline and never become entries.
+	// baseline and never become entries. ownBranches is keyed by
+	// ownBranchKey(repo, branch): a same-named branch in another repository is
+	// somebody else's.
 	ownPaths    map[string]bool
 	ownBranches map[string]bool
+	// agentDirs is where each pane's AGENT last worked, from its probes. The
+	// pane's own CWD does not move when Claude enters a worktree, so this is
+	// what tells a removal that the worktree is in use.
+	agentDirs map[string]string
+	// seeded is the directory each pane's baseline was last seeded for.
+	seeded map[string]string
 	// One compare per directory at a time; a probe that arrives meanwhile
 	// runs it once more.
 	running map[string]bool
 	pending map[string]agentWTAttr
 	saveT   *time.Timer
+	// saveMu orders whole saves (snapshot + write), so an older snapshot can
+	// never be written after a newer one.
+	saveMu sync.Mutex
 
 	now       func() time.Time
 	listFn    func(ctx context.Context, dir string) ([]gitworktree.Worktree, error)
@@ -127,6 +139,8 @@ func newAgentWTStore(path string, paneFn func(string) (agentWTPane, bool)) *agen
 		lastAttr:    map[string]agentWTAttr{},
 		ownPaths:    map[string]bool{},
 		ownBranches: map[string]bool{},
+		agentDirs:   map[string]string{},
+		seeded:      map[string]string{},
 		running:     map[string]bool{},
 		pending:     map[string]agentWTAttr{},
 		now:         time.Now,
@@ -163,9 +177,11 @@ func (s *agentWTStore) probe(p hookevents.Payload) {
 	}
 	attr := agentWTAttr{
 		PaneID: p.PaneID, PaneName: pane.Name, Source: p.Source, SessionID: p.SessionID,
-		Trigger: p.Data[hookevents.DataProbeTrigger], Command: p.Data[hookevents.DataProbeCommand],
+		Trigger: p.Data[hookevents.DataProbeTrigger],
 	}
 	s.mu.Lock()
+	// The agent is (or, after ExitWorktree, is back) in this directory.
+	s.agentDirs[p.PaneID] = p.CWD
 	if s.touched[p.PaneID] == nil {
 		s.touched[p.PaneID] = map[string]bool{}
 	}
@@ -193,7 +209,7 @@ func (s *agentWTStore) turnEnded(paneID string) {
 	delete(s.touched, paneID)
 	attr := s.lastAttr[paneID]
 	s.mu.Unlock()
-	attr.PaneID, attr.PaneName, attr.Trigger, attr.Command = paneID, pane.Name, "turn-end", ""
+	attr.PaneID, attr.PaneName, attr.Trigger = paneID, pane.Name, "turn-end"
 	if pane.CWD != "" {
 		if dirs == nil {
 			dirs = map[string]bool{}
@@ -213,12 +229,66 @@ func (s *agentWTStore) forgetPane(paneID string) {
 	s.mu.Lock()
 	delete(s.touched, paneID)
 	delete(s.lastAttr, paneID)
+	delete(s.agentDirs, paneID)
+	delete(s.seeded, paneID)
 	s.mu.Unlock()
 }
 
-// noteOwnWorktree records a worktree this daemon created, so no compare ever
-// attributes it to an agent.
-func (s *agentWTStore) noteOwnWorktree(path, branch string) {
+// seed takes the baseline of the pane's repository before its agent acts:
+// called on a turn's START edge. A worktree made in a repository with no
+// baseline yet would otherwise be read as pre-existing by the first compare
+// and never recorded. Once per pane and directory; a later compare of an
+// already-seen repository costs one listing.
+func (s *agentWTStore) seed(paneID string) {
+	if s == nil {
+		return
+	}
+	pane, ok := s.paneFn(paneID)
+	if !ok || pane.Sandbox || pane.CWD == "" {
+		return
+	}
+	s.mu.Lock()
+	if s.seeded[paneID] == pane.CWD {
+		s.mu.Unlock()
+		return
+	}
+	s.seeded[paneID] = pane.CWD
+	s.mu.Unlock()
+	s.schedule(pane.CWD, agentWTAttr{PaneID: paneID, PaneName: pane.Name, Trigger: "seed"})
+}
+
+// paneInDir reports a live pane whose AGENT last worked inside path (from its
+// probes), or "". The pane's own CWD stays where it was when Claude enters a
+// worktree, so a removal must ask this as well.
+func (s *agentWTStore) paneInDir(path string) string {
+	if s == nil {
+		return ""
+	}
+	s.mu.Lock()
+	dirs := make(map[string]string, len(s.agentDirs))
+	for id, dir := range s.agentDirs {
+		dirs[id] = dir
+	}
+	s.mu.Unlock()
+	for id, dir := range dirs {
+		if !pathWithin(path, dir) {
+			continue
+		}
+		if _, live := s.paneFn(id); live {
+			return id
+		}
+	}
+	return ""
+}
+
+// ownBranchKey scopes a branch name to its repository.
+func ownBranchKey(repo, branch string) string {
+	return normalizeWorktreePath(repo) + "\x00" + branch
+}
+
+// noteOwnWorktree records a worktree this daemon created in repo, so no
+// compare ever attributes it to an agent.
+func (s *agentWTStore) noteOwnWorktree(repo, path, branch string) {
 	if s == nil {
 		return
 	}
@@ -228,7 +298,7 @@ func (s *agentWTStore) noteOwnWorktree(path, branch string) {
 		s.ownPaths[normalizeWorktreePath(path)] = true
 	}
 	if branch != "" && len(s.ownBranches) < maxAgentWTEntries {
-		s.ownBranches[branch] = true
+		s.ownBranches[ownBranchKey(repo, branch)] = true
 	}
 }
 
@@ -357,11 +427,14 @@ func (s *agentWTStore) apply(list []gitworktree.Worktree, branchesOK bool, branc
 		}
 		changed = true
 	}
+	var goneWT []AgentWTEntry
 	for p := range base {
 		if _, still := curSet[p]; !still {
-			changed = s.markGone(func(e AgentWTEntry) bool {
+			gone := s.markGone(func(e AgentWTEntry) bool {
 				return e.Kind == agentWTKindWorktree && normalizeWorktreePath(e.Path) == p
-			}, now) || changed
+			}, now)
+			goneWT = append(goneWT, gone...)
+			changed = changed || len(gone) > 0
 		}
 	}
 	if len(r.Worktrees) != len(cur) {
@@ -385,8 +458,8 @@ func (s *agentWTStore) apply(list []gitworktree.Worktree, branchesOK bool, branc
 			if baseB[b] || b == def {
 				continue
 			}
-			if s.ownBranches[b] {
-				delete(s.ownBranches, b)
+			if ok := ownBranchKey(repoPath, b); s.ownBranches[ok] {
+				delete(s.ownBranches, ok)
 				continue
 			}
 			if madeBranch[b] {
@@ -398,34 +471,57 @@ func (s *agentWTStore) apply(list []gitworktree.Worktree, branchesOK bool, branc
 		for b := range baseB {
 			if !curB[b] {
 				bb := b
-				changed = s.markGone(func(e AgentWTEntry) bool {
+				gone := s.markGone(func(e AgentWTEntry) bool {
 					return e.Kind == agentWTKindBranch && e.Repo == repoPath && e.Branch == bb
-				}, now) || changed
+				}, now)
+				changed = changed || len(gone) > 0
 			}
+		}
+		// A recorded worktree removed WITHOUT its branch leaves the branch
+		// behind; its entry is gone, so the branch gets an entry of its own
+		// (same attribution) or it could never be cleaned up from the view.
+		for _, ge := range goneWT {
+			if ge.Branch == "" || !curB[ge.Branch] || ge.Branch == def || s.liveBranchEntry(repoPath, ge.Branch) {
+				continue
+			}
+			s.add(AgentWTEntry{Kind: agentWTKindBranch, Repo: repoPath, Branch: ge.Branch},
+				agentWTAttr{PaneID: ge.PaneID, PaneName: ge.PaneName, Source: ge.Source, SessionID: ge.SessionID, Trigger: ge.Trigger}, ge.FirstSeen)
+			changed = true
 		}
 		r.Branches = names
 	}
 	return changed
 }
 
+// liveBranchEntry reports a recorded, not-gone branch entry. Caller holds mu.
+func (s *agentWTStore) liveBranchEntry(repo, branch string) bool {
+	for _, e := range s.entries {
+		if e.Kind == agentWTKindBranch && !e.Gone && e.Repo == repo && e.Branch == branch {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *agentWTStore) add(e AgentWTEntry, attr agentWTAttr, now time.Time) {
 	e.ID = uuid.NewString()
 	e.FirstSeen = now
 	e.PaneID, e.PaneName, e.Source, e.SessionID = attr.PaneID, attr.PaneName, attr.Source, attr.SessionID
-	e.Trigger, e.Command = attr.Trigger, attr.Command
+	e.Trigger = attr.Trigger
 	s.entries = append(s.entries, e)
 	s.evictEntries()
 	log.Printf("agent worktrees: %s %s%s appeared while pane %s ran", e.Kind, e.Path, e.Branch, e.PaneID)
 }
 
 // markGone marks every live entry match selects as gone, or deletes it when
-// it lived less than agentWTShortLived. Reports whether anything changed.
-func (s *agentWTStore) markGone(match func(AgentWTEntry) bool, now time.Time) bool {
-	changed := false
+// it lived less than agentWTShortLived. It returns the entries it matched, as
+// they were before.
+func (s *agentWTStore) markGone(match func(AgentWTEntry) bool, now time.Time) []AgentWTEntry {
+	var matched []AgentWTEntry
 	kept := s.entries[:0]
 	for _, e := range s.entries {
 		if !e.Gone && match(e) {
-			changed = true
+			matched = append(matched, e)
 			if now.Sub(e.FirstSeen) < agentWTShortLived {
 				continue
 			}
@@ -434,7 +530,7 @@ func (s *agentWTStore) markGone(match func(AgentWTEntry) bool, now time.Time) bo
 		kept = append(kept, e)
 	}
 	s.entries = kept
-	return changed
+	return matched
 }
 
 // evictEntries keeps at most maxAgentWTEntries: gone ones first, oldest first.
@@ -599,6 +695,12 @@ func (s *agentWTStore) save() {
 	if s == nil || s.path == "" {
 		return
 	}
+	// The whole save — snapshot AND write — under saveMu: two saves (the
+	// debounce and close, or two debounces) take their snapshots in the order
+	// they write, so an older record can never land after a newer one. close
+	// also waits here for a save already running.
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
 	s.mu.Lock()
 	b, err := json.Marshal(agentWTFile{V: 1, Repos: s.repos, Entries: s.entries})
 	s.mu.Unlock()

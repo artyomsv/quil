@@ -408,7 +408,8 @@ export default async function quilSessionTracker(input) {
           await logLine("worktree probe dropped: directory over the cap");
           return;
         }
-        await spool("WorktreeProbe", "Worktree command", "info", { trigger: "shell", command: cmd }, dir);
+        // The command text is not spooled: it can carry a credential.
+        await spool("WorktreeProbe", "Worktree command", "info", { trigger: "shell" }, dir);
       } catch (e) {
         await logLine("tool.execute.after handler error: " + (e && e.message ? e.message : String(e)));
       }

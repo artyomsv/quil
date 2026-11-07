@@ -142,6 +142,24 @@ func TestReadBranchFacts_UnlistedPathIsAnError(t *testing.T) {
 	}
 }
 
+// A feature branch whose upstream is the remote DEFAULT branch must never
+// offer a remote delete: that push would delete origin/main.
+//
+// Fails if the remote target is not compared with the default branch.
+func TestReadBranchFacts_UpstreamOnDefaultIsNoRemoteTarget(t *testing.T) {
+	factsScript(t, "/w/feat", "feat", "origin/main", []string{"origin"}, map[string]bool{
+		"refs/remotes/origin/main": true,
+	})
+
+	f, err := ReadBranchFacts(context.Background(), "/repo", "/w/feat", "refs/remotes/origin/main")
+	if err != nil {
+		t.Fatalf("ReadBranchFacts: %v", err)
+	}
+	if f.Remote != "" || f.RemoteReason == "" {
+		t.Errorf("Remote = %q/%q reason %q; want no remote target and a reason", f.Remote, f.RemoteBranch, f.RemoteReason)
+	}
+}
+
 func TestShortBranchName(t *testing.T) {
 	for ref, want := range map[string]string{
 		"refs/heads/main":            "main",

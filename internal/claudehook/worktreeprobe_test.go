@@ -49,15 +49,15 @@ func TestRunHook_EnterWorktreeSpoolsProbeWithWorktreePath(t *testing.T) {
 }
 
 // A shell command that makes a worktree spools a probe for the session's cwd,
-// carrying the command for display.
+// carrying the trigger and NEVER the command text (it can hold a credential).
 func TestRunHook_BashWorktreeAddSpoolsProbe(t *testing.T) {
 	dir, _ := runProbe(t, map[string]any{
 		"hook_event_name": "PostToolUse", "tool_name": "Bash", "cwd": "/w/repo",
 		"tool_input": map[string]any{"command": "git worktree add ../wt-bash -b bash-branch"},
 	})
 	got := readSpool(t, dir, "pane-wt")
-	if len(got) != 1 || got[0].CWD != "/w/repo" || got[0].Data[hookevents.DataProbeCommand] == "" {
-		t.Fatalf("spool = %+v, want one shell probe for /w/repo with the command", got)
+	if len(got) != 1 || got[0].CWD != "/w/repo" || got[0].Data[hookevents.DataProbeTrigger] != hookevents.ProbeShell || len(got[0].Data) != 1 {
+		t.Fatalf("spool = %+v, want one shell probe for /w/repo carrying only the trigger", got)
 	}
 }
 

@@ -102,6 +102,13 @@ func ReadBranchFactsFor(ctx context.Context, repo, branch, defaultRef string) (B
 	if err := resolveRemote(ctx, repo, &f); err != nil {
 		return f, err
 	}
+	// A feature branch can track the remote DEFAULT branch (`-u origin main`).
+	// Its remote target is then the default itself, and deleting it would
+	// delete origin/main: never offered.
+	if f.Remote != "" && defaultRef != "" && f.RemoteBranch == ShortBranchName(defaultRef) {
+		f.Remote, f.RemoteBranch = "", ""
+		f.RemoteReason = "its remote branch is the default branch"
+	}
 	if f.Remote != "" {
 		tracking := "refs/remotes/" + f.Remote + "/" + f.RemoteBranch
 		if f.Unpushed, err = countCommits(ctx, repo, tracking, local); err != nil {

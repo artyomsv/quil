@@ -76,11 +76,16 @@ func collectConfirmWorktrees(panes []*PaneModel) []confirmWorktree {
 			continue
 		}
 		seen[p.WorktreePath] = true
-		out = append(out, confirmWorktree{
-			path: p.WorktreePath, label: confirmWorktreeLabel(p),
-			prNumber: p.PRNumber,
-			prOpen:   p.PRNumber > 0 && p.PRStatus != "merged" && p.PRStatus != "closed",
-		})
+		row := confirmWorktree{path: p.WorktreePath, label: confirmWorktreeLabel(p)}
+		// The pane's PR row describes the pane's CURRENT directory. Only
+		// while the shell is still in its own worktree is that the branch the
+		// remote delete would hit; otherwise the warning would name another
+		// checkout's PR, so it is left out.
+		if p.CWD == p.WorktreePath {
+			row.prNumber = p.PRNumber
+			row.prOpen = p.PRNumber > 0 && p.PRStatus != "merged" && p.PRStatus != "closed"
+		}
+		out = append(out, row)
 	}
 	return out
 }

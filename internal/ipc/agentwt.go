@@ -30,7 +30,6 @@ type AgentWorktreeInfo struct {
 	PaneLive bool   `json:"pane_live,omitempty"`
 	Source   string `json:"source,omitempty"`
 	Trigger  string `json:"trigger,omitempty"`
-	Command  string `json:"command,omitempty"`
 	// InUseBy names a live pane sitting in the worktree, which blocks its
 	// removal.
 	InUseBy string `json:"in_use_by,omitempty"`
@@ -58,7 +57,7 @@ type AgentWorktreeFactsRespPayload struct {
 
 // AgentWorktreeActReqPayload acts on one entry. Forget drops the record only.
 // A worktree entry takes RemoveWorktree (and the branch deletes with it); a
-// branch entry takes only the branch deletes. ConfirmedBranch is CHECK-ONLY:
+// branch entry takes only the branch deletes. Confirmation is CHECK-ONLY:
 // the daemon acts on the branch it reads from git, and only when it matches.
 type AgentWorktreeActReqPayload struct {
 	ID                 string `json:"id"`
@@ -66,7 +65,10 @@ type AgentWorktreeActReqPayload struct {
 	RemoveWorktree     bool   `json:"remove_worktree,omitempty"`
 	DeleteBranch       bool   `json:"delete_branch,omitempty"`
 	DeleteRemoteBranch bool   `json:"delete_remote_branch,omitempty"`
-	ConfirmedBranch    string `json:"confirmed_branch,omitempty"`
+	// Confirmation is CHECK-ONLY: the branch and remote target the view
+	// showed for this entry (its WorktreePath is ignored: the entry names
+	// the worktree).
+	Confirmation BranchConfirmation `json:"confirmation"`
 }
 
 // AgentWorktreeActRespPayload answers an act. Error is a refusal that changed

@@ -3,6 +3,8 @@ package tui
 import (
 	"fmt"
 	"strings"
+
+	"github.com/artyomsv/quil/internal/ipc"
 )
 
 // The close dialog's worktree section: the worktree toggle, the files the
@@ -97,18 +99,19 @@ func (m Model) confirmDest() (string, bool) {
 // confirmBranchSelection is what an accept sends: the two flags as they take
 // effect (an armed row that is no longer enabled counts as off) and the
 // branch names on screen, which the daemon only CHECKS against what it reads.
-func (m Model) confirmBranchSelection() (local, remote bool, confirmed []string) {
+func (m Model) confirmBranchSelection() (local, remote bool, confirmed []ipc.BranchConfirmation) {
 	local = m.confirmDeleteBranch && m.localRowReason() == ""
 	remote = m.confirmDeleteRemote && m.remoteRowReason() == ""
 	if !local && !remote {
 		return false, false, nil
 	}
-	seen := map[string]bool{}
+	// One confirmation PER WORKTREE, carrying the remote target shown: the
+	// daemon matches each against that worktree alone, so one row's branch
+	// cannot confirm another's, and a moved upstream is not deleted.
 	for _, w := range m.confirmDeletable() {
-		if !seen[w.branch] {
-			seen[w.branch] = true
-			confirmed = append(confirmed, w.branch)
-		}
+		confirmed = append(confirmed, ipc.BranchConfirmation{
+			WorktreePath: w.path, Branch: w.branch, Remote: w.remote, RemoteBranch: w.remoteBranch,
+		})
 	}
 	return local, remote, confirmed
 }
@@ -151,13 +154,35 @@ func (m Model) focusedWorktree() (confirmWorktree, bool) {
 	if len(m.confirmWorktrees) == 0 {
 		return confirmWorktree{}, false
 	}
-	i := max(0, min(m.confirmFileFocus, min(len(m.confirmWorktrees), confirmWorktreeMaxRows)-1))
+	i := max(0, min(m.confirmFileFocus, m.confirmRowCap()-1))
 	return m.confirmWorktrees[i], true
+}
+
+// confirmRowCap is how many worktree rows the dialog draws: at most
+// confirmWorktreeMaxRows, and fewer when the terminal is short. Every other
+// line of the box (branch rows, warnings, footer) must stay on screen, and
+// lipgloss.Place does not clip, so the worktree list gives way first. It is
+// measured like confirmFileRows: one probe render with one row and no files.
+func (m Model) confirmRowCap() int {
+	n := min(len(m.confirmWorktrees), confirmWorktreeMaxRows)
+	if m.confirmRowCapSet {
+		return min(n, m.confirmRowCapFixed)
+	}
+	if m.height <= 0 || n <= 1 {
+		return n
+	}
+	probe := m
+	probe.confirmRowCapSet, probe.confirmRowCapFixed = true, 1
+	probe.confirmFileRowsSet, probe.confirmFileRowsFixed = true, 0
+	used := strings.Count(probe.renderConfirmDialog(), "\n") + 1
+	// Each further row costs one line; one line stays for a file row.
+	spare := m.height - dialogVChrome - used - 1
+	return max(1, min(n, 1+spare))
 }
 
 // moveConfirmFocus moves the file list to the previous or next worktree.
 func (m *Model) moveConfirmFocus(delta int) {
-	n := min(len(m.confirmWorktrees), confirmWorktreeMaxRows)
+	n := m.confirmRowCap()
 	if n == 0 {
 		return
 	}
@@ -189,6 +214,7 @@ func (m Model) confirmFileRows() int {
 		return confirmFileRowsMax
 	}
 	probe := m
+	probe.confirmRowCapSet, probe.confirmRowCapFixed = true, m.confirmRowCap()
 	probe.confirmFileRowsSet, probe.confirmFileRowsFixed = true, 0
 	used := strings.Count(probe.renderConfirmDialog(), "\n") + 1
 	return max(1, min(confirmFileRowsMax, m.height-dialogVChrome-used))
@@ -288,7 +314,9 @@ func (m Model) confirmCheckRow(row int, armed bool, label, reason string, inner 
 	style := dialogNormal
 	switch {
 	case reason != "":
-		text += " — " + reason
+		// The reason can be git's own error text from the daemon: remote
+		// text, sanitised like every other.
+		text += " — " + sanitizeRemoteText(reason)
 		style = dialogSubtle
 	case armed:
 		style = dialogWarn

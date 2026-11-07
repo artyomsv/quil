@@ -68,7 +68,7 @@ type claudeStdin struct {
 // NOT gated on agent_id, unlike the PreToolUse heartbeat: a worktree a
 // subagent makes is exactly what the daemon wants to see.
 func worktreeProbe(env HookEnv, in claudeStdin, nowMs int64) error {
-	var dir, trigger, cmd string
+	var dir, trigger string
 	switch in.ToolName {
 	case "EnterWorktree":
 		var r struct {
@@ -89,7 +89,7 @@ func worktreeProbe(env HookEnv, in claudeStdin, nowMs int64) error {
 		if json.Unmarshal(in.ToolInput, &ti) != nil || !hookevents.IsWorktreeCommand(ti.Command) {
 			return nil
 		}
-		dir, trigger, cmd = in.CWD, hookevents.ProbeShell, ti.Command
+		dir, trigger = in.CWD, hookevents.ProbeShell
 	default:
 		return nil
 	}
@@ -101,12 +101,11 @@ func worktreeProbe(env HookEnv, in claudeStdin, nowMs int64) error {
 		hookLog(env.QuilDir, env.PaneID, "worktree probe dropped: directory over the cap")
 		return nil
 	}
-	data := map[string]string{hookevents.DataProbeTrigger: trigger}
-	if cmd != "" {
-		data[hookevents.DataProbeCommand] = truncate(cmd, hookevents.MaxDataValueBytes)
-	}
+	// The command text itself is NOT spooled: it can carry a credential (an
+	// inline token, an authenticated URL), and the daemon's compare needs only
+	// the directory.
 	return spoolEventCWD(env, nowMs, hookevents.EventWorktreeProbe, in.SessionID, dir,
-		"Worktree command", hookevents.SeverityInfo, data)
+		"Worktree command", hookevents.SeverityInfo, map[string]string{hookevents.DataProbeTrigger: trigger})
 }
 
 // sessionIDRe matches the Claude session-id shape (uuid-ish hex). Mirrors the

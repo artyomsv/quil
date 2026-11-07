@@ -49,6 +49,32 @@ func TestRemotePushEnv_KeepsUserSSHCommand(t *testing.T) {
 	}
 }
 
+// A repository's own core.sshCommand (a key file, a jump host) must survive:
+// GIT_SSH_COMMAND outranks it, so adding ours would break a push that works.
+//
+// Fails if DeleteRemoteBranch adds GIT_SSH_COMMAND when the repo sets one.
+func TestRemotePushEnvFor_KeepsRepoSSHCommand(t *testing.T) {
+	stubGit(t, "ssh -i ~/.ssh/deploy\n", nil)
+	env := remotePushEnvFor(context.Background(), "/repo", []string{"PATH=/bin"})
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "GIT_SSH_COMMAND=") {
+			t.Errorf("env overrides the repository's core.sshCommand: %v", env)
+		}
+	}
+}
+
+// Push output is held in a bounded buffer, never all of it.
+func TestBoundedPushOutput(t *testing.T) {
+	b := &boundedBuffer{max: maxPushOutput}
+	big := strings.Repeat("x", maxPushOutput*4)
+	if _, err := b.Write([]byte(big)); err != nil {
+		t.Fatal(err)
+	}
+	if len(b.String()) > maxPushOutput {
+		t.Errorf("buffer holds %d bytes, cap %d", len(b.String()), maxPushOutput)
+	}
+}
+
 // `--` keeps a dash-led branch name from reaching git as an option.
 func TestDeleteLocalBranch_TerminatesOptions(t *testing.T) {
 	calls := stubGit(t, "", nil)

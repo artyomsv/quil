@@ -145,3 +145,29 @@ func TestAgentWTDialog_HidesGoneByDefault(t *testing.T) {
 		t.Errorf("g did not show gone entries: %+v", rows)
 	}
 }
+
+// A repository whose record may miss items says so, in one line, and the
+// list still fits the terminal with that line added.
+//
+// Fails if the uncertain repositories are not shown, or the extra line
+// pushes the footer off screen.
+func TestAgentWTDialog_ShowsUncertainReposAndStillFits(t *testing.T) {
+	var entries []ipc.AgentWorktreeInfo
+	for i := 0; i < 40; i++ {
+		entries = append(entries, wtInfo(fmt.Sprintf("e%02d", i), fmt.Sprintf("/repo%d", i%3), fmt.Sprintf("feat/%02d", i)))
+	}
+	m := agentWTModel(entries...)
+	m.agentWT.uncertain = []string{"/repo1"}
+	m.width, m.height = 100, 24
+
+	out := m.renderAgentWTDialog()
+	if !strings.Contains(stripANSI(out), "May miss items in /repo1") {
+		t.Errorf("no uncertainty line:\n%s", stripANSI(out))
+	}
+	if box := strings.Count(out, "\n") + 1 + dialogVChrome; box > m.height {
+		t.Errorf("box is %d rows in a %d-row terminal", box, m.height)
+	}
+	if !strings.Contains(stripANSI(out), "Esc close") {
+		t.Error("the footer is not drawn")
+	}
+}

@@ -1863,7 +1863,12 @@ seen evicted), 500 entries (gone first). The record is written through
 held): a listing taken after the agent's first `git worktree add` would adopt
 that worktree as pre-existing for good. A failed or slow listing does not hold
 the agent back — the spawn goes on, the pane is not marked seeded, and the
-turn-start seed retries. A RESTORED pane seeds off-goroutine (`seedSoon`):
+turn-start seed retries. An INCOMPLETE read (timeout, no permit, a cut
+branch list — not a quick "not a repository") marks the pane `seedFailed`, and
+every repository its compares then see for the first time is baselined
+`Uncertain` (persisted): the cleanup view says "may miss items" for it rather
+than presenting a baseline that may already hold what the agent made. A
+RESTORED pane seeds off-goroutine (`seedSoon`):
 restore runs before the daemon listens, and a resumed agent waits for a
 prompt. A pane counts as seeded only after a compare that READ the
 repository. A repository the agent first reaches mid-session is baselined by
@@ -1888,7 +1893,11 @@ live entry gets one, with the gone worktree's attribution.
 **A remote branch delete asks the REMOTE for its default**
 (`ls-remote --symref <remote> HEAD`, same no-prompt env, inside the 30 s
 budget) right before the push, because the local `refs/remotes/<remote>/HEAD`
-can be stale. No answer, or no symref in it, refuses the delete.
+can be stale. No answer, or no symref in it, refuses the delete. And the
+check must be ABOUT the server the push reaches: `ls-remote` uses the fetch
+address, a push uses `pushurl`, every `url`, or a `pushInsteadOf` rewrite —
+so `singlePushTarget` refuses unless `git remote get-url --all` and
+`get-url --push --all` each give exactly one address and the same one.
 
 **A worktree whose files were not READ is never deleted** — this reverses
 the earlier "the status answer is advisory" rule for the DELETE (the count is

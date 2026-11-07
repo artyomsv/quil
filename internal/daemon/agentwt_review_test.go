@@ -234,15 +234,20 @@ func TestAgentWT_KeptBranchSettledAfterATruncatedBranchList(t *testing.T) {
 //
 // Fails if the spawn-time seed only queues work and returns.
 func TestAgentWT_SeedSyncHoldsTheStartUntilTheBaselineIsIn(t *testing.T) {
-	repo := &fakeRepo{branches: []string{"master"}, gate: make(chan struct{})}
+	repo := &fakeRepo{branches: []string{"master"}, gate: make(chan struct{}), entered: make(chan struct{}, 1)}
 	s, _ := newTestAgentWT(t, repo, agentPanes)
 
 	done := make(chan bool, 1)
 	go func() { done <- s.seedSync("pane-a") }()
 	select {
+	case <-repo.entered: // the listing has started and is held
+	case <-time.After(5 * time.Second):
+		t.Fatal("the seed never started its listing")
+	}
+	select {
 	case <-done:
 		t.Fatal("seedSync returned while the listing was still held")
-	case <-time.After(50 * time.Millisecond):
+	default:
 	}
 	close(repo.gate)
 	if ok := <-done; !ok {
@@ -399,5 +404,67 @@ func TestAgentWT_ProcessExitClearsSubagentOverflow(t *testing.T) {
 			t.Fatal("the exited pane still blocks every path")
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// An incomplete pre-start read never becomes a silent baseline. A timeout
+// (the fake honours the deadline) and a cut branch list each mark the
+// repository Uncertain, which the cleanup view shows; a quick "not a
+// repository" answer and a complete read do not.
+//
+// Fails if a failed seed lets the next first-sight listing adopt what the
+// agent made meanwhile without saying so.
+func TestAgentWT_IncompleteSeedMarksTheRepositoryUncertain(t *testing.T) {
+	prev := agentWTSeedTimeout
+	agentWTSeedTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { agentWTSeedTimeout = prev })
+
+	for _, tc := range []struct {
+		name          string
+		repo          *fakeRepo
+		afterSeed     func(r *fakeRepo)
+		wantUncertain bool
+	}{
+		{"timeout", &fakeRepo{branches: []string{"master"}, gate: make(chan struct{})},
+			func(r *fakeRepo) { r.gate = nil }, true},
+		{"cut branch list", &fakeRepo{branches: []string{"master"}, truncated: true},
+			func(r *fakeRepo) { r.truncated = false }, true},
+		{"not a repository", &fakeRepo{branches: []string{"master"}, listErr: errors.New("not a git repository")},
+			func(r *fakeRepo) { r.listErr = nil }, false},
+		{"complete", &fakeRepo{branches: []string{"master"}}, func(*fakeRepo) {}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _ := newTestAgentWT(t, tc.repo, agentPanes)
+			ok := s.seedSync("pane-a")
+			if ok != (tc.name == "complete") {
+				t.Fatalf("seedSync = %v", ok)
+			}
+			tc.afterSeed(tc.repo)
+			// The agent acts, then its first probe is the first listing
+			// that reads (for the failed seeds).
+			tc.repo.worktrees = []gitworktree.Worktree{{Path: "/w/early", Branch: "early"}}
+			tc.repo.branches = []string{"master", "early"}
+			s.probe(probeFor("pane-a", "/repo"))
+
+			got := s.uncertainRepos()
+			if tc.wantUncertain && (len(got) != 1 || got[0] != "/repo") {
+				t.Errorf("uncertainRepos = %v, want /repo", got)
+			}
+			if !tc.wantUncertain && len(got) != 0 {
+				t.Errorf("uncertainRepos = %v, want none", got)
+			}
+		})
+	}
+}
+
+// The cleanup view's list answer carries the uncertain repositories.
+func TestAgentWorktreesResponse_CarriesUncertainRepos(t *testing.T) {
+	d := daemonWithRecord(t)
+	d.agentWT.repos["/repo"] = &agentWTRepo{Path: "/repo", Uncertain: true}
+
+	got := d.agentWorktreesResponse()
+
+	if len(got.UncertainRepos) != 1 || got.UncertainRepos[0] != "/repo" {
+		t.Errorf("UncertainRepos = %v, want [/repo]", got.UncertainRepos)
 	}
 }

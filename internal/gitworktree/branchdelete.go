@@ -38,6 +38,13 @@ func DeleteRemoteBranch(ctx context.Context, repo, remote, branch string) error 
 	if remote == "" || branch == "" || strings.HasPrefix(remote, "-") {
 		return fmt.Errorf("no remote branch to delete")
 	}
+	// The default is checked on the FETCH address, and the push goes to the
+	// push address(es): pushurl, several urls, or pushInsteadOf make them
+	// differ. Only one address, the same for both, binds the check to the
+	// delete; anything else refuses.
+	if err := singlePushTarget(ctx, repo, remote); err != nil {
+		return fmt.Errorf("git push %s :%s: %w", remote, branch, err)
+	}
 	env := remotePushEnvFor(ctx, repo, os.Environ())
 	// The remote's default is asked of the REMOTE, right before the push:
 	// the local refs/remotes/<remote>/HEAD can be stale (the remote changed
@@ -157,4 +164,40 @@ func remoteHeadLive(ctx context.Context, repo string, env []string, remote strin
 		}
 	}
 	return "", fmt.Errorf("the remote names no default branch")
+}
+
+// singlePushTarget refuses unless remote has exactly ONE fetch address and
+// exactly ONE push address and they are the same, after git's own insteadOf
+// and pushInsteadOf expansion (`git remote get-url` applies both). Local
+// config only, no network.
+func singlePushTarget(ctx context.Context, repo, remote string) error {
+	urls := func(push bool) ([]string, error) {
+		args := []string{"remote", "get-url", "--all"}
+		if push {
+			args = append(args, "--push")
+		}
+		out, err := runGit(ctx, repo, append(args, remote)...)
+		if err != nil {
+			return nil, err
+		}
+		var list []string
+		for _, l := range strings.Split(strings.ReplaceAll(out, "\r\n", "\n"), "\n") {
+			if l = strings.TrimSpace(l); l != "" {
+				list = append(list, l)
+			}
+		}
+		return list, nil
+	}
+	fetch, err := urls(false)
+	if err != nil {
+		return fmt.Errorf("could not read the remote's address: %w", err)
+	}
+	push, err := urls(true)
+	if err != nil {
+		return fmt.Errorf("could not read the remote's push address: %w", err)
+	}
+	if len(fetch) != 1 || len(push) != 1 || fetch[0] != push[0] {
+		return fmt.Errorf("the remote pushes to a different or to several addresses (%d fetch, %d push)", len(fetch), len(push))
+	}
+	return nil
 }

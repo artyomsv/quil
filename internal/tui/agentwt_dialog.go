@@ -30,14 +30,16 @@ var agentWTTimeout = 6 * time.Second
 
 // agentWTView is the view's state. Zero value = closed (m.dialog decides).
 type agentWTView struct {
-	dest     string
-	entries  []ipc.AgentWorktreeInfo
-	loading  bool
-	err      string
-	notice   string
-	gen      string
-	cursor   int
-	showGone bool
+	dest    string
+	entries []ipc.AgentWorktreeInfo
+	// uncertain lists repositories whose record may miss items.
+	uncertain []string
+	loading   bool
+	err       string
+	notice    string
+	gen       string
+	cursor    int
+	showGone  bool
 	// entry is the one the confirm is about.
 	entry ipc.AgentWorktreeInfo
 }
@@ -108,6 +110,7 @@ func (m *Model) applyAgentWTList(msg agentWTListMsg) {
 	m.agentWT.loading = false
 	m.agentWT.err = msg.Resp.Error
 	m.agentWT.entries = msg.Resp.Entries
+	m.agentWT.uncertain = msg.Resp.UncertainRepos
 	m.agentWT.cursor = max(0, min(m.agentWT.cursor, len(m.visibleAgentWT())-1))
 }
 
@@ -268,6 +271,19 @@ func (m Model) renderAgentWTDialog() string {
 	b.WriteString(dialogTitle.Render("Worktrees and branches from agents"))
 	b.WriteString("\n")
 	b.WriteString(dialogSubtle.Render(truncateToWidth("Each appeared while the named pane ran.", inner)))
+	// One line, whatever the count: a repository whose baseline was read
+	// only after an agent could have acted may be missing what it made, and
+	// the record says so rather than looking complete.
+	extra := 0
+	if n := len(m.agentWT.uncertain); n > 0 {
+		line := fmt.Sprintf("⚠ May miss items in %s: Quil could not read it before an agent started.",
+			elideMiddle(sanitizeRemoteText(m.agentWT.uncertain[0]), 40))
+		if n > 1 {
+			line = fmt.Sprintf("⚠ May miss items in %d repositories: Quil could not read them before an agent started.", n)
+		}
+		b.WriteString("\n" + dialogWarn.Render(truncateToWidth(line, inner)))
+		extra = 1
+	}
 	b.WriteString("\n\n")
 
 	rows := m.visibleAgentWT()
@@ -286,7 +302,7 @@ func (m Model) renderAgentWTDialog() string {
 		// and rows are drawn until the budget is spent.
 		budget := 24
 		if m.height > 0 {
-			budget = max(2, m.height-dialogVChrome-7)
+			budget = max(2, m.height-dialogVChrome-7-extra)
 		}
 		start, _ := historyWindow(len(rows), m.agentWT.cursor, 0, max(1, budget/2))
 		used, lastRepo := 0, ""

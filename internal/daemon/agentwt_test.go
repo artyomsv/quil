@@ -20,13 +20,26 @@ type fakeRepo struct {
 	truncated bool
 	listErr   error
 	lists     int
-	// gate, when set, holds every listing until it is closed.
-	gate chan struct{}
+	// gate, when set, holds every listing until it is closed or the
+	// listing's context ends; entered, when set, is signalled as a
+	// listing starts.
+	entered chan struct{}
+	gate    chan struct{}
 }
 
-func (f *fakeRepo) list(context.Context, string) ([]gitworktree.Worktree, error) {
+func (f *fakeRepo) list(ctx context.Context, _ string) ([]gitworktree.Worktree, error) {
+	if f.entered != nil {
+		select {
+		case f.entered <- struct{}{}:
+		default:
+		}
+	}
 	if f.gate != nil {
-		<-f.gate
+		select {
+		case <-f.gate:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()

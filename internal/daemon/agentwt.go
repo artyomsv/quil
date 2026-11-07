@@ -73,6 +73,12 @@ const (
 
 // agentWTRepo is one repository's baseline.
 type agentWTRepo struct {
+	// Path is the main checkout as git printed it (for display).
+	Path string `json:"path,omitempty"`
+	// Uncertain: the baseline may already include what an agent made
+	// (taken after a failed pre-start read, or without a complete branch
+	// list). Shown in the cleanup view; never cleared by a later compare.
+	Uncertain     bool      `json:"uncertain,omitempty"`
 	Worktrees     []string  `json:"worktrees"`
 	Branches      []string  `json:"branches,omitempty"`
 	BranchesKnown bool      `json:"branches_known,omitempty"`
@@ -145,6 +151,10 @@ type agentWTStore struct {
 	subOverflow map[string]time.Time
 	// seeded is the directory each pane's baseline was last seeded for.
 	seeded map[string]string
+	// seedFailed marks a pane whose pre-start baseline could not be read in
+	// full (timeout, no permit, cut branch list). A repository first seen by
+	// its compares is then baselined as Uncertain.
+	seedFailed map[string]bool
 	// One compare per directory at a time; a probe that arrives meanwhile
 	// runs it once more.
 	running map[string]bool
@@ -174,6 +184,7 @@ func newAgentWTStore(path string, paneFn func(string) (agentWTPane, bool)) *agen
 		subDirs:     map[string]map[string]agentDir{},
 		subOverflow: map[string]time.Time{},
 		seeded:      map[string]string{},
+		seedFailed:  map[string]bool{},
 		running:     map[string]bool{},
 		pending:     map[string]agentWTAttr{},
 		now:         time.Now,
@@ -279,6 +290,7 @@ func (s *agentWTStore) forgetPane(paneID string) {
 	delete(s.subDirs, paneID)
 	delete(s.subOverflow, paneID)
 	delete(s.seeded, paneID)
+	delete(s.seedFailed, paneID)
 	s.mu.Unlock()
 }
 
@@ -375,7 +387,18 @@ func (s *agentWTStore) seedSync(paneID string) bool {
 	if done {
 		return true
 	}
-	return s.compareWithin(pane.CWD, agentWTAttr{PaneID: paneID, PaneName: pane.Name, Trigger: agentWTSeedTrigger}, agentWTSeedTimeout)
+	switch s.compareWithin(pane.CWD, agentWTAttr{PaneID: paneID, PaneName: pane.Name, Trigger: agentWTSeedTrigger}, agentWTSeedTimeout) {
+	case seedComplete:
+		return true
+	case seedIncomplete:
+		// Explicit uncertainty instead of a silent baseline: every
+		// repository this pane's compares see for the first time from now
+		// on is marked as possibly missing what the agent made.
+		s.mu.Lock()
+		s.seedFailed[paneID] = true
+		s.mu.Unlock()
+	}
+	return false
 }
 
 // paneInDir reports a live pane whose AGENT last worked inside path (from its
@@ -473,11 +496,25 @@ func (s *agentWTStore) compare(dir string, attr agentWTAttr) {
 	s.compareWithin(dir, attr, agentWTTimeout)
 }
 
-// compareWithin is compare with its own deadline. It reports whether the
-// repository was read.
-func (s *agentWTStore) compareWithin(dir string, attr agentWTAttr, timeout time.Duration) bool {
+// seedResult says what a compare learned about a repository's baseline.
+type seedResult int
+
+const (
+	// seedComplete: worktrees AND a complete branch list were read.
+	seedComplete seedResult = iota
+	// seedNoRepo: git answered, and the directory is no repository —
+	// nothing to baseline, and nothing uncertain either.
+	seedNoRepo
+	// seedIncomplete: no answer in time, no permit, or a branch list that
+	// failed or was cut: whatever is baselined later may include what the
+	// agent made meanwhile.
+	seedIncomplete
+)
+
+// compareWithin is compare with its own deadline.
+func (s *agentWTStore) compareWithin(dir string, attr agentWTAttr, timeout time.Duration) seedResult {
 	if !claimBlockingFSCall() {
-		return false // the turn-end compare will ask again
+		return seedIncomplete // the turn-end compare will ask again
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	// Stamped BEFORE the listing: two compares of one repository (its main
@@ -500,24 +537,34 @@ func (s *agentWTStore) compareWithin(dir string, attr agentWTAttr, timeout time.
 			def = gitworktree.ShortBranchName(s.defaultFn(ctx, list[0].Path))
 		}
 	}
+	timedOut := ctx.Err() != nil
 	cancel()
 	releaseBlockingFSCall()
 	// An unreadable listing compares NOTHING and marks nothing gone, the rule
 	// worktreeRegistered follows: an unknown answer never authorises a change.
 	if err != nil || len(list) == 0 || list[0].Path == "" {
-		return false
+		if timedOut {
+			return seedIncomplete
+		}
+		return seedNoRepo
 	}
 
 	s.mu.Lock()
 	changed := s.apply(list, branchesOK, branches, def, attr, listedAt)
-	if attr.Trigger == agentWTSeedTrigger && attr.PaneID != "" {
+	// A pane counts as seeded only on a COMPLETE read: a cut branch list
+	// would let branches made meanwhile join the baseline unnoticed.
+	if attr.Trigger == agentWTSeedTrigger && attr.PaneID != "" && branchesOK {
 		s.seeded[attr.PaneID] = normalizeWorktreePath(dir)
+		delete(s.seedFailed, attr.PaneID)
 	}
 	s.mu.Unlock()
 	if changed {
 		s.scheduleSave()
 	}
-	return true
+	if !branchesOK {
+		return seedIncomplete
+	}
+	return seedComplete
 }
 
 // apply folds one listing, taken at listedAt, into the baseline and the
@@ -544,7 +591,13 @@ func (s *agentWTStore) apply(list []gitworktree.Worktree, branchesOK bool, branc
 	if r == nil {
 		// First sight: everything already there is the baseline, attributed
 		// to nobody.
-		s.repos[key] = &agentWTRepo{Worktrees: cur, Branches: names, BranchesKnown: branchesOK, Seen: now}
+		//
+		// Unless the baseline cannot be trusted to predate the agent: a
+		// branch list that is not complete, or a pane whose pre-start read
+		// failed. Then the repository is marked Uncertain — the cleanup view
+		// says its record may miss items — rather than adopted silently.
+		uncertain := !branchesOK || (attr.PaneID != "" && s.seedFailed[attr.PaneID])
+		s.repos[key] = &agentWTRepo{Path: repoPath, Worktrees: cur, Branches: names, BranchesKnown: branchesOK, Seen: now, Uncertain: uncertain}
 		s.evictRepos()
 		return true
 	}
@@ -873,4 +926,22 @@ func (s *agentWTStore) save() {
 	if err := atomicfile.Write(s.path, b); err != nil {
 		log.Printf("agent worktrees: write %s: %v", s.path, err)
 	}
+}
+
+// uncertainRepos lists the repositories whose baseline may already include
+// what an agent made, for the cleanup view.
+func (s *agentWTStore) uncertainRepos() []string {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []string
+	for _, r := range s.repos {
+		if r.Uncertain && r.Path != "" {
+			out = append(out, r.Path)
+		}
+	}
+	sort.Strings(out)
+	return out
 }

@@ -41,6 +41,7 @@ func (d *Daemon) agentWorktreesResponse() ipc.AgentWorktreesRespPayload {
 		}
 		out.Entries = append(out.Entries, info)
 	}
+	out.UncertainRepos = d.agentWT.uncertainRepos()
 	return out
 }
 

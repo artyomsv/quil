@@ -38,7 +38,10 @@ type AgentWorktreeInfo struct {
 // AgentWorktreesRespPayload answers the list, newest first.
 type AgentWorktreesRespPayload struct {
 	Entries []AgentWorktreeInfo `json:"entries,omitempty"`
-	Error   string              `json:"error,omitempty"`
+	// UncertainRepos are repositories whose record may miss items: their
+	// baseline was read only after an agent could have acted.
+	UncertainRepos []string `json:"uncertain_repos,omitempty"`
+	Error          string   `json:"error,omitempty"`
 }
 
 // AgentWorktreeFactsReqPayload asks what deleting one entry would cost: its

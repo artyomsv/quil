@@ -135,17 +135,33 @@ func TestRunPush_BoundsWhatAChildPrints(t *testing.T) {
 	}
 }
 
+// bareRemote makes a disposable bare repository that ACCEPTS deleting its
+// own default branch (receive.denyDeleteCurrent=ignore), so a test can tell
+// Quil's refusal apart from the server's.
+func bareRemote(t *testing.T, repo, name, head string) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), name+".git")
+	runGitIn(t, repo, "init", "--bare", "-q", "-b", head, dir)
+	runGitIn(t, dir, "config", "receive.denyDeleteCurrent", "ignore")
+	return dir
+}
+
+func remoteHas(t *testing.T, repo, url, branch string) bool {
+	t.Helper()
+	return strings.Contains(runGitIn(t, repo, "ls-remote", url, "refs/heads/"+branch), "refs/heads/"+branch)
+}
+
 // The remote changed its default (master → develop) and this clone's
-// refs/remotes/fork/HEAD still says master. The delete asks the REMOTE, so
-// develop is kept; an ordinary feature branch on the same remote still goes.
+// refs/remotes/fork/HEAD still says master. The server WOULD delete develop
+// (denyDeleteCurrent=ignore); Quil asks the remote first and refuses. An
+// ordinary feature branch still goes.
 //
 // Fails if DeleteRemoteBranch trusts the local symref.
 func TestDeleteRemoteBranch_RealGit_AsksTheRemoteForItsDefault(t *testing.T) {
 	repo := realGitRepo(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	fork := filepath.Join(t.TempDir(), "fork.git")
-	runGitIn(t, repo, "init", "--bare", "-q", "-b", "master", fork)
+	fork := bareRemote(t, repo, "fork", "master")
 	runGitIn(t, repo, "branch", "develop")
 	runGitIn(t, repo, "branch", "feat2")
 	runGitIn(t, repo, "remote", "add", "fork", fork)
@@ -156,14 +172,66 @@ func TestDeleteRemoteBranch_RealGit_AsksTheRemoteForItsDefault(t *testing.T) {
 	if err := DeleteRemoteBranch(ctx, repo, "fork", "develop"); err == nil {
 		t.Fatal("deleted develop, the remote's current default")
 	}
-	if out := runGitIn(t, repo, "ls-remote", "fork", "refs/heads/develop"); !strings.Contains(out, "refs/heads/develop") {
-		t.Fatalf("develop is gone from the remote: %q", out)
+	if !remoteHas(t, repo, fork, "develop") {
+		t.Fatal("develop is gone from the remote")
 	}
-
 	if err := DeleteRemoteBranch(ctx, repo, "fork", "feat2"); err != nil {
 		t.Fatalf("DeleteRemoteBranch(feat2): %v", err)
 	}
-	if out := runGitIn(t, repo, "ls-remote", "fork", "refs/heads/feat2"); strings.Contains(out, "feat2") {
-		t.Errorf("feat2 is still on the remote: %q", out)
+	if remoteHas(t, repo, fork, "feat2") {
+		t.Error("feat2 is still on the remote")
+	}
+}
+
+// Every case where the check cannot be bound to the delete refuses, and the
+// remote is left exactly as it was: a push address unlike the fetch address,
+// several push addresses, a remote whose HEAD names no branch, and a remote
+// that does not answer.
+//
+// Fails if any of them reaches the push.
+func TestDeleteRemoteBranch_RealGit_FailsClosed(t *testing.T) {
+	repo := realGitRepo(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	runGitIn(t, repo, "branch", "feat")
+	fetch := bareRemote(t, repo, "fetch", "master")
+	push := bareRemote(t, repo, "push", "feat") // its default IS feat
+	for _, url := range []string{fetch, push} {
+		runGitIn(t, repo, "push", "-q", url, "master", "feat")
+	}
+
+	runGitIn(t, repo, "remote", "add", "split", fetch)
+	runGitIn(t, repo, "remote", "set-url", "--push", "split", push)
+	if err := DeleteRemoteBranch(ctx, repo, "split", "feat"); err == nil {
+		t.Error("split fetch/push addresses: delete went ahead")
+	}
+
+	runGitIn(t, repo, "remote", "add", "multi", fetch)
+	runGitIn(t, repo, "remote", "set-url", "--add", "--push", "multi", fetch)
+	runGitIn(t, repo, "remote", "set-url", "--add", "--push", "multi", push)
+	if err := DeleteRemoteBranch(ctx, repo, "multi", "feat"); err == nil {
+		t.Error("several push addresses: delete went ahead")
+	}
+
+	detached := bareRemote(t, repo, "detached", "master")
+	runGitIn(t, repo, "push", "-q", detached, "master", "feat")
+	sha := runGitIn(t, detached, "rev-parse", "refs/heads/master")
+	if err := os.WriteFile(filepath.Join(detached, "HEAD"), []byte(sha+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitIn(t, repo, "remote", "add", "nohead", detached)
+	if err := DeleteRemoteBranch(ctx, repo, "nohead", "feat"); err == nil {
+		t.Error("a remote HEAD naming no branch: delete went ahead")
+	}
+
+	runGitIn(t, repo, "remote", "add", "gone", filepath.Join(t.TempDir(), "missing.git"))
+	if err := DeleteRemoteBranch(ctx, repo, "gone", "feat"); err == nil {
+		t.Error("an unreachable remote: delete reported success")
+	}
+
+	for _, url := range []string{fetch, push, detached} {
+		if !remoteHas(t, repo, url, "feat") {
+			t.Errorf("feat is gone from %s", url)
+		}
 	}
 }

@@ -11,6 +11,16 @@ version section here and deletes them.
 
 ## [Unreleased]
 
+## [1.98.1] - 2026-11-07
+
+### Fixed
+- **The sbx sandbox row in the pane dialog now names the sandbox you picked.**
+  The row showed the NEXT sandbox in the `←/→` cycle, and the picked one was on
+  the line below. At a glance, the row and the working directory seemed to
+  name two different tickets. The row now reads
+  `Run in an sbx sandbox: <name>`, and the hint shows only your place in the
+  list, for example `←/→ 3/5`.
+
 ## [1.98.0] - 2026-10-28
 
 ### Changed

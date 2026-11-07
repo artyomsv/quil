@@ -62,6 +62,11 @@ var classes = map[string]Class{
 	ipc.MsgKillProcessReq: ClassAdmin, ipc.MsgStageUpdateReq: ClassAdmin, ipc.MsgUpdateCheckReq: ClassAdmin,
 	ipc.MsgPluginUpdateReq: ClassAdmin, ipc.MsgWorktreePolicy: ClassAdmin,
 
+	// act: the agent-worktree record discloses paths on the daemon's disk,
+	// and acting on it deletes them (agent_worktree_act_req's remote delete
+	// is refused to a standard token by carriesRemoteDelete).
+	ipc.MsgAgentWorktreesReq: ClassAct, ipc.MsgAgentWorktreeFactsReq: ClassAct, ipc.MsgAgentWorktreeActReq: ClassAct,
+
 	// local
 	ipc.MsgTokenCreateReq: ClassLocal, ipc.MsgTokenListReq: ClassLocal, ipc.MsgTokenRevokeReq: ClassLocal,
 }
@@ -77,6 +82,7 @@ var neverAccepted = map[string]bool{
 	ipc.MsgKillProcessResp: true, ipc.MsgPaneHistoryResp: true, ipc.MsgPaneHistoryEntryResp: true,
 	ipc.MsgPaneSearchResp: true, ipc.MsgClaudeSessionsResp: true, ipc.MsgClaudeSessionDetailResp: true,
 	ipc.MsgBrowseDirResp: true, ipc.MsgGitReposResp: true, ipc.MsgWorktreeListResp: true,
+	ipc.MsgAgentWorktreesResp: true, ipc.MsgAgentWorktreeFactsResp: true, ipc.MsgAgentWorktreeActResp: true,
 	ipc.MsgWorktreeStatusResp: true, ipc.MsgDirsExistResp: true, ipc.MsgSandboxCapResp: true, ipc.MsgPasteImageResp: true,
 	ipc.MsgStageUpdateResp: true, ipc.MsgKubeCtxResp: true, ipc.MsgPluginListResp: true,
 	ipc.MsgListProjectsResp: true, ipc.MsgCreateProjectResp: true, ipc.MsgProjectOpResp: true,
@@ -202,6 +208,12 @@ func carriesRemoteDelete(msg *ipc.Message) (remote, ok bool) {
 		return p.DeleteRemoteBranch, true
 	case ipc.MsgDestroyTab:
 		var p ipc.DestroyTabPayload
+		if !decodeIfPresent(msg, &p) {
+			return false, false
+		}
+		return p.DeleteRemoteBranch, true
+	case ipc.MsgAgentWorktreeActReq:
+		var p ipc.AgentWorktreeActReqPayload
 		if !decodeIfPresent(msg, &p) {
 			return false, false
 		}

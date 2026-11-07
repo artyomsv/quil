@@ -238,9 +238,15 @@ func (d *Daemon) removeWorktreeWithBranch(path string, opt branchDeleteOpts) {
 		d.notifyBranchKept(owner, f.Branch, "the worktree switched branch after the dialog opened")
 		return
 	}
+	d.deleteBranches(res.repo, f, opt, owner)
+}
 
+// deleteBranches runs the local and remote deletes opt asks for, for a branch
+// whose facts the caller has already checked (read from git, not the default,
+// confirmed). Each outcome is a sidebar card for owner.
+func (d *Daemon) deleteBranches(repo string, f gitworktree.BranchFacts, opt branchDeleteOpts, owner paneRef) {
 	if opt.Local {
-		if err := d.deleteLocalBranch(res.repo, f.Branch); err != nil {
+		if err := d.deleteLocalBranch(repo, f.Branch); err != nil {
 			d.notifyBranchKept(owner, f.Branch, err.Error())
 		} else {
 			d.notifyBranchDeleted(owner, f.Branch, "")
@@ -254,7 +260,7 @@ func (d *Daemon) removeWorktreeWithBranch(path string, opt branchDeleteOpts) {
 			d.notifyBranchKept(owner, f.Branch, "no remote branch: "+f.RemoteReason)
 		default:
 			ctx, cancel := context.WithTimeout(context.Background(), remoteBranchDeleteTimeout)
-			err := deleteRemoteBranchFn(ctx, res.repo, f.Remote, f.RemoteBranch)
+			err := deleteRemoteBranchFn(ctx, repo, f.Remote, f.RemoteBranch)
 			cancel()
 			target := f.Remote + "/" + f.RemoteBranch
 			if err != nil {

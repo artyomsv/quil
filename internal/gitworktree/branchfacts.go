@@ -79,12 +79,17 @@ func ReadBranchFacts(ctx context.Context, repo, worktreePath, defaultRef string)
 	if wt == nil {
 		return BranchFacts{}, errors.New("not a worktree of this repository")
 	}
-	f := BranchFacts{DefaultRef: defaultRef}
 	if wt.Detached || wt.Branch == "" {
-		f.Detached = true
-		return f, nil
+		return BranchFacts{DefaultRef: defaultRef, Detached: true}, nil
 	}
-	f.Branch = wt.Branch
+	return ReadBranchFactsFor(ctx, repo, wt.Branch, defaultRef)
+}
+
+// ReadBranchFactsFor describes a local branch by name — for a branch that has
+// no worktree. The caller must have read the name from git itself.
+func ReadBranchFactsFor(ctx context.Context, repo, branch, defaultRef string) (BranchFacts, error) {
+	var err error
+	f := BranchFacts{DefaultRef: defaultRef, Branch: branch}
 	f.IsDefault = defaultRef != "" && ShortBranchName(defaultRef) == f.Branch
 	local := "refs/heads/" + f.Branch
 

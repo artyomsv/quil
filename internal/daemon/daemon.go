@@ -85,6 +85,10 @@ type Daemon struct {
 	// agentWT records worktrees and branches that appear while agents run
 	// (agentwt.go). Nil until Start; every method is nil-safe.
 	agentWT *agentWTStore
+	// Single-flight slots for the cleanup view's facts and act requests
+	// (agentwt_ipc.go), each on its own worker.
+	agentWTFacting atomic.Bool
+	agentWTActing  atomic.Bool
 	// Last attached terminal size, used before a client can resize a new pane.
 	clientSize atomic.Pointer[terminalSize]
 
@@ -1689,6 +1693,12 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		d.setOverlayPolicy(p)
 	case ipc.MsgWorktreePolicy:
 		d.handleWorktreePolicy(msg)
+	case ipc.MsgAgentWorktreesReq:
+		d.handleAgentWorktreesReq(conn, msg)
+	case ipc.MsgAgentWorktreeFactsReq:
+		d.handleAgentWorktreeFactsReq(conn, msg)
+	case ipc.MsgAgentWorktreeActReq:
+		d.handleAgentWorktreeActReq(conn, msg)
 	case ipc.MsgShutdown:
 		d.shutdownOnce.Do(func() { close(d.shutdown) })
 

@@ -1,0 +1,158 @@
+package daemon
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/artyomsv/quil/internal/gitworktree"
+	"github.com/artyomsv/quil/internal/ipc"
+)
+
+// daemonWithRecord builds a test daemon whose agent-worktree record holds
+// the given entries, with compares run synchronously on an empty repo.
+func daemonWithRecord(t *testing.T, entries ...AgentWTEntry) *Daemon {
+	t.Helper()
+	d := newTestDaemon(t)
+	s, _ := newTestAgentWT(t, &fakeRepo{}, nil)
+	s.paneFn = d.paneForAgentWT
+	s.entries = append(s.entries, entries...)
+	d.agentWT = s
+	return d
+}
+
+var wtEntry = AgentWTEntry{ID: "e-wt", Kind: agentWTKindWorktree, Repo: "/repo", Path: "/w/x", Branch: "x",
+	FirstSeen: time.Date(2026, 11, 7, 0, 0, 0, 0, time.UTC), PaneID: "pane-gone", PaneName: "claude"}
+
+var brEntry = AgentWTEntry{ID: "e-br", Kind: agentWTKindBranch, Repo: "/repo", Branch: "feat/plain",
+	FirstSeen: time.Date(2026, 11, 7, 0, 0, 0, 0, time.UTC)}
+
+func TestAgentWTAct_UnknownIDRefused(t *testing.T) {
+	d := daemonWithRecord(t)
+	if got := d.agentWorktreeAct(ipc.AgentWorktreeActReqPayload{ID: "nope", RemoveWorktree: true}); got.Error == "" {
+		t.Error("an unknown id was acted on")
+	}
+}
+
+// git no longer lists the path: nothing reaches `worktree remove --force`.
+func TestAgentWTAct_PathNoLongerListedRefused(t *testing.T) {
+	d := daemonWithRecord(t, wtEntry)
+	stubWorktreeList(t, []gitworktree.Worktree{{Path: "/repo", Main: true}}, nil)
+	calls := stubRemoveWorktree(t, nil)
+
+	got := d.agentWorktreeAct(ipc.AgentWorktreeActReqPayload{ID: "e-wt", RemoveWorktree: true})
+
+	if got.Error == "" || len(*calls) != 0 {
+		t.Errorf("resp = %+v, removals %v; want a refusal and no removal", got, *calls)
+	}
+}
+
+// The folder now belongs to another repository: refused.
+func TestAgentWTAct_RepoMismatchRefused(t *testing.T) {
+	d := daemonWithRecord(t, wtEntry)
+	stubWorktreeList(t, []gitworktree.Worktree{{Path: "/other", Main: true}, {Path: "/w/x", Branch: "x"}}, nil)
+	calls := stubRemoveWorktree(t, nil)
+
+	got := d.agentWorktreeAct(ipc.AgentWorktreeActReqPayload{ID: "e-wt", RemoveWorktree: true})
+
+	if got.Error == "" || len(*calls) != 0 {
+		t.Errorf("resp = %+v, removals %v; want a refusal", got, *calls)
+	}
+}
+
+// A record naming the main checkout is never removed.
+func TestAgentWTAct_MainCheckoutRefused(t *testing.T) {
+	main := wtEntry
+	main.Path = "/repo"
+	d := daemonWithRecord(t, main)
+	stubWorktreeList(t, []gitworktree.Worktree{{Path: "/repo", Main: true}}, nil)
+	calls := stubRemoveWorktree(t, nil)
+
+	got := d.agentWorktreeAct(ipc.AgentWorktreeActReqPayload{ID: "e-wt", RemoveWorktree: true})
+
+	if got.Error == "" || len(*calls) != 0 {
+		t.Errorf("resp = %+v, removals %v; want a refusal for the main checkout", got, *calls)
+	}
+}
+
+// A live pane in the worktree blocks the removal.
+func TestAgentWTAct_InUseRefused(t *testing.T) {
+	d := daemonWithRecord(t, wtEntry)
+	tab := d.session.CreateTab("t")
+	if _, err := d.session.CreatePane(tab.ID, "/w/x"); err != nil {
+		t.Fatal(err)
+	}
+	stubWorktreeList(t, []gitworktree.Worktree{{Path: "/repo", Main: true}, {Path: "/w/x", Branch: "x"}}, nil)
+	calls := stubRemoveWorktree(t, nil)
+
+	got := d.agentWorktreeAct(ipc.AgentWorktreeActReqPayload{ID: "e-wt", RemoveWorktree: true})
+
+	if got.Error == "" || len(*calls) != 0 {
+		t.Errorf("resp = %+v, removals %v; want a refusal while a pane is in it", got, *calls)
+	}
+}
+
+// Verified, unused: the removal runs on the recorded path, in the recorded
+// repository.
+func TestAgentWTAct_RemovesTheRecordedPath(t *testing.T) {
+	d := daemonWithRecord(t, wtEntry)
+	stubWorktreeList(t, []gitworktree.Worktree{{Path: "/repo", Main: true}, {Path: "/w/x", Branch: "x"}}, nil)
+	calls := stubRemoveWorktree(t, nil)
+
+	got := d.agentWorktreeAct(ipc.AgentWorktreeActReqPayload{ID: "e-wt", RemoveWorktree: true})
+
+	if got.Error != "" || len(*calls) != 1 || (*calls)[0][1] != "/w/x" {
+		t.Errorf("resp = %+v, removals %v; want one removal of /w/x", got, *calls)
+	}
+}
+
+// A branch entry's remote delete honours the policy like the close does.
+func TestAgentWTAct_RemoteRefusedWhenPolicyOff(t *testing.T) {
+	d := daemonWithRecord(t, brEntry)
+	prevList, prevFor, prevDef, prevRemote := branchListFn, branchFactsForFn, defaultBranchRefFn, deleteRemoteBranchFn
+	branchListFn = func(context.Context, string) ([]gitworktree.Branch, bool, error) {
+		return []gitworktree.Branch{{Name: "master"}, {Name: "feat/plain"}}, false, nil
+	}
+	branchFactsForFn = func(_ context.Context, _, b, _ string) (gitworktree.BranchFacts, error) {
+		return gitworktree.BranchFacts{Branch: b, Remote: "origin", RemoteBranch: b}, nil
+	}
+	defaultBranchRefFn = func(context.Context, string) string { return "refs/heads/master" }
+	pushed := 0
+	deleteRemoteBranchFn = func(context.Context, string, string, string) error { pushed++; return nil }
+	t.Cleanup(func() {
+		branchListFn, branchFactsForFn, defaultBranchRefFn, deleteRemoteBranchFn = prevList, prevFor, prevDef, prevRemote
+	})
+
+	d.agentWorktreeAct(ipc.AgentWorktreeActReqPayload{ID: "e-br", DeleteRemoteBranch: true, ConfirmedBranch: "feat/plain"})
+
+	if pushed != 0 {
+		t.Errorf("pushed %d remote deletes with the policy off", pushed)
+	}
+	if kept := eventsOfType(d, "worktree_branch_kept"); len(kept) != 1 {
+		t.Errorf("kept cards = %+v, want one", kept)
+	}
+}
+
+// Forget drops the entry; the baseline is untouched.
+func TestAgentWTAct_ForgetKeepsBaseline(t *testing.T) {
+	d := daemonWithRecord(t, wtEntry)
+	d.agentWT.repos["/repo"] = &agentWTRepo{Worktrees: []string{"/w/x"}}
+
+	got := d.agentWorktreeAct(ipc.AgentWorktreeActReqPayload{ID: "e-wt", Forget: true})
+
+	if got.Error != "" || len(d.agentWT.entriesSnapshot()) != 0 {
+		t.Errorf("resp = %+v, entries %+v; want forgotten", got, d.agentWT.entriesSnapshot())
+	}
+	if r := d.agentWT.repos["/repo"]; r == nil || len(r.Worktrees) != 1 {
+		t.Error("forget dropped the baseline, so the next compare would record it again")
+	}
+}
+
+// The list answer says whether the pane still exists.
+func TestAgentWorktreesResponse_ReportsPaneLive(t *testing.T) {
+	d := daemonWithRecord(t, wtEntry)
+	got := d.agentWorktreesResponse()
+	if len(got.Entries) != 1 || got.Entries[0].PaneLive || got.Entries[0].ID != "e-wt" {
+		t.Errorf("entries = %+v, want one with a gone pane", got.Entries)
+	}
+}

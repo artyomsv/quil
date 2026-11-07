@@ -237,6 +237,12 @@ func fillBranchFacts(ctx context.Context, path string, defaults map[string]strin
 		defaults[key] = def
 	}
 	f, err := branchFactsFn(ctx, repo, path, def)
+	applyBranchFacts(st, f, err)
+}
+
+// applyBranchFacts copies branch facts onto a status answer. Any failure
+// leaves the branch NOT deletable with the reason.
+func applyBranchFacts(st *ipc.WorktreeStatus, f gitworktree.BranchFacts, err error) {
 	st.Branch = f.Branch
 	st.DefaultBranch = gitworktree.ShortBranchName(f.DefaultRef)
 	st.Unmerged = f.Unmerged

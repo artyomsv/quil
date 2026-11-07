@@ -1791,6 +1791,14 @@ checked BEFORE `resetConfirmWorktrees`, or a refused Enter would drop the arm.
 The browser's Settings page saves the switch but sends no policy; the daemon
 takes it at its next start.
 
+**A ticked worktree is never removed before its file list loaded.** The
+accept arm returns while any row is still "checking…" (`confirmWorktreesLoaded`)
+and the footer says `checking…`; the status request's own timeout loads the
+rows with a reason, so it never waits forever. The remote push also blanks
+`GIT_ASKPASS`/`SSH_ASKPASS` and passes `-c core.askPass=`:
+`GIT_TERMINAL_PROMPT=0` does not stop an askpass helper, and a daemon started
+from an editor's terminal inherits the editor's.
+
 **The dialog's height is measured, not budgeted by constant.**
 `confirmFileRows` renders the dialog once with zero file rows (a probe copy
 with `confirmFileRowsSet`) and gives the file list what is left of the

@@ -166,6 +166,34 @@ func TestCloseConfirm_EnterDoesNotAcceptWithRemoteArmed(t *testing.T) {
 	}
 }
 
+// The worktree is never removed before its file list is on screen: Enter
+// with the worktree ticked waits while the row still says "checking…".
+//
+// Fails if the accept branch sends before every row has LOADED.
+func TestCloseConfirm_EnterWaitsForTheFileList(t *testing.T) {
+	m := modelWithWorktreePane()
+	m.cfg = config.Default()
+	m = applyModel(m.openClosePaneConfirm())
+	m = confirmPress(m, " ") // tick the worktree before the status arrives
+	fake := &fakeSender{}
+	m.client = fake
+
+	m = confirmPress(m, "enter")
+	if len(fake.sent) != 0 || m.dialog != dialogConfirm || !m.confirmRemoveWorktree {
+		t.Fatalf("Enter acted before the file list loaded (sent %d)", len(fake.sent))
+	}
+
+	m.confirmWorktrees[0].loaded = true
+	_, cmd := m.handleConfirmKey(keyPressFor("enter"))
+	if cmd != nil {
+		cmd()
+	}
+	var p ipc.DestroyPanePayload
+	if !decodeSent(t, fake, ipc.MsgDestroyPane, &p) || !p.RemoveWorktree {
+		t.Errorf("Enter after the list loaded did not send the removal: %+v", p)
+	}
+}
+
 // Every new field is cleared on the way out, like the worktree toggle.
 func TestCloseConfirm_ResetOnEveryExit(t *testing.T) {
 	m := openLoadedConfirm(t, 25, "")

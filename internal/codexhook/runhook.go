@@ -31,6 +31,10 @@ type codexStdin struct {
 	AgentID        string `json:"agent_id"`
 	Model          string `json:"model"`
 	Trigger        string `json:"trigger"`
+	// CWD is the directory the tool ran in: for a shell call codex reports
+	// the command's own workdir here (measured, codex 0.166.0).
+	CWD       string          `json:"cwd"`
+	ToolInput json.RawMessage `json:"tool_input"`
 }
 
 // RunHook processes one codex hook invocation: reads the JSON from r, routes
@@ -148,6 +152,11 @@ func dispatchHookEvent(env HookEnv, in codexStdin, nowMs int64) error {
 		// Stop reports the true size — same reasoning as claudehook.
 		return spoolEvent(env, nowMs, "PostCompact", in.SessionID, "Compaction complete", hookevents.SeverityInfo,
 			map[string]string{"compacting": "1"})
+	case "PostToolUse":
+		// Registered for the worktree probe only. Codex has no worktree tool:
+		// its agent makes worktrees with shell commands, so a Bash call whose
+		// command matches is the one thing spooled — never a PostToolUse line.
+		return worktreeProbe(env, in, nowMs)
 	default:
 		// Forward-compat: codex may add events (Interrupt is one). Drop with
 		// a breadcrumb rather than erroring.
@@ -220,6 +229,34 @@ func spoolIsFresh(env HookEnv, nowMs int64) bool {
 // spoolEvent appends one hookevents.Payload JSONL line to the pane's spool.
 // Off-mode drops the event; session-id tracking runs separately.
 func spoolEvent(env HookEnv, nowMs int64, hookEvent, sessionID, title, sev string, data map[string]string) error {
+	return spoolEventCWD(env, nowMs, hookEvent, sessionID, "", title, sev, data)
+}
+
+// worktreeProbe spools a WorktreeProbe for a shell call whose command can
+// make, remove or switch a worktree or branch; anything else spools nothing.
+func worktreeProbe(env HookEnv, in codexStdin, nowMs int64) error {
+	if in.ToolName != "Bash" {
+		return nil
+	}
+	var ti struct {
+		Command string `json:"command"`
+	}
+	if json.Unmarshal(in.ToolInput, &ti) != nil || !hookevents.IsWorktreeCommand(ti.Command) || in.CWD == "" {
+		return nil
+	}
+	if len(in.CWD) > hookevents.MaxProbeDirBytes {
+		hookLog(env.QuilDir, env.PaneID, "worktree probe dropped: directory over the cap")
+		return nil
+	}
+	return spoolEventCWD(env, nowMs, hookevents.EventWorktreeProbe, in.SessionID, in.CWD,
+		"Worktree command", hookevents.SeverityInfo, map[string]string{
+			hookevents.DataProbeTrigger: hookevents.ProbeShell,
+			hookevents.DataProbeCommand: truncate(ti.Command, hookevents.MaxDataValueBytes),
+		})
+}
+
+// spoolEventCWD is spoolEvent with the payload's CWD set.
+func spoolEventCWD(env HookEnv, nowMs int64, hookEvent, sessionID, cwd, title, sev string, data map[string]string) error {
 	if env.Mode == "off" {
 		return nil
 	}
@@ -234,6 +271,7 @@ func spoolEvent(env HookEnv, nowMs int64, hookEvent, sessionID, title, sev strin
 		Source:    hookevents.SourceCodex,
 		HookEvent: hookEvent,
 		SessionID: sessionID,
+		CWD:       cwd,
 		Title:     title,
 		Severity:  sev,
 		Data:      data,

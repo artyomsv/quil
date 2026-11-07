@@ -7110,6 +7110,13 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 			}
 			envVars = append(envVars, hookEnv...)
 		}
+		// The agent-worktree baseline of the pane's directory is taken NOW,
+		// before the agent process can run anything: a listing taken after
+		// its first `git worktree add` would adopt that worktree as
+		// pre-existing for good. Off this goroutine (it lists through git).
+		if p.Name == "opencode" || p.Name == plugin.CodexPluginName || p.UsesClaudeSessions() {
+			d.agentWT.seedSoon(pane.ID)
+		}
 
 		if quilMCP {
 			var err error

@@ -177,3 +177,32 @@ func TestAgentWorktreesResponse_ReportsPaneLive(t *testing.T) {
 		t.Errorf("entries = %+v, want one with a gone pane", got.Entries)
 	}
 }
+
+// The cleanup view's facts keep the file list when the branch half runs out
+// of its budget: the view waits as briefly as the close dialog.
+//
+// Fails if agentWorktreeFacts reads branch facts on the full request timeout.
+func TestAgentWorktreeFacts_BranchBudgetKeepsTheFileList(t *testing.T) {
+	prevBudget, prevStatus, prevFacts := branchFactsBudget, worktreeStatusFn, branchFactsFn
+	t.Cleanup(func() { branchFactsBudget, worktreeStatusFn, branchFactsFn = prevBudget, prevStatus, prevFacts })
+	branchFactsBudget = 0
+	stubWorktreeList(t, []gitworktree.Worktree{{Path: "/repo", Main: true}, {Path: "/w/x", Branch: "x"}}, nil)
+	worktreeStatusFn = func(context.Context, string) (gitworktree.StatusReport, error) {
+		return gitworktree.StatusReport{Changes: 2, Files: []gitworktree.FileChange{{Code: "??", Path: ".env"}, {Code: " M", Path: "a.go"}}}, nil
+	}
+	asked := 0
+	branchFactsFn = func(context.Context, string, string, string) (gitworktree.BranchFacts, error) {
+		asked++
+		return gitworktree.BranchFacts{Branch: "x"}, nil
+	}
+	d := daemonWithRecord(t, wtEntry)
+
+	got := d.agentWorktreeFacts(wtEntry.ID)
+
+	if got.Error != "" || got.Status.Changes != 2 || len(got.Status.Files) != 2 || got.Status.Files[0].Path != ".env" {
+		t.Errorf("facts = %+v, want the two files", got)
+	}
+	if asked != 0 || got.Status.BranchReason != "not checked (out of time)" {
+		t.Errorf("branch facts read %d times, reason %q; want none and the out-of-time reason", asked, got.Status.BranchReason)
+	}
+}

@@ -14,10 +14,15 @@ import "regexp"
 // name, and would drop the first of two probes in one tick).
 const EventWorktreeProbe = "WorktreeProbe"
 
-// DataProbeTrigger is the one data key a probe carries: what kind of command
-// fired it. The command text itself is never sent — a shell command can
+// DataProbeTrigger is the data key saying what kind of command
+// fired the probe. The command text itself is never sent — a shell command can
 // carry a credential, and the compare needs only the directory.
 const DataProbeTrigger = "trigger"
+
+// DataProbeAgent is the subagent that ran the command (Claude's agent_id),
+// absent for the main agent: several subagents can work in different
+// worktrees of one pane at once, and the daemon tracks each one's directory.
+const DataProbeAgent = "agent"
 
 // Probe triggers.
 const (

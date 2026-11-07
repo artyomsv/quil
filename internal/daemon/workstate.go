@@ -89,6 +89,10 @@ func (d *Daemon) settleIdle(paneID string) {
 	pane.idleSubs = nil
 	pane.workMu.Unlock()
 
+	// Every subagent has finished (or the process died): none of them works
+	// in a worktree any more.
+	d.agentWT.subagentsDone(paneID)
+
 	if aborted {
 		for _, fn := range subs {
 			fn(true)

@@ -1770,7 +1770,11 @@ the race with a sibling worktree). The remote delete is `git -c
 credential.interactive=false push <remote> :refs/heads/<b>` with
 `GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never` and a BatchMode ssh command
 unless the user set their own — the daemon has no console, so any prompt is
-invisible — bounded at 30 s, with NO filesystem permit held (it is network).
+invisible — bounded at 30 s, with NO filesystem permit held (it is network),
+and its output kept to 16 KiB (`runPush`). The remote target is checked
+against THAT REMOTE's own default (`refs/remotes/<remote>/HEAD`), not only the
+repository's — a fork's default can be `develop` while origin's is `main` —
+and a remote with no recorded HEAD is no target at all.
 Every refusal and failure is a `worktree_branch_kept` sidebar card carrying
 the CLOSED pane's id and name (`paneRef`, captured before the destroy);
 success is `worktree_branch_deleted`. All three close paths now go through
@@ -1853,3 +1857,18 @@ older listing would read a newer worktree as gone. Each compare takes a
 10 s deadline on a worker goroutine. Bounds: 64 baselines (least recently
 seen evicted), 500 entries (gone first). The record is written through
 `internal/atomicfile`, debounced 2 s, and flushed at daemon stop.
+
+**The baseline is taken at SPAWN** (`seedSoon` from `spawnPane`, for claude,
+codex and opencode panes), again at each turn start, and marked done only
+after a listing that READ the repository: a listing taken after the agent's
+first `git worktree add` would adopt that worktree as pre-existing for good.
+A repository the agent first reaches mid-session is baselined by its first
+probe, so a worktree made by that very command is not recorded.
+
+**"In use" covers every agent of the pane.** The main agent's last probe
+directory, plus one directory per SUBAGENT (`DataProbeAgent`, Claude only),
+kept until the pane settles idle (`settleIdle` → `subagentsDone`): several
+subagents can work in different worktrees of one pane at once. A gone
+worktree's surviving branch is settled once (`BranchKept`), on the first
+COMPLETE branch listing — a removal seen while the branch list was
+unreadable is settled later, never lost.

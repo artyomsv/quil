@@ -109,6 +109,20 @@ func ReadBranchFactsFor(ctx context.Context, repo, branch, defaultRef string) (B
 		f.Remote, f.RemoteBranch = "", ""
 		f.RemoteReason = "its remote branch is the default branch"
 	}
+	// Each remote has its OWN default: a fork's may be develop while
+	// origin's is main. The target is checked against the default of the
+	// remote it is on, and a remote whose default is not known locally
+	// (no refs/remotes/<remote>/HEAD) is no target at all.
+	if f.Remote != "" {
+		switch rdef := remoteDefaultBranch(ctx, repo, f.Remote); {
+		case rdef == "":
+			f.Remote, f.RemoteBranch = "", ""
+			f.RemoteReason = "the remote's default branch is not known (git remote set-head)"
+		case rdef == f.RemoteBranch:
+			f.Remote, f.RemoteBranch = "", ""
+			f.RemoteReason = "its remote branch is the default branch"
+		}
+	}
 	if f.Remote != "" {
 		tracking := "refs/remotes/" + f.Remote + "/" + f.RemoteBranch
 		if f.Unpushed, err = countCommits(ctx, repo, tracking, local); err != nil {
@@ -204,4 +218,20 @@ func samePath(a, b string) bool {
 		return strings.EqualFold(ca, cb)
 	}
 	return ca == cb
+}
+
+// remoteDefaultBranch is remote's own default branch name, read from the
+// local refs/remotes/<remote>/HEAD symref (set by clone, or by `git remote
+// set-head`), or "" when it is not recorded. It is compared BY NAME, so a
+// symref left dangling by a renamed default still protects that name.
+func remoteDefaultBranch(ctx context.Context, repo, remote string) string {
+	out, err := runGit(ctx, repo, "symbolic-ref", "--quiet", "refs/remotes/"+remote+"/HEAD")
+	if err != nil {
+		return ""
+	}
+	b, ok := strings.CutPrefix(strings.TrimSpace(out), "refs/remotes/"+remote+"/")
+	if !ok {
+		return ""
+	}
+	return b
 }

@@ -110,3 +110,17 @@ func TestBuildSettingsJSON_PostToolUseMatcherCoversWorktreeTools(t *testing.T) {
 		t.Error("registered a WorktreeCreate hook — that REPLACES Claude's own worktree creation")
 	}
 }
+
+// A subagent's probe names the subagent, so the daemon can keep each one's
+// worktree protected; the main agent's carries no id.
+func TestRunHook_SubagentProbeCarriesItsAgentID(t *testing.T) {
+	dir, _ := runProbe(t, map[string]any{
+		"hook_event_name": "PostToolUse", "tool_name": "Bash", "cwd": "/w/a",
+		"agent_id": "ag-1", "agent_type": "impl",
+		"tool_input": map[string]any{"command": "git worktree add ../b"},
+	})
+	got := readSpool(t, dir, "pane-wt")
+	if len(got) != 1 || got[0].Data[hookevents.DataProbeAgent] != "ag-1" {
+		t.Fatalf("spool = %+v, want one probe naming agent ag-1", got)
+	}
+}

@@ -36,6 +36,9 @@ func factsScript(t *testing.T, path, branch, upstream string, remotes []string, 
 			return porcelainFor(path, branch), nil
 		case args[0] == "rev-list":
 			return "3\n", nil
+		case args[0] == "symbolic-ref":
+			// Every remote records master as its default.
+			return strings.TrimSuffix(args[len(args)-1], "HEAD") + "master\n", nil
 		case args[0] == "remote":
 			return strings.Join(remotes, "\n") + "\n", nil
 		case args[0] == "rev-parse" && args[1] == "--abbrev-ref":
@@ -193,6 +196,9 @@ func TestReadBranchFacts_RealGit_UnmergedAndUnpushed(t *testing.T) {
 		runGitIn(t, path, "commit", "-qm", "c"+string(rune('1'+i)))
 		if i == 0 {
 			runGitIn(t, repo, "remote", "add", "origin", repo)
+			// What clone records: origin's own default. Without it origin is
+			// no delete target.
+			runGitIn(t, repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/master")
 			runGitIn(t, repo, "update-ref", "refs/remotes/origin/feat", "refs/heads/feat")
 		}
 	}
@@ -202,5 +208,67 @@ func TestReadBranchFacts_RealGit_UnmergedAndUnpushed(t *testing.T) {
 	}
 	if f.Branch != "feat" || f.Unmerged != 2 || f.Remote != "origin" || f.Unpushed != 1 {
 		t.Errorf("facts = %+v; want branch feat, Unmerged 2, Remote origin, Unpushed 1", f)
+	}
+}
+
+// Each remote's OWN default branch is protected. origin's default is master
+// and fork's is develop: a branch tracking fork/develop must never offer to
+// delete develop on fork, although develop is not the repository's default.
+// A remote whose default is not recorded is no target at all.
+//
+// Fails if the remote target is checked only against the repository default.
+func TestReadBranchFacts_RealGit_EachRemoteKeepsItsOwnDefault(t *testing.T) {
+	repo := realGitRepo(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	base := t.TempDir()
+	origin, fork, other := filepath.Join(base, "origin.git"), filepath.Join(base, "fork.git"), filepath.Join(base, "other.git")
+	runGitIn(t, base, "init", "--bare", "-q", "-b", "master", origin)
+	runGitIn(t, base, "init", "--bare", "-q", "-b", "develop", fork)
+	runGitIn(t, base, "init", "--bare", "-q", "-b", "master", other)
+	runGitIn(t, repo, "branch", "develop")
+	runGitIn(t, repo, "branch", "feat")
+	runGitIn(t, repo, "branch", "feat2")
+	runGitIn(t, repo, "remote", "add", "origin", origin)
+	runGitIn(t, repo, "remote", "add", "fork", fork)
+	runGitIn(t, repo, "remote", "add", "other", other)
+	runGitIn(t, repo, "push", "-q", "origin", "master")
+	runGitIn(t, repo, "push", "-q", "fork", "develop", "feat2")
+	runGitIn(t, repo, "push", "-q", "other", "feat")
+	runGitIn(t, repo, "remote", "set-head", "origin", "--auto")
+	runGitIn(t, repo, "remote", "set-head", "fork", "--auto")
+	runGitIn(t, repo, "branch", "--set-upstream-to=fork/develop", "feat")
+	runGitIn(t, repo, "branch", "--set-upstream-to=fork/feat2", "feat2")
+	def := DefaultBranchRef(ctx, repo)
+	if ShortBranchName(def) != "master" {
+		t.Fatalf("default = %q, want origin's master", def)
+	}
+
+	f, err := ReadBranchFactsFor(ctx, repo, "feat", def)
+	if err != nil {
+		t.Fatalf("facts(feat): %v", err)
+	}
+	if f.Remote != "" || f.RemoteBranch != "" || f.RemoteReason == "" {
+		t.Errorf("feat tracking fork/develop: facts = %+v, want no remote target", f)
+	}
+
+	// Control: a feature branch on the same remote is still a target.
+	f2, err := ReadBranchFactsFor(ctx, repo, "feat2", def)
+	if err != nil {
+		t.Fatalf("facts(feat2): %v", err)
+	}
+	if f2.Remote != "fork" || f2.RemoteBranch != "feat2" {
+		t.Errorf("feat2 tracking fork/feat2: facts = %+v, want fork/feat2", f2)
+	}
+
+	// A remote with no recorded HEAD: its default cannot be told, so no target.
+	runGitIn(t, repo, "fetch", "-q", "other")
+	runGitIn(t, repo, "branch", "--set-upstream-to=other/feat", "feat")
+	f3, err := ReadBranchFactsFor(ctx, repo, "feat", def)
+	if err != nil {
+		t.Fatalf("facts(feat on other): %v", err)
+	}
+	if f3.Remote != "" || f3.RemoteReason == "" {
+		t.Errorf("feat tracking other/feat with no other/HEAD: facts = %+v, want no remote target", f3)
 	}
 }

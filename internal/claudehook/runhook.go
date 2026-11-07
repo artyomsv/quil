@@ -104,8 +104,14 @@ func worktreeProbe(env HookEnv, in claudeStdin, nowMs int64) error {
 	// The command text itself is NOT spooled: it can carry a credential (an
 	// inline token, an authenticated URL), and the daemon's compare needs only
 	// the directory.
+	data := map[string]string{hookevents.DataProbeTrigger: trigger}
+	// A subagent says which one it is: several can work in different
+	// worktrees of one pane at once, and each must stay protected.
+	if in.AgentID != "" {
+		data[hookevents.DataProbeAgent] = truncate(in.AgentID, hookevents.MaxDataValueBytes)
+	}
 	return spoolEventCWD(env, nowMs, hookevents.EventWorktreeProbe, in.SessionID, dir,
-		"Worktree command", hookevents.SeverityInfo, map[string]string{hookevents.DataProbeTrigger: trigger})
+		"Worktree command", hookevents.SeverityInfo, data)
 }
 
 // sessionIDRe matches the Claude session-id shape (uuid-ish hex). Mirrors the

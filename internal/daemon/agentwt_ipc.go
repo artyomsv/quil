@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"time"
 
 	"github.com/artyomsv/quil/internal/gitworktree"
 	"github.com/artyomsv/quil/internal/ipc"
@@ -71,6 +72,7 @@ func (d *Daemon) agentWorktreeFacts(id string) ipc.AgentWorktreeFactsRespPayload
 		out.Error = "no such entry"
 		return out
 	}
+	start := time.Now()
 	if !claimBlockingFSCall() {
 		out.Error = "too many filesystem calls in flight"
 		return out
@@ -78,6 +80,11 @@ func (d *Daemon) agentWorktreeFacts(id string) ipc.AgentWorktreeFactsRespPayload
 	defer releaseBlockingFSCall()
 	ctx, cancel := context.WithTimeout(context.Background(), worktreeStatusTimeout)
 	defer cancel()
+	// The branch half runs on the same budget as the close dialog's
+	// (branchFactsBudget): the view waits as briefly, and a slow branch read
+	// must never cost it the file list already read.
+	factsCtx, cancelFacts := context.WithDeadline(ctx, start.Add(branchFactsBudget))
+	defer cancelFacts()
 
 	switch e.Kind {
 	case agentWTKindWorktree:
@@ -94,14 +101,18 @@ func (d *Daemon) agentWorktreeFacts(id string) ipc.AgentWorktreeFactsRespPayload
 				st.Files = append(st.Files, ipc.WorktreeFile{Code: f.Code, Path: f.Path})
 			}
 		}
-		fillBranchFacts(ctx, e.Path, map[string]string{}, &st)
+		if factsCtx.Err() != nil {
+			st.BranchReason = "not checked (out of time)"
+		} else {
+			fillBranchFacts(factsCtx, e.Path, map[string]string{}, &st)
+		}
 		out.Status = st
 	case agentWTKindBranch:
-		if err := verifyAgentBranch(ctx, e); err != nil {
+		if err := verifyAgentBranch(factsCtx, e); err != nil {
 			out.Error = err.Error()
 			return out
 		}
-		f, err := branchFactsForFn(ctx, e.Repo, e.Branch, defaultBranchRefFn(ctx, e.Repo))
+		f, err := branchFactsForFn(factsCtx, e.Repo, e.Branch, defaultBranchRefFn(factsCtx, e.Repo))
 		st := ipc.WorktreeStatus{}
 		applyBranchFacts(&st, f, err)
 		out.Status = st

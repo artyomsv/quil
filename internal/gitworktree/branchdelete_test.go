@@ -3,6 +3,7 @@ package gitworktree
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -63,18 +64,6 @@ func TestRemotePushEnvFor_KeepsRepoSSHCommand(t *testing.T) {
 	}
 }
 
-// Push output is held in a bounded buffer, never all of it.
-func TestBoundedPushOutput(t *testing.T) {
-	b := &boundedBuffer{max: maxPushOutput}
-	big := strings.Repeat("x", maxPushOutput*4)
-	if _, err := b.Write([]byte(big)); err != nil {
-		t.Fatal(err)
-	}
-	if len(b.String()) > maxPushOutput {
-		t.Errorf("buffer holds %d bytes, cap %d", len(b.String()), maxPushOutput)
-	}
-}
-
 // `--` keeps a dash-led branch name from reaching git as an option.
 func TestDeleteLocalBranch_TerminatesOptions(t *testing.T) {
 	calls := stubGit(t, "", nil)
@@ -111,5 +100,37 @@ func TestDeleteLocalBranch_RealGit_AfterWorktreeRemoved(t *testing.T) {
 	}
 	if out := runGitIn(t, repo, "branch", "--list", "feat/gone"); out != "" {
 		t.Errorf("branch still listed after delete: %q", out)
+	}
+}
+
+// The push keeps at most maxPushOutput bytes of what a real child prints —
+// the exact first bytes, not nothing — while the child is drained to the end.
+//
+// Fails if runPush returns to unbounded capture (CombinedOutput), or keeps
+// nothing.
+func TestRunPush_BoundsWhatAChildPrints(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh is not on PATH")
+	}
+	prev := gitBinary
+	gitBinary = "sh"
+	t.Cleanup(func() { gitBinary = prev })
+
+	// 4x the cap: an "a" line, then lines of x, then "done" on stderr — the
+	// child exits 0 only if every write was accepted (none blocked or failed).
+	script := `printf 'a\n'; i=0; while [ $i -lt 2048 ]; do printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n'; i=$((i+1)); done; echo done >&2`
+	out, err := runPush(context.Background(), t.TempDir(), os.Environ(), []string{"-c", script})
+
+	if err != nil {
+		t.Fatalf("runPush: %v (the child must be drained to the end)", err)
+	}
+	if len(out) != maxPushOutput {
+		t.Fatalf("kept %d bytes, want exactly maxPushOutput (%d)", len(out), maxPushOutput)
+	}
+	if !strings.HasPrefix(out, "a\nxxxx") {
+		t.Errorf("kept %q…, want the first bytes the child printed", out[:8])
+	}
+	if strings.Contains(out, "done") {
+		t.Error("kept output from past the cap")
 	}
 }

@@ -40,18 +40,9 @@ func DeleteRemoteBranch(ctx context.Context, repo, remote, branch string) error 
 	}
 	args := RemotePushArgs(remote, branch)
 	env := remotePushEnvFor(ctx, repo, os.Environ())
-	cmd := exec.CommandContext(ctx, gitBinary, args...)
-	cmd.Dir = repo
-	cmd.Env = env
-	hideWindow(cmd)
-	cmd.WaitDelay = gitWaitDelay
-	// Bounded like runGit's buffers: a remote or a hook can print without
-	// end, and the push may run for the whole timeout.
-	out := &boundedBuffer{max: maxPushOutput}
-	cmd.Stdout, cmd.Stderr = out, out
-	err := cmd.Run()
+	out, err := runPush(ctx, repo, env, args)
 	if err != nil {
-		msg := strings.TrimSpace(out.String())
+		msg := strings.TrimSpace(out)
 		if len(msg) > 400 {
 			msg = msg[:400]
 		}
@@ -110,4 +101,19 @@ func pushEnv(base []string, keepSSH bool) []string {
 		env = append(env, "GIT_SSH_COMMAND=ssh -o BatchMode=yes")
 	}
 	return env
+}
+
+// runPush runs one push and returns what it printed, at most maxPushOutput
+// bytes: a remote or a hook can print without end, and the push may run for
+// the whole timeout, inside a daemon that hosts every pane.
+func runPush(ctx context.Context, repo string, env, args []string) (string, error) {
+	cmd := exec.CommandContext(ctx, gitBinary, args...)
+	cmd.Dir = repo
+	cmd.Env = env
+	hideWindow(cmd)
+	cmd.WaitDelay = gitWaitDelay
+	out := &boundedBuffer{max: maxPushOutput}
+	cmd.Stdout, cmd.Stderr = out, out
+	err := cmd.Run()
+	return out.String(), err
 }

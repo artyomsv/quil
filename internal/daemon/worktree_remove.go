@@ -214,31 +214,32 @@ func (d *Daemon) removeOwnedWorktreesWith(paths []string, opt branchDeleteOpts) 
 // Each refusal and each failure becomes a sidebar card: the pane and the
 // dialog are gone by now, and a branch that silently survived a delete the
 // user asked for is the outcome this must never hide.
-func (d *Daemon) removeWorktreeWithBranch(path string, opt branchDeleteOpts) {
+func (d *Daemon) removeWorktreeWithBranch(path string, opt branchDeleteOpts) removeResult {
 	res := d.removeOneWorktreeFull(path, opt.wanted())
 	if !opt.wanted() {
-		return
+		return res
 	}
 	owner := opt.Owners[path]
 	f := res.facts
 	switch {
 	case !res.removed:
 		d.notifyBranchKept(owner, f.Branch, "the worktree was not removed")
-		return
+		return res
 	case res.factsErr != nil:
 		d.notifyBranchKept(owner, "", "could not read the branch: "+res.factsErr.Error())
-		return
+		return res
 	case f.Detached || f.Branch == "":
 		d.notifyBranchKept(owner, "", "the worktree had no branch checked out")
-		return
+		return res
 	case f.IsDefault:
 		d.notifyBranchKept(owner, f.Branch, "it is the default branch")
-		return
+		return res
 	case !opt.confirmed(f.Branch):
 		d.notifyBranchKept(owner, f.Branch, "the worktree switched branch after the dialog opened")
-		return
+		return res
 	}
 	d.deleteBranches(res.repo, f, opt, owner)
+	return res
 }
 
 // deleteBranches runs the local and remote deletes opt asks for, for a branch
@@ -297,6 +298,8 @@ type removeResult struct {
 	removed  bool
 	facts    gitworktree.BranchFacts
 	factsErr error
+	// reason says why removed is false, for a caller that reports it.
+	reason string
 }
 
 // removeOneWorktree resolves the repository and runs the removal, retrying
@@ -386,10 +389,12 @@ func (d *Daemon) removeOneWorktreeFull(path string, wantFacts bool) (res removeR
 		case <-ctx.Done():
 			timer.Stop()
 			log.Printf("worktree remove: %s gave up waiting for the directory: %v", path, err)
+			res.reason = "the folder is still held: " + err.Error()
 			return
 		}
 	}
 	log.Printf("worktree remove: %s failed after %d attempts: %v", path, worktreeRemoveAttempts, err)
+	res.reason = err.Error()
 	return res
 }
 

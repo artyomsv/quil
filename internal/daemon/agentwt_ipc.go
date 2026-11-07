@@ -164,7 +164,23 @@ func (d *Daemon) agentWorktreeAct(req ipc.AgentWorktreeActReqPayload) ipc.AgentW
 			return out
 		}
 		log.Printf("agent worktrees: removing %s (entry %s)", e.Path, e.ID)
-		d.removeWorktreeWithBranch(e.Path, opt)
+		res := d.removeWorktreeWithBranch(e.Path, opt)
+		if !res.removed {
+			// The worktree removal itself raises no sidebar card, so this
+			// answer is the only place the user learns it did not happen.
+			reason := res.reason
+			if reason == "" {
+				reason = "see quild.log"
+			}
+			out.Error = "the worktree was not removed: " + reason
+			return out
+		}
+		out.Notice = "Worktree removed."
+		if opt.wanted() {
+			out.Notice += " Each branch step reports on a sidebar card."
+		}
+		d.agentWT.schedule(e.Repo, agentWTAttr{Trigger: "cleanup"})
+		return out
 	case agentWTKindBranch:
 		if req.RemoveWorktree || (!req.DeleteBranch && !req.DeleteRemoteBranch) {
 			out.Error = "a branch entry takes only the branch deletes"
@@ -187,7 +203,7 @@ func (d *Daemon) agentWorktreeAct(req ipc.AgentWorktreeActReqPayload) ipc.AgentW
 	}
 	// The next compare marks what went as gone.
 	d.agentWT.schedule(e.Repo, agentWTAttr{Trigger: "cleanup"})
-	out.Notice = "Started. Each step reports on a sidebar card."
+	out.Notice = "Done. Each branch step reports on a sidebar card."
 	return out
 }
 

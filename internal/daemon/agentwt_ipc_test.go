@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -103,6 +105,25 @@ func TestAgentWTAct_RemovesTheRecordedPath(t *testing.T) {
 
 	if got.Error != "" || len(*calls) != 1 || (*calls)[0][1] != "/w/x" {
 		t.Errorf("resp = %+v, removals %v; want one removal of /w/x", got, *calls)
+	}
+}
+
+// A removal git refuses (a folder another process holds) must come back as a
+// refusal, not "started": the view would otherwise show a live row the user
+// believes is gone.
+//
+// Fails if agentWorktreeAct ignores the removal's result.
+func TestAgentWTAct_RemovalFailureIsReported(t *testing.T) {
+	d := daemonWithRecord(t, wtEntry)
+	stubWorktreeList(t, []gitworktree.Worktree{{Path: "/repo", Main: true}, {Path: "/w/x", Branch: "x"}}, nil)
+	stubRemoveWorktree(t, func(context.Context, string, string) error {
+		return errors.New("The process cannot access the file because it is being used by another process.")
+	})
+
+	got := d.agentWorktreeAct(ipc.AgentWorktreeActReqPayload{ID: "e-wt", RemoveWorktree: true})
+
+	if got.Error == "" || !strings.Contains(got.Error, "not removed") {
+		t.Errorf("resp = %+v, want a refusal naming the failed removal", got)
 	}
 }
 

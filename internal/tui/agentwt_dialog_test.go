@@ -90,6 +90,24 @@ func TestAgentWTDialog_DetailReusesCloseRowsAndRemoteNeedsY(t *testing.T) {
 	}
 }
 
+// Review Focus 5: nothing is removed before the file list is on screen. Enter
+// with the worktree ticked waits while the facts are still on their way.
+func TestAgentWTDialog_EnterWaitsForTheFacts(t *testing.T) {
+	m := agentWTModel(wtInfo("a", "/proj", "feat/a"))
+	fake := &fakeSender{}
+	m.client = fake
+	mdl, _ := m.openAgentWTConfirm(m.visibleAgentWT()[0])
+	m = mdl.(Model)
+	fake.sent = nil
+
+	m = confirmPress(m, " ")
+	m = confirmPress(m, "enter")
+
+	if len(fake.sent) != 0 || m.dialog != dialogConfirm {
+		t.Errorf("Enter acted before the facts arrived (sent %d)", len(fake.sent))
+	}
+}
+
 // A list request nobody answers ends with a reason, never an endless Loading.
 func TestAgentWTDialog_TimeoutShowsReason(t *testing.T) {
 	m := agentWTModel()

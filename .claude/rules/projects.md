@@ -1743,3 +1743,57 @@ it is not, finishes with `os.Remove` — never `RemoveAll`, so only an empty
 directory, because Quil is completing git's operation rather than performing a
 recursive delete of its own. That cleanup retries on the same budget the git
 call does, since the child that blocked git is still exiting.
+
+**The status answer carries the FILE LIST and the BRANCH FACTS.**
+`gitworktree.Status` returns a `StatusReport` (count, the first 200 entries,
+truncated flag) from `status --porcelain -z --ignored`: `-z` keeps a name with a
+space, a quote or a newline one entry, and a rename's source path is consumed,
+not listed. `gitworktree.ReadBranchFacts` reads the branch from git's listing
+(never from a client), the unmerged count against the FULLY-QUALIFIED default
+ref, and the remote — the configured upstream first, split on remote NAMES
+(longest first, so `origin/feat/x` is origin + `feat/x`), else the one remote
+whose tracking ref exists; two such remotes are ambiguous, never guessed. Local
+refs only, no network. The default branch is resolved once per repository per
+request, and facts are read for the first six worktrees only (the dialog's row
+cap), all on the request's one deadline.
+
+**Branch deletes on close are bools plus CHECK-ONLY names.**
+`DestroyPanePayload`/`DestroyTabPayload` carry `delete_branch`,
+`delete_remote_branch` and `confirmed_branches`. The daemon reads the facts
+BEFORE `git worktree remove` (the listing entry naming the branch goes with
+it) and deletes only when the branch it read is in `confirmed_branches` — so a
+worktree an agent switched to another branch after the dialog opened keeps
+that branch, and no client can name a branch to delete. Never the default
+branch. The local delete is `branch -D -- <b>` (the dialog showed the unmerged
+count; git itself refuses a branch checked out in any worktree, which closes
+the race with a sibling worktree). The remote delete is `git -c
+credential.interactive=false push <remote> :refs/heads/<b>` with
+`GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never` and a BatchMode ssh command
+unless the user set their own — the daemon has no console, so any prompt is
+invisible — bounded at 30 s, with NO filesystem permit held (it is network).
+Every refusal and failure is a `worktree_branch_kept` sidebar card carrying
+the CLOSED pane's id and name (`paneRef`, captured before the destroy);
+success is `worktree_branch_deleted`. All three close paths now go through
+`removeOwnedWorktreesFn` — the tab close used to call `removeOwnedWorktrees`
+directly. The MCP/browser `destroy_pane_req` deletes no branches.
+
+**The remote delete has two gates, and the daemon owns the first.** F1 →
+Settings → "Allow remote branch delete" (`worktree.remote_branch_delete`,
+default OFF) is pushed to every daemon this client may administer as
+`worktree_policy` (admin class), on attach and on change — F1 edits reach
+`config.toml` only on TUI exit, and a remote daemon never reads this machine's
+file, so a disk read at delete time would refuse what the dialog offered. The
+daemon keeps it in `remoteBranchDelete` (seeded from its own config) and
+refuses a remote delete while it is off. A standard token is refused
+`delete_remote_branch` by `clientauth.carriesRemoteDelete`. The second gate is
+the dialog: the remote row is ticked by hand and the accept takes `y` only —
+checked BEFORE `resetConfirmWorktrees`, or a refused Enter would drop the arm.
+The browser's Settings page saves the switch but sends no policy; the daemon
+takes it at its next start.
+
+**The dialog's height is measured, not budgeted by constant.**
+`confirmFileRows` renders the dialog once with zero file rows (a probe copy
+with `confirmFileRowsSet`) and gives the file list what is left of the
+terminal, 1 to 10 rows; with several worktrees only the focused one is drawn in
+full and the rest take one row each. `TestCloseConfirm_FitsTerminal` asserts the
+property at 24 and 30 rows.

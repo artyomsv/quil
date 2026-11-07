@@ -24,6 +24,27 @@ type confirmWorktree struct {
 	changes int
 	err     string
 	loaded  bool
+
+	// The files the removal destroys, as the daemon listed them (remote text:
+	// sanitised at render).
+	files          []ipc.WorktreeFile
+	filesTruncated bool
+
+	// Branch facts, from the same answer. The dialog offers the branch rows
+	// only on facts it LOADED: branchDeletable is false until then.
+	branch          string
+	branchDeletable bool
+	branchReason    string
+	unmerged        int
+	defaultBranch   string
+	remote          string
+	remoteBranch    string
+	remoteReason    string
+
+	// The branch's open pull request, from the pane's own PR row at open
+	// time: a remote delete closes it.
+	prNumber int
+	prOpen   bool
 }
 
 // collectConfirmWorktrees reports the worktrees a close would delete.
@@ -55,7 +76,11 @@ func collectConfirmWorktrees(panes []*PaneModel) []confirmWorktree {
 			continue
 		}
 		seen[p.WorktreePath] = true
-		out = append(out, confirmWorktree{path: p.WorktreePath, label: confirmWorktreeLabel(p)})
+		out = append(out, confirmWorktree{
+			path: p.WorktreePath, label: confirmWorktreeLabel(p),
+			prNumber: p.PRNumber,
+			prOpen:   p.PRNumber > 0 && p.PRStatus != "merged" && p.PRStatus != "closed",
+		})
 	}
 	return out
 }
@@ -181,6 +206,20 @@ func (m *Model) applyWorktreeStatus(msg worktreeStatusMsg) {
 			row.err = st.Error
 		default:
 			row.changes = st.Changes
+			row.files = st.Files
+			row.filesTruncated = st.FilesTruncated
+		}
+		if ok && msg.Resp.Error == "" {
+			// The branch half is independent of the file half: one can fail
+			// while the other answered, and each says so on its own row.
+			row.branch = st.Branch
+			row.branchDeletable = st.BranchDeletable
+			row.branchReason = st.BranchReason
+			row.unmerged = st.Unmerged
+			row.defaultBranch = st.DefaultBranch
+			row.remote, row.remoteBranch, row.remoteReason = st.Remote, st.RemoteBranch, st.RemoteReason
+		} else {
+			row.branchReason = "could not check the branch"
 		}
 	}
 }
@@ -200,6 +239,7 @@ func (m *Model) applyWorktreeStatusTimeout(msg worktreeStatusTimeoutMsg) {
 	for i := range m.confirmWorktrees {
 		m.confirmWorktrees[i].loaded = true
 		m.confirmWorktrees[i].err = "could not check for uncommitted work"
+		m.confirmWorktrees[i].branchReason = "could not check the branch"
 	}
 }
 
@@ -213,4 +253,9 @@ func (m *Model) resetConfirmWorktrees() {
 	m.confirmWorktrees = nil
 	m.confirmRemoveWorktree = false
 	m.confirmWorktreeGen = ""
+	m.confirmDeleteBranch = false
+	m.confirmDeleteRemote = false
+	m.confirmRow = 0
+	m.confirmFileScroll = 0
+	m.confirmFileFocus = 0
 }

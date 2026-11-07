@@ -1797,3 +1797,44 @@ with `confirmFileRowsSet`) and gives the file list what is left of the
 terminal, 1 to 10 rows; with several worktrees only the focused one is drawn in
 full and the rest take one row each. `TestCloseConfirm_FitsTerminal` asserts the
 property at 24 and 30 rows.
+
+## Worktrees that appear while agents run (`agentwt.go`)
+
+The agents' hooks only say WHERE a worktree-related command ran (a
+`WorktreeProbe`, see `hooks-and-sessions.md`). `agentWTStore` answers it by
+listing that repository (`git worktree list` + `for-each-ref refs/heads`) and
+comparing with a per-repository BASELINE it saved the last time it looked, in
+`$QUIL_HOME/agent-worktrees.json` (stem `agent-worktrees` is in
+`quilHomeStems`, or Windows `ProtectDir` would refuse the folder and the TCP
+listener stays off). The compare is the truth and the hook is the trigger: an
+alias, a script or a probe that never fired is caught by the compare at the
+end of the pane's turn (`turnEnded`, from `emitHookEvent` on a stop-class
+edge), which covers every directory the pane probed plus its own CWD.
+
+**First sight is baseline only** — what already exists is attributed to
+nobody. A new worktree after that is one entry, attributed to the pane whose
+compare saw it, carrying its branch; a new branch with no worktree is its own
+entry; the default branch never is. Something that disappears is marked
+`Gone`, or dropped when it lived under 60 s (Claude's own subagent worktrees
+come and go inside a turn). Quil's own worktree adds (`noteOwnWorktree`, from
+`worktreeAddAndCreate`) join the baseline and never become entries.
+
+**An entry says the worktree APPEARED while the pane ran, never that its agent
+made it** — a user can make one by hand in another terminal at the same
+moment. The cleanup view words it "appeared while <pane> ran"; do not
+strengthen the claim.
+
+**No answer never authorises a change.** A `git worktree list` error compares
+nothing and marks nothing gone (the `worktreeRegistered` rule). A branch list
+that errors or comes back TRUNCATED (`maxBranchList`) skips the branch half
+only: reading everything past the cap as gone would later re-record it all as
+new. A sandbox pane is never listed — its paths are inside its container.
+
+**Probes go around the hook ingester** (`routeHookPayload`): the coalescer is
+last-wins per (pane, event, agent type), so two probes in one 200 ms tick would
+lose the first directory, and a probe is no notification. One compare per
+directory runs at a time; probes arriving meanwhile cost one more compare
+(`running`/`pending`). Each compare takes a `claimBlockingFSCall` permit and a
+10 s deadline on a worker goroutine. Bounds: 64 baselines (least recently
+seen evicted), 500 entries (gone first). The record is written through
+`internal/atomicfile`, debounced 2 s, and flushed at daemon stop.

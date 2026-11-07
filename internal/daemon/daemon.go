@@ -82,6 +82,9 @@ type Daemon struct {
 	// see them end when their conn closes.
 	parkedWaits atomic.Int32
 	gitCache    *gitCache // per-checkout branch/worktree/divergence, refreshed on a ticker
+	// agentWT records worktrees and branches that appear while agents run
+	// (agentwt.go). Nil until Start; every method is nil-safe.
+	agentWT *agentWTStore
 	// Last attached terminal size, used before a client can resize a new pane.
 	clientSize atomic.Pointer[terminalSize]
 
@@ -492,6 +495,9 @@ func (d *Daemon) Start() error {
 		log.Printf("warning: failed to init hook events spool: %v", err)
 	}
 	d.hookIngester = hookevents.NewIngester(d.emitHookEvent)
+	// Before the watcher starts: it diverts worktree probes here.
+	d.agentWT = newAgentWTStore(config.AgentWorktreesPath(), d.paneForAgentWT)
+	d.agentWT.load()
 
 	// Write default plugin TOML files if missing, then load all plugins
 	if _, err := plugin.EnsureDefaultPlugins(config.PluginsDir()); err != nil {
@@ -726,6 +732,7 @@ func (d *Daemon) Stop() {
 		d.refreshPluginStateFromHooks()
 		log.Print("daemon stopping, writing final snapshot...")
 		d.snapshot()
+		d.agentWT.close()
 		// Every conn's disconnect callback writes to the audit log (a
 		// tcp_disconnect, or a login_failed from a check still in flight
 		// when its conn was closed), so it closes only after they ran.
@@ -3520,6 +3527,7 @@ func (d *Daemon) cleanupPaneArtifacts(paneID string) {
 	// can end them: the task state machine only advances on events for a pane
 	// the session still holds. See failTasksForPane (task.go).
 	d.failTasksForPane(paneID, "pane destroyed")
+	d.agentWT.forgetPane(paneID)
 	// Overlay visibility claims are keyed by pane id, so a destroyed overlay
 	// would otherwise leave its id in every live client's claim set — in a
 	// daemon that runs for weeks, one entry per overlay ever opened.
@@ -7344,7 +7352,7 @@ func (d *Daemon) hookEventsWatcher() {
 				logger.Debug("hook events tick: read %d payloads from spool", len(payloads))
 			}
 			for _, p := range payloads {
-				d.hookIngester.Submit(p)
+				d.routeHookPayload(p)
 			}
 		}
 	}
@@ -7367,16 +7375,7 @@ func (d *Daemon) emitHookEvent(p hookevents.Payload) {
 	// "default"/"verbose"/anything else fall through. Storm diagnostics
 	// always pass — they're the rate limiter's own internal signal.
 	if p.HookEvent != hookevents.EventStorm {
-		var mode string
-		switch p.Source {
-		case hookevents.SourceClaude:
-			mode = d.cfg.Notification.Hooks.Claude
-		case hookevents.SourceOpenCode:
-			mode = d.cfg.Notification.Hooks.OpenCode
-		case hookevents.SourceCodex:
-			mode = d.cfg.Notification.Hooks.Codex
-		}
-		if mode == "off" {
+		if d.hookMode(p.Source) == "off" {
 			return
 		}
 	}
@@ -7465,6 +7464,41 @@ func (d *Daemon) emitHookEvent(p hookevents.Payload) {
 		Timestamp: ts,
 		Data:      data,
 	})
+
+	// The end of an agent's turn is the backstop compare for worktrees and
+	// branches no probe caught (a script, an alias).
+	switch hookevents.ClassifyWorkEvent(eventType) {
+	case hookevents.WorkEventStop, hookevents.WorkEventStopFinal:
+		d.agentWT.turnEnded(p.PaneID)
+	}
+}
+
+// routeHookPayload sends one spool line on. A worktree probe goes around the
+// ingester to the agent-worktree record: the ingester's coalescer is
+// last-wins per pane and event name, so two probes read in one tick (a
+// worktree add, then EnterWorktree) would lose the first directory — and a
+// probe is no notification, so it must not reach the event queue either.
+func (d *Daemon) routeHookPayload(p hookevents.Payload) {
+	if p.HookEvent == hookevents.EventWorktreeProbe {
+		if d.hookMode(p.Source) != "off" {
+			d.agentWT.probe(p)
+		}
+		return
+	}
+	d.hookIngester.Submit(p)
+}
+
+// hookMode is the configured hooks tier for one source ("off" drops events).
+func (d *Daemon) hookMode(source string) string {
+	switch source {
+	case hookevents.SourceClaude:
+		return d.cfg.Notification.Hooks.Claude
+	case hookevents.SourceOpenCode:
+		return d.cfg.Notification.Hooks.OpenCode
+	case hookevents.SourceCodex:
+		return d.cfg.Notification.Hooks.Codex
+	}
+	return ""
 }
 
 func (d *Daemon) idleChecker() {

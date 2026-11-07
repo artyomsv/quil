@@ -1842,7 +1842,11 @@ new. A sandbox pane is never listed — its paths are inside its container.
 last-wins per (pane, event, agent type), so two probes in one 200 ms tick would
 lose the first directory, and a probe is no notification. One compare per
 directory runs at a time; probes arriving meanwhile cost one more compare
-(`running`/`pending`). Each compare takes a `claimBlockingFSCall` permit and a
+(`running`/`pending`), and two compares of one repository through different
+directories may still overlap, so each listing is stamped BEFORE it is taken
+and `apply` refuses one older than the baseline's `Seen` — applied second, an
+older listing would read a newer worktree as gone. Each compare takes a
+`claimBlockingFSCall` permit and a
 10 s deadline on a worker goroutine. Bounds: 64 baselines (least recently
 seen evicted), 500 entries (gone first). The record is written through
 `internal/atomicfile`, debounced 2 s, and flushed at daemon stop.

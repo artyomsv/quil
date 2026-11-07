@@ -301,6 +301,33 @@ func TestRouteHookPayload_ProbeBypassesCoalescerAndQueue(t *testing.T) {
 	}
 }
 
+// Two compares of one repository can finish in either order. A listing taken
+// BEFORE the one already applied must not undo it: applied second, it would
+// read the newer worktree as gone and drop it as short-lived.
+//
+// Fails if apply does not refuse a listing older than the baseline.
+func TestAgentWT_OlderListingDoesNotUndoANewerOne(t *testing.T) {
+	repo := &fakeRepo{branches: []string{"master"}}
+	s, now := newTestAgentWT(t, repo, agentPanes)
+	s.probe(probeFor("pane-a", "/repo")) // baseline at t0
+	t0 := *now
+
+	*now = t0.Add(2 * time.Second)
+	newer := []gitworktree.Worktree{{Path: "/repo", Main: true}, {Path: "/w/x", Branch: "x"}}
+	s.mu.Lock()
+	s.apply(newer, false, nil, "master", agentWTAttr{PaneID: "pane-a"}, *now)
+	s.mu.Unlock()
+
+	older := []gitworktree.Worktree{{Path: "/repo", Main: true}}
+	s.mu.Lock()
+	s.apply(older, false, nil, "master", agentWTAttr{PaneID: "pane-a"}, t0.Add(time.Second))
+	s.mu.Unlock()
+
+	if got := s.entriesSnapshot(); len(got) != 1 || got[0].Gone {
+		t.Errorf("entries = %+v, want x recorded and live", got)
+	}
+}
+
 // A new branch with no worktree is recorded; the default branch never is.
 func TestAgentWT_NewBranchRecorded(t *testing.T) {
 	repo := &fakeRepo{branches: []string{"master"}}

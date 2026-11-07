@@ -711,10 +711,21 @@ type Model struct {
 	// cleared by resetConfirmWorktrees on every route out of the dialog.
 	confirmWorktrees      []confirmWorktree
 	confirmRemoveWorktree bool
-	confirmWorktreeGen    string           // in-flight status request; "" = none
-	upgradeQueue          []upgradePrompt  // hosts waiting to be ASKED about provisioning; see enqueueUpgradePrompt
-	devMode               bool             // true when QUIL_HOME is set
-	pluginRegistry        *plugin.Registry // plugin registry (shared with daemon)
+	confirmWorktreeGen    string // in-flight status request; "" = none
+	// The branch rows under the worktree row (worktree_rows.go). Off on every
+	// open like the worktree toggle, and cleared by resetConfirmWorktrees.
+	confirmDeleteBranch bool
+	confirmDeleteRemote bool
+	confirmRow          int // 0 worktree, 1 local branch, 2 remote branch
+	confirmFileScroll   int // first file row shown
+	confirmFileFocus    int // which worktree's files show when a tab holds several
+	// confirmFileRowsFixed pins the file list's height for one render; only a
+	// probe copy sets it (confirmFileRows), to measure the rest of the box.
+	confirmFileRowsFixed int
+	confirmFileRowsSet   bool
+	upgradeQueue         []upgradePrompt  // hosts waiting to be ASKED about provisioning; see enqueueUpgradePrompt
+	devMode              bool             // true when QUIL_HOME is set
+	pluginRegistry       *plugin.Registry // plugin registry (shared with daemon)
 	// destAvail records what each REMOTE daemon said about its OWN registry,
 	// keyed by destination. Absent means "that machine has not answered for
 	// itself" and falls back to the local registry's own detection — see
@@ -9020,6 +9031,11 @@ func (m *Model) attachAllDests() tea.Cmd {
 	// current policy on every resize, not just after a fresh attach.
 	if len(newlyAttached) > 0 {
 		if cmd := m.overlayPolicyCmd(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		// Same moment, same reason: a daemon learns the remote-branch-delete
+		// switch only from this push.
+		if cmd := m.worktreePolicyCmd(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
 		// Rides the same post-attach path as the policy, and for the same

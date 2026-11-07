@@ -26,6 +26,7 @@ func TestQuilHomeEntriesKnownToProtectDir(t *testing.T) {
 		config.WorkspacePath(), config.BufferDir(), config.PluginsDir(),
 		config.PasteDir(), config.WindowStatePath(), config.InstancesPath(),
 		config.ProjectGroupsPath(), config.NotesDir(), config.NotesConflictsDir(),
+		config.AgentWorktreesPath(),
 		config.SharedImportPath(), config.EventsDir(), config.SessionsDir(),
 		config.UpdateDir(), config.TemplatesPath(), config.BindingsPath(),
 		config.RecentCWDsPath(""), config.RecentCWDsPath("user@host"),

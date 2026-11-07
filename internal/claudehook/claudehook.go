@@ -164,13 +164,20 @@ var forwardedHookEvents = []string{
 // and it is unaffected by PreToolUse also being registered match-all above for
 // an unrelated purpose (proof that an autonomously resumed turn is running).
 var matchedHookEvents = []struct{ Name, Matcher string }{
-	{Name: "PostToolUse", Matcher: promptToolMatcher},
+	{Name: "PostToolUse", Matcher: promptToolMatcher + "|" + worktreeToolMatcher},
 }
 
 // promptToolMatcher is the tool-name regex for interactive-prompt tools whose
-// completion re-arms the work spinner. Keep in sync with the PostToolUse case
-// in runhook.go.
+// completion re-arms the work spinner. Keep in sync with isPromptTool in
+// runhook.go.
 const promptToolMatcher = "AskUserQuestion|ExitPlanMode"
+
+// worktreeToolMatcher adds the tools whose PostToolUse can report a worktree
+// the agent made: a shell command, and Claude's own worktree tools. Their
+// PostToolUse spools only a WorktreeProbe (runhook.worktreeProbe), never the
+// resume edge. Cost: one hook process per Bash call (tens of ms). Never a
+// WorktreeCreate hook: registering one REPLACES Claude's own creation.
+const worktreeToolMatcher = "Bash|EnterWorktree|ExitWorktree"
 
 // BuildSettingsJSON returns the settings JSON Quil writes for
 // `claude --settings <path>` (see WriteSettingsFile — the JSON reaches claude

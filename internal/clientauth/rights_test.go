@@ -109,6 +109,9 @@ func TestAllows_StandardPayloadCarriers(t *testing.T) {
 		{"split_pane_req args", "SplitPaneReqPayload.pane.instance_args", msgOf(t, ipc.MsgSplitPaneReq, ipc.SplitPaneReqPayload{Placement: ipc.PlacementRight, Pane: ipc.SplitPaneSpec{Type: "ssh", InstanceArgs: []string{"u@h"}}})},
 		{"split_pane_req overlay", "SplitPaneReqPayload.placement", msgOf(t, ipc.MsgSplitPaneReq, ipc.SplitPaneReqPayload{Placement: ipc.PlacementOverlay, OverlayKind: "lazygit"})},
 		{"malformed split_pane_req", "", &ipc.Message{Type: ipc.MsgSplitPaneReq, Payload: json.RawMessage(`"x"`)}},
+		// A remote branch delete reaches everyone sharing the remote.
+		{"destroy_pane remote branch delete", "", msgOf(t, ipc.MsgDestroyPane, ipc.DestroyPanePayload{PaneID: "p", RemoveWorktree: true, DeleteRemoteBranch: true})},
+		{"destroy_tab remote branch delete", "", msgOf(t, ipc.MsgDestroyTab, ipc.DestroyTabPayload{TabID: "t", RemoveWorktree: true, DeleteRemoteBranch: true})},
 	}
 	covered := map[string]bool{}
 	for _, tt := range refused {
@@ -135,6 +138,8 @@ func TestAllows_StandardPayloadCarriers(t *testing.T) {
 		msgOf(t, ipc.MsgCreateTab, ipc.CreateTabPayload{FirstPane: &ipc.FirstPaneSpec{Toggles: []string{"chrome"}}}),
 		msgOf(t, ipc.MsgCreateTab, nil),
 		msgOf(t, ipc.MsgSplitPaneReq, ipc.SplitPaneReqPayload{Placement: ipc.PlacementBelow, Pane: ipc.SplitPaneSpec{Type: "claude-code", Toggles: []string{"chrome"}, InstanceName: "work"}}),
+		// The local delete stays a standard action, like the close itself.
+		msgOf(t, ipc.MsgDestroyPane, ipc.DestroyPanePayload{PaneID: "p", RemoveWorktree: true, DeleteBranch: true, ConfirmedBranches: []string{"feat"}}),
 	}
 	for _, m := range allowed {
 		if ok, reason := Allows(LevelStandard, "tcp", m); !ok {

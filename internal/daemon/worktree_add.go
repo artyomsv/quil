@@ -169,6 +169,9 @@ func (d *Daemon) worktreeAddAndCreate(p ipc.CreatePanePayload) ipc.CreatePaneRes
 			from = "HEAD (no default branch resolved)"
 		}
 		log.Printf("worktree create: %s on %s from %s", path, spec.Branch, from)
+		// Quil made this one: it joins the baseline and is never recorded
+		// as having appeared while an agent ran.
+		d.agentWT.noteOwnWorktree(path, spec.Branch)
 	}
 	if err != nil {
 		// gitworktree.Add attaches git's own stderr — "already used by

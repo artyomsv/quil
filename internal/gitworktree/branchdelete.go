@@ -72,10 +72,11 @@ const maxPushOutput = 16 << 10
 // not added. Without a terminal or an askpass program ssh cannot prompt then
 // either.
 func remotePushEnvFor(ctx context.Context, repo string, base []string) []string {
+	repoSSH := false
 	if out, err := runGit(ctx, repo, "config", "--get", "core.sshCommand"); err == nil && strings.TrimSpace(out) != "" {
-		return RemotePushEnv(append(append([]string{}, base...), "GIT_SSH_COMMAND="+strings.TrimSpace(out)))
+		repoSSH = true
 	}
-	return RemotePushEnv(base)
+	return pushEnv(base, repoSSH)
 }
 
 // RemotePushArgs is the argv DeleteRemoteBranch runs, exported for its test.
@@ -92,10 +93,14 @@ func RemotePushArgs(remote, branch string) []string {
 // EMPTY GIT_ASKPASS/SSH_ASKPASS means "none" (a later duplicate key wins in
 // exec). An ssh command the user configured is left alone: replacing it would
 // drop their own options (a jump host, a key file).
-func RemotePushEnv(base []string) []string {
+func RemotePushEnv(base []string) []string { return pushEnv(base, false) }
+
+// pushEnv is RemotePushEnv; keepSSH leaves ssh to a command the repository
+// configures.
+func pushEnv(base []string, keepSSH bool) []string {
 	env := append([]string{}, base...)
 	env = append(env, "GIT_TERMINAL_PROMPT=0", "GCM_INTERACTIVE=never", "GIT_ASKPASS=", "SSH_ASKPASS=")
-	userSSH := false
+	userSSH := keepSSH
 	for _, kv := range base {
 		if strings.HasPrefix(kv, "GIT_SSH_COMMAND=") || strings.HasPrefix(kv, "GIT_SSH=") {
 			userSSH = true

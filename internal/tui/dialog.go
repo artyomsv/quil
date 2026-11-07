@@ -1205,6 +1205,13 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if len(m.confirmWorktrees) > 0 && m.remoteDeleteArmed() && msg.String() != "y" {
 			return m, nil
 		}
+		// A ticked worktree is removed only once its file list is on screen:
+		// git status on a large repository takes seconds, and that window is
+		// the ordinary case. The status request has its own timeout, after
+		// which the row is loaded with a reason, so this never waits forever.
+		if m.confirmRemoveWorktree && !m.confirmWorktreesLoaded() {
+			return m, nil
+		}
 		kind := m.confirmKind
 		id := m.confirmID
 		// Read BEFORE the reset below, like every other value this branch
@@ -2101,6 +2108,10 @@ func (m Model) renderConfirmDialog() string {
 			// the key every dialog commits with — does not confirm it.
 			if m.remoteDeleteArmed() {
 				footer = "space toggle  ↑↓ row  y delete remote  Esc cancel"
+			}
+			// Enter waits for the file list while the worktree is ticked.
+			if m.confirmRemoveWorktree && !m.confirmWorktreesLoaded() {
+				footer = "space toggle  ↑↓ row  checking…  Esc cancel"
 			}
 		}
 	}

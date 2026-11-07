@@ -305,6 +305,17 @@ func worktreeChangesShort(w confirmWorktree) string {
 	}
 }
 
+// confirmWorktreesLoaded reports that every worktree row has its answer (or
+// its timeout reason).
+func (m Model) confirmWorktreesLoaded() bool {
+	for _, w := range m.confirmWorktrees {
+		if !w.loaded {
+			return false
+		}
+	}
+	return true
+}
+
 // remoteDeleteArmed reports that an accept would delete a remote branch —
 // the one choice Enter alone must not confirm.
 func (m Model) remoteDeleteArmed() bool {

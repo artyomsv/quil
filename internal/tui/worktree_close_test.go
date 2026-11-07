@@ -121,6 +121,8 @@ func TestConfirmKey_EnterSendsTheRemoveFlagWhenArmed(t *testing.T) {
 	m := modelWithWorktreePane()
 	m = applyModel(m.openClosePaneConfirm())
 	m = applyModel(m.handleConfirmKey(keyPressFor(" ")))
+	// The status answered (Enter waits for it while the worktree is ticked).
+	m.confirmWorktrees[0].loaded = true
 
 	fake := &fakeSender{}
 	m.client = fake

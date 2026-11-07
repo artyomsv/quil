@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"log"
 	"os"
 	"path/filepath"
@@ -49,7 +50,83 @@ const (
 var removeWorktreeKeepBranchFn = gitworktree.RemoveWorktree
 
 // removeOwnedWorktreesFn is the test seam for the close-time removal.
-var removeOwnedWorktreesFn = func(d *Daemon, paths []string) { d.removeOwnedWorktrees(paths) }
+var removeOwnedWorktreesFn = func(d *Daemon, paths []string, opt branchDeleteOpts) {
+	d.removeOwnedWorktreesWith(paths, opt)
+}
+
+// Seams for the branch deletes that may follow a removal.
+var (
+	deleteLocalBranchFn  = gitworktree.DeleteLocalBranch
+	deleteRemoteBranchFn = gitworktree.DeleteRemoteBranch
+)
+
+// remoteBranchDeleteTimeout bounds one remote push. It runs with no FS
+// permit held (it is network, not disk), but it is still a goroutine and a
+// git process; a push that has not finished in 30 s is waiting on something
+// that will not answer, and the user learns that from the sidebar card.
+var remoteBranchDeleteTimeout = 30 * time.Second
+
+// paneRef names the pane a close came from, captured BEFORE the destroy: the
+// branch outcome is reported after the pane is gone, and a card with no pane
+// id or name tells the user nothing about which close it belongs to.
+type paneRef struct {
+	ID, TabID, Name string
+}
+
+// branchDeleteOpts says what a close asked for beyond the worktree directory.
+//
+// Confirmed holds the branch names the dialog SHOWED. It is check-only: the
+// daemon deletes the branch it reads from git itself, and only when that name
+// is in this list — so a branch an agent switched the worktree to after the
+// dialog opened is never deleted, and no client can name a branch to delete.
+type branchDeleteOpts struct {
+	Local, Remote bool
+	Confirmed     []string
+	// Owners maps a worktree path (as ownedWorktreePaths returns it) to the
+	// pane that owned it.
+	Owners map[string]paneRef
+}
+
+func (o branchDeleteOpts) wanted() bool { return o.Local || o.Remote }
+
+func (o branchDeleteOpts) confirmed(branch string) bool {
+	for _, b := range o.Confirmed {
+		if b == branch {
+			return true
+		}
+	}
+	return false
+}
+
+// worktreeOwners maps each owned worktree path to the first pane that owns it,
+// read under PluginMu like ownedWorktreePaths.
+func worktreeOwners(panes []*Pane) map[string]paneRef {
+	out := map[string]paneRef{}
+	for _, p := range panes {
+		if p == nil {
+			continue
+		}
+		p.PluginMu.Lock()
+		owned, path, name := p.WorktreeOwned, p.WorktreePath, p.Name
+		p.PluginMu.Unlock()
+		if !owned || path == "" {
+			continue
+		}
+		if _, ok := out[path]; !ok {
+			out[path] = paneRef{ID: p.ID, TabID: p.CurrentTabID(), Name: name}
+		}
+	}
+	return out
+}
+
+// branchOpts builds the options a destroy payload asked for.
+func branchOpts(local, remote bool, confirmed []string, panes []*Pane) branchDeleteOpts {
+	opt := branchDeleteOpts{Local: local, Remote: remote, Confirmed: confirmed}
+	if opt.wanted() {
+		opt.Owners = worktreeOwners(panes)
+	}
+	return opt
+}
 
 // ownedWorktreePaths reports the worktree directories the given panes own, with
 // duplicates collapsed.
@@ -106,6 +183,12 @@ func ownedWorktreePaths(panes []*Pane) []string {
 // dialog left to answer, and a failure leaves the worktree exactly where the
 // user can still see it and deal with it.
 func (d *Daemon) removeOwnedWorktrees(paths []string) {
+	d.removeOwnedWorktreesWith(paths, branchDeleteOpts{})
+}
+
+// removeOwnedWorktreesWith is removeOwnedWorktrees plus the branch deletes a
+// close may ask for.
+func (d *Daemon) removeOwnedWorktreesWith(paths []string, opt branchDeleteOpts) {
 	for _, path := range paths {
 		// The pane that owned it is gone, but a worktree can host panes in
 		// OTHER tabs — a split made in the same directory, a second agent on
@@ -114,18 +197,115 @@ func (d *Daemon) removeOwnedWorktrees(paths []string) {
 		// data-loss bug wearing this feature's clothes.
 		if used := d.paneInWorktree(path); used != "" {
 			log.Printf("worktree remove: %s kept, pane %s is still in it", path, used)
+			if opt.wanted() {
+				d.notifyBranchKept(opt.Owners[path], "", "the worktree is still in use by pane "+used)
+			}
 			continue
 		}
-		d.removeOneWorktree(path)
+		d.removeWorktreeWithBranch(path, opt)
 	}
+}
+
+// removeWorktreeWithBranch removes one worktree and then, when asked, its
+// branch: locally first, then on its remote. The branch facts are read BEFORE
+// the removal, because the worktree's entry in git's listing — the only
+// record of which branch it had checked out — goes with it.
+//
+// Each refusal and each failure becomes a sidebar card: the pane and the
+// dialog are gone by now, and a branch that silently survived a delete the
+// user asked for is the outcome this must never hide.
+func (d *Daemon) removeWorktreeWithBranch(path string, opt branchDeleteOpts) {
+	res := d.removeOneWorktreeFull(path, opt.wanted())
+	if !opt.wanted() {
+		return
+	}
+	owner := opt.Owners[path]
+	f := res.facts
+	switch {
+	case !res.removed:
+		d.notifyBranchKept(owner, f.Branch, "the worktree was not removed")
+		return
+	case res.factsErr != nil:
+		d.notifyBranchKept(owner, "", "could not read the branch: "+res.factsErr.Error())
+		return
+	case f.Detached || f.Branch == "":
+		d.notifyBranchKept(owner, "", "the worktree had no branch checked out")
+		return
+	case f.IsDefault:
+		d.notifyBranchKept(owner, f.Branch, "it is the default branch")
+		return
+	case !opt.confirmed(f.Branch):
+		d.notifyBranchKept(owner, f.Branch, "the worktree switched branch after the dialog opened")
+		return
+	}
+
+	if opt.Local {
+		if err := d.deleteLocalBranch(res.repo, f.Branch); err != nil {
+			d.notifyBranchKept(owner, f.Branch, err.Error())
+		} else {
+			d.notifyBranchDeleted(owner, f.Branch, "")
+		}
+	}
+	if opt.Remote {
+		switch {
+		case !d.remoteBranchDelete.Load():
+			d.notifyBranchKept(owner, f.Branch, "remote delete is off in F1 → Settings")
+		case f.Remote == "":
+			d.notifyBranchKept(owner, f.Branch, "no remote branch: "+f.RemoteReason)
+		default:
+			ctx, cancel := context.WithTimeout(context.Background(), remoteBranchDeleteTimeout)
+			err := deleteRemoteBranchFn(ctx, res.repo, f.Remote, f.RemoteBranch)
+			cancel()
+			target := f.Remote + "/" + f.RemoteBranch
+			if err != nil {
+				log.Printf("worktree remove: remote branch %s kept: %v", target, err)
+				d.notifyBranchKept(owner, target, err.Error())
+			} else {
+				log.Printf("worktree remove: remote branch %s deleted", target)
+				d.notifyBranchDeleted(owner, target, f.Remote)
+			}
+		}
+	}
+}
+
+// deleteLocalBranch runs the local delete under its own FS permit and
+// deadline, after the removal released its own.
+func (d *Daemon) deleteLocalBranch(repo, branch string) error {
+	if !claimBlockingFSCall() {
+		return errors.New("too many filesystem calls in flight")
+	}
+	defer releaseBlockingFSCall()
+	ctx, cancel := context.WithTimeout(context.Background(), worktreeRemoveTimeout)
+	defer cancel()
+	if err := deleteLocalBranchFn(ctx, repo, branch); err != nil {
+		log.Printf("worktree remove: branch %s kept: %v", branch, err)
+		return err
+	}
+	log.Printf("worktree remove: branch %s deleted", branch)
+	return nil
+}
+
+// removeResult is what one worktree removal learned.
+type removeResult struct {
+	repo     string
+	removed  bool
+	facts    gitworktree.BranchFacts
+	factsErr error
 }
 
 // removeOneWorktree resolves the repository and runs the removal, retrying
 // while the directory is still held.
 func (d *Daemon) removeOneWorktree(path string) {
+	d.removeOneWorktreeFull(path, false)
+}
+
+// removeOneWorktreeFull is removeOneWorktree, also reading the branch facts
+// before the removal when wantFacts, and reporting whether git no longer
+// holds the worktree afterwards.
+func (d *Daemon) removeOneWorktreeFull(path string, wantFacts bool) (res removeResult) {
 	if !claimBlockingFSCall() {
 		log.Printf("worktree remove: %s kept, too many filesystem calls in flight", path)
-		return
+		return res
 	}
 	defer releaseBlockingFSCall()
 
@@ -156,10 +336,16 @@ func (d *Daemon) removeOneWorktree(path string) {
 		log.Printf("worktree remove: %s kept, its repository has no main checkout", path)
 		return
 	}
+	res.repo = repo
+	if wantFacts {
+		// Before the removal: the listing entry naming the branch goes with it.
+		res.facts, res.factsErr = branchFactsFn(ctx, repo, path, defaultBranchRefFn(ctx, repo))
+	}
 
 	for attempt := 1; attempt <= worktreeRemoveAttempts; attempt++ {
 		err = removeWorktreeKeepBranchFn(ctx, repo, path)
 		if err == nil {
+			res.removed = true
 			// Logged on SUCCESS as well, because this is the only record that a
 			// directory was deleted: the pane it belonged to is gone, and so is
 			// the dialog that asked. The branch is named as surviving because
@@ -179,6 +365,9 @@ func (d *Daemon) removeOneWorktree(path string) {
 		// to reword and locale-dependent, while "does git still own this path"
 		// is the question that actually decides who finishes the job.
 		if !worktreeRegistered(ctx, repo, path) {
+			// git has let go of it, so its branch is no longer checked out
+			// there: a branch delete may follow even if the empty folder stays.
+			res.removed = true
 			finishRemovedWorktree(path)
 			return
 		}
@@ -195,6 +384,7 @@ func (d *Daemon) removeOneWorktree(path string) {
 		}
 	}
 	log.Printf("worktree remove: %s failed after %d attempts: %v", path, worktreeRemoveAttempts, err)
+	return res
 }
 
 // worktreeRegistered reports whether git still knows path as a worktree of

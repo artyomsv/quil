@@ -40,6 +40,7 @@ func TestSettingsFields_LabelsAndInitialValues(t *testing.T) {
 		"Show disclaimer",
 		"Update check",
 		"Update auto-download",
+		"Allow remote branch delete",
 		"Templates",
 	}
 	if len(fields) != len(wantLabels) {

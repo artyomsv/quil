@@ -488,7 +488,7 @@ func TestDestroyPaneReq_RemoveWorktreeRemovesTheOwnedCheckout(t *testing.T) {
 	pane.PluginMu.Unlock()
 	called := make(chan []string, 1)
 	prev := removeOwnedWorktreesFn
-	removeOwnedWorktreesFn = func(_ *Daemon, paths []string) { called <- paths }
+	removeOwnedWorktreesFn = func(_ *Daemon, paths []string, _ branchDeleteOpts) { called <- paths }
 	t.Cleanup(func() { removeOwnedWorktreesFn = prev })
 
 	resp := decodeInto[ipc.DestroyPaneRespPayload](t, roundTrip(t, client, ipc.MsgDestroyPaneReq, ipc.MsgDestroyPaneResp,

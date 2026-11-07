@@ -86,6 +86,11 @@ const (
 	// disk on TUI exit, so without this a setting would not apply until the
 	// next daemon start. Last writer wins across clients.
 	MsgOverlayPolicy = "overlay_policy"
+	// MsgWorktreePolicy pushes whether a worktree close may delete the
+	// branch on its remote. Same reason as MsgOverlayPolicy: F1 edits reach
+	// config.toml only on TUI exit, and a remote daemon reads its own file.
+	// Admin class, so only a full-rights client can turn it on.
+	MsgWorktreePolicy = "worktree_policy"
 
 	// MCP request-response (Client -> Daemon -> Client)
 	MsgListPanesReq       = "list_panes_req"
@@ -556,6 +561,20 @@ type DestroyPanePayload struct {
 	// existing producer — the MCP destroy_pane tool, the overlay teardown, an
 	// older client — non-destructive without knowing this field exists.
 	RemoveWorktree bool `json:"remove_worktree,omitempty"`
+
+	// DeleteBranch and DeleteRemoteBranch ask the daemon to delete, after the
+	// worktree is gone, the branch it had checked out — locally, and on the
+	// remote it is pushed to. Bools, like RemoveWorktree: the daemon reads the
+	// branch from git itself. Both need RemoveWorktree.
+	//
+	// ConfirmedBranches is CHECK-ONLY: the branch names the dialog showed. A
+	// branch is deleted only when the name the daemon read is in this list, so
+	// a worktree switched to another branch after the dialog opened keeps it.
+	// A remote delete also needs the daemon's worktree_policy on, and a
+	// full-rights conn (clientauth carriers).
+	DeleteBranch       bool     `json:"delete_branch,omitempty"`
+	DeleteRemoteBranch bool     `json:"delete_remote_branch,omitempty"`
+	ConfirmedBranches  []string `json:"confirmed_branches,omitempty"`
 }
 
 type ResizePanePayload struct {
@@ -702,6 +721,10 @@ type DestroyTabPayload struct {
 	// DestroyPanePayload.RemoveWorktree for why this is a bool rather than a
 	// list of paths.
 	RemoveWorktree bool `json:"remove_worktree,omitempty"`
+	// Branch deletes: see DestroyPanePayload.
+	DeleteBranch       bool     `json:"delete_branch,omitempty"`
+	DeleteRemoteBranch bool     `json:"delete_remote_branch,omitempty"`
+	ConfirmedBranches  []string `json:"confirmed_branches,omitempty"`
 }
 
 type SwitchTabPayload struct {
@@ -928,6 +951,11 @@ type PluginFixRespPayload struct {
 type OverlayPolicyPayload struct {
 	IdleTimeoutMinutes int `json:"idle_timeout_minutes"`
 	MaxLive            int `json:"max_live"`
+}
+
+// WorktreePolicyPayload carries the remote-branch-delete switch.
+type WorktreePolicyPayload struct {
+	RemoteBranchDelete bool `json:"remote_branch_delete"`
 }
 
 // MCP request-response payloads
@@ -2117,6 +2145,35 @@ type WorktreeStatus struct {
 	Path    string `json:"path"`
 	Changes int    `json:"changes,omitempty"`
 	Error   string `json:"error,omitempty"`
+
+	// Files names the first entries Changes counts (git's two-character code
+	// and the path relative to the worktree); FilesTruncated says there are
+	// more than were listed. Remote text: render-time sanitising applies.
+	Files          []WorktreeFile `json:"files,omitempty"`
+	FilesTruncated bool           `json:"files_truncated,omitempty"`
+
+	// Branch facts, read from local refs only. BranchDeletable is false, with
+	// BranchReason, for a detached checkout, the default branch, or facts that
+	// could not be read — the dialog offers the local delete only when true.
+	Branch          string `json:"branch,omitempty"`
+	BranchDeletable bool   `json:"branch_deletable,omitempty"`
+	BranchReason    string `json:"branch_reason,omitempty"`
+	// Unmerged counts commits on Branch that DefaultBranch lacks.
+	Unmerged      int    `json:"unmerged,omitempty"`
+	DefaultBranch string `json:"default_branch,omitempty"`
+	// Remote/RemoteBranch name where Branch is pushed; RemoteReason says why
+	// there is no single answer when Remote is empty.
+	Remote       string `json:"remote,omitempty"`
+	RemoteBranch string `json:"remote_branch,omitempty"`
+	RemoteReason string `json:"remote_reason,omitempty"`
+	// Unpushed counts commits on Branch the remote-tracking ref lacks.
+	Unpushed int `json:"unpushed,omitempty"`
+}
+
+// WorktreeFile is one entry of a worktree's `git status`.
+type WorktreeFile struct {
+	Code string `json:"code"`
+	Path string `json:"path"`
 }
 
 // WorktreeStatusRespPayload answers a status request.

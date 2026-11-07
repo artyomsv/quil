@@ -304,6 +304,12 @@ type Daemon struct {
 	// pushes runtime updates via MsgOverlayPolicy without a daemon restart.
 	overlayPolicyState overlayPolicyState
 
+	// remoteBranchDelete is whether a worktree close may delete the branch on
+	// its remote. Seeded from config at construction; the TUI pushes the F1
+	// value (MsgWorktreePolicy, admin class). Every remote delete reads it at
+	// the moment it would run, so turning it off stops the next one.
+	remoteBranchDelete atomic.Bool
+
 	// clients holds one record for each conn that has sent MsgAttach — the
 	// clients, as distinct from every conn (see registerClient) — with the
 	// size-master election over them (clients.go). Each record also carries
@@ -430,6 +436,7 @@ func New(cfg config.Config) *Daemon {
 		IdleTimeoutMinutes: cfg.Overlay.IdleTimeoutMinutes,
 		MaxLive:            cfg.Overlay.MaxLive,
 	}))
+	d.remoteBranchDelete.Store(cfg.Worktree.RemoteBranchDelete)
 	return d
 }
 
@@ -1673,6 +1680,8 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 			return
 		}
 		d.setOverlayPolicy(p)
+	case ipc.MsgWorktreePolicy:
+		d.handleWorktreePolicy(msg)
 	case ipc.MsgShutdown:
 		d.shutdownOnce.Do(func() { close(d.shutdown) })
 
@@ -2770,8 +2779,10 @@ func (d *Daemon) handleDestroyTab(conn *ipc.Conn, msg *ipc.Message) {
 	// Read from the SAME pre-destroy capture, for the same reason: after
 	// DestroyTab there is nothing left to ask which worktrees the tab owned.
 	var worktrees []string
+	var branches branchDeleteOpts
 	if payload.RemoveWorktree {
 		worktrees = ownedWorktreePaths(panes)
+		branches = branchOpts(payload.DeleteBranch, payload.DeleteRemoteBranch, payload.ConfirmedBranches, panes)
 	}
 	d.session.DestroyTab(payload.TabID)
 	for _, p := range panes {
@@ -2821,7 +2832,7 @@ func (d *Daemon) handleDestroyTab(conn *ipc.Conn, msg *ipc.Message) {
 			return
 		}
 		if len(worktrees) > 0 {
-			d.removeOwnedWorktrees(worktrees)
+			removeOwnedWorktreesFn(d, worktrees, branches)
 		}
 	}()
 }
@@ -3548,6 +3559,7 @@ func (d *Daemon) handleDestroyPane(msg *ipc.Message) {
 	// Capture tab ID before destroying the pane
 	var tabID string
 	var worktrees []string
+	var branches branchDeleteOpts
 	if pane := d.session.Pane(payload.PaneID); pane != nil {
 		tabID = pane.CurrentTabID()
 		// Captured here for the reason the tab id is: DestroyPane removes the
@@ -3555,6 +3567,7 @@ func (d *Daemon) handleDestroyPane(msg *ipc.Message) {
 		// worktree it owned.
 		if payload.RemoveWorktree {
 			worktrees = ownedWorktreePaths([]*Pane{pane})
+			branches = branchOpts(payload.DeleteBranch, payload.DeleteRemoteBranch, payload.ConfirmedBranches, []*Pane{pane})
 		}
 		// Same window, same reason: the card needs the pane's name, which is
 		// gone once DestroyPane runs.
@@ -3588,13 +3601,14 @@ func (d *Daemon) handleDestroyPane(msg *ipc.Message) {
 	// after three attempts at 250 ms. Teardown also harvests the pane's git
 	// objects before anything is deleted, so closing a pane never loses
 	// commits made inside the container.
-	d.teardownAfterDestroy(payload.PaneID, worktrees)
+	d.teardownAfterDestroy(payload.PaneID, worktrees, branches)
 }
 
 // teardownAfterDestroy brings a destroyed pane's container down and, when
 // worktrees is non-empty, removes them — GATED on the container being gone,
-// for the reason handleDestroyPane documents.
-func (d *Daemon) teardownAfterDestroy(paneID string, worktrees []string) {
+// for the reason handleDestroyPane documents. branches carries the branch
+// deletes the close asked for (zero for the MCP path).
+func (d *Daemon) teardownAfterDestroy(paneID string, worktrees []string, branches branchDeleteOpts) {
 	if len(worktrees) == 0 {
 		go d.teardownSandbox(context.Background(), paneID)
 		return
@@ -3611,7 +3625,7 @@ func (d *Daemon) teardownAfterDestroy(paneID string, worktrees []string) {
 			log.Printf("pane %s: worktree removal skipped — its container is still running", paneID)
 			return
 		}
-		removeOwnedWorktreesFn(d, worktrees)
+		removeOwnedWorktreesFn(d, worktrees, branches)
 	}()
 }
 
@@ -4201,6 +4215,48 @@ func (d *Daemon) notifyWorktreeFailed(paneID, tabID, branch, reason string) {
 		Title:     "Worktree not created: " + branch,
 		Message:   truncateField(reason, maxWorktreeErrorField),
 		Severity:  "error",
+		Timestamp: time.Now(),
+		Data:      map[string]string{"branch": branch},
+	})
+}
+
+// notifyBranchDeleted says a close deleted a worktree's branch. remote is the
+// remote name for a remote delete, "" for the local one. The pane is the one
+// the close came from, captured before it was destroyed.
+func (d *Daemon) notifyBranchDeleted(owner paneRef, branch, remote string) {
+	title := "Branch deleted: " + branch
+	if remote != "" {
+		title = "Remote branch deleted: " + branch
+	}
+	d.emitEvent(PaneEvent{
+		ID:        uuid.New().String(),
+		PaneID:    owner.ID,
+		TabID:     owner.TabID,
+		PaneName:  owner.Name,
+		Type:      "worktree_branch_deleted",
+		Title:     title,
+		Severity:  "info",
+		Timestamp: time.Now(),
+		Data:      map[string]string{"branch": branch, "remote": remote},
+	})
+}
+
+// notifyBranchKept says a branch delete the user asked for did not happen,
+// and why. A warning, not info: the user believes the branch is gone.
+func (d *Daemon) notifyBranchKept(owner paneRef, branch, reason string) {
+	title := "Branch kept"
+	if branch != "" {
+		title = "Branch kept: " + branch
+	}
+	d.emitEvent(PaneEvent{
+		ID:        uuid.New().String(),
+		PaneID:    owner.ID,
+		TabID:     owner.TabID,
+		PaneName:  owner.Name,
+		Type:      "worktree_branch_kept",
+		Title:     title,
+		Message:   truncateField(reason, maxWorktreeErrorField),
+		Severity:  "warning",
 		Timestamp: time.Now(),
 		Data:      map[string]string{"branch": branch},
 	})
@@ -8358,7 +8414,9 @@ func (d *Daemon) handleDestroyPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 	// once its object store is eventually removed. MCP destroy_pane is an
 	// ordinary way to close a pane, not an edge case. A requested worktree
 	// removal follows it, gated on the container being gone.
-	d.teardownAfterDestroy(req.PaneID, worktrees)
+	// No branch deletes on this path: the MCP tool and the browser offer the
+	// worktree removal only, and DestroyPaneReqPayload carries no branch flag.
+	d.teardownAfterDestroy(req.PaneID, worktrees, branchDeleteOpts{})
 
 	respondTo(conn, msg.ID, ipc.MsgDestroyPaneResp, ipc.DestroyPaneRespPayload{
 		Success: true,

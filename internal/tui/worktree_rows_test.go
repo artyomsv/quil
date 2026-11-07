@@ -34,7 +34,7 @@ func openLoadedConfirm(t *testing.T, files int, remote string) Model {
 	return m
 }
 
-func press(m Model, key string) Model { return applyModel(m.handleConfirmKey(keyPressFor(key))) }
+func confirmPress(m Model, key string) Model { return applyModel(m.handleConfirmKey(keyPressFor(key))) }
 
 // The list shows a page of files and PgDn moves to the next page.
 //
@@ -51,7 +51,7 @@ func TestCloseConfirm_ListsFilesAndScrolls(t *testing.T) {
 		t.Errorf("no position line for a list longer than the page:\n%s", out)
 	}
 
-	m = press(m, "pgdown")
+	m = confirmPress(m, "pgdown")
 	out = stripANSI(m.renderConfirmDialog())
 	if !strings.Contains(out, "f10.txt") || strings.Contains(out, "f09.txt") {
 		t.Errorf("PgDn did not show the next page:\n%s", out)
@@ -92,22 +92,22 @@ func TestCloseConfirm_CursorStartsOnWorktreeRow(t *testing.T) {
 func TestCloseConfirm_BranchRowsInertUntilWorktreeArmed(t *testing.T) {
 	m := openLoadedConfirm(t, 1, "")
 
-	m = press(m, "down")
-	m = press(m, " ")
+	m = confirmPress(m, "down")
+	m = confirmPress(m, " ")
 	if m.confirmDeleteBranch {
 		t.Fatal("the local branch row armed while the worktree row was off")
 	}
 
-	m = press(m, "up")
-	m = press(m, " ") // arm the worktree
-	m = press(m, "down")
-	m = press(m, " ")
+	m = confirmPress(m, "up")
+	m = confirmPress(m, " ") // arm the worktree
+	m = confirmPress(m, "down")
+	m = confirmPress(m, " ")
 	if !m.confirmDeleteBranch {
 		t.Fatal("the local branch row did not arm once the worktree row was on")
 	}
 
-	m = press(m, "up")
-	m = press(m, " ") // disarm the worktree
+	m = confirmPress(m, "up")
+	m = confirmPress(m, " ") // disarm the worktree
 	if m.confirmDeleteBranch {
 		t.Error("disarming the worktree left the branch row armed")
 	}
@@ -116,10 +116,10 @@ func TestCloseConfirm_BranchRowsInertUntilWorktreeArmed(t *testing.T) {
 // With the F1 switch off the remote row says so and cannot be armed.
 func TestCloseConfirm_RemoteRowGreyedWhenSettingOff(t *testing.T) {
 	m := openLoadedConfirm(t, 1, "origin")
-	m = press(m, " ")
-	m = press(m, "down")
-	m = press(m, "down")
-	m = press(m, " ")
+	m = confirmPress(m, " ")
+	m = confirmPress(m, "down")
+	m = confirmPress(m, "down")
+	m = confirmPress(m, " ")
 
 	if m.confirmDeleteRemote {
 		t.Error("the remote row armed with the setting off")
@@ -134,17 +134,17 @@ func TestCloseConfirm_RemoteRowGreyedWhenSettingOff(t *testing.T) {
 func TestCloseConfirm_EnterDoesNotAcceptWithRemoteArmed(t *testing.T) {
 	m := openLoadedConfirm(t, 1, "origin")
 	m.cfg.Worktree.RemoteBranchDelete = true
-	m = press(m, " ")
-	m = press(m, "down")
-	m = press(m, "down")
-	m = press(m, " ")
+	m = confirmPress(m, " ")
+	m = confirmPress(m, "down")
+	m = confirmPress(m, "down")
+	m = confirmPress(m, " ")
 	if !m.confirmDeleteRemote {
 		t.Fatal("the remote row did not arm with the setting on")
 	}
 
 	fake := &fakeSender{}
 	m.client = fake
-	m = press(m, "enter")
+	m = confirmPress(m, "enter")
 	if !m.confirmDeleteRemote || len(m.confirmWorktrees) == 0 {
 		t.Fatal("a refused Enter dropped the arm or closed the dialog state")
 	}
@@ -169,12 +169,12 @@ func TestCloseConfirm_EnterDoesNotAcceptWithRemoteArmed(t *testing.T) {
 // Every new field is cleared on the way out, like the worktree toggle.
 func TestCloseConfirm_ResetOnEveryExit(t *testing.T) {
 	m := openLoadedConfirm(t, 25, "")
-	m = press(m, " ")
-	m = press(m, "down")
-	m = press(m, " ")
-	m = press(m, "pgdown")
+	m = confirmPress(m, " ")
+	m = confirmPress(m, "down")
+	m = confirmPress(m, " ")
+	m = confirmPress(m, "pgdown")
 
-	m = press(m, "esc")
+	m = confirmPress(m, "esc")
 
 	if m.confirmDeleteBranch || m.confirmDeleteRemote || m.confirmRow != 0 || m.confirmFileScroll != 0 || m.confirmFileFocus != 0 {
 		t.Errorf("esc left state: branch=%v remote=%v row=%d scroll=%d focus=%d",

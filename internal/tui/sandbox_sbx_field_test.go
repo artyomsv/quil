@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
@@ -83,8 +84,8 @@ func TestSandboxRow_ArrowsSwitchOnlyWhenBothAreOffered(t *testing.T) {
 		t.Error("← did not switch back to docker")
 	}
 	out := m.renderSetupSandboxField(true)
-	if !strings.Contains(out, "←/→ sbx") {
-		t.Errorf("the row does not name the other backend:\n%s", out)
+	if !strings.Contains(out, "←/→ 1/2") {
+		t.Errorf("the row does not show its place in the cycle:\n%s", out)
 	}
 }
 
@@ -98,7 +99,7 @@ func TestSandboxRow_SbxRendersTheProfileNotAnImage(t *testing.T) {
 	m.sandboxBackend = config.SandboxBackendSbx
 	m.sandboxErr = "no profile here"
 	out := m.renderSetupSandboxField(true)
-	for _, want := range []string{"Run in an sbx sandbox", "←/→ Docker", sbx.ProfileFile, "no profile here"} {
+	for _, want := range []string{"Run in an sbx sandbox", "←/→ 2/2", sbx.ProfileFile, "no profile here"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("row does not contain %q:\n%s", want, out)
 		}
@@ -161,11 +162,16 @@ func TestSandboxRow_ArrowsReachAnExistingSandbox(t *testing.T) {
 	if spec == nil || spec.Backend != "sbx" || spec.Name != "ticket-1" || spec.Image != "" {
 		t.Fatalf("spec = %+v", spec)
 	}
+	// The PICKED sandbox is named on the row; the next one is never named,
+	// or a glance reads it as the selection.
 	out := m.renderSetupSandboxField(true)
-	for _, w := range []string{"attach: ticket-1 (stopped), not changed", "←/→ sbx ticket-2"} {
+	for _, w := range []string{"Run in an sbx sandbox: ticket-1", "stopped · attached, not changed", "←/→ 3/4"} {
 		if !strings.Contains(out, w) {
 			t.Errorf("row does not contain %q:\n%s", w, out)
 		}
+	}
+	if strings.Contains(out, "ticket-2") {
+		t.Errorf("row names a sandbox that is not picked:\n%s", out)
 	}
 	if !m.handleSandboxFieldKey(tea.KeyPressMsg{Code: tea.KeyLeft}) || m.sandboxSbxName != "" || !m.sandboxBackendIsSbx() {
 		t.Errorf("← did not go back to the profile: backend=%q name=%q", m.sandboxBackend, m.sandboxSbxName)
@@ -182,7 +188,7 @@ func TestSandboxSubmitError_AttachChecks(t *testing.T) {
 	if msg := m.sandboxSubmitError(); msg != "" {
 		t.Errorf("an unlisted folder was refused: %q", msg)
 	}
-	if out := m.renderSetupSandboxField(false); !strings.Contains(out, "attach: ticket-1 (stopped), folder checked at start") {
+	if out := m.renderSetupSandboxField(false); !strings.Contains(out, "stopped · attached, folder checked at start") {
 		t.Errorf("the row does not say the folder is checked at start:\n%s", out)
 	}
 	m.applySandboxCap("", ipc.SandboxCapRespPayload{Available: true, SbxAvailable: true})
@@ -192,6 +198,10 @@ func TestSandboxSubmitError_AttachChecks(t *testing.T) {
 	// The cycle restarts from the first choice rather than losing its place.
 	if next, ok := m.nextSandboxChoice(1); !ok || next.backend != "docker" {
 		t.Errorf("next = %+v, %v", next, ok)
+	}
+	// And the row shows no place for a pick that is not offered any more.
+	if pos, n := m.sandboxChoicePosition(); pos != 0 || n != 2 {
+		t.Errorf("position = %d/%d, want 0/2", pos, n)
 	}
 }
 
@@ -398,5 +408,57 @@ func TestSandboxRow_LateDiscoveryCannotUndoTheSandboxFolder(t *testing.T) {
 	}
 	if len(m.cwdBrowseEntries) == 0 || m.cwdBrowseEntries[len(m.cwdBrowseEntries)-1] != "src" {
 		t.Errorf("the sandbox folder's listing was replaced: %v", m.cwdBrowseEntries)
+	}
+}
+
+// The picked name is cut to what the dialog's text area leaves, so the row
+// never wraps: at the standard width the hint stays, and too narrow for a
+// useful name the hint goes and the name keeps the room.
+func TestSandboxRow_PickedNameFitsTheTextArea(t *testing.T) {
+	long := "cf-cryptobrok-14280-a-long-ticket" // 33 cells, over the cap
+	for _, tc := range []struct {
+		name     string
+		termW    int
+		wantHint bool
+	}{
+		{"standard width", 120, true},
+		{"narrow terminal", 52, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := attachModel()
+			m.applySandboxCap("", ipc.SandboxCapRespPayload{Available: true, SbxAvailable: true, SbxSandboxes: []ipc.SbxSandbox{
+				{Name: long, Status: "running", Folders: []string{"/w/ticket-1"}},
+			}})
+			m.width = tc.termW
+			m.sandboxBackend, m.sandboxSbxName = config.SandboxBackendSbx, long
+			first, _, _ := strings.Cut(m.renderSetupSandboxField(true), "\n")
+			if w := lipgloss.Width(first); w > m.setupTextWidth() {
+				t.Errorf("row is %d cells, text area is %d:\n%q", w, m.setupTextWidth(), first)
+			}
+			if !strings.Contains(first, "cf-cryptobrok") {
+				t.Errorf("row does not name the picked sandbox:\n%q", first)
+			}
+			if got := strings.Contains(first, "←/→"); got != tc.wantHint {
+				t.Errorf("hint shown = %v, want %v:\n%q", got, tc.wantHint, first)
+			}
+		})
+	}
+}
+
+// A pick that is no longer offered keeps a bare ←/→ even when only one
+// choice is left: the arrow still moves to it, and nothing else says so.
+func TestSandboxRow_StalePickKeepsTheArrowHint(t *testing.T) {
+	var m Model
+	m.sandboxOn = true
+	m.sandboxDialogSbx = true
+	m.sandboxBackend, m.sandboxSbxName = config.SandboxBackendSbx, "gone"
+	if got := m.sandboxPositionHint(); got != "  ←/→" {
+		t.Errorf("hint = %q, want a bare arrow hint", got)
+	}
+	if !m.handleSandboxFieldKey(tea.KeyPressMsg{Code: tea.KeyRight}) || m.sandboxSbxName != "" {
+		t.Errorf("→ did not move to the profile: name=%q", m.sandboxSbxName)
+	}
+	if got := m.sandboxPositionHint(); got != "" {
+		t.Errorf("hint with one choice picked = %q, want none", got)
 	}
 }

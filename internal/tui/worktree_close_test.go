@@ -525,7 +525,6 @@ func TestOpenRestartPaneConfirm_ClearsAnyWorktreeStateFromABeforeDialog(t *testi
 // check runs, then the check times out (or answers an error): the row is
 // UNTICKED with its reason, cannot be re-armed, a late answer does not enable
 // it, and Enter closes the pane keeping the worktree.
-// unticking closes the pane keeping the worktree.
 //
 // Fails if a loaded-with-an-error row counts as inspected.
 func TestConfirmKey_UnreadFilesNeverDeleteTheWorktree(t *testing.T) {

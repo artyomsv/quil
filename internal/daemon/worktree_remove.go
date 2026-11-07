@@ -384,6 +384,7 @@ func (d *Daemon) removeOneWorktreeFull(path string, wantFacts bool) (res removeR
 		}
 	}
 	log.Printf("worktree remove: %s failed after %d attempts: %v", path, worktreeRemoveAttempts, err)
+	return res
 }
 
 // worktreeRegistered reports whether git still knows path as a worktree of

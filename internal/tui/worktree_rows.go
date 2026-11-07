@@ -402,3 +402,15 @@ func (m Model) worktreeRowReason() string {
 	}
 	return ""
 }
+
+// disarmUnreadWorktree unticks the worktree row (and the branch rows that
+// depend on it) once a check FAILED: a tick given while the files were
+// loading is not consent to lose files nobody was shown, and a box drawn
+// empty must not stay set underneath. Enter then closes and keeps it.
+func (m *Model) disarmUnreadWorktree() {
+	if m.worktreeRowReason() == "" {
+		return
+	}
+	m.confirmRemoveWorktree = false
+	m.confirmDeleteBranch, m.confirmDeleteRemote = false, false
+}

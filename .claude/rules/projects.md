@@ -1876,7 +1876,8 @@ each stamped with when it arrived. The idle settle (`settleIdle` →
 only directories recorded at or before it, so a next turn's subagent that
 probes in between survives. Past `maxAgentWTSubagents` between two settles
 the pane FAILS CLOSED (`subOverflow`): it counts as in use for every path
-until a settle clears the mark.
+until a settle — or the process exiting (`applyWorkEvent`'s abort arm) —
+clears the mark.
 
 **A gone worktree's surviving branch is queued on the REPOSITORY**
 (`agentWTRepo.PendingKept`, persisted), not on the entry — a short-lived
@@ -1892,7 +1893,8 @@ can be stale. No answer, or no symref in it, refuses the delete.
 **A worktree whose files were not READ is never deleted** — this reverses
 the earlier "the status answer is advisory" rule for the DELETE (the count is
 still advisory for closing). A timeout or an error loads the row with a
-reason; `confirmWorktreesInspected` (loaded AND no error) gates Enter, the
+reason and UNTICKS the row (`disarmUnreadWorktree`); `confirmWorktreesInspected`
+(loaded AND no error) still gates Enter, the
 worktree row cannot be armed while `worktreeRowReason` names a reason, and a
 late answer for the timed-out request is not applied. Unticking closes the
 pane and keeps the worktree.

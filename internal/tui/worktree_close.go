@@ -227,6 +227,7 @@ func (m *Model) applyWorktreeStatus(msg worktreeStatusMsg) {
 			row.branchReason = "could not check the branch"
 		}
 	}
+	m.disarmUnreadWorktree()
 }
 
 // applyWorktreeStatusTimeout gives up on a request.
@@ -246,6 +247,7 @@ func (m *Model) applyWorktreeStatusTimeout(msg worktreeStatusTimeoutMsg) {
 		m.confirmWorktrees[i].err = "could not check for uncommitted work"
 		m.confirmWorktrees[i].branchReason = "could not check the branch"
 	}
+	m.disarmUnreadWorktree()
 }
 
 // resetConfirmWorktrees clears every field the worktree row owns.

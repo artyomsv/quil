@@ -370,3 +370,34 @@ func TestAgentWTAct_SubagentOverflowRefusesCleanup(t *testing.T) {
 		t.Errorf("act after idle = %+v, removals %v; want /w/last removed", got, *calls)
 	}
 }
+
+// A process that dies past the subagent bound stops blocking: the exit
+// clears its subagent records (an abort never reaches the idle settle).
+//
+// Fails if only settleIdle clears subOverflow.
+func TestAgentWT_ProcessExitClearsSubagentOverflow(t *testing.T) {
+	d := newTestDaemon(t)
+	pane := spawnedPane(t, d)
+	s, _ := newTestAgentWT(t, &fakeRepo{branches: []string{"master"}}, nil)
+	s.paneFn, s.now = d.paneForAgentWT, time.Now
+	d.agentWT = s
+	for i := 0; i <= maxAgentWTSubagents; i++ {
+		p := probeFor(pane.ID, "/w/sub")
+		p.Data[hookevents.DataProbeAgent] = fmt.Sprintf("sub-%d", i)
+		s.probe(p)
+	}
+	if got := s.paneInDir("/w/unrelated"); got != pane.ID {
+		t.Fatalf("paneInDir = %q before the exit, want the overflowing pane", got)
+	}
+
+	d.emitEvent(hookEvent(pane, "hook.claude.UserPromptSubmit", nil))
+	d.emitEvent(hookEvent(pane, "process_exit", map[string]string{"exit_code": "1"}))
+
+	deadline := time.Now().Add(time.Second)
+	for s.paneInDir("/w/unrelated") != "" {
+		if time.Now().After(deadline) {
+			t.Fatal("the exited pane still blocks every path")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}

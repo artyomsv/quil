@@ -522,8 +522,9 @@ func TestOpenRestartPaneConfirm_ClearsAnyWorktreeStateFromABeforeDialog(t *testi
 }
 
 // A worktree whose files were never READ is never deleted. Armed while the
-// check runs, then the check times out (or answers an error): Enter sends
-// nothing, the row cannot be re-armed, a late answer does not enable it, and
+// check runs, then the check times out (or answers an error): the row is
+// UNTICKED with its reason, cannot be re-armed, a late answer does not enable
+// it, and Enter closes the pane keeping the worktree.
 // unticking closes the pane keeping the worktree.
 //
 // Fails if a loaded-with-an-error row counts as inspected.
@@ -550,21 +551,20 @@ func TestConfirmKey_UnreadFilesNeverDeleteTheWorktree(t *testing.T) {
 			m.applyWorktreeStatus(worktreeStatusMsg{Gen: gen, Resp: ipc.WorktreeStatusRespPayload{
 				Statuses: []ipc.WorktreeStatus{{Path: "/w/feat-a", Changes: 0}}}})
 
-			fake := &fakeSender{}
-			m.client = fake
-			m = applyModel(m.handleConfirmKey(keyPressFor("enter")))
-			if len(fake.sent) != 0 || m.dialog != dialogConfirm {
-				t.Fatalf("Enter with unread files sent %d messages (dialog %v); want nothing", len(fake.sent), m.dialog)
+			// The failed check UNTICKED the row — the box drawn empty is empty.
+			if m.confirmRemoveWorktree {
+				t.Fatal("the row stayed armed underneath an empty box after the check failed")
 			}
 			if !strings.Contains(stripANSI(m.renderConfirmDialog()), "kept: files not read") {
 				t.Errorf("the row does not say why:\n%s", stripANSI(m.renderConfirmDialog()))
 			}
-
-			m = applyModel(m.handleConfirmKey(keyPressFor(" "))) // untick
 			m = applyModel(m.handleConfirmKey(keyPressFor(" "))) // try to re-arm
 			if m.confirmRemoveWorktree {
 				t.Fatal("the row re-armed although the files are unknown")
 			}
+
+			fake := &fakeSender{}
+			m.client = fake
 			_, cmd := m.handleConfirmKey(keyPressFor("enter"))
 			if cmd != nil {
 				cmd()

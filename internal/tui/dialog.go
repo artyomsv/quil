@@ -714,6 +714,8 @@ func (m Model) dispatchDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handleShortcutsKey(msg)
 	case dialogConfirm:
 		return m.handleConfirmKey(msg)
+	case dialogAgentWorktrees:
+		return m.handleAgentWTKey(msg)
 	case dialogCreatePane:
 		return m.handleCreatePaneKey(msg)
 	case dialogCreatePaneSetup:
@@ -1153,6 +1155,10 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// inherited arm is a deletion the next close never offered.
 		m.resetConfirmWorktrees()
 		// Return to appropriate dialog based on confirm kind
+		if m.confirmKind == confirmKindAgentWT {
+			m.dialog = dialogAgentWorktrees
+			return m, tea.ClearScreen
+		}
 		if m.confirmKind == "instance" {
 			m.dialog = dialogCreatePane
 			m.createPaneStep = 2
@@ -1215,6 +1221,9 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			deleteBranch, deleteRemote, confirmedBranches = false, false, nil
 		}
 		m.resetConfirmWorktrees()
+		if kind == confirmKindAgentWT {
+			return m.sendAgentWTAct(removeWorktree, deleteBranch, deleteRemote, confirmedBranches)
+		}
 
 		// Stop-daemon requires explicit `y` — Enter is the universal
 		// select/commit key across every menu and toggle, so accepting it
@@ -1554,6 +1563,8 @@ func (m Model) renderDialog() string {
 		content = m.renderShortcutsDialog()
 	case dialogConfirm:
 		content = m.renderConfirmDialog()
+	case dialogAgentWorktrees:
+		content = m.renderAgentWTDialog()
 	case dialogCreatePane:
 		content = m.renderCreatePaneDialog()
 		// Auto-fit so plugin rows never wrap — e.g. a greyed entry that
@@ -2068,6 +2079,30 @@ func (m Model) renderConfirmDialog() string {
 		b.WriteString("  " + dialogSubtle.Render("Its projects leave the sidebar. Nothing on that"))
 		b.WriteString("\n")
 		b.WriteString("  " + dialogSubtle.Render("machine stops — reconnect to get it all back."))
+	case confirmKindAgentWT:
+		e := m.agentWT.entry
+		inner := dialogInnerWidth(m.width, dialogWidth)
+		kindWord := "worktree"
+		if e.Kind == "branch" {
+			kindWord = "branch"
+		}
+		b.WriteString("  " + dialogNormal.Render(truncateToWidth(
+			fmt.Sprintf("Clean up %s %q?", kindWord, sanitizeRemoteText(m.confirmName)), inner-2)))
+		who := sanitizeRemoteText(e.PaneName)
+		if who == "" {
+			who = "a pane"
+		}
+		// "appeared while", never "made by": a user can make one by hand
+		// while an agent runs.
+		b.WriteString("\n  " + dialogSubtle.Render(truncateToWidth("Appeared while "+who+" ran.", inner-2)))
+		if rows := m.renderConfirmWorktrees(); rows != "" {
+			b.WriteString("\n\n")
+			b.WriteString(rows)
+		}
+		footer = "space toggle  ↑↓ row  Enter confirm  Esc back"
+		if m.remoteDeleteArmed() {
+			footer = "space toggle  ↑↓ row  y delete remote  Esc back"
+		}
 	default:
 		label := fmt.Sprintf("Close %s %q?", m.confirmKind, m.confirmName)
 		b.WriteString("  " + dialogNormal.Render(label))
@@ -2129,6 +2164,12 @@ func (m Model) renderConfirmWorktrees() string {
 	}
 	inner := dialogInnerWidth(m.width, dialogWidth)
 	var b strings.Builder
+	if m.agentWTBranchEntry() {
+		// A branch with no worktree: only the branch rows apply.
+		b.WriteString("  " + dialogSubtle.Render(truncateToWidth("Branch "+sanitizeRemoteText(m.confirmName)+", no worktree", inner-2)))
+		b.WriteString(m.renderBranchRows(inner))
+		return b.String()
+	}
 	b.WriteString(m.confirmCheckRow(confirmRowWorktree, m.confirmRemoveWorktree,
 		"Also delete "+pluralWorktrees(len(m.confirmWorktrees)), "", inner))
 	focus, _ := m.focusedWorktree()

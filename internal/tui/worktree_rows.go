@@ -88,6 +88,8 @@ func (m Model) confirmDest() (string, bool) {
 		return m.destOfPane(m.confirmID), true
 	case "tab":
 		return m.destOfTab(m.confirmID), true
+	case confirmKindAgentWT:
+		return m.agentWT.dest, true
 	}
 	return "", false
 }
@@ -117,6 +119,9 @@ func (m Model) confirmBranchSelection() (local, remote bool, confirmed []string)
 func (m *Model) toggleConfirmRow() {
 	switch m.confirmRow {
 	case confirmRowWorktree:
+		if m.agentWTBranchEntry() {
+			return // a branch entry has no worktree row to toggle
+		}
 		m.confirmRemoveWorktree = !m.confirmRemoveWorktree
 		if !m.confirmRemoveWorktree {
 			m.confirmDeleteBranch, m.confirmDeleteRemote = false, false
@@ -134,7 +139,11 @@ func (m *Model) toggleConfirmRow() {
 
 // moveConfirmRow moves the cursor between the three rows.
 func (m *Model) moveConfirmRow(delta int) {
-	m.confirmRow = max(confirmRowWorktree, min(confirmRowRemote, m.confirmRow+delta))
+	lowest := confirmRowWorktree
+	if m.agentWTBranchEntry() {
+		lowest = confirmRowLocal
+	}
+	m.confirmRow = max(lowest, min(confirmRowRemote, m.confirmRow+delta))
 }
 
 // focusedWorktree is the worktree whose files are listed.

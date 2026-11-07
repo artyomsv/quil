@@ -556,7 +556,7 @@ func TestConfirmKey_UnreadFilesNeverDeleteTheWorktree(t *testing.T) {
 			if len(fake.sent) != 0 || m.dialog != dialogConfirm {
 				t.Fatalf("Enter with unread files sent %d messages (dialog %v); want nothing", len(fake.sent), m.dialog)
 			}
-			if !strings.Contains(stripANSI(m.renderConfirmDialog()), "could not be read") {
+			if !strings.Contains(stripANSI(m.renderConfirmDialog()), "kept: files not read") {
 				t.Errorf("the row does not say why:\n%s", stripANSI(m.renderConfirmDialog()))
 			}
 

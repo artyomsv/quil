@@ -397,7 +397,7 @@ func (m Model) worktreeRowReason() string {
 	}
 	for _, w := range m.confirmWorktrees {
 		if w.loaded && w.err != "" {
-			return "kept: its files could not be read"
+			return "kept: files not read"
 		}
 	}
 	return ""

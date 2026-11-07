@@ -2117,6 +2117,35 @@ type WorktreeStatus struct {
 	Path    string `json:"path"`
 	Changes int    `json:"changes,omitempty"`
 	Error   string `json:"error,omitempty"`
+
+	// Files names the first entries Changes counts (git's two-character code
+	// and the path relative to the worktree); FilesTruncated says there are
+	// more than were listed. Remote text: render-time sanitising applies.
+	Files          []WorktreeFile `json:"files,omitempty"`
+	FilesTruncated bool           `json:"files_truncated,omitempty"`
+
+	// Branch facts, read from local refs only. BranchDeletable is false, with
+	// BranchReason, for a detached checkout, the default branch, or facts that
+	// could not be read — the dialog offers the local delete only when true.
+	Branch          string `json:"branch,omitempty"`
+	BranchDeletable bool   `json:"branch_deletable,omitempty"`
+	BranchReason    string `json:"branch_reason,omitempty"`
+	// Unmerged counts commits on Branch that DefaultBranch lacks.
+	Unmerged      int    `json:"unmerged,omitempty"`
+	DefaultBranch string `json:"default_branch,omitempty"`
+	// Remote/RemoteBranch name where Branch is pushed; RemoteReason says why
+	// there is no single answer when Remote is empty.
+	Remote       string `json:"remote,omitempty"`
+	RemoteBranch string `json:"remote_branch,omitempty"`
+	RemoteReason string `json:"remote_reason,omitempty"`
+	// Unpushed counts commits on Branch the remote-tracking ref lacks.
+	Unpushed int `json:"unpushed,omitempty"`
+}
+
+// WorktreeFile is one entry of a worktree's `git status`.
+type WorktreeFile struct {
+	Code string `json:"code"`
+	Path string `json:"path"`
 }
 
 // WorktreeStatusRespPayload answers a status request.

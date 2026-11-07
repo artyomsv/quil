@@ -22,6 +22,12 @@ func stubWorktreeStatus(t *testing.T, fn func(path string) (int, error)) *[]cont
 		return gitworktree.StatusReport{Changes: n}, err
 	}
 	t.Cleanup(func() { worktreeStatusFn = prev })
+	// The branch half lists the repository too; answer "not a repository" so
+	// a change-count test never shells out to a real git. Tests of the branch
+	// half restub this after calling here.
+	prevList := worktreeListFn
+	worktreeListFn = func(context.Context, string) ([]gitworktree.Worktree, error) { return nil, nil }
+	t.Cleanup(func() { worktreeListFn = prevList })
 	return &ctxs
 }
 

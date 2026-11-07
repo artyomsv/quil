@@ -53,6 +53,60 @@ type claudeStdin struct {
 	// every event, main-agent events included.
 	AgentID string `json:"agent_id"`
 	Content string `json:"content"`
+	// CWD is the session's directory when the hook fired. It follows the
+	// session INTO a worktree after EnterWorktree (measured, Claude Code
+	// 2.1.319), while the pane's own CWD stays where it was.
+	CWD          string          `json:"cwd"`
+	ToolInput    json.RawMessage `json:"tool_input"`
+	ToolResponse json.RawMessage `json:"tool_response"`
+}
+
+// worktreeProbe spools a WorktreeProbe for a PostToolUse that may have made,
+// removed or entered a worktree: Bash running a matching command, and the
+// EnterWorktree/ExitWorktree tools. Anything else spools nothing.
+//
+// NOT gated on agent_id, unlike the PreToolUse heartbeat: a worktree a
+// subagent makes is exactly what the daemon wants to see.
+func worktreeProbe(env HookEnv, in claudeStdin, nowMs int64) error {
+	var dir, trigger, cmd string
+	switch in.ToolName {
+	case "EnterWorktree":
+		var r struct {
+			WorktreePath string `json:"worktreePath"`
+		}
+		if json.Unmarshal(in.ToolResponse, &r) != nil || r.WorktreePath == "" {
+			dir = in.CWD // the payload cwd is the worktree after the tool ran
+		} else {
+			dir = r.WorktreePath
+		}
+		trigger = hookevents.ProbeEnter
+	case "ExitWorktree":
+		dir, trigger = in.CWD, hookevents.ProbeExit
+	case "Bash":
+		var ti struct {
+			Command string `json:"command"`
+		}
+		if json.Unmarshal(in.ToolInput, &ti) != nil || !hookevents.IsWorktreeCommand(ti.Command) {
+			return nil
+		}
+		dir, trigger, cmd = in.CWD, hookevents.ProbeShell, ti.Command
+	default:
+		return nil
+	}
+	if dir == "" {
+		return nil
+	}
+	if len(dir) > hookevents.MaxProbeDirBytes {
+		// Dropped, never cut: a truncated path names another directory.
+		hookLog(env.QuilDir, env.PaneID, "worktree probe dropped: directory over the cap")
+		return nil
+	}
+	data := map[string]string{hookevents.DataProbeTrigger: trigger}
+	if cmd != "" {
+		data[hookevents.DataProbeCommand] = truncate(cmd, hookevents.MaxDataValueBytes)
+	}
+	return spoolEventCWD(env, nowMs, hookevents.EventWorktreeProbe, in.SessionID, dir,
+		"Worktree command", hookevents.SeverityInfo, data)
 }
 
 // sessionIDRe matches the Claude session-id shape (uuid-ish hex). Mirrors the
@@ -159,7 +213,11 @@ func dispatchHookEvent(env HookEnv, in claudeStdin, nowMs int64) error {
 		// never want to spool a Read/Bash/Edit completion here. This event drives
 		// work-state only; the TUI suppresses it from the notification sidebar.
 		if !isPromptTool(in.ToolName) {
-			return nil
+			// The matcher also admits Bash and the worktree tools, for the
+			// worktree probe. Those spool a probe or NOTHING — never a
+			// PostToolUse line, which is a work-start edge that clears the
+			// pane's unseen mark and would fire on every shell command.
+			return worktreeProbe(env, in, nowMs)
 		}
 		hookLog(env.QuilDir, env.PaneID, "PostToolUse resume tool="+in.ToolName)
 		return spoolEvent(env, nowMs, "PostToolUse", in.SessionID,
@@ -441,6 +499,12 @@ func isPromptTool(tool string) bool {
 // spoolEvent appends one hookevents.Payload JSONL line to the pane's spool
 // file. Off-mode drops the event (session-id tracking still runs separately).
 func spoolEvent(env HookEnv, nowMs int64, hookEvent, sessionID, title, sev string, data map[string]string) error {
+	return spoolEventCWD(env, nowMs, hookEvent, sessionID, "", title, sev, data)
+}
+
+// spoolEventCWD is spoolEvent with the payload's CWD set: the directory a
+// worktree probe asks the daemon to compare.
+func spoolEventCWD(env HookEnv, nowMs int64, hookEvent, sessionID, cwd, title, sev string, data map[string]string) error {
 	if env.Mode == "off" {
 		return nil
 	}
@@ -457,6 +521,7 @@ func spoolEvent(env HookEnv, nowMs int64, hookEvent, sessionID, title, sev strin
 		Source:    hookevents.SourceClaude,
 		HookEvent: hookEvent,
 		SessionID: sessionID,
+		CWD:       cwd,
 		Title:     title,
 		Severity:  sev,
 		Data:      data,

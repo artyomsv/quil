@@ -100,6 +100,7 @@ func TestForeignHomeEntry(t *testing.T) {
 		"bindings.toml", "templates.toml", "instances.json", "window.json",
 		"recent-cwds.json", "recent-cwds-host-1a2b.json", "remote-projects.json",
 		"project-groups.json", "project-groups.before-shared-x.json", "shared-import.json",
+		"agent-worktrees.json", "agent-worktrees.json.123.tmp",
 		"sandbox-image.json", "tokens.json", "tokens.json.tmp-1", "audit.log",
 		"audit-20261001-120000.log", "quild-20261001-120000.log", "quil-20261001-120000.log",
 		"web.log", "hook.log", "notify-activate.log", "quild.sock", ".quil-staging-123",

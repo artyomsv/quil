@@ -482,6 +482,9 @@ const (
 	// F1 → Settings → Keys: preset and prefix, applied live — see
 	// dialog_keysettings.go
 	dialogKeySettings
+
+	// agentwt_dialog.go
+	dialogAgentWorktrees
 )
 
 // tuiClient is the subset of *ipc.Client the TUI uses on the Model. Defined
@@ -711,10 +714,23 @@ type Model struct {
 	// cleared by resetConfirmWorktrees on every route out of the dialog.
 	confirmWorktrees      []confirmWorktree
 	confirmRemoveWorktree bool
-	confirmWorktreeGen    string           // in-flight status request; "" = none
-	upgradeQueue          []upgradePrompt  // hosts waiting to be ASKED about provisioning; see enqueueUpgradePrompt
-	devMode               bool             // true when QUIL_HOME is set
-	pluginRegistry        *plugin.Registry // plugin registry (shared with daemon)
+	confirmWorktreeGen    string // in-flight status request; "" = none
+	// The branch rows under the worktree row (worktree_rows.go). Off on every
+	// open like the worktree toggle, and cleared by resetConfirmWorktrees.
+	confirmDeleteBranch bool
+	confirmDeleteRemote bool
+	confirmRow          int // 0 worktree, 1 local branch, 2 remote branch
+	confirmFileScroll   int // first file row shown
+	confirmFileFocus    int // which worktree's files show when a tab holds several
+	// confirmFileRowsFixed pins the file list's height for one render; only a
+	// probe copy sets it (confirmFileRows), to measure the rest of the box.
+	confirmFileRowsFixed int
+	confirmFileRowsSet   bool
+	// agentWT is the Worktrees… view (agentwt_dialog.go).
+	agentWT        agentWTView
+	upgradeQueue   []upgradePrompt  // hosts waiting to be ASKED about provisioning; see enqueueUpgradePrompt
+	devMode        bool             // true when QUIL_HOME is set
+	pluginRegistry *plugin.Registry // plugin registry (shared with daemon)
 	// destAvail records what each REMOTE daemon said about its OWN registry,
 	// keyed by destination. Absent means "that machine has not answered for
 	// itself" and falls back to the local registry's own detection — see
@@ -3837,6 +3853,23 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		// worktreeTimeoutMsg below makes.
 		m.applyWorktreeStatusTimeout(msg)
 		return m, nil
+
+	case agentWTListMsg:
+		m.applyAgentWTList(msg)
+		return m, m.listenForMessages()
+
+	case agentWTListTimeoutMsg:
+		// Local timer: no re-arm.
+		m.applyAgentWTListTimeout(msg)
+		return m, nil
+
+	case agentWTFactsMsg:
+		m.applyAgentWTFacts(msg)
+		return m, m.listenForMessages()
+
+	case agentWTActMsg:
+		cmd := m.applyAgentWTAct(msg)
+		return m, tea.Batch(cmd, m.listenForMessages())
 
 	case createPaneRespMsg:
 		// Same rule: an IPC response arm that returns a bare nil ends the
@@ -9022,6 +9055,11 @@ func (m *Model) attachAllDests() tea.Cmd {
 		if cmd := m.overlayPolicyCmd(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+		// Same moment, same reason: a daemon learns the remote-branch-delete
+		// switch only from this push.
+		if cmd := m.worktreePolicyCmd(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 		// Rides the same post-attach path as the policy, and for the same
 		// reason: this is the only moment the daemon's copy of overlay
 		// visibility can be stale, in either direction. A TUI that exited with
@@ -9381,6 +9419,30 @@ func (m Model) listenForMessages() tea.Cmd {
 				return listenContinueMsg{}
 			}
 			return worktreeStatusMsg{Resp: resp, Gen: msg.ID}
+
+		case ipc.MsgAgentWorktreesResp:
+			var resp ipc.AgentWorktreesRespPayload
+			if err := msg.DecodePayload(&resp); err != nil {
+				log.Printf("agent worktrees: decode: %v", err)
+				return listenContinueMsg{}
+			}
+			return agentWTListMsg{Resp: resp, Gen: msg.ID}
+
+		case ipc.MsgAgentWorktreeFactsResp:
+			var resp ipc.AgentWorktreeFactsRespPayload
+			if err := msg.DecodePayload(&resp); err != nil {
+				log.Printf("agent worktree facts: decode: %v", err)
+				return listenContinueMsg{}
+			}
+			return agentWTFactsMsg{Resp: resp, Gen: msg.ID}
+
+		case ipc.MsgAgentWorktreeActResp:
+			var resp ipc.AgentWorktreeActRespPayload
+			if err := msg.DecodePayload(&resp); err != nil {
+				log.Printf("agent worktree act: decode: %v", err)
+				return listenContinueMsg{}
+			}
+			return agentWTActMsg{Resp: resp}
 
 		case ipc.MsgCreatePaneResp:
 			var resp ipc.CreatePaneRespPayload

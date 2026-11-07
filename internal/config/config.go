@@ -28,6 +28,7 @@ type Config struct {
 	Notification NotificationConfig `toml:"notification"`
 	Overlay      OverlayConfig      `toml:"overlay"`
 	Update       UpdateConfig       `toml:"update"`
+	Worktree     WorktreeConfig     `toml:"worktree"`
 	Remote       RemoteConfig       `toml:"remote"`
 	Sandbox      SandboxConfig      `toml:"sandbox"`
 	Agents       AgentsConfig       `toml:"agents"`
@@ -428,6 +429,16 @@ type OverlayConfig struct {
 // gates background download + staging of a newer release. auto = false
 // degrades to notify-only. Dev builds (version.IsRelease() == false) skip
 // the pipeline regardless of these settings.
+// WorktreeConfig governs what closing a Quil-made worktree may delete.
+type WorktreeConfig struct {
+	// RemoteBranchDelete lets the close dialog offer deleting the worktree's
+	// branch on its REMOTE as well. Off by default: a remote delete reaches
+	// everyone who shares that remote and closes an open pull request on it.
+	// The TUI pushes the value to every daemon (MsgWorktreePolicy), which
+	// refuses a remote delete while its copy is off.
+	RemoteBranchDelete bool `toml:"remote_branch_delete"`
+}
+
 type UpdateConfig struct {
 	Check bool `toml:"check"`
 	Auto  bool `toml:"auto"`
@@ -1015,6 +1026,13 @@ func InstancesPath() string {
 // machine share it; the last write wins.
 func ProjectGroupsPath() string {
 	return filepath.Join(QuilDir(), "project-groups.json")
+}
+
+// AgentWorktreesPath is the daemon's record of worktrees and branches that
+// appeared while agents ran, with the per-repository baselines it compares
+// against. Daemon-owned; written through internal/atomicfile.
+func AgentWorktreesPath() string {
+	return filepath.Join(QuilDir(), "agent-worktrees.json")
 }
 
 // RecentCWDsPath returns the file storing the last-used working directories

@@ -474,3 +474,23 @@ The desktop-toast row reports registration STATE, not the flag, and does NOT
 perform registration: writing a Start Menu shortcut and an HKCU key as a side
 effect of a config toggle is the auto-register behaviour the notify design
 rejected. It names `quil notify setup` instead.
+
+## Worktrees from agents (`agentwt_dialog.go`)
+
+`dialogAgentWorktrees`, opened from the palette (System → "Worktrees from
+agents…"; no key binding), lists the daemon's agent-worktree record
+(`agent_worktrees_req`) for `m.activeDest()`, pinned at open in
+`agentWT.dest`. Rows are worktrees and branches, the active project's
+repository first; gone entries hide until `g`. **Wording is "appeared while
+<pane> ran", never "made by"** — the record cannot know who made it (see
+`projects.md`). `Enter` reuses the CLOSE confirm (`confirmKindAgentWT`), so the
+file list, branch rows, F1 remote switch and `y` gate are the same code; a
+BRANCH entry starts with `confirmRemoveWorktree` set, the cursor on the local
+row, and no worktree row (`agentWTBranchEntry`). Its facts arrive as
+`agent_worktree_facts_req` and are landed through `applyWorktreeStatus` with
+the confirm's generation. Accept sends `agent_worktree_act_req` by entry ID
+(never a path) and returns to the list; Esc returns to the list. `f` forgets
+with no confirm — it touches only the record. Requests capture `m.client`
+and the dest on the Update goroutine (the `requestWorktreeStatus` rule). The
+list's height is a line budget (terminal minus chrome and seven fixed lines),
+because each row can bring a repository header.

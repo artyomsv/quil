@@ -145,9 +145,11 @@ func ClassifyWorkEvent(eventType string) WorkEventKind {
 	case "hook.claude.UserPromptSubmit", "hook.opencode.chat.message", "hook.codex.UserPromptSubmit":
 		return WorkEventStart
 	// Resume edge: the user answered an interactive-prompt tool (AskUserQuestion
-	// / ExitPlanMode) and the agent is working again. The hook registers
-	// PostToolUse only for those tools, so this re-arms the spinner after a park
-	// without tracking ordinary tool completions.
+	// / ExitPlanMode) and the agent is working again. The hook's PostToolUse
+	// matcher also admits Bash and the worktree tools, but for those it spools
+	// only a WorktreeProbe or nothing — so this edge still fires only for the
+	// prompt tools and re-arms the spinner after a park without tracking
+	// ordinary tool completions.
 	case "hook.claude.PostToolUse":
 		return WorkEventStart
 	// The only start edge that does not assume a HUMAN began the turn, and the

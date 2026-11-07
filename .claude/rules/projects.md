@@ -1743,3 +1743,110 @@ it is not, finishes with `os.Remove` — never `RemoveAll`, so only an empty
 directory, because Quil is completing git's operation rather than performing a
 recursive delete of its own. That cleanup retries on the same budget the git
 call does, since the child that blocked git is still exiting.
+
+**The status answer carries the FILE LIST and the BRANCH FACTS.**
+`gitworktree.Status` returns a `StatusReport` (count, the first 200 entries,
+truncated flag) from `status --porcelain -z --ignored`: `-z` keeps a name with a
+space, a quote or a newline one entry, and a rename's source path is consumed,
+not listed. `gitworktree.ReadBranchFacts` reads the branch from git's listing
+(never from a client), the unmerged count against the FULLY-QUALIFIED default
+ref, and the remote — the configured upstream first, split on remote NAMES
+(longest first, so `origin/feat/x` is origin + `feat/x`), else the one remote
+whose tracking ref exists; two such remotes are ambiguous, never guessed. Local
+refs only, no network. The default branch is resolved once per repository per
+request, and facts are read for the first six worktrees only (the dialog's row
+cap), all on the request's one deadline.
+
+**Branch deletes on close are bools plus CHECK-ONLY names.**
+`DestroyPanePayload`/`DestroyTabPayload` carry `delete_branch`,
+`delete_remote_branch` and `confirmed_branches`. The daemon reads the facts
+BEFORE `git worktree remove` (the listing entry naming the branch goes with
+it) and deletes only when the branch it read is in `confirmed_branches` — so a
+worktree an agent switched to another branch after the dialog opened keeps
+that branch, and no client can name a branch to delete. Never the default
+branch. The local delete is `branch -D -- <b>` (the dialog showed the unmerged
+count; git itself refuses a branch checked out in any worktree, which closes
+the race with a sibling worktree). The remote delete is `git -c
+credential.interactive=false push <remote> :refs/heads/<b>` with
+`GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never` and a BatchMode ssh command
+unless the user set their own — the daemon has no console, so any prompt is
+invisible — bounded at 30 s, with NO filesystem permit held (it is network).
+Every refusal and failure is a `worktree_branch_kept` sidebar card carrying
+the CLOSED pane's id and name (`paneRef`, captured before the destroy);
+success is `worktree_branch_deleted`. All three close paths now go through
+`removeOwnedWorktreesFn` — the tab close used to call `removeOwnedWorktrees`
+directly. The MCP/browser `destroy_pane_req` deletes no branches.
+
+**The remote delete has two gates, and the daemon owns the first.** F1 →
+Settings → "Allow remote branch delete" (`worktree.remote_branch_delete`,
+default OFF) is pushed to every daemon this client may administer as
+`worktree_policy` (admin class), on attach and on change — F1 edits reach
+`config.toml` only on TUI exit, and a remote daemon never reads this machine's
+file, so a disk read at delete time would refuse what the dialog offered. The
+daemon keeps it in `remoteBranchDelete` (seeded from its own config) and
+refuses a remote delete while it is off. A standard token is refused
+`delete_remote_branch` by `clientauth.carriesRemoteDelete`. The second gate is
+the dialog: the remote row is ticked by hand and the accept takes `y` only —
+checked BEFORE `resetConfirmWorktrees`, or a refused Enter would drop the arm.
+The browser's Settings page saves the switch but sends no policy; the daemon
+takes it at its next start.
+
+**A ticked worktree is never removed before its file list loaded.** The
+accept arm returns while any row is still "checking…" (`confirmWorktreesLoaded`)
+and the footer says `checking…`; the status request's own timeout loads the
+rows with a reason, so it never waits forever. The remote push also blanks
+`GIT_ASKPASS`/`SSH_ASKPASS` and passes `-c core.askPass=`:
+`GIT_TERMINAL_PROMPT=0` does not stop an askpass helper, and a daemon started
+from an editor's terminal inherits the editor's.
+
+**The dialog's height is measured, not budgeted by constant.**
+`confirmFileRows` renders the dialog once with zero file rows (a probe copy
+with `confirmFileRowsSet`) and gives the file list what is left of the
+terminal, 1 to 10 rows; with several worktrees only the focused one is drawn in
+full and the rest take one row each. `TestCloseConfirm_FitsTerminal` asserts the
+property at 24 and 30 rows.
+
+## Worktrees that appear while agents run (`agentwt.go`)
+
+The agents' hooks only say WHERE a worktree-related command ran (a
+`WorktreeProbe`, see `hooks-and-sessions.md`). `agentWTStore` answers it by
+listing that repository (`git worktree list` + `for-each-ref refs/heads`) and
+comparing with a per-repository BASELINE it saved the last time it looked, in
+`$QUIL_HOME/agent-worktrees.json` (stem `agent-worktrees` is in
+`quilHomeStems`, or Windows `ProtectDir` would refuse the folder and the TCP
+listener stays off). The compare is the truth and the hook is the trigger: an
+alias, a script or a probe that never fired is caught by the compare at the
+end of the pane's turn (`turnEnded`, from `emitHookEvent` on a stop-class
+edge), which covers every directory the pane probed plus its own CWD.
+
+**First sight is baseline only** — what already exists is attributed to
+nobody. A new worktree after that is one entry, attributed to the pane whose
+compare saw it, carrying its branch; a new branch with no worktree is its own
+entry; the default branch never is. Something that disappears is marked
+`Gone`, or dropped when it lived under 60 s (Claude's own subagent worktrees
+come and go inside a turn). Quil's own worktree adds (`noteOwnWorktree`, from
+`worktreeAddAndCreate`) join the baseline and never become entries.
+
+**An entry says the worktree APPEARED while the pane ran, never that its agent
+made it** — a user can make one by hand in another terminal at the same
+moment. The cleanup view words it "appeared while <pane> ran"; do not
+strengthen the claim.
+
+**No answer never authorises a change.** A `git worktree list` error compares
+nothing and marks nothing gone (the `worktreeRegistered` rule). A branch list
+that errors or comes back TRUNCATED (`maxBranchList`) skips the branch half
+only: reading everything past the cap as gone would later re-record it all as
+new. A sandbox pane is never listed — its paths are inside its container.
+
+**Probes go around the hook ingester** (`routeHookPayload`): the coalescer is
+last-wins per (pane, event, agent type), so two probes in one 200 ms tick would
+lose the first directory, and a probe is no notification. One compare per
+directory runs at a time; probes arriving meanwhile cost one more compare
+(`running`/`pending`), and two compares of one repository through different
+directories may still overlap, so each listing is stamped BEFORE it is taken
+and `apply` refuses one older than the baseline's `Seen` — applied second, an
+older listing would read a newer worktree as gone. Each compare takes a
+`claimBlockingFSCall` permit and a
+10 s deadline on a worker goroutine. Bounds: 64 baselines (least recently
+seen evicted), 500 entries (gone first). The record is written through
+`internal/atomicfile`, debounced 2 s, and flushed at daemon stop.

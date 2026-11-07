@@ -115,6 +115,25 @@ func TestSettings_PRStatusDefaultsOn(t *testing.T) {
 	}
 }
 
+// Remote branch delete is OFF unless the user turns it on: a remote delete
+// reaches everyone who shares the remote. The row applies now (it is pushed).
+func TestSettings_RemoteBranchDeleteDefaultsOff(t *testing.T) {
+	if config.Default().Worktree.RemoteBranchDelete {
+		t.Fatal("Default().Worktree.RemoteBranchDelete = true, want false")
+	}
+	s, ok := config.LookupSetting("worktree.remote_branch_delete")
+	if !ok {
+		t.Fatal("worktree.remote_branch_delete is not in the settings table")
+	}
+	if s.Applies != config.AppliesNow {
+		t.Errorf("Applies = %q, want AppliesNow", s.Applies)
+	}
+	c := config.Default()
+	if err := s.Set(&c, "true"); err != nil || s.Get(c) != "true" {
+		t.Errorf("Set(true) then Get = %q, %v; want true, nil", s.Get(c), err)
+	}
+}
+
 func TestSettings_DimSwitchActsOnState(t *testing.T) {
 	s, _ := config.LookupSetting("ui.unfocused_dim_enabled")
 	cfg := config.Default()

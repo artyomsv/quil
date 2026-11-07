@@ -73,6 +73,9 @@ var plainEventGroups = map[string]string{
 	"agent_untracked":  System,
 	"worktree_ready":   System,
 	"worktree_failed":  System,
+	// A close's branch delete: done, or kept with the reason.
+	"worktree_branch_deleted": System,
+	"worktree_branch_kept":    System,
 	"command_complete": Commands,
 	"output_idle":      Idle,
 }

@@ -561,6 +561,20 @@ type DestroyPanePayload struct {
 	// existing producer — the MCP destroy_pane tool, the overlay teardown, an
 	// older client — non-destructive without knowing this field exists.
 	RemoveWorktree bool `json:"remove_worktree,omitempty"`
+
+	// DeleteBranch and DeleteRemoteBranch ask the daemon to delete, after the
+	// worktree is gone, the branch it had checked out — locally, and on the
+	// remote it is pushed to. Bools, like RemoveWorktree: the daemon reads the
+	// branch from git itself. Both need RemoveWorktree.
+	//
+	// ConfirmedBranches is CHECK-ONLY: the branch names the dialog showed. A
+	// branch is deleted only when the name the daemon read is in this list, so
+	// a worktree switched to another branch after the dialog opened keeps it.
+	// A remote delete also needs the daemon's worktree_policy on, and a
+	// full-rights conn (clientauth carriers).
+	DeleteBranch       bool     `json:"delete_branch,omitempty"`
+	DeleteRemoteBranch bool     `json:"delete_remote_branch,omitempty"`
+	ConfirmedBranches  []string `json:"confirmed_branches,omitempty"`
 }
 
 type ResizePanePayload struct {
@@ -707,6 +721,10 @@ type DestroyTabPayload struct {
 	// DestroyPanePayload.RemoveWorktree for why this is a bool rather than a
 	// list of paths.
 	RemoveWorktree bool `json:"remove_worktree,omitempty"`
+	// Branch deletes: see DestroyPanePayload.
+	DeleteBranch       bool     `json:"delete_branch,omitempty"`
+	DeleteRemoteBranch bool     `json:"delete_remote_branch,omitempty"`
+	ConfirmedBranches  []string `json:"confirmed_branches,omitempty"`
 }
 
 type SwitchTabPayload struct {

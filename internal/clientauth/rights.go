@@ -178,7 +178,36 @@ func checkStandardPayload(msg *ipc.Message) (bool, string) {
 	case overlay:
 		return false, "overlay panes need full rights"
 	}
+	remote, ok := carriesRemoteDelete(msg)
+	switch {
+	case !ok:
+		return false, "malformed " + msg.Type
+	case remote:
+		return false, "remote branch delete needs a full token"
+	}
 	return true, ""
+}
+
+// carriesRemoteDelete reports a close that asks to delete a branch on its
+// REMOTE. That push reaches everyone who shares the remote, so it is a full
+// token's action even though closing the pane is not. ok is false only for a
+// payload that is present and does not decode.
+func carriesRemoteDelete(msg *ipc.Message) (remote, ok bool) {
+	switch msg.Type {
+	case ipc.MsgDestroyPane:
+		var p ipc.DestroyPanePayload
+		if !decodeIfPresent(msg, &p) {
+			return false, false
+		}
+		return p.DeleteRemoteBranch, true
+	case ipc.MsgDestroyTab:
+		var p ipc.DestroyTabPayload
+		if !decodeIfPresent(msg, &p) {
+			return false, false
+		}
+		return p.DeleteRemoteBranch, true
+	}
+	return false, true
 }
 
 // carriers decodes the five create shapes. ok is false only for a payload

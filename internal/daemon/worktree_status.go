@@ -181,14 +181,14 @@ func worktreeStatusResponse(req ipc.WorktreeStatusReqPayload) ipc.WorktreeStatus
 
 	for _, path := range req.Paths {
 		st := ipc.WorktreeStatus{Path: path}
-		changes, err := worktreeStatusFn(ctx, path)
+		rep, err := worktreeStatusFn(ctx, path)
 		if err != nil {
 			// Reported rather than folded into a 0. A count nobody obtained
 			// must not render as "clean", which is the one answer that invites
 			// the removal toggle.
 			st.Error = err.Error()
 		} else {
-			st.Changes = changes
+			st.Changes = rep.Changes
 		}
 		out.Statuses = append(out.Statuses, st)
 	}

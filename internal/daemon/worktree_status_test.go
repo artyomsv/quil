@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/artyomsv/quil/internal/gitworktree"
 	"github.com/artyomsv/quil/internal/ipc"
 )
 
@@ -15,9 +16,10 @@ func stubWorktreeStatus(t *testing.T, fn func(path string) (int, error)) *[]cont
 	t.Helper()
 	var ctxs []context.Context
 	prev := worktreeStatusFn
-	worktreeStatusFn = func(ctx context.Context, path string) (int, error) {
+	worktreeStatusFn = func(ctx context.Context, path string) (gitworktree.StatusReport, error) {
 		ctxs = append(ctxs, ctx)
-		return fn(path)
+		n, err := fn(path)
+		return gitworktree.StatusReport{Changes: n}, err
 	}
 	t.Cleanup(func() { worktreeStatusFn = prev })
 	return &ctxs

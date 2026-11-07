@@ -536,8 +536,8 @@ func TestStatus_RealGit_CountsModifiedAndUntrackedFiles(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	if got, err := Status(ctx, path); err != nil || got != 0 {
-		t.Fatalf("Status on a fresh worktree = %d, %v; want 0, nil", got, err)
+	if got, err := Status(ctx, path); err != nil || got.Changes != 0 {
+		t.Fatalf("Status on a fresh worktree = %d, %v; want 0, nil", got.Changes, err)
 	}
 
 	if err := os.WriteFile(filepath.Join(path, "f.txt"), []byte("modified\n"), 0o644); err != nil {
@@ -550,8 +550,16 @@ func TestStatus_RealGit_CountsModifiedAndUntrackedFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Status: %v", err)
 	}
-	if got != 2 {
-		t.Errorf("Status = %d, want 2 (one modified + one untracked)", got)
+	if got.Changes != 2 {
+		t.Errorf("Status = %d, want 2 (one modified + one untracked)", got.Changes)
+	}
+	// The report NAMES what it counted, so the dialog can list it.
+	names := map[string]string{}
+	for _, f := range got.Files {
+		names[f.Path] = f.Code
+	}
+	if names["f.txt"] != " M" || names["untracked.txt"] != "??" {
+		t.Errorf("Files = %#v, want f.txt as \" M\" and untracked.txt as \"??\"", got.Files)
 	}
 }
 
@@ -613,11 +621,11 @@ func TestStatus_RealGit_CountsIgnoredFilesToo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Status: %v", err)
 	}
-	if got == 0 {
+	if got.Changes == 0 {
 		t.Fatal("Status = 0 for a worktree holding an ignored .env and build/ — the dialog would call this clean and then delete both")
 	}
-	if got != 2 {
-		t.Errorf("Status = %d, want 2 (.env plus the collapsed build/ directory)", got)
+	if got.Changes != 2 {
+		t.Errorf("Status = %d, want 2 (.env plus the collapsed build/ directory)", got.Changes)
 	}
 }
 

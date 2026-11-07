@@ -234,6 +234,9 @@ func Settings() []Setting {
 		boolRow("ui.show_disclaimer", g, "Show disclaimer", AppliesNextStart, func(c *Config) *bool { return &c.UI.ShowDisclaimer }),
 		boolRow("update.check", g, "Update check", AppliesNextStart, func(c *Config) *bool { return &c.Update.Check }),
 		boolRow("update.auto", g, "Update auto-download", AppliesNextStart, func(c *Config) *bool { return &c.Update.Auto }),
+		// Pushed to every attached daemon as worktree_policy, so it applies now.
+		boolRow("worktree.remote_branch_delete", g, "Allow remote branch delete", AppliesNow,
+			func(c *Config) *bool { return &c.Worktree.RemoteBranchDelete }),
 
 		boolRow("notification.desktop.enabled", n, "Desktop toasts", AppliesNow, func(c *Config) *bool { return &c.Notification.Desktop.Enabled }),
 		boolRow("notification.desktop.blocked", n, "Toast on blocked", AppliesNow, func(c *Config) *bool { return &c.Notification.Desktop.Blocked }),

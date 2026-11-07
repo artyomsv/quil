@@ -223,6 +223,10 @@ type settingsField struct {
 	sandboxSettings bool
 	// keysSettings opens F1 → Settings → Keys.
 	keysSettings bool
+	// worktreePolicy marks a row whose change is pushed to every daemon at
+	// once (worktreePolicyCmd): the daemon enforces it, and F1 edits reach
+	// config.toml only when the TUI exits.
+	worktreePolicy bool
 }
 
 // settingsFields returns the editable Settings rows. Every setter that
@@ -480,6 +484,18 @@ func settingsFields() []settingsField {
 			get:    func(m *Model) string { return boolStr(m.cfg.Update.Auto) },
 			set:    func(m *Model, _ string) { m.applySetting("update.auto", strconv.FormatBool(!m.cfg.Update.Auto)) },
 			isBool: true,
+		},
+		{
+			// Off by default. The close dialog offers the remote branch delete
+			// only while this is on, and the daemon refuses one while its own
+			// pushed copy is off — so the switch is enforced where the push runs.
+			label: "Allow remote branch delete",
+			get:   func(m *Model) string { return boolStr(m.cfg.Worktree.RemoteBranchDelete) },
+			set: func(m *Model, _ string) {
+				m.applySetting("worktree.remote_branch_delete", strconv.FormatBool(!m.cfg.Worktree.RemoteBranchDelete))
+			},
+			isBool:         true,
+			worktreePolicy: true,
 		},
 		{label: "Templates", get: func(m *Model) string { return "…" }, set: func(m *Model, _ string) {}, templateSettings: true},
 	}
@@ -1026,6 +1042,9 @@ func (m Model) handleSettingsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, tea.ClearScreen
 		case f.isBool:
 			f.set(&m, "")
+			if f.worktreePolicy {
+				return m, m.worktreePolicyCmd()
+			}
 		default:
 			m.dialogEdit = true
 			m.dialogInput = f.get(&m)

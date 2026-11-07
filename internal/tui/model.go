@@ -9022,6 +9022,11 @@ func (m *Model) attachAllDests() tea.Cmd {
 		if cmd := m.overlayPolicyCmd(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+		// Same moment, same reason: a daemon learns the remote-branch-delete
+		// switch only from this push.
+		if cmd := m.worktreePolicyCmd(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 		// Rides the same post-attach path as the policy, and for the same
 		// reason: this is the only moment the daemon's copy of overlay
 		// visibility can be stale, in either direction. A TUI that exited with

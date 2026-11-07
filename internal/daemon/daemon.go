@@ -304,6 +304,12 @@ type Daemon struct {
 	// pushes runtime updates via MsgOverlayPolicy without a daemon restart.
 	overlayPolicyState overlayPolicyState
 
+	// remoteBranchDelete is whether a worktree close may delete the branch on
+	// its remote. Seeded from config at construction; the TUI pushes the F1
+	// value (MsgWorktreePolicy, admin class). Every remote delete reads it at
+	// the moment it would run, so turning it off stops the next one.
+	remoteBranchDelete atomic.Bool
+
 	// clients holds one record for each conn that has sent MsgAttach — the
 	// clients, as distinct from every conn (see registerClient) — with the
 	// size-master election over them (clients.go). Each record also carries
@@ -430,6 +436,7 @@ func New(cfg config.Config) *Daemon {
 		IdleTimeoutMinutes: cfg.Overlay.IdleTimeoutMinutes,
 		MaxLive:            cfg.Overlay.MaxLive,
 	}))
+	d.remoteBranchDelete.Store(cfg.Worktree.RemoteBranchDelete)
 	return d
 }
 
@@ -1673,6 +1680,8 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 			return
 		}
 		d.setOverlayPolicy(p)
+	case ipc.MsgWorktreePolicy:
+		d.handleWorktreePolicy(msg)
 	case ipc.MsgShutdown:
 		d.shutdownOnce.Do(func() { close(d.shutdown) })
 

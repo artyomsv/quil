@@ -60,7 +60,7 @@ var classes = map[string]Class{
 	// admin
 	ipc.MsgShutdown: ClassAdmin, ipc.MsgReloadPlugins: ClassAdmin, ipc.MsgOverlayPolicy: ClassAdmin,
 	ipc.MsgKillProcessReq: ClassAdmin, ipc.MsgStageUpdateReq: ClassAdmin, ipc.MsgUpdateCheckReq: ClassAdmin,
-	ipc.MsgPluginUpdateReq: ClassAdmin,
+	ipc.MsgPluginUpdateReq: ClassAdmin, ipc.MsgWorktreePolicy: ClassAdmin,
 
 	// local
 	ipc.MsgTokenCreateReq: ClassLocal, ipc.MsgTokenListReq: ClassLocal, ipc.MsgTokenRevokeReq: ClassLocal,

@@ -86,6 +86,11 @@ const (
 	// disk on TUI exit, so without this a setting would not apply until the
 	// next daemon start. Last writer wins across clients.
 	MsgOverlayPolicy = "overlay_policy"
+	// MsgWorktreePolicy pushes whether a worktree close may delete the
+	// branch on its remote. Same reason as MsgOverlayPolicy: F1 edits reach
+	// config.toml only on TUI exit, and a remote daemon reads its own file.
+	// Admin class, so only a full-rights client can turn it on.
+	MsgWorktreePolicy = "worktree_policy"
 
 	// MCP request-response (Client -> Daemon -> Client)
 	MsgListPanesReq       = "list_panes_req"
@@ -928,6 +933,11 @@ type PluginFixRespPayload struct {
 type OverlayPolicyPayload struct {
 	IdleTimeoutMinutes int `json:"idle_timeout_minutes"`
 	MaxLive            int `json:"max_live"`
+}
+
+// WorktreePolicyPayload carries the remote-branch-delete switch.
+type WorktreePolicyPayload struct {
+	RemoteBranchDelete bool `json:"remote_branch_delete"`
 }
 
 // MCP request-response payloads

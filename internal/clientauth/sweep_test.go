@@ -219,6 +219,7 @@ var wantClassTable = map[string]Class{
 	ipc.MsgShutdown:        ClassAdmin,
 	ipc.MsgReloadPlugins:   ClassAdmin,
 	ipc.MsgOverlayPolicy:   ClassAdmin,
+	ipc.MsgWorktreePolicy:  ClassAdmin,
 	ipc.MsgKillProcessReq:  ClassAdmin,
 	ipc.MsgStageUpdateReq:  ClassAdmin,
 	ipc.MsgPluginUpdateReq: ClassAdmin,

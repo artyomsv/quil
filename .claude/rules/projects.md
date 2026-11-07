@@ -1693,7 +1693,7 @@ worktrees while the close dialog asks about them. ONE shared deadline across the
 request's paths, like `dirsExistResponse` — every path blocks on the same thing,
 and a per-path budget lets a tab full of worktrees hold the slot N times as long.
 
-**The answer is ADVISORY, and the client timeout is set from that.** The toggle
+**The answer is ADVISORY, and the client timeout is set from that.** (No longer for the DELETE: an unread row keeps its worktree — see "A worktree whose files were not READ" below.) The toggle
 works whether or not the count arrives, so `worktreeStatusTimeout` (6 s) gives up
 well inside the daemon's own 10 s bound: an early give-up costs a number, never a
 decision, while a dialog stuck on `checking…` in front of someone trying to close
@@ -1858,17 +1858,41 @@ older listing would read a newer worktree as gone. Each compare takes a
 seen evicted), 500 entries (gone first). The record is written through
 `internal/atomicfile`, debounced 2 s, and flushed at daemon stop.
 
-**The baseline is taken at SPAWN** (`seedSoon` from `spawnPane`, for claude,
-codex and opencode panes), again at each turn start, and marked done only
-after a listing that READ the repository: a listing taken after the agent's
-first `git worktree add` would adopt that worktree as pre-existing for good.
-A repository the agent first reaches mid-session is baselined by its first
-probe, so a worktree made by that very command is not recorded.
+**The baseline is taken BEFORE a new agent pane's process starts**
+(`spawnPane` → `seedSync`, bounded by `agentWTSeedTimeout` = 3 s, no pane lock
+held): a listing taken after the agent's first `git worktree add` would adopt
+that worktree as pre-existing for good. A failed or slow listing does not hold
+the agent back — the spawn goes on, the pane is not marked seeded, and the
+turn-start seed retries. A RESTORED pane seeds off-goroutine (`seedSoon`):
+restore runs before the daemon listens, and a resumed agent waits for a
+prompt. A pane counts as seeded only after a compare that READ the
+repository. A repository the agent first reaches mid-session is baselined by
+its first probe, so a worktree made by that very command is not recorded.
 
 **"In use" covers every agent of the pane.** The main agent's last probe
 directory, plus one directory per SUBAGENT (`DataProbeAgent`, Claude only),
-kept until the pane settles idle (`settleIdle` → `subagentsDone`): several
-subagents can work in different worktrees of one pane at once. A gone
-worktree's surviving branch is settled once (`BranchKept`), on the first
-COMPLETE branch listing — a removal seen while the branch list was
-unreadable is settled later, never lost.
+each stamped with when it arrived. The idle settle (`settleIdle` →
+`subagentsDone(pane, idleAt)`, `idleAt` read while idle is confirmed) clears
+only directories recorded at or before it, so a next turn's subagent that
+probes in between survives. Past `maxAgentWTSubagents` between two settles
+the pane FAILS CLOSED (`subOverflow`): it counts as in use for every path
+until a settle clears the mark.
+
+**A gone worktree's surviving branch is queued on the REPOSITORY**
+(`agentWTRepo.PendingKept`, persisted), not on the entry — a short-lived
+entry is dropped the moment its worktree goes. The queue is settled on the
+next COMPLETE branch listing, once: a surviving, non-default branch with no
+live entry gets one, with the gone worktree's attribution.
+
+**A remote branch delete asks the REMOTE for its default**
+(`ls-remote --symref <remote> HEAD`, same no-prompt env, inside the 30 s
+budget) right before the push, because the local `refs/remotes/<remote>/HEAD`
+can be stale. No answer, or no symref in it, refuses the delete.
+
+**A worktree whose files were not READ is never deleted** — this reverses
+the earlier "the status answer is advisory" rule for the DELETE (the count is
+still advisory for closing). A timeout or an error loads the row with a
+reason; `confirmWorktreesInspected` (loaded AND no error) gates Enter, the
+worktree row cannot be armed while `worktreeRowReason` names a reason, and a
+late answer for the timed-out request is not applied. Unticking closes the
+pane and keeps the worktree.

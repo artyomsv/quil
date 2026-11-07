@@ -20,9 +20,14 @@ type fakeRepo struct {
 	truncated bool
 	listErr   error
 	lists     int
+	// gate, when set, holds every listing until it is closed.
+	gate chan struct{}
 }
 
 func (f *fakeRepo) list(context.Context, string) ([]gitworktree.Worktree, error) {
+	if f.gate != nil {
+		<-f.gate
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.lists++

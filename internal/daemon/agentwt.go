@@ -47,9 +47,6 @@ type AgentWTEntry struct {
 	Source    string    `json:"source,omitempty"`
 	SessionID string    `json:"session_id,omitempty"`
 	Trigger   string    `json:"trigger,omitempty"`
-	// BranchKept: a gone worktree entry whose surviving branch has been
-	// given its own entry (or found gone too). Settled once.
-	BranchKept bool `json:"branch_kept,omitempty"`
 	// No command text is kept: a shell command can carry a credential
 	// (an inline token, an authenticated URL), and the compare needs none.
 }
@@ -80,6 +77,23 @@ type agentWTRepo struct {
 	Branches      []string  `json:"branches,omitempty"`
 	BranchesKnown bool      `json:"branches_known,omitempty"`
 	Seen          time.Time `json:"seen"`
+	// PendingKept are branches of recorded worktrees that went away, waiting
+	// for a COMPLETE branch listing to tell whether they survived (and then
+	// get an entry of their own). Kept here, not on the worktree entry: a
+	// short-lived entry is dropped the moment its worktree goes.
+	PendingKept []agentWTKept `json:"pending_kept,omitempty"`
+}
+
+// agentWTKept is a surviving-branch check waiting on a branch listing, with
+// the gone worktree's attribution.
+type agentWTKept struct {
+	Branch    string    `json:"branch"`
+	PaneID    string    `json:"pane_id,omitempty"`
+	PaneName  string    `json:"pane_name,omitempty"`
+	Source    string    `json:"source,omitempty"`
+	SessionID string    `json:"session_id,omitempty"`
+	Trigger   string    `json:"trigger,omitempty"`
+	FirstSeen time.Time `json:"first_seen"`
 }
 
 type agentWTFile struct {
@@ -121,8 +135,14 @@ type agentWTStore struct {
 	// subDirs is where each SUBAGENT of a pane last worked (pane → agent id →
 	// dir). Several can work in different worktrees at once, so one value per
 	// pane would forget all but the last. Kept until the pane settles idle:
-	// only then has every subagent finished.
-	subDirs map[string]map[string]string
+	// only then has every subagent finished. Each carries when it was
+	// recorded, so an idle settle clears only what came before it.
+	subDirs map[string]map[string]agentDir
+	// subOverflow marks a pane that had more subagents than
+	// maxAgentWTSubagents since its last idle settle (with when): some
+	// subagent's directory is unknown, so the pane counts as in use for
+	// EVERY path until the settle clears it.
+	subOverflow map[string]time.Time
 	// seeded is the directory each pane's baseline was last seeded for.
 	seeded map[string]string
 	// One compare per directory at a time; a probe that arrives meanwhile
@@ -151,7 +171,8 @@ func newAgentWTStore(path string, paneFn func(string) (agentWTPane, bool)) *agen
 		ownPaths:    map[string]bool{},
 		ownBranches: map[string]bool{},
 		agentDirs:   map[string]string{},
-		subDirs:     map[string]map[string]string{},
+		subDirs:     map[string]map[string]agentDir{},
+		subOverflow: map[string]time.Time{},
 		seeded:      map[string]string{},
 		running:     map[string]bool{},
 		pending:     map[string]agentWTAttr{},
@@ -197,10 +218,14 @@ func (s *agentWTStore) probe(p hookevents.Payload) {
 		s.agentDirs[p.PaneID] = p.CWD
 	} else {
 		if s.subDirs[p.PaneID] == nil {
-			s.subDirs[p.PaneID] = map[string]string{}
+			s.subDirs[p.PaneID] = map[string]agentDir{}
 		}
 		if _, known := s.subDirs[p.PaneID][agent]; known || len(s.subDirs[p.PaneID]) < maxAgentWTSubagents {
-			s.subDirs[p.PaneID][agent] = p.CWD
+			s.subDirs[p.PaneID][agent] = agentDir{Dir: p.CWD, At: s.now()}
+		} else {
+			// Fail closed: this subagent's directory is not kept, so no
+			// path of this pane may be treated as free.
+			s.subOverflow[p.PaneID] = s.now()
 		}
 	}
 	if s.touched[p.PaneID] == nil {
@@ -252,20 +277,40 @@ func (s *agentWTStore) forgetPane(paneID string) {
 	delete(s.lastAttr, paneID)
 	delete(s.agentDirs, paneID)
 	delete(s.subDirs, paneID)
+	delete(s.subOverflow, paneID)
 	delete(s.seeded, paneID)
 	s.mu.Unlock()
 }
 
-// subagentsDone drops a pane's subagent directories: called when the pane
-// settles idle, the one moment every subagent is known to have finished.
-// The main agent's directory stays — its session continues there.
-func (s *agentWTStore) subagentsDone(paneID string) {
+// agentDir is one subagent's last directory and when it was recorded.
+type agentDir struct {
+	Dir string
+	At  time.Time
+}
+
+// subagentsDone drops a pane's subagent directories recorded at or before
+// idleAt: called when the pane settles idle, the one moment every subagent
+// is known to have finished. idleAt is taken while the idle state is
+// confirmed, so a probe from a turn that started after it — between the
+// settle's check and this call — is kept. The main agent's directory stays:
+// its session continues there.
+func (s *agentWTStore) subagentsDone(paneID string, idleAt time.Time) {
 	if s == nil {
 		return
 	}
 	s.mu.Lock()
-	delete(s.subDirs, paneID)
-	s.mu.Unlock()
+	defer s.mu.Unlock()
+	for agent, d := range s.subDirs[paneID] {
+		if !d.At.After(idleAt) {
+			delete(s.subDirs[paneID], agent)
+		}
+	}
+	if len(s.subDirs[paneID]) == 0 {
+		delete(s.subDirs, paneID)
+	}
+	if at, ok := s.subOverflow[paneID]; ok && !at.After(idleAt) {
+		delete(s.subOverflow, paneID)
+	}
 }
 
 // seed takes the baseline of the pane's repository before its agent acts:
@@ -296,13 +341,41 @@ func (s *agentWTStore) seed(paneID string) {
 // agentWTSeedTrigger marks a compare that takes a baseline.
 const agentWTSeedTrigger = "seed"
 
-// seedSoon is seed off the caller's goroutine: spawnPane calls it, and the
-// pane lookup takes the pane's PluginMu.
+// seedSoon is seed off the caller's goroutine, for a RESTORED pane: its
+// agent resumes a session and does not act before it is prompted, and a
+// restore must not wait on git before the daemon listens.
 func (s *agentWTStore) seedSoon(paneID string) {
 	if s == nil {
 		return
 	}
 	s.goFn(func() { s.seed(paneID) })
+}
+
+// agentWTSeedTimeout bounds how long a new agent pane's start waits for the
+// baseline: long enough for a listing on a healthy disk, short enough that
+// a dead mount costs a slow spawn, never a hung one.
+var agentWTSeedTimeout = 3 * time.Second
+
+// seedSync takes the baseline of the pane's directory BEFORE its agent
+// starts: spawnPane calls it ahead of the PTY start, holding no pane lock
+// (the pane lookup takes PluginMu). It reports whether a baseline is in
+// place; on false the spawn goes on and the start edge retries (the
+// explicit failure path — an agent is never held back by its record).
+func (s *agentWTStore) seedSync(paneID string) bool {
+	if s == nil {
+		return false
+	}
+	pane, ok := s.paneFn(paneID)
+	if !ok || pane.Sandbox || pane.CWD == "" {
+		return false
+	}
+	s.mu.Lock()
+	done := s.seeded[paneID] == normalizeWorktreePath(pane.CWD)
+	s.mu.Unlock()
+	if done {
+		return true
+	}
+	return s.compareWithin(pane.CWD, agentWTAttr{PaneID: paneID, PaneName: pane.Name, Trigger: agentWTSeedTrigger}, agentWTSeedTimeout)
 }
 
 // paneInDir reports a live pane whose AGENT last worked inside path (from its
@@ -319,11 +392,22 @@ func (s *agentWTStore) paneInDir(path string) string {
 		dirs = append(dirs, paneDir{id, dir})
 	}
 	for id, subs := range s.subDirs {
-		for _, dir := range subs {
-			dirs = append(dirs, paneDir{id, dir})
+		for _, d := range subs {
+			dirs = append(dirs, paneDir{id, d.Dir})
 		}
 	}
+	var overflow []string
+	for id := range s.subOverflow {
+		overflow = append(overflow, id)
+	}
 	s.mu.Unlock()
+	// A pane whose subagents overflowed the bound counts as in use for
+	// every path: one of its subagents works somewhere unrecorded.
+	for _, id := range overflow {
+		if _, live := s.paneFn(id); live {
+			return id
+		}
+	}
 	for _, d := range dirs {
 		if !pathWithin(path, d.dir) {
 			continue
@@ -386,10 +470,16 @@ func (s *agentWTStore) schedule(dir string, attr agentWTAttr) {
 // compare lists the repository containing dir and folds the difference from
 // its baseline into the record.
 func (s *agentWTStore) compare(dir string, attr agentWTAttr) {
+	s.compareWithin(dir, attr, agentWTTimeout)
+}
+
+// compareWithin is compare with its own deadline. It reports whether the
+// repository was read.
+func (s *agentWTStore) compareWithin(dir string, attr agentWTAttr, timeout time.Duration) bool {
 	if !claimBlockingFSCall() {
-		return // the turn-end compare will ask again
+		return false // the turn-end compare will ask again
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), agentWTTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	// Stamped BEFORE the listing: two compares of one repository (its main
 	// checkout and a new worktree, probed in one tick) run concurrently, and
 	// apply refuses a listing taken before the one it already holds.
@@ -415,7 +505,7 @@ func (s *agentWTStore) compare(dir string, attr agentWTAttr) {
 	// An unreadable listing compares NOTHING and marks nothing gone, the rule
 	// worktreeRegistered follows: an unknown answer never authorises a change.
 	if err != nil || len(list) == 0 || list[0].Path == "" {
-		return
+		return false
 	}
 
 	s.mu.Lock()
@@ -427,6 +517,7 @@ func (s *agentWTStore) compare(dir string, attr agentWTAttr) {
 	if changed {
 		s.scheduleSave()
 	}
+	return true
 }
 
 // apply folds one listing, taken at listedAt, into the baseline and the
@@ -490,6 +581,16 @@ func (s *agentWTStore) apply(list []gitworktree.Worktree, branchesOK bool, branc
 				return e.Kind == agentWTKindWorktree && normalizeWorktreePath(e.Path) == p
 			}, now)
 			changed = changed || len(gone) > 0
+			// Its branch may survive it. Queued on the REPOSITORY, not
+			// on the entry: a short-lived entry is dropped right here,
+			// and the branch was in the baseline since the worktree
+			// appeared, so nothing else would ever look at it again.
+			for _, ge := range gone {
+				if ge.Branch != "" && len(r.PendingKept) < maxAgentWTEntries {
+					r.PendingKept = append(r.PendingKept, agentWTKept{Branch: ge.Branch, PaneID: ge.PaneID,
+						PaneName: ge.PaneName, Source: ge.Source, SessionID: ge.SessionID, Trigger: ge.Trigger, FirstSeen: ge.FirstSeen})
+				}
+			}
 		}
 	}
 	if len(r.Worktrees) != len(cur) {
@@ -535,21 +636,19 @@ func (s *agentWTStore) apply(list []gitworktree.Worktree, branchesOK bool, branc
 		// A recorded worktree removed WITHOUT its branch leaves the branch
 		// behind; its entry is gone, so the branch gets an entry of its own
 		// (same attribution) or it could never be cleaned up from the view.
-		// Settled ONCE per gone entry (BranchKept), and only on a complete
-		// branch listing: a removal seen while the branch list was unreadable
-		// is settled by the next listing that reads.
-		for i, n := 0, len(s.entries); i < n; i++ {
-			ge := s.entries[i]
-			if ge.Kind != agentWTKindWorktree || !ge.Gone || ge.BranchKept || ge.Repo != repoPath {
+		// Settled from the repository's queue (PendingKept), and only on a
+		// complete branch listing: a removal seen while the branch list was
+		// unreadable is settled by the next listing that reads, once.
+		for _, k := range r.PendingKept {
+			if !curB[k.Branch] || k.Branch == def || s.liveBranchEntry(repoPath, k.Branch) {
 				continue
 			}
-			s.entries[i].BranchKept = true
+			s.add(AgentWTEntry{Kind: agentWTKindBranch, Repo: repoPath, Branch: k.Branch},
+				agentWTAttr{PaneID: k.PaneID, PaneName: k.PaneName, Source: k.Source, SessionID: k.SessionID, Trigger: k.Trigger}, k.FirstSeen)
+		}
+		if len(r.PendingKept) > 0 {
+			r.PendingKept = nil
 			changed = true
-			if ge.Branch == "" || !curB[ge.Branch] || ge.Branch == def || s.liveBranchEntry(repoPath, ge.Branch) {
-				continue
-			}
-			s.add(AgentWTEntry{Kind: agentWTKindBranch, Repo: repoPath, Branch: ge.Branch},
-				agentWTAttr{PaneID: ge.PaneID, PaneName: ge.PaneName, Source: ge.Source, SessionID: ge.SessionID, Trigger: ge.Trigger}, ge.FirstSeen)
 		}
 		r.Branches = names
 	}

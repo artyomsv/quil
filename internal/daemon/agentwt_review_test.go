@@ -2,7 +2,9 @@ package daemon
 
 import (
 	"errors"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/artyomsv/quil/internal/gitworktree"
 	"github.com/artyomsv/quil/internal/hookevents"
@@ -135,7 +137,7 @@ func TestAgentWTAct_TwoSubagentsKeepBothWorktrees(t *testing.T) {
 		t.Fatalf("removals %v while subagents work in both worktrees", *calls)
 	}
 
-	d.agentWT.subagentsDone(pane.ID)
+	d.agentWT.subagentsDone(pane.ID, d.agentWT.now())
 	if got := d.agentWorktreeAct(ipc.AgentWorktreeActReqPayload{ID: "e-a", RemoveWorktree: true}); got.Error != "" || len(*calls) != 1 {
 		t.Errorf("act after idle = %+v, removals %v; want /w/a removed", got, *calls)
 	}
@@ -223,5 +225,148 @@ func TestAgentWT_KeptBranchSettledAfterATruncatedBranchList(t *testing.T) {
 	}
 	if live != 1 {
 		t.Errorf("entries = %+v, want exactly one live branch entry for x", s.entriesSnapshot())
+	}
+}
+
+// A new agent pane's start WAITS for the baseline: seedSync does not return
+// while the listing is held, and once it does the baseline is in place, so
+// the agent's first worktree is recorded.
+//
+// Fails if the spawn-time seed only queues work and returns.
+func TestAgentWT_SeedSyncHoldsTheStartUntilTheBaselineIsIn(t *testing.T) {
+	repo := &fakeRepo{branches: []string{"master"}, gate: make(chan struct{})}
+	s, _ := newTestAgentWT(t, repo, agentPanes)
+
+	done := make(chan bool, 1)
+	go func() { done <- s.seedSync("pane-a") }()
+	select {
+	case <-done:
+		t.Fatal("seedSync returned while the listing was still held")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(repo.gate)
+	if ok := <-done; !ok {
+		t.Fatal("seedSync = false after a successful listing")
+	}
+
+	// The agent starts only now; its first worktree is new to the baseline.
+	repo.worktrees = []gitworktree.Worktree{{Path: "/w/first", Branch: "first"}}
+	repo.branches = []string{"master", "first"}
+	s.probe(probeFor("pane-a", "/repo"))
+	if got := s.entriesSnapshot(); len(got) != 1 || got[0].Path != "/w/first" {
+		t.Errorf("entries = %+v, want the first worktree recorded", got)
+	}
+}
+
+// A failed baseline read says so, and the pane is not counted as seeded.
+func TestAgentWT_SeedSyncReportsAFailedListing(t *testing.T) {
+	repo := &fakeRepo{branches: []string{"master"}, listErr: errors.New("dead mount")}
+	s, _ := newTestAgentWT(t, repo, agentPanes)
+
+	if s.seedSync("pane-a") {
+		t.Fatal("seedSync = true for a listing that failed")
+	}
+	s.mu.Lock()
+	seeded := s.seeded["pane-a"]
+	s.mu.Unlock()
+	if seeded != "" {
+		t.Errorf("seeded = %q after a failed listing, want none", seeded)
+	}
+}
+
+// A worktree that goes again within the short-lived window is dropped from
+// the record — but its branch, if it survives, still gets an entry: with a
+// complete listing, and with a truncated one followed by a complete one.
+//
+// Fails if the kept-branch check depends on the dropped worktree entry.
+func TestAgentWT_ShortLivedWorktreeKeepsItsBranchEntry(t *testing.T) {
+	for _, truncatedFirst := range []bool{false, true} {
+		repo := &fakeRepo{branches: []string{"master"}}
+		s, now := newTestAgentWT(t, repo, agentPanes)
+		s.probe(probeFor("pane-a", "/repo"))
+		repo.worktrees = []gitworktree.Worktree{{Path: "/w/x", Branch: "x"}}
+		repo.branches = []string{"master", "x"}
+		s.probe(probeFor("pane-a", "/repo"))
+
+		*now = now.Add(agentWTShortLived / 2)
+		repo.worktrees, repo.truncated = nil, truncatedFirst
+		s.probe(probeFor("pane-a", "/repo"))
+		repo.truncated = false
+		s.probe(probeFor("pane-a", "/repo"))
+		s.probe(probeFor("pane-a", "/repo"))
+
+		var live, wt int
+		for _, e := range s.entriesSnapshot() {
+			switch {
+			case e.Kind == agentWTKindBranch && !e.Gone && e.Branch == "x" && e.PaneID == "pane-a":
+				live++
+			case e.Kind == agentWTKindWorktree:
+				wt++
+			}
+		}
+		if live != 1 || wt != 0 {
+			t.Errorf("truncatedFirst=%v: entries = %+v, want the short-lived worktree dropped and one live branch entry for x",
+				truncatedFirst, s.entriesSnapshot())
+		}
+	}
+}
+
+// The idle settle clears only what came before it. A subagent of the NEXT
+// turn that probes between the settle's idle check and its clear keeps its
+// directory.
+//
+// Fails if subagentsDone drops every subagent directory of the pane.
+func TestAgentWT_IdleSettleKeepsANewerTurnsSubagent(t *testing.T) {
+	repo := &fakeRepo{branches: []string{"master"}}
+	s, now := newTestAgentWT(t, repo, agentPanes)
+	old := probeFor("pane-a", "/w/old")
+	old.Data[hookevents.DataProbeAgent] = "sub-old"
+	s.probe(old)
+
+	idleAt := *now // the settle confirms idle here …
+	*now = now.Add(time.Second)
+	next := probeFor("pane-a", "/w/new") // … a new turn's subagent probes …
+	next.Data[hookevents.DataProbeAgent] = "sub-new"
+	s.probe(next)
+	s.subagentsDone("pane-a", idleAt) // … and only then the clear runs
+
+	if got := s.paneInDir("/w/old"); got != "" {
+		t.Errorf("paneInDir(/w/old) = %q, want the finished subagent cleared", got)
+	}
+	if got := s.paneInDir("/w/new"); got != "pane-a" {
+		t.Errorf("paneInDir(/w/new) = %q, want the newer subagent kept", got)
+	}
+}
+
+// Past the bound on tracked subagents, the pane fails closed: the cleanup
+// refuses every worktree while the pane is live, until it settles idle.
+//
+// Fails if an overflowing subagent's worktree can be removed.
+func TestAgentWTAct_SubagentOverflowRefusesCleanup(t *testing.T) {
+	last := AgentWTEntry{ID: "e-last", Kind: agentWTKindWorktree, Repo: "/repo", Path: "/w/last", Branch: "last"}
+	d := daemonWithRecord(t, last)
+	tab := d.session.CreateTab("t")
+	pane, err := d.session.CreatePane(tab.ID, "/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stubWorktreeList(t, []gitworktree.Worktree{{Path: "/repo", Main: true}, {Path: "/w/last", Branch: "last"}}, nil)
+	calls := stubRemoveWorktree(t, nil)
+	for i := 0; i < maxAgentWTSubagents; i++ {
+		p := probeFor(pane.ID, "/w/sub")
+		p.Data[hookevents.DataProbeAgent] = fmt.Sprintf("sub-%d", i)
+		d.agentWT.probe(p)
+	}
+	p := probeFor(pane.ID, "/w/last")
+	p.Data[hookevents.DataProbeAgent] = "sub-overflow"
+	d.agentWT.probe(p)
+
+	if got := d.agentWorktreeAct(ipc.AgentWorktreeActReqPayload{ID: "e-last", RemoveWorktree: true}); got.Error == "" || len(*calls) != 0 {
+		t.Fatalf("act = %+v, removals %v; want a refusal past the subagent bound", got, *calls)
+	}
+
+	d.agentWT.subagentsDone(pane.ID, d.agentWT.now())
+	if got := d.agentWorktreeAct(ipc.AgentWorktreeActReqPayload{ID: "e-last", RemoveWorktree: true}); got.Error != "" || len(*calls) != 1 {
+		t.Errorf("act after idle = %+v, removals %v; want /w/last removed", got, *calls)
 	}
 }

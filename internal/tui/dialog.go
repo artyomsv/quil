@@ -1213,9 +1213,11 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		// A ticked worktree is removed only once its file list is on screen:
 		// git status on a large repository takes seconds, and that window is
-		// the ordinary case. The status request has its own timeout, after
-		// which the row is loaded with a reason, so this never waits forever.
-		if m.confirmRemoveWorktree && !m.confirmWorktreesLoaded() {
+		// the ordinary case. And only when the files were READ: a timeout or
+		// an error loads the row with a reason, which is no file list — an
+		// armed tick is not consent to lose files nobody was shown. The row
+		// then says so; unticking it closes and keeps the worktree.
+		if m.confirmRemoveWorktree && !m.agentWTBranchEntry() && !m.confirmWorktreesInspected() {
 			return m, nil
 		}
 		kind := m.confirmKind
@@ -2182,7 +2184,7 @@ func (m Model) renderConfirmWorktrees() string {
 		return b.String()
 	}
 	b.WriteString(m.confirmCheckRow(confirmRowWorktree, m.confirmRemoveWorktree,
-		"Also delete "+pluralWorktrees(len(m.confirmWorktrees)), "", inner))
+		"Also delete "+pluralWorktrees(len(m.confirmWorktrees)), m.worktreeRowReason(), inner))
 	focus, _ := m.focusedWorktree()
 	// CAPPED, because lipgloss pads but never clips and renderDialog's
 	// lipgloss.Place does not either: two lines per worktree grows the box past

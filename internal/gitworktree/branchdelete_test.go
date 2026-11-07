@@ -134,3 +134,36 @@ func TestRunPush_BoundsWhatAChildPrints(t *testing.T) {
 		t.Error("kept output from past the cap")
 	}
 }
+
+// The remote changed its default (master → develop) and this clone's
+// refs/remotes/fork/HEAD still says master. The delete asks the REMOTE, so
+// develop is kept; an ordinary feature branch on the same remote still goes.
+//
+// Fails if DeleteRemoteBranch trusts the local symref.
+func TestDeleteRemoteBranch_RealGit_AsksTheRemoteForItsDefault(t *testing.T) {
+	repo := realGitRepo(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	fork := filepath.Join(t.TempDir(), "fork.git")
+	runGitIn(t, repo, "init", "--bare", "-q", "-b", "master", fork)
+	runGitIn(t, repo, "branch", "develop")
+	runGitIn(t, repo, "branch", "feat2")
+	runGitIn(t, repo, "remote", "add", "fork", fork)
+	runGitIn(t, repo, "push", "-q", "fork", "master", "develop", "feat2")
+	runGitIn(t, repo, "remote", "set-head", "fork", "--auto") // records master
+	runGitIn(t, fork, "symbolic-ref", "HEAD", "refs/heads/develop")
+
+	if err := DeleteRemoteBranch(ctx, repo, "fork", "develop"); err == nil {
+		t.Fatal("deleted develop, the remote's current default")
+	}
+	if out := runGitIn(t, repo, "ls-remote", "fork", "refs/heads/develop"); !strings.Contains(out, "refs/heads/develop") {
+		t.Fatalf("develop is gone from the remote: %q", out)
+	}
+
+	if err := DeleteRemoteBranch(ctx, repo, "fork", "feat2"); err != nil {
+		t.Fatalf("DeleteRemoteBranch(feat2): %v", err)
+	}
+	if out := runGitIn(t, repo, "ls-remote", "fork", "refs/heads/feat2"); strings.Contains(out, "feat2") {
+		t.Errorf("feat2 is still on the remote: %q", out)
+	}
+}

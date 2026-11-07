@@ -38,8 +38,19 @@ func DeleteRemoteBranch(ctx context.Context, repo, remote, branch string) error 
 	if remote == "" || branch == "" || strings.HasPrefix(remote, "-") {
 		return fmt.Errorf("no remote branch to delete")
 	}
-	args := RemotePushArgs(remote, branch)
 	env := remotePushEnvFor(ctx, repo, os.Environ())
+	// The remote's default is asked of the REMOTE, right before the push:
+	// the local refs/remotes/<remote>/HEAD can be stale (the remote changed
+	// its default since the last set-head), and this is the last moment a
+	// wrong answer can be stopped. No answer refuses.
+	def, err := remoteHeadLive(ctx, repo, env, remote)
+	if err != nil {
+		return fmt.Errorf("git push %s :%s: could not confirm the remote's default branch: %w", remote, branch, err)
+	}
+	if def == branch {
+		return fmt.Errorf("git push %s :%s: it is the remote's default branch", remote, branch)
+	}
+	args := RemotePushArgs(remote, branch)
 	out, err := runPush(ctx, repo, env, args)
 	if err != nil {
 		msg := strings.TrimSpace(out)
@@ -116,4 +127,34 @@ func runPush(ctx context.Context, repo string, env, args []string) (string, erro
 	cmd.Stdout, cmd.Stderr = out, out
 	err := cmd.Run()
 	return out.String(), err
+}
+
+// remoteHeadLive asks remote which branch its HEAD names
+// (`ls-remote --symref <remote> HEAD`), with the same no-prompt environment
+// and output bound as the push. An answer without a symref is an error:
+// the default cannot be established.
+func remoteHeadLive(ctx context.Context, repo string, env []string, remote string) (string, error) {
+	out, err := runPush(ctx, repo, env, []string{"-c", "credential.interactive=false", "-c", "core.askPass=",
+		"ls-remote", "--symref", "--", remote, "HEAD"})
+	if err != nil {
+		msg := strings.TrimSpace(out)
+		if len(msg) > 200 {
+			msg = msg[:200]
+		}
+		return "", fmt.Errorf("%w: %s", err, msg)
+	}
+	for _, line := range strings.Split(strings.ReplaceAll(out, "\r\n", "\n"), "\n") {
+		ref, ok := strings.CutPrefix(line, "ref: ")
+		if !ok {
+			continue
+		}
+		target, name, _ := strings.Cut(ref, "\t")
+		if strings.TrimSpace(name) != "HEAD" {
+			continue
+		}
+		if b, ok := strings.CutPrefix(target, "refs/heads/"); ok && b != "" {
+			return b, nil
+		}
+	}
+	return "", fmt.Errorf("the remote names no default branch")
 }

@@ -125,6 +125,10 @@ func (m *Model) toggleConfirmRow() {
 		if m.agentWTBranchEntry() {
 			return // a branch entry has no worktree row to toggle
 		}
+		// Disarming always works; arming only while the files are known.
+		if !m.confirmRemoveWorktree && m.worktreeRowReason() != "" {
+			return
+		}
 		m.confirmRemoveWorktree = !m.confirmRemoveWorktree
 		if !m.confirmRemoveWorktree {
 			m.confirmDeleteBranch, m.confirmDeleteRemote = false, false
@@ -370,4 +374,31 @@ func (m Model) confirmWorktreesLoaded() bool {
 func (m Model) remoteDeleteArmed() bool {
 	_, remote, _ := m.confirmBranchSelection()
 	return remote
+}
+
+// confirmWorktreesInspected reports that every worktree's files were READ:
+// loaded, and without an error. A timeout or a refusal loads a row with a
+// reason, which says the files are unknown — not that there are none.
+func (m Model) confirmWorktreesInspected() bool {
+	for _, w := range m.confirmWorktrees {
+		if !w.loaded || w.err != "" {
+			return false
+		}
+	}
+	return true
+}
+
+// worktreeRowReason is why the worktree row cannot be armed, or "". A
+// worktree whose files could not be read is never deleted: the dialog cannot
+// show what would be lost. Closing still works, keeping the worktree.
+func (m Model) worktreeRowReason() string {
+	if m.agentWTBranchEntry() {
+		return ""
+	}
+	for _, w := range m.confirmWorktrees {
+		if w.loaded && w.err != "" {
+			return "kept: its files could not be read"
+		}
+	}
+	return ""
 }

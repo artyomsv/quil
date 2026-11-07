@@ -1,5 +1,5 @@
 ---
-headline: Quil notes worktrees and branches that agents create
+headline: Quil notes worktrees that appear while agents run
 ---
 - **Quil keeps a record of worktrees and branches that appear while agents
   run.** Claude Code, Codex and OpenCode tell Quil when an agent runs a

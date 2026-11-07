@@ -1791,6 +1791,14 @@ checked BEFORE `resetConfirmWorktrees`, or a refused Enter would drop the arm.
 The browser's Settings page saves the switch but sends no policy; the daemon
 takes it at its next start.
 
+**A ticked worktree is never removed before its file list loaded.** The
+accept arm returns while any row is still "checking…" (`confirmWorktreesLoaded`)
+and the footer says `checking…`; the status request's own timeout loads the
+rows with a reason, so it never waits forever. The remote push also blanks
+`GIT_ASKPASS`/`SSH_ASKPASS` and passes `-c core.askPass=`:
+`GIT_TERMINAL_PROMPT=0` does not stop an askpass helper, and a daemon started
+from an editor's terminal inherits the editor's.
+
 **The dialog's height is measured, not budgeted by constant.**
 `confirmFileRows` renders the dialog once with zero file rows (a probe copy
 with `confirmFileRowsSet`) and gives the file list what is left of the
@@ -1834,7 +1842,11 @@ new. A sandbox pane is never listed — its paths are inside its container.
 last-wins per (pane, event, agent type), so two probes in one 200 ms tick would
 lose the first directory, and a probe is no notification. One compare per
 directory runs at a time; probes arriving meanwhile cost one more compare
-(`running`/`pending`). Each compare takes a `claimBlockingFSCall` permit and a
+(`running`/`pending`), and two compares of one repository through different
+directories may still overlap, so each listing is stamped BEFORE it is taken
+and `apply` refuses one older than the baseline's `Seen` — applied second, an
+older listing would read a newer worktree as gone. Each compare takes a
+`claimBlockingFSCall` permit and a
 10 s deadline on a worker goroutine. Bounds: 64 baselines (least recently
 seen evicted), 500 entries (gone first). The record is written through
 `internal/atomicfile`, debounced 2 s, and flushed at daemon stop.

@@ -60,15 +60,21 @@ func DeleteRemoteBranch(ctx context.Context, repo, remote, branch string) error 
 
 // RemotePushArgs is the argv DeleteRemoteBranch runs, exported for its test.
 func RemotePushArgs(remote, branch string) []string {
-	return []string{"-c", "credential.interactive=false", "push", remote, ":refs/heads/" + branch}
+	// core.askPass= beside the env's GIT_ASKPASS=: an askpass program named
+	// in the repository's or user's config would run as well.
+	return []string{"-c", "credential.interactive=false", "-c", "core.askPass=", "push", remote, ":refs/heads/" + branch}
 }
 
 // RemotePushEnv returns base with the variables that make a push fail rather
-// than prompt. An ssh command the user configured is left alone: replacing it
-// would drop their own options (a jump host, a key file).
+// than prompt. GIT_TERMINAL_PROMPT=0 stops only the terminal prompt: git
+// still runs an askpass program when one is named, and a daemon started from
+// an editor's terminal inherits the editor's — a prompt in another app. An
+// EMPTY GIT_ASKPASS/SSH_ASKPASS means "none" (a later duplicate key wins in
+// exec). An ssh command the user configured is left alone: replacing it would
+// drop their own options (a jump host, a key file).
 func RemotePushEnv(base []string) []string {
 	env := append([]string{}, base...)
-	env = append(env, "GIT_TERMINAL_PROMPT=0", "GCM_INTERACTIVE=never")
+	env = append(env, "GIT_TERMINAL_PROMPT=0", "GCM_INTERACTIVE=never", "GIT_ASKPASS=", "SSH_ASKPASS=")
 	userSSH := false
 	for _, kv := range base {
 		if strings.HasPrefix(kv, "GIT_SSH_COMMAND=") || strings.HasPrefix(kv, "GIT_SSH=") {

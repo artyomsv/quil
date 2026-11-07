@@ -13,7 +13,7 @@ import (
 // Fails if the argv goes back to `--delete <b>` or drops the GCM switch.
 func TestDeleteRemoteBranch_ArgvUsesFullRefspec(t *testing.T) {
 	got := strings.Join(RemotePushArgs("origin", "feat/x"), " ")
-	want := "-c credential.interactive=false push origin :refs/heads/feat/x"
+	want := "-c credential.interactive=false -c core.askPass= push origin :refs/heads/feat/x"
 	if got != want {
 		t.Errorf("argv = %q, want %q", got, want)
 	}
@@ -30,8 +30,14 @@ func TestRemotePushEnv_KeepsUserSSHCommand(t *testing.T) {
 		return false
 	}
 
-	plain := RemotePushEnv([]string{"PATH=/bin"})
-	for _, kv := range []string{"GIT_TERMINAL_PROMPT=0", "GCM_INTERACTIVE=never", "GIT_SSH_COMMAND=ssh -o BatchMode=yes"} {
+	// An inherited askpass helper (a daemon started from an editor's
+	// terminal carries the editor's) would raise a prompt in another app:
+	// GIT_TERMINAL_PROMPT=0 does not stop askpass, an empty value does.
+	plain := RemotePushEnv([]string{"PATH=/bin", "GIT_ASKPASS=/opt/editor/askpass.sh", "SSH_ASKPASS=/usr/bin/ksshaskpass"})
+	if plain[len(plain)-1] == "" {
+		t.Fatal("empty env entry")
+	}
+	for _, kv := range []string{"GIT_TERMINAL_PROMPT=0", "GCM_INTERACTIVE=never", "GIT_SSH_COMMAND=ssh -o BatchMode=yes", "GIT_ASKPASS=", "SSH_ASKPASS="} {
 		if !has(plain, kv) {
 			t.Errorf("env without a user ssh command lacks %q: %v", kv, plain)
 		}

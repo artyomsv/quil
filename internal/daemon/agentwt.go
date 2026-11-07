@@ -266,6 +266,10 @@ func (s *agentWTStore) compare(dir string, attr agentWTAttr) {
 		return // the turn-end compare will ask again
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), agentWTTimeout)
+	// Stamped BEFORE the listing: two compares of one repository (its main
+	// checkout and a new worktree, probed in one tick) run concurrently, and
+	// apply refuses a listing taken before the one it already holds.
+	listedAt := s.now()
 	list, err := s.listFn(ctx, dir)
 	var (
 		branches   []gitworktree.Branch
@@ -291,16 +295,18 @@ func (s *agentWTStore) compare(dir string, attr agentWTAttr) {
 	}
 
 	s.mu.Lock()
-	changed := s.apply(list, branchesOK, branches, def, attr)
+	changed := s.apply(list, branchesOK, branches, def, attr, listedAt)
 	s.mu.Unlock()
 	if changed {
 		s.scheduleSave()
 	}
 }
 
-// apply folds one listing into the baseline and the entries. Caller holds mu.
-func (s *agentWTStore) apply(list []gitworktree.Worktree, branchesOK bool, branches []gitworktree.Branch, def string, attr agentWTAttr) bool {
-	now := s.now()
+// apply folds one listing, taken at listedAt, into the baseline and the
+// entries. Caller holds mu. A listing older than the baseline's is refused:
+// applying it would undo what a newer one recorded.
+func (s *agentWTStore) apply(list []gitworktree.Worktree, branchesOK bool, branches []gitworktree.Branch, def string, attr agentWTAttr, listedAt time.Time) bool {
+	now := listedAt
 	repoPath := list[0].Path
 	key := normalizeWorktreePath(repoPath)
 
@@ -323,6 +329,9 @@ func (s *agentWTStore) apply(list []gitworktree.Worktree, branchesOK bool, branc
 		s.repos[key] = &agentWTRepo{Worktrees: cur, Branches: names, BranchesKnown: branchesOK, Seen: now}
 		s.evictRepos()
 		return true
+	}
+	if now.Before(r.Seen) {
+		return false
 	}
 	r.Seen = now
 	changed := false

@@ -1803,7 +1803,10 @@ from an editor's terminal inherits the editor's.
 `confirmFileRows` renders the dialog once with zero file rows (a probe copy
 with `confirmFileRowsSet`) and gives the file list what is left of the
 terminal, 1 to 10 rows; with several worktrees only the focused one is drawn in
-full and the rest take one row each. `TestCloseConfirm_FitsTerminal` asserts the
+full and the rest take one row each. A short terminal draws fewer rows, but
+`←`/`→` still walk EVERY worktree the close removes and the drawn window
+follows the focus (`confirmWindow`); the hidden ones are counted on ONE line
+so the measured height holds. `TestCloseConfirm_FitsTerminal` asserts the
 property at 24 and 30 rows.
 
 ## Worktrees that appear while agents run (`agentwt.go`)

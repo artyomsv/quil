@@ -295,6 +295,21 @@ func TestCollectConfirmWorktrees_NoPRWhenShellLeftTheWorktree(t *testing.T) {
 // Six worktrees, every row armed and every warning on: the box still fits a
 // 24-row terminal, because the worktree list gives way.
 func TestCloseConfirm_SixWorktreesFitTerminal(t *testing.T) {
+	m := sixWorktreeConfirm(t)
+
+	out := m.renderConfirmDialog()
+	if box := strings.Count(out, "\n") + 1 + dialogVChrome; box > m.height {
+		t.Errorf("box is %d rows in a %d-row terminal:\n%s", box, m.height, stripANSI(out))
+	}
+	if !strings.Contains(stripANSI(out), "Esc") {
+		t.Error("the footer is not drawn")
+	}
+}
+
+// sixWorktreeConfirm opens the close dialog for a tab of six loaded
+// worktrees, every row armed and every warning on, in a 24-row terminal.
+func sixWorktreeConfirm(t *testing.T) Model {
+	t.Helper()
 	var panes []*PaneModel
 	for i := 0; i < 6; i++ {
 		panes = append(panes, worktreePane(fmt.Sprintf("pane-%d", i), fmt.Sprintf("/w/feat-%d", i), fmt.Sprintf("feat/%d", i)))
@@ -315,12 +330,45 @@ func TestCloseConfirm_SixWorktreesFitTerminal(t *testing.T) {
 		w.remote, w.remoteBranch = "origin", w.branch
 	}
 	m.confirmRemoveWorktree, m.confirmDeleteBranch, m.confirmDeleteRemote = true, true, true
+	return m
+}
 
-	out := m.renderConfirmDialog()
-	if box := strings.Count(out, "\n") + 1 + dialogVChrome; box > m.height {
-		t.Errorf("box is %d rows in a %d-row terminal:\n%s", box, m.height, stripANSI(out))
+// Every worktree the close removes stays inspectable: → walks past the rows
+// a short terminal draws, the drawn window follows, and the box still fits.
+//
+// Fails if the focus wraps at the drawn rows, or the window does not follow.
+func TestCloseConfirm_ArrowsReachHiddenWorktrees(t *testing.T) {
+	m := sixWorktreeConfirm(t)
+	if cap := m.confirmRowCap(); cap >= 6 {
+		t.Fatalf("cap = %d, want fewer than 6 rows for this test to mean anything", cap)
 	}
-	if !strings.Contains(stripANSI(out), "Esc") {
-		t.Error("the footer is not drawn")
+
+	for i := 0; i < 5; i++ {
+		m = confirmPress(m, "right")
+	}
+
+	if w, _ := m.focusedWorktree(); w.path != "/w/feat-5" {
+		t.Fatalf("focus = %q after 5 rights, want the last worktree /w/feat-5", w.path)
+	}
+	out := stripANSI(m.renderConfirmDialog())
+	focused := false
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "▸ ") && strings.Contains(line, "5") {
+			focused = true
+		}
+	}
+	if !focused {
+		t.Errorf("the last worktree is not drawn as focused:\n%s", out)
+	}
+	if !strings.Contains(out, "more not shown") {
+		t.Errorf("hidden worktrees are not counted:\n%s", out)
+	}
+	if box := strings.Count(out, "\n") + 1 + dialogVChrome; box > m.height {
+		t.Errorf("box is %d rows in a %d-row terminal:\n%s", box, m.height, out)
+	}
+
+	m = confirmPress(m, "right")
+	if w, _ := m.focusedWorktree(); w.path != "/w/feat-0" {
+		t.Errorf("focus = %q after wrapping, want /w/feat-0", w.path)
 	}
 }

@@ -2189,7 +2189,8 @@ func (m Model) renderConfirmWorktrees() string {
 	// the terminal and pushes the footer — and the Enter it documents — off
 	// screen. The cap is a DISPLAY bound only; the header counts every worktree
 	// and the toggle still covers all of them.
-	shown := m.confirmWorktrees[:m.confirmRowCap()]
+	from, to := m.confirmWindow()
+	shown := m.confirmWorktrees[from:to]
 	for _, w := range shown {
 		b.WriteString("\n")
 		// With several worktrees only the FOCUSED one is drawn in full; the
@@ -2223,7 +2224,9 @@ func (m Model) renderConfirmWorktrees() string {
 	}
 	if rest := len(m.confirmWorktrees) - len(shown); rest > 0 {
 		b.WriteString("\n")
-		b.WriteString("      " + dialogSubtle.Render(fmt.Sprintf("…and %d more", rest)))
+		// ONE line however the window sits, so the box height the cap was
+		// measured for holds; ←/→ reaches every hidden worktree.
+		b.WriteString("      " + dialogSubtle.Render(fmt.Sprintf("…%d more not shown (←/→)", rest)))
 	}
 	// Said once, under the list, because it is a property of the operation
 	// rather than of any one worktree — and said whether or not the check

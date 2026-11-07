@@ -154,7 +154,7 @@ func (m Model) focusedWorktree() (confirmWorktree, bool) {
 	if len(m.confirmWorktrees) == 0 {
 		return confirmWorktree{}, false
 	}
-	i := max(0, min(m.confirmFileFocus, m.confirmRowCap()-1))
+	i := max(0, min(m.confirmFileFocus, len(m.confirmWorktrees)-1))
 	return m.confirmWorktrees[i], true
 }
 
@@ -180,14 +180,26 @@ func (m Model) confirmRowCap() int {
 	return max(1, min(n, 1+spare))
 }
 
-// moveConfirmFocus moves the file list to the previous or next worktree.
+// moveConfirmFocus moves the file list to the previous or next worktree. It
+// walks EVERY worktree the delete covers, not only the rows drawn: a short
+// terminal draws fewer, and each one the close removes must stay inspectable.
+// The drawn window follows the focus (confirmWindow).
 func (m *Model) moveConfirmFocus(delta int) {
-	n := m.confirmRowCap()
+	n := len(m.confirmWorktrees)
 	if n == 0 {
 		return
 	}
 	m.confirmFileFocus = (m.confirmFileFocus + delta + n) % n
 	m.confirmFileScroll = 0
+}
+
+// confirmWindow is the slice of worktrees drawn: confirmRowCap rows, placed
+// so the focused worktree is one of them.
+func (m Model) confirmWindow() (start, end int) {
+	n, rows := len(m.confirmWorktrees), m.confirmRowCap()
+	focus := max(0, min(m.confirmFileFocus, n-1))
+	start = max(0, min(focus-rows+1, n-rows))
+	return start, min(n, start+rows)
 }
 
 // scrollConfirmFiles moves the file list by one page.

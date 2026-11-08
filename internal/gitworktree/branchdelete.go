@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -50,6 +51,10 @@ func DeleteRemoteBranch(ctx context.Context, repo, remote, branch string) error 
 	if err != nil {
 		return fail("%v", err)
 	}
+	// A local RELATIVE address is resolved against the repository now: the
+	// git calls below run in the helper directory, where "../server.git"
+	// would name a different folder — or another repository.
+	url = absLocalAddress(repo, url)
 	// And the CONFIGURATION is frozen with it: both git calls run in an
 	// empty helper repository with system and global config off and only a
 	// snapshot of the credential/http/ssh settings, taken now and passed in
@@ -278,4 +283,18 @@ var urlUserinfo = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.\-]*://)[^/@\s]+@`)
 // quild.log and a sidebar card.
 func redactURLs(s string) string {
 	return urlUserinfo.ReplaceAllString(s, "${1}***@")
+}
+
+// scpLike matches git's scp-like address, "[user@]host:path". A single
+// letter before the colon is a Windows drive, not a host.
+var scpLike = regexp.MustCompile(`^[^/\:]{2,}:`)
+
+// absLocalAddress returns url with a local relative path made absolute
+// against repo. URLs with a scheme ("ssh://", "file://") and scp-like
+// addresses are returned unchanged; so is an absolute path.
+func absLocalAddress(repo, url string) string {
+	if strings.Contains(url, "://") || scpLike.MatchString(url) || filepath.IsAbs(url) {
+		return url
+	}
+	return filepath.Join(repo, url)
 }

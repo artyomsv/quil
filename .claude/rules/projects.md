@@ -1917,7 +1917,9 @@ exists there, and nothing written to any config file in between can redirect
 it (`isolatedPushEnv`). Inherited `GIT_CONFIG_*`, `GIT_DIR`, `GIT_TRACE*` and
 `GIT_CURL_VERBOSE` are dropped, and every error passes `redactURLs`, because
 the URL is now on argv and git's output reaches quild.log and a sidebar card.
-The remote-tracking ref is dropped after the push.
+A local RELATIVE remote address (`../server.git`) is made absolute against
+the repository first (`absLocalAddress`): from the helper directory it would
+name another folder. The remote-tracking ref is dropped after the push.
 
 **A worktree whose files were not READ is never deleted** — this reverses
 the earlier "the status answer is advisory" rule for the DELETE (the count is

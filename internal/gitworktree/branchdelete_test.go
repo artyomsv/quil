@@ -304,3 +304,44 @@ func TestRedactURLs(t *testing.T) {
 		t.Errorf("redactURLs = %q, want the rest kept", got)
 	}
 }
+
+// Only a local relative path is resolved against the repository.
+func TestAbsLocalAddress(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "repo")
+	for in, want := range map[string]string{
+		"../server.git":                filepath.Join(repo, "../server.git"),
+		"server.git":                   filepath.Join(repo, "server.git"),
+		"git@github.com:o/r.git":       "git@github.com:o/r.git",
+		"ssh://git@host/o/r.git":       "ssh://git@host/o/r.git",
+		"https://host/o/r.git":         "https://host/o/r.git",
+		"file:///srv/r.git":            "file:///srv/r.git",
+		filepath.Join(repo, "abs.git"): filepath.Join(repo, "abs.git"),
+	} {
+		if got := absLocalAddress(repo, in); got != want {
+			t.Errorf("absLocalAddress(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// A remote configured with a RELATIVE path is deleted on the server it
+// names from the repository, although the git calls run in the helper
+// directory.
+//
+// Fails if the relative address is used as-is from the helper directory.
+func TestDeleteRemoteBranch_RealGit_RelativeRemoteResolvesFromTheRepo(t *testing.T) {
+	repo := realGitRepo(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	server := filepath.Join(filepath.Dir(repo), "server.git") // beside the repository
+	runGitIn(t, repo, "init", "--bare", "-q", "-b", "master", server)
+	runGitIn(t, repo, "branch", "feat")
+	runGitIn(t, repo, "remote", "add", "rel", "../server.git")
+	runGitIn(t, repo, "push", "-q", "rel", "master", "feat")
+
+	if err := DeleteRemoteBranch(ctx, repo, "rel", "feat"); err != nil {
+		t.Fatalf("DeleteRemoteBranch: %v", err)
+	}
+	if remoteHas(t, repo, server, "feat") {
+		t.Error("feat is still on the server the relative remote names")
+	}
+}

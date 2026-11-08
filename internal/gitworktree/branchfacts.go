@@ -73,7 +73,7 @@ func ReadBranchFacts(ctx context.Context, repo, worktreePath, defaultRef string)
 			break
 		}
 	}
-	if wt == nil {
+	if wt == nil && len(list) > 1 {
 		// git prints the path as it recorded it, often resolved (/private/tmp
 		// for /tmp on macOS) or in another letter case: ask the disk before
 		// calling the caller's spelling a stranger. Linked worktrees only —

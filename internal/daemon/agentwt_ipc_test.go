@@ -140,7 +140,7 @@ func TestAgentWTAct_BranchEntryDeletesLocally(t *testing.T) {
 	}
 	defaultBranchRefFn = func(context.Context, string) string { return "refs/heads/master" }
 	var deleted []string
-	deleteLocalBranchFn = func(_ context.Context, _, b string) error { deleted = append(deleted, b); return nil }
+	deleteLocalBranchFn = func(_ context.Context, _, b, _ string) error { deleted = append(deleted, b); return nil }
 	t.Cleanup(func() {
 		branchListFn, branchFactsForFn, defaultBranchRefFn, deleteLocalBranchFn = prevList, prevFor, prevDef, prevLocal
 	})

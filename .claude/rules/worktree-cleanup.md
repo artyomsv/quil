@@ -195,15 +195,20 @@ branch after the dialog opened keeps that branch, one row cannot confirm
 another's, and no client can name a branch to delete. **The confirmation also
 pins the branch's TIP** (`BranchFacts.Tip` → `WorktreeStatus.BranchTip` →
 `BranchConfirmation.Tip`, checked by `confirmRefusal`): the name says which
-branch, the tip says what `-D` discards — an agent committing between the
-dialog's unmerged count and the close moves the tip, and the delete is refused
-with "the branch moved after the dialog opened". An older client sends no tip,
-which never matches a real branch, so it can delete none. The cleanup view's
-branch entry checks the same tip. Never the default
-branch, and never with the default branch unknown (unmerged commits could not
-be counted). The delete is `branch -D -- <b>` (the dialog showed the unmerged
-count; git itself refuses a branch checked out in any worktree, which closes
-the race with a sibling worktree). Every refusal and failure is a
+branch, the tip says what the delete discards — an agent committing between
+the dialog's unmerged count and the close moves the tip, and the delete is
+refused with "the branch moved after the dialog opened". An older client sends
+no tip, which never matches a real branch, so it can delete none. The cleanup
+view's branch entry checks the same tip. Never the default branch, and never
+with the default branch unknown (unmerged commits could not be counted). **The
+delete itself is bound to the tip too**, because the facts are read before
+`git worktree remove` and its retries, and a commit can land in that wait:
+`gitworktree.DeleteLocalBranch` refuses a branch any worktree has checked out
+(from git's listing, as `branch -D` would), then runs `git update-ref -d
+refs/heads/<b> <tip>` — git's own locked compare-and-delete, which removes the
+ref only while it still holds the confirmed tip (`ErrBranchMoved` otherwise,
+card "the branch moved after it was confirmed"). It used to be `branch -D`,
+which deletes by NAME. Every refusal and failure is a
 `worktree_branch_kept` sidebar card carrying the CLOSED pane's id and name
 (`paneRef`, captured before the destroy); success is `worktree_branch_deleted`.
 All three close paths go through `removeOwnedWorktreesFn` — the tab close used

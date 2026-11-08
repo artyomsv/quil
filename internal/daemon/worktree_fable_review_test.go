@@ -94,7 +94,7 @@ func TestRemoveWorktreeWithBranch_MovedBranchIsKept(t *testing.T) {
 	}
 	defaultBranchRefFn = func(context.Context, string) string { return "refs/heads/master" }
 	deleted := 0
-	deleteLocalBranchFn = func(context.Context, string, string) error { deleted++; return nil }
+	deleteLocalBranchFn = func(context.Context, string, string, string) error { deleted++; return nil }
 	t.Cleanup(func() { branchFactsFn, defaultBranchRefFn, deleteLocalBranchFn = prevFacts, prevDef, prevLocal })
 	opt := identityOpts()
 	opt.Local = true
@@ -123,7 +123,7 @@ func TestAgentWTAct_BranchMovedSinceTheViewRefused(t *testing.T) {
 	}
 	defaultBranchRefFn = func(context.Context, string) string { return "refs/heads/master" }
 	deleted := 0
-	deleteLocalBranchFn = func(context.Context, string, string) error { deleted++; return nil }
+	deleteLocalBranchFn = func(context.Context, string, string, string) error { deleted++; return nil }
 	t.Cleanup(func() {
 		branchListFn, branchFactsForFn, defaultBranchRefFn, deleteLocalBranchFn = prevList, prevFor, prevDef, prevLocal
 	})
@@ -147,8 +147,9 @@ func TestAgentWT_LoadedBaselineIsRebaselinedOnce(t *testing.T) {
 	first := newAgentWTStore(file, func(string) (agentWTPane, bool) { return agentWTPane{}, false })
 	t0 := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
 	first.apply([]gitworktree.Worktree{{Path: "/repo", Main: true}, {Path: "/w/old", Branch: "old"}},
-		true, []gitworktree.Branch{{Name: "master"}, {Name: "old"}}, "refs/heads/master", agentWTAttr{}, t0)
+		true, []gitworktree.Branch{{Name: "master"}, {Name: "old"}, {Name: "gone-br"}}, "refs/heads/master", agentWTAttr{}, t0)
 	first.entries = append(first.entries, AgentWTEntry{ID: "e-old", Kind: agentWTKindWorktree, Repo: "/repo", Path: "/w/old", Branch: "old", FirstSeen: t0})
+	first.entries = append(first.entries, AgentWTEntry{ID: "e-br-gone", Kind: agentWTKindBranch, Repo: "/repo", Branch: "gone-br", FirstSeen: t0})
 	first.save()
 
 	s := newAgentWTStore(file, func(string) (agentWTPane, bool) { return agentWTPane{}, false })
@@ -169,6 +170,15 @@ func TestAgentWT_LoadedBaselineIsRebaselinedOnce(t *testing.T) {
 		if e.ID == "e-old" && e.Gone {
 			goneOld = true
 		}
+	}
+	goneBr := false
+	for _, e := range s.entries {
+		if e.ID == "e-br-gone" && e.Gone {
+			goneBr = true
+		}
+	}
+	if !goneBr {
+		t.Error("the branch deleted while the daemon was down is not marked gone")
 	}
 	if !goneOld {
 		t.Error("the worktree removed while the daemon was down is not marked gone")
@@ -211,6 +221,7 @@ func TestAgentWT_LoadDropsANullRepository(t *testing.T) {
 // note back.
 func TestWorktreeAdd_OwnWorktreeNotedBeforeTheAdd(t *testing.T) {
 	d, req, checkout := markTestCreate(t)
+	d.agentWT = newAgentWTStore("", func(string) (agentWTPane, bool) { return agentWTPane{}, false })
 	notedDuringAdd := false
 	stubAdd(t, func(context.Context, string, string, string) error {
 		d.agentWT.mu.Lock()
@@ -277,7 +288,7 @@ func TestVerifyAgentBranch_CappedListingIsNoAnswer(t *testing.T) {
 func TestDeleteBranches_RefusalCardCarriesNoGitText(t *testing.T) {
 	d := newTestDaemon(t)
 	prev := deleteLocalBranchFn
-	deleteLocalBranchFn = func(context.Context, string, string) error {
+	deleteLocalBranchFn = func(context.Context, string, string, string) error {
 		return errors.New("error: the branch 'feat/a' is not fully merged at /secret/path")
 	}
 	t.Cleanup(func() { deleteLocalBranchFn = prev })

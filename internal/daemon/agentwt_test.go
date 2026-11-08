@@ -251,8 +251,9 @@ func TestAgentWT_TurnEndComparesProbedReposAndPaneCWD(t *testing.T) {
 	}
 }
 
-// The baseline survives a restart, or the next compare would record nothing
-// it already knew — and everything as new after a lost file.
+// The baseline and the entries survive a restart. The FIRST compare after the
+// load re-baselines (what appeared while no daemon ran — y — is not
+// attributed to a pane); what appears after it — z — is recorded as before.
 func TestAgentWT_PersistRoundTripKeepsBaseline(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "agent-worktrees.json")
 	repo := &fakeRepo{branches: []string{"master"}}
@@ -269,10 +270,16 @@ func TestAgentWT_PersistRoundTripKeepsBaseline(t *testing.T) {
 	t.Cleanup(s2.close) // before TempDir's own cleanup, which runs later
 	repo.worktrees = append(repo.worktrees, gitworktree.Worktree{Path: "/w/y", Branch: "y"})
 	s2.probe(probeFor("pane-a", "/repo"))
+	repo.worktrees = append(repo.worktrees, gitworktree.Worktree{Path: "/w/z", Branch: "z"})
+	s2.probe(probeFor("pane-a", "/repo"))
 
 	got := s2.entriesSnapshot()
-	if len(got) != 2 {
-		t.Fatalf("entries after reload = %+v, want x (kept) and y (new)", got)
+	paths := map[string]bool{}
+	for _, e := range got {
+		paths[e.Path] = true
+	}
+	if len(got) != 2 || !paths["/w/x"] || !paths["/w/z"] {
+		t.Fatalf("entries after reload = %+v, want x (kept) and z (new), not y (made while no daemon ran)", got)
 	}
 }
 

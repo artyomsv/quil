@@ -711,10 +711,16 @@ func (s *agentWTStore) apply(list []gitworktree.Worktree, branchesOK bool, branc
 
 	// Branch half.
 	if branchesOK {
-		if !r.BranchesKnown || r.restoredBranches {
+		if !r.BranchesKnown {
 			r.Branches, r.BranchesKnown, r.restoredBranches = names, true, false
 			return true
 		}
+		// After a load, nothing is recorded as NEW (see restoredWT above),
+		// but a branch deleted while no daemon ran is still marked gone below
+		// — re-baselining first would drop it from the baseline with its
+		// entry still live, and no later compare could mark it.
+		restoredB := r.restoredBranches
+		r.restoredBranches = false
 		baseB := map[string]bool{}
 		for _, b := range r.Branches {
 			baseB[b] = true
@@ -722,7 +728,7 @@ func (s *agentWTStore) apply(list []gitworktree.Worktree, branchesOK bool, branc
 		curB := map[string]bool{}
 		for _, b := range names {
 			curB[b] = true
-			if baseB[b] || b == def {
+			if baseB[b] || b == def || restoredB {
 				continue
 			}
 			if ok := ownBranchKey(repoPath, b); s.ownBranches[ok] {

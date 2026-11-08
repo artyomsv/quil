@@ -26,13 +26,15 @@ func porcelainFor(path, branch string) string {
 }
 
 // factsScript answers the git calls ReadBranchFacts makes: the worktree
-// listing and the unmerged count.
+// listing, the branch tip and the unmerged count.
 func factsScript(t *testing.T, path, branch string) *[][]string {
 	t.Helper()
 	return stubGitScript(t, func(args []string) (string, error) {
 		switch args[0] {
 		case "worktree":
 			return porcelainFor(path, branch), nil
+		case "rev-parse":
+			return "tip-1", nil
 		case "rev-list":
 			return "3\n", nil
 		}
@@ -101,5 +103,14 @@ func TestReadBranchFacts_RealGit_Unmerged(t *testing.T) {
 	}
 	if f.Branch != "feat" || f.Unmerged != 2 || f.IsDefault {
 		t.Errorf("facts = %+v; want branch feat, Unmerged 2, not the default", f)
+	}
+}
+
+// git answers with NO listing (a repository gone between two reads): the
+// facts read is an error, never a crash.
+func TestReadBranchFacts_EmptyListingIsAnError(t *testing.T) {
+	stubGitScript(t, func([]string) (string, error) { return "", nil })
+	if _, err := ReadBranchFacts(context.Background(), "/repo", "/w/x", "refs/heads/master"); err == nil {
+		t.Error("an empty listing produced facts")
 	}
 }

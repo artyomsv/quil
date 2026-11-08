@@ -310,7 +310,10 @@ func (d *Daemon) removeWorktreeWithBranch(path string, opt branchDeleteOpts) rem
 // Each outcome is a sidebar card for owner.
 func (d *Daemon) deleteBranches(repo string, f gitworktree.BranchFacts, opt branchDeleteOpts, owner paneRef) {
 	if opt.Local {
-		if err := d.deleteLocalBranch(repo, f.Branch); err != nil {
+		// f.Tip is the commit the confirmation was checked against, so the
+		// delete removes the branch only while it still points there: a
+		// commit made during the removal and its retries survives.
+		if err := d.deleteLocalBranch(repo, f.Branch, f.Tip); err != nil {
 			d.notifyBranchKept(owner, f.Branch, err.Error())
 		} else {
 			d.notifyBranchDeleted(owner, f.Branch)
@@ -319,16 +322,20 @@ func (d *Daemon) deleteBranches(repo string, f gitworktree.BranchFacts, opt bran
 }
 
 // deleteLocalBranch runs the local delete under its own FS permit and
-// deadline, after the removal released its own.
-func (d *Daemon) deleteLocalBranch(repo, branch string) error {
+// deadline, after the removal released its own. It deletes the branch only
+// while it still points at tip.
+func (d *Daemon) deleteLocalBranch(repo, branch, tip string) error {
 	if !claimBlockingFSCall() {
 		return errors.New("too many filesystem calls in flight")
 	}
 	defer releaseBlockingFSCall()
 	ctx, cancel := context.WithTimeout(context.Background(), worktreeRemoveTimeout)
 	defer cancel()
-	if err := deleteLocalBranchFn(ctx, repo, branch); err != nil {
+	if err := deleteLocalBranchFn(ctx, repo, branch, tip); err != nil {
 		log.Printf("worktree remove: branch %s kept: %v", branch, err)
+		if errors.Is(err, gitworktree.ErrBranchMoved) {
+			return errors.New("the branch moved after it was confirmed")
+		}
 		// git's own text (paths, the ref) stays in the log: the card says
 		// only that git refused.
 		return errors.New("git refused the delete (see quild.log)")

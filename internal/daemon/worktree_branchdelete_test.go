@@ -32,7 +32,7 @@ func stubBranchDelete(t *testing.T, facts gitworktree.BranchFacts) *branchStubs 
 	prevFacts, prevDef, prevLocal := branchFactsFn, defaultBranchRefFn, deleteLocalBranchFn
 	branchFactsFn = func(context.Context, string, string, string) (gitworktree.BranchFacts, error) { return facts, nil }
 	defaultBranchRefFn = func(context.Context, string) string { return "refs/heads/master" }
-	deleteLocalBranchFn = func(_ context.Context, _, branch string) error {
+	deleteLocalBranchFn = func(_ context.Context, _, branch, _ string) error {
 		rec.local = append(rec.local, branch)
 		return nil
 	}

@@ -129,8 +129,8 @@ func checkStatusVisible(ctx context.Context, path string) error {
 // unterminated record, or git failing. When ctx ends the pipe is closed, so
 // the read returns even if a descendant still holds git's stdout, and git is
 // always reaped. A seam like runGit.
-var scanGitRecords = func(ctx context.Context, dir string, fn func(string) error, args ...string) error {
-	ctx, cancel := context.WithCancel(ctx)
+var scanGitRecords = func(parent context.Context, dir string, fn func(string) error, args ...string) error {
+	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, gitBinary, args...)
 	cmd.Dir = dir
@@ -155,8 +155,10 @@ var scanGitRecords = func(ctx context.Context, dir string, fn func(string) error
 	waitErr := cmd.Wait()
 	switch {
 	case scanErr != nil:
-		if ctx.Err() != nil && !errors.Is(scanErr, ErrHiddenState) {
-			return ctx.Err()
+		// Only the CALLER's deadline replaces the cause: our own cancel()
+		// above merely stopped git and must not hide why the scan failed.
+		if parent.Err() != nil && !errors.Is(scanErr, ErrHiddenState) {
+			return parent.Err()
 		}
 		return scanErr
 	case waitErr != nil:

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -292,5 +293,18 @@ func TestScanNULRecords(t *testing.T) {
 	err = scanNULRecords(strings.NewReader("a\x00b\x00c\x00"), 64, func(string) error { calls++; return stop })
 	if !errors.Is(err, stop) || calls != 1 {
 		t.Errorf("fn refusal: err = %v after %d calls, want stop after 1", err, calls)
+	}
+}
+
+// A scan that fails keeps its CAUSE: stopping git after the failure must not
+// turn the error into context.Canceled. `git --version` prints one line with
+// no NUL, so the scan ends inside a record.
+func TestScanGitRecords_RealGit_FailureKeepsItsCause(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not on PATH")
+	}
+	err := scanGitRecords(context.Background(), t.TempDir(), func(string) error { return nil }, "--version")
+	if !errors.Is(err, errUnterminatedRecord) {
+		t.Errorf("err = %v, want errUnterminatedRecord (not the internal cancel)", err)
 	}
 }

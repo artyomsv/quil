@@ -3,6 +3,7 @@ package daemon
 import (
 	"errors"
 	"fmt"
+	"os/exec"
 	"testing"
 	"time"
 
@@ -376,37 +377,6 @@ func TestAgentWTAct_SubagentOverflowRefusesCleanup(t *testing.T) {
 	}
 }
 
-// A process that dies past the subagent bound stops blocking: the exit
-// clears its subagent records (an abort never reaches the idle settle).
-//
-// Fails if only settleIdle clears subOverflow.
-func TestAgentWT_ProcessExitClearsSubagentOverflow(t *testing.T) {
-	d := newTestDaemon(t)
-	pane := spawnedPane(t, d)
-	s, _ := newTestAgentWT(t, &fakeRepo{branches: []string{"master"}}, nil)
-	s.paneFn, s.now = d.paneForAgentWT, time.Now
-	d.agentWT = s
-	for i := 0; i <= maxAgentWTSubagents; i++ {
-		p := probeFor(pane.ID, "/w/sub")
-		p.Data[hookevents.DataProbeAgent] = fmt.Sprintf("sub-%d", i)
-		s.probe(p)
-	}
-	if got := s.paneInDir("/w/unrelated"); got != pane.ID {
-		t.Fatalf("paneInDir = %q before the exit, want the overflowing pane", got)
-	}
-
-	d.emitEvent(hookEvent(pane, "hook.claude.UserPromptSubmit", nil))
-	d.emitEvent(hookEvent(pane, "process_exit", map[string]string{"exit_code": "1"}))
-
-	deadline := time.Now().Add(time.Second)
-	for s.paneInDir("/w/unrelated") != "" {
-		if time.Now().After(deadline) {
-			t.Fatal("the exited pane still blocks every path")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-}
-
 // An incomplete pre-start read never becomes a silent baseline. A timeout
 // (the fake honours the deadline) and a cut branch list each mark the
 // repository Uncertain, which the cleanup view shows; a quick "not a
@@ -429,8 +399,12 @@ func TestAgentWT_IncompleteSeedMarksTheRepositoryUncertain(t *testing.T) {
 			func(r *fakeRepo) { r.gate = nil }, true},
 		{"cut branch list", &fakeRepo{branches: []string{"master"}, truncated: true},
 			func(r *fakeRepo) { r.truncated = false }, true},
-		{"not a repository", &fakeRepo{branches: []string{"master"}, listErr: errors.New("not a git repository")},
+		{"not a repository", &fakeRepo{branches: []string{"master"}, listErr: errors.New("fatal: not a git repository (or any of the parent directories): .git")},
 			func(r *fakeRepo) { r.listErr = nil }, false},
+		{"truncated listing", &fakeRepo{branches: []string{"master"}, listErr: fmt.Errorf("%w: big", gitworktree.ErrOutputTruncated)},
+			func(r *fakeRepo) { r.listErr = nil }, true},
+		{"git missing", &fakeRepo{branches: []string{"master"}, listErr: exec.ErrNotFound},
+			func(r *fakeRepo) { r.listErr = nil }, true},
 		{"complete", &fakeRepo{branches: []string{"master"}}, func(*fakeRepo) {}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -466,5 +440,81 @@ func TestAgentWorktreesResponse_CarriesUncertainRepos(t *testing.T) {
 
 	if len(got.UncertainRepos) != 1 || got.UncertainRepos[0] != "/repo" {
 		t.Errorf("UncertainRepos = %v, want [/repo]", got.UncertainRepos)
+	}
+}
+
+// A child that dies past the subagent bound stops blocking, and its exit
+// clears ONLY its own records: old child exits → the pane restarts → the new
+// child's subagent probes → the old exit's cleanup runs late. The new
+// subagent keeps its worktree; the old overflow is gone.
+//
+// Fails if the exit cleanup is bound to a clock instead of the generation.
+func TestAgentWT_LateExitCleanupKeepsTheRestartedChildsRecords(t *testing.T) {
+	gen := uint64(1)
+	s, _ := newTestAgentWT(t, &fakeRepo{branches: []string{"master"}}, nil)
+	s.paneFn = func(id string) (agentWTPane, bool) {
+		return agentWTPane{Name: "claude", CWD: "/repo", Gen: gen}, id == "pane-a"
+	}
+	for i := 0; i <= maxAgentWTSubagents; i++ { // the old child overflows
+		p := probeFor("pane-a", "/w/old")
+		p.Data[hookevents.DataProbeAgent] = fmt.Sprintf("old-%d", i)
+		s.probe(p)
+	}
+	if got := s.paneInDir("/w/unrelated"); got != "pane-a" {
+		t.Fatalf("paneInDir = %q before the exit, want the overflowing pane", got)
+	}
+
+	gen = 2 // the old child exited and the pane restarted …
+	p := probeFor("pane-a", "/w/new")
+	p.Data[hookevents.DataProbeAgent] = "new-1" // … the new child's subagent probes …
+	s.probe(p)
+	s.subagentsExited("pane-a", 1) // … and only now the old exit is handled
+
+	if got := s.paneInDir("/w/unrelated"); got != "" {
+		t.Errorf("paneInDir(/w/unrelated) = %q, want the old overflow cleared", got)
+	}
+	if got := s.paneInDir("/w/old"); got != "" {
+		t.Errorf("paneInDir(/w/old) = %q, want the old child's records cleared", got)
+	}
+	if got := s.paneInDir("/w/new"); got != "pane-a" {
+		t.Errorf("paneInDir(/w/new) = %q, want the new child's subagent kept", got)
+	}
+}
+
+// The daemon's exit handler is what calls the cleanup.
+//
+// Fails if onPaneExitGeneration stops clearing the exited child's records.
+func TestOnPaneExit_ClearsTheChildsSubagentRecords(t *testing.T) {
+	d := daemonWithRecord(t)
+	tab := d.session.CreateTab("t")
+	pane, err := d.session.CreatePane(tab.ID, "/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.agentWT.subDirs[pane.ID] = map[string]agentDir{"sub": {Dir: "/w/a"}}
+	d.agentWT.subOverflow[pane.ID] = agentDir{}
+
+	d.onPaneExit(pane, 1)
+
+	if got := d.agentWT.paneInDir("/w/a"); got != "" {
+		t.Errorf("paneInDir(/w/a) = %q after the exit, want none", got)
+	}
+}
+
+// The daemon refuses a cleanup in an uncertain repository unless the request
+// acknowledges it — any IPC client can send the act.
+//
+// Fails if the Uncertain mark is display-only.
+func TestAgentWTAct_UncertainRepoNeedsTheAcknowledgment(t *testing.T) {
+	d := daemonWithRecord(t, wtEntry)
+	d.agentWT.repos["/repo"] = &agentWTRepo{Path: "/repo", Uncertain: true}
+	stubWorktreeList(t, []gitworktree.Worktree{{Path: "/repo", Main: true}, {Path: "/w/x", Branch: "x"}}, nil)
+	calls := stubRemoveWorktree(t, nil)
+
+	if got := d.agentWorktreeAct(ipc.AgentWorktreeActReqPayload{ID: "e-wt", RemoveWorktree: true}); got.Error == "" || len(*calls) != 0 {
+		t.Fatalf("act = %+v, removals %v; want a refusal without the acknowledgment", got, *calls)
+	}
+	if got := d.agentWorktreeAct(ipc.AgentWorktreeActReqPayload{ID: "e-wt", RemoveWorktree: true, AcceptUncertain: true}); got.Error != "" || len(*calls) != 1 {
+		t.Errorf("act = %+v, removals %v; want the removal once acknowledged", got, *calls)
 	}
 }

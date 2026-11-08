@@ -72,6 +72,10 @@ type AgentWorktreeActReqPayload struct {
 	// showed for this entry (its WorktreePath is ignored: the entry names
 	// the worktree).
 	Confirmation BranchConfirmation `json:"confirmation"`
+	// AcceptUncertain acknowledges that this entry's repository record may
+	// miss items (UncertainRepos). The daemon refuses a removal or delete in
+	// such a repository without it.
+	AcceptUncertain bool `json:"accept_uncertain,omitempty"`
 }
 
 // AgentWorktreeActRespPayload answers an act. Error is a refusal that changed

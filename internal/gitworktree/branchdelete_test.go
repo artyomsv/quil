@@ -235,3 +235,49 @@ func TestDeleteRemoteBranch_RealGit_FailsClosed(t *testing.T) {
 		}
 	}
 }
+
+// The address is frozen between the default check and the push. The remote
+// is pointed at another server in exactly that window — one whose default IS
+// the branch and which would accept deleting it. The push still goes to the
+// checked server; the other one is untouched.
+//
+// Fails if the push resolves the remote's name again.
+func TestDeleteRemoteBranch_RealGit_PushGoesToTheCheckedAddress(t *testing.T) {
+	repo := realGitRepo(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	runGitIn(t, repo, "branch", "feat")
+	checked := bareRemote(t, repo, "checked", "master")
+	other := bareRemote(t, repo, "other", "feat") // its default is feat
+	for _, url := range []string{checked, other} {
+		runGitIn(t, repo, "push", "-q", url, "master", "feat")
+	}
+	runGitIn(t, repo, "remote", "add", "r", checked)
+
+	prev := afterRemoteCheck
+	afterRemoteCheck = func() { runGitIn(t, repo, "remote", "set-url", "r", other) }
+	t.Cleanup(func() { afterRemoteCheck = prev })
+
+	if err := DeleteRemoteBranch(ctx, repo, "r", "feat"); err != nil {
+		t.Fatalf("DeleteRemoteBranch: %v", err)
+	}
+	if !remoteHas(t, repo, other, "feat") {
+		t.Fatal("feat was deleted from the server that was never checked")
+	}
+	if remoteHas(t, repo, checked, "feat") {
+		t.Error("feat is still on the checked server")
+	}
+}
+
+// A url rewrite that would still change the frozen address refuses.
+func TestNoURLRewrite_RefusesARewrittenAddress(t *testing.T) {
+	repo := realGitRepo(t)
+	ctx := context.Background()
+	if err := noURLRewrite(ctx, repo, "/srv/a.git"); err != nil {
+		t.Fatalf("no rules: %v", err)
+	}
+	runGitIn(t, repo, "config", "url./srv/b.git.pushInsteadOf", "/srv/a")
+	if err := noURLRewrite(ctx, repo, "/srv/a.git"); err == nil {
+		t.Error("a pushInsteadOf rule matching the address was not refused")
+	}
+}

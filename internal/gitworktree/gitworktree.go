@@ -530,3 +530,11 @@ func ParseStatusZ(out string) (files []FileChange, total int) {
 	}
 	return files, total
 }
+
+// IsNotRepository reports that git ANSWERED that dir is in no repository —
+// as opposed to an error that says nothing about the directory (a truncated
+// listing, git missing, a timeout). Matched on git's message; a localized
+// git does not match, which falls to "unknown", the safe side.
+func IsNotRepository(err error) bool {
+	return err != nil && !errors.Is(err, ErrOutputTruncated) && strings.Contains(err.Error(), "not a git repository")
+}

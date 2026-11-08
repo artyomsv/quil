@@ -248,7 +248,8 @@ func (m Model) agentWTBranchEntry() bool {
 func (m Model) sendAgentWTAct(removeWorktree, local, remote bool, confirmed []ipc.BranchConfirmation) (tea.Model, tea.Cmd) {
 	e := m.agentWT.entry
 	m.dialog = dialogAgentWorktrees
-	req := ipc.AgentWorktreeActReqPayload{ID: e.ID, DeleteBranch: local, DeleteRemoteBranch: remote}
+	req := ipc.AgentWorktreeActReqPayload{ID: e.ID, DeleteBranch: local, DeleteRemoteBranch: remote,
+		AcceptUncertain: m.agentWTEntryUncertain()}
 	if e.Kind != "branch" {
 		req.RemoveWorktree = removeWorktree
 	}
@@ -386,4 +387,21 @@ func agentWTAge(firstSeenMs int64) string {
 	default:
 		return fmt.Sprintf("%dd", int(d.Hours()/24))
 	}
+}
+
+// agentWTEntryUncertain reports that the entry the view acts on is in a
+// repository whose record may miss items.
+func (m Model) agentWTEntryUncertain() bool {
+	for _, r := range m.agentWT.uncertain {
+		if r == m.agentWT.entry.Repo {
+			return true
+		}
+	}
+	return false
+}
+
+// agentWTUncertainOpen reports that the open confirm is about such an
+// entry: its accept then takes `y` only and carries AcceptUncertain.
+func (m Model) agentWTUncertainOpen() bool {
+	return m.confirmKind == confirmKindAgentWT && m.agentWTEntryUncertain()
 }

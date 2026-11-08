@@ -2,6 +2,7 @@ package gitworktree
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -38,11 +39,16 @@ func DeleteRemoteBranch(ctx context.Context, repo, remote, branch string) error 
 	if remote == "" || branch == "" || strings.HasPrefix(remote, "-") {
 		return fmt.Errorf("no remote branch to delete")
 	}
-	// The default is checked on the FETCH address, and the push goes to the
-	// push address(es): pushurl, several urls, or pushInsteadOf make them
-	// differ. Only one address, the same for both, binds the check to the
-	// delete; anything else refuses.
-	if err := singlePushTarget(ctx, repo, remote); err != nil {
+	// The address is resolved ONCE and FROZEN: the default check and the
+	// push both use that URL, never the remote's name, so a config change in
+	// between cannot send the push to a server that was never checked. Only
+	// one address, the same for fetch and push, can be frozen; and a URL a
+	// rewrite rule would still change is refused.
+	url, err := singlePushTarget(ctx, repo, remote)
+	if err != nil {
+		return fmt.Errorf("git push %s :%s: %w", remote, branch, err)
+	}
+	if err := noURLRewrite(ctx, repo, url); err != nil {
 		return fmt.Errorf("git push %s :%s: %w", remote, branch, err)
 	}
 	env := remotePushEnvFor(ctx, repo, os.Environ())
@@ -50,15 +56,15 @@ func DeleteRemoteBranch(ctx context.Context, repo, remote, branch string) error 
 	// the local refs/remotes/<remote>/HEAD can be stale (the remote changed
 	// its default since the last set-head), and this is the last moment a
 	// wrong answer can be stopped. No answer refuses.
-	def, err := remoteHeadLive(ctx, repo, env, remote)
+	def, err := remoteHeadLive(ctx, repo, env, url)
 	if err != nil {
 		return fmt.Errorf("git push %s :%s: could not confirm the remote's default branch: %w", remote, branch, err)
 	}
 	if def == branch {
 		return fmt.Errorf("git push %s :%s: it is the remote's default branch", remote, branch)
 	}
-	args := RemotePushArgs(remote, branch)
-	out, err := runPush(ctx, repo, env, args)
+	afterRemoteCheck()
+	out, err := runPush(ctx, repo, env, RemotePushArgs(url, branch))
 	if err != nil {
 		msg := strings.TrimSpace(out)
 		if len(msg) > 400 {
@@ -68,6 +74,34 @@ func DeleteRemoteBranch(ctx context.Context, repo, remote, branch string) error 
 			return fmt.Errorf("git push %s :%s: timed out", remote, branch)
 		}
 		return fmt.Errorf("git push %s :%s: %w: %s", remote, branch, err, msg)
+	}
+	// A push by URL does not update the remote-tracking ref; drop it so the
+	// next facts do not report a branch the remote no longer has.
+	_, _ = runGit(ctx, repo, "update-ref", "-d", "refs/remotes/"+remote+"/"+branch) // best-effort: a stale ref only mis-reports, the next fetch fixes it
+	return nil
+}
+
+// afterRemoteCheck runs between the default check and the push. A seam only,
+// so a test can change the remote's configuration in exactly that window.
+var afterRemoteCheck = func() {}
+
+// noURLRewrite refuses a URL that an insteadOf or pushInsteadOf rule would
+// still rewrite when pushed to directly: the frozen address must be the
+// address the push reaches.
+func noURLRewrite(ctx context.Context, repo, url string) error {
+	out, err := runGit(ctx, repo, "config", "--get-regexp", `^url\..*\.(insteadof|pushinsteadof)$`)
+	if err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && ee.ExitCode() == 1 {
+			return nil // no rewrite rules at all
+		}
+		return fmt.Errorf("could not read the url rewrite rules: %w", err)
+	}
+	for _, l := range strings.Split(strings.ReplaceAll(out, "\r\n", "\n"), "\n") {
+		_, prefix, ok := strings.Cut(strings.TrimSpace(l), " ")
+		if ok && prefix != "" && strings.HasPrefix(url, prefix) {
+			return fmt.Errorf("a url rewrite rule applies to the remote's address")
+		}
 	}
 	return nil
 }
@@ -169,8 +203,8 @@ func remoteHeadLive(ctx context.Context, repo string, env []string, remote strin
 // singlePushTarget refuses unless remote has exactly ONE fetch address and
 // exactly ONE push address and they are the same, after git's own insteadOf
 // and pushInsteadOf expansion (`git remote get-url` applies both). Local
-// config only, no network.
-func singlePushTarget(ctx context.Context, repo, remote string) error {
+// config only, no network. It returns that one address.
+func singlePushTarget(ctx context.Context, repo, remote string) (string, error) {
 	urls := func(push bool) ([]string, error) {
 		args := []string{"remote", "get-url", "--all"}
 		if push {
@@ -190,14 +224,14 @@ func singlePushTarget(ctx context.Context, repo, remote string) error {
 	}
 	fetch, err := urls(false)
 	if err != nil {
-		return fmt.Errorf("could not read the remote's address: %w", err)
+		return "", fmt.Errorf("could not read the remote's address: %w", err)
 	}
 	push, err := urls(true)
 	if err != nil {
-		return fmt.Errorf("could not read the remote's push address: %w", err)
+		return "", fmt.Errorf("could not read the remote's push address: %w", err)
 	}
 	if len(fetch) != 1 || len(push) != 1 || fetch[0] != push[0] {
-		return fmt.Errorf("the remote pushes to a different or to several addresses (%d fetch, %d push)", len(fetch), len(push))
+		return "", fmt.Errorf("the remote pushes to a different or to several addresses (%d fetch, %d push)", len(fetch), len(push))
 	}
-	return nil
+	return fetch[0], nil
 }

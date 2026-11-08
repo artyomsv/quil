@@ -154,6 +154,13 @@ func (d *Daemon) agentWorktreeAct(req ipc.AgentWorktreeActReqPayload) ipc.AgentW
 		out.Notice = "Forgotten. Git is unchanged."
 		return out
 	}
+	// A repository whose record may miss items needs an explicit
+	// acknowledgment: enforced HERE, not only in the view, because any IPC
+	// client can send this request.
+	if d.agentWT.repoUncertain(e.Repo) && !req.AcceptUncertain {
+		out.Error = "this repository's record may miss items: confirm with y in the view"
+		return out
+	}
 	owner := paneRef{ID: e.PaneID, Name: e.PaneName}
 	// The confirmation is filed under the ENTRY's own path: the client's copy
 	// of a path is never trusted to say which worktree it is about.

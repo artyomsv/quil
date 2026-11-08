@@ -171,3 +171,37 @@ func TestAgentWTDialog_ShowsUncertainReposAndStillFits(t *testing.T) {
 		t.Error("the footer is not drawn")
 	}
 }
+
+// An entry in a repository whose record may miss items says so, refuses
+// Enter, and its `y` carries the acknowledgment the daemon requires.
+//
+// Fails if the uncertainty is display-only in the confirm.
+func TestAgentWTDialog_UncertainRepoNeedsY(t *testing.T) {
+	m := agentWTModel(wtInfo("a", "/proj", "feat/a"))
+	m.agentWT.uncertain = []string{"/proj"}
+	fake := &fakeSender{}
+	m.client = fake
+	mdl, _ := m.openAgentWTConfirm(m.visibleAgentWT()[0])
+	m = mdl.(Model)
+	m.applyAgentWTFacts(agentWTFactsMsg{Gen: m.confirmWorktreeGen, Resp: ipc.AgentWorktreeFactsRespPayload{
+		ID: "a", Status: ipc.WorktreeStatus{Changes: 1, Files: []ipc.WorktreeFile{{Code: "??", Path: "x.txt"}}, Branch: "feat/a"},
+	}})
+	if out := stripANSI(m.renderConfirmDialog()); !strings.Contains(out, "may miss items") {
+		t.Errorf("no uncertainty warning in the confirm:\n%s", out)
+	}
+
+	m = confirmPress(m, " ") // worktree
+	fake.sent = nil
+	m = confirmPress(m, "enter")
+	if len(fake.sent) != 0 || m.dialog != dialogConfirm {
+		t.Fatalf("Enter acted in an uncertain repository (sent %d)", len(fake.sent))
+	}
+
+	mdl, cmd := m.handleConfirmKey(keyPressFor("y"))
+	_ = mdl
+	runCmd(cmd)
+	var req ipc.AgentWorktreeActReqPayload
+	if !decodeSent(t, fake, ipc.MsgAgentWorktreeActReq, &req) || !req.AcceptUncertain || !req.RemoveWorktree {
+		t.Errorf("request = %+v, want the removal with AcceptUncertain", req)
+	}
+}

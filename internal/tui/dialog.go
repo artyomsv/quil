@@ -1211,6 +1211,11 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if len(m.confirmWorktrees) > 0 && m.remoteDeleteArmed() && msg.String() != "y" {
 			return m, nil
 		}
+		// So does a cleanup in a repository whose record may miss items:
+		// the `y` is the acknowledgment the daemon asks for.
+		if m.agentWTUncertainOpen() && msg.String() != "y" {
+			return m, nil
+		}
 		// A ticked worktree is removed only once its file list is on screen:
 		// git status on a large repository takes seconds, and that window is
 		// the ordinary case. And only when the files were READ: a timeout or
@@ -2111,6 +2116,11 @@ func (m Model) renderConfirmDialog() string {
 		footer = "space toggle  ↑↓ row  Enter confirm  Esc back"
 		if m.remoteDeleteArmed() {
 			footer = "space toggle  ↑↓ row  y delete remote  Esc back"
+		}
+		if m.agentWTUncertainOpen() {
+			b.WriteString("\n\n  " + dialogWarn.Render(truncateToWidth(
+				"⚠ This repository's record may miss items (read late).", inner-2)))
+			footer = "space toggle  ↑↓ row  y confirm  Esc back"
 		}
 	default:
 		label := fmt.Sprintf("Close %s %q?", m.confirmKind, m.confirmName)

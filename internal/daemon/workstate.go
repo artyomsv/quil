@@ -56,13 +56,9 @@ func (d *Daemon) applyWorkEvent(pane *Pane, e PaneEvent) hookevents.Transition {
 		}
 		subs := pane.idleSubs
 		pane.idleSubs = nil
-		// The process died with its subagents: none of them works in a
-		// worktree any more, and an abort never reaches settleIdle. Only
-		// records up to now go — a restarted process's probes are newer.
-		exitAt := time.Now()
-		paneID := pane.ID
+		// (Subagent worktree records of the dead child are cleared in
+		// onPaneExitGeneration, bound to its PTY generation.)
 		go func() {
-			d.agentWT.subagentsDone(paneID, exitAt)
 			for _, fn := range subs {
 				fn(true)
 			}

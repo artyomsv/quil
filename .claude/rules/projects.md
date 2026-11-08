@@ -1864,10 +1864,14 @@ held): a listing taken after the agent's first `git worktree add` would adopt
 that worktree as pre-existing for good. A failed or slow listing does not hold
 the agent back — the spawn goes on, the pane is not marked seeded, and the
 turn-start seed retries. An INCOMPLETE read (timeout, no permit, a cut
-branch list — not a quick "not a repository") marks the pane `seedFailed`, and
+branch list, a truncated listing, git missing — anything but git ANSWERING
+"not a git repository" (`gitworktree.IsNotRepository`)) marks the pane `seedFailed`, and
 every repository its compares then see for the first time is baselined
 `Uncertain` (persisted): the cleanup view says "may miss items" for it rather
-than presenting a baseline that may already hold what the agent made. A
+than presenting a baseline that may already hold what the agent made. It is
+ENFORCED, not only shown: the daemon refuses a cleanup act in an Uncertain
+repository unless the request carries `AcceptUncertain`, and the view's confirm
+says so and takes `y` only to send it. A
 RESTORED pane seeds off-goroutine (`seedSoon`):
 restore runs before the daemon listens, and a resumed agent waits for a
 prompt. A pane counts as seeded only after a compare that READ the
@@ -1881,7 +1885,9 @@ each stamped with when it arrived. The idle settle (`settleIdle` →
 only directories recorded at or before it, so a next turn's subagent that
 probes in between survives. Past `maxAgentWTSubagents` between two settles
 the pane FAILS CLOSED (`subOverflow`): it counts as in use for every path
-until a settle — or the process exiting (`applyWorkEvent`'s abort arm) —
+until a settle — or that child's process exiting (`onPaneExitGeneration` →
+`subagentsExited(pane, gen)`: records carry the PTY generation that reported
+them, so a late exit of an old child never clears a restarted one's) —
 clears the mark.
 
 **A gone worktree's surviving branch is queued on the REPOSITORY**
@@ -1897,7 +1903,12 @@ can be stale. No answer, or no symref in it, refuses the delete. And the
 check must be ABOUT the server the push reaches: `ls-remote` uses the fetch
 address, a push uses `pushurl`, every `url`, or a `pushInsteadOf` rewrite —
 so `singlePushTarget` refuses unless `git remote get-url --all` and
-`get-url --push --all` each give exactly one address and the same one.
+`get-url --push --all` each give exactly one address and the same one. That
+address is FROZEN: the `ls-remote` check and the push both use the URL, never
+the remote name, so a config change between them cannot redirect the push
+(`afterRemoteCheck` is the test seam for that window); a URL an
+`insteadOf`/`pushInsteadOf` rule would still rewrite is refused
+(`noURLRewrite`), and the remote-tracking ref is dropped after the push.
 
 **A worktree whose files were not READ is never deleted** — this reverses
 the earlier "the status answer is advisory" rule for the DELETE (the count is

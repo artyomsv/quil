@@ -117,6 +117,9 @@ type agentWTAttr struct {
 type agentWTPane struct {
 	Name, CWD string
 	Sandbox   bool
+	// Gen is the pane's PTY generation (ptyGen) when it was read: a
+	// subagent record is tied to the child that reported it.
+	Gen uint64
 }
 
 type agentWTStore struct {
@@ -148,7 +151,7 @@ type agentWTStore struct {
 	// maxAgentWTSubagents since its last idle settle (with when): some
 	// subagent's directory is unknown, so the pane counts as in use for
 	// EVERY path until the settle clears it.
-	subOverflow map[string]time.Time
+	subOverflow map[string]agentDir
 	// seeded is the directory each pane's baseline was last seeded for.
 	seeded map[string]string
 	// seedFailed marks a pane whose pre-start baseline could not be read in
@@ -182,7 +185,7 @@ func newAgentWTStore(path string, paneFn func(string) (agentWTPane, bool)) *agen
 		ownBranches: map[string]bool{},
 		agentDirs:   map[string]string{},
 		subDirs:     map[string]map[string]agentDir{},
-		subOverflow: map[string]time.Time{},
+		subOverflow: map[string]agentDir{},
 		seeded:      map[string]string{},
 		seedFailed:  map[string]bool{},
 		running:     map[string]bool{},
@@ -204,7 +207,7 @@ func (d *Daemon) paneForAgentWT(id string) (agentWTPane, bool) {
 	}
 	p.PluginMu.Lock()
 	defer p.PluginMu.Unlock()
-	return agentWTPane{Name: p.Name, CWD: p.CWD, Sandbox: p.SandboxImage != "" || p.SandboxBackend != ""}, true
+	return agentWTPane{Name: p.Name, CWD: p.CWD, Sandbox: p.SandboxImage != "" || p.SandboxBackend != "", Gen: p.ptyGen}, true
 }
 
 // probe answers one WorktreeProbe: it remembers the directory for the pane's
@@ -232,11 +235,11 @@ func (s *agentWTStore) probe(p hookevents.Payload) {
 			s.subDirs[p.PaneID] = map[string]agentDir{}
 		}
 		if _, known := s.subDirs[p.PaneID][agent]; known || len(s.subDirs[p.PaneID]) < maxAgentWTSubagents {
-			s.subDirs[p.PaneID][agent] = agentDir{Dir: p.CWD, At: s.now()}
+			s.subDirs[p.PaneID][agent] = agentDir{Dir: p.CWD, At: s.now(), Gen: pane.Gen}
 		} else {
 			// Fail closed: this subagent's directory is not kept, so no
 			// path of this pane may be treated as free.
-			s.subOverflow[p.PaneID] = s.now()
+			s.subOverflow[p.PaneID] = agentDir{At: s.now(), Gen: pane.Gen}
 		}
 	}
 	if s.touched[p.PaneID] == nil {
@@ -298,6 +301,7 @@ func (s *agentWTStore) forgetPane(paneID string) {
 type agentDir struct {
 	Dir string
 	At  time.Time
+	Gen uint64 // the PTY generation that reported it
 }
 
 // subagentsDone drops a pane's subagent directories recorded at or before
@@ -320,7 +324,7 @@ func (s *agentWTStore) subagentsDone(paneID string, idleAt time.Time) {
 	if len(s.subDirs[paneID]) == 0 {
 		delete(s.subDirs, paneID)
 	}
-	if at, ok := s.subOverflow[paneID]; ok && !at.After(idleAt) {
+	if o, ok := s.subOverflow[paneID]; ok && !o.At.After(idleAt) {
 		delete(s.subOverflow, paneID)
 	}
 }
@@ -543,10 +547,13 @@ func (s *agentWTStore) compareWithin(dir string, attr agentWTAttr, timeout time.
 	// An unreadable listing compares NOTHING and marks nothing gone, the rule
 	// worktreeRegistered follows: an unknown answer never authorises a change.
 	if err != nil || len(list) == 0 || list[0].Path == "" {
-		if timedOut {
-			return seedIncomplete
+		// Only git ANSWERING "no repository" (or an empty success) is a
+		// clean no; a timeout, a truncated listing, git missing or any other
+		// error says nothing about the directory.
+		if !timedOut && (err == nil || gitworktree.IsNotRepository(err)) {
+			return seedNoRepo
 		}
-		return seedNoRepo
+		return seedIncomplete
 	}
 
 	s.mu.Lock()
@@ -944,4 +951,39 @@ func (s *agentWTStore) uncertainRepos() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// subagentsExited drops the subagent records of the child at PTY generation
+// gen (and older): its process exited, taking its subagents with it. Records
+// of a newer child — a restart that already probed before this exit was
+// processed — are kept, whatever the clock says. The main agent's directory
+// stays, as on an idle settle.
+func (s *agentWTStore) subagentsExited(paneID string, gen uint64) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for agent, d := range s.subDirs[paneID] {
+		if d.Gen <= gen {
+			delete(s.subDirs[paneID], agent)
+		}
+	}
+	if len(s.subDirs[paneID]) == 0 {
+		delete(s.subDirs, paneID)
+	}
+	if o, ok := s.subOverflow[paneID]; ok && o.Gen <= gen {
+		delete(s.subOverflow, paneID)
+	}
+}
+
+// repoUncertain reports that repo's baseline is marked Uncertain.
+func (s *agentWTStore) repoUncertain(repo string) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r := s.repos[normalizeWorktreePath(repo)]
+	return r != nil && r.Uncertain
 }

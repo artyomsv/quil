@@ -4978,8 +4978,17 @@ func (d *Daemon) onPaneExitGeneration(pane *Pane, code int, generation uint64) {
 	pane.ExitCode = &code
 	pane.ExitedAt = time.Now()
 	isOverlay := pane.Overlay
+	exitGen := generation
+	if exitGen == 0 {
+		exitGen = pane.ptyGen
+	}
 	pane.PluginMu.Unlock()
 	log.Printf("pane %s: process exited with code %d", pane.ID, code)
+
+	// The child died with its subagents: their worktrees are free. Bound to
+	// THIS child's generation, so a restart that already probed keeps its
+	// own records however late this exit is handled.
+	d.agentWT.subagentsExited(pane.ID, exitGen)
 
 	// The run's unfinished last line gets its one notice match now: a tool
 	// that prints "please update to v1.55.1" and exits without a newline

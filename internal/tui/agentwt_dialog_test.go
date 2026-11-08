@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
+
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
@@ -234,5 +237,127 @@ func TestAgentWTDialog_ActAnswerRefreshesUnderTheConfirm(t *testing.T) {
 	var req struct{}
 	if !decodeSent(t, fake, ipc.MsgAgentWorktreesReq, &req) {
 		t.Error("an act answered under the confirm did not refresh the list")
+	}
+}
+
+// The list's keys: the cursor moves and stops at both ends; g shows the gone
+// entries and resets the cursor; Enter on a gone entry only explains; f
+// forgets the entry under the cursor, by id; Esc closes and clears the view.
+func TestAgentWTDialog_ListKeys(t *testing.T) {
+	gone := wtInfo("c", "/proj", "p3")
+	gone.Gone = true
+	m := agentWTModel(wtInfo("a", "/proj", "p1"), wtInfo("b", "/proj", "p2"), gone)
+	fake := &fakeSender{}
+	m.client = fake
+	press := func(k string) tea.Cmd {
+		mdl, cmd := m.handleAgentWTKey(keyPressFor(k))
+		m = mdl.(Model)
+		return cmd
+	}
+
+	press("down")
+	press("down") // only two visible rows: stays on the last
+	if m.agentWT.cursor != 1 {
+		t.Errorf("cursor = %d after two downs, want 1", m.agentWT.cursor)
+	}
+	press("up")
+	press("up")
+	if m.agentWT.cursor != 0 {
+		t.Errorf("cursor = %d after two ups, want 0", m.agentWT.cursor)
+	}
+
+	press("g")
+	if !m.agentWT.showGone || len(m.visibleAgentWT()) != 3 || m.agentWT.cursor != 0 {
+		t.Fatalf("after g: showGone=%v rows=%d cursor=%d", m.agentWT.showGone, len(m.visibleAgentWT()), m.agentWT.cursor)
+	}
+	for i, e := range m.visibleAgentWT() {
+		if e.ID == "c" {
+			m.agentWT.cursor = i
+		}
+	}
+	press("enter")
+	if !strings.Contains(m.agentWT.notice, "already gone") || m.dialog != dialogAgentWorktrees {
+		t.Errorf("Enter on a gone entry: notice %q, dialog %v", m.agentWT.notice, m.dialog)
+	}
+
+	fake.sent = nil
+	runCmd(press("f"))
+	var req ipc.AgentWorktreeActReqPayload
+	if !decodeSent(t, fake, ipc.MsgAgentWorktreeActReq, &req) || req.ID != "c" || !req.Forget || req.RemoveWorktree || req.DeleteBranch {
+		t.Errorf("f sent %+v, want a forget of c only", req)
+	}
+
+	press("esc")
+	if m.dialog != dialogNone || len(m.agentWT.entries) != 0 {
+		t.Errorf("Esc left dialog %v with %d entries", m.dialog, len(m.agentWT.entries))
+	}
+}
+
+// The view says what it is doing: loading, a failure, an empty record, the
+// uncertain-repository warning (one repository by name, several by count),
+// and a notice; rows name the kind, the pane, its state and whether it is
+// gone or in use.
+func TestAgentWTDialog_RenderStates(t *testing.T) {
+	m := agentWTModel()
+	m.agentWT.loading = true
+	if out := stripANSI(m.renderAgentWTDialog()); !strings.Contains(out, "Loading") {
+		t.Errorf("loading:\n%s", out)
+	}
+	m.agentWT.loading = false
+	m.agentWT.err = "the daemon did not answer"
+	if out := stripANSI(m.renderAgentWTDialog()); !strings.Contains(out, "did not answer") {
+		t.Errorf("error:\n%s", out)
+	}
+	m.agentWT.err = ""
+	if out := stripANSI(m.renderAgentWTDialog()); !strings.Contains(out, "Nothing recorded") {
+		t.Errorf("empty:\n%s", out)
+	}
+
+	m.agentWT.uncertain = []string{"/proj"}
+	if out := stripANSI(m.renderAgentWTDialog()); !strings.Contains(out, "May miss items in /proj") {
+		t.Errorf("one uncertain repository:\n%s", out)
+	}
+	m.agentWT.uncertain = []string{"/proj", "/other"}
+	if out := stripANSI(m.renderAgentWTDialog()); !strings.Contains(out, "2 repositories") {
+		t.Errorf("several uncertain repositories:\n%s", out)
+	}
+
+	inUse := wtInfo("a", "/proj", "feat/a")
+	inUse.InUseBy = "pane-1"
+	inUse.PaneLive = false
+	inUse.FirstSeen = time.Now().Add(-3 * time.Hour).UnixMilli()
+	branch := ipc.AgentWorktreeInfo{ID: "b", Kind: "branch", Repo: "/proj", Branch: "feat/b", FirstSeen: time.Now().Add(-72 * time.Hour).UnixMilli()}
+	m.agentWT.entries = []ipc.AgentWorktreeInfo{inUse, branch}
+	m.agentWT.uncertain = nil
+	m.agentWT.notice = "Forgotten. Git is unchanged."
+	out := stripANSI(m.renderAgentWTDialog())
+	for _, want := range []string{"worktree feat/a", "claude (closed)", "in use", "3h", "branch feat/b", "a pane", "3d", "Forgotten."} {
+		if !strings.Contains(out, want) {
+			t.Errorf("rows lack %q:\n%s", want, out)
+		}
+	}
+}
+
+// A list request that never answers says so instead of loading forever; a
+// stale timeout (another request since) changes nothing. A refused act is
+// shown as refused.
+func TestAgentWTDialog_TimeoutAndRefusal(t *testing.T) {
+	m := agentWTModel()
+	m.agentWT.loading, m.agentWT.gen = true, "g2"
+	m.applyAgentWTListTimeout(agentWTListTimeoutMsg{gen: "g1"})
+	if !m.agentWT.loading {
+		t.Error("a stale timeout ended the current request")
+	}
+	m.applyAgentWTListTimeout(agentWTListTimeoutMsg{gen: "g2"})
+	if m.agentWT.loading || !strings.Contains(m.agentWT.err, "did not answer") {
+		t.Errorf("timeout: loading=%v err=%q", m.agentWT.loading, m.agentWT.err)
+	}
+
+	m.dialog = dialogNone
+	if cmd := m.applyAgentWTAct(agentWTActMsg{Resp: ipc.AgentWorktreeActRespPayload{Error: "the branch moved"}}); cmd != nil {
+		t.Error("an act answer with the view closed requested a refresh")
+	}
+	if !strings.HasPrefix(m.agentWT.notice, "Refused: ") {
+		t.Errorf("notice = %q, want a refusal", m.agentWT.notice)
 	}
 }

@@ -299,6 +299,7 @@ func TestAgentWTDialog_ListKeys(t *testing.T) {
 // gone or in use.
 func TestAgentWTDialog_RenderStates(t *testing.T) {
 	m := agentWTModel()
+	m.width = 200
 	m.agentWT.loading = true
 	if out := stripANSI(m.renderAgentWTDialog()); !strings.Contains(out, "Loading") {
 		t.Errorf("loading:\n%s", out)
@@ -322,7 +323,8 @@ func TestAgentWTDialog_RenderStates(t *testing.T) {
 		t.Errorf("several uncertain repositories:\n%s", out)
 	}
 
-	inUse := wtInfo("a", "/proj", "feat/a")
+	inUse := wtInfo("a", "/proj", "a")
+	inUse.Source = "" // keep the row short: a long row is cut at the dialog width
 	inUse.InUseBy = "pane-1"
 	inUse.PaneLive = false
 	inUse.FirstSeen = time.Now().Add(-3 * time.Hour).UnixMilli()
@@ -331,7 +333,7 @@ func TestAgentWTDialog_RenderStates(t *testing.T) {
 	m.agentWT.uncertain = nil
 	m.agentWT.notice = "Forgotten. Git is unchanged."
 	out := stripANSI(m.renderAgentWTDialog())
-	for _, want := range []string{"worktree feat/a", "claude (closed)", "in use", "3h", "branch feat/b", "a pane", "3d", "Forgotten."} {
+	for _, want := range []string{"worktree a", "claude (closed)", "in use", "3h", "branch feat/b", "a pane", "3d", "Forgotten."} {
 		if !strings.Contains(out, want) {
 			t.Errorf("rows lack %q:\n%s", want, out)
 		}

@@ -584,7 +584,10 @@ func TestNotificationLines_FallsBackWhenTheLocatorHasNoName(t *testing.T) {
 // pane is usually gone. At the default sidebar width (inner 28 cells) its
 // outcome-first title and message must survive the one-line cut whole.
 //
-// Fails if the daemon's rollback texts grow past the default card width.
+// The texts below are COPIES of the daemon's (tui cannot import daemon); the
+// daemon's own TestWorktreeAddAndCreate_RollbackRefusedByGitIsReported pins
+// those to 26 cells. This test pins the RENDERER: it fails if the card at
+// the default width cuts a 26-cell outcome, or hides it for a gone source.
 func TestNotificationLines_RollbackOutcomeFitsTheDefaultWidth(t *testing.T) {
 	for _, c := range []struct{ title, message string }{
 		{"Branch kept: feat/x", "folder gone, branch kept"},

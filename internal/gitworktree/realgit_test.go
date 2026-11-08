@@ -843,3 +843,57 @@ func TestRemove_RealGit_IgnoredFilesAreNotGuardedByGit(t *testing.T) {
 		t.Errorf("the ignored file survived (%v): update the documented residual", err)
 	}
 }
+
+// The facts carry the branch's TIP, the commit a confirmed -D would discard
+// down to: a delete is refused once it moves.
+func TestReadBranchFactsFor_RealGit_CarriesTheTip(t *testing.T) {
+	repo := realGitRepo(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	path := DerivePath(repo, "feat/tip")
+	if _, err := Add(ctx, repo, path, "feat/tip"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	f, err := ReadBranchFactsFor(ctx, repo, "feat/tip", "refs/heads/master")
+	if err != nil {
+		t.Fatalf("facts: %v", err)
+	}
+	want := strings.TrimSpace(runGitIn(t, repo, "rev-parse", "refs/heads/feat/tip"))
+	if f.Tip != want {
+		t.Errorf("tip = %q, want %q", f.Tip, want)
+	}
+	if err := os.WriteFile(filepath.Join(path, "n.txt"), []byte("n\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitIn(t, path, "add", "n.txt")
+	runGitIn(t, path, "commit", "-q", "-m", "n")
+	if g, _ := ReadBranchFactsFor(ctx, repo, "feat/tip", "refs/heads/master"); g.Tip == f.Tip {
+		t.Error("the tip did not move with a new commit")
+	}
+}
+
+// The caller names the worktree through a LINK to the repository (git
+// records the resolved path): the facts still find it, by folder identity,
+// instead of answering "not a worktree of this repository".
+//
+// Fails if ReadBranchFacts matches git's listing by spelling alone.
+func TestReadBranchFacts_RealGit_LinkedRepoRootStillFindsTheWorktree(t *testing.T) {
+	repo := realGitRepo(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	link := filepath.Join(t.TempDir(), "repo-link")
+	if err := os.Symlink(repo, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	path := DerivePath(link, "feat/l")
+	if _, err := Add(ctx, link, path, "feat/l"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	f, err := ReadBranchFacts(ctx, link, path, "refs/heads/master")
+	if err != nil {
+		t.Fatalf("facts through a linked repo root: %v", err)
+	}
+	if f.Branch != "feat/l" {
+		t.Errorf("branch = %q, want feat/l", f.Branch)
+	}
+}

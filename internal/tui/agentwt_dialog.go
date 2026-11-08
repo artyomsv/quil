@@ -107,11 +107,25 @@ func (m *Model) applyAgentWTList(msg agentWTListMsg) {
 	if msg.Gen != m.agentWT.gen {
 		return
 	}
+	// The cursor stays on the SAME entry across a refresh: the list re-sorts
+	// and rows come and go, and a key pressed right after (f forgets with no
+	// confirm) must act on the row the user was looking at, not its index.
+	keep := ""
+	if rows := m.visibleAgentWT(); m.agentWT.cursor < len(rows) {
+		keep = rows[m.agentWT.cursor].ID
+	}
 	m.agentWT.loading = false
 	m.agentWT.err = msg.Resp.Error
 	m.agentWT.entries = msg.Resp.Entries
 	m.agentWT.uncertain = msg.Resp.UncertainRepos
-	m.agentWT.cursor = max(0, min(m.agentWT.cursor, len(m.visibleAgentWT())-1))
+	rows := m.visibleAgentWT()
+	m.agentWT.cursor = max(0, min(m.agentWT.cursor, len(rows)-1))
+	for i, e := range rows {
+		if keep != "" && e.ID == keep {
+			m.agentWT.cursor = i
+			break
+		}
+	}
 }
 
 func (m *Model) applyAgentWTListTimeout(msg agentWTListTimeoutMsg) {
@@ -139,7 +153,10 @@ func (m *Model) applyAgentWTAct(msg agentWTActMsg) tea.Cmd {
 	} else {
 		m.agentWT.notice = msg.Resp.Notice
 	}
-	if m.dialog != dialogAgentWorktrees {
+	// Refreshed while the view OR its confirm is up: an answer landing while
+	// the confirm is open would otherwise leave the acted-on row in the list
+	// the user returns to, until r.
+	if m.dialog != dialogAgentWorktrees && !(m.dialog == dialogConfirm && m.confirmKind == confirmKindAgentWT) {
 		return nil
 	}
 	return m.requestAgentWTList()

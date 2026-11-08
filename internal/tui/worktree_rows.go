@@ -68,7 +68,7 @@ func (m Model) confirmBranchSelection() (local bool, confirmed []ipc.BranchConfi
 	// One confirmation PER WORKTREE: the daemon matches each against that
 	// worktree alone, so one row's branch cannot confirm another's.
 	for _, w := range m.confirmDeletable() {
-		confirmed = append(confirmed, ipc.BranchConfirmation{WorktreePath: w.path, Branch: w.branch})
+		confirmed = append(confirmed, ipc.BranchConfirmation{WorktreePath: w.path, Branch: w.branch, Tip: w.branchTip})
 	}
 	return local, confirmed
 }

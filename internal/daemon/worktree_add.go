@@ -153,6 +153,11 @@ func (d *Daemon) worktreeAddAndCreate(p ipc.CreatePanePayload) ipc.CreatePaneRes
 		return fail("the daemon is busy with filesystem work — try again in a moment")
 	}
 	path := gitworktree.DerivePath(spec.RepoRoot, spec.Branch)
+	// Quil makes this one: noted BEFORE git runs, so a compare of the same
+	// repository from another AI pane while the add is in flight (a probe, a
+	// turn end, a spawn seed) never records it as having appeared while that
+	// pane ran. Taken back if the add fails.
+	d.agentWT.noteOwnWorktree(spec.RepoRoot, path, spec.Branch)
 	ctx, cancel := context.WithTimeout(context.Background(), worktreeAddTimeout)
 	base, err := addWorktreeFn(ctx, spec.RepoRoot, path, spec.Branch)
 	cancel()
@@ -183,11 +188,9 @@ func (d *Daemon) worktreeAddAndCreate(p ipc.CreatePanePayload) ipc.CreatePaneRes
 			from = "HEAD (no default branch resolved)"
 		}
 		log.Printf("worktree create: %s on %s from %s", path, spec.Branch, from)
-		// Quil made this one: it joins the baseline and is never recorded
-		// as having appeared while an agent ran.
-		d.agentWT.noteOwnWorktree(spec.RepoRoot, path, spec.Branch)
 	}
 	if err != nil {
+		d.agentWT.unnoteOwnWorktree(spec.RepoRoot, path, spec.Branch)
 		// gitworktree.Add attaches git's own stderr — "already used by
 		// worktree '/x/feat-y'" names the pane to go look at.
 		return fail("%v", err)

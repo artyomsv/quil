@@ -718,7 +718,7 @@ type Model struct {
 	// The branch rows under the worktree row (worktree_rows.go). Off on every
 	// open like the worktree toggle, and cleared by resetConfirmWorktrees.
 	confirmDeleteBranch bool
-	confirmRow          int // 0 worktree, 1 local branch, 2 remote branch
+	confirmRow          int // 0 worktree, 1 local branch
 	confirmFileScroll   int // first file row shown
 	confirmFileFocus    int // which worktree's files show when a tab holds several
 	// confirmFileRowsFixed pins the file list's height for one render; only a

@@ -158,6 +158,14 @@ func (d *Daemon) agentWorktreeAct(req ipc.AgentWorktreeActReqPayload) ipc.AgentW
 		out.Notice = "Forgotten. Git is unchanged."
 		return out
 	}
+	// A GONE entry describes something that no longer exists. Enforced here,
+	// not only in the view: a worktree recreated later at the same path is
+	// listed by git again, and acting on the stale record would remove a
+	// checkout nobody recorded or confirmed.
+	if e.Gone {
+		out.Error = "this entry is gone: forget it instead"
+		return out
+	}
 	// A repository whose record may miss items needs an explicit
 	// acknowledgment: enforced HERE, not only in the view, because any IPC
 	// client can send this request.
@@ -214,6 +222,12 @@ func (d *Daemon) agentWorktreeAct(req ipc.AgentWorktreeActReqPayload) ipc.AgentW
 		f, err := d.checkAgentBranch(e)
 		if err != nil {
 			out.Error = err.Error()
+			return out
+		}
+		// The count the view showed must still describe the branch: a commit
+		// made since then would go with -D unseen.
+		if req.Confirmation.Tip != f.Tip {
+			out.Error = "the branch moved since the view showed it: press r and look again"
 			return out
 		}
 		log.Printf("agent worktrees: deleting branch %s (entry %s)", e.Branch, e.ID)
@@ -278,9 +292,15 @@ func verifyAgentWorktree(ctx context.Context, e AgentWTEntry) error {
 		return errors.New("this is the main checkout")
 	}
 	for _, w := range list[1:] {
-		if sameWorktreePath(w.Path, e.Path) {
-			return nil
+		if !sameWorktreePath(w.Path, e.Path) {
+			continue
 		}
+		// A worktree recreated at the recorded path almost always carries
+		// another branch: then it is not the one the record describes.
+		if e.Branch != "" && w.Branch != e.Branch {
+			return errors.New("this folder holds another branch now")
+		}
+		return nil
 	}
 	return errors.New("git does not list this worktree any more")
 }
@@ -288,7 +308,7 @@ func verifyAgentWorktree(ctx context.Context, e AgentWTEntry) error {
 // verifyAgentBranch asks git whether the recorded branch still exists. A
 // capped listing that does not show it is no answer, and refuses.
 func verifyAgentBranch(ctx context.Context, e AgentWTEntry) error {
-	branches, _, err := branchListFn(ctx, e.Repo)
+	branches, truncated, err := branchListFn(ctx, e.Repo)
 	if err != nil {
 		return errors.New("could not list the branches")
 	}
@@ -296,6 +316,10 @@ func verifyAgentBranch(ctx context.Context, e AgentWTEntry) error {
 		if b.Name == e.Branch {
 			return nil
 		}
+	}
+	if truncated {
+		// Absent from a CAPPED list is no answer: say so rather than "gone".
+		return errors.New("could not list the branches in full")
 	}
 	return errors.New("the branch no longer exists")
 }

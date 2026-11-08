@@ -88,6 +88,11 @@ type agentWTRepo struct {
 	// get an entry of their own). Kept here, not on the worktree entry: a
 	// short-lived entry is dropped the moment its worktree goes.
 	PendingKept []agentWTKept `json:"pending_kept,omitempty"`
+	// restoredWT / restoredBranches: this baseline was LOADED from disk and
+	// the next compare must re-baseline that half rather than record what
+	// changed while no daemon ran. Runtime-only.
+	restoredWT       bool
+	restoredBranches bool
 }
 
 // agentWTKept is a surviving-branch check waiting on a branch listing, with
@@ -484,6 +489,21 @@ func (s *agentWTStore) noteOwnWorktree(repo, path, branch string) {
 	}
 }
 
+// unnoteOwnWorktree takes back a noteOwnWorktree whose add failed: nothing
+// will appear to consume it, and a later worktree at the same path is not
+// Quil's.
+func (s *agentWTStore) unnoteOwnWorktree(repo, path, branch string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.ownPaths, normalizeWorktreePath(path))
+	if branch != "" {
+		delete(s.ownBranches, ownBranchKey(repo, branch))
+	}
+}
+
 func (s *agentWTStore) schedule(dir string, attr agentWTAttr) {
 	key := normalizeWorktreePath(dir)
 	s.mu.Lock()
@@ -630,6 +650,14 @@ func (s *agentWTStore) apply(list []gitworktree.Worktree, branchesOK bool, branc
 	}
 	r.Seen = now
 	changed := false
+	// A baseline LOADED from disk predates a daemon restart: whatever was
+	// made while no daemon ran (by hand — no agent runs without one) differs
+	// from it, and would be recorded as "appeared while <pane> ran". So the
+	// first compare after a load re-baselines without recording anything as
+	// new; it still marks what went as gone. Worktrees and branches each get
+	// their own flag, because a branch listing can fail on its own.
+	restoredWT := r.restoredWT
+	r.restoredWT = false
 
 	// Worktree half.
 	base := map[string]bool{}
@@ -638,12 +666,18 @@ func (s *agentWTStore) apply(list []gitworktree.Worktree, branchesOK bool, branc
 	}
 	madeBranch := map[string]bool{}
 	for _, n := range cur {
-		if base[n] {
+		if base[n] || restoredWT {
 			continue
 		}
 		w := curSet[n]
 		if s.ownPaths[n] {
 			delete(s.ownPaths, n)
+			// Its branch is Quil's too: never a separate branch entry, even
+			// when ownBranches' repository key spells the repo differently
+			// from git's listing.
+			if w.Branch != "" {
+				madeBranch[w.Branch] = true
+			}
 			continue
 		}
 		s.add(AgentWTEntry{Kind: agentWTKindWorktree, Repo: repoPath, Path: w.Path, Branch: w.Branch}, attr, now)
@@ -677,8 +711,8 @@ func (s *agentWTStore) apply(list []gitworktree.Worktree, branchesOK bool, branc
 
 	// Branch half.
 	if branchesOK {
-		if !r.BranchesKnown {
-			r.Branches, r.BranchesKnown = names, true
+		if !r.BranchesKnown || r.restoredBranches {
+			r.Branches, r.BranchesKnown, r.restoredBranches = names, true, false
 			return true
 		}
 		baseB := map[string]bool{}
@@ -890,7 +924,14 @@ func (s *agentWTStore) load() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if f.Repos != nil {
-		s.repos = f.Repos
+		s.repos = map[string]*agentWTRepo{}
+		for k, r := range f.Repos {
+			if r == nil {
+				continue // a null record would panic every reader
+			}
+			r.restoredWT, r.restoredBranches = true, true
+			s.repos[k] = r
+		}
 	}
 	s.entries = f.Entries
 	s.evictRepos()

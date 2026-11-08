@@ -36,7 +36,10 @@ type confirmWorktree struct {
 	branchDeletable bool
 	branchReason    string
 	unmerged        int
-	defaultBranch   string
+	// branchTip is the commit the branch pointed at when the facts were read;
+	// an accept echoes it so the daemon can refuse a branch that moved.
+	branchTip     string
+	defaultBranch string
 }
 
 // collectConfirmWorktrees reports the worktrees a close would delete.
@@ -205,6 +208,7 @@ func (m *Model) applyWorktreeStatus(msg worktreeStatusMsg) {
 			row.branchDeletable = st.BranchDeletable
 			row.branchReason = st.BranchReason
 			row.unmerged = st.Unmerged
+			row.branchTip = st.BranchTip
 			row.defaultBranch = st.DefaultBranch
 		} else {
 			row.branchReason = "could not check the branch"

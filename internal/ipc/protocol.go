@@ -576,6 +576,10 @@ type DestroyPanePayload struct {
 type BranchConfirmation struct {
 	WorktreePath string `json:"worktree_path,omitempty"`
 	Branch       string `json:"branch"`
+	// Tip is WorktreeStatus.BranchTip as the dialog showed it. The daemon
+	// deletes only while the branch still points there; empty never matches a
+	// real branch, so an older client cannot delete a branch at all.
+	Tip string `json:"tip,omitempty"`
 }
 
 type ResizePanePayload struct {
@@ -2156,6 +2160,10 @@ type WorktreeStatus struct {
 	// Unmerged counts commits on Branch that DefaultBranch lacks.
 	Unmerged      int    `json:"unmerged,omitempty"`
 	DefaultBranch string `json:"default_branch,omitempty"`
+	// BranchTip is the commit Branch pointed at when these facts were read. A
+	// client confirming the delete echoes it in BranchConfirmation.Tip, and the
+	// daemon refuses the delete once the branch has moved.
+	BranchTip string `json:"branch_tip,omitempty"`
 }
 
 // WorktreeFile is one entry of a worktree's `git status`.

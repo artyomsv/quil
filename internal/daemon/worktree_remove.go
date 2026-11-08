@@ -110,8 +110,23 @@ func confirmations(cs []ipc.BranchConfirmation) map[string]ipc.BranchConfirmatio
 
 // localConfirmed reports that the dialog showed this worktree on branch f.
 func (o branchDeleteOpts) localConfirmed(path string, f gitworktree.BranchFacts) bool {
+	return o.confirmRefusal(path, f) == ""
+}
+
+// confirmRefusal is "" when the dialog's confirmation for path still
+// describes the branch as git reads it now, else the reason for the card. The
+// NAME pins which branch; the TIP pins what the delete discards — an agent
+// committing between the dialog's count and the close would otherwise have
+// that commit dropped by -D unseen.
+func (o branchDeleteOpts) confirmRefusal(path string, f gitworktree.BranchFacts) string {
 	c, ok := o.Confirmed[confirmKey(path)]
-	return ok && f.Branch != "" && c.Branch == f.Branch
+	switch {
+	case !ok || f.Branch == "" || c.Branch != f.Branch:
+		return "the worktree switched branch after the dialog opened"
+	case c.Tip != f.Tip:
+		return "the branch moved after the dialog opened"
+	}
+	return ""
 }
 
 // worktreeOwners maps each owned worktree path to the first pane that owns it,
@@ -268,7 +283,8 @@ func (d *Daemon) removeWorktreeWithBranch(path string, opt branchDeleteOpts) rem
 		// already says why; a second branch card would repeat it.
 		return res
 	case res.factsErr != nil:
-		d.notifyBranchKept(owner, "", "could not read the branch: "+res.factsErr.Error())
+		log.Printf("worktree remove: %s: branch facts: %v", path, res.factsErr)
+		d.notifyBranchKept(owner, "", "could not read the branch (see quild.log)")
 		return res
 	case f.Detached || f.Branch == "":
 		d.notifyBranchKept(owner, "", "the worktree had no branch checked out")
@@ -279,8 +295,9 @@ func (d *Daemon) removeWorktreeWithBranch(path string, opt branchDeleteOpts) rem
 	case f.DefaultRef == "":
 		d.notifyBranchKept(owner, f.Branch, "no default branch found, so unmerged commits cannot be counted")
 		return res
-	case !opt.localConfirmed(path, f):
-		d.notifyBranchKept(owner, f.Branch, "the worktree switched branch after the dialog opened")
+	}
+	if r := opt.confirmRefusal(path, f); r != "" {
+		d.notifyBranchKept(owner, f.Branch, r)
 		return res
 	}
 	d.deleteBranches(res.repo, f, opt, owner)
@@ -312,7 +329,9 @@ func (d *Daemon) deleteLocalBranch(repo, branch string) error {
 	defer cancel()
 	if err := deleteLocalBranchFn(ctx, repo, branch); err != nil {
 		log.Printf("worktree remove: branch %s kept: %v", branch, err)
-		return err
+		// git's own text (paths, the ref) stays in the log: the card says
+		// only that git refused.
+		return errors.New("git refused the delete (see quild.log)")
 	}
 	log.Printf("worktree remove: branch %s deleted", branch)
 	return nil
@@ -359,6 +378,14 @@ func (d *Daemon) removeOneWorktreeFull(path, token string, wantFacts bool) (res 
 		return
 	}
 	if len(list) == 0 {
+		// List runs INSIDE the path, so a folder deleted by hand reads as "not
+		// a repository" too. Say which: its registration and branch are still
+		// in the repository, and the remedy differs.
+		if _, serr := lstatFn(path); errors.Is(serr, fs.ErrNotExist) {
+			log.Printf("worktree remove: %s kept, its folder is already gone", path)
+			res.reason = keptFolderMissing
+			return
+		}
 		log.Printf("worktree remove: %s kept, it is not inside a git repository", path)
 		res.reason = keptNotRepo
 		return
@@ -823,6 +850,7 @@ const (
 	keptRemoveIncomplete  = "remove_incomplete"
 	keptBranchNotDeleted  = "branch_not_deleted"
 	keptCleanupIncomplete = "cleanup_incomplete"
+	keptFolderMissing     = "folder_missing"
 )
 
 var keptMessages = map[string]string{
@@ -844,6 +872,7 @@ var keptMessages = map[string]string{
 	keptRemoveIncomplete:  "folder may remain; see log",
 	keptBranchNotDeleted:  "folder gone, branch kept",
 	keptCleanupIncomplete: "cleanup failed; see log",
+	keptFolderMissing:     "its folder is already gone (see git worktree prune)",
 }
 
 // keptMessage is the card text for a reason code.

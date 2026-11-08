@@ -59,7 +59,7 @@ func TestAgentWTDialog_DetailReusesCloseRows(t *testing.T) {
 	m = mdl.(Model)
 	m.applyAgentWTFacts(agentWTFactsMsg{Gen: m.confirmWorktreeGen, Resp: ipc.AgentWorktreeFactsRespPayload{
 		ID: "a", Status: ipc.WorktreeStatus{Changes: 1, Files: []ipc.WorktreeFile{{Code: "??", Path: "x.txt"}},
-			Branch: "feat/a", BranchDeletable: true, DefaultBranch: "master"},
+			Branch: "feat/a", BranchDeletable: true, DefaultBranch: "master", BranchTip: "tip-1"},
 	}})
 	if out := stripANSI(m.renderConfirmDialog()); !strings.Contains(out, "x.txt") {
 		t.Fatalf("the detail does not list the files:\n%s", out)
@@ -76,7 +76,7 @@ func TestAgentWTDialog_DetailReusesCloseRows(t *testing.T) {
 	if !decodeSent(t, fake, ipc.MsgAgentWorktreeActReq, &req) {
 		t.Fatal("Enter sent no act request")
 	}
-	if req.ID != "a" || !req.RemoveWorktree || !req.DeleteBranch || req.Confirmation.Branch != "feat/a" {
+	if req.ID != "a" || !req.RemoveWorktree || !req.DeleteBranch || req.Confirmation.Branch != "feat/a" || req.Confirmation.Tip != "tip-1" {
 		t.Errorf("request = %+v", req)
 	}
 	if m.dialog != dialogAgentWorktrees {
@@ -197,5 +197,42 @@ func TestAgentWTDialog_UncertainRepoNeedsY(t *testing.T) {
 	var req ipc.AgentWorktreeActReqPayload
 	if !decodeSent(t, fake, ipc.MsgAgentWorktreeActReq, &req) || !req.AcceptUncertain || !req.RemoveWorktree {
 		t.Errorf("request = %+v, want the removal with AcceptUncertain", req)
+	}
+}
+
+// A refresh re-sorts the list and rows come and go; the cursor stays on the
+// SAME entry, so a key pressed right after (f forgets with no confirm) acts
+// on the row the user was looking at.
+//
+// Fails if the cursor keeps its index across a refresh.
+func TestAgentWTDialog_RefreshKeepsTheCursorOnItsEntry(t *testing.T) {
+	m := agentWTModel(wtInfo("a", "/proj", "p1"), wtInfo("b", "/proj", "p2"))
+	m.agentWT.gen = "g1"
+	m.agentWT.cursor = 1 // "b"
+	m.applyAgentWTList(agentWTListMsg{Gen: "g1", Resp: ipc.AgentWorktreesRespPayload{
+		Entries: []ipc.AgentWorktreeInfo{wtInfo("new", "/proj", "p0"), wtInfo("a", "/proj", "p1"), wtInfo("b", "/proj", "p2")},
+	}})
+	if rows := m.visibleAgentWT(); rows[m.agentWT.cursor].ID != "b" {
+		t.Errorf("cursor on %q after the refresh, want b", rows[m.agentWT.cursor].ID)
+	}
+}
+
+// An act answered while the entry's confirm is (still) open refreshes the
+// list too, or the acted-on row is still there when the user returns.
+//
+// Fails if the list refreshes only while the list itself is on screen.
+func TestAgentWTDialog_ActAnswerRefreshesUnderTheConfirm(t *testing.T) {
+	m := agentWTModel(wtInfo("a", "/proj", "feat/a"))
+	fake := &fakeSender{}
+	m.client = fake
+	mdl, _ := m.openAgentWTConfirm(m.visibleAgentWT()[0])
+	m = mdl.(Model)
+	fake.sent = nil
+
+	runCmd(m.applyAgentWTAct(agentWTActMsg{Resp: ipc.AgentWorktreeActRespPayload{ID: "a", Notice: "Worktree removed."}}))
+
+	var req struct{}
+	if !decodeSent(t, fake, ipc.MsgAgentWorktreesReq, &req) {
+		t.Error("an act answered under the confirm did not refresh the list")
 	}
 }

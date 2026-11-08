@@ -26,6 +26,10 @@ type BranchFacts struct {
 	DefaultRef string
 	// Unmerged counts commits on Branch that DefaultRef does not contain.
 	Unmerged int
+	// Tip is the commit Branch points at when the facts were read. A delete
+	// confirmed against these facts is refused once the tip has moved: the
+	// count shown no longer describes what -D would discard.
+	Tip string
 }
 
 // DefaultBranchRef is the repository's default branch as a FULLY-QUALIFIED
@@ -70,6 +74,18 @@ func ReadBranchFacts(ctx context.Context, repo, worktreePath, defaultRef string)
 		}
 	}
 	if wt == nil {
+		// git prints the path as it recorded it, often resolved (/private/tmp
+		// for /tmp on macOS) or in another letter case: ask the disk before
+		// calling the caller's spelling a stranger. Linked worktrees only —
+		// the main checkout is never a branch-facts subject here.
+		for i := range list[1:] {
+			if same, err := sameFile(list[i+1].Path, worktreePath); err == nil && same {
+				wt = &list[i+1]
+				break
+			}
+		}
+	}
+	if wt == nil {
 		return BranchFacts{}, errors.New("not a worktree of this repository")
 	}
 	if wt.Detached || wt.Branch == "" {
@@ -85,6 +101,13 @@ func ReadBranchFactsFor(ctx context.Context, repo, branch, defaultRef string) (B
 	f := BranchFacts{DefaultRef: defaultRef, Branch: branch}
 	f.IsDefault = defaultRef != "" && ShortBranchName(defaultRef) == f.Branch
 	local := "refs/heads/" + f.Branch
+	tip, err := runGit(ctx, repo, "rev-parse", "--verify", "--quiet", local+"^{commit}")
+	if err != nil {
+		return f, fmt.Errorf("git rev-parse %s: %w", local, err)
+	}
+	if f.Tip = strings.TrimSpace(tip); f.Tip == "" {
+		return f, fmt.Errorf("git rev-parse %s: no commit", local)
+	}
 
 	if defaultRef != "" && !f.IsDefault {
 		if f.Unmerged, err = countCommits(ctx, repo, defaultRef, local); err != nil {

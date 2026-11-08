@@ -192,7 +192,14 @@ reads the facts BEFORE `git worktree remove` (the listing entry naming the
 branch goes with it) and deletes only when the branch it read matches the
 confirmation for THAT worktree — so a worktree an agent switched to another
 branch after the dialog opened keeps that branch, one row cannot confirm
-another's, and no client can name a branch to delete. Never the default
+another's, and no client can name a branch to delete. **The confirmation also
+pins the branch's TIP** (`BranchFacts.Tip` → `WorktreeStatus.BranchTip` →
+`BranchConfirmation.Tip`, checked by `confirmRefusal`): the name says which
+branch, the tip says what `-D` discards — an agent committing between the
+dialog's unmerged count and the close moves the tip, and the delete is refused
+with "the branch moved after the dialog opened". An older client sends no tip,
+which never matches a real branch, so it can delete none. The cleanup view's
+branch entry checks the same tip. Never the default
 branch, and never with the default branch unknown (unmerged commits could not
 be counted). The delete is `branch -D -- <b>` (the dialog showed the unmerged
 count; git itself refuses a branch checked out in any worktree, which closes
@@ -245,7 +252,29 @@ compare saw it, carrying its branch; a new branch with no worktree is its own
 entry; the default branch never is. Something that disappears is marked
 `Gone`, or dropped when it lived under 60 s (Claude's own subagent worktrees
 come and go inside a turn). Quil's own worktree adds (`noteOwnWorktree`, from
-`worktreeAddAndCreate`) join the baseline and never become entries.
+`worktreeAddAndCreate`, noted BEFORE `git worktree add` runs and taken back by
+`unnoteOwnWorktree` when it fails, so a compare from another pane during the
+add never claims it) join the baseline and never become entries, and neither
+does their branch.
+
+**A baseline LOADED from disk is re-baselined once** (`restoredWT` /
+`restoredBranches`, runtime-only, set by `load`): it predates a daemon restart,
+and what was made while no daemon ran (by hand — no agent runs without one)
+would otherwise be recorded as "appeared while <pane> ran" and offered for
+removal. The first compare after a load records nothing as new, still marks
+what went as gone; each half has its own flag because a branch listing can
+fail on its own. `load` also drops a null repository record, which would panic
+every reader.
+
+**A probe names the command's working directory**, so `cd /other && git
+worktree add …` or `git -C /other …` in ANOTHER repository is not seen; turn
+ends compare the probed directories and the pane's CWD only.
+
+**The daemon refuses an act on a GONE entry** (`agentWorktreeAct`), not only the
+view: git can list a worktree recreated later at the same path, and the stale
+record must not remove it. `verifyAgentWorktree` also refuses a listed checkout
+on another branch than the entry's. A branch absent from a CAPPED branch
+listing is "could not list the branches in full", never "no longer exists".
 
 **An entry says the worktree APPEARED while the pane ran, never that its agent
 made it** — a user can make one by hand in another terminal at the same
@@ -502,4 +531,14 @@ is a FIXED message per reason code (`keptMessage`, codes `keptNoIdentity` …
 `keptRemoveFailed`), and the code rides in `Data["reason"]`; git's own error
 text goes to the log only, never onto the card or into the cleanup view's act
 answer, because it can carry paths and text from a repository the user does
-not control.
+not control. The same holds for the `worktree_branch_kept` cards: a facts
+error reads "could not read the branch (see quild.log)" and a refused delete
+"git refused the delete (see quild.log)". A worktree whose folder was deleted
+by hand is `keptFolderMissing` (git's listing runs inside the path, so it
+would otherwise read "not inside a git repository"). Branch facts find a
+worktree by folder identity when git's spelling differs from the caller's (a
+linked repository root; `/private/tmp` for `/tmp` on macOS).
+
+**Known cost, accepted:** `seedSync` lists the repository (≤3 s, under a
+permit) on the requesting conn's dispatch goroutine for every new AI pane, so
+on a slow or networked repository that client's other messages wait behind it.

@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -319,6 +320,12 @@ func TestAbsLocalAddress(t *testing.T) {
 	} {
 		if got := absLocalAddress(repo, in); got != want {
 			t.Errorf("absLocalAddress(%q) = %q, want %q", in, got, want)
+		}
+	}
+	// One-letter ssh host (an alias): a host, not a drive, except on Windows.
+	if runtime.GOOS != "windows" {
+		if got := absLocalAddress(repo, "h:repo.git"); got != "h:repo.git" {
+			t.Errorf("absLocalAddress(h:repo.git) = %q, want it unchanged", got)
 		}
 	}
 }

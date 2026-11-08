@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 )
 
@@ -285,15 +286,18 @@ func redactURLs(s string) string {
 	return urlUserinfo.ReplaceAllString(s, "${1}***@")
 }
 
-// scpLike matches git's scp-like address, "[user@]host:path". A single
-// letter before the colon is a Windows drive, not a host.
-var scpLike = regexp.MustCompile(`^[^/\:]{2,}:`)
+// scpLike matches git's scp-like address, "[user@]host:path".
+var scpLike = regexp.MustCompile(`^([^/\:]+):`)
 
 // absLocalAddress returns url with a local relative path made absolute
 // against repo. URLs with a scheme ("ssh://", "file://") and scp-like
-// addresses are returned unchanged; so is an absolute path.
+// addresses are returned unchanged; so is an absolute path. A single letter
+// before the colon is a host everywhere but Windows, where it is a drive.
 func absLocalAddress(repo, url string) string {
-	if strings.Contains(url, "://") || scpLike.MatchString(url) || filepath.IsAbs(url) {
+	if strings.Contains(url, "://") || filepath.IsAbs(url) {
+		return url
+	}
+	if m := scpLike.FindStringSubmatch(url); m != nil && !(runtime.GOOS == "windows" && len(m[1]) == 1) {
 		return url
 	}
 	return filepath.Join(repo, url)

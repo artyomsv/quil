@@ -413,6 +413,10 @@ type Pane struct {
 	// non-comparable dynamic type panics — on a time.AfterFunc goroutine, which
 	// takes the whole daemon with it. PluginMu-protected, like PTY itself.
 	ptyGen uint64
+	// startingGen is the generation of the child being started, set before
+	// its Start (ptyGen catches up after): a hook from that child can arrive
+	// first. PluginMu-protected, like ptyGen.
+	startingGen uint64
 	// freshID records that this pane's ID was MINTED in this process rather
 	// than read back from a snapshot. Runtime-only and deliberately never
 	// persisted: restoring it would make every pane look fresh forever, which

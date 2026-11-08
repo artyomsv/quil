@@ -112,6 +112,8 @@ func TestAllows_StandardPayloadCarriers(t *testing.T) {
 		// A remote branch delete reaches everyone sharing the remote.
 		{"destroy_pane remote branch delete", "", msgOf(t, ipc.MsgDestroyPane, ipc.DestroyPanePayload{PaneID: "p", RemoveWorktree: true, DeleteRemoteBranch: true})},
 		{"destroy_tab remote branch delete", "", msgOf(t, ipc.MsgDestroyTab, ipc.DestroyTabPayload{TabID: "t", RemoveWorktree: true, DeleteRemoteBranch: true})},
+		// The uncertain-record acknowledgment stands for a person's `y`.
+		{"agent_worktree_act uncertain ack", "", msgOf(t, ipc.MsgAgentWorktreeActReq, ipc.AgentWorktreeActReqPayload{ID: "e", RemoveWorktree: true, AcceptUncertain: true})},
 	}
 	covered := map[string]bool{}
 	for _, tt := range refused {

@@ -1907,9 +1907,17 @@ so `singlePushTarget` refuses unless `git remote get-url --all` and
 `get-url --push --all` each give exactly one address and the same one. That
 address is FROZEN: the `ls-remote` check and the push both use the URL, never
 the remote name, so a config change between them cannot redirect the push
-(`afterRemoteCheck` is the test seam for that window); a URL an
-`insteadOf`/`pushInsteadOf` rule would still rewrite is refused
-(`noURLRewrite`), and the remote-tracking ref is dropped after the push.
+(`afterRemoteCheck` is the test seam for that window). The CONFIGURATION is
+frozen with it: both git calls run in an empty helper repository
+(`git init --bare --template=` in a temp dir, so no hooks) with
+`GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL` at the null device and only a
+snapshot of `credential.*`, `http.*` and `core.sshCommand` passed as
+`GIT_CONFIG_COUNT/KEY/VALUE` (in memory, never a file) — no url rewrite rule
+exists there, and nothing written to any config file in between can redirect
+it (`isolatedPushEnv`). Inherited `GIT_CONFIG_*`, `GIT_DIR`, `GIT_TRACE*` and
+`GIT_CURL_VERBOSE` are dropped, and every error passes `redactURLs`, because
+the URL is now on argv and git's output reaches quild.log and a sidebar card.
+The remote-tracking ref is dropped after the push.
 
 **A worktree whose files were not READ is never deleted** — this reverses
 the earlier "the status answer is advisory" rule for the DELETE (the count is
@@ -1919,3 +1927,21 @@ reason and UNTICKS the row (`disarmUnreadWorktree`); `confirmWorktreesInspected`
 worktree row cannot be armed while `worktreeRowReason` names a reason, and a
 late answer for the timed-out request is not applied. Unticking closes the
 pane and keeps the worktree.
+
+**`AcceptUncertain` needs a full token** (`clientauth.carriesRemoteDelete`'s
+`uncertain` result): it stands for a person pressing `y`, and a standard
+token is what a non-interactive client holds. Local conns are full, as for
+every other admin-shaped action.
+
+**The baseline and `worktreeRegistered` read `gitworktree.ListStrict`**
+(through `worktreeListStrictFn`), not `List`: `List` folds every non-zero git
+exit — a permission error, an unsafe directory, a corrupt repository — into
+"not a repository" `(nil, nil)`, which here would read as a clean answer.
+`ListStrict` returns `ErrNotRepository` only when git SAYS so and the failure
+itself otherwise. `stubWorktreeList` stubs both seams.
+
+**A subagent record is stamped with the generation of the child that is
+STARTING** (`Pane.startingGen`, set under `PluginMu` just before
+`ptySession.Start`; `paneForAgentWT` reports `max(ptyGen, startingGen)`):
+`ptyGen` moves only after `Start` returns, and a fast child's first hook can
+arrive in between.

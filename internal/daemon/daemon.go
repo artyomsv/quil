@@ -7199,6 +7199,13 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 
 		ptySession.SetCWD(pane.CWD)
 		log.Printf("spawn: pane %s cmd=%s args=%v cwd=%s restoring=%v", pane.ID, cmd, args, pane.CWD, restoring)
+		// Published BEFORE the child starts: ptyGen moves only after Start
+		// returns, and a fast child's first hook can arrive in between. The
+		// agent-worktree record stamps a probe with this generation, so a
+		// late exit cleanup of the previous child never clears it.
+		pane.PluginMu.Lock()
+		pane.startingGen = pane.ptyGen + 1
+		pane.PluginMu.Unlock()
 		if err := ptySession.Start(cmd, args...); err != nil {
 			return err
 		}

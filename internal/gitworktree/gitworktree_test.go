@@ -547,3 +547,24 @@ func TestStatus_DoesNotTakeOptionalLocks(t *testing.T) {
 		t.Errorf("argv = %v, want --ignored — an ignored .env is destroyed by the removal and must be counted", args)
 	}
 }
+
+// ListStrict keeps "not a repository" and "could not read it" apart, where
+// List folds both into (nil, nil).
+//
+// Fails if ListStrict folds a refusal such as an unsafe directory into "no
+// repository".
+func TestListStrict_SeparatesNoRepositoryFromAFailure(t *testing.T) {
+	stubGit(t, "", errors.New("exit status 128: fatal: not a git repository (or any of the parent directories): .git"))
+	if _, err := ListStrict(context.Background(), "/x"); !errors.Is(err, ErrNotRepository) {
+		t.Errorf("not a repository: err = %v, want ErrNotRepository", err)
+	}
+
+	dubious := errors.New("exit status 128: fatal: detected dubious ownership in repository at '/x'")
+	stubGit(t, "", dubious)
+	if _, err := ListStrict(context.Background(), "/x"); err == nil || errors.Is(err, ErrNotRepository) {
+		t.Errorf("dubious ownership: err = %v, want the failure itself", err)
+	}
+	if got, err := List(context.Background(), "/x"); got != nil || err != nil {
+		t.Errorf("List keeps its fold: got %v, %v", got, err)
+	}
+}

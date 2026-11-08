@@ -50,20 +50,6 @@ func TestRemotePushEnv_KeepsUserSSHCommand(t *testing.T) {
 	}
 }
 
-// A repository's own core.sshCommand (a key file, a jump host) must survive:
-// GIT_SSH_COMMAND outranks it, so adding ours would break a push that works.
-//
-// Fails if DeleteRemoteBranch adds GIT_SSH_COMMAND when the repo sets one.
-func TestRemotePushEnvFor_KeepsRepoSSHCommand(t *testing.T) {
-	stubGit(t, "ssh -i ~/.ssh/deploy\n", nil)
-	env := remotePushEnvFor(context.Background(), "/repo", []string{"PATH=/bin"})
-	for _, kv := range env {
-		if strings.HasPrefix(kv, "GIT_SSH_COMMAND=") {
-			t.Errorf("env overrides the repository's core.sshCommand: %v", env)
-		}
-	}
-}
-
 // `--` keeps a dash-led branch name from reaching git as an option.
 func TestDeleteLocalBranch_TerminatesOptions(t *testing.T) {
 	calls := stubGit(t, "", nil)
@@ -146,9 +132,11 @@ func bareRemote(t *testing.T, repo, name, head string) string {
 	return dir
 }
 
-func remoteHas(t *testing.T, repo, url, branch string) bool {
+func remoteHas(t *testing.T, _, url, branch string) bool {
 	t.Helper()
-	return strings.Contains(runGitIn(t, repo, "ls-remote", url, "refs/heads/"+branch), "refs/heads/"+branch)
+	// From a folder outside the repository, so a url rule a test adds to the
+	// repository config cannot redirect the check itself.
+	return strings.Contains(runGitIn(t, t.TempDir(), "ls-remote", url, "refs/heads/"+branch), "refs/heads/"+branch)
 }
 
 // The remote changed its default (master → develop) and this clone's
@@ -255,7 +243,13 @@ func TestDeleteRemoteBranch_RealGit_PushGoesToTheCheckedAddress(t *testing.T) {
 	runGitIn(t, repo, "remote", "add", "r", checked)
 
 	prev := afterRemoteCheck
-	afterRemoteCheck = func() { runGitIn(t, repo, "remote", "set-url", "r", other) }
+	afterRemoteCheck = func() {
+		// Every way to redirect the push, added in the window: the remote's
+		// url, an insteadOf and a pushInsteadOf rule for the frozen URL.
+		runGitIn(t, repo, "remote", "set-url", "r", other)
+		runGitIn(t, repo, "config", "url."+other+".insteadOf", checked)
+		runGitIn(t, repo, "config", "url."+other+".pushInsteadOf", checked)
+	}
 	t.Cleanup(func() { afterRemoteCheck = prev })
 
 	if err := DeleteRemoteBranch(ctx, repo, "r", "feat"); err != nil {
@@ -269,15 +263,44 @@ func TestDeleteRemoteBranch_RealGit_PushGoesToTheCheckedAddress(t *testing.T) {
 	}
 }
 
-// A url rewrite that would still change the frozen address refuses.
-func TestNoURLRewrite_RefusesARewrittenAddress(t *testing.T) {
-	repo := realGitRepo(t)
-	ctx := context.Background()
-	if err := noURLRewrite(ctx, repo, "/srv/a.git"); err != nil {
-		t.Fatalf("no rules: %v", err)
+// The isolated environment carries only the snapshot: system and global
+// config off, inherited config/dir/trace variables gone, credential and ssh
+// settings passed in memory, and a configured ssh command kept (no BatchMode
+// override).
+//
+// Fails if a trace or an inherited config variable reaches the push, or the
+// snapshot is not passed.
+func TestIsolatedPushEnv_CarriesOnlyTheSnapshot(t *testing.T) {
+	stubGit(t, "core.sshcommand\nssh -i key\x00credential.helper\nstore\x00", nil)
+	base := []string{"PATH=/bin", "GIT_TRACE=1", "GIT_TRACE_CURL=1", "GIT_CONFIG_PARAMETERS='url.x.insteadof'=y",
+		"GIT_DIR=/elsewhere", "git_config_global=/evil"}
+
+	env, err := isolatedPushEnv(context.Background(), "/repo", base)
+	if err != nil {
+		t.Fatal(err)
 	}
-	runGitIn(t, repo, "config", "url./srv/b.git.pushInsteadOf", "/srv/a")
-	if err := noURLRewrite(ctx, repo, "/srv/a.git"); err == nil {
-		t.Error("a pushInsteadOf rule matching the address was not refused")
+	joined := strings.Join(env, "\n")
+	for _, bad := range []string{"GIT_TRACE", "GIT_CONFIG_PARAMETERS", "GIT_DIR=", "/evil", "BatchMode"} {
+		if strings.Contains(joined, bad) {
+			t.Errorf("env carries %q:\n%s", bad, joined)
+		}
+	}
+	for _, want := range []string{"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=" + os.DevNull, "GIT_CONFIG_COUNT=2",
+		"GIT_CONFIG_KEY_0=core.sshcommand", "GIT_CONFIG_VALUE_0=ssh -i key", "GIT_CONFIG_KEY_1=credential.helper", "PATH=/bin"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("env lacks %q:\n%s", want, joined)
+		}
+	}
+}
+
+// URL credentials never reach an error, the log or a card.
+func TestRedactURLs(t *testing.T) {
+	in := "fatal: unable to access 'https://bob:s3cret@git.example/r.git/': timeout; ssh://alice@h/x ok"
+	got := redactURLs(in)
+	if strings.Contains(got, "s3cret") || strings.Contains(got, "bob") || strings.Contains(got, "alice@") {
+		t.Errorf("redactURLs = %q", got)
+	}
+	if !strings.Contains(got, "https://***@git.example/r.git/") {
+		t.Errorf("redactURLs = %q, want the rest kept", got)
 	}
 }

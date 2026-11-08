@@ -191,11 +191,13 @@ func newAgentWTStore(path string, paneFn func(string) (agentWTPane, bool)) *agen
 		running:     map[string]bool{},
 		pending:     map[string]agentWTAttr{},
 		now:         time.Now,
-		listFn:      func(ctx context.Context, dir string) ([]gitworktree.Worktree, error) { return worktreeListFn(ctx, dir) },
-		branchFn:    gitworktree.Branches,
-		defaultFn:   gitworktree.DefaultBranchRef,
-		paneFn:      paneFn,
-		goFn:        func(f func()) { go f() },
+		listFn: func(ctx context.Context, dir string) ([]gitworktree.Worktree, error) {
+			return worktreeListStrictFn(ctx, dir)
+		},
+		branchFn:  gitworktree.Branches,
+		defaultFn: gitworktree.DefaultBranchRef,
+		paneFn:    paneFn,
+		goFn:      func(f func()) { go f() },
 	}
 }
 
@@ -207,7 +209,7 @@ func (d *Daemon) paneForAgentWT(id string) (agentWTPane, bool) {
 	}
 	p.PluginMu.Lock()
 	defer p.PluginMu.Unlock()
-	return agentWTPane{Name: p.Name, CWD: p.CWD, Sandbox: p.SandboxImage != "" || p.SandboxBackend != "", Gen: p.ptyGen}, true
+	return agentWTPane{Name: p.Name, CWD: p.CWD, Sandbox: p.SandboxImage != "" || p.SandboxBackend != "", Gen: max(p.ptyGen, p.startingGen)}, true
 }
 
 // probe answers one WorktreeProbe: it remembers the directory for the pane's

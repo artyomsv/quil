@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 )
 
@@ -39,45 +40,59 @@ func DeleteRemoteBranch(ctx context.Context, repo, remote, branch string) error 
 	if remote == "" || branch == "" || strings.HasPrefix(remote, "-") {
 		return fmt.Errorf("no remote branch to delete")
 	}
+	fail := func(format string, a ...any) error {
+		return fmt.Errorf("git push %s :%s: %s", remote, branch, redactURLs(fmt.Sprintf(format, a...)))
+	}
 	// The address is resolved ONCE and FROZEN: the default check and the
-	// push both use that URL, never the remote's name, so a config change in
-	// between cannot send the push to a server that was never checked. Only
-	// one address, the same for fetch and push, can be frozen; and a URL a
-	// rewrite rule would still change is refused.
+	// push both use that URL, never the remote's name. Only one address, the
+	// same for fetch and push, can be frozen.
 	url, err := singlePushTarget(ctx, repo, remote)
 	if err != nil {
-		return fmt.Errorf("git push %s :%s: %w", remote, branch, err)
+		return fail("%v", err)
 	}
-	if err := noURLRewrite(ctx, repo, url); err != nil {
-		return fmt.Errorf("git push %s :%s: %w", remote, branch, err)
+	// And the CONFIGURATION is frozen with it: both git calls run in an
+	// empty helper repository with system and global config off and only a
+	// snapshot of the credential/http/ssh settings, taken now and passed in
+	// memory. No url rewrite rule exists there, and nothing written to any
+	// config file in between can redirect the push.
+	env, err := isolatedPushEnv(ctx, repo, os.Environ())
+	if err != nil {
+		return fail("%v", err)
 	}
-	env := remotePushEnvFor(ctx, repo, os.Environ())
+	helper, err := os.MkdirTemp("", "quil-push-")
+	if err != nil {
+		return fail("could not make a helper repository: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(helper) }() // best-effort: an empty bare repo in the temp dir
+	if out, err := runPush(ctx, helper, env, []string{"init", "--bare", "-q", "--template=", "."}); err != nil {
+		return fail("could not make a helper repository: %v: %s", err, strings.TrimSpace(out))
+	}
 	// The remote's default is asked of the REMOTE, right before the push:
 	// the local refs/remotes/<remote>/HEAD can be stale (the remote changed
 	// its default since the last set-head), and this is the last moment a
 	// wrong answer can be stopped. No answer refuses.
-	def, err := remoteHeadLive(ctx, repo, env, url)
+	def, err := remoteHeadLive(ctx, helper, env, url)
 	if err != nil {
-		return fmt.Errorf("git push %s :%s: could not confirm the remote's default branch: %w", remote, branch, err)
+		return fail("could not confirm the remote's default branch: %v", err)
 	}
 	if def == branch {
-		return fmt.Errorf("git push %s :%s: it is the remote's default branch", remote, branch)
+		return fail("it is the remote's default branch")
 	}
 	afterRemoteCheck()
-	out, err := runPush(ctx, repo, env, RemotePushArgs(url, branch))
+	out, err := runPush(ctx, helper, env, RemotePushArgs(url, branch))
 	if err != nil {
+		if ctx.Err() != nil {
+			return fail("timed out")
+		}
 		msg := strings.TrimSpace(out)
 		if len(msg) > 400 {
 			msg = msg[:400]
 		}
-		if ctx.Err() != nil {
-			return fmt.Errorf("git push %s :%s: timed out", remote, branch)
-		}
-		return fmt.Errorf("git push %s :%s: %w: %s", remote, branch, err, msg)
+		return fail("%v: %s", err, msg)
 	}
-	// A push by URL does not update the remote-tracking ref; drop it so the
-	// next facts do not report a branch the remote no longer has.
-	_, _ = runGit(ctx, repo, "update-ref", "-d", "refs/remotes/"+remote+"/"+branch) // best-effort: a stale ref only mis-reports, the next fetch fixes it
+	// A push by URL updates no remote-tracking ref; drop it so the next
+	// facts do not report a branch the remote no longer has.
+	_, _ = runGit(ctx, repo, "update-ref", "-d", "refs/remotes/"+remote+"/"+branch) // best-effort: a stale ref only mis-reports until the next fetch
 	return nil
 }
 
@@ -85,42 +100,8 @@ func DeleteRemoteBranch(ctx context.Context, repo, remote, branch string) error 
 // so a test can change the remote's configuration in exactly that window.
 var afterRemoteCheck = func() {}
 
-// noURLRewrite refuses a URL that an insteadOf or pushInsteadOf rule would
-// still rewrite when pushed to directly: the frozen address must be the
-// address the push reaches.
-func noURLRewrite(ctx context.Context, repo, url string) error {
-	out, err := runGit(ctx, repo, "config", "--get-regexp", `^url\..*\.(insteadof|pushinsteadof)$`)
-	if err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) && ee.ExitCode() == 1 {
-			return nil // no rewrite rules at all
-		}
-		return fmt.Errorf("could not read the url rewrite rules: %w", err)
-	}
-	for _, l := range strings.Split(strings.ReplaceAll(out, "\r\n", "\n"), "\n") {
-		_, prefix, ok := strings.Cut(strings.TrimSpace(l), " ")
-		if ok && prefix != "" && strings.HasPrefix(url, prefix) {
-			return fmt.Errorf("a url rewrite rule applies to the remote's address")
-		}
-	}
-	return nil
-}
-
 // maxPushOutput bounds what a remote push may leave in memory.
 const maxPushOutput = 16 << 10
-
-// remotePushEnvFor is RemotePushEnv for one repository: when the repository
-// configures core.sshCommand (a key file, a jump host), GIT_SSH_COMMAND would
-// outrank it and break a push that works by hand, so the BatchMode command is
-// not added. Without a terminal or an askpass program ssh cannot prompt then
-// either.
-func remotePushEnvFor(ctx context.Context, repo string, base []string) []string {
-	repoSSH := false
-	if out, err := runGit(ctx, repo, "config", "--get", "core.sshCommand"); err == nil && strings.TrimSpace(out) != "" {
-		repoSSH = true
-	}
-	return pushEnv(base, repoSSH)
-}
 
 // RemotePushArgs is the argv DeleteRemoteBranch runs, exported for its test.
 func RemotePushArgs(remote, branch string) []string {
@@ -234,4 +215,67 @@ func singlePushTarget(ctx context.Context, repo, remote string) (string, error) 
 		return "", fmt.Errorf("the remote pushes to a different or to several addresses (%d fetch, %d push)", len(fetch), len(push))
 	}
 	return fetch[0], nil
+}
+
+// isolatedPushEnv is the environment the remote check and the push run in:
+// base without anything that points git at other config, another repository
+// or a trace (GIT_CONFIG_*, GIT_DIR, GIT_TRACE*, GIT_CURL_VERBOSE — a trace
+// prints the URL argv, credentials and all), with system and global config
+// OFF, and a SNAPSHOT of repo's credential.*, http.* and core.sshCommand
+// settings passed as GIT_CONFIG_COUNT/KEY/VALUE (in memory, never written to
+// a file). url.* rules are deliberately not carried: the URL is already
+// expanded, and a rule could only redirect it. Then RemotePushEnv's
+// no-prompt variables, keeping a configured ssh command.
+func isolatedPushEnv(ctx context.Context, repo string, base []string) ([]string, error) {
+	out, err := runGit(ctx, repo, "config", "--null", "--get-regexp", `^(credential\..*|http\..*|core\.sshcommand)$`)
+	if err != nil {
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) || ee.ExitCode() != 1 { // 1 = no such settings
+			return nil, fmt.Errorf("could not read the push settings: %w", err)
+		}
+		out = ""
+	}
+	env := make([]string, 0, len(base)+8)
+	for _, kv := range base {
+		k, _, _ := strings.Cut(kv, "=")
+		if !isolatedDrop(strings.ToUpper(k)) {
+			env = append(env, kv)
+		}
+	}
+	env = append(env, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull)
+	n, repoSSH := 0, false
+	for _, rec := range strings.Split(out, "\x00") {
+		key, val, ok := strings.Cut(rec, "\n")
+		if !ok || key == "" {
+			continue
+		}
+		if strings.EqualFold(key, "core.sshcommand") {
+			repoSSH = true
+		}
+		env = append(env, fmt.Sprintf("GIT_CONFIG_KEY_%d=%s", n, key), fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", n, val))
+		n++
+	}
+	env = append(env, fmt.Sprintf("GIT_CONFIG_COUNT=%d", n))
+	return pushEnv(env, repoSSH), nil
+}
+
+// isolatedDrop names the inherited variables isolatedPushEnv removes (k is
+// upper-cased: Windows environment names are case-insensitive).
+func isolatedDrop(k string) bool {
+	switch k {
+	case "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_CONFIG",
+		"GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
+		"GIT_CONFIG_NOSYSTEM", "GIT_CURL_VERBOSE":
+		return true
+	}
+	return strings.HasPrefix(k, "GIT_CONFIG_KEY_") || strings.HasPrefix(k, "GIT_CONFIG_VALUE_") || strings.HasPrefix(k, "GIT_TRACE")
+}
+
+// urlUserinfo matches the user:password@ part of a URL.
+var urlUserinfo = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.\-]*://)[^/@\s]+@`)
+
+// redactURLs masks any URL credentials in s: git output and errors reach
+// quild.log and a sidebar card.
+func redactURLs(s string) string {
+	return urlUserinfo.ReplaceAllString(s, "${1}***@")
 }

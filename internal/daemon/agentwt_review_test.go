@@ -403,6 +403,8 @@ func TestAgentWT_IncompleteSeedMarksTheRepositoryUncertain(t *testing.T) {
 			func(r *fakeRepo) { r.listErr = nil }, false},
 		{"truncated listing", &fakeRepo{branches: []string{"master"}, listErr: fmt.Errorf("%w: big", gitworktree.ErrOutputTruncated)},
 			func(r *fakeRepo) { r.listErr = nil }, true},
+		{"unsafe directory", &fakeRepo{branches: []string{"master"}, listErr: errors.New("exit status 128: fatal: detected dubious ownership")},
+			func(r *fakeRepo) { r.listErr = nil }, true},
 		{"git missing", &fakeRepo{branches: []string{"master"}, listErr: exec.ErrNotFound},
 			func(r *fakeRepo) { r.listErr = nil }, true},
 		{"complete", &fakeRepo{branches: []string{"master"}}, func(*fakeRepo) {}, false},
@@ -516,5 +518,31 @@ func TestAgentWTAct_UncertainRepoNeedsTheAcknowledgment(t *testing.T) {
 	}
 	if got := d.agentWorktreeAct(ipc.AgentWorktreeActReqPayload{ID: "e-wt", RemoveWorktree: true, AcceptUncertain: true}); got.Error != "" || len(*calls) != 1 {
 		t.Errorf("act = %+v, removals %v; want the removal once acknowledged", got, *calls)
+	}
+}
+
+// The new child's hook can arrive after spawnPane published startingGen but
+// before ptyGen moves. Its subagent record must carry the NEW generation, so
+// a late exit cleanup of the old child keeps it.
+//
+// Fails if paneForAgentWT reports ptyGen alone.
+func TestAgentWT_ProbeBeforeGenerationBumpCarriesTheStartingGen(t *testing.T) {
+	d := daemonWithRecord(t)
+	tab := d.session.CreateTab("t")
+	pane, err := d.session.CreatePane(tab.ID, "/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pane.PluginMu.Lock()
+	pane.ptyGen, pane.startingGen = 1, 2 // child 2 is starting; ptyGen not bumped yet
+	pane.PluginMu.Unlock()
+
+	p := probeFor(pane.ID, "/w/new")
+	p.Data[hookevents.DataProbeAgent] = "new-1"
+	d.agentWT.probe(p)
+	d.agentWT.subagentsExited(pane.ID, 1) // the old child's exit, handled late
+
+	if got := d.agentWT.paneInDir("/w/new"); got != pane.ID {
+		t.Errorf("paneInDir(/w/new) = %q, want the starting child's subagent kept", got)
 	}
 }

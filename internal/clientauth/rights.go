@@ -184,42 +184,47 @@ func checkStandardPayload(msg *ipc.Message) (bool, string) {
 	case overlay:
 		return false, "overlay panes need full rights"
 	}
-	remote, ok := carriesRemoteDelete(msg)
+	remote, uncertain, ok := carriesRemoteDelete(msg)
 	switch {
 	case !ok:
 		return false, "malformed " + msg.Type
 	case remote:
 		return false, "remote branch delete needs a full token"
+	case uncertain:
+		return false, "confirming a cleanup in an uncertain repository needs a full token"
 	}
 	return true, ""
 }
 
 // carriesRemoteDelete reports a close that asks to delete a branch on its
-// REMOTE. That push reaches everyone who shares the remote, so it is a full
+// REMOTE, and (uncertain) a cleanup act that acknowledges an uncertain
+// repository record: that acknowledgment stands for a person pressing y,
+// so a standard token, which a non-interactive client holds, cannot send it.
+// The remote push reaches everyone who shares the remote, so it is a full
 // token's action even though closing the pane is not. ok is false only for a
 // payload that is present and does not decode.
-func carriesRemoteDelete(msg *ipc.Message) (remote, ok bool) {
+func carriesRemoteDelete(msg *ipc.Message) (remote, uncertain, ok bool) {
 	switch msg.Type {
 	case ipc.MsgDestroyPane:
 		var p ipc.DestroyPanePayload
 		if !decodeIfPresent(msg, &p) {
-			return false, false
+			return false, false, false
 		}
-		return p.DeleteRemoteBranch, true
+		return p.DeleteRemoteBranch, false, true
 	case ipc.MsgDestroyTab:
 		var p ipc.DestroyTabPayload
 		if !decodeIfPresent(msg, &p) {
-			return false, false
+			return false, false, false
 		}
-		return p.DeleteRemoteBranch, true
+		return p.DeleteRemoteBranch, false, true
 	case ipc.MsgAgentWorktreeActReq:
 		var p ipc.AgentWorktreeActReqPayload
 		if !decodeIfPresent(msg, &p) {
-			return false, false
+			return false, false, false
 		}
-		return p.DeleteRemoteBranch, true
+		return p.DeleteRemoteBranch, p.AcceptUncertain, true
 	}
-	return false, true
+	return false, false, true
 }
 
 // carriers decodes the five create shapes. ok is false only for a payload

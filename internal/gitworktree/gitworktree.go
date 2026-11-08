@@ -536,5 +536,30 @@ func ParseStatusZ(out string) (files []FileChange, total int) {
 // listing, git missing, a timeout). Matched on git's message; a localized
 // git does not match, which falls to "unknown", the safe side.
 func IsNotRepository(err error) bool {
+	if errors.Is(err, ErrNotRepository) {
+		return true
+	}
 	return err != nil && !errors.Is(err, ErrOutputTruncated) && strings.Contains(err.Error(), "not a git repository")
+}
+
+// ErrNotRepository is ListStrict's answer when git says dir is in no
+// repository.
+var ErrNotRepository = errors.New("not a git repository")
+
+// ListStrict is List without the not-a-repository collapse: git saying "not
+// a git repository" is ErrNotRepository, and EVERY other failure (a non-zero
+// exit for a permission error, an unsafe directory, a corrupt repository; a
+// truncated listing; git missing; a timeout) is returned as itself. For the
+// callers that must tell "no repository" from "could not read it" — the
+// agent-worktree baseline and the removal's still-registered check — where
+// the two answers authorise different things.
+func ListStrict(ctx context.Context, dir string) ([]Worktree, error) {
+	out, err := runGit(ctx, dir, "worktree", "list", "--porcelain")
+	if err != nil {
+		if IsNotRepository(err) {
+			return nil, ErrNotRepository
+		}
+		return nil, err
+	}
+	return parsePorcelain(out), nil
 }

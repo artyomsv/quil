@@ -442,7 +442,7 @@ func (d *Daemon) removeOneWorktreeFull(path string, wantFacts bool) (res removeR
 // decides whether Quil may delete a directory itself, and an unknown answer
 // must never be the one that authorises that.
 func worktreeRegistered(ctx context.Context, repo, path string) bool {
-	list, err := worktreeListFn(ctx, repo)
+	list, err := worktreeListStrictFn(ctx, repo)
 	if err != nil {
 		return true
 	}

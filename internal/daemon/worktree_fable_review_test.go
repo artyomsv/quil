@@ -429,52 +429,110 @@ func TestCloseUnattended_Roles(t *testing.T) {
 	}
 }
 
-// H-12 end to end: a non-TUI client (the socket says hello as an MCP bridge)
-// sends destroy_pane_req{remove_worktree} for a pane in a REAL Quil-made,
-// Quil-marked worktree that holds a tracked change, an untracked file or an
-// ignored one. The pane closes; the worktree and the file survive.
-func TestDestroyPaneReq_RealGit_UnattendedRemovalKeepsWork(t *testing.T) {
-	for _, tc := range []struct{ name, file, content string }{
-		{"tracked change", "f.txt", "changed\n"},
-		{"untracked", "new.txt", "new\n"},
-		{"ignored", "local.env", "SECRET=1\n"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			repo := realGitRepoForDaemon(t)
-			if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("*.env\n"), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			runGitForAbandon(t, repo, "add", ".gitignore")
-			runGitForAbandon(t, repo, "commit", "-q", "-m", "ignore env")
-			t.Setenv("QUIL_HOME", t.TempDir())
-			d, client := mcpTestDaemon(t)
-			tabID, _ := seedTab(t, d, client)
-			waitCreateWorkersAtCleanup(t, d)
-			created := d.worktreeAddAndCreate(worktreeCreate(tabID, repo, "feat/keep"))
-			if created.Error != "" || created.PaneID == "" {
-				t.Fatalf("create: %+v", created)
-			}
-			path := gitworktree.DerivePath(repo, "feat/keep")
-			if err := os.WriteFile(filepath.Join(path, tc.file), []byte(tc.content), 0o644); err != nil {
-				t.Fatal(err)
-			}
-
-			roundTrip(t, client, ipc.MsgDestroyPaneReq, ipc.MsgDestroyPaneResp,
-				ipc.DestroyPaneReqPayload{PaneID: created.PaneID, RemoveWorktree: true})
-
-			deadline := time.Now().Add(15 * time.Second)
-			for len(eventsOfType(d, "worktree_kept")) == 0 {
-				if time.Now().After(deadline) {
-					t.Fatal("no kept card: the unattended removal did not decide")
+// H-12 end to end, through the real socket as a non-TUI client (hello role
+// bridge): every close message that can ask for a worktree removal, against a
+// REAL Quil-made, Quil-marked worktree that holds a tracked change, an
+// untracked file or an ignored one — with status.showUntrackedFiles=no set,
+// which would hide the last two from a status that does not pin it. The pane
+// closes; the worktree and the file's CONTENT survive.
+//
+// Fails if an unattended close removes a checkout that holds anything, or if
+// the clean check honours a config that hides untracked or ignored files.
+func TestUnattendedClose_RealGit_KeepsWorkOnEveryCloseMessage(t *testing.T) {
+	for _, close := range []string{ipc.MsgDestroyPaneReq, ipc.MsgDestroyPane, ipc.MsgDestroyTab} {
+		for _, tc := range []struct{ name, file, content string }{
+			{"tracked change", "f.txt", "changed\n"},
+			{"untracked", "new.txt", "new\n"},
+			{"ignored", "local.env", "SECRET=1\n"},
+		} {
+			t.Run(close+"/"+tc.name, func(t *testing.T) {
+				d, client, _, path, paneID, tabID := unattendedFixture(t)
+				if err := os.WriteFile(filepath.Join(path, tc.file), []byte(tc.content), 0o644); err != nil {
+					t.Fatal(err)
 				}
-				time.Sleep(20 * time.Millisecond)
-			}
-			if c := eventsOfType(d, "worktree_kept")[0]; c.Data["reason"] != keptHasChanges {
-				t.Errorf("card reason = %q, want %q", c.Data["reason"], keptHasChanges)
-			}
-			if _, err := os.Stat(filepath.Join(path, tc.file)); err != nil {
-				t.Errorf("the %s file is gone: %v", tc.name, err)
-			}
-		})
+
+				sendUnattendedClose(t, client, close, paneID, tabID)
+
+				waitKeptCard(t, d, keptHasChanges)
+				got, err := os.ReadFile(filepath.Join(path, tc.file))
+				if err != nil || string(got) != tc.content {
+					t.Errorf("the %s file = %q, %v; want its content to survive", tc.name, got, err)
+				}
+			})
+		}
+	}
+}
+
+// A CLEAN worktree is removed by an unattended close (the browser's close
+// keeps working), unforced, and its branch is kept.
+func TestUnattendedClose_RealGit_RemovesACleanCheckoutKeepsItsBranch(t *testing.T) {
+	_, client, repo, path, paneID, tabID := unattendedFixture(t)
+
+	sendUnattendedClose(t, client, ipc.MsgDestroyPaneReq, paneID, tabID)
+
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the clean worktree was not removed")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if out := runGitForAbandon(t, repo, "branch", "--list", "feat/keep"); strings.TrimSpace(out) == "" {
+		t.Error("the branch went with the worktree")
+	}
+}
+
+// unattendedFixture is a socket daemon (the client says hello as a bridge)
+// holding a pane in a real Quil-made worktree of a repository that ignores
+// *.env and sets status.showUntrackedFiles=no.
+func unattendedFixture(t *testing.T) (d *Daemon, client *ipc.Client, repo, path, paneID, tabID string) {
+	t.Helper()
+	repo = realGitRepoForDaemon(t)
+	if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("*.env\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitForAbandon(t, repo, "add", ".gitignore")
+	runGitForAbandon(t, repo, "commit", "-q", "-m", "ignore env")
+	runGitForAbandon(t, repo, "config", "status.showUntrackedFiles", "no")
+	t.Setenv("QUIL_HOME", t.TempDir())
+	d, client = mcpTestDaemon(t)
+	tabID, _ = seedTab(t, d, client)
+	waitCreateWorkersAtCleanup(t, d)
+	created := d.worktreeAddAndCreate(worktreeCreate(tabID, repo, "feat/keep"))
+	if created.Error != "" || created.PaneID == "" {
+		t.Fatalf("create: %+v", created)
+	}
+	return d, client, repo, gitworktree.DerivePath(repo, "feat/keep"), created.PaneID, tabID
+}
+
+// sendUnattendedClose sends one close message asking for the worktree removal.
+func sendUnattendedClose(t *testing.T, client *ipc.Client, close, paneID, tabID string) {
+	t.Helper()
+	switch close {
+	case ipc.MsgDestroyPaneReq:
+		roundTrip(t, client, ipc.MsgDestroyPaneReq, ipc.MsgDestroyPaneResp,
+			ipc.DestroyPaneReqPayload{PaneID: paneID, RemoveWorktree: true})
+	case ipc.MsgDestroyPane:
+		sendNoID(t, client, ipc.MsgDestroyPane, ipc.DestroyPanePayload{PaneID: paneID, RemoveWorktree: true})
+	case ipc.MsgDestroyTab:
+		sendNoID(t, client, ipc.MsgDestroyTab, ipc.DestroyTabPayload{TabID: tabID, RemoveWorktree: true})
+	}
+}
+
+// waitKeptCard waits for the first worktree_kept card and checks its reason.
+func waitKeptCard(t *testing.T, d *Daemon, reason string) {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for len(eventsOfType(d, "worktree_kept")) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("no kept card: the unattended removal did not decide")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if c := eventsOfType(d, "worktree_kept")[0]; c.Data["reason"] != reason {
+		t.Errorf("card reason = %q, want %q", c.Data["reason"], reason)
 	}
 }

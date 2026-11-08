@@ -897,3 +897,46 @@ func TestReadBranchFacts_RealGit_LinkedRepoRootStillFindsTheWorktree(t *testing.
 		t.Errorf("branch = %q, want feat/l", f.Branch)
 	}
 }
+
+// status.showUntrackedFiles=no hides untracked AND ignored files from a plain
+// `git status`. The removal's safety status pins untracked listing, so both
+// are still counted.
+//
+// Fails if Status honours a config that hides what a removal would destroy.
+func TestStatus_RealGit_CountsUntrackedAndIgnoredDespiteConfig(t *testing.T) {
+	repo := realGitRepo(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("*.env\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitIn(t, repo, "add", ".gitignore")
+	runGitIn(t, repo, "commit", "-q", "-m", "ignore env")
+	runGitIn(t, repo, "config", "status.showUntrackedFiles", "no")
+	path := DerivePath(repo, "feat/cfg")
+	if _, err := Add(ctx, repo, path, "feat/cfg"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	for _, f := range []string{"note.txt", "local.env"} {
+		if err := os.WriteFile(filepath.Join(path, f), []byte("x\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	st, err := Status(ctx, path)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if st.Changes != 2 {
+		t.Errorf("changes = %d, want 2 (an untracked and an ignored file)", st.Changes)
+	}
+	// And the unforced removal's own clean check is not blinded either.
+	if err := os.Remove(filepath.Join(path, "local.env")); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveCleanWorktree(ctx, repo, path); err == nil {
+		t.Error("RemoveCleanWorktree removed a checkout holding an untracked file")
+	}
+	if _, err := os.Stat(filepath.Join(path, "note.txt")); err != nil {
+		t.Errorf("the untracked file is gone: %v", err)
+	}
+}

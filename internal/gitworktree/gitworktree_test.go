@@ -533,11 +533,13 @@ func TestStatus_DoesNotTakeOptionalLocks(t *testing.T) {
 		t.Fatalf("git calls = %v, want one", *calls)
 	}
 	args := (*calls)[0]
-	var sawNoOptionalLocks, sawIgnored bool
+	var sawNoOptionalLocks, sawIgnored, sawUntracked bool
 	for _, a := range args {
 		switch a {
 		case "--no-optional-locks":
 			sawNoOptionalLocks = true
+		case "--untracked-files=normal":
+			sawUntracked = true
 		case "--ignored":
 			sawIgnored = true
 		}
@@ -547,6 +549,9 @@ func TestStatus_DoesNotTakeOptionalLocks(t *testing.T) {
 	}
 	if !sawIgnored {
 		t.Errorf("argv = %v, want --ignored — an ignored .env is destroyed by the removal and must be counted", args)
+	}
+	if !sawUntracked {
+		t.Errorf("argv = %v, want --untracked-files=normal — status.showUntrackedFiles=no would hide untracked AND ignored files", args)
 	}
 }
 

@@ -401,7 +401,7 @@ func Add(ctx context.Context, repo, path, branch string) (string, error) {
 // (It used to force: a fresh checkout can look dirty on a repository with
 // line-ending differences, and the caller now keeps a dirty one instead.)
 func Remove(ctx context.Context, repo, path string, branch string) error {
-	if _, err := runGit(ctx, repo, "worktree", "remove", "--", path); err != nil {
+	if _, err := runGit(ctx, repo, "-c", "status.showUntrackedFiles=normal", "worktree", "remove", "--", path); err != nil {
 		return fmt.Errorf("%w: git worktree remove %s: %v", ErrWorktreeNotRemoved, path, err)
 	}
 	// Only after the worktree is gone: git refuses to delete a branch that a
@@ -451,7 +451,7 @@ func RemoveWorktree(ctx context.Context, repo, path string) error {
 // untracked files (ignored files are the caller's to check — git does not).
 // The branch is left alone, as with RemoveWorktree.
 func RemoveCleanWorktree(ctx context.Context, repo, path string) error {
-	if _, err := runGit(ctx, repo, "worktree", "remove", "--", path); err != nil {
+	if _, err := runGit(ctx, repo, "-c", "status.showUntrackedFiles=normal", "worktree", "remove", "--", path); err != nil {
 		return fmt.Errorf("git worktree remove %s: %w", path, err)
 	}
 	return nil
@@ -500,7 +500,7 @@ func Status(ctx context.Context, path string) (StatusReport, error) {
 	// -z because the report now NAMES the files: without it git quotes a name
 	// holding a space, a quote or a non-ASCII byte and a newline in a name
 	// splits it into two entries.
-	out, err := runGit(ctx, path, "--no-optional-locks", "status", "--porcelain", "-z", "--ignored")
+	out, err := runGit(ctx, path, "--no-optional-locks", "status", "--porcelain", "-z", "--ignored", "--untracked-files=normal")
 	if err != nil {
 		return StatusReport{}, fmt.Errorf("git status %s: %w", path, err)
 	}

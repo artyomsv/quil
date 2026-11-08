@@ -239,13 +239,21 @@ file list, so the removal goes ahead only while `git status --ignored` counts
 nothing in the checkout, read right before each attempt (`keptHasChanges`
 otherwise, unreadable `keptRepoUnreadable`), and through
 `gitworktree.RemoveCleanWorktree` — plain `git worktree remove`, no `--force`,
-so git refuses tracked or untracked work landing after that read. The browser
+so git refuses tracked or untracked work landing after that read. **Both
+checks PIN untracked listing**: `status.showUntrackedFiles=no` (repository or
+global) makes a plain `git status` skip untracked AND ignored files, so
+`gitworktree.Status` passes `--untracked-files=normal` and the unforced
+removals (`RemoveCleanWorktree`, `Remove`) run with
+`-c status.showUntrackedFiles=normal`, which git hands down to the status its
+own clean check spawns (`TestStatus_RealGit_CountsUntrackedAndIgnoredDespiteConfig`). The browser
 (`closePane(…, removeWorktree)`) keeps working for a clean checkout; a Quil
 window's close is unchanged (the user confirmed against the file list). The
 ignored-file gap after the read is the same-user residual. Tests:
 `TestRemoveOwnedWorktrees_UnattendedRemovalNeedsACleanCheckout`,
-`TestDestroyPaneReq_RealGit_UnattendedRemovalKeepsWork` (socket, bridge role,
-tracked / untracked / ignored). Every refusal and failure is a
+`TestUnattendedClose_RealGit_KeepsWorkOnEveryCloseMessage` (socket, bridge role,
+every close message × tracked / untracked / ignored, with
+`status.showUntrackedFiles=no`), `…RemovesACleanCheckoutKeepsItsBranch` (a
+clean checkout is removed unforced, its branch kept). Every refusal and failure is a
 `worktree_branch_kept` sidebar card carrying the CLOSED pane's id and name
 (`paneRef`, captured before the destroy); success is `worktree_branch_deleted`.
 All three close paths go through `removeOwnedWorktreesFn` — the tab close used

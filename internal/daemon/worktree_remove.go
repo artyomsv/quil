@@ -567,7 +567,15 @@ func physicalPathBy(path string, deadline time.Time) (string, bool) {
 			}
 			ch <- result{p, true}
 		case errors.Is(err, fs.ErrNotExist):
-			ch <- result{"", true}
+			// A missing tail does not prove nobody is there: a process keeps
+			// its cwd after a rename. Resolve the nearest EXISTING ancestor and
+			// re-append the rest, so /link/sub (sub renamed) still names the
+			// real worktree it was under.
+			if p, ok := resolveNearestAncestor(eval, path); ok {
+				ch <- result{p, true}
+			} else {
+				ch <- result{"", false}
+			}
 		default:
 			ch <- result{"", false}
 		}
@@ -592,4 +600,33 @@ func physicalPathBy(path string, deadline time.Time) (string, bool) {
 func pathWithin(parent, child string) bool {
 	p, c := normalizeWorktreePath(parent), normalizeWorktreePath(child)
 	return p == c || strings.HasPrefix(c, p+string(filepath.Separator))
+}
+
+// resolveNearestAncestor resolves the deepest existing ancestor of path with
+// eval and joins the missing remainder back on. ok is false when no ancestor
+// answers (an error other than "does not exist" on the way up).
+func resolveNearestAncestor(eval func(string) (string, error), path string) (string, bool) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", false
+	}
+	rest := ""
+	for d := abs; ; {
+		p, err := eval(d)
+		switch {
+		case err == nil:
+			if a, aerr := filepath.Abs(p); aerr == nil {
+				p = a
+			}
+			return filepath.Join(p, rest), true
+		case !errors.Is(err, fs.ErrNotExist):
+			return "", false
+		}
+		parent := filepath.Dir(d)
+		if parent == d {
+			return "", false
+		}
+		rest = filepath.Join(filepath.Base(d), rest)
+		d = parent
+	}
 }

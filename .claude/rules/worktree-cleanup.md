@@ -348,11 +348,20 @@ arrive in between.
 **The delete checks compare REAL folders** (`paneInWorktree(path, true)` →
 `resolvedWithin`): a pane CWD, a pane's recorded worktree and every agent or
 subagent probe directory is matched lexically AND with symlinks resolved, so a
-resident working through a link to the worktree keeps it. A path that no longer
-resolves is matched lexically only (a folder that is gone holds nobody). All
+resident working through a link to the worktree keeps it. A path that
+no longer exists is resolved through its nearest EXISTING ancestor with the
+missing remainder re-appended (`resolveNearestAncestor`): a process keeps its
+cwd after a rename, so a stale path still names the worktree it was under. All
 resolution of one check shares ONE deadline (`resolveTimeout`, 3 s) under the
 process-wide filesystem-call limit, and an UNANSWERED resolution (timeout, no
 permit, unreadable) counts as in use — a pane on a dead share keeps the
 worktree instead of hanging the cleanup slot. The
 cleanup view's `in use` hint passes `false`: it runs on a dispatch goroutine,
 where a filesystem call may not wait.
+
+**The Uncertain mark does not gate a pane or tab CLOSE, by ruling.** The mark
+says the agent record's BASELINE may hold worktrees an agent made (so the view
+may miss leftovers); it says nothing about who sits in a folder. A close
+deletes only a worktree QUIL created for the closing pane (`WorktreeOwned`),
+after the same occupancy check the view uses (`paneInWorktree(path, true)`),
+which reads pane folders and agent probe directories, never the baseline.

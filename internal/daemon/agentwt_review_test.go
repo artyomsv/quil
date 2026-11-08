@@ -647,3 +647,41 @@ func TestPaneInWorktree_HungResolutionKeepsTheWorktreeAndReturns(t *testing.T) {
 		t.Fatal("the delete check hung on an unanswered resolution")
 	}
 }
+
+// A subagent last reported a subfolder THROUGH A LINK, and that subfolder was
+// then renamed: the stale path no longer resolves, but it still names the
+// real worktree it was under. The close's delete gate keeps the worktree.
+//
+// Fails if a missing path is read as "nobody there".
+func TestRemoveOwnedWorktrees_RenamedDescendantThroughALinkKeepsTheWorktree(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "real", "wt")
+	sub := filepath.Join(real, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	d := daemonWithRecord(t)
+	tab := d.session.CreateTab("t")
+	pane, err := d.session.CreatePane(tab.ID, "/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := probeFor(pane.ID, filepath.Join(link, "sub"))
+	p.Data[hookevents.DataProbeAgent] = "sub-1"
+	d.agentWT.probe(p)
+	if err := os.Rename(sub, filepath.Join(real, "moved")); err != nil {
+		t.Fatal(err)
+	}
+	stubWorktreeList(t, []gitworktree.Worktree{{Path: "/repo", Main: true}, {Path: real, Branch: "feat"}}, nil)
+	calls := stubRemoveWorktree(t, nil)
+
+	d.removeOwnedWorktreesWith([]string{real}, branchDeleteOpts{})
+
+	if len(*calls) != 0 {
+		t.Errorf("removed %v while a subagent's (renamed) folder is inside it", *calls)
+	}
+}

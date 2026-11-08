@@ -452,6 +452,7 @@ func TestSplitPaneReq_PlaceholderClosedDuringCheckout(t *testing.T) {
 		return nil
 	}
 	t.Cleanup(func() { removeWorktreeFn = prevRm })
+	allowRollback(t)
 
 	resp := split(t, client, ipc.SplitPaneReqPayload{TargetPaneID: first, Placement: ipc.PlacementRight,
 		Pane: ipc.SplitPaneSpec{CWD: repo, Worktree: &ipc.SplitWorktree{Branch: "feat/x"}}})
@@ -660,6 +661,7 @@ func TestSplitPaneReq_PlaceholderMovedDuringCheckout(t *testing.T) {
 	prevRm := removeWorktreeFn
 	removeWorktreeFn = func(_ context.Context, _, path, _ string) error { removed <- path; return nil }
 	t.Cleanup(func() { removeWorktreeFn = prevRm })
+	allowRollback(t)
 
 	resp := split(t, client, ipc.SplitPaneReqPayload{TargetPaneID: first, Placement: ipc.PlacementRight,
 		Pane: ipc.SplitPaneSpec{CWD: repo, Worktree: &ipc.SplitWorktree{Branch: "feat/x"}}})

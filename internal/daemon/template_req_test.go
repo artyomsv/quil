@@ -462,6 +462,7 @@ func TestTemplateIPC_FirstWorktreeSubdir_ValidatesNewCheckout(t *testing.T) {
 				return err
 			}
 			t.Cleanup(func() { removeWorktreeFn = oldRemove })
+			allowRollback(t)
 			stubAdd(t, func(_ context.Context, _, path, _ string) error {
 				if err := os.MkdirAll(path, 0700); err != nil {
 					return err

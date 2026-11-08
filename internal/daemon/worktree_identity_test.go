@@ -425,6 +425,9 @@ func TestAbandonRefusal_KeepsOnEveryDoubt(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			d := newTestDaemon(t)
+			stubWorktreeStatus(t, func(string) (int, error) { return tc.changes, tc.statErr })
+			stubBranchFacts(t, func(string) (gitworktree.BranchFacts, error) { return tc.facts, tc.factErr })
+			// AFTER stubWorktreeStatus, which installs an always-ours mark.
 			calls := 0
 			prev := ownerMarkMatchesFn
 			ownerMarkMatchesFn = func(context.Context, string, string) (bool, error) {
@@ -433,8 +436,6 @@ func TestAbandonRefusal_KeepsOnEveryDoubt(t *testing.T) {
 				return ok, nil
 			}
 			t.Cleanup(func() { ownerMarkMatchesFn = prev })
-			stubWorktreeStatus(t, func(string) (int, error) { return tc.changes, tc.statErr })
-			stubBranchFacts(t, func(string) (gitworktree.BranchFacts, error) { return tc.facts, tc.factErr })
 
 			if got := d.abandonRefusal("/repo", "/w/feat-x", tc.token); got != tc.want {
 				t.Errorf("abandonRefusal = %q, want %q", got, tc.want)

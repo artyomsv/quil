@@ -446,6 +446,17 @@ func RemoveWorktree(ctx context.Context, repo, path string) error {
 	return nil
 }
 
+// RemoveCleanWorktree is RemoveWorktree WITHOUT --force, for a removal nobody
+// confirmed against the file list: git refuses a checkout holding modified or
+// untracked files (ignored files are the caller's to check — git does not).
+// The branch is left alone, as with RemoveWorktree.
+func RemoveCleanWorktree(ctx context.Context, repo, path string) error {
+	if _, err := runGit(ctx, repo, "worktree", "remove", "--", path); err != nil {
+		return fmt.Errorf("git worktree remove %s: %w", path, err)
+	}
+	return nil
+}
+
 // Status counts everything the forced removal would destroy in the worktree at
 // path: modified tracked files, untracked ones, AND IGNORED ones.
 //

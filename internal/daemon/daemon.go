@@ -2795,6 +2795,7 @@ func (d *Daemon) handleDestroyTab(conn *ipc.Conn, msg *ipc.Message) {
 	if payload.RemoveWorktree {
 		worktrees = ownedWorktreePaths(panes)
 		branches = branchOpts(d.branchDeleteAllowed(conn, payload.DeleteBranch), payload.Confirmations, panes)
+		branches.Unattended = d.closeUnattended(conn)
 	}
 	d.session.DestroyTab(payload.TabID)
 	for _, p := range panes {
@@ -3581,6 +3582,7 @@ func (d *Daemon) handleDestroyPane(conn *ipc.Conn, msg *ipc.Message) {
 		if payload.RemoveWorktree {
 			worktrees = ownedWorktreePaths([]*Pane{pane})
 			branches = branchOpts(d.branchDeleteAllowed(conn, payload.DeleteBranch), payload.Confirmations, []*Pane{pane})
+			branches.Unattended = d.closeUnattended(conn)
 		}
 		// Same window, same reason: the card needs the pane's name, which is
 		// gone once DestroyPane runs.
@@ -8464,6 +8466,7 @@ func (d *Daemon) handleDestroyPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 		// only record of its worktree) out of the session maps.
 		worktrees = ownedWorktreePaths([]*Pane{pane})
 		closeOpts = branchOpts(false, nil, []*Pane{pane})
+		closeOpts.Unattended = d.closeUnattended(conn)
 	}
 
 	// Captured BEFORE DestroyPane, which takes the pane out of the session

@@ -230,7 +230,22 @@ view, or ask a close to delete a branch** (`destructiveActRefusal`,
 are PUBLIC — any client reads them from `agent_worktree_facts_req` — so they
 prove freshness, not consent. Forget stays open to any client. The role is
 self-declared: this binds cooperating clients, not a same-user process willing
-to lie (the known limit). Every refusal and failure is a
+to lie (the known limit).
+
+**A close's WORKTREE removal from anything but a Quil window is UNATTENDED**
+(`closeUnattended` → `branchDeleteOpts.Unattended`, on all three close
+messages: `destroy_pane`, `destroy_tab`, `destroy_pane_req`). Nobody saw the
+file list, so the removal goes ahead only while `git status --ignored` counts
+nothing in the checkout, read right before each attempt (`keptHasChanges`
+otherwise, unreadable `keptRepoUnreadable`), and through
+`gitworktree.RemoveCleanWorktree` — plain `git worktree remove`, no `--force`,
+so git refuses tracked or untracked work landing after that read. The browser
+(`closePane(…, removeWorktree)`) keeps working for a clean checkout; a Quil
+window's close is unchanged (the user confirmed against the file list). The
+ignored-file gap after the read is the same-user residual. Tests:
+`TestRemoveOwnedWorktrees_UnattendedRemovalNeedsACleanCheckout`,
+`TestDestroyPaneReq_RealGit_UnattendedRemovalKeepsWork` (socket, bridge role,
+tracked / untracked / ignored). Every refusal and failure is a
 `worktree_branch_kept` sidebar card carrying the CLOSED pane's id and name
 (`paneRef`, captured before the destroy); success is `worktree_branch_deleted`.
 All three close paths go through `removeOwnedWorktreesFn` — the tab close used

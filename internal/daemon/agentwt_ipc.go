@@ -370,6 +370,15 @@ func (d *Daemon) branchDeleteAllowed(conn *ipc.Conn, asked bool) bool {
 	return true
 }
 
+// closeUnattended reports a close whose worktree removal nobody confirmed
+// against the file list: it came from anything but a Quil window (an MCP
+// bridge, the browser, a script). Such a removal goes ahead only while the
+// checkout holds nothing, and unforced (branchDeleteOpts.Unattended). A nil
+// conn is an in-process caller.
+func (d *Daemon) closeUnattended(conn *ipc.Conn) bool {
+	return conn != nil && d.hellos.roleOf(conn) != "tui"
+}
+
 func uncertainAckRefusal(req ipc.AgentWorktreeActReqPayload, role string) string {
 	if req.AcceptUncertain && role != "tui" {
 		return "only a Quil window can confirm a cleanup in an uncertain repository"

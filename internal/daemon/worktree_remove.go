@@ -51,6 +51,10 @@ const (
 // difference is whether the user's commits survive.
 var removeWorktreeKeepBranchFn = gitworktree.RemoveWorktree
 
+// removeCleanWorktreeFn is the UNFORCED removal an unattended close uses: git
+// itself refuses a checkout holding modified or untracked files.
+var removeCleanWorktreeFn = gitworktree.RemoveCleanWorktree
+
 // removeOwnedWorktreesFn is the test seam for the close-time removal.
 var removeOwnedWorktreesFn = func(d *Daemon, paths []string, opt branchDeleteOpts) {
 	d.removeOwnedWorktreesWith(paths, opt)
@@ -87,6 +91,11 @@ type branchDeleteOpts struct {
 	// Owners maps a worktree path (as ownedWorktreePaths returns it) to the
 	// pane that owned it.
 	Owners map[string]paneRef
+	// Unattended: the close did not come from a Quil window, so nobody saw the
+	// file list. The worktree is then removed only while git status counts
+	// nothing in it (ignored files included), and without --force, so git
+	// itself refuses whatever appears after that check.
+	Unattended bool
 }
 
 func (o branchDeleteOpts) wanted() bool { return o.Local }
@@ -271,7 +280,7 @@ func (d *Daemon) removeOwnedWorktreesWith(paths []string, opt branchDeleteOpts) 
 // dialog are gone by now, and a branch that silently survived a delete the
 // user asked for is the outcome this must never hide.
 func (d *Daemon) removeWorktreeWithBranch(path string, opt branchDeleteOpts) removeResult {
-	res := d.removeOneWorktreeFull(path, opt.Tokens[path], opt.wanted())
+	res := d.removeOneWorktreeFull(path, opt.Tokens[path], opt.wanted(), opt.Unattended)
 	if !opt.wanted() {
 		return res
 	}
@@ -357,7 +366,7 @@ type removeResult struct {
 // removeOneWorktreeFull is removeOneWorktree, also reading the branch facts
 // before the removal when wantFacts, and reporting whether git no longer
 // holds the worktree afterwards.
-func (d *Daemon) removeOneWorktreeFull(path, token string, wantFacts bool) (res removeResult) {
+func (d *Daemon) removeOneWorktreeFull(path, token string, wantFacts, unattended bool) (res removeResult) {
 	if !claimBlockingFSCall() {
 		log.Printf("worktree remove: %s kept, too many filesystem calls in flight", path)
 		res.reason = keptBusy
@@ -435,7 +444,25 @@ func (d *Daemon) removeOneWorktreeFull(path, token string, wantFacts bool) (res 
 		if !stillOurs() {
 			return
 		}
-		err = removeWorktreeKeepBranchFn(ctx, repo, path)
+		if unattended {
+			// Nobody saw the file list: remove only what holds nothing, read
+			// right before the attempt (ignored files included), and let a
+			// plain `worktree remove` refuse what lands after this read.
+			st, serr := worktreeStatusFn(ctx, path)
+			switch {
+			case serr != nil:
+				log.Printf("worktree remove: %s kept, status before an unattended removal: %v", path, serr)
+				res.reason = keptRepoUnreadable
+				return
+			case st.Changes > 0:
+				log.Printf("worktree remove: %s kept, it holds %d changes and the close was not confirmed in a Quil window", path, st.Changes)
+				res.reason = keptHasChanges
+				return
+			}
+			err = removeCleanWorktreeFn(ctx, repo, path)
+		} else {
+			err = removeWorktreeKeepBranchFn(ctx, repo, path)
+		}
 		if err == nil {
 			res.removed = true
 			// Logged on SUCCESS as well, because this is the only record that a

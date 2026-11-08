@@ -371,3 +371,109 @@ func TestBranchDeleteAllowed_OnlyFromAQuilWindow(t *testing.T) {
 		t.Error("the flag is not passed through for an in-process caller or an unticked row")
 	}
 }
+
+// H-12: a close that did not come from a Quil window (nobody saw the file
+// list) removes a worktree only while git status counts nothing in it, and
+// never forced; a checkout holding changes is kept with a card.
+//
+// Fails if an unattended close reaches the forced removal, or removes a
+// checkout that holds anything.
+func TestRemoveOwnedWorktrees_UnattendedRemovalNeedsACleanCheckout(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		changes int
+		wantRm  bool
+	}{
+		{"holds changes", 2, false},
+		{"clean", 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := newTestDaemon(t)
+			stubWorktreeList(t, []gitworktree.Worktree{{Path: "/repo", Main: true}, {Path: "/w/feat-a", Branch: "x"}}, nil)
+			forced := stubRemoveWorktree(t, nil)
+			stubWorktreeStatus(t, func(string) (int, error) { return tc.changes, nil })
+			var clean []string
+			prev := removeCleanWorktreeFn
+			removeCleanWorktreeFn = func(_ context.Context, _, path string) error { clean = append(clean, path); return nil }
+			t.Cleanup(func() { removeCleanWorktreeFn = prev })
+			opt := identityOpts()
+			opt.Unattended = true
+
+			d.removeOwnedWorktreesWith([]string{"/w/feat-a"}, opt)
+
+			if len(*forced) != 0 {
+				t.Errorf("an unattended close used the forced removal: %v", *forced)
+			}
+			if got := len(clean) == 1; got != tc.wantRm {
+				t.Errorf("unforced removals = %v, want removed=%v", clean, tc.wantRm)
+			}
+			if !tc.wantRm {
+				if c := oneKeptCard(t, d); c.Data["reason"] != keptHasChanges {
+					t.Errorf("card reason = %q, want %q", c.Data["reason"], keptHasChanges)
+				}
+			}
+		})
+	}
+}
+
+// Only a close from a Quil window is attended; an in-process caller (no
+// conn) is too.
+func TestCloseUnattended_Roles(t *testing.T) {
+	d := newTestDaemon(t)
+	if !d.closeUnattended(bridgeConn(d)) {
+		t.Error("an MCP bridge's close counts as confirmed in a Quil window")
+	}
+	if d.closeUnattended(tuiConn(d)) || d.closeUnattended(nil) {
+		t.Error("a Quil window's close, or an in-process one, counts as unattended")
+	}
+}
+
+// H-12 end to end: a non-TUI client (the socket says hello as an MCP bridge)
+// sends destroy_pane_req{remove_worktree} for a pane in a REAL Quil-made,
+// Quil-marked worktree that holds a tracked change, an untracked file or an
+// ignored one. The pane closes; the worktree and the file survive.
+func TestDestroyPaneReq_RealGit_UnattendedRemovalKeepsWork(t *testing.T) {
+	for _, tc := range []struct{ name, file, content string }{
+		{"tracked change", "f.txt", "changed\n"},
+		{"untracked", "new.txt", "new\n"},
+		{"ignored", "local.env", "SECRET=1\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := realGitRepoForDaemon(t)
+			if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("*.env\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			runGitForAbandon(t, repo, "add", ".gitignore")
+			runGitForAbandon(t, repo, "commit", "-q", "-m", "ignore env")
+			t.Setenv("QUIL_HOME", t.TempDir())
+			d, client := mcpTestDaemon(t)
+			tabID, _ := seedTab(t, d, client)
+			waitCreateWorkersAtCleanup(t, d)
+			created := d.worktreeAddAndCreate(worktreeCreate(tabID, repo, "feat/keep"))
+			if created.Error != "" || created.PaneID == "" {
+				t.Fatalf("create: %+v", created)
+			}
+			path := gitworktree.DerivePath(repo, "feat/keep")
+			if err := os.WriteFile(filepath.Join(path, tc.file), []byte(tc.content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			roundTrip(t, client, ipc.MsgDestroyPaneReq, ipc.MsgDestroyPaneResp,
+				ipc.DestroyPaneReqPayload{PaneID: created.PaneID, RemoveWorktree: true})
+
+			deadline := time.Now().Add(15 * time.Second)
+			for len(eventsOfType(d, "worktree_kept")) == 0 {
+				if time.Now().After(deadline) {
+					t.Fatal("no kept card: the unattended removal did not decide")
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			if c := eventsOfType(d, "worktree_kept")[0]; c.Data["reason"] != keptHasChanges {
+				t.Errorf("card reason = %q, want %q", c.Data["reason"], keptHasChanges)
+			}
+			if _, err := os.Stat(filepath.Join(path, tc.file)); err != nil {
+				t.Errorf("the %s file is gone: %v", tc.name, err)
+			}
+		})
+	}
+}

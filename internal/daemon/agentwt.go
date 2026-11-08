@@ -228,6 +228,18 @@ func (s *agentWTStore) probe(p hookevents.Payload) {
 	}
 	s.mu.Lock()
 	// The agent is (or, after ExitWorktree, is back) in this directory.
+	// Records of an OLDER child are of a process already replaced (a PTY
+	// generation moves only when a new child is installed): drop them
+	// before counting, or a dead child's subagents fill the bound for the
+	// live one.
+	for agent, d := range s.subDirs[p.PaneID] {
+		if d.Gen < pane.Gen {
+			delete(s.subDirs[p.PaneID], agent)
+		}
+	}
+	if o, ok := s.subOverflow[p.PaneID]; ok && o.Gen < pane.Gen {
+		delete(s.subOverflow, p.PaneID)
+	}
 	if agent := p.Data[hookevents.DataProbeAgent]; agent == "" {
 		s.agentDirs[p.PaneID] = p.CWD
 	} else {

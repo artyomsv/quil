@@ -1887,6 +1887,7 @@ probes in between survives. Past `maxAgentWTSubagents` between two settles
 the pane FAILS CLOSED (`subOverflow`): it counts as in use for every path
 until a settle — or that child's process exiting (`onPaneExitGeneration` →
 `subagentsExited(pane, gen)`: records carry the PTY generation that reported
+them, and a probe from a newer child first drops an older child's records,
 them, so a late exit of an old child never clears a restarted one's) —
 clears the mark.
 

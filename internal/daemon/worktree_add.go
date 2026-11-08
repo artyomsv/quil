@@ -404,6 +404,11 @@ func (d *Daemon) abandonRefusal(repo, path, token string) string {
 		return keptRepoUnreadable
 	case facts.Detached || facts.IsDefault || facts.Unmerged > 0:
 		return keptHasCommits
+	case facts.DefaultRef == "":
+		// No default branch to count against: Unmerged is 0 because nothing
+		// was counted, not because nothing is there. The close-time branch
+		// delete refuses here too.
+		return keptNoDefaultBranch
 	}
 	return ownerMarkRefusal(ctx, path, token)
 }

@@ -421,6 +421,7 @@ func TestAbandonRefusal_KeepsOnEveryDoubt(t *testing.T) {
 		{"status unanswered", "tok", []bool{true, true}, 0, errors.New("boom"), clean, nil, keptRepoUnreadable},
 		{"commits", "tok", []bool{true, true}, 0, nil, gitworktree.BranchFacts{Branch: "feat/x", Unmerged: 1}, nil, keptHasCommits},
 		{"facts unanswered", "tok", []bool{true, true}, 0, nil, clean, errors.New("boom"), keptRepoUnreadable},
+		{"no default branch", "tok", []bool{true, true}, 0, nil, gitworktree.BranchFacts{Branch: "feat/x"}, nil, keptNoDefaultBranch},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -818,6 +818,7 @@ const (
 	keptRemoveFailed    = "remove_failed"
 	keptHasChanges      = "has_changes"
 	keptHasCommits      = "has_commits"
+	keptNoDefaultBranch = "no_default_branch"
 )
 
 var keptMessages = map[string]string{
@@ -831,6 +832,7 @@ var keptMessages = map[string]string{
 	keptRemoveFailed:    "git could not remove it (see quild.log)",
 	keptHasChanges:      "it holds changes that are not committed",
 	keptHasCommits:      "its branch has commits the default branch does not",
+	keptNoDefaultBranch: "its branch could not be checked for commits (no default branch found)",
 }
 
 // keptMessage is the card text for a reason code.

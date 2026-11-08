@@ -427,7 +427,9 @@ loss.
 the create, and the checkout is removed only when: the mark still matches
 (checked first and again last), no pane is in it, `git status` counts nothing
 (`keptHasChanges`), and its branch holds no commit the default branch lacks and
-is not detached or the default (`keptHasCommits`); any unanswered check is
+is not detached or the default (`keptHasCommits`) — with no default branch to
+count against, `Unmerged` is 0 by omission, so that keeps too
+(`keptNoDefaultBranch`); any unanswered check is
 `keptRepoUnreadable`. Otherwise it is KEPT, the requester's error says so with
 the fixed message, and the reason is logged. The mark alone is never proof
 there: the accepted residual is exactly a replacement that carries it.

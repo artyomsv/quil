@@ -378,7 +378,11 @@ lists files only for a path whose mark still matches
 (`worktreeStatusResponseFor`), and the close checks again right before
 `git worktree remove` (`removeOneWorktreeFull` → `ownerMarkRefusal`). No token
 (a pane from before identities, or a mark that could not be written), no
-answer, or another mark: kept. The cleanup view's agent entries carry no
+answer, or another mark: kept. The mark's file read and write run in
+`boundedFSCall`: a worker that holds its own filesystem-call permit until the
+I/O really returns, while the caller gives up at its deadline — on a dead mount
+the plain file I/O would otherwise hold the status or worktree-add slot
+forever. The cleanup view's agent entries carry no
 token — they are verified against git's listing instead.
 
 **Every worktree a close asked to remove and KEPT gets a sidebar card**

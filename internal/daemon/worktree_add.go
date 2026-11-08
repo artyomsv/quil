@@ -331,7 +331,8 @@ func (d *Daemon) createPaneInWorktree(p ipc.CreatePanePayload, path string) (*Pa
 	// removal it cannot prove.
 	token := uuid.NewString()
 	markCtx, cancel := context.WithTimeout(context.Background(), worktreeStatusTimeout)
-	err = writeOwnerMarkFn(markCtx, wtPath, token)
+	write := writeOwnerMarkFn // read here: the worker can outlive this call
+	_, err = boundedFSCall(markCtx, func() (struct{}, error) { return struct{}{}, write(markCtx, wtPath, token) })
 	cancel()
 	if err != nil {
 		log.Printf("worktree add: %s: could not record its identity, it will not be removed on close: %v", wtPath, err)

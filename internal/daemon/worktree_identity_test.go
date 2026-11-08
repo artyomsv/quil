@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/artyomsv/quil/internal/gitworktree"
 	"github.com/artyomsv/quil/internal/hookevents"
@@ -198,5 +199,29 @@ func TestRemoveOwnedWorktrees_DanglingLinkKeepsTheWorktree(t *testing.T) {
 
 	if len(*calls) != 0 {
 		t.Errorf("removed %v while a subagent's dangling link may point into it", *calls)
+	}
+}
+
+// A mark read that never returns cannot hold the caller: the bounded worker
+// gives up at the deadline and the answer is a refusal (keep the worktree).
+//
+// Fails if the identity check runs the file read unbounded.
+func TestOwnerMarkRefusal_HungReadRefusesAndReturns(t *testing.T) {
+	hang := make(chan struct{})
+	prev := ownerMarkMatchesFn
+	ownerMarkMatchesFn = func(context.Context, string, string) (bool, error) { <-hang; return true, nil }
+	t.Cleanup(func() { close(hang); ownerMarkMatchesFn = prev })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	done := make(chan string, 1)
+	go func() { done <- ownerMarkRefusal(ctx, "/w/feat-a", "test-token") }()
+	select {
+	case reason := <-done:
+		if reason == "" {
+			t.Error("an unanswered mark read was accepted")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the identity check hung on a mark read that never returns")
 	}
 }

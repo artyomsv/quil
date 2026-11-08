@@ -689,7 +689,8 @@ func ownerMarkRefusal(ctx context.Context, path, token string) string {
 	if token == "" {
 		return "Quil has no record of making this worktree (it predates checkout identities)"
 	}
-	ok, err := ownerMarkMatchesFn(ctx, path, token)
+	match := ownerMarkMatchesFn // read here: the worker can outlive this call
+	ok, err := boundedFSCall(ctx, func() (bool, error) { return match(ctx, path, token) })
 	switch {
 	case err != nil:
 		return "could not confirm this is the worktree Quil made: " + err.Error()
@@ -701,3 +702,36 @@ func ownerMarkRefusal(ctx context.Context, path, token string) string {
 
 // lstatFn is the link-inspection seam beside evalSymlinksFn.
 var lstatFn = os.Lstat
+
+// errFSCallUnanswered is boundedFSCall's answer when the call did not finish
+// in time, or no permit was free.
+var errFSCallUnanswered = errors.New("the filesystem did not answer in time")
+
+// boundedFSCall runs fn on a worker that holds its OWN filesystem-call permit
+// until fn really returns — a hung read or write keeps counting against the
+// process-wide limit — and gives up waiting when ctx ends. The identity mark is
+// plain file I/O after a bounded git call, and on a dead mount the file read
+// or write alone could otherwise wait forever while its caller holds a
+// single-flight slot (status, worktree add) every later request needs.
+func boundedFSCall[T any](ctx context.Context, fn func() (T, error)) (T, error) {
+	var zero T
+	if !claimBlockingFSCall() {
+		return zero, errFSCallUnanswered
+	}
+	type result struct {
+		v   T
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		defer releaseBlockingFSCall()
+		v, err := fn()
+		ch <- result{v, err}
+	}()
+	select {
+	case r := <-ch:
+		return r.v, r.err
+	case <-ctx.Done():
+		return zero, errFSCallUnanswered
+	}
+}

@@ -389,9 +389,10 @@ func TestRemoveOwnedWorktrees_UnattendedRemovalNeedsACleanCheckout(t *testing.T)
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d := newTestDaemon(t)
+			// FIRST: it also installs an empty listing, which the next line replaces.
+			stubWorktreeStatus(t, func(string) (int, error) { return tc.changes, nil })
 			stubWorktreeList(t, []gitworktree.Worktree{{Path: "/repo", Main: true}, {Path: "/w/feat-a", Branch: "x"}}, nil)
 			forced := stubRemoveWorktree(t, nil)
-			stubWorktreeStatus(t, func(string) (int, error) { return tc.changes, nil })
 			var clean []string
 			prev := removeCleanWorktreeFn
 			removeCleanWorktreeFn = func(_ context.Context, _, path string) error { clean = append(clean, path); return nil }

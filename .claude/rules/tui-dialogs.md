@@ -484,7 +484,8 @@ agents…"; no key binding), lists the daemon's agent-worktree record
 repository first; gone entries hide until `g`. **Wording is "appeared while
 <pane> ran", never "made by"** — the record cannot know who made it (see
 `projects.md`). `Enter` reuses the CLOSE confirm (`confirmKindAgentWT`), so the
-file list, branch rows, F1 remote switch and `y` gate are the same code; a
+file list, local branch row and `y` gate are the same code (local-only: the
+remote branch delete and its F1 switch were removed); a
 BRANCH entry starts with `confirmRemoveWorktree` set, the cursor on the local
 row, and no worktree row (`agentWTBranchEntry`). Its facts arrive as
 `agent_worktree_facts_req` and are landed through `applyWorktreeStatus` with

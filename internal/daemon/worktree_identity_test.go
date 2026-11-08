@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -594,6 +595,43 @@ func TestWorktreeAddAndCreate_RealGit_AbandonSeesWorkLandingDuringTheProbes(t *t
 			}
 			if !strings.Contains(resp.Error, "kept") {
 				t.Errorf("answer = %q, want it to say the worktree was kept", resp.Error)
+			}
+		})
+	}
+}
+
+// git refuses the rollback AFTER the guard passed (work landed after the last
+// check, a lock): the requester hears which part survived, in fixed words.
+//
+// Fails if a git-level refusal is only logged.
+func TestWorktreeAddAndCreate_RollbackRefusedByGitIsReported(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"worktree kept", fmt.Errorf("%w: boom", gitworktree.ErrWorktreeNotRemoved), "the new worktree was kept: " + keptMessage(keptRemoveFailed)},
+		{"branch kept", fmt.Errorf("%w: boom", gitworktree.ErrBranchNotDeleted), "cleanup incomplete: the new worktree was removed but its branch was kept"},
+		{"other", errors.New("boom"), "cleanup incomplete (see quild.log)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d, req, checkout := markTestCreate(t)
+			stubAdd(t, func(context.Context, string, string, string) error {
+				if err := d.session.DestroyTab(req.TabID); err != nil {
+					return err
+				}
+				return os.MkdirAll(checkout, 0o700)
+			})
+			stubRemove(t, func(context.Context, string, string, string) error { return tc.err })
+
+			resp := d.worktreeAddAndCreate(req)
+
+			if !strings.HasSuffix(resp.Error, "; "+tc.want) {
+				t.Errorf("answer = %q, want it to end with %q", resp.Error, tc.want)
+			}
+			if strings.Contains(resp.Error, "boom") {
+				t.Errorf("answer = %q carries git's own text", resp.Error)
 			}
 		})
 	}

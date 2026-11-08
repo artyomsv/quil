@@ -1290,15 +1290,18 @@ because the dialog closes on submit and `ActivePaneModel` adopts another leaf
 once the first replace detaches its pane. The daemon's `worktreeAdding`
 single-flight would refuse it anyway; this just says so when the user asks.
 
-**Every abandonment after a successful add REMOVES the worktree**
-(`removeWorktreeFn`, paired with `addWorktreeFn` so a stub can observe the
-undo). The tab or the replace target can be closed inside the checkout window;
-returning without cleanup strands a full checkout plus a branch pointing at it,
-and the next attempt at that name fails with "already exists" against a
-directory the user never made. `gitworktree.Remove` is the one place `--force`
-is right — the tree was created by this daemon seconds ago and handed to nobody
-— and it removes the worktree BEFORE the branch, because git refuses to delete a
-branch a worktree still has checked out.
+**An abandonment after a successful add removes the worktree only when its
+guard passes** (`removeWorktreeFn`, paired with `addWorktreeFn` so a stub can
+observe the undo). The tab or the replace target can be closed inside the
+checkout window; returning without cleanup strands a full checkout plus a
+branch pointing at it, and the next attempt at that name fails with "already
+exists" against a directory the user never made. But the checkout at the path
+may by then hold someone's work, so the rollback first clears the close path's
+doubts (`abandonRefusal`) and `gitworktree.Remove` forces NOTHING (plain
+`worktree remove`, then `branch -d`) — it is no longer the "one place --force
+is right". It still removes the worktree BEFORE the branch, because git refuses
+to delete a branch a worktree still has checked out. The guard, its order, the
+reported outcomes and the non-atomic residual live in `worktree-cleanup.md`.
 
 **The replace target is validated against `p.TabID`, before AND after the add.**
 `ReplacePane` resolves the pane id globally and swaps it inside its OWN tab, so

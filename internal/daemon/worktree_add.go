@@ -215,7 +215,11 @@ func (d *Daemon) worktreeAddAndCreate(p ipc.CreatePanePayload) ipc.CreatePaneRes
 		ctx, cancel := context.WithTimeout(context.Background(), worktreeAddTimeout)
 		defer cancel()
 		if rmErr := removeWorktreeFn(ctx, spec.RepoRoot, path, spec.Branch); rmErr != nil {
+			// git's own refusal is the backstop (Remove forces nothing), so it
+			// is an outcome the requester must hear about, in fixed words:
+			// git's text goes to the log only.
 			log.Printf("worktree create: could not clean up %s after a failed create: %v", path, rmErr)
+			resp.Error += "; " + rollbackOutcome(rmErr)
 		}
 		return resp
 	}
@@ -422,4 +426,17 @@ func (d *Daemon) abandonRefusal(repo, path, branch, token string) string {
 		return keptHasChanges
 	}
 	return ""
+}
+
+// rollbackOutcome is the fixed text for a rollback git refused part-way: the
+// checkout and its branch both kept, or the checkout removed and its branch
+// kept. Anything else is a cleanup that did not complete, said as such.
+func rollbackOutcome(err error) string {
+	switch {
+	case errors.Is(err, gitworktree.ErrBranchNotDeleted):
+		return "cleanup incomplete: the new worktree was removed but its branch was kept"
+	case errors.Is(err, gitworktree.ErrWorktreeNotRemoved):
+		return "the new worktree was kept: " + keptMessage(keptRemoveFailed)
+	}
+	return "cleanup incomplete (see quild.log)"
 }

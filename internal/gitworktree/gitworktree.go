@@ -387,30 +387,38 @@ func Add(ctx context.Context, repo, path, branch string) (string, error) {
 // Remove undoes an Add whose pane could not be created, and deletes the branch
 // that Add made along with it.
 //
-// NEITHER step forces, and that is the backstop, not a detail. The caller has
-// checked the checkout is clean and the branch holds nothing unmerged, but a
-// check is a snapshot: work that lands after it must still survive. A plain
-// `git worktree remove` refuses a checkout with modified or untracked files,
-// and `git branch -d` refuses a branch that is not merged. A refusal leaves
-// the checkout or the branch in place, and the next attempt at the same name
-// then fails with "already exists" — a visible cost, where forcing would be a
-// silent loss of work. (It used to force: a fresh checkout can look dirty on a
-// repository with line-ending differences, and the caller now keeps a dirty
-// one on purpose instead.)
-//
-// Best-effort by contract: the caller is already reporting a failure and this
-// is cleanup, so the error is for the log, not for the user.
+// NEITHER step forces, and that NARROWS loss rather than preventing it. The
+// caller has checked the checkout is clean and the branch holds nothing
+// unmerged, but a check is a snapshot. A plain `git worktree remove` refuses a
+// checkout git's OWN status calls unclean (modified or untracked files), and
+// `git branch -d` refuses a branch that is not merged. It is not atomic: git
+// runs its clean check and THEN deletes recursively, so a tracked or untracked
+// file written between the two is deleted, and git's check omits IGNORED files
+// altogether (TestRemove_RealGit_IgnoredFilesAreNotGuardedByGit). Startup,
+// status on a large repository and the delete itself bound none of this to a
+// short interval. The outcome short of success is typed
+// (ErrWorktreeNotRemoved, ErrBranchNotDeleted) so the caller can report it.
+// (It used to force: a fresh checkout can look dirty on a repository with
+// line-ending differences, and the caller now keeps a dirty one instead.)
 func Remove(ctx context.Context, repo, path string, branch string) error {
 	if _, err := runGit(ctx, repo, "worktree", "remove", "--", path); err != nil {
-		return fmt.Errorf("git worktree remove %s: %w", path, err)
+		return fmt.Errorf("%w: git worktree remove %s: %v", ErrWorktreeNotRemoved, path, err)
 	}
 	// Only after the worktree is gone: git refuses to delete a branch that a
 	// worktree still has checked out, so the order is load-bearing.
 	if _, err := runGit(ctx, repo, "branch", "-d", "--", branch); err != nil {
-		return fmt.Errorf("git branch -d %s: %w", branch, err)
+		return fmt.Errorf("%w: git branch -d %s: %v", ErrBranchNotDeleted, branch, err)
 	}
 	return nil
 }
+
+// Remove's two outcomes short of success, so a caller can say which one
+// happened without parsing git's text: nothing was removed, or the checkout
+// was removed and its branch kept.
+var (
+	ErrWorktreeNotRemoved = errors.New("the worktree was not removed")
+	ErrBranchNotDeleted   = errors.New("the worktree was removed but its branch was kept")
+)
 
 // RemoveWorktree deletes a linked worktree's directory and git registration,
 // and LEAVES ITS BRANCH ALONE. repo is the directory the command runs in.

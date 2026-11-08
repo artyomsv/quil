@@ -809,3 +809,33 @@ func TestBranches_RealGit_UnaffectedByASameNamedTag(t *testing.T) {
 		t.Errorf("Branches() = %v, want the plain branch name %q a user would type", got, "dup")
 	}
 }
+
+// PINS A RESIDUAL, not a safety property: plain `git worktree remove` does not
+// count IGNORED files as unclean, so a checkout holding only an ignored file
+// is removed with it. The rollback's own status check (with --ignored) is what
+// keeps such a checkout; anything ignored that lands after that check is lost
+// with the folder. This test says nothing about timing.
+func TestRemove_RealGit_IgnoredFilesAreNotGuardedByGit(t *testing.T) {
+	repo := realGitRepo(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("*.env\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitIn(t, repo, "add", ".gitignore")
+	runGitIn(t, repo, "commit", "-q", "-m", "ignore env")
+	path := DerivePath(repo, "feat/env")
+	if _, err := Add(ctx, repo, path, "feat/env"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "local.env"), []byte("SECRET=1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Remove(ctx, repo, path, "feat/env"); err != nil {
+		t.Fatalf("Remove: %v (the residual changed: git now guards ignored files)", err)
+	}
+	if _, err := os.Stat(filepath.Join(path, "local.env")); !os.IsNotExist(err) {
+		t.Errorf("the ignored file survived (%v): update the documented residual", err)
+	}
+}

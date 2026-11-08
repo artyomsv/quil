@@ -420,10 +420,9 @@ calls, a few stats and the write — is indistinguishable from the one the add
 made and IS marked as Quil's. Only a process of the same user can act there,
 the trust boundary this feature already accepts.
 `TestMarkNewWorktree_RealGit_SameRepositoryReplacementIsTheAcceptedResidual`
-pins it (the replacement carries the token). The consequence is bounded by the
-close path's other checks (occupancy, the file list the user confirms) and by
-the rollback guard below, so the residual can cost a mislabel, not silent work
-loss.
+pins it (the replacement carries the token). The close path's other checks
+(occupancy, the file list the user confirms) and the rollback guard below
+NARROW what that costs; they do not make it zero — see the rollback residual.
 
 **An abandoned create's rollback has the close path's doubts**
 (`abandonRefusal`, before `removeWorktreeFn`). The tab or the replace target
@@ -446,16 +445,38 @@ Any unanswered check is `keptRepoUnreadable`. A kept checkout's reason is
 logged and the requester's error says so with the fixed message. The mark alone
 is never proof: the accepted residual is exactly a replacement that carries it.
 **The removal itself forces nothing** (`gitworktree.Remove`: plain
-`git worktree remove`, then `git branch -d`), so modified or untracked work and
-unmerged commits that land after the last check are refused by git; only an
-IGNORED file landing in that last instant is unguarded (plain remove does not
-count ignored files) — a residual of microseconds. Tests:
-`TestAbandonRefusal_KeepsOnEveryDoubt`,
+`git worktree remove`, then `git branch -d`). When git refuses part-way, the
+requester's error ends with a FIXED outcome (`rollbackOutcome`, typed by
+`ErrWorktreeNotRemoved` / `ErrBranchNotDeleted`): the worktree kept, or the
+worktree removed and its branch kept; git's own text goes to the log only.
+
+**Rollback residual (same-user, under the 2026-11-08 ruling): the delete is NOT
+atomic and the interval is NOT short.** Two check-to-delete gaps remain:
+- Quil's final `git status --ignored` → `git worktree remove`: anything written
+  in between is not seen by Quil;
+- inside `git worktree remove`: git runs its OWN clean check (a `git status`
+  WITHOUT `--ignored`), then deletes the tree recursively. A tracked or
+  untracked file written after git's check is deleted, and an IGNORED file —
+  `.env`, local notes, build output, possibly valuable — is never checked by
+  git at all (`TestRemove_RealGit_IgnoredFilesAreNotGuardedByGit`).
+
+Neither gap is bounded to a short time: process startup, status on a large or
+fsmonitor-less repository and slow storage all stretch them, within the 120 s
+`worktreeAddTimeout` the rollback runs under. So work a SAME-USER process
+writes into a checkout during its own abandoned create can be lost. This is the
+same trust boundary the owner accepted for the mark: only a process of the
+same user can write there, and it needs no new authority from Quil. What
+narrows it: the checks above run last, git refuses what its own check sees,
+`branch -d` refuses unmerged commits, and anything KEPT is reported.
+
+Tests: `TestAbandonRefusal_KeepsOnEveryDoubt`,
 `TestWorktreeAddAndCreate_RealGit_AbandonKeepsAReplacementHoldingWork`,
 `…AbandonKeepsTheCreatedBranchWhenSwapped`,
-`…AbandonSeesWorkLandingDuringTheProbes`, `TestRemove_RealGit_RefusesADirtyWorktree`,
-`TestRemove_RealGit_KeepsAnUnmergedBranch`. `stubRemove`/`allowRollback` let the
-guard through for the tests about the removal itself.
+`…AbandonSeesWorkLandingDuringTheProbes`,
+`TestWorktreeAddAndCreate_RollbackRefusedByGitIsReported`,
+`TestRemove_RealGit_RefusesADirtyWorktree`,
+`TestRemove_RealGit_KeepsAnUnmergedBranch`. `stubRemove`/`allowRollback` let
+the guard through for the tests about the removal itself.
 
 The delete checks compare resolved paths through `foldedWithin`, which folds
 case on darwin and windows (`foldPathCase`) as a cheap first test. Strings

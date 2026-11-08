@@ -48,18 +48,18 @@ func TestAgentWTDialog_LabelSaysAppearedWhile(t *testing.T) {
 	}
 }
 
-// Picking an entry opens the close dialog's own rows: the remote row needs
-// the switch, and only `y` sends it; the request names the entry by id.
-func TestAgentWTDialog_DetailReusesCloseRowsAndRemoteNeedsY(t *testing.T) {
+// The view's detail reuses the close dialog's rows: the file list, the
+// worktree row and the local branch row; Enter sends the act by entry id
+// with the branch shown.
+func TestAgentWTDialog_DetailReusesCloseRows(t *testing.T) {
 	m := agentWTModel(wtInfo("a", "/proj", "feat/a"))
-	m.cfg.Worktree.RemoteBranchDelete = true
 	fake := &fakeSender{}
 	m.client = fake
 	mdl, _ := m.openAgentWTConfirm(m.visibleAgentWT()[0])
 	m = mdl.(Model)
 	m.applyAgentWTFacts(agentWTFactsMsg{Gen: m.confirmWorktreeGen, Resp: ipc.AgentWorktreeFactsRespPayload{
 		ID: "a", Status: ipc.WorktreeStatus{Changes: 1, Files: []ipc.WorktreeFile{{Code: "??", Path: "x.txt"}},
-			Branch: "feat/a", BranchDeletable: true, Remote: "origin", RemoteBranch: "feat/a"},
+			Branch: "feat/a", BranchDeletable: true, DefaultBranch: "master"},
 	}})
 	if out := stripANSI(m.renderConfirmDialog()); !strings.Contains(out, "x.txt") {
 		t.Fatalf("the detail does not list the files:\n%s", out)
@@ -67,22 +67,16 @@ func TestAgentWTDialog_DetailReusesCloseRowsAndRemoteNeedsY(t *testing.T) {
 
 	m = confirmPress(m, " ") // worktree
 	m = confirmPress(m, "down")
-	m = confirmPress(m, "down")
-	m = confirmPress(m, " ") // remote
+	m = confirmPress(m, " ") // local branch
 	fake.sent = nil
-	m = confirmPress(m, "enter")
-	if len(fake.sent) != 0 || m.dialog != dialogConfirm {
-		t.Fatalf("Enter acted with a remote delete armed (sent %d)", len(fake.sent))
-	}
-
-	mdl, cmd := m.handleConfirmKey(keyPressFor("y"))
+	mdl, cmd := m.handleConfirmKey(keyPressFor("enter"))
 	m = mdl.(Model)
 	runCmd(cmd)
 	var req ipc.AgentWorktreeActReqPayload
 	if !decodeSent(t, fake, ipc.MsgAgentWorktreeActReq, &req) {
-		t.Fatal("y sent no act request")
+		t.Fatal("Enter sent no act request")
 	}
-	if req.ID != "a" || !req.RemoveWorktree || !req.DeleteRemoteBranch || req.Confirmation.Branch != "feat/a" || req.Confirmation.Remote != "origin" {
+	if req.ID != "a" || !req.RemoveWorktree || !req.DeleteBranch || req.Confirmation.Branch != "feat/a" {
 		t.Errorf("request = %+v", req)
 	}
 	if m.dialog != dialogAgentWorktrees {

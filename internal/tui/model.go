@@ -718,7 +718,6 @@ type Model struct {
 	// The branch rows under the worktree row (worktree_rows.go). Off on every
 	// open like the worktree toggle, and cleared by resetConfirmWorktrees.
 	confirmDeleteBranch bool
-	confirmDeleteRemote bool
 	confirmRow          int // 0 worktree, 1 local branch, 2 remote branch
 	confirmFileScroll   int // first file row shown
 	confirmFileFocus    int // which worktree's files show when a tab holds several
@@ -9057,11 +9056,6 @@ func (m *Model) attachAllDests() tea.Cmd {
 	// current policy on every resize, not just after a fresh attach.
 	if len(newlyAttached) > 0 {
 		if cmd := m.overlayPolicyCmd(); cmd != nil {
-			cmds = append(cmds, cmd)
-		}
-		// Same moment, same reason: a daemon learns the remote-branch-delete
-		// switch only from this push.
-		if cmd := m.worktreePolicyCmd(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
 		// Rides the same post-attach path as the policy, and for the same

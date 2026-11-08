@@ -129,6 +129,10 @@ func (d *Daemon) handleAgentWorktreeActReq(conn *ipc.Conn, msg *ipc.Message) {
 		respondTo(conn, msg.ID, ipc.MsgAgentWorktreeActResp, ipc.AgentWorktreeActRespPayload{Error: "malformed request"})
 		return
 	}
+	if reason := uncertainAckRefusal(req, d.hellos.roleOf(conn)); reason != "" {
+		respondTo(conn, msg.ID, ipc.MsgAgentWorktreeActResp, ipc.AgentWorktreeActRespPayload{ID: req.ID, Error: reason})
+		return
+	}
 	if !d.agentWTActing.CompareAndSwap(false, true) {
 		respondTo(conn, msg.ID, ipc.MsgAgentWorktreeActResp, ipc.AgentWorktreeActRespPayload{ID: req.ID, Error: "another cleanup is already running"})
 		return
@@ -166,7 +170,7 @@ func (d *Daemon) agentWorktreeAct(req ipc.AgentWorktreeActReqPayload) ipc.AgentW
 	// of a path is never trusted to say which worktree it is about.
 	c := req.Confirmation
 	c.WorktreePath = e.Path
-	opt := branchDeleteOpts{Local: req.DeleteBranch, Remote: req.DeleteRemoteBranch,
+	opt := branchDeleteOpts{Local: req.DeleteBranch,
 		Owners:    map[string]paneRef{e.Path: owner},
 		Confirmed: confirmations([]ipc.BranchConfirmation{c})}
 
@@ -203,8 +207,8 @@ func (d *Daemon) agentWorktreeAct(req ipc.AgentWorktreeActReqPayload) ipc.AgentW
 		d.agentWT.schedule(e.Repo, agentWTAttr{Trigger: "cleanup"})
 		return out
 	case agentWTKindBranch:
-		if req.RemoveWorktree || (!req.DeleteBranch && !req.DeleteRemoteBranch) {
-			out.Error = "a branch entry takes only the branch deletes"
+		if req.RemoveWorktree || !req.DeleteBranch {
+			out.Error = "a branch entry takes only the branch delete"
 			return out
 		}
 		if req.Confirmation.Branch != e.Branch {
@@ -217,7 +221,7 @@ func (d *Daemon) agentWorktreeAct(req ipc.AgentWorktreeActReqPayload) ipc.AgentW
 			return out
 		}
 		log.Printf("agent worktrees: deleting branch %s (entry %s)", e.Branch, e.ID)
-		d.deleteBranches(e.Repo, e.Path, f, opt, owner)
+		d.deleteBranches(e.Repo, f, opt, owner)
 	default:
 		out.Error = "unknown entry kind"
 		return out
@@ -302,3 +306,17 @@ func verifyAgentBranch(ctx context.Context, e AgentWTEntry) error {
 
 // Seam for the branch listing, beside worktreeListFn.
 var branchListFn = gitworktree.Branches
+
+// uncertainAckRefusal refuses an uncertain-record acknowledgment from
+// anything but a Quil window (hello role "tui"): the acknowledgment stands
+// for a person pressing y in the cleanup view, and an MCP bridge, the
+// browser gateway or a script has no such view. The role is self-declared,
+// so this keeps a cooperating agent from confirming on the user's behalf; a
+// local process willing to lie already holds the user's own rights over the
+// repository. A standard TCP token is refused earlier (clientauth).
+func uncertainAckRefusal(req ipc.AgentWorktreeActReqPayload, role string) string {
+	if req.AcceptUncertain && role != "tui" {
+		return "only a Quil window can confirm a cleanup in an uncertain repository"
+	}
+	return ""
+}

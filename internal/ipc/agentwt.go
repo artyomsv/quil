@@ -63,12 +63,11 @@ type AgentWorktreeFactsRespPayload struct {
 // branch entry takes only the branch deletes. Confirmation is CHECK-ONLY:
 // the daemon acts on the branch it reads from git, and only when it matches.
 type AgentWorktreeActReqPayload struct {
-	ID                 string `json:"id"`
-	Forget             bool   `json:"forget,omitempty"`
-	RemoveWorktree     bool   `json:"remove_worktree,omitempty"`
-	DeleteBranch       bool   `json:"delete_branch,omitempty"`
-	DeleteRemoteBranch bool   `json:"delete_remote_branch,omitempty"`
-	// Confirmation is CHECK-ONLY: the branch and remote target the view
+	ID             string `json:"id"`
+	Forget         bool   `json:"forget,omitempty"`
+	RemoveWorktree bool   `json:"remove_worktree,omitempty"`
+	DeleteBranch   bool   `json:"delete_branch,omitempty"`
+	// Confirmation is CHECK-ONLY: the branch the view
 	// showed for this entry (its WorktreePath is ignored: the entry names
 	// the worktree).
 	Confirmation BranchConfirmation `json:"confirmation"`

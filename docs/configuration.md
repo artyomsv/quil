@@ -13,7 +13,6 @@ Quil reads `~/.quil/config.toml` (or `$QUIL_HOME/config.toml` when `QUIL_HOME` i
 - [`[notification]`](#notification)
 - [`[overlay]`](#overlay)
 - [`[update]`](#update)
-- [`[worktree]`](#worktree)
 - [`[[destinations]]`](#destinations)
 - [`[listener]`](#listener)
 - [`[keybindings]`](#keybindings) — legacy, migrated to `bindings.toml`
@@ -98,9 +97,6 @@ max_live = 5                    # cap live overlays across all tabs; 0 disables
 [update]
 check = true                    # Daily check for new releases
 auto = true                     # Download and stage in background
-
-[worktree]
-remote_branch_delete = false    # Let a worktree close offer deleting the branch on its remote
 
 [listener]
 tcp = ""                        # off; e.g. "127.0.0.1:7878" — loopback only
@@ -326,14 +322,6 @@ flag, since a self-update would strip the dev/debug ldflags baked into those
 binaries) — see `./scripts/dev.sh build`. Installs in non-writable locations
 (package managers) also never self-update; those show the release page URL
 instead.
-
-## `[worktree]`
-
-What closing a pane or tab with a Quil-made worktree may delete.
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `remote_branch_delete` | `false` | Let the close dialog offer deleting the worktree's branch on its **remote** as well as locally. The delete reaches everyone who uses that remote and closes an open pull request on the branch, so it is off by default, and the dialog still asks for `y`. Also F1 → Settings → **Allow remote branch delete**, which applies at once: the TUI sends the value to every daemon it may administer, and a daemon refuses a remote delete while its copy is off. A daemon reached only with a standard token keeps its own config's value. |
 
 ## `[[destinations]]`
 

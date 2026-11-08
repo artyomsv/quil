@@ -80,7 +80,7 @@ func TestCloseConfirm_FileNameIsSanitizedAndBounded(t *testing.T) {
 // always did.
 func TestCloseConfirm_CursorStartsOnWorktreeRow(t *testing.T) {
 	m := modelWithWorktreePane()
-	m.confirmRow = confirmRowRemote // left over from a previous dialog
+	m.confirmRow = confirmRowLocal // left over from a previous dialog
 	m = applyModel(m.openClosePaneConfirm())
 	if m.confirmRow != confirmRowWorktree {
 		t.Errorf("confirmRow = %d on open, want %d", m.confirmRow, confirmRowWorktree)
@@ -113,56 +113,35 @@ func TestCloseConfirm_BranchRowsInertUntilWorktreeArmed(t *testing.T) {
 	}
 }
 
-// With the F1 switch off the remote row says so and cannot be armed.
-func TestCloseConfirm_RemoteRowGreyedWhenSettingOff(t *testing.T) {
+// The dialog never offers a remote branch delete — Quil deletes local
+// branches only — and Enter accepts a local delete with the branch the
+// dialog showed.
+func TestCloseConfirm_LocalDeleteOnlyAndEnterAccepts(t *testing.T) {
 	m := openLoadedConfirm(t, 1, "origin")
-	m = confirmPress(m, " ")
-	m = confirmPress(m, "down")
-	m = confirmPress(m, "down")
-	m = confirmPress(m, " ")
-
-	if m.confirmDeleteRemote {
-		t.Error("the remote row armed with the setting off")
+	if out := strings.ToLower(stripANSI(m.renderConfirmDialog())); strings.Contains(out, "remote") {
+		t.Fatalf("the dialog offers something remote:\n%s", out)
 	}
-	if out := stripANSI(m.renderConfirmDialog()); !strings.Contains(out, "off in F1") {
-		t.Errorf("the remote row does not say why it is off:\n%s", out)
-	}
-}
-
-// Enter does not accept a remote delete; `y` does, and the payload carries the
-// flag and the branch the dialog showed.
-func TestCloseConfirm_EnterDoesNotAcceptWithRemoteArmed(t *testing.T) {
-	m := openLoadedConfirm(t, 1, "origin")
-	m.cfg.Worktree.RemoteBranchDelete = true
 	m = confirmPress(m, " ")
 	m = confirmPress(m, "down")
-	m = confirmPress(m, "down")
 	m = confirmPress(m, " ")
-	if !m.confirmDeleteRemote {
-		t.Fatal("the remote row did not arm with the setting on")
+	m = confirmPress(m, "down") // no third row: the cursor stays
+	if m.confirmRow != confirmRowLocal {
+		t.Fatalf("confirmRow = %d, want the local row (the last one)", m.confirmRow)
 	}
 
 	fake := &fakeSender{}
 	m.client = fake
-	m = confirmPress(m, "enter")
-	if !m.confirmDeleteRemote || len(m.confirmWorktrees) == 0 {
-		t.Fatal("a refused Enter dropped the arm or closed the dialog state")
-	}
-	if len(fake.sent) != 0 {
-		t.Fatalf("Enter sent %d messages with a remote delete armed", len(fake.sent))
-	}
-
-	_, cmd := m.handleConfirmKey(keyPressFor("y"))
+	_, cmd := m.handleConfirmKey(keyPressFor("enter"))
 	if cmd != nil {
 		cmd()
 	}
 	var p ipc.DestroyPanePayload
 	if !decodeSent(t, fake, ipc.MsgDestroyPane, &p) {
-		t.Fatal("y sent no destroy_pane")
+		t.Fatal("Enter sent no destroy_pane")
 	}
-	if !p.RemoveWorktree || !p.DeleteRemoteBranch || p.DeleteBranch ||
-		len(p.Confirmations) != 1 || p.Confirmations[0].Branch != "feat/a" || p.Confirmations[0].Remote != "origin" || p.Confirmations[0].WorktreePath != "/w/feat-a" {
-		t.Errorf("payload = %+v, want worktree + remote delete of feat/a only", p)
+	if !p.RemoveWorktree || !p.DeleteBranch || len(p.Confirmations) != 1 ||
+		p.Confirmations[0].Branch != "feat/a" || p.Confirmations[0].WorktreePath != "/w/feat-a" {
+		t.Errorf("payload = %+v, want worktree + local delete of feat/a", p)
 	}
 }
 
@@ -204,9 +183,9 @@ func TestCloseConfirm_ResetOnEveryExit(t *testing.T) {
 
 	m = confirmPress(m, "esc")
 
-	if m.confirmDeleteBranch || m.confirmDeleteRemote || m.confirmRow != 0 || m.confirmFileScroll != 0 || m.confirmFileFocus != 0 {
-		t.Errorf("esc left state: branch=%v remote=%v row=%d scroll=%d focus=%d",
-			m.confirmDeleteBranch, m.confirmDeleteRemote, m.confirmRow, m.confirmFileScroll, m.confirmFileFocus)
+	if m.confirmDeleteBranch || m.confirmRow != 0 || m.confirmFileScroll != 0 || m.confirmFileFocus != 0 {
+		t.Errorf("esc left state: branch=%v row=%d scroll=%d focus=%d",
+			m.confirmDeleteBranch, m.confirmRow, m.confirmFileScroll, m.confirmFileFocus)
 	}
 }
 
@@ -223,7 +202,6 @@ func TestCloseConfirm_FitsTerminal(t *testing.T) {
 			panes[0].PRNumber, panes[0].PRStatus = 12, "open"
 			m := modelWithPanes(panes...)
 			m.cfg = config.Default()
-			m.cfg.Worktree.RemoteBranchDelete = true
 			m.width, m.height = 100, height
 			m = applyModel(m.openCloseTabConfirm())
 			for i := range m.confirmWorktrees {
@@ -235,7 +213,7 @@ func TestCloseConfirm_FitsTerminal(t *testing.T) {
 				w.branch, w.branchDeletable, w.unmerged = fmt.Sprintf("feat/%d", i), true, 3
 				w.remote, w.remoteBranch = "origin", w.branch
 			}
-			m.confirmRemoveWorktree, m.confirmDeleteBranch, m.confirmDeleteRemote = true, true, true
+			m.confirmRemoveWorktree, m.confirmDeleteBranch = true, true
 
 			lines := strings.Count(m.renderConfirmDialog(), "\n") + 1
 			if box := lines + dialogVChrome; box > height {
@@ -271,7 +249,7 @@ func TestCloseConfirm_ConfirmationsArePerWorktree(t *testing.T) {
 	m = confirmPress(m, "down")
 	m = confirmPress(m, " ")
 
-	_, _, got := m.confirmBranchSelection()
+	_, got := m.confirmBranchSelection()
 	if len(got) != 2 || got[0].WorktreePath != m.confirmWorktrees[0].path || got[0].Branch != "feat/a" ||
 		got[1].WorktreePath != m.confirmWorktrees[1].path || got[1].Branch != "feat/b" {
 		t.Errorf("confirmations = %+v, want one per worktree, tied to its path", got)
@@ -317,7 +295,6 @@ func sixWorktreeConfirm(t *testing.T) Model {
 	panes[0].PRNumber, panes[0].PRStatus = 12, "open"
 	m := modelWithPanes(panes...)
 	m.cfg = config.Default()
-	m.cfg.Worktree.RemoteBranchDelete = true
 	m.width, m.height = 100, 24
 	m = applyModel(m.openCloseTabConfirm())
 	for i := range m.confirmWorktrees {
@@ -329,7 +306,7 @@ func sixWorktreeConfirm(t *testing.T) Model {
 		w.branch, w.branchDeletable, w.unmerged = fmt.Sprintf("feat/%d", i), true, 3
 		w.remote, w.remoteBranch = "origin", w.branch
 	}
-	m.confirmRemoveWorktree, m.confirmDeleteBranch, m.confirmDeleteRemote = true, true, true
+	m.confirmRemoveWorktree, m.confirmDeleteBranch = true, true
 	return m
 }
 

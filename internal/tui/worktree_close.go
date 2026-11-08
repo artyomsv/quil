@@ -261,7 +261,6 @@ func (m *Model) resetConfirmWorktrees() {
 	m.confirmRemoveWorktree = false
 	m.confirmWorktreeGen = ""
 	m.confirmDeleteBranch = false
-	m.confirmDeleteRemote = false
 	m.confirmRow = 0
 	m.confirmFileScroll = 0
 	m.confirmFileFocus = 0

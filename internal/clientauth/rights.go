@@ -60,11 +60,11 @@ var classes = map[string]Class{
 	// admin
 	ipc.MsgShutdown: ClassAdmin, ipc.MsgReloadPlugins: ClassAdmin, ipc.MsgOverlayPolicy: ClassAdmin,
 	ipc.MsgKillProcessReq: ClassAdmin, ipc.MsgStageUpdateReq: ClassAdmin, ipc.MsgUpdateCheckReq: ClassAdmin,
-	ipc.MsgPluginUpdateReq: ClassAdmin, ipc.MsgWorktreePolicy: ClassAdmin,
+	ipc.MsgPluginUpdateReq: ClassAdmin,
 
 	// act: the agent-worktree record discloses paths on the daemon's disk,
-	// and acting on it deletes them (agent_worktree_act_req's remote delete
-	// is refused to a standard token by carriesRemoteDelete).
+	// and acting on it deletes them (agent_worktree_act_req's uncertain-record
+	// acknowledgment is refused to a standard token by carriesUncertainAck).
 	ipc.MsgAgentWorktreesReq: ClassAct, ipc.MsgAgentWorktreeFactsReq: ClassAct, ipc.MsgAgentWorktreeActReq: ClassAct,
 
 	// local
@@ -184,47 +184,29 @@ func checkStandardPayload(msg *ipc.Message) (bool, string) {
 	case overlay:
 		return false, "overlay panes need full rights"
 	}
-	remote, uncertain, ok := carriesRemoteDelete(msg)
+	uncertain, ok := carriesUncertainAck(msg)
 	switch {
 	case !ok:
 		return false, "malformed " + msg.Type
-	case remote:
-		return false, "remote branch delete needs a full token"
 	case uncertain:
 		return false, "confirming a cleanup in an uncertain repository needs a full token"
 	}
 	return true, ""
 }
 
-// carriesRemoteDelete reports a close that asks to delete a branch on its
-// REMOTE, and (uncertain) a cleanup act that acknowledges an uncertain
-// repository record: that acknowledgment stands for a person pressing y,
-// so a standard token, which a non-interactive client holds, cannot send it.
-// The remote push reaches everyone who shares the remote, so it is a full
-// token's action even though closing the pane is not. ok is false only for a
-// payload that is present and does not decode.
-func carriesRemoteDelete(msg *ipc.Message) (remote, uncertain, ok bool) {
-	switch msg.Type {
-	case ipc.MsgDestroyPane:
-		var p ipc.DestroyPanePayload
-		if !decodeIfPresent(msg, &p) {
-			return false, false, false
-		}
-		return p.DeleteRemoteBranch, false, true
-	case ipc.MsgDestroyTab:
-		var p ipc.DestroyTabPayload
-		if !decodeIfPresent(msg, &p) {
-			return false, false, false
-		}
-		return p.DeleteRemoteBranch, false, true
-	case ipc.MsgAgentWorktreeActReq:
-		var p ipc.AgentWorktreeActReqPayload
-		if !decodeIfPresent(msg, &p) {
-			return false, false, false
-		}
-		return p.DeleteRemoteBranch, p.AcceptUncertain, true
+// carriesUncertainAck reports a cleanup act that acknowledges an uncertain
+// repository record. That acknowledgment stands for a person pressing y, so
+// a standard token, which a non-interactive client holds, cannot send it.
+// ok is false only for a payload that is present and does not decode.
+func carriesUncertainAck(msg *ipc.Message) (uncertain, ok bool) {
+	if msg.Type != ipc.MsgAgentWorktreeActReq {
+		return false, true
 	}
-	return false, false, true
+	var p ipc.AgentWorktreeActReqPayload
+	if !decodeIfPresent(msg, &p) {
+		return false, false
+	}
+	return p.AcceptUncertain, true
 }
 
 // carriers decodes the five create shapes. ok is false only for a payload

@@ -127,30 +127,31 @@ func TestAgentWTAct_RemovalFailureIsReported(t *testing.T) {
 	}
 }
 
-// A branch entry's remote delete honours the policy like the close does.
-func TestAgentWTAct_RemoteRefusedWhenPolicyOff(t *testing.T) {
+// A branch entry's local delete runs on the branch git lists, once
+// confirmed, and reports on a card.
+func TestAgentWTAct_BranchEntryDeletesLocally(t *testing.T) {
 	d := daemonWithRecord(t, brEntry)
-	prevList, prevFor, prevDef, prevRemote := branchListFn, branchFactsForFn, defaultBranchRefFn, deleteRemoteBranchFn
+	prevList, prevFor, prevDef, prevLocal := branchListFn, branchFactsForFn, defaultBranchRefFn, deleteLocalBranchFn
 	branchListFn = func(context.Context, string) ([]gitworktree.Branch, bool, error) {
 		return []gitworktree.Branch{{Name: "master"}, {Name: "feat/plain"}}, false, nil
 	}
 	branchFactsForFn = func(_ context.Context, _, b, _ string) (gitworktree.BranchFacts, error) {
-		return gitworktree.BranchFacts{Branch: b, DefaultRef: "refs/heads/master", Remote: "origin", RemoteBranch: b}, nil
+		return gitworktree.BranchFacts{Branch: b, DefaultRef: "refs/heads/master"}, nil
 	}
 	defaultBranchRefFn = func(context.Context, string) string { return "refs/heads/master" }
-	pushed := 0
-	deleteRemoteBranchFn = func(context.Context, string, string, string) error { pushed++; return nil }
+	var deleted []string
+	deleteLocalBranchFn = func(_ context.Context, _, b string) error { deleted = append(deleted, b); return nil }
 	t.Cleanup(func() {
-		branchListFn, branchFactsForFn, defaultBranchRefFn, deleteRemoteBranchFn = prevList, prevFor, prevDef, prevRemote
+		branchListFn, branchFactsForFn, defaultBranchRefFn, deleteLocalBranchFn = prevList, prevFor, prevDef, prevLocal
 	})
 
-	d.agentWorktreeAct(ipc.AgentWorktreeActReqPayload{ID: "e-br", DeleteRemoteBranch: true, Confirmation: ipc.BranchConfirmation{Branch: "feat/plain", Remote: "origin", RemoteBranch: "feat/plain"}})
+	got := d.agentWorktreeAct(ipc.AgentWorktreeActReqPayload{ID: "e-br", DeleteBranch: true, Confirmation: ipc.BranchConfirmation{Branch: "feat/plain"}})
 
-	if pushed != 0 {
-		t.Errorf("pushed %d remote deletes with the policy off", pushed)
+	if got.Error != "" || len(deleted) != 1 || deleted[0] != "feat/plain" {
+		t.Errorf("resp = %+v, deleted %v; want feat/plain deleted", got, deleted)
 	}
-	if kept := eventsOfType(d, "worktree_branch_kept"); len(kept) != 1 {
-		t.Errorf("kept cards = %+v, want one", kept)
+	if done := eventsOfType(d, "worktree_branch_deleted"); len(done) != 1 {
+		t.Errorf("deleted cards = %+v, want one", done)
 	}
 }
 

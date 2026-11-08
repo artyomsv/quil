@@ -28,7 +28,6 @@ type Config struct {
 	Notification NotificationConfig `toml:"notification"`
 	Overlay      OverlayConfig      `toml:"overlay"`
 	Update       UpdateConfig       `toml:"update"`
-	Worktree     WorktreeConfig     `toml:"worktree"`
 	Remote       RemoteConfig       `toml:"remote"`
 	Sandbox      SandboxConfig      `toml:"sandbox"`
 	Agents       AgentsConfig       `toml:"agents"`
@@ -429,16 +428,6 @@ type OverlayConfig struct {
 // gates background download + staging of a newer release. auto = false
 // degrades to notify-only. Dev builds (version.IsRelease() == false) skip
 // the pipeline regardless of these settings.
-// WorktreeConfig governs what closing a Quil-made worktree may delete.
-type WorktreeConfig struct {
-	// RemoteBranchDelete lets the close dialog offer deleting the worktree's
-	// branch on its REMOTE as well. Off by default: a remote delete reaches
-	// everyone who shares that remote and closes an open pull request on it.
-	// The TUI pushes the value to every daemon (MsgWorktreePolicy), which
-	// refuses a remote delete while its copy is off.
-	RemoteBranchDelete bool `toml:"remote_branch_delete"`
-}
-
 type UpdateConfig struct {
 	Check bool `toml:"check"`
 	Auto  bool `toml:"auto"`

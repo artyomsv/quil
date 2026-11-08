@@ -33,7 +33,7 @@ func parksGoroutine(msgType string) bool {
 // carries raw instance arguments: they act on the daemon itself, so the
 // record must not depend on which door they came through.
 var privilegedTypes = map[string]bool{
-	ipc.MsgShutdown: true, ipc.MsgReloadPlugins: true, ipc.MsgOverlayPolicy: true, ipc.MsgWorktreePolicy: true,
+	ipc.MsgShutdown: true, ipc.MsgReloadPlugins: true, ipc.MsgOverlayPolicy: true,
 	ipc.MsgKillProcessReq: true, ipc.MsgStageUpdateReq: true, ipc.MsgUpdateCheckReq: true,
 }
 

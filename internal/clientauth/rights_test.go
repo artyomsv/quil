@@ -109,9 +109,6 @@ func TestAllows_StandardPayloadCarriers(t *testing.T) {
 		{"split_pane_req args", "SplitPaneReqPayload.pane.instance_args", msgOf(t, ipc.MsgSplitPaneReq, ipc.SplitPaneReqPayload{Placement: ipc.PlacementRight, Pane: ipc.SplitPaneSpec{Type: "ssh", InstanceArgs: []string{"u@h"}}})},
 		{"split_pane_req overlay", "SplitPaneReqPayload.placement", msgOf(t, ipc.MsgSplitPaneReq, ipc.SplitPaneReqPayload{Placement: ipc.PlacementOverlay, OverlayKind: "lazygit"})},
 		{"malformed split_pane_req", "", &ipc.Message{Type: ipc.MsgSplitPaneReq, Payload: json.RawMessage(`"x"`)}},
-		// A remote branch delete reaches everyone sharing the remote.
-		{"destroy_pane remote branch delete", "", msgOf(t, ipc.MsgDestroyPane, ipc.DestroyPanePayload{PaneID: "p", RemoveWorktree: true, DeleteRemoteBranch: true})},
-		{"destroy_tab remote branch delete", "", msgOf(t, ipc.MsgDestroyTab, ipc.DestroyTabPayload{TabID: "t", RemoveWorktree: true, DeleteRemoteBranch: true})},
 		// The uncertain-record acknowledgment stands for a person's `y`.
 		{"agent_worktree_act uncertain ack", "", msgOf(t, ipc.MsgAgentWorktreeActReq, ipc.AgentWorktreeActReqPayload{ID: "e", RemoveWorktree: true, AcceptUncertain: true})},
 	}

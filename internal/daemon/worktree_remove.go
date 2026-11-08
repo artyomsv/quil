@@ -57,15 +57,8 @@ var removeOwnedWorktreesFn = func(d *Daemon, paths []string, opt branchDeleteOpt
 
 // Seams for the branch deletes that may follow a removal.
 var (
-	deleteLocalBranchFn  = gitworktree.DeleteLocalBranch
-	deleteRemoteBranchFn = gitworktree.DeleteRemoteBranch
+	deleteLocalBranchFn = gitworktree.DeleteLocalBranch
 )
-
-// remoteBranchDeleteTimeout bounds one remote push. It runs with no FS
-// permit held (it is network, not disk), but it is still a goroutine and a
-// git process; a push that has not finished in 30 s is waiting on something
-// that will not answer, and the user learns that from the sidebar card.
-var remoteBranchDeleteTimeout = 30 * time.Second
 
 // paneRef names the pane a close came from, captured BEFORE the destroy: the
 // branch outcome is reported after the pane is gone, and a card with no pane
@@ -76,14 +69,14 @@ type paneRef struct {
 
 // branchDeleteOpts says what a close asked for beyond the worktree directory.
 //
-// Confirmed holds, per worktree, what the dialog SHOWED: the branch and its
-// remote target. It is check-only: the daemon deletes what it reads from git
-// itself, and only when it matches the confirmation for THAT worktree — so a
-// branch an agent switched the worktree to, or an upstream moved to another
-// remote branch, after the dialog opened is never deleted, one row cannot
-// confirm another's, and no client can name a branch to delete.
+// Confirmed holds, per worktree, the branch the dialog SHOWED. It is
+// check-only: the daemon deletes what it reads from git itself, and only when
+// it matches the confirmation for THAT worktree — so a branch an agent
+// switched the worktree to after the dialog opened is never deleted, one row
+// cannot confirm another's, and no client can name a branch to delete. Quil
+// never deletes a branch on a remote.
 type branchDeleteOpts struct {
-	Local, Remote bool
+	Local bool
 	// Confirmed is keyed by confirmKey(worktree path); "" for a branch with
 	// no worktree.
 	Confirmed map[string]ipc.BranchConfirmation
@@ -92,7 +85,7 @@ type branchDeleteOpts struct {
 	Owners map[string]paneRef
 }
 
-func (o branchDeleteOpts) wanted() bool { return o.Local || o.Remote }
+func (o branchDeleteOpts) wanted() bool { return o.Local }
 
 // confirmKey normalises a worktree path for the confirmation map.
 func confirmKey(path string) string {
@@ -117,14 +110,6 @@ func (o branchDeleteOpts) localConfirmed(path string, f gitworktree.BranchFacts)
 	return ok && f.Branch != "" && c.Branch == f.Branch
 }
 
-// remoteConfirmed reports that the dialog showed this worktree's branch AND
-// the very remote target git now names.
-func (o branchDeleteOpts) remoteConfirmed(path string, f gitworktree.BranchFacts) bool {
-	c, ok := o.Confirmed[confirmKey(path)]
-	return ok && c.Branch == f.Branch && c.Remote != "" &&
-		c.Remote == f.Remote && c.RemoteBranch == f.RemoteBranch
-}
-
 // worktreeOwners maps each owned worktree path to the first pane that owns it,
 // read under PluginMu like ownedWorktreePaths.
 func worktreeOwners(panes []*Pane) map[string]paneRef {
@@ -147,8 +132,8 @@ func worktreeOwners(panes []*Pane) map[string]paneRef {
 }
 
 // branchOpts builds the options a destroy payload asked for.
-func branchOpts(local, remote bool, confirmed []ipc.BranchConfirmation, panes []*Pane) branchDeleteOpts {
-	opt := branchDeleteOpts{Local: local, Remote: remote, Confirmed: confirmations(confirmed)}
+func branchOpts(local bool, confirmed []ipc.BranchConfirmation, panes []*Pane) branchDeleteOpts {
+	opt := branchDeleteOpts{Local: local, Confirmed: confirmations(confirmed)}
 	if opt.wanted() {
 		opt.Owners = worktreeOwners(panes)
 	}
@@ -268,46 +253,20 @@ func (d *Daemon) removeWorktreeWithBranch(path string, opt branchDeleteOpts) rem
 		d.notifyBranchKept(owner, f.Branch, "the worktree switched branch after the dialog opened")
 		return res
 	}
-	d.deleteBranches(res.repo, path, f, opt, owner)
+	d.deleteBranches(res.repo, f, opt, owner)
 	return res
 }
 
-// deleteBranches runs the local and remote deletes opt asks for, for a branch
+// deleteBranches runs the local delete opt asks for, for a branch
 // whose facts the caller has already checked (read from git, not the default,
-// confirmed). path keys the confirmation ("" for a branch with no worktree).
+// confirmed).
 // Each outcome is a sidebar card for owner.
-func (d *Daemon) deleteBranches(repo, path string, f gitworktree.BranchFacts, opt branchDeleteOpts, owner paneRef) {
+func (d *Daemon) deleteBranches(repo string, f gitworktree.BranchFacts, opt branchDeleteOpts, owner paneRef) {
 	if opt.Local {
 		if err := d.deleteLocalBranch(repo, f.Branch); err != nil {
 			d.notifyBranchKept(owner, f.Branch, err.Error())
 		} else {
 			d.notifyBranchDeleted(owner, f.Branch, "")
-		}
-	}
-	if opt.Remote {
-		switch {
-		case !d.remoteBranchDelete.Load():
-			d.notifyBranchKept(owner, f.Branch, "remote delete is off in F1 → Settings")
-		case f.Remote == "":
-			d.notifyBranchKept(owner, f.Branch, "no remote branch: "+f.RemoteReason)
-		case f.DefaultRef == "" || f.RemoteBranch == gitworktree.ShortBranchName(f.DefaultRef):
-			// ReadBranchFacts already clears such a target; checked again
-			// here because this push deletes for everyone.
-			d.notifyBranchKept(owner, f.Branch, "its remote branch is, or may be, the default branch")
-		case !opt.remoteConfirmed(path, f):
-			d.notifyBranchKept(owner, f.Branch, "the remote target changed after the dialog opened")
-		default:
-			ctx, cancel := context.WithTimeout(context.Background(), remoteBranchDeleteTimeout)
-			err := deleteRemoteBranchFn(ctx, repo, f.Remote, f.RemoteBranch)
-			cancel()
-			target := f.Remote + "/" + f.RemoteBranch
-			if err != nil {
-				log.Printf("worktree remove: remote branch %s kept: %v", target, err)
-				d.notifyBranchKept(owner, target, err.Error())
-			} else {
-				log.Printf("worktree remove: remote branch %s deleted", target)
-				d.notifyBranchDeleted(owner, target, f.Remote)
-			}
 		}
 	}
 }

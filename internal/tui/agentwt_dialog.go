@@ -17,7 +17,7 @@ import (
 // appeared while agents ran, and a way to clean them up.
 //
 // Picking an entry opens the CLOSE dialog's own confirm (confirmKindAgentWT),
-// so the file list, the branch rows, the remote gate and the `y` rule are the
+// so the file list, the branch row and the `y` rule are the
 // same code a pane close uses. Every request names the entry by the daemon's
 // id; the daemon re-checks it against git before acting.
 
@@ -245,10 +245,10 @@ func (m Model) agentWTBranchEntry() bool {
 }
 
 // sendAgentWTAct sends the confirm's choice and returns to the list.
-func (m Model) sendAgentWTAct(removeWorktree, local, remote bool, confirmed []ipc.BranchConfirmation) (tea.Model, tea.Cmd) {
+func (m Model) sendAgentWTAct(removeWorktree, local bool, confirmed []ipc.BranchConfirmation) (tea.Model, tea.Cmd) {
 	e := m.agentWT.entry
 	m.dialog = dialogAgentWorktrees
-	req := ipc.AgentWorktreeActReqPayload{ID: e.ID, DeleteBranch: local, DeleteRemoteBranch: remote,
+	req := ipc.AgentWorktreeActReqPayload{ID: e.ID, DeleteBranch: local,
 		AcceptUncertain: m.agentWTEntryUncertain()}
 	if e.Kind != "branch" {
 		req.RemoveWorktree = removeWorktree
@@ -256,7 +256,7 @@ func (m Model) sendAgentWTAct(removeWorktree, local, remote bool, confirmed []ip
 	if len(confirmed) > 0 {
 		req.Confirmation = confirmed[0]
 	}
-	if !req.RemoveWorktree && !local && !remote {
+	if !req.RemoveWorktree && !local {
 		m.agentWT.notice = "Nothing was ticked."
 		return m, tea.ClearScreen
 	}

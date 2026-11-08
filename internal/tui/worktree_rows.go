@@ -8,7 +8,7 @@ import (
 )
 
 // The close dialog's worktree section: the worktree toggle, the files the
-// removal destroys, and the two branch rows (local, remote). Kept apart from
+// removal destroys, and the local branch row. Kept apart from
 // dialog.go so the agent-worktree view can draw the same rows.
 
 // confirmFileRowsMax is the file list's height when the terminal has room.
@@ -22,7 +22,6 @@ const dialogVChrome = 4
 const (
 	confirmRowWorktree = 0
 	confirmRowLocal    = 1
-	confirmRowRemote   = 2
 )
 
 // confirmDeletable reports the worktrees whose branch the dialog may offer to
@@ -58,66 +57,24 @@ func (m Model) localRowReason() string {
 	return "no branch to delete"
 }
 
-// remoteRowReason is "" when the remote-branch row can be armed, else why not.
-// The F1 switch comes first: while it is off the row says so and nothing else.
-func (m Model) remoteRowReason() string {
-	if !m.cfg.Worktree.RemoteBranchDelete {
-		return "off in F1 → Settings"
-	}
-	if r := m.localRowReason(); r != "" {
-		return r
-	}
-	if dest, ok := m.confirmDest(); ok && !m.destCanAdmin(dest) {
-		return "needs a full token"
-	}
-	for _, w := range m.confirmDeletable() {
-		if w.remote != "" {
-			return ""
-		}
-	}
-	for _, w := range m.confirmDeletable() {
-		if w.remoteReason != "" {
-			return w.remoteReason
-		}
-	}
-	return "no remote branch"
-}
-
-// confirmDest is the destination of the pane or tab the confirm is about.
-func (m Model) confirmDest() (string, bool) {
-	switch m.confirmKind {
-	case "pane":
-		return m.destOfPane(m.confirmID), true
-	case "tab":
-		return m.destOfTab(m.confirmID), true
-	case confirmKindAgentWT:
-		return m.agentWT.dest, true
-	}
-	return "", false
-}
-
-// confirmBranchSelection is what an accept sends: the two flags as they take
+// confirmBranchSelection is what an accept sends: the local flag as it takes
 // effect (an armed row that is no longer enabled counts as off) and the
 // branch names on screen, which the daemon only CHECKS against what it reads.
-func (m Model) confirmBranchSelection() (local, remote bool, confirmed []ipc.BranchConfirmation) {
+func (m Model) confirmBranchSelection() (local bool, confirmed []ipc.BranchConfirmation) {
 	local = m.confirmDeleteBranch && m.localRowReason() == ""
-	remote = m.confirmDeleteRemote && m.remoteRowReason() == ""
-	if !local && !remote {
-		return false, false, nil
+	if !local {
+		return false, nil
 	}
-	// One confirmation PER WORKTREE, carrying the remote target shown: the
-	// daemon matches each against that worktree alone, so one row's branch
-	// cannot confirm another's, and a moved upstream is not deleted.
+	// One confirmation PER WORKTREE: the daemon matches each against that
+	// worktree alone, so one row's branch cannot confirm another's.
 	for _, w := range m.confirmDeletable() {
-		confirmed = append(confirmed, ipc.BranchConfirmation{
-			WorktreePath: w.path, Branch: w.branch, Remote: w.remote, RemoteBranch: w.remoteBranch,
-		})
+		confirmed = append(confirmed, ipc.BranchConfirmation{WorktreePath: w.path, Branch: w.branch})
 	}
-	return local, remote, confirmed
+	return local, confirmed
 }
 
 // toggleConfirmRow flips the row under the cursor. A greyed row does nothing.
-// Disarming the worktree row disarms the branch rows too: a branch cannot be
+// Disarming the worktree row disarms the branch row too: a branch cannot be
 // deleted while its worktree still has it checked out.
 func (m *Model) toggleConfirmRow() {
 	switch m.confirmRow {
@@ -131,26 +88,22 @@ func (m *Model) toggleConfirmRow() {
 		}
 		m.confirmRemoveWorktree = !m.confirmRemoveWorktree
 		if !m.confirmRemoveWorktree {
-			m.confirmDeleteBranch, m.confirmDeleteRemote = false, false
+			m.confirmDeleteBranch = false
 		}
 	case confirmRowLocal:
 		if m.localRowReason() == "" {
 			m.confirmDeleteBranch = !m.confirmDeleteBranch
 		}
-	case confirmRowRemote:
-		if m.remoteRowReason() == "" {
-			m.confirmDeleteRemote = !m.confirmDeleteRemote
-		}
 	}
 }
 
-// moveConfirmRow moves the cursor between the three rows.
+// moveConfirmRow moves the cursor between the two rows.
 func (m *Model) moveConfirmRow(delta int) {
 	lowest := confirmRowWorktree
 	if m.agentWTBranchEntry() {
 		lowest = confirmRowLocal
 	}
-	m.confirmRow = max(lowest, min(confirmRowRemote, m.confirmRow+delta))
+	m.confirmRow = max(lowest, min(confirmRowLocal, m.confirmRow+delta))
 }
 
 // focusedWorktree is the worktree whose files are listed.
@@ -263,28 +216,22 @@ func (m Model) renderConfirmFiles(w confirmWorktree, inner int) string {
 	return b.String()
 }
 
-// renderBranchRows draws the local and remote branch rows with their
-// warnings. Each greyed row names why it cannot be armed.
+// renderBranchRows draws the local branch row with its warning. A greyed row
+// names why it cannot be armed. Quil never deletes a branch on a remote.
 func (m Model) renderBranchRows(inner int) string {
 	deletable := m.confirmDeletable()
 	var b strings.Builder
 
 	localLabel := "Delete local branch"
-	remoteLabel := "Delete remote branch"
 	switch {
 	case len(deletable) == 1:
 		localLabel += " " + sanitizeRemoteText(deletable[0].branch)
-		if r := deletable[0]; r.remote != "" {
-			remoteLabel += " " + sanitizeRemoteText(r.remote+"/"+r.remoteBranch)
-		}
 	case len(deletable) > 1:
 		localLabel = fmt.Sprintf("Delete local branches (%d)", len(deletable))
-		remoteLabel = fmt.Sprintf("Delete remote branches (%d)", len(deletable))
 	}
 
 	b.WriteString("\n" + m.confirmCheckRow(confirmRowLocal, m.confirmDeleteBranch, localLabel, m.localRowReason(), inner))
-	local, remote, _ := m.confirmBranchSelection()
-	if local {
+	if local, _ := m.confirmBranchSelection(); local {
 		unmerged, def := 0, ""
 		for _, w := range deletable {
 			unmerged += w.unmerged
@@ -298,18 +245,6 @@ func (m Model) renderBranchRows(inner int) string {
 				msg = fmt.Sprintf("⚠ %d commits not on %s will be lost", unmerged, sanitizeRemoteText(def))
 			}
 			b.WriteString("\n      " + dialogWarn.Render(truncateToWidth(msg, inner-6)))
-		}
-	}
-
-	b.WriteString("\n" + m.confirmCheckRow(confirmRowRemote, m.confirmDeleteRemote, remoteLabel, m.remoteRowReason(), inner))
-	if remote {
-		b.WriteString("\n      " + dialogWarn.Render(truncateToWidth("⚠ deletes it on the remote, for everyone", inner-6)))
-		for _, w := range deletable {
-			if w.prOpen && w.remote != "" {
-				msg := fmt.Sprintf("⚠ PR #%d is open — deleting the branch closes it", w.prNumber)
-				b.WriteString("\n      " + dialogWarn.Render(truncateToWidth(msg, inner-6)))
-				break
-			}
 		}
 	}
 	return b.String()
@@ -369,13 +304,6 @@ func (m Model) confirmWorktreesLoaded() bool {
 	return true
 }
 
-// remoteDeleteArmed reports that an accept would delete a remote branch —
-// the one choice Enter alone must not confirm.
-func (m Model) remoteDeleteArmed() bool {
-	_, remote, _ := m.confirmBranchSelection()
-	return remote
-}
-
 // confirmWorktreesInspected reports that every worktree's files were READ:
 // loaded, and without an error. A timeout or a refusal loads a row with a
 // reason, which says the files are unknown — not that there are none.
@@ -412,5 +340,5 @@ func (m *Model) disarmUnreadWorktree() {
 		return
 	}
 	m.confirmRemoveWorktree = false
-	m.confirmDeleteBranch, m.confirmDeleteRemote = false, false
+	m.confirmDeleteBranch = false
 }

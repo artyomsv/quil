@@ -20,7 +20,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -531,35 +534,50 @@ func ParseStatusZ(out string) (files []FileChange, total int) {
 	return files, total
 }
 
-// IsNotRepository reports that git ANSWERED that dir is in no repository —
-// as opposed to an error that says nothing about the directory (a truncated
-// listing, git missing, a timeout). Matched on git's message; a localized
-// git does not match, which falls to "unknown", the safe side.
+// IsNotRepository reports ListStrict's "no repository" answer.
 func IsNotRepository(err error) bool {
-	if errors.Is(err, ErrNotRepository) {
-		return true
-	}
-	return err != nil && !errors.Is(err, ErrOutputTruncated) && strings.Contains(err.Error(), "not a git repository")
+	return errors.Is(err, ErrNotRepository)
 }
 
-// ErrNotRepository is ListStrict's answer when git says dir is in no
-// repository.
+// ErrNotRepository is ListStrict's answer when dir is in no repository.
 var ErrNotRepository = errors.New("not a git repository")
 
-// ListStrict is List without the not-a-repository collapse: git saying "not
-// a git repository" is ErrNotRepository, and EVERY other failure (a non-zero
-// exit for a permission error, an unsafe directory, a corrupt repository; a
-// truncated listing; git missing; a timeout) is returned as itself. For the
-// callers that must tell "no repository" from "could not read it" — the
-// agent-worktree baseline and the removal's still-registered check — where
-// the two answers authorise different things.
+// ListStrict is List without the not-a-repository collapse: it answers
+// ErrNotRepository only when git failed AND neither dir nor any parent holds
+// a `.git` entry, and returns every other failure as itself — a broken
+// `.git` indirection, a permission error, an unsafe directory, a truncated
+// listing, git missing, a timeout. Decided from the disk rather than from
+// git's message, which is localized and which a broken repository shares
+// ("not a git repository: <gitdir>"). For the callers that must tell "no
+// repository" from "could not read it": the agent-worktree baseline and the
+// removal's still-registered check.
 func ListStrict(ctx context.Context, dir string) ([]Worktree, error) {
 	out, err := runGit(ctx, dir, "worktree", "list", "--porcelain")
 	if err != nil {
-		if IsNotRepository(err) {
+		if ctx.Err() == nil && !errors.Is(err, ErrOutputTruncated) && !errors.Is(err, exec.ErrNotFound) && !hasGitAncestor(dir) {
 			return nil, ErrNotRepository
 		}
 		return nil, err
 	}
 	return parsePorcelain(out), nil
+}
+
+// hasGitAncestor reports a `.git` entry (directory or file) in dir or any
+// parent: where git would find a repository. An unreadable entry counts as
+// present — it is not evidence of absence.
+func hasGitAncestor(dir string) bool {
+	d, err := filepath.Abs(dir)
+	if err != nil {
+		return true
+	}
+	for {
+		if _, err := os.Lstat(filepath.Join(d, ".git")); err == nil || !errors.Is(err, fs.ErrNotExist) {
+			return true
+		}
+		parent := filepath.Dir(d)
+		if parent == d {
+			return false
+		}
+		d = parent
+	}
 }

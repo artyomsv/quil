@@ -3,7 +3,9 @@ package gitworktree
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -548,23 +550,33 @@ func TestStatus_DoesNotTakeOptionalLocks(t *testing.T) {
 	}
 }
 
-// ListStrict keeps "not a repository" and "could not read it" apart, where
-// List folds both into (nil, nil).
+// ListStrict keeps "not a repository" and "could not read it" apart, from
+// the disk: a folder with no .git anywhere above is no repository; a broken
+// .git indirection is a FAILURE, although git's message for it also says
+// "not a git repository". List folds both into (nil, nil).
 //
-// Fails if ListStrict folds a refusal such as an unsafe directory into "no
-// repository".
-func TestListStrict_SeparatesNoRepositoryFromAFailure(t *testing.T) {
-	stubGit(t, "", errors.New("exit status 128: fatal: not a git repository (or any of the parent directories): .git"))
-	if _, err := ListStrict(context.Background(), "/x"); !errors.Is(err, ErrNotRepository) {
-		t.Errorf("not a repository: err = %v, want ErrNotRepository", err)
+// Fails if ListStrict decides from git's message text.
+func TestListStrict_RealGit_SeparatesNoRepositoryFromABrokenOne(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not on PATH")
+	}
+	ctx := context.Background()
+	plain := t.TempDir()
+	if hasGitAncestor(plain) {
+		t.Skip("the temp directory is inside a repository")
+	}
+	if _, err := ListStrict(ctx, plain); !errors.Is(err, ErrNotRepository) {
+		t.Errorf("plain folder: err = %v, want ErrNotRepository", err)
 	}
 
-	dubious := errors.New("exit status 128: fatal: detected dubious ownership in repository at '/x'")
-	stubGit(t, "", dubious)
-	if _, err := ListStrict(context.Background(), "/x"); err == nil || errors.Is(err, ErrNotRepository) {
-		t.Errorf("dubious ownership: err = %v, want the failure itself", err)
+	broken := t.TempDir()
+	if err := os.WriteFile(filepath.Join(broken, ".git"), []byte("gitdir: "+filepath.Join(broken, "missing")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	if got, err := List(context.Background(), "/x"); got != nil || err != nil {
+	if _, err := ListStrict(ctx, broken); err == nil || errors.Is(err, ErrNotRepository) {
+		t.Errorf("broken .git: err = %v, want the failure itself", err)
+	}
+	if got, err := List(ctx, broken); got != nil || err != nil {
 		t.Errorf("List keeps its fold: got %v, %v", got, err)
 	}
 }

@@ -399,7 +399,7 @@ func TestAgentWT_IncompleteSeedMarksTheRepositoryUncertain(t *testing.T) {
 			func(r *fakeRepo) { r.gate = nil }, true},
 		{"cut branch list", &fakeRepo{branches: []string{"master"}, truncated: true},
 			func(r *fakeRepo) { r.truncated = false }, true},
-		{"not a repository", &fakeRepo{branches: []string{"master"}, listErr: errors.New("fatal: not a git repository (or any of the parent directories): .git")},
+		{"not a repository", &fakeRepo{branches: []string{"master"}, listErr: gitworktree.ErrNotRepository},
 			func(r *fakeRepo) { r.listErr = nil }, false},
 		{"truncated listing", &fakeRepo{branches: []string{"master"}, listErr: fmt.Errorf("%w: big", gitworktree.ErrOutputTruncated)},
 			func(r *fakeRepo) { r.listErr = nil }, true},
@@ -544,5 +544,23 @@ func TestAgentWT_ProbeBeforeGenerationBumpCarriesTheStartingGen(t *testing.T) {
 
 	if got := d.agentWT.paneInDir("/w/new"); got != pane.ID {
 		t.Errorf("paneInDir(/w/new) = %q, want the starting child's subagent kept", got)
+	}
+}
+
+// Only a Quil window may acknowledge an uncertain record: a bridge, the web
+// gateway or a conn that never said hello is refused; a plain request is not
+// affected.
+func TestUncertainAckRefusal_OnlyTheTUI(t *testing.T) {
+	ack := ipc.AgentWorktreeActReqPayload{ID: "e", RemoveWorktree: true, AcceptUncertain: true}
+	for _, role := range []string{"bridge", "web", ""} {
+		if uncertainAckRefusal(ack, role) == "" {
+			t.Errorf("role %q may acknowledge", role)
+		}
+	}
+	if r := uncertainAckRefusal(ack, "tui"); r != "" {
+		t.Errorf("tui refused: %s", r)
+	}
+	if r := uncertainAckRefusal(ipc.AgentWorktreeActReqPayload{ID: "e", RemoveWorktree: true}, "bridge"); r != "" {
+		t.Errorf("a request without the acknowledgment refused: %s", r)
 	}
 }

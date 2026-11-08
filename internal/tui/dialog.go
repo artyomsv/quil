@@ -223,10 +223,6 @@ type settingsField struct {
 	sandboxSettings bool
 	// keysSettings opens F1 → Settings → Keys.
 	keysSettings bool
-	// worktreePolicy marks a row whose change is pushed to every daemon at
-	// once (worktreePolicyCmd): the daemon enforces it, and F1 edits reach
-	// config.toml only when the TUI exits.
-	worktreePolicy bool
 }
 
 // settingsFields returns the editable Settings rows. Every setter that
@@ -484,18 +480,6 @@ func settingsFields() []settingsField {
 			get:    func(m *Model) string { return boolStr(m.cfg.Update.Auto) },
 			set:    func(m *Model, _ string) { m.applySetting("update.auto", strconv.FormatBool(!m.cfg.Update.Auto)) },
 			isBool: true,
-		},
-		{
-			// Off by default. The close dialog offers the remote branch delete
-			// only while this is on, and the daemon refuses one while its own
-			// pushed copy is off — so the switch is enforced where the push runs.
-			label: "Allow remote branch delete",
-			get:   func(m *Model) string { return boolStr(m.cfg.Worktree.RemoteBranchDelete) },
-			set: func(m *Model, _ string) {
-				m.applySetting("worktree.remote_branch_delete", strconv.FormatBool(!m.cfg.Worktree.RemoteBranchDelete))
-			},
-			isBool:         true,
-			worktreePolicy: true,
 		},
 		{label: "Templates", get: func(m *Model) string { return "…" }, set: func(m *Model, _ string) {}, templateSettings: true},
 	}
@@ -1044,9 +1028,6 @@ func (m Model) handleSettingsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, tea.ClearScreen
 		case f.isBool:
 			f.set(&m, "")
-			if f.worktreePolicy {
-				return m, m.worktreePolicyCmd()
-			}
 		default:
 			m.dialogEdit = true
 			m.dialogInput = f.get(&m)
@@ -1206,12 +1187,9 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "enter", "y":
-		// A remote branch delete takes `y` only. Checked BEFORE the reset
-		// below, or a refused Enter would drop the arm the user set.
-		if len(m.confirmWorktrees) > 0 && m.remoteDeleteArmed() && msg.String() != "y" {
-			return m, nil
-		}
-		// So does a cleanup in a repository whose record may miss items:
+		// A cleanup in a repository whose record may miss items takes `y`
+		// only. Checked BEFORE the reset below, or a refused Enter would drop
+		// the arm the user set:
 		// the `y` is the acknowledgment the daemon asks for.
 		if m.agentWTUncertainOpen() && msg.String() != "y" {
 			return m, nil
@@ -1230,13 +1208,13 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// Read BEFORE the reset below, like every other value this branch
 		// carries into its command.
 		removeWorktree := m.confirmRemoveWorktree
-		deleteBranch, deleteRemote, confirmedBranches := m.confirmBranchSelection()
+		deleteBranch, confirmedBranches := m.confirmBranchSelection()
 		if !removeWorktree {
-			deleteBranch, deleteRemote, confirmedBranches = false, false, nil
+			deleteBranch, confirmedBranches = false, nil
 		}
 		m.resetConfirmWorktrees()
 		if kind == confirmKindAgentWT {
-			return m.sendAgentWTAct(removeWorktree, deleteBranch, deleteRemote, confirmedBranches)
+			return m.sendAgentWTAct(removeWorktree, deleteBranch, confirmedBranches)
 		}
 
 		// Stop-daemon requires explicit `y` — Enter is the universal
@@ -1479,18 +1457,16 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 					// Bools again, and branch names the daemon only CHECKS:
 					// it deletes the branch it reads from git, and only when
 					// that name is one this dialog showed.
-					DeleteBranch:       deleteBranch,
-					DeleteRemoteBranch: deleteRemote,
-					Confirmations:      confirmedBranches,
+					DeleteBranch:  deleteBranch,
+					Confirmations: confirmedBranches,
 				})
 				m.sendForDest(dest, req)
 			case "tab":
 				req, _ := ipc.NewMessage(ipc.MsgDestroyTab, ipc.DestroyTabPayload{
-					TabID:              id,
-					RemoveWorktree:     removeWorktree,
-					DeleteBranch:       deleteBranch,
-					DeleteRemoteBranch: deleteRemote,
-					Confirmations:      confirmedBranches,
+					TabID:          id,
+					RemoveWorktree: removeWorktree,
+					DeleteBranch:   deleteBranch,
+					Confirmations:  confirmedBranches,
 				})
 				m.sendForDest(dest, req)
 			}
@@ -2114,9 +2090,6 @@ func (m Model) renderConfirmDialog() string {
 			b.WriteString(rows)
 		}
 		footer = "space toggle  ↑↓ row  Enter confirm  Esc back"
-		if m.remoteDeleteArmed() {
-			footer = "space toggle  ↑↓ row  y delete remote  Esc back"
-		}
 		if m.agentWTUncertainOpen() {
 			b.WriteString("\n\n  " + dialogWarn.Render(truncateToWidth(
 				"⚠ This repository's record may miss items (read late).", inner-2)))
@@ -2150,11 +2123,6 @@ func (m Model) renderConfirmDialog() string {
 			footer = "space toggle  ↑↓ row  Enter confirm  Esc cancel"
 			if len(m.confirmWorktrees) > 1 {
 				footer = "space toggle  ↑↓ row  ←→ files  Enter ok  Esc cancel"
-			}
-			// A remote delete reaches everyone sharing the remote, so Enter —
-			// the key every dialog commits with — does not confirm it.
-			if m.remoteDeleteArmed() {
-				footer = "space toggle  ↑↓ row  y delete remote  Esc cancel"
 			}
 			// Enter waits for the file list while the worktree is ticked.
 			if m.confirmRemoveWorktree && !m.confirmWorktreesLoaded() {
@@ -2250,7 +2218,7 @@ func (m Model) renderConfirmWorktrees() string {
 	// worktree's own status line rather than as a statement about the operation.
 	b.WriteString(m.renderBranchRows(inner))
 	b.WriteString("\n\n")
-	if local, remote, _ := m.confirmBranchSelection(); local || remote {
+	if local, _ := m.confirmBranchSelection(); local {
 		b.WriteString("  " + dialogSubtle.Render("Everything marked here goes."))
 	} else {
 		b.WriteString("  " + dialogSubtle.Render("The branch is kept; everything else here goes."))

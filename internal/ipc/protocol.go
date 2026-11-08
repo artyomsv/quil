@@ -86,11 +86,6 @@ const (
 	// disk on TUI exit, so without this a setting would not apply until the
 	// next daemon start. Last writer wins across clients.
 	MsgOverlayPolicy = "overlay_policy"
-	// MsgWorktreePolicy pushes whether a worktree close may delete the
-	// branch on its remote. Same reason as MsgOverlayPolicy: F1 edits reach
-	// config.toml only on TUI exit, and a remote daemon reads its own file.
-	// Admin class, so only a full-rights client can turn it on.
-	MsgWorktreePolicy = "worktree_policy"
 
 	// MCP request-response (Client -> Daemon -> Client)
 	MsgListPanesReq       = "list_panes_req"
@@ -562,21 +557,17 @@ type DestroyPanePayload struct {
 	// older client — non-destructive without knowing this field exists.
 	RemoveWorktree bool `json:"remove_worktree,omitempty"`
 
-	// DeleteBranch and DeleteRemoteBranch ask the daemon to delete, after the
-	// worktree is gone, the branch it had checked out — locally, and on the
-	// remote it is pushed to. Bools, like RemoveWorktree: the daemon reads the
-	// branch from git itself. Both need RemoveWorktree.
+	// DeleteBranch asks the daemon to delete, after the worktree is gone, the
+	// LOCAL branch it had checked out. A bool, like RemoveWorktree: the daemon
+	// reads the branch from git itself. It needs RemoveWorktree. Quil never
+	// deletes a branch on a remote.
 	//
-	// Confirmations is CHECK-ONLY: per worktree, the branch and the remote
-	// target the dialog showed. The daemon deletes what it reads from git
-	// itself, and only when it matches the confirmation for THAT worktree — so
-	// a worktree switched to another branch, or a branch whose upstream moved,
-	// keeps it, and one row cannot confirm another's. A remote delete also
-	// needs the daemon's worktree_policy on, and a full-rights conn
-	// (clientauth carriers).
-	DeleteBranch       bool                 `json:"delete_branch,omitempty"`
-	DeleteRemoteBranch bool                 `json:"delete_remote_branch,omitempty"`
-	Confirmations      []BranchConfirmation `json:"confirmations,omitempty"`
+	// Confirmations is CHECK-ONLY: per worktree, the branch the dialog showed.
+	// The daemon deletes what it reads from git itself, and only when it
+	// matches the confirmation for THAT worktree — so a worktree switched to
+	// another branch keeps it, and one row cannot confirm another's.
+	DeleteBranch  bool                 `json:"delete_branch,omitempty"`
+	Confirmations []BranchConfirmation `json:"confirmations,omitempty"`
 }
 
 // BranchConfirmation is what a dialog showed for one worktree's branch. Every
@@ -585,8 +576,6 @@ type DestroyPanePayload struct {
 type BranchConfirmation struct {
 	WorktreePath string `json:"worktree_path,omitempty"`
 	Branch       string `json:"branch"`
-	Remote       string `json:"remote,omitempty"`
-	RemoteBranch string `json:"remote_branch,omitempty"`
 }
 
 type ResizePanePayload struct {
@@ -734,9 +723,8 @@ type DestroyTabPayload struct {
 	// list of paths.
 	RemoveWorktree bool `json:"remove_worktree,omitempty"`
 	// Branch deletes: see DestroyPanePayload.
-	DeleteBranch       bool                 `json:"delete_branch,omitempty"`
-	DeleteRemoteBranch bool                 `json:"delete_remote_branch,omitempty"`
-	Confirmations      []BranchConfirmation `json:"confirmations,omitempty"`
+	DeleteBranch  bool                 `json:"delete_branch,omitempty"`
+	Confirmations []BranchConfirmation `json:"confirmations,omitempty"`
 }
 
 type SwitchTabPayload struct {
@@ -963,11 +951,6 @@ type PluginFixRespPayload struct {
 type OverlayPolicyPayload struct {
 	IdleTimeoutMinutes int `json:"idle_timeout_minutes"`
 	MaxLive            int `json:"max_live"`
-}
-
-// WorktreePolicyPayload carries the remote-branch-delete switch.
-type WorktreePolicyPayload struct {
-	RemoteBranchDelete bool `json:"remote_branch_delete"`
 }
 
 // MCP request-response payloads

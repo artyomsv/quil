@@ -819,6 +819,7 @@ const (
 	keptHasChanges      = "has_changes"
 	keptHasCommits      = "has_commits"
 	keptNoDefaultBranch = "no_default_branch"
+	keptBranchChanged   = "branch_changed"
 )
 
 var keptMessages = map[string]string{
@@ -833,6 +834,7 @@ var keptMessages = map[string]string{
 	keptHasChanges:      "it holds changes that are not committed",
 	keptHasCommits:      "its branch has commits the default branch does not",
 	keptNoDefaultBranch: "its branch could not be checked for commits (no default branch found)",
+	keptBranchChanged:   "it is no longer on the branch Quil created",
 }
 
 // keptMessage is the card text for a reason code.

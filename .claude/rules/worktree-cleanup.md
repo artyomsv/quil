@@ -406,8 +406,12 @@ directory (`Lstat` — a link routing the metadata to another repository is
 refused) holding the admin directory directly; and the admin directory's
 `gitdir` back-pointer — resolved against the ADMIN directory when relative
 (`worktree.useRelativePaths`, git 2.48+), never against quild's cwd — must be
-`<path>/.git`. A refusal is `ErrNotCreatedHere` and leaves the pane with no
-token.
+`<dir>/.git` where `<dir>` is the SAME DIRECTORY as the path (compared as
+directories, so a spelling alias of one folder still matches). The path's own
+`.git` must be a plain FILE (`Lstat`): a `P/.git` linked to `Q/.git` makes git
+resolve P to Q's admin directory, and comparing the two `.git` entries by
+followed identity would call two checkouts one and overwrite Q's mark. A
+refusal is `ErrNotCreatedHere` and leaves the pane with no token.
 
 **Accepted residual (owner's ruling, 2026-11-08):** git cannot make the add and
 the mark one step. A checkout of the SAME repository made at the SAME path
@@ -422,19 +426,36 @@ the rollback guard below, so the residual can cost a mislabel, not silent work
 loss.
 
 **An abandoned create's rollback has the close path's doubts**
-(`abandonRefusal`, before `removeWorktreeFn`, which is `--force` plus
-`branch -D`). The tab or the replace target closing during the checkout ends
-the create, and the checkout is removed only when: the mark still matches
-(checked first and again last), no pane is in it, `git status` counts nothing
-(`keptHasChanges`), and its branch holds no commit the default branch lacks and
-is not detached or the default (`keptHasCommits`) — with no default branch to
-count against, `Unmerged` is 0 by omission, so that keeps too
-(`keptNoDefaultBranch`); any unanswered check is
-`keptRepoUnreadable`. Otherwise it is KEPT, the requester's error says so with
-the fixed message, and the reason is logged. The mark alone is never proof
-there: the accepted residual is exactly a replacement that carries it.
-`TestWorktreeAddAndCreate_RealGit_AbandonKeepsAReplacementHoldingWork` pins it;
-`stubRemove` lets the guard through for the tests about the removal itself.
+(`abandonRefusal`, before `removeWorktreeFn`). The tab or the replace target
+closing during the checkout ends the create, and the checkout is removed only
+when, in this ORDER — the slow probes first, the fast state checks last, right
+before the removal, so work that lands during a probe is still seen:
+1. the mark matches;
+2. branch facts: the checkout is still on the branch the create made
+   (`keptBranchChanged` — the rollback deletes THAT branch, so facts about
+   another branch prove nothing about it), not the default, with no commit the
+   default branch lacks (`keptHasCommits`), and a default branch exists to
+   count against (`keptNoDefaultBranch` — `Unmerged` is 0 by omission without
+   one);
+3. the mark still matches;
+4. no pane is in it (`keptInUse`);
+5. `git status` (tracked, untracked AND ignored) counts nothing
+   (`keptHasChanges`).
+
+Any unanswered check is `keptRepoUnreadable`. A kept checkout's reason is
+logged and the requester's error says so with the fixed message. The mark alone
+is never proof: the accepted residual is exactly a replacement that carries it.
+**The removal itself forces nothing** (`gitworktree.Remove`: plain
+`git worktree remove`, then `git branch -d`), so modified or untracked work and
+unmerged commits that land after the last check are refused by git; only an
+IGNORED file landing in that last instant is unguarded (plain remove does not
+count ignored files) — a residual of microseconds. Tests:
+`TestAbandonRefusal_KeepsOnEveryDoubt`,
+`TestWorktreeAddAndCreate_RealGit_AbandonKeepsAReplacementHoldingWork`,
+`…AbandonKeepsTheCreatedBranchWhenSwapped`,
+`…AbandonSeesWorkLandingDuringTheProbes`, `TestRemove_RealGit_RefusesADirtyWorktree`,
+`TestRemove_RealGit_KeepsAnUnmergedBranch`. `stubRemove`/`allowRollback` let the
+guard through for the tests about the removal itself.
 
 The delete checks compare resolved paths through `foldedWithin`, which folds
 case on darwin and windows (`foldPathCase`) as a cheap first test. Strings

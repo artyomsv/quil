@@ -422,6 +422,8 @@ func TestAbandonRefusal_KeepsOnEveryDoubt(t *testing.T) {
 		{"commits", "tok", []bool{true, true}, 0, nil, gitworktree.BranchFacts{Branch: "feat/x", Unmerged: 1}, nil, keptHasCommits},
 		{"facts unanswered", "tok", []bool{true, true}, 0, nil, clean, errors.New("boom"), keptRepoUnreadable},
 		{"no default branch", "tok", []bool{true, true}, 0, nil, gitworktree.BranchFacts{Branch: "feat/x"}, nil, keptNoDefaultBranch},
+		{"on another branch", "tok", []bool{true, true}, 0, nil, gitworktree.BranchFacts{Branch: "feat/b", DefaultRef: "refs/heads/master"}, nil, keptBranchChanged},
+		{"detached", "tok", []bool{true, true}, 0, nil, gitworktree.BranchFacts{Detached: true, DefaultRef: "refs/heads/master"}, nil, keptBranchChanged},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -438,7 +440,7 @@ func TestAbandonRefusal_KeepsOnEveryDoubt(t *testing.T) {
 			}
 			t.Cleanup(func() { ownerMarkMatchesFn = prev })
 
-			if got := d.abandonRefusal("/repo", "/w/feat-x", tc.token); got != tc.want {
+			if got := d.abandonRefusal("/repo", "/w/feat-x", "feat/x", tc.token); got != tc.want {
 				t.Errorf("abandonRefusal = %q, want %q", got, tc.want)
 			}
 		})
@@ -506,4 +508,93 @@ func runGitForAbandon(t *testing.T, dir string, args ...string) string {
 		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
 	}
 	return string(out)
+}
+
+// The replacement is CLEAN but on another branch: the work went onto the
+// branch the create made (feat/x), whose checkout was then swapped for a
+// clean one on feat/b. The rollback deletes feat/x, so feat/b's clean facts
+// prove nothing about it: the commit on feat/x survives.
+//
+// Fails if the guard checks the checkout's current branch rather than the one
+// the rollback deletes.
+func TestWorktreeAddAndCreate_RealGit_AbandonKeepsTheCreatedBranchWhenSwapped(t *testing.T) {
+	repo := realGitRepoForDaemon(t)
+	t.Setenv("QUIL_HOME", t.TempDir())
+	d := newTestDaemon(t)
+	tab := d.session.CreateTab("t")
+	req := worktreeCreate(tab.ID, repo, "feat/x")
+	path := gitworktree.DerivePath(repo, "feat/x")
+	stubAdd(t, func(ctx context.Context, repo, path, branch string) error {
+		if _, err := gitworktree.Add(ctx, repo, path, branch); err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(path, "work.txt"), []byte("work\n"), 0o644); err != nil {
+			return err
+		}
+		runGitForAbandon(t, path, "add", "work.txt")
+		runGitForAbandon(t, path, "commit", "-q", "-m", "work")
+		if err := gitworktree.RemoveWorktree(ctx, repo, path); err != nil {
+			return err
+		}
+		runGitForAbandon(t, repo, "worktree", "add", "-q", "-b", "feat/b", path, "master")
+		return d.session.DestroyTab(tab.ID)
+	})
+
+	resp := d.worktreeAddAndCreate(req)
+
+	if tip := strings.TrimSpace(runGitForAbandon(t, repo, "log", "-1", "--format=%s", "feat/x")); tip != "work" {
+		t.Errorf("feat/x tip = %q, want its commit to survive", tip)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("the swapped checkout is gone: %v", err)
+	}
+	if !strings.Contains(resp.Error, "kept") {
+		t.Errorf("answer = %q, want it to say the worktree was kept", resp.Error)
+	}
+}
+
+// Work lands DURING the rollback's slow branch-facts probe, after nothing was
+// there: the clean check runs after that probe, so the new file — tracked,
+// untracked or ignored — is seen and the checkout is kept.
+//
+// Fails if the clean check runs before the slow probes.
+func TestWorktreeAddAndCreate_RealGit_AbandonSeesWorkLandingDuringTheProbes(t *testing.T) {
+	for _, file := range []string{"dirty.txt", "build.log"} {
+		t.Run(file, func(t *testing.T) {
+			repo := realGitRepoForDaemon(t)
+			if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("*.log\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			runGitForAbandon(t, repo, "add", ".gitignore")
+			runGitForAbandon(t, repo, "commit", "-q", "-m", "ignore logs")
+			t.Setenv("QUIL_HOME", t.TempDir())
+			d := newTestDaemon(t)
+			tab := d.session.CreateTab("t")
+			req := worktreeCreate(tab.ID, repo, "feat/x")
+			path := gitworktree.DerivePath(repo, "feat/x")
+			stubAdd(t, func(ctx context.Context, repo, path, branch string) error {
+				if _, err := gitworktree.Add(ctx, repo, path, branch); err != nil {
+					return err
+				}
+				return d.session.DestroyTab(tab.ID)
+			})
+			prev := branchFactsFn
+			branchFactsFn = func(ctx context.Context, repo, wt, def string) (gitworktree.BranchFacts, error) {
+				if err := os.WriteFile(filepath.Join(wt, file), []byte("late\n"), 0o644); err != nil {
+					return gitworktree.BranchFacts{}, err
+				}
+				return prev(ctx, repo, wt, def)
+			}
+			t.Cleanup(func() { branchFactsFn = prev })
+
+			resp := d.worktreeAddAndCreate(req)
+
+			if _, err := os.Stat(filepath.Join(path, file)); err != nil {
+				t.Errorf("the file that landed during the probe is gone: %v", err)
+			}
+			if !strings.Contains(resp.Error, "kept") {
+				t.Errorf("answer = %q, want it to say the worktree was kept", resp.Error)
+			}
+		})
+	}
 }

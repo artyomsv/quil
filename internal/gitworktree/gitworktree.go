@@ -387,25 +387,27 @@ func Add(ctx context.Context, repo, path, branch string) (string, error) {
 // Remove undoes an Add whose pane could not be created, and deletes the branch
 // that Add made along with it.
 //
-// This is the ONE place --force is right, and for a reason that does not
-// generalise to Add: the worktree being removed was created by this daemon
-// seconds ago and has never been handed to anyone, so there is no user work to
-// protect — while without it git refuses to remove a worktree it considers
-// dirty, which a fresh checkout can be on a repository with line-ending or
-// filemode differences. Leaving it instead strands a full checkout on disk plus
-// a branch pointing at it, and the next attempt at the same name then fails
-// with "already exists" against a directory the user never made.
+// NEITHER step forces, and that is the backstop, not a detail. The caller has
+// checked the checkout is clean and the branch holds nothing unmerged, but a
+// check is a snapshot: work that lands after it must still survive. A plain
+// `git worktree remove` refuses a checkout with modified or untracked files,
+// and `git branch -d` refuses a branch that is not merged. A refusal leaves
+// the checkout or the branch in place, and the next attempt at the same name
+// then fails with "already exists" — a visible cost, where forcing would be a
+// silent loss of work. (It used to force: a fresh checkout can look dirty on a
+// repository with line-ending differences, and the caller now keeps a dirty
+// one on purpose instead.)
 //
 // Best-effort by contract: the caller is already reporting a failure and this
 // is cleanup, so the error is for the log, not for the user.
 func Remove(ctx context.Context, repo, path string, branch string) error {
-	if err := RemoveWorktree(ctx, repo, path); err != nil {
-		return err
+	if _, err := runGit(ctx, repo, "worktree", "remove", "--", path); err != nil {
+		return fmt.Errorf("git worktree remove %s: %w", path, err)
 	}
 	// Only after the worktree is gone: git refuses to delete a branch that a
 	// worktree still has checked out, so the order is load-bearing.
-	if _, err := runGit(ctx, repo, "branch", "-D", branch); err != nil {
-		return fmt.Errorf("git branch -D %s: %w", branch, err)
+	if _, err := runGit(ctx, repo, "branch", "-d", "--", branch); err != nil {
+		return fmt.Errorf("git branch -d %s: %w", branch, err)
 	}
 	return nil
 }

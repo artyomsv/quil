@@ -238,3 +238,38 @@ func TestMarkNewWorktree_RealGit_RelativeBackPointerIsMarked(t *testing.T) {
 		t.Errorf("match = %v, %v; want the worktree marked", ok, err)
 	}
 }
+
+// Two checkouts of one repository, P and Q. P/.git is replaced by a link to
+// Q/.git, so git resolves P to Q's admin directory and Q's back-pointer
+// follows to the same file. P is not Q: it is refused, and Q's own mark is
+// untouched.
+//
+// Fails if the .git entries are compared by followed identity, or a linked
+// .git is accepted.
+func TestMarkNewWorktree_RealGit_RefusesALinkedDotGit(t *testing.T) {
+	repo := realGitRepo(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	p, q := DerivePath(repo, "feat-p"), DerivePath(repo, "feat-q")
+	for _, wt := range []struct{ path, branch string }{{p, "feat-p"}, {q, "feat-q"}} {
+		if _, err := Add(ctx, repo, wt.path, wt.branch); err != nil {
+			t.Fatalf("Add %s: %v", wt.branch, err)
+		}
+	}
+	if err := MarkNewWorktree(ctx, repo, q, "tok-q"); err != nil {
+		t.Fatalf("MarkNewWorktree q: %v", err)
+	}
+	if err := os.Remove(filepath.Join(p, ".git")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(q, ".git"), filepath.Join(p, ".git")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	if err := MarkNewWorktree(ctx, repo, p, "tok-p"); !errors.Is(err, ErrNotCreatedHere) {
+		t.Fatalf("err = %v, want ErrNotCreatedHere", err)
+	}
+	if ok, err := OwnerMarkMatches(ctx, q, "tok-q"); !ok || err != nil {
+		t.Errorf("Q's mark = %v, %v; want it unchanged", ok, err)
+	}
+}

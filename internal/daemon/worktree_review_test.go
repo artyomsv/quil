@@ -39,7 +39,7 @@ func stubRemove(t *testing.T, fn func(ctx context.Context, repo, path, branch st
 func allowRollback(t *testing.T) {
 	t.Helper()
 	prev := abandonRefusalFn
-	abandonRefusalFn = func(*Daemon, string, string, string) string { return "" }
+	abandonRefusalFn = func(*Daemon, string, string, string, string) string { return "" }
 	t.Cleanup(func() { abandonRefusalFn = prev })
 }
 

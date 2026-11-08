@@ -105,7 +105,24 @@ func MarkNewWorktree(ctx context.Context, repo, path, token string) error {
 	if !filepath.IsAbs(backPath) {
 		backPath = filepath.Join(admin, backPath)
 	}
-	if same, err := sameFile(backPath, filepath.Join(path, ".git")); err != nil {
+	// The checkout's own .git must be a plain FILE (a linked worktree's
+	// "gitdir:" pointer), never a link: a P/.git linked to Q/.git makes git
+	// resolve P to Q's admin directory, and comparing the two .git entries by
+	// followed identity would then call two different checkouts one.
+	dotGit, err := os.Lstat(filepath.Join(path, ".git"))
+	if err != nil {
+		return err
+	}
+	if !dotGit.Mode().IsRegular() {
+		return ErrNotCreatedHere
+	}
+	// And the back-pointer must name THIS checkout directory — compared as
+	// directories, so a case or Unicode spelling of the same folder still
+	// matches while a different folder never does.
+	if filepath.Base(backPath) != ".git" {
+		return ErrNotCreatedHere
+	}
+	if same, err := sameFile(filepath.Dir(backPath), path); err != nil {
 		return err
 	} else if !same {
 		return ErrNotCreatedHere

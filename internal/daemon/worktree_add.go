@@ -200,14 +200,14 @@ func (d *Daemon) worktreeAddAndCreate(p ipc.CreatePanePayload) ipc.CreatePaneRes
 	// Every abandonment past this point REMOVES the worktree git just made —
 	// but only after the same doubts the close path has are cleared
 	// (abandonRefusal): the accepted same-repository replacement can carry the
-	// mark, and removal is --force plus branch -D. Anything uncertain, in use,
+	// mark. Anything uncertain, in use, on another branch,
 	// holding changes or holding commits is KEPT and the answer says so.
 	// Returning without cleanup otherwise strands a full checkout on disk plus
 	// a branch pointing at it, and the next attempt at the same name fails
 	// with "already exists" against a directory the user never created.
 	abandon := func(format string, args ...any) ipc.CreatePaneRespPayload {
 		resp := fail(format, args...)
-		if reason := abandonRefusalFn(d, spec.RepoRoot, path, token); reason != "" {
+		if reason := abandonRefusalFn(d, spec.RepoRoot, path, spec.Branch, token); reason != "" {
 			log.Printf("worktree create: kept %s after a failed create: %s", path, keptMessage(reason))
 			resp.Error += "; the new worktree was kept: " + keptMessage(reason)
 			return resp
@@ -372,17 +372,41 @@ var markNewWorktreeFn = gitworktree.MarkNewWorktree
 // tests that observe the removal itself (stubRemove) can let it through.
 var abandonRefusalFn = (*Daemon).abandonRefusal
 
-// abandonRefusal is the rollback's version of the close path's doubts. The
-// removal is `worktree remove --force` plus `branch -D`, and the accepted
-// same-repository replacement (MarkNewWorktree) can carry the mark — so the
-// mark alone is not proof that no work appeared. The checkout is kept unless
-// it is still the one marked (checked first and again last, right before the
-// caller destroys it), no pane is in it, it holds no changes, and its branch
-// holds no commit the default branch lacks. Any check that cannot answer
-// keeps it.
-func (d *Daemon) abandonRefusal(repo, path, token string) string {
+// abandonRefusal is the rollback's version of the close path's doubts, for
+// the checkout at path that a create made on branch. The accepted
+// same-repository replacement (MarkNewWorktree) can carry the mark, so the
+// mark alone is not proof that no work appeared. The checkout is kept unless:
+// it is still the one marked; it is still on branch — the rollback deletes
+// THAT branch, so facts about whatever else the checkout is on now prove
+// nothing about it; the branch holds no commit the default branch lacks (and a
+// default branch exists to count against); no pane is in it; and it holds no
+// changes. Any check that cannot answer keeps it.
+//
+// ORDER: the slow probes (mark, branch facts) run first, and the occupancy and
+// clean checks LAST, right before the caller removes — so work that lands
+// during a slow probe is still seen. What lands after the last check is caught
+// by the removal itself, which forces neither step (gitworktree.Remove).
+func (d *Daemon) abandonRefusal(repo, path, branch, token string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), worktreeStatusTimeout)
 	defer cancel()
+	if r := ownerMarkRefusal(ctx, path, token); r != "" {
+		return r
+	}
+	facts, err := branchFactsFn(ctx, repo, path, defaultBranchRefFn(ctx, repo))
+	switch {
+	case err != nil:
+		log.Printf("worktree create: %s: branch facts before rollback: %v", path, err)
+		return keptRepoUnreadable
+	case facts.Detached || facts.Branch != branch:
+		return keptBranchChanged
+	case facts.IsDefault || facts.Unmerged > 0:
+		return keptHasCommits
+	case facts.DefaultRef == "":
+		// No default branch to count against: Unmerged is 0 because nothing
+		// was counted, not because nothing is there. The close-time branch
+		// delete refuses here too.
+		return keptNoDefaultBranch
+	}
 	if r := ownerMarkRefusal(ctx, path, token); r != "" {
 		return r
 	}
@@ -397,18 +421,5 @@ func (d *Daemon) abandonRefusal(repo, path, token string) string {
 	case status.Changes > 0:
 		return keptHasChanges
 	}
-	facts, err := branchFactsFn(ctx, repo, path, defaultBranchRefFn(ctx, repo))
-	switch {
-	case err != nil:
-		log.Printf("worktree create: %s: branch facts before rollback: %v", path, err)
-		return keptRepoUnreadable
-	case facts.Detached || facts.IsDefault || facts.Unmerged > 0:
-		return keptHasCommits
-	case facts.DefaultRef == "":
-		// No default branch to count against: Unmerged is 0 because nothing
-		// was counted, not because nothing is there. The close-time branch
-		// delete refuses here too.
-		return keptNoDefaultBranch
-	}
-	return ownerMarkRefusal(ctx, path, token)
+	return ""
 }

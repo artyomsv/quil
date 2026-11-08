@@ -216,11 +216,12 @@ func TestRemove_RealGit_UndoesAnAddCompletely(t *testing.T) {
 	}
 }
 
-// A dirty worktree must still be removable. It was created by the daemon
-// seconds ago and never handed to anyone, so there is no user work to protect —
-// and git refuses a plain remove on a checkout it considers dirty, which a
-// fresh one can be on a repository with line-ending differences.
-func TestRemove_RealGit_RemovesADirtyWorktree(t *testing.T) {
+// A dirty worktree is NOT removed, and neither is its branch: Remove is the
+// rollback's last line, and work that arrived after the caller's clean check
+// must survive it.
+//
+// Fails if Remove forces either step.
+func TestRemove_RealGit_RefusesADirtyWorktree(t *testing.T) {
 	repo := realGitRepo(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -236,11 +237,40 @@ func TestRemove_RealGit_RemovesADirtyWorktree(t *testing.T) {
 		t.Fatalf("add an untracked file: %v", err)
 	}
 
-	if err := Remove(ctx, repo, path, "feat/dirty"); err != nil {
-		t.Fatalf("Remove refused a dirty worktree: %v", err)
+	if err := Remove(ctx, repo, path, "feat/dirty"); err == nil {
+		t.Fatal("Remove removed a dirty worktree")
 	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Errorf("the dirty worktree survived Remove: %v", err)
+	if _, err := os.Stat(filepath.Join(path, "untracked.txt")); err != nil {
+		t.Errorf("the untracked file is gone: %v", err)
+	}
+	if out := runGitIn(t, repo, "branch", "--list", "feat/dirty"); strings.TrimSpace(out) == "" {
+		t.Error("the branch was deleted")
+	}
+}
+
+// A branch with a commit the repository's HEAD does not hold survives
+// Remove even when its checkout is clean: `branch -d` refuses it.
+//
+// Fails if Remove force-deletes the branch.
+func TestRemove_RealGit_KeepsAnUnmergedBranch(t *testing.T) {
+	repo := realGitRepo(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	path := DerivePath(repo, "feat/work")
+	if _, err := Add(ctx, repo, path, "feat/work"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "w.txt"), []byte("w\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitIn(t, path, "add", "w.txt")
+	runGitIn(t, path, "commit", "-q", "-m", "work")
+
+	if err := Remove(ctx, repo, path, "feat/work"); err == nil {
+		t.Fatal("Remove deleted an unmerged branch")
+	}
+	if out := runGitIn(t, repo, "log", "-1", "--format=%s", "feat/work"); strings.TrimSpace(out) != "work" {
+		t.Errorf("branch tip = %q, want the commit to survive", out)
 	}
 }
 

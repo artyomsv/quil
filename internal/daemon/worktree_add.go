@@ -229,7 +229,7 @@ func (d *Daemon) worktreeAddAndCreate(p ipc.CreatePanePayload) ipc.CreatePaneRes
 			log.Printf("worktree create: could not clean up %s after a failed create: %v", path, rmErr)
 			code := rollbackOutcome(rmErr)
 			resp.Error += "; cleanup incomplete: " + keptMessage(code)
-			d.notifyRollbackIncomplete(owner, path, code)
+			d.notifyRollbackIncomplete(owner, path, spec.Branch, code)
 		}
 		return resp
 	}
@@ -454,19 +454,26 @@ func rollbackOutcome(err error) string {
 }
 
 // notifyRollbackIncomplete is the card for a rollback git refused part-way.
-// Its own title, because the checkout may be gone: only the reason says what
-// is left.
-func (d *Daemon) notifyRollbackIncomplete(owner paneRef, path, code string) {
+// OUTCOME FIRST, because the sidebar shows one cut line of title and one of
+// message (26 cells at its default width) and this card can be the only
+// place the outcome is reported: a kept branch leads with the branch it kept,
+// anything else says the cleanup is incomplete and names the folder after.
+// The full path and the code ride in Data.
+func (d *Daemon) notifyRollbackIncomplete(owner paneRef, path, branch, code string) {
+	title := "Cleanup incomplete: " + filepath.Base(path)
+	if code == keptBranchNotDeleted {
+		title = "Branch kept: " + branch
+	}
 	d.emitEvent(PaneEvent{
 		ID:        uuid.New().String(),
 		PaneID:    owner.ID,
 		TabID:     owner.TabID,
 		PaneName:  owner.Name,
 		Type:      "worktree_kept",
-		Title:     "Worktree cleanup incomplete: " + filepath.Base(path),
+		Title:     title,
 		Message:   keptMessage(code),
 		Severity:  "warning",
 		Timestamp: time.Now(),
-		Data:      map[string]string{"path": path, "reason": code},
+		Data:      map[string]string{"path": path, "branch": branch, "reason": code},
 	})
 }

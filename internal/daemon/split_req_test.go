@@ -1052,53 +1052,64 @@ func TestSplitPaneReq_WorktreeSplitSpawnFailureIsTold(t *testing.T) {
 }
 
 // The same split, and then git refuses part of the rollback: the spawn
-// failure is already told, but what survived the rollback is a SECOND fact,
-// and the answer that would carry it has already gone (Preparing). It is a
-// card of its own, on the placeholder the answer named, in fixed words.
+// failure is already told (a worktree_failed card beside a surviving pane, or
+// the recovery pane in a tab the replace emptied), but what survived the
+// rollback is a SECOND fact, and the answer that would carry it has already
+// gone (Preparing). It is a card of its own, in the request's tab, in fixed
+// outcome-first words.
 //
 // Fails if a rollback refused after a told spawn failure reaches only the
-// already-sent answer or the log.
+// already-sent answer or the log — including the recovered last-pane replace,
+// whose caller suppresses the error entirely.
 func TestSplitPaneReq_WorktreeRollbackRefusedAfterSpawnFailureIsTold(t *testing.T) {
-	d, client := mcpTestDaemon(t)
-	_, keep := seedTab(t, d, client)
-	repo := worktreeRepo(t)
-	stubAdd(t, func(_ context.Context, _, path, _ string) error { return os.MkdirAll(path, 0o755) })
-	prevRm := removeWorktreeFn
-	removeWorktreeFn = func(context.Context, string, string, string) error {
-		return fmt.Errorf("%w: git said something long", gitworktree.ErrBranchNotDeleted)
-	}
-	t.Cleanup(func() { removeWorktreeFn = prevRm })
-	allowRollback(t)
-	prev := newSessionFn
-	newSessionFn = func(cols, rows int) apty.Session { return &startFailSession{} }
-	t.Cleanup(func() { newSessionFn = prev })
-	waitCreateWorkersAtCleanup(t, d)
-
-	resp := split(t, client, ipc.SplitPaneReqPayload{TargetPaneID: keep, Placement: ipc.PlacementRight,
-		Pane: ipc.SplitPaneSpec{CWD: repo, Worktree: &ipc.SplitWorktree{Branch: "feat/r"}}})
-	if !resp.Preparing || resp.PaneID == "" {
-		t.Fatalf("split: %+v", resp)
-	}
-	kept := func() []PaneEvent {
-		var out []PaneEvent
-		for _, e := range d.events.Events() {
-			if e.Type == "worktree_kept" && e.PaneID == resp.PaneID {
-				out = append(out, e)
+	for _, placement := range []string{ipc.PlacementRight, ipc.PlacementReplace} {
+		t.Run(placement, func(t *testing.T) {
+			d, client := mcpTestDaemon(t)
+			tabID, target := seedTab(t, d, client)
+			repo := worktreeRepo(t)
+			stubAdd(t, func(_ context.Context, _, path, _ string) error { return os.MkdirAll(path, 0o755) })
+			prevRm := removeWorktreeFn
+			removeWorktreeFn = func(context.Context, string, string, string) error {
+				return fmt.Errorf("%w: git said something long", gitworktree.ErrBranchNotDeleted)
 			}
-		}
-		return out
-	}
-	deadline := time.Now().Add(5 * time.Second)
-	for len(kept()) == 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("a rollback git refused after a told spawn failure raised no card")
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	waitWorktreeSlotFree(t, d)
-	cards := kept()
-	if len(cards) != 1 || cards[0].Data["reason"] != keptBranchNotDeleted || strings.Contains(cards[0].Message, "git said") {
-		t.Fatalf("cards = %+v, want one fixed branch-not-deleted card", cards)
+			t.Cleanup(func() { removeWorktreeFn = prevRm })
+			allowRollback(t)
+			prev := newSessionFn
+			newSessionFn = func(cols, rows int) apty.Session { return &startFailSession{} }
+			t.Cleanup(func() { newSessionFn = prev })
+			waitCreateWorkersAtCleanup(t, d)
+
+			resp := split(t, client, ipc.SplitPaneReqPayload{TargetPaneID: target, Placement: placement,
+				Pane: ipc.SplitPaneSpec{CWD: repo, Worktree: &ipc.SplitWorktree{Branch: "feat/r"}}})
+			if !resp.Preparing {
+				t.Fatalf("split: %+v", resp)
+			}
+			kept := func() []PaneEvent {
+				var out []PaneEvent
+				for _, e := range d.events.Events() {
+					if e.Type == "worktree_kept" && e.TabID == tabID {
+						out = append(out, e)
+					}
+				}
+				return out
+			}
+			deadline := time.Now().Add(5 * time.Second)
+			for len(kept()) == 0 {
+				if time.Now().After(deadline) {
+					t.Fatal("a rollback git refused after a told spawn failure raised no card")
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			waitWorktreeSlotFree(t, d)
+			cards := kept()
+			if len(cards) != 1 {
+				t.Fatalf("cards = %+v, want exactly one", cards)
+			}
+			c := cards[0]
+			if c.Data["reason"] != keptBranchNotDeleted || c.Title != "Branch kept: feat/r" || c.Message != "folder gone, branch kept" {
+				t.Errorf("card = %+v, want the literal branch-kept outcome", c)
+			}
+		})
 	}
 }
 

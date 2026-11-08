@@ -826,21 +826,24 @@ const (
 )
 
 var keptMessages = map[string]string{
-	keptNoIdentity:        "Quil has no record of making this worktree (it predates checkout identities)",
-	keptIdentityUnknown:   "could not confirm this is the worktree Quil made",
-	keptNotOurs:           "this folder is no longer the worktree Quil made for the pane",
-	keptInUse:             "another pane is still in it",
-	keptRepoUnreadable:    "its repository could not be read",
-	keptNotRepo:           "it is not inside a git repository",
-	keptBusy:              "too many filesystem calls in flight",
-	keptRemoveFailed:      "git could not remove it (see quild.log)",
-	keptHasChanges:        "it holds changes that are not committed",
-	keptHasCommits:        "its branch has commits the default branch does not",
-	keptNoDefaultBranch:   "its branch could not be checked for commits (no default branch found)",
-	keptBranchChanged:     "it is no longer on the branch Quil created",
-	keptRemoveIncomplete:  "git could not finish removing the new worktree (see quild.log)",
-	keptBranchNotDeleted:  "the new worktree was removed but its branch was kept",
-	keptCleanupIncomplete: "cleanup did not finish (see quild.log)",
+	keptNoIdentity:      "Quil has no record of making this worktree (it predates checkout identities)",
+	keptIdentityUnknown: "could not confirm this is the worktree Quil made",
+	keptNotOurs:         "this folder is no longer the worktree Quil made for the pane",
+	keptInUse:           "another pane is still in it",
+	keptRepoUnreadable:  "its repository could not be read",
+	keptNotRepo:         "it is not inside a git repository",
+	keptBusy:            "too many filesystem calls in flight",
+	keptRemoveFailed:    "git could not remove it (see quild.log)",
+	keptHasChanges:      "it holds changes that are not committed",
+	keptHasCommits:      "its branch has commits the default branch does not",
+	keptNoDefaultBranch: "its branch could not be checked for commits (no default branch found)",
+	keptBranchChanged:   "it is no longer on the branch Quil created",
+	// The three rollback outcomes fit the sidebar card at its DEFAULT width
+	// (26 visible cells after the indent): they are the only place a recovered
+	// MCP split, new tab or template reports them.
+	keptRemoveIncomplete:  "folder may remain; see log",
+	keptBranchNotDeleted:  "folder gone, branch kept",
+	keptCleanupIncomplete: "cleanup failed; see log",
 }
 
 // keptMessage is the card text for a reason code.

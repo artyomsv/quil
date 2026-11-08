@@ -608,14 +608,19 @@ func TestWorktreeAddAndCreate_RealGit_AbandonSeesWorkLandingDuringTheProbes(t *t
 //
 // Fails if a git-level refusal is only logged, or reaches only the answer.
 func TestWorktreeAddAndCreate_RollbackRefusedByGitIsReported(t *testing.T) {
+	// LITERAL texts, not keptMessage compared with itself: these are what the
+	// sidebar shows, and each must fit its 26 visible cells at the default
+	// width with the outcome first.
 	cases := []struct {
-		name string
-		err  error
-		code string
+		name        string
+		err         error
+		code        string
+		titlePrefix string
+		message     string
 	}{
-		{"worktree removal failed", fmt.Errorf("%w: boom", gitworktree.ErrWorktreeNotRemoved), keptRemoveIncomplete},
-		{"branch kept", fmt.Errorf("%w: boom", gitworktree.ErrBranchNotDeleted), keptBranchNotDeleted},
-		{"other", errors.New("boom"), keptCleanupIncomplete},
+		{"worktree removal failed", fmt.Errorf("%w: boom", gitworktree.ErrWorktreeNotRemoved), keptRemoveIncomplete, "Cleanup incomplete: ", "folder may remain; see log"},
+		{"branch kept", fmt.Errorf("%w: boom", gitworktree.ErrBranchNotDeleted), keptBranchNotDeleted, "Branch kept: feat/id", "folder gone, branch kept"},
+		{"other", errors.New("boom"), keptCleanupIncomplete, "Cleanup incomplete: ", "cleanup failed; see log"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -630,7 +635,7 @@ func TestWorktreeAddAndCreate_RollbackRefusedByGitIsReported(t *testing.T) {
 
 			resp := d.worktreeAddAndCreate(req)
 
-			want := "cleanup incomplete: " + keptMessage(tc.code)
+			want := "cleanup incomplete: " + tc.message
 			if !strings.HasSuffix(resp.Error, "; "+want) {
 				t.Errorf("answer = %q, want it to end with %q", resp.Error, want)
 			}
@@ -638,11 +643,16 @@ func TestWorktreeAddAndCreate_RollbackRefusedByGitIsReported(t *testing.T) {
 				t.Errorf("answer = %q carries git's own text", resp.Error)
 			}
 			cards := eventsOfType(d, "worktree_kept")
-			if len(cards) != 1 || cards[0].Data["reason"] != tc.code || cards[0].Message != keptMessage(tc.code) {
-				t.Fatalf("cards = %+v, want one with reason %q", cards, tc.code)
+			if len(cards) != 1 {
+				t.Fatalf("cards = %+v, want exactly one", cards)
 			}
-			if strings.Contains(cards[0].Message, "boom") {
-				t.Errorf("card carries git's own text: %q", cards[0].Message)
+			c := cards[0]
+			if c.Data["reason"] != tc.code || c.Message != tc.message || c.TabID != req.TabID || !strings.HasPrefix(c.Title, tc.titlePrefix) {
+				t.Errorf("card = %+v, want reason %q, message %q, tab %q, title %q…", c, tc.code, tc.message, req.TabID, tc.titlePrefix)
+			}
+			const sidebarCells = 26 // the default sidebar's inner width, after the indent
+			if len(c.Message) > sidebarCells || len(tc.titlePrefix) > sidebarCells {
+				t.Errorf("outcome %q / %q does not fit %d cells", tc.titlePrefix, c.Message, sidebarCells)
 			}
 		})
 	}

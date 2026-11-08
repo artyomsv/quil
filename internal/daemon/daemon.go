@@ -1651,7 +1651,7 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		d.touchClientInput(conn)
 		d.handleCreatePane(conn, msg)
 	case ipc.MsgDestroyPane:
-		d.handleDestroyPane(msg)
+		d.handleDestroyPane(conn, msg)
 	case ipc.MsgUpdatePane:
 		// update_pane also carries automatic reports — an OSC 7 CWD change,
 		// overlay visibility, the unseen mark — that are not the user doing
@@ -2794,7 +2794,7 @@ func (d *Daemon) handleDestroyTab(conn *ipc.Conn, msg *ipc.Message) {
 	var branches branchDeleteOpts
 	if payload.RemoveWorktree {
 		worktrees = ownedWorktreePaths(panes)
-		branches = branchOpts(payload.DeleteBranch, payload.Confirmations, panes)
+		branches = branchOpts(d.branchDeleteAllowed(conn, payload.DeleteBranch), payload.Confirmations, panes)
 	}
 	d.session.DestroyTab(payload.TabID)
 	for _, p := range panes {
@@ -3555,7 +3555,7 @@ func (d *Daemon) cleanupPaneArtifacts(paneID string) {
 	}
 }
 
-func (d *Daemon) handleDestroyPane(msg *ipc.Message) {
+func (d *Daemon) handleDestroyPane(conn *ipc.Conn, msg *ipc.Message) {
 	var payload ipc.DestroyPanePayload
 	if err := msg.DecodePayload(&payload); err != nil {
 		return
@@ -3580,7 +3580,7 @@ func (d *Daemon) handleDestroyPane(msg *ipc.Message) {
 		// worktree it owned.
 		if payload.RemoveWorktree {
 			worktrees = ownedWorktreePaths([]*Pane{pane})
-			branches = branchOpts(payload.DeleteBranch, payload.Confirmations, []*Pane{pane})
+			branches = branchOpts(d.branchDeleteAllowed(conn, payload.DeleteBranch), payload.Confirmations, []*Pane{pane})
 		}
 		// Same window, same reason: the card needs the pane's name, which is
 		// gone once DestroyPane runs.

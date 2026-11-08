@@ -114,3 +114,36 @@ func TestReadBranchFacts_EmptyListingIsAnError(t *testing.T) {
 		t.Error("an empty listing produced facts")
 	}
 }
+
+// The unmerged count is taken between the CAPTURED commits — the branch's tip
+// read once and the default branch's tip read once — never by re-resolving a
+// ref, so the tip the user confirms and the count shown beside it describe
+// the same commit even if the branch moves between git calls.
+//
+// Fails if rev-list resolves refs/heads/<branch> a second time.
+func TestReadBranchFactsFor_CountsFromTheCapturedTip(t *testing.T) {
+	calls := stubGitScript(t, func(args []string) (string, error) {
+		switch args[0] {
+		case "rev-parse":
+			if strings.HasPrefix(args[3], "refs/heads/feat") {
+				return "aaaa\n", nil
+			}
+			return "bbbb\n", nil // the default branch
+		case "rev-list":
+			return "2\n", nil
+		}
+		return "", errors.New("unexpected git call: " + strings.Join(args, " "))
+	})
+
+	f, err := ReadBranchFactsFor(context.Background(), "/repo", "feat", "refs/heads/master")
+	if err != nil {
+		t.Fatalf("facts: %v", err)
+	}
+	if f.Tip != "aaaa" || f.Unmerged != 2 {
+		t.Errorf("facts = %+v, want tip aaaa and 2 unmerged", f)
+	}
+	last := (*calls)[len(*calls)-1]
+	if got := strings.Join(last[1:], " "); got != "rev-list --count bbbb..aaaa" {
+		t.Errorf("count argv = %q, want \"rev-list --count bbbb..aaaa\"", got)
+	}
+}

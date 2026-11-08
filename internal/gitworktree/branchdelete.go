@@ -22,10 +22,17 @@ var ErrBranchMoved = errors.New("the branch moved after it was confirmed")
 //
 // The delete itself stays `git branch -D -- <b>`: git's own refusals (a branch
 // checked out in any worktree, one being rebased or bisected) and its cleanup
-// of the branch's configuration come with it. Between the tip read and the
-// delete no worktree holds the branch (branch -D refuses one that does), so
-// an ordinary commit cannot land there; only an explicit ref update can, and
-// that is the remaining gap. -D, not -d: the user chose to drop the commits
+// of the branch's configuration come with it.
+//
+// ACCEPTED RESIDUAL (owner's ruling, 2026-11-08): the tip read and the delete
+// are two git calls, not one. A process of the same user that moves the
+// branch BETWEEN them — an explicit ref update, or checking the branch out,
+// committing and switching away again — gets that move deleted, because
+// branch -D checks only what holds the branch at the moment it runs. Binding
+// the delete to the tip atomically (update-ref -d <ref> <tip>) was tried and
+// dropped: it loses git's own refusals and config cleanup.
+// TestDeleteLocalBranch_RealGit_MoveInsideTheWindowIsTheAcceptedResidual pins
+// it. -D, not -d: the user chose to drop the commits
 // the dialog counted. `--` ends option parsing: a branch name may legally
 // begin with a dash.
 func DeleteLocalBranch(ctx context.Context, repo, branch, tip string) error {
@@ -43,8 +50,13 @@ func DeleteLocalBranch(ctx context.Context, repo, branch, tip string) error {
 	if strings.TrimSpace(cur) != tip {
 		return ErrBranchMoved
 	}
+	betweenTipAndDelete()
 	if _, err := runGit(ctx, repo, "branch", "-D", "--", branch); err != nil {
 		return fmt.Errorf("git branch -D %s: %w", branch, err)
 	}
 	return nil
 }
+
+// betweenTipAndDelete is a test seam at the read/delete boundary, where the
+// accepted residual lives.
+var betweenTipAndDelete = func() {}

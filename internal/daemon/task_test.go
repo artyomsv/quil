@@ -429,7 +429,7 @@ func TestDelegateTask_DestroyingTheTargetFailsItsTasks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d.handleDestroyPane(msg)
+	d.handleDestroyPane(nil, msg)
 
 	info := reg.info(reg.get(resp.Task.ID))
 	if info.State != "failed" || !strings.Contains(info.Error, "destroyed") {

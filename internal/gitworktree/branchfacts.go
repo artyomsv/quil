@@ -109,8 +109,19 @@ func ReadBranchFactsFor(ctx context.Context, repo, branch, defaultRef string) (B
 		return f, fmt.Errorf("git rev-parse %s: no commit", local)
 	}
 
+	// The count is taken between two captured COMMITS, never the ref names:
+	// a ref read twice (once for the tip, once by rev-list) can move between
+	// the reads, and then the tip the user confirms and the count shown
+	// beside it describe different commits.
 	if defaultRef != "" && !f.IsDefault {
-		if f.Unmerged, err = countCommits(ctx, repo, defaultRef, local); err != nil {
+		base, err := runGit(ctx, repo, "rev-parse", "--verify", "--quiet", defaultRef+"^{commit}")
+		if err != nil {
+			return f, fmt.Errorf("git rev-parse %s: %w", defaultRef, err)
+		}
+		if base = strings.TrimSpace(base); base == "" {
+			return f, fmt.Errorf("git rev-parse %s: no commit", defaultRef)
+		}
+		if f.Unmerged, err = countCommits(ctx, repo, base, f.Tip); err != nil {
 			return f, err
 		}
 	}
@@ -118,8 +129,8 @@ func ReadBranchFactsFor(ctx context.Context, repo, branch, defaultRef string) (B
 	return f, nil
 }
 
-// countCommits counts commits reachable from to and not from from. Both are
-// fully-qualified refs, so neither can be read as an option.
+// countCommits counts commits reachable from to and not from from. Callers pass
+// object ids (hex) or fully-qualified refs, so neither can be read as an option.
 func countCommits(ctx context.Context, repo, from, to string) (int, error) {
 	out, err := runGit(ctx, repo, "rev-list", "--count", from+".."+to)
 	if err != nil {

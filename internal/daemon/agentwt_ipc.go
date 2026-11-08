@@ -129,6 +129,10 @@ func (d *Daemon) handleAgentWorktreeActReq(conn *ipc.Conn, msg *ipc.Message) {
 		respondTo(conn, msg.ID, ipc.MsgAgentWorktreeActResp, ipc.AgentWorktreeActRespPayload{Error: "malformed request"})
 		return
 	}
+	if reason := destructiveActRefusal(req, d.hellos.roleOf(conn)); reason != "" {
+		respondTo(conn, msg.ID, ipc.MsgAgentWorktreeActResp, ipc.AgentWorktreeActRespPayload{ID: req.ID, Error: reason})
+		return
+	}
 	if reason := uncertainAckRefusal(req, d.hellos.roleOf(conn)); reason != "" {
 		respondTo(conn, msg.ID, ipc.MsgAgentWorktreeActResp, ipc.AgentWorktreeActRespPayload{ID: req.ID, Error: reason})
 		return
@@ -334,6 +338,38 @@ var branchListFn = gitworktree.Branches
 // so this keeps a cooperating agent from confirming on the user's behalf; a
 // local process willing to lie already holds the user's own rights over the
 // repository. A standard TCP token is refused earlier (clientauth).
+// destructiveActRefusal refuses a worktree removal or a branch delete from
+// anything but a Quil window (hello role "tui"). Those acts stand for a person
+// reading the file list and the unmerged count in the cleanup view and pressing
+// Enter; the branch name and tip the request carries are PUBLIC (any client can
+// read them with agent_worktree_facts_req), so they prove freshness, not
+// consent. An MCP bridge, the browser gateway, a hook or a script has no such
+// view. Forget changes no git state and stays open to any client. The role is
+// self-declared: this keeps a COOPERATING client from deleting on the user's
+// behalf; a local process willing to lie already holds the user's own rights
+// over the repository.
+func destructiveActRefusal(req ipc.AgentWorktreeActReqPayload, role string) string {
+	if (req.RemoveWorktree || req.DeleteBranch) && role != "tui" {
+		return "only a Quil window can remove a worktree or delete a branch"
+	}
+	return ""
+}
+
+// branchDeleteAllowed is a close's branch-delete flag as the daemon honours
+// it: only from a Quil window, for the reason destructiveActRefusal gives. The
+// worktree removal itself is unchanged (it predates this and is gated by
+// ownership and the file list). A nil conn is an in-process caller.
+func (d *Daemon) branchDeleteAllowed(conn *ipc.Conn, asked bool) bool {
+	if !asked || conn == nil {
+		return asked
+	}
+	if role := d.hellos.roleOf(conn); role != "tui" {
+		log.Printf("worktree remove: branch delete ignored from a %q client (only a Quil window may ask)", role)
+		return false
+	}
+	return true
+}
+
 func uncertainAckRefusal(req ipc.AgentWorktreeActReqPayload, role string) string {
 	if req.AcceptUncertain && role != "tui" {
 		return "only a Quil window can confirm a cleanup in an uncertain repository"

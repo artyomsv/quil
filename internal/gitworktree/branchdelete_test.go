@@ -153,3 +153,42 @@ func TestDeleteLocalBranch_RealGit_CheckedOutBranchRefused(t *testing.T) {
 		t.Error("the checked-out branch is gone")
 	}
 }
+
+// ACCEPTED RESIDUAL, pinned so it is a decision and not an accident: a move of
+// the branch BETWEEN the tip read and `branch -D` (here an explicit ref
+// update; equally a checkout, a commit and a switch away) is not caught, and
+// the moved branch is deleted. The owner accepted this as a same-user gap
+// rather than lose git's own refusals and config cleanup to an atomic
+// update-ref delete.
+func TestDeleteLocalBranch_RealGit_MoveInsideTheWindowIsTheAcceptedResidual(t *testing.T) {
+	repo := realGitRepo(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	path := DerivePath(repo, "feat/window")
+	if _, err := Add(ctx, repo, path, "feat/window"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "w.txt"), []byte("w\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitIn(t, path, "add", "w.txt")
+	runGitIn(t, path, "commit", "-qm", "late")
+	late := strings.TrimSpace(runGitIn(t, repo, "rev-parse", "refs/heads/feat/window"))
+	if err := RemoveWorktree(ctx, repo, path); err != nil {
+		t.Fatalf("RemoveWorktree: %v", err)
+	}
+	// The user confirmed the branch at master's tip; inside the window it is
+	// moved to the "late" commit.
+	confirmed := strings.TrimSpace(runGitIn(t, repo, "rev-parse", "refs/heads/master"))
+	runGitIn(t, repo, "update-ref", "refs/heads/feat/window", confirmed)
+	prev := betweenTipAndDelete
+	betweenTipAndDelete = func() { runGitIn(t, repo, "update-ref", "refs/heads/feat/window", late) }
+	t.Cleanup(func() { betweenTipAndDelete = prev })
+
+	if err := DeleteLocalBranch(ctx, repo, "feat/window", confirmed); err != nil {
+		t.Fatalf("err = %v; the accepted residual is that the delete goes through", err)
+	}
+	if out := runGitIn(t, repo, "branch", "--list", "feat/window"); strings.TrimSpace(out) != "" {
+		t.Errorf("branch survived (%q): the residual changed, update the rule", out)
+	}
+}

@@ -210,10 +210,27 @@ was confirmed" — that wording ONLY for a tip mismatch; any other failure is
 <b>`, NOT `update-ref -d`: that was tried and dropped, because it skips git's
 own refusals (a branch checked out, rebased or bisected — a bisect lists its
 worktree as detached, so a listing check misses it) and leaves the branch's
-config (`branch.<b>.remote/merge`) behind for a recreated name. Between the
-tip read and `branch -D` no worktree holds the branch (git refuses one that
-does), so an ordinary commit cannot land there; an explicit ref update is the
-remaining gap. Every refusal and failure is a
+config (`branch.<b>.remote/merge`) behind for a recreated name. **Accepted
+residual (owner's ruling, 2026-11-08):** the tip read and `branch -D` are two
+git calls. A same-user process that moves the branch between them — an
+explicit ref update, or checking it out, committing and switching away again,
+since `branch -D` checks only what holds the branch at the moment it runs —
+gets that move deleted. Pinned by
+`TestDeleteLocalBranch_RealGit_MoveInsideTheWindowIsTheAcceptedResidual`
+(seam `betweenTipAndDelete`).
+
+**The tip and the count describe ONE commit**: `ReadBranchFactsFor` reads the
+branch's tip and the default branch's tip once each and counts
+`rev-list --count <defaultTip>..<tip>` between those captured ids, never by
+resolving a ref a second time (`TestReadBranchFactsFor_CountsFromTheCapturedTip`).
+
+**Only a Quil window may remove a worktree or delete a branch from the cleanup
+view, or ask a close to delete a branch** (`destructiveActRefusal`,
+`branchDeleteAllowed`; hello role `tui`). The branch name and tip in a request
+are PUBLIC — any client reads them from `agent_worktree_facts_req` — so they
+prove freshness, not consent. Forget stays open to any client. The role is
+self-declared: this binds cooperating clients, not a same-user process willing
+to lie (the known limit). Every refusal and failure is a
 `worktree_branch_kept` sidebar card carrying the CLOSED pane's id and name
 (`paneRef`, captured before the destroy); success is `worktree_branch_deleted`.
 All three close paths go through `removeOwnedWorktreesFn` — the tab close used

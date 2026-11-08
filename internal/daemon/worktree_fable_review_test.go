@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -298,5 +299,75 @@ func TestDeleteBranches_RefusalCardCarriesNoGitText(t *testing.T) {
 	cards := eventsOfType(d, "worktree_branch_kept")
 	if len(cards) != 1 || strings.Contains(cards[0].Message, "/secret/path") || !strings.Contains(cards[0].Message, "quild.log") {
 		t.Errorf("cards = %+v, want one fixed refusal", cards)
+	}
+}
+
+// H-11: the branch name and tip a request carries are PUBLIC (any client can
+// read them from agent_worktree_facts_req), so they are no consent. A
+// worktree removal or a branch delete is refused from anything but a Quil
+// window, through the real socket; the unmerged branch survives.
+//
+// Fails if a cooperating non-TUI client can delete a branch with the facts it
+// read itself.
+func TestAgentWTActReq_DestructiveActNeedsAQuilWindow(t *testing.T) {
+	d, client := mcpTestDaemon(t) // says hello as an MCP bridge
+	s, _ := newTestAgentWT(t, &fakeRepo{}, nil)
+	s.paneFn = d.paneForAgentWT
+	s.entries = append(s.entries, brEntry, wtEntry)
+	d.agentWT = s
+	deleted := 0
+	prev := deleteLocalBranchFn
+	deleteLocalBranchFn = func(context.Context, string, string, string) error { deleted++; return nil }
+	t.Cleanup(func() { deleteLocalBranchFn = prev })
+
+	for _, req := range []ipc.AgentWorktreeActReqPayload{
+		{ID: "e-br", DeleteBranch: true, Confirmation: ipc.BranchConfirmation{Branch: "feat/plain", Tip: "public"}},
+		{ID: "e-wt", RemoveWorktree: true, DeleteBranch: true, Confirmation: ipc.BranchConfirmation{Branch: "x", Tip: "public"}},
+		{ID: "e-wt", RemoveWorktree: true},
+	} {
+		resp := roundTrip(t, client, ipc.MsgAgentWorktreeActReq, ipc.MsgAgentWorktreeActResp, req)
+		var out ipc.AgentWorktreeActRespPayload
+		if err := json.Unmarshal(resp.Payload, &out); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out.Error, "only a Quil window") {
+			t.Errorf("request %+v answered %+v, want a refusal", req, out)
+		}
+	}
+	if deleted != 0 {
+		t.Errorf("deleted %d branches for a non-TUI client", deleted)
+	}
+}
+
+// Forget changes no git state and stays open to any client; a Quil window
+// may remove and delete.
+func TestDestructiveActRefusal_Roles(t *testing.T) {
+	for _, role := range []string{"bridge", "web", ""} {
+		for _, req := range []ipc.AgentWorktreeActReqPayload{{RemoveWorktree: true}, {DeleteBranch: true}} {
+			if destructiveActRefusal(req, role) == "" {
+				t.Errorf("role %q may %+v", role, req)
+			}
+		}
+		if r := destructiveActRefusal(ipc.AgentWorktreeActReqPayload{Forget: true}, role); r != "" {
+			t.Errorf("role %q refused a forget: %s", role, r)
+		}
+	}
+	if r := destructiveActRefusal(ipc.AgentWorktreeActReqPayload{RemoveWorktree: true, DeleteBranch: true}, "tui"); r != "" {
+		t.Errorf("a Quil window was refused: %s", r)
+	}
+}
+
+// The close path honours a branch delete only from a Quil window; an
+// in-process caller (no conn) keeps the flag.
+func TestBranchDeleteAllowed_OnlyFromAQuilWindow(t *testing.T) {
+	d := newTestDaemon(t)
+	if d.branchDeleteAllowed(bridgeConn(d), true) {
+		t.Error("an MCP bridge's close deleted a branch")
+	}
+	if !d.branchDeleteAllowed(tuiConn(d), true) {
+		t.Error("a Quil window's close may not delete a branch")
+	}
+	if !d.branchDeleteAllowed(nil, true) || d.branchDeleteAllowed(tuiConn(d), false) {
+		t.Error("the flag is not passed through for an in-process caller or an unticked row")
 	}
 }

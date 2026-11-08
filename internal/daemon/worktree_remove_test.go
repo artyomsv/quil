@@ -190,7 +190,7 @@ func TestHandleDestroyPane_RemovesTheWorktreeWhenAsked(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewMessage: %v", err)
 	}
-	d.handleDestroyPane(msg)
+	d.handleDestroyPane(nil, msg)
 
 	select {
 	case got := <-done:
@@ -227,7 +227,7 @@ func TestHandleDestroyPane_LeavesTheWorktreeAloneByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewMessage: %v", err)
 	}
-	d.handleDestroyPane(msg)
+	d.handleDestroyPane(nil, msg)
 
 	select {
 	case got := <-removed:

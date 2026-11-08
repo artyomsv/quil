@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/iotest"
 	"time"
 )
 
@@ -248,5 +250,47 @@ func TestStatus_RealGit_UninitialisedSubmoduleFolderMustBeEmpty(t *testing.T) {
 	}
 	if got, err := os.ReadFile(filepath.Join(folder, "local.env")); err != nil || string(got) != "SECRET=1\n" {
 		t.Errorf("the file = %q, %v; want it untouched", got, err)
+	}
+}
+
+// The record reader is bounded WHILE reading and refuses anything that is not
+// a complete list: an over-long record (memory never grows past the limit), a
+// final record with no NUL, a read error. A refusal from fn stops the scan.
+//
+// Fails if the size is checked only after a record is fully buffered, or a
+// truncated or failed stream is accepted as complete.
+func TestScanNULRecords(t *testing.T) {
+	collect := func(r io.Reader, max int) ([]string, error) {
+		var got []string
+		err := scanNULRecords(r, max, func(s string) error { got = append(got, s); return nil })
+		return got, err
+	}
+
+	got, err := collect(strings.NewReader("a\x00bb\x00\x00ccc\x00"), 64)
+	if err != nil || strings.Join(got, ",") != "a,bb,ccc" {
+		t.Errorf("well-formed: %v, %v", got, err)
+	}
+
+	// One record far longer than the limit, never terminated: refused, and
+	// the reader never hands over more than the limit.
+	huge := io.MultiReader(strings.NewReader("ok\x00"), strings.NewReader(strings.Repeat("x", 1<<20)))
+	if got, err := collect(huge, 4096); !errors.Is(err, errRecordTooLong) || len(got) != 1 {
+		t.Errorf("over-long: %v, %v; want errRecordTooLong after the one good record", got, err)
+	}
+
+	if _, err := collect(strings.NewReader("a\x00tail"), 64); !errors.Is(err, errUnterminatedRecord) {
+		t.Errorf("unterminated: err = %v, want errUnterminatedRecord", err)
+	}
+
+	broken := io.MultiReader(strings.NewReader("a\x00"), iotest.ErrReader(errors.New("pipe broke")))
+	if _, err := collect(broken, 64); err == nil || !strings.Contains(err.Error(), "pipe broke") {
+		t.Errorf("read error: err = %v, want it reported", err)
+	}
+
+	stop := errors.New("stop")
+	calls := 0
+	err = scanNULRecords(strings.NewReader("a\x00b\x00c\x00"), 64, func(string) error { calls++; return stop })
+	if !errors.Is(err, stop) || calls != 1 {
+		t.Errorf("fn refusal: err = %v after %d calls, want stop after 1", err, calls)
 	}
 }

@@ -178,7 +178,11 @@ call on a worker holding a permit from the daemon's process-wide limit until the
 call really returns (`gitworktree.SetFSPermits`, set in `daemon.New`; none free
 = `ErrFSBusy`, could not check), so abandoned calls cannot pile up: a dead
 network mount must not hold the status single-flight slot.
-The index scan is STREAMED (`scanGitRecords`, one NUL record at a time), because
+The index scan is STREAMED (`scanGitRecords` → `scanNULRecords`: a
+`bufio.Scanner` with a NUL split, so memory is bounded WHILE reading at
+`maxScanRecord`; an over-long or unterminated record and any read error are
+refusals, and the pipe is closed when the context ends so a descendant holding
+git's stdout cannot hold the read), because
 a large monorepo's index is far past `runGit`'s 1 MiB cap and a buffered check
 would make every worktree there unremovable. The kept reason is
 `keptHiddenState` ("git cannot see every file in it"), via `statusRefusal`.

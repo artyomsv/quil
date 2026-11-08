@@ -2,6 +2,7 @@ package gitworktree
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -123,8 +124,11 @@ func checkStatusVisible(ctx context.Context, path string) error {
 }
 
 // scanGitRecords runs git in dir and hands each NUL-terminated record of its
-// stdout to fn as it arrives, keeping no more than one record in memory. The
-// first error fn returns stops git and is returned. A seam like runGit.
+// stdout to fn as it arrives (scanNULRecords). The first error fn returns
+// stops git and is returned; so does a read error, an over-long or
+// unterminated record, or git failing. When ctx ends the pipe is closed, so
+// the read returns even if a descendant still holds git's stdout, and git is
+// always reaped. A seam like runGit.
 var scanGitRecords = func(ctx context.Context, dir string, fn func(string) error, args ...string) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -142,31 +146,62 @@ var scanGitRecords = func(ctx context.Context, dir string, fn func(string) error
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	r := bufio.NewReaderSize(stdout, 64<<10)
-	var fnErr error
-	for {
-		rec, rerr := r.ReadString(0)
-		if len(rec) > maxScanRecord {
-			fnErr = fmt.Errorf("a record of %d bytes", len(rec))
-			break
+	stop := context.AfterFunc(ctx, func() { _ = stdout.Close() })
+	defer stop()
+	scanErr := scanNULRecords(stdout, maxScanRecord, fn)
+	if scanErr != nil {
+		cancel() // stop git; its own exit status no longer matters
+	}
+	waitErr := cmd.Wait()
+	switch {
+	case scanErr != nil:
+		if ctx.Err() != nil && !errors.Is(scanErr, ErrHiddenState) {
+			return ctx.Err()
 		}
-		if rec = strings.TrimSuffix(rec, "\x00"); rec != "" {
-			if fnErr = fn(rec); fnErr != nil {
-				break
+		return scanErr
+	case waitErr != nil:
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return fmt.Errorf("%w: %s", waitErr, msg)
+		}
+		return waitErr
+	}
+	return nil
+}
+
+// errRecordTooLong and errUnterminatedRecord refuse a stream that is not a
+// well-formed list of NUL-terminated records within the size bound.
+var (
+	errRecordTooLong      = errors.New("a record longer than the limit")
+	errUnterminatedRecord = errors.New("the output ended inside a record")
+)
+
+// scanNULRecords reads NUL-terminated records from r and hands each (without
+// its NUL) to fn. Memory is bounded WHILE reading: a record that reaches max
+// bytes is refused before more of it is buffered. A final record with no NUL,
+// or any read error other than EOF, is an error too — a truncated listing is
+// never taken for a complete one.
+func scanNULRecords(r io.Reader, max int, fn func(string) error) error {
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 4096), max)
+	sc.Split(func(data []byte, atEOF bool) (int, []byte, error) {
+		if i := bytes.IndexByte(data, 0); i >= 0 {
+			return i + 1, data[:i], nil
+		}
+		if atEOF && len(data) > 0 {
+			return 0, nil, errUnterminatedRecord
+		}
+		return 0, nil, nil
+	})
+	for sc.Scan() {
+		if rec := sc.Text(); rec != "" {
+			if err := fn(rec); err != nil {
+				return err
 			}
 		}
-		if rerr != nil {
-			break
-		}
 	}
-	if fnErr != nil {
-		cancel() // stop git; its exit status no longer matters
-		_ = cmd.Wait()
-		return fnErr
-	}
-	if err := cmd.Wait(); err != nil {
-		if msg := strings.TrimSpace(stderr.String()); msg != "" {
-			return fmt.Errorf("%w: %s", err, msg)
+	if err := sc.Err(); err != nil {
+		if errors.Is(err, bufio.ErrTooLong) {
+			return errRecordTooLong
 		}
 		return err
 	}
@@ -174,7 +209,7 @@ var scanGitRecords = func(ctx context.Context, dir string, fn func(string) error
 }
 
 // maxScanRecord bounds one record: a path is at most a few KiB, so a longer
-// one is not an index entry.
+// one is not an index entry this check can trust.
 const maxScanRecord = 64 << 10
 
 // fsWithin runs one filesystem call on its own goroutine and stops waiting

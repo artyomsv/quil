@@ -42,8 +42,7 @@ func TestWorktreeStatusResponse_CarriesFilesAndBranchFacts(t *testing.T) {
 	}
 	t.Cleanup(func() { worktreeStatusFn = prev })
 	stubBranchFacts(t, func(string) (gitworktree.BranchFacts, error) {
-		return gitworktree.BranchFacts{Branch: "feat", DefaultRef: "refs/heads/master", Unmerged: 2,
-			Remote: "origin", RemoteBranch: "feat", Unpushed: 1}, nil
+		return gitworktree.BranchFacts{Branch: "feat", DefaultRef: "refs/heads/master", Unmerged: 2}, nil
 	})
 
 	got := worktreeStatusResponse(ipc.WorktreeStatusReqPayload{Paths: []string{"/w/feat"}})
@@ -52,8 +51,7 @@ func TestWorktreeStatusResponse_CarriesFilesAndBranchFacts(t *testing.T) {
 	if st.Changes != 3 || !st.FilesTruncated || len(st.Files) != 1 || st.Files[0] != (ipc.WorktreeFile{Code: "??", Path: "a b.txt"}) {
 		t.Errorf("files = %d %v %#v, want 3, truncated, one entry", st.Changes, st.FilesTruncated, st.Files)
 	}
-	if st.Branch != "feat" || !st.BranchDeletable || st.Unmerged != 2 || st.DefaultBranch != "master" ||
-		st.Remote != "origin" || st.RemoteBranch != "feat" || st.Unpushed != 1 {
+	if st.Branch != "feat" || !st.BranchDeletable || st.Unmerged != 2 || st.DefaultBranch != "master" {
 		t.Errorf("branch facts = %+v", st)
 	}
 }

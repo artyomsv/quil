@@ -207,7 +207,7 @@ func (d *Daemon) removeOwnedWorktreesWith(paths []string, opt branchDeleteOpts) 
 		// the same branch. Removing it would delete the working directory out
 		// from under processes that are still running in it, which is a
 		// data-loss bug wearing this feature's clothes.
-		if used := d.paneInWorktree(path); used != "" {
+		if used := d.paneInWorktree(path, true); used != "" {
 			log.Printf("worktree remove: %s kept, pane %s is still in it", path, used)
 			if opt.wanted() {
 				d.notifyBranchKept(opt.Owners[path], "", "the worktree is still in use by pane "+used)
@@ -266,7 +266,7 @@ func (d *Daemon) deleteBranches(repo string, f gitworktree.BranchFacts, opt bran
 		if err := d.deleteLocalBranch(repo, f.Branch); err != nil {
 			d.notifyBranchKept(owner, f.Branch, err.Error())
 		} else {
-			d.notifyBranchDeleted(owner, f.Branch, "")
+			d.notifyBranchDeleted(owner, f.Branch)
 		}
 	}
 }
@@ -480,21 +480,63 @@ func normalizeWorktreePath(p string) string {
 // cd'd into a subrepo. Asking only where the shell last said it was would
 // delete the tree out from under it, which is the same CWD-is-a-cursor mistake
 // ownedWorktreePaths documents, one step later.
-func (d *Daemon) paneInWorktree(path string) string {
+//
+// resolve says the answer authorises a DELETE: then every path is also
+// compared by the real folder behind it (symlinks resolved), because an agent
+// or a shell can sit in the worktree through a link while git lists the real
+// path. The listing's "in use" hint passes false: it runs on a dispatch
+// goroutine, where a filesystem call is not allowed to wait.
+func (d *Daemon) paneInWorktree(path string, resolve bool) string {
+	within := pathWithin
+	if resolve {
+		within = resolvedWithin(path)
+	}
 	for _, p := range d.session.AllPanes() {
 		p.PluginMu.Lock()
 		cwd, home := p.CWD, p.WorktreePath
 		p.PluginMu.Unlock()
-		if home != "" && pathWithin(path, home) {
+		if home != "" && within(path, home) {
 			return p.ID
 		}
-		if cwd != "" && pathWithin(path, cwd) {
+		if cwd != "" && within(path, cwd) {
 			return p.ID
 		}
 	}
 	// A THIRD resident the pane fields cannot show: an agent that entered
 	// the worktree (Claude's EnterWorktree) while its pane's CWD stayed put.
-	return d.agentWT.paneInDir(path)
+	return d.agentWT.paneInDir(path, within)
+}
+
+// resolvedWithin returns a pathWithin for parent that ALSO matches when the
+// two paths name the same real folder: parent and each child are compared
+// lexically and then with symlinks resolved. A child that cannot be resolved
+// (it no longer exists) is compared lexically only — a folder that is gone
+// holds nobody.
+func resolvedWithin(parent string) func(parent, child string) bool {
+	physParent := physicalPath(parent)
+	return func(p, child string) bool {
+		if pathWithin(p, child) {
+			return true
+		}
+		if physParent == "" {
+			return false
+		}
+		pc := physicalPath(child)
+		return pc != "" && pathWithin(physParent, pc)
+	}
+}
+
+// physicalPath is path with every symlink resolved, or "" when it cannot be
+// (it does not exist, or a component is unreadable).
+func physicalPath(path string) string {
+	p, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return ""
+	}
+	if abs, err := filepath.Abs(p); err == nil {
+		return abs
+	}
+	return p
 }
 
 // pathWithin reports whether child is parent or sits below it.

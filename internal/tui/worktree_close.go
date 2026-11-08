@@ -37,14 +37,6 @@ type confirmWorktree struct {
 	branchReason    string
 	unmerged        int
 	defaultBranch   string
-	remote          string
-	remoteBranch    string
-	remoteReason    string
-
-	// The branch's open pull request, from the pane's own PR row at open
-	// time: a remote delete closes it.
-	prNumber int
-	prOpen   bool
 }
 
 // collectConfirmWorktrees reports the worktrees a close would delete.
@@ -77,14 +69,6 @@ func collectConfirmWorktrees(panes []*PaneModel) []confirmWorktree {
 		}
 		seen[p.WorktreePath] = true
 		row := confirmWorktree{path: p.WorktreePath, label: confirmWorktreeLabel(p)}
-		// The pane's PR row describes the pane's CURRENT directory. Only
-		// while the shell is still in its own worktree is that the branch the
-		// remote delete would hit; otherwise the warning would name another
-		// checkout's PR, so it is left out.
-		if p.CWD == p.WorktreePath {
-			row.prNumber = p.PRNumber
-			row.prOpen = p.PRNumber > 0 && p.PRStatus != "merged" && p.PRStatus != "closed"
-		}
 		out = append(out, row)
 	}
 	return out
@@ -222,7 +206,6 @@ func (m *Model) applyWorktreeStatus(msg worktreeStatusMsg) {
 			row.branchReason = st.BranchReason
 			row.unmerged = st.Unmerged
 			row.defaultBranch = st.DefaultBranch
-			row.remote, row.remoteBranch, row.remoteReason = st.Remote, st.RemoteBranch, st.RemoteReason
 		} else {
 			row.branchReason = "could not check the branch"
 		}

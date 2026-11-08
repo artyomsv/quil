@@ -266,8 +266,6 @@ func applyBranchFacts(st *ipc.WorktreeStatus, f gitworktree.BranchFacts, err err
 	st.Branch = f.Branch
 	st.DefaultBranch = gitworktree.ShortBranchName(f.DefaultRef)
 	st.Unmerged = f.Unmerged
-	st.Remote, st.RemoteBranch, st.RemoteReason = f.Remote, f.RemoteBranch, f.RemoteReason
-	st.Unpushed = f.Unpushed
 	switch {
 	case err != nil:
 		st.BranchReason = "could not read the branch: " + err.Error()

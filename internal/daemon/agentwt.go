@@ -422,7 +422,10 @@ func (s *agentWTStore) seedSync(paneID string) bool {
 // paneInDir reports a live pane whose AGENT last worked inside path (from its
 // probes), or "". The pane's own CWD stays where it was when Claude enters a
 // worktree, so a removal must ask this as well.
-func (s *agentWTStore) paneInDir(path string) string {
+func (s *agentWTStore) paneInDir(path string, within func(parent, child string) bool) string {
+	if within == nil {
+		within = pathWithin
+	}
 	if s == nil {
 		return ""
 	}
@@ -450,7 +453,7 @@ func (s *agentWTStore) paneInDir(path string) string {
 		}
 	}
 	for _, d := range dirs {
-		if !pathWithin(path, d.dir) {
+		if !within(path, d.dir) {
 			continue
 		}
 		if _, live := s.paneFn(d.id); live {

@@ -37,7 +37,7 @@ func (d *Daemon) agentWorktreesResponse() ipc.AgentWorktreesRespPayload {
 			Source: e.Source, Trigger: e.Trigger,
 		}
 		if e.Kind == agentWTKindWorktree && !e.Gone && e.Path != "" {
-			info.InUseBy = d.paneInWorktree(e.Path)
+			info.InUseBy = d.paneInWorktree(e.Path, false)
 		}
 		out.Entries = append(out.Entries, info)
 	}
@@ -184,7 +184,7 @@ func (d *Daemon) agentWorktreeAct(req ipc.AgentWorktreeActReqPayload) ipc.AgentW
 			out.Error = err.Error()
 			return out
 		}
-		if used := d.paneInWorktree(e.Path); used != "" {
+		if used := d.paneInWorktree(e.Path, true); used != "" {
 			out.Error = "pane " + used + " is still in this worktree"
 			return out
 		}

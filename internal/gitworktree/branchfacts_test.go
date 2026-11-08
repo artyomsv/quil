@@ -25,32 +25,16 @@ func porcelainFor(path, branch string) string {
 	}, "\n")
 }
 
-// factsScript answers the git calls ReadBranchFacts makes. upstream is what
-// `@{upstream}` resolves to ("" = no upstream); remotes are `git remote`'s
-// names; refs is the set of refs that exist.
-func factsScript(t *testing.T, path, branch, upstream string, remotes []string, refs map[string]bool) *[][]string {
+// factsScript answers the git calls ReadBranchFacts makes: the worktree
+// listing and the unmerged count.
+func factsScript(t *testing.T, path, branch string) *[][]string {
 	t.Helper()
 	return stubGitScript(t, func(args []string) (string, error) {
-		switch {
-		case args[0] == "worktree":
+		switch args[0] {
+		case "worktree":
 			return porcelainFor(path, branch), nil
-		case args[0] == "rev-list":
+		case "rev-list":
 			return "3\n", nil
-		case args[0] == "symbolic-ref":
-			// Every remote records master as its default.
-			return strings.TrimSuffix(args[len(args)-1], "HEAD") + "master\n", nil
-		case args[0] == "remote":
-			return strings.Join(remotes, "\n") + "\n", nil
-		case args[0] == "rev-parse" && args[1] == "--abbrev-ref":
-			if upstream == "" {
-				return "", errors.New("no upstream")
-			}
-			return upstream + "\n", nil
-		case args[0] == "rev-parse" && args[1] == "--verify":
-			if refs[args[len(args)-1]] {
-				return "cafebabe\n", nil
-			}
-			return "", errors.New("missing")
 		}
 		return "", errors.New("unexpected git call: " + strings.Join(args, " "))
 	})
@@ -59,7 +43,7 @@ func factsScript(t *testing.T, path, branch, upstream string, remotes []string, 
 // The default branch is the one branch the dialog must never offer to delete.
 // Fails if IsDefault compares the fully-qualified ref against the short name.
 func TestReadBranchFacts_DefaultBranchIsNotDeletable(t *testing.T) {
-	factsScript(t, "/w/main-wt", "main", "", nil, nil)
+	factsScript(t, "/w/main-wt", "main")
 
 	f, err := ReadBranchFacts(context.Background(), "/repo", "/w/main-wt", "refs/remotes/origin/main")
 	if err != nil {
@@ -70,96 +54,13 @@ func TestReadBranchFacts_DefaultBranchIsNotDeletable(t *testing.T) {
 	}
 }
 
-// A configured upstream is the branch's own answer to "where is it pushed",
-// so it outranks guessing from whichever remote-tracking refs exist.
-// Fails if the ref scan runs first and picks the other remote.
-func TestReadBranchFacts_UpstreamWinsOverRefScan(t *testing.T) {
-	factsScript(t, "/w/feat", "feat", "fork/feat", []string{"origin", "fork"}, map[string]bool{
-		"refs/remotes/origin/feat": true,
-		"refs/remotes/fork/feat":   true,
-	})
-
-	f, err := ReadBranchFacts(context.Background(), "/repo", "/w/feat", "refs/heads/master")
-	if err != nil {
-		t.Fatalf("ReadBranchFacts: %v", err)
-	}
-	if f.Remote != "fork" || f.RemoteBranch != "feat" {
-		t.Errorf("Remote = %q/%q, want fork/feat (the upstream)", f.Remote, f.RemoteBranch)
-	}
-}
-
-// "origin/feat/x" is remote origin + branch feat/x, not remote origin/feat +
-// branch x. The split must use the remote NAMES, longest match first.
-func TestReadBranchFacts_SlashInBranchResolvesRemote(t *testing.T) {
-	factsScript(t, "/w/feat-x", "feat/x", "origin/feat/x", []string{"origin"}, map[string]bool{
-		"refs/remotes/origin/feat/x": true,
-	})
-
-	f, err := ReadBranchFacts(context.Background(), "/repo", "/w/feat-x", "refs/heads/master")
-	if err != nil {
-		t.Fatalf("ReadBranchFacts: %v", err)
-	}
-	if f.Remote != "origin" || f.RemoteBranch != "feat/x" {
-		t.Errorf("Remote = %q/%q, want origin/feat/x", f.Remote, f.RemoteBranch)
-	}
-}
-
-// With no upstream, a branch that exists on two remotes has no single answer,
-// and guessing one would push a delete to the wrong place.
-func TestReadBranchFacts_TwoRemotesIsAmbiguous(t *testing.T) {
-	factsScript(t, "/w/feat", "feat", "", []string{"origin", "fork"}, map[string]bool{
-		"refs/remotes/origin/feat": true,
-		"refs/remotes/fork/feat":   true,
-	})
-
-	f, err := ReadBranchFacts(context.Background(), "/repo", "/w/feat", "refs/heads/master")
-	if err != nil {
-		t.Fatalf("ReadBranchFacts: %v", err)
-	}
-	if f.Remote != "" || f.RemoteReason != "branch exists on several remotes" {
-		t.Errorf("Remote = %q, reason %q; want none and the ambiguity reason", f.Remote, f.RemoteReason)
-	}
-}
-
-// No remote-tracking ref anywhere: the dialog greys the remote row with this
-// reason rather than offering a push that has nothing to delete.
-func TestReadBranchFacts_NoRemoteBranch(t *testing.T) {
-	factsScript(t, "/w/feat", "feat", "", []string{"origin"}, nil)
-
-	f, err := ReadBranchFacts(context.Background(), "/repo", "/w/feat", "refs/heads/master")
-	if err != nil {
-		t.Fatalf("ReadBranchFacts: %v", err)
-	}
-	if f.Remote != "" || f.RemoteReason != "no remote branch" {
-		t.Errorf("Remote = %q, reason %q; want none and \"no remote branch\"", f.Remote, f.RemoteReason)
-	}
-}
-
 // A path git does not list is not a worktree this function can describe, and
 // facts invented for it would offer a delete of a branch it never held.
 func TestReadBranchFacts_UnlistedPathIsAnError(t *testing.T) {
-	factsScript(t, "/w/feat", "feat", "", nil, nil)
+	factsScript(t, "/w/feat", "feat")
 
 	if _, err := ReadBranchFacts(context.Background(), "/repo", "/w/other", "refs/heads/master"); err == nil {
 		t.Error("ReadBranchFacts returned no error for a path git does not list")
-	}
-}
-
-// A feature branch whose upstream is the remote DEFAULT branch must never
-// offer a remote delete: that push would delete origin/main.
-//
-// Fails if the remote target is not compared with the default branch.
-func TestReadBranchFacts_UpstreamOnDefaultIsNoRemoteTarget(t *testing.T) {
-	factsScript(t, "/w/feat", "feat", "origin/main", []string{"origin"}, map[string]bool{
-		"refs/remotes/origin/main": true,
-	})
-
-	f, err := ReadBranchFacts(context.Background(), "/repo", "/w/feat", "refs/remotes/origin/main")
-	if err != nil {
-		t.Fatalf("ReadBranchFacts: %v", err)
-	}
-	if f.Remote != "" || f.RemoteReason == "" {
-		t.Errorf("Remote = %q/%q reason %q; want no remote target and a reason", f.Remote, f.RemoteBranch, f.RemoteReason)
 	}
 }
 
@@ -176,10 +77,9 @@ func TestShortBranchName(t *testing.T) {
 	}
 }
 
-// The counts are what the dialog's warnings print, so they are checked against
-// real git: a branch 2 commits past master, whose remote-tracking ref is 1
-// commit behind it, found by the ref scan (no upstream is configured).
-func TestReadBranchFacts_RealGit_UnmergedAndUnpushed(t *testing.T) {
+// The count is what the dialog's warning prints, so it is checked against
+// real git: a branch 2 commits past master.
+func TestReadBranchFacts_RealGit_Unmerged(t *testing.T) {
 	repo := realGitRepo(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -194,81 +94,12 @@ func TestReadBranchFacts_RealGit_UnmergedAndUnpushed(t *testing.T) {
 		}
 		runGitIn(t, path, "add", name)
 		runGitIn(t, path, "commit", "-qm", "c"+string(rune('1'+i)))
-		if i == 0 {
-			runGitIn(t, repo, "remote", "add", "origin", repo)
-			// What clone records: origin's own default. Without it origin is
-			// no delete target.
-			runGitIn(t, repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/master")
-			runGitIn(t, repo, "update-ref", "refs/remotes/origin/feat", "refs/heads/feat")
-		}
 	}
 	f, err := ReadBranchFacts(ctx, repo, path, "refs/heads/master")
 	if err != nil {
 		t.Fatalf("ReadBranchFacts: %v", err)
 	}
-	if f.Branch != "feat" || f.Unmerged != 2 || f.Remote != "origin" || f.Unpushed != 1 {
-		t.Errorf("facts = %+v; want branch feat, Unmerged 2, Remote origin, Unpushed 1", f)
-	}
-}
-
-// Each remote's OWN default branch is protected. origin's default is master
-// and fork's is develop: a branch tracking fork/develop must never offer to
-// delete develop on fork, although develop is not the repository's default.
-// A remote whose default is not recorded is no target at all.
-//
-// Fails if the remote target is checked only against the repository default.
-func TestReadBranchFacts_RealGit_EachRemoteKeepsItsOwnDefault(t *testing.T) {
-	repo := realGitRepo(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	base := t.TempDir()
-	origin, fork, other := filepath.Join(base, "origin.git"), filepath.Join(base, "fork.git"), filepath.Join(base, "other.git")
-	runGitIn(t, base, "init", "--bare", "-q", "-b", "master", origin)
-	runGitIn(t, base, "init", "--bare", "-q", "-b", "develop", fork)
-	runGitIn(t, base, "init", "--bare", "-q", "-b", "master", other)
-	runGitIn(t, repo, "branch", "develop")
-	runGitIn(t, repo, "branch", "feat")
-	runGitIn(t, repo, "branch", "feat2")
-	runGitIn(t, repo, "remote", "add", "origin", origin)
-	runGitIn(t, repo, "remote", "add", "fork", fork)
-	runGitIn(t, repo, "remote", "add", "other", other)
-	runGitIn(t, repo, "push", "-q", "origin", "master")
-	runGitIn(t, repo, "push", "-q", "fork", "develop", "feat2")
-	runGitIn(t, repo, "push", "-q", "other", "feat")
-	runGitIn(t, repo, "remote", "set-head", "origin", "--auto")
-	runGitIn(t, repo, "remote", "set-head", "fork", "--auto")
-	runGitIn(t, repo, "branch", "--set-upstream-to=fork/develop", "feat")
-	runGitIn(t, repo, "branch", "--set-upstream-to=fork/feat2", "feat2")
-	def := DefaultBranchRef(ctx, repo)
-	if ShortBranchName(def) != "master" {
-		t.Fatalf("default = %q, want origin's master", def)
-	}
-
-	f, err := ReadBranchFactsFor(ctx, repo, "feat", def)
-	if err != nil {
-		t.Fatalf("facts(feat): %v", err)
-	}
-	if f.Remote != "" || f.RemoteBranch != "" || f.RemoteReason == "" {
-		t.Errorf("feat tracking fork/develop: facts = %+v, want no remote target", f)
-	}
-
-	// Control: a feature branch on the same remote is still a target.
-	f2, err := ReadBranchFactsFor(ctx, repo, "feat2", def)
-	if err != nil {
-		t.Fatalf("facts(feat2): %v", err)
-	}
-	if f2.Remote != "fork" || f2.RemoteBranch != "feat2" {
-		t.Errorf("feat2 tracking fork/feat2: facts = %+v, want fork/feat2", f2)
-	}
-
-	// A remote with no recorded HEAD: its default cannot be told, so no target.
-	runGitIn(t, repo, "fetch", "-q", "other")
-	runGitIn(t, repo, "branch", "--set-upstream-to=other/feat", "feat")
-	f3, err := ReadBranchFactsFor(ctx, repo, "feat", def)
-	if err != nil {
-		t.Fatalf("facts(feat on other): %v", err)
-	}
-	if f3.Remote != "" || f3.RemoteReason == "" {
-		t.Errorf("feat tracking other/feat with no other/HEAD: facts = %+v, want no remote target", f3)
+	if f.Branch != "feat" || f.Unmerged != 2 || f.IsDefault {
+		t.Errorf("facts = %+v; want branch feat, Unmerged 2, not the default", f)
 	}
 }

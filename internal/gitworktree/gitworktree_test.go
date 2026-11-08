@@ -580,3 +580,53 @@ func TestListStrict_RealGit_SeparatesNoRepositoryFromABrokenOne(t *testing.T) {
 		t.Errorf("List keeps its fold: got %v, %v", got, err)
 	}
 }
+
+// A folder reached through a symlink into a repository, a bare repository,
+// and GIT_DIR set are never "no repository": git could have found one.
+//
+// Fails if hasGitAncestor walks only the lexical path.
+func TestHasGitAncestor_PhysicalBareAndGitDir(t *testing.T) {
+	base := t.TempDir()
+	if hasGitAncestor(base) {
+		t.Skip("the temp directory is inside a repository")
+	}
+	repo := filepath.Join(base, "repo")
+	sub := filepath.Join(repo, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "alias")
+	if err := os.Symlink(sub, link); err == nil {
+		if !hasGitAncestor(link) {
+			t.Error("a link into a repository read as no repository")
+		}
+	}
+
+	bare := filepath.Join(base, "bare.git")
+	for _, p := range []string{"objects", "refs"} {
+		if err := os.MkdirAll(filepath.Join(bare, p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(bare, "HEAD"), []byte("ref: refs/heads/master\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !hasGitAncestor(bare) {
+		t.Error("a bare repository read as no repository")
+	}
+
+	plain := filepath.Join(base, "plain")
+	if err := os.Mkdir(plain, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if hasGitAncestor(plain) {
+		t.Error("a plain folder read as a repository")
+	}
+	t.Setenv("GIT_DIR", filepath.Join(base, "elsewhere"))
+	if !hasGitAncestor(plain) {
+		t.Error("GIT_DIR set read as no repository")
+	}
+}

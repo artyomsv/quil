@@ -562,16 +562,32 @@ func ListStrict(ctx context.Context, dir string) ([]Worktree, error) {
 	return parsePorcelain(out), nil
 }
 
-// hasGitAncestor reports a `.git` entry (directory or file) in dir or any
-// parent: where git would find a repository. An unreadable entry counts as
-// present — it is not evidence of absence.
+// hasGitAncestor reports anything git could have found a repository from:
+// a `.git` entry (directory or file) in dir or any parent, a bare repository
+// layout (HEAD, objects, refs) in dir or a parent, or GIT_DIR set. It walks
+// BOTH the path as written and the real path behind it (symlinks resolved),
+// because git discovers from the physical directory. Anything it cannot
+// decide — an unresolvable path, an unreadable entry — counts as present:
+// absence is the one answer that must be certain.
 func hasGitAncestor(dir string) bool {
-	d, err := filepath.Abs(dir)
+	if os.Getenv("GIT_DIR") != "" {
+		return true
+	}
+	abs, err := filepath.Abs(dir)
 	if err != nil {
 		return true
 	}
+	phys, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return true
+	}
+	return gitAbove(abs) || gitAbove(phys)
+}
+
+// gitAbove walks d and its parents for a `.git` entry or a bare layout.
+func gitAbove(d string) bool {
 	for {
-		if _, err := os.Lstat(filepath.Join(d, ".git")); err == nil || !errors.Is(err, fs.ErrNotExist) {
+		if present(filepath.Join(d, ".git")) || bareLayout(d) {
 			return true
 		}
 		parent := filepath.Dir(d)
@@ -580,4 +596,16 @@ func hasGitAncestor(dir string) bool {
 		}
 		d = parent
 	}
+}
+
+// present reports that path exists — or that asking failed for any reason
+// other than "does not exist".
+func present(path string) bool {
+	_, err := os.Lstat(path)
+	return err == nil || !errors.Is(err, fs.ErrNotExist)
+}
+
+// bareLayout reports git's bare-repository shape in d: HEAD, objects, refs.
+func bareLayout(d string) bool {
+	return present(filepath.Join(d, "HEAD")) && present(filepath.Join(d, "objects")) && present(filepath.Join(d, "refs"))
 }

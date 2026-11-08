@@ -4229,24 +4229,19 @@ func (d *Daemon) notifyWorktreeFailed(paneID, tabID, branch, reason string) {
 	})
 }
 
-// notifyBranchDeleted says a close deleted a worktree's branch. remote is the
-// remote name for a remote delete, "" for the local one. The pane is the one
-// the close came from, captured before it was destroyed.
-func (d *Daemon) notifyBranchDeleted(owner paneRef, branch, remote string) {
-	title := "Branch deleted: " + branch
-	if remote != "" {
-		title = "Remote branch deleted: " + branch
-	}
+// notifyBranchDeleted says a close deleted a worktree's local branch. The pane
+// is the one the close came from, captured before it was destroyed.
+func (d *Daemon) notifyBranchDeleted(owner paneRef, branch string) {
 	d.emitEvent(PaneEvent{
 		ID:        uuid.New().String(),
 		PaneID:    owner.ID,
 		TabID:     owner.TabID,
 		PaneName:  owner.Name,
 		Type:      "worktree_branch_deleted",
-		Title:     title,
+		Title:     "Branch deleted: " + branch,
 		Severity:  "info",
 		Timestamp: time.Now(),
-		Data:      map[string]string{"branch": branch, "remote": remote},
+		Data:      map[string]string{"branch": branch},
 	})
 }
 

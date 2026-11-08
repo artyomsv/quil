@@ -6,6 +6,6 @@ headline: Clean up worktrees and branches agents left behind
   agents ran: each worktree or branch, the pane and agent it appeared under,
   its age, and whether a pane still uses it. Picking one opens the same
   confirm a pane close uses: it lists the files that would be lost and offers
-  to delete the worktree, the local branch and (with the F1 switch on, and a
-  typed `y`) the remote branch. Quil checks with git again before it deletes
-  anything. `f` forgets an entry without touching git.
+  to delete the worktree and its local branch. Quil checks with git again
+  before it deletes anything, and never deletes a branch on a remote. `f`
+  forgets an entry without touching git.

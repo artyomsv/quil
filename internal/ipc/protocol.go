@@ -2156,13 +2156,6 @@ type WorktreeStatus struct {
 	// Unmerged counts commits on Branch that DefaultBranch lacks.
 	Unmerged      int    `json:"unmerged,omitempty"`
 	DefaultBranch string `json:"default_branch,omitempty"`
-	// Remote/RemoteBranch name where Branch is pushed; RemoteReason says why
-	// there is no single answer when Remote is empty.
-	Remote       string `json:"remote,omitempty"`
-	RemoteBranch string `json:"remote_branch,omitempty"`
-	RemoteReason string `json:"remote_reason,omitempty"`
-	// Unpushed counts commits on Branch the remote-tracking ref lacks.
-	Unpushed int `json:"unpushed,omitempty"`
 }
 
 // WorktreeFile is one entry of a worktree's `git status`.

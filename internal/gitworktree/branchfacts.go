@@ -11,8 +11,8 @@ import (
 )
 
 // BranchFacts is what the close dialog needs to know about the branch a
-// worktree has checked out before it may offer to delete that branch, locally
-// or on its remote. Every value is read from LOCAL refs: no call here touches
+// worktree has checked out before it may offer to delete that LOCAL branch.
+// Every value is read from local refs: no call here touches
 // the network, because the dialog asks while the user waits.
 type BranchFacts struct {
 	// Branch is the short name checked out in the worktree ("" when Detached).
@@ -26,13 +26,6 @@ type BranchFacts struct {
 	DefaultRef string
 	// Unmerged counts commits on Branch that DefaultRef does not contain.
 	Unmerged int
-	// Remote and RemoteBranch name where the branch is pushed. Both are ""
-	// when there is no single answer, and RemoteReason then says why.
-	Remote       string
-	RemoteBranch string
-	RemoteReason string
-	// Unpushed counts commits on Branch that the remote-tracking ref lacks.
-	Unpushed int
 }
 
 // DefaultBranchRef is the repository's default branch as a FULLY-QUALIFIED
@@ -99,100 +92,7 @@ func ReadBranchFactsFor(ctx context.Context, repo, branch, defaultRef string) (B
 		}
 	}
 
-	if err := resolveRemote(ctx, repo, &f); err != nil {
-		return f, err
-	}
-	// A feature branch can track the remote DEFAULT branch (`-u origin main`).
-	// Its remote target is then the default itself, and deleting it would
-	// delete origin/main: never offered.
-	if f.Remote != "" && defaultRef != "" && f.RemoteBranch == ShortBranchName(defaultRef) {
-		f.Remote, f.RemoteBranch = "", ""
-		f.RemoteReason = "its remote branch is the default branch"
-	}
-	// Each remote has its OWN default: a fork's may be develop while
-	// origin's is main. The target is checked against the default of the
-	// remote it is on, and a remote whose default is not known locally
-	// (no refs/remotes/<remote>/HEAD) is no target at all.
-	if f.Remote != "" {
-		switch rdef := remoteDefaultBranch(ctx, repo, f.Remote); {
-		case rdef == "":
-			f.Remote, f.RemoteBranch = "", ""
-			f.RemoteReason = "the remote's default branch is not known (git remote set-head)"
-		case rdef == f.RemoteBranch:
-			f.Remote, f.RemoteBranch = "", ""
-			f.RemoteReason = "its remote branch is the default branch"
-		}
-	}
-	if f.Remote != "" {
-		tracking := "refs/remotes/" + f.Remote + "/" + f.RemoteBranch
-		if f.Unpushed, err = countCommits(ctx, repo, tracking, local); err != nil {
-			return f, err
-		}
-	}
 	return f, nil
-}
-
-// resolveRemote fills Remote/RemoteBranch, or RemoteReason when there is no
-// single answer. The configured upstream comes first — it is the branch's own
-// record of where it is pushed. Without one, the remote-tracking refs decide,
-// and a branch present on two remotes is ambiguous rather than guessed.
-func resolveRemote(ctx context.Context, repo string, f *BranchFacts) error {
-	remotes, err := remoteNames(ctx, repo)
-	if err != nil {
-		return err
-	}
-	out, err := runGit(ctx, repo, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "refs/heads/"+f.Branch+"@{upstream}")
-	if up := strings.TrimSpace(out); err == nil && up != "" {
-		// "origin/feat/x" is split on the remote NAMES, longest first, so a
-		// slash in the branch cannot be read as part of the remote.
-		best := ""
-		for _, r := range remotes {
-			if strings.HasPrefix(up, r+"/") && len(r) > len(best) {
-				best = r
-			}
-		}
-		if best != "" {
-			rb := strings.TrimPrefix(up, best+"/")
-			if refExists(ctx, repo, "refs/remotes/"+best+"/"+rb) {
-				f.Remote, f.RemoteBranch = best, rb
-				return nil
-			}
-		}
-	}
-	var found []string
-	for _, r := range remotes {
-		if refExists(ctx, repo, "refs/remotes/"+r+"/"+f.Branch) {
-			found = append(found, r)
-		}
-	}
-	switch len(found) {
-	case 0:
-		f.RemoteReason = "no remote branch"
-	case 1:
-		f.Remote, f.RemoteBranch = found[0], f.Branch
-	default:
-		f.RemoteReason = "branch exists on several remotes"
-	}
-	return nil
-}
-
-func remoteNames(ctx context.Context, repo string) ([]string, error) {
-	out, err := runGit(ctx, repo, "remote")
-	if err != nil {
-		return nil, fmt.Errorf("git remote: %w", err)
-	}
-	var names []string
-	for _, l := range strings.Split(strings.ReplaceAll(out, "\r\n", "\n"), "\n") {
-		if l = strings.TrimSpace(l); l != "" {
-			names = append(names, l)
-		}
-	}
-	return names, nil
-}
-
-func refExists(ctx context.Context, repo, ref string) bool {
-	out, err := runGit(ctx, repo, "rev-parse", "--verify", "--quiet", ref)
-	return err == nil && strings.TrimSpace(out) != ""
 }
 
 // countCommits counts commits reachable from to and not from from. Both are
@@ -218,20 +118,4 @@ func samePath(a, b string) bool {
 		return strings.EqualFold(ca, cb)
 	}
 	return ca == cb
-}
-
-// remoteDefaultBranch is remote's own default branch name, read from the
-// local refs/remotes/<remote>/HEAD symref (set by clone, or by `git remote
-// set-head`), or "" when it is not recorded. It is compared BY NAME, so a
-// symref left dangling by a renamed default still protects that name.
-func remoteDefaultBranch(ctx context.Context, repo, remote string) string {
-	out, err := runGit(ctx, repo, "symbolic-ref", "--quiet", "refs/remotes/"+remote+"/HEAD")
-	if err != nil {
-		return ""
-	}
-	b, ok := strings.CutPrefix(strings.TrimSpace(out), "refs/remotes/"+remote+"/")
-	if !ok {
-		return ""
-	}
-	return b
 }

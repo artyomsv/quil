@@ -10,9 +10,8 @@ import (
 )
 
 // openLoadedConfirm opens the close dialog for one worktree pane and lands a
-// status answer on its row: files, a deletable branch and, when remote is
-// non-empty, a remote.
-func openLoadedConfirm(t *testing.T, files int, remote string) Model {
+// status answer on its row: files and a deletable branch.
+func openLoadedConfirm(t *testing.T, files int) Model {
 	t.Helper()
 	m := modelWithWorktreePane()
 	m.cfg = config.Default()
@@ -26,11 +25,6 @@ func openLoadedConfirm(t *testing.T, files int, remote string) Model {
 		w.files = append(w.files, ipc.WorktreeFile{Code: "??", Path: fmt.Sprintf("f%02d.txt", i)})
 	}
 	w.branch, w.branchDeletable, w.defaultBranch, w.unmerged = "feat/a", true, "master", 2
-	if remote != "" {
-		w.remote, w.remoteBranch = remote, "feat/a"
-	} else {
-		w.remoteReason = "no remote branch"
-	}
 	return m
 }
 
@@ -41,7 +35,7 @@ func confirmPress(m Model, key string) Model { return applyModel(m.handleConfirm
 // Fails if the file rows are not rendered, are not capped at the page, or if
 // PgDn does not move the window.
 func TestCloseConfirm_ListsFilesAndScrolls(t *testing.T) {
-	m := openLoadedConfirm(t, 25, "")
+	m := openLoadedConfirm(t, 25)
 
 	out := stripANSI(m.renderConfirmDialog())
 	if !strings.Contains(out, "f00.txt") || !strings.Contains(out, "f09.txt") || strings.Contains(out, "f10.txt") {
@@ -61,7 +55,7 @@ func TestCloseConfirm_ListsFilesAndScrolls(t *testing.T) {
 // A file name is remote text: an escape sequence or a bidi override in it
 // must not reach the terminal.
 func TestCloseConfirm_FileNameIsSanitizedAndBounded(t *testing.T) {
-	m := openLoadedConfirm(t, 1, "")
+	m := openLoadedConfirm(t, 1)
 	m.confirmWorktrees[0].files[0].Path = "\x1b[31mred‮evil" + strings.Repeat("x", 300)
 
 	out := m.renderConfirmDialog()
@@ -90,7 +84,7 @@ func TestCloseConfirm_CursorStartsOnWorktreeRow(t *testing.T) {
 // A greyed row does nothing when toggled, and the branch rows are greyed until
 // the worktree row is armed: a branch cannot go while its worktree stays.
 func TestCloseConfirm_BranchRowsInertUntilWorktreeArmed(t *testing.T) {
-	m := openLoadedConfirm(t, 1, "")
+	m := openLoadedConfirm(t, 1)
 
 	m = confirmPress(m, "down")
 	m = confirmPress(m, " ")
@@ -117,7 +111,7 @@ func TestCloseConfirm_BranchRowsInertUntilWorktreeArmed(t *testing.T) {
 // branches only — and Enter accepts a local delete with the branch the
 // dialog showed.
 func TestCloseConfirm_LocalDeleteOnlyAndEnterAccepts(t *testing.T) {
-	m := openLoadedConfirm(t, 1, "origin")
+	m := openLoadedConfirm(t, 1)
 	if out := strings.ToLower(stripANSI(m.renderConfirmDialog())); strings.Contains(out, "remote") {
 		t.Fatalf("the dialog offers something remote:\n%s", out)
 	}
@@ -175,7 +169,7 @@ func TestCloseConfirm_EnterWaitsForTheFileList(t *testing.T) {
 
 // Every new field is cleared on the way out, like the worktree toggle.
 func TestCloseConfirm_ResetOnEveryExit(t *testing.T) {
-	m := openLoadedConfirm(t, 25, "")
+	m := openLoadedConfirm(t, 25)
 	m = confirmPress(m, " ")
 	m = confirmPress(m, "down")
 	m = confirmPress(m, " ")
@@ -199,7 +193,6 @@ func TestCloseConfirm_FitsTerminal(t *testing.T) {
 			for i := 0; i < 3; i++ {
 				panes = append(panes, worktreePane(fmt.Sprintf("pane-%d", i), fmt.Sprintf("/w/feat-%d", i), fmt.Sprintf("feat/%d", i)))
 			}
-			panes[0].PRNumber, panes[0].PRStatus = 12, "open"
 			m := modelWithPanes(panes...)
 			m.cfg = config.Default()
 			m.width, m.height = 100, height
@@ -211,7 +204,6 @@ func TestCloseConfirm_FitsTerminal(t *testing.T) {
 					w.files = append(w.files, ipc.WorktreeFile{Code: " M", Path: fmt.Sprintf("dir/f%02d.go", j)})
 				}
 				w.branch, w.branchDeletable, w.unmerged = fmt.Sprintf("feat/%d", i), true, 3
-				w.remote, w.remoteBranch = "origin", w.branch
 			}
 			m.confirmRemoveWorktree, m.confirmDeleteBranch = true, true
 
@@ -225,7 +217,7 @@ func TestCloseConfirm_FitsTerminal(t *testing.T) {
 
 // A greyed row's reason can be git's own error text: it is sanitised.
 func TestCloseConfirm_BranchReasonIsSanitized(t *testing.T) {
-	m := openLoadedConfirm(t, 1, "")
+	m := openLoadedConfirm(t, 1)
 	w := &m.confirmWorktrees[0]
 	w.branchDeletable, w.branchReason = false, "could not read the branch: \x1b]52;c;aGk=\x07boom"
 
@@ -256,20 +248,6 @@ func TestCloseConfirm_ConfirmationsArePerWorktree(t *testing.T) {
 	}
 }
 
-// A pane whose shell left its worktree shows another checkout's PR: that PR
-// is not claimed for the worktree being deleted.
-func TestCollectConfirmWorktrees_NoPRWhenShellLeftTheWorktree(t *testing.T) {
-	p := worktreePane("pane-a", "/w/feat-b", "feat/b")
-	p.WorktreePath = "/w/feat-a"
-	p.PRNumber, p.PRStatus = 7, "open"
-
-	got := collectConfirmWorktrees([]*PaneModel{p})
-
-	if len(got) != 1 || got[0].prOpen || got[0].prNumber != 0 {
-		t.Errorf("row = %+v, want no PR claimed for a pane that left its worktree", got)
-	}
-}
-
 // Six worktrees, every row armed and every warning on: the box still fits a
 // 24-row terminal, because the worktree list gives way.
 func TestCloseConfirm_SixWorktreesFitTerminal(t *testing.T) {
@@ -292,7 +270,6 @@ func sixWorktreeConfirm(t *testing.T) Model {
 	for i := 0; i < 6; i++ {
 		panes = append(panes, worktreePane(fmt.Sprintf("pane-%d", i), fmt.Sprintf("/w/feat-%d", i), fmt.Sprintf("feat/%d", i)))
 	}
-	panes[0].PRNumber, panes[0].PRStatus = 12, "open"
 	m := modelWithPanes(panes...)
 	m.cfg = config.Default()
 	m.width, m.height = 100, 24
@@ -304,7 +281,6 @@ func sixWorktreeConfirm(t *testing.T) Model {
 			w.files = append(w.files, ipc.WorktreeFile{Code: " M", Path: fmt.Sprintf("f%02d", j)})
 		}
 		w.branch, w.branchDeletable, w.unmerged = fmt.Sprintf("feat/%d", i), true, 3
-		w.remote, w.remoteBranch = "origin", w.branch
 	}
 	m.confirmRemoveWorktree, m.confirmDeleteBranch = true, true
 	return m

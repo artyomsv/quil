@@ -179,11 +179,9 @@ call does, since the child that blocked git is still exiting.
 truncated flag) from `status --porcelain -z --ignored`: `-z` keeps a name with a
 space, a quote or a newline one entry, and a rename's source path is consumed,
 not listed. `gitworktree.ReadBranchFacts` reads the branch from git's listing
-(never from a client), the unmerged count against the FULLY-QUALIFIED default
-ref, and the remote — the configured upstream first, split on remote NAMES
-(longest first, so `origin/feat/x` is origin + `feat/x`), else the one remote
-whose tracking ref exists; two such remotes are ambiguous, never guessed. Local
-refs only, no network. The default branch is resolved once per repository per
+(never from a client) and the unmerged count against the FULLY-QUALIFIED
+default ref. Local refs only, no network, and nothing about remotes. The
+default branch is resolved once per repository per
 request, and facts are read for the first six worktrees only (the dialog's row
 cap), all on the request's one deadline.
 
@@ -205,13 +203,13 @@ All three close paths go through `removeOwnedWorktreesFn` — the tab close used
 to call `removeOwnedWorktrees` directly. The MCP/browser `destroy_pane_req`
 deletes no branches.
 
-**Quil never deletes a branch on a REMOTE.** It was built (an F1 switch, a
-`worktree_policy` push, a `y`-confirmed row) and taken out of this feature
-before release: seven review rounds each found a new way for the delete to
-reach a server other than the one checked — `pushurl`/`insteadOf` rules,
-ssh routing, relative paths resolved from another directory, a remote's own
-default unknown locally — and a remote delete reaches everyone who shares the
-remote. If it comes back it is its own change, starting from that list.
+**Quil never deletes a branch on a REMOTE.** It was built and taken out of
+this feature before release: seven review rounds each found a new way for the
+delete to reach a server other than the one checked — `pushurl`/`insteadOf`
+rules, ssh routing, relative paths resolved from another directory, a
+remote's own default unknown locally — and a remote delete reaches everyone
+who shares the remote. If it comes back it is its own change, starting from
+that list.
 
 **A ticked worktree is never removed before its file list loaded.** The
 accept arm returns while any row is still "checking…" (`confirmWorktreesLoaded`)
@@ -334,7 +332,9 @@ willing to lie already holds the user's own rights over the repository.
 exit — a permission error, an unsafe directory, a corrupt repository — into
 "not a repository" `(nil, nil)`, which here would read as a clean answer.
 `ListStrict` answers `ErrNotRepository` only when git failed AND no `.git`
-entry exists in the directory or any parent (`hasGitAncestor`) — decided
+entry, no bare layout (HEAD, objects, refs) and no `GIT_DIR` is found in the
+directory or any parent, walking BOTH the written and the symlink-resolved
+path (`hasGitAncestor`; anything undecidable counts as present) — decided
 from the disk, never from git's message, which is localized and which a
 broken `.git` indirection shares ("not a git repository: <gitdir>"). Every
 other failure is returned as itself. `stubWorktreeList` stubs both seams.
@@ -344,3 +344,11 @@ STARTING** (`Pane.startingGen`, set under `PluginMu` just before
 `ptySession.Start`; `paneForAgentWT` reports `max(ptyGen, startingGen)`):
 `ptyGen` moves only after `Start` returns, and a fast child's first hook can
 arrive in between.
+
+**The delete checks compare REAL folders** (`paneInWorktree(path, true)` →
+`resolvedWithin`): a pane CWD, a pane's recorded worktree and every agent or
+subagent probe directory is matched lexically AND with symlinks resolved, so a
+resident working through a link to the worktree keeps it. A path that no longer
+resolves is matched lexically only (a folder that is gone holds nobody). The
+cleanup view's `in use` hint passes `false`: it runs on a dispatch goroutine,
+where a filesystem call may not wait.

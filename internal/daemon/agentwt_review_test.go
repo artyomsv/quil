@@ -3,7 +3,9 @@ package daemon
 import (
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -50,14 +52,14 @@ func TestAgentWT_PaneInDirSeesTheAgentsDirectory(t *testing.T) {
 
 	s.probe(probeFor("pane-a", "/w/wt-x/sub"))
 
-	if got := s.paneInDir("/w/wt-x"); got != "pane-a" {
+	if got := s.paneInDir("/w/wt-x", nil); got != "pane-a" {
 		t.Errorf("paneInDir = %q, want pane-a", got)
 	}
-	if got := s.paneInDir("/w/wt-x2"); got != "" {
+	if got := s.paneInDir("/w/wt-x2", nil); got != "" {
 		t.Errorf("paneInDir(sibling) = %q, want none", got)
 	}
 	s.forgetPane("pane-a")
-	if got := s.paneInDir("/w/wt-x"); got != "" {
+	if got := s.paneInDir("/w/wt-x", nil); got != "" {
 		t.Errorf("paneInDir after forget = %q, want none", got)
 	}
 }
@@ -336,10 +338,10 @@ func TestAgentWT_IdleSettleKeepsANewerTurnsSubagent(t *testing.T) {
 	s.probe(next)
 	s.subagentsDone("pane-a", idleAt) // … and only then the clear runs
 
-	if got := s.paneInDir("/w/old"); got != "" {
+	if got := s.paneInDir("/w/old", nil); got != "" {
 		t.Errorf("paneInDir(/w/old) = %q, want the finished subagent cleared", got)
 	}
-	if got := s.paneInDir("/w/new"); got != "pane-a" {
+	if got := s.paneInDir("/w/new", nil); got != "pane-a" {
 		t.Errorf("paneInDir(/w/new) = %q, want the newer subagent kept", got)
 	}
 }
@@ -462,7 +464,7 @@ func TestAgentWT_LateExitCleanupKeepsTheRestartedChildsRecords(t *testing.T) {
 		p.Data[hookevents.DataProbeAgent] = fmt.Sprintf("old-%d", i)
 		s.probe(p)
 	}
-	if got := s.paneInDir("/w/unrelated"); got != "pane-a" {
+	if got := s.paneInDir("/w/unrelated", nil); got != "pane-a" {
 		t.Fatalf("paneInDir = %q before the exit, want the overflowing pane", got)
 	}
 
@@ -472,13 +474,13 @@ func TestAgentWT_LateExitCleanupKeepsTheRestartedChildsRecords(t *testing.T) {
 	s.probe(p)
 	s.subagentsExited("pane-a", 1) // … and only now the old exit is handled
 
-	if got := s.paneInDir("/w/unrelated"); got != "" {
+	if got := s.paneInDir("/w/unrelated", nil); got != "" {
 		t.Errorf("paneInDir(/w/unrelated) = %q, want the old overflow cleared", got)
 	}
-	if got := s.paneInDir("/w/old"); got != "" {
+	if got := s.paneInDir("/w/old", nil); got != "" {
 		t.Errorf("paneInDir(/w/old) = %q, want the old child's records cleared", got)
 	}
-	if got := s.paneInDir("/w/new"); got != "pane-a" {
+	if got := s.paneInDir("/w/new", nil); got != "pane-a" {
 		t.Errorf("paneInDir(/w/new) = %q, want the new child's subagent kept", got)
 	}
 }
@@ -498,7 +500,7 @@ func TestOnPaneExit_ClearsTheChildsSubagentRecords(t *testing.T) {
 
 	d.onPaneExit(pane, 1)
 
-	if got := d.agentWT.paneInDir("/w/a"); got != "" {
+	if got := d.agentWT.paneInDir("/w/a", nil); got != "" {
 		t.Errorf("paneInDir(/w/a) = %q after the exit, want none", got)
 	}
 }
@@ -542,7 +544,7 @@ func TestAgentWT_ProbeBeforeGenerationBumpCarriesTheStartingGen(t *testing.T) {
 	d.agentWT.probe(p)
 	d.agentWT.subagentsExited(pane.ID, 1) // the old child's exit, handled late
 
-	if got := d.agentWT.paneInDir("/w/new"); got != pane.ID {
+	if got := d.agentWT.paneInDir("/w/new", nil); got != pane.ID {
 		t.Errorf("paneInDir(/w/new) = %q, want the starting child's subagent kept", got)
 	}
 }
@@ -562,5 +564,50 @@ func TestUncertainAckRefusal_OnlyTheTUI(t *testing.T) {
 	}
 	if r := uncertainAckRefusal(ipc.AgentWorktreeActReqPayload{ID: "e", RemoveWorktree: true}, "bridge"); r != "" {
 		t.Errorf("a request without the acknowledgment refused: %s", r)
+	}
+}
+
+// An agent or a shell working in the worktree THROUGH A SYMLINK still keeps
+// it: git lists the real path, the probe and the pane CWD name the link.
+//
+// Fails if the delete check compares paths only as text.
+func TestPaneInWorktree_SeesResidentsThroughASymlink(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "real", "wt")
+	if err := os.MkdirAll(filepath.Join(real, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	// A subagent probing through the link, its pane elsewhere.
+	d := daemonWithRecord(t)
+	tab := d.session.CreateTab("t")
+	pane, err := d.session.CreatePane(tab.ID, "/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := probeFor(pane.ID, filepath.Join(link, "src"))
+	p.Data[hookevents.DataProbeAgent] = "sub-1"
+	d.agentWT.probe(p)
+	if got := d.paneInWorktree(real, true); got != pane.ID {
+		t.Errorf("subagent via link: paneInWorktree = %q, want %s", got, pane.ID)
+	}
+
+	// A shell whose CWD is the link.
+	d2 := daemonWithRecord(t)
+	tab2 := d2.session.CreateTab("t")
+	shell, err := d2.session.CreatePane(tab2.ID, link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := d2.paneInWorktree(real, true); got != shell.ID {
+		t.Errorf("shell via link: paneInWorktree = %q, want %s", got, shell.ID)
+	}
+	// The text-only compare (the listing's hint) does not resolve.
+	if got := d2.paneInWorktree(real, false); got != "" {
+		t.Errorf("lexical compare resolved a link: %q", got)
 	}
 }

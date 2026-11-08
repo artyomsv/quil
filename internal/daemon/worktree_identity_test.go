@@ -225,3 +225,45 @@ func TestOwnerMarkRefusal_HungReadRefusesAndReturns(t *testing.T) {
 		t.Fatal("the identity check hung on a mark read that never returns")
 	}
 }
+
+// The folder is replaced during the retry backoff: the identity is checked
+// again before EVERY attempt, so the second attempt never runs on the
+// replacement.
+//
+// Fails if the identity is checked only once before the attempts.
+func TestRemoveOneWorktree_IdentityRecheckedBeforeEachAttempt(t *testing.T) {
+	d := newTestDaemon(t)
+	stubWorktreeList(t, []gitworktree.Worktree{{Path: "/repo", Main: true}, {Path: "/w/feat-a", Branch: "x"}}, nil)
+	calls := stubRemoveWorktree(t, func(context.Context, string, string) error { return errors.New("directory busy") })
+	checks := 0
+	ownerMarkMatchesFn = func(context.Context, string, string) (bool, error) {
+		checks++
+		return checks <= 2, nil // ours before the facts and the first attempt; replaced after
+	}
+
+	d.removeOwnedWorktreesWith([]string{"/w/feat-a"}, identityOpts())
+
+	if len(*calls) != 1 {
+		t.Fatalf("removal attempts = %d, want 1: the second ran on a replaced checkout", len(*calls))
+	}
+	if c := oneKeptCard(t, d); c.Data["reason"] != keptNotOurs {
+		t.Errorf("card reason = %q, want %q", c.Data["reason"], keptNotOurs)
+	}
+}
+
+// On a case-insensitive volume (macOS by default) a probe spelling the
+// worktree in another case is the same folder: the delete check keeps it.
+//
+// Fails if the resolved compare is case-sensitive where the volume is not.
+func TestResolvedWithin_CaseAliasKeepsTheWorktree(t *testing.T) {
+	prev := foldPathCase
+	foldPathCase = true
+	t.Cleanup(func() { foldPathCase = prev })
+	within := resolvedWithin("/Users/me/WT")
+	if !within("/Users/me/WT", "/Users/me/wt/src") {
+		t.Error("a case alias of the worktree was not seen as inside it")
+	}
+	if within("/Users/me/WT", "/Users/me/wt2") {
+		t.Error("a sibling folder was seen as inside the worktree")
+	}
+}

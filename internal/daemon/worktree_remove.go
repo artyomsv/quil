@@ -224,7 +224,7 @@ func (d *Daemon) removeOwnedWorktreesWith(paths []string, opt branchDeleteOpts) 
 		token := opt.Tokens[path]
 		if token == "" {
 			log.Printf("worktree remove: %s kept, no identity was recorded for it", path)
-			d.notifyWorktreeKept(owner, path, "Quil has no record of making this worktree (it predates checkout identities)")
+			d.notifyWorktreeKept(owner, path, keptNoIdentity)
 			continue
 		}
 		// The pane that owned it is gone, but a worktree can host panes in
@@ -234,13 +234,13 @@ func (d *Daemon) removeOwnedWorktreesWith(paths []string, opt branchDeleteOpts) 
 		// data-loss bug wearing this feature's clothes.
 		if used := d.paneInWorktree(path, true); used != "" {
 			log.Printf("worktree remove: %s kept, pane %s is still in it", path, used)
-			d.notifyWorktreeKept(owner, path, "pane "+used+" is still in it")
+			d.notifyWorktreeKept(owner, path, keptInUse)
 			continue
 		}
 		if res := d.removeWorktreeWithBranch(path, opt); !res.removed {
 			reason := res.reason
 			if reason == "" {
-				reason = "see quild.log"
+				reason = keptRemoveFailed
 			}
 			d.notifyWorktreeKept(owner, path, reason)
 		}
@@ -334,7 +334,7 @@ type removeResult struct {
 func (d *Daemon) removeOneWorktreeFull(path, token string, wantFacts bool) (res removeResult) {
 	if !claimBlockingFSCall() {
 		log.Printf("worktree remove: %s kept, too many filesystem calls in flight", path)
-		res.reason = "too many filesystem calls in flight"
+		res.reason = keptBusy
 		return res
 	}
 	defer releaseBlockingFSCall()
@@ -355,33 +355,42 @@ func (d *Daemon) removeOneWorktreeFull(path, token string, wantFacts bool) (res 
 	list, err := worktreeListFn(ctx, path)
 	if err != nil {
 		log.Printf("worktree remove: %s kept, its repository could not be read: %v", path, err)
-		res.reason = "its repository could not be read: " + err.Error()
+		res.reason = keptRepoUnreadable
 		return
 	}
 	if len(list) == 0 {
 		log.Printf("worktree remove: %s kept, it is not inside a git repository", path)
-		res.reason = "it is not inside a git repository"
+		res.reason = keptNotRepo
 		return
 	}
 	repo := list[0].Path
 	if repo == "" {
 		log.Printf("worktree remove: %s kept, its repository has no main checkout", path)
-		res.reason = "its repository has no main checkout"
+		res.reason = keptNotRepo
 		return
 	}
 	res.repo = repo
-	// The checkout's identity, again, right before the removal: a token the
-	// close captured from the pane, matched against the mark in the
-	// worktree's own git admin directory. A checkout replaced at this path
-	// since Quil made it has a fresh admin directory and no mark. Only the
-	// close path passes a token; the cleanup view verifies its agent entry
-	// against git's listing instead (verifyAgentWorktree).
-	if token != "" {
+	// The checkout's IDENTITY: a token the close captured from the pane,
+	// matched against the mark in the worktree's own git admin directory. A
+	// checkout replaced at this path since Quil made it has a fresh admin
+	// directory and no mark. Checked before the facts read AND before every
+	// removal attempt, because the facts read and the retry backoff are
+	// windows in which the folder can be replaced. Only the close path passes
+	// a token; the cleanup view verifies its agent entry against git's
+	// listing instead (verifyAgentWorktree).
+	stillOurs := func() bool {
+		if token == "" {
+			return true
+		}
 		if reason := ownerMarkRefusal(ctx, path, token); reason != "" {
 			log.Printf("worktree remove: %s kept, %s", path, reason)
 			res.reason = reason
-			return
+			return false
 		}
+		return true
+	}
+	if !stillOurs() {
+		return
 	}
 	if wantFacts {
 		// Before the removal: the listing entry naming the branch goes with it.
@@ -389,6 +398,9 @@ func (d *Daemon) removeOneWorktreeFull(path, token string, wantFacts bool) (res 
 	}
 
 	for attempt := 1; attempt <= worktreeRemoveAttempts; attempt++ {
+		if !stillOurs() {
+			return
+		}
 		err = removeWorktreeKeepBranchFn(ctx, repo, path)
 		if err == nil {
 			res.removed = true
@@ -426,12 +438,12 @@ func (d *Daemon) removeOneWorktreeFull(path, token string, wantFacts bool) (res 
 		case <-ctx.Done():
 			timer.Stop()
 			log.Printf("worktree remove: %s gave up waiting for the directory: %v", path, err)
-			res.reason = "the folder is still held: " + err.Error()
+			res.reason = keptRemoveFailed
 			return
 		}
 	}
 	log.Printf("worktree remove: %s failed after %d attempts: %v", path, worktreeRemoveAttempts, err)
-	res.reason = err.Error()
+	res.reason = keptRemoveFailed
 	return res
 }
 
@@ -567,7 +579,7 @@ func resolvedWithin(parent string) func(parent, child string) bool {
 	deadline := time.Now().Add(resolveTimeout)
 	physParent, parentOK := physicalPathBy(parent, deadline)
 	return func(p, child string) bool {
-		if pathWithin(p, child) {
+		if foldedWithin(p, child) {
 			return true
 		}
 		if !parentOK {
@@ -577,7 +589,7 @@ func resolvedWithin(parent string) func(parent, child string) bool {
 		if !ok {
 			return true
 		}
-		return physParent != "" && pc != "" && pathWithin(physParent, pc)
+		return physParent != "" && pc != "" && foldedWithin(physParent, pc)
 	}
 }
 
@@ -681,25 +693,6 @@ func resolveNearestAncestor(eval func(string) (string, error), path string) (str
 // ownerMarkMatchesFn is the identity-check seam, so tests need no real git.
 var ownerMarkMatchesFn = gitworktree.OwnerMarkMatches
 
-// ownerMarkRefusal is "" when the worktree at path is still the checkout Quil
-// made and marked with token, else why not. No token, no answer, a missing or
-// different mark all refuse: a replacement at the same path is never shown or
-// removed as Quil's.
-func ownerMarkRefusal(ctx context.Context, path, token string) string {
-	if token == "" {
-		return "Quil has no record of making this worktree (it predates checkout identities)"
-	}
-	match := ownerMarkMatchesFn // read here: the worker can outlive this call
-	ok, err := boundedFSCall(ctx, func() (bool, error) { return match(ctx, path, token) })
-	switch {
-	case err != nil:
-		return "could not confirm this is the worktree Quil made: " + err.Error()
-	case !ok:
-		return "this folder is no longer the worktree Quil made for the pane"
-	}
-	return ""
-}
-
 // lstatFn is the link-inspection seam beside evalSymlinksFn.
 var lstatFn = os.Lstat
 
@@ -734,4 +727,74 @@ func boundedFSCall[T any](ctx context.Context, fn func() (T, error)) (T, error) 
 	case <-ctx.Done():
 		return zero, errFSCallUnanswered
 	}
+}
+
+// ownerMarkRefusal is "" when the worktree at path is still the checkout Quil
+// made and marked with token, else the reason CODE (keptNoIdentity,
+// keptIdentityUnknown, keptNotOurs). No token, no answer, a missing or
+// different mark all refuse: a replacement at the same path is never shown or
+// removed as Quil's. The detail of a failed read goes to quild.log only.
+func ownerMarkRefusal(ctx context.Context, path, token string) string {
+	if token == "" {
+		return keptNoIdentity
+	}
+	match := ownerMarkMatchesFn // read here: the worker can outlive this call
+	ok, err := boundedFSCall(ctx, func() (bool, error) { return match(ctx, path, token) })
+	switch {
+	case err != nil:
+		log.Printf("worktree identity: %s: %v", path, err)
+		return keptIdentityUnknown
+	case !ok:
+		return keptNotOurs
+	}
+	return ""
+}
+
+// Why a worktree a close (or the cleanup view) asked to remove was kept: a
+// FIXED set of codes, each with a fixed message for the sidebar card. Git's
+// own error text and absolute paths go to quild.log, never to a card.
+const (
+	keptNoIdentity      = "no_identity"
+	keptIdentityUnknown = "identity_unknown"
+	keptNotOurs         = "not_ours"
+	keptInUse           = "in_use"
+	keptRepoUnreadable  = "repo_unreadable"
+	keptNotRepo         = "not_in_repository"
+	keptBusy            = "busy"
+	keptRemoveFailed    = "remove_failed"
+)
+
+var keptMessages = map[string]string{
+	keptNoIdentity:      "Quil has no record of making this worktree (it predates checkout identities)",
+	keptIdentityUnknown: "could not confirm this is the worktree Quil made",
+	keptNotOurs:         "this folder is no longer the worktree Quil made for the pane",
+	keptInUse:           "another pane is still in it",
+	keptRepoUnreadable:  "its repository could not be read",
+	keptNotRepo:         "it is not inside a git repository",
+	keptBusy:            "too many filesystem calls in flight",
+	keptRemoveFailed:    "git could not remove it (see quild.log)",
+}
+
+// keptMessage is the card text for a reason code.
+func keptMessage(code string) string {
+	if m, ok := keptMessages[code]; ok {
+		return m
+	}
+	return keptMessages[keptRemoveFailed]
+}
+
+// foldPathCase says the delete checks compare paths ignoring letter case.
+// True on macOS as well as Windows: APFS and HFS+ are case-insensitive by
+// default, and EvalSymlinks there keeps the spelling it was given, so /a/WT
+// and /a/wt resolve to two strings naming one folder. Folding on a
+// case-sensitive volume can only make two folders look like one — the
+// worktree is KEPT, never removed by mistake. A var so a test can turn it on.
+var foldPathCase = runtime.GOOS == "darwin" || runtime.GOOS == "windows"
+
+// foldedWithin is pathWithin, ignoring case when foldPathCase.
+func foldedWithin(parent, child string) bool {
+	if foldPathCase {
+		return pathWithin(strings.ToLower(parent), strings.ToLower(child))
+	}
+	return pathWithin(parent, child)
 }

@@ -385,8 +385,27 @@ the plain file I/O would otherwise hold the status or worktree-add slot
 forever. The cleanup view's agent entries carry no
 token — they are verified against git's listing instead.
 
+The identity is checked again **before EVERY removal attempt** (`stillOurs()` in
+`removeOneWorktreeFull`), not once before the loop: the retry backoff is a
+window in which the folder can be replaced, and a check taken before it says
+nothing about the second attempt. The mark READ refuses anything but a small
+regular file: `Lstat` first (no link, size ≤ `maxOwnerToken`+1), an open with
+`O_NOFOLLOW|O_NONBLOCK` on Unix (a FIFO planted at the path must not park the
+reader), `os.SameFile` between the `Lstat` and the opened handle, and a capped
+read. The WRITE is a temp file plus rename, mode 0600, so a crash never leaves a
+half token that reads as "not ours" forever.
+
+The delete checks compare resolved paths through `foldedWithin`, which folds
+case on darwin and windows (`foldPathCase`): their default volumes are
+case-insensitive, so `/Users/me/wt/src` is inside `/Users/me/WT` there.
+
 **Every worktree a close asked to remove and KEPT gets a sidebar card**
 (`notifyWorktreeKept`, type `worktree_kept`, class System) with the reason —
 no identity, a pane still in it, the repository unreadable, the identity no
 longer matching — whether or not a branch delete was asked; `branchOpts`
-captures the owners and tokens on every close for that reason.
+captures the owners and tokens on every close for that reason. The card's text
+is a FIXED message per reason code (`keptMessage`, codes `keptNoIdentity` …
+`keptRemoveFailed`), and the code rides in `Data["reason"]`; git's own error
+text goes to the log only, never onto the card or into the cleanup view's act
+answer, because it can carry paths and text from a repository the user does
+not control.

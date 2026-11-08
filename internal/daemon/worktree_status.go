@@ -202,7 +202,7 @@ func worktreeStatusResponseFor(req ipc.WorktreeStatusReqPayload, tokens map[stri
 		st := ipc.WorktreeStatus{Path: path}
 		if tokens != nil {
 			if reason := ownerMarkRefusal(ctx, path, tokens[path]); reason != "" {
-				st.Error, st.BranchReason = reason, reason
+				st.Error, st.BranchReason = keptMessage(reason), keptMessage(reason)
 				out.Statuses = append(out.Statuses, st)
 				continue
 			}

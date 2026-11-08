@@ -4252,7 +4252,7 @@ func (d *Daemon) notifyBranchDeleted(owner paneRef, branch string) {
 // notifyWorktreeKept says a worktree removal the user asked for did not
 // happen, and why. A warning: the pane and the dialog are gone, so this card
 // is the only place the user learns the folder is still there.
-func (d *Daemon) notifyWorktreeKept(owner paneRef, path, reason string) {
+func (d *Daemon) notifyWorktreeKept(owner paneRef, path, code string) {
 	d.emitEvent(PaneEvent{
 		ID:        uuid.New().String(),
 		PaneID:    owner.ID,
@@ -4260,10 +4260,10 @@ func (d *Daemon) notifyWorktreeKept(owner paneRef, path, reason string) {
 		PaneName:  owner.Name,
 		Type:      "worktree_kept",
 		Title:     "Worktree kept: " + filepath.Base(path),
-		Message:   reason,
+		Message:   keptMessage(code),
 		Severity:  "warning",
 		Timestamp: time.Now(),
-		Data:      map[string]string{"path": path},
+		Data:      map[string]string{"path": path, "reason": code},
 	})
 }
 

@@ -193,11 +193,7 @@ func (d *Daemon) agentWorktreeAct(req ipc.AgentWorktreeActReqPayload) ipc.AgentW
 		if !res.removed {
 			// The worktree removal itself raises no sidebar card, so this
 			// answer is the only place the user learns it did not happen.
-			reason := res.reason
-			if reason == "" {
-				reason = "see quild.log"
-			}
-			out.Error = "the worktree was not removed: " + reason
+			out.Error = "the worktree was not removed: " + keptMessage(res.reason)
 			return out
 		}
 		out.Notice = "Worktree removed."

@@ -3,6 +3,9 @@ package gitworktree
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -42,5 +45,34 @@ func TestOwnerMark_RealGit_ReplacedCheckoutDoesNotMatch(t *testing.T) {
 	// The main checkout has no admin directory of its own.
 	if err := WriteOwnerMark(ctx, repo, "tok-3"); !errors.Is(err, ErrNotLinkedWorktree) {
 		t.Errorf("main checkout: err = %v, want ErrNotLinkedWorktree", err)
+	}
+}
+
+// A mark that is not a small regular file is refused WITHOUT reading it: a
+// symlink (to an endless source, say) or an oversized file.
+//
+// Fails if readOwnerMark follows a link or reads without a cap.
+func TestReadOwnerMark_RefusesLinksAndOversizedFiles(t *testing.T) {
+	dir := t.TempDir()
+	big := filepath.Join(dir, "big")
+	if err := os.WriteFile(big, []byte(strings.Repeat("x", 4096)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readOwnerMark(big); !errors.Is(err, errBadMark) {
+		t.Errorf("oversized mark: err = %v, want errBadMark", err)
+	}
+	good := filepath.Join(dir, "good")
+	if err := os.WriteFile(good, []byte("tok-1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := readOwnerMark(good); err != nil || got != "tok-1" {
+		t.Errorf("regular mark: %q, %v", got, err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(good, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := readOwnerMark(link); !errors.Is(err, errBadMark) {
+		t.Errorf("symlink mark: err = %v, want errBadMark", err)
 	}
 }

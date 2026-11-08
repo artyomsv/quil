@@ -395,22 +395,44 @@ reader), `os.SameFile` between the `Lstat` and the opened handle, and a capped
 read. The WRITE is a temp file plus rename, mode 0600, so a crash never leaves a
 half token that reads as "not ours" forever.
 
-The mark is written STRAIGHT after `git worktree add` returns
-(`worktreeAddAndCreate` → `markNewWorktree`), before the post-add checks and
-before the pane starts, and only into the checkout this create made:
-`MarkNewWorktree` refuses (`ErrNotCreatedHere`, pane left with no token) when
-the admin directory is outside the repository's `<common>/worktrees`, or when
-its `gitdir` back-pointer names another path (a copied or moved checkout).
+The mark is written FIRST after `git worktree add` returns
+(`worktreeAddAndCreate` → `markNewWorktree`, ahead of the log line, the agent
+baseline note, the post-add checks and the pane start), and only into the
+checkout this create made. `MarkNewWorktree` compares by FILE IDENTITY
+(`os.SameFile`), never by spelling, and an unresolvable path is an error (no
+mark), never a fallback to text: the checkout's common git directory must be
+the repository's own; the repository's `<common>/worktrees` must be a real
+directory (`Lstat` — a link routing the metadata to another repository is
+refused) holding the admin directory directly; and the admin directory's
+`gitdir` back-pointer — resolved against the ADMIN directory when relative
+(`worktree.useRelativePaths`, git 2.48+), never against quild's cwd — must be
+`<path>/.git`. A refusal is `ErrNotCreatedHere` and leaves the pane with no
+token.
 
 **Accepted residual (owner's ruling, 2026-11-08):** git cannot make the add and
-the mark one step. A checkout of the SAME repository made at the SAME path in
-that window — one `rev-parse` wide — is indistinguishable from the one the add
-made, and is marked as Quil's. Only a process of the same user can act there,
+the mark one step. A checkout of the SAME repository made at the SAME path
+between `git worktree add` returning and the mark landing — two `rev-parse`
+calls, a few stats and the write — is indistinguishable from the one the add
+made and IS marked as Quil's. Only a process of the same user can act there,
 the trust boundary this feature already accepts.
 `TestMarkNewWorktree_RealGit_SameRepositoryReplacementIsTheAcceptedResidual`
-pins it as a decision. So the guarantee is: the close removes only the checkout
-Quil marked, and Quil marks only a checkout of the right repository registered
-at that path, within one git call of creating it.
+pins it (the replacement carries the token). The consequence is bounded by the
+close path's other checks (occupancy, the file list the user confirms) and by
+the rollback guard below, so the residual can cost a mislabel, not silent work
+loss.
+
+**An abandoned create's rollback has the close path's doubts**
+(`abandonRefusal`, before `removeWorktreeFn`, which is `--force` plus
+`branch -D`). The tab or the replace target closing during the checkout ends
+the create, and the checkout is removed only when: the mark still matches
+(checked first and again last), no pane is in it, `git status` counts nothing
+(`keptHasChanges`), and its branch holds no commit the default branch lacks and
+is not detached or the default (`keptHasCommits`); any unanswered check is
+`keptRepoUnreadable`. Otherwise it is KEPT, the requester's error says so with
+the fixed message, and the reason is logged. The mark alone is never proof
+there: the accepted residual is exactly a replacement that carries it.
+`TestWorktreeAddAndCreate_RealGit_AbandonKeepsAReplacementHoldingWork` pins it;
+`stubRemove` lets the guard through for the tests about the removal itself.
 
 The delete checks compare resolved paths through `foldedWithin`, which folds
 case on darwin and windows (`foldPathCase`) as a cheap first test. Strings

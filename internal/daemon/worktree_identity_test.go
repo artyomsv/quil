@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -392,4 +393,115 @@ func TestResolvedWithin_UnicodeAliasKeepsTheWorktree(t *testing.T) {
 	if !resolvedWithin(nfc)(nfc, filepath.Join(nfd, "src")) {
 		t.Error("an NFD spelling of the worktree was not seen as inside it")
 	}
+}
+
+// The rollback of an abandoned create destroys with --force and branch -D, so
+// it keeps the checkout on every doubt the close path has: no identity, not
+// the marked checkout, a pane in it, changes, commits, or a check that could
+// not answer — and it re-checks the mark last.
+//
+// Fails if any doubt lets the rollback through.
+func TestAbandonRefusal_KeepsOnEveryDoubt(t *testing.T) {
+	clean := gitworktree.BranchFacts{Branch: "feat/x", DefaultRef: "refs/heads/master"}
+	cases := []struct {
+		name    string
+		token   string
+		marks   []bool // successive mark answers
+		changes int
+		statErr error
+		facts   gitworktree.BranchFacts
+		factErr error
+		want    string
+	}{
+		{"clean and ours", "tok", []bool{true, true}, 0, nil, clean, nil, ""},
+		{"no identity", "", nil, 0, nil, clean, nil, keptNoIdentity},
+		{"not ours", "tok", []bool{false}, 0, nil, clean, nil, keptNotOurs},
+		{"replaced before the final check", "tok", []bool{true, false}, 0, nil, clean, nil, keptNotOurs},
+		{"changes", "tok", []bool{true, true}, 2, nil, clean, nil, keptHasChanges},
+		{"status unanswered", "tok", []bool{true, true}, 0, errors.New("boom"), clean, nil, keptRepoUnreadable},
+		{"commits", "tok", []bool{true, true}, 0, nil, gitworktree.BranchFacts{Branch: "feat/x", Unmerged: 1}, nil, keptHasCommits},
+		{"facts unanswered", "tok", []bool{true, true}, 0, nil, clean, errors.New("boom"), keptRepoUnreadable},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := newTestDaemon(t)
+			calls := 0
+			prev := ownerMarkMatchesFn
+			ownerMarkMatchesFn = func(context.Context, string, string) (bool, error) {
+				ok := calls < len(tc.marks) && tc.marks[calls]
+				calls++
+				return ok, nil
+			}
+			t.Cleanup(func() { ownerMarkMatchesFn = prev })
+			stubWorktreeStatus(t, func(string) (int, error) { return tc.changes, tc.statErr })
+			stubBranchFacts(t, func(string) (gitworktree.BranchFacts, error) { return tc.facts, tc.factErr })
+
+			if got := d.abandonRefusal("/repo", "/w/feat-x", tc.token); got != tc.want {
+				t.Errorf("abandonRefusal = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// The accepted residual meets a rollback: after the add, another operation
+// replaces the checkout at the path with one of the SAME repository on the
+// same branch, commits there and leaves a change, then the tab closes. The
+// replacement carries the mark (the documented residual), yet the rollback
+// keeps the checkout, the change and the commit.
+//
+// Fails if the abandoned create force-removes on the mark alone.
+func TestWorktreeAddAndCreate_RealGit_AbandonKeepsAReplacementHoldingWork(t *testing.T) {
+	repo := realGitRepoForDaemon(t)
+	t.Setenv("QUIL_HOME", t.TempDir())
+	d := newTestDaemon(t)
+	tab := d.session.CreateTab("t")
+	req := worktreeCreate(tab.ID, repo, "feat/x")
+	path := gitworktree.DerivePath(repo, "feat/x")
+	stubAdd(t, func(ctx context.Context, repo, path, branch string) error {
+		if _, err := gitworktree.Add(ctx, repo, path, branch); err != nil {
+			return err
+		}
+		if err := gitworktree.RemoveWorktree(ctx, repo, path); err != nil {
+			return err
+		}
+		runGitForAbandon(t, repo, "worktree", "add", "-q", path, branch)
+		if err := os.WriteFile(filepath.Join(path, "work.txt"), []byte("work\n"), 0o644); err != nil {
+			return err
+		}
+		runGitForAbandon(t, path, "add", "work.txt")
+		runGitForAbandon(t, path, "commit", "-q", "-m", "work")
+		if err := os.WriteFile(filepath.Join(path, "dirty.txt"), []byte("dirty\n"), 0o644); err != nil {
+			return err
+		}
+		return d.session.DestroyTab(tab.ID)
+	})
+
+	resp := d.worktreeAddAndCreate(req)
+
+	if !strings.Contains(resp.Error, "kept") {
+		t.Errorf("answer = %q, want it to say the worktree was kept", resp.Error)
+	}
+	if _, err := os.Stat(filepath.Join(path, "dirty.txt")); err != nil {
+		t.Errorf("the uncommitted file is gone: %v", err)
+	}
+	if out := runGitForAbandon(t, repo, "log", "-1", "--format=%s", "feat/x"); strings.TrimSpace(out) != "work" {
+		t.Errorf("branch tip = %q, want the replacement's commit", out)
+	}
+}
+
+// runGitForAbandon runs git in dir with a hermetic identity and config.
+func runGitForAbandon(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_SYSTEM="+os.DevNull,
+		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	return string(out)
 }

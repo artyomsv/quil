@@ -816,6 +816,8 @@ const (
 	keptNotRepo         = "not_in_repository"
 	keptBusy            = "busy"
 	keptRemoveFailed    = "remove_failed"
+	keptHasChanges      = "has_changes"
+	keptHasCommits      = "has_commits"
 )
 
 var keptMessages = map[string]string{
@@ -827,6 +829,8 @@ var keptMessages = map[string]string{
 	keptNotRepo:         "it is not inside a git repository",
 	keptBusy:            "too many filesystem calls in flight",
 	keptRemoveFailed:    "git could not remove it (see quild.log)",
+	keptHasChanges:      "it holds changes that are not committed",
+	keptHasCommits:      "its branch has commits the default branch does not",
 }
 
 // keptMessage is the card text for a reason code.

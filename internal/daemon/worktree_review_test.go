@@ -26,7 +26,11 @@ func stubRemove(t *testing.T, fn func(ctx context.Context, repo, path, branch st
 		}
 		return fn(ctx, repo, path, branch)
 	}
-	t.Cleanup(func() { removeWorktreeFn = prev })
+	// These tests are about WHETHER and WHAT the rollback removes once it
+	// decided to; the guard in front of it (abandonRefusal) has its own tests.
+	prevGuard := abandonRefusalFn
+	abandonRefusalFn = func(*Daemon, string, string, string) string { return "" }
+	t.Cleanup(func() { removeWorktreeFn = prev; abandonRefusalFn = prevGuard })
 	return &calls
 }
 

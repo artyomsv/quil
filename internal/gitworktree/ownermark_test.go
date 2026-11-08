@@ -172,6 +172,69 @@ func TestMarkNewWorktree_RealGit_SameRepositoryReplacementIsTheAcceptedResidual(
 	runGitIn(t, repo, "worktree", "add", "-q", path, "-b", "swapped")
 
 	if err := MarkNewWorktree(ctx, repo, path, "tok-1"); err != nil {
-		t.Errorf("err = %v; the accepted residual is that this is marked", err)
+		t.Fatalf("err = %v; the accepted residual is that this is marked", err)
+	}
+	if ok, err := OwnerMarkMatches(ctx, path, "tok-1"); !ok || err != nil {
+		t.Errorf("match = %v, %v; the accepted residual is that the replacement carries the token", ok, err)
+	}
+}
+
+// A's worktree metadata is ROUTED to B's through a link: A's .git/worktrees
+// is a symlink to B's. A checkout B registered at the path passes a
+// spelling check against A's metadata root; it is not A's, and B gets no mark.
+//
+// Fails if the repository or the metadata root is compared by spelling, or if
+// a linked metadata root is accepted.
+func TestMarkNewWorktree_RealGit_RefusesMetadataRoutedToAnotherRepository(t *testing.T) {
+	repo, other := realGitRepo(t), realGitRepo(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	path := DerivePath(repo, "feat")
+	runGitIn(t, other, "worktree", "add", "-q", path, "-b", "intruder")
+	if err := os.Remove(filepath.Join(repo, ".git", "worktrees")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(other, ".git", "worktrees"), filepath.Join(repo, ".git", "worktrees")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	if err := MarkNewWorktree(ctx, repo, path, "tok-1"); !errors.Is(err, ErrNotCreatedHere) {
+		t.Fatalf("err = %v, want ErrNotCreatedHere", err)
+	}
+	if ok, _ := OwnerMarkMatches(ctx, path, "tok-1"); ok {
+		t.Error("the other repository's checkout was marked")
+	}
+}
+
+// With worktree.useRelativePaths git writes the gitdir back-pointer relative
+// to the admin directory. A fresh, valid worktree must still be marked.
+//
+// Fails if a relative back-pointer is resolved against the process's cwd.
+func TestMarkNewWorktree_RealGit_RelativeBackPointerIsMarked(t *testing.T) {
+	repo := realGitRepo(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	runGitIn(t, repo, "config", "worktree.useRelativePaths", "true")
+	path := DerivePath(repo, "feat")
+	if _, err := Add(ctx, repo, path, "feat"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	admin, err := worktreeAdminDir(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := os.ReadFile(filepath.Join(admin, "gitdir"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.IsAbs(strings.TrimSpace(string(back))) {
+		t.Skip("this git writes absolute back-pointers (worktree.useRelativePaths needs git 2.48+)")
+	}
+
+	if err := MarkNewWorktree(ctx, repo, path, "tok-1"); err != nil {
+		t.Fatalf("MarkNewWorktree: %v", err)
+	}
+	if ok, err := OwnerMarkMatches(ctx, path, "tok-1"); !ok || err != nil {
+		t.Errorf("match = %v, %v; want the worktree marked", ok, err)
 	}
 }

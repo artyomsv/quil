@@ -164,7 +164,20 @@ func (d *Daemon) worktreeAddAndCreate(p ipc.CreatePanePayload) ipc.CreatePaneRes
 	// afterwards, and that is precisely how the ambient-HEAD defect survived.
 	// An empty base means gitworktree found no default branch and left git to
 	// use HEAD, which is worth naming rather than printing as a blank.
+	//
+	// The checkout's IDENTITY, beside its path: a random token written into
+	// the worktree's own git admin directory, which a checkout later made at
+	// the same path does not share. A close removes the worktree only while
+	// the token still matches (removeOwnedWorktreesWith). Written FIRST after
+	// git returns, ahead of the log line and every other step, and only into
+	// the checkout this create made (MarkNewWorktree checks the repository's
+	// identity and git's back-pointer). The window it leaves — two rev-parse
+	// calls, a few stats and the write — is the accepted residual it
+	// documents. A mark that could not be written leaves the pane with no
+	// token, and it is never offered a removal it cannot prove.
+	token := ""
 	if err == nil {
+		token = d.markNewWorktree(spec.RepoRoot, path)
 		from := base
 		if from == "" {
 			from = "HEAD (no default branch resolved)"
@@ -179,33 +192,32 @@ func (d *Daemon) worktreeAddAndCreate(p ipc.CreatePanePayload) ipc.CreatePaneRes
 		// worktree '/x/feat-y'" names the pane to go look at.
 		return fail("%v", err)
 	}
-	// The checkout's IDENTITY, beside its path: a random token written into
-	// the worktree's own git admin directory, which a checkout later made at
-	// the same path does not share. A close removes the worktree only while
-	// the token still matches (removeOwnedWorktreesWith). Written STRAIGHT
-	// after git returns, before anything else, and only into the checkout
-	// this create made (MarkNewWorktree checks the repository and git's
-	// back-pointer) — the accepted residual it documents is one rev-parse
-	// wide. A mark that could not be written leaves the pane with no token,
-	// and it is never offered a removal it cannot prove.
-	token := d.markNewWorktree(spec.RepoRoot, path)
 
 	// Re-validated AFTER the add: the window is seconds wide here, not the
 	// microseconds an ordinary create has, and a tab can be destroyed inside
 	// it. Without this the pane lands in a tab nobody is looking at.
 	//
-	// Every abandonment past this point REMOVES the worktree git just made.
-	// Returning without it strands a full checkout on disk plus a branch
-	// pointing at it, and the next attempt at the same name then fails with
-	// "already exists" against a directory the user never created — which is
-	// indistinguishable from a name genuinely in use.
+	// Every abandonment past this point REMOVES the worktree git just made —
+	// but only after the same doubts the close path has are cleared
+	// (abandonRefusal): the accepted same-repository replacement can carry the
+	// mark, and removal is --force plus branch -D. Anything uncertain, in use,
+	// holding changes or holding commits is KEPT and the answer says so.
+	// Returning without cleanup otherwise strands a full checkout on disk plus
+	// a branch pointing at it, and the next attempt at the same name fails
+	// with "already exists" against a directory the user never created.
 	abandon := func(format string, args ...any) ipc.CreatePaneRespPayload {
+		resp := fail(format, args...)
+		if reason := abandonRefusalFn(d, spec.RepoRoot, path, token); reason != "" {
+			log.Printf("worktree create: kept %s after a failed create: %s", path, keptMessage(reason))
+			resp.Error += "; the new worktree was kept: " + keptMessage(reason)
+			return resp
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), worktreeAddTimeout)
 		defer cancel()
 		if rmErr := removeWorktreeFn(ctx, spec.RepoRoot, path, spec.Branch); rmErr != nil {
 			log.Printf("worktree create: could not clean up %s after a failed create: %v", path, rmErr)
 		}
-		return fail(format, args...)
+		return resp
 	}
 	if d.session.Tab(p.TabID) == nil {
 		return abandon("the tab was closed while the worktree was being created")
@@ -354,3 +366,44 @@ func (d *Daemon) markNewWorktree(repo, path string) string {
 
 // markNewWorktreeFn is the identity-mark seam, so tests need no real git.
 var markNewWorktreeFn = gitworktree.MarkNewWorktree
+
+// abandonRefusalFn decides whether an abandoned create may destroy the
+// checkout it made: "" when it may, else the kept reason code. A seam so the
+// tests that observe the removal itself (stubRemove) can let it through.
+var abandonRefusalFn = (*Daemon).abandonRefusal
+
+// abandonRefusal is the rollback's version of the close path's doubts. The
+// removal is `worktree remove --force` plus `branch -D`, and the accepted
+// same-repository replacement (MarkNewWorktree) can carry the mark — so the
+// mark alone is not proof that no work appeared. The checkout is kept unless
+// it is still the one marked (checked first and again last, right before the
+// caller destroys it), no pane is in it, it holds no changes, and its branch
+// holds no commit the default branch lacks. Any check that cannot answer
+// keeps it.
+func (d *Daemon) abandonRefusal(repo, path, token string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), worktreeStatusTimeout)
+	defer cancel()
+	if r := ownerMarkRefusal(ctx, path, token); r != "" {
+		return r
+	}
+	if d.paneInWorktree(path, true) != "" {
+		return keptInUse
+	}
+	status, err := worktreeStatusFn(ctx, path)
+	switch {
+	case err != nil:
+		log.Printf("worktree create: %s: status before rollback: %v", path, err)
+		return keptRepoUnreadable
+	case status.Changes > 0:
+		return keptHasChanges
+	}
+	facts, err := branchFactsFn(ctx, repo, path, defaultBranchRefFn(ctx, repo))
+	switch {
+	case err != nil:
+		log.Printf("worktree create: %s: branch facts before rollback: %v", path, err)
+		return keptRepoUnreadable
+	case facts.Detached || facts.IsDefault || facts.Unmerged > 0:
+		return keptHasCommits
+	}
+	return ownerMarkRefusal(ctx, path, token)
+}

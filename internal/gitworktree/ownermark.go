@@ -42,18 +42,27 @@ var ErrNotCreatedHere = errors.New("the checkout at the path is not the one this
 
 // MarkNewWorktree marks the linked worktree a create in repo JUST made at
 // path, and refuses (ErrNotCreatedHere) when the checkout found there cannot
-// be it: an admin directory outside repo's <common>/worktrees, or one whose
-// gitdir back-pointer names another path. Call it straight after git returns.
+// be it. Every comparison is by FILE IDENTITY (os.SameFile), never by
+// spelling, and anything that cannot be resolved is an error — no mark:
+//   - the checkout's common git directory must be repo's own;
+//   - repo's <common>/worktrees must be a real directory (not a link that
+//     routes the metadata to another repository), and the admin directory a
+//     real directory directly inside it;
+//   - the admin directory's gitdir back-pointer (relative to the admin
+//     directory when worktree.useRelativePaths wrote it so) must be path/.git.
 //
-// ACCEPTED RESIDUAL: git cannot make the add and the mark one step, so a
-// checkout of the SAME repository made at the SAME path inside that window
-// (one rev-parse wide) is indistinguishable from the one the add made, and is
-// marked. Only a process of the same user can act there.
+// Call it straight after git returns.
+//
+// ACCEPTED RESIDUAL: git cannot make the add and the mark one step. A
+// checkout of the SAME repository made at the SAME path between the add and
+// this call — two rev-parse calls, a few stats and the write — is
+// indistinguishable from the one the add made, and IS marked. Only a process
+// of the same user can act there.
 func MarkNewWorktree(ctx context.Context, repo, path, token string) error {
 	if token == "" || len(token) > maxOwnerToken {
 		return errors.New("invalid owner token")
 	}
-	admin, err := worktreeAdminDir(ctx, path)
+	admin, common, err := worktreeAdminAndCommon(ctx, path)
 	if err != nil {
 		return err
 	}
@@ -61,33 +70,61 @@ func MarkNewWorktree(ctx context.Context, repo, path, token string) error {
 	if err != nil {
 		return fmt.Errorf("git rev-parse in %s: %w", repo, err)
 	}
-	common := strings.TrimSpace(out)
-	if !filepath.IsAbs(common) {
-		common = filepath.Join(repo, common)
+	repoCommon := strings.TrimSpace(out)
+	if !filepath.IsAbs(repoCommon) {
+		repoCommon = filepath.Join(repo, repoCommon)
 	}
-	if !sameResolvedPath(filepath.Dir(admin), filepath.Join(common, "worktrees")) {
+	if same, err := sameFile(common, repoCommon); err != nil {
+		return err
+	} else if !same {
+		return ErrNotCreatedHere
+	}
+	worktrees, err := os.Lstat(filepath.Join(repoCommon, "worktrees"))
+	if err != nil {
+		return err
+	}
+	adminInfo, err := os.Lstat(admin)
+	if err != nil {
+		return err
+	}
+	if !worktrees.IsDir() || !adminInfo.IsDir() {
+		return ErrNotCreatedHere // a link is not a directory to Lstat
+	}
+	parent, err := os.Stat(filepath.Dir(admin))
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(parent, worktrees) {
 		return ErrNotCreatedHere
 	}
 	back, err := readSmallFile(filepath.Join(admin, "gitdir"), 4096)
 	if err != nil {
 		return fmt.Errorf("reading the worktree's gitdir: %w", err)
 	}
-	if !sameResolvedPath(strings.TrimSpace(back), filepath.Join(path, ".git")) {
+	backPath := strings.TrimSpace(back)
+	if !filepath.IsAbs(backPath) {
+		backPath = filepath.Join(admin, backPath)
+	}
+	if same, err := sameFile(backPath, filepath.Join(path, ".git")); err != nil {
+		return err
+	} else if !same {
 		return ErrNotCreatedHere
 	}
 	return writeMarkIn(admin, token)
 }
 
-// sameResolvedPath is samePath after resolving links where possible: git
-// records real paths (/private/var on macOS) where a caller may hold a link.
-func sameResolvedPath(a, b string) bool {
-	if r, err := filepath.EvalSymlinks(a); err == nil {
-		a = r
+// sameFile reports whether a and b are the same file on disk. An error is a
+// path that could not be examined: never treated as either answer.
+func sameFile(a, b string) (bool, error) {
+	ai, err := os.Stat(a)
+	if err != nil {
+		return false, err
 	}
-	if r, err := filepath.EvalSymlinks(b); err == nil {
-		b = r
+	bi, err := os.Stat(b)
+	if err != nil {
+		return false, err
 	}
-	return samePath(a, b)
+	return os.SameFile(ai, bi), nil
 }
 
 // readSmallFile reads at most limit bytes of a regular file, refusing
@@ -208,20 +245,27 @@ func readOwnerMark(file string) (string, error) {
 // worktreeAdminDir is the per-worktree git directory of the linked worktree
 // at path, refusing a main checkout (whose git dir IS the common dir).
 func worktreeAdminDir(ctx context.Context, path string) (string, error) {
+	admin, _, err := worktreeAdminAndCommon(ctx, path)
+	return admin, err
+}
+
+// worktreeAdminAndCommon is worktreeAdminDir plus the common git directory
+// the checkout at path belongs to.
+func worktreeAdminAndCommon(ctx context.Context, path string) (admin, common string, err error) {
 	out, err := runGit(ctx, path, "rev-parse", "--absolute-git-dir", "--git-common-dir")
 	if err != nil {
-		return "", fmt.Errorf("git rev-parse in %s: %w", path, err)
+		return "", "", fmt.Errorf("git rev-parse in %s: %w", path, err)
 	}
 	lines := strings.Split(strings.TrimSpace(strings.ReplaceAll(out, "\r\n", "\n")), "\n")
 	if len(lines) != 2 {
-		return "", fmt.Errorf("git rev-parse in %s: unexpected answer %q", path, out)
+		return "", "", fmt.Errorf("git rev-parse in %s: unexpected answer %q", path, out)
 	}
 	gitDir, common := strings.TrimSpace(lines[0]), strings.TrimSpace(lines[1])
 	if !filepath.IsAbs(common) {
 		common = filepath.Join(path, common)
 	}
 	if samePath(gitDir, common) {
-		return "", ErrNotLinkedWorktree
+		return "", "", ErrNotLinkedWorktree
 	}
-	return gitDir, nil
+	return gitDir, common, nil
 }

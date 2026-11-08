@@ -32,6 +32,89 @@ func WriteOwnerMark(ctx context.Context, path, token string) error {
 	if err != nil {
 		return err
 	}
+	return writeMarkIn(admin, token)
+}
+
+// ErrNotCreatedHere means the checkout at the path is not the one the create
+// just made: its admin directory belongs to another repository, or git's own
+// back-pointer names another path.
+var ErrNotCreatedHere = errors.New("the checkout at the path is not the one this create made")
+
+// MarkNewWorktree marks the linked worktree a create in repo JUST made at
+// path, and refuses (ErrNotCreatedHere) when the checkout found there cannot
+// be it: an admin directory outside repo's <common>/worktrees, or one whose
+// gitdir back-pointer names another path. Call it straight after git returns.
+//
+// ACCEPTED RESIDUAL: git cannot make the add and the mark one step, so a
+// checkout of the SAME repository made at the SAME path inside that window
+// (one rev-parse wide) is indistinguishable from the one the add made, and is
+// marked. Only a process of the same user can act there.
+func MarkNewWorktree(ctx context.Context, repo, path, token string) error {
+	if token == "" || len(token) > maxOwnerToken {
+		return errors.New("invalid owner token")
+	}
+	admin, err := worktreeAdminDir(ctx, path)
+	if err != nil {
+		return err
+	}
+	out, err := runGit(ctx, repo, "rev-parse", "--git-common-dir")
+	if err != nil {
+		return fmt.Errorf("git rev-parse in %s: %w", repo, err)
+	}
+	common := strings.TrimSpace(out)
+	if !filepath.IsAbs(common) {
+		common = filepath.Join(repo, common)
+	}
+	if !sameResolvedPath(filepath.Dir(admin), filepath.Join(common, "worktrees")) {
+		return ErrNotCreatedHere
+	}
+	back, err := readSmallFile(filepath.Join(admin, "gitdir"), 4096)
+	if err != nil {
+		return fmt.Errorf("reading the worktree's gitdir: %w", err)
+	}
+	if !sameResolvedPath(strings.TrimSpace(back), filepath.Join(path, ".git")) {
+		return ErrNotCreatedHere
+	}
+	return writeMarkIn(admin, token)
+}
+
+// sameResolvedPath is samePath after resolving links where possible: git
+// records real paths (/private/var on macOS) where a caller may hold a link.
+func sameResolvedPath(a, b string) bool {
+	if r, err := filepath.EvalSymlinks(a); err == nil {
+		a = r
+	}
+	if r, err := filepath.EvalSymlinks(b); err == nil {
+		b = r
+	}
+	return samePath(a, b)
+}
+
+// readSmallFile reads at most limit bytes of a regular file, refusing
+// anything larger or not regular.
+func readSmallFile(file string, limit int64) (string, error) {
+	f, err := os.OpenFile(file, os.O_RDONLY|markOpenFlags, 0)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	if fi, err := f.Stat(); err != nil {
+		return "", err
+	} else if !fi.Mode().IsRegular() || fi.Size() > limit {
+		return "", errBadMark
+	}
+	b, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return "", err
+	}
+	if int64(len(b)) > limit {
+		return "", errBadMark
+	}
+	return string(b), nil
+}
+
+// writeMarkIn writes token as the owner mark of the admin directory admin.
+func writeMarkIn(admin, token string) error {
 	// Written ATOMICALLY: a fresh temp file (O_EXCL, 0600) renamed over the
 	// mark. A rename replaces whatever entry is there — a symlink included —
 	// rather than writing through it, which os.WriteFile would.

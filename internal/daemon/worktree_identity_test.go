@@ -139,29 +139,66 @@ func TestWorktreeStatusResponse_ReplacedCheckoutListsNoFiles(t *testing.T) {
 // Creating a worktree pane records its identity: the token written into the
 // worktree's admin directory is the one the pane keeps.
 func TestCreatePaneInWorktree_RecordsTheIdentity(t *testing.T) {
+	d, req, checkout := markTestCreate(t)
+	var wroteRepo, wrotePath, wroteToken string
+	stubMark(t, func(_ context.Context, repo, p, tok string) error {
+		wroteRepo, wrotePath, wroteToken = repo, p, tok
+		return nil
+	})
+
+	resp := d.worktreeAddAndCreate(req)
+	if resp.Error != "" {
+		t.Fatalf("create failed: %s", resp.Error)
+	}
+	pane := d.session.Pane(resp.PaneID)
+	pane.PluginMu.Lock()
+	tok := pane.WorktreeToken
+	pane.PluginMu.Unlock()
+	if tok == "" || tok != wroteToken || wrotePath != checkout || wroteRepo != req.Worktree.RepoRoot {
+		t.Errorf("pane token %q; mark %q written at %q for repo %q", tok, wroteToken, wrotePath, wroteRepo)
+	}
+}
+
+// A mark the create could not write (the checkout at the path is not the one
+// it made, say) leaves the pane with NO token: the close keeps it.
+//
+// Fails if a refused mark still records a token.
+func TestCreatePaneInWorktree_RefusedMarkLeavesNoToken(t *testing.T) {
+	d, req, _ := markTestCreate(t)
+	stubMark(t, func(context.Context, string, string, string) error { return gitworktree.ErrNotCreatedHere })
+
+	resp := d.worktreeAddAndCreate(req)
+	if resp.Error != "" {
+		t.Fatalf("create failed: %s", resp.Error)
+	}
+	pane := d.session.Pane(resp.PaneID)
+	pane.PluginMu.Lock()
+	tok := pane.WorktreeToken
+	pane.PluginMu.Unlock()
+	if tok != "" {
+		t.Errorf("pane token = %q after a refused mark, want none", tok)
+	}
+}
+
+// markTestCreate is a worktree create whose git add is stubbed to make the
+// checkout folder, so the create runs end to end without git.
+func markTestCreate(t *testing.T) (*Daemon, ipc.CreatePanePayload, string) {
+	t.Helper()
 	t.Setenv("QUIL_HOME", t.TempDir())
 	d := newTestDaemon(t)
 	tab := d.session.CreateTab("t")
 	req := worktreeCreate(tab.ID, t.TempDir(), "feat/id")
 	checkout := gitworktree.DerivePath(req.Worktree.RepoRoot, req.Worktree.Branch)
-	if err := os.MkdirAll(checkout, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	var wrotePath, wroteToken string
-	prev := writeOwnerMarkFn
-	writeOwnerMarkFn = func(_ context.Context, p, tok string) error { wrotePath, wroteToken = p, tok; return nil }
-	t.Cleanup(func() { writeOwnerMarkFn = prev })
+	stubAdd(t, func(context.Context, string, string, string) error { return os.MkdirAll(checkout, 0o700) })
+	return d, req, checkout
+}
 
-	pane, _, err := d.createPaneInWorktree(req, checkout)
-	if err != nil {
-		t.Fatalf("createPaneInWorktree: %v", err)
-	}
-	pane.PluginMu.Lock()
-	tok, path := pane.WorktreeToken, pane.WorktreePath
-	pane.PluginMu.Unlock()
-	if tok == "" || tok != wroteToken || wrotePath != path {
-		t.Errorf("pane token %q path %q; mark written %q at %q", tok, path, wroteToken, wrotePath)
-	}
+// stubMark swaps the identity-mark seam for the test's duration.
+func stubMark(t *testing.T, fn func(ctx context.Context, repo, path, token string) error) {
+	t.Helper()
+	prev := markNewWorktreeFn
+	markNewWorktreeFn = fn
+	t.Cleanup(func() { markNewWorktreeFn = prev })
 }
 
 // A subagent reported a LINK whose target folder was then renamed: the link
@@ -268,33 +305,46 @@ func TestResolvedWithin_CaseAliasKeepsTheWorktree(t *testing.T) {
 	}
 }
 
-// The identity is written BEFORE the pane starts: a folder replaced after
-// the child is running must not be the one Quil marks as its own.
+// The identity is written STRAIGHT after git returns: before the pane starts
+// (a folder replaced under a running child must not be marked as Quil's) and
+// before the post-add checks, so the window between the add and the mark is
+// as small as it can be.
 //
-// Fails if the mark is written after the pane is published.
-func TestCreatePaneInWorktree_MarksBeforeThePaneStarts(t *testing.T) {
-	t.Setenv("QUIL_HOME", t.TempDir())
-	d := newTestDaemon(t)
-	tab := d.session.CreateTab("t")
-	req := worktreeCreate(tab.ID, t.TempDir(), "feat/order")
-	checkout := gitworktree.DerivePath(req.Worktree.RepoRoot, req.Worktree.Branch)
-	if err := os.MkdirAll(checkout, 0o700); err != nil {
-		t.Fatal(err)
-	}
+// Fails if the mark is written after the pane is published, or after the
+// post-add re-validation.
+func TestCreatePaneInWorktree_MarksStraightAfterTheAdd(t *testing.T) {
+	d, req, _ := markTestCreate(t)
 	before := len(d.session.AllPanes())
 	panesAtWrite := -1
-	prev := writeOwnerMarkFn
-	writeOwnerMarkFn = func(context.Context, string, string) error {
+	stubMark(t, func(context.Context, string, string, string) error {
 		panesAtWrite = len(d.session.AllPanes())
 		return nil
-	}
-	t.Cleanup(func() { writeOwnerMarkFn = prev })
+	})
 
-	if _, _, err := d.createPaneInWorktree(req, checkout); err != nil {
-		t.Fatalf("createPaneInWorktree: %v", err)
+	if resp := d.worktreeAddAndCreate(req); resp.Error != "" {
+		t.Fatalf("create failed: %s", resp.Error)
 	}
 	if panesAtWrite != before {
 		t.Errorf("panes when the mark was written = %d, want %d: the pane started first", panesAtWrite, before)
+	}
+
+	// The tab closes during the checkout: the post-add check abandons the
+	// create, and the mark was already written ahead of it.
+	d2, req2, checkout2 := markTestCreate(t)
+	marked := false
+	stubMark(t, func(context.Context, string, string, string) error { marked = true; return nil })
+	stubAdd(t, func(context.Context, string, string, string) error {
+		if err := d2.session.DestroyTab(req2.TabID); err != nil {
+			return err
+		}
+		return os.MkdirAll(checkout2, 0o700)
+	})
+	stubRemove(t, nil)
+	if resp := d2.worktreeAddAndCreate(req2); resp.Error == "" {
+		t.Fatal("create succeeded in a tab closed during the checkout")
+	}
+	if !marked {
+		t.Error("the mark waited for the post-add checks")
 	}
 }
 

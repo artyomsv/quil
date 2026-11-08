@@ -143,7 +143,7 @@ type Pane struct {
 	WorktreePath string
 	// WorktreeToken is the IDENTITY of the checkout Quil made at WorktreePath:
 	// a random token also written into that worktree's own git admin
-	// directory (gitworktree.WriteOwnerMark). A checkout later created at the
+	// directory (gitworktree.MarkNewWorktree). A checkout later created at the
 	// same path has a fresh admin directory without it, so the close removes
 	// the worktree, and the status check lists its files, only while the mark
 	// still matches. PERSISTED (snapshot only, never broadcast) and

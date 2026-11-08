@@ -179,6 +179,16 @@ func (d *Daemon) worktreeAddAndCreate(p ipc.CreatePanePayload) ipc.CreatePaneRes
 		// worktree '/x/feat-y'" names the pane to go look at.
 		return fail("%v", err)
 	}
+	// The checkout's IDENTITY, beside its path: a random token written into
+	// the worktree's own git admin directory, which a checkout later made at
+	// the same path does not share. A close removes the worktree only while
+	// the token still matches (removeOwnedWorktreesWith). Written STRAIGHT
+	// after git returns, before anything else, and only into the checkout
+	// this create made (MarkNewWorktree checks the repository and git's
+	// back-pointer) — the accepted residual it documents is one rev-parse
+	// wide. A mark that could not be written leaves the pane with no token,
+	// and it is never offered a removal it cannot prove.
+	token := d.markNewWorktree(spec.RepoRoot, path)
 
 	// Re-validated AFTER the add: the window is seconds wide here, not the
 	// microseconds an ordinary create has, and a tab can be destroyed inside
@@ -214,7 +224,7 @@ func (d *Daemon) worktreeAddAndCreate(p ipc.CreatePanePayload) ipc.CreatePaneRes
 		}
 	}
 
-	pane, swapped, err := d.createPaneInWorktree(p, path)
+	pane, swapped, err := d.createPaneInWorktree(p, path, token)
 	if err != nil {
 		// swapped is forwarded on the ERROR path too, and that is the whole
 		// point of carrying it: the swap happens before the new pane's PTY is
@@ -263,7 +273,8 @@ func (e *tabRecoveredError) Unwrap() error { return e.error }
 // The second return says whether a REPLACE removed the old pane; see
 // replacePaneAt. It is true on some ERROR paths, which is exactly why it cannot
 // be inferred from the error.
-func (d *Daemon) createPaneInWorktree(p ipc.CreatePanePayload, path string) (*Pane, bool, error) {
+// token is the identity markNewWorktree wrote ("" when none was).
+func (d *Daemon) createPaneInWorktree(p ipc.CreatePanePayload, path, token string) (*Pane, bool, error) {
 	var swapped bool
 	cwd, worktreeRoot := path, path
 	if p.Worktree != nil && p.Worktree.Subdir != "" {
@@ -283,27 +294,6 @@ func (d *Daemon) createPaneInWorktree(p ipc.CreatePanePayload, path string) (*Pa
 		}
 	}
 	p.CWD = cwd
-	// The checkout's IDENTITY, beside its path: a random token written into
-	// the worktree's own git admin directory, which a checkout later made at
-	// the same path does not share. A close removes the worktree only while
-	// the token still matches (removeOwnedWorktreesWith). Written BEFORE the
-	// pane starts: once a child runs in the folder, a replacement there could
-	// be marked as Quil's. A mark that could not be written leaves the pane
-	// with no token, and it is never offered a removal it cannot prove.
-	markPath := path
-	if p.Worktree != nil && p.Worktree.Subdir != "" {
-		markPath = worktreeRoot
-	}
-	token := uuid.NewString() // never written again: the worker may still read it
-	recorded := token         // what the pane keeps; cleared when the mark failed
-	markCtx, cancel := context.WithTimeout(context.Background(), worktreeStatusTimeout)
-	write := writeOwnerMarkFn // read here: the worker can outlive this call
-	_, markErr := boundedFSCall(markCtx, func() (struct{}, error) { return struct{}{}, write(markCtx, markPath, token) })
-	cancel()
-	if markErr != nil {
-		log.Printf("worktree add: %s: could not record its identity, it will not be removed on close: %v", markPath, markErr)
-		recorded = ""
-	}
 	paneType := p.Type
 	if paneType == "" {
 		paneType = "terminal"
@@ -342,10 +332,25 @@ func (d *Daemon) createPaneInWorktree(p ipc.CreatePanePayload, path string) (*Pa
 		// Later template panes and close-time removal both use this root.
 		pane.WorktreePath = worktreeRoot
 	}
-	pane.WorktreeToken = recorded
+	pane.WorktreeToken = token
 	pane.PluginMu.Unlock()
 	return pane, swapped, nil
 }
 
-// writeOwnerMarkFn is the identity-mark seam, so tests need no real git.
-var writeOwnerMarkFn = gitworktree.WriteOwnerMark
+// markNewWorktree writes a fresh identity mark into the checkout a create in
+// repo just made at path, and returns the token — or "" when it could not be
+// written (logged), so the pane is never offered a removal it cannot prove.
+func (d *Daemon) markNewWorktree(repo, path string) string {
+	token := uuid.NewString() // never written again: the worker may still read it
+	ctx, cancel := context.WithTimeout(context.Background(), worktreeStatusTimeout)
+	defer cancel()
+	mark := markNewWorktreeFn // read here: the worker can outlive this call
+	if _, err := boundedFSCall(ctx, func() (struct{}, error) { return struct{}{}, mark(ctx, repo, path, token) }); err != nil {
+		log.Printf("worktree add: %s: could not record its identity, it will not be removed on close: %v", path, err)
+		return ""
+	}
+	return token
+}
+
+// markNewWorktreeFn is the identity-mark seam, so tests need no real git.
+var markNewWorktreeFn = gitworktree.MarkNewWorktree

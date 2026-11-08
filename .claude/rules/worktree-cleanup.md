@@ -369,8 +369,8 @@ after the same occupancy check the view uses (`paneInWorktree(path, true)`),
 which reads pane folders and agent probe directories, never the baseline.
 
 **The close removes only the CHECKOUT Quil made, not whatever sits at its
-path.** At creation `createPaneInWorktree` writes a random token into the
-worktree's own git admin directory (`gitworktree.WriteOwnerMark`,
+path.** At creation `worktreeAddAndCreate` writes a random token into the
+worktree's own git admin directory (`gitworktree.MarkNewWorktree`,
 `<common>/worktrees/<name>/quil-owner`) and keeps it as `Pane.WorktreeToken`
 (persisted to the DISK snapshot only, never broadcast). A checkout later made
 at the same path gets a fresh admin directory without it. The status check
@@ -395,9 +395,22 @@ reader), `os.SameFile` between the `Lstat` and the opened handle, and a capped
 read. The WRITE is a temp file plus rename, mode 0600, so a crash never leaves a
 half token that reads as "not ours" forever.
 
-The mark is written BEFORE the pane starts (`createPaneInWorktree`, ahead of
-`createPaneAt`/`replacePaneAt`): once a child runs in the folder, a replacement
-made there before a post-spawn write would be marked as Quil's.
+The mark is written STRAIGHT after `git worktree add` returns
+(`worktreeAddAndCreate` → `markNewWorktree`), before the post-add checks and
+before the pane starts, and only into the checkout this create made:
+`MarkNewWorktree` refuses (`ErrNotCreatedHere`, pane left with no token) when
+the admin directory is outside the repository's `<common>/worktrees`, or when
+its `gitdir` back-pointer names another path (a copied or moved checkout).
+
+**Accepted residual (owner's ruling, 2026-11-08):** git cannot make the add and
+the mark one step. A checkout of the SAME repository made at the SAME path in
+that window — one `rev-parse` wide — is indistinguishable from the one the add
+made, and is marked as Quil's. Only a process of the same user can act there,
+the trust boundary this feature already accepts.
+`TestMarkNewWorktree_RealGit_SameRepositoryReplacementIsTheAcceptedResidual`
+pins it as a decision. So the guarantee is: the close removes only the checkout
+Quil marked, and Quil marks only a checkout of the right repository registered
+at that path, within one git call of creating it.
 
 The delete checks compare resolved paths through `foldedWithin`, which folds
 case on darwin and windows (`foldPathCase`) as a cheap first test. Strings

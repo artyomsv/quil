@@ -4,28 +4,30 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // ErrBranchMoved means the branch no longer points at the commit the caller
 // confirmed: nothing was deleted.
 var ErrBranchMoved = errors.New("the branch moved after it was confirmed")
 
-// DeleteLocalBranch deletes a local branch ONLY while it still points at tip,
-// the commit the user confirmed against.
+// DeleteLocalBranch deletes a local branch, but only while it still points at
+// tip, the commit the user confirmed against.
 //
 // The caller decided this with the unmerged-commit count on screen, and that
-// count describes the branch at tip. `git branch -D` deletes by NAME, so a
-// commit made after the count — an agent finishing its turn while the close
-// retried — went with it unseen. `git update-ref -d <ref> <old>` is git's own
-// compare-and-delete: it removes the ref only if it still holds old, as one
-// locked step, so there is no window between the check and the delete.
+// count describes the branch at tip. The tip is read again here, right
+// before the delete, so a commit made after the count — an agent finishing
+// its turn while the close retried the worktree removal — keeps the branch
+// (ErrBranchMoved).
 //
-// update-ref does not refuse a branch some worktree has checked out, which
-// `branch -D` does; that check runs first, from git's own listing. A checkout
-// switched onto the branch between the listing and the delete is the
-// remaining gap, the same one `branch -D` has between its check and its
-// delete. The ref is fully qualified, so a dash-led branch name never reaches
-// git as an option.
+// The delete itself stays `git branch -D -- <b>`: git's own refusals (a branch
+// checked out in any worktree, one being rebased or bisected) and its cleanup
+// of the branch's configuration come with it. Between the tip read and the
+// delete no worktree holds the branch (branch -D refuses one that does), so
+// an ordinary commit cannot land there; only an explicit ref update can, and
+// that is the remaining gap. -D, not -d: the user chose to drop the commits
+// the dialog counted. `--` ends option parsing: a branch name may legally
+// begin with a dash.
 func DeleteLocalBranch(ctx context.Context, repo, branch, tip string) error {
 	if branch == "" {
 		return fmt.Errorf("no branch to delete")
@@ -33,24 +35,16 @@ func DeleteLocalBranch(ctx context.Context, repo, branch, tip string) error {
 	if tip == "" {
 		return fmt.Errorf("no confirmed commit for branch %s", branch)
 	}
-	list, err := List(ctx, repo)
-	if err != nil {
-		return fmt.Errorf("git worktree list: %w", err)
-	}
-	if len(list) == 0 {
-		return fmt.Errorf("git worktree list in %s: no answer", repo)
-	}
-	for _, w := range list {
-		if !w.Detached && w.Branch == branch {
-			return fmt.Errorf("branch %s is checked out in %s", branch, w.Path)
-		}
-	}
 	ref := "refs/heads/" + branch
-	if _, err := runGit(ctx, repo, "rev-parse", "--verify", "--quiet", ref+"^{commit}"); err != nil {
+	cur, err := runGit(ctx, repo, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
+	if err != nil {
 		return fmt.Errorf("git rev-parse %s: %w", ref, err)
 	}
-	if _, err := runGit(ctx, repo, "update-ref", "-d", ref, tip); err != nil {
-		return fmt.Errorf("%w: git update-ref -d %s: %v", ErrBranchMoved, ref, err)
+	if strings.TrimSpace(cur) != tip {
+		return ErrBranchMoved
+	}
+	if _, err := runGit(ctx, repo, "branch", "-D", "--", branch); err != nil {
+		return fmt.Errorf("git branch -D %s: %w", branch, err)
 	}
 	return nil
 }

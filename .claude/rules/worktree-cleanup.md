@@ -203,12 +203,17 @@ view's branch entry checks the same tip. Never the default branch, and never
 with the default branch unknown (unmerged commits could not be counted). **The
 delete itself is bound to the tip too**, because the facts are read before
 `git worktree remove` and its retries, and a commit can land in that wait:
-`gitworktree.DeleteLocalBranch` refuses a branch any worktree has checked out
-(from git's listing, as `branch -D` would), then runs `git update-ref -d
-refs/heads/<b> <tip>` — git's own locked compare-and-delete, which removes the
-ref only while it still holds the confirmed tip (`ErrBranchMoved` otherwise,
-card "the branch moved after it was confirmed"). It used to be `branch -D`,
-which deletes by NAME. Every refusal and failure is a
+`gitworktree.DeleteLocalBranch` reads the tip again right before the delete
+and refuses a moved branch (`ErrBranchMoved`, card "the branch moved after it
+was confirmed" — that wording ONLY for a tip mismatch; any other failure is
+"git refused the delete (see quild.log)"). The delete stays `git branch -D --
+<b>`, NOT `update-ref -d`: that was tried and dropped, because it skips git's
+own refusals (a branch checked out, rebased or bisected — a bisect lists its
+worktree as detached, so a listing check misses it) and leaves the branch's
+config (`branch.<b>.remote/merge`) behind for a recreated name. Between the
+tip read and `branch -D` no worktree holds the branch (git refuses one that
+does), so an ordinary commit cannot land there; an explicit ref update is the
+remaining gap. Every refusal and failure is a
 `worktree_branch_kept` sidebar card carrying the CLOSED pane's id and name
 (`paneRef`, captured before the destroy); success is `worktree_branch_deleted`.
 All three close paths go through `removeOwnedWorktreesFn` — the tab close used

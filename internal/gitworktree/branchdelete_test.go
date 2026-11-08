@@ -10,15 +10,15 @@ import (
 	"time"
 )
 
-// The delete is git's compare-and-delete on the FULLY-QUALIFIED ref, so a
-// dash-led branch name never reaches git as an option, and the confirmed tip
-// is the old value git compares against.
-func TestDeleteLocalBranch_ComparesAndDeletesTheQualifiedRef(t *testing.T) {
+// The tip is read from the FULLY-QUALIFIED ref, and the delete is git's own
+// `branch -D` with `--`, so a dash-led branch name never reaches git as an
+// option and git keeps its own refusals and config cleanup.
+func TestDeleteLocalBranch_ChecksTheTipThenDeletesWithBranchD(t *testing.T) {
 	calls := stubGitScript(t, func(args []string) (string, error) {
 		switch args[0] {
-		case "worktree":
-			return "worktree /repo\nHEAD abc\nbranch refs/heads/master\n\n", nil
-		case "rev-parse", "update-ref":
+		case "rev-parse":
+			return "tip-1\n", nil
+		case "branch":
 			return "", nil
 		}
 		return "", errors.New("unexpected git call: " + strings.Join(args, " "))
@@ -26,9 +26,41 @@ func TestDeleteLocalBranch_ComparesAndDeletesTheQualifiedRef(t *testing.T) {
 	if err := DeleteLocalBranch(context.Background(), "/repo", "-evil", "tip-1"); err != nil {
 		t.Fatalf("DeleteLocalBranch: %v", err)
 	}
-	last := (*calls)[len(*calls)-1]
-	if got := strings.Join(last[1:], " "); got != "update-ref -d refs/heads/-evil tip-1" {
-		t.Errorf("argv = %q, want \"update-ref -d refs/heads/-evil tip-1\"", got)
+	if len(*calls) != 2 {
+		t.Fatalf("git calls = %v, want rev-parse then branch -D", *calls)
+	}
+	if got := strings.Join((*calls)[0][1:], " "); got != "rev-parse --verify --quiet refs/heads/-evil^{commit}" {
+		t.Errorf("tip read = %q", got)
+	}
+	if got := strings.Join((*calls)[1][1:], " "); got != "branch -D -- -evil" {
+		t.Errorf("argv = %q, want \"branch -D -- -evil\"", got)
+	}
+}
+
+// A tip that differs is ErrBranchMoved and nothing is deleted; a git
+// failure of the delete itself is NOT reported as a moved branch.
+func TestDeleteLocalBranch_MovedOnlyForATipMismatch(t *testing.T) {
+	calls := stubGitScript(t, func(args []string) (string, error) {
+		if args[0] == "rev-parse" {
+			return "other\n", nil
+		}
+		return "", nil
+	})
+	if err := DeleteLocalBranch(context.Background(), "/repo", "feat/a", "tip-1"); !errors.Is(err, ErrBranchMoved) {
+		t.Fatalf("err = %v, want ErrBranchMoved", err)
+	}
+	if len(*calls) != 1 {
+		t.Errorf("git ran %v after a tip mismatch", *calls)
+	}
+
+	stubGitScript(t, func(args []string) (string, error) {
+		if args[0] == "rev-parse" {
+			return "tip-1\n", nil
+		}
+		return "", errors.New("cannot lock ref")
+	})
+	if err := DeleteLocalBranch(context.Background(), "/repo", "feat/a", "tip-1"); err == nil || errors.Is(err, ErrBranchMoved) {
+		t.Errorf("err = %v, want a plain failure, not ErrBranchMoved", err)
 	}
 }
 

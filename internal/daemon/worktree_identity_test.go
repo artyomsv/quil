@@ -267,3 +267,79 @@ func TestResolvedWithin_CaseAliasKeepsTheWorktree(t *testing.T) {
 		t.Error("a sibling folder was seen as inside the worktree")
 	}
 }
+
+// The identity is written BEFORE the pane starts: a folder replaced after
+// the child is running must not be the one Quil marks as its own.
+//
+// Fails if the mark is written after the pane is published.
+func TestCreatePaneInWorktree_MarksBeforeThePaneStarts(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	d := newTestDaemon(t)
+	tab := d.session.CreateTab("t")
+	req := worktreeCreate(tab.ID, t.TempDir(), "feat/order")
+	checkout := gitworktree.DerivePath(req.Worktree.RepoRoot, req.Worktree.Branch)
+	if err := os.MkdirAll(checkout, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	before := len(d.session.AllPanes())
+	panesAtWrite := -1
+	prev := writeOwnerMarkFn
+	writeOwnerMarkFn = func(context.Context, string, string) error {
+		panesAtWrite = len(d.session.AllPanes())
+		return nil
+	}
+	t.Cleanup(func() { writeOwnerMarkFn = prev })
+
+	if _, _, err := d.createPaneInWorktree(req, checkout); err != nil {
+		t.Fatalf("createPaneInWorktree: %v", err)
+	}
+	if panesAtWrite != before {
+		t.Errorf("panes when the mark was written = %d, want %d: the pane started first", panesAtWrite, before)
+	}
+}
+
+// A pane folder that names the worktree through a path the strings cannot
+// match (here a link the resolver leaves alone; on macOS a Unicode or case
+// alias) is still the same folder on disk: the delete check keeps it.
+//
+// Fails if the delete check compares path strings only.
+func TestResolvedWithin_SameFolderOnDiskKeepsTheWorktree(t *testing.T) {
+	base := t.TempDir()
+	wt := filepath.Join(base, "wt")
+	if err := os.MkdirAll(filepath.Join(wt, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(base, "alias")
+	if err := os.Symlink(wt, alias); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	prevEval, prevFold := evalSymlinksFn, foldPathCase
+	evalSymlinksFn = func(p string) (string, error) { return p, nil } // the alias survives resolution
+	foldPathCase = false
+	t.Cleanup(func() { evalSymlinksFn, foldPathCase = prevEval, prevFold })
+
+	within := resolvedWithin(wt)
+	if !within(wt, filepath.Join(alias, "src")) {
+		t.Error("a folder that is the worktree on disk was not seen as inside it")
+	}
+	if within(wt, base) {
+		t.Error("the worktree's parent was seen as inside it")
+	}
+}
+
+// The macOS case: one folder, two Unicode spellings (NFC and NFD). Skipped
+// where the volume treats the two spellings as different names.
+func TestResolvedWithin_UnicodeAliasKeepsTheWorktree(t *testing.T) {
+	base := t.TempDir()
+	nfc := filepath.Join(base, "caf"+string(rune(0x00e9)))
+	nfd := filepath.Join(base, "cafe"+string(rune(0x0301)))
+	if err := os.MkdirAll(filepath.Join(nfc, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(nfd); err != nil {
+		t.Skipf("this volume is normalization-sensitive (%v): no alias to test", err)
+	}
+	if !resolvedWithin(nfc)(nfc, filepath.Join(nfd, "src")) {
+		t.Error("an NFD spelling of the worktree was not seen as inside it")
+	}
+}

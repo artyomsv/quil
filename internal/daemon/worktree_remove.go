@@ -589,8 +589,62 @@ func resolvedWithin(parent string) func(parent, child string) bool {
 		if !ok {
 			return true
 		}
-		return physParent != "" && pc != "" && foldedWithin(physParent, pc)
+		if physParent != "" && pc != "" && foldedWithin(physParent, pc) {
+			return true
+		}
+		// The strings disagree, but the disk may not: a case or Unicode
+		// (NFC/NFD) alias on a macOS volume is one folder under two spellings,
+		// and only the folder's identity says so.
+		same, ok := sameFolderAncestorBy(physParent, pc, deadline)
+		return !ok || same
 	}
+}
+
+// statFn is the identity seam beside evalSymlinksFn.
+var statFn = os.Stat
+
+// sameFolderAncestorBy reports whether child, or a folder above it, IS the
+// folder parent names on disk (os.SameFile), before deadline. ok is false when
+// that cannot be answered (timeout, no permit, a stat error other than "does
+// not exist"). An empty or missing parent answers (false, true): a folder that
+// is not there holds nobody.
+func sameFolderAncestorBy(parent, child string, deadline time.Time) (same, ok bool) {
+	if parent == "" || child == "" {
+		return false, true
+	}
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+	stat := statFn // read here: the worker can outlive this call
+	type answer struct{ same, ok bool }
+	r, err := boundedFSCall(ctx, func() (answer, error) {
+		pi, err := stat(parent)
+		if errors.Is(err, fs.ErrNotExist) {
+			return answer{false, true}, nil
+		}
+		if err != nil {
+			return answer{false, false}, nil
+		}
+		for d := child; ; {
+			ci, err := stat(d)
+			switch {
+			case err == nil:
+				if os.SameFile(pi, ci) {
+					return answer{true, true}, nil
+				}
+			case !errors.Is(err, fs.ErrNotExist):
+				return answer{false, false}, nil
+			}
+			up := filepath.Dir(d)
+			if up == d {
+				return answer{false, true}, nil
+			}
+			d = up
+		}
+	})
+	if err != nil {
+		return false, false
+	}
+	return r.same, r.ok
 }
 
 // physicalPathBy resolves path before deadline. ok is false when there was no

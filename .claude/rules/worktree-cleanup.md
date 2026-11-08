@@ -395,9 +395,17 @@ reader), `os.SameFile` between the `Lstat` and the opened handle, and a capped
 read. The WRITE is a temp file plus rename, mode 0600, so a crash never leaves a
 half token that reads as "not ours" forever.
 
+The mark is written BEFORE the pane starts (`createPaneInWorktree`, ahead of
+`createPaneAt`/`replacePaneAt`): once a child runs in the folder, a replacement
+made there before a post-spawn write would be marked as Quil's.
+
 The delete checks compare resolved paths through `foldedWithin`, which folds
-case on darwin and windows (`foldPathCase`): their default volumes are
-case-insensitive, so `/Users/me/wt/src` is inside `/Users/me/WT` there.
+case on darwin and windows (`foldPathCase`) as a cheap first test. Strings
+cannot catch every alias — a macOS volume also treats NFC and NFD spellings of
+one name as one folder — so when they disagree, `sameFolderAncestorBy` asks the
+disk: is the child, or a folder above it, the SAME folder (`os.SameFile`) as the
+worktree? Bounded by the same deadline and permit; an unanswered stat counts as
+a match (kept), a worktree folder that does not exist holds nobody.
 
 **Every worktree a close asked to remove and KEPT gets a sidebar card**
 (`notifyWorktreeKept`, type `worktree_kept`, class System) with the reason —

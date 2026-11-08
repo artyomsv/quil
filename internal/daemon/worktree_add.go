@@ -294,14 +294,15 @@ func (d *Daemon) createPaneInWorktree(p ipc.CreatePanePayload, path string) (*Pa
 	if p.Worktree != nil && p.Worktree.Subdir != "" {
 		markPath = worktreeRoot
 	}
-	token := uuid.NewString()
+	token := uuid.NewString() // never written again: the worker may still read it
+	recorded := token         // what the pane keeps; cleared when the mark failed
 	markCtx, cancel := context.WithTimeout(context.Background(), worktreeStatusTimeout)
 	write := writeOwnerMarkFn // read here: the worker can outlive this call
 	_, markErr := boundedFSCall(markCtx, func() (struct{}, error) { return struct{}{}, write(markCtx, markPath, token) })
 	cancel()
 	if markErr != nil {
 		log.Printf("worktree add: %s: could not record its identity, it will not be removed on close: %v", markPath, markErr)
-		token = ""
+		recorded = ""
 	}
 	paneType := p.Type
 	if paneType == "" {
@@ -341,7 +342,7 @@ func (d *Daemon) createPaneInWorktree(p ipc.CreatePanePayload, path string) (*Pa
 		// Later template panes and close-time removal both use this root.
 		pane.WorktreePath = worktreeRoot
 	}
-	pane.WorktreeToken = token
+	pane.WorktreeToken = recorded
 	pane.PluginMu.Unlock()
 	return pane, swapped, nil
 }

@@ -351,7 +351,9 @@ subagent probe directory is matched lexically AND with symlinks resolved, so a
 resident working through a link to the worktree keeps it. A path that
 no longer exists is resolved through its nearest EXISTING ancestor with the
 missing remainder re-appended (`resolveNearestAncestor`): a process keeps its
-cwd after a rename, so a stale path still names the worktree it was under. All
+cwd after a rename, so a stale path still names the worktree it was under — but
+a DANGLING LINK on the way (the entry is there, its target is not) is
+unknown, never a missing component to re-append. All
 resolution of one check shares ONE deadline (`resolveTimeout`, 3 s) under the
 process-wide filesystem-call limit, and an UNANSWERED resolution (timeout, no
 permit, unreadable) counts as in use — a pane on a dead share keeps the
@@ -365,3 +367,22 @@ may miss leftovers); it says nothing about who sits in a folder. A close
 deletes only a worktree QUIL created for the closing pane (`WorktreeOwned`),
 after the same occupancy check the view uses (`paneInWorktree(path, true)`),
 which reads pane folders and agent probe directories, never the baseline.
+
+**The close removes only the CHECKOUT Quil made, not whatever sits at its
+path.** At creation `createPaneInWorktree` writes a random token into the
+worktree's own git admin directory (`gitworktree.WriteOwnerMark`,
+`<common>/worktrees/<name>/quil-owner`) and keeps it as `Pane.WorktreeToken`
+(persisted to the DISK snapshot only, never broadcast). A checkout later made
+at the same path gets a fresh admin directory without it. The status check
+lists files only for a path whose mark still matches
+(`worktreeStatusResponseFor`), and the close checks again right before
+`git worktree remove` (`removeOneWorktreeFull` → `ownerMarkRefusal`). No token
+(a pane from before identities, or a mark that could not be written), no
+answer, or another mark: kept. The cleanup view's agent entries carry no
+token — they are verified against git's listing instead.
+
+**Every worktree a close asked to remove and KEPT gets a sidebar card**
+(`notifyWorktreeKept`, type `worktree_kept`, class System) with the reason —
+no identity, a pane still in it, the repository unreadable, the identity no
+longer matching — whether or not a branch delete was asked; `branchOpts`
+captures the owners and tokens on every close for that reason.

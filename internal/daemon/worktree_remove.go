@@ -81,6 +81,9 @@ type branchDeleteOpts struct {
 	// Confirmed is keyed by confirmKey(worktree path); "" for a branch with
 	// no worktree.
 	Confirmed map[string]ipc.BranchConfirmation
+	// Tokens maps a worktree path to the identity token recorded when Quil
+	// created it; a path with no token is never removed (removeOwnedWorktreesWith).
+	Tokens map[string]string
 	// Owners maps a worktree path (as ownedWorktreePaths returns it) to the
 	// pane that owned it.
 	Owners map[string]paneRef
@@ -132,13 +135,30 @@ func worktreeOwners(panes []*Pane) map[string]paneRef {
 	return out
 }
 
-// branchOpts builds the options a destroy payload asked for.
+// branchOpts builds the options a close asked for: the owners (for the cards)
+// and the identity tokens are captured for every owned worktree, whether or
+// not a branch delete was asked, because the removal itself needs both.
 func branchOpts(local bool, confirmed []ipc.BranchConfirmation, panes []*Pane) branchDeleteOpts {
-	opt := branchDeleteOpts{Local: local, Confirmed: confirmations(confirmed)}
-	if opt.wanted() {
-		opt.Owners = worktreeOwners(panes)
+	return branchDeleteOpts{Local: local, Confirmed: confirmations(confirmed),
+		Owners: worktreeOwners(panes), Tokens: worktreeTokens(panes)}
+}
+
+// worktreeTokens maps each owned worktree path to its identity token ("" when
+// none was recorded), read under PluginMu like ownedWorktreePaths.
+func worktreeTokens(panes []*Pane) map[string]string {
+	out := map[string]string{}
+	for _, p := range panes {
+		if p == nil {
+			continue
+		}
+		p.PluginMu.Lock()
+		owned, path, tok := p.WorktreeOwned, p.WorktreePath, p.WorktreeToken
+		p.PluginMu.Unlock()
+		if owned && path != "" && out[path] == "" {
+			out[path] = tok
+		}
 	}
-	return opt
+	return out
 }
 
 // ownedWorktreePaths reports the worktree directories the given panes own, with
@@ -184,25 +204,29 @@ func ownedWorktreePaths(panes []*Pane) []string {
 	return out
 }
 
-// removeOwnedWorktrees deletes each worktree directory, leaving its branch.
+// removeOwnedWorktreesWith deletes each worktree directory a close asked to
+// remove, plus the local branch deletes opt asks for.
 //
 // ALWAYS off the requesting connection's dispatch goroutine (the callers `go`
-// it): a removal shells out to git against a directory that may be on a network
-// mount, and the dispatch goroutine is where that client's input arrives. Same
-// rule the add path follows, for the same reason.
-//
-// Best-effort by contract. Every outcome is logged and nothing is reported back
-// to the client: the pane is already gone by the time this runs, so there is no
-// dialog left to answer, and a failure leaves the worktree exactly where the
-// user can still see it and deal with it.
-func (d *Daemon) removeOwnedWorktrees(paths []string) {
-	d.removeOwnedWorktreesWith(paths, branchDeleteOpts{})
-}
-
-// removeOwnedWorktreesWith is removeOwnedWorktrees plus the branch deletes a
-// close may ask for.
+// it): a removal shells out to git against a directory that may be on a
+// network mount, and the dispatch goroutine is where that client's input
+// arrives. The pane is already gone by the time this runs, so every worktree
+// that is KEPT gets a sidebar card saying why (notifyWorktreeKept), and every
+// outcome is logged.
 func (d *Daemon) removeOwnedWorktreesWith(paths []string, opt branchDeleteOpts) {
 	for _, path := range paths {
+		owner := opt.Owners[path]
+		// IDENTITY first: the close removes only the checkout Quil made. A
+		// path with no recorded token (a pane from before identities, or a
+		// mark that could not be written) is never removed; the token is
+		// checked against the worktree's own git admin directory again just
+		// before the removal (removeOneWorktreeFull).
+		token := opt.Tokens[path]
+		if token == "" {
+			log.Printf("worktree remove: %s kept, no identity was recorded for it", path)
+			d.notifyWorktreeKept(owner, path, "Quil has no record of making this worktree (it predates checkout identities)")
+			continue
+		}
 		// The pane that owned it is gone, but a worktree can host panes in
 		// OTHER tabs — a split made in the same directory, a second agent on
 		// the same branch. Removing it would delete the working directory out
@@ -210,12 +234,16 @@ func (d *Daemon) removeOwnedWorktreesWith(paths []string, opt branchDeleteOpts) 
 		// data-loss bug wearing this feature's clothes.
 		if used := d.paneInWorktree(path, true); used != "" {
 			log.Printf("worktree remove: %s kept, pane %s is still in it", path, used)
-			if opt.wanted() {
-				d.notifyBranchKept(opt.Owners[path], "", "the worktree is still in use by pane "+used)
-			}
+			d.notifyWorktreeKept(owner, path, "pane "+used+" is still in it")
 			continue
 		}
-		d.removeWorktreeWithBranch(path, opt)
+		if res := d.removeWorktreeWithBranch(path, opt); !res.removed {
+			reason := res.reason
+			if reason == "" {
+				reason = "see quild.log"
+			}
+			d.notifyWorktreeKept(owner, path, reason)
+		}
 	}
 }
 
@@ -228,7 +256,7 @@ func (d *Daemon) removeOwnedWorktreesWith(paths []string, opt branchDeleteOpts) 
 // dialog are gone by now, and a branch that silently survived a delete the
 // user asked for is the outcome this must never hide.
 func (d *Daemon) removeWorktreeWithBranch(path string, opt branchDeleteOpts) removeResult {
-	res := d.removeOneWorktreeFull(path, opt.wanted())
+	res := d.removeOneWorktreeFull(path, opt.Tokens[path], opt.wanted())
 	if !opt.wanted() {
 		return res
 	}
@@ -236,7 +264,8 @@ func (d *Daemon) removeWorktreeWithBranch(path string, opt branchDeleteOpts) rem
 	f := res.facts
 	switch {
 	case !res.removed:
-		d.notifyBranchKept(owner, f.Branch, "the worktree was not removed")
+		// The worktree-kept card (close) or the act's answer (cleanup view)
+		// already says why; a second branch card would repeat it.
 		return res
 	case res.factsErr != nil:
 		d.notifyBranchKept(owner, "", "could not read the branch: "+res.factsErr.Error())
@@ -299,18 +328,13 @@ type removeResult struct {
 	reason string
 }
 
-// removeOneWorktree resolves the repository and runs the removal, retrying
-// while the directory is still held.
-func (d *Daemon) removeOneWorktree(path string) {
-	d.removeOneWorktreeFull(path, false)
-}
-
 // removeOneWorktreeFull is removeOneWorktree, also reading the branch facts
 // before the removal when wantFacts, and reporting whether git no longer
 // holds the worktree afterwards.
-func (d *Daemon) removeOneWorktreeFull(path string, wantFacts bool) (res removeResult) {
+func (d *Daemon) removeOneWorktreeFull(path, token string, wantFacts bool) (res removeResult) {
 	if !claimBlockingFSCall() {
 		log.Printf("worktree remove: %s kept, too many filesystem calls in flight", path)
+		res.reason = "too many filesystem calls in flight"
 		return res
 	}
 	defer releaseBlockingFSCall()
@@ -331,18 +355,34 @@ func (d *Daemon) removeOneWorktreeFull(path string, wantFacts bool) (res removeR
 	list, err := worktreeListFn(ctx, path)
 	if err != nil {
 		log.Printf("worktree remove: %s kept, its repository could not be read: %v", path, err)
+		res.reason = "its repository could not be read: " + err.Error()
 		return
 	}
 	if len(list) == 0 {
 		log.Printf("worktree remove: %s kept, it is not inside a git repository", path)
+		res.reason = "it is not inside a git repository"
 		return
 	}
 	repo := list[0].Path
 	if repo == "" {
 		log.Printf("worktree remove: %s kept, its repository has no main checkout", path)
+		res.reason = "its repository has no main checkout"
 		return
 	}
 	res.repo = repo
+	// The checkout's identity, again, right before the removal: a token the
+	// close captured from the pane, matched against the mark in the
+	// worktree's own git admin directory. A checkout replaced at this path
+	// since Quil made it has a fresh admin directory and no mark. Only the
+	// close path passes a token; the cleanup view verifies its agent entry
+	// against git's listing instead (verifyAgentWorktree).
+	if token != "" {
+		if reason := ownerMarkRefusal(ctx, path, token); reason != "" {
+			log.Printf("worktree remove: %s kept, %s", path, reason)
+			res.reason = reason
+			return
+		}
+	}
 	if wantFacts {
 		// Before the removal: the listing entry naming the branch goes with it.
 		res.facts, res.factsErr = branchFactsFn(ctx, repo, path, defaultBranchRefFn(ctx, repo))
@@ -622,6 +662,13 @@ func resolveNearestAncestor(eval func(string) (string, error), path string) (str
 		case !errors.Is(err, fs.ErrNotExist):
 			return "", false
 		}
+		// ENOENT from resolution can also be a DANGLING LINK: the entry is
+		// there, its target is not. Its target is where the process went, and
+		// the link alone no longer says where that is — unknown, never an
+		// ordinary missing component to re-append.
+		if _, lerr := lstatFn(d); lerr == nil || !errors.Is(lerr, fs.ErrNotExist) {
+			return "", false
+		}
 		parent := filepath.Dir(d)
 		if parent == d {
 			return "", false
@@ -630,3 +677,27 @@ func resolveNearestAncestor(eval func(string) (string, error), path string) (str
 		d = parent
 	}
 }
+
+// ownerMarkMatchesFn is the identity-check seam, so tests need no real git.
+var ownerMarkMatchesFn = gitworktree.OwnerMarkMatches
+
+// ownerMarkRefusal is "" when the worktree at path is still the checkout Quil
+// made and marked with token, else why not. No token, no answer, a missing or
+// different mark all refuse: a replacement at the same path is never shown or
+// removed as Quil's.
+func ownerMarkRefusal(ctx context.Context, path, token string) string {
+	if token == "" {
+		return "Quil has no record of making this worktree (it predates checkout identities)"
+	}
+	ok, err := ownerMarkMatchesFn(ctx, path, token)
+	switch {
+	case err != nil:
+		return "could not confirm this is the worktree Quil made: " + err.Error()
+	case !ok:
+		return "this folder is no longer the worktree Quil made for the pane"
+	}
+	return ""
+}
+
+// lstatFn is the link-inspection seam beside evalSymlinksFn.
+var lstatFn = os.Lstat

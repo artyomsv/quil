@@ -108,14 +108,16 @@ func (d *Daemon) worktreeStatusResponse(req ipc.WorktreeStatusReqPayload) ipc.Wo
 			Error: "too many worktrees in one status check",
 		}
 	}
-	owned := d.ownedWorktreeSet()
+	owned := d.ownedWorktreeTokens()
+	tokens := map[string]string{}
 	var ask ipc.WorktreeStatusReqPayload
 	for _, p := range req.Paths {
-		if owned[normalizeWorktreePath(p)] {
+		if tok, ok := owned[normalizeWorktreePath(p)]; ok {
+			tokens[p] = tok
 			ask.Paths = append(ask.Paths, p)
 		}
 	}
-	inner := worktreeStatusResponse(ask)
+	inner := worktreeStatusResponseFor(ask, tokens)
 	byPath := make(map[string]ipc.WorktreeStatus, len(inner.Statuses))
 	for _, st := range inner.Statuses {
 		byPath[st.Path] = st
@@ -137,16 +139,20 @@ func (d *Daemon) worktreeStatusResponse(req ipc.WorktreeStatusReqPayload) ipc.Wo
 	return out
 }
 
-// ownedWorktreeSet is every worktree directory this daemon created, normalised
-// for comparison.
-func (d *Daemon) ownedWorktreeSet() map[string]bool {
-	out := map[string]bool{}
+// ownedWorktreeTokens maps every worktree directory this daemon created,
+// normalised for comparison, to the identity token recorded for it ("" for a
+// pane restored from before identities were recorded — the status check then
+// refuses it, as the close does).
+func (d *Daemon) ownedWorktreeTokens() map[string]string {
+	out := map[string]string{}
 	for _, p := range d.session.AllPanes() {
 		p.PluginMu.Lock()
-		owned, path := p.WorktreeOwned, p.WorktreePath
+		owned, path, tok := p.WorktreeOwned, p.WorktreePath, p.WorktreeToken
 		p.PluginMu.Unlock()
 		if owned && path != "" {
-			out[normalizeWorktreePath(path)] = true
+			if prev, seen := out[normalizeWorktreePath(path)]; !seen || prev == "" {
+				out[normalizeWorktreePath(path)] = tok
+			}
 		}
 	}
 	return out
@@ -158,6 +164,15 @@ func (d *Daemon) ownedWorktreeSet() map[string]bool {
 // refusal — it is the client's staleness key, not a statement about what was
 // read.
 func worktreeStatusResponse(req ipc.WorktreeStatusReqPayload) ipc.WorktreeStatusRespPayload {
+	return worktreeStatusResponseFor(req, nil)
+}
+
+// worktreeStatusResponseFor is worktreeStatusResponse with the identity check:
+// when tokens is non-nil, every path must carry a token whose mark still
+// matches, or it is refused with a reason before any file is read — the
+// files shown must be the files of the checkout Quil made, not of a
+// replacement at the same path.
+func worktreeStatusResponseFor(req ipc.WorktreeStatusReqPayload, tokens map[string]string) ipc.WorktreeStatusRespPayload {
 	out := ipc.WorktreeStatusRespPayload{Paths: req.Paths}
 	if len(req.Paths) > maxWorktreeStatusPaths {
 		out.Error = "too many worktrees in one status check"
@@ -185,6 +200,13 @@ func worktreeStatusResponse(req ipc.WorktreeStatusReqPayload) ipc.WorktreeStatus
 	start := time.Now()
 	for _, path := range req.Paths {
 		st := ipc.WorktreeStatus{Path: path}
+		if tokens != nil {
+			if reason := ownerMarkRefusal(ctx, path, tokens[path]); reason != "" {
+				st.Error, st.BranchReason = reason, reason
+				out.Statuses = append(out.Statuses, st)
+				continue
+			}
+		}
 		rep, err := worktreeStatusFn(ctx, path)
 		if err != nil {
 			// Reported rather than folded into a 0. A count nobody obtained
@@ -212,6 +234,8 @@ func worktreeStatusResponse(req ipc.WorktreeStatusReqPayload) ipc.WorktreeStatus
 	for i := range out.Statuses {
 		st := &out.Statuses[i]
 		switch {
+		case st.BranchReason != "":
+			// Already refused: not the checkout Quil made.
 		case i >= maxBranchFactsPaths:
 			st.BranchReason = "not checked (too many worktrees)"
 		case factsCtx.Err() != nil:

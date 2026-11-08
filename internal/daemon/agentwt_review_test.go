@@ -679,7 +679,7 @@ func TestRemoveOwnedWorktrees_RenamedDescendantThroughALinkKeepsTheWorktree(t *t
 	stubWorktreeList(t, []gitworktree.Worktree{{Path: "/repo", Main: true}, {Path: real, Branch: "feat"}}, nil)
 	calls := stubRemoveWorktree(t, nil)
 
-	d.removeOwnedWorktreesWith([]string{real}, branchDeleteOpts{})
+	d.removeOwnedWorktreesWith([]string{real}, branchDeleteOpts{Tokens: map[string]string{real: "test-token"}})
 
 	if len(*calls) != 0 {
 		t.Errorf("removed %v while a subagent's (renamed) folder is inside it", *calls)

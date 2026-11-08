@@ -88,7 +88,9 @@ type PaneState struct {
 	WorktreeOwned     bool              `json:"worktree_owned,omitempty"`
 	QuilMCP           bool              `json:"quil_mcp,omitempty"`
 	WorktreePath      string            `json:"worktree_path,omitempty"`
-	SandboxImage      string            `json:"sandbox_image,omitempty"`
+	// WorktreeToken is written to the disk snapshot only, never broadcast.
+	WorktreeToken string `json:"worktree_token,omitempty"`
+	SandboxImage  string `json:"sandbox_image,omitempty"`
 	// SandboxAuth is present (possibly "") whenever SandboxImage is set.
 	SandboxAuth *string `json:"sandbox_auth,omitempty"`
 	// SandboxClaudeConfig is present (possibly "") whenever SandboxImage is set.

@@ -141,6 +141,16 @@ type Pane struct {
 	// existed. That pane is not offered for removal at all: the only directory
 	// it can name is the one that cannot be trusted for this.
 	WorktreePath string
+	// WorktreeToken is the IDENTITY of the checkout Quil made at WorktreePath:
+	// a random token also written into that worktree's own git admin
+	// directory (gitworktree.WriteOwnerMark). A checkout later created at the
+	// same path has a fresh admin directory without it, so the close removes
+	// the worktree, and the status check lists its files, only while the mark
+	// still matches. PERSISTED (snapshot only, never broadcast) and
+	// PluginMu-protected. Empty on a pane from before identities were
+	// recorded, or whose mark could not be written: such a worktree is never
+	// removed on close.
+	WorktreeToken string
 	// SpawnError explains why this pane has no process. Runtime-only and
 	// deliberately NOT persisted: a fresh daemon re-stats and re-derives it,
 	// while a stored one resurrects a complaint about a worktree the user has

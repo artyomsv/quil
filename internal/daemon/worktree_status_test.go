@@ -28,6 +28,11 @@ func stubWorktreeStatus(t *testing.T, fn func(path string) (int, error)) *[]cont
 	prevList := worktreeListFn
 	worktreeListFn = func(context.Context, string) ([]gitworktree.Worktree, error) { return nil, nil }
 	t.Cleanup(func() { worktreeListFn = prevList })
+	// The identity check passes: the owned panes these tests build carry a
+	// test token, and the mark itself is not what they are about.
+	prevMark := ownerMarkMatchesFn
+	ownerMarkMatchesFn = func(context.Context, string, string) (bool, error) { return true, nil }
+	t.Cleanup(func() { ownerMarkMatchesFn = prevMark })
 	return &ctxs
 }
 
@@ -210,6 +215,7 @@ func TestWorktreeStatusReq_IsDispatchedAndAnswered(t *testing.T) {
 	}
 	pane.WorktreeOwned = true
 	pane.WorktreePath = "/w/feat-a"
+	pane.WorktreeToken = "test-token"
 
 	c, err := ipc.NewClient(sock)
 	if err != nil {
@@ -280,6 +286,7 @@ func TestWorktreeStatusResponse_AnswersOnlyAboutOwnedWorktrees(t *testing.T) {
 	}
 	pane.WorktreeOwned = true
 	pane.WorktreePath = "/w/feat-a"
+	pane.WorktreeToken = "test-token"
 
 	var asked []string
 	stubWorktreeStatus(t, func(path string) (int, error) {

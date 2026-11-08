@@ -484,7 +484,7 @@ func TestDestroyPaneReq_RemoveWorktreeRemovesTheOwnedCheckout(t *testing.T) {
 	}
 	pane, _ := d.session.CreatePane(tab.ID, wt)
 	pane.PluginMu.Lock()
-	pane.WorktreeOwned, pane.WorktreePath = true, wt
+	pane.WorktreeOwned, pane.WorktreePath, pane.WorktreeToken = true, wt, "test-token"
 	pane.PluginMu.Unlock()
 	called := make(chan []string, 1)
 	prev := removeOwnedWorktreesFn

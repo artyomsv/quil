@@ -192,6 +192,9 @@ func (d *Daemon) oldWorkspaceStateMap(activeTab string, tabs []*Tab, panesByTab 
 			if pane.WorktreePath != "" {
 				paneData["worktree_path"] = pane.WorktreePath
 			}
+			if !includeOverlays && pane.WorktreeToken != "" {
+				paneData["worktree_token"] = pane.WorktreeToken
+			}
 			// The sandbox pair. The image is what makes a restored pane
 			// sandboxed at all; the container CWD is what the resume path
 			// needs and cannot re-derive, since Claude names a transcript

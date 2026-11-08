@@ -1147,6 +1147,7 @@ func (d *Daemon) restoreWorkspace() error {
 				worktreeOwned, _ := paneData["worktree_owned"].(bool)
 				quilMCP, _ := paneData["quil_mcp"].(bool)
 				worktreePath, _ := paneData["worktree_path"].(string)
+				worktreeToken, _ := paneData["worktree_token"].(string)
 				worktreeInterrupted, _ := paneData["worktree_interrupted"].(bool)
 				sandboxImage, _ := paneData["sandbox_image"].(string)
 				sandboxAuth, _ := paneData["sandbox_auth"].(string)
@@ -1243,6 +1244,9 @@ func (d *Daemon) restoreWorkspace() error {
 					// CWD, which is the value that cannot be trusted for a
 					// force-delete.
 					WorktreePath: worktreePath,
+					// Absent on a snapshot from before checkout identities → empty,
+					// and such a worktree is never removed on close (fail closed).
+					WorktreeToken: worktreeToken,
 				}
 				// NoteRev is atomic.Uint64: cannot be set in the struct
 				// literal above, so it is stored once here, before the pane
@@ -4245,6 +4249,24 @@ func (d *Daemon) notifyBranchDeleted(owner paneRef, branch string) {
 	})
 }
 
+// notifyWorktreeKept says a worktree removal the user asked for did not
+// happen, and why. A warning: the pane and the dialog are gone, so this card
+// is the only place the user learns the folder is still there.
+func (d *Daemon) notifyWorktreeKept(owner paneRef, path, reason string) {
+	d.emitEvent(PaneEvent{
+		ID:        uuid.New().String(),
+		PaneID:    owner.ID,
+		TabID:     owner.TabID,
+		PaneName:  owner.Name,
+		Type:      "worktree_kept",
+		Title:     "Worktree kept: " + filepath.Base(path),
+		Message:   reason,
+		Severity:  "warning",
+		Timestamp: time.Now(),
+		Data:      map[string]string{"path": path},
+	})
+}
+
 // notifyBranchKept says a branch delete the user asked for did not happen,
 // and why. A warning, not info: the user believes the branch is gone.
 func (d *Daemon) notifyBranchKept(owner paneRef, branch, reason string) {
@@ -5543,6 +5565,12 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			// the shell has been rewriting all along — see Pane.WorktreePath.
 			if pane.WorktreePath != "" {
 				paneData.WorktreePath = pane.WorktreePath
+			}
+			// The identity token is written to DISK only (includeOverlays is
+			// false for the snapshot): it is the daemon's own proof, of no use
+			// to a client.
+			if !includeOverlays && pane.WorktreeToken != "" {
+				paneData.WorktreeToken = pane.WorktreeToken
 			}
 			// The sandbox pair. The image is what makes a restored pane
 			// sandboxed at all; the container CWD is what the resume path
@@ -8430,10 +8458,12 @@ func (d *Daemon) handleDestroyPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 	}
 	d.highlightPane(pane.ID)
 	var worktrees []string
+	var closeOpts branchDeleteOpts
 	if req.RemoveWorktree {
 		// Captured before DestroyPane, which takes the pane (and with it the
 		// only record of its worktree) out of the session maps.
 		worktrees = ownedWorktreePaths([]*Pane{pane})
+		closeOpts = branchOpts(false, nil, []*Pane{pane})
 	}
 
 	// Captured BEFORE DestroyPane, which takes the pane out of the session
@@ -8480,7 +8510,7 @@ func (d *Daemon) handleDestroyPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 	// removal follows it, gated on the container being gone.
 	// No branch deletes on this path: the MCP tool and the browser offer the
 	// worktree removal only, and DestroyPaneReqPayload carries no branch flag.
-	d.teardownAfterDestroy(req.PaneID, worktrees, branchDeleteOpts{})
+	d.teardownAfterDestroy(req.PaneID, worktrees, closeOpts)
 
 	respondTo(conn, msg.ID, ipc.MsgDestroyPaneResp, ipc.DestroyPaneRespPayload{
 		Success: true,

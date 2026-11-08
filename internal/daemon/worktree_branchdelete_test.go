@@ -44,11 +44,13 @@ func stubBranchDelete(t *testing.T, facts gitworktree.BranchFacts) *branchStubs 
 
 var testBranchOwner = paneRef{ID: "pane-0000000a", TabID: "tab-0000000a", Name: "claude"}
 
-// optsFor confirms branch for /w/feat-a.
+// optsFor confirms branch for /w/feat-a, a Quil-made worktree (its identity
+// token is recorded; stubRemoveWorktree makes the mark match).
 func optsFor(local bool, branch string) branchDeleteOpts {
 	return branchDeleteOpts{Local: local,
 		Confirmed: confirmations([]ipc.BranchConfirmation{{WorktreePath: "/w/feat-a", Branch: branch}}),
-		Owners:    map[string]paneRef{"/w/feat-a": testBranchOwner}}
+		Owners:    map[string]paneRef{"/w/feat-a": testBranchOwner},
+		Tokens:    map[string]string{"/w/feat-a": "test-token"}}
 }
 
 // eventsOfType returns the queued events of one type.
@@ -123,7 +125,7 @@ func TestHandleDestroyTab_PassesBranchOpts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreatePane: %v", err)
 	}
-	pane.WorktreeOwned, pane.WorktreePath = true, "/w/feat-a"
+	pane.WorktreeOwned, pane.WorktreePath, pane.WorktreeToken = true, "/w/feat-a", "test-token"
 	got := make(chan branchDeleteOpts, 1)
 	prev := removeOwnedWorktreesFn
 	removeOwnedWorktreesFn = func(_ *Daemon, _ []string, opt branchDeleteOpts) { got <- opt }
@@ -154,7 +156,8 @@ func TestRemoveOwnedWorktrees_OtherRowDoesNotConfirm(t *testing.T) {
 	rec := stubBranchDelete(t, gitworktree.BranchFacts{Branch: "feat/b"})
 	opt := branchDeleteOpts{Local: true,
 		Confirmed: confirmations([]ipc.BranchConfirmation{{WorktreePath: "/w/other", Branch: "feat/b"}}),
-		Owners:    map[string]paneRef{"/w/feat-a": testBranchOwner}}
+		Owners:    map[string]paneRef{"/w/feat-a": testBranchOwner},
+		Tokens:    map[string]string{"/w/feat-a": "test-token"}}
 
 	d.removeOwnedWorktreesWith([]string{"/w/feat-a"}, opt)
 

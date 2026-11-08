@@ -25,7 +25,11 @@ func stubRemoveWorktree(t *testing.T, fn func(ctx context.Context, repo, path st
 		}
 		return fn(ctx, repo, path)
 	}
-	t.Cleanup(func() { removeWorktreeKeepBranchFn = prev })
+	// The identity check passes: these tests are about the removal, and
+	// removeOwnedWorktrees below records a token for every path.
+	prevMark := ownerMarkMatchesFn
+	ownerMarkMatchesFn = func(context.Context, string, string) (bool, error) { return true, nil }
+	t.Cleanup(func() { removeWorktreeKeepBranchFn, ownerMarkMatchesFn = prev, prevMark })
 	return &calls
 }
 
@@ -171,6 +175,7 @@ func TestHandleDestroyPane_RemovesTheWorktreeWhenAsked(t *testing.T) {
 	}
 	pane.WorktreeOwned = true
 	pane.WorktreePath = "/w/feat-a"
+	pane.WorktreeToken = "test-token"
 
 	stubWorktreeList(t, []gitworktree.Worktree{{Path: "/repo", Main: true}}, nil)
 	done := make(chan string, 1)
@@ -209,6 +214,7 @@ func TestHandleDestroyPane_LeavesTheWorktreeAloneByDefault(t *testing.T) {
 	}
 	pane.WorktreeOwned = true
 	pane.WorktreePath = "/w/feat-a"
+	pane.WorktreeToken = "test-token"
 
 	stubWorktreeList(t, []gitworktree.Worktree{{Path: "/repo", Main: true}}, nil)
 	removed := make(chan string, 1)
@@ -243,6 +249,7 @@ func TestHandleDestroyTab_RemovesEveryOwnedWorktreeInTheTab(t *testing.T) {
 		}
 		pane.WorktreeOwned = true
 		pane.WorktreePath = cwd
+		pane.WorktreeToken = "test-token"
 	}
 
 	stubWorktreeList(t, []gitworktree.Worktree{{Path: "/repo", Main: true}}, nil)
@@ -353,6 +360,7 @@ func TestRemoveOwnedWorktrees_SkipsAWorktreeAPaneWasCreatedInEvenIfItsShellMoved
 	}
 	pane.WorktreeOwned = true
 	pane.WorktreePath = "/w/feat-a"
+	pane.WorktreeToken = "test-token"
 
 	stubWorktreeList(t, []gitworktree.Worktree{{Path: "/repo", Main: true}}, nil)
 	calls := stubRemoveWorktree(t, nil)
@@ -501,4 +509,15 @@ func TestFinishRemovedWorktree_TreatsAnAlreadyGoneDirectoryAsDone(t *testing.T) 
 	if attempts != 1 {
 		t.Errorf("attempts = %d, want 1 — a missing directory is the outcome we wanted", attempts)
 	}
+}
+
+// removeOwnedWorktrees runs the close-time removal for paths as a close of
+// Quil-made worktrees would: each path carries an identity token. The mark
+// check itself is stubbed by stubRemoveWorktree.
+func (d *Daemon) removeOwnedWorktrees(paths []string) {
+	tokens := map[string]string{}
+	for _, p := range paths {
+		tokens[p] = "test-token"
+	}
+	d.removeOwnedWorktreesWith(paths, branchDeleteOpts{Tokens: tokens})
 }

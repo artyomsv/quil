@@ -76,6 +76,7 @@ var plainEventGroups = map[string]string{
 	// A close's branch delete: done, or kept with the reason.
 	"worktree_branch_deleted": System,
 	"worktree_branch_kept":    System,
+	"worktree_kept":           System,
 	"command_complete":        Commands,
 	"output_idle":             Idle,
 }

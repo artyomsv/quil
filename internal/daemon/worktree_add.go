@@ -11,6 +11,7 @@ import (
 
 	"github.com/artyomsv/quil/internal/gitworktree"
 	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/google/uuid"
 )
 
 // worktreeAddTimeout bounds one `git worktree add`.
@@ -320,6 +321,27 @@ func (d *Daemon) createPaneInWorktree(p ipc.CreatePanePayload, path string) (*Pa
 		// Later template panes and close-time removal both use this root.
 		pane.WorktreePath = worktreeRoot
 	}
+	wtPath := pane.WorktreePath
+	pane.PluginMu.Unlock()
+	// The checkout's IDENTITY, beside its path: a random token written into
+	// the worktree's own git admin directory, which a checkout later made at
+	// the same path does not share. A close removes the worktree only while
+	// the token still matches (removeOwnedWorktreesWith). Off the lock: it is
+	// file I/O. A pane whose mark could not be written is never offered a
+	// removal it cannot prove.
+	token := uuid.NewString()
+	markCtx, cancel := context.WithTimeout(context.Background(), worktreeStatusTimeout)
+	err = writeOwnerMarkFn(markCtx, wtPath, token)
+	cancel()
+	if err != nil {
+		log.Printf("worktree add: %s: could not record its identity, it will not be removed on close: %v", wtPath, err)
+		return pane, swapped, nil
+	}
+	pane.PluginMu.Lock()
+	pane.WorktreeToken = token
 	pane.PluginMu.Unlock()
 	return pane, swapped, nil
 }
+
+// writeOwnerMarkFn is the identity-mark seam, so tests need no real git.
+var writeOwnerMarkFn = gitworktree.WriteOwnerMark

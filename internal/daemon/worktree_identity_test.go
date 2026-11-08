@@ -610,7 +610,7 @@ func TestWorktreeAddAndCreate_RollbackRefusedByGitIsReported(t *testing.T) {
 		err  error
 		want string
 	}{
-		{"worktree kept", fmt.Errorf("%w: boom", gitworktree.ErrWorktreeNotRemoved), "the new worktree was kept: " + keptMessage(keptRemoveFailed)},
+		{"worktree removal failed", fmt.Errorf("%w: boom", gitworktree.ErrWorktreeNotRemoved), "cleanup incomplete: git could not finish removing the new worktree (see quild.log)"},
 		{"branch kept", fmt.Errorf("%w: boom", gitworktree.ErrBranchNotDeleted), "cleanup incomplete: the new worktree was removed but its branch was kept"},
 		{"other", errors.New("boom"), "cleanup incomplete (see quild.log)"},
 	}

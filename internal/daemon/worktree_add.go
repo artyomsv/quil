@@ -429,14 +429,16 @@ func (d *Daemon) abandonRefusal(repo, path, branch, token string) string {
 }
 
 // rollbackOutcome is the fixed text for a rollback git refused part-way: the
-// checkout and its branch both kept, or the checkout removed and its branch
+// worktree removal not finished, or the checkout removed and its branch
 // kept. Anything else is a cleanup that did not complete, said as such.
 func rollbackOutcome(err error) string {
 	switch {
 	case errors.Is(err, gitworktree.ErrBranchNotDeleted):
 		return "cleanup incomplete: the new worktree was removed but its branch was kept"
 	case errors.Is(err, gitworktree.ErrWorktreeNotRemoved):
-		return "the new worktree was kept: " + keptMessage(keptRemoveFailed)
+		// Not "kept": on Windows git can delete the files and the registration
+		// and then fail on the empty folder a process still holds.
+		return "cleanup incomplete: git could not finish removing the new worktree (see quild.log)"
 	}
 	return "cleanup incomplete (see quild.log)"
 }

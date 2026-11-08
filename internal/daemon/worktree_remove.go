@@ -553,10 +553,13 @@ func physicalPathBy(path string, deadline time.Time) (string, bool) {
 		path string
 		ok   bool
 	}
+	// Read on the caller's goroutine: the worker can outlive the call (a
+	// hung resolution is abandoned), and must not read the seam later.
+	eval := evalSymlinksFn
 	ch := make(chan result, 1)
 	go func() {
 		defer releaseBlockingFSCall()
-		p, err := evalSymlinksFn(path)
+		p, err := eval(path)
 		switch {
 		case err == nil:
 			if abs, aerr := filepath.Abs(p); aerr == nil {

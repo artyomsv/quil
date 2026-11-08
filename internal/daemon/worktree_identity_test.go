@@ -601,18 +601,21 @@ func TestWorktreeAddAndCreate_RealGit_AbandonSeesWorkLandingDuringTheProbes(t *t
 }
 
 // git refuses the rollback AFTER the guard passed (work landed after the last
-// check, a lock): the requester hears which part survived, in fixed words.
+// check, a lock): the requester hears which part survived, in fixed words —
+// in the answer AND as a sidebar card, because several callers never show the
+// answer (a recovered MCP split or new tab, a template) and the TUI cuts a
+// long one.
 //
-// Fails if a git-level refusal is only logged.
+// Fails if a git-level refusal is only logged, or reaches only the answer.
 func TestWorktreeAddAndCreate_RollbackRefusedByGitIsReported(t *testing.T) {
 	cases := []struct {
 		name string
 		err  error
-		want string
+		code string
 	}{
-		{"worktree removal failed", fmt.Errorf("%w: boom", gitworktree.ErrWorktreeNotRemoved), "cleanup incomplete: git could not finish removing the new worktree (see quild.log)"},
-		{"branch kept", fmt.Errorf("%w: boom", gitworktree.ErrBranchNotDeleted), "cleanup incomplete: the new worktree was removed but its branch was kept"},
-		{"other", errors.New("boom"), "cleanup incomplete (see quild.log)"},
+		{"worktree removal failed", fmt.Errorf("%w: boom", gitworktree.ErrWorktreeNotRemoved), keptRemoveIncomplete},
+		{"branch kept", fmt.Errorf("%w: boom", gitworktree.ErrBranchNotDeleted), keptBranchNotDeleted},
+		{"other", errors.New("boom"), keptCleanupIncomplete},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -627,12 +630,44 @@ func TestWorktreeAddAndCreate_RollbackRefusedByGitIsReported(t *testing.T) {
 
 			resp := d.worktreeAddAndCreate(req)
 
-			if !strings.HasSuffix(resp.Error, "; "+tc.want) {
-				t.Errorf("answer = %q, want it to end with %q", resp.Error, tc.want)
+			want := "cleanup incomplete: " + keptMessage(tc.code)
+			if !strings.HasSuffix(resp.Error, "; "+want) {
+				t.Errorf("answer = %q, want it to end with %q", resp.Error, want)
 			}
 			if strings.Contains(resp.Error, "boom") {
 				t.Errorf("answer = %q carries git's own text", resp.Error)
 			}
+			cards := eventsOfType(d, "worktree_kept")
+			if len(cards) != 1 || cards[0].Data["reason"] != tc.code || cards[0].Message != keptMessage(tc.code) {
+				t.Fatalf("cards = %+v, want one with reason %q", cards, tc.code)
+			}
+			if strings.Contains(cards[0].Message, "boom") {
+				t.Errorf("card carries git's own text: %q", cards[0].Message)
+			}
 		})
+	}
+}
+
+// A rollback the GUARD refuses is a card too, whatever the caller does with
+// the answer.
+//
+// Fails if the kept reason reaches only the answer.
+func TestWorktreeAddAndCreate_RollbackKeptByTheGuardIsACard(t *testing.T) {
+	d, req, checkout := markTestCreate(t)
+	stubAdd(t, func(context.Context, string, string, string) error {
+		if err := d.session.DestroyTab(req.TabID); err != nil {
+			return err
+		}
+		return os.MkdirAll(checkout, 0o700)
+	})
+	prev := abandonRefusalFn
+	abandonRefusalFn = func(*Daemon, string, string, string, string) string { return keptHasChanges }
+	t.Cleanup(func() { abandonRefusalFn = prev })
+
+	d.worktreeAddAndCreate(req)
+
+	cards := eventsOfType(d, "worktree_kept")
+	if len(cards) != 1 || cards[0].Data["reason"] != keptHasChanges || cards[0].TabID != req.TabID {
+		t.Fatalf("cards = %+v, want one kept card for the tab", cards)
 	}
 }

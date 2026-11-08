@@ -448,7 +448,14 @@ is never proof: the accepted residual is exactly a replacement that carries it.
 `git worktree remove`, then `git branch -d`). When git refuses part-way, the
 requester's error ends with a FIXED outcome (`rollbackOutcome`, typed by
 `ErrWorktreeNotRemoved` / `ErrBranchNotDeleted`): git could not finish removing the worktree (never "kept": on Windows git can delete the files and fail on the empty folder), or the
-worktree removed and its branch kept; git's own text goes to the log only.
+worktree removed and its branch kept; git's own text goes to the log only. Both
+outcomes, and a guard refusal, are ALSO a sidebar card (`worktree_kept`, on the
+placeholder or replace target and the tab, `Data["reason"]` the code):
+several callers never show the answer — an MCP split or new tab whose recovery
+pane already shows the spawn failure, a template — and the TUI cuts a long
+error at 160 cells. Tests: `TestWorktreeAddAndCreate_RollbackRefusedByGitIsReported`,
+`…RollbackKeptByTheGuardIsACard`,
+`TestSplitPaneReq_WorktreeRollbackRefusedAfterSpawnFailureIsTold`.
 
 **Rollback residual (same-user, under the 2026-11-08 ruling): the delete is NOT
 atomic and the interval is NOT short.** Two check-to-delete gaps remain:

@@ -2,6 +2,7 @@ package gitworktree
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -237,8 +238,8 @@ func TestRemove_RealGit_RefusesADirtyWorktree(t *testing.T) {
 		t.Fatalf("add an untracked file: %v", err)
 	}
 
-	if err := Remove(ctx, repo, path, "feat/dirty"); err == nil {
-		t.Fatal("Remove removed a dirty worktree")
+	if err := Remove(ctx, repo, path, "feat/dirty"); !errors.Is(err, ErrWorktreeNotRemoved) {
+		t.Fatalf("Remove = %v, want ErrWorktreeNotRemoved", err)
 	}
 	if _, err := os.Stat(filepath.Join(path, "untracked.txt")); err != nil {
 		t.Errorf("the untracked file is gone: %v", err)
@@ -266,8 +267,11 @@ func TestRemove_RealGit_KeepsAnUnmergedBranch(t *testing.T) {
 	runGitIn(t, path, "add", "w.txt")
 	runGitIn(t, path, "commit", "-q", "-m", "work")
 
-	if err := Remove(ctx, repo, path, "feat/work"); err == nil {
-		t.Fatal("Remove deleted an unmerged branch")
+	if err := Remove(ctx, repo, path, "feat/work"); !errors.Is(err, ErrBranchNotDeleted) {
+		t.Fatalf("Remove = %v, want ErrBranchNotDeleted", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("the clean checkout was not removed: %v", err)
 	}
 	if out := runGitIn(t, repo, "log", "-1", "--format=%s", "feat/work"); strings.TrimSpace(out) != "work" {
 		t.Errorf("branch tip = %q, want the commit to survive", out)

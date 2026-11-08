@@ -207,9 +207,17 @@ func (d *Daemon) worktreeAddAndCreate(p ipc.CreatePanePayload) ipc.CreatePaneRes
 	// with "already exists" against a directory the user never created.
 	abandon := func(format string, args ...any) ipc.CreatePaneRespPayload {
 		resp := fail(format, args...)
+		// A rollback that did not finish is ALSO a sidebar card, not only a
+		// suffix on this answer: several callers do not show the answer at
+		// all (an MCP split or new tab whose recovery pane already shows the
+		// spawn failure, a template), and the TUI cuts a long error. The card
+		// names the pane the create was replacing (its placeholder or target,
+		// possibly gone — as the close path's cards do) and the tab.
+		owner := paneRef{ID: p.ReplacePaneID, TabID: p.TabID}
 		if reason := abandonRefusalFn(d, spec.RepoRoot, path, spec.Branch, token); reason != "" {
 			log.Printf("worktree create: kept %s after a failed create: %s", path, keptMessage(reason))
 			resp.Error += "; the new worktree was kept: " + keptMessage(reason)
+			d.notifyWorktreeKept(owner, path, reason)
 			return resp
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), worktreeAddTimeout)
@@ -219,7 +227,9 @@ func (d *Daemon) worktreeAddAndCreate(p ipc.CreatePanePayload) ipc.CreatePaneRes
 			// is an outcome the requester must hear about, in fixed words:
 			// git's text goes to the log only.
 			log.Printf("worktree create: could not clean up %s after a failed create: %v", path, rmErr)
-			resp.Error += "; " + rollbackOutcome(rmErr)
+			code := rollbackOutcome(rmErr)
+			resp.Error += "; cleanup incomplete: " + keptMessage(code)
+			d.notifyRollbackIncomplete(owner, path, code)
 		}
 		return resp
 	}
@@ -428,17 +438,35 @@ func (d *Daemon) abandonRefusal(repo, path, branch, token string) string {
 	return ""
 }
 
-// rollbackOutcome is the fixed text for a rollback git refused part-way: the
-// worktree removal not finished, or the checkout removed and its branch
-// kept. Anything else is a cleanup that did not complete, said as such.
+// rollbackOutcome is the reason code for a rollback git refused part-way: the
+// worktree removal not finished, or the checkout removed and its branch kept.
+// Anything else is a cleanup that did not complete, said as such.
 func rollbackOutcome(err error) string {
 	switch {
 	case errors.Is(err, gitworktree.ErrBranchNotDeleted):
-		return "cleanup incomplete: the new worktree was removed but its branch was kept"
+		return keptBranchNotDeleted
 	case errors.Is(err, gitworktree.ErrWorktreeNotRemoved):
 		// Not "kept": on Windows git can delete the files and the registration
 		// and then fail on the empty folder a process still holds.
-		return "cleanup incomplete: git could not finish removing the new worktree (see quild.log)"
+		return keptRemoveIncomplete
 	}
-	return "cleanup incomplete (see quild.log)"
+	return keptCleanupIncomplete
+}
+
+// notifyRollbackIncomplete is the card for a rollback git refused part-way.
+// Its own title, because the checkout may be gone: only the reason says what
+// is left.
+func (d *Daemon) notifyRollbackIncomplete(owner paneRef, path, code string) {
+	d.emitEvent(PaneEvent{
+		ID:        uuid.New().String(),
+		PaneID:    owner.ID,
+		TabID:     owner.TabID,
+		PaneName:  owner.Name,
+		Type:      "worktree_kept",
+		Title:     "Worktree cleanup incomplete: " + filepath.Base(path),
+		Message:   keptMessage(code),
+		Severity:  "warning",
+		Timestamp: time.Now(),
+		Data:      map[string]string{"path": path, "reason": code},
+	})
 }

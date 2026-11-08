@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -1047,6 +1048,57 @@ func TestSplitPaneReq_WorktreeSplitSpawnFailureIsTold(t *testing.T) {
 	waitWorktreeSlotFree(t, d)
 	if n := count(); n != 1 {
 		t.Fatalf("worktree_failed cards = %d, want 1", n)
+	}
+}
+
+// The same split, and then git refuses part of the rollback: the spawn
+// failure is already told, but what survived the rollback is a SECOND fact,
+// and the answer that would carry it has already gone (Preparing). It is a
+// card of its own, on the placeholder the answer named, in fixed words.
+//
+// Fails if a rollback refused after a told spawn failure reaches only the
+// already-sent answer or the log.
+func TestSplitPaneReq_WorktreeRollbackRefusedAfterSpawnFailureIsTold(t *testing.T) {
+	d, client := mcpTestDaemon(t)
+	_, keep := seedTab(t, d, client)
+	repo := worktreeRepo(t)
+	stubAdd(t, func(_ context.Context, _, path, _ string) error { return os.MkdirAll(path, 0o755) })
+	prevRm := removeWorktreeFn
+	removeWorktreeFn = func(context.Context, string, string, string) error {
+		return fmt.Errorf("%w: git said something long", gitworktree.ErrBranchNotDeleted)
+	}
+	t.Cleanup(func() { removeWorktreeFn = prevRm })
+	allowRollback(t)
+	prev := newSessionFn
+	newSessionFn = func(cols, rows int) apty.Session { return &startFailSession{} }
+	t.Cleanup(func() { newSessionFn = prev })
+	waitCreateWorkersAtCleanup(t, d)
+
+	resp := split(t, client, ipc.SplitPaneReqPayload{TargetPaneID: keep, Placement: ipc.PlacementRight,
+		Pane: ipc.SplitPaneSpec{CWD: repo, Worktree: &ipc.SplitWorktree{Branch: "feat/r"}}})
+	if !resp.Preparing || resp.PaneID == "" {
+		t.Fatalf("split: %+v", resp)
+	}
+	kept := func() []PaneEvent {
+		var out []PaneEvent
+		for _, e := range d.events.Events() {
+			if e.Type == "worktree_kept" && e.PaneID == resp.PaneID {
+				out = append(out, e)
+			}
+		}
+		return out
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for len(kept()) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("a rollback git refused after a told spawn failure raised no card")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	waitWorktreeSlotFree(t, d)
+	cards := kept()
+	if len(cards) != 1 || cards[0].Data["reason"] != keptBranchNotDeleted || strings.Contains(cards[0].Message, "git said") {
+		t.Fatalf("cards = %+v, want one fixed branch-not-deleted card", cards)
 	}
 }
 

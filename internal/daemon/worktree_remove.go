@@ -808,33 +808,39 @@ func ownerMarkRefusal(ctx context.Context, path, token string) string {
 // FIXED set of codes, each with a fixed message for the sidebar card. Git's
 // own error text and absolute paths go to quild.log, never to a card.
 const (
-	keptNoIdentity      = "no_identity"
-	keptIdentityUnknown = "identity_unknown"
-	keptNotOurs         = "not_ours"
-	keptInUse           = "in_use"
-	keptRepoUnreadable  = "repo_unreadable"
-	keptNotRepo         = "not_in_repository"
-	keptBusy            = "busy"
-	keptRemoveFailed    = "remove_failed"
-	keptHasChanges      = "has_changes"
-	keptHasCommits      = "has_commits"
-	keptNoDefaultBranch = "no_default_branch"
-	keptBranchChanged   = "branch_changed"
+	keptNoIdentity        = "no_identity"
+	keptIdentityUnknown   = "identity_unknown"
+	keptNotOurs           = "not_ours"
+	keptInUse             = "in_use"
+	keptRepoUnreadable    = "repo_unreadable"
+	keptNotRepo           = "not_in_repository"
+	keptBusy              = "busy"
+	keptRemoveFailed      = "remove_failed"
+	keptHasChanges        = "has_changes"
+	keptHasCommits        = "has_commits"
+	keptNoDefaultBranch   = "no_default_branch"
+	keptBranchChanged     = "branch_changed"
+	keptRemoveIncomplete  = "remove_incomplete"
+	keptBranchNotDeleted  = "branch_not_deleted"
+	keptCleanupIncomplete = "cleanup_incomplete"
 )
 
 var keptMessages = map[string]string{
-	keptNoIdentity:      "Quil has no record of making this worktree (it predates checkout identities)",
-	keptIdentityUnknown: "could not confirm this is the worktree Quil made",
-	keptNotOurs:         "this folder is no longer the worktree Quil made for the pane",
-	keptInUse:           "another pane is still in it",
-	keptRepoUnreadable:  "its repository could not be read",
-	keptNotRepo:         "it is not inside a git repository",
-	keptBusy:            "too many filesystem calls in flight",
-	keptRemoveFailed:    "git could not remove it (see quild.log)",
-	keptHasChanges:      "it holds changes that are not committed",
-	keptHasCommits:      "its branch has commits the default branch does not",
-	keptNoDefaultBranch: "its branch could not be checked for commits (no default branch found)",
-	keptBranchChanged:   "it is no longer on the branch Quil created",
+	keptNoIdentity:        "Quil has no record of making this worktree (it predates checkout identities)",
+	keptIdentityUnknown:   "could not confirm this is the worktree Quil made",
+	keptNotOurs:           "this folder is no longer the worktree Quil made for the pane",
+	keptInUse:             "another pane is still in it",
+	keptRepoUnreadable:    "its repository could not be read",
+	keptNotRepo:           "it is not inside a git repository",
+	keptBusy:              "too many filesystem calls in flight",
+	keptRemoveFailed:      "git could not remove it (see quild.log)",
+	keptHasChanges:        "it holds changes that are not committed",
+	keptHasCommits:        "its branch has commits the default branch does not",
+	keptNoDefaultBranch:   "its branch could not be checked for commits (no default branch found)",
+	keptBranchChanged:     "it is no longer on the branch Quil created",
+	keptRemoveIncomplete:  "git could not finish removing the new worktree (see quild.log)",
+	keptBranchNotDeleted:  "the new worktree was removed but its branch was kept",
+	keptCleanupIncomplete: "cleanup did not finish (see quild.log)",
 }
 
 // keptMessage is the card text for a reason code.

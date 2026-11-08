@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -171,5 +172,81 @@ func TestFsWithin_HungCallReturnsAtTheDeadline(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the check hung on a filesystem call that never returns")
+	}
+}
+
+// A worker holds its permit until its filesystem call REALLY returns: with
+// the one permit held by a call stuck on a dead mount, the next check is
+// refused at once (ErrFSBusy) rather than starting another stuck worker; the
+// permit comes back when the stuck call ends.
+//
+// Fails if fsWithin's worker runs without a permit, or gives it back when the
+// caller gives up.
+func TestFsWithin_PermitHeldUntilTheCallEnds(t *testing.T) {
+	var held atomic.Int32
+	SetFSPermits(func() bool {
+		if held.Add(1) > 1 {
+			held.Add(-1)
+			return false
+		}
+		return true
+	}, func() { held.Add(-1) })
+	t.Cleanup(func() { fsPermits.Store(nil) })
+
+	hang := make(chan struct{})
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := fsWithin(ctx, func() (bool, error) { <-hang; return true, nil }); err == nil {
+		t.Fatal("a stuck call was accepted")
+	}
+	if _, err := fsWithin(context.Background(), func() (bool, error) { return true, nil }); !errors.Is(err, ErrFSBusy) {
+		t.Errorf("err = %v, want ErrFSBusy while the stuck call holds the only permit", err)
+	}
+	close(hang)
+	deadline := time.Now().Add(5 * time.Second)
+	for held.Load() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the permit was never returned after the stuck call ended")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, err := fsWithin(context.Background(), func() (bool, error) { return true, nil }); err != nil {
+		t.Errorf("after the stuck call ended: %v", err)
+	}
+}
+
+// A submodule that was never initialised leaves its folder in the checkout.
+// git status never lists files put there, so the folder must be EMPTY: one
+// with a file in it is refused, and the file is untouched.
+//
+// Fails if only a .git inside the folder counts as content.
+func TestStatus_RealGit_UninitialisedSubmoduleFolderMustBeEmpty(t *testing.T) {
+	sub := realGitRepo(t)
+	repo := realGitRepo(t)
+	runGitIn(t, repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", sub, "sub")
+	runGitIn(t, repo, "commit", "-q", "-m", "add submodule")
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	path := DerivePath(repo, "feat/uninit")
+	if _, err := Add(ctx, repo, path, "feat/uninit"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	folder := filepath.Join(path, "sub")
+	if err := os.MkdirAll(folder, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if st, err := Status(ctx, path); err != nil || st.Changes != 0 {
+		t.Fatalf("empty submodule folder: status = %+v, %v; want clean", st, err)
+	}
+
+	if err := os.WriteFile(filepath.Join(folder, "local.env"), []byte("SECRET=1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Status(ctx, path); !errors.Is(err, ErrHiddenState) {
+		t.Errorf("err = %v, want ErrHiddenState for a file in an uninitialised submodule folder", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(folder, "local.env")); err != nil || string(got) != "SECRET=1\n" {
+		t.Errorf("the file = %q, %v; want it untouched", got, err)
 	}
 }

@@ -5,10 +5,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 )
 
 // ErrHiddenState means the checkout is in a state git status cannot see
@@ -100,9 +102,16 @@ func checkStatusVisible(ctx context.Context, path string) error {
 			return fmt.Errorf("%w: %s is marked assume-unchanged or skip-worktree", ErrHiddenState, name)
 		}
 		if mode == "160000" {
-			// Anything but a clear "no .git there" counts as populated.
-			if _, err := fsWithin(ctx, func() (os.FileInfo, error) { return os.Lstat(filepath.Join(path, filepath.FromSlash(name), ".git")) }); !errors.Is(err, os.ErrNotExist) {
-				return fmt.Errorf("%w: submodule %s is populated", ErrHiddenState, name)
+			// A gitlink's directory is invisible to git status whether or not
+			// the submodule was initialised: git treats a gitlink with no
+			// valid .git as unmodified and never lists files under it. So the
+			// directory must be ABSENT or truly EMPTY; any content, any other
+			// kind of entry, or anything unreadable keeps the checkout.
+			empty, err := fsWithin(ctx, func() (bool, error) {
+				return absentOrEmptyDir(filepath.Join(path, filepath.FromSlash(name)))
+			})
+			if err != nil || !empty {
+				return fmt.Errorf("%w: submodule folder %s is not empty", ErrHiddenState, name)
 			}
 		}
 		return nil
@@ -178,8 +187,23 @@ func fsWithin[T any](ctx context.Context, fn func() (T, error)) (T, error) {
 		v   T
 		err error
 	}
+	// The worker holds a permit from the host's process-wide limit until fn
+	// REALLY returns, so abandoned calls on a dead mount cannot pile up past
+	// it; with none free the check is refused at once ("could not check").
+	var claim func() bool
+	var release func()
+	if p := fsPermits.Load(); p != nil { // read here: the worker can outlive this call
+		claim, release = p.claim, p.release
+	}
+	if claim != nil && !claim() {
+		var zero T
+		return zero, ErrFSBusy
+	}
 	ch := make(chan result, 1)
 	go func() {
+		if release != nil {
+			defer release()
+		}
 		v, err := fn()
 		ch <- result{v, err}
 	}()
@@ -190,4 +214,53 @@ func fsWithin[T any](ctx context.Context, fn func() (T, error)) (T, error) {
 		var zero T
 		return zero, ctx.Err()
 	}
+}
+
+// absentOrEmptyDir is true for a path that does not exist, or a REAL
+// directory (not a link) with no entries. Anything else — a file, a link, a
+// directory holding even one entry, an error — is false or an error.
+func absentOrEmptyDir(dir string) (bool, error) {
+	info, err := os.Lstat(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !info.IsDir() {
+		return false, nil
+	}
+	f, err := os.Open(dir)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+	names, err := f.Readdirnames(1)
+	if len(names) > 0 {
+		return false, nil
+	}
+	if err != nil && !errors.Is(err, io.EOF) {
+		return false, err
+	}
+	return true, nil
+}
+
+// ErrFSBusy means no filesystem-call permit was free for a safety check.
+var ErrFSBusy = errors.New("too many filesystem calls in flight")
+
+// fsPermits bounds fsWithin's workers by the host's process-wide
+// filesystem-call limit (the daemon's). Unset, nothing is bounded (a CLI or a
+// test). Atomic: daemons are built concurrently in tests while checks run.
+var fsPermits atomic.Pointer[fsPermitFuncs]
+
+type fsPermitFuncs struct {
+	claim   func() bool
+	release func()
+}
+
+// SetFSPermits hands this package the host's filesystem-call limit: claim
+// takes a permit without blocking (false when none is free), release returns
+// it. Call it at start, before any worktree check; later calls replace it.
+func SetFSPermits(claim func() bool, release func()) {
+	fsPermits.Store(&fsPermitFuncs{claim: claim, release: release})
 }

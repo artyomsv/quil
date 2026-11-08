@@ -389,6 +389,10 @@ func New(cfg config.Config) *Daemon {
 		bufSize = 500 * 512 // 256KB default
 	}
 
+	// The worktree safety checks bound their filesystem calls by the same
+	// process-wide limit as every other blocking call here.
+	gitworktree.SetFSPermits(claimBlockingFSCall, releaseBlockingFSCall)
+
 	reg := plugin.NewRegistry()
 
 	maxEvents := cfg.Notification.MaxEvents

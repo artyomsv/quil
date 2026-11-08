@@ -159,7 +159,10 @@ the close dialog's row, the rollback guard, the unattended close — when git's
 top-level folder is not the checkout itself (`core.worktree`), when any index
 entry is assume-unchanged (also what `core.ignoreStat` sets) or skip-worktree
 (sparse checkouts), since status never looks at those files, or when a
-submodule is populated (its contents are filtered by its own settings and its
+gitlink's folder is anything but absent or EMPTY — initialised or not: git
+treats a gitlink without a valid `.git` as unmodified and never lists files put
+in its folder (`absentOrEmptyDir`; an unreadable folder keeps too), and a
+populated one is filtered by its own settings and its
 ignored files are never listed). The status itself runs with
 `-c core.fsmonitor=false` (a stale cached "nothing changed" is not a read) and
 `--ignore-submodules=none`; the unforced removals turn fsmonitor off too.
@@ -170,7 +173,10 @@ object/namespace selectors and `GIT_CONFIG_PARAMETERS`/`GIT_CONFIG_COUNT`/
 decides the checkout only while none of them says otherwise; a daemon started
 from a shell that had one set would check one checkout and remove another.
 Its filesystem calls (the top-level identity, the submodule `.git` stat) run
-through `fsWithin`, which stops waiting at the caller's deadline: a dead
+through `fsWithin`, which stops waiting at the caller's deadline AND runs each
+call on a worker holding a permit from the daemon's process-wide limit until the
+call really returns (`gitworktree.SetFSPermits`, set in `daemon.New`; none free
+= `ErrFSBusy`, could not check), so abandoned calls cannot pile up: a dead
 network mount must not hold the status single-flight slot.
 The index scan is STREAMED (`scanGitRecords`, one NUL record at a time), because
 a large monorepo's index is far past `runGit`'s 1 MiB cap and a buffered check

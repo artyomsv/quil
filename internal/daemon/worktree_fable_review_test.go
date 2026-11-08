@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -534,5 +535,17 @@ func waitKeptCard(t *testing.T, d *Daemon, reason string) {
 	}
 	if c := eventsOfType(d, "worktree_kept")[0]; c.Data["reason"] != reason {
 		t.Errorf("card reason = %q, want %q", c.Data["reason"], reason)
+	}
+}
+
+// A status refused because git cannot see everything (assume-unchanged,
+// skip-worktree, a populated submodule) keeps the worktree with its own
+// reason, not "the repository could not be read".
+func TestStatusRefusal_HiddenStateHasItsOwnReason(t *testing.T) {
+	if got := statusRefusal(fmt.Errorf("x: %w", gitworktree.ErrHiddenState)); got != keptHiddenState {
+		t.Errorf("hidden state -> %q, want %q", got, keptHiddenState)
+	}
+	if got := statusRefusal(errors.New("boom")); got != keptRepoUnreadable {
+		t.Errorf("other error -> %q, want %q", got, keptRepoUnreadable)
 	}
 }

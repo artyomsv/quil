@@ -523,6 +523,7 @@ func TestRemoveWorktree_TerminatesOptionsBeforeThePath(t *testing.T) {
 // REWRITES the index, contending with their own git. Quil is asking a question
 // here, not doing work on their behalf.
 func TestStatus_DoesNotTakeOptionalLocks(t *testing.T) {
+	skipPreflight(t)
 	calls := stubGit(t, "", nil)
 
 	if _, err := Status(context.Background(), "/w/feat-a"); err != nil {

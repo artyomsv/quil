@@ -64,6 +64,7 @@ func TestParseStatusZ_CapsAtMaxStatusFiles(t *testing.T) {
 //
 // Fails if "-z" is dropped from the argv.
 func TestStatus_UsesNULSeparatedPorcelain(t *testing.T) {
+	skipPreflight(t)
 	calls := stubGit(t, "?? a\x00", nil)
 
 	rep, err := Status(context.Background(), "/w/feat-a")
@@ -91,6 +92,7 @@ func TestStatus_ReportsTruncatedList(t *testing.T) {
 	for i := 0; i < MaxStatusFiles+1; i++ {
 		fmt.Fprintf(&b, "?? f%d\x00", i)
 	}
+	skipPreflight(t)
 	stubGit(t, b.String(), nil)
 
 	rep, err := Status(context.Background(), "/w/feat-a")

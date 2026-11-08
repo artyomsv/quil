@@ -434,7 +434,7 @@ func (d *Daemon) abandonRefusal(repo, path, branch, token string) string {
 	switch {
 	case err != nil:
 		log.Printf("worktree create: %s: status before rollback: %v", path, err)
-		return keptRepoUnreadable
+		return statusRefusal(err)
 	case status.Changes > 0:
 		return keptHasChanges
 	}

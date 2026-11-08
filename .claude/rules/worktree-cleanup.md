@@ -152,6 +152,31 @@ ignored directory to one entry (a `node_modules` costs one line);
 `--no-optional-locks`, because a plain `git status` refreshes and rewrites the
 index of a checkout the user may be working in at that moment.
 
+**The status is proof of an empty checkout only when it can SEE everything**
+(`checkStatusVisible`, run first by every `Status`). Refused as
+`ErrHiddenState` — "could not check", so every consumer keeps the worktree:
+the close dialog's row, the rollback guard, the unattended close — when git's
+top-level folder is not the checkout itself (`core.worktree`), when any index
+entry is assume-unchanged (also what `core.ignoreStat` sets) or skip-worktree
+(sparse checkouts), since status never looks at those files, or when a
+submodule is populated (its contents are filtered by its own settings and its
+ignored files are never listed). The status itself runs with
+`-c core.fsmonitor=false` (a stale cached "nothing changed" is not a read) and
+`--ignore-submodules=none`; the unforced removals turn fsmonitor off too.
+**Every git call runs in a clean environment** (`cleanGitEnv` in `runGit`):
+inherited `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_COMMON_DIR`,
+object/namespace selectors and `GIT_CONFIG_PARAMETERS`/`GIT_CONFIG_COUNT`/
+`GIT_CONFIG_KEY_*`/`GIT_CONFIG_VALUE_*` are dropped, because the directory
+decides the checkout only while none of them says otherwise; a daemon started
+from a shell that had one set would check one checkout and remove another.
+The index scan is STREAMED (`scanGitRecords`, one NUL record at a time), because
+a large monorepo's index is far past `runGit`'s 1 MiB cap and a buffered check
+would make every worktree there unremovable. The kept reason is
+`keptHiddenState` ("git cannot see every file in it"), via `statusRefusal`.
+Tests: `statussafe_test.go` (real git: assume-unchanged, skip-worktree, a
+populated submodule, inherited selectors, a 12k-entry index; argv; the env
+filter).
+
 **`MsgWorktreeStatusReq` carries PATHS, and the ownership filter is where the
 destroy payload's "a bool, never a path" boundary is enforced for it.** The
 request has to name paths — it is asked before the close, about several

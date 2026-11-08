@@ -452,7 +452,7 @@ func (d *Daemon) removeOneWorktreeFull(path, token string, wantFacts, unattended
 			switch {
 			case serr != nil:
 				log.Printf("worktree remove: %s kept, status before an unattended removal: %v", path, serr)
-				res.reason = keptRepoUnreadable
+				res.reason = statusRefusal(serr)
 				return
 			case st.Changes > 0:
 				log.Printf("worktree remove: %s kept, it holds %d changes and the close was not confirmed in a Quil window", path, st.Changes)
@@ -885,6 +885,7 @@ const (
 	keptBranchNotDeleted  = "branch_not_deleted"
 	keptCleanupIncomplete = "cleanup_incomplete"
 	keptFolderMissing     = "folder_missing"
+	keptHiddenState       = "hidden_state"
 )
 
 var keptMessages = map[string]string{
@@ -907,6 +908,7 @@ var keptMessages = map[string]string{
 	keptBranchNotDeleted:  "folder gone, branch kept",
 	keptCleanupIncomplete: "cleanup failed; see log",
 	keptFolderMissing:     "its folder is already gone (see git worktree prune)",
+	keptHiddenState:       "git cannot see every file in it (see quild.log)",
 }
 
 // keptMessage is the card text for a reason code.
@@ -931,4 +933,14 @@ func foldedWithin(parent, child string) bool {
 		return pathWithin(strings.ToLower(parent), strings.ToLower(child))
 	}
 	return pathWithin(parent, child)
+}
+
+// statusRefusal is the kept reason for a status that did not answer "clean":
+// a checkout git cannot see through (gitworktree.ErrHiddenState) says so,
+// anything else is an unreadable repository.
+func statusRefusal(err error) string {
+	if errors.Is(err, gitworktree.ErrHiddenState) {
+		return keptHiddenState
+	}
+	return keptRepoUnreadable
 }

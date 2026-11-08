@@ -150,3 +150,26 @@ func TestStatus_RealGit_LargeIndexIsStillChecked(t *testing.T) {
 		t.Errorf("status = %+v, %v; want a clean answer for a large index", st, err)
 	}
 }
+
+// A filesystem call that never answers (a dead network mount) cannot hold the
+// check past its deadline: fsWithin returns the context's error, which every
+// caller treats as "could not check".
+func TestFsWithin_HungCallReturnsAtTheDeadline(t *testing.T) {
+	hang := make(chan struct{})
+	t.Cleanup(func() { close(hang) })
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := fsWithin(ctx, func() (bool, error) { <-hang; return true, nil })
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("a call that never answered was accepted")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the check hung on a filesystem call that never returns")
+	}
+}

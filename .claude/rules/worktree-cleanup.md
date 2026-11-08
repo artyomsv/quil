@@ -169,6 +169,9 @@ object/namespace selectors and `GIT_CONFIG_PARAMETERS`/`GIT_CONFIG_COUNT`/
 `GIT_CONFIG_KEY_*`/`GIT_CONFIG_VALUE_*` are dropped, because the directory
 decides the checkout only while none of them says otherwise; a daemon started
 from a shell that had one set would check one checkout and remove another.
+Its filesystem calls (the top-level identity, the submodule `.git` stat) run
+through `fsWithin`, which stops waiting at the caller's deadline: a dead
+network mount must not hold the status single-flight slot.
 The index scan is STREAMED (`scanGitRecords`, one NUL record at a time), because
 a large monorepo's index is far past `runGit`'s 1 MiB cap and a buffered check
 would make every worktree there unremovable. The kept reason is

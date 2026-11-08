@@ -78,7 +78,11 @@ func checkStatusVisible(ctx context.Context, path string) error {
 	if err != nil {
 		return fmt.Errorf("git rev-parse in %s: %w", path, err)
 	}
-	if same, err := sameFile(strings.TrimSpace(top), path); err != nil || !same {
+	same, err := fsWithin(ctx, func() (bool, error) { return sameFile(strings.TrimSpace(top), path) })
+	if err != nil {
+		return fmt.Errorf("checking the top-level folder of %s: %w", path, err)
+	}
+	if !same {
 		return fmt.Errorf("%w: git's top-level folder is not this worktree", ErrHiddenState)
 	}
 	// STREAMED, one index entry at a time: the index of a large monorepo is
@@ -97,7 +101,7 @@ func checkStatusVisible(ctx context.Context, path string) error {
 		}
 		if mode == "160000" {
 			// Anything but a clear "no .git there" counts as populated.
-			if _, err := os.Lstat(filepath.Join(path, filepath.FromSlash(name), ".git")); !errors.Is(err, os.ErrNotExist) {
+			if _, err := fsWithin(ctx, func() (os.FileInfo, error) { return os.Lstat(filepath.Join(path, filepath.FromSlash(name), ".git")) }); !errors.Is(err, os.ErrNotExist) {
 				return fmt.Errorf("%w: submodule %s is populated", ErrHiddenState, name)
 			}
 		}
@@ -163,3 +167,27 @@ var scanGitRecords = func(ctx context.Context, dir string, fn func(string) error
 // maxScanRecord bounds one record: a path is at most a few KiB, so a longer
 // one is not an index entry.
 const maxScanRecord = 64 << 10
+
+// fsWithin runs one filesystem call on its own goroutine and stops waiting
+// when ctx ends: a stat on a network mount that stopped answering cannot be
+// interrupted, and the check must still return (as an error, so the
+// worktree is kept) by the caller's deadline. An abandoned call finishes on
+// its own when the mount answers.
+func fsWithin[T any](ctx context.Context, fn func() (T, error)) (T, error) {
+	type result struct {
+		v   T
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		v, err := fn()
+		ch <- result{v, err}
+	}()
+	select {
+	case r := <-ch:
+		return r.v, r.err
+	case <-ctx.Done():
+		var zero T
+		return zero, ctx.Err()
+	}
+}

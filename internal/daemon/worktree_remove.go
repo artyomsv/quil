@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -507,36 +508,75 @@ func (d *Daemon) paneInWorktree(path string, resolve bool) string {
 	return d.agentWT.paneInDir(path, within)
 }
 
+// resolveTimeout bounds ALL symlink resolution of one delete check: a pane
+// sitting on a dead network share must not hold the check — and with it the
+// cleanup slot — forever. A var so a test can shorten it.
+var resolveTimeout = 3 * time.Second
+
+// evalSymlinksFn is the resolution seam, so a test can make one path hang.
+var evalSymlinksFn = filepath.EvalSymlinks
+
 // resolvedWithin returns a pathWithin for parent that ALSO matches when the
 // two paths name the same real folder: parent and each child are compared
-// lexically and then with symlinks resolved. A child that cannot be resolved
-// (it no longer exists) is compared lexically only — a folder that is gone
-// holds nobody.
+// lexically and then with symlinks resolved, on ONE shared deadline and under
+// the process-wide filesystem-call limit. A child that does not exist is
+// compared lexically only (a folder that is gone holds nobody). Anything that
+// cannot be ANSWERED — a timeout, no permit, an unreadable component — counts
+// as a match: the worktree is kept rather than deleted on an unknown.
 func resolvedWithin(parent string) func(parent, child string) bool {
-	physParent := physicalPath(parent)
+	deadline := time.Now().Add(resolveTimeout)
+	physParent, parentOK := physicalPathBy(parent, deadline)
 	return func(p, child string) bool {
 		if pathWithin(p, child) {
 			return true
 		}
-		if physParent == "" {
-			return false
+		if !parentOK {
+			return true
 		}
-		pc := physicalPath(child)
-		return pc != "" && pathWithin(physParent, pc)
+		pc, ok := physicalPathBy(child, deadline)
+		if !ok {
+			return true
+		}
+		return physParent != "" && pc != "" && pathWithin(physParent, pc)
 	}
 }
 
-// physicalPath is path with every symlink resolved, or "" when it cannot be
-// (it does not exist, or a component is unreadable).
-func physicalPath(path string) string {
-	p, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return ""
+// physicalPathBy resolves path before deadline. ok is false when there was no
+// answer (timeout, no permit, an error other than "does not exist"); a path
+// that does not exist answers ("", true).
+func physicalPathBy(path string, deadline time.Time) (string, bool) {
+	d := time.Until(deadline)
+	if d <= 0 || !claimBlockingFSCall() {
+		return "", false
 	}
-	if abs, err := filepath.Abs(p); err == nil {
-		return abs
+	type result struct {
+		path string
+		ok   bool
 	}
-	return p
+	ch := make(chan result, 1)
+	go func() {
+		defer releaseBlockingFSCall()
+		p, err := evalSymlinksFn(path)
+		switch {
+		case err == nil:
+			if abs, aerr := filepath.Abs(p); aerr == nil {
+				p = abs
+			}
+			ch <- result{p, true}
+		case errors.Is(err, fs.ErrNotExist):
+			ch <- result{"", true}
+		default:
+			ch <- result{"", false}
+		}
+	}()
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case r := <-ch:
+		return r.path, r.ok
+	case <-timer.C:
+		return "", false
+	}
 }
 
 // pathWithin reports whether child is parent or sits below it.

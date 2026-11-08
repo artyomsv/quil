@@ -611,3 +611,39 @@ func TestPaneInWorktree_SeesResidentsThroughASymlink(t *testing.T) {
 		t.Errorf("lexical compare resolved a link: %q", got)
 	}
 }
+
+// A pane on a share that never answers cannot hold the delete check: the
+// resolution gives up on the shared deadline and the worktree is KEPT.
+//
+// Fails if the check resolves symlinks without a bound, or deletes on an
+// unanswered resolution.
+func TestPaneInWorktree_HungResolutionKeepsTheWorktreeAndReturns(t *testing.T) {
+	prevT, prevE := resolveTimeout, evalSymlinksFn
+	resolveTimeout = 50 * time.Millisecond
+	hang := make(chan struct{})
+	evalSymlinksFn = func(p string) (string, error) {
+		if p == "/mnt/dead" {
+			<-hang
+		}
+		return p, nil
+	}
+	t.Cleanup(func() { close(hang); resolveTimeout, evalSymlinksFn = prevT, prevE })
+
+	d := daemonWithRecord(t)
+	tab := d.session.CreateTab("t")
+	pane, err := d.session.CreatePane(tab.ID, "/mnt/dead")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan string, 1)
+	go func() { done <- d.paneInWorktree("/w/healthy", true) }()
+	select {
+	case got := <-done:
+		if got != pane.ID {
+			t.Errorf("paneInWorktree = %q, want the unanswered pane (keep the worktree)", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the delete check hung on an unanswered resolution")
+	}
+}

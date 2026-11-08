@@ -349,6 +349,10 @@ arrive in between.
 `resolvedWithin`): a pane CWD, a pane's recorded worktree and every agent or
 subagent probe directory is matched lexically AND with symlinks resolved, so a
 resident working through a link to the worktree keeps it. A path that no longer
-resolves is matched lexically only (a folder that is gone holds nobody). The
+resolves is matched lexically only (a folder that is gone holds nobody). All
+resolution of one check shares ONE deadline (`resolveTimeout`, 3 s) under the
+process-wide filesystem-call limit, and an UNANSWERED resolution (timeout, no
+permit, unreadable) counts as in use — a pane on a dead share keeps the
+worktree instead of hanging the cleanup slot. The
 cleanup view's `in use` hint passes `false`: it runs on a dispatch goroutine,
 where a filesystem call may not wait.

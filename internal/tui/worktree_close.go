@@ -24,6 +24,22 @@ type confirmWorktree struct {
 	changes int
 	err     string
 	loaded  bool
+
+	// The files the removal destroys, as the daemon listed them (remote text:
+	// sanitised at render).
+	files          []ipc.WorktreeFile
+	filesTruncated bool
+
+	// Branch facts, from the same answer. The dialog offers the branch rows
+	// only on facts it LOADED: branchDeletable is false until then.
+	branch          string
+	branchDeletable bool
+	branchReason    string
+	unmerged        int
+	// branchTip is the commit the branch pointed at when the facts were read;
+	// an accept echoes it so the daemon can refuse a branch that moved.
+	branchTip     string
+	defaultBranch string
 }
 
 // collectConfirmWorktrees reports the worktrees a close would delete.
@@ -55,7 +71,8 @@ func collectConfirmWorktrees(panes []*PaneModel) []confirmWorktree {
 			continue
 		}
 		seen[p.WorktreePath] = true
-		out = append(out, confirmWorktree{path: p.WorktreePath, label: confirmWorktreeLabel(p)})
+		row := confirmWorktree{path: p.WorktreePath, label: confirmWorktreeLabel(p)}
+		out = append(out, row)
 	}
 	return out
 }
@@ -181,8 +198,23 @@ func (m *Model) applyWorktreeStatus(msg worktreeStatusMsg) {
 			row.err = st.Error
 		default:
 			row.changes = st.Changes
+			row.files = st.Files
+			row.filesTruncated = st.FilesTruncated
+		}
+		if ok && msg.Resp.Error == "" {
+			// The branch half is independent of the file half: one can fail
+			// while the other answered, and each says so on its own row.
+			row.branch = st.Branch
+			row.branchDeletable = st.BranchDeletable
+			row.branchReason = st.BranchReason
+			row.unmerged = st.Unmerged
+			row.branchTip = st.BranchTip
+			row.defaultBranch = st.DefaultBranch
+		} else {
+			row.branchReason = "could not check the branch"
 		}
 	}
+	m.disarmUnreadWorktree()
 }
 
 // applyWorktreeStatusTimeout gives up on a request.
@@ -200,7 +232,9 @@ func (m *Model) applyWorktreeStatusTimeout(msg worktreeStatusTimeoutMsg) {
 	for i := range m.confirmWorktrees {
 		m.confirmWorktrees[i].loaded = true
 		m.confirmWorktrees[i].err = "could not check for uncommitted work"
+		m.confirmWorktrees[i].branchReason = "could not check the branch"
 	}
+	m.disarmUnreadWorktree()
 }
 
 // resetConfirmWorktrees clears every field the worktree row owns.
@@ -213,4 +247,8 @@ func (m *Model) resetConfirmWorktrees() {
 	m.confirmWorktrees = nil
 	m.confirmRemoveWorktree = false
 	m.confirmWorktreeGen = ""
+	m.confirmDeleteBranch = false
+	m.confirmRow = 0
+	m.confirmFileScroll = 0
+	m.confirmFileFocus = 0
 }

@@ -2,6 +2,7 @@ package gitworktree
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -216,11 +217,12 @@ func TestRemove_RealGit_UndoesAnAddCompletely(t *testing.T) {
 	}
 }
 
-// A dirty worktree must still be removable. It was created by the daemon
-// seconds ago and never handed to anyone, so there is no user work to protect —
-// and git refuses a plain remove on a checkout it considers dirty, which a
-// fresh one can be on a repository with line-ending differences.
-func TestRemove_RealGit_RemovesADirtyWorktree(t *testing.T) {
+// A dirty worktree is NOT removed, and neither is its branch: Remove is the
+// rollback's last line, and work that arrived after the caller's clean check
+// must survive it.
+//
+// Fails if Remove forces either step.
+func TestRemove_RealGit_RefusesADirtyWorktree(t *testing.T) {
 	repo := realGitRepo(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -236,11 +238,43 @@ func TestRemove_RealGit_RemovesADirtyWorktree(t *testing.T) {
 		t.Fatalf("add an untracked file: %v", err)
 	}
 
-	if err := Remove(ctx, repo, path, "feat/dirty"); err != nil {
-		t.Fatalf("Remove refused a dirty worktree: %v", err)
+	if err := Remove(ctx, repo, path, "feat/dirty"); !errors.Is(err, ErrWorktreeNotRemoved) {
+		t.Fatalf("Remove = %v, want ErrWorktreeNotRemoved", err)
+	}
+	if _, err := os.Stat(filepath.Join(path, "untracked.txt")); err != nil {
+		t.Errorf("the untracked file is gone: %v", err)
+	}
+	if out := runGitIn(t, repo, "branch", "--list", "feat/dirty"); strings.TrimSpace(out) == "" {
+		t.Error("the branch was deleted")
+	}
+}
+
+// A branch with a commit the repository's HEAD does not hold survives
+// Remove even when its checkout is clean: `branch -d` refuses it.
+//
+// Fails if Remove force-deletes the branch.
+func TestRemove_RealGit_KeepsAnUnmergedBranch(t *testing.T) {
+	repo := realGitRepo(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	path := DerivePath(repo, "feat/work")
+	if _, err := Add(ctx, repo, path, "feat/work"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "w.txt"), []byte("w\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitIn(t, path, "add", "w.txt")
+	runGitIn(t, path, "commit", "-q", "-m", "work")
+
+	if err := Remove(ctx, repo, path, "feat/work"); !errors.Is(err, ErrBranchNotDeleted) {
+		t.Fatalf("Remove = %v, want ErrBranchNotDeleted", err)
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Errorf("the dirty worktree survived Remove: %v", err)
+		t.Errorf("the clean checkout was not removed: %v", err)
+	}
+	if out := runGitIn(t, repo, "log", "-1", "--format=%s", "feat/work"); strings.TrimSpace(out) != "work" {
+		t.Errorf("branch tip = %q, want the commit to survive", out)
 	}
 }
 
@@ -536,8 +570,8 @@ func TestStatus_RealGit_CountsModifiedAndUntrackedFiles(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	if got, err := Status(ctx, path); err != nil || got != 0 {
-		t.Fatalf("Status on a fresh worktree = %d, %v; want 0, nil", got, err)
+	if got, err := Status(ctx, path); err != nil || got.Changes != 0 {
+		t.Fatalf("Status on a fresh worktree = %d, %v; want 0, nil", got.Changes, err)
 	}
 
 	if err := os.WriteFile(filepath.Join(path, "f.txt"), []byte("modified\n"), 0o644); err != nil {
@@ -550,8 +584,16 @@ func TestStatus_RealGit_CountsModifiedAndUntrackedFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Status: %v", err)
 	}
-	if got != 2 {
-		t.Errorf("Status = %d, want 2 (one modified + one untracked)", got)
+	if got.Changes != 2 {
+		t.Errorf("Status = %d, want 2 (one modified + one untracked)", got.Changes)
+	}
+	// The report NAMES what it counted, so the dialog can list it.
+	names := map[string]string{}
+	for _, f := range got.Files {
+		names[f.Path] = f.Code
+	}
+	if names["f.txt"] != " M" || names["untracked.txt"] != "??" {
+		t.Errorf("Files = %#v, want f.txt as \" M\" and untracked.txt as \"??\"", got.Files)
 	}
 }
 
@@ -613,11 +655,11 @@ func TestStatus_RealGit_CountsIgnoredFilesToo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Status: %v", err)
 	}
-	if got == 0 {
+	if got.Changes == 0 {
 		t.Fatal("Status = 0 for a worktree holding an ignored .env and build/ — the dialog would call this clean and then delete both")
 	}
-	if got != 2 {
-		t.Errorf("Status = %d, want 2 (.env plus the collapsed build/ directory)", got)
+	if got.Changes != 2 {
+		t.Errorf("Status = %d, want 2 (.env plus the collapsed build/ directory)", got.Changes)
 	}
 }
 
@@ -769,5 +811,132 @@ func TestBranches_RealGit_UnaffectedByASameNamedTag(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("Branches() = %v, want the plain branch name %q a user would type", got, "dup")
+	}
+}
+
+// PINS A RESIDUAL, not a safety property: plain `git worktree remove` does not
+// count IGNORED files as unclean, so a checkout holding only an ignored file
+// is removed with it. The rollback's own status check (with --ignored) is what
+// keeps such a checkout; anything ignored that lands after that check is lost
+// with the folder. This test says nothing about timing.
+func TestRemove_RealGit_IgnoredFilesAreNotGuardedByGit(t *testing.T) {
+	repo := realGitRepo(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("*.env\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitIn(t, repo, "add", ".gitignore")
+	runGitIn(t, repo, "commit", "-q", "-m", "ignore env")
+	path := DerivePath(repo, "feat/env")
+	if _, err := Add(ctx, repo, path, "feat/env"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "local.env"), []byte("SECRET=1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Remove(ctx, repo, path, "feat/env"); err != nil {
+		t.Fatalf("Remove: %v (the residual changed: git now guards ignored files)", err)
+	}
+	if _, err := os.Stat(filepath.Join(path, "local.env")); !os.IsNotExist(err) {
+		t.Errorf("the ignored file survived (%v): update the documented residual", err)
+	}
+}
+
+// The facts carry the branch's TIP, the commit a confirmed -D would discard
+// down to: a delete is refused once it moves.
+func TestReadBranchFactsFor_RealGit_CarriesTheTip(t *testing.T) {
+	repo := realGitRepo(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	path := DerivePath(repo, "feat/tip")
+	if _, err := Add(ctx, repo, path, "feat/tip"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	f, err := ReadBranchFactsFor(ctx, repo, "feat/tip", "refs/heads/master")
+	if err != nil {
+		t.Fatalf("facts: %v", err)
+	}
+	want := strings.TrimSpace(runGitIn(t, repo, "rev-parse", "refs/heads/feat/tip"))
+	if f.Tip != want {
+		t.Errorf("tip = %q, want %q", f.Tip, want)
+	}
+	if err := os.WriteFile(filepath.Join(path, "n.txt"), []byte("n\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitIn(t, path, "add", "n.txt")
+	runGitIn(t, path, "commit", "-q", "-m", "n")
+	if g, _ := ReadBranchFactsFor(ctx, repo, "feat/tip", "refs/heads/master"); g.Tip == f.Tip {
+		t.Error("the tip did not move with a new commit")
+	}
+}
+
+// The caller names the worktree through a LINK to the repository (git
+// records the resolved path): the facts still find it, by folder identity,
+// instead of answering "not a worktree of this repository".
+//
+// Fails if ReadBranchFacts matches git's listing by spelling alone.
+func TestReadBranchFacts_RealGit_LinkedRepoRootStillFindsTheWorktree(t *testing.T) {
+	repo := realGitRepo(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	link := filepath.Join(t.TempDir(), "repo-link")
+	if err := os.Symlink(repo, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	path := DerivePath(link, "feat/l")
+	if _, err := Add(ctx, link, path, "feat/l"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	f, err := ReadBranchFacts(ctx, link, path, "refs/heads/master")
+	if err != nil {
+		t.Fatalf("facts through a linked repo root: %v", err)
+	}
+	if f.Branch != "feat/l" {
+		t.Errorf("branch = %q, want feat/l", f.Branch)
+	}
+}
+
+// status.showUntrackedFiles=no hides untracked AND ignored files from a plain
+// `git status`. The removal's safety status pins untracked listing, so both
+// are still counted.
+//
+// Fails if Status honours a config that hides what a removal would destroy.
+func TestStatus_RealGit_CountsUntrackedAndIgnoredDespiteConfig(t *testing.T) {
+	repo := realGitRepo(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("*.env\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitIn(t, repo, "add", ".gitignore")
+	runGitIn(t, repo, "commit", "-q", "-m", "ignore env")
+	runGitIn(t, repo, "config", "status.showUntrackedFiles", "no")
+	path := DerivePath(repo, "feat/cfg")
+	if _, err := Add(ctx, repo, path, "feat/cfg"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	for _, f := range []string{"note.txt", "local.env"} {
+		if err := os.WriteFile(filepath.Join(path, f), []byte("x\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	st, err := Status(ctx, path)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if st.Changes != 2 {
+		t.Errorf("changes = %d, want 2 (an untracked and an ignored file)", st.Changes)
+	}
+	// And the unforced removal's own clean check is not blinded either.
+	if err := os.Remove(filepath.Join(path, "local.env")); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveCleanWorktree(ctx, repo, path); err == nil {
+		t.Error("RemoveCleanWorktree removed a checkout holding an untracked file")
+	}
+	if _, err := os.Stat(filepath.Join(path, "note.txt")); err != nil {
+		t.Errorf("the untracked file is gone: %v", err)
 	}
 }

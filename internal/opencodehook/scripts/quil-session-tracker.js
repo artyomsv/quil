@@ -19,7 +19,7 @@
 // a no-op. Safe to delete — Quil recreates it on next daemon start.
 
 import { writeFile, rename, mkdir, unlink, appendFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 
 const PANE_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
@@ -43,8 +43,16 @@ const RATE_BURST = 50;
 // batch them in this window and emit a single "Edited N files" event.
 const FILE_EDITED_BATCH_MS = 1000;
 
-export default async function quilSessionTracker(_input) {
+// Worktree probe. Must stay byte-equal to hookevents.WorktreeCommandPattern
+// (Go): TestOpencodeScript_ProbeRegexMatchesGo compares them.
+const WORKTREE_COMMAND_RE = /worktree|git\s+branch\s|checkout\s+-[bB]|switch\s+-[cC]|push\b.*(--delete|\s:)/i;
+const MAX_PROBE_DIR_BYTES = 1024;
+
+export default async function quilSessionTracker(input) {
   const paneId = process.env.QUIL_PANE_ID || "";
+  // The session's directory. A bash call's `workdir` is RELATIVE to it as the
+  // model wrote it (measured, opencode 1.18.32), and absent for the default.
+  const baseDir = (input && input.directory) || process.cwd();
   const quilHome = process.env.QUIL_HOOK_HOME || process.env.QUIL_HOME || "";
   // Tier gate: "default" forwards the standard event set, "verbose" would
   // add tier-2 (tool.execute.before/after for read-only tools — currently
@@ -161,7 +169,7 @@ export default async function quilSessionTracker(_input) {
 
   // Emit one Payload to the spool file. Best-effort; failures land in the
   // hook log but never block the opencode runtime.
-  const spool = async (hookEvent, title, sev, data) => {
+  const spool = async (hookEvent, title, sev, data, cwd) => {
     // Off-mode short-circuit: keep session-id tracking alive but drop the
     // notification event surface entirely. The user opted out.
     if (hookMode === "off") return;
@@ -179,6 +187,7 @@ export default async function quilSessionTracker(_input) {
     };
     const td = truncateData(data);
     if (td && Object.keys(td).length > 0) payload.data = td;
+    if (cwd) payload.cwd = cwd;
 
     let line;
     try {
@@ -379,6 +388,30 @@ export default async function quilSessionTracker(_input) {
         await spool("chat.message", "Working…", "info", {});
       } catch (e) {
         await logLine("chat.message handler error: " + (e && e.message ? e.message : String(e)));
+      }
+    },
+
+    // tool.execute.after — the worktree probe. opencode has no worktree tool
+    // and sends no worktree event: its agent uses the shell, so a bash call
+    // whose command can make, remove or switch a worktree or branch is the
+    // one thing spooled, naming the directory it ran in. The daemon compares
+    // that repository's worktree list; this line is only the trigger.
+    "tool.execute.after": async (input, _output) => {
+      try {
+        if (!input || input.tool !== "bash") return;
+        const args = input.args || {};
+        const cmd = typeof args.command === "string" ? args.command : "";
+        if (!WORKTREE_COMMAND_RE.test(cmd)) return;
+        const dir = resolve(baseDir, typeof args.workdir === "string" && args.workdir !== "" ? args.workdir : ".");
+        if (Buffer.byteLength(dir, "utf8") > MAX_PROBE_DIR_BYTES) {
+          // Dropped, never cut: a truncated path names another directory.
+          await logLine("worktree probe dropped: directory over the cap");
+          return;
+        }
+        // The command text is not spooled: it can carry a credential.
+        await spool("WorktreeProbe", "Worktree command", "info", { trigger: "shell" }, dir);
+      } catch (e) {
+        await logLine("tool.execute.after handler error: " + (e && e.message ? e.message : String(e)));
       }
     },
 

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/artyomsv/quil/internal/gitworktree"
 	"github.com/artyomsv/quil/internal/ipc"
 )
 
@@ -15,11 +16,23 @@ func stubWorktreeStatus(t *testing.T, fn func(path string) (int, error)) *[]cont
 	t.Helper()
 	var ctxs []context.Context
 	prev := worktreeStatusFn
-	worktreeStatusFn = func(ctx context.Context, path string) (int, error) {
+	worktreeStatusFn = func(ctx context.Context, path string) (gitworktree.StatusReport, error) {
 		ctxs = append(ctxs, ctx)
-		return fn(path)
+		n, err := fn(path)
+		return gitworktree.StatusReport{Changes: n}, err
 	}
 	t.Cleanup(func() { worktreeStatusFn = prev })
+	// The branch half lists the repository too; answer "not a repository" so
+	// a change-count test never shells out to a real git. Tests of the branch
+	// half restub this after calling here.
+	prevList := worktreeListFn
+	worktreeListFn = func(context.Context, string) ([]gitworktree.Worktree, error) { return nil, nil }
+	t.Cleanup(func() { worktreeListFn = prevList })
+	// The identity check passes: the owned panes these tests build carry a
+	// test token, and the mark itself is not what they are about.
+	prevMark := ownerMarkMatchesFn
+	ownerMarkMatchesFn = func(context.Context, string, string) (bool, error) { return true, nil }
+	t.Cleanup(func() { ownerMarkMatchesFn = prevMark })
 	return &ctxs
 }
 
@@ -202,6 +215,7 @@ func TestWorktreeStatusReq_IsDispatchedAndAnswered(t *testing.T) {
 	}
 	pane.WorktreeOwned = true
 	pane.WorktreePath = "/w/feat-a"
+	pane.WorktreeToken = "test-token"
 
 	c, err := ipc.NewClient(sock)
 	if err != nil {
@@ -272,6 +286,7 @@ func TestWorktreeStatusResponse_AnswersOnlyAboutOwnedWorktrees(t *testing.T) {
 	}
 	pane.WorktreeOwned = true
 	pane.WorktreePath = "/w/feat-a"
+	pane.WorktreeToken = "test-token"
 
 	var asked []string
 	stubWorktreeStatus(t, func(path string) (int, error) {

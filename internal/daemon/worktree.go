@@ -19,6 +19,11 @@ var worktreeListTimeout = 10 * time.Second
 // git binary. Same pattern as gitProbeFn/gitDirsFn in gitcache.go.
 var worktreeListFn = gitworktree.List
 
+// worktreeListStrictFn is the listing for callers that must tell "no
+// repository" from "could not read it" (gitworktree.ListStrict): the
+// agent-worktree baseline and worktreeRegistered.
+var worktreeListStrictFn = gitworktree.ListStrict
+
 // worktreeBranchesFn is the same seam for the branch listing that rides along
 // with it.
 var worktreeBranchesFn = gitworktree.Branches

@@ -69,12 +69,16 @@ var plainEventGroups = map[string]string{
 	"input_blocked":          System,
 	// Hand-started agents. System rather than process: these report what Quil
 	// did about a launch, not what a program did.
-	"agent_adopted":    System,
-	"agent_untracked":  System,
-	"worktree_ready":   System,
-	"worktree_failed":  System,
-	"command_complete": Commands,
-	"output_idle":      Idle,
+	"agent_adopted":   System,
+	"agent_untracked": System,
+	"worktree_ready":  System,
+	"worktree_failed": System,
+	// A close's branch delete: done, or kept with the reason.
+	"worktree_branch_deleted": System,
+	"worktree_branch_kept":    System,
+	"worktree_kept":           System,
+	"command_complete":        Commands,
+	"output_idle":             Idle,
 }
 
 // Group classifies one PaneEvent Type.

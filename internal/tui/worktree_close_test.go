@@ -121,6 +121,8 @@ func TestConfirmKey_EnterSendsTheRemoveFlagWhenArmed(t *testing.T) {
 	m := modelWithWorktreePane()
 	m = applyModel(m.openClosePaneConfirm())
 	m = applyModel(m.handleConfirmKey(keyPressFor(" ")))
+	// The status answered (Enter waits for it while the worktree is ticked).
+	m.confirmWorktrees[0].loaded = true
 
 	fake := &fakeSender{}
 	m.client = fake
@@ -516,5 +518,60 @@ func TestOpenRestartPaneConfirm_ClearsAnyWorktreeStateFromABeforeDialog(t *testi
 	if len(got.confirmWorktrees) != 0 || got.confirmRemoveWorktree {
 		t.Errorf("the restart confirm inherited worktree state: rows=%+v armed=%v",
 			got.confirmWorktrees, got.confirmRemoveWorktree)
+	}
+}
+
+// A worktree whose files were never READ is never deleted. Armed while the
+// check runs, then the check times out (or answers an error): the row is
+// UNTICKED with its reason, cannot be re-armed, a late answer does not enable
+// it, and Enter closes the pane keeping the worktree.
+//
+// Fails if a loaded-with-an-error row counts as inspected.
+func TestConfirmKey_UnreadFilesNeverDeleteTheWorktree(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		settle func(m *Model)
+	}{
+		{"timeout", func(m *Model) {
+			m.applyWorktreeStatusTimeout(worktreeStatusTimeoutMsg{gen: m.confirmWorktreeGen})
+		}},
+		{"error", func(m *Model) {
+			m.applyWorktreeStatus(worktreeStatusMsg{Gen: m.confirmWorktreeGen, Resp: ipc.WorktreeStatusRespPayload{
+				Statuses: []ipc.WorktreeStatus{{Path: "/w/feat-a", Error: "git status failed"}}}})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := modelWithWorktreePane()
+			m = applyModel(m.openClosePaneConfirm())
+			gen := m.confirmWorktreeGen
+			m = applyModel(m.handleConfirmKey(keyPressFor(" "))) // armed while pending
+			tc.settle(&m)
+			// A late real answer for the same request is not applied.
+			m.applyWorktreeStatus(worktreeStatusMsg{Gen: gen, Resp: ipc.WorktreeStatusRespPayload{
+				Statuses: []ipc.WorktreeStatus{{Path: "/w/feat-a", Changes: 0}}}})
+
+			// The failed check UNTICKED the row — the box drawn empty is empty.
+			if m.confirmRemoveWorktree {
+				t.Fatal("the row stayed armed underneath an empty box after the check failed")
+			}
+			if !strings.Contains(stripANSI(m.renderConfirmDialog()), "kept: files not read") {
+				t.Errorf("the row does not say why:\n%s", stripANSI(m.renderConfirmDialog()))
+			}
+			m = applyModel(m.handleConfirmKey(keyPressFor(" "))) // try to re-arm
+			if m.confirmRemoveWorktree {
+				t.Fatal("the row re-armed although the files are unknown")
+			}
+
+			fake := &fakeSender{}
+			m.client = fake
+			_, cmd := m.handleConfirmKey(keyPressFor("enter"))
+			if cmd != nil {
+				cmd()
+			}
+			var payload ipc.DestroyPanePayload
+			if !decodeSent(t, fake, ipc.MsgDestroyPane, &payload) || payload.RemoveWorktree {
+				t.Errorf("payload = %+v, want a close that keeps the worktree", payload)
+			}
+		})
 	}
 }

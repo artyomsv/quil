@@ -62,6 +62,11 @@ var classes = map[string]Class{
 	ipc.MsgKillProcessReq: ClassAdmin, ipc.MsgStageUpdateReq: ClassAdmin, ipc.MsgUpdateCheckReq: ClassAdmin,
 	ipc.MsgPluginUpdateReq: ClassAdmin,
 
+	// act: the agent-worktree record discloses paths on the daemon's disk,
+	// and acting on it deletes them (agent_worktree_act_req's uncertain-record
+	// acknowledgment is refused to a standard token by carriesUncertainAck).
+	ipc.MsgAgentWorktreesReq: ClassAct, ipc.MsgAgentWorktreeFactsReq: ClassAct, ipc.MsgAgentWorktreeActReq: ClassAct,
+
 	// local
 	ipc.MsgTokenCreateReq: ClassLocal, ipc.MsgTokenListReq: ClassLocal, ipc.MsgTokenRevokeReq: ClassLocal,
 }
@@ -77,6 +82,7 @@ var neverAccepted = map[string]bool{
 	ipc.MsgKillProcessResp: true, ipc.MsgPaneHistoryResp: true, ipc.MsgPaneHistoryEntryResp: true,
 	ipc.MsgPaneSearchResp: true, ipc.MsgClaudeSessionsResp: true, ipc.MsgClaudeSessionDetailResp: true,
 	ipc.MsgBrowseDirResp: true, ipc.MsgGitReposResp: true, ipc.MsgWorktreeListResp: true,
+	ipc.MsgAgentWorktreesResp: true, ipc.MsgAgentWorktreeFactsResp: true, ipc.MsgAgentWorktreeActResp: true,
 	ipc.MsgWorktreeStatusResp: true, ipc.MsgDirsExistResp: true, ipc.MsgSandboxCapResp: true, ipc.MsgPasteImageResp: true,
 	ipc.MsgStageUpdateResp: true, ipc.MsgKubeCtxResp: true, ipc.MsgPluginListResp: true,
 	ipc.MsgListProjectsResp: true, ipc.MsgCreateProjectResp: true, ipc.MsgProjectOpResp: true,
@@ -178,7 +184,29 @@ func checkStandardPayload(msg *ipc.Message) (bool, string) {
 	case overlay:
 		return false, "overlay panes need full rights"
 	}
+	uncertain, ok := carriesUncertainAck(msg)
+	switch {
+	case !ok:
+		return false, "malformed " + msg.Type
+	case uncertain:
+		return false, "confirming a cleanup in an uncertain repository needs a full token"
+	}
 	return true, ""
+}
+
+// carriesUncertainAck reports a cleanup act that acknowledges an uncertain
+// repository record. That acknowledgment stands for a person pressing y, so
+// a standard token, which a non-interactive client holds, cannot send it.
+// ok is false only for a payload that is present and does not decode.
+func carriesUncertainAck(msg *ipc.Message) (uncertain, ok bool) {
+	if msg.Type != ipc.MsgAgentWorktreeActReq {
+		return false, true
+	}
+	var p ipc.AgentWorktreeActReqPayload
+	if !decodeIfPresent(msg, &p) {
+		return false, false
+	}
+	return p.AcceptUncertain, true
 }
 
 // carriers decodes the five create shapes. ok is false only for a payload

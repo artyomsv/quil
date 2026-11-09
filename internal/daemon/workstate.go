@@ -56,6 +56,8 @@ func (d *Daemon) applyWorkEvent(pane *Pane, e PaneEvent) hookevents.Transition {
 		}
 		subs := pane.idleSubs
 		pane.idleSubs = nil
+		// (Subagent worktree records of the dead child are cleared in
+		// onPaneExitGeneration, bound to its PTY generation.)
 		go func() {
 			for _, fn := range subs {
 				fn(true)
@@ -87,7 +89,14 @@ func (d *Daemon) settleIdle(paneID string) {
 	aborted := pane.Work.Aborted()
 	subs := pane.idleSubs
 	pane.idleSubs = nil
+	// Taken while idle is confirmed: a probe of a turn that starts after
+	// this unlock is newer and survives the clear below.
+	idleAt := time.Now()
 	pane.workMu.Unlock()
+
+	// Every subagent has finished (or the process died): none of them works
+	// in a worktree any more.
+	d.agentWT.subagentsDone(paneID, idleAt)
 
 	if aborted {
 		for _, fn := range subs {

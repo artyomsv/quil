@@ -556,6 +556,30 @@ type DestroyPanePayload struct {
 	// existing producer — the MCP destroy_pane tool, the overlay teardown, an
 	// older client — non-destructive without knowing this field exists.
 	RemoveWorktree bool `json:"remove_worktree,omitempty"`
+
+	// DeleteBranch asks the daemon to delete, after the worktree is gone, the
+	// LOCAL branch it had checked out. A bool, like RemoveWorktree: the daemon
+	// reads the branch from git itself. It needs RemoveWorktree. Quil never
+	// deletes a branch on a remote.
+	//
+	// Confirmations is CHECK-ONLY: per worktree, the branch the dialog showed.
+	// The daemon deletes what it reads from git itself, and only when it
+	// matches the confirmation for THAT worktree — so a worktree switched to
+	// another branch keeps it, and one row cannot confirm another's.
+	DeleteBranch  bool                 `json:"delete_branch,omitempty"`
+	Confirmations []BranchConfirmation `json:"confirmations,omitempty"`
+}
+
+// BranchConfirmation is what a dialog showed for one worktree's branch. Every
+// field is compared with what the daemon reads from git; none is acted on.
+// WorktreePath is "" for a branch with no worktree (agent cleanup).
+type BranchConfirmation struct {
+	WorktreePath string `json:"worktree_path,omitempty"`
+	Branch       string `json:"branch"`
+	// Tip is WorktreeStatus.BranchTip as the dialog showed it. The daemon
+	// deletes only while the branch still points there; empty never matches a
+	// real branch, so an older client cannot delete a branch at all.
+	Tip string `json:"tip,omitempty"`
 }
 
 type ResizePanePayload struct {
@@ -702,6 +726,9 @@ type DestroyTabPayload struct {
 	// DestroyPanePayload.RemoveWorktree for why this is a bool rather than a
 	// list of paths.
 	RemoveWorktree bool `json:"remove_worktree,omitempty"`
+	// Branch deletes: see DestroyPanePayload.
+	DeleteBranch  bool                 `json:"delete_branch,omitempty"`
+	Confirmations []BranchConfirmation `json:"confirmations,omitempty"`
 }
 
 type SwitchTabPayload struct {
@@ -2117,6 +2144,32 @@ type WorktreeStatus struct {
 	Path    string `json:"path"`
 	Changes int    `json:"changes,omitempty"`
 	Error   string `json:"error,omitempty"`
+
+	// Files names the first entries Changes counts (git's two-character code
+	// and the path relative to the worktree); FilesTruncated says there are
+	// more than were listed. Remote text: render-time sanitising applies.
+	Files          []WorktreeFile `json:"files,omitempty"`
+	FilesTruncated bool           `json:"files_truncated,omitempty"`
+
+	// Branch facts, read from local refs only. BranchDeletable is false, with
+	// BranchReason, for a detached checkout, the default branch, or facts that
+	// could not be read — the dialog offers the local delete only when true.
+	Branch          string `json:"branch,omitempty"`
+	BranchDeletable bool   `json:"branch_deletable,omitempty"`
+	BranchReason    string `json:"branch_reason,omitempty"`
+	// Unmerged counts commits on Branch that DefaultBranch lacks.
+	Unmerged      int    `json:"unmerged,omitempty"`
+	DefaultBranch string `json:"default_branch,omitempty"`
+	// BranchTip is the commit Branch pointed at when these facts were read. A
+	// client confirming the delete echoes it in BranchConfirmation.Tip, and the
+	// daemon refuses the delete once the branch has moved.
+	BranchTip string `json:"branch_tip,omitempty"`
+}
+
+// WorktreeFile is one entry of a worktree's `git status`.
+type WorktreeFile struct {
+	Code string `json:"code"`
+	Path string `json:"path"`
 }
 
 // WorktreeStatusRespPayload answers a status request.

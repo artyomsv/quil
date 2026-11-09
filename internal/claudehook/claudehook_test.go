@@ -79,7 +79,9 @@ func TestBuildSettingsJSON_PostToolUseHasMatcher(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildSettingsJSON: %v", err)
 	}
-	for _, want := range []string{`"PostToolUse"`, `"matcher":"` + promptToolMatcher + `"`} {
+	// The worktree tools ride the same matcher for the worktree probe; still
+	// a named list, never match-all.
+	for _, want := range []string{`"PostToolUse"`, `"matcher":"AskUserQuestion|ExitPlanMode|Bash|EnterWorktree|ExitWorktree"`} {
 		if !strings.Contains(js, want) {
 			t.Errorf("BuildSettingsJSON missing %q in output: %s", want, js)
 		}

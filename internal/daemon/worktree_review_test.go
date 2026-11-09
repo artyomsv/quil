@@ -26,8 +26,21 @@ func stubRemove(t *testing.T, fn func(ctx context.Context, repo, path, branch st
 		}
 		return fn(ctx, repo, path, branch)
 	}
+	// These tests are about WHETHER and WHAT the rollback removes once it
+	// decided to; the guard in front of it (abandonRefusal) has its own tests.
 	t.Cleanup(func() { removeWorktreeFn = prev })
+	allowRollback(t)
 	return &calls
+}
+
+// allowRollback lets an abandoned create's rollback through its guard
+// (abandonRefusal), for tests about WHETHER and WHAT the rollback removes once
+// it decided to. The guard has its own tests.
+func allowRollback(t *testing.T) {
+	t.Helper()
+	prev := abandonRefusalFn
+	abandonRefusalFn = func(*Daemon, string, string, string, string) string { return "" }
+	t.Cleanup(func() { abandonRefusalFn = prev })
 }
 
 // realRepoDir returns an existing directory to stand in for a repository root.

@@ -211,7 +211,9 @@ func TestConfigOverrideArgs_IsOneCFlag(t *testing.T) {
 	}
 }
 
-func TestRegisteredEvents_NoDuplicatesNoPostToolUseNoInterrupt(t *testing.T) {
+// PostToolUse is registered for the worktree probe (it spools nothing else);
+// Interrupt is still absent.
+func TestRegisteredEvents_NoDuplicatesNoInterrupt(t *testing.T) {
 	t.Parallel()
 	seen := map[string]bool{}
 	for _, ev := range registeredEvents {
@@ -219,11 +221,11 @@ func TestRegisteredEvents_NoDuplicatesNoPostToolUseNoInterrupt(t *testing.T) {
 			t.Errorf("duplicate event %s", ev.name)
 		}
 		seen[ev.name] = true
-		if ev.name == "PostToolUse" || ev.name == "Interrupt" {
+		if ev.name == "Interrupt" {
 			t.Errorf("%s must not be registered in v1 (see the design spec)", ev.name)
 		}
 	}
-	for _, want := range []string{"SessionStart", "SessionEnd", "UserPromptSubmit", "PermissionRequest", "PreToolUse", "Stop", "SubagentStart", "SubagentStop", "PreCompact", "PostCompact"} {
+	for _, want := range []string{"SessionStart", "SessionEnd", "UserPromptSubmit", "PermissionRequest", "PreToolUse", "PostToolUse", "Stop", "SubagentStart", "SubagentStop", "PreCompact", "PostCompact"} {
 		if !seen[want] {
 			t.Errorf("missing event %s", want)
 		}

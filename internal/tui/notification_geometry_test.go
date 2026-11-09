@@ -578,3 +578,30 @@ func TestNotificationLines_FallsBackWhenTheLocatorHasNoName(t *testing.T) {
 		t.Errorf("card lost the event's own pane name:\n%s", joined)
 	}
 }
+
+// A rollback card can be the ONLY report of what an abandoned worktree create
+// left behind (a recovered MCP split or new tab, a template), and its source
+// pane is usually gone. At the default sidebar width (inner 28 cells) its
+// outcome-first title and message must survive the one-line cut whole.
+//
+// The texts below are COPIES of the daemon's (tui cannot import daemon); the
+// daemon's own TestWorktreeAddAndCreate_RollbackRefusedByGitIsReported pins
+// those to 26 cells. This test pins the RENDERER: it fails if the card at
+// the default width cuts a 26-cell outcome, or hides it for a gone source.
+func TestNotificationLines_RollbackOutcomeFitsTheDefaultWidth(t *testing.T) {
+	for _, c := range []struct{ title, message string }{
+		{"Branch kept: feat/x", "folder gone, branch kept"},
+		{"Cleanup incomplete: wt", "folder may remain; see log"},
+		{"Cleanup incomplete: wt", "cleanup failed; see log"},
+	} {
+		out := renderedText(notificationLines(
+			[]ipc.PaneEventPayload{geomEvent("TEST-1", c.title, c.message)},
+			28, 0, false, deadLoc,
+		))
+		for _, want := range []string{c.title, c.message, "(closed)"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("card at the default width lost %q:\n%s", want, out)
+			}
+		}
+	}
+}

@@ -20,7 +20,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -63,6 +66,11 @@ type Worktree struct {
 var runGit = func(ctx context.Context, dir string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, gitBinary, args...)
 	cmd.Dir = dir
+	// The directory decides which checkout git acts on ONLY while no inherited
+	// selector (GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, GIT_CONFIG_*) says
+	// otherwise: stripped, or a safety check reads one checkout and a removal
+	// acts on another (cleanGitEnv).
+	cmd.Env = cleanGitEnv(os.Environ())
 	hideWindow(cmd)
 	cmd.WaitDelay = gitWaitDelay
 	// cmd.Output() would buffer the WHOLE of stdout with no cap. Only stderr is
@@ -384,28 +392,38 @@ func Add(ctx context.Context, repo, path, branch string) (string, error) {
 // Remove undoes an Add whose pane could not be created, and deletes the branch
 // that Add made along with it.
 //
-// This is the ONE place --force is right, and for a reason that does not
-// generalise to Add: the worktree being removed was created by this daemon
-// seconds ago and has never been handed to anyone, so there is no user work to
-// protect — while without it git refuses to remove a worktree it considers
-// dirty, which a fresh checkout can be on a repository with line-ending or
-// filemode differences. Leaving it instead strands a full checkout on disk plus
-// a branch pointing at it, and the next attempt at the same name then fails
-// with "already exists" against a directory the user never made.
-//
-// Best-effort by contract: the caller is already reporting a failure and this
-// is cleanup, so the error is for the log, not for the user.
+// NEITHER step forces, and that NARROWS loss rather than preventing it. The
+// caller has checked the checkout is clean and the branch holds nothing
+// unmerged, but a check is a snapshot. A plain `git worktree remove` refuses a
+// checkout git's OWN status calls unclean (modified or untracked files), and
+// `git branch -d` refuses a branch that is not merged. It is not atomic: git
+// runs its clean check and THEN deletes recursively, so a tracked or untracked
+// file written between the two is deleted, and git's check omits IGNORED files
+// altogether (TestRemove_RealGit_IgnoredFilesAreNotGuardedByGit). Startup,
+// status on a large repository and the delete itself bound none of this to a
+// short interval. The outcome short of success is typed
+// (ErrWorktreeNotRemoved, ErrBranchNotDeleted) so the caller can report it.
+// (It used to force: a fresh checkout can look dirty on a repository with
+// line-ending differences, and the caller now keeps a dirty one instead.)
 func Remove(ctx context.Context, repo, path string, branch string) error {
-	if err := RemoveWorktree(ctx, repo, path); err != nil {
-		return err
+	if _, err := runGit(ctx, repo, "-c", "status.showUntrackedFiles=normal", "-c", "core.fsmonitor=false", "worktree", "remove", "--", path); err != nil {
+		return fmt.Errorf("%w: git worktree remove %s: %v", ErrWorktreeNotRemoved, path, err)
 	}
 	// Only after the worktree is gone: git refuses to delete a branch that a
 	// worktree still has checked out, so the order is load-bearing.
-	if _, err := runGit(ctx, repo, "branch", "-D", branch); err != nil {
-		return fmt.Errorf("git branch -D %s: %w", branch, err)
+	if _, err := runGit(ctx, repo, "branch", "-d", "--", branch); err != nil {
+		return fmt.Errorf("%w: git branch -d %s: %v", ErrBranchNotDeleted, branch, err)
 	}
 	return nil
 }
+
+// Remove's two outcomes short of success, so a caller can say which one
+// happened without parsing git's text: nothing was removed, or the checkout
+// was removed and its branch kept.
+var (
+	ErrWorktreeNotRemoved = errors.New("the worktree was not removed")
+	ErrBranchNotDeleted   = errors.New("the worktree was removed but its branch was kept")
+)
 
 // RemoveWorktree deletes a linked worktree's directory and git registration,
 // and LEAVES ITS BRANCH ALONE. repo is the directory the command runs in.
@@ -428,6 +446,17 @@ func Remove(ctx context.Context, repo, path string, branch string) error {
 // makes it a property of the call.
 func RemoveWorktree(ctx context.Context, repo, path string) error {
 	if _, err := runGit(ctx, repo, "worktree", "remove", "--force", "--", path); err != nil {
+		return fmt.Errorf("git worktree remove %s: %w", path, err)
+	}
+	return nil
+}
+
+// RemoveCleanWorktree is RemoveWorktree WITHOUT --force, for a removal nobody
+// confirmed against the file list: git refuses a checkout holding modified or
+// untracked files (ignored files are the caller's to check — git does not).
+// The branch is left alone, as with RemoveWorktree.
+func RemoveCleanWorktree(ctx context.Context, repo, path string) error {
+	if _, err := runGit(ctx, repo, "-c", "status.showUntrackedFiles=normal", "-c", "core.fsmonitor=false", "worktree", "remove", "--", path); err != nil {
 		return fmt.Errorf("git worktree remove %s: %w", path, err)
 	}
 	return nil
@@ -466,21 +495,150 @@ func RemoveWorktree(ctx context.Context, repo, path string) error {
 // is the plumbing that can take seconds on a large repository without fsmonitor.
 // It is affordable here because it runs ONCE, when the user opens a confirm
 // dialog, against one worktree.
-func Status(ctx context.Context, path string) (int, error) {
+func Status(ctx context.Context, path string) (StatusReport, error) {
 	// A truncated read arrives as an error here and is NOT special-cased into a
 	// count, deliberately: this function returns a NUMBER, so truncation
 	// undercounts — and 0 is the single answer that invites the force-delete.
 	// "Could not check" and "clean" are rendered apart precisely so a count
 	// nobody fully obtained never masquerades as one.
-	out, err := runGit(ctx, path, "--no-optional-locks", "status", "--porcelain", "--ignored")
-	if err != nil {
-		return 0, fmt.Errorf("git status %s: %w", path, err)
+	//
+	// -z because the report now NAMES the files: without it git quotes a name
+	// holding a space, a quote or a non-ASCII byte and a newline in a name
+	// splits it into two entries.
+	// The status is proof of an EMPTY checkout only when it can see
+	// everything: refused first when it cannot (checkStatusVisible). fsmonitor
+	// off, so a stale cached "nothing changed" never stands in for a read;
+	// submodules never filtered.
+	if err := statusPreflight(ctx, path); err != nil {
+		return StatusReport{}, err
 	}
-	var n int
-	for _, line := range strings.Split(strings.ReplaceAll(out, "\r\n", "\n"), "\n") {
-		if strings.TrimSpace(line) != "" {
-			n++
+	out, err := runGit(ctx, path, "-c", "core.fsmonitor=false", "--no-optional-locks", "status", "--porcelain", "-z", "--ignored", "--untracked-files=normal", "--ignore-submodules=none")
+	if err != nil {
+		return StatusReport{}, fmt.Errorf("git status %s: %w", path, err)
+	}
+	files, total := ParseStatusZ(out)
+	return StatusReport{Changes: total, Files: files, Truncated: total > len(files)}, nil
+}
+
+// MaxStatusFiles bounds the file list one Status call reports. A DISPLAY bound:
+// Changes still counts every entry, and Truncated says the list is short.
+const MaxStatusFiles = 200
+
+// FileChange is one entry of `git status --porcelain`: git's two-character XY
+// code ("??" untracked, "!!" ignored, " M" modified, "R " renamed …) and the
+// path, relative to the worktree, exactly as git wrote it.
+type FileChange struct {
+	Code string
+	Path string
+}
+
+// StatusReport is what a forced removal of a worktree would destroy.
+type StatusReport struct {
+	// Changes counts every entry, including those past the list cap.
+	Changes int
+	// Files is the first MaxStatusFiles entries, in git's order.
+	Files []FileChange
+	// Truncated reports that Files holds fewer entries than Changes counts.
+	Truncated bool
+}
+
+// ParseStatusZ reads `git status --porcelain -z`: NUL-terminated records of
+// "XY path", where a rename or copy (X or Y is R or C) is followed by one more
+// NUL-terminated field holding the SOURCE path. The source is consumed and not
+// listed — it names a file that is no longer in the checkout.
+func ParseStatusZ(out string) (files []FileChange, total int) {
+	fields := strings.Split(out, "\x00")
+	for i := 0; i < len(fields); i++ {
+		rec := fields[i]
+		if len(rec) < 4 || rec[2] != ' ' {
+			// The trailing empty field after the last NUL, or a record git
+			// would never write; neither is an entry.
+			continue
+		}
+		code, path := rec[:2], rec[3:]
+		total++
+		if len(files) < MaxStatusFiles {
+			files = append(files, FileChange{Code: code, Path: path})
+		}
+		if strings.ContainsAny(code, "RC") {
+			i++ // the source path of a rename or copy
 		}
 	}
-	return n, nil
+	return files, total
+}
+
+// IsNotRepository reports ListStrict's "no repository" answer.
+func IsNotRepository(err error) bool {
+	return errors.Is(err, ErrNotRepository)
+}
+
+// ErrNotRepository is ListStrict's answer when dir is in no repository.
+var ErrNotRepository = errors.New("not a git repository")
+
+// ListStrict is List without the not-a-repository collapse: it answers
+// ErrNotRepository only when git failed AND neither dir nor any parent holds
+// a `.git` entry, and returns every other failure as itself — a broken
+// `.git` indirection, a permission error, an unsafe directory, a truncated
+// listing, git missing, a timeout. Decided from the disk rather than from
+// git's message, which is localized and which a broken repository shares
+// ("not a git repository: <gitdir>"). For the callers that must tell "no
+// repository" from "could not read it": the agent-worktree baseline and the
+// removal's still-registered check.
+func ListStrict(ctx context.Context, dir string) ([]Worktree, error) {
+	out, err := runGit(ctx, dir, "worktree", "list", "--porcelain")
+	if err != nil {
+		if ctx.Err() == nil && !errors.Is(err, ErrOutputTruncated) && !errors.Is(err, exec.ErrNotFound) && !hasGitAncestor(dir) {
+			return nil, ErrNotRepository
+		}
+		return nil, err
+	}
+	return parsePorcelain(out), nil
+}
+
+// hasGitAncestor reports anything git could have found a repository from:
+// a `.git` entry (directory or file) in dir or any parent, a bare repository
+// layout (HEAD, objects, refs) in dir or a parent, or GIT_DIR set. It walks
+// BOTH the path as written and the real path behind it (symlinks resolved),
+// because git discovers from the physical directory. Anything it cannot
+// decide — an unresolvable path, an unreadable entry — counts as present:
+// absence is the one answer that must be certain.
+func hasGitAncestor(dir string) bool {
+	if os.Getenv("GIT_DIR") != "" {
+		return true
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return true
+	}
+	phys, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return true
+	}
+	return gitAbove(abs) || gitAbove(phys)
+}
+
+// gitAbove walks d and its parents for a `.git` entry or a bare layout.
+func gitAbove(d string) bool {
+	for {
+		if present(filepath.Join(d, ".git")) || bareLayout(d) {
+			return true
+		}
+		parent := filepath.Dir(d)
+		if parent == d {
+			return false
+		}
+		d = parent
+	}
+}
+
+// present reports that path exists — or that asking failed for any reason
+// other than "does not exist".
+func present(path string) bool {
+	_, err := os.Lstat(path)
+	return err == nil || !errors.Is(err, fs.ErrNotExist)
+}
+
+// bareLayout reports git's bare-repository shape in d: HEAD, objects, refs.
+func bareLayout(d string) bool {
+	return present(filepath.Join(d, "HEAD")) && present(filepath.Join(d, "objects")) && present(filepath.Join(d, "refs"))
 }

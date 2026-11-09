@@ -98,6 +98,7 @@ func TestBranches_AcceptsATruncatedListingAsTruncated(t *testing.T) {
 // answer that invites a force-delete. Refused for the same reason it refuses a
 // non-repository: a number nobody fully obtained must never render as "clean".
 func TestStatus_RefusesATruncatedListing(t *testing.T) {
+	skipPreflight(t)
 	stubGit(t, " M a\n M b\n", ErrOutputTruncated)
 
 	if _, err := Status(context.Background(), "/repo"); !errors.Is(err, ErrOutputTruncated) {

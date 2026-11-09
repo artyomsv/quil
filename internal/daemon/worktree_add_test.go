@@ -50,7 +50,7 @@ func TestWorktreeAdd_ClassifiesWrappedSubdirError(t *testing.T) {
 
 	// Exercise the real producer and require its contextual wrapper, so a
 	// bare assertion at the worker boundary cannot accidentally pass again.
-	_, swapped, err := d.createPaneInWorktree(req, checkout)
+	_, swapped, err := d.createPaneInWorktree(req, checkout, "")
 	var subdirErr *worktreeSubdirError
 	if swapped || !errors.As(errors.Unwrap(err), &subdirErr) {
 		t.Fatalf("want wrapped subdirectory error before swap, got swapped=%v err=%v", swapped, err)

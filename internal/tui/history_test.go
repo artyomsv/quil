@@ -142,6 +142,8 @@ func keyPressFor(name string) tea.KeyPressMsg {
 	codes := map[string]rune{
 		"up":     tea.KeyUp,
 		"down":   tea.KeyDown,
+		"left":   tea.KeyLeft,
+		"right":  tea.KeyRight,
 		"home":   tea.KeyHome,
 		"end":    tea.KeyEnd,
 		"pgup":   tea.KeyPgUp,

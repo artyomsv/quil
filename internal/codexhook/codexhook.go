@@ -131,10 +131,14 @@ const (
 	sessionEndTimeoutSec = 3
 )
 
-// registeredEvents lists what Quil registers. Not PostToolUse: codex has no
-// AskUserQuestion / ExitPlanMode, and an answered permission prompt is cleared
-// by the keystroke (tui.answerBlockedByInput). Not Interrupt: absent from
-// codex 0.146.0, and the TUI already synthesises the ESC stop for every pane.
+// registeredEvents lists what Quil registers. PostToolUse is registered for
+// the worktree probe ONLY (runhook.worktreeProbe): codex has no
+// AskUserQuestion / ExitPlanMode, so it is never a resume edge here, and an
+// answered permission prompt is cleared by the keystroke
+// (tui.answerBlockedByInput). It runs once per tool call, so the handler
+// spools nothing unless a shell command matches. Adding it added one trust
+// key; the other keys' hashes are unchanged. Not Interrupt: absent from codex
+// 0.146.0, and the TUI already synthesises the ESC stop for every pane.
 //
 // Every handler is SYNCHRONOUS (no `async`): async handlers run concurrently
 // on codex's side and could deliver a Stop before its own UserPromptSubmit,
@@ -145,6 +149,7 @@ var registeredEvents = []hookEvent{
 	{name: "UserPromptSubmit", key: "user_prompt_submit", timeout: hookTimeoutSec},
 	{name: "PermissionRequest", key: "permission_request", timeout: hookTimeoutSec},
 	{name: "PreToolUse", key: "pre_tool_use", timeout: hookTimeoutSec},
+	{name: "PostToolUse", key: "post_tool_use", timeout: hookTimeoutSec},
 	{name: "Stop", key: "stop", timeout: hookTimeoutSec},
 	{name: "SubagentStart", key: "subagent_start", timeout: hookTimeoutSec},
 	{name: "SubagentStop", key: "subagent_stop", timeout: hookTimeoutSec},

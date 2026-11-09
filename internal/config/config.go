@@ -1017,6 +1017,13 @@ func ProjectGroupsPath() string {
 	return filepath.Join(QuilDir(), "project-groups.json")
 }
 
+// AgentWorktreesPath is the daemon's record of worktrees and branches that
+// appeared while agents ran, with the per-repository baselines it compares
+// against. Daemon-owned; written through internal/atomicfile.
+func AgentWorktreesPath() string {
+	return filepath.Join(QuilDir(), "agent-worktrees.json")
+}
+
 // RecentCWDsPath returns the file storing the last-used working directories
 // offered as a quick pick in the pane setup dialog. TUI-owned, single writer
 // — the daemon never reads or writes it directly. For a destination whose

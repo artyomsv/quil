@@ -11,11 +11,14 @@ import (
 
 func stubWorktreeList(t *testing.T, out []gitworktree.Worktree, err error) {
 	t.Helper()
-	prev := worktreeListFn
+	prev, prevStrict := worktreeListFn, worktreeListStrictFn
 	worktreeListFn = func(ctx context.Context, dir string) ([]gitworktree.Worktree, error) {
 		return out, err
 	}
-	t.Cleanup(func() { worktreeListFn = prev })
+	// The strict listing answers the same: a test stubbing "the listing" means
+	// both callers' view of it.
+	worktreeListStrictFn = worktreeListFn
+	t.Cleanup(func() { worktreeListFn, worktreeListStrictFn = prev, prevStrict })
 }
 
 // The echo contract: Path comes back byte-identical on EVERY path, because it

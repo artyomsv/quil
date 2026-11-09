@@ -120,7 +120,7 @@ var quilHomeNames = map[string]bool{
 // the extension, a .tmp or .bak beside it, a rotated log and a
 // per-destination copy (recent-cwds-<key>.json).
 var quilHomeStems = []string{
-	"OpenConsole", "audit", "bindings", "config", "conpty",
+	"OpenConsole", "agent-worktrees", "audit", "bindings", "config", "conpty",
 	"hook", "instances", "notify-activate", "plugin-update-skips", "project-groups",
 	"quil", "quild", "recent-cwds", "remote-projects", "sandbox-image", "shared-import",
 	"templates", "tokens", "web", "window", "workspace",

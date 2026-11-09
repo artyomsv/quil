@@ -224,7 +224,7 @@ func TestHandleDestroyPane_EmitsForTheUser(t *testing.T) {
 		t.Fatalf("NewMessage: %v", err)
 	}
 
-	d.handleDestroyPane(msg)
+	d.handleDestroyPane(nil, msg)
 
 	var destroyed *PaneEvent
 	for _, e := range d.events.Events() {

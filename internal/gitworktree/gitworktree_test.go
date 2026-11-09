@@ -3,7 +3,9 @@ package gitworktree
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -521,6 +523,7 @@ func TestRemoveWorktree_TerminatesOptionsBeforeThePath(t *testing.T) {
 // REWRITES the index, contending with their own git. Quil is asking a question
 // here, not doing work on their behalf.
 func TestStatus_DoesNotTakeOptionalLocks(t *testing.T) {
+	skipPreflight(t)
 	calls := stubGit(t, "", nil)
 
 	if _, err := Status(context.Background(), "/w/feat-a"); err != nil {
@@ -531,11 +534,13 @@ func TestStatus_DoesNotTakeOptionalLocks(t *testing.T) {
 		t.Fatalf("git calls = %v, want one", *calls)
 	}
 	args := (*calls)[0]
-	var sawNoOptionalLocks, sawIgnored bool
+	var sawNoOptionalLocks, sawIgnored, sawUntracked bool
 	for _, a := range args {
 		switch a {
 		case "--no-optional-locks":
 			sawNoOptionalLocks = true
+		case "--untracked-files=normal":
+			sawUntracked = true
 		case "--ignored":
 			sawIgnored = true
 		}
@@ -545,5 +550,89 @@ func TestStatus_DoesNotTakeOptionalLocks(t *testing.T) {
 	}
 	if !sawIgnored {
 		t.Errorf("argv = %v, want --ignored — an ignored .env is destroyed by the removal and must be counted", args)
+	}
+	if !sawUntracked {
+		t.Errorf("argv = %v, want --untracked-files=normal — status.showUntrackedFiles=no would hide untracked AND ignored files", args)
+	}
+}
+
+// ListStrict keeps "not a repository" and "could not read it" apart, from
+// the disk: a folder with no .git anywhere above is no repository; a broken
+// .git indirection is a FAILURE, although git's message for it also says
+// "not a git repository". List folds both into (nil, nil).
+//
+// Fails if ListStrict decides from git's message text.
+func TestListStrict_RealGit_SeparatesNoRepositoryFromABrokenOne(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not on PATH")
+	}
+	ctx := context.Background()
+	plain := t.TempDir()
+	if hasGitAncestor(plain) {
+		t.Skip("the temp directory is inside a repository")
+	}
+	if _, err := ListStrict(ctx, plain); !errors.Is(err, ErrNotRepository) {
+		t.Errorf("plain folder: err = %v, want ErrNotRepository", err)
+	}
+
+	broken := t.TempDir()
+	if err := os.WriteFile(filepath.Join(broken, ".git"), []byte("gitdir: "+filepath.Join(broken, "missing")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ListStrict(ctx, broken); err == nil || errors.Is(err, ErrNotRepository) {
+		t.Errorf("broken .git: err = %v, want the failure itself", err)
+	}
+	if got, err := List(ctx, broken); got != nil || err != nil {
+		t.Errorf("List keeps its fold: got %v, %v", got, err)
+	}
+}
+
+// A folder reached through a symlink into a repository, a bare repository,
+// and GIT_DIR set are never "no repository": git could have found one.
+//
+// Fails if hasGitAncestor walks only the lexical path.
+func TestHasGitAncestor_PhysicalBareAndGitDir(t *testing.T) {
+	base := t.TempDir()
+	if hasGitAncestor(base) {
+		t.Skip("the temp directory is inside a repository")
+	}
+	repo := filepath.Join(base, "repo")
+	sub := filepath.Join(repo, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "alias")
+	if err := os.Symlink(sub, link); err == nil {
+		if !hasGitAncestor(link) {
+			t.Error("a link into a repository read as no repository")
+		}
+	}
+
+	bare := filepath.Join(base, "bare.git")
+	for _, p := range []string{"objects", "refs"} {
+		if err := os.MkdirAll(filepath.Join(bare, p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(bare, "HEAD"), []byte("ref: refs/heads/master\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !hasGitAncestor(bare) {
+		t.Error("a bare repository read as no repository")
+	}
+
+	plain := filepath.Join(base, "plain")
+	if err := os.Mkdir(plain, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if hasGitAncestor(plain) {
+		t.Error("a plain folder read as a repository")
+	}
+	t.Setenv("GIT_DIR", filepath.Join(base, "elsewhere"))
+	if !hasGitAncestor(plain) {
+		t.Error("GIT_DIR set read as no repository")
 	}
 }

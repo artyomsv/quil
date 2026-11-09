@@ -82,6 +82,13 @@ type Daemon struct {
 	// see them end when their conn closes.
 	parkedWaits atomic.Int32
 	gitCache    *gitCache // per-checkout branch/worktree/divergence, refreshed on a ticker
+	// agentWT records worktrees and branches that appear while agents run
+	// (agentwt.go). Nil until Start; every method is nil-safe.
+	agentWT *agentWTStore
+	// Single-flight slots for the cleanup view's facts and act requests
+	// (agentwt_ipc.go), each on its own worker.
+	agentWTFacting atomic.Bool
+	agentWTActing  atomic.Bool
 	// Last attached terminal size, used before a client can resize a new pane.
 	clientSize atomic.Pointer[terminalSize]
 
@@ -382,6 +389,10 @@ func New(cfg config.Config) *Daemon {
 		bufSize = 500 * 512 // 256KB default
 	}
 
+	// The worktree safety checks bound their filesystem calls by the same
+	// process-wide limit as every other blocking call here.
+	gitworktree.SetFSPermits(claimBlockingFSCall, releaseBlockingFSCall)
+
 	reg := plugin.NewRegistry()
 
 	maxEvents := cfg.Notification.MaxEvents
@@ -485,6 +496,9 @@ func (d *Daemon) Start() error {
 		log.Printf("warning: failed to init hook events spool: %v", err)
 	}
 	d.hookIngester = hookevents.NewIngester(d.emitHookEvent)
+	// Before the watcher starts: it diverts worktree probes here.
+	d.agentWT = newAgentWTStore(config.AgentWorktreesPath(), d.paneForAgentWT)
+	d.agentWT.load()
 
 	// Write default plugin TOML files if missing, then load all plugins
 	if _, err := plugin.EnsureDefaultPlugins(config.PluginsDir()); err != nil {
@@ -719,6 +733,7 @@ func (d *Daemon) Stop() {
 		d.refreshPluginStateFromHooks()
 		log.Print("daemon stopping, writing final snapshot...")
 		d.snapshot()
+		d.agentWT.close()
 		// Every conn's disconnect callback writes to the audit log (a
 		// tcp_disconnect, or a login_failed from a check still in flight
 		// when its conn was closed), so it closes only after they ran.
@@ -1136,6 +1151,7 @@ func (d *Daemon) restoreWorkspace() error {
 				worktreeOwned, _ := paneData["worktree_owned"].(bool)
 				quilMCP, _ := paneData["quil_mcp"].(bool)
 				worktreePath, _ := paneData["worktree_path"].(string)
+				worktreeToken, _ := paneData["worktree_token"].(string)
 				worktreeInterrupted, _ := paneData["worktree_interrupted"].(bool)
 				sandboxImage, _ := paneData["sandbox_image"].(string)
 				sandboxAuth, _ := paneData["sandbox_auth"].(string)
@@ -1232,6 +1248,9 @@ func (d *Daemon) restoreWorkspace() error {
 					// CWD, which is the value that cannot be trusted for a
 					// force-delete.
 					WorktreePath: worktreePath,
+					// Absent on a snapshot from before checkout identities → empty,
+					// and such a worktree is never removed on close (fail closed).
+					WorktreeToken: worktreeToken,
 				}
 				// NoteRev is atomic.Uint64: cannot be set in the struct
 				// literal above, so it is stored once here, before the pane
@@ -1636,7 +1655,7 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		d.touchClientInput(conn)
 		d.handleCreatePane(conn, msg)
 	case ipc.MsgDestroyPane:
-		d.handleDestroyPane(msg)
+		d.handleDestroyPane(conn, msg)
 	case ipc.MsgUpdatePane:
 		// update_pane also carries automatic reports — an OSC 7 CWD change,
 		// overlay visibility, the unseen mark — that are not the user doing
@@ -1673,6 +1692,12 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 			return
 		}
 		d.setOverlayPolicy(p)
+	case ipc.MsgAgentWorktreesReq:
+		d.handleAgentWorktreesReq(conn, msg)
+	case ipc.MsgAgentWorktreeFactsReq:
+		d.handleAgentWorktreeFactsReq(conn, msg)
+	case ipc.MsgAgentWorktreeActReq:
+		d.handleAgentWorktreeActReq(conn, msg)
 	case ipc.MsgShutdown:
 		d.shutdownOnce.Do(func() { close(d.shutdown) })
 
@@ -2770,8 +2795,11 @@ func (d *Daemon) handleDestroyTab(conn *ipc.Conn, msg *ipc.Message) {
 	// Read from the SAME pre-destroy capture, for the same reason: after
 	// DestroyTab there is nothing left to ask which worktrees the tab owned.
 	var worktrees []string
+	var branches branchDeleteOpts
 	if payload.RemoveWorktree {
 		worktrees = ownedWorktreePaths(panes)
+		branches = branchOpts(d.branchDeleteAllowed(conn, payload.DeleteBranch), payload.Confirmations, panes)
+		branches.Unattended = d.closeUnattended(conn)
 	}
 	d.session.DestroyTab(payload.TabID)
 	for _, p := range panes {
@@ -2821,7 +2849,7 @@ func (d *Daemon) handleDestroyTab(conn *ipc.Conn, msg *ipc.Message) {
 			return
 		}
 		if len(worktrees) > 0 {
-			d.removeOwnedWorktrees(worktrees)
+			removeOwnedWorktreesFn(d, worktrees, branches)
 		}
 	}()
 }
@@ -3509,6 +3537,7 @@ func (d *Daemon) cleanupPaneArtifacts(paneID string) {
 	// can end them: the task state machine only advances on events for a pane
 	// the session still holds. See failTasksForPane (task.go).
 	d.failTasksForPane(paneID, "pane destroyed")
+	d.agentWT.forgetPane(paneID)
 	// Overlay visibility claims are keyed by pane id, so a destroyed overlay
 	// would otherwise leave its id in every live client's claim set — in a
 	// daemon that runs for weeks, one entry per overlay ever opened.
@@ -3531,7 +3560,7 @@ func (d *Daemon) cleanupPaneArtifacts(paneID string) {
 	}
 }
 
-func (d *Daemon) handleDestroyPane(msg *ipc.Message) {
+func (d *Daemon) handleDestroyPane(conn *ipc.Conn, msg *ipc.Message) {
 	var payload ipc.DestroyPanePayload
 	if err := msg.DecodePayload(&payload); err != nil {
 		return
@@ -3548,6 +3577,7 @@ func (d *Daemon) handleDestroyPane(msg *ipc.Message) {
 	// Capture tab ID before destroying the pane
 	var tabID string
 	var worktrees []string
+	var branches branchDeleteOpts
 	if pane := d.session.Pane(payload.PaneID); pane != nil {
 		tabID = pane.CurrentTabID()
 		// Captured here for the reason the tab id is: DestroyPane removes the
@@ -3555,6 +3585,8 @@ func (d *Daemon) handleDestroyPane(msg *ipc.Message) {
 		// worktree it owned.
 		if payload.RemoveWorktree {
 			worktrees = ownedWorktreePaths([]*Pane{pane})
+			branches = branchOpts(d.branchDeleteAllowed(conn, payload.DeleteBranch), payload.Confirmations, []*Pane{pane})
+			branches.Unattended = d.closeUnattended(conn)
 		}
 		// Same window, same reason: the card needs the pane's name, which is
 		// gone once DestroyPane runs.
@@ -3588,13 +3620,14 @@ func (d *Daemon) handleDestroyPane(msg *ipc.Message) {
 	// after three attempts at 250 ms. Teardown also harvests the pane's git
 	// objects before anything is deleted, so closing a pane never loses
 	// commits made inside the container.
-	d.teardownAfterDestroy(payload.PaneID, worktrees)
+	d.teardownAfterDestroy(payload.PaneID, worktrees, branches)
 }
 
 // teardownAfterDestroy brings a destroyed pane's container down and, when
 // worktrees is non-empty, removes them — GATED on the container being gone,
-// for the reason handleDestroyPane documents.
-func (d *Daemon) teardownAfterDestroy(paneID string, worktrees []string) {
+// for the reason handleDestroyPane documents. branches carries the branch
+// deletes the close asked for (zero for the MCP path).
+func (d *Daemon) teardownAfterDestroy(paneID string, worktrees []string, branches branchDeleteOpts) {
 	if len(worktrees) == 0 {
 		go d.teardownSandbox(context.Background(), paneID)
 		return
@@ -3611,7 +3644,7 @@ func (d *Daemon) teardownAfterDestroy(paneID string, worktrees []string) {
 			log.Printf("pane %s: worktree removal skipped — its container is still running", paneID)
 			return
 		}
-		removeOwnedWorktreesFn(d, worktrees)
+		removeOwnedWorktreesFn(d, worktrees, branches)
 	}()
 }
 
@@ -4201,6 +4234,61 @@ func (d *Daemon) notifyWorktreeFailed(paneID, tabID, branch, reason string) {
 		Title:     "Worktree not created: " + branch,
 		Message:   truncateField(reason, maxWorktreeErrorField),
 		Severity:  "error",
+		Timestamp: time.Now(),
+		Data:      map[string]string{"branch": branch},
+	})
+}
+
+// notifyBranchDeleted says a close deleted a worktree's local branch. The pane
+// is the one the close came from, captured before it was destroyed.
+func (d *Daemon) notifyBranchDeleted(owner paneRef, branch string) {
+	d.emitEvent(PaneEvent{
+		ID:        uuid.New().String(),
+		PaneID:    owner.ID,
+		TabID:     owner.TabID,
+		PaneName:  owner.Name,
+		Type:      "worktree_branch_deleted",
+		Title:     "Branch deleted: " + branch,
+		Severity:  "info",
+		Timestamp: time.Now(),
+		Data:      map[string]string{"branch": branch},
+	})
+}
+
+// notifyWorktreeKept says a worktree removal the user asked for did not
+// happen, and why. A warning: the pane and the dialog are gone, so this card
+// is the only place the user learns the folder is still there.
+func (d *Daemon) notifyWorktreeKept(owner paneRef, path, code string) {
+	d.emitEvent(PaneEvent{
+		ID:        uuid.New().String(),
+		PaneID:    owner.ID,
+		TabID:     owner.TabID,
+		PaneName:  owner.Name,
+		Type:      "worktree_kept",
+		Title:     "Worktree kept: " + filepath.Base(path),
+		Message:   keptMessage(code),
+		Severity:  "warning",
+		Timestamp: time.Now(),
+		Data:      map[string]string{"path": path, "reason": code},
+	})
+}
+
+// notifyBranchKept says a branch delete the user asked for did not happen,
+// and why. A warning, not info: the user believes the branch is gone.
+func (d *Daemon) notifyBranchKept(owner paneRef, branch, reason string) {
+	title := "Branch kept"
+	if branch != "" {
+		title = "Branch kept: " + branch
+	}
+	d.emitEvent(PaneEvent{
+		ID:        uuid.New().String(),
+		PaneID:    owner.ID,
+		TabID:     owner.TabID,
+		PaneName:  owner.Name,
+		Type:      "worktree_branch_kept",
+		Title:     title,
+		Message:   truncateField(reason, maxWorktreeErrorField),
+		Severity:  "warning",
 		Timestamp: time.Now(),
 		Data:      map[string]string{"branch": branch},
 	})
@@ -4904,8 +4992,17 @@ func (d *Daemon) onPaneExitGeneration(pane *Pane, code int, generation uint64) {
 	pane.ExitCode = &code
 	pane.ExitedAt = time.Now()
 	isOverlay := pane.Overlay
+	exitGen := generation
+	if exitGen == 0 {
+		exitGen = pane.ptyGen
+	}
 	pane.PluginMu.Unlock()
 	log.Printf("pane %s: process exited with code %d", pane.ID, code)
+
+	// The child died with its subagents: their worktrees are free. Bound to
+	// THIS child's generation, so a restart that already probed keeps its
+	// own records however late this exit is handled.
+	d.agentWT.subagentsExited(pane.ID, exitGen)
 
 	// The run's unfinished last line gets its one notice match now: a tool
 	// that prints "please update to v1.55.1" and exits without a newline
@@ -5474,6 +5571,12 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			// the shell has been rewriting all along — see Pane.WorktreePath.
 			if pane.WorktreePath != "" {
 				paneData.WorktreePath = pane.WorktreePath
+			}
+			// The identity token is written to DISK only (includeOverlays is
+			// false for the snapshot): it is the daemon's own proof, of no use
+			// to a client.
+			if !includeOverlays && pane.WorktreeToken != "" {
+				paneData.WorktreeToken = pane.WorktreeToken
 			}
 			// The sandbox pair. The image is what makes a restored pane
 			// sandboxed at all; the container CWD is what the resume path
@@ -7036,6 +7139,20 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 			}
 			envVars = append(envVars, hookEnv...)
 		}
+		// The agent-worktree baseline of the pane's directory is taken NOW,
+		// before the agent process starts: a listing taken after its first
+		// `git worktree add` would adopt that worktree as pre-existing for
+		// good. A new pane WAITS for it (bounded by agentWTSeedTimeout; no
+		// pane lock is held here). A restored pane does not: its agent
+		// resumes and waits for a prompt, and restore runs before the daemon
+		// listens, so it must not pay a git call per pane.
+		if p.Name == "opencode" || p.Name == plugin.CodexPluginName || p.UsesClaudeSessions() {
+			if restoring {
+				d.agentWT.seedSoon(pane.ID)
+			} else if !d.agentWT.seedSync(pane.ID) {
+				logger.Debug("agent worktrees: no baseline for pane %s before its agent starts", pane.ID)
+			}
+		}
 
 		if quilMCP {
 			var err error
@@ -7102,6 +7219,13 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 
 		ptySession.SetCWD(pane.CWD)
 		log.Printf("spawn: pane %s cmd=%s args=%v cwd=%s restoring=%v", pane.ID, cmd, args, pane.CWD, restoring)
+		// Published BEFORE the child starts: ptyGen moves only after Start
+		// returns, and a fast child's first hook can arrive in between. The
+		// agent-worktree record stamps a probe with this generation, so a
+		// late exit cleanup of the previous child never clears it.
+		pane.PluginMu.Lock()
+		pane.startingGen = pane.ptyGen + 1
+		pane.PluginMu.Unlock()
 		if err := ptySession.Start(cmd, args...); err != nil {
 			return err
 		}
@@ -7288,7 +7412,7 @@ func (d *Daemon) hookEventsWatcher() {
 				logger.Debug("hook events tick: read %d payloads from spool", len(payloads))
 			}
 			for _, p := range payloads {
-				d.hookIngester.Submit(p)
+				d.routeHookPayload(p)
 			}
 		}
 	}
@@ -7311,16 +7435,7 @@ func (d *Daemon) emitHookEvent(p hookevents.Payload) {
 	// "default"/"verbose"/anything else fall through. Storm diagnostics
 	// always pass — they're the rate limiter's own internal signal.
 	if p.HookEvent != hookevents.EventStorm {
-		var mode string
-		switch p.Source {
-		case hookevents.SourceClaude:
-			mode = d.cfg.Notification.Hooks.Claude
-		case hookevents.SourceOpenCode:
-			mode = d.cfg.Notification.Hooks.OpenCode
-		case hookevents.SourceCodex:
-			mode = d.cfg.Notification.Hooks.Codex
-		}
-		if mode == "off" {
+		if d.hookMode(p.Source) == "off" {
 			return
 		}
 	}
@@ -7409,6 +7524,45 @@ func (d *Daemon) emitHookEvent(p hookevents.Payload) {
 		Timestamp: ts,
 		Data:      data,
 	})
+
+	// The end of an agent's turn is the backstop compare for worktrees and
+	// branches no probe caught (a script, an alias).
+	switch hookevents.ClassifyWorkEvent(eventType) {
+	case hookevents.WorkEventStop, hookevents.WorkEventStopFinal:
+		d.agentWT.turnEnded(p.PaneID)
+	case hookevents.WorkEventStart:
+		// Before the agent acts: take the baseline of its repository now,
+		// or the first worktree it makes there reads as pre-existing.
+		d.agentWT.seed(p.PaneID)
+	}
+}
+
+// routeHookPayload sends one spool line on. A worktree probe goes around the
+// ingester to the agent-worktree record: the ingester's coalescer is
+// last-wins per pane and event name, so two probes read in one tick (a
+// worktree add, then EnterWorktree) would lose the first directory — and a
+// probe is no notification, so it must not reach the event queue either.
+func (d *Daemon) routeHookPayload(p hookevents.Payload) {
+	if p.HookEvent == hookevents.EventWorktreeProbe {
+		if d.hookMode(p.Source) != "off" {
+			d.agentWT.probe(p)
+		}
+		return
+	}
+	d.hookIngester.Submit(p)
+}
+
+// hookMode is the configured hooks tier for one source ("off" drops events).
+func (d *Daemon) hookMode(source string) string {
+	switch source {
+	case hookevents.SourceClaude:
+		return d.cfg.Notification.Hooks.Claude
+	case hookevents.SourceOpenCode:
+		return d.cfg.Notification.Hooks.OpenCode
+	case hookevents.SourceCodex:
+		return d.cfg.Notification.Hooks.Codex
+	}
+	return ""
 }
 
 func (d *Daemon) idleChecker() {
@@ -8310,10 +8464,13 @@ func (d *Daemon) handleDestroyPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 	}
 	d.highlightPane(pane.ID)
 	var worktrees []string
+	var closeOpts branchDeleteOpts
 	if req.RemoveWorktree {
 		// Captured before DestroyPane, which takes the pane (and with it the
 		// only record of its worktree) out of the session maps.
 		worktrees = ownedWorktreePaths([]*Pane{pane})
+		closeOpts = branchOpts(false, nil, []*Pane{pane})
+		closeOpts.Unattended = d.closeUnattended(conn)
 	}
 
 	// Captured BEFORE DestroyPane, which takes the pane out of the session
@@ -8358,7 +8515,9 @@ func (d *Daemon) handleDestroyPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 	// once its object store is eventually removed. MCP destroy_pane is an
 	// ordinary way to close a pane, not an edge case. A requested worktree
 	// removal follows it, gated on the container being gone.
-	d.teardownAfterDestroy(req.PaneID, worktrees)
+	// No branch deletes on this path: the MCP tool and the browser offer the
+	// worktree removal only, and DestroyPaneReqPayload carries no branch flag.
+	d.teardownAfterDestroy(req.PaneID, worktrees, closeOpts)
 
 	respondTo(conn, msg.ID, ipc.MsgDestroyPaneResp, ipc.DestroyPaneRespPayload{
 		Success: true,

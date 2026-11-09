@@ -698,6 +698,8 @@ func (m Model) dispatchDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handleShortcutsKey(msg)
 	case dialogConfirm:
 		return m.handleConfirmKey(msg)
+	case dialogAgentWorktrees:
+		return m.handleAgentWTKey(msg)
 	case dialogCreatePane:
 		return m.handleCreatePaneKey(msg)
 	case dialogCreatePaneSetup:
@@ -1096,7 +1098,36 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// confirming must stay two separate keystrokes, or the toggle is no
 		// safer than a plain destructive default.
 		if len(m.confirmWorktrees) > 0 {
-			m.confirmRemoveWorktree = !m.confirmRemoveWorktree
+			m.toggleConfirmRow()
+		}
+		return m, nil
+	case "up", "down":
+		// The cursor over the worktree and branch rows. Inert for every
+		// confirm that offers no worktree.
+		if len(m.confirmWorktrees) > 0 {
+			if msg.String() == "up" {
+				m.moveConfirmRow(-1)
+			} else {
+				m.moveConfirmRow(1)
+			}
+		}
+		return m, nil
+	case "pgup", "pgdown":
+		if len(m.confirmWorktrees) > 0 {
+			if msg.String() == "pgup" {
+				m.scrollConfirmFiles(-1)
+			} else {
+				m.scrollConfirmFiles(1)
+			}
+		}
+		return m, nil
+	case "left", "right":
+		if len(m.confirmWorktrees) > 1 {
+			if msg.String() == "left" {
+				m.moveConfirmFocus(-1)
+			} else {
+				m.moveConfirmFocus(1)
+			}
 		}
 		return m, nil
 	case "esc", "n":
@@ -1105,6 +1136,10 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// inherited arm is a deletion the next close never offered.
 		m.resetConfirmWorktrees()
 		// Return to appropriate dialog based on confirm kind
+		if m.confirmKind == confirmKindAgentWT {
+			m.dialog = dialogAgentWorktrees
+			return m, tea.ClearScreen
+		}
 		if m.confirmKind == "instance" {
 			m.dialog = dialogCreatePane
 			m.createPaneStep = 2
@@ -1152,12 +1187,35 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "enter", "y":
+		// A cleanup in a repository whose record may miss items takes `y`
+		// only. Checked BEFORE the reset below, or a refused Enter would drop
+		// the arm the user set:
+		// the `y` is the acknowledgment the daemon asks for.
+		if m.agentWTUncertainOpen() && msg.String() != "y" {
+			return m, nil
+		}
+		// A ticked worktree is removed only once its file list is on screen:
+		// git status on a large repository takes seconds, and that window is
+		// the ordinary case. And only when the files were READ: a timeout or
+		// an error loads the row with a reason, which is no file list — an
+		// armed tick is not consent to lose files nobody was shown. The row
+		// then says so; unticking it closes and keeps the worktree.
+		if m.confirmRemoveWorktree && !m.agentWTBranchEntry() && !m.confirmWorktreesInspected() {
+			return m, nil
+		}
 		kind := m.confirmKind
 		id := m.confirmID
 		// Read BEFORE the reset below, like every other value this branch
 		// carries into its command.
 		removeWorktree := m.confirmRemoveWorktree
+		deleteBranch, confirmedBranches := m.confirmBranchSelection()
+		if !removeWorktree {
+			deleteBranch, confirmedBranches = false, nil
+		}
 		m.resetConfirmWorktrees()
+		if kind == confirmKindAgentWT {
+			return m.sendAgentWTAct(removeWorktree, deleteBranch, confirmedBranches)
+		}
 
 		// Stop-daemon requires explicit `y` — Enter is the universal
 		// select/commit key across every menu and toggle, so accepting it
@@ -1396,12 +1454,19 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 					// is a bool: the daemon re-derives WHICH worktree from its
 					// own ownership record, so nothing here names a path.
 					RemoveWorktree: removeWorktree,
+					// Bools again, and branch names the daemon only CHECKS:
+					// it deletes the branch it reads from git, and only when
+					// that name is one this dialog showed.
+					DeleteBranch:  deleteBranch,
+					Confirmations: confirmedBranches,
 				})
 				m.sendForDest(dest, req)
 			case "tab":
 				req, _ := ipc.NewMessage(ipc.MsgDestroyTab, ipc.DestroyTabPayload{
 					TabID:          id,
 					RemoveWorktree: removeWorktree,
+					DeleteBranch:   deleteBranch,
+					Confirmations:  confirmedBranches,
 				})
 				m.sendForDest(dest, req)
 			}
@@ -1488,6 +1553,8 @@ func (m Model) renderDialog() string {
 		content = m.renderShortcutsDialog()
 	case dialogConfirm:
 		content = m.renderConfirmDialog()
+	case dialogAgentWorktrees:
+		content = m.renderAgentWTDialog()
 	case dialogCreatePane:
 		content = m.renderCreatePaneDialog()
 		// Auto-fit so plugin rows never wrap — e.g. a greyed entry that
@@ -2002,6 +2069,32 @@ func (m Model) renderConfirmDialog() string {
 		b.WriteString("  " + dialogSubtle.Render("Its projects leave the sidebar. Nothing on that"))
 		b.WriteString("\n")
 		b.WriteString("  " + dialogSubtle.Render("machine stops — reconnect to get it all back."))
+	case confirmKindAgentWT:
+		e := m.agentWT.entry
+		inner := dialogInnerWidth(m.width, dialogWidth)
+		kindWord := "worktree"
+		if e.Kind == "branch" {
+			kindWord = "branch"
+		}
+		b.WriteString("  " + dialogNormal.Render(truncateToWidth(
+			fmt.Sprintf("Clean up %s %q?", kindWord, sanitizeRemoteText(m.confirmName)), inner-2)))
+		who := sanitizeRemoteText(e.PaneName)
+		if who == "" {
+			who = "a pane"
+		}
+		// "appeared while", never "made by": a user can make one by hand
+		// while an agent runs.
+		b.WriteString("\n  " + dialogSubtle.Render(truncateToWidth("Appeared while "+who+" ran.", inner-2)))
+		if rows := m.renderConfirmWorktrees(); rows != "" {
+			b.WriteString("\n\n")
+			b.WriteString(rows)
+		}
+		footer = "space toggle  ↑↓ row  Enter confirm  Esc back"
+		if m.agentWTUncertainOpen() {
+			b.WriteString("\n\n  " + dialogWarn.Render(truncateToWidth(
+				"⚠ This repository's record may miss items (read late).", inner-2)))
+			footer = "space toggle  ↑↓ row  y confirm  Esc back"
+		}
 	default:
 		label := fmt.Sprintf("Close %s %q?", m.confirmKind, m.confirmName)
 		b.WriteString("  " + dialogNormal.Render(label))
@@ -2027,7 +2120,14 @@ func (m Model) renderConfirmDialog() string {
 			// hazard; this footer is the one that walked into it.
 			// "toggle" rather than "worktree": a footer lists key → ACTION, and
 			// there is exactly one checkbox on screen for it to refer to.
-			footer = "space toggle    Enter confirm    Esc cancel"
+			footer = "space toggle  ↑↓ row  Enter confirm  Esc cancel"
+			if len(m.confirmWorktrees) > 1 {
+				footer = "space toggle  ↑↓ row  ←→ files  Enter ok  Esc cancel"
+			}
+			// Enter waits for the file list while the worktree is ticked.
+			if m.confirmRemoveWorktree && !m.confirmWorktreesLoaded() {
+				footer = "space toggle  ↑↓ row  checking…  Esc cancel"
+			}
 		}
 	}
 	b.WriteString("\n\n")
@@ -2053,29 +2153,39 @@ func (m Model) renderConfirmWorktrees() string {
 	if len(m.confirmWorktrees) == 0 {
 		return ""
 	}
-	box := "[ ]"
-	if m.confirmRemoveWorktree {
-		box = "[x]"
-	}
-	head := fmt.Sprintf("%s Also delete %s", box, pluralWorktrees(len(m.confirmWorktrees)))
-	style := dialogNormal
-	if m.confirmRemoveWorktree {
-		style = dialogWarn
-	}
-
+	inner := dialogInnerWidth(m.width, dialogWidth)
 	var b strings.Builder
-	b.WriteString("  " + style.Render(head))
+	if m.agentWTBranchEntry() {
+		// A branch with no worktree: only the branch rows apply.
+		b.WriteString("  " + dialogSubtle.Render(truncateToWidth("Branch "+sanitizeRemoteText(m.confirmName)+", no worktree", inner-2)))
+		b.WriteString(m.renderBranchRows(inner))
+		return b.String()
+	}
+	b.WriteString(m.confirmCheckRow(confirmRowWorktree, m.confirmRemoveWorktree,
+		"Also delete "+pluralWorktrees(len(m.confirmWorktrees)), m.worktreeRowReason(), inner))
+	focus, _ := m.focusedWorktree()
 	// CAPPED, because lipgloss pads but never clips and renderDialog's
 	// lipgloss.Place does not either: two lines per worktree grows the box past
 	// the terminal and pushes the footer — and the Enter it documents — off
 	// screen. The cap is a DISPLAY bound only; the header counts every worktree
 	// and the toggle still covers all of them.
-	shown := m.confirmWorktrees
-	if len(shown) > confirmWorktreeMaxRows {
-		shown = shown[:confirmWorktreeMaxRows]
-	}
+	from, to := m.confirmWindow()
+	shown := m.confirmWorktrees[from:to]
 	for _, w := range shown {
 		b.WriteString("\n")
+		// With several worktrees only the FOCUSED one is drawn in full; the
+		// rest take one row each (label and count), so a tab of worktrees
+		// still fits a 24-row terminal with a file list.
+		if len(shown) > 1 && w.path != focus.path {
+			line := elideMiddle(sanitizeRemoteText(w.label), confirmWorktreeLabelCap) + "  " + worktreeChangesShort(w)
+			b.WriteString("      " + dialogSubtle.Render(truncateToWidth(line, inner-6)))
+			continue
+		}
+		if len(shown) > 1 {
+			b.WriteString("    ▸ ")
+		} else {
+			b.WriteString("      ")
+		}
 		// The label is daemon-chosen text — a branch name, or a path when the
 		// pane's shell has drifted — so it is sanitized AND bounded at render,
 		// like every other value from a machine the user may not control.
@@ -2086,14 +2196,17 @@ func (m Model) renderConfirmWorktrees() string {
 		// TAIL: truncateCells cuts the end, so every worktree under one parent
 		// would render as the same `E:\Projects\…\quil-worktrees\…` prefix. The
 		// pane's own spawn-error line elides for exactly this reason.
-		b.WriteString("      " + dialogSubtle.Render(
+		b.WriteString(dialogSubtle.Render(
 			elideMiddle(sanitizeRemoteText(w.label), confirmWorktreeLabelCap)))
 		b.WriteString("\n")
 		b.WriteString("      " + m.renderWorktreeChanges(w))
+		b.WriteString(m.renderConfirmFiles(w, inner))
 	}
 	if rest := len(m.confirmWorktrees) - len(shown); rest > 0 {
 		b.WriteString("\n")
-		b.WriteString("      " + dialogSubtle.Render(fmt.Sprintf("…and %d more", rest)))
+		// ONE line however the window sits, so the box height the cap was
+		// measured for holds; ←/→ reaches every hidden worktree.
+		b.WriteString("      " + dialogSubtle.Render(fmt.Sprintf("…%d more not shown (←/→)", rest)))
 	}
 	// Said once, under the list, because it is a property of the operation
 	// rather than of any one worktree — and said whether or not the check
@@ -2103,8 +2216,13 @@ func (m Model) renderConfirmWorktrees() string {
 	//
 	// Separated by a BLANK line: butted against the last row it reads as that
 	// worktree's own status line rather than as a statement about the operation.
+	b.WriteString(m.renderBranchRows(inner))
 	b.WriteString("\n\n")
-	b.WriteString("  " + dialogSubtle.Render("The branch is kept; everything else here goes."))
+	if local, _ := m.confirmBranchSelection(); local {
+		b.WriteString("  " + dialogSubtle.Render("Everything marked here goes."))
+	} else {
+		b.WriteString("  " + dialogSubtle.Render("The branch is kept; everything else here goes."))
+	}
 	return b.String()
 }
 

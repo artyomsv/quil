@@ -11,6 +11,7 @@ import (
 
 	"github.com/artyomsv/quil/internal/gitworktree"
 	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/google/uuid"
 )
 
 // worktreeAddTimeout bounds one `git worktree add`.
@@ -152,6 +153,11 @@ func (d *Daemon) worktreeAddAndCreate(p ipc.CreatePanePayload) ipc.CreatePaneRes
 		return fail("the daemon is busy with filesystem work — try again in a moment")
 	}
 	path := gitworktree.DerivePath(spec.RepoRoot, spec.Branch)
+	// Quil makes this one: noted BEFORE git runs, so a compare of the same
+	// repository from another AI pane while the add is in flight (a probe, a
+	// turn end, a spawn seed) never records it as having appeared while that
+	// pane ran. Taken back if the add fails.
+	d.agentWT.noteOwnWorktree(spec.RepoRoot, path, spec.Branch)
 	ctx, cancel := context.WithTimeout(context.Background(), worktreeAddTimeout)
 	base, err := addWorktreeFn(ctx, spec.RepoRoot, path, spec.Branch)
 	cancel()
@@ -163,7 +169,20 @@ func (d *Daemon) worktreeAddAndCreate(p ipc.CreatePanePayload) ipc.CreatePaneRes
 	// afterwards, and that is precisely how the ambient-HEAD defect survived.
 	// An empty base means gitworktree found no default branch and left git to
 	// use HEAD, which is worth naming rather than printing as a blank.
+	//
+	// The checkout's IDENTITY, beside its path: a random token written into
+	// the worktree's own git admin directory, which a checkout later made at
+	// the same path does not share. A close removes the worktree only while
+	// the token still matches (removeOwnedWorktreesWith). Written FIRST after
+	// git returns, ahead of the log line and every other step, and only into
+	// the checkout this create made (MarkNewWorktree checks the repository's
+	// identity and git's back-pointer). The window it leaves — two rev-parse
+	// calls, a few stats and the write — is the accepted residual it
+	// documents. A mark that could not be written leaves the pane with no
+	// token, and it is never offered a removal it cannot prove.
+	token := ""
 	if err == nil {
+		token = d.markNewWorktree(spec.RepoRoot, path)
 		from := base
 		if from == "" {
 			from = "HEAD (no default branch resolved)"
@@ -171,6 +190,7 @@ func (d *Daemon) worktreeAddAndCreate(p ipc.CreatePanePayload) ipc.CreatePaneRes
 		log.Printf("worktree create: %s on %s from %s", path, spec.Branch, from)
 	}
 	if err != nil {
+		d.agentWT.unnoteOwnWorktree(spec.RepoRoot, path, spec.Branch)
 		// gitworktree.Add attaches git's own stderr — "already used by
 		// worktree '/x/feat-y'" names the pane to go look at.
 		return fail("%v", err)
@@ -180,18 +200,41 @@ func (d *Daemon) worktreeAddAndCreate(p ipc.CreatePanePayload) ipc.CreatePaneRes
 	// microseconds an ordinary create has, and a tab can be destroyed inside
 	// it. Without this the pane lands in a tab nobody is looking at.
 	//
-	// Every abandonment past this point REMOVES the worktree git just made.
-	// Returning without it strands a full checkout on disk plus a branch
-	// pointing at it, and the next attempt at the same name then fails with
-	// "already exists" against a directory the user never created — which is
-	// indistinguishable from a name genuinely in use.
+	// Every abandonment past this point REMOVES the worktree git just made —
+	// but only after the same doubts the close path has are cleared
+	// (abandonRefusal): the accepted same-repository replacement can carry the
+	// mark. Anything uncertain, in use, on another branch,
+	// holding changes or holding commits is KEPT and the answer says so.
+	// Returning without cleanup otherwise strands a full checkout on disk plus
+	// a branch pointing at it, and the next attempt at the same name fails
+	// with "already exists" against a directory the user never created.
 	abandon := func(format string, args ...any) ipc.CreatePaneRespPayload {
+		resp := fail(format, args...)
+		// A rollback that did not finish is ALSO a sidebar card, not only a
+		// suffix on this answer: several callers do not show the answer at
+		// all (an MCP split or new tab whose recovery pane already shows the
+		// spawn failure, a template), and the TUI cuts a long error. The card
+		// names the pane the create was replacing (its placeholder or target,
+		// possibly gone — as the close path's cards do) and the tab.
+		owner := paneRef{ID: p.ReplacePaneID, TabID: p.TabID}
+		if reason := abandonRefusalFn(d, spec.RepoRoot, path, spec.Branch, token); reason != "" {
+			log.Printf("worktree create: kept %s after a failed create: %s", path, keptMessage(reason))
+			resp.Error += "; the new worktree was kept: " + keptMessage(reason)
+			d.notifyWorktreeKept(owner, path, reason)
+			return resp
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), worktreeAddTimeout)
 		defer cancel()
 		if rmErr := removeWorktreeFn(ctx, spec.RepoRoot, path, spec.Branch); rmErr != nil {
+			// git's own refusal is the backstop (Remove forces nothing), so it
+			// is an outcome the requester must hear about, in fixed words:
+			// git's text goes to the log only.
 			log.Printf("worktree create: could not clean up %s after a failed create: %v", path, rmErr)
+			code := rollbackOutcome(rmErr)
+			resp.Error += "; cleanup incomplete: " + keptMessage(code)
+			d.notifyRollbackIncomplete(owner, path, spec.Branch, code)
 		}
-		return fail(format, args...)
+		return resp
 	}
 	if d.session.Tab(p.TabID) == nil {
 		return abandon("the tab was closed while the worktree was being created")
@@ -210,7 +253,7 @@ func (d *Daemon) worktreeAddAndCreate(p ipc.CreatePanePayload) ipc.CreatePaneRes
 		}
 	}
 
-	pane, swapped, err := d.createPaneInWorktree(p, path)
+	pane, swapped, err := d.createPaneInWorktree(p, path, token)
 	if err != nil {
 		// swapped is forwarded on the ERROR path too, and that is the whole
 		// point of carrying it: the swap happens before the new pane's PTY is
@@ -259,7 +302,8 @@ func (e *tabRecoveredError) Unwrap() error { return e.error }
 // The second return says whether a REPLACE removed the old pane; see
 // replacePaneAt. It is true on some ERROR paths, which is exactly why it cannot
 // be inferred from the error.
-func (d *Daemon) createPaneInWorktree(p ipc.CreatePanePayload, path string) (*Pane, bool, error) {
+// token is the identity markNewWorktree wrote ("" when none was).
+func (d *Daemon) createPaneInWorktree(p ipc.CreatePanePayload, path, token string) (*Pane, bool, error) {
 	var swapped bool
 	cwd, worktreeRoot := path, path
 	if p.Worktree != nil && p.Worktree.Subdir != "" {
@@ -317,6 +361,122 @@ func (d *Daemon) createPaneInWorktree(p ipc.CreatePanePayload, path string) (*Pa
 		// Later template panes and close-time removal both use this root.
 		pane.WorktreePath = worktreeRoot
 	}
+	pane.WorktreeToken = token
 	pane.PluginMu.Unlock()
 	return pane, swapped, nil
+}
+
+// markNewWorktree writes a fresh identity mark into the checkout a create in
+// repo just made at path, and returns the token — or "" when it could not be
+// written (logged), so the pane is never offered a removal it cannot prove.
+func (d *Daemon) markNewWorktree(repo, path string) string {
+	token := uuid.NewString() // never written again: the worker may still read it
+	ctx, cancel := context.WithTimeout(context.Background(), worktreeStatusTimeout)
+	defer cancel()
+	mark := markNewWorktreeFn // read here: the worker can outlive this call
+	if _, err := boundedFSCall(ctx, func() (struct{}, error) { return struct{}{}, mark(ctx, repo, path, token) }); err != nil {
+		log.Printf("worktree add: %s: could not record its identity, it will not be removed on close: %v", path, err)
+		return ""
+	}
+	return token
+}
+
+// markNewWorktreeFn is the identity-mark seam, so tests need no real git.
+var markNewWorktreeFn = gitworktree.MarkNewWorktree
+
+// abandonRefusalFn decides whether an abandoned create may destroy the
+// checkout it made: "" when it may, else the kept reason code. A seam so the
+// tests that observe the removal itself (stubRemove) can let it through.
+var abandonRefusalFn = (*Daemon).abandonRefusal
+
+// abandonRefusal is the rollback's version of the close path's doubts, for
+// the checkout at path that a create made on branch. The accepted
+// same-repository replacement (MarkNewWorktree) can carry the mark, so the
+// mark alone is not proof that no work appeared. The checkout is kept unless:
+// it is still the one marked; it is still on branch — the rollback deletes
+// THAT branch, so facts about whatever else the checkout is on now prove
+// nothing about it; the branch holds no commit the default branch lacks (and a
+// default branch exists to count against); no pane is in it; and it holds no
+// changes. Any check that cannot answer keeps it.
+//
+// ORDER: the slow probes (mark, branch facts) run first, and the occupancy and
+// clean checks LAST, right before the caller removes — so work that lands
+// during a slow probe is still seen. What lands after the last check is caught
+// by the removal itself, which forces neither step (gitworktree.Remove).
+func (d *Daemon) abandonRefusal(repo, path, branch, token string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), worktreeStatusTimeout)
+	defer cancel()
+	if r := ownerMarkRefusal(ctx, path, token); r != "" {
+		return r
+	}
+	facts, err := branchFactsFn(ctx, repo, path, defaultBranchRefFn(ctx, repo))
+	switch {
+	case err != nil:
+		log.Printf("worktree create: %s: branch facts before rollback: %v", path, err)
+		return keptRepoUnreadable
+	case facts.Detached || facts.Branch != branch:
+		return keptBranchChanged
+	case facts.IsDefault || facts.Unmerged > 0:
+		return keptHasCommits
+	case facts.DefaultRef == "":
+		// No default branch to count against: Unmerged is 0 because nothing
+		// was counted, not because nothing is there. The close-time branch
+		// delete refuses here too.
+		return keptNoDefaultBranch
+	}
+	if r := ownerMarkRefusal(ctx, path, token); r != "" {
+		return r
+	}
+	if d.paneInWorktree(path, true) != "" {
+		return keptInUse
+	}
+	status, err := worktreeStatusFn(ctx, path)
+	switch {
+	case err != nil:
+		log.Printf("worktree create: %s: status before rollback: %v", path, err)
+		return statusRefusal(err)
+	case status.Changes > 0:
+		return keptHasChanges
+	}
+	return ""
+}
+
+// rollbackOutcome is the reason code for a rollback git refused part-way: the
+// worktree removal not finished, or the checkout removed and its branch kept.
+// Anything else is a cleanup that did not complete, said as such.
+func rollbackOutcome(err error) string {
+	switch {
+	case errors.Is(err, gitworktree.ErrBranchNotDeleted):
+		return keptBranchNotDeleted
+	case errors.Is(err, gitworktree.ErrWorktreeNotRemoved):
+		// Not "kept": on Windows git can delete the files and the registration
+		// and then fail on the empty folder a process still holds.
+		return keptRemoveIncomplete
+	}
+	return keptCleanupIncomplete
+}
+
+// notifyRollbackIncomplete is the card for a rollback git refused part-way.
+// OUTCOME FIRST, because the sidebar shows one cut line of title and one of
+// message (26 cells at its default width) and this card can be the only
+// place the outcome is reported: a kept branch leads with the branch it kept,
+// anything else says the cleanup is incomplete and names the folder after.
+// The full path and the code ride in Data.
+func (d *Daemon) notifyRollbackIncomplete(owner paneRef, path, branch, code string) {
+	title := "Cleanup incomplete: " + filepath.Base(path)
+	if code == keptBranchNotDeleted {
+		title = "Branch kept: " + branch
+	}
+	d.emitEvent(PaneEvent{
+		ID:        uuid.New().String(),
+		PaneID:    owner.ID,
+		TabID:     owner.TabID,
+		PaneName:  owner.Name,
+		Type:      "worktree_kept",
+		Title:     title,
+		Message:   keptMessage(code),
+		Severity:  "warning",
+		Timestamp: time.Now(),
+		Data:      map[string]string{"path": path, "branch": branch, "reason": code},
+	})
 }

@@ -108,14 +108,16 @@ func (d *Daemon) worktreeStatusResponse(req ipc.WorktreeStatusReqPayload) ipc.Wo
 			Error: "too many worktrees in one status check",
 		}
 	}
-	owned := d.ownedWorktreeSet()
+	owned := d.ownedWorktreeTokens()
+	tokens := map[string]string{}
 	var ask ipc.WorktreeStatusReqPayload
 	for _, p := range req.Paths {
-		if owned[normalizeWorktreePath(p)] {
+		if tok, ok := owned[normalizeWorktreePath(p)]; ok {
+			tokens[p] = tok
 			ask.Paths = append(ask.Paths, p)
 		}
 	}
-	inner := worktreeStatusResponse(ask)
+	inner := worktreeStatusResponseFor(ask, tokens)
 	byPath := make(map[string]ipc.WorktreeStatus, len(inner.Statuses))
 	for _, st := range inner.Statuses {
 		byPath[st.Path] = st
@@ -137,16 +139,20 @@ func (d *Daemon) worktreeStatusResponse(req ipc.WorktreeStatusReqPayload) ipc.Wo
 	return out
 }
 
-// ownedWorktreeSet is every worktree directory this daemon created, normalised
-// for comparison.
-func (d *Daemon) ownedWorktreeSet() map[string]bool {
-	out := map[string]bool{}
+// ownedWorktreeTokens maps every worktree directory this daemon created,
+// normalised for comparison, to the identity token recorded for it ("" for a
+// pane restored from before identities were recorded — the status check then
+// refuses it, as the close does).
+func (d *Daemon) ownedWorktreeTokens() map[string]string {
+	out := map[string]string{}
 	for _, p := range d.session.AllPanes() {
 		p.PluginMu.Lock()
-		owned, path := p.WorktreeOwned, p.WorktreePath
+		owned, path, tok := p.WorktreeOwned, p.WorktreePath, p.WorktreeToken
 		p.PluginMu.Unlock()
 		if owned && path != "" {
-			out[normalizeWorktreePath(path)] = true
+			if prev, seen := out[normalizeWorktreePath(path)]; !seen || prev == "" {
+				out[normalizeWorktreePath(path)] = tok
+			}
 		}
 	}
 	return out
@@ -158,6 +164,15 @@ func (d *Daemon) ownedWorktreeSet() map[string]bool {
 // refusal — it is the client's staleness key, not a statement about what was
 // read.
 func worktreeStatusResponse(req ipc.WorktreeStatusReqPayload) ipc.WorktreeStatusRespPayload {
+	return worktreeStatusResponseFor(req, nil)
+}
+
+// worktreeStatusResponseFor is worktreeStatusResponse with the identity check:
+// when tokens is non-nil, every path must carry a token whose mark still
+// matches, or it is refused with a reason before any file is read — the
+// files shown must be the files of the checkout Quil made, not of a
+// replacement at the same path.
+func worktreeStatusResponseFor(req ipc.WorktreeStatusReqPayload, tokens map[string]string) ipc.WorktreeStatusRespPayload {
 	out := ipc.WorktreeStatusRespPayload{Paths: req.Paths}
 	if len(req.Paths) > maxWorktreeStatusPaths {
 		out.Error = "too many worktrees in one status check"
@@ -179,18 +194,115 @@ func worktreeStatusResponse(req ipc.WorktreeStatusReqPayload) ipc.WorktreeStatus
 		releaseBlockingFSCall()
 	}()
 
+	// The default branch is resolved ONCE per repository per request: a tab
+	// holding several worktrees of one repository would otherwise pay up to
+	// six git spawns per worktree for the same answer.
+	start := time.Now()
 	for _, path := range req.Paths {
 		st := ipc.WorktreeStatus{Path: path}
-		changes, err := worktreeStatusFn(ctx, path)
+		if tokens != nil {
+			if reason := ownerMarkRefusal(ctx, path, tokens[path]); reason != "" {
+				st.Error, st.BranchReason = keptMessage(reason), keptMessage(reason)
+				out.Statuses = append(out.Statuses, st)
+				continue
+			}
+		}
+		rep, err := worktreeStatusFn(ctx, path)
 		if err != nil {
 			// Reported rather than folded into a 0. A count nobody obtained
 			// must not render as "clean", which is the one answer that invites
 			// the removal toggle.
 			st.Error = err.Error()
 		} else {
-			st.Changes = changes
+			st.Changes = rep.Changes
+			st.FilesTruncated = rep.Truncated
+			for _, f := range rep.Files {
+				st.Files = append(st.Files, ipc.WorktreeFile{Code: f.Code, Path: f.Path})
+			}
 		}
 		out.Statuses = append(out.Statuses, st)
 	}
+
+	// The branch half runs AFTER every file count, on a budget that ends
+	// before the dialog gives up waiting (worktreeStatusTimeout client side,
+	// 6 s): slow branch checks must never cost the user the file counts they
+	// were waiting for. A worktree whose facts did not fit says so.
+	factsCtx, cancelFacts := context.WithDeadline(ctx, start.Add(branchFactsBudget))
+	defer cancelFacts()
+	// The default branch is resolved ONCE per repository per request.
+	defaults := map[string]string{}
+	for i := range out.Statuses {
+		st := &out.Statuses[i]
+		switch {
+		case st.BranchReason != "":
+			// Already refused: not the checkout Quil made.
+		case i >= maxBranchFactsPaths:
+			st.BranchReason = "not checked (too many worktrees)"
+		case factsCtx.Err() != nil:
+			st.BranchReason = "not checked (out of time)"
+		default:
+			fillBranchFacts(factsCtx, st.Path, defaults, st)
+		}
+	}
 	return out
+}
+
+// branchFactsBudget is how long one status request may spend, counted from
+// its start, before the branch half stops: inside the close dialog's 6 s wait,
+// so the file counts always arrive. A var so a test can shorten it.
+var branchFactsBudget = 4 * time.Second
+
+// maxBranchFactsPaths bounds how many worktrees of one request get branch
+// facts. It matches the close dialog's own row cap (confirmWorktreeMaxRows):
+// facts are several git spawns each, all on the request's one deadline, and a
+// row the dialog does not draw needs none.
+const maxBranchFactsPaths = 6
+
+// Seams for the branch half, so no test needs a repository.
+var (
+	branchFactsFn      = gitworktree.ReadBranchFacts
+	defaultBranchRefFn = gitworktree.DefaultBranchRef
+)
+
+// fillBranchFacts adds the branch facts for one worktree to st. Any failure
+// leaves the branch NOT deletable with the reason — the dialog offers a local
+// delete only on facts it actually read.
+func fillBranchFacts(ctx context.Context, path string, defaults map[string]string, st *ipc.WorktreeStatus) {
+	list, err := worktreeListFn(ctx, path)
+	if err != nil || len(list) == 0 || list[0].Path == "" {
+		st.BranchReason = "could not find the repository"
+		return
+	}
+	repo := list[0].Path
+	key := normalizeWorktreePath(repo)
+	def, ok := defaults[key]
+	if !ok {
+		def = defaultBranchRefFn(ctx, repo)
+		defaults[key] = def
+	}
+	f, err := branchFactsFn(ctx, repo, path, def)
+	applyBranchFacts(st, f, err)
+}
+
+// applyBranchFacts copies branch facts onto a status answer. Any failure
+// leaves the branch NOT deletable with the reason.
+func applyBranchFacts(st *ipc.WorktreeStatus, f gitworktree.BranchFacts, err error) {
+	st.Branch = f.Branch
+	st.DefaultBranch = gitworktree.ShortBranchName(f.DefaultRef)
+	st.Unmerged = f.Unmerged
+	st.BranchTip = f.Tip
+	switch {
+	case err != nil:
+		st.BranchReason = "could not read the branch: " + err.Error()
+	case f.Detached:
+		st.BranchReason = "detached HEAD, no branch"
+	case f.IsDefault:
+		st.BranchReason = "default branch"
+	case f.DefaultRef == "":
+		// Without a default branch nothing can say which commits exist only
+		// on this one, nor guard the default itself: fail closed.
+		st.BranchReason = "no default branch found, so unmerged commits cannot be counted"
+	default:
+		st.BranchDeletable = true
+	}
 }

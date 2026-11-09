@@ -11,6 +11,36 @@ version section here and deletes them.
 
 ## [Unreleased]
 
+## [1.99.0] - 2026-11-09
+
+### Added
+- **Quil keeps a record of worktrees and branches that appear while agents
+  run.** Claude Code, Codex and OpenCode tell Quil when an agent runs a
+  command that can make or remove a worktree or a branch, including a plain
+  `git worktree add` in the shell and Claude's own worktree tool. Quil then
+  compares the repository's worktrees and branches with what it saw before,
+  and also does that once at the end of every agent turn. Each new one is
+  recorded with the pane it appeared in. The command text is never stored,
+  because it can hold a password or a token. Worktrees Quil made itself are
+  not recorded. The cleanup view lists the record.
+- **A view to clean up worktrees and branches that agents left behind.** The
+  command palette's **Worktrees from agents…** lists what Quil recorded while
+  agents ran: each worktree or branch, the pane and agent it appeared under,
+  its age, and whether a pane still uses it. Picking one opens the same
+  confirm a pane close uses: it lists the files that would be lost and offers
+  to delete the worktree and its local branch. Quil checks with git again
+  before it deletes anything, and never deletes a branch on a remote. `f`
+  forgets an entry without touching git.
+- **The close dialog shows what a worktree delete destroys, and can delete the
+  local branch too.** When you close a pane or tab whose worktree Quil created,
+  the dialog lists the uncommitted, untracked and ignored files the delete
+  would remove (10 rows, scroll with `PgUp`/`PgDn`, `←`/`→` between worktrees).
+  A second row deletes the worktree's local branch as well, and warns about
+  commits that exist only on that branch. Quil never deletes a branch on a
+  remote. A worktree whose files could not be read is never deleted, nor a
+  folder that is no longer the checkout Quil made; a sidebar card says why
+  whenever a worktree you asked to delete is kept.
+
 ## [1.98.1] - 2026-11-07
 
 ### Fixed

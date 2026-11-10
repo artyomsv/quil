@@ -6561,9 +6561,25 @@ func resolveSpawnArgs(p *plugin.PanePlugin, pane *Pane, restoring, ownsRecord bo
 	// the union only over-detects, but it meant the per-agent split this map
 	// exists for was not actually reached from here.
 	agent := handStartBase(p.Command.Cmd)
-	typedSession := instanceArgsNameSession(agent, pane.InstanceArgs)
+	//
+	// Checked on the EFFECTIVE args (the pane's own, else the plugin's), as the
+	// sbx path does: a plugin whose own args carry `--continue` is the same
+	// standing selector as a typed one.
+	typedSession := instanceArgsNameSession(agent, args)
 
 	if !restoring && p.Persistence.Strategy == "preassign_id" {
+		// A typed selector is a starting point, not a standing instruction:
+		// once the pane has a session of its own — a located one to resume,
+		// or one its hook recorded (ownsRecord, narrowed by spawnPane for this
+		// strategy) — it is stale. Kept, `--continue` wins in claude even
+		// beside `--resume <own>`, and opens the newest session in the
+		// directory: a sibling pane's (issue #288). Toggles typed beside it
+		// stay. Not persisted, so an override of the plugin's own args stays
+		// an override.
+		if typedSession && (resumeID != "" || ownsRecord) {
+			args = stripSessionArgs(agent, args)
+			typedSession = false
+		}
 		if resumeID != "" {
 			args = append(args, "--resume", resumeID)
 		} else if typedSession {
@@ -6629,8 +6645,29 @@ func resolveSpawnArgs(p *plugin.PanePlugin, pane *Pane, restoring, ownsRecord bo
 	// session expands to the plugin's own ResumeArgs, which codex.toml
 	// deliberately leaves empty, so it starts fresh rather than guessing with
 	// `resume --last`.
-	if !restoring && ownsRecord && !typedSession && p.Persistence.Strategy == "session_scrape" {
-		args = appendResumeTemplate(args, resumeTemplateFor(p, pane, claim), pane)
+	if !restoring && ownsRecord && p.Persistence.Strategy == "session_scrape" {
+		template := resumeTemplateFor(p, pane, claim)
+		if !typedSession {
+			args = appendResumeTemplate(args, template, pane)
+		} else if templateHasPlaceholder(template) {
+			// The pane typed a session (`opencode --continue`, `codex resume
+			// <id>`) AND its own hook may have recorded one since. The record
+			// is where the conversation actually went, exactly as on restore;
+			// the typed selector is stale, and `--continue` would open the
+			// newest session in the directory — a sibling pane's (issue #288).
+			//
+			// Swapped only when the template EXPANDED: a placeholder template
+			// does not prove a session was recorded (a TOML may configure
+			// `--session {session_id}` as its fallback), and stripping the only
+			// selector for nothing would start the pane fresh. Static
+			// fallbacks (codex `[]`, opencode `--continue`) never swap.
+			stripped := stripSessionArgs(agent, args)
+			if resumed := appendResumeTemplate(stripped, template, pane); len(resumed) > len(stripped) {
+				args = resumed
+			}
+		}
+		// Typed, and nothing recorded (the child died before its session hook
+		// fired): the typed selector is still the best information there is.
 	}
 
 	// Resume branch: append ResumeArgs to whatever args already exist so
@@ -6861,6 +6898,7 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 		// resolveSpawnArgs — see the note on that function for why it must not
 		// read PluginState itself.
 		var resumeID string
+		claudeRecorded := false
 		if !restoring && p.Persistence.Strategy == "preassign_id" {
 			// This branch is not only pane creation: handleRestartPaneReq (Alt+R)
 			// also calls spawnPane with restoring=false. So a creation-time resume
@@ -6915,6 +6953,12 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 					delete(pane.PluginState, "transcript_path")
 				}
 			}
+			// The pane's own hook has recorded where its conversation went. This
+			// is the ownership test the block above already trusts, and it is
+			// what lets resolveSpawnArgs drop a session flag the user TYPED
+			// (issue #288): a converting pane's records were retired at
+			// conversion, so its first spawn has no hookID and keeps the flag.
+			claudeRecorded = hadSession && hookID != ""
 			if pane.PluginState["session_id"] == "" {
 				if resumeID != "" {
 					pane.PluginState["session_id"] = resumeID
@@ -6975,6 +7019,14 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 			ownsRecord = false
 		}
 		pane.PluginMu.Unlock()
+		// preassign_id has no record file of its own to own: what makes a typed
+		// session flag stale there is the claude hook having recorded the
+		// pane's session (see claudeRecorded). ownsRecord is otherwise unused
+		// on that strategy, so it carries exactly that answer into
+		// resolveSpawnArgs.
+		if p.Persistence.Strategy == "preassign_id" {
+			ownsRecord = ownsRecord && claudeRecorded
+		}
 
 		// A session_scrape pane that owns NOTHING retires any record left under its
 		// id before its child can write one, which is what turns ownsRecord from a
@@ -8845,14 +8897,17 @@ func sessionFlagTakesValue(flag string) bool {
 // malformed `--resume --chrome` loses the dangling --resume and keeps the
 // toggle rather than swallowing it.
 func stripSessionArgs(agent string, args []string) []string {
+	// codex spells it as a subcommand, and its arguments need a parse of
+	// their own: see stripCodexResume.
+	if len(args) > 0 && args[0] == "resume" {
+		return stripCodexResume(args[1:])
+	}
 	flags := sessionFlagsFor(agent)
 	out := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		takesValue := false
 		switch {
-		case a == "resume" && i == 0: // codex spells it as a subcommand
-			takesValue = true
 		case a == "resume":
 			out = append(out, a)
 			continue
@@ -8866,6 +8921,72 @@ func stripSessionArgs(agent string, args []string) []string {
 		}
 		if takesValue && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
 			i++
+		}
+	}
+	return out
+}
+
+// codexResumeOnly are the flags codex's `resume` subcommand has and the top
+// level does not (ResumeCommand in codex-rs/cli/src/main.rs). Left behind
+// they land in front of the `resume <id>` a caller appends, and codex refuses
+// the whole command.
+var codexResumeOnly = setOf("--last", "--all", "--include-non-interactive")
+
+// codexValueFlags are the codex flags that take their value as the NEXT word:
+// TuiCli and its shared options, `-c`, the feature toggles and the remote
+// options (MultitoolCli, codex-rs/cli/src/main.rs). Knowing them is what tells
+// a flag's value apart from a positional, which the strip drops — an unlisted
+// value flag loses its value and takes the appended `resume` as one.
+var codexValueFlags = setOf(
+	"-m", "--model", "-p", "--profile", "-s", "--sandbox",
+	"-a", "--ask-for-approval", "-C", "--cd", "--add-dir",
+	"-c", "--config", "--local-provider", "--enable", "--disable",
+	"--remote", "--remote-auth-token-env",
+)
+
+// codexPromptFlags attach files to the initial prompt and take one or more
+// values (`num_args = 1..`): every following word that is not a flag belongs
+// to them, as clap reads it. They are DROPPED with their values, for two
+// reasons. They belong to the prompt, which the strip drops. And kept, the
+// greedy value list would swallow the `resume <id>` the caller appends
+// (`codex -i a.png resume <id>` reads `resume` and the id as image paths).
+var codexPromptFlags = setOf("-i", "--image")
+
+// stripCodexResume removes `resume`, its own selectors and every positional
+// (the session id and any prompt) from the subcommand's arguments wherever
+// they appear, keeping every other option with its value, in order.
+// `resume <id> --all` and `resume --model m --last` are both valid codex
+// commands, so an adjacent-only rule left a resume-only flag behind.
+//
+// The prompt goes too, deliberately. It was the first message of the
+// conversation the pane now reopens: kept, it would be sent into that
+// conversation again on every restart. It also cannot stay where it was —
+// the caller appends `resume <id>` AFTER what is returned, so a kept prompt
+// would sit in front of the subcommand, and one after `--` (`-- --help`)
+// would be read there as a flag. After `--` everything is positional, as in
+// clap, so all of it goes.
+func stripCodexResume(rest []string) []string {
+	out := make([]string, 0, len(rest))
+	for i := 0; i < len(rest); i++ {
+		a := rest[i]
+		switch {
+		case a == "--":
+			return out
+		case codexResumeOnly[a]:
+			// dropped
+		case codexPromptFlags[flagName(a)]:
+			// dropped with its values (`-i=a.png` carries its first one)
+			for i+1 < len(rest) && rest[i+1] != "--" && !strings.HasPrefix(rest[i+1], "-") {
+				i++
+			}
+		case strings.HasPrefix(a, "-"):
+			out = append(out, a)
+			if codexValueFlags[a] && i+1 < len(rest) {
+				i++
+				out = append(out, rest[i])
+			}
+		default:
+			// the old session id, or a prompt
 		}
 	}
 	return out

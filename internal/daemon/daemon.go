@@ -8944,33 +8944,25 @@ var codexValueFlags = setOf(
 	"--remote", "--remote-auth-token-env",
 )
 
-// stripCodexResume removes `resume`, its own selectors and the session id from
-// the subcommand's arguments wherever they appear, keeping every other option
-// with its value and any prompt, in order. `resume <id> --all` and
-// `resume --model m --last` are both valid codex commands, so an
-// adjacent-only rule left a resume-only flag behind.
+// stripCodexResume removes `resume`, its own selectors and every positional
+// (the session id and any prompt) from the subcommand's arguments wherever
+// they appear, keeping every other option with its value, in order.
+// `resume <id> --all` and `resume --model m --last` are both valid codex
+// commands, so an adjacent-only rule left a resume-only flag behind.
 //
-// `--last` stands in for the id, so with it every positional is a prompt.
-// After `--` everything is positional, as in clap.
+// The prompt goes too, deliberately. It was the first message of the
+// conversation the pane now reopens: kept, it would be sent into that
+// conversation again on every restart. It also cannot stay where it was —
+// the caller appends `resume <id>` AFTER what is returned, so a kept prompt
+// would sit in front of the subcommand, and one after `--` (`-- --help`)
+// would be read there as a flag. After `--` everything is positional, as in
+// clap, so all of it goes.
 func stripCodexResume(rest []string) []string {
-	idTaken := false
-	for _, a := range rest {
-		if a == "--last" {
-			idTaken = true
-		}
-	}
 	out := make([]string, 0, len(rest))
 	for i := 0; i < len(rest); i++ {
 		a := rest[i]
 		switch {
 		case a == "--":
-			for _, p := range rest[i+1:] {
-				if !idTaken {
-					idTaken = true
-					continue
-				}
-				out = append(out, p)
-			}
 			return out
 		case codexResumeOnly[a]:
 			// dropped
@@ -8980,10 +8972,8 @@ func stripCodexResume(rest []string) []string {
 				i++
 				out = append(out, rest[i])
 			}
-		case !idTaken:
-			idTaken = true // the old session id
 		default:
-			out = append(out, a)
+			// the old session id, or a prompt
 		}
 	}
 	return out

@@ -118,10 +118,13 @@ func TestStripSessionArgs_CodexResumeSelectors(t *testing.T) {
 		{[]string{"resume", "--include-non-interactive", "--last"}, []string{}},
 		// A value flag's value is not the session id.
 		{[]string{"resume", "-c", "model=gpt-5", restartTestSessionID}, []string{"-c", "model=gpt-5"}},
-		// With --last every positional is a prompt.
-		{[]string{"resume", "--last", "fix the build"}, []string{"fix the build"}},
-		{[]string{"resume", restartTestSessionID, "fix the build"}, []string{"fix the build"}},
+		// A prompt was the conversation's first message: it is not sent into
+		// the reopened conversation again, and a `--` prompt never becomes a
+		// flag in front of the appended `resume <id>`.
+		{[]string{"resume", "--last", "fix the build"}, []string{}},
+		{[]string{"resume", restartTestSessionID, "fix the build", "--search"}, []string{"--search"}},
 		{[]string{"resume", "--", restartTestSessionID}, []string{}},
+		{[]string{"resume", "--search", "--last", "--", "--help"}, []string{"--search"}},
 	}
 	for _, tt := range tests {
 		if got := stripSessionArgs("codex", tt.args); !reflect.DeepEqual(got, tt.want) {
@@ -227,6 +230,7 @@ func TestResolveSpawnArgs_RestartTypedSessionScrape(t *testing.T) {
 		{"codex nothing recorded", codexPlugin, []string{"resume", typedCodexID}, "", "", []string{"resume", typedCodexID}},
 		{"codex resume --last recorded", codexPlugin, []string{"resume", "--last"}, "", restartTestSessionID, []string{"resume", restartTestSessionID}},
 		{"codex selector after the id", codexPlugin, []string{"resume", typedCodexID, "--all"}, "", restartTestSessionID, []string{"resume", restartTestSessionID}},
+		{"codex literal prompt after --", codexPlugin, []string{"resume", "--last", "--", "--help"}, "", restartTestSessionID, []string{"resume", restartTestSessionID}},
 		{"codex selector after an option pair", codexPlugin, []string{"resume", "--model", "gpt-5", "--last"}, "", restartTestSessionID, []string{"--model", "gpt-5", "resume", restartTestSessionID}},
 		{"opencode placeholder fallback, nothing recorded", opencodeTemplated, []string{"--continue"}, "", "", []string{"--continue"}},
 	}

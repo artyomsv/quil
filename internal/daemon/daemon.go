@@ -6561,16 +6561,26 @@ func resolveSpawnArgs(p *plugin.PanePlugin, pane *Pane, restoring, ownsRecord bo
 	// the union only over-detects, but it meant the per-agent split this map
 	// exists for was not actually reached from here.
 	agent := handStartBase(p.Command.Cmd)
-	typedSession := instanceArgsNameSession(agent, pane.InstanceArgs)
+	//
+	// Checked on the EFFECTIVE args (the pane's own, else the plugin's), as the
+	// sbx path does: a plugin whose own args carry `--continue` is the same
+	// standing selector as a typed one.
+	typedSession := instanceArgsNameSession(agent, args)
 
 	if !restoring && p.Persistence.Strategy == "preassign_id" {
+		// A typed selector is a starting point, not a standing instruction:
+		// once the pane has a session of its own — a located one to resume,
+		// or one its hook recorded (ownsRecord, narrowed by spawnPane for this
+		// strategy) — it is stale. Kept, `--continue` wins in claude even
+		// beside `--resume <own>`, and opens the newest session in the
+		// directory: a sibling pane's (issue #288). Toggles typed beside it
+		// stay. Not persisted, so an override of the plugin's own args stays
+		// an override.
+		if typedSession && (resumeID != "" || ownsRecord) {
+			args = stripSessionArgs(agent, args)
+			typedSession = false
+		}
 		if resumeID != "" {
-			// --resume names the session; a typed selector beside it is stale
-			// and wins in claude — `--continue --resume <own>` opened the
-			// newest session in the directory, a sibling pane's (issue #288).
-			if typedSession {
-				args = stripSessionArgs(agent, args)
-			}
 			args = append(args, "--resume", resumeID)
 		} else if typedSession {
 			// Nothing to append: the user said which session this is.
@@ -6637,23 +6647,27 @@ func resolveSpawnArgs(p *plugin.PanePlugin, pane *Pane, restoring, ownsRecord bo
 	// `resume --last`.
 	if !restoring && ownsRecord && p.Persistence.Strategy == "session_scrape" {
 		template := resumeTemplateFor(p, pane, claim)
-		switch {
-		case !typedSession:
+		if !typedSession {
 			args = appendResumeTemplate(args, template, pane)
-		case templateHasPlaceholder(template):
+		} else if templateHasPlaceholder(template) {
 			// The pane typed a session (`opencode --continue`, `codex resume
-			// <id>`) AND its own hook has since recorded one. The record is
-			// where the conversation actually went, exactly as on restore; the
-			// typed selector is stale, and `--continue` would open the newest
-			// session in the directory — a sibling pane's (issue #288).
-			// A placeholder template is the recorded-session case: the
-			// fallbacks (codex `[]`, opencode `--continue`) are static.
-			args = appendResumeTemplate(stripSessionArgs(agent, args), template, pane)
-		default:
-			// Typed, and nothing recorded yet (the child died before its
-			// session hook fired): the typed selector is still the best
-			// information this pane has.
+			// <id>`) AND its own hook may have recorded one since. The record
+			// is where the conversation actually went, exactly as on restore;
+			// the typed selector is stale, and `--continue` would open the
+			// newest session in the directory — a sibling pane's (issue #288).
+			//
+			// Swapped only when the template EXPANDED: a placeholder template
+			// does not prove a session was recorded (a TOML may configure
+			// `--session {session_id}` as its fallback), and stripping the only
+			// selector for nothing would start the pane fresh. Static
+			// fallbacks (codex `[]`, opencode `--continue`) never swap.
+			stripped := stripSessionArgs(agent, args)
+			if resumed := appendResumeTemplate(stripped, template, pane); len(resumed) > len(stripped) {
+				args = resumed
+			}
 		}
+		// Typed, and nothing recorded (the child died before its session hook
+		// fired): the typed selector is still the best information there is.
 	}
 
 	// Resume branch: append ResumeArgs to whatever args already exist so
@@ -6884,6 +6898,7 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 		// resolveSpawnArgs — see the note on that function for why it must not
 		// read PluginState itself.
 		var resumeID string
+		claudeRecorded := false
 		if !restoring && p.Persistence.Strategy == "preassign_id" {
 			// This branch is not only pane creation: handleRestartPaneReq (Alt+R)
 			// also calls spawnPane with restoring=false. So a creation-time resume
@@ -6938,27 +6953,12 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 					delete(pane.PluginState, "transcript_path")
 				}
 			}
-			// A session the user TYPED (`claude --continue` in a terminal pane,
-			// converted by the hand-start path) has done its job once this pane's
-			// own hook has recorded where the conversation went. Kept, it is a
-			// standing instruction the restart below would obey: `--continue`
-			// means "the newest session in this directory", which is a SIBLING
-			// pane's whenever two share a directory — and appending `--resume`
-			// beside it does not help, claude takes `--continue` (issue #288).
-			// Restore already strips it on every spawn; this drops it for good,
-			// so workspace.json stops carrying it too.
-			//
-			// hadSession && hookID is the ownership test this block already
-			// trusts: a converting pane's records were retired at conversion,
-			// so its first spawn has no hookID and keeps the typed flag.
-			// Only the session flag goes; toggles typed beside it stay.
-			if hadSession && hookID != "" {
-				agent := handStartBase(p.Command.Cmd)
-				if instanceArgsNameSession(agent, pane.InstanceArgs) {
-					pane.InstanceArgs = stripSessionArgs(agent, pane.InstanceArgs)
-					log.Printf("pane %s: dropped the typed session flag; resuming its own recorded session", pane.ID)
-				}
-			}
+			// The pane's own hook has recorded where its conversation went. This
+			// is the ownership test the block above already trusts, and it is
+			// what lets resolveSpawnArgs drop a session flag the user TYPED
+			// (issue #288): a converting pane's records were retired at
+			// conversion, so its first spawn has no hookID and keeps the flag.
+			claudeRecorded = hadSession && hookID != ""
 			if pane.PluginState["session_id"] == "" {
 				if resumeID != "" {
 					pane.PluginState["session_id"] = resumeID
@@ -7019,6 +7019,14 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 			ownsRecord = false
 		}
 		pane.PluginMu.Unlock()
+		// preassign_id has no record file of its own to own: what makes a typed
+		// session flag stale there is the claude hook having recorded the
+		// pane's session (see claudeRecorded). ownsRecord is otherwise unused
+		// on that strategy, so it carries exactly that answer into
+		// resolveSpawnArgs.
+		if p.Persistence.Strategy == "preassign_id" {
+			ownsRecord = ownsRecord && claudeRecorded
+		}
 
 		// A session_scrape pane that owns NOTHING retires any record left under its
 		// id before its child can write one, which is what turns ownsRecord from a
@@ -8897,6 +8905,16 @@ func stripSessionArgs(agent string, args []string) []string {
 		switch {
 		case a == "resume" && i == 0: // codex spells it as a subcommand
 			takesValue = true
+			// `resume --last` / `resume --all` are the subcommand's own
+			// selectors. Left behind they become top-level flags in front of the
+			// `resume <id>` a caller appends, which codex refuses.
+			// `--last` stands in for the id, so a word after it is a prompt.
+			for i+1 < len(args) && codexResumeSelector(args[i+1]) {
+				i++
+				if args[i] == "--last" {
+					takesValue = false
+				}
+			}
 		case a == "resume":
 			out = append(out, a)
 			continue
@@ -8913,6 +8931,12 @@ func stripSessionArgs(agent string, args []string) []string {
 		}
 	}
 	return out
+}
+
+// codexResumeSelector reports whether an argument is one of codex's `resume`
+// subcommand selectors, which belong to the subcommand and go with it.
+func codexResumeSelector(a string) bool {
+	return a == "--last" || a == "--all"
 }
 
 // splitSourceCWD is the folder a split opens in when the request names the

@@ -60,9 +60,63 @@ func TestSpawnPane_RestartWithTypedContinueResumesItsOwnSession(t *testing.T) {
 	if !argsHaveFlag(fs.startArgs, "--chrome") {
 		t.Errorf("start args = %q, want the typed toggle --chrome kept", fs.startArgs)
 	}
-	// Dropped for good, so workspace.json stops carrying the stale flag.
-	if want := []string{"--chrome"}; !reflect.DeepEqual(pane.InstanceArgs, want) {
-		t.Errorf("InstanceArgs = %v, want %v", pane.InstanceArgs, want)
+	// Stripped per spawn, never persisted: emptying InstanceArgs would switch
+	// the override off and bring the plugin's own args back.
+	if want := []string{"--continue", "--chrome"}; !reflect.DeepEqual(pane.InstanceArgs, want) {
+		t.Errorf("InstanceArgs = %v, want %v unchanged", pane.InstanceArgs, want)
+	}
+}
+
+// The pure matrix for preassign_id restarts, including a selector that comes
+// from the PLUGIN's own args rather than the pane's.
+func TestResolveSpawnArgs_RestartTypedPreassignMatrix(t *testing.T) {
+	withPluginArgs := claudeResumePlugin()
+	withPluginArgs.Command.Args = []string{"--continue"}
+
+	tests := []struct {
+		name       string
+		plugin     *plugin.PanePlugin
+		args       []string
+		ownsRecord bool
+		resumeID   string
+		want       []string
+	}{
+		{"recorded, no transcript", claudeResumePlugin(), []string{"--continue"}, true, "", []string{"--session-id", typedRestartID}},
+		{"nothing recorded keeps the typed flag", claudeResumePlugin(), []string{"--continue"}, false, "", []string{"--continue"}},
+		{"plugin args carry the selector", withPluginArgs, nil, true, typedRestartID, []string{"--resume", typedRestartID}},
+		{"override of plugin args stays an override", withPluginArgs, []string{"--continue"}, true, typedRestartID, []string{"--resume", typedRestartID}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pane := &Pane{
+				ID:           "pane-4779a4b0",
+				InstanceArgs: tt.args,
+				PluginState:  map[string]string{"session_id": typedRestartID},
+			}
+			got := resolveSpawnArgs(tt.plugin, pane, false, tt.ownsRecord, tt.resumeID, claimAny)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("resolveSpawnArgs:\n  got:  %v\n  want: %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// codex's `resume --last` must go as a unit: a `--last` left behind lands in
+// front of the appended `resume <id>` and codex refuses it.
+func TestStripSessionArgs_CodexResumeSelectors(t *testing.T) {
+	tests := []struct {
+		args []string
+		want []string
+	}{
+		{[]string{"resume", "--last"}, []string{}},
+		{[]string{"resume", "--last", "--search"}, []string{"--search"}},
+		{[]string{"resume", "--all", restartTestSessionID}, []string{}},
+		{[]string{"resume", restartTestSessionID, "--search"}, []string{"--search"}},
+	}
+	for _, tt := range tests {
+		if got := stripSessionArgs("codex", tt.args); !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("stripSessionArgs(%v) = %v, want %v", tt.args, got, tt.want)
+		}
 	}
 }
 
@@ -137,6 +191,13 @@ func TestResolveSpawnArgs_RestartTypedSessionScrape(t *testing.T) {
 		Command:     plugin.CommandConfig{Cmd: "codex"},
 		Persistence: plugin.PersistenceConfig{Strategy: "session_scrape"},
 	}
+	// A TOML may configure a placeholder template as its fallback; with no
+	// record it expands to nothing and must not cost the pane its selector.
+	opencodeTemplated := &plugin.PanePlugin{
+		Name:        "opencode",
+		Command:     plugin.CommandConfig{Cmd: "opencode"},
+		Persistence: plugin.PersistenceConfig{Strategy: "session_scrape", ResumeArgs: []string{"--session", "{session_id}"}},
+	}
 	const typedCodexID = "11111111-2222-4333-8444-555555555555"
 
 	origOpencode, origCodex := readOpencodeSessionIDFn, readCodexSessionFn
@@ -154,6 +215,8 @@ func TestResolveSpawnArgs_RestartTypedSessionScrape(t *testing.T) {
 		{"opencode nothing recorded", opencodePlugin, []string{"--continue"}, "", "", []string{"--continue"}},
 		{"codex recorded", codexPlugin, []string{"resume", typedCodexID}, "", restartTestSessionID, []string{"resume", restartTestSessionID}},
 		{"codex nothing recorded", codexPlugin, []string{"resume", typedCodexID}, "", "", []string{"resume", typedCodexID}},
+		{"codex resume --last recorded", codexPlugin, []string{"resume", "--last"}, "", restartTestSessionID, []string{"resume", restartTestSessionID}},
+		{"opencode placeholder fallback, nothing recorded", opencodeTemplated, []string{"--continue"}, "", "", []string{"--continue"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

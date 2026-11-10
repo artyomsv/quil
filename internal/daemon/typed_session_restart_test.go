@@ -125,6 +125,10 @@ func TestStripSessionArgs_CodexResumeSelectors(t *testing.T) {
 		{[]string{"resume", restartTestSessionID, "fix the build", "--search"}, []string{"--search"}},
 		{[]string{"resume", "--", restartTestSessionID}, []string{}},
 		{[]string{"resume", "--search", "--last", "--", "--help"}, []string{"--search"}},
+		// Feature toggles take a value; --image takes one or more.
+		{[]string{"resume", restartTestSessionID, "--enable", "web_search"}, []string{"--enable", "web_search"}},
+		{[]string{"resume", "--disable", "x", "--last"}, []string{"--disable", "x"}},
+		{[]string{"resume", "--last", "-i", "a.png", "b.png", "--search"}, []string{"-i", "a.png", "b.png", "--search"}},
 	}
 	for _, tt := range tests {
 		if got := stripSessionArgs("codex", tt.args); !reflect.DeepEqual(got, tt.want) {
@@ -230,6 +234,7 @@ func TestResolveSpawnArgs_RestartTypedSessionScrape(t *testing.T) {
 		{"codex nothing recorded", codexPlugin, []string{"resume", typedCodexID}, "", "", []string{"resume", typedCodexID}},
 		{"codex resume --last recorded", codexPlugin, []string{"resume", "--last"}, "", restartTestSessionID, []string{"resume", restartTestSessionID}},
 		{"codex selector after the id", codexPlugin, []string{"resume", typedCodexID, "--all"}, "", restartTestSessionID, []string{"resume", restartTestSessionID}},
+		{"codex feature toggle keeps its value", codexPlugin, []string{"resume", typedCodexID, "--enable", "web_search"}, "", restartTestSessionID, []string{"--enable", "web_search", "resume", restartTestSessionID}},
 		{"codex literal prompt after --", codexPlugin, []string{"resume", "--last", "--", "--help"}, "", restartTestSessionID, []string{"resume", restartTestSessionID}},
 		{"codex selector after an option pair", codexPlugin, []string{"resume", "--model", "gpt-5", "--last"}, "", restartTestSessionID, []string{"--model", "gpt-5", "resume", restartTestSessionID}},
 		{"opencode placeholder fallback, nothing recorded", opencodeTemplated, []string{"--continue"}, "", "", []string{"--continue"}},

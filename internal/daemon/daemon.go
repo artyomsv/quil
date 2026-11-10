@@ -8932,17 +8932,21 @@ func stripSessionArgs(agent string, args []string) []string {
 // the whole command.
 var codexResumeOnly = setOf("--last", "--all", "--include-non-interactive")
 
-// codexValueFlags are the codex flags that take their value as the NEXT word
-// (TuiCli, its shared options, -c, the remote options). Knowing them is what
-// tells a flag's value apart from the session id, which is the subcommand's
-// first positional. An unlisted value flag only risks keeping its value as a
-// stray word or taking it for the id — never dropping a listed flag.
+// codexValueFlags are the codex flags that take their value as the NEXT word:
+// TuiCli and its shared options, `-c`, the feature toggles and the remote
+// options (MultitoolCli, codex-rs/cli/src/main.rs). Knowing them is what tells
+// a flag's value apart from a positional, which the strip drops — an unlisted
+// value flag loses its value and takes the appended `resume` as one.
 var codexValueFlags = setOf(
 	"-m", "--model", "-p", "--profile", "-s", "--sandbox",
 	"-a", "--ask-for-approval", "-C", "--cd", "--add-dir",
-	"-i", "--image", "-c", "--config", "--local-provider",
+	"-c", "--config", "--local-provider", "--enable", "--disable",
 	"--remote", "--remote-auth-token-env",
 )
+
+// codexMultiValueFlags take one or more values (`num_args = 1..`): every
+// following word that is not a flag belongs to them, as clap reads it.
+var codexMultiValueFlags = setOf("-i", "--image")
 
 // stripCodexResume removes `resume`, its own selectors and every positional
 // (the session id and any prompt) from the subcommand's arguments wherever
@@ -8968,9 +8972,15 @@ func stripCodexResume(rest []string) []string {
 			// dropped
 		case strings.HasPrefix(a, "-"):
 			out = append(out, a)
-			if codexValueFlags[a] && i+1 < len(rest) {
+			switch {
+			case codexValueFlags[a] && i+1 < len(rest):
 				i++
 				out = append(out, rest[i])
+			case codexMultiValueFlags[a]:
+				for i+1 < len(rest) && rest[i+1] != "--" && !strings.HasPrefix(rest[i+1], "-") {
+					i++
+					out = append(out, rest[i])
+				}
 			}
 		default:
 			// the old session id, or a prompt

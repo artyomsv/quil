@@ -8897,24 +8897,17 @@ func sessionFlagTakesValue(flag string) bool {
 // malformed `--resume --chrome` loses the dangling --resume and keeps the
 // toggle rather than swallowing it.
 func stripSessionArgs(agent string, args []string) []string {
+	// codex spells it as a subcommand, and its arguments need a parse of
+	// their own: see stripCodexResume.
+	if len(args) > 0 && args[0] == "resume" {
+		return stripCodexResume(args[1:])
+	}
 	flags := sessionFlagsFor(agent)
 	out := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		takesValue := false
 		switch {
-		case a == "resume" && i == 0: // codex spells it as a subcommand
-			takesValue = true
-			// `resume --last` / `resume --all` are the subcommand's own
-			// selectors. Left behind they become top-level flags in front of the
-			// `resume <id>` a caller appends, which codex refuses.
-			// `--last` stands in for the id, so a word after it is a prompt.
-			for i+1 < len(args) && codexResumeSelector(args[i+1]) {
-				i++
-				if args[i] == "--last" {
-					takesValue = false
-				}
-			}
 		case a == "resume":
 			out = append(out, a)
 			continue
@@ -8933,10 +8926,67 @@ func stripSessionArgs(agent string, args []string) []string {
 	return out
 }
 
-// codexResumeSelector reports whether an argument is one of codex's `resume`
-// subcommand selectors, which belong to the subcommand and go with it.
-func codexResumeSelector(a string) bool {
-	return a == "--last" || a == "--all"
+// codexResumeOnly are the flags codex's `resume` subcommand has and the top
+// level does not (ResumeCommand in codex-rs/cli/src/main.rs). Left behind
+// they land in front of the `resume <id>` a caller appends, and codex refuses
+// the whole command.
+var codexResumeOnly = setOf("--last", "--all", "--include-non-interactive")
+
+// codexValueFlags are the codex flags that take their value as the NEXT word
+// (TuiCli, its shared options, -c, the remote options). Knowing them is what
+// tells a flag's value apart from the session id, which is the subcommand's
+// first positional. An unlisted value flag only risks keeping its value as a
+// stray word or taking it for the id — never dropping a listed flag.
+var codexValueFlags = setOf(
+	"-m", "--model", "-p", "--profile", "-s", "--sandbox",
+	"-a", "--ask-for-approval", "-C", "--cd", "--add-dir",
+	"-i", "--image", "-c", "--config", "--local-provider",
+	"--remote", "--remote-auth-token-env",
+)
+
+// stripCodexResume removes `resume`, its own selectors and the session id from
+// the subcommand's arguments wherever they appear, keeping every other option
+// with its value and any prompt, in order. `resume <id> --all` and
+// `resume --model m --last` are both valid codex commands, so an
+// adjacent-only rule left a resume-only flag behind.
+//
+// `--last` stands in for the id, so with it every positional is a prompt.
+// After `--` everything is positional, as in clap.
+func stripCodexResume(rest []string) []string {
+	idTaken := false
+	for _, a := range rest {
+		if a == "--last" {
+			idTaken = true
+		}
+	}
+	out := make([]string, 0, len(rest))
+	for i := 0; i < len(rest); i++ {
+		a := rest[i]
+		switch {
+		case a == "--":
+			for _, p := range rest[i+1:] {
+				if !idTaken {
+					idTaken = true
+					continue
+				}
+				out = append(out, p)
+			}
+			return out
+		case codexResumeOnly[a]:
+			// dropped
+		case strings.HasPrefix(a, "-"):
+			out = append(out, a)
+			if codexValueFlags[a] && i+1 < len(rest) {
+				i++
+				out = append(out, rest[i])
+			}
+		case !idTaken:
+			idTaken = true // the old session id
+		default:
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // splitSourceCWD is the folder a split opens in when the request names the

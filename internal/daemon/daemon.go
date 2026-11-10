@@ -8944,9 +8944,13 @@ var codexValueFlags = setOf(
 	"--remote", "--remote-auth-token-env",
 )
 
-// codexMultiValueFlags take one or more values (`num_args = 1..`): every
-// following word that is not a flag belongs to them, as clap reads it.
-var codexMultiValueFlags = setOf("-i", "--image")
+// codexPromptFlags attach files to the initial prompt and take one or more
+// values (`num_args = 1..`): every following word that is not a flag belongs
+// to them, as clap reads it. They are DROPPED with their values, for two
+// reasons. They belong to the prompt, which the strip drops. And kept, the
+// greedy value list would swallow the `resume <id>` the caller appends
+// (`codex -i a.png resume <id>` reads `resume` and the id as image paths).
+var codexPromptFlags = setOf("-i", "--image")
 
 // stripCodexResume removes `resume`, its own selectors and every positional
 // (the session id and any prompt) from the subcommand's arguments wherever
@@ -8970,17 +8974,16 @@ func stripCodexResume(rest []string) []string {
 			return out
 		case codexResumeOnly[a]:
 			// dropped
+		case codexPromptFlags[flagName(a)]:
+			// dropped with its values (`-i=a.png` carries its first one)
+			for i+1 < len(rest) && rest[i+1] != "--" && !strings.HasPrefix(rest[i+1], "-") {
+				i++
+			}
 		case strings.HasPrefix(a, "-"):
 			out = append(out, a)
-			switch {
-			case codexValueFlags[a] && i+1 < len(rest):
+			if codexValueFlags[a] && i+1 < len(rest) {
 				i++
 				out = append(out, rest[i])
-			case codexMultiValueFlags[a]:
-				for i+1 < len(rest) && rest[i+1] != "--" && !strings.HasPrefix(rest[i+1], "-") {
-					i++
-					out = append(out, rest[i])
-				}
 			}
 		default:
 			// the old session id, or a prompt

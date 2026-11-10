@@ -125,10 +125,12 @@ func TestStripSessionArgs_CodexResumeSelectors(t *testing.T) {
 		{[]string{"resume", restartTestSessionID, "fix the build", "--search"}, []string{"--search"}},
 		{[]string{"resume", "--", restartTestSessionID}, []string{}},
 		{[]string{"resume", "--search", "--last", "--", "--help"}, []string{"--search"}},
-		// Feature toggles take a value; --image takes one or more.
+		// Feature toggles take a value.
 		{[]string{"resume", restartTestSessionID, "--enable", "web_search"}, []string{"--enable", "web_search"}},
 		{[]string{"resume", "--disable", "x", "--last"}, []string{"--disable", "x"}},
-		{[]string{"resume", "--last", "-i", "a.png", "b.png", "--search"}, []string{"-i", "a.png", "b.png", "--search"}},
+		// Images belong to the dropped prompt, and go with all their values.
+		{[]string{"resume", "--last", "-i", "TEST-a.png", "TEST-b.png", "--search"}, []string{"--search"}},
+		{[]string{"resume", "--last", "--image=TEST-a.png", "TEST-b.png"}, []string{}},
 	}
 	for _, tt := range tests {
 		if got := stripSessionArgs("codex", tt.args); !reflect.DeepEqual(got, tt.want) {
@@ -235,6 +237,8 @@ func TestResolveSpawnArgs_RestartTypedSessionScrape(t *testing.T) {
 		{"codex resume --last recorded", codexPlugin, []string{"resume", "--last"}, "", restartTestSessionID, []string{"resume", restartTestSessionID}},
 		{"codex selector after the id", codexPlugin, []string{"resume", typedCodexID, "--all"}, "", restartTestSessionID, []string{"resume", restartTestSessionID}},
 		{"codex feature toggle keeps its value", codexPlugin, []string{"resume", typedCodexID, "--enable", "web_search"}, "", restartTestSessionID, []string{"--enable", "web_search", "resume", restartTestSessionID}},
+		// A trailing greedy -i would swallow the appended `resume <id>` (M-2).
+		{"codex trailing image", codexPlugin, []string{"resume", "--last", "-i", "TEST-a.png"}, "", restartTestSessionID, []string{"resume", restartTestSessionID}},
 		{"codex literal prompt after --", codexPlugin, []string{"resume", "--last", "--", "--help"}, "", restartTestSessionID, []string{"resume", restartTestSessionID}},
 		{"codex selector after an option pair", codexPlugin, []string{"resume", "--model", "gpt-5", "--last"}, "", restartTestSessionID, []string{"--model", "gpt-5", "resume", restartTestSessionID}},
 		{"opencode placeholder fallback, nothing recorded", opencodeTemplated, []string{"--continue"}, "", "", []string{"--continue"}},

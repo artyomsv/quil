@@ -98,8 +98,10 @@ func (d *Daemon) waitWorktreeAdd() string {
 	}
 	defer d.worktreeAddWaiters.Add(-1)
 	log.Printf("worktree create: waiting for another worktree to finish")
-	deadline := time.Now().Add(worktreeAddQueueWait)
-	tick := time.NewTicker(worktreeAddQueuePoll)
+	// Each knob read once: a test restores them while a waiter may still run.
+	wait, poll := worktreeAddQueueWait, worktreeAddQueuePoll
+	deadline := time.Now().Add(wait)
+	tick := time.NewTicker(poll)
 	defer tick.Stop()
 	for {
 		select {
@@ -111,7 +113,7 @@ func (d *Daemon) waitWorktreeAdd() string {
 			return ""
 		}
 		if time.Now().After(deadline) {
-			return fmt.Sprintf("another worktree was still being created after %v — try again in a moment", worktreeAddQueueWait)
+			return fmt.Sprintf("another worktree was still being created after %v — try again in a moment", wait)
 		}
 	}
 }

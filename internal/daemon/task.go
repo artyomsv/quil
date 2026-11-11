@@ -86,9 +86,11 @@ const (
 // three minutes means the prompt was not taken.
 var taskStartTimeout = 3 * time.Minute
 
-// taskNotStarted is the error a task ends with when its start deadline passes.
-func taskNotStarted() string {
-	return fmt.Sprintf("the pane did not start working on the prompt within %v — it may have been starting up, or the prompt may still be sitting in its input box", taskStartTimeout)
+// taskNotStarted is the error a task ends with when its start deadline (after)
+// passes. The deadline is a parameter, read once at delegation: the timer
+// goroutine must not read the package var, which a test restores meanwhile.
+func taskNotStarted(after time.Duration) string {
+	return fmt.Sprintf("the pane did not start working on the prompt within %v — it may have been starting up, or the prompt may still be sitting in its input box", after)
 }
 
 type task struct {
@@ -396,10 +398,10 @@ func (d *Daemon) delegateTask(req ipc.DelegateTaskReqPayload) ipc.DelegateTaskRe
 	if agent {
 		// A shell reports no start edge (it completes on command_complete),
 		// so the start deadline applies to AI targets only.
-		id := t.id
-		reg.armStart(t, taskStartTimeout, func() {
+		id, after := t.id, taskStartTimeout
+		reg.armStart(t, after, func() {
 			if tt := reg.get(id); tt != nil {
-				d.finishTaskIf(tt, taskSent, taskFailed, taskNotStarted())
+				d.finishTaskIf(tt, taskSent, taskFailed, taskNotStarted(after))
 			}
 		})
 	}

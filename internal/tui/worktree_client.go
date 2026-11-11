@@ -243,13 +243,18 @@ type createPaneRespMsg struct {
 // worktreeScanTimeout is one. A test that drives the real send executes the
 // tick alongside it, and at the production value that is a two-and-a-half
 // minute unit test.
-var createPaneTimeout = worktreeAddTimeout + 30*time.Second
+var createPaneTimeout = worktreeAddQueueWait + worktreeAddTimeout + 30*time.Second
 
 // worktreeAddTimeout mirrors the daemon constant of the same name. Duplicated
 // rather than imported because internal/daemon is not an import this package
 // takes — but the RELATIONSHIP is what matters and is asserted by
 // TestCreatePaneTimeout_ExceedsTheDaemonAddTimeout.
 const worktreeAddTimeout = 120 * time.Second
+
+// worktreeAddQueueWait mirrors the daemon's wait for the creation slot: a
+// create queued behind another add waits up to this long BEFORE its own
+// checkout starts, so the client must allow for both.
+const worktreeAddQueueWait = 120 * time.Second
 
 // applyCreatePaneResp settles a worktree-backed create.
 //

@@ -304,8 +304,9 @@ func TestCreatePaneResp_WrongDestinationIsRefused(t *testing.T) {
 // The client must give up LATER than the daemon does, or it prunes a
 // placeholder the daemon is about to fill.
 func TestCreatePaneTimeout_ExceedsTheDaemonAddTimeout(t *testing.T) {
-	if createPaneTimeout <= worktreeAddTimeout {
-		t.Errorf("createPaneTimeout (%v) must exceed worktreeAddTimeout (%v)", createPaneTimeout, worktreeAddTimeout)
+	if createPaneTimeout <= worktreeAddQueueWait+worktreeAddTimeout {
+		t.Errorf("createPaneTimeout (%v) must exceed the queue wait plus the add (%v + %v)",
+			createPaneTimeout, worktreeAddQueueWait, worktreeAddTimeout)
 	}
 }
 

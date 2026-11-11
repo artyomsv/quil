@@ -2941,10 +2941,10 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 	// the first's response restores a pane into the wrong slot.
 	//
 	// Widening the maps to hold both was the alternative and is the wrong
-	// trade: the daemon's worktreeAdding single-flight already refuses a
-	// concurrent add, so the second create could not have succeeded anyway.
-	// Refusing here just says so at the moment the user asks, instead of
-	// seconds later and less legibly. Reachable from the keyboard because the
+	// trade: the daemon runs one add at a time (later ones wait in a queue),
+	// so a second create on the same tab only stacks a second placeholder on
+	// one that is still waiting. Refusing here says so at the moment the user
+	// asks. Reachable from the keyboard because the
 	// dialog closes on submit and ActivePaneModel falls back to another leaf
 	// once the first replace detaches its pane.
 	if inflight := m.worktreeCreates[tab.ID]; inflight != "" {

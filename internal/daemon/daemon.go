@@ -41,7 +41,6 @@ import (
 	"github.com/artyomsv/quil/internal/version"
 	"github.com/artyomsv/quil/internal/winjob"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/charmbracelet/x/vt"
 	"github.com/google/uuid"
 )
 
@@ -256,6 +255,10 @@ type Daemon struct {
 	// the permit budget for that path: one add at a time daemon-wide means at
 	// most one blocking-FS permit held for worktreeAddTimeout.
 	worktreeAdding atomic.Bool
+
+	// worktreeAddWaiters counts creates queued behind worktreeAdding
+	// (waitWorktreeAdd), bounded by maxWorktreeAddWaiters.
+	worktreeAddWaiters atomic.Int32
 
 	// worktreeAddTab names the tab the single in-flight worktree add targets, or
 	// nil. worktreeAdding (above) makes it single-valued. Set right after
@@ -8410,39 +8413,15 @@ func (d *Daemon) handleScreenshotPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 		height = 200
 	}
 
-	raw := pane.OutputBuf.Bytes()
-
-	// Feed ring buffer into a temporary VT emulator to get the screen state
-	em := vt.NewSafeEmulator(width, height)
-	em.Write(raw)
-
-	// Extract text grid from emulator cells
-	var lines []string
-	for y := 0; y < height; y++ {
-		var line strings.Builder
-		for x := 0; x < width; x++ {
-			cell := em.CellAt(x, y)
-			if cell != nil && cell.Content != "" {
-				line.WriteString(cell.Content)
-			} else {
-				line.WriteByte(' ')
-			}
-		}
-		lines = append(lines, strings.TrimRight(line.String(), " "))
-	}
-
-	// Trim trailing empty lines
-	for len(lines) > 0 && lines[len(lines)-1] == "" {
-		lines = lines[:len(lines)-1]
-	}
-
-	cursor := em.CursorPosition()
+	// Replayed through renderScreenshot, which drains the emulator's query
+	// answers: a bare em.Write here wedged this connection for good.
+	text, cursorX, cursorY := renderScreenshot(pane.OutputBuf.Bytes(), width, height)
 
 	respondTo(conn, msg.ID, ipc.MsgScreenshotPaneResp, ipc.ScreenshotPaneRespPayload{
 		PaneID:     pane.ID,
-		Text:       strings.Join(lines, "\n"),
-		CursorX:    cursor.X,
-		CursorY:    cursor.Y,
+		Text:       text,
+		CursorX:    cursorX,
+		CursorY:    cursorY,
 		NotRunning: !running,
 	})
 }

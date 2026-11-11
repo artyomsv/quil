@@ -71,6 +71,26 @@ const (
 	pasteSettle = 400 * time.Millisecond
 )
 
+// taskStartTimeout bounds how long a task to an AI pane may stay `sent`: the
+// prompt was queued, but the agent never reported a turn starting. A var so
+// tests can shorten it.
+//
+// Without it such a task was open forever — and one live task per target
+// (addLive) then refused every later delegation to that pane. Observed
+// 2026-11-10/11: a task delegated to a pane the same request had just booted
+// (a deferred, restored claude pane) was pasted while claude was still
+// loading its session, so the prompt never became a turn; the task stayed
+// `sent` for 27 hours and blocked an orchestrator's code reviews the next day.
+// A turn starts within seconds of an accepted prompt, even on a busy pane
+// (its turn is already running, so the first event advances the task), so
+// three minutes means the prompt was not taken.
+var taskStartTimeout = 3 * time.Minute
+
+// taskNotStarted is the error a task ends with when its start deadline passes.
+func taskNotStarted() string {
+	return fmt.Sprintf("the pane did not start working on the prompt within %v — it may have been starting up, or the prompt may still be sitting in its input box", taskStartTimeout)
+}
+
 type task struct {
 	id       string
 	from, to string
@@ -87,6 +107,9 @@ type task struct {
 	notified bool
 	done     chan struct{}
 	timer    *time.Timer
+	// startTimer fails the task when it is still `sent` at taskStartTimeout.
+	// AI targets only; stopped by finishTask like timer.
+	startTimer *time.Timer
 }
 
 type taskRegistry struct {
@@ -195,6 +218,16 @@ func (r *taskRegistry) arm(t *task, after time.Duration, fire func()) {
 	t.timer = time.AfterFunc(after, fire)
 }
 
+// armStart publishes t's start-deadline timer, under the same rule as arm.
+func (r *taskRegistry) armStart(t *task, after time.Duration, fire func()) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if t.state.terminal() {
+		return
+	}
+	t.startTimer = time.AfterFunc(after, fire)
+}
+
 // liveTasksTo returns every open task aimed at paneID.
 func (r *taskRegistry) liveTasksTo(paneID string) []*task {
 	r.mu.Lock()
@@ -299,11 +332,23 @@ func (d *Daemon) delegateTask(req ipc.DelegateTaskReqPayload) ipc.DelegateTaskRe
 	if req.ToPane == req.FromPane && req.ToPane != "" {
 		return refuse("a pane cannot delegate to itself")
 	}
+	// Read BEFORE paneInputTarget, which boots a deferred pane.
+	wasDeferred := false
+	if p := d.session.Pane(req.ToPane); p != nil {
+		wasDeferred = p.Pending.Load()
+	}
 	pane, why := d.paneInputTarget(req.ToPane)
 	if pane == nil {
 		return refuse("%s", why)
 	}
 	agent := d.isAgentPane(pane)
+	if agent && wasDeferred {
+		// paneInputTarget just started the agent. It is loading now and does
+		// not take input yet: a prompt pasted into it here is lost, and the
+		// task would never start (taskStartTimeout). Say so instead; the pane
+		// keeps starting, and the next delegation reaches a ready agent.
+		return refuse("pane %s was not running; it is starting now — delegate again when its agent_state is idle (list_panes or get_pane_status)", req.ToPane)
+	}
 	pane.PluginMu.Lock()
 	toName := pane.Name
 	pane.PluginMu.Unlock()
@@ -345,6 +390,16 @@ func (d *Daemon) delegateTask(req ipc.DelegateTaskReqPayload) ipc.DelegateTaskRe
 		reg.arm(t, time.Duration(req.TimeoutMs)*time.Millisecond, func() {
 			if tt := reg.get(id); tt != nil {
 				d.finishTask(tt, taskTimeout, "")
+			}
+		})
+	}
+	if agent {
+		// A shell reports no start edge (it completes on command_complete),
+		// so the start deadline applies to AI targets only.
+		id := t.id
+		reg.armStart(t, taskStartTimeout, func() {
+			if tt := reg.get(id); tt != nil {
+				d.finishTaskIf(tt, taskSent, taskFailed, taskNotStarted())
 			}
 		})
 	}
@@ -421,11 +476,19 @@ func (d *Daemon) failTasksForPane(paneID, reason string) {
 // last output, queues task_done, wakes waiters and starts the notify-back.
 
 func (d *Daemon) finishTask(t *task, st taskState, errText string) {
+	d.finishTaskIf(t, "", st, errText)
+}
+
+// finishTaskIf is finishTask that applies only while t is still in state
+// `from` ("" = any open state). The check and the write are one critical
+// section: the start deadline must not fail a task whose turn started in the
+// instant before its timer fired.
+func (d *Daemon) finishTaskIf(t *task, from, st taskState, errText string) {
 	// Resolve before the registry lock; never reacquire sm.mu under workMu.
 	target := d.session.Pane(t.to)
 	reg := d.tasksRegistry()
 	reg.mu.Lock()
-	if t.state.terminal() {
+	if t.state.terminal() || (from != "" && t.state != from) {
 		reg.mu.Unlock()
 		return
 	}
@@ -434,6 +497,9 @@ func (d *Daemon) finishTask(t *task, st taskState, errText string) {
 	t.ended = time.Now()
 	if t.timer != nil {
 		t.timer.Stop()
+	}
+	if t.startTimer != nil {
+		t.startTimer.Stop()
 	}
 	if target != nil {
 		t.result = paneOutputExcerpt(target, taskResultLines)

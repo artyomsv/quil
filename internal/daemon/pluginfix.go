@@ -293,6 +293,15 @@ func (d *Daemon) pluginFixTarget(paneID string) (*Pane, *plugin.PanePlugin, erro
 // clears the one-shot again, or the next Alt+R would run the fix the user
 // never saw start.
 func (d *Daemon) startFix(pane *Pane, argv []string, label, then string) error {
+	return d.startFixIf(pane, argv, label, then, nil)
+}
+
+// startFixIf is startFix with one more refusal: eligible, when not nil, runs
+// in the SAME lifecycleMu + PluginMu span that reserves the fix, so a
+// condition the request checked earlier cannot have changed by the time the
+// fix replaces the pane's child (a restart by another client, say). It reads
+// pane fields only — PluginMu is held — and returns why the fix may not run.
+func (d *Daemon) startFixIf(pane *Pane, argv []string, label, then string, eligible func() error) error {
 	if len(argv) == 0 {
 		return errors.New("fix names no command")
 	}
@@ -317,6 +326,13 @@ func (d *Daemon) startFix(pane *Pane, argv []string, label, then string) error {
 		pane.PluginMu.Unlock()
 		pane.lifecycleMu.Unlock()
 		return fmt.Errorf("a fix is already running in this pane: %s", running)
+	}
+	if eligible != nil {
+		if err := eligible(); err != nil {
+			pane.PluginMu.Unlock()
+			pane.lifecycleMu.Unlock()
+			return err
+		}
 	}
 	pane.FixLabel = label
 	pane.fixArgv = append([]string(nil), argv...)

@@ -44,18 +44,51 @@ func (d *Daemon) offerSbxLogin(paneID string) {
 	}
 	pane.PluginMu.Lock()
 	pane.sbxLoginNeeded = true
+	pane.PluginMu.Unlock()
+	d.sendPluginError(pane, sbxLoginOffer(pane))
+}
+
+// sbxLoginMessage is the dialog's text.
+const sbxLoginMessage = "sbx is not signed in to Docker, so this sandbox cannot start. " +
+	"Sign in runs sbx login in this pane. When it succeeds, every sbx pane " +
+	"that stopped for this reason starts again."
+
+// sbxLoginOffer is the dialog for one pane.
+func sbxLoginOffer(pane *Pane) ipc.PluginErrorPayload {
+	pane.PluginMu.Lock()
 	typ := pane.Type
 	pane.PluginMu.Unlock()
 	typ, _ = splitSandboxType(typ)
-	d.sendPluginError(pane, ipc.PluginErrorPayload{
-		PaneID: paneID,
-		Title:  "Docker sign-in needed",
-		Message: "sbx is not signed in to Docker, so this sandbox cannot start. " +
-			"Sign in runs sbx login in this pane. When it succeeds, every sbx pane " +
-			"that stopped for this reason starts again.",
-		Plugin: typ,
-		Fixes:  []ipc.PluginFixInfo{{Name: ipc.PluginFixSbxLogin, Label: "Sign in"}},
-	})
+	return ipc.PluginErrorPayload{
+		PaneID:  pane.ID,
+		Title:   "Docker sign-in needed",
+		Message: sbxLoginMessage,
+		Plugin:  typ,
+		Fixes:   []ipc.PluginFixInfo{{Name: ipc.PluginFixSbxLogin, Label: "Sign in"}},
+	}
+}
+
+// replaySbxLoginOffers sends an attaching client the dialog of every pane
+// still stopped on the sign-in error. The offer went out when the
+// preparation failed, which can be while no client was attached — during a
+// restore before the socket opens, say — and the flag is runtime-only, so
+// without this a later client sees only the error and Alt+R. Only panes
+// that still show the error: the TUI drops a sign-in dialog whose pane has
+// no SpawnError (reconcilePluginDialogs). No sidebar card — the event
+// replay already carried the one sent with the offer.
+func (d *Daemon) replaySbxLoginOffers(conn *ipc.Conn) {
+	for _, p := range d.session.AllPanes() {
+		p.PluginMu.Lock()
+		offer := sbxLoginStoppedLocked(p) && p.SpawnError != ""
+		p.PluginMu.Unlock()
+		if !offer {
+			continue
+		}
+		msg, _ := ipc.NewMessage(ipc.MsgPluginError, sbxLoginOffer(p))
+		if err := conn.SendBlocking(msg, d.shutdown); err != nil {
+			return // client disconnected or daemon shutting down
+		}
+	}
 }
 
 // handleSbxLoginReq answers the "Sign in" button: it runs `sbx login` in the
@@ -78,13 +111,24 @@ func (d *Daemon) startSbxLogin(paneID string) error {
 	}
 	pane.PluginMu.Lock()
 	isSbx := pane.SandboxBackend == config.SandboxBackendSbx
-	needed := pane.sbxLoginNeeded
 	pane.PluginMu.Unlock()
 	if !isSbx {
 		return errors.New("this pane is not an sbx sandbox pane")
 	}
-	if !needed {
-		return errors.New("this pane is not waiting for a Docker sign-in (Alt+R restarts it)")
+	// Checked again where the fix is reserved, not only here: between this
+	// request and the reservation another client can restart the pane, and
+	// the sign-in must not replace the agent that restart started.
+	eligible := func() error {
+		if !sbxLoginStoppedLocked(pane) {
+			return errors.New("this pane is not waiting for a Docker sign-in (Alt+R restarts it)")
+		}
+		return nil
+	}
+	pane.PluginMu.Lock()
+	err := eligible()
+	pane.PluginMu.Unlock()
+	if err != nil {
+		return err
 	}
 	// The check and the start are one step: two presses on two panes must
 	// not both pass the check.
@@ -98,7 +142,7 @@ func (d *Daemon) startSbxLogin(paneID string) error {
 	if bin == "" {
 		return errors.New("could not locate sbx on this machine")
 	}
-	return d.startFix(pane, []string{bin, "login"}, sbxLoginLabel, plugin.FixThenRestart)
+	return d.startFixIf(pane, []string{bin, "login"}, sbxLoginLabel, plugin.FixThenRestart, eligible)
 }
 
 // sbxLoginRunningIn names a pane whose current child is the sign-in, or "".
@@ -140,5 +184,14 @@ func (d *Daemon) retrySbxLoginWaiters(except string) {
 func sbxLoginWaiting(p *Pane) bool {
 	p.PluginMu.Lock()
 	defer p.PluginMu.Unlock()
-	return p.sbxLoginNeeded && p.PTY == nil && p.FixLabel == ""
+	return sbxLoginStoppedLocked(p)
+}
+
+// sbxLoginStoppedLocked is sbxLoginWaiting with PluginMu held: flagged, no
+// fix running, and no live child. "No live child" is a PTY that is gone (the
+// preparation stood down and failed) OR one whose child has exited (a failed
+// `sbx login` leaves its PTY installed with ExitCode set, and that pane must
+// still start when a sign-in from another pane succeeds).
+func sbxLoginStoppedLocked(p *Pane) bool {
+	return p.sbxLoginNeeded && p.FixLabel == "" && (p.PTY == nil || p.ExitCode != nil)
 }

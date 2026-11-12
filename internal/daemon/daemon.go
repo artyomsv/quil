@@ -2354,6 +2354,11 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 			return // client disconnected or daemon shutting down
 		}
 	}
+
+	// A pane stopped on a missing sbx sign-in offered its dialog when it
+	// failed, possibly to nobody (sandbox_sbx_login.go). Offer it again,
+	// after the state frame that carries the pane's SpawnError.
+	d.replaySbxLoginOffers(conn)
 }
 
 // refuseAttach answers an attach whose client id belongs to another

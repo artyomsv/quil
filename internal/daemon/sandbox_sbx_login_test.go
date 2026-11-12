@@ -20,13 +20,18 @@ import (
 
 // makeSbxPane turns a fixme pane into an sbx pane in its own folder, so the
 // restart after the sign-in fails at the profile lookup instead of reaching
-// any sbx call. waiting marks it as stopped on the sign-in.
+// any sbx call. waiting marks it as stopped on the sign-in: flagged, with no
+// live child (ExitCode set, as after a child that exited).
 func makeSbxPane(t *testing.T, pane *Pane, waiting bool) {
 	t.Helper()
 	pane.PluginMu.Lock()
 	pane.SandboxBackend = config.SandboxBackendSbx
 	pane.CWD = t.TempDir()
 	pane.sbxLoginNeeded = waiting
+	if waiting {
+		code := 1
+		pane.ExitCode = &code
+	}
 	pane.PluginMu.Unlock()
 }
 
@@ -198,5 +203,79 @@ func TestSbxLoginReq_FailedSignInStartsNothing(t *testing.T) {
 	// Still waiting: the user can press Alt+R or sign in again.
 	if !sbxLoginNeededOf(waiter) {
 		t.Error("the waiter lost its flag after a failed sign-in")
+	}
+}
+
+// A press that arrives after another client restarted the pane must not
+// replace the agent that restart started: a flagged pane with a LIVE child is
+// refused (Greptile, PR #291).
+func TestSbxLoginReq_RefusedForAPaneThatStartedAgain(t *testing.T) {
+	_, pane, sessions, c := fixHarness(t)
+	stubSbxLookup(t)
+	makeSbxPane(t, pane, false)
+	pane.PluginMu.Lock()
+	pane.sbxLoginNeeded = true // flagged, but session 1 is still running
+	pane.PluginMu.Unlock()
+
+	if resp := signInRequest(t, c, pane, "late"); resp.OK {
+		t.Fatal("sign-in started over a live child")
+	}
+	if n := sessions.count(); n != 1 {
+		t.Fatalf("%d sessions, want 1: the live child must stay", n)
+	}
+}
+
+// A pane whose own sign-in failed keeps its flag and its exited PTY. A later
+// sign-in that succeeds in ANOTHER pane must start it too (Greptile, PR #291).
+func TestSbxLoginReq_FailedPaneStartsAfterASignInElsewhere(t *testing.T) {
+	d, pane, sessions, c := fixHarness(t)
+	stubSbxLookup(t)
+	makeSbxPane(t, pane, true)
+	other := newFixmePane(t, d)
+	makeSbxPane(t, other, true)
+
+	if resp := signInRequest(t, c, pane, "first"); !resp.OK {
+		t.Fatalf("first sign-in refused: %q", resp.Error)
+	}
+	sessions.waitFor(t, 2).end(1)
+	deadline := time.Now().Add(3 * time.Second)
+	for fixLabelOf(pane) != "" {
+		if time.Now().After(deadline) {
+			t.Fatal("the failed sign-in's exit was never handled")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	if resp := signInRequest(t, c, other, "second"); !resp.OK {
+		t.Fatalf("second sign-in refused: %q", resp.Error)
+	}
+	sessions.waitFor(t, 3).end(0)
+	// 4: the other pane starting again; 5: the pane whose sign-in failed.
+	deadline = time.Now().Add(3 * time.Second)
+	for sessions.count() < 5 {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d sessions after the second sign-in, want 5: the failed pane was not restarted", sessions.count())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// The offer can go out while no client is attached; an attaching client gets
+// the dialog again for a pane that still shows the error (Greptile, PR #291).
+func TestAttach_ReplaysTheSbxSignInOffer(t *testing.T) {
+	_, pane, _, c := fixHarness(t)
+	makeSbxPane(t, pane, true)
+	pane.PluginMu.Lock()
+	pane.SpawnError = sbx.ErrNotSignedIn.Error()
+	pane.PluginMu.Unlock()
+
+	attachOn(t, c, "sbx-login-replay")
+	m := waitType(t, c, ipc.MsgPluginError, 3*time.Second)
+	var p ipc.PluginErrorPayload
+	if err := m.DecodePayload(&p); err != nil {
+		t.Fatalf("decode plugin_error: %v", err)
+	}
+	if p.PaneID != pane.ID || len(p.Fixes) != 1 || p.Fixes[0].Name != ipc.PluginFixSbxLogin {
+		t.Fatalf("replayed plugin_error = %+v", p)
 	}
 }

@@ -771,8 +771,8 @@ reads it there. Only that one image goes into that one sandbox; nothing is
 saved on your machine for it.
 
 Each paste gets a new folder with a name nobody in the VM can guess, and Quil
-makes the file readable by every user inside the VM (`sbx cp` leaves it owned
-by root). It needs the agent to be running; a paste into an exited
+makes the file readable by every user inside the VM (`sbx cp` keeps the
+host file's private mode). It needs the agent to be running; a paste into an exited
 pane says so in the status bar.
 
 ### Restarts keep the conversation

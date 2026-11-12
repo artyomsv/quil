@@ -94,13 +94,19 @@ func TestDelegateTask_StartTimeoutIsPerDaemon(t *testing.T) {
 // unknown, and retries: the retry is accepted, and the refusal points at the
 // screen, never at agent_state idle.
 func TestDelegateTask_DeferredAgentPaneIsStartedAndRefused(t *testing.T) {
-	for _, tc := range []struct{ typ, startup string }{
-		{"claude-code", "hook.claude.SessionStart"},
-		{"codex", "hook.codex.SessionStart"},
+	for _, tc := range []struct {
+		typ, startup string
+		// register loads the plugin. LoadFromDir PRUNES every plugin not in
+		// the directory it loads, so each case loads exactly its own: adding
+		// codex on top of newTestDaemon's claude-code would unregister claude.
+		register func(*testing.T, *Daemon)
+	}{
+		{"claude-code", "hook.claude.SessionStart", registerClaudePlugin},
+		{"codex", "hook.codex.SessionStart", registerCodexPlugin},
 	} {
 		t.Run(tc.typ, func(t *testing.T) {
-			d := newTestDaemon(t) // registers claude-code
-			registerCodexPlugin(t, d)
+			d := newTestDaemon(t)
+			tc.register(t, d)
 			// AFTER newTestDaemon, which installs and restores its own seam.
 			sess := newRecordingLiveSession()
 			prev := newSessionFn

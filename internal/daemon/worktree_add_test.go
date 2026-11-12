@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/artyomsv/quil/internal/gitworktree"
 	"github.com/artyomsv/quil/internal/ipc"
@@ -283,23 +284,136 @@ func TestWorktreeAdd_SlotIsIndependentOfTheListingSlot(t *testing.T) {
 	d.endWorktreeAdd()
 }
 
-// Two adds at once are refused rather than queued: the second would hold a
-// blocking-FS permit for the add's long timeout, and that serialisation IS the
-// permit budget for this path.
-func TestWorktreeAdd_SecondConcurrentAddIsRefused(t *testing.T) {
+// shortQueue makes d's waitWorktreeAdd poll fast and give up after wait. Set
+// on the test's own daemon before any create runs; no other daemon sees it.
+func shortQueue(d *Daemon, wait time.Duration) {
+	d.worktreeQueueWait, d.worktreeQueuePoll = wait, 5*time.Millisecond
+}
+
+// A create that arrives while another add runs WAITS for it and then runs —
+// it is not refused. Three worktree tabs asked for at once must give three
+// worktrees (2026-11-11: two of three failed with "another worktree is being
+// created"). The wait holds no git call: the add starts only after the slot
+// is free, so one add at a time still holds the long permit.
+func TestWorktreeAdd_SecondCreateWaitsForTheFirst(t *testing.T) {
 	d := newTestDaemon(t)
+	shortQueue(d, 10*time.Second)
 	tab := d.session.CreateTab("t")
+	calls := stubAdd(t, func(context.Context, string, string, string) error {
+		return errors.New("stop before the pane is created")
+	})
+	if !d.beginWorktreeAdd() {
+		t.Fatal("could not claim the add slot")
+	}
+
+	done := make(chan ipc.CreatePaneRespPayload, 1)
+	go func() { done <- d.worktreeAddAndCreate(worktreeCreate(tab.ID, t.TempDir(), "feat/x")) }()
+
+	select {
+	case resp := <-done:
+		t.Fatalf("the create did not wait for the running add: %+v", resp)
+	case <-time.After(100 * time.Millisecond):
+	}
+	d.endWorktreeAdd() // the first add finishes
+
+	select {
+	case resp := <-done:
+		if !strings.Contains(resp.Error, "stop before the pane is created") {
+			t.Errorf("error = %q, want the add's own result (it ran after the wait)", resp.Error)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the waiting create never ran after the slot was freed")
+	}
+	if len(*calls) != 1 {
+		t.Errorf("git invocations = %d, want 1", len(*calls))
+	}
+	if d.worktreeAdding.Load() {
+		t.Error("the slot is still held after the create returned")
+	}
+}
+
+// The wait is bounded: past d.worktreeQueueWait the create gives up, runs no
+// git, and still echoes the spec so the client unwinds its placeholder.
+func TestWorktreeAdd_QueueWaitRunsOut(t *testing.T) {
+	d := newTestDaemon(t)
+	shortQueue(d, 50*time.Millisecond)
+	tab := d.session.CreateTab("t")
+	calls := stubAdd(t, func(context.Context, string, string, string) error { return nil })
 	if !d.beginWorktreeAdd() {
 		t.Fatal("could not claim the add slot")
 	}
 	t.Cleanup(d.endWorktreeAdd)
 
-	resp := d.worktreeAddAndCreate(worktreeCreate(tab.ID, "/repo", "feat/x"))
-	if resp.Error == "" {
-		t.Error("a second concurrent add was accepted")
+	resp := d.worktreeAddAndCreate(worktreeCreate(tab.ID, t.TempDir(), "feat/x"))
+	if !strings.Contains(resp.Error, "still being created") {
+		t.Errorf("error = %q, want the queue-timeout reason", resp.Error)
 	}
 	if resp.Worktree == nil {
-		t.Error("the rejection dropped the spec echo — the client would never unwind")
+		t.Error("the refusal dropped the spec echo — the client would never unwind")
+	}
+	if len(*calls) != 0 {
+		t.Errorf("git invocations = %d, want 0", len(*calls))
+	}
+}
+
+// A tab closed while its create waits is refused when the slot comes free,
+// before any git call, and the slot is released for the next waiter.
+func TestWorktreeAdd_TabClosedWhileWaitingIsRefused(t *testing.T) {
+	d := newTestDaemon(t)
+	shortQueue(d, 10*time.Second)
+	d.session.CreateTab("keep") // so the session never runs out of tabs
+	tab := d.session.CreateTab("t")
+	calls := stubAdd(t, func(context.Context, string, string, string) error { return nil })
+	if !d.beginWorktreeAdd() {
+		t.Fatal("could not claim the add slot")
+	}
+
+	done := make(chan ipc.CreatePaneRespPayload, 1)
+	go func() { done <- d.worktreeAddAndCreate(worktreeCreate(tab.ID, t.TempDir(), "feat/x")) }()
+	time.Sleep(50 * time.Millisecond) // let it reach the queue
+	if err := d.session.DestroyTab(tab.ID); err != nil {
+		t.Fatal(err)
+	}
+	d.endWorktreeAdd()
+
+	select {
+	case resp := <-done:
+		if !strings.Contains(resp.Error, "tab was closed while the worktree was waiting") {
+			t.Errorf("error = %q, want the closed-while-waiting reason", resp.Error)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the waiting create never returned")
+	}
+	if len(*calls) != 0 {
+		t.Errorf("git invocations = %d, want 0", len(*calls))
+	}
+	if d.worktreeAdding.Load() {
+		t.Error("the refusal left the slot held")
+	}
+}
+
+// The queue is bounded: past maxWorktreeAddWaiters a create is refused at
+// once instead of parking another goroutine.
+func TestWorktreeAdd_QueueIsBounded(t *testing.T) {
+	d := newTestDaemon(t)
+	shortQueue(d, 10*time.Second)
+	tab := d.session.CreateTab("t")
+	if !d.beginWorktreeAdd() {
+		t.Fatal("could not claim the add slot")
+	}
+	t.Cleanup(d.endWorktreeAdd)
+	d.worktreeAddWaiters.Store(maxWorktreeAddWaiters)
+
+	start := time.Now()
+	resp := d.worktreeAddAndCreate(worktreeCreate(tab.ID, t.TempDir(), "feat/x"))
+	if !strings.Contains(resp.Error, "too many worktrees are waiting") {
+		t.Errorf("error = %q, want the full-queue reason", resp.Error)
+	}
+	if time.Since(start) > time.Second {
+		t.Error("a full queue made the create wait")
+	}
+	if got := d.worktreeAddWaiters.Load(); got != maxWorktreeAddWaiters {
+		t.Errorf("waiters = %d after a refusal, want %d", got, maxWorktreeAddWaiters)
 	}
 }
 

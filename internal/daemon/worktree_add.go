@@ -58,6 +58,66 @@ func (d *Daemon) beginWorktreeAdd() bool {
 
 func (d *Daemon) endWorktreeAdd() { d.worktreeAdding.Store(false) }
 
+// defaultWorktreeAddQueueWait bounds how long a create waits for the slot
+// while another add runs (Daemon.worktreeQueueWait).
+//
+// Creates QUEUE rather than being refused. An agent that opens three worktree
+// tabs at once is the ordinary case (2026-11-11: an orchestrator asked for
+// three in two seconds; the first ran and the other two failed with "another
+// worktree is being created", each placeholder left showing the error while
+// the MCP call had already answered "preparing"). The two late ones had to be
+// noticed, restarted by hand — which turned them into plain shells in the
+// main checkout — and created again one by one.
+//
+// Waiting costs nothing the single-flight exists to protect: the slot is
+// still held by ONE add at a time, and the blocking-FS permit is claimed only
+// after it, so at most one permit is ever held long. The budget is one more
+// add's worth of time; clients that wait for the answer add it to their own
+// timeouts (createPaneTimeout in the TUI, createTimeout in the MCP bridge).
+const defaultWorktreeAddQueueWait = 120 * time.Second
+
+// defaultWorktreeAddQueuePoll is how often a waiting create retries the slot
+// (Daemon.worktreeQueuePoll).
+const defaultWorktreeAddQueuePoll = 100 * time.Millisecond
+
+// maxWorktreeAddWaiters bounds the queue. Each waiter is a parked worker
+// goroutine and, for the TUI, a placeholder on screen; any IPC client can
+// send creates, so the queue must not grow without limit.
+const maxWorktreeAddWaiters = 8
+
+// waitWorktreeAdd claims the creation slot, waiting up to d.worktreeQueueWait
+// while another add holds it. It answers "" on success, else the reason the
+// create gives up. Order among waiters is not first-come: whichever waiter
+// retries first after the slot frees takes it.
+func (d *Daemon) waitWorktreeAdd() string {
+	if d.beginWorktreeAdd() {
+		return ""
+	}
+	if d.worktreeAddWaiters.Add(1) > maxWorktreeAddWaiters {
+		d.worktreeAddWaiters.Add(-1)
+		return "too many worktrees are waiting to be created — try again in a moment"
+	}
+	defer d.worktreeAddWaiters.Add(-1)
+	log.Printf("worktree create: waiting for another worktree to finish")
+	wait, poll := d.worktreeQueueWait, d.worktreeQueuePoll
+	deadline := time.Now().Add(wait)
+	tick := time.NewTicker(poll)
+	defer tick.Stop()
+	for {
+		select {
+		case <-d.shutdown:
+			return "the daemon is shutting down"
+		case <-tick.C:
+		}
+		if d.beginWorktreeAdd() {
+			return ""
+		}
+		if time.Now().After(deadline) {
+			return fmt.Sprintf("another worktree was still being created after %v — try again in a moment", wait)
+		}
+	}
+}
+
 // worktreeAddingIn reports whether the in-flight worktree add targets tabID.
 func (d *Daemon) worktreeAddingIn(tabID string) bool {
 	t := d.worktreeAddTab.Load()
@@ -138,8 +198,21 @@ func (d *Daemon) worktreeAddAndCreate(p ipc.CreatePanePayload) ipc.CreatePaneRes
 		}
 	}
 
-	if !d.beginWorktreeAdd() {
-		return fail("another worktree is being created — try again in a moment")
+	if why := d.waitWorktreeAdd(); why != "" {
+		return fail("%s", why)
+	}
+	// Re-checked after a wait: the tab or the replace target can go while a
+	// create sits in the queue, and nothing has been written yet, so this is
+	// a plain refusal with nothing to clean up.
+	if d.session.Tab(p.TabID) == nil {
+		d.endWorktreeAdd()
+		return fail("the tab was closed while the worktree was waiting to be created")
+	}
+	if p.ReplacePaneID != "" {
+		if target := d.session.Pane(p.ReplacePaneID); target == nil || target.CurrentTabID() != p.TabID {
+			d.endWorktreeAdd()
+			return fail("the pane to replace was closed or moved while the worktree was waiting to be created")
+		}
 	}
 	// Recorded so handleMovePane can refuse a pane moving into or out of this
 	// tab for the length of the checkout: a pane arriving would be swallowed by

@@ -41,7 +41,6 @@ import (
 	"github.com/artyomsv/quil/internal/version"
 	"github.com/artyomsv/quil/internal/winjob"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/charmbracelet/x/vt"
 	"github.com/google/uuid"
 )
 
@@ -257,6 +256,18 @@ type Daemon struct {
 	// most one blocking-FS permit held for worktreeAddTimeout.
 	worktreeAdding atomic.Bool
 
+	// worktreeAddWaiters counts creates queued behind worktreeAdding
+	// (waitWorktreeAdd), bounded by maxWorktreeAddWaiters.
+	worktreeAddWaiters atomic.Int32
+
+	// Timing for the worktree queue and the task start deadline. Set once in
+	// New from the production constants and never written afterwards, so a
+	// test shortens them on ITS daemon before using it instead of mutating
+	// package state every other daemon shares.
+	worktreeQueueWait time.Duration // defaultWorktreeAddQueueWait
+	worktreeQueuePoll time.Duration // defaultWorktreeAddQueuePoll
+	taskStartTimeout  time.Duration // defaultTaskStartTimeout
+
 	// worktreeAddTab names the tab the single in-flight worktree add targets, or
 	// nil. worktreeAdding (above) makes it single-valued. Set right after
 	// beginWorktreeAdd succeeds, cleared in the same defer that ends it.
@@ -410,6 +421,10 @@ func New(cfg config.Config) *Daemon {
 		gitCache:   newGitCache(),
 		snapGens:   make(map[string]uint64),
 		runID:      uuid.NewString(),
+
+		worktreeQueueWait: defaultWorktreeAddQueueWait,
+		worktreeQueuePoll: defaultWorktreeAddQueuePoll,
+		taskStartTimeout:  defaultTaskStartTimeout,
 	}
 	d.pluginUpdate = defaultPluginUpdateConfig()
 	d.limited = inServiceSessionFn()
@@ -8410,39 +8425,15 @@ func (d *Daemon) handleScreenshotPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 		height = 200
 	}
 
-	raw := pane.OutputBuf.Bytes()
-
-	// Feed ring buffer into a temporary VT emulator to get the screen state
-	em := vt.NewSafeEmulator(width, height)
-	em.Write(raw)
-
-	// Extract text grid from emulator cells
-	var lines []string
-	for y := 0; y < height; y++ {
-		var line strings.Builder
-		for x := 0; x < width; x++ {
-			cell := em.CellAt(x, y)
-			if cell != nil && cell.Content != "" {
-				line.WriteString(cell.Content)
-			} else {
-				line.WriteByte(' ')
-			}
-		}
-		lines = append(lines, strings.TrimRight(line.String(), " "))
-	}
-
-	// Trim trailing empty lines
-	for len(lines) > 0 && lines[len(lines)-1] == "" {
-		lines = lines[:len(lines)-1]
-	}
-
-	cursor := em.CursorPosition()
+	// Replayed through renderScreenshot, which drains the emulator's query
+	// answers: a bare em.Write here wedged this connection for good.
+	text, cursorX, cursorY := renderScreenshot(pane.OutputBuf.Bytes(), width, height)
 
 	respondTo(conn, msg.ID, ipc.MsgScreenshotPaneResp, ipc.ScreenshotPaneRespPayload{
 		PaneID:     pane.ID,
-		Text:       strings.Join(lines, "\n"),
-		CursorX:    cursor.X,
-		CursorY:    cursor.Y,
+		Text:       text,
+		CursorX:    cursorX,
+		CursorY:    cursorY,
 		NotRunning: !running,
 	})
 }

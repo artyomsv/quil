@@ -1219,6 +1219,19 @@ other (same reason `dirsChecking` is not `browseScanning`). One add at a time
 daemon-wide is what makes a 120 s `claimBlockingFSCall` safe: at most one
 permit is ever held long, however many clients ask.
 
+**A create that finds the slot taken WAITS for it (`waitWorktreeAdd`), it is
+not refused.** It used to fail at once with "another worktree is being
+created", so an agent opening three worktree tabs in parallel got one and two
+placeholders showing the error, while the MCP `create_tab` had already
+answered `preparing` (2026-11-11). The waiter holds no permit (claimed only
+after the slot), so the budget above is unchanged. Bounds: `Daemon.worktreeQueueWait`
+(120 s) per waiter, `maxWorktreeAddWaiters` (8), and `d.shutdown`. After the
+wait the tab and the replace target are re-checked BEFORE any git runs, so a
+tab closed in the queue costs no checkout. Order among waiters is not
+first-come. Every client that waits for the answer budgets wait + add:
+`createPaneTimeout` (TUI, mirrors `worktreeAddQueueWait`) and the bridge's
+`createTimeout` (250 s).
+
 **`Pane.WorktreeOwned` is PERSISTED; `Pane.SpawnError` is NOT.** Ownership is
 the only thing that lets `spawnRestoredPane` tell a missing WORKTREE from a
 missing browsed directory — the snapshot stores only CWD otherwise — and a
@@ -1287,8 +1300,8 @@ including a timeout that mutated the leaf before its own nil-root guard.
 so a second create overwrites all three — leaking the first held pane and
 pointing the first's response at the second's leaf. Reachable from the keyboard
 because the dialog closes on submit and `ActivePaneModel` adopts another leaf
-once the first replace detaches its pane. The daemon's `worktreeAdding`
-single-flight would refuse it anyway; this just says so when the user asks.
+once the first replace detaches its pane. The daemon would only queue it
+behind the first; this says so when the user asks.
 
 **An abandonment after a successful add removes the worktree only when its
 guard passes** (`removeWorktreeFn`, paired with `addWorktreeFn` so a stub can
@@ -1415,9 +1428,9 @@ fill.
 
 **`worktreeCreates` is a MAP keyed by tab, never a scalar "the create I last
 started".** The setup dialog closes on submit, so a second Ctrl+N create can
-begin while the first is still checking out — and the daemon's single-flight
-rejects the second IMMEDIATELY, so its response routinely arrives BEFORE the
-first's. A single slot is overwritten by the second and then cleared, stranding
+begin while the first is still checking out — and the second's response can
+arrive BEFORE the first's (a refusal before the queue — bad branch, a full
+queue — answers at once). A single slot is overwritten by the second and then cleared, stranding
 the first tab's placeholder permanently (every later pane in that tab is
 swallowed, silently) or unwinding the second's live one. The handler keys on
 what the daemon ECHOED (`p.TabID`, plus a non-nil `p.Worktree` so the MCP

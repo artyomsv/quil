@@ -288,6 +288,10 @@ type Daemon struct {
 	// with the same single-flight and TTL as sandboxCap but its own probe.
 	sbxCap     sandboxCap
 	sbxCapOnce sync.Once
+	// sbxLoginMu makes "no other pane is signing in, so start the sign-in
+	// here" one step (sandbox_sbx_login.go). Taken before the pane's
+	// lifecycleMu, never under it.
+	sbxLoginMu sync.Mutex
 	// sbxPrep serialises the creation of each named sbx sandbox: two panes
 	// opened together on one profile must not both run `sbx env create`.
 	sbxPrep sbxPrepare
@@ -6864,10 +6868,10 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	// A fix runs the argv the plugin file named, in the pane's directory,
 	// with none of the preparation below: no shell integration, no hook
 	// settings, no MCP, no container. It comes before the sandbox arms
-	// because a fix is refused for a sandbox pane at the request
-	// (pluginFixTarget) — its binary is inside the container — so a fix
-	// argv on one would be a daemon bug, and running it on the host is the
-	// worse way to find out.
+	// because a plugin fix is refused for a sandbox pane at the request
+	// (pluginFixTarget) — its binary is inside the container. The one fix a
+	// sandbox pane runs is the daemon's own `sbx login` (sandbox_sbx_login.go),
+	// and that one MUST run on the host: sbx is a host tool.
 	if len(fixArgv) > 0 {
 		if err := d.startFixChild(pane, ptySession, p, cwd, fixArgv); err != nil {
 			return err

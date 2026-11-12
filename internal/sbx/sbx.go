@@ -116,8 +116,8 @@ type Sandbox struct {
 // turned into the instruction that fixes it.
 func (c Client) List(ctx context.Context) ([]Sandbox, error) {
 	out, err := c.output(ctx, "ls")
-	if hint := Hint(out); hint != "" {
-		return nil, errors.New(hint)
+	if err := HintErr(out); err != nil {
+		return nil, err
 	}
 	if err != nil {
 		return nil, fmt.Errorf("sbx ls: %w%s", err, tail(out))
@@ -132,8 +132,8 @@ func (c Client) List(ctx context.Context) ([]Sandbox, error) {
 // that ignores --quiet still reads correctly.
 func (c Client) Exists(ctx context.Context, name string) (bool, error) {
 	out, err := c.output(ctx, "ls", "--quiet")
-	if hint := Hint(out); hint != "" {
-		return false, errors.New(hint)
+	if err := HintErr(out); err != nil {
+		return false, err
 	}
 	if err != nil {
 		return false, fmt.Errorf("sbx ls: %w%s", err, tail(out))
@@ -193,11 +193,18 @@ func ParseList(out string) []Sandbox {
 // sbx refuses every env create until it is.
 func (c Client) policyReady(ctx context.Context) error {
 	out, _ := c.output(ctx, "policy", "ls")
-	if hint := Hint(out); hint != "" {
-		return errors.New(hint)
+	if err := HintErr(out); err != nil {
+		return err
 	}
 	return nil
 }
+
+// ErrNotSignedIn is the failure sbx reports when its Docker sign-in is
+// missing or has expired. It is a type of its own, not only a hint string,
+// because the daemon acts on it: the pane offers a button that runs
+// `sbx login` and then starts again (internal/daemon/sandbox_sbx_login.go).
+// Callers wrap it with %w, so errors.Is finds it through every layer.
+var ErrNotSignedIn = errors.New("sbx is not signed in to Docker. Run: sbx login")
 
 // Hint turns a known sbx failure into the instruction that fixes it, or ""
 // when the output matches none.
@@ -207,7 +214,7 @@ func Hint(out string) string {
 	// sbx 0.42 said "Not authenticated to Docker"; 0.47 says "not signed in
 	// to Docker".
 	case strings.Contains(low, "not authenticated"), strings.Contains(low, "not signed in"):
-		return "sbx is not signed in to Docker. Run: sbx login"
+		return ErrNotSignedIn.Error()
 	case strings.Contains(low, "network policy has not been initialized"),
 		strings.Contains(low, "policy has not been initialized"),
 		strings.Contains(low, "not been initialized"):
@@ -216,6 +223,20 @@ func Hint(out string) string {
 		return "sbx read a kit path as an image reference: local kit sources must start with ./ or ../"
 	}
 	return ""
+}
+
+// HintErr is Hint as an error: ErrNotSignedIn itself for the sign-in case,
+// so a caller can tell it apart, a plain error for the other known
+// failures, and nil when the output matches none.
+func HintErr(out string) error {
+	switch hint := Hint(out); hint {
+	case "":
+		return nil
+	case ErrNotSignedIn.Error():
+		return ErrNotSignedIn
+	default:
+		return errors.New(hint)
+	}
 }
 
 // CreateArgs is `sbx env create <file> --name <name> <approve>`, where
@@ -364,8 +385,8 @@ func (c Client) Ensure(ctx context.Context, a Approved, w io.Writer) (bool, erro
 	err = c.run(cctx, p.Dir, io.MultiWriter(w, &out), CreateArgs(staged, approve)...)
 	cancel()
 	if err != nil {
-		if hint := Hint(out.String()); hint != "" {
-			return false, fmt.Errorf("sbx env create failed: %s", hint)
+		if herr := HintErr(out.String()); herr != nil {
+			return false, fmt.Errorf("sbx env create failed: %w", herr)
 		}
 		// The pane shows only this line once the spawn fails, so it carries
 		// sbx's own last line rather than just an exit status.

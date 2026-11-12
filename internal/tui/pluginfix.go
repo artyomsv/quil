@@ -65,6 +65,17 @@ const (
 	fixLabelCap = 128
 )
 
+// offersSbxLogin reports whether the dialog carries the daemon's sbx
+// "Sign in" button (ipc.PluginFixSbxLogin).
+func (d *pluginDialog) offersSbxLogin() bool {
+	for _, f := range d.fixes {
+		if f.Name == ipc.PluginFixSbxLogin {
+			return true
+		}
+	}
+	return false
+}
+
 // pluginLetterGrace is how long after the dialog opens its letter keys stay
 // inert. The dialog opens from pane OUTPUT, under a user who may be typing
 // into that pane: the "l" of "ls" or the "n" of "npm" must not become Log in
@@ -425,15 +436,21 @@ func (m *Model) reconcilePluginDialogs(msg WorkspaceStateMsg) tea.Cmd {
 		return nil
 	}
 	fixing := make(map[string]bool, len(msg.Panes))
+	failed := make(map[string]bool, len(msg.Panes))
 	for _, p := range msg.Panes {
 		fixing[p.ID] = p.FixLabel != ""
+		failed[p.ID] = p.SpawnError != ""
 	}
 	var closed bool
 	for id, d := range m.pluginDialogs {
 		if d.dest != msg.Dest {
 			continue
 		}
-		if fix, present := fixing[id]; present && !fix {
+		// The sbx "Sign in" dialog describes a pane stopped on its error. A
+		// pane that is starting again (Alt+R, or a sign-in done from another
+		// pane) has no SpawnError any more, and its dialog would only be
+		// refused; a new failure sends a new one.
+		if fix, present := fixing[id]; present && !fix && !(d.offersSbxLogin() && !failed[id]) {
 			d.unplaced = false
 			continue
 		}

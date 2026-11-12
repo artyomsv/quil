@@ -190,6 +190,11 @@ func (d *Daemon) startSbxPane(pane *Pane, ptySession apty.Session, p *plugin.Pan
 		return nil, false, err
 	}
 	if !ready {
+		// A new preparation decides afresh whether a Docker sign-in is
+		// missing; failSbxPrepare sets the flag again if it still is.
+		pane.PluginMu.Lock()
+		pane.sbxLoginNeeded = false
+		pane.PluginMu.Unlock()
 		d.beginSbxPrepare(sbxWaiter{paneID: pane.ID, gen: gen}, t)
 		return nil, false, nil
 	}
@@ -562,6 +567,12 @@ func (d *Daemon) failSbxPrepare(paneID string, err error) {
 	d.tellPane(paneID, "\r\nThe sbx sandbox could not be prepared: "+crlf(err.Error())+"\r\n"+
 		"Fix the cause, then restart this pane (Alt+R).\r\n")
 	d.failSbxPane(paneID, err)
+	// After failSbxPane: the dialog frame must follow the state frame that
+	// carries the SpawnError, or a client reconciling on that state drops
+	// the dialog it has just been sent (reconcilePluginDialogs).
+	if errors.Is(err, sbx.ErrNotSignedIn) {
+		d.offerSbxLogin(paneID)
+	}
 }
 
 // mountSbxWorktrees shares each pane's worktrees folder with the sandbox.

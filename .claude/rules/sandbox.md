@@ -957,6 +957,27 @@ back to. Quil and
 the owning tool know nothing of each other: the only shared facts are the
 sandbox name and sbx's own listing.
 
+**An expired Docker sign-in offers a "Sign in" button** (`internal/daemon/sandbox_sbx_login.go`,
+2026-11-12). Every sbx call answers "not signed in" once sbx's own Docker sign-in
+expires; `sbx.HintErr` returns `sbx.ErrNotSignedIn` for it (callers wrap with `%w`), and
+`failSbxPrepare` then sets `Pane.sbxLoginNeeded` and sends a `plugin_error` dialog whose
+one fix is `ipc.PluginFixSbxLogin`. **The dialog goes AFTER `failSbxPane`'s broadcast**: the
+TUI drops a sign-in dialog whose pane has no `SpawnError` (`reconcilePluginDialogs`, so a
+held dialog closes once the pane starts again), and a state frame without the error
+arriving after the dialog would drop it. `handlePluginFixReq` routes that name to
+`handleSbxLoginReq` BEFORE `pluginFixTarget`, whose sandbox refusal is right for plugin
+fixes (their binary is inside the cage) and wrong here (sbx is a host tool). The request is
+refused unless the pane is sbx AND flagged — no client can make an ordinary pane run sbx —
+and while another pane runs the sign-in (the flight is read from `FixLabel` on the panes,
+so a pane closed mid-sign-in cannot leave it claimed). It runs through `startFix`, so the
+pane shows "running fix", refuses restart over a half-done sign-in, and `onFixExit`
+restarts it on exit 0 — then `retrySbxLoginWaiters` restarts every other flagged pane with
+no process, rechecked under each pane's `lifecycleMu`. The flag is cleared only when a new
+preparation BEGINS (`startSbxPane`'s `!ready` branch), never by the sign-in's own spawn, so a
+failed sign-in leaves every waiter flagged. **Quil never signs in on its own**: a
+non-interactive `sbx login` needs a Docker password or token on stdin, and Quil keeps no
+credential (the `claude setup-token` posture above).
+
 **Ending the host `sbx exec` does NOT end the agent inside the VM** (measured:
 a closed pane's claude ran for a day). Every exec carries `-e
 QUIL_SBX_PANE=<pane id>-<random>` (`sbx.NewTag`, PER SPAWN — a restart closes

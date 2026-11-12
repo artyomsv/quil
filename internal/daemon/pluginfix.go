@@ -31,6 +31,13 @@ func (d *Daemon) handlePluginFixReq(conn *ipc.Conn, msg *ipc.Message) {
 		refuseFix(conn, msg, ipc.MsgPluginFixResp, "malformed plugin_fix_req")
 		return
 	}
+	// The sbx sign-in is the daemon's own button, not a plugin fix, and it
+	// is the one fix a sandbox pane may run: sbx is a HOST tool, so the
+	// refusal in pluginFixTarget does not apply to it.
+	if req.Fix == ipc.PluginFixSbxLogin {
+		d.handleSbxLoginReq(conn, msg, req.PaneID)
+		return
+	}
 	pane, p, err := d.pluginFixTarget(req.PaneID)
 	if err != nil {
 		refuseFix(conn, msg, ipc.MsgPluginFixResp, err.Error())
@@ -365,6 +372,13 @@ func fixCommandWithin(p *plugin.PanePlugin, name string, d time.Duration) string
 			return cmd
 		}
 	}
+	return lookPathWithin(name, d)
+}
+
+// lookPathWithin is a PATH lookup of name under the process-wide
+// blocking-FS budget: "" when no permit is free, the name is not on PATH,
+// or the worker has not answered within d.
+func lookPathWithin(name string, d time.Duration) string {
 	if !claimBlockingFSCall() {
 		return ""
 	}
@@ -442,6 +456,12 @@ func (d *Daemon) onFixExit(pane *Pane, code int, generation uint64) bool {
 			log.Printf("pane %s: restart after fix %q failed", pane.ID, label)
 		}
 		pane.lifecycleMu.Unlock()
+		// One Docker sign-in serves every sbx pane, so the others that
+		// stopped for it start too. After this pane's lifecycleMu is
+		// released: each restart takes its own pane's.
+		if label == sbxLoginLabel {
+			d.retrySbxLoginWaiters(pane.ID)
+		}
 		d.broadcastState()
 		d.requestSnapshot()
 		return true

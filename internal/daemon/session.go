@@ -209,6 +209,12 @@ type Pane struct {
 	fixArgv  []string
 	fixThen  string
 	fixGen   uint64
+	// sbxLoginNeeded says the last preparation of this sbx pane failed
+	// because sbx is not signed in to Docker (sandbox_sbx_login.go). It gates
+	// the "Sign in" button's request, and the successful sign-in starts every
+	// pane that carries it. Set by failSbxPrepare, cleared when a new
+	// preparation begins (startSbxPane). Runtime-only. PluginMu-protected.
+	sbxLoginNeeded bool
 	// lifecycleMu serialises the pane's child-replacing transitions — a
 	// restart request, a fix's reservation plus the restart that starts it,
 	// the restart after a fix exits, the hand-start conversions — so a

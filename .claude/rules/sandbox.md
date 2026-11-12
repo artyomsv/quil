@@ -1015,9 +1015,11 @@ machine and types its host path, which names nothing in the VM. For a pane
 whose `SandboxKind` is sbx the TUI sends the bytes instead (the TUI may be on
 another machine), the daemon `sbx cp`s them to `/tmp/quil-paste-<time>-<hex>/image.png` in the
 sandbox the RUNNING session names (`sbxSession.name` — never re-derived from a
-profile), then runs `chmod` as root: measured on 0.48, `sbx cp` leaves a
-root-owned copy with the source's mode, and the agent (uid 1000) is refused a
-0600 file. The folder is NEW per paste, directly under `/tmp`, with an unguessable name:
+profile), then runs `chmod` as root: `sbx cp` keeps the source's mode, and the
+agent (uid 1000) is refused a 0600 file. The folder is made FIRST, by a root
+`mkdir -m 755` without `-p`: sbx 0.48's `cp` created missing folders, 0.53's
+refuses (`destination directory "…" does not exist`, measured 2026-11-12), and
+a folder already there fails the mkdir rather than being reused. The folder is NEW per paste, directly under `/tmp`, with an unguessable name:
 the chmod runs as root inside a VM the agent controls, and a fixed folder
 (`/tmp/quil-paste`) could be made — or replaced by a link — by the agent before
 the first paste, pointing the root chmod anywhere (PR #271 review). Root owns

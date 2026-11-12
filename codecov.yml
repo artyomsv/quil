@@ -1,0 +1,10 @@
+# Project coverage moves by a few lines between runs: some tests cover
+# timing-dependent code, so the same commit can hit or miss those lines.
+# A drop up to 0.25% of total coverage is noise, not a regression.
+# codecov/patch keeps its default and still guards the PR's own lines.
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 0.25%

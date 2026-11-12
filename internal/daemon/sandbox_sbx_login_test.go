@@ -9,6 +9,7 @@ import (
 
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
+	apty "github.com/artyomsv/quil/internal/pty"
 	"github.com/artyomsv/quil/internal/sbx"
 )
 
@@ -337,5 +338,87 @@ func TestSbxLoginReq_StaleAfterAConcurrentRestartRefused(t *testing.T) {
 		if cmd, _, started := s.argv(); started && cmd == "/fake/sbx" {
 			t.Fatalf("session %d ran sbx login", i+1)
 		}
+	}
+}
+
+// A pane closed by another client while the request looks up sbx: the
+// sign-in must not keep running with no pane to show it (Greptile, PR #291).
+// The lookup stub closes the pane, the way a destroy landing in that second
+// would; teardown has begun, so the reservation refuses.
+func TestSbxLoginReq_PaneClosedDuringTheRequestStopsTheSignIn(t *testing.T) {
+	d, pane, sessions, c := fixHarness(t)
+	makeSbxPane(t, pane, true)
+	prev := lookPathFn
+	lookPathFn = func(string) (string, error) {
+		if err := d.session.DestroyPane(pane.ID); err != nil {
+			t.Errorf("DestroyPane: %v", err)
+		}
+		return "/fake/sbx", nil
+	}
+	t.Cleanup(func() { lookPathFn = prev })
+
+	resp := signInRequest(t, c, pane, "closed")
+	if resp.OK {
+		t.Fatal("sign-in reported started on a pane that was closed")
+	}
+	if got := fixLabelOf(pane); got != "" {
+		t.Errorf("FixLabel = %q on the closed pane", got)
+	}
+	// Whatever child the reservation started is stopped, not left running.
+	sessions.mu.Lock()
+	made := append([]*fixSession(nil), sessions.made...)
+	sessions.mu.Unlock()
+	for i, s := range made {
+		cmd, _, started := s.argv()
+		if !started || cmd != "/fake/sbx" {
+			continue
+		}
+		select {
+		case <-s.exit:
+		case <-time.After(3 * time.Second):
+			t.Fatalf("session %d (sbx login) still running after its pane was closed", i+1)
+		}
+	}
+	if other := d.sbxLoginRunningIn(); other != "" {
+		t.Errorf("sbxLoginRunningIn = %q after the closed pane's sign-in", other)
+	}
+}
+
+// The same close, landing later: after the reservation passed, while the
+// sign-in child is being created. Only the registry check AFTER the start
+// (startFixIf) can see it; the child it started must be stopped.
+func TestSbxLoginReq_PaneClosedWhileTheSignInStartsStopsIt(t *testing.T) {
+	d, pane, sessions, c := fixHarness(t)
+	stubSbxLookup(t)
+	makeSbxPane(t, pane, true)
+	inner := newSessionFn
+	newSessionFn = func(cols, rows int) apty.Session {
+		s := inner(cols, rows)
+		if sessions.count() == 2 { // the sign-in child
+			if err := d.session.DestroyPane(pane.ID); err != nil {
+				t.Errorf("DestroyPane: %v", err)
+			}
+		}
+		return s
+	}
+	t.Cleanup(func() { newSessionFn = inner })
+
+	if resp := signInRequest(t, c, pane, "closed-late"); resp.OK {
+		t.Fatal("sign-in reported started on a pane closed while it started")
+	}
+	login := sessions.waitFor(t, 2)
+	if cmd, _, _ := login.argv(); cmd != "/fake/sbx" {
+		t.Fatalf("session 2 ran %q, want the sign-in", cmd)
+	}
+	select {
+	case <-login.exit:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the sign-in child still runs after its pane was closed")
+	}
+	if got := fixLabelOf(pane); got != "" {
+		t.Errorf("FixLabel = %q on the closed pane", got)
+	}
+	if n := sessions.count(); n != 2 {
+		t.Errorf("%d sessions, want 2: the stopped sign-in must not restart a closed pane", n)
 	}
 }

@@ -122,6 +122,11 @@ func (d *Daemon) startSbxLogin(paneID string) error {
 		if pane.SandboxBackend != config.SandboxBackendSbx {
 			return errors.New("this pane is not an sbx sandbox pane")
 		}
+		// Teardown has begun (StopInput). The registry check after the fix
+		// starts (startFixIf) covers a destroy that has not reached this yet.
+		if pane.inputStopped {
+			return errors.New("this pane is being closed")
+		}
 		if !sbxLoginStoppedLocked(pane) {
 			return errors.New("this pane is not waiting for a Docker sign-in (Alt+R restarts it)")
 		}

@@ -346,6 +346,33 @@ func (d *Daemon) startFixIf(pane *Pane, argv []string, label, then string, eligi
 		pane.FixLabel, pane.fixArgv, pane.fixThen = "", nil, ""
 		pane.PluginMu.Unlock()
 	}
+	// The pane can be closed by another client while the request ran — its
+	// bounded PATH lookup takes up to a second — and a destroy takes neither
+	// lifecycleMu nor anything this reservation holds. Checked AFTER the fix
+	// child is installed, which makes it complete: a destroy that detached the
+	// pane before this line is caught here and the child is stopped; one that
+	// detaches it later releases the PTY it reads then, which is the fix
+	// child. Without it a `sbx login` or `stripe login` ran with no pane to
+	// show it, and dropped out of every sweep that finds a running fix.
+	if started && d.session.Pane(pane.ID) != pane {
+		pane.PluginMu.Lock()
+		orphan := pane.PTY
+		pane.PTY = nil
+		// Cleared first, so the child's exit is not taken for the fix's
+		// (onFixExit) and does not restart a pane that no longer exists.
+		pane.FixLabel, pane.fixArgv, pane.fixThen = "", nil, ""
+		pane.PluginMu.Unlock()
+		pane.lifecycleMu.Unlock()
+		if orphan != nil {
+			go func(s apty.Session) {
+				if err := s.Close(); err != nil {
+					log.Printf("pane %s: closing fix %q of a closed pane: %v", pane.ID, label, err)
+				}
+			}(orphan)
+		}
+		log.Printf("pane %s: closed while fix %q started; fix stopped", pane.ID, label)
+		return errors.New("the pane was closed while the fix started")
+	}
 	pane.lifecycleMu.Unlock()
 	if !started {
 		d.broadcastState()

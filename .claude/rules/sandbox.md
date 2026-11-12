@@ -977,7 +977,12 @@ child) is rechecked inside the fix reservation** (`startFixIf`'s guard, same `li
 `PluginMu` span; `TestSbxLoginReq_StaleAfterAConcurrentRestartRefused` parks a restart on
 `restartGuardPassedFn` to drive it): a press
 that lands after another client restarted the pane must not replace the agent that restart
-started. **"No live child" is `PTY == nil || ExitCode != nil`** (`sbxLoginStoppedLocked`):
+started. **A pane closed while the request runs** (the bounded `sbx` lookup takes up to a second)
+is refused at the reservation once teardown began (`inputStopped`), and `startFixIf` checks
+the registry AFTER the fix child is installed: a destroy that detached the pane before that
+check is caught and the child stopped (marker cleared first, so its exit restarts nothing);
+one that detaches it later releases the PTY it reads, which is the fix child. This covers the
+Stripe-style plugin fixes too. **"No live child" is `PTY == nil || ExitCode != nil`** (`sbxLoginStoppedLocked`):
 a failed `sbx login` leaves its exited PTY installed, and that pane must still start when a
 sign-in from another pane succeeds. **`handleAttach` replays the dialog last**
 (`replaySbxLoginOffers`) for every stopped pane that still shows the error: the offer can go

@@ -66,6 +66,23 @@ func TestCopyIn_FailedCopyStops(t *testing.T) {
 	}
 }
 
+// A failed chmod is reported as its own step, after the mkdir and the copy.
+func TestCopyIn_FailedChmodSaysSo(t *testing.T) {
+	f := &fakeRunner{answers: func(argv []string) (string, error) {
+		if len(argv) > 6 && argv[6] == "-c" && argv[7] == readableScript {
+			return "chmod: Operation not permitted", errors.New("exit status 1")
+		}
+		return "", nil
+	}}
+	_, err := (Client{Bin: "sbx", Runner: f}).CopyIn(context.Background(), "cf-x-1", "/h/a.png", testPasteID)
+	if err == nil || !strings.Contains(err.Error(), "making the image readable") || !strings.Contains(err.Error(), "Operation not permitted") {
+		t.Errorf("err = %v", err)
+	}
+	if len(f.calls) != 3 {
+		t.Errorf("calls = %d, want 3", len(f.calls))
+	}
+}
+
 // Nothing runs for a name or folder id sbx or a shell could misread, or an id
 // short enough to guess.
 func TestCopyIn_RefusesUnsafeNames(t *testing.T) {

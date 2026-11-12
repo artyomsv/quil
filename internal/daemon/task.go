@@ -71,9 +71,9 @@ const (
 	pasteSettle = 400 * time.Millisecond
 )
 
-// taskStartTimeout bounds how long a task to an AI pane may stay `sent`: the
-// prompt was queued, but the agent never reported a turn starting. A var so
-// tests can shorten it.
+// defaultTaskStartTimeout bounds how long a task to an AI pane may stay
+// `sent` (Daemon.taskStartTimeout): the prompt was queued, but the agent
+// never reported a turn starting.
 //
 // Without it such a task was open forever — and one live task per target
 // (addLive) then refused every later delegation to that pane. Observed
@@ -84,11 +84,10 @@ const (
 // A turn starts within seconds of an accepted prompt, even on a busy pane
 // (its turn is already running, so the first event advances the task), so
 // three minutes means the prompt was not taken.
-var taskStartTimeout = 3 * time.Minute
+const defaultTaskStartTimeout = 3 * time.Minute
 
 // taskNotStarted is the error a task ends with when its start deadline (after)
-// passes. The deadline is a parameter, read once at delegation: the timer
-// goroutine must not read the package var, which a test restores meanwhile.
+// passes.
 func taskNotStarted(after time.Duration) string {
 	return fmt.Sprintf("the pane did not start working on the prompt within %v — it may have been starting up, or the prompt may still be sitting in its input box", after)
 }
@@ -349,7 +348,16 @@ func (d *Daemon) delegateTask(req ipc.DelegateTaskReqPayload) ipc.DelegateTaskRe
 		// not take input yet: a prompt pasted into it here is lost, and the
 		// task would never start (taskStartTimeout). Say so instead; the pane
 		// keeps starting, and the next delegation reaches a ready agent.
-		return refuse("pane %s was not running; it is starting now — delegate again when its agent_state is idle (list_panes or get_pane_status)", req.ToPane)
+		//
+		// The retry condition must be one the caller can REACH. agent_state
+		// is not it: the ledger is runtime-only and moves on prompt and turn
+		// edges, and SessionStart is not one, so an agent that has booted and
+		// sits at its empty input box reports NO state until its first prompt
+		// — which is the prompt this refusal withholds. Empty means unknown,
+		// never idle. So the answer names what IS observable: the pane's own
+		// screen. Nothing here gates the retry: the next call is accepted
+		// whatever agent_state says.
+		return refuse("pane %s was not running; it is starting now. Delegate again once it is ready: read_pane_output shows its input prompt. Its agent_state can stay empty until it receives a prompt — empty means unknown, not busy", req.ToPane)
 	}
 	pane.PluginMu.Lock()
 	toName := pane.Name
@@ -398,7 +406,7 @@ func (d *Daemon) delegateTask(req ipc.DelegateTaskReqPayload) ipc.DelegateTaskRe
 	if agent {
 		// A shell reports no start edge (it completes on command_complete),
 		// so the start deadline applies to AI targets only.
-		id, after := t.id, taskStartTimeout
+		id, after := t.id, d.taskStartTimeout
 		reg.armStart(t, after, func() {
 			if tt := reg.get(id); tt != nil {
 				d.finishTaskIf(tt, taskSent, taskFailed, taskNotStarted(after))

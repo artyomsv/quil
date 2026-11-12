@@ -58,8 +58,8 @@ func (d *Daemon) beginWorktreeAdd() bool {
 
 func (d *Daemon) endWorktreeAdd() { d.worktreeAdding.Store(false) }
 
-// worktreeAddQueueWait bounds how long a create waits for the slot while
-// another add runs. A var so tests can shorten it.
+// defaultWorktreeAddQueueWait bounds how long a create waits for the slot
+// while another add runs (Daemon.worktreeQueueWait).
 //
 // Creates QUEUE rather than being refused. An agent that opens three worktree
 // tabs at once is the ordinary case (2026-11-11: an orchestrator asked for
@@ -74,17 +74,18 @@ func (d *Daemon) endWorktreeAdd() { d.worktreeAdding.Store(false) }
 // after it, so at most one permit is ever held long. The budget is one more
 // add's worth of time; clients that wait for the answer add it to their own
 // timeouts (createPaneTimeout in the TUI, createTimeout in the MCP bridge).
-var worktreeAddQueueWait = 120 * time.Second
+const defaultWorktreeAddQueueWait = 120 * time.Second
 
-// worktreeAddQueuePoll is how often a waiting create retries the slot.
-var worktreeAddQueuePoll = 100 * time.Millisecond
+// defaultWorktreeAddQueuePoll is how often a waiting create retries the slot
+// (Daemon.worktreeQueuePoll).
+const defaultWorktreeAddQueuePoll = 100 * time.Millisecond
 
 // maxWorktreeAddWaiters bounds the queue. Each waiter is a parked worker
 // goroutine and, for the TUI, a placeholder on screen; any IPC client can
 // send creates, so the queue must not grow without limit.
 const maxWorktreeAddWaiters = 8
 
-// waitWorktreeAdd claims the creation slot, waiting up to worktreeAddQueueWait
+// waitWorktreeAdd claims the creation slot, waiting up to d.worktreeQueueWait
 // while another add holds it. It answers "" on success, else the reason the
 // create gives up. Order among waiters is not first-come: whichever waiter
 // retries first after the slot frees takes it.
@@ -98,8 +99,7 @@ func (d *Daemon) waitWorktreeAdd() string {
 	}
 	defer d.worktreeAddWaiters.Add(-1)
 	log.Printf("worktree create: waiting for another worktree to finish")
-	// Each knob read once: a test restores them while a waiter may still run.
-	wait, poll := worktreeAddQueueWait, worktreeAddQueuePoll
+	wait, poll := d.worktreeQueueWait, d.worktreeQueuePoll
 	deadline := time.Now().Add(wait)
 	tick := time.NewTicker(poll)
 	defer tick.Stop()

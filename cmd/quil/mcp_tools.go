@@ -362,7 +362,7 @@ func (in createPaneInput) toReq(tabID string) ipc.CreatePaneReqPayload {
 }
 
 // createTimeout is how long the bridge waits for a create. A worktree create
-// can first wait for another add to finish (worktreeAddQueueWait, 120 s) and
+// can first wait for another add to finish (the daemon's worktree queue wait, 120 s) and
 // then checks out a tree (worktreeAddTimeout, 120 s); the ordinary create
 // answers at once.
 func createTimeout(worktree bool) time.Duration {

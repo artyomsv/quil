@@ -1224,7 +1224,7 @@ not refused.** It used to fail at once with "another worktree is being
 created", so an agent opening three worktree tabs in parallel got one and two
 placeholders showing the error, while the MCP `create_tab` had already
 answered `preparing` (2026-11-11). The waiter holds no permit (claimed only
-after the slot), so the budget above is unchanged. Bounds: `worktreeAddQueueWait`
+after the slot), so the budget above is unchanged. Bounds: `Daemon.worktreeQueueWait`
 (120 s) per waiter, `maxWorktreeAddWaiters` (8), and `d.shutdown`. After the
 wait the tab and the replace target are re-checked BEFORE any git runs, so a
 tab closed in the queue costs no checkout. Order among waiters is not

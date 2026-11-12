@@ -260,6 +260,14 @@ type Daemon struct {
 	// (waitWorktreeAdd), bounded by maxWorktreeAddWaiters.
 	worktreeAddWaiters atomic.Int32
 
+	// Timing for the worktree queue and the task start deadline. Set once in
+	// New from the production constants and never written afterwards, so a
+	// test shortens them on ITS daemon before using it instead of mutating
+	// package state every other daemon shares.
+	worktreeQueueWait time.Duration // defaultWorktreeAddQueueWait
+	worktreeQueuePoll time.Duration // defaultWorktreeAddQueuePoll
+	taskStartTimeout  time.Duration // defaultTaskStartTimeout
+
 	// worktreeAddTab names the tab the single in-flight worktree add targets, or
 	// nil. worktreeAdding (above) makes it single-valued. Set right after
 	// beginWorktreeAdd succeeds, cleared in the same defer that ends it.
@@ -413,6 +421,10 @@ func New(cfg config.Config) *Daemon {
 		gitCache:   newGitCache(),
 		snapGens:   make(map[string]uint64),
 		runID:      uuid.NewString(),
+
+		worktreeQueueWait: defaultWorktreeAddQueueWait,
+		worktreeQueuePoll: defaultWorktreeAddQueuePoll,
+		taskStartTimeout:  defaultTaskStartTimeout,
 	}
 	d.pluginUpdate = defaultPluginUpdateConfig()
 	d.limited = inServiceSessionFn()

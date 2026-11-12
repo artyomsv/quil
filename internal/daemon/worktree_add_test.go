@@ -284,12 +284,10 @@ func TestWorktreeAdd_SlotIsIndependentOfTheListingSlot(t *testing.T) {
 	d.endWorktreeAdd()
 }
 
-// shortQueue makes waitWorktreeAdd poll fast and give up after wait.
-func shortQueue(t *testing.T, wait time.Duration) {
-	t.Helper()
-	prevWait, prevPoll := worktreeAddQueueWait, worktreeAddQueuePoll
-	worktreeAddQueueWait, worktreeAddQueuePoll = wait, 5*time.Millisecond
-	t.Cleanup(func() { worktreeAddQueueWait, worktreeAddQueuePoll = prevWait, prevPoll })
+// shortQueue makes d's waitWorktreeAdd poll fast and give up after wait. Set
+// on the test's own daemon before any create runs; no other daemon sees it.
+func shortQueue(d *Daemon, wait time.Duration) {
+	d.worktreeQueueWait, d.worktreeQueuePoll = wait, 5*time.Millisecond
 }
 
 // A create that arrives while another add runs WAITS for it and then runs —
@@ -298,8 +296,8 @@ func shortQueue(t *testing.T, wait time.Duration) {
 // created"). The wait holds no git call: the add starts only after the slot
 // is free, so one add at a time still holds the long permit.
 func TestWorktreeAdd_SecondCreateWaitsForTheFirst(t *testing.T) {
-	shortQueue(t, 10*time.Second)
 	d := newTestDaemon(t)
+	shortQueue(d, 10*time.Second)
 	tab := d.session.CreateTab("t")
 	calls := stubAdd(t, func(context.Context, string, string, string) error {
 		return errors.New("stop before the pane is created")
@@ -334,11 +332,11 @@ func TestWorktreeAdd_SecondCreateWaitsForTheFirst(t *testing.T) {
 	}
 }
 
-// The wait is bounded: past worktreeAddQueueWait the create gives up, runs no
+// The wait is bounded: past d.worktreeQueueWait the create gives up, runs no
 // git, and still echoes the spec so the client unwinds its placeholder.
 func TestWorktreeAdd_QueueWaitRunsOut(t *testing.T) {
-	shortQueue(t, 50*time.Millisecond)
 	d := newTestDaemon(t)
+	shortQueue(d, 50*time.Millisecond)
 	tab := d.session.CreateTab("t")
 	calls := stubAdd(t, func(context.Context, string, string, string) error { return nil })
 	if !d.beginWorktreeAdd() {
@@ -361,8 +359,8 @@ func TestWorktreeAdd_QueueWaitRunsOut(t *testing.T) {
 // A tab closed while its create waits is refused when the slot comes free,
 // before any git call, and the slot is released for the next waiter.
 func TestWorktreeAdd_TabClosedWhileWaitingIsRefused(t *testing.T) {
-	shortQueue(t, 10*time.Second)
 	d := newTestDaemon(t)
+	shortQueue(d, 10*time.Second)
 	d.session.CreateTab("keep") // so the session never runs out of tabs
 	tab := d.session.CreateTab("t")
 	calls := stubAdd(t, func(context.Context, string, string, string) error { return nil })
@@ -397,8 +395,8 @@ func TestWorktreeAdd_TabClosedWhileWaitingIsRefused(t *testing.T) {
 // The queue is bounded: past maxWorktreeAddWaiters a create is refused at
 // once instead of parking another goroutine.
 func TestWorktreeAdd_QueueIsBounded(t *testing.T) {
-	shortQueue(t, 10*time.Second)
 	d := newTestDaemon(t)
+	shortQueue(d, 10*time.Second)
 	tab := d.session.CreateTab("t")
 	if !d.beginWorktreeAdd() {
 		t.Fatal("could not claim the add slot")

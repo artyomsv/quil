@@ -72,12 +72,13 @@ func TestPasteImage_CopiesIntoThePanesSandbox(t *testing.T) {
 	if !bytes.Equal(r.copied, testPNG) {
 		t.Errorf("copied %q, want the image", r.copied)
 	}
-	if len(r.calls) != 2 || r.calls[0][1] != "cp" || r.calls[0][3] != "cf-x-1:"+resp.Path ||
-		r.calls[1][1] != "exec" || r.calls[1][4] != "cf-x-1" {
+	if len(r.calls) != 3 || r.calls[0][1] != "exec" || r.calls[0][4] != "cf-x-1" ||
+		r.calls[1][1] != "cp" || r.calls[1][3] != "cf-x-1:"+resp.Path ||
+		r.calls[2][1] != "exec" || r.calls[2][4] != "cf-x-1" {
 		t.Fatalf("calls = %v", r.calls)
 	}
-	if _, err := os.Stat(r.calls[0][2]); !os.IsNotExist(err) {
-		t.Errorf("the host temp copy %s was left behind (stat err %v)", r.calls[0][2], err)
+	if _, err := os.Stat(r.calls[1][2]); !os.IsNotExist(err) {
+		t.Errorf("the host temp copy %s was left behind (stat err %v)", r.calls[1][2], err)
 	}
 }
 
@@ -162,7 +163,7 @@ func TestHandlePasteImageReq_SlotAndWorker(t *testing.T) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if d.pasteCopying.Load() || len(r.calls) != 2 {
-		t.Errorf("slot held=%v, sbx calls=%d, want released and 2", d.pasteCopying.Load(), len(r.calls))
+	if d.pasteCopying.Load() || len(r.calls) != 3 {
+		t.Errorf("slot held=%v, sbx calls=%d, want released and 3", d.pasteCopying.Load(), len(r.calls))
 	}
 }

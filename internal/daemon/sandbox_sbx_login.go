@@ -119,6 +119,9 @@ func (d *Daemon) startSbxLogin(paneID string) error {
 	// request and the reservation another client can restart the pane, and
 	// the sign-in must not replace the agent that restart started.
 	eligible := func() error {
+		if pane.SandboxBackend != config.SandboxBackendSbx {
+			return errors.New("this pane is not an sbx sandbox pane")
+		}
 		if !sbxLoginStoppedLocked(pane) {
 			return errors.New("this pane is not waiting for a Docker sign-in (Alt+R restarts it)")
 		}

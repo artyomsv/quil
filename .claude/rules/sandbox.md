@@ -972,16 +972,19 @@ and while another pane runs the sign-in (the flight is read from `FixLabel` on t
 so a pane closed mid-sign-in cannot leave it claimed). It runs through `startFixIf`, so the
 pane shows "running fix", refuses restart over a half-done sign-in, and `onFixExit`
 restarts it on exit 0 — then `retrySbxLoginWaiters` restarts every other flagged pane with
-no live child, rechecked under each pane's `lifecycleMu`. **Eligibility is rechecked inside
-the fix reservation** (`startFixIf`'s guard, same `lifecycleMu` + `PluginMu` span): a press
+no live child, rechecked under each pane's `lifecycleMu`. **Eligibility (sbx backend, flag, no live
+child) is rechecked inside the fix reservation** (`startFixIf`'s guard, same `lifecycleMu` +
+`PluginMu` span; `TestSbxLoginReq_StaleAfterAConcurrentRestartRefused` parks a restart on
+`restartGuardPassedFn` to drive it): a press
 that lands after another client restarted the pane must not replace the agent that restart
 started. **"No live child" is `PTY == nil || ExitCode != nil`** (`sbxLoginStoppedLocked`):
 a failed `sbx login` leaves its exited PTY installed, and that pane must still start when a
 sign-in from another pane succeeds. **`handleAttach` replays the dialog last**
 (`replaySbxLoginOffers`) for every stopped pane that still shows the error: the offer can go
 out while no client is attached (a restore before the socket opens), and the flag is
-runtime-only. The flag is cleared only when a new
-preparation BEGINS (`startSbxPane`'s `!ready` branch), never by the sign-in's own spawn, so a
+runtime-only. The flag is cleared at the start of
+every new attempt (`startSbxPane` with `!ready`, BEFORE the profile check, so an attempt that
+fails for another reason stops offering a sign-in), never by the sign-in's own spawn, so a
 failed sign-in leaves every waiter flagged. **Quil never signs in on its own**: a
 non-interactive `sbx login` needs a Docker password or token on stdin, and Quil keeps no
 credential (the `claude setup-token` posture above).

@@ -279,3 +279,63 @@ func TestAttach_ReplaysTheSbxSignInOffer(t *testing.T) {
 		t.Fatalf("replayed plugin_error = %+v", p)
 	}
 }
+
+// A sign-in press and a restart on two connections: the press reads the pane
+// as waiting, the restart then starts a new attempt (which clears the flag),
+// and only after that does the press reach the reservation. It must be
+// refused there, never replace the restart's attempt with `sbx login`
+// (code-spire-beaver M-1, PR #291). Driven through restartGuardPassedFn, the
+// seam TestRestartPaneReq_SerializedWithFix parks the restart on.
+func TestSbxLoginReq_StaleAfterAConcurrentRestartRefused(t *testing.T) {
+	d, pane, sessions, c := fixHarness(t)
+	c2 := quietReader(t, d)
+	stubSbxLookup(t)
+	makeSbxPane(t, pane, true)
+
+	entered := make(chan struct{}, 1)
+	resume := make(chan struct{})
+	prev := restartGuardPassedFn
+	restartGuardPassedFn = func(p *Pane) {
+		if p.ID == pane.ID {
+			entered <- struct{}{}
+			<-resume
+		}
+	}
+	t.Cleanup(func() { restartGuardPassedFn = prev })
+
+	// The restart passes its guard and parks, holding the pane's lifecycle.
+	sendWithID(t, c, ipc.MsgRestartPaneReq, "r-park", ipc.RestartPaneReqPayload{PaneID: pane.ID})
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the restart never reached its guard")
+	}
+	// The press reads the OLD state — flagged, no live child — and waits for
+	// the lifecycle at the reservation.
+	sendWithID(t, c2, ipc.MsgPluginFixReq, "s-stale", ipc.PluginFixReqPayload{PaneID: pane.ID, Fix: ipc.PluginFixSbxLogin})
+	time.Sleep(200 * time.Millisecond)
+	if got := fixLabelOf(pane); got != "" {
+		t.Fatalf("FixLabel = %q while a restart held the pane", got)
+	}
+
+	close(resume)
+	readUntilID(t, c, ipc.MsgRestartPaneResp, "r-park", 3*time.Second)
+	got := readUntilID(t, c2, ipc.MsgPluginFixResp, "s-stale", 3*time.Second)
+	var resp ipc.PluginFixRespPayload
+	if err := got[len(got)-1].DecodePayload(&resp); err != nil {
+		t.Fatalf("decode plugin_fix_resp: %v", err)
+	}
+	if resp.OK {
+		t.Fatal("the stale sign-in was accepted after the restart began a new attempt")
+	}
+	if fixLabelOf(pane) != "" || sbxLoginNeededOf(pane) {
+		t.Fatalf("after the refusal: FixLabel=%q sbxLoginNeeded=%v, want neither", fixLabelOf(pane), sbxLoginNeededOf(pane))
+	}
+	sessions.mu.Lock()
+	defer sessions.mu.Unlock()
+	for i, s := range sessions.made {
+		if cmd, _, started := s.argv(); started && cmd == "/fake/sbx" {
+			t.Fatalf("session %d ran sbx login", i+1)
+		}
+	}
+}

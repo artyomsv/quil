@@ -172,6 +172,15 @@ func (d *Daemon) startSbxPane(pane *Pane, ptySession apty.Session, p *plugin.Pan
 		ptySession = rs.Session
 	}
 	pane.PluginMu.Lock()
+	// Every new attempt decides afresh whether a Docker sign-in is missing
+	// (sandbox_sbx_login.go): failSbxPrepare sets the flag again if it still
+	// is. Cleared BEFORE the profile check, so an attempt that fails for
+	// another reason does not leave the pane offering a sign-in it does not
+	// need. The ready respawn keeps it: it is the same attempt, past the
+	// preparation.
+	if !ready {
+		pane.sbxLoginNeeded = false
+	}
 	gen := pane.ptyGen
 	cwd := pane.CWD
 	name := pane.SandboxName
@@ -190,11 +199,6 @@ func (d *Daemon) startSbxPane(pane *Pane, ptySession apty.Session, p *plugin.Pan
 		return nil, false, err
 	}
 	if !ready {
-		// A new preparation decides afresh whether a Docker sign-in is
-		// missing; failSbxPrepare sets the flag again if it still is.
-		pane.PluginMu.Lock()
-		pane.sbxLoginNeeded = false
-		pane.PluginMu.Unlock()
 		d.beginSbxPrepare(sbxWaiter{paneID: pane.ID, gen: gen}, t)
 		return nil, false, nil
 	}

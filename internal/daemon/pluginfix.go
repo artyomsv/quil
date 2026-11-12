@@ -31,6 +31,13 @@ func (d *Daemon) handlePluginFixReq(conn *ipc.Conn, msg *ipc.Message) {
 		refuseFix(conn, msg, ipc.MsgPluginFixResp, "malformed plugin_fix_req")
 		return
 	}
+	// The sbx sign-in is the daemon's own button, not a plugin fix, and it
+	// is the one fix a sandbox pane may run: sbx is a HOST tool, so the
+	// refusal in pluginFixTarget does not apply to it.
+	if req.Fix == ipc.PluginFixSbxLogin {
+		d.handleSbxLoginReq(conn, msg, req.PaneID)
+		return
+	}
 	pane, p, err := d.pluginFixTarget(req.PaneID)
 	if err != nil {
 		refuseFix(conn, msg, ipc.MsgPluginFixResp, err.Error())
@@ -286,6 +293,15 @@ func (d *Daemon) pluginFixTarget(paneID string) (*Pane, *plugin.PanePlugin, erro
 // clears the one-shot again, or the next Alt+R would run the fix the user
 // never saw start.
 func (d *Daemon) startFix(pane *Pane, argv []string, label, then string) error {
+	return d.startFixIf(pane, argv, label, then, nil)
+}
+
+// startFixIf is startFix with one more refusal: eligible, when not nil, runs
+// in the SAME lifecycleMu + PluginMu span that reserves the fix, so a
+// condition the request checked earlier cannot have changed by the time the
+// fix replaces the pane's child (a restart by another client, say). It reads
+// pane fields only — PluginMu is held — and returns why the fix may not run.
+func (d *Daemon) startFixIf(pane *Pane, argv []string, label, then string, eligible func() error) error {
 	if len(argv) == 0 {
 		return errors.New("fix names no command")
 	}
@@ -311,6 +327,13 @@ func (d *Daemon) startFix(pane *Pane, argv []string, label, then string) error {
 		pane.lifecycleMu.Unlock()
 		return fmt.Errorf("a fix is already running in this pane: %s", running)
 	}
+	if eligible != nil {
+		if err := eligible(); err != nil {
+			pane.PluginMu.Unlock()
+			pane.lifecycleMu.Unlock()
+			return err
+		}
+	}
 	pane.FixLabel = label
 	pane.fixArgv = append([]string(nil), argv...)
 	pane.fixThen = then
@@ -322,6 +345,33 @@ func (d *Daemon) startFix(pane *Pane, argv []string, label, then string) error {
 		pane.PluginMu.Lock()
 		pane.FixLabel, pane.fixArgv, pane.fixThen = "", nil, ""
 		pane.PluginMu.Unlock()
+	}
+	// The pane can be closed by another client while the request ran — its
+	// bounded PATH lookup takes up to a second — and a destroy takes neither
+	// lifecycleMu nor anything this reservation holds. Checked AFTER the fix
+	// child is installed, which makes it complete: a destroy that detached the
+	// pane before this line is caught here and the child is stopped; one that
+	// detaches it later releases the PTY it reads then, which is the fix
+	// child. Without it a `sbx login` or `stripe login` ran with no pane to
+	// show it, and dropped out of every sweep that finds a running fix.
+	if started && d.session.Pane(pane.ID) != pane {
+		pane.PluginMu.Lock()
+		orphan := pane.PTY
+		pane.PTY = nil
+		// Cleared first, so the child's exit is not taken for the fix's
+		// (onFixExit) and does not restart a pane that no longer exists.
+		pane.FixLabel, pane.fixArgv, pane.fixThen = "", nil, ""
+		pane.PluginMu.Unlock()
+		pane.lifecycleMu.Unlock()
+		if orphan != nil {
+			go func(s apty.Session) {
+				if err := s.Close(); err != nil {
+					log.Printf("pane %s: closing fix %q of a closed pane: %v", pane.ID, label, err)
+				}
+			}(orphan)
+		}
+		log.Printf("pane %s: closed while fix %q started; fix stopped", pane.ID, label)
+		return errors.New("the pane was closed while the fix started")
 	}
 	pane.lifecycleMu.Unlock()
 	if !started {
@@ -365,6 +415,13 @@ func fixCommandWithin(p *plugin.PanePlugin, name string, d time.Duration) string
 			return cmd
 		}
 	}
+	return lookPathWithin(name, d)
+}
+
+// lookPathWithin is a PATH lookup of name under the process-wide
+// blocking-FS budget: "" when no permit is free, the name is not on PATH,
+// or the worker has not answered within d.
+func lookPathWithin(name string, d time.Duration) string {
 	if !claimBlockingFSCall() {
 		return ""
 	}
@@ -442,6 +499,12 @@ func (d *Daemon) onFixExit(pane *Pane, code int, generation uint64) bool {
 			log.Printf("pane %s: restart after fix %q failed", pane.ID, label)
 		}
 		pane.lifecycleMu.Unlock()
+		// One Docker sign-in serves every sbx pane, so the others that
+		// stopped for it start too. After this pane's lifecycleMu is
+		// released: each restart takes its own pane's.
+		if label == sbxLoginLabel {
+			d.retrySbxLoginWaiters(pane.ID)
+		}
 		d.broadcastState()
 		d.requestSnapshot()
 		return true

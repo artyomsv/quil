@@ -858,3 +858,41 @@ func TestPluginDialog_RefusalLandsInTheStatusBar(t *testing.T) {
 		t.Errorf("an OK answer flashed %q", got.flashText)
 	}
 }
+
+// sbxSignInFrame is the daemon's sbx "Sign in" dialog for paneID.
+func sbxSignInFrame(paneID string) PluginErrorMsg {
+	return PluginErrorMsg{
+		PaneID:  paneID,
+		Title:   "Docker sign-in needed",
+		Message: "sbx is not signed in to Docker.",
+		Plugin:  "claude-code",
+		Fixes:   []ipc.PluginFixInfo{{Name: ipc.PluginFixSbxLogin, Label: "Sign in"}},
+	}
+}
+
+// The sbx sign-in dialog describes a pane stopped on its error. While the
+// broadcast still carries the SpawnError the dialog is held; once the pane
+// is starting again — Alt+R, or a sign-in done from another pane — it is
+// dropped, since its button would only be refused. A Stripe-style dialog on
+// a pane with no SpawnError is untouched by this rule.
+func TestPluginDialog_SbxSignInDroppedWhenThePaneStartsAgain(t *testing.T) {
+	t.Parallel()
+	m, _, _ := newPluginDialogTestModel(t)
+	got := pluginUpdate(t, *m, sbxSignInFrame("p3")) // p3: a background tab, so held
+	got = pluginUpdate(t, got, pluginErrorFrame("p2"))
+
+	failed := pluginDialogWorkspace("")
+	failed.Panes[2].SpawnError = "sbx is not signed in to Docker. Run: sbx login"
+	got = pluginUpdate(t, got, failed)
+	if _, held := got.pluginDialogs["p3"]; !held {
+		t.Fatal("sign-in dialog dropped while the pane still shows its error")
+	}
+
+	got = pluginUpdate(t, got, pluginDialogWorkspace(""))
+	if _, held := got.pluginDialogs["p3"]; held {
+		t.Error("sign-in dialog kept after the pane's SpawnError cleared")
+	}
+	if _, held := got.pluginDialogs["p2"]; !held {
+		t.Error("the Stripe-style dialog was dropped by the sign-in rule")
+	}
+}

@@ -282,6 +282,33 @@ func TestHint(t *testing.T) {
 	}
 }
 
+// The sign-in failure is a TYPE, not only a sentence: the daemon offers its
+// "Sign in" button on errors.Is(err, ErrNotSignedIn), through every wrap the
+// callers add, and must not offer it for the other known failures.
+func TestHintErr_SignInIsErrNotSignedIn(t *testing.T) {
+	if err := HintErr("error: not signed in to Docker"); !errors.Is(err, ErrNotSignedIn) {
+		t.Errorf("not signed in: %v, want ErrNotSignedIn", err)
+	}
+	if err := HintErr("ERROR: Not authenticated to Docker"); !errors.Is(err, ErrNotSignedIn) {
+		t.Errorf("not authenticated: %v, want ErrNotSignedIn", err)
+	}
+	if err := HintErr("global network policy has not been initialized"); err == nil || errors.Is(err, ErrNotSignedIn) {
+		t.Errorf("policy: %v, want a plain error", err)
+	}
+	if err := HintErr("something else"); err != nil {
+		t.Errorf("no match: %v, want nil", err)
+	}
+	c := Client{Bin: "sbx", Runner: &fakeRunner{answers: func([]string) (string, error) {
+		return "error: not signed in to Docker\n", errors.New("exit status 1")
+	}}}
+	if _, err := c.ListSandboxes(context.Background()); !errors.Is(err, ErrNotSignedIn) {
+		t.Errorf("ListSandboxes: %v, want ErrNotSignedIn", err)
+	}
+	if _, err := c.List(context.Background()); !errors.Is(err, ErrNotSignedIn) {
+		t.Errorf("List: %v, want ErrNotSignedIn", err)
+	}
+}
+
 func TestArgs(t *testing.T) {
 	p := Profile{Name: "my-app", EnvFile: "/r/sandbox/sbxenv.yaml", PostCreateEnvFile: "/r/sandbox/setup.env"}
 	if got, want := CreateArgs(p, "--force"), []string{"env", "create", "/r/sandbox/sbxenv.yaml", "--name", "my-app", "--force"}; !reflect.DeepEqual(got, want) {

@@ -923,6 +923,12 @@ type PluginUpdateInfo struct {
 // the dialog for that version (or an older one) again.
 const PluginFixNotNow = "not_now"
 
+// PluginFixSbxLogin is the plugin_fix_req Fix of the "Sign in" button an sbx
+// sandbox pane offers when sbx is not signed in to Docker. It names no
+// plugin fix: the daemon answers it itself, runs `sbx login` in the pane,
+// and on success starts every sbx pane that stopped for the same reason.
+const PluginFixSbxLogin = "sbx_login"
+
 // PluginFixReqPayload asks the daemon to run one of the pane's plugin's
 // handler fixes in the pane, by name — or, with Fix = PluginFixNotNow, to
 // record that Version was declined. It carries neither an argv nor the

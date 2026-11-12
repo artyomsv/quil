@@ -41,8 +41,8 @@ type Listed struct {
 // ListSandboxes returns every sandbox with its workspaces.
 func (c Client) ListSandboxes(ctx context.Context) ([]Listed, error) {
 	out, err := c.output(ctx, "ls", "--json")
-	if hint := Hint(out); hint != "" {
-		return nil, errors.New(hint)
+	if err := HintErr(out); err != nil {
+		return nil, err
 	}
 	if err != nil {
 		return nil, fmt.Errorf("sbx ls: %w%s", err, tail(out))

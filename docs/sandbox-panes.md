@@ -874,10 +874,16 @@ setup:
 Files under a kit's `files/home/...` are copied into `/home/agent/...` in the
 sandbox.
 
+When the Docker sign-in of `sbx` is missing or expired, the pane opens a
+dialog with a **Sign in** button. It runs `sbx login` in the pane: answer
+its code and browser step there. When it succeeds, the pane starts again,
+and so does every other sbx pane that stopped for the same reason. Quil
+cannot sign in without you, because it keeps no Docker password or token.
+
 Common sbx errors and their fix:
 
 | Message | Fix |
 |---|---|
-| `Not authenticated to Docker` | `sbx login` |
+| `Not authenticated to Docker` / `not signed in to Docker` | press **Sign in** on the pane's dialog, or run `sbx login` |
 | `global network policy has not been initialized` | `sbx policy init balanced` |
 | `resolve kits: ... invalid reference` | start the kit path with `./` or `../` |

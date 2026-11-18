@@ -192,6 +192,7 @@ func Settings() []Setting {
 			func(c *Config) *int { return &c.UI.MouseScrollLines }),
 		intRow("ui.page_scroll_lines", g, "Page scroll lines", AppliesNextStart, 0, "must be a whole number, 0 or more",
 			func(c *Config) *int { return &c.UI.PageScrollLines }),
+		boolRow("ui.copy_on_select", g, "Copy on select", AppliesNextStart, func(c *Config) *bool { return &c.UI.CopyOnSelect }),
 		// The upper bound depends on the terminal width: the TUI checks it.
 		intRow("ui.sidebar_width", g, "Sidebar width", AppliesNextStart, MinSidebarWidth,
 			fmt.Sprintf("must be a whole number, %d or more", MinSidebarWidth),

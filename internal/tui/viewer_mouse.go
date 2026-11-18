@@ -1,11 +1,7 @@
 package tui
 
 import (
-	"log"
-
 	tea "charm.land/bubbletea/v2"
-
-	"github.com/artyomsv/quil/internal/clipboard"
 )
 
 // Mouse support for the full-screen read-only viewer (dialogLogViewer): the F1
@@ -60,15 +56,7 @@ func (m Model) handleViewerMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd
 		}
 		text := editorExtractText(e.Lines, e.Sel)
 		e.Sel = nil
-		if text == "" {
-			return m, nil
-		}
-		return m, func() tea.Msg {
-			if err := clipboard.Write(text); err != nil {
-				log.Printf("viewer clipboard write: %v", err)
-			}
-			return nil
-		}
+		return m, copyTextCmd(text, "viewer")
 
 	case tea.MouseLeft:
 		row, col, ok := m.logViewerPosAt(msg.X, msg.Y)

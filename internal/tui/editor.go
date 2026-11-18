@@ -165,12 +165,7 @@ func (e *TextEditor) HandleKey(key string) (saved, closed bool, cmd tea.Cmd) {
 		if e.Sel != nil && !e.Sel.IsEmpty() {
 			text := editorExtractText(e.Lines, e.Sel)
 			e.Sel = nil
-			cmd = func() tea.Msg {
-				if err := clipboard.Write(text); err != nil {
-					log.Printf("editor clipboard write: %v", err)
-				}
-				return nil
-			}
+			cmd = copyTextCmd(text, "editor")
 		}
 		e.ensureCursorVisible()
 		return false, false, cmd
@@ -184,12 +179,7 @@ func (e *TextEditor) HandleKey(key string) (saved, closed bool, cmd tea.Cmd) {
 			text := editorExtractText(e.Lines, e.Sel)
 			e.deleteSelection()
 			e.Dirty = true
-			cmd = func() tea.Msg {
-				if err := clipboard.Write(text); err != nil {
-					log.Printf("editor clipboard write: %v", err)
-				}
-				return nil
-			}
+			cmd = copyTextCmd(text, "editor")
 		}
 		e.ensureCursorVisible()
 		return false, false, cmd
@@ -226,12 +216,7 @@ func (e *TextEditor) HandleKey(key string) (saved, closed bool, cmd tea.Cmd) {
 		if e.Sel != nil && !e.Sel.IsEmpty() {
 			text := editorExtractText(e.Lines, e.Sel)
 			e.Sel = nil
-			cmd = func() tea.Msg {
-				if err := clipboard.Write(text); err != nil {
-					log.Printf("editor clipboard write: %v", err)
-				}
-				return nil
-			}
+			cmd = copyTextCmd(text, "editor")
 			e.ensureCursorVisible()
 			return false, false, cmd
 		}

@@ -3921,6 +3921,9 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 			m.setErrorFlash("could not copy: " + msg.err.Error())
 		} else {
 			m.setFlash(copiedFlash(msg.text))
+			if msg.mark != nil {
+				msg.mark.apply()
+			}
 		}
 		return m, m.flashCmd()
 
@@ -8631,6 +8634,17 @@ func (m Model) renderTOMLEditorFullScreen() string {
 	switch {
 	case e.SaveErr != "":
 		status = fmt.Sprintf(" \x1b[31mError: %s\x1b[0m\x1b[48;5;236m\x1b[38;5;250m    Ln %d, Col %d", e.SaveErr, e.CursorRow+1, e.CursorCol+1)
+	case m.flashText != "" && m.clock().Before(m.flashUntil):
+		// The main status bar, which shows flashes, is not drawn while this
+		// screen is up, so a copy made here ("Copied 3 lines", or why it
+		// failed) would otherwise say nothing. The flash takes the hint's
+		// place until it expires.
+		pos := fmt.Sprintf("    Ln %d, Col %d", e.CursorRow+1, e.CursorCol+1)
+		flash := truncateToWidth(m.flashText, max(m.width-len(pos)-1, 1))
+		if m.flashErr {
+			flash = "\x1b[31m" + flash + "\x1b[0m\x1b[48;5;236m\x1b[38;5;250m"
+		}
+		status = " " + flash + pos
 	case e.Sel != nil && !e.Sel.IsEmpty():
 		if e.ReadOnly {
 			status = fmt.Sprintf(" Enter copy  Esc clear    Ln %d, Col %d", e.CursorRow+1, e.CursorCol+1)

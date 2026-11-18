@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -42,6 +43,15 @@ func runIfAny(cmd tea.Cmd) {
 	if cmd != nil {
 		cmd()
 	}
+}
+
+// deliverCopy runs the copy cmd and hands its result back to Update, as the
+// Bubble Tea loop does; that is where a successful copy-on-select copy marks
+// its selection copied.
+func deliverCopy(t *testing.T, m Model, cmd tea.Cmd) Model {
+	t.Helper()
+	next, _ := m.Update(runCopy(t, cmd))
+	return next.(Model)
 }
 
 func copyTestModel(copyOnSelect bool) Model {
@@ -150,7 +160,7 @@ func TestRightClick_WithSelection(t *testing.T) {
 	t.Run("on: opens the context menu instead of copying again", func(t *testing.T) {
 		copied := captureCopies(t)
 		m, cmd := dragSelect(t, copyTestModel(true), 0, 3)
-		runIfAny(cmd) // the copy-on-select copy
+		m = deliverCopy(t, m, cmd) // the copy-on-select copy
 		*copied = nil
 		x, y := paneCellScreen(m, 1, 0)
 		next, cmd := m.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseRight})
@@ -380,7 +390,7 @@ func TestCopyOnSelect_RightClickCopiesWhatItDidNotCopy(t *testing.T) {
 	t.Run("a selection changed by the keyboard", func(t *testing.T) {
 		captureCopies(t)
 		m, cmd := dragSelect(t, copyTestModel(true), 0, 3)
-		runCopy(t, cmd)
+		m = deliverCopy(t, m, cmd)
 		if !m.selection.copied {
 			t.Fatal("setup: the drag's selection is not marked copied")
 		}
@@ -433,4 +443,80 @@ func TestSettingsRow_CopyOnSelectToggles(t *testing.T) {
 	if m.cfg.UI.CopyOnSelect {
 		t.Error("toggle off left CopyOnSelect on")
 	}
+}
+
+// A copy-on-select copy that failed must not mark its selection copied, or
+// right-click would drop a selection that never reached the clipboard.
+func TestCopyOnSelect_FailedCopyIsNotMarkedCopied(t *testing.T) {
+	prev := clipboardWriteText
+	fail := true
+	var copied []string
+	clipboardWriteText = func(s string) error {
+		if fail {
+			return errors.New("no clipboard tool found")
+		}
+		copied = append(copied, s)
+		return nil
+	}
+	t.Cleanup(func() { clipboardWriteText = prev })
+
+	m, cmd := dragSelect(t, copyTestModel(true), 0, 3)
+	m = deliverCopy(t, m, cmd)
+	if m.selection.copied {
+		t.Fatal("a failed copy marked the selection copied")
+	}
+	if !m.flashErr {
+		t.Error("a failed copy showed no error flash")
+	}
+	fail = false
+	x, y := paneCellScreen(m, 1, 0)
+	next, cmd := m.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseRight})
+	if msg := runCopy(t, cmd); msg.text != "echo" || len(copied) != 1 {
+		t.Errorf("right-click after a failed copy: copied %q (%q), want a retry of %q", msg.text, copied, "echo")
+	}
+	if next.(Model).ctxMenu.open() {
+		t.Error("right-click opened the menu over a selection that was never copied")
+	}
+}
+
+// A selection the keyboard changed while its copy was in flight no longer
+// matches the clipboard, so the late success must not mark it.
+func TestCopyOnSelect_SelectionChangedDuringCopyIsNotMarked(t *testing.T) {
+	captureCopies(t)
+	m, cmd := dragSelect(t, copyTestModel(true), 0, 3)
+	msg := runCopy(t, cmd) // the write finished...
+	next, _ := m.handleSelectionKey("shift+right")
+	m = next.(Model) // ...but the keyboard moved the selection before Update saw it
+	next, _ = m.Update(msg)
+	if next.(Model).selection.copied {
+		t.Error("a selection changed during its copy was marked copied")
+	}
+}
+
+// The full-screen viewer and TOML editor replace the main status bar, so
+// their own footer has to show the copy flash, or a copy there says nothing.
+func TestFullScreenEditorFooter_ShowsCopyFlash(t *testing.T) {
+	m := viewerModel(t, "alpha\nbravo", 80, 24, false)
+	next, _ := m.Update(textCopiedMsg{text: "alpha"})
+	m = next.(Model)
+	footer := lastLine(m.renderTOMLEditorFullScreen())
+	if !strings.Contains(footer, "Copied 5 characters") {
+		t.Errorf("footer %q does not show the copy flash", footer)
+	}
+
+	next, _ = m.Update(textCopiedMsg{text: "x", err: errors.New("no clipboard tool found")})
+	m = next.(Model)
+	footer = lastLine(m.renderTOMLEditorFullScreen())
+	if !strings.Contains(footer, "could not copy") || !strings.Contains(footer, "\x1b[31m") {
+		t.Errorf("footer %q does not show the copy failure in red", footer)
+	}
+
+	m.flashUntil = m.clock().Add(-time.Second) // expired
+	if footer := lastLine(m.renderTOMLEditorFullScreen()); strings.Contains(footer, "could not copy") {
+		t.Errorf("footer %q still shows an expired flash", footer)
+	}
+}
+
+func lastLine(s string) string {
+	return s[strings.LastIndex(s, "\n")+1:]
 }

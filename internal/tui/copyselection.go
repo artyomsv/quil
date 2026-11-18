@@ -20,12 +20,36 @@ import (
 type textCopiedMsg struct {
 	text string
 	err  error
+	// mark, when set, is the pane selection copy_on_select copied; Update
+	// marks it copied (Selection.copied) only if the write succeeded.
+	mark *selectionMark
+}
+
+// selectionMark names a selection and its extent at the moment its copy
+// started. The extent is checked again before marking: a selection the
+// keyboard changed while the write ran no longer matches the clipboard.
+type selectionMark struct {
+	sel            *Selection
+	anchor, cursor SelectionAnchor
+}
+
+// apply marks the selection copied when it still spans what was copied.
+// Called on the Update goroutine, which owns every Selection.
+func (k *selectionMark) apply() {
+	if k.sel.Anchor == k.anchor && k.sel.Cursor == k.cursor {
+		k.sel.copied = true
+	}
 }
 
 // copyTextCmd writes text to the clipboard off the Update goroutine (the
 // write can shell out to a helper) and reports the outcome as textCopiedMsg.
 // what names the copy's source in the log line. Empty text copies nothing.
 func copyTextCmd(text, what string) tea.Cmd {
+	return markingCopyCmd(text, what, nil)
+}
+
+// markingCopyCmd is copyTextCmd carrying mark back to Update with the result.
+func markingCopyCmd(text, what string, mark *selectionMark) tea.Cmd {
 	if text == "" {
 		return nil
 	}
@@ -34,7 +58,7 @@ func copyTextCmd(text, what string) tea.Cmd {
 		if err != nil {
 			log.Printf("%s clipboard write: %v", what, err)
 		}
-		return textCopiedMsg{text: text, err: err}
+		return textCopiedMsg{text: text, err: err, mark: mark}
 	}
 }
 
@@ -78,18 +102,17 @@ func (m Model) copyOnSelectCmd(text, what string) tea.Cmd {
 }
 
 // copyPaneSelectionOnSelect is copyOnSelectCmd for the pane selection the
-// mouse just made, and marks it copied (see Selection.copied). The mark is
-// written through the m.selection pointer, which the returned Model shares,
-// so the value receiver does not lose it.
+// mouse just made. The selection is marked copied (see Selection.copied)
+// only when the write reports success, in Update: marking it here, before
+// the write ran, let a failed copy make right-click drop a selection that
+// never reached the clipboard.
 func (m Model) copyPaneSelectionOnSelect() tea.Cmd {
-	if m.selection == nil {
+	if m.selection == nil || !m.cfg.UI.CopyOnSelect {
 		return nil
 	}
-	cmd := m.copyOnSelectCmd(m.paneSelectionText(), "pane")
-	if cmd != nil {
-		m.selection.copied = true
-	}
-	return cmd
+	s := m.selection
+	return markingCopyCmd(m.paneSelectionText(), "pane",
+		&selectionMark{sel: s, anchor: s.Anchor, cursor: s.Cursor})
 }
 
 // paneMenuAllowed reports whether a right-click with no selection opens a

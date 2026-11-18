@@ -9,9 +9,9 @@ import (
 )
 
 // This file holds the platform-neutral half of the Unix image readers
-// (clipboard_unix.go): parsing what osascript and xclip print. It carries no
-// build tag on purpose — CI runs on Linux, so a parser that lived behind
-// `//go:build darwin` would never be compiled or tested there.
+// (clipboard_unix.go): parsing what osascript, xclip and wl-paste print. It
+// carries no build tag on purpose - CI runs on Linux, so a parser that lived
+// behind `//go:build darwin` would never be compiled or tested there.
 
 // maxImageSize caps a clipboard image. A full-screen Retina screenshot is a
 // few MB of PNG; 50 MB leaves ample room while still bounding the read.
@@ -80,9 +80,20 @@ func clipboardText(out []byte) string {
 }
 
 // isNoImageStderr reports whether a failed reader's stderr means "the
-// clipboard holds no image" rather than a real failure. osascript says -1700;
-// xclip says the image/png target is not available.
+// clipboard holds no image" rather than a real failure. osascript says
+// -1700; xclip and wl-paste say what isTypeNotOfferedStderr matches.
 func isNoImageStderr(stderr string) bool {
 	return strings.Contains(stderr, appleScriptNoImage) ||
-		strings.Contains(stderr, "not available")
+		isTypeNotOfferedStderr(stderr)
+}
+
+// isTypeNotOfferedStderr reports whether a failed xclip or wl-paste read
+// means the clipboard holds nothing of the requested type: an answer, not a
+// failure. xclip says the target is not available, and so does wl-paste
+// (`Clipboard content is not available as requested type "image/png"`) when
+// the clipboard holds something else; wl-paste says "Nothing is copied" when
+// the clipboard is empty.
+func isTypeNotOfferedStderr(stderr string) bool {
+	return strings.Contains(stderr, "not available") ||
+		strings.Contains(stderr, "Nothing is copied")
 }

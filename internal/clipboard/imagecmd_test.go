@@ -90,7 +90,11 @@ func TestIsNoImageStderr(t *testing.T) {
 	}{
 		{"0:29: execution error: Can’t make some data into the expected type. (-1700)\n", true},
 		{"Error: target image/png not available\n", true},
+		// wl-paste (wl-clipboard 2.x), text on the clipboard and an empty one.
+		{"Clipboard content is not available as requested type \"image/png\"\nUse \"wl-paste --list-types\" to view available types.\n", true},
+		{"Nothing is copied\n", true},
 		{"Error: Can't open display: (null)\n", false},
+		{"Failed to connect to a Wayland server: No such file or directory\n", false},
 		{"", false},
 	}
 	for _, tt := range tests {

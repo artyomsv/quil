@@ -291,7 +291,7 @@ The suffix behaviour matters more here than for the pin: the marked pane is usua
 
 Select text in terminal panes with `Shift+Arrow` (character), `Ctrl+Shift+Arrow` (word jump), `Ctrl+Alt+Shift+Arrow` (3-word jump), or mouse click+drag. Enter copies the selection to the system clipboard. `Ctrl+V` pastes with bracketed-paste sequences so the receiving shell knows the text came from clipboard.
 
-Platform-native clipboard: Win32 `GetClipboardData` / `SetClipboardData` on Windows, `pbpaste` / `pbcopy` on macOS, `xclip` / `xsel` on Linux.
+Platform-native clipboard: Win32 `GetClipboardData` / `SetClipboardData` on Windows, `pbpaste` / `pbcopy` on macOS. On Linux, `wl-copy` / `wl-paste` (from wl-clipboard) in a Wayland session, otherwise `xclip` / `xsel`. Under Wayland without wl-clipboard installed, Quil still falls back to `xclip` / `xsel`, which only reach the clipboard through XWayland and may not see what native Wayland apps copied. When wl-clipboard is installed but fails (it cannot reach the compositor, or it waits for focus the compositor never gives), the copy or paste is retried with `xclip` / `xsel`; after a timeout Quil keeps using them for the rest of the session. A copy or paste helper that has not finished within 5 seconds is stopped.
 
 ### Image paste from clipboard
 
@@ -300,7 +300,7 @@ Press any paste key on a screenshot. If the clipboard has no text but contains a
 1. Reads the clipboard image:
    - **Windows** — Win32 `CF_DIBV5` / `CF_DIB` (decodes 24bpp BI_RGB + 32bpp BI_BITFIELDS). Sources: `Win+Shift+S`, Snipping Tool.
    - **macOS** — `osascript` (ships with macOS; a TIFF clipboard is converted to PNG). Sources: `Cmd+Ctrl+Shift+4`, or copy an image from any app. Plain `Cmd+Shift+4` saves a file and puts nothing on the clipboard.
-   - **Linux** — `xclip -selection clipboard -t image/png -o`. Needs `xclip`; with only `xsel` installed, image paste is not available.
+   - **Linux** — `wl-paste --type image/png` in a Wayland session with wl-clipboard installed, otherwise `xclip -selection clipboard -t image/png -o`. With only `xsel` installed, image paste is not available.
 2. Saves it as `~/.quil/paste/quil-paste-<timestamp>-<rand>.png` with `0o600` permissions
 3. Types the absolute path into the active pane
 

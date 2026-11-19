@@ -35,21 +35,26 @@ func paneCopyPath(pane *PaneModel) (label, path string) {
 type pathCopiedMsg struct {
 	path string
 	err  error
+	// seq and superseded order it against other copies, as on textCopiedMsg.
+	seq        uint64
+	superseded bool
 }
 
 // copyPanePath writes the pane's path (see paneCopyPath) to the clipboard.
 // The path is read here, on the Update goroutine; only the write runs in the
-// Cmd, since it can shell out (pbcopy, xclip).
+// Cmd, since it can shell out (pbcopy, xclip). It takes its place in the
+// clipboard write order like every text copy (copyTicket).
 func (m Model) copyPanePath(pane *PaneModel) tea.Cmd {
 	_, path := paneCopyPath(pane)
 	if path == "" {
 		return nil
 	}
+	ticket := newCopyTicket()
 	return func() tea.Msg {
-		err := clipboardWriteText(path)
+		superseded, err := ticket.write(path)
 		if err != nil {
 			log.Printf("copy path: clipboard write: %v", err)
 		}
-		return pathCopiedMsg{path: path, err: err}
+		return pathCopiedMsg{path: path, err: err, seq: ticket.seq, superseded: superseded}
 	}
 }

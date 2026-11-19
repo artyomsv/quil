@@ -3,6 +3,7 @@ package tui
 import (
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -411,7 +412,10 @@ func TestCopyOnSelect_RightClickCopiesWhatItDidNotCopy(t *testing.T) {
 	t.Run("notes mode, where no menu opens", func(t *testing.T) {
 		captureCopies(t)
 		m, cmd := dragSelect(t, copyTestModel(true), 0, 3)
-		runCopy(t, cmd)
+		m = deliverCopy(t, m, cmd)
+		if !m.selection.copied {
+			t.Fatal("setup: the drag's selection is not marked copied, so this would not reach the guard")
+		}
 		m.notesMode = true
 		x, y := paneCellScreen(m, 1, 0)
 		_, cmd = m.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseRight})
@@ -519,4 +523,250 @@ func TestFullScreenEditorFooter_ShowsCopyFlash(t *testing.T) {
 
 func lastLine(s string) string {
 	return s[strings.LastIndex(s, "\n")+1:]
+}
+
+// slowWriter makes clipboard writes of slowText block until released, and
+// reports when one has started, so a test can hold an older write in flight
+// while a newer one is made. It records every write in order.
+type slowWriter struct {
+	slowText string
+	started  chan struct{}
+	release  chan struct{}
+	mu       sync.Mutex
+	written  []string
+}
+
+func newSlowWriter(t *testing.T, slowText string) *slowWriter {
+	t.Helper()
+	w := &slowWriter{slowText: slowText, started: make(chan struct{}), release: make(chan struct{})}
+	prev := clipboardWriteText
+	clipboardWriteText = func(s string) error {
+		if s == w.slowText {
+			close(w.started)
+			<-w.release
+		}
+		w.mu.Lock()
+		w.written = append(w.written, s)
+		w.mu.Unlock()
+		return nil
+	}
+	t.Cleanup(func() { clipboardWriteText = prev })
+	return w
+}
+
+func (w *slowWriter) final() (string, []string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.written) == 0 {
+		return "", nil
+	}
+	return w.written[len(w.written)-1], append([]string(nil), w.written...)
+}
+
+// raceHeldWrite starts newer while w holds an older write (already started:
+// the caller has received from w.started), waits until newer is queued behind
+// it, or has finished because it bypassed the queue, and only then lets the
+// older write go. No sleeps: both outcomes are observed, not timed.
+func raceHeldWrite(t *testing.T, w *slowWriter, olderDone <-chan tea.Msg, newer tea.Cmd) (olderMsg, newerMsg tea.Msg) {
+	t.Helper()
+	queued := make(chan struct{}, 1)
+	prev := beforeCopyLock
+	beforeCopyLock = func() {
+		select {
+		case queued <- struct{}{}:
+		default:
+		}
+	}
+	t.Cleanup(func() { beforeCopyLock = prev })
+	newerDone := startCmd(newer)
+	select {
+	case <-queued:
+	case newerMsg = <-newerDone:
+	}
+	close(w.release)
+	olderMsg = <-olderDone
+	if newerMsg == nil {
+		newerMsg = <-newerDone
+	}
+	return olderMsg, newerMsg
+}
+
+// startCmd runs cmd on its own goroutine, as Bubble Tea does.
+func startCmd(cmd tea.Cmd) <-chan tea.Msg {
+	done := make(chan tea.Msg, 1)
+	go func() { done <- cmd() }()
+	return done
+}
+
+// wordThenSentence double- and triple-clicks "hello-world" and returns the
+// model and both copies, built in that order.
+func wordThenSentence(t *testing.T) (m Model, word, sentence tea.Cmd) {
+	t.Helper()
+	pinClickClock(t)
+	m = copyTestModel(true)
+	x, y := paneCellScreen(m, 8, 0)
+	m = clickAt(m, x, y)
+	next, word := m.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+	next, _ = next.(Model).Update(tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseLeft})
+	next, sentence = next.(Model).Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+	if word == nil || sentence == nil {
+		t.Fatal("setup: double and triple click did not both copy")
+	}
+	return next.(Model), word, sentence
+}
+
+// Two copies made in quick succession (the word on a double-click, then the
+// sentence on the third click) run on separate goroutines. Whichever starts
+// writing first, the clipboard must end on the newer one, and only the newer
+// one may mark its selection copied.
+func TestCopy_WritesFollowInputOrder(t *testing.T) {
+	const sentence = "echo hello-world done"
+	t.Run("the older write starts first and is slow", func(t *testing.T) {
+		w := newSlowWriter(t, "hello-world")
+		m, wordCmd, sentenceCmd := wordThenSentence(t)
+		wordDone := startCmd(wordCmd)
+		<-w.started // the word's write holds the clipboard now
+		wordMsg, sentenceMsg := raceHeldWrite(t, w, wordDone, sentenceCmd)
+		if final, all := w.final(); final != sentence {
+			t.Errorf("clipboard ended on %q (writes %q), want the sentence", final, all)
+		}
+		for _, msg := range []tea.Msg{wordMsg, sentenceMsg} {
+			next, _ := m.Update(msg)
+			m = next.(Model)
+		}
+		if !m.selection.copied || m.flashText != copiedFlash(sentence) {
+			t.Errorf("copied=%v flash=%q; want the sentence marked and reported", m.selection.copied, m.flashText)
+		}
+	})
+	t.Run("the newer write runs first", func(t *testing.T) {
+		copied := captureCopies(t)
+		m, wordCmd, sentenceCmd := wordThenSentence(t)
+		sentenceMsg := sentenceCmd()
+		wordMsg := wordCmd()
+		if len(*copied) != 1 || (*copied)[0] != sentence {
+			t.Errorf("clipboard writes = %q, want only the sentence", *copied)
+		}
+		for _, msg := range []tea.Msg{sentenceMsg, wordMsg} {
+			next, _ := m.Update(msg)
+			m = next.(Model)
+		}
+		if !m.selection.copied || m.flashText != copiedFlash(sentence) {
+			t.Errorf("copied=%v flash=%q; want the sentence marked and reported", m.selection.copied, m.flashText)
+		}
+	})
+}
+
+// Copy-path writes the clipboard too, so it takes its place in the same
+// order as selection copies, in both directions.
+func TestCopy_PathCopiesShareTheWriteOrder(t *testing.T) {
+	pathCopy := func(m Model) tea.Cmd {
+		pane := m.curTabs()[0].ActivePaneModel()
+		pane.CWD = "/w/proj"
+		return m.copyPanePath(pane)
+	}
+	t.Run("a slow selection copy, then the path", func(t *testing.T) {
+		w := newSlowWriter(t, "echo")
+		m, selCmd := dragSelect(t, copyTestModel(true), 0, 3)
+		selDone := startCmd(selCmd)
+		<-w.started
+		selMsg, pathMsg := raceHeldWrite(t, w, selDone, pathCopy(m))
+		if final, all := w.final(); final != "/w/proj" {
+			t.Errorf("clipboard ended on %q (writes %q), want the path", final, all)
+		}
+		for _, msg := range []tea.Msg{selMsg, pathMsg} {
+			next, _ := m.Update(msg)
+			m = next.(Model)
+		}
+		if m.selection.copied {
+			t.Error("the selection is marked copied, but the clipboard holds the path")
+		}
+	})
+	t.Run("a slow path copy, then a selection", func(t *testing.T) {
+		w := newSlowWriter(t, "/w/proj")
+		m := copyTestModel(true)
+		pathDone := startCmd(pathCopy(m))
+		<-w.started
+		m, selCmd := dragSelect(t, m, 0, 3)
+		pathMsg, selMsg := raceHeldWrite(t, w, pathDone, selCmd)
+		if final, all := w.final(); final != "echo" {
+			t.Errorf("clipboard ended on %q (writes %q), want the selection", final, all)
+		}
+		// The path's result arrives last; it must not unmark the selection.
+		for _, msg := range []tea.Msg{selMsg, pathMsg} {
+			next, _ := m.Update(msg)
+			m = next.(Model)
+		}
+		if !m.selection.copied || m.flashText != copiedFlash("echo") {
+			t.Errorf("copied=%v flash=%q; want the selection marked and reported", m.selection.copied, m.flashText)
+		}
+	})
+}
+
+// Bubble Tea can deliver two copies' results in either order. An older
+// success arriving after a newer one must not mark its selection or flash,
+// since the clipboard holds the newer text.
+func TestCopy_OlderResultArrivingLateIsIgnored(t *testing.T) {
+	captureCopies(t)
+	m, firstCmd := dragSelect(t, copyTestModel(true), 0, 3)
+	first := runCopy(t, firstCmd)
+	firstSel := m.selection
+	m, secondCmd := dragSelect(t, m, 5, 9)
+	second := runCopy(t, secondCmd)
+
+	next, _ := m.Update(second)
+	next, _ = next.(Model).Update(first) // older, delivered last
+	m = next.(Model)
+	if firstSel.copied {
+		t.Error("the older selection was marked copied by its late result")
+	}
+	if !m.selection.copied || m.flashText != copiedFlash(second.text) {
+		t.Errorf("copied=%v flash=%q; want the newer copy marked and reported", m.selection.copied, m.flashText)
+	}
+}
+
+// A later successful copy replaces the clipboard, so the selection marked
+// copied before it is unmarked: right-click must copy it again, not drop it.
+func TestCopy_NewerCopyUnmarksTheOldSelection(t *testing.T) {
+	captureCopies(t)
+	m, cmd := dragSelect(t, copyTestModel(true), 0, 3)
+	m = deliverCopy(t, m, cmd)
+	if !m.selection.copied {
+		t.Fatal("setup: the selection is not marked copied")
+	}
+	pane := m.curTabs()[0].ActivePaneModel()
+	pane.CWD = "/w/proj"
+	next, _ := m.Update(m.copyPanePath(pane)())
+	m = next.(Model)
+	if m.selection.copied {
+		t.Error("the selection stayed marked copied after the path replaced the clipboard")
+	}
+	x, y := paneCellScreen(m, 1, 0)
+	_, cmd = m.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseRight})
+	if msg := runCopy(t, cmd); msg.text != "echo" {
+		t.Errorf("right-click copied %q, want the selection copied again", msg.text)
+	}
+}
+
+// A copy that a newer one overtook is dropped, not written late: the slow
+// older copy must not replace the newer text that is already there.
+func TestCopy_OvertakenCopyIsNotWrittenLate(t *testing.T) {
+	copied := captureCopies(t)
+	older := copyTextCmd("older", "test")
+	newer := copyTextCmd("newer", "test")
+	if msg := runCopy(t, newer); msg.superseded || msg.text != "newer" {
+		t.Fatalf("newer copy = %+v", msg)
+	}
+	if msg := older(); !msg.(textCopiedMsg).superseded {
+		t.Errorf("the overtaken copy was not marked superseded: %+v", msg)
+	}
+	if len(*copied) != 1 || (*copied)[0] != "newer" {
+		t.Errorf("clipboard writes = %q, want only the newer copy", *copied)
+	}
+
+	m := copyTestModel(false)
+	m.flashText = ""
+	next, cmd := m.Update(textCopiedMsg{superseded: true})
+	if got := next.(Model); got.flashText != "" || cmd != nil {
+		t.Errorf("a superseded copy flashed %q", got.flashText)
+	}
 }

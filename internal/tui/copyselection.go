@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
@@ -23,6 +25,57 @@ type textCopiedMsg struct {
 	// mark, when set, is the pane selection copy_on_select copied; Update
 	// marks it copied (Selection.copied) only if the write succeeded.
 	mark *selectionMark
+	// seq and superseded order the result against other copies; see
+	// copyTicket and Model.takeCopyResult.
+	seq        uint64
+	superseded bool
+}
+
+// Clipboard writes run in the order Update asked for them. Bubble Tea runs
+// every Cmd on its own goroutine, so two copies made in quick succession (the
+// word on a double-click, then the sentence on the third click; a selection,
+// then a pane's path) could finish in either order, and a late older write
+// would replace the newer text while the newer selection stayed highlighted
+// and marked copied.
+//
+// Every clipboard write, text and path alike, takes a copyTicket when its Cmd
+// is built. That happens on the Update goroutine, so ticket numbers follow
+// input order. copyMu lets one write run at a time, without blocking Update:
+// only the Cmd goroutines wait on it. lastCopySeq, guarded by copyMu, is the
+// newest copy written or attempted; an older one that gets the lock after it
+// is dropped rather than written late. Their results can still reach Update
+// out of order, which Model.takeCopyResult handles. These are package state
+// because the clipboard is one per process, like the counters in pane.go and
+// watchdog.go.
+var (
+	copySeq     atomic.Uint64
+	copyMu      sync.Mutex
+	lastCopySeq uint64
+)
+
+// copyTicket is one clipboard write's place in input order.
+type copyTicket struct{ seq uint64 }
+
+// newCopyTicket must be called on the Update goroutine, where every copy
+// site runs: the number it takes there is what keeps writes in input order.
+func newCopyTicket() copyTicket { return copyTicket{seq: copySeq.Add(1)} }
+
+// beforeCopyLock runs as a clipboard write starts waiting for its turn.
+// Tests set it to know a write has reached the queue; production leaves it a
+// no-op.
+var beforeCopyLock = func() {}
+
+// write runs in the Cmd. It writes text unless a newer copy has already run,
+// in which case nothing is written and superseded is true.
+func (k copyTicket) write(text string) (superseded bool, err error) {
+	beforeCopyLock()
+	copyMu.Lock()
+	defer copyMu.Unlock()
+	if k.seq < lastCopySeq {
+		return true, nil
+	}
+	lastCopySeq = k.seq
+	return false, clipboardWriteText(text)
 }
 
 // selectionMark names a selection and its extent at the moment its copy
@@ -33,11 +86,40 @@ type selectionMark struct {
 	anchor, cursor SelectionAnchor
 }
 
-// apply marks the selection copied when it still spans what was copied.
-// Called on the Update goroutine, which owns every Selection.
-func (k *selectionMark) apply() {
+// apply marks the selection copied when it still spans what was copied, and
+// reports whether it did. Called on the Update goroutine, which owns every
+// Selection.
+func (k *selectionMark) apply() bool {
 	if k.sel.Anchor == k.anchor && k.sel.Cursor == k.cursor {
 		k.sel.copied = true
+		return true
+	}
+	return false
+}
+
+// takeCopyResult reports whether a copy result is the newest one: not
+// superseded, and not older than a result Update has already applied, since
+// Bubble Tea can deliver the results of two writes in either order. Anything
+// else neither flashes nor marks: the clipboard holds newer text than it.
+func (m *Model) takeCopyResult(seq uint64, superseded bool) bool {
+	if superseded || seq < m.copyResultSeq {
+		return false
+	}
+	m.copyResultSeq = seq
+	return true
+}
+
+// clipboardChanged records a successful copy. The clipboard no longer holds
+// the text of the selection marked copied before it, so that one is unmarked
+// (right-click copies it again rather than dropping it); mark, if any, is
+// the selection this copy holds.
+func (m *Model) clipboardChanged(mark *selectionMark) {
+	if m.copiedSel != nil {
+		m.copiedSel.copied = false
+		m.copiedSel = nil
+	}
+	if mark != nil && mark.apply() {
+		m.copiedSel = mark.sel
 	}
 }
 
@@ -49,16 +131,18 @@ func copyTextCmd(text, what string) tea.Cmd {
 }
 
 // markingCopyCmd is copyTextCmd carrying mark back to Update with the result.
+// It must be called on the Update goroutine (see newCopyTicket).
 func markingCopyCmd(text, what string, mark *selectionMark) tea.Cmd {
 	if text == "" {
 		return nil
 	}
+	ticket := newCopyTicket()
 	return func() tea.Msg {
-		err := clipboardWriteText(text)
+		superseded, err := ticket.write(text)
 		if err != nil {
 			log.Printf("%s clipboard write: %v", what, err)
 		}
-		return textCopiedMsg{text: text, err: err, mark: mark}
+		return textCopiedMsg{text: text, err: err, mark: mark, seq: ticket.seq, superseded: superseded}
 	}
 }
 

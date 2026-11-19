@@ -1381,6 +1381,11 @@ type Model struct {
 	// and the status-bar renderer checks flashUntil on every frame.
 	flashText  string
 	flashUntil time.Time
+	// copyResultSeq is the newest clipboard write whose result Update has
+	// applied, and copiedSel the selection marked copied by it, if any (see
+	// takeCopyResult, clipboardChanged).
+	copyResultSeq uint64
+	copiedSel     *Selection
 	// flashErr marks the live flash as a refusal or failure (setErrorFlash):
 	// it lasts longer, and a routine setFlash does not replace it.
 	flashErr bool
@@ -3908,22 +3913,29 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 
 	case pathCopiedMsg:
 		// A clipboard write result, not an IPC response, so no re-arm.
+		if !m.takeCopyResult(msg.seq, msg.superseded) {
+			return m, nil
+		}
 		if msg.err != nil {
 			m.setErrorFlash("could not copy path: " + msg.err.Error())
 		} else {
+			m.clipboardChanged(nil)
 			m.setFlash("Copied " + msg.path)
 		}
 		return m, m.flashCmd()
 
 	case textCopiedMsg:
 		// A clipboard write result, not an IPC response, so no re-arm.
+		// A superseded or out-of-order result neither flashes nor marks:
+		// the newer copy reports itself (takeCopyResult).
+		if !m.takeCopyResult(msg.seq, msg.superseded) {
+			return m, nil
+		}
 		if msg.err != nil {
 			m.setErrorFlash("could not copy: " + msg.err.Error())
 		} else {
+			m.clipboardChanged(msg.mark)
 			m.setFlash(copiedFlash(msg.text))
-			if msg.mark != nil {
-				msg.mark.apply()
-			}
 		}
 		return m, m.flashCmd()
 

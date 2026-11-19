@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/artyomsv/quil/internal/logger"
@@ -54,11 +55,105 @@ var (
 	// tryHelpers); clipNone when clipTool is not wl-clipboard or there is no
 	// X helper.
 	clipFallback clipHelper
-	// clipDemoted is set once wl-clipboard has timed out. From then on this
-	// process goes straight to clipFallback instead of paying the timeout on
-	// every copy and paste.
-	clipDemoted atomic.Bool
+	// clipHealth is what this process has learned about its helpers.
+	clipHealth helperHealth
 )
+
+// helperRetryAfter is how long copy and paste fail at once after a helper
+// timed out with nothing left to fall back on, before it is tried again.
+const helperRetryAfter = 30 * time.Second
+
+// errHelperStalled is returned, at once, while a helper that timed out with
+// nothing to fall back on is not being retried (see helperHealth).
+var errHelperStalled = errors.New("clipboard helper timed out recently")
+
+// helperHealth is what this process has learned about its clipboard helpers
+// from their timeouts. Each timeout costs the user the whole timeout, so it
+// is paid once, not on every copy and paste.
+type helperHealth struct {
+	// demoted is set once wl-clipboard has timed out with an X helper to
+	// fall back on. From then on the process goes straight to the fallback
+	// (helperOrder).
+	demoted atomic.Bool
+
+	// The stall: set when the last helper to try timed out, so there was
+	// nothing left to fall back on (wl-clipboard on a compositor without
+	// data-control, GNOME's Mutter, that never gives it focus, with no xclip
+	// / xsel installed). Until stalledUntil every call fails at once, as it
+	// did before this host had a usable helper at all. After it, exactly one
+	// call claims the retry (retrying) while the rest keep failing at once;
+	// its timeout stalls again, any other result clears the stall.
+	//
+	// gen counts stall changes. A call records it when it starts, and only
+	// the claimed retry may clear a stall, and only one no newer than its
+	// claim: a call that started before a stall must not undo it when it
+	// finishes, since it says nothing about the helper since then.
+	mu           sync.Mutex
+	stalledUntil time.Time // zero: not stalled
+	retrying     bool
+	gen          uint64
+
+	// now is the clock; nil means time.Now. Tests set it.
+	now func() time.Time
+}
+
+func (h *helperHealth) clock() time.Time {
+	if h.now != nil {
+		return h.now()
+	}
+	return time.Now()
+}
+
+// helperCall is one tryHelpers call's standing with helperHealth.
+type helperCall struct {
+	gen   uint64
+	retry bool // this call claimed the retry after a stall
+}
+
+// begin admits a call, or refuses it while the helper is stalled or another
+// call already holds the retry.
+func (h *helperHealth) begin() (helperCall, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.stalledUntil.IsZero() {
+		return helperCall{gen: h.gen}, nil
+	}
+	if left := h.stalledUntil.Sub(h.clock()); left > 0 {
+		return helperCall{}, fmt.Errorf("clipboard: %w; next try in %s", errHelperStalled, left.Round(time.Second))
+	}
+	if h.retrying {
+		return helperCall{}, fmt.Errorf("clipboard: %w; a retry is running", errHelperStalled)
+	}
+	h.retrying = true
+	return helperCall{gen: h.gen, retry: true}, nil
+}
+
+// end records how a call admitted by begin went: err is its final error.
+func (h *helperHealth) end(c helperCall, err error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	switch {
+	case errors.Is(err, errHelperTimedOut):
+		h.stalledUntil = h.clock().Add(helperRetryAfter)
+		h.retrying = false
+		h.gen++
+		logger.Warn("clipboard: %v and there is nothing to fall back on; copy and paste fail at once for %s", err, helperRetryAfter)
+	case c.retry && c.gen == h.gen:
+		h.stalledUntil = time.Time{}
+		h.retrying = false
+		h.gen++
+	}
+}
+
+// stalledFor reports how long calls still fail at once, or 0.
+func (h *helperHealth) stalledFor() time.Duration {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.stalledUntil.IsZero() {
+		return 0
+	}
+	return max(h.stalledUntil.Sub(h.clock()), 0)
+}
 
 func detectClipTool() {
 	clipTool, clipFallback = pickClipTool(runtime.GOOS, os.Getenv, exec.LookPath)
@@ -67,7 +162,7 @@ func detectClipTool() {
 // sessionHelpers returns the helpers to try, in order.
 func sessionHelpers() []clipHelper {
 	clipToolOnce.Do(detectClipTool)
-	return helperOrder(clipTool, clipFallback, clipDemoted.Load())
+	return helperOrder(clipTool, clipFallback, clipHealth.demoted.Load())
 }
 
 // helperOrder is the order helpers are tried in: the session's helper, then
@@ -202,11 +297,11 @@ var errHelperTimedOut = errors.New("timed out")
 var errTextTooLarge = errors.New("clipboard: text larger than 10 MB")
 
 func read() (string, error) {
-	return readText(sessionHelpers(), &clipDemoted, textHelperTimeout)
+	return readText(sessionHelpers(), &clipHealth, textHelperTimeout)
 }
 
 func write(text string) error {
-	return writeText(sessionHelpers(), &clipDemoted, text, textHelperTimeout)
+	return writeText(sessionHelpers(), &clipHealth, text, textHelperTimeout)
 }
 
 // readImage returns the clipboard image as PNG bytes (#261).
@@ -231,18 +326,25 @@ func readImage() ([]byte, error) {
 		}
 		return decodeAppleScriptPNG(out)
 	}
-	return readImageFrom(hs, &clipDemoted, imageReadTimeout)
+	return readImageFrom(hs, &clipHealth, imageReadTimeout)
 }
 
 // tryHelpers runs op with each helper in turn, moving to the next only when
 // op reports that the helper itself failed (retry): it timed out, could not
 // start, or exited with an error. Never when the helper answered, even with
 // "the clipboard holds nothing of that type": an X fallback would then read
-// the stale XWayland copy that wl-clipboard is there to avoid. A
-// wl-clipboard timeout sets demoted, so later calls skip it (helperOrder).
-func tryHelpers[T any](hs []clipHelper, demoted *atomic.Bool, op func(clipHelper) (v T, retry bool, err error)) (T, error) {
+// the stale XWayland copy that wl-clipboard is there to avoid.
+//
+// Timeouts are remembered in health. A wl-clipboard timeout with a fallback
+// demotes it, so later calls skip it (helperOrder). A timeout of the last
+// helper, with nothing to fall back on, makes calls fail at once for
+// helperRetryAfter instead of each one waiting out the timeout again.
+func tryHelpers[T any](hs []clipHelper, health *helperHealth, op func(clipHelper) (v T, retry bool, err error)) (T, error) {
 	var v T
-	var err error
+	call, err := health.begin()
+	if err != nil {
+		return v, err
+	}
 	for i, h := range hs {
 		var retry bool
 		v, retry, err = op(h)
@@ -250,12 +352,15 @@ func tryHelpers[T any](hs []clipHelper, demoted *atomic.Bool, op func(clipHelper
 			break
 		}
 		next := filepath.Base(hs[i+1].paste)
-		if h.kind == clipWayland && errors.Is(err, errHelperTimedOut) && demoted.CompareAndSwap(false, true) {
+		if h.kind == clipWayland && errors.Is(err, errHelperTimedOut) && health.demoted.CompareAndSwap(false, true) {
 			logger.Warn("clipboard: %v; using %s from now on", err, next)
 		} else {
 			logger.Debug("clipboard: %v; trying %s", err, next)
 		}
 	}
+	// A timeout here came from the last helper: a timeout always asks for
+	// the next one, so the loop only stops on it when none is left.
+	health.end(call, err)
 	return v, err
 }
 
@@ -282,8 +387,8 @@ func (e *helperExitError) Unwrap() error { return e.err }
 // used to hold the paste for good are errors instead: a timeout, and more
 // than maxReadSize of text (the helper is stopped, not left blocked on a
 // full pipe).
-func readText(hs []clipHelper, demoted *atomic.Bool, timeout time.Duration) (string, error) {
-	text, err := tryHelpers(hs, demoted, func(h clipHelper) (string, bool, error) {
+func readText(hs []clipHelper, health *helperHealth, timeout time.Duration) (string, error) {
+	text, err := tryHelpers(hs, health, func(h clipHelper) (string, bool, error) {
 		argv, err := textReadArgv(h)
 		if err != nil {
 			return "", false, err
@@ -320,8 +425,8 @@ func readText(hs []clipHelper, demoted *atomic.Bool, timeout time.Duration) (str
 // pipe it inherited open (wl-copy points stdin and stdout at /dev/null but
 // keeps stderr): capturing would stall every copy for helperWaitDelay and
 // then fail it.
-func writeText(hs []clipHelper, demoted *atomic.Bool, text string, timeout time.Duration) error {
-	_, err := tryHelpers(hs, demoted, func(h clipHelper) (struct{}, bool, error) {
+func writeText(hs []clipHelper, health *helperHealth, text string, timeout time.Duration) error {
+	_, err := tryHelpers(hs, health, func(h clipHelper) (struct{}, bool, error) {
 		argv, err := textWriteArgv(h)
 		if err != nil {
 			return struct{}{}, false, err
@@ -342,8 +447,8 @@ func writeText(hs []clipHelper, demoted *atomic.Bool, text string, timeout time.
 // readImageFrom reads the clipboard image through the first helper in hs
 // that does not fail (see tryHelpers). ErrNoImage and an oversized image are
 // answers, not failures, so they never move on to the next helper.
-func readImageFrom(hs []clipHelper, demoted *atomic.Bool, timeout time.Duration) ([]byte, error) {
-	return tryHelpers(hs, demoted, func(h clipHelper) ([]byte, bool, error) {
+func readImageFrom(hs []clipHelper, health *helperHealth, timeout time.Duration) ([]byte, error) {
+	return tryHelpers(hs, health, func(h clipHelper) ([]byte, bool, error) {
 		argv, ok := imageReadArgv(h)
 		if !ok {
 			return nil, false, ErrNoImage
@@ -393,6 +498,13 @@ type helperRun struct {
 // none). It is bounded three ways: timeout, limit bytes of stdout, and
 // helperWaitDelay for the pipes after a kill. With capture false, stdout and
 // stderr go to /dev/null and limit is unused (see writeText for why).
+//
+// capture also marks a READ helper, which runs in its own process group and
+// is stopped as a group: wl-paste forks cat to read the clipboard owner's
+// pipe and waits for it, so killing wl-paste alone leaves cat blocked on an
+// owner that never writes, one more each paste. A copy helper (capture
+// false) is left alone, since the child it forks must outlive it to serve
+// the selection.
 func runHelper(timeout time.Duration, limit int, stdin io.Reader, capture bool, name string, args ...string) helperRun {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -405,6 +517,8 @@ func runHelper(timeout time.Duration, limit int, stdin io.Reader, capture bool, 
 		stderr = &cappedBuffer{limit: maxHelperStderr, cancel: cancel}
 		cmd.Stdout = stdout
 		cmd.Stderr = stderr
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Cancel = func() error { return killGroup(cmd.Process.Pid) }
 	}
 	err := cmd.Run()
 	r := helperRun{
@@ -415,6 +529,15 @@ func runHelper(timeout time.Duration, limit int, stdin io.Reader, capture bool, 
 		r.stdout, r.stderr, r.over = stdout.buf.Bytes(), stderr.buf.String(), stdout.over
 	}
 	return r
+}
+
+// killGroup kills the process group a reader helper leads (its pgid is its
+// pid, from Setpgid). A group already gone is not an error.
+func killGroup(pid int) error {
+	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return err
+	}
+	return nil
 }
 
 // runImageHelper runs one clipboard image helper and returns its stdout,

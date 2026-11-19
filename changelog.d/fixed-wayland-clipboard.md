@@ -9,11 +9,14 @@ headline: Copy and paste use the Wayland clipboard on Linux
 
   When `WAYLAND_DISPLAY` is set and wl-clipboard is installed, Quil now uses
   `wl-copy` / `wl-paste` for copy, paste and image paste. If wl-clipboard fails, the
-  copy or paste is retried with `xclip` / `xsel`. X11 sessions are unchanged, and a
-  Wayland session without wl-clipboard still uses `xclip` / `xsel`.
+  copy or paste is retried with `xclip` / `xsel`. If there is nothing to retry
+  with, a timed-out copy or paste makes the next ones fail at once for 30 seconds
+  instead of each waiting again. X11 sessions are unchanged, and a Wayland session
+  without wl-clipboard still uses `xclip` / `xsel`.
 
 - **Pasting more than 10 MB of text no longer hangs the paste on macOS and Linux.**
   Quil stopped reading at its 10 MB limit but then waited for a clipboard helper
   that was still trying to write the rest, so the paste never arrived. The helper is
   now stopped at the limit and the paste is refused. Every copy and paste helper is
-  also given 5 seconds to finish instead of being waited on forever.
+  also given 5 seconds to finish instead of being waited on forever, and a paste
+  helper that is stopped takes its own child processes with it.

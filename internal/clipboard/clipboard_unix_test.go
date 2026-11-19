@@ -9,8 +9,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
-	"sync/atomic"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -61,8 +63,9 @@ func TestRunImageHelper_OtherFailureIsAnError(t *testing.T) {
 
 func TestRunImageHelper_StalledHelperTimesOut(t *testing.T) {
 	t.Parallel()
-	// `sleep 30; :` makes sh fork sleep rather than exec it, so the
-	// grandchild keeps stdout open after sh is killed — the WaitDelay case.
+	// `sleep 30; :` makes sh fork sleep rather than exec it, so a grandchild
+	// holds stdout. The group kill stops it with sh; WaitDelay is the
+	// backstop should it ever survive.
 	start := time.Now()
 	_, err := runImageHelper(100*time.Millisecond, 1024, "sh", "-c", "sleep 30; :")
 	if err == nil || !strings.Contains(err.Error(), "timed out") {
@@ -245,16 +248,16 @@ func xclipFake(t *testing.T, script string) clipHelper {
 }
 
 func TestReadText_FallsBackWhenWaylandFails(t *testing.T) {
-	var demoted atomic.Bool
+	var health helperHealth
 	hs := []clipHelper{
 		waylandFake(t, "echo 'Failed to connect to a Wayland server' >&2; exit 1"),
 		xclipFake(t, "printf 'from-x\\n'"),
 	}
-	got, err := readText(hs, &demoted, 5*time.Second)
+	got, err := readText(hs, &health, 5*time.Second)
 	if err != nil || got != "from-x" {
 		t.Fatalf("readText = %q, %v; want %q", got, err, "from-x")
 	}
-	if demoted.Load() {
+	if health.demoted.Load() {
 		t.Error("a fast failure demoted wl-clipboard; only a timeout should")
 	}
 }
@@ -267,12 +270,12 @@ func TestReadText_NoFallbackWhenWaylandHasNoText(t *testing.T) {
 		`Clipboard content is not available as requested type "text"`,
 		"Nothing is copied",
 	} {
-		var demoted atomic.Bool
+		var health helperHealth
 		hs := []clipHelper{
 			waylandFake(t, "echo '"+msg+"' >&2; exit 1"),
 			xclipFake(t, "touch '"+marker+"'; printf stale"),
 		}
-		got, err := readText(hs, &demoted, 5*time.Second)
+		got, err := readText(hs, &health, 5*time.Second)
 		if err != nil || got != "" {
 			t.Errorf("%s: readText = %q, %v; want empty", msg, got, err)
 		}
@@ -283,20 +286,20 @@ func TestReadText_NoFallbackWhenWaylandHasNoText(t *testing.T) {
 }
 
 func TestReadText_TimeoutFallsBackAndDemotes(t *testing.T) {
-	var demoted atomic.Bool
+	var health helperHealth
 	hs := []clipHelper{
 		waylandFake(t, "sleep 30; :"),
 		xclipFake(t, "printf from-x"),
 	}
 	start := time.Now()
-	got, err := readText(hs, &demoted, 200*time.Millisecond)
+	got, err := readText(hs, &health, 200*time.Millisecond)
 	if err != nil || got != "from-x" {
 		t.Fatalf("readText = %q, %v; want %q", got, err, "from-x")
 	}
 	if d := time.Since(start); d > quick {
 		t.Errorf("returned after %s, want under %s", d, quick)
 	}
-	if !demoted.Load() {
+	if !health.demoted.Load() {
 		t.Error("a wl-clipboard timeout did not demote it")
 	}
 }
@@ -304,19 +307,19 @@ func TestReadText_TimeoutFallsBackAndDemotes(t *testing.T) {
 func TestReadText_LastHelperExitErrorReadsEmpty(t *testing.T) {
 	// Quil has always read a failing helper as an empty clipboard; the CWD
 	// dialogs would otherwise show the helper's error inline.
-	var demoted atomic.Bool
+	var health helperHealth
 	hs := []clipHelper{xclipFake(t, "echo 'Error: Can not open display' >&2; exit 1")}
-	got, err := readText(hs, &demoted, 5*time.Second)
+	got, err := readText(hs, &health, 5*time.Second)
 	if err != nil || got != "" {
 		t.Fatalf("readText = %q, %v; want empty and no error", got, err)
 	}
 }
 
 func TestReadText_StalledHelperIsAnError(t *testing.T) {
-	var demoted atomic.Bool
+	var health helperHealth
 	hs := []clipHelper{xclipFake(t, "sleep 30; :")}
 	start := time.Now()
-	_, err := readText(hs, &demoted, 100*time.Millisecond)
+	_, err := readText(hs, &health, 100*time.Millisecond)
 	if !errors.Is(err, errHelperTimedOut) {
 		t.Fatalf("err = %v, want a timeout", err)
 	}
@@ -328,10 +331,10 @@ func TestReadText_StalledHelperIsAnError(t *testing.T) {
 func TestReadText_OversizedTextStopsTheHelper(t *testing.T) {
 	// Before the cap stopped the helper, reading stopped at maxReadSize and
 	// Wait then blocked forever on a helper stuck writing to a full pipe.
-	var demoted atomic.Bool
+	var health helperHealth
 	hs := []clipHelper{xclipFake(t, "exec yes")}
 	start := time.Now()
-	_, err := readText(hs, &demoted, 30*time.Second)
+	_, err := readText(hs, &health, 30*time.Second)
 	if !errors.Is(err, errTextTooLarge) {
 		t.Fatalf("err = %v, want errTextTooLarge", err)
 	}
@@ -341,33 +344,41 @@ func TestReadText_OversizedTextStopsTheHelper(t *testing.T) {
 }
 
 func TestWriteText_FallsBackWhenWaylandFails(t *testing.T) {
-	var demoted atomic.Bool
+	var health helperHealth
 	dir := t.TempDir()
 	wlOut, xOut := filepath.Join(dir, "wl"), filepath.Join(dir, "x")
 	hs := []clipHelper{
 		waylandFake(t, "cat >'"+wlOut+"'; exit 1"),
 		xclipFake(t, "cat >'"+xOut+"'"),
 	}
-	if err := writeText(hs, &demoted, "copied", 5*time.Second); err != nil {
+	if err := writeText(hs, &health, "copied", 5*time.Second); err != nil {
 		t.Fatalf("writeText: %v", err)
 	}
-	if b, _ := os.ReadFile(xOut); string(b) != "copied" {
+	b, err := os.ReadFile(xOut)
+	if err != nil {
+		t.Fatalf("read what the fallback wrote: %v", err)
+	}
+	if string(b) != "copied" {
 		t.Errorf("fallback got %q, want %q", b, "copied")
 	}
 }
 
 func TestWriteText_NoFallbackWhenWaylandSucceeds(t *testing.T) {
-	var demoted atomic.Bool
+	var health helperHealth
 	dir := t.TempDir()
 	wlOut, xOut := filepath.Join(dir, "wl"), filepath.Join(dir, "x")
 	hs := []clipHelper{
 		waylandFake(t, "cat >'"+wlOut+"'"),
 		xclipFake(t, "cat >'"+xOut+"'"),
 	}
-	if err := writeText(hs, &demoted, "copied", 5*time.Second); err != nil {
+	if err := writeText(hs, &health, "copied", 5*time.Second); err != nil {
 		t.Fatalf("writeText: %v", err)
 	}
-	if b, _ := os.ReadFile(wlOut); string(b) != "copied" {
+	b, err := os.ReadFile(wlOut)
+	if err != nil {
+		t.Fatalf("read what the wl-copy wrote: %v", err)
+	}
+	if string(b) != "copied" {
 		t.Errorf("wl-copy got %q, want %q", b, "copied")
 	}
 	if _, err := os.Stat(xOut); err == nil {
@@ -379,10 +390,10 @@ func TestWriteText_BackgroundChildDoesNotStallTheCopy(t *testing.T) {
 	// wl-copy and xclip leave a child behind serving the selection, and
 	// wl-copy's keeps stderr. A captured stderr would hold the copy for
 	// helperWaitDelay and then fail it.
-	var demoted atomic.Bool
+	var health helperHealth
 	hs := []clipHelper{waylandFake(t, "cat >/dev/null; sleep 5 & exit 0")}
 	start := time.Now()
-	if err := writeText(hs, &demoted, "copied", 5*time.Second); err != nil {
+	if err := writeText(hs, &health, "copied", 5*time.Second); err != nil {
 		t.Fatalf("writeText: %v", err)
 	}
 	if d := time.Since(start); d >= helperWaitDelay {
@@ -392,12 +403,12 @@ func TestWriteText_BackgroundChildDoesNotStallTheCopy(t *testing.T) {
 
 func TestReadImageFrom_Fallback(t *testing.T) {
 	png := "\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
-	var demoted atomic.Bool
+	var health helperHealth
 	hs := []clipHelper{
 		waylandFake(t, "echo 'Failed to connect to a Wayland server' >&2; exit 1"),
 		xclipFake(t, "printf '"+png+"'"),
 	}
-	got, err := readImageFrom(hs, &demoted, 5*time.Second)
+	got, err := readImageFrom(hs, &health, 5*time.Second)
 	if err != nil || !bytes.HasPrefix(got, pngMagic) {
 		t.Fatalf("readImageFrom = %q, %v; want the fallback's PNG", got, err)
 	}
@@ -407,10 +418,224 @@ func TestReadImageFrom_Fallback(t *testing.T) {
 		waylandFake(t, `echo 'Clipboard content is not available as requested type "image/png"' >&2; exit 1`),
 		xclipFake(t, "touch '"+marker+"'; printf '"+png+"'"),
 	}
-	if _, err := readImageFrom(hs, &demoted, 5*time.Second); !errors.Is(err, ErrNoImage) {
+	if _, err := readImageFrom(hs, &health, 5*time.Second); !errors.Is(err, ErrNoImage) {
 		t.Errorf("err = %v, want ErrNoImage", err)
 	}
 	if _, err := os.Stat(marker); err == nil {
 		t.Error("the X fallback ran after wl-paste reported no image")
+	}
+}
+
+// pidAlive reports whether pid still exists, waiting up to 2s for it to go:
+// a killed process lingers as a zombie until its new parent reaps it.
+func pidAlive(pid int) bool {
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
+			return false
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return true
+}
+
+// readPID reads the pid a fake helper wrote to path.
+func readPID(t *testing.T, path string) int {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read child pid: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		t.Fatalf("child pid %q: %v", b, err)
+	}
+	return pid
+}
+
+// wl-paste forks cat to read the clipboard owner's pipe and waits for it.
+// When the owner never writes, a timeout must stop cat too, not only
+// wl-paste: a cat left blocked is one more stray process per paste.
+func TestRead_TimeoutKillsTheReadersChildren(t *testing.T) {
+	for name, read := range map[string]func(clipHelper) error{
+		"text": func(h clipHelper) error {
+			var health helperHealth
+			_, err := readText([]clipHelper{h}, &health, 200*time.Millisecond)
+			return err
+		},
+		"image": func(h clipHelper) error {
+			var health helperHealth
+			_, err := readImageFrom([]clipHelper{h}, &health, 200*time.Millisecond)
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pidFile := filepath.Join(t.TempDir(), "child")
+			// The child stands in for cat: blocked, holding nothing we wait on.
+			h := waylandFake(t, "sleep 30 </dev/null >/dev/null 2>&1 & echo $! >'"+pidFile+"'; wait")
+			start := time.Now()
+			if err := read(h); !errors.Is(err, errHelperTimedOut) {
+				t.Fatalf("err = %v, want a timeout", err)
+			}
+			if d := time.Since(start); d > quick {
+				t.Errorf("returned after %s, want under %s", d, quick)
+			}
+			pid := readPID(t, pidFile)
+			if pidAlive(pid) {
+				_ = syscall.Kill(pid, syscall.SIGKILL) // not to leak it past the test
+				t.Errorf("the reader's child %d outlived the timeout", pid)
+			}
+		})
+	}
+}
+
+// A copy helper's child serves the selection after the helper exits, so
+// nothing may stop it: only reads are run and killed as a group.
+func TestWriteText_CopyHelpersChildOutlivesIt(t *testing.T) {
+	var health helperHealth
+	pidFile := filepath.Join(t.TempDir(), "child")
+	hs := []clipHelper{waylandFake(t, "cat >/dev/null; sleep 30 </dev/null >/dev/null 2>&1 & echo $! >'"+pidFile+"'; exit 0")}
+	if err := writeText(hs, &health, "copied", 5*time.Second); err != nil {
+		t.Fatalf("writeText: %v", err)
+	}
+	pid := readPID(t, pidFile)
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+	if err := syscall.Kill(pid, 0); err != nil {
+		t.Errorf("the copy helper's child %d is gone (%v); it must keep serving the selection", pid, err)
+	}
+}
+
+// With nothing to fall back on (wl-clipboard on GNOME without xclip / xsel),
+// a timeout must not be paid again on every copy and paste: calls fail at
+// once for helperRetryAfter, then one tries again.
+func TestTimeoutWithNoFallback_FailsFastThenRetries(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	health := helperHealth{now: func() time.Time { return now }}
+	runs := filepath.Join(t.TempDir(), "runs")
+	stalled := []clipHelper{waylandFake(t, "echo run >>'"+runs+"'; sleep 30; :")}
+	countRuns := func() int {
+		b, _ := os.ReadFile(runs) // absent until the first run: zero runs
+		return strings.Count(string(b), "run")
+	}
+
+	if _, err := readText(stalled, &health, 100*time.Millisecond); !errors.Is(err, errHelperTimedOut) {
+		t.Fatalf("first read: err = %v, want a timeout", err)
+	}
+	start := time.Now()
+	_, err := readText(stalled, &health, 100*time.Millisecond)
+	if !errors.Is(err, errHelperStalled) {
+		t.Fatalf("second read: err = %v, want errHelperStalled", err)
+	}
+	if err := writeText(stalled, &health, "x", 100*time.Millisecond); !errors.Is(err, errHelperStalled) {
+		t.Errorf("a copy during the stall: err = %v, want errHelperStalled", err)
+	}
+	if d := time.Since(start); d > 50*time.Millisecond || countRuns() != 1 {
+		t.Errorf("stalled calls took %s and ran the helper %d times; want at once and once", d, countRuns())
+	}
+
+	now = now.Add(helperRetryAfter + time.Second)
+	if _, err := readText(stalled, &health, 100*time.Millisecond); !errors.Is(err, errHelperTimedOut) || countRuns() != 2 {
+		t.Fatalf("after %s: err = %v, runs = %d; want one fresh try that times out", helperRetryAfter, err, countRuns())
+	}
+
+	now = now.Add(helperRetryAfter + time.Second)
+	working := []clipHelper{waylandFake(t, "printf back")}
+	if got, err := readText(working, &health, 5*time.Second); err != nil || got != "back" {
+		t.Fatalf("recovered read = %q, %v", got, err)
+	}
+	if left := health.stalledFor(); left != 0 {
+		t.Errorf("a success left calls stalled for %s", left)
+	}
+}
+
+// waitForFile waits for a fake helper to create path, which is how a test
+// knows the helper has started rather than guessing with a sleep.
+func waitForFile(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("helper never created %s", path)
+}
+
+// When the stall expires, exactly one of the calls arriving together may try
+// the helper again; the rest keep failing at once until it reports back.
+func TestStall_OnlyOneCallRetriesAfterItExpires(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	health := helperHealth{now: func() time.Time { return now }}
+	runs := filepath.Join(t.TempDir(), "runs")
+	stalled := []clipHelper{waylandFake(t, "echo run >>'"+runs+"'; sleep 30; :")}
+	countRuns := func() int {
+		b, _ := os.ReadFile(runs) // absent until the first run: zero runs
+		return strings.Count(string(b), "run")
+	}
+	if _, err := readText(stalled, &health, 100*time.Millisecond); !errors.Is(err, errHelperTimedOut) {
+		t.Fatalf("setup: err = %v, want a timeout", err)
+	}
+	now = now.Add(helperRetryAfter + time.Second)
+
+	const callers = 6
+	errs := make(chan error, callers)
+	var wg sync.WaitGroup
+	for range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := readText(stalled, &health, 300*time.Millisecond)
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	var timedOut, refused int
+	for err := range errs {
+		switch {
+		case errors.Is(err, errHelperTimedOut):
+			timedOut++
+		case errors.Is(err, errHelperStalled):
+			refused++
+		default:
+			t.Errorf("unexpected err %v", err)
+		}
+	}
+	if timedOut != 1 || refused != callers-1 || countRuns() != 2 {
+		t.Errorf("retried %d, refused %d, helper runs %d; want 1 retry, %d refused, 2 runs", timedOut, refused, countRuns(), callers-1)
+	}
+	if health.stalledFor() == 0 {
+		t.Error("the failed retry did not stall again")
+	}
+}
+
+// A call that started before another call's timeout set the stall says
+// nothing about the helper since then, so finishing must not clear it.
+func TestStall_ACallStartedEarlierCannotClearIt(t *testing.T) {
+	var health helperHealth
+	dir := t.TempDir()
+	started, release := filepath.Join(dir, "started"), filepath.Join(dir, "release")
+	// Slow but working: it waits for the test's go-ahead, then answers.
+	slow := []clipHelper{waylandFake(t, "touch '"+started+"'; while [ ! -e '"+release+"' ]; do sleep 0.01; done; printf ok")}
+	stalled := []clipHelper{waylandFake(t, "sleep 30; :")}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := readText(slow, &health, 10*time.Second)
+		done <- err
+	}()
+	waitForFile(t, started) // the slow call has begun, before any stall
+	if _, err := readText(stalled, &health, 100*time.Millisecond); !errors.Is(err, errHelperTimedOut) {
+		t.Fatalf("stalling call: err = %v, want a timeout", err)
+	}
+	if err := os.WriteFile(release, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("slow call: %v", err)
+	}
+	if health.stalledFor() == 0 {
+		t.Error("a call that began before the stall cleared it when it finished")
 	}
 }

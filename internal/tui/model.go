@@ -1381,6 +1381,11 @@ type Model struct {
 	// and the status-bar renderer checks flashUntil on every frame.
 	flashText  string
 	flashUntil time.Time
+	// copyResultSeq is the newest clipboard write whose result Update has
+	// applied, and copiedSel the selection marked copied by it, if any (see
+	// takeCopyResult, clipboardChanged).
+	copyResultSeq uint64
+	copiedSel     *Selection
 	// flashErr marks the live flash as a refusal or failure (setErrorFlash):
 	// it lasts longer, and a routine setFlash does not replace it.
 	flashErr bool
@@ -2617,47 +2622,35 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 			return m, cmd
 		}
 		// Right-click: copy the active selection to the clipboard. While
-		// notes mode is on, the editor's selection takes priority.
+		// notes mode is on, the editor's selection takes priority. Notes
+		// mode has no context menu, so right-click there copies even with
+		// copy_on_select on.
 		if msg.Button == tea.MouseRight {
 			if m.notesMode && m.notesEditor.HasSelection() {
 				text := m.notesEditor.ExtractSelection()
 				m.notesEditor.ClearSelection()
-				if text != "" {
-					return m, func() tea.Msg {
-						if err := clipboard.Write(text); err != nil {
-							log.Printf("notes clipboard write: %v", err)
-						}
-						return nil
-					}
-				}
-				return m, nil
+				return m, copyTextCmd(text, "notes")
 			}
 			if m.selection != nil {
-				tab := m.activeTabModel()
-				if tab != nil {
-					if pane := tab.ActivePaneModel(); pane != nil {
-						text := copyText(pane, m.selection, m.paneIsAgent(pane))
-						m.selection = nil
-						if text != "" {
-							return m, func() tea.Msg {
-								if err := clipboardWriteText(text); err != nil {
-									log.Printf("pane clipboard write: %v", err)
-								}
-								return nil
-							}
-						}
-						return m, nil
-					}
+				// A selection copy_on_select already copied is dropped and
+				// the menu below opens instead of copying it a second time,
+				// but only when that menu will open. Any other selection (a
+				// keyboard one, or one in notes mode or mid-rename, where no
+				// menu opens) is copied as before, never dropped uncopied.
+				if m.cfg.UI.CopyOnSelect && m.selection.copied && m.paneMenuAllowed() {
+					m.selection = nil
+				} else {
+					text := m.paneSelectionText()
+					m.selection = nil
+					return m, copyTextCmd(text, "pane")
 				}
-				m.selection = nil
-				return m, nil
 			}
 			// No selection anywhere: open the pane context menu for the
 			// pane under the cursor, or the tab menu for the tab bar.
 			// Suppressed while a modal dialog, rename edit, or notes mode
 			// owns input (the lazygit overlay and sidebar swallows already
 			// returned above).
-			if m.dialog == dialogNone && !m.notesMode && !m.renaming && !m.renamingPane {
+			if m.paneMenuAllowed() {
 				if msg.Y == 0 {
 					// The sidebar's own columns at row 0 are already
 					// swallowed above; hitTestTab answers -1 for the scroll
@@ -2732,7 +2725,7 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 						(clicks == 3 && m.notesEditor.SelectSentenceAt(row, col)) {
 						m.selection = nil
 						m.notesPaneFocused = false
-						return m, nil
+						return m, m.copyOnSelectCmd(m.notesEditor.ExtractSelection(), "notes")
 					}
 					m.notesMouseDown = true
 					m.mouseStartX = msg.X
@@ -2798,6 +2791,7 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 				if (clicks == 2 && m.selectWordAt(msg.X, msg.Y)) ||
 					(clicks == 3 && m.selectSentenceAt(msg.X, msg.Y)) {
 					m.mouseDown = false
+					return m, m.copyPaneSelectionOnSelect()
 				}
 			}
 		}
@@ -2936,8 +2930,13 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 
 	case tea.MouseReleaseMsg:
 		if m.viewerOwnsMouse() {
-			// The selection stays — release only ends the drag.
+			// The selection stays; release only ends the drag, and copies
+			// it when copy_on_select is on.
+			wasDragging := m.viewerMouseDown
 			m.viewerMouseDown = false
+			if e := m.tomlEditor; wasDragging && e.Sel != nil && !e.Sel.IsEmpty() {
+				return m, m.copyOnSelectCmd(editorExtractText(e.Lines, e.Sel), "viewer")
+			}
 			return m, nil
 		}
 		if m.modalSwallowsMouse() {
@@ -2987,7 +2986,7 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 		}
 		if m.notesMouseDown {
 			m.clearDragState()
-			return m, nil
+			return m, m.copyOnSelectCmd(m.notesEditor.ExtractSelection(), "notes")
 		}
 		if m.mouseDown {
 			m.mouseDown = false
@@ -3006,6 +3005,12 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 						tab.ActivePane = pane.ID
 					}
 				}
+			} else if m.selection.Anchor != m.selection.Cursor {
+				// A drag made a selection: copy_on_select copies it now. A
+				// "drag" that never left the cell it was pressed in is a
+				// click with pointer jitter; copying its one character
+				// would replace the clipboard on what was meant as a click.
+				return m, m.copyPaneSelectionOnSelect()
 			}
 		}
 		return m, nil
@@ -3908,10 +3913,29 @@ func (m Model) Update(msg tea.Msg) (retModel tea.Model, retCmd tea.Cmd) {
 
 	case pathCopiedMsg:
 		// A clipboard write result, not an IPC response, so no re-arm.
+		if !m.takeCopyResult(msg.seq, msg.superseded) {
+			return m, nil
+		}
 		if msg.err != nil {
 			m.setErrorFlash("could not copy path: " + msg.err.Error())
 		} else {
+			m.clipboardChanged(nil)
 			m.setFlash("Copied " + msg.path)
+		}
+		return m, m.flashCmd()
+
+	case textCopiedMsg:
+		// A clipboard write result, not an IPC response, so no re-arm.
+		// A superseded or out-of-order result neither flashes nor marks:
+		// the newer copy reports itself (takeCopyResult).
+		if !m.takeCopyResult(msg.seq, msg.superseded) {
+			return m, nil
+		}
+		if msg.err != nil {
+			m.setErrorFlash("could not copy: " + msg.err.Error())
+		} else {
+			m.clipboardChanged(msg.mark)
+			m.setFlash(copiedFlash(msg.text))
 		}
 		return m, m.flashCmd()
 
@@ -6380,24 +6404,9 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if seqAction == "" && m.selection != nil && (key == "enter" || key == "super+c") {
-		tab := m.activeTabModel()
-		if tab != nil {
-			if pane := tab.ActivePaneModel(); pane != nil {
-				text := copyText(pane, m.selection, m.paneIsAgent(pane))
-				m.selection = nil
-				if text != "" {
-					return m, func() tea.Msg {
-						if err := clipboardWriteText(text); err != nil {
-							log.Printf("pane clipboard write: %v", err)
-						}
-						return nil
-					}
-				}
-				return m, nil
-			}
-		}
+		text := m.paneSelectionText()
 		m.selection = nil
-		return m, nil
+		return m, copyTextCmd(text, "pane")
 	}
 
 	// Plugin-declared raw key passthrough (e.g., claude-code consumes shift+tab
@@ -8637,6 +8646,17 @@ func (m Model) renderTOMLEditorFullScreen() string {
 	switch {
 	case e.SaveErr != "":
 		status = fmt.Sprintf(" \x1b[31mError: %s\x1b[0m\x1b[48;5;236m\x1b[38;5;250m    Ln %d, Col %d", e.SaveErr, e.CursorRow+1, e.CursorCol+1)
+	case m.flashText != "" && m.clock().Before(m.flashUntil):
+		// The main status bar, which shows flashes, is not drawn while this
+		// screen is up, so a copy made here ("Copied 3 lines", or why it
+		// failed) would otherwise say nothing. The flash takes the hint's
+		// place until it expires.
+		pos := fmt.Sprintf("    Ln %d, Col %d", e.CursorRow+1, e.CursorCol+1)
+		flash := truncateToWidth(m.flashText, max(m.width-len(pos)-1, 1))
+		if m.flashErr {
+			flash = "\x1b[31m" + flash + "\x1b[0m\x1b[48;5;236m\x1b[38;5;250m"
+		}
+		status = " " + flash + pos
 	case e.Sel != nil && !e.Sel.IsEmpty():
 		if e.ReadOnly {
 			status = fmt.Sprintf(" Enter copy  Esc clear    Ln %d, Col %d", e.CursorRow+1, e.CursorCol+1)
@@ -10755,6 +10775,7 @@ func (m Model) handleSelectionKey(key string) (tea.Model, tea.Cmd) {
 	// Calculate delta from previous cursor to new cursor
 	prevCur := m.selection.Cursor
 	m.selection.Cursor = cur
+	m.selection.copied = false // the clipboard no longer holds what is selected
 
 	// Move shell cursor horizontally when staying on the same line.
 	// Cross-line selection is visual only — sending Up/Down to PTY

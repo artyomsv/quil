@@ -11,6 +11,30 @@ version section here and deletes them.
 
 ## [Unreleased]
 
+## [1.101.0] - 2026-11-20
+
+### Added
+- **Copy on select, as an opt-in.** Set `[ui] copy_on_select = true`, or turn on
+  F1 → Settings → Copy on select, and a mouse selection is copied as soon as it is
+  made: on releasing a drag in panes, the notes editor and the read-only viewer,
+  and on a double- or triple-click in panes and the notes editor. Right-click on a
+  pane then opens the context menu instead of copying that selection a second
+  time; a selection it did not copy, such as a keyboard one, right-click still
+  copies. Off by default, so select and then right-click or `Enter` works as before.
+
+### Changed
+- **Copying text now says so in the status bar.** `Copied 3 lines` or `Copied 12
+  characters`, or the reason a copy failed, the way copying a pane's path already
+  did. A copy used to be silent, so a failed one looked like a successful one. The
+  full-screen viewer and config editor show it in their own status line, since
+  they cover the main status bar.
+
+### Fixed
+- **Copying a selection made in a pane that does not have focus now copies that
+  pane's text.** Dragging across a pane selects there without moving focus, but
+  right-click and `Enter` copied the same rows from the focused pane instead, so
+  the clipboard held text that was never highlighted.
+
 ## [1.100.1] - 2026-11-12
 
 ### Fixed

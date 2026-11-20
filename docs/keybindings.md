@@ -250,7 +250,8 @@ If the clipboard has no text but contains an image, Quil saves a PNG under `~/.q
 | `Shift+Home` / `Shift+End` | Extend to line start / end |
 | `Ctrl+A` (in editors) | Select all |
 | `Enter` | Copy selection to clipboard |
-| Mouse click + drag | Visual selection (terminals + editors) |
+| Right-click | Copy the selection to the clipboard (with no selection, opens the context menu). With `[ui] copy_on_select = true`, a pane selection it already copied is dropped and the context menu opens instead |
+| Mouse click + drag | Visual selection (terminals + editors). With `[ui] copy_on_select = true`, releasing the drag copies it |
 | Double-click | Select the word (paths and URLs stay whole) |
 | Triple-click | Select the sentence, across wrapped rows |
 | Click + drag a split border | Resize the adjacent panes (10×4 minimum; PTY resize applied on release) |

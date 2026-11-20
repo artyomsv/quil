@@ -280,6 +280,16 @@ func settingsFields() []settingsField {
 			set:   func(m *Model, v string) { m.applySetting("ui.page_scroll_lines", v) },
 		},
 		{
+			// Applies LIVE, like Unfocused dim: the mouse handlers read
+			// m.cfg.UI.CopyOnSelect on every selection.
+			label: "Copy on select",
+			get:   func(m *Model) string { return boolStr(m.cfg.UI.CopyOnSelect) },
+			set: func(m *Model, _ string) {
+				m.applySetting("ui.copy_on_select", strconv.FormatBool(!m.cfg.UI.CopyOnSelect))
+			},
+			isBool: true,
+		},
+		{
 			// The one Settings row that applies LIVE. The comment on
 			// settingsFields says changes take effect on the next launch,
 			// which is right for the log level — its file handle lives in

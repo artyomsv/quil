@@ -20,10 +20,11 @@ func Write(text string) error {
 
 // ReadImage returns the current clipboard image encoded as PNG bytes. If the
 // clipboard does not contain an image in a supported format, it returns
-// ErrNoImage. Where no image reader is available (Linux without xclip), it
-// also returns ErrNoImage.
+// ErrNoImage. Where no image reader is available (Linux with only xsel, or
+// no helper at all), it also returns ErrNoImage.
 //
-// Windows reads CF_DIBV5/CF_DIB, macOS runs osascript, Linux runs xclip. It
+// Windows reads CF_DIBV5/CF_DIB, macOS runs osascript, Linux runs wl-paste
+// in a Wayland session with wl-clipboard installed and xclip otherwise. It
 // began as a workaround for the Windows-specific upstream bug in claude-code
 // where its own clipboard image reader fails to see images that are
 // verifiably present on the clipboard (see anthropics/claude-code#32791).

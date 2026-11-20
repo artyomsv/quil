@@ -42,8 +42,8 @@ type pathCopiedMsg struct {
 
 // copyPanePath writes the pane's path (see paneCopyPath) to the clipboard.
 // The path is read here, on the Update goroutine; only the write runs in the
-// Cmd, since it can shell out (pbcopy, xclip). It takes its place in the
-// clipboard write order like every text copy (copyTicket).
+// Cmd, since it can shell out (pbcopy, wl-copy, xclip). It takes its place
+// in the clipboard write order like every text copy (copyTicket).
 func (m Model) copyPanePath(pane *PaneModel) tea.Cmd {
 	_, path := paneCopyPath(pane)
 	if path == "" {

@@ -426,12 +426,43 @@ func TestReadImageFrom_Fallback(t *testing.T) {
 	}
 }
 
-// pidAlive reports whether pid still exists, waiting up to 2s for it to go:
-// a killed process lingers as a zombie until its new parent reaps it.
+// processRunning reports whether pid is a process that has not exited.
+//
+// A killed process stays a zombie until its parent reaps it, and kill(pid, 0)
+// still succeeds on a zombie. An orphan is reparented to PID 1, which reaps
+// it at once on a normal host, but scripts/dev.sh runs go test in a container
+// without --init, where PID 1 is the go tool and never reaps: there a killed
+// child stays a zombie for good. So on Linux the state is read from /proc,
+// and a zombie counts as gone. Elsewhere (macOS, where launchd reaps)
+// kill(pid, 0) answers.
+func processRunning(pid int) bool {
+	if _, err := os.Stat("/proc/self/stat"); err != nil {
+		return syscall.Kill(pid, 0) == nil
+	}
+	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if err != nil {
+		return false // no such process
+	}
+	// The state follows the command name, which is in parentheses and may
+	// itself contain spaces or parentheses: read it after the last ')'.
+	stat := string(b)
+	i := strings.LastIndexByte(stat, ')')
+	if i < 0 || i+2 >= len(stat) {
+		return true
+	}
+	switch stat[i+2] {
+	case 'Z', 'X', 'x': // zombie, dead
+		return false
+	}
+	return true
+}
+
+// pidAlive reports whether pid is still running, waiting up to 2s for it to
+// go: a kill is not instant.
 func pidAlive(pid int) bool {
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
+		if !processRunning(pid) {
 			return false
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -500,8 +531,8 @@ func TestWriteText_CopyHelpersChildOutlivesIt(t *testing.T) {
 	}
 	pid := readPID(t, pidFile)
 	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
-	if err := syscall.Kill(pid, 0); err != nil {
-		t.Errorf("the copy helper's child %d is gone (%v); it must keep serving the selection", pid, err)
+	if !processRunning(pid) {
+		t.Errorf("the copy helper's child %d is gone; it must keep serving the selection", pid)
 	}
 }
 

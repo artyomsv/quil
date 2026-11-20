@@ -81,8 +81,12 @@ func TestCopyPath_ThroughTheMenuWritesTheClipboard(t *testing.T) {
 	if got := next.(Model).flashText; got != "Copied /w/feat-a" {
 		t.Errorf("flash = %q after a copy", got)
 	}
+	// A second copy, through the menu again, whose write fails. Built for
+	// real rather than as a literal: results carry their place in the copy
+	// order, and a hand-made one would read as older than the first.
 	writeErr = errors.New("no clipboard tool")
-	next, _ = next.(Model).Update(pathCopiedMsg{path: "/w/feat-a", err: writeErr})
+	_, cmd = next.(Model).executeCtxMenuItem(ctxMenuItem{id: ctxActCopyPath, label: "Copy worktree path", enabled: true})
+	next, _ = next.(Model).Update(cmd())
 	if nm := next.(Model); !nm.flashErr {
 		t.Errorf("a failed copy did not raise an error flash (flash %q)", nm.flashText)
 	}

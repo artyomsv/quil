@@ -19,6 +19,12 @@ type Selection struct {
 	PaneID string
 	Anchor SelectionAnchor // where selection started (fixed)
 	Cursor SelectionAnchor // where selection extends to (moves with keys/mouse)
+	// copied is set when copy_on_select copied this selection as the mouse
+	// made it, and cleared when the keyboard changes it. Right-click opens
+	// the context menu only for a copied selection; any other one (a
+	// keyboard selection, say) it still copies, so it is never dropped
+	// uncopied.
+	copied bool
 }
 
 // Normalized returns start/end ordered top-to-bottom, left-to-right.

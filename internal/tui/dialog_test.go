@@ -28,6 +28,7 @@ func TestSettingsFields_LabelsAndInitialValues(t *testing.T) {
 		"Scrollback lines",
 		"Mouse scroll lines",
 		"Page scroll lines",
+		"Copy on select",
 		"Sidebar width",
 		"Unfocused dim",
 		"Unfocused dim level",

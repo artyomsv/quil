@@ -289,7 +289,7 @@ The suffix behaviour matters more here than for the pin: the marked pane is usua
 
 ### Text selection & clipboard
 
-Select text in terminal panes with `Shift+Arrow` (character), `Ctrl+Shift+Arrow` (word jump), `Ctrl+Alt+Shift+Arrow` (3-word jump), or mouse click+drag. Enter copies the selection to the system clipboard. `Ctrl+V` pastes with bracketed-paste sequences so the receiving shell knows the text came from clipboard.
+Select text in terminal panes with `Shift+Arrow` (character), `Ctrl+Shift+Arrow` (word jump), `Ctrl+Alt+Shift+Arrow` (3-word jump), or mouse click+drag. Enter or right-click copies the selection to the system clipboard, and the status bar confirms it (`Copied 3 lines`) or says why it could not. To copy as soon as a mouse selection is made instead, as most terminals do, set `[ui] copy_on_select = true` or turn on **F1 → Settings → Copy on select**; right-click on a pane then opens the context menu instead of copying that selection a second time. `Ctrl+V` pastes with bracketed-paste sequences so the receiving shell knows the text came from clipboard.
 
 Platform-native clipboard: Win32 `GetClipboardData` / `SetClipboardData` on Windows, `pbpaste` / `pbcopy` on macOS, `xclip` / `xsel` on Linux.
 

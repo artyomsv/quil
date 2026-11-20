@@ -504,6 +504,14 @@ type UIConfig struct {
 	// Alt+Down inside the F1 → log viewer. 0 falls back to the default 40.
 	LogViewerPageLines int  `toml:"log_viewer_page_lines"`
 	ShowDisclaimer     bool `toml:"show_disclaimer"`
+	// CopyOnSelect copies a mouse selection to the clipboard as soon as it
+	// is made, as most terminals do: on drag release in panes, the notes
+	// editor and the read-only viewer, and on double- or triple-click in
+	// panes and the notes editor. Off by default so the established gesture
+	// (select, then right-click or Enter) is not changed under anyone. With
+	// it on, right-click on a pane drops a selection it already copied and
+	// opens the context menu; any other selection it still copies.
+	CopyOnSelect bool `toml:"copy_on_select"`
 	// SidebarOpen/SidebarWidth control the project sidebar (a reserved left
 	// column listing projects and the active project's panes). These are
 	// screen properties, not session ones — client config, never

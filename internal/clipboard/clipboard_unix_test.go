@@ -530,7 +530,12 @@ func TestWriteText_CopyHelpersChildOutlivesIt(t *testing.T) {
 		t.Fatalf("writeText: %v", err)
 	}
 	pid := readPID(t, pidFile)
-	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+	t.Cleanup(func() {
+		// ESRCH: the child is already gone, which is fine at teardown.
+		if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+			t.Errorf("stop the copy helper's child %d: %v", pid, err)
+		}
+	})
 	if !processRunning(pid) {
 		t.Errorf("the copy helper's child %d is gone; it must keep serving the selection", pid)
 	}

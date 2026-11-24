@@ -98,8 +98,9 @@ func TestExecRunner_CancelStopsWhatTheCommandStarted(t *testing.T) {
 }
 
 // A command that succeeds is not failed for a child it left running that
-// still holds the output: Run stops reading, says so, and succeeds. The child
-// is the command's business and is left alone.
+// still holds the output: Run stops reading and succeeds, and w holds exactly
+// what the command wrote (callers parse it). The child is the command's
+// business and is left alone.
 func TestExecRunner_SuccessWithAChildStillHoldingTheOutput(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "child")
 	var out bytes.Buffer
@@ -113,10 +114,29 @@ func TestExecRunner_SuccessWithAChildStillHoldingTheOutput(t *testing.T) {
 	if d := time.Since(start); d > runWaitDelay+time.Second {
 		t.Errorf("returned after %s, want about runWaitDelay (%s)", d, runWaitDelay)
 	}
-	if got := out.String(); !strings.HasPrefix(got, "done\n") || !strings.Contains(got, "no longer reading it") {
-		t.Errorf("output %q, want the command's output and a note that reading stopped", got)
+	if got := out.String(); got != "done\n" {
+		t.Errorf("output %q, want exactly what the command wrote", got)
 	}
 	if !processRunning(pid) {
 		t.Error("the child of a command that succeeded was stopped")
+	}
+}
+
+// A probe whose sbx leaves a child holding stdout still gets an answer it can
+// parse: Run adds nothing to what it captured. Driven through the real
+// ListSandboxes, whose JSON a trailing note would have broken.
+func TestListSandboxes_ParsesWhenSbxLeavesAChildHoldingTheOutput(t *testing.T) {
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "child")
+	bin := filepath.Join(dir, "sbx")
+	script := "#!/bin/sh\nsleep 30 & echo $! >'" + pidFile + "'\nprintf '[{\"name\":\"quil-a\",\"status\":\"running\"}]\\n'\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	c := Client{Bin: bin, Runner: ExecRunner{}}
+	got, err := c.ListSandboxes(context.Background())
+	t.Cleanup(func() { _ = syscall.Kill(readChildPID(t, pidFile), syscall.SIGKILL) })
+	if err != nil || len(got) != 1 || got[0].Name != "quil-a" {
+		t.Fatalf("ListSandboxes = %+v, %v; want the one sandbox", got, err)
 	}
 }

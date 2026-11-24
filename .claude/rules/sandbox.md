@@ -762,7 +762,7 @@ earlier parse could come from a changed file restored before the digest read.
 `Ensure` runs `prepare_host` from a private 0700 copy of the script
 (`hostArgv`), the script chosen from the APPROVED snapshot rather than
 the disk (a script removed after approval was skipped, its repository path
-passed on, and a file put back in time ran; every step goes through `ExecRunner.Run`, whose budget is real: `WaitDelay` (`runWaitDelay`) bounds the wait for a child still holding the output pipe, on Unix a cancel kills the step's whole process group (`stopTreeOnCancel`; Windows kills only the command), and a step that exits 0 but leaves such a child succeeds with a note in its output), `recheck`s (the host step must not change a pinned file), then
+passed on, and a file put back in time ran; every step goes through `ExecRunner.Run`, whose budget is real: `WaitDelay` (`runWaitDelay`) bounds the wait for a child still holding the output pipe, on Unix a cancel kills the step's whole process group (`stopTreeOnCancel`; Windows kills only the command), and a step that exits 0 but leaves such a child succeeds, logged, with NOTHING added to `w`: callers parse what it captured, `ParseListJSON` and `Arch` among them), `recheck`s (the host step must not change a pinned file), then
 `stageEnv` writes the env file, local kits and post-create env file to
 `$QUIL_HOME/sandbox/sbx-env/<name>/` (persistent: sbx keeps the env file
 mounted) and creates from that. Measured on sbx 0.48: relative paths,

@@ -10,4 +10,4 @@ headline: Sandbox setup steps stop when their time runs out
 
   A step that finishes but leaves a process running that still holds its output no
   longer keeps the pane waiting either: Quil stops reading after two seconds and
-  notes it in the pane.
+  notes it in its log.

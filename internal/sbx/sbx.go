@@ -10,6 +10,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/artyomsv/quil/internal/logger"
 )
 
 // Step budgets. A host script may warm a dependency cache and an env create
@@ -52,8 +54,10 @@ const runWaitDelay = 2 * time.Second
 // When ctx ends, the command is stopped together with what it started where
 // the platform allows (stopTreeOnCancel), and Run returns within
 // runWaitDelay. A command that succeeds but leaves a child holding its output
-// still succeeds: after runWaitDelay Run stops reading, says so in w, and
-// returns nil, since the command itself exited 0.
+// still succeeds: after runWaitDelay Run stops reading and returns nil, since
+// the command itself exited 0. That goes to the log, never into w: callers
+// parse what w captured (`sbx ls --json`, `sbx version`, the last line of
+// `uname -m`), so anything Run added there would corrupt the answer.
 func (ExecRunner) Run(ctx context.Context, dir string, w io.Writer, argv ...string) error {
 	if len(argv) == 0 {
 		return errors.New("empty command")
@@ -69,7 +73,7 @@ func (ExecRunner) Run(ctx context.Context, dir string, w io.Writer, argv ...stri
 	err := cmd.Run()
 	if errors.Is(err, exec.ErrWaitDelay) {
 		// Only returned when the command otherwise succeeded.
-		fmt.Fprintf(w, "\n(%s exited, but a process it started still holds its output; no longer reading it)\n", argv[0])
+		logger.Warn("sbx: %s exited, but a process it started still holds its output; stopped reading after %s", argv[0], runWaitDelay)
 		return nil
 	}
 	return err

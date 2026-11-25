@@ -25,6 +25,9 @@ version section here and deletes them.
   longer keeps the pane waiting either: Quil stops reading after two seconds and
   notes it in its log.
 
+### Contributors
+- @SiteRelEnby (#295)
+
 ## [1.101.1] - 2026-11-20
 
 ### Fixed
@@ -47,6 +50,9 @@ version section here and deletes them.
   now stopped at the limit and the paste is refused. Every copy and paste helper is
   also given 5 seconds to finish instead of being waited on forever, and a paste
   helper that is stopped takes its own child processes with it.
+
+### Contributors
+- @SiteRelEnby (#293)
 
 ## [1.101.0] - 2026-11-20
 
@@ -71,6 +77,9 @@ version section here and deletes them.
   pane's text.** Dragging across a pane selects there without moving focus, but
   right-click and `Enter` copied the same rows from the focused pane instead, so
   the clipboard held text that was never highlighted.
+
+### Contributors
+- @SiteRelEnby (#294)
 
 ## [1.100.1] - 2026-11-12
 

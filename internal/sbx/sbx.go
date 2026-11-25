@@ -10,6 +10,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/artyomsv/quil/internal/logger"
 )
 
 // Step budgets. A host script may warm a dependency cache and an env create
@@ -34,8 +36,28 @@ type Runner interface {
 // ExecRunner is the real Runner.
 type ExecRunner struct{}
 
+// runWaitDelay bounds how long Run waits for the command's output pipes once
+// the command has exited or its context is done.
+//
+// w is usually not an *os.File (prepare_host writes through an
+// io.MultiWriter), so os/exec copies output through a pipe, and Wait does not
+// return until every holder of that pipe has closed it. A child the command
+// started inherits the pipe: CommandContext kills only the command itself on
+// expiry, so a child still holding its output used to keep Run waiting past
+// the step's budget for as long as the child lived (prepare_host's 30 minutes
+// bounded nothing). The same value gitinfo, prinfo and internal/sandbox use.
+const runWaitDelay = 2 * time.Second
+
 // Run implements Runner. A relative argv[0] containing a separator is
 // resolved against dir by os/exec; a bare name is looked up on PATH.
+//
+// When ctx ends, the command is stopped together with what it started where
+// the platform allows (stopTreeOnCancel), and Run returns within
+// runWaitDelay. A command that succeeds but leaves a child holding its output
+// still succeeds: after runWaitDelay Run stops reading and returns nil, since
+// the command itself exited 0. That goes to the log, never into w: callers
+// parse what w captured (`sbx ls --json`, `sbx version`, the last line of
+// `uname -m`), so anything Run added there would corrupt the answer.
 func (ExecRunner) Run(ctx context.Context, dir string, w io.Writer, argv ...string) error {
 	if len(argv) == 0 {
 		return errors.New("empty command")
@@ -45,8 +67,16 @@ func (ExecRunner) Run(ctx context.Context, dir string, w io.Writer, argv ...stri
 	cmd.Stdout = w
 	cmd.Stderr = w
 	cmd.Stdin = nil
+	cmd.WaitDelay = runWaitDelay
 	hideWindow(cmd)
-	return cmd.Run()
+	stopTreeOnCancel(cmd)
+	err := cmd.Run()
+	if errors.Is(err, exec.ErrWaitDelay) {
+		// Only returned when the command otherwise succeeded.
+		logger.Warn("sbx: %s exited, but a process it started still holds its output; stopped reading after %s", argv[0], runWaitDelay)
+		return nil
+	}
+	return err
 }
 
 // Binary resolves the sbx CLI, or reports it missing with the install command
